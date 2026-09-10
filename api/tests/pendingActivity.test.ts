@@ -289,3 +289,50 @@ describe('outbound cross-chain', () => {
     expect(rows.filter(r => r.kind === 'xcm')).toHaveLength(0)
   })
 })
+
+describe('an intent settlement waits for finality', () => {
+  const ICE_POT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
+
+  // The solver's pot runs the solution's AMM routes, so the unfinalized block shows
+  // the POT trading. At finality the classifier folds those away and renders the
+  // intent OWNER's DcaTrade row instead, so publishing the pot's trade here is a row
+  // that changes into somebody else's — exactly what this layer must not do.
+  it('publishes no trade for a swap inside an ICE solution', () => {
+    const rows = buildPendingActivities(block([
+      swap(26, 2, ICE_POT, 0, '1000', 5, '77'),
+      plain(46, 2, 'Intent.DcaTradeExecuted'),
+      plain(47, 2, 'ICE.SolutionExecuted'),
+    ]))
+    expect(rows).toEqual([])
+  })
+
+  // The rule is the extrinsic's own events, not who the swapper is: a solution that
+  // routed under some other account is still a settlement.
+  it('holds the settlement back whichever account the route names', () => {
+    expect(buildPendingActivities(block([
+      swap(26, 2, A, 0, '1000', 5, '77'),
+      plain(46, 2, 'Intent.IntentResolved'),
+    ]))).toEqual([])
+  })
+
+  it('leaves an ordinary swap in another extrinsic alone', () => {
+    const rows = buildPendingActivities(block([
+      swap(26, 2, ICE_POT, 0, '1000', 5, '77'),
+      plain(46, 2, 'ICE.SolutionExecuted'),
+      swap(60, 3, A, 0, '500', 5, '40'),
+    ]))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ kind: 'trade', extrinsicIndex: 3, swapper: A })
+  })
+
+  // A hook-phase swap has no extrinsic to carry the settlement's events, so it is
+  // judged as before rather than swept up by this rule.
+  it('does not withhold an extrinsic-less swap', () => {
+    const rows = buildPendingActivities(block([
+      swap(3, null, A, 0, '10', 5, '1'),
+      plain(46, 2, 'ICE.SolutionExecuted'),
+    ]))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ kind: 'trade', swapper: A })
+  })
+})

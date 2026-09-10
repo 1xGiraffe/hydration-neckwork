@@ -97,6 +97,14 @@ export function isClassifiedAction(eventName: string): boolean {
   return pallet !== '' && CLASSIFIED_ACTION_PALLETS.has(pallet.toLowerCase())
 }
 
+// The pallets an ICE solution speaks through. An extrinsic touching one settled an
+// intent, and everything it moved — its AMM routes included — belongs to that
+// settlement rather than to the account the runtime happened to name.
+const INTENT_SETTLEMENT_PALLETS = ['intent', 'ice', 'lazyexecutor']
+function settlesAnIntent(pallets: Set<string> | undefined): boolean {
+  return pallets != null && INTENT_SETTLEMENT_PALLETS.some(pallet => pallets.has(pallet))
+}
+
 export function buildPendingActivities(block: PendingBlock): PendingActivity[] {
   const swapGroups = new Map<string, PendingEventRow[]>()
   const swapExtrinsics = new Set<number>()
@@ -145,6 +153,13 @@ export function buildPendingActivities(block: PendingBlock): PendingActivity[] {
     const input = first.swap!.inputs[0]
     const output = last.swap!.outputs[last.swap!.outputs.length - 1]
     if (!input || !output) continue
+    // A swap inside an intent settlement is the solution's own routing, run by the
+    // solver's pot. The finalized classifier renders the settlement as the intent
+    // OWNER's row and folds the pot's trades away, so publishing one here shows the
+    // pot trading and then replaces it with somebody else's DCA trade — the "it
+    // changed into a different row" this layer exists to avoid. Intents are among the
+    // kinds it does not decode, so the settlement simply appears at finality.
+    if (first.extrinsicIndex != null && settlesAnIntent(actionPallets.get(first.extrinsicIndex))) continue
     out.push({
       kind: 'trade',
       blockHeight: block.height,
