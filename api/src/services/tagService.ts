@@ -17,6 +17,18 @@ export interface Tag {
 }
 export interface AccountTag { tagId: string; name: string; color: string; icon: string; memberCount: number }
 
+// Holders whose own token dominates their balance sheet, for which the surfaces
+// also show value with HDX and its LP positions taken out. HDX is ~2/3 of the
+// Treasury's holdings, so the plain figure mostly reports the HDX price and says
+// little about the diversified reserve — the second reading is what makes the
+// chart legible. Code-defined rather than a tag column: it is a property of what
+// the account IS, not of how the tag is presented, and DEFAULT_TAGS syncs only
+// presentation into the database.
+const EX_HDX_VALUE_TAGS = new Set(['treasury'])
+export function showsExHdxValue(tagId: string | null | undefined): boolean {
+  return tagId != null && EX_HDX_VALUE_TAGS.has(tagId)
+}
+
 let client: ClickHouseClient
 const byAccount = new Map<string, AccountTag>()
 const byTag = new Map<string, Tag>()

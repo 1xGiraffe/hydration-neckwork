@@ -1209,16 +1209,25 @@ function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
 // `markers` flags notable events on the same time axis (see ChartMarker).
 // The viewBox is fixed and the svg is stretched to its container (height `h`).
 const W = 820, padT = 14, padB = 14
-export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt = F.usd, markers, refine, zoomKey }: {
+export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt = F.usd, markers, refine, zoomKey, label, overlay }: {
   data: number[]; h?: number; target?: number; color?: string; floor?: number
   dates?: string[]; valueFmt?: (v: number) => string; markers?: ChartMarker[]
+  /** Names `data` in the crosshair tooltip; only shown when an overlay makes the
+   *  two curves ambiguous. */
+  label?: string
+  /** A second line on the same dates and the same y-scale (e.g. a portfolio's
+   *  ex-HDX value beside its total). Drawn as a bare line — no fill, so the
+   *  primary's area gradient stays readable — and dropped whenever its length
+   *  stops matching `data`, since an overlay on a different point set would
+   *  invite exactly the comparison it would then get wrong. */
+  overlay?: { data: number[]; label: string; color?: string }
   /** Zoom refinement loader: a finer series for base-index window [lo, hi]. */
   refine?: (fromSec: number, toSec: number, points: number) => Promise<RefinedSeries | null>
   /** Query-param name persisting the zoom window (back-navigable, shareable). */
   zoomKey?: string
 }) {
   const wrapRef = useRef<HTMLDivElement>(null)
-  const [hover, setHover] = useState<{ xPct: number; yPct: number; val: string; date: string } | null>(null)
+  const [hover, setHover] = useState<{ xPct: number; yPct: number; val: string; ovVal: string | null; date: string } | null>(null)
   const [openMark, setOpenMark] = useState<number | null>(null)
   // On phones 1.5% of the chart is a few px — caps would collide, so cluster
   // wider there. Same breakpoint as the stylesheet's table→card switch.
@@ -1260,22 +1269,37 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   const view = useMemo(() => ({ from: zoom.view.from, to: zoom.view.to }), [zoom.view.from, zoom.view.to])
   const slicedData = useMemo(() => (zoom.zoomed ? data.slice(zoom.lo, zoom.hi + 1) : data), [data, zoom.zoomed, zoom.lo, zoom.hi])
   const slicedDates = useMemo(() => (zoom.zoomed && dates ? dates.slice(zoom.lo, zoom.hi + 1) : dates), [dates, zoom.zoomed, zoom.lo, zoom.hi])
+  // The overlay is sliced on the SAME base indices as the primary — it is declared
+  // to be on the same dates, so anything else would silently shear the two curves.
+  const overlayData = overlay?.data
+  const slicedOverlay = useMemo(
+    () => (zoom.zoomed && overlayData ? overlayData.slice(zoom.lo, zoom.hi + 1) : overlayData),
+    [overlayData, zoom.zoomed, zoom.lo, zoom.hi])
   const rawVData = refined?.data ?? slicedData
   const rawVDates = refined?.dates ?? slicedDates
+  // A refined window replaces BOTH curves or neither (useZoomRefine rejects a
+  // half-refined payload), so taking the overlay from the same `refined` object
+  // keeps them on one grid.
+  const rawVOverlay = refined ? refined.overlay : slicedOverlay
   // Clip to the window so the line spans it exactly: a point outside would draw
   // past the axis, and a coarse slice holding only a couple of interior points
   // would cover part of the width until the refined series lands.
-  const { vData, vDates } = useMemo(() => {
-    if (!zoom.zoomed || !rawVDates || rawVDates.length !== rawVData.length) return { vData: rawVData, vDates: rawVDates }
+  const { vData, vOverlay, vDates } = useMemo(() => {
+    const asIs = { vData: rawVData, vOverlay: rawVOverlay, vDates: rawVDates }
+    if (!zoom.zoomed || !rawVDates || rawVDates.length !== rawVData.length) return asIs
     const times = rawVDates.map(d => Math.floor(parseUtcTimestamp(d) / 1000))
-    if (!times.every(Number.isFinite)) return { vData: rawVData, vDates: rawVDates }
-    const clipped = bracketToView(times, view, [rawVData])
-    if (clipped.times.length < 2) return { vData: rawVData, vDates: rawVDates }
+    if (!times.every(Number.isFinite)) return asIs
+    // Both curves go through ONE bracketToView call, so the window can never keep
+    // a different point set for each.
+    const paired = rawVOverlay != null && rawVOverlay.length === rawVData.length
+    const clipped = bracketToView(times, view, paired ? [rawVData, rawVOverlay!] : [rawVData])
+    if (clipped.times.length < 2) return asIs
     return {
       vData: clipped.series[0].map(v => v ?? 0),
+      vOverlay: paired ? clipped.series[1].map(v => v ?? 0) : undefined,
       vDates: clipped.times.map(t => new Date(t * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')),
     }
-  }, [rawVData, rawVDates, zoom.zoomed, view])
+  }, [rawVData, rawVOverlay, rawVDates, zoom.zoomed, view])
 
   // Pure geometry over the series. Every portfolio and balance chart in the app is
   // one of these, and the pages holding them re-render once a second on the shared
@@ -1283,8 +1307,11 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   // curve every tick and on every crosshair move.
   const geom = useMemo(() => {
     if (!vData || vData.length < 2) return null
+    // Both curves are the same unit, so they share one y-scale — drawing a second
+    // value line on its own scale would make the gap between them meaningless.
+    const ov = vOverlay && vOverlay.length === vData.length ? vOverlay : null
     // `floor` pins the baseline (e.g. 0) so small values don't glue to the bottom.
-    const min = floor != null ? floor : Math.min(...vData, target ?? Infinity), max = Math.max(...vData, target ?? -Infinity)
+    const min = floor != null ? floor : Math.min(...vData, ...(ov ?? []), target ?? Infinity), max = Math.max(...vData, ...(ov ?? []), target ?? -Infinity)
     // X positions are proportional to TIME when a parseable date accompanies every
     // point (portfolio/balance history buckets cover unequal time spans, so index
     // spacing would distort the shape); index spacing is the fallback.
@@ -1296,9 +1323,10 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
     const sy = (v: number) => padT + (1 - (v - min) / ((max - min) || 1)) * (h - padT - padB)
     const line = vData.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
     const area = `${line} L ${sx(vData.length - 1).toFixed(1)} ${h - padB} L ${sx(0).toFixed(1)} ${h - padB} Z`
+    const overlayLine = ov ? ov.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ') : null
     const up = vData[vData.length - 1] >= vData[0]
-    return { xFrac, sy, line, area, col: color ?? (up ? 'var(--green)' : 'var(--red)'), gid: 'ag' + Math.round(min * 1000 + max) }
-  }, [vData, vDates, target, floor, h, color, view])
+    return { xFrac, sy, line, area, overlayLine, ov, col: color ?? (up ? 'var(--green)' : 'var(--red)'), gid: 'ag' + Math.round(min * 1000 + max) }
+  }, [vData, vOverlay, vDates, target, floor, h, color, view])
 
   // Markers key off the EXACT axis the line uses (timeAxisSpan is the same guard
   // as viewFractions): render only when the line is time-proportional, so a flag
@@ -1309,7 +1337,8 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   }, [markers, vData, vDates, narrow])
 
   if (!geom) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
-  const { xFrac, sy, line, area, col, gid } = geom
+  const { xFrac, sy, line, area, overlayLine, ov, col, gid } = geom
+  const ovCol = overlay?.color ?? 'var(--text-low)'
   // Points closer than half a day label with their time, not just the date.
   const viewSpanMs = vDates && vDates.length > 1 ? parseUtcTimestamp(vDates[vDates.length - 1]) - parseUtcTimestamp(vDates[0]) : NaN
   const subDaily = Number.isFinite(viewSpanMs) && viewSpanMs > 0 && viewSpanMs / (vData.length - 1) < 43_200_000
@@ -1325,6 +1354,7 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
     const ts = vDates?.[i]
     setHover({
       xPct: xFrac[i] * 100, yPct: sy(vData[i]) / h * 100, val: valueFmt(vData[i]),
+      ovVal: ov ? valueFmt(ov[i]) : null,
       date: ts ? (subDaily ? tsDateTime(ts) : tsDate(ts)) : '',
     })
   }
@@ -1346,6 +1376,10 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
         <path className="chart-area" d={area} fill={`url(#${gid})`} />
         {target != null && <line x1={0} x2={W} y1={sy(target).toFixed(1)} y2={sy(target).toFixed(1)} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.6" vectorEffect="non-scaling-stroke" />}
         <path className="chart-line" d={line} fill="none" stroke={col} strokeWidth="2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+        {/* The overlay is a bare line above the primary's fill — no area of its own,
+            which would muddy both. Thinner and unfilled so the total still reads as
+            the headline curve. */}
+        {overlayLine && <path className="chart-line" d={overlayLine} fill="none" stroke={ovCol} strokeWidth="1.5" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />}
       </svg>
       {markClusters.length > 0 && (
         <div className="apx-marks">
@@ -1361,7 +1395,15 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
       {hover && !zoom.selecting && openMark == null && (
         <ChartTip xPct={hover.xPct}>
           {hover.date && <span className="t-d">{hover.date}</span>}
+          {/* With two curves the tooltip has to say which value is which — an
+              unlabelled pair of dollar figures is the ambiguity the labels exist
+              to remove. A single-series chart keeps its bare value. */}
+          {hover.ovVal != null && label && <span className="t-k">{label}</span>}
           <span className="t-p">{hover.val}</span>
+          {hover.ovVal != null && <>
+            <span className="t-k" style={{ color: ovCol }}>{overlay?.label}</span>
+            <span className="t-p" style={{ color: ovCol }}>{hover.ovVal}</span>
+          </>}
         </ChartTip>
       )}
       {zoom.preview && (() => {

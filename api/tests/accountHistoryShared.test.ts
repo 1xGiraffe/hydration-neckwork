@@ -168,9 +168,11 @@ describe('windowed history keeps the resolution it just computed', () => {
   })
 
   it('keeps the portfolio series gated the same way', () => {
-    // Pinned so the two paths cannot drift apart again.
-    expect(body()).toContain('? { series: rawSeries, dates: rawDates, blocks: rawBlocks }')
-    expect(body()).toMatch(/:\s*downsampleDaily\(rawSeries, rawDates, rawBlocks\)/)
+    // Pinned so the two paths cannot drift apart again. The ex-HDX curve rides the
+    // same branch — it must keep or collapse its points with the total, never on a
+    // gate of its own.
+    expect(body()).toContain('? { series: rawSeries, exHdx: rawSeriesExHdx, dates: rawDates, blocks: rawBlocks }')
+    expect(body()).toMatch(/:\s*downsampleDaily\(rawSeries, rawSeriesExHdx, rawDates, rawBlocks\)/)
   })
 })
 
