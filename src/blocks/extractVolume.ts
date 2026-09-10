@@ -19,6 +19,7 @@ import * as xyk from '../types/xyk/events.js';
 import * as stableswap from '../types/stableswap/events.js';
 import * as broadcast from '../types/broadcast/events.js';
 import { foldOmnipoolHubHops } from './hubHops.js';
+import { OTC_FILLER_KIND, OTC_FILL_EVENT_NAMES, otcSides } from './otcCounterparty.js';
 import { aggregateTradeVolumeRows, sumBigIntStrings, sumDecimal128Strings, sumVolumeFields } from './volumeMath.js';
 import {
   EVM_LOG_EVENT_NAME,
@@ -53,10 +54,18 @@ interface DecodedTrade {
   filler?: string;
   /**
    * The Broadcast `filler` ACCOUNT (distinct from `filler`, which is the venue
-   * kind): the account the runtime named as filling the trade, a pool for an AMM
-   * venue and the party on the other side for a peer-to-peer one.
+   * kind). Only an OTC fill needs it: there the filler is the human on the other
+   * side of the trade rather than a pool, and it is one of the two accounts
+   * resolveOtcCounterparties chooses between.
    */
   fillerAccount?: string | null;
+  /**
+   * The second account of a peer-to-peer fill, holding the MIRROR of `inputs`/
+   * `outputs` — it received what the trade took in and gave up what it put out.
+   * Set only for OTC, where both sides are real accounts; a pool venue has no
+   * counterparty to book. See resolveOtcCounterparties.
+   */
+  counterparty?: string | null;
 }
 
 export type AssetCanonicalizer = (assetId: number) => number;
@@ -157,9 +166,37 @@ function broadcastTrade(decoded: {
   return {
     trader: normalizeAccount(decoded.swapper),
     filler: decoded.fillerType.__kind,
+    fillerAccount: normalizeAccount(decoded.filler),
     inputs: decoded.inputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
     outputs: decoded.outputs.map(({ asset, amount }) => ({ assetId: asset, amount })),
   };
+}
+
+const OTC_FILL_EVENTS = new Set<string>(OTC_FILL_EVENT_NAMES);
+
+/**
+ * Put the two accounts of an OTC fill on their true sides — see otcSides in
+ * ./otcCounterparty.ts for why the event cannot be booked as it stands.
+ *
+ * `previous` is the event before this one, which is where the pallet's fill event
+ * always sits; the caller walks the block in order, so no index arithmetic is
+ * needed. Returns the trade unchanged when the pairing cannot be established, so
+ * an unresolvable fill keeps its old booking rather than a guess.
+ */
+function resolveOtcCounterparties(trade: DecodedTrade, previous: EventLike | undefined): DecodedTrade {
+  if (trade.filler !== OTC_FILLER_KIND || !previous || !OTC_FILL_EVENTS.has(previous.name)) return trade;
+  const runtime = previous.block?._runtime;
+  if (typeof runtime?.decodeJsonEventRecordArguments !== 'function') return trade;
+  let taker: string | null = null;
+  try {
+    const args = runtime.decodeJsonEventRecordArguments(previous) as Record<string, unknown> | null;
+    taker = normalizeAccount(args?.who);
+  } catch {
+    return trade;
+  }
+  const sides = otcSides(trade.trader, trade.fillerAccount, taker);
+  if (!sides) return trade;
+  return { ...trade, trader: sides.trader, counterparty: sides.counterparty };
 }
 
 function priceToDecimal128(value: string): bigint {
@@ -619,13 +656,21 @@ function decodeBlockTrades(
   // is read, because the Broadcast fill of a routed hop follows the log in its
   // extrinsic.
   const slots: Array<{ trade: DecodedTrade; extrinsicIndex?: number; fromPoolLog: boolean }> = [];
+  // The event before the one being read. An OTC fill's Broadcast event needs it:
+  // the pallet's own fill event sits immediately ahead of it and is the only thing
+  // that names the taker (see resolveOtcCounterparties). Tracked over EVERY event,
+  // not just swaps — the OTC event is not itself a swap event.
+  let previous: EventLike | undefined;
   for (const event of events) {
+    const priorEvent = previous;
+    previous = event;
     if (isSwapEvent(event.name, specVersion)) {
-      const trade = decodeTradeEvent(event);
-      if (!trade) {
+      const decoded = decodeTradeEvent(event);
+      if (!decoded) {
         console.warn(`[extractVolume] Skipping event ${event.name} at block ${blockHeight} (decode failed)`);
         continue;
       }
+      const trade = resolveOtcCounterparties(decoded, priorEvent);
       slots.push({ trade, extrinsicIndex: event.extrinsicIndex, fromPoolLog: false });
       continue;
     }
@@ -683,18 +728,21 @@ export function extractVolumeFromSwaps(
   return volumeRows;
 }
 
-function tradeToAccountVolumeRows(
+/**
+ * One account's side of a trade. `mirrored` books the legs the other way round —
+ * inputs bought, outputs sold — which is what the passive side of a peer-to-peer
+ * fill actually did, and flags the row so cross-account sums count the traded
+ * tokens once (see resolveOtcCounterparties and TradeVolumeRow.counterparty).
+ */
+function accountSideVolumeRows(
   trade: DecodedTrade,
+  account: string,
+  mirrored: boolean,
   blockHeight: number,
   prices: PriceMap,
   decimals: AssetDecimals,
-  canonicalizeAssetId: AssetCanonicalizer = assetId => assetId
+  canonicalizeAssetId: AssetCanonicalizer
 ): TradeVolumeRow[] {
-  const account = normalizeAccount(trade.trader);
-  if (!account) {
-    return [];
-  }
-
   const rowsByAsset = new Map<number, TradeVolumeRow>();
   const { inputs, outputs } = canonicalTradeLegs(trade, canonicalizeAssetId);
   const outputOriginalsByCanonical = originalsByCanonicalAsset(outputs);
@@ -712,10 +760,27 @@ function tradeToAccountVolumeRows(
         usd_volume_buy: '0.000000000000',
         usd_volume_sell: '0.000000000000',
         trade_count: 1,
+        counterparty: mirrored ? 1 : 0,
       };
       rowsByAsset.set(assetId, row);
     }
     return row;
+  };
+
+  // A mirrored side sold what the trade output and bought what it took in.
+  const addSell = (row: TradeVolumeRow, leg: CanonicalTradeLeg) => {
+    row.native_volume_sell = sumBigIntStrings(row.native_volume_sell ?? '0', leg.amount.toString());
+    row.usd_volume_sell = sumDecimal128Strings(
+      row.usd_volume_sell ?? '0.000000000000',
+      calculateLegUsdVolume(leg, prices, decimals)
+    );
+  };
+  const addBuy = (row: TradeVolumeRow, leg: CanonicalTradeLeg) => {
+    row.native_volume_buy = sumBigIntStrings(row.native_volume_buy ?? '0', leg.amount.toString());
+    row.usd_volume_buy = sumDecimal128Strings(
+      row.usd_volume_buy ?? '0.000000000000',
+      calculateLegUsdVolume(leg, prices, decimals)
+    );
   };
 
   for (const input of inputs) {
@@ -724,11 +789,7 @@ function tradeToAccountVolumeRows(
     }
 
     const row = rowForAsset(input.canonicalAssetId);
-    row.native_volume_sell = sumBigIntStrings(row.native_volume_sell ?? '0', input.amount.toString());
-    row.usd_volume_sell = sumDecimal128Strings(
-      row.usd_volume_sell ?? '0.000000000000',
-      calculateLegUsdVolume(input, prices, decimals)
-    );
+    (mirrored ? addBuy : addSell)(row, input);
   }
 
   for (const output of outputs) {
@@ -737,14 +798,31 @@ function tradeToAccountVolumeRows(
     }
 
     const row = rowForAsset(output.canonicalAssetId);
-    row.native_volume_buy = sumBigIntStrings(row.native_volume_buy ?? '0', output.amount.toString());
-    row.usd_volume_buy = sumDecimal128Strings(
-      row.usd_volume_buy ?? '0.000000000000',
-      calculateLegUsdVolume(output, prices, decimals)
-    );
+    (mirrored ? addSell : addBuy)(row, output);
   }
 
   return Array.from(rowsByAsset.values());
+}
+
+function tradeToAccountVolumeRows(
+  trade: DecodedTrade,
+  blockHeight: number,
+  prices: PriceMap,
+  decimals: AssetDecimals,
+  canonicalizeAssetId: AssetCanonicalizer = assetId => assetId
+): TradeVolumeRow[] {
+  const account = normalizeAccount(trade.trader);
+  const rows: TradeVolumeRow[] = [];
+  if (account) {
+    rows.push(...accountSideVolumeRows(trade, account, false, blockHeight, prices, decimals, canonicalizeAssetId));
+  }
+  // The passive side of a peer-to-peer fill traded too, so it is booked with the
+  // legs mirrored. Only OTC sets this; a pool venue has no account to credit.
+  const counterparty = normalizeAccount(trade.counterparty);
+  if (counterparty && counterparty !== account) {
+    rows.push(...accountSideVolumeRows(trade, counterparty, true, blockHeight, prices, decimals, canonicalizeAssetId));
+  }
+  return rows;
 }
 
 /**

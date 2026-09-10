@@ -21,6 +21,17 @@ export interface TradeVolumeRow {
   usd_volume_buy?: string
   usd_volume_sell?: string
   trade_count: number
+  /**
+   * 1 when this row is the PASSIVE side of a peer-to-peer fill — an OTC order's
+   * maker, whose resting order was hit. Its volume is the same tokens the taker's
+   * row already carries, seen from the other side, so a per-account read counts it
+   * (the maker really did trade) while any sum ACROSS accounts must restrict to
+   * `counterparty = 0` or it counts one trade's tokens twice.
+   *
+   * Defaulted to 0 in ClickHouse, so every row written before OTC fills were
+   * two-sided reads as a principal — which is what they were.
+   */
+  counterparty?: number
 }
 
 export interface BlockRow {

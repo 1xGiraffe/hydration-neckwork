@@ -40,6 +40,14 @@ export const processor = new SubstrateBatchProcessor()
       'Broadcast.Swapped',
       'Broadcast.Swapped2',
       'Broadcast.Swapped3',
+      // Not swaps themselves: they name an OTC fill's TAKER, which is the only
+      // thing that puts the fill's two accounts on their true sides
+      // (src/blocks/otcCounterparty.ts). The extractor reads whichever of these
+      // sits immediately before the Broadcast fill, so they have to be in the
+      // block's events — without the subscription the rule silently books every
+      // fill the old way, which is how it shipped once already.
+      'OTC.Filled',
+      'OTC.PartiallyFilled',
       // Asset-registry changes (a rename, a new registration, a location fix)
       // must reach the live block's event list: the indexer forces a registry
       // re-scan when it SEES one of these, and without the subscription the
