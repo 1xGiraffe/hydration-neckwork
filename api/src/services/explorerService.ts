@@ -14,7 +14,7 @@ import { weightedFromLabels } from './convictionWeight.ts'
 import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
-import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, INCENTIVES_REWARD_POT } from './tagService.ts'
+import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT } from './tagService.ts'
 import { identityForAccount, searchIdentitiesByDisplay, type AccountIdentity } from './identityService.ts'
 import { normalizeAddress, hydrationAddress, polkadotAddress, reservedH160AccountId, type NormalizedAddress } from './addressIdentity.ts'
 import { accountIcon, emojisMatchingName, emojiNameFor, parseSuffixEmojiQuery } from './omniwatchIdentity.ts'
@@ -3813,6 +3813,13 @@ export interface AddressDetail {
   // for the accounts list and the hover card. Derived from `balances` above.
   topAssets: { asset: AssetRef; valueUsd: number }[]
   portfolioUsd: number
+  // `portfolioUsd` with the account's HDX and its HDX LP positions taken out — the
+  // diversified-reserve reading of a holder whose own token dominates its balance
+  // sheet. Same money-market fold as `portfolioUsd`, so the two are comparable.
+  // Present only for the accounts the tag registry marks (showsExHdxValue), the
+  // same "the surface exists exactly when the figure does" rule `revenueUsd` uses —
+  // on an ordinary account the second reading is noise, so it is absent, not zero.
+  portfolioExHdxUsd?: number
   tradingVolumeUsd: number
   liquidationVolumeUsd: number
   // Protocol revenue earned from this account (absent when zero).
@@ -4056,6 +4063,11 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // markets are excluded — their collateral is the already-counted locked HDX.
     const collateralShortfall = countedPositions.reduce((s, p) => s + mmCollateralShortfallUsd(p, 0), 0)
     const portfolioUsd = balances.reduce((s, b) => s + (b.valueUsd ?? 0), 0) + Math.max(0, collateralShortfall - foldedMmUsd)
+    // The HDX-free twin of the balance side. The money-market fold is deliberately
+    // identical (the exclusion is HDX and HDX LP only), so the two figures differ by
+    // exactly the HDX the account holds and the HDX LP it owns — nothing else.
+    const balancesExHdxUsd = balances.reduce((s, b) => s + (b.asset.assetId === HDX_ASSET_ID ? 0 : b.valueUsd ?? 0), 0)
+      + Math.max(0, collateralShortfall - foldedMmUsd)
     const volumeAccounts = [...new Set([...related, ...[...related].map(evmAccountForm).filter(Boolean) as string[]])]
     const [tradingVolumeUsd, liquidationVolumeUsd, revenueUsd] = await Promise.all([
       tradingVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
@@ -4108,6 +4120,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // Only NFT-held positions add value here — stableLp rows are wallet balances
     // already counted in portfolioUsd, they're appended for display only.
     const lpUsd = lpPositions.reduce((s, p) => s + (p.valueUsd ?? 0), 0)
+    const lpExHdxUsd = lpPositions.reduce((s, p) => s + (isHdxLpPosition(p) ? 0 : p.valueUsd ?? 0), 0)
     // Pin the history's final point to the authoritative current net worth so the
     // chart ends exactly on the headline figure (the live aToken valuation can
     // differ from the MM base collateral by a small amount). Copy first — history
@@ -4130,6 +4143,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
       balances,
       topAssets: topHeldTokens(balances),
       portfolioUsd: portfolioUsd + lpUsd,
+      ...(showsExHdxValue(tag?.tagId) ? { portfolioExHdxUsd: balancesExHdxUsd + lpExHdxUsd } : {}),
       tradingVolumeUsd,
       liquidationVolumeUsd,
       ...(revenueUsd > 0 ? { revenueUsd } : {}),
@@ -4141,6 +4155,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
       multisigMemberships,
       contract,
       portfolioSeries: [],
+      portfolioSeriesExHdx: [],
       portfolioDates: [],
       balanceHistory: [],
     }
@@ -4152,7 +4167,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
 // only by the Balances treemap — the value chart needs the two series alone. Both
 // halves come out of one cached walk, so this trims transfer and parse bytes, not
 // query work.
-export async function getAddressHistory(addressInput: string, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
+export async function getAddressHistory(addressInput: string, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioSeriesExHdx: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
   const detail = await getAddress(addressInput)
   if (!detail) return null
   // The reconstruction is cached under the same scope key the value-event jump
@@ -4162,8 +4177,17 @@ export async function getAddressHistory(addressInput: string, opts: { seriesOnly
   const debtUsd = detail.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
   const portfolioSeries = history.portfolioSeries.slice()
   if (portfolioSeries.length) portfolioSeries[portfolioSeries.length - 1] = +(detail.portfolioUsd - debtUsd).toFixed(2)
+  // The ex-HDX curve gets its OWN live pin, against the same debt: left on the last
+  // reconstructed bucket it would step away from the ex-HDX stat beside it, which is
+  // the one disagreement a reader would notice immediately. Shipped only where the
+  // stat is (see AddressDetail.portfolioExHdxUsd) — the walk computes it either way,
+  // but no ordinary account pays the bytes for a second series nothing renders.
+  const exHdxUsd = detail.portfolioExHdxUsd
+  const portfolioSeriesExHdx = exHdxUsd == null ? [] : history.portfolioSeriesExHdx.slice()
+  if (exHdxUsd != null && portfolioSeriesExHdx.length) portfolioSeriesExHdx[portfolioSeriesExHdx.length - 1] = +(exHdxUsd - debtUsd).toFixed(2)
   return {
     portfolioSeries,
+    portfolioSeriesExHdx,
     portfolioDates: history.portfolioDates,
     // Additive: the end-of-bucket block heights let the chart-zoom refinement
     // name its window in exact block space (no timestamp->height scan).
@@ -4178,12 +4202,16 @@ export async function getAddressHistory(addressInput: string, opts: { seriesOnly
  * its own last bucket, not at live net worth — and no daily downsample, since
  * sub-daily resolution is the refinement's whole point.
  */
-export async function getAddressHistoryWindow(addressInput: string, fromBlock: number, toBlock: number, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
+export async function getAddressHistoryWindow(addressInput: string, fromBlock: number, toBlock: number, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioSeriesExHdx: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
   const detail = await getAddress(addressInput)
   if (!detail) return null
   const history = await getAccountHistoryWindowed(detail.relatedAccountIds, `addr:${detail.accountId}`, fromBlock, toBlock)
   return {
     portfolioSeries: history.portfolioSeries,
+    // Same gate as the unwindowed twin: a zoom cannot reveal a curve the base view
+    // does not draw, and the refinement must return both series or neither, or the
+    // chart would substitute a finer total against a coarse ex-HDX line.
+    portfolioSeriesExHdx: detail.portfolioExHdxUsd == null ? [] : history.portfolioSeriesExHdx,
     portfolioDates: history.portfolioDates,
     portfolioBlocks: history.portfolioBlocks,
     balanceHistory: opts.seriesOnly ? [] : history.balanceHistory,
@@ -4191,13 +4219,14 @@ export async function getAddressHistoryWindow(addressInput: string, fromBlock: n
 }
 
 /** The tag twin of getAddressHistoryWindow, over the tag's member set + EVM twins. */
-export async function getTagHistoryWindow(tagId: string, fromBlock: number, toBlock: number, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
+export async function getTagHistoryWindow(tagId: string, fromBlock: number, toBlock: number, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioSeriesExHdx: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
   const tag = getTagRecord(tagId)
   if (!tag || !tag.members.length) return null
   const accounts = [...new Set([...tag.members, ...tag.members.map(evmAccountForm).filter(Boolean) as string[]])]
   const history = await getAccountHistoryWindowed(accounts, `tag:${tagId}`, fromBlock, toBlock)
   return {
     portfolioSeries: history.portfolioSeries,
+    portfolioSeriesExHdx: showsExHdxValue(tagId) ? history.portfolioSeriesExHdx : [],
     portfolioDates: history.portfolioDates,
     portfolioBlocks: history.portfolioBlocks,
     balanceHistory: opts.seriesOnly ? [] : history.balanceHistory,
@@ -5933,6 +5962,20 @@ async function loadOmnipoolState(): Promise<Map<number, OmnipoolAssetState>> {
   return omniState
 }
 const LRNA_ASSET_ID = 1   // hub asset (H2O / LRNA), 12 decimals
+export const HDX_ASSET_ID = 0   // the native token, 12 decimals
+
+/**
+ * Does this LP position hold HDX as one of its legs? The ex-HDX value and the
+ * ex-HDX history curve both subtract whole positions rather than legs: a share is
+ * a claim on every reserve at once, and an Omnipool position's hub leg is part of
+ * ITS withdraw value rather than H2O the account holds separately, so there is no
+ * half of either to keep. `asset`/`assetB` are the venue's legs (Omnipool names one
+ * plus an implicit hub, XYK names two), which is exactly what the historical
+ * reconstruction tests in getAccountHistory.
+ */
+export function isHdxLpPosition(p: LpPosition): boolean {
+  return p.asset.assetId === HDX_ASSET_ID || p.assetB?.assetId === HDX_ASSET_ID
+}
 // Value a decoded omnipool position (asset leg + LRNA/hub leg) in USD.
 function valueOmnipoolPosition(pos: DecodedPosition, st: OmnipoolAssetState, prices: Map<number, PriceInfo>): { amount: bigint; hub: bigint; valueUsd: number | null } {
   const { liquidity, hub } = omnipoolRemoveLiquidity(st, pos)
@@ -18337,9 +18380,9 @@ function formatUtcSeconds(sec: number): string {
 // blocks, every borrower — not just on the borrower's own MM events), so the
 // stored net is dense and the series forward-fills only across a short gap before
 // the caller pins the final point to the live net worth.
-async function getAccountHistory(accounts: string[], window?: { fromBlock: number; toBlock: number }): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] }> {
+async function getAccountHistory(accounts: string[], window?: { fromBlock: number; toBlock: number }): Promise<{ portfolioSeries: number[]; portfolioSeriesExHdx: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] }> {
   const list = sqlAccountList(accounts)
-  if (list === "''") return { portfolioSeries: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
+  if (list === "''") return { portfolioSeries: [], portfolioSeriesExHdx: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
   // Single ordinary accounts are already selective in the account-first exact
   // history and avoid the merge overhead of the hourly model. Multi-member tags
   // and dense structural accounts are the shapes for which hourly compaction is
@@ -18360,7 +18403,7 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
     format: 'JSONEachRow',
   })
   const rng = (await rangeRes.json<{ minb: number; maxb: number; mint: number; maxt: number }>())[0]
-  if (!rng || !rng.maxb || rng.maxb <= rng.minb) return { portfolioSeries: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
+  if (!rng || !rng.maxb || rng.maxb <= rng.minb) return { portfolioSeries: [], portfolioSeriesExHdx: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
   // A chart-zoom refinement clamps the reconstruction to the caller's block
   // window: the same reconstruction, re-bucketed over [fromBlock, toBlock] on the
   // wall-clock ladder (bucketLadder) rather than by block count.
@@ -18383,7 +18426,7 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   if (window) {
     rng.minb = Math.max(Number(rng.minb), window.fromBlock)
     rng.maxb = Math.min(Number(rng.maxb), window.toBlock)
-    if (rng.maxb <= rng.minb) return { portfolioSeries: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
+    if (rng.maxb <= rng.minb) return { portfolioSeries: [], portfolioSeriesExHdx: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
     // Real endpoint timestamps for the interpolated-date FALLBACK — left at the
     // account's global range they would mislabel every fallback date by the
     // account's whole lifetime. `blocks` is complete, so both lookups resolve.
@@ -18499,7 +18542,7 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   }
   const mmAvailableFromBucket = await appendMoneyMarketBalanceRows(accounts, rng.maxb, bk, balRows)
   const assetIds = [...new Set(balRows.map(r => r.asset_id))]
-  if (!assetIds.length) return { portfolioSeries: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
+  if (!assetIds.length) return { portfolioSeries: [], portfolioSeriesExHdx: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
   // Open omnipool LP positions (bare + farmed) for the period LP-value reconstruction
   // below, plus the per-bucket pool state to value them. Fetched here so the position
   // assets + LRNA(1) can be added to the historical price query.
@@ -18625,9 +18668,13 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
     }
     let lastPx = earliestPx
     const points: AssetBalancePoint[] = []
+    const exHdx = Number(id) !== HDX_ASSET_ID
     for (let b = 0; b <= N; b++) {
       if (pxMap.has(b)) lastPx = pxMap.get(b)!
-      if (!suppressPortfolioValue) portfolio[b] += portfolioCombined[b] * (lastPx || 0)
+      if (!suppressPortfolioValue) {
+        portfolio[b] += portfolioCombined[b] * (lastPx || 0)
+        if (exHdx) portfolioExHdx[b] += portfolioCombined[b] * (lastPx || 0)
+      }
       // Plot every observed bucket, plus the final bucket so the line is forward-
       // filled to "now" (the balance persists after its last change). This also
       // gives sparsely-observed assets a 2nd point, so they render a real line.
@@ -18688,7 +18735,12 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
         const pxB = pxByPriceId.get(String(priceAssetId(st.assetB)))
         const priceA = pxA?.get(b) ?? earliestPrice(pxA)
         const priceB = pxB?.get(b) ?? earliestPrice(pxB)
-        portfolio[b] += (Number(amountA) / 10 ** asset(st.assetA).decimals) * priceA + (Number(amountB) / 10 ** asset(st.assetB).decimals) * priceB
+        const nav = (Number(amountA) / 10 ** asset(st.assetA).decimals) * priceA + (Number(amountB) / 10 ** asset(st.assetB).decimals) * priceB
+        portfolio[b] += nav
+        // A share is a claim on both reserves at once — there is no way to hold the
+        // non-HDX half — so an HDX-paired pool leaves the ex-HDX curve entirely
+        // rather than contributing its other leg.
+        if (st.assetA !== HDX_ASSET_ID && st.assetB !== HDX_ASSET_ID) portfolioExHdx[b] += nav
       }
     }
   }
@@ -18766,7 +18818,10 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
     // Forward-fill the combined MM net to the end (the position persists between
     // snapshots); the caller pins the final point to the live net worth, so the
     // only un-sampled span is the short tail since the last periodic snapshot.
-    for (let b = 0; b <= N; b++) portfolio[b] += mmNet[b]
+    // Both curves carry the identical money-market fold: the exclusion is HDX and
+    // HDX LP only, and netting the same debt off both is what keeps the two
+    // headline figures comparable.
+    for (let b = 0; b <= N; b++) { portfolio[b] += mmNet[b]; portfolioExHdx[b] += mmNet[b] }
   }
 
   // Omnipool LP principal on the historical curve, valued at WITHDRAW value (asset +
@@ -18788,7 +18843,12 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
         const px = pxByPriceId.get(priceId)
         const price = px?.get(b) ?? earliestFor(priceId)
         const aDec = asset(leg.assetId).decimals
-        portfolio[b] += (Number(leg.liquidity) / 10 ** aDec) * price + (Number(leg.hub) / 10 ** lrnaDec) * lrna
+        const withdrawValue = (Number(leg.liquidity) / 10 ** aDec) * price + (Number(leg.hub) / 10 ** lrnaDec) * lrna
+        portfolio[b] += withdrawValue
+        // An HDX position drops out with BOTH its legs: the hub leg is part of that
+        // position's withdraw value, not H2O the account could hold on its own, so
+        // keeping it would leave a fragment of an excluded position in the curve.
+        if (leg.assetId !== HDX_ASSET_ID) portfolioExHdx[b] += withdrawValue
       }
     }
   }
@@ -18799,6 +18859,10 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   const alignedBalanceHistory = alignBalanceHistoryDailyPoints(balanceHistory, Boolean(window))
   alignedBalanceHistory.sort((x, y) => (y.current * (prices.get(y.asset.assetId)?.price ?? 0)) - (x.current * (prices.get(x.asset.assetId)?.price ?? 0)))
   const rawSeries = portfolio.slice(start).map(v => +v.toFixed(2))
+  // Trimmed at the TOTAL curve's start so both series index the same dates. Its own
+  // leading zeros are real information (an account that held only HDX at first), not
+  // a gap to cut.
+  const rawSeriesExHdx = portfolioExHdx.slice(start).map(v => +v.toFixed(2))
   const rawDates = Array.from({ length: portfolio.length - start }, (_, k) => tsAt(start + k))
   // End-of-bucket block per point: bucket b covers [minb + b·BUCKET, minb + (b+1)·BUCKET)
   // (the final bucket absorbs the tail to maxb), so the events a point-to-point
@@ -18810,26 +18874,29 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // Collapse to one point per calendar day (keep the latest of each day) so the
   // chart never shows the same date on adjacent points when the window spans
   // fewer days than buckets. Long windows (≫70 days) are unaffected.
-  const { series: portfolioSeries, dates: portfolioDates, blocks: portfolioBlocks } = window
-    ? { series: rawSeries, dates: rawDates, blocks: rawBlocks }
-    : downsampleDaily(rawSeries, rawDates, rawBlocks)
+  const { series: portfolioSeries, exHdx: portfolioSeriesExHdx, dates: portfolioDates, blocks: portfolioBlocks } = window
+    ? { series: rawSeries, exHdx: rawSeriesExHdx, dates: rawDates, blocks: rawBlocks }
+    : downsampleDaily(rawSeries, rawSeriesExHdx, rawDates, rawBlocks)
   // Return every asset that has a historical balance (sorted by current value),
   // not just the top N — the per-asset chip list should be complete.
-  return { portfolioSeries, portfolioDates, portfolioBlocks, balanceHistory: alignedBalanceHistory }
+  return { portfolioSeries, portfolioSeriesExHdx, portfolioDates, portfolioBlocks, balanceHistory: alignedBalanceHistory }
 }
 
-// One point per calendar day (the last bucket of each day), preserving order.
-function downsampleDaily(series: number[], dates: string[], blocks: number[]): { series: number[]; dates: string[]; blocks: number[] } {
-  const outS: number[] = [], outD: string[] = [], outB: number[] = []
+// One point per calendar day (the last bucket of each day), preserving order. The
+// ex-HDX curve is collapsed on the SAME kept buckets as the total, so the two stay
+// index-aligned with each other and with `dates` — picking each day's last bucket
+// per series independently would let them disagree about which instant a point is.
+export function downsampleDaily(series: number[], exHdx: number[], dates: string[], blocks: number[]): { series: number[]; exHdx: number[]; dates: string[]; blocks: number[] } {
+  const outS: number[] = [], outX: number[] = [], outD: string[] = [], outB: number[] = []
   for (let i = 0; i < series.length; i++) {
     const day = (dates[i] ?? '').slice(0, 10)
     if (outD.length && outD[outD.length - 1].slice(0, 10) === day) {
-      outS[outS.length - 1] = series[i]; outD[outD.length - 1] = dates[i]; outB[outB.length - 1] = blocks[i]
+      outS[outS.length - 1] = series[i]; outX[outX.length - 1] = exHdx[i]; outD[outD.length - 1] = dates[i]; outB[outB.length - 1] = blocks[i]
     } else {
-      outS.push(series[i]); outD.push(dates[i]); outB.push(blocks[i])
+      outS.push(series[i]); outX.push(exHdx[i]); outD.push(dates[i]); outB.push(blocks[i])
     }
   }
-  return { series: outS, dates: outD, blocks: outB }
+  return { series: outS, exHdx: outX, dates: outD, blocks: outB }
 }
 
 // One bucketed value-series reconstruction per scope (`addr:<id>` / `tag:<id>`),
@@ -25104,6 +25171,9 @@ export interface TagDetail {
   // Up to 4 largest combined holdings (see AddressDetail.topAssets).
   topAssets: { asset: AssetRef; valueUsd: number }[]
   portfolioUsd: number
+  // See AddressDetail.portfolioExHdxUsd — the tag-wide twin, over its member set,
+  // and absent for the same reason on every tag the registry does not flag.
+  portfolioExHdxUsd?: number
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
   revenueUsd?: number
@@ -25111,6 +25181,7 @@ export interface TagDetail {
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
   portfolioSeries: number[]
+  portfolioSeriesExHdx: number[]
   portfolioDates: string[]
   portfolioBlocks: number[]
   balanceHistory: AssetBalanceHistory[]
@@ -25198,10 +25269,12 @@ async function loadTagDetailSnapshot(tagId: string, membershipKey: string): Prom
   if (!row || row.membership_key !== membershipKey || Number(row.age) > TAG_DETAIL_REQUEST_MAX_AGE_SECONDS) return null
   try {
     const detail = JSON.parse(row.payload_json) as TagDetail
-    // portfolioBlocks arrived with the chart-zoom refinement; a payload
-    // serialized before it exists is otherwise valid for its whole membership
-    // life, so treat its absence as staleness and rebuild.
-    return detail?.tagId === tagId && Array.isArray(detail.members) && Array.isArray(detail.portfolioBlocks) ? detail : null
+    // portfolioBlocks arrived with the chart-zoom refinement and
+    // portfolioSeriesExHdx with the ex-HDX curve; a payload serialized before
+    // either exists is otherwise valid for its whole membership life, so treat
+    // the absence as staleness and rebuild.
+    return detail?.tagId === tagId && Array.isArray(detail.members) && Array.isArray(detail.portfolioBlocks)
+      && Array.isArray(detail.portfolioSeriesExHdx) ? detail : null
   } catch { return null }
 }
 
@@ -25267,6 +25340,10 @@ async function buildTagDetailForMembers(
     ttlMs?: number
     scope: string
     snapshot?: { tagId: string; membershipKey: string }
+    // Draw the ex-HDX value and curve. Passed in by getTag from the registry flag
+    // rather than derived from `presentation.tagId` in here, so a user list-tag that
+    // happens to be named `treasury` cannot claim the Treasury's second reading.
+    exHdx?: boolean
   },
 ): Promise<TagDetail> {
   const summary = opts.summary === true
@@ -25328,13 +25405,19 @@ async function buildTagDetailForMembers(
     // Fold each market's borrow-position display too (2-Pool-GETH → GETH), after the line above.
     moneyMarket = moneyMarket.map(p => p.reserves?.length ? { ...p, reserves: foldShareReserves(p.reserves) } : p)
     const lpUsd = lpPositions.reduce((s, p) => s + (p.valueUsd ?? 0), 0)
+    const lpExHdxUsd = lpPositions.reduce((s, p) => s + (isHdxLpPosition(p) ? 0 : p.valueUsd ?? 0), 0)
     const collateralShortfall = countedMm.reduce((s, p) => s + mmCollateralShortfallUsd(p, 0), 0)
     const portfolioUsd = balances.reduce((s, b) => s + (b.valueUsd ?? 0), 0) + lpUsd + Math.max(0, collateralShortfall - foldedMmUsd)
+    // See getAddress: same exclusion (HDX balance + HDX-legged LP), same MM fold.
+    const portfolioExHdxUsd = balances.reduce((s, b) => s + (b.asset.assetId === HDX_ASSET_ID ? 0 : b.valueUsd ?? 0), 0)
+      + lpExHdxUsd + Math.max(0, collateralShortfall - foldedMmUsd)
     // Pin the history's last point to the current net worth (see getAddress) so the
     // chart ends at the displayed figure rather than a stale stored-MM bucket.
     const debtUsd = moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
     const portfolioSeries = history.portfolioSeries.slice()
     if (portfolioSeries.length) portfolioSeries[portfolioSeries.length - 1] = +(portfolioUsd - debtUsd).toFixed(2)
+    const portfolioSeriesExHdx = opts.exHdx ? history.portfolioSeriesExHdx.slice() : []
+    if (portfolioSeriesExHdx.length) portfolioSeriesExHdx[portfolioSeriesExHdx.length - 1] = +(portfolioExHdxUsd - debtUsd).toFixed(2)
     const volumeAccounts = [...new Set([...members, ...members.map(evmAccountForm).filter(Boolean) as string[]])]
     const [tradingVolumeUsd, liquidationVolumeUsd, revenueUsd] = await Promise.all([
       tradingVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
@@ -25344,11 +25427,12 @@ async function buildTagDetailForMembers(
     const detail: TagDetail = {
       tagId: presentation.tagId, name: presentation.name, color: presentation.color, note: presentation.note, icon: presentation.icon,
       members: members.map(accountRef), balances, topAssets: topHeldTokens(balances), portfolioUsd,
+      ...(opts.exHdx ? { portfolioExHdxUsd } : {}),
       ...(tradingVolumeUsd > 0 ? { tradingVolumeUsd } : {}),
       ...(liquidationVolumeUsd > 0 ? { liquidationVolumeUsd } : {}),
       ...(revenueUsd > 0 ? { revenueUsd } : {}),
       moneyMarket, liquidityPositions: [...lpPositions, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)), activeDcas,
-      portfolioSeries, portfolioDates: history.portfolioDates, portfolioBlocks: history.portfolioBlocks,
+      portfolioSeries, portfolioSeriesExHdx, portfolioDates: history.portfolioDates, portfolioBlocks: history.portfolioBlocks,
       // Holdings without indexed historical observations remain absent rather
       // than being projected backward from their current balance.
       balanceHistory: summary ? [] : history.balanceHistory,
@@ -25378,6 +25462,7 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
       ttlMs: 8000,
       scope: `tag:${tagId}`,
       snapshot: { tagId, membershipKey },
+      exHdx: showsExHdxValue(tagId),
     },
   )
 }
@@ -25443,13 +25528,16 @@ export async function getListTagDetail(listId: string, presentation: ListTagPres
   return buildTagDetailForMembers(presentation, valid, { summary, cacheKey: `explorer:${scope}${summary ? ':summary' : ''}`, scope })
 }
 /** The list-tag twin of getTagHistoryWindow: same member set and scope key the detail uses. */
-export async function getListTagHistoryWindow(listId: string, tagId: string, members: string[], fromBlock: number, toBlock: number, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
+export async function getListTagHistoryWindow(listId: string, tagId: string, members: string[], fromBlock: number, toBlock: number, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioSeriesExHdx: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
   const valid = listTagMembers(members)
   if (!valid.length) return null
   const accounts = [...new Set([...valid, ...valid.map(evmAccountForm).filter(Boolean) as string[]])]
   const history = await getAccountHistoryWindowed(accounts, listTagScope(listId, tagId, valid), fromBlock, toBlock)
   return {
     portfolioSeries: history.portfolioSeries,
+    // A user list-tag is an arbitrary, live-editable member set, never the flagged
+    // Treasury registry entry — so it never draws the second curve, whatever its id.
+    portfolioSeriesExHdx: [],
     portfolioDates: history.portfolioDates,
     portfolioBlocks: history.portfolioBlocks,
     balanceHistory: opts.seriesOnly ? [] : history.balanceHistory,

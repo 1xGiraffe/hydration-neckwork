@@ -146,7 +146,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
                   <div className="tag">{data.name} <span className="em" style={{ color: data.color }}>· tag</span></div>
                   <div className="full"><span className="muted">{members.length} accounts</span></div>
                 </div>
-                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} valueUsd={data.portfolioUsd - debtUsd} moneyMarket={mmList} />
+                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} valueUsd={data.portfolioUsd - debtUsd} exHdxValueUsd={data.portfolioExHdxUsd == null ? null : data.portfolioExHdxUsd - debtUsd} moneyMarket={mmList} />
               </div>
 
               <DetailTabs tabs={tabs} active={activeView} onChange={k => setQuery({ view: k === 'overview' ? null : k })} />
@@ -181,11 +181,14 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
               <CloseAccountsSection tagId={tagId} />
 
               <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data}
+                exHdxSeries={data.portfolioSeriesExHdx} exHdxNetUsd={data.portfolioExHdxUsd == null ? undefined : data.portfolioExHdxUsd - debtUsd}
                 refine={tagHistoryBlocks ? async (fromSec, toSec) => {
                   const range = blockRangeForWindow(data.portfolioDates ?? [], tagHistoryBlocks, fromSec, toSec)
                   if (!range) return null
                   const w = await api.tagHistoryWindow(tagId, range.fromBlock, range.toBlock)
-                  return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates } : null
+                  // See the account page: both curves refine together or neither does.
+                  const overlay = w.portfolioSeriesExHdx?.length === w.portfolioSeries.length ? w.portfolioSeriesExHdx : undefined
+                  return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates, overlay } : null
                 } : undefined} />
               </>)}
 
