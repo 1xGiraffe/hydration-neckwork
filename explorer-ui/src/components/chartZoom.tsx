@@ -355,7 +355,10 @@ export function useChartZoom(
   }
 }
 
-export interface RefinedSeries { data: number[]; dates: string[] }
+// `overlay` is a second curve on the SAME dates — refined together with `data` in
+// one fetch so the two can never be drawn on different grids (the reason
+// useZoomRefineValue exists for the multi-series charts).
+export interface RefinedSeries { data: number[]; dates: string[]; overlay?: number[] }
 
 /**
  * Refetch-on-zoom: when a chart is zoomed and its owner supplied a `refine`
@@ -370,7 +373,11 @@ export function useZoomRefine(
   refine: ((fromSec: number, toSec: number, points: number) => Promise<RefinedSeries | null>) | undefined,
   points: number,
 ): RefinedSeries | null {
-  return useZoomRefineValue(zoom, refine, points, (s, span) => s.data.length === s.dates.length && s.data.length > span)
+  return useZoomRefineValue(zoom, refine, points, (s, span) =>
+    s.data.length === s.dates.length && s.data.length > span
+    // A payload that refined only one of the two curves is rejected whole: pairing
+    // a finer total with a coarse overlay would draw the comparison wrong.
+    && (s.overlay == null || s.overlay.length === s.data.length))
 }
 
 /**

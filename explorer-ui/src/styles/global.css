@@ -1734,6 +1734,12 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
 .pf-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 12px; }
 .pf-head .pf-now { font-family: 'GeistMono'; font-size: 26px; font-weight: 600; }
 .pf-head .pf-chg { font-family: 'GeistMono'; font-size: 13px; }
+/* Two-curve legend (total vs ex-HDX). Wraps rather than overflowing at 390px, and
+   sits between the headline row and the chart so a key is read before the lines. */
+.pf-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: -4px 0 6px; }
+.pf-legend .pf-key { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-low); text-transform: uppercase; letter-spacing: 0.04em; }
+.pf-legend .pf-swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.pf-legend .pf-key-val { font-family: 'GeistMono'; font-size: 12px; color: var(--text); text-transform: none; letter-spacing: 0; }
 .pf-chart { width: 100%; height: 180px; display: block; }
 .apx-chart { width: 100%; height: 220px; display: block; margin-top: 8px; overflow: visible; }
 /* touch-action pan-y: horizontal touch drags scrub the crosshair (pointer events
