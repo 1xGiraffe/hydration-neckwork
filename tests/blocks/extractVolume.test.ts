@@ -15,6 +15,7 @@ import { sts, type RuntimeCtx } from '../../src/types/support.ts';
 import { broadcast } from '../../src/types/events.ts';
 import { readFile } from 'node:fs/promises'
 import { OTC_FILL_EVENT_NAMES } from '../../src/blocks/otcCounterparty.js'
+import { ICE_SETTLEMENT_TRANSFER_EVENTS } from '../../src/blocks/icePotSettlement.js'
 
 function createMockEvent(name: string, args: unknown) {
   const runtime = {
@@ -1138,5 +1139,117 @@ describe('the OTC side rule needs its source events subscribed', () => {
     // regression this pins, found live after the rule itself was already correct.
     const source = await readFile(new URL('../../src/processor.ts', import.meta.url), 'utf8')
     for (const name of OTC_FILL_EVENT_NAMES) expect(source).toContain(`'${name}'`)
+  })
+})
+
+describe('an ICE settlement is the intent owner\'s trade, not the pot\'s', () => {
+  const ICE_POT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000';
+  const ROUTER_POT = '0x6d6f646c726f7574657265780000000000000000000000000000000000000000';
+  const FEE_PROCESSOR = '0x6d6f646c66656570726f632f0000000000000000000000000000000000000000';
+  const OWNER = '0x45544800553f022201fa7c88e6cc10d1c688b157d6fa77750000000000000000';
+
+  const prices: PriceMap = new Map([
+    [0, '0.008000000000'],
+    [22, '1.000000000000'],
+  ]);
+  const decimals: AssetDecimals = new Map([
+    [0, 12],
+    [22, 6],
+  ]);
+
+  const withExtrinsic = (event: ReturnType<typeof createMockEvent>, extrinsicIndex: number) =>
+    ({ ...event, extrinsicIndex });
+
+  // The solution's AMM route: the solver submits it, so the pot is the swapper.
+  const routeLeg = (extrinsicIndex = 2) => withExtrinsic(createMockEvent('Broadcast.Swapped3', {
+    fillerType: { __kind: 'Omnipool' }, operation: { __kind: 'ExactIn' },
+    inputs: [{ asset: 22, amount: 800000n }], outputs: [{ asset: 0, amount: 100000000000000n }],
+    fees: [], swapper: ICE_POT, filler: 'pool', operationStack: [],
+  }), extrinsicIndex);
+
+  const transferLeg = (name: string, from: string, to: string, extrinsicIndex = 2) =>
+    withExtrinsic(createMockEvent(name, { from, to, currencyId: 22, amount: 800000n }), extrinsicIndex);
+
+  const accounts = (rows: ReturnType<typeof extractTradeVolumeFromSwaps>) =>
+    [...new Set(rows.map(row => row.account))];
+
+  it('books the route to the owner the pot moved funds with', () => {
+    const rows = extractTradeVolumeFromSwaps([
+      transferLeg('Currencies.Transferred', OWNER, ICE_POT),
+      routeLeg(),
+      transferLeg('Tokens.Transfer', ICE_POT, OWNER),
+    ], 100, 443, prices, decimals);
+
+    expect(accounts(rows)).toEqual([OWNER]);
+    expect(rows.find(row => row.asset_id === 22)).toMatchObject({ native_volume_sell: '800000' });
+    expect(rows.find(row => row.asset_id === 0)).toMatchObject({ native_volume_buy: '100000000000000' });
+  });
+
+  // 15 of the 150 settlements on chain move an aToken, whose only transfer event
+  // is Currencies.Transferred — reading Tokens.Transfer alone leaves them on the pot.
+  it('names the owner from a Currencies.Transferred leg alone', () => {
+    const rows = extractTradeVolumeFromSwaps([
+      routeLeg(), transferLeg('Currencies.Transferred', ICE_POT, OWNER),
+    ], 100, 443, prices, decimals);
+
+    expect(accounts(rows)).toEqual([OWNER]);
+  });
+
+  // 211 of the pot's 717 legs face another module account. Counting those as
+  // owners would make every such solution look multi-owner and attribute none.
+  it('ignores module accounts on the other side of a pot leg', () => {
+    const rows = extractTradeVolumeFromSwaps([
+      transferLeg('Tokens.Transfer', ROUTER_POT, ICE_POT),
+      routeLeg(),
+      transferLeg('Tokens.Transfer', ICE_POT, OWNER),
+      transferLeg('Tokens.Transfer', ICE_POT, FEE_PROCESSOR),
+    ], 100, 443, prices, decimals);
+
+    expect(accounts(rows)).toEqual([OWNER]);
+  });
+
+  it('leaves the pot booked when the extrinsic names no single owner', () => {
+    const other = '0x45544800aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0000000000000000';
+    // Two owners in one solution: the route cannot be divided without guessing.
+    expect(accounts(extractTradeVolumeFromSwaps([
+      routeLeg(), transferLeg('Tokens.Transfer', ICE_POT, OWNER), transferLeg('Tokens.Transfer', ICE_POT, other),
+    ], 100, 443, prices, decimals))).toEqual([ICE_POT]);
+    // No leg at all — nothing names an owner.
+    expect(accounts(extractTradeVolumeFromSwaps([routeLeg()], 100, 443, prices, decimals))).toEqual([ICE_POT]);
+  });
+
+  it('only takes legs from the settlement\'s own extrinsic', () => {
+    const rows = extractTradeVolumeFromSwaps([
+      routeLeg(2), transferLeg('Tokens.Transfer', ICE_POT, OWNER, 3),
+    ], 100, 443, prices, decimals);
+
+    expect(accounts(rows)).toEqual([ICE_POT]);
+  });
+
+  it('leaves the candle volume alone — only the per-account breakdown moves', () => {
+    const events = [routeLeg(), transferLeg('Tokens.Transfer', ICE_POT, OWNER)];
+    const withOwner = extractVolumeFromSwaps(events, 100, 443, prices, decimals);
+    const withoutLegs = extractVolumeFromSwaps([routeLeg()], 100, 443, prices, decimals);
+
+    expect(withOwner).toEqual(withoutLegs);
+  });
+
+  it('gives the fee processor no per-account row, having nobody to name', () => {
+    const rows = extractTradeVolumeFromSwaps([withExtrinsic(createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' }, operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: 22, amount: 800000n }], outputs: [{ asset: 0, amount: 100000000000000n }],
+      fees: [], swapper: FEE_PROCESSOR, filler: 'pool', operationStack: [],
+    }), 2)], 100, 443, prices, decimals);
+
+    expect(rows).toEqual([]);
+  });
+})
+
+describe('the ICE settlement rule needs its source events subscribed', () => {
+  it('the processor fetches the transfer events that name the intent owner', async () => {
+    // Same regression the OTC rule shipped once: a rule reading events the
+    // processor never asked for is silently a no-op on the live path.
+    const source = await readFile(new URL('../../src/processor.ts', import.meta.url), 'utf8')
+    for (const name of ICE_SETTLEMENT_TRANSFER_EVENTS) expect(source).toContain(`'${name}'`)
   })
 })

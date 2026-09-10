@@ -5,6 +5,14 @@ import type { PriceRow, TradeVolumeRow } from '../db/schema.js'
 import { rebuildOHLCForTimeRange } from '../ohlc/repair.js'
 import { ALL_SWAP_EVENT_NAMES, BROADCAST_SWAP_EVENT_NAMES, LEGACY_SWAP_EVENT_NAMES, decodeRawTrade, decodeRawUniswapV3Swap, resolveRawOtcSides, type DecodedRawTrade, type RawTradeEventRow, type TradeAssetAmount } from './tradeEventDecoder.js'
 import { OTC_FILL_EVENT_NAMES } from '../blocks/otcCounterparty.js'
+import {
+  ICE_FIRST_BLOCK,
+  ICE_POT_ACCOUNT,
+  ICE_SETTLEMENT_TRANSFER_EVENTS,
+  icePotSettlementOwner,
+  isIcePotSwapper,
+  isUnattributableVolumePot,
+} from '../blocks/icePotSettlement.js'
 import { EVM_LOG_EVENT_NAME, resolveEvmTokenAssetId, routedUniswapV3Extrinsics, type UniswapV3PoolIndex, type UniswapV3PoolTokens } from '../price/uniswapV3.js'
 import { aggregateTradeVolumeRows, decimalToScaledBigInt, formatDecimal128, sumBigIntStrings, sumDecimal128Strings, sumVolumeFields } from '../blocks/volumeMath.js'
 import { foldOmnipoolHubHops } from '../blocks/hubHops.js'
@@ -284,6 +292,7 @@ export function decodeTrade(row: RawEventRow): DecodedTrade | null {
  * asset exactly as new blocks do.
  */
 const OTC_FILL_EVENT_SET = new Set<string>(OTC_FILL_EVENT_NAMES)
+const ICE_TRANSFER_EVENT_SET = new Set<string>(ICE_SETTLEMENT_TRANSFER_EVENTS)
 
 /**
  * The taker named by the OTC pallet's fill event sitting immediately before
@@ -311,14 +320,23 @@ export function decodeBlockTrades(
   // A pool's Swap log (EVM.Log) counts only when no Broadcast fill of its
   // extrinsic already booked the hop — the same rule as the live extractor.
   let slots: Array<{ trade: DecodedTrade; extrinsicIndex: number | null | undefined; fromPoolLog: boolean }> = []
+  // The pot's transfer legs of the block being read, per extrinsic — what names
+  // the intent owner of an ICE settlement (see icePotSettlement.ts).
+  let icePotLegs = new Map<number, Array<{ from: string | null; to: string | null }>>()
   const flush = () => {
     if (block == null) return
+    for (const slot of slots) {
+      if (slot.extrinsicIndex == null || !isIcePotSwapper(slot.trade.account)) continue
+      const owner = icePotSettlementOwner(icePotLegs.get(slot.extrinsicIndex) ?? [])
+      if (owner) slot.trade = { ...slot.trade, account: owner }
+    }
     const routed = routedUniswapV3Extrinsics(slots.filter(slot => !slot.fromPoolLog).map(slot => ({ filler: slot.trade.filler, extrinsicIndex: slot.extrinsicIndex })))
     const trades = slots
       .filter(slot => !slot.fromPoolLog || slot.extrinsicIndex == null || !routed.has(slot.extrinsicIndex))
       .map(slot => slot.trade)
     for (const trade of foldOmnipoolHubHops(trades, t => t.account)) out.push({ blockHeight: block, trade })
     slots = []
+    icePotLegs = new Map()
   }
   // The row before the one being read. The rows arrive ordered by (block,
   // event_index) and an OTC Broadcast fill's pallet event sits immediately ahead
@@ -330,6 +348,24 @@ export function decodeBlockTrades(
     const priorRow = previous
     previous = row
     if (row.block_height !== block) { flush(); block = row.block_height }
+    if (ICE_TRANSFER_EVENT_SET.has(row.event_name)) {
+      // Collected, never a trade of its own: the settlement's transfer legs exist
+      // only to name the owner the solution's route legs belong to.
+      if (row.extrinsic_index == null) continue
+      try {
+        const args = JSON.parse(row.args_json) as { from?: unknown; to?: unknown }
+        const from = typeof args.from === 'string' ? args.from : null
+        const to = typeof args.to === 'string' ? args.to : null
+        if (from && to) {
+          const legs = icePotLegs.get(row.extrinsic_index)
+          if (legs) legs.push({ from, to })
+          else icePotLegs.set(row.extrinsic_index, [{ from, to }])
+        }
+      } catch {
+        // A leg we cannot read simply does not name an owner.
+      }
+      continue
+    }
     if (row.event_name === EVM_LOG_EVENT_NAME) {
       const swap = decodeRawUniswapV3Swap(row, uniswapV3Pools)
       if (swap) slots.push({ trade: swap, extrinsicIndex: row.extrinsic_index, fromPoolLog: true })
@@ -546,10 +582,13 @@ export function rowsForTrade(
     }
     return row
   }
+  // A pot that swaps as machinery with nobody behind it gets no per-account row
+  // (icePotSettlement.ts) — the price rows below still carry the volume.
   const tradeRowForAsset = (assetId: number): TradeVolumeRow | null =>
-    trade.account ? rowIn(tradeRowsByAsset, trade.account, assetId, false) : null
+    trade.account && !isUnattributableVolumePot(trade.account) ? rowIn(tradeRowsByAsset, trade.account, assetId, false) : null
   // The passive side of an OTC fill, booked with the legs mirrored (otcCounterparty.ts).
-  const counterpartyAccount = trade.counterparty && trade.counterparty !== trade.account ? trade.counterparty : null
+  const counterpartyAccount = trade.counterparty && trade.counterparty !== trade.account
+    && !isUnattributableVolumePot(trade.counterparty) ? trade.counterparty : null
   const counterpartyRowForAsset = (assetId: number): TradeVolumeRow | null =>
     counterpartyAccount ? rowIn(counterpartyRowsByAsset, counterpartyAccount, assetId, true) : null
 
@@ -778,6 +817,14 @@ async function queryRawEvents(
           -- event names, which sits at event_index - 1 (see otcCounterparty.ts). It
           -- is not a swap event, so it has to be asked for explicitly.
           OR event_name IN ({otc_fill_names:Array(String)})
+          -- An ICE solution's route legs carry the solver's pot as swapper; the
+          -- intent owner is named by the pot's own transfer legs in the same
+          -- extrinsic (see icePotSettlement.ts). Bounded to the pot's own legs and
+          -- to blocks at or above ICE's first event, so a repair below that range
+          -- reads nothing extra.
+          OR (block_height >= {ice_from:UInt32} AND event_name IN ({ice_transfer_names:Array(String)})
+              AND (JSONExtractString(args_json, 'from') = {ice_pot:String}
+                OR JSONExtractString(args_json, 'to') = {ice_pot:String}))
           ${poolLogArm}
         )
       ORDER BY block_height, event_index
@@ -789,6 +836,9 @@ async function queryRawEvents(
       legacy_names: LEGACY_SWAP_EVENT_NAMES,
       broadcast_names: BROADCAST_SWAP_EVENT_NAMES,
       otc_fill_names: OTC_FILL_EVENT_NAMES,
+      ice_from: ICE_FIRST_BLOCK,
+      ice_transfer_names: ICE_SETTLEMENT_TRANSFER_EVENTS,
+      ice_pot: ICE_POT_ACCOUNT,
       evm_log: EVM_LOG_EVENT_NAME,
       pools: [...uniswapV3PoolAddresses],
     },
