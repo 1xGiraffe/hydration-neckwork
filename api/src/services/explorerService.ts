@@ -4050,7 +4050,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // market uses the pool tokens, e.g. the 2-Pool-GETH reserve), so re-fold to
     // merge that supplied collateral into the underlying main asset as well.
     balances = foldShareBalances(balances)
-    // ERC-20-side wallet holdings (HOLLAR): read from the bounded snapshot and
+    // ERC-20-side wallet holdings: read from the bounded snapshot and
     // summed onto any Tokens-side balance — the two pots are separate on-chain.
     balances = mergeErc20Balances(balances, await erc20WalletHoldings(mmH160), prices)
     // Attach the lock/reserve components once the display rows are final.
@@ -4353,7 +4353,7 @@ function moneyMarketFields(m: ApiMmMarket): Pick<MoneyMarketPosition, 'marketKey
 function orderMoneyMarkets<T extends Pick<MoneyMarketPosition, 'marketKey'>>(positions: T[]): T[] {
   return positions.sort((a, b) => (MM_MARKET_ORDER.get(a.marketKey) ?? Number.MAX_SAFE_INTEGER) - (MM_MARKET_ORDER.get(b.marketKey) ?? Number.MAX_SAFE_INTEGER))
 }
-// ERC-20-backed wallet assets (HOLLAR): served from the erc20_wallet_balances table
+// ERC-20-backed wallet assets: served from the erc20_wallet_balances table
 // (refreshed every 10 min by erc20WalletService) rather than a per-request eth_call.
 // The table is keyed by the anchored account_id; match this h160 by the ETH-prefixed
 // form, the reserved (module) form, or a substrate account whose truncation is the h160.
@@ -7095,7 +7095,7 @@ async function getAssetTotals(): Promise<Map<number, bigint>> {
           FROM price_data.account_asset_latest_balances
           GROUP BY account_id, asset_id
           UNION ALL
-          -- ERC-20-side holdings (HOLLAR) — separate pot, see erc20WalletService.
+          -- ERC-20-side holdings — separate pot, see erc20WalletService.
           SELECT account_id, asset_id, toUInt256OrZero(argMax(total, updated_at)) AS bal
           FROM price_data.erc20_wallet_balances
           GROUP BY account_id, asset_id
@@ -18504,7 +18504,7 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
       // portfolio value aren't off by 10^Δ (downactivity divides by the display decimals).
       return { ...r, asset_id: String(did), bal: rescaleRaw(r.bal, asset(r.asset_id).decimals, asset(did).decimals) }
     })
-  // ERC-20-backed holdings (HOLLAR): balances live in contract storage and never
+  // ERC-20-backed holdings: balances live in contract storage and never
   // hit raw_balance_observations, so without this the portfolio series shows the
   // value only in the live-pinned final point — a cliff on tag/account charts.
   // Reconstruct per-account cumulative bucket balances from the indexed Transfer
@@ -24158,7 +24158,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
                 FROM price_data.account_asset_latest_balances
                 GROUP BY account_id, asset_id
                 UNION ALL
-                -- ERC-20-side holdings (HOLLAR): separate pot from the Tokens
+                -- ERC-20-side holdings: separate pot from the Tokens
                 -- balances above (refreshed by erc20WalletService); the group
                 -- sum below folds both pots into the account's value.
                 SELECT account_id, asset_id, toUInt256OrZero(argMax(total, updated_at)) AS bal, 0 AS lb
@@ -24672,7 +24672,7 @@ async function enrichAccountRows(
     decimalsById.set(id, asset(id).decimals)
   }
 
-  // ERC-20-backed HOLLAR history for the sparkline. Contract-storage balances
+  // ERC-20-backed wallet-asset history for the sparkline. Contract-storage balances
   // never hit raw_balance_observations / account_asset_latest_balances, so the
   // EVM-twin sparklines would otherwise miss their contract-storage history.
   // Rebuild weekly cumulative balances from indexed Transfer logs into a
@@ -24755,7 +24755,7 @@ async function enrichAccountRows(
     // balance is not a historical balance series, so omit the sparkline unless a
     // complete indexed reconstruction is available.
     if (moduleBalances.length) spark = null
-    // Add ERC-20 (HOLLAR) history before the pin, over every account key the row
+    // Add ERC-20 wallet-asset history before the pin, over every account key the row
     // covers (substrate + twins + module/sovereign forms) — the final bucket is
     // overwritten by the authoritative pin below, so no double count there.
     for (const a of [...accs, ...moduleAccs]) {

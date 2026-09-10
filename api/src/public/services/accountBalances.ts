@@ -367,8 +367,10 @@ export function priceFor(prices: PriceMap, assetId: number): bigint {
 // the Tokens pallet, so `account_asset_latest_balances` reads them as zero and
 // `erc20_wallet_balances` is the authoritative pot. The shared list lives in
 // services/erc20WalletService.ts, which is outside the public API's import
-// allow-list, so it is restated here.
-const ERC20_WALLET_ASSET_IDS = [222] // HOLLAR
+// allow-list, so it is restated here — and pinned against it by
+// api/tests/erc20WalletAssets.test.ts, because a list that diverges makes this
+// surface report a holder of the missing asset as holding nothing.
+const ERC20_WALLET_ASSET_IDS = [222, 1001354] // HOLLAR, aDOT-HOLLAR
 
 /**
  * How stale a persisted current-state snapshot may be before it is ignored.
