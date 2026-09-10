@@ -14,6 +14,44 @@ const INTERVAL_BUCKET: Record<OHLCVInterval, string> = {
   '1M':    'toStartOfMonth(b.block_timestamp)',
 }
 
+/**
+ * Per-account volume sums, plus the same sums restricted to the PRINCIPAL side.
+ *
+ * An OTC fill books both of its accounts — the taker with the trade's own legs and
+ * the maker with them mirrored (see `counterparty` in src/db/schema.ts), because a
+ * resting order that gets hit is a real trade for its owner. So an account's own
+ * figures are the unrestricted sums, while anything summed ACROSS accounts has to
+ * take the principal side only: the two rows of one fill describe the same tokens
+ * from both ends, and adding them would report a candle's volume twice.
+ *
+ * Every row written before OTC fills were two-sided carries `counterparty = 0`, so
+ * the restricted sums equal the plain ones over all of that history.
+ */
+const PER_ACCOUNT_VOLUME_SUMS_SQL = `
+      sum(tv.usd_volume_buy) AS volume_buy,
+      sum(tv.usd_volume_sell) AS volume_sell,
+      sum(tv.usd_volume_buy) + sum(tv.usd_volume_sell) AS volume_total,
+      sum(tv.usd_volume_buy) - sum(tv.usd_volume_sell) AS net_volume,
+      sum(tv.trade_count) AS trade_count,
+      sum(tv.native_volume_buy) AS native_volume_buy,
+      sum(tv.native_volume_sell) AS native_volume_sell,
+      sum(tv.native_volume_buy) + sum(tv.native_volume_sell) AS native_volume_total,
+      sum(tv.native_volume_buy) - sum(tv.native_volume_sell) AS native_net_volume,
+      sumIf(tv.usd_volume_buy, tv.counterparty = 0) AS principal_volume_buy,
+      sumIf(tv.usd_volume_sell, tv.counterparty = 0) AS principal_volume_sell,
+      sumIf(tv.trade_count, tv.counterparty = 0) AS principal_trade_count,
+      sumIf(tv.native_volume_buy, tv.counterparty = 0) AS principal_native_volume_buy,
+      sumIf(tv.native_volume_sell, tv.counterparty = 0) AS principal_native_volume_sell`
+
+/** The cross-account totals, over the per-account rows the SQL above produces. */
+const CROSS_ACCOUNT_TOTALS_SQL = `
+            toString(count()) AS account_count,
+            toString(sum(principal_trade_count)) AS trade_count,
+            toString(sum(principal_volume_buy)) AS volume_buy,
+            toString(sum(principal_volume_sell)) AS volume_sell,
+            toString(sum(principal_volume_buy) + sum(principal_volume_sell)) AS volume_total,
+            toString(sum(principal_volume_buy) - sum(principal_volume_sell)) AS net_volume`
+
 const INTERVAL_SECONDS: Record<OHLCVInterval, number> = {
   '5min': 300,
   '15min': 900,
@@ -185,25 +223,16 @@ export async function queryTradeVolumeSummaries(
             interval_start,
             argMax(tuple(account, volume_buy, volume_sell, volume_total, net_volume, trade_count, native_volume_buy, native_volume_sell, native_volume_total, native_net_volume), volume_total) AS top_trader,
             count() AS account_count,
-            sum(trade_count) AS total_trade_count,
-            sum(volume_buy) AS total_volume_buy,
-            sum(volume_sell) AS total_volume_sell,
-            sum(volume_total) AS total_volume_total,
-            sum(net_volume) AS total_net_volume,
-            sum(native_net_volume) AS total_native_net_volume
+            sum(principal_trade_count) AS total_trade_count,
+            sum(principal_volume_buy) AS total_volume_buy,
+            sum(principal_volume_sell) AS total_volume_sell,
+            sum(principal_volume_buy) + sum(principal_volume_sell) AS total_volume_total,
+            sum(principal_volume_buy) - sum(principal_volume_sell) AS total_net_volume,
+            sum(principal_native_volume_buy) - sum(principal_native_volume_sell) AS total_native_net_volume
           FROM (
             SELECT
               ${bucket} AS interval_start,
-              tv.account AS account,
-              sum(tv.usd_volume_buy) AS volume_buy,
-              sum(tv.usd_volume_sell) AS volume_sell,
-              sum(tv.usd_volume_buy) + sum(tv.usd_volume_sell) AS volume_total,
-              sum(tv.usd_volume_buy) - sum(tv.usd_volume_sell) AS net_volume,
-              sum(tv.trade_count) AS trade_count,
-              sum(tv.native_volume_buy) AS native_volume_buy,
-              sum(tv.native_volume_sell) AS native_volume_sell,
-              sum(tv.native_volume_buy) + sum(tv.native_volume_sell) AS native_volume_total,
-              sum(tv.native_volume_buy) - sum(tv.native_volume_sell) AS native_net_volume
+              tv.account AS account,${PER_ACCOUNT_VOLUME_SUMS_SQL}
             FROM price_data.trade_volume_by_account AS tv
             INNER JOIN price_data.blocks b ON tv.block_height = b.block_height
             WHERE tv.asset_id = {asset_id:UInt32}
@@ -277,16 +306,7 @@ export async function queryTradeVolumeDetails(
         WHERE block_timestamp >= {start_time:DateTime}
           AND block_timestamp < {end_time:DateTime}) AS to_block
     SELECT
-      tv.account AS account,
-      sum(tv.usd_volume_buy) AS volume_buy,
-      sum(tv.usd_volume_sell) AS volume_sell,
-      sum(tv.usd_volume_buy) + sum(tv.usd_volume_sell) AS volume_total,
-      sum(tv.usd_volume_buy) - sum(tv.usd_volume_sell) AS net_volume,
-      sum(tv.trade_count) AS trade_count,
-      sum(tv.native_volume_buy) AS native_volume_buy,
-      sum(tv.native_volume_sell) AS native_volume_sell,
-      sum(tv.native_volume_buy) + sum(tv.native_volume_sell) AS native_volume_total,
-      sum(tv.native_volume_buy) - sum(tv.native_volume_sell) AS native_net_volume
+      tv.account AS account,${PER_ACCOUNT_VOLUME_SUMS_SQL}
     FROM price_data.trade_volume_by_account AS tv
     INNER JOIN price_data.blocks b ON tv.block_height = b.block_height
     WHERE tv.asset_id = {asset_id:UInt32}
@@ -329,17 +349,11 @@ export async function queryTradeVolumeDetails(
       }),
       client.query({
         query: `
-          SELECT
-            toString(count()) AS account_count,
-            toString(sum(trade_count)) AS trade_count,
-            toString(sum(volume_buy)) AS volume_buy,
-            toString(sum(volume_sell)) AS volume_sell,
-            toString(sum(volume_total)) AS volume_total,
-            toString(sum(net_volume)) AS net_volume,
-            toString(sum(native_volume_buy)) AS native_volume_buy,
-            toString(sum(native_volume_sell)) AS native_volume_sell,
-            toString(sum(native_volume_total)) AS native_volume_total,
-            toString(sum(native_net_volume)) AS native_net_volume
+          SELECT${CROSS_ACCOUNT_TOTALS_SQL},
+            toString(sum(principal_native_volume_buy)) AS native_volume_buy,
+            toString(sum(principal_native_volume_sell)) AS native_volume_sell,
+            toString(sum(principal_native_volume_buy) + sum(principal_native_volume_sell)) AS native_volume_total,
+            toString(sum(principal_native_volume_buy) - sum(principal_native_volume_sell)) AS native_net_volume
           FROM (${perAccountQuery})
         `,
         query_params: queryParams,

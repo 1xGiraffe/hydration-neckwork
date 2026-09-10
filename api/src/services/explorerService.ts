@@ -9903,7 +9903,7 @@ async function v3TradeDetail(act: V3Activity, prices: Map<number, PriceInfo>): P
   // The pool fee is taken from the input: amountIn × fee / 1e6, to the pool's LPs.
   const fee = pool ? (BigInt(act.amountIn) * BigInt(pool.fee) / 1_000_000n).toString() : null
   const venue = pool ? `Uniswap v3 ${feeTierLabel(pool.fee)}` : 'Uniswap v3'
-  return {
+  const detail: TradeDetail = {
     blockHeight: act.blockHeight, timestamp: act.timestamp, extrinsicIndex: act.extrinsicIndex, eventIndex: act.eventIndex,
     hash: ext?.extrinsic_hash ?? null, success: ext ? Number(ext.success) === 1 : true,
     who: who ? accountRef(who) : null, venue, direction: 'Sell',
@@ -9914,6 +9914,10 @@ async function v3TradeDetail(act: V3Activity, prices: Map<number, PriceInfo>): P
     route: [{ pool: venue, poolId: null, assetIn: aIn, assetOut: aOut, amountIn: act.amountIn, amountOut: act.amountOut, fee: fee ? { amount: fee, asset: aIn } : null }],
     dca: false, ...(act.pool ? { poolAddress: act.pool } : {}),
   }
+  // Same event-time valuation every other trade detail gets: without it this page
+  // showed a v3 swap at today's price while its own feed row showed the block's.
+  await applyEventTimeUsd([detail], tradeDetailValuePick)
+  return detail
 }
 interface XcmNetworkMeta { name: string; subscan?: string; ss58?: number }
 // A parachain's product name, for surfaces that hold a bare para id — a sibling
@@ -17485,7 +17489,7 @@ export async function getPoolSwaps(poolId: number, members: number[], kind: stri
     const own = rows.filter(r => mine.has(`${r.block_height}:${r.event_index}`))
     if (!own.length) return []
     const signers = await actorsFor(own.map(r => [r.block_height, r.extrinsic_index] as [number, number | null]))
-    return own.map(r => {
+    const swaps: ActivityRow[] = own.map(r => {
       const aIn = asset(r.asset_in), aOut = asset(r.asset_out)
       const actor = (r.extrinsic_index != null ? signers.get(`${r.block_height}:${r.extrinsic_index}`) : undefined)
         ?? (r.who && ACCOUNT_RE.test(r.who) ? r.who : null)
@@ -18554,6 +18558,14 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // Per asset: forward-fill each account's balance, sum across accounts per bucket,
   // value with the period (back-/forward-filled historical) price, add to portfolio.
   const portfolio = new Array(N + 1).fill(0)
+  // The same curve with HDX taken out: the HDX wallet balance (which includes its
+  // locked/staked part) and every LP position that holds HDX as a leg. Accumulated
+  // in this pass rather than derived afterwards, because HDX reaches the portfolio
+  // from three places — the balance loop, the XYK NAV decomposition and the
+  // Omnipool principal — and subtracting only the wallet balance would leave the
+  // line still tracking the HDX price through the LP legs. See isHdxLpPosition for
+  // the current-value twin of this exclusion.
+  const portfolioExHdx = new Array(N + 1).fill(0)
   const balanceHistory: AssetBalanceHistory[] = []
   for (const id of assetIds) {
     const a = asset(id)

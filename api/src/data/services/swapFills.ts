@@ -1,4 +1,5 @@
 import type { ClickHouseClient } from '../../db/client.ts'
+import { fillKey, otcSideIndex, type OtcSideIndex } from './otcSides.ts'
 import { attachExtrinsicHashes, type WithExtrinsicHash } from './extrinsicHashes.ts'
 import { iso } from '../schemas/common.ts'
 import { accountRefOrNull, type AccountRef } from './address.ts'
@@ -39,6 +40,8 @@ export interface SwapFill {
   venue: string
   poolKey: string | null
   swapper: AccountRef | null
+  /** An OTC fill's maker; null on every pool venue, which has no counterparty account. */
+  counterparty: AccountRef | null
   inputs: FillLeg[]
   outputs: FillLeg[]
   fees: FillFeeLeg[]
@@ -89,7 +92,27 @@ export async function fillsPage(client: ClickHouseClient, scope: FillsScope, opt
   // An asset filter matches a fill through ANY of its legs (fee legs included:
   // the fill touched the asset either way).
   if (options.assetId != null) { filterSql += ' AND asset_id = {assetId:UInt32}'; params.assetId = options.assetId }
-  if (options.swapperAccountId) { filterSql += ' AND swapper = {swapper:String}'; params.swapper = options.swapperAccountId }
+  // `swapper` is one of an OTC fill's two counterparties but not reliably the one
+  // asked about (otcSides.ts), so an account filter also names the fills the side
+  // index says this account took part in. Bounded by the whole chain's 796 OTC
+  // fills, and an OR on identity — a fill matching both ways is still one fill.
+  // Only a scope that can actually hold an OTC fill pays for the index: a page
+  // pinned to another venue can never contain one.
+  const otcInScope = scope.venue == null || scope.venue === 'otc'
+  const otcSides = options.swapperAccountId && otcInScope ? await otcSideIndex(client) : null
+  if (options.swapperAccountId) {
+    const account = options.swapperAccountId.toLowerCase()
+    const fills = otcSides?.byAccount.get(account) ?? []
+    if (fills.length) {
+      filterSql += ' AND (swapper = {swapper:String}'
+        + ' OR (block_height, event_index) IN arrayZip({otcBlocks:Array(UInt32)}, {otcEvents:Array(UInt32)}))'
+      params.otcBlocks = fills.map(fill => fill.blockHeight)
+      params.otcEvents = fills.map(fill => fill.eventIndex)
+    } else {
+      filterSql += ' AND swapper = {swapper:String}'
+    }
+    params.swapper = options.swapperAccountId
+  }
   filterSql += positionCursorSql(options.order, 'event_index', params, options.cursor)
 
   // Fill-identity discovery takes one of two shapes:
@@ -185,18 +208,25 @@ export async function fillsPage(client: ClickHouseClient, scope: FillsScope, opt
     else byFill.set(fillKey, [leg])
   }
 
+  // The side index is only needed when the page actually holds an OTC fill; a
+  // page of pool fills never loads it. Already in hand when an account filter
+  // asked for it above.
+  const sides = otcSides ?? (legs.some(leg => leg.venue === 'otc') ? await otcSideIndex(client) : null)
   const items: SwapFill[] = []
   for (const key of pageKeys) {
     const fillLegs = byFill.get(`${key.block_height}:${key.event_index}`)
     if (!fillLegs) continue
-    items.push(assembleFill(fillLegs))
+    items.push(assembleFill(fillLegs, sides))
   }
   return { items: await attachExtrinsicHashes(client, items), hasMore }
 }
 
-function assembleFill(legs: LegRow[]): SwapFill {
+function assembleFill(legs: LegRow[], otcSides: OtcSideIndex | null): SwapFill {
   const first = legs[0]
   const swapper = String(first.swapper ?? '').toLowerCase()
+  const otcResolved = first.venue === 'otc'
+    ? otcSides?.byFill.get(fillKey(first.block_height, first.event_index)) ?? null
+    : null
   const inputs: FillLeg[] = []
   const outputs: FillLeg[] = []
   const fees: FillFeeLeg[] = []
@@ -218,7 +248,13 @@ function assembleFill(legs: LegRow[]): SwapFill {
     timestamp: iso(first.ts),
     venue: first.venue,
     poolKey: first.pool_key || null,
-    swapper: PLACEHOLDER_SWAPPERS.includes(swapper) ? null : accountRefOrNull(swapper),
+    // An OTC fill's stored swapper may be either counterparty; the side index says
+    // which is which, so `swapper` is always the taker (whose direction the legs
+    // describe) and `counterparty` names the order's maker. Every other venue has
+    // no counterparty account — the pool is not one.
+    swapper: otcResolved ? accountRefOrNull(otcResolved.taker)
+      : PLACEHOLDER_SWAPPERS.includes(swapper) ? null : accountRefOrNull(swapper),
+    counterparty: otcResolved ? accountRefOrNull(otcResolved.maker) : null,
     inputs,
     outputs,
     fees,

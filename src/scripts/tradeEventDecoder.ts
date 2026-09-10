@@ -1,4 +1,5 @@
 import { EVM_LOG_EVENT_NAME, decodeUniswapV3Log, evmLogOf, uniswapV3SwapTrade, type UniswapV3PoolIndex } from '../price/uniswapV3.js'
+import { OTC_FILLER_KIND, otcSides } from '../blocks/otcCounterparty.js'
 
 export const LEGACY_SWAP_EVENT_NAMES = [
   'Omnipool.SellExecuted',
@@ -23,6 +24,8 @@ export interface RawTradeEventRow {
   args_json: string
   /** Needed to pair a pool's Swap log with the Broadcast fill of its extrinsic; absent on rows read before it was selected. */
   extrinsic_index?: number | null
+  /** Needed to pair an OTC Broadcast fill with the pallet fill event at index - 1. */
+  event_index?: number | null
 }
 
 export interface TradeAssetAmount {
@@ -34,8 +37,26 @@ export interface DecodedRawTrade {
   account: string | null
   /** `fillerType.__kind` of a Broadcast trade — what tells an Omnipool hub hop from any other pool's fill. Absent on a legacy pallet event. */
   filler?: string
+  /** The Broadcast `filler` ACCOUNT (not the venue kind). Only OTC needs it — see otcSides. */
+  fillerAccount?: string | null
+  /**
+   * The other account of a peer-to-peer fill, holding the MIRROR of the legs.
+   * Only OTC sets it; resolved by resolveRawOtcSides once the taker is known.
+   */
+  counterparty?: string | null
   inputs: TradeAssetAmount[]
   outputs: TradeAssetAmount[]
+}
+
+/**
+ * The repair path's twin of extractVolume's resolveOtcCounterparties: put an OTC
+ * fill's two accounts on their true sides, given the taker the pallet's fill event
+ * named. Both call otcSides, so the rule exists once.
+ */
+export function resolveRawOtcSides(trade: DecodedRawTrade, taker: string | null | undefined): DecodedRawTrade {
+  if (trade.filler !== OTC_FILLER_KIND) return trade
+  const sides = otcSides(trade.account, trade.fillerAccount, taker)
+  return sides ? { ...trade, account: sides.trader, counterparty: sides.counterparty } : trade
 }
 
 function normalizeAccount(value: unknown): string | null {
@@ -109,10 +130,11 @@ export function decodeRawTrade(row: RawTradeEventRow): DecodedRawTrade | null {
   if (row.event_name === 'Broadcast.Swapped' && operation === 'ExactOut' && (fillerType === 'XYK' || fillerType === 'LBP') && inputs.length === 1 && outputs.length === 1) {
     return {
       account: normalizeAccount(args.swapper),
+      fillerAccount: normalizeAccount(args.filler),
       ...filler,
       inputs: [{ assetId: inputs[0].assetId, amount: outputs[0].amount }],
       outputs: [{ assetId: outputs[0].assetId, amount: inputs[0].amount }],
     }
   }
-  return { account: normalizeAccount(args.swapper), ...filler, inputs, outputs }
+  return { account: normalizeAccount(args.swapper), fillerAccount: normalizeAccount(args.filler), ...filler, inputs, outputs }
 }

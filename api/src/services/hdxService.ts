@@ -859,8 +859,14 @@ async function loadDailyFlows(): Promise<HdxDailyFlow[]> {
   const from = await cutoffHeightForWindow(60 * 24, head.height)
   const res = await client.query({
     query: `
+      -- Volume sums the PRINCIPAL side only: an OTC fill books both of its accounts
+      -- (see \`counterparty\` in src/db/schema.ts), and adding the maker's mirrored
+      -- row to the taker's would report the same HDX twice in a day's flow. The
+      -- buyer/seller COUNTS stay over both sides, because an OTC maker whose
+      -- resting order was hit really was a seller that day.
       SELECT toDate(b.block_timestamp) AS d,
-        toFloat64(sum(t.native_volume_buy)) / 1e12 AS buy, toFloat64(sum(t.native_volume_sell)) / 1e12 AS sell,
+        toFloat64(sumIf(t.native_volume_buy, t.counterparty = 0)) / 1e12 AS buy,
+        toFloat64(sumIf(t.native_volume_sell, t.counterparty = 0)) / 1e12 AS sell,
         uniqExactIf(t.account, t.native_volume_buy > 0) AS buyers, uniqExactIf(t.account, t.native_volume_sell > 0) AS sellers
       FROM price_data.trade_volume_by_account t
       INNER JOIN price_data.blocks b ON b.block_height = t.block_height
