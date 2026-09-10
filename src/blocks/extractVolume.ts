@@ -20,6 +20,12 @@ import * as stableswap from '../types/stableswap/events.js';
 import * as broadcast from '../types/broadcast/events.js';
 import { foldOmnipoolHubHops } from './hubHops.js';
 import { OTC_FILLER_KIND, OTC_FILL_EVENT_NAMES, otcSides } from './otcCounterparty.js';
+import {
+  ICE_SETTLEMENT_TRANSFER_EVENTS,
+  icePotSettlementOwner,
+  isIcePotSwapper,
+  isUnattributableVolumePot,
+} from './icePotSettlement.js';
 import { aggregateTradeVolumeRows, sumBigIntStrings, sumDecimal128Strings, sumVolumeFields } from './volumeMath.js';
 import {
   EVM_LOG_EVENT_NAME,
@@ -173,6 +179,61 @@ function broadcastTrade(decoded: {
 }
 
 const OTC_FILL_EVENTS = new Set<string>(OTC_FILL_EVENT_NAMES);
+const ICE_TRANSFER_EVENTS = new Set<string>(ICE_SETTLEMENT_TRANSFER_EVENTS);
+
+/**
+ * The pot's own transfer legs in each of `extrinsics`, which is where an ICE
+ * settlement names the intent owner (see icePotSettlement.ts). Only called for a
+ * block that actually settled an intent, so an ordinary block decodes no
+ * transfers it would otherwise have left alone.
+ */
+function icePotTransferLegs(
+  events: Array<EventLike>,
+  extrinsics: Set<number>,
+): Map<number, Array<{ from: string | null; to: string | null }>> {
+  const byExtrinsic = new Map<number, Array<{ from: string | null; to: string | null }>>();
+  for (const event of events) {
+    const extrinsicIndex = event.extrinsicIndex;
+    if (extrinsicIndex == null || !extrinsics.has(extrinsicIndex)) continue;
+    if (!ICE_TRANSFER_EVENTS.has(event.name)) continue;
+    const runtime = event.block?._runtime;
+    if (typeof runtime?.decodeJsonEventRecordArguments !== 'function') continue;
+    let args: Record<string, unknown> | null;
+    try {
+      args = runtime.decodeJsonEventRecordArguments(event) as Record<string, unknown> | null;
+    } catch {
+      continue;
+    }
+    const from = normalizeAccount(args?.from);
+    const to = normalizeAccount(args?.to);
+    if (!from || !to) continue;
+    const legs = byExtrinsic.get(extrinsicIndex);
+    if (legs) legs.push({ from, to });
+    else byExtrinsic.set(extrinsicIndex, [{ from, to }]);
+  }
+  return byExtrinsic;
+}
+
+/**
+ * Book an ICE solution's route legs to the intent owner the settlement names,
+ * leaving them on the pot when the extrinsic names no single owner.
+ */
+function resolveIceSettlementOwners(
+  slots: Array<{ trade: DecodedTrade; extrinsicIndex?: number; fromPoolLog: boolean }>,
+  events: Array<EventLike>,
+): void {
+  const settled = new Set<number>();
+  for (const slot of slots) {
+    if (slot.extrinsicIndex != null && isIcePotSwapper(slot.trade.trader)) settled.add(slot.extrinsicIndex);
+  }
+  if (settled.size === 0) return;
+  const legsByExtrinsic = icePotTransferLegs(events, settled);
+  for (const slot of slots) {
+    if (slot.extrinsicIndex == null || !isIcePotSwapper(slot.trade.trader)) continue;
+    const owner = icePotSettlementOwner(legsByExtrinsic.get(slot.extrinsicIndex) ?? []);
+    if (owner) slot.trade = { ...slot.trade, trader: owner };
+  }
+}
 
 /**
  * Put the two accounts of an OTC fill on their true sides — see otcSides in
@@ -687,6 +748,8 @@ function decodeBlockTrades(
     });
   }
 
+  resolveIceSettlementOwners(slots, events);
+
   const routedExtrinsics = routedUniswapV3Extrinsics(
     slots.filter(slot => !slot.fromPoolLog).map(slot => ({ filler: slot.trade.filler, extrinsicIndex: slot.extrinsicIndex })),
   );
@@ -813,13 +876,17 @@ function tradeToAccountVolumeRows(
 ): TradeVolumeRow[] {
   const account = normalizeAccount(trade.trader);
   const rows: TradeVolumeRow[] = [];
-  if (account) {
+  // A pot that swaps as machinery with nobody behind it (the fee processor
+  // converting collected fees) gets no per-account row: it is not a trader, and
+  // there is no account its volume could be handed to. The candle's own volume
+  // still counts the swap — only the per-account breakdown drops it.
+  if (account && !isUnattributableVolumePot(account)) {
     rows.push(...accountSideVolumeRows(trade, account, false, blockHeight, prices, decimals, canonicalizeAssetId));
   }
   // The passive side of a peer-to-peer fill traded too, so it is booked with the
   // legs mirrored. Only OTC sets this; a pool venue has no account to credit.
   const counterparty = normalizeAccount(trade.counterparty);
-  if (counterparty && counterparty !== account) {
+  if (counterparty && counterparty !== account && !isUnattributableVolumePot(counterparty)) {
     rows.push(...accountSideVolumeRows(trade, counterparty, true, blockHeight, prices, decimals, canonicalizeAssetId));
   }
   return rows;

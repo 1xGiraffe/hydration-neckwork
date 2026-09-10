@@ -48,6 +48,16 @@ export const processor = new SubstrateBatchProcessor()
       // fill the old way, which is how it shipped once already.
       'OTC.Filled',
       'OTC.PartiallyFilled',
+      // Also not a swap: an ICE solution's route legs name the solver's pot as
+      // swapper, and the only thing naming the intent owner they belong to is the
+      // pot's own transfer legs in the same extrinsic
+      // (src/blocks/icePotSettlement.ts). `Tokens.Transfer` above covers 135 of
+      // the 150 settlements on chain; the remaining 15 move an aToken, which is
+      // reported as `Currencies.Transferred` alone — so without this the rule
+      // silently leaves a tenth of settlements booked to the pot. Measured on
+      // 2026-09-10 it is 27,560 events/day, against 21,565 for Broadcast.Swapped3
+      // and 15,732 for Tokens.Transfer, both already subscribed.
+      'Currencies.Transferred',
       // Asset-registry changes (a rename, a new registration, a location fix)
       // must reach the live block's event list: the indexer forces a registry
       // re-scan when it SEES one of these, and without the subscription the
