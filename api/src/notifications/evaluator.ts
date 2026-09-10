@@ -91,7 +91,37 @@ export const cursorKey = (kind: RowLaneKind): string => `cursor:${kind}`
 // How far behind the head a single tick may look. A longer gap (a restart, a
 // stalled evaluator, a paused api) is skipped rather than replayed: nobody
 // wants an hour of alerts at once, and the inbox is not a backlog queue.
-const MAX_WINDOW_BLOCKS = 600
+//
+// Raisable for a deliberate catch-up after a lane lost a stretch (an incident, a
+// long outage): one tick with a wide window replays it, and every match already
+// delivered is dropped by its (rule, row) identity, so a replay can only add what
+// was missed. Put it back afterwards — a permanently wide window would turn a
+// restart into an alert flood.
+const MAX_WINDOW_BLOCKS = Math.max(1, Number(process.env.NOTIFICATIONS_MAX_WINDOW_BLOCKS) || 600)
+
+/**
+ * Blocks BELOW the cursor a page-backed lane re-reads on every tick.
+ *
+ * The activity feed is a page, not a stream: a row becomes visible on it only
+ * once every source it is assembled from has it, and the lane's window is
+ * anchored on the raw head. An OTC fill is the case that proved it — it reaches
+ * its MAKER's page through the order set the maker's own reserve resolves, so at
+ * head time the row can be one tick late, and a forward-only cursor steps past it
+ * for good (measured: the maker's fills never notified while the same rule's
+ * placements did).
+ *
+ * Re-reading a short trailing stretch costs nothing — it is the same page the
+ * tick already fetched, matched against a slightly wider window — and cannot
+ * double-send: a match's identity is `(ruleId, blockHeight-eventIndex)`, which
+ * the inbox key and the recent-id set both collapse. What it buys is that a row
+ * one tick late is delivered late instead of never.
+ */
+const TRAILING_RECHECK_BLOCKS = Math.max(0, Number(process.env.NOTIFICATIONS_RECHECK_BLOCKS) || 150)
+
+/** The window a page-backed lane matches: the cursor's, widened backwards by the re-check. */
+export function recheckWindow(window: BlockWindow, blocks = TRAILING_RECHECK_BLOCKS): BlockWindow {
+  return { from: Math.max(0, window.from - blocks), to: window.to }
+}
 
 const DEFAULT_EVAL_MS = 6_000
 const SNAPSHOT_EVERY_TICKS = 5
@@ -1538,7 +1568,7 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
   if (window.to <= window.from) return null
   switch (kind) {
     case 'account-activity': {
-      const { matches, deferred } = await accountActivityMatches(rules, window, { left: SOURCE_FETCH_CAP })
+      const { matches, deferred } = await accountActivityMatches(rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
       // A deferred group has not seen this window yet, so the cursor waits for
       // it rather than stepping over its rows. Blocks the SOURCE has not revealed
       // yet wait the same way (see windowCoveredTo).
@@ -1548,7 +1578,7 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
     case 'large-trade':
     case 'large-transfer': {
       const feedType = kind === 'large-trade' ? 'trade' : 'transfer'
-      const { matches, deferred } = await largeValueMatches(kind, feedType, rules, window, { left: SOURCE_FETCH_CAP })
+      const { matches, deferred } = await largeValueMatches(kind, feedType, rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
       // A large-trade rule also watches DCA STARTS: a standing order pushing this
       // much per hour is the same event to a subscriber as one big swap. Only the
       // trade kind has schedules to watch, and a deferred fetch must not let the
@@ -1560,8 +1590,8 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
     case 'protocol-revenue':
     case 'liquidation': {
       const { matches, deferred } = kind === 'protocol-revenue'
-        ? await protocolRevenueMatches(rules, window, { left: SOURCE_FETCH_CAP })
-        : await liquidationMatches(rules, window, { left: SOURCE_FETCH_CAP })
+        ? await protocolRevenueMatches(rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
+        : await liquidationMatches(rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
       // Same source as the large-value lanes, so the same rule applies: never step
       // the cursor past the blocks that source has actually shown.
       const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
@@ -1697,7 +1727,25 @@ async function accountActivityMatches(rules: NotificationRule[], window: BlockWi
     const min = floors.every(f => f != null) ? Math.min(...floors as number[]) : null
     const filters = min == null ? {} : { min, unit: 'usd' as const }
     const rows = await fetchActivityPage(limit => fetchTargetActivity(params[0].target, group[0].accountId, limit, filters), window)
-    return evaluateAccountActivity(rows, group, window)
+    const matches = evaluateAccountActivity(rows, group, window)
+    // NOTIFICATIONS_DEBUG=1 prints what a group's page actually contained for the
+    // window it was matched against — the one thing no unit test can show, because
+    // the page is only as fresh as the moment the lane asked for it. Target and
+    // rule ids only; a rule's params are private.
+    if (process.env.NOTIFICATIONS_DEBUG === '1') {
+      const blocks = rows.map(r => r.blockHeight)
+      const inWin = rows.filter(r => r.blockHeight > window.from && r.blockHeight <= window.to)
+      console.log('[notifications:debug] account-activity group', JSON.stringify({
+        target: params[0].target.kind === 'address' ? `address:${(params[0].target as { address: string }).address.slice(0, 10)}` : params[0].target.kind,
+        window, rows: rows.length,
+        newest: blocks.length ? Math.max(...blocks) : null,
+        oldest: blocks.length ? Math.min(...blocks) : null,
+        inWindow: inWin.length,
+        inWindowTypes: inWin.map(r => `${r.type}${(r as { otcAction?: string }).otcAction ? ':' + (r as { otcAction?: string }).otcAction : ''}@${r.blockHeight}`),
+        matches: matches.length,
+      }))
+    }
+    return matches
   })
 }
 
