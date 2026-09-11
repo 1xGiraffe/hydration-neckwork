@@ -90,6 +90,12 @@ describe('activity detail routes', () => {
   it('redirects legacy /trade to /swap', () => {
     expect(p('/trade/12847348-e77')).toEqual({ name: 'legacy', to: '/swap/12847348-e77' })
   })
+  it('redirects the /tx shorthand to /extrinsic', () => {
+    const hash = '0x' + 'ab'.repeat(32)
+    expect(p(`/tx/${hash}`)).toEqual({ name: 'legacy', to: `/extrinsic/${hash}` })
+    expect(p('/tx/1234-5')).toEqual({ name: 'legacy', to: '/extrinsic/1234-5' })
+    expect(p('/tx')).toEqual({ name: 'extrinsics' })
+  })
   it('round-trips the path builder', () => {
     expect(p(paths.activityDetail('cross-chain', '13072380-e2'))).toEqual({ name: 'activity-detail', slug: 'cross-chain', id: '13072380-e2' })
   })
