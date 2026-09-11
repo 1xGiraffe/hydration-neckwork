@@ -28,7 +28,7 @@ describe('DEFAULT_TAGS', () => {
     const byId = new Map(DEFAULT_TAGS.map(t => [t.tagId, t]))
     expect(byId.get('kraken')?.addresses).toContain('12xtAYsRUrmbniiWQqJtECiBQrMn8AypQcXhnQAc6RB6XkLW')
     expect(byId.get('kraken')?.addresses).toContain('15DajYeqgb4ADkb8scVCcNaXjfM1SV9PLvqjNDkpH6kBDRLZ')
-    expect(byId.get('polkadot-treasury')?.addresses).toHaveLength(5)
+    expect(byId.get('polkadot-treasury')?.addresses).toHaveLength(6)
     expect(byId.get('polkadot-fellowship')?.addresses).toHaveLength(1)
     expect(byId.get('moonbeam-treasury')?.addresses).toHaveLength(1)
   })
