@@ -112,6 +112,11 @@ export function parseRoute(loc: string): Route {
     case 'extrinsics': return { name: 'extrinsics' }
     case 'extrinsic':
       return parts[1] ? { name: 'extrinsic', id: parts[1] } : { name: 'extrinsics' }
+    // /tx/<hash|height-index> is the common shorthand other explorers use; it
+    // canonicalizes to /extrinsic/<id>, which then resolves a hash to its
+    // height-index form on load.
+    case 'tx':
+      return parts[1] ? { name: 'legacy', to: `/extrinsic/${encodeURIComponent(parts[1])}` } : { name: 'extrinsics' }
     case 'trade': // /trade/* URLs canonicalize to /swap or /dca after load
       return parts[1] && ACTIVITY_ID_RE.test(parts[1])
         ? { name: 'legacy', to: `/swap/${parts[1]}` }
