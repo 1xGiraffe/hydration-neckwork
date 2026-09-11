@@ -1,6 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import type { OmniwatchCandleSummary, OmniwatchTrader } from '../types.ts'
 import { accountIcon, ensureSnakewatchEmojiSourceLoaded, polkadotAddress, shortAccount } from './omniwatchIdentity.ts'
+import { normalizeAddress } from './addressIdentity.ts'
 import { toClickHouseDateTime, type OHLCVInterval } from './ohlcvService.ts'
 
 const INTERVAL_BUCKET: Record<OHLCVInterval, string> = {
@@ -148,6 +149,19 @@ function parseRawAmount(value: string | number | null | undefined): string {
   return /^-?\d+$/.test(text) ? text : '0'
 }
 
+// The explorer's account notation, for the one identity preis renders: an EVM
+// account shows its H160, everything else its Polkadot SS58 (`accountRef`). The
+// stored id is an AccountId32 either way, so encoding it unconditionally would
+// give an unbound EVM trader an SS58 nobody else ever shows it under — a
+// different last-three code on the chart marker than on its own explorer pill,
+// and one the explorer's suffix search cannot find. `normalizeAddress` also
+// folds the module/sovereign ETH-prefixed truncations back to the real
+// substrate account, as the pill does.
+function displayAddress(account: string): string {
+  const n = normalizeAddress(account)
+  return n?.evmAddress ?? n?.ss58Polkadot ?? polkadotAddress(account)
+}
+
 function toTrader(row: {
   account: string
   volume_buy: string
@@ -160,7 +174,7 @@ function toTrader(row: {
   native_volume_total: string
   native_net_volume: string
 }): OmniwatchTrader {
-  const address = polkadotAddress(row.account)
+  const address = displayAddress(row.account)
   const icon = accountIcon(row.account)
   return {
     account: address,
