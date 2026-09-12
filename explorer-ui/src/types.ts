@@ -832,7 +832,7 @@ export interface XcmFeeLeg {
 }
 
 export interface ActivityRow {
-  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond' | 'intent'
+  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond' | 'intent' | 'xcswap'
   revenue?: ActivityRevenue
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean
@@ -935,7 +935,25 @@ export interface ActivityRow {
   intentDeadline?: string | null          // Place: when the order stops standing (ISO)
   intentRemainingBudget?: string | null   // DcaTrade: budget left after this trade, raw units of assetIn
   intentMigratedFrom?: number | null      // Place: the DCA schedule this intent replaced
-  intentForward?: string | null           // fills: the contract the settlement was forwarded to
+  intentForward?: string | null
+  // A cross-chain swap out through NEAR Intents. `assetIn`/`amountIn` are the
+  // Hydration side — all the chain records. Everything below is resolved from the
+  // 1Click quote by the deposit address and is absent until it is; the destination
+  // is not a registry asset, so it travels as its own fields, never as `assetOut`.
+  xcswapDepositAddress?: string
+  xcswapSequence?: number
+  xcswapEthOut?: string
+  xcswapMaxRelayFee?: string
+  xcswapStatus?: 'KNOWN_DEPOSIT_TX' | 'PENDING_DEPOSIT' | 'INCOMPLETE_DEPOSIT' | 'PROCESSING' | 'SUCCESS' | 'REFUNDED' | 'FAILED' | null
+  xcswapDestAsset?: string | null
+  xcswapDestSymbol?: string | null
+  xcswapDestChain?: string | null
+  xcswapDestDecimals?: number | null
+  xcswapDestAmount?: string | null
+  xcswapDestAmountUsd?: number | null
+  xcswapRecipient?: string | null
+  xcswapDestTxHash?: string | null
+  xcswapRefundReason?: string | null           // fills: the contract the settlement was forwarded to
 }
 
 export interface VoteRow {

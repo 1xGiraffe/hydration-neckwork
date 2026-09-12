@@ -139,6 +139,15 @@ export function activitySlug(r: ActivityRow): ActivitySlug {
 // The coordinates a row occupies in its block — the id every activity detail page is
 // addressed by. activityId() prefers a row's HOME over these for the families whose
 // rows are one step of a longer thing.
+// A destination-chain address (a NEAR account name, a Zcash transparent address).
+// Not an SS58 or an H160, so none of the account plumbing applies: a NEAR name is
+// already human-readable and is shown whole, anything else is elided in the middle
+// the way AddrPill elides a hash.
+export function shortForeignAddress(address: string): string {
+  if (address.length <= 20) return address
+  return `${address.slice(0, 8)}…${address.slice(-4)}`
+}
+
 function coordinateId(r: ActivityRow): string | null {
   if (r.eventIndex != null) return `${r.blockHeight}-e${r.eventIndex}`
   if (r.extrinsicIndex != null) return `${r.blockHeight}-${r.extrinsicIndex}`
@@ -300,6 +309,23 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
   }
   if ((r.type === 'trade' || r.type === 'dca') && r.assetIn && r.assetOut) {
     return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> → <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span>{r.dcaStatus === 'failed' && <span className="muted">Failed attempt</span>}</span>
+  }
+  if (r.type === 'xcswap' && r.assetIn) {
+    // The destination is on ANOTHER chain, so it has no asset chip to show: it is
+    // named by its symbol and the chain it settled on. Until the off-chain half is
+    // resolved the row says where the value went — an Ethereum deposit address —
+    // and stops there, rather than implying a delivery that may not have happened.
+    const sold = <AssetAmount asset={r.assetIn} raw={r.amountIn} />
+    const dest = r.xcswapDestSymbol
+      ? <span className="trade-leg">
+        <span className="mono">{r.xcswapDestAmount && r.xcswapDestDecimals != null ? `${F.amount(r.xcswapDestAmount, r.xcswapDestDecimals)} ` : ''}{r.xcswapDestSymbol}</span>
+        {r.xcswapDestChain && <span className="xc-chain">{r.xcswapDestChain}</span>}
+      </span>
+      : <span className="muted">bridging out</span>
+    return <span className="asset-flow">{sold} → {dest}
+      {!headed && r.xcswapRecipient && <span className="muted mono">{shortForeignAddress(r.xcswapRecipient)}</span>}
+      {!headed && r.xcswapStatus === 'REFUNDED' && <span className="muted">refunded</span>}
+    </span>
   }
   if (r.type === 'intent' && r.assetIn && r.assetOut) {
     // A fill — or a DCA intent's trade — moved value and reads like a swap. A
