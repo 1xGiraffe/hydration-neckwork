@@ -11,11 +11,13 @@ import {
   moneyMarketActivity, moneyMarketPositions,
 } from '../services/accountsDefi.ts'
 import { dcaSchedules } from '../services/dcaData.ts'
+import { intentOrders } from '../services/intentData.ts'
 import { votesForVoter } from '../services/governance.ts'
 import { liquidityPositions } from '../services/lpPositions.ts'
 import { LIQUIDITY_ACTIONS, type LiquidityAction } from '../services/uniswapV3Liquidity.ts'
 import { UNSEEN_IS_EMPTY, inWindow, requireParsedAddress, windowKey, zAccountFeedQuery, zAccountParams } from './accountsShared.ts'
 import { PRE_ROUTER_NOTE, zSchedule } from './dcaShared.ts'
+import { INTENT_NOTE, zIntent, zIntentKind } from './intentsShared.ts'
 import { zOtcEvent } from './otcShared.ts'
 import { zStakingEvent } from './stakingShared.ts'
 import { zFillFeeLeg } from './tradesShared.ts'
@@ -219,6 +221,32 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
       hasMoreSchedules: schedules.hasMore,
       events: feedPage(events.items, events.hasMore, last => ({ b: last.blockHeight, i: last.eventIndex })),
     }
+  })
+
+  app.get('/v1/accounts/:address/intents', {
+    schema: {
+      tags: ['accounts'],
+      summary: 'The account\'s ICE intents (limit orders and DCA intents)',
+      description: [
+        INTENT_NOTE,
+        'A cursor feed of the account\'s own submissions, read from the owner-first projection, newest first. These are the orders AS SUBMITTED — fold one order\'s status and fill totals from /v1/intents/{id}, and walk its life through /v1/intents/{id}/events.',
+        'A dca intent placed by the pallet-DCA migration also appears here; its pre-migration history stays under /v1/dca/schedules.',
+        UNSEEN_IS_EMPTY,
+      ].join('\n\n'),
+      params: zAccountParams,
+      querystring: zAccountFeedQuery.extend({ kind: zIntentKind.optional() }),
+      response: { 200: zFeedPage(zIntent), 400: zError },
+    },
+  }, async request => {
+    const parsed = requireParsedAddress(request.params.address)
+    const { limit, order, kind, fromBlock, toBlock, fromTime, toTime } = request.query
+    const cursor = requirePositionCursor(request.query.cursor)
+    const head = await liveHeadTag(opts.client)
+    const key = `data:accounts:intents:${parsed.accountId}:${order}:${kind ?? ''}:${windowKey(request.query)}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
+    const { items, hasMore } = await cached(key, 5_000, () => intentOrders(opts.client, {
+      limit, order, cursor, ownerAccountId: parsed.accountId, kind, fromBlock, toBlock, fromTime, toTime,
+    }))
+    return feedPage(items, hasMore, last => ({ b: last.createdAtBlock, i: last.createdAtEventIndex }))
   })
 
   app.get('/v1/accounts/:address/otc', {

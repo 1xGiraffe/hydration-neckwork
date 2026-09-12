@@ -23,6 +23,7 @@ import { assetsRoutes } from './routes/assets.ts'
 import { poolsRoutes } from './routes/pools.ts'
 import { tradesRoutes } from './routes/trades.ts'
 import { dcaRoutes } from './routes/dca.ts'
+import { intentsRoutes } from './routes/intents.ts'
 import { otcRoutes } from './routes/otc.ts'
 import { governanceRoutes } from './routes/governance.ts'
 import { stakingRoutes } from './routes/staking.ts'
@@ -43,6 +44,7 @@ export const DATA_ROUTE_PLUGINS: Array<FastifyPluginAsync<{ client: ClickHouseCl
   poolsRoutes,
   tradesRoutes,
   dcaRoutes,
+  intentsRoutes,
   otcRoutes,
   governanceRoutes,
   stakingRoutes,
