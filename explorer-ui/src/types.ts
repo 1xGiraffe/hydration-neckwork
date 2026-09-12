@@ -514,7 +514,14 @@ export interface MmReserve {
 // `asset`/`amount` are token0, `assetB`/`amountB` token1; it links to its pool page.
 export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string; assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string }
 export interface ActiveDca {
-  id: number; assetIn: AssetRef; assetOut: AssetRef; direction: string
+  // A schedule id, or a DCA intent's short "#n" handle. The two id spaces
+  // overlap, so this is a display handle — `intentId` decides which order a row
+  // is and where it links.
+  id: number
+  // Set exactly when the order is an ICE DCA intent rather than a pallet-DCA
+  // schedule: the u128 id as a decimal string, and its page (`/intent/<id>`).
+  intentId?: string
+  assetIn: AssetRef; assetOut: AssetRef; direction: string
   amountPerTrade: string; totalAmount: string; filledAmount: string; remainingAmount: string | null
   executionsDone: number; period: number; nextExecutionBlock: number | null
   // Seconds actually observed between this order's trades. `period` is a block
@@ -534,8 +541,43 @@ export interface ActiveDca {
   who?: AccountRef
 }
 
-// The asset page's DCAs tab: ongoing schedules buying the asset vs selling it.
+// The asset page's DCAs tab: ongoing orders buying the asset vs selling it.
 export interface AssetDcas { buys: ActiveDca[]; sells: ActiveDca[] }
+
+// A resting limit order — an unfilled swap intent. Its `assetIn` sits under a
+// named reserve until a solution fills it, so it is money committed at a price.
+export interface OpenLimitOrder {
+  intentId: string
+  // Low 64 bits of the u128 id — the short "#n" handle, display only.
+  seq: number
+  who: AccountRef
+  assetIn: AssetRef; assetOut: AssetRef
+  // As placed, what partial fills have taken, and what is still resting.
+  amountIn: string; amountOut: string
+  filledIn: string; filledOut: string
+  remainingIn: string; remainingOut: string
+  fills: number
+  // Whether the order accepts partial fills; a non-partial one is all-or-nothing.
+  partial: boolean
+  // assetOut units per one assetIn unit, on the amounts as placed.
+  limitPrice: number | null
+  // What is still resting, at the sold asset's current price.
+  valueUsd: number | null
+  placedBlock: number; placedIndex: number | null; timestamp: string
+  deadline: string | null
+}
+
+// One side of an asset's book. `price` restates the order from this asset's point
+// of view — counter-asset units per one unit of it — and `priceUsd` is that at the
+// counter asset's current price, which is what lets orders quoted in different
+// assets share one ladder.
+export interface AssetBookEntry extends OpenLimitOrder {
+  counter: AssetRef
+  price: number | null; priceUsd: number | null
+  size: string; sizeUsd: number | null
+  total: string
+}
+export interface AssetLimitOrderBook { bids: AssetBookEntry[]; asks: AssetBookEntry[] }
 export interface MoneyMarketPosition {
   marketKey: string
   market: string                 // display label, e.g. 'Money Market' or 'GIGAHDX'
@@ -602,6 +644,7 @@ export interface AddressDetail {
   moneyMarket: MoneyMarketPosition[]
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
+  openLimitOrders?: OpenLimitOrder[]
   proxy?: AccountProxyInfo | null
   multisig?: MultisigInfo | null
   multisigMemberships?: MultisigMembership[]
@@ -967,8 +1010,11 @@ export interface AssetLiquidations {
 export interface AssetDetail {
   asset: AssetListItem
   holderCount: number
-  // Ongoing DCA schedules buying or selling this asset (the DCAs tab badge).
+  // Ongoing DCA orders — schedules and DCA intents — buying or selling this
+  // asset (the DCAs tab badge).
   dcaCount: number
+  // Resting limit orders on either side of this asset (the Limit orders badge).
+  limitOrderCount?: number
   totalUsd: number
   priceSeries: number[]
   priceDates?: string[]
@@ -1469,6 +1515,7 @@ export interface TagDetail {
   moneyMarket: MoneyMarketPosition[]
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
+  openLimitOrders?: OpenLimitOrder[]
   portfolioSeries: number[]
   portfolioSeriesExHdx?: number[]
   portfolioDates?: string[]
