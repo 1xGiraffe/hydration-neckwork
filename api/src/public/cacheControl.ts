@@ -59,6 +59,7 @@ export const PUBLIC_CACHE_CONTROL: Array<[RegExp, number]> = [
   [/^\/v1\/dca\/schedules(\/count|\/[^/]+\/executions)?$/, 3],
   [/^\/v1\/intents(\/count)?$/, 3],
   [/^\/v1\/prices\/pair$/, 5],
+  [/^\/v1\/prices\/cross-chain-pair$/, 5],
   [/^\/v1\/pools\/[^/]+\/volumes$/, 60],
   // A concentrated-liquidity pool's chart data. Both move only when the pool trades
   // or a position changes, and the UI redraws them on a switch between periods, so a
