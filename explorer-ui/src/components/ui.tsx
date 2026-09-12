@@ -1887,6 +1887,7 @@ export function normalizeActivityType(value: string): string {
   if (value === 'dca') return 'trade'   // dca is surfaced under the Trade feed (server does the same)
   if (value === 'otc') return 'trade'   // otc is surfaced under the Trade feed (server does the same)
   if (value === 'intent') return 'trade'   // intents too: a limit order is a trade the chain has yet to make
+  if (value === 'xcswap') return 'trade'   // a cross-chain swap is a swap whose other half lands elsewhere
   return ACTIVITY_CHIP_VALUES.has(value) ? value : 'all'
 }
 
