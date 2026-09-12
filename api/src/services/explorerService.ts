@@ -3845,6 +3845,7 @@ export interface AddressDetail {
   moneyMarket: MoneyMarketPosition[]          // one entry per isolated market the account has a position in
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
+  openLimitOrders?: OpenLimitOrder[]
   proxy: AccountProxyDisplay | null
   multisig: MultisigDisplay | null
   multisigMemberships: MultisigMembershipDisplay[]
@@ -4100,12 +4101,13 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // LP positions stay even in summary — they count toward the displayed value, so
     // dropping them would make the hover's value disagree with the detail page. Only
     // DCA/proxy/multisig (below), which the card never shows, are skipped.
-    const [bareLp, farmLp, xykLp, v3Lp, activeDcas] = await Promise.all([
+    const [bareLp, farmLp, xykLp, v3Lp, activeDcas, openLimitOrders] = await Promise.all([
       getOmnipoolPositions([...related]),
       getFarmingPositions([...related]),
       getXykPositions([...related], balances),
       getUniswapV3Positions([...related]),
       summary ? Promise.resolve([]) : getActiveDcas([...related]),
+      summary ? Promise.resolve([]) : getOpenLimitOrders([...related]),
     ])
     // Proxy & multisig relations (in-memory indexes refreshed by the
     // proxyMultisigService; pending ops come from indexed events).
@@ -4168,6 +4170,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
       moneyMarket,
       liquidityPositions: [...lpPositions, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)),
       activeDcas,
+      openLimitOrders,
       proxy,
       multisig,
       multisigMemberships,
@@ -6707,7 +6710,16 @@ export async function loadXykPrincipalHistory(accounts: string[], candidateAsset
 // amount, totalAmount, period); progress is summed from DCA.TradeExecuted and the
 // next slot from DCA.ExecutionPlanned. totalAmount "0" = open-ended (no remaining).
 export interface ActiveDca {
-  id: number; assetIn: AssetRef; assetOut: AssetRef; direction: string
+  // A classic schedule's id, or — for a DCA intent — the low 64 bits of its u128
+  // id, the short "#n" handle. The two id spaces overlap (schedule 76 and intent
+  // seq 76 both exist), so `id` is a display handle here and never the identity:
+  // `intentId` decides which order this is and where it links.
+  id: number
+  // Set exactly when the order is an ICE DCA intent (runtime 443's DCA) rather
+  // than a pallet-DCA schedule: the u128 id as a decimal string, which is both
+  // its identity and its page (`/intent/<id>` instead of `/dca/<id>`).
+  intentId?: string
+  assetIn: AssetRef; assetOut: AssetRef; direction: string
   amountPerTrade: string; totalAmount: string; filledAmount: string; remainingAmount: string | null
   executionsDone: number; period: number; nextExecutionBlock: number | null
   // Seconds this order actually waits between trades, the median of its own most
@@ -6839,7 +6851,15 @@ async function spendableBalances(pairs: { account: string; assetId: number }[]):
 // median (not the mean) absorbs the retries and late blocks that would otherwise
 // drag a handful of gaps around, and DISTINCT + `gap > 0` absorb a replayed range
 // inserting an execution twice.
-function dcaCadenceQuery(where: string, grouped: boolean): string {
+//
+// `source` names where the executions live: a pallet-DCA schedule's are
+// `dca_events` rows keyed by schedule id, a DCA intent's are `intent_events` rows
+// keyed by intent id. The shape is identical, so both kinds of order are measured
+// by one query rather than two that could drift apart.
+interface DcaCadenceSource { table: string; idExpr: string; eventName: string }
+const DCA_SCHEDULE_CADENCE: DcaCadenceSource = { table: 'price_data.dca_events', idExpr: 'id', eventName: 'DCA.TradeExecuted' }
+const DCA_INTENT_CADENCE: DcaCadenceSource = { table: 'price_data.intent_events', idExpr: 'toString(intent_id)', eventName: 'Intent.DcaTradeExecuted' }
+function dcaCadenceQuery(where: string, grouped: boolean, source: DcaCadenceSource = DCA_SCHEDULE_CADENCE): string {
   const idCol = grouped ? 'id, ' : ''
   const groupBy = grouped ? 'GROUP BY id' : ''
   return `
@@ -6847,9 +6867,9 @@ function dcaCadenceQuery(where: string, grouped: boolean): string {
     FROM (
       SELECT ${idCol}arrayJoin(arrayDifference(arraySort(groupArray(t)))) AS gap
       FROM (
-        SELECT DISTINCT ${idCol}toUInt32(block_timestamp) AS t
-        FROM price_data.dca_events
-        WHERE event_name = 'DCA.TradeExecuted' AND ${where}
+        SELECT DISTINCT ${grouped ? `${source.idExpr} AS id, ` : ''}toUInt32(block_timestamp) AS t
+        FROM ${source.table}
+        WHERE event_name = '${source.eventName}' AND ${where}
         ORDER BY t DESC
         LIMIT 21${grouped ? ' BY id' : ''}
       )
@@ -6878,11 +6898,13 @@ async function getDcaScheduleLinks(ids: Array<string | number>): Promise<Map<str
   return out
 }
 
-// One live schedule as dca_schedules stores it — the shape both active-order
-// surfaces (an account's own orders, an asset's ongoing buys/sells) select
-// before handing to enrichActiveDcas.
+// One live order as its source stores it — the shape every active-order surface
+// (an account's own orders, an asset's ongoing buys/sells) selects before handing
+// to enrichActiveDcas. A pallet-DCA schedule and a runtime-443 DCA intent are the
+// same product, so they are normalised to one row here and stay merged from then
+// on; `intent_id` empty means the schedule.
 interface ActiveDcaScheduleRow {
-  id: number; who: string; sblock: number; sidx: number | null
+  id: number; intent_id?: string; who: string; sblock: number; sidx: number | null
   asset_in: number; asset_out: number; direction: string
   amt_per: string; total: string; period: number
 }
@@ -6892,34 +6914,70 @@ interface ActiveDcaScheduleRow {
 // with its remainder refunded (MigrationCancelled). Either one leaves the live lists.
 const DCA_ENDED_EVENTS_SQL = "'DCA.Completed','DCA.Terminated','DCA.Migrated','DCA.MigrationCancelled'"
 
+// The events after which an INTENT no longer rests: a limit order that fully
+// resolved, either kind cancelled or expired, and the DCA trade that spent the
+// last of the budget. A PARTIAL resolution is deliberately absent — pallet_ice
+// leaves the remainder resting and keeps filling it (id …96250533888086 took
+// eight partials before its owner cancelled), so treating one as terminal would
+// hide a live order.
+const INTENT_ENDED_EVENTS_SQL = "'Intent.IntentResolved','Intent.IntentCanceled','Intent.IntentExpired','Intent.DcaCompleted'"
+const INTENT_RESTING_SQL = `intent_id NOT IN (SELECT intent_id FROM price_data.intent_events WHERE event_name IN (${INTENT_ENDED_EVENTS_SQL}))`
+
+// A DCA intent as an ActiveDcaScheduleRow. The pallet's DCA intent is fixed-INPUT
+// (buy-side DCA was removed in runtime 440), so its direction is always Sell and
+// `amount_in` is the per-trade amount. `budget` is optional on chain — an empty
+// one is the rolling re-reserve, which is exactly the open-ended order a schedule
+// spells `total_amount = 0`.
+const ACTIVE_DCA_INTENT_COLUMNS = `
+  toUInt64(seq) AS id, toString(intent_id) AS intent_id, owner AS who,
+  block_height AS sblock, extrinsic_index AS sidx,
+  asset_in, asset_out, 'Sell' AS direction, amount_in AS amt_per,
+  if(budget = '', '0', budget) AS total, period`
+
 async function getActiveDcas(accounts: string[]): Promise<ActiveDca[]> {
   const list = sqlAccountList(accounts)
   if (list === "''") return []
   return cached(`explorer:dca-active:${[...accounts].sort().join(',')}`, 15000, async () => {
-    const schedRes = await client.query({
-      query: `SELECT id, who, block_height AS sblock, extrinsic_index AS sidx,
-                asset_in, asset_out, direction, amount_per AS amt_per,
-                total_amount AS total, period
-              FROM price_data.dca_schedules
-              WHERE who IN (${list})
-                AND id NOT IN (
-                  SELECT id FROM price_data.dca_events WHERE event_name IN (${DCA_ENDED_EVENTS_SQL})
-                )
-              ORDER BY block_height DESC`,
-      format: 'JSONEachRow',
-    })
-    return enrichActiveDcas(await schedRes.json<ActiveDcaScheduleRow>())
+    const [schedRes, intentRes] = await Promise.all([
+      client.query({
+        query: `SELECT id, who, block_height AS sblock, extrinsic_index AS sidx,
+                  asset_in, asset_out, direction, amount_per AS amt_per,
+                  total_amount AS total, period
+                FROM price_data.dca_schedules
+                WHERE who IN (${list})
+                  AND id NOT IN (
+                    SELECT id FROM price_data.dca_events WHERE event_name IN (${DCA_ENDED_EVENTS_SQL})
+                  )
+                ORDER BY block_height DESC`,
+        format: 'JSONEachRow',
+      }),
+      // intent_orders is ordered by intent_id, so an owner predicate reads the
+      // whole table — which is the point: one row per intent ever submitted, in
+      // the hundreds, and a projection keyed by owner would be a read model for a
+      // scan that costs less than planning it.
+      client.query({
+        query: `SELECT ${ACTIVE_DCA_INTENT_COLUMNS}
+                FROM (SELECT * FROM price_data.intent_orders FINAL WHERE kind = 'dca' AND owner IN (${list}))
+                WHERE ${INTENT_RESTING_SQL}
+                ORDER BY block_height DESC`,
+        format: 'JSONEachRow',
+      }),
+    ])
+    return enrichActiveDcas([...await schedRes.json<ActiveDcaScheduleRow>(), ...await intentRes.json<ActiveDcaScheduleRow>()])
   })
 }
 
-// Everything a live schedule row doesn't carry itself: executions done and
-// filled amount (replay-deduplicated), the next planned block, the measured
-// cadence, current-price valuations, and — for open-ended orders — the owner's
-// spendable balance of the sold asset.
-async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveDca[]> {
-  if (!scheds.length) return []
-  const prices = await ensurePrices()
+// What an order has done so far, keyed by the order's own identity (a schedule id
+// as a string, an intent's u128 decimal string). The two sources state the same
+// four facts in different tables, so each loads its own and the enricher below
+// stays one implementation.
+interface DcaOrderProgress { executions: number; filled: string; nextBlock: number | null; periodSeconds: number | null }
+const dcaOrderKey = (s: ActiveDcaScheduleRow): string => s.intent_id ? s.intent_id : String(s.id)
+
+async function dcaScheduleProgress(scheds: ActiveDcaScheduleRow[]): Promise<Map<string, DcaOrderProgress>> {
+  const out = new Map<string, DcaOrderProgress>()
   const ids = scheds.map(s => s.id).join(',')
+  if (!ids) return out
   const [exRes, planRes, cadenceRes] = await Promise.all([
     // Counting and summing rows, so the replacements have to be resolved first —
     // a re-inserted raw range would otherwise inflate both the executions done and
@@ -6928,20 +6986,73 @@ async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveD
     client.query({ query: `SELECT id, max(planned_block) AS nb FROM price_data.dca_events WHERE event_name='DCA.ExecutionPlanned' AND id IN (${ids}) GROUP BY id`, format: 'JSONEachRow' }),
     client.query({ query: dcaCadenceQuery(`id IN (${ids})`, true), format: 'JSONEachRow' }),
   ])
-  const exMap = new Map<number, { n: number; filled: string }>()
-  for (const e of await exRes.json<{ id: number; n: number; filled: string }>()) exMap.set(e.id, { n: e.n, filled: e.filled })
-  const planMap = new Map<number, number>()
-  for (const p of await planRes.json<{ id: number; nb: number }>()) planMap.set(p.id, p.nb)
-  const cadenceMap = new Map<number, number>()
-  for (const c of await cadenceRes.json<{ id: number; sec: number }>()) {
-    if (Number(c.sec) > 0) cadenceMap.set(c.id, Number(c.sec))
+  const at = (id: string): DcaOrderProgress => out.get(id) ?? out.set(id, { executions: 0, filled: '0', nextBlock: null, periodSeconds: null }).get(id)!
+  for (const e of await exRes.json<{ id: number; n: number; filled: string }>()) Object.assign(at(String(e.id)), { executions: Number(e.n), filled: e.filled })
+  for (const p of await planRes.json<{ id: number; nb: number }>()) at(String(p.id)).nextBlock = Number(p.nb)
+  for (const c of await cadenceRes.json<{ id: number; sec: number }>()) if (Number(c.sec) > 0) at(String(c.id)).periodSeconds = Number(c.sec)
+  return out
+}
+
+// A DCA intent's progress. Two differences from a schedule's, both from the
+// pallet rather than from us:
+//  - the executions are `Intent.DcaTradeExecuted` rows in intent_events, and
+//  - there is no ExecutionPlanned event, so the next slot is DERIVED as the last
+//    trade plus the order's period. pallet_intent schedules the next trade at
+//    `executed_block + period`; the solver lands it a block or so later (measured
+//    on intent #76: 301 of 392 gaps are exactly period + 1), so this is the block
+//    the order becomes eligible, which is what the countdown is reading anyway.
+//    An order that has never traded has no anchor and keeps a null.
+async function dcaIntentProgress(scheds: ActiveDcaScheduleRow[]): Promise<Map<string, DcaOrderProgress>> {
+  const out = new Map<string, DcaOrderProgress>()
+  const intents = scheds.filter(s => s.intent_id)
+  if (!intents.length) return out
+  const idList = intents.map(s => `toUInt128('${s.intent_id}')`).join(',')
+  const periodById = new Map(intents.map(s => [s.intent_id!, Number(s.period)]))
+  const [exRes, cadenceRes] = await Promise.all([
+    // FINAL for the same reason the schedule twin uses it: intent_events replaces
+    // on (block, event index), and a replayed range would otherwise be counted twice.
+    client.query({
+      query: `SELECT id, n, filled, last_block FROM (
+                SELECT toString(intent_id) AS id, count() AS n,
+                       toString(sum(toUInt256OrZero(amount_in))) AS filled, max(block_height) AS last_block
+                FROM price_data.intent_events FINAL
+                WHERE event_name = 'Intent.DcaTradeExecuted' AND intent_id IN (${idList})
+                GROUP BY intent_id)`,
+      format: 'JSONEachRow',
+    }),
+    client.query({ query: dcaCadenceQuery(`intent_id IN (${idList})`, true, DCA_INTENT_CADENCE), format: 'JSONEachRow' }),
+  ])
+  const at = (id: string): DcaOrderProgress => out.get(id) ?? out.set(id, { executions: 0, filled: '0', nextBlock: null, periodSeconds: null }).get(id)!
+  for (const e of await exRes.json<{ id: string; n: number; filled: string; last_block: number }>()) {
+    const period = periodById.get(e.id) ?? 0
+    Object.assign(at(e.id), {
+      executions: Number(e.n), filled: e.filled,
+      nextBlock: period > 0 && Number(e.last_block) > 0 ? Number(e.last_block) + period : null,
+    })
   }
+  for (const c of await cadenceRes.json<{ id: string; sec: number }>()) if (Number(c.sec) > 0) at(String(c.id)).periodSeconds = Number(c.sec)
+  return out
+}
+
+// Everything a live order row doesn't carry itself: executions done and filled
+// amount (replay-deduplicated), the next execution block, the measured cadence,
+// current-price valuations, and — for open-ended orders — the owner's spendable
+// balance of the sold asset. Schedules and DCA intents arrive mixed and leave
+// mixed; only the progress lookup differs, and each source loads its own.
+async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveDca[]> {
+  if (!scheds.length) return []
+  const [prices, scheduleProgress, intentProgress] = await Promise.all([
+    ensurePrices(),
+    dcaScheduleProgress(scheds.filter(s => !s.intent_id)),
+    dcaIntentProgress(scheds),
+  ])
   // Only open-ended orders need it: a budgeted one already knows where it ends.
   const funds = await spendableBalances(
     scheds.filter(x => x.total === '0').map(x => ({ account: x.who, assetId: x.asset_in })),
   )
   return scheds.map(s => {
-    const filled = exMap.get(s.id)?.filled ?? '0'
+    const progress = (s.intent_id ? intentProgress : scheduleProgress).get(dcaOrderKey(s))
+    const filled = progress?.filled ?? '0'
     let remaining: string | null = null
     try { if (s.total !== '0') remaining = (BigInt(s.total) - BigInt(filled)).toString() } catch { /* keep null */ }
     const aIn = asset(s.asset_in), aOut = asset(s.asset_out)
@@ -6950,10 +7061,11 @@ async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveD
     const perAsset = s.direction === 'Buy' ? aOut : aIn
     const fundingBalance = s.total === '0' ? funds.get(`${s.who}|${s.asset_in}`) ?? null : null
     return {
-      id: s.id, assetIn: aIn, assetOut: aOut, direction: s.direction,
+      id: Number(s.id), ...(s.intent_id ? { intentId: s.intent_id } : {}),
+      assetIn: aIn, assetOut: aOut, direction: s.direction,
       amountPerTrade: s.amt_per, totalAmount: s.total, filledAmount: filled, remainingAmount: remaining,
-      executionsDone: exMap.get(s.id)?.n ?? 0, period: s.period, nextExecutionBlock: planMap.get(s.id) ?? null,
-      periodSeconds: cadenceMap.get(s.id) ?? null,
+      executionsDone: progress?.executions ?? 0, period: s.period, nextExecutionBlock: progress?.nextBlock ?? null,
+      periodSeconds: progress?.periodSeconds ?? null,
       valueUsd: usdValue(prices, perAsset.assetId, s.amt_per, perAsset.decimals),
       // The budget is always denominated in the sold asset, whichever leg the
       // per-trade amount fixes.
@@ -6984,19 +7096,29 @@ export function compareDcasByBudgetUsdDesc(x: ActiveDca, y: ActiveDca): number {
 export interface AssetDcas { buys: ActiveDca[]; sells: ActiveDca[] }
 export async function getAssetDcas(assetId: number): Promise<AssetDcas> {
   return cached(`explorer:dca-asset:${assetId}`, 15000, async () => {
-    const schedRes = await client.query({
-      query: `SELECT id, who, block_height AS sblock, extrinsic_index AS sidx,
-                asset_in, asset_out, direction, amount_per AS amt_per,
-                total_amount AS total, period
-              FROM price_data.dca_schedules FINAL
-              WHERE (asset_in = {id:UInt32} OR asset_out = {id:UInt32})
-                AND id NOT IN (
-                  SELECT id FROM price_data.dca_events WHERE event_name IN (${DCA_ENDED_EVENTS_SQL})
-                )
-              ORDER BY block_height DESC`,
-      query_params: { id: assetId }, format: 'JSONEachRow',
-    })
-    const rows = await enrichActiveDcas(await schedRes.json<ActiveDcaScheduleRow>())
+    const [schedRes, intentRes] = await Promise.all([
+      client.query({
+        query: `SELECT id, who, block_height AS sblock, extrinsic_index AS sidx,
+                  asset_in, asset_out, direction, amount_per AS amt_per,
+                  total_amount AS total, period
+                FROM price_data.dca_schedules FINAL
+                WHERE (asset_in = {id:UInt32} OR asset_out = {id:UInt32})
+                  AND id NOT IN (
+                    SELECT id FROM price_data.dca_events WHERE event_name IN (${DCA_ENDED_EVENTS_SQL})
+                  )
+                ORDER BY block_height DESC`,
+        query_params: { id: assetId }, format: 'JSONEachRow',
+      }),
+      client.query({
+        query: `SELECT ${ACTIVE_DCA_INTENT_COLUMNS}
+                FROM (SELECT * FROM price_data.intent_orders FINAL
+                      WHERE kind = 'dca' AND (asset_in = {id:UInt32} OR asset_out = {id:UInt32}))
+                WHERE ${INTENT_RESTING_SQL}
+                ORDER BY block_height DESC`,
+        query_params: { id: assetId }, format: 'JSONEachRow',
+      }),
+    ])
+    const rows = await enrichActiveDcas([...await schedRes.json<ActiveDcaScheduleRow>(), ...await intentRes.json<ActiveDcaScheduleRow>()])
     return {
       buys: rows.filter(r => r.assetOut.assetId === assetId).sort(compareDcasByBudgetUsdDesc),
       sells: rows.filter(r => r.assetIn.assetId === assetId).sort(compareDcasByBudgetUsdDesc),
@@ -7005,15 +7127,231 @@ export async function getAssetDcas(assetId: number): Promise<AssetDcas> {
 }
 
 // The DCAs tab badge on the asset page. countDistinct resolves the same
-// replacement duplicates FINAL does above, so the badge equals buys + sells.
+// replacement duplicates FINAL does above, so the badge equals buys + sells —
+// schedules and DCA intents alike, since the tab lists both.
 async function countAssetDcas(assetId: number): Promise<number> {
+  const [schedRes, intentRes] = await Promise.all([
+    client.query({
+      query: `SELECT countDistinct(id) AS n
+              FROM price_data.dca_schedules
+              WHERE (asset_in = {id:UInt32} OR asset_out = {id:UInt32})
+                AND id NOT IN (
+                  SELECT id FROM price_data.dca_events WHERE event_name IN (${DCA_ENDED_EVENTS_SQL})
+                )`,
+      query_params: { id: assetId }, format: 'JSONEachRow',
+    }),
+    client.query({
+      query: `SELECT countDistinct(intent_id) AS n
+              FROM price_data.intent_orders
+              WHERE kind = 'dca' AND (asset_in = {id:UInt32} OR asset_out = {id:UInt32})
+                AND ${INTENT_RESTING_SQL}`,
+      query_params: { id: assetId }, format: 'JSONEachRow',
+    }),
+  ])
+  const count = async (r: typeof schedRes): Promise<number> => Number((await r.json<{ n: string | number }>())[0]?.n ?? 0)
+  return await count(schedRes) + await count(intentRes)
+}
+
+// ---------------------------------------------------------------------------
+// Open limit orders (resting swap intents)
+//
+// The other half of what runtime 443 made a position. A swap intent is the
+// product's limit order: the owner's `asset_in` sits under a named reserve until
+// a solution fills it, so an unfilled one is money committed at a price, the same
+// way a DCA order is money committed to a schedule. It gets its own model rather
+// than a row in the DCA table — it has no period, no per-trade amount and no
+// budget, and wearing those columns empty would say less than nothing.
+//
+// A partial resolution leaves the remainder resting (see INTENT_ENDED_EVENTS_SQL),
+// so the live size is the placed amount minus what the partials have taken, in
+// integer arithmetic on both legs.
+// ---------------------------------------------------------------------------
+export interface OpenLimitOrder {
+  intentId: string
+  // The low 64 bits of the u128 id — the short "#n" handle. A display handle only
+  // (exact below 2^53); `intentId` is the identity. See intentSeqOf.
+  seq: number
+  who: AccountRef
+  assetIn: AssetRef; assetOut: AssetRef
+  // The order as placed, then what partial resolutions have taken off it, then
+  // what is still resting. Raw integer units throughout.
+  amountIn: string; amountOut: string
+  filledIn: string; filledOut: string
+  remainingIn: string; remainingOut: string
+  fills: number
+  // Whether the order accepts partial fills at all (`partial: Yes` on chain). A
+  // non-partial order is all-or-nothing, so its remaining size is always its whole size.
+  partial: boolean
+  // The price the order holds out for: assetOut units per one assetIn unit, on
+  // the amounts as placed (partials fill AT that price, so the ratio is the
+  // order's identity and does not drift as it fills).
+  limitPrice: number | null
+  // What is still resting, in dollars, at the sold asset's CURRENT price — the
+  // same basis every other open position on the page uses.
+  valueUsd: number | null
+  placedBlock: number; placedIndex: number | null; timestamp: string
+  // Present only when the placement carried one; the pallet's deadline is
+  // optional and no order on chain has used it yet.
+  deadline: string | null
+}
+
+// One `base` unit costs this many `quote` units, from the two raw legs of an
+// order. Display-only (a ratio of two scaled floats), so it never feeds an amount.
+export function limitPriceOf(baseRaw: string, baseDecimals: number, quoteRaw: string, quoteDecimals: number): number | null {
+  const base = Number(baseRaw) / 10 ** baseDecimals
+  const quote = Number(quoteRaw) / 10 ** quoteDecimals
+  if (!Number.isFinite(base) || !Number.isFinite(quote) || base <= 0) return null
+  return quote / base
+}
+// Integer subtraction that refuses to go negative or to guess: a leg whose parts
+// aren't both plain integers keeps the placed amount rather than inventing one.
+function restingLeg(placed: string, filled: string): string {
+  if (!/^\d+$/.test(placed)) return placed
+  if (!/^\d+$/.test(filled)) return placed
+  const left = BigInt(placed) - BigInt(filled)
+  return left > 0n ? left.toString() : '0'
+}
+
+interface RawOpenLimitOrderRow {
+  intent_id: string; seq: string | number; owner: string
+  asset_in: number; asset_out: number; amount_in: string; amount_out: string
+  partial: number; deadline_ms: string | number
+  block_height: number; extrinsic_index: number | null; ts: string
+}
+
+// Every resting swap intent matching `where`, with its partial fills folded in.
+// `where` is applied to intent_orders inside the subquery, so the outer
+// resting-predicate never sees a row the caller did not ask for.
+async function loadOpenLimitOrders(where: string, params: Record<string, unknown>): Promise<OpenLimitOrder[]> {
+  const prices = await ensurePrices()
   const res = await client.query({
-    query: `SELECT countDistinct(id) AS n
-            FROM price_data.dca_schedules
-            WHERE (asset_in = {id:UInt32} OR asset_out = {id:UInt32})
-              AND id NOT IN (
-                SELECT id FROM price_data.dca_events WHERE event_name IN (${DCA_ENDED_EVENTS_SQL})
-              )`,
+    query: `SELECT toString(intent_id) AS intent_id, seq, owner, asset_in, asset_out,
+              amount_in, amount_out, partial, deadline_ms,
+              block_height, extrinsic_index, toString(block_timestamp) AS ts
+            FROM (SELECT * FROM price_data.intent_orders FINAL WHERE kind = 'swap' AND (${where}))
+            WHERE ${INTENT_RESTING_SQL}
+            ORDER BY block_height DESC`,
+    query_params: params, format: 'JSONEachRow',
+  })
+  const rows = await res.json<RawOpenLimitOrderRow>()
+  if (!rows.length) return []
+  // What the partials have already taken, per order. FINAL for the usual reason:
+  // these are summed, so a replayed range must be resolved first.
+  const fillRes = await client.query({
+    query: `SELECT id, n, fin, fout FROM (
+              SELECT toString(intent_id) AS id, count() AS n,
+                     toString(sum(toUInt256OrZero(amount_in))) AS fin,
+                     toString(sum(toUInt256OrZero(amount_out))) AS fout
+              FROM price_data.intent_events FINAL
+              WHERE event_name = 'Intent.IntentResovedPartially'
+                AND intent_id IN (${rows.map(r => `toUInt128('${r.intent_id}')`).join(',')})
+              GROUP BY intent_id)`,
+    format: 'JSONEachRow',
+  })
+  const fills = new Map<string, { n: number; fin: string; fout: string }>()
+  for (const f of await fillRes.json<{ id: string; n: number; fin: string; fout: string }>()) {
+    fills.set(f.id, { n: Number(f.n), fin: f.fin, fout: f.fout })
+  }
+  return rows.map(r => {
+    const aIn = asset(r.asset_in), aOut = asset(r.asset_out)
+    const filled = fills.get(r.intent_id) ?? { n: 0, fin: '0', fout: '0' }
+    const remainingIn = restingLeg(r.amount_in, filled.fin)
+    const deadlineMs = Number(r.deadline_ms)
+    return {
+      intentId: r.intent_id, seq: Number(r.seq), who: accountRef(r.owner),
+      assetIn: aIn, assetOut: aOut,
+      amountIn: r.amount_in, amountOut: r.amount_out,
+      filledIn: filled.fin, filledOut: filled.fout,
+      remainingIn, remainingOut: restingLeg(r.amount_out, filled.fout),
+      fills: filled.n,
+      partial: Number(r.partial) === 1,
+      limitPrice: limitPriceOf(r.amount_in, aIn.decimals, r.amount_out, aOut.decimals),
+      valueUsd: usdValue(prices, aIn.assetId, remainingIn, aIn.decimals),
+      placedBlock: Number(r.block_height), placedIndex: r.extrinsic_index, timestamp: r.ts,
+      deadline: Number.isFinite(deadlineMs) && deadlineMs > 0 ? new Date(deadlineMs).toISOString() : null,
+    }
+  })
+}
+
+// Biggest resting money first; an order in an asset with no price feed sinks
+// below a knowable $0 rather than sorting as one. Ties keep placement recency.
+export function compareLimitOrdersByValueDesc(x: OpenLimitOrder, y: OpenLimitOrder): number {
+  return (y.valueUsd ?? -1) - (x.valueUsd ?? -1)
+}
+
+// An account's (or tag's) own resting limit orders.
+export async function getOpenLimitOrders(accounts: string[]): Promise<OpenLimitOrder[]> {
+  const list = sqlAccountList(accounts)
+  if (list === "''") return []
+  return cached(`explorer:limit-orders:${[...accounts].sort().join(',')}`, 15000, async () =>
+    (await loadOpenLimitOrders(`owner IN (${list})`, {})).sort(compareLimitOrdersByValueDesc))
+}
+
+// One side of an asset's book. `price`/`size` restate the order from the asset's
+// own point of view, which is what lets orders quoted in different assets sit in
+// one ladder: `price` is counter-asset units per one unit of this asset, and
+// `priceUsd` is that price at the counter asset's current price — the only common
+// axis a mixed-quote book has.
+export interface AssetBookEntry extends OpenLimitOrder {
+  counter: AssetRef
+  price: number | null; priceUsd: number | null
+  size: string; sizeUsd: number | null
+  total: string
+}
+export interface AssetLimitOrderBook { bids: AssetBookEntry[]; asks: AssetBookEntry[] }
+
+// The asset page's book: bids are the orders buying this asset (it is their
+// asset_out), asks the orders selling it. Each side is ranked by the price it
+// offers THIS asset at — bids best (highest) first, asks best (lowest) first —
+// with unpriced orders last on both sides rather than sorted as free or infinite.
+export function assetBookEntry(order: OpenLimitOrder, assetId: number, prices: Map<number, PriceInfo>): AssetBookEntry {
+  const buying = order.assetOut.assetId === assetId
+  const base = buying ? order.assetOut : order.assetIn
+  const counter = buying ? order.assetIn : order.assetOut
+  const size = buying ? order.remainingOut : order.remainingIn
+  const total = buying ? order.remainingIn : order.remainingOut
+  const price = limitPriceOf(
+    buying ? order.amountOut : order.amountIn, base.decimals,
+    buying ? order.amountIn : order.amountOut, counter.decimals,
+  )
+  const counterPrice = prices.get(counter.assetId)?.price
+  const priceUsd = price != null && counterPrice != null ? price * counterPrice : null
+  const sizeAmount = Number(size) / 10 ** base.decimals
+  return {
+    ...order, counter, price, priceUsd, size, total,
+    sizeUsd: priceUsd != null && Number.isFinite(sizeAmount) ? sizeAmount * priceUsd : null,
+  }
+}
+function compareBookSide(side: 'bids' | 'asks') {
+  return (x: AssetBookEntry, y: AssetBookEntry): number => {
+    // An order we cannot price cannot be ranked against one we can; it goes last
+    // on either side rather than posing as the best or the worst price in the book.
+    if (x.priceUsd == null || y.priceUsd == null) return (x.priceUsd == null ? 1 : 0) - (y.priceUsd == null ? 1 : 0)
+    return side === 'bids' ? y.priceUsd - x.priceUsd : x.priceUsd - y.priceUsd
+  }
+}
+export async function getAssetLimitOrders(assetId: number): Promise<AssetLimitOrderBook> {
+  return cached(`explorer:limit-orders-asset:${assetId}`, 15000, async () => {
+    const [prices, orders] = await Promise.all([
+      ensurePrices(),
+      loadOpenLimitOrders('asset_in = {id:UInt32} OR asset_out = {id:UInt32}', { id: assetId }),
+    ])
+    const entries = orders.map(o => assetBookEntry(o, assetId, prices))
+    return {
+      bids: entries.filter(e => e.assetOut.assetId === assetId).sort(compareBookSide('bids')),
+      asks: entries.filter(e => e.assetIn.assetId === assetId).sort(compareBookSide('asks')),
+    }
+  })
+}
+
+// The Limit orders tab badge on the asset page — the same resting set the book
+// lists, counted without folding the partial fills the ladder needs.
+async function countAssetLimitOrders(assetId: number): Promise<number> {
+  const res = await client.query({
+    query: `SELECT countDistinct(intent_id) AS n
+            FROM price_data.intent_orders
+            WHERE kind = 'swap' AND (asset_in = {id:UInt32} OR asset_out = {id:UInt32})
+              AND ${INTENT_RESTING_SQL}`,
     query_params: { id: assetId }, format: 'JSONEachRow',
   })
   return Number((await res.json<{ n: string | number }>())[0]?.n ?? 0)
@@ -23077,9 +23415,13 @@ export interface AssetLiquidations {
 export interface AssetDetail {
   asset: AssetListItem
   holderCount: number
-  // Ongoing DCA schedules buying or selling this asset — the DCAs tab's badge,
-  // counted exactly as getAssetDcas lists them so the two never disagree.
+  // Ongoing DCA orders buying or selling this asset — schedules and DCA intents
+  // alike — the DCAs tab's badge, counted exactly as getAssetDcas lists them so
+  // the two never disagree.
   dcaCount: number
+  // Resting limit orders (swap intents) on either side of this asset — the Limit
+  // orders tab's badge, counted exactly as getAssetLimitOrders lists them.
+  limitOrderCount: number
   totalUsd: number
   priceSeries: number[]
   priceDates: string[]
@@ -23229,14 +23571,14 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
     // A reserve with no seizures still reports a total (zero) — "in the market,
     // never liquidated" is a fact, not missing data.
     const scope = mmReserveScope(assetId)
-    const [days, isReserve, dcaCount] = await Promise.all([
-      assetLiquidationDays(scope), isPrimaryMmReserve(scope), countAssetDcas(assetId), closesP,
+    const [days, isReserve, dcaCount, limitOrderCount] = await Promise.all([
+      assetLiquidationDays(scope), isPrimaryMmReserve(scope), countAssetDcas(assetId), countAssetLimitOrders(assetId), closesP,
     ])
     const liquidations: AssetLiquidations | null = isReserve || days.length
       ? { decimals: scope.decimals, days, total: totalAssetLiquidations(days) }
       : null
 
-    return { asset: assetItem, holderCount: hsummary.total, dcaCount, totalUsd: hsummary.totalUsd, priceSeries, priceDates, liquidations }
+    return { asset: assetItem, holderCount: hsummary.total, dcaCount, limitOrderCount, totalUsd: hsummary.totalUsd, priceSeries, priceDates, liquidations }
   })
 }
 
@@ -25340,6 +25682,7 @@ export interface TagDetail {
   moneyMarket: MoneyMarketPosition[]
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
+  openLimitOrders?: OpenLimitOrder[]
   portfolioSeries: number[]
   portfolioSeriesExHdx: number[]
   portfolioDates: string[]
@@ -25539,7 +25882,7 @@ async function buildTagDetailForMembers(
     let moneyMarket = await aggregateMoneyMarket(mmMembers)
     // LP stays (it feeds the displayed value); only the heavy portfolio-history walk
     // and DCA — neither shown on the card — are skipped in summary.
-    const [history, bareLp, farmLp, xykLp, v3Lp, activeDcas] = await Promise.all([
+    const [history, bareLp, farmLp, xykLp, v3Lp, activeDcas, openLimitOrders] = await Promise.all([
       summary
         ? Promise.resolve({ portfolioSeries: [] as number[], portfolioSeriesExHdx: [] as number[], portfolioDates: [] as string[], portfolioBlocks: [] as number[], balanceHistory: [] as AssetBalanceHistory[] })
         : getAccountHistoryShared(tagHistoryAccounts, opts.scope),
@@ -25548,6 +25891,7 @@ async function buildTagDetailForMembers(
       getXykPositions(members, balances),
       getUniswapV3Positions(members),
       summary ? Promise.resolve([]) : getActiveDcas(members),
+      summary ? Promise.resolve([]) : getOpenLimitOrders(members),
     ])
     const lpPositions = [...bareLp, ...farmLp, ...xykLp, ...v3Lp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
     // Staking-backed markets (GIGAHDX): collateral is the already-counted locked HDX,
@@ -25591,7 +25935,7 @@ async function buildTagDetailForMembers(
       ...(tradingVolumeUsd > 0 ? { tradingVolumeUsd } : {}),
       ...(liquidationVolumeUsd > 0 ? { liquidationVolumeUsd } : {}),
       ...(revenueUsd > 0 ? { revenueUsd } : {}),
-      moneyMarket, liquidityPositions: [...lpPositions, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)), activeDcas,
+      moneyMarket, liquidityPositions: [...lpPositions, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)), activeDcas, openLimitOrders,
       portfolioSeries, portfolioSeriesExHdx, portfolioDates: history.portfolioDates, portfolioBlocks: history.portfolioBlocks,
       // Holdings without indexed historical observations remain absent rather
       // than being projected backward from their current balance.

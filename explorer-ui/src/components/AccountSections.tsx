@@ -7,7 +7,7 @@ import { performancePoints } from './performance'
 import { CAT } from './activityColors'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds, blockSpanSeconds, dcaAmountLeft, dcaCadence, dcaLeftUsd, dcaProgress, dcaRunway, fmtDuration } from '../utils/dca'
-import type { MoneyMarketPosition, LpPosition, ActiveDca, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent, ContractInfo } from '../types'
+import type { MoneyMarketPosition, LpPosition, ActiveDca, OpenLimitOrder, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent, ContractInfo } from '../types'
 import type { ListCount } from '../api/explorer'
 import type { ReactNode } from 'react'
 
@@ -228,6 +228,8 @@ export function moneyMarketDebtUsd(markets: MoneyMarketPosition[]): number {
 export function profileTabs(
   balanceCount: number,
   markets: MoneyMarketPosition[],
+  // Ongoing DCA orders plus resting limit orders — both are money committed and
+  // both live on the Positions tab, so both count toward its badge.
   dcaCount: number,
   liquidityPositionCount: number,
   // The activity list's own total. `activity.complete === false` means it counts
@@ -621,13 +623,20 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
               fundingBalance: d.fundingBalance,
             })
             return (
-              <tr key={d.id} {...rowNav(paths.dcaSchedule(d.id))} data-dca-schedule={d.id}>
+              // A DCA intent and a pallet-DCA schedule are the same order to a
+              // reader, so they share this table — but not an id space (schedule
+              // 76 and intent #76 both exist), so the key and the link come from
+              // whichever identity the row actually has.
+              <tr key={d.intentId ?? `dca-${d.id}`}
+                {...rowNav(d.intentId ? paths.intent(d.intentId) : paths.dcaSchedule(d.id))}
+                {...(d.intentId ? { 'data-intent-order': d.intentId } : { 'data-dca-schedule': d.id })}>
                 {showOwner && <td data-label="Owner">{d.who ? <AddrPill account={d.who} noCopy /> : <Dash />}</td>}
                 <td data-label="Selling → Buying">
                   <span className="asset-flow">
                     <span className="trade-leg"><AssetIcon assetId={d.assetIn.assetId} iconAssetId={d.assetIn.iconAssetId} symbol={d.assetIn.symbol} size={20} parachainId={d.assetIn.parachainId} origin={d.assetIn.origin} /> <span className="mono">{d.assetIn.symbol}</span></span>
                     {' → '}
                     <span className="trade-leg"><AssetIcon assetId={d.assetOut.assetId} iconAssetId={d.assetOut.iconAssetId} symbol={d.assetOut.symbol} size={20} parachainId={d.assetOut.parachainId} origin={d.assetOut.origin} /> <span className="mono">{d.assetOut.symbol}</span></span>
+                    {d.intentId && <span className="dca-kind" title={`ICE DCA intent #${d.id} — runtime 443’s DCA, filled by a solver rather than by the DCA pallet`}>intent</span>}
                   </span>
                 </td>
                 <td data-label="Per trade" className="r">
@@ -679,6 +688,87 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
                       <span className="dca-sub mono muted">{runway.estimated ? '~' : ''}{F.int(runway.trades)} to go</span>
                     </span>
                     : <span className="muted">—</span>}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table></div>
+    </>
+  )
+}
+
+// How far through a partially-filled limit order we are, by the sold leg: what
+// the partials have taken as a share of what was placed. Integer strings can
+// exceed Number's exact range, so the ratio is taken as a ratio of two floats —
+// display-only, and never an amount.
+export function limitOrderFilledPct(amountIn: string, filledIn: string): number | null {
+  const placed = Number(amountIn), filled = Number(filledIn)
+  if (!Number.isFinite(placed) || !Number.isFinite(filled) || placed <= 0) return null
+  return Math.max(0, Math.min(100, (filled / placed) * 100))
+}
+
+// Resting limit orders — unfilled swap intents. A separate table from the DCA one
+// on purpose: a limit order has no period, no per-trade amount and no budget, so
+// it answers different questions — what it sells, what it wants for it, at what
+// price, and how much of it is still standing.
+//
+// `showOwner` is the asset page's variant (the page isn't the owner there); the
+// profile pages use the defaults.
+export function LimitOrdersTable({ orders, now, title, showOwner, emptyText }: {
+  orders: OpenLimitOrder[]; now: number; title?: ReactNode; showOwner?: boolean; emptyText?: ReactNode
+}) {
+  if (!orders.length && !emptyText) return null
+  return (
+    <>
+      <div className="sec-title">{title ?? <>Open limit orders · {orders.length}</>}</div>
+      <div className="panel"><table className="tbl dca-tbl">
+        <thead><tr>
+          {showOwner && <th>Owner</th>}
+          <th>Selling → Buying</th><th className="r">Selling</th><th className="r">For at least</th>
+          <th className="r">Limit price</th><th className="r">Filled</th><th className="r">Placed</th>
+        </tr></thead>
+        <tbody>
+          {!orders.length ? <EmptyRow cols={showOwner ? 7 : 6}>{emptyText}</EmptyRow> : orders.map(o => {
+            const pct = limitOrderFilledPct(o.amountIn, o.filledIn)
+            return (
+              <tr key={o.intentId} {...rowNav(paths.intent(o.intentId))} data-intent-order={o.intentId}>
+                {showOwner && <td data-label="Owner"><AddrPill account={o.who} noCopy /></td>}
+                <td data-label="Selling → Buying">
+                  <span className="asset-flow">
+                    <span className="trade-leg"><AssetIcon assetId={o.assetIn.assetId} iconAssetId={o.assetIn.iconAssetId} symbol={o.assetIn.symbol} size={20} parachainId={o.assetIn.parachainId} origin={o.assetIn.origin} /> <span className="mono">{o.assetIn.symbol}</span></span>
+                    {' → '}
+                    <span className="trade-leg"><AssetIcon assetId={o.assetOut.assetId} iconAssetId={o.assetOut.iconAssetId} symbol={o.assetOut.symbol} size={20} parachainId={o.assetOut.parachainId} origin={o.assetOut.origin} /> <span className="mono">{o.assetOut.symbol}</span></span>
+                    {!o.partial && <span className="dca-kind" title="All-or-nothing — the order only fills in full">all-or-none</span>}
+                  </span>
+                </td>
+                {/* What is still resting, not what was placed: a partially filled
+                    order's remainder is the position, and the placed size rides
+                    underneath it so the two can be read together. */}
+                <td data-label="Selling" className="r">
+                  <AssetAmount asset={o.assetIn} raw={o.remainingIn} />
+                  {o.valueUsd != null && <span className="dca-sub mono muted">{F.usd(o.valueUsd)}</span>}
+                </td>
+                <td data-label="For at least" className="r">
+                  <AssetAmount asset={o.assetOut} raw={o.remainingOut} />
+                </td>
+                <td data-label="Limit price" className="r mono">
+                  {o.limitPrice != null
+                    ? <span title={`One ${o.assetIn.symbol} for ${o.limitPrice} ${o.assetOut.symbol}`}>
+                      {F.amount(String(o.limitPrice), 0)} <span className="muted">{o.assetOut.symbol}</span>
+                      <span className="dca-sub mono muted">per {o.assetIn.symbol}</span>
+                    </span>
+                    : <Dash />}
+                </td>
+                <td data-label="Filled" className="r">
+                  <span className="dca-filled">
+                    <ProgressRing pct={pct} size={18} stroke={8} title={pct == null ? 'Nothing filled yet' : `${pct.toFixed(1)}% of the order filled`} />
+                    <span className="mono">{pct != null ? `${Math.round(pct)}%` : '—'}</span>
+                    <span className="dca-sub mono muted">{F.int(o.fills)} {o.fills === 1 ? 'fill' : 'fills'}</span>
+                  </span>
+                </td>
+                <td data-label="Placed" className="r mono">
+                  <MomentLink at={{ blockHeight: o.placedBlock, extrinsicIndex: o.placedIndex, timestamp: o.timestamp }} now={now} />
                 </td>
               </tr>
             )

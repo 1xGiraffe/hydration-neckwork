@@ -2083,6 +2083,48 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
   .dca-tbl .dca-filled { justify-content: flex-end; }
 }
 
+/* Marks a row in the shared DCA table as an ICE intent rather than a pallet-DCA
+   schedule, and an all-or-nothing limit order in the same slot — a quiet word
+   beside the pair, in the intent family's violet, not a second colour system. */
+.dca-kind {
+  font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 1px 5px; border-radius: 5px; white-space: nowrap;
+  color: var(--cat-intent);
+  background: color-mix(in srgb, var(--cat-intent) 14%, transparent);
+}
+
+/* ── an asset's limit-order book ──────────────────────────────────────────── */
+/* Two ladders side by side, bids left and asks right, stacking on a phone.
+   `minmax(0, 1fr)`, not `1fr`: a grid track's default minimum is its content's
+   min-width, so a plain 1fr would let each ladder's table push the track past
+   half the page and scroll the whole document sideways. */
+.book-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 18px; align-items: start; }
+@media (max-width: 860px) { .book-grid { grid-template-columns: minmax(0, 1fr); gap: 0; } }
+.book-side-note { color: var(--text-low); text-transform: none; letter-spacing: 0; margin-left: 6px; }
+/* Four columns, so the book needs far less room than the shared 760px table
+   minimum — and when a narrow window squeezes even that, the ladder scrolls
+   inside its own panel rather than taking the page with it. */
+.book-tbl { min-width: 380px; }
+.book-panel { overflow-x: auto; }
+.book-tbl tbody td { vertical-align: top; line-height: 22px; }
+.book-tbl tbody td .trade-leg { height: 22px; vertical-align: middle; }
+/* The depth bar: each row's size as a share of the largest on its side, painted
+   from the price edge inward so the two ladders mirror each other. It rides on
+   the row's background rather than in a cell, so it runs the full width without
+   an extra element; `--depth` is set per row by the component. */
+.book-tbl tbody tr { background-image: linear-gradient(to left, var(--book-depth) 0, var(--book-depth) var(--depth, 0%), transparent var(--depth, 0%)); }
+.book-asks tbody tr { background-image: linear-gradient(to right, var(--book-depth) 0, var(--book-depth) var(--depth, 0%), transparent var(--depth, 0%)); }
+.book-bids { --book-depth: color-mix(in srgb, var(--green) 12%, transparent); }
+.book-asks { --book-depth: color-mix(in srgb, var(--red) 12%, transparent); }
+.book-bids .book-price { color: var(--green); }
+.book-asks .book-price { color: var(--red); }
+/* The one figure the pair of ladders doesn't hold: sits between the section
+   title and the book, reading as a caption rather than a card. */
+.book-spread {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 10px 2px 2px; font-size: 12px;
+}
+
 /* searchable token combobox */
 .combo { position: relative; }
 .combo-input { width: 150px; cursor: text; }
