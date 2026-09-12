@@ -2125,6 +2125,15 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
   padding: 10px 2px 2px; font-size: 12px;
 }
 
+/* Names the chain a cross-chain swap's destination settled on. The destination is
+   not a Hydration asset and has no icon here, so the chain is what places it. */
+.xc-chain {
+  font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+  margin-left: 5px; padding: 1px 5px; border-radius: 5px; white-space: nowrap;
+  color: var(--cat-xcm);
+  background: color-mix(in srgb, var(--cat-xcm) 14%, transparent);
+}
+
 /* searchable token combobox */
 .combo { position: relative; }
 .combo-input { width: 150px; cursor: text; }

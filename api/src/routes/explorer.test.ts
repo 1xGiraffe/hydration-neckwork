@@ -59,7 +59,7 @@ describe('unusableFilterParam', () => {
   it('reports the first unusable filter with what it expected', () => {
     expect(unusableFilterParam({ type: 'staking', min: 'abc' })).toEqual({
       key: 'type',
-      expected: 'all, transfer, trade, dca, liquidity, mm, xcm, stake, vote, otc, bond, intent',
+      expected: 'all, transfer, trade, dca, liquidity, mm, xcm, stake, vote, otc, bond, intent, xcswap',
     })
   })
 
