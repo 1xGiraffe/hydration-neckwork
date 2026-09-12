@@ -8,7 +8,7 @@ import type { OHLCVInterval } from '../../services/ohlcvService.ts'
 import { queryOHLCV } from '../../services/ohlcvService.ts'
 import type { OHLCVCandle } from '../../types.ts'
 import { iso, zAssetId, zBucket, zIsoTimestamp } from '../schemas/common.ts'
-import { KRAKEN_PAIRS, ONE_CLICK_PLATFORMS, loadForeignCandles, platformForOneClickAsset, type ForeignCandle } from '../services/foreignCandles.ts'
+import { KRAKEN_PAIRS, ONE_CLICK_PLATFORMS, loadForeignCandles, platformForOneClickAsset, type ForeignCandle } from '../../services/foreignCandles.ts'
 
 // Pair candles. See spec section "Prices" and "Semantics" rule 8.
 

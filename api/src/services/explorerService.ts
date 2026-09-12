@@ -44,6 +44,7 @@ import { buildMempoolActivities, buildPendingActivities, type PendingActivity, t
 import { feeTierLabel, loadV3Registry, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3SwapAt, type V3Activity, type V3Registry } from './uniswapV3Service.ts'
 import { loadV3AccountPositions, v3AccountPositions } from './uniswapV3Positions.ts'
 import { xcswapSettlementsFor, type XcswapSettlement, type XcswapStatus } from './xcswapSettlements.ts'
+import { loadForeignCandles } from './foreignCandles.ts'
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
@@ -7493,6 +7494,87 @@ export async function getRecentXcswaps(
   })
 }
 
+
+/**
+ * A cross-chain destination's page.
+ *
+ * Deliberately NOT an asset page's shape. Hydration has no holders of ZEC, no
+ * pool in it, no supply of it and no price feed for it, so every panel an asset
+ * page carries would be blank or borrowed. What is knowable is stated instead:
+ * what the thing is, a reference price from a venue that lists it, and the swaps
+ * that actually delivered it — totalled on the leg each side of the swap records.
+ */
+export interface XcDestinationDetail {
+  destination: XcDestination
+  referencePrice: number | null
+  referenceSource: string
+  /** Swaps that delivered this destination, and what they moved. */
+  swapCount: number
+  settledCount: number
+  soldUsd: number | null
+  deliveredUsd: number | null
+  recipientCount: number
+  firstAt: string | null
+  lastAt: string | null
+  /** The assets sold into it on Hydration, biggest first. */
+  soldAssets: { asset: AssetRef; swaps: number; amount: string; valueUsd: number | null }[]
+  recent: ActivityRow[]
+}
+
+export async function getXcDestination(slug: string): Promise<XcDestinationDetail | null> {
+  const destination = xcDestinationBySlug(slug)
+  if (!destination) return null
+  return cached(`explorer:xc-destination:${destination.platform}`, 30_000, async () => {
+    const [prices, spot, orders] = await Promise.all([
+      ensurePrices(),
+      xcDestinationSpotPrices(),
+      // Every order ever placed — 62 today and growing by a handful a week, so the
+      // whole set is the bound. The destination filter can only be applied to
+      // orders the sweep has resolved, so an unresolved one counts toward neither
+      // destination rather than being assigned to a guess.
+      getRecentXcswaps(1000, undefined, undefined, undefined, 0),
+    ])
+    const mine = orders.filter(r => r.xcswapDestAsset === destination.oneClickId)
+    const byAsset = new Map<number, { asset: AssetRef; swaps: number; amount: bigint }>()
+    let soldUsd = 0, deliveredUsd = 0, settled = 0
+    const recipients = new Set<string>()
+    for (const r of mine) {
+      if (r.valueUsd != null) soldUsd += r.valueUsd
+      if (r.xcswapDestAmountUsd != null) deliveredUsd += r.xcswapDestAmountUsd
+      if (r.xcswapStatus === 'SUCCESS') settled += 1
+      if (r.xcswapRecipient) recipients.add(r.xcswapRecipient)
+      if (!r.assetIn || !r.amountIn) continue
+      const hit = byAsset.get(r.assetIn.assetId) ?? { asset: r.assetIn, swaps: 0, amount: 0n }
+      hit.swaps += 1
+      try { hit.amount += BigInt(r.amountIn) } catch { /* a non-integer amount adds nothing */ }
+      byAsset.set(r.assetIn.assetId, hit)
+    }
+    const soldAssets = [...byAsset.values()]
+      .map(v => ({
+        asset: v.asset, swaps: v.swaps, amount: v.amount.toString(),
+        valueUsd: usdValue(prices, v.asset.assetId, v.amount.toString(), v.asset.decimals),
+      }))
+      .sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0) || y.swaps - x.swaps)
+    const times = mine.map(r => r.timestamp).sort()
+    return {
+      destination,
+      referencePrice: spot.get(destination.platform) ?? null,
+      referenceSource: 'kraken',
+      swapCount: mine.length,
+      settledCount: settled,
+      // Absent rather than zero when nothing has settled: "no swaps yet" and
+      // "swaps worth nothing" are different statements.
+      soldUsd: mine.length ? soldUsd : null,
+      deliveredUsd: settled ? deliveredUsd : null,
+      recipientCount: recipients.size,
+      firstAt: times[0] ?? null,
+      lastAt: times[times.length - 1] ?? null,
+      soldAssets,
+      recent: mine.slice(0, 25),
+    }
+  })
+}
+
 // extrinsic by block-index (design routes #/extrinsic/h-i)
 export async function getExtrinsicAt(height: number, index: number): Promise<ExtrinsicDetail | null> {
   // Pending first (see getBlock): unfinalized extrinsics answer from memory,
@@ -7564,8 +7646,78 @@ async function getExtrinsicSummaryAt(height: number, index: number): Promise<Ext
 }
 
 // assets registry with prices + total value on Hydration
-export type ExplorerAssetType = 'Native' | 'Derivative' | 'Token'
-export interface AssetListItem extends AssetRef { price: number | null; change24h: number | null; type: ExplorerAssetType; amountUsd: number | null; holderCount?: number }
+export type ExplorerAssetType = 'Native' | 'Derivative' | 'Token' | 'Cross-chain'
+export interface AssetListItem extends AssetRef {
+  price: number | null; change24h: number | null; type: ExplorerAssetType
+  amountUsd: number | null; holderCount?: number
+  // Present ONLY on a cross-chain destination — an asset a swap delivers on
+  // another chain, which Hydration never holds. Its `assetId` is a negative
+  // sentinel, not a registry id: there is no registry entry to give it one, and a
+  // negative number cannot collide with the UInt32 ids everything else uses.
+  // Consumers route and key on this object, never on that id.
+  xcDestination?: XcDestination
+}
+
+/**
+ * A cross-chain swap's destination: an asset that lives on another chain and is
+ * reachable from Hydration only by selling into it (see 011_xcswap.sql).
+ *
+ * It is listed beside the registry assets because that is where people look for
+ * it, and it is marked `Cross-chain` everywhere because almost nothing that is
+ * true of a registry asset is true of it: Hydration has no holders of it, no
+ * pool in it, no supply of it and no price feed for it. What IS knowable — a
+ * reference price from a venue that lists it, and the swaps that delivered it —
+ * is what its page shows.
+ */
+export interface XcDestination {
+  /** URL slug and the platform key the reference price is keyed on. */
+  platform: string
+  /** 1Click asset id — the identity this destination is addressed by. */
+  oneClickId: string
+  symbol: string
+  name: string
+  decimals: number
+  /** The chain it settles on, as the 1Click token registry keys it ('near', 'zec'). */
+  chain: string
+  /** The same chain as people write it. The registry key is `zec` for Zcash, which
+   *  beside the ZEC symbol reads as a stutter rather than a place. */
+  chainName: string
+}
+
+// The destinations the swap SDK offers today. An explicit list: each one needs a
+// reference price, and a destination we cannot price is one we cannot describe.
+export const XC_DESTINATIONS: XcDestination[] = [
+  { platform: 'near', oneClickId: 'nep141:wrap.near', symbol: 'wNEAR', name: 'Wrapped NEAR', decimals: 24, chain: 'near', chainName: 'NEAR' },
+  { platform: 'zec', oneClickId: 'nep141:zec.omft.near', symbol: 'ZEC', name: 'Zcash', decimals: 8, chain: 'zec', chainName: 'Zcash' },
+]
+// Negative, so it can never be mistaken for — or collide with — a registry id.
+export const xcDestinationAssetId = (platform: string): number =>
+  -(XC_DESTINATIONS.findIndex(d => d.platform === platform) + 1)
+
+export function xcDestinationBySlug(slug: string): XcDestination | undefined {
+  const key = slug.toLowerCase()
+  return XC_DESTINATIONS.find(d =>
+    d.platform === key || d.oneClickId === slug || d.symbol.toLowerCase() === key
+    || d.name.toLowerCase() === key || `w${d.symbol.toLowerCase()}` === key)
+}
+
+/** The destinations as asset-list rows. Priced from the same reference the chart uses. */
+export function xcDestinationListItems(prices: ReadonlyMap<string, number>): AssetListItem[] {
+  return XC_DESTINATIONS.map(d => ({
+    assetId: xcDestinationAssetId(d.platform),
+    iconAssetId: xcDestinationAssetId(d.platform),
+    symbol: d.symbol, name: d.name, decimals: d.decimals,
+    parachainId: null, origin: null,
+    price: prices.get(d.platform) ?? null,
+    change24h: null,
+    type: 'Cross-chain' as const,
+    // Hydration holds none of it, so there is no value here to total and no
+    // holders to count. Null says that; a zero would claim the asset is held
+    // here and empty.
+    amountUsd: null,
+    xcDestination: d,
+  }))
+}
 
 function explorerAssetType(asset: AssetRef): ExplorerAssetType {
   if (asset.assetId === 0) return 'Native'
@@ -7771,7 +7923,7 @@ async function getWeeklyPriceSamples(): Promise<Map<number, number[]>> {
 export async function getAssets(): Promise<AssetListItem[]> {
   return cached('explorer:assets-list', 30000, async () => {
     const [prices, totals, holderCounts, samples] = await Promise.all([ensurePrices(), getAssetTotals(), getAssetHolderCounts(), getWeeklyPriceSamples()])
-    return allExplorerAssets()
+    const listed = allExplorerAssets()
       .filter(a => !a.symbol.includes('-Pool') && !a.symbol.startsWith('Asset') && a.symbol.trim() !== '')
       .map(a => {
         // Derivatives (bonds, aTokens) carry no price feed of their own — fall back
@@ -7787,7 +7939,32 @@ export async function getAssets(): Promise<AssetListItem[]> {
       })
       // Default ordering: total value held on Hydration, descending.
       .sort((x, y) => (y.amountUsd ?? 0) - (x.amountUsd ?? 0) || (y.price ?? 0) - (x.price ?? 0))
+    // Cross-chain destinations sit AFTER every registry asset, whatever their
+    // price: the list is ordered by value held on Hydration, and none of it is.
+    // They are listed at all because that is where a reader looks for them.
+    return [...listed, ...xcDestinationListItems(await xcDestinationSpotPrices())]
   })
+}
+
+/**
+ * The current USD price of each cross-chain destination, from the same reference
+ * venue its chart is composed from. The newest CLOSED daily candle rather than a
+ * spot tick: one upstream series already cached for the charts, and a reference
+ * price is not a quote — nothing here executes at it.
+ */
+export async function xcDestinationSpotPrices(): Promise<Map<string, number>> {
+  const out = new Map<string, number>()
+  await Promise.all(XC_DESTINATIONS.map(async d => {
+    try {
+      const candles = await loadForeignCandles(d.platform, '1h', 3600)
+      const close = Number(candles[candles.length - 1]?.close)
+      if (Number.isFinite(close) && close > 0) out.set(d.platform, close)
+    } catch {
+      // A reference venue that will not answer leaves the destination unpriced,
+      // which its row renders as such. It is not a Hydration price to begin with.
+    }
+  }))
+  return out
 }
 
 // What the activity token filter shows and searches on — nothing else. It is a
@@ -26584,7 +26761,7 @@ export async function getDailyAccounts(): Promise<{ date: string; active: number
 
 // search
 export interface SearchResult {
-  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool'
+  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination'
   value: string
   label?: string
   desc?: string   // asset-type: the descriptive name (e.g. DOT → "Polkadot")
@@ -27069,6 +27246,18 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
       .sort((x, y) => x.rank - y.rank || x.a.symbol.length - y.a.symbol.length)
       .slice(0, 6)
     for (const { a } of ranked) results.push({ type: 'asset', value: String(a.assetId), label: a.symbol, desc: a.name ?? undefined, asset: a })
+  }
+
+  // Cross-chain destinations. They are not registry assets, so they match on
+  // their own names ('ZEC', 'Zcash', 'NEAR', 'wNEAR') and are addressed by their
+  // platform slug rather than an asset id — `/asset/xc/zec`, never `/asset/-2`.
+  for (const d of XC_DESTINATIONS) {
+    // The 1Click id matches only in full: every NEAR-hosted id ENDS in '.near',
+    // so a substring test on it answered "near" with ZEC as well.
+    const q = query.toLowerCase()
+    const hay = [d.symbol, d.name, d.platform].map(v => v.toLowerCase())
+    if (!hay.some(v => v.includes(q)) && d.oneClickId.toLowerCase() !== q) continue
+    results.push({ type: 'xcDestination', value: d.platform, label: d.symbol, desc: `${d.name} · cross-chain destination` })
   }
 
   // Pool name — the /liquidity directory ('Omnipool', '2-Pool-GDOT',
