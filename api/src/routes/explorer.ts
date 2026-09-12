@@ -8,7 +8,7 @@ import {
   getExtrinsicActivity, getBlockActivity,
   getHolders, getAddress, getAddressHistory, search, getAssets, getAssetFilterOptions, getFilterNames, getAccounts, getDcaSchedule, getDcaScheduleIdAt, getDcaExecution,
   getIntentOrder,
-  getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetDcas, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag, getTagMemberAccounts,
+  getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetDcas, getAssetLimitOrders, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag, getTagMemberAccounts,
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressListTotal, getTagListTotal,
   getAddressValueEvents, getTagValueEvents,
@@ -628,13 +628,23 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return getAssetPriceWindow(params.data.assetId, q.data.fromTs, q.data.toTs, q.data.points)
   })
 
-  // Ongoing DCA schedules trading one asset, split into buys (schedules
-  // acquiring it) and sells (schedules disposing of it). Chain-wide there are
-  // only a few dozen live schedules, so the list is unpaginated.
+  // Ongoing DCA orders trading one asset — pallet-DCA schedules and runtime-443
+  // DCA intents together — split into buys (orders acquiring it) and sells
+  // (orders disposing of it). Chain-wide there are only a few dozen live orders,
+  // so the list is unpaginated.
   fastify.get('/explorer/asset/:assetId/dcas', async (req, reply) => {
     const params = z.object({ assetId: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid asset id' })
     return getAssetDcas(params.data.assetId)
+  })
+
+  // One asset's resting limit orders (unfilled swap intents) as a book: bids buy
+  // the asset, asks sell it, each side ranked by the price it offers the asset
+  // at. Unpaginated for the same reason as the DCA list above.
+  fastify.get('/explorer/asset/:assetId/limit-orders', async (req, reply) => {
+    const params = z.object({ assetId: uint32Param }).safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid asset id' })
+    return getAssetLimitOrders(params.data.assetId)
   })
 
   fastify.get('/explorer/holders/:assetId', async (req, reply) => {
