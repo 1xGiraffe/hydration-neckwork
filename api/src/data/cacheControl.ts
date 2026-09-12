@@ -39,7 +39,7 @@ export const DATA_CACHE_CONTROL: Array<[RegExp, number, Visibility]> = [
   [/^\/v1\/accounts\/[^/]+\/balances\/history$/, 60, 'private'],
   [/^\/v1\/accounts\/[^/]+\/liquidity\/positions$/, 10, 'private'],
   [/^\/v1\/accounts\/[^/]+\/otc\/fills$/, 5, 'private'],
-  [/^\/v1\/accounts\/[^/]+\/(balances|events|extrinsics|transfers|trades|dca|otc|liquidity|xcm|money-market)$/, 5, 'private'],
+  [/^\/v1\/accounts\/[^/]+\/(balances|events|extrinsics|transfers|trades|dca|intents|otc|liquidity|xcm|money-market)$/, 5, 'private'],
   [/^\/v1\/accounts\/[^/]+\/(staking|votes|liquidations)$/, 10, 'private'],
   [/^\/v1\/accounts\/[^/]+\/fees$/, 60, 'private'],
   [/^\/v1\/accounts\/[^/]+$/, 10, 'private'],
@@ -59,6 +59,7 @@ export const DATA_CACHE_CONTROL: Array<[RegExp, number, Visibility]> = [
   [/^\/v1\/pools\/[^/]+\/[^/]+\/volumes$/, 60, 'private'],
   [/^\/v1\/trades$/, 3, 'private'],
   [/^\/v1\/dca\/schedules(\/[^/]+(\/executions)?)?$/, 5, 'private'],
+  [/^\/v1\/intents(\/[^/]+(\/events)?)?$/, 5, 'private'],
   [/^\/v1\/otc\/orders(\/[^/]+(\/events)?)?$/, 5, 'private'],
 
   // Governance, staking, XCM, EVM.
