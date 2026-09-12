@@ -3,11 +3,12 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { assetDescriptor } from '../../services/explorerAssets.ts'
+import { ATOKEN_UNDERLYING_ID, assetDescriptor } from '../../services/explorerAssets.ts'
 import type { OHLCVInterval } from '../../services/ohlcvService.ts'
 import { queryOHLCV } from '../../services/ohlcvService.ts'
 import type { OHLCVCandle } from '../../types.ts'
 import { iso, zAssetId, zBucket, zIsoTimestamp } from '../schemas/common.ts'
+import { KRAKEN_PAIRS, ONE_CLICK_PLATFORMS, loadForeignCandles, platformForOneClickAsset, type ForeignCandle } from '../services/foreignCandles.ts'
 
 // Pair candles. See spec section "Prices" and "Semantics" rule 8.
 
@@ -233,6 +234,62 @@ function usdCandles(base: OHLCVCandle[]): PairCandle[] {
   }))
 }
 
+
+// ---------------------------------------------------------------------------
+// Cross-chain pair candles
+// ---------------------------------------------------------------------------
+
+/**
+ * The Hydration asset's USD close at or BEFORE a moment — never after it.
+ *
+ * The two series are independent: Hydration's buckets are the candle model's, the
+ * destination's are Kraken's, and neither is a subset of the other. Scaling a
+ * foreign candle by the Hydration close that CONTAINS or precedes it keeps the
+ * rule the rest of the price model follows (a bucket is priced by what had closed
+ * by its boundary, never by a future price). A foreign candle older than the
+ * first Hydration close has no price to scale by at all and is dropped — carrying
+ * the oldest close backwards would invent history.
+ */
+export function crossChainCandles(
+  foreign: readonly ForeignCandle[],
+  hydration: readonly { time: number; close: string }[],
+  scale: number,
+  baseIsUsd: boolean,
+): PairCandle[] {
+  const out: PairCandle[] = []
+  if (!foreign.length) return out
+  if (!baseIsUsd && !hydration.length) return out
+  const ordered = [...foreign].sort((a, b) => a.time - b.time)
+  const first = hydration[0]
+  let cursor = 0
+  let usdPerBase = baseIsUsd ? '1' : first!.close
+  for (const candle of ordered) {
+    while (cursor < hydration.length && hydration[cursor]!.time <= candle.time) {
+      usdPerBase = hydration[cursor]!.close
+      cursor++
+    }
+    if (!baseIsUsd && candle.time < first!.time) continue
+    const denominator = scaled(usdPerBase, scale)
+    if (denominator <= 0n) continue
+    // assetIn quoted in the destination asset: how much of the destination one
+    // unit of assetIn buys, i.e. usd(base) / usd(destination). Integer division
+    // on the same scale both legs were lifted to, so nothing passes through a
+    // float — the same arithmetic the on-chain cross path uses.
+    const rate = (field: string): string | null => {
+      const quote = scaled(field, scale)
+      if (quote <= 0n) return null
+      return fromScaled((denominator * BigInt(10) ** BigInt(scale)) / quote, scale)
+    }
+    // `high` of the pair is the base's best against the destination's WORST, so
+    // the destination's LOW gives the pair's high — the same envelope rule the
+    // on-chain cross pair publishes.
+    const open = rate(candle.open), high = rate(candle.low), low = rate(candle.high), close = rate(candle.close)
+    if (open == null || high == null || low == null || close == null) continue
+    out.push({ timestamp: iso(new Date(candle.time * 1000)), open, high, low, close, volumeUsd: '0' })
+  }
+  return out
+}
+
 export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = async (fastify, opts) => {
   const app = fastify.withTypeProvider<ZodTypeProvider>()
 
@@ -335,6 +392,95 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
       return {
         referenceAsset,
         items: quoteIsUsd ? usdCandles(closed) : crossCandles(closed, quote),
+      }
+    })
+  })
+
+  app.get('/v1/prices/cross-chain-pair', {
+    schema: {
+      tags: ['prices'],
+      summary: 'Reference candles for a cross-chain swap pair',
+      description: [
+        'Candles for a pair whose destination does NOT trade on Hydration — the assets a cross-chain swap delivers on their own chains (NEAR, Zcash). There is no native pair data for these and never will be, so this composes two independent USD series: the Hydration asset\'s own candles, and the destination\'s from a venue that does list it.',
+        `ORIENTATION matches GET /v1/prices/pair: the price is \`assetIn\` quoted in the destination — how much of the destination asset one \`assetIn\` buys. The Hydration UI's cross-chain chart uses the INVERSE convention (how much assetIn one destination unit costs), so a client reproducing that chart inverts these candles.`,
+        `REFERENCE PRICE, NOT AN EXECUTED ONE. \`referenceSource\` names the venue the destination leg is priced from (\`kraken\`, pair \`${Object.values(KRAKEN_PAIRS).join('\`/\`')}\`). A cross-chain swap's realised rate is a property of the order itself — the solver network's fill, plus both bridge rails' fees — and is typically several percent away from this. Do not present these candles as what a swap would get.`,
+        `\`destinationAsset\` is a 1Click asset id and must be one this deployment can price: ${Object.keys(ONE_CLICK_PLATFORMS).map(id => `\`${id}\``).join(', ')}. Anything else is a 400 rather than being priced off an adjacent market.`,
+        'WINDOW: the destination venue serves a fixed recent tail per interval (roughly 720 candles) and takes no start bound, so the series begins where that tail begins — `from` narrows it but cannot extend it. Buckets older than the Hydration asset\'s first candle are dropped rather than scaled by a price that did not exist yet.',
+        '`open`/`close` are exact rates at each end of the bucket; `high`/`low` are the conservative envelope the two independent series admit, exactly as the on-chain cross pair publishes them — an upper bound on realised range, never an underestimate. `volumeUsd` is always `"0"`: the two legs\' volumes are on different venues and summing them would describe no market.',
+        'Each Hydration bucket is priced by the close that had already happened at or before it — never a future price (AGENTS.md).',
+        'A money-market aToken `assetIn` is priced through its reserve, which is 1:1 with it and is what carries the candles (aUSDC is USDC). `pricedAsset` reports which asset the base leg was read from, so the substitution is visible rather than silent.',
+      ].join('\n\n'),
+      querystring: z.object({
+        assetIn: zAssetId,
+        destinationAsset: z.string().min(3).max(128).describe('1Click asset id of the destination, e.g. nep141:wrap.near.'),
+        from: z.iso.datetime({ offset: true }).optional(),
+        to: z.iso.datetime({ offset: true }).optional(),
+        bucket: zPriceBucket.default('1h'),
+      }),
+      response: {
+        200: z.object({
+          referenceAsset: z.string().describe('The 1Click asset id the candles are quoted in.'),
+          referenceSource: z.string().describe('The venue the destination leg is priced from.'),
+          pricedAsset: zAssetId.describe('The Hydration asset the base leg was actually priced from. Differs from `assetIn` when it is a money-market aToken, which is 1:1 with its reserve and has no candles of its own.'),
+          items: z.array(zCandle),
+        }),
+      },
+    },
+  }, async request => {
+    const { assetIn, destinationAsset, bucket } = request.query
+    const { interval, seconds, anchor } = BUCKETS[bucket]
+    const platform = platformForOneClickAsset(destinationAsset)
+    if (!platform) {
+      throw badRequest(`no reference price for destination asset '${destinationAsset}'; priced destinations are ${Object.keys(ONE_CLICK_PLATFORMS).join(', ')}`)
+    }
+    const requestedId = Number(assetIn)
+    // A money-market aToken is 1:1 with its reserve and carries no USD candles of
+    // its own, so it is priced through the reserve — which is what the pair
+    // actually is (aUSDC is USDC). Without this the endpoint is empty for exactly
+    // the assets cross-chain swaps are most often paid in: every order placed so
+    // far sold aUSDC. `pricedAsset` reports the substitution rather than hiding it.
+    const baseId = ATOKEN_UNDERLYING_ID[requestedId] ?? requestedId
+    const baseIsUsd = USD_PEGGED_SYMBOLS.has(assetDescriptor(baseId).symbol.toUpperCase())
+
+    const floor = (ms: number) => Math.max(Math.floor((ms / 1000 - anchor) / seconds) * seconds + anchor, anchor)
+    const parsedFrom = request.query.from == null ? null : Date.parse(request.query.from)
+    const parsedTo = request.query.to == null ? null : Date.parse(request.query.to)
+    if (parsedFrom != null && parsedTo != null && parsedFrom > parsedTo) {
+      throw badRequest('from must be earlier than to')
+    }
+    const lastClosedStart = floor(Date.now()) - seconds
+    const toSeconds = Math.min(parsedTo == null ? lastClosedStart : floor(parsedTo), lastClosedStart)
+    const fromSeconds = parsedFrom == null ? toSeconds - (DEFAULT_CANDLES - 1) * seconds : floor(parsedFrom)
+    const empty = { referenceAsset: destinationAsset, referenceSource: 'kraken', pricedAsset: String(baseId), items: [] as PairCandle[] }
+    if (fromSeconds > toSeconds) return empty
+
+    const points = Math.floor((toSeconds - fromSeconds) / seconds) + 1
+    if (points > MAX_CANDLES) {
+      throw badRequest(`the requested window is ${points} ${bucket} candles; at most ${MAX_CANDLES} are served per request`)
+    }
+
+    const key = `pub:prices-xc-pair:${baseId}:${destinationAsset}:${bucket}:${fromSeconds}-${toSeconds}`
+    return cached(key, 5_000, async () => {
+      const [base, foreign] = await Promise.all([
+        // A dollar-pegged base needs no series of its own: its USD price IS 1,
+        // so the pair is the destination's own USD candles inverted.
+        baseIsUsd
+          ? Promise.resolve<OHLCVCandle[]>([])
+          : queryOHLCV(opts.client, { assetId: baseId, startTime: new Date(fromSeconds * 1000), endTime: new Date(toSeconds * 1000), interval }),
+        loadForeignCandles(platform, bucket, seconds),
+      ])
+      const nowSeconds = Math.floor(Date.now() / 1000)
+      const hydration = base
+        .filter(candle => Date.parse(`${candle.interval_start.replace(' ', 'T')}Z`) / 1000 + seconds <= nowSeconds)
+        .map(candle => ({ time: Math.floor(Date.parse(`${candle.interval_start.replace(' ', 'T')}Z`) / 1000), close: decimalText(candle.close) }))
+      // The foreign series carries its venue's whole tail; clamp it to the window
+      // the caller asked for and to the closed-bucket rule both sides obey.
+      const windowed = foreign.filter(c => c.time >= fromSeconds && c.time <= toSeconds && c.time + seconds <= nowSeconds)
+      return {
+        referenceAsset: destinationAsset,
+        referenceSource: 'kraken',
+        pricedAsset: String(baseId),
+        items: crossChainCandles(windowed, hydration, CROSS_SCALE, baseIsUsd),
       }
     })
   })

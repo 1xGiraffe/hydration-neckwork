@@ -525,6 +525,13 @@ services:
       - GIGA_UNBONDING_BLOCKS=${GIGA_UNBONDING_BLOCKS:-}
       - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
       - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
+      # Defuse 1Click, which resolves the destination leg of a cross-chain swap
+      # (which asset, which recipient, how much arrived — none of it is on chain).
+      # Unset leaves the resolution off and the swap shows its on-chain half only.
+      - ONE_CLICK_BASE_URL=${ONE_CLICK_BASE_URL:-https://1click.chaindefuser.com}
+      - ONE_CLICK_TOKEN=${ONE_CLICK_TOKEN:-}
+      # Reference USD candles for cross-chain destinations that do not trade here.
+      - KRAKEN_BASE_URL=${KRAKEN_BASE_URL:-https://api.kraken.com/0/public}
       # Transaction-pool rows (dry-run projections of transactions no block
       # carries yet). OFF unless set to on/1/true/yes: it needs a node that
       # answers author_pendingExtrinsics and the DryRunApi, and what it shows
@@ -585,6 +592,13 @@ services:
       - RAW_EVM_RPC_URL=${RAW_EVM_RPC_URL:-https://hydration-rpc.neckwork.net}
       - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
       - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
+      # Defuse 1Click, which resolves the destination leg of a cross-chain swap
+      # (which asset, which recipient, how much arrived — none of it is on chain).
+      # Unset leaves the resolution off and the swap shows its on-chain half only.
+      - ONE_CLICK_BASE_URL=${ONE_CLICK_BASE_URL:-https://1click.chaindefuser.com}
+      - ONE_CLICK_TOKEN=${ONE_CLICK_TOKEN:-}
+      # Reference USD candles for cross-chain destinations that do not trade here.
+      - KRAKEN_BASE_URL=${KRAKEN_BASE_URL:-https://api.kraken.com/0/public}
     networks:
       - neckwork
 
@@ -629,6 +643,13 @@ services:
       # served as null; the rest of the response is unaffected.
       - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
       - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}
+      # Defuse 1Click, which resolves the destination leg of a cross-chain swap
+      # (which asset, which recipient, how much arrived — none of it is on chain).
+      # Unset leaves the resolution off and the swap shows its on-chain half only.
+      - ONE_CLICK_BASE_URL=${ONE_CLICK_BASE_URL:-https://1click.chaindefuser.com}
+      - ONE_CLICK_TOKEN=${ONE_CLICK_TOKEN:-}
+      # Reference USD candles for cross-chain destinations that do not trade here.
+      - KRAKEN_BASE_URL=${KRAKEN_BASE_URL:-https://api.kraken.com/0/public}
     networks:
       - neckwork
 
