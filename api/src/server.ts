@@ -70,6 +70,7 @@ import { initPoolService } from './services/poolService.ts'
 import { initSecurityService } from './services/securityService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
 import { initWormholeNttService } from './services/wormholeNttService.ts'
+import { initXcswapSettlements } from './services/xcswapSettlements.ts'
 import { startBackgroundRefresh, stopBackgroundRefresh } from './services/backgroundRefresh.ts'
 import { getHdxDashboard } from './services/hdxService.ts'
 import { getHollarDashboard } from './services/hollarService.ts'
@@ -276,6 +277,7 @@ async function start() {
     // Must precede startBackgroundRefresh(): its initial pass discovers the NTT
     // asset set from ClickHouse before it reads any chain.
     initWormholeNttService(client)
+    initXcswapSettlements(client)
     // Must precede startBackgroundRefresh(): its initial pass runs the
     // contract-code snapshot refresher, which reads and writes ClickHouse.
     initContractRegistryService(client)
