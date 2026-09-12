@@ -43,6 +43,7 @@ import { findMempoolTx, findPendingBlock, findPendingExtrinsic, findPendingExtri
 import { buildMempoolActivities, buildPendingActivities, type PendingActivity, type PendingTradeActivity } from './pendingActivity.ts'
 import { feeTierLabel, loadV3Registry, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3SwapAt, type V3Activity, type V3Registry } from './uniswapV3Service.ts'
 import { loadV3AccountPositions, v3AccountPositions } from './uniswapV3Positions.ts'
+import { xcswapSettlementsFor, type XcswapSettlement, type XcswapStatus } from './xcswapSettlements.ts'
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
@@ -7357,6 +7358,141 @@ async function countAssetLimitOrders(assetId: number): Promise<number> {
   return Number((await res.json<{ n: string | number }>())[0]?.n ?? 0)
 }
 
+
+// ---------------------------------------------------------------------------
+// Cross-chain swaps (Hydration -> NEAR Intents)
+//
+// `IntentEmitter.placeOrder` sells the caller's asset for WETH through the Router
+// and settles it over Wormhole NTT toward an Ethereum deposit address that a
+// solver network then converts into NEAR or ZEC (clickhouse/schema/011_xcswap.sql).
+// The user's action is ONE cross-chain swap; the Router sell and the NTT send are
+// how it was carried out, so they are folded behind it.
+// ---------------------------------------------------------------------------
+
+/** The IntentEmitter's ETH-marker AccountId32, which owns the NTT send leg. */
+export const XCSWAP_EMITTER_H160 = '0x98f1ebc9dcc8ab7ba54d83c98500e9e313f793f2'
+export const XCSWAP_EMITTER_ACCOUNT = `0x45544800${XCSWAP_EMITTER_H160.slice(2)}0000000000000000`
+
+interface RawXcswapOrderRow {
+  block_height: number; event_index: number; extrinsic_index: number | null; ts: string
+  transfer_sequence: string | number; deposit_address: string; caller: string
+  caller_account_id: string; asset_in: number; amount_in: string; eth_out: string; max_relay_fee: string
+}
+
+// One order as an activity row. The destination half is attached only when the
+// sweep has resolved it; until then the row says what the chain says — this much
+// of this asset left for an Ethereum deposit address — and nothing more.
+export function xcswapRowFromOrder(
+  r: RawXcswapOrderRow,
+  prices: Map<number, PriceInfo>,
+  settlement: XcswapSettlement | null,
+): ActivityRow {
+  const aIn = asset(r.asset_in)
+  return {
+    type: 'xcswap',
+    blockHeight: Number(r.block_height), timestamp: r.ts,
+    eventIndex: Number(r.event_index), extrinsicIndex: r.extrinsic_index,
+    who: accountRef(r.caller_account_id), to: null,
+    asset: null, assetIn: aIn, assetOut: null,
+    amount: null, amountIn: r.amount_in, amountOut: null,
+    // Valued on the leg Hydration actually recorded — what the caller paid. The
+    // destination's dollar value is a separate, off-chain figure and is carried
+    // as `xcswapDestAmountUsd` rather than replacing this one.
+    valueUsd: usdValue(prices, aIn.assetId, r.amount_in, aIn.decimals),
+    assetRefs: [aIn.assetId],
+    xcswapDepositAddress: r.deposit_address,
+    xcswapSequence: Number(r.transfer_sequence),
+    xcswapEthOut: r.eth_out,
+    xcswapMaxRelayFee: r.max_relay_fee,
+    xcswapStatus: settlement?.status ?? null,
+    xcswapDestAsset: settlement?.destinationAsset ?? null,
+    xcswapDestSymbol: settlement?.destinationSymbol ?? null,
+    xcswapDestChain: settlement?.destinationChain ?? null,
+    xcswapDestDecimals: settlement?.destinationDecimals ?? null,
+    xcswapDestAmount: settlement?.amountOut ?? null,
+    xcswapDestAmountUsd: settlement?.amountOutUsd ?? null,
+    xcswapRecipient: settlement?.recipient ?? null,
+    xcswapDestTxHash: settlement?.destinationTxHash ?? null,
+    xcswapRefundReason: settlement?.refundReason ?? null,
+    linkBlock: Number(r.block_height), linkIndex: r.extrinsic_index,
+  }
+}
+
+// Inside a cross-chain swap the Router sell and the NTT send are how the swap was
+// carried out, not actions of their own: fold them wherever the swap row is shown.
+// The extrinsic/block pages keep them (`keepPot`, the same switch the ICE pot
+// takes) — there the question is how the order executed.
+//
+// The sell is matched on the order's own (asset in, amount in) rather than on "a
+// trade in this extrinsic": a batch that placed an order alongside an unrelated
+// swap must keep the unrelated one. The NTT send is matched on the emitter being
+// its actor, which it only ever is as part of an order.
+export function suppressXcswapPlumbingRows<T extends ActivityRow>(rows: T[], keepPot = false): T[] {
+  if (keepPot) return rows
+  const legKeys = new Set<string>()
+  const bridgeKeys = new Set<string>()
+  for (const r of rows) {
+    if (r.type !== 'xcswap' || r.extrinsicIndex == null) continue
+    bridgeKeys.add(`${r.blockHeight}:${r.extrinsicIndex}`)
+    if (r.assetIn && r.amountIn) legKeys.add(`${r.blockHeight}:${r.extrinsicIndex}:${r.assetIn.assetId}:${r.amountIn}`)
+  }
+  if (!bridgeKeys.size) return rows
+  return rows.filter(r => {
+    if (r.extrinsicIndex == null) return true
+    if (r.type === 'trade' && r.assetIn && r.amountIn
+      && legKeys.has(`${r.blockHeight}:${r.extrinsicIndex}:${r.assetIn.assetId}:${r.amountIn}`)) return false
+    if (r.type === 'xcm' && r.who?.accountId.toLowerCase() === XCSWAP_EMITTER_ACCOUNT
+      && bridgeKeys.has(`${r.blockHeight}:${r.extrinsicIndex}`)) return false
+    return true
+  })
+}
+
+const XCSWAP_COLUMNS_SQL = `
+  block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts,
+  toString(transfer_sequence) AS transfer_sequence, deposit_address, caller,
+  caller_account_id, asset_in, amount_in, eth_out, max_relay_fee`
+
+/**
+ * Cross-chain swaps, newest first. `accounts` scopes to a caller through the
+ * caller-first twin; `assetId` matches the Hydration asset sold, which is the only
+ * registry asset a cross-chain swap touches.
+ */
+export async function getRecentXcswaps(
+  limit: number,
+  from?: string,
+  to?: string,
+  accounts?: string[],
+  offset = 0,
+  assetId?: number,
+  destinationAsset?: string,
+): Promise<ActivityRow[]> {
+  const tw = timeWindow(from, to)
+  const scoped = accounts?.length ? sqlAccountList(accounts) : null
+  if (scoped === "''") return []
+  const clauses = [tw ?? '1']
+  if (scoped) clauses.push(`caller_account_id IN (${scoped})`)
+  if (assetId != null) clauses.push(`asset_in = ${Math.trunc(assetId)}`)
+  const table = scoped ? 'price_data.xcswap_orders_by_account' : 'price_data.xcswap_orders'
+  const key = `explorer:xcswap:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${accounts?.slice().sort().join(',') ?? ''}:${assetId ?? ''}:${destinationAsset ?? ''}`
+  return cached(key, 8000, async () => {
+    const res = await client.query({
+      query: `SELECT ${XCSWAP_COLUMNS_SQL} FROM ${table} FINAL
+              WHERE ${clauses.join(' AND ')}
+              ORDER BY block_height DESC, event_index DESC
+              LIMIT ${Math.trunc(limit)} OFFSET ${Math.trunc(offset)}`,
+      format: 'JSONEachRow',
+    })
+    const orders = await res.json<RawXcswapOrderRow>()
+    if (!orders.length) return []
+    const prices = await ensurePrices()
+    const settlements = xcswapSettlementsFor(orders.map(o => o.deposit_address))
+    const rows = orders.map(o => xcswapRowFromOrder(o, prices, settlements.get(o.deposit_address.toLowerCase()) ?? null))
+    // A destination filter can only be applied once the sweep has named the
+    // destination, so an unresolved order is excluded rather than assumed to match.
+    return destinationAsset ? rows.filter(r => r.xcswapDestAsset === destinationAsset) : rows
+  })
+}
+
 // extrinsic by block-index (design routes #/extrinsic/h-i)
 export async function getExtrinsicAt(height: number, index: number): Promise<ExtrinsicDetail | null> {
   // Pending first (see getBlock): unfinalized extrinsics answer from memory,
@@ -9529,7 +9665,7 @@ export interface XcmFeeLeg {
 
 // unified activity
 export interface ActivityRow {
-  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond' | 'intent'
+  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond' | 'intent' | 'xcswap'
   blockHeight: number
   timestamp: string
   eventIndex?: number | null
@@ -9580,6 +9716,28 @@ export interface ActivityRow {
   intentRemainingBudget?: string | null
   intentMigratedFrom?: number | null
   intentForward?: string | null
+  // Cross-chain swaps out to NEAR Intents. `assetIn`/`amountIn` are the Hydration
+  // side, which is all the chain records; everything below the deposit address is
+  // resolved off-chain and is absent until it is (see xcswapSettlements.ts), never
+  // guessed. The destination is NOT a registry asset — it lives on another chain —
+  // so it travels as its own fields rather than as `assetOut`.
+  xcswapDepositAddress?: string
+  xcswapSequence?: number
+  /** WETH the settlement carries after both rails' fees, and the caller's relay-fee ceiling. */
+  xcswapEthOut?: string
+  xcswapMaxRelayFee?: string
+  xcswapStatus?: XcswapStatus | null
+  /** 1Click asset id of the destination, e.g. `nep141:zec.omft.near`. */
+  xcswapDestAsset?: string | null
+  xcswapDestSymbol?: string | null
+  xcswapDestChain?: string | null
+  xcswapDestDecimals?: number | null
+  xcswapDestAmount?: string | null
+  xcswapDestAmountUsd?: number | null
+  /** Recipient in the destination chain's own address format, never an SS58/H160. */
+  xcswapRecipient?: string | null
+  xcswapDestTxHash?: string | null
+  xcswapRefundReason?: string | null
   votePallet?: string
   // Referendum identity for the row's link, plus the off-chain title. Set only for
   // ConvictionVoting/Democracy rows: Council and Technical Committee votes are not
@@ -14887,7 +15045,7 @@ export function suppressIcePotSettlementTrades<T extends ActivityRow>(rows: T[],
 }
 
 async function suppressActivityPlumbing<T extends ActivityRow>(rows: T[], opts: { keepPot?: boolean } = {}): Promise<T[]> {
-  const out = await suppressDustTransferRows(suppressIcePotSettlementTrades(suppressSubordinateActivityRows(rows), opts.keepPot))
+  const out = await suppressDustTransferRows(suppressXcswapPlumbingRows(suppressIcePotSettlementTrades(suppressSubordinateActivityRows(rows), opts.keepPot), opts.keepPot))
   await applyXcmFeeUsd(out)
   return out
 }
@@ -15937,10 +16095,10 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     let sourceFilters = sourceValueFiltered
       ? filters
       : deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
-    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'xcmExecuted' | 'nttOut' | 'nttIn' | 'staking' | 'bond' | 'intent' | 'vote' | 'v3Trade' | 'v3Liquidity'
+    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'xcmExecuted' | 'nttOut' | 'nttIn' | 'staking' | 'bond' | 'intent' | 'xcswap' | 'vote' | 'v3Trade' | 'v3Liquidity'
     const classifiedSourceKeys: ClassifiedSourceKey[] = [
       'transfer', 'trade', 'dca', 'reward', 'liquidity', 'mm', 'otc',
-      'xcm', 'xcmIn', 'xcmOutRemote', 'xcmExecuted', 'nttOut', 'nttIn', 'staking', 'bond', 'intent', 'vote', 'v3Trade', 'v3Liquidity',
+      'xcm', 'xcmIn', 'xcmOutRemote', 'xcmExecuted', 'nttOut', 'nttIn', 'staking', 'bond', 'intent', 'xcswap', 'vote', 'v3Trade', 'v3Liquidity',
     ]
     const exactSeedSize = activitySourceSeedSize(want)
     const exactSourceLimits = Object.fromEntries(classifiedSourceKeys.map(key => [key, sourceValueFiltered ? exactSeedSize : fetchN])) as Record<ClassifiedSourceKey, number>
@@ -15959,7 +16117,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       })
     }
     for (;;) {
-      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, staking, bonds, intents, votes, v3Trades, v3Liquidity] = await Promise.all([
+      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, staking, bonds, intents, xcswaps, votes, v3Trades, v3Liquidity] = await Promise.all([
         needsFullClassification
           ? loadClassifiedSource('transfer', (sourceLimit, sourceFrom) => getRecentTransfers(sourceLimit, sourceFrom, to, 0, true, sourceFilters))
           : Promise.resolve([]),
@@ -16008,6 +16166,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         // Intents fold under the trade family like otc, so they are read for the trade
         // tab as well as under full classification.
         loadClassifiedSource('intent', (sourceLimit, sourceFrom) => getRecentIntents(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters)),
+        loadClassifiedSource('xcswap', (sourceLimit, sourceFrom) => getRecentXcswaps(sourceLimit, sourceFrom, to, undefined, 0)),
         needsFullClassification
           ? loadClassifiedSource('vote', (sourceLimit, sourceFrom) => getVoteFeedRows(sourceLimit, sourceFrom, to, 0, sourceFilters, withCollective))
           : Promise.resolve([]),
@@ -16078,6 +16237,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         { key: 'staking', fetchSize: sourceFetchSize('staking'), rawSize: staking.length, rows: staking, oldest: oldestOf(staking) },
         { key: 'bond', fetchSize: sourceFetchSize('bond'), rawSize: bonds.length, rows: bonds, oldest: oldestOf(bonds) },
         { key: 'intent', fetchSize: sourceFetchSize('intent'), rawSize: intents.length, rows: intents, oldest: oldestOf(intents) },
+        { key: 'xcswap', fetchSize: sourceFetchSize('xcswap'), rawSize: xcswaps.length, rows: xcswaps, oldest: oldestOf(xcswaps) },
         { key: 'v3Trade', fetchSize: sourceFetchSize('v3Trade'), rawSize: v3Trades.length, rows: userV3Trades, oldest: oldestOf(v3Trades) },
         { key: 'v3Liquidity', fetchSize: sourceFetchSize('v3Liquidity'), rawSize: v3Liquidity.length, rows: v3Liquidity, oldest: oldestOf(v3Liquidity) },
         { key: 'vote', fetchSize: sourceFetchSize('vote'), rawSize: votes.length, rows: votes.map(voteActivityRow), oldest: oldestOf(votes) },
@@ -16093,7 +16253,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       // The trade family's sources — swaps, failed DCA schedules, OTC and intents —
       // selected by key: a positional pick silently swapped otc for mm when a source
       // was inserted above it.
-      const TRADE_FAMILY_SOURCES: ClassifiedSourceKey[] = ['trade', 'dca', 'otc', 'intent', 'v3Trade']
+      const TRADE_FAMILY_SOURCES: ClassifiedSourceKey[] = ['trade', 'dca', 'otc', 'intent', 'xcswap', 'v3Trade']
       const sourcePages = type === 'trade'
         ? allSources.filter(source => TRADE_FAMILY_SOURCES.includes(source.key))
         : type === 'transfer' ? allSources.filter(source => source.key === 'transfer') : allSources
@@ -16176,6 +16336,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
     else if (type === 'bond') rows = await getRecentBonds(fetchN, from, to, undefined, 0, filters, undefined, action)
     else if (type === 'intent') rows = await getRecentIntents(fetchN, from, to, undefined, 0, filters, undefined, action)
+    else if (type === 'xcswap') rows = await getRecentXcswaps(fetchN, from, to, undefined, 0, undefined, action || undefined)
     else rows = (await getVoteFeedRows(fetchN, from, to, 0, filters, withCollective)).map(voteActivityRow)
   } else if (type === 'liquidity') {
     rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters), ...await getRecentV3Rows('liquidity', fetchN, from, to, 0, filters), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'referral')).filter(r => r.type === 'liquidity')]
@@ -16191,6 +16352,8 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     rows = await getRecentBonds(limit, from, to, undefined, offset, filters)
   } else if (type === 'intent') {
     rows = await getRecentIntents(limit, from, to, undefined, offset, filters)
+  } else if (type === 'xcswap') {
+    rows = await getRecentXcswaps(limit, from, to, undefined, offset)
   } else {
     rows = (await getVoteFeedRows(limit, from, to, offset, filters, withCollective)).map(voteActivityRow)
   }
@@ -18133,6 +18296,8 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     // intent folds under the trade chip/type like otc — fetched whenever trade is,
     // plus its own `type=intent` request and the Trade tab's intent actions.
     const wantIntents = type === 'all' || type === 'intent' || wantTrades || intentOnly
+    // A cross-chain swap is a swap, so it joins the trade family like intents do.
+    const wantXcswaps = type === 'all' || type === 'xcswap' || wantTrades
     const wantVotes = (type === 'all' || type === 'vote' || wantTransfers) && assetId === 0
 
     const transfersP: Promise<ActivityRow[]> = wantTransfers ? (async () => {
@@ -18529,6 +18694,9 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     // action into the read, so the one source it has cannot saturate on rows the
     // action then drops.
     const intentsP: Promise<ActivityRow[]> = wantIntents ? getRecentIntents(fetchN, from, to, undefined, 0, queryFilters, assetId, intentOnly ? action : undefined) : Promise.resolve([])
+    // A cross-chain swap SELLS a registry asset, so it belongs on that asset's
+    // feed; the destination it delivers is not a registry asset and has no feed.
+    const xcswapsP: Promise<ActivityRow[]> = wantXcswaps ? getRecentXcswaps(fetchN, from, to, undefined, 0, assetId) : Promise.resolve([])
     // Concentrated-liquidity pools holding the asset: swaps join the trade family, position
     // and vault acts the liquidity family.
     const v3TradesP: Promise<ActivityRow[]> = wantTrades ? getRecentV3Rows('swap', fetchN, from, to, 0, queryFilters, { assetId }) : Promise.resolve([])
@@ -18544,7 +18712,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       ? getVoteFeedRows(fetchN, from, to, 0, queryFilters, collectiveVotesAdmitted(queryFilters)).then(rows => rows.map(voteActivityRow))
       : Promise.resolve([])
 
-    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, bonds, intents, votes, v3Trades, v3Liquidity] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, bondsP, intentsP, votesP, v3TradesP, v3LiquidityP])
+    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, bonds, intents, xcswaps, votes, v3Trades, v3Liquidity] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, bondsP, intentsP, xcswapsP, votesP, v3TradesP, v3LiquidityP])
     // Drop transfer legs of the asset's own trades (hops/fee legs share the extrinsic).
     const tradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
     const userV3Trades = v3Trades.filter(r => !(r.extrinsicIndex != null && tradeExtrinsics.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
@@ -18565,7 +18733,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     const feeSwapKeys = await feePurchaseSwapKeys(trades)
     const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liquidity))
     const userMm = mm.filter(r => !isModuleAcct(r.who))
-    let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc, ...intents, ...userV3Trades, ...v3Liquidity]))
+    let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc, ...intents, ...xcswaps, ...userV3Trades, ...v3Liquidity]))
       .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
     if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
     rows = rows.filter(r => activityRowMatchesAction(r, action))
@@ -18574,7 +18742,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
     rows = rows.filter(r => activityRowMatchesFilters(r, { ...filters, token: undefined }))
     rows.sort(compareActivityRowsNewestFirst)
-    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, bonds, intents, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, v3Trades, v3Liquidity]
+    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, bonds, intents, xcswaps, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, v3Trades, v3Liquidity]
       : type === 'transfer' ? [transfers]
         : type === 'trade' ? [trades, dcaFailures, otc, intents, v3Trades]
           : type === 'liquidity' ? [liquidity, rewards, v3Liquidity]
@@ -20877,6 +21045,8 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   // plus its own `type=intent` request and the Trade tab's intent actions. Owner
   // scope comes from intent_orders.
   const wantIntents = type === 'all' || type === 'intent' || wantTrades || intentOnly
+  // A cross-chain swap is a swap, so it joins the trade family like intents do.
+  const wantXcswaps = type === 'all' || type === 'xcswap' || wantTrades
   const wantVotes = type === 'all' || type === 'vote' || wantTransfers
   // 1. The account's signed swaps. Signer scope and value predicates are joined
   // before LIMIT so a rare token/value match cannot sit beyond a signer window.
@@ -21330,6 +21500,10 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const intents = exact ? exact.enumerated.intents
     : wantIntents ? await getRecentIntents(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
   noteSource(intents.length, oldestWindowBlock(intents, r => r.blockHeight))
+  // The account's cross-chain swaps out through NEAR Intents. Not part of an exact
+  // plan's enumeration: the orders table is its own model, read here directly.
+  const xcswaps = wantXcswaps ? await getRecentXcswaps(catFetch, from, to, accounts, 0) : []
+  noteSource(xcswaps.length, oldestWindowBlock(xcswaps, r => r.blockHeight))
   // Concentrated-liquidity acts of the accounts: swaps under the trade family, position and
   // vault acts under liquidity. Not part of an exact plan's enumeration (its count does
   // not include them either).
@@ -21382,7 +21556,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const userMm = mmTx.filter(r => !isModuleAcct(r.who))
   // The ICE pot's own page keeps its settlement trades: there they are what it did.
   const keepPot = accounts.some(a => a.toLowerCase() === ICE_POT_ACCOUNT)
-  let merged = (await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...bonds, ...intents, ...v3Acts, ...voteRows, ...userMm, ...otc, ...xcm], { keepPot }))
+  let merged = (await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...bonds, ...intents, ...xcswaps, ...v3Acts, ...voteRows, ...userMm, ...otc, ...xcm], { keepPot }))
     .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
   if (type && type !== 'all') merged = merged.filter(r => activityTypeMatchesFamily(r.type, type))
   merged = merged.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))

@@ -69,6 +69,8 @@ const CATEGORY_COLORS: Record<string, string> = {
   stake: CAT.stake,
   bond: CAT.bond,
   intent: CAT.intent,
+  // A cross-chain swap is a swap, so it reads in the trade family's colour.
+  xcswap: CAT.trade,
   vote: CAT.vote,
 }
 // Charts that are not scoped to a category — the unfiltered activity histogram,
@@ -195,6 +197,17 @@ export function activityBadge(r: ActivityRow): { label: string; col: string } {
     return { label: BOND_LABELS[a] ?? 'Bond', col: BOND_COLORS[a] ?? CAT.bond }
   }
   if (r.type === 'intent') return { label: intentLabel(r.intentKind, r.intentAction), col: INTENT_COLORS[r.intentAction ?? ''] ?? CAT.intent }
+  // A cross-chain swap's badge names its OUTCOME, because the on-chain half always
+  // succeeds and says nothing about whether the swap landed: the order is placed
+  // here and settled on another chain minutes later. `Sent` is the honest label
+  // while that is unknown — not `Swapped`, which would claim delivery.
+  if (r.type === 'xcswap') {
+    const status = r.xcswapStatus
+    if (status === 'SUCCESS') return { label: 'Cross-chain swap', col: CAT.trade }
+    if (status === 'REFUNDED') return { label: 'Refunded', col: CAT.intentCancel }
+    if (status === 'FAILED') return { label: 'Failed', col: 'var(--red)' }
+    return { label: 'Sent', col: CAT.xcm }
+  }
   if (r.type === 'vote') return { label: voteLabel(r.voteAction), col: voteColor(r.voteAction) }
   if (r.type === 'liquidity') {
     const a = r.liqAction ?? ''

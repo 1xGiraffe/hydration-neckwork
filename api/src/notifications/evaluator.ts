@@ -898,6 +898,7 @@ const INTENT_VERB: Record<string, string> = {
 const ACTIVITY_LABEL: Record<ActivityRow['type'], string> = {
   transfer: 'Transfer', trade: 'Swap', xcm: 'Cross-chain', liquidity: 'Liquidity',
   mm: 'Money market', dca: 'DCA', staking: 'Staking', vote: 'Vote', otc: 'OTC', bond: 'Bond', intent: 'Intent',
+  xcswap: 'Cross-chain swap',
 }
 function activityHeadline(row: ActivityRow): string {
   if (row.type === 'liquidity' && row.liqAction === 'ClaimReferral') return 'Claim referral rewards'
