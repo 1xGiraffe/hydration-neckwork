@@ -12,7 +12,7 @@ import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
-import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, ActiveDcaTable, LiquidityPositionsTable } from '../components/AccountSections'
+import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, ActiveDcaTable, LimitOrdersTable, LiquidityPositionsTable } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { useTagMapVersion } from '../userTags'
 import { useStats } from '../hooks/useExplorerData'
@@ -82,13 +82,14 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
           const balances = data.balances ?? []
           const mmList = data.moneyMarket ?? []
           const activeDcas = data.activeDcas ?? []
+          const limitOrders = data.openLimitOrders ?? []
           const liquidityPositions = data.liquidityPositions ?? []
           const portfolioSeries = data.portfolioSeries ?? []
           const balanceHistory = data.balanceHistory ?? []
           // Zoom refinement needs the base points' block heights, aligned 1:1.
           const historyBlocks = data.portfolioBlocks && data.portfolioBlocks.length === portfolioSeries.length ? data.portfolioBlocks : undefined
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(balances.length, mmList, activeDcas.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
+          const tabs = profileTabs(balances.length, mmList, activeDcas.length + limitOrders.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
@@ -164,6 +165,7 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
               {activeView === 'positions' && (<>
               <MoneyMarketPositions markets={mmList} />
               {activeDcas.length > 0 && <ActiveDcaTable dcas={activeDcas} headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />}
+              {limitOrders.length > 0 && <LimitOrdersTable orders={limitOrders} now={now} />}
               {liquidityPositions.length > 0 && <LiquidityPositionsTable positions={liquidityPositions} />}
               </>)}
 

@@ -6,7 +6,7 @@ import { api } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, Copy, ShortAddr, ProfilePageSkeleton, DetailTabs, moduleName, emojiName, TagIcon, AccountEmoji, UserTagPill, rowNav, EmptyRow } from '../components/ui'
-import { PortfolioChart, ProfileStats, MoneyMarketPositions, moneyMarketDebtUsd, profileTabs, ActiveDcaTable, LiquidityPositionsTable, ProxyMultisigSection, ContractSection } from '../components/AccountSections'
+import { PortfolioChart, ProfileStats, MoneyMarketPositions, moneyMarketDebtUsd, profileTabs, ActiveDcaTable, LimitOrdersTable, LiquidityPositionsTable, ProxyMultisigSection, ContractSection } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
@@ -113,7 +113,7 @@ export function Account({ address }: { address: string }) {
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
           // Debt counts from every market and is netted out of the portfolio Value.
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(data.balances.length, mmList, data.activeDcas?.length ?? 0, data.liquidityPositions?.length ?? 0, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
+          const tabs = profileTabs(data.balances.length, mmList, (data.activeDcas?.length ?? 0) + (data.openLimitOrders?.length ?? 0), data.liquidityPositions?.length ?? 0, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
           const activeView = tabs.some(t => t.key === view) ? view : 'overview'
           return (
             <>
@@ -240,6 +240,7 @@ export function Account({ address }: { address: string }) {
               {activeView === 'positions' && (<>
               <MoneyMarketPositions markets={mmList} defisimAddress={data.evmAddress ?? explicitEvmBinding ?? data.accountId} />
               {data.activeDcas && <ActiveDcaTable dcas={data.activeDcas} headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />}
+              {data.openLimitOrders && <LimitOrdersTable orders={data.openLimitOrders} now={now} />}
               {data.liquidityPositions && <LiquidityPositionsTable positions={data.liquidityPositions} />}
               </>)}
 

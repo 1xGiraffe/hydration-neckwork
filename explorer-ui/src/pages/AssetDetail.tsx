@@ -1,11 +1,12 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
-import { useActivityCount, useAsset, useAssetActivity, useAssetDcas, useHolders, useStats } from '../hooks/useExplorerData'
+import { useActivityCount, useAsset, useAssetActivity, useAssetDcas, useAssetLimitOrders, useHolders, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { api } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, useQuery, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, AssetIcon, AssetAmount, AddrPill, AssetDetailSkeleton, TableSkeleton, EmptyRow, rowNav, accountHref, TagGroupPill, ActivityChips, Pager, normalizeActivityType, normalizeActivityAction, Dash, pendingRows } from '../components/ui'
 import { ActiveDcaTable } from '../components/AccountSections'
+import { AssetOrderBook } from '../components/AssetOrderBook'
 import { AssetLiquidityTab } from '../components/AssetLiquidity'
 import { FilterZone, useFilters } from '../components/Filters'
 import { activityFilterFields } from '../components/activityFilters'
@@ -43,7 +44,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
   const now = useNow()
   const q = useQuery()
   const rawTab = q.get('tab')
-  const tab = (rawTab === 'holders' || rawTab === 'activity' || rawTab === 'dcas' || rawTab === 'liquidity' ? rawTab : initialTab) as 'holders' | 'activity' | 'dcas' | 'liquidity'
+  const tab = (rawTab === 'holders' || rawTab === 'activity' || rawTab === 'dcas' || rawTab === 'orders' || rawTab === 'liquidity' ? rawTab : initialTab) as 'holders' | 'activity' | 'dcas' | 'orders' | 'liquidity'
   const activityType = normalizeActivityType(useQueryValue('type', 'all'))
   // Activities filters — the same set as the global feed minus the token combo
   // (this page IS the token filter). `page` resets whenever a filter changes.
@@ -85,6 +86,8 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
   const dcaBuys = dcas.data?.buys ?? []
   const dcaSells = dcas.data?.sells ?? []
   const { data: stats } = useStats(tab === 'dcas' && !!(dcaBuys.length || dcaSells.length))
+  // Resting limit orders on this asset — its own tab, its own tab-scoped fetch.
+  const book = useAssetLimitOrders(assetId, tab === 'orders')
   // A /hdx "N orders" deep link lands with ?side=buys|sells: scroll that section
   // into view once there are rows to scroll to. The path navigation has already
   // reset scroll to the top, so this fires at most once per landing; switching
@@ -154,6 +157,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
               <button className={tab === 'holders' ? 'active' : ''} onClick={() => setQuery({ tab: 'holders', page: null, hpage: null, side: null })}>Holders <span className="cnt">{F.int(data.holderCount)}</span></button>
               <button className={tab === 'liquidity' ? 'active' : ''} onClick={() => setQuery({ tab: 'liquidity', page: null, hpage: null, side: null })}>Liquidity {data.liquiditySourceCount != null && <span className="cnt">{F.int(data.liquiditySourceCount)}</span>}</button>
               <button className={tab === 'dcas' ? 'active' : ''} onClick={() => setQuery({ tab: 'dcas', page: null, hpage: null, side: null })}>DCAs <span className="cnt">{F.int(data.dcaCount)}</span></button>
+              <button className={tab === 'orders' ? 'active' : ''} onClick={() => setQuery({ tab: 'orders', page: null, hpage: null, side: null })}>Limit orders {data.limitOrderCount != null && <span className="cnt">{F.int(data.limitOrderCount)}</span>}</button>
             </div>
 
             {tab === 'activity' && <>
@@ -211,6 +215,17 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
                         emptyText={`No ongoing DCA orders selling ${a.symbol}`} />
                     </div>
                   </>
+            )}
+
+            {/* Resting limit orders (unfilled swap intents) as a two-sided book.
+                Unlike the DCA sections this one hides nothing when a side is
+                empty: an empty ladder IS the book's answer. */}
+            {tab === 'orders' && (
+              book.isLoading && !book.data
+                ? <div className="panel"><table className="tbl"><tbody><TableSkeleton cols={4} rows={6} /></tbody></table></div>
+                : book.isError
+                  ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load the limit orders</div>
+                  : <AssetOrderBook book={book.data ?? { bids: [], asks: [] }} asset={a} />
             )}
           </>
         )}

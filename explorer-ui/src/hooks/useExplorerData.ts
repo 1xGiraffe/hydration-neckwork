@@ -255,6 +255,12 @@ export function useAssetDcas(assetId: number | null, enabled = true) {
   const ri = useInterval(DETAIL_POLL_MS)
   return useQuery({ queryKey: ['asset-dcas', assetId], queryFn: ({ signal }) => api.assetDcas(assetId as number, signal), enabled: assetId != null && enabled, refetchInterval: enabled ? ri : false, staleTime: BLOCK_STALE_MS })
 }
+// The asset page's Limit orders tab — the resting book, on the same tab-scoped
+// fetch and cadence as the DCAs tab: a fill can land in any block.
+export function useAssetLimitOrders(assetId: number | null, enabled = true) {
+  const ri = useInterval(DETAIL_POLL_MS)
+  return useQuery({ queryKey: ['asset-limit-orders', assetId], queryFn: ({ signal }) => api.assetLimitOrders(assetId as number, signal), enabled: assetId != null && enabled, refetchInterval: enabled ? ri : false, staleTime: BLOCK_STALE_MS })
+}
 // A tag's members as directory rows — the same table /accounts renders, so a
 // tag reads as the slice of the directory it is.
 export function useTagMembers(tagId: string | null) {

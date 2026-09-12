@@ -890,13 +890,37 @@ async function loadDailyFlows(): Promise<HdxDailyFlow[]> {
 //    order of magnitude. Open-ended budgets (total_amount = 0) are uncapped.
 // Per-execution HDX is exact when the order is denominated in HDX; otherwise
 // it's the average of that schedule's actual executions.
+//
+// Runtime 443's DCA intents are the same flow through a different pallet, so they
+// are measured the same way and summed into the same two figures — the card
+// answers "how much HDX do ongoing DCA orders move", and which pallet schedules
+// an order is not part of that question. They are a separate query rather than a
+// branch inside this one: an intent's executions live in intent_events, its
+// budget in `budget`, and it is always fixed-input (buy-side DCA was removed in
+// runtime 440), so nothing but the arithmetic is shared.
 async function loadDcaFlows(): Promise<HdxDashboard['flows']['dca']> {
+  const [schedules, intents] = await Promise.all([loadDcaScheduleFlows(), loadDcaIntentFlows()])
+  const side = (sell: boolean) => {
+    const a = schedules.find(x => x.sell === sell), b = intents.find(x => x.sell === sell)
+    return { orders: (a?.orders ?? 0) + (b?.orders ?? 0), hdxPerDay: (a?.hdxPerDay ?? 0) + (b?.hdxPerDay ?? 0) }
+  }
+  return { buy: side(false), sell: side(true) }
+}
+
+interface DcaFlowSide { sell: boolean; orders: number; hdxPerDay: number }
+
+async function loadDcaScheduleFlows(): Promise<DcaFlowSide[]> {
   const total = 'toUInt256OrZero(s.total_amount)'
   const spent = 'ifNull(e.sum_in, toUInt256(0))'
   const remaining = nonNegativeUIntDifferenceSql(total, spent)
   const res = await client.query({
     query: `
-      WITH done AS (SELECT DISTINCT id FROM price_data.dca_events WHERE event_name IN ('DCA.Completed', 'DCA.Terminated')),
+      WITH done AS (SELECT DISTINCT id FROM price_data.dca_events
+                    -- Migrated/MigrationCancelled end a schedule too (runtime 443).
+                    -- A migrated one continues as a DCA intent, which the intent
+                    -- query below counts, so omitting them here would book the
+                    -- same order's flow twice.
+                    WHERE event_name IN ('DCA.Completed', 'DCA.Terminated', 'DCA.Migrated', 'DCA.MigrationCancelled')),
       execstats AS (SELECT id, count() AS executions,
                            sum(toUInt256OrZero(amount_in)) AS sum_in,
                            sum(toUInt256OrZero(amount_out)) AS sum_out
@@ -923,12 +947,57 @@ async function loadDcaFlows(): Promise<HdxDashboard['flows']['dca']> {
       GROUP BY is_sell`,
     format: 'JSONEachRow',
   })
-  const rows = await res.json<{ is_sell: number; orders: number; hdx_per_day: number }>()
-  const pick = (sell: boolean) => {
-    const r = rows.find(x => Boolean(Number(x.is_sell)) === sell)
-    return { orders: Number(r?.orders ?? 0), hdxPerDay: Number(r?.hdx_per_day ?? 0) }
-  }
-  return { buy: pick(false), sell: pick(true) }
+  return dcaFlowSides(await res.json<DcaFlowRow>())
+}
+
+type DcaFlowRow = { is_sell: number; orders: number; hdx_per_day: number }
+function dcaFlowSides(rows: DcaFlowRow[]): DcaFlowSide[] {
+  return rows.map(r => ({ sell: Boolean(Number(r.is_sell)), orders: Number(r.orders), hdxPerDay: Number(r.hdx_per_day) }))
+}
+
+// The DCA-intent twin of the query above, same two caps (measured blocks per day
+// over the order's period, and what its remaining budget can still fund) and the
+// same per-execution HDX rule — exact on the HDX leg when the order is
+// denominated in HDX, the order's own average execution otherwise.
+//
+// Two intent-only details: an empty `budget` is the pallet's rolling re-reserve,
+// which is the uncapped open-ended order `total_amount = 0` spells for a
+// schedule; and a DCA intent is always fixed-input, so `amount_in` is the
+// per-trade amount on the sell side and the output has to be averaged from its
+// executions on the buy side.
+async function loadDcaIntentFlows(): Promise<DcaFlowSide[]> {
+  const res = await client.query({
+    query: `
+      WITH done AS (SELECT DISTINCT intent_id FROM price_data.intent_events
+                    WHERE event_name IN ('Intent.IntentCanceled', 'Intent.IntentExpired', 'Intent.DcaCompleted')),
+      execstats AS (SELECT intent_id, count() AS executions,
+                           sum(toUInt256OrZero(amount_in)) AS sum_in,
+                           sum(toUInt256OrZero(amount_out)) AS sum_out
+                    FROM price_data.intent_events FINAL
+                    WHERE event_name = 'Intent.DcaTradeExecuted' GROUP BY intent_id),
+      bpd AS (SELECT count() AS blocks FROM price_data.raw_blocks WHERE block_timestamp > now() - INTERVAL 24 HOUR),
+      live AS (SELECT intent_id, asset_in, asset_out, amount_in, budget, period
+               FROM price_data.intent_orders FINAL
+               WHERE kind = 'dca' AND (asset_in = 0 OR asset_out = 0))
+      SELECT s.asset_in = 0 AS is_sell, count() AS orders,
+        sum(
+          least(
+            (SELECT blocks FROM bpd) / nullIf(s.period, 0),
+            if(toUInt256OrZero(s.budget) > 0,
+               toFloat64(${nonNegativeUIntDifferenceSql('toUInt256OrZero(s.budget)', 'ifNull(e.sum_in, toUInt256(0))')})
+                 / nullIf(if(e.executions > 0, toFloat64(e.sum_in) / e.executions, toFloat64OrZero(s.amount_in)), 0),
+               1e15)
+          ) * if(s.asset_in = 0,
+                 toFloat64OrZero(s.amount_in),
+                 if(e.executions > 0, toFloat64(e.sum_out) / e.executions, 0))
+        ) / 1e12 AS hdx_per_day
+      FROM live s
+      LEFT ANTI JOIN done ON done.intent_id = s.intent_id
+      LEFT JOIN execstats e ON e.intent_id = s.intent_id
+      GROUP BY is_sell`,
+    format: 'JSONEachRow',
+  })
+  return dcaFlowSides(await res.json<DcaFlowRow>())
 }
 
 async function loadChurn(): Promise<HdxDashboard['churn']> {
