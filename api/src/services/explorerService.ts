@@ -10815,6 +10815,9 @@ export interface ParsedOutboundXcm {
   // funded Moonbeam's GMP precompile this way). It carries no payload here; a sibling
   // send in the same extrinsic to the same chain is what funded it.
   transact: boolean
+  // The message's topic id (PolkadotXcm.Sent `messageId`; the XTokens events name
+  // none). This is the key the journey index is stored under — see outboundXcmRow.
+  messageId: string | null
 }
 export function parseOutboundXcm(argsRaw: unknown): ParsedOutboundXcm | null {
   const args = argsRaw as {
@@ -10825,8 +10828,14 @@ export function parseOutboundXcm(argsRaw: unknown): ParsedOutboundXcm | null {
     origin?: { interior?: unknown }
     destination?: { parents?: number; interior?: { value?: unknown } }
     message?: { __kind?: string; value?: unknown; assets?: unknown }[]
+    messageId?: unknown
   } | null
   if (!args || typeof args !== 'object') return null
+  // Only a well-formed 32-byte topic is a key; anything else would look up nothing
+  // and, carried onto the row, would be shown to a reader as this send's identity.
+  const messageId = typeof args.messageId === 'string' && /^0x[0-9a-f]{64}$/i.test(args.messageId)
+    ? args.messageId.toLowerCase()
+    : null
 
   if (typeof args.sender === 'string') {
     // Every leg the send names, INCLUDING two of the same amount. Folding equal
@@ -10855,7 +10864,7 @@ export function parseOutboundXcm(argsRaw: unknown): ParsedOutboundXcm | null {
     const feeIsIdentifiable = typeof feeAmount === 'string'
       && amounts.filter(amount => amount === feeAmount).length === 1
     const fee = amounts.length > 1 && feeIsIdentifiable ? feeAmount : null
-    return { sender: args.sender, amounts: fee ? amounts.filter(a => a !== fee) : amounts, dest: xcmDestination(args), fee: fee ? { amount: fee } : null, transact: false }
+    return { sender: args.sender, amounts: fee ? amounts.filter(a => a !== fee) : amounts, dest: xcmDestination(args), fee: fee ? { amount: fee } : null, transact: false, messageId }
   }
 
   if (args.origin && Array.isArray(args.message)) {
@@ -10911,7 +10920,7 @@ export function parseOutboundXcm(argsRaw: unknown): ParsedOutboundXcm | null {
     }
     // A Transact message withdraws and pays at the DESTINATION: none of its amounts is
     // a Hydration leg, so it carries no payload here.
-    return { sender: senderId, amounts: transact ? [] : transferAmounts.length ? transferAmounts : amounts, dest, fee: feeOnly ? { amount: feeOnly } : null, transact }
+    return { sender: senderId, amounts: transact ? [] : transferAmounts.length ? transferAmounts : amounts, dest, fee: feeOnly ? { amount: feeOnly } : null, transact, messageId }
   }
 
   return null
@@ -11055,12 +11064,17 @@ async function applyXcmFeeUsd(rows: readonly ActivityRow[]): Promise<void> {
   }
 }
 
-function outboundXcmRow(
+// One leg of one outbound send as a row. It takes the whole parsed send rather than
+// its destination alone because the row must also carry the send's TOPIC: the local
+// junction names only the first hop, and the topic is the key — the only one that
+// outlives the process — by which applyXcmOutDests reaches the journey that knows
+// where the transfer actually ended (a Snowbridge withdrawal handed to AssetHub
+// otherwise renders as a transfer to AssetHub).
+export function outboundXcmRow(
   event: { block_height: number; ts: string; event_index: number; extrinsic_index: number | null },
-  sender: string,
+  parsed: Pick<ParsedOutboundXcm, 'sender' | 'dest' | 'messageId'>,
   assetId: number,
   amount: string,
-  destination: Pick<ActivityRow, 'destChain' | 'destParachainId' | 'destAccount'>,
   prices: Map<number, PriceInfo>,
   fees: XcmFeeLeg[] = [],
 ): ActivityRow {
@@ -11072,7 +11086,7 @@ function outboundXcmRow(
     timestamp: event.ts,
     eventIndex: event.event_index,
     extrinsicIndex: event.extrinsic_index,
-    who: accountRef(sender),
+    who: accountRef(parsed.sender),
     to: null,
     asset: transferAsset,
     assetIn: null,
@@ -11082,7 +11096,8 @@ function outboundXcmRow(
     amountOut: null,
     valueUsd: usdValue(prices, transferAsset.assetId, amount, transferAsset.decimals),
     xcmDir: 'out',
-    ...destination,
+    messageId: parsed.messageId,
+    ...parsed.dest,
     linkBlock: event.block_height,
     linkIndex: event.extrinsic_index,
   }
@@ -11200,7 +11215,7 @@ async function buildOutboundXcmRows(
     parsed.amounts.forEach((amount, index) => {
       const assetId = legAssets[index]
       if (assetId == null) return
-      out.push(outboundXcmRow(event, parsed.sender, assetId, amount, parsed.dest, prices, fees))
+      out.push(outboundXcmRow(event, parsed, assetId, amount, prices, fees))
     })
   }
   await applyHistoricalUsd(out, activityHistPick)
@@ -12439,36 +12454,48 @@ async function applyXcmOutDests(rows: ActivityRow[]): Promise<void> {
   // none of 47 NTT journeys' origin hashes matches an extrinsic or EVM tx hash.
   const outRows = rows.filter(r => r.type === 'xcm' && r.xcmDir === 'out' && r.extrinsicIndex != null && r.bridge == null)
   if (!outRows.length) return
-  const pairs = [...new Set(outRows.map(r => `${r.blockHeight}:${r.extrinsicIndex}`))]
-  const tuples = pairs.map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
-  const res = await client.query({
-    query: `SELECT block_height, extrinsic_index, extrinsic_hash FROM price_data.raw_extrinsics WHERE (block_height, extrinsic_index) IN (${tuples})`,
-    format: 'JSONEachRow',
-  })
-  const hashByPair = new Map<string, string>()
-  for (const e of await res.json<{ block_height: number; extrinsic_index: number; extrinsic_hash: string }>()) {
-    if (e.extrinsic_hash) hashByPair.set(`${e.block_height}:${e.extrinsic_index}`, e.extrinsic_hash.toLowerCase())
-  }
-  const keys = outRows
-    .map(r => ({ txHash: hashByPair.get(`${r.blockHeight}:${r.extrinsicIndex}`) ?? '', timestampMs: activityRowTimestampMs(r) }))
-    .filter(k => k.txHash)
-  // Two keys, because neither covers outbound alone. The extrinsic hash is exact but
-  // absent from roughly half of outbound BRIDGE journeys, and those are precisely the
-  // ones whose real destination lies past the sibling we handed the message to. The
-  // topic id is on every one of them, is what this row already carries, and is what
-  // the persisted table is keyed by — so it also survives a restart, which the
-  // hash-keyed map (memory only) does not.
+  // Two keys, because neither covers outbound alone. The topic id is carried by every
+  // pallet_xcm send, is already on the row, and is what the persisted table is keyed
+  // by, so it is asked first and answers nearly everything. The extrinsic hash covers
+  // what is left — the XTokens shape names no topic — but it is absent from roughly
+  // half of outbound BRIDGE journeys, and it costs both a read here and an unsorted
+  // scan of the journey table, so it is only ever asked for the remainder.
   const byTopic = await xcmJourneySourcesFor(outRows
     .filter(r => r.messageId)
     .map(r => ({ messageId: r.messageId!, timestampMs: activityRowTimestampMs(r), bridge: looksBridged(r) })))
-  const journeys = keys.length ? await xcmJourneysByOriginTx(keys) : new Map()
+  // The topic hit is the more complete of the two when both answer, since it carries
+  // the API's own rendering of the destination account.
+  const byRow = new Map<ActivityRow, XcmJourneySource>()
   for (const r of outRows) {
-    const hash = hashByPair.get(`${r.blockHeight}:${r.extrinsicIndex}`)
-    const list = hash ? journeys.get(hash) : undefined
-    const topicHit = r.messageId ? byTopic.get(r.messageId) : undefined
-    // Prefer whichever names a destination; the topic hit is the more complete of the
-    // two, since it carries the API's own rendering of the account.
-    const src = topicHit?.destination ? topicHit : (list && list.length === 1 ? list[0] : undefined)
+    const hit = r.messageId ? byTopic.get(r.messageId) : undefined
+    if (hit?.destination) byRow.set(r, hit)
+  }
+  const needHash = outRows.filter(r => !byRow.has(r))
+  if (needHash.length) {
+    const pairs = [...new Set(needHash.map(r => `${r.blockHeight}:${r.extrinsicIndex}`))]
+    const tuples = pairs.map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
+    const res = await client.query({
+      query: `SELECT block_height, extrinsic_index, extrinsic_hash FROM price_data.raw_extrinsics WHERE (block_height, extrinsic_index) IN (${tuples})`,
+      format: 'JSONEachRow',
+    })
+    const hashByPair = new Map<string, string>()
+    for (const e of await res.json<{ block_height: number; extrinsic_index: number; extrinsic_hash: string }>()) {
+      if (e.extrinsic_hash) hashByPair.set(`${e.block_height}:${e.extrinsic_index}`, e.extrinsic_hash.toLowerCase())
+    }
+    const keys = needHash
+      .map(r => ({ txHash: hashByPair.get(`${r.blockHeight}:${r.extrinsicIndex}`) ?? '', timestampMs: activityRowTimestampMs(r) }))
+      .filter(k => k.txHash)
+    const journeys = keys.length ? await xcmJourneysByOriginTx(keys) : new Map<string, XcmJourneySource[]>()
+    for (const r of needHash) {
+      const hash = hashByPair.get(`${r.blockHeight}:${r.extrinsicIndex}`)
+      // An extrinsic batching several journeys names them all under one hash and they
+      // cannot be told apart by it, so an ambiguous match keeps the local junction data.
+      const list = hash ? journeys.get(hash) : undefined
+      if (list?.length === 1) byRow.set(r, list[0])
+    }
+  }
+  for (const r of outRows) {
+    const src = byRow.get(r)
     if (!src?.destination) continue
     const dest = externalChainRef(src.destination, src.to, src.toFormatted)
     // A journey whose destination is Hydration is this row's own arrival, not its
@@ -17558,7 +17585,7 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       for (const amount of parsed.amounts) {
         const cid = withdrawnByAmount.get(amount)
         if (cid == null) continue
-        rows.push(outboundXcmRow(e, parsed.sender, cid, amount, parsed.dest, prices, fees))
+        rows.push(outboundXcmRow(e, parsed, cid, amount, prices, fees))
       }
     }
     // An MRL send had Moonbeam call the Wormhole TokenBridge for the user; the arbiter
@@ -18709,7 +18736,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
           type: 'xcm', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
           who: accountRef(parsed.sender), to: null, asset: a, assetIn: null, assetOut: null,
           amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
-          xcmDir: 'out', ...parsed.dest, linkBlock: r.block_height, linkIndex: r.extrinsic_index,
+          xcmDir: 'out', messageId: parsed.messageId, ...parsed.dest, linkBlock: r.block_height, linkIndex: r.extrinsic_index,
         })
       }
       return out

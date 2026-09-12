@@ -18,7 +18,7 @@ const FROM_2 = '0x' + 'b'.repeat(64)
 const FROM_PERSISTED = '0x' + 'c'.repeat(64)
 
 type InsertArgs = { table: string; values: { message_id: string; from_hex: string; origin_urn: string }[] }
-type QueryArgs = { query: string; query_params: { ids: string[] } }
+type QueryArgs = { query: string; query_params: { ids?: string[]; txs?: string[] } }
 
 function fakeClient(overrides: { query?: ReturnType<typeof makeQueryMock>; insert?: ReturnType<typeof makeInsertMock> } = {}) {
   return {
@@ -144,7 +144,7 @@ describe('xcmJourneySourcesFor', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const { initXcmJourneyService, xcmJourneySourcesFor } = await import('../src/services/xcmJourneyService.ts')
-    const query = makeQueryMock(async ({ query_params }) => (query_params.ids.includes(MSG_PERSISTED)
+    const query = makeQueryMock(async ({ query_params }) => (query_params.ids?.includes(MSG_PERSISTED)
       ? [{ message_id: MSG_PERSISTED, from_hex: FROM_PERSISTED, origin_urn: ORIGIN_URN }]
       : []))
     initXcmJourneyService(fakeClient({ query }) as never)
@@ -519,6 +519,49 @@ describe('xcmJourneysByOriginTx', () => {
         destination: 'urn:ocn:polkadot:2004',
       })
     })
+  })
+
+  // The in-memory map holds only what the live refresh has walked, so a send older
+  // than that window — which is every send a reader reaches from a block, extrinsic
+  // or account page — finds nothing in it, and the row keeps the sibling parachain
+  // it was handed to as its destination. The persisted table holds every resolution
+  // this deployment has ever learned; block 13,859,226's apyUSD send has sat in it
+  // as `urn:ocn:ethereum:1 / snowbridge` while the page kept saying "AssetHub".
+  const SNOWBRIDGE_ROW = (originTx: string) => ({
+    message_id: MSG_PERSISTED,
+    from_hex: '', from_formatted: '',
+    origin_urn: 'urn:ocn:polkadot:2034', origin_tx: originTx, origin_protocol: 'xcm',
+    dest_urn: 'urn:ocn:ethereum:1', dest_tx: '', dest_protocol: 'snowbridge',
+    to_hex: FROM_PERSISTED, to_formatted: '',
+  })
+  // Answers a lookup keyed on origin tx hashes, and nothing else.
+  const persistedByOriginTx = (rows: ReturnType<typeof SNOWBRIDGE_ROW>[]) =>
+    makeQueryMock(async ({ query_params }) => (query_params.txs ? rows.filter(r => query_params.txs!.includes(r.origin_tx)) : []))
+
+  it('resolves an outbound send from the persisted table when the memory map is cold', async () => {
+    const txHash = '0x' + 'e'.repeat(64)
+    vi.stubEnv('EXPLORER_OCELLOIDS_TOKEN', 'test-token')
+    vi.stubGlobal('fetch', makeFetchMock(async () => ({ ok: true, json: async () => ({ items: [], pageInfo: { hasNextPage: false } }) })))
+    const { initXcmJourneyService, xcmJourneysByOriginTx } = await import('../src/services/xcmJourneyService.ts')
+    initXcmJourneyService(fakeClient({ query: persistedByOriginTx([SNOWBRIDGE_ROW(txHash)]) }) as never)
+
+    expect((await xcmJourneysByOriginTx([{ txHash, timestampMs: Date.now() }])).get(txHash)?.[0]).toMatchObject({
+      destination: 'urn:ocn:ethereum:1',
+      destProtocol: 'snowbridge',
+      to: FROM_PERSISTED,
+    })
+  })
+
+  // A persisted resolution is ours already; it needs no upstream credentials to read,
+  // exactly as the topic-keyed lookup does not.
+  it('serves a persisted resolution with no upstream token configured', async () => {
+    const txHash = '0x' + 'f'.repeat(64)
+    vi.stubEnv('EXPLORER_OCELLOIDS_TOKEN', '')
+    const { initXcmJourneyService, xcmJourneysByOriginTx } = await import('../src/services/xcmJourneyService.ts')
+    initXcmJourneyService(fakeClient({ query: persistedByOriginTx([SNOWBRIDGE_ROW(txHash)]) }) as never)
+
+    expect((await xcmJourneysByOriginTx([{ txHash, timestampMs: Date.now() }])).get(txHash)?.[0])
+      .toMatchObject({ destProtocol: 'snowbridge' })
   })
 })
 
