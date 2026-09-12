@@ -33,6 +33,7 @@ const ListDetail = lazy(() => import('./pages/ListDetail').then(m => ({ default:
 const Assets = lazy(() => import('./pages/Assets').then(m => ({ default: m.Assets })))
 const AssetDetail = lazy(() => import('./pages/AssetDetail').then(m => ({ default: m.AssetDetail })))
 const PoolDetail = lazy(() => import('./pages/PoolDetail').then(m => ({ default: m.PoolDetail })))
+const XcDestination = lazy(() => import('./pages/XcDestination').then(m => ({ default: m.XcDestination })))
 const UniswapV3Pool = lazy(() => import('./pages/UniswapV3Pool').then(m => ({ default: m.UniswapV3Pool })))
 const Omnipool = lazy(() => import('./pages/Omnipool').then(m => ({ default: m.Omnipool })))
 const Liquidity = lazy(() => import('./pages/Liquidity').then(m => ({ default: m.Liquidity })))
@@ -105,6 +106,7 @@ export default function App() {
       case 'asset': return <AssetDetail assetId={route.assetId} />
       case 'holders': return <AssetDetail assetId={route.assetId} initialTab="holders" />
       case 'pool': return <PoolDetail poolId={route.poolId} />
+      case 'xcDestination': return <XcDestination slug={route.slug} />
       case 'v3pool': return <UniswapV3Pool address={route.address} />
       case 'omnipool': return <Omnipool />
       case 'liquidity': return <Liquidity />

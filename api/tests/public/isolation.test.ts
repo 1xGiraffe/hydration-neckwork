@@ -22,6 +22,10 @@ const ALLOWED_SHARED = new Set([
   'services/volumeService.ts',
   // Venue-neutral valuation/money helpers, moved out of poolVolumes.ts so the
   // revenue read models can share them (the public tree is an import leaf).
+  // Kraken's public OHLC, the reference series for cross-chain destinations that
+  // do not trade on Hydration. Shared because the explorer's destination pages
+  // need the same prices the public pair route composes.
+  'services/foreignCandles.ts',
   'services/valuation.ts',
   // The canonical per-stream revenue definitions — feesCharts reads the same
   // builders the derivations jobs and the explorer revenue surfaces use, so

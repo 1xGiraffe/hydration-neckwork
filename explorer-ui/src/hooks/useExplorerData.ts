@@ -255,6 +255,11 @@ export function useAssetDcas(assetId: number | null, enabled = true) {
   const ri = useInterval(DETAIL_POLL_MS)
   return useQuery({ queryKey: ['asset-dcas', assetId], queryFn: ({ signal }) => api.assetDcas(assetId as number, signal), enabled: assetId != null && enabled, refetchInterval: enabled ? ri : false, staleTime: BLOCK_STALE_MS })
 }
+// A cross-chain destination's page. Its numbers move only when a swap settles
+// (a handful a week), so the detail cadence is ample.
+export function useXcDestination(slug: string | null) {
+  return useQuery({ queryKey: ['xc-destination', slug], queryFn: ({ signal }) => api.xcDestination(slug as string, signal), enabled: !!slug, staleTime: 30_000 })
+}
 // The asset page's Limit orders tab — the resting book, on the same tab-scoped
 // fetch and cadence as the DCAs tab: a fill can land in any block.
 export function useAssetLimitOrders(assetId: number | null, enabled = true) {

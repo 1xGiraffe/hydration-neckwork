@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { crossChainCandles } from '../../src/public/routes/prices.ts'
-import { ONE_CLICK_PLATFORMS, KRAKEN_INTERVALS, foreignCandleTtlMs, platformForOneClickAsset } from '../../src/public/services/foreignCandles.ts'
+import { ONE_CLICK_PLATFORMS, KRAKEN_INTERVALS, foreignCandleTtlMs, platformForOneClickAsset } from '../../src/services/foreignCandles.ts'
 
 // A cross-chain swap's destination does not trade on Hydration, so the pair is
 // composed from two independent USD series — the asset's own candles and the

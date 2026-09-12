@@ -1,5 +1,5 @@
-import { config } from '../../config.ts'
-import { cached } from '../../services/cache.ts'
+import { config } from '../config.ts'
+import { cached } from './cache.ts'
 
 // USD candles for assets that do NOT trade on Hydration.
 //
@@ -12,6 +12,10 @@ import { cached } from '../../services/cache.ts'
 // candle model's buckets happen to match exactly, and an allowlisted pair per
 // destination platform. It is a REFERENCE price and never an executed one — what
 // a cross-chain swap actually got is the realised rate of the order itself.
+//
+// A leaf under services/ rather than under public/: both the public price route
+// and the explorer's cross-chain destination pages need it, and the public tree is
+// an import leaf that nothing outside it may read from.
 //
 // This is the server-side half of a fold the Hydration UI currently does in every
 // visitor's browser (apps/main/src/api/external/kraken.ts, whose own comment calls

@@ -2134,6 +2134,26 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
   background: color-mix(in srgb, var(--cat-xcm) 14%, transparent);
 }
 
+/* Stands in for an asset icon on a cross-chain destination row: the destination
+   has no artwork here, so the chain it settles on occupies the same slot. */
+.ar-xc {
+  width: 30px; height: 30px; flex-shrink: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: 'GeistMono'; font-size: 9px; text-transform: uppercase; letter-spacing: 0.02em;
+  color: var(--cat-xcm);
+  background: color-mix(in srgb, var(--cat-xcm) 16%, transparent);
+}
+/* Says outright, above the figures, that the asset is not held on Hydration —
+   the page sits in the asset list, so everything below would otherwise read as
+   an asset's own numbers. */
+.xc-note {
+  border: 1px solid color-mix(in srgb, var(--cat-xcm) 32%, transparent);
+  background: color-mix(in srgb, var(--cat-xcm) 8%, transparent);
+  border-radius: 14px; padding: 13px 16px; margin-bottom: 14px;
+  font-size: 13px; line-height: 1.6; color: var(--text-medium);
+}
+.xc-note strong { color: var(--text-high); }
+
 /* searchable token combobox */
 .combo { position: relative; }
 .combo-input { width: 150px; cursor: text; }

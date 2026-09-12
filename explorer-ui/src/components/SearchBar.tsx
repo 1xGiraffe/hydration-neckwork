@@ -33,6 +33,7 @@ export function routeFor(r: Hit): string {
     // index from 0), so both fields are needed to build its route.
     case 'referendum': return r.pallet && r.index != null ? paths.referendum(r.pallet, r.index) : paths.dashboard()
     case 'pool': return r.value === 'omnipool' ? paths.omnipool() : r.poolKind === 'uniswapv3' ? paths.v3Pool(r.value) : paths.pool(Number(r.value))
+    case 'xcDestination': return paths.xcDestination(r.value)
     default: return paths.dashboard()
   }
 }
@@ -44,6 +45,7 @@ export function hitKey(r: Hit): string {
 }
 export const TYPE_LABEL: Record<Hit['type'], string> = {
   block: 'Block', extrinsic: 'Extrinsic', address: 'Account', asset: 'Asset', tag: 'Tag', 'user-tag': 'Tag', referendum: 'Referendum', pool: 'Pool',
+  xcDestination: 'Cross-chain',
 }
 
 // Account results use the same avatar and shortened-address treatment as account
@@ -82,6 +84,16 @@ export function SearchResultBody({ r }: { r: Hit }) {
       <span className="sr-acct">
         <AssetIcon assetId={Number(r.value)} iconAssetId={asset?.iconAssetId} symbol={r.label || r.value} size={20} parachainId={asset?.parachainId} origin={asset?.origin} />
         <span className="sr-acct-name"><span className="mono">{r.label || r.value}</span>{r.desc && r.desc !== r.label && <span className="sr-desc">{r.desc}</span>}</span>
+      </span>
+    )
+  }
+  if (r.type === 'xcDestination') {
+    // No asset icon: it is not a registry asset and has no artwork here. The
+    // chain tag is what places it, the same marker its activity rows carry.
+    return (
+      <span className="sr-acct">
+        <span className="xc-chain">{r.value}</span>
+        <span className="sr-acct-name"><span className="mono">{r.label || r.value}</span>{r.desc && <span className="sr-desc">{r.desc}</span>}</span>
       </span>
     )
   }
