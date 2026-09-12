@@ -59,7 +59,7 @@ export interface ExplorerStats {
   hdxPrice: number | null
 }
 
-export type ExplorerAssetType = 'Native' | 'Derivative' | 'Token'
+export type ExplorerAssetType = 'Native' | 'Derivative' | 'Token' | 'Cross-chain'
 export interface AssetListItem extends AssetRef {
   price: number | null
   change24h: number | null
@@ -68,6 +68,10 @@ export interface AssetListItem extends AssetRef {
   amountUsd: number | null
   holderCount?: number
   sparkline?: number[]
+  // Present ONLY on a cross-chain destination — an asset a swap delivers on
+  // another chain, which Hydration never holds. Route and key on this, never on
+  // `assetId`, which is a negative sentinel for these rows.
+  xcDestination?: XcDestination
 }
 
 // `/explorer/assets?fields=filter` — the same ordered directory projected down to
@@ -710,7 +714,7 @@ export interface CloseAccountsResponse {
 }
 
 export interface SearchResult {
-  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool'
+  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination'
   value: string
   label?: string
   desc?: string   // asset-type: the descriptive name (e.g. DOT → "Polkadot")
@@ -1023,6 +1027,37 @@ export interface AssetLiquidations {
   decimals: number
   days: AssetLiquidationDay[]
   total: AssetLiquidationTotal
+}
+
+// A cross-chain swap's destination: an asset that lives on another chain and is
+// reachable from Hydration only by selling into it. Not a registry asset — its
+// `assetId` in the asset list is a negative sentinel, never an id to route on.
+export interface XcDestination {
+  platform: string
+  oneClickId: string
+  symbol: string
+  name: string
+  decimals: number
+  chain: string
+  // The chain as people write it; `chain` is the registry key ('zec' for Zcash).
+  chainName: string
+}
+export interface XcDestinationDetail {
+  destination: XcDestination
+  // A REFERENCE price from a venue that lists the asset — never what a swap got.
+  referencePrice: number | null
+  referenceSource: string
+  swapCount: number
+  settledCount: number
+  // Null rather than 0 when nothing has settled: "no swaps yet" and "swaps worth
+  // nothing" are different statements.
+  soldUsd: number | null
+  deliveredUsd: number | null
+  recipientCount: number
+  firstAt: string | null
+  lastAt: string | null
+  soldAssets: { asset: AssetRef; swaps: number; amount: string; valueUsd: number | null }[]
+  recent: ActivityRow[]
 }
 
 export interface AssetDetail {

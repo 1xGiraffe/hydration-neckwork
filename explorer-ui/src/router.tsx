@@ -68,6 +68,7 @@ export type Route =
   | { name: 'ice' }
   | { name: 'revenue' }
   | { name: 'asset'; assetId: number }
+  | { name: 'xcDestination'; slug: string }
   | { name: 'holders'; assetId: number }
   | { name: 'pool'; poolId: number }
   // /pool/<0x…40 hex> — a concentrated-liquidity pool, addressed by its contract.
@@ -167,6 +168,9 @@ export function parseRoute(loc: string): Route {
     case 'ice': return { name: 'ice' }
     case 'revenue': return { name: 'revenue' }
     case 'asset':
+      // /asset/xc/<slug> — a cross-chain destination. It has no registry id, so
+      // it is addressed by a slug under its own prefix rather than by a number.
+      if (parts[1] === 'xc') return parts[2] && /^[a-z0-9-]{2,32}$/i.test(parts[2]) ? { name: 'xcDestination', slug: parts[2].toLowerCase() } : { name: 'assets' }
       return parts[1] && isSafeId(parts[1]) ? { name: 'asset', assetId: Number(parts[1]) } : { name: 'assets' }
     case 'holders':
       return parts[1] && isSafeId(parts[1]) ? { name: 'holders', assetId: Number(parts[1]) } : { name: 'assets' }
@@ -333,6 +337,8 @@ export const paths = {
   ice: () => '/ice',
   revenue: () => '/revenue',
   asset: (assetId: number) => `/asset/${assetId}`,
+  // A cross-chain swap's destination — not a registry asset, so not an id route.
+  xcDestination: (slug: string) => `/asset/xc/${encodeURIComponent(slug)}`,
   holders: (assetId: number) => `/holders/${assetId}`,
   pool: (poolId: number) => `/pool/${poolId}`,
   v3Pool: (address: string) => `/pool/${address.toLowerCase()}`,
