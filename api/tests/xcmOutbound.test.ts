@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseOutboundXcm, xcmLegAssets } from '../src/services/explorerService.ts'
+import { outboundXcmRow, parseOutboundXcm, xcmLegAssets } from '../src/services/explorerService.ts'
 
 // Outbound XCM is represented by both the legacy XTokens event and the nested
 // pallet_xcm message shape.
@@ -79,6 +79,44 @@ describe('parseOutboundXcm', () => {
     expect(parseOutboundXcm({ ...SENT, origin: { parents: 0, interior: { __kind: 'Here' } } })).toBeNull()
     expect(parseOutboundXcm({})).toBeNull()
     expect(parseOutboundXcm(null)).toBeNull()
+  })
+})
+
+// The topic id is the key the persisted journey index is stored under, and it is the
+// ONLY key that survives a restart (the origin-tx map is memory-only). Without it an
+// outbound send cannot be matched to the journey that knows where it really ended, so
+// a Snowbridge withdrawal to Ethereum renders as a plain hop to the sibling it was
+// handed to — which is what block 13,859,226's apyUSD send to Ethereum did.
+describe('parseOutboundXcm: the send topic', () => {
+  it('carries the topic id PolkadotXcm.Sent names', () => {
+    expect(parseOutboundXcm(SENT)!.messageId).toBe(`0x${'33'.repeat(32)}`)
+  })
+
+  it('reports no topic for the XTokens shape, which names none', () => {
+    expect(parseOutboundXcm(XTOKENS)!.messageId).toBeNull()
+  })
+
+  it('reports no topic for a non-hex value rather than passing it on as a key', () => {
+    expect(parseOutboundXcm({ ...SENT, messageId: 'not-a-topic' })!.messageId).toBeNull()
+  })
+})
+
+// Every leg of a send is one row, and each has to carry the topic: the rows are what
+// the journey lookup is handed, so a row without one is unresolvable however complete
+// the index is.
+describe('outboundXcmRow', () => {
+  const EVENT = { block_height: 13859226, ts: '2026-08-27 04:07:24', event_index: 11, extrinsic_index: 2 }
+
+  it('stamps the send topic on the row', () => {
+    const parsed = parseOutboundXcm(SENT)!
+    const row = outboundXcmRow(EVENT, parsed, 5, '2000', new Map())
+    expect(row.messageId).toBe(`0x${'33'.repeat(32)}`)
+    expect(row.xcmDir).toBe('out')
+    expect(row.destParachainId).toBe(1000)
+  })
+
+  it('leaves the topic null for a send that names none', () => {
+    expect(outboundXcmRow(EVENT, parseOutboundXcm(XTOKENS)!, 5, '1000', new Map()).messageId).toBeNull()
   })
 })
 

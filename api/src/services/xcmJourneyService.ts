@@ -410,51 +410,83 @@ async function ensureJourneys(oldestNeededMs: number): Promise<void> {
   await inflight
 }
 
-// Batch fallback for message ids the in-memory map doesn't (or no longer)
-// cover — either this process hasn't walked deep enough yet this run, or the
-// resolution was learned by an earlier process incarnation entirely. A
-// persisted row only carries the two fields the inbound-source display needs
-// (from_hex, origin_urn); the rest of XcmJourneySource is left empty since
-// applyXcmInSources (the only caller) never reads them for inbound rows.
-// argMax(…, updated_at) picks the latest version per message_id without a
-// (costly at scale) FINAL read.
+// Both ends of every persisted resolution, one row per journey. argMax(…, updated_at)
+// picks the latest version per message_id without a (costly at scale) FINAL read.
+const PERSISTED_SOURCE_SELECT = `
+  SELECT message_id,
+         argMax(from_hex, updated_at) AS from_hex, argMax(origin_urn, updated_at) AS origin_urn,
+         argMax(origin_tx, updated_at) AS origin_tx, argMax(origin_protocol, updated_at) AS origin_protocol,
+         argMax(from_formatted, updated_at) AS from_formatted,
+         argMax(to_hex, updated_at) AS to_hex, argMax(dest_urn, updated_at) AS dest_urn,
+         argMax(dest_tx, updated_at) AS dest_tx, argMax(dest_protocol, updated_at) AS dest_protocol,
+         argMax(to_formatted, updated_at) AS to_formatted
+  FROM ${XCM_JOURNEY_SOURCES_TABLE}`
+
+// A row is useful if EITHER end is known: an inbound lookup needs the origin, an
+// outbound one the destination, and an outbound journey never has a source account at
+// all. Requiring from_hex (as it once did) threw away every destination this table holds.
+function persistedSourceOf(row: JourneyRow): XcmJourneySource | null {
+  if (!row.origin_urn && !row.dest_urn) return null
+  return {
+    from: row.from_hex || '', to: row.to_hex || '',
+    fromFormatted: row.from_formatted || '', toFormatted: row.to_formatted || '',
+    origin: row.origin_urn || '', destination: row.dest_urn || '',
+    originTx: row.origin_tx || null, destTx: row.dest_tx || null,
+    correlationId: '',
+    originProtocol: row.origin_protocol || '', destProtocol: row.dest_protocol || '',
+  }
+}
+
+// Batch fallback for message ids the in-memory map doesn't (or no longer) cover —
+// either this process hasn't walked deep enough yet this run, or the resolution was
+// learned by an earlier process incarnation entirely.
 async function fetchPersistedSources(messageIds: string[]): Promise<Map<string, XcmJourneySource>> {
   const out = new Map<string, XcmJourneySource>()
   if (!client || !messageIds.length) return out
   try {
     const res = await client.query({
-      query: `
-        SELECT message_id,
-               argMax(from_hex, updated_at) AS from_hex, argMax(origin_urn, updated_at) AS origin_urn,
-               argMax(origin_tx, updated_at) AS origin_tx, argMax(origin_protocol, updated_at) AS origin_protocol,
-               argMax(from_formatted, updated_at) AS from_formatted,
-               argMax(to_hex, updated_at) AS to_hex, argMax(dest_urn, updated_at) AS dest_urn,
-               argMax(dest_tx, updated_at) AS dest_tx, argMax(dest_protocol, updated_at) AS dest_protocol,
-               argMax(to_formatted, updated_at) AS to_formatted
-        FROM ${XCM_JOURNEY_SOURCES_TABLE}
-        WHERE message_id IN ({ids:Array(String)})
-        GROUP BY message_id
-      `,
+      query: `${PERSISTED_SOURCE_SELECT} WHERE message_id IN ({ids:Array(String)}) GROUP BY message_id`,
       query_params: { ids: messageIds },
       format: 'JSONEachRow',
     })
     for (const row of await res.json<JourneyRow>()) {
-      // A row is useful if EITHER end is known: an inbound lookup needs the origin, an
-      // outbound one the destination, and an outbound journey never has a source
-      // account at all. Requiring from_hex (as it once did) threw away every
-      // destination this table holds.
-      if (!row.origin_urn && !row.dest_urn) continue
-      out.set(row.message_id, {
-        from: row.from_hex || '', to: row.to_hex || '',
-        fromFormatted: row.from_formatted || '', toFormatted: row.to_formatted || '',
-        origin: row.origin_urn || '', destination: row.dest_urn || '',
-        originTx: row.origin_tx || null, destTx: row.dest_tx || null,
-        correlationId: '',
-        originProtocol: row.origin_protocol || '', destProtocol: row.dest_protocol || '',
-      })
+      const source = persistedSourceOf(row)
+      if (source) out.set(row.message_id, source)
     }
   } catch (err) {
     console.error('[Explorer] XCM journey source persisted lookup failed:', err instanceof Error ? err.message : err)
+  }
+  return out
+}
+
+// The same resolutions keyed by the ORIGIN TRANSACTION, for outbound sends the topic
+// path could not answer. One extrinsic can start several journeys, so a hash maps to a
+// list — and the caller keeps only an unambiguous single match, since a batched send's
+// journeys cannot be told apart by hash alone.
+//
+// `origin_tx` is not the table's sort key, so this reads the column across the whole
+// table (386k rows, one String column) rather than seeking. That is affordable only
+// because it is asked for what the topic-keyed lookup left over, which is a handful of
+// rows per page at most — keep it that way rather than calling it for every send.
+async function fetchPersistedSourcesByOriginTx(txHashes: string[]): Promise<Map<string, XcmJourneySource[]>> {
+  const out = new Map<string, XcmJourneySource[]>()
+  if (!client || !txHashes.length) return out
+  try {
+    const res = await client.query({
+      query: `${PERSISTED_SOURCE_SELECT} WHERE lower(origin_tx) IN ({txs:Array(String)}) GROUP BY message_id`,
+      query_params: { txs: txHashes },
+      format: 'JSONEachRow',
+    })
+    for (const row of await res.json<JourneyRow>()) {
+      const source = persistedSourceOf(row)
+      if (!source?.originTx) continue
+      const key = source.originTx.toLowerCase()
+      const pooled = out.get(key)
+      if (pooled) pooled.push(source)
+      else out.set(key, [source])
+    }
+  } catch (err) {
+    console.error('[Explorer] XCM journey origin-tx persisted lookup failed:', err instanceof Error ? err.message : err)
   }
   return out
 }
@@ -601,14 +633,29 @@ export async function xcmJourneySourcesFor(keys: { messageId: string; timestampM
   return out
 }
 
-// Resolve outbound journeys from memory. Misses schedule the shared background
-// recent-window refresh and remain unenriched for this response.
+// Resolve outbound journeys from memory, then from the persisted table. Misses
+// schedule the shared background recent-window refresh and remain unenriched for
+// this response.
+//
+// The memory map holds only what this process has walked, which is a recent window —
+// so on its own it answers live rows and nothing a reader opens from a block,
+// extrinsic or account page. The persisted read is what makes a resolution outlive
+// the process that learned it, exactly as the topic-keyed lookup does; and like that
+// lookup it needs no upstream token, because the rows are already ours.
 export async function xcmJourneysByOriginTx(keys: { txHash: string; timestampMs: number }[]): Promise<Map<string, XcmJourneySource[]>> {
   const out = new Map<string, XcmJourneySource[]>()
-  if (!OCELLOIDS_TOKEN || !keys.length) return out
+  if (!keys.length) return out
   for (const k of keys) {
     const hit = journeysByOriginTx.get(k.txHash.toLowerCase())
     if (hit) out.set(k.txHash, hit)
+  }
+  const missing = keys.filter(k => !out.has(k.txHash))
+  if (missing.length) {
+    const persisted = await fetchPersistedSourcesByOriginTx(missing.map(k => k.txHash.toLowerCase()))
+    for (const k of missing) {
+      const hit = persisted.get(k.txHash.toLowerCase())
+      if (hit) out.set(k.txHash, hit)
+    }
   }
   queueBackgroundRefresh(
     keys.filter(key => !out.has(key.txHash)).map(key => ({ id: key.txHash, timestampMs: key.timestampMs })),
