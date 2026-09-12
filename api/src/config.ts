@@ -18,4 +18,14 @@ export const config = {
     database: 'price_data',
     password: process.env.CLICKHOUSE_PASSWORD ?? '',
   },
+  // Defuse 1Click, which resolves the destination leg of a cross-chain swap
+  // (services/xcswapSettlements.ts). The token is a distribution-channel
+  // identifier rather than a secret, but it is still a credential the operator
+  // supplies: unset leaves the resolution off, and a cross-chain swap then shows
+  // its on-chain half with the destination stated as unknown.
+  oneClickBaseUrl: process.env.ONE_CLICK_BASE_URL?.trim() || 'https://1click.chaindefuser.com',
+  oneClickToken: process.env.ONE_CLICK_TOKEN?.trim() || '',
+  // Kraken's public OHLC, the reference series for the cross-chain pairs whose
+  // destination asset does not trade on Hydration (services/foreignPrices.ts).
+  krakenBaseUrl: process.env.KRAKEN_BASE_URL?.trim() || 'https://api.kraken.com/0/public',
 } as const

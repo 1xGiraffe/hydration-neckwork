@@ -4,6 +4,7 @@ import { refreshErc20Wallets } from './erc20WalletService.ts'
 import { refreshContractCode } from './contractRegistryService.ts'
 import { refreshSecurityChainState } from './securityService.ts'
 import { refreshWormholeBacking } from './wormholeNttService.ts'
+import { refreshXcswapSettlements } from './xcswapSettlements.ts'
 
 // Coordinated scheduler for the background refreshers that read node-full
 // (chain-state enumeration and EVM eth_call). Previously each ran on its own
@@ -82,6 +83,11 @@ const TASKS: RefreshTask[] = [
   // backing is the one finding here that is worth minutes rather than an hour, so
   // it takes the base cadence.
   { name: 'wormhole-backing', everyTicks: 1, run: refreshWormholeBacking },
+  // Cross-chain swap destinations, from the 1Click API. Only orders still in
+  // flight are ever re-read (a settled one can no longer change), so this is
+  // proportional to open orders rather than to orders ever placed — and an
+  // order settles in minutes, so it wants the base cadence.
+  { name: 'xcswap-settlements', everyTicks: 1, run: refreshXcswapSettlements },
 ]
 
 // Tasks due on a given 1-based tick number (exported for testing the cadence).
