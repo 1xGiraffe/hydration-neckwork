@@ -8,7 +8,7 @@ import {
   getExtrinsicActivity, getBlockActivity,
   getHolders, getAddress, getAddressHistory, search, getAssets, getAssetFilterOptions, getFilterNames, getAccounts, getDcaSchedule, getDcaScheduleIdAt, getDcaExecution,
   getIntentOrder,
-  getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetDcas, getAssetLimitOrders, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag, getTagMemberAccounts,
+  getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetDcas, getAssetLimitOrders, getXcDestination, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag, getTagMemberAccounts,
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressListTotal, getTagListTotal,
   getAddressValueEvents, getTagValueEvents,
@@ -636,6 +636,16 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = z.object({ assetId: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid asset id' })
     return getAssetDcas(params.data.assetId)
+  })
+
+  // A cross-chain destination — an asset a swap delivers on another chain, which
+  // Hydration never holds. Addressed by its platform slug, not an asset id.
+  fastify.get('/explorer/xc-destination/:slug', async (req, reply) => {
+    const params = z.object({ slug: z.string().min(2).max(64) }).safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid destination' })
+    const detail = await getXcDestination(params.data.slug)
+    if (!detail) return reply.status(404).send({ error: 'Unknown cross-chain destination', slug: params.data.slug })
+    return detail
   })
 
   // One asset's resting limit orders (unfilled swap intents) as a book: bids buy

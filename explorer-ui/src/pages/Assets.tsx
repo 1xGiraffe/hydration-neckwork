@@ -60,11 +60,21 @@ export function Assets() {
           <thead><tr><th>Asset</th><th className="r">Price</th><th className="r">{sTh('24h', '24H')}</th><th className="r">{sTh('7d', '7D')}</th><th className="r">{sTh('holders', 'Holders')}</th><th className="r">{sTh('tvl', 'TVL')}</th><th className="r">Last 7 days</th></tr></thead>
           <tbody>
             {isLoading ? <TableSkeleton cols={7} /> : !rows.length ? <EmptyRow cols={7}>No assets</EmptyRow> : rows.map(a => (
-              <tr key={a.assetId} {...rowNav(paths.asset(a.assetId))}>
+              // A cross-chain destination is keyed and routed by its slug: its
+              // `assetId` is a negative sentinel, not a registry id.
+              <tr key={a.xcDestination ? `xc:${a.xcDestination.platform}` : a.assetId}
+                {...rowNav(a.xcDestination ? paths.xcDestination(a.xcDestination.platform) : paths.asset(a.assetId))}>
                 <td data-label="Asset">
                   <div className="asset-row">
-                    <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} symbol={a.symbol} size={30} parachainId={a.parachainId} origin={a.origin} />
-                    <div className="ar-meta"><span className="ar-sym">{a.symbol}</span><span className="ar-name">{a.name ?? `#${a.assetId}`}</span></div>
+                    {/* No artwork for a destination — it is not a registry asset,
+                        so the chain it settles on is what places it instead. */}
+                    {a.xcDestination
+                      ? <span className="ar-xc">{a.xcDestination.chainName}</span>
+                      : <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} symbol={a.symbol} size={30} parachainId={a.parachainId} origin={a.origin} />}
+                    <div className="ar-meta">
+                      <span className="ar-sym">{a.symbol}{a.xcDestination && <span className="xc-chain">cross-chain</span>}</span>
+                      <span className="ar-name">{a.xcDestination ? `${a.name} · on ${a.xcDestination.chainName}, not held here` : (a.name ?? `#${a.assetId}`)}</span>
+                    </div>
                   </div>
                 </td>
                 <td data-label="Price" className="r mono ar-price">{a.price != null ? F.priceUsd(a.price) : <Dash />}</td>
