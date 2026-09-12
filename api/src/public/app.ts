@@ -20,6 +20,7 @@ import { tradesRoutes } from './routes/trades.ts'
 import { chainRoutes } from './routes/chain.ts'
 import { gigahdxRoutes } from './routes/gigahdx.ts'
 import { dcaRoutes } from './routes/dca.ts'
+import { intentsRoutes } from './routes/intents.ts'
 import { pricesRoutes } from './routes/prices.ts'
 import { poolsRoutes } from './routes/pools.ts'
 import { dexscreenerRoutes } from './routes/dexscreener.ts'
@@ -41,6 +42,7 @@ export const PUBLIC_ROUTE_PLUGINS: Array<FastifyPluginAsync<{ client: ClickHouse
   chainRoutes,
   gigahdxRoutes,
   dcaRoutes,
+  intentsRoutes,
   pricesRoutes,
   poolsRoutes,
   dexscreenerRoutes,

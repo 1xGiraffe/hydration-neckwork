@@ -188,7 +188,7 @@ API it is a **versioned frozen contract**; concept: `~/.g/hydraken-api-concept.m
   `user_api_tokens`/`user_api_limits` and writes `user_api_usage`.
 - Its read models live in `clickhouse/schema/009_data.sql` (hash-first, account-first,
   asset-first and contract-first projections). The by-account twins CHAIN off their
-  MV-fed sources (`pool_swap_legs`, `dca_events`, `staking_activity`,
+  MV-fed sources (`pool_swap_legs`, `dca_events`, `intent_orders`, `staking_activity`,
   `liquidity_activity`, `governance_vote_calls`) so extraction logic exists once;
   replay safety rides the source's replacement identity. Selective filters the sort key
   cannot prune (`call=`, `name=`) require a bounded window

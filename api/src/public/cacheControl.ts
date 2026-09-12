@@ -57,6 +57,7 @@ export const PUBLIC_CACHE_CONTROL: Array<[RegExp, number]> = [
   // freshness and collapse every dashboard onto one computation.
   [/^\/v1\/staking\/gigahdx\/apr$/, 300],
   [/^\/v1\/dca\/schedules(\/count|\/[^/]+\/executions)?$/, 3],
+  [/^\/v1\/intents(\/count)?$/, 3],
   [/^\/v1\/prices\/pair$/, 5],
   [/^\/v1\/pools\/[^/]+\/volumes$/, 60],
   // A concentrated-liquidity pool's chart data. Both move only when the pool trades
