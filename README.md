@@ -73,11 +73,7 @@ Docker Compose provides working defaults. Override them in an untracked `.env` f
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `RPC_URL` | `https://hydration-rpc.neckwork.net` | Price indexer RPC |
-| `RAW_LIVE_RPC_URL` | `https://hydration-rpc.neckwork.net` | Live raw-indexer RPC |
-| `RAW_RPC_URL` | `https://rpc.coke.hydration.cloud` | Historical raw-worker RPC |
-| `RAW_EVM_RPC_URL` | `https://rpc.coke.hydration.cloud` | Historical EVM state reads |
-| `IDENTITY_RPC_URL` | `https://hydration-rpc.neckwork.net` | Hydration identity snapshot RPC |
+| `RPC_URL` | `https://hydration-rpc.neckwork.net` | The one Hydration RPC. Every service and every supervisor-spawned worker reads it, for both substrate calls and the Money Market's `eth_call` reads — Hydration answers both on the same endpoint. Historical ranges and money-market position reads need an archive node |
 | `IDENTITY_CHAINS` | Polkadot/Kusama People chains and their testnets | Extra identity sources, `key=url[@block]` and highest display priority first; empty for Hydration only |
 | `SQD_GATEWAY` | Hydration SQD archive | Historical block source |
 | `CLICKHOUSE_HOST` | `http://localhost:18123` outside Compose | ClickHouse HTTP endpoint |
