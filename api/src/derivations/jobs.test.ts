@@ -16,6 +16,7 @@ import {
   poolSwapHourlyStalePartitionsSql,
   POOL_SWAP_HOURLY_REFRESH_HOURS,
   REVENUE_EVENT_STREAMS_INSERTED,
+  xcmArrivalsChunks,
   REVENUE_REFRESH_SECONDS,
   accountRevenueEventfulInsertSql,
   accountRevenueStalePartitionsSql,
@@ -642,5 +643,36 @@ describe('accountRevenueEventfulInsertSql', () => {
     expect(sql).toContain("(stream != 'omnipool_asset_fee' OR dest IN ('protocol', 'burned', 'pol')) AND dest != 'lp'")
     expect(sql).toContain('GROUP BY account, stream')
     expect(sql).toContain('toYYYYMM(block_timestamp) = 202608')
+  })
+})
+
+describe('xcm_arrivals', () => {
+  // The stored model must not restate the feed's walk. A SQL restatement was measured
+  // against it and drifted four ways (barrier set, credit set, reserved-account
+  // prefixes, and the crossable events the run steps over), so the job calls
+  // xcmInboundCreditsForBlocks instead. This pins that it still does.
+  it('derives arrivals from the feed walk, not from its own SQL', () => {
+    const src = readFileSync(
+      fileURLToPath(new URL('./jobs.ts', import.meta.url)), 'utf8')
+    const section = src.slice(src.indexOf('xcm_arrivals ──'))
+    expect(section).toContain('xcmInboundCreditsForBlocks')
+    // No second copy of the classification: these are the constants the SQL version
+    // carried, and their absence is what keeps the two from diverging again.
+    expect(section).not.toContain('Tokens.Deposited')
+    expect(section).not.toContain('0x6d6f646c')
+    expect(section).not.toContain('ROWS BETWEEN')
+  })
+
+  // Walking history in one pass would hold every block's events at once; chunks bound
+  // both the ClickHouse reads and the rows in memory.
+  it('splits a block range into bounded chunks covering it exactly', () => {
+    expect(xcmArrivalsChunks(1, 10, 4)).toEqual([[1, 4], [5, 8], [9, 10]])
+    expect(xcmArrivalsChunks(100, 100, 50)).toEqual([[100, 100]])
+    const chunks = xcmArrivalsChunks(0, 999, 100)
+    expect(chunks.length).toBe(10)
+    expect(chunks[0][0]).toBe(0)
+    expect(chunks[chunks.length - 1][1]).toBe(999)
+    // contiguous, no gaps or overlaps
+    for (let i = 1; i < chunks.length; i++) expect(chunks[i][0]).toBe(chunks[i - 1][1] + 1)
   })
 })
