@@ -136,7 +136,7 @@ describe('the account-scoped XCM readers use the account-first projection', () =
   // 20.78 GiB of result bytes) and half its payload is a `weightUsed` nothing reads.
   it('decodes credits and barriers from extracted fields, not args_json', () => {
     const sites = [
-      { site: 'xcmInRowsForBlocks', row: 'e', barrier: 'b' },
+      { site: 'xcmInboundCreditsForBlocks', row: 'e', barrier: 'b' },
       { site: 'xcmOutRemoteRowsForBlocks', row: 'w', barrier: 'barrier' },
     ]
     for (const { site, row, barrier } of sites) {
@@ -195,7 +195,7 @@ describe('the account-scoped XCM readers use the account-first projection', () =
   it('reads the inbound deposit run from the block-first projection, and nothing else does', () => {
     // One definition + one call site, and the call site is inside the inbound decoder.
     expect(occurrences(explorerService, 'xcmInboundWalkTable(')).toBe(2)
-    const body = functionBody('xcmInRowsForBlocks')
+    const body = functionBody('xcmInboundCreditsForBlocks')
     expect(occurrences(body, '${xcmInboundWalkTable()}')).toBe(1)
     // Two family reads, one per execution context: the hook-context run from the walk
     // projection, and the pre-migration inherent-context run from the parent (the walk
