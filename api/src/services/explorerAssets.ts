@@ -4,7 +4,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 // cache in assetsService.ts. The Explorer must resolve symbol/decimals for every
 // asset_id that can appear in balances/transfers, including foreign and aToken
 // assets that the price UI hides.
-interface AssetOrigin {
+export interface AssetOrigin {
   ecosystem: string
   chainId: string
   assetId: string | null
