@@ -36,29 +36,20 @@ RAW_SNAPSHOT_READ_BATCH_CONCURRENCY="${RAW_SNAPSHOT_READ_BATCH_CONCURRENCY:-2}"
 RAW_MONEY_MARKET_POSITION_CONCURRENCY="${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}"
 RAW_MONEY_MARKET_BATCH_SIZE="${RAW_MONEY_MARKET_BATCH_SIZE:-50}"
 
-MAIN_RPC_URL="${MAIN_RPC_URL:-https://hydration-rpc.neckwork.net}"
 MAIN_RATE_LIMIT="${MAIN_RATE_LIMIT:-10}"
 MAIN_CAPACITY="${MAIN_CAPACITY:-3}"
 
 LIVE_MAIN_ENABLED="${LIVE_MAIN_ENABLED:-true}"
 LIVE_MAIN_NAME="${LIVE_MAIN_NAME:-hydration-neckwork-main-live}"
 LIVE_MAIN_PIPELINE_ID="${LIVE_MAIN_PIPELINE_ID:-main-live}"
-LIVE_MAIN_RPC_URL="${LIVE_MAIN_RPC_URL:-https://hydration-rpc.neckwork.net}"
 LIVE_MAIN_RATE_LIMIT="${LIVE_MAIN_RATE_LIMIT:-100}"
 LIVE_MAIN_CAPACITY="${LIVE_MAIN_CAPACITY:-20}"
 LIVE_MAIN_BATCH_SIZE="${LIVE_MAIN_BATCH_SIZE:-50000}"
 
-# Use an operator-selected raw RPC when configured; otherwise rotate public RPCs.
-if [[ -n "${RAW_RPC_URL:-}" ]]; then
-  RPC_ENDPOINTS=("$RAW_RPC_URL")
-else
-  RPC_ENDPOINTS=(
-    "https://rpc.coke.hydration.cloud"
-    "https://rpc.sin.hydration.cloud"
-    "https://hydration.rotko.net"
-  )
-fi
-RPC_FALLBACKS="${RAW_EVM_RPC_FALLBACK_URLS:-https://rpc.sin.hydration.cloud,https://rpc.coke.hydration.cloud,https://hydration.rotko.net,https://hydration-rpc.neckwork.net}"
+# One Hydration RPC serves every worker this supervisor spawns. It carries both
+# the substrate calls and the Money-Market `eth_call` reads, which Hydration
+# answers on the same endpoint.
+RPC_URL="${RPC_URL:-https://hydration-rpc.neckwork.net}"
 
 cd "$ROOT_DIR"
 
@@ -290,20 +281,16 @@ start_raw_range() {
   local to="$2"
   local name="${RAW_PREFIX}${from}-${to}"
   local pipeline="raw-backfill-${from}-${to}"
-  local endpoint_index=$(( (from / RANGE_SIZE) % ${#RPC_ENDPOINTS[@]} ))
-  local endpoint="${RPC_ENDPOINTS[$endpoint_index]}"
 
   if container_exists "$name"; then
     log "raw container already exists: $name"
     return 0
   fi
 
-  log "starting raw range $from-$to on $endpoint"
+  log "starting raw range $from-$to on $RPC_URL"
   COMPOSE_IGNORE_ORPHANS=true docker compose run --no-deps --interactive=false -d --name "$name" \
     -e RAW_PIPELINE_ID="$pipeline" \
-    -e RPC_URL="$endpoint" \
-    -e RAW_EVM_RPC_URL="${RAW_EVM_RPC_URL:-$endpoint}" \
-    -e RAW_EVM_RPC_FALLBACK_URLS="$RPC_FALLBACKS" \
+    -e RPC_URL="$RPC_URL" \
     -e RPC_RATE_LIMIT="$RAW_RATE_LIMIT" \
     -e RPC_CAPACITY="$RAW_CAPACITY" \
     -e RAW_BALANCE_READ_CONCURRENCY="$RAW_BALANCE_READ_CONCURRENCY" \
@@ -333,7 +320,7 @@ start_main_range() {
   log "starting main range $from-$to"
   COMPOSE_IGNORE_ORPHANS=true docker compose run --no-deps --interactive=false -d --name "$name" \
     -e INDEXER_PIPELINE_ID="$pipeline" \
-    -e RPC_URL="$MAIN_RPC_URL" \
+    -e RPC_URL="$RPC_URL" \
     -e RPC_RATE_LIMIT="$MAIN_RATE_LIMIT" \
     -e RPC_CAPACITY="$MAIN_CAPACITY" \
     indexer src/cli.ts \
@@ -387,7 +374,7 @@ start_live_main() {
   COMPOSE_IGNORE_ORPHANS=true docker compose run --no-deps --interactive=false -d --name "$LIVE_MAIN_NAME" \
     -e INDEXER_PIPELINE_ID="$LIVE_MAIN_PIPELINE_ID" \
     -e MAIN_REQUIRE_FINALIZED_RAW=false \
-    -e RPC_URL="$LIVE_MAIN_RPC_URL" \
+    -e RPC_URL="$RPC_URL" \
     -e RPC_RATE_LIMIT="$LIVE_MAIN_RATE_LIMIT" \
     -e RPC_CAPACITY="$LIVE_MAIN_CAPACITY" \
     -e BATCH_SIZE="$LIVE_MAIN_BATCH_SIZE" \

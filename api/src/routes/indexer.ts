@@ -27,11 +27,9 @@ function uintValue(value: unknown): number {
 }
 
 async function fetchChainBlockHeight(): Promise<number | null> {
-  // The node the rest of the api already reads chain state from; the public
-  // endpoint is a last resort and is not reachable from inside the compose network.
-  const rpcUrl = process.env.CHAIN_RPC_URL?.trim() || process.env.RPC_URL?.trim() || SUBSTRATE_RPC_URL
+  // The node the rest of the api already reads chain state from.
   try {
-    const response = await fetch(rpcUrl, {
+    const response = await fetch(SUBSTRATE_RPC_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'chain_getHeader', params: [] }),
