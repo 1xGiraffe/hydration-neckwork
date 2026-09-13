@@ -3,11 +3,11 @@ import {
   BIL_ATOKEN,
   BIL_HOLLAR_ATOKEN,
   BIL_POOL_PROXY,
-  DEFAULT_RAW_EVM_RPC_URL,
   GIGAHDX_POOL_PROXY,
   extractMoneyMarketRows,
   snapshotMoneyMarketPositions,
 } from '../../src/raw/moneyMarket.ts'
+import { DEFAULT_RPC_URL } from '../../src/config.ts'
 import type { RawEvmLogRow } from '../../src/raw/types.ts'
 
 const USER = '0xf34e845538cc8a498edd97d7cde16fdfef3d4d99'
@@ -47,8 +47,7 @@ function supplyLog(contractAddress = '0x1b02e051683b5cfac5929c25e84adb26ecf87b38
 
 describe('raw Money Market rows', () => {
   afterEach(() => {
-    delete process.env.RAW_EVM_RPC_URL
-    delete process.env.RAW_EVM_RPC_FALLBACK_URLS
+    delete process.env.RPC_URL
     vi.restoreAllMocks()
   })
 
@@ -63,7 +62,7 @@ describe('raw Money Market rows', () => {
   })
 
   it('uses the default Money Market position RPC when not configured', async () => {
-    delete process.env.RAW_EVM_RPC_URL
+    delete process.env.RPC_URL
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
       status: 200,
@@ -83,7 +82,7 @@ describe('raw Money Market rows', () => {
     const rows = await extractMoneyMarketRows([supplyLog()], 'test')
 
     expect(fetchMock).toHaveBeenCalledWith(
-      DEFAULT_RAW_EVM_RPC_URL,
+      DEFAULT_RPC_URL,
       expect.objectContaining({ method: 'POST' }),
     )
     expect(rows.positions).toHaveLength(1)
@@ -91,7 +90,7 @@ describe('raw Money Market rows', () => {
   })
 
   it('redacts sensitive Money Market RPC URL parts from position evidence', async () => {
-    process.env.RAW_EVM_RPC_URL = 'https://user:pass@example.com/private/path?token=secret'
+    process.env.RPC_URL = 'https://user:pass@example.com/private/path?token=secret'
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,
       status: 200,
@@ -121,48 +120,34 @@ describe('raw Money Market rows', () => {
     expect(rows.positions[0].evidence_json).not.toContain('secret')
   })
 
-  it('retries Money Market position reads on configured fallback RPCs', async () => {
-    process.env.RAW_EVM_RPC_URL = 'https://slow.example'
-    process.env.RAW_EVM_RPC_FALLBACK_URLS = 'https://fallback.example'
-    const fetchMock = vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 504,
-        statusText: 'Gateway Timeout',
-        json: async () => ({ error: 'timeout' }),
-      } as unknown as Response)
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        statusText: 'OK',
-        json: async () => ({
-          result: `0x${[
-            1000n,
-            200n,
-            800n,
-            8500n,
-            7500n,
-            5_000_000_000_000_000_000n,
-          ].map(value => value.toString(16).padStart(64, '0')).join('')}`,
-        }),
-      } as unknown as Response)
+  // A failing read is reported, never retried against a second endpoint. Silently
+  // rolling over to a public RPC would answer a historical `eth_call` from a node
+  // that may have pruned the block, so a wrong position would look like a healthy one.
+  it('warns instead of retrying elsewhere when the Money Market read fails', async () => {
+    process.env.RPC_URL = 'https://only.example'
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: false,
+      status: 504,
+      statusText: 'Gateway Timeout',
+      json: async () => ({ error: 'timeout' }),
+    } as unknown as Response)
 
     const rows = await extractMoneyMarketRows([supplyLog()], 'test')
-    const evidence = JSON.parse(rows.positions[0].evidence_json) as Record<string, unknown>
 
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(fetchMock.mock.calls[0][0]).toBe('https://slow.example')
-    expect(fetchMock.mock.calls[1][0]).toBe('https://fallback.example')
-    expect(rows.positions).toHaveLength(1)
-    expect(rows.warnings).toHaveLength(0)
-    expect(evidence.rpc_origin).toBe('https://fallback.example')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock.mock.calls[0][0]).toBe('https://only.example')
+    expect(rows.positions).toHaveLength(0)
+    expect(rows.warnings).toHaveLength(1)
+    expect(rows.warnings[0].warning_code).toBe('position_eth_call_failed')
+    const evidence = JSON.parse(rows.warnings[0].evidence_json) as Record<string, unknown>
+    expect(evidence.rpc_origins).toEqual(['https://only.example'])
   })
 
   it('fails hard when Money Market position RPC is explicitly invalid', async () => {
-    process.env.RAW_EVM_RPC_URL = 'wss://hydration.dotters.network'
+    process.env.RPC_URL = 'wss://hydration.dotters.network'
 
     await expect(extractMoneyMarketRows([supplyLog()], 'test')).rejects.toThrow(
-      'RAW_EVM_RPC_URL must use http or https',
+      'RPC_URL must use http or https',
     )
   })
 
@@ -348,8 +333,7 @@ describe('raw Money Market — additional markets (RAW_MM_EXTRA_MARKETS)', () =>
 
   afterEach(() => {
     delete process.env.RAW_MM_EXTRA_MARKETS
-    delete process.env.RAW_EVM_RPC_URL
-    delete process.env.RAW_EVM_RPC_FALLBACK_URLS
+    delete process.env.RPC_URL
     vi.restoreAllMocks()
     vi.resetModules()
   })

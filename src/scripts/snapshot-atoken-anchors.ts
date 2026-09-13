@@ -28,7 +28,7 @@ import { hasFlag, integerOption } from '../util/cliArgs.js'
 
 const RAY = 10n ** 27n
 const SEL = { reservesList: 'd1946dbc', reserveData: '35ea6a75', balanceOf: '70a08231', totalSupply: '18160ddd' }
-const RPC_URL = process.env.RAW_ATOKEN_ANCHOR_RPC_URL?.trim() || config.RPC_URL
+const RPC_URL = config.RPC_URL
 const ZERO_H160 = '0x0000000000000000000000000000000000000000'
 
 const dryRun = hasFlag('dry-run')
