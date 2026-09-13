@@ -66,11 +66,9 @@ export function Assets() {
                 {...rowNav(a.xcDestination ? paths.xcDestination(a.xcDestination.platform) : paths.asset(a.assetId))}>
                 <td data-label="Asset">
                   <div className="asset-row">
-                    {/* No artwork for a destination — it is not a registry asset,
-                        so the chain it settles on is what places it instead. */}
-                    {a.xcDestination
-                      ? <span className="ar-xc">{a.xcDestination.chainName}</span>
-                      : <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} symbol={a.symbol} size={30} parachainId={a.parachainId} origin={a.origin} />}
+                    {/* A destination's artwork resolves through the same origin
+                        path every foreign asset uses, so it needs no special case. */}
+                    <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} symbol={a.symbol} size={30} parachainId={a.parachainId} origin={a.origin} />
                     <div className="ar-meta">
                       <span className="ar-sym">{a.symbol}{a.xcDestination && <span className="xc-chain">cross-chain</span>}</span>
                       <span className="ar-name">{a.xcDestination ? `${a.name} · on ${a.xcDestination.chainName}, not held here` : (a.name ?? `#${a.assetId}`)}</span>
