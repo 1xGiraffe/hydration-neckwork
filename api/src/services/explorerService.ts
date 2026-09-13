@@ -11322,7 +11322,7 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
 // these four: before the first XcmpQueue/DmpQueue event (block 1,439,879) not one
 // user-account hook deposit shares a block with a downward message — measured, all
 // 24,800 of them are on-initialize reward/vesting credits, not XCM.
-const XCM_BARRIER_EVENTS = ['MessageQueue.Processed', 'DmpQueue.ExecutedDownward', 'XcmpQueue.Success', 'XcmpQueue.Fail']
+export const XCM_BARRIER_EVENTS = ['MessageQueue.Processed', 'DmpQueue.ExecutedDownward', 'XcmpQueue.Success', 'XcmpQueue.Fail']
 const XCM_BARRIER_EVENTS_SQL = XCM_BARRIER_EVENTS.map(n => `'${n}'`).join(',')
 // Outbound send events. XTokens emitted TransferredMultiAssets until the same
 // MessageQueue migration renamed it TransferredAssets; both carry the identical
@@ -11532,9 +11532,33 @@ export function xcmCreditRun(
   return walked
 }
 
+// One inbound-XCM credit, before any presentation is applied: exactly what the walk
+// established and nothing else. The activity feed turns these into ActivityRows, and
+// the xcm_arrivals derivation stores them — so both surfaces get their arrivals from
+// this one walk rather than from two implementations of the same rule. Restating the
+// rule in SQL for the stored model drifted four separate ways when it was measured
+// against this path (barrier set, credit set, reserved-account prefixes, and the
+// crossable events the run must step over), which is why the derivation calls this
+// instead.
+export interface XcmInboundCredit {
+  blockHeight: number
+  ts: string
+  eventIndex: number
+  who: string
+  assetId: number
+  amount: string
+  messageId: string | null
+  // xcmOrigin only names a chain for MessageQueue barriers; DMP/XCMP-era barriers
+  // leave it unset rather than guessing, so both stay optional here.
+  fromChain?: ActivityRow['fromChain']
+  fromParachainId?: ActivityRow['fromParachainId']
+  barrierEventIndex: number
+  barriersInContext: number
+}
+
 // Decode the inbound-XCM beneficiary credits of the given blocks (see above).
 // `whoIn` restricts rows to those raw beneficiary account ids (account/tag page).
-async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInfo>, whoIn?: Set<string>): Promise<ActivityRow[]> {
+export async function xcmInboundCreditsForBlocks(blocks: number[], whoIn?: Set<string>): Promise<XcmInboundCredit[]> {
   const list = sqlUIntList(blocks)
   if (!list) return []
   // Pre-migration blocks execute their messages inside the set_validation_data
@@ -11622,7 +11646,13 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
     barrierIdxByBlock.set(b.block_height, at)
   }
   for (const idxs of barrierIdxByBlock.values()) idxs.sort((l, r) => l - r)
-  const rows: ActivityRow[] = []
+  const credits: XcmInboundCredit[] = []
+  const barrierCountByCtx = new Map<string, number>()
+  for (const b of barriers) {
+    if (!b.succeeded) continue
+    const ctxKey = `${b.block_height}:${b.extrinsic_index ?? 'hook'}`
+    barrierCountByCtx.set(ctxKey, (barrierCountByCtx.get(ctxKey) ?? 0) + 1)
+  }
   for (const b of barriers) {
     if (!b.succeeded) continue
     const from = xcmOrigin(b)
@@ -11648,15 +11678,30 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
       const key = `${who}:${cid}:${amount}`
       if (seen.has(key)) continue
       seen.add(key)
-      const a = asset(cid)
-      rows.push({
-        type: 'xcm', blockHeight: b.block_height, timestamp: b.ts, eventIndex: idx, extrinsicIndex: null,
-        who: accountRef(who), to: null, asset: a, assetIn: null, assetOut: null,
-        amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
-        xcmDir: 'in', ...from, messageId,
+      credits.push({
+        blockHeight: b.block_height, ts: b.ts, eventIndex: idx, who, assetId: cid, amount,
+        messageId, ...from,
+        barrierEventIndex: b.event_index,
+        barriersInContext: barrierCountByCtx.get(`${b.block_height}:${b.extrinsic_index ?? 'hook'}`) ?? 1,
       })
     }
   }
+  return credits
+}
+
+// The activity feed's inbound arm: the same walk, dressed for presentation.
+async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInfo>, whoIn?: Set<string>): Promise<ActivityRow[]> {
+  const credits = await xcmInboundCreditsForBlocks(blocks, whoIn)
+  const rows: ActivityRow[] = credits.map(c => {
+    const a = asset(c.assetId)
+    return {
+      type: 'xcm', blockHeight: c.blockHeight, timestamp: c.ts, eventIndex: c.eventIndex, extrinsicIndex: null,
+      who: accountRef(c.who), to: null, asset: a, assetIn: null, assetOut: null,
+      amount: c.amount, amountIn: null, amountOut: null,
+      valueUsd: usdValue(prices, a.assetId, c.amount, a.decimals),
+      xcmDir: 'in', fromChain: c.fromChain, fromParachainId: c.fromParachainId, messageId: c.messageId,
+    } as ActivityRow
+  })
   return rows.sort(compareActivityRowsNewestFirst)
 }
 
