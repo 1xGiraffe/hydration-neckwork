@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- activity table exports slug/id/label helpers alongside its components */
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
-import { F, AddrPill, AssetChip, AssetAmount, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
+import { F, AddrPill, AssetChip, AssetAmount, AssetIcon, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
 import { LIQ_LABELS, activityBadge, BOND_LABELS, intentLabel } from './activityColors'
 import { parseUtcTimestamp } from '../utils/time'
@@ -171,6 +171,11 @@ export function activityId(r: ActivityRow, dcaExecutionLink = false): string | n
 // recognised by VALUE, not by the row's type — an intent row handed its coordinates
 // must land on its slug page, never on /intent/<h>-e<i>.
 export function activityHref(r: ActivityRow, id: string): string {
+  // A cross-chain swap has no detail page of its own: what there is to see is the
+  // extrinsic that placed it, which carries the Router legs, the NTT settlement and
+  // the order's own log. Without this it fell through activitySlug's default and
+  // linked to /transfer/<coords>, which resolves to nothing.
+  if (r.type === 'xcswap' && r.extrinsicIndex != null) return paths.extrinsicAt(r.blockHeight, r.extrinsicIndex)
   return r.type === 'intent' && id === r.intentId ? paths.intent(id) : paths.activityDetail(activitySlug(r), id)
 }
 // A slug names a URL, and `claim-rewards` is the URL of BOTH reward claims (see
@@ -318,7 +323,10 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     const sold = <AssetAmount asset={r.assetIn} raw={r.amountIn} />
     const dest = r.xcswapDestSymbol
       ? <span className="trade-leg">
-        <span className="mono">{r.xcswapDestAmount && r.xcswapDestDecimals != null ? `${F.amount(r.xcswapDestAmount, r.xcswapDestDecimals)} ` : ''}{r.xcswapDestSymbol}</span>
+        {/* The destination is not a registry asset, so it has no asset id — but it
+            does have an origin, which is all AssetIcon needs to resolve artwork. */}
+        {r.xcswapDestOrigin && <AssetIcon assetId={0} symbol={r.xcswapDestSymbol} origin={r.xcswapDestOrigin} />}
+        {' '}<span className="mono">{r.xcswapDestAmount && r.xcswapDestDecimals != null ? `${F.amount(r.xcswapDestAmount, r.xcswapDestDecimals)} ` : ''}{r.xcswapDestSymbol}</span>
         {r.xcswapDestChain && <span className="xc-chain">{r.xcswapDestChain}</span>}
       </span>
       : <span className="muted">bridging out</span>

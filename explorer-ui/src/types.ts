@@ -952,6 +952,8 @@ export interface ActivityRow {
   xcswapDestAsset?: string | null
   xcswapDestSymbol?: string | null
   xcswapDestChain?: string | null
+  // Where the destination's artwork lives; it renders through the ordinary AssetIcon.
+  xcswapDestOrigin?: AssetOrigin | null
   xcswapDestDecimals?: number | null
   xcswapDestAmount?: string | null
   xcswapDestAmountUsd?: number | null
@@ -1041,6 +1043,9 @@ export interface XcDestination {
   chain: string
   // The chain as people write it; `chain` is the registry key ('zec' for Zcash).
   chainName: string
+  // Where its artwork lives in the shared asset-metadata CDN — the same origin
+  // shape every foreign asset carries, so AssetIcon renders it unchanged.
+  origin: AssetOrigin
 }
 export interface XcDestinationDetail {
   destination: XcDestination

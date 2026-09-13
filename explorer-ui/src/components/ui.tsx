@@ -451,7 +451,13 @@ export function assetIconCandidates(srcId: number, origin?: AssetOrigin | null):
   // contract icon. Keep the local Hydration icon as a fallback for incomplete
   // external metadata. Polkadot-origin assets continue using the curated local
   // icon and get only an origin-chain badge.
-  if (origin?.ecosystem === 'ethereum') {
+  // Any ecosystem but Polkadot's is addressed by its own chain and asset key in
+  // the shared metadata CDN, and the path shape is the same for all of them
+  // (`<ecosystem>/<chain>/assets/<key>/icon.svg`) — so this is keyed on "not the
+  // local curated set" rather than on Ethereum by name. That is what lets a
+  // cross-chain destination (NEAR, Zcash) carry an icon without a code change per
+  // chain: it arrives as an origin like every other foreign asset.
+  if (origin && origin.ecosystem !== 'polkadot') {
     for (const ext of ['svg', 'png'] as const) {
       const url = originAssetIconUrl(origin, ext)
       if (url) out.push(url)
@@ -1904,6 +1910,10 @@ export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = 
     { v: 'otc-place', label: 'OTC place' }, { v: 'otc-pull', label: 'OTC pull' }, { v: 'otc-fill', label: 'OTC fill' },
     { v: 'intent-place', label: intentLabel('swap', 'Place') }, { v: 'intent-fill', label: intentLabel('swap', 'Fill') }, { v: 'intent-cancel', label: intentLabel('swap', 'Cancel') }, { v: 'intent-expire', label: intentLabel('swap', 'Expire') },
     { v: 'intent-dca-trade', label: intentLabel('dca', 'DcaTrade') },
+    // Swapping OUT of Hydration to another chain. An action under Trade rather
+    // than a chip of its own, because the chip named "Cross-chain" is XCM —
+    // moving an asset to another chain, not selling into one.
+    { v: 'xcswap', label: 'Cross-chain swap' },
   ],
   xcm: [{ v: 'out', label: 'Outgoing' }, { v: 'in', label: 'Incoming' }],
   liquidity: [{ v: 'Add', label: 'Add liquidity' }, { v: 'Remove', label: 'Remove liquidity' }, { v: 'Create', label: 'Create pool' }, { v: 'Destroy', label: 'Destroy pool' }, { v: 'Claim', label: LIQ_LABELS.Claim }, { v: 'ClaimReferral', label: LIQ_LABELS.ClaimReferral }, { v: 'CollectFees', label: LIQ_LABELS.CollectFees }, { v: 'Rebalance', label: LIQ_LABELS.Rebalance }],

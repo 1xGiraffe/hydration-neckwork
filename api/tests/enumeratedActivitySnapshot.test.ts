@@ -39,7 +39,7 @@ describe('the enumerated activity snapshot is one shared read', () => {
     // joined one of these groups would have to justify itself here.
     const countable = ['all', 'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'otc', 'bond', 'intent']
     expect(new Set(countable.map(type => enumeratedActivityKey(accounts, type))).size).toBe(10)
-    expect(enumeratedActivityKey(accounts, 'all')).toContain(':otc+dcaFailures+rewards+staking+bonds+intents+votes+xcm+ntt+v3:')
+    expect(enumeratedActivityKey(accounts, 'all')).toContain(':otc+dcaFailures+rewards+staking+bonds+intents+xcswaps+votes+xcm+ntt+v3:')
   })
 
   // The account set is a set, not a list: two callers resolving the same related accounts
