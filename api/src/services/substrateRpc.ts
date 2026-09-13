@@ -1,7 +1,8 @@
 // Minimal substrate JSON-RPC helpers shared by services that read chain state
 // live (money market, LP positions, proxy/multisig). One full Hydration node
-// serves both eth_* and state_* calls.
-export const SUBSTRATE_RPC_URL = process.env.RAW_EVM_RPC_URL?.trim() || 'https://hydration-rpc.n.dwellir.com'
+// serves both eth_* and state_* calls, so this is the same RPC_URL every other
+// service in the stack reads.
+export const SUBSTRATE_RPC_URL = process.env.RPC_URL?.trim() || 'https://hydration-rpc.neckwork.net'
 
 // Nodes cap JSON-RPC batch size (node-full rejects >100 with -32010), so large
 // reads are split into conservative chunks.

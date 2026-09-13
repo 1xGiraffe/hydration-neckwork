@@ -38,9 +38,8 @@ Options:
   --help, -h            Print this help message
 
 Environment Variables:
-  RPC_URL                       HTTP(S) or WebSocket RPC endpoint
-  RAW_EVM_RPC_URL               HTTP(S) endpoint with historical eth_call support for Money Market positions
-  RAW_EVM_RPC_FALLBACK_URLS     Comma-separated fallback HTTP(S) endpoints for Money Market eth_call reads
+  RPC_URL                       HTTP(S) or WebSocket RPC endpoint. Money Market
+                                position reads need HTTP(S) with historical eth_call support
   RPC_RATE_LIMIT                RPC request rate limit (Docker Compose default: 50)
   RPC_CAPACITY                  Max concurrent RPC requests (default: 20; Docker Compose uses 10)
   CLICKHOUSE_HOST               ClickHouse HTTP endpoint

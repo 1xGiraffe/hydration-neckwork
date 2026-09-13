@@ -9,6 +9,7 @@ import type {
   RawParserWarningRow,
 } from './types.js'
 import { chunk, forEachConcurrent } from '../util/collections.js'
+import { DEFAULT_RPC_URL } from '../config.js'
 
 const POOL_IMPLEMENTATION_PROXY = '0x1b02e051683b5cfac5929c25e84adb26ecf87b38'
 const ATOKEN = '0xc0df4c545bafa1788a4ee55f79704d12fc2c7b5c'
@@ -32,12 +33,6 @@ const POOL_ADDRESS_PROVIDER = '0xf3ba4d1b50f78301bdd7eaea9b67822a15fca691'
 const UI_POOL_DATA_PROVIDER = '0x112b087b60c1a166130d59266363c45f8aa99db0'
 const MM_TREASURY = '0xe52567ff06acd6cbe7ba94dc777a3126e180b6d9'
 const HSMPOOL_FACILITATOR = '0x6d6f646c70792f68736d6f640000000000000000'
-export const DEFAULT_RAW_EVM_RPC_URL = 'https://hydration-rpc.n.dwellir.com'
-export const DEFAULT_RAW_EVM_RPC_FALLBACK_URLS = [
-  'https://hydration-rpc.n.dwellir.com',
-  'https://rpc.coke.hydration.cloud',
-  'https://rpc.sin.hydration.cloud',
-]
 
 // money markets
 // Each AAVE v3 market is an isolated pool: getUserAccountData(user) on one pool
@@ -305,32 +300,20 @@ function parseRpcUrl(rawUrl: string): string {
   try {
     url = new URL(trimmed)
   } catch {
-    throw new Error(`RAW_EVM_RPC_URL must be a valid HTTP(S) URL, got "${trimmed}"`)
+    throw new Error(`RPC_URL must be a valid HTTP(S) URL, got "${trimmed}"`)
   }
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error(`RAW_EVM_RPC_URL must use http or https for eth_call, got "${trimmed}"`)
+    throw new Error(`RPC_URL must use http or https for eth_call, got "${trimmed}"`)
   }
 
   return trimmed
 }
 
-function evmRpcUrls(): string[] {
-  const primary = process.env.RAW_EVM_RPC_URL?.trim() || DEFAULT_RAW_EVM_RPC_URL
-  const fallbackConfig = process.env.RAW_EVM_RPC_FALLBACK_URLS ?? DEFAULT_RAW_EVM_RPC_FALLBACK_URLS.join(',')
-  const candidates = [
-    primary,
-    ...fallbackConfig.split(',').map(value => value.trim()).filter(value => value !== ''),
-  ]
-  const urls: string[] = []
-  const seen = new Set<string>()
-  for (const candidate of candidates) {
-    const url = parseRpcUrl(candidate)
-    if (seen.has(url)) continue
-    seen.add(url)
-    urls.push(url)
-  }
-  return urls
+// Read at call time rather than through `config`, so a worker started with a
+// different endpoint picks it up without a module reload.
+function evmRpcUrl(): string {
+  return parseRpcUrl(process.env.RPC_URL?.trim() || DEFAULT_RPC_URL)
 }
 
 function rpcOriginForEvidence(rpcUrl: string): string {
@@ -338,7 +321,7 @@ function rpcOriginForEvidence(rpcUrl: string): string {
 }
 
 export function assertMoneyMarketPositionConfig(): void {
-  evmRpcUrls()
+  evmRpcUrl()
 }
 
 function moneyMarketEthCallTimeoutMs(): number {
@@ -465,29 +448,10 @@ async function readUserPositions(userAddresses: string[], blockHeight: number, r
   return positions
 }
 
-async function readUserPositionsWithFallback(userAddresses: string[], blockHeight: number, rpcUrls: string[], poolProxy: string): Promise<Map<string, {
-  metrics: ReturnType<typeof decodeUserAccountData>
-  evidence: Record<string, unknown>
-}>> {
-  let lastError: unknown
-  const attemptedOrigins: string[] = []
-  for (const rpcUrl of rpcUrls) {
-    attemptedOrigins.push(rpcOriginForEvidence(rpcUrl))
-    try {
-      return await readUserPositions(userAddresses, blockHeight, rpcUrl, poolProxy)
-    } catch (error) {
-      lastError = error
-    }
-  }
-
-  const detail = lastError instanceof Error ? lastError.message : 'Money Market eth_call failed'
-  throw new Error(`${detail}; attempted RPC origins: ${attemptedOrigins.join(', ')}`)
-}
-
 function positionWarning(
   row: RawEvmLogRow,
   userAddress: string,
-  rpcUrls: string[],
+  rpcUrl: string,
   ingestSource: string,
   error: unknown,
 ): RawParserWarningRow {
@@ -504,7 +468,7 @@ function positionWarning(
       raw_evm_log_event_index: row.event_index,
       event_signature: row.event_signature,
       user_address: userAddress,
-      rpc_origins: rpcUrls.map(rpcOriginForEvidence),
+      rpc_origins: [rpcOriginForEvidence(rpcUrl)],
     }),
     ingest_source: ingestSource,
   }
@@ -514,7 +478,7 @@ function periodicPositionWarning(
   userAddress: string,
   blockHeight: number,
   blockTimestamp: string,
-  rpcUrls: string[],
+  rpcUrl: string,
   ingestSource: string,
   error: unknown,
 ): RawParserWarningRow {
@@ -529,7 +493,7 @@ function periodicPositionWarning(
     warning: error instanceof Error ? error.message : 'Money Market periodic eth_call failed',
     evidence_json: toJsonString({
       user_address: userAddress,
-      rpc_origins: rpcUrls.map(rpcOriginForEvidence),
+      rpc_origins: [rpcOriginForEvidence(rpcUrl)],
     }),
     ingest_source: ingestSource,
   }
@@ -559,7 +523,7 @@ export async function snapshotMoneyMarketPositions(
   const addresses = uniqueAddresses(userAddresses)
   if (addresses.length === 0) return { positions, warnings }
 
-  const rpcUrls = evmRpcUrls()
+  const rpcUrl = evmRpcUrl()
   const batches = chunk(addresses, moneyMarketBatchSize())
   const requestedMarkets = options.marketKeys == null ? null : new Set(options.marketKeys)
   const selectedMarkets = requestedMarkets == null
@@ -575,12 +539,12 @@ export async function snapshotMoneyMarketPositions(
   // totals and are skipped, so this only materialises real positions per market.
   const work = selectedMarkets.flatMap(market => batches.map(batch => ({ market, batch })))
   await forEachConcurrent(work, moneyMarketPositionConcurrency(), async ({ market, batch }) => {
-    let positionsByUser: Awaited<ReturnType<typeof readUserPositionsWithFallback>>
+    let positionsByUser: Awaited<ReturnType<typeof readUserPositions>>
     try {
-      positionsByUser = await readUserPositionsWithFallback(batch, blockHeight, rpcUrls, market.poolProxy)
+      positionsByUser = await readUserPositions(batch, blockHeight, rpcUrl, market.poolProxy)
     } catch (error) {
       for (const userAddress of batch) {
-        warnings.push(periodicPositionWarning(userAddress, blockHeight, blockTimestamp, rpcUrls, ingestSource, error))
+        warnings.push(periodicPositionWarning(userAddress, blockHeight, blockTimestamp, rpcUrl, ingestSource, error))
       }
       return
     }
@@ -588,7 +552,7 @@ export async function snapshotMoneyMarketPositions(
     for (const userAddress of batch) {
       const position = positionsByUser.get(userAddress)
       if (position == null) {
-        warnings.push(periodicPositionWarning(userAddress, blockHeight, blockTimestamp, rpcUrls, ingestSource, new Error('eth_call returned no position')))
+        warnings.push(periodicPositionWarning(userAddress, blockHeight, blockTimestamp, rpcUrl, ingestSource, new Error('eth_call returned no position')))
         continue
       }
       if (!options.includeZeroPositions
@@ -770,7 +734,7 @@ export async function extractMoneyMarketRows(
   }
 
   if (positionTasks.size > 0 && !options.skipPositions) {
-    const rpcUrls = evmRpcUrls()
+    const rpcUrl = evmRpcUrl()
     // Group by (block, pool): one getUserAccountData batch hits a single pool at a
     // single block height.
     const tasksByBlockPool = new Map<string, Array<{
@@ -795,7 +759,7 @@ export async function extractMoneyMarketRows(
       const poolProxy = tasks[0]?.poolProxy
       if (blockHeight == null || poolProxy == null) return
       try {
-        const positionsByUser = await readUserPositionsWithFallback(tasks.map(task => task.userAddress), blockHeight, rpcUrls, poolProxy)
+        const positionsByUser = await readUserPositions(tasks.map(task => task.userAddress), blockHeight, rpcUrl, poolProxy)
         for (const task of tasks) {
           const position = positionsByUser.get(task.userAddress)
           if (position == null) {
@@ -822,7 +786,7 @@ export async function extractMoneyMarketRows(
       } catch (error) {
         for (const task of tasks) {
           for (const entry of task.entries) {
-            warnings.push(positionWarning(entry.row, task.userAddress, rpcUrls, ingestSource, error))
+            warnings.push(positionWarning(entry.row, task.userAddress, rpcUrl, ingestSource, error))
           }
         }
       }

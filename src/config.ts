@@ -5,6 +5,11 @@ import {
   stringFromEnvironment,
 } from './util/env.js'
 
+// The project's own unthrottled Hydration archive. One endpoint serves every
+// service: Hydration answers the substrate calls and the Money-Market `eth_call`
+// reads on the same port, so there is no separate EVM endpoint to configure.
+export const DEFAULT_RPC_URL = 'https://hydration-rpc.neckwork.net'
+
 export interface Config {
   // Subsquid Network gateway for Hydration mainnet
   SQD_GATEWAY: string
@@ -47,7 +52,7 @@ export const config: Config = {
   SQD_GATEWAY_API_KEY: optionalStringFromEnvironment('SQD_GATEWAY_API_KEY'),
 
   // RPC endpoint (falls back to the project's own unthrottled Hydration archive)
-  RPC_URL: stringFromEnvironment('RPC_URL', 'https://hydration-rpc.neckwork.net'),
+  RPC_URL: stringFromEnvironment('RPC_URL', DEFAULT_RPC_URL),
   RPC_RATE_LIMIT: integerFromEnvironment('RPC_RATE_LIMIT', 100), // requests per second
   RPC_CAPACITY: integerFromEnvironment('RPC_CAPACITY', 20), // max concurrent RPC requests
   // How often the SQD live follower polls the chain for a new head (the RPC
