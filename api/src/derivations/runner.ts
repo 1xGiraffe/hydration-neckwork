@@ -16,8 +16,14 @@
 
 import { createLongOpClickHouseClient, type ClickHouseClient } from '../db/client.ts'
 import { loadExplorerAssets } from '../services/explorerAssets.ts'
+// xcm_arrivals stores the output of the activity feed's own inbound-XCM walk rather
+// than restating it, so this process runs that service's code and has to give it the
+// same client the jobs use. Without it the walk's module-level client is undefined and
+// the job fails on its first read.
+import { initExplorerService } from '../services/explorerService.ts'
 import {
   runAccountRevenue,
+  runXcmArrivals,
   runAccountTradeVolume,
   runOmnipoolOwnerIntervals,
   runPoolSwapHourly,
@@ -78,6 +84,10 @@ const JOBS: DerivationJob[] = [
   // computed_at, and its USD comes from the already-valued rows (no registry
   // dependency of its own).
   { model: 'account_revenue', run: runAccountRevenue },
+  // Attribution of inbound XCM arrivals. No registry dependency: it stores the raw
+  // integer amount and the message's own origin, no valuation. Order-independent of
+  // the jobs above — it reads raw_events/raw_xcm_activity, which none of them write.
+  { model: 'xcm_arrivals', run: runXcmArrivals },
 ]
 
 export interface RunCycleDeps {
@@ -93,6 +103,7 @@ export interface RunCycleDeps {
 // for(;;) loop below and the DERIVATIONS_ONESHOT path call this same function.
 export async function runCycle({ jobs, loadAssets, makeClient }: RunCycleDeps): Promise<void> {
   const client = makeClient()
+  initExplorerService(client)
   const results: DerivationResult[] = []
   const skipped = new Set<string>()
   try {

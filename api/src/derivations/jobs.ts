@@ -25,6 +25,9 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { buildPartitionInsertSql } from '../services/accountTradeVolume.ts'
 import { allExplorerAssets } from '../services/explorerAssets.ts'
+// The feed's own inbound-XCM walk. Imported, not reimplemented: see the xcm_arrivals
+// section below for the four ways a SQL restatement of it drifted.
+import { xcmInboundCreditsForBlocks, XCM_BARRIER_EVENTS, type XcmInboundCredit } from '../services/explorerService.ts'
 import {
   buildOmnipoolOwnerIntervals,
   type OwnerLifecycleEvent,
@@ -1225,4 +1228,109 @@ export async function runAccountRevenue(client: ClickHouseClient): Promise<Deriv
     format: 'JSONEachRow',
   })
   return { model, rows: Number((await counted.json<{ n: string }>())[0]?.n ?? 0) }
+}
+
+// ───────────────────────────── xcm_arrivals ─────────────────────────────
+// Store the inbound-XCM arrivals the activity feed already decodes, so they can be
+// answered in SQL. `raw_xcm_activity.recipient` is NULL on all 988,879 inbound and
+// processed rows — the chain emits no beneficiary for an arrival, it lives in the XCM
+// program's un-emitted `DepositAsset` — so nothing in the database could attribute an
+// arrival to an account for analysis or the Data API.
+//
+// This job CALLS the feed's own walk (`xcmInboundCreditsForBlocks`) rather than
+// restating it in SQL. A SQL restatement was written first and measured against the
+// walk: it drifted four separate ways (a barrier set missing `DmpQueue.ExecutedDownward`,
+// a credit set missing `Balances.Issued`/`Minted`, reserved-account prefixes of
+// `modl|ETH\0` instead of `modl|sibl|para`, and no handling of the crossable events the
+// run must step over — without crossing `EVM.Log`, 149 of the first 151 HOLLAR arrivals
+// decode to nothing). One walk, two consumers, parity by construction.
+//
+// Block-range chunks rather than partitions: the walk reads per block, and a chunk
+// bounds both the ClickHouse reads it issues and the rows held in memory.
+// The same barrier list the walk terminates on, so this selects exactly the blocks the
+// walk can decode — a second copy here is how the SQL version started drifting.
+const XCM_MESSAGE_EVENTS = XCM_BARRIER_EVENTS.map(n => `'${n}'`).join(',')
+
+const XCM_ARRIVALS_CHUNK_BLOCKS = 50_000
+
+export function xcmArrivalsChunks(fromBlock: number, toBlock: number, size = XCM_ARRIVALS_CHUNK_BLOCKS): number[][] {
+  const chunks: number[][] = []
+  for (let start = fromBlock; start <= toBlock; start += size) {
+    chunks.push([start, Math.min(start + size - 1, toBlock)])
+  }
+  return chunks
+}
+
+// Forward-only would be wrong under backward backfill, so the floor is the lowest block
+// raw holds that the derived table does not yet cover, recomputed each cycle. Replacement
+// is per (block_height, event_index), so re-running a chunk is idempotent.
+export function xcmArrivalsPendingRangeSql(): string {
+  return `
+    SELECT toString(src.src_lo) AS lo, toString(src.src_hi) AS hi, toString(der.der_lo) AS der_lo, toString(der.der_hi) AS der_hi
+    FROM (
+      SELECT min(block_height) AS src_lo, max(block_height) AS src_hi FROM price_data.raw_xcm_activity
+      WHERE name IN (${XCM_MESSAGE_EVENTS})
+    ) AS src CROSS JOIN (
+      SELECT ifNull(min(block_height), 0) AS der_lo, ifNull(max(block_height), 0) AS der_hi
+      FROM price_data.xcm_arrivals
+    ) AS der`
+}
+
+export async function runXcmArrivals(client: ClickHouseClient): Promise<DerivationResult> {
+  const model = 'xcm_arrivals'
+  const res = await client.query({ query: xcmArrivalsPendingRangeSql(), format: 'JSONEachRow' })
+  const r = (await res.json<{ lo: string; hi: string; der_lo: string; der_hi: string }>())[0]
+  if (!r) return { model, rows: 0 }
+  const srcLo = Number(r.lo), srcHi = Number(r.hi), derLo = Number(r.der_lo), derHi = Number(r.der_hi)
+  if (!Number.isFinite(srcHi) || srcHi <= 0) return { model, rows: 0 }
+  // Two open ends: history below what has been stored, and the live head above it.
+  const ranges: number[][] = []
+  if (derHi === 0) ranges.push([srcLo, srcHi])
+  else {
+    if (derLo > srcLo) ranges.push([srcLo, derLo - 1])
+    if (srcHi > derHi) ranges.push([derHi + 1, srcHi])
+  }
+  let written = 0
+  for (const [lo, hi] of ranges) {
+    for (const [from, to] of xcmArrivalsChunks(lo, hi)) {
+      const blocks = await blocksWithXcmMessages(client, from, to)
+      if (!blocks.length) continue
+      const credits = await xcmInboundCreditsForBlocks(blocks)
+      if (!credits.length) continue
+      await insertXcmArrivals(client, credits)
+      written += credits.length
+    }
+  }
+  return { model, rows: written }
+}
+
+// Only the blocks that actually processed a message; the walk is given nothing else.
+async function blocksWithXcmMessages(client: ClickHouseClient, from: number, to: number): Promise<number[]> {
+  const res = await client.query({
+    query: `SELECT DISTINCT block_height FROM price_data.raw_xcm_activity
+            WHERE block_height >= ${from} AND block_height <= ${to}
+              AND name IN (${XCM_MESSAGE_EVENTS})
+            ORDER BY block_height
+            SETTINGS max_memory_usage = 2000000000, max_threads = 4`,
+    format: 'JSONEachRow',
+  })
+  return (await res.json<{ block_height: number }>()).map(x => Number(x.block_height))
+}
+
+function sqlQuote(v: string): string {
+  return `'${v.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
+}
+
+async function insertXcmArrivals(client: ClickHouseClient, credits: XcmInboundCredit[]): Promise<void> {
+  const values = credits.map(c => `(${c.blockHeight},${c.eventIndex},${sqlQuote(c.ts)},${sqlQuote(c.who)},` +
+    `${c.assetId},${sqlQuote(c.amount)},${sqlQuote(c.messageId ?? '')},${c.barrierEventIndex},` +
+    `${Math.min(c.barriersInContext, 255)},` +
+    `${sqlQuote(c.barriersInContext === 1 ? 'exact' : 'ambiguous')},` +
+    `${sqlQuote(c.fromChain ?? '')},${c.fromParachainId ?? 'NULL'},now())`).join(',')
+  await client.command({
+    query: `INSERT INTO price_data.xcm_arrivals
+      (block_height, event_index, block_timestamp, account, asset_id, amount, message_id,
+       message_event_index, barriers_in_context, attribution, from_chain, from_parachain_id, computed_at)
+      VALUES ${values}`,
+  })
 }
