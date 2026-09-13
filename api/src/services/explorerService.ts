@@ -11,7 +11,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT } from './tagService.ts'
@@ -7407,6 +7407,12 @@ export function xcswapRowFromOrder(
     xcswapMaxRelayFee: r.max_relay_fee,
     xcswapStatus: settlement?.status ?? null,
     xcswapDestAsset: settlement?.destinationAsset ?? null,
+    // Where the destination's artwork lives, so a row renders its icon through the
+    // same origin path every foreign asset uses. Looked up from the 1Click id the
+    // settlement names, so a destination added to XC_DESTINATIONS gets one for free.
+    xcswapDestOrigin: (settlement?.destinationAsset
+      ? XC_DESTINATIONS.find(d => d.oneClickId === settlement.destinationAsset)?.origin
+      : undefined) ?? null,
     xcswapDestSymbol: settlement?.destinationSymbol ?? null,
     xcswapDestChain: settlement?.destinationChain ?? null,
     xcswapDestDecimals: settlement?.destinationDecimals ?? null,
@@ -7682,13 +7688,28 @@ export interface XcDestination {
   /** The same chain as people write it. The registry key is `zec` for Zcash, which
    *  beside the ZEC symbol reads as a stutter rather than a place. */
   chainName: string
+  /** Where its artwork lives in the shared asset-metadata CDN. */
+  origin: AssetOrigin
 }
 
 // The destinations the swap SDK offers today. An explicit list: each one needs a
 // reference price, and a destination we cannot price is one we cannot describe.
 export const XC_DESTINATIONS: XcDestination[] = [
-  { platform: 'near', oneClickId: 'nep141:wrap.near', symbol: 'wNEAR', name: 'Wrapped NEAR', decimals: 24, chain: 'near', chainName: 'NEAR' },
-  { platform: 'zec', oneClickId: 'nep141:zec.omft.near', symbol: 'ZEC', name: 'Zcash', decimals: 8, chain: 'zec', chainName: 'Zcash' },
+  // `origin` is the destination's entry in the shared asset-metadata CDN, the same
+  // shape every foreign asset already carries — so it gets its icon and its chain
+  // badge from the ordinary path rather than from anything cross-chain-specific.
+  // The metadata key is NOT always the trading symbol: NEAR's icon is filed under
+  // NEAR, and a request for wNEAR 404s.
+  {
+    platform: 'near', oneClickId: 'nep141:wrap.near', symbol: 'wNEAR', name: 'Wrapped NEAR',
+    decimals: 24, chain: 'near', chainName: 'NEAR',
+    origin: { ecosystem: 'near', chainId: 'near', assetId: 'NEAR' },
+  },
+  {
+    platform: 'zec', oneClickId: 'nep141:zec.omft.near', symbol: 'ZEC', name: 'Zcash',
+    decimals: 8, chain: 'zec', chainName: 'Zcash',
+    origin: { ecosystem: 'zcash', chainId: 'zec', assetId: 'ZEC' },
+  },
 ]
 // Negative, so it can never be mistaken for — or collide with — a registry id.
 export const xcDestinationAssetId = (platform: string): number =>
@@ -7707,7 +7728,7 @@ export function xcDestinationListItems(prices: ReadonlyMap<string, number>): Ass
     assetId: xcDestinationAssetId(d.platform),
     iconAssetId: xcDestinationAssetId(d.platform),
     symbol: d.symbol, name: d.name, decimals: d.decimals,
-    parachainId: null, origin: null,
+    parachainId: null, origin: d.origin,
     price: prices.get(d.platform) ?? null,
     change24h: null,
     type: 'Cross-chain' as const,
@@ -9908,6 +9929,7 @@ export interface ActivityRow {
   xcswapDestAsset?: string | null
   xcswapDestSymbol?: string | null
   xcswapDestChain?: string | null
+  xcswapDestOrigin?: AssetOrigin | null
   xcswapDestDecimals?: number | null
   xcswapDestAmount?: string | null
   xcswapDestAmountUsd?: number | null
@@ -15736,7 +15758,7 @@ function normalizeActivityTypeKey(type: string): string { return type === 'dca' 
 // changes). `type=otc` / `type=intent` still select only their own rows (kept
 // working as an API nicety; the UI never sends them).
 export function activityTypeMatchesFamily(rowType: ActivityRow['type'], type: string): boolean {
-  return rowType === type || (type === 'trade' && (rowType === 'otc' || rowType === 'intent'))
+  return rowType === type || (type === 'trade' && (rowType === 'otc' || rowType === 'intent' || rowType === 'xcswap'))
 }
 // Per-category action filter (the sub-type select next to the chips).
 export function activityRowMatchesAction(r: ActivityRow, action?: string): boolean {
@@ -15754,6 +15776,9 @@ export function activityRowMatchesAction(r: ActivityRow, action?: string): boole
       const a = resolveIntentActions(action)
       return !!a && !!r.intentAction && a.includes(r.intentAction)
     }
+    // The only action a cross-chain swap answers to is its own: it is the whole
+    // family, so there is nothing narrower to pick inside it.
+    case 'xcswap': return action === 'xcswap'
     case 'liquidity': return r.liqAction === action
     case 'vote': return (r.voteSide ?? '') === action
     case 'xcm': return (r.xcmDir ?? 'out') === action
@@ -16135,7 +16160,7 @@ export function activityPagesInMemory(type: string, action?: string): boolean {
   const category = normalizeActivityTypeKey(type)
   // Failed DCA executions, the OTC actions and the intent actions are exact,
   // independently pageable event families; the builder reads them at the page's own offset.
-  if (category === 'trade' && (action === 'dca-failed' || otcOnlyActivityAction(action) || isIntentOnlyTradeRequest(category, action))) return false
+  if (category === 'trade' && (action === 'dca-failed' || otcOnlyActivityAction(action) || isIntentOnlyTradeRequest(category, action) || isXcswapOnlyTradeRequest(category, action))) return false
   if (category === 'all' || category === 'trade' || category === 'transfer') return true
   if (action) return true
   return category === 'liquidity' || category === 'mm' || category === 'xcm'
@@ -16159,6 +16184,18 @@ function otcOnlyActivityAction(action?: string): boolean {
 // already gives it.
 export function isIntentOnlyTradeRequest(type: string, action?: string): boolean {
   return normalizeActivityTypeKey(type) === 'trade' && resolveIntentActions(action) !== undefined && !otcOnlyActivityAction(action)
+}
+
+// A Trade-tab request for cross-chain swaps. Same shape as the intent case: no
+// swap, failed-DCA, OTC or intent row can satisfy it, so it is answered from the
+// xcswap source alone rather than widening the whole family's windows looking for
+// a match that cannot be there.
+//
+// It is an ACTION under Trade rather than a chip of its own because the chip
+// named "Cross-chain" is already XCM — a transfer of an asset to another chain,
+// which is a different thing from selling into one.
+export function isXcswapOnlyTradeRequest(type: string, action?: string): boolean {
+  return normalizeActivityTypeKey(type) === 'trade' && action === 'xcswap'
 }
 
 // Whether a value floor is sparse enough that the classified builder skips the
@@ -16229,6 +16266,11 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     // Sending them through the shared Trade classifier widens the unrelated
     // swap source forever because no swap can satisfy an otc-* action.
     rows = await getRecentOtc(limit, from, to, offset, filters, action)
+  } else if (isXcswapOnlyTradeRequest(type, action)) {
+    // Cross-chain swaps are their own indexed family, paged in SQL like the
+    // others; routing them through the shared Trade classifier would widen the
+    // swap source forever because no swap can satisfy the action.
+    rows = await getRecentXcswaps(limit, from, to, undefined, offset)
   } else if (isIntentOnlyTradeRequest(type, action)) {
     // The intent actions are the intent source's own page (see
     // isIntentOnlyTradeRequest): the same SQL-paged read `type=intent` takes, with
@@ -18484,11 +18526,12 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     // liquidity context that exists to classify swaps — contribute nothing to it,
     // and a busy asset's swaps filling their window read as this page being too broad.
     const intentOnly = isIntentOnlyTradeRequest(type, action)
+    const xcswapOnly = isXcswapOnlyTradeRequest(type, action)
     const wantTransfers = type === 'all' || type === 'transfer'
     // Classification context: the Transfers view must exclude trade/staking/MM
     // legs, and Trades must yield share-routed legs to Liquidity — so those
     // categories are fetched whenever their exclusion sets are needed.
-    const wantTrades = !intentOnly && (type === 'all' || type === 'trade' || wantTransfers)
+    const wantTrades = !intentOnly && !xcswapOnly && (type === 'all' || type === 'trade' || wantTransfers)
     const wantLiquidity = type === 'all' || type === 'liquidity' || wantTrades
     const wantXcm = type === 'all' || type === 'xcm' || wantTransfers
     const wantMm = type === 'all' || type === 'mm' || wantTransfers
@@ -18499,9 +18542,9 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     const wantBonds = type === 'all' || type === 'bond' || wantTransfers
     // intent folds under the trade chip/type like otc — fetched whenever trade is,
     // plus its own `type=intent` request and the Trade tab's intent actions.
-    const wantIntents = type === 'all' || type === 'intent' || wantTrades || intentOnly
+    const wantIntents = !xcswapOnly && (type === 'all' || type === 'intent' || wantTrades || intentOnly)
     // A cross-chain swap is a swap, so it joins the trade family like intents do.
-    const wantXcswaps = type === 'all' || type === 'xcswap' || wantTrades
+    const wantXcswaps = xcswapOnly || type === 'all' || type === 'xcswap' || wantTrades
     const wantVotes = (type === 'all' || type === 'vote' || wantTransfers) && assetId === 0
 
     const transfersP: Promise<ActivityRow[]> = wantTransfers ? (async () => {
@@ -20747,6 +20790,10 @@ interface EnumeratedActivity {
   staking: ActivityRow[]
   bonds: ActivityRow[]
   intents: ActivityRow[]
+  // Cross-chain swaps out through NEAR Intents — trade-family rows like otc and
+  // intents, and fully enumerable (the whole chain has placed 62 of them), which
+  // is what lets the exact plan count and locate them rather than guess.
+  xcswaps: ActivityRow[]
   votes: ActivityRow[]
   xcm: ActivityRow[]
   // Wormhole NTT sends and arrivals — cross-chain rows like xcm's, kept as their own
@@ -20761,7 +20808,7 @@ interface EnumeratedActivity {
 // Every enumerated row. All of them are non-transfer, so a transfer feed needs each
 // one's extrinsic or hook owner to decide which transfers are its plumbing.
 function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
-  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.bonds, ...e.intents, ...e.votes, ...e.xcm, ...e.ntt, ...e.v3]
+  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.bonds, ...e.intents, ...e.xcswaps, ...e.votes, ...e.xcm, ...e.ntt, ...e.v3]
 }
 
 // Which enumerated sources one type's feed needs. Exactly the `want*` flags
@@ -20774,7 +20821,7 @@ function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
 // therefore produce the same array, as do `liquidity` and `mm` with their one. That is
 // why the cache key names the SOURCE SET rather than the type — two types that read the
 // same history share one entry instead of reading it twice under two names.
-const ENUMERATED_SOURCE_NAMES = ['otc', 'dcaFailures', 'rewards', 'staking', 'bonds', 'intents', 'votes', 'xcm', 'ntt', 'v3'] as const
+const ENUMERATED_SOURCE_NAMES = ['otc', 'dcaFailures', 'rewards', 'staking', 'bonds', 'intents', 'xcswaps', 'votes', 'xcm', 'ntt', 'v3'] as const
 type EnumeratedSourceName = typeof ENUMERATED_SOURCE_NAMES[number]
 function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolean> {
   const wantTransfers = type === 'all' || type === 'transfer'
@@ -20787,6 +20834,10 @@ function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolea
     bonds: type === 'all' || type === 'bond' || wantTransfers,
     // Intents fold under the trade family like otc.
     intents: type === 'all' || type === 'intent' || type === 'trade' || wantTransfers,
+    // Cross-chain swaps fold under trade too, and own the Router sell and the NTT
+    // send in their extrinsic — so `transfer` needs them as suppression context
+    // exactly as it needs the others.
+    xcswaps: type === 'all' || type === 'xcswap' || type === 'trade' || wantTransfers,
     votes: type === 'all' || type === 'vote' || wantTransfers,
     xcm: type === 'all' || type === 'xcm' || wantTransfers,
     ntt: type === 'all' || type === 'xcm' || wantTransfers,
@@ -20863,13 +20914,14 @@ async function enumeratedActivityRowsUncached(
   const depth = EXACT_SMALL_SOURCE_ROWS + 1
   const xcmDepth = EXACT_XCM_SOURCE_ROWS + 1
   const need = enumeratedSourceNeed(type)
-  const [otc, dcaFailures, rewards, staking, bonds, intents, voteLegs, xcmLegs, nttLegs, v3] = await Promise.all([
+  const [otc, dcaFailures, rewards, staking, bonds, intents, xcswaps, voteLegs, xcmLegs, nttLegs, v3] = await Promise.all([
     need.otc ? getRecentOtc(depth, from, to, 0, {}, undefined, accounts) : [],
     need.dcaFailures ? getRecentDcaFailures(depth, from, to, accounts) : [],
     need.rewards ? getRecentRewardClaims(depth, from, to, accounts) : [],
     need.staking ? getRecentStaking(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
     need.bonds ? getRecentBonds(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
     need.intents ? getRecentIntents(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
+    need.xcswaps ? getRecentXcswaps(depth, from, to, accounts, 0) : [],
     // Two vote sources, each read to its own cap and landing in the one `votes`
     // slot the classifier expects: the indexed conviction/Democracy rows, and the
     // collective (Council / Technical Committee) votes out of raw_events. The
@@ -20895,13 +20947,13 @@ async function enumeratedActivityRowsUncached(
     need.v3 ? getRecentV3Rows('all', depth, from, to, 0, {}, { accounts }) : [],
   ])
   const capped: [ActivityRow[], number][] = [
-    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth], [bonds, depth], [intents, depth], [v3, depth],
+    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth], [bonds, depth], [intents, depth], [xcswaps, depth], [v3, depth],
     ...voteLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
     ...xcmLegs.map(leg => [leg, xcmDepth] as [ActivityRow[], number]),
     ...nttLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
   ]
   if (capped.some(([rows, cap]) => rows.length >= cap)) return null
-  return { otc, dcaFailures, rewards, staking, bonds, intents, votes: voteLegs.flat(), xcm: xcmLegs.flat(), ntt: nttLegs.flat(), v3 }
+  return { otc, dcaFailures, rewards, staking, bonds, intents, xcswaps, votes: voteLegs.flat(), xcm: xcmLegs.flat(), ntt: nttLegs.flat(), v3 }
 }
 
 // Which types this path can count exactly, in the order the reasoning above splits
@@ -21232,10 +21284,11 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   // account's swaps filling their window kept the windowed path widening to the
   // source ceiling before refusing the page.
   const intentOnly = isIntentOnlyTradeRequest(type, action)
+  const xcswapOnly = isXcswapOnlyTradeRequest(type, action)
   const wantTransfers = type === 'all' || type === 'transfer'
   // Classification context: Transfers excludes trade/staking/MM legs, Trades
   // yields share-routed legs to Liquidity — fetch what the exclusions need.
-  const wantTrades = !intentOnly && (type === 'all' || type === 'trade' || wantTransfers)
+  const wantTrades = !intentOnly && !xcswapOnly && (type === 'all' || type === 'trade' || wantTransfers)
   const wantDca = !intentOnly && (type === 'all' || type === 'trade' || wantTransfers)
   const wantLiquidity = type === 'all' || type === 'liquidity' || wantTrades
   const wantMm = type === 'all' || type === 'mm' || wantTransfers
@@ -21248,9 +21301,9 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   // intent folds under the trade chip/type like otc — fetched whenever trade is,
   // plus its own `type=intent` request and the Trade tab's intent actions. Owner
   // scope comes from intent_orders.
-  const wantIntents = type === 'all' || type === 'intent' || wantTrades || intentOnly
+  const wantIntents = !xcswapOnly && (type === 'all' || type === 'intent' || wantTrades || intentOnly)
   // A cross-chain swap is a swap, so it joins the trade family like intents do.
-  const wantXcswaps = type === 'all' || type === 'xcswap' || wantTrades
+  const wantXcswaps = xcswapOnly || type === 'all' || type === 'xcswap' || wantTrades
   const wantVotes = type === 'all' || type === 'vote' || wantTransfers
   // 1. The account's signed swaps. Signer scope and value predicates are joined
   // before LIMIT so a rare token/value match cannot sit beyond a signer window.
@@ -21706,7 +21759,8 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   noteSource(intents.length, oldestWindowBlock(intents, r => r.blockHeight))
   // The account's cross-chain swaps out through NEAR Intents. Not part of an exact
   // plan's enumeration: the orders table is its own model, read here directly.
-  const xcswaps = wantXcswaps ? await getRecentXcswaps(catFetch, from, to, accounts, 0) : []
+  const xcswaps = exact ? exact.enumerated.xcswaps
+    : wantXcswaps ? await getRecentXcswaps(catFetch, from, to, accounts, 0) : []
   noteSource(xcswaps.length, oldestWindowBlock(xcswaps, r => r.blockHeight))
   // Concentrated-liquidity acts of the accounts: swaps under the trade family, position and
   // vault acts under liquidity. Not part of an exact plan's enumeration (its count does

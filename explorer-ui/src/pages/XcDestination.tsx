@@ -29,7 +29,8 @@ export function XcDestination({ slug }: { slug: string }) {
         ]} />
         <div className="detail-header">
           <div className="page-title">
-            {data?.destination.symbol ?? slug}
+            {data && <AssetIcon assetId={0} symbol={data.destination.symbol} size={30} origin={data.destination.origin} />}
+            {' '}{data?.destination.symbol ?? slug}
             {data && <span className="xc-chain">on {data.destination.chainName}</span>}
           </div>
         </div>
@@ -46,30 +47,42 @@ export function XcDestination({ slug }: { slug: string }) {
               What Hydration can do is <em>swap out</em> into it: an order sells an asset here and a solver network delivers {data.destination.symbol} on its own chain.
             </div>
 
+            {/* `.dl` is a two-column grid whose cells ARE the `.dt`/`.dd` elements —
+                wrapping each pair in a div leaves both unstyled and unpadded. */}
             <div className="detail-card"><div className="dl">
-              <div><dt>Reference price</dt><dd>
+              <div className="dt">Chain</div>
+              <div className="dd">{data.destination.chainName} <span className="muted mono">{data.destination.oneClickId}</span></div>
+              <div className="dt">Reference price</div>
+              <div className="dd mono">
                 {data.referencePrice != null
-                  ? <><span className="mono">{F.priceUsd(data.referencePrice)}</span> <span className="muted">from {data.referenceSource}</span></>
+                  ? <>{F.priceUsd(data.referencePrice)} <span className="muted">from {data.referenceSource}</span></>
                   : <Dash />}
-              </dd></div>
-              <div><dt>Cross-chain swaps</dt><dd>
-                <span className="mono">{F.int(data.swapCount)}</span>
-                {data.settledCount !== data.swapCount && <span className="muted"> · {F.int(data.settledCount)} settled</span>}
-              </dd></div>
-              <div><dt>Sold from Hydration</dt><dd>{data.soldUsd != null ? <span className="mono">{F.usd(data.soldUsd)}</span> : <Dash />}</dd></div>
+              </div>
+              <div className="dt">Cross-chain swaps</div>
+              <div className="dd num">
+                {F.int(data.swapCount)}
+                {data.settledCount !== data.swapCount && <span className="muted">{F.int(data.settledCount)} settled</span>}
+              </div>
+              <div className="dt">Sold from Hydration</div>
+              <div className="dd mono">{data.soldUsd != null ? F.usd(data.soldUsd) : <Dash />}</div>
               {/* Two different dollar figures on purpose: what left Hydration, and
                   what reached the recipient. The gap is both rails' fees plus the
                   solver's spread, and it is the number a reader wants. */}
-              <div><dt>Delivered</dt><dd>
+              <div className="dt">Delivered</div>
+              <div className="dd mono">
                 {data.deliveredUsd != null
-                  ? <><span className="mono">{F.usd(data.deliveredUsd)}</span>
+                  ? <>{F.usd(data.deliveredUsd)}
                     {data.soldUsd != null && data.soldUsd > 0 && (
-                      <span className="muted"> · {((1 - data.deliveredUsd / data.soldUsd) * 100).toFixed(1)}% lost to fees and spread</span>
+                      <span className="muted">{((1 - data.deliveredUsd / data.soldUsd) * 100).toFixed(1)}% to fees and spread</span>
                     )}</>
                   : <Dash />}
-              </dd></div>
-              <div><dt>Recipients</dt><dd><span className="mono">{F.int(data.recipientCount)}</span></dd></div>
-              <div><dt>Decimals</dt><dd><span className="mono">{data.destination.decimals}</span></dd></div>
+              </div>
+              <div className="dt">Recipients</div>
+              <div className="dd num">{F.int(data.recipientCount)}</div>
+              <div className="dt">Decimals</div>
+              <div className="dd num">{data.destination.decimals}</div>
+              <div className="dt">First swap</div>
+              <div className="dd mono">{data.firstAt ? data.firstAt.slice(0, 10) : <Dash />}</div>
             </div></div>
 
             <div className="sec-title">Sold into it · {data.soldAssets.length}</div>

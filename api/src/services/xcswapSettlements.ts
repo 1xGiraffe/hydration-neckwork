@@ -175,9 +175,12 @@ async function oneClickGet(path: string): Promise<unknown> {
 
 const ONE_CLICK_TIMEOUT_MS = 10_000
 // Orders resolved per sweep. Only unresolved and still-moving orders are ever on
-// the list, so this is a ceiling for the first sweep after a restart rather than
-// a steady-state cost; the rest arrive on the next tick.
-const SWEEP_BATCH = 40
+// the list, so this bounds the first sweep after a restart rather than steady
+// state, where it is however many are in flight. Sized so a cold start resolves
+// the whole set in one tick — the full 62 took 0.76 s at this concurrency, and a
+// restart that leaves destinations unresolved for a minute shows a page missing
+// swaps it has every fact for.
+const SWEEP_BATCH = 250
 // Requests in flight at once against a third party's API.
 const SWEEP_CONCURRENCY = 4
 
