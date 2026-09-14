@@ -1,0 +1,22 @@
+<clickhouse>
+    <!--
+      Server memory ceiling.
+
+      The stock ratio is 0.9, i.e. ~111 GiB of this host's 124 GiB. That is not a
+      ceiling that protects anything: AGENTS.md records an unbounded full-history
+      pass over raw_extrinsics/raw_events reaching ~84 GiB RSS, at which point the
+      NEXT container to allocate tripped the kernel's global OOM killer, which took
+      ClickHouse down and every service on the box with it. At 0.9 the server was
+      still happily below its own limit the whole time.
+
+      0.6 (~74 GiB) puts the ceiling BELOW that figure, so the same query is
+      refused with MEMORY_LIMIT_EXCEEDED — a failed query and a stack trace instead
+      of a dead host — and leaves ~50 GiB for the twenty-odd other containers that
+      share this machine.
+
+      This is a backstop, not a substitute for bounding a query. AGENTS.md still
+      requires every ad-hoc pass over raw history to carry its own PREWHERE,
+      max_memory_usage and max_threads, and to run in block-range chunks.
+    -->
+    <max_server_memory_usage_to_ram_ratio>0.6</max_server_memory_usage_to_ram_ratio>
+</clickhouse>
