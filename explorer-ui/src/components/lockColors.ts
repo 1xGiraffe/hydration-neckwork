@@ -9,9 +9,9 @@
 // module's ~9.4 kB of /hdx-only chart components onto those pages too.
 export const LOCK_ORDER = ['vote', 'staking', 'gigahdx', 'vesting', 'other'] as const
 // A lock names the activity that placed it, so it wears that activity's colour:
-// governance locks are vote lavender, staked HDX is stake violet. The two used to
-// be neighbouring purples (--lavender-deep against #9c5cc4) and the first two
-// segments of the bar were near indistinguishable.
+// governance locks are vote lavender, staked HDX is stake violet. The two have to
+// stay well apart: as neighbouring purples the bar's first two segments are near
+// indistinguishable.
 // GIGAHDX keeps its brand black, the same one its market badge wears. Vesting
 // leaves red — red means the bad outcome now, and vesting is just capital on a
 // schedule — for a teal no category claims.

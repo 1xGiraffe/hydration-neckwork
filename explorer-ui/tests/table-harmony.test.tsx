@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { Dash, Sparkline } from '../src/components/ui'
+import { AssetDetailSkeleton, Dash, Sparkline } from '../src/components/ui'
 import { ActivityTable } from '../src/components/ActivityTable'
 import type { AssetRef, ActivityRow } from '../src/types'
 
@@ -53,5 +53,54 @@ describe('ActivityTable — Value column emphasis', () => {
     const html = renderToStaticMarkup(<ActivityTable rows={[row(50)]} now={0} />)
     const account = html.match(/<td data-label="Account"[^>]*>(.*?)<\/td>/)?.[1] ?? ''
     expect(account).toContain('mono muted')
+  })
+})
+
+// A placeholder row has to cover the whole table. When a column is added to the
+// header and the colSpan constant is left behind, nothing errors: the skeleton,
+// the empty note and the error row simply stop under the last column and the
+// table's right edge collapses while it loads. Counting the header instead of
+// hardcoding a number means the next column added is covered by construction.
+const headerCols = (html: string) => (html.match(/<th[\s>]/g) ?? []).length
+const spans = (html: string) => [...html.matchAll(/colspan="(\d+)"/gi)].map(m => Number(m[1]))
+const skeletonCells = (html: string) =>
+  [...html.matchAll(/<tr class="sk-tr">(.*?)<\/tr>/g)].map(m => (m[1].match(/<td[\s>]/g) ?? []).length)
+
+describe('activity placeholder rows cover every column', () => {
+  for (const noActor of [false, true]) {
+    const label = noActor ? ' (no actor column)' : ''
+
+    it(`the loading skeleton fills the header's width${label}`, () => {
+      const html = renderToStaticMarkup(<ActivityTable rows={[]} now={0} loading pageSize={3} noActor={noActor} />)
+      const cells = skeletonCells(html)
+
+      expect(cells).toHaveLength(3)
+      for (const n of cells) expect(n).toBe(headerCols(html))
+    })
+
+    it(`the empty note spans the header's width${label}`, () => {
+      const html = renderToStaticMarkup(<ActivityTable rows={[]} now={0} noActor={noActor} />)
+
+      expect(spans(html)).toEqual([headerCols(html)])
+    })
+
+    it(`the error row spans the header's width${label}`, () => {
+      const html = renderToStaticMarkup(<ActivityTable rows={[]} now={0} error={new Error('nope')} noActor={noActor} />)
+
+      expect(spans(html)).toEqual([headerCols(html)])
+    })
+  }
+})
+
+describe('the asset page skeleton reserves the activity table it precedes', () => {
+  // It cannot reuse ActivityTable (that component imports ui.tsx, which owns this
+  // skeleton), so the two headers are kept in step by this test instead.
+  it('has the same columns as the table that replaces it', () => {
+    const table = renderToStaticMarkup(<ActivityTable rows={[]} now={0} loading pageSize={5} />)
+    const skeleton = renderToStaticMarkup(<AssetDetailSkeleton />)
+    const panel = skeleton.slice(skeleton.lastIndexOf('<div class="panel">'))
+
+    expect(headerCols(panel)).toBe(headerCols(table))
+    for (const n of skeletonCells(panel)) expect(n).toBe(headerCols(table))
   })
 })

@@ -18,7 +18,6 @@ import type { AccountHistoryResponse, AddressBalance, AssetBalanceHistory, Asset
 // A long tail of dust holdings collapses into one "Other" tile; assets with no
 // market price and assets held only in the past sit in the selectable rows
 // beneath. The locked asset deep-links via ?asset=<assetId>.
-// Replaces the old balances table + separate balance-history section.
 
 // Keep tiles that carry real weight; fold the dust tail into a single "Other"
 // tile rather than a corner full of unreadable slivers.

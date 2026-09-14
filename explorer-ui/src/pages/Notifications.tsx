@@ -13,7 +13,7 @@ import { AddrPill, Ago, Copy, Crumbs, DetailTabs, EmptyRow, F, TableSkeleton, Ta
 import type { DetailTab } from '../components/ui'
 import { NotifyButton } from '../components/NotifyButton'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import { cooldownLabel, deleteRuleConfirmBody, ruleTagTarget, ruleHeadline } from '../notificationKinds'
+import { clearInboxConfirmBody, cooldownLabel, deleteRuleConfirmBody, ruleTagTarget, ruleHeadline } from '../notificationKinds'
 import { disablePush, enablePush, isStandalone, pushAvailability } from '../push'
 import type { NotificationChannel, NotificationInboxRow, NotificationRule, NotificationRuleInput } from '../types'
 
@@ -98,7 +98,7 @@ export function Notifications() {
           />
 
           {tab === 'inbox' && (
-            <InboxSection rows={inbox.data?.rows ?? []} unread={inbox.data?.unread ?? 0} loading={inbox.isLoading} now={now} />
+            <InboxSection rows={inbox.data?.rows ?? []} total={inbox.data?.total ?? 0} unread={inbox.data?.unread ?? 0} loading={inbox.isLoading} now={now} />
           )}
 
           {tab === 'alerts' && (
@@ -163,7 +163,7 @@ const PERSONAS: { who: string; want: string; how: string }[] = [
   { who: 'Risk desk', want: 'Tell me the moment a fuse trips', how: 'Every circuit breaker, pause, freeze and lockdown' },
 ]
 
-export function NotificationsTeaser() {
+function NotificationsTeaser() {
   return (
     <>
       <div className="notif-hero detail-card">
@@ -566,8 +566,11 @@ function RuleTargetPill({ rule }: { rule: NotificationRule }) {
 
 /* ── inbox ──────────────────────────────────────────────────────────────── */
 
-export function InboxSection({ rows, unread, loading, now }: {
+export function InboxSection({ rows, total, unread, loading, now }: {
   rows: NotificationInboxRow[]
+  // The whole history's length, not this page's: "Clear inbox" empties every
+  // stored notification, so the confirm has to name the number that disappears.
+  total: number
   unread: number
   loading?: boolean
   now: number
@@ -631,7 +634,7 @@ export function InboxSection({ rows, unread, loading, now }: {
         open={confirming}
         onOpenChange={setConfirming}
         title="Clear inbox"
-        body={`Clear all ${F.int(rows.length)} notification${rows.length === 1 ? '' : 's'}? Alerts keep firing; this only empties the history.`}
+        body={clearInboxConfirmBody(total, rows.length)}
         confirmLabel="Clear inbox"
         pending={clear.isPending}
         error={clearError}

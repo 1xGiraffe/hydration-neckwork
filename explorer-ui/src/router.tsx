@@ -28,7 +28,7 @@ export const ACTIVITY_SLUG_TAB: Record<ActivitySlug, string> = {
 
 // One section per part of the protocol, so a page never mixes two domains: the
 // money market's solvency and the Omnipool's per-block limits are different
-// questions and used to share a "Risk" tab.
+// questions and do not share a tab.
 export const SECURITY_SECTIONS = ['cross-chain', 'wormhole', 'omnipool', 'money-market', 'freezes', 'ledger', 'guardians'] as const
 export type SecuritySection = typeof SECURITY_SECTIONS[number]
 

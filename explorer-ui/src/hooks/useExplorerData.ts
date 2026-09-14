@@ -20,19 +20,7 @@ import type { AccountSort, ContractSort, RevenueRange } from '../types'
 // still is held. Ranked directories (useAccounts, useHolders) are excluded: they
 // serve a fixed-size page whose rows are replaced in rank order rather than
 // pushed down by an insertion.
-const DETAIL_POLL_MS = 15_000
-const SLOW_POLL_MS = 60_000
-
-// `pushed` marks a query the SSE head channel already refreshes (a
-// LIVE_PUSH_KEYS feed): while the stream is healthy its interval polling
-// pauses entirely, so requests happen only when a block actually lands. On
-// stream loss (older browser, proxy hiccup, mocked test API) the interval
-// resumes as the fallback.
-function useInterval(intervalMs = LIVE_MS, pushed = false): number | false {
-  const streaming = useHeadStream()
-  return pushed && streaming ? false : intervalMs
-}
-
+//
 // Paged and tabbed lists carry `placeholderData: keepPreviousData` for the same
 // reason the charts do: a tab switch, filter change or pager click changes the
 // query key, and without it `data` drops to undefined mid-fetch, so the table
@@ -41,6 +29,19 @@ function useInterval(intervalMs = LIVE_MS, pushed = false): number | false {
 // no rows", so the outgoing page simply refreshes in place. Row-freshness
 // highlighting is unaffected: useNewRows only flags additions when the new keys
 // overlap the previous ones, which a page or filter change never does.
+
+const DETAIL_POLL_MS = 15_000
+const SLOW_POLL_MS = 60_000
+
+// `pushed` marks a query the SSE head channel already refreshes (a
+// LIVE_PUSH_KEYS feed): while the stream is healthy its interval polling
+// pauses entirely, so requests happen only when a block actually lands. On
+// stream loss (older browser, proxy hiccup, mocked test API) the interval
+// resumes as the fallback.
+export function useInterval(intervalMs = LIVE_MS, pushed = false): number | false {
+  const streaming = useHeadStream()
+  return pushed && streaming ? false : intervalMs
+}
 
 export function useStats(enabled = true) {
   const ri = useInterval(LIVE_MS, true)
@@ -302,10 +303,13 @@ export function usePoolActivity(poolId: number | null, limit = 25) {
     refetchInterval: ri,
   })
 }
-export function useAssetActivity(assetId: number | null, type = 'all', offset = 0, action?: string, enabled = true, from?: string, to?: string, min?: string) {
+// The asset-pinned activity feed. Every filter the page shows has to arrive here:
+// the pager's bound is fetched under the same filter set, so a filter that reached
+// only one of the two would size the pages for a list the rows never match.
+export function useAssetActivity(assetId: number | null, type = 'all', offset = 0, action?: string, enabled = true, from?: string, to?: string, min?: string, minRevenue?: string) {
   const ri = useInterval()
-  const key = ['asset-activity', assetId, type, offset, action, from, to, min]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.assetActivity(assetId as number, type, offset, undefined, action, from, to, min, signal), enabled: assetId != null && enabled, refetchInterval: enabled && offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
+  const key = ['asset-activity', assetId, type, offset, action, from, to, min, minRevenue]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.assetActivity(assetId as number, type, offset, undefined, action, from, to, min, minRevenue, signal), enabled: assetId != null && enabled, refetchInterval: enabled && offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useAddress(address: string | null) {
   return useQuery({ queryKey: ['address', address], queryFn: ({ signal }) => api.address(address as string, signal), enabled: !!address, refetchInterval: useInterval(DETAIL_POLL_MS), staleTime: BLOCK_STALE_MS })
@@ -380,14 +384,6 @@ export function useAccountVotes(address: string | null, offset = 0, from?: strin
   const key = ['account-votes', address, offset, from, to]
   return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountVotes(address as string, offset, undefined, from, to, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
 }
-// One referendum, polled while it is still running.
-//
-// A running referendum gains votes under the reader, and the whole page — tally,
-// delegated residual, bubble map, votes table — is rebuilt from this one payload, so
-// polling it is all any of them need. It stops at the conclusion rather than on a
-// timer: a concluded referendum can never gain another vote, so there is nothing left
-// to poll for. The API holds a running referendum for one block and a concluded one for
-// a minute, so a poll here is not answered with the figures the last one already showed.
 // The /governance page. The overview holds the live cards, so it polls at the
 // feed cadence while mounted; the tables poll nothing — a motion or archive row
 // changes rarely and a refresh is a click away.
@@ -417,6 +413,14 @@ export function useGovernanceTips(offset = 0, enabled = true) {
   })
 }
 
+// One referendum, polled while it is still running.
+//
+// A running referendum gains votes under the reader, and the whole page — tally,
+// delegated residual, bubble map, votes table — is rebuilt from this one payload, so
+// polling it is all any of them need. It stops at the conclusion rather than on a
+// timer: a concluded referendum can never gain another vote, so there is nothing left
+// to poll for. The API holds a running referendum for one block and a concluded one for
+// a minute, so a poll here is not answered with the figures the last one already showed.
 export function useReferendum(pallet: 'opengov' | 'democracy', index: number) {
   return useQuery({
     queryKey: ['referendum', pallet, index],
@@ -425,9 +429,6 @@ export function useReferendum(pallet: 'opengov' | 'democracy', index: number) {
     staleTime: BLOCK_STALE_MS,
   })
 }
-// Lazy per-account / per-tag activity totals (extrinsic + event counts). The
-// first hit can take a few seconds server-side, so no live polling and a long
-// staleTime — badges simply appear once the count query resolves.
 // The Protocol Revenue tab payload. Derived-table freshness (~2h tail), so no
 // polling — a long staleTime keeps tab flips free.
 export function useAccountRevenueBreakdown(address: string | null) {
@@ -436,6 +437,9 @@ export function useAccountRevenueBreakdown(address: string | null) {
 export function useTagRevenueBreakdown(tagId: string | null) {
   return useQuery({ queryKey: ['tag-revenue-breakdown', tagId], queryFn: ({ signal }) => api.tagRevenueBreakdown(tagId as string, signal), enabled: !!tagId, staleTime: 300_000 })
 }
+// Lazy per-account / per-tag activity totals (extrinsic + event counts). The
+// first hit can take a few seconds server-side, so no live polling and a long
+// staleTime — badges simply appear once the count query resolves.
 export function useAccountActivityCounts(address: string | null) {
   return useQuery({ queryKey: ['account-activity-counts', address], queryFn: ({ signal }) => api.accountActivityCounts(address as string, signal), enabled: !!address, staleTime: 600_000 })
 }

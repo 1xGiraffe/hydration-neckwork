@@ -35,8 +35,8 @@ export function TallySummary({ tally, voters, decimals }: { tally: DisplayTally;
   return (
     <>
       <div className="dt">{tally.source === 'chain' ? (tally.live ? 'On-chain tally · live' : 'On-chain tally') : 'Attributed votes'}</div>
-      {/* dd-stack: .dd is a flex ROW, which put the bar beside the numbers and collapsed
-          it to zero width (its children are percentages). */}
+      {/* dd-stack: .dd is a flex ROW, which would put the bar beside the numbers and
+          collapse it to zero width (its children are percentages). */}
       <div className="dd dd-stack">
         <TallyBar ayes={tally.ayes} nays={tally.nays} />
         <div className="mono">

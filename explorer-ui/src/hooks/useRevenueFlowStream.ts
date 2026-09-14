@@ -189,7 +189,7 @@ export const FLOW_RESUME_RESET_MS = 90_000
  * return), and pauses entirely while the document is hidden — the river only
  * flows when someone is watching it.
  */
-export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): void {
+export function useRevenueFlowStream(scheduler: FlowScheduler): void {
   const cursorRef = useRef<string | null>(null)
   const lastHeadRef = useRef(0)
   const lastBatchAtRef = useRef(0)
@@ -203,19 +203,25 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
   // response then carries a stale epoch and is discarded whole, so it can
   // never double-ingest a batch or rewind the cursor and head.
   const pullEpochRef = useRef(0)
+  // The controller of the pull that owns the epoch. Discarding a superseded
+  // response is not enough: the request itself has to go, or a takeover (or a
+  // page the reader left) leaves it on the wire holding a connection.
+  const pullAbortRef = useRef<AbortController | null>(null)
   const hiddenAtRef = useRef(0)
   const resumeSpreadRef = useRef(0)
 
   useEffect(() => {
-    if (paused) return
     let disposed = false
 
     async function pull(): Promise<void> {
       if (Date.now() - inflightAtRef.current < 15_000 || document.hidden) return
       const epoch = ++pullEpochRef.current
+      pullAbortRef.current?.abort()
+      const controller = new AbortController()
+      pullAbortRef.current = controller
       inflightAtRef.current = Date.now()
       try {
-        const res = await api.revenueFlow(cursorRef.current)
+        const res = await api.revenueFlow(cursorRef.current, controller.signal)
         if (disposed || epoch !== pullEpochRef.current) return
         cursorRef.current = res.cursor
         scheduler.setBlockMs(res.blockSeconds * 1000)
@@ -247,8 +253,10 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
       } catch {
         // Transient fetch failure: the head SSE and the fallback interval retry.
       } finally {
-        // An orphaned pull must not clear the latch the current pull owns.
+        // An orphaned pull must not clear the latch — or the controller — the
+        // current pull owns.
         if (epoch === pullEpochRef.current) inflightAtRef.current = 0
+        if (pullAbortRef.current === controller) pullAbortRef.current = null
       }
     }
 
@@ -300,11 +308,13 @@ export function useRevenueFlowStream(scheduler: FlowScheduler, paused = false): 
     }, LIVE_MS)
     return () => {
       disposed = true
+      pullAbortRef.current?.abort()
+      pullAbortRef.current = null
       unsubscribe()
       window.clearInterval(fallback)
       document.removeEventListener('visibilitychange', onVisibility)
       window.removeEventListener('pageshow', onVisibility)
       window.removeEventListener('focus', onVisibility)
     }
-  }, [scheduler, paused])
+  }, [scheduler])
 }

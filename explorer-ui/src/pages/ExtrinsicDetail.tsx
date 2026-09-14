@@ -18,7 +18,7 @@ import type { EvmTransactionFacts, IceSolutionPanel } from '../types'
 // other's counter-flow, the part no pool saw — and the value it ROUTED, the
 // remainder the pot traded through the pools on the intents' behalf. Both are null
 // when any leg is unpriced: a partial sum would read as a smaller solution.
-export function IceSolutionCard({ panel, now }: { panel: IceSolutionPanel; now: number }) {
+function IceSolutionCard({ panel, now }: { panel: IceSolutionPanel; now: number }) {
   return <>
     <div className="sec-title" style={{ marginTop: 22 }}>ICE solution</div>
     <div className="detail-card"><div className="dl">
@@ -147,9 +147,9 @@ export function ExtrinsicDetail({ id }: { id: string }) {
   useDocumentTitle(`Extrinsic ${data && !inPool ? `${data.blockHeight}-${data.index}` : id.startsWith('0x') ? F.shortAddr(id) : id}`)
   // "Next extrinsic" only asks whether index+1 exists in this block. Asking the
   // sibling directly answers it in ~1–3 kB and lands under the very query key that
-  // page reads, so the arrow opens an already-loaded extrinsic; the block detail
-  // this used to come from carries every extrinsic and event in the block (5–10 kB
-  // compressed on a busy block) purely for that one chevron. A 404 on the block's
+  // page reads, so the arrow opens an already-loaded extrinsic; taking the answer
+  // from the block detail instead would pull every extrinsic and event in the block
+  // (5–10 kB compressed on a busy one) for that one chevron. A 404 on the block's
   // last extrinsic is the answer, and 4xx is never retried (see queryRetry).
   const next = useExtrinsic(data && !inPool ? `${data.blockHeight}-${data.index + 1}` : null)
   const { data: stats } = useStats(!!data)

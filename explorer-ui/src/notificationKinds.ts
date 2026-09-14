@@ -405,6 +405,15 @@ export function deleteRuleConfirmBody(rule: { name?: string; summary?: string })
   return `Delete "${ruleSubject(rule)}"? It stops alerting immediately.`
 }
 
+// "Clear inbox" empties the WHOLE history, not the page on screen, so the confirm
+// names the stored total — asking to clear 50 and removing 300 is a confirm that
+// misled the person who read it. When the two differ it also says how many of them
+// the table is actually showing.
+export function clearInboxConfirmBody(total: number, shown: number): string {
+  const scope = total > shown ? ` (the newest ${shown.toLocaleString('en-US')} are shown)` : ''
+  return `Clear all ${total.toLocaleString('en-US')} notification${total === 1 ? '' : 's'}${scope}? Alerts keep firing; this only empties the history.`
+}
+
 // How a rule's cooldown reads in the rules list.
 export function cooldownLabel(cooldownS: number): string {
   if (!cooldownS) return 'every match'

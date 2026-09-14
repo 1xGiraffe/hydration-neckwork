@@ -214,14 +214,25 @@ export interface EvmWriteOptions {
   onStage: (stage: WriteStage) => void
   pollMs?: number
   maxPolls?: number
+  /** Stops the receipt poll (and any further onStage) when the caller goes away. */
+  signal?: AbortSignal
 }
 
-const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>(resolve => {
+  if (signal?.aborted) { resolve(); return }
+  const timer = setTimeout(done, ms)
+  function done() {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', done)
+    resolve()
+  }
+  signal?.addEventListener('abort', done, { once: true })
+})
 
 // Drive one EVM-wallet write end to end. Never throws — every outcome is a
 // WriteStage, and the last emitted stage is also returned.
 export async function runEvmWrite(opts: EvmWriteOptions): Promise<WriteStage> {
-  const { provider, rpc, onStage, pollMs = 3_000, maxPolls = 60 } = opts
+  const { provider, rpc, onStage, pollMs = 3_000, maxPolls = 60, signal } = opts
   let stage: WriteStage = { phase: 'wallet-pending' }
   const emit = (next: WriteStage) => { stage = next; onStage(next) }
   emit(stage)
@@ -238,14 +249,22 @@ export async function runEvmWrite(opts: EvmWriteOptions): Promise<WriteStage> {
   }
   emit({ phase: 'submitted', txHash })
 
+  // Three minutes of receipt polling outlives the panel that started it, so the
+  // walk stops the moment the caller aborts — no further RPC, no stage emitted
+  // into a component that is gone. The last stage the caller saw is returned.
   for (let i = 0; i < maxPolls; i++) {
-    if (i > 0 || pollMs === 0) await sleep(pollMs)
+    if (signal?.aborted) return stage
+    if (i > 0 || pollMs === 0) await sleep(pollMs, signal)
+    if (signal?.aborted) return stage
     let receipt: Awaited<ReturnType<EvmWriteRpc['getTransactionReceipt']>>
     try {
       receipt = await rpc.getTransactionReceipt(txHash)
     } catch {
       continue   // a flaky poll is not a failed transaction
     }
+    // The poll in flight when the caller went away still resolves; its answer is
+    // dropped rather than emitted into a component that is no longer mounted.
+    if (signal?.aborted) return stage
     if (!receipt) continue
     const blockHeight = Number.parseInt(receipt.blockNumber, 16)
     emit({ phase: 'in-block', txHash, blockHeight })

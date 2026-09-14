@@ -241,7 +241,10 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
           ? <>{priceLabel(d, p10)}{d.price.token0PerToken1 != null && <span className="muted" style={{ marginLeft: 8 }}>({fmtPrice(d.price.token0PerToken1)} {d.token0.symbol}/{d.token1.symbol})</span>}</>
           : <Dash />}</div>
         <div className="dt">Tick</div><div className="dd mono">{d.price.tick != null ? F.int(d.price.tick) : <Dash />} <span className="muted">· spacing {d.tickSpacing}</span></div>
-        <div className="dt">In-range liquidity</div><div className="dd mono">{d.liquidity ? `L = ${d.liquidity}` : <span className="muted">not initialised</span>}</div>
+        {/* L is a raw uint128 — 20-30 digits, which overflows the card on a
+            phone. Compacted like every other L on this page; the exact integer
+            stays one hover away. */}
+        <div className="dt">In-range liquidity</div><div className="dd mono">{d.liquidity ? <span title={d.liquidity}>L = {fmtLiquidity(Number(d.liquidity))}</span> : <span className="muted">not initialised</span>}</div>
         <div className="dt">Protocol fee</div>
         <div className="dd mono">{d.protocolFee.sharePct != null
           ? <>{d.protocolFee.sharePct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% <span className="muted">of every swap fee, collected by the factory owner</span></>
@@ -306,7 +309,7 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
             {v.ranges.map((r, i) => (
               <div key={`${r.tickLower}:${r.tickUpper}`} style={{ display: 'contents' }}>
                 <div className="dt">{i === 0 ? 'Ranges' : ''}</div>
-                <div className="dd"><RangeCell d={d} lower={r.priceLower} upper={r.priceUpper} inRange={r.inRange} /> <span className="mono muted" style={{ marginLeft: 8 }}>L = {r.liquidity}</span></div>
+                <div className="dd"><RangeCell d={d} lower={r.priceLower} upper={r.priceUpper} inRange={r.inRange} /> <span className="mono muted" style={{ marginLeft: 8 }} title={r.liquidity}>L = {fmtLiquidity(Number(r.liquidity))}</span></div>
               </div>
             ))}
           </div></div>

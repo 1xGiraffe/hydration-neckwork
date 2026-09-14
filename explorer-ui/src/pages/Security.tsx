@@ -432,7 +432,7 @@ function FuseBoard({ d, explain, loadedOnly, note }: { d: SecurityDashboard; exp
         ? <FuseGrid fuses={shown} />
         : <div className="hdx-note">No asset is minting against its limit right now.</div>}
       {/* No colour key: green/amber/red on a fill bar reads as headroom without
-          being told, and the three swatches were the widest thing in the row. */}
+          being told, and three swatches would be the widest thing in the row. */}
       <div className="sec-legend">
         <span className="muted">
           {loadedOnly

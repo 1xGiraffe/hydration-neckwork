@@ -13,7 +13,7 @@ function read(): Session | null {
     const raw = localStorage.getItem(SESSION_STORAGE_KEY)
     if (!raw) return null
     const v = JSON.parse(raw) as Session
-    return v && typeof v.token === 'string' && typeof v.accountId === 'string' ? v : null
+    return v && typeof v.token === 'string' && typeof v.accountId === 'string' && typeof v.address === 'string' ? v : null
   } catch { return null }
 }
 

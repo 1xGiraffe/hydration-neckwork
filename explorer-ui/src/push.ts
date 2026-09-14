@@ -64,7 +64,7 @@ export function urlBase64ToUint8Array(base64UrlKey: string): Uint8Array<ArrayBuf
 // A human name for THIS browser, so the channels list distinguishes "Chrome on
 // this laptop" from "the phone". Best-effort from the user agent — the server
 // stores it verbatim and never derives anything from it.
-export function browserLabel(): string {
+function browserLabel(): string {
   if (typeof navigator === 'undefined') return 'This browser'
   const ua = navigator.userAgent
   const browser = /Edg\//.test(ua) ? 'Edge'
