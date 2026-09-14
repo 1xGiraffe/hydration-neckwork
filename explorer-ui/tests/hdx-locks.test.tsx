@@ -33,11 +33,11 @@ function mockData(): HdxDashboard {
     },
     unlocks: {
       buckets: Array.from({ length: 8 }, (_, i) => bucket(i)),
-      laterHdx: { gigahdx: 9.2e7, vesting: 4.6e8, vote: 1.4e8 },
+      laterHdx: { gigahdx: 9.2e7, vesting: 4.6e8, vote: 1.4e8, other: 0 },
       unlockableNowHdx: 6.7e8,
       activeVoteHdx: 7.8e8,
       stakingAnytimeHdx: 1.2e9,
-      nowHdx: { gigahdx: 4.2e8, vesting: 2.5e8, vote: 0 },
+      nowHdx: { gigahdx: 4.2e8, vesting: 2.5e8, vote: 0, other: 0 },
       gigaPending: {
         count: 12, totalHdx: 1.4e6, nextUnlockTs: '2026-07-16 00:00:00',
         maturedCount: 5, maturedHdx: 9e5,
@@ -147,7 +147,7 @@ describe('HDX Upcoming unlocks — claimable-now column', () => {
 
   it('omits the claimable-now block when nothing is releasable', () => {
     const data = mockData()
-    data.unlocks.nowHdx = { gigahdx: 0, vesting: 0, vote: 0 }
+    data.unlocks.nowHdx = { gigahdx: 0, vesting: 0, vote: 0, other: 0 }
     expect(render(data)).not.toContain('Claimable now')
   })
 
