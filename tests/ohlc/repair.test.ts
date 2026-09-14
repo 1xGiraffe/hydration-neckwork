@@ -32,8 +32,34 @@ describe('OHLC repair helpers', () => {
     const query = buildRebuildOHLCQuery(spec!, '2024-01-29 00:00:00', '2024-02-01 00:00:00')
     expect(query).toContain("toStartOfMonth(b.block_timestamp) >= toStartOfMonth(toDateTime('2024-01-29 00:00:00'))")
     expect(query).toContain("toStartOfMonth(b.block_timestamp) <= toStartOfMonth(toDateTime('2024-02-01 00:00:00'))")
-    expect(query).toContain('argMinState(p.usd_price, b.block_timestamp) AS open_state')
+    expect(query).toContain('argMinState(price, block_time) AS open_state')
   })
+
+  // price_data.prices is a ReplacingMergeTree keyed on (asset_id, block_height).
+  // A re-indexed block leaves duplicate rows until a merge collapses them, so a
+  // rebuild that sums the raw read multiplies that block's volume into the candle
+  // permanently. Every INSERT…SELECT into a candle table has to collapse the key
+  // before it aggregates.
+  it.each(OHLC_TABLE_SPECS.map(spec => spec.table))(
+    'deduplicates the replayable prices read before aggregating %s',
+    table => {
+      const spec = OHLC_TABLE_SPECS.find(entry => entry.table === table)!
+      const queries = [
+        buildRebuildOHLCQuery(spec, '2024-02-01 00:00:00', '2024-02-02 00:00:00'),
+        buildRebuildOHLCQuery(spec, '2024-02-01 00:00:00', '2024-02-02 00:00:00', [34]),
+        buildRestoreRollbackPrefixQuery(spec, '2024-02-01 00:23:24'),
+      ]
+
+      for (const query of queries) {
+        expect(query).toContain('GROUP BY p.asset_id, p.block_height')
+        // The sums must read the collapsed rows, never the raw table columns.
+        expect(query).toContain('sumState(volume_buy) AS volume_buy_state')
+        expect(query).toContain('sumState(volume_sell) AS volume_sell_state')
+        expect(query).not.toContain('sumState(p.usd_volume_buy)')
+        expect(query).not.toContain('sumState(p.usd_volume_sell)')
+      }
+    },
+  )
 
   it('can scope delete and rebuild queries to selected assets', () => {
     const spec = OHLC_TABLE_SPECS.find(entry => entry.table === 'ohlc_1h')

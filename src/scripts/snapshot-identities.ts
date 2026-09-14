@@ -99,6 +99,11 @@ async function snapshotChain(chain: IdentityChain): Promise<void> {
     // An identity cleared on chain has to disappear here too, or the explorer keeps
     // showing a name its owner removed. A dry run stays off ClickHouse entirely, so
     // it can prove a new chain decodes without a database to compare against.
+    //
+    // Retiring is only sound against a COMPLETE live set: absence from a partial read
+    // means nothing. `readStorageMap` therefore throws rather than returning a short
+    // map, and the throw lands in runOnce's per-chain catch above this line, leaving
+    // the chain's stored identities untouched for the next pass.
     const live = new Set(rows.map(row => row.account_id))
     const retired = dryRun ? [] : [...await displayedAccounts(chain.key)]
       .filter(accountId => !live.has(accountId))
