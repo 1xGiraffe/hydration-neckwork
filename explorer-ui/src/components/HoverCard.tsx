@@ -356,7 +356,7 @@ function AssetHover({ id }: { id: number }) {
   return (
     <>
       <div className="hc-head">
-        <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} symbol={a.symbol} size={28} parachainId={a.parachainId} origin={a.origin} />
+        <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} iconAssetIds={a.iconAssetIds} symbol={a.symbol} size={28} parachainId={a.parachainId} origin={a.origin} />
         <div>
           <div className="hc-title">{a.symbol}</div>
           <div className="hc-sub">{a.name ?? `#${a.assetId}`}</div>
@@ -396,9 +396,9 @@ function TradeHover({ id }: { id: string }) {
           <div className="hc-hop" key={`${h.pool}-${h.assetIn.assetId}-${h.assetOut.assetId}-${i}`}>
             <PoolBadge pool={h.pool} poolId={h.poolId} to={poolHref(h.pool, h.poolId, h.poolAddress)} />
             <span className="hc-hop-assets">
-              <span className="trade-leg"><AssetIcon assetId={h.assetIn.assetId} iconAssetId={h.assetIn.iconAssetId} symbol={h.assetIn.symbol} size={16} parachainId={h.assetIn.parachainId} origin={h.assetIn.origin} /><span className="mono">{h.assetIn.symbol}</span></span>
+              <span className="trade-leg"><AssetIcon assetId={h.assetIn.assetId} iconAssetId={h.assetIn.iconAssetId} iconAssetIds={h.assetIn.iconAssetIds} symbol={h.assetIn.symbol} size={16} parachainId={h.assetIn.parachainId} origin={h.assetIn.origin} /><span className="mono">{h.assetIn.symbol}</span></span>
               <span className="muted">→</span>
-              <span className="trade-leg"><AssetIcon assetId={h.assetOut.assetId} iconAssetId={h.assetOut.iconAssetId} symbol={h.assetOut.symbol} size={16} parachainId={h.assetOut.parachainId} origin={h.assetOut.origin} /><span className="mono">{h.assetOut.symbol}</span></span>
+              <span className="trade-leg"><AssetIcon assetId={h.assetOut.assetId} iconAssetId={h.assetOut.iconAssetId} iconAssetIds={h.assetOut.iconAssetIds} symbol={h.assetOut.symbol} size={16} parachainId={h.assetOut.parachainId} origin={h.assetOut.origin} /><span className="mono">{h.assetOut.symbol}</span></span>
             </span>
           </div>
         ))}

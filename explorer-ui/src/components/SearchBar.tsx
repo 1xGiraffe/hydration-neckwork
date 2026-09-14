@@ -82,7 +82,7 @@ export function SearchResultBody({ r }: { r: Hit }) {
     const asset = r.asset
     return (
       <span className="sr-acct">
-        <AssetIcon assetId={Number(r.value)} iconAssetId={asset?.iconAssetId} symbol={r.label || r.value} size={20} parachainId={asset?.parachainId} origin={asset?.origin} />
+        <AssetIcon assetId={Number(r.value)} iconAssetId={asset?.iconAssetId} iconAssetIds={asset?.iconAssetIds} symbol={r.label || r.value} size={20} parachainId={asset?.parachainId} origin={asset?.origin} />
         <span className="sr-acct-name"><span className="mono">{r.label || r.value}</span>{r.desc && r.desc !== r.label && <span className="sr-desc">{r.desc}</span>}</span>
       </span>
     )
@@ -96,7 +96,7 @@ export function SearchResultBody({ r }: { r: Hit }) {
     return (
       <span className="sr-acct">
         {r.asset
-          ? <AssetIcon assetId={r.asset.assetId} iconAssetId={r.asset.iconAssetId} symbol={r.asset.symbol} size={20} parachainId={r.asset.parachainId} origin={r.asset.origin} />
+          ? <AssetIcon assetId={r.asset.assetId} iconAssetId={r.asset.iconAssetId} iconAssetIds={r.asset.iconAssetIds} symbol={r.asset.symbol} size={20} parachainId={r.asset.parachainId} origin={r.asset.origin} />
           : <span className="xc-chain">{r.value}</span>}
         <span className="sr-acct-name"><span className="mono">{r.label || r.value}</span>{r.desc && <span className="sr-desc">{r.desc}</span>}</span>
       </span>
@@ -114,7 +114,7 @@ export function SearchResultBody({ r }: { r: Hit }) {
     const venue = r.poolKind === 'omnipool' ? 'Omnipool' : r.poolKind === 'stableswap' ? 'Stableswap' : r.poolKind === 'uniswapv3' ? 'Concentrated pool' : 'Isolated pool'
     return (
       <span className="sr-acct">
-        {r.asset && <AssetIcon assetId={r.asset.assetId} iconAssetId={r.asset.iconAssetId} symbol={r.asset.symbol} size={20} parachainId={r.asset.parachainId} origin={r.asset.origin} />}
+        {r.asset && <AssetIcon assetId={r.asset.assetId} iconAssetId={r.asset.iconAssetId} iconAssetIds={r.asset.iconAssetIds} symbol={r.asset.symbol} size={20} parachainId={r.asset.parachainId} origin={r.asset.origin} />}
         <span className="sr-acct-name">
           <span className="mono">{r.label || r.value}</span>
           <span className="sr-desc">{venue}{r.tvlUsd != null ? ` · ${F.usd(r.tvlUsd)} TVL` : ''}</span>
