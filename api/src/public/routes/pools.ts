@@ -6,7 +6,7 @@ import { csv, zAssetId, zHexAddress, zIsoTimestamp, zPeriod } from '../schemas/c
 import { omnipoolVolumes, poolVolumes, xykPoolMeta } from '../services/poolVolumes.ts'
 import { omnipoolYield, stableswapYield } from '../services/poolYield.ts'
 import { getUniswapV3PoolLiquidity, uniswapV3HistoryPool, uniswapV3PoolMeta } from '../../services/poolService.ts'
-import { ensurePoolService } from '../services/coingecko.ts'
+import { ensurePoolService } from '../services/poolWiring.ts'
 import { fixedV3Grain, v3PoolHistory } from '../../services/uniswapV3History.ts'
 
 // Pool volumes and fee yield. See spec sections "Pools: volumes and yield" and
@@ -147,10 +147,18 @@ export function v3HistoryWindow(bucket: V3HistoryBucket, from: string | undefine
   if (period && from) return { error: '`period` sets the window start itself; pass either `period` or `from`' }
   const toRaw = to ? Math.floor(Date.parse(to) / 1000) : nowSec
   const toGrid = Math.min(Math.floor(toRaw / step) * step, Math.floor(nowSec / step) * step)
-  const fromRaw = from ? Math.floor(Date.parse(from) / 1000) : period ? toGrid - V3_PERIOD_SEC[period] : toRaw - V3_HISTORY_DEFAULT_BUCKETS * step
+  // Both defaults count back from the CLAMPED end: a `to` past the last closed
+  // bucket would otherwise place the default start past it too, and the window
+  // would come back inverted rather than holding the documented last buckets.
+  const fromRaw = from ? Math.floor(Date.parse(from) / 1000) : period ? toGrid - V3_PERIOD_SEC[period] : toGrid - V3_HISTORY_DEFAULT_BUCKETS * step
   if (!(fromRaw < toRaw)) return { error: '`from` must be before `to`' }
-  const toSec = Math.min(Math.floor(toRaw / step) * step, Math.floor(nowSec / step) * step)
+  const toSec = toGrid
   const fromSec = Math.floor(fromRaw / step) * step
+  // The end is clamped to the last closed bucket and the start is not, so a
+  // window lying wholly in the future survives the check above and floors to an
+  // inverted one — whose negative span the bucket guard below would wave through
+  // as a silently empty series.
+  if (!(fromSec < toSec)) return { error: '`from` must be before `to`' }
   if ((toSec - fromSec) / step > V3_HISTORY_MAX_BUCKETS) return { error: `at most ${V3_HISTORY_MAX_BUCKETS} buckets per request; narrow the window or widen the bucket` }
   return { fromSec, toSec }
 }
