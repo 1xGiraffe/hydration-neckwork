@@ -86,7 +86,12 @@ export function useActivity(limit = 30, from?: string, to?: string, offset = 0, 
       // requirement for the feed to render: a failed authed call falls back to
       // the page a logged-out reader would see rather than an error.
       try { return await userApi.activity(limit, from, to, offset, type, filters, action, signal) }
-      catch { return api.activity(limit, from, to, offset, type, filters, action, signal) }
+      catch (err) {
+        // A real cancellation (unmount, params changed) propagates as an abort
+        // rather than firing a second request for a page nobody is waiting for.
+        if (signal?.aborted) throw err
+        return api.activity(limit, from, to, offset, type, filters, action, signal)
+      }
     },
     refetchInterval: offset === 0 ? ri : false, staleTime: 2000, placeholderData: keepPreviousData,
   }), key, offset === 0)
@@ -103,7 +108,10 @@ export function useActivityCount(type = 'all', from?: string, to?: string, filte
     queryFn: async ({ signal }) => {
       if (!viewer.authed) return api.activityCount(type, from, to, filters, action, signal)
       try { return await userApi.activityCount(type, from, to, filters, action, signal) }
-      catch { return api.activityCount(type, from, to, filters, action, signal) }
+      catch (err) {
+        if (signal?.aborted) throw err
+        return api.activityCount(type, from, to, filters, action, signal)
+      }
     },
     staleTime: 120_000,
   })
@@ -349,7 +357,10 @@ export function useAccountActivity(address: string | null, type = 'all', offset 
     queryFn: async ({ signal }) => {
       if (!viewer.authed) return api.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal)
       try { return await userApi.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal) }
-      catch { return api.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal) }
+      catch (err) {
+        if (signal?.aborted) throw err
+        return api.accountActivity(address as string, type, offset, undefined, action, from, to, filters, signal)
+      }
     },
     enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData,
   }), key, offset === 0)
@@ -478,7 +489,10 @@ export function useTagActivity(tagId: string | null, type = 'all', offset = 0, a
     queryFn: async ({ signal }) => {
       if (!viewer.authed) return api.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal)
       try { return await userApi.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal) }
-      catch { return api.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal) }
+      catch (err) {
+        if (signal?.aborted) throw err
+        return api.tagActivity(tagId as string, type, offset, undefined, action, from, to, filters, signal)
+      }
     },
     enabled: !!tagId, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData,
   }), key, offset === 0)

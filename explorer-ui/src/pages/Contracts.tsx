@@ -95,7 +95,7 @@ export function Contracts() {
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Contracts' }]} />
         <div className="detail-header">
-          <div className="page-title">Contracts <span className="sub">{total ? `${total.toLocaleString()} contracts` : ''}</span></div>
+          <div className="page-title">Contracts <span className="sub">{total ? `${F.int(total)} contracts` : ''}</span></div>
         </div>
       </div>
 

@@ -3,7 +3,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 're
 import type { CSSProperties, FocusEvent as ReactFocusEvent, ReactNode, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { Link, paths, navigate } from '../router'
 import type { AccountRef, AssetOrigin, AssetRef, FailureReason, FeePayment } from '../types'
-import { parseUtcTimestamp } from '../utils/time'
+import { parseUtcTimestamp, tsDate, tsDateTime, utcDay } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { voteSideLabel } from '../utils/voteRows'
 import { BOND_LABELS, CAT, LIQ_LABELS, MM_LABELS, intentLabel } from './activityColors'
@@ -175,6 +175,11 @@ export const F = {
     if (v == null || !Number.isFinite(v)) return '—'
     return (v * 100).toFixed(1) + '%'
   },
+  /** The same rendering for a value the API already expresses in percent (0–100). */
+  sharePct: (v: number | null | undefined) => {
+    if (v == null || !Number.isFinite(v)) return '—'
+    return v.toFixed(1) + '%'
+  },
   ago: (ts: string, now = Date.now()) => {
     const t = parseUtcTimestamp(ts); if (!Number.isFinite(t)) return '—'
     const s = Math.max(0, Math.floor((now - t) / 1000))
@@ -204,25 +209,6 @@ export const F = {
     const p = (n: number) => String(n).padStart(2, '0')
     return `${days[d.getUTCDay()]} ${p(d.getUTCDate())} ${mon[d.getUTCMonth()]} ${d.getUTCFullYear()} · ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`
   },
-}
-
-// Short ISO date (YYYY-MM-DD) from an indexer UTC timestamp, '' when unparseable.
-// Shared by the chart tooltips (AreaChart, BalanceHistory).
-/** A window bound as the `YYYY-MM-DD HH:MM:SS` shape tsDate/tsDateTime parse. */
-function windowStamp(sec: number): string {
-  return new Date(sec * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
-}
-
-function tsDate(ts: string): string {
-  const t = parseUtcTimestamp(ts)
-  return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 10) : ''
-}
-
-// Date + time, for series whose points are closer than a day (a refined zoom
-// window) — a date-only label would repeat across neighbouring points.
-function tsDateTime(ts: string): string {
-  const t = parseUtcTimestamp(ts)
-  return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 16).replace('T', ' ') : ''
 }
 
 // The chart's time axis: parsed timestamps and [t0, span], but ONLY when every
@@ -981,6 +967,8 @@ export function Copy({ text }: { text: string }) {
 // other feedback).
 export function CopyTextButton({ label, text }: { label: string; text: string }) {
   const [done, setDone] = useState(false)
+  const timer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
   return (
     <button
       type="button"
@@ -990,7 +978,8 @@ export function CopyTextButton({ label, text }: { label: string; text: string })
         e.stopPropagation(); e.preventDefault()
         void navigator.clipboard?.writeText(text)
         setDone(true)
-        setTimeout(() => setDone(false), 1200)
+        window.clearTimeout(timer.current)
+        timer.current = window.setTimeout(() => setDone(false), 1200)
       }}
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
@@ -1233,6 +1222,9 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   zoomKey?: string
 }) {
   const wrapRef = useRef<HTMLDivElement>(null)
+  // The area gradient's element id. Unique per instance, so two charts on one
+  // page cannot collide and take each other's fill.
+  const gid = `area-${useId()}`
   const [hover, setHover] = useState<{ xPct: number; yPct: number; val: string; ovVal: string | null; date: string } | null>(null)
   const [openMark, setOpenMark] = useState<number | null>(null)
   // On phones 1.5% of the chart is a few px — caps would collide, so cluster
@@ -1331,7 +1323,7 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
     const area = `${line} L ${sx(vData.length - 1).toFixed(1)} ${h - padB} L ${sx(0).toFixed(1)} ${h - padB} Z`
     const overlayLine = ov ? ov.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ') : null
     const up = vData[vData.length - 1] >= vData[0]
-    return { xFrac, sy, line, area, overlayLine, ov, col: color ?? (up ? 'var(--green)' : 'var(--red)'), gid: 'ag' + Math.round(min * 1000 + max) }
+    return { xFrac, sy, line, area, overlayLine, ov, col: color ?? (up ? 'var(--green)' : 'var(--red)') }
   }, [vData, vOverlay, vDates, target, floor, h, color, view])
 
   // Markers key off the EXACT axis the line uses (timeAxisSpan is the same guard
@@ -1343,7 +1335,7 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   }, [markers, vData, vDates, narrow])
 
   if (!geom) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
-  const { xFrac, sy, line, area, overlayLine, ov, col, gid } = geom
+  const { xFrac, sy, line, area, overlayLine, ov, col } = geom
   const ovCol = overlay?.color ?? 'var(--text-low)'
   // Points closer than half a day label with their time, not just the date.
   const viewSpanMs = vDates && vDates.length > 1 ? parseUtcTimestamp(vDates[vDates.length - 1]) - parseUtcTimestamp(vDates[0]) : NaN
@@ -1418,7 +1410,7 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
         // whatever the base series' step happens to be.
         const pw = zoom.preview
         const pct = (t: number) => fracOfTime(zoom.view, t) * 100
-        const label = `${tsDate(windowStamp(pw.from))} – ${tsDate(windowStamp(pw.to))}`
+        const label = `${utcDay(pw.from)} – ${utcDay(pw.to)}`
         return <ZoomSelection aPct={pct(pw.from)} bPct={pct(pw.to)} label={label} />
       })()}
       {zoom.zoomed && !zoom.sel && <ZoomReset onReset={zoom.reset} />}
