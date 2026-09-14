@@ -88,6 +88,11 @@ function fakeClient(overrides: { extrinsics?: Row[]; otc?: Row[]; staking?: Row[
           .filter(row => (params.names as string[]).includes(String(row.event_name)))
           .filter(row => params.fromBlock == null || Number(row.block_height) >= Number(params.fromBlock))
           .filter(row => params.toBlock == null || Number(row.block_height) <= Number(params.toBlock))
+          // The page reads successive keyset chunks; a chunk past the first
+          // carries the cursor of the last row the previous one returned.
+          .filter(row => params.afterBlock == null
+            || Number(row.block_height) > Number(params.afterBlock)
+            || (Number(row.block_height) === Number(params.afterBlock) && Number(row.event_index) > Number(params.afterEvent)))
         if (query.includes('uniqExact')) {
           const keys = new Set(rows.map(row => `${row.block_height}:${row.event_index}`))
           return queryResult([{ total: String(keys.size) }])
@@ -279,6 +284,53 @@ describe('parseStakingEventArgs', () => {
     expect(parseStakingEventArgs('AccumulatedRpsUpdated', '{}')).toEqual({ accumulatedRps: null, totalStake: null, nonDustableBalance: null })
     expect(parseStakingEventArgs('AccumulatedRpsUpdated', 'not json')).toEqual({ accumulatedRps: null, totalStake: null, nonDustableBalance: null })
     expect(parseStakingEventArgs('AccumulatedRpsUpdated', '{"accumulatedRps":1.5,"totalStake":"x"}')).toEqual({ accumulatedRps: null, totalStake: null, nonDustableBalance: null })
+  })
+})
+
+describe('queryStakingEvents', () => {
+  const ARGS = '{"accumulatedRps":"119305674157435","totalStake":"1382000000000000000"}'
+
+  /** 150 replays of one event — more than the 100-row dedup slack — then 30 real ones. */
+  function replayedStream(): Row[] {
+    const rows: Row[] = []
+    for (let i = 0; i < 150; i++) {
+      rows.push({ event_name: 'Staking.AccumulatedRpsUpdated', block_height: 100, event_index: 1, ts: '2024-01-01 00:00:00', args_json: ARGS })
+    }
+    for (let block = 101; block <= 130; block++) {
+      rows.push({ event_name: 'Staking.AccumulatedRpsUpdated', block_height: block, event_index: 1, ts: '2024-01-01 00:00:00', args_json: ARGS })
+    }
+    return rows
+  }
+
+  it('fills a full page when a replay run is longer than the dedup slack', async () => {
+    const { queryStakingEvents } = await import('../../src/public/services/chain.ts')
+    const client = fakeClient({ staking: replayedStream() })
+    const out = await queryStakingEvents(client as never, {
+      // fromBlock is part of the count's cache key; each of these tests takes
+      // one of its own so a neighbour's total cannot be served here.
+      types: ['AccumulatedRpsUpdated'], fromBlock: 1, toBlock: null, limit: 25, offset: 0,
+    })
+    // One window sized limit+offset+slack holds nothing but duplicates, so the
+    // single-fetch shape answered with ONE row while totalCount said 31.
+    expect(out.items.length).toBe(25)
+    expect(out.totalCount).toBe(31)
+    expect(out.items[0]!.blockHeight).toBe(100)
+    expect(out.items[1]!.blockHeight).toBe(101)
+    // Each chunk starts strictly past the previous chunk's last key, so the read
+    // stays bounded instead of re-reading an ever wider prefix.
+    const pages = client.seen.filter(s => s.query.includes('-- pub:staking:events') && !s.query.includes('uniqExact'))
+    expect(pages.length).toBeGreaterThan(1)
+    expect(pages[0]!.params.afterBlock).toBeUndefined()
+    expect(pages[1]!.params).toMatchObject({ afterBlock: 100, afterEvent: 1 })
+  })
+
+  it('offsets into the deduplicated stream, not into the raw one', async () => {
+    const { queryStakingEvents } = await import('../../src/public/services/chain.ts')
+    const client = fakeClient({ staking: replayedStream() })
+    const out = await queryStakingEvents(client as never, {
+      types: ['AccumulatedRpsUpdated'], fromBlock: 2, toBlock: null, limit: 5, offset: 10,
+    })
+    expect(out.items.map(row => row.blockHeight)).toEqual([110, 111, 112, 113, 114])
   })
 })
 

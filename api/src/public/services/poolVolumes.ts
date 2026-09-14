@@ -238,17 +238,21 @@ emitted AS (
   )) AS part
   FROM flagged
 )
-SELECT scope, ifNull(toString(asset_id), '') AS asset_id,
+SELECT scope, ifNull(toString(asset), '') AS asset_id,
        toString(volume) AS volume_usd, toString(fee) AS fee_usd, toString(protocol_fee) AS protocol_fee_usd
 FROM (
-  SELECT tupleElement(part, 1) AS scope, tupleElement(part, 2) AS asset_id,
+  SELECT tupleElement(part, 1) AS scope, tupleElement(part, 2) AS asset,
          sum(tupleElement(part, 3)) AS volume, sum(tupleElement(part, 4)) AS fee,
          sum(tupleElement(part, 5)) AS protocol_fee
   FROM emitted
-  GROUP BY scope, asset_id
+  GROUP BY scope, asset
 )
-WHERE scope = 'total' OR asset_id IS NOT NULL
-ORDER BY volume DESC, asset_id`
+-- The inner id keeps a name of its own: aliasing the rendered string back to
+-- \`asset_id\` would make this predicate read that alias (a non-Nullable String,
+-- so never NULL) and publish an empty assetId, which the route's schema
+-- rejects. \`ORDER BY asset\` sorts the numeric id for the same reason.
+WHERE scope = 'total' OR asset IS NOT NULL
+ORDER BY volume DESC, asset`
 }
 
 /**
@@ -491,7 +495,10 @@ export async function omnipoolVolumes(client: ClickHouseClient, window: VolumeWi
       asOf: iso(at.anchor),
       blockHeight: at.blockHeight,
       totalVolumeUsd: renderUsd(total),
-      items: rows.filter(r => r.scope === 'asset').map(r => ({
+      // The empty id is the SQL's rendering of a NULL asset, which the query
+      // already drops for the 'asset' scope; belt and braces, because the
+      // response schema answers an empty assetId with a 500.
+      items: rows.filter(r => r.scope === 'asset' && r.asset_id !== '').map(r => ({
         assetId: r.asset_id,
         volumeUsd: usdString(r.volume_usd),
         feeUsd: usdString(r.fee_usd),
