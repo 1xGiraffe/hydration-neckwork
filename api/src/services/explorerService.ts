@@ -7997,8 +7997,15 @@ async function getWeeklyPriceSamples(): Promise<Map<number, number[]>> {
   })
 }
 
+// Served stale while it revalidates. The build folds three aggregations (totals,
+// holder counts, weekly price samples) and measured 683 ms cold, so on a plain TTL
+// the first reader after each lapse paid it — including the Activity page, which
+// blocks its filter list on this and so inherited the stall on first paint. The
+// value is a directory rather than a feed: it carries no head in its key and is
+// already up to 30 s old by construction, so serving the previous build for a few
+// seconds longer costs a reader nothing that the TTL was not already costing them.
 export async function getAssets(): Promise<AssetListItem[]> {
-  return cached('explorer:assets-list', 30000, async () => {
+  return cachedSwr('explorer:assets-list', 30_000, 5 * 60_000, async () => {
     const [prices, totals, holderCounts, samples] = await Promise.all([ensurePrices(), getAssetTotals(), getAssetHolderCounts(), getWeeklyPriceSamples()])
     const listed = allExplorerAssets()
       .filter(a => !a.symbol.includes('-Pool') && !a.symbol.startsWith('Asset') && a.symbol.trim() !== '')
@@ -16148,9 +16155,28 @@ async function activityWindow(
       // further, and the rows past it are the ones no source proved complete.
       return { ...window, rows: window.rows.slice(0, depth) }
     }
-    return plan.live
-      ? cached(`${key}:${await liveHeadTag()}`, LIVE_CACHE_MS, build)
-      : cachedSwr(key, ACTIVITY_WINDOW_FRESH_MS, plan.staleMs ?? ACTIVITY_WINDOW_STALE_MS, build)
+    if (!plan.live) return cachedSwr(key, ACTIVITY_WINDOW_FRESH_MS, plan.staleMs ?? ACTIVITY_WINDOW_STALE_MS, build)
+    // A forward-only reader must never be handed a window built for an earlier
+    // head: its cursor moves past whatever the page did not contain, so a stale
+    // window is permanent silent loss. It keeps the head IN the key and pays the
+    // blocking rebuild — one per block, for a page complete when read.
+    if (forwardOnly) return cached(`${key}:${await liveHeadTag()}`, LIVE_CACHE_MS, build)
+    // A UI reader can re-read the page, so it takes the head as the entry's
+    // GENERATION instead. The head is still consulted on every read — a new one
+    // marks the entry superseded and starts the rebuild immediately, so the
+    // window can never silently stop gaining rows — but the reader is served the
+    // previous head's rows while that runs rather than blocking on it.
+    //
+    // Measured on the live stack before this: the landing page's window is the one
+    // live shape with no stale-serving protection, and rebuilding it costs 2.8-6.5s
+    // of wall time, so every reader who arrived after the 5s TTL lapsed paid it —
+    // p90 1.46s, p99 1.94s over 456 real requests. The deeper and filtered windows
+    // already had exactly this protection; the default view did not.
+    //
+    // Freshness the reader can actually see is unaffected: page 0 of the live feed
+    // merges the pending and mempool rows OUTSIDE this cache, fresh per request, so
+    // the newest activity leads the feed whatever age the settled window is.
+    return cachedSwr(`${key}:ui`, LIVE_CACHE_MS, ACTIVITY_LIVE_STALE_MS, build, await indexedRawHead())
   }
   const want = offset + limit
   try {
@@ -16172,6 +16198,14 @@ async function activityWindow(
 // taken seconds apart.
 const ACTIVITY_WINDOW_FRESH_MS = 60_000
 const ACTIVITY_WINDOW_STALE_MS = 5 * 60_000
+
+// How long a LIVE window may be served while its replacement builds. The head
+// generation triggers that rebuild the moment a block lands, so this is not a
+// freshness budget — it is the ceiling on how far behind a reader can be if
+// rebuilds keep failing or keep being outrun. It has to exceed one build by a
+// wide margin (builds measured at 2.8-6.5s) or readers land on a cold, blocking
+// miss again, which is the whole point of not blocking them.
+const ACTIVITY_LIVE_STALE_MS = 60_000
 
 export interface ActivityWindowPlan { key: string; depth: number; live: boolean; staleMs?: number }
 
@@ -26747,7 +26781,11 @@ const sqlNames = (names: readonly string[]) => names.map(n => `'${n}'`).join(','
 export async function getDailyActivity(scope: string, filters: DailyFilters = {}): Promise<{ date: string; value: number }[]> {
   const type = normalizeActivityTypeKey(filters.type ?? 'all')
   const key = `${scope}:${type}:${filters.action ?? ''}:${filters.token ?? ''}`
-  return cached(`explorer:daily:${key}`, 300000, async () => {
+  // Ninety DAILY buckets: the newest one is the only one that can still move, and it
+  // moves by a rounding error over a day. Served stale while it revalidates so the
+  // reader who happens to arrive after the freshness lapses is not the one who pays
+  // the rebuild — the Activity page blocks its histogram on this at first paint.
+  return cachedSwr(`explorer:daily:${key}`, 300_000, 30 * 60_000, async () => {
     const since = `block_timestamp > now() - INTERVAL 90 DAY`
     const daily = (table: string, where: string, uniq = '(block_height, event_index)') =>
       `SELECT toString(toDate(block_timestamp)) AS d, toUInt64(uniqExact(${uniq})) AS v FROM price_data.${table} WHERE ${since}${where ? ` AND ${where}` : ''} GROUP BY d ORDER BY d`
