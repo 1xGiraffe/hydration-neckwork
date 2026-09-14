@@ -410,8 +410,11 @@ const PNG_ICON_IDS = new Set([
   4, 20, 35, 36, 38, 39, 43, 1000085, 1000189, 1000794, 1000796, 1000809,
   1000286, 1000324, 1000365, 1000397, 1000479, 1000512, 1000524, 1000779,
 ])
+// 100/101/102 (4-Pool, 2-Pool, 2-Pool-Stbl) are multi-asset share tokens with no
+// single underlying to borrow from, so they stay here; every share token that HAS
+// one resolves through the API's iconAssetId instead of being listed.
 const NO_CDN_ICON_IDS = new Set([
-  29, 37, 45, 100, 101, 102, 110, 670, 1112, 1000198, 1000444, 1000746, 1000766, 1000767, 1001034, 1001168,
+  29, 37, 45, 100, 101, 102, 670, 1112, 1000198, 1000444, 1000746, 1000766, 1000767, 1001034, 1001168,
 ])
 function initialIconMode(srcId: number): 'svg' | 'png' | 'fail' {
   if (NO_CDN_ICON_IDS.has(srcId)) return 'fail'
@@ -481,7 +484,10 @@ export function AssetIcon({ assetId, iconAssetId, symbol, size = 20, parachainId
   // Some assets ship only .svg, others only .png — try svg, then png, then the
   // gradient-letter fallback (same chain as preis-ui). Hollar-wrapped tokens render
   // as a composite half/half icon; aTokens use the icon ID resolved by the API.
-  const composite = COMPOSITE_ICONS[assetId]
+  // Keyed on the RESOLVED icon id, so a share token over a Hollar-wrapped stable
+  // (2-Pool-HUSDC → HUSDC) inherits the composite instead of falling to the letter.
+  const srcId = iconAssetId ?? assetId
+  const composite = COMPOSITE_ICONS[srcId] ?? COMPOSITE_ICONS[assetId]
   const chainOrigin = origin ?? (parachainId != null ? { ecosystem: 'polkadot', chainId: String(parachainId), assetId: null } : null)
   const badgeKey = chainOrigin ? `${chainOrigin.ecosystem}:${chainOrigin.chainId}` : ''
   const [badgeFailure, setBadgeFailure] = useState<{ key: string; failed: boolean }>({ key: badgeKey, failed: false })
@@ -491,7 +497,7 @@ export function AssetIcon({ assetId, iconAssetId, symbol, size = 20, parachainId
         <CdnIcon srcId={composite[0]} symbol={symbol} size={size} clip="left" />
         <CdnIcon srcId={composite[1]} symbol={symbol} size={size} clip="right" />
       </span>
-    ) : <CdnIcon srcId={iconAssetId ?? assetId} symbol={symbol} size={size} origin={origin} />
+    ) : <CdnIcon srcId={srcId} symbol={symbol} size={size} origin={origin} />
   return <span style={{ position: 'relative', width: size, height: size, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', verticalAlign: 'middle', lineHeight: 0 }}>
     {body}
     {chainOrigin && !badgeFailed && <img
