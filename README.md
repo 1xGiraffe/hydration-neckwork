@@ -30,7 +30,16 @@ Local services:
 | API | <http://localhost:3000> | Explorer and market-data API |
 | Public API | <http://localhost:3002> | Versioned REST API for the Hydration UI and external feeds (Swagger at `/docs`) |
 | Public API cache | <http://localhost:8081> | nginx micro-cache in front of the public API |
+| Data API | <http://localhost:3003> | Token-authenticated REST API for external developers (Scalar portal at `/docs`) |
 | ClickHouse HTTP | <http://localhost:18123> | Local database endpoint |
+
+Every port binds to `127.0.0.1`: the services are reached through a reverse proxy on
+the Docker network, so publishing them on all interfaces would only offer a way past
+its caching, rate limiting and logging.
+
+Three more services run without a port of their own: `smart-contract-verifier` compiles
+and matches submitted contract sources, and `user-backup`/`contract-backup` export the
+two api-authored datasets that no projection rebuild can regenerate.
 
 The live pipelines start immediately. Historical ingestion continues in the background, so a fresh installation fills older explorer and price history over time.
 
@@ -63,7 +72,8 @@ SQD archive + Hydration RPC
 - `clickhouse/schema/` is the single declarative schema (tables + materialized views), applied once to an empty database by the `schema-bootstrap` service — see [Database model](#database-model). There are no migrations.
 - `api/` serves indexed data through cached read models; Compose snapshot services refresh bounded current-state datasets. `api/src/public/` is the separate `api-public` service — the versioned REST contract for the Hydration UI and external feeds (see the Public API section in [AGENTS.md](AGENTS.md)).
 - `explorer-ui/` is the block explorer; `preis-ui/` is the price-chart application.
-- `ops/` contains the ingestion supervisor image.
+- `ops/` contains the ingestion supervisor's image and the nightly backup scripts; the
+  supervisor script itself is `scripts/ingestion-supervisor.sh`.
 
 Historical raw ranges are finalized only after block counts and parent links validate. The supervisor promotes completed raw ranges into the price index and maintains the live pipelines. Writes and checkpoints are designed for replay and crash recovery.
 

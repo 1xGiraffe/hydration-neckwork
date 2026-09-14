@@ -16,4 +16,11 @@ test-results/
 /*.png
 
 # planning/spec/report scratch (AGENTS: do not commit task plans, agent reports)
-docs/superpowers/
+# ...except the documents AGENTS.md and the code cite as normative: a rule that
+# only exists in an ignored file is not a rule a fresh clone can follow. Git
+# cannot re-include a file under an excluded directory, so the contents are
+# excluded and the two paths re-included.
+docs/superpowers/**
+!docs/superpowers/specs/
+!docs/superpowers/specs/2026-08-12-public-rest-api-design.md
+!docs/superpowers/specs/2026-08-13-blocktime-migration-runbook.md

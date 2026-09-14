@@ -1,7 +1,60 @@
 name: hydration-neckwork
 
+# Applied to every service. Container logs are bounded: the daemon's json-file
+# default is unlimited and shares a disk with clickhouse_data, so an unattended
+# stack fills it. The restart policy brings the stack back after a host reboot;
+# a service that must run once and exit states its own.
+x-service: &service
+  restart: unless-stopped
+  networks:
+    - neckwork
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "3"
+
+# Raw ingestion tuning shared by the two raw pipelines. They differ only in
+# their pipeline id, batch size and RPC budget, which each states for itself.
+x-raw-env: &raw-env
+  RPC_URL: "${RPC_URL:-https://hydration-rpc.neckwork.net}"
+  SQD_GATEWAY: "${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}"
+  SQD_GATEWAY_API_KEY: "${SQD_GATEWAY_API_KEY:-}"
+  CLICKHOUSE_HOST: "http://clickhouse:8123"
+  CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:-dev}"
+  RPC_HEAD_POLL_MS: "${RPC_HEAD_POLL_MS:-}"
+  RAW_LIVE_FINALITY_POLL_MS: "${RAW_LIVE_FINALITY_POLL_MS:-}"
+  RAW_BALANCE_READ_CONCURRENCY: "${RAW_BALANCE_READ_CONCURRENCY:-20}"
+  RAW_BALANCE_READ_BATCH_ENABLED: "${RAW_BALANCE_READ_BATCH_ENABLED:-true}"
+  RAW_BALANCE_READ_BATCH_SIZE: "${RAW_BALANCE_READ_BATCH_SIZE:-250}"
+  RAW_BALANCE_READ_BATCH_CONCURRENCY: "${RAW_BALANCE_READ_BATCH_CONCURRENCY:-4}"
+  RAW_SNAPSHOT_READ_BATCH_SIZE: "${RAW_SNAPSHOT_READ_BATCH_SIZE:-100}"
+  RAW_SNAPSHOT_READ_BATCH_CONCURRENCY: "${RAW_SNAPSHOT_READ_BATCH_CONCURRENCY:-2}"
+  RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS: "${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}"
+  RAW_MONEY_MARKET_POSITION_CONCURRENCY: "${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}"
+  RAW_MONEY_MARKET_BATCH_SIZE: "${RAW_MONEY_MARKET_BATCH_SIZE:-50}"
+  RAW_MM_PERIODIC_SNAPSHOT_ENABLED: "${RAW_MM_PERIODIC_SNAPSHOT_ENABLED:-true}"
+  # Chain time, not a block count: the money-market re-snapshot costs an
+  # eth_call per known borrower, so a block-count interval would have
+  # tripled its RPC fan-out at a 2s block time. 720 = 12h.
+  RAW_MM_SNAPSHOT_INTERVAL_MINUTES: "${RAW_MM_SNAPSHOT_INTERVAL_MINUTES:-}"
+  # Deprecated block-count form, passed through empty so a deployment that still
+  # sets it gets the startup warning naming the replacement instead of silence.
+  RAW_MM_SNAPSHOT_INTERVAL_BLOCKS: "${RAW_MM_SNAPSHOT_INTERVAL_BLOCKS:-}"
+  # Chain time between asset-registry scans. 100 = what the old
+  # RAW_ASSET_SNAPSHOT_INTERVAL of 1000 blocks meant at 6s.
+  RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES: "${RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES:-}"
+  RAW_ASSET_SNAPSHOT_INTERVAL: "${RAW_ASSET_SNAPSHOT_INTERVAL:-}"
+  # One raw_block_snapshots row per N blocks. 1 = today's per-block behaviour.
+  # The table is the largest in the database and 36% of all growth, so N is the
+  # one pure-config disk lever; N must divide the 600-block pool-history MV grid
+  # (checked at startup). Do NOT raise it before the main/price pipeline stops
+  # requiring a snapshot row for every block it replays — see the migration runbook.
+  RAW_SNAPSHOT_EVERY_N_BLOCKS: "${RAW_SNAPSHOT_EVERY_N_BLOCKS:-1}"
+
 services:
   clickhouse:
+    <<: *service
     build:
       context: ./clickhouse
       dockerfile: Dockerfile
@@ -20,14 +73,17 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - neckwork
+      # A cold start over the full part set takes minutes; without this the
+      # server is declared unhealthy after 50s and every `service_healthy` gate
+      # downstream fails on a restart that would have succeeded.
+      start_period: 180s
 
   # Applies clickhouse/schema/*.sql to a fresh server before any ingestion or
   # API service starts. Runs once and exits 0 (nonzero on failure); everything
   # downstream gates on `service_completed_successfully` so nothing races an
   # empty/partial schema.
   schema-bootstrap:
+    <<: *service
     build:
       context: ./api
       dockerfile: Dockerfile
@@ -44,16 +100,14 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
-    networks:
-      - neckwork
 
   indexer:
+    <<: *service
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-indexer
     profiles:
       - worker
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -75,114 +129,44 @@ services:
       - SNAPSHOT_INTERVAL=${SNAPSHOT_INTERVAL:-}
       - BATCH_SIZE=${INDEXER_BATCH_SIZE:-10000}
       - GRAPH_MIN_PATH_LIQUIDITY_USD=${GRAPH_MIN_PATH_LIQUIDITY_USD:-}
-    networks:
-      - neckwork
 
   raw-indexer:
+    <<: *service
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-raw-indexer
     profiles:
       - worker
-    restart: unless-stopped
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-    environment:
-      - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
-      - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
-      - SQD_GATEWAY_API_KEY=${SQD_GATEWAY_API_KEY:-}
-      - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
-      - RPC_RATE_LIMIT=${RAW_RPC_RATE_LIMIT:-50}
-      - RPC_CAPACITY=${RAW_RPC_CAPACITY:-10}
-      - RPC_HEAD_POLL_MS=${RPC_HEAD_POLL_MS:-}
-      - RAW_LIVE_FINALITY_POLL_MS=${RAW_LIVE_FINALITY_POLL_MS:-}
-      - RAW_BALANCE_READ_CONCURRENCY=${RAW_BALANCE_READ_CONCURRENCY:-20}
-      - RAW_BALANCE_READ_BATCH_ENABLED=${RAW_BALANCE_READ_BATCH_ENABLED:-true}
-      - RAW_BALANCE_READ_BATCH_SIZE=${RAW_BALANCE_READ_BATCH_SIZE:-250}
-      - RAW_BALANCE_READ_BATCH_CONCURRENCY=${RAW_BALANCE_READ_BATCH_CONCURRENCY:-4}
-      - RAW_SNAPSHOT_READ_BATCH_SIZE=${RAW_SNAPSHOT_READ_BATCH_SIZE:-100}
-      - RAW_SNAPSHOT_READ_BATCH_CONCURRENCY=${RAW_SNAPSHOT_READ_BATCH_CONCURRENCY:-2}
-      - RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS=${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}
-      - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
-      - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
-      - RAW_MM_PERIODIC_SNAPSHOT_ENABLED=${RAW_MM_PERIODIC_SNAPSHOT_ENABLED:-true}
-      # Chain time, not a block count: the money-market re-snapshot costs an
-      # eth_call per known borrower, so a block-count interval would have
-      # tripled its RPC fan-out at a 2s block time. 720 = 12h.
-      - RAW_MM_SNAPSHOT_INTERVAL_MINUTES=${RAW_MM_SNAPSHOT_INTERVAL_MINUTES:-}
-      # Deprecated block-count form, passed through empty so a deployment that still
-      # sets it gets the startup warning naming the replacement instead of silence.
-      - RAW_MM_SNAPSHOT_INTERVAL_BLOCKS=${RAW_MM_SNAPSHOT_INTERVAL_BLOCKS:-}
-      - BATCH_SIZE=${RAW_BATCH_SIZE:-50000}
-      # Chain time between asset-registry scans. 100 = what the old
-      # RAW_ASSET_SNAPSHOT_INTERVAL of 1000 blocks meant at 6s.
-      - RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES=${RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES:-}
-      - RAW_ASSET_SNAPSHOT_INTERVAL=${RAW_ASSET_SNAPSHOT_INTERVAL:-}
-      # One raw_block_snapshots row per N blocks. 1 = today's per-block behaviour.
-      # The table is the largest in the database and 36% of all growth, so N is the
-      # one pure-config disk lever; N must divide the 600-block pool-history MV grid
-      # (checked at startup). Do NOT raise it before the main/price pipeline stops
-      # requiring a snapshot row for every block it replays — see the migration runbook.
-      - RAW_SNAPSHOT_EVERY_N_BLOCKS=${RAW_SNAPSHOT_EVERY_N_BLOCKS:-1}
-      - RAW_PIPELINE_ID=${RAW_PIPELINE_ID:-raw-main}
-    command: ["src/raw/cli.ts"]
-    networks:
-      - neckwork
-
-  raw-live:
-    image: hydration-neckwork-indexer:latest
-    build: .
-    container_name: hydration-neckwork-raw-live
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
       schema-bootstrap:
         condition: service_completed_successfully
     environment:
-      - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
-      - SQD_GATEWAY=${SQD_GATEWAY:-https://v2.archive.subsquid.io/network/hydradx}
-      - SQD_GATEWAY_API_KEY=${SQD_GATEWAY_API_KEY:-}
-      - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
-      - RPC_RATE_LIMIT=${RAW_LIVE_RPC_RATE_LIMIT:-50}
-      - RPC_CAPACITY=${RAW_LIVE_RPC_CAPACITY:-10}
-      - RPC_HEAD_POLL_MS=${RPC_HEAD_POLL_MS:-}
-      - RAW_LIVE_FINALITY_POLL_MS=${RAW_LIVE_FINALITY_POLL_MS:-}
-      - RAW_BALANCE_READ_CONCURRENCY=${RAW_BALANCE_READ_CONCURRENCY:-20}
-      - RAW_BALANCE_READ_BATCH_ENABLED=${RAW_BALANCE_READ_BATCH_ENABLED:-true}
-      - RAW_BALANCE_READ_BATCH_SIZE=${RAW_BALANCE_READ_BATCH_SIZE:-250}
-      - RAW_BALANCE_READ_BATCH_CONCURRENCY=${RAW_BALANCE_READ_BATCH_CONCURRENCY:-4}
-      - RAW_SNAPSHOT_READ_BATCH_SIZE=${RAW_SNAPSHOT_READ_BATCH_SIZE:-100}
-      - RAW_SNAPSHOT_READ_BATCH_CONCURRENCY=${RAW_SNAPSHOT_READ_BATCH_CONCURRENCY:-2}
-      - RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS=${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}
-      - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
-      - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
-      - RAW_MM_PERIODIC_SNAPSHOT_ENABLED=${RAW_MM_PERIODIC_SNAPSHOT_ENABLED:-true}
-      # Chain time, not a block count: the money-market re-snapshot costs an
-      # eth_call per known borrower, so a block-count interval would have
-      # tripled its RPC fan-out at a 2s block time. 720 = 12h.
-      - RAW_MM_SNAPSHOT_INTERVAL_MINUTES=${RAW_MM_SNAPSHOT_INTERVAL_MINUTES:-}
-      # Deprecated block-count form, passed through empty so a deployment that still
-      # sets it gets the startup warning naming the replacement instead of silence.
-      - RAW_MM_SNAPSHOT_INTERVAL_BLOCKS=${RAW_MM_SNAPSHOT_INTERVAL_BLOCKS:-}
-      - BATCH_SIZE=${RAW_LIVE_BATCH_SIZE:-50000}
-      # Chain time between asset-registry scans. 100 = what the old
-      # RAW_ASSET_SNAPSHOT_INTERVAL of 1000 blocks meant at 6s.
-      - RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES=${RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES:-}
-      - RAW_ASSET_SNAPSHOT_INTERVAL=${RAW_ASSET_SNAPSHOT_INTERVAL:-}
-      # One raw_block_snapshots row per N blocks. 1 = today's per-block behaviour.
-      # The table is the largest in the database and 36% of all growth, so N is the
-      # one pure-config disk lever; N must divide the 600-block pool-history MV grid
-      # (checked at startup). Do NOT raise it before the main/price pipeline stops
-      # requiring a snapshot row for every block it replays — see the migration runbook.
-      - RAW_SNAPSHOT_EVERY_N_BLOCKS=${RAW_SNAPSHOT_EVERY_N_BLOCKS:-1}
-      - RAW_PIPELINE_ID=raw-live
+      <<: *raw-env
+      RPC_RATE_LIMIT: "${RAW_RPC_RATE_LIMIT:-50}"
+      RPC_CAPACITY: "${RAW_RPC_CAPACITY:-10}"
+      BATCH_SIZE: "${RAW_BATCH_SIZE:-50000}"
+      RAW_PIPELINE_ID: "${RAW_PIPELINE_ID:-raw-main}"
+    command: ["src/raw/cli.ts"]
+
+  raw-live:
+    <<: *service
+    image: hydration-neckwork-indexer:latest
+    build: .
+    container_name: hydration-neckwork-raw-live
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *raw-env
+      RPC_RATE_LIMIT: "${RAW_LIVE_RPC_RATE_LIMIT:-50}"
+      RPC_CAPACITY: "${RAW_LIVE_RPC_CAPACITY:-10}"
+      BATCH_SIZE: "${RAW_LIVE_BATCH_SIZE:-50000}"
+      RAW_PIPELINE_ID: "raw-live"
     command: ["src/raw/cli.ts", "--pipeline-id=raw-live"]
-    networks:
-      - neckwork
 
   # Populates price_data.account_identities from the Identity pallet of Hydration and
   # of every chain in IDENTITY_CHAINS (the Polkadot/Kusama People chains and their
@@ -190,10 +174,10 @@ services:
   # `docker compose up` gets identities with no manual step. IDENTITY_CHAINS is
   # forwarded only when set, so the code default in src/config.ts stays canonical.
   identity-snapshot:
+    <<: *service
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-identity-snapshot
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -208,8 +192,6 @@ services:
       - RPC_RATE_LIMIT=${IDENTITY_RPC_RATE_LIMIT:-20}
       - RPC_CAPACITY=${IDENTITY_RPC_CAPACITY:-5}
     command: ["src/scripts/snapshot-identities.ts", "--loop", "--refresh-hours=${IDENTITY_REFRESH_HOURS:-1}"]
-    networks:
-      - neckwork
 
   # Nightly export of the user_* tables (see clickhouse/schema/004_user.sql) —
   # the only ClickHouse state not reproducible from raw chain data. Reuses the
@@ -217,9 +199,9 @@ services:
   # server. See ops/backup-user-tables.sh for the export/retention/restore
   # procedure.
   user-backup:
+    <<: *service
     build: ./clickhouse
     container_name: hydration-neckwork-user-backup
-    restart: unless-stopped
     entrypoint: ["/bin/sh", "/backup-user-tables.sh"]
     volumes:
       - ./ops/backup-user-tables.sh:/backup-user-tables.sh:ro
@@ -230,18 +212,18 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
-    networks:
-      - neckwork
+      schema-bootstrap:
+        condition: service_completed_successfully
 
   # Referendum proposal calls. A referendum names its proposal by hash and the call
   # itself lives in a preimage as SCALE bytes, which only runtime metadata can read —
   # hence an indexer-side decoder rather than API-side. A hash IS its content, so a
   # decoded proposal is never revisited and this goes quiet once caught up.
   referendum-proposals:
+    <<: *service
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-referendum-proposals
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -258,8 +240,6 @@ services:
     command: ["src/scripts/decode-referendum-proposals.ts", "--loop",
       "--cycle-minutes=${REFERENDUM_PROPOSAL_CYCLE_MINUTES:-30}",
       "--max=${REFERENDUM_PROPOSAL_MAX:-200}"]
-    networks:
-      - neckwork
 
   # Referendum titles from SubSquare. The chain has no human title for a
   # referendum, so "#369" is all the explorer could show without this. Live
@@ -267,10 +247,10 @@ services:
   # open); concluded ones are fetched once and then never requested again, which is
   # what keeps the 576 settled referenda from being re-crawled every cycle.
   referendum-titles:
+    <<: *service
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-referendum-titles
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -285,19 +265,19 @@ services:
       "--live-refresh-minutes=${REFERENDUM_TITLE_LIVE_REFRESH_MINUTES:-30}",
       "--max-fetches=${REFERENDUM_TITLE_MAX_FETCHES:-40}",
       "--delay-ms=${REFERENDUM_TITLE_DELAY_MS:-1500}"]
-    networks:
-      - neckwork
 
   # Seed current balances for every account, including dormant accounts with no
   # events in the indexed range, and refresh them on an interval.
   balance-snapshot:
+    <<: *service
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-balance-snapshot
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
     environment:
       - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
@@ -305,21 +285,21 @@ services:
       - RPC_RATE_LIMIT=${BALANCES_SNAPSHOT_RPC_RATE_LIMIT:-20}
       - RPC_CAPACITY=${BALANCES_SNAPSHOT_RPC_CAPACITY:-5}
     command: ["src/scripts/snapshot-balances.ts", "--loop", "--refresh-hours=${BALANCES_REFRESH_HOURS:-24}"]
-    networks:
-      - neckwork
 
   # Money-market sweep: after the balance snapshot has seeded all accounts, calls
   # getUserAccountData for every account in the primary pool and for the bounded
   # observed participant set in supplemental pools. This keeps core coverage
   # exhaustive without multiplying the RPC workload for sparse isolated markets.
   mm-snapshot:
+    <<: *service
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-mm-snapshot
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
     environment:
       - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
@@ -330,19 +310,19 @@ services:
       - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
       - RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS=${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}
     command: ["src/scripts/snapshot-money-market.ts", "--market=core", "--loop", "--refresh-hours=${MM_SNAPSHOT_REFRESH_HOURS:-6}"]
-    networks:
-      - neckwork
 
   # Refresh sparse supplemental-market (GIGAHDX, BIL) positions more often than
   # the exhaustive primary sweep.
   mm-supplemental-snapshot:
+    <<: *service
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-mm-supplemental-snapshot
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
     environment:
       - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
@@ -355,34 +335,32 @@ services:
       - --market=gigahdx,bil
       - --loop
       - --refresh-minutes=${MM_SUPPLEMENTAL_SNAPSHOT_MINUTES:-15}
-    networks:
-      - neckwork
 
   # aToken / variable-debt scaled-balance anchor (see clickhouse/schema/041_atoken_anchors.sql).
   # Refreshes the reserve map each cycle and self-re-establishes the balanceOf@B0 anchor
   # whenever the anchor table is empty (e.g. after a wipe & reindex). One-time bounded RPC.
   atoken-anchor:
+    <<: *service
     image: hydration-neckwork-indexer:latest
     build: .
     container_name: hydration-neckwork-atoken-anchor
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
+      schema-bootstrap:
+        condition: service_completed_successfully
     environment:
       - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
     command: ["src/scripts/snapshot-atoken-anchors.ts", "--loop", "--refresh-hours=${ATOKEN_ANCHOR_REFRESH_HOURS:-6}"]
-    networks:
-      - neckwork
 
   ingestion-supervisor:
+    <<: *service
     build:
       context: .
       dockerfile: ops/supervisor.Dockerfile
     container_name: hydration-neckwork-ingestion-supervisor
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -429,9 +407,13 @@ services:
       - LIVE_MAIN_BATCH_SIZE=${LIVE_MAIN_BATCH_SIZE:-50000}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # The supervisor spawns its workers from this compose file and this script.
+      # Both are also baked into its image, which is the trap: without these mounts
+      # a deployment that edits either one keeps spawning workers from the copy
+      # frozen at image-build time, silently and with no version to compare.
+      - ./docker-compose.yml:/etc/hydration-neckwork/docker-compose.yml:ro
+      - ./scripts/ingestion-supervisor.sh:/usr/local/bin/ingestion-supervisor.sh:ro
     working_dir: /etc/hydration-neckwork
-    networks:
-      - neckwork
 
   # Blockscout's contract-verification microservice: compiles submitted
   # standard-json and compares against the bytecode the api hands it. Stateless
@@ -442,9 +424,9 @@ services:
   # Config is deserialized with deny_unknown_fields: a typo in any
   # SMART_CONTRACT_VERIFIER__* variable PANICS at startup rather than warning.
   smart-contract-verifier:
+    <<: *service
     image: ghcr.io/blockscout/smart-contract-verifier:v1.10.6
     container_name: hydration-neckwork-smart-contract-verifier
-    restart: unless-stopped
     environment:
       # 2 MiB default is below a real project's standard-json input.
       - SMART_CONTRACT_VERIFIER__SERVER__HTTP__MAX_BODY_SIZE=33554432
@@ -461,17 +443,15 @@ services:
       #   docker compose exec -u root smart-contract-verifier chown 1001:1001 /tmp/solidity-compilers
       # or every verification fails with "fetching evm compiler: Permission denied".
       - solidity_compilers:/tmp/solidity-compilers
-    networks:
-      - neckwork
 
   # Nightly Parquet export of the contract verification tables — api-authored
   # state a projection rebuild cannot regenerate (005_contracts.sql). Mirrors
   # user-backup with its own script and volume; see ops/backup-contract-tables.sh
   # for the export/retention/restore procedure.
   contract-backup:
+    <<: *service
     build: ./clickhouse
     container_name: hydration-neckwork-contract-backup
-    restart: unless-stopped
     entrypoint: ["/bin/sh", "/backup-contract-tables.sh"]
     volumes:
       - ./ops/backup-contract-tables.sh:/backup-contract-tables.sh:ro
@@ -482,22 +462,22 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
-    networks:
-      - neckwork
+      schema-bootstrap:
+        condition: service_completed_successfully
 
   api:
+    <<: *service
     build:
       context: ./api
       dockerfile: Dockerfile
     container_name: hydration-neckwork-api
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
       schema-bootstrap:
         condition: service_completed_successfully
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       # Per-group page/window logging for the notification lanes; off unless set.
       - NOTIFICATIONS_DEBUG=${NOTIFICATIONS_DEBUG:-}
@@ -556,20 +536,22 @@ services:
       - WORMHOLE_ORIGIN_RPC_URLS=${WORMHOLE_ORIGIN_RPC_URLS:-}
       # Unset-only default (no colon): setting it EMPTY is the disable switch.
       - WORMHOLE_SCAN_URL=${WORMHOLE_SCAN_URL-https://api.wormholescan.io}
-    networks:
-      - neckwork
+      # Read by governanceService for referendum links; the titles snapshotter
+      # reads the same variable, and the two must name the same site.
+      - SUBSQUARE_BASE_URL=${SUBSQUARE_BASE_URL:-https://hydration.subsquare.io}
+      - EXPLORER_EXTRA_ATOKEN_UNDERLYING=${EXPLORER_EXTRA_ATOKEN_UNDERLYING:-}
 
   # Long-running recompute loop for the four derivation jobs in
   # api/src/derivations/jobs.ts (read models a plain materialized view can't
   # express). Same image/env as `api`; gated on schema-bootstrap like every
   # other schema consumer.
   derivations:
+    <<: *service
     build:
       context: ./api
       dockerfile: Dockerfile
     image: hydration-neckwork-api
     container_name: hydration-neckwork-derivations
-    restart: unless-stopped
     depends_on:
       schema-bootstrap:
         condition: service_completed_successfully
@@ -586,8 +568,7 @@ services:
       - ONE_CLICK_TOKEN=${ONE_CLICK_TOKEN:-}
       # Reference USD candles for cross-chain destinations that do not trade here.
       - KRAKEN_BASE_URL=${KRAKEN_BASE_URL:-https://api.kraken.com/0/public}
-    networks:
-      - neckwork
+      - EXPLORER_EXTRA_ATOKEN_UNDERLYING=${EXPLORER_EXTRA_ATOKEN_UNDERLYING:-}
 
   # Public REST API (docs/superpowers/specs/2026-08-12-public-rest-api-design.md):
   # the versioned /v1 + /rest surface for the Hydration UI and external feeds.
@@ -595,12 +576,12 @@ services:
   # shares an event loop, in-process cache or rate-limit budget with the
   # explorer; gated on schema-bootstrap like every other schema consumer.
   api-public:
+    <<: *service
     build:
       context: ./api
       dockerfile: Dockerfile
     image: hydration-neckwork-api
     container_name: hydration-neckwork-api-public
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -608,7 +589,7 @@ services:
         condition: service_completed_successfully
     command: ["./node_modules/.bin/tsx", "src/public/server.ts"]
     ports:
-      - "3002:3000"
+      - "127.0.0.1:3002:3000"
     environment:
       # Batch filters travel in the query string, so a supported request line is
       # kilobytes long — `/v1/pools/xyk/volumes?pools=` takes a list of 67-byte
@@ -637,8 +618,6 @@ services:
       - ONE_CLICK_TOKEN=${ONE_CLICK_TOKEN:-}
       # Reference USD candles for cross-chain destinations that do not trade here.
       - KRAKEN_BASE_URL=${KRAKEN_BASE_URL:-https://api.kraken.com/0/public}
-    networks:
-      - neckwork
 
   # Data API (~/.g/hydraken-api-concept.md): the token-authenticated /v1 REST
   # surface for external developers at hydration-data.neckwork.net. Fourth
@@ -649,12 +628,12 @@ services:
   # explorer `api` (control plane); this process only reads user_api_tokens/
   # user_api_limits and writes user_api_usage.
   api-data:
+    <<: *service
     build:
       context: ./api
       dockerfile: Dockerfile
     image: hydration-neckwork-api
     container_name: hydration-neckwork-api-data
-    restart: unless-stopped
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -662,7 +641,7 @@ services:
         condition: service_completed_successfully
     command: ["./node_modules/.bin/tsx", "src/data/server.ts"]
     ports:
-      - "3003:3000"
+      - "127.0.0.1:3003:3000"
     environment:
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
@@ -677,27 +656,25 @@ services:
       # 401 context / docs links.
       - DATA_API_PUBLIC_URL=${DATA_API_PUBLIC_URL:-}
       - EXPLORER_PUBLIC_URL=${EXPLORER_PUBLIC_URL:-}
-    networks:
-      - neckwork
+      - EXPLORER_EXTRA_ATOKEN_UNDERLYING=${EXPLORER_EXTRA_ATOKEN_UNDERLYING:-}
 
   # Micro-cache in front of api-public: URI-keyed, honors the app's per-route
   # Cache-Control, collapses concurrent misses into one upstream request. The
   # external reverse proxy (outside this repo) points the public hostname here,
   # never at api-public directly.
   api-public-nginx:
+    <<: *service
     build:
       context: ./public-nginx
       dockerfile: Dockerfile
     container_name: hydration-neckwork-api-public-nginx
-    restart: unless-stopped
     depends_on:
       - api-public
     ports:
-      - "8081:80"
-    networks:
-      - neckwork
+      - "127.0.0.1:8081:80"
 
   preis-ui:
+    <<: *service
     build:
       context: ./preis-ui
       dockerfile: Dockerfile
@@ -709,11 +686,10 @@ services:
     depends_on:
       - api
     ports:
-      - "5173:80"
-    networks:
-      - neckwork
+      - "127.0.0.1:5173:80"
 
   explorer-ui:
+    <<: *service
     build:
       context: ./explorer-ui
       dockerfile: Dockerfile
@@ -727,9 +703,7 @@ services:
     depends_on:
       - api
     ports:
-      - "5174:80"
-    networks:
-      - neckwork
+      - "127.0.0.1:5174:80"
 
 volumes:
   clickhouse_data:
