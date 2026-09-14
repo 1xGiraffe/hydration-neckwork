@@ -10,6 +10,9 @@ import { PoolBadge, Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBad
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { convictionLabel, voteSideLabel, voteSubjectLabel } from '../utils/voteRows'
 
+// Hydration's own Subscan instance — the chain this explorer indexes.
+const HYDRATION_SUBSCAN = 'https://hydration.subscan.io'
+
 export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: string }) {
   const label = activityLabel(slug)
   useDocumentTitle(`${label} ${id}`)
@@ -106,6 +109,15 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             </>}
             {row.type === 'xcm' && row.destTxUrl && <><div className="dt">Destination transaction</div><div className="dd"><a className="ext-link" href={row.destTxUrl} target="_blank" rel="noopener">{explorerSiteName(row.destTxUrl)} ↗</a></div></>}
             {row.type === 'xcm' && row.messageId && <><div className="dt">Message ID</div><div className="dd mono" style={{ overflowWrap: 'anywhere' }}>{row.messageId}</div></>}
+            {/* The send's own extrinsic on Subscan. Offered on every cross-chain row,
+                not only the ones the journey walk resolved a counterpart for: a
+                bridged send's far side often has no indexed transaction here, and
+                this side always does. Addressed by block-index rather than by hash
+                because the row already carries both, and the hash does not. */}
+            {row.type === 'xcm' && row.extrinsicIndex != null && <>
+              <div className="dt">Subscan</div>
+              <div className="dd"><a className="ext-link" href={`${HYDRATION_SUBSCAN}/extrinsic/${row.blockHeight}-${row.extrinsicIndex}`} target="_blank" rel="noopener">Subscan ↗</a></div>
+            </>}
             {row.type === 'xcm' && row.bridge && <><div className="dt">Bridge</div><div className="dd">{row.bridge}</div></>}
             {/* What the send cost beyond its payload. A swap batched in to buy the fee
                 asset is not a trade the sender made, so it is not a row of its own: it
