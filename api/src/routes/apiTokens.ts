@@ -1,8 +1,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import rateLimit from '@fastify/rate-limit'
 import { z } from 'zod'
-import { requireUser } from '../services/userAuthService.ts'
-import { noStore, withUserErrors } from './user.ts'
+import { sessionUser } from '../services/userAuthService.ts'
+import { privateUserHooks, withUserErrors } from './user.ts'
 import {
   MAX_ACTIVE_TOKENS, MAX_LABEL_LEN, adminApiUsers, adminClearLimits, adminSetLimits, apiLimitDefaults,
   createApiToken, isApiAdmin, listApiTokens, revokeApiToken,
@@ -24,10 +24,10 @@ const limitsBody = z.object({
   note: z.string().max(400).optional(),
 })
 
-// Non-admins get a 404, never a 403: the admin surface stays invisible.
+// Non-admins get a 404, never a 403: the admin surface stays invisible. The
+// session is already resolved by the plugin's private hook.
 function requireAdmin(req: FastifyRequest, reply: FastifyReply): string | null {
-  const accountId = requireUser(req, reply)
-  if (!accountId) return null
+  const accountId = sessionUser(req)
   if (!isApiAdmin(accountId)) {
     void reply.status(404).send({ error: 'Not found' })
     return null
@@ -39,19 +39,19 @@ export async function apiTokenRoutes(fastify: FastifyInstance) {
   // Scoped to this plugin's encapsulation context, like the user routes.
   await fastify.register(rateLimit, { max: 60, timeWindow: '1 minute' })
 
-  fastify.get('/user/api-tokens', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+  // Every route here is private: no shared cache, no anonymous access (see
+  // privateUserHooks). Registered once for the plugin, never per handler.
+  privateUserHooks(fastify)
+
+  fastify.get('/user/api-tokens', async (req) => {
+    const accountId = sessionUser(req)
     return { tokens: await listApiTokens(accountId), maxTokens: MAX_ACTIVE_TOKENS, docsUrl: 'https://hydration-data.neckwork.net/docs' }
   })
 
   // The per-route brake sits above MAX_ACTIVE_TOKENS so the cap's own 422 is
   // reachable within one window; minting is still bounded.
   fastify.post('/user/api-tokens', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const body = createBody.safeParse(req.body ?? {})
     if (!body.success) return reply.status(400).send({ error: 'Invalid token payload' })
     // The response carries the raw token — the only time it ever leaves the
@@ -60,9 +60,7 @@ export async function apiTokenRoutes(fastify: FastifyInstance) {
   })
 
   fastify.delete('/user/api-tokens/:tokenHash', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { tokenHash } = req.params as { tokenHash: string }
     if (!TOKEN_HASH_RE.test(tokenHash)) return reply.status(400).send({ error: 'Invalid token id' })
     return withUserErrors(reply, async () => { await revokeApiToken(accountId, tokenHash); return { ok: true } })
@@ -71,7 +69,6 @@ export async function apiTokenRoutes(fastify: FastifyInstance) {
   // ---- Admin ----
 
   fastify.get('/user/admin/api-users', async (req, reply) => {
-    noStore(reply)
     if (!requireAdmin(req, reply)) return
     const users = await adminApiUsers()
     return {
@@ -81,7 +78,6 @@ export async function apiTokenRoutes(fastify: FastifyInstance) {
   })
 
   fastify.put('/user/admin/api-users/:accountId/limits', async (req, reply) => {
-    noStore(reply)
     const admin = requireAdmin(req, reply)
     if (!admin) return
     const normalized = normalizeAddress((req.params as { accountId: string }).accountId)
@@ -95,7 +91,6 @@ export async function apiTokenRoutes(fastify: FastifyInstance) {
   })
 
   fastify.delete('/user/admin/api-users/:accountId/limits', async (req, reply) => {
-    noStore(reply)
     const admin = requireAdmin(req, reply)
     if (!admin) return
     const normalized = normalizeAddress((req.params as { accountId: string }).accountId)
@@ -104,7 +99,6 @@ export async function apiTokenRoutes(fastify: FastifyInstance) {
   })
 
   fastify.delete('/user/admin/api-tokens/:tokenHash', async (req, reply) => {
-    noStore(reply)
     const admin = requireAdmin(req, reply)
     if (!admin) return
     const { tokenHash } = req.params as { tokenHash: string }
