@@ -1,15 +1,9 @@
+// The payload carries the whole ingestion picture; preis renders two of it —
+// the height in the indexer chip and the lag behind the LIVE dot. Declaring
+// only those keeps the app's read of the API honest about what it depends on.
 export interface IndexerStatus {
   blockHeight: number
-  blockTimestamp: string
   lagSeconds: number
-  chainBlockHeight: number
-  blocksBehindHead: number
-  // false when the API could not sample the chain head — blocksBehindHead is then
-  // measured against raw ingestion's own head, so 0 does not mean "in sync".
-  chainHeadSampled?: boolean
-  rawFinalizedRangeCount: number
-  rawFinalizedFromBlock: number
-  rawFinalizedToBlock: number
 }
 
 // The green LIVE dot means "following the chain", which is a question about how

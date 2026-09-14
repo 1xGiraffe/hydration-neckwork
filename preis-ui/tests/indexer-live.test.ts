@@ -7,14 +7,7 @@ import { indexerLiveDot, type IndexerStatus } from '../src/api/indexer'
 // so it reports 0 — fully synced — exactly when the indicator matters.
 const status = (over: Partial<IndexerStatus> = {}): IndexerStatus => ({
   blockHeight: 13_307_175,
-  blockTimestamp: '2026-07-25 00:00:00',
   lagSeconds: 40,
-  chainBlockHeight: 13_307_179,
-  blocksBehindHead: 4,
-  chainHeadSampled: true,
-  rawFinalizedRangeCount: 1,
-  rawFinalizedFromBlock: 1,
-  rawFinalizedToBlock: 13_307_175,
   ...over,
 })
 
@@ -29,9 +22,11 @@ describe('indexer live dot', () => {
     expect(indexerLiveDot(status({ lagSeconds: 3_600 }))).toBe(false)
   })
 
-  it('does not trust a synthesised zero lag behind an unsampled chain head', () => {
-    // A stalled pipeline keeps blocksBehindHead at 0 when the chain head is unknown.
-    expect(indexerLiveDot(status({ chainHeadSampled: false, blocksBehindHead: 0, lagSeconds: 900 }))).toBe(false)
+  it('reads the age of the newest block, never the distance to the head', () => {
+    // The response also carries blocksBehindHead, which a stalled pipeline
+    // reports as 0 whenever the API could not sample the chain head. The dot
+    // never reads it, so that zero cannot turn a stalled indexer green.
+    expect(indexerLiveDot(status({ lagSeconds: 900 }))).toBe(false)
   })
 
   it('is not live before any status has loaded', () => {

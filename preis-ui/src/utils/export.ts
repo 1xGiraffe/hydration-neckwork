@@ -1,6 +1,17 @@
 import type { ApiCandle } from '../types'
 
 /**
+ * One naming scheme for every chart export, so a CSV and a screenshot of the
+ * same chart land beside each other: `hydration_neckwork_HDXUSD_1h_<utc>.csv`.
+ * `quote` is the DISPLAYED quote label — "USD" for a USD-pegged quote, matching
+ * what the header, the pair pill and the screenshot watermark all render.
+ */
+export function exportFilename(base: string, quote: string, interval: string, extension: string): string {
+  const utcNow = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z'
+  return `hydration_neckwork_${base}${quote}_${interval}_${utcNow}.${extension}`
+}
+
+/**
  * Export candle data as CSV. If visibleFrom/visibleTo provided, slices to that range.
  * Falls back to exporting all data if range is null.
  */
@@ -27,8 +38,7 @@ export function exportVisibleCSV(
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  const utcNow = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z'
-  a.download = `hydration_neckwork_${base}${quote}_${interval}_${utcNow}.csv`
+  a.download = exportFilename(base, quote, interval, 'csv')
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
