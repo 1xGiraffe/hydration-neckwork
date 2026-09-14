@@ -1,22 +1,21 @@
 import { EVM_LOG_EVENT_NAME, decodeUniswapV3Log, evmLogOf, uniswapV3SwapTrade, type UniswapV3PoolIndex } from '../price/uniswapV3.js'
 import { OTC_FILLER_KIND, otcSides } from '../blocks/otcCounterparty.js'
+import {
+  LEGACY_SWAP_EVENT_NAMES as REGISTRY_LEGACY_SWAP_EVENT_NAMES,
+  UNIFIED_SWAP_EVENT_NAMES as REGISTRY_UNIFIED_SWAP_EVENT_NAMES,
+} from '../registry/swapEvents.js'
 
-export const LEGACY_SWAP_EVENT_NAMES = [
-  'Omnipool.SellExecuted',
-  'Omnipool.BuyExecuted',
-  'XYK.SellExecuted',
-  'XYK.BuyExecuted',
-  'Stableswap.SellExecuted',
-  'Stableswap.BuyExecuted',
-] as const
+// Re-exported from the registry rather than restated: the repair tooling must
+// select exactly the events the live indexer classifies as swaps.
+export {
+  LEGACY_SWAP_EVENT_NAMES,
+  UNIFIED_SWAP_EVENT_NAMES as BROADCAST_SWAP_EVENT_NAMES,
+} from '../registry/swapEvents.js'
 
-export const BROADCAST_SWAP_EVENT_NAMES = [
-  'Broadcast.Swapped',
-  'Broadcast.Swapped2',
-  'Broadcast.Swapped3',
-] as const
-
-export const ALL_SWAP_EVENT_NAMES = [...LEGACY_SWAP_EVENT_NAMES, ...BROADCAST_SWAP_EVENT_NAMES]
+export const ALL_SWAP_EVENT_NAMES: readonly string[] = [
+  ...REGISTRY_LEGACY_SWAP_EVENT_NAMES,
+  ...REGISTRY_UNIFIED_SWAP_EVENT_NAMES,
+]
 
 export interface RawTradeEventRow {
   block_height: number
