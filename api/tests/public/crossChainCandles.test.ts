@@ -10,10 +10,11 @@ import { ONE_CLICK_PLATFORMS, KRAKEN_INTERVALS, foreignCandleTtlMs, platformForO
 
 const SCALE = 18
 const hour = 3600
-// $0.01 per HDX at t=0, $0.02 at t=2h.
+// $0.01 per HDX at t=0, $0.02 at t=2h. Flat buckets (high = low = close), so
+// the cases below isolate the destination leg's contribution to the envelope.
 const HYDRATION = [
-  { time: 0 * hour, close: '0.01' },
-  { time: 2 * hour, close: '0.02' },
+  { time: 0 * hour, close: '0.01', high: '0.01', low: '0.01' },
+  { time: 2 * hour, close: '0.02', high: '0.02', low: '0.02' },
 ]
 const foreign = (time: number, o: string, h: string, l: string, c: string) => ({ time, open: o, high: h, low: l, close: c })
 
@@ -54,6 +55,29 @@ describe('crossChainCandles', () => {
     // The envelope must contain both exact ends.
     expect(Number(candle!.low)).toBeLessThanOrEqual(Number(candle!.open))
     expect(Number(candle!.high)).toBeGreaterThanOrEqual(Number(candle!.close))
+  })
+
+  it('widens the envelope by the BASE leg’s range too, so high/low never understate it', () => {
+    // The base ranged $0.008–$0.015 around a $0.01 close while the destination
+    // held $2. Pricing the base at its close alone reported 0.005/0.005 — a zero
+    // range for a bucket in which the pair provably moved, which is an
+    // UNDERESTIMATE of realised range, not a conservative bound.
+    const base = [{ time: 0, close: '0.01', high: '0.015', low: '0.008' }]
+    const [candle] = crossChainCandles([foreign(0, '2', '2', '2', '2')], base, SCALE, false)
+    expect(candle?.high).toBe('0.0075')
+    expect(candle?.low).toBe('0.004')
+    // open/close stay on the base's close and must sit inside the envelope.
+    expect(candle?.open).toBe('0.005')
+    expect(candle?.close).toBe('0.005')
+    expect(Number(candle!.low)).toBeLessThanOrEqual(Number(candle!.open))
+    expect(Number(candle!.high)).toBeGreaterThanOrEqual(Number(candle!.close))
+  })
+
+  it('falls back to the base close when a base bucket carries no usable extreme', () => {
+    const base = [{ time: 0, close: '0.01', high: '0', low: '0' }]
+    const [candle] = crossChainCandles([foreign(0, '2', '4', '1', '2')], base, SCALE, false)
+    expect(candle?.high).toBe('0.01')
+    expect(candle?.low).toBe('0.0025')
   })
 
   it('treats a dollar-pegged base as 1 and needs no Hydration series for it', () => {

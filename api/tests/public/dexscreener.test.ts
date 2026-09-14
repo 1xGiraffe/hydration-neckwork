@@ -44,8 +44,11 @@ const STABLESWAP_ACCOUNT_ROWS: Row[] = [{ pool_id: 102, pool_account: STABLESWAP
 const STATUS_MAIN: Row[] = [{ block_height: '13585536', block_timestamp: '2026-08-12 20:51:51' }]
 const STATUS_RAW: Row[] = [{ block_height: '13585540' }]
 
-/** Distinct Omnipool assets, for pair validation. */
-const OMNIPOOL_ASSET_ROWS: Row[] = [{ asset_id: 0 }, { asset_id: 5 }, { asset_id: 102 }, { asset_id: 222 }]
+// Distinct Omnipool assets, for pair validation. The column is `registry_asset_id`
+// because the underlying `asset_id` is Int32 and the query's `WHERE asset_id >= 0`
+// has to read the COLUMN: aliasing the unsigned cast back over it would leave a
+// negative row to wrap to 4294967295 and enter this set as a phantom asset.
+const OMNIPOOL_ASSET_ROWS: Row[] = [{ registry_asset_id: 0 }, { registry_asset_id: 5 }, { registry_asset_id: 102 }, { registry_asset_id: 222 }]
 /** Stableswap pool → its underlying assets, for pair validation. */
 const STABLESWAP_POOL_ROWS: Row[] = [{ pool_id: 102, asset_ids: [10, 22, 222] }, { pool_id: 690, asset_ids: [15, 1001] }]
 /** price_data.xyk_pool_registry, read through poolVolumes.xykPoolMeta. */
@@ -600,6 +603,19 @@ describe('the events queries', () => {
     }
   })
 
+  it('keeps the Int32 sign guard on the reserve join readable', async () => {
+    const omnipool = (await queriesFor('/dexscreener/events?fromBlock=1&toBlock=10'))
+      .find(s => s.query.includes('pub:ds:events:omnipool'))!
+    // omnipool_pool_state_history.asset_id is Int32. `toUInt32(asset_id) AS
+    // asset_id` would make `WHERE asset_id >= 0` read the unsigned alias, so a
+    // negative row would pass the guard AND wrap to 4294967295 — a phantom asset
+    // joined under a bogus key that still validates against zAssetId.
+    expect(omnipool.query).toContain('toUInt32(asset_id) AS registry_asset_id')
+    expect(omnipool.query).toContain('WHERE asset_id >= 0')
+    expect(omnipool.query).toContain('h.registry_asset_id = f.other_asset')
+    expect(omnipool.query).not.toContain('toUInt32(asset_id) AS asset_id')
+  })
+
   it('drops a fill whose side is not a single asset rather than guessing one', async () => {
     for (const { query } of await queriesFor('/dexscreener/events?fromBlock=1&toBlock=10')) {
       expect(query).toMatch(/uniqExactIf\(asset_id, leg_kind = 'in'\) = 1/)
@@ -724,6 +740,20 @@ describe('the identifier queries', () => {
     // check silently start reading '' for every newer event and reject them all.
     expect(ERC20_CONTRACTS_SQL).toContain("'interior', 'value', 1, '__kind'")
     expect(ERC20_CONTRACTS_SQL).toContain("'interior', 'value', '__kind'")
+  })
+
+  it('guards the pool universe against a negative Int32 asset id', async () => {
+    const { OMNIPOOL_ASSETS_SQL, poolUniverse } = await import('../../src/public/services/dexscreener.ts')
+    // Same trap as the reserve join: the cast must not take the column's name,
+    // or `WHERE asset_id >= 0` guards the alias and asset 4294967295 enters the
+    // universe as a tradeable Omnipool asset.
+    expect(OMNIPOOL_ASSETS_SQL).toContain('toUInt32(asset_id) AS registry_asset_id')
+    expect(OMNIPOOL_ASSETS_SQL).toContain('WHERE asset_id >= 0')
+    expect(OMNIPOOL_ASSETS_SQL).not.toContain('toUInt32(asset_id) AS asset_id')
+    // …and the reader takes the guarded column, so a row the guard let through
+    // cannot arrive under the old name and be read as NaN instead.
+    const universe = await poolUniverse(fakeClient() as never)
+    expect([...universe.omnipoolAssets].sort((a, b) => a - b)).toEqual([0, 5, 102, 222])
   })
 
   it('keeps every Erc20 asset as a row so a missing contract is visible, not absent', async () => {

@@ -591,8 +591,13 @@ interface PoolUniverse {
   stableswapPools: Map<number, number[]>
 }
 
-const OMNIPOOL_ASSETS_SQL = `-- pub:ds:omnipool-assets
-SELECT DISTINCT toUInt32(asset_id) AS asset_id
+// `asset_id` is Int32 here, so the sign guard is load-bearing: an unsigned cast
+// would wrap a negative row to 4294967295 and mint a phantom asset that still
+// validates against zAssetId. The cast therefore takes a NAME OF ITS OWN —
+// aliasing it back to `asset_id` makes the WHERE read the alias and the guard
+// stops guarding.
+export const OMNIPOOL_ASSETS_SQL = `-- pub:ds:omnipool-assets
+SELECT DISTINCT toUInt32(asset_id) AS registry_asset_id
 FROM price_data.omnipool_pool_state_history
 WHERE asset_id >= 0`
 
@@ -615,7 +620,7 @@ export function poolUniverse(client: ClickHouseClient): Promise<PoolUniverse> {
       client.query({ query: OMNIPOOL_ASSETS_SQL, format: 'JSONEachRow' }),
       client.query({ query: STABLESWAP_POOLS_SQL, format: 'JSONEachRow' }),
     ])
-    const omnipoolAssets = new Set((await omniRes.json<{ asset_id: number | string }>()).map(r => Number(r.asset_id)))
+    const omnipoolAssets = new Set((await omniRes.json<{ registry_asset_id: number | string }>()).map(r => Number(r.registry_asset_id)))
     const stableswapPools = new Map<number, number[]>()
     for (const row of await stableRes.json<{ pool_id: number | string; asset_ids: Array<number | string> }>()) {
       stableswapPools.set(Number(row.pool_id), (row.asset_ids ?? []).map(Number))
@@ -870,14 +875,16 @@ SELECT f.pool_key AS pool_key, f.block_height AS block_height, f.event_index AS 
        h.block_height AS reserve_block, h.reserve_raw AS reserve_raw, h.hub_reserve_raw AS hub_reserve_raw
 FROM hub_fills f
 ASOF LEFT JOIN (
-  SELECT toUInt32(asset_id) AS asset_id, block_height,
+  -- Int32 column, unsigned cast: the sign guard must read the COLUMN, so the
+  -- cast is named apart from it (see OMNIPOOL_ASSETS_SQL).
+  SELECT toUInt32(asset_id) AS registry_asset_id, block_height,
          argMax(reserve_raw, ingested_at) AS reserve_raw,
          argMax(hub_reserve_raw, ingested_at) AS hub_reserve_raw
   FROM price_data.omnipool_pool_state_history
   WHERE asset_id >= 0
     AND block_height >= {reserveFrom:UInt32} AND block_height <= {toBlock:UInt32}
-  GROUP BY asset_id, block_height
-) h ON h.asset_id = f.other_asset AND h.block_height <= f.block_height
+  GROUP BY registry_asset_id, block_height
+) h ON h.registry_asset_id = f.other_asset AND h.block_height <= f.block_height
 ORDER BY f.block_height, f.event_index
 LIMIT ${MAX_EVENTS + 1}`
 

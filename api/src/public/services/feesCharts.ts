@@ -572,6 +572,26 @@ async function hollarBorrowInterest(client: ClickHouseClient, q: FeesChartQuery)
 }
 
 /**
+ * The cache key for one request.
+ *
+ * `startTime` is snapped away: the query binds it as `firstBucketStart(...)` and
+ * reads it nowhere else, so every start inside one bucket asks exactly the same
+ * question and must not mint its own LRU entry.
+ *
+ * `endTime` is NOT snapped, and deliberately so. It is bound raw as the source
+ * cut (`anchor`, and `end` for the bucket filter), so the trailing bucket carries
+ * only what happened up to the second asked for — two ends inside one bucket are
+ * different answers, and when that bucket is the current one the window is still
+ * gaining rows, which AGENTS.md requires stay keyed on something that moves.
+ * Coarsening it would need the query snapped to the bucket's END too, which
+ * changes what a historical mid-bucket window publishes.
+ */
+export function feesChartCacheKey(q: FeesChartQuery): string {
+  const first = firstBucketStart(q.startSeconds, BUCKET_SECONDS[q.bucketSize])
+  return `pub:fees:${q.productType}:${q.streamType}:${q.feeDestination}:${q.bucketSize}:${first}:${q.endSeconds}`
+}
+
+/**
  * One stream, bucketed and aggregated.
  *
  * Cached deliberately rather than incidentally: the money-market history view
@@ -581,8 +601,7 @@ async function hollarBorrowInterest(client: ClickHouseClient, q: FeesChartQuery)
  * anything a chart would notice as old. It matches the route's own max-age.
  */
 export async function feesChart(client: ClickHouseClient, q: FeesChartQuery): Promise<FeesChartResponse> {
-  const key = `pub:fees:${q.productType}:${q.streamType}:${q.feeDestination}:${q.bucketSize}:${q.startSeconds}:${q.endSeconds}`
-  return cachedSwr(key, 300_000, 900_000, async () => {
+  return cachedSwr(feesChartCacheKey(q), 300_000, 900_000, async () => {
     const scaled = q.streamType === 'borrow_apr'
       ? await hollarBorrowInterest(client, q)
       : await readBuckets(client, buildFeesStreamSql(q.streamType, q.feeDestination), q)

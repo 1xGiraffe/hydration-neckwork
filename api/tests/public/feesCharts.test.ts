@@ -127,6 +127,48 @@ describe('bucket grid', () => {
   })
 })
 
+describe('cache key', () => {
+  const base = {
+    productType: 'omnipool', streamType: 'asset', feeDestination: 'lp', bucketSize: '24hour',
+  } as const
+
+  it('snaps startTime to the bucket the query already binds', async () => {
+    const { feesChartCacheKey } = await import('../../src/public/services/feesCharts.ts')
+    const day = Math.floor(Date.parse('2026-08-04T00:00:00Z') / 1000)
+    const end = Math.floor(Date.parse('2026-08-11T00:00:00Z') / 1000)
+    // Every start inside one bucket binds the same {start} and asks exactly the
+    // same question, so it must not mint its own entry in the shared LRU.
+    const a = feesChartCacheKey({ ...base, startSeconds: day - 3_600, endSeconds: end })
+    const b = feesChartCacheKey({ ...base, startSeconds: day - 1, endSeconds: end })
+    expect(a).toBe(b)
+    expect(a).toContain(`:${day}:${end}`)
+  })
+
+  it('keeps endTime exact, because the trailing bucket is cut at it', async () => {
+    const { feesChartCacheKey } = await import('../../src/public/services/feesCharts.ts')
+    const start = Math.floor(Date.parse('2026-08-04T00:00:00Z') / 1000)
+    const day = Math.floor(Date.parse('2026-08-11T00:00:00Z') / 1000)
+    // `end` is bound raw as the source cut, so two ends inside one bucket are
+    // different answers — and when that bucket is the current one the window is
+    // still gaining rows. Coarsening here would serve one for the other.
+    expect(feesChartCacheKey({ ...base, startSeconds: start, endSeconds: day + 3_600 }))
+      .not.toBe(feesChartCacheKey({ ...base, startSeconds: start, endSeconds: day + 7_200 }))
+  })
+
+  it('separates every filter the response depends on', async () => {
+    const { feesChartCacheKey } = await import('../../src/public/services/feesCharts.ts')
+    const window = { startSeconds: 1_780_000_000, endSeconds: 1_780_090_000 }
+    const keys = new Set([
+      feesChartCacheKey({ ...base, ...window }),
+      feesChartCacheKey({ ...base, ...window, feeDestination: 'protocol' }),
+      feesChartCacheKey({ ...base, ...window, streamType: 'protocol' }),
+      feesChartCacheKey({ ...base, ...window, bucketSize: '1hour' }),
+      feesChartCacheKey({ ...base, ...window, productType: 'hollar' }),
+    ])
+    expect(keys.size).toBe(5)
+  })
+})
+
 describe('periodAggregate', () => {
   it('sums every stream but hsm_revenue, which is the mean', async () => {
     const { AGGREGATE_MODE, aggregate } = await import('../../src/public/services/feesCharts.ts')
