@@ -8,19 +8,23 @@
 //   - omnipool_position_owner_intervals  bounded full recompute, atomic staging swap
 //   - xyk_farm_principal_intervals       bounded full recompute, atomic staging swap
 //   - xyk_lp_total_shares_history        bounded full recompute, atomic staging swap
-//   - uniswap_v3_legs                    incremental by block, replay-safe re-insert (no tracking table)
+//   - uniswap_v3_legs                    partition-diff incremental, replay-safe re-insert
 //   - revenue_events                     partition-diff incremental (MV-fed watermark index)
 //   - account_revenue                    partition-diff incremental, keyed on revenue_events
+//   - xcm_arrivals                       partition-diff incremental over the feed's own walk
 //
-// The three reconstructions write their full result into a `<table>_staging` twin
-// and EXCHANGE it with the live table (see atomicFullReplace below) — the live
-// table is always exactly the latest full run, with no stale rows left behind by
-// a shifted ReplacingMergeTree key and no unbounded run_id growth. account_trade_volume
-// rebuilds stale month-partitions in its own `_staging` twin and publishes each via
-// atomic REPLACE PARTITION, and pool_swap_hourly does the same per month. Both
-// the live tables and their staging twins are declared in clickhouse/schema
-// (001_tables.sql, plus 006_public.sql for pool_swap_hourly) — nothing here
-// creates a table or writes the (retired) lp_history_model_coverage gate rows.
+// Two publication shapes, and no third: a bounded full recompute into a
+// `<table>_staging` twin swapped in by EXCHANGE TABLES (atomicFullReplace), or a
+// per-month rebuild in that same twin published by REPLACE PARTITION
+// (publishPartitions). Both are atomic, so a reader never sees a gap or a
+// half-written model. Every live table and every staging twin is declared in
+// clickhouse/schema (001_tables.sql, 006_public.sql for pool_swap_hourly,
+// 008_revenue.sql for the two revenue models); nothing here creates a table.
+//
+// Whichever shape a job takes, it decides what to recompute from an INGEST-TIME
+// watermark — `max(source.ingested_at) > max(derived.computed_at)` — never from a
+// forward high-water block cursor, which goes blind to every block a backward
+// backfill fills beneath it (AGENTS.md, Schema and derivations).
 
 import type { ClickHouseClient } from '../db/client.ts'
 import { buildPartitionInsertSql } from '../services/accountTradeVolume.ts'
@@ -75,37 +79,38 @@ async function stagingBusy(client: ClickHouseClient, stagingTable: string): Prom
 // ───────────────────── atomic full-replace helper ─────────────────────
 // The three reconstruction jobs below (omnipool owner intervals, xyk farm
 // intervals, xyk total shares) each recompute their whole read model from
-// scratch every run. They used to append rows with a fresh run_id, relying on
-// ReplacingMergeTree(run_id) + FINAL to collapse old rows on their stable
-// business key. That breaks under out-of-order backward backfill: a corrected
-// event can shift a row's `valid_from_block`/`valid_from_event`, which is part
-// of the ORDER BY key, so the new row lands at a *different* key than the old
-// one — FINAL has no key collision to collapse, and the stale row lingers
-// forever (plus run_id rows accumulate without bound).
+// scratch, so the publication has to REPLACE the model rather than add to it.
+// Appending and relying on ReplacingMergeTree + FINAL cannot: a corrected event
+// shifts a row's `valid_from_block`/`valid_from_event`, which is part of the
+// ORDER BY key, so the recomputed row lands at a DIFFERENT key than the row it
+// supersedes — there is no key collision for FINAL to collapse and the stale row
+// would linger forever.
 //
-// Instead, write the full recompute into a `<table>_staging` twin (declared next
+// So the full recompute is written into a `<table>_staging` twin (declared next
 // to its parent in clickhouse/schema — 001_tables.sql for these three,
-// 006_public.sql for pool_swap_hourly) and EXCHANGE it with the
-// live table — a single atomic rename swap with no reader-visible gap. The live
-// table is then always exactly the latest full run: no stale keys, no unbounded
-// run_id growth. Truncate staging both before writing (clean slate if a prior
-// run crashed mid-way) and after the swap (drop the now-superseded old data
-// promptly rather than let it double the table's disk footprint until the next
-// run).
+// 006_public.sql for pool_swap_hourly) and EXCHANGEd with the live table: a
+// single atomic rename swap with no reader-visible gap, after which the live
+// table is exactly the latest full run. Truncate staging both before writing
+// (clean slate if a prior run crashed mid-way) and after the swap (drop the
+// now-superseded old data promptly rather than let it double the table's disk
+// footprint until the next run).
+// Returns false when the swap was skipped, so a caller never records a rebuild
+// that did not happen.
 async function atomicFullReplace(
   client: ClickHouseClient,
   liveTable: string,
   write: (stagingTable: string) => Promise<void>,
-): Promise<void> {
+): Promise<boolean> {
   const stagingTable = `${liveTable}_staging`
   if (await stagingBusy(client, stagingTable)) {
     console.log(`[derivations] ${liveTable} skipped: ${stagingTable} busy in another process`)
-    return
+    return false
   }
   await client.command({ query: `TRUNCATE TABLE ${stagingTable}` })
   await write(stagingTable)
   await client.command({ query: `EXCHANGE TABLES ${liveTable} AND ${stagingTable}` })
   await client.command({ query: `TRUNCATE TABLE ${stagingTable}` })
+  return true
 }
 
 // ───────────────────────── account_trade_volume ─────────────────────────
@@ -215,6 +220,74 @@ export function partitionsNeedingRebuild(
   return candidates.filter(c => lastRebuilt.get(c.p) !== c.src_ingest).map(c => c.p)
 }
 
+/** What a staleness query hands the publisher: the partition and the source watermark it carries. */
+export interface PartitionCandidate { p: string; src_ingest: string }
+
+/**
+ * Publishes a set of stale month-partitions, atomically, one at a time.
+ *
+ * Every partition-incremental job below shares this exact sequence, and each
+ * step is load-bearing:
+ *   * the staging twin's partition is dropped FIRST, so a run that crashed
+ *     mid-fill cannot contribute rows to this one;
+ *   * `fill` writes the rebuilt month into the twin (returning false when the
+ *     month is not publishable yet, which leaves the candidate unconsumed for a
+ *     later cycle);
+ *   * REPLACE PARTITION swaps it into the live table in one operation, so a
+ *     reader sees the old month until the swap and never an empty one;
+ *   * the twin's copy is dropped again rather than left to double the model's
+ *     disk footprint until the next run;
+ *   * only then is the consumed source watermark remembered, so a rebuild that
+ *     threw anywhere above stays a candidate next cycle.
+ *
+ * Candidates arrive oldest-first (every staleness query orders by partition), so
+ * partial coverage is always a contiguous prefix — which is what lets readers
+ * split "closed part from the model, tail from raw" at a single boundary.
+ *
+ * Returns the partitions actually published.
+ */
+async function publishPartitions(
+  client: ClickHouseClient,
+  model: string,
+  live: string,
+  candidates: readonly PartitionCandidate[],
+  remembered: Map<string, string>,
+  fill: (partition: string, staging: string) => Promise<boolean | void>,
+): Promise<string[]> {
+  const staging = `${live}_staging`
+  const stale = partitionsNeedingRebuild([...candidates], remembered)
+  if (!stale.length) return []
+  if (await stagingBusy(client, staging)) {
+    console.log(`[derivations] ${model} skipped: ${staging} busy in another process`)
+    return []
+  }
+  const ingestByPartition = new Map(candidates.map(c => [c.p, c.src_ingest]))
+  const built: string[] = []
+  for (const p of stale) {
+    // DROP PARTITION on an absent partition is a no-op.
+    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
+    if (await fill(p, staging) === false) continue
+    await client.command({ query: `ALTER TABLE ${live} REPLACE PARTITION ${p} FROM ${staging}` })
+    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
+    const consumed = ingestByPartition.get(p)
+    if (consumed != null) remembered.set(p, consumed)
+    built.push(p)
+  }
+  return built
+}
+
+/** How many rows a just-published set of partitions holds, for the cycle log. */
+async function countPublished(
+  client: ClickHouseClient, table: string, partitionExpr: string, built: readonly string[], scope = '1',
+): Promise<number> {
+  if (!built.length) return 0
+  const res = await client.query({
+    query: `SELECT count() AS n FROM ${table} WHERE ${scope} AND ${partitionExpr} IN (${built.join(',')})`,
+    format: 'JSONEachRow',
+  })
+  return Number((await res.json<{ n: string }>())[0]?.n ?? 0)
+}
+
 interface StalePartition { p: string; src_ingest: string; src_max_ts: string }
 
 // src is ORDER BY p ascending → rebuild oldest partition first.
@@ -231,8 +304,9 @@ async function stalePartitions(client: ClickHouseClient): Promise<StalePartition
 //
 // Publication is atomic per partition: the rebuild lands in the `_staging`
 // twin first, then REPLACE PARTITION swaps it into the live table in one
-// operation — readers see the old partition until the swap, never a gap
-// (the old DROP PARTITION + INSERT exposed an empty month mid-rebuild).
+// operation, so a reader sees the month's previous contents right up to the
+// swap. Dropping the live partition and inserting into it would expose an empty
+// month for the length of the rebuild instead.
 export async function runAccountTradeVolume(client: ClickHouseClient): Promise<DerivationResult> {
   const model = 'account_trade_volume'
   if (!allExplorerAssets().length) {
@@ -240,37 +314,17 @@ export async function runAccountTradeVolume(client: ClickHouseClient): Promise<D
     return { model, rows: 0 }
   }
   const live = 'price_data.account_trade_volume'
-  const staging = `${live}_staging`
   const candidates = await stalePartitions(client)
-  const stale = partitionsNeedingRebuild(candidates, rebuiltSourceWatermark)
-  if (!stale.length) return { model, rows: 0 }
-  if (await stagingBusy(client, staging)) {
-    console.log(`[derivations] ${model} skipped: ${staging} busy in another process`)
-    return { model, rows: 0 }
-  }
-  const ingestByPartition = new Map(candidates.map(c => [c.p, c.src_ingest]))
   // The partition's last swap block time, straight off the watermark projection.
   // It bounds the valuation's ohlc right side from above — see
   // buildPartitionInsertSql.
   const maxBlockTimeByPartition = new Map(candidates.map(c => [c.p, c.src_max_ts]))
-  for (const p of stale) {
-    // Clean slate in staging for this partition (a prior crashed run may have
-    // left rows); DROP PARTITION on an absent partition is a no-op.
-    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
-    await client.command({ query: buildPartitionInsertSql(p, staging, maxBlockTimeByPartition.get(p)) })
-    await client.command({ query: `ALTER TABLE ${live} REPLACE PARTITION ${p} FROM ${staging}` })
-    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
-    // Only after the swap succeeded: a failed rebuild must stay a candidate.
-    const consumed = ingestByPartition.get(p)
-    if (consumed != null) rebuiltSourceWatermark.set(p, consumed)
-  }
-  const res = await client.query({
-    // Synthetic block-space partition clock, same constant as the PARTITION BY.
-    query: `SELECT count() AS n FROM price_data.account_trade_volume
-            WHERE toYYYYMM(toDateTime(block_height * 12)) IN (${stale.join(',')})`,
-    format: 'JSONEachRow',
-  })
-  return { model, rows: Number((await res.json<{ n: string }>())[0]?.n ?? 0) }
+  const built = await publishPartitions(client, model, live, candidates, rebuiltSourceWatermark,
+    async (p, staging) => {
+      await client.command({ query: buildPartitionInsertSql(p, staging, maxBlockTimeByPartition.get(p)) })
+    })
+  // Synthetic block-space partition clock, same constant as the PARTITION BY.
+  return { model, rows: await countPublished(client, live, 'toYYYYMM(toDateTime(block_height * 12))', built) }
 }
 
 // ───────────────────────── pool_swap_hourly ─────────────────────────
@@ -313,8 +367,9 @@ export const POOL_SWAP_HOURLY_REFRESH_HOURS = 24
 //   3. its raw tail reached 24 hours, or the calendar month closed.
 //
 // Appending an ordinary live swap above the cut does NOT rebuild the month: the
-// reader already takes that tail from raw legs. This avoids both the old 68 M-row
-// staleness scan every ten minutes and a same-month rebuild on every live insert.
+// reader already takes that tail from raw legs. Keying staleness on the small
+// hourly watermark index rather than the 68 M-row leg table is what keeps the
+// check itself cheap enough to run every ten minutes.
 export function poolSwapHourlyStalePartitionsSql(): string {
   return `
     WITH ${POOL_SWAP_OPEN_HOUR} AS open_hour
@@ -389,33 +444,15 @@ export function resetPoolSwapHourlyWatermarkForTest(): void {
 export async function runPoolSwapHourly(client: ClickHouseClient): Promise<DerivationResult> {
   const model = 'pool_swap_hourly'
   const live = POOL_SWAP_HOURLY_TABLE
-  const staging = `${live}_staging`
   const res = await client.query({ query: poolSwapHourlyStalePartitionsSql(), format: 'JSONEachRow' })
-  const candidates = await res.json<{ p: string; src_ingest: string }>()
-  const stale = partitionsNeedingRebuild(candidates, poolSwapHourlyRebuilt)
-  if (!stale.length) return { model, rows: 0 }
-  if (await stagingBusy(client, staging)) {
-    console.log(`[derivations] ${model} skipped: ${staging} busy in another process`)
-    return { model, rows: 0 }
-  }
-  const ingestByPartition = new Map(candidates.map(c => [c.p, c.src_ingest]))
-  // Oldest partition first (the staleness query orders by p), so partial coverage
-  // is always a contiguous PREFIX of the era. That is what makes the readers' cut
-  // at max(hour) + 1 hour safe: everything above the cut comes from raw legs, and
-  // there is never a hole below it.
-  for (const p of stale) {
-    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
-    await client.command({ query: poolSwapHourlyInsertSql(p, staging) })
-    await client.command({ query: `ALTER TABLE ${live} REPLACE PARTITION ${p} FROM ${staging}` })
-    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
-    const consumed = ingestByPartition.get(p)
-    if (consumed != null) poolSwapHourlyRebuilt.set(p, consumed)
-  }
-  const counted = await client.query({
-    query: `SELECT count() AS n FROM ${live} WHERE toYYYYMM(hour) IN (${stale.join(',')})`,
-    format: 'JSONEachRow',
-  })
-  return { model, rows: Number((await counted.json<{ n: string }>())[0]?.n ?? 0) }
+  const candidates = await res.json<PartitionCandidate>()
+  // Oldest partition first (publishPartitions preserves the query's order), so
+  // partial coverage is always a contiguous PREFIX of the era. That is what makes
+  // the readers' cut at max(hour) + 1 hour safe: everything above the cut comes
+  // from raw legs, and there is never a hole below it.
+  const built = await publishPartitions(client, model, live, candidates, poolSwapHourlyRebuilt,
+    async (p, staging) => { await client.command({ query: poolSwapHourlyInsertSql(p, staging) }) })
+  return { model, rows: await countPublished(client, live, 'toYYYYMM(hour)', built) }
 }
 
 // ───────────────────────── uniswap_v3_legs ─────────────────────────
@@ -431,13 +468,39 @@ export async function runPoolSwapHourly(client: ClickHouseClient): Promise<Deriv
 // id from the `UniswapV3` Swapped3 of the same extrinsic (matched on the input amount)
 // so the route nets across its hops like every other venue's; a direct swap takes
 // `evm:<block>:<event>` — unique per fill, so consumers that fold fills into trades by
-// op_key see each as its own trade, and the prefix marks the source. Re-running
-// re-inserts an overlap window and the leg identity's ReplacingMergeTree collapses
-// it — no tracking table.
-export const UNISWAP_V3_LEGS_OVERLAP_BLOCKS = 5_000
+// op_key see each as its own trade, and the prefix marks the source.
+//
+// Publication is a plain re-INSERT of a whole month rather than a REPLACE
+// PARTITION: pool_swap_legs is shared with five MVs that write every other
+// venue's legs into the same partitions, so swapping a partition in would delete
+// theirs. A re-insert is safe because the leg identity is the table's
+// ReplacingMergeTree key — re-running a month collapses onto the same rows — and
+// which months to re-run comes from the ingest-time partition diff below, never
+// from a forward block cursor. A forward cursor is exactly wrong here: once one
+// head-side leg lands, every v3 swap a backward backfill writes below it is never
+// legged at all.
+export function uniswapV3LegsStalePartitionsSql(): string {
+  return `
+    SELECT toString(src.p) AS p, toString(src.src_ingest) AS src_ingest
+    FROM (
+      SELECT toYYYYMM(block_timestamp) AS p, max(ingested_at) AS src_ingest
+      FROM price_data.uniswap_v3_events
+      WHERE kind = 'pool' AND event_name = 'Swap'
+      GROUP BY p
+    ) AS src
+    LEFT JOIN (
+      SELECT toYYYYMM(block_timestamp) AS p, max(ingested_at) AS der_computed
+      FROM price_data.pool_swap_legs
+      WHERE venue = 'uniswapv3'
+      GROUP BY p
+    ) AS der ON src.p = der.p
+    -- Same non-nullable LEFT JOIN rule as stalePartitionsSql: an absent derived
+    -- month carries the DateTime epoch, never NULL.
+    WHERE der.der_computed = toDateTime(0) OR src.src_ingest > der.der_computed
+    ORDER BY src.p`
+}
 
-export function uniswapV3LegsInsertSql(sinceBlock: number): string {
-  const since = Math.max(0, Math.trunc(sinceBlock))
+export function uniswapV3LegsInsertSql(partition: string): string {
   const precompile = (expr: string) => {
     const hex = `replaceRegexpOne(lower(${expr}), '^0x', '')`
     return `if(length(${hex}) = 40 AND substring(${hex}, 1, 32) = '00000000000000000000000000000001', toUInt32(reinterpretAsUInt32(reverse(unhex(substring(${hex}, 33, 8))))), toUInt32(4294967295))`
@@ -454,7 +517,7 @@ routed AS (
          JSONExtractString(JSONExtractArrayRaw(args_json, 'inputs')[1], 'amount') AS amount_in,
          toUInt64OrZero(extractGroups(args_json, '"__kind":"Router","value":(\\d+)')[1]) AS router_id
   FROM price_data.raw_events
-  WHERE event_name = 'Broadcast.Swapped3' AND block_height > ${since}
+  WHERE event_name = 'Broadcast.Swapped3' AND toYYYYMM(block_timestamp) = ${partition}
     AND JSONExtractString(args_json, 'fillerType', '__kind') = 'UniswapV3'
 ),
 swaps AS (
@@ -466,7 +529,7 @@ swaps AS (
   FROM (
     SELECT block_height, event_index, extrinsic_index, block_timestamp, contract_address, counterparty, amount0, amount1
     FROM price_data.uniswap_v3_events FINAL
-    WHERE kind = 'pool' AND event_name = 'Swap' AND block_height > ${since}
+    WHERE kind = 'pool' AND event_name = 'Swap' AND toYYYYMM(block_timestamp) = ${partition}
   ) e
   INNER JOIN price_data.uniswap_v3_pools p ON p.pool_address = e.contract_address
   LEFT JOIN token_assets t0 ON t0.addr = lower(p.token0)
@@ -495,19 +558,34 @@ ARRAY JOIN arrayEnumerate(legs) AS leg_i
 SETTINGS max_memory_usage = 2000000000, max_threads = 4`
 }
 
+// Same purpose as rebuiltSourceWatermark above: a month whose every v3 swap is
+// dropped by the unresolvable-token guard writes no legs, so the LEFT JOIN miss
+// would re-mark it stale on every cycle forever.
+const uniswapV3LegsRebuilt = new Map<string, string>()
+
+export function resetUniswapV3LegsWatermarkForTest(): void {
+  uniswapV3LegsRebuilt.clear()
+}
+
 export async function runUniswapV3Legs(client: ClickHouseClient): Promise<DerivationResult> {
   const model = 'uniswap_v3_legs'
-  const head = await client.query({
-    query: `SELECT max(block_height) AS b FROM price_data.pool_swap_legs WHERE venue = 'uniswapv3'`,
-    format: 'JSONEachRow',
-  })
-  const since = Math.max(0, Number((await head.json<{ b: number | string }>())[0]?.b ?? 0) - UNISWAP_V3_LEGS_OVERLAP_BLOCKS)
-  await client.command({ query: uniswapV3LegsInsertSql(since) })
-  const counted = await client.query({
-    query: `SELECT count() AS n FROM price_data.pool_swap_legs WHERE venue = 'uniswapv3' AND block_height > ${since}`,
-    format: 'JSONEachRow',
-  })
-  return { model, rows: Number((await counted.json<{ n: string }>())[0]?.n ?? 0) }
+  const res = await client.query({ query: uniswapV3LegsStalePartitionsSql(), format: 'JSONEachRow' })
+  const candidates = await res.json<PartitionCandidate>()
+  const stale = partitionsNeedingRebuild([...candidates], uniswapV3LegsRebuilt)
+  if (!stale.length) return { model, rows: 0 }
+  const ingestByPartition = new Map(candidates.map(c => [c.p, c.src_ingest]))
+  const built: string[] = []
+  for (const p of stale) {
+    await client.command({ query: uniswapV3LegsInsertSql(p) })
+    // Only after the insert landed: a failed month must stay a candidate.
+    const consumed = ingestByPartition.get(p)
+    if (consumed != null) uniswapV3LegsRebuilt.set(p, consumed)
+    built.push(p)
+  }
+  return {
+    model,
+    rows: await countPublished(client, 'price_data.pool_swap_legs', 'toYYYYMM(block_timestamp)', built, `venue = 'uniswapv3'`),
+  }
 }
 
 // ───────────────────────── lp_lifecycle_events ─────────────────────────
@@ -521,6 +599,46 @@ export async function runUniswapV3Legs(client: ClickHouseClient): Promise<Deriva
 // observes the other's rows. FINAL deduplicates a replayed range on the
 // projection's (block_height, event_index) replacement key.
 const LP_LIFECYCLE_SOURCE = 'price_data.lp_lifecycle_events FINAL'
+
+// Every pass over history is bounded BEFORE it runs. Unbounded, a full-history
+// read reaches ~84 GiB RSS and the next container to allocate trips the kernel's
+// global OOM killer, which takes ClickHouse — and with it every service on the
+// box — down; the same work bounded stays near 3 GiB. This is the same clause
+// every other full-history read in this module carries.
+const FULL_HISTORY_SETTINGS = 'SETTINGS max_memory_usage = 2000000000, max_threads = 4'
+
+/**
+ * The three full reconstructions below re-read the whole ~880k-row lifecycle,
+ * rebuild every interval in Node and EXCHANGE the table. That is the right shape
+ * (a forward cursor is wrong while backfill fills lower blocks, and a shifted key
+ * would leave stale rows) but it is pure waste on a cycle where the source has
+ * not moved, which is most cycles. So each run first asks the source for its
+ * ingest-time watermark and skips the rebuild when it matches the one the last
+ * rebuild consumed — one cheap aggregate instead of a full recompute.
+ *
+ * In memory, not a completion-marker table: a restart costs one extra rebuild,
+ * never one per cycle. A backfilled or corrected row carries a newer
+ * `ingested_at`, so backward backfill still re-triggers the rebuild.
+ */
+const rebuiltFromWatermark = new Map<string, string>()
+
+export function resetFullRebuildWatermarksForTest(): void {
+  rebuiltFromWatermark.clear()
+}
+
+async function sourceWatermark(client: ClickHouseClient, table: string): Promise<string> {
+  const res = await client.query({
+    query: `SELECT toString(max(ingested_at)) AS w FROM ${table}`,
+    format: 'JSONEachRow',
+  })
+  return String((await res.json<{ w: string | null }>())[0]?.w ?? '')
+}
+
+/** True when `model` has already been rebuilt from exactly this source watermark. */
+async function fullRebuildIsCurrent(client: ClickHouseClient, model: string, sourceTable: string): Promise<string | null> {
+  const watermark = await sourceWatermark(client, sourceTable)
+  return watermark !== '' && rebuiltFromWatermark.get(model) === watermark ? null : watermark
+}
 
 // ─────────────────── omnipool_position_owner_intervals ───────────────────
 // Bounded full recompute: load the complete Omnipool NFT + liquidity-mining
@@ -596,10 +714,14 @@ export function omnipoolLifecycleSelectSql(): string {
         AND (event_name NOT IN ('Uniques.Issued','Uniques.Transferred','Uniques.Burned')
              OR collection IN ('1337','2584'))
       ORDER BY block_height, event_index
+      ${FULL_HISTORY_SETTINGS}
     `
 }
 
 export async function runOmnipoolOwnerIntervals(client: ClickHouseClient): Promise<DerivationResult> {
+  const model = 'omnipool_owner_intervals'
+  const watermark = await fullRebuildIsCurrent(client, model, 'price_data.lp_lifecycle_events')
+  if (watermark == null) return { model, rows: 0 }
   const runId = Date.now()
   const res = await client.query({ query: omnipoolLifecycleSelectSql(), format: 'JSONEachRow' })
   const rows = await res.json<OmnipoolRawRow>()
@@ -636,7 +758,7 @@ export async function runOmnipoolOwnerIntervals(client: ClickHouseClient): Promi
     run_id: runId,
   }))
 
-  await atomicFullReplace(client, 'price_data.omnipool_position_owner_intervals', async stagingTable => {
+  const published = await atomicFullReplace(client, 'price_data.omnipool_position_owner_intervals', async stagingTable => {
     const BATCH = 50_000
     for (let i = 0; i < intervalRows.length; i += BATCH) {
       await client.insert({
@@ -646,7 +768,9 @@ export async function runOmnipoolOwnerIntervals(client: ClickHouseClient): Promi
       })
     }
   })
-  return { model: 'omnipool_owner_intervals', rows: intervalRows.length }
+  // Only after the swap landed: a skipped or failed run must rebuild next cycle.
+  if (published) rebuiltFromWatermark.set(model, watermark)
+  return { model, rows: intervalRows.length }
 }
 
 // ─────────────────── xyk_farm_principal_intervals ───────────────────
@@ -705,10 +829,14 @@ export function xykFarmLifecycleSelectSql(): string {
       FROM ${LP_LIFECYCLE_SOURCE}
       WHERE (event_name IN ('Uniques.Issued','Uniques.Transferred','Uniques.Burned') AND collection='5389')
          OR event_name IN ('XYKLiquidityMining.SharesDeposited','XYKLiquidityMining.SharesRedeposited','XYKLiquidityMining.DepositDestroyed')
-      ORDER BY block_height, event_index`
+      ORDER BY block_height, event_index
+      ${FULL_HISTORY_SETTINGS}`
 }
 
 export async function runXykFarmIntervals(client: ClickHouseClient): Promise<DerivationResult> {
+  const model = 'xyk_farm_intervals'
+  const watermark = await fullRebuildIsCurrent(client, model, 'price_data.lp_lifecycle_events')
+  if (watermark == null) return { model, rows: 0 }
   const runId = Date.now()
   const res = await client.query({ query: xykFarmLifecycleSelectSql(), format: 'JSONEachRow' })
   const rows = await res.json<XykFarmRawRow>()
@@ -744,7 +872,7 @@ export async function runXykFarmIntervals(client: ClickHouseClient): Promise<Der
     run_id: runId,
   }))
 
-  await atomicFullReplace(client, 'price_data.xyk_farm_principal_intervals', async stagingTable => {
+  const published = await atomicFullReplace(client, 'price_data.xyk_farm_principal_intervals', async stagingTable => {
     const BATCH = 50_000
     for (let i = 0; i < intervalRows.length; i += BATCH) {
       await client.insert({
@@ -754,7 +882,8 @@ export async function runXykFarmIntervals(client: ClickHouseClient): Promise<Der
       })
     }
   })
-  return { model: 'xyk_farm_intervals', rows: intervalRows.length }
+  if (published) rebuiltFromWatermark.set(model, watermark)
+  return { model, rows: intervalRows.length }
 }
 
 // ─────────────────── xyk_lp_total_shares_history ───────────────────
@@ -784,9 +913,9 @@ const XYK_TOTAL_SHARES_TABLE = 'price_data.xyk_lp_total_shares_history'
 export const XYK_SHARE_ASSET_ID_FLOOR = 1_000_000
 
 // The pool set. price_data.xyk_pool_registry is the MV over XYK.PoolCreated and
-// decodes shareToken with the same expression this used to run inline, so the two
-// sets are equal by construction — but the registry is 729 rows against a 302M-row
-// raw_events scan the event-name index barely prunes.
+// decodes shareToken with the same expression an inline decode here would, so the
+// two sets are equal by construction — and the registry is 729 rows against a
+// 302M-row raw_events scan the event-name index barely prunes.
 const XYK_SHARE_TOKENS_SQL = 'SELECT DISTINCT lp_asset_id AS lp FROM price_data.xyk_pool_registry FINAL'
 
 // Guard on the superset claim. A share token below the floor would simply never
@@ -823,6 +952,11 @@ export function xykTotalSharesInsertSql(runId: number): string {
 }
 
 export async function runXykTotalShares(client: ClickHouseClient): Promise<DerivationResult> {
+  const model = 'xyk_total_shares'
+  // The reconstruction is a pure function of the share observations, so an
+  // unchanged observation watermark means an unchanged result.
+  const watermark = await fullRebuildIsCurrent(client, model, 'price_data.xyk_lp_share_observations')
+  if (watermark == null) return { model, rows: 0 }
   const runId = Date.now()
   const liveTable = XYK_TOTAL_SHARES_TABLE
   const guard = await client.query({ query: xykShareTokensBelowFloorSql(), format: 'JSONEachRow' })
@@ -836,14 +970,15 @@ export async function runXykTotalShares(client: ClickHouseClient): Promise<Deriv
   // No memory carve-out: windowing 1.2M projected rows in their stored order
   // fits the long-op client's default cap, where the 244M-row scan and sort this
   // replaced needed 8 GB.
-  await atomicFullReplace(client, liveTable, async () => {
+  const published = await atomicFullReplace(client, liveTable, async () => {
     await client.command({ query: xykTotalSharesInsertSql(runId) })
   })
+  if (published) rebuiltFromWatermark.set(model, watermark)
   const res = await client.query({
     query: `SELECT count() AS n FROM ${liveTable} WHERE run_id = ${runId}`,
     format: 'JSONEachRow',
   })
-  return { model: 'xyk_total_shares', rows: Number((await res.json<{ n: string }>())[0]?.n ?? 0) }
+  return { model, rows: Number((await res.json<{ n: string }>())[0]?.n ?? 0) }
 }
 
 // ───────────────────────── revenue_events ─────────────────────────
@@ -979,15 +1114,9 @@ export async function runRevenueEvents(client: ClickHouseClient): Promise<Deriva
     return { model, rows: 0 }
   }
   const live = REVENUE_EVENTS_TABLE
-  const staging = `${live}_staging`
   const res = await client.query({ query: revenueStalePartitionsSql(), format: 'JSONEachRow' })
   const candidates = await res.json<RevenueStalePartition>()
-  const stale = partitionsNeedingRebuild(candidates, revenueEventsRebuilt)
-  if (!stale.length) return { model, rows: 0 }
-  if (await stagingBusy(client, staging)) {
-    console.log(`[derivations] ${model} skipped: ${staging} busy in another process`)
-    return { model, rows: 0 }
-  }
+  if (!partitionsNeedingRebuild([...candidates], revenueEventsRebuilt).length) return { model, rows: 0 }
 
   // The closed-hour cut comes from the GLOBAL newest source row, not from the
   // candidate's own watermark: an old backfilled month must republish its whole
@@ -1000,18 +1129,15 @@ export async function runRevenueEvents(client: ClickHouseClient): Promise<Deriva
   if (!cutLiteral) return { model, rows: 0 }
   const cutSeconds = chTimestampSeconds(cutLiteral)
 
-  const ingestByPartition = new Map(candidates.map(c => [c.p, c.src_ingest]))
-  const built: string[] = []
-  for (const p of stale) {
+  const built = await publishPartitions(client, model, live, candidates, revenueEventsRebuilt, async (p, staging) => {
     const { startSeconds, endSeconds } = monthBounds(p)
     // Nothing in this month is a closed hour yet (a brand-new month); leave the
     // candidate unconsumed so the next cycle retries once hours close.
-    if (cutSeconds <= startSeconds) continue
+    if (cutSeconds <= startSeconds) return false
     const anchorSeconds = Math.min(cutSeconds, endSeconds)
     const anchor = chTimestamp(anchorSeconds)
     const hours = Math.ceil((anchorSeconds - startSeconds) / 3_600) + 2
 
-    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
     for (const stream of REVENUE_EVENT_STREAMS_INSERTED) {
       await client.command({
         query: revenueEventsInsertSql(stream, p, cutLiteral),
@@ -1045,26 +1171,24 @@ export async function runRevenueEvents(client: ClickHouseClient): Promise<Deriva
         format: 'JSONEachRow',
       })
     }
-    await client.command({ query: `ALTER TABLE ${live} REPLACE PARTITION ${p} FROM ${staging}` })
-    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
-    const consumed = ingestByPartition.get(p)
-    if (consumed != null) revenueEventsRebuilt.set(p, consumed)
-    built.push(p)
-  }
-  if (!built.length) return { model, rows: 0 }
-  const counted = await client.query({
-    query: `SELECT count() AS n FROM ${live} WHERE toYYYYMM(block_timestamp) IN (${built.join(',')})`,
-    format: 'JSONEachRow',
   })
-  return { model, rows: Number((await counted.json<{ n: string }>())[0]?.n ?? 0) }
+  return { model, rows: await countPublished(client, live, 'toYYYYMM(block_timestamp)', built) }
 }
 
 // ───────────────────────── account_revenue ─────────────────────────
 // Per-account, per-stream protocol revenue by calendar month — the account
 // grain behind the account/tag Revenue stats and the /accounts sort. Rebuilt
-// per partition strictly AFTER revenue_events (its only upstream: staleness
-// keys on revenue_events.computed_at, which already folds in the forward-
-// cascading debt watermarks), so the two tables can never disagree for long.
+// per partition strictly AFTER revenue_events, so the two tables can never
+// disagree for long.
+//
+// revenue_events is not its only upstream, which is why its staleness reads TWO
+// watermarks. The eventful streams come from the fresh revenue_events partition,
+// but the borrow SPLIT is computed here from the raw debt observations
+// (accountBorrowInterestSql / assetReserveMintsSql over the atoken scaled deltas
+// and the reserve mints). A month whose borrow observations are backfilled while
+// its revenue_events partition is unchanged would otherwise keep a stale
+// per-account split forever — the stream total stays right and every account's
+// share stays wrong, with nothing to signal it.
 //
 // Eventful streams are a plain GROUP BY of the fresh revenue_events partition
 // restricted to protocol revenue. The two borrow streams are attributed here:
@@ -1087,11 +1211,32 @@ const ACCOUNT_REVENUE_TABLE = 'price_data.account_revenue'
 
 export function accountRevenueStalePartitionsSql(): string {
   return `
-    SELECT toString(src.p) AS p, toString(src.src_ingest) AS src_ingest
+    SELECT toString(src.p) AS p, toString(src.eff_ingest) AS src_ingest
     FROM (
-      SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS src_ingest
-      FROM ${REVENUE_EVENTS_TABLE}
-      GROUP BY p
+      SELECT p,
+             rev_ingest,
+             -- The borrow split reads CUMULATIVE debt state (an opening balance
+             -- carried in from every earlier month), so debt staleness cascades
+             -- FORWARD exactly as it does in revenueStalePartitionsSql.
+             greatest(rev_ingest,
+                      max(debt_ingest) OVER (ORDER BY p ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS eff_ingest
+      FROM (
+        SELECT p, max(rev_ingest) AS rev_ingest, max(debt_ingest) AS debt_ingest
+        FROM (
+          SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS rev_ingest, toDateTime(0) AS debt_ingest
+          FROM ${REVENUE_EVENTS_TABLE}
+          GROUP BY p
+          UNION ALL
+          -- The attribution sources' own ingest clock, from the same MV-fed index
+          -- revenue_events reads: 'debt' covers the reserve mints and the atoken
+          -- scaled deltas the per-account weights are computed from.
+          SELECT p, toDateTime(0) AS rev_ingest, max(src_ingest) AS debt_ingest
+          FROM price_data.revenue_source_partition_watermarks
+          WHERE kind = 'debt'
+          GROUP BY p
+        )
+        GROUP BY p
+      )
     ) AS src
     LEFT JOIN (
       SELECT month AS p, max(computed_at) AS der_computed
@@ -1099,7 +1244,15 @@ export function accountRevenueStalePartitionsSql(): string {
       GROUP BY p
     ) AS der ON src.p = der.p
     -- Same non-nullable LEFT JOIN rule as stalePartitionsSql above.
-    WHERE der.der_computed = toDateTime(0) OR src.src_ingest > der.der_computed
+    WHERE (der.der_computed = toDateTime(0) OR src.eff_ingest > der.der_computed)
+      -- The live month's debt observations move on every block, so following them
+      -- directly would re-attribute the month on every cycle. It follows its
+      -- upstream at once (revenue_events republished, which is itself throttled),
+      -- and a debt-only change in the live month lands within one refresh window.
+      AND (der.der_computed = toDateTime(0)
+           OR src.p != toYYYYMM(now())
+           OR src.rev_ingest > der.der_computed
+           OR der.der_computed < now() - INTERVAL ${REVENUE_REFRESH_SECONDS} SECOND)
     ORDER BY src.p`
 }
 
@@ -1144,20 +1297,11 @@ async function borrowWeights(
 export async function runAccountRevenue(client: ClickHouseClient): Promise<DerivationResult> {
   const model = 'account_revenue'
   const live = ACCOUNT_REVENUE_TABLE
-  const staging = `${live}_staging`
   const res = await client.query({ query: accountRevenueStalePartitionsSql(), format: 'JSONEachRow' })
-  const candidates = await res.json<{ p: string; src_ingest: string }>()
-  const stale = partitionsNeedingRebuild(candidates, accountRevenueRebuilt)
-  if (!stale.length) return { model, rows: 0 }
-  if (await stagingBusy(client, staging)) {
-    console.log(`[derivations] ${model} skipped: ${staging} busy in another process`)
-    return { model, rows: 0 }
-  }
-  const ingestByPartition = new Map(candidates.map(c => [c.p, c.src_ingest]))
+  const candidates = await res.json<PartitionCandidate>()
 
-  for (const p of stale) {
+  const built = await publishPartitions(client, model, live, candidates, accountRevenueRebuilt, async (p, staging) => {
     const { startSeconds, endSeconds } = monthBounds(p)
-    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
     await client.command({ query: accountRevenueEventfulInsertSql(p) })
 
     // Borrow attribution rows, accumulated per (account, stream) then inserted
@@ -1217,17 +1361,8 @@ export async function runAccountRevenue(client: ClickHouseClient): Promise<Deriv
         format: 'JSONEachRow',
       })
     }
-
-    await client.command({ query: `ALTER TABLE ${live} REPLACE PARTITION ${p} FROM ${staging}` })
-    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${p}` })
-    const consumed = ingestByPartition.get(p)
-    if (consumed != null) accountRevenueRebuilt.set(p, consumed)
-  }
-  const counted = await client.query({
-    query: `SELECT count() AS n FROM ${live} WHERE month IN (${stale.join(',')})`,
-    format: 'JSONEachRow',
   })
-  return { model, rows: Number((await counted.json<{ n: string }>())[0]?.n ?? 0) }
+  return { model, rows: await countPublished(client, live, 'month', built) }
 }
 
 // ───────────────────────────── xcm_arrivals ─────────────────────────────
@@ -1245,73 +1380,126 @@ export async function runAccountRevenue(client: ClickHouseClient): Promise<Deriv
 // run must step over — without crossing `EVM.Log`, 149 of the first 151 HOLLAR arrivals
 // decode to nothing). One walk, two consumers, parity by construction.
 //
-// Block-range chunks rather than partitions: the walk reads per block, and a chunk
-// bounds both the ClickHouse reads it issues and the rows held in memory.
+// Coverage is an INGEST-TIME partition diff, like every other job here, never a
+// block range between the derived table's own min and max. A block range cannot
+// express this model's coverage at all, for two reasons that both lose rows
+// silently:
+//   * a block that processed a message but decoded to no credit writes nothing,
+//     so "there is a derived row at block N" is not "block N has been walked" —
+//     a low-end fill interrupted after its first chunk moved the derived minimum
+//     down to the source minimum and every block in between was then considered
+//     covered forever;
+//   * a raw row CORRECTED inside the covered range is invisible to a range, so
+//     the arrival it should have produced (or withdrawn) never materialised.
+// An ingest-time watermark answers both: a backfilled or corrected row carries a
+// newer `ingested_at` than the derived partition's `computed_at`, whatever block
+// it sits at.
+//
 // The same barrier list the walk terminates on, so this selects exactly the blocks the
 // walk can decode — a second copy here is how the SQL version started drifting.
 const XCM_MESSAGE_EVENTS = XCM_BARRIER_EVENTS.map(n => `'${n}'`).join(',')
 
-const XCM_ARRIVALS_CHUNK_BLOCKS = 50_000
+// Blocks handed to one walk call. The walk reads per block, so a chunk bounds
+// both the ClickHouse reads it issues and the rows held in memory.
+const XCM_ARRIVALS_CHUNK_BLOCKS = 5_000
 
-export function xcmArrivalsChunks(fromBlock: number, toBlock: number, size = XCM_ARRIVALS_CHUNK_BLOCKS): number[][] {
+/** Splits a block list into bounded walk chunks, in order, covering it exactly. */
+export function xcmArrivalsChunks(blocks: readonly number[], size = XCM_ARRIVALS_CHUNK_BLOCKS): number[][] {
   const chunks: number[][] = []
-  for (let start = fromBlock; start <= toBlock; start += size) {
-    chunks.push([start, Math.min(start + size - 1, toBlock)])
-  }
+  for (let start = 0; start < blocks.length; start += size) chunks.push(blocks.slice(start, start + size))
   return chunks
 }
 
-// Forward-only would be wrong under backward backfill, so the floor is the lowest block
-// raw holds that the derived table does not yet cover, recomputed each cycle. Replacement
-// is per (block_height, event_index), so re-running a chunk is idempotent.
-export function xcmArrivalsPendingRangeSql(): string {
+/**
+ * Ingest-time slack on the per-partition re-walk.
+ *
+ * A pass stamps `computed_at = now()` on the rows it writes, so a raw row that
+ * landed WHILE the pass was running carries an `ingested_at` below that stamp and
+ * would never be selected again. Re-walking the blocks whose raw rows were
+ * ingested in the hour before the partition's own derivation closes that window;
+ * the walk is idempotent (replacement is per (block_height, event_index)), so the
+ * overlap costs reads and never correctness.
+ */
+export const XCM_ARRIVALS_INGEST_OVERLAP_SECONDS = 3_600
+
+export function xcmArrivalsStalePartitionsSql(): string {
   return `
-    SELECT toString(src.src_lo) AS lo, toString(src.src_hi) AS hi, toString(der.der_lo) AS der_lo, toString(der.der_hi) AS der_hi
+    SELECT toString(src.p) AS p, toString(src.src_ingest) AS src_ingest, toString(der.der_computed) AS der_computed
     FROM (
-      SELECT min(block_height) AS src_lo, max(block_height) AS src_hi FROM price_data.raw_xcm_activity
+      SELECT toYYYYMM(block_timestamp) AS p, max(ingested_at) AS src_ingest
+      FROM price_data.raw_xcm_activity
       WHERE name IN (${XCM_MESSAGE_EVENTS})
-    ) AS src CROSS JOIN (
-      SELECT ifNull(min(block_height), 0) AS der_lo, ifNull(max(block_height), 0) AS der_hi
+      GROUP BY p
+    ) AS src
+    LEFT JOIN (
+      SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS der_computed
       FROM price_data.xcm_arrivals
-    ) AS der`
+      GROUP BY p
+    ) AS der ON src.p = der.p
+    -- Same non-nullable LEFT JOIN rule as stalePartitionsSql above: an absent
+    -- derived month carries the DateTime epoch, never NULL.
+    WHERE der.der_computed = toDateTime(0) OR src.src_ingest > der.der_computed
+    ORDER BY src.p`
 }
+
+/**
+ * The blocks of one month whose XCM rows the derived month has not seen: every
+ * message block when the month has never been derived, otherwise the ones whose
+ * raw rows were (re-)ingested since it was, plus the overlap above.
+ */
+export function xcmArrivalsPendingBlocksSql(): string {
+  return `SELECT DISTINCT block_height FROM price_data.raw_xcm_activity
+          WHERE toYYYYMM(block_timestamp) = {partition:UInt32}
+            AND name IN (${XCM_MESSAGE_EVENTS})
+            AND ingested_at > {since:DateTime}
+          ORDER BY block_height
+          ${FULL_HISTORY_SETTINGS}`
+}
+
+// A month whose message blocks all decode to nothing writes no arrivals, so the
+// LEFT JOIN miss would re-mark it stale on every cycle forever. Same idiom as
+// rebuiltSourceWatermark above.
+const xcmArrivalsRebuilt = new Map<string, string>()
+
+export function resetXcmArrivalsWatermarkForTest(): void {
+  xcmArrivalsRebuilt.clear()
+}
+
+interface XcmArrivalsPartition { p: string; src_ingest: string; der_computed: string }
 
 export async function runXcmArrivals(client: ClickHouseClient): Promise<DerivationResult> {
   const model = 'xcm_arrivals'
-  const res = await client.query({ query: xcmArrivalsPendingRangeSql(), format: 'JSONEachRow' })
-  const r = (await res.json<{ lo: string; hi: string; der_lo: string; der_hi: string }>())[0]
-  if (!r) return { model, rows: 0 }
-  const srcLo = Number(r.lo), srcHi = Number(r.hi), derLo = Number(r.der_lo), derHi = Number(r.der_hi)
-  if (!Number.isFinite(srcHi) || srcHi <= 0) return { model, rows: 0 }
-  // Two open ends: history below what has been stored, and the live head above it.
-  const ranges: number[][] = []
-  if (derHi === 0) ranges.push([srcLo, srcHi])
-  else {
-    if (derLo > srcLo) ranges.push([srcLo, derLo - 1])
-    if (srcHi > derHi) ranges.push([derHi + 1, srcHi])
-  }
+  const res = await client.query({ query: xcmArrivalsStalePartitionsSql(), format: 'JSONEachRow' })
+  const candidates = await res.json<XcmArrivalsPartition>()
+  const stale = new Set(partitionsNeedingRebuild([...candidates], xcmArrivalsRebuilt))
+  if (!stale.size) return { model, rows: 0 }
+
   let written = 0
-  for (const [lo, hi] of ranges) {
-    for (const [from, to] of xcmArrivalsChunks(lo, hi)) {
-      const blocks = await blocksWithXcmMessages(client, from, to)
-      if (!blocks.length) continue
-      const credits = await xcmInboundCreditsForBlocks(blocks)
+  for (const candidate of candidates) {
+    if (!stale.has(candidate.p)) continue
+    const blocks = await pendingXcmBlocks(client, candidate)
+    for (const chunk of xcmArrivalsChunks(blocks)) {
+      const credits = await xcmInboundCreditsForBlocks(chunk)
       if (!credits.length) continue
       await insertXcmArrivals(client, credits)
       written += credits.length
     }
+    // Only once the whole month walked: a chunk that threw leaves the month a
+    // candidate, and the next cycle re-walks it from the same watermark.
+    xcmArrivalsRebuilt.set(candidate.p, candidate.src_ingest)
   }
   return { model, rows: written }
 }
 
 // Only the blocks that actually processed a message; the walk is given nothing else.
-async function blocksWithXcmMessages(client: ClickHouseClient, from: number, to: number): Promise<number[]> {
+async function pendingXcmBlocks(client: ClickHouseClient, candidate: XcmArrivalsPartition): Promise<number[]> {
+  const derived = Math.floor(Date.parse(`${candidate.der_computed.trim().replace(' ', 'T')}Z`) / 1000)
+  const since = Number.isFinite(derived) && derived > 0
+    ? Math.max(0, derived - XCM_ARRIVALS_INGEST_OVERLAP_SECONDS)
+    : 0
   const res = await client.query({
-    query: `SELECT DISTINCT block_height FROM price_data.raw_xcm_activity
-            WHERE block_height >= ${from} AND block_height <= ${to}
-              AND name IN (${XCM_MESSAGE_EVENTS})
-            ORDER BY block_height
-            SETTINGS max_memory_usage = 2000000000, max_threads = 4`,
+    query: xcmArrivalsPendingBlocksSql(),
+    query_params: { partition: Number(candidate.p), since: chTimestamp(since) },
     format: 'JSONEachRow',
   })
   return (await res.json<{ block_height: number }>()).map(x => Number(x.block_height))
