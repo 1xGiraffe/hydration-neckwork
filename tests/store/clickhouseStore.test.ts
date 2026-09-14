@@ -163,12 +163,31 @@ describe('ClickHouseStore retry idempotency', () => {
     const fake = new FakeClickHouseClient()
     const store = new ClickHouseStore(fake as any, 10_000)
 
-    store.addAssets([{ asset_id: 1, symbol: 'ONE', name: 'One', decimals: 12, parachain_id: null, evm_address: '' }])
+    store.addAssets([{ asset_id: 1, symbol: 'ONE', name: 'One', decimals: 12, parachain_id: null, evm_address: '', observed_block: 10 }])
     await store.flushAssets()
-    store.addAssets([{ asset_id: 1, symbol: 'ONE2', name: 'One v2', decimals: 12, parachain_id: null, evm_address: '' }])
+    store.addAssets([{ asset_id: 1, symbol: 'ONE2', name: 'One v2', decimals: 12, parachain_id: null, evm_address: '', observed_block: 20 }])
     await store.flushAssets()
 
     expect(fake.inserts.map(insert => insert.values.map((row: any) => row.symbol))).toEqual([['ONE'], ['ONE2']])
+  })
+
+  // Which row survives is decided by observed_block, not by insert order, so a
+  // backfill re-reading the registry at a low block cannot reinstate a superseded
+  // symbol over one live ingestion already observed at a high block.
+  it('stamps every asset row with the block its metadata was read at', async () => {
+    const fake = new FakeClickHouseClient()
+    const store = new ClickHouseStore(fake as any, 10_000)
+
+    store.addAssets([{ asset_id: 1, symbol: 'NEW', name: 'New', decimals: 12, parachain_id: null, evm_address: '', observed_block: 13_000_000 }])
+    await store.flushAssets()
+    store.addAssets([{ asset_id: 1, symbol: 'OLD', name: 'Old', decimals: 12, parachain_id: null, evm_address: '', observed_block: 2_000_000 }])
+    await store.flushAssets()
+
+    const sent = fake.inserts.flatMap(insert => insert.values as any[])
+    expect(sent.map(row => [row.symbol, row.observed_block]))
+      .toEqual([['NEW', 13_000_000], ['OLD', 2_000_000]])
+    // Both rows are sent — the store never drops one — and the engine resolves them.
+    expect(sent.every(row => typeof row.observed_block === 'number')).toBe(true)
   })
 
   it('honors the configured insert batch size', async () => {

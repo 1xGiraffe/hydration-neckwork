@@ -634,14 +634,21 @@ export function computeLpNavPrices(
       // (which is stable due to the stableswap curve + peg), rather than using
       // volatile Omnipool market prices.
 
-      // Find base asset: lowest peg ratio (typically 1.0 = aDOT, aETH, aSOL)
+      // Find base asset: lowest peg ratio (typically 1.0 = aDOT, aETH, aSOL).
+      // Compared by cross-multiplication rather than by dividing: the multipliers
+      // are on-chain u128 numerator/denominator pairs, and Number() on either
+      // above 2^53 is lossy. baseIndex picks the asset every other reserve is
+      // converted through and whose price anchors the published LP NAV, so a
+      // mis-ordered pair is a wrong NAV, not a rounding difference.
       let baseIndex = 0;
-      let minPegRatio = Number.MAX_VALUE;
-      for (let i = 0; i < pool.assets.length; i++) {
-        const [num, den] = pool.pegMultipliers![i] ?? [1n, 1n];
-        const ratio = Number(num) / Number(den);
-        if (ratio < minPegRatio) {
-          minPegRatio = ratio;
+      let bestNum = pool.pegMultipliers[0]?.[0] ?? 1n;
+      let bestDen = pool.pegMultipliers[0]?.[1] ?? 1n;
+      for (let i = 1; i < pool.assets.length; i++) {
+        const [num, den] = pool.pegMultipliers[i] ?? [1n, 1n];
+        if (den <= 0n || bestDen <= 0n) continue;
+        if (num * bestDen < bestNum * den) {
+          bestNum = num;
+          bestDen = den;
           baseIndex = i;
         }
       }

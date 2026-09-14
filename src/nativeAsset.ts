@@ -193,5 +193,9 @@ export function nativeAssetInfoToRow(nativeAsset: NativeAssetInfo): AssetRow {
     origin_chain_id: null,
     origin_asset_id: null,
     evm_address: '',
+    // The native asset's metadata is a runtime constant, not a registry read, so
+    // it has no observation height and must never win a replacement against a
+    // real scan.
+    observed_block: 0,
   }
 }
