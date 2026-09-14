@@ -88,7 +88,12 @@ export function createMarketStatsService(dependencies: MarketStatsDependencies =
       })
       .catch(error => {
         reportError(error)
-        return cache?.data ?? []
+        // A stale snapshot is still real data, so it keeps serving. With none,
+        // the failure propagates: an empty array here is indistinguishable from
+        // a chain that lists no markets, and the whole page would render that
+        // way rather than reporting that the read failed.
+        if (cache) return cache.data
+        throw error
       })
       .finally(() => {
         if (inflight === request) inflight = null

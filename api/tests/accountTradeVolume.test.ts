@@ -245,8 +245,12 @@ describe('ICE intent fills as owner trades', () => {
   const sql = buildPartitionInsertSql('202609')
 
   it('reads the partition\'s fills from the intent tables, deduplicated, from runtime 443 on', () => {
-    expect(sql).toContain('FROM price_data.intent_events FINAL')
-    expect(sql).toContain('FROM price_data.intent_orders FINAL')
+    expect(sql).toMatch(/FROM price_data\.intent_events(\s+AS\s+\w+)?\s+FINAL/)
+    expect(sql).toMatch(/FROM price_data\.intent_orders(\s+AS\s+\w+)?\s+FINAL/)
+    // The NOT NULL filter has to read the TABLE's column: `assumeNotNull(x) AS x`
+    // would otherwise resolve the later `x` to the alias, which is never null,
+    // and every extrinsic-less event would join on a fabricated index 0.
+    expect(sql).toContain('ie.extrinsic_index IS NOT NULL')
     for (const name of ['Intent.IntentResolved', 'Intent.IntentResovedPartially', 'Intent.DcaTradeExecuted', 'Intent.DcaCompleted']) {
       expect(sql, name).toContain(`'${name}'`)
     }
@@ -262,7 +266,8 @@ describe('ICE intent fills as owner trades', () => {
   })
 
   it('reads a completion\'s amounts from the pot\'s settlement legs, for a single claimant only', () => {
-    expect(sql).toContain('FROM price_data.transfer_activity_by_time FINAL')
+    expect(sql).toMatch(/FROM price_data\.transfer_activity_by_time(\s+AS\s+\w+)?\s+FINAL/)
+    expect(sql).toContain('t.extrinsic_index IS NOT NULL')
     expect(sql).toContain("event_name = 'Currencies.Transferred'")
     expect(sql).toContain("'0x6d6f646c6963655f696365230000000000000000000000000000000000000000'")
     // Sibling fills that state their amounts are subtracted; two completions of one

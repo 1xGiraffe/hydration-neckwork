@@ -1,4 +1,4 @@
-import { cached } from './cache.ts'
+import { cachedFound } from './cache.ts'
 import { SUBSTRATE_RPC_URL } from './substrateRpc.ts'
 
 // The authentic bytes of one extrinsic.
@@ -10,8 +10,10 @@ import { SUBSTRATE_RPC_URL } from './substrateRpc.ts'
 // hex, 128-bit integers to decimal strings), and bytes that are subtly wrong are worse
 // than none — someone could submit them.
 //
-// One targeted call per extrinsic viewed, cached for an hour: an extrinsic's bytes are
-// immutable once the block exists, so a second look never re-asks.
+// One targeted call per extrinsic viewed, and the ANSWER is cached for an hour: an
+// extrinsic's bytes are immutable once the block exists, so a second look never re-asks.
+// A null is never cached — an RPC timeout, or a block the node has not caught up to, must
+// not silence the copy affordance for the rest of the hour after the node recovers.
 const RPC_TIMEOUT_MS = 8_000
 
 async function rpc<T>(method: string, params: unknown[]): Promise<T | null> {
@@ -35,7 +37,7 @@ interface SignedBlock { block?: { extrinsics?: unknown } }
 // Null rather than an error when the node cannot answer: the copy affordance simply does
 // not appear, instead of offering bytes that are absent or wrong.
 export async function extrinsicEncoded(blockHeight: number, extrinsicIndex: number): Promise<string | null> {
-  return cached(`explorer:extrinsic-bytes:${blockHeight}:${extrinsicIndex}`, 3_600_000, async () => {
+  return cachedFound(`explorer:extrinsic-bytes:${blockHeight}:${extrinsicIndex}`, 3_600_000, async () => {
     const hash = await rpc<string>('chain_getBlockHash', [blockHeight])
     if (typeof hash !== 'string' || !/^0x[0-9a-f]{64}$/i.test(hash)) return null
     const block = await rpc<SignedBlock>('chain_getBlock', [hash])

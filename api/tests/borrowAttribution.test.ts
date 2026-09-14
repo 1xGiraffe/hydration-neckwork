@@ -4,6 +4,7 @@ import {
   assetReserveMintsSql,
   distributeUsd1e12,
 } from '../src/services/borrowAttribution.ts'
+import { attributablePayerSql } from '../src/services/revenueStreams.ts'
 
 describe('accountBorrowInterestSql', () => {
   const sql = accountBorrowInterestSql()
@@ -11,9 +12,11 @@ describe('accountBorrowInterestSql', () => {
   it('uses RAY in string form and FINAL on every ReplacingMergeTree source', () => {
     expect(sql).toContain("toUInt256('1000000000000000000000000000')")
     expect(sql).not.toMatch(/1e27|10 \*\* 27/)
-    expect(sql).toMatch(/atoken_scaled_deltas_by_contract FINAL/)
-    expect(sql).toMatch(/atoken_reserve_map FINAL/)
-    expect(sql).toMatch(/atoken_scaled_anchor FINAL/)
+    // A table alias may sit between the name and FINAL, but FINAL may not go
+    // missing: without it a replayed range double-counts every delta.
+    expect(sql).toMatch(/atoken_scaled_deltas_by_contract(\s+AS\s+\w+)?\s+FINAL/)
+    expect(sql).toMatch(/atoken_reserve_map(\s+AS\s+\w+)?\s+FINAL/)
+    expect(sql).toMatch(/atoken_scaled_anchor(\s+AS\s+\w+)?\s+FINAL/)
   })
 
   it('scopes to the reserve debt-token set from atoken_reserve_map', () => {
@@ -31,24 +34,30 @@ describe('accountBorrowInterestSql', () => {
     expect(sql).toContain('block_height > (SELECT b FROM b0)')
   })
 
-  it('books principal flows with the exact atokenDeltas event semantics', () => {
+  it('books principal flows with the exact atoken_scaled_deltas event semantics', () => {
     // Mint.value INCLUDES balanceIncrease, Burn.value EXCLUDES it — the same
-    // convention db/atokenDeltas.ts pins; mixing them up misattributes every
-    // repayment's realized interest as principal.
+    // convention the atoken_scaled_deltas MVs in
+    // clickhouse/schema/003_materialized_views.sql apply; mixing them up
+    // misattributes every repayment's realized interest as principal.
     expect(sql).toMatch(/Mint',[\s\S]*value[\s\S]*-[\s\S]*balanceIncrease/)
     expect(sql).toMatch(/value[\s\S]*\+[\s\S]*balanceIncrease/)
   })
 
   it('maps holders to the ETH-mapped substrate account form and clamps dust negatives', () => {
-    expect(sql).toContain("concat('0x45544800', substring(holder, 3), '0000000000000000')")
+    expect(sql).toContain("concat('0x45544800', substring(lower(holder), 3), '0000000000000000')")
     expect(sql).toContain('greatest(')
   })
 
-  it('blanks protocol-internal holders to the unattributed bucket', () => {
-    // Same rule as attributablePayerSql: pallet H160s and the runtime executor
-    // still weigh (conservation), but never appear as payers.
-    expect(sql).toContain("startsWith(holder, '0x6d6f646c')")
-    expect(sql).toContain('0x000000000000000000000000000000000000090a')
+  it('blanks protocol-internal holders through the shared payer predicate', () => {
+    // The revenue streams and this surface must recognise the SAME protocol
+    // actors — pallet accounts (here in their ETH-mapped form, since a pallet
+    // holding debt does so through its truncated H160) and the runtime
+    // executor. They still weigh (conservation), but never appear as payers.
+    // Restating the rule here is how the two silently drifted apart before.
+    expect(sql).toContain(attributablePayerSql('mapped'))
+    expect(sql).toContain("startsWith(mapped, '0x455448006d6f646c')")
+    // The executor's H160 mapped back is exactly the account the streams list.
+    expect(sql).toContain('0x45544800000000000000000000000000000000000000090a0000000000000000')
   })
 })
 

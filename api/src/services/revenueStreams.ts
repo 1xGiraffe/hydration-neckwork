@@ -100,18 +100,32 @@ export const PLACEHOLDER_SWAPPER = '0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a
 export const MODL_ACCOUNT_PREFIX = '0x6d6f646c'
 
 /**
+ * The same pallet account seen through the runtime's ETH mapping: a pallet
+ * acting over the EVM is recorded as its truncated H160 wrapped back into the
+ * `0x45544800` + H160 + zero-padding substrate form, which buries the `modl…`
+ * marker eight hex digits in. A surface that attributes ETH-mapped accounts
+ * (the money-market payers, the liquidation-profit stream) sees this shape and
+ * not the native one.
+ */
+const MODL_ETH_MAPPED_PREFIX = '0x455448006d6f646c'
+
+/**
  * A payer only when it is an actual USER. The protocol's own actors — pallet
  * accounts (`modl…`: treasury buyback/fee-conversion swaps, the liquidation
- * pallet selling seized collateral, referral/OTC-settlement bots) and the
- * runtime EVM executor — pay their fees with protocol money, so attributing
- * that to them would list the protocol among its own customers (measured:
- * ~1% of attributed revenue). Their rows keep their VALUE (dashboard totals
- * and conservation are untouched); only the payer blanks to the explicit
- * unattributed bucket, exactly like the placeholder swapper. Sibling/para
- * sovereign accounts stay attributed: another chain trading here IS a user.
+ * pallet selling seized collateral, referral/OTC-settlement bots), in either
+ * the native or the ETH-mapped account form, and the runtime EVM executor —
+ * pay their fees with protocol money, so attributing that to them would list
+ * the protocol among its own customers (measured: ~1% of attributed revenue).
+ * Their rows keep their VALUE (dashboard totals and conservation are
+ * untouched); only the payer blanks to the explicit unattributed bucket,
+ * exactly like the placeholder swapper. Sibling/para sovereign accounts stay
+ * attributed: another chain trading here IS a user.
+ *
+ * `expr` is an account in the 32-byte substrate form — apply it to the mapped
+ * account (`ethMappedAccountSql`) where the source names an H160.
  */
 export function attributablePayerSql(expr: string): string {
-  return `if(startsWith(${expr}, '${MODL_ACCOUNT_PREFIX}')
+  return `if(startsWith(${expr}, '${MODL_ACCOUNT_PREFIX}') OR startsWith(${expr}, '${MODL_ETH_MAPPED_PREFIX}')
              OR ${expr} IN ('${PLACEHOLDER_SWAPPER}', '${HSM_EXECUTOR_ACCOUNTS[0]}'), '', ${expr})`
 }
 
@@ -179,7 +193,7 @@ export function reserveAssetIdSql(expr: string): string {
 }
 
 /** An H160 (with 0x) as the runtime's ETH-mapped substrate account form. */
-function ethMappedAccountSql(h160Expr: string): string {
+export function ethMappedAccountSql(h160Expr: string): string {
   return `concat('0x45544800', substring(lower(${h160Expr}), 3), '0000000000000000')`
 }
 
@@ -233,10 +247,10 @@ function iceSolutionOwnerSql(extra: string): string {
   return `SELECT e.block_height AS block_height, e.extrinsic_index AS extrinsic_index,
          if(uniqExact(o.owner) = 1, any(o.owner), '') AS owner
   FROM (
-    SELECT intent_id, block_height, assumeNotNull(extrinsic_index) AS extrinsic_index
-    FROM price_data.intent_events FINAL
+    SELECT intent_id, block_height, assumeNotNull(ie.extrinsic_index) AS extrinsic_index
+    FROM price_data.intent_events AS ie FINAL
     WHERE event_name IN ('Intent.IntentResolved', 'Intent.IntentResovedPartially', 'Intent.DcaTradeExecuted', 'Intent.DcaCompleted')
-      AND extrinsic_index IS NOT NULL AND ${WINDOW} AND (${extra})
+      AND ie.extrinsic_index IS NOT NULL AND ${WINDOW} AND (${extra})
   ) AS e
   INNER JOIN (SELECT intent_id, owner FROM price_data.intent_orders FINAL) AS o ON o.intent_id = e.intent_id
   GROUP BY block_height, extrinsic_index`
@@ -332,8 +346,8 @@ fee_transfers AS (
     GROUP BY block_height, event_index
   ) t
   INNER JOIN (
-    SELECT lower(atoken) AS atoken, any(asset_address) AS asset_address
-    FROM price_data.atoken_reserve_map GROUP BY atoken
+    SELECT lower(r.atoken) AS atoken, any(r.asset_address) AS asset_address
+    FROM price_data.atoken_reserve_map AS r GROUP BY atoken
   ) m ON m.atoken = t.atoken
 ),
 matched AS (

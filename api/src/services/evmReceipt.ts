@@ -1,4 +1,4 @@
-import { cached } from './cache.ts'
+import { cachedFound } from './cache.ts'
 import { SUBSTRATE_RPC_URL } from './substrateRpc.ts'
 
 // Gas accounting for one EVM transaction.
@@ -48,10 +48,12 @@ export interface EvmReceipt {
 interface RawReceipt { gasUsed?: unknown; effectiveGasPrice?: unknown }
 
 // Null rather than an error when the node cannot answer: the gas rows simply do
-// not appear, instead of a zero standing in for a number nobody has.
+// not appear, instead of a zero standing in for a number nobody has. Only a real
+// receipt is cached — a timeout, or a transaction the node has not indexed yet,
+// would otherwise keep the rows off the page for the rest of the hour.
 export async function evmTransactionReceipt(txHash: string): Promise<EvmReceipt | null> {
   if (!/^0x[0-9a-f]{64}$/.test(txHash)) return null
-  return cached(`explorer:evm-receipt:${txHash}`, 3_600_000, async () => {
+  return cachedFound(`explorer:evm-receipt:${txHash}`, 3_600_000, async () => {
     const receipt = await rpc<RawReceipt>('eth_getTransactionReceipt', [txHash])
     if (receipt == null || typeof receipt !== 'object') return null
     const gasUsed = quantity(receipt.gasUsed)

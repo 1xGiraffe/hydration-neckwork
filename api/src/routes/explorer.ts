@@ -203,6 +203,11 @@ const FILTER_PARAM_RULES: { key: string; accepts: (raw: string) => boolean; expe
   { key: 'minRevenue', accepts: raw => z.coerce.number().finite().safeParse(raw).success, expected: 'a number' },
   { key: 'from', accepts: raw => isCalendarDay(raw), expected: 'YYYY-MM-DD' },
   { key: 'to', accepts: raw => isCalendarDay(raw), expected: 'YYYY-MM-DD' },
+  // `asset` is the activity feed's SCOPE, not one of its filters, which makes
+  // dropping it the worst failure of the set: an unparseable id falls through to
+  // the chain-wide builder, and an asset-scoped question comes back answered
+  // globally under the caller's own `asset=`.
+  { key: 'asset', accepts: raw => uint32Param.safeParse(raw).success, expected: 'an asset id' },
 ]
 
 // A real calendar day, not merely the shape of one: `2025-02-30` matches the regex
@@ -573,7 +578,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const type = activityTypeParam(q)
     const offset = activityOffsetParam(q, type)
     if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${maxActivityOffsetFor(type)} for type '${type}'` })
-    const asset = z.coerce.number().int().min(0).max(0xffff_ffff).optional().safeParse(q.asset)
+    const asset = uint32Param.optional().safeParse(q.asset)
     if (asset.success && asset.data != null) {
       return getAssetActivity(asset.data, type, limitParam(q, 40), offset, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
     }
@@ -604,9 +609,14 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!params.success) return reply.status(400).send({ error: 'Invalid asset id' })
     // Additive: the Liquidity tab's count chip. Both reads are cached; the
     // count comes from the same current-pools loader the tab renders from.
+    // A failed count is omitted, never shown as 0 — the chip is optional and
+    // the UI drops it, where a zero would claim the asset has no liquidity.
     const [detail, liquiditySourceCount] = await Promise.all([
       getAssetDetail(params.data.assetId),
-      countLiquiditySources(params.data.assetId).catch(() => 0),
+      countLiquiditySources(params.data.assetId).catch(err => {
+        req.log.warn({ err }, 'liquidity source count failed; the tab renders without its chip')
+        return null
+      }),
     ])
     return { ...detail, liquiditySourceCount }
   })

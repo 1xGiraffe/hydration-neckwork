@@ -1,6 +1,4 @@
-import type { ClickHouseClient } from './client.ts'
-
-const SWAP_EVENTS_SQL = `'Router.Executed','Router.RouteExecuted','Omnipool.SellExecuted','Omnipool.BuyExecuted','Stableswap.SellExecuted','Stableswap.BuyExecuted','XYK.SellExecuted','XYK.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted'`
+import { createLongOpClickHouseClient, type ClickHouseClient } from './client.ts'
 
 export interface AccountSwapQueueRow {
   queued_at: string
@@ -123,71 +121,6 @@ export function accountSwapDestinationRows(
   return out
 }
 
-// One-time historical repair. Routed swaps ingested before the queue MV existed
-// are missing their Router.Executed/RouteExecuted *net* row in
-// account_swap_activity — only an internal hop (e.g. Stableswap aDOT→vDOT) was
-// stored. The activity feed prefers the net row per extrinsic (see the swap
-// query's `event_name IN (ROUTER_NET) DESC … LIMIT 1 BY extrinsic`), so without
-// it the swap renders as the hop (aDOT→vDOT) instead of the true pair (DOT→SOL).
-// This backfills every net event as its signer's row, exactly as the live drain
-// attributes them. Idempotent: account_swap_activity is a ReplacingMergeTree, so
-// re-inserting present rows is a no-op and only the missing net rows are added.
-const NET_BACKFILL_FLAG_ID = 2
-
-export async function backfillAccountSwapNetRows(
-  client: ClickHouseClient,
-  options: { batchSize?: number; maxBatches?: number } = {},
-): Promise<number> {
-  const flag = await client.query({
-    query: `SELECT 1 FROM price_data.account_swap_activity_queue_seed FINAL WHERE id = ${NET_BACKFILL_FLAG_ID} LIMIT 1`,
-    format: 'JSONEachRow',
-  })
-  if ((await flag.json<Record<string, number>>()).length) return 0
-
-  const batchSize = options.batchSize ?? 10_000
-  const maxBatches = options.maxBatches ?? 1_000_000
-  let lastBlock = 0
-  let lastEvent = 0
-  let processed = 0
-  for (let batch = 0; batch < maxBatches; batch++) {
-    const res = await client.query({
-      query: `SELECT block_height, event_index, toUInt32(extrinsic_index) AS extrinsic_index,
-                toString(block_timestamp) AS block_timestamp, event_name,
-                toUInt32(greatest(0, JSONExtractInt(args_json, 'assetIn'))) AS asset_in,
-                toUInt32(greatest(0, JSONExtractInt(args_json, 'assetOut'))) AS asset_out,
-                JSONExtractString(args_json, 'amountIn') AS amount_in,
-                JSONExtractString(args_json, 'amountOut') AS amount_out,
-                toString(ingested_at) AS ingested_at
-              FROM price_data.raw_events
-              WHERE event_name IN ('Router.Executed', 'Router.RouteExecuted')
-                AND extrinsic_index IS NOT NULL
-                AND tuple(block_height, event_index) > tuple({block:UInt32}, {event:UInt32})
-              ORDER BY block_height, event_index
-              LIMIT {limit:UInt32}`,
-      query_params: { block: lastBlock, event: lastEvent, limit: batchSize },
-      format: 'JSONEachRow',
-    })
-    const rows = (await res.json<Omit<AccountSwapQueueRow, 'queued_at'>>())
-      .map(row => ({ ...row, queued_at: '' } as AccountSwapQueueRow))
-    if (!rows.length) break
-    const destination = accountSwapDestinationRows(rows, await queueExtrinsics(client, rows))
-    if (destination.length) {
-      await client.insert({ table: 'price_data.account_swap_activity', values: destination, format: 'JSONEachRow' })
-    }
-    const last = rows.at(-1)!
-    lastBlock = last.block_height
-    lastEvent = last.event_index
-    processed += rows.length
-    if (rows.length < batchSize) break
-  }
-  await client.insert({
-    table: 'price_data.account_swap_activity_queue_seed',
-    values: [{ id: NET_BACKFILL_FLAG_ID }],
-    format: 'JSONEachRow',
-  })
-  return processed
-}
-
 interface QueueCursor {
   queued_at: string
   block_height: number
@@ -206,6 +139,18 @@ async function queueCursor(client: ClickHouseClient): Promise<QueueCursor> {
   }
 }
 
+// The cursor only ever moves FORWARD over `queued_at`, which the MV stamps with
+// `now64(3)` at insert time — so a row is lost for good if it becomes visible
+// only after a row with a LATER stamp has already been drained. That happens
+// routinely: an insert evaluates `now64(3)` before it commits, so several
+// inserts are in flight at once and they do not become visible in stamp order.
+//
+// Draining only up to `now64(3) - QUEUE_SETTLE_MS` closes the window: by the
+// time a stamp is that old, every insert that could carry it has committed. The
+// bound is evaluated by ClickHouse, so no clock skew between this process and
+// the server can reopen it.
+const QUEUE_SETTLE_MS = 10_000
+
 async function queuePage(client: ClickHouseClient, cursor: QueueCursor, limit: number): Promise<AccountSwapQueueRow[]> {
   const result = await client.query({
     query: `SELECT toString(q.queued_at) AS queued_at,
@@ -216,6 +161,7 @@ async function queuePage(client: ClickHouseClient, cursor: QueueCursor, limit: n
             FROM price_data.account_swap_activity_queue AS q
             WHERE tuple(q.queued_at, q.block_height, q.event_index, q.ingested_at) >
               tuple({queuedAt:DateTime64(3)}, {block:UInt32}, {event:UInt32}, {ingestedAt:DateTime})
+              AND q.queued_at <= subtractMilliseconds(now64(3), {settleMs:UInt32})
             ORDER BY q.queued_at, q.block_height, q.event_index, q.ingested_at
             LIMIT {limit:UInt32}`,
     query_params: {
@@ -223,6 +169,7 @@ async function queuePage(client: ClickHouseClient, cursor: QueueCursor, limit: n
       block: cursor.block_height,
       event: cursor.event_index,
       ingestedAt: cursor.ingested_at,
+      settleMs: QUEUE_SETTLE_MS,
       limit,
     },
     format: 'JSONEachRow',
@@ -278,50 +225,6 @@ async function hookSwapActors(client: ClickHouseClient, rows: AccountSwapQueueRo
   return out
 }
 
-export async function seedAccountSwapActivityQueue(client: ClickHouseClient): Promise<void> {
-  const seeded = await client.query({
-    query: `SELECT 1 FROM price_data.account_swap_activity_queue_seed FINAL WHERE id=1 LIMIT 1`,
-    format: 'JSONEachRow',
-  })
-  if ((await seeded.json<Record<string, number>>()).length) return
-
-  const status = await client.query({
-    query: `SELECT count() AS rows, toString(max(ingested_at)) AS last_ingested
-            FROM price_data.account_swap_activity`,
-    format: 'JSONEachRow',
-  })
-  const model = (await status.json<{ rows: string; last_ingested: string }>())[0]
-  if (Number(model?.rows ?? 0) > 0 && model?.last_ingested) {
-    // Cover the deployment hand-off from the former synchronous MV. The small
-    // overlap is deliberate: destination replacement makes it idempotent and
-    // avoids losing rows that share a one-second ingested_at value.
-    await client.command({
-      query: `INSERT INTO price_data.account_swap_activity_queue
-        SELECT now64(3) AS queued_at,
-          block_height, event_index, toUInt32(extrinsic_index) AS extrinsic_index,
-          block_timestamp, event_name,
-          toUInt32(greatest(0, JSONExtractInt(args_json, 'assetIn'))) AS asset_in,
-          toUInt32(greatest(0, JSONExtractInt(args_json, 'assetOut'))) AS asset_out,
-          multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted'), JSONExtractString(args_json, 'amount'),
-                  event_name IN ('XYK.BuyExecuted','LBP.BuyExecuted'), JSONExtractString(args_json, 'buyPrice'),
-                  JSONExtractString(args_json, 'amountIn')) AS amount_in,
-          multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted'), JSONExtractString(args_json, 'salePrice'),
-                  event_name IN ('XYK.BuyExecuted','LBP.BuyExecuted'), JSONExtractString(args_json, 'amount'),
-                  JSONExtractString(args_json, 'amountOut')) AS amount_out, ingested_at
-        FROM price_data.raw_events
-        WHERE ingested_at >= {lastIngested:DateTime} - INTERVAL 2 MINUTE
-          AND event_name IN (${SWAP_EVENTS_SQL}) AND extrinsic_index IS NOT NULL`,
-      query_params: { lastIngested: model.last_ingested },
-      clickhouse_settings: { max_threads: 4 },
-    })
-  }
-  await client.insert({
-    table: 'price_data.account_swap_activity_queue_seed',
-    values: [{ id: 1 }],
-    format: 'JSONEachRow',
-  })
-}
-
 export async function drainAccountSwapActivityQueue(
   client: ClickHouseClient,
   options: { batchSize?: number; maxBatches?: number } = {},
@@ -358,9 +261,15 @@ export async function drainAccountSwapActivityQueue(
 
 let drainTimer: NodeJS.Timeout | undefined
 let drainRunning = false
+let drainClient: ClickHouseClient | undefined
 
-export function startAccountSwapActivityQueueDrain(client: ClickHouseClient): void {
+// The drain is a batch job on a one-second tick, not a request: each cycle
+// reads and inserts up to five pages of 2,000 rows. It therefore runs on its
+// OWN long-op client rather than the shared request client, whose ten sockets
+// and 20s execution cap belong to the explorer's readers.
+export function startAccountSwapActivityQueueDrain(): void {
   if (drainTimer) return
+  const client = drainClient ?? (drainClient = createLongOpClickHouseClient())
   const run = async () => {
     if (drainRunning) return
     drainRunning = true
@@ -377,7 +286,10 @@ export function startAccountSwapActivityQueueDrain(client: ClickHouseClient): vo
   void run()
 }
 
-export function stopAccountSwapActivityQueueDrain(): void {
+export async function stopAccountSwapActivityQueueDrain(): Promise<void> {
   if (drainTimer) clearInterval(drainTimer)
   drainTimer = undefined
+  const closing = drainClient
+  drainClient = undefined
+  if (closing) await closing.close().catch(() => {})
 }

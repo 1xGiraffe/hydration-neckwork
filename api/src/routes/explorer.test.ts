@@ -56,6 +56,17 @@ describe('unusableFilterParam', () => {
     expect(unusableFilterParam({ to: '2025-13-01' })?.key).toBe('to')
   })
 
+  // An unparseable `asset` used to fall through to the CHAIN-WIDE feed, so an
+  // asset-scoped question came back answered globally.
+  it('refuses an asset id the scoped feed cannot resolve', () => {
+    expect(unusableFilterParam({ asset: '5' })).toBeNull()
+    expect(unusableFilterParam({ asset: '0' })).toBeNull()
+    expect(unusableFilterParam({ asset: 'hdx' })?.key).toBe('asset')
+    expect(unusableFilterParam({ asset: '-1' })?.key).toBe('asset')
+    expect(unusableFilterParam({ asset: '1.5' })?.key).toBe('asset')
+    expect(unusableFilterParam({ asset: '4294967296' })?.key).toBe('asset')
+  })
+
   it('reports the first unusable filter with what it expected', () => {
     expect(unusableFilterParam({ type: 'staking', min: 'abc' })).toEqual({
       key: 'type',

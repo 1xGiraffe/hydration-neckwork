@@ -13,6 +13,7 @@ import {
   isConcludingEvent,
   latestVotePerAccount,
   onChainTallyFrom,
+  opengovPhase,
   parseReferendumPallet,
   referendumEnactmentTaskId,
   referendumStatusFrom,
@@ -123,6 +124,43 @@ describe('referendumStatusFrom', () => {
 
   it('says unknown rather than guessing', () => {
     expect(referendumStatusFrom('opengov', [])).toBe('unknown')
+    // Nothing in OPENGOV_STATUS may name a running event: a running word that
+    // could be read out of a flat table is a second interpretation of the
+    // lifecycle, and it is the one that drifted from opengovPhase.
+    expect(referendumStatusFrom('opengov', ['Referenda.DecisionDepositPlaced'])).toBe('unknown')
+  })
+
+  // The directory word and the detail page's phase are one reading of one
+  // lifecycle. Confirmation can abort and begin again, so only the LAST
+  // ConfirmStarted counts — a flat "any ConfirmStarted means confirming" table
+  // read `confirming` while the page correctly said `deciding`.
+  it('agrees with the phase the detail page computes, abort included', () => {
+    const lifecycles: string[][] = [
+      ['Referenda.Submitted'],
+      ['Referenda.Submitted', 'Referenda.DecisionDepositPlaced'],
+      ['Referenda.Submitted', 'Referenda.DecisionStarted'],
+      ['Referenda.Submitted', 'Referenda.DecisionStarted', 'Referenda.ConfirmStarted'],
+      ['Referenda.Submitted', 'Referenda.DecisionStarted', 'Referenda.ConfirmStarted', 'Referenda.ConfirmAborted'],
+      ['Referenda.Submitted', 'Referenda.DecisionStarted', 'Referenda.ConfirmStarted', 'Referenda.ConfirmAborted', 'Referenda.ConfirmStarted'],
+    ]
+    const expected = ['submitted', 'submitted', 'deciding', 'confirming', 'deciding', 'confirming']
+    lifecycles.forEach((events, i) => {
+      const rows = events.map((event_name, n) => ({ event_name, block_height: 1000 + n }))
+      const phase = opengovPhase(rows)
+      const status = referendumStatusFrom('opengov', events)
+      expect(status, events.join(' ')).toBe(expected[i])
+      // 'preparing' is the phase word for a referendum that has only been
+      // submitted; the directory spells that state 'submitted'.
+      expect(phase?.phase === 'preparing' ? 'submitted' : phase?.phase, events.join(' ')).toBe(status)
+    })
+  })
+
+  // A concluded referendum has an outcome, not a phase — and the outcome wins
+  // however the running events read.
+  it('reports the outcome once the referendum concludes, never a phase', () => {
+    const events = ['Referenda.Submitted', 'Referenda.DecisionStarted', 'Referenda.ConfirmStarted', 'Referenda.Rejected']
+    expect(opengovPhase(events.map((event_name, n) => ({ event_name, block_height: 1000 + n })))).toBeNull()
+    expect(referendumStatusFrom('opengov', events)).toBe('rejected')
   })
 })
 

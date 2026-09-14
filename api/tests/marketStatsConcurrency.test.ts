@@ -107,11 +107,14 @@ describe('getMarketStats concurrency and failures', () => {
     })
   })
 
-  it('returns an empty cold fallback when the head query fails', async () => {
+  // An empty array is a legitimate answer ("this chain lists no markets"), so a
+  // cold failure must not borrow it: the route has to fail rather than render a
+  // market list that silently lost every row.
+  it('propagates a cold failure instead of serving an empty market list', async () => {
     const { getMarketStats, reportError } = createService()
     const client = { query: vi.fn().mockRejectedValue(new Error('clickhouse unavailable')) } as never
 
-    await expect(getMarketStats(client)).resolves.toEqual([])
+    await expect(getMarketStats(client)).rejects.toThrow('clickhouse unavailable')
     expect(reportError).toHaveBeenCalledOnce()
   })
 })

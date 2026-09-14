@@ -5,7 +5,8 @@
 // The core is Aave's own bookkeeping identity. A holder's debt balance is
 // scaled × index / RAY, and every balance-changing event's principal flow is
 // scaled_delta × index_at_event (the exact formulas the atoken_scaled_deltas
-// MV applies — see db/atokenDeltas.ts). Interest accrued over a window
+// MV applies — its declaration is in
+// clickhouse/schema/003_materialized_views.sql). Interest accrued over a window
 // [start, end) is therefore
 //
 //   interest = (scaled_end × idx1 − scaled_start × idx0) / RAY − Σ principal
@@ -22,6 +23,8 @@
 // (USDT) debt token has a genuine pre-anchor log gap (~9.9% of its pre-B0
 // total; every other debt token reconstructs to ≤0.01%), so pre-B0 windows
 // skew that reserve's SHARES slightly. Conservation is unaffected.
+
+import { attributablePayerSql, ethMappedAccountSql } from './revenueStreams.ts'
 
 /** Aave's RAY as the Int256 SQL literal (string form — never a float). */
 const RAY_INT_SQL = "toInt256(toUInt256('1000000000000000000000000000'))"
@@ -41,8 +44,10 @@ const RAY_INT_SQL = "toInt256(toUInt256('1000000000000000000000000000'))"
  *    replayed range double-counts);
  *  * window deltas — same table, same FINAL;
  *  * principal flows — the raw Mint/Burn args (value/balanceIncrease exactly
- *    as db/atokenDeltas.ts consumes them: Mint.value includes balanceIncrease,
- *    Burn.value excludes it), deduplicated on the event identity;
+ *    as the atoken_scaled_deltas MVs in
+ *    clickhouse/schema/003_materialized_views.sql consume them: Mint.value
+ *    includes balanceIncrease, Burn.value excludes it), deduplicated on the
+ *    event identity;
  *  * indices — money_market_reserve_indices at the window bounds, argMax on
  *    (block, event, ingested_at), the reserveIndicesNow convention.
  */
@@ -78,9 +83,9 @@ opening AS (
       AND (NOT (SELECT ok FROM anchor_applies) OR block_height > (SELECT b FROM b0))
     GROUP BY contract, holder
     UNION ALL
-    SELECT lower(contract_address) AS contract, lower(holder) AS holder, toInt256(scaled_balance) AS scaled
-    FROM price_data.atoken_scaled_anchor FINAL
-    WHERE lower(contract_address) IN (SELECT contract FROM vdebts) AND holder != ''
+    SELECT lower(a.contract_address) AS contract, lower(a.holder) AS holder, toInt256(a.scaled_balance) AS scaled
+    FROM price_data.atoken_scaled_anchor AS a FINAL
+    WHERE lower(a.contract_address) IN (SELECT contract FROM vdebts) AND a.holder != ''
       AND (SELECT ok FROM anchor_applies)
   )
   GROUP BY contract, holder
@@ -121,20 +126,24 @@ per_holder AS (
   GROUP BY contract, holder
 )
 -- Protocol-internal holders (pallet accounts acting through their truncated
--- H160, and the runtime executor) blank to the unattributed bucket, matching
--- attributablePayerSql in revenueStreams.ts: their weight still participates,
--- so conservation holds while no protocol actor lists among its own payers.
-SELECT if(startsWith(holder, '0x6d6f646c') OR holder = '0x000000000000000000000000000000000000090a',
-          '', concat('0x45544800', substring(holder, 3), '0000000000000000')) AS account,
-       toString(sum(greatest(
-         intDiv((p.s0 + p.dw) * toInt256(i.idx1) - p.s0 * toInt256(i.idx0), ${RAY_INT_SQL}) - p.pr,
-         toInt256(0)))) AS interest
-FROM per_holder p
-INNER JOIN idx i ON i.contract = p.contract
-GROUP BY holder
-HAVING sum(greatest(
-         intDiv((p.s0 + p.dw) * toInt256(i.idx1) - p.s0 * toInt256(i.idx0), ${RAY_INT_SQL}) - p.pr,
-         toInt256(0))) > 0
+-- H160, and the runtime executor) blank to the unattributed bucket through the
+-- shared payer predicate, applied to the mapped account so this surface and the
+-- revenue streams recognise exactly the same set: their weight still
+-- participates, so conservation holds while no protocol actor lists among its
+-- own payers.
+SELECT ${attributablePayerSql('mapped')} AS account, interest
+FROM (
+  SELECT ${ethMappedAccountSql('holder')} AS mapped,
+         toString(sum(greatest(
+           intDiv((p.s0 + p.dw) * toInt256(i.idx1) - p.s0 * toInt256(i.idx0), ${RAY_INT_SQL}) - p.pr,
+           toInt256(0)))) AS interest
+  FROM per_holder p
+  INNER JOIN idx i ON i.contract = p.contract
+  GROUP BY holder
+  HAVING sum(greatest(
+           intDiv((p.s0 + p.dw) * toInt256(i.idx1) - p.s0 * toInt256(i.idx0), ${RAY_INT_SQL}) - p.pr,
+           toInt256(0))) > 0
+)
 ORDER BY account`
 }
 

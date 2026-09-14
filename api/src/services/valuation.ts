@@ -49,15 +49,63 @@ export const PRICE_LOOKBACK_DAYS = 30
 const USD_SCALE = 12
 const USD_UNIT = 10n ** BigInt(USD_SCALE)
 
-/** A decimal string (or ClickHouse number) as an integer count of 10^-USD_SCALE. */
-export function scaledUsd(value: string | number | null | undefined): bigint {
+/**
+ * How a value carrying more precision than the requested scale is reduced to it.
+ * Named at every call site rather than defaulted per helper: the two answers
+ * differ in the last published digit, and which one a surface is on is part of
+ * its frozen wire.
+ */
+export type DecimalRounding = 'truncate' | 'half-up'
+
+/**
+ * A decimal string (or ClickHouse number) as an integer count of 10^-scale.
+ *
+ * The one parser: every fixed-point surface (USD at 1e-12, CoinGecko quantities
+ * at 1e-18, percentages at 1e-4, candle closes) reads its decimals through this,
+ * so a rounding rule cannot drift between two copies of the same three lines.
+ * Empty is 0; anything that is not a decimal throws rather than reading as 0,
+ * because a silent 0 is a published number.
+ */
+export function scaledDecimal(value: string | number | null | undefined, scale: number, rounding: DecimalRounding): bigint {
   const input = String(value ?? '').trim()
   if (!input) return 0n
   const match = /^(-?)(\d*)(?:\.(\d*))?$/.exec(input)
-  if (!match) throw new RangeError(`not a decimal USD value: ${input}`)
-  const fraction = (match[3] ?? '').slice(0, USD_SCALE).padEnd(USD_SCALE, '0')
-  const magnitude = BigInt(`${match[2] || '0'}${fraction}`)
+  if (!match) throw new RangeError(`not a decimal: ${input}`)
+  const fraction = match[3] ?? ''
+  const kept = fraction.slice(0, scale).padEnd(scale, '0')
+  // The first dropped digit decides a half-up rounding; truncation ignores it.
+  const next = rounding === 'half-up' ? fraction.charCodeAt(scale) : Number.NaN
+  const magnitude = BigInt(`${match[2] || '0'}${kept}`) + (next >= 0x35 && next <= 0x39 ? 1n : 0n)
   return match[1] === '-' ? -magnitude : magnitude
+}
+
+/** A decimal string (or ClickHouse number) as an integer count of 10^-USD_SCALE. */
+export function scaledUsd(value: string | number | null | undefined): bigint {
+  return scaledDecimal(value, USD_SCALE, 'truncate')
+}
+
+/**
+ * A raw on-chain integer amount as a decimal string in token units, trailing
+ * fractional zeros dropped.
+ *
+ * BigInt throughout: an 18-decimal amount passes 2^64 routinely and the 25-digit
+ * stableswap share issuances this renders are past a double's 2^53 of exact
+ * integers, so any float step would silently round the value. The input must be
+ * an integer — a value that already carries a decimal point has been through a
+ * scale somewhere and is not a raw amount.
+ */
+export function formatUnits(raw: string, decimals: number): string {
+  const input = (raw ?? '').trim()
+  if (!input) return '0'
+  if (!/^-?\d+$/.test(input)) throw new RangeError(`not a raw integer amount: ${raw}`)
+  const negative = input.startsWith('-')
+  const digits = negative ? input.slice(1) : input
+  if (decimals <= 0) return `${negative && digits !== '0' ? '-' : ''}${BigInt(digits)}`
+  const padded = digits.padStart(decimals + 1, '0')
+  const whole = padded.slice(0, -decimals).replace(/^0+(?=\d)/, '')
+  const fraction = padded.slice(-decimals).replace(/0+$/, '')
+  const sign = negative && (whole !== '0' || fraction) ? '-' : ''
+  return `${sign}${whole}${fraction ? `.${fraction}` : ''}`
 }
 
 /**
@@ -173,10 +221,17 @@ export function priceSourceSql(windowPredicate: string = ANCHORED_PRICE_WINDOW):
  * The window's legs, one row per leg identity. The GROUP BY is the destination
  * table's ORDER BY: the replacement key of a ReplacingMergeTree, collapsed here so
  * a replayed range cannot contribute a leg twice.
+ *
+ * `extraColumns` widens the projection for a consumer that needs a column this
+ * base set does not carry (`swapper` and `extrinsic_index` for the DexScreener
+ * feed, `fee_recipient` for the LP fee APR). Each is folded with the same
+ * argMax(…, ingested_at) as the rest, so widening the read never means restating
+ * the deduplication.
  */
-export function legsCteSql(venuePredicate: string, timePredicate: string = ANCHORED_LEG_WINDOW): string {
+export function legsCteSql(venuePredicate: string, timePredicate: string = ANCHORED_LEG_WINDOW, extraColumns: string[] = []): string {
+  const extra = extraColumns.map(column => `\n           argMax(${column}, ingested_at) AS ${column},`).join('')
   return `legs AS (
-    SELECT venue, pool_key, block_height, event_index, leg_kind,
+    SELECT venue, pool_key, block_height, event_index, leg_kind,${extra}
            argMax(asset_id, ingested_at) AS asset_id,
            argMax(amount, ingested_at) AS amount,
            argMax(fee_dest, ingested_at) AS fee_dest,
