@@ -3,10 +3,11 @@ import * as Dialog from '@radix-ui/react-dialog'
 import type { Asset, AssetMarketStats } from '../types'
 import { getDefaultPairs, searchPairs, displayLabel } from '../utils/pairs'
 import type { PairResult } from '../utils/pairs'
-import { useWindowWidth } from '../hooks/useWindowWidth'
+import { useMediaQuery } from '../hooks/useMediaQuery'
 import PairIcons from './PairIcons'
 import Sparkline from './Sparkline'
 import { formatPrice, formatChange } from '../utils/format'
+import { crossChange } from '../utils/change'
 
 interface AssetPickerDialogProps {
   isOpen: boolean
@@ -36,25 +37,18 @@ function buildRows(
   currentQuoteId: number
 ): ResolvedRow[] {
   return pairs.map(p => {
-    const isUsd = p.quote.isStablecoin
+    // A stablecoin quote is not automatically a dollar one: EURC tracks the
+    // euro, so a EURC-quoted row is a real cross pair.
+    const isUsd = p.quote.isUsdPegged ?? false
+    const bs = statsById.get(p.base.assetId)
+    const qs = statsById.get(p.quote.assetId)
     let price: number | null = null
-    let change1h: number | null = null
-    let change24h: number | null = null
-    let change7d: number | null = null
     let sparkline: number[] = []
 
     if (isUsd) {
-      const s = statsById.get(p.base.assetId)
-      if (s) {
-        price = s.price
-        change1h = s.change1h
-        change24h = s.change24h
-        change7d = s.change7d
-        sparkline = s.sparkline
-      }
+      price = bs?.price ?? null
+      sparkline = bs?.sparkline ?? []
     } else {
-      const bs = statsById.get(p.base.assetId)
-      const qs = statsById.get(p.quote.assetId)
       if (bs?.price != null && qs?.price != null && qs.price !== 0) {
         price = bs.price / qs.price
       }
@@ -66,19 +60,16 @@ function buildRows(
           if (q !== 0) cross.push(bs.sparkline[i] / q)
         }
         sparkline = cross
-        if (sparkline.length >= 2) {
-          const first = sparkline[0]
-          const last = sparkline[sparkline.length - 1]
-          change7d = first !== 0 ? last / first - 1 : null
-          if (sparkline.length >= 24) {
-            const ref24 = sparkline[sparkline.length - 24]
-            change24h = ref24 !== 0 ? last / ref24 - 1 : null
-          }
-          const ref1h = sparkline[sparkline.length - 2]
-          change1h = ref1h !== 0 ? last / ref1h - 1 : null
-        }
       }
     }
+
+    // The sparkline is a 7-day series of four-hourly closes, so its last two
+    // points are four hours apart and its 24th-from-last is ~four days back —
+    // neither is a 1H or a 24H move. Both columns come from the per-asset USD
+    // changes instead, exactly as the chart header derives them.
+    const change1h = isUsd ? (bs?.change1h ?? null) : crossChange(bs, qs, '1h', false)
+    const change24h = isUsd ? (bs?.change24h ?? null) : crossChange(bs, qs, '24h', false)
+    const change7d = isUsd ? (bs?.change7d ?? null) : crossChange(bs, qs, '7d', false)
 
     return {
       pairResult: p,
@@ -117,7 +108,7 @@ export default function AssetPickerDialog({
   keyBufferRef,
   marketStats,
 }: AssetPickerDialogProps) {
-  const isMobile = useWindowWidth() <= 768
+  const isMobile = useMediaQuery('(max-width: 768px)')
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -130,11 +121,10 @@ export default function AssetPickerDialog({
     return m
   }, [marketStats])
 
-  const volumeByAssetId = useMemo(() => {
-    const m = new Map<number, number>()
-    if (marketStats) for (const s of marketStats) m.set(s.assetId, s.volumeUsd24h)
-    return m
-  }, [marketStats])
+  const volumeUsd24h = useCallback(
+    (assetId: number) => statsById.get(assetId)?.volumeUsd24h ?? 0,
+    [statsById]
+  )
 
   useEffect(() => {
     if (!isOpen) return
@@ -153,9 +143,9 @@ export default function AssetPickerDialog({
   }, [isOpen, keyBufferRef])
 
   const pairs = useMemo(() => {
-    if (query.trim() === '') return getDefaultPairs(assets, volumeByAssetId)
+    if (query.trim() === '') return getDefaultPairs(assets, volumeUsd24h)
     return searchPairs(query, assets)
-  }, [query, assets, volumeByAssetId])
+  }, [query, assets, volumeUsd24h])
 
   const rows = useMemo(
     () => buildRows(pairs, statsById, currentBaseId, currentQuoteId),
@@ -343,7 +333,7 @@ export default function AssetPickerDialog({
                 <div>Try a different symbol — e.g. HDX, DOT, ETH</div>
               </div>
             ) : rows.map((r, i) => {
-              const isUsd = r.pairResult.quote.isStablecoin
+              const isUsd = r.pairResult.quote.isUsdPegged ?? false
               const label = displayLabel(r.pairResult.display)
               const className = 'picker-row' + (r.isCurrent ? ' current' : (i === effectiveActiveIndex ? ' active' : ''))
               return (

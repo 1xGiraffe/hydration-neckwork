@@ -18,7 +18,12 @@ function pairNameHint(base: Asset, quote: Asset): string | null {
   return names.length > 0 ? names.join(' | ') : null
 }
 
-export function getDefaultPairs(assets: Asset[], volumeByAssetId?: Map<number, number>): PairResult[] {
+/**
+ * The USD pairs shown before anything is typed. `volumeUsd24h` ranks them when
+ * the caller can look a 24h volume up by asset id; without it the list is
+ * alphabetical.
+ */
+export function getDefaultPairs(assets: Asset[], volumeUsd24h?: (assetId: number) => number): PairResult[] {
   const usdt = assets.find(a => a.assetId === 10)
   if (!usdt) return []
   const list: PairResult[] = assets
@@ -29,10 +34,10 @@ export function getDefaultPairs(assets: Asset[], volumeByAssetId?: Map<number, n
       display: a.symbol + 'USD',
       nameHint: a.name,
     }))
-  if (volumeByAssetId && volumeByAssetId.size > 0) {
+  if (volumeUsd24h) {
     list.sort((a, b) => {
-      const va = volumeByAssetId.get(a.base.assetId) ?? 0
-      const vb = volumeByAssetId.get(b.base.assetId) ?? 0
+      const va = volumeUsd24h(a.base.assetId)
+      const vb = volumeUsd24h(b.base.assetId)
       if (va !== vb) return vb - va
       return a.display.localeCompare(b.display)
     })

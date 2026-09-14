@@ -4,6 +4,7 @@ import PairIcons from './PairIcons'
 import { INTERVALS, INTERVAL_LABELS } from '../types'
 import type { OHLCVInterval, Asset } from '../types'
 import type { Theme } from '../hooks/useTheme'
+import { pairDisplay as formatPairDisplay } from '../utils/pairs'
 import FavoriteStar from './FavoriteStar'
 
 interface TopbarProps {
@@ -25,15 +26,6 @@ interface TopbarProps {
   onOpenMobileSidebar: () => void
   isFavorite: boolean
   onToggleFavorite: () => void
-}
-
-// Single, slashless label everywhere — matches the sidebar/picker format:
-//   USD pair  → BASE       (e.g. "HDX")
-//   cross pair → BASE+QUOTE (e.g. "HDXDOT")
-function pairLabel(baseAsset: Asset | undefined, quoteAsset: Asset | undefined, fallback: string): string {
-  if (!baseAsset || !quoteAsset) return fallback
-  if (quoteAsset.isStablecoin) return baseAsset.symbol
-  return baseAsset.symbol + quoteAsset.symbol
 }
 
 const HydrationLogo = () => (
@@ -64,7 +56,11 @@ export default function Topbar({
 }: TopbarProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const mobileMenuTriggerRef = useRef<HTMLButtonElement>(null)
-  const label = pairLabel(baseAsset, quoteAsset, pairDisplay)
+  // One slashless label everywhere — "HDX" for a USD pair, "HDXEURC" for a
+  // cross one. `pairDisplay` is the App-supplied fallback for the first paint,
+  // before the asset registry has resolved both legs.
+  const isUsdPair = quoteAsset?.isUsdPegged ?? false
+  const label = baseAsset && quoteAsset ? formatPairDisplay(baseAsset, quoteAsset) : pairDisplay
 
   useEffect(() => {
     if (!mobileMenuOpen) return
@@ -219,7 +215,7 @@ export default function Topbar({
           title="Change pair (or just start typing)"
         >
           {baseAsset && quoteAsset && (
-            <PairIcons base={baseAsset} quote={quoteAsset} isUsdPair={quoteAsset.isStablecoin} size={22} />
+            <PairIcons base={baseAsset} quote={quoteAsset} isUsdPair={isUsdPair} size={22} />
           )}
           <span className="name">{label}</span>
           <span className="caret">▾</span>
