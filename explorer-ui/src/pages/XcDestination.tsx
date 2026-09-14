@@ -92,7 +92,7 @@ export function XcDestination({ slug }: { slug: string }) {
                 {data.soldAssets.length ? data.soldAssets.map(a => (
                   <tr key={a.asset.assetId} {...rowNav(paths.asset(a.asset.assetId))}>
                     <td data-label="Asset"><span className="trade-leg">
-                      <AssetIcon assetId={a.asset.assetId} iconAssetId={a.asset.iconAssetId} symbol={a.asset.symbol} size={20} parachainId={a.asset.parachainId} origin={a.asset.origin} />
+                      <AssetIcon assetId={a.asset.assetId} iconAssetId={a.asset.iconAssetId} iconAssetIds={a.asset.iconAssetIds} symbol={a.asset.symbol} size={20} parachainId={a.asset.parachainId} origin={a.asset.origin} />
                       {' '}<span className="mono">{a.asset.symbol}</span>
                     </span></td>
                     <td data-label="Swaps" className="r mono">{F.int(a.swaps)}</td>

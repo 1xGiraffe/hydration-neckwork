@@ -56,7 +56,7 @@ function PoolRow({ p }: { p: PoolListEntry }) {
         <div className="liq-pool">
           <span className="icon-stack">
             {shown.map((c, i) => (
-              <AssetIcon key={`${c.asset.assetId}:${i}`} assetId={c.asset.assetId} iconAssetId={c.asset.iconAssetId}
+              <AssetIcon key={`${c.asset.assetId}:${i}`} assetId={c.asset.assetId} iconAssetId={c.asset.iconAssetId} iconAssetIds={c.asset.iconAssetIds}
                 symbol={c.asset.symbol} size={22} parachainId={c.asset.parachainId} origin={c.asset.origin} />
             ))}
             {rest > 0 && <span className="liq-more mono">+{rest}</span>}
