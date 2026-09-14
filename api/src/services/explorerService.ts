@@ -10862,6 +10862,57 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
   }
   return undefined
 }
+// A send's top-level `destination` is only the FIRST hop. A bridge hands the assets
+// to an intermediary — Polkadot AssetHub, here — whose own program forwards them
+// into ANOTHER consensus system, and that target is named inside the message, never
+// at the top level. Reading `destination` alone therefore reports the hop: a
+// transfer to Kusama reads as one to AssetHub, which is what every bridge send did.
+//
+// The forwarding instructions all carry a location under a different key, so the
+// key is what is matched; `ExportMessage` names its target network directly.
+const XCM_FORWARDING_LOCATION_KEYS = ['reserve', 'dest', 'destination'] as const
+const XCM_FORWARDING_KINDS = new Set([
+  'InitiateReserveWithdraw', 'DepositReserveAsset', 'InitiateTeleport', 'TransferReserveAsset',
+])
+
+// A GlobalConsensus junction's network, as a name a reader recognises. `ByGenesis`
+// and friends identify a chain by hash rather than by name, so they stay
+// unresolved rather than being rendered as a hex blob.
+function globalConsensusName(value: unknown): string | null {
+  const kind = (value as { __kind?: unknown } | undefined)?.__kind
+  if (typeof kind !== 'string' || !kind) return null
+  return /^(ByGenesis|ByFork|Unknown)$/.test(kind) ? null : kind
+}
+
+/**
+ * The consensus system a send ultimately targets, or null when it stays in this one.
+ *
+ * Only the NETWORK is returned, never the parachain beside it: a bridged location's
+ * `Parachain(1000)` is 1000 of the FOREIGN consensus, and resolving it against the
+ * local parachain registry would label Kusama AssetHub as Polkadot's.
+ */
+export function bridgedXcmNetwork(message: readonly { __kind?: string; value?: unknown }[] | undefined): string | null {
+  for (const instruction of message ?? []) {
+    const kind = instruction.__kind
+    if (kind === 'ExportMessage') {
+      const named = globalConsensusName((instruction as { network?: unknown }).network)
+      if (named) return named
+      continue
+    }
+    if (!kind || !XCM_FORWARDING_KINDS.has(kind)) continue
+    for (const key of XCM_FORWARDING_LOCATION_KEYS) {
+      const location = (instruction as Record<string, unknown>)[key] as { interior?: unknown } | undefined
+      if (!location) continue
+      for (const junction of xcmJunctions(location.interior)) {
+        if (junction.__kind !== 'GlobalConsensus') continue
+        const named = globalConsensusName(junction.value)
+        if (named) return named
+      }
+    }
+  }
+  return null
+}
+
 function xcmDestination(args: { dest?: { parents?: number; interior?: { value?: unknown } } }): Pick<ActivityRow, 'destChain' | 'destParachainId' | 'destAccount'> {
   const di = args.dest?.interior?.value
   const junctions = Array.isArray(di) ? di as Record<string, unknown>[] : []
@@ -10992,7 +11043,13 @@ export function parseOutboundXcm(argsRaw: unknown): ParsedOutboundXcm | null {
     // asset (it both transfers and pays its own fee).
     const transferAmounts = amounts.length > 1 ? amounts.filter(a => !feeAmounts.has(a)) : amounts
     const feeOnly = amounts.length > 1 ? amounts.find(a => feeAmounts.has(a)) : undefined
-    const dest = xcmDestination({ dest: args.destination })
+    const hop = xcmDestination({ dest: args.destination })
+    // The bridged target replaces the hop, and takes the parachain id with it: the
+    // id in a bridged location belongs to the other consensus, so leaving it set
+    // would resolve this row's chain link and icon to the LOCAL parachain of the
+    // same number. Null says "not a parachain of this consensus", which is true.
+    const bridged = bridgedXcmNetwork(args.message)
+    const dest = bridged ? { ...hop, destChain: bridged, destParachainId: null } : hop
     // Sent's destination names only the chain; the beneficiary account lives in
     // the message's DepositAsset instruction.
     if (!dest.destAccount) {
