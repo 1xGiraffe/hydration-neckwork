@@ -202,15 +202,20 @@ describe('window freshness', () => {
     expect(plan(0, { to: '2024-01-01', live: true })!.live).toBe(false)
   })
 
-  it('spends the live TTL on the head-keyed live branch and the window TTL on the rest', () => {
-    // The live branch must carry the ingested-head tag: its freshness comes
-    // from per-block key rotation, not the TTL (which is only GC there).
-    const live = explorerService.match(/\? cached\(`\$\{key\}:\$\{await liveHeadTag\(\)\}`, LIVE_CACHE_MS, build\)/g) ?? []
+  it('spends the live TTL on the live branches and the window TTL on the rest', () => {
+    // Every live reader is head-AWARE; they differ in whether the head sits in the
+    // key (forward-only: freshness by per-block key rotation, TTL only GC) or in
+    // the entry's generation (UI: rebuild on the next read after a block, served
+    // stale meanwhile). Exactly one of each, so neither can be duplicated onto the
+    // wrong reader — the branch shapes themselves are pinned below.
+    const forwardOnly = explorerService.match(/if \(forwardOnly\) return cached\(`\$\{key\}:\$\{await liveHeadTag\(\)\}`, LIVE_CACHE_MS, build\)/g) ?? []
+    const ui = explorerService.match(/return cachedSwr\(`\$\{key\}:ui`, LIVE_CACHE_MS, ACTIVITY_LIVE_STALE_MS, build, await indexedRawHead\(\)\)/g) ?? []
     // The stale budget is the plan's to override (the token-filtered merge needs
     // one that outlives its own rebuild); the shared constant stays the default.
-    const windowed = explorerService.match(/: cachedSwr\(key, ACTIVITY_WINDOW_FRESH_MS, plan\.staleMs \?\? ACTIVITY_WINDOW_STALE_MS, build\)/g) ?? []
+    const windowed = explorerService.match(/if \(!plan\.live\) return cachedSwr\(key, ACTIVITY_WINDOW_FRESH_MS, plan\.staleMs \?\? ACTIVITY_WINDOW_STALE_MS, build\)/g) ?? []
 
-    expect(live).toHaveLength(1)
+    expect(forwardOnly).toHaveLength(1)
+    expect(ui).toHaveLength(1)
     expect(windowed).toHaveLength(1)
     expect(explorerService).toMatch(/const ACTIVITY_WINDOW_FRESH_MS = 60_000\b/)
     expect(explorerService).toMatch(/const LIVE_CACHE_MS = 5_000\b/)
@@ -314,5 +319,42 @@ describe('activityExactValueFiltered', () => {
 
     expect(uses).toHaveLength(3)   // the declaration, the builder, the window plan
     expect(explorerService).toMatch(/const directExactValueFilter = activityExactValueFiltered\(type, filters\)/)
+  })
+})
+
+// A live window is head-aware in one of two ways, and which one a reader gets is
+// a correctness decision, not a tuning one.
+describe('how a live window consults the head', () => {
+  // `const want = offset + limit` also occurs earlier in the file, so the end
+  // anchor is searched from the start of this block rather than from the top.
+  const branchStart = explorerService.indexOf('const load = async (key: string, depth: number)')
+  const branch = explorerService.slice(branchStart, explorerService.indexOf('const want = offset + limit', branchStart))
+
+  // The notification lanes page forward and advance a cursor past whatever the
+  // page did not contain, so a window built for an earlier head is permanent
+  // silent loss. They keep the head IN the key and block on the rebuild.
+  it('keeps a forward-only reader on a head-keyed blocking read', () => {
+    expect(branch).toMatch(/if \(forwardOnly\) return cached\(`\$\{key\}:\$\{await liveHeadTag\(\)\}`/)
+  })
+
+  // A UI reader can re-read the page, so it takes the head as the GENERATION: the
+  // rebuild still starts the moment a block lands, but it is not waited on.
+  it('serves a UI reader the previous head while the next one builds', () => {
+    expect(branch).toMatch(/return cachedSwr\(`\$\{key\}:ui`, LIVE_CACHE_MS, ACTIVITY_LIVE_STALE_MS, build, await indexedRawHead\(\)\)/)
+  })
+
+  // The two must never share an entry, or the evaluator inherits the UI's stale one.
+  it('gives the two readers different keys', () => {
+    expect(branch).toContain('`${key}:ui`')
+    expect(branch).toContain('`${key}:${await liveHeadTag()}`')
+  })
+
+  // Stale-serving only helps while the value outlives a rebuild; builds here were
+  // measured at 2.8-6.5s, so a budget near the feed TTL would put readers straight
+  // back onto a cold blocking miss.
+  it('allows a live window to be served well past one rebuild', () => {
+    const stale = explorerService.match(/const ACTIVITY_LIVE_STALE_MS = ([\d_]+)/)
+    expect(stale).not.toBeNull()
+    expect(Number(stale![1].replace(/_/g, ''))).toBeGreaterThanOrEqual(30_000)
   })
 })
