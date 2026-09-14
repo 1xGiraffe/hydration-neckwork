@@ -4,8 +4,9 @@ import { allExplorerAssets } from '../../services/explorerAssets.ts'
 import { getPoolsIndex } from '../../services/poolService.ts'
 import { formatUsd } from './accountBalances.ts'
 import { moneyMarketSupply } from './moneyMarketReserves.ts'
-import { ensurePoolService, foldedPlatformTvl, tvlComponents } from './platformStats.ts'
-import { DECIMAL_STRINGS, WINDOW_HOURS, readAnchor, renderUsd, routedNettedCteSql, scaledUsd } from './poolVolumes.ts'
+import { foldedPlatformTvl, tvlComponents } from './platformStats.ts'
+import { DECIMAL_STRINGS, WINDOW_HOURS, nettedTradeSidesSql, readAnchor, renderUsd, routedNettedCteSql, scaledUsd } from './poolVolumes.ts'
+import { ensurePoolService } from './poolWiring.ts'
 
 // GET /hydration-web/v1/stats — the five numbers hydration.net's homepage reads.
 //
@@ -49,9 +50,10 @@ export interface WebStats {
  * 30-day one measures 200 301. Widening the window therefore means moving the fold
  * into SQL, which `greatest(side_in, side_out)` does — the same "larger of the two
  * boundary sides" rule `nettedTradeScaled` applies row by row, and pinned against
- * it in tests. Everything before the fold, including the aToken-wrap exclusion, is
- * the shared `routedNettedCteSql`, so this figure and /defillama/v1/volume differ
- * only in their window.
+ * it in tests. Everything before the fold, including the per-trade sides and the
+ * aToken-wrap exclusion, is the shared `routedNettedCteSql` /
+ * `nettedTradeSidesSql` pair, so this figure and /defillama/v1/volume differ only
+ * in their window.
  *
  * Measured: 1.8 s cold for the 30-day window against the leg projection, held for
  * the endpoint's 600 s.
@@ -61,12 +63,7 @@ export function buildWebVolumeSql(): string {
 WITH ${routedNettedCteSql()}
 SELECT toString(sum(greatest(side_in, side_out))) AS total_usd
 FROM (
-  SELECT trade_key,
-         sum(greatest(-net_usd, toDecimal256(0, 12))) AS side_in,
-         sum(greatest(net_usd, toDecimal256(0, 12))) AS side_out
-  FROM netted
-  GROUP BY trade_key
-  HAVING min(all_aave) = 0
+  ${nettedTradeSidesSql()}
 )
 WHERE side_in > 0 OR side_out > 0`
 }

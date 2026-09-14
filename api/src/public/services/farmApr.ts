@@ -1,7 +1,7 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
 import { iso } from '../schemas/common.ts'
-import { DECIMAL_STRINGS, PRICE_LOOKBACK_DAYS, scaledUsd } from './poolVolumes.ts'
+import { DECIMAL_STRINGS, PRICE_LOOKBACK_DAYS, scaledDecimal, scaledUsd } from './poolVolumes.ts'
 
 // Liquidity-mining ("farm") APR per Omnipool asset, from the indexed farm
 // lifecycle in `price_data.farm_config_events` (clickhouse/schema/006_public.sql).
@@ -82,14 +82,13 @@ export function renderPerc(value: bigint): string {
   return `${negative ? '-' : ''}${whole}.${digits.slice(digits.length - PERC_DECIMALS)}`
 }
 
-/** A decimal string as an integer count of 10^-scale; a leading `-` is carried through. */
+/**
+ * A decimal string as an integer count of 10^-scale; a leading `-` is carried
+ * through. Truncating: the percentages this reads back are re-rendered at the
+ * same scale they were published at, so there is nothing to round.
+ */
 export function scaled(value: string, scale: number): bigint {
-  const input = value.trim()
-  const match = /^(-?)(\d*)(?:\.(\d*))?$/.exec(input)
-  if (!match) throw new RangeError(`not a decimal: ${value}`)
-  const fraction = (match[3] ?? '').slice(0, scale).padEnd(scale, '0')
-  const magnitude = BigInt(`${match[2] || '0'}${fraction}`)
-  return match[1] === '-' ? -magnitude : magnitude
+  return scaledDecimal(value, scale, 'truncate')
 }
 
 /** Seconds in the year the pallet's rate is quoted over (365.2425 days). */
