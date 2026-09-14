@@ -17,6 +17,10 @@ interface SnapshotRow {
 
 interface ParseSnapshotOptions {
   nativeAssetRow?: AssetRow
+  // The block this snapshot was taken at — the observation height its asset rows
+  // are stamped with, so a historical range can never overwrite newer registry
+  // metadata (see AssetRow.observed_block).
+  observedBlock?: number
 }
 
 export interface HistoricalSnapshotEntry {
@@ -202,7 +206,9 @@ function parseSnapshot(payloadJson: string, options: ParseSnapshotOptions = {}):
     })
   }
 
+  const observedBlock = options.observedBlock ?? 0
   let assetRows: AssetRow[] = assetItems.map(asset => ({
+    observed_block: observedBlock,
     asset_id: asset.assetId,
     symbol: asset.symbol,
     name: asset.name,
@@ -350,7 +356,10 @@ export class ClickHouseSnapshotReader {
             const snapshotRow = row.json<SnapshotRow>()
             yield {
               blockHeight: snapshotRow.block_height,
-              snapshot: parseSnapshot(snapshotRow.payload_json, { nativeAssetRow: this.nativeAssetRow }),
+              snapshot: parseSnapshot(snapshotRow.payload_json, {
+                nativeAssetRow: this.nativeAssetRow,
+                observedBlock: snapshotRow.block_height,
+              }),
             }
           }
         }
@@ -358,16 +367,6 @@ export class ClickHouseSnapshotReader {
         result.close()
       }
     }
-  }
-
-  async loadRange(fromBlock: number, toBlock: number): Promise<Map<number, HistoricalSnapshotState>> {
-    const snapshots = new Map<number, HistoricalSnapshotState>()
-
-    for await (const entry of this.streamRange(fromBlock, toBlock)) {
-      snapshots.set(entry.blockHeight, entry.snapshot)
-    }
-
-    return snapshots
   }
 
   async close(): Promise<void> {

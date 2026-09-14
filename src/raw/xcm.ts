@@ -51,23 +51,28 @@ function directionFor(name: string, payload: unknown): string {
   return 'unknown'
 }
 
-function visitObjects(value: unknown, cb: (value: unknown, keyHint: string) => void, keyHint = ''): void {
-  cb(value, keyHint)
+// Returns true once the callback has asked to stop, so a "find the first" walk
+// does not keep recursing a payload it is already done with.
+function visitObjects(value: unknown, cb: (value: unknown, keyHint: string) => boolean | void, keyHint = ''): boolean {
+  if (cb(value, keyHint) === true) return true
   if (Array.isArray(value)) {
-    for (const item of value) visitObjects(item, cb, keyHint)
-    return
+    for (const item of value) if (visitObjects(item, cb, keyHint)) return true
+    return false
   }
   if (value != null && typeof value === 'object') {
     for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-      visitObjects(nested, cb, key)
+      if (visitObjects(nested, cb, key)) return true
     }
   }
+  return false
 }
 
 function findFirstByKey(value: unknown, keyPattern: RegExp): unknown | null {
   let found: unknown | null = null
   visitObjects(value, (current, keyHint) => {
-    if (found == null && keyPattern.test(keyHint)) found = current
+    if (!keyPattern.test(keyHint)) return
+    found = current
+    return true
   })
   return found
 }
@@ -332,6 +337,12 @@ export function extractXcmBridgeAndOperationRows(
   ]
 
   for (const source of sources) {
+    // The relay-chain validation-data inherent is in every block and carries the
+    // ~95 KiB storage proof, which is not evidence of anything: its trie nodes are
+    // opaque bytes that only read as accounts and routes by accident. Skipping it
+    // once here keeps all three extractors — not just the XCM one — from walking
+    // that proof on every block to reach a guaranteed non-match.
+    if (XCM_NAME_EXCLUDE.test(source.name)) continue
     if (isXcmName(source.name)) {
       xcmActivity.push(xcmRow(source, blockTimestamp, ingestSource))
     }

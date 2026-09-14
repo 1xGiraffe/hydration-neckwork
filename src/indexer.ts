@@ -45,6 +45,19 @@ import type { ClickHouseStore } from './store/clickhouseStore.js'
 // a bounded cost of one cadence-independent constant.
 const BACKFILL_ASSET_SNAPSHOT_INTERVAL_MINUTES = 1_000
 
+// Transfer events that can move a pool reserve, and so must stop a block being
+// skipped as price-irrelevant. Both are already subscribed (see processor.ts).
+//
+// `Currencies.Transferred` is the load-bearing half: an aToken or ERC-20 leg is
+// reported as that event ALONE, and those are exactly the reserves the GDOT /
+// GETH / GSOL stableswap pools hold. Matching only `Tokens.Transfer` let an
+// aToken liquidity add into one of those pools skip its own block — the
+// Stableswap.LiquidityAdded that accompanies it is deliberately ignored by the
+// composition cache — so the moved reserve reached no price row until some later
+// swap happened to unskip a block. Only `from`/`to` are read, and both events
+// carry them.
+const POOL_TRANSFER_EVENTS = new Set(['Tokens.Transfer', 'Currencies.Transferred'])
+
 let errorNamesRpc: RpcClient | null = null
 // Snapshot a spec version's pallet error names into runtime_error_names. Loads
 // metadata over RPC only at baseline + each runtime upgrade (rare), never per
@@ -551,6 +564,13 @@ export async function run(options: RunOptions = {}): Promise<void> {
       if (firstHeight <= previousBlockHeight) {
         previousBlockHash = null
         previousBlockHeight = null
+        // The v3 tracker's liquidity is an ACCUMULATOR over Mint/Burn, so unlike
+        // the boundary-hash state it cannot simply be reset — replaying a block
+        // would add its Mints to `L` a second time, silently inflating the pool's
+        // price edge and its liquidity weight until the next Swap (which assigns
+        // rather than accumulates) resynced it. Re-seed from the last persisted
+        // anchor instead, which the loader walks forward from.
+        await uniswapV3Pools.loadFromClickHouse(firstHeight - 1)
       } else if (firstHeight > previousBlockHeight + 1) {
         throw new Error(`[Integrity] Processor gap between blocks ${previousBlockHeight} and ${firstHeight}`)
       }
@@ -658,6 +678,16 @@ export async function run(options: RunOptions = {}): Promise<void> {
       // Every block, processed or skipped: a Mint in a quiet block still moves
       // the edge, and a pool's Swap is volume this block must book.
       const uniswapV3Changes = uniswapV3Pools.processEvents(block.events)
+      // Fold this block's own composition events into the cache on EVERY block,
+      // snapshot-backed or not. RPC fallback is a per-block decision, so the two
+      // paths interleave: with this inside the RPC arm only, a TokenAdded or
+      // PoolCreated landing in a snapshot-backed stretch was never applied, and
+      // the next block that fell back to RPC read the composition as it stood
+      // before the stretch — pricing a pool's asset set that no longer existed.
+      // It is a pure fold over the block's own events, so running it always is
+      // free for the snapshot path, which ignores the result.
+      const compositionChanges = compositionCache.processEvents(block.events)
+      if (hasSetStorageAffectingPools) compositionCache.invalidateAll()
       let currentAtokenEquivalences = atokenEquivalences
       let currentAtokenIds = atokenIds
       let currentLpEquivalences = lpEquivalences
@@ -733,8 +763,8 @@ export async function run(options: RunOptions = {}): Promise<void> {
         let hasPoolAffectingTransfer = false
         let hasSwapEvents = false
         for (const event of block.events) {
-          if (event.name === 'Tokens.Transfer') {
-            const args = event.args as { currencyId: number; from: string; to: string; amount: bigint }
+          if (POOL_TRANSFER_EVENTS.has(event.name)) {
+            const args = event.args as { from: string; to: string }
             if (historicalSnapshot.poolAccounts.has(args.from) || historicalSnapshot.poolAccounts.has(args.to)) {
               hasPoolAffectingTransfer = true
             }
@@ -780,15 +810,12 @@ export async function run(options: RunOptions = {}): Promise<void> {
         decimals = registry.getDecimals()
         assetsTracked = registry.getCacheSize()
 
-        // Update pool composition cache from events
-        const compositionChanges = compositionCache.processEvents(block.events)
         const compositionChanged = compositionChanges.omnipoolChanged ||
           compositionChanges.xykChanged ||
           compositionChanges.stableswapChanged
 
         if (hasSetStorageAffectingPools) {
           console.warn(`[SetStorage] Pool-affecting System.set_storage detected at block ${blockHeight}`)
-          compositionCache.invalidateAll()
         }
 
         const omnipoolAssetIds = await compositionCache.getOmnipoolAssets(block.header)
@@ -814,8 +841,8 @@ export async function run(options: RunOptions = {}): Promise<void> {
         let hasPoolAffectingTransfer = false
         let hasSwapEvents = false
         for (const event of block.events) {
-          if (event.name === 'Tokens.Transfer') {
-            const args = event.args as { currencyId: number; from: string; to: string; amount: bigint }
+          if (POOL_TRANSFER_EVENTS.has(event.name)) {
+            const args = event.args as { from: string; to: string }
             if (poolAccounts.has(args.from) || poolAccounts.has(args.to)) {
               hasPoolAffectingTransfer = true
             }

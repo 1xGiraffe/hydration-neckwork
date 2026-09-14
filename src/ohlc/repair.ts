@@ -159,11 +159,13 @@ export async function clearOHLCForTimeRange(
 
 export async function restoreRollbackOHLCPrefix(
   client: ClickHouseClient,
-  startTime: string
+  startTime: string,
+  settings: ClickHouseSettings = {},
 ): Promise<void> {
   for (const spec of OHLC_TABLE_SPECS) {
     await client.command({
       query: buildRestoreRollbackPrefixQuery(spec, startTime),
+      clickhouse_settings: settings,
     })
   }
 }

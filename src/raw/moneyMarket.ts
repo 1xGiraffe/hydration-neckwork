@@ -345,14 +345,21 @@ function encodeGetUserAccountData(address: string): string {
   return `0x${selector}${paddedAddress}`
 }
 
+/**
+ * The six words getUserAccountData returns, or null when the response is not a
+ * decodable one. Null rather than a throw because the caller reads a BATCH of
+ * addresses in one request: a market that is not deployed at this height answers
+ * `0x` for its members, and a throw here would discard every good position read
+ * alongside it.
+ */
 function decodeUserAccountData(result: string): Omit<RawMoneyMarketPositionRow,
   'block_height' | 'block_timestamp' | 'observation_id' | 'user_address' | 'account_id' | 'pool_address' | 'evidence_json' | 'ingest_source'
-> {
+> | null {
   const body = result.startsWith('0x') ? result.slice(2) : result
   const words: string[] = []
   for (let i = 0; i < 6; i++) {
     const word = body.slice(i * 64, (i + 1) * 64)
-    if (word.length !== 64) throw new Error('getUserAccountData returned fewer than six words')
+    if (word.length !== 64) return null
     words.push(BigInt(`0x${word}`).toString())
   }
   return {
@@ -409,7 +416,7 @@ async function fetchMoneyMarketRpc(rpcUrl: string, body: unknown): Promise<unkno
 }
 
 async function readUserPositions(userAddresses: string[], blockHeight: number, rpcUrl: string, poolProxy: string): Promise<Map<string, {
-  metrics: ReturnType<typeof decodeUserAccountData>
+  metrics: NonNullable<ReturnType<typeof decodeUserAccountData>>
   evidence: Record<string, unknown>
 }>> {
   const requests = userAddresses.map(userAddress => userPositionRequest(userAddress, blockHeight, poolProxy))
@@ -424,7 +431,7 @@ async function readUserPositions(userAddresses: string[], blockHeight: number, r
   }
 
   const positions = new Map<string, {
-    metrics: ReturnType<typeof decodeUserAccountData>
+    metrics: NonNullable<ReturnType<typeof decodeUserAccountData>>
     evidence: Record<string, unknown>
   }>()
   for (const request of requests) {
@@ -432,11 +439,14 @@ async function readUserPositions(userAddresses: string[], blockHeight: number, r
     const response = responsesById.get(request.id) ?? (requests.length === 1 && responses.length === 1 && responses[0] != null && typeof responses[0] === 'object'
       ? responses[0] as { result?: string; error?: unknown }
       : undefined)
-    if (response == null || typeof response.result !== 'string') {
-      throw new Error(`Money Market eth_call failed: ${toJsonString(response?.error ?? response ?? { id: request.id, error: 'missing response' })}`)
-    }
+    // A per-address miss is recorded by its absence from the map — the caller
+    // already emits a warning for an address it asked for and did not get back.
+    // Throwing here would void the whole batch (50 addresses) for one bad answer.
+    if (response == null || typeof response.result !== 'string') continue
+    const metrics = decodeUserAccountData(response.result)
+    if (metrics == null) continue
     positions.set(userAddress, {
-      metrics: decodeUserAccountData(response.result),
+      metrics,
       evidence: {
         rpc_origin: rpcOriginForEvidence(rpcUrl),
         rpc_method: 'eth_call',
@@ -461,7 +471,13 @@ function positionWarning(
     parser: 'raw_money_market',
     source_kind: 'evm_log',
     source_name: row.event_name ?? '',
-    source_index: row.event_index.toString(),
+    // The user address is part of the identity, not just the evidence: one log
+    // yields a position task per participant, and raw_parser_warnings replaces on
+    // (block, parser, source_kind, source_index, warning_code). Keyed on the event
+    // index alone, two participants' failures collapse into one row whose survivor
+    // ReplacingMergeTree(ingested_at) picks arbitrarily and unstably under replay.
+    // The periodic twin already keys on the address for the same reason.
+    source_index: `${row.event_index}:${userAddress}`,
     warning_code: 'position_eth_call_failed',
     warning: error instanceof Error ? error.message : 'Money Market eth_call failed',
     evidence_json: toJsonString({
@@ -763,7 +779,16 @@ export async function extractMoneyMarketRows(
         for (const task of tasks) {
           const position = positionsByUser.get(task.userAddress)
           if (position == null) {
-            throw new Error(`Money Market eth_call returned no position for ${task.userAddress}`)
+            // One address the batch could not answer for is that address's problem.
+            // Throwing here would reach the group catch below and discard every
+            // position this batch DID read — up to 49 good ones for one bad answer.
+            for (const entry of task.entries) {
+              warnings.push(positionWarning(
+                entry.row, task.userAddress, rpcUrl, ingestSource,
+                new Error(`Money Market eth_call returned no position for ${task.userAddress}`),
+              ))
+            }
+            continue
           }
           for (const entry of task.entries) {
             positions.push({
