@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { hollarSupplySql } from '../src/services/hollarService.ts'
+import { hollarStableShareSql, hollarSupplySql } from '../src/services/hollarService.ts'
 
 const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
 
@@ -99,6 +99,39 @@ describe('HOLLAR supply', () => {
     expect(unionAt).toBeGreaterThan(-1)
     expect(groupAfterUnion).toBeGreaterThan(unionAt)
     expect(sql.slice(groupAfterUnion)).toContain('WHERE bal > 0')
+  })
+})
+
+// pool_swap_legs replaces on (venue, pool_key, block_height, event_index, leg_kind,
+// leg_index), so a re-inserted raw range holds each leg twice until its parts merge.
+// Summing the amounts first and deduplicating afterwards is impossible, so the fold
+// onto the replacement key has to come FIRST — the same order pool_swap_hourly's job
+// uses. Without it a replayed month doubles HOLLAR's volume share.
+describe('HOLLAR stable-share volume', () => {
+  const sql = hollarStableShareSql()
+
+  it('folds legs onto their replacement key before any amount is summed', () => {
+    const dedup = sql.indexOf('GROUP BY venue, pool_key, block_height, event_index, leg_kind, leg_index')
+    expect(dedup).toBeGreaterThan(-1)
+    // The only read of the source sits above that fold...
+    const reads = sql.match(/FROM price_data\.pool_swap_legs/g) ?? []
+    expect(reads.length).toBe(1)
+    expect(sql.indexOf('FROM price_data.pool_swap_legs')).toBeLessThan(dedup)
+    // ...and every sum of an amount sits below it, reading the folded rows.
+    for (const at of [...sql.matchAll(/sumIf\(/g)].map(m => m.index)) expect(at).toBeGreaterThan(dedup)
+    expect(sql).toContain('argMax(s.amount, s.ingested_at)')
+    // The filters read the TABLE's columns, not the `argMax(x, …) AS x` aliases.
+    expect(sql).toContain('WHERE s.leg_kind IN')
+    expect(sql).toContain('s.asset_id IN')
+  })
+
+  it('keeps the amounts integral, never routing an 18-decimal leg through a float', () => {
+    // Decimal256 over the raw u128 strings, divided by the asset's exact
+    // 10^decimals unit; only the finished percentage becomes a float.
+    expect(sql).toContain('toDecimal256(l.amount, 0)')
+    expect(sql).not.toContain('toFloat64(l.amount)')
+    expect(sql).not.toMatch(/pow\(10, /)
+    expect(sql).toContain("concat('1', repeat('0', toUInt32(any(d.decimals))))")
   })
 })
 

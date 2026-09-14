@@ -250,14 +250,14 @@ async function loadDirectTransfers(accounts: string[]): Promise<DirectTransferRo
   const res = await client.query({
     query: `
       WITH refs AS (
-        SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index
+        SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_idx
         FROM price_data.account_activity_v3
         WHERE account IN ({accounts:Array(String)})
           AND event_name IN ({transferEvents:Array(String)})
           AND is_module_transfer = 0
           AND extrinsic_index IS NOT NULL
-        GROUP BY block_height, extrinsic_index
-        ORDER BY block_height DESC, extrinsic_index DESC
+        GROUP BY block_height, extrinsic_idx
+        ORDER BY block_height DESC, extrinsic_idx DESC
         LIMIT {refLimit:UInt32}
       ), transfers AS (
         SELECT
@@ -279,7 +279,7 @@ async function loadDirectTransfers(accounts: string[]): Promise<DirectTransferRo
           multiIf(e.event_name = 'Currencies.Transferred', 3, e.event_name = 'Tokens.Transfer', 2, 1) AS priority
         FROM price_data.raw_events AS e
         WHERE e.block_height >= (SELECT min(block_height) FROM refs)
-          AND (e.block_height, assumeNotNull(e.extrinsic_index)) IN (SELECT block_height, extrinsic_index FROM refs)
+          AND (e.block_height, assumeNotNull(e.extrinsic_index)) IN (SELECT block_height, extrinsic_idx FROM refs)
           AND e.event_name IN ({transferEvents:Array(String)})
         ORDER BY e.block_height DESC, priority DESC, e.event_index DESC
         LIMIT 1 BY e.block_height, extrinsic_index, asset_id, lower(from_acc), lower(to_acc), amount

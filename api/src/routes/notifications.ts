@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify'
 import rateLimit from '@fastify/rate-limit'
 import { z } from 'zod'
-import { requireUser } from '../services/userAuthService.ts'
-import { noStore, withUserErrors } from './user.ts'
+import { sessionUser } from '../services/userAuthService.ts'
+import { privateUserHooks, withUserErrors } from './user.ts'
 import {
   channelsFor, getChannel, createWebPushChannel, deleteChannel,
   rulesFor, createRule, findEquivalentRule, updateRule, deleteRule,
@@ -140,10 +140,12 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   // Scoped to this plugin's encapsulation context — other routes unaffected.
   await fastify.register(rateLimit, { max: 120, timeWindow: '1 minute' })
 
-  fastify.get('/user/notifications/overview', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+  // Every route here is private: no shared cache, no anonymous access (see
+  // privateUserHooks). Registered once for the plugin, never per handler.
+  privateUserHooks(fastify)
+
+  fastify.get('/user/notifications/overview', async (req) => {
+    const accountId = sessionUser(req)
     return {
       channels: channelsFor(accountId).map(channelRef),
       rules: rulesFor(accountId).map(ruleRef),
@@ -160,9 +162,7 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   // Without VAPID keys the server cannot sign a push, so accepting a
   // subscription would store a credential it can never use.
   fastify.post('/user/notifications/channels/webpush', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     if (!webPushConfigured()) return reply.status(503).send({ error: 'Web Push is not configured on this deployment' })
     const body = webPushBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid push subscription' })
@@ -177,9 +177,7 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   })
 
   fastify.post('/user/notifications/channels/telegram/link', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     if (!telegramConfigured()) return reply.status(503).send({ error: 'Telegram is not configured on this deployment' })
     const link = createTelegramLink(accountId)
     if (!link) return reply.status(503).send({ error: 'Too many pending link codes — try again shortly' })
@@ -187,18 +185,14 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   })
 
   fastify.get('/user/notifications/channels/telegram/link/:code', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const params = codeParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid link code' })
     return { status: telegramLinkStatus(params.data.code, accountId) }
   })
 
   fastify.delete('/user/notifications/channels/:id', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const params = idParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid channel id' })
     return withUserErrors(reply, async () => {
@@ -210,9 +204,7 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   // A real send through the real renderer — the point is to prove the whole
   // path (formatting included), not just that the channel row exists.
   fastify.post('/user/notifications/channels/:id/test', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const params = idParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid channel id' })
     const channel = getChannel(params.data.id)
@@ -231,9 +223,7 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   })
 
   fastify.post('/user/notifications/rules', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const body = createRuleBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid alert' })
     return withUserErrors(reply, async () => {
@@ -249,9 +239,7 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   })
 
   fastify.patch('/user/notifications/rules/:id', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const params = idParam.safeParse(req.params)
     const body = patchRuleBody.safeParse(req.body)
     if (!params.success || !body.success) return reply.status(400).send({ error: 'Invalid alert update' })
@@ -262,9 +250,7 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   })
 
   fastify.delete('/user/notifications/rules/:id', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const params = idParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid alert id' })
     return withUserErrors(reply, async () => {
@@ -274,9 +260,7 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   })
 
   fastify.get('/user/notifications/inbox', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const query = inboxQuery.safeParse(req.query ?? {})
     if (!query.success) return reply.status(400).send({ error: 'Invalid inbox query' })
     const { rows, total, unread } = await queryInbox(accountId, query.data.limit, query.data.offset)
@@ -284,9 +268,7 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   })
 
   fastify.post('/user/notifications/inbox/read', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const body = readBody.safeParse(req.body ?? {})
     if (!body.success) return reply.status(400).send({ error: 'Invalid read request' })
     const marked = await markInboxRead(accountId, body.data.ids)
@@ -297,10 +279,8 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   // next match lands in an inbox that is empty rather than in one that has been
   // switched off. Nothing that was already delivered can be delivered again
   // afterwards: the dedup seed at boot reads soft-deleted rows too.
-  fastify.post('/user/notifications/inbox/clear', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+  fastify.post('/user/notifications/inbox/clear', async (req) => {
+    const accountId = sessionUser(req)
     const cleared = await clearInbox(accountId)
     return { ok: true, cleared, unread: 0 }
   })

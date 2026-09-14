@@ -4,9 +4,7 @@ import compress from '@fastify/compress'
 import { config } from './config.ts'
 import { createClickHouseClient, createLongOpClickHouseClient } from './db/client.ts'
 import {
-  backfillAccountSwapNetRows,
   drainAccountSwapActivityQueue,
-  seedAccountSwapActivityQueue,
   startAccountSwapActivityQueueDrain,
   stopAccountSwapActivityQueueDrain,
 } from './db/accountSwapQueue.ts'
@@ -120,7 +118,8 @@ await fastify.register(compress, { global: true, encodings: ['br', 'gzip', 'defl
 
 // Public, short-lived HTTP caching aligned with each endpoint's internal
 // single-flight TTL, so browsers (and any fronting proxy/CDN) can reuse
-// responses instead of re-hitting the API. Longest-prefix match wins.
+// responses instead of re-hitting the API. FIRST match wins, so a narrower
+// pattern must be listed above every wider one that would also match it.
 const CACHE_CONTROL: [RegExp, number][] = [
   [/^\/assets$/, 300],
   // The Live surfaces poll on the chain's block cadence (~6s today, 2s
@@ -200,11 +199,12 @@ fastify.addHook('onClose', async () => {
   stopBackgroundRefresh()
   stopContractRegistryRefresh()
   stopVerifiedContractsRefresh()
-  stopAccountSwapActivityQueueDrain()
   stopExplorerBackgroundTasks()
   stopTelegramBot()
   // Awaited: the evaluator's cursors are written on a throttle, and the last
-  // ones have to land before the client that writes them closes.
+  // ones have to land before the client that writes them closes. The swap-queue
+  // drain owns its own client, so it closes that itself.
+  await stopAccountSwapActivityQueueDrain()
   await stopNotificationEvaluator()
   await client.close()
 })
@@ -241,11 +241,11 @@ async function start() {
     }
     // The schema is created by the schema-bootstrap service before this process
     // starts (Compose depends_on: service_completed_successfully), so no schema
-    // work runs here. Seed/drain the account-swap-activity queue on a long-op
-    // client, off the public request client (20s timeout, 4 GB cap).
+    // work runs here. Drain whatever the account-swap-activity queue accumulated
+    // while this process was down, on a long-op client rather than the public
+    // request client (20s timeout, 4 GB cap).
     const bootstrapClient = createLongOpClickHouseClient()
     try {
-      await seedAccountSwapActivityQueue(bootstrapClient)
       await drainAccountSwapActivityQueue(bootstrapClient, { maxBatches: 100 })
     } finally {
       await bootstrapClient.close()
@@ -304,7 +304,7 @@ async function start() {
     await Promise.all([loadExplorerAssets(client), ensureSnakewatchEmojiSourceLoaded(), loadRuntimeErrorNames(client)])
     // Referendum titles come from SubSquare (the chain has none), so they are held
     // in memory like identities and read on every vote row the explorer renders.
-    await Promise.all([loadTags(), loadUserProfiles(), loadIdentities(), loadReferendumTitles().catch(() => {}), loadUserSessions(), loadUserLists(), loadNotifications()])
+    await Promise.all([loadTags(), loadUserProfiles(), loadIdentities(), loadReferendumTitles().catch(err => console.warn('[titles] referendum title load failed; vote rows render without titles until the refresh succeeds', err)), loadUserSessions(), loadUserLists(), loadNotifications()])
     // Seed the fixed default tag set on a fresh database (no-op once tags exist),
     // so a clean `docker compose up` reaches the expected state with no manual step.
     await seedDefaultTags()
@@ -338,13 +338,13 @@ async function start() {
     startIdentityRefresh()
     startReferendumTitleRefresh()
     // H160 → bound substrate owner map for display resolution.
-    await loadEvmBindings().catch(() => {})
+    await loadEvmBindings().catch(err => console.warn('[evm] binding load failed; bound EVM signers display unresolved until the refresh succeeds', err))
     startEvmBindingsRefresh()
     // Account 3-letter-code search index — load in the background (a distinct-account
     // scan), don't block startup; refresh periodically.
-    void loadAccountSuffixIndex().catch(() => {})
+    void loadAccountSuffixIndex().catch(err => console.warn('[search] account suffix index load failed; 3-letter-code search stays empty until the refresh succeeds', err))
     startAccountSuffixRefresh()
-    startAccountSwapActivityQueueDrain(client)
+    startAccountSwapActivityQueueDrain()
     await fastify.listen({ port: config.port, host: config.host })
     console.log(`[API] Server listening on ${config.host}:${config.port}`)
     // Telegram channel linking needs the bot's long-poll loop; without a token
@@ -356,22 +356,6 @@ async function start() {
     // explorer open. Its first tick seeds the cursor at the live head, so
     // starting it never replays what was indexed while the api was down.
     startNotificationEvaluator()
-    // One-time historical repair (background, off the request client): routed
-    // swaps ingested before the queue MV lack their Router net row in
-    // account_swap_activity, so the activity feed shows an internal hop
-    // (e.g. aDOT→vDOT) instead of the true pair (DOT→SOL). Idempotent + flag-
-    // gated, so it runs once and is a no-op on every subsequent boot.
-    void (async () => {
-      const backfillClient = createLongOpClickHouseClient()
-      try {
-        const n = await backfillAccountSwapNetRows(backfillClient)
-        if (n) console.log(`[API] account-swap net backfill processed ${n} router-net events`)
-      } catch (err) {
-        console.error('[API] account-swap net backfill failed', err)
-      } finally {
-        await backfillClient.close()
-      }
-    })()
     // Account-directory value snapshots (bare/farmed Omnipool claims and current
     // money-market reserve principal) have no materialized view or derivation
     // job, so the API still computes them: generate once now, then keep fresh on

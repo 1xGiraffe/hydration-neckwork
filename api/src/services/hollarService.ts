@@ -447,6 +447,59 @@ const ZERO_H160 = '0x0000000000000000000000000000000000000000'
 // pool deposit doesn't double-count as volume.
 const STABLE_SET = [7, 10, 21, 22, 23, 45, 46, 222, 1002, 1003, 1046, 1110, 1111, 1112, 1113, 1000625, 1000626, 1000745, 1000766, 1000767]
 
+/**
+ * HOLLAR's monthly share of stable-vs-stable trade volume, as (m, v) rows.
+ *
+ * `pool_swap_legs` is a ReplacingMergeTree, so a re-inserted raw range holds a
+ * leg twice until its parts merge. The legs are therefore folded onto their
+ * replacement key — the table's own ORDER BY — BEFORE any volume is summed, the
+ * same dedup-then-sum shape the pool_swap_hourly fold uses; summing first would
+ * double a replayed range's 18-decimal amounts.
+ *
+ * Amounts stay integral (Decimal256 over the raw u128 strings, divided by the
+ * asset's exact 10^decimals unit) until the final percentage, which is
+ * presentation. Legs with an empty op_key (non-routed swaps) get a synthetic
+ * per-event key — grouping them together would collapse 23% of legs into one
+ * op. Volume counts each op once at max(in, out).
+ *
+ * The source columns the fold reads are table-qualified: `argMax(x, …) AS x`
+ * next to a bare `x` in the WHERE would resolve the filter to the aggregate.
+ */
+export function hollarStableShareSql(): string {
+  return `
+        WITH dec AS (
+          SELECT asset_id, decimals FROM price_data.assets
+          WHERE asset_id IN (${STABLE_SET.join(',')})
+        ),
+        legs AS (
+          SELECT s.venue AS venue, s.pool_key AS pool_key, s.block_height AS block_height,
+            s.event_index AS event_index, s.leg_kind AS leg_kind, s.leg_index AS leg_index,
+            argMax(s.asset_id, s.ingested_at) AS asset_id,
+            argMax(s.amount, s.ingested_at) AS amount,
+            argMax(s.op_key, s.ingested_at) AS op_key,
+            min(s.block_timestamp) AS leg_ts
+          FROM price_data.pool_swap_legs AS s
+          WHERE s.leg_kind IN ('in', 'out') AND s.asset_id IN (${STABLE_SET.join(',')})
+            AND s.block_timestamp >= toDate('${HOLLAR_LAUNCH_MONDAY}') - 30
+          GROUP BY venue, pool_key, block_height, event_index, leg_kind, leg_index
+        ),
+        ops AS (
+          SELECT toStartOfMonth(min(l.leg_ts)) AS mo, l.asset_id AS aid,
+            divideDecimal(
+              greatest(sumIf(toDecimal256(l.amount, 0), l.leg_kind = 'in'),
+                       sumIf(toDecimal256(l.amount, 0), l.leg_kind = 'out')),
+              toDecimal256(concat('1', repeat('0', toUInt32(any(d.decimals)))), 0), 12) AS vol
+          FROM legs l
+          INNER JOIN dec d ON l.asset_id = d.asset_id
+          GROUP BY if(l.op_key = '', concat('e', toString(l.block_height), ':', toString(l.event_index)), l.op_key), l.asset_id
+        )
+        SELECT toString(mo) AS m,
+          round(toFloat64(divideDecimal(sumIf(vol, aid = {id:UInt32}),
+                                        if(sum(vol) > 0, sum(vol), toDecimal256(1, 12)), 12)) * 100, 1) AS v
+        FROM ops WHERE mo >= toDate('${HOLLAR_LAUNCH_MONDAY}') - 30
+        GROUP BY mo ORDER BY mo`
+}
+
 // Monday grid from launch to now, in TS so a fresh database aligns to nulls.
 function hollarWeekGrid(): string[] {
   const start = new Date(`${HOLLAR_LAUNCH_MONDAY}T00:00:00Z`).getTime()
@@ -640,28 +693,8 @@ async function loadHollarTrends(): Promise<HollarTrends> {
       query_params: { id: HOLLAR_ASSET_ID },
       format: 'JSONEachRow',
     })
-    // HOLLAR's share of stable-vs-stable trade volume. Legs with an empty
-    // op_key (non-routed swaps) get a synthetic per-event key — grouping them
-    // together would collapse 23% of legs into one op. Volume counts each op
-    // once at max(in, out).
     const shareQuery = client.query({
-      query: `
-        WITH dec AS (
-          SELECT asset_id, decimals FROM price_data.assets
-          WHERE asset_id IN (${STABLE_SET.join(',')})
-        ),
-        ops AS (
-          SELECT toStartOfMonth(min(l.block_timestamp)) AS mo, l.asset_id AS aid,
-            greatest(sumIf(toFloat64(l.amount), l.leg_kind = 'in'),
-                     sumIf(toFloat64(l.amount), l.leg_kind = 'out')) / pow(10, any(d.decimals)) AS vol
-          FROM price_data.pool_swap_legs l
-          INNER JOIN dec d ON l.asset_id = d.asset_id
-          WHERE l.leg_kind IN ('in', 'out')
-          GROUP BY if(l.op_key = '', concat('e', toString(l.block_height), ':', toString(l.event_index)), l.op_key), l.asset_id
-        )
-        SELECT toString(mo) AS m, round(sumIf(vol, aid = {id:UInt32}) / sum(vol) * 100, 1) AS v
-        FROM ops WHERE mo >= toDate('${HOLLAR_LAUNCH_MONDAY}') - 30
-        GROUP BY mo ORDER BY mo`,
+      query: hollarStableShareSql(),
       query_params: { id: HOLLAR_ASSET_ID },
       format: 'JSONEachRow',
     })
