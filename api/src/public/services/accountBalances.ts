@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import { ATOKEN_UNDERLYING_ID, assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
+import { scaledDecimal } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
 
 // Account valuation for GET /v1/accounts/balances and
@@ -59,19 +60,14 @@ const EVM_MARKER = '45544800'
 // report a stranger's holdings under the caller's address.
 const RESERVED_H160_PREFIXES = ['6d6f646c', '7369626c', '70617261']
 
-/** Non-negative decimal string (or ClickHouse number) as an integer count of 10^-scale. */
+/**
+ * Non-negative decimal string (or ClickHouse number) as an integer count of
+ * 10^-scale. Half-up: a value carrying more precision than `scale` rounds rather
+ * than silently truncating toward zero, which is the rounding the balances and
+ * balance-history numbers are published under.
+ */
 export function decimalToScaled(value: string | number | null | undefined, scale: number): bigint {
-  const input = String(value ?? '').trim()
-  if (!input) return 0n
-  const match = /^(-?)(\d*)(?:\.(\d*))?$/.exec(input)
-  if (!match) throw new RangeError(`not a decimal: ${input}`)
-  const fraction = match[3] ?? ''
-  // Keep one extra digit so a value carrying more precision than `scale` rounds
-  // half-up rather than silently truncating toward zero.
-  const kept = fraction.slice(0, scale).padEnd(scale, '0')
-  const next = fraction.charCodeAt(scale)
-  const magnitude = BigInt(`${match[2] || '0'}${kept}`) + (next >= 0x35 && next <= 0x39 ? 1n : 0n)
-  return match[1] === '-' ? -magnitude : magnitude
+  return scaledDecimal(value, scale, 'half-up')
 }
 
 /** Raw on-chain amount × unit price, as an integer count of 10^-USD_DECIMALS USD. */

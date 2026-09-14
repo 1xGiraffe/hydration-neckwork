@@ -263,8 +263,11 @@ describe('daily SQL invariants', () => {
     const { buildDailySql } = await import('../../src/public/services/defillama.ts')
     const sql = buildDailySql()
     // The SQL form of nettedTradeScaled — the two must not drift, because the
-    // rolling /volume endpoint nets in TS and the backfill nets here.
-    expect(sql).toContain('greatest(sum(greatest(-net_usd, toDecimal256(0, 12))), sum(greatest(net_usd, toDecimal256(0, 12))))')
+    // rolling /volume endpoint nets in TS and the backfill nets here. The two
+    // boundary sides are summed per trade, and the day total takes the larger.
+    expect(sql).toContain('sum(greatest(-net_usd, toDecimal256(0, 12))) AS side_in')
+    expect(sql).toContain('sum(greatest(net_usd, toDecimal256(0, 12))) AS side_out')
+    expect(sql).toContain('sum(greatest(side_in, side_out))')
     expect(sql).toContain('GROUP BY day, trade_key')
   })
 
@@ -275,8 +278,11 @@ describe('daily SQL invariants', () => {
     // stableswap fee is already inside the trade's own amounts, so adding fee
     // legs to trade legs would count the same value twice.
     expect(sql).toContain("sum(multiIf(leg_kind = 'out', usd, leg_kind = 'in', -usd, toDecimal256(0, 12))) AS net_usd")
-    const volumeExpression = sql.slice(sql.lastIndexOf('SELECT day,'), sql.indexOf(' AS volume,'))
-    expect(volumeExpression).not.toContain('fee')
+    // The published total reads the two sides and nothing else, and the sides
+    // are built from net_usd alone — the fee sums ride alongside, never into them.
+    expect(sql).toContain('toString(sum(greatest(side_in, side_out))) AS volume_usd')
+    const sides = sql.slice(sql.lastIndexOf('SELECT day, trade_key,'), sql.indexOf(' AS side_out'))
+    expect(sides).not.toContain('fee')
   })
 
   it('splits fee legs by destination and never merges the unknown class into accrued', async () => {

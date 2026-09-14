@@ -35,9 +35,9 @@ function fakeClient(byMarker: Record<string, Row[]> = {}, registry: { vaults?: R
       // The v3 registry the pool lookup reads.
       if (query.includes('FROM price_data.uniswap_v3_pools FINAL')) return result([{ pool_address: POOL, factory: '0x776c4fd6a6170165a91ba45dec40a14bcc8ec354', token0: ADOT, token1: HOLLAR, fee: 3000, tick_spacing: 60, block_height: 14359646, ts: '2026-09-01 10:37:24', extrinsic_index: 2 }])
       if (query.includes('FROM price_data.uniswap_v3_vaults FINAL')) return result(registry.vaults ?? [])
-      if (query.includes("kind = 'manager' AND event_name = 'IncreaseLiquidity'")) return result(registry.managers ?? [])
-      if (query.includes('FROM price_data.atoken_reserve_map FINAL')) return result([{ atoken: ADOT, reserve: '0x0000000000000000000000000000000100000005' }])
-      if (query.includes("kind = 'manager' AND event_name = 'Transfer'")) return result([])
+      if (query.includes("event_name = 'IncreaseLiquidity'")) return result(registry.managers ?? [])
+      if (query.includes('FROM price_data.atoken_reserve_map')) return result([{ atoken: ADOT, reserve: '0x0000000000000000000000000000000100000005' }])
+      if (query.includes("event_name = 'Transfer'")) return result([])
       for (const [marker, rows] of Object.entries(byMarker)) {
         if (query.includes(marker)) return result(rows)
       }
@@ -76,6 +76,19 @@ describe('v3HistoryWindow', () => {
     expect(w.toSec).toBe(Date.UTC(2026, 8, 9, 11) / 1000)
     expect(v3HistoryWindow('1h', '2026-09-09T11:00:00Z', '2026-09-09T08:00:00Z', now)).toEqual({ error: '`from` must be before `to`' })
     expect(v3HistoryWindow('1h', '2026-05-01T00:00:00Z', '2026-09-09T00:00:00Z', now)).toMatchObject({ error: expect.stringContaining(`${V3_HISTORY_MAX_BUCKETS}`) })
+    // A window entirely in the future: the end clamps back to the last closed
+    // bucket, the start does not, so the pair is refused rather than answered
+    // with the empty series a negative span would produce.
+    expect(v3HistoryWindow('1h', '2026-09-09T17:00:00Z', '2026-09-09T19:00:00Z', now)).toEqual({ error: '`from` must be before `to`' })
+  })
+
+  it('counts the default and a period back from the last CLOSED bucket, not from a future `to`', () => {
+    // `to` a week ahead: the series is still the most recent buckets, not a
+    // window that starts after the one it ends at.
+    const w = v3HistoryWindow('1d', undefined, '2026-09-16T00:00:00Z', now)
+    if ('error' in w) throw new Error(w.error)
+    expect(w.toSec).toBe(Date.UTC(2026, 8, 9) / 1000)
+    expect((w.toSec - w.fromSec) / 86_400).toBe(V3_HISTORY_DEFAULT_BUCKETS)
   })
   it('a period is the switch a chart offers: the window ends at the last closed bucket and spans the period', () => {
     const w = v3HistoryWindow('1h', undefined, undefined, now, '7d')

@@ -1,9 +1,10 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cachedSwr } from '../../services/cache.ts'
 import { ATOKEN_UNDERLYING_ID, SHARE_TOKEN_UNDERLYING_ID, assetDescriptor } from '../../services/explorerAssets.ts'
-import { getPoolsIndex, initPoolService, type PoolListResponse } from '../../services/poolService.ts'
+import { getPoolsIndex, type PoolListResponse } from '../../services/poolService.ts'
 import { tvlUsdString } from './platformStats.ts'
-import { DECIMAL_STRINGS, amountUnitSql, legsCteSql, readAnchor, xykPoolMeta } from './poolVolumes.ts'
+import { DECIMAL_STRINGS, amountUnitSql, formatUnits, legsCteSql, readAnchor, scaledDecimal, xykPoolMeta } from './poolVolumes.ts'
+import { ensurePoolService } from './poolWiring.ts'
 
 // The CoinGecko facade: a drop-in replacement for HydraDX-api's
 // /coingecko/v1/* endpoints (spec § Phase 2 → "CoinGecko facade"). CoinGecko is
@@ -70,46 +71,21 @@ const WINDOW_HOURS = 24
 // Decimal helpers
 // ---------------------------------------------------------------------------
 
-/**
- * A decimal string as an integer count of 10^-scale. Prices and token
- * quantities span far more than a double's 15 significant digits (a 6-decimal
- * stable trading against an 18-decimal token puts 24 digits on one side), so
- * every value on this surface stays an exact integer until it is rendered.
- */
-function scaledDecimal(value: string | number | null | undefined, scale: number): bigint {
-  const input = String(value ?? '').trim()
-  if (!input) return 0n
-  const match = /^(-?)(\d*)(?:\.(\d*))?$/.exec(input)
-  if (!match) throw new RangeError(`not a decimal value: ${input}`)
-  const fraction = (match[3] ?? '').slice(0, scale).padEnd(scale, '0')
-  const magnitude = BigInt(`${match[2] || '0'}${fraction}`)
-  return match[1] === '-' ? -magnitude : magnitude
-}
+// Prices and token quantities span far more than a double's 15 significant
+// digits (a 6-decimal stable trading against an 18-decimal token puts 24 digits
+// on one side), so every value on this surface stays an exact integer until it is
+// rendered. Both directions are the shared helpers in services/valuation.ts:
+// `scaledDecimal` parses (TRUNCATING at `scale`, which is this feed's frozen
+// rounding) and `formatUnits` renders an integer count back, trailing fractional
+// zeros dropped — the shape /totalsupply publishes and the same one the old
+// endpoint's RPC read produced.
+const renderDecimal = (value: bigint, scale: number): string => formatUnits(value.toString(), scale)
 
-/** An integer count of 10^-scale as a plain decimal string, trailing zeros dropped. */
-function renderDecimal(value: bigint, scale: number): string {
-  const negative = value < 0n
-  const magnitude = negative ? -value : value
-  const unit = 10n ** BigInt(scale)
-  const whole = (magnitude / unit).toString()
-  const fraction = (magnitude % unit).toString().padStart(scale, '0').replace(/0+$/, '')
-  const rendered = fraction ? `${whole}.${fraction}` : whole
-  return negative && magnitude > 0n ? `-${rendered}` : rendered
-}
-
-/**
- * A raw on-chain amount as whole tokens — the shape /totalsupply publishes, and
- * the same one the old endpoint's RPC read produced.
- */
-export function formatUnits(raw: string, decimals: number): string {
-  const digits = String(raw ?? '').trim().replace(/^\+/, '')
-  if (!/^-?\d+$/.test(digits)) throw new RangeError(`not an integer amount: ${raw}`)
-  return renderDecimal(BigInt(digits), decimals)
-}
+export { formatUnits }
 
 /** A ClickHouse Decimal column's fixed-scale text as a plain decimal string. */
 export function trimDecimal(value: string): string {
-  return renderDecimal(scaledDecimal(value, QTY_SCALE), QTY_SCALE)
+  return renderDecimal(scaledDecimal(value, QTY_SCALE, 'truncate'), QTY_SCALE)
 }
 
 /**
@@ -119,7 +95,7 @@ export function trimDecimal(value: string): string {
  * keeps `invert(invert(x))` from drifting downwards.
  */
 export function invertRatio(value: string): string {
-  const scaled = scaledDecimal(value, QTY_SCALE)
+  const scaled = scaledDecimal(value, QTY_SCALE, 'truncate')
   if (scaled === 0n) return '0'
   return renderDecimal((QTY_UNIT * QTY_UNIT + scaled / 2n) / scaled, QTY_SCALE)
 }
@@ -507,18 +483,6 @@ function warnOnDroppedPairs(unnamedPairs: number, unnamed: Set<number>, indistin
     console.warn(`[public-api] coingecko tickers dropped ${indistinguishable.size} pair-group(s) whose two sides `
       + `share a symbol and cannot be named: ${[...indistinguishable].sort().join(', ')}`)
   }
-}
-
-/**
- * poolService keeps its ClickHouse handle in module state, set once by whichever
- * process uses it. The public API is a separate process, so it is wired on first
- * use — the same non-clobbering guard platformStats.ts applies.
- */
-let wiredClient: ClickHouseClient | null = null
-export function ensurePoolService(client: ClickHouseClient): void {
-  if (wiredClient === client) return
-  initPoolService(client)
-  wiredClient = client
 }
 
 /**

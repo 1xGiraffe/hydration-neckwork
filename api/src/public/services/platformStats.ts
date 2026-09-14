@@ -1,10 +1,11 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cachedSwr } from '../../services/cache.ts'
 import { ATOKEN_UNDERLYING_ID } from '../../services/explorerAssets.ts'
-import { getPoolsIndex, initPoolService } from '../../services/poolService.ts'
+import { getPoolsIndex } from '../../services/poolService.ts'
 import { decimalToScaled, formatUsd } from './accountBalances.ts'
 import { type MmReserveState, type MoneyMarketSupply, moneyMarketSupply } from './moneyMarketReserves.ts'
 import { omnipoolVolumes, poolVolumes, routedTradesUsd } from './poolVolumes.ts'
+import { ensurePoolService } from './poolWiring.ts'
 
 // GET /v1/stats/platform: the chain-wide TVL and 24-hour volume headline.
 //
@@ -211,18 +212,6 @@ function warnOnUnknownTvl(byVenue: Record<string, number | null>): void {
   if (unknown.length === 0) return
   console.warn(`[public-api] platform TVL unknown for ${unknown.join(', ')} — every pool of `
     + `${unknown.length > 1 ? 'those venues' : 'that venue'} is unpriced (check the price feed, not the pool model)`)
-}
-
-/**
- * poolService keeps its ClickHouse handle in module state, set once at boot by
- * whichever process uses it. The public API is a separate process, so it is wired
- * here on first use rather than duplicating the pool composition model.
- */
-let wiredClient: ClickHouseClient | null = null
-export function ensurePoolService(client: ClickHouseClient): void {
-  if (wiredClient === client) return
-  initPoolService(client)
-  wiredClient = client
 }
 
 /** The TVL half of /v1/stats/platform, exactly as it is published. */

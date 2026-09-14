@@ -7,12 +7,14 @@ import {
   OMNIPOOL_ACCOUNT,
   PRICE_LOOKBACK_DAYS,
   amountUnitSql,
+  formatUnits,
   legsCteSql,
   nettedTradeScaled,
   priceAliasSql,
   priceSourceSql,
   pricedCteSql,
   renderUsd,
+  scaledDecimal,
   scaledUsd,
   usdString,
 } from '../../services/valuation.ts'
@@ -22,6 +24,7 @@ import { iso } from '../schemas/common.ts'
 // the revenue read models can share them without importing the public tree
 // (which is an import leaf). Re-exported so this file stays the public
 // surfaces' single import site for them.
+export type { DecimalRounding } from '../../services/valuation.ts'
 export {
   ANCHORED_LEG_WINDOW,
   ANCHORED_PRICE_WINDOW,
@@ -29,12 +32,14 @@ export {
   OMNIPOOL_ACCOUNT,
   PRICE_LOOKBACK_DAYS,
   amountUnitSql,
+  formatUnits,
   legsCteSql,
   nettedTradeScaled,
   priceAliasSql,
   priceSourceSql,
   pricedCteSql,
   renderUsd,
+  scaledDecimal,
   scaledUsd,
   usdString,
 }
@@ -378,22 +383,44 @@ netted AS (
 }
 
 /**
- * One row per routed trade, as the two boundary sums the netting rule compares.
+ * One row per routed trade, as the two boundary sums the netting rule compares:
+ * everything the trade took in, everything it paid out, each summed over the
+ * per-asset nets that survived the cancellation inside the route.
  *
- * Trades whose every fill is an aToken wrap are dropped (see `all_aave`): this
- * total is published as DEX volume, and a money-market deposit is not a trade.
+ * Trades whose every fill is an aToken wrap are dropped here (`HAVING
+ * min(all_aave) = 0`): these sides are published as DEX volume, and a
+ * money-market deposit is not a trade.
+ *
+ * The three surfaces that publish a netted figure — the rolling routed total,
+ * the homepage's 30-day fold and the DefiLlama day series — all start from these
+ * two sums and differ only in how they collapse them (`nettedTradeScaled` row by
+ * row in TS, `greatest(side_in, side_out)` in SQL when the row count is too
+ * large to stream). The fold must stay one definition, so the stage they share
+ * is written once, here.
+ *
+ * `groupColumns` prefixes the grouping with the caller's own key (the DefiLlama
+ * series groups per day as well as per trade) and rides out as columns;
+ * `extraAggregates` are further aggregates over the same group (its per-trade fee
+ * sums), so a caller never has to restate the group or the aave HAVING to carry
+ * one more column.
  */
+export function nettedTradeSidesSql(groupColumns: string[] = [], extraAggregates: string[] = []): string {
+  const prefix = groupColumns.length ? `${groupColumns.join(', ')}, ` : ''
+  const extra = extraAggregates.length ? `,\n         ${extraAggregates.join(',\n         ')}` : ''
+  return `SELECT ${prefix}trade_key,
+         sum(greatest(-net_usd, toDecimal256(0, 12))) AS side_in,
+         sum(greatest(net_usd, toDecimal256(0, 12))) AS side_out${extra}
+  FROM netted
+  GROUP BY ${prefix}trade_key
+  HAVING min(all_aave) = 0`
+}
+
 export function buildRoutedTradesSql(): string {
   return `-- pub:vol:routed
 WITH ${routedNettedCteSql()}
 SELECT toString(side_in) AS in_usd, toString(side_out) AS out_usd
 FROM (
-  SELECT trade_key,
-         sum(greatest(-net_usd, toDecimal256(0, 12))) AS side_in,
-         sum(greatest(net_usd, toDecimal256(0, 12))) AS side_out
-  FROM netted
-  GROUP BY trade_key
-  HAVING min(all_aave) = 0
+  ${nettedTradeSidesSql()}
 )
 WHERE side_in > 0 OR side_out > 0`
 }
@@ -523,7 +550,7 @@ export async function routedTradesUsd(client: ClickHouseClient, window: RoutedWi
   })
 }
 
-interface XykRegistryRow { pool_account: string; lp_asset_id: number; asset_a: number; asset_b: number; created_block: number }
+interface XykRegistryRow { pool_account: string; lp_asset_id: number; asset_a: number; asset_b: number; created_block: number; ingested_at: string }
 
 /**
  * The pair and share token behind each XYK pool account. A pair account can be
@@ -533,15 +560,23 @@ interface XykRegistryRow { pool_account: string; lp_asset_id: number; asset_a: n
 export async function xykPoolMeta(client: ClickHouseClient): Promise<Map<string, XykPoolMeta>> {
   return cachedSwr('pub:vol:xyk-pools', 300_000, 900_000, async () => {
     const res = await client.query({
+      // No FINAL: the table replaces on `lp_asset_id`, which is not the identity
+      // this read needs, so a global FINAL would merge the whole table for a
+      // dedup the fold below has to redo anyway. That fold subsumes it — newest
+      // `created_block` per ACCOUNT, then newest `ingested_at` within one
+      // incarnation, which is exactly the replacement a re-indexed range makes.
       query: `-- pub:vol:xyk-pools
-SELECT pool_account, lp_asset_id, asset_a, asset_b, created_block
-FROM price_data.xyk_pool_registry FINAL`,
+SELECT pool_account, lp_asset_id, asset_a, asset_b, created_block, toString(ingested_at) AS ingested_at
+FROM price_data.xyk_pool_registry`,
       format: 'JSONEachRow',
     })
     const newest = new Map<string, XykRegistryRow>()
     for (const row of await res.json<XykRegistryRow>()) {
       const prev = newest.get(row.pool_account)
-      if (!prev || row.created_block > prev.created_block) newest.set(row.pool_account, row)
+      const wins = !prev
+        || row.created_block > prev.created_block
+        || (row.created_block === prev.created_block && row.ingested_at > prev.ingested_at)
+      if (wins) newest.set(row.pool_account, row)
     }
     // The registry's ids are Int32 and a pool recorded before its share token
     // existed carries a negative one. Those are not registry ids, so they are

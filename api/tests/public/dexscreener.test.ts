@@ -536,6 +536,26 @@ describe('GET /dexscreener/events', () => {
       expect(res.json().error.message).toMatch(/narrower/)
     })
   })
+
+  it('rejects a saturated venue even when dropped fills bring the union under the cap', async () => {
+    const { MAX_EVENTS } = await import('../../src/public/services/dexscreener.ts')
+    // One venue's own LIMIT is what truncates, so saturation has to be judged per
+    // venue on the RAW rows: here two fills name an asset the registry cannot
+    // resolve, and dropping them would put the union back under the cap while the
+    // venue's tail is still missing — a window served as complete, cursor lost.
+    const flood: Row[] = Array.from({ length: MAX_EVENTS + 1 }, (_, i) => ({
+      ...OMNIPOOL_EVENT_ROWS[0],
+      block_height: 8000000 + i,
+      event_index: 1,
+      ...(i < 2 ? { out_asset: 1000021 } : {}),
+    }))
+    const client = fakeClient({ 'pub:ds:events:omnipool': flood })
+    await withApp(client, async app => {
+      const res = await app.inject('/dexscreener/events?fromBlock=8000000&toBlock=8009999')
+      expect(res.statusCode).toBe(400)
+      expect(res.json().error.message).toMatch(/narrower/)
+    })
+  })
 })
 
 describe('the events queries', () => {

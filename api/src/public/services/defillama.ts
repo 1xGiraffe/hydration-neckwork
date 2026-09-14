@@ -1,8 +1,8 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cachedSwr } from '../../services/cache.ts'
 import {
-  DECIMAL_STRINGS, PRICE_LOOKBACK_DAYS, priceSourceSql, renderUsd, routedNettedCteSql,
-  routedTradesUsd, scaledUsd,
+  DECIMAL_STRINGS, PRICE_LOOKBACK_DAYS, nettedTradeSidesSql, priceSourceSql, renderUsd,
+  routedNettedCteSql, routedTradesUsd, scaledUsd,
 } from './poolVolumes.ts'
 
 // The DefiLlama facade (spec § Phase 2 → "DefiLlama facade"). Two endpoints,
@@ -264,9 +264,10 @@ const DAILY_PRICE_WINDOW = `interval_start > toDateTime({from:String}, 'UTC') - 
  *
  * The netting is the SQL form of nettedTradeScaled: per trade, the larger of the
  * two boundary sides. The rolling /volume endpoint streams one row per trade and
- * folds in TS; a multi-month range cannot, so the same rule is written here as
- * `greatest(sum(in side), sum(out side))` and pinned against the TS definition
- * by test.
+ * folds in TS; a multi-month range cannot, so the same rule is applied here as
+ * `greatest(side_in, side_out)` over the shared per-trade stage
+ * (`nettedTradeSidesSql`, which also carries the aToken-wrap exclusion) and
+ * pinned against the TS definition by test.
  *
  * The leg window is half-open, `[from, to)`, unlike the anchored rolling windows
  * — because these bounds are midnights, and block timestamps land exactly on
@@ -274,24 +275,18 @@ const DAILY_PRICE_WINDOW = `interval_start > toDateTime({from:String}, 'UTC') - 
  * request and hand the last one to the following chunk.
  */
 export function buildDailySql(): string {
-  const zero = 'toDecimal256(0, 12)'
+  const fees = ['fee_total', 'fee_account', 'fee_burned', 'fee_unknown', 'fee_hub']
   return `-- pub:dl:daily
 WITH ${routedNettedCteSql(DAILY_LEG_WINDOW, priceSourceSql(DAILY_PRICE_WINDOW))}
 SELECT toString(day) AS day,
-       toString(sum(volume)) AS volume_usd,
+       toString(sum(greatest(side_in, side_out))) AS volume_usd,
        toString(sum(fee_total)) AS fee_total_usd,
        toString(sum(fee_account)) AS fee_account_usd,
        toString(sum(fee_burned)) AS fee_burned_usd,
        toString(sum(fee_unknown)) AS fee_unknown_usd,
        toString(sum(fee_hub)) AS fee_hub_usd
 FROM (
-  SELECT day,
-         greatest(sum(greatest(-net_usd, ${zero})), sum(greatest(net_usd, ${zero}))) AS volume,
-         sum(fee_total) AS fee_total, sum(fee_account) AS fee_account,
-         sum(fee_burned) AS fee_burned, sum(fee_unknown) AS fee_unknown, sum(fee_hub) AS fee_hub
-  FROM netted
-  GROUP BY day, trade_key
-  HAVING min(all_aave) = 0
+  ${nettedTradeSidesSql(['day'], fees.map(fee => `sum(${fee}) AS ${fee}`))}
 )
 GROUP BY day
 ORDER BY day`
