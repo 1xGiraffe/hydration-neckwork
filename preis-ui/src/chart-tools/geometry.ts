@@ -10,7 +10,7 @@ export function distToSegment(px: number, py: number, x1: number, y1: number, x2
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 }
 
-export interface MeasureStatsResult {
+interface MeasureStatsResult {
   deltaPrice: number
   deltaPct: number
   bars: number

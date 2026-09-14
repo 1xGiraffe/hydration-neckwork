@@ -6,7 +6,7 @@ export interface AnchorPoint {
   price: number
 }
 
-export type DrawingKind = 'trendline' | 'channel'
+type DrawingKind = 'trendline' | 'channel'
 
 /**
  * A stored drawing. `kind` is absent for trendlines (v1 data stays readable);

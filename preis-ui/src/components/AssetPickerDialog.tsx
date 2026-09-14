@@ -6,8 +6,10 @@ import type { PairResult } from '../utils/pairs'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import PairIcons from './PairIcons'
 import Sparkline from './Sparkline'
+import { CloseIcon } from './icons'
 import { formatPrice, formatChange } from '../utils/format'
-import { crossChange } from '../utils/change'
+import { changeTone, crossChange } from '../utils/change'
+import { useStatsById } from '../hooks/useStatsById'
 
 interface AssetPickerDialogProps {
   isOpen: boolean
@@ -83,12 +85,9 @@ function buildRows(
   })
 }
 
-function changeColor(c: number | null): string {
-  if (c === null) return 'var(--text-low)'
-  if (c > 0) return 'var(--green)'
-  if (c < 0) return 'var(--red)'
-  return 'var(--text-low)'
-}
+// Long enough to swallow a fast typist's burst, short enough that the list
+// still feels like it answers the keystroke.
+const SEARCH_DEBOUNCE_MS = 120
 
 function suggestedIndexFor(pairs: PairResult[], query: string): number {
   if (pairs.length === 1) return 0
@@ -115,11 +114,7 @@ export default function AssetPickerDialog({
   const listRef = useRef<HTMLDivElement>(null)
   const listboxId = useId()
 
-  const statsById = useMemo(() => {
-    const m = new Map<number, AssetMarketStats>()
-    if (marketStats) for (const s of marketStats) m.set(s.assetId, s)
-    return m
-  }, [marketStats])
+  const statsById = useStatsById(marketStats)
 
   const volumeUsd24h = useCallback(
     (assetId: number) => statsById.get(assetId)?.volumeUsd24h ?? 0,
@@ -142,17 +137,27 @@ export default function AssetPickerDialog({
     if (!isOpen) keyBufferRef.current = ''
   }, [isOpen, keyBufferRef])
 
+  // The input stays on `query` so typing never feels laggy; the cross-product
+  // search and the whole row list run off this settled copy instead, so a
+  // burst of keystrokes builds one list rather than one per character.
+  const [settledQuery, setSettledQuery] = useState(query)
+  useEffect(() => {
+    if (settledQuery === query) return
+    const timer = window.setTimeout(() => setSettledQuery(query), SEARCH_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [query, settledQuery])
+
   const pairs = useMemo(() => {
-    if (query.trim() === '') return getDefaultPairs(assets, volumeUsd24h)
-    return searchPairs(query, assets)
-  }, [query, assets, volumeUsd24h])
+    if (settledQuery.trim() === '') return getDefaultPairs(assets, volumeUsd24h)
+    return searchPairs(settledQuery, assets)
+  }, [settledQuery, assets, volumeUsd24h])
 
   const rows = useMemo(
     () => buildRows(pairs, statsById, currentBaseId, currentQuoteId),
     [pairs, statsById, currentBaseId, currentQuoteId]
   )
 
-  const suggestedActiveIndex = useMemo(() => suggestedIndexFor(pairs, query), [pairs, query])
+  const suggestedActiveIndex = useMemo(() => suggestedIndexFor(pairs, settledQuery), [pairs, settledQuery])
   const effectiveActiveIndex = activeIndex ?? suggestedActiveIndex
 
   useEffect(() => {
@@ -189,7 +194,7 @@ export default function AssetPickerDialog({
     }
   }, [rows, effectiveActiveIndex, suggestedActiveIndex, onClose, onSelect])
 
-  const sortLabel = query.trim() === '' ? 'sorted by 24h volume' : 'sorted by match'
+  const sortLabel = settledQuery.trim() === '' ? 'sorted by 24h volume' : 'sorted by match'
 
   return (
     <Dialog.Root open={isOpen} onOpenChange={(open) => { if (!open) onClose() }}>
@@ -238,7 +243,9 @@ export default function AssetPickerDialog({
           .picker-name { display: flex; flex-direction: column; gap: 1px; min-width: 0; overflow: hidden; }
           .picker-hint { font-family: 'GeistMono', monospace; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
           .picker-num { font-family: 'GeistMono', monospace; font-size: 13px; font-weight: 500; color: var(--text-high); text-align: right; }
-          .picker-chg { font-family: 'GeistMono', monospace; font-size: 12px; text-align: right; }
+          .picker-chg { font-family: 'GeistMono', monospace; font-size: 12px; text-align: right; color: var(--text-low); }
+          .picker-chg.up { color: var(--green); }
+          .picker-chg.down { color: var(--red); }
           .picker-spark { display: flex; align-items: center; justify-content: center; }
           .picker-foot { display: flex; align-items: center; justify-content: space-between; padding: 12px 22px; border-top: 1px solid var(--separator); background: var(--bg); font-family: 'GeistMono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
           .picker-foot .hints { display: flex; gap: 16px; flex-wrap: wrap; }
@@ -308,7 +315,7 @@ export default function AssetPickerDialog({
                 aria-label="Close pair picker"
                 title="Close"
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+                <CloseIcon />
               </button>
             </div>
             <div className="picker-divider" />
@@ -329,7 +336,7 @@ export default function AssetPickerDialog({
                 display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start',
                 padding: '48px 24px', color: 'var(--text-low)', fontSize: 14, textAlign: 'center', gap: 8,
               }}>
-                <div style={{ color: 'var(--text-medium)', fontWeight: 500 }}>No matches for &ldquo;{query}&rdquo;</div>
+                <div style={{ color: 'var(--text-medium)', fontWeight: 500 }}>No matches for &ldquo;{settledQuery}&rdquo;</div>
                 <div>Try a different symbol — e.g. HDX, DOT, ETH</div>
               </div>
             ) : rows.map((r, i) => {
@@ -355,9 +362,9 @@ export default function AssetPickerDialog({
                     </div>
                   </div>
                   <div className="picker-num">{r.price != null ? formatPrice(r.price, isUsd) : '—'}</div>
-                  <div className="picker-chg col-1h" style={{ color: changeColor(r.change1h) }}>{formatChange(r.change1h)}</div>
-                  <div className="picker-chg" style={{ color: changeColor(r.change24h) }}>{formatChange(r.change24h)}</div>
-                  <div className="picker-chg col-7d" style={{ color: changeColor(r.change7d) }}>{formatChange(r.change7d)}</div>
+                  <div className={`picker-chg col-1h ${changeTone(r.change1h)}`}>{formatChange(r.change1h)}</div>
+                  <div className={`picker-chg ${changeTone(r.change24h)}`}>{formatChange(r.change24h)}</div>
+                  <div className={`picker-chg col-7d ${changeTone(r.change7d)}`}>{formatChange(r.change7d)}</div>
                   <div className="picker-spark"><Sparkline data={r.sparkline} change7d={r.change7d} width={isMobile ? 80 : 100} height={28} /></div>
                 </div>
               )

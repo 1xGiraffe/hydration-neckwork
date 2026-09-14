@@ -25,10 +25,12 @@ import {
   formatCount,
   formatCountdown,
   formatPrice,
+  formatSignedPrice,
   formatSignedUsd,
   formatUsd,
   tokenAmountFromRaw,
 } from '../utils/format'
+import { withAlpha } from '../utils/color'
 import { candleEndTimestamp, previousCandleRange, recentCandleRange } from '../utils/candleTime'
 import { headStreamHealthy, subscribeHead } from '../live'
 import { useModalShell } from '../hooks/useModalShell'
@@ -88,17 +90,31 @@ interface OmniwatchMarker {
   showAccount: boolean
 }
 
+// One frozen empty list for every path that produces no markers: a fresh `[]`
+// per call never compares equal, so `Object.is` could not bail out of the state
+// update and the whole chart shell re-rendered on each pan frame.
+const NO_MARKERS: OmniwatchMarker[] = []
+
+function sameMarkers(a: OmniwatchMarker[], b: OmniwatchMarker[]): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    const prev = a[i]
+    const next = b[i]
+    if (
+      prev.candle !== next.candle || prev.x !== next.x ||
+      prev.y !== next.y || prev.showAccount !== next.showAccount
+    ) return false
+  }
+  return true
+}
+
 interface VolumeModalState {
   candle: ApiCandle
   details: OmniwatchVolumeDetails | null
   loading: boolean
   loadingMore: boolean
   error: string | null
-}
-
-/** A price delta, whose sign is the point. */
-function formatSignedPrice(value: number): string {
-  return (value >= 0 ? '+' : '-') + formatPrice(Math.abs(value), false)
 }
 
 interface LegendStore {
@@ -278,22 +294,6 @@ function volumeBarColors(): { up: string; down: string } {
   return { up: withAlpha(palette.green, 0.32), down: withAlpha(palette.red, 0.32) }
 }
 
-// Tokens are authored as hex; the volume histogram needs them at a fixed alpha.
-function withAlpha(color: string, alpha: number): string {
-  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color)
-  if (hex) {
-    const digits = hex[1].length === 3 ? hex[1].replace(/./g, d => d + d) : hex[1]
-    const n = Number.parseInt(digits, 16)
-    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`
-  }
-  const rgb = /^rgba?\(([^)]+)\)$/i.exec(color)
-  if (rgb) {
-    const [r, g, b] = rgb[1].split(/[,/\s]+/).filter(Boolean)
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`
-  }
-  return color
-}
-
 export default function Chart({
   baseId, quoteId, interval, base, baseDecimals = null, showVolumeSource = false,
   onVisibleRangeReady, onDataChange,
@@ -308,6 +308,7 @@ export default function Chart({
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const volumePaneTopRef = useRef(0)
   const markerFrameRef = useRef<number | null>(null)
+  const writtenAxisMetricsRef = useRef({ priceAxisWidth: -1, timeAxisHeight: -1 })
   const openVolumeModalRef = useRef<(candle: ApiCandle) => void>(() => undefined)
   const volumeRowsRef = useRef<HTMLDivElement>(null)
   const volumeModalRef = useRef<HTMLDivElement>(null)
@@ -407,17 +408,45 @@ export default function Chart({
     return fetchCandles({ baseId, quoteId, interval, from, to }, signal)
   }, [baseId, quoteId, interval])
 
+  // Both axes are canvas-drawn inside the chart, so only the chart can measure
+  // them; mirror the two measurements DOM overlays need into CSS variables.
+  // Width: the price axis follows its label text (an 8-decimal price needs far
+  // more room than "$1,961"), and the legend reserves it as a right gutter so it
+  // never runs underneath the labels. Height: below 980px, where the sidebar and
+  // its indexer footer are gone, the scale switch takes the time-axis row
+  // instead of the app's bottom strip.
+  const syncAxisMetrics = useCallback(() => {
+    const chart = chartRef.current
+    const area = chartAreaRef.current
+    if (!chart || !area) return
+    // Both properties feed layout-affecting rules, so re-writing an unchanged
+    // value is a wasted style invalidation — and most frames change neither.
+    const written = writtenAxisMetricsRef.current
+    const priceAxisWidth = Math.round(chart.priceScale('right').width())
+    if (priceAxisWidth !== written.priceAxisWidth) {
+      written.priceAxisWidth = priceAxisWidth
+      area.style.setProperty('--price-axis-w', `${priceAxisWidth}px`)
+    }
+    // Reads 0 until the chart lays out. Publishing that zero would beat the CSS
+    // fallback rather than defer to it, and a 0px-tall switch is invisible.
+    const timeAxisHeight = Math.round(chart.timeScale().height())
+    if (timeAxisHeight > 0 && timeAxisHeight !== written.timeAxisHeight) {
+      written.timeAxisHeight = timeAxisHeight
+      area.style.setProperty('--time-axis-h', `${timeAxisHeight}px`)
+    }
+  }, [])
+
   const updateOmniwatchMarkers = useCallback(() => {
     const chart = chartRef.current
     const container = containerRef.current
     if (!chart || !container) {
-      setOmniwatchMarkers([])
+      setOmniwatchMarkers(NO_MARKERS)
       return
     }
 
     const data = allDataRef.current
     if (data.length === 0) {
-      setOmniwatchMarkers([])
+      setOmniwatchMarkers(NO_MARKERS)
       return
     }
 
@@ -430,7 +459,7 @@ export default function Chart({
     const volumePaneHeight = Math.floor(container.clientHeight * 0.15)
     volumePaneTopRef.current = container.clientHeight - volumePaneHeight
     if (barWidth < minBarWidth) {
-      setOmniwatchMarkers([])
+      setOmniwatchMarkers(NO_MARKERS)
       return
     }
 
@@ -444,18 +473,30 @@ export default function Chart({
       if (x == null || x < -20 || x > container.clientWidth + 20) continue
       next.push({ candle, x, y, showAccount })
     }
-    setOmniwatchMarkers(next)
+    if (next.length === 0) {
+      setOmniwatchMarkers(NO_MARKERS)
+      return
+    }
+    // Panning moves the markers, but zooming past a threshold or crossing a
+    // candle without omniwatch data reproduces the same list — keep the old
+    // array so the shell does not re-render for an identical result.
+    setOmniwatchMarkers(current => (sameMarkers(current, next) ? current : next))
   }, [])
 
-  const scheduleOmniwatchMarkers = useCallback(() => {
+  // Both overlays the chart drives from outside the canvas — the marker list and
+  // the two axis measurements — land in one frame. Writing the axis custom
+  // properties straight from the range handler put a layout-affecting style
+  // write on every pan frame, which `handleResize` then read back the next one.
+  const scheduleOverlaySync = useCallback(() => {
     if (markerFrameRef.current != null) {
       window.cancelAnimationFrame(markerFrameRef.current)
     }
     markerFrameRef.current = window.requestAnimationFrame(() => {
       markerFrameRef.current = null
       updateOmniwatchMarkers()
+      syncAxisMetrics()
     })
-  }, [updateOmniwatchMarkers])
+  }, [syncAxisMetrics, updateOmniwatchMarkers])
 
   const loadVolumeDetailsPage = useCallback((candle: ApiCandle, offset: number) => {
     const requestKey = `${baseId}:${quoteId}:${interval}:${candle.intervalStart}:${offset}`
@@ -650,24 +691,6 @@ export default function Chart({
     loadMoreVolumeDetails,
   ])
 
-  // Both axes are canvas-drawn inside the chart, so only the chart can measure
-  // them; mirror the two measurements DOM overlays need into CSS variables.
-  // Width: the price axis follows its label text (an 8-decimal price needs far
-  // more room than "$1,961"), and the legend reserves it as a right gutter so it
-  // never runs underneath the labels. Height: below 980px, where the sidebar and
-  // its indexer footer are gone, the scale switch takes the time-axis row
-  // instead of the app's bottom strip.
-  const syncAxisMetrics = useCallback(() => {
-    const chart = chartRef.current
-    const area = chartAreaRef.current
-    if (!chart || !area) return
-    area.style.setProperty('--price-axis-w', `${Math.round(chart.priceScale('right').width())}px`)
-    // Reads 0 until the chart lays out. Publishing that zero would beat the CSS
-    // fallback rather than defer to it, and a 0px-tall switch is invisible.
-    const timeAxisHeight = Math.round(chart.timeScale().height())
-    if (timeAxisHeight > 0) area.style.setProperty('--time-axis-h', `${timeAxisHeight}px`)
-  }, [])
-
   const applyData = useCallback((data: ApiCandle[]) => {
     const candleSeries = candleSeriesRef.current
     const volumeSeries = volumeSeriesRef.current
@@ -692,9 +715,8 @@ export default function Chart({
     candleSeries.setData(candleData)
     volumeSeries.setData(volumeData)
     onDataChange?.(data)
-    scheduleOmniwatchMarkers()
-    syncAxisMetrics()
-  }, [onDataChange, scheduleOmniwatchMarkers, syncAxisMetrics])
+    scheduleOverlaySync()
+  }, [onDataChange, scheduleOverlaySync])
 
   const replaceAllData = useCallback((data: ApiCandle[]) => {
     const normalized = normalizeCandles(data)
@@ -707,7 +729,8 @@ export default function Chart({
   /**
    * Merge a live poll that only touches the tail: the newest candle re-closing
    * plus any that opened since. Both series take a point `update()` instead of
-   * a full `setData()`, so the ~6-second poll costs the changed bars rather
+   * a full `setData()`, so a refresh — one per pushed head, or per
+   * POLL_INTERVAL_MS while the stream is down — costs the changed bars rather
    * than a re-sort and a reset of the entire loaded history.
    *
    * Returns false — and the caller falls back to a full replace — whenever the
@@ -746,10 +769,9 @@ export default function Chart({
     allDataRef.current = next
     setTail(next[next.length - 1])
     onDataChange?.(next)
-    scheduleOmniwatchMarkers()
-    syncAxisMetrics()
+    scheduleOverlaySync()
     return true
-  }, [onDataChange, scheduleOmniwatchMarkers, syncAxisMetrics])
+  }, [onDataChange, scheduleOverlaySync])
 
   const showLatestCandles = useCallback(() => {
     const ts = chartRef.current?.timeScale()
@@ -877,12 +899,9 @@ export default function Chart({
     }
     chart.subscribeClick(clickHandler)
 
-    const markerRangeHandler = () => {
-      scheduleOmniwatchMarkers()
-      // Panning/zooming re-autoscales the price axis, which can change how wide
-      // its labels are.
-      syncAxisMetrics()
-    }
+    // Panning/zooming moves the markers and re-autoscales the price axis, which
+    // can change how wide its labels are.
+    const markerRangeHandler = () => scheduleOverlaySync()
     chart.timeScale().subscribeVisibleLogicalRangeChange(markerRangeHandler)
 
     const handleResize = () => {
@@ -891,18 +910,17 @@ export default function Chart({
       const volumePaneHeight = Math.floor(containerRef.current.clientHeight * 0.15)
       volumePaneTopRef.current = containerRef.current.clientHeight - volumePaneHeight
       chart.panes()[1].setHeight(volumePaneHeight)
-      scheduleOmniwatchMarkers()
-      syncAxisMetrics()
+      scheduleOverlaySync()
     }
+    // The container resizes with the window, so the observer already covers
+    // every case a window listener would — a second one only doubles the work.
     const resizeObserver = new ResizeObserver(handleResize)
     resizeObserver.observe(container)
-    window.addEventListener('resize', handleResize)
     const settleTimer = setTimeout(handleResize, 300)
 
     return () => {
       resizeObserver.disconnect()
       clearTimeout(settleTimer)
-      window.removeEventListener('resize', handleResize)
       chart.unsubscribeCrosshairMove(crosshairHandler)
       chart.unsubscribeClick(clickHandler)
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(markerRangeHandler)
@@ -918,7 +936,7 @@ export default function Chart({
       volumeSeriesRef.current = null
       chart.remove()
     }
-  }, [legendStore, onVisibleRangeReady, scheduleOmniwatchMarkers, syncAxisMetrics]) // create once; theme changes are handled by applyOptions below
+  }, [legendStore, onVisibleRangeReady, scheduleOverlaySync]) // create once; theme changes are handled by applyOptions below
 
   // Theme changes: re-apply colors on the existing chart instance so the
   // canvas isn't torn down and re-mounted — a remount blanks the chart for a
@@ -1279,8 +1297,8 @@ export default function Chart({
           font-family: 'GeistMono', monospace; font-size: 12px; font-weight: 700; line-height: 1;
           cursor: pointer; color: var(--text-high);
         }
-        .omniwatch-marker.net-buy { background: var(--green-soft); border-color: rgba(116, 199, 66, 0.55); }
-        .omniwatch-marker.net-sell { background: var(--red-soft); border-color: rgba(255, 104, 104, 0.55); }
+        .omniwatch-marker.net-buy { background: var(--green-soft); border-color: color-mix(in srgb, var(--green) 55%, transparent); }
+        .omniwatch-marker.net-sell { background: var(--red-soft); border-color: color-mix(in srgb, var(--red) 55%, transparent); }
         .omniwatch-marker .emoji { font-size: 18px; line-height: 1; }
         .omniwatch-marker .emoji-img {
           width: 20px; height: 20px; object-fit: contain; border-radius: 4px; flex: 0 0 auto;

@@ -1,11 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { compactAmount, formatChange, formatCountdown, formatPrice, tokenAmountFromRaw } from '../src/utils/format'
+import { compactAmount, formatChange, formatCountdown, formatPrice, formatSignedPrice, tokenAmountFromRaw } from '../src/utils/format'
 
 describe('formatting edge cases', () => {
+  // An unknown price is not a zero one — a broken feed must not render as free.
   it('does not expose non-finite market values', () => {
-    expect(formatPrice(Number.NaN)).toBe('$0')
-    expect(formatPrice(Number.POSITIVE_INFINITY, false)).toBe('0')
+    expect(formatPrice(Number.NaN)).toBe('—')
+    expect(formatPrice(Number.POSITIVE_INFINITY, false)).toBe('—')
+    expect(formatSignedPrice(Number.NaN)).toBe('—')
     expect(formatChange(Number.NaN)).toBe('—')
+  })
+
+  it('still renders a genuine zero as a price', () => {
+    expect(formatPrice(0)).toBe('$0')
+    expect(formatPrice(0, false)).toBe('0')
+  })
+
+  it('prices a signed delta on the same ladder as the price itself', () => {
+    expect(formatSignedPrice(1.5)).toBe('+1.50')
+    expect(formatSignedPrice(-1.5)).toBe('-1.50')
   })
 
   it('normalizes fractional and non-finite countdowns', () => {
