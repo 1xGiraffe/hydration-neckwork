@@ -62,14 +62,14 @@ describe('DCA failure errors come from the read model', () => {
     // nowhere in api/src, so a guard written that way matched zero things and would
     // have passed over the cross-table lookup it exists to keep out. The positive
     // count pins that the construct is still spelled this way somewhere, so this
-    // stays a real absence rather than another literal that can never match. The
-    // fourteenth is the pool-swaps venue check, which confirms the pool id an
-    // event carries over the rows one page already read — bounded by that page,
-    // not a per-row lookup. The fifteenth is the daily histogram's token arm for
-    // the concentrated-liquidity rows (v3HistogramTokenArm), which resolves them
-    // to their pool through the venue's own few-thousand-row projection under the
-    // chart's 90-day bound — one subquery per chart, not a per-row lookup.
-    expect((explorerService.match(/\(block_height, event_index\) IN/g) ?? []).length).toBe(15)
+    // stays a real absence rather than another literal that can never match. Two of
+    // the fourteen only look like per-row lookups: the pool-swaps venue check, which
+    // confirms the pool id an event carries over the rows one page already read —
+    // bounded by that page — and the daily histogram's token arm for the
+    // concentrated-liquidity rows (v3HistogramTokenArm), which resolves them to
+    // their pool through the venue's own few-thousand-row projection under the
+    // chart's 90-day bound. One subquery per page or per chart, not per row.
+    expect((explorerService.match(/\(block_height, event_index\) IN/g) ?? []).length).toBe(14)
     expect(schedule).not.toContain('(block_height, event_index) IN')
     // The one raw_events read left in here is DCA.Terminated's point lookup, whose
     // error genuinely has no column. Pinning the count is what keeps that true: a
