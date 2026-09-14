@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { setTagMap, setTagMapError, resolveTag, allAssociations, searchUserTags, listForTag, tagMapStatus, looksLikeUserTagId } from '../src/userTags'
+import { setTagMap, setTagMapError, resolveTag, allAssociations, searchUserTags, MAX_USER_TAG_RESULTS, listForTag, tagMapStatus, looksLikeUserTagId } from '../src/userTags'
 import type { AccountRef } from '../src/types'
 
 const ACC = '0x' + 'ab'.repeat(32)
@@ -161,12 +161,17 @@ describe('searchUserTags', () => {
     expect(hits).toEqual([{ listId: 'lib1', listName: 'Personal', tagId: 't1', name: 'My Exchange', color: '#0f0', icon: '' }])
   })
 
-  it('caps results at the given limit, defaulting to 3', () => {
-    const many = Array.from({ length: 5 }, (_, i) => ({ tagId: `g${i}`, name: `Giraffe ${i}`, color: '#0f0', icon: '', members: [] }))
+  // The cap exists to stop a broad query burying the shared results these are
+  // prepended to, not to bound cost — the lookup is an in-memory scan. It was 3,
+  // which a library that tags a whole org blows past on the org's own name: 17
+  // personal tags spell "Parity", and a reader saw three of them.
+  it('caps results at MAX_USER_TAG_RESULTS, and honours an explicit limit', () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ tagId: `g${i}`, name: `Giraffe ${i}`, color: '#0f0', icon: '', members: [] }))
     setTagMap({ lists: [{ listId: 'lib1', name: 'Personal', tags: many }] })
-    expect(searchUserTags('giraffe')).toHaveLength(3)
+    expect(MAX_USER_TAG_RESULTS).toBeGreaterThan(3)
+    expect(searchUserTags('giraffe')).toHaveLength(MAX_USER_TAG_RESULTS)
     expect(searchUserTags('giraffe', 2)).toHaveLength(2)
-    expect(searchUserTags('giraffe', 10)).toHaveLength(5)
+    expect(searchUserTags('giraffe', 20)).toHaveLength(12)
   })
 
   // Regression: hits used to come back in list-then-insertion order, so an
