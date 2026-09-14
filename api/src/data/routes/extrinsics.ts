@@ -5,12 +5,12 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import {
   badRequest, errorEnvelope, feedPage, requirePositionCursor,
-  zBlock, zCursor, zError, zFeedPage, zLimit, zOrder, zTimeParam,
+  zError, zFeedPage, zFeedQuery, zWindowQuartet,
 } from '../schemas/common.ts'
 import { liveHeadTag, notFoundContext } from '../services/head.ts'
 import { extrinsicAt, extrinsicEvents, extrinsicPositionByHash, extrinsicsFeed } from '../services/chainCore.ts'
-import { MAX_FILTER_WINDOW_DAYS } from '../services/feed.ts'
-import { ADDRESS_FORMATS_HINT, parseAddress } from '../services/address.ts'
+import { MAX_FILTER_WINDOW_DAYS, windowKey } from '../services/feed.ts'
+import { optionalAddress } from './accountsShared.ts'
 import { zEventItem, zExtrinsicDetail, zExtrinsicItem } from './extrinsicsShared.ts'
 
 // An extrinsic is addressed by ONE path segment: either its transaction hash
@@ -35,19 +35,13 @@ function parseExtrinsicId(raw: string): { hash: string } | { blockHeight: number
   throw badRequest('expected a 0x-prefixed 32-byte extrinsic hash or a `{blockHeight}-{extrinsicIndex}` position')
 }
 
-const zExtrinsicsQuery = z.object({
-  limit: zLimit,
-  cursor: zCursor,
-  order: zOrder,
+const zExtrinsicsQuery = zFeedQuery.extend({
   signer: z.string().min(3).max(128).optional()
     .describe('Filter to one signer (SS58, H160, or 0x-64-hex). Signer-scoped pages read an account-first projection, so no window is needed.'),
   success: z.enum(['true', 'false']).optional(),
   call: z.string().max(80).optional()
     .describe(`Filter by \`Pallet.call\`. Without \`signer\`, this cannot prune the primary key and therefore requires a bounded window (fromTime+toTime ≤ ${MAX_FILTER_WINDOW_DAYS} days, or fromBlock+toBlock).`),
-  fromBlock: zBlock.optional(),
-  toBlock: zBlock.optional(),
-  fromTime: zTimeParam.optional(),
-  toTime: zTimeParam.optional(),
+  ...zWindowQuartet,
 })
 
 export const extrinsicsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = async (fastify, opts) => {
@@ -64,10 +58,9 @@ export const extrinsicsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> 
   }, async request => {
     const { limit, order, success, call, fromBlock, toBlock, fromTime, toTime } = request.query
     const cursor = requirePositionCursor(request.query.cursor)
-    const signer = request.query.signer ? parseAddress(request.query.signer) : null
-    if (request.query.signer && !signer) throw badRequest(`unparseable signer; ${ADDRESS_FORMATS_HINT}`)
+    const signer = optionalAddress(request.query.signer, 'signer')
     const head = await liveHeadTag(opts.client)
-    const key = `data:extrinsics:${order}:${signer?.accountId ?? ''}:${success ?? ''}:${call ?? ''}:${fromBlock ?? ''}:${toBlock ?? ''}:${fromTime ?? ''}:${toTime ?? ''}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
+    const key = `data:extrinsics:${order}:${signer?.accountId ?? ''}:${success ?? ''}:${call ?? ''}:${windowKey(request.query)}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
     const { items, hasMore } = await cached(key, 3_000, () => extrinsicsFeed(opts.client, {
       limit, order, signer, cursor,
       success: success == null ? undefined : success === 'true',

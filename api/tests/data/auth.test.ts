@@ -149,6 +149,19 @@ describe('rate limiting', () => {
     expect((await app.inject({ url: '/v1/blocks', headers: AUTH })).statusCode).toBe(200)
   })
 
+  it('sends a client whose day is spent to the day boundary, not the next minute', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-28T12:00:30Z'))
+    // Both windows full at once: the minute rolling over frees nothing, so
+    // naming it would have the client busy-retry every 60 s until midnight.
+    app = await freshDataApp(limitedClient(1, 1))
+    expect((await app.inject({ url: '/v1/blocks', headers: AUTH })).statusCode).toBe(200)
+    const res = await app.inject({ url: '/v1/blocks', headers: AUTH })
+    expect(res.statusCode).toBe(429)
+    expect(res.headers['retry-after']).toBe('43170') // 24:00:00Z − 12:00:30Z
+    expect(res.json().error.context.retryAfterSeconds).toBe(43_170)
+  })
+
   it('counts every token of one account against the same budget', async () => {
     const secondToken = `hdd_${'cd'.repeat(32)}`
     const client = fakeDataClient(

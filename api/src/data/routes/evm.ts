@@ -5,8 +5,9 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import {
   errorEnvelope, feedPage, requirePositionCursor,
-  zBlock, zCursor, zError, zFeedPage, zIsoTimestamp, zLimit, zOrder, zTimeParam,
+  zError, zFeedPage, zFeedQuery, zIsoTimestamp, zWindowQuartet,
 } from '../schemas/common.ts'
+import { MAX_FILTER_WINDOW_BLOCKS, MAX_FILTER_WINDOW_DAYS, windowKey } from '../services/feed.ts'
 import { liveHeadTag, notFoundContext } from '../services/head.ts'
 import { contractAbi, contractDetail, contractLogs, evmTransactionByHash } from '../services/evmData.ts'
 
@@ -132,17 +133,12 @@ export const evmRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = async
     schema: {
       tags: ['evm'],
       summary: 'One contract’s logs, newest first',
-      description: 'Cursor-paginated over a contract-first log index; each page is then enriched with topics, data and the decoded form (when the indexer knows the ABI) by a primary-key read — so a deep page costs the same as the first. `topic0=` filters by event signature hash.',
+      description: 'Cursor-paginated over a contract-first log index; each page is then enriched with topics, data and the decoded form (when the indexer knows the ABI) by a primary-key read — so a deep page costs the same as the first. `topic0=` filters by event signature hash and requires a bounded window (see the parameter note).',
       params: z.object({ address: zH160 }),
-      querystring: z.object({
-        limit: zLimit,
-        cursor: zCursor,
-        order: zOrder,
-        topic0: z.string().toLowerCase().regex(TOPIC_RE, 'expected a 0x-prefixed 32-byte topic hash').optional(),
-        fromBlock: zBlock.optional(),
-        toBlock: zBlock.optional(),
-        fromTime: zTimeParam.optional(),
-        toTime: zTimeParam.optional(),
+      querystring: zFeedQuery.extend({
+        topic0: z.string().toLowerCase().regex(TOPIC_RE, 'expected a 0x-prefixed 32-byte topic hash').optional()
+          .describe(`Filter by event signature hash. The log index is keyed (contract, block, event index), so a topic predicate cannot prune it — a rare signature on a busy contract would scan the contract's whole history. It therefore requires a bounded window: fromTime+toTime ≤ ${MAX_FILTER_WINDOW_DAYS} days, or fromBlock+toBlock ≤ ${MAX_FILTER_WINDOW_BLOCKS} blocks.`),
+        ...zWindowQuartet,
       }),
       response: { 200: zFeedPage(zLogItem), 400: zError },
     },
@@ -151,7 +147,7 @@ export const evmRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = async
     const { limit, order, topic0, fromBlock, toBlock, fromTime, toTime } = request.query
     const cursor = requirePositionCursor(request.query.cursor)
     const head = await liveHeadTag(opts.client)
-    const key = `data:evm:logs:${address}:${order}:${topic0 ?? ''}:${fromBlock ?? ''}:${toBlock ?? ''}:${fromTime ?? ''}:${toTime ?? ''}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
+    const key = `data:evm:logs:${address}:${order}:${topic0 ?? ''}:${windowKey(request.query)}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
     const { items, hasMore } = await cached(key, 5_000, () => contractLogs(opts.client, address, {
       limit, order, topic0, cursor, fromBlock, toBlock, fromTime, toTime,
     }))

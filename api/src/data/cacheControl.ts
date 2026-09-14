@@ -55,6 +55,7 @@ export const DATA_CACHE_CONTROL: Array<[RegExp, number, Visibility]> = [
   // Pools & trades.
   [/^\/v1\/pools$/, 10, 'private'],
   [/^\/v1\/pools\/(omnipool|stableswap|xyk|uniswapv3)\/[^/]+\/history$/, 30, 'private'],
+  [/^\/v1\/pools\/uniswapv3\/[^/]+\/liquidity$/, 30, 'private'],
   [/^\/v1\/pools\/[^/]+\/[^/]+\/trades$/, 3, 'private'],
   [/^\/v1\/pools\/[^/]+\/[^/]+\/volumes$/, 60, 'private'],
   [/^\/v1\/trades$/, 3, 'private'],
