@@ -71,7 +71,7 @@ function PoolRow({ p }: { p: PoolListEntry }) {
       </td>
       <td data-label="Composition" className="comp-cell"><CompositionBar composition={p.composition} colors={colors} /></td>
       <td data-label="TVL" className="r mono liq-tvl">{p.tvlUsd != null ? F.usd(p.tvlUsd) : <Dash />}</td>
-      <td data-label="Share" className="r mono muted">{p.sharePct != null ? `${p.sharePct < 0.1 ? '<0.1' : p.sharePct.toFixed(1)}%` : <Dash />}</td>
+      <td data-label="Share" className="r mono muted">{p.sharePct == null ? <Dash /> : p.sharePct < 0.1 ? '<0.1%' : F.sharePct(p.sharePct)}</td>
     </tr>
   )
 }

@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 import { ChartTip, compactAmount } from './ui'
 import { ZoomReset, ZoomSelection, bracketToView, fracOfTime, useChartZoom, useZoomRefineValue } from './chartZoom'
 import { useMediaQuery } from '../hooks/useMediaQuery'
+import { parseUtcTimestamp, utcDay, utcSeconds, utcStamp } from '../utils/time'
 
 /* ============ formatting ============ */
 // Compact HDX amount — the shared explorer-wide rough scale (1.56B · 797M ·
@@ -318,7 +319,7 @@ export function lineRuns(values: (number | null)[]): [number, number][] {
 // label every tick "Sep 3 00:00" — a clock the data does not carry, which reads
 // as intraday precision that isn't there.
 export function axisTick(key: string, spanSec: number, grainSec = 0): string {
-  const t = Date.parse(key.includes(' ') ? `${key.replace(' ', 'T')}Z` : `${key}T00:00:00Z`)
+  const t = parseUtcTimestamp(key)
   if (!Number.isFinite(t)) return key
   const d = new Date(t)
   const day = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
@@ -364,14 +365,7 @@ function dateTicks(n: number): number[] {
 // already plotting shares (100%-stacked mode) would repeat every value.
 const AREA_W = 860, AREA_PAD_L = 46, AREA_PAD_R = 6
 /** Bucket keys -> unix seconds, for either grain the API emits. */
-function bucketSecs(keys: string[]): number[] {
-  return keys.map(b => Math.floor(Date.parse(b.includes(' ') ? `${b.replace(' ', 'T')}Z` : `${b}T00:00:00Z`) / 1000))
-}
-
-/** The inverse, in the `YYYY-MM-DD HH:MM:SS` shape the tooltips parse. */
-function bucketKeyOf(sec: number): string {
-  return new Date(sec * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
-}
+const bucketSecs = (keys: string[]): number[] => keys.map(utcSeconds)
 
 /** What a refined multi-series payload looks like: one grid, every band on it. */
 export interface RefinedGrid { buckets: string[]; series: AreaSeries[] }
@@ -417,7 +411,7 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, show
   // points would cover part of the width until the refined grid arrives.
   const clip = zoom.zoomed ? bracketToView(bucketSecs(rawBuckets), zoom.view, rawSeries.map(s => s.values)) : null
   const useClip = clip != null && clip.times.length >= 2
-  const vBuckets = useClip ? clip.times.map(bucketKeyOf) : rawBuckets
+  const vBuckets = useClip ? clip.times.map(utcStamp) : rawBuckets
   const vSeries = useClip ? rawSeries.map((s, i) => ({ ...s, values: clip.series[i] })) : rawSeries
   const n = vBuckets.length
   const { tops, max: rawMax } = stackSeries(vSeries)
@@ -530,9 +524,8 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, show
         // The shade IS the window a lift commits, on the view's time domain, so
         // it tracks the cursor instead of stepping between buckets.
         const pw = zoom.preview
-        const day = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 10)
         return <ZoomSelection aPct={selPct(fracOfTime(zoom.view, pw.from))} bPct={selPct(fracOfTime(zoom.view, pw.to))}
-          label={`${day(pw.from)} – ${day(pw.to)}`} />
+          label={`${utcDay(pw.from)} – ${utcDay(pw.to)}`} />
       })()}
       {zoom.zoomed && !zoom.sel && <ZoomReset onReset={zoom.reset} />}
     </div>
@@ -617,7 +610,7 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
   // points would cover part of the width until the refined grid arrives.
   const clip = zoom.zoomed ? bracketToView(bucketSecs(rawBuckets), zoom.view, rawSeries.map(s => s.values)) : null
   const useClip = clip != null && clip.times.length >= 2
-  const vBuckets = useClip ? clip.times.map(bucketKeyOf) : rawBuckets
+  const vBuckets = useClip ? clip.times.map(utcStamp) : rawBuckets
   const vSeries = useClip ? rawSeries.map((s, i) => ({ ...s, values: clip.series[i] })) : rawSeries
   const n = vBuckets.length
   const flat = vSeries.flatMap(s => s.values).filter((v): v is number => v != null)
@@ -769,9 +762,8 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
         // The shade IS the window a lift commits, on the view's time domain, so
         // it tracks the cursor instead of stepping between buckets.
         const pw = zoom.preview
-        const day = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 10)
         return <ZoomSelection aPct={selPct(fracOfTime(zoom.view, pw.from))} bPct={selPct(fracOfTime(zoom.view, pw.to))}
-          label={`${day(pw.from)} – ${day(pw.to)}`} />
+          label={`${utcDay(pw.from)} – ${utcDay(pw.to)}`} />
       })()}
       {zoom.zoomed && !zoom.sel && <ZoomReset onReset={zoom.reset} />}
     </div>

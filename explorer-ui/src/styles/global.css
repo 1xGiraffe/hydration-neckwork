@@ -1656,8 +1656,6 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
 .trade-leg .mono { color: var(--text-high); }
 .ext-link { font-family: 'GeistMono'; font-size: 11px; color: var(--sky); padding: 2px 7px; border-radius: 6px; background: var(--sky-soft); margin-left: 4px; white-space: nowrap; }
 .ext-link:hover { color: var(--text-high); }
-.ref-link { display: inline-flex; align-items: center; gap: 7px; font-family: 'GeistMono'; font-size: 12px; color: var(--sky); white-space: nowrap; }
-.ref-link:hover .mono { text-decoration: underline; text-underline-offset: 2px; }
 
 /* operation trace */
 .trace { display: flex; flex-direction: column; gap: 0; }
@@ -2197,9 +2195,6 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    explorer-ui additions (loading states, label editor, buttons)
    — not in the static design; required for the live React app
    ============================================================ */
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 0ms !important; scroll-behavior: auto !important; }
-}
 .skeleton-row { height: 49px; border-bottom: 1px solid var(--separator); background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%); background-size: 400% 100%; animation: sk 1.4s ease infinite; }
 @keyframes sk { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
 .sk-pill,
@@ -2990,10 +2985,15 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
   .tabs button .cnt { margin-left: 4px; }
 }
 
+/* The one global motion reset. Delays go to zero along with durations: the
+   staggered `fadeUp` cascade fills backwards (`both`), so a surviving delay
+   would hold a panel at opacity 0 for its whole stagger — motion removed at
+   the cost of the content being invisible. */
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
@@ -3001,7 +3001,7 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
 }
 
 /* Referendum: tally bar, vote bubbles, and the ref link on vote rows. */
-.ref-link { color: var(--sky); text-decoration: none; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+.ref-link { display: inline-block; font-family: 'GeistMono'; font-size: 12px; color: var(--sky); text-decoration: none; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ref-link:hover { text-decoration: underline; }
 .ref-num { margin-right: 2px; }
 /* A vote row pairs the index with the title. The title ellipsizes, and an
@@ -3013,6 +3013,19 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
 /* Wider screens have the room for more of the title before the ellipsis. */
 @media (min-width: 1100px) { .ref-link { max-width: 40ch; } }
 @media (max-width: 720px) { .ref-link { max-width: 18ch; } }
+/* A vote row is one line. Its fixed parts — the locked amount, the #index, the
+   side badge, the conviction — are all as wide as their own content, and the
+   amount's width moves with the number, so no character cap on the title can
+   know what room is left: a 40ch title that fits beside "HDX 15k" wraps beside
+   "HDX 15.1k". So the row stops wrapping and the title alone absorbs the
+   difference, ellipsizing to exactly the space the others leave. Below 720px
+   there is not enough width to give the title anything worth reading, so the
+   row wraps there instead and keeps the character cap. */
+@media (min-width: 721px) {
+  .asset-flow.vote-flow { flex-wrap: nowrap; max-width: 100%; }
+  .vote-flow > * { flex: none; }
+  .vote-flow > .ref-link { flex: 0 1 auto; min-width: 8ch; }
+}
 /* Stacks a value under a full-width element (a tally bar) inside the flex-row .dd. */
 .dl .dd.dd-stack { flex-direction: column; align-items: stretch; gap: 6px; }
 .tally-bar { display: flex; width: 100%; height: 10px; border-radius: 5px; overflow: hidden; background: var(--surface-2); }

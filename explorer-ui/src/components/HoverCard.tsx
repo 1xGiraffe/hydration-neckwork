@@ -207,17 +207,24 @@ export function HoverCards() {
   )
 }
 
+// A hover body with nothing to draw yet. A query still in flight reads as
+// loading; a failed one says so, because a 500 or a permission denial never
+// resolves and would otherwise leave the card claiming to load forever.
+function HoverPending({ isError, what }: { isError: boolean; what: string }) {
+  return <div className="hc-sub mono">{isError ? `Could not load ${what}` : 'Loading…'}</div>
+}
+
 // Referendum card: what the vote was and where it stands. Asks for limit=1 because
 // only the tallies and counts are shown here — the full voter list belongs to the
 // page, and the endpoint caches its vote scan for a minute either way.
 function ReferendumHover({ id }: { id: string }) {
   const [pallet, index] = id.split('/')
-  const { data } = useQuery({
+  const { data, isError } = useQuery({
     queryKey: ['referendum-hover', pallet, index],
     queryFn: ({ signal }) => api.referendum(pallet as 'opengov' | 'democracy', Number(index), signal, 1),
     staleTime: 60_000,
   })
-  if (!data) return <div className="hc-sub mono">Loading…</div>
+  if (!data) return <HoverPending isError={isError} what="this referendum" />
   // Same selection and same BigInt share the page uses, so the card cannot say a
   // different percentage than the page it links to, and the AYE row still names its
   // source when the chain published no tally of its own (every Democracy referendum).
@@ -253,8 +260,8 @@ function ReferendumHover({ id }: { id: string }) {
 const MAX_HOVER_TAGS = 4
 function AccountHover({ id, vote }: { id: string; vote?: VoteContext }) {
   useTagMapVersion()   // re-render when the viewer's tag map changes
-  const { data } = useAddressSummary(id)
-  if (!data) return <div className="hc-sub mono">Loading…</div>
+  const { data, isError } = useAddressSummary(id)
+  if (!data) return <HoverPending isError={isError} what="this account" />
   const mod = moduleName(data.accountId)
   const debtUsd = data.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
   const topAssets = data.topAssets
@@ -297,8 +304,8 @@ function AccountHover({ id, vote }: { id: string; vote?: VoteContext }) {
 // Tag chips (grouped accounts): the tag identity plus the combined metrics of
 // all member accounts — the same figures the tag detail header shows.
 function TagHover({ id, vote }: { id: string; vote?: VoteContext }) {
-  const { data } = useTagSummary(id)
-  if (!data) return <div className="hc-sub mono">Loading…</div>
+  const { data, isError } = useTagSummary(id)
+  if (!data) return <HoverPending isError={isError} what="this tag" />
   const debtUsd = data.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
   const topAssets = data.topAssets
   return (
@@ -317,13 +324,13 @@ function TagHover({ id, vote }: { id: string; vote?: VoteContext }) {
 }
 
 // A list tag's own hover card — same shape as TagHover, over the aggregate
-// view's authed summary. Logged out (or lacking permission) the query simply
-// never resolves data, and the card reads as "Loading…" rather than crashing —
-// this hovers a pill the viewer's own tag map already resolved for them, so in
-// practice they always have access to what they're hovering.
+// view's authed summary. Logged out (or lacking permission) the query fails and
+// the card says so rather than crashing — this hovers a pill the viewer's own
+// tag map already resolved for them, so in practice they always have access to
+// what they're hovering.
 function ListTagHover({ listId, tagId, vote }: { listId: string; tagId: string; vote?: VoteContext }) {
-  const { data } = useListTagSummary(listId, tagId)
-  if (!data) return <div className="hc-sub mono">Loading…</div>
+  const { data, isError } = useListTagSummary(listId, tagId)
+  if (!data) return <HoverPending isError={isError} what="this tag" />
   const debtUsd = data.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
   const topAssets = data.topAssets
   return (
@@ -342,8 +349,8 @@ function ListTagHover({ listId, tagId, vote }: { listId: string; tagId: string; 
 }
 
 function AssetHover({ id }: { id: number }) {
-  const { data } = useAsset(id)
-  if (!data) return <div className="hc-sub mono">Loading…</div>
+  const { data, isError } = useAsset(id)
+  if (!data) return <HoverPending isError={isError} what="this asset" />
   const a = data.asset
   const ch = a.change24h
   return (
@@ -364,8 +371,8 @@ function AssetHover({ id }: { id: number }) {
 }
 
 function TradeHover({ id }: { id: string }) {
-  const { data } = useTrade(id)
-  if (!data) return <div className="hc-sub mono">Loading…</div>
+  const { data, isError } = useTrade(id)
+  if (!data) return <HoverPending isError={isError} what="this trade" />
   const detailId = data.extrinsicIndex != null ? `${data.blockHeight}-${data.extrinsicIndex}` : data.eventIndex != null ? `${data.blockHeight}-e${data.eventIndex}` : id
   // A route-less trade (a direct pool swap) is one hop through its venue; a
   // concentrated-liquidity swap names its pool contract, so that hop links to it.
@@ -405,8 +412,7 @@ function TradeHover({ id }: { id: string }) {
 // the schedule page's basic-info block in miniature.
 function DcaScheduleHover({ id }: { id: string }) {
   const { data, isError } = useDcaSchedule(Number(id))
-  if (isError) return <div className="hc-sub mono">DCA schedule not found</div>
-  if (!data) return <div className="hc-sub mono">Loading…</div>
+  if (!data) return <HoverPending isError={isError} what="this DCA schedule" />
   return (
     <>
       <div className="hc-head">
@@ -446,8 +452,7 @@ function DcaScheduleHover({ id }: { id: string }) {
 function DcaExecutionHover({ id }: { id: string }) {
   const m = /^(\d+)-e(\d+)$/.exec(id)
   const { data, isError } = useDcaExecution(Number(m?.[1] ?? 0), Number(m?.[2] ?? 0))
-  if (isError) return <div className="hc-sub mono">No DCA execution at this event</div>
-  if (!data) return <div className="hc-sub mono">Loading…</div>
+  if (!data) return <HoverPending isError={isError} what="this DCA execution" />
   return (
     <>
       <div className="hc-head">
@@ -472,8 +477,8 @@ function DcaExecutionHover({ id }: { id: string }) {
 // Mirrors the extrinsic detail's basic-info block. The call name sits on its own
 // full-width line (never wraps); the hash is shortened.
 function ExtrinsicHover({ id }: { id: string }) {
-  const { data } = useExtrinsic(id)
-  if (!data) return <div className="hc-sub mono">Loading…</div>
+  const { data, isError } = useExtrinsic(id)
+  if (!data) return <HoverPending isError={isError} what="this extrinsic" />
   return (
     <>
       <div className="hc-head">
@@ -496,9 +501,9 @@ function ExtrinsicHover({ id }: { id: string }) {
 
 // Mirrors the block detail's basic-info block; hash shortened.
 function BlockHover({ id }: { id: number }) {
-  const { data } = useBlock(id)
+  const { data, isError } = useBlock(id)
   const { data: stats } = useStats(!!data)
-  if (!data) return <div className="hc-sub mono">Loading…</div>
+  if (!data) return <HoverPending isError={isError} what="this block" />
   return (
     <>
       <div className="hc-head">
