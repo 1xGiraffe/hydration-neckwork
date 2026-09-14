@@ -1190,6 +1190,16 @@ export async function dexScreenerEvents(client: ClickHouseClient, fromBlock: num
     run<FillRow>(UNISWAPV3_EVENTS_SQL),
     pairIdForms(client),
   ])
+  // Each venue query is independently `LIMIT MAX_EVENTS + 1`, so a venue that
+  // came back with more than MAX_EVENTS rows had its own tail cut. That has to
+  // be judged on the RAW rows: the unservable fills dropped below can bring the
+  // union back under the cap, and a truncated window would then answer 200 as if
+  // it were complete — the permanent cursor loss MAX_EVENTS exists to prevent.
+  if ([omnipool, stableswap, xyk, uniswapV3].some(rows => rows.length > MAX_EVENTS)) {
+    throw new DexScreenerRequestError(
+      `block range holds more than ${MAX_EVENTS} swap events; ask for a narrower range`,
+    )
+  }
   // A fill touching an asset the registry cannot resolve is DROPPED, not priced
   // on an assumed scale. Chain registration is permissionless, so AssetHub
   // externals reach `pool_swap_legs` before `price_data.assets` carries them
