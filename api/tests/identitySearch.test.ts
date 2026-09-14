@@ -76,3 +76,24 @@ describe('identity display search', () => {
     expect(searchIdentitiesByDisplay('   ', 5)).toEqual([])
   })
 })
+
+// The search's address results come from four sources — a direct address match,
+// the identity display index, the emoji-name index and the 3-letter suffix index —
+// and all four are meant to share one budget (MAX_ACCOUNT_RESULTS). Identity was
+// the only one called with its own smaller number, so a display many accounts
+// carry surfaced a handful and left the rest of the budget unspent: 52 indexed
+// accounts spell "Parity", and the dropdown offered five.
+describe('identity search draws from the shared account budget', () => {
+  afterEach(() => { stopIdentityRefresh() })
+
+  it('returns as many matches as it is asked for, not a fixed five', async () => {
+    const rows = Array.from({ length: 30 }, (_, i) => identity(id(i + 1), `Somebody ${i} (Parity)`))
+    initIdentityService(clientWith(rows))
+    await loadIdentities()
+
+    expect(searchIdentitiesByDisplay('parity', 5)).toHaveLength(5)
+    expect(searchIdentitiesByDisplay('parity', 15)).toHaveLength(15)
+    // Never more than the index holds.
+    expect(searchIdentitiesByDisplay('parity', 100)).toHaveLength(30)
+  })
+})

@@ -27530,7 +27530,21 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
     const q = query.toLowerCase()
     const hay = [d.symbol, d.name, d.platform].map(v => v.toLowerCase())
     if (!hay.some(v => v.includes(q)) && d.oneClickId.toLowerCase() !== q) continue
-    results.push({ type: 'xcDestination', value: d.platform, label: d.symbol, desc: `${d.name} · cross-chain destination` })
+    // Carries the destination's CDN entry as an ordinary asset descriptor, so the
+    // dropdown draws its icon through the same path every foreign asset uses —
+    // `origin` is exactly what the /assets directory already renders it from. The
+    // id is negative (xcDestinationAssetId), so it cannot collide with a registry
+    // one, and the route still goes by platform slug rather than by that id.
+    results.push({
+      type: 'xcDestination', value: d.platform, label: d.symbol,
+      desc: `${d.name} · cross-chain destination`,
+      asset: {
+        assetId: xcDestinationAssetId(d.platform),
+        iconAssetId: xcDestinationAssetId(d.platform),
+        symbol: d.symbol, name: d.name, decimals: d.decimals,
+        parachainId: null, origin: d.origin,
+      },
+    })
   }
 
   // Pool name — the /liquidity directory ('Omnipool', '2-Pool-GDOT',
@@ -27550,7 +27564,13 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
   // (e.g. "kraken", "stakernode"). Returns the matching accounts as address
   // results, deduped against a direct address match above.
   if (/[A-Za-z]/.test(query)) {
-    for (const m of searchIdentitiesByDisplay(query, 5)) {
+    // Drawn from the SHARED account budget, like every other address source below
+    // (direct match, emoji name, 3-letter suffix), each of which already stops at
+    // MAX_ACCOUNT_RESULTS. Identity was the one source with its own smaller number,
+    // so a name many accounts carry — 52 accounts spell "Parity" — surfaced five of
+    // them and left the rest of the budget unspent.
+    for (const m of searchIdentitiesByDisplay(query, MAX_ACCOUNT_RESULTS)) {
+      if (results.filter(r => r.type === 'address').length >= MAX_ACCOUNT_RESULTS) break
       if (seenAccounts.has(m.accountId.toLowerCase())) continue
       seenAccounts.add(m.accountId.toLowerCase())
       const mic = accountIcon(m.accountId)

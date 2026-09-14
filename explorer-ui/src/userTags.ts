@@ -166,7 +166,14 @@ function nameMatchRank(name: string, ql: string): number {
 // loaded, there is nothing to search. Ranked exact/prefix/word-start/substring
 // (ties broken by name) before the limit is applied, so the closest match is
 // never crowded out by an earlier-created tag that merely also matches.
-export function searchUserTags(q: string, limit = 3): UserTagSearchHit[] {
+// The viewer's own tags are the most specific thing a query can match — they named
+// them — and they are prepended ahead of the shared results, so the cap is what
+// stops a broad query burying everything else rather than a cost bound (the lookup
+// is a pure in-memory scan). Three was too tight to be useful: a personal library
+// that tags a whole org spells the org's name many times over.
+export const MAX_USER_TAG_RESULTS = 8
+
+export function searchUserTags(q: string, limit = MAX_USER_TAG_RESULTS): UserTagSearchHit[] {
   const needle = q.trim().toLowerCase()
   if (!needle || !indexes) return []
   const hits: { hit: UserTagSearchHit; rank: number }[] = []
