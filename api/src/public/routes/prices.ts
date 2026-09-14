@@ -239,20 +239,32 @@ function usdCandles(base: OHLCVCandle[]): PairCandle[] {
 // Cross-chain pair candles
 // ---------------------------------------------------------------------------
 
+/** The base leg's USD bucket, as the cross-chain fold reads it. */
+export interface CrossChainBase { time: number; close: string; high: string; low: string }
+
+/** A USD-pegged base has no series of its own: every one of its values is 1. */
+const USD_BASE: CrossChainBase = { time: 0, close: '1', high: '1', low: '1' }
+
 /**
- * The Hydration asset's USD close at or BEFORE a moment — never after it.
+ * The Hydration asset's USD bucket at or BEFORE a moment — never after it.
  *
  * The two series are independent: Hydration's buckets are the candle model's, the
  * destination's are Kraken's, and neither is a subset of the other. Scaling a
- * foreign candle by the Hydration close that CONTAINS or precedes it keeps the
+ * foreign candle by the Hydration bucket that CONTAINS or precedes it keeps the
  * rule the rest of the price model follows (a bucket is priced by what had closed
  * by its boundary, never by a future price). A foreign candle older than the
  * first Hydration close has no price to scale by at all and is dropped — carrying
  * the oldest close backwards would invent history.
+ *
+ * BOTH legs' ranges enter `high`/`low`, which is what makes them the upper bound
+ * the endpoint documents: pricing the base at a single close would report an
+ * envelope narrower than the two series admit, and a narrower range on a pair is
+ * an underestimate, not a conservative one. `open`/`close` stay on the base's
+ * close, the one value the "at or before" rule makes exact at a boundary.
  */
 export function crossChainCandles(
   foreign: readonly ForeignCandle[],
-  hydration: readonly { time: number; close: string }[],
+  hydration: readonly CrossChainBase[],
   scale: number,
   baseIsUsd: boolean,
 ): PairCandle[] {
@@ -262,28 +274,34 @@ export function crossChainCandles(
   const ordered = [...foreign].sort((a, b) => a.time - b.time)
   const first = hydration[0]
   let cursor = 0
-  let usdPerBase = baseIsUsd ? '1' : first!.close
+  let base: CrossChainBase = baseIsUsd ? USD_BASE : first!
   for (const candle of ordered) {
     while (cursor < hydration.length && hydration[cursor]!.time <= candle.time) {
-      usdPerBase = hydration[cursor]!.close
+      base = hydration[cursor]!
       cursor++
     }
     if (!baseIsUsd && candle.time < first!.time) continue
-    const denominator = scaled(usdPerBase, scale)
-    if (denominator <= 0n) continue
+    const baseClose = scaled(base.close, scale)
+    if (baseClose <= 0n) continue
+    // A base bucket that carries no usable extreme falls back to its close, which
+    // is the pre-range behaviour and never widens the envelope the wrong way.
+    const baseHigh = scaled(base.high, scale) > baseClose ? scaled(base.high, scale) : baseClose
+    const baseLowRaw = scaled(base.low, scale)
+    const baseLow = baseLowRaw > 0n && baseLowRaw < baseClose ? baseLowRaw : baseClose
     // assetIn quoted in the destination asset: how much of the destination one
     // unit of assetIn buys, i.e. usd(base) / usd(destination). Integer division
     // on the same scale both legs were lifted to, so nothing passes through a
     // float — the same arithmetic the on-chain cross path uses.
-    const rate = (field: string): string | null => {
+    const rate = (numerator: bigint, field: string): string | null => {
       const quote = scaled(field, scale)
       if (quote <= 0n) return null
-      return fromScaled((denominator * BigInt(10) ** BigInt(scale)) / quote, scale)
+      return fromScaled((numerator * BigInt(10) ** BigInt(scale)) / quote, scale)
     }
     // `high` of the pair is the base's best against the destination's WORST, so
-    // the destination's LOW gives the pair's high — the same envelope rule the
+    // the base's HIGH over the destination's LOW — the same envelope rule the
     // on-chain cross pair publishes.
-    const open = rate(candle.open), high = rate(candle.low), low = rate(candle.high), close = rate(candle.close)
+    const open = rate(baseClose, candle.open), high = rate(baseHigh, candle.low)
+    const low = rate(baseLow, candle.high), close = rate(baseClose, candle.close)
     if (open == null || high == null || low == null || close == null) continue
     out.push({ timestamp: iso(new Date(candle.time * 1000)), open, high, low, close, volumeUsd: '0' })
   }
@@ -406,7 +424,7 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
         `REFERENCE PRICE, NOT AN EXECUTED ONE. \`referenceSource\` names the venue the destination leg is priced from (\`kraken\`, pair \`${Object.values(KRAKEN_PAIRS).join('\`/\`')}\`). A cross-chain swap's realised rate is a property of the order itself — the solver network's fill, plus both bridge rails' fees — and is typically several percent away from this. Do not present these candles as what a swap would get.`,
         `\`destinationAsset\` is a 1Click asset id and must be one this deployment can price: ${Object.keys(ONE_CLICK_PLATFORMS).map(id => `\`${id}\``).join(', ')}. Anything else is a 400 rather than being priced off an adjacent market.`,
         'WINDOW: the destination venue serves a fixed recent tail per interval (roughly 720 candles) and takes no start bound, so the series begins where that tail begins — `from` narrows it but cannot extend it. Buckets older than the Hydration asset\'s first candle are dropped rather than scaled by a price that did not exist yet.',
-        '`open`/`close` are exact rates at each end of the bucket; `high`/`low` are the conservative envelope the two independent series admit, exactly as the on-chain cross pair publishes them — an upper bound on realised range, never an underestimate. `volumeUsd` is always `"0"`: the two legs\' volumes are on different venues and summing them would describe no market.',
+        '`open`/`close` are rates taken from each leg at the ends of the bucket; `high`/`low` are the conservative envelope the two independent series admit — the Hydration leg\'s high over the destination\'s low, and its low over the destination\'s high, exactly as the on-chain cross pair publishes them. Both legs\' ranges enter, so the envelope is an upper bound on realised range, never an underestimate. `volumeUsd` is always `"0"`: the two legs\' volumes are on different venues and summing them would describe no market.',
         'Each Hydration bucket is priced by the close that had already happened at or before it — never a future price (AGENTS.md).',
         'A money-market aToken `assetIn` is priced through its reserve, which is 1:1 with it and is what carries the candles (aUSDC is USDC). `pricedAsset` reports which asset the base leg was read from, so the substitution is visible rather than silent.',
       ].join('\n\n'),
@@ -472,7 +490,12 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
       const nowSeconds = Math.floor(Date.now() / 1000)
       const hydration = base
         .filter(candle => Date.parse(`${candle.interval_start.replace(' ', 'T')}Z`) / 1000 + seconds <= nowSeconds)
-        .map(candle => ({ time: Math.floor(Date.parse(`${candle.interval_start.replace(' ', 'T')}Z`) / 1000), close: decimalText(candle.close) }))
+        .map(candle => ({
+          time: Math.floor(Date.parse(`${candle.interval_start.replace(' ', 'T')}Z`) / 1000),
+          close: decimalText(candle.close),
+          high: decimalText(candle.high),
+          low: decimalText(candle.low),
+        }))
       // The foreign series carries its venue's whole tail; clamp it to the window
       // the caller asked for and to the closed-bucket rule both sides obey.
       const windowed = foreign.filter(c => c.time >= fromSeconds && c.time <= toSeconds && c.time + seconds <= nowSeconds)

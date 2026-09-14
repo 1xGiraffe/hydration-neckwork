@@ -206,6 +206,26 @@ describe('volume SQL invariants', () => {
     expect(buildRoutedTradesSql()).toContain("venue = 'omnipool' AND next_venue = 'omnipool'")
   })
 
+  it('keeps the NULL-asset guard readable: the rendered id never shadows the column it reads', async () => {
+    const { buildOmnipoolVolumeSql } = await import('../../src/public/services/poolVolumes.ts')
+    const sql = buildOmnipoolVolumeSql()
+    // A fill with no non-hub in/out leg emits scope='asset' with a NULL id, and
+    // this predicate is what drops it. Aliasing `ifNull(toString(...), '')` back
+    // to `asset_id` would make the predicate read the alias — a non-Nullable
+    // String, so always true — and ship the row with an empty assetId, which the
+    // response schema answers with a 500.
+    expect(sql).toContain("WHERE scope = 'total' OR asset IS NOT NULL")
+    expect(sql).toContain("ifNull(toString(asset), '') AS asset_id")
+    expect(sql).toContain('tupleElement(part, 2) AS asset')
+    expect(sql).not.toMatch(/AS asset_id\b[\s\S]*WHERE scope = 'total' OR asset_id IS NOT NULL/)
+    // The tiebreak sorts the numeric id, not its rendering.
+    expect(sql).toContain('ORDER BY volume DESC, asset')
+    expect(sql).not.toContain('ORDER BY volume DESC, asset_id')
+    // …and the same rule the yield endpoint already follows.
+    const { buildOmnipoolYieldSql } = await import('../../src/public/services/poolYield.ts')
+    expect(buildOmnipoolYieldSql()).toContain('WHERE asset IS NOT NULL')
+  })
+
   it('prices every leg at a candle that had closed before the fill', async () => {
     const { buildOmnipoolVolumeSql } = await import('../../src/public/services/poolVolumes.ts')
     const sql = buildOmnipoolVolumeSql()
@@ -241,6 +261,25 @@ describe('omnipoolVolumes', () => {
     const main = client.seen.find(s => s.query.includes('-- pub:vol:omnipool'))!
     expect(main.params.hours).toBe(1)
     expect(main.params.anchor).toBe('2026-08-12 18:22:36')
+  })
+
+  it('drops an asset row with no id rather than serving an empty assetId', async () => {
+    const client = fakeClient({
+      '-- pub:vol:anchor': [ANCHOR_ROW],
+      '-- pub:vol:omnipool': [
+        { scope: 'asset', asset_id: '5', volume_usd: '1000.500000000000', fee_usd: '2.250000000000', protocol_fee_usd: '0.750000000000' },
+        // A fill with no non-hub in/out leg: the SQL guard drops it, and this
+        // pins the belt-and-braces filter that keeps it off the wire if it
+        // ever gets past. `zAssetId` rejects '' and the route 500s on it.
+        { scope: 'asset', asset_id: '', volume_usd: '7.000000000000', fee_usd: '0.000000000000', protocol_fee_usd: '0.500000000000' },
+        { scope: 'total', asset_id: '', volume_usd: '1000.500000000000', fee_usd: '0.000000000000', protocol_fee_usd: '0.000000000000' },
+      ],
+    })
+    const { omnipoolVolumes } = await import('../../src/public/services/poolVolumes.ts')
+    const out = await omnipoolVolumes(client as never, '24h')
+    expect(out.items).toEqual([{ assetId: '5', volumeUsd: '1000.50', feeUsd: '2.25', protocolFeeUsd: '0.75' }])
+    // The venue total is the 'total' row and is unaffected by the drop.
+    expect(out.totalVolumeUsd).toBe('1000.50')
   })
 
   it('reports no data instead of a 1970 anchor when the model is empty', async () => {

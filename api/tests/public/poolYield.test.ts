@@ -157,10 +157,24 @@ describe('yield SQL invariants', () => {
     expect(omni).toMatch(/GROUP BY venue, pool_key, block_height, event_index, leg_kind, leg_index/)
     expect(omni).toContain('argMax(reserve_raw, ingested_at)')
     expect(omni).toContain('argMax(hub_reserve_raw, ingested_at)')
-    expect(omni).toContain('GROUP BY asset_id, block_height')
+    expect(omni).toContain('GROUP BY registry_asset_id, block_height')
     const ss = buildStableswapYieldSql()
     expect(ss).toContain('argMax(reserves_raw, ingested_at)')
     expect(ss).toContain('GROUP BY pool_id, block_height')
+  })
+
+  it('guards the Int32 asset id under a name the cast does not shadow', async () => {
+    const { buildOmnipoolYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const sql = buildOmnipoolYieldSql()
+    // omnipool_pool_state_history.asset_id is Int32. Without the guard a negative
+    // row wraps through toUInt32 to 4294967295 and is published as an Omnipool
+    // asset's yield; with the guard aliased over the column it reads (the trap
+    // this endpoint's DexScreener twin shipped) the guard does nothing at all.
+    expect(sql).toContain('toUInt32(asset_id) AS registry_asset_id')
+    expect(sql).toContain('WHERE asset_id >= 0')
+    expect(sql).not.toContain('toUInt32(asset_id) AS asset_id')
+    // And the per-asset result still drops a NULL id rather than rendering it ''.
+    expect(sql).toContain('WHERE asset IS NOT NULL')
   })
 
   it('averages the reserve over in-window grid samples only', async () => {

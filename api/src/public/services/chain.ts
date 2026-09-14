@@ -447,7 +447,7 @@ export interface StakingEventsOptions {
   offset: number
 }
 
-/** Extra rows read past the page so replay duplicates cannot shorten it. */
+/** The minimum size of one keyset chunk, and the margin each chunk over-reads by. */
 const DEDUP_SLACK = 100
 
 interface RawStakingRow {
@@ -464,7 +464,7 @@ interface RawStakingRow {
  *
  * `raw_events` is ordered (block_height, event_index), so an ascending page with
  * an optional `fromBlock` reads in key order and stops early. Deduplication of
- * the ReplacingMergeTree key happens in TS over an over-fetched window rather
+ * the ReplacingMergeTree key happens in TS over successive keyset chunks rather
  * than through LIMIT 1 BY, which would defeat that early stop.
  */
 export async function queryStakingEvents(client: ClickHouseClient, options: StakingEventsOptions): Promise<{ items: StakingEvent[]; totalCount: number }> {
@@ -480,32 +480,57 @@ export async function queryStakingEvents(client: ClickHouseClient, options: Stak
 
   const [rows, totalCount] = await Promise.all([
     (async () => {
-      const res = await client.query({
-        // `read_in_order_use_buffering = 0` is load-bearing, not a tuning knob.
-        // These events are ~1 per 1,200 blocks, so every granule the scan touches
-        // yields at most one row and the LIMIT is what must stop the read. With
-        // read-in-order buffering on, ClickHouse pre-reads far past the point the
-        // page is complete: measured on the live table, the default first page
-        // read 136M rows / 850 MiB, and with buffering off the same page reads
-        // 9.5M rows / 199 MiB. `args_json` is the column that makes the
-        // difference expensive.
-        query: `-- pub:staking:events
+      // Deduplication happens BEFORE the page is cut, over successive keyset
+      // chunks rather than one over-fetched window (the shape trades.ts uses).
+      // A single window is short by exactly the duplicates it holds, so a replay
+      // run longer than the slack returned a page shorter than `limit` while
+      // `totalCount` still reported the full uniqExact. The cursor always
+      // advances, so the read stays bounded whatever the duplicate run is.
+      const want = options.limit + options.offset
+      const deduped: RawStakingRow[] = []
+      const seen = new Set<string>()
+      let afterBlock: number | null = null
+      let afterEvent: number | null = null
+      while (deduped.length < want) {
+        const cursorFilter: string = afterBlock == null
+          ? ''
+          : ' AND (block_height, event_index) > ({afterBlock:UInt32}, {afterEvent:UInt32})'
+        const bound = Math.max(DEDUP_SLACK, want - deduped.length + DEDUP_SLACK)
+        const res: { json<T>(): Promise<T[]> } = await client.query({
+          // `read_in_order_use_buffering = 0` is load-bearing, not a tuning knob.
+          // These events are ~1 per 1,200 blocks, so every granule the scan touches
+          // yields at most one row and the LIMIT is what must stop the read. With
+          // read-in-order buffering on, ClickHouse pre-reads far past the point the
+          // page is complete: measured on the live table, the default first page
+          // read 136M rows / 850 MiB, and with buffering off the same page reads
+          // 9.5M rows / 199 MiB. `args_json` is the column that makes the
+          // difference expensive.
+          query: `-- pub:staking:events
             SELECT event_name, block_height, event_index, toString(block_timestamp) AS ts, args_json
             FROM price_data.raw_events
-            WHERE ${filter}
+            WHERE ${filter}${cursorFilter}
             ORDER BY block_height ASC, event_index ASC
             LIMIT {bound:UInt32}
             SETTINGS read_in_order_use_buffering = 0`,
-        query_params: { ...params, bound: options.limit + options.offset + DEDUP_SLACK },
-        format: 'JSONEachRow',
-      })
-      const seen = new Set<string>()
-      const deduped: RawStakingRow[] = []
-      for (const row of await res.json<RawStakingRow>()) {
-        const key = `${row.block_height}:${row.event_index}`
-        if (seen.has(key)) continue
-        seen.add(key)
-        deduped.push(row)
+          query_params: {
+            ...params,
+            bound,
+            ...(afterBlock == null ? {} : { afterBlock, afterEvent }),
+          },
+          format: 'JSONEachRow',
+        })
+        const raw: RawStakingRow[] = await res.json<RawStakingRow>()
+        for (const row of raw) {
+          const key = `${row.block_height}:${row.event_index}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          deduped.push(row)
+          if (deduped.length >= want) break
+        }
+        if (raw.length < bound || raw.length === 0) break
+        const tail: RawStakingRow = raw[raw.length - 1]!
+        afterBlock = Number(tail.block_height)
+        afterEvent = Number(tail.event_index)
       }
       return deduped.slice(options.offset, options.offset + options.limit)
     })(),
