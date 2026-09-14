@@ -52,6 +52,16 @@ export interface AssetRow {
   // Deployed ERC-20 contract of an `Erc20` registry asset (lowercase 0x + 40 hex),
   // '' for every other asset — what lets SQL map an EVM token address to its id.
   evm_address: string
+  // The block this metadata was READ at, and the table's replacement version.
+  //
+  // `assets` mirrors mutable chain state rather than deriving from raw, so
+  // "newest row wins" has to mean newest OBSERVATION, not newest INSERT. A
+  // historical range re-reads the registry as it stood at its own blocks, and a
+  // backfill run after live ingestion would otherwise reinstate a pre-rename
+  // symbol permanently — the merge keeps whichever part landed last. Versioning
+  // on the observation height makes a low block unable to overwrite a high one,
+  // whatever order the runs happen in.
+  observed_block: number
 }
 
 export interface IndexerStateRow {

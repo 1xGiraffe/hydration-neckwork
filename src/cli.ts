@@ -1,6 +1,6 @@
 import { run } from './indexer.js'
 import { parseBlockHeight, validateBlockRange } from './blockRange.js'
-import { createClickHouseClient } from './db/client.js'
+import { BOUNDED_QUERY_SETTINGS, createClickHouseClient } from './db/client.js'
 import { saveCheckpoint } from './store/checkpoint.js'
 import { clearOHLCForTimeRange, rebuildOHLCForTimeRange, restoreRollbackOHLCPrefix } from './ohlc/repair.js'
 
@@ -153,6 +153,7 @@ async function detectGaps(): Promise<void> {
         FROM (SELECT DISTINCT block_height FROM price_data.blocks)
       `,
       format: 'JSONEachRow',
+      clickhouse_settings: BOUNDED_QUERY_SETTINGS,
     })
     const summaryRows = await summaryResult.json<{
       indexed_blocks: string | number
@@ -198,27 +199,28 @@ async function detectGaps(): Promise<void> {
       FROM gaps
       WHERE previous_to > 0 AND from_block > previous_to + 1
     `
-    const countResult = await client.query({
-      query: `SELECT count() AS c FROM (${gapsSql})`,
+    // Run ONCE. Each evaluation is a DISTINCT plus a single-threaded row_number()
+    // over every indexed block height, and nothing in it prunes; wrapping the same
+    // SQL in count() and then re-running it for the listing paid that three times
+    // over, against the ClickHouse the live deployment serves from. Gaps are rare,
+    // so the whole set fits in memory and the count comes from the rows.
+    const gapsResult = await client.query({
+      query: `${gapsSql} ORDER BY start ASC`,
       format: 'JSONEachRow',
+      clickhouse_settings: BOUNDED_QUERY_SETTINGS,
     })
-    const countRows = await countResult.json<{ c: string | number }>()
-    const gapCount = Number(countRows[0]?.c ?? 0)
+    const allGaps = await gapsResult.json<{ start: number; end: number; count: number }>()
 
-    if (gapCount === 0) {
+    if (allGaps.length === 0) {
       console.log('[Gap Detection] No gaps found - all blocks indexed sequentially')
     } else {
-      const gapsResult = await client.query({
-        query: `${gapsSql} ORDER BY start ASC LIMIT 100`,
-        format: 'JSONEachRow',
-      })
-      const gaps = await gapsResult.json<{ start: number; end: number; count: number }>()
-      console.log(`[Gap Detection] Found ${gapCount} gap(s):`)
-      for (const gap of gaps) {
+      const shown = allGaps.slice(0, 100)
+      console.log(`[Gap Detection] Found ${allGaps.length} gap(s):`)
+      for (const gap of shown) {
         console.log(`  Gap: blocks ${gap.start} to ${gap.end} (${gap.count} blocks missing)`)
       }
-      if (gapCount > gaps.length) {
-        console.log(`  ... ${gapCount - gaps.length} more gap(s) omitted`)
+      if (allGaps.length > shown.length) {
+        console.log(`  ... ${allGaps.length - shown.length} more gap(s) omitted`)
       }
     }
   } catch (error) {
@@ -301,7 +303,7 @@ async function rollbackToBlock(targetBlock: number, checkpointId = 'main'): Prom
       const { start_time, end_time } = timeRange[0]
       console.log(`[Rollback] Cleaning OHLC tables for time range ${start_time} to ${end_time}...`)
       await clearOHLCForTimeRange(client, start_time, end_time)
-      await restoreRollbackOHLCPrefix(client, start_time)
+      await restoreRollbackOHLCPrefix(client, start_time, BOUNDED_QUERY_SETTINGS)
       console.log('[Rollback] OHLC tables cleaned')
     }
 
@@ -325,7 +327,9 @@ async function repairOHLC(fromTime: string, toTime: string): Promise<void> {
   const client = createClickHouseClient()
 
   try {
-    await rebuildOHLCForTimeRange(client, fromTime, toTime)
+    // Operator-facing, and it runs against the ClickHouse the live deployment
+    // serves from, so it takes the same ceiling every ad-hoc raw pass does.
+    await rebuildOHLCForTimeRange(client, fromTime, toTime, undefined, BOUNDED_QUERY_SETTINGS)
     console.log('[OHLC Repair] OHLC tables rebuilt successfully')
   } catch (error) {
     console.error('[OHLC Repair] Error rebuilding OHLC tables:', error)
