@@ -88,11 +88,16 @@ export function SearchResultBody({ r }: { r: Hit }) {
     )
   }
   if (r.type === 'xcDestination') {
-    // No asset icon: it is not a registry asset and has no artwork here. The
-    // chain tag is what places it, the same marker its activity rows carry.
+    // Not a registry asset, but it carries the same `origin` every foreign asset
+    // does, so its icon resolves through the ordinary CDN path — the /assets
+    // directory already renders these. The chain tag stays beside it: it is the
+    // marker the destination's activity rows carry, and it is what places a hit
+    // whose artwork the CDN happens not to hold.
     return (
       <span className="sr-acct">
-        <span className="xc-chain">{r.value}</span>
+        {r.asset
+          ? <AssetIcon assetId={r.asset.assetId} iconAssetId={r.asset.iconAssetId} symbol={r.asset.symbol} size={20} parachainId={r.asset.parachainId} origin={r.asset.origin} />
+          : <span className="xc-chain">{r.value}</span>}
         <span className="sr-acct-name"><span className="mono">{r.label || r.value}</span>{r.desc && <span className="sr-desc">{r.desc}</span>}</span>
       </span>
     )
