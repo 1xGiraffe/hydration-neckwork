@@ -146,7 +146,7 @@ const STABLESWAP_SWAP_EVENTS: SwapEventEntry[] = [
  * onward. We keep their metadata separate because the curated first-block
  * catalog above only tracks legacy pool-specific events today.
  */
-const UNIFIED_SWAP_EVENT_NAMES = [
+export const UNIFIED_SWAP_EVENT_NAMES = [
   'Broadcast.Swapped',
   'Broadcast.Swapped2',
   'Broadcast.Swapped3',
@@ -166,7 +166,14 @@ const SWAP_EVENT_CATALOG: SwapEventEntry[] = [
   ...STABLESWAP_SWAP_EVENTS,
 ]
 
-const LEGACY_SWAP_EVENT_NAMES = new Set(SWAP_EVENT_CATALOG.map(event => event.name))
+/**
+ * The two swap-event name sets, exported so every reader — the live indexer's
+ * `isSwapEvent` and the repair tooling's SQL alike — selects the same events. A
+ * second hand-written copy is how a future `Broadcast.Swapped4` gets added in one
+ * place and leaves the other silently blind to it.
+ */
+export const LEGACY_SWAP_EVENT_NAMES: readonly string[] = SWAP_EVENT_CATALOG.map(event => event.name)
+const LEGACY_SWAP_EVENT_NAME_SET = new Set(LEGACY_SWAP_EVENT_NAMES)
 const UNIFIED_SWAP_EVENT_NAME_SET = new Set<string>(UNIFIED_SWAP_EVENT_NAMES)
 
 /**
@@ -229,7 +236,7 @@ export function isSwapEvent(eventName: string, specVersion?: number): boolean {
   }
 
   if (specVersion != null) {
-    return LEGACY_SWAP_EVENT_NAMES.has(eventName)
+    return LEGACY_SWAP_EVENT_NAME_SET.has(eventName)
   }
 
   return EVENT_CLASSIFICATION[eventName] === EventCategory.SWAP
