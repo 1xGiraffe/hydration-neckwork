@@ -54,7 +54,7 @@ function BookSide({ side, entries, asset }: { side: 'bids' | 'asks'; entries: As
                 </td>
                 <td data-label="Total" className="r">
                   <span className="trade-leg">
-                    <AssetIcon assetId={e.counter.assetId} iconAssetId={e.counter.iconAssetId} symbol={e.counter.symbol} size={16} parachainId={e.counter.parachainId} origin={e.counter.origin} />
+                    <AssetIcon assetId={e.counter.assetId} iconAssetId={e.counter.iconAssetId} iconAssetIds={e.counter.iconAssetIds} symbol={e.counter.symbol} size={16} parachainId={e.counter.parachainId} origin={e.counter.origin} />
                     {' '}<span className="mono">{F.amount(e.total, e.counter.decimals)}</span>
                   </span>
                   {e.fills > 0 && <span className="dca-sub mono muted" title={`${e.fills} partial ${e.fills === 1 ? 'fill' : 'fills'} already taken off this order`}>

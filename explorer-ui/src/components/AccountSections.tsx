@@ -74,10 +74,10 @@ function valueEventTip(ev: ValueEvent): ReactNode {
   const kindLabel = ev.kind === 'dca' && ev.dcaScheduleId != null ? `DCA #${ev.dcaScheduleId}` : valueEventLabel(ev)
   const pair = ev.assetIn && ev.assetOut && (
     <span className="trade-leg">
-      <AssetIcon assetId={ev.assetIn.assetId} iconAssetId={ev.assetIn.iconAssetId} symbol={ev.assetIn.symbol} size={16} parachainId={ev.assetIn.parachainId} origin={ev.assetIn.origin} />
+      <AssetIcon assetId={ev.assetIn.assetId} iconAssetId={ev.assetIn.iconAssetId} iconAssetIds={ev.assetIn.iconAssetIds} symbol={ev.assetIn.symbol} size={16} parachainId={ev.assetIn.parachainId} origin={ev.assetIn.origin} />
       {' '}<span className="mono">{ev.assetIn.symbol}</span>
       <span className="muted">{' → '}</span>
-      <AssetIcon assetId={ev.assetOut.assetId} iconAssetId={ev.assetOut.iconAssetId} symbol={ev.assetOut.symbol} size={16} parachainId={ev.assetOut.parachainId} origin={ev.assetOut.origin} />
+      <AssetIcon assetId={ev.assetOut.assetId} iconAssetId={ev.assetOut.iconAssetId} iconAssetIds={ev.assetOut.iconAssetIds} symbol={ev.assetOut.symbol} size={16} parachainId={ev.assetOut.parachainId} origin={ev.assetOut.origin} />
       {' '}<span className="mono">{ev.assetOut.symbol}</span>
     </span>
   )
@@ -90,7 +90,7 @@ function valueEventTip(ev: ValueEvent): ReactNode {
     {(pair || ev.asset || (dir && ev.counterparty) || (ev.kind === 'dca' && ev.dcaTrades != null)) && (
       <div className="apx-mark-row">
         {pair || (ev.asset && <span className="trade-leg">
-          <AssetIcon assetId={ev.asset.assetId} iconAssetId={ev.asset.iconAssetId} symbol={ev.asset.symbol} size={16} parachainId={ev.asset.parachainId} origin={ev.asset.origin} />
+          <AssetIcon assetId={ev.asset.assetId} iconAssetId={ev.asset.iconAssetId} iconAssetIds={ev.asset.iconAssetIds} symbol={ev.asset.symbol} size={16} parachainId={ev.asset.parachainId} origin={ev.asset.origin} />
           {' '}<span className="mono">{ev.amount != null ? `${F.amount(ev.amount, ev.asset.decimals)} ` : ''}{ev.asset.symbol}</span>
         </span>)}
         {dir && ev.counterparty && <><span className="muted">{dir}</span><AddrPill account={ev.counterparty} noCopy /></>}
@@ -105,16 +105,16 @@ function valueEventTip(ev: ValueEvent): ReactNode {
 function valueEventDetail(ev: ValueEvent): ReactNode | undefined {
   if (ev.assetIn && ev.assetOut) {
     return <span className="trade-leg">
-      <AssetIcon assetId={ev.assetIn.assetId} iconAssetId={ev.assetIn.iconAssetId} symbol={ev.assetIn.symbol} size={13} parachainId={ev.assetIn.parachainId} origin={ev.assetIn.origin} />
+      <AssetIcon assetId={ev.assetIn.assetId} iconAssetId={ev.assetIn.iconAssetId} iconAssetIds={ev.assetIn.iconAssetIds} symbol={ev.assetIn.symbol} size={13} parachainId={ev.assetIn.parachainId} origin={ev.assetIn.origin} />
       <span className="mono">{ev.assetIn.symbol}</span>
       <span className="muted">→</span>
-      <AssetIcon assetId={ev.assetOut.assetId} iconAssetId={ev.assetOut.iconAssetId} symbol={ev.assetOut.symbol} size={13} parachainId={ev.assetOut.parachainId} origin={ev.assetOut.origin} />
+      <AssetIcon assetId={ev.assetOut.assetId} iconAssetId={ev.assetOut.iconAssetId} iconAssetIds={ev.assetOut.iconAssetIds} symbol={ev.assetOut.symbol} size={13} parachainId={ev.assetOut.parachainId} origin={ev.assetOut.origin} />
       <span className="mono">{ev.assetOut.symbol}</span>
     </span>
   }
   if (ev.asset) {
     return <span className="trade-leg">
-      <AssetIcon assetId={ev.asset.assetId} iconAssetId={ev.asset.iconAssetId} symbol={ev.asset.symbol} size={13} parachainId={ev.asset.parachainId} origin={ev.asset.origin} />
+      <AssetIcon assetId={ev.asset.assetId} iconAssetId={ev.asset.iconAssetId} iconAssetIds={ev.asset.iconAssetIds} symbol={ev.asset.symbol} size={13} parachainId={ev.asset.parachainId} origin={ev.asset.origin} />
       <span className="mono">{ev.amount != null ? `${F.amount(ev.amount, ev.asset.decimals)} ` : ''}{ev.asset.symbol}</span>
     </span>
   }
@@ -387,7 +387,7 @@ function MoneyMarketReserveColumns({ mm }: { mm: MoneyMarketPosition }) {
         <div className="mm-col-head">Lent</div>
         {supplied.map(r => (
           <div className="mm-row" key={`s${r.assetId}`}>
-            <span className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></span>
+            <span className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} iconAssetIds={r.iconAssetIds} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></span>
             <span className="mono">{F.amount(r.supplied, r.decimals)}</span>
             <span className="mono muted">{F.usd(r.suppliedUsd)}</span>
             {r.collateral ? <span className="badge ok mm-collateral-badge">collateral</span> : null}
@@ -399,7 +399,7 @@ function MoneyMarketReserveColumns({ mm }: { mm: MoneyMarketPosition }) {
         <div className="mm-col-head">Borrowed</div>
         {borrowed.map(r => (
           <div className="mm-row" key={`d${r.assetId}`}>
-            <span className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></span>
+            <span className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} iconAssetIds={r.iconAssetIds} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></span>
             <span className="mono">{F.amount(r.debt, r.decimals)}</span>
             <span className="mono muted">{F.usd(r.debtUsd)}</span>
           </div>
@@ -635,9 +635,9 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
                 {showOwner && <td data-label="Owner">{d.who ? <AddrPill account={d.who} noCopy /> : <Dash />}</td>}
                 <td data-label="Selling → Buying">
                   <span className="asset-flow">
-                    <span className="trade-leg"><AssetIcon assetId={d.assetIn.assetId} iconAssetId={d.assetIn.iconAssetId} symbol={d.assetIn.symbol} size={20} parachainId={d.assetIn.parachainId} origin={d.assetIn.origin} /> <span className="mono">{d.assetIn.symbol}</span></span>
+                    <span className="trade-leg"><AssetIcon assetId={d.assetIn.assetId} iconAssetId={d.assetIn.iconAssetId} iconAssetIds={d.assetIn.iconAssetIds} symbol={d.assetIn.symbol} size={20} parachainId={d.assetIn.parachainId} origin={d.assetIn.origin} /> <span className="mono">{d.assetIn.symbol}</span></span>
                     {' → '}
-                    <span className="trade-leg"><AssetIcon assetId={d.assetOut.assetId} iconAssetId={d.assetOut.iconAssetId} symbol={d.assetOut.symbol} size={20} parachainId={d.assetOut.parachainId} origin={d.assetOut.origin} /> <span className="mono">{d.assetOut.symbol}</span></span>
+                    <span className="trade-leg"><AssetIcon assetId={d.assetOut.assetId} iconAssetId={d.assetOut.iconAssetId} iconAssetIds={d.assetOut.iconAssetIds} symbol={d.assetOut.symbol} size={20} parachainId={d.assetOut.parachainId} origin={d.assetOut.origin} /> <span className="mono">{d.assetOut.symbol}</span></span>
                     {d.intentId && <span className="dca-kind" title={`ICE DCA intent #${d.id} — runtime 443’s DCA, filled by a solver rather than by the DCA pallet`}>intent</span>}
                   </span>
                 </td>
@@ -738,9 +738,9 @@ export function LimitOrdersTable({ orders, now, title, showOwner, emptyText }: {
                 {showOwner && <td data-label="Owner"><AddrPill account={o.who} noCopy /></td>}
                 <td data-label="Selling → Buying">
                   <span className="asset-flow">
-                    <span className="trade-leg"><AssetIcon assetId={o.assetIn.assetId} iconAssetId={o.assetIn.iconAssetId} symbol={o.assetIn.symbol} size={20} parachainId={o.assetIn.parachainId} origin={o.assetIn.origin} /> <span className="mono">{o.assetIn.symbol}</span></span>
+                    <span className="trade-leg"><AssetIcon assetId={o.assetIn.assetId} iconAssetId={o.assetIn.iconAssetId} iconAssetIds={o.assetIn.iconAssetIds} symbol={o.assetIn.symbol} size={20} parachainId={o.assetIn.parachainId} origin={o.assetIn.origin} /> <span className="mono">{o.assetIn.symbol}</span></span>
                     {' → '}
-                    <span className="trade-leg"><AssetIcon assetId={o.assetOut.assetId} iconAssetId={o.assetOut.iconAssetId} symbol={o.assetOut.symbol} size={20} parachainId={o.assetOut.parachainId} origin={o.assetOut.origin} /> <span className="mono">{o.assetOut.symbol}</span></span>
+                    <span className="trade-leg"><AssetIcon assetId={o.assetOut.assetId} iconAssetId={o.assetOut.iconAssetId} iconAssetIds={o.assetOut.iconAssetIds} symbol={o.assetOut.symbol} size={20} parachainId={o.assetOut.parachainId} origin={o.assetOut.origin} /> <span className="mono">{o.assetOut.symbol}</span></span>
                     {!o.partial && <span className="dca-kind" title="All-or-nothing — the order only fills in full">all-or-none</span>}
                   </span>
                 </td>
@@ -815,7 +815,7 @@ export function LiquidityPositionsTable({ positions }: { positions: LpPosition[]
               <tr key={p.positionId} {...rowNav(to)}>
                 <td data-label="Pool asset">
                   <div className="asset-row">
-                    <AssetIcon assetId={p.asset.assetId} iconAssetId={p.asset.iconAssetId} symbol={p.asset.symbol} size={30} parachainId={p.asset.parachainId} origin={p.asset.origin} />
+                    <AssetIcon assetId={p.asset.assetId} iconAssetId={p.asset.iconAssetId} iconAssetIds={p.asset.iconAssetIds} symbol={p.asset.symbol} size={30} parachainId={p.asset.parachainId} origin={p.asset.origin} />
                     <div className="ar-meta"><span className="ar-sym">{p.asset.symbol}{p.assetB ? ` / ${p.assetB.symbol}` : ''}</span><span className="ar-name">{lpPositionName(p)}</span></div>
                   </div>
                 </td>

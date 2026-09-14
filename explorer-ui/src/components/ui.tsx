@@ -410,11 +410,12 @@ const PNG_ICON_IDS = new Set([
   4, 20, 35, 36, 38, 39, 43, 1000085, 1000189, 1000794, 1000796, 1000809,
   1000286, 1000324, 1000365, 1000397, 1000479, 1000512, 1000524, 1000779,
 ])
-// 100/101/102 (4-Pool, 2-Pool, 2-Pool-Stbl) are multi-asset share tokens with no
-// single underlying to borrow from, so they stay here; every share token that HAS
-// one resolves through the API's iconAssetId instead of being listed.
+// Assets the CDN genuinely holds nothing for, so a request would only 404. Pool
+// share tokens are NOT here any more: one with a single dominant asset borrows its
+// icon (the API's iconAssetId), and a multi-asset one draws as a cluster of its
+// members (iconAssetIds) — neither asks the CDN for the share id itself.
 const NO_CDN_ICON_IDS = new Set([
-  29, 37, 45, 100, 101, 102, 670, 1112, 1000198, 1000444, 1000746, 1000766, 1000767, 1001034, 1001168,
+  29, 37, 45, 670, 1112, 1000198, 1000444, 1000746, 1000766, 1000767, 1001034, 1001168,
 ])
 function initialIconMode(srcId: number): 'svg' | 'png' | 'fail' {
   if (NO_CDN_ICON_IDS.has(srcId)) return 'fail'
@@ -480,25 +481,37 @@ function CdnIcon({ srcId, symbol, size, clip, origin }: { srcId: number; symbol:
   />
 }
 
-export function AssetIcon({ assetId, iconAssetId, symbol, size = 20, parachainId, origin }: { assetId: number; iconAssetId?: number; symbol: string; size?: number; parachainId?: number | null; origin?: AssetOrigin | null }) {
+export function AssetIcon({ assetId, iconAssetId, iconAssetIds, symbol, size = 20, parachainId, origin }: { assetId: number; iconAssetId?: number; iconAssetIds?: number[]; symbol: string; size?: number; parachainId?: number | null; origin?: AssetOrigin | null }) {
   // Some assets ship only .svg, others only .png — try svg, then png, then the
   // gradient-letter fallback (same chain as preis-ui). Hollar-wrapped tokens render
   // as a composite half/half icon; aTokens use the icon ID resolved by the API.
   // Keyed on the RESOLVED icon id, so a share token over a Hollar-wrapped stable
   // (2-Pool-HUSDC → HUSDC) inherits the composite instead of falling to the letter.
   const srcId = iconAssetId ?? assetId
+  // A pool share token is drawn as its members — the pool IS them, and a multi-asset
+  // pool has no single icon it could honestly borrow. Capped at three: past that the
+  // circles stop being tellable apart at the sizes these render in.
+  const members = iconAssetIds && iconAssetIds.length > 1 ? iconAssetIds.slice(0, 3) : null
   const composite = COMPOSITE_ICONS[srcId] ?? COMPOSITE_ICONS[assetId]
   const chainOrigin = origin ?? (parachainId != null ? { ecosystem: 'polkadot', chainId: String(parachainId), assetId: null } : null)
   const badgeKey = chainOrigin ? `${chainOrigin.ecosystem}:${chainOrigin.chainId}` : ''
   const [badgeFailure, setBadgeFailure] = useState<{ key: string; failed: boolean }>({ key: badgeKey, failed: false })
   const badgeFailed = badgeFailure.key === badgeKey && badgeFailure.failed
-  const body = composite ? (
+  const memberSize = Math.round(size * (members?.length === 3 ? 0.58 : 0.68))
+  const body = members ? (
+      <span className="asset-logo icon-stack" style={{ display: 'inline-flex', height: size, alignItems: 'center', ['--stack-overlap' as string]: `${-Math.round(memberSize * 0.34)}px` }}>
+        {members.map((m, i) => <CdnIcon key={`${m}:${i}`} srcId={m} symbol={symbol} size={memberSize} />)}
+      </span>
+    ) : composite ? (
       <span className="asset-logo" style={{ position: 'relative', width: size, height: size, borderRadius: '50%', overflow: 'hidden', display: 'inline-block', background: assetGradient(symbol)[0] }}>
         <CdnIcon srcId={composite[0]} symbol={symbol} size={size} clip="left" />
         <CdnIcon srcId={composite[1]} symbol={symbol} size={size} clip="right" />
       </span>
     ) : <CdnIcon srcId={srcId} symbol={symbol} size={size} origin={origin} />
-  return <span style={{ position: 'relative', width: size, height: size, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', verticalAlign: 'middle', lineHeight: 0 }}>
+  // A cluster is legitimately wider than one icon, so the box grows with it rather
+  // than the members being shrunk to fit — at 20px, three icons squeezed into one
+  // icon's width are 8px each and tell nothing apart.
+  return <span style={{ position: 'relative', width: members ? undefined : size, height: size, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', verticalAlign: 'middle', lineHeight: 0 }}>
     {body}
     {chainOrigin && !badgeFailed && <img
       src={originChainIconUrl(chainOrigin)} alt="" aria-hidden="true"
@@ -509,7 +522,7 @@ export function AssetIcon({ assetId, iconAssetId, symbol, size = 20, parachainId
 }
 
 export function AssetChip({ asset, link = true }: { asset: AssetRef; link?: boolean }) {
-  const body = <><AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} symbol={asset.symbol} parachainId={asset.parachainId} origin={asset.origin} /> {asset.symbol}</>
+  const body = <><AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} iconAssetIds={asset.iconAssetIds} symbol={asset.symbol} parachainId={asset.parachainId} origin={asset.origin} /> {asset.symbol}</>
   return link
     ? <Link to={paths.asset(asset.assetId)} className="asset-chip">{body}</Link>
     : <span className="asset-chip">{body}</span>
@@ -528,7 +541,7 @@ export function TokenIconRow({ assets, size = 16, others = 0 }: { assets: { asse
     <span className="token-icons icon-stack" data-no-hover>
       {assets.map(({ asset, valueUsd }) => (
         <span key={asset.assetId} className="token-icons-item" title={valueUsd != null ? `${asset.symbol} — ${F.usd(valueUsd)}` : asset.symbol}>
-          <AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} symbol={asset.symbol} size={size} parachainId={asset.parachainId} origin={asset.origin} />
+          <AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} iconAssetIds={asset.iconAssetIds} symbol={asset.symbol} size={size} parachainId={asset.parachainId} origin={asset.origin} />
         </span>
       ))}
       {others > 0 && (

@@ -7,6 +7,10 @@ export interface AssetOrigin {
 export interface AssetRef {
   assetId: number
   iconAssetId?: number
+  // A pool SHARE token's member assets. Present only on pool shares, and what lets
+  // a multi-asset pool (2-Pool is USDT+USDC) be drawn as what is in it rather than
+  // borrowing one member's icon or falling to the letter placeholder.
+  iconAssetIds?: number[]
   symbol: string
   name: string | null
   decimals: number
@@ -504,6 +508,9 @@ export interface AddressBalance { asset: AssetRef; total: string; free: string; 
 export interface MmReserve {
   assetId: number
   iconAssetId?: number
+  // Set when the reserve IS a pool share (a3-Pool over 3-Pool), so it draws as
+  // the pool rather than borrowing one member's icon.
+  iconAssetIds?: number[]
   symbol: string
   decimals: number
   parachainId?: number | null
