@@ -14,11 +14,18 @@ import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '..
 import { monthDayLabel as mdLabel, monthLabel as monLabel } from '../utils/dashboardDates'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 
-const UNLOCK_KEYS = ['gigahdx', 'vesting', 'vote'] as const
+// Every lock cause the series can carry. `other` is the catch-all for a lock id
+// outside the three named causes (staking, democracy, elections, sufficiency, or
+// an unmapped one): without it those slices would be dropped from the chart while
+// still counting toward the envelope, so the bar would not sum to its own total.
+const UNLOCK_KEYS = ['gigahdx', 'vesting', 'vote', 'other'] as const
 const LOCK_LABELS: Record<string, string> = { vote: 'Vote', staking: 'Staking', gigahdx: 'GIGAHDX', vesting: 'Vesting', other: 'Other' }
 // Sum of the first 4 weekly unlock buckets across all lock types (≤28 days out).
+// Folded over UNLOCK_KEYS rather than named one by one, so a cause added to the
+// series reaches this figure too instead of quietly dropping out of it.
 function near28d(d: HdxDashboard): number {
-  return d.unlocks.buckets.slice(0, 4).reduce((s, b) => s + b.gigahdx + b.vesting + b.vote, 0)
+  return d.unlocks.buckets.slice(0, 4)
+    .reduce((s, b) => s + UNLOCK_KEYS.reduce((t, k) => t + (b[k] ?? 0), 0), 0)
 }
 
 // 1. stat ribbon
@@ -238,17 +245,17 @@ function UnlocksSection({ d }: { d: HdxDashboard }) {
   // years, flattening the dated series that actually says when balance moves.
   // GIGAHDX leads the cards: it is two orders of magnitude smaller than the
   // other kinds and the only one with a deadline worth acting on.
-  const nowTotal = UNLOCK_KEYS.reduce((s, k) => s + nowHdx[k], 0)
-  const nowKeys = UNLOCK_KEYS.filter(k => nowHdx[k] > 0)
+  const nowTotal = UNLOCK_KEYS.reduce((s, k) => s + (nowHdx[k] ?? 0), 0)
+  const nowKeys = UNLOCK_KEYS.filter(k => (nowHdx[k] ?? 0) > 0)
   columns.push({
     key: 'later',
     label: 'later',
-    segments: NON_GIGA_KEYS.map(k => ({ key: k, label: LOCK_LABELS[k], color: lockColor(k), value: laterHdx[k] })),
+    segments: NON_GIGA_KEYS.map(k => ({ key: k, label: LOCK_LABELS[k], color: lockColor(k), value: laterHdx[k] ?? 0 })),
     tip: (
       <>
         <span className="t-d">Later{buckets.length ? ` (after ${mdLabel(buckets[buckets.length - 1].toTs)})` : ''}</span>
-        {NON_GIGA_KEYS.map(k => <TipRow key={k} color={lockColor(k)} label={LOCK_LABELS[k]} value={compactAmount(laterHdx[k]) + ' HDX'} />)}
-        <TipRow label="Total" value={compactAmount(NON_GIGA_KEYS.reduce((s, k) => s + laterHdx[k], 0)) + ' HDX'} />
+        {NON_GIGA_KEYS.map(k => <TipRow key={k} color={lockColor(k)} label={LOCK_LABELS[k]} value={compactAmount(laterHdx[k] ?? 0) + ' HDX'} />)}
+        <TipRow label="Total" value={compactAmount(NON_GIGA_KEYS.reduce((s, k) => s + (laterHdx[k] ?? 0), 0)) + ' HDX'} />
       </>
     ),
   })
@@ -269,7 +276,7 @@ function UnlocksSection({ d }: { d: HdxDashboard }) {
                   display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
                   background: lockColor(k), marginRight: 5, verticalAlign: 'middle',
                 }} />
-                {LOCK_LABELS[k]} {compactAmount(nowHdx[k])}
+                {LOCK_LABELS[k]} {compactAmount(nowHdx[k] ?? 0)}
               </span>
             ))}
             {nowKeys.length > 1 && ` (${compactAmount(nowTotal)} total)`}
