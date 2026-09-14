@@ -883,7 +883,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
         stableswapPools,
         decimals,
         config.USD_REFERENCE_BASKETS[0]?.[0] ?? 10,
-        config.LRNA_ASSET_ID,
+        config.H2O_ASSET_ID,
         config.OMNIPOOL_BRIDGE_IDS,
         currentAtokenEquivalences,
         totalIssuances,

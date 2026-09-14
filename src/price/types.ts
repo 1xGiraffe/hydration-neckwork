@@ -1,7 +1,7 @@
 // hubReserve comes from Omnipool.Assets storage
 // reserve comes from Tokens.Accounts for the Omnipool sovereign account
 export interface OmnipoolAssetState {
-  hubReserve: bigint;    // LRNA reserves
+  hubReserve: bigint;    // H2O reserves
   reserve: bigint;       // Token reserves (from Tokens pallet)
   shares: bigint;
   protocolShares: bigint;

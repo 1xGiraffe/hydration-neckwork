@@ -15,32 +15,32 @@ function bigintDivide(numerator: bigint, denominator: bigint, precision: number 
   return `${integerPart}.${decimalPart}`;
 }
 
-// Calculate LRNA price in USD from USD anchor asset's Omnipool state.
-// Formula: LRNA price = reserve / hubReserve (adjusted for decimals)
-export function calculateLRNAPrice(
+// Calculate H2O price in USD from USD anchor asset's Omnipool state.
+// Formula: H2O price = reserve / hubReserve (adjusted for decimals)
+export function calculateH2OPrice(
   usdState: OmnipoolAssetState,
   usdDecimals: number
 ): string {
   if (usdState.hubReserve === 0n) {
-    throw new Error('Cannot calculate LRNA price: zero hub reserve');
+    throw new Error('Cannot calculate H2O price: zero hub reserve');
   }
 
-  const lrnaDecimals = 12;
-  const lrnaScale = 10n ** BigInt(lrnaDecimals);
+  const h2oDecimals = 12;
+  const h2oScale = 10n ** BigInt(h2oDecimals);
   const usdScale = 10n ** BigInt(usdDecimals);
 
-  return bigintDivide(usdState.reserve * lrnaScale, usdState.hubReserve * usdScale, 12);
+  return bigintDivide(usdState.reserve * h2oScale, usdState.hubReserve * usdScale, 12);
 }
 
 // Calculate USD prices for all assets in the Omnipool.
-// Formula: priceInUSDT = (hubReserve / reserve) * lrnaPrice, normalized for decimals.
+// Formula: priceInUSDT = (hubReserve / reserve) * h2oPrice, normalized for decimals.
 export function calculateOmnipoolPrices(
   assets: Map<number, OmnipoolAssetState>,
-  lrnaPrice: string,
+  h2oPrice: string,
   decimals: AssetDecimals
 ): PriceMap {
   const prices = new Map<number, string>();
-  const lrnaDecimals = 12;
+  const h2oDecimals = 12;
 
   for (const [assetId, state] of assets.entries()) {
     if (state.reserve === 0n || state.hubReserve === 0n) {
@@ -53,13 +53,13 @@ export function calculateOmnipoolPrices(
     }
 
     const assetScale = 10n ** BigInt(assetDecimals);
-    const lrnaScale = 10n ** BigInt(lrnaDecimals);
+    const h2oScale = 10n ** BigInt(h2oDecimals);
 
-    const [intPart, decPart = ''] = lrnaPrice.split('.');
+    const [intPart, decPart = ''] = h2oPrice.split('.');
     const priceDigits = intPart + decPart.padEnd(12, '0');
-    const lrnaPriceBigint = BigInt(priceDigits);
+    const h2oPriceBigint = BigInt(priceDigits);
 
-    const result = (state.hubReserve * assetScale * lrnaPriceBigint) / (state.reserve * lrnaScale);
+    const result = (state.hubReserve * assetScale * h2oPriceBigint) / (state.reserve * h2oScale);
 
     const resultStr = result.toString().padStart(13, '0');
     const resultInt = resultStr.slice(0, -12) || '0';

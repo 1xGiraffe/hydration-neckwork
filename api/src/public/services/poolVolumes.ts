@@ -1,5 +1,6 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cachedSwr } from '../../services/cache.ts'
+import { H2O_ASSET_ID } from '../../services/explorerAssets.ts'
 import {
   ANCHORED_LEG_WINDOW,
   ANCHORED_PRICE_WINDOW,
@@ -70,8 +71,7 @@ export {
 // several hundred thousand fills, and streaming them into the API process to net
 // them there would make the endpoint's cost linear in trade count per request.
 
-/** The Omnipool's hub asset. Its legs are the protocol fee, never per-asset volume. */
-const LRNA_ASSET_ID = 1
+// The Omnipool's hub asset (H2O). Its legs are the protocol fee, never per-asset volume.
 
 /**
  * Rolling windows this surface serves.
@@ -142,10 +142,10 @@ function warnIfNothingPriced(venue: string, window: string, fills: number, total
 
 /**
  * The Omnipool trades every pair THROUGH the hub, and emits one fill per hop: a
- * user swap A→B is `A → LRNA` immediately followed by `LRNA → B`, sharing the
+ * user swap A→B is `A → H2O` immediately followed by `H2O → B`, sharing the
  * router operation when routed and adjacent event indices always (measured over a
  * 24-hour window: 3 721 of 3 721 hub-out fills are followed at `event_index + 1`
- * by a hub-in fill; the 1 503 unpaired hub-in fills are users spending LRNA
+ * by a hub-in fill; the 1 503 unpaired hub-in fills are users spending H2O
  * directly, which are whole swaps of their own).
  *
  * So a fill is NOT a user trade — half of them are the first leg of one. Anything
@@ -165,7 +165,7 @@ const NEXT_FILL_WINDOW = 'WINDOW nxt AS (PARTITION BY block_height ORDER BY even
 const IS_FIRST_HOP = 'out_hub = 1 AND next_in_hub = 1 AND next_event_index = event_index + 1'
 
 /**
- * Per-asset Omnipool volume, asset fees and protocol (LRNA) fees, plus the venue's
+ * Per-asset Omnipool volume, asset fees and protocol (H2O) fees, plus the venue's
  * single-counted total as one extra row (`scope = 'total'`).
  *
  * A fill's value is its OUT side, falling back to its IN side when the out asset
@@ -175,7 +175,7 @@ const IS_FIRST_HOP = 'out_hub = 1 AND next_in_hub = 1 AND next_event_index = eve
  * appears in a fill ONLY as a fee leg has no side and no volume — it must not
  * inherit the fill's value.
  *
- * The LRNA fee is the protocol fee. It is attributed to the fill's non-hub IN
+ * The H2O fee is the protocol fee. It is attributed to the fill's non-hub IN
  * asset — the asset that was sold into the hub, which is where the runtime charges
  * it — and to the OUT asset only when the fill's in-leg IS the hub.
  *
@@ -207,13 +207,13 @@ fill AS (
          sum(leg_out_usd) AS out_usd,
          sum(leg_in_usd) AS in_usd,
          if(out_usd > 0, out_usd, in_usd) AS fill_usd,
-         maxIf(has_out, asset_id = ${LRNA_ASSET_ID}) AS out_hub,
-         maxIf(has_in, asset_id = ${LRNA_ASSET_ID}) AS in_hub,
-         anyIf(toNullable(asset_id), has_in = 1 AND asset_id != ${LRNA_ASSET_ID}) AS in_asset,
-         anyIf(toNullable(asset_id), has_out = 1 AND asset_id != ${LRNA_ASSET_ID}) AS out_asset,
-         sumIf(leg_fee_usd, asset_id = ${LRNA_ASSET_ID}) AS hub_fee_usd,
+         maxIf(has_out, asset_id = ${H2O_ASSET_ID}) AS out_hub,
+         maxIf(has_in, asset_id = ${H2O_ASSET_ID}) AS in_hub,
+         anyIf(toNullable(asset_id), has_in = 1 AND asset_id != ${H2O_ASSET_ID}) AS in_asset,
+         anyIf(toNullable(asset_id), has_out = 1 AND asset_id != ${H2O_ASSET_ID}) AS out_asset,
+         sumIf(leg_fee_usd, asset_id = ${H2O_ASSET_ID}) AS hub_fee_usd,
          groupArrayIf(tuple(asset_id, leg_in_usd + leg_out_usd, leg_fee_usd, greatest(has_in, has_out)),
-                      asset_id != ${LRNA_ASSET_ID}) AS asset_parts
+                      asset_id != ${H2O_ASSET_ID}) AS asset_parts
   FROM fill_asset
   GROUP BY block_height, event_index
 ),
@@ -288,7 +288,7 @@ ORDER BY volume DESC, pool_key`
  * chain's flow against itself.
  *
  * The ONE exception is the Omnipool's hub hop (see IS_FIRST_HOP): an unrouted
- * `A → LRNA` fill is not a trade, it is the first half of one, and it is keyed
+ * `A → H2O` fill is not a trade, it is the first half of one, and it is keyed
  * onto its partner so the hub cancels in the net and the swap counts once. That
  * still keys per fill — it names the partner fill, never the extrinsic.
  *
@@ -329,15 +329,15 @@ fill_asset AS (
          sumIf(usd, leg_kind = 'fee' AND fee_dest = 'account') AS fee_account,
          sumIf(usd, leg_kind = 'fee' AND fee_dest = 'burned') AS fee_burned,
          sumIf(usd, leg_kind = 'fee' AND fee_dest = '') AS fee_unknown,
-         sumIf(usd, leg_kind = 'fee' AND asset_id = ${LRNA_ASSET_ID}) AS fee_hub
+         sumIf(usd, leg_kind = 'fee' AND asset_id = ${H2O_ASSET_ID}) AS fee_hub
   FROM priced
   GROUP BY block_height, event_index, asset_id
 ),
 fill AS (
   SELECT block_height, event_index, any(op_key) AS op_key, any(venue) AS venue,
          toDate(min(block_time), 'UTC') AS day,
-         maxIf(has_out, asset_id = ${LRNA_ASSET_ID}) AS out_hub,
-         maxIf(has_in, asset_id = ${LRNA_ASSET_ID}) AS in_hub,
+         maxIf(has_out, asset_id = ${H2O_ASSET_ID}) AS out_hub,
+         maxIf(has_in, asset_id = ${H2O_ASSET_ID}) AS in_hub,
          sum(fee_total) AS fee_total, sum(fee_account) AS fee_account, sum(fee_burned) AS fee_burned,
          sum(fee_unknown) AS fee_unknown, sum(fee_hub) AS fee_hub,
          groupArray(tuple(asset_id, net_usd)) AS nets

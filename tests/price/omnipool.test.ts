@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { calculateLRNAPrice, calculateOmnipoolPrices } from '../../src/price/omnipool.ts';
+import { calculateH2OPrice, calculateOmnipoolPrices } from '../../src/price/omnipool.ts';
 import type { OmnipoolAssetState } from '../../src/price/types.ts';
 
-describe('calculateLRNAPrice', () => {
-  it('calculates LRNA price from symmetric USDT reserves', () => {
+describe('calculateH2OPrice', () => {
+  it('calculates H2O price from symmetric USDT reserves', () => {
     const usdState: OmnipoolAssetState = {
-      hubReserve: 1000000000000n,  // 1 LRNA (12 decimals: 1 * 10^12)
+      hubReserve: 1000000000000n,  // 1 H2O (12 decimals: 1 * 10^12)
       reserve: 1000000n,            // 1 USDT (6 decimals: 1 * 10^6)
       shares: 0n,
       protocolShares: 0n,
@@ -13,18 +13,18 @@ describe('calculateLRNAPrice', () => {
       tradable: 0,
     };
 
-    const lrnaPrice = calculateLRNAPrice(usdState, 6);
+    const h2oPrice = calculateH2OPrice(usdState, 6);
 
-    // With 1 USDT per 1 LRNA, LRNA price = 1.0 USDT
+    // With 1 USDT per 1 H2O, H2O price = 1.0 USDT
     // Formula: (reserve * 10^12) / (hubReserve * 10^6)
     //        = (1000000 * 10^12) / (1000000000000 * 10^6)
     //        = 10^18 / 10^18 = 1.0
-    expect(lrnaPrice).toBe('1.000000000000');
+    expect(h2oPrice).toBe('1.000000000000');
   });
 
-  it('calculates LRNA price from asymmetric reserves', () => {
+  it('calculates H2O price from asymmetric reserves', () => {
     const usdState: OmnipoolAssetState = {
-      hubReserve: 1000000000000n,  // 1 LRNA (12 decimals)
+      hubReserve: 1000000000000n,  // 1 H2O (12 decimals)
       reserve: 2000000n,            // 2 USDT (6 decimals: 2 * 10^6)
       shares: 0n,
       protocolShares: 0n,
@@ -32,11 +32,11 @@ describe('calculateLRNAPrice', () => {
       tradable: 0,
     };
 
-    const lrnaPrice = calculateLRNAPrice(usdState, 6);
+    const h2oPrice = calculateH2OPrice(usdState, 6);
 
-    // With 2 USDT per 1 LRNA, LRNA price = 2.0 USDT
+    // With 2 USDT per 1 H2O, H2O price = 2.0 USDT
     // Formula: (2000000 * 10^12) / (1000000000000 * 10^6) = 2.0
-    expect(lrnaPrice).toBe('2.000000000000');
+    expect(h2oPrice).toBe('2.000000000000');
   });
 
   it('prices H2O exactly from an 18-decimal dollar anchor', () => {
@@ -51,9 +51,9 @@ describe('calculateLRNAPrice', () => {
 
     // (26000e18 * 1e12) / (1000e12 * 1e18) = 26, computed in integers: the
     // 18-decimal scale must not be routed through a float.
-    expect(calculateLRNAPrice(daiState, 18)).toBe('26.000000000000');
+    expect(calculateH2OPrice(daiState, 18)).toBe('26.000000000000');
     // One extra DAI atom cannot move the 12-decimal result.
-    expect(calculateLRNAPrice({ ...daiState, reserve: daiState.reserve + 1n }, 18)).toBe('26.000000000000');
+    expect(calculateH2OPrice({ ...daiState, reserve: daiState.reserve + 1n }, 18)).toBe('26.000000000000');
   });
 
   it('handles zero hub reserve', () => {
@@ -66,7 +66,7 @@ describe('calculateLRNAPrice', () => {
       tradable: 0,
     };
 
-    expect(() => calculateLRNAPrice(usdState, 6)).toThrow();
+    expect(() => calculateH2OPrice(usdState, 6)).toThrow();
   });
 });
 
@@ -74,7 +74,7 @@ describe('calculateOmnipoolPrices', () => {
   it('calculates prices for assets with valid reserves', () => {
     const assets = new Map<number, OmnipoolAssetState>([
       [0, { // HDX (12 decimals)
-        hubReserve: 50000000000000n,    // 50 LRNA (50 * 10^12)
+        hubReserve: 50000000000000n,    // 50 H2O (50 * 10^12)
         reserve: 100000000000000000n,   // 100,000 HDX (100000 * 10^12)
         shares: 0n,
         protocolShares: 0n,
@@ -82,7 +82,7 @@ describe('calculateOmnipoolPrices', () => {
         tradable: 0,
       }],
       [5, { // DOT (10 decimals)
-        hubReserve: 5000000000000000n,  // 5000 LRNA (5000 * 10^12)
+        hubReserve: 5000000000000000n,  // 5000 H2O (5000 * 10^12)
         reserve: 1000000000000n,        // 100 DOT (100 * 10^10)
         shares: 0n,
         protocolShares: 0n,
@@ -97,20 +97,20 @@ describe('calculateOmnipoolPrices', () => {
       [10, 6],  // USDT
     ]);
 
-    const lrnaPrice = '1.000000000000';
-    const prices = calculateOmnipoolPrices(assets, lrnaPrice, decimals);
+    const h2oPrice = '1.000000000000';
+    const prices = calculateOmnipoolPrices(assets, h2oPrice, decimals);
 
     expect(prices.size).toBe(2);
     expect(prices.has(0)).toBe(true);  // HDX
     expect(prices.has(5)).toBe(true);  // DOT
 
-    // HDX (12 decimals): hubReserve=50 LRNA, reserve=100,000 HDX
+    // HDX (12 decimals): hubReserve=50 H2O, reserve=100,000 HDX
     // With decimal normalization: (50 * 10^12 / 100,000 * 10^12) * 1.0 = 0.0005 USDT
     const hdxPrice = prices.get(0);
     expect(hdxPrice).toBeDefined();
     expect(parseFloat(hdxPrice!)).toBeCloseTo(0.0005, 6);
 
-    // DOT (10 decimals): hubReserve=5000 LRNA, reserve=100 DOT
+    // DOT (10 decimals): hubReserve=5000 H2O, reserve=100 DOT
     // With decimal normalization: (5000 * 10^10 / 100 * 10^12) * 1.0 = 50.0 USDT
     const dotPrice = prices.get(5);
     expect(dotPrice).toBeDefined();
@@ -164,7 +164,7 @@ describe('calculateOmnipoolPrices', () => {
   it('correctly normalizes asset with 8 decimals (WBTC)', () => {
     const assets = new Map<number, OmnipoolAssetState>([
       [21, { // WBTC (8 decimals)
-        hubReserve: 100000000000000n,   // 100 LRNA (100 * 10^12)
+        hubReserve: 100000000000000n,   // 100 H2O (100 * 10^12)
         reserve: 200000000n,            // 2 WBTC (2 * 10^8)
         shares: 0n,
         protocolShares: 0n,
@@ -178,13 +178,13 @@ describe('calculateOmnipoolPrices', () => {
       [10, 6],  // USDT
     ]);
 
-    const lrnaPrice = '1.000000000000';
-    const prices = calculateOmnipoolPrices(assets, lrnaPrice, decimals);
+    const h2oPrice = '1.000000000000';
+    const prices = calculateOmnipoolPrices(assets, h2oPrice, decimals);
 
     expect(prices.size).toBe(1);
     expect(prices.has(21)).toBe(true);
 
-    // WBTC (8 decimals): hubReserve=100 LRNA, reserve=2 WBTC
+    // WBTC (8 decimals): hubReserve=100 H2O, reserve=2 WBTC
     // With decimal normalization: (100 * 10^8 / 2 * 10^12) * 1.0 = 50.0 USDT
     const wbtcPrice = prices.get(21);
     expect(wbtcPrice).toBeDefined();

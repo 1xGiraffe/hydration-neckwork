@@ -51,7 +51,7 @@ describe('resolvePrices', () => {
     // USDT in Omnipool
     const omnipoolAssets = new Map<number, OmnipoolAssetState>([
       [10, { // USDT (6 decimals)
-        hubReserve: 1000000000000n,   // 1 LRNA
+        hubReserve: 1000000000000n,   // 1 H2O
         reserve: 1000000n,             // 1 USDT
         shares: 0n,
         protocolShares: 0n,
@@ -59,7 +59,7 @@ describe('resolvePrices', () => {
         tradable: 0,
       }],
       [0, { // HDX (12 decimals)
-        hubReserve: 50000000000000n,     // 50 LRNA
+        hubReserve: 50000000000000n,     // 50 H2O
         reserve: 100000000000000000n,    // 100,000 HDX
         shares: 0n,
         protocolShares: 0n,
@@ -67,7 +67,7 @@ describe('resolvePrices', () => {
         tradable: 0,
       }],
       [5, { // DOT (10 decimals)
-        hubReserve: 5000000000000000n,   // 5000 LRNA
+        hubReserve: 5000000000000000n,   // 5000 H2O
         reserve: 1000000000000n,         // 100 DOT
         shares: 0n,
         protocolShares: 0n,
@@ -107,10 +107,10 @@ describe('resolvePrices', () => {
 
     const { prices } = resolvePrices(omnipoolAssets, xykPools, stableswapPools, decimals);
 
-    // Should have prices for: USDT, LRNA, HDX, DOT, GLMR, USDC
+    // Should have prices for: USDT, H2O, HDX, DOT, GLMR, USDC
     expect(prices.size).toBeGreaterThanOrEqual(5);
     expect(prices.has(10)).toBe(true);  // USDT
-    expect(prices.has(1)).toBe(true);   // LRNA
+    expect(prices.has(1)).toBe(true);   // H2O
     expect(prices.has(0)).toBe(true);   // HDX
     expect(prices.has(5)).toBe(true);   // DOT
     expect(prices.has(2)).toBe(true);   // GLMR
@@ -129,7 +129,7 @@ describe('resolvePrices', () => {
   it('handles iterative resolution across multiple XYK hops', () => {
     const omnipoolAssets = new Map<number, OmnipoolAssetState>([
       [10, { // USDT (6 decimals)
-        hubReserve: 1000000000000n,      // 1 LRNA
+        hubReserve: 1000000000000n,      // 1 H2O
         reserve: 1000000n,                // 1 USDT
         shares: 0n,
         protocolShares: 0n,
@@ -137,7 +137,7 @@ describe('resolvePrices', () => {
         tradable: 0,
       }],
       [5, { // DOT (10 decimals)
-        hubReserve: 5000000000000000n,   // 5000 LRNA
+        hubReserve: 5000000000000000n,   // 5000 H2O
         reserve: 1000000000000n,         // 100 DOT
         shares: 0n,
         protocolShares: 0n,
@@ -229,10 +229,10 @@ describe('resolvePrices', () => {
     expect(prices.get(10)).toBe('1.000000000000');
   });
 
-  it('uses custom USDT and LRNA asset IDs', () => {
+  it('uses custom USDT and H2O asset IDs', () => {
     const omnipoolAssets = new Map<number, OmnipoolAssetState>([
       [100, { // Custom USDT ID (6 decimals)
-        hubReserve: 1000000000000n,      // 1 LRNA
+        hubReserve: 1000000000000n,      // 1 H2O
         reserve: 1000000n,                // 1 USDT
         shares: 0n,
         protocolShares: 0n,
@@ -249,12 +249,12 @@ describe('resolvePrices', () => {
       [],
       decimals,
       100,  // Custom USDT ID
-      999,  // Custom LRNA ID
+      999,  // Custom H2O ID
       [100] // Custom anchor
     );
 
     expect(prices.has(100)).toBe(true);  // Custom USDT
-    expect(prices.has(999)).toBe(true);  // Custom LRNA
+    expect(prices.has(999)).toBe(true);  // Custom H2O
     expect(prices.get(100)).toBe('1.000000000000');
   });
 
@@ -263,7 +263,7 @@ describe('resolvePrices', () => {
     // BFS should price assets at depth 1, 2, 3 but NOT depth 4+
     const omnipoolAssets = new Map<number, OmnipoolAssetState>([
       [10, { // USDT (6 decimals)
-        hubReserve: 1000000000000n,      // 1 LRNA
+        hubReserve: 1000000000000n,      // 1 H2O
         reserve: 1000000n,                // 1 USDT
         shares: 0n,
         protocolShares: 0n,
@@ -271,7 +271,7 @@ describe('resolvePrices', () => {
         tradable: 0,
       }],
       [0, { // HDX (12 decimals)
-        hubReserve: 50000000000000n,     // 50 LRNA
+        hubReserve: 50000000000000n,     // 50 H2O
         reserve: 100000000000000000n,    // 100,000 HDX
         shares: 0n,
         protocolShares: 0n,
@@ -299,7 +299,7 @@ describe('resolvePrices', () => {
 
     const { prices } = resolvePrices(omnipoolAssets, xykPools, [], decimals);
 
-    // BFS caps at 3 hops: USDT(10) + LRNA(1) + HDX(0) + assets 100, 101, 102 = 6 total
+    // BFS caps at 3 hops: USDT(10) + H2O(1) + HDX(0) + assets 100, 101, 102 = 6 total
     expect(prices.size).toBe(6);
 
     // Depth 1, 2, 3 should be priced
@@ -317,7 +317,7 @@ describe('resolvePrices', () => {
     // Omnipool should win (most liquid route)
     const omnipoolAssets = new Map<number, OmnipoolAssetState>([
       [10, { // USDT (6 decimals)
-        hubReserve: 1000000000000n,   // 1 LRNA
+        hubReserve: 1000000000000n,   // 1 H2O
         reserve: 1000000n,             // 1 USDT
         shares: 0n,
         protocolShares: 0n,
@@ -325,7 +325,7 @@ describe('resolvePrices', () => {
         tradable: 0,
       }],
       [5, { // DOT (10 decimals) - priced at $50 via Omnipool
-        hubReserve: 5000000000000000n,   // 5000 LRNA
+        hubReserve: 5000000000000000n,   // 5000 H2O
         reserve: 1000000000000n,         // 100 DOT
         shares: 0n,
         protocolShares: 0n,
@@ -356,8 +356,8 @@ describe('resolvePrices', () => {
     expect(prices.has(5)).toBe(true);
 
     // Calculate expected Omnipool price for DOT with decimal normalization:
-    // LRNA price from USDT: (1 USDT / 1 LRNA) = 1.0
-    // DOT price: (5000 LRNA / 100 DOT) * 1.0 = 50.0
+    // H2O price from USDT: (1 USDT / 1 H2O) = 1.0
+    // DOT price: (5000 H2O / 100 DOT) * 1.0 = 50.0
     const dotPrice = parseFloat(prices.get(5)!);
     expect(dotPrice).toBeCloseTo(50.0, 1); // Should be ~50.0
 
@@ -815,7 +815,7 @@ describe('bfsResolvePrices', () => {
     // Seed with HDX price from Omnipool
     const hdxPrice = prices.get(0)!;
     seeds.set(0, priceTo24(hdxPrice));
-    const omnipoolPricedSet = new Set([0, 1, 10]); // LRNA + USDT + HDX
+    const omnipoolPricedSet = new Set([0, 1, 10]); // H2O + USDT + HDX
 
     const bfsResult = bfsResolvePrices(seeds, omnipoolPricedSet, graph);
     // AssetA at depth 1
@@ -833,7 +833,7 @@ describe('bfsResolvePrices', () => {
     // BFS picks Pool 2 (higher liquidity) so AssetX = HDX_price * 5
     const omnipoolAssets = new Map<number, OmnipoolAssetState>([
       [10, { hubReserve: 1000000000000n, reserve: 1000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
-      [0,  { // HDX: LRNA=50, reserve=100,000 HDX => price ≈ $0.0005 per HDX
+      [0,  { // HDX: H2O=50, reserve=100,000 HDX => price ≈ $0.0005 per HDX
              hubReserve: 50000000000000n, reserve: 100000000000000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
     ]);
 
@@ -916,7 +916,7 @@ describe('bfsResolvePrices', () => {
     // BFS must NOT override the Omnipool price for DOT.
     const omnipoolAssets = new Map<number, OmnipoolAssetState>([
       [10, { hubReserve: 1000000000000n, reserve: 1000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
-      [5,  { // DOT: priced at $50 via Omnipool (5000 LRNA / 100 DOT)
+      [5,  { // DOT: priced at $50 via Omnipool (5000 H2O / 100 DOT)
              hubReserve: 5000000000000000n, reserve: 1000000000000n, shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0 }],
     ]);
 
@@ -1334,12 +1334,12 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
     // HOLLAR has depegged to ~$0.95 in the stableswap pool.
     const omnipoolAssets = new Map<number, OmnipoolAssetState>([
       [222, { // HOLLAR in Omnipool
-        hubReserve: 100000_000000000000n,  // 100k LRNA
+        hubReserve: 100000_000000000000n,  // 100k H2O
         reserve: 1000000_000000000000000000n, // 1M HOLLAR (18 dec)
         shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
       }],
       [0, { // HDX in Omnipool
-        hubReserve: 50000_000000000000n,     // 50k LRNA
+        hubReserve: 50000_000000000000n,     // 50k H2O
         reserve: 5000000_000000000000n,      // 5M HDX (12 dec)
         shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
       }],
@@ -1379,14 +1379,14 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
     expect(prices.has(0)).toBe(true);
   });
 
-  it('does not anchor LRNA from an Omnipool stable LP token when HOLLAR is quoted through aUSDT', () => {
+  it('does not anchor H2O from an Omnipool stable LP token when HOLLAR is quoted through aUSDT', () => {
     const omnipoolAssets = new Map<number, OmnipoolAssetState>([
       [102, { // 2-Pool LP in Omnipool must not become a synthetic $1 anchor.
         hubReserve: 100_000000000000n,
         reserve: 1450_000000000000000000n,
         shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
       }],
-      [222, { // HOLLAR in Omnipool, fair LRNA anchor should come from here
+      [222, { // HOLLAR in Omnipool, fair H2O anchor should come from here
         hubReserve: 100_000000000000n,
         reserve: 1400_000000000000000000n,
         shares: 0n, protocolShares: 0n, cap: 0n, tradable: 0,
@@ -1430,11 +1430,11 @@ describe('Fallback 2: non-USDT anchor with stableswap spot price', () => {
       10, 1, [10, 22, 222], [[10, 1002]], new Map(), [[10, 22]],
     );
 
-    const lrnaPrice = parseFloat(prices.get(1)!);
+    const h2oPrice = parseFloat(prices.get(1)!);
     const hollarPrice = parseFloat(prices.get(222)!);
 
-    expect(lrnaPrice).toBeGreaterThan(13.9);
-    expect(lrnaPrice).toBeLessThan(14.1);
+    expect(h2oPrice).toBeGreaterThan(13.9);
+    expect(h2oPrice).toBeLessThan(14.1);
     expect(hollarPrice).toBeGreaterThan(0.99);
     expect(hollarPrice).toBeLessThan(1.01);
     expect(prices.get(102)).not.toBe('1.000000000000');

@@ -11,7 +11,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT } from './tagService.ts'
@@ -6023,7 +6023,6 @@ async function loadOmnipoolState(): Promise<Map<number, OmnipoolAssetState>> {
   } catch { /* keep last good */ }
   return omniState
 }
-const LRNA_ASSET_ID = 1   // the Omnipool hub asset, H2O, 12 decimals
 export const HDX_ASSET_ID = 0   // the native token, 12 decimals
 
 /**
@@ -6043,8 +6042,8 @@ function valueOmnipoolPosition(pos: DecodedPosition, st: OmnipoolAssetState, pri
   const { liquidity, hub } = omnipoolRemoveLiquidity(st, pos)
   const a = asset(pos.assetId)
   const assetUsd = usdValue(prices, pos.assetId, liquidity.toString(), a.decimals)
-  const lrnaPx = prices.get(LRNA_ASSET_ID)?.price
-  const hubUsd = lrnaPx != null ? Number(hub) / 10 ** (asset(LRNA_ASSET_ID).decimals) * lrnaPx : 0
+  const h2oPx = prices.get(H2O_ASSET_ID)?.price
+  const hubUsd = h2oPx != null ? Number(hub) / 10 ** (asset(H2O_ASSET_ID).decimals) * h2oPx : 0
   const valueUsd = assetUsd == null ? null : assetUsd + hubUsd
   return { amount: liquidity, hub, valueUsd }
 }
@@ -19513,7 +19512,7 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // aTokens have no price feed of their own — query the underlying reserve's
   // historical prices for them (priceAssetId maps aPRIME→PRIME, etc.).
   const priceIdFor = new Map(assetIds.map(id => [id, String(priceAssetId(Number(id)))]))
-  const lpPriceIds = omniAssetIds.length ? [...new Set(omniAssetIds.map(id => String(priceAssetId(id))))].concat(String(LRNA_ASSET_ID)) : []
+  const lpPriceIds = omniAssetIds.length ? [...new Set(omniAssetIds.map(id => String(priceAssetId(id))))].concat(String(H2O_ASSET_ID)) : []
   const xykPriceIds = xykHist ? xykHist.underlyingAssetIds.map(id => String(priceAssetId(id))) : []
   const priceIds = [...new Set([...priceIdFor.values(), ...lpPriceIds, ...xykPriceIds])]
   // The daily close states are a replay-safe compact projection of prices, and the
@@ -19790,17 +19789,17 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // loadOmnipoolPrincipalHistory returns null, Omnipool value is omitted rather than
   // approximated (explicit incompleteness).
   if (omniHist) {
-    const lrnaPx = pxByPriceId.get(String(LRNA_ASSET_ID))
-    const lrnaDec = asset(LRNA_ASSET_ID).decimals
-    const fallbackLrna = earliestBucketPrice(lrnaPx)
+    const h2oPx = pxByPriceId.get(String(H2O_ASSET_ID))
+    const h2oDec = asset(H2O_ASSET_ID).decimals
+    const fallbackH2o = earliestBucketPrice(h2oPx)
     for (let b = 0; b <= N; b++) {
-      const lrna = lrnaPx?.get(b) ?? fallbackLrna
+      const h2o = h2oPx?.get(b) ?? fallbackH2o
       for (const leg of omniHist.legsByBucket[b]) {
         const priceId = String(priceAssetId(leg.assetId))
         const px = pxByPriceId.get(priceId)
         const price = px?.get(b) ?? earliestBucketPrice(px)
         const aDec = asset(leg.assetId).decimals
-        const withdrawValue = (Number(leg.liquidity) / 10 ** aDec) * price + (Number(leg.hub) / 10 ** lrnaDec) * lrna
+        const withdrawValue = (Number(leg.liquidity) / 10 ** aDec) * price + (Number(leg.hub) / 10 ** h2oDec) * h2o
         portfolio[b] += withdrawValue
         // An HDX position drops out with BOTH its legs: the hub leg is part of that
         // position's withdraw value, not H2O the account could hold on its own, so
