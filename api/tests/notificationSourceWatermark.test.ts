@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { windowCoveredTo, resolveWindow } from '../src/notifications/evaluator.ts'
 
@@ -38,5 +39,37 @@ describe('the cursor a feed-backed lane may advance to', () => {
     // The blocks the source had not revealed are still above the new cursor.
     expect(next.window.from).toBe(150)
     expect(next.skipped).toBe(0)
+  })
+})
+
+// The clamp only protects a lane that applies it, and the loss it prevents is
+// silent — no error, no log line, an advancing cursor. Four lanes (referendum,
+// tc-motion, event, extrinsic) shipped without it precisely because each lane
+// re-types the same line, so the rule is pinned here rather than left to review.
+describe('every lane clamps the cursor it advances to', () => {
+  const evaluator = readFileSync(new URL('../src/notifications/evaluator.ts', import.meta.url), 'utf8')
+  const laneBody = evaluator.slice(
+    evaluator.indexOf('async function runKindLane'),
+    evaluator.indexOf('async function safetyLane'))
+
+  it('is the function under test', () => {
+    expect(laneBody).toContain('switch (kind)')
+    // Every row-window kind resolves here, so a new one cannot dodge the rule.
+    for (const kind of ['account-activity', 'large-trade', 'protocol-revenue', 'referendum', 'tc-motion', 'event']) {
+      expect(laneBody, kind).toContain(`case '${kind}'`)
+    }
+  })
+
+  it('never advances a cursor straight to the raw ingestion head', () => {
+    expect(laneBody).not.toMatch(/nextCursor:\s*window\.to/)
+  })
+
+  it('advances only to a clamped value or holds the cursor for a deferred source', () => {
+    const advances = laneBody.match(/nextCursor:\s*([^,}\n]+)/g) ?? []
+
+    expect(advances.length).toBeGreaterThanOrEqual(7)
+    for (const advance of advances) {
+      expect(advance, advance).toMatch(/covered|cursor/)
+    }
   })
 })
