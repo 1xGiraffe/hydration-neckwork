@@ -46,8 +46,36 @@ function substrateToEvmAddress(accountHex: string): string {
 }
 
 /**
+ * Underlying-unit balance from an Aave V3 `_userState` word, or `null` when the
+ * word cannot produce one.
+ *
+ * The word packs `IncentivizedERC20.UserState { uint128 balance; uint128
+ * additionalData; }` — the low half is the SCALED balance, the high half the
+ * liquidity index written at the holder's last mint or burn (a transfer does not
+ * refresh it). Underlying units are `scaled · index / RAY`, so a scaled balance is
+ * a different unit from every other entry in the result array and must never be
+ * returned as one.
+ *
+ * An `additionalData` of 0 is therefore unusable, not an index of 1: it says the
+ * holder has no recorded mint/burn to date, which leaves nothing to convert the
+ * scaled half with. `null` makes that incompleteness explicit and lets the caller
+ * keep whatever the substrate-side read gave it, rather than publishing a scaled
+ * number as a reserve.
+ */
+export function atokenBalanceFromUserState(word: bigint): bigint | null {
+  const scaledBalance = word & ((1n << 128n) - 1n)
+  const cachedIndex = word >> 128n
+  if (scaledBalance === 0n) return 0n
+  if (cachedIndex === 0n) return null
+  return (scaledBalance * cachedIndex) / RAY
+}
+
+/**
  * Batch-read ERC20 balances for multiple assets in a pool.
  * Returns an array of balances in the same order as assetIds.
+ *
+ * A zero entry means "no value read" — every caller keeps its existing
+ * substrate-side reserve for that asset rather than writing the zero.
  */
 export async function readErc20Balances(
   block: Block,
@@ -88,10 +116,18 @@ export async function readErc20Balances(
       const query = queries[qi]
 
       if (query.isAToken) {
-        const fullValue = BigInt('0x' + hex)
-        const scaledBalance = fullValue & ((1n << 128n) - 1n)
-        const cachedIndex = fullValue >> 128n
-        results[query.index] = cachedIndex === 0n ? scaledBalance : (scaledBalance * cachedIndex) / RAY
+        const balance = atokenBalanceFromUserState(BigInt('0x' + hex))
+        if (balance == null) {
+          console.warn(JSON.stringify({
+            type: 'atoken_user_state_unusable',
+            block: block.height,
+            asset_id: assetIds[query.index],
+            contract: query.contract,
+            reason: 'no cached liquidity index in _userState.additionalData',
+          }))
+          continue
+        }
+        results[query.index] = balance
       } else {
         results[query.index] = BigInt('0x' + hex)
       }
