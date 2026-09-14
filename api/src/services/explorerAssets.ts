@@ -13,6 +13,11 @@ export interface AssetOrigin {
 export interface ExplorerAsset {
   assetId: number
   iconAssetId: number
+  // A POOL SHARE token's member assets, so a surface can draw the pool the way the
+  // Hydration UI does — a cluster of what is in it — instead of one borrowed icon.
+  // Absent on every ordinary asset. Each member is already resolved through
+  // iconAssetIdFor, so an aToken member shows its reserve's artwork.
+  iconAssetIds?: number[]
   symbol: string
   name: string | null
   decimals: number
@@ -39,19 +44,52 @@ let loadInflight: Promise<void> | null = null
 // and the preis/market-stats loader in assetsService — rename it on load.
 export const H2O_ASSET_ID = 1
 
+// Every stableswap pool's member assets, keyed by the pool's SHARE token id (a
+// pool's id IS its share token's registry id). Read from the MV-fed state history,
+// which is the generic source: a pool registered tomorrow is covered with no code
+// change, unlike the hand-kept alias maps below.
+//
+// This is what gives the multi-asset share tokens an icon at all. A pool with one
+// dominant asset can borrow that asset's artwork (SHARE_TOKEN_UNDERLYING_ID), but
+// 2-Pool is USDT+USDC and 4-Pool is four stablecoins — there is no single asset
+// they could borrow from, so they rendered the letter placeholder.
+//
+// 17 rows, so the read is trivial and rides the registry's own refresh.
+async function loadStableswapMembers(client: ClickHouseClient): Promise<Map<number, number[]>> {
+  const out = new Map<number, number[]>()
+  try {
+    const res = await client.query({
+      query: `SELECT pool_id, argMax(asset_ids, block_height) AS members
+              FROM price_data.stableswap_pool_state_history GROUP BY pool_id`,
+      format: 'JSONEachRow',
+    })
+    for (const row of await res.json<{ pool_id: number; members: number[] }>()) {
+      if (Array.isArray(row.members) && row.members.length) out.set(Number(row.pool_id), row.members.map(Number))
+    }
+  } catch (err) {
+    // A share token without its members renders as it did before — a borrowed icon
+    // or the letter — so a failed read costs artwork, never correctness.
+    console.error('[ExplorerAssets] stableswap member read failed:', err)
+  }
+  return out
+}
+
 async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<void> {
   const res = await client.query({
     query: `SELECT asset_id, symbol, name, decimals, parachain_id, origin_ecosystem, origin_chain_id, origin_asset_id FROM price_data.assets FINAL`,
     format: 'JSONEachRow',
   })
   const rows = await res.json<AssetRow>()
+  const poolMembers = await loadStableswapMembers(client)
   cache.clear()
   for (const r of rows) {
     const symbol = r.asset_id === H2O_ASSET_ID ? 'H2O' : r.symbol
     const name = NAME_OVERRIDES[r.asset_id] ?? (r.asset_id === H2O_ASSET_ID ? 'H2O' : r.name)
+    const members = poolMembers.get(r.asset_id)
     cache.set(r.asset_id, {
       assetId: r.asset_id,
       iconAssetId: iconAssetIdFor(r.asset_id),
+      ...(members && members.length > 1 ? { iconAssetIds: members.map(iconAssetIdFor) } : {}),
       symbol,
       name: name === symbol ? null : name,
       decimals: r.decimals,

@@ -68,7 +68,7 @@ export function Assets() {
                   <div className="asset-row">
                     {/* A destination's artwork resolves through the same origin
                         path every foreign asset uses, so it needs no special case. */}
-                    <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} symbol={a.symbol} size={30} parachainId={a.parachainId} origin={a.origin} />
+                    <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} iconAssetIds={a.iconAssetIds} symbol={a.symbol} size={30} parachainId={a.parachainId} origin={a.origin} />
                     <div className="ar-meta">
                       <span className="ar-sym">{a.symbol}{a.xcDestination && <span className="xc-chain">cross-chain</span>}</span>
                       <span className="ar-name">{a.xcDestination ? `${a.name} · on ${a.xcDestination.chainName}, not held here` : (a.name ?? `#${a.assetId}`)}</span>

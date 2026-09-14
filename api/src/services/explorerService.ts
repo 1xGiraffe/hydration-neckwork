@@ -4595,6 +4595,9 @@ export async function getPrimaryHealthFactor(addressInput: string): Promise<numb
 export interface MmReserve {
   assetId: number
   iconAssetId?: number
+  // Set when the reserve IS a pool share (a3-Pool over 3-Pool), so it draws as
+  // the pool rather than borrowing one member's icon.
+  iconAssetIds?: number[]
   symbol: string
   decimals: number
   parachainId?: number | null
@@ -4627,6 +4630,7 @@ export function foldShareReserves(reserves: MmReserve[]): MmReserve[] {
       ...r,
       assetId: did,
       iconAssetId: d.iconAssetId,
+      ...(d.iconAssetIds ? { iconAssetIds: d.iconAssetIds } : {}),
       symbol: d.symbol,
       decimals: d.decimals,
       parachainId: d.parachainId,

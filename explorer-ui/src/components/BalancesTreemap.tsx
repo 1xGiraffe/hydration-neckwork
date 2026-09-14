@@ -114,7 +114,7 @@ function TileFace({ balance, share, w, h }: { balance: AddressBalance; share: nu
     <span className="tm-face">
       {canIcon
         ? <span className="tm-top">
-            <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} symbol={a.symbol} size={iconSize} parachainId={a.parachainId} origin={a.origin} />
+            <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} iconAssetIds={a.iconAssetIds} symbol={a.symbol} size={iconSize} parachainId={a.parachainId} origin={a.origin} />
             {showSym && (
               <span className="tm-id">
                 <span className="tm-sym">{a.symbol}</span>
@@ -220,7 +220,7 @@ function Metric({ label, value, strong }: { label: string; value: React.ReactNod
 function SelectChip({ asset, value, active, onSelect }: { asset: AssetRef; value?: string; active: boolean; onSelect: () => void }) {
   return (
     <button type="button" className={'tm-chip' + (active ? ' on' : '')} aria-pressed={active} onClick={onSelect}>
-      <AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} symbol={asset.symbol} size={18} parachainId={asset.parachainId} origin={asset.origin} />
+      <AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} iconAssetIds={asset.iconAssetIds} symbol={asset.symbol} size={18} parachainId={asset.parachainId} origin={asset.origin} />
       {asset.symbol}
       {value && <span className="tm-chip-val">{value}</span>}
     </button>
@@ -253,7 +253,7 @@ function FocusedDetail({ balance, hist, allHistory, refineWindow }: {
     <div className="tm-detail" aria-live="polite">
       <div className="tm-detail-band">
         <div className="tm-detail-head">
-          <AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} symbol={asset.symbol} size={26} parachainId={asset.parachainId} origin={asset.origin} />
+          <AssetIcon assetId={asset.assetId} iconAssetId={asset.iconAssetId} iconAssetIds={asset.iconAssetIds} symbol={asset.symbol} size={26} parachainId={asset.parachainId} origin={asset.origin} />
           <div className="tm-detail-id">
             <span className="tm-detail-sym">{asset.symbol}</span>
             <span className="tm-detail-name">{assetName(asset)}</span>

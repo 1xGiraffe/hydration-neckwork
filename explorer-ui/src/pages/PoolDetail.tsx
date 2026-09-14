@@ -279,7 +279,7 @@ export function PoolDetail({ poolId }: { poolId: number }) {
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Assets', to: paths.assets() }, { label: data?.name ?? `Pool #${poolId}` }]} />
         <div className="detail-header">
           <div className="page-title">
-            {data && <AssetIcon assetId={data.shareToken.assetId} iconAssetId={data.shareToken.iconAssetId} symbol={data.shareToken.symbol} size={30} parachainId={data.shareToken.parachainId} origin={data.shareToken.origin} />}
+            {data && <AssetIcon assetId={data.shareToken.assetId} iconAssetId={data.shareToken.iconAssetId} iconAssetIds={data.shareToken.iconAssetIds} symbol={data.shareToken.symbol} size={30} parachainId={data.shareToken.parachainId} origin={data.shareToken.origin} />}
             {' '}{data?.name ?? `Pool #${poolId}`}
             {data && <span className="sub muted" style={{ marginLeft: 8 }}><PoolBadge pool={data.kind === 'stableswap' ? 'Stableswap' : 'XYK'} /></span>}
           </div>

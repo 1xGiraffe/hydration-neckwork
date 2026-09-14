@@ -345,8 +345,8 @@ export function UniswapV3Pool({ address }: { address: string }) {
         <div className="detail-header">
           <div className="page-title">
             {data && <span className="icon-stack">
-              <AssetIcon assetId={data.token0.assetId} iconAssetId={data.token0.iconAssetId} symbol={data.token0.symbol} size={30} parachainId={data.token0.parachainId} origin={data.token0.origin} />
-              <AssetIcon assetId={data.token1.assetId} iconAssetId={data.token1.iconAssetId} symbol={data.token1.symbol} size={30} parachainId={data.token1.parachainId} origin={data.token1.origin} />
+              <AssetIcon assetId={data.token0.assetId} iconAssetId={data.token0.iconAssetId} iconAssetIds={data.token0.iconAssetIds} symbol={data.token0.symbol} size={30} parachainId={data.token0.parachainId} origin={data.token0.origin} />
+              <AssetIcon assetId={data.token1.assetId} iconAssetId={data.token1.iconAssetId} iconAssetIds={data.token1.iconAssetIds} symbol={data.token1.symbol} size={30} parachainId={data.token1.parachainId} origin={data.token1.origin} />
             </span>}
             {' '}{data?.name ?? short}
             <span className="sub muted" style={{ marginLeft: 8 }}><PoolBadge pool="Uniswap v3" /></span>
