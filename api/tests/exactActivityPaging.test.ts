@@ -298,7 +298,8 @@ describe('POOL_LIFECYCLE_EVENTS confines the pool_account admission arm', () => 
     // The page read is a closure inside collectAccountActivity, not a top-level
     // function `body()` can extract by name — assert its call site directly.
     expect(explorerService).toContain('const liquiditySource = liquidityScopedSourceSql(pageBound, list)')
-    expect(explorerService).toContain('FROM ${liquiditySource} AS la\n              ${routerHopLiquiditySql(pageBound, liquidityAssetExpr, { sourceSql: liquiditySource }).joinSql}')
+    expect(explorerService).toContain('const routerHop = routerHopLiquiditySql(pageBound, liquidityAssetExpr, { sourceSql: liquiditySource })')
+    expect(explorerService).toContain('FROM ${liquiditySource} AS la\n              ${routerHop.joinSql}')
   })
 
   // The failure this guards: an account read moved back onto the block-keyed
