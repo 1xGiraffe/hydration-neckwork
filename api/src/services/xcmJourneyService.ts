@@ -468,18 +468,24 @@ async function fetchPersistedSources(messageIds: string[]): Promise<Map<string, 
 // table (386k rows, one String column) rather than seeking. That is affordable only
 // because it is asked for what the topic-keyed lookup left over, which is a handful of
 // rows per page at most — keep it that way rather than calling it for every send.
+// Two reads, and it has to be two: `PERSISTED_SOURCE_SELECT` aliases each
+// `argMax(col, updated_at)` back to `col`, so a WHERE naming one of those columns
+// binds to the AGGREGATE, not the table's column, and ClickHouse rejects it
+// outright (ILLEGAL_AGGREGATION). So the hashes resolve to message ids first, and
+// the ids — the table's sort key — drive the ordinary keyed lookup.
 async function fetchPersistedSourcesByOriginTx(txHashes: string[]): Promise<Map<string, XcmJourneySource[]>> {
   const out = new Map<string, XcmJourneySource[]>()
   if (!client || !txHashes.length) return out
   try {
     const res = await client.query({
-      query: `${PERSISTED_SOURCE_SELECT} WHERE lower(origin_tx) IN ({txs:Array(String)}) GROUP BY message_id`,
+      query: `SELECT DISTINCT message_id FROM ${XCM_JOURNEY_SOURCES_TABLE}
+              WHERE lower(origin_tx) IN ({txs:Array(String)})`,
       query_params: { txs: txHashes },
       format: 'JSONEachRow',
     })
-    for (const row of await res.json<JourneyRow>()) {
-      const source = persistedSourceOf(row)
-      if (!source?.originTx) continue
+    const messageIds = (await res.json<{ message_id: string }>()).map(r => r.message_id)
+    for (const source of (await fetchPersistedSources(messageIds)).values()) {
+      if (!source.originTx) continue
       const key = source.originTx.toLowerCase()
       const pooled = out.get(key)
       if (pooled) pooled.push(source)
