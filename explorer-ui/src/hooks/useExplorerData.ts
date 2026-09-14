@@ -180,13 +180,39 @@ export function useEvmReceipt(txHash: string | null | undefined) {
     retry: false,
   })
 }
+// A DCA schedule and an ICE order are both PROGRESS pages: the reader sits on one
+// to watch the percentage climb and the next fill land. Neither refreshed on its
+// own — a staleTime only decides whether a refetch that is already happening goes
+// to network, and with refetchOnWindowFocus off globally and neither key in
+// LIVE_PUSH_KEYS, nothing ever triggered one. The page was whatever it was at
+// first paint until the reader reloaded it.
+//
+// Polled rather than pushed: the api caches these reads for its own 8 s / 15 s, so
+// refetching per block (~6 s) would return the same body two times in three. The
+// interval is matched to the cache period instead, so a request that goes out can
+// actually come back with something new.
+//
+// Only the FIRST page polls — a live refetch of page 3 of the fills would shuffle
+// rows under the reader — and polling stops once the order can no longer change,
+// the same rule the referendum page applies at its conclusion.
+const DCA_LIVE_STATUSES = new Set(['active'])
+const INTENT_LIVE_STATUSES = new Set(['open', 'partially-filled'])
+
 export function useDcaSchedule(scheduleId: number, offset = 0) {
-  return useQuery({ queryKey: ['dca-schedule', scheduleId, offset], queryFn: ({ signal }) => api.dcaSchedule(scheduleId, offset, 25, signal), staleTime: 8000 })
+  return useQuery({
+    queryKey: ['dca-schedule', scheduleId, offset],
+    queryFn: ({ signal }) => api.dcaSchedule(scheduleId, offset, 25, signal),
+    refetchInterval: query => (offset === 0 && DCA_LIVE_STATUSES.has(query.state.data?.status ?? 'active') ? 8000 : false),
+    staleTime: 8000,
+  })
 }
-// An order's lifecycle is short and its fills arrive with the solutions that settle
-// them, so the page re-reads at the API's own cache period rather than live-polling.
 export function useIntentOrder(intentId: string, offset = 0) {
-  return useQuery({ queryKey: ['intent-order', intentId, offset], queryFn: ({ signal }) => api.intentOrder(intentId, offset, 25, signal), staleTime: 15_000 })
+  return useQuery({
+    queryKey: ['intent-order', intentId, offset],
+    queryFn: ({ signal }) => api.intentOrder(intentId, offset, 25, signal),
+    refetchInterval: query => (offset === 0 && INTENT_LIVE_STATUSES.has(query.state.data?.status ?? 'open') ? DETAIL_POLL_MS : false),
+    staleTime: 15_000,
+  })
 }
 export function useDcaExecution(height: number, eventIndex: number) {
   return useQuery({ queryKey: ['dca-execution', height, eventIndex], queryFn: ({ signal }) => api.dcaExecution(height, eventIndex, signal), staleTime: 60_000, ...detailWait(height) })
