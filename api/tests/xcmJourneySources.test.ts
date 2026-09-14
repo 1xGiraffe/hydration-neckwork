@@ -534,9 +534,31 @@ describe('xcmJourneysByOriginTx', () => {
     dest_urn: 'urn:ocn:ethereum:1', dest_tx: '', dest_protocol: 'snowbridge',
     to_hex: FROM_PERSISTED, to_formatted: '',
   })
-  // Answers a lookup keyed on origin tx hashes, and nothing else.
+  // ClickHouse resolves a name in WHERE to a SELECT alias of the same name, so
+  // `argMax(col, updated_at) AS col … WHERE col` binds the predicate to the
+  // AGGREGATE and the statement is rejected outright (ILLEGAL_AGGREGATION). The
+  // real client raised that on every call; this fake answered anyway, which is
+  // why the lookup could sit broken behind a caught error. Reproduce the rule.
+  const rejectAggregateAliasInWhere = (query: string) => {
+    const where = query.slice(query.search(/\bWHERE\b/i))
+    for (const [, column] of query.matchAll(/argMax\(\s*(\w+)\s*,[^)]*\)\s+AS\s+\1\b/gi)) {
+      if (new RegExp(`\\b${column}\\b`).test(where)) {
+        throw new Error(`Aggregate function argMax(${column}, updated_at) AS ${column} is found in WHERE in query.`)
+      }
+    }
+  }
+  // The service asks twice: hashes resolve to message ids, then the ids — the
+  // table's sort key — drive the keyed lookup. Answering only the shape it
+  // actually sends is what lets this test fail if the two collapse back into one.
   const persistedByOriginTx = (rows: ReturnType<typeof SNOWBRIDGE_ROW>[]) =>
-    makeQueryMock(async ({ query_params }) => (query_params.txs ? rows.filter(r => query_params.txs!.includes(r.origin_tx)) : []))
+    makeQueryMock(async ({ query, query_params }) => {
+      rejectAggregateAliasInWhere(query)
+      if (query_params.txs) {
+        return rows.filter(r => query_params.txs!.includes(r.origin_tx)).map(r => ({ message_id: r.message_id }))
+      }
+      if (query_params.ids) return rows.filter(r => query_params.ids!.includes(r.message_id))
+      return []
+    })
 
   it('resolves an outbound send from the persisted table when the memory map is cold', async () => {
     const txHash = '0x' + 'e'.repeat(64)
