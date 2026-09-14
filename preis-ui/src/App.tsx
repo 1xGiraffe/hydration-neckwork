@@ -7,7 +7,8 @@ import { useMarketStats } from './hooks/useMarketStats'
 import { useIndexerStatus } from './hooks/useIndexerStatus'
 import { indexerLiveDot } from './api/indexer'
 import { useTheme } from './hooks/useTheme'
-import { useWindowWidth } from './hooks/useWindowWidth'
+import { useMediaQuery } from './hooks/useMediaQuery'
+import { useModalShell } from './hooks/useModalShell'
 import { useFavorites } from './hooks/useFavorites'
 import { INTERVALS, INTERVAL_LABELS, PERIODS } from './types'
 import type { Asset, OHLCVInterval, Period } from './types'
@@ -15,7 +16,7 @@ import { parseUrlPair, pairDisplay } from './utils/pairs'
 import type { PairResult } from './utils/pairs'
 import { exportVisibleCSV } from './utils/export'
 import { drawBrandWatermark } from './utils/brandWatermark'
-import { keepTabFocusInside } from './utils/focus'
+import { formatPrice } from './utils/format'
 
 const DEFAULT_BASE_ID = 0   // HDX
 const DEFAULT_QUOTE_ID = 10  // USDT
@@ -82,8 +83,8 @@ function readInitialDesktopSidebarOpen() {
 
 export default function App() {
   const { theme, toggle: toggleTheme } = useTheme()
-  const windowWidth = useWindowWidth()
-  const isMobile = windowWidth <= 980
+  // Same breakpoint the stylesheet uses for the sidebar/drawer swap.
+  const isMobile = useMediaQuery('(max-width: 980px)')
 
   const [baseId, setBaseId] = useState(() => readInitialRoute().baseId)
   const [quoteId, setQuoteId] = useState(() => readInitialRoute().quoteId)
@@ -186,53 +187,24 @@ export default function App() {
     if (toastTimerRef.current != null) window.clearTimeout(toastTimerRef.current)
   }, [])
 
-  useEffect(() => {
-    const closeOnDesktopResize = () => {
-      if (window.innerWidth > 980) setDrawerOpen(false)
-    }
-    window.addEventListener('resize', closeOnDesktopResize)
-    return () => window.removeEventListener('resize', closeOnDesktopResize)
-  }, [])
+  // The drawer only exists below the breakpoint; widening past it closes it, so
+  // narrowing back does not bring back a drawer the reader left behind. Adjusted
+  // during render rather than in an effect: an effect would paint the stale open
+  // state for a frame first, and re-entering render to correct it is the cascade
+  // React warns about.
+  const [wasMobile, setWasMobile] = useState(isMobile)
+  if (wasMobile !== isMobile) {
+    setWasMobile(isMobile)
+    if (!isMobile && drawerOpen) setDrawerOpen(false)
+  }
+
+  const closeDrawer = useCallback(() => setDrawerOpen(false), [])
+  useModalShell(mobileDrawerOpen, mobileDrawerRef, mobileDrawerCloseRef, closeDrawer)
 
   useEffect(() => {
-    if (!mobileDrawerOpen) return
-    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const previousOverflow = document.body.style.overflow
-    const focusFrame = window.requestAnimationFrame(() => mobileDrawerCloseRef.current?.focus())
-    const handleKeyDown = (event: KeyboardEvent) => {
-      // Only the topmost dialog acts on Escape: a picker opened over the drawer
-      // consumes it first, and closing both on one press loses the drawer too.
-      if (event.defaultPrevented) return
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        setDrawerOpen(false)
-        return
-      }
-      keepTabFocusInside(event, mobileDrawerRef.current)
-    }
-    document.body.style.overflow = 'hidden'
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      window.cancelAnimationFrame(focusFrame)
-      document.body.style.overflow = previousOverflow
-      document.removeEventListener('keydown', handleKeyDown)
-      previouslyFocused?.focus()
-    }
-  }, [mobileDrawerOpen])
-
-  useEffect(() => {
-    if (chartData.length > 0) {
-      const price = chartData[chartData.length - 1].close
-      const opts: Intl.NumberFormatOptions =
-        price >= 1000 ? { minimumFractionDigits: 2, maximumFractionDigits: 2 }
-          : price >= 1 ? { minimumFractionDigits: 2, maximumFractionDigits: 4 }
-          : price >= 0.01 ? { minimumFractionDigits: 4, maximumFractionDigits: 6 }
-          : { minimumFractionDigits: 6, maximumFractionDigits: 8 }
-      const fmt = price.toLocaleString('en-US', opts)
-      document.title = `${display} ${fmt}`
-    } else {
-      document.title = display
-    }
+    document.title = chartData.length > 0
+      ? `${display} ${formatPrice(chartData[chartData.length - 1].close, false)}`
+      : display
   }, [display, chartData])
 
   const [orientationKey, setOrientationKey] = useState(0)
@@ -450,14 +422,25 @@ export default function App() {
           color: var(--text-low); font-size: 13px; pointer-events: none;
         }
         .sidebar-host { min-width: 0; overflow: hidden; animation: preis-list-row-in 180ms var(--ease-out-soft); }
+        /* Visible on its own, with the animation only easing it in and out —
+           its own 2s timer is what removes it. The global reduced-motion rule
+           clamps every animation to 1ms, which on an animation-only toast would
+           snap it straight to its final (opacity: 0) frame and the message
+           would never be seen; reduced motion drops the animation instead, so
+           the toast simply appears and disappears without moving. */
         .toast {
           position: fixed; bottom: 24px; left: 50%;
+          transform: translateX(-50%);
           background: var(--bg-elev); color: var(--text-high);
           padding: 8px 16px; border-radius: 999px; font-size: 13px;
           z-index: 200; border: 1px solid var(--border);
           font-family: 'GeistMono', monospace;
           box-shadow: 0 12px 32px rgba(0,0,0,0.28);
+          opacity: 1;
           animation: preis-toast-life 2000ms var(--ease-out-soft) both;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .toast { animation: none; }
         }
         @media (max-width: 980px) {
           .main { grid-template-columns: 1fr; }

@@ -7,6 +7,7 @@ const assets = [
     name: 'Hydration',
     decimals: 12,
     isStablecoin: false,
+    isUsdPegged: false,
     parachainId: null,
   },
   {
@@ -15,6 +16,7 @@ const assets = [
     name: 'Tether',
     decimals: 6,
     isStablecoin: true,
+    isUsdPegged: true,
     parachainId: 1000,
   },
 ]

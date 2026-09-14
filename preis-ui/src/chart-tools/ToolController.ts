@@ -1,5 +1,5 @@
 import type { IChartApi, ISeriesApi } from 'lightweight-charts'
-import { barMetaFromSeries, makeChartScale, xToTime } from './coords'
+import { xToTime } from './coords'
 import { newDrawingId } from './geometry'
 import { readDrawings, writeDrawings } from './store'
 import { ChartToolsPrimitive } from './ToolsPrimitive'
@@ -369,9 +369,19 @@ export class ToolController {
     return shiftKey ? { time: point.time, price: base.price } : point
   }
 
+  /**
+   * Pane x → unix seconds, through the primitive's cached coords. Placement,
+   * measuring and dragging all call this once per pointermove, so rebuilding
+   * the bar grid here would walk every loaded candle on every pointer event.
+   */
+  private timeAtX(x: number): number | null {
+    const ctx = this.primitive.coordCtx()
+    return ctx ? xToTime(x, ctx.scale, ctx.meta) : null
+  }
+
   /** Anchor at pane-0 (x, y); time may be extrapolated beyond the data edges. */
   private anchorAtXY(x: number, y: number): AnchorPoint | null {
-    const time = xToTime(x, makeChartScale(this.chart), barMetaFromSeries(this.series))
+    const time = this.timeAtX(x)
     if (time == null) return null
     const price = this.series.coordinateToPrice(y)
     if (price == null) return null
@@ -658,7 +668,7 @@ export class ToolController {
         kind: 'drag', pointerId: event.pointerId, id: parsed.id, part: parsed.part,
         startAnchors: [{ ...drawing.points[0] }, { ...drawing.points[1] }],
         startOffset: drawing.offset,
-        startTime: xToTime(x, makeChartScale(this.chart), barMetaFromSeries(this.series)),
+        startTime: this.timeAtX(x),
         startPrice: this.series.coordinateToPrice(y),
         startX: x, startY: y, moved: false,
       })
@@ -769,7 +779,7 @@ export class ToolController {
     const index = this.drawings.findIndex(d => d.id === interaction.id)
     if (index < 0) return
     const current = this.drawings[index]
-    const cursorTime = xToTime(x, makeChartScale(this.chart), barMetaFromSeries(this.series))
+    const cursorTime = this.timeAtX(x)
     const cursorPrice = this.series.coordinateToPrice(y)
 
     if (interaction.part === 'off') {

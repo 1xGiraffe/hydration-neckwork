@@ -19,10 +19,11 @@ type BitmapScope = Parameters<Parameters<CanvasTarget['useBitmapCoordinateSpace'
 
 type XY = { x: number; y: number }
 
-// Time-scale + bar-meta resolved ONCE per render/hit pass. barMetaFromSeries
-// copies the whole bar array (series.data() is O(n)), so it must not be rebuilt
-// per anchor — a channel alone maps a dozen anchors per pass.
-type Coords = { scale: CoordScale; meta: BarMeta | null }
+// Time-scale + bar-meta resolved ONCE and reused across passes.
+// barMetaFromSeries copies the whole bar array (series.data() is O(n)), so it
+// must not be rebuilt per anchor — a channel alone maps a dozen anchors per
+// pass — nor per pointer event.
+export type Coords = { scale: CoordScale; meta: BarMeta | null }
 
 export interface PendingTrendline {
   p1: AnchorPoint
@@ -140,17 +141,31 @@ export class ChartToolsPrimitive implements ISeriesPrimitive<Time> {
   // Touch placement reticle, in pane-0 pixel space (screen-anchored, not data-anchored).
   private placementCrosshair: XY | null = null
   private hitTestEnabled = true
+  // Resolved coords for the current data, rebuilt only when the series data
+  // changes. hitTest runs on EVERY mousemove the library routes to us, and
+  // barMetaFromSeries walks and copies the whole bar array — with thousands of
+  // candles loaded that walk per mouse move is the single most expensive thing
+  // the tools layer can do.
+  private cachedCoords: Coords | null = null
 
   attached(param: SeriesAttachedParameter<Time>): void {
     this.chart = param.chart
     this.series = param.series
     this.requestUpdate = param.requestUpdate
+    this.cachedCoords = null
+    param.series.subscribeDataChanged(this.onSeriesDataChanged)
   }
 
   detached(): void {
+    this.series?.unsubscribeDataChanged(this.onSeriesDataChanged)
     this.chart = null
     this.series = null
     this.requestUpdate = null
+    this.cachedCoords = null
+  }
+
+  private readonly onSeriesDataChanged = (): void => {
+    this.cachedCoords = null
   }
 
   paneViews(): readonly IPrimitivePaneView[] {
@@ -192,10 +207,17 @@ export class ChartToolsPrimitive implements ISeriesPrimitive<Time> {
     this.hitTestEnabled = enabled
   }
 
-  /** Time-scale + bar-meta for one pass; null while detached. */
-  private coordCtx(): Coords | null {
+  /**
+   * Time-scale + bar-meta; null while detached. Cached until the series data
+   * changes — the scale adapter reads the live time scale on every call, so
+   * pan/zoom needs no invalidation, and only the bar grid is snapshotted.
+   */
+  coordCtx(): Coords | null {
     if (!this.chart || !this.series) return null
-    return { scale: makeChartScale(this.chart), meta: barMetaFromSeries(this.series) }
+    if (!this.cachedCoords) {
+      this.cachedCoords = { scale: makeChartScale(this.chart), meta: barMetaFromSeries(this.series) }
+    }
+    return this.cachedCoords
   }
 
   /**

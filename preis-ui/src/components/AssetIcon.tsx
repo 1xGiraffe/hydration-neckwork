@@ -77,7 +77,8 @@ function AssetIconInner({ assetId, symbol, size = 24, parachainId, origin }: Ass
           alignItems: 'center',
           justifyContent: 'center',
           fontSize: size * 0.42,
-          fontWeight: 700,
+          // 600 is the heaviest Geist face the app ships; 700 would be faux-bold.
+          fontWeight: 600,
           color: '#fff',
           userSelect: 'none',
         }}>
@@ -129,8 +130,10 @@ function AssetIconInner({ assetId, symbol, size = 24, parachainId, origin }: Ass
             width: 12,
             height: 12,
             borderRadius: '50%',
-            border: '1px solid #030816',
-            background: '#030816',
+            // The ring separates the badge from the icon it overlaps, so it has
+            // to be the page ground in whichever theme is showing.
+            border: '1px solid var(--bg)',
+            background: 'var(--bg)',
             objectFit: 'cover',
           }}
         />
