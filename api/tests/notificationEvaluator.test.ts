@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest'
 import {
   SAFETY_ROW_LANE_KINDS, SAFETY_SNAPSHOT_KINDS,
   activityIdentity, activityPath, activityReferencesAsset, armStateKey, evaluateAccountActivity,
-  evaluateEvents, evaluateExtrinsics, evaluateLargeValue, evaluateReferendum, evaluateRowKind,
+  evaluateEvents, evaluateExtrinsics, evaluateLargeValue, evaluateReferendum,
   evaluateSafety, evaluateThreshold, inWindow, isFinalRow, nameMatches, notificationIdFor,
   pageMissedRows, parseArmState, REFERENDUM_PHASE_BY_EVENT,
   renderDigest, renderMatch, resolveWindow, safetyIdentity,
@@ -245,8 +245,8 @@ describe('large-transfer matching', () => {
     expect(evaluateLargeValue(rows, [r], W).map(m => m.blockHeight)).toEqual([1_022])
   })
 
-  it('dispatches through evaluateRowKind under its own kind', () => {
-    const matches = evaluateRowKind('large-transfer', [transfer()], [rule('large-transfer', { minUsd: 1_000 })], W)
+  it('stamps a match with the kind of the rule that produced it', () => {
+    const matches = evaluateLargeValue([transfer()], [rule('large-transfer', { minUsd: 1_000 })], W)
     expect(matches.map(m => m.identity)).toEqual(['1050-e7'])
     expect(matches[0].kind).toBe('large-transfer')
   })
@@ -377,9 +377,9 @@ describe('event and extrinsic matching', () => {
     expect(evaluateExtrinsics(rows, [bySigner], W).map(m => m.identity)).toEqual(['1010-1'])
   })
 
-  it('dispatches through evaluateRowKind with the rows its kind expects', () => {
+  it('matches an event rule against the row shape its kind carries', () => {
     const rows: ChainEventRow[] = [{ blockHeight: 1_050, eventIndex: 1, extrinsicIndex: null, name: 'Omnipool.SellExecuted' }]
-    expect(evaluateRowKind('event', rows, [rule('event', { section: 'Omnipool' })], W)).toHaveLength(1)
+    expect(evaluateEvents(rows, [rule('event', { section: 'Omnipool' })], W)).toHaveLength(1)
   })
 })
 
