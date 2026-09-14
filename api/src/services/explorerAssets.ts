@@ -169,8 +169,17 @@ export const ATOKEN_UNDERLYING_ID: Record<number, number> = {
 // while uBIL's marks the wrapped receivable. Price aliasing (priceAssetId) is
 // unaffected.
 const OWN_ICON_ASSET_IDS = new Set<number>([67, 55]) // GIGAHDX, BIL
+// A wrapper with no artwork of its own borrows its underlying's, the same rule the
+// Hydration UI applies (an asset without `iconSrc` that is an aToken, a bond or a
+// stableswap share resolves through `underlyingAssetId`). aTokens and bonds already
+// carried it; pool SHARE tokens are folded here too, so 2-Pool-GDOT shows GDOT and
+// 2-Pool-WETH shows ETH rather than the letter placeholder their own ids resolve to.
+// Single-hop on purpose: the two maps never chain, and a share token whose underlying
+// is itself iconless (the Hollar-wrapped stables) resolves to the id the UI holds a
+// composite for.
 export function iconAssetIdFor(assetId: number): number {
-  return OWN_ICON_ASSET_IDS.has(assetId) ? assetId : (ATOKEN_UNDERLYING_ID[assetId] ?? assetId)
+  if (OWN_ICON_ASSET_IDS.has(assetId)) return assetId
+  return ATOKEN_UNDERLYING_ID[assetId] ?? SHARE_TOKEN_UNDERLYING_ID[assetId] ?? assetId
 }
 
 // An aToken uses its reserve asset's artwork, so its origin badge must describe
