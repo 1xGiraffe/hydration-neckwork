@@ -74,7 +74,23 @@ export const zOrder = z.enum(['asc', 'desc']).default('desc')
 export const zCursor = z.string().max(600).optional()
   .describe('Opaque position from the previous page\'s `nextCursor`. Never construct one by hand.')
 
+// The pagination triple every feed takes; a feed extends it with its own
+// filters rather than restating limit/cursor/order.
 export const zFeedQuery = z.object({ limit: zLimit, cursor: zCursor, order: zOrder })
+
+// The uniform window quartet every deep feed takes: either kind, either end
+// alone, composable with the cursor — the cursor then walks only the window.
+// An inverted window is simply empty. Declared here rather than per route so
+// the four parameters cannot drift apart across the surface.
+export const zWindowQuartet = {
+  fromBlock: zBlock.optional().describe('Lower block bound, inclusive.'),
+  toBlock: zBlock.optional().describe('Upper block bound, inclusive.'),
+  fromTime: zTimeParam.optional().describe('Lower time bound, inclusive (ISO-8601).'),
+  toTime: zTimeParam.optional().describe('Upper time bound, inclusive (ISO-8601).'),
+}
+
+// The two composed: the shape of a windowed cursor feed with no extra filters.
+export const zWindowedFeedQuery = zFeedQuery.extend(zWindowQuartet)
 
 export function zFeedPage<T extends z.ZodType>(item: T) {
   return z.object({
@@ -131,19 +147,6 @@ export function requirePositionCursor(raw: string | undefined): { b: number; i: 
 export function feedPage<T>(items: T[], hasMore: boolean, position: (last: T) => Record<string, number | string>): { items: T[]; hasMore: boolean; nextCursor?: string } {
   const last = items[items.length - 1]
   return { items, hasMore, ...(hasMore && last ? { nextCursor: encodeCursor(position(last)) } : {}) }
-}
-
-// The lexicographic keyset predicate for a cursor over sort columns c1..cn:
-// desc -> (c1 < v1) OR (c1 = v1 AND c2 < v2) OR …; asc flips the comparators.
-// Columns are SQL expressions the caller controls; values bind as parameters.
-export interface KeysetColumn { sql: string; param: string }
-export function keysetClause(order: 'asc' | 'desc', columns: KeysetColumn[]): string {
-  const cmp = order === 'desc' ? '<' : '>'
-  const alternatives = columns.map((column, i) => {
-    const equalities = columns.slice(0, i).map(prev => `${prev.sql} = {${prev.param}}`)
-    return [...equalities, `${column.sql} ${cmp} {${column.param}}`].join(' AND ')
-  })
-  return `(${alternatives.map(a => `(${a})`).join(' OR ')})`
 }
 
 // ---------------------------------------------------------------------------

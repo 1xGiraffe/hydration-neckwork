@@ -5,26 +5,14 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import {
   feedPage, requirePositionCursor,
-  zAccountRef, zAssetId, zCursor, zError, zFeedPage, zIsoTimestamp, zLimit, zOrder, zTimeParam,
+  zAssetId, zCursor, zError, zFeedPage, zLimit, zOrder, zTimeParam,
 } from '../schemas/common.ts'
 import { liveHeadTag } from '../services/head.ts'
 import { resolveWindow } from '../services/statsData.ts'
 import {
   XCM_DEFAULT_WINDOW_S, XCM_IN_EVENTS, XCM_MAX_WINDOW_S, XCM_OUT_EVENTS, xcmFeed,
 } from '../services/xcmFeed.ts'
-
-const zXcmItem = z.object({
-  blockHeight: z.number().int(),
-  eventIndex: z.number().int(),
-  extrinsicIndex: z.number().int().nullable().describe('The sending extrinsic on `out`; null on `in` (arrivals land in block hooks).'),
-  extrinsicHash: z.string().nullable().describe('Hash of the carrying extrinsic; null for a block-hook row.'),
-  timestamp: zIsoTimestamp,
-  eventName: z.string(),
-  direction: z.enum(['in', 'out']),
-  who: zAccountRef.nullable().describe('The local account the flow names: the sender on `out`, the beneficiary on `in`.'),
-  assetId: zAssetId,
-  amount: z.string().nullable().describe('Raw integer amount of `assetId`; null when the event carries none.'),
-})
+import { zXcmTransfer } from './xcmShared.ts'
 
 const DESCRIPTION = [
   'Cross-chain flow events seen on Hydration, inside a BOUNDED window (default the last 24 hours, maximum 7 days — the backing table is keyed event-name-first, so the window is what prunes the read).',
@@ -50,7 +38,7 @@ export const xcmRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = async
         fromTime: zTimeParam.optional(),
         toTime: zTimeParam.optional(),
       }),
-      response: { 200: zFeedPage(zXcmItem), 400: zError },
+      response: { 200: zFeedPage(zXcmTransfer), 400: zError },
     },
   }, async request => {
     const { limit, order, direction } = request.query

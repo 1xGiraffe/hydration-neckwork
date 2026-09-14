@@ -7,8 +7,9 @@ import { assetDescriptor } from '../../services/explorerAssets.ts'
 import { v3PoolLiquidity } from '../../services/uniswapV3Ranges.ts'
 import {
   badRequest, errorEnvelope, feedPage, requireCursor, requirePositionCursor,
-  zAccountRef, zAssetId, zBlock, zCursor, zError, zFeedPage, zIsoTimestamp, zLimit, zOrder, zTimeParam,
+  zAccountRef, zAssetId, zError, zFeedPage, zIsoTimestamp, zTimeParam, zWindowedFeedQuery,
 } from '../schemas/common.ts'
+import { windowKey } from '../services/feed.ts'
 import { liveHeadTag, notFoundContext } from '../services/head.ts'
 import {
   omnipoolHistory, omnipoolState, poolVolumes, stableswapHistory, stableswapState, uniswapV3History, uniswapV3State, xykHistory, xykState,
@@ -16,6 +17,7 @@ import {
 } from '../services/poolsData.ts'
 import { fillsPage } from '../services/swapFills.ts'
 import { ADDRESS_FORMATS_HINT, accountRefFor, parseAddress } from '../services/address.ts'
+import { requireParsedAddress } from './accountsShared.ts'
 import { zSwapFill, zVenue, type Venue } from './tradesShared.ts'
 
 const zOmnipoolAsset = z.object({
@@ -66,16 +68,6 @@ const zUniswapV3Pool = z.object({
   blockHeight: z.number().int().describe('Block of the last pool event this state reflects.'),
 })
 
-const zHistoryQuery = z.object({
-  limit: zLimit,
-  cursor: zCursor,
-  order: zOrder,
-  fromBlock: zBlock.optional(),
-  toBlock: zBlock.optional(),
-  fromTime: zTimeParam.optional(),
-  toTime: zTimeParam.optional(),
-})
-
 const zVolumeBucket = z.object({
   bucket: zIsoTimestamp,
   assetId: zAssetId,
@@ -114,7 +106,7 @@ function normalizePoolKey(venue: Venue, raw: string): string {
 }
 
 async function poolHistoryPage<T>(
-  request: { query: z.infer<typeof zHistoryQuery> },
+  request: { query: z.infer<typeof zWindowedFeedQuery> },
   load: (options: HistoryPageOptions) => Promise<{ items: T[]; hasMore: boolean }>,
   cacheKey: string,
   blockOf: (item: T) => number,
@@ -122,7 +114,7 @@ async function poolHistoryPage<T>(
   const { limit, order, fromBlock, toBlock, fromTime, toTime } = request.query
   const cursorBlock = requireCursor(request.query.cursor, ['b'])?.b ?? null
   const { items, hasMore } = await cached(
-    `${cacheKey}:${order}:${fromBlock ?? ''}:${toBlock ?? ''}:${fromTime ?? ''}:${toTime ?? ''}:${cursorBlock ?? ''}:${limit}`,
+    `${cacheKey}:${order}:${windowKey(request.query)}:${cursorBlock ?? ''}:${limit}`,
     10_000,
     () => load({ limit, order, cursorBlock, fromBlock, toBlock, fromTime, toTime }),
   )
@@ -178,7 +170,7 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
       summary: 'Omnipool per-asset state history',
       description: 'One asset\'s Omnipool position over time on the 600-block sampling grid, newest first. A delisted asset\'s history simply ends; its last row is its final state (the asset is then absent from /v1/pools).',
       params: z.object({ assetId: zAssetId }),
-      querystring: zHistoryQuery,
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(z.object({
         blockHeight: z.number().int(),
         timestamp: zIsoTimestamp,
@@ -209,7 +201,7 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
       summary: 'Stableswap pool state history',
       description: 'One pool\'s reserves, amplification (with its ramp bounds), fee and share issuance over time on the 600-block grid, newest first. `pegNum`/`pegDen` are the per-asset peg ratios (e.g. pool 690 prices vDOT off its Bifrost peg).',
       params: z.object({ poolId: zAssetId }),
-      querystring: zHistoryQuery,
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(z.object({
         blockHeight: z.number().int(),
         timestamp: zIsoTimestamp,
@@ -246,7 +238,7 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
       summary: 'XYK pool reserve history',
       description: 'One XYK pair\'s reserves over time on the 600-block grid, newest first. The pool is addressed by its account (SS58, H160, or 0x-64-hex).',
       params: z.object({ poolAccount: z.string().min(3).max(128) }),
-      querystring: zHistoryQuery,
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(z.object({
         blockHeight: z.number().int(),
         timestamp: zIsoTimestamp,
@@ -257,8 +249,7 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
       })), 400: zError, 404: zError },
     },
   }, async (request, reply) => {
-    const parsed = parseAddress(request.params.poolAccount)
-    if (!parsed) throw badRequest(`unparseable pool account; ${ADDRESS_FORMATS_HINT}`)
+    const parsed = requireParsedAddress(request.params.poolAccount, 'pool account')
     const page = await poolHistoryPage(request, options => xykHistory(opts.client, parsed.accountId, options), `data:pools:xyk-history:${parsed.accountId}`, item => item.blockHeight)
     if (page.items.length === 0 && !request.query.cursor && request.query.fromBlock == null && request.query.fromTime == null) {
       const known = await xykState(opts.client)
@@ -279,7 +270,7 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
         '`liquidity` is the liquidity active at the post-swap tick as of that swap; a Mint or Burn in range since then is not reflected until the next swap. Fills themselves are /v1/pools/uniswapv3/{pool}/trades.',
       ].join('\n\n'),
       params: z.object({ pool: z.string().min(3).max(64).describe('The pool contract address (0x + 40 hex).') }),
-      querystring: zHistoryQuery,
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(z.object({
         blockHeight: z.number().int(),
         eventIndex: z.number().int(),
@@ -296,8 +287,11 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
     const pool = normalizePoolKey('uniswapv3', request.params.pool)
     const { limit, order, fromBlock, toBlock, fromTime, toTime } = request.query
     const cursor = requirePositionCursor(request.query.cursor)
-    const key = `data:pools:v3-history:${pool}:${order}:${fromBlock ?? ''}:${toBlock ?? ''}:${fromTime ?? ''}:${toTime ?? ''}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}`
+    const key = `data:pools:v3-history:${pool}:${order}:${windowKey(request.query)}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}`
     const page = await cached(key, 10_000, () => uniswapV3History(opts.client, pool, { limit, order, cursor, fromBlock, toBlock, fromTime, toTime }))
+    // An empty first page of an unbounded request means the pool has no events at
+    // all — so it is either unknown (404) or genuinely silent. A lower bound or a
+    // cursor makes emptiness expected, and the 404 probe would be wrong.
     if (page.items.length === 0 && !cursor && fromBlock == null && fromTime == null) {
       const known = await uniswapV3State(opts.client)
       if (!known.some(state => state.pool === pool)) {
@@ -370,15 +364,7 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
         'Era split at block 6,837,788 (the first Broadcast.Swapped): a modern Omnipool route reports its hub hops as separate fills, a legacy fill is the whole A→B swap with no hub leg and no `opKey`. A legacy fee leg\'s `feeDest: null` is genuinely unknowable, not unset. Fills with no local actor (XCM-originated placeholders) report `swapper: null`.',
       ].join('\n\n'),
       params: z.object({ venue: zVenue, poolKey: z.string().min(1).max(128) }),
-      querystring: z.object({
-        limit: zLimit,
-        cursor: zCursor,
-        order: zOrder,
-        fromBlock: zBlock.optional(),
-        toBlock: zBlock.optional(),
-        fromTime: zTimeParam.optional(),
-        toTime: zTimeParam.optional(),
-      }),
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(zSwapFill), 400: zError },
     },
   }, async request => {
@@ -387,7 +373,7 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
     const { limit, order, fromBlock, toBlock, fromTime, toTime } = request.query
     const cursor = requirePositionCursor(request.query.cursor)
     const head = await liveHeadTag(opts.client)
-    const key = `data:pool:trades:${venue}:${poolKey}:${order}:${fromBlock ?? ''}:${toBlock ?? ''}:${fromTime ?? ''}:${toTime ?? ''}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
+    const key = `data:pool:trades:${venue}:${poolKey}:${order}:${windowKey(request.query)}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
     const { items, hasMore } = await cached(key, 3_000, () => fillsPage(opts.client, { venue, poolKey }, { limit, order, cursor, fromBlock, toBlock, fromTime, toTime }))
     return feedPage(items, hasMore, last => ({ b: last.blockHeight, i: last.eventIndex }))
   })

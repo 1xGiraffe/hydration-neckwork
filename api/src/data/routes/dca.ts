@@ -4,13 +4,13 @@ import { z } from 'zod'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import {
-  badRequest, errorEnvelope, feedPage, requireCursor, requirePositionCursor,
-  zCursor, zError, zFeedPage, zLimit, zOrder,
+  errorEnvelope, feedPage, requireCursor, requirePositionCursor,
+  zCursor, zError, zFeedPage, zLimit, zOrder, zWindowedFeedQuery,
 } from '../schemas/common.ts'
-import { windowKey, zWindowQuartet } from './accountsShared.ts'
+import { windowKey } from '../services/feed.ts'
 import { liveHeadTag, notFoundContext } from '../services/head.ts'
 import { dcaScheduleAggregates, dcaScheduleById, dcaScheduleExecutions, dcaSchedules } from '../services/dcaData.ts'
-import { ADDRESS_FORMATS_HINT, parseAddress } from '../services/address.ts'
+import { optionalAddress } from './accountsShared.ts'
 import { PRE_ROUTER_NOTE, zExecution, zSchedule, zScheduleDetail } from './dcaShared.ts'
 
 const zScheduleId = z.string().regex(/^\d{1,18}$/, 'expected a decimal schedule id')
@@ -38,8 +38,7 @@ export const dcaRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = async
     },
   }, async request => {
     const { limit, order } = request.query
-    const owner = request.query.owner ? parseAddress(request.query.owner) : null
-    if (request.query.owner && !owner) throw badRequest(`unparseable owner; ${ADDRESS_FORMATS_HINT}`)
+    const owner = optionalAddress(request.query.owner, 'owner')
     const cursorId = requireCursor(request.query.cursor, ['i'], Number.MAX_SAFE_INTEGER)?.i ?? null
     const head = await liveHeadTag(opts.client)
     const key = `data:dca:schedules:${order}:${owner?.accountId ?? ''}:${cursorId ?? ''}:${limit}:${head}`
@@ -76,7 +75,7 @@ export const dcaRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = async
       summary: 'One schedule\'s execution history, newest first',
       description: 'Every DCA event of the schedule — executions, failures (with the raw DispatchError), plans, and the terminal event — cursor-paginated over the owner-first projection, so any depth of a long-running schedule costs one key-range read. The window quartet bounds the feed; `order=asc` replays it from the start.',
       params: z.object({ id: zScheduleId }),
-      querystring: z.object({ limit: zLimit, cursor: zCursor, order: zOrder, ...zWindowQuartet }),
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(zExecution), 400: zError, 404: zError },
     },
   }, async (request, reply) => {

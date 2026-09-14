@@ -234,7 +234,10 @@ export async function checkRateLimit(accountId: string): Promise<RateDecision> {
     counters.minuteCount += 1
     counters.dayCount += 1
   }
-  const retryAfterSeconds = overDay && !overMinute
+  // The day boundary wins whenever the day budget is spent, minute budget or
+  // not: the minute window turning over frees nothing while the day is out, so
+  // naming the next minute would only invite a busy retry loop until midnight.
+  const retryAfterSeconds = overDay
     ? dayStart + 86_400 - nowSec
     : minuteStart + 60 - nowSec
   return {

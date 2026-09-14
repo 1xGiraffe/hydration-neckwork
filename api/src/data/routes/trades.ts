@@ -9,7 +9,7 @@ import {
 } from '../schemas/common.ts'
 import { liveHeadTag } from '../services/head.ts'
 import { fillsPage } from '../services/swapFills.ts'
-import { ADDRESS_FORMATS_HINT, parseAddress } from '../services/address.ts'
+import { optionalAddress } from './accountsShared.ts'
 import { zSwapFill, zVenue } from './tradesShared.ts'
 
 // The global feed is time-windowed because the leg table is venue-first: the
@@ -57,8 +57,7 @@ export const tradesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
         { context: { maxWindowDays: 7 } },
       )
     }
-    const account = request.query.account ? parseAddress(request.query.account) : null
-    if (request.query.account && !account) throw badRequest(`unparseable account; ${ADDRESS_FORMATS_HINT}`)
+    const account = optionalAddress(request.query.account, 'account')
     const cursor = requirePositionCursor(request.query.cursor)
 
     const head = await liveHeadTag(opts.client)

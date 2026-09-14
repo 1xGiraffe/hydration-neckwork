@@ -5,8 +5,9 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import {
   MAX_BLOCK, badRequest, errorEnvelope, feedPage, requireCursor,
-  zAccountRef, zBlock, zCursor, zError, zFeedPage, zIsoTimestamp, zLimit, zOrder, zTimeParam,
+  zAccountRef, zBlock, zError, zFeedPage, zIsoTimestamp, zWindowedFeedQuery,
 } from '../schemas/common.ts'
+import { windowKey } from '../services/feed.ts'
 import { dataStatus, notFoundContext } from '../services/head.ts'
 import { blockByHash, blockByHeight, blockCounts, blockEvents, blockExtrinsics, blocksFeed } from '../services/chainCore.ts'
 import { zEventItem, zExtrinsicItem } from './extrinsicsShared.ts'
@@ -27,16 +28,6 @@ const zBlockDetail = zBlockHeader.extend({
   eventCount: z.number().int(),
 })
 
-const zBlocksQuery = z.object({
-  limit: zLimit,
-  cursor: zCursor,
-  order: zOrder,
-  fromBlock: zBlock.optional(),
-  toBlock: zBlock.optional(),
-  fromTime: zTimeParam.optional(),
-  toTime: zTimeParam.optional(),
-})
-
 export const blocksRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = async (fastify, opts) => {
   const app = fastify.withTypeProvider<ZodTypeProvider>()
 
@@ -45,14 +36,14 @@ export const blocksRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
       tags: ['chain'],
       summary: 'Block headers, newest first',
       description: 'Cursor-paginated over the primary key, so any depth of history costs one key-range read. `fromBlock`/`toBlock`/`fromTime`/`toTime` bound the window; `order=asc` walks forward.',
-      querystring: zBlocksQuery,
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(zBlockHeader), 400: zError },
     },
   }, async request => {
     const { limit, order, fromBlock, toBlock, fromTime, toTime } = request.query
     const cursorHeight = requireCursor(request.query.cursor, ['b'])?.b ?? null
     const { indexedHead } = await dataStatus(opts.client)
-    const key = `data:blocks:${order}:${fromBlock ?? ''}:${toBlock ?? ''}:${fromTime ?? ''}:${toTime ?? ''}:${cursorHeight ?? ''}:${limit}:h${indexedHead}`
+    const key = `data:blocks:${order}:${windowKey(request.query)}:${cursorHeight ?? ''}:${limit}:h${indexedHead}`
     const { items, hasMore } = await cached(key, 3_000, () => blocksFeed(opts.client, { limit, order, cursorHeight, fromBlock, toBlock, fromTime, toTime, head: indexedHead }))
     return feedPage(items, hasMore, last => ({ b: last.height }))
   })
