@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
-import { windowCoveredTo, resolveWindow } from '../src/notifications/evaluator.ts'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  evaluatorCursors, initEvaluator, resetEvaluatorForTests, resolveWindow, runEvaluatorTick,
+  stopNotificationEvaluator, windowCoveredTo,
+} from '../src/notifications/evaluator.ts'
+import { createRule, initNotifications, loadNotifications } from '../src/notifications/notificationStore.ts'
+import { resetDeliveryStateForTests } from '../src/notifications/delivery.ts'
+import { fakeClient, insertedRows, type FakeClient } from './helpers/userFakes.ts'
 
 // The cursor is anchored on the raw ingestion head, but the activity feed a lane
 // reads is keyed and built on its own head — `indexedRawHead` (all pipelines, a
@@ -43,14 +49,20 @@ describe('the cursor a feed-backed lane may advance to', () => {
 })
 
 // The clamp only protects a lane that applies it, and the loss it prevents is
-// silent — no error, no log line, an advancing cursor. Four lanes (referendum,
-// tc-motion, event, extrinsic) shipped without it precisely because each lane
-// re-types the same line, so the rule is pinned here rather than left to review.
-describe('every lane clamps the cursor it advances to', () => {
+// silent — no error, no log line, an advancing cursor. Every lane re-typing the
+// same line is what let six of the seven read the watermark AFTER their own
+// source query, which is not a clamp at all: the blocks that land while a lane
+// spends seconds in its source then count as covered by a page that could not
+// have held them. So no lane names its own cursor any more — it returns the
+// window it matched and the tick derives the cursor once.
+describe('the clamp lives in exactly one place', () => {
   const evaluator = readFileSync(new URL('../src/notifications/evaluator.ts', import.meta.url), 'utf8')
   const laneBody = evaluator.slice(
     evaluator.indexOf('async function runKindLane'),
     evaluator.indexOf('async function safetyLane'))
+  const tickBody = evaluator.slice(
+    evaluator.indexOf('export async function runEvaluatorTick'),
+    evaluator.indexOf('async function guard('))
 
   it('is the function under test', () => {
     expect(laneBody).toContain('switch (kind)')
@@ -60,16 +72,90 @@ describe('every lane clamps the cursor it advances to', () => {
     }
   })
 
-  it('never advances a cursor straight to the raw ingestion head', () => {
-    expect(laneBody).not.toMatch(/nextCursor:\s*window\.to/)
+  it('lets no lane name the cursor it advances to', () => {
+    expect(laneBody).not.toContain('nextCursor')
   })
 
-  it('advances only to a clamped value or holds the cursor for a deferred source', () => {
-    const advances = laneBody.match(/nextCursor:\s*([^,}\n]+)/g) ?? []
+  it('keeps the watermark read out of the lanes entirely', () => {
+    // Inside a lane the read is worthless: it happens after the source query.
+    expect(laneBody).not.toContain('visibleSourceHead')
+    expect(evaluator.match(/await visibleSourceHead\(\)/g) ?? []).toHaveLength(1)
+  })
 
-    expect(advances.length).toBeGreaterThanOrEqual(7)
-    for (const advance of advances) {
-      expect(advance, advance).toMatch(/covered|cursor/)
-    }
+  it('reads the watermark once per tick, before the lanes run', () => {
+    expect(tickBody).toContain('const sourceHead = await visibleSourceHead()')
+    expect(tickBody.indexOf('visibleSourceHead')).toBeLessThan(tickBody.indexOf('runKindLane'))
+  })
+})
+
+/* ============ the same invariant, driven through a tick ============ */
+
+const OWNER = '0x' + 'cc'.repeat(32)
+const swapAt = (block: number) =>
+  ({ block_height: block, event_index: 1, extrinsic_index: 0, event_name: 'Omnipool.SellExecuted' })
+
+let client: FakeClient
+let tables: { raw_ingestion_state: { head: number }[]; raw_events: Record<string, unknown>[] }
+let queries: string[]
+
+const inbox = () => insertedRows(client, 'user_notification_inbox')
+const setHead = (head: number) => { tables.raw_ingestion_state[0].head = head }
+const isWatermark = (q: string) => q.trim() === 'SELECT max(block_height) AS head FROM price_data.raw_events'
+const isLaneRead = (q: string) => q.includes('event_name')
+
+beforeEach(async () => {
+  resetEvaluatorForTests()
+  resetDeliveryStateForTests()
+  queries = []
+  tables = { raw_ingestion_state: [{ head: 1_000 }], raw_events: [] }
+  client = fakeClient(tables as unknown as Record<string, Record<string, unknown>[]>)
+  initNotifications(client)
+  await loadNotifications()
+  // Every query the evaluator makes, in order.
+  initEvaluator({
+    ...client,
+    query: async (args: { query: string }) => { queries.push(args.query); return client.query(args as never) },
+  } as unknown as FakeClient)
+  await createRule(OWNER, { kind: 'event', params: { section: 'Omnipool' } })
+})
+
+afterEach(async () => { await stopNotificationEvaluator() })
+
+describe('a tick’s source watermark', () => {
+  it('is read exactly once, and before the lane reads its source', async () => {
+    await runEvaluatorTick()                       // seeds at 1000
+    setHead(1_010)
+    tables.raw_events = [swapAt(1_010)]
+    queries = []
+    await runEvaluatorTick()
+
+    expect(queries.filter(isWatermark)).toHaveLength(1)
+    expect(queries.findIndex(isWatermark)).toBeLessThan(queries.findIndex(isLaneRead))
+  })
+
+  it('holds the cursor at the blocks it cannot vouch for', async () => {
+    await runEvaluatorTick()                       // seeds at 1000
+    setHead(1_010)
+    // The ingestion head names 1010, but only 1005's rows have landed.
+    client.sourceHead = 1_005
+    tables.raw_events = [swapAt(1_002)]
+    await runEvaluatorTick()
+
+    expect(inbox().map(r => r.block_height)).toEqual([1_002])
+    expect(evaluatorCursors().event).toBe(1_005)
+  })
+
+  // An unreadable watermark is not permission to advance to the ingestion head:
+  // that is precisely the step that loses rows, and holding costs a re-read.
+  it('holds the cursor when the watermark cannot be read at all', async () => {
+    await runEvaluatorTick()                       // seeds at 1000
+    setHead(1_010)
+    client.sourceHead = null
+    await runEvaluatorTick()
+    expect(evaluatorCursors().event).toBe(1_000)
+
+    client.sourceHead = undefined
+    await runEvaluatorTick()
+    expect(evaluatorCursors().event).toBe(1_010)
   })
 })

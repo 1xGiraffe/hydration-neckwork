@@ -27,7 +27,7 @@ import {
 } from '../services/wormholeNttService.ts'
 import {
   activeRulesByKind, armStateKey, channelsFor, getChannel, getNotificationState, setNotificationState,
-  type NotificationChannel, type NotificationRule,
+  setNotificationStates, type NotificationChannel, type NotificationRule,
 } from './notificationStore.ts'
 import { resolveActivityTarget } from './ruleTargets.ts'
 import {
@@ -982,9 +982,6 @@ const PHASE_LABEL: Record<ReferendumPhase, string> = {
   executed: 'executed', rejected: 'rejected', cancelled: 'cancelled', 'timed-out': 'timed out', killed: 'killed',
 }
 
-// Asset ids in human-facing summaries read as tickers, from the same registry
-// the rest of the api renders symbols from.
-
 // When a rate-limited transfer can be let out. Anyone may call the release once
 // the window has opened, which is the actionable part of the message.
 export function wormholeReleaseText(releasableAt: string | null, nowMs = Date.now()): string {
@@ -1440,14 +1437,17 @@ async function flushCursors(force: boolean): Promise<void> {
   const pending = [...dirtyCursors]
   dirtyCursors.clear()
   cursorsPersistedAtMs = now
-  for (const kind of pending) {
-    const value = cursors.get(kind)
-    if (value != null) await setNotificationState(cursorKey(kind), String(value))
-  }
+  // One insert for every cursor that moved, plus the parked map when it changed:
+  // a row at a time was one round trip per kind on a tick that delivered.
+  const rows = pending
+    .map(kind => ({ kind, value: cursors.get(kind) }))
+    .filter((r): r is { kind: RowLaneKind; value: number } => r.value != null)
+    .map(r => ({ key: cursorKey(r.kind), value: String(r.value) }))
   if (parkedDirty) {
     parkedDirty = false
-    await setNotificationState(PARKED_SUBMISSIONS_KEY, serializeParkedSubmissions(parkedSubmissions()))
+    rows.push({ key: PARKED_SUBMISSIONS_KEY, value: serializeParkedSubmissions(parkedSubmissions()) })
   }
+  await setNotificationStates(rows)
 }
 
 /** The cursors as they stand in memory, for tests and diagnostics. */
@@ -1523,6 +1523,14 @@ export async function runEvaluatorTick(): Promise<void> {
     tick++
     const head = await queryLiveHead()
     if (head == null) return
+    // The source watermark, read ONCE and BEFORE any lane touches its source.
+    // Read after a lane's query it would prove nothing: a lane spends seconds in
+    // its source (account-activity alone makes up to 25 sequential feed fetches),
+    // and the blocks that land in the meantime would be counted as covered by a
+    // page that provably could not have held them — which a forward-only cursor
+    // then steps over for good. Read first, it is a lower bound on what every
+    // lane this tick actually saw.
+    const sourceHead = await visibleSourceHead()
     const lanes: LaneOutcome[] = []
     for (const kind of ROW_LANE_KINDS) {
       const rules = activeRulesByKind(kind)
@@ -1548,7 +1556,7 @@ export async function runEvaluatorTick(): Promise<void> {
     // a cursor or disarmed a crossing would lose them for good.
     if (await dispatch(matches)) {
       for (const lane of lanes) {
-        advanceCursor(lane.kind, lane.nextCursor)
+        advanceCursor(lane.kind, laneCursor(lane, sourceHead))
         lane.commit?.()
       }
       await snapshot.commit()
@@ -1571,11 +1579,23 @@ async function guard(what: string, run: () => Promise<void>): Promise<void> {
 
 /* ============ row lane ============ */
 
-/** One kind's matches for this tick, and where its cursor may move to. */
+/** One kind's matches for this tick, and the window they were matched over. */
 interface LaneOutcome {
   kind: RowLaneKind
   matches: RuleMatch[]
-  nextCursor: number
+  /**
+   * The window the lane matched. The CALLER turns it into the next cursor
+   * (`laneCursor`); a lane never names its own. That is what makes the
+   * source-watermark clamp unskippable — while each lane computed its own
+   * cursor, six of the seven re-typed the clamp with the watermark read AFTER
+   * their source query, which defeats it silently.
+   */
+  window: BlockWindow
+  /**
+   * A source group has not seen this window yet, so the cursor waits for it
+   * rather than stepping over the group's rows.
+   */
+  deferred?: boolean
   /**
    * State the lane may only keep once this tick's rows are durably in the inbox —
    * applied exactly where the cursor advances. The referendum lane's parked
@@ -1584,6 +1604,25 @@ interface LaneOutcome {
    */
   commit?: () => void
 }
+
+/**
+ * Where a lane's cursor may stand once this tick's matches are durably stored.
+ *
+ * `sourceHead` is the every-block watermark read at the top of the tick (see
+ * `visibleSourceHead`). Three cases, and only this function decides them:
+ *
+ *   * a DEFERRED lane holds exactly where it was — a group never asked its source;
+ *   * an UNREADABLE watermark holds the lane at `window.from`, the blocks the
+ *     clamp already wrote off. "We cannot tell what the source has" must never
+ *     mean "advance to the ingestion head";
+ *   * otherwise the lane advances only as far as the watermark proves its source
+ *     had reached BEFORE the lane read it.
+ */
+function laneCursor(lane: LaneOutcome, sourceHead: number | null): number {
+  if (lane.deferred) return cursors.get(lane.kind) ?? lane.window.from
+  return windowCoveredTo(lane.window, sourceHead ?? lane.window.from)
+}
+
 /** Activity source fetches this kind has left this tick. */
 interface FetchBudget { left: number }
 
@@ -1604,14 +1643,15 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
     console.warn(`[notifications] ${kind} cursor ${cursor} was ${head - cursor} blocks behind the live head; skipping ${skipped} blocks`)
   }
   if (window.to <= window.from) return null
+  // Every case returns the WINDOW it matched; the caller clamps it against the
+  // watermark it read before any of this ran (see laneCursor). `window.to` is the
+  // RAW INGESTION head, which is moved by an insert ClickHouse does not order
+  // against the inserts carrying a block's rows — so it can name blocks no source
+  // here could have returned, and advancing to it drops them silently.
   switch (kind) {
     case 'account-activity': {
       const { matches, deferred } = await accountActivityMatches(rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
-      // A deferred group has not seen this window yet, so the cursor waits for
-      // it rather than stepping over its rows. Blocks the SOURCE has not revealed
-      // yet wait the same way (see windowCoveredTo).
-      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
-      return { kind, matches, nextCursor: deferred ? cursor : covered }
+      return { kind, matches, window, deferred }
     }
     case 'large-trade':
     case 'large-transfer': {
@@ -1622,43 +1662,23 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
       // trade kind has schedules to watch, and a deferred fetch must not let the
       // cursor step over them either.
       const dca = kind === 'large-trade' ? await dcaStartMatches(rules, window) : []
-      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
-      return { kind, matches: [...matches, ...dca], nextCursor: deferred ? cursor : covered }
+      return { kind, matches: [...matches, ...dca], window, deferred }
     }
     case 'protocol-revenue':
     case 'liquidation': {
       const { matches, deferred } = kind === 'protocol-revenue'
         ? await protocolRevenueMatches(rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
         : await liquidationMatches(rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
-      // Same source as the large-value lanes, so the same rule applies: never step
-      // the cursor past the blocks that source has actually shown.
-      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
-      return { kind, matches, nextCursor: deferred ? cursor : covered }
+      return { kind, matches, window, deferred }
     }
-    // The four raw-window lanes. `window.to` is the RAW INGESTION head, which is
-    // moved by an insert ClickHouse does not order against the inserts carrying a
-    // block's rows — so it can name blocks these queries provably could not have
-    // returned. Advancing to it drops them permanently and silently. They clamp on
-    // the same every-block watermark the feed lanes above use.
-    case 'referendum': {
-      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
-      return { kind, ...await referendumMatches(rules, window), nextCursor: covered }
-    }
-    case 'tc-motion': {
-      const matches = evaluateTcMotion(await queryWindowTcMotions(window), rules, window)
-      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
-      return { kind, matches, nextCursor: covered }
-    }
-    case 'event': {
-      const matches = evaluateEvents(await queryWindowEvents(rules, window), rules, window)
-      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
-      return { kind, matches, nextCursor: covered }
-    }
-    default: {
-      const matches = evaluateExtrinsics(await queryWindowExtrinsics(rules, window), rules, window)
-      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
-      return { kind, matches, nextCursor: covered }
-    }
+    case 'referendum':
+      return { kind, ...await referendumMatches(rules, window), window }
+    case 'tc-motion':
+      return { kind, matches: evaluateTcMotion(await queryWindowTcMotions(window), rules, window), window }
+    case 'event':
+      return { kind, matches: evaluateEvents(await queryWindowEvents(rules, window), rules, window), window }
+    default:
+      return { kind, matches: evaluateExtrinsics(await queryWindowExtrinsics(rules, window), rules, window), window }
   }
 }
 
@@ -1671,6 +1691,11 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
 // contained, which keeps the blind spot below the cursor (a backfilled safety
 // action stays silent) while guaranteeing every action the dashboard eventually
 // reveals is above the cursor exactly once.
+//
+// The MAX_WINDOW_BLOCKS clamp applies here like it does to every other lane: a
+// tick after a long outage reports the newest 600 blocks of the security
+// timeline and counts the rest as skipped, rather than delivering days of alerts
+// at once (see MAX_WINDOW_BLOCKS — the inbox is not a backlog queue).
 async function safetyLane(rules: NotificationRule[], cursor: number | null, head: number): Promise<LaneOutcome | null> {
   const timeline = (await getSecurityDashboard()).timeline
   const newest = timeline.reduce((max, e) => Math.max(max, e.blockHeight), 0)
@@ -1680,9 +1705,15 @@ async function safetyLane(rules: NotificationRule[], cursor: number | null, head
     await seedCursor('safety', newest > 0 ? newest : head)
     return null
   }
-  const to = Math.max(cursor, newest)
-  if (to === cursor) return null
-  return { kind: 'safety', matches: evaluateSafety(timeline, rules, { from: cursor, to }), nextCursor: to }
+  // Anchored on the timeline's own newest row rather than on `head`, which is
+  // the whole point of this lane's cursor.
+  const { window, skipped } = resolveWindow(cursor, Math.max(cursor, newest))
+  if (skipped > 0) {
+    counters.skippedBlocks += skipped
+    console.warn(`[notifications] safety cursor ${cursor} was ${newest - cursor} blocks behind the newest security action; skipping ${skipped} blocks`)
+  }
+  if (window.to <= window.from) return null
+  return { kind: 'safety', matches: evaluateSafety(timeline, rules, window), window }
 }
 
 // One source fetch per WATCHED TARGET, not per rule variant: the pure matcher
@@ -1824,11 +1855,9 @@ const largeValueKey = (p: RuleParams['large-trade']): string => (p.assetId == nu
 // sparse floor walks all history otherwise), and a dated read is served the
 // shared classified window — stale-while-revalidate, on a key that carries no
 // head. Their cursor tracks the live head every tick, so a row that landed while
-// that window was fresh sat below the cursor by the time it appeared and was
-// never seen again. Measured live 2026-08-21: 66 trades cleared a $500 HDX floor
-// and ONE of them notified; every one of the ten ~$1.1k DCA executions of
-// schedule 33789 that day was silent. Declaring the reader forward-only puts the
-// page on the head-keyed window: one build per block, complete when it is read.
+// that window was fresh sits below the cursor by the time it appears, and is
+// never seen again. Declaring the reader forward-only puts the page on the
+// head-keyed window: one build per block, complete when it is read.
 //
 // `revenue` stays per lane — only the two revenue-reading lanes pay for it.
 const FORWARD_ONLY_PAGE = { revenue: false, forwardOnly: true } as const
@@ -2045,7 +2074,9 @@ async function fillReferendumTracks(rows: ReferendumEventRow[]): Promise<void> {
 }
 
 async function referendumMatches(rules: NotificationRule[], window: BlockWindow): Promise<{ matches: RuleMatch[]; commit?: () => void }> {
-  const rows = [...await queryWindowReferenda(window), ...await queryWindowEnactments(window)]
+  // Two independent reads of the same window, so they go out together.
+  const [lifecycle, enactments] = await Promise.all([queryWindowReferenda(window), queryWindowEnactments(window)])
+  const rows = [...lifecycle, ...enactments]
   if (rows.length && rules.some(r => (r.params as RuleParams['referendum']).track)) await fillReferendumTracks(rows)
   // Titles are off-chain (SubSquare) and already in memory; a referendum the
   // refresher has not seen yet simply renders without one — except at SUBMITTED,
@@ -2215,10 +2246,6 @@ const argNumber = (args: Record<string, unknown>, key: string): number | null =>
   return Number.isFinite(n) ? n : null
 }
 
-// Technical Committee motion events in the window, straight off raw_events. The
-// committee has emitted a few thousand events in the chain's whole history, and
-// the event-name set index makes a 600-block window a near-empty scan — so this
-// needs no projection of its own, unlike the referendum lane's.
 // The DCA-start half of the large-trade lane: value each new schedule at
 // event-time prices and hand it to the pure matcher. Prices come from the shared
 // map the rest of the loop already uses; a schedule whose asset has no price
@@ -2339,6 +2366,10 @@ async function queryWindowDcaIntents(window: BlockWindow): Promise<DcaScheduleRo
   return rows.map(dcaIntentScheduleRow)
 }
 
+// Technical Committee motion events in the window, straight off raw_events. The
+// committee has emitted a few thousand events in the chain's whole history, and
+// the event-name set index makes a 600-block window a near-empty scan — so this
+// needs no projection of its own, unlike the referendum lane's.
 async function queryWindowTcMotions(window: BlockWindow): Promise<TcMotionEventRow[]> {
   if (!client) return []
   const res = await client.query({
@@ -2458,17 +2489,32 @@ async function queryWindowExtrinsics(rules: NotificationRule[], window: BlockWin
 // A kind that throws has its own buffered writes dropped, so a half-evaluated
 // rule cannot disarm against a reading it never finished acting on.
 let pendingArmWrites: { key: string; value: string }[] = []
+// In-memory state under the same rule as the arm writes: a lane's memory of what
+// it has already announced is a disarm too, so keeping it before the inbox write
+// lands loses the alert exactly the same way (the Wormhole queue memo).
+let pendingStateCommits: (() => void)[] = []
 
 function armWrite(key: string, value: string): void {
   pendingArmWrites.push({ key, value })
 }
 
+/** In-memory state to apply on the same commit the arm writes ride. */
+function commitAfterDispatch(apply: () => void): void {
+  pendingStateCommits.push(apply)
+}
+
 async function runSnapshotLane(run: { values: boolean; security: boolean }): Promise<{ matches: RuleMatch[]; commit: () => Promise<void> }> {
   const matches: RuleMatch[] = []
   pendingArmWrites = []
+  pendingStateCommits = []
   const kindGuard = (what: string, fn: () => Promise<RuleMatch[]>) => guard(what, async () => {
-    const before = pendingArmWrites.length
-    try { matches.push(...await fn()) } catch (err) { pendingArmWrites.length = before; throw err }
+    const writesBefore = pendingArmWrites.length
+    const commitsBefore = pendingStateCommits.length
+    try { matches.push(...await fn()) } catch (err) {
+      pendingArmWrites.length = writesBefore
+      pendingStateCommits.length = commitsBefore
+      throw err
+    }
   })
   if (run.values) {
     await kindGuard('price', priceMatches)
@@ -2479,10 +2525,17 @@ async function runSnapshotLane(run: { values: boolean; security: boolean }): Pro
     await kindGuard('safety-state', safetySnapshotMatches)
   }
   const writes = pendingArmWrites
+  const applies = pendingStateCommits
   pendingArmWrites = []
+  pendingStateCommits = []
   return {
     matches,
-    commit: async () => { for (const w of writes) await setNotificationState(w.key, w.value) },
+    // One insert for the whole tick's arm state: a rule per row cost a round
+    // trip each, on a 6s tick.
+    commit: async () => {
+      await setNotificationStates(writes)
+      for (const apply of applies) apply()
+    },
   }
 }
 
@@ -2522,6 +2575,26 @@ async function priceMatches(): Promise<RuleMatch[]> {
   })
 }
 
+// Health-factor reads one tick may have in flight at once. The tick is 6s and
+// shared with every other kind, so this is deliberately small: enough to hide the
+// round trips, not enough to turn a tag rule into a fan-out.
+const HEALTH_FACTOR_CONCURRENCY = 8
+
+/** `Promise.all` under a ceiling on how many run at once. Results keep input order. */
+async function mapBounded<T, R>(items: readonly T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++
+      out[i] = await run(items[i])
+    }
+  }
+  const workers = Math.max(1, Math.min(limit, items.length))
+  await Promise.all(Array.from({ length: workers }, worker))
+  return out
+}
+
 async function healthFactorMatches(): Promise<RuleMatch[]> {
   const rules = activeRulesByKind('health-factor')
   if (!rules.length) return []
@@ -2546,17 +2619,25 @@ async function healthFactorMatches(): Promise<RuleMatch[]> {
   // threshold and a panic threshold), or one address in several watched tags,
   // still read the same number once.
   const positionKey = (market: string, address: string) => `${market}:${address}`
-  const byPosition = new Map<string, number | null>()
+  const positions: { key: string; market: string; address: string }[] = []
+  const seenPosition = new Set<string>()
   for (const { market, addresses } of watched.values()) {
     for (const address of addresses) {
       const key = positionKey(market, address)
-      if (byPosition.has(key)) continue
-      // Unreadable is NOT zero: an address with no position in this market, or a
-      // position whose health factor cannot be read, must never look like an
-      // imminent liquidation.
-      byPosition.set(key, await getMarketHealthFactor(address, market).catch(() => null))
+      if (seenPosition.has(key)) continue
+      seenPosition.add(key)
+      positions.push({ key, market, address })
     }
   }
+  // The de-duplication above already proves the reads are independent, so they
+  // run a few at a time rather than one after another: a single tag rule is
+  // capped at MAX_TAG_MEMBERS, and 50 sequential round trips do not fit a 6s tick.
+  // Unreadable is NOT zero: an address with no position in this market, or a
+  // position whose health factor cannot be read, must never look like an
+  // imminent liquidation.
+  const readings = await mapBounded(positions, HEALTH_FACTOR_CONCURRENCY,
+    p => getMarketHealthFactor(p.address, p.market).catch(() => null))
+  const byPosition = new Map<string, number | null>(positions.map((p, i) => [p.key, readings[i]]))
 
   // Arm state is PER (rule, member) — one member crossing must not disarm the
   // rule for the others — but persisted as one row per rule (the same
@@ -2720,7 +2801,9 @@ async function mmCapMatches(): Promise<RuleMatch[]> {
   }
 
   // Remembered AFTER the rules ran, so this tick's flips compared against the
-  // cap the previous tick saw.
+  // cap the previous tick saw. Unlike the arm state and the bridge queue memo
+  // this is NOT deferred to the commit: it decides only whether a message can say
+  // "lowered from …", so a failed inbox write costs a phrase, never an alert.
   const seen = new Map<string, bigint>()
   for (const reserve of reserves) {
     for (const side of CAP_SIDES) {
@@ -2774,6 +2857,8 @@ async function safetySnapshotMatches(): Promise<RuleMatch[]> {
   if (!state) return []
 
   const matches: RuleMatch[] = []
+  // What the snapshot holds right now, read once: every rule judges the same set.
+  const held = new Set(state.queued.map(q => q.digest))
   for (const rule of rules) {
     const params = rule.params as RuleParams['safety']
     const prev = parseMemberArmStates(getNotificationState(armStateKey(rule.ruleId))) ?? new Map<string, ArmState>()
@@ -2865,7 +2950,6 @@ async function safetySnapshotMatches(): Promise<RuleMatch[]> {
       }
     }
 
-    const held = new Set(state.queued.map(q => q.digest))
     if (wantsSafetyEvent(params, 'queued')) {
       for (const entry of state.queued) {
         // Announced on the pass that first sees it, not on every pass: the
@@ -2897,14 +2981,20 @@ async function safetySnapshotMatches(): Promise<RuleMatch[]> {
   }
 
   // Remembered AFTER the rules ran, so a digest that appeared and vanished
-  // between two ticks cannot fire its release in the same pass that first saw it.
-  for (const entry of state.queued) {
-    seenOriginQueued.add(entry.digest)
-    originQueuedMemo.set(entry.digest, entry)
-  }
-  for (const digest of [...seenOriginQueued]) {
-    if (!state.queued.some(q => q.digest === digest)) { seenOriginQueued.delete(digest); originQueuedMemo.delete(digest) }
-  }
+  // between two ticks cannot fire its release in the same pass that first saw it —
+  // and only once the matches above are durably in the inbox. This memo is what
+  // stops a digest being announced twice, so writing it before the inbox write
+  // lands means a failed write drops the alert for good: the next tick skips a
+  // digest nobody was ever told about (and the mirror case loses the release).
+  commitAfterDispatch(() => {
+    for (const entry of state.queued) {
+      seenOriginQueued.add(entry.digest)
+      originQueuedMemo.set(entry.digest, entry)
+    }
+    for (const digest of [...seenOriginQueued]) {
+      if (!held.has(digest)) { seenOriginQueued.delete(digest); originQueuedMemo.delete(digest) }
+    }
+  })
   return matches
 }
 

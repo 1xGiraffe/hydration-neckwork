@@ -160,8 +160,10 @@ describe('evaluator cursor', () => {
     let failNext = true
     const flaky = {
       ...client,
+      // The LANE's own read, not the source watermark (which reads raw_events
+      // too, swallows its own failure, and must not stand in for the lane here).
       query: async (args: { query: string }) => {
-        if (failNext && args.query.includes('raw_events')) { failNext = false; throw new Error('raw_events unavailable') }
+        if (failNext && args.query.includes('event_name')) { failNext = false; throw new Error('raw_events unavailable') }
         return client.query(args as never)
       },
     }

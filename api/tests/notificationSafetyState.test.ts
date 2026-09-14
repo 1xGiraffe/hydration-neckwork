@@ -513,6 +513,63 @@ describe('the rate-limiter queue events', () => {
     expect(inbox()).toHaveLength(1)
   })
 
+  // The queue memo is a disarm like any other: it is what stops a digest being
+  // announced twice, so keeping it before the inbox row has landed loses the
+  // alert outright — the next tick skips a digest the subscriber was never told
+  // about, and nothing ever says the transfer is held.
+  it('re-announces a held digest when the inbox write failed', async () => {
+    let failInbox = false
+    const gated = {
+      ...client,
+      insert: async (args: { table: string; values: Record<string, unknown>[] }) => {
+        if (failInbox && args.table.endsWith('user_notification_inbox')) throw new Error('inbox is read-only')
+        return client.insert(args as never)
+      },
+    } as unknown as FakeClient
+    initNotifications(gated)
+    await loadNotifications()
+    initEvaluator(gated)
+    await createRule(OWNER, { kind: 'safety', params: {} })
+
+    failInbox = true
+    alertState = state({ queued: [held] })
+    await snapshotTick()
+    expect(inbox()).toHaveLength(0)
+
+    failInbox = false
+    await snapshotTick()
+    expect(inbox()).toHaveLength(1)
+    expect(inbox()[0].title).toBe("sUSDS held by Ethereum's rate limiter")
+  })
+
+  // The mirror: a release the inbox refused must still be reported, so the
+  // digest may not be forgotten until the row is durable.
+  it('re-announces a release when the inbox write failed', async () => {
+    let failInbox = false
+    const gated = {
+      ...client,
+      insert: async (args: { table: string; values: Record<string, unknown>[] }) => {
+        if (failInbox && args.table.endsWith('user_notification_inbox')) throw new Error('inbox is read-only')
+        return client.insert(args as never)
+      },
+    } as unknown as FakeClient
+    initNotifications(gated)
+    await loadNotifications()
+    initEvaluator(gated)
+    await createRule(OWNER, { kind: 'safety', params: { kinds: ['released'] } })
+    alertState = state({ queued: [held] })
+    await snapshotTick()                                   // seen held
+
+    failInbox = true
+    alertState = state({ queued: [] })
+    await snapshotTick()
+    expect(inbox()).toHaveLength(0)
+
+    failInbox = false
+    await snapshotTick()
+    expect(inbox().map(r => r.title)).toEqual(["sUSDS released by Ethereum's rate limiter"])
+  })
+
   it('never invents a release for a digest it did not see held', async () => {
     await createRule(OWNER, { kind: 'safety', params: { kinds: ['released'] } })
     alertState = state({ queued: [] })

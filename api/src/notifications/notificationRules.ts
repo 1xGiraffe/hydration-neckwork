@@ -1,9 +1,14 @@
 import { z } from 'zod'
+import { compactUsd } from './render.ts'
 
 // The notification rule registry: one zod schema and one human summary per
 // rule kind. Deliberately dependency-free — the evaluator, the routes, the
 // renderer and (mirrored) the explorer UI all describe a rule from the same
-// definition, so a kind's parameter set exists in exactly one place.
+// definition, so a kind's parameter set exists in exactly one place. `render.ts`
+// is the one import: it is itself a pure leaf, and a threshold in a summary has
+// to round exactly the way the message and the page round it, so the rough scale
+// is never restated here (a local rounder summarised a $1,500 floor as "$2k",
+// telling an owner a threshold they never set).
 
 export const NOTIFICATION_KINDS = [
   'account-activity', 'large-trade', 'large-transfer', 'price', 'health-factor',
@@ -139,10 +144,11 @@ const accountActivityShape = z.object({
 }).strict()
 
 // The pre-target spelling — `{ address, … }` — is still accepted and rewritten
-// into the address target. Rules persisted before targets existed are re-parsed
-// on every load (loadNotifications), so they normalize in place and need no
-// migration; a client that still posts the old shape keeps working.
-export function normalizeAccountActivityParams(value: unknown): unknown {
+// into the address target, for every kind that takes a target (account-activity,
+// liquidation, health-factor). Rules persisted before targets existed are
+// re-parsed on every load (loadNotifications), so they normalize in place and
+// need no migration; a client that still posts the old shape keeps working.
+export function normalizeAddressTargetParams(value: unknown): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value
   const o = { ...(value as Record<string, unknown>) }
   if (o.target === undefined && typeof o.address === 'string') o.target = { kind: 'address', address: o.address }
@@ -152,7 +158,7 @@ export function normalizeAccountActivityParams(value: unknown): unknown {
   return o
 }
 
-export const accountActivityParams = z.preprocess(normalizeAccountActivityParams, accountActivityShape)
+export const accountActivityParams = z.preprocess(normalizeAddressTargetParams, accountActivityShape)
 
 // The two value-floor kinds — large trades and large transfers — take the same
 // pair of parameters over two different activity feeds, so they share one
@@ -192,7 +198,7 @@ const liquidationShape = z.object({
   minUsd: z.number().min(0).optional(),
   target: accountActivityTarget.optional(),
 }).strict()
-export const liquidationParams = z.preprocess(normalizeAccountActivityParams, liquidationShape)
+export const liquidationParams = z.preprocess(normalizeAddressTargetParams, liquidationShape)
 
 export const priceParams = z.object({
   assetId,
@@ -213,19 +219,7 @@ const healthFactorShape = z.object({
   market: marketKey.default(PRIMARY_MARKET_KEY),
 }).strict()
 
-// The pre-target spelling — `{ address, threshold }` — is still accepted and
-// rewritten into the address target, exactly like account-activity above: rules
-// persisted before targets existed re-parse on every load and normalize in
-// place, and a client that still posts the old shape keeps working.
-export function normalizeHealthFactorParams(value: unknown): unknown {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return value
-  const o = { ...(value as Record<string, unknown>) }
-  if (o.target === undefined && typeof o.address === 'string') o.target = { kind: 'address', address: o.address }
-  delete o.address
-  return o
-}
-
-export const healthFactorParams = z.preprocess(normalizeHealthFactorParams, healthFactorShape)
+export const healthFactorParams = z.preprocess(normalizeAddressTargetParams, healthFactorShape)
 
 // One market's borrow and supply caps: every capped reserve of the market, or
 // one token's. A reserve reads as "reached" when its headroom under the cap is
@@ -329,7 +323,6 @@ export function parseRuleParams<K extends NotificationKind>(kind: K, params: unk
 }
 
 const shortAddr = (a: string) => (a.length > 14 ? `${a.slice(0, a.startsWith('0x') ? 6 : 4)}…${a.slice(-5)}` : a)
-const usd = (n: number) => (n >= 1000 ? `$${Math.round(n / 1000)}k` : `$${n}`)
 
 /**
  * Asset id → ticker. Passed in rather than imported: this module stays
@@ -370,7 +363,7 @@ export function describeRule(
     case 'account-activity': {
       const p = parsed.params as RuleParams['account-activity']
       const filtered = p.action ? `${p.action} activity` : p.type && p.type !== 'all' ? `${p.type} activity` : null
-      const floor = p.minUsd ? ` over ${usd(p.minUsd)}` : ''
+      const floor = p.minUsd ? ` over ${compactUsd(p.minUsd)}` : ''
       // An address target names no group, and every surface that shows this
       // sentence shows the account beside it as a pill — so the sentence says
       // WHAT is watched and the pill says whose. Repeating a truncated address
@@ -385,11 +378,11 @@ export function describeRule(
     }
     case 'large-trade': {
       const p = parsed.params as RuleParams['large-trade']
-      return `trades over ${usd(p.minUsd)}${p.assetId === undefined ? '' : ` on ${assetLabel(p.assetId, symbolOf)}`}`
+      return `trades over ${compactUsd(p.minUsd)}${p.assetId === undefined ? '' : ` on ${assetLabel(p.assetId, symbolOf)}`}`
     }
     case 'large-transfer': {
       const p = parsed.params as RuleParams['large-transfer']
-      return `transfers over ${usd(p.minUsd)}${p.assetId === undefined ? '' : ` of ${assetLabel(p.assetId, symbolOf)}`}`
+      return `transfers over ${compactUsd(p.minUsd)}${p.assetId === undefined ? '' : ` of ${assetLabel(p.assetId, symbolOf)}`}`
     }
     case 'price': {
       const p = parsed.params as RuleParams['price']
@@ -426,7 +419,7 @@ export function describeRule(
       // watches everything and reads as such; spelling out both defaults it
       // never chose would bury what it actually watches.
       const floors: string[] = []
-      if (p.kinds?.includes('deficit')) floors.push(`deficit ≥ ${usd(p.deficitUsd)}`)
+      if (p.kinds?.includes('deficit')) floors.push(`deficit ≥ ${compactUsd(p.deficitUsd)}`)
       if (p.kinds?.includes('fuse')) floors.push(`fuse ≥ ${p.fusePct}%`)
       const events = p.kinds?.length ? p.kinds.join(', ') : 'every action'
       return `Security · ${floors.length ? `${floors.join(', ')} · ` : ''}${events}`
@@ -443,11 +436,11 @@ export function describeRule(
     }
     case 'protocol-revenue': {
       const p = parsed.params as RuleParams['protocol-revenue']
-      return `extrinsics earning the protocol over ${usd(p.minUsd)}`
+      return `extrinsics earning the protocol over ${compactUsd(p.minUsd)}`
     }
     case 'liquidation': {
       const p = parsed.params as RuleParams['liquidation']
-      const floor = p.minUsd ? ` over ${usd(p.minUsd)}` : ''
+      const floor = p.minUsd ? ` over ${compactUsd(p.minUsd)}` : ''
       if (!p.target) return `liquidations${floor}`
       if (p.target.kind === 'address') return `liquidations${floor}`
       const label = targetLabelOf?.(p.target) ?? null
