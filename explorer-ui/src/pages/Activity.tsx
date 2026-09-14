@@ -33,7 +33,7 @@ export function effectiveMin(userMin: string | undefined, hideSmol: boolean): st
 export function smolHiddenFrom(urlValue: string, storedHide: boolean): boolean {
   return urlValue === 'show' ? false : storedHide
 }
-export function useHideSmol(): [boolean, () => void] {
+function useHideSmol(): [boolean, () => void] {
   const urlValue = useQueryValue('smol', '')
   const storedHide = (() => {
     try { return localStorage.getItem('explorer-hide-smol') !== '0' } catch { return true }

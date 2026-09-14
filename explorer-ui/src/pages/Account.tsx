@@ -265,7 +265,7 @@ export function Account({ address }: { address: string }) {
       {editMounted && (
         <Suspense fallback={null}>
           {/* The page's own data prefills the form — no /user/me round trip to
-              race against (a cold me query used to open the dialog blank). */}
+              race against, which a cold me query loses by opening blank. */}
           {data && <EditProfileDialog open={editOpen} onOpenChange={setEditOpen} account={data} profile={data.profile ?? null} />}
         </Suspense>
       )}

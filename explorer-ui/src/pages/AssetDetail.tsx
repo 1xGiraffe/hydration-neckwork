@@ -61,7 +61,8 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
   // categories aren't starved by the row cap.
   const ACTIVITY_PAGE = 40
   const activity = useAssetActivity(assetId, activityType, activityPage * ACTIVITY_PAGE, activityAction || undefined, tab === 'activity',
-    activityFilters.values.from, activityFilters.values.to, activityFilters.values.min || undefined)
+    activityFilters.values.from, activityFilters.values.to, activityFilters.values.min || undefined,
+    activityFilters.values.minRevenue || undefined)
   const assetActivity = activity.data ?? []
   // Asset activity is served by the global feed's endpoint under the same
   // per-category depth bound, so the › arrow has to stop where that bound does —

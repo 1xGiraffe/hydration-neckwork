@@ -285,7 +285,7 @@ export function AssetAmount({ asset, raw, formatted, link = true }: { asset: Ass
 
 // The native asset, for the surfaces that render an amount the chain denominates
 // in HDX without naming an asset alongside it (a transaction fee, a tip).
-export const NATIVE_ASSET: AssetRef = { assetId: 0, iconAssetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12, parachainId: null }
+const NATIVE_ASSET: AssetRef = { assetId: 0, iconAssetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12, parachainId: null }
 
 // A transaction fee, in the asset it was actually charged in.
 //
@@ -895,7 +895,7 @@ export function MempoolResultBadge({ includability, reason, projected, compact }
   return <ProjectedBadge verdict={projected ?? 'unknown'} compact={compact} />
 }
 
-export function ProjectedBadge({ verdict, compact }: { verdict: 'ok' | 'fail' | 'unknown'; compact?: boolean }) {
+function ProjectedBadge({ verdict, compact }: { verdict: 'ok' | 'fail' | 'unknown'; compact?: boolean }) {
   if (verdict === 'unknown') {
     return <span className="badge projected unknown" title="No dry-run projection available — the outcome is unknown until a block executes it">?</span>
   }
@@ -1117,7 +1117,7 @@ export interface ChartMarkerCluster { frac: number; items: ChartMarker[] }
 // closely spaced events collapse months into one flag. Out-of-range events are
 // dropped (a whisker of slack absorbs cache skew at the span's edges); items
 // are value-sorted so a cluster's largest event drives its color and click.
-export function clusterChartMarkers(markers: ChartMarker[], t0: number, span: number, threshold = 0.015): ChartMarkerCluster[] {
+function clusterChartMarkers(markers: ChartMarker[], t0: number, span: number, threshold = 0.015): ChartMarkerCluster[] {
   const pts = markers
     .map(m => ({ m, frac: (parseUtcTimestamp(m.ts) - t0) / span }))
     .filter(p => Number.isFinite(p.frac) && p.frac >= -0.01 && p.frac <= 1.01)
@@ -1673,9 +1673,9 @@ export function ChartSkeleton({ h = 120 }: { h?: number }) {
 // chrome — `.pf-card`, `.pf-head`, and a plot as tall as the fixed 220px
 // `.apx-chart` — instead of a pixel height. The head's height follows its font and
 // its figures wrap below 720px, so any single constant is right at one viewport
-// and wrong at the other: the 260px this replaced stood against a card measuring
-// 328px at 1440 and 378px at 390. Describing the head instead matches at both by
-// construction, the way TabsSkeleton already does for the tab bar. `metrics` is
+// and wrong at the other — this card measures 328px at 1440 and 378px at 390.
+// Describing the head instead matches at both by construction, the way
+// TabsSkeleton already does for the tab bar. `metrics` is
 // how many figures trail the headline — one is drawn as the inline `.pf-chg` the
 // single-figure cards use, several as the stacked `.perf-row` — and `legend`
 // covers the cards that close with a `.bal-legend` row. `headClass` carries the
@@ -1747,12 +1747,16 @@ export function ProfilePageSkeleton() {
     </>
   )
 }
+// The page-level stand-in for ActivityTable's own loading state, for the moment
+// before the detail payload that decides whether the table mounts at all. It
+// cannot reuse ActivityTable (that component imports this module), so its header
+// has to track ActivityTable's column set by hand — Protocol revenue included.
 function ActivityPanelSkeleton({ rows = 6, noActor = false }: { rows?: number; noActor?: boolean }) {
-  const cols = noActor ? 4 : 5
+  const cols = noActor ? 5 : 6
   return (
     <div className="panel">
       <table className="tbl">
-        <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
+        <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r">Protocol revenue</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
         <tbody><TableSkeleton cols={cols} rows={rows} /></tbody>
       </table>
     </div>
