@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { ATOKEN_UNDERLYING_ID, assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
+import { ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
 import { scaledDecimal } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
 
@@ -44,10 +44,8 @@ const PRICE_LOOKBACK_SECONDS = 30 * 24 * 3600
 // USD with 8 decimals for every configured Hydration market.
 const MM_BASE_DECIMALS = 8
 
-// The Omnipool hub asset (H2O / LRNA). Every Omnipool position withdraws an asset
-// leg plus a hub leg, and the hub leg is denominated in this asset whatever the
-// position's own asset is.
-const LRNA_ASSET_ID = 1
+// Every Omnipool position withdraws an asset leg plus a hub leg, and the hub leg is
+// denominated in H2O whatever the position's own asset is.
 
 // 'ETH\0' — the marker an AccountId32 carries when it stands for an H160.
 const EVM_MARKER = '45544800'
@@ -516,7 +514,7 @@ async function moneyMarketPositions(
   return positions
 }
 
-/** One account's Omnipool claim on a pool: the asset leg plus the hub (LRNA) leg. */
+/** One account's Omnipool claim on a pool: the asset leg plus the hub (H2O) leg. */
 interface OmnipoolClaim {
   assetId: number
   amount: bigint
@@ -604,7 +602,7 @@ interface LatestBalanceRow {
  * `transferableUsd` values free balances plus the ERC-20-backed wallet pot plus
  * money-market SUPPLIED balances (the aToken side, spec "Semantics" rule 7);
  * `lockedUsd` values reserved ones; `lpUsd` values Omnipool LP claims, bare and
- * farmed, including each position's hub (LRNA) leg. `totalUsd` is the sum of the
+ * farmed, including each position's hub (H2O) leg. `totalUsd` is the sum of the
  * three — GROSS assets. `debtUsd` is reported alongside and is never netted into
  * any of them, so the Hydration account picker's figure is `totalUsd - debtUsd`.
  *
@@ -727,10 +725,10 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
       }
       for (const claim of claims?.get(form) ?? []) {
         seen = true
-        // A position withdraws its own asset PLUS a hub leg denominated in LRNA;
+        // A position withdraws its own asset PLUS a hub leg denominated in H2O;
         // valuing only the asset leg would under-report an imbalanced position.
         lp += usdScaled(claim.amount, priceFor(prices, claim.assetId), assetDescriptor(claim.assetId).decimals)
-        lp += usdScaled(claim.hubAmount, priceFor(prices, LRNA_ASSET_ID), assetDescriptor(LRNA_ASSET_ID).decimals)
+        lp += usdScaled(claim.hubAmount, priceFor(prices, H2O_ASSET_ID), assetDescriptor(H2O_ASSET_ID).decimals)
       }
     }
 

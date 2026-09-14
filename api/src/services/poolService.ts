@@ -8,7 +8,7 @@ import {
 } from './explorerService.ts'
 import { v3PoolHistory, v3PoolLiquidity, type V3History, type V3HistoryPool, type V3PoolLiquidity } from './uniswapV3History.ts'
 import { ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, sqrtPriceX96ToPrice, tickToPrice, v3ManagerPositions, v3PoolStats, v3PricePoints, v3VaultStats, type V3Pool, type V3Registry } from './uniswapV3Service.ts'
-import { assetDescriptor, priceAssetId } from './explorerAssets.ts'
+import { H2O_ASSET_ID, assetDescriptor, priceAssetId } from './explorerAssets.ts'
 import { stableswapPoolAccount } from './tagService.ts'
 import { hasDriftingPegs, parseStableswapPools, pegPrice, type StableswapPoolSnapshot } from './stableswapSnapshot.ts'
 
@@ -48,7 +48,6 @@ export function initPoolService(c: ClickHouseClient): void {
   initUniswapV3Service(c)
 }
 
-const LRNA_ASSET_ID = 1
 const OMNIPOOL_ACCOUNT = '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000'
 // XYK trade fee is a runtime constant: Permill 0.3% (3/1000).
 const XYK_FEE_PERMILL = 3000
@@ -504,12 +503,12 @@ function currentSourcesForAsset(pools: CurrentPools, prices: Map<number, PriceIn
   const out: AssetLiquiditySource[] = []
   const omniTvl = omnipoolTvl(pools, prices)
 
-  if (assetId === LRNA_ASSET_ID) {
-    // LRNA is the Omnipool hub: its pooled form is the total hub reserve.
+  if (assetId === H2O_ASSET_ID) {
+    // H2O is the Omnipool hub: its pooled form is the total hub reserve.
     let hubTotal = 0n
     for (const a of pools.omnipool.values()) hubTotal += a.hub
     if (hubTotal > 0n) {
-      const usd = usdOf(prices, LRNA_ASSET_ID, hubTotal)
+      const usd = usdOf(prices, H2O_ASSET_ID, hubTotal)
       out.push({
         kind: 'omnipool', poolId: null, name: 'Omnipool (hub)', tvlUsd: omniTvl,
         assetAmount: hubTotal.toString(), assetUsd: usd, assetSharePct: null,
@@ -599,7 +598,7 @@ export async function countLiquiditySources(assetId: number): Promise<number> {
 async function formerSourcesForAsset(pools: CurrentPools, assetId: number): Promise<FormerLiquiditySource[]> {
   const out: FormerLiquiditySource[] = []
   const [omniRes, ssRes, xykRegRes] = await Promise.all([
-    pools.omnipool.has(assetId) || assetId === LRNA_ASSET_ID
+    pools.omnipool.has(assetId) || assetId === H2O_ASSET_ID
       ? null
       : client.query({
           query: `SELECT max(block_height) AS b, toString(argMax(block_timestamp, block_height)) AS ts
@@ -672,7 +671,7 @@ async function assetLiquidityHistory(
   // display-normalized once, at the edge.
   const seriesPoints: { key: string; label: string; live: boolean; points: Map<string, number>; lastTs: number }[] = []
 
-  if (assetId === LRNA_ASSET_ID) {
+  if (assetId === H2O_ASSET_ID) {
     const res = await client.query({
       query: `SELECT d, toString(sum(hub)) AS v, max(last_ts) AS last_ts FROM (
                 SELECT asset_id, ${grain.keySql('block_timestamp')} AS d, toUnixTimestamp(max(block_timestamp)) AS last_ts,
@@ -1382,7 +1381,7 @@ export async function getOmnipoolDetail(grain: HistoryGrain = DAILY_GRAIN, win?:
       tvlUsd,
       assetCount: pools.omnipool.size,
       hubReserveTotal: hubTotal.toString(),
-      lrnaPrice: priceOf(prices, LRNA_ASSET_ID),
+      lrnaPrice: priceOf(prices, H2O_ASSET_ID),
       assets: rows,
       history: { buckets: chartBuckets, tvlUsd: chartTvl, composition: chartComposition },
     }
@@ -1623,7 +1622,7 @@ export async function getOmnipoolAssetLps(assetId: number, limit: number, offset
   const lps = groups.slice(offset, offset + limit).map((g, i) => {
     const frac = shareFraction(g.shares, st.shares)
     const assetUsd = usdOf(prices, assetId, g.liquidity)
-    const hubUsd = g.hub > 0n ? usdOf(prices, LRNA_ASSET_ID, g.hub) : 0
+    const hubUsd = g.hub > 0n ? usdOf(prices, H2O_ASSET_ID, g.hub) : 0
     return {
       rank: offset + i + 1,
       account: g.accountId != null ? accountRef(g.accountId) : null,
