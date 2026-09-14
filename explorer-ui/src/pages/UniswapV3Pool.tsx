@@ -3,7 +3,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useV3Pool, useV3PoolActivity, useV3PoolHistory, useV3PoolLiquidity } from '../hooks/useExplorerData'
 import { api } from '../api/explorer'
 import { windowRefine } from '../utils/chartRefine'
-import { distributionSlices, distributionWindow } from '../utils/v3Distribution'
+import { distributionSlices, distributionWindow, fmtLiquidity } from '../utils/v3Distribution'
 import { Link, paths } from '../router'
 import { accountHref, AddrPill, Ago, AreaChart, AssetAmount, AssetChip, AssetIcon, ChartSkeleton, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav } from '../components/ui'
 import { ChartLegend, MultiLineChart, ShareBar, StackedColumnChart, type ChartZone, type ShareSegment, type StackColumn } from '../components/HdxCharts'
@@ -20,15 +20,6 @@ import type { UniswapV3PoolDetail, UniswapV3PoolHistory, UniswapV3PositionRow } 
 // yield the pool never books, so they can run a little under the contract's).
 
 const fmtPrice = (v: number) => v.toLocaleString('en-US', { minimumSignificantDigits: 4, maximumSignificantDigits: 6 })
-// Liquidity runs to 1e19+, and the axis has room for a handful of characters:
-// one significant decimal and a bare exponent ("4.5e18").
-export function fmtLiquidity(v: number): string {
-  if (!(v > 0)) return '0'
-  const exp = Math.floor(Math.log10(v))
-  if (exp < 6) return v.toLocaleString('en-US', { maximumFractionDigits: 0 })
-  const mantissa = v / 10 ** exp
-  return `${Number(mantissa.toFixed(1))}e${exp}`
-}
 
 function priceLabel(d: UniswapV3PoolDetail, v: number): string {
   return `${fmtPrice(v)} ${d.token1.symbol}/${d.token0.symbol}`

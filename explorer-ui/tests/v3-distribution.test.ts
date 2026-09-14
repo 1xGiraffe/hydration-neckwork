@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { distributionSlices, distributionWindow } from '../src/utils/v3Distribution'
+import { distributionSlices, distributionWindow, fmtLiquidity } from '../src/utils/v3Distribution'
 
 // The pool page's liquidity distribution: the API's segments (liquidity between
 // consecutive initialised ticks) sliced into equal-width columns around the price.
@@ -48,8 +48,7 @@ describe('distributionSlices', () => {
 })
 
 describe('fmtLiquidity', () => {
-  it('keeps a liquidity axis label short enough not to be clipped', async () => {
-    const { fmtLiquidity } = await import('../src/pages/UniswapV3Pool')
+  it('keeps a liquidity axis label short enough not to be clipped', () => {
     expect(fmtLiquidity(4.504017577969432e18)).toBe('4.5e18')
     expect(fmtLiquidity(11)).toBe('11')
     expect(fmtLiquidity(0)).toBe('0')

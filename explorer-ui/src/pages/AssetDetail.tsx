@@ -182,7 +182,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
                       <td data-label="Holder">{h.tag ? <TagGroupPill tag={h.tag} /> : h.account ? <AddrPill account={h.account} noCopy /> : <Dash />}</td>
                       <td data-label="Balance" className="r"><AssetAmount asset={a} raw={h.balance} /></td>
                       <td data-label="Value" className="r mono">{F.usd(h.valueUsd)}</td>
-                      <td data-label="Share" className="r mono muted">{((h.share ?? 0) * 100).toFixed(1)}%</td>
+                      <td data-label="Share" className="r mono muted">{F.share(h.share ?? 0)}</td>
                     </tr>
                   )) : <EmptyRow cols={5}>No holders</EmptyRow>}
                 </tbody>

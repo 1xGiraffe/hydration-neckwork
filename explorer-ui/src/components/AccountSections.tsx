@@ -1,4 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
+import { useMemo } from 'react'
 import { F, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash, EmptyRow, Copy } from './ui'
 import type { ChartMarker, DetailTab } from './ui'
 import { Link, paths, setQuery } from '../router'
@@ -35,9 +36,8 @@ export function DcaNextExec({ nextBlock, headBlock, headTime, now, blockSec }: {
   }
   const timing = estimateBlockCountdown(nextBlock, headBlock, headTime, now, blockSeconds(blockSec))
   const secondsUntil = timing?.secondsUntil ?? blockSpanSeconds(blocksAway, blockSec)
-  const est = timing ? new Date(timing.etaMs) : null
   return (
-    <span title={est ? `Est. ${est.toLocaleString()}` : `Approximately ${blocksAway} blocks away`}>
+    <span title={timing ? `Est. ${F.datetime(new Date(timing.etaMs).toISOString())}` : `Approximately ${blocksAway} blocks away`}>
       in {fmtDuration(secondsUntil, { seconds: true })}<span className="dca-sub">{blockLink}</span>
     </span>
   )
@@ -154,6 +154,9 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
   exHdxSeries?: number[]
   exHdxNetUsd?: number
 }) {
+  // Stable across renders: Account holds a 1s clock, and AreaChart's marker
+  // clustering memoizes on this array's identity.
+  const markers = useMemo(() => (valueEvents?.length ? valueEvents.map(valueEventMarker) : undefined), [valueEvents])
   if (!series || series.length <= 1) {
     return loading ? (
       <>
@@ -180,7 +183,6 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
     { label: '1M', days: 30 },
     { label: '1Y', days: 365 },
   ], { minBase: 1, maxRatio: 20 })
-  const markers = valueEvents?.length ? valueEvents.map(valueEventMarker) : undefined
   // The second curve renders only when it covers the same points as the total; a
   // mismatched length means the two came from different reconstructions, and the
   // comparison a reader would draw from them would be wrong.

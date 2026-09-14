@@ -3,6 +3,7 @@ import { useMemo, useRef, useState } from 'react'
 import { performancePoints } from './performance'
 import { CAT, UNFILTERED_COLOR } from './activityColors'
 import { useMediaQuery } from '../hooks/useMediaQuery'
+import { utcDay } from '../utils/time'
 import { ChartTip, F } from './ui'
 import { ZoomReset, ZoomSelection, fracOfTime, useChartZoom, useZoomRefine } from './chartZoom'
 import type { RefinedSeries } from './chartZoom'
@@ -327,9 +328,8 @@ export function PriceChart({ data, dates, price, change24h, liquidations, asset,
           // Placed on the view's time domain, so the shade tracks the cursor
           // exactly rather than stepping between candles.
           const pw = zoom.preview
-          const day = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 10)
           return <ZoomSelection aPct={fracOfTime(zoom.view, pw.from) * 100} bPct={fracOfTime(zoom.view, pw.to) * 100}
-            label={`${day(pw.from)} – ${day(pw.to)}`} />
+            label={`${utcDay(pw.from)} – ${utcDay(pw.to)}`} />
         })()}
         {zoom.zoomed && !zoom.sel && <ZoomReset onReset={zoom.reset} />}
         {hover && !zoom.selecting && <div className="apx-cross"><div className="apx-vline" style={{ left: `${hover.xPct}%` }} /><div className="apx-dot" style={{ left: `${hover.xPct}%`, top: `${hover.yPct}%` }} /></div>}

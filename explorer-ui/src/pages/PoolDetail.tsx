@@ -140,7 +140,7 @@ function PoolBody({ d }: { d: PoolDetailData }) {
                 <td data-label="Asset"><AssetChip asset={a.asset} /></td>
                 <td data-label="Reserve" className="r"><AssetAmount asset={a.asset} raw={a.amount} /></td>
                 <td data-label="Value" className="r mono">{a.usd != null ? F.usd(a.usd) : <Dash />}</td>
-                <td data-label="Share" className="r mono muted">{a.sharePct != null ? `${a.sharePct.toFixed(1)}%` : '—'}</td>
+                <td data-label="Share" className="r mono muted">{F.sharePct(a.sharePct)}</td>
                 {hasPegs && <>
                   <td data-label="Peg" className="r mono">{a.peg ? fmtPeg(a.peg.price) : <Dash />}</td>
                   <td data-label="Peg source">{a.pegSource ? <span className="mono" style={{ fontSize: 12 }}>{pegSourceLabel(a.pegSource)}</span> : <Dash />}</td>
@@ -258,7 +258,7 @@ function PoolLpsSection({ d }: { d: PoolDetailData }) {
                     title={`${F.amount(r.farmedShares, d.shareToken.decimals)} of these shares are deposited in a liquidity-mining farm`}>farm</span>}
                 </td>
                 <td data-label="Shares" className="r mono">{F.amount(r.shares, d.shareToken.decimals)}</td>
-                <td data-label="Share" className="r mono muted">{r.sharePct != null ? `${r.sharePct.toFixed(1)}%` : '—'}</td>
+                <td data-label="Share" className="r mono muted">{F.sharePct(r.sharePct)}</td>
                 <td data-label="Value" className="r mono">{r.valueUsd != null ? F.usd(r.valueUsd) : <Dash />}</td>
               </tr>
             )) : <EmptyRow cols={5}>No liquidity providers</EmptyRow>}
