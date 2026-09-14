@@ -60,6 +60,7 @@ export async function verifyStandardJson(input: {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), VERIFY_TIMEOUT_MS)
   let res: Response
+  let text: string
   try {
     res = await fetch(`${VERIFIER_URL}/api/v2/verifier/solidity/sources:verify-standard-json`, {
       method: 'POST',
@@ -67,6 +68,10 @@ export async function verifyStandardJson(input: {
       signal: ctrl.signal,
       body,
     })
+    // Inside the try, so the abort timer still covers it: read outside, the
+    // timeout bounded only the HEADERS, and a verifier that answered 200 and
+    // then stalled mid-body held a Fastify connection open indefinitely.
+    text = await res.text()
   } catch (err) {
     // The service replies to an oversized body before consuming it, which
     // surfaces here as a broken pipe rather than a status code.
@@ -81,7 +86,6 @@ export async function verifyStandardJson(input: {
     clearTimeout(timer)
   }
 
-  const text = await res.text()
   let parsed: unknown
   try {
     parsed = JSON.parse(text)

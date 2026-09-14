@@ -1,5 +1,5 @@
 import { cachedFound } from './cache.ts'
-import { SUBSTRATE_RPC_URL } from './substrateRpc.ts'
+import { rpc } from './substrateRpc.ts'
 
 // Gas accounting for one EVM transaction.
 //
@@ -13,23 +13,6 @@ import { SUBSTRATE_RPC_URL } from './substrateRpc.ts'
 // a receipt is immutable once its block exists, so a second look never re-asks.
 // Receipt logs are ignored — the explorer renders EVM logs from indexed EVM.Log
 // rows, which is the better source; the receipt answers gas only.
-const RPC_TIMEOUT_MS = 8_000
-
-async function rpc<T>(method: string, params: unknown[]): Promise<T | null> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS)
-  try {
-    const res = await fetch(SUBSTRATE_RPC_URL, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      signal: controller.signal,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-    })
-    if (!res.ok) return null
-    const body = await res.json() as { result?: T; error?: unknown }
-    return body.error != null ? null : (body.result ?? null)
-  } catch { return null } finally { clearTimeout(timer) }
-}
 
 // Exact integers as decimal strings. The node answers in hex quantities, and gas
 // prices are wei-scale values that must not be routed through a JS number.

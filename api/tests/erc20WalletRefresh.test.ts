@@ -58,4 +58,30 @@ describe('erc20 wallet refresh rows', () => {
       { account_id: anchorOf(h(1)), asset_id: '222', total: '0' },
     ])
   })
+
+  // erc20_wallet_balances is ReplacingMergeTree(updated_at) ORDER BY
+  // (asset_id, account_id), and `updated_at` is a DEFAULT — so two rows under
+  // one account id share the key AND the version, and the merge keeps one
+  // arbitrarily. Several H160s CAN resolve to one substrate account through
+  // account_alias_directory, so the emitted set has to be key-unique by
+  // construction and the balances summed.
+  it('folds several H160s that anchor to one account into a single summed row', () => {
+    const substrate = '0x' + 'ab'.repeat(32)
+    const sameOwner = () => substrate
+
+    const rows = walletBalanceRows(222, [h(1), h(2)], new Map([[h(1), 5n], [h(2), 7n]]), sameOwner, [])
+
+    expect(rows).toEqual([{ account_id: substrate, asset_id: '222', total: '12' }])
+  })
+
+  it('does not let an unread sibling address drag the shared row down', () => {
+    // h(2) could not be read this cycle — unknown, not zero — so only h(1)'s
+    // balance is published, and the row is still one row.
+    const substrate = '0x' + 'ab'.repeat(32)
+    const sameOwner = () => substrate
+
+    const rows = walletBalanceRows(222, [h(1), h(2)], new Map([[h(1), 5n]]), sameOwner, [])
+
+    expect(rows).toEqual([{ account_id: substrate, asset_id: '222', total: '5' }])
+  })
 })

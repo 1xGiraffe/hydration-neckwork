@@ -9,6 +9,7 @@
 // (REPLACE PARTITION), so re-runs are idempotent and readers never see a gap.
 
 import { allExplorerAssets, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, priceAssetId } from './explorerAssets.ts'
+import { ICE_POT_ACCOUNT } from './revenueStreams.ts'
 
 // First block emitting Broadcast.Swapped (the unified swap-event era). At/above
 // this height a swap's hops are Broadcast.Swapped* events (grouped by their
@@ -27,7 +28,6 @@ const INTENT_FILL_EVENTS = "'Intent.IntentResolved','Intent.IntentResovedPartial
 // The OTC pallet's fill events, which name a fill's TAKER as `who` — the only
 // thing that resolves an OTC Broadcast fill's two sides (see the `bcast` CTE).
 const OTC_FILL_EVENTS = "'OTC.Filled','OTC.PartiallyFilled'"
-const ICE_POT_ACCOUNT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
 
 // Source for per-account trading volume: the de-duped net-trade model, whose
 // derivations job keeps every partition covered. One summable USD column per

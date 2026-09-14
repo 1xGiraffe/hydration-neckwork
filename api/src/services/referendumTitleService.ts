@@ -71,10 +71,6 @@ export function referendumTitleFor(pallet: string, index: number | string | null
   return byRef.get(referendumTitleKey(pallet, index)) ?? null
 }
 
-export function referendumTitleCount(): number {
-  return byRef.size
-}
-
 // Whether a title says anything a reader could not have worked out from the index.
 //
 // What this table holds is SubSquare's page title, and for a referendum nobody

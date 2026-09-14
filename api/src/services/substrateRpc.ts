@@ -8,6 +8,28 @@ export const SUBSTRATE_RPC_URL = process.env.RPC_URL?.trim() || 'https://hydrati
 // reads are split into conservative chunks.
 const MAX_BATCH = 80
 
+const RPC_TIMEOUT_MS = 8_000
+
+// One JSON-RPC call. Null covers every way the node can fail to answer — a
+// non-200, a JSON-RPC error, a timeout, a transport fault — because every caller
+// here degrades the same way: the affordance simply does not appear, rather than
+// showing a value that is absent or wrong.
+export async function rpc<T>(method: string, params: unknown[]): Promise<T | null> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS)
+  try {
+    const res = await fetch(SUBSTRATE_RPC_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    })
+    if (!res.ok) return null
+    const body = await res.json() as { result?: T; error?: unknown }
+    return body.error != null ? null : (body.result ?? null)
+  } catch { return null } finally { clearTimeout(timer) }
+}
+
 // Batched state_getStorage — chunked JSON-RPC batches, position-mapped results
 // (null for missing storage or transport errors). `at` pins every key to one
 // block hash, so a set of values read together describes a single chain state

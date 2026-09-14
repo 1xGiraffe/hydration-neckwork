@@ -110,8 +110,11 @@ export function makeBucketing(
   // ceil - 1, not floor: buckets are (start, end], so covering the range takes
   // ceil(span / step) of them. floor() produced one bucket too many whenever the
   // span divided exactly, and its last two shared an end instant — a duplicate
-  // final point on every such series.
-  const N = Math.max(1, Math.ceil((toSec - t0) / step) - 1)
+  // final point on every such series. The clamp floors at 0, not 1: a span
+  // shorter than one step fits in a SINGLE bucket, and forcing a second one back
+  // recreates that duplicate end instant (and a bucket whose start height sits
+  // past its end). N = 0 is a valid bucketing — one bucket, index 0.
+  const N = Math.max(0, Math.ceil((toSec - t0) / step) - 1)
   const endSec = (b: number) => Math.min(t0 + (b + 1) * step, toSec)
   const endHeights = heightsForBoundaries(clock, Array.from({ length: N + 1 }, (_, b) => endSec(b)), floorHeight)
   // The first height IN each bucket, so a height landing exactly on a bucket-end

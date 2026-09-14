@@ -515,9 +515,14 @@ export async function setMemberOrder(owner: string, listId: string, tagId: strin
 
 export async function setListOrder(accountId: string, listIds: string[]): Promise<string[]> {
   if (listIds.length > 500) throw new UserDataError(422, 'Order list too long')
-  orderByAccount.set(accountId, listIds)
+  // An order is a permutation, so a repeated id is meaningless. A repeated
+  // ORDINARY id is also harmless (the second pass fails the `visible` check
+  // below), but SYSTEM_LIST_ID bypasses `visible` entirely and would emit the
+  // system slot twice — client-controlled, and persisted.
+  const order = [...new Set(listIds)]
+  orderByAccount.set(accountId, order)
   bumpMutation()
-  await client.insert({ table: 'price_data.user_list_order', values: [{ account_id: accountId, list_ids: listIds, deleted: 0 }], format: 'JSONEachRow' })
+  await client.insert({ table: 'price_data.user_list_order', values: [{ account_id: accountId, list_ids: order, deleted: 0 }], format: 'JSONEachRow' })
   return listOrderFor(accountId)
 }
 
@@ -529,8 +534,10 @@ export function listOrderFor(accountId: string): string[] {
   const visible = visibleListIds(accountId)
   const stored = orderByAccount.get(accountId) ?? []
   const out: string[] = []
+  const emitted = new Set<string>()
   for (const id of stored) {
-    if (id === SYSTEM_LIST_ID || visible.has(id)) { out.push(id); visible.delete(id) }
+    if (emitted.has(id)) continue
+    if (id === SYSTEM_LIST_ID || visible.has(id)) { out.push(id); emitted.add(id); visible.delete(id) }
   }
   if (!stored.includes(SYSTEM_LIST_ID)) {
     // unlisted defaults: personal ahead of system, everything else after
