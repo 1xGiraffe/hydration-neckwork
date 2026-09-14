@@ -1,6 +1,6 @@
 // Dual-line daily Active & New accounts chart with independent left/right scales.
 // The chart stays mounted while data resolves so its dimensions remain stable.
-import { DayChartSkeleton } from './ui'
+import { DayChartSkeleton, F } from './ui'
 
 export function AccountsChart({ data, loading }: { data: { date: string; active: number; new: number }[]; loading?: boolean }) {
   const W = 860, H = 160, padL = 46, padR = 46, padT = 12, padB = 18
@@ -11,14 +11,13 @@ export function AccountsChart({ data, loading }: { data: { date: string; active:
   const syA = (v: number) => padT + (1 - v / axisA) * (H - padT - padB)
   const syN = (v: number) => padT + (1 - v / axisN) * (H - padT - padB)
   const path = (vals: number[], sy: (v: number) => number) => vals.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ')
-  const fk = (v: number) => v >= 1000 ? (v / 1000).toFixed(1) + 'k' : String(Math.round(v))
   const grid = [0, 0.5, 1].map(t => {
     const y = padT + (1 - t) * (H - padT - padB)
     return (
       <g key={t}>
         <line x1={padL} x2={W - padR} y1={y.toFixed(1)} y2={y.toFixed(1)} stroke="var(--separator)" strokeWidth="1" />
-        <text x={padL - 8} y={(y + 3).toFixed(1)} textAnchor="end" className="ax-lbl" fill="var(--sky)">{fk(axisA * t)}</text>
-        <text x={W - padR + 8} y={(y + 3).toFixed(1)} textAnchor="start" className="ax-lbl" fill="var(--green)">{fk(axisN * t)}</text>
+        <text x={padL - 8} y={(y + 3).toFixed(1)} textAnchor="end" className="ax-lbl" fill="var(--sky)">{F.count(axisA * t)}</text>
+        <text x={W - padR + 8} y={(y + 3).toFixed(1)} textAnchor="start" className="ax-lbl" fill="var(--green)">{F.count(axisN * t)}</text>
       </g>
     )
   })

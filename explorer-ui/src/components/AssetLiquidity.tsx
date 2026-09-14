@@ -55,7 +55,7 @@ function SourceCard({ s, asset }: { s: AssetLiquiditySource; asset: AssetRef }) 
       </div>
       {segments.length > 0 && <ShareBar segments={segments} h={26} />}
       <div className="hv"><AssetAmount asset={asset} raw={s.assetAmount} link={false} /></div>
-      <div className="hs">{F.usd(s.assetUsd)}{s.assetSharePct != null && <span className="muted"> · {s.assetSharePct.toFixed(1)}% of pool</span>}</div>
+      <div className="hs">{F.usd(s.assetUsd)}{s.assetSharePct != null && <span className="muted"> · {F.sharePct(s.assetSharePct)} of pool</span>}</div>
     </>
   )
   return to
@@ -106,7 +106,7 @@ function OmnipoolLpsSection({ asset }: { asset: AssetRef }) {
                         <AssetAmount asset={asset} raw={r.amount} link={false} />
                         {r.hubAmount !== '0' && <div className="muted" style={{ fontSize: 11 }}>+ {F.amount(r.hubAmount, 12)} H2O</div>}
                       </td>
-                      <td data-label="Share" className="r mono muted">{r.sharePct != null ? `${r.sharePct.toFixed(1)}%` : '—'}</td>
+                      <td data-label="Share" className="r mono muted">{F.sharePct(r.sharePct)}</td>
                       <td data-label="Value" className="r mono">{r.valueUsd != null ? F.usd(r.valueUsd) : <Dash />}</td>
                     </tr>
                   )) : <EmptyRow cols={6}>No liquidity providers</EmptyRow>}

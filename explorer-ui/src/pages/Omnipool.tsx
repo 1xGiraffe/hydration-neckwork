@@ -117,7 +117,7 @@ export function Omnipool() {
                   <td data-label="Asset"><AssetChip asset={r.asset} /></td>
                   <td data-label="Reserve" className="r"><AssetAmount asset={r.asset} raw={r.reserve} /></td>
                   <td data-label="Value" className="r mono">{r.reserveUsd != null ? F.usd(r.reserveUsd) : <Dash />}</td>
-                  <td data-label="Weight" className="r mono muted">{r.weightPct != null ? `${r.weightPct.toFixed(1)}%` : '—'}</td>
+                  <td data-label="Weight" className="r mono muted">{F.sharePct(r.weightPct)}</td>
                   <td data-label="Cap" className="r mono muted">{r.capPct != null ? `${r.capPct.toLocaleString('en-US', { maximumFractionDigits: 1 })}%` : '—'}</td>
                   <td data-label="Tradability" className="r mono" style={r.tradable.length === 1 && r.tradable[0] === 'Frozen' ? { color: 'var(--red)' } : undefined}>
                     {r.tradable.length === 4 ? <span className="muted">Full</span> : r.tradable.join(' · ')}

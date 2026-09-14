@@ -392,7 +392,7 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     // The index identifies the referendum, the title says what it is: show the index
     // muted ahead of a plain link on the title, which carries the referendum hover
     // card. A hash is not an index, so a motion leads with its label alone.
-    return <span className="asset-flow">{locked}
+    return <span className="asset-flow vote-flow">{locked}
       {r.voteRef && r.voteRefPallet && <span className="muted mono ref-num">#{r.voteRef}</span>}
       {r.voteRefPallet && r.voteRef
         ? <Link to={paths.referendum(r.voteRefPallet, r.voteRef)} className="ref-link">{r.voteRefTitle ?? 'Referendum'}</Link>

@@ -8,6 +8,16 @@
 // sell it as the price falls), columns above hold token0, the column holding the
 // price both.
 
+// Liquidity runs to 1e19+, and the axis has room for a handful of characters:
+// one significant decimal and a bare exponent ("4.5e18").
+export function fmtLiquidity(v: number): string {
+  if (!(v > 0)) return '0'
+  const exp = Math.floor(Math.log10(v))
+  if (exp < 6) return v.toLocaleString('en-US', { maximumFractionDigits: 0 })
+  const mantissa = v / 10 ** exp
+  return `${Number(mantissa.toFixed(1))}e${exp}`
+}
+
 export interface V3Segment { tickLower: number; tickUpper: number; liquidity: string; amount0: string; amount1: string }
 export interface V3Slice {
   tickFrom: number

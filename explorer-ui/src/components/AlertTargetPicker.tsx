@@ -249,18 +249,22 @@ export function AlertTargetPicker({ value, onChange, onTextChange, disabled, inp
   }, [me.data?.account, session?.address, session?.accountId])
 
   const userTags = useMemo(() => searchUserTags(text), [text])
-  const userTagHits = addressOnly ? [] : userTags
   const query = text.trim()
-  // Server hits belong to the text they were fetched for; while a keystroke is
-  // still debouncing they are stale and must not be what Enter picks.
-  const serverResults = resultsQuery === query ? results : []
-  const all: TargetOption[] = query
-    ? targetOptions(serverResults, userTagHits)
-    : (self ? [self] : [])
-  const options = addressOnly ? all.filter(o => o.target.kind === 'address') : all
-  // A pasted address the search does not know is still a target.
-  const fallback = query && !options.length ? rawAddressOption(query) : null
-  const rawRows = fallback ? [fallback] : options
+  // Stable across renders, so the refs query and the row list below memoize on
+  // it instead of refetching and rebuilding on every keystroke render.
+  const rawRows = useMemo(() => {
+    const userTagHits = addressOnly ? [] : userTags
+    // Server hits belong to the text they were fetched for; while a keystroke is
+    // still debouncing they are stale and must not be what Enter picks.
+    const serverResults = resultsQuery === query ? results : []
+    const all: TargetOption[] = query
+      ? targetOptions(serverResults, userTagHits)
+      : (self ? [self] : [])
+    const options = addressOnly ? all.filter(o => o.target.kind === 'address') : all
+    // A pasted address the search does not know is still a target.
+    const fallback = query && !options.length ? rawAddressOption(query) : null
+    return fallback ? [fallback] : options
+  }, [addressOnly, userTags, resultsQuery, query, results, self])
   // Chip and rows together, so one call answers for everything on screen.
   const refs = useAddressRefs(useMemo(() => [value, ...rawRows], [value, rawRows]))
   const rows = useMemo(() => rawRows.map(o => withRef(o, refs.get((o.address ?? '').toLowerCase()))), [rawRows, refs])
