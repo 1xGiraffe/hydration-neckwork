@@ -13,10 +13,13 @@ import {
   partitionsNeedingRebuild,
   poolSwapHourlyInsertSql,
   uniswapV3LegsInsertSql,
+  uniswapV3LegsStalePartitionsSql,
   poolSwapHourlyStalePartitionsSql,
   POOL_SWAP_HOURLY_REFRESH_HOURS,
   REVENUE_EVENT_STREAMS_INSERTED,
   xcmArrivalsChunks,
+  xcmArrivalsStalePartitionsSql,
+  xcmArrivalsPendingBlocksSql,
   REVENUE_REFRESH_SECONDS,
   accountRevenueEventfulInsertSql,
   accountRevenueStalePartitionsSql,
@@ -294,10 +297,9 @@ describe('partitionsNeedingRebuild', () => {
 // A publication swaps a staging twin into place with EXCHANGE TABLES or REPLACE
 // PARTITION, neither of which checks that the two sides agree. A twin whose DDL
 // drifted from its parent would therefore publish the wrong engine, ORDER BY or
-// partitioning without an error. The twins used to be created on demand with
-// `CREATE TABLE <t>_staging AS <t>`, which made drift impossible but put a table
-// definition in application code; now that they are declared, the equality has to
-// be asserted here.
+// partitioning without an error. Both sides are declared in clickhouse/schema —
+// the single source of truth for every table, so no job may create one — which
+// leaves this test as the only place their equality can be enforced.
 describe('staging twins', () => {
   const TWINNED = [
     'price_data.account_trade_volume',
@@ -566,8 +568,39 @@ describe('revenueEventsInsertSql', () => {
 // op_key), a token neither the registry nor the precompile rule can name drops the
 // swap rather than booking it as asset 0, and the fee leg is the pool fee taken from
 // the input.
+// A forward high-water cursor over the derived legs is the failure this diff
+// exists to make impossible: once one head-side v3 leg lands, `max(block_height)
+// − overlap` sits above every block a backward backfill is still filling, so those
+// swaps are never legged and nothing ever says so. Staleness is therefore an
+// ingest-time partition diff, the shape every sibling job here uses.
+describe('uniswapV3LegsStalePartitionsSql', () => {
+  const sql = uniswapV3LegsStalePartitionsSql()
+
+  it('compares ingest-time watermarks per month, never a derived block head', () => {
+    expect(sql).toContain('max(ingested_at) AS src_ingest')
+    expect(sql).toContain('max(ingested_at) AS der_computed')
+    expect(sql).toContain('src.src_ingest > der.der_computed')
+    expect(sql).not.toContain('max(block_height)')
+  })
+
+  it('keys both sides on the same month partition and scopes each to its own rows', () => {
+    expect(sql).toContain('toYYYYMM(block_timestamp) AS p')
+    expect(sql).toContain("WHERE kind = 'pool' AND event_name = 'Swap'")
+    expect(sql).toContain("WHERE venue = 'uniswapv3'")
+  })
+
+  it('recognises a missing derived month under ClickHouse default join semantics', () => {
+    expect(sql).toContain('der.der_computed = toDateTime(0)')
+    expect(sql).not.toContain('IS NULL')
+  })
+
+  it('orders candidates oldest first', () => {
+    expect(sql.trimEnd().endsWith('ORDER BY src.p')).toBe(true)
+  })
+})
+
 describe('uniswapV3LegsInsertSql', () => {
-  const sql = uniswapV3LegsInsertSql(14_390_000)
+  const sql = uniswapV3LegsInsertSql('202608')
 
   // The Broadcast MV leaves the venue to this job (its filler is the router, not the
   // pool), so a routed hop is booked HERE with the route's Router id — matched to the
@@ -586,11 +619,19 @@ describe('uniswapV3LegsInsertSql', () => {
     expect(sql).toContain('asset0 != 4294967295 AND asset1 != 4294967295')
   })
 
-  it('books in, out and the LP fee leg off the input amount, and only above the overlap floor', () => {
+  it('books in, out and the LP fee leg off the input amount, for the one month it republishes', () => {
     expect(sql).toContain("tuple(toUInt8(3), asset_in, intDiv(amount_in * toUInt256(fee), toUInt256(1000000)), 'account', pool_account)")
     expect(sql).toContain("CAST(legs[leg_i].1 AS Enum8('in' = 1, 'out' = 2, 'fee' = 3)) AS leg_kind")
-    expect(sql).toContain('block_height > 14390000')
     expect(sql).toContain('INSERT INTO price_data.pool_swap_legs (venue, pool_key, block_height, event_index, leg_index, leg_kind, asset_id, amount, fee_dest, fee_recipient, swapper, op_key, extrinsic_index, block_timestamp, ingested_at)')
+    // Both sources bounded to the republished month; nothing keyed on a block floor.
+    expect(sql).toContain("WHERE kind = 'pool' AND event_name = 'Swap' AND toYYYYMM(block_timestamp) = 202608")
+    expect(sql).toContain("WHERE event_name = 'Broadcast.Swapped3' AND toYYYYMM(block_timestamp) = 202608")
+    expect(sql).not.toMatch(/block_height > \d/)
+  })
+
+  it('bounds the pass before it runs', () => {
+    expect(sql).toContain('max_memory_usage = 2000000000')
+    expect(sql).toContain('max_threads = 4')
   })
 
   it('names the swapper in the ETH-prefixed account form and never a raw H160', () => {
@@ -622,6 +663,22 @@ describe('accountRevenueStalePartitionsSql', () => {
     expect(sql).toContain('max(computed_at)')
     expect(sql).toContain('der.der_computed = toDateTime(0)')
     expect(sql).not.toContain('IS NULL')
+  })
+
+  // revenue_events is not the only upstream: the per-account borrow SPLIT is
+  // computed here from the raw debt observations, so a month whose observations are
+  // backfilled while its revenue_events partition is untouched would keep a stale
+  // split forever — right totals, wrong shares, no signal.
+  it('also follows the borrow-attribution sources, cascading forward', () => {
+    expect(sql).toContain("WHERE kind = 'debt'")
+    expect(sql).toContain('price_data.revenue_source_partition_watermarks')
+    expect(sql).toContain('ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW')
+    expect(sql).toContain('src.eff_ingest > der.der_computed')
+  })
+
+  it('keeps the live month following revenue_events at once, and debt on the refresh window', () => {
+    expect(sql).toContain('src.rev_ingest > der.der_computed')
+    expect(sql).toContain(`der.der_computed < now() - INTERVAL ${REVENUE_REFRESH_SECONDS} SECOND`)
   })
 
   it('orders candidates oldest first', () => {
@@ -665,14 +722,63 @@ describe('xcm_arrivals', () => {
 
   // Walking history in one pass would hold every block's events at once; chunks bound
   // both the ClickHouse reads and the rows in memory.
-  it('splits a block range into bounded chunks covering it exactly', () => {
-    expect(xcmArrivalsChunks(1, 10, 4)).toEqual([[1, 4], [5, 8], [9, 10]])
-    expect(xcmArrivalsChunks(100, 100, 50)).toEqual([[100, 100]])
-    const chunks = xcmArrivalsChunks(0, 999, 100)
-    expect(chunks.length).toBe(10)
-    expect(chunks[0][0]).toBe(0)
-    expect(chunks[chunks.length - 1][1]).toBe(999)
-    // contiguous, no gaps or overlaps
-    for (let i = 1; i < chunks.length; i++) expect(chunks[i][0]).toBe(chunks[i - 1][1] + 1)
+  it('splits a block list into bounded chunks covering it exactly', () => {
+    expect(xcmArrivalsChunks([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]])
+    expect(xcmArrivalsChunks([100], 50)).toEqual([[100]])
+    expect(xcmArrivalsChunks([], 50)).toEqual([])
+    const blocks = Array.from({ length: 1_000 }, (_, i) => i * 7)
+    expect(xcmArrivalsChunks(blocks, 100).flat()).toEqual(blocks)
+  })
+
+  // A block range between the derived table's own min and max cannot express this
+  // model's coverage: a walked block that decoded to nothing leaves no row, so the
+  // first chunk of a low-end fill dropped the derived minimum to the source minimum
+  // and everything between was treated as covered for good — and a raw row corrected
+  // INSIDE the range was never recomputed at all. Both are silent.
+  describe('coverage is an ingest-time partition diff, never a block range', () => {
+    const sql = xcmArrivalsStalePartitionsSql()
+
+    it('compares the raw ingest clock against the derived publication clock', () => {
+      expect(sql).toContain('max(ingested_at) AS src_ingest')
+      expect(sql).toContain('max(computed_at) AS der_computed')
+      expect(sql).toContain('src.src_ingest > der.der_computed')
+    })
+
+    it('reads no block-height bound on either side', () => {
+      expect(sql).not.toContain('min(block_height)')
+      expect(sql).not.toContain('max(block_height)')
+    })
+
+    it('keys both sides on the same month partition', () => {
+      expect(sql.match(/toYYYYMM\(block_timestamp\) AS p/g)).toHaveLength(2)
+    })
+
+    it('recognises a missing derived month under ClickHouse default join semantics', () => {
+      expect(sql).toContain('der.der_computed = toDateTime(0)')
+      expect(sql).not.toContain('IS NULL')
+    })
+
+    // Within a stale month only the blocks whose raw rows moved are re-walked, so a
+    // correction is picked up wherever it sits while the live month stays cheap.
+    it('re-walks a month by ingest time, and bounds the pass before it runs', () => {
+      const blocks = xcmArrivalsPendingBlocksSql()
+      expect(blocks).toContain('toYYYYMM(block_timestamp) = {partition:UInt32}')
+      expect(blocks).toContain('ingested_at > {since:DateTime}')
+      expect(blocks).toContain('max_memory_usage = 2000000000')
+      expect(blocks).toContain('max_threads = 4')
+    })
+  })
+})
+
+// Every pass over history is bounded BEFORE it runs: unbounded, a full-history read
+// reaches ~84 GiB RSS and the next allocation trips the kernel's global OOM killer,
+// taking ClickHouse and every service on the box with it.
+describe('full-history reads', () => {
+  it.each([
+    ['omnipool lifecycle', omnipoolLifecycleSelectSql()],
+    ['xyk farm lifecycle', xykFarmLifecycleSelectSql()],
+  ])('%s is memory- and thread-bounded', (_name, sql) => {
+    expect(sql).toContain('max_memory_usage = 2000000000')
+    expect(sql).toContain('max_threads = 4')
   })
 })
