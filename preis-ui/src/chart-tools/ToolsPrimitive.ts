@@ -11,6 +11,8 @@ import { barMetaFromSeries, fractionalLogicalForTime, makeChartScale, timeToX } 
 import type { BarMeta, CoordScale } from './coords'
 import { distToSegment, formatDuration, measureStats } from './geometry'
 import type { AnchorPoint, ChartDrawing } from './types'
+import { withAlpha } from '../utils/color'
+import { formatChange, formatSignedPrice } from '../utils/format'
 
 // Renderer target types come from fancy-canvas; derive them from the
 // lightweight-charts typings instead of depending on the transitive package.
@@ -25,13 +27,13 @@ type XY = { x: number; y: number }
 // pass — nor per pointer event.
 export type Coords = { scale: CoordScale; meta: BarMeta | null }
 
-export interface PendingTrendline {
+interface PendingTrendline {
   p1: AnchorPoint
   cursor: AnchorPoint | null
 }
 
 /** Channel placement stage 2: base line committed, offset previewing. */
-export interface PendingChannel {
+interface PendingChannel {
   points: [AnchorPoint, AnchorPoint]
   offset: number | null
 }
@@ -50,10 +52,8 @@ const EQ_LINE_WIDTH = 1
 const EQ_DASH: number[] = [2, 3]
 const PREVIEW_DASH: number[] = [6, 4]
 
-const MEASURE_UP_FILL = 'rgba(34, 197, 94, 0.12)'
-const MEASURE_UP_BORDER = 'rgba(34, 197, 94, 0.5)'
-const MEASURE_DOWN_FILL = 'rgba(239, 68, 68, 0.12)'
-const MEASURE_DOWN_BORDER = 'rgba(239, 68, 68, 0.5)'
+const MEASURE_FILL_ALPHA = 0.12
+const MEASURE_BORDER_ALPHA = 0.5
 
 interface ToolColors {
   line: string
@@ -61,6 +61,8 @@ interface ToolColors {
   bgElev: string
   border: string
   textHigh: string
+  green: string
+  red: string
 }
 
 // Resolved on EVERY draw (never cached) so theme toggles repaint correctly.
@@ -76,13 +78,9 @@ function resolveColors(element: HTMLElement): ToolColors {
     bgElev: read('--bg-elev', '#0d1525'),
     border: read('--border', 'rgba(255, 255, 255, 0.08)'),
     textHigh: read('--text-high', '#f5f1f8'),
+    green: read('--green', '#74C742'),
+    red: read('--red', '#ff6868'),
   }
-}
-
-function formatSignedPrice(value: number): string {
-  const s = Math.abs(value).toPrecision(6)
-  const trimmed = s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s
-  return `${value >= 0 ? '+' : '-'}${trimmed}`
 }
 
 function offsetAnchor(anchor: AnchorPoint, offset: number): AnchorPoint {
@@ -463,10 +461,11 @@ export class ChartToolsPrimitive implements ISeriesPrimitive<Time> {
     const width = Math.abs(a.x - b.x) * hpr
     const height = Math.abs(a.y - b.y) * vpr
 
+    const tone = up ? colors.green : colors.red
     ctx.save()
-    ctx.fillStyle = up ? MEASURE_UP_FILL : MEASURE_DOWN_FILL
+    ctx.fillStyle = withAlpha(tone, MEASURE_FILL_ALPHA)
     ctx.fillRect(left, top, width, height)
-    ctx.strokeStyle = up ? MEASURE_UP_BORDER : MEASURE_DOWN_BORDER
+    ctx.strokeStyle = withAlpha(tone, MEASURE_BORDER_ALPHA)
     ctx.lineWidth = Math.max(1, Math.round(hpr))
     ctx.strokeRect(left, top, width, height)
     ctx.restore()
@@ -479,10 +478,10 @@ export class ChartToolsPrimitive implements ISeriesPrimitive<Time> {
       : Math.abs(Math.round(fractionalLogicalForTime(measure.b.time, meta)) -
           Math.round(fractionalLogicalForTime(measure.a.time, meta)))
     const stats = measureStats(measure.a, measure.b, bars)
-    const sign = stats.deltaPct >= 0 ? '+' : '-'
     const lines = [
       formatSignedPrice(stats.deltaPrice),
-      `${sign}${Math.abs(stats.deltaPct).toFixed(2)}%`,
+      // measureStats reports a percentage; formatChange takes a fraction.
+      formatChange(stats.deltaPct / 100),
       `${stats.bars} bars · ${formatDuration(stats.seconds)}`,
     ]
 

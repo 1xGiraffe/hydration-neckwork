@@ -14,15 +14,29 @@ import { INTERVALS, INTERVAL_LABELS, PERIODS } from './types'
 import type { Asset, OHLCVInterval, Period } from './types'
 import { parseUrlPair, pairDisplay } from './utils/pairs'
 import type { PairResult } from './utils/pairs'
-import { exportVisibleCSV } from './utils/export'
+import { exportFilename, exportVisibleCSV } from './utils/export'
 import { drawBrandWatermark } from './utils/brandWatermark'
 import { formatPrice } from './utils/format'
+import { usePersistedState } from './hooks/usePersistedState'
+import { CameraIcon, CloseIcon, DownloadIcon, MoonIcon, SunIcon, TrendlineIcon } from './components/icons'
 
 const DEFAULT_BASE_ID = 0   // HDX
 const DEFAULT_QUOTE_ID = 10  // USDT
 const EMPTY_ASSETS: Asset[] = []
 const DESKTOP_SIDEBAR_STORAGE_KEY = 'preis-desktop-sidebar-open'
 const INSPECTION_QUERY_PARAM = 'inspect'
+
+// Codecs for the persisted preferences. Module-level so their identity is
+// stable — `usePersistedState` writes whenever `encode` changes.
+const decodePeriod = (raw: string | null): Period =>
+  raw != null && (PERIODS as readonly string[]).includes(raw) ? (raw as Period) : '24h'
+const encodePeriod = (period: Period) => period
+const decodeToolsEnabled = (raw: string | null) => raw !== 'off'
+const encodeToolsEnabled = (enabled: boolean) => (enabled ? 'on' : 'off')
+const decodeLogScale = (raw: string | null) => raw === 'log'
+const encodeLogScale = (logarithmic: boolean) => (logarithmic ? 'log' : 'linear')
+const decodeSidebarOpen = (raw: string | null) => raw !== 'false'
+const encodeSidebarOpen = (open: boolean) => (open ? 'true' : 'false')
 
 const AssetPickerDialog = lazy(() => import('./components/AssetPickerDialog'))
 
@@ -72,15 +86,6 @@ function readInitialRoute() {
   }
 }
 
-function readInitialDesktopSidebarOpen() {
-  if (typeof window === 'undefined') return true
-  try {
-    return localStorage.getItem(DESKTOP_SIDEBAR_STORAGE_KEY) !== 'false'
-  } catch {
-    return true
-  }
-}
-
 export default function App() {
   const { theme, toggle: toggleTheme } = useTheme()
   // Same breakpoint the stylesheet uses for the sidebar/drawer swap.
@@ -93,62 +98,13 @@ export default function App() {
   const [modalOpen, setModalOpen] = useState(false)
   const [chartData, setChartData] = useState<import('./types').ApiCandle[]>([])
   const [drawerOpen, setDrawerOpen] = useState(false)
-  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(readInitialDesktopSidebarOpen)
-  const [period, setPeriod] = useState<Period>(() => {
-    try {
-      const saved = localStorage.getItem('preis-period')
-      if (saved && (PERIODS as readonly string[]).includes(saved)) return saved as Period
-    } catch {
-      // localStorage can be unavailable in private or hardened contexts.
-    }
-    return '24h'
-  })
-  useEffect(() => {
-    try {
-      localStorage.setItem('preis-period', period)
-    } catch {
-      // Ignore persistence failures; the in-memory selection still works.
-    }
-  }, [period])
-  const [toolsEnabled, setToolsEnabled] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('preis-tools') !== 'off'
-    } catch {
-      // localStorage can be unavailable in private or hardened contexts.
-      return true
-    }
-  })
-  useEffect(() => {
-    try {
-      localStorage.setItem('preis-tools', toolsEnabled ? 'on' : 'off')
-    } catch {
-      // Ignore persistence failures; the in-memory preference still works.
-    }
-  }, [toolsEnabled])
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = usePersistedState(
+    DESKTOP_SIDEBAR_STORAGE_KEY, decodeSidebarOpen, encodeSidebarOpen)
+  const [period, setPeriod] = usePersistedState('preis-period', decodePeriod, encodePeriod)
+  const [toolsEnabled, setToolsEnabled] = usePersistedState('preis-tools', decodeToolsEnabled, encodeToolsEnabled)
   // Price-scale mode is one preference for every pair, so switching pairs keeps
   // the chosen scale. Linear stays the default.
-  const [logScale, setLogScale] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('preis-scale') === 'log'
-    } catch {
-      // localStorage can be unavailable in private or hardened contexts.
-      return false
-    }
-  })
-  useEffect(() => {
-    try {
-      localStorage.setItem('preis-scale', logScale ? 'log' : 'linear')
-    } catch {
-      // Ignore persistence failures; the in-memory preference still works.
-    }
-  }, [logScale])
-  useEffect(() => {
-    try {
-      localStorage.setItem(DESKTOP_SIDEBAR_STORAGE_KEY, desktopSidebarOpen ? 'true' : 'false')
-    } catch {
-      // Ignore persistence failures; the in-memory sidebar state still works.
-    }
-  }, [desktopSidebarOpen])
+  const [logScale, setLogScale] = usePersistedState('preis-scale', decodeLogScale, encodeLogScale)
   const cyclePeriod = () => setPeriod(p => PERIODS[(PERIODS.indexOf(p) + 1) % PERIODS.length])
 
   const assetsQuery = useAssets()
@@ -315,18 +271,19 @@ export default function App() {
 
   const baseSymbol = baseAsset?.symbol ?? 'HDX'
   const quoteSymbol = quoteAsset?.symbol ?? 'USDT'
+  // A USD-pegged quote reads as "USD" everywhere it is displayed, exports
+  // included — the CSV and the screenshot of one chart must not disagree.
+  const displayQuote = quoteAsset?.isUsdPegged ? 'USD' : quoteSymbol
 
   const handleScreenshot = async () => {
     const container = chartContainerRef.current
     if (!container) return
     try {
-      const displayQ = quoteAsset?.isUsdPegged ? 'USD' : quoteSymbol
       const isLight = document.documentElement.getAttribute('data-theme') === 'light'
-      const pairLine = `${baseSymbol}${displayQ}, ${INTERVAL_LABELS[interval]}`
+      const pairLine = `${baseSymbol}${displayQuote}, ${INTERVAL_LABELS[interval]}`
       const nameParts = [baseAsset?.name ?? baseSymbol, quoteAsset?.isUsdPegged ? 'USD' : (quoteAsset?.name ?? quoteSymbol)]
       const subLine = nameParts.join(' / ')
-      const utcNow = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z'
-      const filename = `hydration_neckwork_${baseSymbol}${displayQ}_${INTERVAL_LABELS[interval]}_${utcNow}.png`
+      const filename = exportFilename(baseSymbol, displayQuote, INTERVAL_LABELS[interval], 'png')
 
       const blobPromise = (async () => {
         const rect = container.getBoundingClientRect()
@@ -457,7 +414,7 @@ export default function App() {
         onExport={() => {
           if (chartData.length === 0) return
           const range = getVisibleRangeRef.current?.()
-          exportVisibleCSV(chartData, baseSymbol, quoteSymbol, INTERVAL_LABELS[interval], range?.from ?? null, range?.to ?? null)
+          exportVisibleCSV(chartData, baseSymbol, displayQuote, INTERVAL_LABELS[interval], range?.from ?? null, range?.to ?? null)
         }}
         canExport={chartData.length > 0}
         onScreenshot={handleScreenshot}
@@ -477,6 +434,7 @@ export default function App() {
             baseAsset={baseAsset}
             quoteAsset={quoteAsset}
             candles={chartData}
+            interval={interval}
             marketStats={marketStatsQuery.data}
             period={period}
             onCyclePeriod={cyclePeriod}
@@ -548,7 +506,7 @@ export default function App() {
               onClick={() => setDrawerOpen(false)}
               aria-label="Close markets drawer"
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+              <CloseIcon />
             </button>
             <Sidebar
               assets={assets}
@@ -568,7 +526,7 @@ export default function App() {
                 type="button"
                 onClick={() => { handleScreenshot(); setDrawerOpen(false) }}
               >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                <CameraIcon />
                 Screenshot
               </button>
               <button
@@ -577,11 +535,11 @@ export default function App() {
                 onClick={() => {
                   if (chartData.length === 0) return
                   const range = getVisibleRangeRef.current?.()
-                  exportVisibleCSV(chartData, baseSymbol, quoteSymbol, INTERVAL_LABELS[interval], range?.from ?? null, range?.to ?? null)
+                  exportVisibleCSV(chartData, baseSymbol, displayQuote, INTERVAL_LABELS[interval], range?.from ?? null, range?.to ?? null)
                   setDrawerOpen(false)
                 }}
               >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <DownloadIcon />
                 Download CSV
               </button>
               <button
@@ -589,16 +547,14 @@ export default function App() {
                 aria-pressed={toolsEnabled}
                 onClick={() => { setToolsEnabled(enabled => !enabled); setDrawerOpen(false) }}
               >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="7.5" y1="16.5" x2="16.5" y2="7.5"/><circle cx="5.5" cy="18.5" r="2"/><circle cx="18.5" cy="5.5" r="2"/></svg>
+                <TrendlineIcon />
                 {toolsEnabled ? 'Hide toolbar' : 'Show toolbar'}
               </button>
               <button
                 type="button"
                 onClick={() => { toggleTheme(); setDrawerOpen(false) }}
               >
-                {theme === 'dark'
-                  ? <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
-                  : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>}
+                {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
                 {theme === 'dark' ? 'Lights on' : 'Lights off'}
               </button>
             </div>

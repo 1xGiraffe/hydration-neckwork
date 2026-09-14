@@ -55,6 +55,12 @@ function matchesPairQuery(label: string, baseSymbol: string, q: string): boolean
   return label.toUpperCase().startsWith(q) || baseSymbol.toUpperCase().startsWith(q)
 }
 
+// Every asset against every asset is quadratic, and a one-character query
+// matches hundreds of pairs — each of which renders two CDN-backed icons and a
+// sparkline. Nothing below the fold is read before the query narrows, so the
+// list is cut after the ranking, never before it.
+const MAX_SEARCH_RESULTS = 100
+
 export function searchPairs(query: string, assets: Asset[]): PairResult[] {
   const q = query.trim().toUpperCase()
   if (!q) return getDefaultPairs(assets)
@@ -105,7 +111,7 @@ export function searchPairs(query: string, assets: Asset[]): PairResult[] {
     // Shorter label = closer match
     if (aLabel.length !== bLabel.length) return aLabel.length - bLabel.length
     return aLabel.localeCompare(bLabel)
-  })
+  }).slice(0, MAX_SEARCH_RESULTS)
 }
 
 // Parse URL: "/0-10/1h" → { baseId: 0, quoteId: 10 }

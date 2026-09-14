@@ -1,6 +1,6 @@
 import type { ApiCandle, OHLCVInterval, OmniwatchVolumeDetails } from '../types'
 
-export interface FetchCandlesParams {
+interface FetchCandlesParams {
   baseId: number
   quoteId: number
   interval: OHLCVInterval
@@ -23,7 +23,7 @@ export async function fetchCandles(params: FetchCandlesParams, signal?: AbortSig
   return res.json()
 }
 
-export interface FetchVolumeDetailsParams {
+interface FetchVolumeDetailsParams {
   baseId: number
   quoteId: number
   interval: OHLCVInterval
