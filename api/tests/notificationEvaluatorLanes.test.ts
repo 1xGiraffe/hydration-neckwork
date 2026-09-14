@@ -156,6 +156,28 @@ describe('safety lane cursor', () => {
     expect(evaluatorCursors().safety).toBe(1_000)
   })
 
+  // The clamp is not a row-lane privilege. A multi-day outage leaves the whole
+  // security timeline above the cursor, and the inbox is not a backlog queue: the
+  // first tick back reports the newest window and COUNTS the rest as skipped,
+  // rather than delivering days of alerts at once with nothing to show for the gap.
+  it('clamps a post-outage backlog and counts the blocks it skipped', async () => {
+    await watchSafety()
+    timeline.push(safetyEvent(900))
+    setHead(1_000)
+    await runEvaluatorTick()                       // seeds at 900
+    expect(evaluatorCounters().skippedBlocks).toBe(0)
+
+    // Days later: the dashboard comes back with everything that happened.
+    timeline.push(safetyEvent(1_200), safetyEvent(5_000))
+    setHead(5_000)
+    await runEvaluatorTick()
+
+    // Only the newest 600 blocks are evaluated; 1_200 is below the clamped window.
+    expect(inbox().map(r => r.block_height)).toEqual([5_000])
+    expect(evaluatorCounters().skippedBlocks).toBe(3_500)
+    expect(evaluatorCursors().safety).toBe(5_000)
+  })
+
   it('adopts the legacy single cursor on an upgrade in place', async () => {
     await watchSafety()
     // The legacy cursor sat at the head, so everything the timeline already held

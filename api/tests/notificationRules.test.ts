@@ -158,6 +158,20 @@ describe('describeRule', () => {
     expect(REFERENDUM_PHASES.length).toBeGreaterThan(0)
   })
 
+  // The summary states the owner's OWN threshold, so it rounds through the
+  // shared scale (render.ts's compactUsd, the one the message and the page use).
+  // A local rounder summarised $1,500 as "$2k" and $1,499 as "$1k" — a rules list
+  // telling its owner a floor they never set.
+  it('states a floor the way every other surface states it', () => {
+    expect(describeRule('large-trade', { minUsd: 1_500 })).toBe('trades over $1.5k')
+    expect(describeRule('large-trade', { minUsd: 2_500 })).toBe('trades over $2.5k')
+    expect(describeRule('large-trade', { minUsd: 1_499 })).toBe('trades over $1.5k')
+    expect(describeRule('large-transfer', { minUsd: 250 })).toBe('transfers over $250')
+    expect(describeRule('account-activity', { address: SS58, minUsd: 1_500 })).toBe('any activity over $1.5k')
+    expect(describeRule('protocol-revenue', { minUsd: 1_500 })).toBe('extrinsics earning the protocol over $1.5k')
+    expect(describeRule('safety', { kinds: ['deficit'], deficitUsd: 1_500 })).toBe('Security · deficit ≥ $1.5k · deficit')
+  })
+
   // A tag target names a group, so the summary names the group — and says so
   // from the reader's own vocabulary, via the lookup the caller supplies.
   it('names a tag target rather than an address', () => {

@@ -55,7 +55,7 @@ const WINDOW_PAGES_BRIDGE = 8
 // so giving up after one attempt is what left rows permanently unenriched; retrying
 // every request instead would spend the whole budget on the same few ids. Capped:
 // past the last step a miss is left alone.
-const MISS_BACKOFF_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3_600_000, 12 * 3_600_000]
+export const MISS_BACKOFF_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3_600_000, 12 * 3_600_000]
 
 // How far the feed may fall behind before it is worth a warning, and how often to
 // check. Bridge latency alone puts tens of minutes between a journey being sent and
@@ -256,10 +256,18 @@ async function fetchJourneyMisses(messageIds: string[]): Promise<Map<string, { a
   return out
 }
 
-// Whether a miss is due for another look. An id never seen before is always due.
-function missIsDue(miss: { attempts: number; lastAttemptMs: number } | undefined, nowMs: number): boolean {
+/**
+ * Whether a miss is due for another look. An id never seen before is always due.
+ *
+ * The stored count is 1 after the FIRST unresolved look (see the persist above),
+ * so attempt N waits `MISS_BACKOFF_MS[N - 1]` and the schedule is exhausted only
+ * once every step has been served — `attempts > length`, not `>=`, which gave up
+ * one step early and made the 12h step (the one Wormhole's multi-hour tail needs)
+ * unreachable.
+ */
+export function missIsDue(miss: { attempts: number; lastAttemptMs: number } | undefined, nowMs: number): boolean {
   if (!miss) return true
-  if (miss.attempts >= MISS_BACKOFF_MS.length) return false
+  if (miss.attempts > MISS_BACKOFF_MS.length) return false
   return nowMs - miss.lastAttemptMs >= MISS_BACKOFF_MS[Math.max(0, miss.attempts - 1)]
 }
 
