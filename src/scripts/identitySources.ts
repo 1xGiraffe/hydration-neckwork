@@ -196,9 +196,18 @@ export function tombstoneRow(chain: IdentityChain, accountId: string, updatedAt:
   return row(chain, accountId, '', false, null, updatedAt)
 }
 
-// Page one storage map at a fixed anchor. A chain that does not carry the item —
-// SuperOf and UsernameOf are absent from older runtimes — yields nothing instead
-// of failing the chain, so the identities it does have still land.
+// Page one storage map at a fixed anchor.
+//
+// The result is either COMPLETE or an exception — never a partial map. The caller
+// retires every stored account missing from what this returns, so a half-read map
+// is indistinguishable from "all those owners cleared their identity" and would
+// tombstone the chain's identities wholesale on one dropped connection.
+//
+// A runtime that does not declare the item at all (SuperOf and UsernameOf are
+// absent from older runtimes) is the one benign empty: there are no identities
+// under an item that does not exist, so the chain's other maps still land. That is
+// read off the runtime metadata rather than inferred from a failure, because an
+// RPC error says nothing about whether the item exists.
 export async function readStorageMap<T>(
   runtime: Runtime,
   hash: string,
@@ -207,17 +216,18 @@ export async function readStorageMap<T>(
   decode: (value: unknown) => T | null,
 ): Promise<Map<string, T>> {
   const out = new Map<string, T>()
-  try {
-    for await (const page of runtime.getStoragePairsPaged(pageSize, hash, item)) {
-      for (const [key, value] of page) {
-        const accountId = toAccountId(key)
-        if (accountId == null) continue
-        const decoded = decode(value)
-        if (decoded != null) out.set(accountId, decoded)
-      }
+  if (!runtime.hasStorageItem(item)) {
+    console.log(JSON.stringify({ type: 'identity_storage_absent', item }))
+    return out
+  }
+
+  for await (const page of runtime.getStoragePairsPaged(pageSize, hash, item)) {
+    for (const [key, value] of page) {
+      const accountId = toAccountId(key)
+      if (accountId == null) continue
+      const decoded = decode(value)
+      if (decoded != null) out.set(accountId, decoded)
     }
-  } catch (error) {
-    console.log(JSON.stringify({ type: 'identity_storage_unavailable', item, reason: (error as Error).message }))
   }
   return out
 }

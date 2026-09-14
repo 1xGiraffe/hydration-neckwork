@@ -9,7 +9,7 @@ import { PoolCompositionCache } from '../pool/compositionCache.js'
 import { updateErc20Registry } from '../evm/balances.js'
 import { rawProcessor } from './processor.js'
 import type { RawCall, RawEvent, RawExtrinsic } from './processor.js'
-import { aliasRowsForBoundEvent, aliasRowsForEvmParticipants } from './accountIdentity.js'
+import { aliasRowsForBoundEvent, aliasRowsForEvmParticipants, dedupeAliasRows } from './accountIdentity.js'
 import { extractBalanceObservations } from './balance.js'
 import { withoutRelayChainProof } from './callArgs.js'
 import { RawDatabase } from './database.js'
@@ -554,10 +554,13 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       callsPersisted += callRows.length + synthetic.rows.length
       eventsPersisted += eventRows.length
 
-      const accountAliasRows = block.events.flatMap(event => aliasRowsForBoundEvent(event, blockTimestamp, ingestSource))
+      // Bound events go in first so that when a block both binds an address and
+      // logs it, the explicit binding is the row `dedupeAliasRows` keeps for the
+      // key the two share.
+      const candidateAliasRows = block.events.flatMap(event => aliasRowsForBoundEvent(event, blockTimestamp, ingestSource))
       const evmLogRows = extractEvmLogs(block.events, blockTimestamp, ingestSource)
       for (const evmLog of evmLogRows) {
-        accountAliasRows.push(...aliasRowsForEvmParticipants(
+        candidateAliasRows.push(...aliasRowsForEvmParticipants(
           evmLog.participants,
           evmLog.block_height,
           evmLog.block_timestamp,
@@ -566,6 +569,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
           evmLog.extrinsic_index,
         ))
       }
+      const accountAliasRows = dedupeAliasRows(candidateAliasRows)
 
       const balances = await tracePhase(blockHeight, 'balances', () => extractBalanceObservations(
           block.header,

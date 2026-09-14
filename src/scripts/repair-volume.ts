@@ -722,18 +722,66 @@ async function getSafeTip(client: ClickHouseClient, safetyLagBlocks: number): Pr
   return Math.max(0, Number(rows[0]?.max_block) - safetyLagBlocks)
 }
 
-async function getRawSwapHistoryRange(client: ClickHouseClient): Promise<{ from: number; to: number }> {
+// Block span of one bounded probe for the first swap event. Proven size for a scan
+// over raw history; the same chunking the repair loop itself uses.
+const HISTORY_SCAN_CHUNK_BLOCKS = 100_000
+
+// Every predicate sits in ONE `WHERE`. Pairing an explicit `PREWHERE` with a
+// separate `WHERE` returns a silent, drifting subset of the matching rows on this
+// ClickHouse build, which here would name a first-swap block that is merely the
+// first one the truncated read happened to keep.
+async function firstSwapBlockInChunk(
+  client: ClickHouseClient,
+  from: number,
+  to: number,
+): Promise<number | null> {
   const result = await client.query({
     query: `
-      SELECT min(block_height) AS min_block, max(block_height) AS max_block
-      FROM price_data.raw_events FINAL
-      WHERE event_name IN ({names:Array(String)})
+      SELECT min(block_height) AS min_block, count() AS hits
+      FROM price_data.raw_events
+      WHERE block_height >= {from:UInt32}
+        AND block_height <= {to:UInt32}
+        AND event_name IN ({names:Array(String)})
     `,
-    query_params: { names: ALL_SWAP_EVENT_NAMES },
+    query_params: { from, to, names: ALL_SWAP_EVENT_NAMES },
+    format: 'JSONEachRow',
+    clickhouse_settings: BOUNDED_QUERY_SETTINGS,
+  })
+  const rows = await result.json<{ min_block: number; hits: string | number }>()
+  if (Number(rows[0]?.hits ?? 0) === 0) return null
+  return Number(rows[0].min_block)
+}
+
+// `--all-history` needs the first block that carries a swap event. Asking
+// `raw_events` for that directly is a full-history scan with no block bound — the
+// shape that reaches ~84 GiB RSS and takes ClickHouse, and every service sharing
+// the box, down with the kernel's OOM killer. So the floor is found by walking
+// bounded block-range chunks forward from the first indexed block and stopping at
+// the first chunk that holds a swap; the ends come from `blocks`, whose sort key IS
+// `block_height`, so its min/max is an index read rather than a scan.
+//
+// No `FINAL`: a replayed row carries the same `block_height`, so a duplicate
+// cannot move a minimum. The upper end is the indexed tip — `resolveRange` clamps
+// it to the safety lag regardless.
+async function getRawSwapHistoryRange(client: ClickHouseClient): Promise<{ from: number; to: number }> {
+  const result = await client.query({
+    query: `SELECT min(block_height) AS min_block, max(block_height) AS max_block FROM price_data.blocks`,
     format: 'JSONEachRow',
   })
   const rows = await result.json<{ min_block: number; max_block: number }>()
-  return { from: Number(rows[0]?.min_block) || 0, to: Number(rows[0]?.max_block) || 0 }
+  const floor = Number(rows[0]?.min_block) || 0
+  const tip = Number(rows[0]?.max_block) || 0
+  if (floor <= 0 || tip < floor) {
+    throw new Error('price_data.blocks holds no blocks; cannot resolve --all-history')
+  }
+
+  for (let from = floor; from <= tip; from += HISTORY_SCAN_CHUNK_BLOCKS) {
+    const to = Math.min(from + HISTORY_SCAN_CHUNK_BLOCKS - 1, tip)
+    const firstSwap = await firstSwapBlockInChunk(client, from, to)
+    if (firstSwap != null) return { from: firstSwap, to: tip }
+  }
+
+  throw new Error('No swap events in price_data.raw_events; --all-history has nothing to repair')
 }
 
 async function getMaxBlockTime(client: ClickHouseClient): Promise<string> {
