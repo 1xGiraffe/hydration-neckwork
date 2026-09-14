@@ -603,6 +603,21 @@ export async function setNotificationState(key: string, value: string): Promise<
   await client.insert({ table: TABLES.state, values: [{ key, value, deleted: 0 }], format: 'JSONEachRow' })
 }
 
+/**
+ * Several state rows in ONE insert. The evaluator writes a row per rule (arm
+ * state) and per kind (cursors) on a 6s tick, and one insert each was one round
+ * trip each. Same semantics as `setNotificationState`, applied in order.
+ */
+export async function setNotificationStates(entries: readonly { key: string; value: string }[]): Promise<void> {
+  if (!entries.length) return
+  for (const { key, value } of entries) state.set(key, value)
+  await client.insert({
+    table: TABLES.state,
+    values: entries.map(({ key, value }) => ({ key, value, deleted: 0 })),
+    format: 'JSONEachRow',
+  })
+}
+
 export async function deleteNotificationState(key: string): Promise<void> {
   if (!state.delete(key)) return
   await client.insert({ table: TABLES.state, values: [{ key, value: '', deleted: 1 }], format: 'JSONEachRow' })

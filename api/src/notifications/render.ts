@@ -74,10 +74,6 @@ export function compactUsd(v: number): string {
 
 /* ============ account notation ============ */
 
-// The subset of the api's AccountRef this module reads, plus the viewer's own
-// resolved list tag — which the server holds per recipient (userListService's
-// tag map) rather than on the shared ref, exactly like AddrPill resolves it
-// client-side. Keeping it a parameter is what keeps this module pure.
 /**
  * A rough wall-clock span for a message: one unit, no false precision. Reading a
  * schedule's length as a duration is what separates a 90-second burst from a
@@ -95,6 +91,10 @@ export function humanDuration(ms: number): string {
   return `${compactAmount(d / 365)} years`
 }
 
+// The subset of the api's AccountRef this module reads, plus the viewer's own
+// resolved list tag — which the server holds per recipient (userListService's
+// tag map) rather than on the shared ref, exactly like AddrPill resolves it
+// client-side. Keeping it a parameter is what keeps this module pure.
 export interface RenderAccount {
   accountId: string
   address: string
