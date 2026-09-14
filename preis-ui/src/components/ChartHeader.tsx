@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Asset, ApiCandle, AssetMarketStats, Period } from '../types'
 import { formatPrice, formatChange } from '../utils/format'
+import { crossChange } from '../utils/change'
 import PairIcons from './PairIcons'
 import FavoriteStar from './FavoriteStar'
 
@@ -15,12 +16,17 @@ interface ChartHeaderProps {
   onToggleFavorite: () => void
 }
 
+// The last close, plus the fallback 24h change for pairs the market-stats feed
+// cannot derive one for. Candles are ascending, so the window's first bar is
+// found by walking back from the end — the loaded history can run to thousands
+// of bars after scrollback, and only the last day of it matters here.
 function deriveFromCandles(candles: ApiCandle[]): { price: number | null; change24h: number | null } {
   if (candles.length === 0) return { price: null, change24h: null }
   const last = candles[candles.length - 1]
   const cutoff = last.intervalStart - 86_400
-  const window = candles.filter(c => c.intervalStart >= cutoff)
-  const refOpen = window[0]?.open ?? last.open
+  let first = candles.length - 1
+  while (first > 0 && candles[first - 1].intervalStart >= cutoff) first--
+  const refOpen = candles[first].open
   return {
     price: last.close,
     change24h: refOpen > 0 ? (last.close - refOpen) / refOpen : null,
@@ -70,29 +76,13 @@ function useValueFlash(value: number | null): string {
 }
 
 export default function ChartHeader({ baseAsset, quoteAsset, candles, marketStats, period, onCyclePeriod, isFavorite, onToggleFavorite }: ChartHeaderProps) {
-  const fromCandles = deriveFromCandles(candles)
+  const fromCandles = useMemo(() => deriveFromCandles(candles), [candles])
 
   const baseStats = marketStats?.find(s => s.assetId === baseAsset?.assetId)
   const quoteStats = marketStats?.find(s => s.assetId === quoteAsset?.assetId)
   const isUsdQuote = quoteAsset?.isUsdPegged ?? false
 
-  function changeFor(window: '1h' | '24h' | '7d'): number | null {
-    if (!baseStats || !baseStats.price) return null
-    const baseChange = window === '1h' ? baseStats.change1h : window === '7d' ? baseStats.change7d : baseStats.change24h
-    if (baseChange == null) return null
-    if (isUsdQuote) return baseChange
-    if (!quoteStats || !quoteStats.price) return null
-    const quoteChange = window === '1h' ? quoteStats.change1h : window === '7d' ? quoteStats.change7d : quoteStats.change24h
-    if (quoteChange == null) return null
-    const baseThen = baseStats.price / (1 + baseChange)
-    const quoteThen = quoteStats.price / (1 + quoteChange)
-    if (quoteThen === 0) return null
-    const ratioNow = baseStats.price / quoteStats.price
-    const ratioThen = baseThen / quoteThen
-    return ratioThen === 0 ? null : ratioNow / ratioThen - 1
-  }
-
-  let changeForPeriod = changeFor(period)
+  let changeForPeriod = crossChange(baseStats, quoteStats, period, isUsdQuote)
   if (changeForPeriod == null && period === '24h') {
     changeForPeriod = fromCandles.change24h
   }

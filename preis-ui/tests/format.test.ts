@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatChange, formatCountdown, formatPrice, formatTokenAmount, tokenAmountFromRaw } from '../src/utils/format'
+import { compactAmount, formatChange, formatCountdown, formatPrice, tokenAmountFromRaw } from '../src/utils/format'
 
 describe('formatting edge cases', () => {
   it('does not expose non-finite market values', () => {
@@ -27,14 +27,17 @@ describe('token amounts', () => {
     expect(tokenAmountFromRaw('123', Number.NaN)).toBe(0)
   })
 
+  // One rough scale for every amount: ~3 significant digits with k/M/B
+  // compaction, so a tally and a token amount cannot read differently.
   it('compacts across the magnitudes a traded asset spans', () => {
-    expect(formatTokenAmount(4_230_000)).toBe('4.23M')
-    expect(formatTokenAmount(4230)).toBe('4.23K')
-    expect(formatTokenAmount(-4230)).toBe('-4.23K')
-    expect(formatTokenAmount(4.2)).toBe('4.20')
-    expect(formatTokenAmount(0.0423)).toBe('0.0423')
-    expect(formatTokenAmount(-0.0423)).toBe('-0.0423')
-    expect(formatTokenAmount(0)).toBe('0')
-    expect(formatTokenAmount(Number.NaN)).toBe('0')
+    expect(compactAmount(1_230_000_000)).toBe('1.23B')
+    expect(compactAmount(4_230_000)).toBe('4.23M')
+    expect(compactAmount(4230)).toBe('4.23k')
+    expect(compactAmount(-4230)).toBe('-4.23k')
+    expect(compactAmount(4.2)).toBe('4.2')
+    expect(compactAmount(0.0423)).toBe('0.0423')
+    expect(compactAmount(-0.0423)).toBe('-0.0423')
+    expect(compactAmount(0)).toBe('0')
+    expect(compactAmount(Number.NaN)).toBe('—')
   })
 })

@@ -2,6 +2,7 @@ import { useMemo, type KeyboardEvent } from 'react'
 import type { Asset, AssetMarketStats, Period } from '../types'
 import PairIcons from './PairIcons'
 import { formatPrice, formatChange } from '../utils/format'
+import { changeForPeriod, crossChange } from '../utils/change'
 import { displayLabel, pairDisplay } from '../utils/pairs'
 
 const TOP_N = 8
@@ -22,10 +23,6 @@ interface SidebarProps {
   favorites: FavoritePair[]
   /** Hide the inline indexer footer (the mobile drawer renders it itself, below the actions). */
   hideIndexer?: boolean
-}
-
-function changeForPeriod(s: AssetMarketStats, p: Period): number | null {
-  return p === '1h' ? s.change1h : p === '7d' ? s.change7d : s.change24h
 }
 
 interface Row {
@@ -159,30 +156,16 @@ export default function Sidebar({
       if (!base || !quote) continue
       const bs = statsById.get(base.assetId)
       const qs = statsById.get(quote.assetId)
+      // A stablecoin quote is not automatically a dollar one: EURC tracks the
+      // euro, so a EURC-quoted favorite is a real cross pair and shows the
+      // base/quote ratio, not the base's USD price.
+      const isUsdPair = quote.isUsdPegged ?? false
       let price: number | null = null
-      let change: number | null = null
-      if (quote.isStablecoin) {
-        price = bs?.price ?? null
-        change = bs ? changeForPeriod(bs, period) : null
-      } else if (bs?.price && qs?.price && qs.price !== 0) {
-        price = bs.price / qs.price
-        // Cross-pair change: derive from both sides' per-asset USD change
-        // (price_then = price_now / (1 + change)). Falling back to the base's
-        // change alone produced wrong signs / wrong magnitudes when the quote
-        // moved meaningfully — e.g. HDXDOT showing +0.89% while the badge
-        // showed -1.82% because the badge derived properly but favorites used
-        // base.change24h alone.
-        const baseChange = changeForPeriod(bs, period)
-        const quoteChange = changeForPeriod(qs, period)
-        if (baseChange != null && quoteChange != null) {
-          const baseThen = bs.price / (1 + baseChange)
-          const quoteThen = qs.price / (1 + quoteChange)
-          if (quoteThen !== 0) {
-            const ratioThen = baseThen / quoteThen
-            if (ratioThen !== 0) change = price / ratioThen - 1
-          }
-        }
-      }
+      if (isUsdPair) price = bs?.price ?? null
+      else if (bs?.price && qs?.price) price = bs.price / qs.price
+      // A pair's change is the change of its ratio, derived from both legs'
+      // USD change; the base's change alone is not the pair's change.
+      const change = crossChange(bs, qs, period, isUsdPair)
       result.push({ pair: f, base, quote, price, change })
     }
     // Alphabetical by displayed label (e.g. "DOT" < "HDXDOT" < "vDOT") so
@@ -258,7 +241,7 @@ export default function Sidebar({
             <div>
               {favoriteRows.map(({ pair, base, quote, price, change }) => {
                 const isActive = base.assetId === currentBaseId && quote.assetId === currentQuoteId
-                const isUsdPair = quote.isStablecoin
+                const isUsdPair = quote.isUsdPegged ?? false
                 const label = displayLabel(pairDisplay(base, quote))
                 return (
                   <div

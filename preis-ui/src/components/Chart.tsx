@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState, useCallback, type SyntheticEvent, type UIEvent } from 'react'
+import { memo, useEffect, useId, useRef, useState, useCallback, useSyncExternalStore, type SyntheticEvent, type UIEvent } from 'react'
 import {
   createChart,
   CandlestickSeries,
@@ -14,15 +14,24 @@ import type {
   ISeriesApi,
   CandlestickData,
   HistogramData,
-  IPriceLine,
 } from 'lightweight-charts'
 import { INTERVAL_LABELS } from '../types'
 import type { ApiCandle, OHLCVInterval, OmniwatchTrader, OmniwatchVolumeDetails } from '../types'
 import { fetchCandles, fetchVolumeDetails } from '../api/candles'
-import { formatCountdown, formatTokenAmount, tokenAmountFromRaw } from '../utils/format'
+import {
+  compactAmount,
+  compactCount,
+  formatChange,
+  formatCount,
+  formatCountdown,
+  formatPrice,
+  formatSignedUsd,
+  formatUsd,
+  tokenAmountFromRaw,
+} from '../utils/format'
 import { candleEndTimestamp, previousCandleRange, recentCandleRange } from '../utils/candleTime'
 import { headStreamHealthy, subscribeHead } from '../live'
-import { keepTabFocusInside } from '../utils/focus'
+import { useModalShell } from '../hooks/useModalShell'
 import { ToolController } from '../chart-tools/ToolController'
 import type { ToolState } from '../chart-tools/ToolController'
 import ChartToolbar from './ChartToolbar'
@@ -56,7 +65,6 @@ interface ChartProps {
   showVolumeSource?: boolean
   onVisibleRangeReady?: (getter: () => { from: number; to: number } | null) => void
   onDataChange?: (data: ApiCandle[]) => void
-  onCountdownChange?: (label: string) => void
   inspectionTime?: number | null
   onInspectionTimeChange?: (time: number | null) => void
   theme: 'dark' | 'light'
@@ -88,49 +96,65 @@ interface VolumeModalState {
   error: string | null
 }
 
-function formatPriceFixed(value: number): string {
-  const digits = value >= 1000 ? 2 : value >= 1 ? 4 : 6
-  return value.toLocaleString(undefined, {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  })
+/** A price delta, whose sign is the point. */
+function formatSignedPrice(value: number): string {
+  return (value >= 0 ? '+' : '-') + formatPrice(Math.abs(value), false)
 }
 
-function formatUsdVolume(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`
-  if (value >= 1_000) return `${(value / 1_000).toFixed(2)}K`
-  return value.toFixed(2)
+interface LegendStore {
+  subscribe: (listener: () => void) => () => void
+  get: () => Legend | null
+  set: (value: Legend | null) => void
 }
 
-function formatUsdVolumeAxis(value: number): string {
-  return `$${formatUsdVolume(value)}`
+/**
+ * The crosshair reports a new O/H/L/C/V on every pointer sample. Holding those
+ * five numbers in Chart's own state would re-render the whole chart shell — the
+ * marker list, the modal subtree and the style block — once per mouse move, so
+ * they live in this store and only the legend row subscribes to it.
+ */
+function createLegendStore(): LegendStore {
+  let value: Legend | null = null
+  const listeners = new Set<() => void>()
+  return {
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    get: () => value,
+    set(next) {
+      if (next === value) return
+      value = next
+      for (const listener of listeners) listener()
+    },
+  }
 }
 
-function formatSignedUsdVolume(value: number): string {
-  const sign = value >= 0 ? '+' : '-'
-  return `${sign}$${formatUsdVolume(Math.abs(value))}`
-}
-
-function formatSignedPriceChange(value: number): string {
-  const sign = value >= 0 ? '+' : '-'
-  return `${sign}${formatPriceFixed(Math.abs(value))}`
-}
-
-function formatPercent(value: number): string {
-  const sign = value >= 0 ? '+' : ''
-  return `${sign}${value.toFixed(2)}%`
-}
-
-function formatCount(value: number): string {
-  return value.toLocaleString(undefined, { maximumFractionDigits: 0 })
-}
-
-function formatShortCount(value: number): string {
-  if (value >= 999_500_000) return `${Math.round(value / 1_000_000_000)}b`
-  if (value >= 999_500) return `${Math.round(value / 1_000_000)}m`
-  if (value >= 1_000) return `${Math.round(value / 1_000)}k`
-  return formatCount(value)
-}
+/** O/H/L/C/V for the hovered candle, falling back to the newest one. */
+const ChartLegend = memo(function ChartLegend({ store, tail, base, showVolumeSource, upColor }: {
+  store: LegendStore
+  tail: ApiCandle | null
+  base: string
+  showVolumeSource: boolean
+  upColor: string
+}) {
+  const hovered = useSyncExternalStore(store.subscribe, store.get, store.get)
+  const legend: Legend | null = hovered ?? (tail
+    ? { open: tail.open, high: tail.high, low: tail.low, close: tail.close, volume: tail.volumeTotal }
+    : null)
+  if (!legend) return null
+  return (
+    <div className="chart-legend">
+      <span><span className="k">O</span>{formatPrice(legend.open, false)}</span>
+      <span><span className="k">H</span>{formatPrice(legend.high, false)}</span>
+      <span><span className="k">L</span>{formatPrice(legend.low, false)}</span>
+      <span style={{ color: legend.close >= legend.open ? upColor : 'var(--red)' }}>
+        <span className="k">C</span>{formatPrice(legend.close, false)}
+      </span>
+      <span><span className="k">V</span>{formatUsd(legend.volume)}{showVolumeSource ? ` (${base})` : ''}</span>
+    </div>
+  )
+})
 
 function formatCandleDate(ts: number): string {
   return new Intl.DateTimeFormat(undefined, {
@@ -171,6 +195,11 @@ function timeToSeconds(time: Time | undefined): number | null {
   return typeof time === 'number' ? time : null
 }
 
+// The price axis and the crosshair label are drawn by the chart library, which
+// wants a decimal count and a tick size rather than a formatted string. They are
+// the one place a real precision is needed instead of the rough display scale —
+// a tick ladder has to stay aligned with the prices it labels — so the tier is
+// chosen from the history's median close.
 function getPriceFormat(data: ApiCandle[]) {
   if (data.length === 0) return { type: 'price' as const, precision: 2, minMove: 0.01 }
   const closes = data.map(c => c.close).sort((a, b) => a - b)
@@ -204,51 +233,70 @@ function latestVisibleRange(dataLength: number) {
   }
 }
 
-// Lightweight Charts requires concrete color values, so palettes are kept in code
-// instead of being read from CSS variables at render time.
-const CHART_PALETTES = {
-  dark: {
-    bg: 'rgb(3, 8, 22)',
-    textMedium: 'rgb(165, 156, 171)',
-    textLow: 'rgb(110, 103, 118)',
-    separator: 'rgba(255, 255, 255, 0.05)',
-    green: 'rgb(116, 199, 66)',
-    red: 'rgb(255, 104, 104)',
-    accent: 'rgb(229, 62, 118)',
-  },
-  light: {
-    bg: 'rgb(239, 237, 234)',
-    textMedium: 'rgb(107, 103, 112)',
-    textLow: 'rgb(141, 137, 149)',
-    separator: 'rgba(36, 14, 50, 0.08)',
-    green: 'rgb(69, 172, 31)',
-    red: 'rgb(216, 59, 59)',
-    accent: 'rgb(229, 62, 118)',
-  },
-} as const
-
 interface ChartPalette {
   bg: string
+  textHigh: string
   textMedium: string
   textLow: string
   separator: string
   green: string
   red: string
   accent: string
+  light: boolean
 }
 
-function paletteForTheme(theme?: 'dark' | 'light' | string | null): ChartPalette {
-  // Prefer the explicit theme argument so callers stay independent of the order
-  // in which React applies side-effects to `data-theme` vs. paints the chart.
-  const t = theme ?? (typeof document !== 'undefined' ? document.documentElement.getAttribute('data-theme') : 'dark')
-  return (t === 'light' ? CHART_PALETTES.light : CHART_PALETTES.dark) as ChartPalette
+// Lightweight Charts draws on a canvas and cannot resolve a CSS variable, so the
+// chart's colors are read out of the design tokens once per theme and handed
+// over as concrete values — `global.css` stays the only place they are defined.
+// `useTheme` writes `data-theme` before React re-renders, so the tokens on the
+// document element are always the ones for the theme being painted.
+let paletteCache: { theme: string; palette: ChartPalette } | null = null
+
+function readPalette(): ChartPalette {
+  const theme = document.documentElement.getAttribute('data-theme') ?? 'dark'
+  if (paletteCache?.theme === theme) return paletteCache.palette
+  const styles = getComputedStyle(document.documentElement)
+  const read = (name: string, fallback: string) => styles.getPropertyValue(name).trim() || fallback
+  const palette: ChartPalette = {
+    bg: read('--bg', '#030816'),
+    textHigh: read('--text-high', '#f5f1f8'),
+    textMedium: read('--text-medium', '#a59cab'),
+    textLow: read('--text-low', '#6e6776'),
+    separator: read('--separator', 'rgba(255, 255, 255, 0.05)'),
+    green: read('--green', '#74C742'),
+    red: read('--red', '#ff6868'),
+    accent: read('--accent', '#e53e76'),
+    light: theme === 'light',
+  }
+  paletteCache = { theme, palette }
+  return palette
 }
 
-function isLight(p: ChartPalette): boolean { return p.bg === CHART_PALETTES.light.bg }
+/** Volume bars are the candle colors at 0.32 alpha, matching the design tokens. */
+function volumeBarColors(): { up: string; down: string } {
+  const palette = readPalette()
+  return { up: withAlpha(palette.green, 0.32), down: withAlpha(palette.red, 0.32) }
+}
+
+// Tokens are authored as hex; the volume histogram needs them at a fixed alpha.
+function withAlpha(color: string, alpha: number): string {
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color)
+  if (hex) {
+    const digits = hex[1].length === 3 ? hex[1].replace(/./g, d => d + d) : hex[1]
+    const n = Number.parseInt(digits, 16)
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`
+  }
+  const rgb = /^rgba?\(([^)]+)\)$/i.exec(color)
+  if (rgb) {
+    const [r, g, b] = rgb[1].split(/[,/\s]+/).filter(Boolean)
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`
+  }
+  return color
+}
 
 export default function Chart({
   baseId, quoteId, interval, base, baseDecimals = null, showVolumeSource = false,
-  onVisibleRangeReady, onDataChange, onCountdownChange,
+  onVisibleRangeReady, onDataChange,
   inspectionTime = null, onInspectionTimeChange, theme, toolsEnabled = true,
   logScale = false, onLogScaleChange,
 }: ChartProps) {
@@ -258,7 +306,6 @@ export default function Chart({
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
-  const countdownLineRef = useRef<IPriceLine | null>(null)
   const volumePaneTopRef = useRef(0)
   const markerFrameRef = useRef<number | null>(null)
   const openVolumeModalRef = useRef<(candle: ApiCandle) => void>(() => undefined)
@@ -291,7 +338,14 @@ export default function Chart({
     if (!toolsEnabled) toolsRef.current?.setTool('cursor')
   }, [toolsEnabled])
 
-  const [legend, setLegend] = useState<Legend | null>(null)
+  const legendStoreRef = useRef<LegendStore | null>(null)
+  if (!legendStoreRef.current) legendStoreRef.current = createLegendStore()
+  const legendStore = legendStoreRef.current
+
+  // The rendered tail of the loaded candles. `allDataRef` is mutated outside
+  // React, so the legend fallback and the empty state have to read a value that
+  // re-renders when the data changes rather than the ref itself.
+  const [tail, setTail] = useState<ApiCandle | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [loadingVisible, setLoadingVisible] = useState(true)
@@ -300,11 +354,6 @@ export default function Chart({
   const volumeModalTitleId = useId()
   const isVolumeModalOpen = volumeModal != null
   const currentVolumeModalTime = volumeModal?.candle.intervalStart ?? null
-  // Mirror the latest theme into a ref so callbacks/intervals read the live
-  // value without needing to be rebuilt (and without depending on document
-  // attribute order-of-application).
-  const themeRef = useRef(theme)
-  useEffect(() => { themeRef.current = theme }, [theme])
 
   // App remounts this component per pair, so the chart-creation effect reads
   // the scale from a ref to seed the new price scale; later toggles are applied
@@ -578,32 +627,7 @@ export default function Chart({
     }
   }, [currentVolumeModalTime, dataScopeKey, fetchData, inspectionTime, interval, openVolumeModal])
 
-  useEffect(() => {
-    if (!isVolumeModalOpen) return
-    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const previousOverflow = document.body.style.overflow
-    const focusFrame = window.requestAnimationFrame(() => volumeModalCloseRef.current?.focus())
-    const onKeyDown = (event: KeyboardEvent) => {
-      // A dialog stacked on top of this one (the asset picker) consumes Escape
-      // first; without this guard one press would also tear down the volume
-      // modal and drop its `?inspect=` URL state.
-      if (event.defaultPrevented) return
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        closeVolumeModal()
-        return
-      }
-      keepTabFocusInside(event, volumeModalRef.current)
-    }
-    document.body.style.overflow = 'hidden'
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      window.cancelAnimationFrame(focusFrame)
-      document.body.style.overflow = previousOverflow
-      document.removeEventListener('keydown', onKeyDown)
-      previouslyFocused?.focus()
-    }
-  }, [closeVolumeModal, isVolumeModalOpen])
+  useModalShell(isVolumeModalOpen, volumeModalRef, volumeModalCloseRef, closeVolumeModal)
 
   useEffect(() => {
     const el = volumeRowsRef.current
@@ -647,16 +671,13 @@ export default function Chart({
   const applyData = useCallback((data: ApiCandle[]) => {
     const candleSeries = candleSeriesRef.current
     const volumeSeries = volumeSeriesRef.current
+    setTail(data.length > 0 ? data[data.length - 1] : null)
     if (!candleSeries || !volumeSeries) {
       onDataChange?.(data)
       return
     }
 
-    const pal = paletteForTheme(themeRef.current)
-    // Volume bars use the candle colors at 0.32 opacity, matching the design tokens.
-    const greenVol = pal.green.replace('rgb(', 'rgba(').replace(')', ', 0.32)')
-    const redVol = pal.red.replace('rgb(', 'rgba(').replace(')', ', 0.32)')
-
+    const volColors = volumeBarColors()
     const candleData: CandlestickData[] = data.map(c => ({
       time: c.intervalStart as UTCTimestamp,
       open: c.open, high: c.high, low: c.low, close: c.close,
@@ -664,7 +685,7 @@ export default function Chart({
     const volumeData: HistogramData[] = data.map(c => ({
       time: c.intervalStart as UTCTimestamp,
       value: c.volumeTotal,
-      color: c.close >= c.open ? greenVol : redVol,
+      color: c.close >= c.open ? volColors.up : volColors.down,
     }))
 
     candleSeries.applyOptions({ priceFormat: getPriceFormat(data) })
@@ -682,6 +703,53 @@ export default function Chart({
     applyData(normalized)
     return normalized
   }, [applyData])
+
+  /**
+   * Merge a live poll that only touches the tail: the newest candle re-closing
+   * plus any that opened since. Both series take a point `update()` instead of
+   * a full `setData()`, so the ~6-second poll costs the changed bars rather
+   * than a re-sort and a reset of the entire loaded history.
+   *
+   * Returns false — and the caller falls back to a full replace — whenever the
+   * poll reaches below the newest known candle, which is the only case where
+   * rows other than the tail can change.
+   */
+  const applyLiveTail = useCallback((recent: ApiCandle[]): boolean => {
+    const candleSeries = candleSeriesRef.current
+    const volumeSeries = volumeSeriesRef.current
+    const all = allDataRef.current
+    if (!candleSeries || !volumeSeries || all.length === 0) return false
+
+    const normalized = normalizeCandles(recent)
+    if (normalized.length === 0) return false
+    const lastKnown = all[all.length - 1].intervalStart
+    if (normalized[0].intervalStart < lastKnown) return false
+
+    const volColors = volumeBarColors()
+    const next = all.slice()
+    for (const candle of normalized) {
+      if (candle.intervalStart === lastKnown) next[next.length - 1] = candle
+      else next.push(candle)
+      candleSeries.update({
+        time: candle.intervalStart as UTCTimestamp,
+        open: candle.open, high: candle.high, low: candle.low, close: candle.close,
+      })
+      volumeSeries.update({
+        time: candle.intervalStart as UTCTimestamp,
+        value: candle.volumeTotal,
+        color: candle.close >= candle.open ? volColors.up : volColors.down,
+      })
+    }
+
+    // The axis precision follows the median close of the whole history, which
+    // a handful of tail bars cannot move.
+    allDataRef.current = next
+    setTail(next[next.length - 1])
+    onDataChange?.(next)
+    scheduleOmniwatchMarkers()
+    syncAxisMetrics()
+    return true
+  }, [onDataChange, scheduleOmniwatchMarkers, syncAxisMetrics])
 
   const showLatestCandles = useCallback(() => {
     const ts = chartRef.current?.timeScale()
@@ -702,7 +770,7 @@ export default function Chart({
   useEffect(() => {
     if (!containerRef.current) return
     const container = containerRef.current
-    const palette = paletteForTheme(themeRef.current)
+    const palette = readPalette()
     const bg = palette.bg
     const txtMed = palette.textMedium
     const txtLow = palette.textLow
@@ -747,7 +815,7 @@ export default function Chart({
 
     const volumeSeries = chart.addSeries(HistogramSeries, {
       color: txtLow,
-      priceFormat: { type: 'custom', minMove: 0.01, formatter: formatUsdVolumeAxis },
+      priceFormat: { type: 'custom', minMove: 0.01, formatter: formatUsd },
       priceScaleId: 'volume',
       lastValueVisible: false,
       priceLineVisible: false,
@@ -781,11 +849,11 @@ export default function Chart({
     }
 
     const crosshairHandler = (param: MouseEventParams) => {
-      if (!param.time) { setLegend(null); return }
+      if (!param.time) { legendStore.set(null); return }
       const candle = param.seriesData.get(candleSeries) as CandlestickData | undefined
       const volume = param.seriesData.get(volumeSeries) as HistogramData | undefined
       if (candle) {
-        setLegend({ open: candle.open, high: candle.high, low: candle.low, close: candle.close, volume: volume?.value ?? 0 })
+        legendStore.set({ open: candle.open, high: candle.high, low: candle.low, close: candle.close, volume: volume?.value ?? 0 })
       }
     }
     chart.subscribeCrosshairMove(crosshairHandler)
@@ -848,10 +916,9 @@ export default function Chart({
       chartRef.current = null
       candleSeriesRef.current = null
       volumeSeriesRef.current = null
-      countdownLineRef.current = null
       chart.remove()
     }
-  }, [onVisibleRangeReady, scheduleOmniwatchMarkers, syncAxisMetrics]) // create once; theme changes are handled by applyOptions below
+  }, [legendStore, onVisibleRangeReady, scheduleOmniwatchMarkers, syncAxisMetrics]) // create once; theme changes are handled by applyOptions below
 
   // Theme changes: re-apply colors on the existing chart instance so the
   // canvas isn't torn down and re-mounted — a remount blanks the chart for a
@@ -860,7 +927,7 @@ export default function Chart({
     const chart = chartRef.current
     const candle = candleSeriesRef.current
     if (!chart || !candle) return
-    const palette = paletteForTheme(themeKey)
+    const palette = readPalette()
     chart.applyOptions({
       layout: {
         background: { type: ColorType.Solid, color: palette.bg },
@@ -947,7 +1014,7 @@ export default function Chart({
 
     replaceAllData([])
     reachedBeginningRef.current = false
-    setLegend(null)
+    legendStore.set(null)
     setLoadError(null)
     setLoading(true)
 
@@ -981,7 +1048,7 @@ export default function Chart({
         initialLoadAbortRef.current = null
       }
     }
-  }, [dataScopeKey, interval, fetchData, replaceAllData, showLatestCandles])
+  }, [dataScopeKey, interval, fetchData, legendStore, replaceAllData, showLatestCandles])
 
   // Live polling
   useEffect(() => {
@@ -1012,7 +1079,7 @@ export default function Chart({
         const trailingBars = trailingBarsForViewport()
         const scrollPosition = ts?.scrollPosition() ?? Infinity
         const wasPinnedToLatest = Math.abs(scrollPosition - trailingBars) <= PINNED_SCROLL_TOLERANCE
-        replaceAllData([...allDataRef.current, ...recent])
+        if (!applyLiveTail(recent)) replaceAllData([...allDataRef.current, ...recent])
         setLoadError(null)
         if (wasEmpty) {
           candleSeriesRef.current?.priceScale().applyOptions({ autoScale: true })
@@ -1046,12 +1113,13 @@ export default function Chart({
       livePollAbortRef.current?.abort()
       livePollAbortRef.current = null
     }
-  }, [dataScopeKey, fetchData, interval, replaceAllData, restoreVisibleRange, showLatestCandles])
+  }, [applyLiveTail, dataScopeKey, fetchData, interval, replaceAllData, restoreVisibleRange, showLatestCandles])
 
   // Countdown line on the price axis
   useEffect(() => {
     if (!candleSeriesRef.current) return
     const series = candleSeriesRef.current
+    const initial = readPalette()
     const line = series.createPriceLine({
       price: 0,
       color: 'transparent',
@@ -1060,31 +1128,27 @@ export default function Chart({
       lineVisible: false,
       axisLabelVisible: true,
       title: '',
-      axisLabelColor: paletteForTheme(themeRef.current).textLow,
-      axisLabelTextColor: isLight(paletteForTheme(themeRef.current)) ? 'rgb(35, 34, 38)' : 'rgb(245, 241, 248)',
+      axisLabelColor: initial.textLow,
+      axisLabelTextColor: initial.textHigh,
     })
-    countdownLineRef.current = line
 
     const tick = () => {
       const data = allDataRef.current
       if (data.length === 0) {
         line.applyOptions({ axisLabelVisible: false })
-        onCountdownChange?.('')
         return
       }
       const lastCandle = data[data.length - 1]
       const candleEnd = candleEndTimestamp(lastCandle.intervalStart, interval)
       const remaining = Math.max(0, candleEnd - Math.floor(Date.now() / 1000))
-      const label = formatCountdown(remaining)
-      const pal = paletteForTheme(themeRef.current)
+      const pal = readPalette()
       line.applyOptions({
         price: lastCandle.close,
         axisLabelVisible: true,
         axisLabelColor: pal.textLow,
-        axisLabelTextColor: isLight(pal) ? 'rgb(35, 34, 38)' : 'rgb(245, 241, 248)',
-        title: label,
+        axisLabelTextColor: pal.textHigh,
+        title: formatCountdown(remaining),
       })
-      onCountdownChange?.(label)
     }
     tick()
     const timer = window.setInterval(tick, 1000)
@@ -1095,25 +1159,18 @@ export default function Chart({
       } catch {
         // The chart may have already disposed the price line during teardown.
       }
-      countdownLineRef.current = null
     }
-  }, [interval, baseId, quoteId, onCountdownChange])
+  }, [interval, baseId, quoteId])
 
-  const data = allDataRef.current
-  const displayLegend = legend ?? (data.length > 0 ? {
-    open: data[data.length - 1].open,
-    high: data[data.length - 1].high,
-    low: data[data.length - 1].low,
-    close: data[data.length - 1].close,
-    volume: data[data.length - 1].volumeTotal,
-  } : null)
-
-  const upColor = useMemo(() => paletteForTheme(themeKey).green, [themeKey])
+  // The legend's up-tick color has to be a concrete value (it sits in an inline
+  // style beside a `var(--red)`), and `readPalette` memoizes per theme, so this
+  // is a map lookup on every render but the first of each theme.
+  const upColor = readPalette().green
   const modalCandle = volumeModal?.candle ?? null
   const modalDetails = volumeModal?.details ?? null
   const modalPriceChange = modalCandle ? modalCandle.close - modalCandle.open : 0
-  const modalChangePct = modalCandle && modalCandle.open !== 0
-    ? (modalPriceChange / modalCandle.open) * 100
+  const modalChange = modalCandle && modalCandle.open !== 0
+    ? modalPriceChange / modalCandle.open
     : 0
   const modalTotalVolume = modalDetails
     ? Math.max(1, modalDetails.volumeTotal)
@@ -1125,7 +1182,7 @@ export default function Chart({
     if (typeof baseDecimals !== 'number') return null
     const amount = tokenAmountFromRaw(raw, baseDecimals)
     const sign = signed && amount >= 0 ? '+' : ''
-    return `${sign}${formatTokenAmount(amount)} ${base}`
+    return `${sign}${compactAmount(amount)} ${base}`
   }, [base, baseDecimals])
   const modalNetToken = modalDetails ? tokenLabel(modalDetails.nativeNetVolume, true) : null
   const modalVolumeToken = modalDetails ? tokenLabel(modalDetails.nativeVolumeTotal) : null
@@ -1450,11 +1507,11 @@ export default function Chart({
               style={{ left: marker.x, top: marker.y }}
               onClick={() => openVolumeModal(marker.candle)}
               aria-label={`Volume contributors for ${formatCandleDate(marker.candle.intervalStart)}`}
-              title={`${summary.topTrader.shortAccount} ${formatSignedUsdVolume(summary.netVolume)}${netToken ? ` · ${netToken}` : ''}`}
+              title={`${summary.topTrader.shortAccount} ${formatSignedUsd(summary.netVolume)}${netToken ? ` · ${netToken}` : ''}`}
             >
               <OmniwatchIcon trader={summary.topTrader} />
               {marker.showAccount && more === 0 && <span className="id">{summary.topTrader.shortAccount}</span>}
-              {more > 0 && <span className="more">+{formatShortCount(more)}</span>}
+              {more > 0 && <span className="more">+{compactCount(more)}</span>}
             </button>
           )
         })}
@@ -1465,7 +1522,7 @@ export default function Chart({
           </div>
         )}
 
-        {!loading && data.length === 0 && (
+        {!loading && !tail && (
           <div style={{
             position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
             color: 'var(--text-low)', fontSize: 13, pointerEvents: 'none', zIndex: 6, textAlign: 'center',
@@ -1476,17 +1533,13 @@ export default function Chart({
           </div>
         )}
 
-        {displayLegend && (
-          <div className="chart-legend">
-            <span><span className="k">O</span>{formatPriceFixed(displayLegend.open)}</span>
-            <span><span className="k">H</span>{formatPriceFixed(displayLegend.high)}</span>
-            <span><span className="k">L</span>{formatPriceFixed(displayLegend.low)}</span>
-            <span style={{ color: displayLegend.close >= displayLegend.open ? upColor : 'var(--red)' }}>
-              <span className="k">C</span>{formatPriceFixed(displayLegend.close)}
-            </span>
-            <span><span className="k">V</span>${formatUsdVolume(displayLegend.volume)}{showVolumeSource ? ` (${base})` : ''}</span>
-          </div>
-        )}
+        <ChartLegend
+          store={legendStore}
+          tail={tail}
+          base={base}
+          showVolumeSource={showVolumeSource}
+          upColor={upColor}
+        />
       </div>
 
       {volumeModal && modalCandle && (
@@ -1501,21 +1554,21 @@ export default function Chart({
             </div>
 
             <div className="omniwatch-stats">
-              <div className="omniwatch-stat"><span className="k">Open</span><span className="v">{formatPriceFixed(modalCandle.open)}</span></div>
-              <div className="omniwatch-stat"><span className="k">High</span><span className="v">{formatPriceFixed(modalCandle.high)}</span></div>
-              <div className="omniwatch-stat"><span className="k">Low</span><span className="v">{formatPriceFixed(modalCandle.low)}</span></div>
-              <div className="omniwatch-stat"><span className="k">Close</span><span className={`v ${modalCandle.close >= modalCandle.open ? 'up' : 'down'}`}>{formatPriceFixed(modalCandle.close)}</span></div>
-              <div className="omniwatch-stat"><span className="k">Change</span><span className={`v ${modalChangePct >= 0 ? 'up' : 'down'}`}>{formatPercent(modalChangePct)}</span></div>
+              <div className="omniwatch-stat"><span className="k">Open</span><span className="v">{formatPrice(modalCandle.open, false)}</span></div>
+              <div className="omniwatch-stat"><span className="k">High</span><span className="v">{formatPrice(modalCandle.high, false)}</span></div>
+              <div className="omniwatch-stat"><span className="k">Low</span><span className="v">{formatPrice(modalCandle.low, false)}</span></div>
+              <div className="omniwatch-stat"><span className="k">Close</span><span className={`v ${modalCandle.close >= modalCandle.open ? 'up' : 'down'}`}>{formatPrice(modalCandle.close, false)}</span></div>
+              <div className="omniwatch-stat"><span className="k">Change</span><span className={`v ${modalChange >= 0 ? 'up' : 'down'}`}>{formatChange(modalChange)}</span></div>
               <div className="omniwatch-stat">
                 <span className="k">Volume</span>
-                <span className="v">${formatUsdVolume(modalCandle.volumeTotal)}</span>
+                <span className="v">{formatUsd(modalCandle.volumeTotal)}</span>
                 {modalVolumeToken && <span className="sub">{modalVolumeToken}</span>}
               </div>
             </div>
 
             <div className="omniwatch-summary">
               <span className={`price-change ${modalPriceChange >= 0 ? 'up' : 'down'}`}>
-                Price {formatSignedPriceChange(modalPriceChange)} ({formatPercent(modalChangePct)})
+                Price {formatSignedPrice(modalPriceChange)} ({formatChange(modalChange)})
               </span>
               {volumeModal.loading && <span>Loading accounts</span>}
               {volumeModal.error && <span>{volumeModal.error}</span>}
@@ -1523,7 +1576,7 @@ export default function Chart({
                 <>
                   <span>{formatCount(modalDetails.tradeCount)} trades · {formatCount(modalDetails.accountCount)} accounts</span>
                   <span className={`net ${modalDetails.netVolume >= 0 ? 'up' : 'down'}`}>
-                    Net {formatSignedUsdVolume(modalDetails.netVolume)}
+                    Net {formatSignedUsd(modalDetails.netVolume)}
                     {modalNetToken && <span className="token"> · {modalNetToken}</span>}
                   </span>
                 </>
@@ -1567,20 +1620,20 @@ export default function Chart({
                         <div className="omniwatch-flow-nums">
                           {hasBuy && (
                             <span className="buy">
-                              +${formatUsdVolume(account.volumeBuy)} bought
+                              +{formatUsd(account.volumeBuy)} bought
                               {buyToken && <span className="token">{buyToken}</span>}
                             </span>
                           )}
                           {hasSell && (
                             <span className="sell">
-                              -${formatUsdVolume(account.volumeSell)} sold
+                              -{formatUsd(account.volumeSell)} sold
                               {sellToken && <span className="token">{sellToken}</span>}
                             </span>
                           )}
                         </div>
                       </div>
                       <div className={`omniwatch-net ${isBuyer ? 'buyer' : 'seller'}`}>
-                        <span className="value">{formatSignedUsdVolume(account.netVolume)}</span>
+                        <span className="value">{formatSignedUsd(account.netVolume)}</span>
                         {netToken && <span className="token">{netToken}</span>}
                         <span className="label">{isBuyer ? 'Net buyer' : 'Net seller'}</span>
                       </div>

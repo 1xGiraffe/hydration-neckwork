@@ -14,8 +14,8 @@ const simulateInset = (px: number) =>
   document.documentElement.style.setProperty('--safe-top', `${px}px`)
 
 const assets = [
-  { assetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12, isStablecoin: false, parachainId: null },
-  { assetId: 10, symbol: 'USDT', name: 'Tether', decimals: 6, isStablecoin: true, parachainId: 1000 },
+  { assetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12, isStablecoin: false, isUsdPegged: false, parachainId: null },
+  { assetId: 10, symbol: 'USDT', name: 'Tether', decimals: 6, isStablecoin: true, isUsdPegged: true, parachainId: 1000 },
 ]
 
 async function mockApi(page: Page) {
