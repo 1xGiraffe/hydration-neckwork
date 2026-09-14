@@ -9,11 +9,17 @@ logs/
 
 docker-compose.override.yml
 test-results/
+playwright-report/
 .playwright-mcp/
 # tsc --build incremental cache
 *.tsbuildinfo
 
 /*.png
+
+# Agent scratch: reports, review diffs and flipped source copies. Kept out of git
+# only by an ignored .gitignore one level down, which is one deleted file wide —
+# the hazard is the same as docs/superpowers/, so the rule is stated here too.
+.superpowers/
 
 # planning/spec/report scratch (AGENTS: do not commit task plans, agent reports)
 docs/superpowers/

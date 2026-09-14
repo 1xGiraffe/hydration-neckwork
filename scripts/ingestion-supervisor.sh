@@ -13,7 +13,7 @@ RAW_WORKERS="${RAW_WORKERS:-6}"
 # 2s chain demands, and the per-range overhead is one container start. Measured
 # capacity leaves this comfortable, so nothing here needs to change at the cutover.
 RANGE_SIZE="${RANGE_SIZE:-1000}"
-MAIN_MAX_RANGES="${MAIN_MAX_RANGES:-2}"
+MAIN_MAX_RANGES="${MAIN_MAX_RANGES:-3}"
 # Parallel price backfills keep event-time prices near the raw ingestion frontier.
 MAIN_WORKERS="${MAIN_WORKERS:-3}"
 POLL_SECONDS="${POLL_SECONDS:-60}"
@@ -36,8 +36,8 @@ RAW_SNAPSHOT_READ_BATCH_CONCURRENCY="${RAW_SNAPSHOT_READ_BATCH_CONCURRENCY:-2}"
 RAW_MONEY_MARKET_POSITION_CONCURRENCY="${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}"
 RAW_MONEY_MARKET_BATCH_SIZE="${RAW_MONEY_MARKET_BATCH_SIZE:-50}"
 
-MAIN_RATE_LIMIT="${MAIN_RATE_LIMIT:-10}"
-MAIN_CAPACITY="${MAIN_CAPACITY:-3}"
+MAIN_RATE_LIMIT="${MAIN_RATE_LIMIT:-40}"
+MAIN_CAPACITY="${MAIN_CAPACITY:-8}"
 
 LIVE_MAIN_ENABLED="${LIVE_MAIN_ENABLED:-true}"
 LIVE_MAIN_NAME="${LIVE_MAIN_NAME:-hydration-neckwork-main-live}"

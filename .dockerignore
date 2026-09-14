@@ -3,6 +3,11 @@
 .dockerignore
 .env
 .playwright-mcp
+.superpowers
+clickhouse_data
+logs
+.papi
+hydration-metadata.json
 **/node_modules
 **/dist
 **/coverage

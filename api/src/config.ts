@@ -26,6 +26,6 @@ export const config = {
   oneClickBaseUrl: process.env.ONE_CLICK_BASE_URL?.trim() || 'https://1click.chaindefuser.com',
   oneClickToken: process.env.ONE_CLICK_TOKEN?.trim() || '',
   // Kraken's public OHLC, the reference series for the cross-chain pairs whose
-  // destination asset does not trade on Hydration (services/foreignPrices.ts).
+  // destination asset does not trade on Hydration (services/foreignCandles.ts).
   krakenBaseUrl: process.env.KRAKEN_BASE_URL?.trim() || 'https://api.kraken.com/0/public',
 } as const
