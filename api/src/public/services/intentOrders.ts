@@ -26,6 +26,20 @@ const DCA_TRADE_EVENT = 'Intent.DcaTradeExecuted'
 const DCA_COMPLETED_EVENT = 'Intent.DcaCompleted'
 const FILL_EVENTS = [RESOLVED_EVENT, PARTIAL_EVENT, DCA_TRADE_EVENT, DCA_COMPLETED_EVENT] as const
 
+/**
+ * 9999-12-31T23:59:59.999Z, the last instant `zIsoTimestamp` accepts.
+ *
+ * `deadline_ms` is an unbounded UInt64 the submitter chooses, and "no deadline"
+ * is expressed on chain as a sentinel far past any real date. It is the only
+ * integer on this surface nothing at the edge bounds, and both ways past the
+ * calendar are fatal for the WHOLE page, not for the one order: past ±8.64e15 ms
+ * `new Date()` is Invalid and `iso()` throws, and below that but past year 9999
+ * `toISOString()` renders the expanded-year form (`+275760-09-13T…`) that the
+ * response schema rejects. Anything beyond this reports `deadline: null`, which
+ * is already this field's word for "none" (a `deadline_ms` of 0).
+ */
+const MAX_TIMESTAMP_MS = 253_402_300_799_999
+
 export interface IntentStatusInput {
   kind: IntentKind
   hasCancelled: boolean
@@ -174,6 +188,24 @@ async function intentEventAggregates(client: ClickHouseClient, ids: string[], fr
   return out
 }
 
+/**
+ * The oldest block any of these orders was placed in — the floor the event
+ * aggregate's window starts at.
+ *
+ * Folded rather than spread: `Math.min(...rows.map(…))` throws
+ * `RangeError: Maximum call stack size exceeded` once an owner has more orders
+ * than the call stack takes arguments, which is a permanent 500 for that owner
+ * and for nobody else.
+ */
+export function oldestOrderBlock(rows: ReadonlyArray<{ block_height: number | string }>): number {
+  let oldest = Number.POSITIVE_INFINITY
+  for (const row of rows) {
+    const block = Number(row.block_height)
+    if (block < oldest) oldest = block
+  }
+  return oldest
+}
+
 export interface IntentOrdersOptions {
   owner: string
   statuses: IntentStatus[]
@@ -190,10 +222,13 @@ export async function queryIntentOrders(
   // Both halves of an EVM identity, exactly as the accounts endpoints resolve them.
   const accounts = await resolveSingleAccountForms(client, options.owner)
   const res = await client.query({
-    // FINAL: intent_orders replaces on intent_id, and one row per order is the
-    // premise of everything below. The table holds one row per intent ever
-    // submitted and `owner` is not part of its key, so this is a bounded full
-    // pass by design — the same shape the DCA listing beside it uses.
+    // The owner-first twin (009_data.sql), whose sort key starts at `owner`, so
+    // this reads one key range instead of the whole-table FINAL pass
+    // `intent_orders` (keyed on intent_id alone) would force. Its column list is
+    // the source's minus `args_json`, which this query does not read. FINAL on
+    // the twin's own key collapses a replayed placement; `intent_id` is
+    // deduplicated again below, because that — not (owner, block, event) — is
+    // the identity the wire promises one row per.
     query: `
         SELECT toString(intent_id) AS intent_id, seq, owner, kind, asset_in, asset_out,
                amount_in, amount_out, partial, slippage_ppm, budget, period, deadline_ms,
@@ -201,19 +236,24 @@ export async function queryIntentOrders(
         FROM (
           SELECT intent_id, seq, owner, kind, asset_in, asset_out, amount_in, amount_out,
                  partial, slippage_ppm, budget, period, deadline_ms, block_height, block_timestamp
-          FROM price_data.intent_orders FINAL
+          FROM price_data.intent_orders_by_account FINAL
           WHERE owner IN {accounts:Array(String)}
         )`,
     query_params: { accounts },
     format: 'JSONEachRow',
   })
-  const orders = await res.json<OrderSqlRow>()
+  const byIntent = new Map<string, OrderSqlRow>()
+  for (const row of await res.json<OrderSqlRow>()) {
+    const held = byIntent.get(String(row.intent_id))
+    if (!held || Number(row.block_height) > Number(held.block_height)) byIntent.set(String(row.intent_id), row)
+  }
+  const orders = [...byIntent.values()]
   if (!orders.length) return { items: [], totalCount: 0 }
 
   const aggregates = await intentEventAggregates(
     client,
     orders.map(o => String(o.intent_id)),
-    Math.min(...orders.map(o => Number(o.block_height))),
+    oldestOrderBlock(orders),
   )
   const assets = new Set(options.assets.map(Number).filter(Number.isInteger))
   const wantedStatus = new Set(options.statuses)
@@ -265,7 +305,7 @@ export async function queryIntentOrders(
       remainingBudget: kind !== 'dca' ? null
         : positive(agg?.dca_completed) ? '0'
           : amount(agg?.last_rb),
-      deadline: Number.isFinite(deadlineMs) && deadlineMs > 0 ? iso(new Date(deadlineMs)) : null,
+      deadline: deadlineMs > 0 && deadlineMs <= MAX_TIMESTAMP_MS ? iso(new Date(deadlineMs)) : null,
       createdAt: iso(raw.ts),
       createdAtBlock: Number(raw.block_height),
       lastEventAt: agg?.last_ts ? iso(agg.last_ts) : null,

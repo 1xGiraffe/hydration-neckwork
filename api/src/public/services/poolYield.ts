@@ -201,22 +201,26 @@ fee_by_asset AS (
   GROUP BY asset_id
 ),
 samples AS (
-  SELECT toUInt32(asset_id) AS asset_id, block_height,
+  -- \`asset_id\` is Int32 here. The unsigned cast takes a name of its own so the
+  -- sign guard reads the COLUMN and not the alias: without it a negative row
+  -- would wrap to 4294967295 and be published as an Omnipool asset.
+  SELECT toUInt32(asset_id) AS registry_asset_id, block_height,
          toDecimal256(argMax(reserve_raw, ingested_at), 0) AS reserve,
          toDecimal256(argMax(hub_reserve_raw, ingested_at), 0) AS hub
   FROM price_data.omnipool_pool_state_history
-  WHERE block_timestamp > {anchor:DateTime} - INTERVAL {hours:UInt32} HOUR
+  WHERE asset_id >= 0
+    AND block_timestamp > {anchor:DateTime} - INTERVAL {hours:UInt32} HOUR
     AND block_timestamp <= {anchor:DateTime}
-  GROUP BY asset_id, block_height
+  GROUP BY registry_asset_id, block_height
 ),
 parts AS (
   SELECT asset_id, fee_raw, pfee_raw,
          toDecimal256(0, 0) AS reserve_sum, toDecimal256(0, 0) AS hub_sum, toUInt64(0) AS samples
   FROM fee_by_asset
   UNION ALL
-  SELECT toNullable(asset_id), toDecimal256(0, 0), toDecimal256(0, 0),
+  SELECT toNullable(registry_asset_id), toDecimal256(0, 0), toDecimal256(0, 0),
          toDecimal256(sum(reserve), 0), toDecimal256(sum(hub), 0), toUInt64(count())
-  FROM samples GROUP BY asset_id
+  FROM samples GROUP BY registry_asset_id
 )
 SELECT ifNull(toString(asset), '') AS asset_id,
        toString(sample_count) AS samples,
