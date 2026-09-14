@@ -1,8 +1,8 @@
 // Continuous background process for the derivation jobs in jobs.ts (the
 // read models a plain materialized view cannot express). Entrypoint:
 // `tsx src/derivations/runner.ts` — a standalone process/container that owns
-// these jobs exclusively; the API itself no longer runs any timer-driven
-// equivalent.
+// these jobs exclusively; no other service runs a timer-driven equivalent, so a
+// second one would race this one's staging publications.
 //
 // Each cycle opens a fresh long-op client (a slow rebuild must never hold a
 // connection open between ticks), does the work, and closes it in `finally`
