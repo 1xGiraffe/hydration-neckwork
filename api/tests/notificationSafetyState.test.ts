@@ -194,6 +194,39 @@ describe('one event, one lane', () => {
     expect(inbox()[0].block_height).toBe(0)
   })
 
+  // A row lane that fails to write its inbox rows holds its cursor and re-reads
+  // the window. An edge-triggered kind has no window: the crossing is a value
+  // that has already changed, so a disarm written before the inbox row loses the
+  // alert outright. The disarm must therefore wait for the write, like a cursor.
+  it('stays armed when the inbox write fails, and fires on the next tick', async () => {
+    let failInbox = false
+    const gated = {
+      ...client,
+      insert: async (args: { table: string; values: Record<string, unknown>[] }) => {
+        if (failInbox && args.table.endsWith('user_notification_inbox')) throw new Error('inbox is read-only')
+        return client.insert(args as never)
+      },
+    } as unknown as FakeClient
+    initNotifications(gated)
+    await loadNotifications()
+    initEvaluator(gated)
+    await watch()
+    await snapshotTick()                                    // first sight arms
+    alertState = state({ assets: [asset({ pausedOrigin: true })] })
+    setHead(1_100)
+
+    failInbox = true
+    await snapshotTick()
+    expect(inbox()).toHaveLength(0)
+
+    // The flag is still raised; had the lane disarmed on the failed tick, this
+    // pass would see no crossing and the pause would never be reported.
+    failInbox = false
+    await snapshotTick()
+    expect(inbox()).toHaveLength(1)
+    expect(inbox()[0].title).toBe('USDC Wormhole transfers paused')
+  })
+
   it('reports a Hydration-side queue from the ledger and an origin queue from the snapshot', async () => {
     await watch()
     await snapshotTick()

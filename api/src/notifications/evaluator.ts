@@ -398,29 +398,63 @@ function matchRows<T>(
   return out
 }
 
+/**
+ * How ONE kind decides which of a page's rows are its matches.
+ *
+ * Every kind's matcher is the same three questions — where does a row sit, what
+ * is its dedup identity, and does this rule's params accept it — so each kind
+ * answers exactly those and nothing restates the loop. `accepts` is a FACTORY:
+ * it is called once per rule, so a params-derived Set (a phase filter, a kind
+ * filter) is built once rather than per row.
+ */
+interface RowMatcher<Row, P> {
+  blockOf: (row: Row) => number
+  identityOf: (row: Row) => string | null
+  accepts: (params: P) => (row: Row) => boolean
+  payloadOf: (row: Row) => MatchPayload
+}
+
+function matchRules<Row, P>(
+  spec: RowMatcher<Row, P>,
+  rows: readonly Row[],
+  rules: readonly NotificationRule[],
+  window: BlockWindow,
+): RuleMatch[] {
+  return rules.flatMap(rule =>
+    matchRows(rows, rule, window, spec.blockOf, spec.identityOf, spec.accepts(rule.params as P), spec.payloadOf))
+}
+
+// The three answers every ACTIVITY-fed kind shares; only `accepts` differs.
+const activityBlockOf = (row: ActivityRow): number => row.blockHeight
+const activityPayloadOf = (row: ActivityRow): MatchPayload => ({ lane: 'activity', row })
+
 // 'dca' is not a row type. The feed categorises DCA executions under the Trade
 // chip and keeps a `dca` flag for the badge — `normalizeActivityTypeKey` maps the
 // FETCH the same way — so a rule naming 'dca' means "a trade row carrying the
-// flag". Comparing the rule's word to `row.type` ('dca' === 'trade') matched
-// nothing and silenced every dca rule outright.
-// A DCA intent (runtime 443's DCA) is a `dca` row to a rule as well, so a rule
-// written for the old schedules survives the migration instead of going silent.
+// flag", never a row whose `type` literally reads 'dca'. Comparing the rule's
+// word to `row.type` silences every dca rule outright.
+// A DCA intent (runtime 443's DCA) is a `dca` row to a rule as well, so one rule
+// covers both generations of schedule.
 export const activityTypeSelects = (row: ActivityRow, type: string): boolean =>
   type === 'dca'
     ? (row.type === 'trade' && row.dca === true) || (row.type === 'intent' && row.intentKind === 'dca')
     : activityTypeMatchesFamily(row.type, type)
 
-export function evaluateAccountActivity(rows: readonly ActivityRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
-  return rules.flatMap(rule => {
-    const p = rule.params as RuleParams['account-activity']
+const ACCOUNT_ACTIVITY_MATCHER: RowMatcher<ActivityRow, RuleParams['account-activity']> = {
+  blockOf: activityBlockOf,
+  identityOf: activityIdentity,
+  accepts: p => {
     const type = activityTypeForFeed(p.type)
-    return matchRows(rows, rule, window, r => r.blockHeight, activityIdentity,
-      r => isFinalRow(r)
-        && (type === 'all' || activityTypeSelects(r, type))
-        && activityRowMatchesAction(r, p.action)
-        && (p.minUsd == null || (r.valueUsd != null && r.valueUsd >= p.minUsd)),
-      row => ({ lane: 'activity', row }))
-  })
+    return r => isFinalRow(r)
+      && (type === 'all' || activityTypeSelects(r, type))
+      && activityRowMatchesAction(r, p.action)
+      && (p.minUsd == null || (r.valueUsd != null && r.valueUsd >= p.minUsd))
+  },
+  payloadOf: activityPayloadOf,
+}
+
+export function evaluateAccountActivity(rows: readonly ActivityRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
+  return matchRules(ACCOUNT_ACTIVITY_MATCHER, rows, rules, window)
 }
 
 // The value-floor matcher, shared by the two kinds that differ only in which
@@ -432,22 +466,24 @@ export function evaluateAccountActivity(rows: readonly ActivityRow[], rules: rea
 //
 // Within the Trade family the row's ACTION decides whether it is news at all,
 // before the floor is applied (largeTradeRowEligible).
+const LARGE_VALUE_MATCHER: RowMatcher<ActivityRow, RuleParams['large-trade']> = {
+  blockOf: activityBlockOf,
+  identityOf: activityIdentity,
+  accepts: p => r => isFinalRow(r) && largeTradeRowEligible(r)
+    && r.valueUsd != null && r.valueUsd >= p.minUsd
+    && (p.assetId == null || activityReferencesAsset(r, p.assetId)),
+  payloadOf: activityPayloadOf,
+}
+
 export function evaluateLargeValue(rows: readonly ActivityRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
-  return rules.flatMap(rule => {
-    const p = rule.params as RuleParams['large-trade']
-    return matchRows(rows, rule, window, r => r.blockHeight, activityIdentity,
-      r => isFinalRow(r) && largeTradeRowEligible(r)
-        && r.valueUsd != null && r.valueUsd >= p.minUsd
-        && (p.assetId == null || activityReferencesAsset(r, p.assetId)),
-      row => ({ lane: 'activity', row }))
-  })
+  return matchRules(LARGE_VALUE_MATCHER, rows, rules, window)
 }
 
 // An order is not a trade until somebody takes it. Placing an OTC order or a
 // limit order (swap intent) reserves funds and moves nothing, and a pull, cancel
-// or expiry only undoes that, so none of them is a large trade — the placements
-// used to fire (a 1.2M HDX OTC order was announced as a $15k trade every time its
-// maker re-placed it) and the user asked for fills alone. A fill realizes the
+// or expiry only undoes that, so none of them is a large trade: a 1.2M HDX OTC
+// order announces itself as a $15k trade on every re-placement, which is the
+// maker repeating themselves rather than size changing hands. A fill realizes the
 // value and is judged like a swap. A DCA-intent placement is a standing order and
 // is judged by dcaStartMatches on its per-hour notional, not here.
 export function largeTradeRowEligible(r: ActivityRow): boolean {
@@ -477,22 +513,26 @@ export function liquidationRowMatches(row: ActivityRow, params: RuleParams['liqu
   return row.valueUsd != null && row.valueUsd >= params.minUsd
 }
 
+const PROTOCOL_REVENUE_MATCHER: RowMatcher<ActivityRow, RuleParams['protocol-revenue']> = {
+  blockOf: activityBlockOf,
+  identityOf: activityIdentity,
+  accepts: p => r => isFinalRow(r) && revenueRowMatches(r, p),
+  payloadOf: activityPayloadOf,
+}
+
+const LIQUIDATION_MATCHER: RowMatcher<ActivityRow, RuleParams['liquidation']> = {
+  blockOf: activityBlockOf,
+  identityOf: activityIdentity,
+  accepts: p => r => isFinalRow(r) && liquidationRowMatches(r, p),
+  payloadOf: activityPayloadOf,
+}
+
 export function evaluateProtocolRevenue(rows: readonly ActivityRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
-  return rules.flatMap(rule => {
-    const p = rule.params as RuleParams['protocol-revenue']
-    return matchRows(rows, rule, window, r => r.blockHeight, activityIdentity,
-      r => isFinalRow(r) && revenueRowMatches(r, p),
-      row => ({ lane: 'activity', row }))
-  })
+  return matchRules(PROTOCOL_REVENUE_MATCHER, rows, rules, window)
 }
 
 export function evaluateLiquidations(rows: readonly ActivityRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
-  return rules.flatMap(rule => {
-    const p = rule.params as RuleParams['liquidation']
-    return matchRows(rows, rule, window, r => r.blockHeight, activityIdentity,
-      r => isFinalRow(r) && liquidationRowMatches(r, p),
-      row => ({ lane: 'activity', row }))
-  })
+  return matchRules(LIQUIDATION_MATCHER, rows, rules, window)
 }
 
 // Every asset a row references, matching the feed's own multi-asset filter
@@ -543,14 +583,18 @@ export type SafetyStateEvent = typeof SAFETY_SNAPSHOT_KINDS[number]
 /** Hydration-centric fuse legs: `in` is the entry limiter, `out` the release leg of an exit. */
 export type FuseDirection = 'in' | 'out'
 
-export function evaluateSafety(events: readonly SafetyEvent[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
-  return rules.flatMap(rule => {
-    const p = rule.params as RuleParams['safety']
+const SAFETY_MATCHER: RowMatcher<SafetyEvent, RuleParams['safety']> = {
+  blockOf: e => e.blockHeight,
+  identityOf: safetyIdentity,
+  accepts: p => {
     const kinds = p.kinds?.length ? new Set<string>(p.kinds) : null
-    return matchRows(events, rule, window, e => e.blockHeight, safetyIdentity,
-      e => !kinds || kinds.has(e.kind),
-      event => ({ lane: 'safety', event }))
-  })
+    return e => !kinds || kinds.has(e.kind)
+  },
+  payloadOf: event => ({ lane: 'safety', event }),
+}
+
+export function evaluateSafety(events: readonly SafetyEvent[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
+  return matchRules(SAFETY_MATCHER, events, rules, window)
 }
 
 // A referendum's dedup identity is (index, phase): one Confirmed is one
@@ -568,26 +612,34 @@ export function referendumIdentity(row: ReferendumEventRow): string {
     : `${row.index}:${row.phase}`
 }
 
+// The title is resolved at match time from an in-memory index, so the matcher is
+// built per call rather than held as a constant.
+const referendumMatcher = (
+  titleFor: (index: number) => string | null,
+): RowMatcher<ReferendumEventRow, RuleParams['referendum']> => ({
+  blockOf: r => r.blockHeight,
+  identityOf: referendumIdentity,
+  accepts: p => {
+    const phases = p.phases?.length ? new Set<string>(p.phases) : null
+    const track = p.track?.trim().toLowerCase()
+    return r => (!phases || phases.has(r.phase))
+      // A track filter can only reject an event whose track is KNOWN. The
+      // chain puts the track on Submitted and DecisionStarted; the loop
+      // back-fills the rest from the referendum's own Submitted row, and an
+      // index whose submission is not indexed at all keeps matching rather
+      // than silently disappearing.
+      && (!track || r.track == null || String(r.track) === track)
+  },
+  payloadOf: row => ({ lane: 'referendum', row, title: titleFor(row.index) }),
+})
+
 export function evaluateReferendum(
   rows: readonly ReferendumEventRow[],
   rules: readonly NotificationRule[],
   window: BlockWindow,
   titleFor: (index: number) => string | null = () => null,
 ): RuleMatch[] {
-  return rules.flatMap(rule => {
-    const p = rule.params as RuleParams['referendum']
-    const phases = p.phases?.length ? new Set<string>(p.phases) : null
-    const track = p.track?.trim().toLowerCase()
-    return matchRows(rows, rule, window, r => r.blockHeight, referendumIdentity,
-      r => (!phases || phases.has(r.phase))
-        // A track filter can only reject an event whose track is KNOWN. The
-        // chain puts the track on Submitted and DecisionStarted; the loop
-        // back-fills the rest from the referendum's own Submitted row, and an
-        // index whose submission is not indexed at all keeps matching rather
-        // than silently disappearing.
-        && (!track || r.track == null || String(r.track) === track),
-      row => ({ lane: 'referendum', row, title: titleFor(row.index) }))
-  })
+  return matchRules(referendumMatcher(titleFor), rows, rules, window)
 }
 
 // A motion's dedup identity is (hash, phase): one Approved is one notification
@@ -601,14 +653,18 @@ export function tcMotionIdentity(row: TcMotionEventRow): string {
     : `${row.proposalHash}:${row.phase}`
 }
 
-export function evaluateTcMotion(rows: readonly TcMotionEventRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
-  return rules.flatMap(rule => {
-    const p = rule.params as RuleParams['tc-motion']
+const TC_MOTION_MATCHER: RowMatcher<TcMotionEventRow, RuleParams['tc-motion']> = {
+  blockOf: r => r.blockHeight,
+  identityOf: tcMotionIdentity,
+  accepts: p => {
     const phases = p.phases?.length ? new Set<string>(p.phases) : null
-    return matchRows(rows, rule, window, r => r.blockHeight, tcMotionIdentity,
-      r => !phases || phases.has(r.phase),
-      row => ({ lane: 'tc-motion', row }))
-  })
+    return r => !phases || phases.has(r.phase)
+  },
+  payloadOf: row => ({ lane: 'tc-motion', row }),
+}
+
+export function evaluateTcMotion(rows: readonly TcMotionEventRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
+  return matchRules(TC_MOTION_MATCHER, rows, rules, window)
 }
 
 // Section/method names are matched case-insensitively — the chain writes
@@ -626,61 +682,38 @@ export function nameMatches(name: string, section: string, method?: string): boo
   return !method || parts.method === method.trim().toLowerCase()
 }
 
+const EVENT_MATCHER: RowMatcher<ChainEventRow, RuleParams['event']> = {
+  blockOf: r => r.blockHeight,
+  identityOf: r => `${r.blockHeight}-e${r.eventIndex}`,
+  accepts: p => r => nameMatches(r.name, p.section, p.method),
+  payloadOf: row => ({ lane: 'event', row }),
+}
+
+const EXTRINSIC_MATCHER: RowMatcher<ChainExtrinsicRow, RuleParams['extrinsic']> = {
+  blockOf: r => r.blockHeight,
+  identityOf: r => `${r.blockHeight}-${r.extrinsicIndex}`,
+  accepts: p => {
+    const signer = p.signer ? normalizeAddress(p.signer)?.accountId ?? null : null
+    return r => nameMatches(r.callName, p.section, p.method)
+      && (p.success === undefined || r.success === p.success)
+      && (!signer || r.signer?.accountId === signer)
+  },
+  payloadOf: row => ({ lane: 'extrinsic', row }),
+}
+
 export function evaluateEvents(rows: readonly ChainEventRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
-  return rules.flatMap(rule => {
-    const p = rule.params as RuleParams['event']
-    return matchRows(rows, rule, window, r => r.blockHeight, r => `${r.blockHeight}-e${r.eventIndex}`,
-      r => nameMatches(r.name, p.section, p.method),
-      row => ({ lane: 'event', row }))
-  })
+  return matchRules(EVENT_MATCHER, rows, rules, window)
 }
 
 export function evaluateExtrinsics(rows: readonly ChainExtrinsicRow[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
-  return rules.flatMap(rule => {
-    const p = rule.params as RuleParams['extrinsic']
-    const signer = p.signer ? normalizeAddress(p.signer)?.accountId ?? null : null
-    return matchRows(rows, rule, window, r => r.blockHeight, r => `${r.blockHeight}-${r.extrinsicIndex}`,
-      r => nameMatches(r.callName, p.section, p.method)
-        && (p.success === undefined || r.success === p.success)
-        && (!signer || r.signer?.accountId === signer),
-      row => ({ lane: 'extrinsic', row }))
-  })
+  return matchRules(EXTRINSIC_MATCHER, rows, rules, window)
 }
 
-// The row lane's dispatcher. `rows` is keyed to `kind` by RowLaneRows, so a
-// caller cannot hand the safety matcher a page of activity rows.
-export interface RowLaneRows {
-  'account-activity': readonly ActivityRow[]
-  'large-trade': readonly ActivityRow[]
-  'large-transfer': readonly ActivityRow[]
-  'protocol-revenue': readonly ActivityRow[]
-  liquidation: readonly ActivityRow[]
-  safety: readonly SafetyEvent[]
-  referendum: readonly ReferendumEventRow[]
-  'tc-motion': readonly TcMotionEventRow[]
-  event: readonly ChainEventRow[]
-  extrinsic: readonly ChainExtrinsicRow[]
-}
-export type RowLaneKind = keyof RowLaneRows
+// The kinds the row lane runs, in the order one tick visits them.
+export type RowLaneKind =
+  | 'account-activity' | 'large-trade' | 'large-transfer' | 'protocol-revenue' | 'liquidation'
+  | 'safety' | 'referendum' | 'tc-motion' | 'event' | 'extrinsic'
 export const ROW_LANE_KINDS: RowLaneKind[] = ['account-activity', 'large-trade', 'large-transfer', 'protocol-revenue', 'liquidation', 'safety', 'referendum', 'tc-motion', 'event', 'extrinsic']
-
-export function evaluateRowKind<K extends RowLaneKind>(
-  kind: K, rows: RowLaneRows[K], rules: readonly NotificationRule[], window: BlockWindow,
-  titleFor?: (index: number) => string | null,
-): RuleMatch[] {
-  switch (kind) {
-    case 'account-activity': return evaluateAccountActivity(rows as RowLaneRows['account-activity'], rules, window)
-    case 'large-trade':
-    case 'large-transfer': return evaluateLargeValue(rows as RowLaneRows['large-trade'], rules, window)
-    case 'protocol-revenue': return evaluateProtocolRevenue(rows as RowLaneRows['protocol-revenue'], rules, window)
-    case 'liquidation': return evaluateLiquidations(rows as RowLaneRows['liquidation'], rules, window)
-    case 'safety': return evaluateSafety(rows as RowLaneRows['safety'], rules, window)
-    case 'referendum': return evaluateReferendum(rows as RowLaneRows['referendum'], rules, window, titleFor)
-    case 'tc-motion': return evaluateTcMotion(rows as RowLaneRows['tc-motion'], rules, window)
-    case 'event': return evaluateEvents(rows as RowLaneRows['event'], rules, window)
-    default: return evaluateExtrinsics(rows as RowLaneRows['extrinsic'], rules, window)
-  }
-}
 
 /* ============ pure snapshot-lane core ============ */
 
@@ -1506,15 +1539,19 @@ export async function runEvaluatorTick(): Promise<void> {
     const onRhythm = tick % SNAPSHOT_EVERY_TICKS === 1
     const security = onRhythm || generation !== lastSecurityGeneration
     if (security) lastSecurityGeneration = generation
-    const snapshot = onRhythm || security ? await runSnapshotLane({ values: onRhythm, security }) : []
-    const matches = [...lanes.flatMap(l => l.matches), ...snapshot]
-    // Cursors move only once this tick's matches are durably in the inbox: a
-    // failed write with an advanced cursor would lose them for good.
+    const snapshot = onRhythm || security
+      ? await runSnapshotLane({ values: onRhythm, security })
+      : { matches: [] as RuleMatch[], commit: async () => {} }
+    const matches = [...lanes.flatMap(l => l.matches), ...snapshot.matches]
+    // Cursors move, and edge-triggered rules disarm, only once this tick's
+    // matches are durably in the inbox: a failed write that had already advanced
+    // a cursor or disarmed a crossing would lose them for good.
     if (await dispatch(matches)) {
       for (const lane of lanes) {
         advanceCursor(lane.kind, lane.nextCursor)
         lane.commit?.()
       }
+      await snapshot.commit()
     }
     await flushCursors(matches.length > 0)
   } catch (err) {
@@ -1598,10 +1635,30 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
       const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
       return { kind, matches, nextCursor: deferred ? cursor : covered }
     }
-    case 'referendum': return { kind, ...await referendumMatches(rules, window), nextCursor: window.to }
-    case 'tc-motion': return { kind, matches: evaluateTcMotion(await queryWindowTcMotions(window), rules, window), nextCursor: window.to }
-    case 'event': return { kind, matches: evaluateEvents(await queryWindowEvents(rules, window), rules, window), nextCursor: window.to }
-    default: return { kind, matches: evaluateExtrinsics(await queryWindowExtrinsics(rules, window), rules, window), nextCursor: window.to }
+    // The four raw-window lanes. `window.to` is the RAW INGESTION head, which is
+    // moved by an insert ClickHouse does not order against the inserts carrying a
+    // block's rows — so it can name blocks these queries provably could not have
+    // returned. Advancing to it drops them permanently and silently. They clamp on
+    // the same every-block watermark the feed lanes above use.
+    case 'referendum': {
+      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
+      return { kind, ...await referendumMatches(rules, window), nextCursor: covered }
+    }
+    case 'tc-motion': {
+      const matches = evaluateTcMotion(await queryWindowTcMotions(window), rules, window)
+      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
+      return { kind, matches, nextCursor: covered }
+    }
+    case 'event': {
+      const matches = evaluateEvents(await queryWindowEvents(rules, window), rules, window)
+      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
+      return { kind, matches, nextCursor: covered }
+    }
+    default: {
+      const matches = evaluateExtrinsics(await queryWindowExtrinsics(rules, window), rules, window)
+      const covered = windowCoveredTo(window, (await visibleSourceHead()) ?? window.to)
+      return { kind, matches, nextCursor: covered }
+    }
   }
 }
 
@@ -2390,17 +2447,43 @@ async function queryWindowExtrinsics(rules: NotificationRule[], window: BlockWin
  * tick behind it". The rhythm stays as the floor for everything a generation
  * bump does not cover.
  */
-async function runSnapshotLane(run: { values: boolean; security: boolean }): Promise<RuleMatch[]> {
+// An edge-triggered kind fires on a CROSSING of a value as it stands now, so it
+// holds no cursor and has no window to re-read: once a rule is disarmed, the
+// crossing is gone. Writing that disarm before the inbox write therefore loses
+// the alert for good if the write fails, where a row lane simply retries its
+// window. So these writes are buffered and applied through the tick's commit
+// hook, after dispatch has durably stored the matches — the same ordering
+// `LaneOutcome.commit` gives the row lanes.
+//
+// A kind that throws has its own buffered writes dropped, so a half-evaluated
+// rule cannot disarm against a reading it never finished acting on.
+let pendingArmWrites: { key: string; value: string }[] = []
+
+function armWrite(key: string, value: string): void {
+  pendingArmWrites.push({ key, value })
+}
+
+async function runSnapshotLane(run: { values: boolean; security: boolean }): Promise<{ matches: RuleMatch[]; commit: () => Promise<void> }> {
   const matches: RuleMatch[] = []
+  pendingArmWrites = []
+  const kindGuard = (what: string, fn: () => Promise<RuleMatch[]>) => guard(what, async () => {
+    const before = pendingArmWrites.length
+    try { matches.push(...await fn()) } catch (err) { pendingArmWrites.length = before; throw err }
+  })
   if (run.values) {
-    await guard('price', async () => { matches.push(...await priceMatches()) })
-    await guard('health-factor', async () => { matches.push(...await healthFactorMatches()) })
-    await guard('mm-cap', async () => { matches.push(...await mmCapMatches()) })
+    await kindGuard('price', priceMatches)
+    await kindGuard('health-factor', healthFactorMatches)
+    await kindGuard('mm-cap', mmCapMatches)
   }
   if (run.security) {
-    await guard('safety-state', async () => { matches.push(...await safetySnapshotMatches()) })
+    await kindGuard('safety-state', safetySnapshotMatches)
   }
-  return matches
+  const writes = pendingArmWrites
+  pendingArmWrites = []
+  return {
+    matches,
+    commit: async () => { for (const w of writes) await setNotificationState(w.key, w.value) },
+  }
 }
 
 function loadArmStates(rules: readonly NotificationRule[]): Map<string, ArmState> {
@@ -2412,8 +2495,8 @@ function loadArmStates(rules: readonly NotificationRule[]): Map<string, ArmState
   return prev
 }
 
-async function persistArmStates(next: ReadonlyMap<string, ArmState>): Promise<void> {
-  for (const [ruleId, state] of next) await setNotificationState(armStateKey(ruleId), JSON.stringify(state))
+function persistArmStates(next: ReadonlyMap<string, ArmState>): void {
+  for (const [ruleId, state] of next) armWrite(armStateKey(ruleId), JSON.stringify(state))
 }
 
 async function priceMatches(): Promise<RuleMatch[]> {
@@ -2426,7 +2509,7 @@ async function priceMatches(): Promise<RuleMatch[]> {
     return { ruleId: rule.ruleId, direction: p.direction, threshold: p.price, value: price != null && price > 0 ? price : null }
   })
   const { fired, next } = evaluateThreshold(inputs, loadArmStates(rules))
-  await persistArmStates(next)
+  persistArmStates(next)
   const byId = new Map(rules.map(r => [r.ruleId, r]))
   return fired.map(f => {
     const rule = byId.get(f.ruleId)!
@@ -2517,7 +2600,7 @@ async function healthFactorMatches(): Promise<RuleMatch[]> {
     const value = isSingleAddress && states.size === 1
       ? JSON.stringify([...states.values()][0])
       : JSON.stringify({ members: Object.fromEntries(states) })
-    await setNotificationState(armStateKey(ruleId), value)
+    armWrite(armStateKey(ruleId), value)
   }
 
   const byId = new Map(rules.map(r => [r.ruleId, r]))
@@ -2632,7 +2715,7 @@ async function mmCapMatches(): Promise<RuleMatch[]> {
       if (state) kept.set(input.key, state)
     }
     if (next.size || kept.size !== prev.size) {
-      await setNotificationState(armStateKey(rule.ruleId), JSON.stringify({ members: Object.fromEntries(kept) }))
+      armWrite(armStateKey(rule.ruleId), JSON.stringify({ members: Object.fromEntries(kept) }))
     }
   }
 
@@ -2810,7 +2893,7 @@ async function safetySnapshotMatches(): Promise<RuleMatch[]> {
       }
     }
 
-    if (changed) await setNotificationState(armStateKey(rule.ruleId), JSON.stringify({ members: Object.fromEntries(next) }))
+    if (changed) armWrite(armStateKey(rule.ruleId), JSON.stringify({ members: Object.fromEntries(next) }))
   }
 
   // Remembered AFTER the rules ran, so a digest that appeared and vanished

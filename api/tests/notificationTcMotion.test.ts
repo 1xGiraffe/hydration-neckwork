@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect } from 'vitest'
 import {
-  ROW_LANE_KINDS, cursorKey, evaluateRowKind, evaluateTcMotion, initEvaluator, renderMatch,
+  ROW_LANE_KINDS, cursorKey, evaluateTcMotion, initEvaluator, renderMatch,
   resetEvaluatorForTests, runEvaluatorTick, stopNotificationEvaluator, tcMotionIdentity,
   type BlockWindow, type TcMotionEventRow,
 } from '../src/notifications/evaluator.ts'
@@ -101,8 +101,8 @@ describe('tc-motion matching', () => {
     expect(evaluateTcMotion([row({ blockHeight: 1_100 })], [r], W)).toHaveLength(1)
   })
 
-  it('is dispatched by the shared row-lane switch', () => {
-    const matches = evaluateRowKind('tc-motion', [row()], [rule('tc-motion', {})], W)
+  it('identifies a motion match by its hash and phase', () => {
+    const matches = evaluateTcMotion([row()], [rule('tc-motion', {})], W)
     expect(matches.map(m => m.identity)).toEqual([`${HASH}:approved`])
   })
 })
