@@ -290,6 +290,46 @@ describe('raw Money Market rows', () => {
     expect(rows.positions.map(p => p.user_address)).toContain(DEPOSITOR)
   })
 
+  // A batch is up to 50 addresses in one eth_call. A market that is not deployed at
+  // the requested height answers `0x` for its members, and an undecodable answer used
+  // to throw out of the per-request loop — voiding the WHOLE batch and discarding
+  // every good position read alongside it.
+  it('keeps the decodable positions of a batch when one answer is undecodable', async () => {
+    const accountData = `0x${[1000n, 200n, 800n, 8500n, 7500n, 5_000_000_000_000_000_000n]
+      .map(value => value.toString(16).padStart(64, '0'))
+      .join('')}`
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse((init as { body: string }).body) as { id: string } | Array<{ id: string }>
+      const requests = Array.isArray(body) ? body : [body]
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        // The vault's read comes back as a bare `0x` — fewer than six words.
+        json: async () => requests.map(r => ({
+          id: r.id,
+          result: r.id.endsWith(VAULT) ? '0x' : accountData,
+        })),
+      } as unknown as Response
+    })
+
+    const log = supplyLog(BIL_POOL_PROXY)
+    log.decoded_args_json = JSON.stringify({
+      reserve: RESERVE,
+      user: VAULT,
+      onBehalfOf: DEPOSITOR,
+      amount: '1000',
+      referralCode: '0',
+    })
+    log.participants = [VAULT, DEPOSITOR]
+
+    const rows = await extractMoneyMarketRows([log], 'test')
+
+    const owners = rows.positions.map(p => p.user_address)
+    expect(owners).toContain(DEPOSITOR)
+    expect(owners).not.toContain(VAULT)
+  })
+
   // Withdraw and Repay carry no onBehalfOf: there `user` IS the position owner, and
   // reordering the lookup must not disturb them.
   it('keeps attributing a withdraw to its own user', async () => {

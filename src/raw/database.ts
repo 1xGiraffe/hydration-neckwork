@@ -106,10 +106,6 @@ export class RawDatabase implements FinalDatabase<RawClickHouseStore> {
     this.rangeFinalized = true
   }
 
-  isRangeFinalized(): boolean {
-    return this.rangeFinalized
-  }
-
   async getIngestionState(): Promise<RawCheckpointState> {
     if (this.store == null) {
       throw new Error('Raw database not connected')

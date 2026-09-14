@@ -20,7 +20,7 @@ interface TrackerOptions {
 
 const DEFAULT_ASSET_DECIMALS = 12
 
-function assetRow(metadata: AssetMetadata): AssetRow {
+function assetRow(metadata: AssetMetadata, observedBlock: number): AssetRow {
   return {
     asset_id: metadata.assetId,
     symbol: metadata.symbol,
@@ -31,6 +31,7 @@ function assetRow(metadata: AssetMetadata): AssetRow {
     origin_chain_id: metadata.originChainId ?? null,
     origin_asset_id: metadata.originAssetId ?? null,
     evm_address: metadata.evmAddress ?? '',
+    observed_block: observedBlock,
   }
 }
 
@@ -362,6 +363,9 @@ export class AssetRegistryTracker {
   // duration ("about every 100 minutes"), and a block count only expresses a
   // duration at one particular block time. null forces the first scan.
   private lastSnapshotTimestampMs: number | null = null
+  // Height of the most recent registry scan — the observation height every row
+  // this tracker emits is stamped with (see AssetRow.observed_block).
+  private lastSnapshotBlock = 0
   private snapshotIntervalMinutes: number
   private seededAssetRows: AssetRow[] = []
   private includeUnresolvedAssets: boolean
@@ -373,6 +377,9 @@ export class AssetRegistryTracker {
     if (nativeAssetMetadata) {
       this.cache.set(nativeAssetMetadata.assetId, { ...nativeAssetMetadata })
       this.seededAssetRows.push({
+        // Seeded from the runtime constant, not a registry scan — see
+        // AssetRow.observed_block for why that must rank below any real read.
+        observed_block: 0,
         asset_id: nativeAssetMetadata.assetId,
         symbol: nativeAssetMetadata.symbol,
         name: nativeAssetMetadata.name,
@@ -552,10 +559,10 @@ export class AssetRegistryTracker {
 
       if (!existing) {
         console.log(`[AssetRegistry] New asset discovered: ${assetId} (${metadata.symbol})`)
-        newAssets.push(assetRow(metadata))
+        newAssets.push(assetRow(metadata, blockHeight))
       } else if (assetMetadataChanged(existing, metadata)) {
         console.log(`[AssetRegistry] Asset ${assetId} metadata changed`)
-        newAssets.push(assetRow(metadata))
+        newAssets.push(assetRow(metadata, blockHeight))
       }
 
       this.cache.set(assetId, metadata)
@@ -577,6 +584,7 @@ export class AssetRegistryTracker {
     // timestamp-less block is skipped by shouldRunOnElapsedChainTime rather than
     // scanning every block.
     this.lastSnapshotTimestampMs = block.timestamp ?? 0
+    this.lastSnapshotBlock = blockHeight
 
     const skippedSuffix = unresolvedAssetsSkipped > 0
       ? `, ${unresolvedAssetsSkipped} unresolved assets skipped`
@@ -652,7 +660,7 @@ export class AssetRegistryTracker {
   getAssetRows(): AssetRow[] {
     return [...this.cache.entries()]
       .sort((a, b) => a[0] - b[0])
-      .map(([, metadata]) => assetRow(metadata))
+      .map(([, metadata]) => assetRow(metadata, this.lastSnapshotBlock))
   }
 
   getAssetsMetadata(): AssetMetadata[] {
