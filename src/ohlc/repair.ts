@@ -72,24 +72,59 @@ WHERE interval_start >= ${startExpr}
   AND interval_start <= ${endExpr}${assetIdPredicate('', assetIds)}`
 }
 
+/**
+ * Candle aggregation over one deduplicated price row per `(asset_id,
+ * block_height)`.
+ *
+ * `price_data.prices` is a `ReplacingMergeTree` keyed on `(asset_id,
+ * block_height)`, so a re-indexed block leaves several rows for that key until a
+ * merge collapses them. Summing that read directly multiplies a replayed block's
+ * volume by however many copies happen to be unmerged, which is permanent once
+ * it lands in a candle's `sumState`. The inner `GROUP BY p.asset_id,
+ * p.block_height` collapses the copies first; its cardinality is one row per
+ * priced block in the window, so it stays bounded by the repair range rather
+ * than pulling `FINAL` over the whole table.
+ *
+ * The engine's version column IS `block_height`, which is constant inside a
+ * replacement key, so no copy of a key outranks another and `any()` is exactly
+ * the engine's own "keep one of them".
+ */
+function buildCandleAggregationQuery(spec: OHLCTableSpec, where: string): string {
+  return `INSERT INTO price_data.${spec.table}
+SELECT
+    asset_id,
+    interval_start,
+    argMinState(price, block_time) AS open_state,
+    maxState(price) AS high_state,
+    minState(price) AS low_state,
+    argMaxState(price, block_time) AS close_state,
+    sumState(volume_buy) AS volume_buy_state,
+    sumState(volume_sell) AS volume_sell_state
+FROM
+(
+    SELECT
+        p.asset_id AS asset_id,
+        any(${spec.bucketExpr}) AS interval_start,
+        any(b.block_timestamp) AS block_time,
+        any(p.usd_price) AS price,
+        any(p.usd_volume_buy) AS volume_buy,
+        any(p.usd_volume_sell) AS volume_sell
+    FROM price_data.prices p
+    INNER JOIN price_data.blocks b ON p.block_height = b.block_height
+    WHERE ${where}
+    GROUP BY p.asset_id, p.block_height
+)
+GROUP BY asset_id, interval_start`
+}
+
 export function buildRestoreRollbackPrefixQuery(spec: OHLCTableSpec, startTime: string): string {
   const startExpr = spec.literalExpr(startTime)
 
-  return `INSERT INTO price_data.${spec.table}
-SELECT
-    p.asset_id,
-    ${spec.bucketExpr} AS interval_start,
-    argMinState(p.usd_price, b.block_timestamp) AS open_state,
-    maxState(p.usd_price) AS high_state,
-    minState(p.usd_price) AS low_state,
-    argMaxState(p.usd_price, b.block_timestamp) AS close_state,
-    sumState(p.usd_volume_buy) AS volume_buy_state,
-    sumState(p.usd_volume_sell) AS volume_sell_state
-FROM price_data.prices p
-INNER JOIN price_data.blocks b ON p.block_height = b.block_height
-WHERE ${spec.bucketExpr} = ${startExpr}
-  AND b.block_timestamp < toDateTime('${startTime}')
-GROUP BY p.asset_id, interval_start`
+  return buildCandleAggregationQuery(
+    spec,
+    `${spec.bucketExpr} = ${startExpr}
+      AND b.block_timestamp < toDateTime('${startTime}')`,
+  )
 }
 
 export function buildRebuildOHLCQuery(
@@ -101,21 +136,11 @@ export function buildRebuildOHLCQuery(
   const startExpr = spec.literalExpr(startTime)
   const endExpr = spec.literalExpr(endTime)
 
-  return `INSERT INTO price_data.${spec.table}
-SELECT
-    p.asset_id,
-    ${spec.bucketExpr} AS interval_start,
-    argMinState(p.usd_price, b.block_timestamp) AS open_state,
-    maxState(p.usd_price) AS high_state,
-    minState(p.usd_price) AS low_state,
-    argMaxState(p.usd_price, b.block_timestamp) AS close_state,
-    sumState(p.usd_volume_buy) AS volume_buy_state,
-    sumState(p.usd_volume_sell) AS volume_sell_state
-FROM price_data.prices p
-INNER JOIN price_data.blocks b ON p.block_height = b.block_height
-WHERE ${spec.bucketExpr} >= ${startExpr}
-  AND ${spec.bucketExpr} <= ${endExpr}${assetIdPredicate('p', assetIds)}
-GROUP BY p.asset_id, interval_start`
+  return buildCandleAggregationQuery(
+    spec,
+    `${spec.bucketExpr} >= ${startExpr}
+      AND ${spec.bucketExpr} <= ${endExpr}${assetIdPredicate('p', assetIds)}`,
+  )
 }
 
 export async function clearOHLCForTimeRange(
