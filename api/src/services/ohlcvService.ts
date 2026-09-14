@@ -1,5 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import type { OHLCVCandle, ApiCandle } from '../types.ts'
+import { chDateTime } from './clickhouseTime.ts'
 
 /**
  * Maps interval keys to ClickHouse parameterized query view names.
@@ -18,13 +19,8 @@ export const INTERVAL_VIEW_MAP = {
 
 export type OHLCVInterval = keyof typeof INTERVAL_VIEW_MAP
 
-/**
- * Converts JavaScript Date to ClickHouse DateTime format.
- * Format: 'YYYY-MM-DD HH:MM:SS'
- */
-export function toClickHouseDateTime(date: Date): string {
-  return date.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
-}
+/** Converts a JavaScript Date to a ClickHouse DateTime literal. */
+export const toClickHouseDateTime = chDateTime
 
 export async function queryOHLCV(
   client: ClickHouseClient,

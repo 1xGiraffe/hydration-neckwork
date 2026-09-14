@@ -9,6 +9,8 @@ import {
 import { v3PoolHistory, v3PoolLiquidity, type V3History, type V3HistoryPool, type V3PoolLiquidity } from './uniswapV3History.ts'
 import { ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, sqrtPriceX96ToPrice, tickToPrice, v3ManagerPositions, v3PoolStats, v3PricePoints, v3VaultStats, type V3Pool, type V3Registry } from './uniswapV3Service.ts'
 import { H2O_ASSET_ID, assetDescriptor, priceAssetId } from './explorerAssets.ts'
+import { usdAtPrice } from './assetValue.ts'
+import { OMNIPOOL_ACCOUNT } from './valuation.ts'
 import { stableswapPoolAccount } from './tagService.ts'
 import { hasDriftingPegs, parseStableswapPools, pegPrice, type StableswapPoolSnapshot } from './stableswapSnapshot.ts'
 
@@ -48,7 +50,6 @@ export function initPoolService(c: ClickHouseClient): void {
   initUniswapV3Service(c)
 }
 
-const OMNIPOOL_ACCOUNT = '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000'
 // XYK trade fee is a runtime constant: Permill 0.3% (3/1000).
 const XYK_FEE_PERMILL = 3000
 
@@ -62,10 +63,7 @@ function priceOf(prices: Map<number, PriceInfo>, assetId: number): number | null
 }
 
 function usdOf(prices: Map<number, PriceInfo>, assetId: number, raw: bigint): number | null {
-  const px = priceOf(prices, assetId)
-  if (px == null) return null
-  const amt = Number(raw) / 10 ** asset(assetId).decimals
-  return Number.isFinite(amt) ? amt * px : null
+  return usdAtPrice(priceOf(prices, assetId), raw, asset(assetId).decimals)
 }
 
 // response shapes
@@ -275,14 +273,19 @@ export function buildComposition(prices: Map<number, PriceInfo>, legs: { assetId
   return { entries, tvlUsd }
 }
 
-// Omnipool Tradability bitflags (pallets/omnipool/src/types.rs).
+// Omnipool Tradability bitflags (pallets/omnipool/src/types.rs), named the way
+// the pallet names its permissions. ONE implementation: the Security page and
+// the pool pages both label the ALLOWED operations, so two spellings only meant
+// one bitmask read "Add liquidity" on /explorer/security and "Add" on
+// /explorer/omnipool. `tradabilityStateName` reads the blocked side by passing
+// the complement, not by a second function.
 export function tradableFlags(bits: number): string[] {
   if (!bits) return ['Frozen']
   const out: string[] = []
   if (bits & 1) out.push('Sell')
   if (bits & 2) out.push('Buy')
-  if (bits & 4) out.push('Add')
-  if (bits & 8) out.push('Remove')
+  if (bits & 4) out.push('Add liquidity')
+  if (bits & 8) out.push('Remove liquidity')
   return out
 }
 
@@ -1006,7 +1009,7 @@ async function stableswapDetail(
   const histAssetIds = [...new Set(histRows.flatMap(r => r.ids))]
   const closes = await gridCloses(histAssetIds, grain)
   const firstDay = histRows[0]?.d
-  const lastKey = destroyed ? lastHist.d : end
+  const lastKey = destroyed ? (lastHist?.d ?? end) : end
   const buckets = firstDay
     ? grain.grid(win ? win.fromSec : keySeconds(firstDay), keySeconds(lastKey))
     : []

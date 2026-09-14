@@ -30,6 +30,9 @@
 //     actualFee = 0, so the two arms cannot double count.
 
 import type { ClickHouseClient } from '../db/client.ts'
+// The Omnipool's hub asset (H2O) — its fee legs are the protocol fee, never an
+// asset fee — from the module that owns the Omnipool's own math.
+import { HUB_ASSET_ID } from './lpMath.ts'
 import {
   DECIMAL_STRINGS,
   OMNIPOOL_ACCOUNT,
@@ -141,13 +144,8 @@ export const ICE_POT_ACCOUNT = '0x6d6f646c6963655f696365230000000000000000000000
 // The Treasury's EVM address: the first 20 bytes of `modlpy/trsry…` — where a Gamma vault
 // sends its fee share and where a pool's CollectProtocol would land.
 export const TREASURY_H160 = '0x6d6f646c70792f74727372790000000000000000'
-// Pool CollectProtocol(sender, recipient, amount0, amount1) — the protocol fee of a
-// concentrated-liquidity pool being collected by the factory owner.
-export const UNISWAP_V3_COLLECT_PROTOCOL_TOPIC = '0x596b573906218d3411850b26a6b437d6c4522fdb43d2d2386263f86d50b8b151'
 export const ICE_FEE_ACCOUNT = '0x6d6f646c6963655f666565230000000000000000000000000000000000000000'
 
-/** The Omnipool's hub asset (H2O); its fee legs are the protocol fee, never an asset fee. */
-const HUB_ASSET_ID = 1
 
 /**
  * The one Omnipool position whose liquidity is protocol-provided, so fees retained in

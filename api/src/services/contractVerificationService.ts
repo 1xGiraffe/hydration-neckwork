@@ -3,6 +3,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
 import { contractByH160 } from './contractRegistryService.ts'
 import { fetchDeployedBytecode, verifyStandardJson, type MatchType } from './verifierClient.ts'
+import { chDateTime as toClickHouseDateTime } from './clickhouseTime.ts'
 
 // Contract verification: owns the job lifecycle and the three ClickHouse tables
 // in `005_contracts.sql`, plus the in-memory verified-contract map that feeds
@@ -686,6 +687,3 @@ export async function getJob(verificationId: string): Promise<JobState | null> {
   }
 }
 
-function toClickHouseDateTime(d: Date): string {
-  return d.toISOString().slice(0, 19).replace('T', ' ')
-}

@@ -4,6 +4,7 @@ import { signatureVerify, keccakAsU8a, secp256k1Recover, ethereumEncode, cryptoW
 import { hexToU8a, u8aConcat, stringToU8a } from '@polkadot/util'
 import type { ClickHouseClient } from '../db/client.ts'
 import { normalizeAddress } from './addressIdentity.ts'
+import { chTimestampMs } from './clickhouseTime.ts'
 
 // Wallet login: the user proves control of an address by signing a plain-text
 // statement (no transaction, no fee). Substrate extensions sign via signRaw
@@ -96,7 +97,6 @@ export function resetUserAuthForTests(): void { pendingChallenges.clear(); sessi
 export function __sessionCountForTests(): number { return sessionsByHash.size }
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
-const chDateTime = (ms: number) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ')
 
 export function createChallenge(host: string, address: string): LoginChallenge | null {
   const n = normalizeAddress(address)
@@ -164,12 +164,12 @@ async function persistSession(hash: string, s: Session, deleted = 0): Promise<vo
   await client.insert({
     table: 'price_data.user_sessions',
     values: [{
-      token_hash: hash, account_id: s.accountId, expires_at: chDateTime(s.expiresAtMs),
+      token_hash: hash, account_id: s.accountId, expires_at: chTimestampMs(s.expiresAtMs),
       // created_at is written explicitly: ReplacingMergeTree keeps the whole
       // newest row, so relying on the column DEFAULT would reset the creation
       // time on every hourly refresh.
-      label: s.label, created_via: s.createdVia, created_at: chDateTime(s.createdAtMs),
-      last_seen: chDateTime(s.lastSeenMs), deleted,
+      label: s.label, created_via: s.createdVia, created_at: chTimestampMs(s.createdAtMs),
+      last_seen: chTimestampMs(s.lastSeenMs), deleted,
     }],
     format: 'JSONEachRow',
   })
@@ -225,7 +225,7 @@ export function listSessions(accountId: string, currentToken: string): SessionIn
     if (s.accountId !== accountId || s.expiresAtMs < now) continue
     out.push({
       id: hash, label: s.label, createdVia: s.createdVia,
-      createdAt: chDateTime(s.createdAtMs), lastSeen: chDateTime(s.lastSeenMs),
+      createdAt: chTimestampMs(s.createdAtMs), lastSeen: chTimestampMs(s.lastSeenMs),
       current: hash === currentHash,
     })
   }

@@ -1,7 +1,9 @@
 import type { ClickHouseClient } from '../db/client.ts'
-import { blake2AsU8a, xxhashAsU8a } from '@polkadot/util-crypto'
+import { blake2AsU8a } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
+import { storagePrefix, twox64Concat, u32At, u32Le, u128At } from './chainPrimitives.ts'
+import { TREASURY_ACCOUNT } from './revenueStreams.ts'
 import { decodeCompact } from './proxyMultisigService.ts'
 import { collectLockBreakdownRows, gigaUnbondingBlocks, persistLockSnapshot, unvestedByAccountRaw, type LockRow, type VestingScheduleRaw } from './lockBreakdownService.ts'
 import { cachedSwr } from './cache.ts'
@@ -21,39 +23,30 @@ let client: ClickHouseClient
 
 const HDX_DECIMALS = 12n
 
-const prefix = (p: string, s: string) => u8aToHex(u8aConcat(xxhashAsU8a(p, 128), xxhashAsU8a(s, 128)))
-const LOCKS_PREFIX = prefix('Balances', 'Locks')
-const PENDING_UNSTAKES_PREFIX = prefix('GigaHdx', 'PendingUnstakes')
-const VESTING_PREFIX = prefix('Vesting', 'VestingSchedules')
-const VOTING_FOR_PREFIX = prefix('ConvictionVoting', 'VotingFor')
-const RELAY_HEIGHT_KEY = prefix('ParachainSystem', 'LastRelayChainBlockNumber')
-const TWO_SEC_SWITCH_KEY = prefix('Parameters', 'TwoSecBlocksSince')
+const LOCKS_PREFIX = storagePrefix('Balances', 'Locks')
+const PENDING_UNSTAKES_PREFIX = storagePrefix('GigaHdx', 'PendingUnstakes')
+const VESTING_PREFIX = storagePrefix('Vesting', 'VestingSchedules')
+const VOTING_FOR_PREFIX = storagePrefix('ConvictionVoting', 'VotingFor')
+const RELAY_HEIGHT_KEY = storagePrefix('ParachainSystem', 'LastRelayChainBlockNumber')
+const TWO_SEC_SWITCH_KEY = storagePrefix('Parameters', 'TwoSecBlocksSince')
 // The three single keys behind the GIGAHDX exchange rate (see loadGigahdxRate).
 // The pallet calls the staked total `TotalLocked`, not `TotalStaked` — a wrong
 // name here is a key that simply does not exist, which reads as an empty value
 // rather than an error, so the test pins the derived key itself.
-const GIGA_TOTAL_LOCKED_KEY = prefix('GigaHdx', 'TotalLocked')
+const GIGA_TOTAL_LOCKED_KEY = storagePrefix('GigaHdx', 'TotalLocked')
 const STHDX_ASSET_ID = 670
-const STHDX_ISSUANCE_KEY = (() => {
-  const id = new Uint8Array(4)
-  new DataView(id.buffer).setUint32(0, STHDX_ASSET_ID, true)
-  // Tokens.TotalIssuance is Twox64Concat-keyed on the asset id.
-  return u8aToHex(u8aConcat(hexToU8a(prefix('Tokens', 'TotalIssuance')), xxhashAsU8a(id, 64), id))
-})()
+// Tokens.TotalIssuance is Twox64Concat-keyed on the SCALE (little-endian) asset id.
+const STHDX_ISSUANCE_KEY = u8aToHex(u8aConcat(
+  hexToU8a(storagePrefix('Tokens', 'TotalIssuance')), twox64Concat(u32Le(STHDX_ASSET_ID)),
+))
 const GIGA_POT_ACCOUNT = (() => {
   const p = u8aConcat(new TextEncoder().encode('modl'), new TextEncoder().encode('gigahdx!'))
   return u8aConcat(p, new Uint8Array(32 - p.length))
 })()
 const GIGA_POT_ACCOUNT_KEY = u8aToHex(u8aConcat(
-  hexToU8a(prefix('System', 'Account')), blake2AsU8a(GIGA_POT_ACCOUNT, 128), GIGA_POT_ACCOUNT,
+  hexToU8a(storagePrefix('System', 'Account')), blake2AsU8a(GIGA_POT_ACCOUNT, 128), GIGA_POT_ACCOUNT,
 ))
 
-const u32At = (b: Uint8Array, off: number) => (b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24)) >>> 0
-function u128At(b: Uint8Array, off: number): bigint {
-  let n = 0n
-  for (let i = 15; i >= 0; i--) n = (n << 8n) | BigInt(b[off + i])
-  return n
-}
 // Full SCALE compact<u128> (vesting perPeriod can exceed the 4-byte form).
 export function decodeCompactBig(b: Uint8Array, off: number): [bigint, number] {
   if (!Number.isInteger(off) || off < 0 || off >= b.length) {
@@ -109,8 +102,13 @@ let snapshot: HdxChainSnapshot | null = null
 const toHdx = (raw: bigint) => Number(raw / 10n ** (HDX_DECIMALS - 4n)) / 1e4
 
 // The unlock series the dashboard charts. One key per lock kind that has its
-// own schedule; `staking` and the deposit-shaped sources have none.
-export type UnlockKey = 'gigahdx' | 'vesting' | 'vote'
+// own schedule, plus `other` for everything else the binding timeline can
+// attribute a drop to — `staking`, `democracy`, `elections`, `sufficiency`, and
+// any lock id LOCK_ID_SOURCES does not map, which passes through verbatim.
+// Those have no schedule of their own, but the envelope they hold is real: with
+// nowhere to put them their slices were dropped, and the series stopped summing
+// to the envelope it is an attribution of.
+export type UnlockKey = 'gigahdx' | 'vesting' | 'vote' | 'other'
 // A binding-timeline slice names the lock(s) that were holding the balance when
 // the envelope dropped, joining ties with '+'. Attribute a tie to the DATED
 // lock that actually gates the release: a conviction prior and a GIGAHDX unbond
@@ -119,9 +117,9 @@ export type UnlockKey = 'gigahdx' | 'vesting' | 'vote'
 // here that can also be cleared on demand. Splitting the amount across keys
 // would invent a division the envelope does not have.
 const UNLOCK_KEY_PRIORITY: UnlockKey[] = ['gigahdx', 'vesting', 'vote']
-export function unlockKeyForCause(cause: string): UnlockKey | null {
+export function unlockKeyForCause(cause: string): UnlockKey {
   const parts = new Set(cause.split('+'))
-  return UNLOCK_KEY_PRIORITY.find(k => parts.has(k)) ?? null
+  return UNLOCK_KEY_PRIORITY.find(k => parts.has(k)) ?? 'other'
 }
 
 // Persisted form of one binding-timeline slice (serializeTimeline in
@@ -152,7 +150,7 @@ export function unlockSeriesFromTimelines(
   buckets: { from: number; to: number }[],
   nowMs: number,
 ): UnlockSeries {
-  const zero = (): Record<UnlockKey, number> => ({ gigahdx: 0, vesting: 0, vote: 0 })
+  const zero = (): Record<UnlockKey, number> => ({ gigahdx: 0, vesting: 0, vote: 0, other: 0 })
   const out: UnlockSeries = { now: zero(), buckets: buckets.map(() => zero()), later: zero(), active: zero() }
   const horizon = buckets.length ? buckets[buckets.length - 1].to : nowMs
   for (const slices of timelines) {
@@ -169,7 +167,6 @@ export function unlockSeriesFromTimelines(
       // would have swamped the real series with stake nobody has moved.
       if (s.conditional) continue
       const key = unlockKeyForCause(s.cause)
-      if (!key) continue
       const hdx = toHdx(BigInt(s.amount))
       if (hdx <= 0) continue
       if (s.state === 'active') { out.active[key] += hdx; continue }
@@ -556,7 +553,7 @@ export function initHdxService(c: ClickHouseClient): void {
 // dashboard payload (ClickHouse aggregates + chain snapshot)
 
 export interface HdxCohort { key: string; label: string; minPct: number; minHdx: number; accounts: number; totalHdx: number }
-export interface HdxUnlockBucket { label: string; fromTs: string; toTs: string; gigahdx: number; vesting: number; vote: number }
+export interface HdxUnlockBucket { label: string; fromTs: string; toTs: string; gigahdx: number; vesting: number; vote: number; other: number }
 export interface HdxDailyFlow { date: string; buyHdx: number; sellHdx: number; buyers: number; sellers: number }
 export interface HdxMover { account: AccountRef; balanceHdx: number; boughtHdx: number; soldHdx: number; netHdx: number }
 
@@ -613,11 +610,11 @@ export interface HdxDashboard {
   }
   unlocks: {
     buckets: HdxUnlockBucket[]
-    laterHdx: { gigahdx: number; vesting: number; vote: number }
+    laterHdx: Record<UnlockKey, number>
     unlockableNowHdx: number
     // Releasable right now, split by the lock that held it — the leading "now"
     // column. Sums to unlockableNowHdx.
-    nowHdx: { gigahdx: number; vesting: number; vote: number }
+    nowHdx: Record<UnlockKey, number>
     activeVoteHdx: number
     stakingAnytimeHdx: number
     gigaPending: {
@@ -701,10 +698,10 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
     let cursor = now + 56 * 86400e3
     for (let i = 8; i < edges.length; i++) { edges[i].from = cursor; edges[i].to = cursor + 30 * 86400e3; cursor = edges[i].to }
     const horizon = cursor
-    const buckets = edges.map(e => ({ label: e.label, fromTs: iso(e.from), toTs: iso(e.to), from: e.from, to: e.to, gigahdx: 0, vesting: 0, vote: 0 }))
-    const later = { gigahdx: 0, vesting: 0, vote: 0 }
+    const buckets = edges.map(e => ({ label: e.label, fromTs: iso(e.from), toTs: iso(e.to), from: e.from, to: e.to, gigahdx: 0, vesting: 0, vote: 0, other: 0 }))
+    const later: Record<UnlockKey, number> = { gigahdx: 0, vesting: 0, vote: 0, other: 0 }
     let unlockableNow = 0
-    const put = (type: 'gigahdx' | 'vesting' | 'vote', ts: number, hdx: number) => {
+    const put = (type: UnlockKey, ts: number, hdx: number) => {
       if (hdx <= 0) return
       if (ts <= now) { unlockableNow += hdx; return }
       if (ts >= horizon) { later[type] += hdx; return }
@@ -713,7 +710,7 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
     }
     let undeterminedVoteHdx = 0
     // What is releasable right now, split by the lock that was holding it.
-    let nowByType = { gigahdx: 0, vesting: 0, vote: 0 }
+    let nowByType: Record<UnlockKey, number> = { gigahdx: 0, vesting: 0, vote: 0, other: 0 }
     // Preferred path: aggregate the per-account BINDING timelines, so a balance
     // held by two overlapping locks is counted once and attributed to the one
     // that actually gates it. The per-source path below double-counts that and
@@ -724,12 +721,14 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
         b.gigahdx = series.buckets[i].gigahdx
         b.vesting = series.buckets[i].vesting
         b.vote = series.buckets[i].vote
+        b.other = series.buckets[i].other
       })
       later.gigahdx = series.later.gigahdx
       later.vesting = series.later.vesting
       later.vote = series.later.vote
+      later.other = series.later.other
       nowByType = series.now
-      unlockableNow = series.now.gigahdx + series.now.vesting + series.now.vote
+      unlockableNow = series.now.gigahdx + series.now.vesting + series.now.vote + series.now.other
       undeterminedVoteHdx = series.active.vote
     } else if (snap) {
       for (const p of snap.pendingUnstakes) put('gigahdx', blockTs(p.expiryBlock), p.payoutHdx)
@@ -934,10 +933,14 @@ async function loadDcaScheduleFlows(): Promise<DcaFlowSide[]> {
                     -- query below counts, so omitting them here would book the
                     -- same order's flow twice.
                     WHERE event_name IN ('DCA.Completed', 'DCA.Terminated', 'DCA.Migrated', 'DCA.MigrationCancelled')),
+      -- FINAL on both replayable sources: these count and sum rows, so a
+      -- re-inserted raw range would otherwise inflate the executions done and the
+      -- amount filled, which collapses the remaining budget and with it the cap,
+      -- and duplicate a schedule into two orders.
       execstats AS (SELECT id, count() AS executions,
                            sum(toUInt256OrZero(amount_in)) AS sum_in,
                            sum(toUInt256OrZero(amount_out)) AS sum_out
-                    FROM price_data.dca_events WHERE event_name = 'DCA.TradeExecuted' GROUP BY id),
+                    FROM price_data.dca_events FINAL WHERE event_name = 'DCA.TradeExecuted' GROUP BY id),
       bpd AS (SELECT count() AS blocks FROM price_data.raw_blocks WHERE block_timestamp > now() - INTERVAL 24 HOUR)
       SELECT s.asset_in = 0 AS is_sell, count() AS orders,
         sum(
@@ -953,7 +956,7 @@ async function loadDcaScheduleFlows(): Promise<DcaFlowSide[]> {
             s.asset_out = 0, if(e.executions > 0, toFloat64(e.sum_out) / e.executions, 0),
             if(e.executions > 0, toFloat64(e.sum_in) / e.executions, 0))
         ) / 1e12 AS hdx_per_day
-      FROM price_data.dca_schedules s
+      FROM price_data.dca_schedules s FINAL
       LEFT ANTI JOIN done ON done.id = s.id
       LEFT JOIN execstats e ON e.id = s.id
       WHERE s.asset_in = 0 OR s.asset_out = 0
@@ -1075,7 +1078,6 @@ const KRAKEN_TAG_IDS = ['kraken']
 // money-market reserve contracts. HDX inside them is pooled/custodial, not a
 // holder's wallet balance. Module (modl) accounts match by prefix instead.
 const POOL_TAG_IDS = ['xyk-pools', 'stableswap-pools', 'lbp-pools', 'money-market']
-const TREASURY_ACCOUNT = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000'
 
 const tagAccountsSql = (ids: string[]) =>
   `(SELECT groupArray(account_id) FROM price_data.account_tags FINAL WHERE label_id IN (${ids.map(t => `'${t}'`).join(',')}) AND deleted = 0)`
@@ -1412,7 +1414,12 @@ async function loadStructure(): Promise<HdxStructure> {
           SELECT toStartOfMonth(e.block_timestamp) AS m, sum(toFloat64OrZero(e.amount_out)) / 1e12 AS hdx
           FROM price_data.dca_events e FINAL
           INNER JOIN (
-            SELECT id FROM price_data.dca_schedules
+            -- FINAL for the same reason the execution side carries it: dca_schedules
+            -- is ReplacingMergeTree(block_height), so an unresolved replacement both
+            -- matches this filter on a superseded row and, being an INNER JOIN key,
+            -- multiplies every execution it pairs with — inflating the cumulative
+            -- buyback series rather than merely duplicating a row.
+            SELECT id FROM price_data.dca_schedules FINAL
             WHERE who = '${TREASURY_ACCOUNT}' AND asset_out = 0 AND asset_in != 0
           ) s ON e.id = s.id
           WHERE e.event_name = 'DCA.TradeExecuted'
@@ -1465,9 +1472,22 @@ async function loadStructure(): Promise<HdxStructure> {
       query: `
         WITH
         ${tagAccountsSql([...KRAKEN_TAG_IDS, ...POOL_TAG_IDS])} AS special_accts,
-        (SELECT mapFromArrays(groupArray(w), groupArray(toFloat64(px))) FROM (
-          SELECT toStartOfWeek(interval_start, 1) AS w, argMaxMerge(close_state) AS px
-          FROM price_data.ohlc_1d WHERE asset_id = 0 GROUP BY w
+        -- Weekly HDX close, FORWARD-FILLED onto the contiguous Monday grid
+        -- through the current week. A ClickHouse map subscript on a missing key
+        -- returns the value type's default, and 0.0 is indistinguishable from a
+        -- real price: an account that increased its balance in a week with no
+        -- asset-0 candle would book that tranche at a $0 cost basis, which
+        -- arrayFold then carries forward for the rest of its history. The
+        -- price_era guard below only covers weeks BEFORE the first candle, not
+        -- a gap inside the era, so the gap has to be closed here.
+        (SELECT mapFromArrays(grid, arrayFill(x -> x > 0., arrayMap(g -> m[g], grid))) FROM (
+          SELECT mapFromArrays(groupArray(w), groupArray(toFloat64(px))) AS m,
+            min(w) AS minw, greatest(max(w), toStartOfWeek(today(), 1)) AS maxw,
+            arrayMap(i -> minw + toIntervalDay(7 * i), range(toUInt32(intDiv(dateDiff('day', minw, maxw), 7)) + 1)) AS grid
+          FROM (
+            SELECT toStartOfWeek(interval_start, 1) AS w, argMaxMerge(close_state) AS px
+            FROM price_data.ohlc_1d WHERE asset_id = 0 GROUP BY w
+          )
         )) AS pmap,
         -- assumeNotNull: a Nullable scalar here would poison the arrayFold
         -- accumulator type (lambda returns Nullable, accumulator is not)

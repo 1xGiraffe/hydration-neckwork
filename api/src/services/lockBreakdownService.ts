@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
-import { xxhashAsU8a } from '@polkadot/util-crypto'
-import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
+import { u8aToHex, hexToU8a } from '@polkadot/util'
 import type { ClickHouseClient } from '../db/client.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
+import { storagePrefix, u32At, u128At } from './chainPrimitives.ts'
 import { decodeCompact } from './proxyMultisigService.ts'
 import { NOMINAL_RELAY_BLOCK_MS } from './blockTime.ts'
 import { runtimeGigaCooldownBlocks } from './runtimeConstants.ts'
@@ -151,18 +151,17 @@ export interface LockTranche { state: 'releasable' | 'scheduled' | 'active'; amo
 // frozen.
 export interface TimelineSlice { state: 'releasable' | 'scheduled' | 'active'; cause: string; amount: bigint; untilMs?: number; linear?: boolean; conditional?: boolean }
 
-const prefix = (p: string, s: string) => u8aToHex(u8aConcat(xxhashAsU8a(p, 128), xxhashAsU8a(s, 128)))
-const RESERVES_PREFIX = prefix('Balances', 'Reserves')
-const HOLDS_PREFIX = prefix('Balances', 'Holds')
-const TOKEN_LOCKS_PREFIX = prefix('Tokens', 'Locks')
-const TOKEN_RESERVES_PREFIX = prefix('Tokens', 'Reserves')
-const IDENTITY_OF_PREFIX = prefix('Identity', 'IdentityOf')
-const SUBS_OF_PREFIX = prefix('Identity', 'SubsOf')
-const PROXIES_PREFIX = prefix('Proxy', 'Proxies')
-const ANNOUNCEMENTS_PREFIX = prefix('Proxy', 'Announcements')
-const MULTISIGS_PREFIX = prefix('Multisig', 'Multisigs')
-const REFERENDUM_INFO_PREFIX = prefix('Referenda', 'ReferendumInfoFor')
-const PREIMAGE_STATUS_PREFIX = prefix('Preimage', 'StatusFor')
+const RESERVES_PREFIX = storagePrefix('Balances', 'Reserves')
+const HOLDS_PREFIX = storagePrefix('Balances', 'Holds')
+const TOKEN_LOCKS_PREFIX = storagePrefix('Tokens', 'Locks')
+const TOKEN_RESERVES_PREFIX = storagePrefix('Tokens', 'Reserves')
+const IDENTITY_OF_PREFIX = storagePrefix('Identity', 'IdentityOf')
+const SUBS_OF_PREFIX = storagePrefix('Identity', 'SubsOf')
+const PROXIES_PREFIX = storagePrefix('Proxy', 'Proxies')
+const ANNOUNCEMENTS_PREFIX = storagePrefix('Proxy', 'Announcements')
+const MULTISIGS_PREFIX = storagePrefix('Multisig', 'Multisigs')
+const REFERENDUM_INFO_PREFIX = storagePrefix('Referenda', 'ReferendumInfoFor')
+const PREIMAGE_STATUS_PREFIX = storagePrefix('Preimage', 'StatusFor')
 
 // Chain lock ids → semantic sources (discovered by chain-wide enumeration; an
 // unmapped id passes through verbatim so future pallets surface untranslated
@@ -182,13 +181,6 @@ export const RESERVE_ID_SOURCES: Record<string, string> = { dcaorder: 'dca', otc
 // RuntimeHoldReason is (pallet index, variant index); Preimage is pallet 15.
 const HOLD_PALLET_SOURCES: Record<number, string> = { 15: 'preimage' }
 
-const u32At = (b: Uint8Array, off: number) => (b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24)) >>> 0
-function u128At(b: Uint8Array, off: number): bigint {
-  if (off + 16 > b.length) throw new RangeError('truncated u128')
-  let n = 0n
-  for (let i = 15; i >= 0; i--) n = (n << 8n) | BigInt(b[off + i])
-  return n
-}
 const asciiId = (b: Uint8Array, off: number) => Buffer.from(b.slice(off, off + 8)).toString('latin1').replace(/\0+$/, '')
 
 // Vec<{id [u8;8], amount u128, ...}>: Balances.Locks items carry a trailing

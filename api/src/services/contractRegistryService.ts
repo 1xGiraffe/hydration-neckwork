@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { xxhashAsU8a, keccakAsHex } from '@polkadot/util-crypto'
 import { u8aToHex, u8aConcat, hexToU8a } from '@polkadot/util'
 import { substrateAllKeys, substrateStorageBatch } from './substrateRpc.ts'
+import { RareEventLedger, type RareEventRow } from './rareEventLedger.ts'
 
 // EVM smart-contract registry.
 //
@@ -280,12 +281,23 @@ export function initContractRegistryService(c: ClickHouseClient): void { client 
 
 let entries = new Map<string, ContractRegistryEntry>()
 let accountForms = new Set<string>()   // both H160 and ETH-prefixed AccountId32, lowercase
-let warnings: string[] = []
 
 async function rows<T>(query: string, query_params?: Record<string, unknown>): Promise<T[]> {
   const res = await client.query({ query, query_params, format: 'JSONEachRow' })
   return (res as { json: <R>() => Promise<R[]> }).json<T>()
 }
+
+// The deployer allow-list, on the shared rare-event ledger: the read names only
+// an event_name, so raw_events cannot prune by key and the event-name index
+// still leaves millions of rows to scan for a handful of governance actions.
+// The ledger reads the family once and afterwards only the tail.
+interface DeployerEventRow extends RareEventRow { event_name: string; who: string }
+const deployerLedger = new RareEventLedger<DeployerEventRow>({
+  eventNames: ['EVMAccounts.DeployerAdded', 'EVMAccounts.DeployerRemoved'],
+  columnsSql: `block_height, event_index, event_name, lower(JSONExtractString(args_json, 'who')) AS who`,
+  head: async () => Number((await rows<{ h: number }>(`SELECT max(block_height) AS h FROM price_data.raw_blocks`))[0]?.h ?? 0),
+  client: () => client,
+})
 
 async function loadRegistryUncached(): Promise<void> {
   const [snapshot, creates, createExecuted, whitelistEvents] = await Promise.all([
@@ -301,11 +313,7 @@ async function loadRegistryUncached(): Promise<void> {
       FROM price_data.evm_executed
       WHERE extrinsic_index IS NOT NULL
         AND (block_height, assumeNotNull(extrinsic_index)) IN (SELECT block_height, extrinsic_index FROM price_data.evm_create_transactions)`),
-    rows<{ event_name: string; who: string }>(`
-      SELECT event_name, lower(JSONExtractString(args_json, 'who')) AS who
-      FROM price_data.raw_events
-      WHERE event_name IN ('EVMAccounts.DeployerAdded', 'EVMAccounts.DeployerRemoved')
-      ORDER BY block_height, event_index`),
+    deployerLedger.rows(),
   ])
 
   const addrs = snapshot.map(r => r.address.toLowerCase()).filter(a => EVM_RE.test(a))
@@ -388,7 +396,6 @@ async function loadRegistryUncached(): Promise<void> {
   }
   entries = built.entries
   accountForms = forms
-  warnings = built.warnings
 }
 
 let loadInflight: Promise<void> | null = null
@@ -425,10 +432,6 @@ export function allContracts(): ContractRegistryEntry[] {
 export function contractsPage(offset: number, limit: number, sort: ContractSort): { rows: ContractRegistryEntry[]; total: number } {
   return pageContracts(allContracts(), offset, limit, sort)
 }
-export function contractRegistryWarnings(): string[] {
-  return [...warnings]
-}
-
 // ---- chain-state snapshot refresher (node-full; scheduled by backgroundRefresh) ----
 
 const ACCOUNT_CODES_PREFIX = u8aToHex(u8aConcat(xxhashAsU8a('EVM', 128), xxhashAsU8a('AccountCodes', 128)))

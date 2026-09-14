@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { chTimestamp, prunePending, sqdCallName, sqdEventName, type PendingBlock } from '../src/services/pendingHeadService.ts'
+import { prunePending, sqdCallName, sqdEventName, type PendingBlock } from '../src/services/pendingHeadService.ts'
+import { chTimestamp, chTimestampMs } from '../src/services/clickhouseTime.ts'
 
 // Pending rows must read IDENTICALLY to their finalized versions, or the same
 // extrinsic would change its display name the moment it finalizes: SQD names
@@ -17,9 +18,17 @@ describe('sqd naming', () => {
   })
 })
 
-describe('chTimestamp', () => {
+describe('ClickHouse DateTime literals', () => {
   it('formats like a ClickHouse DateTime string', () => {
-    expect(chTimestamp(Date.UTC(2026, 7, 6, 12, 34, 56))).toBe('2026-08-06 12:34:56')
+    expect(chTimestampMs(Date.UTC(2026, 7, 6, 12, 34, 56))).toBe('2026-08-06 12:34:56')
+  })
+
+  // The two differ by a factor of 1000 and were indistinguishable at a call site
+  // while both were spelled `chTimestamp`, so the unit is in the name.
+  it('reads its argument in the unit its name states', () => {
+    const ms = Date.UTC(2026, 7, 6, 12, 34, 56)
+    expect(chTimestamp(ms / 1000)).toBe(chTimestampMs(ms))
+    expect(chTimestamp(ms)).not.toBe(chTimestampMs(ms))
   })
 })
 

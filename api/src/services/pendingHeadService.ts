@@ -3,6 +3,7 @@ import { decodeAddress } from '@polkadot/util-crypto'
 import { u8aToHex } from '@polkadot/util'
 import type { ClickHouseClient } from '../db/client.ts'
 import { SUBSTRATE_RPC_URL } from './substrateRpc.ts'
+import { chTimestampMs } from './clickhouseTime.ts'
 
 // The pending-head layer: the last few UNFINALIZED (best-head) blocks, decoded
 // straight from the node and held in memory only. Feeds and detail lookups
@@ -220,19 +221,61 @@ const MEMPOOL_MAX_REJECTED_SHOWN = 8
 // surplus beyond the cap — are remembered so the sweep skips them without
 // re-admitting or re-judging. Bounded and insertion-ordered: at the cap the oldest
 // is dropped, and if it is still in the node's pool it is simply re-judged once.
+//
+// Each entry carries WHY it was suppressed, because the two causes differ in
+// durability. Flood surplus is judged against a cap that only a quieter pool can
+// relieve, so its skip is unconditional. A FOLLOWUP is condemned by a transient
+// condition — another transaction from the same signer, at a lower nonce, that
+// was rejected AT THAT MOMENT. Bump its tip and it is included; the followup is
+// then the pool head and must become a row again. Remembering only the hash made
+// that suppression permanent for the process lifetime: invisible in the feed and
+// a 404 on its own page until restart.
 const MEMPOOL_SUPPRESSED_MAX = 20_000
 const DRY_RUN_XCM_VERSION = 4
+export type SuppressionCause =
+  | { kind: 'followup'; signerId: string; nonce: number }
+  | { kind: 'surplus' }
 const poolByHash = new Map<string, MempoolTx>()
-const suppressedHashes = new Set<string>()
+const suppressedHashes = new Map<string, SuppressionCause>()
 let poolGeneration = 0
 
-function suppress(hash: string): void {
+function suppress(hash: string, cause: SuppressionCause): void {
   if (suppressedHashes.has(hash)) return
-  suppressedHashes.add(hash)
+  suppressedHashes.set(hash, cause)
   if (suppressedHashes.size > MEMPOOL_SUPPRESSED_MAX) {
-    const oldest = suppressedHashes.values().next().value
+    const oldest = suppressedHashes.keys().next().value
     if (oldest !== undefined) suppressedHashes.delete(oldest)
   }
+}
+
+// The lowest nonce each signer currently has a REJECTED transaction at — the
+// same floor classifySuppressed condemns followups against, read back from what
+// is still tracked.
+export function rejectedNonceFloors(
+  txs: Array<Pick<MempoolTx, 'signerId' | 'nonce' | 'includability'>>,
+): Map<string, number> {
+  const floors = new Map<string, number>()
+  for (const tx of txs) {
+    if (tx.includability !== 'rejected' || tx.signerId == null || tx.nonce == null) continue
+    const cur = floors.get(tx.signerId)
+    if (cur == null || tx.nonce < cur) floors.set(tx.signerId, tx.nonce)
+  }
+  return floors
+}
+
+// Which suppressed hashes are no longer condemned. A followup survives only while
+// its blocker does; surplus is never revoked here.
+export function revocableSuppressions(
+  suppressed: Map<string, SuppressionCause>,
+  floors: Map<string, number>,
+): string[] {
+  const free: string[] = []
+  for (const [hash, cause] of suppressed) {
+    if (cause.kind !== 'followup') continue
+    const floor = floors.get(cause.signerId)
+    if (floor == null || cause.nonce <= floor) free.push(hash)
+  }
+  return free
 }
 
 // What the feeds show as "in the pool": everything the node still lists, plus
@@ -269,24 +312,24 @@ export function poolRowVisible(tx: Pick<MempoolTx, 'inPool' | 'droppedAtMs' | 'c
 export function classifySuppressed(
   txs: Array<Pick<MempoolTx, 'hash' | 'signerId' | 'nonce' | 'includability' | 'firstSeenMs'>>,
   maxRejectedShown: number,
-): Set<string> {
-  const minRejectedNonce = new Map<string, number>()
-  for (const tx of txs) {
-    if (tx.includability !== 'rejected' || tx.signerId == null || tx.nonce == null) continue
-    const cur = minRejectedNonce.get(tx.signerId)
-    if (cur == null || tx.nonce < cur) minRejectedNonce.set(tx.signerId, tx.nonce)
-  }
-  const suppressed = new Set<string>()
+): Map<string, SuppressionCause> {
+  const minRejectedNonce = rejectedNonceFloors(txs)
+  const suppressed = new Map<string, SuppressionCause>()
   const heads: Array<{ hash: string; firstSeenMs: number }> = []
   for (const tx of txs) {
     const floor = tx.signerId != null ? minRejectedNonce.get(tx.signerId) : undefined
     // Strictly above a rejected nonce from the same signer: a doomed followup.
-    if (floor != null && tx.nonce != null && tx.nonce > floor) { suppressed.add(tx.hash); continue }
+    // Recorded with the blocker it is doomed BY, so the sweep can let it go once
+    // that blocker is gone (see revocableSuppressions).
+    if (floor != null && tx.nonce != null && tx.nonce > floor) {
+      suppressed.set(tx.hash, { kind: 'followup', signerId: tx.signerId!, nonce: tx.nonce })
+      continue
+    }
     if (tx.includability === 'rejected') heads.push(tx)
   }
   // Keep the longest-waiting failing heads; suppress the newer surplus.
   heads.sort((a, b) => a.firstSeenMs - b.firstSeenMs)
-  for (const tx of heads.slice(maxRejectedShown)) suppressed.add(tx.hash)
+  for (const tx of heads.slice(maxRejectedShown)) suppressed.set(tx.hash, { kind: 'surplus' })
   return suppressed
 }
 
@@ -359,9 +402,6 @@ export function sqdEventName(section: string, method: string): string {
   return `${section.charAt(0).toUpperCase()}${section.slice(1)}.${method}`
 }
 
-export function chTimestamp(ms: number): string {
-  return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
-}
 
 // A Vec of { asset, amount } structs (polkadot-js Structs extend Map).
 function decodeAssetAmountVec(codec: unknown): { assetId: number; amount: string }[] {
@@ -580,7 +620,7 @@ async function fetchPendingBlock(height: number): Promise<PendingBlock | null> {
     height,
     hash: hash.toLowerCase(),
     parentHash: signedBlock.block.header.parentHash.toHex().toLowerCase(),
-    timestamp: chTimestamp(timestampMs),
+    timestamp: chTimestampMs(timestampMs),
     specVersion: runtime.specVersion.toNumber(),
     extrinsics,
     events,
@@ -652,6 +692,11 @@ async function syncMempool(): Promise<void> {
 async function sweepMempool(): Promise<void> {
   if (!api) return
   const pool = await api.rpc.author.pendingExtrinsics()
+  // Let go of every followup whose blocker has cleared, BEFORE the skip below —
+  // otherwise the pool head the node is now offering stays invisible forever.
+  for (const hash of revocableSuppressions(suppressedHashes, rejectedNonceFloors([...poolByHash.values()]))) {
+    suppressedHashes.delete(hash)
+  }
   const seen = new Set<string>()
   const admit: { hash: string; ext: unknown }[] = []
   let changed = false
@@ -684,8 +729,8 @@ async function sweepMempool(): Promise<void> {
   // their hashes so the next sweep skips them. Runs every sweep because a rejected
   // head established this sweep is what condemns a followup admitted earlier.
   const doomed = classifySuppressed([...poolByHash.values()], MEMPOOL_MAX_REJECTED_SHOWN)
-  for (const hash of doomed) {
-    suppress(hash)
+  for (const [hash, cause] of doomed) {
+    suppress(hash, cause)
     if (poolByHash.delete(hash)) changed = true
   }
   for (const [hash, tx] of poolByHash) {
@@ -771,7 +816,7 @@ async function buildMempoolTx(hash: string, extRaw: unknown): Promise<MempoolTx>
     tip: ext.tip.toString(),
     version: ext.version,
     callArgs: human?.args ?? null,
-    firstSeen: chTimestamp(now),
+    firstSeen: chTimestampMs(now),
     firstSeenMs: now,
     success: null,
     events: [],

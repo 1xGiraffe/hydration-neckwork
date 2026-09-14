@@ -4,8 +4,9 @@ import {
   decodeLockdownState, decodeOptionalRational, decodePausedKey, decodeRational,
   decodeWithdrawAccumulator, decodeWithdrawConfig, egressSinkChain, pairLockdowns, rationalPct, registryLimitChanges, withdrawConfigText,
   outstandingWhitelistedCalls, registryLimitEventsByAsset, registryLimitsFromEvents,
-  replayPauses, tradabilityStateName, tradableLabels, type LockdownState,
+  replayPauses, stableswapTradabilityFromEvents, tradabilityStateName, type LockdownState,
 } from './securityService.ts'
+import { tradableFlags } from './poolService.ts'
 
 // Every number the Security page shows about a live limit comes out of one of
 // these decoders, so each is pinned against SCALE bytes taken from the live
@@ -361,13 +362,47 @@ describe('replayPauses', () => {
   })
 })
 
-describe('tradableLabels', () => {
+// Stableswap stores only NON-default tradability (the setter deletes the row
+// when the state returns to fully tradable), so the current restriction set is
+// the newest event per (pool, asset) whose bits are not 15. This used to be a
+// second whole-history raw_events scan with a window function; it now folds the
+// rows the shared tradability ledger already holds.
+describe('stableswapTradabilityFromEvents', () => {
+  const ev = (block: number, index: number, poolId: number, assetId: number, bits: number, name = 'Stableswap.TradableStateUpdated') =>
+    ({ event_name: name, block_height: block, event_index: index, args_json: JSON.stringify({ poolId, assetId, state: { bits } }) })
+
+  it('keeps only the newest state per (pool, asset), and only if restricted', () => {
+    expect(stableswapTradabilityFromEvents([
+      ev(100, 0, 102, 10, 0),
+      ev(200, 0, 102, 10, 15),      // restored: no longer a restriction
+      ev(100, 0, 102, 11, 15),
+      ev(300, 0, 102, 11, 11),      // restricted last: kept
+    ])).toEqual([{ pool_id: 102, asset_id: 11, bits: 11 }])
+  })
+
+  it('breaks a same-block tie by event index, as the sort key does', () => {
+    expect(stableswapTradabilityFromEvents([
+      ev(100, 7, 102, 10, 15),
+      ev(100, 3, 102, 10, 0),
+    ])).toEqual([])
+    expect(stableswapTradabilityFromEvents([
+      ev(100, 3, 102, 10, 15),
+      ev(100, 7, 102, 10, 0),
+    ])).toEqual([{ pool_id: 102, asset_id: 10, bits: 0 }])
+  })
+
+  it('ignores the Omnipool half of the shared family', () => {
+    expect(stableswapTradabilityFromEvents([ev(100, 0, 0, 5, 3, 'Omnipool.TradableStateUpdated')])).toEqual([])
+  })
+})
+
+describe('tradableFlags', () => {
   it('names every allowed operation and calls a zero mask frozen', () => {
-    expect(tradableLabels(15)).toEqual(['Sell', 'Buy', 'Add liquidity', 'Remove liquidity'])
-    expect(tradableLabels(0)).toEqual(['Frozen'])
-    expect(tradableLabels(1)).toEqual(['Sell'])
-    expect(tradableLabels(8)).toEqual(['Remove liquidity'])
-    expect(tradableLabels(11)).toEqual(['Sell', 'Buy', 'Remove liquidity'])
+    expect(tradableFlags(15)).toEqual(['Sell', 'Buy', 'Add liquidity', 'Remove liquidity'])
+    expect(tradableFlags(0)).toEqual(['Frozen'])
+    expect(tradableFlags(1)).toEqual(['Sell'])
+    expect(tradableFlags(8)).toEqual(['Remove liquidity'])
+    expect(tradableFlags(11)).toEqual(['Sell', 'Buy', 'Remove liquidity'])
   })
 })
 

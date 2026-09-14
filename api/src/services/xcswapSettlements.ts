@@ -99,11 +99,6 @@ export function xcswapSettlementsEnabled(): boolean {
   return Boolean(config.oneClickToken)
 }
 
-/** The resolved destination of one order, or null when it is not known yet. */
-export function xcswapSettlementFor(depositAddress: string): XcswapSettlement | null {
-  return settlements.get(depositAddress.toLowerCase()) ?? null
-}
-
 export function xcswapSettlementsFor(depositAddresses: readonly string[]): Map<string, XcswapSettlement> {
   const out = new Map<string, XcswapSettlement>()
   for (const address of depositAddresses) {
@@ -111,14 +106,6 @@ export function xcswapSettlementsFor(depositAddresses: readonly string[]): Map<s
     if (hit) out.set(address.toLowerCase(), hit)
   }
   return out
-}
-
-/** Test seam: the sweep's own store, so a test can pin a state without HTTP. */
-export function setXcswapSettlementForTesting(settlement: XcswapSettlement): void {
-  settlements.set(settlement.depositAddress.toLowerCase(), settlement)
-}
-export function clearXcswapSettlementsForTesting(): void {
-  settlements.clear()
 }
 
 // A number 1Click sends as a decimal string; absent or unparseable stays null
