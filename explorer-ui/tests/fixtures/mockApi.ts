@@ -1217,6 +1217,7 @@ function buildHdx(): HdxDashboard {
     buckets.push({
       label: `W${i + 1}`, fromTs: ts(from), toTs: ts(from + 7 * day),
       gigahdx: Math.round(1.5e6 + r() * 9e6), vesting: Math.round(8.2e6 + r() * 3.2e6), vote: Math.round(9e6 + r() * 4.4e7),
+      other: Math.round(2e5 + r() * 1.1e6),
     })
   }
   // Monthly buckets step by calendar month (not 30 days) so no month label repeats.
@@ -1226,6 +1227,7 @@ function buildHdx(): HdxDashboard {
     buckets.push({
       label: `M${i + 1}`, fromTs: ts(monthFrom(i)), toTs: ts(monthFrom(i + 1)),
       gigahdx: Math.round(8e6 + r() * 2.6e7), vesting: Math.round(3.4e7 + r() * 8e6), vote: Math.round(2e7 + r() * 8.5e7),
+      other: Math.round(9e5 + r() * 3.4e6),
     })
   }
   const daily: HdxDailyFlow[] = Array.from({ length: 60 }, (_, i) => {
@@ -1253,10 +1255,10 @@ function buildHdx(): HdxDashboard {
     locks: { types: lockTypes, totalLockedHdx: 2.9e9, lockedPctOfUser: 74.4, vestedUnclaimedHdx: 2.3e8, snapshotAt: ts(now - 3_600_000) },
     unlocks: {
       buckets,
-      laterHdx: { gigahdx: 9.2e7, vesting: 1.6e8, vote: 1.4e8 },
+      laterHdx: { gigahdx: 9.2e7, vesting: 1.6e8, vote: 1.4e8, other: 6.1e6 },
       // The leading "now" column, split by lock kind and summing to
       // unlockableNowHdx — the cards read the split, the ribbon the total.
-      nowHdx: { gigahdx: 1.2e7, vesting: 2.3e8, vote: 4.28e8 },
+      nowHdx: { gigahdx: 1.2e7, vesting: 2.3e8, vote: 4.28e8, other: 1.4e7 },
       unlockableNowHdx: 6.7e8,
       activeVoteHdx: 7.8e8,
       stakingAnytimeHdx: 1.24e9,
