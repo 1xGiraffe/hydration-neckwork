@@ -3,6 +3,7 @@ import { normalizeAddress } from './addressIdentity.ts'
 import { accountIcon } from './omniwatchIdentity.ts'
 import { blake2AsU8a } from '@polkadot/util-crypto'
 import { u8aToHex } from '@polkadot/util'
+import { RareEventLedger, type RareEventRow } from './rareEventLedger.ts'
 
 // Address tags. The whole tag set is user-curated and small, so it lives in
 // memory (refreshed on every edit) for O(1) display resolution, and is also
@@ -354,7 +355,12 @@ export function mmTagMemberRows(reserves: { atoken: string; vdebt: string; pool_
 
 export async function syncMoneyMarketTag(): Promise<void> {
   const res = await client.query({
-    query: `SELECT DISTINCT atoken, vdebt, pool_proxy FROM price_data.atoken_reserve_map`,
+    // FINAL: atoken_reserve_map is ReplacingMergeTree(updated_at) keyed
+    // (asset_address, atoken). Without it a corrected vdebt/pool_proxy under a
+    // fixed key leaves the superseded row visible until merge, and the tag would
+    // take on a stale contract as a member — permanently, since mmTagMemberRows
+    // only ever adds.
+    query: `SELECT DISTINCT atoken, vdebt, pool_proxy FROM price_data.atoken_reserve_map FINAL`,
     format: 'JSONEachRow',
   })
   const reserves = await res.json<{ atoken: string; vdebt: string; pool_proxy: string }>()
@@ -378,6 +384,17 @@ const LM_PREFIXES = ['OmniWhLM', 'Omni//LM', 'XYK///LM', 'xykLMpID'].map(id => (
 // markers: 'sibl' for a sibling parachain, 'para' for a (relay-registered) para
 // id. Matching only 'sibl' left the 'para' form untagged.
 export const SOVEREIGN_PREFIXES = ['sibl', 'para'].map(id => ('0x' + Buffer.from(id, 'latin1').toString('hex')).toLowerCase())
+interface PoolCreatedRow extends RareEventRow { acc: string }
+const lbpPoolLedger = new RareEventLedger<PoolCreatedRow>({
+  eventNames: ['LBP.PoolCreated'],
+  columnsSql: `block_height, event_index, JSONExtractString(args_json, 'pool') AS acc`,
+  head: async () => {
+    const res = await client.query({ query: `SELECT max(block_height) AS h FROM price_data.raw_blocks`, format: 'JSONEachRow' })
+    return Number((await res.json<{ h: number }>())[0]?.h ?? 0)
+  },
+  client: () => client,
+})
+
 const STRUCTURAL_TAGS = [
   { tagId: 'xyk-pools', name: 'XYK Pool', color: '#86c4f5', note: 'XYK AMM pair account — holds the pool reserves', icon: '💧' },
   { tagId: 'stableswap-pools', name: 'Stableswap Pool', color: '#57a5ec', note: 'Stableswap pool account — holds the pool reserves', icon: '💧' },
@@ -387,20 +404,23 @@ const STRUCTURAL_TAGS = [
 ] as const
 
 export async function syncStructuralTags(): Promise<void> {
-  const [xykRes, stableRes, lbpRes, prefixRes] = await Promise.all([
+  // XYK and stableswap pools are read from their MV-fed registries, not from
+  // raw_events: the registries are 730 and 17 rows, against a 302M-row
+  // raw_events scan the event-name index barely prunes. Verified equal
+  // (730/730 accounts, 17/17 pool ids).
+  const [xykRes, stableRes, lbpRows, prefixRes] = await Promise.all([
     client.query({
-      query: `SELECT DISTINCT JSONExtractString(args_json, 'pool') AS acc FROM price_data.raw_events WHERE event_name = 'XYK.PoolCreated'`,
+      query: `SELECT DISTINCT pool_account AS acc FROM price_data.xyk_pool_registry FINAL`,
       format: 'JSONEachRow',
     }),
     client.query({
-      query: `SELECT DISTINCT JSONExtractInt(args_json, 'poolId') AS pool_id FROM price_data.raw_events WHERE event_name = 'Stableswap.PoolCreated'`,
+      query: `SELECT DISTINCT pool_id FROM price_data.stableswap_pool_params FINAL WHERE event_name = 'Stableswap.PoolCreated'`,
       format: 'JSONEachRow',
     }),
-    // LBP pools name their account on the creation event exactly as XYK does.
-    client.query({
-      query: `SELECT DISTINCT JSONExtractString(args_json, 'pool') AS acc FROM price_data.raw_events WHERE event_name = 'LBP.PoolCreated'`,
-      format: 'JSONEachRow',
-    }),
+    // LBP pools name their account on the creation event exactly as XYK does,
+    // and have no registry of their own — two rows in all of history, so the
+    // ledger reads them once and afterwards only the tail.
+    lbpPoolLedger.rows(),
     client.query({
       query: `SELECT DISTINCT account_id FROM price_data.account_asset_latest_balances
               WHERE ${SOVEREIGN_PREFIXES.map(p => `startsWith(account_id, '${p}')`).join(' OR ')}
@@ -411,7 +431,7 @@ export async function syncStructuralTags(): Promise<void> {
   const poolAccounts = (rows: { acc: string }[]): string[] =>
     rows.map(r => r.acc.toLowerCase()).filter(a => /^0x[0-9a-f]{64}$/.test(a))
   const xyk = poolAccounts(await xykRes.json<{ acc: string }>())
-  const lbp = poolAccounts(await lbpRes.json<{ acc: string }>())
+  const lbp = poolAccounts(lbpRows)
   const stable = (await stableRes.json<{ pool_id: number }>()).filter(r => r.pool_id > 0).map(r => stableswapPoolAccount(r.pool_id))
   const prefixAccounts = (await prefixRes.json<{ account_id: string }>()).map(r => r.account_id.toLowerCase())
   const membersByTag: Record<string, string[]> = {

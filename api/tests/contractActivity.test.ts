@@ -122,6 +122,10 @@ function fakeClient(): ClickHouseClient {
               },
             ]
           }
+          // The deployer allow-list rides the rare-event ledger, which names its
+          // family in a query parameter and asks the head for its settled floor.
+          if (q.includes('max(block_height)')) return [{ h: 1_000 }]
+          if (q.includes('AS who')) return []
           throw new Error(`unexpected query: ${q}`)
         },
       }

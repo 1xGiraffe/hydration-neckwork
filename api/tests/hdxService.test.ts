@@ -440,6 +440,27 @@ describe('unlockSeriesFromTimelines — overlap-corrected unlock buckets', () =>
     expect(r.buckets[0].gigahdx).toBeCloseTo(10, 0)
     expect(r.buckets[1].gigahdx).toBeCloseTo(25, 0)
   })
+
+  // The series is an ATTRIBUTION of the frozen envelope, so its slices have to
+  // sum back to it. LOCK_ID_SOURCES also emits staking, democracy, elections
+  // and sufficiency, and passes an unmapped lock id through verbatim; those have
+  // no schedule of their own, and dropping them took their balance out of the
+  // chart AND out of unlockableNowHdx with no trace.
+  it('keeps a slice whose cause has no series of its own, in "other"', () => {
+    const r = unlockSeriesFromTimelines(
+      [slices(
+        { state: 'releasable', cause: 'staking', amount: 40n * HDX },
+        { state: 'scheduled', cause: 'democracy', amount: 60n * HDX, until: now + 1 * day },
+        { state: 'active', cause: 'somenewpallet', amount: 5n * HDX },
+      )],
+      buckets, now,
+    )
+    expect(r.now.other).toBeCloseTo(40, 6)
+    expect(r.buckets[0].other).toBeCloseTo(60, 6)
+    expect(r.active.other).toBeCloseTo(5, 6)
+    // and never leaks into a named series
+    expect(r.now.gigahdx + r.now.vesting + r.now.vote).toBe(0)
+  })
 })
 
 describe('unlockKeyForCause', () => {
@@ -454,8 +475,15 @@ describe('unlockKeyForCause', () => {
     expect(unlockKeyForCause('vote+vesting')).toBe('vesting')
   })
 
-  it('ignores causes with no series of their own', () => {
-    expect(unlockKeyForCause('staking')).toBe(null)
-    expect(unlockKeyForCause('')).toBe(null)
+  // Every cause LOCK_ID_SOURCES can produce lands somewhere. Dropping the ones
+  // without a schedule of their own (staking, democracy, elections, sufficiency,
+  // and any unmapped lock id, which passes through verbatim) took their balance
+  // out of the chart entirely and out of unlockableNowHdx with it, so the series
+  // stopped summing to the frozen envelope it is an attribution of.
+  it('folds a cause with no series of its own into "other" rather than dropping it', () => {
+    expect(unlockKeyForCause('staking')).toBe('other')
+    expect(unlockKeyForCause('democracy')).toBe('other')
+    expect(unlockKeyForCause('somenewpallet')).toBe('other')
+    expect(unlockKeyForCause('')).toBe('other')
   })
 })

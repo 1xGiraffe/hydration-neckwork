@@ -1,12 +1,11 @@
 import { describe, it, expect } from 'vitest'
+import { assetIdFromPrecompile, erc20Precompile } from '../src/services/chainPrimitives.ts'
 import {
-  assetIdFromPrecompile,
   base58Decode,
   base58Encode,
   decodeGetPeer,
   decodeInboundQueuedTransfer,
   decodeU128Le,
-  decodeU32Le,
   deTrim,
   displayChainAddress,
   encodeBalanceOf,
@@ -364,6 +363,14 @@ describe('EVM call encoding and decoding', () => {
     // A real contract is not a precompile and must not resolve to an asset.
     expect(assetIdFromPrecompile('0x531a654d1696ed52e7275a8cede955e82620f99a')).toBeNull()
   })
+
+  it('is the exact inverse of erc20Precompile', () => {
+    // The two live side by side precisely so this holds: the forward direction
+    // builds the balanceOf target, the reverse reads a payload's sourceToken.
+    for (const assetId of [0, 21, 222, 1_000_753]) {
+      expect(assetIdFromPrecompile(erc20Precompile(assetId))).toBe(assetId)
+    }
+  })
 })
 
 describe('substrate storage keys', () => {
@@ -379,7 +386,6 @@ describe('substrate storage keys', () => {
     expect(decodeU128Le('0x' + '15cd5b07' + '00'.repeat(12))).toBe(123_456_789n)
     expect(decodeU128Le(null)).toBeNull()
     expect(decodeU128Le('0x00')).toBeNull()
-    expect(decodeU32Le('0x' + 'efd7d100')).toBe(13_752_303)
   })
 })
 

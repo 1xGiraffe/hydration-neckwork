@@ -2,6 +2,9 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { cachedSwr } from './cache.ts'
 import { ensurePrices, getAtokenSuppliedDailyHistory, getMoneyMarketReserves, mmMarkets, type AssetRef, type PriceInfo } from './explorerService.ts'
 import { assetDescriptor } from './explorerAssets.ts'
+import { usdOfRaw } from './assetValue.ts'
+import { HOLLAR_ASSET_ID } from './revenueStreams.ts'
+import { OMNIPOOL_ACCOUNT } from './valuation.ts'
 import { parsePoolAssetIds } from './stableswapSnapshot.ts'
 import { alignMonthly, carryForward } from './hdxService.ts'
 
@@ -15,11 +18,8 @@ import { alignMonthly, carryForward } from './hdxService.ts'
 let client: ClickHouseClient
 export function initHollarService(c: ClickHouseClient): void { client = c }
 
-const HOLLAR_ASSET_ID = 222
 // modl + "py/hsmod" — the HSM pallet's holding account for approved collaterals.
 const HSM_ACCOUNT = '0x6d6f646c70792f68736d6f640000000000000000000000000000000000000000'
-// modl + "omnipool" — the Omnipool pallet account.
-const OMNIPOOL_ACCOUNT = '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000'
 const PEG_WINDOW_DAYS = 30
 const CHART_WINDOW_DAYS = 60
 
@@ -33,12 +33,8 @@ function safeJsonObj(s: string | null | undefined): Record<string, unknown> {
   } catch { return {} }
 }
 
-function usdOf(prices: Map<number, PriceInfo>, assetId: number, raw: string, decimals: number): number | null {
-  const p = prices.get(assetId)
-  if (!p) return null
-  const amt = Number(raw) / 10 ** decimals
-  return Number.isFinite(amt) ? amt * p.price : null
-}
+const usdOf = (prices: Map<number, PriceInfo>, assetId: number, raw: string, decimals: number): number | null =>
+  usdOfRaw(prices, assetId, raw, decimals)
 
 // Emit a continuous `n`-day axis (today inclusive), same idiom as the explorer's
 // other daily charts — sparse days (arb/trade quiet periods) render as zero

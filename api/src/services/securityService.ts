@@ -1,13 +1,17 @@
 import type { ClickHouseClient } from '../db/client.ts'
-import { xxhashAsU8a } from '@polkadot/util-crypto'
-import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
+import { u8aToHex, hexToU8a } from '@polkadot/util'
+import { storagePrefix, twox64Concat, u32At, u32Le, u64At, u128At } from './chainPrimitives.ts'
+// The Omnipool hub asset (H2O) is exempt from every per-block limit and cannot
+// have one; its id comes from the module that owns the Omnipool's own math.
+import { HUB_ASSET_ID } from './lpMath.ts'
 import { substrateStorageBatch, substrateAllKeys, SUBSTRATE_RPC_URL } from './substrateRpc.ts'
 import { cachedSwr } from './cache.ts'
-import { RareEventLedger } from './rareEventLedger.ts'
+import { RareEventLedger, type RareEventRow } from './rareEventLedger.ts'
 import { nominalBlockMsMismatch, resolveParaBlockTime, type ResolvedBlockTime } from './blockTime.ts'
-import { accountRef, ensurePrices, mmMarkets, parachainName, usdValue, type AccountRef, type AssetRef, type PriceInfo } from './explorerService.ts'
+import { accountRef, ensurePrices, mmMarkets, parachainName, type AccountRef, type AssetRef, type PriceInfo } from './explorerService.ts'
+import { usdOfRaw } from './assetValue.ts'
 import { assetDescriptor } from './explorerAssets.ts'
-import { loadCurrentPools } from './poolService.ts'
+import { loadCurrentPools, tradableFlags } from './poolService.ts'
 import { resolveModuleError } from './runtimeErrorNames.ts'
 import { getWormholeManagers, getWormholeSummary, type WormholeManagerRef, type WormholeSummary } from './wormholeNttService.ts'
 import { parseNttLimitUpdate, parseNttPauseEvent, parseNttQueuedTransfer, TOPIC } from './wormholeNtt.ts'
@@ -140,8 +144,6 @@ async function checkFusePeriodPin(): Promise<void> {
 
 // Hydration's reference currency for the global withdraw limit is HDX.
 const HDX_DECIMALS = 12
-// The Omnipool hub asset is exempt from every per-block limit and cannot have one.
-const HUB_ASSET_ID = 1
 // Runtime defaults: (5000, 10000) net trade volume and Some((500, 10000)) for
 // both liquidity directions (runtime/hydradx/src/assets.rs).
 const DEFAULT_TRADE_LIMIT: Rational = [5_000, 10_000]
@@ -150,22 +152,7 @@ const CIRCUIT_BREAKER_PALLET_INDEX = 65
 
 export type Rational = [number, number]
 
-const prefix = (p: string, s: string) => u8aToHex(u8aConcat(xxhashAsU8a(p, 128), xxhashAsU8a(s, 128)))
-const CB = (item: string) => prefix('CircuitBreaker', item)
-
-const u32Le = (n: number): Uint8Array => new Uint8Array([n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff])
-const twox64Concat = (b: Uint8Array) => u8aConcat(xxhashAsU8a(b, 64), b)
-
-function u32At(b: Uint8Array, off: number): number {
-  return (b[off] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24)) >>> 0
-}
-function uintAt(b: Uint8Array, off: number, bytes: number): bigint {
-  let n = 0n
-  for (let i = bytes - 1; i >= 0; i--) n = (n << 8n) | BigInt(b[off + i])
-  return n
-}
-const u64At = (b: Uint8Array, off: number) => uintAt(b, off, 8)
-const u128At = (b: Uint8Array, off: number) => uintAt(b, off, 16)
+const CB = (item: string) => storagePrefix('CircuitBreaker', item)
 
 // pure decoders (unit-tested)
 
@@ -372,6 +359,35 @@ const whitelistLedger = new RareEventLedger<WhitelistEventRow>({
   client: () => client,
 })
 
+// The rest of the dashboard's whole-history families, on the same ledger and for
+// the same reason: every one of them named only an event_name, so raw_events
+// could not prune by key, and all of them ran on the 20 s rebuild. Each family is
+// a few hundred rows across four years of chain.
+interface LimitLedgerRow extends LimitEventRow { event_index: number }
+interface PauseLedgerRow extends PauseEventRow { event_index: number }
+const LIMIT_LEDGER_COLUMNS = 'block_height, block_timestamp, event_name, args_json, extrinsic_index, event_index'
+const ledger = <T extends RareEventRow>(eventNames: string[], columnsSql = LIMIT_LEDGER_COLUMNS) =>
+  new RareEventLedger<T>({ eventNames, columnsSql, head: async () => (await queryHead()).block_height, client: () => client })
+
+const lockdownLedger = ledger<LimitLedgerRow>(['CircuitBreaker.AssetLockdown', 'CircuitBreaker.AssetLockdownRemoved'])
+const depositReleaseLedger = ledger<RareEventRow>(['CircuitBreaker.DepositReleased'], 'block_height, event_index')
+const limitEventLedger = ledger<LimitLedgerRow>([
+  'CircuitBreaker.TradeVolumeLimitChanged', 'CircuitBreaker.AddLiquidityLimitChanged',
+  'CircuitBreaker.RemoveLiquidityLimitChanged', 'CircuitBreaker.WithdrawLimitConfigUpdated',
+  'CircuitBreaker.WithdrawLockdownTriggered', 'CircuitBreaker.WithdrawLockdownLifted',
+  'CircuitBreaker.WithdrawLockdownReset', 'CircuitBreaker.EgressAccountsAdded',
+  'CircuitBreaker.EgressAccountsRemoved', 'CircuitBreaker.AssetCategoryUpdated',
+])
+const pauseLedger = ledger<PauseLedgerRow>(
+  ['TransactionPause.TransactionPaused', 'TransactionPause.TransactionUnpaused'],
+  `${LIMIT_LEDGER_COLUMNS},
+   JSONExtractString(args_json, 'palletNameBytes') AS pallet_hex,
+   JSONExtractString(args_json, 'functionNameBytes') AS call_hex`,
+)
+// ONE ledger for both tradability surfaces: the stableswap set is a subset of
+// this family, so reading it twice read the same rows twice.
+const tradabilityLedger = ledger<LimitLedgerRow>(['Omnipool.TradableStateUpdated', 'Stableswap.TradableStateUpdated'])
+
 // Every asset that currently declares an `xcm_rate_limit`, reconstructed from the
 // registry's own events: `Registered`/`Updated` both carry the asset's full state,
 // so the newest event per asset IS the current registry entry. Verified against
@@ -533,16 +549,16 @@ export async function refreshSecurityChainState(): Promise<void> {
     const limitedAssets = [...limits.keys()].sort((a, b) => a - b)
 
     const plainKeys = [
-      prefix('System', 'Number'),
-      prefix('Timestamp', 'Now'),
+      storagePrefix('System', 'Number'),
+      storagePrefix('Timestamp', 'Now'),
       CB('GlobalWithdrawLimitConfig'),
       CB('WithdrawLimitAccumulator'),
       CB('WithdrawLockdownUntil'),
-      prefix('Omnipool', 'HubAssetTradability'),
-      prefix('Balances', 'TotalIssuance'),
+      storagePrefix('Omnipool', 'HubAssetTradability'),
+      storagePrefix('Balances', 'TotalIssuance'),
     ]
     // orml-tokens keys its currency maps with Twox64Concat.
-    const issuancePrefix = prefix('Tokens', 'TotalIssuance')
+    const issuancePrefix = storagePrefix('Tokens', 'TotalIssuance')
     const issuanceKeys = limitedAssets
       .filter(id => id !== 0)
       .map(id => issuancePrefix + u8aToHex(twox64Concat(u32Le(id))).slice(2))
@@ -556,7 +572,7 @@ export async function refreshSecurityChainState(): Promise<void> {
       readAssetMap<Rational | null>(CB('LiquidityRemoveLimitPerAsset'), decodeOptionalRational),
       substrateAllKeys(CB('EgressAccounts')),
       readAssetMap(CB('GlobalAssetOverrides'), hex => { const b = hexToU8a(hex); return b.length ? (b[0] === 1 ? 'local' : 'external') : null }),
-      substrateAllKeys(prefix('TransactionPause', 'PausedTransactions')),
+      substrateAllKeys(storagePrefix('TransactionPause', 'PausedTransactions')),
     ])
 
     const headBlock = plain[0] ? u32At(hexToU8a(plain[0]), 0) : 0
@@ -831,13 +847,6 @@ const extrinsicId = (block: number, index: number | null): string | null => (ind
 // let the UI link to the extrinsic when there is one and the block otherwise.
 const extrinsicIndexOf = (index: number | null | undefined): number | null => (index == null ? null : Number(index))
 
-function usdOf(prices: Map<number, PriceInfo>, assetId: number, raw: bigint, decimals: number): number | null {
-  const p = prices.get(assetId)
-  if (!p) return null
-  const amount = Number(raw) / 10 ** decimals
-  return Number.isFinite(amount) ? amount * p.price : null
-}
-
 const PEAK_WINDOW_DAYS = 30
 
 interface HeadRow { block_height: number; block_timestamp: string }
@@ -847,7 +856,7 @@ interface TripSourceRow { block_height: number; block_timestamp: string; extrins
 interface PeakRow { asset_id: number; peak_net: string; peak_block: number }
 interface TradabilityEventRow { asset_id: number; pool_id: number | null; bits: number }
 interface WhitelistRow { call_hash: string; block_height: number; block_timestamp: string }
-interface MemberRow { block_height: number; args_json: string }
+export interface MemberRow { block_height: number; args_json: string }
 
 const hexToUtf8 = (hex: string): string => Buffer.from(hex.replace(/^0x/, ''), 'hex').toString('utf8')
 
@@ -926,43 +935,14 @@ async function queryHead(): Promise<HeadRow> {
   return rows[0] ?? { block_height: 0, block_timestamp: new Date(0).toISOString() }
 }
 
-async function queryLockdownEvents(): Promise<LimitEventRow[]> {
-  const res = await client.query({
-    query: `SELECT block_height, block_timestamp, event_name, args_json, extrinsic_index
-            FROM price_data.raw_events
-            WHERE event_name IN ('CircuitBreaker.AssetLockdown', 'CircuitBreaker.AssetLockdownRemoved')
-            ORDER BY block_height, event_index`,
-    format: 'JSONEachRow',
-  })
-  return res.json<LimitEventRow>()
-}
+const queryLockdownEvents = (): Promise<LimitEventRow[]> => lockdownLedger.rows()
 
-async function queryDepositReleases(): Promise<number> {
-  const res = await client.query({
-    query: `SELECT count() AS c FROM price_data.raw_events WHERE event_name = 'CircuitBreaker.DepositReleased'`,
-    format: 'JSONEachRow',
-  })
-  return Number((await res.json<{ c: string }>())[0]?.c ?? 0)
-}
+const queryDepositReleases = async (): Promise<number> => (await depositReleaseLedger.rows()).length
 
 // Every circuit-breaker configuration change ever made. `AssetCategoryUpdated`
 // fired 58 times in one governance batch, so it is folded into a single entry by
 // the timeline builder rather than filling the list.
-async function queryLimitEvents(): Promise<LimitEventRow[]> {
-  const res = await client.query({
-    query: `SELECT block_height, block_timestamp, event_name, args_json, extrinsic_index
-            FROM price_data.raw_events
-            WHERE event_name IN (
-              'CircuitBreaker.TradeVolumeLimitChanged', 'CircuitBreaker.AddLiquidityLimitChanged',
-              'CircuitBreaker.RemoveLiquidityLimitChanged', 'CircuitBreaker.WithdrawLimitConfigUpdated',
-              'CircuitBreaker.WithdrawLockdownTriggered', 'CircuitBreaker.WithdrawLockdownLifted',
-              'CircuitBreaker.WithdrawLockdownReset', 'CircuitBreaker.EgressAccountsAdded',
-              'CircuitBreaker.EgressAccountsRemoved', 'CircuitBreaker.AssetCategoryUpdated')
-            ORDER BY block_height, event_index`,
-    format: 'JSONEachRow',
-  })
-  return res.json<LimitEventRow>()
-}
+const queryLimitEvents = (): Promise<LimitEventRow[]> => limitEventLedger.rows()
 
 // Every registry event that could carry a deposit-fuse limit, grouped so the
 // ledger can diff each asset's own history. `Updated` restates the whole entry,
@@ -1101,18 +1081,7 @@ export function buildWormholeSafetyEvents(
 
 // TransactionPause emits only on a real state change, so pause/unpause events are
 // a complete ledger and the currently-paused set is exactly derivable from them.
-async function queryPauseEvents(): Promise<PauseEventRow[]> {
-  const res = await client.query({
-    query: `SELECT block_height, block_timestamp, event_name, args_json, extrinsic_index,
-                   JSONExtractString(args_json, 'palletNameBytes') AS pallet_hex,
-                   JSONExtractString(args_json, 'functionNameBytes') AS call_hex
-            FROM price_data.raw_events
-            WHERE event_name IN ('TransactionPause.TransactionPaused', 'TransactionPause.TransactionUnpaused')
-            ORDER BY block_height, event_index`,
-    format: 'JSONEachRow',
-  })
-  return res.json<PauseEventRow>()
-}
+const queryPauseEvents = (): Promise<PauseEventRow[]> => pauseLedger.rows()
 
 // Circuit-breaker rejections from all four places a Module error surfaces. The
 // error index is the first byte of the 4-byte LE error field; the name depends on
@@ -1246,33 +1215,32 @@ async function queryPeakBlockVolumeUncached(): Promise<Map<number, PeakRow>> {
 // The newest tradability state each Omnipool asset was ever set to. Assets still
 // in the pool read their live bits from the block snapshot; this covers the
 // delisted ones, whose last event is the only record left.
-async function queryOmnipoolTradabilityHistory(): Promise<LimitEventRow[]> {
-  const res = await client.query({
-    query: `SELECT block_height, block_timestamp, event_name, args_json, extrinsic_index
-            FROM price_data.raw_events
-            WHERE event_name IN ('Omnipool.TradableStateUpdated', 'Stableswap.TradableStateUpdated')
-            ORDER BY block_height, event_index`,
-    format: 'JSONEachRow',
-  })
-  return res.json<LimitEventRow>()
-}
+const queryOmnipoolTradabilityHistory = (): Promise<LimitEventRow[]> => tradabilityLedger.rows()
 
 // Stableswap stores only NON-default tradability (the setter deletes the row when
 // the state returns to fully-tradable), so the newest event per (pool, asset) with
 // non-default bits is the current restriction set.
-async function queryStableswapTradability(): Promise<TradabilityEventRow[]> {
-  const res = await client.query({
-    query: `SELECT pool_id, asset_id, bits FROM (
-              SELECT JSONExtractInt(args_json, 'poolId') AS pool_id,
-                     JSONExtractInt(args_json, 'assetId') AS asset_id,
-                     JSONExtractInt(args_json, 'state', 'bits') AS bits,
-                     row_number() OVER (PARTITION BY pool_id, asset_id ORDER BY block_height DESC, event_index DESC) AS rn
-              FROM price_data.raw_events
-              WHERE event_name = 'Stableswap.TradableStateUpdated'
-            ) WHERE rn = 1 AND bits != 15`,
-    format: 'JSONEachRow',
-  })
-  return res.json<TradabilityEventRow>()
+const queryStableswapTradability = async (): Promise<TradabilityEventRow[]> =>
+  stableswapTradabilityFromEvents(await tradabilityLedger.rows())
+
+export function stableswapTradabilityFromEvents(
+  rows: readonly { event_name: string; args_json: string; block_height: number; event_index: number }[],
+): TradabilityEventRow[] {
+  const newest = new Map<string, { row: TradabilityEventRow; block_height: number; event_index: number }>()
+  for (const r of rows) {
+    if (r.event_name !== 'Stableswap.TradableStateUpdated') continue
+    const args = safeJson(r.args_json)
+    const pool_id = Number(args.poolId)
+    const asset_id = Number(args.assetId)
+    const bits = Number((args.state as { bits?: unknown } | undefined)?.bits)
+    if (!Number.isFinite(pool_id) || !Number.isFinite(asset_id) || !Number.isFinite(bits)) continue
+    const key = `${pool_id}:${asset_id}`
+    const held = newest.get(key)
+    if (held && (held.block_height > r.block_height
+      || (held.block_height === r.block_height && held.event_index >= r.event_index))) continue
+    newest.set(key, { row: { asset_id, pool_id, bits }, block_height: r.block_height, event_index: r.event_index })
+  }
+  return [...newest.values()].filter(e => e.row.bits !== 15).map(e => e.row)
 }
 
 // Call hashes the technical committee whitelisted that no referendum has
@@ -1330,7 +1298,6 @@ interface SolvencyRow {
   underwater: number; uw_debt_usd: number; uw_collateral_usd: number
   bad_debt_n: number; bad_debt_usd: number
   liquidatable_n: number; liquidatable_usd: number
-  near_liq_all: number
 }
 async function queryMarketSolvency(): Promise<Map<string, SolvencyRow>> {
   const debt = `tupleElement(pos, 'total_debt_base')`
@@ -1342,9 +1309,6 @@ async function queryMarketSolvency(): Promise<Map<string, SolvencyRow>> {
   // even though sumIf discards it, and the result is divided into a float anyway.
   const shortfall = `toFloat64(${debt}) - toFloat64(${coll})`
   const uncovered = `${borrowing} AND ${coll} < ${debt}`
-  // Counted here only to prove the band is non-empty; the published figure excludes
-  // e-mode positions and is computed on the refresher, which can read the pool.
-  const near = `${borrowing} AND ${hf} BETWEEN ${HF_ONE} AND ${HF_NEAR}`
   const res = await client.query({
     query: `
       WITH p AS (
@@ -1362,8 +1326,7 @@ async function queryMarketSolvency(): Promise<Map<string, SolvencyRow>> {
              countIf(${uncovered}) AS bad_debt_n,
              sumIf(${shortfall}, ${uncovered}) / ${MM_BASE} AS bad_debt_usd,
              countIf(${underwater} AND ${coll} >= ${debt}) AS liquidatable_n,
-             toFloat64(sumIf(${debt}, ${underwater} AND ${coll} >= ${debt})) / ${MM_BASE} AS liquidatable_usd,
-             countIf(${near}) AS near_liq_all
+             toFloat64(sumIf(${debt}, ${underwater} AND ${coll} >= ${debt})) / ${MM_BASE} AS liquidatable_usd
       FROM p GROUP BY pool`,
     format: 'JSONEachRow',
   })
@@ -1481,17 +1444,67 @@ async function queryRuntime(): Promise<RuntimeRow | null> {
 }
 
 // pallet_collective emits no membership event, so the committee's roster is only
-// recorded in the enacted referendum preimage that set it.
+// recorded in the referendum preimage that set it. `referendum_proposals` holds
+// EVERY hash a `Referenda.Submitted` named, regardless of outcome, and
+// submitting a referendum is permissionless — so the newest `set_members` row is
+// not the live roster, it is the newest one anybody PROPOSED. The roster is only
+// the newest whose referendum actually reached `Referenda.Confirmed`; with none
+// resolved the dashboard carries no roster rather than a proposed one.
+export function newestEnactedRoster(
+  proposals: (MemberRow & { proposal_hash: string })[],
+  submitted: { proposal_hash: string; ref_index: number }[],
+  confirmed: { ref_index: number; block_height: number }[],
+): MemberRow | null {
+  const enactedAt = new Map<number, number>()
+  for (const c of confirmed) enactedAt.set(c.ref_index, Math.max(enactedAt.get(c.ref_index) ?? 0, c.block_height))
+  const byHash = new Map<string, number>()
+  for (const s of submitted) {
+    const at = enactedAt.get(s.ref_index)
+    if (at == null) continue
+    byHash.set(s.proposal_hash, Math.max(byHash.get(s.proposal_hash) ?? 0, at))
+  }
+  let best: MemberRow | null = null
+  let bestAt = -1
+  for (const p of proposals) {
+    const at = byHash.get(p.proposal_hash)
+    if (at == null || at <= bestAt) continue
+    best = { block_height: p.block_height, args_json: p.args_json }
+    bestAt = at
+  }
+  return best
+}
+
 async function queryTechCommittee(): Promise<MemberRow | null> {
-  const res = await client.query({
-    query: `SELECT noted_block AS block_height, args_json
-            FROM price_data.referendum_proposals FINAL
-            WHERE pallet = 'TechnicalCommittee' AND call_name = 'set_members'
-            ORDER BY noted_block DESC
-            LIMIT 1`,
-    format: 'JSONEachRow',
-  })
-  return (await res.json<MemberRow>())[0] ?? null
+  // Three small reads, all over tables in the low thousands of rows: every
+  // `set_members` preimage ever noted, and the submission/confirmation lifecycle
+  // rows that say which of them a referendum actually enacted.
+  const [propRes, subRes, confRes] = await Promise.all([
+    client.query({
+      query: `SELECT proposal_hash, noted_block AS block_height, args_json
+              FROM price_data.referendum_proposals FINAL
+              WHERE pallet = 'TechnicalCommittee' AND call_name = 'set_members'`,
+      format: 'JSONEachRow',
+    }),
+    client.query({
+      query: `SELECT DISTINCT JSONExtractString(args_json, 'proposal', 'hash') AS proposal_hash, ref_index
+              FROM price_data.referendum_lifecycle_events
+              WHERE pallet = 'opengov' AND event_name = 'Referenda.Submitted'
+                AND JSONExtractString(args_json, 'proposal', 'hash') != ''`,
+      format: 'JSONEachRow',
+    }),
+    client.query({
+      query: `SELECT ref_index, max(block_height) AS block_height
+              FROM price_data.referendum_lifecycle_events
+              WHERE pallet = 'opengov' AND event_name IN ('Referenda.Confirmed', 'Referenda.Approved')
+              GROUP BY ref_index`,
+      format: 'JSONEachRow',
+    }),
+  ])
+  return newestEnactedRoster(
+    await propRes.json<MemberRow & { proposal_hash: string }>(),
+    await subRes.json<{ proposal_hash: string; ref_index: number }>(),
+    await confRes.json<{ ref_index: number; block_height: number }>(),
+  )
 }
 
 // builders
@@ -1559,8 +1572,8 @@ function buildFuses(
       status: verdict?.status ?? (limitRaw === 0n ? 'frozen' : 'unarmed'),
       limit: limitRaw.toString(),
       used: (verdict?.usedRaw ?? 0n).toString(),
-      limitUsd: usdValue(prices, assetId, limitRaw.toString(), descriptor.decimals),
-      usedUsd: usdValue(prices, assetId, (verdict?.usedRaw ?? 0n).toString(), descriptor.decimals),
+      limitUsd: usdOfRaw(prices, assetId, limitRaw, descriptor.decimals),
+      usedUsd: usdOfRaw(prices, assetId, verdict?.usedRaw ?? 0n, descriptor.decimals),
       headroom: (verdict?.headroomRaw ?? limitRaw).toString(),
       usagePct: verdict?.usagePct ?? 0,
       untilBlock: verdict?.untilBlock ?? null,
@@ -1710,10 +1723,10 @@ function buildPerBlock(
     rows.push({
       asset: descriptor,
       reserve: state.reserve.toString(),
-      reserveUsd: usdOf(prices, assetId, state.reserve, descriptor.decimals),
+      reserveUsd: usdOfRaw(prices, assetId, state.reserve, descriptor.decimals),
       tradeLimitPct: rationalPct(tradeLimit),
       tradeAllowance: tradeAllowance.toString(),
-      tradeAllowanceUsd: usdOf(prices, assetId, tradeAllowance, descriptor.decimals),
+      tradeAllowanceUsd: usdOfRaw(prices, assetId, tradeAllowance, descriptor.decimals),
       addLimitPct: addLimit ? rationalPct(addLimit) : null,
       addAllowance: allowanceFor(state.reserve, addLimit)?.toString() ?? null,
       removeLimitPct: removeLimit ? rationalPct(removeLimit) : null,
@@ -1722,7 +1735,7 @@ function buildPerBlock(
       peakBlockNet: peakNet?.toString() ?? null,
       peakBlockHeight: peak?.peak_block ?? null,
       peakPressurePct: peakNet != null && tradeAllowance > 0n ? Number((peakNet * 10_000n) / tradeAllowance) / 100 : null,
-      tradable: tradableLabels(state.tradable),
+      tradable: tradableFlags(state.tradable),
     })
   }
   rows.sort((a, b) => (b.reserveUsd ?? -1) - (a.reserveUsd ?? -1))
@@ -1735,19 +1748,6 @@ function buildPerBlock(
   }
 }
 
-// Tradability bitflags, named the way the pallet names its permissions. Kept
-// local to this service because the Security page labels the BLOCKED operations,
-// where the pool pages label the allowed ones.
-export function tradableLabels(bits: number): string[] {
-  if (!bits) return ['Frozen']
-  const out: string[] = []
-  if (bits & 1) out.push('Sell')
-  if (bits & 2) out.push('Buy')
-  if (bits & 4) out.push('Add liquidity')
-  if (bits & 8) out.push('Remove liquidity')
-  return out
-}
-
 // A tradability state as the ledger words it. The reader's question is "what is
 // switched off", so the shorter side of the mask speaks: naming the surviving
 // permissions instead made six rows read "Sell · Buy · Remove liquidity" when
@@ -1756,8 +1756,8 @@ export function tradableLabels(bits: number): string[] {
 export function tradabilityStateName(bits: number): string {
   if (bits === 15) return 'fully tradable'
   if (bits === 0) return 'frozen — nothing allowed'
-  const allowed = tradableLabels(bits)
-  const blocked = tradableLabels(~bits & 15)
+  const allowed = tradableFlags(bits)
+  const blocked = tradableFlags(~bits & 15)
   return blocked.length <= allowed.length
     ? `${blocked.join(' · ')} off`
     : `only ${allowed.join(' · ')} allowed`
@@ -1870,7 +1870,7 @@ function buildFreezes(
   const omnipool: TradabilityRow[] = []
   for (const [assetId, state] of pools.omnipool) {
     if (state.tradable === 15) continue
-    omnipool.push({ asset: asset(assetId), poolId: null, bits: state.tradable, flags: tradableLabels(state.tradable) })
+    omnipool.push({ asset: asset(assetId), poolId: null, bits: state.tradable, flags: tradableFlags(state.tradable) })
   }
   // Assets whose last tradability state restricted them and that have since left
   // the pool. Freezing an asset IS how it is wound down, so these are completed
@@ -1885,16 +1885,16 @@ function buildFreezes(
   }
   const delisted: TradabilityRow[] = [...delistedBits.entries()]
     .filter(([, bits]) => bits !== 15)
-    .map(([assetId, bits]) => ({ asset: asset(assetId), poolId: null, bits, flags: tradableLabels(bits) }))
+    .map(([assetId, bits]) => ({ asset: asset(assetId), poolId: null, bits, flags: tradableFlags(bits) }))
     .sort((a, b) => a.bits - b.bits || a.asset.assetId - b.asset.assetId)
 
   return {
     paused,
-    hubTradability: tradableLabels(snap?.hubTradability ?? 0),
+    hubTradability: tradableFlags(snap?.hubTradability ?? 0),
     omnipool,
     omnipoolAssetCount: [...pools.omnipool.keys()].filter(id => id !== HUB_ASSET_ID).length,
     delisted,
-    stableswap: stableswap.map(r => ({ asset: asset(r.asset_id), poolId: r.pool_id, bits: r.bits, flags: tradableLabels(r.bits) })),
+    stableswap: stableswap.map(r => ({ asset: asset(r.asset_id), poolId: r.pool_id, bits: r.bits, flags: tradableFlags(r.bits) })),
   }
 }
 

@@ -30,6 +30,7 @@
 //
 // Verified against 13759746-2 (DOT), 13756091-3 (H2O), 13706669-3 (HDX fee
 // alongside 0.0001 HDX of dust) and 13443355-3 (EVM, three WETH gas deposits).
+import { TREASURY_ACCOUNT } from './revenueStreams.ts'
 export const FEE_BALANCE_EVENTS = [
   'Tokens.Withdrawn',
   'Balances.Withdraw',
@@ -37,8 +38,6 @@ export const FEE_BALANCE_EVENTS = [
   'Balances.Deposit',
 ] as const
 
-/** The Substrate Treasury pallet account (`modlpy/trsry`), pubkey hex. */
-const TREASURY_POT = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000'
 
 export interface FeePaymentEvent {
   name: string
@@ -131,7 +130,7 @@ export function deriveFeePayment(
       const cid = currencyOf(e.name, e.args)
       if (cid != null) debited.add(cid)
     } else if (e.name === 'Tokens.Deposited' || e.name === 'Balances.Deposit') {
-      if (accountArg(e.args, 'who') !== TREASURY_POT) continue
+      if (accountArg(e.args, 'who') !== TREASURY_ACCOUNT) continue
       const cid = currencyOf(e.name, e.args)
       const amount = amountArg(e.args)
       if (cid != null && amount != null && amount > 0n) deposits.push({ assetId: cid, amount })

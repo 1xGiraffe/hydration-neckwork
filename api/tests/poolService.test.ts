@@ -42,8 +42,11 @@ describe('buildComposition', () => {
 })
 
 describe('tradableFlags', () => {
+  // The full operation names, so a bitmask reads the same on /explorer/omnipool
+  // and /explorer/security — these used to be 'Add'/'Remove' here and
+  // 'Add liquidity'/'Remove liquidity' there, out of two copies of one function.
   it('decodes the omnipool bitflags', () => {
-    expect(tradableFlags(15)).toEqual(['Sell', 'Buy', 'Add', 'Remove'])
+    expect(tradableFlags(15)).toEqual(['Sell', 'Buy', 'Add liquidity', 'Remove liquidity'])
     expect(tradableFlags(3)).toEqual(['Sell', 'Buy'])
     expect(tradableFlags(0)).toEqual(['Frozen'])
   })
