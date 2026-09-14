@@ -211,6 +211,47 @@ describe('runEvmWrite lifecycle', () => {
     expect(stages.map(s => s.phase)).toEqual(['wallet-pending', 'failed'])
   })
 
+  // Three minutes of receipt polling outlives the panel that started it, so an
+  // abort has to stop the RPC calls AND the stages — a stage emitted after the
+  // caller is gone lands on an unmounted component.
+  it('stops polling and stops emitting once the caller aborts', async () => {
+    const stages: WriteStage[] = []
+    const controller = new AbortController()
+    const { provider } = mockProvider(method => (method === 'eth_sendTransaction' ? TX_HASH : null))
+    let receiptCalls = 0
+    const final = await runEvmWrite({
+      provider, from: FROM, to: TO, data: '0xd0e30db0', valueWei: 0n, explorerOrigin: ORIGIN,
+      rpc: {
+        getTransactionReceipt: async () => {
+          receiptCalls++
+          controller.abort()
+          return { status: '0x1', blockNumber: '0x10', transactionHash: TX_HASH }
+        },
+        call: async () => '0x',
+      },
+      decodeRevert: () => null,
+      onStage: s => stages.push(s),
+      pollMs: 0, maxPolls: 60, signal: controller.signal,
+    })
+
+    expect(receiptCalls).toBe(1)
+    expect(stages.map(s => s.phase)).toEqual(['wallet-pending', 'submitted'])
+    expect(final).toEqual({ phase: 'submitted', txHash: TX_HASH })
+  })
+
+  it('never starts polling at all when it is handed an already-aborted signal', async () => {
+    const { provider } = mockProvider(method => (method === 'eth_sendTransaction' ? TX_HASH : null))
+    let receiptCalls = 0
+    const final = await runEvmWrite({
+      provider, from: FROM, to: TO, data: '0xd0e30db0', valueWei: 0n, explorerOrigin: ORIGIN,
+      rpc: { getTransactionReceipt: async () => { receiptCalls++; return null }, call: async () => '0x' },
+      decodeRevert: () => null, onStage: () => {}, pollMs: 0, signal: AbortSignal.abort(),
+    })
+
+    expect(receiptCalls).toBe(0)
+    expect(final).toEqual({ phase: 'submitted', txHash: TX_HASH })
+  })
+
   it('stays on submitted when the receipt never lands within the poll budget', async () => {
     const { provider } = mockProvider(method => (method === 'eth_sendTransaction' ? TX_HASH : null))
     const final = await runEvmWrite({

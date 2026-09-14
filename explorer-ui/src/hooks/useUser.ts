@@ -4,12 +4,11 @@ import { api, userApi } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import { useSession, setSession } from '../session'
 import { setTagMap, setTagMapError } from '../userTags'
-import { BLOCK_STALE_MS, LIVE_MS } from '../live'
+import { BLOCK_STALE_MS } from '../live'
 import { useHeldRows } from './useHeldRows'
-
-function useInterval(intervalMs = LIVE_MS): number {
-  return intervalMs
-}
+// The same poll cadence the public feeds use — the list-tag feeds below are the
+// authed twins of the system-tag ones, so they share one rule for when to poll.
+import { useInterval } from './useExplorerData'
 
 export function useMe() {
   const session = useSession()

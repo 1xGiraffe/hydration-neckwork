@@ -4,7 +4,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
 import { Crumbs, F, AddrPill, AssetIcon, ChartSkeleton, EmptyRow, compactAmount } from '../components/ui'
 import {
-  fmtHdx, fmtLiqPrice, cohortColor, OWNERSHIP_COLORS, AGE_COLORS,
+  fmtLiqPrice, cohortColor, OWNERSHIP_COLORS, AGE_COLORS,
   ChartLegend, ShareBar, StackedColumnChart, MirroredBarChart, StackedAreaChart, MultiLineChart, GigaLiquidationChart,
 } from '../components/HdxCharts'
 import { LOCK_ORDER, lockColor } from '../components/lockColors'
@@ -31,10 +31,10 @@ function Ribbon({ d }: { d: HdxDashboard }) {
       v: <>{F.priceUsd(d.price)}{chg != null && <span style={{ color: chg >= 0 ? 'var(--green)' : 'var(--red)', fontSize: 12, marginLeft: 6 }}>{F.pct(chg)}</span>}</>,
     },
     { k: 'Holders', v: F.int(d.supply.holders) },
-    { k: 'User-held supply', v: fmtHdx(d.supply.userHdx), s: `of ${fmtHdx(d.supply.totalHdx)} total` },
-    { k: 'Locked', v: fmtHdx(d.locks.totalLockedHdx), s: `${d.locks.lockedPctOfUser.toFixed(1)}% of user-held` },
-    { k: 'GIGAHDX locked', v: giga ? fmtHdx(giga.totalHdx) : '—' },
-    { k: 'Unlocking ≤28d', v: fmtHdx(near28d(d)) },
+    { k: 'User-held supply', v: compactAmount(d.supply.userHdx), s: `of ${compactAmount(d.supply.totalHdx)} total` },
+    { k: 'Locked', v: compactAmount(d.locks.totalLockedHdx), s: `${d.locks.lockedPctOfUser.toFixed(1)}% of user-held` },
+    { k: 'GIGAHDX locked', v: giga ? compactAmount(giga.totalHdx) : '—' },
+    { k: 'Unlocking ≤28d', v: compactAmount(near28d(d)) },
   ]
   return (
     <div className="ribbon standalone">
@@ -54,7 +54,6 @@ function Ribbon({ d }: { d: HdxDashboard }) {
 function GigaMarketSection({ d }: { d: HdxDashboard }) {
   const rows = d.gigaMarket
   if (!rows?.length) return null
-  const fmtAmt = compactAmount
   return (
     <>
       <SecTitle title="GIGAHDX Money Market" subtitle="lend & borrow against staked HDX" />
@@ -72,14 +71,14 @@ function GigaMarketSection({ d }: { d: HdxDashboard }) {
               {r.supplied > 0 && (
                 <div className="hdx-card">
                   <div className="hk"><AssetIcon assetId={r.asset.assetId} iconAssetId={iconId} symbol={sym} size={16} parachainId={r.asset.parachainId} origin={r.asset.origin} /> {sym} supplied</div>
-                  <div className="hv">{fmtAmt(r.supplied)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{sym}</span></div>
+                  <div className="hv">{compactAmount(r.supplied)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{sym}</span></div>
                   <div className="hs">{r.suppliedUsd != null ? F.usd(r.suppliedUsd) : '—'} · {F.int(r.suppliers)} suppliers</div>
                 </div>
               )}
               {r.debt > 0 && (
                 <div className="hdx-card">
                   <div className="hk"><AssetIcon assetId={r.asset.assetId} iconAssetId={iconId} symbol={sym} size={16} parachainId={r.asset.parachainId} origin={r.asset.origin} /> {sym} borrowed</div>
-                  <div className="hv">{fmtAmt(r.debt)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{sym}</span></div>
+                  <div className="hv">{compactAmount(r.debt)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>{sym}</span></div>
                   <div className="hs">{r.debtUsd != null ? F.usd(r.debtUsd) : '—'} · {F.int(r.borrowers)} borrowers</div>
                 </div>
               )}
@@ -90,7 +89,7 @@ function GigaMarketSection({ d }: { d: HdxDashboard }) {
         {d.gigaLiquidations && (
           <div style={{ marginTop: 18 }}>
             <div className="sec-title" style={{ marginBottom: 6 }}>Liquidation levels <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>
-              · {fmtHdx(d.gigaLiquidations.points.reduce((a, p) => a + p.stHdx, 0))} GIGAHDX at risk across {d.gigaLiquidations.points.length} borrowers — how much becomes liquidatable as the HDX price falls
+              · {compactAmount(d.gigaLiquidations.points.reduce((a, p) => a + p.stHdx, 0))} GIGAHDX at risk across {d.gigaLiquidations.points.length} borrowers — how much becomes liquidatable as the HDX price falls
             </span></div>
             {/* The axis is stated against the money market's own price, because
                 that is the one liquidation is decided on. It is smoothed, so it
@@ -120,7 +119,7 @@ function HolderSection({ d }: { d: HdxDashboard }) {
       <>
         <span className="t-d">{c.label}</span>
         <TipRow label="Accounts" value={F.int(c.accounts)} />
-        <TipRow label="HDX" value={fmtHdx(c.totalHdx)} />
+        <TipRow label="HDX" value={compactAmount(c.totalHdx)} />
         <TipRow label="Of user supply" value={(c.totalHdx / user * 100).toFixed(1) + '%'} />
       </>
     ),
@@ -136,16 +135,16 @@ function HolderSection({ d }: { d: HdxDashboard }) {
             <div className="hdx-card" key={c.key}>
               <div className="hk">
                 <i style={{ background: cohortColor(c.key) }} />{c.label}
-                <span className="cohort-threshold" title={c.minPct > 0 ? `> ${fmtHdx(c.minHdx)} HDX at current supply` : i > 0 ? `≤ ${fmtHdx(d.cohorts[i - 1].minHdx)} HDX at current supply` : undefined}>
+                <span className="cohort-threshold" title={c.minPct > 0 ? `> ${compactAmount(c.minHdx)} HDX at current supply` : i > 0 ? `≤ ${compactAmount(d.cohorts[i - 1].minHdx)} HDX at current supply` : undefined}>
                   {c.minPct > 0 ? `> ${c.minPct}% of supply` : i > 0 ? `≤ ${d.cohorts[i - 1].minPct}%` : ''}
                 </span>
               </div>
-              <div className="hv">{fmtHdx(c.totalHdx)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+              <div className="hv">{compactAmount(c.totalHdx)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
               <div className="hs">{F.int(c.accounts)} accounts · {(c.totalHdx / user * 100).toFixed(1)}% share</div>
             </div>
           ))}
         </div>
-        <div className="hdx-note">Protocol accounts (treasury, omnipool, staking pot) hold {fmtHdx(d.supply.protocolHdx)} — excluded from cohorts.</div>
+        <div className="hdx-note">Protocol accounts (treasury, omnipool, staking pot) hold {compactAmount(d.supply.protocolHdx)} — excluded from cohorts.</div>
       </div>
     </>
   )
@@ -169,7 +168,7 @@ function LocksSection({ d }: { d: HdxDashboard }) {
       <>
         <span className="t-d">{lockLabel(t)}</span>
         <TipRow label="Accounts" value={F.int(t.accounts)} />
-        <TipRow label="HDX" value={fmtHdx(t.totalHdx)} />
+        <TipRow label="HDX" value={compactAmount(t.totalHdx)} />
         <TipRow label="Of locked" value={(t.totalHdx / sum * 100).toFixed(1) + '%'} />
       </>
     ),
@@ -184,14 +183,14 @@ function LocksSection({ d }: { d: HdxDashboard }) {
           {types.map(t => (
             <div className="hdx-card" key={t.key}>
               <div className="hk"><i style={{ background: lockColor(t.key) }} />{lockLabel(t)}</div>
-              <div className="hv">{fmtHdx(t.totalHdx)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+              <div className="hv">{compactAmount(t.totalHdx)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
               <div className="hs">{F.int(t.accounts)} accounts</div>
             </div>
           ))}
         </div>
         <div className="hdx-note">
-          Locks overlap on the same balance — net locked is {fmtHdx(d.locks.totalLockedHdx)} ({d.locks.lockedPctOfUser.toFixed(1)}% of user-held HDX).
-          {d.locks.vestedUnclaimedHdx > 0 && <> Vesting counts only HDX still on schedule — another {fmtHdx(d.locks.vestedUnclaimedHdx)} is vested but unclaimed and not counted.</>}
+          Locks overlap on the same balance — net locked is {compactAmount(d.locks.totalLockedHdx)} ({d.locks.lockedPctOfUser.toFixed(1)}% of user-held HDX).
+          {d.locks.vestedUnclaimedHdx > 0 && <> Vesting counts only HDX still on schedule — another {compactAmount(d.locks.vestedUnclaimedHdx)} is vested but unclaimed and not counted.</>}
         </div>
       </div>
     </>
@@ -223,8 +222,8 @@ function UnlocksSection({ d }: { d: HdxDashboard }) {
       tip: (
         <>
           <span className="t-d">{mdLabel(b.fromTs)} – {mdLabel(b.toTs)}</span>
-          {keys.map(k => <TipRow key={k} color={lockColor(k)} label={LOCK_LABELS[k]} value={fmtHdx(b[k]) + ' HDX'} />)}
-          <TipRow label="Total" value={fmtHdx(keys.reduce((s, k) => s + b[k], 0)) + ' HDX'} />
+          {keys.map(k => <TipRow key={k} color={lockColor(k)} label={LOCK_LABELS[k]} value={compactAmount(b[k]) + ' HDX'} />)}
+          <TipRow label="Total" value={compactAmount(keys.reduce((s, k) => s + b[k], 0)) + ' HDX'} />
         </>
       ),
     }
@@ -248,8 +247,8 @@ function UnlocksSection({ d }: { d: HdxDashboard }) {
     tip: (
       <>
         <span className="t-d">Later{buckets.length ? ` (after ${mdLabel(buckets[buckets.length - 1].toTs)})` : ''}</span>
-        {NON_GIGA_KEYS.map(k => <TipRow key={k} color={lockColor(k)} label={LOCK_LABELS[k]} value={fmtHdx(laterHdx[k]) + ' HDX'} />)}
-        <TipRow label="Total" value={fmtHdx(NON_GIGA_KEYS.reduce((s, k) => s + laterHdx[k], 0)) + ' HDX'} />
+        {NON_GIGA_KEYS.map(k => <TipRow key={k} color={lockColor(k)} label={LOCK_LABELS[k]} value={compactAmount(laterHdx[k]) + ' HDX'} />)}
+        <TipRow label="Total" value={compactAmount(NON_GIGA_KEYS.reduce((s, k) => s + laterHdx[k], 0)) + ' HDX'} />
       </>
     ),
   })
@@ -270,18 +269,18 @@ function UnlocksSection({ d }: { d: HdxDashboard }) {
                   display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
                   background: lockColor(k), marginRight: 5, verticalAlign: 'middle',
                 }} />
-                {LOCK_LABELS[k]} {fmtHdx(nowHdx[k])}
+                {LOCK_LABELS[k]} {compactAmount(nowHdx[k])}
               </span>
             ))}
-            {nowKeys.length > 1 && ` (${fmtHdx(nowTotal)} total)`}
+            {nowKeys.length > 1 && ` (${compactAmount(nowTotal)} total)`}
           </div>
         )}
         <ChartLegend items={UNLOCK_KEYS.map(k => ({ label: LOCK_LABELS[k], color: lockColor(k) }))} />
         <StackedColumnChart columns={columns} h={200} separatorAt={weeklyN} separatorCaption="weekly → monthly" />
         {gigaPending.count > 0 && (
           <div className="hdx-note">
-            GIGAHDX: {F.int(gigaPending.count)} pending unstakes · {fmtHdx(gigaPending.totalHdx)} HDX
-            {gigaPending.maturedCount > 0 ? ` · ${F.int(gigaPending.maturedCount)} matured (${fmtHdx(gigaPending.maturedHdx)} HDX claimable)` : ''}
+            GIGAHDX: {F.int(gigaPending.count)} pending unstakes · {compactAmount(gigaPending.totalHdx)} HDX
+            {gigaPending.maturedCount > 0 ? ` · ${F.int(gigaPending.maturedCount)} matured (${compactAmount(gigaPending.maturedHdx)} HDX claimable)` : ''}
             {gigaPending.nextUnlockTs ? ` · next ${mdLabel(gigaPending.nextUnlockTs)}` : ''}
           </div>
         )}
@@ -298,8 +297,8 @@ function FlowsSection({ d }: { d: HdxDashboard }) {
     tip: (
       <>
         <span className="t-d">{mdLabel(f.date)}</span>
-        <TipRow color="var(--green)" label="Bought" value={fmtHdx(f.buyHdx) + ' HDX'} />
-        <TipRow color="var(--red)" label="Sold" value={fmtHdx(f.sellHdx) + ' HDX'} />
+        <TipRow color="var(--green)" label="Bought" value={compactAmount(f.buyHdx) + ' HDX'} />
+        <TipRow color="var(--red)" label="Sold" value={compactAmount(f.sellHdx) + ' HDX'} />
         <TipRow label="Buyers / sellers" value={`${F.int(f.buyers)} / ${F.int(f.sellers)}`} />
       </>
     ),
@@ -315,24 +314,24 @@ function FlowsSection({ d }: { d: HdxDashboard }) {
         <div className="pf-card" style={{ marginBottom: 0 }}>
           <ChartLegend items={[{ label: 'Buys', color: 'var(--green)' }, { label: 'Sells', color: 'var(--red)' }]} />
           <MirroredBarChart data={bars} h={190} xTicks={ticks} />
-          <div className="bal-xaxis" style={{ justifyContent: 'center' }}><span>avg buys {fmtHdx(avgBuy)}/day · avg sells {fmtHdx(avgSell)}/day</span></div>
+          <div className="bal-xaxis" style={{ justifyContent: 'center' }}><span>avg buys {compactAmount(avgBuy)}/day · avg sells {compactAmount(avgSell)}/day</span></div>
         </div>
         <div className="pf-card hdx-dca" style={{ marginBottom: 0 }}>
           {/* The order counts open the asset page's DCAs tab on the matching
               section — the list these headline figures are summed from. */}
           <div className="mm-stat">
             <span className="k">Scheduled DCA buys</span>
-            <span className="v">≈ {fmtHdx(buy.hdxPerDay)}/day</span>
+            <span className="v">≈ {compactAmount(buy.hdxPerDay)}/day</span>
             <span className="s"><Link className="hash" to={`${paths.asset(0)}?tab=dcas&side=buys`} title="The ongoing DCA orders buying HDX">{F.int(buy.orders)} orders</Link></span>
           </div>
           <div className="mm-stat">
             <span className="k">Scheduled DCA sells</span>
-            <span className="v">≈ {fmtHdx(sell.hdxPerDay)}/day</span>
+            <span className="v">≈ {compactAmount(sell.hdxPerDay)}/day</span>
             <span className="s"><Link className="hash" to={`${paths.asset(0)}?tab=dcas&side=sells`} title="The ongoing DCA orders selling HDX">{F.int(sell.orders)} orders</Link></span>
           </div>
           <div className="mm-stat">
             <span className="k">Potential unlock overhang (28d)</span>
-            <span className="v">{fmtHdx(near28d(d))}</span>
+            <span className="v">{compactAmount(near28d(d))}</span>
             <span className="s">weekly unlock buckets 1–4, all lock types</span>
           </div>
         </div>
@@ -397,19 +396,19 @@ function OwnershipSection({ s }: { s: HdxStructure }) {
           </div>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: OWNERSHIP_COLORS.kraken }} />Kraken custody</div>
-            <div className="hv">{fmtHdx(last(o.kraken))} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+            <div className="hv">{compactAmount(last(o.kraken))} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
             <div className="hs">{pct1(last(o.kraken) / last(totalNow) * 100)} of total supply</div>
           </div>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: OWNERSHIP_COLORS.treasury }} />Treasury</div>
-            <div className="hv">{fmtHdx(last(o.treasury))} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+            <div className="hv">{compactAmount(last(o.treasury))} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
             <div className="hs">{pct1(last(o.treasury) / last(totalNow) * 100)} of total supply</div>
           </div>
         </div>
         <div className="hdx-note">
           Tranches rank user accounts only — the Treasury, module &amp; pool accounts and Kraken's tagged custody wallets are carved out above.
           Kraken and pool accounts carry today's tags across the whole history.
-          {s.backfilledAllocationHdx > 0 && <> Allocations minted later ({fmtHdx(s.backfilledAllocationHdx)} — growth pots, completed vesting) are counted in their band from the start, so realizing them on-chain doesn't read as new supply.</>}
+          {s.backfilledAllocationHdx > 0 && <> Allocations minted later ({compactAmount(s.backfilledAllocationHdx)} — growth pots, completed vesting) are counted in their band from the start, so realizing them on-chain doesn't read as new supply.</>}
         </div>
       </div>
     </>
@@ -459,12 +458,12 @@ function SupplySinksSection({ s }: { s: HdxStructure }) {
         <div className="hdx-cards" style={{ marginTop: 14 }}>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: 'var(--cat-stake)' }} />Staked</div>
-            <div className="hv">{fmtHdx(stakedNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+            <div className="hv">{compactAmount(stakedNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
             <div className="hs">{(stakedNow / (stakedNow + floatNow) * 100).toFixed(1)}% of user-held supply</div>
           </div>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: 'var(--cat-liquidity)' }} />Liquid float</div>
-            <div className="hv">{fmtHdx(floatNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+            <div className="hv">{compactAmount(floatNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
             <div className="hs">{floatStart > 0 ? `−${((1 - floatNow / floatStart) * 100).toFixed(0)}% since ${monthYearShort(t.months[0])}` : '—'}</div>
           </div>
         </div>
@@ -513,13 +512,13 @@ function CostBasisSection({ s }: { s: HdxStructure }) {
           </div>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: 'var(--green)' }} />{narrow ? 'Treasury BB' : 'Treasury bought back'}</div>
-            <div className="hv">{fmtHdx(buybackNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+            <div className="hv">{compactAmount(buybackNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
             <div className="hs">revenue recycled into HDX since Oct 2024</div>
           </div>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: OWNERSHIP_COLORS.kraken }} />Kraken custody</div>
-            <div className="hv">{fmtHdx(krakenNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
-            <div className="hs">−{krakenPeak > 0 ? ((1 - krakenNow / krakenPeak) * 100).toFixed(0) : 0}% from its {fmtHdx(krakenPeak)} peak</div>
+            <div className="hv">{compactAmount(krakenNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
+            <div className="hs">−{krakenPeak > 0 ? ((1 - krakenNow / krakenPeak) * 100).toFixed(0) : 0}% from its {compactAmount(krakenPeak)} peak</div>
           </div>
         </div>
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Treasury buyback{trendSub('cumulative HDX the protocol bought with its own revenue')}</div>
@@ -546,7 +545,7 @@ function ParticipationSection({ s }: { s: HdxStructure }) {
     tip: (
       <>
         <span className="t-d">{quarterLabel(q)}</span>
-        <TipRow color="var(--cat-vote)" label="Capital voting" value={fmtHdx(t.gov.capital[i]) + ' HDX'} />
+        <TipRow color="var(--cat-vote)" label="Capital voting" value={compactAmount(t.gov.capital[i]) + ' HDX'} />
         <TipRow label="Voters" value={F.int(t.gov.voters[i])} />
       </>
     ),
@@ -639,11 +638,11 @@ function MoversPanel({ title, rows }: { title: string; rows: HdxMover[] }) {
           {!rows.length ? <EmptyRow cols={5}>No movers</EmptyRow> : rows.map(m => (
             <tr key={m.account.accountId}>
               <td data-label="Account"><AddrPill account={m.account} noCopy /></td>
-              <td data-label="Balance" className="r mono muted">{fmtHdx(m.balanceHdx)}</td>
-              <td data-label="Bought" className="r mono">{fmtHdx(m.boughtHdx)}</td>
-              <td data-label="Sold" className="r mono">{fmtHdx(m.soldHdx)}</td>
+              <td data-label="Balance" className="r mono muted">{compactAmount(m.balanceHdx)}</td>
+              <td data-label="Bought" className="r mono">{compactAmount(m.boughtHdx)}</td>
+              <td data-label="Sold" className="r mono">{compactAmount(m.soldHdx)}</td>
               <td data-label="Net" className="r mono" style={{ color: m.netHdx >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                {(m.netHdx >= 0 ? '+' : '−') + fmtHdx(Math.abs(m.netHdx))}
+                {(m.netHdx >= 0 ? '+' : '−') + compactAmount(Math.abs(m.netHdx))}
               </td>
             </tr>
           ))}

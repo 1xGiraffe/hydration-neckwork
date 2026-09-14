@@ -1,7 +1,7 @@
 import type {
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
-  AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, IndexerStatus, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, MoneyMarketResponse, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
+  AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
   RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, AssetPriceWindow, HollarDashboard, IceDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas, AssetLimitOrderBook, XcDestinationDetail, IntentOrderDetail,
   AssetLiquidity, PoolDetail, UniswapV3PoolDetail, UniswapV3PoolHistory, UniswapV3PoolLiquidity, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
@@ -121,7 +121,6 @@ export interface ListCounts { blocks: number; extrinsics: number; events: number
 
 export const api = {
   stats: (signal?: AbortSignal) => getJson<ExplorerStats>(withQuery('/explorer/stats', { h: liveHeadTag() || undefined }), signal),
-  indexer: (signal?: AbortSignal) => getJson<IndexerStatus>('/indexer', signal),
   blocks: (limit = 25, offset = 0, signal?: AbortSignal) => getJson<BlockSummary[]>(withQuery('/explorer/blocks', { limit, offset, h: liveHeadTag() || undefined }), signal),
   block: (height: number, signal?: AbortSignal) => getJson<BlockDetail>(`/explorer/block/${height}`, signal),
   blockActivity: (height: number, signal?: AbortSignal) => getJson<ActivityRow[]>(`/explorer/block/${height}/activity`, signal),
@@ -153,7 +152,6 @@ export const api = {
   activityCount: (type = 'all', from?: string, to?: string, filters?: ValueFilters, action?: string, signal?: AbortSignal) =>
     getJson<ActivityCount>(withQuery('/explorer/activity/count', { type, action, from, to, ...filters }), signal),
   counts: (signal?: AbortSignal) => getJson<ListCounts>('/explorer/counts', signal),
-  moneyMarket: (limit = 50, signal?: AbortSignal) => getJson<MoneyMarketResponse>(withQuery('/explorer/money-market', { limit }), signal),
   asset: (assetId: number, signal?: AbortSignal) => getJson<AssetDetail>(`/explorer/asset/${assetId}`, signal),
   assetDcas: (assetId: number, signal?: AbortSignal) => getJson<AssetDcas>(`/explorer/asset/${assetId}/dcas`, signal),
   assetLimitOrders: (assetId: number, signal?: AbortSignal) => getJson<AssetLimitOrderBook>(`/explorer/asset/${assetId}/limit-orders`, signal),
@@ -181,8 +179,8 @@ export const api = {
   omnipoolWindow: (fromTs: number, toTs: number, points: number, signal?: AbortSignal) =>
     getJson<OmnipoolDetail>(withQuery('/explorer/omnipool', { fromTs, toTs, points }), signal),
   // Same endpoint as the global activities feed, with the asset id pinned.
-  assetActivity: (assetId: number, type = 'all', offset = 0, limit = 40, action?: string, from?: string, to?: string, min?: string, signal?: AbortSignal) =>
-    getJson<ActivityRow[]>(withQuery('/explorer/activity', { asset: assetId, type, offset, limit, action, from, to, min }), signal),
+  assetActivity: (assetId: number, type = 'all', offset = 0, limit = 40, action?: string, from?: string, to?: string, min?: string, minRevenue?: string, signal?: AbortSignal) =>
+    getJson<ActivityRow[]>(withQuery('/explorer/activity', { asset: assetId, type, offset, limit, action, from, to, min, minRevenue }), signal),
   pools: (signal?: AbortSignal) => getJson<PoolsIndexResponse>('/explorer/pools', signal),
   // A pool's own activity: the swaps that happened IN it, merged with what its
   // share token did. The asset-pinned activity feed cannot answer this — a
@@ -390,9 +388,12 @@ export const userApi = {
     authedJson<ActivityRow[]>('GET', withQuery('/user/activity', { limit, offset, type, action, from, to, ...filters }), undefined, signal),
   activityCount: (type = 'all', from?: string, to?: string, filters?: ValueFilters, action?: string, signal?: AbortSignal) =>
     authedJson<ActivityCount>('GET', withQuery('/user/activity/count', { type, action, from, to, ...filters }), undefined, signal),
-  accountActivity: (address: string, type = 'all', offset = 0, limit = 40, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
+  // Page size matches the anonymous twin's exactly: a hook that lets both
+  // default steps the pager by one number and fills the page from the other,
+  // which repeats rows and hides the › arrow for signed-in readers alone.
+  accountActivity: (address: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
     authedJson<ActivityRow[]>('GET', withQuery(`/user/address/${encodeURIComponent(address)}/activity`, { type, offset, limit, action, from, to, ...filters }), undefined, signal),
-  tagActivity: (tagId: string, type = 'all', offset = 0, limit = 40, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
+  tagActivity: (tagId: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
     authedJson<ActivityRow[]>('GET', withQuery(`/user/tag/${encodeURIComponent(tagId)}/activity`, { type, offset, limit, action, from, to, ...filters }), undefined, signal),
   listTagMembers: (listId: string, tagId: string, signal?: AbortSignal) =>
     authedJson<AccountsPage>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/members`, undefined, signal),

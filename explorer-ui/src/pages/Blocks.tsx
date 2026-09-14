@@ -98,9 +98,9 @@ export function Blocks() {
 
       <div className="sec-title">Average block time</div>
       {/* One trailing figure (the median beside the average), so the placeholder
-          is the loaded card's own chrome around a 220px plot. It used to reserve
-          168px against a 309px card, dropping the block table 141px the moment
-          the series landed — this page's whole layout shift. */}
+          is the loaded card's own chrome around a 220px plot rather than a fixed
+          height: 168px against this 309px card drops the block table 141px the
+          moment the series lands, which is this page's whole layout shift. */}
       {!recent ? <ChartCardSkeleton metrics={1} /> : (
       <div className="pf-card">
         <div className="pf-head"><div className="pf-now" title="The recent window's total elapsed time over the blocks it covers">mean {avg ? avg.toFixed(2) + 's' : '—'}</div><div className="pf-chg muted" title="The typical block: half the window is quicker, half slower. A stall lifts the mean and leaves this where it is.">median {median ? median.toFixed(2) + 's' : '—'}</div></div>

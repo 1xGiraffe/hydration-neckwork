@@ -19,7 +19,7 @@ import {
   HEALTH_FACTOR_MAX, HEALTH_FACTOR_MIN, HEALTH_FACTOR_PRESETS, KIND_LABELS, LARGE_VALUE_MIN_USD,
   NOTIFICATION_KINDS, PRICE_STEP_PCTS, priceAtStep, priceStepLabel, readTarget, REFERENDUM_PHASES,
   REFERENDUM_TRACKS, ruleSubject, ruleTagTarget,
-  TC_MOTION_PHASES, SAFETY_DEFICIT_DEFAULT_USD, SAFETY_FUSE_DEFAULT_PCT,
+  TC_MOTION_PHASES, SAFETY_DEFICIT_DEFAULT_USD, SAFETY_FUSE_DEFAULT_PCT, clearInboxConfirmBody,
   SAFETY_KINDS, sameRuleParams, suggestPriceDirection, USD_FLOOR_PRESETS, subscribedLabel } from '../src/notificationKinds'
 import {
   MOCK_NOTIFICATION_CHANNELS, MOCK_NOTIFICATION_INBOX, MOCK_NOTIFICATION_RULES,
@@ -221,7 +221,7 @@ describe('Notifications — rules', () => {
 })
 
 describe('Notifications — inbox', () => {
-  const html = render(<InboxSection rows={MOCK_NOTIFICATION_INBOX} unread={MOCK_NOTIFICATION_UNREAD} now={now} />)
+  const html = render(<InboxSection rows={MOCK_NOTIFICATION_INBOX} total={MOCK_NOTIFICATION_INBOX.length} unread={MOCK_NOTIFICATION_UNREAD} now={now} />)
 
   it('renders each notification with its title, body, link and age', () => {
     expect(html).toContain(`Inbox · ${MOCK_NOTIFICATION_UNREAD} unread`)
@@ -237,17 +237,31 @@ describe('Notifications — inbox', () => {
   })
 
   it('says nothing has fired rather than showing a blank table, and offers the way out', () => {
-    const empty = render(<InboxSection rows={[]} unread={0} now={now} />)
+    const empty = render(<InboxSection rows={[]} total={0} unread={0} now={now} />)
     expect(empty).toContain('Nothing yet')
     // An empty inbox is a missing RULE, so it links to where rules are made.
     expect(empty).toContain('href="/notifications?tab=alerts"')
+  })
+
+  // "Clear inbox" empties the WHOLE stored history, while the table holds one page
+  // of it. Naming the page's length asked to clear 50 and removed 300 — the reader
+  // agreed to something other than what happened.
+  it('names the stored total, not the page on screen, before clearing', () => {
+    expect(clearInboxConfirmBody(300, 50)).toContain('Clear all 300 notifications')
+    expect(clearInboxConfirmBody(300, 50)).toContain('the newest 50 are shown')
+    expect(clearInboxConfirmBody(1_200, 50)).toContain('Clear all 1,200 notifications')
+  })
+
+  it('says nothing about a page when the whole history is on screen', () => {
+    expect(clearInboxConfirmBody(7, 7)).toBe('Clear all 7 notifications? Alerts keep firing; this only empties the history.')
+    expect(clearInboxConfirmBody(1, 1)).toContain('Clear all 1 notification?')
   })
 
   // Emptying the history is offered only when there is a history to empty — on an
   // empty inbox the button would be a control that does nothing.
   it('offers "Clear inbox" only while rows exist', () => {
     expect(html).toContain('Clear inbox')
-    expect(render(<InboxSection rows={[]} unread={0} now={now} />)).not.toContain('Clear inbox')
+    expect(render(<InboxSection rows={[]} total={0} unread={0} now={now} />)).not.toContain('Clear inbox')
   })
 })
 
@@ -857,7 +871,7 @@ describe('confirm dialogs', () => {
     // Rule delete, channel removal/unlink, and clearing the inbox.
     expect(page.match(/<ConfirmDialog/g)).toHaveLength(3)
     expect(page).toContain('body={deleteRuleConfirmBody(confirmRule)}')
-    expect(page).toContain('Alerts keep firing; this only empties the history.')
+    expect(page).toContain('body={clearInboxConfirmBody(total, rows.length)}')
     expect(page).toContain('Unlink Telegram')
     // Muting stays one click: it is reversible.
     expect(page).toContain("update.mutate([rule.id, { muted: !rule.muted }])")

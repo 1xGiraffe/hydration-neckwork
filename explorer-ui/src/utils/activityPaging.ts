@@ -63,10 +63,10 @@ export function offeredPages(args: {
 }
 
 // Each list asks for its total under ITS OWN filters — a total that ignored a
-// filter would size the pager for a longer list than the one on screen, which is
-// exactly how the pager used to advertise 49 pages of a 26-page feed. Splitting the
-// builders per tab also keeps one tab's filters out of another tab's cache key, so
-// switching tabs does not re-count.
+// filter sizes the pager for a longer list than the one on screen, which is how a
+// 26-page feed ends up advertising 49 pages. Splitting the builders per tab also
+// keeps one tab's filters out of another tab's cache key, so switching tabs does
+// not re-count.
 export interface ActivityFilterValues { token?: string; min?: string; minRevenue?: string; from?: string; to?: string; identity?: string }
 export interface ExtrinsicFilterValues { call?: string; result?: string; origin?: string; from?: string; to?: string }
 export interface EventFilterValues { event?: string; from?: string; to?: string }

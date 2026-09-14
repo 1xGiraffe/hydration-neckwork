@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 const EMPTY: ReadonlySet<string> = new Set()
 
@@ -10,18 +10,24 @@ const EMPTY: ReadonlySet<string> = new Set()
 export function useNewRows(keys: string[], live: boolean): ReadonlySet<string> {
   const prev = useRef<string[] | null>(null)
   const [added, setAdded] = useState<ReadonlySet<string>>(EMPTY)
-  const signature = JSON.stringify(keys)
+  // What the effect runs on: the ROWS changing, not the caller building a fresh
+  // array of the same rows. Callers pass a literal `rows.map(...)`, so the array
+  // itself is a new reference every render, and these tables re-render on the
+  // 1 Hz clock — hence a cheap join for the identity, and a memo that hands the
+  // effect the same array back until that identity actually moves.
+  const signature = keys.join('\n')
+  const stableKeys = useMemo(() => keys, [signature])   // eslint-disable-line react-hooks/exhaustive-deps -- `signature` IS the content of `keys`
 
   useEffect(() => {
     const prevKeys = prev.current
-    const nextKeys = JSON.parse(signature) as string[]
+    const nextKeys = stableKeys
     prev.current = nextKeys
     if (!live || !prevKeys) { setAdded(EMPTY); return }
     const prevSet = new Set(prevKeys)
     const fresh = nextKeys.filter(k => !prevSet.has(k))
     const overlaps = nextKeys.some(k => prevSet.has(k))
     setAdded(fresh.length && overlaps ? new Set(fresh) : EMPTY)
-  }, [signature, live])
+  }, [stableKeys, live])
 
   return added
 }
