@@ -36,7 +36,7 @@ export interface Config {
   RAW_FLUSH_INTERVAL_MS: number
 
   // Hydration chain constants
-  LRNA_ASSET_ID: number
+  H2O_ASSET_ID: number
   // Assets that can bridge Omnipool state into USD pricing.
   OMNIPOOL_BRIDGE_IDS: number[]
   // Dollar references that anchor Omnipool pricing, as peer baskets in falling preference.
@@ -100,7 +100,7 @@ export const config: Config = {
   RAW_FLUSH_INTERVAL_MS: integerFromEnvironment('RAW_FLUSH_INTERVAL_MS', 5_000, { min: 0 }),
 
   // Hydration chain asset IDs
-  LRNA_ASSET_ID: 1,   // LRNA is the Omnipool hub token
+  H2O_ASSET_ID: 1,   // H2O is the Omnipool hub token
   // Assets that can bridge Omnipool pricing into the stable basket.
   // 222 is deliberately treated as a bridge, not as a canonical USD reference.
   OMNIPOOL_BRIDGE_IDS: [10, 22, 222],

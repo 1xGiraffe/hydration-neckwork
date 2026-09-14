@@ -1,5 +1,5 @@
 import type { OmnipoolAssetState, XYKPool, UniswapV3PoolEdge, StableswapPool, AssetDecimals, PriceMap, GraphEdge, EdgeKind, QueueEntry, ResolvedPrices } from './types.ts';
-import { calculateLRNAPrice, calculateOmnipoolPrices } from './omnipool.ts';
+import { calculateH2OPrice, calculateOmnipoolPrices } from './omnipool.ts';
 import { calculateSpotPrice } from './stableswap.ts';
 
 const PRICE_SCALE = 10n ** 12n;
@@ -426,7 +426,7 @@ const MAX_HOPS = 3;
 const BFS_PRECISION = 24;
 
 // Multi-source BFS from Omnipool-seeded assets outward to resolve unpriced assets.
-// Seeds: Map of assetId -> 24-decimal bigint price (from Omnipool LRNA pass).
+// Seeds: Map of assetId -> 24-decimal bigint price (from Omnipool H2O pass).
 // omnipoolPricedAssets: Guard set — BFS must not override these prices.
 // graph: Bidirectional adjacency map from buildGraph().
 // maxHops: Maximum real pool crossings (default 3). aToken edges are zero-cost.
@@ -943,7 +943,7 @@ export function buildGraph(
 // 1. Anchor H2O on the dollar reference present in the Omnipool: the deepest
 //    member of the highest-preference basket in `usdReferenceBaskets`
 // 2. Fallback: externally priced Omnipool bridge assets, including stable LP bridges priced by NAV
-// 3. Compute all Omnipool prices via LRNA
+// 3. Compute all Omnipool prices via H2O
 // 4. Iteratively resolve XYK + Uniswap v3 + Stableswap + aToken equivalences
 export function resolvePrices(
   omnipoolAssets: Map<number, OmnipoolAssetState>,
@@ -951,7 +951,7 @@ export function resolvePrices(
   stableswapPools: StableswapPool[],
   decimals: AssetDecimals,
   _legacyUsdReferenceAssetId: number = 10,
-  lrnaAssetId: number = 1,
+  h2oAssetId: number = 1,
   omnipoolBridgeIds: number[] = [10],
   atokenEquivalences: [number, number][] = [],
   totalIssuances: Map<number, bigint> = new Map(),
@@ -1005,7 +1005,7 @@ export function resolvePrices(
     }
   };
 
-  let lrnaPrice: string | null = null;
+  let h2oPrice: string | null = null;
   const { referenceIds: usdReferenceIds, bridge: directReferenceBridge } =
     selectUsdAnchor(omnipoolAssets, usdReferenceBaskets);
   const referenceUsdPrices = buildUsdReferencePrices(usdReferenceIds, stableswapPools, decimals);
@@ -1023,13 +1023,13 @@ export function resolvePrices(
     try {
       const bridgeDecimals = decimals.get(directReferenceBridge.assetId) ?? 6;
       const bridgeUsdPrice = referenceUsdPrices.get(directReferenceBridge.assetId) ?? '1.000000000000';
-      lrnaPrice = calculateLRNAPrice(directReferenceBridge.state, bridgeDecimals);
-      lrnaPrice = multiplyPriceStrings(lrnaPrice, bridgeUsdPrice);
+      h2oPrice = calculateH2OPrice(directReferenceBridge.state, bridgeDecimals);
+      h2oPrice = multiplyPriceStrings(h2oPrice, bridgeUsdPrice);
     } catch {
     }
   }
 
-  if (!lrnaPrice) {
+  if (!h2oPrice) {
     const bridgeCandidates: WeightedObservation[] = [];
     const selectedBridgePrices = new Map<number, string>();
     const nonReferenceBridgeIds = omnipoolBridgeIds.filter(id => !usdReferenceIds.includes(id));
@@ -1084,9 +1084,9 @@ export function resolvePrices(
 
         const bridgeDecimals = decimals.get(assetId)
           ?? (stableswapPools.some(pool => pool.poolId === assetId) ? 18 : 6);
-        const bridgeLrnaPrice = priceStringTo12(calculateLRNAPrice(state, bridgeDecimals));
+        const bridgeH2oPrice = priceStringTo12(calculateH2OPrice(state, bridgeDecimals));
         bridgeCandidates.push({
-          value: (bridgeLrnaPrice * assetUsdPrice) / PRICE_SCALE,
+          value: (bridgeH2oPrice * assetUsdPrice) / PRICE_SCALE,
           weight: anchorWeight,
         });
         selectedBridgePrices.set(assetId, price12ToString(assetUsdPrice));
@@ -1094,9 +1094,9 @@ export function resolvePrices(
       }
     }
 
-    const medianLrnaPrice = weightedMedian(bridgeCandidates);
-    if (medianLrnaPrice !== null) {
-      lrnaPrice = price12ToString(medianLrnaPrice);
+    const medianH2oPrice = weightedMedian(bridgeCandidates);
+    if (medianH2oPrice !== null) {
+      h2oPrice = price12ToString(medianH2oPrice);
       for (const [assetId, price] of selectedBridgePrices.entries()) {
         prices.set(assetId, price);
       }
@@ -1104,10 +1104,10 @@ export function resolvePrices(
   }
 
   // Compute all Omnipool prices
-  if (lrnaPrice) {
-    prices.set(lrnaAssetId, lrnaPrice);
+  if (h2oPrice) {
+    prices.set(h2oAssetId, h2oPrice);
 
-    const omnipoolPrices = calculateOmnipoolPrices(omnipoolAssets, lrnaPrice, decimals);
+    const omnipoolPrices = calculateOmnipoolPrices(omnipoolAssets, h2oPrice, decimals);
     for (const [assetId, price] of omnipoolPrices.entries()) {
       if (!prices.has(assetId)) {
         prices.set(assetId, price);
