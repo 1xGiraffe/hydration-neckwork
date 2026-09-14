@@ -37,9 +37,10 @@ Every port binds to `127.0.0.1`: the services are reached through a reverse prox
 the Docker network, so publishing them on all interfaces would only offer a way past
 its caching, rate limiting and logging.
 
-Three more services run without a port of their own: `smart-contract-verifier` compiles
-and matches submitted contract sources, and `user-backup`/`contract-backup` export the
-two api-authored datasets that no projection rebuild can regenerate.
+The remaining sixteen services run without a port of their own: the raw/live ingestion
+and snapshot tier, `schema-bootstrap`, `derivations`, `smart-contract-verifier` (which
+compiles and matches submitted contract sources), and `user-backup`/`contract-backup`,
+which export the two api-authored datasets no projection rebuild can regenerate.
 
 The live pipelines start immediately. Historical ingestion continues in the background, so a fresh installation fills older explorer and price history over time.
 
@@ -205,9 +206,11 @@ it, so the database is disposable and rebuildable — **there are no migrations*
   table/MV and let it refill from raw, or reset the derived layer and let it rebuild.
   Never write an in-place migration; there is no version ledger.
 
-Fresh-install order (enforced by Compose `depends_on`):
-`schema-bootstrap` → ingestion (raw) → `derivations` → `api`. Applying the schema to a
-non-empty database is a safe no-op, so redeploying never risks existing data.
+Fresh-install order (enforced by Compose `depends_on`): `clickhouse` healthy →
+`schema-bootstrap` completed → everything else in parallel. Ingestion, `derivations` and
+`api` deliberately have no edges between them: each is correct against whatever raw is
+indexed at the time, which is the point of the schema-first design above. Applying the
+schema to a non-empty database is a safe no-op, so redeploying never risks existing data.
 
 ## Operational safety
 
