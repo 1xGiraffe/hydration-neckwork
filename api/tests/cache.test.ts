@@ -126,3 +126,48 @@ describe('cached', () => {
     expect(load).not.toHaveBeenCalled()
   })
 })
+
+// A live feed's window is head-keyed so it can never silently stop gaining rows.
+// Doing that with the head in the KEY means a new block leaves nothing to serve,
+// so the next reader blocks on the whole rebuild. Passing the head as the entry's
+// GENERATION keeps the same guarantee — a new head still forces the rebuild, and
+// it is noticed on the next read rather than when a TTL happens to lapse — while
+// the reader is served the previous head's value instead of waiting for it.
+describe('cachedSwr generation', () => {
+  beforeEach(() => { vi.resetModules() })
+
+  it('serves the superseded value and rebuilds it in the background', async () => {
+    const { cachedSwr } = await import('../src/services/cache.ts')
+    let built = 0
+    const build = async (): Promise<string> => {
+      built += 1
+      await new Promise(resolve => setTimeout(resolve, 5))
+      return `head-${built}`
+    }
+
+    expect(await cachedSwr('k', 60_000, 60_000, build, 100)).toBe('head-1')
+
+    // A new head supersedes the entry: the reader is NOT blocked on the rebuild.
+    const started = Date.now()
+    expect(await cachedSwr('k', 60_000, 60_000, build, 101)).toBe('head-1')
+    expect(Date.now() - started).toBeLessThan(5)
+
+    // …but the rebuild was started, and the next reader sees the new head's value.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(built).toBe(2)
+    expect(await cachedSwr('k', 60_000, 60_000, build, 101)).toBe('head-2')
+  })
+
+  it('blocks only when there is nothing to serve at all', async () => {
+    const { cached } = await import('../src/services/cache.ts')
+    let built = 0
+    const build = async (): Promise<string> => { built += 1; return `v${built}` }
+
+    // The head-in-the-key shape: a new head is a new key, so there is no previous
+    // value to serve and the reader pays the build. This is what a forward-only
+    // reader must keep — a page incomplete when read loses rows permanently.
+    expect(await cached('w:h1', 60_000, build)).toBe('v1')
+    expect(await cached('w:h2', 60_000, build)).toBe('v2')
+    expect(built).toBe(2)
+  })
+})
