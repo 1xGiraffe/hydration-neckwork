@@ -23,6 +23,15 @@ import { liveHeadTag } from './head.ts'
  * of the chain holds 796 fills. One query, ~800 rows, so every fill on a page
  * resolves without a per-request read. Keyed on the indexed head so a fill
  * indexed a moment ago is not served from a stale index.
+ *
+ * A head key means the load re-runs on every block, so the read has to be cheap
+ * at rest. The taker side comes from `otc_order_events` — the MV-fed projection
+ * of the same pallet events, tiny and already decoded — and the block set it
+ * yields ALSO bounds the one remaining `raw_events` read to the ~800 blocks that
+ * hold a fill. That bound is lossless: a Broadcast row outside it has no sibling
+ * fill event, so the INNER JOIN would drop it anyway. Only the Broadcast's
+ * `filler` account still needs raw, because no derived model stores it
+ * (`pool_swap_legs` overwrites that column with the OTC order id).
  */
 export interface OtcFillSides {
   /** Fill identity: `${blockHeight}:${eventIndex}` of the Broadcast event. */
@@ -63,13 +72,18 @@ async function load(client: ClickHouseClient): Promise<OtcSideIndex> {
                JSONExtractString(args_json, 'swapper') AS swapper,
                JSONExtractString(args_json, 'filler') AS filler_account
         FROM price_data.raw_events
-        WHERE event_name IN ('Broadcast.Swapped', 'Broadcast.Swapped2', 'Broadcast.Swapped3')
+        WHERE block_height IN (
+                SELECT block_height FROM price_data.otc_order_events
+                WHERE event_name IN ('Filled', 'PartiallyFilled')
+              )
+          AND event_name IN ('Broadcast.Swapped', 'Broadcast.Swapped2', 'Broadcast.Swapped3')
           AND JSONExtractString(args_json, 'fillerType', '__kind') = 'OTC'
       ) AS b
       INNER JOIN (
-        SELECT block_height, event_index + 1 AS bc_index, JSONExtractString(args_json, 'who') AS taker
-        FROM price_data.raw_events
-        WHERE event_name IN ('OTC.Filled', 'OTC.PartiallyFilled')
+        SELECT block_height, event_index + 1 AS bc_index, argMax(filler, ingested_at) AS taker
+        FROM price_data.otc_order_events
+        WHERE event_name IN ('Filled', 'PartiallyFilled')
+        GROUP BY block_height, event_index
       ) AS f ON f.block_height = b.block_height AND f.bc_index = b.event_index
       -- A taker that is neither account the Broadcast names would leave the sides
       -- unresolved; measured 0 of 796, and excluded here so a reader never has to

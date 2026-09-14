@@ -5,11 +5,10 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import {
   badRequest, cursorUint, decodeCursor, encodeCursor, errorEnvelope,
-  zCursor, zError, zFeedPage, zIsoTimestamp, zLimit, zOrder,
+  zCursor, zError, zFeedPage, zFeedQuery, zIsoTimestamp, zLimit, zWindowQuartet, zWindowedFeedQuery,
 } from '../schemas/common.ts'
 import { liveHeadTag, notFoundContext } from '../services/head.ts'
-import { ADDRESS_FORMATS_HINT, parseAddress } from '../services/address.ts'
-import { inWindow, zWindowQuartet } from './accountsShared.ts'
+import { inWindow, requireParsedAddress } from './accountsShared.ts'
 import { REFERENDUM_STATUSES, loadReferenda, loadReferendum, votesForReferendum, votesForVoter, type ReferendumPallet } from '../services/governance.ts'
 import { VOTES_DESCRIPTION, voteCursorPage, zPallet, zVoteItem } from './votesShared.ts'
 
@@ -129,7 +128,7 @@ export const governanceRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> 
       summary: 'One referendum’s raw vote-call history',
       description: VOTES_DESCRIPTION,
       params: z.object({ pallet: zPallet, index: zRefIndex }),
-      querystring: z.object({ limit: zLimit, cursor: zCursor, order: zOrder, ...zWindowQuartet }),
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(zVoteItem), 400: zError, 404: zError },
     },
   }, async (request, reply) => {
@@ -154,18 +153,14 @@ export const governanceRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> 
       tags: ['governance'],
       summary: 'One voter’s raw vote-call history across all referenda',
       description: `${VOTES_DESCRIPTION}\n\nServed from a voter-first projection, so any voter's full history is one key-range read. \`voter\` is required; an account that never voted answers 200 with empty items. The same feed is addressable as /v1/accounts/{address}/votes.`,
-      querystring: z.object({
+      querystring: zFeedQuery.extend({
         voter: z.string().min(3).max(128).describe('The voter, as SS58 (any prefix), H160, or 0x-prefixed public-key hex.'),
-        limit: zLimit,
-        cursor: zCursor,
-        order: zOrder,
         ...zWindowQuartet,
       }),
       response: { 200: zFeedPage(zVoteItem), 400: zError },
     },
   }, async request => {
-    const voter = parseAddress(request.query.voter)
-    if (!voter) throw badRequest(`unparseable voter; ${ADDRESS_FORMATS_HINT}`)
+    const voter = requireParsedAddress(request.query.voter, 'voter')
     const head = await liveHeadTag(opts.client)
     const votes = await cached(`data:governance:voter:${voter.accountId}:${head}`, 10_000,
       () => votesForVoter(opts.client, voter.accountId))

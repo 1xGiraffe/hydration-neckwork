@@ -3,7 +3,8 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { feedPage, requirePositionCursor, zAssetId, zError, zFeedPage, zIsoTimestamp } from '../schemas/common.ts'
+import { feedPage, requirePositionCursor, zAssetId, zError, zFeedPage, zIsoTimestamp, zWindowedFeedQuery } from '../schemas/common.ts'
+import { windowKey } from '../services/feed.ts'
 import { liveHeadTag } from '../services/head.ts'
 import {
   accountDcaEvents, accountFees, accountLiquidations, accountLiquidity,
@@ -15,7 +16,7 @@ import { intentOrders } from '../services/intentData.ts'
 import { votesForVoter } from '../services/governance.ts'
 import { liquidityPositions } from '../services/lpPositions.ts'
 import { LIQUIDITY_ACTIONS, type LiquidityAction } from '../services/uniswapV3Liquidity.ts'
-import { UNSEEN_IS_EMPTY, inWindow, requireParsedAddress, windowKey, zAccountFeedQuery, zAccountParams } from './accountsShared.ts'
+import { UNSEEN_IS_EMPTY, inWindow, requireParsedAddress, zAccountParams } from './accountsShared.ts'
 import { PRE_ROUTER_NOTE, zSchedule } from './dcaShared.ts'
 import { INTENT_NOTE, zIntent, zIntentKind } from './intentsShared.ts'
 import { zOtcEvent } from './otcShared.ts'
@@ -172,7 +173,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
         UNSEEN_IS_EMPTY,
       ].join('\n\n'),
       params: zAccountParams,
-      querystring: zAccountFeedQuery,
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(zTrade), 400: zError },
     },
   }, async request => {
@@ -195,7 +196,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
         UNSEEN_IS_EMPTY,
       ].join('\n\n'),
       params: zAccountParams,
-      querystring: zAccountFeedQuery,
+      querystring: zWindowedFeedQuery,
       response: {
         200: z.object({
           schedules: z.array(zSchedule),
@@ -234,7 +235,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
         UNSEEN_IS_EMPTY,
       ].join('\n\n'),
       params: zAccountParams,
-      querystring: zAccountFeedQuery.extend({ kind: zIntentKind.optional() }),
+      querystring: zWindowedFeedQuery.extend({ kind: zIntentKind.optional() }),
       response: { 200: zFeedPage(zIntent), 400: zError },
     },
   }, async request => {
@@ -259,7 +260,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
         UNSEEN_IS_EMPTY,
       ].join('\n\n'),
       params: zAccountParams,
-      querystring: zAccountFeedQuery,
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(zOtcCall), 400: zError },
     },
   }, async request => {
@@ -281,7 +282,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
         UNSEEN_IS_EMPTY,
       ].join('\n\n'),
       params: zAccountParams,
-      querystring: zAccountFeedQuery,
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(zOtcFill), 400: zError },
     },
   }, async request => {
@@ -300,7 +301,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
       summary: 'Staking events naming the account',
       description: 'HDX staking and GIGAHDX events (Staking.*, GigaHdx.*, GigaHdxRewards.*, CollatorRewards.*) where the event names this account, with decoded `args` — the same items /v1/staking/events serves, scoped to one account. ' + UNSEEN_IS_EMPTY,
       params: zAccountParams,
-      querystring: zAccountFeedQuery,
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(zStakingEvent), 400: zError },
     },
   }, async request => {
@@ -319,7 +320,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
       summary: 'Governance votes cast by the account',
       description: `${VOTES_DESCRIPTION}\n\nThe same feed as /v1/governance/votes?voter=, addressed under the account. ${UNSEEN_IS_EMPTY}`,
       params: zAccountParams,
-      querystring: zAccountFeedQuery,
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(zVoteItem), 400: zError },
     },
   }, async request => {
@@ -340,7 +341,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
         'Concentrated-liquidity (Uniswap v3) acts are in the same feed, restated from the pools\' EVM logs with the explorer\'s act rules: a position opened or closed through the NonfungiblePositionManager (`IncreaseLiquidity` → Add, `DecreaseLiquidity` → Remove, attributed to the NFT\'s holder at that moment, with the pool and tick range read from the pool log beside it), a manager `Collect` as CollectFees for what it paid BEYOND the principal a DecreaseLiquidity in the same extrinsic booked (a collect that only settled principal is not an act; a collect made in a later transaction than its decrease reports its whole payout), a Gamma vault `Deposit`/`Withdraw` for the beneficiary, and a pool\'s own `Mint`/`Burn`/`Collect` only when the owner is no announced manager or vault (a burn(0) poke never is). `assetId`/`amount` are token0, `assetB`/`amountB` token1; an act whose tokens the registry cannot name is omitted rather than published with an invented asset. A vault Rebalance is the operator\'s act and names no account.',
       ].join('\n\n'),
       params: zAccountParams,
-      querystring: zAccountFeedQuery,
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(zLiquidityItem), 400: zError },
     },
   }, async request => {
@@ -386,7 +387,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
         UNSEEN_IS_EMPTY,
       ].join('\n\n'),
       params: zAccountParams,
-      querystring: zAccountFeedQuery.extend({
+      querystring: zWindowedFeedQuery.extend({
         direction: z.enum(['in', 'out']).optional(),
         asset: zAssetId.optional(),
       }),
@@ -412,7 +413,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
         UNSEEN_IS_EMPTY,
       ].join('\n\n'),
       params: zAccountParams,
-      querystring: zAccountFeedQuery,
+      querystring: zWindowedFeedQuery,
       response: {
         200: z.object({ positions: z.array(zMmPosition), activity: zFeedPage(zMmActivity) }),
         400: zError,
@@ -437,7 +438,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
       summary: 'Liquidations of the account\'s positions',
       description: 'Money-market LiquidationCall events where this account was the liquidated borrower. ' + UNSEEN_IS_EMPTY,
       params: zAccountParams,
-      querystring: zAccountFeedQuery,
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(zLiquidation), 400: zError },
     },
   }, async request => {

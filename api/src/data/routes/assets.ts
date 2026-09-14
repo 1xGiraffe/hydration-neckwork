@@ -5,8 +5,9 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import {
   badRequest, errorEnvelope, feedPage, requirePositionCursor,
-  zAccountRef, zAssetId, zBlock, zCursor, zError, zFeedPage, zIsoTimestamp, zLimit, zOrder, zTimeParam,
+  zAccountRef, zAssetId, zError, zFeedPage, zIsoTimestamp, zLimit, zTimeParam, zWindowedFeedQuery,
 } from '../schemas/common.ts'
+import { windowKey } from '../services/feed.ts'
 import { liveHeadTag, notFoundContext } from '../services/head.ts'
 import {
   CANDLE_BUCKETS, HOLDERS_RANK_DEPTH, assetCandles, assetHolders, currentPrice, getAsset, listAssets, priceAtBlock, priceAtTime,
@@ -14,6 +15,7 @@ import {
 } from '../services/assetsData.ts'
 import { assetSwaps, assetTransfers } from '../services/assetFeeds.ts'
 import { accountRefFor } from '../services/address.ts'
+import { zAssetSwap, zAssetTransfer } from './assetsShared.ts'
 
 const zAssetItem = z.object({
   assetId: zAssetId,
@@ -49,16 +51,6 @@ const zHolder = z.object({
 
 const zBucketParam = z.enum(Object.keys(CANDLE_BUCKETS) as [CandleBucket, ...CandleBucket[]])
 
-const zFeedWithWindow = z.object({
-  limit: zLimit,
-  cursor: zCursor,
-  order: zOrder,
-  fromBlock: zBlock.optional(),
-  toBlock: zBlock.optional(),
-  fromTime: zTimeParam.optional(),
-  toTime: zTimeParam.optional(),
-})
-
 const NOT_FOUND_HINT = 'list ids via /v1/assets'
 
 function parseAssetId(raw: string): number {
@@ -83,6 +75,7 @@ export const assetsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
     schema: {
       tags: ['assets'],
       summary: 'One asset by registry id',
+      description: 'One registry entry: symbol, name, decimals and origin, plus the current USD price. `priceUsd` is subject to the 30-day freshness rule — an asset whose feed has not produced a price in the last 30 days reports null rather than its final close, so a dead feed is visible as unpriced instead of frozen. The Omnipool hub asset (id 1) is named **H2O**. 404 for an id the registry does not hold.',
       params: z.object({ id: zAssetId }),
       response: { 200: zAssetItem, 400: zError, 404: zError },
     },
@@ -169,19 +162,8 @@ export const assetsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
       summary: 'Transfers of one asset, newest first',
       description: 'Asset-first projection (transfer_activity), cursor-paginated: any depth of one asset\'s transfer history is a key-range read. HDX is asset 0. `from`/`to` may name module (pallet) accounts.',
       params: z.object({ id: zAssetId }),
-      querystring: zFeedWithWindow,
-      response: { 200: zFeedPage(z.object({
-        blockHeight: z.number().int(),
-        eventIndex: z.number().int(),
-        extrinsicIndex: z.number().int().nullable(),
-  extrinsicHash: z.string().nullable().describe('Hash of the carrying extrinsic; null for a block-hook row.'),
-        timestamp: zIsoTimestamp,
-        eventName: z.string(),
-        from: zAccountRef.nullable(),
-        to: zAccountRef.nullable(),
-        amount: z.string(),
-        valueUsd: z.string().nullable().describe('EVENT-TIME USD (the last closed hourly candle before the transfer, ≤30 days stale); null when the asset had no usable price then.'),
-      })), 400: zError, 404: zError },
+      querystring: zWindowedFeedQuery,
+      response: { 200: zFeedPage(zAssetTransfer), 400: zError, 404: zError },
     },
   }, async (request, reply) => {
     const id = parseAssetId(request.params.id)
@@ -192,7 +174,7 @@ export const assetsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
     const { limit, order, fromBlock, toBlock, fromTime, toTime } = request.query
     const cursor = requirePositionCursor(request.query.cursor)
     const head = await liveHeadTag(opts.client)
-    const key = `data:asset:transfers:${id}:${order}:${fromBlock ?? ''}:${toBlock ?? ''}:${fromTime ?? ''}:${toTime ?? ''}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
+    const key = `data:asset:transfers:${id}:${order}:${windowKey(request.query)}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
     const { items, hasMore } = await cached(key, 3_000, () => assetTransfers(opts.client, id, { limit, order, cursor, fromBlock, toBlock, fromTime, toTime }))
     return feedPage(items, hasMore, last => ({ b: last.blockHeight, i: last.eventIndex }))
   })
@@ -203,20 +185,8 @@ export const assetsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
       summary: 'Swaps touching one asset, newest first',
       description: 'Asset-first projection (asset_swap_activity): every SUBSTRATE swap event naming the asset on either side, including the legacy per-pallet events and Router.Executed rows (which carry no actor — `who` is null there; Broadcast-era actor attribution lives on /v1/trades). A direct EVM swap against a concentrated-liquidity (Uniswap v3) pool emits no substrate event and is not in this projection; those fills are on /v1/pools/uniswapv3/{pool}/trades and /v1/trades?venue=uniswapv3 (a Router-routed hop through such a pool is here like any other route).',
       params: z.object({ id: zAssetId }),
-      querystring: zFeedWithWindow,
-      response: { 200: zFeedPage(z.object({
-        blockHeight: z.number().int(),
-        eventIndex: z.number().int(),
-        extrinsicIndex: z.number().int().nullable(),
-  extrinsicHash: z.string().nullable().describe('Hash of the carrying extrinsic; null for a block-hook row.'),
-        timestamp: zIsoTimestamp,
-        eventName: z.string(),
-        who: zAccountRef.nullable(),
-        assetIn: zAssetId,
-        assetOut: zAssetId,
-        amountIn: z.string(),
-        amountOut: z.string(),
-      })), 400: zError, 404: zError },
+      querystring: zWindowedFeedQuery,
+      response: { 200: zFeedPage(zAssetSwap), 400: zError, 404: zError },
     },
   }, async (request, reply) => {
     const id = parseAssetId(request.params.id)
@@ -227,7 +197,7 @@ export const assetsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
     const { limit, order, fromBlock, toBlock, fromTime, toTime } = request.query
     const cursor = requirePositionCursor(request.query.cursor)
     const head = await liveHeadTag(opts.client)
-    const key = `data:asset:swaps:${id}:${order}:${fromBlock ?? ''}:${toBlock ?? ''}:${fromTime ?? ''}:${toTime ?? ''}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
+    const key = `data:asset:swaps:${id}:${order}:${windowKey(request.query)}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
     const { items, hasMore } = await cached(key, 3_000, () => assetSwaps(opts.client, id, { limit, order, cursor, fromBlock, toBlock, fromTime, toTime }))
     return feedPage(items, hasMore, last => ({ b: last.blockHeight, i: last.eventIndex }))
   })

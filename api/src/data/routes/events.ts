@@ -5,25 +5,19 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import {
   badRequest, csv, errorEnvelope, feedPage, requirePositionCursor,
-  zBlock, zCursor, zError, zFeedPage, zLimit, zOrder, zTimeParam,
+  zError, zFeedPage, zFeedQuery, zWindowQuartet,
 } from '../schemas/common.ts'
 import { liveHeadTag, notFoundContext } from '../services/head.ts'
 import { eventAt, eventsFeed } from '../services/chainCore.ts'
-import { MAX_FILTER_WINDOW_DAYS } from '../services/feed.ts'
+import { MAX_FILTER_WINDOW_DAYS, windowKey } from '../services/feed.ts'
 import { zEventItem } from './extrinsicsShared.ts'
 
 const EVENT_ID_RE = /^(\d{1,10})-(\d{1,10})$/
 
-const zEventsQuery = z.object({
-  limit: zLimit,
-  cursor: zCursor,
-  order: zOrder,
+const zEventsQuery = zFeedQuery.extend({
   name: z.string().max(400).optional()
     .describe(`Comma-separated \`Pallet.Event\` names. A name predicate cannot prune the primary key, so it requires a bounded window (fromTime+toTime ≤ ${MAX_FILTER_WINDOW_DAYS} days, or fromBlock+toBlock).`),
-  fromBlock: zBlock.optional(),
-  toBlock: zBlock.optional(),
-  fromTime: zTimeParam.optional(),
-  toTime: zTimeParam.optional(),
+  ...zWindowQuartet,
 })
 
 export const eventsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = async (fastify, opts) => {
@@ -42,7 +36,7 @@ export const eventsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
     const cursor = requirePositionCursor(request.query.cursor)
     const names = csv(request.query.name)
     const head = await liveHeadTag(opts.client)
-    const key = `data:events:${order}:${[...names].sort().join(',')}:${fromBlock ?? ''}:${toBlock ?? ''}:${fromTime ?? ''}:${toTime ?? ''}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
+    const key = `data:events:${order}:${[...names].sort().join(',')}:${windowKey(request.query)}:${cursor?.b ?? ''}:${cursor?.i ?? ''}:${limit}:${head}`
     const { items, hasMore } = await cached(key, 3_000, () => eventsFeed(opts.client, {
       limit, order, cursor,
       names: names.length ? names : undefined,
