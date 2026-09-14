@@ -362,10 +362,10 @@ async function loadRegistryUncached(): Promise<void> {
       if (withExtrinsic.length) {
         const keyList = withExtrinsic.map(r => `(${numeric(r.block_height)}, ${numeric(r.extrinsic_index!)})`).join(',')
         const execRows = await rows<CreateExecutedRow>(`
-          SELECT DISTINCT to_address, block_height, assumeNotNull(extrinsic_index) AS extrinsic_index, tx_hash, exit_kind,
-                 toString(block_timestamp) AS block_timestamp
-          FROM price_data.evm_executed
-          WHERE extrinsic_index IS NOT NULL AND (block_height, assumeNotNull(extrinsic_index)) IN (${keyList})`)
+          SELECT DISTINCT x.to_address, x.block_height, assumeNotNull(x.extrinsic_index) AS extrinsic_index, x.tx_hash, x.exit_kind,
+                 toString(x.block_timestamp) AS block_timestamp
+          FROM price_data.evm_executed AS x
+          WHERE x.extrinsic_index IS NOT NULL AND (x.block_height, assumeNotNull(x.extrinsic_index)) IN (${keyList})`)
         const execByKey = new Map(execRows.map(r => [`${r.block_height}:${r.extrinsic_index}`, r]))
         firstLogExecuted = withExtrinsic.flatMap(r => {
           const exec = execByKey.get(`${r.block_height}:${r.extrinsic_index}`)

@@ -175,8 +175,11 @@ describe('omnipool fee streams', () => {
     const marker = "toYYYYMM(block_timestamp) = 209901"
     for (const stream of ['omnipool_asset_fee', 'omnipool_protocol_fee'] as const) {
       const sql = buildRevenueEventRowsSql(stream, marker)
-      expect(sql, stream).toContain('FROM price_data.intent_events FINAL')
-      expect(sql, stream).toContain('FROM price_data.intent_orders FINAL')
+      expect(sql, stream).toMatch(/FROM price_data\.intent_events(\s+AS\s+\w+)?\s+FINAL/)
+      expect(sql, stream).toMatch(/FROM price_data\.intent_orders(\s+AS\s+\w+)?\s+FINAL/)
+      // The NOT NULL filter reads the TABLE's column: `assumeNotNull(x) AS x`
+      // would resolve the later `x` to the alias, which is never null.
+      expect(sql, stream).toContain('ie.extrinsic_index IS NOT NULL')
       expect(sql, stream).toContain("if(uniqExact(o.owner) = 1, any(o.owner), '') AS owner")
       expect(sql, stream).toContain(`if(f.swapper = '${ICE_POT_ACCOUNT}' AND i.owner != '', i.owner,`)
       // The owner read is bounded like every other source read of the stream.

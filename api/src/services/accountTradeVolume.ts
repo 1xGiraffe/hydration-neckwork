@@ -221,16 +221,16 @@ intent_fills AS (
          lower(o.owner) AS account, o.asset_in AS asset_in, o.asset_out AS asset_out,
          toDecimal256(if(e.amount_in = '', '0', e.amount_in), 0) AS stated_in,
          toDecimal256(if(e.amount_out = '', '0', e.amount_out), 0) AS stated_out
-  FROM (SELECT intent_id, block_height, assumeNotNull(extrinsic_index) AS extrinsic_index, event_index, block_timestamp, event_name, amount_in, amount_out
-        FROM price_data.intent_events FINAL
-        WHERE event_name IN (${INTENT_FILL_EVENTS}) AND extrinsic_index IS NOT NULL AND block_height >= ${ICE_MIN_BLOCK} AND ${pf}) e
+  FROM (SELECT intent_id, block_height, assumeNotNull(ie.extrinsic_index) AS extrinsic_index, event_index, block_timestamp, event_name, amount_in, amount_out
+        FROM price_data.intent_events AS ie FINAL
+        WHERE event_name IN (${INTENT_FILL_EVENTS}) AND ie.extrinsic_index IS NOT NULL AND block_height >= ${ICE_MIN_BLOCK} AND ${pf}) e
   INNER JOIN (SELECT intent_id, owner, asset_in, asset_out FROM price_data.intent_orders FINAL) o ON o.intent_id = e.intent_id
 ),
 pot_legs AS (
-  SELECT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index,
+  SELECT block_height, assumeNotNull(t.extrinsic_index) AS extrinsic_index,
          lower(from_account) AS src, lower(to_account) AS dst, asset_id, toDecimal256(if(amount = '', '0', amount), 0) AS amount
-  FROM price_data.transfer_activity_by_time FINAL
-  WHERE event_name = 'Currencies.Transferred' AND extrinsic_index IS NOT NULL AND block_height >= ${ICE_MIN_BLOCK} AND ${pf}
+  FROM price_data.transfer_activity_by_time AS t FINAL
+  WHERE event_name = 'Currencies.Transferred' AND t.extrinsic_index IS NOT NULL AND block_height >= ${ICE_MIN_BLOCK} AND ${pf}
     AND (from_account = '${ICE_POT_ACCOUNT}' OR to_account = '${ICE_POT_ACCOUNT}')
 ),
 moved AS (

@@ -3,7 +3,7 @@ import { blake2AsU8a, xxhashAsU8a } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 import { decodeCompact } from './proxyMultisigService.ts'
-import { collectLockBreakdownRows, gigaUnbondingBlocks, persistLockSnapshot, type LockRow } from './lockBreakdownService.ts'
+import { collectLockBreakdownRows, gigaUnbondingBlocks, persistLockSnapshot, unvestedByAccountRaw, type LockRow, type VestingScheduleRaw } from './lockBreakdownService.ts'
 import { cachedSwr } from './cache.ts'
 import { NOMINAL_RELAY_BLOCK_MS, paraBlockMs } from './blockTime.ts'
 import { allTags, economicModuleAccounts } from './tagService.ts'
@@ -78,10 +78,12 @@ export function decodeCompactBig(b: Uint8Array, off: number): [bigint, number] {
 
 export interface LockTypeTotal { id: string; accounts: number; totalHdx: number }
 export interface PendingUnstake { accountId: string; startBlock: number; expiryBlock: number; payoutHdx: number; payoutRaw: bigint }
-export interface VestingScheduleAgg { accountId: string; start: number; period: number; periodCount: number; perPeriod: bigint }
-// Per-account lock overlap: the largest non-vesting lock and the raw ormlvest
-// amount (which goes stale between claims — see correctVestingLocks).
-export interface LockAccount { maxNonVestHdx: number; vestLockHdx: number }
+// The orml-vesting schedule shape both this dashboard and the per-account lock
+// breakdown decode; one declaration so the two cannot drift.
+export type VestingScheduleAgg = VestingScheduleRaw
+// Per-account lock overlap in raw planck: the largest non-vesting lock and the
+// ormlvest amount (which goes stale between claims — see correctVestingLocks).
+export interface LockAccount { maxNonVestRaw: bigint; vestLockRaw: bigint }
 // One entry per account holding a pyconvot lock, classified so the vote-lock
 // totals across "unlockable now" / scheduled / undetermined sum EXACTLY to the
 // authoritative Balances.Locks pyconvot amount (per-entry prior locks overlap
@@ -228,7 +230,7 @@ async function loadLocks(): Promise<{ lockTypes: LockTypeTotal[]; lockAccounts: 
       else if (amount > maxNonVest) maxNonVest = amount
       if (id === 'pyconvot') voteLockByAccount.set(accountId, toHdx(amount))
     }
-    lockAccounts.set(accountId, { maxNonVestHdx: toHdx(maxNonVest), vestLockHdx: toHdx(vestLock) })
+    lockAccounts.set(accountId, { maxNonVestRaw: maxNonVest, vestLockRaw: vestLock })
   }
   const lockTypes = [...byId.entries()]
     .map(([id, e]) => ({ id, accounts: e.accounts, totalHdx: toHdx(e.total) }))
@@ -260,9 +262,17 @@ async function loadLocks(): Promise<{ lockTypes: LockTypeTotal[]; lockAccounts: 
 // `switchBlock` is `parameters.twoSecBlocksSince` (a storage value, not a
 // metadata constant); `u32::MAX` is its unset sentinel, meaning no switch has
 // happened and the plain cooldown applies.
+//
+// The pre-switch half of that arithmetic is a fixed historical fact — 28 days
+// of 6s blocks — not a derivation of today's constant. Deriving it (as
+// `cooldownBlocks / 3`) would hard-wire "the current value is exactly triple
+// the old one", so a `GIGA_UNBONDING_BLOCKS` override or a later governance
+// change to the cooldown would misdate every straddling position.
+const PRE_TWO_SEC_COOLDOWN_BLOCKS = 403_200
+
 export function cooldownExpiresAt(startBlock: number, switchBlock: number, cooldownBlocks: number): number {
   if (switchBlock === 0xFFFFFFFF || startBlock >= switchBlock) return startBlock + cooldownBlocks
-  const oldExpiresAt = startBlock + Math.floor(cooldownBlocks / 3)
+  const oldExpiresAt = startBlock + PRE_TWO_SEC_COOLDOWN_BLOCKS
   if (oldExpiresAt <= switchBlock) return oldExpiresAt
   return switchBlock + (oldExpiresAt - switchBlock) * 3
 }
@@ -351,20 +361,22 @@ export function correctVestingLocks(
   schedules: VestingScheduleAgg[],
   relayHeight: number,
 ): { vestingAccounts: number; vestingHdx: number; vestedUnclaimedHdx: number; totalLockedHdx: number } {
-  const unvestedByAccount = new Map<string, number>()
-  for (const s of schedules) {
-    const elapsed = Math.max(0, Math.min(s.periodCount, Math.floor((relayHeight - s.start) / s.period)))
-    const remaining = BigInt(s.periodCount - elapsed) * s.perPeriod
-    if (remaining > 0n) unvestedByAccount.set(s.accountId, (unvestedByAccount.get(s.accountId) ?? 0) + toHdx(remaining))
-  }
-  let vestingAccounts = 0, vestingHdx = 0, vestedUnclaimedHdx = 0, totalLockedHdx = 0
+  const unvestedByAccount = unvestedByAccountRaw(schedules, relayHeight)
+  let vestingAccounts = 0
+  let vestingRaw = 0n, vestedUnclaimedRaw = 0n, totalLockedRaw = 0n
   for (const [accountId, l] of lockAccounts) {
-    const unvested = Math.min(unvestedByAccount.get(accountId) ?? 0, l.vestLockHdx)
-    if (unvested > 0) { vestingAccounts++; vestingHdx += unvested }
-    vestedUnclaimedHdx += l.vestLockHdx - unvested
-    totalLockedHdx += Math.max(l.maxNonVestHdx, unvested)
+    const scheduled = unvestedByAccount.get(accountId) ?? 0n
+    const unvested = scheduled < l.vestLockRaw ? scheduled : l.vestLockRaw
+    if (unvested > 0n) { vestingAccounts++; vestingRaw += unvested }
+    vestedUnclaimedRaw += l.vestLockRaw - unvested
+    totalLockedRaw += l.maxNonVestRaw > unvested ? l.maxNonVestRaw : unvested
   }
-  return { vestingAccounts, vestingHdx, vestedUnclaimedHdx, totalLockedHdx }
+  return {
+    vestingAccounts,
+    vestingHdx: toHdx(vestingRaw),
+    vestedUnclaimedHdx: toHdx(vestedUnclaimedRaw),
+    totalLockedHdx: toHdx(totalLockedRaw),
+  }
 }
 
 // ConvictionVoting.VotingFor: Casting{votes: Vec<(poll u32, AccountVote)>,
@@ -660,12 +672,13 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
   return cachedSwr('explorer:hdx-dashboard', 300_000, 48 * 3_600_000, async () => {
     const [prices, head, paraMs, supply, flows, dca, churn, structure, movers, gigaMarket] = await Promise.all([
       ensurePrices(), loadHead(), paraBlockMs(client), loadSupplyCohorts(), loadDailyFlows(), loadDcaFlows(), loadChurn(), loadStructure(), loadTopMovers(),
-      getGigaMarketStats().catch(() => null),
+      getGigaMarketStats().catch(err => { console.warn('[hdx] GIGAHDX market stats unavailable; the dashboard omits them', err); return null }),
     ])
     // Needs the staking exchange rate to express levels as HDX prices; without
     // a snapshot there is none, and the chart is withheld rather than assumed.
     const gigaLiquidations = snapshot
-      ? await getGigaLiquidationLevels(snapshot.gigahdxHdxPerShare).catch(() => null)
+      ? await getGigaLiquidationLevels(snapshot.gigahdxHdxPerShare)
+        .catch(err => { console.warn('[hdx] GIGAHDX liquidation levels unavailable; the chart is withheld', err); return null })
       : null
     const px = prices.get(0)
     const snap = snapshot
@@ -1297,11 +1310,11 @@ async function loadStructure(): Promise<HdxStructure> {
           ARRAY JOIN arrayZip(gw, fb) AS t
           WHERE t.2 > 0 AND t.1 >= toDate({start:String})
         )
-        SELECT toString(week) AS week,
-          treasury, protocol, kraken, user_total,
-          top10, top100, top1000,
-          if(user_total > 0, hhi_raw / (user_total * user_total), 0) AS hhi,
-          age_0_3m, age_3_12m, age_1_2y, age_2y
+        SELECT toString(w.week) AS week,
+          w.treasury, w.protocol, w.kraken, w.user_total,
+          w.top10, w.top100, w.top1000,
+          if(w.user_total > 0, w.hhi_raw / (w.user_total * w.user_total), 0) AS hhi,
+          w.age_0_3m, w.age_3_12m, w.age_1_2y, w.age_2y
         FROM (
           SELECT week,
             sumIf(bal, cls = 'treasury') AS treasury,
@@ -1320,7 +1333,7 @@ async function loadStructure(): Promise<HdxStructure> {
             sumIf(bal, cls = 'user' AND age_days >= 364 AND age_days < 728) AS age_1_2y,
             sumIf(bal, cls = 'user' AND age_days >= 728) AS age_2y
           FROM sel GROUP BY week
-        ) ORDER BY week`,
+        ) AS w ORDER BY w.week`,
       query_params: { start: HDX_BALANCE_SERIES_START, rotAccs, rotAnchors },
       format: 'JSONEachRow',
     })
@@ -1355,9 +1368,9 @@ async function loadStructure(): Promise<HdxStructure> {
     // then reads as a handoff between the two bands, not new stake.
     const stakedQuery = client.query({
       query: `
-        SELECT toString(m) AS m,
-          round(sum(classic_delta) OVER (ORDER BY m) / 1e12, 0) AS classic,
-          round(sum(giga_delta) OVER (ORDER BY m) / 1e12, 0) AS giga
+        SELECT toString(s.m) AS m,
+          round(sum(s.classic_delta) OVER (ORDER BY s.m) / 1e12, 0) AS classic,
+          round(sum(s.giga_delta) OVER (ORDER BY s.m) / 1e12, 0) AS giga
         FROM (
           SELECT toStartOfMonth(block_timestamp) AS m,
             sumIf(toFloat64OrZero(JSONExtractString(args_json, 'stake')), event_name IN ('Staking.PositionCreated', 'Staking.StakeAdded'))
@@ -1367,7 +1380,7 @@ async function loadStructure(): Promise<HdxStructure> {
             - sumIf(toFloat64OrZero(JSONExtractString(args_json, 'payout')), event_name = 'GigaHdx.Unstaked') AS giga_delta
           FROM price_data.staking_activity
           GROUP BY m
-        ) ORDER BY m`,
+        ) AS s ORDER BY s.m`,
       format: 'JSONEachRow',
     })
     // Tagged Kraken custody balance as of each month end.
@@ -1394,7 +1407,7 @@ async function loadStructure(): Promise<HdxStructure> {
     // schedules (revenue recycled into HDX — schedule 30104 et al.).
     const buybackQuery = client.query({
       query: `
-        SELECT toString(m) AS m, round(sum(hdx) OVER (ORDER BY m), 0) AS v
+        SELECT toString(b.m) AS m, round(sum(b.hdx) OVER (ORDER BY b.m), 0) AS v
         FROM (
           SELECT toStartOfMonth(e.block_timestamp) AS m, sum(toFloat64OrZero(e.amount_out)) / 1e12 AS hdx
           FROM price_data.dca_events e FINAL
@@ -1404,7 +1417,7 @@ async function loadStructure(): Promise<HdxStructure> {
           ) s ON e.id = s.id
           WHERE e.event_name = 'DCA.TradeExecuted'
           GROUP BY m
-        ) ORDER BY m`,
+        ) AS b ORDER BY b.m`,
       format: 'JSONEachRow',
     })
     // Monthly close, USD (ohlc_1d is keyed (asset_id, interval_start)).
@@ -1430,7 +1443,7 @@ async function loadStructure(): Promise<HdxStructure> {
     // OpenGov via the (pallet, ref_index) key.
     const govQuery = client.query({
       query: `
-        SELECT toString(q) AS q, round(sum(max_cap) / 1e12, 0) AS capital, uniqExact(who) AS voters
+        SELECT toString(g.q) AS q, round(sum(g.max_cap) / 1e12, 0) AS capital, uniqExact(g.who) AS voters
         FROM (
           SELECT q, who, max(cap) AS max_cap FROM (
             SELECT toStartOfQuarter(block_timestamp) AS q, who, (pallet, ref_index) AS ref,
@@ -1440,7 +1453,7 @@ async function loadStructure(): Promise<HdxStructure> {
             FROM price_data.governance_vote_calls WHERE success = 1 AND vote_kind != ''
             GROUP BY q, who, ref
           ) GROUP BY q, who
-        ) GROUP BY q ORDER BY q`,
+        ) AS g GROUP BY g.q ORDER BY g.q`,
       format: 'JSONEachRow',
     })
     // Aggregate cost basis (realized price) of user-held HDX, plus user supply

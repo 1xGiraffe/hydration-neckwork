@@ -399,16 +399,16 @@ export async function loadV3Registry(contractAsset: (addr: string) => number | n
         format: 'JSONEachRow',
       }),
       queryRows<{ atoken: string; reserve: string }>({
-        query: `SELECT lower(atoken) AS atoken, any(asset_address) AS reserve FROM price_data.atoken_reserve_map FINAL GROUP BY atoken`,
+        query: `SELECT lower(r.atoken) AS atoken, any(r.asset_address) AS reserve FROM price_data.atoken_reserve_map AS r FINAL GROUP BY atoken`,
         format: 'JSONEachRow',
       }),
       // The last real holder: a closed position's NFT is burnt (Transfer to the zero
       // address), and the zero address is nobody's page.
       queryRows<{ contract_address: string; token_id: string; owner: string }>({
-        query: `SELECT contract_address, toString(token_id) AS token_id,
-                       argMaxIf(counterparty, (block_height, event_index), counterparty != '0x0000000000000000000000000000000000000000') AS owner
-                FROM price_data.uniswap_v3_events WHERE kind = 'manager' AND event_name = 'Transfer'
-                GROUP BY contract_address, token_id`,
+        query: `SELECT e.contract_address AS contract_address, toString(e.token_id) AS token_id,
+                       argMaxIf(e.counterparty, (e.block_height, e.event_index), e.counterparty != '0x0000000000000000000000000000000000000000') AS owner
+                FROM price_data.uniswap_v3_events AS e WHERE e.kind = 'manager' AND e.event_name = 'Transfer'
+                GROUP BY e.contract_address, e.token_id`,
         format: 'JSONEachRow',
       }),
     ])

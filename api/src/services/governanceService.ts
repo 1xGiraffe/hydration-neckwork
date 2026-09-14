@@ -241,8 +241,10 @@ export function parseReferendumPallet(value: unknown): ReferendumPallet | null {
   return value === 'opengov' || value === 'democracy' ? value : null
 }
 
-// OpenGov lifecycle -> a single status word. Ordered most-final first so a
-// referendum that was confirmed and later refunded still reads as approved.
+// A CONCLUDED OpenGov referendum's outcome word. Ordered most-final first so a
+// referendum that was confirmed and later refunded still reads as approved. A
+// running referendum never reaches this list — its word comes from the phase
+// walk below, which is the only place the running lifecycle is interpreted.
 const OPENGOV_STATUS: [string, string][] = [
   ['Referenda.Killed', 'killed'],
   ['Referenda.Cancelled', 'cancelled'],
@@ -250,9 +252,6 @@ const OPENGOV_STATUS: [string, string][] = [
   ['Referenda.Rejected', 'rejected'],
   ['Referenda.Approved', 'approved'],
   ['Referenda.Confirmed', 'approved'],
-  ['Referenda.ConfirmStarted', 'confirming'],
-  ['Referenda.DecisionStarted', 'deciding'],
-  ['Referenda.Submitted', 'submitted'],
 ]
 const DEMOCRACY_STATUS: [string, string][] = [
   ['Democracy.Vetoed', 'vetoed'],
@@ -263,8 +262,58 @@ const DEMOCRACY_STATUS: [string, string][] = [
   ['Democracy.Started', 'started'],
 ]
 
+/**
+ * Where a still-running OpenGov referendum stands, from its lifecycle event
+ * names in (block, event) order. Null once any concluding event exists: a
+ * concluded referendum has no phase, it has an outcome.
+ *
+ * Confirmation can abort — support dipping below the curve mid-confirm emits
+ * Referenda.ConfirmAborted and the referendum falls back to deciding — and then
+ * begin again, so "confirming" means the LAST ConfirmStarted with no
+ * ConfirmAborted after it, not any ConfirmStarted at all. The positions are
+ * indexes into `eventNames`, which `opengovPhase` turns into block heights.
+ */
+function opengovRunningPhase(eventNames: readonly string[]): {
+  phase: 'preparing' | 'deciding' | 'confirming'
+  decisionStartAt: number | null
+  confirmStartAt: number | null
+  decisionDepositPlaced: boolean
+} | null {
+  if (eventNames.some(isConcludingEvent)) return null
+  let decisionStartAt: number | null = null
+  let confirmStartAt: number | null = null
+  let decisionDepositPlaced = false
+  eventNames.forEach((name, at) => {
+    if (name === 'Referenda.DecisionStarted') decisionStartAt ??= at
+    else if (name === 'Referenda.DecisionDepositPlaced') decisionDepositPlaced = true
+    else if (name === 'Referenda.ConfirmStarted') confirmStartAt = at
+    else if (name === 'Referenda.ConfirmAborted') confirmStartAt = null
+  })
+  return {
+    phase: confirmStartAt != null ? 'confirming' : decisionStartAt != null ? 'deciding' : 'preparing',
+    decisionStartAt,
+    confirmStartAt,
+    decisionDepositPlaced,
+  }
+}
+
+/**
+ * The status word for one referendum. `eventNames` must be in (block, event)
+ * order — a running OpenGov referendum's word comes from the SAME phase walk
+ * `opengovPhase` does, so the directory and the detail page cannot disagree
+ * about one referendum (reading a ConfirmStarted the chain has since aborted as
+ * "confirming" while the page said "deciding" is what a second, order-blind
+ * table of running states caused).
+ */
 export function referendumStatusFrom(pallet: ReferendumPallet, eventNames: string[]): string {
   const seen = new Set(eventNames)
+  if (pallet === 'opengov') {
+    const running = opengovRunningPhase(eventNames)
+    if (running) {
+      if (running.phase !== 'preparing') return running.phase
+      return seen.has('Referenda.Submitted') ? 'submitted' : 'unknown'
+    }
+  }
   for (const [event, status] of pallet === 'opengov' ? OPENGOV_STATUS : DEMOCRACY_STATUS) {
     if (seen.has(event)) return status
   }
@@ -449,14 +498,12 @@ export function onChainTallyFrom(rows: Pick<LifecycleRow, 'event_name' | 'block_
   return null
 }
 
-// Which lifecycle phase a still-running OpenGov referendum is in, from its
-// event history alone. Null once any concluding event exists (or before the
-// Submitted row is indexed): a concluded referendum has no phase to report.
-//
-// Confirmation can abort — support dipping below the curve mid-confirm emits
-// Referenda.ConfirmAborted and the referendum falls back to deciding — and then
-// begin again, so "confirming" means the LAST ConfirmStarted with no
-// ConfirmAborted after it, not any ConfirmStarted at all.
+// Which lifecycle phase a still-running OpenGov referendum is in, plus the
+// blocks its phases began on. The phase itself comes from `opengovRunningPhase`
+// — the one walk of the running lifecycle, shared with `referendumStatusFrom`
+// so the directory word and this page's phase are the same reading. Null once
+// any concluding event exists (or before the Submitted row is indexed): a
+// concluded referendum has no phase to report.
 export function opengovPhase(rows: Pick<LifecycleRow, 'event_name' | 'block_height'>[]): {
   phase: 'preparing' | 'deciding' | 'confirming'
   submittedBlock: number
@@ -464,24 +511,16 @@ export function opengovPhase(rows: Pick<LifecycleRow, 'event_name' | 'block_heig
   confirmStartBlock: number | null
   decisionDepositPlaced: boolean
 } | null {
-  if (rows.some(row => isConcludingEvent(row.event_name))) return null
+  const running = opengovRunningPhase(rows.map(row => row.event_name))
+  if (!running) return null
   const submitted = rows.find(row => row.event_name === 'Referenda.Submitted')
   if (!submitted) return null
-  let decisionStartBlock: number | null = null
-  let confirmStartBlock: number | null = null
-  let decisionDepositPlaced = false
-  for (const row of rows) {
-    if (row.event_name === 'Referenda.DecisionStarted') decisionStartBlock ??= row.block_height
-    else if (row.event_name === 'Referenda.DecisionDepositPlaced') decisionDepositPlaced = true
-    else if (row.event_name === 'Referenda.ConfirmStarted') confirmStartBlock = row.block_height
-    else if (row.event_name === 'Referenda.ConfirmAborted') confirmStartBlock = null
-  }
   return {
-    phase: confirmStartBlock != null ? 'confirming' : decisionStartBlock != null ? 'deciding' : 'preparing',
+    phase: running.phase,
     submittedBlock: submitted.block_height,
-    decisionStartBlock,
-    confirmStartBlock,
-    decisionDepositPlaced,
+    decisionStartBlock: running.decisionStartAt == null ? null : rows[running.decisionStartAt].block_height,
+    confirmStartBlock: running.confirmStartAt == null ? null : rows[running.confirmStartAt].block_height,
+    decisionDepositPlaced: running.decisionDepositPlaced,
   }
 }
 
@@ -679,16 +718,29 @@ export function unexplainedVoteKeys(voted: ExtrinsicVoteCount[], calls: Extrinsi
   return keys
 }
 
-async function unexplainedVoteExtrinsics(fromBlock: number, toBlock: number): Promise<Set<string>> {
-  const perExtrinsic = (table: string, predicate: string) => client.query({
-    query: `SELECT block_height, toUInt32(extrinsic_index) AS extrinsic_index, count() AS n
-            FROM ${table}
+// The (block, extrinsic) keys of a bounded window's rows matching one predicate.
+// Declared once: two callers need exactly this shape, and a second copy is how
+// the two drift apart.
+//
+// The null filter reads the SOURCE column through the table alias, not the bare
+// name: a SELECT alias outranks the column it shadows for the rest of its own
+// statement, so an unqualified `extrinsic_index IS NOT NULL` beside
+// `toUInt32(extrinsic_index) AS extrinsic_index` tests the converted value
+// instead of the column.
+function extrinsicsMatching(table: string, predicate: string, fromBlock: number, toBlock: number) {
+  return client.query({
+    query: `SELECT block_height, toUInt32(t.extrinsic_index) AS extrinsic_index, count() AS n
+            FROM ${table} AS t
             WHERE ${predicate}
               AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}
-              AND extrinsic_index IS NOT NULL
+              AND t.extrinsic_index IS NOT NULL
             GROUP BY block_height, extrinsic_index`,
     query_params: { from: fromBlock, to: toBlock }, format: 'JSONEachRow',
   })
+}
+
+async function unexplainedVoteExtrinsics(fromBlock: number, toBlock: number): Promise<Set<string>> {
+  const perExtrinsic = (table: string, predicate: string) => extrinsicsMatching(table, predicate, fromBlock, toBlock)
   const [votedRes, callsRes] = await Promise.all([
     perExtrinsic('price_data.vote_activity', `event_name = 'ConvictionVoting.Voted'`),
     perExtrinsic('price_data.governance_vote_calls', `pallet = 'opengov' AND call_name = 'ConvictionVoting.vote' AND success = 1`),
@@ -860,15 +912,7 @@ const REMOVAL_CALLS: Record<ReferendumPallet, string[]> = {
 // removal, which also means a wrapper that removes votes on several referenda at once
 // cannot lend this one a sibling's account.
 async function wrappedRemovalExtrinsics(index: number, fromBlock: number, toBlock: number): Promise<{ block_height: number; extrinsic_index: number }[]> {
-  const perExtrinsic = (table: string, predicate: string) => client.query({
-    query: `SELECT block_height, toUInt32(extrinsic_index) AS extrinsic_index, count() AS n
-            FROM ${table}
-            WHERE ${predicate}
-              AND block_height >= {from:UInt32} AND block_height <= {to:UInt32}
-              AND extrinsic_index IS NOT NULL
-            GROUP BY block_height, extrinsic_index`,
-    query_params: { from: fromBlock, to: toBlock }, format: 'JSONEachRow',
-  })
+  const perExtrinsic = (table: string, predicate: string) => extrinsicsMatching(table, predicate, fromBlock, toBlock)
   // VoteRemoved lives only in raw_events — vote_activity carries the Voted events, not
   // the removals.
   const [removedRes, callsRes] = await Promise.all([
@@ -1365,7 +1409,12 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
             -- The inner aggregate must NOT alias max(block_height) to the column's
             -- own name: the alias shadows the column for the submit_block
             -- aggregate, which ClickHouse rejects as nested aggregation.
-            SELECT pallet, ref_index, groupArray(event_name) AS events, max(block_height) AS last_block,
+            -- The status walk reads the lifecycle in order (a ConfirmStarted the
+            -- chain later aborted must not outrank the abort), so the names are
+            -- sorted on the event identity rather than left in group order.
+            SELECT pallet, ref_index,
+                   arrayMap(e -> tupleElement(e, 3), arraySort(groupArray((block_height, event_index, event_name)))) AS events,
+                   max(block_height) AS last_block,
                    toString(max(block_timestamp)) AS ts,
                    if(countIf(event_name = 'Referenda.Submitted') > 0,
                       anyIf(JSONExtractInt(args_json, 'track'), event_name = 'Referenda.Submitted'), -1) AS track_id,

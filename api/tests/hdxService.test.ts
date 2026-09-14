@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { unvestedByAccountRaw } from '../src/services/lockBreakdownService.ts'
 import { alignMonthly, backfillAllocationMints, buildHdxStructure, carryForward, correctVestingLocks, decodeCompactBig, gigaUnbondingBlocks, moverAccountFilterSql, nonNegativeUIntDifferenceSql, resolveRotationAnchors, cooldownExpiresAt, unlockKeyForCause, unlockSeriesFromTimelines, withCooldownExpiries, type HdxStructureWeekRow } from '../src/services/hdxService.ts'
 import { hexToU8a } from '@polkadot/util'
 
@@ -55,9 +56,12 @@ describe('correctVestingLocks — vested-but-unclaimed excluded from lock totals
   const HDX = 10n ** 12n
   const sched = (accountId: string, start: number, periodCount = 10) =>
     ({ accountId, start, period: 10, periodCount, perPeriod: 10n * HDX })
+  // Locks are held in raw planck; the HDX figures are produced once, at the edge.
+  const lock = (maxNonVestHdx: number, vestLockHdx: number) =>
+    ({ maxNonVestRaw: BigInt(maxNonVestHdx) * HDX, vestLockRaw: BigInt(vestLockHdx) * HDX })
 
   it('drops a fully matured but unclaimed schedule from the vesting row', () => {
-    const locks = new Map([[A, { maxNonVestHdx: 0, vestLockHdx: 100 }]])
+    const locks = new Map([[A, lock(0, 100)]])
     const r = correctVestingLocks(locks, [sched(A, 0)], 1_000) // long past end block
     expect(r.vestingHdx).toBe(0)
     expect(r.vestingAccounts).toBe(0)
@@ -66,7 +70,7 @@ describe('correctVestingLocks — vested-but-unclaimed excluded from lock totals
   })
 
   it('keeps only future periods of a partially vested, never-claimed schedule', () => {
-    const locks = new Map([[A, { maxNonVestHdx: 0, vestLockHdx: 100 }]])
+    const locks = new Map([[A, lock(0, 100)]])
     const r = correctVestingLocks(locks, [sched(A, 0)], 50) // 5 of 10 periods elapsed
     expect(r.vestingHdx).toBe(50)
     expect(r.vestingAccounts).toBe(1)
@@ -75,7 +79,7 @@ describe('correctVestingLocks — vested-but-unclaimed excluded from lock totals
   })
 
   it('reports zero unclaimed for an account that claims promptly', () => {
-    const locks = new Map([[A, { maxNonVestHdx: 0, vestLockHdx: 50 }]])
+    const locks = new Map([[A, lock(0, 50)]])
     const r = correctVestingLocks(locks, [sched(A, 0)], 50)
     expect(r.vestingHdx).toBe(50)
     expect(r.vestedUnclaimedHdx).toBe(0)
@@ -83,8 +87,8 @@ describe('correctVestingLocks — vested-but-unclaimed excluded from lock totals
 
   it('lets a bigger non-vesting lock set the per-account max and ignores schedules without a lock', () => {
     const locks = new Map([
-      [A, { maxNonVestHdx: 80, vestLockHdx: 100 }], // staking 80 > corrected vest 50
-      [B, { maxNonVestHdx: 30, vestLockHdx: 0 }],   // plain lock, no vesting
+      [A, lock(80, 100)], // staking 80 > corrected vest 50
+      [B, lock(30, 0)],   // plain lock, no vesting
     ])
     const r = correctVestingLocks(locks, [sched(A, 0), sched('0x' + 'cc'.repeat(32), 0)], 50)
     expect(r.vestingHdx).toBe(50)
@@ -92,10 +96,43 @@ describe('correctVestingLocks — vested-but-unclaimed excluded from lock totals
   })
 
   it('sums schedules per account and counts a not-yet-started schedule in full', () => {
-    const locks = new Map([[A, { maxNonVestHdx: 0, vestLockHdx: 1000 }]])
+    const locks = new Map([[A, lock(0, 1000)]])
     const r = correctVestingLocks(locks, [sched(A, 0), sched(A, 100, 5)], 50)
     expect(r.vestingHdx).toBe(50 + 50)
     expect(r.vestingAccounts).toBe(1)
+  })
+
+  // Planck amounts are summed as integers and converted once. Rounding each
+  // schedule to HDX first loses a wei-scale remainder per account, so a wide
+  // set of dust-bearing schedules drifts away from the exact total.
+  it('sums planck exactly instead of accumulating per-schedule HDX floats', () => {
+    const accounts = 1_000
+    const perPeriod = 1n * HDX + 1n // one planck above a whole HDX
+    const locks = new Map<string, { maxNonVestRaw: bigint; vestLockRaw: bigint }>()
+    const schedules: { accountId: string; start: number; period: number; periodCount: number; perPeriod: bigint }[] = []
+    for (let i = 0; i < accounts; i++) {
+      const id = '0x' + i.toString(16).padStart(64, '0')
+      locks.set(id, { maxNonVestRaw: 0n, vestLockRaw: perPeriod })
+      schedules.push({ accountId: id, start: 0, period: 10, periodCount: 1, perPeriod })
+    }
+    const r = correctVestingLocks(locks, schedules, 0)
+    const exact = BigInt(accounts) * perPeriod
+    expect(r.vestingHdx).toBe(Number(exact / 10n ** 8n) / 1e4)
+    expect(r.totalLockedHdx).toBe(r.vestingHdx)
+  })
+
+  // The vesting maths lives once, in lockBreakdownService.unvestedByAccountRaw.
+  it('agrees with the shared raw producer schedule for schedule', () => {
+    const schedules = [sched(A, 0), sched(A, 100, 5), sched(B, 20, 3)]
+    const raw = unvestedByAccountRaw(schedules, 50)
+    const locks = new Map([
+      [A, { maxNonVestRaw: 0n, vestLockRaw: raw.get(A) ?? 0n }],
+      [B, { maxNonVestRaw: 0n, vestLockRaw: raw.get(B) ?? 0n }],
+    ])
+    const r = correctVestingLocks(locks, schedules, 50)
+    const total = (raw.get(A) ?? 0n) + (raw.get(B) ?? 0n)
+    expect(r.vestingHdx).toBe(Number(total / 10n ** 8n) / 1e4)
+    expect(r.vestedUnclaimedHdx).toBe(0)
   })
 })
 
@@ -250,6 +287,14 @@ describe('cooldownExpiresAt — port of pallet_gigahdx::cooldown_expires_at', ()
 
   it('treats the unset u32::MAX sentinel as "no switch happened"', () => {
     expect(cooldownExpiresAt(13_531_773, 0xFFFFFFFF, COOLDOWN)).toBe(13_531_773 + 1_209_600)
+  })
+
+  // The pre-switch leg is the historical 403,200-block cooldown, not a third of
+  // whatever the cooldown is today: a changed constant must not re-date a
+  // position that matured under the old one.
+  it('keeps the historical pre-switch cooldown when the current constant changes', () => {
+    expect(cooldownExpiresAt(13_346_727, SWITCH, 2_419_200)).toBe(13_749_927)
+    expect(cooldownExpiresAt(13_346_727, SWITCH, 604_800)).toBe(13_749_927)
   })
 })
 

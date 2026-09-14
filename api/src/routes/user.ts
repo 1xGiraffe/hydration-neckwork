@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import rateLimit from '@fastify/rate-limit'
 import { z } from 'zod'
 import {
-  createChallenge, verifyChallenge, issueSession, revokeSession, requireUser,
+  createChallenge, verifyChallenge, issueSession, revokeSession, requireUser, sessionUser,
   listSessions, revokeSessionByHash, deviceLabelFromUserAgent,
 } from '../services/userAuthService.ts'
 import { createDeviceLink, claimDeviceLink, deviceLinkStatus } from '../services/deviceLinkService.ts'
@@ -39,7 +39,25 @@ import {
 // /api/user/ from an uncached location. Auth is a bearer token — no cookies, so
 // the API keeps CORS `origin: '*'` without ever carrying credentials in a
 // cacheable request.
-export function noStore(reply: FastifyReply): void { reply.header('cache-control', 'no-store') }
+function noStore(reply: FastifyReply): void { reply.header('cache-control', 'no-store') }
+
+// Both of those rules — never shared-cacheable, never anonymous — are properties
+// of the /user/ prefix, not of any one handler, so every plugin serving it
+// registers them ONCE here instead of repeating them per route. Repeated per
+// handler they only have to be forgotten once for a private reply to become
+// cacheable or a private route to answer without a session.
+//
+// `anonymous` names the few routes that mint a session rather than carry one
+// (they still get `no-store`); everything else resolves its account through
+// `sessionUser(req)`.
+export function privateUserHooks(fastify: FastifyInstance, anonymous: readonly string[] = []): void {
+  const open = new Set(anonymous)
+  fastify.addHook('preHandler', async (req, reply) => {
+    noStore(reply)
+    if (open.has(req.routeOptions.url ?? '')) return
+    if (!requireUser(req, reply)) return reply
+  })
+}
 
 // UserDataError carries its own HTTP status (422 caps, 403 ownership, 404 unknown ids).
 export async function withUserErrors<T>(reply: FastifyReply, fn: () => Promise<T>): Promise<T | undefined> {
@@ -126,8 +144,22 @@ export async function userRoutes(fastify: FastifyInstance) {
   // Scoped to this plugin's encapsulation context — explorer routes unaffected.
   await fastify.register(rateLimit, { max: 120, timeWindow: '1 minute' })
 
+  // The three routes that mint a session rather than carry one.
+  privateUserHooks(fastify, [
+    '/user/auth/challenge', '/user/auth/verify', '/user/auth/device-link/claim',
+  ])
+
+  // The viewer-fold feeds take the SAME list filters as their public twins, so
+  // they refuse an unusable one the same way — plugin-wide, exactly as
+  // explorerRoutes does. A malformed `type`/`asset`/`min`/`unit`/`from`/`to`
+  // would otherwise be dropped and the answer silently WIDENED under the
+  // caller's own query string.
+  fastify.addHook('preHandler', async (req, reply) => {
+    const bad = unusableFilterParam(req.query as Record<string, unknown>)
+    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
+  })
+
   fastify.post('/user/auth/challenge', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
-    noStore(reply)
     const body = addressBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid address' })
     const challenge = createChallenge(req.headers.host ?? 'Hydration Explorer', body.data.address)
@@ -136,7 +168,6 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   fastify.post('/user/auth/verify', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
-    noStore(reply)
     const body = verifyBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid login payload' })
     const verified = verifyChallenge(body.data.nonce, body.data.address, body.data.signature)
@@ -159,19 +190,15 @@ export async function userRoutes(fastify: FastifyInstance) {
   // A logged-in device mints the code the QR carries. The response's `code`
   // goes into the QR only; `linkId` is what the dialog polls with.
   fastify.post('/user/auth/device-link', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const link = createDeviceLink(accountId)
     if (!link) return reply.status(503).send({ error: 'Too many pending link codes — try again shortly' })
     return link
   })
 
   // The issuing device's poll: has anyone claimed this code yet?
-  fastify.get('/user/auth/device-link/:linkId', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+  fastify.get('/user/auth/device-link/:linkId', async (req) => {
+    const accountId = sessionUser(req)
     return { status: deviceLinkStatus((req.params as { linkId: string }).linkId, accountId) }
   })
 
@@ -180,7 +207,6 @@ export async function userRoutes(fastify: FastifyInstance) {
   // unknown, expired, and already-claimed alike: the caller can't act on the
   // difference, and collapsing them leaks nothing to whoever found a stale QR.
   fastify.post('/user/auth/device-link/claim', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
-    noStore(reply)
     const body = deviceLinkClaimBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid link code' })
     const accountId = claimDeviceLink(body.data.code)
@@ -192,34 +218,25 @@ export async function userRoutes(fastify: FastifyInstance) {
 
   // ---- Devices: every live session of the account, revocable one by one. ----
 
-  fastify.get('/user/sessions', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+  fastify.get('/user/sessions', async (req) => {
+    const accountId = sessionUser(req)
     return { sessions: listSessions(accountId, (req.headers.authorization as string).slice(7)) }
   })
 
   fastify.delete('/user/sessions/:id', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const revoked = await revokeSessionByHash(accountId, (req.params as { id: string }).id)
     if (!revoked) return reply.status(404).send({ error: 'Unknown session' })
     return { ok: true }
   })
 
-  fastify.post('/user/auth/logout', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+  fastify.post('/user/auth/logout', async (req) => {
     await revokeSession((req.headers.authorization as string).slice(7))
     return { ok: true }
   })
 
-  fastify.get('/user/me', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+  fastify.get('/user/me', async (req) => {
+    const accountId = sessionUser(req)
     return meResponse(accountId)
   })
 
@@ -227,34 +244,26 @@ export async function userRoutes(fastify: FastifyInstance) {
   const avatarBody = z.object({ data: z.string().min(4).max(120_000) })  // 64 KiB binary ≈ 87 KiB base64
 
   fastify.put('/user/profile', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const body = nameBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid profile payload' })
     return withUserErrors(reply, () => setProfileName(accountId, body.data.name))
   })
 
   fastify.put('/user/profile/avatar', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const body = avatarBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid avatar payload' })
     return withUserErrors(reply, () => setProfileAvatar(accountId, body.data.data))
   })
 
-  fastify.delete('/user/profile/avatar', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+  fastify.delete('/user/profile/avatar', async (req) => {
+    const accountId = sessionUser(req)
     return clearProfileAvatar(accountId)
   })
 
-  fastify.get('/user/tag-map', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+  fastify.get('/user/tag-map', async (req) => {
+    const accountId = sessionUser(req)
     return { lists: tagMapFor(accountId) }
   })
 
@@ -287,9 +296,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   // /explorer/activity, so the client swaps endpoints and reads the answer
   // unchanged (the /user/accounts pattern above).
   fastify.get('/user/activity', async (req, reply) => {
-    noStore(reply)
-    const viewer = requireUser(req, reply)
-    if (!viewer) return
+    const viewer = sessionUser(req)
     const q = req.query as Record<string, unknown>
     const type = activityTypeParam(q)
     const offset = activityOffsetParam(q, type)
@@ -302,10 +309,8 @@ export async function userRoutes(fastify: FastifyInstance) {
     return getRecentActivity(limitParam(q, 25), dateParam(q, 'from'), dateParam(q, 'to'), offset, type, filters, textParam(q, 'action', 32))
   })
 
-  fastify.get('/user/activity/count', async (req, reply) => {
-    noStore(reply)
-    const viewer = requireUser(req, reply)
-    if (!viewer) return
+  fastify.get('/user/activity/count', async (req) => {
+    const viewer = sessionUser(req)
     const q = req.query as Record<string, unknown>
     const type = activityTypeParam(q)
     const total = await getGlobalActivityTotal(type, textParam(q, 'action', 32), viewerValueFilters(q, viewer), dateParam(q, 'from'), dateParam(q, 'to'))
@@ -314,9 +319,7 @@ export async function userRoutes(fastify: FastifyInstance) {
 
   // The same for the two scoped feeds a reader filters from a detail page.
   fastify.get('/user/address/:address/activity', async (req, reply) => {
-    noStore(reply)
-    const viewer = requireUser(req, reply)
-    if (!viewer) return
+    const viewer = sessionUser(req)
     const params = z.object({ address: z.string().min(1).max(128) }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
     const q = req.query as Record<string, unknown>
@@ -330,9 +333,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   fastify.get('/user/tag/:tagId/activity', async (req, reply) => {
-    noStore(reply)
-    const viewer = requireUser(req, reply)
-    if (!viewer) return
+    const viewer = sessionUser(req)
     const params = z.object({ tagId: z.string().min(1).max(64) }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
     const q = req.query as Record<string, unknown>
@@ -346,9 +347,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   fastify.get('/user/accounts', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const q = req.query as Record<string, unknown>
     const limit = limitParam(q, 50)
     const offset = offsetParam(q)
@@ -365,9 +364,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   // result the accounts directory uses, so the two surfaces always group an
   // account the same way for the same viewer.
   fastify.get('/user/holders/:assetId', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const params = z.object({ assetId: uint32Param }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid asset id' })
     const q = req.query as Record<string, unknown>
@@ -382,18 +379,14 @@ export async function userRoutes(fastify: FastifyInstance) {
   const listUpdateBody = z.object({ name: z.string().max(200).optional(), note: z.string().max(400).optional(), visibility: z.enum(['private', 'public']).optional() })
 
   fastify.get('/user/lists/:id', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { id } = req.params as { id: string }
     if (!canView(accountId, id)) return reply.status(404).send({ error: 'List not found' })
     return listDetailResponse(getList(id)!, accountId)
   })
 
   fastify.post('/user/lists', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const body = listCreateBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid list payload' })
     return withUserErrors(reply, async () => listDetailResponse(
@@ -402,9 +395,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   fastify.patch('/user/lists/:id', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { id } = req.params as { id: string }
     const body = listUpdateBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid list payload' })
@@ -412,9 +403,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   fastify.delete('/user/lists/:id', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { id } = req.params as { id: string }
     return withUserErrors(reply, async () => { await deleteList(accountId, id); return { ok: true } })
   })
@@ -425,9 +414,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   const memberOrderBody = z.object({ accountIds: z.array(z.string()).max(LIMITS.membersPerTag) })
 
   fastify.post('/user/lists/:id/tags', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { id } = req.params as { id: string }
     const body = tagCreateBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid tag payload' })
@@ -435,9 +422,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   fastify.patch('/user/lists/:id/tags/:tagId', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { id, tagId } = req.params as { id: string; tagId: string }
     const body = tagUpdateBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid tag payload' })
@@ -445,17 +430,13 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   fastify.delete('/user/lists/:id/tags/:tagId', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { id, tagId } = req.params as { id: string; tagId: string }
     return withUserErrors(reply, async () => { await deleteTag(accountId, id, tagId); return { ok: true } })
   })
 
   fastify.put('/user/lists/:id/tags/:tagId/members', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { id, tagId } = req.params as { id: string; tagId: string }
     const body = membersBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid members payload' })
@@ -467,9 +448,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   // rather than best-effort applying a client order that dropped or duplicated
   // an id.
   fastify.put('/user/lists/:id/tags/:tagId/member-order', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { id, tagId } = req.params as { id: string; tagId: string }
     const body = memberOrderBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid member-order payload' })
@@ -477,9 +456,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   fastify.post('/user/lists/:id/invites', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { id } = req.params as { id: string }
     const body = addressBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid address' })
@@ -493,9 +470,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   fastify.delete('/user/lists/:id/invites/:address', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { id, address } = req.params as { id: string; address: string }
     const normalized = normalizeAddress(address)
     if (!normalized) return reply.status(400).send({ error: 'Invalid address' })
@@ -505,25 +480,19 @@ export async function userRoutes(fastify: FastifyInstance) {
     return withUserErrors(reply, async () => { await revokeShare(accountId, id, grantee); return { ok: true } })
   })
 
-  fastify.get('/user/invites', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+  fastify.get('/user/invites', async (req) => {
+    const accountId = sessionUser(req)
     return invitesFor(accountId).map(listSummaryRef)
   })
 
   fastify.post('/user/invites/:listId/accept', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { listId } = req.params as { listId: string }
     return withUserErrors(reply, async () => { await respondToInvite(accountId, listId, true); return { ok: true } })
   })
 
   fastify.post('/user/invites/:listId/decline', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { listId } = req.params as { listId: string }
     return withUserErrors(reply, async () => { await respondToInvite(accountId, listId, false); return { ok: true } })
   })
@@ -531,18 +500,14 @@ export async function userRoutes(fastify: FastifyInstance) {
   const subscriptionBody = z.object({ listId: z.string().max(64) })
 
   fastify.post('/user/subscriptions', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const body = subscriptionBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid subscription payload' })
     return withUserErrors(reply, async () => { await subscribePublic(accountId, body.data.listId); return { ok: true } })
   })
 
   fastify.delete('/user/subscriptions/:listId', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const { listId } = req.params as { listId: string }
     return withUserErrors(reply, async () => { await unsubscribe(accountId, listId); return { ok: true } })
   })
@@ -550,9 +515,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   const orderBody = z.object({ listIds: z.array(z.string().max(64)).max(500) })
 
   fastify.put('/user/list-order', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const body = orderBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid order payload' })
     return withUserErrors(reply, async () => ({ order: await setListOrder(accountId, body.data.listIds) }))
@@ -578,9 +541,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   }
 
   fastify.get('/user/list-tag/:listId/:tagId', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
     const { listId, tagId, tag } = resolved
@@ -593,9 +554,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   // Chart-zoom refinement over the list tag's member set (block window). Same
   // visibility rule as the detail — owner or subscriber, 404 otherwise.
   fastify.get('/user/list-tag/:listId/:tagId/history', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
     const q = req.query as Record<string, unknown>
@@ -609,9 +568,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   // The list tag's members as DIRECTORY rows — same shape and same renderer as
   // /explorer/accounts, so a user tag reads like the system tags beside it.
   fastify.get('/user/list-tag/:listId/:tagId/members', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
     // The owner's own arrangement is the default order; an explicit ?sort
@@ -621,14 +578,10 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   fastify.get('/user/list-tag/:listId/:tagId/activity', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
     const q = req.query as Record<string, unknown>
-    const bad = unusableFilterParam(q)
-    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
     const activityType = activityTypeParam(q)
     const maxOffset = maxScopedActivityOffsetFor(q, activityType)
     const offset = boundedActivityOffset(q, maxOffset)
@@ -637,42 +590,30 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   fastify.get('/user/list-tag/:listId/:tagId/extrinsics', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
     const q = req.query as Record<string, unknown>
-    const bad = unusableFilterParam(q)
-    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
     const offset = offsetParam(q)
     if (offset == null) return badOffset(reply)
     return getListTagExtrinsics(resolved.listId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset, extrinsicFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
   })
 
   fastify.get('/user/list-tag/:listId/:tagId/events', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
     const q = req.query as Record<string, unknown>
-    const bad = unusableFilterParam(q)
-    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
     const offset = offsetParam(q)
     if (offset == null) return badOffset(reply)
     return getListTagEvents(resolved.listId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset, eventFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
   })
 
   fastify.get('/user/list-tag/:listId/:tagId/votes', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
     const q = req.query as Record<string, unknown>
-    const bad = unusableFilterParam(q)
-    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
     const offset = activityOffsetParam(q, 'vote')
     if (offset == null) return reply.status(400).send({ error: `Votes offset must be between 0 and ${maxActivityOffsetFor('vote')}` })
     return getListTagVotes(resolved.listId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset, dateParam(q, 'from'), dateParam(q, 'to'))
@@ -681,9 +622,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   // The Protocol Revenue tab: where the revenue this tag's members generated
   // came from — per stream, per asset within the stream.
   fastify.get('/user/list-tag/:listId/:tagId/revenue-breakdown', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
     return getListTagRevenueBreakdown(resolved.listId, resolved.tagId, resolved.tag.members)
@@ -691,9 +630,7 @@ export async function userRoutes(fastify: FastifyInstance) {
 
   // Grouped-mode counterpart of the votes route above — one row per referendum.
   fastify.get('/user/list-tag/:listId/:tagId/votes-by-referendum', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
     const q = req.query as Record<string, unknown>
@@ -703,37 +640,27 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   fastify.get('/user/list-tag/:listId/:tagId/counts', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
     return getListTagTabCounts(resolved.listId, resolved.tagId, resolved.tag.members)
   })
 
   fastify.get('/user/list-tag/:listId/:tagId/list-count', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
     const q = req.query as Record<string, unknown>
-    const bad = unusableFilterParam(q)
-    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
     const query = scopedListQuery(q)
     if (!query) return reply.status(400).send({ error: `List tab must be one of ${listTabSchema.options.join(', ')}` })
     return getListTagListTotal(resolved.listId, resolved.tagId, resolved.tag.members, query)
   })
 
   fastify.get('/user/list-tag/:listId/:tagId/value-events', async (req, reply) => {
-    noStore(reply)
-    const accountId = requireUser(req, reply)
-    if (!accountId) return
+    const accountId = sessionUser(req)
     const resolved = requireListTag(req, reply, accountId)
     if (!resolved) return
     const q = req.query as Record<string, unknown>
-    const bad = unusableFilterParam(q)
-    if (bad) return reply.status(400).send({ error: `Invalid ${bad.key}; expected ${bad.expected}` })
     return getListTagValueEvents(resolved.listId, resolved.tagId, resolved.tag.members, dateParam(q, 'from'), dateParam(q, 'to'))
   })
 }

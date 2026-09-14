@@ -264,11 +264,27 @@ export function deviceLabelFromUserAgent(ua: string | undefined): string {
   return os ? `${browser} on ${os}` : browser
 }
 
+// The session a request already authenticated, so the handler behind a
+// plugin-wide auth hook reads it without re-hashing the bearer token or
+// sliding the expiry a second time.
+const requestAccounts = new WeakMap<FastifyRequest, string>()
+
 // Route guard: resolves the bearer token or answers 401 itself. Callers bail on null.
 export function requireUser(req: FastifyRequest, reply: FastifyReply): string | null {
+  const resolved = requestAccounts.get(req)
+  if (resolved) return resolved
   const auth = req.headers.authorization
   const token = auth?.startsWith('Bearer ') ? auth.slice(7) : null
   const accountId = token ? sessionAccount(token) : null
   if (!accountId) { void reply.status(401).send({ error: 'Not logged in' }) }
+  else requestAccounts.set(req, accountId)
+  return accountId
+}
+
+// The account the private-route hook already authenticated. An absent one means
+// the hook is not registered on this plugin — a wiring bug, not a request error.
+export function sessionUser(req: FastifyRequest): string {
+  const accountId = requestAccounts.get(req)
+  if (!accountId) throw new Error('private route reached without the session hook')
   return accountId
 }
