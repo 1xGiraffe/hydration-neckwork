@@ -6,17 +6,17 @@
 //
 // THE WINDOW IS A TIME RANGE, not a pair of series indices.
 //
-// It used to be indices, and that capped the zoom's resolution at the BASE
-// series' step no matter how finely the chart was drawn: on a 3-day base series
-// a drag across a 3-hour-resolution view could only land on 3-day boundaries, so
-// the selection shade jumped in 3-day steps (the "jitter") and the committed
-// window missed what was selected by up to a day and a half. Time has no such
-// floor, so a selection is exactly what was dragged.
+// Indices would cap the zoom's resolution at the BASE series' step no matter how
+// finely the chart is drawn: on a 3-day base series a drag across a
+// 3-hour-resolution view could only land on 3-day boundaries, so the selection
+// shade would jump in 3-day steps and the committed window would miss what was
+// selected by up to a day and a half. Time has no such floor, so a selection is
+// exactly what was dragged.
 //
-// It also removes the mismatch that caused two earlier bugs: the plot's x domain
-// IS the window, so a point's screen position and the window's arithmetic are
-// the same fact rather than two computations over different spans (the refined
-// series' extent used to differ from the window it replaced).
+// It also keeps the plot's x domain and the window one fact rather than two
+// computations over different spans — a refined series' extent differing from
+// the window it replaced is exactly how the positions and the arithmetic drift
+// apart.
 //
 // Times are UNIX SECONDS throughout — the unit the windowed endpoints take, and
 // what the URL carries, so a shared link is stable even as the base series

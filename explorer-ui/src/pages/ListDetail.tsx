@@ -9,6 +9,7 @@ import { useList, useUserMutation } from '../hooks/useUser'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, navigate, paths, setQuery, useQueryValue } from '../router'
 import { AddrPill, Crumbs, DetailTabs, ProfilePageSkeleton, TagIcon, noAutofill } from '../components/ui'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import type { AccountRef, ListSummaryRef, ListTagDetail } from '../types'
 
 const ListFormDialog = lazy(() => import('../components/ListFormDialog').then(m => ({ default: m.ListFormDialog })))
@@ -136,6 +137,8 @@ function TagPanel({ listId, tag, isOwner }: { listId: string; tag: ListTagDetail
   const [color, setColor] = useState(tag.color)
   const [icon, setIcon] = useState(tag.icon)
   const [error, setError] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const updateTagMutation = useUserMutation(userApi.updateTag)
   const deleteTagMutation = useUserMutation(userApi.deleteTag)
@@ -215,11 +218,17 @@ function TagPanel({ listId, tag, isOwner }: { listId: string; tag: ListTagDetail
       setError(e instanceof Error ? e.message : 'Could not save the tag')
     }
   }
+  // Same confirm chrome as the delete-list dialog above: it names the tag, holds
+  // a pending state while the write is in flight, and shows the server's own
+  // error in place instead of closing over it.
   async function removeTag() {
-    if (!window.confirm(`Delete the "${tag.name}" tag? Its members stay in the list — only the tag is removed.`)) return
-    setError(null)
-    try { await deleteTagMutation.mutateAsync([listId, tag.tagId]) }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not delete the tag') }
+    setDeleteError(null)
+    try {
+      await deleteTagMutation.mutateAsync([listId, tag.tagId])
+      setDeleting(false)
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : 'Could not delete the tag')
+    }
   }
   async function removeMember(address: string) {
     setError(null)
@@ -279,7 +288,7 @@ function TagPanel({ listId, tag, isOwner }: { listId: string; tag: ListTagDetail
             {isOwner && (
               <span className="row gap6">
                 <button type="button" className="btn sm" onClick={startEdit}>Edit</button>
-                <button type="button" className="btn sm danger" onClick={() => void removeTag()} disabled={deleteTagMutation.isPending}>Delete</button>
+                <button type="button" className="btn sm danger" onClick={() => { setDeleteError(null); setDeleting(true) }} disabled={deleteTagMutation.isPending}>Delete</button>
               </span>
             )}
           </>
@@ -332,6 +341,17 @@ function TagPanel({ listId, tag, isOwner }: { listId: string; tag: ListTagDetail
           </div>
         )}
       </div>
+      {/* Portalled out of this panel when open, so it sits here purely next to
+          the button that opens it. */}
+      <ConfirmDialog
+        open={deleting}
+        onOpenChange={open => { setDeleting(open); if (!open) setDeleteError(null) }}
+        title="Delete tag"
+        body={`Delete the "${tag.name}" tag? Its members stay in the list — only the tag is removed.`}
+        pending={deleteTagMutation.isPending}
+        error={deleteError}
+        onConfirm={() => void removeTag()}
+      />
     </div>
   )
 }
@@ -384,10 +404,10 @@ export function ListDetail({ listId }: { listId: string }) {
   useDocumentTitle(data?.name)
   const isOwner = !!session && !!data && session.accountId === data.owner.accountId
   // Owner-only tabs (Tags/Subscribers); deep-links via ?view= like Account.tsx's
-  // profile tabs. The non-owner view has no tabs, only its stats panel. The tab
-  // used to be called Invites at `?view=invites` — that value isn't aliased,
-  // it just falls back to the default 'tags' tab, same as any other unknown
-  // `view`; a stale deep link losing its tab selection is low-stakes.
+  // profile tabs. The non-owner view has no tabs, only its stats panel. A stale
+  // `?view=invites` link is deliberately not aliased — it falls back to the
+  // default 'tags' tab like any other unknown `view`, and a deep link losing its
+  // tab selection is low-stakes.
   const view = useQueryValue('view', 'tags')
   const activeView = view === 'subscribers' ? 'subscribers' : 'tags'
 

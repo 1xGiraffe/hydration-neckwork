@@ -18,7 +18,7 @@ export function DcaExecution({ height, eventIndex }: { height: number; eventInde
 
   // Legacy event-form links carried the swap event index, not the DCA event
   // index, so nothing resolves exactly there — fall back to the schedule
-  // resolver (old behavior) rather than dead-ending.
+  // resolver rather than dead-ending.
   //
   // Only a 404 the API itself described as "the block is not indexed yet" waits
   // here (queryRetry.ts), never the finality heuristic useAwaitingBlock also
@@ -61,7 +61,7 @@ export function DcaExecution({ height, eventIndex }: { height: number; eventInde
             <div className="dd"><span className="asset-flow">
               <span className="trade-leg"><AssetChip asset={data.assetIn} /> <span className="mono">1</span></span>
               {' = '}
-              <span className="trade-leg"><AssetChip asset={data.assetOut} /> <span className="mono">{data.executionPrice.toLocaleString(undefined, { maximumSignificantDigits: 6 })}</span></span>
+              <span className="trade-leg"><AssetChip asset={data.assetOut} /> <span className="mono">{data.executionPrice.toLocaleString('en-US', { maximumSignificantDigits: 6 })}</span></span>
             </span></div>
           </>}
           {data.who && <><div className="dt">Owner</div><div className="dd"><AddrPill account={data.who} /></div></>}

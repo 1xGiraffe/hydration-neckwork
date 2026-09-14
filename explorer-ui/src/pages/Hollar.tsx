@@ -5,7 +5,7 @@ import { useHollarDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useNow } from '../hooks/useNow'
 import { Link, paths } from '../router'
-import { AssetAmount, Crumbs, F, AssetChip, Ago, ChartSkeleton, TableSkeleton, EmptyRow } from '../components/ui'
+import { AssetAmount, Crumbs, F, AssetChip, Ago, ChartSkeleton, TableSkeleton, EmptyRow, compactAmount } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
 import { ChartLegend, ShareBar, MirroredBarChart, StackedAreaChart, MultiLineChart } from '../components/HdxCharts'
 import type { ShareSegment, MirrorBar, AreaSeries, RefinedGrid } from '../components/HdxCharts'
@@ -15,11 +15,9 @@ import { monthDayLabel as mdLabel } from '../utils/dashboardDates'
 
 // formatting
 // HOLLAR/collateral/partner amounts arrive as already-human-unit numbers (see
-// types.ts) — routed through F.amount's magnitude rules (M/B/T/Q, k, plain)
-// by treating the number itself as a "raw" value at 0 decimals.
+// types.ts), so they go straight to the shared rough scale (M/B/T/Q, k, plain).
 function fmtAmt(v: number | null | undefined): string {
-  if (v == null || !Number.isFinite(v)) return '—'
-  return F.amount(String(v), 0)
+  return v == null ? '—' : compactAmount(v)
 }
 function fmtBps(v: number): string {
   const r = Math.round(v * 10) / 10
@@ -195,7 +193,11 @@ function TradesChart({ d }: { d: HollarDashboard }) {
   )
 }
 
-function HsmSection({ d, now }: { d: HollarDashboard; now: number }) {
+// The only section that reads the clock (two `Ago` cells), so it subscribes to
+// it here rather than at the page: a `now` threaded from the top would rebuild
+// every chart section once a second for two strings.
+function HsmSection({ d }: { d: HollarDashboard }) {
+  const now = useNow()
   return (
     <>
       <SecTitle title="Stability Module" subtitle="HSM" />
@@ -492,7 +494,6 @@ function HollarSkeleton() {
 
 export function Hollar() {
   const { data, isError } = useHollarDashboard()
-  const now = useNow()
   useDocumentTitle(data && data.price != null ? `HOLLAR ${F.priceUsd(data.price)}` : 'HOLLAR')
   return (
     <div className="wrap">
@@ -507,7 +508,7 @@ export function Hollar() {
             <Ribbon d={data} />
             <PegSection d={data} />
             <SupplyHoldersSection t={data.trends} />
-            <HsmSection d={data} now={now} />
+            <HsmSection d={data} />
             <BorrowingSection t={data.trends} />
             <MarketSection t={data.trends} />
             <LiquiditySection d={data} />

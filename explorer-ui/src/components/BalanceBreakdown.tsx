@@ -239,7 +239,10 @@ export function BalanceBreakdown({ balance }: { balance: AddressBalance }) {
 
   // Binding unlock timeline; without one (old snapshot rows), the whole frozen
   // amount renders as one open-ended slice caused by the largest lock.
-  const largestLock = components.filter(c => c.kind === 'lock').sort((a, b) => (big(b.amount) > big(a.amount) ? 1 : -1))[0]
+  // Descending by amount, 0 on a tie: a comparator that answers -1 both ways for
+  // equal locks is not a total order, so which one wins is up to the sort.
+  const largestLock = components.filter(c => c.kind === 'lock')
+    .sort((a, b) => { const x = big(a.amount), y = big(b.amount); return y > x ? 1 : y < x ? -1 : 0 })[0]
   const timeline: BalanceUnlockSlice[] = balance.timeline?.length
     ? balance.timeline
     : frozen > 0n ? [{ state: 'active', cause: largestLock?.source ?? 'other', amount: frozen.toString() }] : []

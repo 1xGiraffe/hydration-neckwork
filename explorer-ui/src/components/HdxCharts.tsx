@@ -1,4 +1,4 @@
-/* eslint-disable react-refresh/only-export-components -- chart primitives + shared fmtHdx/color-token module (mirrors ui.tsx) */
+/* eslint-disable react-refresh/only-export-components -- chart primitives + shared tick-formatter/color-token module (mirrors ui.tsx) */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ChartTip, compactAmount } from './ui'
@@ -7,17 +7,11 @@ import { useMediaQuery } from '../hooks/useMediaQuery'
 import { parseUtcTimestamp, utcDay, utcSeconds, utcStamp } from '../utils/time'
 
 /* ============ formatting ============ */
-// Compact HDX amount — the shared explorer-wide rough scale (1.56B · 797M ·
-// 12.6k · 537 · 0.0₅7191), centralized in ui.tsx.
-export function fmtHdx(v: number): string {
-  return compactAmount(v)
-}
-
 // Compact form for on-bar clamp labels: whole millions once past ~10M, so the
 // value labels on adjacent clamped columns keep clear space between them
-// (147.94M → "148M"). Billions still collapse via fmtHdx (1.61B).
+// (147.94M → "148M"). Billions still collapse via the shared scale (1.61B).
 export function fmtHdxTick(v: number): string {
-  return Math.abs(v) >= 1e7 ? fmtHdx(Math.round(v / 1e6) * 1e6) : fmtHdx(v)
+  return Math.abs(v) >= 1e7 ? compactAmount(Math.round(v / 1e6) * 1e6) : compactAmount(v)
 }
 
 /* ============ chart color system (CVD-validated — fixed, never cycled) ============ */
@@ -193,7 +187,7 @@ export function niceAxisMax(v: number): number {
 
 // Segments stack bottom-up in the order given, separated by 2px gaps; 3 y-gridlines
 // with compact labels; optional dashed separator (weekly → monthly) before a column.
-export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCaption, yFmt = fmtHdx }: {
+export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCaption, yFmt = compactAmount }: {
   columns: StackColumn[]; h?: number; separatorAt?: number; separatorCaption?: string; yFmt?: (v: number) => string
 }) {
   const [hover, setHover] = useState<number | null>(null)
@@ -374,7 +368,7 @@ export interface RefinedGrid { buckets: string[]; series: AreaSeries[] }
 const acceptGrid = (r: RefinedGrid, span: number) =>
   r.buckets.length > span && r.series.every(s => s.values.length === r.buckets.length)
 
-export function StackedAreaChart({ buckets, series, h = 220, yFmt = fmtHdx, showShare = true, totalLabel, zoomKey, refine }: {
+export function StackedAreaChart({ buckets, series, h = 220, yFmt = compactAmount, showShare = true, totalLabel, zoomKey, refine }: {
   buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string; showShare?: boolean
   /** Adds a summed stack-top row under the bands in the tooltip, under this label. */
   totalLabel?: string

@@ -2,7 +2,6 @@ import { useState } from 'react'
 import { api } from '../api/explorer'
 import { windowRefine } from '../utils/chartRefine'
 import { useOmnipool } from '../hooks/useExplorerData'
-import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
 import { AddrPill, AreaChart, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, F, rowNav } from '../components/ui'
@@ -24,7 +23,6 @@ const OTHER_COLOR = 'var(--text-low)'
 export function Omnipool() {
   const { data, isLoading, isError } = useOmnipool()
   useDocumentTitle('Omnipool')
-  useNow()
   // The pool's mix rotated completely while its TVL swung an order of
   // magnitude, so the share view is the readable default — the TVL chart below
   // carries the absolute scale; USD stays one click away.
@@ -37,7 +35,13 @@ export function Omnipool() {
 
   const body = () => {
     if (!data) return null
-    const hubUsd = data.lrnaPrice != null ? Number(data.hubReserveTotal) / 1e12 * data.lrnaPrice : null
+    // The hub reserve arrives as a raw u128. Scale it by the decimals HUB_ASSET
+    // already carries, through the shared exact string converter — a float
+    // division by a restated 1e12 loses digits real reserves have and would
+    // silently disagree with the AssetAmount rendered right beside it.
+    const hubUsd = data.lrnaPrice != null
+      ? Number(F.preciseAmountPlain(data.hubReserveTotal, HUB_ASSET.decimals)) * data.lrnaPrice
+      : null
 
     // Current composition bar: the table's top rows, tail folded into Other so
     // the bar stays legible (the table below has every asset).

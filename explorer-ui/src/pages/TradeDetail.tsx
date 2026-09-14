@@ -134,7 +134,7 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                     <span className="asset-flow">
                       <AssetValue asset={data.assetIn}>1</AssetValue>
                       {' = '}
-                      <AssetValue asset={data.assetOut}>{data.executionPrice.toLocaleString(undefined, { maximumSignificantDigits: 6 })}</AssetValue>
+                      <AssetValue asset={data.assetOut}>{data.executionPrice.toLocaleString('en-US', { maximumSignificantDigits: 6 })}</AssetValue>
                     </span>
                   </div>
                 </>}

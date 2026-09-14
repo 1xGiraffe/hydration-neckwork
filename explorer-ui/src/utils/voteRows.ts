@@ -22,12 +22,11 @@ export function voteSideLabel(side: string | null | undefined): VoteSideLabel {
   }
 }
 
-// A vote as the activity feed renders it. This tab used to draw its own table —
-// Referendum / Type / Side / Conviction / Amount / Value / Time, linking to the generic
-// activity-detail page — which looked nothing like the same vote on /activity and drifted
-// further from it with every change there. Mapping to ActivityRow instead means one
-// renderer: the same asset chip and amount, the muted #index ahead of a linked referendum
-// title, the AYE/NAY badge, the conviction, the hover cards and the row navigation.
+// A vote as the activity feed renders it. Mapping to ActivityRow rather than giving
+// this tab a table of its own means one renderer for both surfaces — the same asset
+// chip and amount, the muted #index ahead of a linked referendum title, the AYE/NAY
+// badge, the conviction, the hover cards and the row navigation — so the same vote
+// cannot read one way here and another on /activity.
 export function voteToActivityRow(vote: VoteRow): ActivityRow {
   return {
     type: 'vote',

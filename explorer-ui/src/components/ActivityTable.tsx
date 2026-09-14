@@ -1,4 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- activity table exports slug/id/label helpers alongside its components */
+import { useMemo } from 'react'
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
 import { F, AddrPill, AssetChip, AssetAmount, AssetIcon, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
@@ -415,11 +416,17 @@ function activityKey(r: ActivityRow): string {
 // about to fill and the pager beneath it does not jump. Unpaged surfaces (a block's
 // or extrinsic's own activity) show whatever the record holds and leave it unset.
 export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pending, error, onRetry, dcaExecutionLinks, pageSize }: { rows: ActivityRow[]; noActor?: boolean; now: number; live?: boolean; anchorRef?: (el: HTMLElement | null) => void; loading?: boolean; pending?: boolean; error?: unknown; onRetry?: () => void; dcaExecutionLinks?: boolean; pageSize?: number }) {
-  const cols = noActor ? 4 : 5
+  // Type · [Account] · Activity · Protocol revenue · Value · Time — the span the
+  // skeleton, empty and error rows must cover for the full table width.
+  const cols = noActor ? 5 : 6
   // Deduped stable keys: same row → same key across renders (so prepended live rows
   // are detected as new without remounting the rest); duplicates get a suffix.
-  const seen = new Map<string, number>()
-  const keys = rows.map(r => { const b = activityKey(r); const n = seen.get(b) ?? 0; seen.set(b, n + 1); return n ? `${b}#${n}` : b })
+  // Memoized on the rows because the surrounding pages re-render on the 1 Hz
+  // clock, and only a new page of rows can change the answer.
+  const keys = useMemo(() => {
+    const seen = new Map<string, number>()
+    return rows.map(r => { const b = activityKey(r); const n = seen.get(b) ?? 0; seen.set(b, n + 1); return n ? `${b}#${n}` : b })
+  }, [rows])
   const fresh = useNewRows(keys, !!live)
   return (
     <div className="panel"><LiveAnchor anchorRef={anchorRef} /><table className="tbl">

@@ -127,3 +127,27 @@ describe('BalanceBreakdown', () => {
     expect(html).not.toContain('anytime')
   })
 })
+
+// Without a server-supplied unlock timeline the whole frozen amount renders as one
+// slice named after the LARGEST lock, so which lock that is has to be decided, not
+// left to the sort. A comparator that answers "a first" for equal amounts in both
+// directions is not a total order: V8 is then free to pick either tied lock, and it
+// picks different ones depending on where they sit in the list.
+describe('BalanceBreakdown — the largest lock is picked deterministically', () => {
+  const tied = (order: string[]) => bal({
+    free: raw(1400), total: raw(1480), reserved: raw(80), frozen: raw(1300),
+    breakdown: [
+      { kind: 'lock', source: order[0], amount: raw(100) },
+      { kind: 'lock', source: order[1], amount: raw(500) },
+      { kind: 'lock', source: order[2], amount: raw(500) },
+      { kind: 'lock', source: order[3], amount: raw(200) },
+    ],
+  })
+
+  it('names the first of two equally large locks, whichever they are', () => {
+    expect(render(tied(['gigahdx', 'vesting', 'staking', 'vote']))).toContain('vesting')
+    expect(render(tied(['gigahdx', 'vesting', 'staking', 'vote']))).not.toContain('staking')
+    expect(render(tied(['gigahdx', 'staking', 'vesting', 'vote']))).toContain('staking')
+    expect(render(tied(['gigahdx', 'staking', 'vesting', 'vote']))).not.toContain('vesting')
+  })
+})
