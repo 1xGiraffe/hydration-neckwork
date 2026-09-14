@@ -18,13 +18,27 @@ const directoryMv = materializedViews
 // raw_account_aliases records an alias again on every block it is observed, so
 // 19,867 distinct identities sit behind 16.2M rows — and its ORDER BY starts with
 // block_height, so no alias predicate (evm_address, account_id, primary_profile,
-// relationship) can use the primary index. Every reader therefore scanned the whole
-// table: the wallet refresh read 16,205,119 rows / 1.90 GiB / 283 ms / 94 MiB peak
-// for 1,736 rows of output, and the four shapes together read ~387 GiB per 6h.
+// relationship) can use the primary index. A reader keyed on one of those scans the
+// whole table: the wallet refresh read 16,205,119 rows / 1.90 GiB / 283 ms / 94 MiB
+// peak for 1,736 rows of output, and the four shapes together read ~387 GiB per 6h.
+//
+// A block_height predicate is the one thing the primary index DOES answer, so a
+// read bounded on it is allowed — that is how the binding poll stays a 4 ms / 1.9
+// MiB point read. The rule is the bound, not the table.
 describe('account alias reads', () => {
-  it('never scans raw_account_aliases at request time', () => {
+  it('bounds every raw_account_aliases read on the sort key', () => {
     for (const [name, source] of [['explorerService', explorerService], ['erc20WalletService', erc20WalletService]] as const) {
-      expect(source.match(/FROM\s+price_data\.raw_account_aliases/g), name).toBeNull()
+      let examined = 0
+      for (const query of source.split('query:').slice(1)) {
+        if (!/FROM\s+price_data\.raw_account_aliases/.test(query)) continue
+        // The statement ends at the template literal's closing backtick.
+        const statement = query.slice(0, query.indexOf('`', query.indexOf('`') + 1) + 1)
+        examined += 1
+        expect(statement, `${name}: unbounded raw_account_aliases read`).toMatch(/block_height/)
+      }
+      // A read the splitter failed to see is a read this test did not check, so
+      // the count has to agree with the plain occurrences in the file.
+      expect(examined, `${name}: reads seen`).toBe((source.match(/FROM\s+price_data\.raw_account_aliases/g) ?? []).length)
     }
   })
 

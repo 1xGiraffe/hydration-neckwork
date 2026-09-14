@@ -41,14 +41,24 @@ describe('background refresh lifecycle', () => {
   })
 
   it('keeps explicit refresh starters idempotent and cancellable', () => {
-    startIdentityRefresh()
-    startIdentityRefresh()
-    startEvmBindingsRefresh()
-    startEvmBindingsRefresh()
-    startAccountSuffixRefresh()
-    startAccountSuffixRefresh()
+    // A starter may own more than one timer — the EVM-bindings one runs a slow full
+    // reload alongside a fast incremental poll — so what is pinned per starter is the
+    // behaviour, not a count: the first call arms at least one timer, a second call
+    // arms none, and the stoppers take every one of them back down.
+    const starters: [string, () => void][] = [
+      ['identity', startIdentityRefresh],
+      ['evm-bindings', startEvmBindingsRefresh],
+      ['account-suffix', startAccountSuffixRefresh],
+    ]
+    let running = 0
+    for (const [name, start] of starters) {
+      start()
+      expect(vi.getTimerCount(), name).toBeGreaterThan(running)
+      running = vi.getTimerCount()
+      start()
+      expect(vi.getTimerCount(), name).toBe(running)
+    }
 
-    expect(vi.getTimerCount()).toBe(3)
     stopIdentityRefresh()
     stopExplorerBackgroundTasks()
     expect(vi.getTimerCount()).toBe(0)
