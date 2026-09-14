@@ -55,6 +55,14 @@ export function windowSql(filters: WindowFilters, params: Record<string, unknown
   return clauses.length ? ` AND ${clauses.join(' AND ')}` : ''
 }
 
+// The window as a cache-key fragment: two different windows must never share an
+// entry, so every bound is spelled out even when absent. Composed by every feed
+// route rather than restated, because a key that silently drops one bound
+// serves one window's page under another window's key.
+export function windowKey(filters: WindowFilters): string {
+  return `${filters.fromBlock ?? ''}~${filters.toBlock ?? ''}~${filters.fromTime ?? ''}~${filters.toTime ?? ''}`
+}
+
 // ---------------------------------------------------------------------------
 // Keyset cursor over (block_height, <index column>)
 // ---------------------------------------------------------------------------

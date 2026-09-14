@@ -5,15 +5,17 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import {
   errorEnvelope, feedPage, requireCursor, requirePositionCursor, zAccountRef, zAssetId, zCursor, zError,
-  zFeedPage, zIsoTimestamp, zLimit, zOrder, zTimeParam,
+  zFeedPage, zIsoTimestamp, zLimit, zOrder, zTimeParam, zWindowedFeedQuery,
 } from '../schemas/common.ts'
+import { windowKey } from '../services/feed.ts'
 import { liveHeadTag, notFoundContext } from '../services/head.ts'
 import { extrinsicsFeed } from '../services/chainCore.ts'
 import {
   accountBalances, accountEvents, accountSummary, accountTransfers, balanceHistory,
 } from '../services/accountsCore.ts'
 import { zExtrinsicItem } from './extrinsicsShared.ts'
-import { UNSEEN_IS_EMPTY, requireParsedAddress, windowKey, zAccountFeedQuery, zAccountParams } from './accountsShared.ts'
+import { zTransfer } from './transfersShared.ts'
+import { UNSEEN_IS_EMPTY, requireParsedAddress, zAccountParams } from './accountsShared.ts'
 
 const zSummary = z.object({
   account: zAccountRef,
@@ -63,21 +65,6 @@ const zAccountEvent = z.object({
   timestamp: zIsoTimestamp,
   assetId: zAssetId,
   amount: z.string().nullable(),
-})
-
-const zTransfer = z.object({
-  blockHeight: z.number().int(),
-  eventIndex: z.number().int(),
-  extrinsicIndex: z.number().int().nullable(),
-  extrinsicHash: z.string().nullable().describe('Hash of the carrying extrinsic; null for a block-hook row.'),
-  timestamp: zIsoTimestamp,
-  eventName: z.string(),
-  direction: z.enum(['in', 'out', 'self']),
-  from: zAccountRef.nullable(),
-  to: zAccountRef.nullable(),
-  assetId: zAssetId,
-  amount: z.string(),
-  valueUsd: z.string().nullable().describe('EVENT-TIME USD (the last closed hourly candle before the transfer, ≤30 days stale); null when the asset had no usable price then.'),
 })
 
 export const accountsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = async (fastify, opts) => {
@@ -159,7 +146,7 @@ export const accountsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = 
         'Filters: `name=` (exact Pallet.Event), `asset=`. ' + UNSEEN_IS_EMPTY,
       ].join('\n\n'),
       params: zAccountParams,
-      querystring: zAccountFeedQuery.extend({
+      querystring: zWindowedFeedQuery.extend({
         name: z.string().max(80).optional(),
         asset: zAssetId.optional(),
       }),
@@ -181,7 +168,7 @@ export const accountsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = 
       summary: 'Extrinsics signed by the account',
       description: 'The account-first projection indexes the signatory AND the effective signer, so an EVM account\'s transactions appear under both identities. Same row shape as /v1/extrinsics. ' + UNSEEN_IS_EMPTY,
       params: zAccountParams,
-      querystring: zAccountFeedQuery.extend({
+      querystring: zWindowedFeedQuery.extend({
         success: z.enum(['true', 'false']).optional(),
         call: z.string().max(80).optional().describe('Filter by `Pallet.call` — key-pruned here, no window needed.'),
       }),
@@ -211,7 +198,7 @@ export const accountsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = 
         UNSEEN_IS_EMPTY,
       ].join('\n\n'),
       params: zAccountParams,
-      querystring: zAccountFeedQuery.extend({
+      querystring: zWindowedFeedQuery.extend({
         direction: z.enum(['in', 'out']).optional(),
         asset: zAssetId.optional(),
       }),

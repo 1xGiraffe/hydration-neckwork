@@ -4,13 +4,13 @@ import { z } from 'zod'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import {
-  badRequest, errorEnvelope, feedPage, requirePositionCursor,
-  zAssetId, zCursor, zError, zFeedPage, zLimit, zOrder,
+  errorEnvelope, feedPage, requirePositionCursor,
+  zAssetId, zError, zFeedPage, zFeedQuery, zWindowQuartet, zWindowedFeedQuery,
 } from '../schemas/common.ts'
-import { windowKey, zWindowQuartet } from './accountsShared.ts'
+import { windowKey } from '../services/feed.ts'
 import { liveHeadTag, notFoundContext } from '../services/head.ts'
 import { intentEvents, intentOrderById, intentOrders } from '../services/intentData.ts'
-import { ADDRESS_FORMATS_HINT, parseAddress } from '../services/address.ts'
+import { optionalAddress } from './accountsShared.ts'
 import { INTENT_NOTE, INTENT_STATUS_NOTE, zIntent, zIntentDetail, zIntentEvent, zIntentKind } from './intentsShared.ts'
 
 // A u128 in decimal is at most 39 digits.
@@ -30,10 +30,7 @@ export const intentsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = a
         INTENT_NOTE,
         'Intent facts exactly as the chain recorded them at submission — this surface does not restate lifecycle status (fold one order\'s status from /v1/intents/{id}, which carries it). Cursor pages over (block, event index); `kind=` and `asset=` (either side of the pair) filter before pagination, and `owner=` reads the owner-first projection.',
       ].join('\n\n'),
-      querystring: z.object({
-        limit: zLimit,
-        cursor: zCursor,
-        order: zOrder,
+      querystring: zFeedQuery.extend({
         owner: z.string().min(3).max(128).optional(),
         kind: zIntentKind.optional(),
         asset: zAssetId.optional().describe('Matches either side of the pair.'),
@@ -43,8 +40,7 @@ export const intentsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = a
     },
   }, async request => {
     const { limit, order, kind, asset, fromBlock, toBlock, fromTime, toTime } = request.query
-    const owner = request.query.owner ? parseAddress(request.query.owner) : null
-    if (request.query.owner && !owner) throw badRequest(`unparseable owner; ${ADDRESS_FORMATS_HINT}`)
+    const owner = optionalAddress(request.query.owner, 'owner')
     const cursor = requirePositionCursor(request.query.cursor)
     const window = { fromBlock, toBlock, fromTime, toTime }
     const head = await liveHeadTag(opts.client)
@@ -88,7 +84,7 @@ export const intentsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = a
         'Only the submission names the owner and the pair — every later event carries the id alone — so amounts here are the trade\'s, not the order\'s. Intent.DcaCompleted is the exception that carries neither: the trade that exhausts a dca budget states its amounts only in the solution\'s settlement transfers.',
       ].join('\n\n'),
       params: z.object({ id: zIntentId }),
-      querystring: z.object({ limit: zLimit, cursor: zCursor, order: zOrder, ...zWindowQuartet }),
+      querystring: zWindowedFeedQuery,
       response: { 200: zFeedPage(zIntentEvent), 400: zError, 404: zError },
     },
   }, async (request, reply) => {

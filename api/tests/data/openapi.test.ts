@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type { DataRouteInfo } from '../../src/data/app.ts'
 import { buildDataApp } from '../../src/data/app.ts'
+import { DATA_CACHE_CONTROL } from '../../src/data/cacheControl.ts'
 import type { ClickHouseClient } from '../../src/db/client.ts'
 import { fakeDataClient } from './helpers.ts'
 
@@ -137,6 +138,18 @@ describe('data OpenAPI document', () => {
       }
     }
     expect(missing).toEqual([])
+  })
+
+  it('gives every route in the surface an explicit cache-control rule', () => {
+    // Unmatched routes ship no-store by design, which is right for a route
+    // nobody listed and wrong for one the contract publishes: the two lists are
+    // maintained separately, so a new route can reach the surface with its TTL
+    // silently missing. Concrete segments matter to the patterns, so only the
+    // {param} placeholders are filled in.
+    const uncovered = EXPECTED_PATHS
+      .map(path => path.replace(/\{[^}]+\}/g, 'x'))
+      .filter(path => !DATA_CACHE_CONTROL.some(([pattern]) => pattern.test(path)))
+    expect(uncovered).toEqual([])
   })
 
   it('exempts only the status probe from the global security requirement', async () => {
