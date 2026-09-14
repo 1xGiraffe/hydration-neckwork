@@ -1365,7 +1365,7 @@ export interface OmnipoolDetail {
 
 export interface HdxCohort { key: string; label: string; minPct: number; minHdx: number; accounts: number; totalHdx: number }
 export interface HdxLockType { key: string; label: string; accounts: number; totalHdx: number }
-export interface HdxUnlockBucket { label: string; fromTs: string; toTs: string; gigahdx: number; vesting: number; vote: number }
+export interface HdxUnlockBucket { label: string; fromTs: string; toTs: string; gigahdx: number; vesting: number; vote: number; other: number }
 export interface HdxDailyFlow { date: string; buyHdx: number; sellHdx: number; buyers: number; sellers: number }
 export interface HdxMover { account: AccountRef; balanceHdx: number; boughtHdx: number; soldHdx: number; netHdx: number }
 
@@ -1455,9 +1455,9 @@ export interface HdxDashboard {
   locks: { types: HdxLockType[]; totalLockedHdx: number; lockedPctOfUser: number; vestedUnclaimedHdx: number; snapshotAt: string | null }
   unlocks: {
     buckets: HdxUnlockBucket[]                     // 8 weekly then monthly buckets
-    laterHdx: { gigahdx: number; vesting: number; vote: number }
+    laterHdx: { gigahdx: number; vesting: number; vote: number; other: number }
     unlockableNowHdx: number
-    nowHdx: { gigahdx: number; vesting: number; vote: number } // leading "now" column
+    nowHdx: { gigahdx: number; vesting: number; vote: number; other: number } // leading "now" column
     activeVoteHdx: number
     stakingAnytimeHdx: number
     gigaPending: {
