@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { UserDataError } from './userProfileService.ts'
+import { chTimestampMs } from './clickhouseTime.ts'
 
 // Control plane for the Data API's tokens (concept: ~/.g/hydraken-api-concept.md
 // § 3): minting, listing and revoking live HERE, on the explorer api, where the
@@ -51,7 +52,6 @@ export function apiLimitDefaults(): { perMinute: number; perDay: number } {
 }
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex')
-const chDateTime = (ms: number) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ')
 const EPOCH = '1970-01-01 00:00:00'
 
 export interface ApiTokenInfo {
@@ -118,7 +118,7 @@ export async function createApiToken(accountId: string, label: string): Promise<
     account_id: accountId,
     label: trimmed,
     token_prefix: token.slice(0, TOKEN_PREFIX_LEN),
-    created_at: chDateTime(now),
+    created_at: chTimestampMs(now),
     last_used_at: EPOCH,
     deleted: 0,
   }
@@ -187,13 +187,20 @@ export async function adminApiUsers(): Promise<ApiUserOverview[]> {
     }),
     client.query({
       query: `
+        -- 30 days is the WIDEST window any column below reports, so rows older
+        -- than that contribute to nothing: summing every hour ever recorded (the
+        -- table keeps 400 days) only to discard all of it inside the sumIfs is
+        -- pure read cost. last_hour is therefore the last ACTIVE hour within the
+        -- window; an account dormant longer than that still shows its
+        -- last_used_at, which comes from user_api_tokens above.
         SELECT account_id,
                toString(sumIf(requests, hour_start >= now() - INTERVAL 24 HOUR)) AS r24,
                toString(sumIf(rejected, hour_start >= now() - INTERVAL 24 HOUR)) AS j24,
                toString(sumIf(requests, hour_start >= now() - INTERVAL 7 DAY)) AS r7,
-               toString(sumIf(requests, hour_start >= now() - INTERVAL 30 DAY)) AS r30,
+               toString(sum(requests)) AS r30,
                toString(max(hour_start)) AS last_hour
         FROM price_data.user_api_usage FINAL
+        WHERE hour_start >= now() - INTERVAL 30 DAY
         GROUP BY account_id`,
       format: 'JSONEachRow',
     }),

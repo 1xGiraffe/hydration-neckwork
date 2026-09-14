@@ -26,22 +26,35 @@ function nextAccess(): number {
   return accessSequence
 }
 
+// Map insertion order IS access order: every hit re-inserts its key, so the
+// first entry is always the least recently used and eviction is a single
+// `keys().next()` rather than a linear min-scan per evicted entry.
+function touch(key: string, entry: Entry<unknown>): void {
+  entry.lastAccessedAt = nextAccess()
+  store.delete(key)
+  store.set(key, entry)
+}
+
+// How often the expired-entry sweep is allowed to run. It is O(store.size), and
+// running it on the tail of EVERY resolved miss cost a full pass over as many as
+// API_CACHE_MAX_ENTRIES entries per miss — for entries that expire on their own
+// schedule whether or not they are swept. The cap below is still enforced on
+// every call, so the sweep's cadence bounds memory nowhere.
+const SWEEP_INTERVAL_MS = 1_000
+let lastSweepAt = 0
+
 function prune(now: number): void {
-  for (const [key, entry] of store) {
-    if (entry.expiresAt <= now) store.delete(key)
+  if (now - lastSweepAt >= SWEEP_INTERVAL_MS || store.size > maxEntries) {
+    lastSweepAt = now
+    for (const [key, entry] of store) {
+      if (entry.expiresAt <= now) store.delete(key)
+    }
   }
 
   while (store.size > maxEntries) {
-    let oldestKey: string | null = null
-    let oldestAccess = Infinity
-    for (const [key, entry] of store) {
-      if (entry.lastAccessedAt < oldestAccess) {
-        oldestAccess = entry.lastAccessedAt
-        oldestKey = key
-      }
-    }
-    if (oldestKey == null) return
-    store.delete(oldestKey)
+    const oldest = store.keys().next()
+    if (oldest.done) return
+    store.delete(oldest.value)
   }
 }
 
@@ -73,6 +86,7 @@ function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: numb
 export function resetCacheForTests(): void {
   store.clear()
   inflight.clear()
+  lastSweepAt = 0
 }
 
 export async function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>): Promise<T> {
@@ -80,7 +94,7 @@ export async function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>
   const now = Date.now()
   const hit = store.get(key) as Entry<T> | undefined
   if (hit && hit.expiresAt > now) {
-    hit.lastAccessedAt = nextAccess()
+    touch(key, hit)
     return hit.value
   }
   if (hit) store.delete(key)
@@ -112,7 +126,7 @@ export async function cachedFound<T>(key: string, ttlMs: number, fn: () => Promi
   const now = Date.now()
   const hit = store.get(key) as Entry<T> | undefined
   if (hit && hit.expiresAt > now) {
-    hit.lastAccessedAt = nextAccess()
+    touch(key, hit)
     return hit.value
   }
   if (hit) store.delete(key)
@@ -151,7 +165,7 @@ export async function cachedSwr<T>(key: string, freshMs: number, staleMs: number
   const now = Date.now()
   const hit = store.get(key) as Entry<T> | undefined
   if (hit && hit.expiresAt > now) {
-    hit.lastAccessedAt = nextAccess()
+    touch(key, hit)
     const superseded = generation != null && hit.generation !== generation
     if ((superseded || (hit.freshUntil ?? hit.expiresAt) <= now) && !inflight.has(key)) {
       loadAndCache(key, freshMs, staleMs, fn, generation).catch(() => { /* stale entry stays valid until staleMs */ })

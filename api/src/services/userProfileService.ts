@@ -104,10 +104,16 @@ export async function setProfileAvatar(accountId: string, base64: string): Promi
   // immutably-cached URL.
   const nextCounter = (avatarCounter.get(acc) ?? 0) + 1
   const next: UserProfile = { name: prev.name, avatarVersion: nextCounter }
-  await client.insert({ table: 'price_data.user_avatars', values: [{ account_id: acc, image: bytes.toString('base64'), deleted: 0 }], format: 'JSONEachRow' })
+  // The VERSION goes first, then the image. A version ahead of its blob costs
+  // nothing — the URL is new, so it is re-fetched and answers with whatever is
+  // stored. The other order is what the split counter exists to prevent: if the
+  // version write failed (or the process restarted between the two), the NEW
+  // bytes sat live under the OLD ?v=, and that URL is served `immutable` — every
+  // browser that had already fetched it would show the old image forever.
   avatarCounter.set(acc, nextCounter)
-  byAccount.set(acc, next)
   await persistProfile(acc, prev.name)
+  await client.insert({ table: 'price_data.user_avatars', values: [{ account_id: acc, image: bytes.toString('base64'), deleted: 0 }], format: 'JSONEachRow' })
+  byAccount.set(acc, next)
   return next
 }
 

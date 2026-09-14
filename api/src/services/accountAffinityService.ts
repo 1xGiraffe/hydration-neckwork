@@ -416,13 +416,17 @@ async function loadCexInteractions(candidateAccounts: string[], cexAccounts: str
         WHERE e.block_height >= (SELECT min(block_height) FROM refs)
           AND (e.block_height, e.event_index) IN (SELECT block_height, event_index FROM refs)
           AND e.event_name IN ({transferEvents:Array(String)})
-          AND (from_acc IN ({cexAccounts:Array(String)}) OR to_acc IN ({cexAccounts:Array(String)}))
+          -- lower() on both sides, as loadDirectTransfers does: from_acc/to_acc are
+          -- raw JSON hex out of args_json, while cexAccounts are the lower-cased ids
+          -- that query produced. A mixed-case account matched nothing here, which
+          -- dropped the shared_cex reason from every result without an error.
+          AND (lower(from_acc) IN ({cexAccounts:Array(String)}) OR lower(to_acc) IN ({cexAccounts:Array(String)}))
         ORDER BY e.block_height DESC, priority DESC, e.event_index DESC
         LIMIT 1 BY e.block_height, extrinsic_index, asset_id, lower(from_acc), lower(to_acc), amount
       ), verified AS (
         SELECT
-          lower(if(t.from_acc IN ({cexAccounts:Array(String)}), t.to_acc, t.from_acc)) AS user_acc,
-          lower(if(t.from_acc IN ({cexAccounts:Array(String)}), t.from_acc, t.to_acc)) AS cex_acc
+          lower(if(lower(t.from_acc) IN ({cexAccounts:Array(String)}), t.to_acc, t.from_acc)) AS user_acc,
+          lower(if(lower(t.from_acc) IN ({cexAccounts:Array(String)}), t.from_acc, t.to_acc)) AS cex_acc
         FROM transfers AS t
         ANY INNER JOIN price_data.raw_calls AS c
           ON c.block_height = t.block_height

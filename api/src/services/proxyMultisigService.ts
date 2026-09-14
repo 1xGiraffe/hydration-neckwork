@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { xxhashAsU8a, createKeyMulti } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
+import { RareEventLedger, type RareEventRow } from './rareEventLedger.ts'
 import { threshold1Operations, proxyChildAddress, type MultisigCallInfo, type MultisigOperationRow } from './onBehalfActivity.ts'
 import { signedOrigin } from './explorerService.ts'
 
@@ -125,25 +126,37 @@ async function refreshProxies(): Promise<void> {
   state.delegatorsByDelegate = byDelegate
 }
 
+// The three fields this reads are extracted in SQL. `Proxy.PureCreated` also
+// carries a disambiguation index nothing here wants, and the whole-payload
+// projection charged 1.08 MiB of result bytes for 179 rows — 9.85 GiB over
+// 9,473 refreshes in two weeks — plus a JSON.parse per row.
+// `pure` is the current name for the created account; `anonymous` is the same
+// field under the pallet's old event name.
+//
+// On the shared rare-event ledger, because this refresh runs every 60 SECONDS:
+// the read names only an event_name, so raw_events cannot prune by key and the
+// event-name index still leaves millions of rows to scan for these 179. The
+// ledger reads the family once and afterwards only the blocks above a settled
+// floor.
+interface PureProxyRow extends RareEventRow {
+  extrinsic_index: number | null; ts: string; account: string; creator: string; proxy_type: string
+}
+const pureProxyLedger = new RareEventLedger<PureProxyRow>({
+  eventNames: ['Proxy.PureCreated', 'Proxy.AnonymousCreated'],
+  columnsSql: `block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts,
+               if(JSONHas(args_json, 'pure'), JSONExtractString(args_json, 'pure'), JSONExtractString(args_json, 'anonymous')) AS account,
+               JSONExtractString(args_json, 'who') AS creator,
+               JSONExtractString(args_json, 'proxyType', '__kind') AS proxy_type`,
+  head: async () => {
+    const res = await client.query({ query: `SELECT max(block_height) AS h FROM price_data.raw_blocks`, format: 'JSONEachRow' })
+    return Number((await res.json<{ h: number }>())[0]?.h ?? 0)
+  },
+  client: () => client,
+})
+
 async function refreshPureProxies(): Promise<void> {
-  // The three fields this reads are extracted in SQL. `Proxy.PureCreated` also
-  // carries a disambiguation index nothing here wants, and the whole-payload
-  // projection charged 1.08 MiB of result bytes for 179 rows — 9.85 GiB over
-  // 9,473 refreshes in two weeks — plus a JSON.parse per row.
-  // `pure` is the current name for the created account; `anonymous` is the same
-  // field under the pallet's old event name.
-  const res = await client.query({
-    query: `SELECT block_height, extrinsic_index, toString(block_timestamp) AS ts,
-                   if(JSONHas(args_json, 'pure'), JSONExtractString(args_json, 'pure'), JSONExtractString(args_json, 'anonymous')) AS account,
-                   JSONExtractString(args_json, 'who') AS creator,
-                   JSONExtractString(args_json, 'proxyType', '__kind') AS proxy_type
-            FROM price_data.raw_events
-            WHERE event_name IN ('Proxy.PureCreated', 'Proxy.AnonymousCreated')
-            ORDER BY block_height`,
-    format: 'JSONEachRow',
-  })
   const pure = new Map<string, PureProxyInfo>()
-  for (const r of await res.json<{ block_height: number; extrinsic_index: number | null; ts: string; account: string; creator: string; proxy_type: string }>()) {
+  for (const r of await pureProxyLedger.rows()) {
     if (!r.account || !r.creator) continue
     pure.set(r.account, { creator: r.creator, proxyType: r.proxy_type || 'Any', blockHeight: r.block_height, extrinsicIndex: r.extrinsic_index ?? null, timestamp: r.ts })
   }

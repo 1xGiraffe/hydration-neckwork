@@ -17,8 +17,6 @@ import { curveCrossingX, curveThresholdPerbill, PERBILL, perbillOfRational, trac
 // merge two unrelated referenda.
 export type ReferendumPallet = 'opengov' | 'democracy'
 
-export const REFERENDUM_PALLETS: ReferendumPallet[] = ['opengov', 'democracy']
-
 const HDX_ASSET_ID = 0
 
 // First block that emitted ConvictionVoting.Voted. Vote CALLS predate it by ~534k
@@ -951,9 +949,14 @@ async function wrappedRemovalExtrinsics(index: number, fromBlock: number, toBloc
 // Votes WITHDRAWN, meaning removed while the referendum was still open — the LAST such
 // removal per account, so a vote recast afterwards still counts.
 //
-// The window ends one block before the conclusion, not at the last lifecycle event: a
-// removal once the vote has closed is just the voter unlocking their balance —
-// treating those as withdrawals would silently delete votes that did count.
+// The window ends AT the conclusion, not at the last lifecycle event: a removal once
+// the vote has closed is just the voter unlocking their balance — treating those as
+// withdrawals would silently delete votes that did count. The conclusion BLOCK is
+// included, because the close and a removal can share it: the close is almost always
+// a block hook (`on_initialize`, before every extrinsic), but `Democracy.Cancelled`
+// has landed inside an extrinsic, and a removal at a lower index in that block is a
+// real withdrawal. Hence a POSITION bound rather than `conclusionBlock - 1`, which
+// excluded the whole block.
 //
 // Both pallets name the poll only on the CALL, so the referendum-first projection is
 // what selects the removals; resolving the index out of `raw_calls.args_json` instead
@@ -975,7 +978,18 @@ async function wrappedRemovalExtrinsics(index: number, fromBlock: number, toBloc
 // OpenGov removals below CONVICTION_VOTED_FIRST_BLOCK — the event did not exist yet
 // (the first one is at 7,175,689), so demanding one there kept withdrawn votes in the
 // tally and pushed referenda 14, 23, 27 and 32 ABOVE the chain's own figure.
-async function loadWithdrawals(pallet: ReferendumPallet, index: number, fromBlock: number, toBlock: number): Promise<Map<string, VotePosition>> {
+async function loadWithdrawals(
+  pallet: ReferendumPallet, index: number, fromBlock: number, toBlock: number,
+  concludedAt: VotePosition | null,
+): Promise<Map<string, VotePosition>> {
+  // OpenGov's post-event-era rows need no positional bound at all: their
+  // ConvictionVoting.VoteRemoved confirmation below is emitted only while the
+  // poll is Ongoing, so it already separates a withdrawal from a post-close
+  // unlock. The unconfirmed paths — Democracy, and OpenGov below
+  // CONVICTION_VOTED_FIRST_BLOCK — have no such marker and compare positions.
+  const beforeClose = (row: { block_height: number; extrinsic_index: number | null }): boolean =>
+    concludedAt == null
+    || isAfter(concludedAt, { blockHeight: Number(row.block_height), extrinsicIndex: row.extrinsic_index })
   const removalRes = await client.query({
     query: `SELECT who, block_height, extrinsic_index
             FROM price_data.governance_vote_calls
@@ -997,7 +1011,7 @@ async function loadWithdrawals(pallet: ReferendumPallet, index: number, fromBloc
       ...wrapped,
     ]
     const tuples = [...new Set(confirmable.map(row => `(${Number(row.block_height)},${Number(row.extrinsic_index)})`))].join(',')
-    removals = removals.filter(row => Number(row.block_height) < CONVICTION_VOTED_FIRST_BLOCK)
+    removals = removals.filter(row => Number(row.block_height) < CONVICTION_VOTED_FIRST_BLOCK && beforeClose(row))
     if (tuples) {
       const eventRes = await client.query({
         query: `SELECT JSONExtractString(args_json, 'who') AS who, block_height, extrinsic_index
@@ -1008,6 +1022,8 @@ async function loadWithdrawals(pallet: ReferendumPallet, index: number, fromBloc
       })
       removals = removals.concat(await eventRes.json<{ who: string; block_height: number; extrinsic_index: number | null }>())
     }
+  } else {
+    removals = removals.filter(beforeClose)
   }
 
   const latest = new Map<string, VotePosition>()
@@ -1237,7 +1253,11 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
     // votes cannot be cast after it, so vote windows end at the CONCLUSION. Using
     // the last lifecycle event instead widened some windows enough to read
     // hundreds of MB of call JSON.
-    const conclusionBlock = [...lifecycle].reverse().find(row => isConcludingEvent(row.event_name))?.block_height ?? null
+    const concludedRow = [...lifecycle].reverse().find(row => isConcludingEvent(row.event_name)) ?? null
+    const conclusionBlock = concludedRow?.block_height ?? null
+    const closePosition: VotePosition | null = concludedRow
+      ? { blockHeight: concludedRow.block_height, extrinsicIndex: concludedRow.extrinsic_index }
+      : null
     // A running referendum needs the head twice: to close its vote window and to
     // place "now" on its track's decision-period clock. A concluded one needs
     // neither, so the read is skipped.
@@ -1266,7 +1286,7 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
     // Withdrawals only count up to the moment the referendum closed (see
     // loadWithdrawals); a still-open referendum has no such ceiling.
     const withdrawals = lifecycle.length
-      ? await loadWithdrawals(pallet, index, lifecycle[0].block_height, conclusionBlock != null ? conclusionBlock - 1 : 0xffff_ffff)
+      ? await loadWithdrawals(pallet, index, lifecycle[0].block_height, conclusionBlock ?? 0xffff_ffff, closePosition)
       : new Map<string, VotePosition>()
 
     const latest = latestVotePerAccount(votes)
@@ -1278,7 +1298,6 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
     const directTally = tallyVoters(voters)
     const onChainTally = onChainTallyFrom(lifecycle)
     const submitted = lifecycle.find(row => row.event_name === 'Referenda.Submitted' || row.event_name === 'Democracy.Started')
-    const concludedRow = [...lifecycle].reverse().find(row => isConcludingEvent(row.event_name))
     const submittedArgs = submitted ? (() => { try { return JSON.parse(submitted.args_json) as Record<string, unknown> } catch { return {} } })() : {}
     const proposal = submittedArgs.proposal as { hash?: unknown } | undefined
     // Democracy.Executed is the enactment, not the conclusion (see CONCLUDING_EVENTS), and
@@ -1494,16 +1513,6 @@ export async function getGovernanceReferenda(
     && (!status || row.status === status)
     && (track == null || row.track?.id === track))
   return { total: rows.length, rows: rows.slice(offset, offset + limit) }
-}
-
-// The status words a pallet's rows can actually carry — the page's status
-// filter offers exactly these rather than a hardcoded list that drifts.
-export function governanceStatusOptions(pallet: ReferendumPallet): string[] {
-  const table = pallet === 'opengov' ? OPENGOV_STATUS : DEMOCRACY_STATUS
-  const statuses = [...new Set(table.map(([, status]) => status))]
-  // 'executed' is not in the lifecycle table — it is the enactment upgrade of
-  // 'approved' (see getReferenda) — but it is a status the rows carry.
-  return pallet === 'opengov' ? [...statuses, 'executed'] : statuses
 }
 
 // One RUNNING OpenGov referendum, enriched for the live cards: track, phase

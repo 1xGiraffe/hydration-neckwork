@@ -88,6 +88,34 @@ describe('makeBucketing interval convention', () => {
     expect(bk.endSec(bk.N)).toBe(4 * H)
   })
 
+  // The defect the `ceil - 1` above was chosen to remove, reintroduced by a
+  // `Math.max(1, …)` floor: FINEST_STEP_SEC is an hour, so any span at or under
+  // one hour gives ceil(span/3600) - 1 = 0, and clamping that to 1 produced two
+  // buckets sharing an end instant AND an end height, with bucket 1's start
+  // height past its own end. Reachable from the account portfolio chart for any
+  // account whose indexed range — or requested window — is under an hour.
+  it('puts a span shorter than one step in ONE bucket, not two sharing an end', () => {
+    for (const span of [60, 15 * 60, H, H - 1]) {
+      const bk = makeBucketing(clock, 0, span, 100)
+      expect(bk.N).toBe(0)
+      expect(bk.endSec(0)).toBe(span)
+      // One bucket, so there is no second end instant to duplicate.
+      expect(bk.endHeight(0)).toBe(bk.endHeight(bk.N))
+      // Every height in range folds into bucket 0 rather than a phantom one.
+      expect(bk.bucketOfHeight(100)).toBe(0)
+      expect(bk.bucketOfHeight(500)).toBe(0)
+      // The SQL agrees: both clamps close on N = 0.
+      expect(bk.ofTs('ts')).toContain(', 0))')
+    }
+  })
+
+  it('still gives a multi-step span one bucket per step', () => {
+    const bk = makeBucketing(clock, 0, 4 * H, 100)
+    expect(bk.N).toBe(3)
+    const ends = Array.from({ length: bk.N + 1 }, (_, b) => bk.endSec(b))
+    expect(new Set(ends).size).toBe(ends.length)
+  })
+
   it('emits SQL that closes on the right, and a carry bucket that floors', () => {
     const bk = makeBucketing(clock, 0, 4 * H, 100)
     // `- 1` before the divide is what closes the interval on the right.

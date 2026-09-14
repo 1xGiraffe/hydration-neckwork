@@ -27,6 +27,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { measuredParaBlockMs } from './blockTime.ts'
 import { accountBorrowInterestSql, distributeUsd1e12 } from './borrowAttribution.ts'
 import { cached, cachedSwr } from './cache.ts'
+import { chTimestamp } from './clickhouseTime.ts'
 import { accountRef, type AccountRef } from './explorerService.ts'
 import {
   HOLLAR_RESERVE_ADDRESS,
@@ -139,9 +140,6 @@ export function isProtocolRevenue(stream: string, dest: string): boolean {
   return stream !== 'omnipool_asset_fee' || dest === 'protocol' || dest === 'burned' || dest === 'pol'
 }
 
-function chTimestamp(seconds: number): string {
-  return new Date(seconds * 1000).toISOString().slice(0, 19).replace('T', ' ')
-}
 
 const CH_TS = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
 

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { base58Decode, base58Encode } from './chainPrimitives.ts'
 
 const EMOJIS = [
   '🐵', '🐒', '🦍', '🦧', '🐶', '🐕', '🦮', '🐕‍🦺', '🐩', '🐺', '🦊', '🦝',
@@ -69,7 +70,6 @@ export function parseSuffixEmojiQuery(query: string): { suffix: string; glyphs: 
   return out
 }
 
-const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 const POLKADOT_SS58_PREFIX = 0
 const HYDRATION_SS58_PREFIX = 63
 const SS58_CHECKSUM_PREFIX = Buffer.from('SS58PRE')
@@ -138,44 +138,6 @@ function accountIdBytes(account: string): Uint8Array | null {
 export function accountIdHex(account: string): string | null {
   const bytes = accountIdBytes(account) ?? ss58AccountIdBytes(account)
   return bytes ? `0x${Buffer.from(bytes).toString('hex')}` : null
-}
-
-function base58Encode(bytes: Uint8Array): string {
-  let zeros = 0
-  while (zeros < bytes.length && bytes[zeros] === 0) zeros++
-
-  const hex = Buffer.from(bytes).toString('hex')
-  let value = hex.length > 0 ? BigInt(`0x${hex}`) : 0n
-  let encoded = ''
-
-  while (value > 0n) {
-    const remainder = Number(value % 58n)
-    encoded = BASE58_ALPHABET[remainder] + encoded
-    value /= 58n
-  }
-
-  return '1'.repeat(zeros) + encoded
-}
-
-function base58Decode(value: string): Uint8Array | null {
-  let decoded = 0n
-
-  for (const char of value) {
-    const index = BASE58_ALPHABET.indexOf(char)
-    if (index === -1) return null
-    decoded = decoded * 58n + BigInt(index)
-  }
-
-  const bytes: number[] = []
-  while (decoded > 0n) {
-    bytes.unshift(Number(decoded & 0xffn))
-    decoded >>= 8n
-  }
-
-  let zeros = 0
-  while (zeros < value.length && value[zeros] === '1') zeros++
-
-  return Uint8Array.from([...new Array(zeros).fill(0), ...bytes])
 }
 
 function ss58AccountIdBytes(account: string): Uint8Array | null {

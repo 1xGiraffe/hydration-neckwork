@@ -29,6 +29,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { buildPartitionInsertSql } from '../services/accountTradeVolume.ts'
 import { allExplorerAssets } from '../services/explorerAssets.ts'
+import { chTimestamp } from '../services/clickhouseTime.ts'
 // The feed's own inbound-XCM walk. Imported, not reimplemented: see the xcm_arrivals
 // section below for the four ways a SQL restatement of it drifted.
 import { xcmInboundCreditsForBlocks, XCM_BARRIER_EVENTS, type XcmInboundCredit } from '../services/explorerService.ts'
@@ -208,9 +209,6 @@ export function stalePartitionsSql(): string {
 // stays correct under backward backfill.
 const rebuiltSourceWatermark = new Map<string, string>()
 
-export function resetRebuiltSourceWatermarkForTest(): void {
-  rebuiltSourceWatermark.clear()
-}
 
 // Candidates whose source actually moved since the last rebuild this process did.
 export function partitionsNeedingRebuild(
@@ -437,9 +435,6 @@ export function poolSwapHourlyInsertSql(partition: string, target: string): stri
 // consumed costs one extra pass after a restart instead of one per cycle.
 const poolSwapHourlyRebuilt = new Map<string, string>()
 
-export function resetPoolSwapHourlyWatermarkForTest(): void {
-  poolSwapHourlyRebuilt.clear()
-}
 
 export async function runPoolSwapHourly(client: ClickHouseClient): Promise<DerivationResult> {
   const model = 'pool_swap_hourly'
@@ -563,9 +558,6 @@ SETTINGS max_memory_usage = 2000000000, max_threads = 4`
 // would re-mark it stale on every cycle forever.
 const uniswapV3LegsRebuilt = new Map<string, string>()
 
-export function resetUniswapV3LegsWatermarkForTest(): void {
-  uniswapV3LegsRebuilt.clear()
-}
 
 export async function runUniswapV3Legs(client: ClickHouseClient): Promise<DerivationResult> {
   const model = 'uniswap_v3_legs'
@@ -622,9 +614,6 @@ const FULL_HISTORY_SETTINGS = 'SETTINGS max_memory_usage = 2000000000, max_threa
  */
 const rebuiltFromWatermark = new Map<string, string>()
 
-export function resetFullRebuildWatermarksForTest(): void {
-  rebuiltFromWatermark.clear()
-}
 
 async function sourceWatermark(client: ClickHouseClient, table: string): Promise<string> {
   const res = await client.query({
@@ -1077,15 +1066,9 @@ ${buildRevenueEventRowsSql(stream, extra)}`
 
 const revenueEventsRebuilt = new Map<string, string>()
 
-export function resetRevenueEventsWatermarkForTest(): void {
-  revenueEventsRebuilt.clear()
-}
 
 interface RevenueStalePartition { p: string; src_ingest: string; src_max_ts: string }
 
-function chTimestamp(seconds: number): string {
-  return new Date(seconds * 1000).toISOString().slice(0, 19).replace('T', ' ')
-}
 
 function chTimestampSeconds(ts: string): number {
   return Math.floor(Date.parse(`${ts.trim().replace(' ', 'T')}Z`) / 1000)
@@ -1273,9 +1256,6 @@ GROUP BY account, stream`
 
 const accountRevenueRebuilt = new Map<string, string>()
 
-export function resetAccountRevenueWatermarkForTest(): void {
-  accountRevenueRebuilt.clear()
-}
 
 interface WeightRow { account: string; interest: string }
 interface MintRow { reserve: string; block_height: number; event_index: number; mint_ts: string; prev_ts: string }
@@ -1461,9 +1441,6 @@ export function xcmArrivalsPendingBlocksSql(): string {
 // rebuiltSourceWatermark above.
 const xcmArrivalsRebuilt = new Map<string, string>()
 
-export function resetXcmArrivalsWatermarkForTest(): void {
-  xcmArrivalsRebuilt.clear()
-}
 
 interface XcmArrivalsPartition { p: string; src_ingest: string; der_computed: string }
 

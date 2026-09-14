@@ -1,5 +1,10 @@
 import { keccakAsHex, xxhashAsU8a } from '@polkadot/util-crypto'
 import { u8aConcat, u8aToHex } from '@polkadot/util'
+// base58 is shared (chainPrimitives): a divergent leading-zero rule produces a
+// wrong SS58 address that still looks like one. Re-exported so this module's own
+// readers keep one import surface.
+import { base58Encode } from './chainPrimitives.ts'
+export { base58Decode, base58Encode } from './chainPrimitives.ts'
 
 // Pure domain layer for the Wormhole NTT backing monitor: the log/payload
 // parsers, the origin-chain decoders, the de-trim arithmetic, the Wormholescan
@@ -212,33 +217,6 @@ export function wormholeChainFamily(chainId: number): WormholeChainFamily {
   return 'evm'
 }
 
-// ───────────────────────────── base58 ─────────────────────────────
-
-const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-
-export function base58Encode(bytes: Uint8Array): string {
-  let n = 0n
-  for (const b of bytes) n = n * 256n + BigInt(b)
-  let out = ''
-  while (n > 0n) { out = BASE58_ALPHABET[Number(n % 58n)] + out; n /= 58n }
-  for (const b of bytes) { if (b !== 0) break; out = '1' + out }
-  return out || '1'
-}
-
-export function base58Decode(value: string): Uint8Array | null {
-  let n = 0n
-  for (const c of value) {
-    const i = BASE58_ALPHABET.indexOf(c)
-    if (i < 0) return null
-    n = n * 58n + BigInt(i)
-  }
-  const digits: number[] = []
-  while (n > 0n) { digits.unshift(Number(n % 256n)); n /= 256n }
-  let leading = 0
-  for (const c of value) { if (c !== '1') break; leading++ }
-  return new Uint8Array([...new Array<number>(leading).fill(0), ...digits])
-}
-
 // ───────────────────────────── hex helpers ─────────────────────────────
 
 const stripHex = (hex: string): string => (hex.startsWith('0x') || hex.startsWith('0X') ? hex.slice(2) : hex).toLowerCase()
@@ -265,8 +243,8 @@ const bigintAt = (bytes: Uint8Array, offset: number, length: number): bigint => 
 
 // ─────────────────────── substrate storage keys ───────────────────────
 // orml-tokens keys its currency maps with Twox64Concat over the SCALE-encoded
-// u32 asset id. Reimplemented here rather than shared with securityService so
-// the layout is pinned by this module's own tests.
+// u32 asset id. Deliberately reimplemented here rather than taken from
+// chainPrimitives, so the layout stays pinned by this module's own tests.
 
 const u32Le = (n: number): Uint8Array => new Uint8Array([n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff])
 const twox64Concat = (b: Uint8Array): Uint8Array => u8aConcat(xxhashAsU8a(b, 64), b)
@@ -288,13 +266,6 @@ export function decodeU128Le(hex: string | null | undefined): bigint | null {
   let n = 0n
   for (let i = 15; i >= 0; i--) n = (n << 8n) | BigInt(bytes[i])
   return n
-}
-
-export function decodeU32Le(hex: string | null | undefined): number | null {
-  if (!hex) return null
-  const bytes = hexToBytes(hex)
-  if (bytes.length < 4) return null
-  return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0
 }
 
 // ─────────────────────── EVM call encoding ───────────────────────
@@ -381,15 +352,6 @@ export function decodeGetPeer(result: string | null | undefined): NttPeer | null
   const address = '0x' + body.slice(0, 64)
   if (/^0x0+$/.test(address)) return null
   return { address, decimals: Number(BigInt('0x' + body.slice(64, 128))) }
-}
-
-// Hydration's per-asset ERC-20 precompile is 0x…0001 followed by the 4-byte
-// big-endian asset id, so an NTT payload's sourceToken names the registry asset
-// directly.
-export function assetIdFromPrecompile(token: string): number | null {
-  const body = stripHex(token).padStart(64, '0')
-  if (!/^0{55}1[0-9a-f]{8}$/.test(body)) return null
-  return Number.parseInt(body.slice(-8), 16)
 }
 
 // ─────────────────────── registry `wh` location ───────────────────────

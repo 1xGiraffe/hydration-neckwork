@@ -251,7 +251,10 @@ describe('loadContractRegistry + accessors', () => {
           if (query.includes('evm_contract_log_stats')) {
             return [{ address: HOLLAR, c: 900, first_ts: '2024-01-01 00:00:00', last_ts: '2024-05-15 00:00:00', first_block: 100 }]
           }
-          if (query.includes('DeployerAdded')) return []
+          // The deployer allow-list rides the rare-event ledger, which names its
+          // family in a query parameter and asks the head for its settled floor.
+          if (query.includes('max(block_height)')) return [{ h: 1_000 }]
+          if (query.includes('AS who')) return []
           throw new Error(`Unexpected query: ${query}`)
         },
       }),

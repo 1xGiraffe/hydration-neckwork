@@ -1,7 +1,9 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { SUBSTRATE_RPC_URL, substrateStorageBatch } from './substrateRpc.ts'
 import { cachedSwr } from './cache.ts'
-import { accountRef, ensurePrices, nttMinterAccounts, nttMinterH160, ocnChainName, usdValue, WORMHOLE_CHAIN_URNS, type PriceInfo } from './explorerService.ts'
+import { accountRef, ensurePrices, nttMinterAccounts, nttMinterH160, ocnChainName, WORMHOLE_CHAIN_URNS, type PriceInfo } from './explorerService.ts'
+import { usdOfRaw } from './assetValue.ts'
+import { erc20Precompile } from './chainPrimitives.ts'
 import { assetDescriptor } from './explorerAssets.ts'
 import {
   base58Encode,
@@ -1048,10 +1050,6 @@ async function readLocalFuses(assets: readonly DiscoveredAsset[]): Promise<Map<n
 const DEAD_ADDRESS = '000000000000000000000000000000000000dead'
 // keccak256("balanceOf(address)")[:4]
 const ERC20_BALANCE_OF = '0x70a08231'
-// Hydration's per-asset ERC-20 precompile (0x…0001 + asset id), the same one
-// erc20WalletService reads: `balanceOf` works for any currency without knowing a
-// backing contract, and it resolves an H160 to its widened account id itself.
-const erc20Precompile = (assetId: number): string => '0x' + '0'.repeat(31) + '1' + assetId.toString(16).padStart(8, '0')
 
 /**
  * Per asset, the supply burned at the dead address, read AT THE PINNED BLOCK —
@@ -1899,7 +1897,7 @@ export async function getWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
 }
 
 const usdOf = (prices: Map<number, PriceInfo>, assetId: number, raw: bigint | null, decimals: number): number | null =>
-  raw == null ? null : usdValue(prices, assetId, raw.toString(), decimals)
+  usdOfRaw(prices, assetId, raw, decimals)
 
 const addUsd = (total: number | null, value: number | null): number | null => (value == null ? total : (total ?? 0) + value)
 
@@ -2164,7 +2162,7 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
   const inflight = snap.inflight.map(op => {
     const assetId = op.assetId != null ? Number(op.assetId) : null
     const asset = assetId != null ? assetById.get(assetId) : null
-    const amountUsd = asset && op.amount != null ? usdValue(prices, asset.assetId, op.amount, asset.decimals) : null
+    const amountUsd = asset ? usdOfRaw(prices, asset.assetId, op.amount, asset.decimals) : null
     if (amountUsd != null) inflightUsd = (inflightUsd ?? 0) + amountUsd
     return { ...op, amountUsd }
   })

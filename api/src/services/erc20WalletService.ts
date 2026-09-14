@@ -1,6 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { SUBSTRATE_RPC_URL } from './substrateRpc.ts'
 import { reservedH160AccountId } from './addressIdentity.ts'
+import { erc20Precompile } from './chainPrimitives.ts'
 
 // ERC-20-backed wallet assets: registry assets whose balances live (partly) in
 // EVM contract storage rather than the Tokens pallet, so the indexed balance
@@ -16,9 +17,6 @@ export const ERC20_WALLET_ASSETS: { assetId: number; contract: string }[] = [
 ]
 export const ERC20_WALLET_ASSET_IDS = ERC20_WALLET_ASSETS.map(a => a.assetId)
 
-// Hydration's per-asset ERC-20 precompile (0x…0001 + asset id) — balanceOf
-// works for any currency without knowing the backing contract.
-const erc20Precompile = (assetId: number) => '0x' + '0'.repeat(31) + '1' + assetId.toString(16).padStart(8, '0')
 const ERC20_BALANCE_OF = '70a08231' // keccak256("balanceOf(address)")[:4]
 
 let client: ClickHouseClient
@@ -62,9 +60,20 @@ export function walletBalanceRows(
   previousNonZeroAccounts: string[],
 ): { account_id: string; asset_id: string; total: string }[] {
   const asset_id = String(assetId)
-  const rows = h160s
-    .filter(h => balances.has(h))
-    .map(h => ({ account_id: anchorOf(h), asset_id, total: balances.get(h)!.toString() }))
+  // Folded by ANCHOR, not emitted per H160: several EVM addresses can resolve
+  // through account_alias_directory onto one substrate account, and
+  // erc20_wallet_balances replaces on (asset_id, account_id) with an `updated_at`
+  // DEFAULT those rows would SHARE — so two rows under one key keep whichever
+  // the merge picks and silently drop the other balance. Summing first makes the
+  // emitted set key-unique by construction.
+  const totals = new Map<string, bigint>()
+  for (const h of h160s) {
+    const balance = balances.get(h)
+    if (balance == null) continue
+    const account_id = anchorOf(h)
+    totals.set(account_id, (totals.get(account_id) ?? 0n) + balance)
+  }
+  const rows = [...totals].map(([account_id, total]) => ({ account_id, asset_id, total: total.toString() }))
   const current = new Set(h160s.map(anchorOf))
   for (const account_id of previousNonZeroAccounts) {
     if (!current.has(account_id)) rows.push({ account_id, asset_id, total: '0' })

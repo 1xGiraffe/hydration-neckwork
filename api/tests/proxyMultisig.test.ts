@@ -118,7 +118,10 @@ describe('the pure-proxy refresh extracts its fields in SQL', () => {
   const occurrences = (text: string, needle: string): number => text.split(needle).length - 1
 
   it('selects the decoded columns and never the payload', () => {
-    const at = proxyMultisigService.indexOf('async function refreshPureProxies')
+    // The projection lives on the rare-event ledger the refresh reads from — the
+    // refresh runs every 60 seconds and the read can prune on nothing, so the
+    // family is read once and then only above a settled floor.
+    const at = proxyMultisigService.indexOf('const pureProxyLedger')
     expect(at).toBeGreaterThan(-1)
     // Comments dropped, so every count below is of code rather than of prose quoting it.
     const body = proxyMultisigService
@@ -132,7 +135,7 @@ describe('the pure-proxy refresh extracts its fields in SQL', () => {
     expect(occurrences(body, ', args_json,')).toBe(0)
     // Both event names still feed it; the projection alone decides which field carries
     // the account.
-    expect(body).toContain("event_name IN ('Proxy.PureCreated', 'Proxy.AnonymousCreated')")
+    expect(body).toContain("eventNames: ['Proxy.PureCreated', 'Proxy.AnonymousCreated']")
     // A proxy type the payload does not name is Any, as it was when TypeScript defaulted it.
     expect(body).toContain("proxyType: r.proxy_type || 'Any'")
   })

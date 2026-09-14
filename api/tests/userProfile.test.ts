@@ -63,6 +63,38 @@ describe('profiles', () => {
     expect(p.avatarVersion).toBe(3)   // continues past the last served version, not from 0
   })
 
+  // The avatar URL is served `immutable`, so the ?v= a browser has already
+  // fetched is never re-requested. If the image landed first and the version
+  // write then failed (or the process restarted between the two), user_avatars
+  // held the NEW bytes under the OLD counter and every browser that had seen the
+  // old image kept it forever. A version ahead of its blob is harmless — the URL
+  // is new, so it is re-fetched and answers with whatever is stored.
+  it('persists the bumped version BEFORE the new image', async () => {
+    await setProfileAvatar(ACC, WEBP.toString('base64'))
+
+    const order = client.inserts.map(i => i.table)
+    expect(order.indexOf('price_data.user_profiles')).toBeLessThan(order.indexOf('price_data.user_avatars'))
+    expect(insertedRows(client, 'user_profiles')[0]).toMatchObject({ account_id: ACC, avatar_version: 1 })
+  })
+
+  it('leaves the OLD image under a NEW version when the image write fails, never the reverse', async () => {
+    const failing = fakeClient()
+    const realInsert = failing.insert.bind(failing)
+    failing.insert = (async (args: { table: string; values: Record<string, unknown>[] }) => {
+      if (args.table === 'price_data.user_avatars') throw new Error('clickhouse down')
+      return realInsert(args)
+    }) as typeof failing.insert
+    initUserProfileService(failing)
+    await loadUserProfiles()
+
+    await expect(setProfileAvatar(ACC, WEBP.toString('base64'))).rejects.toThrow('clickhouse down')
+    // The version moved and no image was written: the next read is a cache MISS
+    // that serves the old bytes, not a hit that serves new bytes under an old
+    // URL.
+    expect(insertedRows(failing, 'user_profiles').at(-1)).toMatchObject({ avatar_version: 1 })
+    expect(insertedRows(failing, 'user_avatars')).toEqual([])
+  })
+
   it('validates magic bytes and size', () => {
     expect(validateAvatarBytes(PNG)).toBe('image/png')
     expect(validateAvatarBytes(WEBP)).toBe('image/webp')
