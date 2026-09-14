@@ -1,4 +1,5 @@
 import type { ToolId } from '../chart-tools/types'
+import { TrendlineIcon } from './icons'
 
 interface ChartToolbarProps {
   tool: ToolId
@@ -21,13 +22,7 @@ const TOOLS: ReadonlyArray<{ id: ToolId; title: string; icon: React.ReactNode }>
   {
     id: 'trendline',
     title: 'Trendline — drag or click two points',
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-        <line x1="7.5" y1="16.5" x2="16.5" y2="7.5" />
-        <circle cx="5.5" cy="18.5" r="2" />
-        <circle cx="18.5" cy="5.5" r="2" />
-      </svg>
-    ),
+    icon: <TrendlineIcon />,
   },
   {
     id: 'channel',

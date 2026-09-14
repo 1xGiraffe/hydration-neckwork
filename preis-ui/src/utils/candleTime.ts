@@ -10,7 +10,7 @@ const FIXED_INTERVAL_SECONDS: Record<Exclude<OHLCVInterval, '1M'>, number> = {
   '1w': 7 * 24 * 60 * 60,
 }
 
-export interface TimestampRange {
+interface TimestampRange {
   from: number
   to: number
 }

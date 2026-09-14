@@ -33,7 +33,6 @@
 :root[data-theme="dark"] {
   --bg: #030816;
   --bg-elev: #0d1525;
-  --bg-deep: #010410;
   --panel: rgba(255, 255, 255, 0.03);
   --panel-hover: rgba(255, 255, 255, 0.06);
   --border: rgba(255, 255, 255, 0.08);
@@ -48,30 +47,19 @@
   --accent-soft: rgba(229, 62, 118, 0.16);
   --accent-on: #ffffff;
 
-  --lavender: #dfb1f3;
-  --lavender-deep: #cc6ef4;
-  --lavender-soft: rgba(204, 110, 244, 0.16);
-
-  --sky: #95caff;
-  --sky-deep: #2C89E9;
-  --sky-soft: rgba(83, 164, 243, 0.14);
-
   --green: #74C742;
-  --green-deep: #45AC1F;
   --green-soft: rgba(116, 199, 66, 0.16);
 
   --red: #ff6868;
   --red-soft: rgba(255, 104, 104, 0.14);
 
   --amber: #F7BF06;
-  --amber-soft: rgba(247, 191, 6, 0.14);
 
   --kbd-bg: rgba(255, 255, 255, 0.06);
 }
 :root[data-theme="light"] {
   --bg: #EFEDEA;
   --bg-elev: #ffffff;
-  --bg-deep: #e5e1dc;
   --panel: rgba(36, 14, 50, 0.04);
   --panel-hover: rgba(36, 14, 50, 0.08);
   --border: rgba(36, 14, 50, 0.14);
@@ -86,23 +74,13 @@
   --accent-soft: rgba(229, 62, 118, 0.10);
   --accent-on: #ffffff;
 
-  --lavender: #b454da;
-  --lavender-deep: #823fa1;
-  --lavender-soft: rgba(204, 110, 244, 0.18);
-
-  --sky: #2C89E9;
-  --sky-deep: #1f5cab;
-  --sky-soft: rgba(83, 164, 243, 0.10);
-
   --green: #45AC1F;
-  --green-deep: #2e7c12;
   --green-soft: rgba(116, 199, 66, 0.16);
 
   --red: #d83b3b;
   --red-soft: rgba(216, 59, 59, 0.10);
 
   --amber: #b58800;
-  --amber-soft: rgba(247, 191, 6, 0.16);
 
   --kbd-bg: rgba(36, 14, 50, 0.06);
 }
@@ -173,7 +151,7 @@ input:focus-visible,
   line-height: 1;
 }
 
-/* Live pulse used in topbar */
+/* Live pulse behind the indexer dot — sidebar footer and mobile drawer */
 @keyframes preis-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { Asset, ApiCandle, AssetMarketStats, Period } from '../types'
+import type { Asset, ApiCandle, AssetMarketStats, OHLCVInterval, Period } from '../types'
 import { formatPrice, formatChange } from '../utils/format'
-import { crossChange } from '../utils/change'
+import { changeTone, crossChange, deriveFromCandles } from '../utils/change'
 import PairIcons from './PairIcons'
 import FavoriteStar from './FavoriteStar'
 
@@ -9,28 +9,13 @@ interface ChartHeaderProps {
   baseAsset: Asset | undefined
   quoteAsset: Asset | undefined
   candles: ApiCandle[]
+  // The candles' bucket width, which decides whether they can carry a 24h move.
+  interval: OHLCVInterval
   marketStats: AssetMarketStats[] | undefined
   period: Period
   onCyclePeriod: () => void
   isFavorite: boolean
   onToggleFavorite: () => void
-}
-
-// The last close, plus the fallback 24h change for pairs the market-stats feed
-// cannot derive one for. Candles are ascending, so the window's first bar is
-// found by walking back from the end — the loaded history can run to thousands
-// of bars after scrollback, and only the last day of it matters here.
-function deriveFromCandles(candles: ApiCandle[]): { price: number | null; change24h: number | null } {
-  if (candles.length === 0) return { price: null, change24h: null }
-  const last = candles[candles.length - 1]
-  const cutoff = last.intervalStart - 86_400
-  let first = candles.length - 1
-  while (first > 0 && candles[first - 1].intervalStart >= cutoff) first--
-  const refOpen = candles[first].open
-  return {
-    price: last.close,
-    change24h: refOpen > 0 ? (last.close - refOpen) / refOpen : null,
-  }
 }
 
 function useValueFlash(value: number | null): string {
@@ -75,8 +60,8 @@ function useValueFlash(value: number | null): string {
   return flash
 }
 
-export default function ChartHeader({ baseAsset, quoteAsset, candles, marketStats, period, onCyclePeriod, isFavorite, onToggleFavorite }: ChartHeaderProps) {
-  const fromCandles = useMemo(() => deriveFromCandles(candles), [candles])
+export default function ChartHeader({ baseAsset, quoteAsset, candles, interval, marketStats, period, onCyclePeriod, isFavorite, onToggleFavorite }: ChartHeaderProps) {
+  const fromCandles = useMemo(() => deriveFromCandles(candles, interval), [candles, interval])
 
   const baseStats = marketStats?.find(s => s.assetId === baseAsset?.assetId)
   const quoteStats = marketStats?.find(s => s.assetId === quoteAsset?.assetId)
@@ -96,7 +81,7 @@ export default function ChartHeader({ baseAsset, quoteAsset, candles, marketStat
   const quoteName = quoteAsset?.isUsdPegged ? 'USD' : (quoteAsset?.name ?? quoteSymbol)
   const subLine = baseName ? `${baseName} / ${quoteName}` : `${baseSymbol} / ${quoteName}`
   const pairLabel = quoteAsset?.isUsdPegged ? baseSymbol : (baseSymbol + quoteSymbol)
-  const changeCls = changeForPeriod == null ? 'flat' : changeForPeriod >= 0 ? 'up' : 'down'
+  const changeCls = changeTone(changeForPeriod)
 
   return (
     <>

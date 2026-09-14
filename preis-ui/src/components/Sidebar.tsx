@@ -2,8 +2,10 @@ import { useMemo, type KeyboardEvent } from 'react'
 import type { Asset, AssetMarketStats, Period } from '../types'
 import PairIcons from './PairIcons'
 import { formatPrice, formatChange } from '../utils/format'
-import { changeForPeriod, crossChange } from '../utils/change'
+import { changeForPeriod, changeTone, crossChange } from '../utils/change'
+import { useStatsById } from '../hooks/useStatsById'
 import { displayLabel, pairDisplay } from '../utils/pairs'
+import FavoriteStar from './FavoriteStar'
 
 const TOP_N = 8
 const MIN_MOVER_VOLUME_USD = 1_000
@@ -28,13 +30,6 @@ interface SidebarProps {
 interface Row {
   asset: Asset
   stats: AssetMarketStats
-}
-
-function changeClass(c: number | null): 'up' | 'down' | 'flat' {
-  if (c === null) return 'flat'
-  if (c > 0) return 'up'
-  if (c < 0) return 'down'
-  return 'flat'
 }
 
 function activateOnKeyboard(event: KeyboardEvent<HTMLElement>, activate: () => void) {
@@ -86,7 +81,7 @@ function RankedMarketsSection({ title, rows, quote, currentBaseId, currentQuoteI
               {quote && <PairIcons base={asset} quote={quote} isUsdPair size={22} />}
               <div className="m-sym">{label}<small>{asset.name ?? ''}</small></div>
               <div className="m-price">{stats.price != null ? formatPrice(stats.price, false) : '—'}</div>
-              <div className={'m-meta ' + changeClass(change)}>{formatChange(change)}</div>
+              <div className={'m-meta ' + changeTone(change)}>{formatChange(change)}</div>
             </div>
           )
         })}
@@ -110,11 +105,7 @@ export default function Sidebar({
 }: SidebarProps) {
   const usdt = useMemo(() => assets.find(a => a.assetId === 10), [assets])
   const assetsById = useMemo(() => new Map(assets.map(a => [a.assetId, a])), [assets])
-  const statsById = useMemo(() => {
-    const m = new Map<number, AssetMarketStats>()
-    if (marketStats) for (const s of marketStats) m.set(s.assetId, s)
-    return m
-  }, [marketStats])
+  const statsById = useStatsById(marketStats)
 
   const rows: Row[] = useMemo(() => {
     if (!marketStats || !usdt) return []
@@ -234,7 +225,7 @@ export default function Sidebar({
           {favoriteRows.length === 0 ? (
             <div className="fav-empty">
               Tap the <span aria-hidden="true" style={{ verticalAlign: '-2px', display: 'inline-block', margin: '0 4px' }}>
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2.5l2.96 6.36 7.04.71-5.2 4.75 1.42 6.93L12 17.77l-6.22 3.48 1.42-6.93L2 9.57l7.04-.71L12 2.5z"/></svg>
+                <FavoriteStar selected={false} size={11} />
               </span> on any pair to add it here.
             </div>
           ) : (
@@ -258,7 +249,7 @@ export default function Sidebar({
                       {label}<small>{base.name ?? base.symbol}</small>
                     </div>
                     <div className="m-price">{price != null ? formatPrice(price, isUsdPair) : '—'}</div>
-                    <div className={'m-meta ' + changeClass(change)}>{formatChange(change)}</div>
+                    <div className={'m-meta ' + changeTone(change)}>{formatChange(change)}</div>
                   </div>
                 )
               })}

@@ -1,4 +1,4 @@
-import React, { useId } from 'react'
+import React, { useId, useMemo } from 'react'
 
 interface SparklineProps {
   data: number[]
@@ -24,6 +24,14 @@ function SparklineInner({ data, change7d, width = 80, height = 28 }: SparklinePr
   const id = useId()
   const gradientId = 'spark-' + id
 
+  // A picker row list runs to a hundred of these, so the point string is built
+  // once per series rather than on every render of the list around it. It has
+  // to be computed above the empty-series bail-out to stay a hook.
+  const linePoints = useMemo(
+    () => (data.length < 2 ? '' : buildPoints(data, width, height)),
+    [data, width, height],
+  )
+
   if (data.length < 2) {
     return null
   }
@@ -42,7 +50,6 @@ function SparklineInner({ data, change7d, width = 80, height = 28 }: SparklinePr
     color = 'var(--red)'
     fillOpacity = 0.4
   }
-  const linePoints = buildPoints(data, width, height)
   const fillPoints = `${linePoints} ${width},${height} 0,${height}`
 
   return (

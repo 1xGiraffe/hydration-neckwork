@@ -27,7 +27,10 @@ function formatTinyPrice(price: number): string {
 // through here so one asset never reads at two precisions across surfaces.
 export function formatPrice(price: number, usd = true): string {
   const prefix = usd ? '$' : ''
-  if (!Number.isFinite(price) || price <= 0) return prefix + '0'
+  // An unknown price is not a zero one: NaN and Infinity read as the em dash
+  // every other formatter here uses, so a broken feed cannot render as free.
+  if (!Number.isFinite(price)) return '—'
+  if (price <= 0) return prefix + '0'
   if (price >= 1000) return prefix + price.toLocaleString('en-US', { maximumFractionDigits: 0 })
   if (price >= 100) return prefix + price.toFixed(1)
   if (price >= 1) return prefix + price.toFixed(2)
@@ -35,6 +38,12 @@ export function formatPrice(price: number, usd = true): string {
   if (price >= 0.001) return prefix + price.toPrecision(4).replace(/\.?0+$/, '')
   // < 0.001 — too many leading zeros to be scannable; collapse into subscript notation
   return prefix + formatTinyPrice(price)
+}
+
+/** A price delta, whose sign is the point — same ladder as the price itself. */
+export function formatSignedPrice(value: number): string {
+  if (!Number.isFinite(value)) return '—'
+  return (value >= 0 ? '+' : '-') + formatPrice(Math.abs(value), false)
 }
 
 // ~3 significant digits with trailing zeros trimmed: 4.87 · 40 · 112 · 537.

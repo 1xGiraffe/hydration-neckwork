@@ -21,16 +21,7 @@ async function mockApi(page: Page) {
       : path === '/market-stats'
         ? marketStats
         : path === '/indexer'
-          ? {
-              blockHeight: 1,
-              blockTimestamp: '2026-07-11 12:00:00',
-              lagSeconds: 0,
-              chainBlockHeight: 1,
-              blocksBehindHead: 0,
-              rawFinalizedRangeCount: 1,
-              rawFinalizedFromBlock: 1,
-              rawFinalizedToBlock: 1,
-            }
+          ? { blockHeight: 1, lagSeconds: 0 }
           : []
 
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
