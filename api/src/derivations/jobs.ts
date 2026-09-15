@@ -1191,6 +1191,7 @@ import {
   assetReserveMintsSql,
   distributeUsd1e12,
 } from '../services/borrowAttribution.ts'
+import { uniswapV3FeePayersSql, uniswapV3RealizationsSql } from '../services/uniswapV3Attribution.ts'
 import { HOLLAR_RESERVE_ADDRESS, PROTOCOL_REVENUE_PREDICATE_SQL } from '../services/revenueStreams.ts'
 import { scaledUsd } from '../services/valuation.ts'
 
@@ -1253,7 +1254,7 @@ export function accountRevenueEventfulInsertSql(partition: string, target = `${A
 SELECT account, stream, toUInt32(${partition}) AS month, sum(amount_usd) AS revenue_usd
 FROM ${REVENUE_EVENTS_TABLE}
 WHERE toYYYYMM(block_timestamp) = ${partition}
-  AND stream NOT IN ('hollar_borrow', 'asset_reserve')
+  AND stream NOT IN ('hollar_borrow', 'asset_reserve', 'uniswap_v3_fee')
   AND ${PROTOCOL_REVENUE_PREDICATE_SQL}
 GROUP BY account, stream`
 }
@@ -1263,6 +1264,7 @@ const accountRevenueRebuilt = new Map<string, string>()
 
 interface WeightRow { account: string; interest: string }
 interface MintRow { reserve: string; block_height: number; event_index: number; mint_ts: string; prev_ts: string }
+interface V3RealizationRow { pool: string; asset_id: number; usd: string; ts: string; prev_ts: string }
 
 async function borrowWeights(
   client: ClickHouseClient,
@@ -1332,6 +1334,36 @@ export async function runAccountRevenue(client: ClickHouseClient): Promise<Deriv
           const k = key(account, 'asset_reserve')
           attributed.set(k, (attributed.get(k) ?? 0n) + share)
         }
+      }
+    }
+
+    // Uniswap v3 protocol fees, split over the swappers whose fees accrued them.
+    // The lump is realized by the factory owner (a CollectProtocol) or by a Gamma
+    // vault paying the Treasury, neither of which is the payer — see
+    // services/uniswapV3Attribution.ts.
+    const realizationsRes = await client.query({
+      query: uniswapV3RealizationsSql(),
+      query_params: { partition: Number(p) },
+      format: 'JSONEachRow',
+    })
+    for (const realization of await realizationsRes.json<V3RealizationRow>()) {
+      const usd = scaledUsd(realization.usd)
+      if (usd <= 0n) continue
+      const payersRes = await client.query({
+        query: uniswapV3FeePayersSql(),
+        query_params: {
+          pool: realization.pool,
+          asset: Number(realization.asset_id),
+          start: realization.prev_ts,
+          end: realization.ts,
+        },
+        format: 'JSONEachRow',
+      })
+      const weights = (await payersRes.json<{ account: string; weight: string }>())
+        .map(row => ({ account: row.account, weight: BigInt(row.weight) }))
+      for (const [account, share] of distributeUsd1e12(usd, weights)) {
+        const k = key(account, 'uniswap_v3_fee')
+        attributed.set(k, (attributed.get(k) ?? 0n) + share)
       }
     }
 
