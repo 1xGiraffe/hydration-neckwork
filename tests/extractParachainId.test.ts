@@ -137,6 +137,14 @@ describe('extractAssetOrigin', () => {
       .toEqual({ ecosystem: 'ethereum', chainId: '8453', assetId: '0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42' })
   })
 
+  // Robinhood Chain: Wormhole 72 (its core bridge's own chainId()), EVM 4663.
+  // Without the mapping a Robinhood-issued asset resolves no origin at all, so it
+  // gets no ecosystem, no chain id and no icon.
+  it('maps Wormhole 72 to Robinhood Chain’s own EVM chain id', () => {
+    expect(extractAssetOrigin(wormholeLocation(72n, '0x00000000000000000000000060a3e35cc302bfa44cb288bc5a4f316fdb1adb42')))
+      .toEqual({ ecosystem: 'ethereum', chainId: '4663', assetId: '0x60a3e35cc302bfa44cb288bc5a4f316fdb1adb42' })
+  })
+
   it('extracts a Solana origin with the mint in its canonical base58 form', () => {
     expect(extractAssetOrigin(wormholeLocation(1n, '0xfcd141e9832caf10ad917495ca0f271b5b293cd47027ea737007ed40eb39a0bd')))
       .toEqual({ ecosystem: 'solana', chainId: '101', assetId: 'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn' })

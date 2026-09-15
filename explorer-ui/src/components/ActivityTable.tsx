@@ -55,6 +55,7 @@ export function HydrationBadge() {
 const EXPLORER_SITES: [string, string][] = [
   ['optimistic.etherscan.io', 'Etherscan'],
   ['solscan.io', 'Solscan'],
+  ['robinscan.io', 'Robinscan'],
   ['etherscan.io', 'Etherscan'],
   ['basescan.org', 'Basescan'],
   ['arbiscan.io', 'Arbiscan'],
