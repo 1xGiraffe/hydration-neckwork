@@ -18,13 +18,42 @@ export const INTENT_STATUSES: readonly IntentStatus[] = ['open', 'partially_fill
 export const INTENT_KINDS: readonly IntentKind[] = ['swap', 'dca']
 
 // The partial-resolution event is spelled `IntentResovedPartially` on chain (sic).
+const SUBMITTED_EVENT = 'Intent.IntentSubmitted'
 const CANCELLED_EVENT = 'Intent.IntentCanceled'
 const EXPIRED_EVENT = 'Intent.IntentExpired'
 const RESOLVED_EVENT = 'Intent.IntentResolved'
 const PARTIAL_EVENT = 'Intent.IntentResovedPartially'
 const DCA_TRADE_EVENT = 'Intent.DcaTradeExecuted'
 const DCA_COMPLETED_EVENT = 'Intent.DcaCompleted'
+const CALLBACK_FAILED_EVENT = 'Intent.FailedToQueueCallback'
 const FILL_EVENTS = [RESOLVED_EVENT, PARTIAL_EVENT, DCA_TRADE_EVENT, DCA_COMPLETED_EVENT] as const
+
+/**
+ * The whole vocabulary of an intent's life, and the wire kind each event takes.
+ *
+ * Both the event page and its count filter on these names, so the two cannot
+ * disagree: a count that included an event the page drops would report a page
+ * the caller can never reach.
+ */
+export const INTENT_EVENT_KIND = {
+  [SUBMITTED_EVENT]: 'submitted',
+  [RESOLVED_EVENT]: 'resolved',
+  [PARTIAL_EVENT]: 'partially_resolved',
+  [DCA_TRADE_EVENT]: 'dca_trade',
+  [DCA_COMPLETED_EVENT]: 'dca_completed',
+  [CANCELLED_EVENT]: 'cancelled',
+  [EXPIRED_EVENT]: 'expired',
+  [CALLBACK_FAILED_EVENT]: 'callback_failed',
+} as const satisfies Record<string, string>
+
+export type IntentEventKind = typeof INTENT_EVENT_KIND[keyof typeof INTENT_EVENT_KIND]
+
+export const INTENT_EVENT_KINDS: readonly IntentEventKind[] = [
+  'submitted', 'resolved', 'partially_resolved', 'dca_trade',
+  'dca_completed', 'cancelled', 'expired', 'callback_failed',
+]
+
+const INTENT_EVENT_NAMES = Object.keys(INTENT_EVENT_KIND)
 
 /**
  * 9999-12-31T23:59:59.999Z, the last instant `zIsoTimestamp` accepts.
@@ -206,6 +235,70 @@ export function oldestOrderBlock(rows: ReadonlyArray<{ block_height: number | st
   return oldest
 }
 
+/**
+ * One placement plus the fold over its own events, as the wire publishes it.
+ *
+ * The listing and the per-id route both build their row HERE rather than each
+ * restating the arithmetic: a progress page reached from a list must not
+ * contradict the list it came from, and status, `remainingAmountIn` and
+ * `remainingBudget` are exactly the fields two implementations would drift on.
+ */
+function intentRow(raw: OrderSqlRow, agg: AggregateSqlRow | undefined): IntentRow {
+  const kind: IntentKind = raw.kind === 'dca' ? 'dca' : 'swap'
+  const status = computeIntentStatus({
+    kind,
+    hasCancelled: positive(agg?.cancelled),
+    hasExpired: positive(agg?.expired),
+    hasResolved: positive(agg?.resolved),
+    hasPartial: positive(agg?.partial),
+    hasDcaCompleted: positive(agg?.dca_completed),
+  })
+  const fillIn = agg?.fill_in ?? '0'
+  const deadlineMs = Number(raw.deadline_ms)
+  // A dca intent's whole commitment is its budget; a swap intent's is the one
+  // amount it placed. Both shrink by what the fills have taken.
+  const committed = kind === 'dca' && raw.budget ? raw.budget : raw.amount_in
+  return {
+    intentId: String(raw.intent_id),
+    // Exact below 2^53; above it a rounded display handle, never a key.
+    seq: Number(raw.seq),
+    owner: raw.owner,
+    kind,
+    assetIn: String(raw.asset_in),
+    assetOut: String(raw.asset_out),
+    amountIn: raw.amount_in,
+    amountOut: raw.amount_out,
+    partiallyFillable: Number(raw.partial) === 1,
+    slippagePpm: Number(raw.slippage_ppm),
+    budget: kind === 'dca' ? (raw.budget || '0') : null,
+    // A dca intent with no budget is the pallet's rolling re-reserve: it keeps
+    // spending whatever the owner holds, the same shape a schedule's
+    // total_amount = 0 has.
+    isRollingBudget: kind === 'dca' ? !raw.budget : null,
+    periodBlocks: kind === 'dca' && Number(raw.period) > 0 ? Number(raw.period) : null,
+    status,
+    filledAmountIn: fillIn,
+    filledAmountOut: agg?.fill_out ?? '0',
+    fillCount: Number(agg?.fills ?? 0),
+    remainingAmountIn: restingLeg(committed, fillIn),
+    remainingBudget: kind !== 'dca' ? null
+      : positive(agg?.dca_completed) ? '0'
+        : amount(agg?.last_rb),
+    deadline: deadlineMs > 0 && deadlineMs <= MAX_TIMESTAMP_MS ? iso(new Date(deadlineMs)) : null,
+    createdAt: iso(raw.ts),
+    createdAtBlock: Number(raw.block_height),
+    lastEventAt: agg?.last_ts ? iso(agg.last_ts) : null,
+  }
+}
+
+const ORDER_COLUMNS_SQL = `
+        toString(intent_id) AS intent_id, seq, owner, kind, asset_in, asset_out,
+        amount_in, amount_out, partial, slippage_ppm, budget, period, deadline_ms,
+        block_height, toString(block_timestamp) AS ts`
+const ORDER_INNER_COLUMNS_SQL = `
+          intent_id, seq, owner, kind, asset_in, asset_out, amount_in, amount_out,
+          partial, slippage_ppm, budget, period, deadline_ms, block_height, block_timestamp`
+
 export interface IntentOrdersOptions {
   owner: string
   statuses: IntentStatus[]
@@ -230,12 +323,9 @@ export async function queryIntentOrders(
     // deduplicated again below, because that — not (owner, block, event) — is
     // the identity the wire promises one row per.
     query: `
-        SELECT toString(intent_id) AS intent_id, seq, owner, kind, asset_in, asset_out,
-               amount_in, amount_out, partial, slippage_ppm, budget, period, deadline_ms,
-               block_height, toString(block_timestamp) AS ts
+        SELECT ${ORDER_COLUMNS_SQL}
         FROM (
-          SELECT intent_id, seq, owner, kind, asset_in, asset_out, amount_in, amount_out,
-                 partial, slippage_ppm, budget, period, deadline_ms, block_height, block_timestamp
+          SELECT ${ORDER_INNER_COLUMNS_SQL}
           FROM price_data.intent_orders_by_account FINAL
           WHERE owner IN {accounts:Array(String)}
         )`,
@@ -264,52 +354,9 @@ export async function queryIntentOrders(
     if (assets.size && !assets.has(Number(raw.asset_in)) && !assets.has(Number(raw.asset_out))) continue
     const kind: IntentKind = raw.kind === 'dca' ? 'dca' : 'swap'
     if (wantedKind.size && !wantedKind.has(kind)) continue
-    const agg = aggregates.get(String(raw.intent_id))
-    const status = computeIntentStatus({
-      kind,
-      hasCancelled: positive(agg?.cancelled),
-      hasExpired: positive(agg?.expired),
-      hasResolved: positive(agg?.resolved),
-      hasPartial: positive(agg?.partial),
-      hasDcaCompleted: positive(agg?.dca_completed),
-    })
-    if (wantedStatus.size && !wantedStatus.has(status)) continue
-    const fillIn = agg?.fill_in ?? '0'
-    const deadlineMs = Number(raw.deadline_ms)
-    // A dca intent's whole commitment is its budget; a swap intent's is the one
-    // amount it placed. Both shrink by what the fills have taken.
-    const committed = kind === 'dca' && raw.budget ? raw.budget : raw.amount_in
-    rows.push({
-      intentId: String(raw.intent_id),
-      // Exact below 2^53; above it a rounded display handle, never a key.
-      seq: Number(raw.seq),
-      owner: raw.owner,
-      kind,
-      assetIn: String(raw.asset_in),
-      assetOut: String(raw.asset_out),
-      amountIn: raw.amount_in,
-      amountOut: raw.amount_out,
-      partiallyFillable: Number(raw.partial) === 1,
-      slippagePpm: Number(raw.slippage_ppm),
-      budget: kind === 'dca' ? (raw.budget || '0') : null,
-      // A dca intent with no budget is the pallet's rolling re-reserve: it keeps
-      // spending whatever the owner holds, the same shape a schedule's
-      // total_amount = 0 has.
-      isRollingBudget: kind === 'dca' ? !raw.budget : null,
-      periodBlocks: kind === 'dca' && Number(raw.period) > 0 ? Number(raw.period) : null,
-      status,
-      filledAmountIn: fillIn,
-      filledAmountOut: agg?.fill_out ?? '0',
-      fillCount: Number(agg?.fills ?? 0),
-      remainingAmountIn: restingLeg(committed, fillIn),
-      remainingBudget: kind !== 'dca' ? null
-        : positive(agg?.dca_completed) ? '0'
-          : amount(agg?.last_rb),
-      deadline: deadlineMs > 0 && deadlineMs <= MAX_TIMESTAMP_MS ? iso(new Date(deadlineMs)) : null,
-      createdAt: iso(raw.ts),
-      createdAtBlock: Number(raw.block_height),
-      lastEventAt: agg?.last_ts ? iso(agg.last_ts) : null,
-    })
+    const row = intentRow(raw, aggregates.get(String(raw.intent_id)))
+    if (wantedStatus.size && !wantedStatus.has(row.status)) continue
+    rows.push(row)
   }
   // Most recent activity first, a never-touched order by its submission; ties by
   // id so a page boundary is deterministic.
@@ -317,4 +364,144 @@ export async function queryIntentOrders(
     Date.parse(b.lastEventAt ?? b.createdAt) - Date.parse(a.lastEventAt ?? a.createdAt)
     || (a.intentId < b.intentId ? 1 : a.intentId > b.intentId ? -1 : 0))
   return { items: rows.slice(options.offset, options.offset + options.limit), totalCount: rows.length }
+}
+
+// ---------------------------------------------------------------------------
+// One order, by its id
+// ---------------------------------------------------------------------------
+
+// Unlike the listing, a per-id read needs no owner: the id alone bounds both
+// tables. `intent_orders` is ORDER BY intent_id, so the placement is a point
+// read there (the owner-first twin could not prune on an id at all), and the
+// placement block it returns is what turns the event read into a key range —
+// `intent_events` is keyed (block_height, event_index) and no event of an order
+// can precede its submission.
+async function intentOrderRow(client: ClickHouseClient, intentId: string): Promise<OrderSqlRow | null> {
+  const res = await client.query({
+    // `toString(intent_id) AS intent_id` may not sit in a statement that also
+    // filters on `intent_id`: ClickHouse resolves the later reference to the
+    // alias and would compare a string to a u128. Hence the outer cast.
+    query: `-- pub:intents:order-by-id
+        SELECT ${ORDER_COLUMNS_SQL}
+        FROM (
+          SELECT ${ORDER_INNER_COLUMNS_SQL}
+          FROM price_data.intent_orders FINAL
+          WHERE intent_id = toUInt128({id:String})
+          LIMIT 1
+        )`,
+    query_params: { id: intentId },
+    format: 'JSONEachRow',
+  })
+  const [row] = await res.json<OrderSqlRow>()
+  return row ?? null
+}
+
+/** One intent with the same folded progress the listing reports for it. */
+export async function queryIntentOrderById(client: ClickHouseClient, intentId: string): Promise<IntentRow | null> {
+  const raw = await intentOrderRow(client, intentId)
+  if (!raw) return null
+  const aggregates = await intentEventAggregates(client, [String(raw.intent_id)], Number(raw.block_height))
+  return intentRow(raw, aggregates.get(String(raw.intent_id)))
+}
+
+export interface IntentEventRow {
+  kind: IntentEventKind
+  eventName: string
+  blockHeight: number
+  eventIndex: number
+  /** Fills happen inside the UNSIGNED ICE.submit_solution: an extrinsic, never a signer. */
+  extrinsicIndex: number | null
+  timestamp: string
+  amountIn: string | null
+  amountOut: string | null
+  remainingBudget: string | null
+}
+
+export interface IntentEventsPage {
+  items: IntentEventRow[]
+  totalCount: number
+  /** The order's pair. Only the submission names it, and it labels every amount. */
+  assetIn: string
+  assetOut: string
+}
+
+interface EventSqlRow {
+  event_name: string
+  block_height: number
+  event_index: number
+  extrinsic_index: number | null
+  ts: string
+  amount_in: string
+  amount_out: string
+  remaining_budget: string
+}
+
+function intentEventRow(row: EventSqlRow): IntentEventRow {
+  const kind = INTENT_EVENT_KIND[row.event_name as keyof typeof INTENT_EVENT_KIND]
+  return {
+    kind,
+    eventName: row.event_name,
+    blockHeight: Number(row.block_height),
+    eventIndex: Number(row.event_index),
+    extrinsicIndex: row.extrinsic_index == null ? null : Number(row.extrinsic_index),
+    timestamp: iso(row.ts),
+    // A submission, cancellation or expiry traded nothing, so its amounts are
+    // absent rather than a zero standing in for one.
+    amountIn: amount(row.amount_in),
+    amountOut: amount(row.amount_out),
+    // Only a dca trade carries a budget figure. The completion carries none —
+    // the trade that exhausts a budget states its amounts in the solution's
+    // settlement transfers — so the fold states the zero its name asserts.
+    remainingBudget: kind === 'dca_trade' ? amount(row.remaining_budget)
+      : kind === 'dca_completed' ? '0'
+        : null,
+  }
+}
+
+/** One order's lifecycle events, newest first. Null when the id was never submitted. */
+export async function queryIntentEvents(
+  client: ClickHouseClient,
+  intentId: string,
+  options: { limit: number; offset: number },
+): Promise<IntentEventsPage | null> {
+  const order = await intentOrderRow(client, intentId)
+  if (!order) return null
+  const window = { id: intentId, from: Number(order.block_height), names: INTENT_EVENT_NAMES }
+  const [pageRes, totalRes] = await Promise.all([
+    client.query({
+      // LIMIT 1 BY the table's own replacement key, then page: a replayed range
+      // must not shift a page by a duplicate row.
+      query: `-- pub:intents:events
+          SELECT event_name, block_height, event_index, extrinsic_index,
+                 toString(block_timestamp) AS ts, amount_in, amount_out, remaining_budget
+          FROM (
+            SELECT event_name, block_height, event_index, extrinsic_index, block_timestamp,
+                   amount_in, amount_out, remaining_budget
+            FROM price_data.intent_events
+            WHERE block_height >= {from:UInt32} AND intent_id = toUInt128({id:String})
+              AND event_name IN {names:Array(String)}
+            LIMIT 1 BY block_height, event_index
+          )
+          ORDER BY block_height DESC, event_index DESC
+          LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+      query_params: { ...window, limit: options.limit, offset: options.offset },
+      format: 'JSONEachRow',
+    }),
+    client.query({
+      query: `-- pub:intents:events-count
+          SELECT toString(uniqExact((block_height, event_index))) AS total
+          FROM price_data.intent_events
+          WHERE block_height >= {from:UInt32} AND intent_id = toUInt128({id:String})
+            AND event_name IN {names:Array(String)}`,
+      query_params: window,
+      format: 'JSONEachRow',
+    }),
+  ])
+  const [totals] = await totalRes.json<{ total: string }>()
+  return {
+    items: (await pageRes.json<EventSqlRow>()).map(intentEventRow),
+    totalCount: Number(totals?.total ?? 0),
+    assetIn: String(order.asset_in),
+    assetOut: String(order.asset_out),
+  }
 }

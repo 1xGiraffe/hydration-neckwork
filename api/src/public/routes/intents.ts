@@ -3,9 +3,12 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { csv, zAssetId, zHexAddress, zIsoTimestamp, zLimitOffset, zPage } from '../schemas/common.ts'
+import { csv, notFound, zAssetId, zHexAddress, zIsoTimestamp, zLimitOffset, zPage } from '../schemas/common.ts'
 import type { IntentKind, IntentStatus } from '../services/intentOrders.ts'
-import { INTENT_KINDS, INTENT_STATUSES, queryIntentOrders } from '../services/intentOrders.ts'
+import {
+  INTENT_EVENT_KINDS, INTENT_KINDS, INTENT_STATUSES,
+  queryIntentEvents, queryIntentOrderById, queryIntentOrders,
+} from '../services/intentOrders.ts'
 
 // ICE intents (runtime 443's limit orders and DCA intents). See spec section
 // "Trades / DCA".
@@ -39,6 +42,24 @@ const zIntentRow = z.object({
   createdAtBlock: z.number().int(),
   lastEventAt: zIsoTimestamp.nullable(),
 })
+
+const zIntentEventRow = z.object({
+  kind: z.enum(INTENT_EVENT_KINDS as [string, ...string[]]),
+  eventName: z.string().describe('The runtime event. `Intent.IntentResovedPartially` is spelled that way on chain (sic).'),
+  blockHeight: z.number().int(),
+  eventIndex: z.number().int(),
+  extrinsicIndex: z.number().int().nullable().describe('Fills happen inside the UNSIGNED ICE.submit_solution, so a fill names an extrinsic but never a signer.'),
+  timestamp: zIsoTimestamp,
+  amountIn: z.string().nullable(),
+  amountOut: z.string().nullable(),
+  remainingBudget: z.string().nullable(),
+})
+
+// A u128 in decimal is at most 39 digits. Bounded at the edge so a caller's typo
+// reads as a 400 rather than a ClickHouse parse failure surfacing as a 500.
+const zIntentId = z.string()
+  .regex(/^\d{1,39}$/, 'expected a decimal intent id')
+  .refine(id => BigInt(id) <= 2n ** 128n - 1n, 'intent id exceeds u128')
 
 const zIntentFilters = z.object({
   owner: zHexAddress.describe('REQUIRED. The intent owner, as a lowercase hex account id.'),
@@ -129,5 +150,56 @@ export const intentsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = a
     // set's size; a limit of 1 keeps the response small without changing it.
     const page = await listing(owner, parseStatuses(request.query.status), parseKinds(request.query.kind), parseAssets(request.query.assets), 1, 0)
     return { totalCount: page.totalCount }
+  })
+
+  app.get('/v1/intents/:id', {
+    schema: {
+      tags: ['dca'],
+      summary: 'One intent with its computed status and fill totals',
+      description: [
+        INTENT_DESCRIPTION,
+        'The same row GET /v1/intents publishes for this order, built by the same fold, so a progress page cannot contradict the list it was reached from. No owner is needed: the id alone bounds both reads — the placement is a point read of the id-keyed table, and its block is the lower bound of the event fold.',
+        STATUS_DESCRIPTION,
+        'A DCA intent\'s progress is `filledAmountIn` against `budget`: `amountIn` is ONE PERIOD\'s trade, never the total. Amounts are raw integers at each asset\'s own decimals, so compute the percentage in integer arithmetic rather than through a float. An unknown id is a 404.',
+      ].join('\n\n'),
+      params: z.object({ id: zIntentId }),
+      response: { 200: zIntentRow },
+    },
+  }, async request => {
+    const { id } = request.params
+    // Short-lived: an order being watched for its next fill must not lag behind
+    // a shared cache entry.
+    const found = await cached(`pub:intent:${id}`, 3_000, () => queryIntentOrderById(opts.client, id))
+    if (!found) throw notFound(`no intent ${id}`)
+    return found
+  })
+
+  app.get('/v1/intents/:id/events', {
+    schema: {
+      tags: ['dca'],
+      summary: 'Lifecycle events of one intent, newest first',
+      description: [
+        'Every event of the order\'s life, newest first: its submission, each dca trade, each full or partial resolution, its completion, cancellation or expiry, and a failed forward callback. A DCA fill table is the `dca_trade` rows; a swap intent\'s fills are `resolved` and `partially_resolved`.',
+        'Amounts are the EVENT\'s, not the order\'s, and an event that traded nothing reports them as null rather than 0 — a submission, a cancellation, an expiry, and `Intent.DcaCompleted`, whose final trade states its amounts only in the solution\'s settlement transfers. `remainingBudget` is the pallet\'s own figure after a dca trade, and "0" on the completion, which by definition spent the rest.',
+        'Only the submission names the pair, so `assetIn`/`assetOut` sit on the envelope: they label every amount in the page. An unknown id is a 404.',
+      ].join('\n\n'),
+      params: z.object({ id: zIntentId }),
+      querystring: zLimitOffset,
+      response: {
+        200: z.object({
+          items: z.array(zIntentEventRow),
+          totalCount: z.number().int().nonnegative(),
+          assetIn: zAssetId,
+          assetOut: zAssetId,
+        }),
+      },
+    },
+  }, async request => {
+    const { id } = request.params
+    const { limit, offset } = request.query
+    const page = await cached(`pub:intent-events:${id}:${limit}:${offset}`, 3_000,
+      () => queryIntentEvents(opts.client, id, { limit, offset }))
+    if (!page) throw notFound(`no intent ${id}`)
+    return page
   })
 }
