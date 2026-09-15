@@ -10787,6 +10787,20 @@ const PARACHAIN_META: Record<number, XcmNetworkMeta> = {
   3369: { name: 'Mythos', subscan: 'https://mythos.subscan.io' },
   3370: { name: 'Laos' },
 }
+// Kusama's side of a bridged journey. Its para ids are KUSAMA's, so they must never
+// be resolved against PARACHAIN_META — 1000 there is Polkadot AssetHub, and a Kusama
+// AssetHub transaction linked to it points at a chain it was never on.
+const KUSAMA_RELAY_META: XcmNetworkMeta = { name: 'Kusama', subscan: 'https://kusama.subscan.io', ss58: 2 }
+const KUSAMA_PARACHAIN_META: Record<number, XcmNetworkMeta> = {
+  1000: { name: 'Kusama AssetHub', subscan: 'https://assethub-kusama.subscan.io', ss58: 2 },
+}
+function kusamaMeta(chainId: string): XcmNetworkMeta | undefined {
+  const paraId = Number(chainId)
+  if (!Number.isFinite(paraId)) return undefined
+  if (paraId === 0) return KUSAMA_RELAY_META
+  return KUSAMA_PARACHAIN_META[paraId] ?? { name: `Kusama ${paraId}` }
+}
+
 function junctionValue<T = unknown>(j: unknown, key: string): T | undefined {
   const o = j as Record<string, unknown> | undefined
   const v = o?.[key] ?? (o?.value as Record<string, unknown> | undefined)?.[key]
@@ -12482,6 +12496,10 @@ function externalChainRef(urnStr: string, account: string, formatted?: string): 
     const acct = externalAccountRef(account, meta)
     return { chain: meta.name, paraId, account: acct && EVM_PARACHAINS.has(paraId) && acct.kind !== 'AccountKey20' ? undefined : acct }
   }
+  if (consensus === 'kusama') {
+    const meta = kusamaMeta(chainId)
+    return meta ? { chain: meta.name, paraId: null, account: externalAccountRef(account, meta) } : null
+  }
   if (consensus === 'solana') {
     let acct: ActivityRow['destAccount']
     if (h?.length === 66) {
@@ -12561,10 +12579,7 @@ export function ocnChainName(urnStr: string): string | null {
   if (consensus === 'ethereum') return EVM_CHAIN_META[chainId]?.name ?? `EVM chain ${chainId}`
   if (consensus === 'solana') return 'Solana'
   if (consensus === 'sui') return 'Sui'
-  if (consensus === 'kusama') {
-    const paraId = Number(chainId)
-    return paraId === 0 ? 'Kusama' : `Kusama ${paraId}`
-  }
+  if (consensus === 'kusama') return kusamaMeta(chainId)?.name ?? null
   return null
 }
 
@@ -12577,7 +12592,8 @@ export function originTxExplorerUrl(urnStr: string, txHash: string | null): stri
   if (consensus === 'polkadot' || consensus === 'kusama') {
     if (!isHex) return null
     const paraId = Number(chainId)
-    const meta = paraId === 0 ? RELAY_XCM_NETWORK : PARACHAIN_META[paraId]
+    const meta = consensus === 'kusama' ? kusamaMeta(chainId)
+      : paraId === 0 ? RELAY_XCM_NETWORK : PARACHAIN_META[paraId]
     return meta?.subscan ? `${meta.subscan}/extrinsic/${txHash}` : null
   }
   if (consensus === 'ethereum') {
