@@ -606,3 +606,25 @@ describe('historical journey resolution helpers', () => {
     expect(originTxExplorerUrl('urn:ocn:polkadot:2006', 'garbage')).toBeNull()
   })
 })
+
+// A Wormhole NTT arrival carries no XCM topic: its journey is correlated on the
+// VAA's own identity, `chain/emitter/sequence`, which has no 0x prefix. The topic
+// collector accepted only 0x-prefixed ids, so those journeys were fetched from
+// Ocelloids and then dropped on the floor — the row could never find its sender.
+describe('journey ids that are not topics', () => {
+  it('collects a VAA-shaped message id from a stop', async () => {
+    const { messageIdsOfStops } = await import('../src/services/xcmJourneyService.ts')
+    const vaa = '1/e97e1f562b67844adddcc4aff6a22e017596c8e612de2686a0745b6e74f196cd/53'
+    expect(messageIdsOfStops([{ messageId: vaa }])).toContain(vaa)
+    // The XCM topic form still works, lowercased as before.
+    const topic = '0x' + 'AB'.repeat(32)
+    expect(messageIdsOfStops([{ messageId: topic }])).toContain(topic.toLowerCase())
+  })
+
+  it('still rejects something that is neither', () => {
+    return import('../src/services/xcmJourneyService.ts').then(({ messageIdsOfStops }) => {
+      expect(messageIdsOfStops([{ messageId: 'not-an-id' }])).toEqual([])
+      expect(messageIdsOfStops([{ messageId: '1//53' }])).toEqual([])
+    })
+  })
+})
