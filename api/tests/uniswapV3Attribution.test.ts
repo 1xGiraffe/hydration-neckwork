@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { uniswapV3FeePayersSql, uniswapV3RealizationsSql } from '../src/services/uniswapV3Attribution.ts'
 import { accountRevenueEventfulInsertSql } from '../src/derivations/jobs.ts'
-import { TREASURY_H160 } from '../src/services/revenueStreams.ts'
+import { attributablePayerSql, TREASURY_H160 } from '../src/services/revenueStreams.ts'
 
 // A v3 protocol fee is a REALIZATION of something the swappers paid earlier: the
 // pool keeps `setFeeProtocol`'s share of every swap fee inside itself, and a
@@ -34,10 +34,30 @@ describe('uniswapV3RealizationsSql', () => {
   // unattributed. Measured before the fix: 23 of 94 realizations, carrying 90% of
   // the stream. Realizations sharing a timestamp share one window instead.
   it('gives realizations in the same block one shared window, not an empty one', () => {
-    expect(sql).toContain('SELECT DISTINCT pool, asset_id, ts')
+    expect(sql).toContain('SELECT DISTINCT pool, asset_id, kind, ts')
     // The previous realization can sit in an earlier month, so the window walks
     // every realization and only then narrows to the partition being rebuilt.
     expect(sql).toContain('{partition:UInt32}')
+  })
+
+  // The two kinds accrue on completely different clocks: a Gamma vault pays out
+  // roughly hourly on each ZeroBurn, while the pool's own protocol fee accrues from
+  // the moment setFeeProtocol turned it on until someone collects. Walking them as
+  // one series would open the first CollectProtocol's window at the last vault
+  // payout — splitting a lump accrued over 600+ swaps across the three since — and
+  // then strand the next vault payout behind it.
+  it('keeps each realization kind on its own accrual clock', () => {
+    expect(sql).toContain('PARTITION BY pool, asset_id, kind')
+    expect(sql).toMatch(/'protocol' AS kind/)
+    expect(sql).toMatch(/concat\('vault:'/)
+  })
+
+  // A protocol lump's first window cannot open at the epoch: swaps before
+  // setFeeProtocol paid no protocol fee at all, so crediting them would name payers
+  // who never paid into this stream.
+  it('opens the first protocol window where the protocol fee itself began', () => {
+    expect(sql).toContain("event_name = 'SetFeeProtocol'")
+    expect(sql).toContain('greatest(')
   })
 
   it('only splits protocol revenue that was actually booked', () => {
@@ -78,8 +98,13 @@ describe('uniswapV3FeePayersSql', () => {
   // payer: crediting it would put protocol revenue on `modlrouterex` and make the
   // router the protocol's biggest customer. Such a leg keeps its WEIGHT (the fee
   // was really paid) but carries no payer, so its share lands unattributed.
-  it('does not name a pallet account as the payer', () => {
-    expect(sql).toContain("substring(payer, 11, 8) = '6d6f646c'")
+  // Reuses the stream module's own rule rather than restating it: that one covers
+  // the native `modl…` form as well as the ETH-mapped one, plus the placeholder
+  // swapper and the HSM executor. A local substring test caught only the mapped
+  // form, so a native pallet swapper (the ICE pot routing through the pool) would
+  // still have been named a payer.
+  it('does not name a pallet account as the payer, by the shared rule', () => {
+    expect(sql).toContain(attributablePayerSql('payer'))
     expect(sql).toMatch(/AS account/)
   })
 })

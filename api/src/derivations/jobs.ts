@@ -517,7 +517,8 @@ routed AS (
     AND JSONExtractString(args_json, 'fillerType', '__kind') = 'UniswapV3'
 ),
 swaps AS (
-  SELECT e.block_height AS block_height, e.event_index AS event_index, e.extrinsic_index AS extrinsic_index, e.block_timestamp AS block_timestamp,
+  SELECT e.block_height AS block_height, e.event_index AS event_index, e.extrinsic_index AS extrinsic_index,
+         ifNull(e.extrinsic_index, 4294967295) AS ext, e.block_timestamp AS block_timestamp,
          e.contract_address AS pool, e.counterparty AS recipient, e.amount0 AS amount0, e.amount1 AS amount1,
          p.token0 AS token0, p.token1 AS token1, p.fee AS fee,
          if(t0.asset_id > 0, toUInt32(t0.asset_id), ${precompile('p.token0')}) AS asset0,
@@ -538,8 +539,8 @@ sided AS (
          toUInt256(if(amount0 > 0, amount0, amount1)) AS amount_in,
          toUInt256(abs(if(amount0 > 0, amount1, amount0))) AS amount_out,
          concat('0x45544800', substring(pool, 3, 40), '0000000000000000') AS pool_account,
-         (SELECT max(router_id) FROM routed r WHERE r.block_height = swaps.block_height AND r.ext = ifNull(swaps.extrinsic_index, 4294967295) AND r.amount_in = toString(toUInt256(if(amount0 > 0, amount0, amount1)))) AS router_id,
-         (SELECT max(swapper) FROM routed r WHERE r.block_height = swaps.block_height AND r.ext = ifNull(swaps.extrinsic_index, 4294967295) AND r.amount_in = toString(toUInt256(if(amount0 > 0, amount0, amount1)))) AS routed_swapper,
+         (SELECT max(router_id) FROM routed r WHERE r.block_height = swaps.block_height AND r.ext = swaps.ext AND r.amount_in = toString(toUInt256(if(amount0 > 0, amount0, amount1)))) AS router_id,
+         (SELECT max(swapper) FROM routed r WHERE r.block_height = swaps.block_height AND r.ext = swaps.ext AND r.amount_in = toString(toUInt256(if(amount0 > 0, amount0, amount1)))) AS routed_swapper,
          [tuple(toUInt8(1), asset_in, amount_in, '', ''),
           tuple(toUInt8(2), asset_out, amount_out, '', ''),
           tuple(toUInt8(3), asset_in, intDiv(amount_in * toUInt256(fee), toUInt256(1000000)), 'account', pool_account)] AS legs
@@ -1221,6 +1222,16 @@ export function accountRevenueStalePartitionsSql(): string {
           SELECT p, toDateTime(0) AS rev_ingest, max(src_ingest) AS debt_ingest
           FROM price_data.revenue_source_partition_watermarks
           WHERE kind = 'debt'
+          GROUP BY p
+          UNION ALL
+          -- The uniswap_v3_fee split is weighted by pool_swap_legs, which the
+          -- uniswap_v3_legs job republishes on its own clock. Without this a month
+          -- whose legs were corrected keeps a stale split forever: right stream
+          -- total, wrong payers, nothing to signal it. Venue-first key prefix, so
+          -- this reads only the v3 legs.
+          SELECT toYYYYMM(block_timestamp) AS p, toDateTime(0) AS rev_ingest, max(ingested_at) AS debt_ingest
+          FROM price_data.pool_swap_legs
+          WHERE venue = 'uniswapv3'
           GROUP BY p
         )
         GROUP BY p

@@ -647,6 +647,18 @@ describe('uniswapV3LegsInsertSql', () => {
     expect(sql).toContain("JSONExtractString(args_json, 'swapper') AS swapper")
     expect(sql).toMatch(/routed_swapper != ''/)
   })
+
+  // A DCA execution runs in on_initialize, so its Swap log carries NO extrinsic
+  // index. `ifNull(swaps.extrinsic_index, …)` inside the correlated subquery does
+  // not resolve there, so every hook-phase hop missed its Broadcast: measured, 0 of
+  // 139 matched, against 139 of 139 once `ext` is a plain column of `swaps`. They
+  // then kept the router as swapper AND took an `evm:` op_key, which reads as a
+  // direct swap and breaks the route's netting.
+  it('matches a hook-phase hop, whose Swap log has no extrinsic index', () => {
+    expect(sql).toContain('ifNull(extrinsic_index, 4294967295) AS ext')
+    expect(sql).toContain('r.ext = swaps.ext')
+    expect(sql).not.toContain('r.ext = ifNull(swaps.extrinsic_index, 4294967295)')
+  })
 })
 
 describe('revenue staging twins', () => {
@@ -684,6 +696,16 @@ describe('accountRevenueStalePartitionsSql', () => {
     expect(sql).toContain('price_data.revenue_source_partition_watermarks')
     expect(sql).toContain('ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW')
     expect(sql).toContain('src.eff_ingest > der.der_computed')
+  })
+
+  // The v3 split's WEIGHTS come from pool_swap_legs, which the uniswap_v3_legs job
+  // republishes on its own clock. A month whose legs are corrected while its
+  // revenue_events partition is untouched would keep a stale split forever — right
+  // stream total, wrong payers, no signal. The live month self-heals hourly; a
+  // closed one would not, which is exactly when a legs fix lands.
+  it('also follows the v3 legs the per-account split is weighted by', () => {
+    expect(sql).toContain("venue = 'uniswapv3'")
+    expect(sql).toContain('price_data.pool_swap_legs')
   })
 
   it('keeps the live month following revenue_events at once, and debt on the refresh window', () => {
