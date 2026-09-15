@@ -482,7 +482,7 @@ describe('Wormhole status table', () => {
   it('sends each custody handle to the explorer that can show it', () => {
     expect(wormholeExplorerLink(2, '0xabc')?.href).toBe('https://etherscan.io/address/0xabc')
     expect(wormholeExplorerLink(30, '0xabc')?.href).toBe('https://basescan.org/address/0xabc')
-    expect(wormholeExplorerLink(1, 'So111')?.href).toBe('https://solscan.io/account/So111')
+    expect(wormholeExplorerLink(1, 'So111')?.href).toBe('https://orbmarkets.io/address/So111')
     expect(wormholeExplorerLink(21, '0xobj')?.href).toBe('https://suivision.xyz/object/0xobj')
     // Robinhood Chain is Wormhole 72 — one below Hydration's own 73.
     expect(wormholeExplorerLink(72, '0xabc')?.href).toBe('https://robinscan.io/address/0xabc')

@@ -131,7 +131,7 @@ export const WORMHOLE_STATUS: Record<WormholeStatus, WormholeStatusMeta> = {
 // Where a custody handle lives, per Wormhole chain id. Each chain names its own
 // kind of thing: an EVM account, a Solana account, a Sui object.
 const WORMHOLE_EXPLORERS: Record<number, { base: string; kind: string }> = {
-  1: { base: 'https://solscan.io/account/', kind: 'Solscan' },
+  1: { base: 'https://orbmarkets.io/address/', kind: 'Orb' },
   2: { base: 'https://etherscan.io/address/', kind: 'Etherscan' },
   21: { base: 'https://suivision.xyz/object/', kind: 'SuiVision' },
   30: { base: 'https://basescan.org/address/', kind: 'BaseScan' },

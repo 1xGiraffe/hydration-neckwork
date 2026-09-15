@@ -63,7 +63,7 @@ describe('originTxExplorerUrl', () => {
   // branches must not be applied to them.
   it('links a base58 Solana signature', () => {
     const sig = '5x7cH1kQ2pYourSignatureHere9aBcDeFgHiJkLmNoPqRsTuVwXyZ'
-    expect(originTxExplorerUrl('urn:ocn:solana:101', sig)).toBe(`https://solscan.io/tx/${encodeURIComponent(sig)}`)
+    expect(originTxExplorerUrl('urn:ocn:solana:101', sig)).toBe(`https://orbmarkets.io/tx/${encodeURIComponent(sig)}`)
   })
 
   it('links a Sui digest', () => {
