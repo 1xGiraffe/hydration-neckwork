@@ -510,7 +510,8 @@ routed AS (
   -- the runtime emits one UniswapV3 Swapped3 per hop with the route's operationStack.
   SELECT block_height, ifNull(extrinsic_index, 4294967295) AS ext,
          JSONExtractString(JSONExtractArrayRaw(args_json, 'inputs')[1], 'amount') AS amount_in,
-         toUInt64OrZero(extractGroups(args_json, '"__kind":"Router","value":(\\d+)')[1]) AS router_id
+         toUInt64OrZero(extractGroups(args_json, '"__kind":"Router","value":(\\d+)')[1]) AS router_id,
+         JSONExtractString(args_json, 'swapper') AS swapper
   FROM price_data.raw_events
   WHERE event_name = 'Broadcast.Swapped3' AND toYYYYMM(block_timestamp) = ${partition}
     AND JSONExtractString(args_json, 'fillerType', '__kind') = 'UniswapV3'
@@ -538,6 +539,7 @@ sided AS (
          toUInt256(abs(if(amount0 > 0, amount1, amount0))) AS amount_out,
          concat('0x45544800', substring(pool, 3, 40), '0000000000000000') AS pool_account,
          (SELECT max(router_id) FROM routed r WHERE r.block_height = swaps.block_height AND r.ext = ifNull(swaps.extrinsic_index, 4294967295) AND r.amount_in = toString(toUInt256(if(amount0 > 0, amount0, amount1)))) AS router_id,
+         (SELECT max(swapper) FROM routed r WHERE r.block_height = swaps.block_height AND r.ext = ifNull(swaps.extrinsic_index, 4294967295) AND r.amount_in = toString(toUInt256(if(amount0 > 0, amount0, amount1)))) AS routed_swapper,
          [tuple(toUInt8(1), asset_in, amount_in, '', ''),
           tuple(toUInt8(2), asset_out, amount_out, '', ''),
           tuple(toUInt8(3), asset_in, intDiv(amount_in * toUInt256(fee), toUInt256(1000000)), 'account', pool_account)] AS legs
@@ -546,7 +548,9 @@ sided AS (
 SELECT 'uniswapv3' AS venue, pool AS pool_key, block_height, event_index, toUInt16(leg_i - 1) AS leg_index,
        CAST(legs[leg_i].1 AS Enum8('in' = 1, 'out' = 2, 'fee' = 3)) AS leg_kind,
        legs[leg_i].2 AS asset_id, toString(legs[leg_i].3) AS amount, legs[leg_i].4 AS fee_dest, legs[leg_i].5 AS fee_recipient,
-       if(recipient != '', concat('0x45544800', substring(recipient, 3, 40), '0000000000000000'), '') AS swapper,
+       multiIf(routed_swapper != '', routed_swapper,
+               recipient != '', concat('0x45544800', substring(recipient, 3, 40), '0000000000000000'),
+               '') AS swapper,
        if(router_id > 0, toString(router_id), concat('evm:', toString(block_height), ':', toString(event_index))) AS op_key, extrinsic_index, block_timestamp, now() AS ingested_at
 FROM sided
 ARRAY JOIN arrayEnumerate(legs) AS leg_i

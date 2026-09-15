@@ -637,6 +637,16 @@ describe('uniswapV3LegsInsertSql', () => {
   it('names the swapper in the ETH-prefixed account form and never a raw H160', () => {
     expect(sql).toContain("concat('0x45544800', substring(recipient, 3, 40), '0000000000000000')")
   })
+
+  // A routed hop's Swap log names the SwapRouter as its recipient, so the log alone
+  // credits every routed fill to the router's own pallet account — measured live,
+  // 612 of 614 fee legs. The Broadcast the hop is already matched to for its Router
+  // id carries the account the router traded FOR, which is the real trader; the log's
+  // recipient stands only for a direct EVM swap, which has no Broadcast at all.
+  it('takes a routed hop’s swapper from its Broadcast, not from the router it filled through', () => {
+    expect(sql).toContain("JSONExtractString(args_json, 'swapper') AS swapper")
+    expect(sql).toMatch(/routed_swapper != ''/)
+  })
 })
 
 describe('revenue staging twins', () => {
