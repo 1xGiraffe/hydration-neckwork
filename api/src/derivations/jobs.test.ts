@@ -704,7 +704,7 @@ describe('accountRevenueEventfulInsertSql', () => {
   })
 
   it('folds only protocol revenue and leaves the borrow streams to attribution', () => {
-    expect(sql).toContain("stream NOT IN ('hollar_borrow', 'asset_reserve')")
+    expect(sql).toContain("stream NOT IN ('hollar_borrow', 'asset_reserve', 'uniswap_v3_fee')")
     // The shared protocol predicate: lp/burned/unknown omnipool asset-fee legs
     // exist only for the public destination matrix and are never account revenue.
     expect(sql).toContain("(stream != 'omnipool_asset_fee' OR dest IN ('protocol', 'burned', 'pol')) AND dest != 'lp'")
