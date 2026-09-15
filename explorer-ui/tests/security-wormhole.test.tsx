@@ -484,6 +484,8 @@ describe('Wormhole status table', () => {
     expect(wormholeExplorerLink(30, '0xabc')?.href).toBe('https://basescan.org/address/0xabc')
     expect(wormholeExplorerLink(1, 'So111')?.href).toBe('https://solscan.io/account/So111')
     expect(wormholeExplorerLink(21, '0xobj')?.href).toBe('https://suivision.xyz/object/0xobj')
+    // Robinhood Chain is Wormhole 72 — one below Hydration's own 73.
+    expect(wormholeExplorerLink(72, '0xabc')?.href).toBe('https://robinscan.io/address/0xabc')
     // An unknown chain, or a peer that was never read, links nowhere rather than guessing.
     expect(wormholeExplorerLink(999, '0xabc')).toBeNull()
     expect(wormholeExplorerLink(2, null)).toBeNull()

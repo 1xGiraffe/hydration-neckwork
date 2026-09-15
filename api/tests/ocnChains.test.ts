@@ -21,6 +21,15 @@ describe('ocnChainName', () => {
     expect(ocnChainName('urn:ocn:ethereum:999999')).toBe('EVM chain 999999')
   })
 
+  // Robinhood Chain, an Arbitrum Orbit L2: EVM chain id 4663, and Wormhole chain
+  // id 72 — read off its own core bridge (chainId() at
+  // 0x141fBa8AD5D61bdaB45A047cF60b5Ad9784987FB answers 0x48).
+  it('names Robinhood Chain and links its own explorer', () => {
+    expect(ocnChainName('urn:ocn:ethereum:4663')).toBe('Robinhood Chain')
+    expect(originTxExplorerUrl('urn:ocn:ethereum:4663', '0x' + 'ab'.repeat(32)))
+      .toBe(`https://robinscan.io/tx/0x${'ab'.repeat(32)}`)
+  })
+
   // Sui identifies itself with a hex digest, which the old numeric-only URN pattern
   // rejected outright — so a Sui journey resolved to nothing at all.
   it('accepts a non-numeric chain id', () => {
@@ -187,5 +196,12 @@ describe('nttDestination', () => {
   // than a plausible wrong chain — the same rule the EVM explorer links follow.
   it('yields nothing for a chain it does not know', () => {
     expect(nttDestination(sent(9999))).toBeNull()
+  })
+
+  // Wormhole chain 72 is Robinhood Chain; 73 is Hydration itself, so the two sit
+  // next to each other and a slip between them would send a transfer's far end to
+  // the chain it left.
+  it('resolves a send to Robinhood Chain', () => {
+    expect(nttDestination(sent(72))).toEqual({ urn: 'urn:ocn:ethereum:4663', account: '0xe6af127259bf7f1b0539fc0a955494f48e31240b' })
   })
 })
