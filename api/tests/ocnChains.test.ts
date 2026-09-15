@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { decodeNttReceivedMessage, decodeNttTransferSent, nttDestination, nttMinterLegExclusionSql, nttOriginChain, ocnChainName, originTxExplorerUrl } from '../src/services/explorerService.ts'
+import { decodeNttReceivedMessage, nttJourneyMessageId, decodeNttTransferSent, nttDestination, nttMinterLegExclusionSql, nttOriginChain, ocnChainName, originTxExplorerUrl } from '../src/services/explorerService.ts'
 
 // A journey's ends are named by Ocelloids URNs, and a bridge can put either end on a
 // chain this app has no other reason to know. Two things then go wrong quietly: the
@@ -126,7 +126,34 @@ describe('decodeNttReceivedMessage', () => {
     + '0000000000000000000000000000000000000000000000000000000000000001'
 
   it('reads the source chain of a real arrival', () => {
-    expect(decodeNttReceivedMessage([topic], data)).toEqual({ sourceChain: 21 })
+    expect(decodeNttReceivedMessage([topic], data)).toMatchObject({ sourceChain: 21 })
+  })
+
+  // The VAA's own identity, which is how Ocelloids correlates the journey that
+  // carried this arrival — without it an NTT row has no key to ask for and stays
+  // sourceless. Read from the live arrival at block 14,637,790: chain 1 (Solana),
+  // emitter 0xe97e1f56…, sequence 53.
+  it('carries the emitter and sequence the journey is keyed by', () => {
+    const solana = '0x' + 'b'.repeat(64)
+      + '0000000000000000000000000000000000000000000000000000000000000001'
+      + 'e97e1f562b67844adddcc4aff6a22e017596c8e612de2686a0745b6e74f196cd'
+      + '0000000000000000000000000000000000000000000000000000000000000035'
+    expect(decodeNttReceivedMessage([topic], solana)).toEqual({
+      sourceChain: 1,
+      emitterAddress: 'e97e1f562b67844adddcc4aff6a22e017596c8e612de2686a0745b6e74f196cd',
+      sequence: '53',
+    })
+  })
+
+  // Ocelloids correlates on `chain/emitter/sequence` with slashes and no 0x — the
+  // colon form vaaKey() builds for our own redemption matching does not resolve
+  // there, so the two must not be confused.
+  it('builds the journey id in the form Ocelloids correlates on', () => {
+    expect(nttJourneyMessageId(decodeNttReceivedMessage([topic], '0x' + 'b'.repeat(64)
+      + '0000000000000000000000000000000000000000000000000000000000000001'
+      + 'e97e1f562b67844adddcc4aff6a22e017596c8e612de2686a0745b6e74f196cd'
+      + '0000000000000000000000000000000000000000000000000000000000000035')!))
+      .toBe('1/e97e1f562b67844adddcc4aff6a22e017596c8e612de2686a0745b6e74f196cd/53')
   })
 
   it('ignores any other log', () => {

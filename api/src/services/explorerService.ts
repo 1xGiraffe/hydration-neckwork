@@ -12838,13 +12838,32 @@ const NTT_RECEIVED_MESSAGE_TOPIC = '0xf6fc529540981400dc64edf649eb5e2e0eb5812a27
 // manager (the registered minter address), which is what ties a redeem to its asset.
 const NTT_TRANSFER_REDEEMED_TOPIC = '0x504e6efe18ab9eed10dc6501a417f5b12a2f7f2b1593aed9b89f9bce3cf29a91'
 
-export function decodeNttReceivedMessage(topics: string[], data: string): { sourceChain: number } | null {
+export interface NttReceivedMessage { sourceChain: number; emitterAddress?: string; sequence?: string }
+export function decodeNttReceivedMessage(topics: string[], data: string): NttReceivedMessage | null {
   if (topics[0]?.toLowerCase() !== NTT_RECEIVED_MESSAGE_TOPIC) return null
   const body = (data ?? '').replace(/^0x/, '')
   if (body.length < 64 * 2) return null
   const sourceChain = Number(BigInt('0x' + body.slice(64, 128)))
   if (!Number.isInteger(sourceChain) || sourceChain <= 0) return null
-  return { sourceChain }
+  // ReceivedMessage(bytes32 digest, uint16 emitterChainId, bytes32 emitterAddress,
+  // uint64 sequence). The chain alone names where an arrival came FROM; the emitter
+  // and sequence are the VAA's identity, which is what the journey is keyed by.
+  if (body.length < 64 * 4) return { sourceChain }
+  const emitterAddress = body.slice(128, 192).toLowerCase()
+  const sequence = BigInt('0x' + body.slice(192, 256)).toString()
+  return { sourceChain, emitterAddress, sequence }
+}
+
+/**
+ * The id Ocelloids correlates a bridged journey on: `chain/emitter/sequence`, with
+ * slashes and no `0x`.
+ *
+ * Deliberately not `vaaKey()`, which builds the COLON form our own redemption
+ * matching uses — the two look alike and only this one resolves upstream.
+ */
+export function nttJourneyMessageId(received: NttReceivedMessage): string | null {
+  if (!received.emitterAddress || received.sequence == null) return null
+  return `${received.sourceChain}/${received.emitterAddress}/${received.sequence}`
 }
 
 // The origin chain in the fields an inbound row carries. Same mapping as the outbound
@@ -12910,6 +12929,9 @@ interface NttExtrinsicLogs {
   sent: NttSentLog[]
   redeemed: Set<string>     // manager H160s that logged TransferRedeemed here
   sourceChains: number[]    // one entry per decoded ReceivedMessage
+  // The VAA id of each of those messages, in the form Ocelloids correlates on.
+  // One per arrival, so a redeem batch naming several has no single journey.
+  journeyIds: string[]
   // WETH paid to the Wormhole Executor (RequestForExecution.amtPaid), one per request —
   // the relayer fee of a send delivered without the sender redeeming it.
   executorPaid: string[]
@@ -12936,7 +12958,7 @@ function nttMemoBlock(key: string): number {
 // flag surviving on a shared memo entry would eat the pairing of every later
 // request. `redeemed`/`sourceChains` are only read, so they stay shared.
 function nttLogsCopy(entry: NttExtrinsicLogs): NttExtrinsicLogs {
-  return { sent: entry.sent.map(s => ({ manager: s.manager, sent: s.sent })), redeemed: entry.redeemed, sourceChains: entry.sourceChains, executorPaid: [...entry.executorPaid] }
+  return { sent: entry.sent.map(s => ({ manager: s.manager, sent: s.sent })), redeemed: entry.redeemed, sourceChains: entry.sourceChains, journeyIds: [...entry.journeyIds], executorPaid: [...entry.executorPaid] }
 }
 async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtrinsicLogs>> {
   const requested = [...new Set(pairs)]
@@ -12968,7 +12990,7 @@ async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtri
   const fetched = new Map<string, NttExtrinsicLogs>()
   for (const log of chunks.flat()) {
     const key = `${log.block_height}:${log.extrinsic_index}`
-    const entry = fetched.get(key) ?? { sent: [], redeemed: new Set<string>(), sourceChains: [], executorPaid: [] }
+    const entry = fetched.get(key) ?? { sent: [], redeemed: new Set<string>(), sourceChains: [], journeyIds: [], executorPaid: [] }
     const topic0 = log.topics[0]?.toLowerCase()
     if (topic0 === NTT_TRANSFER_REDEEMED_TOPIC) entry.redeemed.add(log.contract)
     const paid = decodeExecutorRequest(log.topics, log.data)
@@ -12976,7 +12998,11 @@ async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtri
     const sent = decodeNttTransferSent(log.topics, log.data)
     if (sent) entry.sent.push({ manager: log.contract, sent })
     const received = decodeNttReceivedMessage(log.topics, log.data)
-    if (received) entry.sourceChains.push(received.sourceChain)
+    if (received) {
+      entry.sourceChains.push(received.sourceChain)
+      const journeyId = nttJourneyMessageId(received)
+      if (journeyId) entry.journeyIds.push(journeyId)
+    }
     fetched.set(key, entry)
   }
   for (const key of keys) {
@@ -13141,11 +13167,17 @@ async function getRecentNttIn(limit: number, from?: string, to?: string, account
         // none for this row rather than guessing which message minted it.
         const chains = [...new Set(entry.sourceChains)]
         const origin = chains.length === 1 ? nttOriginChain(chains[0]) : null
+        // The VAA this mint redeemed, which is how Ocelloids correlates the journey
+        // that carried it — and the only key that can name the sender on the far
+        // chain, since an NTT arrival carries no XCM message id. A redeem batch
+        // naming several messages names no single journey, exactly as for the chain.
+        const journeys = [...new Set(entry.journeyIds)]
         out.push({
           type: 'xcm', blockHeight: c.block_height, timestamp: c.ts, eventIndex: c.event_index, extrinsicIndex: c.extrinsic_index,
           who: accountRef(c.who), to: null, asset: a, assetIn: null, assetOut: null,
           amount: c.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, c.amount, a.decimals),
           xcmDir: 'in', bridge: 'Wormhole', ...(origin ?? {}), linkBlock: c.block_height, linkIndex: c.extrinsic_index,
+          ...(journeys.length === 1 ? { messageId: journeys[0] } : {}),
         })
       }
       await applyHistoricalUsd(out, activityHistPick)
@@ -17967,6 +17999,10 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       const sentLogs: NttSentLog[] = []
       const redeemedManagers = new Set<string>()
       const sourceChains: number[] = []
+      // The VAA ids of those arrivals — see the deep-scan builder: this is the key
+      // Ocelloids correlates the carrying journey on, and the only way an NTT row
+      // can name its sender.
+      const journeyIds: string[] = []
       const executorPaid: string[] = []
       for (const e of events) {
         if (e.event_name !== 'EVM.Log') continue
@@ -17979,7 +18015,11 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
         const sent = decodeNttTransferSent(log.topics, log.data ?? '')
         if (sent) sentLogs.push({ manager: contract, sent })
         const received = decodeNttReceivedMessage(log.topics, log.data ?? '')
-        if (received) sourceChains.push(received.sourceChain)
+        if (received) {
+          sourceChains.push(received.sourceChain)
+          const journeyId = nttJourneyMessageId(received)
+          if (journeyId) journeyIds.push(journeyId)
+        }
       }
       const seenNtt = new Set<string>()
       for (const t of dedupeTransferEvents(transferRows.filter(leg => {
@@ -18029,11 +18069,13 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
         // names none for this row rather than guessing which message minted it.
         const chains = [...new Set(sourceChains)]
         const origin = chains.length === 1 ? nttOriginChain(chains[0]) : null
+        const journeys = [...new Set(journeyIds)]
         rows.push({
           type: 'xcm', blockHeight: e.block_height, timestamp: e.ts, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index,
           who: accountRef(who), to: null, asset: a, assetIn: null, assetOut: null,
           amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
           xcmDir: 'in', bridge: 'Wormhole', ...(origin ?? {}), linkBlock: e.block_height, linkIndex: e.extrinsic_index,
+          ...(journeys.length === 1 ? { messageId: journeys[0] } : {}),
         })
       }
     }
