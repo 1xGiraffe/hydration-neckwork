@@ -132,6 +132,7 @@ const WORMHOLE_ORIGIN_CHAINS: Record<string, Pick<AssetOrigin, 'ecosystem' | 'ch
   '2': { ecosystem: 'ethereum', chainId: '1' },
   '21': { ecosystem: 'sui', chainId: '0x35834a8a' },
   '30': { ecosystem: 'ethereum', chainId: '8453' },
+  '72': { ecosystem: 'ethereum', chainId: '4663' },  // Robinhood Chain
 }
 
 // A GeneralKey's `data` is a fixed 32-byte field and `length` says how many of those

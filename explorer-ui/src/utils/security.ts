@@ -135,6 +135,7 @@ const WORMHOLE_EXPLORERS: Record<number, { base: string; kind: string }> = {
   2: { base: 'https://etherscan.io/address/', kind: 'Etherscan' },
   21: { base: 'https://suivision.xyz/object/', kind: 'SuiVision' },
   30: { base: 'https://basescan.org/address/', kind: 'BaseScan' },
+  72: { base: 'https://robinscan.io/address/', kind: 'Robinscan' },
 }
 export function wormholeExplorerLink(chainId: number, handle: string | null): { href: string; kind: string } | null {
   const meta = WORMHOLE_EXPLORERS[chainId]
