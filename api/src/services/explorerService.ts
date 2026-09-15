@@ -10770,7 +10770,10 @@ const PARACHAIN_META: Record<number, XcmNetworkMeta> = {
   2030: { name: 'Bifrost', subscan: 'https://bifrost.subscan.io', ss58: 6 },
   2031: { name: 'Centrifuge', subscan: 'https://centrifuge.subscan.io', ss58: 36 },
   2032: { name: 'Interlay', subscan: 'https://interlay.subscan.io', ss58: 2032 },
-  2034: { name: 'Hydration', subscan: 'https://hydration.subscan.io', ss58: 63 },
+  // No subscan: Hydration is no longer indexed there (the host answers 403), so a
+  // pill or transaction link pointing back at this chain offers none. The prefix
+  // stays — it is how the address is ENCODED, not where it is looked up.
+  2034: { name: 'Hydration', ss58: 63 },
   2035: { name: 'Phala', subscan: 'https://phala.subscan.io', ss58: 30 },
   2037: { name: 'Unique', subscan: 'https://unique.subscan.io' },
   2043: { name: 'NeuroWeb', subscan: 'https://origintrail.subscan.io' },

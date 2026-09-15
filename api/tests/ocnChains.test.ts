@@ -232,3 +232,14 @@ describe('nttDestination', () => {
     expect(nttDestination(sent(72))).toEqual({ urn: 'urn:ocn:ethereum:4663', account: '0xe6af127259bf7f1b0539fc0a955494f48e31240b' })
   })
 })
+
+// Hydration is no longer indexed on Subscan — the host answers 403 — so a remote
+// pill or origin-transaction link pointing back at this chain must offer nothing
+// rather than a page that cannot load. The SS58 prefix stays: it is how the
+// address is ENCODED, which is unrelated to where it can be looked up.
+describe('links back to Hydration itself', () => {
+  it('offers no Subscan link for Hydration, while still naming and encoding it', () => {
+    expect(ocnChainName('urn:ocn:polkadot:2034')).toBe('Hydration')
+    expect(originTxExplorerUrl('urn:ocn:polkadot:2034', '0x' + 'ab'.repeat(32))).toBeNull()
+  })
+})
