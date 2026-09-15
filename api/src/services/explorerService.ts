@@ -11006,6 +11006,54 @@ function xcmDestination(args: { dest?: { parents?: number; interior?: { value?: 
   const destAccount = externalAccountRef(junctionValue(account32, 'id') ?? junctionValue(account20, 'key'), meta)
   return { destChain: meta?.name, destParachainId: paraId, destAccount }
 }
+/** Unwrap an XCM version envelope (`{__kind:'V4', value}`), if there is one. */
+function xcmVersioned(value: unknown): unknown {
+  const v = value as { __kind?: unknown; value?: unknown } | null | undefined
+  return typeof v?.__kind === 'string' && /^V\d+$/.test(v.__kind) && 'value' in v ? v.value : value
+}
+
+/**
+ * Where a send goes, read from the EXTRINSIC's own call args.
+ *
+ * Hydration sets `XcmEventEmitter = ()` (runtime/hydradx/src/xcm.rs), so a message
+ * the xcm EXECUTOR dispatches — `InitiateReserveWithdraw`, `DepositReserveAsset`,
+ * `ExportMessage` — deposits no `PolkadotXcm.Sent`, only `XcmpQueue.XcmpMessageSent`,
+ * which is a bare hash. Those sends are still rows (see emitsExecutedOutboundXcm),
+ * but the event stream cannot say where they went: measured above block 14,500,000,
+ * 15 of 153 outbound sends, every one of them showing no destination at all.
+ *
+ * The call that made the send names it. `dest` is the chain, and the beneficiary is
+ * either the call's own (`limited_reserve_transfer_assets`) or the one inside the
+ * program it asks the destination to run (`customXcmOnDest`), which
+ * xcmFinalBeneficiary already walks.
+ */
+export function xcmDestinationFromCallArgs(
+  args: unknown,
+): Pick<ActivityRow, 'destChain' | 'destParachainId' | 'destAccount'> | null {
+  const a = args as Record<string, unknown> | null | undefined
+  if (!a || typeof a !== 'object') return null
+  const dest = xcmVersioned(a.dest) as { parents?: number; interior?: { value?: unknown } } | undefined
+  if (!dest || typeof dest !== 'object') return null
+  const hop = xcmDestination({ dest })
+  if (!hop.destChain) return null
+  if (!hop.destAccount) {
+    const meta = hop.destParachainId != null ? PARACHAIN_META[hop.destParachainId]
+      : hop.destChain === RELAY_XCM_NETWORK.name ? RELAY_XCM_NETWORK : undefined
+    // The program the destination runs, then the call's own beneficiary.
+    const onDest = xcmVersioned(a.customXcmOnDest)
+    const fromProgram = Array.isArray(onDest)
+      ? xcmFinalBeneficiary(onDest as Record<string, unknown>[])
+      : undefined
+    const beneficiary = xcmVersioned(a.beneficiary) as { interior?: unknown } | undefined
+    const junctions = xcmJunctions(beneficiary?.interior)
+    const id = fromProgram
+      ?? junctionValue<string>(junctions.find(j => j.__kind === 'AccountId32'), 'id')
+      ?? junctionValue<string>(junctions.find(j => j.__kind === 'AccountKey20'), 'key')
+    hop.destAccount = externalAccountRef(id, meta)
+  }
+  return hop
+}
+
 // A multilocation interior's junction list — X1 is a single object in XCM v3,
 // an array in v4; Here has no value.
 function xcmJunctions(interior: unknown): Record<string, unknown>[] {
@@ -12299,7 +12347,10 @@ async function xcmExecutedRowsForBlocks(blocks: number[], prices: Map<number, Pr
       && claimed.has(executedXcmExtrinsicKey(w.block_height, w.extrinsic_index)))
   // The swaps batched into the claimed extrinsics: a Router leg's input withdrawal is a
   // cost leg the read above cannot tell from a fee, and its output is the fee it bought.
-  const swapsByExt = await routerNetSwapsByExtrinsic(claimedList)
+  const [swapsByExt, destsByExt] = await Promise.all([
+    routerNetSwapsByExtrinsic(claimedList),
+    xcmDestinationsByExtrinsic(claimedList),
+  ])
   const legKey = (leg: { block_height: number; extrinsic_index: number | null; who: string }) => `${executedXcmExtrinsicKey(leg.block_height, leg.extrinsic_index)}:${leg.who}`
   const costs = executedXcmCostLegs(admitted, legKey, leg => leg.event_index)
   const rows: ActivityRow[] = []
@@ -12314,11 +12365,48 @@ async function xcmExecutedRowsForBlocks(blocks: number[], prices: Map<number, Pr
       type: 'xcm', blockHeight: w.block_height, timestamp: w.ts, eventIndex: w.event_index, extrinsicIndex: w.extrinsic_index,
       who: accountRef(who), to: null, asset: a, assetIn: null, assetOut: null,
       amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
-      xcmDir: 'out', xcmExecuted: true, ...(fees.length ? { xcmFees: fees } : {}), linkBlock: w.block_height, linkIndex: w.extrinsic_index,
+      xcmDir: 'out', xcmExecuted: true, ...(fees.length ? { xcmFees: fees } : {}),
+      ...(destsByExt.get(executedXcmExtrinsicKey(w.block_height, w.extrinsic_index)) ?? {}),
+      linkBlock: w.block_height, linkIndex: w.extrinsic_index,
     })
   }
   return rows.sort(compareActivityRowsNewestFirst)
 }
+/**
+ * The destination of each executor-dispatched send, keyed `${block}:${extrinsic}`.
+ *
+ * Their events name no destination at all (see xcmDestinationFromCallArgs), so it is
+ * read from the extrinsics themselves — a block-keyed primary-key read over the same
+ * extrinsics the rows were already admitted from.
+ */
+async function xcmDestinationsByExtrinsic(blockListSql: string): Promise<Map<string, ReturnType<typeof xcmDestinationFromCallArgs>>> {
+  const out = new Map<string, ReturnType<typeof xcmDestinationFromCallArgs>>()
+  if (!blockListSql) return out
+  const res = await client.query({
+    query: `SELECT block_height, extrinsic_index, call_args_json
+            FROM price_data.raw_extrinsics FINAL
+            WHERE block_height IN (${blockListSql}) AND startsWith(call_name, 'PolkadotXcm.')`,
+    format: 'JSONEachRow',
+  })
+  for (const row of await res.json<{ block_height: number; extrinsic_index: number | null; call_args_json: string }>()) {
+    const dest = xcmDestinationFromCallArgs(safeJson(row.call_args_json))
+    if (dest) out.set(executedXcmExtrinsicKey(row.block_height, row.extrinsic_index), dest)
+  }
+  return out
+}
+
+/** One executor-dispatched send's destination, read from its own call args. */
+async function executedXcmDestinationOf(height: number, index: number): Promise<ReturnType<typeof xcmDestinationFromCallArgs>> {
+  const res = await client.query({
+    query: `SELECT call_args_json FROM price_data.raw_extrinsics FINAL
+            WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} AND startsWith(call_name, 'PolkadotXcm.')`,
+    query_params: { h: height, i: index },
+    format: 'JSONEachRow',
+  })
+  const row = (await res.json<{ call_args_json: string }>())[0]
+  return row ? xcmDestinationFromCallArgs(safeJson(row.call_args_json)) : null
+}
+
 type RouterNetSwap = { assetIn: number; amountIn: string; assetOut: number }
 // The Router net summaries of the signed extrinsics in these blocks, keyed
 // `${block}:${extrinsic}` — a block-keyed primary-key read.
@@ -17995,7 +18083,10 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
           type: 'xcm', blockHeight: e.block_height, timestamp: e.ts, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index,
           who: accountRef(who), to: null, asset: a, assetIn: null, assetOut: null,
           amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
-          xcmDir: 'out', xcmExecuted: true, ...(fees.length ? { xcmFees: fees } : {}), linkBlock: e.block_height, linkIndex: e.extrinsic_index,
+          xcmDir: 'out', xcmExecuted: true, ...(fees.length ? { xcmFees: fees } : {}),
+          // Its events name no destination (see xcmDestinationFromCallArgs); the call does.
+          ...(await executedXcmDestinationOf(height, index) ?? {}),
+          linkBlock: e.block_height, linkIndex: e.extrinsic_index,
         })
       }
       // The bridge is the user's highest-level action here, so the swap beside it is the
