@@ -49,12 +49,12 @@ export function HydrationBadge() {
   return <span className="chain-badge chain-badge-local" title="Hydration">Hydration</span>
 }
 // The external-explorer label follows the link target — cross-chain accounts
-// live on Subscan for substrate chains, Solscan/Etherscan for Solana/Ethereum.
+// live on Subscan for substrate chains, Orb/Etherscan for Solana/Ethereum.
 // Every explorer a bridged journey can reach, so a Base link never says "Subscan".
 // Ordered longest-suffix first where hosts nest (optimistic.etherscan.io).
 const EXPLORER_SITES: [string, string][] = [
   ['optimistic.etherscan.io', 'Etherscan'],
-  ['solscan.io', 'Solscan'],
+  ['orbmarkets.io', 'Orb'],
   ['robinscan.io', 'Robinscan'],
   ['etherscan.io', 'Etherscan'],
   ['basescan.org', 'Basescan'],

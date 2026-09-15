@@ -12420,7 +12420,7 @@ function externalChainRef(urnStr: string, account: string, formatted?: string): 
       let address = formatted || h
       if (!formatted) { try { address = base58Encode(hexToU8a(h)) } catch { /* keep hex */ } }
       acct = remoteAccountRef('AccountId32', h, resolveDisplayAccountId(h), address,
-        `https://solscan.io/account/${encodeURIComponent(address)}`)
+        `https://orbmarkets.io/address/${encodeURIComponent(address)}`)
     }
     return { chain: 'Solana', paraId: null, account: acct }
   }
@@ -12515,7 +12515,8 @@ export function originTxExplorerUrl(urnStr: string, txHash: string | null): stri
     return isHex && meta ? `${meta.explorer}/tx/${txHash}` : null
   }
   // Solana signatures are base58, not hex, so no hex test applies here.
-  if (consensus === 'solana') return `https://solscan.io/tx/${encodeURIComponent(txHash)}`
+  // Orb (orbmarkets.io) — Helius's own explorer, and the domain its docs link to.
+  if (consensus === 'solana') return `https://orbmarkets.io/tx/${encodeURIComponent(txHash)}`
   if (consensus === 'sui') return `https://suiscan.xyz/mainnet/tx/${encodeURIComponent(txHash)}`
   return null
 }

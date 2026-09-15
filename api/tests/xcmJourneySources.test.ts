@@ -600,7 +600,7 @@ describe('historical journey resolution helpers', () => {
       .toBe('https://astar.subscan.io/extrinsic/0xf1a9da7aebf2afa410577bcb4226d0c13e73a0569a2d5cc90ebf709ea98c9b8e')
     expect(originTxExplorerUrl('urn:ocn:polkadot:0', '0xabc1')).toBe('https://polkadot.subscan.io/extrinsic/0xabc1')
     expect(originTxExplorerUrl('urn:ocn:ethereum:1', '0xabc1')).toBe('https://etherscan.io/tx/0xabc1')
-    expect(originTxExplorerUrl('urn:ocn:solana:0', '0xabc1')).toBe('https://solscan.io/tx/0xabc1')
+    expect(originTxExplorerUrl('urn:ocn:solana:0', '0xabc1')).toBe('https://orbmarkets.io/tx/0xabc1')
     expect(originTxExplorerUrl('urn:ocn:polkadot:2006', null)).toBeNull()
     expect(originTxExplorerUrl('not-a-urn', '0xabc1')).toBeNull()
     expect(originTxExplorerUrl('urn:ocn:polkadot:2006', 'garbage')).toBeNull()
