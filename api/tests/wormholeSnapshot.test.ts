@@ -167,14 +167,21 @@ const programIdBase58 = (bytes32: string) => base58Encode(hexToBytes(bytes32))
 // The digests the origin was actually asked about after a given point, so a
 // test can prove a settled one is never probed again.
 const fetchStubCalls = () => fetchImpl.mock.calls.length
-const queueProbes = (since: number) => fetchImpl.mock.calls.slice(since).flatMap(([, init]) => {
-  const body = init?.body
-  if (!body || !body.startsWith('[')) return []
-  return (JSON.parse(body) as RpcCall[])
-    .map(call => (call.params?.[0] as { data?: string } | undefined)?.data ?? '')
-    .filter(data => data.startsWith('0xfd96063c'))
-    .map(data => data.slice(10))
-})
+const queueProbes = (since: number) => fetchImpl.mock.calls.slice(since)
+  .flatMap(([, init]) => originLegs(init))
+  .map(leg => leg.data)
+  .filter(data => data.startsWith('0xfd96063c'))
+  .map(data => data.slice(10))
+
+/** The selectors the origin chain was asked for since `since`, multicall included. */
+const originSelectors = (since: number) => fetchImpl.mock.calls.slice(since)
+  .flatMap(([, init]) => originLegs(init))
+  .map(leg => leg.data.slice(0, 10))
+
+/** How many eth_calls the origin chain was actually billed for since `since`. */
+const originEthCalls = (since: number) => fetchImpl.mock.calls.slice(since)
+  .flatMap(([url, init]) => (String(url) === ETH_RPC ? bodyCalls(init?.body) : []))
+  .length
 
 // The manager program's config account, laid out at the offsets the parser
 // reads. Its custody token account carries the asset id in its last four bytes
@@ -247,6 +254,91 @@ function packTrimmed(amount: bigint, decimals: number): bigint {
   return (amount << 8n) | BigInt(decimals)
 }
 
+const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11'
+
+// One origin view, answered on its own terms — the same answers whether it
+// arrives as its own JSON-RPC call or folded into an aggregate3.
+function evmEthCall(to: string, data: string): string {
+  const selector = data.slice(0, 10)
+  const byToken = ALL_ASSETS.find(a => a.token.slice(26) === to.slice(2).toLowerCase())
+  const byManager = ALL_ASSETS.find(a => ORIGIN_PEER[a.assetId]?.slice(26) === to.slice(2).toLowerCase())
+  if (selector === '0x70a08231') {
+    const custody = byToken ? evmCustody.get(byToken.assetId) : undefined
+    return '0x' + word(custody ?? ethCustody)
+  }
+  if (selector === '0xb187bd26') return '0x' + word(0n)
+  // The origin manager answering for the token the registry recorded.
+  if (selector === '0xfc0c546a') return byManager ? byManager.token : '0x'
+  if (selector === '0x74aa7bfc') return '0x' + word(evmRateLimitSeconds)
+  if (selector === '0x86e11ffa' || selector === '0xd788c147') {
+    return '0x' + word(packTrimmed(ORIGIN_LIMIT_TRIMMED, 8)) + word(packTrimmed(ORIGIN_LIMIT_TRIMMED, 8)) + word(LAST_TX_SEC)
+  }
+  if (selector === '0xf5cfec18' || selector === '0x02717250') return '0x' + word(ORIGIN_CAPACITY_RAW)
+  if (selector === '0x396c16b7') return '0x' + word(evmExecuted.has('0x' + data.slice(10)) ? 1n : 0n)
+  if (selector === '0xfd96063c') return evmQueue.get('0x' + data.slice(10)) ?? '0x' + '0'.repeat(192)
+  return '0x'
+}
+
+/**
+ * The legs inside an aggregate3 payload, parsed here from the ABI spec rather
+ * than with the production codec — a stub that decoded with the code under test
+ * could not catch the code under test encoding it wrongly.
+ */
+function unwrapAggregate3(data: string): { to: string; data: string }[] {
+  if (!data.startsWith('0x82ad56cb')) return []
+  const body = data.slice(10)
+  const at = (byteOffset: number) => Number(BigInt('0x' + body.slice(byteOffset * 2, byteOffset * 2 + 64)))
+  const arrayAt = at(0)
+  const count = at(arrayAt)
+  const base = arrayAt + 32
+  const legs: { to: string; data: string }[] = []
+  for (let i = 0; i < count; i++) {
+    const item = base + at(base + i * 32)
+    const to = '0x' + body.slice((item + 12) * 2, (item + 32) * 2)
+    const bytesAt = item + at(item + 64)
+    const length = at(bytesAt)
+    legs.push({ to, data: '0x' + body.slice((bytesAt + 32) * 2, (bytesAt + 32) * 2 + length * 2) })
+  }
+  return legs
+}
+
+/** `(bool success, bytes returnData)[]` for every leg, encoded by hand. */
+function stubAggregate3(data: string): string {
+  const legs = unwrapAggregate3(data)
+  const results = legs.map(leg => {
+    const answer = evmEthCall(leg.to, leg.data).replace(/^0x/, '')
+    const bytes = answer.length / 2
+    return word(answer.length ? 1n : 0n) + word(64n) + word(BigInt(bytes))
+      + (bytes ? answer.padEnd(Math.ceil(answer.length / 64) * 64, '0') : '')
+  })
+  let cursor = results.length * 32
+  const offsets = results.map(result => {
+    const here = cursor
+    cursor += result.length / 2
+    return word(BigInt(here))
+  })
+  return '0x' + word(32n) + word(BigInt(results.length)) + offsets.join('') + results.join('')
+}
+
+/** The eth_calls a request body carries, one or many. */
+function bodyCalls(body: string | undefined): RpcCall[] {
+  if (!body) return []
+  const parsed = JSON.parse(body) as RpcCall | RpcCall[]
+  const calls = Array.isArray(parsed) ? parsed : [parsed]
+  return calls.filter(call => call.method === 'eth_call')
+}
+
+/** Every origin call in a request body, multicall legs unwrapped. */
+function originLegs(init?: { body?: string }): { to: string; data: string }[] {
+  return bodyCalls(init?.body).flatMap(call => {
+    const params = call.params?.[0] as { to?: string; data?: string } | undefined
+    if (!params?.to || !params.data) return []
+    return params.to.toLowerCase() === MULTICALL3.toLowerCase()
+      ? unwrapAggregate3(params.data)
+      : [{ to: params.to, data: params.data }]
+  })
+}
+
 const fetchImpl = vi.fn(async (input: string | URL, init?: { body?: string }) => {
   const url = String(input)
   const body = init?.body ? JSON.parse(init.body) as RpcCall | RpcCall[] : null
@@ -264,37 +356,18 @@ const fetchImpl = vi.fn(async (input: string | URL, init?: { body?: string }) =>
   }
   if (url === ETH_RPC) {
     if (!ethChainReachable) return { ok: false, json: async () => ({}) }
-    const calls = body as RpcCall[]
-    return {
-      ok: true,
-      json: async () => calls.map(call => {
-        const { to, data } = call.params[0] as { to: string; data: string }
-        const selector = data.slice(0, 10)
-        const byToken = ALL_ASSETS.find(a => a.token.slice(26) === to.slice(2).toLowerCase())
-        const byManager = ALL_ASSETS.find(a => ORIGIN_PEER[a.assetId]?.slice(26) === to.slice(2).toLowerCase())
-        if (selector === '0x70a08231') {
-          const custody = byToken ? evmCustody.get(byToken.assetId) : undefined
-          return { id: call.id, result: '0x' + word(custody ?? ethCustody) }
-        }
-        if (selector === '0xb187bd26') return { id: call.id, result: '0x' + word(0n) }
-        if (selector === '0xfc0c546a') {
-          // The origin manager answering for the token the registry recorded.
-          return { id: call.id, result: byManager ? byManager.token : '0x' }
-        }
-        if (selector === '0x74aa7bfc') return { id: call.id, result: '0x' + word(evmRateLimitSeconds) }
-        if (selector === '0x86e11ffa' || selector === '0xd788c147') {
-          return { id: call.id, result: '0x' + word(packTrimmed(ORIGIN_LIMIT_TRIMMED, 8)) + word(packTrimmed(ORIGIN_LIMIT_TRIMMED, 8)) + word(LAST_TX_SEC) }
-        }
-        if (selector === '0xf5cfec18' || selector === '0x02717250') return { id: call.id, result: '0x' + word(ORIGIN_CAPACITY_RAW) }
-        if (selector === '0x396c16b7') {
-          return { id: call.id, result: '0x' + word(evmExecuted.has('0x' + data.slice(10)) ? 1n : 0n) }
-        }
-        if (selector === '0xfd96063c') {
-          return { id: call.id, result: evmQueue.get('0x' + data.slice(10)) ?? '0x' + '0'.repeat(192) }
-        }
-        return { id: call.id, result: '0x' }
-      }),
+    const answer = (call: RpcCall) => {
+      const { to, data } = call.params[0] as { to: string; data: string }
+      return {
+        id: call.id,
+        result: to.toLowerCase() === MULTICALL3.toLowerCase() ? stubAggregate3(data) : evmEthCall(to, data),
+      }
     }
+    // The origin pass folds itself into ONE aggregate3 call; the array form is
+    // still answered so a shape change shows up as a failing expectation rather
+    // than as a chain that cannot be read.
+    if (Array.isArray(body)) return { ok: true, json: async () => (body as RpcCall[]).map(answer) }
+    return { ok: true, json: async () => answer(body as RpcCall) }
   }
   if (url === SOL_RPC) {
     const call = body as RpcCall
@@ -408,7 +481,55 @@ describe('the Wormhole backing snapshot', () => {
     expect(queries.find(q => q.includes('raw_evm_logs'))).toContain('block_height >= 13378659')
   })
 
+  // The origin endpoints are metered per METHOD, not per HTTP request, so a
+  // JSON-RPC array of N eth_calls costs N. These two cases are what keeps the
+  // cost of a 60s cycle proportional to what can actually change.
+  it('asks an EVM origin through one aggregate3 call, not one call per read', async () => {
+    registry = [USDC, EURC]
+    minters.clear()
+    minters.set(USDC.assetId, widen(USDC.manager))
+    minters.set(EURC.assetId, widen(EURC.manager))
+    issuance = new Map([[USDC.assetId, 227_031_998_904n], [EURC.assetId, 12_000_000n]])
+    initWormholeNttService(fakeClient())
+
+    const before = fetchStubCalls()
+    await refreshWormholeBacking()
+
+    // Two assets on one chain: custody, pause, token and four fuse legs each,
+    // all of it one billed call.
+    expect(originEthCalls(before)).toBe(1)
+    // …and the reads themselves are unchanged.
+    expect(originSelectors(before)).toEqual(expect.arrayContaining(['0x70a08231', '0xb187bd26', '0x86e11ffa', '0xf5cfec18']))
+    const detail = await getWormholeBridgeDetail()
+    expect(detail.assets.find(a => a.symbol === 'USDC')!.locked).toBe('227031998904')
+  })
+
+  it('re-reads only what can change on the next cycle', async () => {
+    const before = fetchStubCalls()
+    await refreshWormholeBacking()
+
+    const selectors = originSelectors(before)
+    // A manager's token() and rateLimitDuration() change only on a
+    // redeployment, so the second cycle takes them from the hourly memo.
+    expect(selectors).not.toContain('0xfc0c546a')
+    expect(selectors).not.toContain('0x74aa7bfc')
+    // Custody, pause and the two capacity legs still move every block.
+    expect(selectors).toContain('0x70a08231')
+    expect(selectors).toContain('0xb187bd26')
+
+    // The fuse still renders from the memoized window, not from a blank.
+    const usdc = (await getWormholeBridgeDetail()).assets.find(a => a.symbol === 'USDC')!
+    expect(usdc.limits!.out!.durationSec).toBe(Number(evmRateLimitSeconds))
+  })
+
   it('rolls the same snapshot up into the dashboard summary', async () => {
+    registry = [USDC, SUI]
+    minters.clear()
+    minters.set(USDC.assetId, widen(USDC.manager))
+    minters.set(SUI.assetId, widen(SUI.manager))
+    issuance = new Map([[USDC.assetId, 227_031_998_904n], [SUI.assetId, 194_145_757_066_522n]])
+    initWormholeNttService(fakeClient())
+    await refreshWormholeBacking()
     const summary = await getWormholeSummary()
     expect(summary).toMatchObject({ assets: 2, worstStatus: 'unconfigured', deficitUsd: 0 })
     expect(summary!.lockedUsd).toBeCloseTo(227_031.998904, 4)
