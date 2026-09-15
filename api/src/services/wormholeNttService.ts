@@ -15,10 +15,12 @@ import {
   decodeGetPeer,
   decodeInboundQueuedTransfer,
   decodeRateLimitParams,
+  decodeAggregate3,
   decodeU128Le,
   decodeUint,
   deTrim,
   displayChainAddress,
+  encodeAggregate3,
   encodeBalanceOf,
   encodeGetCurrentInboundCapacity,
   encodeGetInboundLimitParams,
@@ -30,6 +32,7 @@ import {
   HYDRATION_WORMHOLE_CHAIN_ID,
   liveCapacity,
   matchInboundDeposit,
+  MULTICALL3_ADDRESS,
   normalizeScanOperations,
   nttDigest,
   parseLogMessagePublished,
@@ -124,9 +127,11 @@ const RECENT_TRANSFER_LIMIT = 25
 const DOWNGRADE_CYCLES = 2
 // Pages of the Sui inbox table one cycle will walk (50 entries each).
 const SUI_INBOX_MAX_PAGES = 20
-// Queue probes are batched into one JSON-RPC array per origin chain, in chunks
-// sized like erc20WalletService's balance reads.
-const QUEUE_CALL_BATCH = 80
+// Legs per aggregate3. One eth_call carries the whole pass at the sizes in play
+// (a chain's assets × 7, plus a digest each for the unresolved transfers); the
+// chunk exists so a surprising fan-out cannot build one call the node's gas cap
+// refuses, which would read as the chain not answering at all.
+const MULTICALL_BATCH = 80
 
 // ───────────────────────────── snapshot ─────────────────────────────
 
@@ -289,6 +294,11 @@ const knownQueuedDigests = new Set<string>()
 // rateLimitDuration() per origin manager, in seconds. Governance can change it,
 // so it rides the same hourly refresh as the other static facts.
 const rateLimitDurations = new Map<number, { seconds: bigint; at: number }>()
+// token() per origin manager: which ERC-20 it answers for, lowercased. A manager
+// cannot change it without being redeployed, so it rides the same hourly refresh
+// — and the check it feeds (a manager whose token disagrees with the registry is
+// not answering for this asset) keeps being made on every cycle, from the memo.
+const managerTokens = new Map<number, { address: string; at: number }>()
 // The last queue read per asset, so one failed poll of one chain does not blank
 // a queue the previous cycle measured.
 const lastQueued = new Map<number, QueuedEntry[]>()
@@ -693,6 +703,33 @@ async function postJson(url: string, body: unknown, timeoutMs: number): Promise<
   } catch { return null } finally { clearTimeout(timer) }
 }
 
+/**
+ * A whole EVM pass as ONE `eth_call`: the legs go to Multicall3, which answers
+ * them all at one block. The origin endpoints meter per METHOD, so a JSON-RPC
+ * array of N reads costs N however few HTTP requests carry it — folding a pass
+ * into one aggregate3 is the difference between ~56 billed calls a minute and 2.
+ *
+ * Failure semantics are exactly the per-call ones they replace: a leg that
+ * reverted comes back null (never a zero, which a custody reader would take for
+ * an emptied vault), and a chunk the chain did not answer leaves every leg it
+ * carried unset, so the caller keeps its previous reading rather than
+ * publishing a gap.
+ */
+async function postMulticall(url: string, calls: readonly EvmCall[]): Promise<Map<number, string | null>> {
+  const byId = new Map<number, string | null>()
+  for (let start = 0; start < calls.length; start += MULTICALL_BATCH) {
+    const chunk = calls.slice(start, start + MULTICALL_BATCH)
+    const json = await postJson(url, {
+      jsonrpc: '2.0', id: 1, method: 'eth_call',
+      params: [{ to: MULTICALL3_ADDRESS, data: encodeAggregate3(chunk) }, 'latest'],
+    }, ORIGIN_RPC_TIMEOUT_MS) as { result?: unknown } | null
+    const results = decodeAggregate3(typeof json?.result === 'string' ? json.result : null, chunk.length)
+    if (!results) continue
+    results.forEach((result, i) => byId.set(start + i, result))
+  }
+  return byId
+}
+
 interface OriginTarget { asset: DiscoveredAsset; peer: string; peerDecimals: number | null }
 
 interface PendingDigest { assetId: number; digest: string }
@@ -721,23 +758,36 @@ async function readEvmCustody(
   url: string, targets: readonly OriginTarget[], hydrationChainId: number, pending: readonly PendingDigest[],
 ): Promise<EvmOriginRead> {
   const out: EvmOriginRead = { custody: new Map(), fuses: new Map(), executed: null }
-  const calls: { jsonrpc: '2.0'; id: number; method: 'eth_call'; params: unknown[] }[] = []
-  const index = new Map<number, { target: OriginTarget; balance: number; paused: number; token: number; fuse: number }>()
-  const push = (call: EvmCall): number => {
-    const id = calls.length
-    calls.push({ jsonrpc: '2.0', id, method: 'eth_call', params: [call, 'latest'] })
-    return id
+  const calls: EvmCall[] = []
+  interface CustodySlot {
+    target: OriginTarget
+    balance: number
+    paused: number
+    // A manager's token() and its rate-limit window are deployment facts, so
+    // they are asked for only when their hourly memo has run out; on every
+    // other cycle the slot carries no id and the memo answers.
+    token: number | null
+    fuse: number
+    duration: number | null
   }
+  const index = new Map<number, CustodySlot>()
+  const push = (call: EvmCall): number => calls.push(call) - 1
   const byAsset = new Map(targets.map(t => [t.asset.assetId, t]))
+  const now = Date.now()
+  const memoLive = (memo: { at: number } | undefined): boolean => !!memo && now - memo.at < STATIC_FACTS_TTL_MS
   for (const target of targets) {
+    const assetId = target.asset.assetId
     const managerAddress = displayChainAddress('evm', target.peer)
     const tokenAddress = displayChainAddress('evm', target.asset.originToken)
     const balance = push({ to: tokenAddress, data: encodeBalanceOf(managerAddress) })
     const paused = push({ to: managerAddress, data: EVM_SELECTOR.isPaused })
-    const token = push({ to: managerAddress, data: EVM_SELECTOR.token })
+    const token = memoLive(managerTokens.get(assetId)) ? null : push({ to: managerAddress, data: EVM_SELECTOR.token })
     const fuse = calls.length
     for (const call of fuseCalls(managerAddress, hydrationChainId)) push(call)
-    index.set(target.asset.assetId, { target, balance, paused, token, fuse })
+    const duration = memoLive(rateLimitDurations.get(assetId))
+      ? null
+      : push({ to: managerAddress, data: EVM_SELECTOR.rateLimitDuration })
+    index.set(assetId, { target, balance, paused, token, fuse, duration })
   }
   const executedIds = new Map<string, number>()
   for (const item of pending) {
@@ -747,33 +797,29 @@ async function readEvmCustody(
   }
   if (!calls.length) return out
 
-  const byId = new Map<number, string | null>()
-  let answered = false
-  for (let start = 0; start < calls.length; start += QUEUE_CALL_BATCH) {
-    const json = await postJson(url, calls.slice(start, start + QUEUE_CALL_BATCH), ORIGIN_RPC_TIMEOUT_MS)
-    if (!Array.isArray(json)) continue
-    answered = true
-    for (const item of json) {
-      const entry = item as { id?: unknown; result?: unknown }
-      if (!Number.isInteger(entry?.id)) continue
-      byId.set(entry.id as number, typeof entry.result === 'string' ? entry.result : null)
-    }
-  }
-  if (!answered) return out
+  const byId = await postMulticall(url, calls)
+  if (!byId.size) return out
 
   const at = Date.now()
   for (const [assetId, slot] of index) {
     const registered = displayChainAddress('evm', slot.target.asset.originToken).toLowerCase()
-    const reported = decodeAddress(byId.get(slot.token))?.toLowerCase() ?? null
+    // Fresh when this cycle asked, otherwise the memo's — a manager only ever
+    // changes the token it answers for by being redeployed.
+    const reported = slot.token == null
+      ? managerTokens.get(assetId)?.address ?? null
+      : decodeAddress(byId.get(slot.token))?.toLowerCase() ?? null
     if (reported != null && reported !== registered) continue
+    if (slot.token != null && reported != null) managerTokens.set(assetId, { address: reported, at })
     const locked = decodeUint(byId.get(slot.balance))
     if (locked == null) continue
     out.custody.set(assetId, { locked, decimals: slot.target.peerDecimals, paused: decodeBool(byId.get(slot.paused)), at })
-    // rateLimitDuration() rides this batch, so the queue pass finds it memoized
-    // instead of asking a second time.
-    const duration = decodeUint(byId.get(slot.fuse + 4))
+    // The window rides this pass only when its memo has expired; the queue pass
+    // reads the same memo rather than asking a second time.
+    const duration = slot.duration == null
+      ? rateLimitDurations.get(assetId)?.seconds ?? null
+      : decodeUint(byId.get(slot.duration))
     if (duration == null || duration <= 0n) continue
-    rateLimitDurations.set(assetId, { seconds: duration, at })
+    rateLimitDurations.set(assetId, { seconds: duration, at: slot.duration == null ? rateLimitDurations.get(assetId)!.at : at })
     const tokenDecimals = slot.target.peerDecimals ?? slot.target.asset.decimals
     out.fuses.set(assetId, {
       outbound: evmFuse(byId.get(slot.fuse) ?? null, byId.get(slot.fuse + 1) ?? null, tokenDecimals, slot.target.asset.decimals, Number(duration)),
@@ -967,12 +1013,13 @@ async function readSuiCustody(
 // The four calls one manager answers about its two legs, plus the window they
 // refill over. `peerChainId` is whoever sits on the other side of this manager:
 // the origin chain for a Hydration manager, Hydration for an origin one.
+// The four legs that move with every transfer. The window they are measured
+// over (`rateLimitDuration`) is a deployment fact and is memoized separately.
 const fuseCalls = (manager: string, peerChainId: number): EvmCall[] => [
   { to: manager, data: EVM_SELECTOR.getOutboundLimitParams },
   { to: manager, data: EVM_SELECTOR.getCurrentOutboundCapacity },
   { to: manager, data: encodeGetInboundLimitParams(peerChainId) },
   { to: manager, data: encodeGetCurrentInboundCapacity(peerChainId) },
-  { to: manager, data: EVM_SELECTOR.rateLimitDuration },
 ]
 
 // One leg from an EVM manager's answers. The limit arrives as a packed
@@ -1142,10 +1189,10 @@ const queuedEntryFromSend = (
   sendKey: vaaKey(ctx.hydrationChainId, send.emitter, send.sequence),
 })
 
-// One batched JSON-RPC array per EVM origin chain: getInboundQueuedTransfer for
-// every candidate digest, plus rateLimitDuration() for any manager whose value
-// is not memoized. An asset the batch did not answer for is left out of the
-// result, so the caller keeps its previous reading rather than reading zero.
+// One aggregate3 per EVM origin chain: getInboundQueuedTransfer for every
+// candidate digest, plus rateLimitDuration() for any manager whose value is not
+// memoized. An asset the pass did not answer for is left out of the result, so
+// the caller keeps its previous reading rather than reading zero.
 async function readEvmQueued(
   url: string,
   targets: readonly OriginTarget[],
@@ -1157,20 +1204,17 @@ async function readEvmQueued(
   interface Slot { target: OriginTarget; send: NttSendRow; id: number }
   const slots: Slot[] = []
   const durationIds = new Map<number, number>()
-  const calls: { jsonrpc: '2.0'; id: number; method: 'eth_call'; params: unknown[] }[] = []
+  const calls: EvmCall[] = []
   const answered = new Set<number>()
 
   for (const target of targets) {
     const manager = displayChainAddress('evm', target.peer)
     const memo = rateLimitDurations.get(target.asset.assetId)
     if (!memo || Date.now() - memo.at >= STATIC_FACTS_TTL_MS) {
-      const id = calls.length
-      calls.push({ jsonrpc: '2.0', id, method: 'eth_call', params: [{ to: manager, data: EVM_SELECTOR.rateLimitDuration }, 'latest'] })
-      durationIds.set(target.asset.assetId, id)
+      durationIds.set(target.asset.assetId, calls.push({ to: manager, data: EVM_SELECTOR.rateLimitDuration }) - 1)
     }
     for (const send of queueCandidates(sends, target.asset.assetId, ctx.chainId, cutoffMs)) {
-      const id = calls.length
-      calls.push({ jsonrpc: '2.0', id, method: 'eth_call', params: [{ to: manager, data: encodeGetInboundQueuedTransfer(send.digest) }, 'latest'] })
+      const id = calls.push({ to: manager, data: encodeGetInboundQueuedTransfer(send.digest) }) - 1
       slots.push({ target, send, id })
     }
     // A target with no candidate digests still counts as read: its queue is
@@ -1178,24 +1222,11 @@ async function readEvmQueued(
     answered.add(target.asset.assetId)
   }
 
-  const byId = new Map<number, string | null>()
-  for (let start = 0; start < calls.length; start += QUEUE_CALL_BATCH) {
-    const chunk = calls.slice(start, start + QUEUE_CALL_BATCH)
-    const json = await postJson(url, chunk, ORIGIN_RPC_TIMEOUT_MS)
-    if (!Array.isArray(json)) {
-      // A dropped chunk is unknown, not empty: every asset it covered loses its
-      // fresh reading and keeps the previous one.
-      for (const call of chunk) {
-        const slot = slots.find(s => s.id === call.id)
-        if (slot) answered.delete(slot.target.asset.assetId)
-      }
-      continue
-    }
-    for (const item of json) {
-      const entry = item as { id?: unknown; result?: unknown }
-      if (!Number.isInteger(entry?.id)) continue
-      byId.set(entry.id as number, typeof entry.result === 'string' ? entry.result : null)
-    }
+  const byId = await postMulticall(url, calls)
+  // A leg the chain never answered is unknown, not empty: every asset it covered
+  // loses its fresh reading and keeps the previous one.
+  for (const slot of slots) {
+    if (!byId.has(slot.id)) answered.delete(slot.target.asset.assetId)
   }
 
   for (const [assetId, id] of durationIds) {

@@ -322,6 +322,87 @@ export function encodeBalanceOf(address: string): string {
   return EVM_SELECTOR.balanceOf + stripHex(address).padStart(64, '0')
 }
 
+// ───────────────────────────── multicall ─────────────────────────────
+// An origin pass reads the same handful of views off every manager, and a
+// provider bills per METHOD however well those are batched into one HTTP
+// request. Multicall3 turns a whole pass into one `eth_call`: same reads, same
+// block, one billed call. Deployed at this address on every chain that has it —
+// verified on Ethereum and Base before this was written.
+export const MULTICALL3_ADDRESS = '0xcA11bde05977b3631167028862bE2a173976CA11'
+
+// aggregate3((address target, bool allowFailure, bytes callData)[])
+//   → (bool success, bytes returnData)[]
+const MULTICALL3_AGGREGATE3 = '0x82ad56cb'
+
+const abiWord = (hex: string): string => stripHex(hex).toLowerCase().padStart(64, '0')
+/** Calldata as whole 32-byte words, right-padded — the ABI's `bytes` tail. */
+const abiBytesTail = (hex: string): string => {
+  const body = stripHex(hex)
+  return body.padEnd(Math.ceil(body.length / 64) * 64, '0')
+}
+
+/**
+ * One `eth_call` standing for `calls`, every leg `allowFailure: true` so one
+ * reverting view cannot take the pass down with it — a revert has to arrive as
+ * that leg's own null, not as a dropped batch.
+ */
+export function encodeAggregate3(calls: readonly { to: string; data: string }[]): string {
+  // Each element is head(target, allowFailure, bytes-offset) + length + payload.
+  const elements = calls.map(call => abiWord(call.to) + abiWord('1') + abiWord('60')
+    + abiWord((stripHex(call.data).length / 2).toString(16)) + abiBytesTail(call.data))
+  // Offsets are measured from the end of the array's length word, past the
+  // offset table itself.
+  let cursor = calls.length * 32
+  const offsets = elements.map(element => {
+    const at = cursor
+    cursor += element.length / 2
+    return abiWord(at.toString(16))
+  })
+  return MULTICALL3_AGGREGATE3 + abiWord('20') + abiWord(calls.length.toString(16))
+    + offsets.join('') + elements.join('')
+}
+
+/**
+ * The `expected` return-data strings, in the order the calls were given. A leg
+ * that reverted is null — never a zero word, which a custody or capacity reader
+ * would take for a real reading of nothing. The whole answer is null (the pass
+ * is unread, and the caller keeps its previous readings) when it is missing,
+ * malformed, or does not carry exactly the expected number of results.
+ */
+export function decodeAggregate3(result: string | null | undefined, expected: number): (string | null)[] | null {
+  if (typeof result !== 'string') return null
+  const body = stripHex(result)
+  if (body.length < 128 || body.length % 64 !== 0) return null
+  const wordAt = (byteOffset: number): number | null => {
+    const hex = body.slice(byteOffset * 2, byteOffset * 2 + 64)
+    if (hex.length < 64) return null
+    const value = Number(BigInt('0x' + hex))
+    return Number.isSafeInteger(value) ? value : null
+  }
+  const arrayAt = wordAt(0)
+  if (arrayAt == null) return null
+  const count = wordAt(arrayAt)
+  if (count !== expected) return null
+  const base = arrayAt + 32
+  const out: (string | null)[] = []
+  for (let i = 0; i < count; i++) {
+    const offset = wordAt(base + i * 32)
+    if (offset == null) return null
+    const item = base + offset
+    const success = wordAt(item)
+    // A dynamic member's offset is measured from the start of its own tuple.
+    const dataAt = wordAt(item + 32)
+    if (success == null || dataAt == null) return null
+    const length = wordAt(item + dataAt)
+    if (length == null) return null
+    const start = (item + dataAt + 32) * 2
+    const hex = body.slice(start, start + length * 2)
+    if (hex.length < length * 2) return null
+    out.push(success === 1 && length > 0 ? '0x' + hex : null)
+  }
+  return out
+}
+
 // eth_call results are 32-byte words. A missing/short/garbage answer is unknown,
 // so every decoder below returns null rather than a plausible zero.
 export function decodeUint(result: string | null | undefined): bigint | null {
