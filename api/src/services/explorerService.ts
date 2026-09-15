@@ -10891,6 +10891,71 @@ function globalConsensusName(value: unknown): string | null {
  * `Parachain(1000)` is 1000 of the FOREIGN consensus, and resolving it against the
  * local parachain registry would label Kusama AssetHub as Polkadot's.
  */
+/**
+ * Where a bridged send's accounts live: the SS58 prefix they are encoded at and the
+ * explorer that can show them. A Kusama address rendered at Polkadot's prefix links
+ * to an account that does not exist there, so a consensus with no entry gets no
+ * link rather than a plausible wrong one.
+ *
+ * Only consensus systems whose accounts are substrate accounts belong here.
+ * `Ethereum` is named by the bridge but its accounts are H160s explored elsewhere,
+ * so it is deliberately absent.
+ */
+const BRIDGED_NETWORK_META: Record<string, XcmNetworkMeta> = {
+  Polkadot: RELAY_XCM_NETWORK,
+  Kusama: { name: 'Kusama', subscan: 'https://kusama.subscan.io', ss58: 2 },
+}
+export function bridgedNetworkMeta(network: string | null | undefined): XcmNetworkMeta | undefined {
+  if (!network) return undefined
+  return BRIDGED_NETWORK_META[network] ?? { name: network }
+}
+
+/** Instructions that carry a nested program for the NEXT hop, under `xcm`. */
+const XCM_NESTED_PROGRAM_KINDS = new Set([
+  'InitiateReserveWithdraw', 'DepositReserveAsset', 'TransferReserveAsset', 'InitiateTeleport', 'ExportMessage',
+])
+
+/**
+ * The account a send ultimately pays: the `DepositAsset` beneficiary of its LAST
+ * hop.
+ *
+ * A bridged send carries no top-level DepositAsset at all — the beneficiary lives
+ * inside the forwarding instruction's own program, and the only DepositAsset above
+ * it belongs to `SetAppendix`, which is the REFUND path that runs when the hop
+ * fails and pays the sender back on the intermediary chain. Reading that one names
+ * the wrong account on the wrong chain, so the appendix and the error handler are
+ * skipped outright and the deepest hop wins.
+ */
+export function xcmFinalBeneficiary(
+  message: readonly Record<string, unknown>[] | undefined,
+): string | undefined {
+  let found: string | undefined
+  const walk = (instructions: readonly Record<string, unknown>[] | undefined): void => {
+    for (const instruction of instructions ?? []) {
+      const kind = instruction.__kind
+      if (typeof kind !== 'string') continue
+      // The failure paths, never the destination.
+      if (kind === 'SetAppendix' || kind === 'SetErrorHandler') continue
+      if (XCM_NESTED_PROGRAM_KINDS.has(kind)) {
+        const nested = instruction.xcm
+        if (Array.isArray(nested)) walk(nested as Record<string, unknown>[])
+        continue
+      }
+      if (kind !== 'DepositAsset') continue
+      const junctions = xcmJunctions((instruction.beneficiary as { interior?: unknown } | undefined)?.interior)
+      const id = junctionValue<string>(junctions.find(j => j.__kind === 'AccountId32'), 'id')
+        ?? junctionValue<string>(junctions.find(j => j.__kind === 'AccountKey20'), 'key')
+      // A deeper hop has already answered; only the outermost level fills a gap.
+      if (typeof id === 'string' && !found) found = id
+    }
+  }
+  // Deepest first: walk the nested programs, then fall back to this level.
+  const hops = (message ?? []).filter(i => typeof i.__kind === 'string' && XCM_NESTED_PROGRAM_KINDS.has(i.__kind as string))
+  for (const hop of hops) if (Array.isArray(hop.xcm)) walk(hop.xcm as Record<string, unknown>[])
+  if (!found) walk(message)
+  return found
+}
+
 export function bridgedXcmNetwork(message: readonly { __kind?: string; value?: unknown }[] | undefined): string | null {
   for (const instruction of message ?? []) {
     const kind = instruction.__kind
@@ -11050,16 +11115,18 @@ export function parseOutboundXcm(argsRaw: unknown): ParsedOutboundXcm | null {
     // same number. Null says "not a parachain of this consensus", which is true.
     const bridged = bridgedXcmNetwork(args.message)
     const dest = bridged ? { ...hop, destChain: bridged, destParachainId: null } : hop
-    // Sent's destination names only the chain; the beneficiary account lives in
-    // the message's DepositAsset instruction.
+    // Sent's destination names only the chain; the beneficiary account lives in the
+    // message's DepositAsset — on the LAST hop, which for a bridged send is nested
+    // inside the forwarding instruction rather than at the top level (see
+    // xcmFinalBeneficiary, which also skips the appendix refund).
     if (!dest.destAccount) {
-      const dep = args.message.find(i => i.__kind === 'DepositAsset') as { beneficiary?: { interior?: unknown } } | undefined
-      const bj = xcmJunctions(dep?.beneficiary?.interior)
-      const b32 = bj.find(j => j.__kind === 'AccountId32')
-      const b20 = bj.find(j => j.__kind === 'AccountKey20')
-      const meta = dest.destParachainId != null ? PARACHAIN_META[dest.destParachainId] : dest.destChain === RELAY_XCM_NETWORK.name ? RELAY_XCM_NETWORK : undefined
-      const id = typeof b32?.id === 'string' ? b32.id : typeof b20?.key === 'string' ? b20.key : undefined
-      dest.destAccount = externalAccountRef(id, meta)
+      // A bridged target takes its own consensus's prefix and explorer: its
+      // parachain id was cleared above precisely because it is not ours, so the
+      // local registry cannot answer for it.
+      const meta = bridged ? bridgedNetworkMeta(bridged)
+        : dest.destParachainId != null ? PARACHAIN_META[dest.destParachainId]
+          : dest.destChain === RELAY_XCM_NETWORK.name ? RELAY_XCM_NETWORK : undefined
+      dest.destAccount = externalAccountRef(xcmFinalBeneficiary(args.message as unknown as Record<string, unknown>[]), meta)
     }
     // A Transact message withdraws and pays at the DESTINATION: none of its amounts is
     // a Hydration leg, so it carries no payload here.
