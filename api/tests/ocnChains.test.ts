@@ -243,3 +243,25 @@ describe('links back to Hydration itself', () => {
     expect(originTxExplorerUrl('urn:ocn:polkadot:2034', '0x' + 'ab'.repeat(32))).toBeNull()
   })
 })
+
+// Kusama's side of a bridged journey. Ocelloids reports these ends as
+// urn:ocn:kusama:<para>, and with no branch for that consensus they fell through to
+// the generic one: named "Kusama 1000" and rendered with no link at all, even
+// though the journeys exist upstream (2 of 250 scanned).
+describe('kusama journey ends', () => {
+  it('names Kusama AssetHub rather than the bare para id', () => {
+    expect(ocnChainName('urn:ocn:kusama:1000')).toBe('Kusama AssetHub')
+    expect(ocnChainName('urn:ocn:kusama:0')).toBe('Kusama')
+  })
+
+  it('links each to its own Subscan', () => {
+    const tx = '0x' + 'cd'.repeat(32)
+    expect(originTxExplorerUrl('urn:ocn:kusama:1000', tx)).toBe(`https://assethub-kusama.subscan.io/extrinsic/${tx}`)
+    expect(originTxExplorerUrl('urn:ocn:kusama:0', tx)).toBe(`https://kusama.subscan.io/extrinsic/${tx}`)
+  })
+
+  it('still names an unmapped Kusama parachain without inventing a link', () => {
+    expect(ocnChainName('urn:ocn:kusama:2222')).toBe('Kusama 2222')
+    expect(originTxExplorerUrl('urn:ocn:kusama:2222', '0x' + 'cd'.repeat(32))).toBeNull()
+  })
+})
