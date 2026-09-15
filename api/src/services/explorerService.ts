@@ -12466,6 +12466,11 @@ const EVM_CHAIN_META: Record<string, { name: string; explorer: string }> = {
   10: { name: 'Optimism', explorer: 'https://optimistic.etherscan.io' },
   56: { name: 'BNB Chain', explorer: 'https://bscscan.com' },
   137: { name: 'Polygon', explorer: 'https://polygonscan.com' },
+  // Robinhood Chain, an Arbitrum Orbit L2 settling on Ethereum. Robinscan over the
+  // chain's Blockscout: both answer /tx/ and /address/, and this is the one the
+  // chain is read on. Checked against a real transaction, and against a fabricated
+  // hash that it does NOT render — a 200 alone proves nothing on a single-page app.
+  4663: { name: 'Robinhood Chain', explorer: 'https://robinscan.io' },
 }
 // A consensus system's own chain id is not always a number — Sui names itself by a
 // hex digest — so the id stays a string and only the polkadot branch reads it as one.
@@ -12721,6 +12726,10 @@ export const WORMHOLE_CHAIN_URNS: Record<number, string> = {
   23: 'urn:ocn:ethereum:42161',   // Arbitrum
   24: 'urn:ocn:ethereum:10',      // Optimism
   30: 'urn:ocn:ethereum:8453',    // Base
+  // Robinhood Chain. Read off its own core bridge rather than a doc page:
+  // chainId() at 0x141fBa8AD5D61bdaB45A047cF60b5Ad9784987FB answers 0x48. It sits
+  // directly below Hydration's own 73, so the two are easy to transpose.
+  72: 'urn:ocn:ethereum:4663',
 }
 
 export interface NttTransferSent { recipient: string; amount: string; recipientChain: number }
