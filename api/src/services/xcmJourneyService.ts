@@ -166,6 +166,27 @@ let backgroundInflight: Promise<void> | null = null
 let pendingOldestMs = Number.MAX_SAFE_INTEGER
 const pendingHistoricalKeys = new Map<string, { timestampMs: number; bridge: boolean }>()
 
+/**
+ * Whether a string is an id a journey can be keyed by.
+ *
+ * Two shapes reach us. An XCM hop is keyed by its 32-byte topic (`0x…`). A bridged
+ * journey with no XCM leg — Wormhole NTT — is keyed by the VAA's own identity,
+ * `chain/emitter/sequence`, which carries no 0x: accepting only the topic form
+ * fetched those journeys and then discarded them, so an NTT arrival could never
+ * find its sender.
+ */
+const VAA_MESSAGE_ID_RE = /^\d+\/[0-9a-f]{64}\/\d+$/i
+function isJourneyMessageId(value: string): boolean {
+  return value.startsWith('0x') || VAA_MESSAGE_ID_RE.test(value)
+}
+
+/** The ids a journey's stops are keyed by. Exported for its own test. */
+export function messageIdsOfStops(stops: unknown): string[] {
+  const out = new Set<string>()
+  collectMessageIds(stops, out)
+  return [...out]
+}
+
 function collectMessageIds(stops: unknown, out: Set<string>): void {
   const parsed = typeof stops === 'string' ? safeParse(stops) : stops
   if (!Array.isArray(parsed)) return
@@ -175,13 +196,13 @@ function collectMessageIds(stops: unknown, out: Set<string>): void {
     // both, or inbound source resolution silently misses whole classes.
     for (const key of ['messageId', 'messageHash'] as const) {
       const v = (stop as Record<string, unknown>)?.[key]
-      if (typeof v === 'string' && v.startsWith('0x')) out.add(v.toLowerCase())
+      if (typeof v === 'string' && isJourneyMessageId(v)) out.add(v.toLowerCase())
     }
     const instructions = (stop as { instructions?: unknown })?.instructions
     if (!Array.isArray(instructions)) continue
     for (const instr of instructions) {
       const id = (instr as { messageId?: unknown })?.messageId
-      if (typeof id === 'string' && id.startsWith('0x')) out.add(id.toLowerCase())
+      if (typeof id === 'string' && isJourneyMessageId(id)) out.add(id.toLowerCase())
     }
   }
 }
