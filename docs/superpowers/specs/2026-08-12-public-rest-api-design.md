@@ -261,6 +261,32 @@ ordering are computed over the owner's whole set before the page is cut.
 ```
 `GET /v1/intents/count?owner=0x…&status=open&kind=&assets=` — max-age 3. `{ "totalCount": 1 }`.
 
+`GET /v1/intents/:id` — max-age 3. The same row object the listing publishes, for one order, built
+by the SAME fold rather than a second one: a progress view reached from a list may not contradict
+the list it came from. No owner: the id alone bounds both reads — `intent_orders` is
+`ORDER BY intent_id`, so the placement is a point read, and the placement block it returns is the
+lower bound of the event fold (`intent_events` is keyed `(block_height, event_index)` and cannot
+prune on an id, and no event of an order can precede its submission). Unknown id → 404.
+
+`GET /v1/intents/:id/events?limit=&offset=` — max-age 3.
+```json
+{ "items": [ { "kind": "dca_trade", "eventName": "Intent.DcaTradeExecuted",
+               "blockHeight": 14519541, "eventIndex": 9, "extrinsicIndex": 1, "timestamp": "…",
+               "amountIn": "…", "amountOut": "…", "remainingBudget": "…" } ],
+  "totalCount": 125, "assetIn": "1000765", "assetOut": "0" }
+```
+`kind` is one of `submitted`, `resolved`, `partially_resolved`, `dca_trade`, `dca_completed`,
+`cancelled`, `expired`, `callback_failed` — a DCA fill table is the `dca_trade` rows, a swap
+intent's fills are `resolved`/`partially_resolved`. Amounts are the EVENT's, not the order's, and
+an event that traded nothing reports them null rather than 0: a submission, a cancellation, an
+expiry, and `Intent.DcaCompleted`, whose final trade states its amounts only in the solution's
+settlement transfers. `remainingBudget` is the pallet's own figure after a dca trade and `"0"` on
+the completion, which by definition spent the rest. The pair sits on the ENVELOPE because only the
+submission names it and it labels every amount in the page — the same reason
+`/v1/dca/schedules/:id/executions` carries it. Page and count filter on the identical event-name
+list, so a count can never promise a page the caller cannot reach; both deduplicate on
+`(block_height, event_index)`, the table's own replacement key. Unknown id → 404.
+
 **Semantics.** `intentId` is a u128 carried as a DECIMAL STRING and is the identity; `seq` is its
 low 64 bits, a display handle exact only below 2^53. Status folds from the order's own events at
 read time and MUST agree with the explorer's intent page — a PARTIAL resolution is not terminal

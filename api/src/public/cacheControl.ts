@@ -57,7 +57,8 @@ export const PUBLIC_CACHE_CONTROL: Array<[RegExp, number]> = [
   // freshness and collapse every dashboard onto one computation.
   [/^\/v1\/staking\/gigahdx\/apr$/, 300],
   [/^\/v1\/dca\/schedules(\/count|\/[^/]+\/executions)?$/, 3],
-  [/^\/v1\/intents(\/count)?$/, 3],
+  // The listing, its counter, and the two per-id reads a progress view polls.
+  [/^\/v1\/intents(\/count|\/\d+(\/events)?)?$/, 3],
   [/^\/v1\/prices\/pair$/, 5],
   [/^\/v1\/prices\/cross-chain-pair$/, 5],
   [/^\/v1\/pools\/[^/]+\/volumes$/, 60],
