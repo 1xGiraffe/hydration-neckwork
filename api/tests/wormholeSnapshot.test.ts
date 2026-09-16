@@ -237,7 +237,16 @@ function hydrationEthCall(call: RpcCall): string | null {
   if (selector === '0x295a5212') return '0x' + word(1n)                        // mode() = BURNING
   if (selector === '0x9a8a0592') return '0x' + word(73n)                       // chainId()
   if (selector === '0xb187bd26') return '0x' + word(0n)                        // isPaused()
-  if (selector === '0xc128d170') return ORIGIN_PEER[asset.assetId] + word(BigInt(asset.decimals))
+  // getPeer(uint16) is asked for every chain this deployment could read, so it
+  // has to answer like a real manager: the peer only on the chain it is actually
+  // registered for, and a zero word — which decodes as "no peer" — everywhere
+  // else. Answering unconditionally would invent a custody on every chain.
+  if (selector === '0xc128d170') {
+    const asked = Number(BigInt('0x' + data.slice(10)))
+    return asked === asset.chain
+      ? ORIGIN_PEER[asset.assetId] + word(BigInt(asset.decimals))
+      : '0x' + word(0n) + word(0n)
+  }
   if (selector === '0x74aa7bfc') return '0x' + word(RATE_LIMIT_SECONDS)
   // Hydration's own legs: uncapped, at the asset's own decimals.
   const localTrimmed = packTrimmed(184_467_440_737_00000000n, 8)
