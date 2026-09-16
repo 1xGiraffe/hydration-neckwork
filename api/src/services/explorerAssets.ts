@@ -85,7 +85,13 @@ async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<voi
   for (const r of rows) {
     const symbol = r.asset_id === H2O_ASSET_ID ? 'H2O' : r.symbol
     const name = NAME_OVERRIDES[r.asset_id] ?? (r.asset_id === H2O_ASSET_ID ? 'H2O' : r.name)
-    const members = poolMembers.get(r.asset_id)
+    // A wrapper over a pool share inherits the pool's member cluster. a3-Pool is an
+    // aToken whose reserve is 3-Pool, and 3-Pool is a multi-member pool with no single
+    // asset to borrow artwork from — so resolving the wrapper to its reserve only moves
+    // the problem: the reserve's icon IS the cluster, which was filed under the reserve's
+    // id and never reached the wrapper. Own id wins, so a share token that is itself a
+    // pool (2-Pool-GDOT) keeps its own members rather than its underlying's.
+    const members = poolMembers.get(r.asset_id) ?? poolMembers.get(iconAssetIdFor(r.asset_id))
     cache.set(r.asset_id, {
       assetId: r.asset_id,
       iconAssetId: iconAssetIdFor(r.asset_id),
