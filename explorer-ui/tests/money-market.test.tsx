@@ -91,6 +91,44 @@ describe('primary-first Money Market presentation', () => {
     expect(html).toContain('/polkadot/2034/assets/22/icon.svg')
   })
 
+  // A reserve that IS a pool share has no single icon to borrow: a2-Pool-PRIME is
+  // PRIME+HOLLAR, so it draws as that cluster, exactly as the activity feed draws
+  // it. Without the members it fell back to a bare glyph.
+  it('draws a pool-share reserve as its pool, not as one bare glyph', () => {
+    const html = renderToStaticMarkup(<MoneyMarketPositions markets={[position({
+      reserves: [{
+        assetId: 1143,
+        iconAssetId: 143,
+        iconAssetIds: [43, 222],
+        symbol: 'a2-Pool-PRIME',
+        decimals: 18,
+        parachainId: null,
+        origin: null,
+        supplied: '1000000000000000000',
+        debt: '0',
+        suppliedUsd: 1,
+        debtUsd: null,
+        collateral: true,
+      }],
+    })]} />)
+    // 43 ships a .png and 222 an .svg, so the pair is asserted extension-agnostically.
+    expect(html).toContain('/assets/43/icon.')
+    expect(html).toContain('/assets/222/icon.')
+  })
+
+  // A reserve names an asset the reader can open — every other surface links its
+  // assets, and the positions card left them as dead text.
+  it('links each reserve to its asset page', () => {
+    const html = renderToStaticMarkup(<MoneyMarketPositions markets={[position({
+      reserves: [{
+        assetId: 1143, iconAssetId: 143, symbol: 'a2-Pool-PRIME', decimals: 18,
+        parachainId: null, origin: null, supplied: '1000000000000000000', debt: '0',
+        suppliedUsd: 1, debtUsd: null, collateral: true,
+      }],
+    })]} />)
+    expect(html).toContain('href="/asset/1143"')
+  })
+
   // The Positions tab renders one card per isolated market, so the badge counts
   // one per market — an account lending in core, GIGAHDX and BIL shows 3, not 1.
   it('counts one position per isolated money market', () => {

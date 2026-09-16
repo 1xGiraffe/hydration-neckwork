@@ -5080,6 +5080,11 @@ function mmReserveRow(
   return {
     assetId: disp?.assetId ?? reg?.assetId ?? -1, symbol: disp?.symbol ?? (reg?.symbol ?? '?'), decimals,
     iconAssetId: disp?.iconAssetId ?? reg?.iconAssetId,
+    // A reserve that IS a pool share (a2-Pool-PRIME over 2-Pool-PRIME) has no single
+    // icon to borrow — it draws as its pool's members, the same cluster the feed
+    // gives it. foldShareReserves already carried these; an UNfolded reserve dropped
+    // them and fell back to a bare glyph.
+    ...((disp?.iconAssetIds ?? reg?.iconAssetIds) ? { iconAssetIds: (disp?.iconAssetIds ?? reg?.iconAssetIds) } : {}),
     parachainId: disp?.parachainId ?? reg?.parachainId ?? null,
     origin: disp?.origin ?? reg?.origin ?? null,
     supplied: sup.toString(), debt: dbt.toString(),
