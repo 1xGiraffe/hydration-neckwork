@@ -145,13 +145,27 @@ interface DiscoveredAsset {
   originToken: string      // 32-byte hex as registered
 }
 
+interface ManagerPeer {
+  chainId: number
+  peer: string
+  decimals: number | null
+}
+
 interface ManagerStaticFacts {
   at: number
   token: string | null
   mode: number | null
   chainId: number | null
+  /** The registry origin's peer, kept for the fields that name a single origin. */
   peer: string | null
   peerDecimals: number | null
+  /**
+   * EVERY chain this manager has registered a peer on, not just the registry
+   * origin. A burning manager can be backed by more than one locking custody —
+   * WETH is held on both Ethereum and Robinhood Chain — and reading only the
+   * registry origin understates backing by whatever the others hold.
+   */
+  peers: ManagerPeer[]
 }
 
 interface CustodyRead {
@@ -275,9 +289,11 @@ export function getWormholeSnapshotGeneration(): number {
 }
 
 // Values that survive a partial failure: per-manager static facts and the last
-// custody read per asset, so one bad poll of one chain does not blank it.
+// custody read, so one bad poll of one chain does not blank it. Custody is keyed
+// `assetId:chainId` because an asset can be backed on more than one chain, and
+// one chain's carried-over reading must not stand in for another's.
 const staticFacts = new Map<number, ManagerStaticFacts>()
-const lastCustody = new Map<number, CustodyRead>()
+const lastCustody = new Map<string, CustodyRead>()
 // Operations Wormholescan has already reported redeemed never change back, so a
 // steady-state cycle only re-checks the ones still pending.
 const resolvedScanOps = new Set<string>()
@@ -298,7 +314,9 @@ const rateLimitDurations = new Map<number, { seconds: bigint; at: number }>()
 // cannot change it without being redeployed, so it rides the same hourly refresh
 // — and the check it feeds (a manager whose token disagrees with the registry is
 // not answering for this asset) keeps being made on every cycle, from the memo.
-const managerTokens = new Map<number, { address: string; at: number }>()
+// Keyed `assetId:chainId` — one asset's custody managers on different chains
+// each lock their own local token.
+const managerTokens = new Map<string, { address: string; at: number }>()
 // The last queue read per asset, so one failed poll of one chain does not blank
 // a queue the previous cycle measured.
 const lastQueued = new Map<number, QueuedEntry[]>()
@@ -667,16 +685,35 @@ async function hydrationBlockHash(blockNumber: number): Promise<string | null> {
   } catch { return null } finally { clearTimeout(timer) }
 }
 
+/**
+ * The chains worth asking a manager whether it has a peer there.
+ *
+ * The asset's own registry origin, plus every chain this deployment has an
+ * endpoint for — a peer we cannot read custody from tells us nothing, and asking
+ * about arbitrary ids would be an unbounded sweep of Wormhole's number space.
+ * Adding a chain to WORMHOLE_ORIGIN_RPC_URLS is therefore all it takes for its
+ * custody to start counting; nothing here is per-chain code.
+ */
+function peerCandidateChains(asset: DiscoveredAsset): number[] {
+  return [...new Set([asset.originChainId, ...ORIGIN_RPC_URLS.keys()])].sort((a, b) => a - b)
+}
+
 async function readManagerFacts(asset: DiscoveredAsset): Promise<ManagerStaticFacts> {
   const cached = staticFacts.get(asset.assetId)
   if (cached && Date.now() - cached.at < STATIC_FACTS_TTL_MS && cached.peer != null) return cached
-  const [tokenRaw, modeRaw, chainIdRaw, peerRaw] = [
+  const candidates = peerCandidateChains(asset)
+  const [tokenRaw, modeRaw, chainIdRaw, ...peerRaws] = [
     await hydrationEthCall(asset.manager, EVM_SELECTOR.token),
     await hydrationEthCall(asset.manager, EVM_SELECTOR.mode),
     await hydrationEthCall(asset.manager, EVM_SELECTOR.chainId),
-    await hydrationEthCall(asset.manager, encodeGetPeer(asset.originChainId)),
+    ...await Promise.all(candidates.map(c => hydrationEthCall(asset.manager, encodeGetPeer(c)))),
   ]
-  const peer = decodeGetPeer(peerRaw)
+  const peers: ManagerPeer[] = []
+  candidates.forEach((chainId, i) => {
+    const decoded = decodeGetPeer(peerRaws[i] ?? null)
+    if (decoded?.address) peers.push({ chainId, peer: decoded.address, decimals: decoded.decimals })
+  })
+  const origin = peers.find(p => p.chainId === asset.originChainId)
   const mode = decodeUint(modeRaw)
   const chainId = decodeUint(chainIdRaw)
   const facts: ManagerStaticFacts = {
@@ -684,8 +721,9 @@ async function readManagerFacts(asset: DiscoveredAsset): Promise<ManagerStaticFa
     token: decodeAddress(tokenRaw),
     mode: mode == null ? null : Number(mode),
     chainId: chainId == null ? null : Number(chainId),
-    peer: peer?.address ?? cached?.peer ?? null,
-    peerDecimals: peer?.decimals ?? cached?.peerDecimals ?? null,
+    peer: origin?.peer ?? cached?.peer ?? null,
+    peerDecimals: origin?.decimals ?? cached?.peerDecimals ?? null,
+    peers: peers.length ? peers : cached?.peers ?? [],
   }
   if (facts.peer != null) staticFacts.set(asset.assetId, facts)
   return facts
@@ -730,9 +768,55 @@ async function postMulticall(url: string, calls: readonly EvmCall[]): Promise<Ma
   return byId
 }
 
-interface OriginTarget { asset: DiscoveredAsset; peer: string; peerDecimals: number | null }
+interface OriginTarget {
+  asset: DiscoveredAsset
+  peer: string
+  peerDecimals: number | null
+  /** The chain this peer is on. Differs from `asset.originChainId` for a second custody. */
+  chainId: number
+  /**
+   * The token whose balance is this peer's custody, when it is already known —
+   * the registry's own origin token on the registry origin chain. Null on any
+   * other chain: the registry names one token on one chain, so there the peer
+   * manager's own `token()` is the only authority, and it is adopted rather than
+   * checked against an address that describes a different chain.
+   */
+  expectedToken: string | null
+}
 
 interface PendingDigest { assetId: number; digest: string }
+
+/**
+ * Fold one chain's custody reading into the asset's running total.
+ *
+ * Custodies are stated in their own chain's token decimals, so each is rescaled
+ * to the first one seen before it is added. A reading that is stale, paused or
+ * of unknown scale carries that property to the total: a sum containing one
+ * carried-over balance is itself carried over, and a paused custody anywhere is
+ * a paused custody for the asset. A balance that cannot be rescaled is dropped
+ * rather than added at the wrong magnitude — the total then reads low, which the
+ * verdict treats as unverified, never as a confirmed shortfall.
+ */
+export function addCustody(prev: CustodyRead | undefined, next: CustodyRead, fallbackDecimals: number): CustodyRead {
+  if (!prev) return next
+  if (prev.locked == null || next.locked == null) {
+    return { ...prev, locked: prev.locked ?? next.locked, stale: true, at: Math.max(prev.at, next.at) }
+  }
+  const scale = (value: bigint, from: number | null, to: number | null): bigint | null => {
+    const f = from ?? fallbackDecimals, t = to ?? fallbackDecimals
+    if (f === t) return value
+    return t > f ? value * 10n ** BigInt(t - f) : value / 10n ** BigInt(f - t)
+  }
+  const added = scale(next.locked, next.decimals, prev.decimals)
+  if (added == null) return { ...prev, stale: true }
+  return {
+    locked: prev.locked + added,
+    decimals: prev.decimals,
+    paused: prev.paused === true || next.paused === true ? true : prev.paused ?? next.paused,
+    at: Math.max(prev.at, next.at),
+    ...(prev.stale || next.stale ? { stale: true } : {}),
+  }
+}
 
 interface EvmOriginRead {
   custody: Map<number, CustodyRead>
@@ -777,11 +861,20 @@ async function readEvmCustody(
   const memoLive = (memo: { at: number } | undefined): boolean => !!memo && now - memo.at < STATIC_FACTS_TTL_MS
   for (const target of targets) {
     const assetId = target.asset.assetId
+    const memoKey = `${assetId}:${target.chainId}`
     const managerAddress = displayChainAddress('evm', target.peer)
-    const tokenAddress = displayChainAddress('evm', target.asset.originToken)
-    const balance = push({ to: tokenAddress, data: encodeBalanceOf(managerAddress) })
+    // Which token holds this peer's custody. On the registry origin the registry
+    // says so; on any other chain only the peer manager does, so until its
+    // `token()` has been read there is no address to ask for a balance and the
+    // balance call is deferred to the follow-up pass below.
+    const tokenAddress = target.expectedToken != null
+      ? displayChainAddress('evm', target.expectedToken)
+      : managerTokens.get(memoKey)?.address ?? null
+    const balance = tokenAddress == null ? -1 : push({ to: tokenAddress, data: encodeBalanceOf(managerAddress) })
     const paused = push({ to: managerAddress, data: EVM_SELECTOR.isPaused })
-    const token = memoLive(managerTokens.get(assetId)) ? null : push({ to: managerAddress, data: EVM_SELECTOR.token })
+    const token = tokenAddress != null && memoLive(managerTokens.get(memoKey))
+      ? null
+      : push({ to: managerAddress, data: EVM_SELECTOR.token })
     const fuse = calls.length
     for (const call of fuseCalls(managerAddress, hydrationChainId)) push(call)
     const duration = memoLive(rateLimitDurations.get(assetId))
@@ -801,15 +894,31 @@ async function readEvmCustody(
   if (!byId.size) return out
 
   const at = Date.now()
+  const deferred: { assetId: number; slot: CustodySlot; token: string }[] = []
   for (const [assetId, slot] of index) {
-    const registered = displayChainAddress('evm', slot.target.asset.originToken).toLowerCase()
+    const memoKey = `${assetId}:${slot.target.chainId}`
     // Fresh when this cycle asked, otherwise the memo's — a manager only ever
     // changes the token it answers for by being redeployed.
     const reported = slot.token == null
-      ? managerTokens.get(assetId)?.address ?? null
+      ? managerTokens.get(memoKey)?.address ?? null
       : decodeAddress(byId.get(slot.token))?.toLowerCase() ?? null
-    if (reported != null && reported !== registered) continue
-    if (slot.token != null && reported != null) managerTokens.set(assetId, { address: reported, at })
+    // Only the registry origin has an address to check against. Elsewhere the
+    // registry describes a different chain's token, so comparing to it would
+    // reject every second custody; the peer manager Hydration itself points at
+    // is the authority for what it locks.
+    if (slot.target.expectedToken != null) {
+      const registered = displayChainAddress('evm', slot.target.expectedToken).toLowerCase()
+      if (reported != null && reported !== registered) continue
+    }
+    if (slot.token != null && reported != null) managerTokens.set(memoKey, { address: reported, at })
+    // A peer whose token was unknown when the batch was built has no balance in
+    // it; now that its manager has named the token, ask in the follow-up pass so
+    // a newly discovered custody counts from its first cycle rather than reading
+    // as zero until the next one.
+    if (slot.balance < 0) {
+      if (reported != null) deferred.push({ assetId, slot, token: reported })
+      continue
+    }
     const locked = decodeUint(byId.get(slot.balance))
     if (locked == null) continue
     out.custody.set(assetId, { locked, decimals: slot.target.peerDecimals, paused: decodeBool(byId.get(slot.paused)), at })
@@ -824,6 +933,20 @@ async function readEvmCustody(
     out.fuses.set(assetId, {
       outbound: evmFuse(byId.get(slot.fuse) ?? null, byId.get(slot.fuse + 1) ?? null, tokenDecimals, slot.target.asset.decimals, Number(duration)),
       inbound: evmFuse(byId.get(slot.fuse + 2) ?? null, byId.get(slot.fuse + 3) ?? null, tokenDecimals, slot.target.asset.decimals, Number(duration)),
+    })
+  }
+
+  // The balances that could not be asked for until their token was named.
+  if (deferred.length) {
+    const followUp = await postMulticall(url, deferred.map(d => ({
+      to: d.token, data: encodeBalanceOf(displayChainAddress('evm', d.slot.target.peer)),
+    })))
+    deferred.forEach((d, i) => {
+      const locked = decodeUint(followUp.get(i))
+      if (locked == null) return
+      out.custody.set(d.assetId, {
+        locked, decimals: d.slot.target.peerDecimals, paused: decodeBool(byId.get(d.slot.paused)), at,
+      })
     })
   }
 
@@ -1481,13 +1604,25 @@ async function readBackingCycle(
   // Origin custody, grouped by chain so one endpoint answers for all its
   // assets. An unconfigured or failing chain keeps whatever it last reported,
   // with its own timestamp, rather than being blanked.
+  // One entry per (asset, peer chain): an asset backed by custody on two chains
+  // is read on both and its backing is their SUM. Reading only the registry
+  // origin reported WETH short by whatever Robinhood Chain held.
   const byChain = new Map<number, OriginTarget[]>()
   for (const asset of assets) {
     const fact = facts.get(asset.assetId)
     if (!fact?.peer) continue
-    const list = byChain.get(asset.originChainId) ?? []
-    list.push({ asset, peer: fact.peer, peerDecimals: fact.peerDecimals })
-    byChain.set(asset.originChainId, list)
+    const peers = fact.peers.length ? fact.peers : [{ chainId: asset.originChainId, peer: fact.peer, decimals: fact.peerDecimals }]
+    for (const p of peers) {
+      const list = byChain.get(p.chainId) ?? []
+      list.push({
+        asset,
+        peer: p.peer,
+        peerDecimals: p.decimals,
+        chainId: p.chainId,
+        expectedToken: p.chainId === asset.originChainId ? asset.originToken : null,
+      })
+      byChain.set(p.chainId, list)
+    }
   }
   const custody = new Map<number, CustodyRead>()
   const suiInbox = new Map<number, number>()
@@ -1556,14 +1691,17 @@ async function readBackingCycle(
     let newest: number | null = null
     for (const target of targets) {
       const fresh = read.get(target.asset.assetId)
-      if (fresh) lastCustody.set(target.asset.assetId, fresh)
+      // Remembered per (asset, chain): two custodies for one asset must not
+      // overwrite each other's last-known reading.
+      const memoKey = `${target.asset.assetId}:${chainId}`
+      if (fresh) lastCustody.set(memoKey, fresh)
       // A carried-over reading is marked as one on its way out, so the verdict
       // can tell "custody is this" from "custody was this when we last got an
       // answer". The remembered entry itself stays unmarked.
-      const remembered = lastCustody.get(target.asset.assetId)
+      const remembered = lastCustody.get(memoKey)
       const value = fresh ?? (remembered ? { ...remembered, stale: true } : undefined)
       if (!value) continue
-      custody.set(target.asset.assetId, value)
+      custody.set(target.asset.assetId, addCustody(custody.get(target.asset.assetId), value, target.asset.decimals))
       newest = newest == null ? value.at : Math.max(newest, value.at)
     }
     chains.push({
@@ -2290,6 +2428,8 @@ export interface WormholeAlertQueued {
   chainName: string
   releasableAt: string | null
 }
+
+export type { CustodyRead }
 
 export interface WormholeAlertState {
   assets: WormholeAlertAsset[]
