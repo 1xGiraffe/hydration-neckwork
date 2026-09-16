@@ -24,9 +24,9 @@ describe('challenge → verify', () => {
     const { pair, address, accountId } = pairAndAddress()
     const ch = createChallenge('h', address)!
     const sig = u8aToHex(sr25519Sign(u8aWrapBytes(ch.message), pair))
-    expect(verifyChallenge(ch.nonce, address, sig)).toBe(accountId)
+    expect(verifyChallenge(ch.nonce, address, sig)).toEqual({ ok: true, accountId })
     // single-use: the same nonce cannot log in twice
-    expect(verifyChallenge(ch.nonce, address, sig)).toBeNull()
+    expect(verifyChallenge(ch.nonce, address, sig)).toEqual({ ok: false, reason: 'no-challenge' })
   })
 
   it('rejects an unknown nonce, a wrong address, and a bad signature', () => {
@@ -34,10 +34,10 @@ describe('challenge → verify', () => {
     const other = pairAndAddress()
     const ch = createChallenge('h', address)!
     const sig = u8aToHex(sr25519Sign(u8aWrapBytes(ch.message), pair))
-    expect(verifyChallenge('f'.repeat(32), address, sig)).toBeNull()
-    expect(verifyChallenge(ch.nonce, other.address, sig)).toBeNull()
+    expect(verifyChallenge('f'.repeat(32), address, sig)).toEqual({ ok: false, reason: 'no-challenge' })
+    expect(verifyChallenge(ch.nonce, other.address, sig)).toEqual({ ok: false, reason: 'address-mismatch' })
     const ch2 = createChallenge('h', address)!
-    expect(verifyChallenge(ch2.nonce, address, u8aToHex(sr25519Sign(u8aWrapBytes('tampered'), pair)))).toBeNull()
+    expect(verifyChallenge(ch2.nonce, address, u8aToHex(sr25519Sign(u8aWrapBytes('tampered'), pair)))).toEqual({ ok: false, reason: 'bad-signature' })
   })
 
   it('rejects an unparseable address at challenge time', () => {
