@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { XC_DESTINATIONS, xcDestinationListItems } from '../src/services/explorerService.ts'
+import { XC_DESTINATIONS, xcDestinationBySlug, xcDestinationListItems } from '../src/services/explorerService.ts'
 
 // A cross-chain destination is not a registry asset, but it carries the same
 // `origin` every foreign asset does — ecosystem, chain and the key its artwork is
@@ -39,5 +39,24 @@ describe('cross-chain destinations carry what an icon needs', () => {
     }
     // Ids are distinct, or two destinations would share one icon slot.
     expect(new Set(items.map(i => i.assetId)).size).toBe(items.length)
+  })
+
+  // The id above is what a link built from one of these rows carries, so it has to
+  // resolve back to the same destination. It did not: `/activity?token=-2` matched no
+  // registry asset and no slug, and the feed answered empty by construction — the filter
+  // the UI generates itself was the one that found nothing.
+  it('resolves every id it hands out back to its own destination', () => {
+    for (const item of xcDestinationListItems(new Map())) {
+      expect(xcDestinationBySlug(String(item.assetId)), String(item.assetId)).toBe(
+        XC_DESTINATIONS.find(d => d.symbol === item.symbol))
+    }
+  })
+
+  // A negative id outside the table must stay unresolved rather than wrap around the
+  // array or pick up a neighbour.
+  it('refuses an id no destination has', () => {
+    expect(xcDestinationBySlug(String(-(XC_DESTINATIONS.length + 1)))).toBeUndefined()
+    expect(xcDestinationBySlug('-0')).toBeUndefined()
+    expect(xcDestinationBySlug('-')).toBeUndefined()
   })
 })
