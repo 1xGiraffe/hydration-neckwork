@@ -387,7 +387,7 @@ function MoneyMarketReserveColumns({ mm }: { mm: MoneyMarketPosition }) {
         <div className="mm-col-head">Lent</div>
         {supplied.map(r => (
           <div className="mm-row" key={`s${r.assetId}`}>
-            <span className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} iconAssetIds={r.iconAssetIds} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></span>
+            <Link to={paths.asset(r.assetId)} className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} iconAssetIds={r.iconAssetIds} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></Link>
             <span className="mono">{F.amount(r.supplied, r.decimals)}</span>
             <span className="mono muted">{F.usd(r.suppliedUsd)}</span>
             {r.collateral ? <span className="badge ok mm-collateral-badge">collateral</span> : null}
@@ -399,7 +399,7 @@ function MoneyMarketReserveColumns({ mm }: { mm: MoneyMarketPosition }) {
         <div className="mm-col-head">Borrowed</div>
         {borrowed.map(r => (
           <div className="mm-row" key={`d${r.assetId}`}>
-            <span className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} iconAssetIds={r.iconAssetIds} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></span>
+            <Link to={paths.asset(r.assetId)} className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} iconAssetIds={r.iconAssetIds} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></Link>
             <span className="mono">{F.amount(r.debt, r.decimals)}</span>
             <span className="mono muted">{F.usd(r.debtUsd)}</span>
           </div>
