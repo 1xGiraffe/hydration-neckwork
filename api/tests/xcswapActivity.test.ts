@@ -1,5 +1,8 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { suppressXcswapPlumbingRows, XCSWAP_EMITTER_ACCOUNT, type ActivityRow } from '../src/services/explorerService.ts'
+
+const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
 
 // A cross-chain swap is ONE user action carried out by two on-chain legs: the
 // Router sells the caller's asset for WETH, and the NTT rail settles that WETH to
@@ -29,9 +32,46 @@ describe('suppressXcswapPlumbingRows', () => {
     expect(out.map(r => r.type)).toEqual(['xcswap'])
   })
 
-  it('keeps every leg on a surface that asks how the order executed', () => {
-    // The block and extrinsic pages pass keepPot, exactly as they do for the ICE pot.
-    expect(suppressXcswapPlumbingRows([swap, routerLeg, bridgeLeg], true)).toHaveLength(3)
+  // There is deliberately no surface that keeps these legs. The extrinsic and block pages
+  // used to, on the ICE pot's `keepPot` switch, and it read as an unrelated fee swap plus
+  // a Wormhole send by a contract — neither naming the destination nor the asset bought.
+  // An ICE settlement trade is a distinct on-chain action by a distinct actor and still
+  // takes keepPot; these two are mechanics of the row beside them and never do.
+  it('folds the legs on every surface, with no opt-out', () => {
+    expect(suppressXcswapPlumbingRows([swap, routerLeg, bridgeLeg]).map(r => r.type)).toEqual(['xcswap'])
+    expect(suppressXcswapPlumbingRows.length, 'a keepPot-style escape hatch came back').toBe(1)
+    const fold = explorerService.slice(explorerService.indexOf('async function suppressActivityPlumbing'))
+    expect(fold.slice(0, 600)).toContain('suppressXcswapPlumbingRows(suppressIcePotSettlementTrades(')
+    // The ICE pot keeps its switch; only the xcswap call lost one.
+    expect(fold.slice(0, 600)).toContain('suppressSubordinateActivityRows(rows), opts.keepPot)')
+  })
+
+  // keepPot keeps the legs BESIDE the swap — it cannot put the swap there. A cross-chain
+  // swap is the one activity with no event of its own in raw_events (the order is
+  // reconstructed off-chain), so the extrinsic page, which builds from events, has to
+  // read it separately. It did not, and rendered the two legs with the action they serve
+  // missing: /extrinsic/14326094-3 showed a fee swap and a Wormhole send but no swap.
+  it('sources the swap row on the extrinsic page, so the legs have one to fold into', () => {
+    const build = explorerService.slice(explorerService.indexOf('export async function getExtrinsicActivity'))
+    const body = build.slice(0, build.indexOf('export async function getBlockActivity'))
+    const push = body.indexOf('xcswapRowsAt(height, index)')
+    // The CALL, not the several comments that name it earlier in this function.
+    const suppress = body.indexOf('await suppressActivityPlumbing(rows.filter')
+    expect(suppress, 'the extrinsic page folding call moved').toBeGreaterThan(-1)
+    expect(push, 'the extrinsic page never reads the xcswap source').toBeGreaterThan(-1)
+    // Pushed into the row set BEFORE the page folds plumbing. The fold is keyed on the
+    // swap row itself, so a swap added afterwards would leave both legs standing.
+    expect(push).toBeLessThan(suppress)
+    // The page still keeps the ICE pot's settlement trades; only the swap legs go.
+    expect(body.slice(suppress)).toContain('keepPot: true')
+  })
+
+  // The block page is composed from the extrinsic page, so it inherits the same row
+  // rather than needing its own reader — asserted so a refactor that stops composing
+  // them has to make the block page's own source explicit.
+  it('lets the block page inherit the swap through the extrinsic page', () => {
+    const block = explorerService.slice(explorerService.indexOf('export async function getBlockActivity'))
+    expect(block.slice(0, 2000)).toContain('getExtrinsicActivity(height, i)')
   })
 
   it('leaves rows alone when no swap is in the page', () => {

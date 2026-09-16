@@ -7500,16 +7500,22 @@ export function xcswapRowFromOrder(
 }
 
 // Inside a cross-chain swap the Router sell and the NTT send are how the swap was
-// carried out, not actions of their own: fold them wherever the swap row is shown.
-// The extrinsic/block pages keep them (`keepPot`, the same switch the ICE pot
-// takes) — there the question is how the order executed.
+// carried out, not actions of their own: fold them wherever the swap row is shown —
+// every surface, with no escape hatch.
+//
+// The extrinsic and block pages used to keep them on `keepPot`, the switch the ICE pot
+// also takes, on the reasoning that those pages answer how an order executed. That was
+// wrong for this family: the legs name neither the destination nor the asset the caller
+// actually bought, so the page read as an unrelated fee swap plus a Wormhole send by a
+// contract, and the swap row beside them only made the duplication plainer. The ICE pot
+// keeps its own `keepPot` — a settlement trade there IS a distinct on-chain action by a
+// distinct actor, which is the difference.
 //
 // The sell is matched on the order's own (asset in, amount in) rather than on "a
 // trade in this extrinsic": a batch that placed an order alongside an unrelated
 // swap must keep the unrelated one. The NTT send is matched on the emitter being
 // its actor, which it only ever is as part of an order.
-export function suppressXcswapPlumbingRows<T extends ActivityRow>(rows: T[], keepPot = false): T[] {
-  if (keepPot) return rows
+export function suppressXcswapPlumbingRows<T extends ActivityRow>(rows: T[]): T[] {
   const legKeys = new Set<string>()
   const bridgeKeys = new Set<string>()
   for (const r of rows) {
@@ -7596,6 +7602,33 @@ export async function getRecentXcswaps(
   })
 }
 
+/**
+ * The cross-chain swaps placed in one block, optionally narrowed to one extrinsic.
+ *
+ * The block and extrinsic pages build their rows from `raw_events`, and a cross-chain
+ * swap has no event of its own there — the order is reconstructed off-chain into
+ * `xcswap_orders` — so those pages showed the Router sell and the NTT send with the
+ * action they serve missing entirely. This row is what `suppressXcswapPlumbingRows`
+ * then folds those two legs into, so the page states the swap the caller actually made
+ * instead of the mechanics that carried it.
+ *
+ * Bounded on `block_height`, the table's leading sort key, so this is one block's slice.
+ */
+async function xcswapRowsAt(height: number, extrinsicIndex?: number): Promise<ActivityRow[]> {
+  const res = await client.query({
+    query: `SELECT ${XCSWAP_COLUMNS_SQL} FROM price_data.xcswap_orders FINAL
+            WHERE block_height = {h:UInt32}
+            ${extrinsicIndex == null ? '' : 'AND extrinsic_index = {i:UInt32}'}
+            ORDER BY event_index ASC`,
+    query_params: { h: height, i: extrinsicIndex ?? 0 },
+    format: 'JSONEachRow',
+  })
+  const orders = await res.json<RawXcswapOrderRow>()
+  if (!orders.length) return []
+  const prices = await ensurePrices()
+  const settlements = xcswapSettlementsFor(orders.map(o => o.deposit_address))
+  return orders.map(o => xcswapRowFromOrder(o, prices, settlements.get(o.deposit_address.toLowerCase()) ?? null))
+}
 
 /**
  * A cross-chain destination's page.
@@ -15717,7 +15750,7 @@ export function suppressIcePotSettlementTrades<T extends ActivityRow>(rows: T[],
 }
 
 async function suppressActivityPlumbing<T extends ActivityRow>(rows: T[], opts: { keepPot?: boolean } = {}): Promise<T[]> {
-  const out = await suppressDustTransferRows(suppressXcswapPlumbingRows(suppressIcePotSettlementTrades(suppressSubordinateActivityRows(rows), opts.keepPot), opts.keepPot))
+  const out = await suppressDustTransferRows(suppressXcswapPlumbingRows(suppressIcePotSettlementTrades(suppressSubordinateActivityRows(rows), opts.keepPot)))
   await applyXcmFeeUsd(out)
   return out
 }
@@ -18515,6 +18548,13 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       const v3Rows = await v3ActivityRows(v3Acts, prices)
       rows.push(...v3Rows.filter(r => !(r.type === 'trade' && swapEvents.length > 0)))
     }
+
+    // The cross-chain swap this extrinsic placed, if it placed one. It is the only
+    // activity here with no event of its own in `raw_events` — the order is
+    // reconstructed off-chain — so nothing above can have built it, and without this
+    // the page showed the Router sell that funded the order and the NTT send that
+    // carried it while the order itself was absent. Both of those then fold into it.
+    rows.push(...await xcswapRowsAt(height, index))
 
     const seen = new Set<string>()
     // The extrinsic page shows how a solution executed, so the pot's settlement trades stay.
