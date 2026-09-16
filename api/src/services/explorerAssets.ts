@@ -34,6 +34,7 @@ interface AssetRow {
   origin_ecosystem: string | null
   origin_chain_id: string | null
   origin_asset_id: string | null
+  evm_address: string | null
 }
 
 const cache = new Map<number, ExplorerAsset>()
@@ -74,13 +75,83 @@ async function loadStableswapMembers(client: ClickHouseClient): Promise<Map<numb
   return out
 }
 
+
+/**
+ * Pair every money-market aToken with the reserve it wraps, from the Aave reserve
+ * map we already index — so a reserve opened on a new asset is priced and iconed
+ * the moment the map sees it, with no code change.
+ *
+ * The table above is the SEED, not the whole truth: its entries are deliberate
+ * exceptions the map cannot express (BIL is the traded leg while its underlying
+ * uBIL has no feed at all; GIGAHDX prices off stHDX), so a discovered pair never
+ * overwrites one. It only fills gaps.
+ *
+ * An underlying is named in the map by its ERC-20 precompile, whose low four bytes
+ * ARE the asset id — `0x…0100000069` is asset 105. A reserve naming a contract this
+ * chain has no asset for is skipped rather than guessed at.
+ *
+ * Measured: the Treasury wrapped four pool shares on 2026-09-16 into aTokens
+ * registered in the same block, and every one of them reached the explorer with no
+ * price and no icon because this pairing was hand-written.
+ */
+const PRECOMPILE_ASSET_RE = /^0x0{31}1([0-9a-f]{8})$/
+function underlyingAssetIdOf(address: string, byContract: Map<string, number>): number | undefined {
+  const addr = (address ?? '').toLowerCase()
+  const precompiled = PRECOMPILE_ASSET_RE.exec(addr)
+  if (precompiled) {
+    const id = Number.parseInt(precompiled[1], 16)
+    return Number.isSafeInteger(id) ? id : undefined
+  }
+  return byContract.get(addr)
+}
+
+async function discoverATokenUnderlyings(client: ClickHouseClient, rows: readonly AssetRow[]): Promise<void> {
+  const byContract = new Map<string, number>()
+  for (const r of rows) {
+    const addr = (r.evm_address ?? '').toLowerCase()
+    if (addr) byContract.set(addr, r.asset_id)
+  }
+  let reserves: { asset_address: string; atoken: string }[]
+  try {
+    const res = await client.query({
+      query: `SELECT asset_address, atoken FROM price_data.atoken_reserve_map FINAL WHERE atoken != ''`,
+      format: 'JSONEachRow',
+    })
+    reserves = await res.json<{ asset_address: string; atoken: string }>()
+  } catch (err) {
+    // The map is an enrichment, never a gate: without it the seeded pairs still work.
+    console.error('[ExplorerAssets] aToken reserve map unavailable:', err)
+    return
+  }
+  for (const reserve of reserves) {
+    const aTokenId = byContract.get((reserve.atoken ?? '').toLowerCase())
+    if (aTokenId == null) continue
+    // A hand-written pairing wins: it encodes a direction the map cannot.
+    if (ATOKEN_UNDERLYING_ID[aTokenId] != null) continue
+    const underlyingId = underlyingAssetIdOf(reserve.asset_address, byContract)
+    if (underlyingId == null || underlyingId === aTokenId) continue
+    // Never invert an alias that already runs the other way. The map calls
+    // 2-Pool-GDOT the reserve of GDOT, while the share table prices the pool share
+    // OFF GDOT; taking both would alias the pair in a cycle, and priceAssetId would
+    // walk it to its hop bound and land on whichever end the parity chose.
+    if (PRICE_ALIAS_ID[underlyingId] === aTokenId) continue
+    ATOKEN_UNDERLYING_ID[aTokenId] = underlyingId
+    if (PRICE_ALIAS_ID[aTokenId] == null) PRICE_ALIAS_ID[aTokenId] = underlyingId
+    if (UNDERLYING_TO_ATOKEN_ID[underlyingId] == null) UNDERLYING_TO_ATOKEN_ID[underlyingId] = aTokenId
+    console.log(`[ExplorerAssets] aToken ${aTokenId} → underlying ${underlyingId} (from the reserve map)`)
+  }
+}
+
 async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<void> {
   const res = await client.query({
-    query: `SELECT asset_id, symbol, name, decimals, parachain_id, origin_ecosystem, origin_chain_id, origin_asset_id FROM price_data.assets FINAL`,
+    query: `SELECT asset_id, symbol, name, decimals, parachain_id, origin_ecosystem, origin_chain_id, origin_asset_id, evm_address FROM price_data.assets FINAL`,
     format: 'JSONEachRow',
   })
   const rows = await res.json<AssetRow>()
   const poolMembers = await loadStableswapMembers(client)
+  // Before the cache is built: iconAssetIdFor reads the pairing, so a newly
+  // discovered aToken must know its reserve to borrow that reserve's artwork.
+  await discoverATokenUnderlyings(client, rows)
   cache.clear()
   for (const r of rows) {
     const symbol = r.asset_id === H2O_ASSET_ID ? 'H2O' : r.symbol
@@ -303,6 +374,7 @@ export const SHARE_TOKEN_UNDERLYING_ID: Record<number, number> = {
   113: 1113,   // 2-Pool-HUSDe  → HUSDe
   143: 43,     // 2-Pool-PRIME  → PRIME
   146: 46,     // 2-Pool-apyUSD → apyUSD
+  10055: 55,   // 2-Pool-BIL    → BIL
   690: 69,     // 2-Pool-GDOT   → GDOT
   4200: 420,   // 2-Pool-GETH   → GETH
   10044: 4444, // 2-Pool-HEURC  → HEURC

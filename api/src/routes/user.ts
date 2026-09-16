@@ -4,6 +4,7 @@ import { z } from 'zod'
 import {
   createChallenge, verifyChallenge, issueSession, revokeSession, requireUser, sessionUser,
   listSessions, revokeSessionByHash, deviceLabelFromUserAgent,
+  loginFailureMessage, describeLoginSignature,
 } from '../services/userAuthService.ts'
 import { createDeviceLink, claimDeviceLink, deviceLinkStatus } from '../services/deviceLinkService.ts'
 import {
@@ -171,10 +172,22 @@ export async function userRoutes(fastify: FastifyInstance) {
     const body = verifyBody.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: 'Invalid login payload' })
     const verified = verifyChallenge(body.data.nonce, body.data.address, body.data.signature)
-    if (!verified) return reply.status(401).send({ error: 'Signature verification failed' })
+    if (!verified.ok) {
+      // The one place a failed login leaves a trace. Without it a report like
+      // "it says signature verification failed" is unreproducible: the branch,
+      // the signature shape and the wallet are all we need to tell a hardware
+      // signer from an expired challenge from a genuinely wrong key.
+      req.log.warn({
+        reason: verified.reason,
+        address: body.data.address,
+        ...describeLoginSignature(body.data.signature),
+        userAgent: req.headers['user-agent'],
+      }, 'login verification failed')
+      return reply.status(401).send({ error: loginFailureMessage(verified.reason) })
+    }
     // Canonicalize exactly like the display side: a bound EVM signer lands on
     // the substrate account the explorer already shows for it.
-    const accountId = resolveDisplayAccountId(verified)
+    const accountId = resolveDisplayAccountId(verified.accountId)
     const token = await issueSession(accountId, { label: deviceLabelFromUserAgent(req.headers['user-agent']), via: 'wallet' })
     await ensurePersonalList(accountId)
     return { token, me: await meResponse(accountId) }

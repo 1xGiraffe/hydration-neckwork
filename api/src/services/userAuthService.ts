@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import type { FastifyReply, FastifyRequest } from 'fastify'
-import { signatureVerify, keccakAsU8a, secp256k1Recover, ethereumEncode, cryptoWaitReady } from '@polkadot/util-crypto'
-import { hexToU8a, u8aConcat, stringToU8a } from '@polkadot/util'
+import { signatureVerify, keccakAsU8a, secp256k1Recover, ethereumEncode, cryptoWaitReady, blake2AsU8a } from '@polkadot/util-crypto'
+import { hexToU8a, u8aConcat, stringToU8a, u8aWrapBytes } from '@polkadot/util'
 import type { ClickHouseClient } from '../db/client.ts'
 import { normalizeAddress } from './addressIdentity.ts'
 import { chTimestampMs } from './clickhouseTime.ts'
@@ -52,20 +52,63 @@ export function evmRecoverAddress(message: string, signature: string): string | 
   } catch { return null }
 }
 
+// A hardware signer does not sign a long payload as-is. The Substrate signing
+// convention every Ledger app implements is: a payload longer than 256 bytes is
+// blake2-256 hashed first and the 32-byte DIGEST is what the device signs — the
+// same rule ExtrinsicPayload applies to transactions, extended to raw messages
+// because the device cannot buffer or display more than that.
+//
+// Our login statement is ~353 bytes once the extension has wrapped it in
+// <Bytes>…</Bytes>, so it is ALWAYS over the threshold: through Talisman (or
+// any extension) with a Ledger running the Polkadot app, the signature that
+// comes back is over the digest, a preimage signatureVerify never tries. Every
+// hardware-wallet login therefore failed with "Signature verification failed",
+// deterministically, while every software wallet worked.
+//
+// Accepting the digest adds no forgery surface: it is a value only computable
+// from the exact statement we issued, so a signature over it proves the same
+// thing a signature over the bytes does. Both the wrapped and unwrapped forms
+// are offered because the wrapping is the extension's, not the device's, and a
+// signer that hashes what IT was handed may have been handed either.
+const HARDWARE_DIGEST_OVER_BYTES = 256
+
+function loginPayloads(message: string): Uint8Array[] {
+  const raw = stringToU8a(message)
+  // signatureVerify itself already retries `u8aWrapBytes(raw)`, so the plain
+  // and <Bytes>-wrapped forms are both covered by the first entry.
+  const payloads: Uint8Array[] = [raw]
+  const wrapped = u8aWrapBytes(raw)
+  if (wrapped.length > HARDWARE_DIGEST_OVER_BYTES) payloads.push(blake2AsU8a(wrapped, 256))
+  if (raw.length > HARDWARE_DIGEST_OVER_BYTES) payloads.push(blake2AsU8a(raw, 256))
+  return payloads
+}
+
 // One verifier for both worlds, keyed on the address SHAPE the wallet reported.
 export function verifySignedLogin(message: string, address: string, signature: string): boolean {
   if (EVM_ADDR_RE.test(address)) {
     return evmRecoverAddress(message, signature) === address.toLowerCase()
   }
-  try {
-    return signatureVerify(message, signature, address).isValid
-  } catch { return false }
+  return loginPayloads(message).some(payload => {
+    try {
+      return signatureVerify(payload, signature, address).isValid
+    } catch { return false }
+  })
 }
 
 // ---- nonce challenges (in-memory only: a lost nonce just means re-requesting
-// a challenge, so a restart mid-login is a retry, not a failure mode) ----
+// a challenge, so a restart mid-login is a retry, not a failure mode — but only
+// because the 'no-challenge' branch below now SAYS so. While every branch read
+// "Signature verification failed", an api restart was indistinguishable from a
+// broken wallet, and three deploys inside 19 minutes on 2026-09-16 each ate a
+// login that way.) ----
 interface PendingChallenge { accountId: string; address: string; message: string; expiresAt: number }
-const NONCE_TTL_MS = 5 * 60_000
+// Long enough to cover a hardware signer: plugging a Ledger in, unlocking it,
+// opening the Polkadot app and confirming does not fit in the five minutes this
+// used to allow, and overrunning it produced the same misleading
+// "Signature verification failed" as a genuinely bad signature. A challenge is
+// single-use and bound to one address, so the only cost of the longer window is
+// a slightly larger pending set, which is capped below.
+export const NONCE_TTL_MS = 15 * 60_000
 const pendingChallenges = new Map<string, PendingChallenge>()
 
 // ---- sessions: raw token only ever exists client-side; the map and the table
@@ -114,14 +157,48 @@ export function createChallenge(host: string, address: string): LoginChallenge |
   return { nonce, message }
 }
 
-export function verifyChallenge(nonce: string, address: string, signature: string): string | null {
+// Four different things end a login here and only ONE of them is a signature
+// problem. Collapsing them into a single "Signature verification failed" sent
+// people to debug their wallet over a server event (an api restart drops the
+// map above; a slow hardware confirmation ages the challenge out) and left us
+// with nothing to read afterwards. The reason is returned so the route can say
+// something true and log which branch it took.
+export type LoginFailureReason = 'no-challenge' | 'expired' | 'address-mismatch' | 'bad-signature'
+export type ChallengeResult =
+  | { ok: true; accountId: string }
+  | { ok: false; reason: LoginFailureReason }
+
+export function verifyChallenge(nonce: string, address: string, signature: string): ChallengeResult {
   const pending = pendingChallenges.get(nonce)
-  if (!pending) return null
+  if (!pending) return { ok: false, reason: 'no-challenge' }
   pendingChallenges.delete(nonce)   // single-use, burn before verifying
-  if (pending.expiresAt < Date.now()) return null
-  if (pending.address !== address.trim()) return null
-  if (!verifySignedLogin(pending.message, pending.address, signature)) return null
-  return pending.accountId
+  if (pending.expiresAt < Date.now()) return { ok: false, reason: 'expired' }
+  if (pending.address !== address.trim()) return { ok: false, reason: 'address-mismatch' }
+  if (!verifySignedLogin(pending.message, pending.address, signature)) return { ok: false, reason: 'bad-signature' }
+  return { ok: true, accountId: pending.accountId }
+}
+
+// What the person is told, per branch. Only 'bad-signature' is about their
+// signature; the other three are "ask for a fresh challenge and sign again",
+// which is what the dialog's Retry already does.
+export function loginFailureMessage(reason: LoginFailureReason): string {
+  switch (reason) {
+    case 'no-challenge': return 'This login request is no longer valid — please try again'
+    case 'expired': return 'This login request expired — please try again'
+    case 'address-mismatch': return 'This login request was issued for a different account — please try again'
+    case 'bad-signature': return 'Signature verification failed'
+  }
+}
+
+// Shape of what the wallet actually handed us, for the failure log. Nothing
+// here is secret — the signature was rejected, and the address is public chain
+// data — but it is the whole difference between diagnosing the next report in
+// one attempt and reproducing it blind.
+export function describeLoginSignature(signature: string): { sigBytes: number; sigPrefix: number | null } {
+  try {
+    const u8a = hexToU8a(signature)
+    return { sigBytes: u8a.length, sigPrefix: u8a.length ? u8a[0] : null }
+  } catch { return { sigBytes: -1, sigPrefix: null } }
 }
 
 // Same additive-column guard as ensureTagMemberPositionColumn (see its comment
