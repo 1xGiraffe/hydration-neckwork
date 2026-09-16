@@ -856,6 +856,42 @@ function assetIdsForToken(token?: string): number[] | undefined {
   return [...new Set(ids)]
 }
 
+/**
+ * The cross-chain destination a token filter names, if any.
+ *
+ * ZEC and wNEAR are not registry assets — Hydration never holds them, so
+ * `assetIdsForToken` resolves them to NO asset id. They exist as the far side of
+ * a cross-chain swap (XC_DESTINATIONS), which a row carries as `xcswapDestAsset`,
+ * so a filter naming one matches on that identity instead of on an asset id.
+ *
+ * Deliberately NOT extended to an XCM send whose destination is the same
+ * consensus. The token filter asks which activity moved THIS asset; a send to
+ * another chain moves the asset it carries, and the chain it lands on is not that
+ * asset. A cross-chain swap DELIVERS ZEC, which is why it matches. This is also
+ * the symmetry rule: `getXcDestination` counts exactly the orders whose
+ * `xcswapDestAsset` is the destination, and a filtered feed that admitted XCM
+ * sends would disagree with the page it links to.
+ */
+function xcDestinationForToken(token?: string): XcDestination | undefined {
+  const t = token?.trim()
+  return t ? xcDestinationBySlug(t) : undefined
+}
+
+/**
+ * A token filter no row anywhere can satisfy: a symbol or id that is neither a
+ * registry asset nor a cross-chain destination — a typo, or a symbol that never
+ * existed. The answer is empty BY CONSTRUCTION, so it can be given without
+ * building a window or reading a source.
+ *
+ * `filters.token` absent (or blank, which every source already reads as absent)
+ * means UNFILTERED, not unsatisfiable, and must never take this branch.
+ */
+export function activityTokenFilterMatchesNothing(filters: ValueListFilters): boolean {
+  const ids = assetIdsForToken(filters.token)
+  if (ids == null) return false
+  return ids.length === 0 && xcDestinationForToken(filters.token) == null
+}
+
 function assetIdFilterSql(assetExpr: string, ids?: number[]): string {
   if (ids == null) return ''
   if (!ids.length) return 'AND 0'
@@ -7776,7 +7812,15 @@ const xcDestinationAssetId = (platform: string): number =>
   -(XC_DESTINATIONS.findIndex(d => d.platform === platform) + 1)
 
 export function xcDestinationBySlug(slug: string): XcDestination | undefined {
-  const key = slug.toLowerCase()
+  const key = slug.trim().toLowerCase()
+  // A destination's own synthetic id resolves back to it. The asset list and the search
+  // dropdown address destinations by `xcDestinationAssetId` — a negative index, chosen so
+  // it cannot collide with a registry asset — so any link built from one of those rows
+  // carries that id, and `/activity?token=-2` is the id making the round trip. Without
+  // this branch the id matches no registry asset and no slug, and the feed answers empty
+  // by construction: the one filter the UI itself generates would be the one that finds
+  // nothing.
+  if (/^-\d+$/.test(key)) return XC_DESTINATIONS[-Number(key) - 1]
   return XC_DESTINATIONS.find(d =>
     d.platform === key || d.oneClickId === slug || d.symbol.toLowerCase() === key
     || d.name.toLowerCase() === key || `w${d.symbol.toLowerCase()}` === key)
@@ -10339,7 +10383,13 @@ export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFi
     if (named !== (filters.identity === 'named')) return false
   }
   const tokenIds = assetIdsForToken(filters.token)
-  if (tokenIds != null) {
+  // A cross-chain destination (ZEC, wNEAR) is not a registry asset, so it carries
+  // no asset id a row could reference. The row that delivered it names it by its
+  // 1Click id instead — see xcDestinationForToken for why an XCM send to the same
+  // consensus is deliberately NOT such a match.
+  const destination = tokenIds != null ? xcDestinationForToken(filters.token) : undefined
+  const destinationMatched = destination != null && row.xcswapDestAsset === destination.oneClickId
+  if (tokenIds != null && !destinationMatched) {
     // assetRefs carries the pool-side assets a liquidity row references but does
     // not display, matching the SQL sources' `hasAny(asset_refs, …)` predicate.
     const rowIds = [row.asset?.assetId, row.assetIn?.assetId, row.assetOut?.assetId, ...(row.assetRefs ?? [])]
@@ -10348,16 +10398,26 @@ export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFi
   }
   if (filters.min != null) {
     if (filters.unit === 'token') {
+      const meets = (amt: string, decimals: number): boolean => {
+        const threshold = minimumRawAmountForValue(filters.min!, 1, decimals)
+        return threshold != null && BigInt(amt) >= threshold
+      }
+      // A row admitted by its DESTINATION moves the filtered token on its far side:
+      // its Hydration legs are the asset that was sold, so measuring them would
+      // apply a ZEC threshold to a DOT amount. An order the 1Click sweep has not
+      // named yet has no destination amount at all, and a filtered view excludes
+      // the unknown rather than asserting it qualifies.
+      if (destinationMatched) {
+        return row.xcswapDestAmount != null && row.xcswapDestDecimals != null
+          && /^\d+$/.test(row.xcswapDestAmount) && meets(row.xcswapDestAmount, row.xcswapDestDecimals)
+      }
       const picks = [
         row.amount != null && row.asset ? { amt: row.amount, a: row.asset } : null,
         row.amountOut != null && row.assetOut ? { amt: row.amountOut, a: row.assetOut } : null,
         row.amountIn != null && row.assetIn ? { amt: row.amountIn, a: row.assetIn } : null,
       ].filter((pick): pick is { amt: string; a: AssetRef } => pick != null && /^\d+$/.test(pick.amt))
       const relevant = tokenIds == null ? picks.slice(0, 1) : picks.filter(pick => tokenIds.includes(pick.a.assetId))
-      return relevant.some(pick => {
-        const threshold = minimumRawAmountForValue(filters.min!, 1, pick.a.decimals)
-        return threshold != null && BigInt(pick.amt) >= threshold
-      })
+      return relevant.some(pick => meets(pick.amt, pick.a.decimals))
     }
     if (!rowMeetsExactUsdMinimum(row, filters.min)) return false
   }
@@ -11509,6 +11569,16 @@ async function buildOutboundXcmRows(
 // Inbound XCM is covered separately by getRecentXcmIn. When `accounts` is given
 // the feed is scoped to that sender (account/tag page).
 async function getRecentXcm(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
+  // Every XCM row references REGISTRY assets, so a token that resolves to no
+  // registry asset — a typo, a delisted symbol, or a cross-chain destination like
+  // ZEC that Hydration never holds — can match none of them. This is the one
+  // source that carries its token filter entirely on built rows (the walk below
+  // post-filters with activityRowMatchesFilters), so without this it proves the
+  // emptiness by reading the whole XCM history: measured 44.7 s on its own, and it
+  // was the dominant cost of a merged `type=all&token=…` page that can match
+  // nothing. Every other source already expresses the same emptiness in SQL
+  // (`assetIdFilterSql` → `AND 0`).
+  if (assetIdsForToken(filters.token)?.length === 0) return []
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
   return cached(`explorer:xcm-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
@@ -16189,6 +16259,15 @@ function activityReadFailure(error: unknown): Error {
 export interface ActivityPageOptions { revenue?: boolean; forwardOnly?: boolean }
 
 export async function getRecentActivity(limit: number, from?: string, to?: string, offset = 0, type = 'all', filters: ValueListFilters = {}, action?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
+  // A token that names neither a registry asset nor a cross-chain destination can
+  // be matched by no row in any source, at any offset, under any other filter — the
+  // page is empty by construction. Say so here rather than proving it by fanning
+  // out to twenty sources and walking history: measured, an unknown token on
+  // `type=all` spent 55 s doing exactly that, and the result was cached for half an
+  // hour under the token-merge window's stale budget. This is the whole feed's
+  // entry point, so every caller — the explorer route, the authenticated route and
+  // the notification evaluator — is covered by the one guard.
+  if (activityTokenFilterMatchesNothing(filters)) return []
   try {
     return await recentActivityPage(limit, from, to, offset, type, filters, action, opts)
   } catch (error) {
@@ -16539,13 +16618,25 @@ export function activityWindowPlan(
 // The other expensive window shape, beside the sparse value floor: a token
 // filter on the MERGED category. 'all' fans out to every source and the token
 // must match every referenced asset (nested pool assets and both pair sides
-// included), so a ubiquitous token turns classification into minutes of work —
-// measured: `type=all&token=0&min=10` (HDX) builds for ~5 minutes while
-// `type=trade` under the same filters answers in 90 ms, because trade and
-// transfer sources push the token into SQL on asset-first keys. A build slower
-// than its own freshness must not sit on the per-block live key: it would
-// restart every block, never finish, and pile up. Off the live key it is one
-// build per freshness window, shared by every poller.
+// included). What it costs is decided by ONE source: every other one pushes the
+// token into SQL on an asset-first key, while the outbound-XCM source carries it
+// entirely on built rows and walks history backwards until the page is full.
+// Measured cold on the live stack:
+//
+//   type=all&token=0&min=10 (HDX)   8.6s   — XCM matches on the first page
+//   type=all&token=DOT              6.5s   — likewise
+//   type=all&token=aPAXG           59.2s   — an aToken never leaves over XCM, so
+//                                            the walk proves it over all history
+//                                            (type=xcm alone: 65.4s)
+//
+// So the shape is not "a ubiquitous token is slow"; it is "a token the XCM source
+// cannot match soon is slow", and bounding that needs an asset-first candidate
+// index for outbound sends, which no read model offers today (raw_xcm_activity is
+// keyed by block and holds its assets in `assets_json`). A build slower than its
+// own freshness must not sit on the per-block live key: it would restart every
+// block, never finish, and pile up. Off the live key it is one build per freshness
+// window, shared by every poller — which is what makes the slow case tolerable
+// rather than what makes it fast.
 export function activityTokenMergeFiltered(type: string, filters: ValueListFilters): boolean {
   return normalizeActivityTypeKey(type) === 'all' && filters.token != null
 }
@@ -16630,6 +16721,14 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
   let fetchN = locallyMerged
     ? Math.max(want * 5, limit + 50)
     : Math.max(limit * 5, limit + 50)
+  // A token filter naming a cross-chain destination (ZEC, wNEAR). The xcswap
+  // branches below are paged in SQL, and the destination lives on the settlement
+  // the 1Click sweep attaches in memory — so it has to be handed to the source,
+  // which walks its own history for it. Post-filtering the SQL page instead would
+  // page the UNFILTERED stream and return only the matches that happened to land in
+  // it. The merged branch needs no such hand-off: its xcswap source is read whole
+  // and the merge's own saturation rule widens it until it covers the page.
+  const destinationToken = xcDestinationForToken(filters.token)?.oneClickId
   const toTransferRow = (t: TransferRow): ActivityRow => ({
     type: 'transfer', blockHeight: t.blockHeight, timestamp: t.timestamp, eventIndex: t.eventIndex, extrinsicIndex: t.extrinsicIndex,
     who: t.from, to: t.to, asset: t.asset, assetIn: null, assetOut: null, amount: t.amount, amountIn: null, amountOut: null, valueUsd: t.valueUsd,
@@ -16669,7 +16768,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     // Cross-chain swaps are their own indexed family, paged in SQL like the
     // others; routing them through the shared Trade classifier would widen the
     // swap source forever because no swap can satisfy the action.
-    rows = await getRecentXcswaps(limit, from, to, undefined, offset)
+    rows = await getRecentXcswaps(limit, from, to, undefined, offset, undefined, destinationToken)
   } else if (isIntentOnlyTradeRequest(type, action)) {
     // The intent actions are the intent source's own page (see
     // isIntentOnlyTradeRequest): the same SQL-paged read `type=intent` takes, with
@@ -16982,7 +17081,10 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
     else if (type === 'bond') rows = await getRecentBonds(fetchN, from, to, undefined, 0, filters, undefined, action)
     else if (type === 'intent') rows = await getRecentIntents(fetchN, from, to, undefined, 0, filters, undefined, action)
-    else if (type === 'xcswap') rows = await getRecentXcswaps(fetchN, from, to, undefined, 0, undefined, action || undefined)
+    // The only action a cross-chain swap admits is `xcswap` itself, which every row
+    // in the family satisfies (activityRowMatchesAction), so the source carries the
+    // DESTINATION here — the filter that actually selects rows — not the action.
+    else if (type === 'xcswap') rows = await getRecentXcswaps(fetchN, from, to, undefined, 0, undefined, destinationToken)
     else rows = (await getVoteFeedRows(fetchN, from, to, 0, filters, withCollective)).map(voteActivityRow)
   } else if (type === 'liquidity') {
     rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters), ...await getRecentV3Rows('liquidity', fetchN, from, to, 0, filters), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'referral')).filter(r => r.type === 'liquidity')]
@@ -16999,7 +17101,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
   } else if (type === 'intent') {
     rows = await getRecentIntents(limit, from, to, undefined, offset, filters)
   } else if (type === 'xcswap') {
-    rows = await getRecentXcswaps(limit, from, to, undefined, offset)
+    rows = await getRecentXcswaps(limit, from, to, undefined, offset, undefined, destinationToken)
   } else {
     rows = (await getVoteFeedRows(limit, from, to, offset, filters, withCollective)).map(voteActivityRow)
   }
