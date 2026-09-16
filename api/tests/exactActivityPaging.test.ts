@@ -61,12 +61,30 @@ describe('isLocatedActivityRequest', () => {
     expect(isLocatedActivityRequest('extrinsics')).toBe(false)
   })
 
-  // A min-USD floor is the only filter still decided outside SQL: it needs the row's
-  // event-time valuation over an amount that, for one liquidity row in eight, is not in
-  // the read model at all. It keeps the window, and the window says what it covers.
+  // Two filters are still decided outside SQL: a min-USD floor needs the row's event-time
+  // valuation over an amount that, for one liquidity row in eight, is not in the read
+  // model at all, and an identity filter needs whether the row's account is named. Either
+  // keeps the window, and the window says what it covers.
   it('excludes only the request whose filter no arm states', () => {
     expect(isLocatedActivityRequest('all', { min: 10 })).toBe(false)
     expect(isLocatedActivityRequest('all', { min: 10, token: 'DOT' })).toBe(false)
+    expect(isLocatedActivityRequest('all', { identity: 'named' })).toBe(false)
+    expect(isLocatedActivityRequest('all', { identity: 'unnamed' })).toBe(false)
+    expect(isLocatedActivityRequest('transfer', { identity: 'named', token: 'DOT' })).toBe(false)
+  })
+
+  // This test and planExactActivity are one decision read in two places: the route grants
+  // the deep-offset bound from this one and then asks the planner to actually serve it.
+  // If this admits what the planner refuses, the request pays for a full candidate-window
+  // build to arrive at the 503 the bound could have returned for free — so the planner's
+  // refusal list is asserted against, not just this function's behaviour.
+  it('refuses exactly what the planner refuses', () => {
+    const refusal = explorerService.match(/if \(!EXACTLY_COUNTABLE_ACTIVITY_TYPES\.has\(type\)[^\n]*\) return null/)?.[0]
+    expect(refusal, 'planExactActivity refusal line not found — has it been reshaped?').toBeTruthy()
+    for (const filter of ['filters.min', 'filters.identity']) {
+      expect(refusal).toContain(filter)
+      expect(isLocatedActivityRequest('all', { [filter.split('.')[1]]: filter.endsWith('min') ? 10 : 'named' })).toBe(false)
+    }
   })
 
   // A token is mirrored by every counted arm now, so it must not send the request back

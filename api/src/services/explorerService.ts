@@ -21566,11 +21566,18 @@ const EXACTLY_COUNTABLE_ACTIVITY_TYPES = new Set([
 //
 // The action is deliberately not a parameter: every action a category offers is
 // mirrored by the arms, so it can no longer decide how a request is paged, and leaving
-// it out is what keeps a caller from reintroducing that fallback. A min-USD floor still
-// can, because no arm holds the row's event-time valuation (see planExactActivity).
+// it out is what keeps a caller from reintroducing that fallback. A min-USD floor and an
+// identity filter still can, because no arm holds the row's event-time valuation or
+// whether its account is named (see planExactActivity, which refuses both).
+//
+// These two tests have to agree. When this one admits a request the planner then refuses,
+// the route grants it an offset bound only a located page can serve, the planner hands
+// back null, and the request falls to the candidate window — which spends the full window
+// build before reporting it cannot reach that depth. The caller waits out that work for a
+// 503 the bound could have refused immediately.
 export function isLocatedActivityRequest(type: string, filters: ValueListFilters = {}): boolean {
   if (!EXACTLY_COUNTABLE_ACTIVITY_TYPES.has(normalizeActivityTypeKey(type))) return false
-  return filters.min == null
+  return filters.min == null && filters.identity == null
 }
 
 // A plan for counting and locating one feed, or null when the request's shape has no
