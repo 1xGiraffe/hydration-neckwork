@@ -12481,6 +12481,16 @@ async function xcmExecutedRowsForBlocks(blocks: number[], prices: Map<number, Pr
  * Their events name no destination at all (see xcmDestinationFromCallArgs), so it is
  * read from the extrinsics themselves — a block-keyed primary-key read over the same
  * extrinsics the rows were already admitted from.
+ *
+ * The block list is the only bound worth having here, though it looks like it should not
+ * be. Narrowing further to the claimed `(block, extrinsic)` tuples, or moving either
+ * bound into a PREWHERE, was measured over a 1,949-block claimed set and changed nothing:
+ * every form read the same 1.28M rows and ~1.6 GiB (tuples 1.81 → 1.81 GiB, PREWHERE 1.80
+ * → 1.61 GiB, FINAL off 1.61 GiB). The cost is not the predicate — it is that
+ * `call_args_json` is the widest column in the table and the claimed blocks are scattered,
+ * so each one drags in a whole 8192-row granule of it. A tuple filter cannot prune a
+ * granule the block list already claimed. Cutting this materially means reading a narrower
+ * source, not writing a tighter WHERE.
  */
 async function xcmDestinationsByExtrinsic(blockListSql: string): Promise<Map<string, ReturnType<typeof xcmDestinationFromCallArgs>>> {
   const out = new Map<string, ReturnType<typeof xcmDestinationFromCallArgs>>()
