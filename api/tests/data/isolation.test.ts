@@ -19,6 +19,11 @@ const ALLOWED_SHARED = new Set([
   'services/explorerAssets.ts',
   'services/valuation.ts',
   'services/lpMath.ts',
+  // The candle reader, so which view answers a bucket — and the decimal quoting
+  // that keeps a Decimal(38,12) out of a double — is stated once for every surface
+  // that serves candles. A local copy is how `1M` (monthly) and the `*min` family
+  // come to mean different tables on different routes.
+  'services/ohlcvService.ts',
   // The concentrated-liquidity position reader (pure math + its own SQL over the
   // uniswap_v3_* projection); a leaf like lpMath — it imports only the client type.
   'services/uniswapV3Positions.ts',

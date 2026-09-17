@@ -55,13 +55,18 @@ describe('asset liquidation history buckets on the candles own day boundary', ()
   // is what makes the ASOF match "completed by then" rather than "the hour it fell in".
   it('values each leg at the last completed hourly close', () => {
     const body = functionBody('assetLiquidationDays')
-    expect(body).toContain('interval_start + INTERVAL 1 HOUR AS price_time')
     expect(body).toContain('p.price_time <= l.block_time')
     expect(occurrences(body, 'ASOF LEFT JOIN')).toBe(1)
+    // The right side is the shared closes relation, so the +1 HOUR shift that makes
+    // the match "completed by then" rather than "the hour it fell in" is stated in
+    // one place for every event-time valuation — pinned here on that builder, since
+    // losing it anywhere is a silent look-ahead.
+    expect(body).toContain('historicalClosesRelationSql(')
+    expect(functionBody('historicalClosesRelationSql')).toContain('interval_start + INTERVAL 1 HOUR AS price_time')
     // One asset's feed on the right side, resolved through the same alias map the
     // rest of the historical valuation uses (an aToken and a pool-share token both
     // value through the asset they are a claim on).
-    expect(body).toContain('WHERE asset_id = {priceId:UInt32}')
+    expect(body).toContain("priceIds: '{priceId:UInt32}'")
     expect(functionBody('mmReserveScope')).toContain('const priceId = historicalPriceAssetId(assetId)')
   })
 
