@@ -562,25 +562,61 @@ ${valuedTailSql('ice_matched_fee')}`
  *     `fees / fee` (SetFee(255) → 1/255) of the LP fees its positions earned to
  *     `feeRecipient`, which the operator's rebalance calls set to the Treasury's
  *     EVM address — one ERC-20 `Transfer` per token from a vault the
- *     uniswap_v3_vaults projection knows;
- *   * a pool's `CollectProtocol` — the pool's protocol fee (referendum 403 sets
- *     `setFeeProtocol(4, 4)` on the aDOT/HOLLAR pool: 1/4 of every swap fee accrues
- *     to the protocol) as the factory owner collects it. Only that owner can collect,
- *     so the recipient is protocol-controlled whoever it is; the collect is the
- *     realization and is booked in full.
+ *     uniswap_v3_vaults projection knows. Realized on arrival, `dest = ''`;
+ *   * the pool's protocol fee, booked WHERE IT ACCRUES rather than where it is
+ *     swept, under `dest = 'accrued'`.
+ *
+ * Why accrual. `setFeeProtocol` (referendum 403, block 14,413,914) gives the
+ * protocol a quarter of every swap fee on the aDOT/HOLLAR pool. It accumulates
+ * inside the pool and `collectProtocol` is `onlyFactoryOwner` — the factory owner
+ * is the runtime's AaveManagerAccount, reachable only through root or the
+ * EconomicParameters track — so a sweep is a governance act that may never come.
+ * Booking the sweep meant the stream reported the Gamma cut alone: $0.62 against
+ * 24.37 aDOT + 27.74 HOLLAR (~$53.7) the protocol had already earned, about 1 %.
+ * The claim exists the moment the swap happens, so that is when it is revenue —
+ * the same rule hollar_borrow follows, where interest is revenue as it accrues and
+ * not when a loan is repaid.
+ *
+ * Which makes `CollectProtocol` NOT revenue: it moves a balance this stream has
+ * already recognised, so booking it too would count the same fee twice. Nothing
+ * has to be unwound — the pool has never been collected.
+ *
+ * The accrued amount is the swap's own fee leg times the protocol's share. That
+ * fee is already derived once, per swap and per payer, by the uniswap_v3_legs job
+ * (`pool_swap_legs`, venue 'uniswapv3', leg_kind 'fee') — its total matched this
+ * arithmetic to the unit over every swap since the rate was set — so this reads it
+ * rather than recomputing the tier against the raw Swap amounts, and gets the
+ * resolved swapper with it. That payer is what lets account_revenue attribute the
+ * accrual through its ordinary path instead of spreading a realization no one made.
+ *
+ * Verified against the pool's own `protocolFees()` at 2026-09-15 14:51:42 — HOLLAR
+ * matched to the last digit (13.838021420143113665) and aDOT to 98 planck in
+ * 147,668,543,177 (6.6e-10), which is the per-step truncation whole-swap arithmetic
+ * cannot see: the pool divides once per tick crossed, and a sum of floors is never
+ * above the floor of the sum, so the residual is one-directional and ~1e-9 relative.
+ *
  * Swap fees themselves stay with the LPs and are not revenue. The token is an EVM
  * contract: an asset precompile decodes to its id, a deployed ERC-20 (aDOT, HOLLAR)
  * resolves through the registry's `assets.evm_address`; a token neither knows is
- * dropped rather than booked as asset 0 (HDX). No payer: the vault's LPs paid it.
+ * dropped rather than booked as asset 0 (HDX). No payer: the swapper paid it.
  */
 function uniswapV3FeeRowsSql(extra: string): string {
   const token = 'lower(f.token)'
   const hex = `replaceRegexpOne(${token}, '^0x', '')`
   const precompile = `if(length(${hex}) = 40 AND substring(${hex}, 1, 32) = '00000000000000000000000000000001', toUInt32(reinterpretAsUInt32(reverse(unhex(substring(${hex}, 33, 8))))), toUInt32(4294967295))`
+  // One ordering key per event so the feeProtocol in force at a swap is an ASOF
+  // match on a single column. A block/index pair would need a composite ASOF key,
+  // which ClickHouse has no form for, and matching on block alone would apply a
+  // rate to swaps that ran before it in the same block.
+  const atKey = (alias: string) => `toUInt64(${alias}.block_height) * 100000 + ${alias}.event_index`
   return `-- rev:uniswap_v3_fee
 WITH token_assets AS (
   SELECT lower(evm_address) AS addr, any(asset_id) AS asset_id
   FROM price_data.assets WHERE evm_address != '' GROUP BY addr
+),
+pools AS (
+  SELECT pool_address, any(token0) AS token0, any(token1) AS token1, any(fee) AS fee
+  FROM price_data.uniswap_v3_pools GROUP BY pool_address
 ),
 vault_fees AS (
   SELECT block_height, event_index, min(block_timestamp) AS block_time,
@@ -594,29 +630,63 @@ vault_fees AS (
     AND lower(JSONExtractString(decoded_args_json, 'from')) IN (SELECT vault_address FROM price_data.uniswap_v3_vaults FINAL)
   GROUP BY block_height, event_index
 ),
-protocol_collects AS (
-  SELECT block_height, event_index, block_timestamp AS block_time, contract_address, amount0, amount1
-  FROM price_data.uniswap_v3_events FINAL
-  WHERE kind = 'pool' AND event_name = 'CollectProtocol'
+-- Deliberately NOT windowed: the rate in force at a swap was usually set long
+-- before the window the job is recomputing.
+fee_protocol AS (
+  SELECT lower(contract_address) AS pool, ${atKey('e')} AS at_key,
+         toUInt256(aux0) AS fp0, toUInt256(aux1) AS fp1
+  FROM price_data.uniswap_v3_events AS e FINAL
+  WHERE kind = 'pool' AND event_name = 'SetFeeProtocol'
+),
+-- The swap's own fee leg: one row per swap, already in the fee asset and already
+-- carrying the payer the leg builder resolved.
+swap_fees AS (
+  SELECT lower(l.pool_key) AS pool, l.block_height AS block_height, l.event_index AS event_index,
+         min(l.block_timestamp) AS block_time,
+         ${atKey('l')} AS at_key,
+         any(l.asset_id) AS fee_asset_id,
+         any(l.swapper) AS swapper,
+         any(toUInt256OrZero(l.amount)) AS gross_fee
+  FROM price_data.pool_swap_legs AS l
+  WHERE l.venue = 'uniswapv3' AND l.leg_kind = 'fee'
     AND ${WINDOW}
     AND (${extra})
+  GROUP BY pool, l.block_height, l.event_index
 ),
-protocol_fees AS (
-  SELECT c.block_height AS block_height, c.event_index AS event_index, c.block_time AS block_time,
-         toUInt16(leg_i - 1) AS leg_index, leg.1 AS token, leg.2 AS amount
-  FROM protocol_collects c
-  INNER JOIN price_data.uniswap_v3_pools p ON p.pool_address = c.contract_address
-  ARRAY JOIN [tuple(p.token0, toUInt256(greatest(c.amount0, toInt256(0)))), tuple(p.token1, toUInt256(greatest(c.amount1, toInt256(0))))] AS leg, arrayEnumerate([1, 2]) AS leg_i
+-- Which of the pool's two tokens the fee was charged in. The pool keeps a separate
+-- share per token, so the rate that applies is that side's.
+sided_fees AS (
+  SELECT f.pool AS pool, f.block_height AS block_height, f.event_index AS event_index,
+         f.block_time AS block_time, f.at_key AS at_key, f.fee_asset_id AS fee_asset_id,
+         f.swapper AS swapper, f.gross_fee AS gross_fee,
+         toUInt8(if(t1.asset_id = f.fee_asset_id, 1, 0)) AS side
+  FROM swap_fees AS f
+  INNER JOIN pools AS p ON p.pool_address = f.pool
+  LEFT JOIN token_assets AS t1 ON t1.addr = lower(p.token1)
+),
+accrued_fees AS (
+  SELECT f.block_height AS block_height, f.event_index AS event_index, f.block_time AS block_time,
+         f.fee_asset_id AS fee_asset_id, f.swapper AS swapper,
+         intDiv(f.gross_fee, fp.fp) AS amount
+  FROM sided_fees AS f
+  ASOF INNER JOIN (
+    SELECT pool, at_key, toUInt8(0) AS side, fp0 AS fp FROM fee_protocol
+    UNION ALL
+    SELECT pool, at_key, toUInt8(1) AS side, fp1 AS fp FROM fee_protocol
+  ) AS fp ON fp.pool = f.pool AND fp.side = f.side AND fp.at_key <= f.at_key
+  WHERE fp.fp > 0
 ),
 fees AS (
-  SELECT block_height, event_index, block_time, toUInt16(0) AS leg_index, token, amount FROM vault_fees
+  SELECT block_height, event_index, block_time, toUInt16(0) AS leg_index, '' AS dest, '' AS account,
+         toUInt32(0) AS fee_asset_id, token, amount FROM vault_fees
   UNION ALL
-  SELECT block_height, event_index, block_time, leg_index, token, amount FROM protocol_fees
+  SELECT block_height, event_index, block_time, toUInt16(0) AS leg_index, 'accrued' AS dest, swapper AS account,
+         fee_asset_id, '' AS token, amount FROM accrued_fees
 ),
 rows AS (
   SELECT f.block_height AS block_height, f.block_time AS block_time, f.event_index AS event_index, f.leg_index AS leg_index,
-         '' AS dest, '' AS account,
-         if(t.asset_id > 0, toUInt32(t.asset_id), ${precompile}) AS asset_id,
+         f.dest AS dest, f.account AS account,
+         if(f.fee_asset_id > 0, f.fee_asset_id, if(t.asset_id > 0, toUInt32(t.asset_id), ${precompile})) AS asset_id,
          f.amount AS amount
   FROM fees f
   LEFT JOIN token_assets t ON t.addr = ${token}

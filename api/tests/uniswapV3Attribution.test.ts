@@ -13,11 +13,14 @@ import { attributablePayerSql, TREASURY_H160 } from '../src/services/revenueStre
 describe('uniswapV3RealizationsSql', () => {
   const sql = uniswapV3RealizationsSql()
 
-  it('finds the pool behind both kinds of realization', () => {
-    // A CollectProtocol names its pool directly…
-    expect(sql).toContain("event_name = 'CollectProtocol'")
-    // …a vault's fee transfer names only the vault, which reaches its pool
-    // through the pair and fee tier the two projections share.
+  // Only the Gamma vault's lump is a realization to spread. A pool's own protocol
+  // fee is booked where it accrues, per swap and already naming its payer, so it
+  // needs no window and no split — and a CollectProtocol would be a second booking
+  // of revenue the accrual already recognised.
+  it('spreads only the vault lump, never a pool collect', () => {
+    expect(sql).not.toContain("event_name = 'CollectProtocol'")
+    // A vault's fee transfer names only the vault, which reaches its pool through
+    // the pair and fee tier the two projections share.
     expect(sql).toContain('price_data.uniswap_v3_vaults')
     expect(sql).toContain(`lower(JSONExtractString(l.decoded_args_json, 'to')) = '${TREASURY_H160}'`)
   })
@@ -46,18 +49,11 @@ describe('uniswapV3RealizationsSql', () => {
   // one series would open the first CollectProtocol's window at the last vault
   // payout — splitting a lump accrued over 600+ swaps across the three since — and
   // then strand the next vault payout behind it.
-  it('keeps each realization kind on its own accrual clock', () => {
+  // Two vaults on one pool pay on their own schedules, so a window still belongs to
+  // one vault rather than to the pool.
+  it('keeps each vault on its own accrual clock', () => {
     expect(sql).toContain('PARTITION BY pool, asset_id, kind')
-    expect(sql).toMatch(/'protocol' AS kind/)
     expect(sql).toMatch(/concat\('vault:'/)
-  })
-
-  // A protocol lump's first window cannot open at the epoch: swaps before
-  // setFeeProtocol paid no protocol fee at all, so crediting them would name payers
-  // who never paid into this stream.
-  it('opens the first protocol window where the protocol fee itself began', () => {
-    expect(sql).toContain("event_name = 'SetFeeProtocol'")
-    expect(sql).toContain('greatest(')
   })
 
   it('only splits protocol revenue that was actually booked', () => {

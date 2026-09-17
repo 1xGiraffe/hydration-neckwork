@@ -2,18 +2,17 @@ import { attributablePayerSql, TREASURY_H160 } from './revenueStreams.ts'
 
 // Per-account attribution for the `uniswap_v3_fee` stream.
 //
-// Every other eventful stream names its payer on the revenue row itself, because
-// the fee and the payment are the same event. A v3 protocol fee is not: the pool
-// keeps `setFeeProtocol`'s share of every swap fee INSIDE itself (`protocolFees()`
-// grows, nothing moves), and a single `CollectProtocol` later hands the whole
-// accumulated lump over. A Gamma vault's fee share behaves the same way — its
-// positions earn across many swaps and one `Transfer` pays the Treasury.
+// Most eventful streams name their payer on the revenue row itself, because the fee
+// and the payment are the same event. The pool's own protocol fee does too, now that
+// it is booked where it accrues: one row per swap, carrying that swap's swapper, so
+// it needs nothing from this module.
 //
-// So the payer of a realization is never the account that triggered it: only the
-// factory owner can collect, and attributing the lump to the owner would name the
-// protocol as its own customer. The payers are the swappers whose fees accrued it,
-// which is what these two queries reconstruct — the same shape `asset_reserve`
-// already uses for its inter-mint window (services/borrowAttribution.ts).
+// A Gamma vault's fee share is the case that still does. Its positions earn across
+// many swaps and one `Transfer` pays the Treasury, so the payer of that lump is
+// never the account that triggered it — attributing it to the vault or the Treasury
+// would name the protocol as its own customer. The payers are the swappers whose
+// fees accrued it, which is what these two queries reconstruct — the same shape
+// `asset_reserve` uses for its inter-mint window (services/borrowAttribution.ts).
 //
 // The split is exact by construction: `distributeUsd1e12` floors cumulatively and
 // puts every remainder — including the whole amount of a realization whose window
@@ -47,11 +46,10 @@ vault_pools AS (
 -- pays out on each ZeroBurn (roughly hourly), while the pool's own protocol fee
 -- accrues from the moment setFeeProtocol turned it on until someone collects. Each
 -- vault is its own clock too, since two vaults on one pool pay independently.
+-- Only the vault arm is a realization. A pool's own protocol fee is booked where
+-- it ACCRUES, per swap and already naming its payer, so it needs no spreading —
+-- and a CollectProtocol moves a balance that stream already recognised.
 sources AS (
-  SELECT block_height, event_index, lower(contract_address) AS pool, 'protocol' AS kind
-  FROM price_data.uniswap_v3_events FINAL
-  WHERE kind = 'pool' AND event_name = 'CollectProtocol'
-  UNION ALL
   SELECT l.block_height AS block_height, l.event_index AS event_index, vp.pool AS pool,
          concat('vault:', vp.vault) AS kind
   FROM price_data.raw_evm_logs AS l
@@ -59,15 +57,6 @@ sources AS (
     ON vp.vault = lower(JSONExtractString(l.decoded_args_json, 'from'))
   WHERE l.event_name = 'Transfer'
     AND lower(JSONExtractString(l.decoded_args_json, 'to')) = '${TREASURY_H160}'
-),
--- When each pool's protocol fee began. Swaps before it paid no protocol fee at
--- all, so the first collect's window opens here rather than at the epoch —
--- otherwise it would be split over payers who never paid into this stream.
-protocol_start AS (
-  SELECT lower(contract_address) AS pool, min(block_timestamp) AS started
-  FROM price_data.uniswap_v3_events FINAL
-  WHERE kind = 'pool' AND event_name = 'SetFeeProtocol' AND (aux0 > 0 OR aux1 > 0)
-  GROUP BY pool
 ),
 realizations AS (
   SELECT r.block_height AS block_height, r.event_index AS event_index, r.leg_index AS leg_index,
@@ -94,11 +83,10 @@ ts_windows AS (
 SELECT r.block_height AS block_height, r.event_index AS event_index, r.leg_index AS leg_index,
        r.pool AS pool, r.asset_id AS asset_id, r.usd AS usd,
        toString(r.ts) AS ts,
-       toString(if(r.kind = 'protocol', greatest(w.prev_ts, ifNull(ps.started, toDateTime(0))), w.prev_ts)) AS prev_ts
+       toString(w.prev_ts) AS prev_ts
 FROM realizations AS r
 INNER JOIN ts_windows AS w
   ON w.pool = r.pool AND w.asset_id = r.asset_id AND w.kind = r.kind AND w.ts = r.ts
-LEFT JOIN protocol_start AS ps ON ps.pool = r.pool
 WHERE r.p = {partition:UInt32}
 ORDER BY r.block_height, r.event_index, r.leg_index`
 }
