@@ -96,6 +96,10 @@ describe('GET /candles price path for a Hydrated quote', () => {
     const client = {
       query: vi.fn(async ({ query }: { query: string }) => {
         seen.push(query)
+        // The cross path resolves its block range before joining the legs; without a
+        // range it would short-circuit to an empty series and never issue the join
+        // this test is looking for.
+        if (query.includes('min(block_height) AS from_block')) return { json: async () => [{ from_block: 1, to_block: 1000 }] }
         return { json: async () => [] }
       }),
     }
@@ -116,7 +120,7 @@ describe('GET /candles price path for a Hydrated quote', () => {
     expect(res.statusCode).toBe(200)
     // The cross path joins the two assets' per-block prices and aggregates the
     // ratio; the USD path reads the base asset's own OHLC view.
-    return made.seen.some(q => q.includes('sub.ratio')) ? 'cross' : 'usd'
+    return made.seen.some(q => q.includes('INNER JOIN price_data.prices')) ? 'cross' : 'usd'
   }
 
   it('prices a HUSDC/HUSDT-quoted pair as a real cross rate, like its HUSDS sibling', async () => {

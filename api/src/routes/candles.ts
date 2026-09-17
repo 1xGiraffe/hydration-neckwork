@@ -5,6 +5,7 @@ import { INTERVAL_VIEW_MAP, queryOHLCV, candleToResponse } from '../services/ohl
 import type { OHLCVInterval } from '../services/ohlcvService.ts'
 import { getAssetById } from '../services/assetsService.ts'
 import { queryCrossPairCandles } from '../services/crossPair.ts'
+import type { CrossCandle } from '../services/crossPair.ts'
 import { queryTradeVolumeDetails, queryTradeVolumeSummaries } from '../services/tradeVolumeService.ts'
 import type { ApiCandle } from '../types.ts'
 
@@ -49,6 +50,24 @@ const detailQuerySchema = z.object({
   limit:    z.coerce.number().int().min(1).max(500).optional(),
   offset:   z.coerce.number().int().min(0).max(100_000).optional(),
 })
+
+/**
+ * The chart wire has always carried candles as numbers, while the shared cross
+ * module carries the exact decimal text it computed. Narrowing happens here, at
+ * this surface's own edge, so the precise value stays available to the public API.
+ */
+function crossCandlesToApi(rows: CrossCandle[]): ApiCandle[] {
+  return rows.map(r => ({
+    intervalStart: r.intervalStart,
+    open: parseFloat(r.open),
+    high: parseFloat(r.high),
+    low: parseFloat(r.low),
+    close: parseFloat(r.close),
+    volumeBuy: parseFloat(r.volumeBuy),
+    volumeSell: parseFloat(r.volumeSell),
+    volumeTotal: parseFloat(r.volumeTotal),
+  }))
+}
 
 function attachOmniwatchSummaries(
   candles: ApiCandle[],
@@ -107,7 +126,7 @@ export async function candlesRoutes(fastify: FastifyInstance, opts: { client: Cl
           startTime,
           endTime,
           interval: interval as OHLCVInterval,
-        }),
+        }).then(crossCandlesToApi),
         queryTradeVolumeSummaries(opts.client, {
           assetId: baseAsset.assetId,
           startTime,

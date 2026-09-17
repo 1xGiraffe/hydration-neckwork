@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
-import type { OHLCVCandle } from '../../src/types.ts'
 
 // Contract tests for GET /v1/prices/pair. The candle views are parameterised
 // ClickHouse views, so the fake client dispatches on the view name and the
@@ -53,9 +52,24 @@ const HDX_CANDLES: Row[] = [
   // No 01:00 HDX candle: that bucket cannot be priced in HDX at all.
 ]
 
+/**
+ * The per-block cross, as the shared module returns it: exact decimal text for the
+ * REAL ratio, not a band composed from the two legs' stored candles. DOT/HDX here
+ * opens at 200 and closes at 225, having traded as high as 260 and as low as 190 —
+ * a range the stored aggregates could only have bounded at 400/120.
+ */
+const CROSS_ROWS = [
+  {
+    interval_start: '2026-06-24 00:00:00',
+    open: '200.000000000000000000', high: '260.000000000000000000',
+    low: '190.000000000000000000', close: '225.000000000000000000',
+    volume_buy: '100.000000000000', volume_sell: '50.000000000000', volume_total: '150.000000000000',
+  },
+]
+
 interface Seen { query: string; params: Record<string, unknown> }
 
-function fakeClient(overrides: { candles?: Record<number, Row[]> } = {}) {
+function fakeClient(overrides: { candles?: Record<number, Row[]>; cross?: unknown[] } = {}) {
   const seen: Seen[] = []
   const byAsset: Record<number, Row[]> = overrides.candles ?? { 5: DOT_CANDLES, 0: HDX_CANDLES }
   const client = {
@@ -65,6 +79,9 @@ function fakeClient(overrides: { candles?: Record<number, Row[]> } = {}) {
       seen.push({ query, params })
       if (query.includes('FROM price_data.assets FINAL')) return queryResult(ASSET_ROWS)
       if (query.includes('Bonds.TokenCreated')) return queryResult([])
+      // The cross path resolves its block range first, then joins the two legs.
+      if (query.includes('min(block_height) AS from_block')) return queryResult([{ from_block: 1, to_block: 1_000 }] as never)
+      if (query.includes('INNER JOIN price_data.prices')) return queryResult((overrides.cross ?? CROSS_ROWS) as never)
       if (/FROM price_data\.ohlc_/.test(query)) return queryResult(byAsset[Number(params.asset_id)] ?? [])
       throw new Error(`unexpected query: ${query}`)
     }),
@@ -109,7 +126,7 @@ describe('GET /v1/prices/pair', () => {
     expect(res.headers['cache-control']).toBe('public, max-age=5')
   })
 
-  it('combines the two USD series field by field for a non-USD quote', async () => {
+  it('serves the per-block ratio for a non-USD quote, not a band over stored candles', async () => {
     const probe = fakeClient()
     const app2 = await freshApp(probe)
     try {
@@ -118,31 +135,23 @@ describe('GET /v1/prices/pair', () => {
       expect(res.json()).toEqual({
         referenceAsset: '0',
         items: [
-          {
-            timestamp: '2026-06-24T00:00:00.000Z',
-            // Points against the matching point — the same instant, so the real rate.
-            // open 4 / 0.02 = 200; close 4.5 / 0.02 = 225 (one DOT buys 225 HDX).
-            open: '200',
-            // Range as the widest the two series admit: high 5 / LOW 0.0125 = 400,
-            // low 3 / HIGH 0.025 = 120. Quoting the range at the quote's close
-            // instead gave 250 / 150 — a band 2.1x narrower that need not contain
-            // the rates that traded.
-            high: '400',
-            low: '120',
-            close: '225',
-            volumeUsd: '150',
-          },
+          // Every field is the real ratio's own statistic over the bucket's blocks.
+          // Composing the legs' stored candles instead could only have bounded the
+          // range at high 5/LOW 0.0125 = 400 and low 3/HIGH 0.025 = 120 — a band
+          // formed from two different instants, containing rates that never existed.
+          { timestamp: '2026-06-24T00:00:00.000Z', open: '200', high: '260', low: '190', close: '225', volumeUsd: '150' },
         ],
       })
-      // The envelope contains both points by construction.
       const [candle] = res.json().items
       for (const point of [candle.open, candle.close]) {
         expect(Number(candle.low)).toBeLessThanOrEqual(Number(point))
         expect(Number(point)).toBeLessThanOrEqual(Number(candle.high))
       }
-      // Both series are read from the same view, one request each.
-      const assets = probe.seen.filter(s => /ohlc_1h_query/.test(s.query)).map(s => Number(s.params.asset_id))
-      expect(assets.sort()).toEqual([0, 5])
+      // The quote leg is never read from the candle views on this path: a cross is
+      // derived from prices, so reading a stored quote candle would mean the old
+      // composition had survived somewhere.
+      expect(probe.seen.filter(s => /ohlc_/.test(s.query))).toHaveLength(0)
+      expect(probe.seen.some(s => s.query.includes('INNER JOIN price_data.prices'))).toBe(true)
     } finally {
       await app2.close()
     }
@@ -289,7 +298,9 @@ describe('GET /v1/prices/pair', () => {
         // rate and understated it by exactly the accrued interest — and grew worse
         // every day. HUSDS/HUSDe never were, so the list also contradicted itself.
         expect(body.referenceAsset).toBe(String(quote))
-        expect(body.items[0].close).toBe('4.411764705882352941')
+        // The cross path answered, so the rate is the pair's own ratio and not the
+        // base asset's raw USD close (4.5) that the USD path would have published.
+        expect(body.items[0].close).toBe('225')
         expect(body.items[0].close).not.toBe('4.5')
       }
     } finally {
@@ -389,130 +400,6 @@ describe('GET /v1/prices/pair', () => {
   })
 })
 
-/** One OHLCV row, as the Decimal strings the candle views return. */
-function candleRow(assetId: number, open: string, high: string, low: string, close: string, volume = '0'): OHLCVCandle {
-  return { asset_id: assetId, interval_start: '2026-06-24 00:00:00', open, high, low, close, volume_buy: '0', volume_sell: '0', volume_total: volume }
-}
 
-/**
- * Whether two decimal strings are exact reciprocals, checked on integers rather
- * than a float: each is read as a count of 1e-18, so the product of an exact
- * reciprocal pair is exactly 1e-36.
- */
-function areReciprocal(a: string, b: string): boolean {
-  const asScaled = (value: string) => {
-    const [whole, fraction = ''] = value.split('.')
-    return BigInt(whole + fraction.padEnd(18, '0').slice(0, 18))
-  }
-  return asScaled(a) * asScaled(b) === 10n ** 36n
-}
 
-describe('cross-pair envelope', () => {
-  it('is exactly reciprocal-symmetric: high(A/B) is 1/low(B/A)', async () => {
-    const { crossCandles } = await import('../../src/public/routes/prices.ts')
-    // Values chosen so every one of the eight divisions is exact, so the reciprocal
-    // relation can be asserted on the published strings and not on a tolerance.
-    const a = candleRow(5, '4', '8', '2', '5')
-    const b = candleRow(0, '2', '4', '1', '5')
-    const [ab] = crossCandles([a], [b])
-    const [ba] = crossCandles([b], [a])
-    expect(ab).toMatchObject({ open: '2', high: '8', low: '0.5', close: '1' })
-    expect(ba).toMatchObject({ open: '0.5', high: '2', low: '0.125', close: '1' })
-    // The envelope's asymmetric pairing is what makes this hold: high(A/B) is
-    // aHigh/bLow and low(B/A) is bLow/aHigh, so they are reciprocals by
-    // construction. Quoting the whole range at the quote's close did NOT have this
-    // property — the old high(A/B) was aHigh/bClose against a low(B/A) of
-    // bLow/aClose, two quantities with no algebraic relation.
-    expect(areReciprocal(ab.high, ba.low)).toBe(true)
-    expect(areReciprocal(ab.low, ba.high)).toBe(true)
-    expect(areReciprocal(ab.open, ba.open)).toBe(true)
-    expect(areReciprocal(ab.close, ba.close)).toBe(true)
-  })
 
-  it('recovers the range from the quote leg when the base leg is flat', async () => {
-    const { crossCandles } = await import('../../src/public/routes/prices.ts')
-    // The HOLLAR/DOT case, measured live: HOLLAR's own hourly high and low are equal
-    // at 12 decimals, so quoting the whole range at one quote close collapsed the
-    // band to a POINT — it contained the rates that actually traded in 0 % of 200
-    // buckets. The variation lives entirely in the quote leg, and the envelope reads
-    // it: the pair's width becomes the quote's own width (5/4 = 1.25 = 0.25/0.2).
-    const flatBase = candleRow(222, '1', '1', '1', '1')
-    const movingQuote = candleRow(5, '4', '5', '4', '4')
-    const [candle] = crossCandles([flatBase], [movingQuote])
-    expect(candle).toMatchObject({ open: '0.25', high: '0.25', low: '0.2', close: '0.25' })
-    expect(Number(candle.high)).toBeGreaterThan(Number(candle.low))
-    // The old formula: every field over the quote close, so high === low === 0.25.
-    const collapsed = '0.25'
-    expect(candle.low).not.toBe(collapsed)
-  })
-
-  it('contains a traded rate the displaced band excluded', async () => {
-    const { crossCandles } = await import('../../src/public/routes/prices.ts')
-    // A bucket where the base rises while the quote falls. The pair's true high is
-    // reached at the instant the base peaks and the quote troughs — 12 — which the
-    // old band (base range over the quote CLOSE: 5/1 = 5 down to 2/1 = 2) placed
-    // entirely BELOW. The envelope contains it.
-    const [candle] = crossCandles([candleRow(5, '2', '6', '2', '5')], [candleRow(0, '2', '2', '0.5', '1')])
-    expect(candle).toMatchObject({ open: '1', high: '12', low: '1', close: '5' })
-    expect(Number(candle.high)).toBeGreaterThanOrEqual(12)
-  })
-
-  it('drops a bucket whose quote LOW is not positive, so no divisor can be zero', async () => {
-    const { crossCandles } = await import('../../src/public/routes/prices.ts')
-    // The low is the smallest of the quote's four values, so it is the only guard
-    // needed — a zero low would otherwise divide the base high by nothing.
-    expect(crossCandles([candleRow(5, '1', '1', '1', '1')], [candleRow(0, '2', '2', '0', '2')])).toEqual([])
-  })
-})
-
-describe('pair candle arithmetic', () => {
-  it('divides decimal strings exactly, without floating point', async () => {
-    const { crossCandles } = await import('../../src/public/routes/prices.ts')
-    // 1/3 is not representable in binary floating point; the quotient is exact to
-    // the published scale and is never a rounded double.
-    const [candle] = crossCandles(
-      [{ asset_id: 5, interval_start: '2026-06-24 00:00:00', open: '1.000000000000', high: '1.000000000000', low: '1.000000000000', close: '1.000000000000', volume_buy: '0', volume_sell: '0', volume_total: '7.500000000000' }],
-      [{ asset_id: 0, interval_start: '2026-06-24 00:00:00', open: '3.000000000000', high: '3.000000000000', low: '3.000000000000', close: '3.000000000000', volume_buy: '0', volume_sell: '0', volume_total: '0' }],
-    )
-    expect(candle.close).toBe('0.333333333333333333')
-    expect(candle.volumeUsd).toBe('7.5')
-  })
-
-  it('drops a bucket the quote asset has no candle for', async () => {
-    const { crossCandles } = await import('../../src/public/routes/prices.ts')
-    const candles = crossCandles(
-      [
-        { asset_id: 5, interval_start: '2026-06-24 00:00:00', open: '1', high: '1', low: '1', close: '1', volume_buy: '0', volume_sell: '0', volume_total: '0' },
-        { asset_id: 5, interval_start: '2026-06-24 01:00:00', open: '1', high: '1', low: '1', close: '1', volume_buy: '0', volume_sell: '0', volume_total: '0' },
-      ],
-      [{ asset_id: 0, interval_start: '2026-06-24 01:00:00', open: '2', high: '2', low: '2', close: '2', volume_buy: '0', volume_sell: '0', volume_total: '0' }],
-    )
-    expect(candles.map(c => c.timestamp)).toEqual(['2026-06-24T01:00:00.000Z'])
-    expect(candles[0].close).toBe('0.5')
-  })
-
-  it('reads a value in exponent notation instead of silently pricing it at zero', async () => {
-    const { crossCandles, trimDecimal, expandExponent } = await import('../../src/public/routes/prices.ts')
-    // A JS number renders as 1e-7 / 1e+21 at the extremes, and every decimal parser
-    // below would read those as 0 — a bucket priced at nothing.
-    expect(expandExponent('1e-7')).toBe('0.0000001')
-    expect(expandExponent('-1.5e-7')).toBe('-0.00000015')
-    expect(expandExponent('1e+21')).toBe('1000000000000000000000')
-    expect(trimDecimal(1e-7)).toBe('0.0000001')
-    expect(trimDecimal(1e21)).toBe('1000000000000000000000')
-    // The whole cross path: a quote close of 1e-7 must divide, not vanish.
-    const [candle] = crossCandles(
-      [{ asset_id: 5, interval_start: '2026-06-24 00:00:00', open: '1', high: '1', low: '1', close: '1', volume_buy: '0', volume_sell: '0', volume_total: '0' }],
-      [{ asset_id: 0, interval_start: '2026-06-24 00:00:00', open: '1e-7', high: '1e-7', low: '1e-7', close: '1e-7', volume_buy: '0', volume_sell: '0', volume_total: '0' } as never],
-    )
-    expect(candle.close).toBe('10000000')
-  })
-
-  it('drops a bucket whose quote close is zero rather than dividing by it', async () => {
-    const { crossCandles } = await import('../../src/public/routes/prices.ts')
-    expect(crossCandles(
-      [{ asset_id: 5, interval_start: '2026-06-24 00:00:00', open: '1', high: '1', low: '1', close: '1', volume_buy: '0', volume_sell: '0', volume_total: '0' }],
-      [{ asset_id: 0, interval_start: '2026-06-24 00:00:00', open: '0', high: '0', low: '0', close: '0', volume_buy: '0', volume_sell: '0', volume_total: '0' }],
-    )).toEqual([])
-  })
-})
