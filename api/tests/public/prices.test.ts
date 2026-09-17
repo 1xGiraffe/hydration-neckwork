@@ -14,6 +14,9 @@ function queryResult(rows: Row[]) {
 const ASSET_ROWS: Row[] = [
   { asset_id: 0, symbol: 'HDX', name: 'HDX', decimals: 12, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
   { asset_id: 5, symbol: 'DOT', name: 'Polkadot', decimals: 10, parachain_id: 0, origin_ecosystem: 'polkadot', origin_chain_id: '0', origin_asset_id: null },
+  { asset_id: 10, symbol: 'USDT', name: 'Tether', decimals: 6, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
+  // A stablecoin the endpoint does NOT substitute the dollar for: HOLLAR is
+  // protocol-minted and floats on its own stablepools, so it quotes as a cross.
   { asset_id: 222, symbol: 'HOLLAR', name: 'Hollar', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
   // The interest-bearing money-market wrappers. HUSDC/HUSDT used to be on the
   // USD-pegged list; HUSDS/HUSDe never were, though all four behave alike.
@@ -94,7 +97,7 @@ const WINDOW = 'from=2026-06-24T00:00:00Z&to=2026-06-24T02:00:00Z'
 
 describe('GET /v1/prices/pair', () => {
   it('serves the base asset\'s own candles when the quote is USD-pegged', async () => {
-    const res = await app.inject(`/v1/prices/pair?assetIn=5&assetOut=222&bucket=1h&${WINDOW}`)
+    const res = await app.inject(`/v1/prices/pair?assetIn=5&assetOut=10&bucket=1h&${WINDOW}`)
     expect(res.statusCode).toBe(200)
     expect(res.json()).toEqual({
       referenceAsset: 'usd',
@@ -152,7 +155,7 @@ describe('GET /v1/prices/pair', () => {
       try {
         // `from` omitted: the default window is 500 buckets, which is inside the
         // candle cap for every bucket size.
-        const res = await app2.inject(`/v1/prices/pair?assetIn=5&assetOut=222&bucket=${bucket}&to=2026-06-24T00:00:00Z`)
+        const res = await app2.inject(`/v1/prices/pair?assetIn=5&assetOut=10&bucket=${bucket}&to=2026-06-24T00:00:00Z`)
         expect(res.statusCode).toBe(200)
         expect(probe.seen.some(s => s.query.includes(`price_data.${view}(`))).toBe(true)
       } finally {
@@ -175,7 +178,7 @@ describe('GET /v1/prices/pair', () => {
     })
     const app2 = await freshApp(probe)
     try {
-      const res = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1h')
+      const res = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1h')
       expect(res.statusCode).toBe(200)
       expect(res.json().items.map((c: { close: string }) => c.close)).toEqual(['4.5', '4.6'])
     } finally {
@@ -184,7 +187,7 @@ describe('GET /v1/prices/pair', () => {
   })
 
   it('rejects a window wider than the candle cap instead of truncating it', async () => {
-    const res = await app.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1h&from=2020-01-01T00:00:00Z&to=2026-06-24T00:00:00Z')
+    const res = await app.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1h&from=2020-01-01T00:00:00Z&to=2026-06-24T00:00:00Z')
     expect(res.statusCode).toBe(400)
     expect(res.json().error.message).toMatch(/5000/)
   })
@@ -200,18 +203,18 @@ describe('GET /v1/prices/pair', () => {
 
   it('rejects an out-of-range asset id rather than overflowing the query parameter', async () => {
     // 99999999999 does not fit UInt32; unbounded it reached ClickHouse as a 500.
-    const res = await app.inject('/v1/prices/pair?assetIn=99999999999&assetOut=222')
+    const res = await app.inject('/v1/prices/pair?assetIn=99999999999&assetOut=10')
     expect(res.statusCode).toBe(400)
     expect(res.json().error.code).toBe('bad_request')
   })
 
   it('rejects an unsupported bucket, an inverted window and a missing asset', async () => {
     // There is no minute-level candle model, so 1m is refused rather than rounded up.
-    expect((await app.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1m')).statusCode).toBe(400)
-    expect((await app.inject(`/v1/prices/pair?assetIn=5&assetOut=222&from=2026-06-24T02:00:00Z&to=2026-06-24T00:00:00Z`)).statusCode).toBe(400)
-    expect((await app.inject('/v1/prices/pair?assetIn=5&assetOut=222&from=1969-12-31T00:00:00Z&to=1970-01-02T00:00:00Z')).statusCode).toBe(400)
+    expect((await app.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1m')).statusCode).toBe(400)
+    expect((await app.inject(`/v1/prices/pair?assetIn=5&assetOut=10&from=2026-06-24T02:00:00Z&to=2026-06-24T00:00:00Z`)).statusCode).toBe(400)
+    expect((await app.inject('/v1/prices/pair?assetIn=5&assetOut=10&from=1969-12-31T00:00:00Z&to=1970-01-02T00:00:00Z')).statusCode).toBe(400)
     expect((await app.inject('/v1/prices/pair?assetIn=5')).statusCode).toBe(400)
-    expect((await app.inject('/v1/prices/pair?assetIn=DOT&assetOut=222')).statusCode).toBe(400)
+    expect((await app.inject('/v1/prices/pair?assetIn=DOT&assetOut=10')).statusCode).toBe(400)
   })
 
   it('floors the weekly window onto MONDAY, the day the candle model buckets weeks to', async () => {
@@ -222,7 +225,7 @@ describe('GET /v1/prices/pair', () => {
       // multiple of 604800 anchors the grid at 1970-01-01, a THURSDAY, so both
       // bounds landed on the Thursday before and the window could not contain a
       // Monday at all: `from == to` at bucket=1w was empty on every weekday.
-      const res = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1w&from=2026-08-03T00:00:00Z&to=2026-08-03T00:00:00Z')
+      const res = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1w&from=2026-08-03T00:00:00Z&to=2026-08-03T00:00:00Z')
       expect(res.statusCode).toBe(200)
       expect(res.json().items.map((c: { timestamp: string }) => c.timestamp)).toEqual(['2026-08-03T00:00:00.000Z'])
       const weekly = probe.seen.find(s => s.query.includes('price_data.ohlc_1w_query('))
@@ -238,7 +241,7 @@ describe('GET /v1/prices/pair', () => {
     try {
       // Wednesday to Wednesday. On the Thursday-anchored grid a Mon/Tue/Wed bound
       // floored PAST the week containing it, silently dropping that candle.
-      const res = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1w&from=2026-07-29T12:00:00Z&to=2026-08-05T12:00:00Z')
+      const res = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1w&from=2026-07-29T12:00:00Z&to=2026-08-05T12:00:00Z')
       expect(res.statusCode).toBe(200)
       const weekly = probe.seen.find(s => s.query.includes('price_data.ohlc_1w_query('))
       expect([weekly?.params.start_time, weekly?.params.end_time]).toEqual(['2026-07-27 00:00:00', '2026-08-03 00:00:00'])
@@ -258,7 +261,7 @@ describe('GET /v1/prices/pair', () => {
       const probe = fakeClient({ candles: { 5: [] } })
       const app2 = await freshApp(probe)
       try {
-        const res = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1w&from=2026-08-10T00:00:00Z')
+        const res = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1w&from=2026-08-10T00:00:00Z')
         expect(res.statusCode).toBe(200)
         const weekly = probe.seen.find(s => s.query.includes('price_data.ohlc_1w_query('))
         expect(weekly?.params.end_time).toBe('2026-08-10 00:00:00')
@@ -301,7 +304,7 @@ describe('GET /v1/prices/pair', () => {
     const res = await app.inject('/v1/prices/pair?assetIn=5&assetOut=5&bucket=1h')
     expect(res.statusCode).toBe(400)
     expect(res.json().error.message).toMatch(/must be different/)
-    expect((await app.inject('/v1/prices/pair?assetIn=222&assetOut=222&bucket=1h')).statusCode).toBe(400)
+    expect((await app.inject('/v1/prices/pair?assetIn=10&assetOut=10&bucket=1h')).statusCode).toBe(400)
   })
 
   it('publishes the registry id as referenceAsset, not the caller\'s spelling of it', async () => {
@@ -322,12 +325,12 @@ describe('GET /v1/prices/pair', () => {
       'from=2087-01-01T00:00:00Z&to=2087-02-01T00:00:00Z',
       `from=${new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000).toISOString()}&to=${new Date(Math.floor(Date.now() / 3_600_000) * 3_600_000).toISOString()}`,
     ]) {
-      const res = await app.inject(`/v1/prices/pair?assetIn=5&assetOut=222&bucket=1h&${query}`)
+      const res = await app.inject(`/v1/prices/pair?assetIn=5&assetOut=10&bucket=1h&${query}`)
       expect(res.statusCode).toBe(200)
       expect(res.json()).toEqual({ referenceAsset: 'usd', items: [] })
     }
     // A window the caller actually inverted is still a 400.
-    const inverted = await app.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1h&from=2026-06-24T02:00:00Z&to=2026-06-24T00:00:00Z')
+    const inverted = await app.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1h&from=2026-06-24T02:00:00Z&to=2026-06-24T00:00:00Z')
     expect(inverted.statusCode).toBe(400)
     expect(inverted.json().error.message).toBe('from must be earlier than to')
   })
@@ -338,20 +341,20 @@ describe('GET /v1/prices/pair', () => {
     // with that candle — while the description promised a 400 for a `from` later
     // than the `to` the caller sent. Swapping two same-day bounds is the likeliest
     // way to make this mistake, so it is the one that must not pass silently.
-    const day = await app.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1d&from=2026-08-05T20:00:00Z&to=2026-08-05T04:00:00Z')
+    const day = await app.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1d&from=2026-08-05T20:00:00Z&to=2026-08-05T04:00:00Z')
     expect(day.statusCode).toBe(400)
     expect(day.json().error.message).toBe('from must be earlier than to')
-    const week = await app.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1w&from=2026-08-07T00:00:00Z&to=2026-08-03T00:00:00Z')
+    const week = await app.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1w&from=2026-08-07T00:00:00Z&to=2026-08-03T00:00:00Z')
     expect(week.statusCode).toBe(400)
     // Equal instants are not an inversion: one bucket, still served.
-    const equal = await app.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1d&from=2026-06-24T04:00:00Z&to=2026-06-24T04:00:00Z')
+    const equal = await app.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1d&from=2026-06-24T04:00:00Z&to=2026-06-24T04:00:00Z')
     expect(equal.statusCode).toBe(200)
     // And two instants inside one bucket, in the right order, still floor onto that
     // one bucket — the flooring rule is unchanged, only the ordering test moved.
     const probe = fakeClient()
     const app2 = await freshApp(probe)
     try {
-      const ordered = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1d&from=2026-06-25T04:00:00Z&to=2026-06-25T20:00:00Z')
+      const ordered = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1d&from=2026-06-25T04:00:00Z&to=2026-06-25T20:00:00Z')
       expect(ordered.statusCode).toBe(200)
       const daily = probe.seen.find(s => s.query.includes('price_data.ohlc_1d_query('))
       expect([daily?.params.start_time, daily?.params.end_time]).toEqual(['2026-06-25 00:00:00', '2026-06-25 00:00:00'])
@@ -363,11 +366,11 @@ describe('GET /v1/prices/pair', () => {
   it('measures the candle cap on the window actually read, not the one requested', async () => {
     // `to` is clamped to the last closed bucket, so a far-future `to` reads up to
     // now instead of tripping the cap on a nominal 500-year window...
-    const clamped = await app.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1h&from=2026-06-24T00:00:00Z&to=2525-01-01T00:00:00Z')
+    const clamped = await app.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1h&from=2026-06-24T00:00:00Z&to=2525-01-01T00:00:00Z')
     expect(clamped.statusCode).toBe(200)
     // ...and a window lying entirely beyond it reads nothing, so it answers empty
     // rather than reporting a cap on candles no one could have been served.
-    const beyond = await app.inject('/v1/prices/pair?assetIn=5&assetOut=222&bucket=1h&from=2087-01-01T00:00:00Z&to=2099-01-01T00:00:00Z')
+    const beyond = await app.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=1h&from=2087-01-01T00:00:00Z&to=2099-01-01T00:00:00Z')
     expect(beyond.statusCode).toBe(200)
     expect(beyond.json().items).toEqual([])
   })
@@ -377,7 +380,7 @@ describe('GET /v1/prices/pair', () => {
     const app2 = await freshApp(probe)
     try {
       // A window no other test uses: the in-process response cache is global.
-      const res = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=222&from=2026-06-20T00:00:00Z&to=2026-06-20T02:00:00Z')
+      const res = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=10&from=2026-06-20T00:00:00Z&to=2026-06-20T02:00:00Z')
       expect(res.statusCode).toBe(200)
       expect(res.json()).toEqual({ referenceAsset: 'usd', items: [] })
     } finally {
