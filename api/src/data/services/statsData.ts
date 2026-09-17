@@ -108,10 +108,14 @@ export const REVENUE_STREAMS = [
 
 // The canonical protocol-revenue predicate, restated from
 // api/src/services/revenueStreams.ts (PROTOCOL_REVENUE_PREDICATE_SQL — not
-// importable here, the data tree's allow-list is narrower): the omnipool fee
-// legs the pool keeps for LPs are not protocol revenue, the routed-out /
-// burned / protocol-owned-liquidity legs are, and every other stream counts in
-// full. Keep the two literals in sync.
+// importable here, the data tree's allow-list is narrower): an omnipool fee leg
+// the pool keeps for the LPs of the position it landed in ('lp') is not protocol
+// revenue, nor is a legacy asset-fee leg whose destination the chain never
+// recorded ('unknown'); the legs retained in the protocol-provided HDX position
+// ('pol'), routed out of the pool ('protocol') or burned ('burned') are, and every
+// other stream counts in full. Keep the two literals in sync. 'protocol' is revenue
+// captured rather than retained: only the hub fee's middle era paid the treasury, while
+// a routed-out asset fee goes to GigaHDX, stakers and referrers.
 export const PROTOCOL_REVENUE_SQL = "((stream != 'omnipool_asset_fee' OR dest IN ('protocol', 'burned', 'pol')) AND dest != 'lp')"
 
 export interface RevenueRow {

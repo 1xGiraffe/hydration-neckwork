@@ -251,14 +251,13 @@ describe('stream SQL', () => {
   })
 
   it('maps the destination matrix onto the rows destination class', async () => {
-    // lp = the pool account's share; protocol = routed out, burned, or retained in the
-    // protocol-provided HDX position; total = everything, including the legacy
-    // pre-2025-01-25 legs whose destination the chain never recorded (counted in total,
-    // claimed by neither share).
+    // lp = the share the pool keeps for the LPs of the position the fee landed in;
+    // protocol = routed out, burned, or retained in the protocol-provided HDX position;
+    // total = everything, including the legacy pre-2025-01-25 legs whose destination the
+    // chain never recorded (counted in total, claimed by neither share).
     //
-    // The hub fee follows the same rule now. It used to take every row for `protocol`,
-    // which stopped being true in 2026-03 when the burned/treasury split ended and every
-    // leg began going to the pool.
+    // Both fee streams read the same matrix. The hub fee simply never produces an `lp`
+    // row, because every leg the pool keeps of it is credited to the HDX position.
     expect(await build('asset', 'lp')).toContain("dest = 'lp'")
     expect(await build('asset', 'protocol')).toContain("dest IN ('protocol', 'burned', 'pol')")
     expect(await build('asset', 'total')).not.toContain("dest = 'lp'")

@@ -34,8 +34,8 @@ describe('the TS twin of the protocol-revenue predicate', () => {
     expect(disagreements).toEqual([])
   })
 
-  // Guards the specific correction: a fee left with the pool is not the protocol's,
-  // whichever of the two omnipool fee streams recorded it.
+  // A fee the pool keeps for its LPs is not the protocol's, whichever of the two
+  // omnipool fee streams recorded it.
   it('rejects a pool-retained leg on both fee streams', () => {
     expect(isProtocolRevenue('omnipool_protocol_fee', 'lp')).toBe(false)
     expect(isProtocolRevenue('omnipool_asset_fee', 'lp')).toBe(false)

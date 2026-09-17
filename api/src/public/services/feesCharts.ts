@@ -317,12 +317,11 @@ const STREAM_MARKER: Record<Exclude<FeesStreamType, 'borrow_apr'>, string> = {
  * count in `total` and in neither share, which understates both before that
  * boundary exactly as the projection's coverage does.
  *
- * On `protocol` (the hub/H2O fee) `burned` is the burn component and `total` takes all
- * rows. `protocol` is NOT all rows: since 2026-03 the burned/treasury split stopped and
- * every hub fee leg is paid to the Omnipool account, so it stays in the pool. Counting
- * the stream in full reported 21% of one 30-day window as protocol revenue that the
- * protocol never received. The exception is a fee retained in the protocol-provided HDX
- * position, which the derivation marks 'pol'.
+ * On `protocol` (the hub/H2O fee) the runtime credits every leg the pool keeps to the
+ * protocol-provided HDX position ('pol'), so `protocol` takes those alongside the
+ * historically burned and treasury-routed legs, `burned` is the burn component alone,
+ * and `total` is all rows. No hub leg is ever the LPs', which is why the combination
+ * matrix offers no `lp` split for this stream.
  */
 export function feesDestinationPredicateSql(destination: FeesDestination): string {
   if (destination === 'lp') return "dest = 'lp'"
