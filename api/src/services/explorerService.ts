@@ -1,5 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { blockClock } from './blockClock.ts'
+import { chDateTime, chTimestamp } from './clickhouseTime.ts'
+import { INTERVAL_VIEW_MAP, type OHLCVInterval } from './ohlcvService.ts'
 import { makeBucketing, type Bucketing } from './bucketLadder.ts'
 import { OMNI_FIXED, omnipoolRemoveLiquidity, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
 import { cached, cachedFound, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
@@ -1310,15 +1312,30 @@ export function exactHistoricalValuePredicateSql(
   return `(${hasAmount} AND ${asset} IN (${ids}) AND ${closeExpr} > 0 AND ${priceAtoms} > 0 AND (${branches.join(' OR ') || '0'}))`
 }
 
-function historicalClosesRelationSql(): string {
-  const priceIds = [...new Set(allExplorerAssets().flatMap(a => [a.assetId, historicalPriceAssetId(a.assetId)]))].join(',')
-  // Hash ASOF requires a left/right equi-key even when the valued asset is a
-  // constant (HDX votes and referral claims). The timestamp-derived key below
-  // is 1 for every non-null event timestamp and leaves the price match unchanged.
-  return `(SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close,
-                  toUInt8(1) AS asof_join_key
+/**
+ * The relation every event-time valuation ASOF-joins against: each asset's CLOSED
+ * hourly close, labelled with the moment it became known.
+ *
+ * `interval_start + 1 HOUR` is the whole point — a bucket's close is only true at
+ * its END, so labelling it with its start would let an ASOF match price an event
+ * with a candle that had not closed yet. Stated once because three call sites used
+ * to spell it out, and a bucket-labelling difference between them would be a
+ * silent look-ahead on one surface and not the others.
+ *
+ * `priceIds` defaults to every asset the explorer knows, including the historical
+ * aliases. `narrowTo` is an extra `asset_id IN (…)` for a caller that already knows
+ * the small set it needs. `joinKey` adds the constant equi-key hash ASOF requires
+ * when the valued asset is a constant (HDX votes, referral claims) — it is 1 for
+ * every row and leaves the price match unchanged.
+ */
+function historicalClosesRelationSql(options: { priceIds?: string; narrowTo?: string; joinKey?: boolean } = {}): string {
+  const priceIds = options.priceIds
+    ?? [...new Set(allExplorerAssets().flatMap(a => [a.assetId, historicalPriceAssetId(a.assetId)]))].join(',')
+  return `(SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close${options.joinKey ? `,
+                  toUInt8(1) AS asof_join_key` : ''}
            FROM price_data.ohlc_1h
-           WHERE asset_id IN (${priceIds || '0'})
+           WHERE asset_id IN (${priceIds || '0'})${options.narrowTo ? `
+             AND asset_id IN (${options.narrowTo})` : ''}
            GROUP BY asset_id, interval_start)`
 }
 
@@ -1340,7 +1357,7 @@ export function eventValueFilterSql(
   }
   const { thresholds, denominator } = historicalValueThresholds(filters.min)
   return {
-    joinSql: `ASOF LEFT JOIN ${historicalClosesRelationSql()} ${alias}
+    joinSql: `ASOF LEFT JOIN ${historicalClosesRelationSql({ joinKey: true })} ${alias}
               ON ${alias}.asof_join_key = toUInt8(isNotNull(${timestampExpr}))
              AND ${alias}.asset_id = ${priceAliasIdSql(assetExpr)}
              AND ${alias}.price_time <= ${timestampExpr}`,
@@ -1736,13 +1753,10 @@ export function historicalVolumeSql(legsCte: string, outName: string): string {
               SELECT l.account_id AS account_id,
                      toFloat64(sum(${exactValue})) / 1e${maxDecimals} AS volume_usd
               FROM ${legsCte} l
-              ASOF LEFT JOIN (
-                SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close
-                FROM price_data.ohlc_1h
-                WHERE asset_id IN (${priceIds || '0'})
-                  AND asset_id IN (SELECT DISTINCT ${priceAliasIdSql('n.asset_id')} FROM ${legsCte} n)
-                GROUP BY asset_id, interval_start
-              ) p ON p.asset_id = ${priceAliasIdSql('l.asset_id')} AND p.price_time <= l.block_time
+              ASOF LEFT JOIN ${historicalClosesRelationSql({
+                priceIds,
+                narrowTo: `SELECT DISTINCT ${priceAliasIdSql('n.asset_id')} FROM ${legsCte} n`,
+              })} p ON p.asset_id = ${priceAliasIdSql('l.asset_id')} AND p.price_time <= l.block_time
               WHERE match(l.account_id, '^0x[0-9a-f]{64}$')
                 AND NOT match(l.account_id, '^0x(6d6f646c|7369626c|70617261)')
               GROUP BY account_id
@@ -1810,12 +1824,8 @@ async function historicalCloses(pairs: { assetId: number; ts: string }[]): Promi
           SELECT toUInt32(tupleElement(pr, 1)) AS asset_id, tupleElement(pr, 2) AS ts
           FROM (SELECT arrayJoin([${tuples}]) AS pr)
         ) ev
-        ASOF LEFT JOIN (
-          SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close
-          FROM price_data.ohlc_1h
-          WHERE asset_id IN (${priceIds.join(',')})
-          GROUP BY asset_id, interval_start
-        ) p ON p.asset_id = ev.asset_id AND p.price_time <= toDateTime(ev.ts)`,
+        ASOF LEFT JOIN ${historicalClosesRelationSql({ priceIds: priceIds.join(',') })} p
+          ON p.asset_id = ev.asset_id AND p.price_time <= toDateTime(ev.ts)`,
       format: 'JSONEachRow',
     })
     return res.json<{ asset_id: number; ts: string; close: string }>()
@@ -8711,7 +8721,7 @@ async function visibleEventHeadWithin(blocks: readonly number[]): Promise<number
 
 // ClickHouse DateTime literal (UTC) for the tail window's upper bound.
 function revenueTailAnchor(): string {
-  return new Date(Date.now() + 60_000).toISOString().slice(0, 19).replace('T', ' ')
+  return chDateTime(new Date(Date.now() + 60_000))
 }
 
 /**
@@ -23349,7 +23359,7 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
     // candidates), pool/MM-leg counterparties and same-extrinsic swap echoes are
     // dropped below and must not leave the chart short.
     const fetch = limit * 4
-    const closes = historicalClosesRelationSql()
+    const closes = historicalClosesRelationSql({ joinKey: true })
     const namedEvents = [...SWAP_EVENTS, ...VALUE_EVENT_LIQUIDITY_NAMES].map(n => `'${n}'`).join(',')
     const transferNames = VALUE_EVENT_TRANSFER_NAMES.map(n => `'${n}'`).join(',')
     const xcmInNames = VALUE_EVENT_XCM_IN_NAMES.map(n => `'${n}'`).join(',')
@@ -24552,12 +24562,8 @@ async function assetLiquidationDays(scope: MmReserveScope): Promise<AssetLiquida
              toUInt32(count()) AS legs,
              toFloat64(sum(multiplyDecimal(l.amount, toDecimal256(p.close, 12), 12))) / 1e${scope.decimals} AS value_usd
       FROM legs l
-      ASOF LEFT JOIN (
-        SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close
-        FROM price_data.ohlc_1h
-        WHERE asset_id = {priceId:UInt32}
-        GROUP BY asset_id, interval_start
-      ) p ON p.asset_id = l.price_asset_id AND p.price_time <= l.block_time
+      ASOF LEFT JOIN ${historicalClosesRelationSql({ priceIds: '{priceId:UInt32}' })} p
+        ON p.asset_id = l.price_asset_id AND p.price_time <= l.block_time
       GROUP BY l.day
       ORDER BY l.day`,
     query_params: { pools: primaryMmPools(), reserves: [...scope.byAddress.keys()], priceId: scope.priceId },
@@ -24600,13 +24606,12 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
     const closesP = (async () => {
       const end = new Date()
       const start = new Date(0)
-      const fmt = (d: Date) => d.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
       const pxRes = await client.query({
         query: `SELECT toString(interval_start) AS ts, toFloat64(close) AS px
-                FROM price_data.ohlc_1d_query(asset_id={id:UInt32}, start_time={s:DateTime}, end_time={e:DateTime})
+                FROM price_data.${INTERVAL_VIEW_MAP['1d']}(asset_id={id:UInt32}, start_time={s:DateTime}, end_time={e:DateTime})
                 WHERE close > 0
                 ORDER BY interval_start`,
-        query_params: { id: priceAssetId(assetId), s: fmt(start), e: fmt(end) }, format: 'JSONEachRow',
+        query_params: { id: priceAssetId(assetId), s: chDateTime(start), e: chDateTime(end) }, format: 'JSONEachRow',
       })
       for (const r of await pxRes.json<{ ts: string; px: number }>()) {
         if (!(r.px > 0)) continue
@@ -24634,14 +24639,17 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
 // caller's point budget. Everything else mirrors the daily read — priceAssetId
 // aliasing, close > 0, interval_start labels — so a refined window is the same
 // series, just denser.
+// Which VIEW answers an interval is ohlcvService's to say (INTERVAL_VIEW_MAP); only
+// the zoom budget — how many seconds a candle covers, so the finest interval whose
+// count fits the caller's point budget can be picked — belongs here.
 const PRICE_WINDOW_INTERVALS = [
-  { key: '5min', view: 'ohlc_5min_query', seconds: 300 },
-  { key: '15min', view: 'ohlc_15min_query', seconds: 900 },
-  { key: '30min', view: 'ohlc_30min_query', seconds: 1_800 },
-  { key: '1h', view: 'ohlc_1h_query', seconds: 3_600 },
-  { key: '4h', view: 'ohlc_4h_query', seconds: 14_400 },
-  { key: '1d', view: 'ohlc_1d_query', seconds: 86_400 },
-] as const
+  { key: '5min', seconds: 300 },
+  { key: '15min', seconds: 900 },
+  { key: '30min', seconds: 1_800 },
+  { key: '1h', seconds: 3_600 },
+  { key: '4h', seconds: 14_400 },
+  { key: '1d', seconds: 86_400 },
+] as const satisfies readonly { key: OHLCVInterval; seconds: number }[]
 
 export interface AssetPriceWindow { interval: string; priceSeries: number[]; priceDates: string[] }
 
@@ -24653,13 +24661,12 @@ export async function getAssetPriceWindow(assetId: number, fromSec: number, toSe
   const from = Math.floor(fromSec / iv.seconds) * iv.seconds
   const to = Math.ceil(toSec / iv.seconds) * iv.seconds
   return cached(`explorer:asset-prices:${assetId}:${iv.key}:${from}:${to}`, 60_000, async () => {
-    const fmt = (s: number) => new Date(s * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
     const res = await client.query({
       query: `SELECT toString(interval_start) AS ts, toFloat64(close) AS px
-              FROM price_data.${iv.view}(asset_id={id:UInt32}, start_time={s:DateTime}, end_time={e:DateTime})
+              FROM price_data.${INTERVAL_VIEW_MAP[iv.key]}(asset_id={id:UInt32}, start_time={s:DateTime}, end_time={e:DateTime})
               WHERE close > 0
               ORDER BY interval_start`,
-      query_params: { id: priceAssetId(assetId), s: fmt(from), e: fmt(to) }, format: 'JSONEachRow',
+      query_params: { id: priceAssetId(assetId), s: chTimestamp(from), e: chTimestamp(to) }, format: 'JSONEachRow',
     })
     const priceSeries: number[] = []
     const priceDates: string[] = []

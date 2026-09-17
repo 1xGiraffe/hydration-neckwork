@@ -24,13 +24,16 @@ export const toClickHouseDateTime = chDateTime
 
 export async function queryOHLCV(
   client: ClickHouseClient,
-  options: { assetId: number; startTime: Date; endTime: Date; interval: OHLCVInterval }
+  // `tag` is the calling surface's own SQL marker (the `-- data:…` convention), so
+  // sharing this reader does not cost the ability to tell whose query a row in
+  // system.query_log belongs to.
+  options: { assetId: number; startTime: Date; endTime: Date; interval: OHLCVInterval; tag?: string }
 ): Promise<OHLCVCandle[]> {
   const viewName = INTERVAL_VIEW_MAP[options.interval]
   const startTime = toClickHouseDateTime(options.startTime)
   const endTime = toClickHouseDateTime(options.endTime)
   const result = await client.query({
-    query: `SELECT * FROM price_data.${viewName}(asset_id={asset_id:UInt32}, start_time={start_time:DateTime}, end_time={end_time:DateTime})`,
+    query: `${options.tag ? `-- ${options.tag}\n` : ''}SELECT * FROM price_data.${viewName}(asset_id={asset_id:UInt32}, start_time={start_time:DateTime}, end_time={end_time:DateTime})`,
     query_params: {
       asset_id: options.assetId,
       start_time: startTime,
