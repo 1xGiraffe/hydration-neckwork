@@ -143,7 +143,7 @@ describe('the DCA schedule page — runtime 443 migration states', () => {
     expect(html).toMatch(/●\s*migration-cancelled</)
     expect(html).toContain('token frozen')
     expect(html).toContain('refunded')
-    expect(html).toContain('3.25k DOT')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('3.25k DOT')
   })
   it('still renders the four pre-443 states', () => {
     for (const status of ['active', 'completed', 'terminated', 'cancelled'] as const) {

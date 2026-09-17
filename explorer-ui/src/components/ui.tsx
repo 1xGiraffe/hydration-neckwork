@@ -1,6 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- shared atoms + formatters module */
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, FocusEvent as ReactFocusEvent, ReactNode, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { Link, paths, navigate } from '../router'
 import type { AccountRef, AssetOrigin, AssetRef, FailureReason, FeePayment } from '../types'
 import { parseUtcTimestamp, tsDate, tsDateTime, utcDay } from '../utils/time'
@@ -239,6 +240,140 @@ function viewFractions(n: number, dates: string[] | undefined, view: { from: num
   return axis.ts.map(t => (t / 1000 - view.from) / span)
 }
 
+/* ============ reveal the rounded figure, then copy it ============ */
+
+// See first, copy second. Every display number in the explorer is rounded to
+// the shared rough scale (compactAmount), so "4.45k" is never the value — it is
+// a reading of it. Hovering the figure (or a first tap, where hover doesn't
+// exist) reveals what was rounded away in a chip anchored to it, with a "click
+// to copy" hint; only a click made WHILE the chip is showing copies, and the
+// chip confirms in place ("Copied ✓").
+//
+// The chip is portaled to <body> in viewport coordinates so a 25-digit figure
+// escapes whatever clips its host (treemap tiles, ellipsised cells, the table's
+// own overflow), and pointer-events:none keeps the click on the figure itself,
+// which stops propagation — most of these numbers sit inside a clickable row, a
+// tile button or a card link, and a copy must never navigate or toggle.
+//
+// `data-no-hover` suppresses the global hover card while the pointer rests on
+// the figure (HoverCard checks the target's ancestors), so an amount inside an
+// activity row reveals its value instead of opening a 360px card on top of it.
+function ExactChip({ rect, full, done }: { rect: DOMRect; full: string; done: boolean }) {
+  const ref = useRef<HTMLSpanElement>(null)
+  const [pos, setPos] = useState<{ left: number; top: number; below: boolean } | null>(null)
+  // Measured, not estimated: the chip is as wide as the figure it carries, and a
+  // fixed clamp either detaches a right-edge number's chip on a 390px screen or
+  // lets a long one run off the left. Flips below its anchor when there is no
+  // room above, so a figure in the first rows never hides behind the sticky topbar.
+  useLayoutEffect(() => {
+    const n = ref.current
+    if (!n) return
+    const w = n.offsetWidth, h = n.offsetHeight
+    const half = Math.min(w / 2, window.innerWidth / 2 - 12)
+    const below = rect.top - h - 7 < 8
+    setPos({
+      left: Math.round(Math.min(Math.max(rect.left + rect.width / 2, half + 12), window.innerWidth - half - 12)),
+      top: Math.round(below ? rect.bottom + 7 : rect.top - 7),
+      below,
+    })
+  }, [rect, full, done])
+  return createPortal(
+    <span
+      ref={ref}
+      className={'exact-tip' + (pos?.below ? ' below' : '')}
+      role="status"
+      style={{ left: pos?.left ?? rect.left, top: pos?.top ?? rect.top, visibility: pos ? undefined : 'hidden' }}
+    >
+      {done ? 'Copied ✓' : <>{full}<span className="exact-hint">click to copy</span></>}
+    </span>,
+    document.body,
+  )
+}
+
+export function CopyValue({ full, plain, children }: { full: string; plain: string; children: ReactNode }) {
+  const ref = useRef<HTMLSpanElement>(null)
+  const hovering = useRef(false)
+  const [rect, setRect] = useState<DOMRect | null>(null) // non-null = chip open
+  const [done, setDone] = useState(false)
+  const open = () => setRect(ref.current?.getBoundingClientRect() ?? null)
+  const close = () => { setRect(null); setDone(false) }
+  // The chip is placed in viewport coordinates and does not track its anchor, so
+  // a scroll (or a resize) dismisses it rather than leaving it stranded — these
+  // figures live in long tables, unlike the treemap this pattern started in.
+  useEffect(() => {
+    if (!rect) return
+    const off = () => { hovering.current = false; close() }
+    window.addEventListener('scroll', off, true)
+    window.addEventListener('resize', off)
+    return () => { window.removeEventListener('scroll', off, true); window.removeEventListener('resize', off) }
+  }, [rect])
+  return (
+    <span
+      ref={ref}
+      className="copyamt"
+      data-no-hover=""
+      onMouseEnter={() => { hovering.current = true; open() }}
+      onMouseLeave={() => { hovering.current = false; close() }}
+      onClick={e => {
+        e.stopPropagation(); e.preventDefault()
+        if (!rect) return open() // touch: the first tap reveals, never copies
+        void navigator.clipboard?.writeText(plain)
+        setDone(true)
+        // A hover keeps the chip (mouseleave will close it); a tap has no leave
+        // event, so the confirmation dismisses itself.
+        setTimeout(() => { if (hovering.current) setDone(false); else close() }, 1400)
+      }}
+    >
+      {children}
+      {rect && <ExactChip rect={rect} full={full} done={done} />}
+    </span>
+  )
+}
+
+// Every rendered figure carries the affordance, including one the rough scale
+// happened not to round: a reader cannot tell "100" the rounding from "100" the
+// value by looking, so the only way the reveal means anything is if it is always
+// there. A number that is already whole simply confirms itself and copies.
+//
+// A token amount, revealing every digit of the raw integer on hover. String math
+// throughout (F.preciseAmount) — a 128-bit amount routed through Number would
+// lose the digits this exists to show. A `raw` that is not an integer string (a
+// few call sites pass String(someFloat) with decimals 0) has no raw precision to
+// promise, so it falls through to the float path.
+export function Amt({ raw, dec }: { raw?: string | null; dec: number }) {
+  if (raw == null || raw === '') return <>—</>
+  const plain = F.preciseAmountPlain(raw, dec)
+  if (plain === '—') return <Num v={F.num(raw, dec)} />
+  return <CopyValue full={F.preciseAmount(raw, dec)} plain={plain}>{F.amount(raw, dec)}</CopyValue>
+}
+
+// A USD figure. Unlike Amt this can only promise the UN-COMPACTED number, never
+// an exact one: the API sends USD as a float it has already valued and rounded,
+// so there is no exact source behind "$40k" — the chip widens it to "$40,127.44"
+// and copies that, and says nothing about digits nobody has.
+function usdFull(v: number): string {
+  const a = Math.abs(v)
+  return (v < 0 ? '-$' : '$') + a.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: a < 1 ? 6 : 2 })
+}
+export function Usd({ v }: { v?: number | null }) {
+  if (v == null || !Number.isFinite(v)) return <>—</>
+  const full = usdFull(v)
+  return <CopyValue full={full} plain={full.replace(/[$,]/g, '')}>{F.usd(v)}</CopyValue>
+}
+
+// A plain (already-scaled) quantity — the HDX-denominated dashboards and the
+// compact counters, whose API fields are numbers with no raw integer behind them.
+// Same promise as Usd: un-compacted, not exact.
+export function Num({ v, suffix = '' }: { v?: number | null; suffix?: string }) {
+  if (v == null || !Number.isFinite(v)) return <>—</>
+  // Significant digits, not decimal places: these fields span 201,000,000 HDX and
+  // a sub-cent dust balance, and a fixed decimal count reads one of them as "0".
+  // Fifteen is what a double actually carries — asking for more prints its noise.
+  const full = v.toLocaleString('en-US', { maximumSignificantDigits: 15 })
+  // The unit stays outside the copied text — a pasted "1,234.5 HDX" is not a number.
+  return <><CopyValue full={full + suffix} plain={String(v)}>{compactAmount(v)}</CopyValue>{suffix}</>
+}
+
 // Relative time ("3m ago") that reveals the absolute UTC timestamp on hover.
 // Used anywhere a time is shown relative (activity, tables, activity rows).
 export function Ago({ ts, now }: { ts: string; now: number }) {
@@ -280,7 +415,9 @@ export function Dash() {
 // `link={false}` for hosts that are themselves links (a nested <a> is invalid
 // and browsers reparent it).
 export function AssetAmount({ asset, raw, formatted, link = true }: { asset: AssetRef; raw?: string | null; formatted?: string; link?: boolean }) {
-  return <span className="trade-leg"><AssetChip asset={asset} link={link} /> <span className="mono">{formatted ?? (raw != null ? F.amount(raw, asset.decimals) : '—')}</span></span>
+  // A raw amount reveals its every digit on hover (Amt); a `formatted` one was
+  // rounded by the caller from a float it no longer has, so it stays plain text.
+  return <span className="trade-leg"><AssetChip asset={asset} link={link} /> <span className="mono">{formatted ?? <Amt raw={raw} dec={asset.decimals} />}</span></span>
 }
 
 // The native asset, for the surfaces that render an amount the chain denominates
@@ -298,9 +435,10 @@ const NATIVE_ASSET: AssetRef = { assetId: 0, iconAssetId: 0, symbol: 'HDX', name
 //
 // Either way it renders as the explorer's amount convention — icon, ticker, then
 // the figure — so a fee reads the same whichever asset paid it, and the one that
-// is not HDX is legible as such at a glance rather than by its magnitude. The
-// exact raw amount stays on the title, since a converted fee can be small enough
-// to round away entirely.
+// is not HDX is legible as such at a glance rather than by its magnitude. A
+// converted fee can be small enough to round away entirely, which is what the
+// figure's own hover chip (AssetAmount → Amt) exists to show; a native `title`
+// here would open a second tooltip over it.
 // Whether the extrinsic actually tipped, in whichever asset paid. Surfaces that
 // curate their rows (an activity, a swap, a hover card) spend a line on the tip
 // only when there is one — most transactions carry none, so an unconditional
@@ -324,11 +462,7 @@ export function FeeAmount({ payment, hdxRaw, part = 'fee', link = true }: {
     ? (part === 'tip' ? payment.tipAmount ?? (hdxRaw != null ? '0' : null) : payment.amount)
     : hdxRaw
   if (raw == null || raw === '') return <Dash />
-  return (
-    <span title={`${F.preciseAmount(raw, asset.decimals)} ${asset.symbol}`}>
-      <AssetAmount asset={asset} raw={raw} link={link} />
-    </span>
-  )
+  return <AssetAmount asset={asset} raw={raw} link={link} />
 }
 
 // Short address with the final three characters highlighted.

@@ -1,7 +1,7 @@
 import { useContracts } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useNow } from '../hooks/useNow'
-import { Crumbs, F, AddrPill, Ago, Dash, EmptyRow, Sparkline, TableSkeleton, TokenIconRow, Pager, pendingRows, compactAmount, rowNav } from '../components/ui'
+import { Crumbs, Num, Usd, F, AddrPill, Ago, Dash, EmptyRow, Sparkline, TableSkeleton, TokenIconRow, Pager, pendingRows, rowNav } from '../components/ui'
 import { paths, usePageParam, useQueryValue, setPage, setQuery } from '../router'
 import { offeredPages } from '../utils/activityPaging'
 import type { ContractInfo, ContractSort } from '../types'
@@ -53,17 +53,17 @@ function ContractRow({ c, now }: { c: ContractInfo; now: number }) {
               : <Dash />}
         </span>
       </td>
-      <td data-label="Value" className={`r mono${emptyIf(!c.portfolioUsd)}`}>{c.portfolioUsd ? F.usd(c.portfolioUsd) : <Dash />}</td>
+      <td data-label="Value" className={`r mono${emptyIf(!c.portfolioUsd)}`}>{c.portfolioUsd ? <Usd v={c.portfolioUsd} /> : <Dash />}</td>
       <td data-label="Holdings" className={`holdings-cell${emptyIf(!c.topAssets?.length)}`}>{c.topAssets?.length ? <TokenIconRow assets={c.topAssets} /> : <Dash />}</td>
       <td data-label="1Y" className={`r${emptyIf(!(c.sparkline && c.sparkline.length > 1))}`}>{c.sparkline && c.sparkline.length > 1 ? <Sparkline data={c.sparkline} w={88} /> : <Dash />}</td>
-      <td data-label="Trading $" className={`r mono${emptyIf(!c.tradingVolumeUsd)}`}>{c.tradingVolumeUsd ? F.usd(c.tradingVolumeUsd) : <Dash />}</td>
+      <td data-label="Trading $" className={`r mono${emptyIf(!c.tradingVolumeUsd)}`}>{c.tradingVolumeUsd ? <Usd v={c.tradingVolumeUsd} /> : <Dash />}</td>
       {/* A partial total is a floor: the feed runs deeper than it could be
           counted, so it reads as "at least this" instead of as exact. */}
       <td data-label="Activity" className={`r mono${emptyIf(c.activityCount == null)}`}>
-        {c.activityCount != null ? <><span className="muted">{compactAmount(c.activityCount)}</span>{c.activityCountComplete === false ? '+' : ''}</> : <Dash />}
+        {c.activityCount != null ? <><span className="muted"><Num v={c.activityCount} /></span>{c.activityCountComplete === false ? '+' : ''}</> : <Dash />}
       </td>
-      <td data-label="Txs" className={`r mono${emptyIf(!c.txCount)}`}>{c.txCount ? <span className="muted">{compactAmount(c.txCount)}</span> : <Dash />}</td>
-      <td data-label="Logs" className={`r mono${emptyIf(!c.logCount)}`}>{c.logCount ? <span className="muted">{compactAmount(c.logCount)}</span> : <Dash />}</td>
+      <td data-label="Txs" className={`r mono${emptyIf(!c.txCount)}`}>{c.txCount ? <span className="muted"><Num v={c.txCount} /></span> : <Dash />}</td>
+      <td data-label="Logs" className={`r mono${emptyIf(!c.logCount)}`}>{c.logCount ? <span className="muted"><Num v={c.logCount} /></span> : <Dash />}</td>
       <td data-label="Created" className={`r${emptyIf(creation.method === 'unknown')}`}>
         {creation.method === 'create' && creation.timestamp ? <Ago ts={creation.timestamp} now={now} />
           : creation.method === 'factory' && creation.timestamp

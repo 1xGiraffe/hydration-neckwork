@@ -5,7 +5,7 @@ import { usePoolActivity, usePoolDetail, usePoolLps } from '../hooks/useExplorer
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
-import { accountHref, AddrPill, Ago, AreaChart, AssetAmount, AssetChip, AssetIcon, ChartSkeleton, compactAmount, Crumbs, Dash, EmptyRow, F, Pager, pendingRows, PoolBadge, rowNav, TableSkeleton } from '../components/ui'
+import { accountHref, Usd, Amt, AddrPill, Ago, AreaChart, AssetAmount, AssetChip, AssetIcon, ChartSkeleton, compactAmount, Crumbs, Dash, EmptyRow, F, Pager, pendingRows, PoolBadge, rowNav, TableSkeleton } from '../components/ui'
 import { ChartLegend, MultiLineChart, ShareBar, StackedAreaChart, type ShareSegment } from '../components/HdxCharts'
 import { ActivityTable } from '../components/ActivityTable'
 import { useAssetColors } from '../utils/iconColor'
@@ -109,7 +109,7 @@ function PoolBody({ d }: { d: PoolDetailData }) {
       <div className="detail-card"><div className="dl">
         <div className="dt">Venue</div><div className="dd">{d.kind === 'stableswap' ? 'Stableswap' : 'XYK'}{d.destroyed && <span className="badge" style={{ marginLeft: 8, background: 'color-mix(in srgb, var(--red) 15%, transparent)', color: 'var(--red)' }}>Destroyed</span>}</div>
         <div className="dt">Pool account</div><div className="dd"><AddrPill account={d.account} /></div>
-        <div className="dt">TVL</div><div className="dd mono">{d.tvlUsd != null ? F.usd(d.tvlUsd) : <Dash />}</div>
+        <div className="dt">TVL</div><div className="dd mono">{d.tvlUsd != null ? <Usd v={d.tvlUsd} /> : <Dash />}</div>
         <div className="dt">Trade fee</div><div className="dd mono">{d.feePermill != null ? fmtPermill(d.feePermill) : <Dash />}</div>
         {d.amplification != null && <>
           <div className="dt">Amplification</div>
@@ -122,7 +122,7 @@ function PoolBody({ d }: { d: PoolDetailData }) {
           <div className="dd mono">{fmtPerbill(d.maxPegUpdatePerbill)} <span className="muted">per block</span></div>
         </>}
         <div className="dt">Share token</div><div className="dd"><AssetChip asset={d.shareToken} /> <span className="muted mono">#{d.poolId}</span></div>
-        <div className="dt">LP supply</div><div className="dd mono">{F.amount(d.totalIssuance, d.shareToken.decimals)} <Link to={paths.holders(d.poolId)} className="hash" style={{ marginLeft: 8 }}>holders</Link></div>
+        <div className="dt">LP supply</div><div className="dd mono"><Amt raw={d.totalIssuance} dec={d.shareToken.decimals} /> <Link to={paths.holders(d.poolId)} className="hash" style={{ marginLeft: 8 }}>holders</Link></div>
         {d.createdAt && <>
           <div className="dt">Created</div>
           <div className="dd mono">{d.createdBlock != null ? <Link to={paths.block(d.createdBlock)} className="hash"><Ago ts={d.createdAt} now={now} /></Link> : <Ago ts={d.createdAt} now={now} />}</div>
@@ -139,7 +139,7 @@ function PoolBody({ d }: { d: PoolDetailData }) {
               <tr key={`${a.asset.assetId}:${i}`} {...rowNav(paths.asset(a.asset.assetId))}>
                 <td data-label="Asset"><AssetChip asset={a.asset} /></td>
                 <td data-label="Reserve" className="r"><AssetAmount asset={a.asset} raw={a.amount} /></td>
-                <td data-label="Value" className="r mono">{a.usd != null ? F.usd(a.usd) : <Dash />}</td>
+                <td data-label="Value" className="r mono">{a.usd != null ? <Usd v={a.usd} /> : <Dash />}</td>
                 <td data-label="Share" className="r mono muted">{F.sharePct(a.sharePct)}</td>
                 {hasPegs && <>
                   <td data-label="Peg" className="r mono">{a.peg ? fmtPeg(a.peg.price) : <Dash />}</td>
@@ -257,9 +257,9 @@ function PoolLpsSection({ d }: { d: PoolDetailData }) {
                   {r.farmedShares && <span className="badge" style={{ marginLeft: 6, background: 'var(--lavender-soft)', color: 'var(--lavender-deep)' }}
                     title={`${F.amount(r.farmedShares, d.shareToken.decimals)} of these shares are deposited in a liquidity-mining farm`}>farm</span>}
                 </td>
-                <td data-label="Shares" className="r mono">{F.amount(r.shares, d.shareToken.decimals)}</td>
+                <td data-label="Shares" className="r mono"><Amt raw={r.shares} dec={d.shareToken.decimals} /></td>
                 <td data-label="Share" className="r mono muted">{F.sharePct(r.sharePct)}</td>
-                <td data-label="Value" className="r mono">{r.valueUsd != null ? F.usd(r.valueUsd) : <Dash />}</td>
+                <td data-label="Value" className="r mono">{r.valueUsd != null ? <Usd v={r.valueUsd} /> : <Dash />}</td>
               </tr>
             )) : <EmptyRow cols={5}>No liquidity providers</EmptyRow>}
         </tbody>

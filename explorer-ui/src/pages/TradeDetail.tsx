@@ -3,7 +3,7 @@ import { useTrade } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect } from '../router'
-import { Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, MomentLink, PoolBadge, poolHref, SkeletonRows, AwaitingBlockCard } from '../components/ui'
+import { Crumbs, Usd, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, MomentLink, PoolBadge, poolHref, SkeletonRows, AwaitingBlockCard } from '../components/ui'
 import { blockOf } from '../utils/activityIds'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import type { TradeHop } from '../types'
@@ -126,7 +126,7 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                     <AssetAmount asset={data.assetOut} amount={data.amountOut} />
                   </span>
                 </div>
-                <div className="dt">Value</div><div className="dd mono">{F.usd(data.valueUsd)}</div>
+                <div className="dt">Value</div><div className="dd mono"><Usd v={data.valueUsd} /></div>
                 <RevenueRow revenue={data.revenue} />
                 {data.executionPrice != null && <>
                   <div className="dt">Execution price</div>

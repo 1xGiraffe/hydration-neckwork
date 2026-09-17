@@ -1,7 +1,7 @@
 import { memo } from 'react'
 import type { ReactNode } from 'react'
 import { Link, paths } from '../router'
-import { AddrPill, Dash, EmptyRow, ErrorRow, F, MomentLink, TableSkeleton, VoteSideBadge, pendingRows, LiveAnchor, type Moment } from './ui'
+import { AddrPill, Amt, Dash, EmptyRow, ErrorRow, MomentLink, TableSkeleton, VoteSideBadge, pendingRows, LiveAnchor, type Moment } from './ui'
 import type { AccountRef, AssetRef } from '../types'
 import { ConvictionTag } from './ActivityTable'
 import { voteSubjectLabel } from '../utils/voteRows'
@@ -65,7 +65,7 @@ const VoteRow = memo(function VoteRow({ row, asset, now, showAccount, showRefere
         {row.withdrawn && <span className="badge badge-quiet" title="Withdrawn before the referendum closed, so it is not counted">withdrawn</span>}
       </td>
       <td data-label="Votes" className="r mono">
-        {row.weighted == null ? <Dash /> : <>{F.amount(row.weighted, asset.decimals)} <span className="muted">{asset.symbol}</span></>}
+        {row.weighted == null ? <Dash /> : <><Amt raw={row.weighted} dec={asset.decimals} /> <span className="muted">{asset.symbol}</span></>}
       </td>
       <td data-label="Time" className="r">
         {/* Links to the extrinsic that cast the vote (see MomentLink). */}

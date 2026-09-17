@@ -5,7 +5,7 @@ import { useHollarDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useNow } from '../hooks/useNow'
 import { Link, paths } from '../router'
-import { AssetAmount, Crumbs, F, AssetChip, Ago, ChartSkeleton, TableSkeleton, EmptyRow, compactAmount } from '../components/ui'
+import { AssetAmount, Num, Usd, Crumbs, F, AssetChip, Ago, ChartSkeleton, TableSkeleton, EmptyRow, compactAmount } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
 import { ChartLegend, ShareBar, MirroredBarChart, StackedAreaChart, MultiLineChart } from '../components/HdxCharts'
 import type { ShareSegment, MirrorBar, AreaSeries, RefinedGrid } from '../components/HdxCharts'
@@ -49,10 +49,10 @@ function Ribbon({ d }: { d: HollarDashboard }) {
       v: <>{F.priceUsd(d.price)}{chg != null && <span style={{ color: chg >= 0 ? 'var(--green)' : 'var(--red)', fontSize: 12, marginLeft: 6 }}>{F.pct(chg)}</span>}</>,
     },
     { k: 'Peg deviation', v: d.pegDeviationBps != null ? <span style={{ color: bpsColor(d.pegDeviationBps) }}>{fmtBps(d.pegDeviationBps)}</span> : '—' },
-    { k: 'Supply', v: fmtAmt(d.supply.total) + ' HOLLAR' },
+    { k: 'Supply', v: <Num v={d.supply.total} suffix=" HOLLAR" /> },
     { k: 'Holders', v: F.int(d.supply.holders) },
-    { k: 'HSM reserves', v: F.usd(d.hsm.totalHoldingsUsd) },
-    { k: 'Stablepool TVL', v: F.usd(stablepoolTvl) },
+    { k: 'HSM reserves', v: <Usd v={d.hsm.totalHoldingsUsd} /> },
+    { k: 'Stablepool TVL', v: <Usd v={stablepoolTvl} /> },
   ]
   return (
     <div className="ribbon standalone">
@@ -90,7 +90,7 @@ function HsmCollateralTable({ collaterals, now }: { collaterals: HollarCollatera
                     with the icon+amount and stops it wrapping underneath */}
                 <span className="trade-leg">
                   <AssetAmount asset={c.asset} raw={c.holdings} />
-                  {c.holdingsUsd != null && <span className="muted">{F.usd(c.holdingsUsd)}</span>}
+                  {c.holdingsUsd != null && <span className="muted"><Usd v={c.holdingsUsd} /></span>}
                 </span>
               </td>
               <td data-label="Purchase fee" className="r mono">{fmtFeePct(c.purchaseFeePct)}</td>
@@ -129,7 +129,7 @@ function ReservesChart({ d }: { d: HollarDashboard }) {
         <ChartLegend items={bands.map(b => ({ label: b.label, color: b.color }))} />
         <StackedAreaChart buckets={days} series={bands} h={200} yFmt={v => fmtAmt(v)} totalLabel="Total reserves" zoomKey="zhsmres" />
         <div className="hdx-note">
-          The module holds {fmtAmt(reservesNow)} tokens of collateral today, all of it dollar-pegged, so the stack top also
+          The module holds <Num v={reservesNow} /> tokens of collateral today, all of it dollar-pegged, so the stack top also
           reads as its reserve value. It takes collateral IN when a user buys HOLLAR from it and spends it OUT when it buys
           HOLLAR back, so the curve is the running record of those two flows — plus the money-market interest it earns in
           between, since every approved collateral sits supplied as an aToken. Drag across the chart to zoom into a window.
@@ -237,7 +237,7 @@ function PoolCard({ p }: { p: HollarPool }) {
   // link-less — a nested <a> is invalid and browsers reparent it.
   return (
     <Link to={paths.pool(p.poolId)} className="hdx-card hdx-card-link" style={{ gap: 10 }} ariaLabel={`${poolLabel(p)} pool`}>
-      <div className="hk" style={{ flexWrap: 'wrap', rowGap: 2 }}><span>{poolLabel(p)}</span><span className="cap">{F.usd(p.tvlUsd)} TVL</span></div>
+      <div className="hk" style={{ flexWrap: 'wrap', rowGap: 2 }}><span>{poolLabel(p)}</span><span className="cap"><Usd v={p.tvlUsd} /> TVL</span></div>
       <ShareBar segments={segs} h={26} />
       <div className="hs">HOLLAR {p.hollarSharePct != null ? p.hollarSharePct.toFixed(1) + '%' : '—'}</div>
       <div className="hs">{p.partners.map((pt, i) => <span key={i}>{i > 0 && ' · '}<AssetAmount asset={pt.asset} formatted={fmtAmt(pt.amount)} link={false} /></span>)}</div>
@@ -382,7 +382,7 @@ function SupplyHoldersSection({ t }: { t: HollarTrends }) {
         <StackedAreaChart buckets={t.weeks} series={bands} h={200} zoomKey="zsup" />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Holders{trendSub(`accounts holding more than 0.01 HOLLAR — ${F.int(holdersFirst)} at launch, ${F.int(holdersNow)} now`)}</div>
         <StackedAreaChart buckets={t.weeks} series={holdersSeries} h={150} showShare={false} yFmt={v => F.int(Math.round(v))} zoomKey="zhold" />
-        <div className="hdx-note">Total supply is {fmtAmt(supplyNow)} HOLLAR. "Bridged out" sits on sibling-chain sovereign accounts;
+        <div className="hdx-note">Total supply is <Num v={supplyNow} /> HOLLAR. "Bridged out" sits on sibling-chain sovereign accounts;
           "Protocol pots" are pallet accounts (bonds, incentives). Balances come from the ERC-20 ledger — HOLLAR's substrate side holds under 0.3%.</div>
       </div>
     </>
@@ -416,7 +416,7 @@ function BorrowingSection({ t }: { t: HollarTrends }) {
         <div className="hdx-cards" style={{ marginTop: 14 }}>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: hollarColor }} />Borrowed now</div>
-            <div className="hv">{fmtAmt(debtNow)} <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HOLLAR</span></div>
+            <div className="hv"><Num v={debtNow} /> <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HOLLAR</span></div>
             <div className="hs">an all-time high</div>
           </div>
           <div className="hdx-card">
@@ -426,7 +426,7 @@ function BorrowingSection({ t }: { t: HollarTrends }) {
           </div>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: 'var(--green)' }} />Interest earned</div>
-            <div className="hv">{F.usd(revNow)}</div>
+            <div className="hv"><Usd v={revNow} /></div>
             <div className="hs">cumulative protocol revenue from HOLLAR borrows</div>
           </div>
           {t.rates.map(r => (

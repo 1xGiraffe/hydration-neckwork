@@ -9,15 +9,30 @@ import { expect, test } from './fixtures/test'
 const feeRow = (page: import('@playwright/test').Page, label: RegExp) =>
   page.locator('.detail-card').first().locator('.dt', { hasText: label }).locator('xpath=following-sibling::*[1]')
 
+// The exact debit the rounded figure stands for, read off its reveal chip.
+async function exactFee(page: import('@playwright/test').Page, cell: import('@playwright/test').Locator) {
+  const figure = cell.locator('.copyamt').first()
+  await expect(figure).toBeVisible()
+  const tip = page.locator('.exact-tip')
+  // The chip opens on mouseenter, so a hover that lands while the row is still
+  // settling registers on nothing — re-enter until it does.
+  await expect(async () => {
+    await page.mouse.move(0, 0)
+    await figure.hover()
+    await expect(tip).toBeVisible({ timeout: 1000 })
+  }).toPass()
+  return (await tip.innerText()).replace('click to copy', '').trim()
+}
+
 test('an extrinsic that paid in DOT states DOT, not HDX', async ({ page }) => {
   await page.goto('/extrinsic/12848613-3')
 
   const fee = feeRow(page, /^Fee$/)
   await expect(fee.locator('.asset-chip')).toContainText('DOT')
   await expect(fee).not.toContainText('HDX')
-  // The rounded figure is the visible one; the exact debit stays on the title, so
-  // a fee small enough to round away is still recoverable.
-  await expect(fee.locator('[title]').first()).toHaveAttribute('title', /DOT$/)
+  // The rounded figure is the visible one; hovering it reveals the exact debit,
+  // so a fee small enough to round away is still recoverable.
+  await expect(exactFee(page, fee)).resolves.toMatch(/^-?[\d,]+(\.\d+)?$/)
 
   // The tip belongs to the same charge and so to the same asset — the runtime
   // converts both through one price and deposits them as one amount.
@@ -31,7 +46,7 @@ test('an HDX-paying extrinsic reads in the same shape', async ({ page }) => {
   // not change shape depending on which currency paid it.
   const fee = feeRow(page, /^Fee$/)
   await expect(fee.locator('.asset-chip')).toContainText('HDX')
-  await expect(fee.locator('[title]').first()).toHaveAttribute('title', /HDX$/)
+  await expect(exactFee(page, fee)).resolves.toMatch(/^-?[\d,]+(\.\d+)?$/)
   await expect(feeRow(page, /^Tip$/).locator('.asset-chip')).toContainText('HDX')
 })
 

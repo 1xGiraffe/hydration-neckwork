@@ -1,6 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import { F, AssetIcon } from './ui'
+import { Amt, F, AssetIcon, Usd } from './ui'
 import { AssetBalanceChart } from './BalanceHistory'
 import { BalanceBreakdown } from './BalanceBreakdown'
 import { useQueryValue, setQuery } from '../router'
@@ -51,54 +50,6 @@ function assetName(a: AssetRef): string {
   return a.name ?? `#${a.assetId}`
 }
 
-// See first, copy second. Hovering the amount (or a first tap, where hover
-// doesn't exist) reveals the EXACT figure — every digit, F.preciseAmount's
-// string math — in a chip anchored above it, with a "click to copy" hint; only
-// a click made WHILE the chip is showing copies, and the chip confirms in place
-// ("Copied ✓"). The chip is portaled to <body> in viewport coordinates so a
-// 25-digit figure escapes the tile's overflow clipping, and pointer-events:none
-// keeps the click on the amount itself, which stops propagation — tiles are
-// buttons and must not toggle their lock on a copy.
-function CopyAmount({ raw, dec, children }: { raw: string; dec: number; children: React.ReactNode }) {
-  const ref = useRef<HTMLSpanElement>(null)
-  const hovering = useRef(false)
-  const [rect, setRect] = useState<DOMRect | null>(null) // non-null = chip open
-  const [done, setDone] = useState(false)
-  const open = () => setRect(ref.current?.getBoundingClientRect() ?? null)
-  const close = () => { setRect(null); setDone(false) }
-  return (
-    <span
-      ref={ref}
-      className="tm-copyamt"
-      onMouseEnter={() => { hovering.current = true; open() }}
-      onMouseLeave={() => { hovering.current = false; close() }}
-      onClick={e => {
-        e.stopPropagation(); e.preventDefault()
-        if (!rect) return open() // touch: the first tap reveals, never copies
-        void navigator.clipboard?.writeText(F.preciseAmountPlain(raw, dec))
-        setDone(true)
-        // A hover keeps the chip (mouseleave will close it); a tap has no leave
-        // event, so the confirmation dismisses itself.
-        setTimeout(() => { if (hovering.current) setDone(false); else close() }, 1400)
-      }}
-    >
-      {children}
-      {rect && createPortal(
-        <span
-          className="tm-exact-tip"
-          role="status"
-          style={{
-            left: Math.min(Math.max(Math.round(rect.left + rect.width / 2), 130), Math.round(window.innerWidth - 130)),
-            top: Math.round(rect.top - 7),
-          }}
-        >
-          {done ? 'Copied ✓' : <>{F.preciseAmount(raw, dec)}<span className="tm-exact-hint">click to copy</span></>}
-        </span>,
-        document.body,
-      )}
-    </span>
-  )
-}
 
 // Progressive tile-face content, revealed only when it comfortably fits so text is
 // never clipped mid-glyph. The full breakdown always lives in the detail card.
@@ -128,8 +79,8 @@ function TileFace({ balance, share, w, h }: { balance: AddressBalance; share: nu
           comfortably fits both. Sizing/sorting stays by USD — labels only. */}
       {(big || med) && (
         <span className="tm-val">
-          <CopyAmount raw={balance.total} dec={a.decimals}>{F.amount(balance.total, a.decimals)}</CopyAmount>
-          {big && balance.valueUsd != null && <span className="tm-val-usd"> · {F.usd(balance.valueUsd)}</span>}
+          <Amt raw={balance.total} dec={a.decimals} />
+          {big && balance.valueUsd != null && <span className="tm-val-usd"> · <Usd v={balance.valueUsd} /></span>}
         </span>
       )}
     </span>
@@ -150,7 +101,7 @@ function OtherFace({ count, value, share, w, h }: { count: number; value: number
         </span>
       </span>
       {(big || med) && <span className="tm-pct">{pctStr(share)}</span>}
-      {(big || med) && <span className="tm-val">{F.usd(value)}</span>}
+      {(big || med) && <span className="tm-val"><Usd v={value} /></span>}
     </span>
   )
 }
@@ -267,11 +218,11 @@ function FocusedDetail({ balance, hist, allHistory, refineWindow }: {
               label="Amount"
               strong
               value={<span className="tm-amt">
-                <CopyAmount raw={balance.total} dec={asset.decimals}>{F.amount(balance.total, asset.decimals)}</CopyAmount>
+                <Amt raw={balance.total} dec={asset.decimals} />
                 <span className="tm-amt-sym">{asset.symbol}</span>
               </span>}
             />
-            {priced && <Metric label="Value" value={F.usd(balance.valueUsd)} />}
+            {priced && <Metric label="Value" value={<Usd v={balance.valueUsd} />} />}
           </div>
         )}
         {balance != null && <BalanceBreakdown balance={balance} />}
@@ -299,7 +250,7 @@ function OtherDetail({ members, value, share, selectedId, onSelect }: {
       <div className="tm-detail-head">
         <div className="tm-detail-id">
           <span className="tm-detail-sym">Other holdings</span>
-          <span className="tm-detail-name">{members.length} assets · {F.usd(value)} · {pctStr(share)}</span>
+          <span className="tm-detail-name">{members.length} assets · <Usd v={value} /> · {pctStr(share)}</span>
         </div>
       </div>
       <div className="tm-chips tm-chips-scroll">

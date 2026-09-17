@@ -41,13 +41,13 @@ test.describe('balances treemap — desktop', () => {
     expect(faceText).toMatch(/%/)
     expect(await top(face.locator('.tm-pct')), '% sits above value').toBeLessThan(await top(face.locator('.tm-val')))
     // Amount primary: the copyable amount carries no $; the dimmed suffix does.
-    const amt = face.locator('.tm-copyamt')
+    const amt = face.locator('.copyamt').first()
     expect(await amt.innerText()).not.toContain('$')
     expect(await face.locator('.tm-val-usd').innerText()).toContain('$')
     // See first, copy second: hovering the amount reveals the full-precision
     // figure in an anchored chip — every digit, grouped, no compact suffixes —
     // with the "click to copy" hint teaching the second action.
-    const tip = page.locator('.tm-exact-tip')
+    const tip = page.locator('.exact-tip')
     await amt.hover()
     await expect(tip).toBeVisible()
     await expect(tip).toContainText('click to copy')
@@ -71,8 +71,8 @@ test.describe('balances treemap — desktop', () => {
     // its copyable figure reveals the same exact form on hover.
     const grid = page.locator('.tm-detail-grid')
     await expect(grid.locator('.tm-metric-label').first()).toHaveText('Amount')
-    await grid.locator('.tm-metric-value.strong .tm-copyamt').hover()
-    await expect(page.locator('.tm-exact-tip')).toContainText(/^-?[\d,]+(\.\d+)?/)
+    await grid.locator('.tm-metric-value.strong .copyamt').hover()
+    await expect(page.locator('.exact-tip')).toContainText(/^-?[\d,]+(\.\d+)?/)
 
     // No horizontal overflow.
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)

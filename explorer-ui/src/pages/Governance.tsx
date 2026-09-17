@@ -3,7 +3,7 @@ import { useGovernanceMotions, useGovernanceOverview, useGovernanceReferenda, us
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, setQuery, useQuery, useQueryValue } from '../router'
-import { AddrPill, Crumbs, Dash, DetailTabs, EmptyRow, F, MomentLink, Pager, pendingRows, rowNav, TableSkeleton } from '../components/ui'
+import { AddrPill, Amt, Crumbs, Dash, DetailTabs, EmptyRow, F, MomentLink, Pager, pendingRows, rowNav, TableSkeleton } from '../components/ui'
 import { NotifyButton } from '../components/NotifyButton'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds, fmtDuration } from '../utils/dca'
@@ -240,7 +240,7 @@ function TipRow({ t, now }: { t: TreasuryTipRow; now: number }) {
             : t.reason}
       </td>
       <td data-label="Beneficiary">{t.beneficiary ? <AddrPill account={t.beneficiary} noCopy /> : <Dash />}</td>
-      <td data-label="Paid out" className="r mono">{t.payout ? `${F.amount(t.payout, 12)} HDX` : <Dash />}</td>
+      <td data-label="Paid out" className="r mono">{t.payout ? <><Amt raw={t.payout} dec={12} /> HDX</> : <Dash />}</td>
       <td data-label="Status"><StatusBadge status={t.status} /></td>
       <td data-label="When" className="r mono"><MomentLink at={t.closedAt ?? t.openedAt} now={now} /></td>
     </tr>
