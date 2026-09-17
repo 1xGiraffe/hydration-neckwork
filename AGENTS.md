@@ -166,7 +166,7 @@ API it is a **versioned frozen contract**; concept: `~/.g/hydraken-api-concept.m
 - `api/src/data/**` may import only the allow-list pinned by
   `api/tests/data/isolation.test.ts` — that test is the enforced contract, and this
   sentence must follow it: today `db/client`, `config`, `types`, and the
-  `cache`/`explorerAssets`/`valuation`/`lpMath`/`uniswapV3Positions`/`uniswapV3Ranges`
+  `cache`/`explorerAssets`/`ohlcvService`/`valuation`/`lpMath`/`uniswapV3Positions`/`uniswapV3Ranges`
   services. Never `explorerService`, never
   `userAuthService`, never `public/**`; nothing outside `src/data/` imports from it.
   Address parsing/rendering is self-contained in `data/services/address.ts`. Pure domain

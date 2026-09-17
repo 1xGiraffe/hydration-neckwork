@@ -1,6 +1,7 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import { allExplorerAssets, type ExplorerAsset } from '../../services/explorerAssets.ts'
+import { queryOHLCV, type OHLCVInterval } from '../../services/ohlcvService.ts'
 import { scaledUsd } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
 import { dataStatus } from './head.ts'
@@ -187,16 +188,23 @@ export async function currentPrice(client: ClickHouseClient, assetId: number): P
 // are no 1-minute candles anywhere in the schema.
 // ---------------------------------------------------------------------------
 
+// This surface's wire bucket names, each mapped to the shared candle interval and
+// to the window this API is willing to read for it. The interval is the shared
+// service's own key, so which VIEW answers a bucket is stated once for the whole
+// codebase (ohlcvService.INTERVAL_VIEW_MAP) — a second copy here is how the two
+// would come to disagree about which table `1M` means. `maxSpanDays` is this
+// API's alone: it meters per account, so it caps a window where the explorer and
+// the public API do not.
 export const CANDLE_BUCKETS = {
-  '5m': { view: 'ohlc_5min_query', maxSpanDays: 14 },
-  '15m': { view: 'ohlc_15min_query', maxSpanDays: 30 },
-  '30m': { view: 'ohlc_30min_query', maxSpanDays: 60 },
-  '1h': { view: 'ohlc_1h_query', maxSpanDays: 120 },
-  '4h': { view: 'ohlc_4h_query', maxSpanDays: 366 },
-  '1d': { view: 'ohlc_1d_query', maxSpanDays: 1830 },
-  '1w': { view: 'ohlc_1w_query', maxSpanDays: 3660 },
-  '1M': { view: 'ohlc_1m_query', maxSpanDays: 3660 },
-} as const
+  '5m': { interval: '5min', maxSpanDays: 14 },
+  '15m': { interval: '15min', maxSpanDays: 30 },
+  '30m': { interval: '30min', maxSpanDays: 60 },
+  '1h': { interval: '1h', maxSpanDays: 120 },
+  '4h': { interval: '4h', maxSpanDays: 366 },
+  '1d': { interval: '1d', maxSpanDays: 1830 },
+  '1w': { interval: '1w', maxSpanDays: 3660 },
+  '1M': { interval: '1M', maxSpanDays: 3660 },
+} as const satisfies Record<string, { interval: OHLCVInterval; maxSpanDays: number }>
 
 export type CandleBucket = keyof typeof CANDLE_BUCKETS
 
@@ -211,19 +219,21 @@ export interface Candle {
   volumeTotal: string
 }
 
-const chDateTime = (epochSeconds: number) => new Date(epochSeconds * 1000).toISOString().slice(0, 19).replace('T', ' ')
-
+/**
+ * One asset's USD candles, read through the shared candle service and renamed onto
+ * this API's wire. Only the naming is local: the view, the window semantics and the
+ * decimal quoting that keeps a Decimal(38,12) out of a double all belong to
+ * ohlcvService, so a candle here is the same candle the explorer and the public API
+ * serve rather than a second reading of the same tables.
+ */
 export async function assetCandles(client: ClickHouseClient, assetId: number, bucket: CandleBucket, fromTime: number, toTime: number): Promise<Candle[]> {
-  const res = await client.query({
-    query: `-- data:assets:candles
-        SELECT * FROM price_data.${CANDLE_BUCKETS[bucket].view}(asset_id={assetId:UInt32}, start_time={start:DateTime}, end_time={end:DateTime})`,
-    query_params: { assetId, start: chDateTime(fromTime), end: chDateTime(toTime) },
-    format: 'JSONEachRow',
-    // Decimal(38,12) values must arrive as strings or JSON.parse rounds them
-    // through a double (the ohlcvService precedent).
-    clickhouse_settings: { output_format_json_quote_decimals: 1 },
+  const rows = await queryOHLCV(client, {
+    assetId,
+    startTime: new Date(fromTime * 1000),
+    endTime: new Date(toTime * 1000),
+    interval: CANDLE_BUCKETS[bucket].interval,
+    tag: 'data:assets:candles',
   })
-  const rows = await res.json<{ interval_start: string; open: string; high: string; low: string; close: string; volume_buy: string; volume_sell: string; volume_total: string }>()
   return rows.map(row => ({
     time: iso(row.interval_start),
     open: row.open,
