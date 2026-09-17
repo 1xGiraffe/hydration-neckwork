@@ -653,6 +653,11 @@ export interface WithdrawLimitView {
   armedAt: { blockHeight: number; blockTimestamp: string } | null
   everTripped: boolean
   egressAccounts: EgressSink[]
+  // Both sides of `GlobalAssetOverrides`, which is the only way an asset becomes
+  // Local and the only way a plain Token joins the accounted set. It is NOT the
+  // whole accounted set: the runtime also takes every registry `External` and
+  // `Erc20` asset without an override (`global_asset_category`), which is an
+  // order of magnitude more assets and cannot be counted from a storage prefix.
   localAssets: AssetRef[]
   externalAssetCount: number
 }

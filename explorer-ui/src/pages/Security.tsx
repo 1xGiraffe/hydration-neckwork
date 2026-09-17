@@ -141,7 +141,7 @@ function Overview({ d, now, nominalSec }: { d: SecurityDashboard; now: number; n
           <div className="pf-card">
             <WithdrawMeter d={d} />
             <div className="hdx-note" style={{ marginTop: 12 }}>
-              One chain-wide budget in HDX, draining linearly back to zero. {d.withdraw.everTripped ? 'It has been tripped before.' : 'It has never been tripped.'}{' '}
+              One chain-wide budget in HDX, net of arrivals and decaying towards zero between charges. {d.withdraw.everTripped ? 'It has been tripped before.' : 'It has never been tripped.'}{' '}
               <Link className="sec-inline-link" to={paths.security('cross-chain')}>See the egress detail →</Link>
             </div>
           </div>
@@ -237,7 +237,14 @@ function Ribbon({ d, now }: { d: SecurityDashboard; now: number }) {
 }
 
 // 2. global withdraw limit
-const WITHDRAW_EXPLAINER = 'Every withdrawal and every transfer into a bridge or exchange sink is priced in HDX and added to one chain-wide accumulator. The accumulator drains linearly back to zero over the window, so sustained outflow builds pressure while a single large transfer does not. An operation that would push the total past the limit is rejected outright — passing the limit does not lock the chain by itself; only the technical committee or governance can arm a lockdown.'
+const WITHDRAW_EXPLAINER = 'Every withdrawal of a participating asset, and every transfer of one into a bridge or exchange sink, is priced in HDX and added to one chain-wide accumulator; arrivals are subtracted again, so this is net outflow rather than gross. The accumulator decays linearly from its last credit and would reach zero one window later, but every new charge restarts that decay from the reduced figure, so a chain under steady outflow carries a standing balance instead of emptying. An operation that would take the total to the limit is rejected outright — reaching the limit does not lock the chain by itself; only the technical committee or governance can arm a lockdown.'
+
+// The number is only ever as good as the price behind it, and the price is not
+// always a market one: the chain converts through the ten-minute oracle over the
+// asset's route to HDX, and where no such route exists it silently falls back to
+// the fixed price governance set for paying fees in that asset, which nothing
+// keeps current.
+const WITHDRAW_PRICE_NOTE = 'Each asset is converted at its ten-minute oracle price along its route to HDX. An asset with no such route falls back to the fixed price governance set for fee payment, which can sit far from the market and moves only when governance moves it.'
 
 function WithdrawMeter({ d }: { d: SecurityDashboard }) {
   const w = d.withdraw
@@ -286,7 +293,7 @@ function WithdrawSection({ d, now }: { d: SecurityDashboard; now: number }) {
           <div className="hdx-card">
             <div className="hk">Drains to zero in</div>
             <div className="hv">{w.windowMs != null ? fmtDuration(w.windowMs) : '—'}</div>
-            <div className="hs">linear decay · last credited {w.lastCreditedMs ? <Ago ts={new Date(w.lastCreditedMs).toISOString()} now={now} /> : '—'}</div>
+            <div className="hs">if nothing more is charged · last credited {w.lastCreditedMs ? <Ago ts={new Date(w.lastCreditedMs).toISOString()} now={now} /> : '—'}</div>
           </div>
           <div className="hdx-card">
             <div className="hk">Armed</div>
@@ -300,6 +307,7 @@ function WithdrawSection({ d, now }: { d: SecurityDashboard; now: number }) {
           </div>
         </div>
         <div className="hdx-note" style={{ marginTop: 14 }}>{WITHDRAW_EXPLAINER}</div>
+        <div className="hdx-note" style={{ marginTop: 8 }}>{WITHDRAW_PRICE_NOTE}</div>
         {w.egressAccounts.length > 0 && (
           <>
             <div className="sec-sub">Egress sinks · {w.egressAccounts.length}</div>
@@ -312,7 +320,7 @@ function WithdrawSection({ d, now }: { d: SecurityDashboard; now: number }) {
               ))}
             </div>
             <div className="hdx-note">
-              Transfers into these accounts count against the budget. {w.localAssets.length > 0 && <>Only {w.localAssets.map(a => a.symbol).join(' and ')} are accounted as local assets — the other {F.int(w.externalAssetCount)} participating assets are external, and their every withdrawal counts.</>}
+              Transfers into these accounts count against the budget. {w.localAssets.length > 0 && <>{w.localAssets.map(a => a.symbol).join(' and ')} are the only assets accounted as local, so they are charged only on the way into a sink. Every external and ERC-20 asset is charged on every withdrawal, wherever it goes, as are the {F.int(w.externalAssetCount)} assets governance has promoted into that category.</>}
             </div>
           </>
         )}

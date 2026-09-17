@@ -2036,6 +2036,9 @@ export interface SecurityWithdrawLimit {
   armedAt: { blockHeight: number; blockTimestamp: string } | null
   everTripped: boolean
   egressAccounts: SecurityEgressSink[]
+  // The asset-category overrides only. Every registry external/ERC-20 asset is
+  // accounted too, without an override, so `externalAssetCount` is what
+  // governance has added rather than the size of the accounted set.
   localAssets: AssetRef[]
   externalAssetCount: number
 }
