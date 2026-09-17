@@ -136,6 +136,8 @@ export interface ReferendumDetail {
   // submission through deposits and phase changes to the deposit refunds that
   // trail the conclusion. Already loaded to derive `status`; here it is shown.
   timeline: ReferendumTimelineEntry[]
+  /** The timeline's scheduled-execution rows stop short of the full chain (see MAX_CHAIN_*). */
+  timelineTruncated: boolean
   // The track's parameters (OpenGov only; Democracy predates tracks). Present
   // for concluded referenda too — the name belongs in the header regardless.
   trackInfo: ReferendumTrackRef | null
@@ -161,9 +163,23 @@ export interface ReferendumTimelineEntry {
   // (`unavailable`). Absent everywhere else, including on an enactment event whose result
   // could not be read — an unreadable result is not a failed one.
   outcome?: ReferendumEnactmentOutcome
+  // Present on the rows the enactment set in motion rather than performed itself — the
+  // anonymous scheduler tasks its call filed (see loadEnactmentChain). `depth` is 1 for a
+  // task the enactment filed directly, 2 for one that task filed, and so on. A task that has
+  // not run carries the block it is due in as its blockHeight and no timestamp, so it sorts
+  // where it is expected to happen.
+  scheduled?: { depth: number; state: ScheduledExecutionState }
 }
 
 export type ReferendumEnactmentOutcome = 'ok' | 'failed' | 'unavailable'
+
+/**
+ * What became of a scheduled execution. `ran` carries the dispatch's own outcome alongside it;
+ * `cancelled` saw the cancellation; `pending` is still ahead of the indexed head. `dropped` is
+ * the honest remainder: its block has passed and no dispatch is indexed for it, which is what a
+ * cancellation in an earlier block looks like from the due block — see loadEnactmentChain.
+ */
+export type ScheduledExecutionState = 'ran' | 'pending' | 'cancelled' | 'dropped'
 
 export interface ReferendumTrackRef {
   id: number
@@ -441,6 +457,209 @@ async function loadEnactment(index: number): Promise<EnactmentRow | null> {
   return (await res.json<EnactmentRow>())[0] ?? null
 }
 
+// ---- the executions an enactment sets in motion ----
+
+// An enactment's own dispatch is rarely the whole story. A referendum whose call schedules
+// further work — a batch that notes a preimage and files it for the next block, a drip that
+// files one task per block for a hundred blocks — dispatches Ok at its enactment block while
+// everything it was voted through to do happens later, in blocks the timeline never named.
+// Referendum 405 is the plain case: enacted at 14,672,011, where it filed one anonymous task
+// for 14,672,012, and that block is where its activity is.
+//
+// Following the chain needs an attribution rule, because an anonymous task carries no name to
+// join on. The scheduler runs each due task to completion inside on_initialize and closes it
+// with a terminal event, so every event between one terminal event and the next belongs to the
+// task that the later one closes. A `Scheduler.Scheduled {when, index}` inside an enactment's
+// window was therefore filed BY the enactment, and the task it names is the `Scheduler.Dispatched`
+// at block `when` whose `task` is `[when, index]` — an exact identity, not a heuristic.
+//
+// The one soft edge is a dispatch with no terminal event before it in its block: its window
+// opens at the block's first event, so another pallet emitting Scheduler.Scheduled from its own
+// on_initialize ahead of the scheduler would be read as the enactment's. Nothing on this chain
+// does that — only the scheduler pallet emits the event, and only from a schedule call.
+const SCHEDULER_TERMINAL = new Set([
+  'Scheduler.Dispatched', 'Scheduler.CallUnavailable',
+  // Not emitted by this runtime today, but they close a task the same way if it starts to be.
+  'Scheduler.PeriodicFailed', 'Scheduler.RetryFailed', 'Scheduler.PermanentlyOverweight',
+])
+
+// How far to follow. A task that files a task that files a task is legitimate; an unbounded
+// walk over adversarial data is not. Both caps sit far above anything governance has done —
+// the deepest real chain is two levels and the widest enactment filed 105 tasks — and when one
+// bites the response says so rather than quietly showing a short list.
+const MAX_CHAIN_DEPTH = 8
+const MAX_CHAIN_ROWS = 500
+
+// A task that does not fit its due block's weight is carried into a later block and dispatched
+// there, still naming its original agenda slot: referendum 257 filed task [11,052,637, 1] and
+// the scheduler ran it at 11,052,638. Reading only the due block would report that task as
+// never run — the same off-by-one that hid the enactment's own follow-ons. So an unresolved
+// task is chased a bounded way past its due block. Both caps keep the extra read small, and it
+// only ever runs for tasks the due block did not already account for (1 of 596 on this chain).
+const POSTPONE_WINDOW = 100
+const MAX_POSTPONED_CHASED = 50
+
+// The indexed head, for deciding whether a scheduled execution is still ahead or has already
+// come and gone. Shares the feed's 1.5s cache window, so a page that reads it pays for it once.
+async function indexedHead(): Promise<number> {
+  return cached('governance:indexed-head', 1_500, async () => {
+    const res = await client.query({ query: 'SELECT max(block_height) AS h FROM price_data.blocks', format: 'JSONEachRow' })
+    return Number((await res.json<{ h: number }>())[0]?.h ?? 0)
+  })
+}
+
+interface SchedulerEventRow {
+  block_height: number
+  event_index: number
+  extrinsic_index: number | null
+  event_name: string
+  ts: string
+  args_json: string
+}
+
+/** A task's identity in the scheduler's agenda: the block it is due in and its slot there. */
+export interface TaskId { when: number; index: number }
+const taskKey = (t: TaskId) => `${t.when}:${t.index}`
+
+function taskIdFromArgs(argsJson: string): TaskId | null {
+  try {
+    const args = JSON.parse(argsJson) as { when?: unknown; index?: unknown; task?: unknown }
+    // Scheduled/Canceled name the agenda slot directly; Dispatched/CallUnavailable carry it
+    // as the `task` pair.
+    if (typeof args.when === 'number' && typeof args.index === 'number') return { when: args.when, index: args.index }
+    const task = args.task
+    if (Array.isArray(task) && typeof task[0] === 'number' && typeof task[1] === 'number') return { when: task[0], index: task[1] }
+    return null
+  } catch { return null }
+}
+
+/**
+ * The tasks a dispatch filed, from its block's scheduler events. The window opens after the
+ * previous terminal event — the scheduler runs one due task to completion before starting the
+ * next, so nothing before that boundary is this task's doing — and closes at the dispatch
+ * itself. Pure, because this attribution IS the feature: get the window wrong and the timeline
+ * credits a referendum with another task's work.
+ */
+export function tasksFiledBy(
+  blockRows: Pick<SchedulerEventRow, 'event_index' | 'event_name' | 'args_json'>[],
+  dispatchEventIndex: number,
+): TaskId[] {
+  const opensAfter = blockRows.reduce(
+    (max, r) => (r.event_index < dispatchEventIndex && SCHEDULER_TERMINAL.has(r.event_name) ? Math.max(max, r.event_index) : max),
+    -1,
+  )
+  const filed: TaskId[] = []
+  for (const r of blockRows) {
+    if (r.event_name !== 'Scheduler.Scheduled') continue
+    if (r.event_index <= opensAfter || r.event_index >= dispatchEventIndex) continue
+    const task = taskIdFromArgs(r.args_json)
+    if (task) filed.push(task)
+  }
+  return filed
+}
+
+/** Every scheduler event in these blocks, in order — one keyed read per wave. */
+async function loadSchedulerEvents(blocks: number[]): Promise<SchedulerEventRow[]> {
+  if (!blocks.length) return []
+  const res = await client.query({
+    query: `SELECT block_height, event_index, extrinsic_index, event_name,
+                   toString(block_timestamp) AS ts, args_json
+            FROM price_data.raw_events
+            WHERE block_height IN {blocks:Array(UInt32)} AND event_name LIKE 'Scheduler.%'
+            ORDER BY block_height, event_index`,
+    query_params: { blocks },
+    format: 'JSONEachRow',
+  })
+  return res.json<SchedulerEventRow>()
+}
+
+/**
+ * The scheduled executions an enactment set in motion, breadth-first from the enactment's own
+ * dispatch. Two keyed reads per level: one for the windows that reveal what was filed, one for
+ * the blocks those tasks are due in. `truncated` says a cap stopped the walk.
+ *
+ * A task is resolved from the block it is due in, which is the only block its dispatch can be
+ * in. A cancellation is not so placed — `Scheduler.Canceled` fires whenever the cancelling call
+ * ran, which may be thousands of blocks earlier — so chasing it would mean scanning the whole
+ * span between. A due block that has passed with nothing indexed for it is reported as
+ * `dropped` instead: it did not run, and this read cannot say why.
+ */
+export async function loadEnactmentChain(
+  enactment: Pick<EnactmentRow, 'block_height' | 'event_index'>,
+  head: number,
+): Promise<{ entries: ReferendumTimelineEntry[]; truncated: boolean }> {
+  const entries: ReferendumTimelineEntry[] = []
+  const seen = new Set<string>()
+  let anchors = [{ blockHeight: enactment.block_height, eventIndex: enactment.event_index }]
+  let truncated = false
+
+  for (let depth = 1; depth <= MAX_CHAIN_DEPTH && anchors.length; depth++) {
+    // What each anchor filed: the Scheduled events in its window.
+    const byBlock = new Map<number, SchedulerEventRow[]>()
+    for (const row of await loadSchedulerEvents([...new Set(anchors.map(a => a.blockHeight))])) {
+      const list = byBlock.get(row.block_height) ?? []
+      list.push(row)
+      byBlock.set(row.block_height, list)
+    }
+    const filed: TaskId[] = []
+    for (const anchor of anchors) {
+      for (const task of tasksFiledBy(byBlock.get(anchor.blockHeight) ?? [], anchor.eventIndex)) {
+        if (!seen.has(taskKey(task))) { seen.add(taskKey(task)); filed.push(task) }
+      }
+    }
+    if (!filed.length) break
+    if (entries.length + filed.length > MAX_CHAIN_ROWS) { truncated = true; break }
+
+    // How each filed task turned out, read from the block it is due in.
+    const outcomeByTask = new Map<string, SchedulerEventRow>()
+    const resolve = async (blocks: number[]) => {
+      for (const row of await loadSchedulerEvents(blocks)) {
+        if (row.event_name === 'Scheduler.Scheduled') continue
+        const task = taskIdFromArgs(row.args_json)
+        // Earliest wins: a task is dispatched once, and the due block is the authority.
+        if (task && !outcomeByTask.has(taskKey(task))) outcomeByTask.set(taskKey(task), row)
+      }
+    }
+    await resolve([...new Set(filed.map(t => t.when))])
+
+    // Anything the due block did not account for may have been carried forward (POSTPONE_WINDOW).
+    const postponed = filed.filter(t => !outcomeByTask.has(taskKey(t)) && t.when <= head).slice(0, MAX_POSTPONED_CHASED)
+    if (postponed.length) {
+      const blocks = new Set<number>()
+      for (const t of postponed) for (let b = t.when + 1; b <= t.when + POSTPONE_WINDOW; b++) blocks.add(b)
+      await resolve([...blocks])
+    }
+    const next: { blockHeight: number; eventIndex: number }[] = []
+    for (const task of filed) {
+      const row = outcomeByTask.get(taskKey(task))
+      if (!row || row.event_name === 'Scheduler.Canceled') {
+        const state: ScheduledExecutionState = row ? 'cancelled' : task.when > head ? 'pending' : 'dropped'
+        entries.push({
+          event: row?.event_name ?? 'Scheduler.Scheduled',
+          blockHeight: task.when,
+          extrinsicIndex: null,
+          timestamp: row?.ts ?? '',
+          scheduled: { depth, state },
+        })
+        continue
+      }
+      const outcome = enactmentOutcomeFrom(row.event_name, row.args_json)
+      entries.push({
+        event: row.event_name,
+        blockHeight: row.block_height,
+        extrinsicIndex: row.extrinsic_index,
+        timestamp: row.ts,
+        ...(outcome ? { outcome } : {}),
+        scheduled: { depth, state: 'ran' },
+      })
+      next.push({ blockHeight: row.block_height, eventIndex: row.event_index })
+    }
+    if (depth === MAX_CHAIN_DEPTH && next.length) truncated = true
+    anchors = next
+  }
+  return { entries, truncated }
+}
+
 // The lifecycle rows and the enactment as one list in block order.
 //
 // A merge rather than an append: the enactment sits between a referendum's conclusion and the
@@ -451,6 +670,7 @@ async function loadEnactment(index: number): Promise<EnactmentRow | null> {
 export function referendumTimelineFrom(
   lifecycle: Pick<LifecycleRow, 'event_name' | 'block_height' | 'extrinsic_index' | 'ts'>[],
   enactment: EnactmentRow | null,
+  scheduled: ReferendumTimelineEntry[] = [],
 ): ReferendumTimelineEntry[] {
   const entries: ReferendumTimelineEntry[] = lifecycle.map(row => ({
     event: row.event_name, blockHeight: row.block_height, extrinsicIndex: row.extrinsic_index, timestamp: row.ts,
@@ -465,6 +685,7 @@ export function referendumTimelineFrom(
       ...(outcome ? { outcome } : {}),
     })
   }
+  entries.push(...scheduled)
   return entries.sort((a, b) => a.blockHeight - b.blockHeight)
 }
 
@@ -1314,6 +1535,10 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
       && lifecycle.some(row => row.event_name === 'Referenda.Confirmed' || row.event_name === 'Referenda.Approved')
     const enactment = approved ? await loadEnactment(index) : null
     const enactmentOutcome = enactment ? enactmentOutcomeFrom(enactment.event_name, enactment.args_json) : null
+    // An enactment that only filed further work leaves its referendum's real effects in later
+    // blocks; the chain walk names each of them so the timeline points at the block that
+    // actually did the thing (see loadEnactmentChain).
+    const chain = enactment ? await loadEnactmentChain(enactment, await indexedHead()) : null
 
     // The proposer: the submit extrinsic's signer (effective signer for proxied
     // and EVM-signed submissions).
@@ -1364,7 +1589,10 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
       voters: voters.slice(0, limit),
       votesShown: Math.min(voters.length, limit),
       votesTotal: voters.length,
-      timeline: referendumTimelineFrom(lifecycle, enactment),
+      timeline: referendumTimelineFrom(lifecycle, enactment, chain?.entries),
+      // True only when a cap stopped the walk short, so the page can say the list is partial
+      // rather than implying the enactment scheduled nothing more.
+      timelineTruncated: chain?.truncated ?? false,
       trackInfo: track ? {
         id: track.id, name: track.name,
         preparePeriod: track.preparePeriod, decisionPeriod: track.decisionPeriod,

@@ -1730,6 +1730,8 @@ export interface ReferendumDetail {
   votesShown: number
   votesTotal: number
   timeline: ReferendumTimelineEntry[]
+  /** The scheduled-execution rows stop short of the full chain — the page says so. */
+  timelineTruncated?: boolean
   trackInfo: ReferendumTrackRef | null
   liveTally: LiveReferendumTally | null
   progress: ReferendumProgress | null
@@ -1743,6 +1745,12 @@ export interface ReferendumTimelineEntry {
   // Enactment entries only, and only when the event said which it was. Absent on an
   // enactment whose result could not be read, which reads as neither success nor failure.
   outcome?: 'ok' | 'failed' | 'unavailable'
+  // Only on the executions the enactment SCHEDULED rather than performed. An approved call
+  // often just files more work — referendum 405 enacted at 14,672,011 by filing one task for
+  // 14,672,012, which is where its activity is — so each filed task gets its own row at the
+  // block that ran it. `depth` is 1 for a task the enactment filed itself, 2 for one that task
+  // filed, and so on. A row that has not run carries the block it is DUE in and no timestamp.
+  scheduled?: { depth: number; state: 'ran' | 'pending' | 'cancelled' | 'dropped' }
 }
 
 export interface ReferendumTrackRef {
