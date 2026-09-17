@@ -376,14 +376,19 @@ describe('uniswap_v3_fee', () => {
 })
 
 describe('hollarBorrowHourlyRows', () => {
+  // The seed read hits the same view as the window read, so it is matched by its
+  // own tag first — the generic view marker would otherwise answer both.
+  const SEED = 'rev:hollar-seed'
   interface Call { query: string }
   function fakeClient(rowsByMarker: Record<string, unknown[]>): { calls: Call[]; client: never } {
     const calls: Call[] = []
     const client = {
       query: async ({ query }: { query: string }) => {
         calls.push({ query })
-        const marker = Object.keys(rowsByMarker).find(m => query.includes(m))
-        return { json: async () => (marker ? rowsByMarker[marker] : []) }
+        const marker = query.includes(SEED)
+          ? SEED
+          : Object.keys(rowsByMarker).find(m => m !== SEED && query.includes(m))
+        return { json: async () => (marker ? rowsByMarker[marker] ?? [] : []) }
       },
     }
     return { calls, client: client as never }
@@ -449,6 +454,74 @@ describe('hollarBorrowHourlyRows', () => {
     // The amount itself is unchanged — booking must stay byte-identical.
     expect(rows[0].amountPlanck).toBe(10n ** 18n)
     expect(rows[0].hoursCovered).toBe(5)
+  })
+
+  // The leak this guards against: the view emits a row only for an hour the
+  // reserve was TOUCHED, so the observation before a window boundary is routinely
+  // hours back — 3 to 30 in the measured history. Differencing against a
+  // one-hour lead-in finds nothing there and drops the segment outright, losing
+  // one accrual per pool per window. Because the derivations job runs a month
+  // partition at a time, that fell on every month boundary: 13 unbooked segments
+  // worth 2,398.90 HOLLAR (~$2,394) between 2025-09 and 2026-09-17, which is the
+  // whole of the explorer's shortfall against /api/v1/fees/charts on this stream.
+  it('books the first observation in the window against the last one BEFORE it', async () => {
+    const { client, calls } = fakeClient({
+      [SEED]: [{
+        pool_address: '0xpool',
+        debt_scaled: '1000000000000000000000',
+        borrow_index: '1000000000000000000000000000',
+        index_bucket: ch(t0 - 8 * H),
+      }],
+      'money_market_reserve_state_history': [
+        { bucket: ch(t0), pool_address: '0xpool', debt_scaled: '1000000000000000000000', borrow_index: '1001000000000000000000000000' },
+      ],
+      'ohlc_1h': [{ bucket: ch(t0), close: '1' }],
+    })
+    const rows = await hollarBorrowHourlyRows(client, t0, t0 + H)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].amountPlanck).toBe(10n ** 18n)
+    // …and the span is the real gap back to that observation, not one hour.
+    expect(rows[0].hoursCovered).toBe(8)
+    // The seed must not be bounded by a guessed lookback: a pool untouched for
+    // months still has to difference against its last real observation.
+    const seed = calls.find(c => c.query.includes(SEED))!
+    expect(seed.query).toContain("start_time = '1970-01-01 00:00:00'")
+  })
+
+  // The other half of the same boundary. The view bounds the UNDERLYING events by
+  // `block_timestamp <= end_time` and buckets them afterwards, so an hour-aligned
+  // end_time returns no bucket for that hour unless an event landed exactly on the
+  // second — measured live: end_time '2025-09-30 23:00:00' returns 20:00, 21:00,
+  // 22:00 and no 23:00, while '2025-09-30 23:59:59' returns all four. That dropped
+  // each month's last accrual: 666.21 HOLLAR over six month-ends, 2025-09 … 2026-07.
+  it('asks the view for the whole of the last hour, not just its first second', async () => {
+    const { client, calls } = fakeClient({
+      'money_market_reserve_state_history': [
+        { bucket: ch(t0), pool_address: '0xpool', debt_scaled: '1000000000000000000000', borrow_index: '1000000000000000000000000000' },
+        { bucket: ch(t0 + H), pool_address: '0xpool', debt_scaled: '1000000000000000000000', borrow_index: '1001000000000000000000000000' },
+      ],
+      'ohlc_1h': [{ bucket: ch(t0), close: '1' }],
+    })
+    const rows = await hollarBorrowHourlyRows(client, t0, t0 + H)
+    const debt = calls.find(c => c.query.includes('rev:hollar-debt'))!
+    expect(debt.query).toContain(`end_time = '${ch(t0 + H + 3_599)}'`)
+    // Reading the full hour must not book an hour past the window.
+    expect(rows.every(r => r.hour <= t0 + H)).toBe(true)
+  })
+
+  it('emits nothing for a pool whose first observation has no predecessor at all', async () => {
+    // Nothing to difference against is not zero interest — it is no model. The
+    // pool's accrual starts being booked at its second observation.
+    const { client } = fakeClient({
+      'money_market_reserve_state_history': [
+        { bucket: ch(t0), pool_address: '0xnew', debt_scaled: '1000000000000000000000', borrow_index: '1000000000000000000000000000' },
+        { bucket: ch(t0 + H), pool_address: '0xnew', debt_scaled: '1000000000000000000000', borrow_index: '1001000000000000000000000000' },
+      ],
+      'ohlc_1h': [{ bucket: ch(t0), close: '1' }],
+    })
+    const rows = await hollarBorrowHourlyRows(client, t0, t0 + H)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].hour).toBe(t0 + H)
   })
 
   it('reports a contiguous pool\'s accrual as covering one hour', async () => {

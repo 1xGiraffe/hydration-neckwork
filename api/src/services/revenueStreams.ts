@@ -825,7 +825,24 @@ export interface HollarHourlyRow {
   debtScaledAfter: bigint
 }
 
-/** Per-bucket HOLLAR debt/index — see feesCharts.ts for the view's contract. */
+/**
+ * Per-bucket HOLLAR debt/index.
+ *
+ * `end_time` reaches to the LAST SECOND of `toSeconds`' hour, not to its start.
+ * The view bounds the underlying EVENTS by `block_timestamp <= end_time` and
+ * buckets them afterwards, so asking with an hour-aligned end_time returns no
+ * bucket for that hour at all unless an event happened to land exactly on the
+ * second — the final hour of every window silently absent rather than partial.
+ * On the derivations job's month partitions that dropped each month's 23:00
+ * accrual: 666.21 HOLLAR over six month-ends, 2025-09 … 2026-07. Callers still
+ * filter what they EMIT to `toSeconds`, so widening the read only completes the
+ * last bucket; it never books an hour past the window.
+ *
+ * An EMPTY result is not zero: the view's contract (clickhouse/schema/
+ * 007_money_market_history.sql) is that it returns nothing at all when the aToken
+ * anchor has not been snapshotted. Callers answer with an empty series, never a
+ * zeroed one.
+ */
 function hollarDebtSql(fromSeconds: number, toSeconds: number): string {
   const ch = (s: number) => new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')
   return `-- rev:hollar-debt
@@ -834,9 +851,48 @@ SELECT toString(bucket_start) AS bucket, pool_address,
 FROM price_data.money_market_reserve_state_history(
   bucket_seconds = 3600,
   start_time = '${ch(fromSeconds)}',
-  end_time = '${ch(toSeconds)}')
+  end_time = '${ch(toSeconds + 3_599)}')
 WHERE reserve_address = {reserve:String}
 ORDER BY pool_address, bucket_start`
+}
+
+/**
+ * Each pool's last observation STRICTLY BEFORE the window — the state the
+ * window's first accrual is differenced against.
+ *
+ * This exists because the view is SPARSE: it emits a row only for an hour the
+ * reserve was actually touched, so the observation preceding a window boundary
+ * sits 3 to 30 hours back in the measured history, and unboundedly far for a
+ * quiet market. A fixed lead-in therefore cannot be right — the one-hour lead-in
+ * this replaced silently dropped the first accrual of every window, which on the
+ * derivations job's month partitions meant one lost segment per pool per month
+ * (13 of them, 2,398.90 HOLLAR / ~$2,394, 2025-09 … 2026-09-17).
+ *
+ * `start_time` is unbounded rather than guessed, and that is free: the view
+ * computes a running total from the aToken anchor over everything up to
+ * `end_time` and only applies `start_time` as a final filter, so narrowing it
+ * saves no work at all (measured flat: 0.50 s for a 1-day span, 0.45 s for 90).
+ * Aggregating here rather than shipping the history keeps the transfer at one
+ * row per pool however far back the predecessor lies.
+ *
+ * `debt_scaled` is taken from the last observation outright, the index from the
+ * last observation that CARRIED one: an index of 0 marks a delta-only hour the
+ * view could not carry an index into, and differencing against it would book the
+ * entire index as one hour's interest.
+ */
+function hollarSeedSql(beforeSeconds: number): string {
+  const ch = (s: number) => new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')
+  return `-- rev:hollar-seed
+SELECT pool_address,
+       toString(argMax(debt_scaled, bucket_start)) AS debt_scaled,
+       toString(argMaxIf(variable_borrow_index, bucket_start, variable_borrow_index > 0)) AS borrow_index,
+       toString(maxIf(bucket_start, variable_borrow_index > 0)) AS index_bucket
+FROM price_data.money_market_reserve_state_history(
+  bucket_seconds = 3600,
+  start_time = '1970-01-01 00:00:00',
+  end_time = '${ch(beforeSeconds)}')
+WHERE reserve_address = {reserve:String}
+GROUP BY pool_address`
 }
 
 /** HOLLAR's price per hour, keyed by the hour the candle became usable. */
@@ -852,6 +908,7 @@ ORDER BY interval_start`
 }
 
 interface DebtRow { bucket: string; pool_address: string; debt_scaled: string; borrow_index: string }
+interface SeedRow { pool_address: string; debt_scaled: string; borrow_index: string; index_bucket: string }
 interface PriceRow { bucket: string; close: string }
 
 function bucketSeconds(chDateTime: string): number {
@@ -878,14 +935,25 @@ export async function hollarBorrowHourlyRows(
   const ch = (s: number) => new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')
 
   const debtRes = await client.query({
-    // One hour of lead-in so the first hour has a predecessor to difference.
-    query: hollarDebtSql(first - HOUR, endSeconds),
+    query: hollarDebtSql(first, endSeconds),
     query_params: { reserve: HOLLAR_RESERVE_ADDRESS },
     format: 'JSONEachRow',
     clickhouse_settings: DECIMAL_STRINGS,
   })
   const debtRows = await debtRes.json<DebtRow>()
   if (!debtRows.length) return []
+
+  // Only once there is something to book: each pool's state as of the last
+  // observation before the window, so the first one inside it differences
+  // against real state rather than against nothing. See hollarSeedSql.
+  const seedRes = await client.query({
+    query: hollarSeedSql(first - 1),
+    query_params: { reserve: HOLLAR_RESERVE_ADDRESS },
+    format: 'JSONEachRow',
+    clickhouse_settings: DECIMAL_STRINGS,
+  })
+  const seeds = new Map<string, SeedRow>()
+  for (const row of await seedRes.json<SeedRow>()) seeds.set(row.pool_address, row)
 
   const priceRes = await client.query({
     query: hollarPriceSql(),
@@ -903,7 +971,7 @@ export async function hollarBorrowHourlyRows(
   const sortedPrices = [...prices].sort(([a], [b]) => a - b)
   let priceIndex = 0
   let lastPrice = 0n
-  for (let t = first - HOUR; t <= endSeconds; t += HOUR) {
+  for (let t = first; t <= endSeconds; t += HOUR) {
     while (priceIndex < sortedPrices.length && sortedPrices[priceIndex][0] <= t) {
       const p = sortedPrices[priceIndex][1]
       if (p > 0n) lastPrice = p
@@ -922,20 +990,26 @@ export async function hollarBorrowHourlyRows(
 
   const out: HollarHourlyRow[] = []
   for (const [poolAddress, rows] of byPool) {
-    const observed = new Map(rows.map(r => [bucketSeconds(r.bucket), r]))
-    let prevDebt: bigint | null = null
-    let prevIndex: bigint | null = null
+    // Walk the observations themselves, in time order. Stepping hour by hour
+    // would be identical (every hour without a row is skipped) but would cost a
+    // tick per hour back to the seed, which is unbounded.
+    const observed = rows
+      .map(r => ({ t: bucketSeconds(r.bucket), row: r }))
+      .sort((a, b) => a.t - b.t)
+    const seed = seeds.get(poolAddress)
+    const seedIndex = seed ? BigInt(seed.borrow_index) : 0n
+    let prevDebt: bigint | null = seed ? BigInt(seed.debt_scaled) : null
+    let prevIndex: bigint | null = seedIndex > 0n ? seedIndex : null
     // The hour of the observation `prevIndex` came from — the far end of the
     // span each accrual covers. Tracked alongside prevIndex rather than per
     // iteration so a delta-only hour (index 0) does not shorten the span to a
     // gap the index was never differenced across.
-    let prevIndexHour: number | null = null
-    for (let t = first - HOUR; t <= endSeconds; t += HOUR) {
-      const row = observed.get(t)
-      if (!row) continue
+    let prevIndexHour: number | null = seedIndex > 0n ? bucketSeconds(seed!.index_bucket) : null
+    for (const { t, row } of observed) {
+      if (t < first || t > endSeconds) continue
       const debt = BigInt(row.debt_scaled)
       const index = BigInt(row.borrow_index)
-      if (prevDebt != null && prevIndex != null && prevIndexHour != null && index > prevIndex && t >= first) {
+      if (prevDebt != null && prevIndex != null && prevIndexHour != null && index > prevIndex) {
         const planck = (prevDebt * (index - prevIndex)) / RAY
         const usd = (planck * (priceAtHour.get(t) ?? 0n)) / HOLLAR_UNIT
         if (planck > 0n) {
