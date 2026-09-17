@@ -176,7 +176,7 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
                 emitted for it, submission through deposit refunds. */}
             {(data.timeline?.length ?? 0) > 0 && <>
               <div className="sec-title" style={{ marginTop: 22 }}>Timeline</div>
-              <ReferendumTimeline timeline={data.timeline} now={now} />
+              <ReferendumTimeline timeline={data.timeline} truncated={data.timelineTruncated} now={now} />
             </>}
 
             {/* What the referendum would actually DO. Only place a reader can see it: the

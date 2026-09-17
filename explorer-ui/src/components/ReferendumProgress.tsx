@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds, fmtDuration } from '../utils/dca'
 import { MomentLink } from './ui'
+import { Link, paths } from '../router'
 import type { ExplorerStats, ReferendumProgress, ReferendumTimelineEntry, ReferendumTrackRef } from '../types'
 
 // Where a running OpenGov referendum stands on its track — the Subsquare-style
@@ -219,12 +220,37 @@ const OUTCOME_LABELS: Record<string, string> = {
   unavailable: 'Call unavailable',
 }
 
+// A scheduled execution's own outcome, said as the follow-on it is. An approved call that only
+// files more work leaves nothing at its enactment block to look at, so these rows are what make
+// the timeline point at the blocks that did the thing.
+const SCHEDULED_LABELS: Record<string, string> = {
+  ok: 'Scheduled execution',
+  failed: 'Scheduled execution failed',
+  unavailable: 'Scheduled call unavailable',
+}
+const SCHEDULED_STATE_LABELS: Record<string, string> = {
+  pending: 'Execution scheduled',
+  cancelled: 'Scheduled execution cancelled',
+  // Its block came and went with no dispatch indexed — cancelled earlier, or dropped. The row
+  // says what is known (it did not run) and not what cannot be read from the due block.
+  dropped: 'Scheduled execution never ran',
+}
+
 function entryLabel(entry: ReferendumTimelineEntry): string {
+  if (entry.scheduled) {
+    const label = entry.scheduled.state === 'ran'
+      ? (entry.outcome ? SCHEDULED_LABELS[entry.outcome] : null) ?? 'Scheduled execution'
+      : SCHEDULED_STATE_LABELS[entry.scheduled.state] ?? 'Scheduled execution'
+    // A task filed by a task: say how far down the chain it sits, so a two-step enactment does
+    // not read as two independent executions.
+    return entry.scheduled.depth > 1 ? `${label} (step ${entry.scheduled.depth})` : label
+  }
   if (entry.outcome) return OUTCOME_LABELS[entry.outcome] ?? entry.outcome
   return EVENT_LABELS[entry.event] ?? entry.event.replace(/^[^.]+\./, '')
 }
 
 function dotClass(entry: ReferendumTimelineEntry): string {
+  if (entry.scheduled && entry.scheduled.state !== 'ran') return entry.scheduled.state === 'pending' ? 'phase' : 'bad'
   if (entry.outcome) return entry.outcome === 'ok' ? 'good' : 'bad'
   if (GOOD_EVENTS.has(entry.event)) return 'good'
   if (BAD_EVENTS.has(entry.event)) return 'bad'
@@ -232,19 +258,34 @@ function dotClass(entry: ReferendumTimelineEntry): string {
   return 'admin'
 }
 
-export function ReferendumTimeline({ timeline, now }: { timeline: ReferendumTimelineEntry[]; now: number }) {
+export function ReferendumTimeline({ timeline, truncated, now }: { timeline: ReferendumTimelineEntry[]; truncated?: boolean; now: number }) {
   return (
     <div className="panel ref-timeline">
-      {timeline.map(entry => (
-        <div className="ref-tl-row" key={`${entry.blockHeight}-${entry.event}`}>
-          <span className={`ref-tl-dot ${dotClass(entry)}`} />
+      {timeline.map((entry, i) => (
+        // Scheduled rows are indented under the enactment that filed them, one step per level,
+        // so the chain reads as consequences rather than as a flat list of equals.
+        <div className={`ref-tl-row${entry.scheduled ? ' sub' : ''}`} key={`${entry.blockHeight}-${entry.event}-${i}`}>
+          <span className={`ref-tl-dot ${dotClass(entry)}`} style={entry.scheduled ? { marginLeft: (entry.scheduled.depth - 1) * 12 } : undefined} />
           <span className="ref-tl-label">{entryLabel(entry)}</span>
           <span className="ref-tl-when mono">
-            <MomentLink at={entry} now={now} />
-            <span className="ref-tl-block muted"> · #{entry.blockHeight.toLocaleString('en-US')}</span>
+            {/* A row that has not run has no moment to link, so the block it is due in carries
+                the link instead — the block page counts down to a height the chain has not
+                reached yet. */}
+            {entry.timestamp
+              ? <>
+                <MomentLink at={entry} now={now} />
+                <span className="ref-tl-block muted"> · #{entry.blockHeight.toLocaleString('en-US')}</span>
+              </>
+              : <Link to={paths.block(entry.blockHeight)} className="hash">#{entry.blockHeight.toLocaleString('en-US')}</Link>}
           </span>
         </div>
       ))}
+      {truncated && (
+        <div className="ref-tl-row">
+          <span className="ref-tl-dot admin" />
+          <span className="ref-tl-label muted">More scheduled executions follow — this list is capped.</span>
+        </div>
+      )}
     </div>
   )
 }
