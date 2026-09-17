@@ -322,11 +322,45 @@ describe('uniswap_v3_fee', () => {
     expect(TREASURY_H160).toBe('0x6d6f646c70792f74727372790000000000000000')
   })
 
-  // Only the factory owner can collect a pool's protocol fee, so the collect is
-  // protocol revenue whoever it names as recipient.
-  it('books a pool CollectProtocol in full, whoever received it', () => {
-    expect(sql).toContain("event_name = 'CollectProtocol'")
-    expect(sql).not.toContain("'CollectProtocol' AND counterparty")
+  // The protocol's share of a swap fee is revenue when the swap happens, not when
+  // governance sweeps it. Only the factory owner (the runtime's AaveManagerAccount,
+  // via root or the EconomicParameters track) can call collectProtocol, so a sweep
+  // may never come — booking it meant the stream showed the Gamma cut alone, $0.62
+  // against ~$53.7 the pool had already earned.
+  it('books the pool protocol fee where it accrues, under its own dest', () => {
+    expect(sql).toContain("'accrued' AS dest")
+    // The gross fee is already derived once, per swap and per payer, by the legs
+    // job; the protocol keeps 1/feeProtocol of it. Recomputing the tier against the
+    // raw Swap amounts here would be the same number written a second way.
+    expect(sql).toContain("l.venue = 'uniswapv3' AND l.leg_kind = 'fee'")
+    expect(sql).toContain('intDiv(f.gross_fee, fp.fp)')
+    // The payer rides along, which is what lets account_revenue attribute the
+    // accrual directly instead of spreading a realization nobody made.
+    expect(sql).toContain('swapper AS account')
+  })
+
+  // Booking both the accrual and the sweep would count one fee twice: a collect
+  // moves a balance this stream has already recognised, exactly as a HOLLAR
+  // repayment is not revenue on top of the interest that accrued.
+  it('does not book CollectProtocol, which would double-count the accrual', () => {
+    expect(sql).not.toContain('CollectProtocol')
+  })
+
+  // The rate in force at a swap was usually set long before the window being
+  // recomputed, so the SetFeeProtocol relation must not carry the job's window or
+  // an incremental recompute would silently accrue nothing.
+  it('reads the fee-protocol rate without the job window, as of each swap', () => {
+    expect(sql).toContain("event_name = 'SetFeeProtocol'")
+    expect(sql).toContain('fp.pool = f.pool AND fp.side = f.side AND fp.at_key <= f.at_key')
+    const feeProtocolCte = sql.slice(sql.indexOf('fee_protocol AS ('), sql.indexOf('swap_fees AS ('))
+    expect(feeProtocolCte).not.toContain('block_timestamp >')
+  })
+
+  // dest is what keeps the two arms tellable apart on a frozen stream enum, and
+  // anything that is not an omnipool 'lp' leg counts as protocol revenue in full.
+  it('counts the accrual as protocol revenue without touching the stream list', () => {
+    expect(REVENUE_STREAMS.filter(s => s.startsWith('uniswap_v3'))).toEqual(['uniswap_v3_fee'])
+    expect(PROTOCOL_REVENUE_PREDICATE_SQL).toContain("dest != 'lp'")
   })
 
   // A token the registry cannot name must not become asset 0 (HDX) by default.

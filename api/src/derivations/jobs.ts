@@ -1265,7 +1265,11 @@ export function accountRevenueEventfulInsertSql(partition: string, target = `${A
 SELECT account, stream, toUInt32(${partition}) AS month, sum(amount_usd) AS revenue_usd
 FROM ${REVENUE_EVENTS_TABLE}
 WHERE toYYYYMM(block_timestamp) = ${partition}
-  AND stream NOT IN ('hollar_borrow', 'asset_reserve', 'uniswap_v3_fee')
+  -- uniswap_v3_fee is half eventful: its accrued rows name the swapper who paid
+  -- them and belong here, while the Gamma vault's lump names no payer and is
+  -- spread over a window by the realization pass below.
+  AND (stream NOT IN ('hollar_borrow', 'asset_reserve', 'uniswap_v3_fee')
+       OR (stream = 'uniswap_v3_fee' AND account != ''))
   AND ${PROTOCOL_REVENUE_PREDICATE_SQL}
 GROUP BY account, stream`
 }
@@ -1349,9 +1353,10 @@ export async function runAccountRevenue(client: ClickHouseClient): Promise<Deriv
     }
 
     // Uniswap v3 protocol fees, split over the swappers whose fees accrued them.
-    // The lump is realized by the factory owner (a CollectProtocol) or by a Gamma
-    // vault paying the Treasury, neither of which is the payer — see
-    // services/uniswapV3Attribution.ts.
+    // Only the Gamma vault's REALIZATION needs this: it pays the Treasury a lump
+    // covering many swaps, and the vault is not the payer — see
+    // services/uniswapV3Attribution.ts. The pool-level share is booked per swap
+    // and already carries its swapper, so it takes the generic path instead.
     const realizationsRes = await client.query({
       query: uniswapV3RealizationsSql(),
       query_params: { partition: Number(p) },
