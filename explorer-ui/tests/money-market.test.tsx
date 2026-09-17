@@ -186,8 +186,8 @@ describe('the Value stat names the money-market debt it nets out', () => {
     const html = renderToStaticMarkup(<ProfileStats valueUsd={-5_240} moneyMarket={borrowing} />)
 
     expect(html).toContain('acct-stats-hint')
-    expect(html).toContain('primary $100 lent · −$40.00 borrowed')
-    expect(html).toContain('GIGAHDX debt −$6.2k')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('primary $100 lent · −$40.00 borrowed')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('GIGAHDX debt −$6.2k')
   })
 
   it('leaves the row off entirely when nothing is borrowed', () => {
@@ -218,8 +218,8 @@ describe('the Value stat names the money-market debt it nets out', () => {
     )
 
     expect(html).toContain('-$5.24k')          // portfolio $1,000 − $6,240 of debt
-    expect(html).toContain('primary $100 lent · −$40.00 borrowed')
-    expect(html).toContain('GIGAHDX debt −$6.2k')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('primary $100 lent · −$40.00 borrowed')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('GIGAHDX debt −$6.2k')
   })
 })
 

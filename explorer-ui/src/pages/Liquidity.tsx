@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { usePools } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, Link } from '../router'
-import { AssetIcon, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav, TableSkeleton } from '../components/ui'
+import { AssetIcon, Usd, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav, TableSkeleton } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
 import type { PoolCompositionEntry, PoolListEntry } from '../types'
 
@@ -70,7 +70,7 @@ function PoolRow({ p }: { p: PoolListEntry }) {
         </div>
       </td>
       <td data-label="Composition" className="comp-cell"><CompositionBar composition={p.composition} colors={colors} /></td>
-      <td data-label="TVL" className="r mono liq-tvl">{p.tvlUsd != null ? F.usd(p.tvlUsd) : <Dash />}</td>
+      <td data-label="TVL" className="r mono liq-tvl">{p.tvlUsd != null ? <Usd v={p.tvlUsd} /> : <Dash />}</td>
       <td data-label="Share" className="r mono muted">{p.sharePct == null ? <Dash /> : p.sharePct < 0.1 ? '<0.1%' : F.sharePct(p.sharePct)}</td>
     </tr>
   )
@@ -92,7 +92,7 @@ export function Liquidity() {
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Liquidity' }]} />
         <div className="page-title">Liquidity <span className="sub">
-          {data ? <>{F.usd(data.totalTvlUsd)} pooled across {held.length} {held.length === 1 ? 'pool' : 'pools'}</> : 'every pool, largest first'}
+          {data ? <><Usd v={data.totalTvlUsd} /> pooled across {held.length} {held.length === 1 ? 'pool' : 'pools'}</> : 'every pool, largest first'}
         </span></div>
       </div>
 
@@ -112,7 +112,7 @@ export function Liquidity() {
           286 empty rows to reach nothing. */}
       {dust.length > 0 && (
         <div className="liq-dust">
-          <span>{dust.length} pools hold {dustUsd > 0 ? `${F.usd(dustUsd)} between them` : 'nothing'}</span>
+          <span>{dust.length} pools hold {dustUsd > 0 ? <><Usd v={dustUsd} /> between them</> : 'nothing'}</span>
           <button type="button" className="liq-dust-toggle" onClick={() => setShowDust(v => !v)} aria-expanded={showDust}>
             {showDust ? 'hide them' : 'show them'}
           </button>

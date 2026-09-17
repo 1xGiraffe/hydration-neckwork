@@ -4,7 +4,7 @@ import { useEvmReceipt, useExtrinsic, useExtrinsicActivity, useStats } from '../
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, redirect } from '../router'
-import { Crumbs, F, AddrPill, AssetAmount, CallPill, FeeAmount, StatusBadge, MempoolResultBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows, AwaitingBlockCard } from '../components/ui'
+import { Crumbs, Usd, Amt, F, AddrPill, AssetAmount, CallPill, FeeAmount, StatusBadge, MempoolResultBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows, AwaitingBlockCard } from '../components/ui'
 import { blockOf } from '../utils/activityIds'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { api } from '../api/explorer'
@@ -33,15 +33,15 @@ function IceSolutionCard({ panel, now }: { panel: IceSolutionPanel; now: number 
         <span className="muted"> · the state the solution was computed against</span>
       </div>
       <div className="dt">Matched</div>
-      <div className="dd mono">{F.usd(panel.matchedInUsd)}<span className="muted"> · intents settled against each other, off the pools</span></div>
+      <div className="dd mono"><Usd v={panel.matchedInUsd} /><span className="muted"> · intents settled against each other, off the pools</span></div>
       <div className="dt">Routed</div>
-      <div className="dd mono">{F.usd(panel.routedInUsd)}<span className="muted"> · the remainder the pot traded through the pools</span></div>
+      <div className="dd mono"><Usd v={panel.routedInUsd} /><span className="muted"> · the remainder the pot traded through the pools</span></div>
       <div className="dt">Fees swept</div>
       <div className="dd">{panel.feeSwept.length === 0
         ? <span className="muted">none</span>
         : panel.feeSwept.map((f, i) => (
           <span key={`${f.asset.assetId}-${i}`}>{i > 0 && <span className="muted"> · </span>}<AssetAmount asset={f.asset} raw={f.amount} />
-            {f.valueUsd != null && <span className="muted mono"> {F.usd(f.valueUsd)}</span>}
+            {f.valueUsd != null && <span className="muted mono"> <Usd v={f.valueUsd} /></span>}
           </span>
         ))}
       </div>
@@ -111,7 +111,7 @@ function EvmTxRows({ tx, callArgs }: { tx?: EvmTransactionFacts; callArgs: unkno
           chain's history — all 68 move currency 20 in exactly these raw units.
           An unlabelled figure reads as HDX, which is both the wrong asset and
           12-decimal, so the number would be misread by six orders of magnitude. */}
-      <div className="dd mono" title={F.preciseAmount(envelope.value, 18)}>{F.amount(envelope.value, 18)} WETH</div>
+      <div className="dd mono"><Amt raw={envelope.value} dec={18} /> WETH</div>
     </>}
     {gasUsed != null && <>
       <div className="dt">Gas</div>

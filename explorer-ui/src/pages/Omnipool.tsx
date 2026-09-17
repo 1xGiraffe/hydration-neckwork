@@ -4,7 +4,7 @@ import { windowRefine } from '../utils/chartRefine'
 import { useOmnipool } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
-import { AddrPill, AreaChart, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, F, rowNav } from '../components/ui'
+import { AddrPill, Usd, AreaChart, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, F, rowNav } from '../components/ui'
 import { ChartLegend, ShareBar, StackedAreaChart, type ShareSegment } from '../components/HdxCharts'
 import { useAssetColors } from '../utils/iconColor'
 import type { AssetRef } from '../types'
@@ -98,10 +98,10 @@ export function Omnipool() {
     return (
       <>
         <div className="detail-card"><div className="dl">
-          <div className="dt">TVL</div><div className="dd mono">{data.tvlUsd != null ? F.usd(data.tvlUsd) : <Dash />}</div>
+          <div className="dt">TVL</div><div className="dd mono">{data.tvlUsd != null ? <Usd v={data.tvlUsd} /> : <Dash />}</div>
           <div className="dt">Assets</div><div className="dd num">{F.int(data.assetCount)}</div>
           <div className="dt">Hub reserve</div>
-          <div className="dd"><AssetAmount asset={HUB_ASSET} raw={data.hubReserveTotal} />{hubUsd != null && <span className="muted mono" style={{ marginLeft: 8 }}>{F.usd(hubUsd)}</span>}</div>
+          <div className="dd"><AssetAmount asset={HUB_ASSET} raw={data.hubReserveTotal} />{hubUsd != null && <span className="muted mono" style={{ marginLeft: 8 }}><Usd v={hubUsd} /></span>}</div>
           <div className="dt">H2O price</div><div className="dd mono">{data.lrnaPrice != null ? F.priceUsd(data.lrnaPrice) : <Dash />}</div>
           <div className="dt">Pool account</div><div className="dd"><AddrPill account={data.account} /></div>
         </div></div>
@@ -120,7 +120,7 @@ export function Omnipool() {
                   <td data-label="#" className="mono muted">{i + 1}</td>
                   <td data-label="Asset"><AssetChip asset={r.asset} /></td>
                   <td data-label="Reserve" className="r"><AssetAmount asset={r.asset} raw={r.reserve} /></td>
-                  <td data-label="Value" className="r mono">{r.reserveUsd != null ? F.usd(r.reserveUsd) : <Dash />}</td>
+                  <td data-label="Value" className="r mono">{r.reserveUsd != null ? <Usd v={r.reserveUsd} /> : <Dash />}</td>
                   <td data-label="Weight" className="r mono muted">{F.sharePct(r.weightPct)}</td>
                   <td data-label="Cap" className="r mono muted">{r.capPct != null ? `${r.capPct.toLocaleString('en-US', { maximumFractionDigits: 1 })}%` : '—'}</td>
                   <td data-label="Tradability" className="r mono" style={r.tradable.length === 1 && r.tradable[0] === 'Frozen' ? { color: 'var(--red)' } : undefined}>

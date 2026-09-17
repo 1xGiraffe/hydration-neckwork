@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- river component + the pure advanceStage helper its tests exercise */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AddrPill, F } from './ui'
+import { AddrPill, Usd, F } from './ui'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import {
   createFlowScheduler,
@@ -216,7 +216,7 @@ export function RevenueFlow() {
     return (
       <div className="rev-river rev-ledger-mode">
         <div className="rev-counter" aria-live="off">
-          <div className="rev-counter-num mono">{F.usd(arrivedUsd)}</div>
+          <div className="rev-counter-num mono"><Usd v={arrivedUsd} /></div>
           <div className="rev-counter-sub">collected while watching</div>
         </div>
         <div className="rev-ledger">
@@ -229,7 +229,7 @@ export function RevenueFlow() {
                   ? <AddrPill account={e.item.account} noCopy />
                   : (e.label ?? REVENUE_STREAM_LABEL[e.stream])}
               </span>
-              <span className="mono">{F.usd(e.usd)}</span>
+              <span className="mono"><Usd v={e.usd} /></span>
             </div>
           ))}
         </div>
@@ -244,7 +244,7 @@ export function RevenueFlow() {
     >
       <div className="rev-current" aria-hidden="true" />
       <div className={`rev-counter${pulse % 2 === 0 ? ' pulse-a' : ' pulse-b'}`}>
-        <div className="rev-counter-num mono">{F.usd(arrivedUsd)}</div>
+        <div className="rev-counter-num mono"><Usd v={arrivedUsd} /></div>
         <div className="rev-counter-sub">collected while watching</div>
       </div>
       <button

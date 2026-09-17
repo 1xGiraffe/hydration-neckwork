@@ -4,7 +4,7 @@ import { useNow } from '../hooks/useNow'
 import { api } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, useQuery, useQueryValue, setQuery } from '../router'
-import { Crumbs, F, AssetIcon, AssetAmount, AddrPill, AssetDetailSkeleton, TableSkeleton, EmptyRow, rowNav, accountHref, TagGroupPill, ActivityChips, Pager, normalizeActivityType, normalizeActivityAction, Dash, pendingRows } from '../components/ui'
+import { Crumbs, Usd, Amt, F, AssetIcon, AssetAmount, AddrPill, AssetDetailSkeleton, TableSkeleton, EmptyRow, rowNav, accountHref, TagGroupPill, ActivityChips, Pager, normalizeActivityType, normalizeActivityAction, Dash, pendingRows } from '../components/ui'
 import { ActiveDcaTable } from '../components/AccountSections'
 import { AssetOrderBook } from '../components/AssetOrderBook'
 import { AssetLiquidityTab } from '../components/AssetLiquidity'
@@ -121,14 +121,14 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
               <div className="dt">Decimals</div><div className="dd num">{a.decimals}</div>
               <div className="dt">Price</div><div className="dd mono">{F.priceUsd(a.price)} <span style={{ color: chCol(a.change24h), marginLeft: 8 }}>{F.pct(a.change24h)}</span>{emaNow != null && <span className="mono ema-tag">EMA7 {F.priceUsd(emaNow)}</span>}</div>
               <div className="dt">Holders</div><div className="dd num">{F.int(data.holderCount)}</div>
-              <div className="dt">TVL</div><div className="dd mono">{F.usd(data.totalUsd)}</div>
+              <div className="dt">TVL</div><div className="dd mono"><Usd v={data.totalUsd} /></div>
               {/* Collateral seized from borrowers in the money market, over the
                   asset's full history. Present for every asset the market holds or
                   has held — a reserve that has never been liquidated reads $0. */}
               {data.liquidations && <>
                 <div className="dt">Liquidated</div>
-                <div className="dd mono">{F.usd(data.liquidations.total.valueUsd)}
-                  <span className="muted" style={{ marginLeft: 8 }}>{F.amount(data.liquidations.total.amount, data.liquidations.decimals)} {a.symbol}</span>
+                <div className="dd mono"><Usd v={data.liquidations.total.valueUsd} />
+                  <span className="muted" style={{ marginLeft: 8 }}><Amt raw={data.liquidations.total.amount} dec={data.liquidations.decimals} /> {a.symbol}</span>
                 </div>
               </>}
             </div></div>
@@ -182,7 +182,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
                       <td data-label="Rank" className="mono muted">{h.rank}</td>
                       <td data-label="Holder">{h.tag ? <TagGroupPill tag={h.tag} /> : h.account ? <AddrPill account={h.account} noCopy /> : <Dash />}</td>
                       <td data-label="Balance" className="r"><AssetAmount asset={a} raw={h.balance} /></td>
-                      <td data-label="Value" className="r mono">{F.usd(h.valueUsd)}</td>
+                      <td data-label="Value" className="r mono"><Usd v={h.valueUsd} /></td>
                       <td data-label="Share" className="r mono muted">{F.share(h.share ?? 0)}</td>
                     </tr>
                   )) : <EmptyRow cols={5}>No holders</EmptyRow>}

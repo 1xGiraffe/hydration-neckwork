@@ -100,7 +100,7 @@ describe('Hollar dashboard page', () => {
     // ribbon values
     expect(html).toContain('$1.00') // F.priceUsd rounds stablecoin prices to 2dp
     expect(html).toContain('+13 bps') // peg deviation, amber band (>10, <=50)
-    expect(html).toContain('10.3M HOLLAR') // total supply
+    expect(html.replace(/<[^>]+>/g, '')).toContain('10.3M HOLLAR') // total supply
     expect(html).toContain('4,215') // holders
     expect(html).toContain('$273k') // HSM reserves USD
     expect(html).toContain('$12.6M') // stablepool TVL (sum of pool tvlUsd)
@@ -122,7 +122,7 @@ describe('Hollar dashboard page', () => {
     expect(html).toContain('Reserves')
     expect(html).toContain('collateral held by the module, since launch')
     // The head of the stack is the module's reserves today: 193k + 0.
-    expect(html).toContain('The module holds 193k tokens of collateral today')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('The module holds 193k tokens of collateral today')
   })
 
   it('renders one peg section: the full-era chart with a filled intraweek range', () => {

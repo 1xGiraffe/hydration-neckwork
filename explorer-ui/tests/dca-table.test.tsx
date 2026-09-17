@@ -61,8 +61,9 @@ describe('ActiveDcaTable — the Budget cell', () => {
   it('states the budget value and the remainder beside it, on one line', () => {
     // A $100 budget with 79.5% of it unspent.
     const html = render(dca())
-    expect(html).toContain('$100 · ')
-    expect(html).toContain('$79.86 left')
+    const text = html.replace(/<[^>]+>/g, '')
+    expect(text).toContain('$100 · ')
+    expect(text).toContain('$79.86 left')
     expect(html.indexOf('$100')).toBeLessThan(html.indexOf('$79.86'))
     expect(html).not.toContain('HEURC left')
   })
@@ -82,7 +83,7 @@ describe('ActiveDcaTable — the Budget cell', () => {
 
   it('falls back to the sold asset when it has no price feed', () => {
     const html = render(dca({ valueUsd: null, budgetUsd: null }))
-    expect(html).toContain('79.5 HEURC left')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('79.5 HEURC left')
   })
 })
 

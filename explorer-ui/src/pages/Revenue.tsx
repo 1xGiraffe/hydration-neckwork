@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useRevenueDashboard, useStakerDistributions } from '../hooks/useExplorerData'
-import { AddrPill, ChartSkeleton, F, compactAmount } from '../components/ui'
+import { AddrPill, Num, Usd, ChartSkeleton, F, compactAmount } from '../components/ui'
 import { ChartLegend, ShareBar, StackedColumnChart } from '../components/HdxCharts'
 import type { ShareSegment, StackColumn } from '../components/HdxCharts'
 import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
@@ -155,7 +155,7 @@ export function Revenue() {
         ] as const).map(([k, v]) => (
           <div className="cell" key={k}>
             <div className="k">{k}</div>
-            <div className="v">{v != null ? F.usd(v) : '—'}</div>
+            <div className="v">{v != null ? <Usd v={v} /> : '—'}</div>
           </div>
         ))}
         </div>
@@ -210,7 +210,7 @@ export function Revenue() {
                           <span className="rev-dot" style={{ background: REVENUE_STREAM_COLOR[b.stream], marginRight: 8 }} />
                           {REVENUE_STREAM_LABEL[b.stream]}
                         </td>
-                        <td className="num mono" data-label="Revenue">{F.usd(b.usd)}</td>
+                        <td className="num mono" data-label="Revenue"><Usd v={b.usd} /></td>
                         <td className="num mono" data-label="Share">{(b.share * 100).toFixed(1)}%</td>
                       </tr>
                     ))}
@@ -234,7 +234,7 @@ export function Revenue() {
                   {data.topAccounts.map(row => (
                     <tr key={row.account.accountId}>
                       <td data-label="Account"><AddrPill account={row.account} noCopy /></td>
-                      <td className="num mono" data-label="Revenue paid">{F.usd(row.usd)}</td>
+                      <td className="num mono" data-label="Revenue paid"><Usd v={row.usd} /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -270,14 +270,14 @@ export function Revenue() {
               <div className="ribbon rev-stakers-ribbon">
                 {(stakerRange === 'all'
                   ? ([
-                      ['all time', hdxAmount(stakers.allTime.hdx)],
-                      ['value at distribution', F.usd(stakers.allTime.usd)],
+                      ['all time', <Num v={stakers.allTime.hdx} suffix=" HDX" />],
+                      ['value at distribution', <Usd v={stakers.allTime.usd} />],
                     ] as const)
                   : ([
-                      [stakerRangeCaption, hdxAmount(stakers.totals.hdx)],
-                      ['value at distribution', F.usd(stakers.totals.usd)],
-                      ['all time', hdxAmount(stakers.allTime.hdx)],
-                      ['all-time value', F.usd(stakers.allTime.usd)],
+                      [stakerRangeCaption, <Num v={stakers.totals.hdx} suffix=" HDX" />],
+                      ['value at distribution', <Usd v={stakers.totals.usd} />],
+                      ['all time', <Num v={stakers.allTime.hdx} suffix=" HDX" />],
+                      ['all-time value', <Usd v={stakers.allTime.usd} />],
                     ] as const)
                 ).map(([k, v]) => (
                   <div className="cell" key={k}>
