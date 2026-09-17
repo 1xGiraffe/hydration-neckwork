@@ -19,18 +19,31 @@ const STABLECOIN_SYMBOLS = new Set(['USDT', 'USDC', 'HOLLAR', 'DAI', 'HUSDT', 'H
 // Only these can stand in for USD when a pair is denominated, since indexed prices
 // are USD — a EURC-quoted series has to be computed as a ratio of the two.
 //
-// The `Hydrated *` money-market wrappers (HUSDT/HUSDC/HUSDS/HUSDe) are stablecoins
-// but not dollars: they accrue interest, so their price leaves par and keeps going.
-// Measured against their own USD candles, HUSDT went 0.9993 → 1.0195 and HUSDC
-// 0.9992 → 1.0159 between 2025-09-22 and 2026-08-12, roughly 2 %/yr and unbounded.
-// While HUSDT/HUSDC were listed here a pair quoted in one of them published the
-// base asset's raw USD price, understating the rate by exactly that accrued
-// interest (1.9 %/1.6 % as of 2026-08-12, worsening daily) — and their siblings
-// HUSDS/HUSDe, same family and same drift, were never listed, so two of four got
-// real cross rates and two did not. All four now take the cross path, where the
-// quote's own price divides the base's. They trade against everything they quote,
-// so the ratio is a real market rate, not an approximation.
-const USD_PEGGED_SYMBOLS = new Set(['USDT', 'USDC', 'HOLLAR', 'DAI'])
+// Membership is earned by holding par tightly enough that substituting the dollar
+// is below the noise of the series, because a quote listed here publishes the BASE
+// asset's raw USD candles: the quote's own deviation from $1 becomes a silent,
+// one-directional error in every rate, and a client charting live spot against
+// those candles sees it as a permanent step at the seam.
+//
+// USDT and USDC clear that bar (measured 2026-09-17: 0.0039 %–0.0345 % across
+// their five listed ids). HOLLAR and DAI do not. HOLLAR is protocol-minted and
+// floats on its own stablepools — 0.9983 on 2026-09-17, a 0.172 % understatement,
+// drifting 0.05 % over 26 h — and DAI is an outside peg nobody here defends. Both
+// trade against everything they quote, so the cross path gives a real market rate
+// instead of an assumption.
+//
+// The `Hydrated *` money-market wrappers (HUSDT/HUSDC/HUSDS/HUSDe) fail the same
+// bar by construction: they accrue interest, so their price leaves par and keeps
+// going. Measured against their own USD candles, HUSDT went 0.9993 → 1.0195 and
+// HUSDC 0.9992 → 1.0159 between 2025-09-22 and 2026-08-12, roughly 2 %/yr and
+// unbounded.
+//
+// The cost of crossing rather than substituting is history: a cross pair exists
+// only where BOTH legs have a candle, so a quote drops every bucket it predates
+// (HOLLAR's first is 2025-09-22) or is missing (DAI id 18 has 1,084 of its span's
+// 1,121 days). That history is not recoverable — there was no quote price to cross
+// against — and the alternative is publishing a rate nobody could have traded at.
+const USD_PEGGED_SYMBOLS = new Set(['USDT', 'USDC'])
 
 const assetCache = new Map<number, Asset>()
 let refreshTimer: ReturnType<typeof setInterval> | null = null
