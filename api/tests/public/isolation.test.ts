@@ -18,6 +18,11 @@ const ALLOWED_SHARED = new Set([
   'services/cache.ts',
   'services/explorerAssets.ts',
   'services/ohlcvService.ts',
+  // The one derivation of a cross-pair candle. Both the public pair route and the
+  // explorer's chart route read it, because a pair quoted two ways is a pair that
+  // disagrees with itself — which is exactly what the two implementations it
+  // replaced did (an envelope over stored candles vs the per-block ratio).
+  'services/crossPair.ts',
   'services/poolService.ts',
   'services/volumeService.ts',
   // Venue-neutral valuation/money helpers, moved out of poolVolumes.ts so the
