@@ -107,9 +107,9 @@ describe('Revenue page', () => {
     // Defaults to the 30d range: the four-cell ribbon carries the window pair
     // AND the all-time pair.
     expect(html).toContain('last 30 days')
-    expect(html).toContain('148k HDX')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('148k HDX')
     expect(html).toContain('$1.37k')
-    expect(html).toContain('201M HDX')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('201M HDX')
     expect(html).toContain('$2.14M')
     // The three pots are named in the legend.
     for (const label of ['Legacy staking', 'GIGAHDX yield', 'GIGAHDX voting rewards']) {

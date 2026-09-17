@@ -3,7 +3,7 @@ import { useReferendum, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
-import { AddrPill, Crumbs, F, SkeletonRows, MomentLink } from '../components/ui'
+import { AddrPill, Amt, Crumbs, F, SkeletonRows, MomentLink } from '../components/ui'
 import { VoteBubbles } from '../components/VoteBubbles'
 import { VotesTable, type VoteTableRow } from '../components/VotesTable'
 import { ProposalCall } from '../components/ProposalCall'
@@ -40,10 +40,10 @@ export function TallySummary({ tally, voters, decimals }: { tally: DisplayTally;
       <div className="dd dd-stack">
         <TallyBar ayes={tally.ayes} nays={tally.nays} />
         <div className="mono">
-          <span className="vb-aye-text">{F.amount(tally.ayes, decimals)} AYE</span>
+          <span className="vb-aye-text"><Amt raw={tally.ayes} dec={decimals} /> AYE</span>
           {' · '}
-          <span className="vb-nay-text">{F.amount(tally.nays, decimals)} NAY</span>
-          {tally.support && <span className="muted"> · support {F.amount(tally.support, decimals)}</span>}
+          <span className="vb-nay-text"><Amt raw={tally.nays} dec={decimals} /> NAY</span>
+          {tally.support && <span className="muted"> · support <Amt raw={tally.support} dec={decimals} /></span>}
         </div>
         {/* A running OpenGov referendum needs no caveat: the "Attributed votes" label
             already says the figure is a reconstruction, and its numbers track the votes
@@ -152,7 +152,7 @@ export function Referendum({ pallet, index }: { pallet: 'opengov' | 'democracy';
                 {data.indirectTally && <>
                   <div className="dt">Delegated / unattributed</div>
                   <div className="dd mono">
-                    {F.amount(data.indirectTally.ayes, data.asset.decimals)} AYE · {F.amount(data.indirectTally.nays, data.asset.decimals)} NAY
+                    <Amt raw={data.indirectTally.ayes} dec={data.asset.decimals} /> AYE · <Amt raw={data.indirectTally.nays} dec={data.asset.decimals} /> NAY
                     <span className="muted"> — in the chain tally, with no Voted event of its own</span>
                   </div>
                 </>}

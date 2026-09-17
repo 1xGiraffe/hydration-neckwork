@@ -5,7 +5,7 @@ import { useDcaSchedule, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect } from '../router'
-import { Ago, Crumbs, F, AddrPill, AssetChip, AssetAmount, PoolBadge, poolHref, ProgressRing, SkeletonRows, MomentLink, Pager } from '../components/ui'
+import { Ago, Usd as UsdValue, Amt, Crumbs, F, AddrPill, AssetChip, AssetAmount, PoolBadge, poolHref, ProgressRing, SkeletonRows, MomentLink, Pager } from '../components/ui'
 import { ActivityTable } from '../components/ActivityTable'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds, dcaAmountLeft, dcaCadence, dcaLeftUsd, dcaProgress, dcaRunway, dcaUnspentBudget, fmtDuration, fmtPermill } from '../utils/dca'
@@ -44,8 +44,8 @@ function Usd({ value, basis, at }: { value: number | null; basis: DcaScheduleDet
   if (value == null) return null
   const historical = basis === 'ended'
   return (
-    <span className="muted mono" title={historical ? `At the ${at.slice(0, 16)} price, when this schedule stopped` : 'At today’s price'}>
-      {' · '}{F.usd(value)}{historical && <span className="dca-then"> then</span>}
+    <span className="muted mono">
+      {' · '}<UsdValue v={value} />{historical && <span className="dca-then" title={`At the ${at.slice(0, 16)} price, when this schedule stopped`}> then</span>}
     </span>
   )
 }
@@ -132,7 +132,7 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
                         runtime could not migrate names why and what came back. */}
                     {data.status === 'migrated' && data.migratedToIntentId && <span>Migrated to <Link to={paths.intent(data.migratedToIntentId)} className="hash" title={`Intent ${data.migratedToIntentId}`}>intent</Link></span>}
                     {data.status === 'migration-cancelled' && data.migrationReason && <span>{data.migrationReason}</span>}
-                    {data.status === 'migration-cancelled' && data.migrationRefunded != null && <span>refunded <span className="mono">{F.amount(data.migrationRefunded, data.assetIn.decimals)} {data.assetIn.symbol}</span></span>}
+                    {data.status === 'migration-cancelled' && data.migrationRefunded != null && <span>refunded <span className="mono"><Amt raw={data.migrationRefunded} dec={data.assetIn.decimals} /> {data.assetIn.symbol}</span></span>}
                     {/* Separators are drawn by CSS between the facts that survive, so
                         a wrap never strands a dangling "·" at the end of a line. */}
                     {countdown && <span>{countdown.secondsUntil > 0
@@ -174,7 +174,7 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
                     it out of line. The sold asset is named in the row above. */}
                 <div className="dd">{data.totalAmount === '0'
                   ? <span className="mono muted">open-ended — runs until stopped or unfunded
-                    {data.fundingBalance != null && <> · funded by {F.amount(data.fundingBalance, data.assetIn.decimals)} {data.assetIn.symbol} in the wallet</>}
+                    {data.fundingBalance != null && <> · funded by <Amt raw={data.fundingBalance} dec={data.assetIn.decimals} /> {data.assetIn.symbol} in the wallet</>}
                   </span>
                   : <><AssetAmount asset={data.assetIn} raw={data.totalAmount} />
                     <Usd value={data.budgetUsd} basis={data.usdBasis} at={data.statusAt ?? data.createdAt.timestamp} />
@@ -184,7 +184,7 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
                         below takes over, and stated in the sold asset when the
                         asset has no price feed to state it in dollars. */}
                     {amountLeft != null && <span className="muted mono" title="Left of the budget — what this order still has to spend">
-                      {' · '}{leftUsd != null ? F.usd(leftUsd) : `${F.amount(amountLeft, data.assetIn.decimals)} ${data.assetIn.symbol}`} left
+                      {' · '}{leftUsd != null ? <UsdValue v={leftUsd} /> : <><Amt raw={amountLeft} dec={data.assetIn.decimals} /> {data.assetIn.symbol}</>} left
                     </span>}</>}
                 </div>
 

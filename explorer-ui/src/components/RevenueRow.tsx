@@ -1,5 +1,5 @@
 import type { ActivityRevenue } from '../types'
-import { F } from './ui'
+import { F, Usd } from './ui'
 
 // The <dt>/<dd> pair for protocol revenue, shared by every activity detail surface.
 //
@@ -13,8 +13,8 @@ export function RevenueRow({ revenue }: { revenue: ActivityRevenue | undefined }
   return <>
     <div className="dt" title="Protocol revenue this extrinsic generated">Protocol revenue</div>
     <div className="dd mono">
-      {F.usd(revenue.protocolUsd)}
-      {revenue.lpUsd > 0 && <span className="muted"> · {F.usd(revenue.lpUsd)} to LPs</span>}
+      <Usd v={revenue.protocolUsd} />
+      {revenue.lpUsd > 0 && <span className="muted"> · <Usd v={revenue.lpUsd} /> to LPs</span>}
       {revenue.streams.length > 0 && (
         <div className="muted revenue-streams">
           {revenue.streams.map(s => `${s.stream} ${F.usd(s.usd)}`).join(' · ')}

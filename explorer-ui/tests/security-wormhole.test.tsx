@@ -25,7 +25,7 @@ describe('Wormhole overview card', () => {
     expect(html).toContain('href="/security/wormhole"')
     expect(html).toContain('Wormhole backing')
     // The fixture's one real shortfall: 0.02 WBTC, which is the number the card exists to show.
-    expect(html).toContain('$1.36k backing deficit')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('$1.36k backing deficit')
     expect(html).toContain('color:var(--red)')
     expect(html).toContain('6 assets · $7.26M locked · 2 in flight · 2 queued')
   })
@@ -125,7 +125,7 @@ describe('Wormhole section', () => {
     expect(html).toContain('-$1.34k')
     expect(html).toContain('color:var(--red)')
     // A surplus is expected, so it is stated with a + and no alarm colour.
-    expect(html).toContain('+$80k')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('+$80k')
   })
 
   it('dims an asset whose origin chain is not configured instead of showing a zero', () => {
@@ -254,12 +254,12 @@ describe('Wormhole section', () => {
     const html = render('wormhole', buildSecurityWormhole())
     // sUSDS: 1,240,012 minted with 12 burned — the +80k surplus is unchanged
     // because burned supply places no claim on custody.
+    const text = html.replace(/<[^>]+>/g, '')
     expect(html).toContain('Burned at the dead address  12.0000')
-    expect(html).toContain('12 burned')
-    expect(html).toContain('burned at the dead address (needs no custody)')
-    expect(html).toContain('+$80k')
+    expect(text).toContain('12 burned at dEaD')
+    expect(text).toContain('+$80k')
     // Assets with nothing burned say nothing about it.
-    expect((html.match(/burned at the dead address/gi) ?? []).length).toBeLessThanOrEqual(3)
+    expect((text.match(/burned at dEaD/g) ?? []).length).toBeLessThanOrEqual(3)
   })
 
   it('puts only the loaded Wormhole fuses on the security overview, linking the detail', () => {

@@ -793,6 +793,21 @@ svg { display: block; }
 .mono { font-family: 'GeistMono'; }
 .num { font-family: 'GeistMono'; }
 
+/* Reveal-then-copy micro-surface for every rounded figure (CopyValue): hover
+   reveals what the rough scale left out in a chip, a click while it shows copies
+   (see first, copy second), the chip confirms in place. The affordance on the
+   figure is layout-neutral — a dotted underline sized in em so it reads the same
+   under an 11px table cell and a 26px headline, no box, no reflow. The chip is
+   portaled to <body> and viewport-fixed so it escapes clipped tiles, ellipsised
+   cells and table overflow; it is centered with the `translate` property so the
+   tipIn animation can't clobber it, and flips below its anchor (.below) when
+   there is no room above. No color change on the figure, no global toast. */
+.copyamt { cursor: copy; }
+.copyamt:hover { text-decoration: underline dotted; text-underline-offset: 0.25em; text-decoration-thickness: 1px; }
+.exact-tip { position: fixed; translate: -50% -100%; z-index: 300; display: inline-flex; align-items: baseline; gap: 8px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-high); white-space: nowrap; max-width: calc(100vw - 24px); overflow: hidden; text-overflow: ellipsis; pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); animation: tipIn 120ms ease-out; }
+.exact-tip.below { translate: -50% 0; }
+.exact-hint { color: var(--text-low); font-size: 10px; }
+
 /* asset list row (preis-style) */
 .asset-row { display: flex; align-items: center; gap: 12px; }
 .ar-meta { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -843,15 +858,6 @@ svg { display: block; }
 .tm-pct { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-medium); margin-top: auto; }
 .tm-val { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-high); }
 .tm-val-usd { color: var(--text-medium); font-size: 12px; }
-/* Exact-amount micro-surface: hover reveals the full-precision figure in a chip,
-   a click while it shows copies (see first, copy second), the chip confirms in
-   place. Portaled to <body> and viewport-fixed so it escapes tile clipping;
-   centered with the `translate` property so the tipIn animation can't clobber it.
-   No color change on the figure itself, no global toast. */
-.tm-copyamt { cursor: copy; }
-.tm-copyamt:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
-.tm-exact-tip { position: fixed; translate: -50% -100%; z-index: 300; display: inline-flex; align-items: baseline; gap: 8px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-high); white-space: nowrap; max-width: calc(100vw - 24px); pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); animation: tipIn 120ms ease-out; }
-.tm-exact-hint { color: var(--text-low); font-size: 10px; }
 .tm-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--tile); }
 
 /* Docked detail card for the active tile. */
@@ -2988,6 +2994,9 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
 /* Only outcomes carry color; ordinary lifecycle rows keep a quiet dot. */
 .ref-tl-dot.phase, .ref-tl-dot.admin { background: color-mix(in srgb, var(--text-low) 45%, transparent); }
 .ref-tl-label { flex: 1; min-width: 0; font-size: 13px; color: var(--text-high); }
+/* A scheduled execution is a consequence of the enactment above it, not a peer: the row reads
+   one step quieter, and its dot is indented a further step per level down the chain. */
+.ref-tl-row.sub .ref-tl-label { color: var(--text-medium); }
 .ref-tl-when { font-size: 12px; white-space: nowrap; }
 @media (max-width: 720px) { .ref-tl-block { display: none; } }
 

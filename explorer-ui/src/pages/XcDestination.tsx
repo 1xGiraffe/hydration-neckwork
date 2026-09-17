@@ -2,7 +2,7 @@ import { useXcDestination } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
-import { Crumbs, F, AssetIcon, AssetDetailSkeleton, Dash, rowNav, EmptyRow } from '../components/ui'
+import { Crumbs, Usd, Amt, F, AssetIcon, AssetDetailSkeleton, Dash, rowNav, EmptyRow } from '../components/ui'
 import { ActivityTable } from '../components/ActivityTable'
 
 // A cross-chain swap's destination: an asset that lives on NEAR or Zcash and is
@@ -64,14 +64,14 @@ export function XcDestination({ slug }: { slug: string }) {
                 {data.settledCount !== data.swapCount && <span className="muted">{F.int(data.settledCount)} settled</span>}
               </div>
               <div className="dt">Sold from Hydration</div>
-              <div className="dd mono">{data.soldUsd != null ? F.usd(data.soldUsd) : <Dash />}</div>
+              <div className="dd mono">{data.soldUsd != null ? <Usd v={data.soldUsd} /> : <Dash />}</div>
               {/* Two different dollar figures on purpose: what left Hydration, and
                   what reached the recipient. The gap is both rails' fees plus the
                   solver's spread, and it is the number a reader wants. */}
               <div className="dt">Delivered</div>
               <div className="dd mono">
                 {data.deliveredUsd != null
-                  ? <>{F.usd(data.deliveredUsd)}
+                  ? <><Usd v={data.deliveredUsd} />
                     {data.soldUsd != null && data.soldUsd > 0 && (
                       <span className="muted">{((1 - data.deliveredUsd / data.soldUsd) * 100).toFixed(1)}% to fees and spread</span>
                     )}</>
@@ -96,8 +96,8 @@ export function XcDestination({ slug }: { slug: string }) {
                       {' '}<span className="mono">{a.asset.symbol}</span>
                     </span></td>
                     <td data-label="Swaps" className="r mono">{F.int(a.swaps)}</td>
-                    <td data-label="Amount" className="r mono">{F.amount(a.amount, a.asset.decimals)}</td>
-                    <td data-label="Value" className="r mono">{a.valueUsd != null ? F.usd(a.valueUsd) : <Dash />}</td>
+                    <td data-label="Amount" className="r mono"><Amt raw={a.amount} dec={a.asset.decimals} /></td>
+                    <td data-label="Value" className="r mono">{a.valueUsd != null ? <Usd v={a.valueUsd} /> : <Dash />}</td>
                   </tr>
                 )) : <EmptyRow cols={4}>No cross-chain swaps into {data.destination.symbol} yet</EmptyRow>}
               </tbody>
