@@ -5,7 +5,7 @@ import { api } from '../api/explorer'
 import { windowRefine } from '../utils/chartRefine'
 import { distributionSlices, distributionWindow, fmtLiquidity } from '../utils/v3Distribution'
 import { Link, paths } from '../router'
-import { accountHref, AddrPill, Ago, AreaChart, AssetAmount, AssetChip, AssetIcon, ChartSkeleton, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav } from '../components/ui'
+import { accountHref, Usd, Amt, AddrPill, Ago, AreaChart, AssetAmount, AssetChip, AssetIcon, ChartSkeleton, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav } from '../components/ui'
 import { ChartLegend, MultiLineChart, ShareBar, StackedColumnChart, type ChartZone, type ShareSegment, type StackColumn } from '../components/HdxCharts'
 import { ActivityTable } from '../components/ActivityTable'
 import { useAssetColors } from '../utils/iconColor'
@@ -46,7 +46,7 @@ function PositionRow({ d, p, now }: { d: UniswapV3PoolDetail; p: UniswapV3Positi
       <td data-label="Holdings" className="r">
         <span className="asset-flow"><span className="trade-leg"><AssetAmount asset={d.token0} raw={p.amount0} /></span> + <span className="trade-leg"><AssetAmount asset={d.token1} raw={p.amount1} /></span></span>
       </td>
-      <td data-label="Value" className="r mono">{p.usd != null ? F.usd(p.usd) : <Dash />}</td>
+      <td data-label="Value" className="r mono">{p.usd != null ? <Usd v={p.usd} /> : <Dash />}</td>
       <td data-label="Opened" className="r mono"><Link to={paths.block(p.openedBlock)} className="hash"><Ago ts={p.openedAt} now={now} /></Link></td>
     </tr>
   )
@@ -192,9 +192,9 @@ function PoolCharts({ d }: { d: UniswapV3PoolDetail }) {
       {volume.some(p => (p.v ?? 0) > 0) && (
         <>
           <div className="sec-title">Volume &amp; fees
-            <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · {F.usd(volumeTotal)} traded in view · its {d.feeTier} swap fee is {F.usd(feesTotal)}
+            <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · <Usd v={volumeTotal} /> traded in view · its {d.feeTier} swap fee is <Usd v={feesTotal} />
               {d.protocolFee.sharePct != null
-                ? `, ${F.usd(feesTotal * lpShare)} of it to the LPs after the protocol's ${d.protocolFee.sharePct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% cut`
+                ? <>, <Usd v={feesTotal * lpShare} /> of it to the LPs after the protocol's {d.protocolFee.sharePct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% cut</>
                 : ' — all of it to the LPs'}</span>
           </div>
           <div className="pf-card"><AreaChart data={volume.map(p => p.v ?? 0)} dates={volume.map(p => p.b)} color="var(--cat-trade)" floor={0} zoomKey="zv3" refine={refineArea(p => p.volumeUsd)} /></div>
@@ -235,7 +235,7 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
         <div className="dt">Venue</div><div className="dd">Uniswap v3 <span className="muted">· concentrated liquidity · {d.feeTier} fee tier</span></div>
         <div className="dt">Pool contract</div><div className="dd"><AddrPill account={d.account} /></div>
         <div className="dt">Pair</div><div className="dd"><AssetChip asset={d.token0} /> <span className="muted">/</span> <AssetChip asset={d.token1} /></div>
-        <div className="dt">TVL</div><div className="dd mono">{d.tvlUsd != null ? F.usd(d.tvlUsd) : <Dash />}</div>
+        <div className="dt">TVL</div><div className="dd mono">{d.tvlUsd != null ? <Usd v={d.tvlUsd} /> : <Dash />}</div>
         <div className="dt">Price</div>
         <div className="dd mono">{p10 != null
           ? <>{priceLabel(d, p10)}{d.price.token0PerToken1 != null && <span className="muted" style={{ marginLeft: 8 }}>({fmtPrice(d.price.token0PerToken1)} {d.token0.symbol}/{d.token1.symbol})</span>}</>
@@ -250,12 +250,12 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
           ? <>{d.protocolFee.sharePct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% <span className="muted">of every swap fee, collected by the factory owner</span></>
           : <span className="muted">off — every swap fee goes to the LPs</span>}</div>
         <div className="dt">Volume</div>
-        <div className="dd mono">{d.volume.dayUsd != null ? F.usd(d.volume.dayUsd) : '—'} <span className="muted">24h</span>
-          <span style={{ marginLeft: 12 }}>{d.volume.allUsd != null ? F.usd(d.volume.allUsd) : '—'} <span className="muted">all time · {F.int(d.swaps)} {d.swaps === 1 ? 'swap' : 'swaps'}</span></span>
+        <div className="dd mono">{d.volume.dayUsd != null ? <Usd v={d.volume.dayUsd} /> : '—'} <span className="muted">24h</span>
+          <span style={{ marginLeft: 12 }}>{d.volume.allUsd != null ? <Usd v={d.volume.allUsd} /> : '—'} <span className="muted">all time · {F.int(d.swaps)} {d.swaps === 1 ? 'swap' : 'swaps'}</span></span>
         </div>
         <div className="dt">Fees to LPs</div>
-        <div className="dd mono">{d.volume.feesDayUsd != null ? F.usd(d.volume.feesDayUsd) : '—'} <span className="muted">24h</span>
-          <span style={{ marginLeft: 12 }}>{d.volume.feesAllUsd != null ? F.usd(d.volume.feesAllUsd) : '—'} <span className="muted">all time · {d.feesCollected.usd != null ? `${F.usd(d.feesCollected.usd)} collected` : 'nothing collected yet'}</span></span>
+        <div className="dd mono">{d.volume.feesDayUsd != null ? <Usd v={d.volume.feesDayUsd} /> : '—'} <span className="muted">24h</span>
+          <span style={{ marginLeft: 12 }}>{d.volume.feesAllUsd != null ? <Usd v={d.volume.feesAllUsd} /> : '—'} <span className="muted">all time · {d.feesCollected.usd != null ? <><Usd v={d.feesCollected.usd} /> collected</> : 'nothing collected yet'}</span></span>
         </div>
         {d.lastSwapAt && <>
           <div className="dt">Last swap</div>
@@ -277,7 +277,7 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
               <tr key={`${a.asset.assetId}:${i}`} {...rowNav(paths.asset(a.asset.assetId))}>
                 <td data-label="Asset"><AssetChip asset={a.asset} /></td>
                 <td data-label="Balance" className="r"><AssetAmount asset={a.asset} raw={a.amount} /></td>
-                <td data-label="Value" className="r mono">{a.usd != null ? F.usd(a.usd) : <Dash />}</td>
+                <td data-label="Value" className="r mono">{a.usd != null ? <Usd v={a.usd} /> : <Dash />}</td>
                 <td data-label="Share" className="r mono muted">{a.sharePct != null ? `${a.sharePct.toFixed(1)}%` : '—'}</td>
               </tr>
             ))}
@@ -297,11 +297,11 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
             <div className="dt">Vault contract</div><div className="dd"><AddrPill account={v.account} /></div>
             <div className="dt">Holdings</div>
             <div className="dd"><span className="asset-flow"><span className="trade-leg"><AssetAmount asset={d.token0} raw={v.total0} link={false} /></span> + <span className="trade-leg"><AssetAmount asset={d.token1} raw={v.total1} link={false} /></span></span>
-              <span className="mono muted" style={{ marginLeft: 8 }}>{v.tvlUsd != null ? F.usd(v.tvlUsd) : ''}</span></div>
-            <div className="dt">Shares</div><div className="dd mono">{F.amount(v.shares, 18)} <span className="muted">· {F.int(v.depositors)} {v.depositors === 1 ? 'depositor' : 'depositors'} · {F.int(v.deposits)} deposits · {F.int(v.withdrawals)} withdrawals</span></div>
+              <span className="mono muted" style={{ marginLeft: 8 }}>{v.tvlUsd != null ? <Usd v={v.tvlUsd} /> : ''}</span></div>
+            <div className="dt">Shares</div><div className="dd mono"><Amt raw={v.shares} dec={18} /> <span className="muted">· {F.int(v.depositors)} {v.depositors === 1 ? 'depositor' : 'depositors'} · {F.int(v.deposits)} deposits · {F.int(v.withdrawals)} withdrawals</span></div>
             <div className="dt">Fees earned</div>
             <div className="dd"><span className="asset-flow"><span className="trade-leg"><AssetAmount asset={d.token0} raw={v.fees0} link={false} /></span> + <span className="trade-leg"><AssetAmount asset={d.token1} raw={v.fees1} link={false} /></span></span>
-              <span className="mono muted" style={{ marginLeft: 8 }}>{v.feesUsd != null ? F.usd(v.feesUsd) : ''}</span></div>
+              <span className="mono muted" style={{ marginLeft: 8 }}>{v.feesUsd != null ? <Usd v={v.feesUsd} /> : ''}</span></div>
             <div className="dt">Protocol cut</div>
             <div className="dd mono">{v.feeSharePct != null ? `${v.feeSharePct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% of earned fees` : <Dash />} <span className="muted">· paid to the Treasury on every compound</span></div>
             <div className="dt">Rebalances</div>

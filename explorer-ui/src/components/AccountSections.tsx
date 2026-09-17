@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
 import { useMemo } from 'react'
-import { F, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash, EmptyRow, Copy } from './ui'
+import { F, Amt, Usd, Num, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash, EmptyRow, Copy } from './ui'
 import type { ChartMarker, DetailTab } from './ui'
 import { Link, paths, setQuery } from '../router'
 import type { ActivitySlug } from '../router'
@@ -199,14 +199,14 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
     <>
       <div className="sec-title">{title}</div>
       <div className="pf-card">
-        <div className="pf-head"><div className="pf-now">{F.usd(netUsd)}</div>{perfItems.length > 0 && <div className="perf-row">{perfItems.map(p => perf(p.label, p.value))}</div>}</div>
+        <div className="pf-head"><div className="pf-now"><Usd v={netUsd} /></div>{perfItems.length > 0 && <div className="perf-row">{perfItems.map(p => perf(p.label, p.value))}</div>}</div>
         {/* Legend only with two curves: it names them and carries the ex-HDX figure
             beside the headline, so the lower line has a number the reader can
             attach to it without hovering. */}
         {overlay && (
           <div className="pf-legend">
             <span className="pf-key"><i className="pf-swatch" style={{ background: totalUp ? 'var(--green)' : 'var(--red)' }} />Total</span>
-            <span className="pf-key"><i className="pf-swatch" style={{ background: 'var(--sky)' }} />Ex-HDX{exHdxNetUsd != null && <span className="pf-key-val">{F.usd(exHdxNetUsd)}</span>}</span>
+            <span className="pf-key"><i className="pf-swatch" style={{ background: 'var(--sky)' }} />Ex-HDX{exHdxNetUsd != null && <span className="pf-key-val"><Usd v={exHdxNetUsd} /></span>}</span>
           </div>
         )}
         <AreaChart data={series} h={180} dates={dates} markers={markers} refine={refine} zoomKey="zv" label="Total" overlay={overlay} />
@@ -282,8 +282,8 @@ function moneyMarketValueBreakdown(markets: MoneyMarketPosition[]): ReactNode {
   if (primaryDebtUsd <= 0 && !supplementalDebts.length) return null
   return (
     <div className="hint">
-      {primaryDebtUsd > 0 && <>primary {F.usd(primarySupplyUsd)} lent · −{F.usd(primaryDebtUsd)} borrowed</>}
-      {supplementalDebts.map((m, i) => <span key={m.key}>{(primaryDebtUsd > 0 || i > 0) && <span aria-hidden="true"> · </span>}<span className="mm-secondary-debt">{m.label} debt −{F.usd(m.usd)}</span></span>)}
+      {primaryDebtUsd > 0 && <>primary <Usd v={primarySupplyUsd} /> lent · −<Usd v={primaryDebtUsd} /> borrowed</>}
+      {supplementalDebts.map((m, i) => <span key={m.key}>{(primaryDebtUsd > 0 || i > 0) && <span aria-hidden="true"> · </span>}<span className="mm-secondary-debt">{m.label} debt −<Usd v={m.usd} /></span></span>)}
     </div>
   )
 }
@@ -315,27 +315,27 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUs
     <div className="acct-stats">
       {trading > 0 && <div className="acct-bal subtle">
         <div className="lab">Trading</div>
-        <div className="amt">{F.usd(trading)}</div>
+        <div className="amt"><Usd v={trading} /></div>
       </div>}
       {liquidation > 0 && <div className="acct-bal subtle">
         <div className="lab">Liquidation</div>
-        <div className="amt">{F.usd(liquidation)}</div>
+        <div className="amt"><Usd v={liquidation} /></div>
       </div>}
       {revenue > 0 && <div className="acct-bal subtle">
         {/* "Protocol revenue" where the row has room; the narrow swap keeps the
             four stat tiles on one line on phones. */}
         <div className="lab"><span className="lab-wide">Protocol revenue</span><span className="lab-narrow">Revenue</span></div>
-        <div className="amt">{F.usd(revenue)}</div>
+        <div className="amt"><Usd v={revenue} /></div>
       </div>}
       {exHdxValueUsd != null && <div className="acct-bal subtle">
         {/* Same wide/narrow pair as Protocol revenue — "Ex-HDX value" where the row
             has room, "Ex-HDX" on phones, so the tiles stay on one line. */}
         <div className="lab"><span className="lab-wide">Ex-HDX value</span><span className="lab-narrow">Ex-HDX</span></div>
-        <div className="amt">{F.usd(exHdxValueUsd)}</div>
+        <div className="amt"><Usd v={exHdxValueUsd} /></div>
       </div>}
       <div className="acct-bal">
         <div className="lab">Value</div>
-        <div className="amt">{F.usd(valueUsd)}</div>
+        <div className="amt"><Usd v={valueUsd} /></div>
       </div>
     </div>
     {/* The money-market breakdown rides on its own full-width row below the
@@ -388,8 +388,8 @@ function MoneyMarketReserveColumns({ mm }: { mm: MoneyMarketPosition }) {
         {supplied.map(r => (
           <div className="mm-row" key={`s${r.assetId}`}>
             <Link to={paths.asset(r.assetId)} className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} iconAssetIds={r.iconAssetIds} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></Link>
-            <span className="mono">{F.amount(r.supplied, r.decimals)}</span>
-            <span className="mono muted">{F.usd(r.suppliedUsd)}</span>
+            <span className="mono"><Amt raw={r.supplied} dec={r.decimals} /></span>
+            <span className="mono muted"><Usd v={r.suppliedUsd} /></span>
             {r.collateral ? <span className="badge ok mm-collateral-badge">collateral</span> : null}
           </div>
         ))}
@@ -400,8 +400,8 @@ function MoneyMarketReserveColumns({ mm }: { mm: MoneyMarketPosition }) {
         {borrowed.map(r => (
           <div className="mm-row" key={`d${r.assetId}`}>
             <Link to={paths.asset(r.assetId)} className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} iconAssetIds={r.iconAssetIds} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></Link>
-            <span className="mono">{F.amount(r.debt, r.decimals)}</span>
-            <span className="mono muted">{F.usd(r.debtUsd)}</span>
+            <span className="mono"><Amt raw={r.debt} dec={r.decimals} /></span>
+            <span className="mono muted"><Usd v={r.debtUsd} /></span>
           </div>
         ))}
         {!borrowed.length && <div className="mm-empty">No outstanding debt</div>}
@@ -436,10 +436,10 @@ function MoneyMarketCard({ mm, defisimAddress }: { mm: MoneyMarketPosition; defi
       </header>
       <div className="mm-card">
         <div className="mm-summary">
-          <div className="mm-stat"><span className="k">Lent</span><span className="v">{F.usd(supplyUsd)}</span></div>
-          <div className="mm-stat"><span className="k">Borrowed</span><span className="v">{debtUsd > 0 ? F.usd(debtUsd) : '—'}</span></div>
-          <div className="mm-stat"><span className="k">Net worth</span><span className="v">{F.usd(supplyUsd - debtUsd)}</span></div>
-          <div className="mm-stat"><span className="k">Available to borrow</span><span className="v">{F.usd(Number(mm.availableBorrowsBase) / 1e8)}</span></div>
+          <div className="mm-stat"><span className="k">Lent</span><span className="v"><Usd v={supplyUsd} /></span></div>
+          <div className="mm-stat"><span className="k">Borrowed</span><span className="v">{debtUsd > 0 ? <Usd v={debtUsd} /> : '—'}</span></div>
+          <div className="mm-stat"><span className="k">Net worth</span><span className="v"><Usd v={supplyUsd - debtUsd} /></span></div>
+          <div className="mm-stat"><span className="k">Available to borrow</span><span className="v"><Usd v={Number(mm.availableBorrowsBase) / 1e8} /></span></div>
           <div className="mm-stat"><span className="k">{mm.simAccount ? 'Lowest member health' : 'Health factor'}</span><span className={`v hf ${hf.cls}`}>{hf.label}</span></div>
         </div>
         <MoneyMarketRiskBar mm={mm} />
@@ -540,13 +540,13 @@ function DcaTotalsRow({ dcas, showOwner, headBlock, headTime, now, blockSec }: {
         {unpriced > 0 && <span className="dca-sub mono muted" title="Orders in an asset with no price feed — in the counts and timing here, but not in the dollar figures">{F.int(unpriced)} unpriced</span>}
       </td>
       <td data-label="Rate" className="r">
-        {agg.perDayUsd > 0 ? <><span className="mono">≈ {F.usd(agg.perDayUsd)}</span><span className="muted">/day</span></> : <Dash />}
+        {agg.perDayUsd > 0 ? <><span className="mono">≈ <Usd v={agg.perDayUsd} /></span><span className="muted">/day</span></> : <Dash />}
         <span className="dca-sub mono muted">combined rate</span>
       </td>
       <td data-label="Budget" className="r">
         {agg.pricedOrders > 0 ? <>
-          <span className="mono">≈ {F.usd(agg.budgetUsd)}</span>
-          <span className="dca-sub mono muted">{F.usd(agg.leftUsd)} left</span>
+          <span className="mono">≈ <Usd v={agg.budgetUsd} /></span>
+          <span className="dca-sub mono muted"><Usd v={agg.leftUsd} /> left</span>
         </> : <Dash />}
       </td>
       <td data-label="Filled" className="r">
@@ -606,8 +606,8 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
             // price feed keeps the figure in the sold asset rather than losing it.
             const leftUsd = openEnded ? d.fundingUsd : dcaLeftUsd(d.totalAmount, d.filledAmount, d.budgetUsd)
             const leftRaw = openEnded ? d.fundingBalance : dcaAmountLeft(d.totalAmount, d.filledAmount)
-            const left = leftUsd != null ? F.usd(leftUsd)
-              : leftRaw != null ? `${F.amount(leftRaw, d.assetIn.decimals)} ${d.assetIn.symbol}`
+            const left = leftUsd != null ? <Usd v={leftUsd} />
+              : leftRaw != null ? <><Amt raw={leftRaw} dec={d.assetIn.decimals} /> {d.assetIn.symbol}</>
                 : null
             // Open-ended orders have no budget to be a fraction of: their share and
             // their end come from the balance still funding them (see dcaProgress).
@@ -643,7 +643,7 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
                 </td>
                 <td data-label="Per trade" className="r">
                   <AssetAmount asset={perAsset} raw={d.amountPerTrade} />{isBuy ? <span className="muted"> bought</span> : null}
-                  {d.valueUsd != null && <span className="dca-sub mono muted">{F.usd(d.valueUsd)}</span>}
+                  {d.valueUsd != null && <span className="dca-sub mono muted"><Usd v={d.valueUsd} /></span>}
                 </td>
                 <td data-label="Budget" className="r">
                   {openEnded ? <>
@@ -658,7 +658,7 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
                         read left to right the way the schedule page states them.
                         Stacked, they read as two unrelated facts. */}
                     {(d.budgetUsd != null || left) && <span className="dca-sub mono muted">
-                      {d.budgetUsd != null && F.usd(d.budgetUsd)}
+                      {d.budgetUsd != null && <Usd v={d.budgetUsd} />}
                       {d.budgetUsd != null && left ? ' · ' : ''}
                       {left && <span title="Left of the budget — what this order still has to spend">{left} left</span>}
                     </span>}
@@ -749,7 +749,7 @@ export function LimitOrdersTable({ orders, now, title, showOwner, emptyText }: {
                     underneath it so the two can be read together. */}
                 <td data-label="Selling" className="r">
                   <AssetAmount asset={o.assetIn} raw={o.remainingIn} />
-                  {o.valueUsd != null && <span className="dca-sub mono muted">{F.usd(o.valueUsd)}</span>}
+                  {o.valueUsd != null && <span className="dca-sub mono muted"><Usd v={o.valueUsd} /></span>}
                 </td>
                 <td data-label="For at least" className="r">
                   <AssetAmount asset={o.assetOut} raw={o.remainingOut} />
@@ -757,7 +757,7 @@ export function LimitOrdersTable({ orders, now, title, showOwner, emptyText }: {
                 <td data-label="Limit price" className="r mono">
                   {o.limitPrice != null
                     ? <span title={`One ${o.assetIn.symbol} for ${o.limitPrice} ${o.assetOut.symbol}`}>
-                      {F.amount(String(o.limitPrice), 0)} <span className="muted">{o.assetOut.symbol}</span>
+                      <Num v={o.limitPrice} /> <span className="muted">{o.assetOut.symbol}</span>
                       <span className="dca-sub mono muted">per {o.assetIn.symbol}</span>
                     </span>
                     : <Dash />}
@@ -821,11 +821,11 @@ export function LiquidityPositionsTable({ positions }: { positions: LpPosition[]
                 </td>
                 <td data-label="Venue"><span className="badge" style={{ background: `color-mix(in srgb, ${col} 14%, transparent)`, color: col }}>{p.venue}</span></td>
                 <td data-label="Amount" className="r mono">
-                  {F.amount(p.amount, p.asset.decimals)} {p.asset.symbol}
-                  {p.hubAmount && <div className="muted" style={{ fontSize: 11, fontWeight: 400 }}>+ {F.amount(p.hubAmount, 12)} H2O</div>}
-                  {p.assetB && p.amountB != null && <div className="muted" style={{ fontSize: 11, fontWeight: 400 }}>+ {F.amount(p.amountB, p.assetB.decimals)} {p.assetB.symbol}</div>}
+                  <Amt raw={p.amount} dec={p.asset.decimals} /> {p.asset.symbol}
+                  {p.hubAmount && <div className="muted" style={{ fontSize: 11, fontWeight: 400 }}>+ <Amt raw={p.hubAmount} dec={12} /> H2O</div>}
+                  {p.assetB && p.amountB != null && <div className="muted" style={{ fontSize: 11, fontWeight: 400 }}>+ <Amt raw={p.amountB} dec={p.assetB.decimals} /> {p.assetB.symbol}</div>}
                 </td>
-                <td data-label="Value" className="r mono">{F.usd(p.valueUsd)}</td>
+                <td data-label="Value" className="r mono"><Usd v={p.valueUsd} /></td>
               </tr>
             )
           })}

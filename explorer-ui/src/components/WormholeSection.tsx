@@ -1,8 +1,6 @@
 import type { ReactNode } from 'react'
 import { Link, paths } from '../router'
-import {
-  AddrPill, Ago, AssetChip, ChartSkeleton, Copy, Dash, EmptyRow, F, MomentLink, TableSkeleton, assetBrandColor, compactAmount,
-} from './ui'
+import { AddrPill, Usd, Amt, Ago, AssetChip, ChartSkeleton, Copy, Dash, EmptyRow, F, MomentLink, TableSkeleton, assetBrandColor, compactAmount } from './ui'
 import { DashboardSectionTitle as SecTitle } from './DashboardPrimitives'
 import { useWormholeBridge } from '../hooks/useExplorerData'
 import { WORMHOLE_STATUS, fmtDuration, fmtPct, loadColor, wormholeExplorerLink, wormholescanLink } from '../utils/security'
@@ -196,10 +194,10 @@ function BackingBeam({ row }: { row: WormholeAssetRow }) {
         )}
       </div>
       <div className="wh-beam-foot">
-        <span className="mono">{F.amount(row.issuance, row.decimals)} minted</span>
+        <span className="mono"><Amt raw={row.issuance} dec={row.decimals} /> minted</span>
         {row.burned != null && row.burned !== '0' &&
-          <span className="mono muted">{F.amount(row.burned, row.decimals)} burned at dEaD</span>}
-        <span className="mono muted">{row.locked == null ? 'custody unread' : `${F.amount(row.locked, row.decimals)} locked`}</span>
+          <span className="mono muted"><Amt raw={row.burned} dec={row.decimals} /> burned at dEaD</span>}
+        <span className="mono muted">{row.locked == null ? 'custody unread' : <><Amt raw={row.locked} dec={row.decimals} /> locked</>}</span>
         {/* An exactly covered asset says nothing more than that; only a real gap
             earns a figure. The token amount is the truth; dollars join it only
             when they round to something ("−$0.00" says less than nothing, and an
@@ -207,9 +205,9 @@ function BackingBeam({ row }: { row: WormholeAssetRow }) {
         {row.residual === '0' && <span className="mono wh-delta muted">exactly covered</span>}
         {row.residual != null && row.residual !== '0' && (
           <span className="mono wh-delta" style={{ color: residualTone(row) }}>
-            {row.residual.startsWith('-') ? '' : '+'}{F.amount(row.residual, row.decimals)} {row.symbol}
+            {row.residual.startsWith('-') ? '' : '+'}<Amt raw={row.residual} dec={row.decimals} /> {row.symbol}
             {row.residualUsd != null && Math.abs(row.residualUsd) >= 0.005 && (
-              <span className="muted"> · {row.residualUsd < 0 ? '' : '+'}{F.usd(row.residualUsd)}</span>
+              <span className="muted"> · {row.residualUsd < 0 ? '' : '+'}<Usd v={row.residualUsd} /></span>
             )}
           </span>
         )}
@@ -440,7 +438,7 @@ function RateLimits({ d, facts, now }: { d: WormholeBridgeDetail; facts: FuseFac
         {facts.localFloor && facts.localRatio != null && (
           <>
             Hydration's own managers are set at least {compactAmount(facts.localRatio)}× above the origin limit on the
-            same asset — the smallest of them still allows {F.amount(facts.localFloor.fuse.limit, facts.localFloor.row.decimals)}
+            same asset — the smallest of them still allows <Amt raw={facts.localFloor.fuse.limit} dec={facts.localFloor.row.decimals} />
             {' '}{facts.localFloor.row.symbol} per {span} — so the origin chain's limiter is the only fuse that can bind.{' '}
           </>
         )}
@@ -511,22 +509,26 @@ function AssetsTable({ d }: { d: WormholeBridgeDetail }) {
                 </td>
                 <td data-label="Locked" className={`r${r.locked == null ? ' cell-empty' : ''}`}>
                   {r.locked == null ? <Dash /> : <>
-                    <span className="mono" title={`${F.exact(r.locked, r.decimals)} ${r.symbol}`}>{F.amount(r.locked, r.decimals)}</span>
-                    {r.lockedUsd != null && <span className="muted mono sec-usd">{F.usd(r.lockedUsd)}</span>}
+                    <span className="mono"><Amt raw={r.locked} dec={r.decimals} /></span>
+                    {r.lockedUsd != null && <span className="muted mono sec-usd"><Usd v={r.lockedUsd} /></span>}
                   </>}
                 </td>
                 <td data-label="Minted" className={`r${r.issuance == null ? ' cell-empty' : ''}`}>
                   {r.issuance == null ? <Dash /> : <>
-                    <span className="mono" title={r.burned != null && r.burned !== '0'
-                      ? `${F.exact(r.issuance, r.decimals)} ${r.symbol} minted · ${F.exact(r.burned, r.decimals)} burned at the dead address (needs no custody)`
-                      : `${F.exact(r.issuance, r.decimals)} ${r.symbol}`}>{F.amount(r.issuance, r.decimals)}</span>
-                    {r.issuanceUsd != null && <span className="muted mono sec-usd">{F.usd(r.issuanceUsd)}</span>}
+                    <span className="mono"><Amt raw={r.issuance} dec={r.decimals} /></span>
+                    {/* Why custody can sit below what was minted: a burn at the dead
+                        address retires supply the bridge no longer has to back. The
+                        figure was a tooltip; it is a line now, because the amount
+                        beside it owns the hover. */}
+                    {r.burned != null && r.burned !== '0' &&
+                      <span className="muted mono sec-usd"><Amt raw={r.burned} dec={r.decimals} /> burned at dEaD</span>}
+                    {r.issuanceUsd != null && <span className="muted mono sec-usd"><Usd v={r.issuanceUsd} /></span>}
                   </>}
                 </td>
                 <td data-label="In flight" className={`r mono muted${pending == null || pending === 0n ? ' cell-empty' : ''}`}
                     title={pendingTitle}>
                   {pending == null || pending === 0n ? <Dash /> : <>
-                    {F.amount(pending.toString(), r.decimals)}
+                    <Amt raw={pending.toString()} dec={r.decimals} />
                     {pendingCount ? <span className="wh-count"> · {F.int(pendingCount)}</span> : null}
                   </>}
                 </td>
@@ -534,12 +536,11 @@ function AssetsTable({ d }: { d: WormholeBridgeDetail }) {
                     coloured only when it is the row's verdict, and dollars join
                     the token figure only when they round to something. */}
                 <td data-label="Difference" className={`r mono${r.residual == null ? ' cell-empty' : ''}`}
-                    style={{ color: residualTone(r) }}
-                    title={r.residual == null ? undefined : `${signedExact(r.residual, r.decimals)} ${r.symbol}`}>
+                    style={{ color: residualTone(r) }}>
                   {r.residual == null ? <Dash /> : r.residual === '0' ? <span className="muted">0</span> : <>
-                    {r.residual.startsWith('-') ? '' : '+'}{F.amount(r.residual, r.decimals)}
+                    {r.residual.startsWith('-') ? '' : '+'}<Amt raw={r.residual} dec={r.decimals} />
                     {r.residualUsd != null && Math.abs(r.residualUsd) >= 0.005 &&
-                      <span className="sec-usd">{r.residualUsd < 0 ? '' : '+'}{F.usd(r.residualUsd)}</span>}
+                      <span className="sec-usd">{r.residualUsd < 0 ? '' : '+'}<Usd v={r.residualUsd} /></span>}
                   </>}
                 </td>
                 <td data-label="Status" className="r">
@@ -586,7 +587,7 @@ function InflightPanel({ d, queued, now, name }: {
   const amount = (op: WormholeInflightOp) => {
     const dec = op.assetId == null ? undefined : decimals.get(op.assetId)
     if (op.amount == null || dec == null) return <Dash />
-    return <span className="mono" title={`${F.exact(op.amount, dec)} ${op.symbol ?? ''}`.trim()}>{F.amount(op.amount, dec)}</span>
+    return <span className="mono"><Amt raw={op.amount} dec={dec} /></span>
   }
   return (
     <div className="panel">
@@ -609,7 +610,7 @@ function InflightPanel({ d, queued, now, name }: {
                     : <span className="muted">unmatched</span>}</td>
                   <td data-label="Amount" className="r">
                     {amount(op)}
-                    {op.amountUsd != null && <span className="muted mono sec-usd">{F.usd(op.amountUsd)}</span>}
+                    {op.amountUsd != null && <span className="muted mono sec-usd"><Usd v={op.amountUsd} /></span>}
                   </td>
                   <td data-label="Sent" className={`r${op.sentAt == null ? ' cell-empty' : ''}`}>
                     {op.sentAt == null ? <Dash /> : <Ago ts={op.sentAt} now={now} />}
@@ -628,8 +629,8 @@ function InflightPanel({ d, queued, now, name }: {
                     </td>
                     <td data-label="Asset"><AssetChip asset={assetRef({ assetId: q.assetId, symbol: q.symbol, decimals: dec })} /></td>
                     <td data-label="Amount" className="r">
-                      <span className="mono" title={`${F.exact(q.amount, dec)} ${q.symbol}`}>{F.amount(q.amount, dec)}</span>
-                      {q.amountUsd != null && <span className="muted mono sec-usd">{F.usd(q.amountUsd)}</span>}
+                      <span className="mono"><Amt raw={q.amount} dec={dec} /></span>
+                      {q.amountUsd != null && <span className="muted mono sec-usd"><Usd v={q.amountUsd} /></span>}
                     </td>
                     <td data-label="Release" className="r"><ReleaseTiming q={q} now={now} /></td>
                     {/* A digest names a message, not a transaction, so it links
@@ -670,8 +671,8 @@ function TransfersTable({ d, now, name }: { d: WormholeBridgeDetail; now: number
               </td>
               <td data-label="Asset"><AssetChip asset={assetRef({ assetId: r.assetId, symbol: r.symbol, decimals: dec(r) })} /></td>
               <td data-label="Amount" className="r">
-                <span className="mono" title={`${F.exact(r.amount, dec(r))} ${r.symbol}`}>{F.amount(r.amount, dec(r))}</span>
-                {r.amountUsd != null && <span className="muted mono sec-usd">{F.usd(r.amountUsd)}</span>}
+                <span className="mono"><Amt raw={r.amount} dec={dec(r)} /></span>
+                {r.amountUsd != null && <span className="muted mono sec-usd"><Usd v={r.amountUsd} /></span>}
               </td>
               <td data-label="Account" className={r.accountRef ? undefined : 'cell-empty'}>
                 {r.accountRef ? <AddrPill account={r.accountRef} /> : <Dash />}
@@ -711,18 +712,18 @@ function Headline({ d }: { d: WormholeBridgeDetail }) {
   const chainsRead = d.chains.filter(c => c.configured && c.ok).length
   return (
     <div className="hdx-cards">
-      <Card label="Locked on origin chains" value={t.lockedUsd == null ? <Dash /> : F.usd(t.lockedUsd)}
+      <Card label="Locked on origin chains" value={t.lockedUsd == null ? <Dash /> : <Usd v={t.lockedUsd} />}
         sub={`custody across ${F.int(chainsRead)} of ${F.int(d.chains.length)} chains`} />
-      <Card label="Minted on Hydration" value={t.issuanceUsd == null ? <Dash /> : F.usd(t.issuanceUsd)}
+      <Card label="Minted on Hydration" value={t.issuanceUsd == null ? <Dash /> : <Usd v={t.issuanceUsd} />}
         sub={`${F.int(d.assets.length)} bridged assets`} />
       <Card label="In flight"
         value={inflightUnchecked ? <Dash /> : F.int(d.inflight.length)}
         sub={inflightUnchecked
           ? 'transfers in transit are not checked'
-          : t.inflightUsd != null && d.inflight.length ? `${F.usd(t.inflightUsd)} between chains` : 'every transfer is settled'} />
+          : t.inflightUsd != null && d.inflight.length ? <><Usd v={t.inflightUsd} /> between chains</> : 'every transfer is settled'} />
       {/* The number this page exists to keep at zero. */}
       <Card label="Backing deficit"
-        value={unpricedShortfall || deficit == null ? <Dash /> : deficit > 0 ? F.usd(deficit) : '$0'}
+        value={unpricedShortfall || deficit == null ? <Dash /> : deficit > 0 ? <Usd v={deficit} /> : '$0'}
         tone={unpricedShortfall ? 'var(--red)' : deficit == null ? undefined : deficit > 0 ? (graded ? 'var(--red)' : 'var(--amber)') : 'var(--green)'}
         sub={unpricedShortfall ? 'shortfall in an asset with no live price'
           : deficit == null ? 'custody unread' : deficit > 0 ? 'supply beyond its custody backing' : 'every token is backed'} />

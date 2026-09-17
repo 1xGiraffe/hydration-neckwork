@@ -2,7 +2,7 @@
 import { useMemo } from 'react'
 import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
-import { F, AddrPill, AssetChip, AssetAmount, AssetIcon, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
+import { F, Amt, Usd, AddrPill, AssetChip, AssetAmount, AssetIcon, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
 import { LIQ_LABELS, activityBadge, BOND_LABELS, intentLabel } from './activityColors'
 import { parseUtcTimestamp } from '../utils/time'
@@ -296,7 +296,7 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     // Inbound: origin chain (+ source account when the crosschain index resolved
     // it), then the arrow, then the chain it landed on with the asset it credited.
     const origin = <><ChainBadge chain={r.fromChain ?? ''} />{r.fromAccount && <ExternalAccountPill account={r.fromAccount} />}</>
-    return <span className="asset-flow">{origin} → <HydrationBadge /><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span></span>
+    return <span className="asset-flow">{origin} → <HydrationBadge /><AssetAmount asset={r.asset} raw={r.amount} /></span>
   }
   if ((r.type === 'transfer' || r.type === 'xcm') && r.asset) {
     // Asset first, then the arrow, then the destination chain and account. A
@@ -312,10 +312,10 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     // moved. A local badge only earns its place opposite a counterparty, so a plain
     // local transfer and an outbound hop with nothing left to point at both skip it.
     const local = r.type === 'xcm' && dest ? <HydrationBadge /> : null
-    return <span className="asset-flow">{local}<span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span>{dest ? <> → {dest}</> : null}</span>
+    return <span className="asset-flow">{local}<AssetAmount asset={r.asset} raw={r.amount} />{dest ? <> → {dest}</> : null}</span>
   }
   if ((r.type === 'trade' || r.type === 'dca') && r.assetIn && r.assetOut) {
-    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> → <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span>{r.dcaStatus === 'failed' && <span className="muted">Failed attempt</span>}</span>
+    return <span className="asset-flow"><AssetAmount asset={r.assetIn} raw={r.amountIn} /> → <AssetAmount asset={r.assetOut} raw={r.amountOut} />{r.dcaStatus === 'failed' && <span className="muted">Failed attempt</span>}</span>
   }
   if (r.type === 'xcswap' && r.assetIn) {
     // The destination is on ANOTHER chain, so it has no asset chip to show: it is
@@ -328,7 +328,7 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
         {/* The destination is not a registry asset, so it has no asset id — but it
             does have an origin, which is all AssetIcon needs to resolve artwork. */}
         {r.xcswapDestOrigin && <AssetIcon assetId={0} symbol={r.xcswapDestSymbol} origin={r.xcswapDestOrigin} />}
-        {' '}<span className="mono">{r.xcswapDestAmount && r.xcswapDestDecimals != null ? `${F.amount(r.xcswapDestAmount, r.xcswapDestDecimals)} ` : ''}{r.xcswapDestSymbol}</span>
+        {' '}<span className="mono">{r.xcswapDestAmount && r.xcswapDestDecimals != null ? <><Amt raw={r.xcswapDestAmount} dec={r.xcswapDestDecimals} />{' '}</> : null}{r.xcswapDestSymbol}</span>
         {r.xcswapDestChain && <span className="xc-chain">{r.xcswapDestChain}</span>}
       </span>
       : <span className="muted">bridging out</span>
@@ -347,7 +347,7 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     const seq = headed || r.intentSeq == null ? null : <span className="muted">#{r.intentSeq}</span>
     if (traded) {
       return <span className="asset-flow"><AssetAmount asset={r.assetIn} raw={r.amountIn} /> → <AssetAmount asset={r.assetOut} raw={r.amountOut} />
-        {!headed && r.intentAction === 'DcaTrade' && r.intentRemainingBudget != null && <span className="muted">{F.amount(r.intentRemainingBudget, r.assetIn.decimals)} {r.assetIn.symbol} left</span>}
+        {!headed && r.intentAction === 'DcaTrade' && r.intentRemainingBudget != null && <span className="muted"><Amt raw={r.intentRemainingBudget} dec={r.assetIn.decimals} /> {r.assetIn.symbol} left</span>}
         {seq}</span>
     }
     // A DCA intent sells its budget in slices the pallet sizes, so its placement names
@@ -370,18 +370,18 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     // missed) render the order id alone — same fallback the design calls out.
     // Kept even when headed: with no legs the order id is all this phrase has to say.
     if (!r.assetIn || !r.assetOut) return <span className="asset-flow"><span className="muted">Order #{r.otcOrderId}</span>{maker}</span>
-    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> → <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span>{headed ? null : <span className="muted">#{r.otcOrderId}</span>}{maker}</span>
+    return <span className="asset-flow"><AssetAmount asset={r.assetIn} raw={r.amountIn} /> → <AssetAmount asset={r.assetOut} raw={r.amountOut} />{headed ? null : <span className="muted">#{r.otcOrderId}</span>}{maker}</span>
   }
   if (r.type === 'liquidity' && r.assetIn && r.assetOut) {
     // Pool creation seeds two assets, and a concentrated-liquidity position or vault
     // act moves both tokens — show both legs side by side.
-    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.assetIn} /> <span className="mono">{F.amount(r.amountIn, r.assetIn.decimals)}</span></span> + <span className="trade-leg"><AssetChip asset={r.assetOut} /> <span className="mono">{F.amount(r.amountOut, r.assetOut.decimals)}</span></span></span>
+    return <span className="asset-flow"><AssetAmount asset={r.assetIn} raw={r.amountIn} /> + <AssetAmount asset={r.assetOut} raw={r.amountOut} /></span>
   }
   if ((r.type === 'mm' || r.type === 'liquidity' || r.type === 'staking' || r.type === 'bond') && r.asset) {
-    return <span className="asset-flow"><span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span></span>
+    return <span className="asset-flow"><AssetAmount asset={r.asset} raw={r.amount} /></span>
   }
   if (r.type === 'vote' && r.asset) {
-    const locked = <span className="trade-leg"><AssetChip asset={r.asset} /> <span className="mono">{F.amount(r.amount, r.asset.decimals)}</span></span>
+    const locked = <AssetAmount asset={r.asset} raw={r.amount} />
     // Headed, the referendum, the side and the conviction are all in the page title's
     // own subtitle, so the locked capital is the one fact left to state; the
     // referendum stays reachable through that page's Referendum row.
@@ -466,8 +466,8 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
                     <td data-label="Activity"><ActivityDesc r={r} now={now} /></td>
                     {/* A dash is "not booked yet", never "$0": the revenue model trails
                         the head, and the field is only present once the block is booked. */}
-                    <td data-label="Protocol revenue" className="r mono muted">{r.revenue ? F.usd(r.revenue.protocolUsd) : <Dash />}</td>
-                    <td data-label="Value" className="r mono">{r.valueUsd != null ? F.usd(r.valueUsd) : <Dash />}</td>
+                    <td data-label="Protocol revenue" className="r mono muted">{r.revenue ? <Usd v={r.revenue.protocolUsd} /> : <Dash />}</td>
+                    <td data-label="Value" className="r mono">{r.valueUsd != null ? <Usd v={r.valueUsd} /> : <Dash />}</td>
                     <td data-label="Time" className="r mono muted">{mempool ? <><PoolChip /><Waiting ts={r.timestamp} now={now} /></> : <Ago ts={r.timestamp} now={now} />}</td>
                   </tr>
                 )

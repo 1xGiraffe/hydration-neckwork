@@ -76,7 +76,9 @@ test('an accounts row hovers and opens the account it names', async ({ page }) =
   const row = page.locator('table.tbl tbody tr').filter({ has: page.locator('.addr-pill') }).first()
   await expect(row).toHaveClass(/clickable/)
 
-  // Clicking blank row space navigates; the pills inside keep their own targets.
-  await row.locator('td[data-label="Value"]').click()
+  // Clicking blank row space navigates; the pills inside keep their own targets,
+  // and so does the figure itself — hovering it reveals the un-compacted value and
+  // a click there copies it, so aim at the cell's blank corner, not its centre.
+  await row.locator('td[data-label="Value"]').click({ position: { x: 6, y: 6 } })
   await expect(page).toHaveURL(/\/(account|tag)\//)
 })

@@ -247,8 +247,8 @@ describe('EVM transaction rows on the extrinsic page', () => {
     }
     const out = render(<ExtrinsicDetailPage id={evmTxId} />, qc => qc.setQueryData(['extrinsic', evmTxId], withValue))
     // 52182158448156 at 18 decimals, on the shared rough scale's subscript-zero notation.
-    expect(out).toContain('0.0₃5218 WETH')
-    expect(out).not.toContain('0.0₃5218 HDX')
+    expect(out.replace(/<[^>]+>/g, '')).toContain('0.0₃5218 WETH')
+    expect(out.replace(/<[^>]+>/g, '')).not.toContain('0.0₃5218 HDX')
   })
 
   it('adds no EVM rows to an extrinsic that submitted no EVM transaction', () => {

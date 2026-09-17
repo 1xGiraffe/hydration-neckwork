@@ -3,7 +3,7 @@ import { useIntentOrder, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
-import { Crumbs, F, AddrPill, AssetChip, AssetAmount, FeeAmount, ProgressRing, SkeletonRows, MomentLink, Pager, compactAmount } from '../components/ui'
+import { Crumbs, Num, Amt, F, AddrPill, AssetChip, AssetAmount, FeeAmount, ProgressRing, SkeletonRows, MomentLink, Pager } from '../components/ui'
 import { ActivityTable } from '../components/ActivityTable'
 import { intentLabel } from '../components/activityColors'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
@@ -140,12 +140,12 @@ export function Intent({ intentId }: { intentId: string }) {
                   <div className="dt">Limit</div>
                   <div className="dd">≥ <AssetAmount asset={data.assetOut} raw={data.order.amountOut} />
                     {data.limitPriceOutPerIn != null && Number.isFinite(Number(data.limitPriceOutPerIn)) && <span className="muted mono" title={`${data.limitPriceOutPerIn} ${data.assetOut.symbol} per ${data.assetIn.symbol}`}>
-                      {' · '}{compactAmount(Number(data.limitPriceOutPerIn))} {data.assetOut.symbol} per {data.assetIn.symbol}
+                      {' · '}<Num v={Number(data.limitPriceOutPerIn)} /> {data.assetOut.symbol} per {data.assetIn.symbol}
                     </span>}
                   </div>
                   <div className="dt">Partial fills</div>
                   <div className="dd">{data.order.partial
-                    ? <>allowed{data.order.partialMin != null && !isZero(data.order.partialMin) && <span className="muted"> · at least <span className="mono">{F.amount(data.order.partialMin, data.assetIn.decimals)} {data.assetIn.symbol}</span> per fill</span>}</>
+                    ? <>allowed{data.order.partialMin != null && !isZero(data.order.partialMin) && <span className="muted"> · at least <span className="mono"><Amt raw={data.order.partialMin} dec={data.assetIn.decimals} /> {data.assetIn.symbol}</span> per fill</span>}</>
                     : <span className="muted">not allowed · settles in one fill or not at all</span>}
                   </div>
                 </>}
@@ -164,7 +164,7 @@ export function Intent({ intentId }: { intentId: string }) {
                     <div className="dt">Budget</div>
                     <div className="dd"><AssetAmount asset={data.assetIn} raw={data.order.budget} />
                       {data.dca?.remainingBudget != null && <span className="muted mono" title="Left of the budget — what this intent still has to spend">
-                        {' · '}{F.amount(data.dca.remainingBudget, data.assetIn.decimals)} {data.assetIn.symbol} left
+                        {' · '}<Amt raw={data.dca.remainingBudget} dec={data.assetIn.decimals} /> {data.assetIn.symbol} left
                       </span>}
                     </div>
                   </>}

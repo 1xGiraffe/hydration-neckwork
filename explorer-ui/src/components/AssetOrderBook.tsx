@@ -1,4 +1,4 @@
-import { F, AssetIcon, AssetAmount, AddrPill, Dash, EmptyRow, rowNav } from './ui'
+import { F, Num, Usd, Amt, AssetIcon, AssetAmount, AddrPill, Dash, EmptyRow, rowNav } from './ui'
 import { paths } from '../router'
 import { bookSpread, depthShare, maxSideSizeUsd } from '../utils/orderBook'
 import type { AssetBookEntry, AssetLimitOrderBook, AssetListItem } from '../types'
@@ -36,7 +36,7 @@ function BookSide({ side, entries, asset }: { side: 'bids' | 'asks'; entries: As
                 <td data-label="Price" className="r">
                   {e.price != null
                     ? <>
-                      <span className="mono book-price">{F.amount(String(e.price), 0)}</span>
+                      <span className="mono book-price"><Num v={e.price} /></span>
                       {' '}<span className="mono muted">{e.counter.symbol}</span>
                       <span className="dca-sub mono muted">
                         {e.priceUsd != null
@@ -50,12 +50,12 @@ function BookSide({ side, entries, asset }: { side: 'bids' | 'asks'; entries: As
                     counter side of that remainder is worth to the owner. */}
                 <td data-label="Size" className="r">
                   <AssetAmount asset={asset} raw={e.size} />
-                  {e.sizeUsd != null && <span className="dca-sub mono muted">{F.usd(e.sizeUsd)}</span>}
+                  {e.sizeUsd != null && <span className="dca-sub mono muted"><Usd v={e.sizeUsd} /></span>}
                 </td>
                 <td data-label="Total" className="r">
                   <span className="trade-leg">
                     <AssetIcon assetId={e.counter.assetId} iconAssetId={e.counter.iconAssetId} iconAssetIds={e.counter.iconAssetIds} symbol={e.counter.symbol} size={16} parachainId={e.counter.parachainId} origin={e.counter.origin} />
-                    {' '}<span className="mono">{F.amount(e.total, e.counter.decimals)}</span>
+                    {' '}<span className="mono"><Amt raw={e.total} dec={e.counter.decimals} /></span>
                   </span>
                   {e.fills > 0 && <span className="dca-sub mono muted" title={`${e.fills} partial ${e.fills === 1 ? 'fill' : 'fills'} already taken off this order`}>
                     {F.int(e.fills)} filled

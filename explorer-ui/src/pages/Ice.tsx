@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { useIceDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
-import { AssetAmount, AssetChip, ChartSkeleton, Crumbs, EmptyRow, F, TableSkeleton } from '../components/ui'
+import { AssetAmount, Usd, AssetChip, ChartSkeleton, Crumbs, EmptyRow, F, TableSkeleton } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
 import { ChartLegend, MultiLineChart, ShareBar, StackedColumnChart } from '../components/HdxCharts'
 import type { AreaSeries, ShareSegment, StackColumn } from '../components/HdxCharts'
@@ -121,7 +121,7 @@ function OpenOrdersSection({ d }: { d: IceDashboard }) {
           <Card k="Open" v={F.int(o.total)} s="limit orders and DCA intents" />
           <Card k="Limit orders" v={F.int(o.limit)} s="swap intents waiting for a match" />
           <Card k="DCA intents" v={F.int(o.dca)} s="budgeted or rolling" />
-          <Card k="Reserved" v={F.usd(reservedUsd)} s="held for open orders, at current prices" />
+          <Card k="Reserved" v={<Usd v={reservedUsd} />} s="held for open orders, at current prices" />
         </div>
         {o.byAsset.length ? (
           <>
@@ -136,7 +136,7 @@ function OpenOrdersSection({ d }: { d: IceDashboard }) {
                       <td data-label="Asset"><AssetChip asset={r.asset} /></td>
                       <td data-label="Orders" className="r mono">{F.int(r.orders)}</td>
                       <td data-label="Reserved" className="r mono"><AssetAmount asset={r.asset} raw={r.reserved} /></td>
-                      <td data-label="Value" className="r mono muted">{F.usd(r.reservedUsd)}</td>
+                      <td data-label="Value" className="r mono muted"><Usd v={r.reservedUsd} /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -182,9 +182,9 @@ function FillsSection({ d }: { d: IceDashboard }) {
             <ChartLegend items={[{ label: 'Matched', color: MATCHED_COLOR }, { label: 'Routed', color: ROUTED_COLOR }]} />
             <StackedColumnChart columns={columns} h={200} yFmt={v => F.usd(v)} />
             <div className="hdx-cards">
-              <Card k="Volume" v={F.usd(totals.usd)} s={`${F.int(totals.fills)} fills — limit-order fills and DCA-intent trades`} />
-              <Card k="Matched" v={F.usd(totals.matched)} dot={MATCHED_COLOR} s={totals.usd > 0 ? `${F.share(totals.matched / totals.usd)} never touched an AMM` : 'never touched an AMM'} />
-              <Card k="Routed" v={F.usd(totals.routed)} dot={ROUTED_COLOR} s="the pot's own AMM trades" />
+              <Card k="Volume" v={<Usd v={totals.usd} />} s={`${F.int(totals.fills)} fills — limit-order fills and DCA-intent trades`} />
+              <Card k="Matched" v={<Usd v={totals.matched} />} dot={MATCHED_COLOR} s={totals.usd > 0 ? `${F.share(totals.matched / totals.usd)} never touched an AMM` : 'never touched an AMM'} />
+              <Card k="Routed" v={<Usd v={totals.routed} />} dot={ROUTED_COLOR} s="the pot's own AMM trades" />
               <Card k="Solutions" v={F.int(totals.solutions)} s={totals.solutions > 0 ? `${(totals.fills / totals.solutions).toFixed(1)} fills per solution` : 'submit_solution extrinsics'} />
             </div>
           </>
@@ -235,8 +235,8 @@ function FeeSection({ d }: { d: IceDashboard }) {
           </>
         ) : <div className="hdx-note" style={{ marginTop: 0 }}>No fee revenue yet — the fee is charged on matched volume only, never on the routed part.</div>}
         <div className="hdx-cards">
-          <Card k={WINDOW_LABEL} v={F.usd(total)} dot={FEE_COLOR} s="booked as ICE matched fee on the revenue page" />
-          <Card k="In the fee account" v={F.usd(holdingsUsd)} s="held right now, at current prices" />
+          <Card k={WINDOW_LABEL} v={<Usd v={total} />} dot={FEE_COLOR} s="booked as ICE matched fee on the revenue page" />
+          <Card k="In the fee account" v={<Usd v={holdingsUsd} />} s="held right now, at current prices" />
         </div>
         {holdings.length > 0 && (
           <div className="panel" style={{ marginTop: 12 }}>
@@ -247,7 +247,7 @@ function FeeSection({ d }: { d: IceDashboard }) {
                   <tr key={h.asset.assetId}>
                     <td data-label="Asset"><AssetChip asset={h.asset} /></td>
                     <td data-label="Held" className="r mono"><AssetAmount asset={h.asset} raw={h.amount} /></td>
-                    <td data-label="Value" className="r mono muted">{F.usd(h.valueUsd)}</td>
+                    <td data-label="Value" className="r mono muted"><Usd v={h.valueUsd} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -327,7 +327,7 @@ function TopPairsSection({ d }: { d: IceDashboard }) {
               <tr key={`${p.assetIn.assetId}-${p.assetOut.assetId}`}>
                 <td data-label="Pair"><span className="trade-leg"><AssetChip asset={p.assetIn} /><span className="muted">→</span><AssetChip asset={p.assetOut} /></span></td>
                 <td data-label="Fills" className="r mono">{F.int(p.fills)}</td>
-                <td data-label="Volume" className="r mono">{F.usd(p.usd)}</td>
+                <td data-label="Volume" className="r mono"><Usd v={p.usd} /></td>
               </tr>
             ))}
           </tbody>

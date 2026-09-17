@@ -2,7 +2,7 @@ import { useDcaExecution, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
-import { Crumbs, F, AddrPill, AssetChip, AssetAmount, StatusBadge, FinalizedBadge, FailureReasonRow, SkeletonRows, MomentLink, AwaitingBlockCard } from '../components/ui'
+import { Crumbs, Usd, AddrPill, AssetChip, AssetAmount, StatusBadge, FinalizedBadge, FailureReasonRow, SkeletonRows, MomentLink, AwaitingBlockCard } from '../components/ui'
 import { isAwaitingBlock } from '../queryRetry'
 import { DcaResolve } from './DcaSchedule'
 import { RevenueRow } from '../components/RevenueRow'
@@ -54,7 +54,7 @@ export function DcaExecution({ height, eventIndex }: { height: number; eventInde
             <AssetAmount asset={data.assetIn} raw={data.amountIn} />
             {data.amountOut != null && <> → <AssetAmount asset={data.assetOut} raw={data.amountOut} /></>}
           </span></div>
-          {data.valueUsd != null && <><div className="dt">Value</div><div className="dd mono">{F.usd(data.valueUsd)}</div></>}
+          {data.valueUsd != null && <><div className="dt">Value</div><div className="dd mono"><Usd v={data.valueUsd} /></div></>}
           <RevenueRow revenue={data.revenue} />
           {data.executionPrice != null && <>
             <div className="dt">Execution price</div>

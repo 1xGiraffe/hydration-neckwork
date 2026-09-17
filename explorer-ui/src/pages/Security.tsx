@@ -5,9 +5,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useNow } from '../hooks/useNow'
 import { Link, paths, SECURITY_SECTIONS } from '../router'
 import type { SecuritySection } from '../router'
-import {
-  AddrPill, Ago, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, EmptyRow, F, MomentLink, TableSkeleton,
-} from '../components/ui'
+import { AddrPill, Usd, Ago, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, EmptyRow, F, MomentLink, TableSkeleton } from '../components/ui'
 import { DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import { NotifyButton } from '../components/NotifyButton'
 import { FuseGrid, LoadMeter, YearBars } from '../components/SecurityPanels'
@@ -108,9 +106,9 @@ function WormholeCard({ w }: { w: SecurityDashboard['wormhole'] }) {
   }
   // A graded shortfall with no USD figure is one in an asset with no live
   // price — the verdict stands, the dollar amount does not.
-  const shortfall = w.deficitUsd != null && w.deficitUsd > 0 ? F.usd(w.deficitUsd) : null
-  const value = w.worstStatus === 'deficit' ? (shortfall ? `${shortfall} backing deficit` : 'Backing deficit')
-    : w.worstStatus === 'attention' ? (shortfall ? `${shortfall} small shortfall` : 'Small shortfall')
+  const shortfall = w.deficitUsd != null && w.deficitUsd > 0 ? <Usd v={w.deficitUsd} /> : null
+  const value = w.worstStatus === 'deficit' ? (shortfall ? <>{shortfall} backing deficit</> : 'Backing deficit')
+    : w.worstStatus === 'attention' ? (shortfall ? <>{shortfall} small shortfall</> : 'Small shortfall')
       : w.worstStatus === 'unverified' || w.worstStatus === 'unconfigured' ? 'Custody unread'
         : 'Fully backed'
   const tone = w.worstStatus === 'deficit' ? 'var(--red)'
@@ -172,15 +170,15 @@ function Overview({ d, now, nominalSec }: { d: SecurityDashboard; now: number; n
           value={F.int(d.trips.enforcementTotal)}
           sub={`rejections on record · ${d.trips.byYear.at(-1)?.count ?? 0} this year`} />
         <OverviewCard section="money-market" label="Borrowed"
-          value={primary ? F.usd(primary.debtUsd) : <Dash />}
+          value={primary ? <Usd v={primary.debtUsd} /> : <Dash />}
           sub={primary ? `${F.int(primary.borrowers)} borrowers in the primary market` : 'no market data'} />
         <OverviewCard section="money-market" label="Within 5%"
-          value={primary?.nearLiquidationDebtUsd != null ? F.usd(primary.nearLiquidationDebtUsd) : <Dash />}
+          value={primary?.nearLiquidationDebtUsd != null ? <Usd v={primary.nearLiquidationDebtUsd} /> : <Dash />}
           sub={primary?.nearLiquidationCount != null
             ? `${F.int(primary.nearLiquidationCount)} positions near liquidation, excluding e-mode and isolated loops`
             : 'needs chain state to tell a loop from a directional borrow'} />
         <OverviewCard section="money-market" label="Bad debt"
-          value={primary ? (primary.badDebtUsd > 0 ? F.usd(primary.badDebtUsd) : 'none') : <Dash />}
+          value={primary ? (primary.badDebtUsd > 0 ? <Usd v={primary.badDebtUsd} /> : 'none') : <Dash />}
           tone={primary && primary.badDebtUsd > 0 ? 'var(--red)' : 'var(--green)'}
           sub={primary && primary.badDebtCount > 0
             ? `unrecoverable, on ${F.int(primary.badDebtCount)} of the ${F.int(primary.underwaterCount)} positions under water`
@@ -357,12 +355,12 @@ function FuseTable({ d, headBlock, blockSec }: { d: SecurityDashboard; headBlock
                     numbers alone hide. */}
                 <td data-label="24h limit" className="r">
                   <AssetAmount asset={r.asset} raw={r.limit} link={false} />
-                  {r.limitUsd != null && <span className="muted mono sec-usd">{F.usd(r.limitUsd)}</span>}
+                  {r.limitUsd != null && <span className="muted mono sec-usd"><Usd v={r.limitUsd} /></span>}
                 </td>
                 <td data-label="Minted" className={`r${dormant ? ' cell-empty' : ''}`}>
                   {dormant ? <Dash /> : <>
                     <AssetAmount asset={r.asset} raw={r.used} link={false} />
-                    {r.usedUsd != null && <span className="muted mono sec-usd">{F.usd(r.usedUsd)}</span>}
+                    {r.usedUsd != null && <span className="muted mono sec-usd"><Usd v={r.usedUsd} /></span>}
                   </>}
                 </td>
                 <td data-label="Used" className={`r mono${dormant ? ' cell-empty' : ''}`} style={{ color: r.usagePct > 0 ? loadColor(r.usagePct) : undefined }}>
@@ -481,7 +479,7 @@ function PerBlockTable({ rows, peakDays }: { rows: SecurityPerBlockRow[]; peakDa
               <td data-label="Reserve" className="r">
                 <span className="trade-leg">
                   <AssetAmount asset={r.asset} raw={r.reserve} link={false} />
-                  {r.reserveUsd != null && <span className="muted">{F.usd(r.reserveUsd)}</span>}
+                  {r.reserveUsd != null && <span className="muted"><Usd v={r.reserveUsd} /></span>}
                 </span>
               </td>
               <td data-label="Net trade / block" className="r">
@@ -691,7 +689,7 @@ function RiskAmount({ usd, count, tone }: { usd: number | null; count: number | 
   if (usd == null || count == null || !count) return <Dash />
   return (
     <span className="sec-amt">
-      <span style={tone ? { color: tone } : undefined}>{F.usd(usd)}</span>
+      <span style={tone ? { color: tone } : undefined}><Usd v={usd} /></span>
       <span className="sec-amt-n">{F.int(count)}</span>
     </span>
   )
@@ -715,8 +713,8 @@ function SolvencyTable({ d }: { d: SecurityDashboard }) {
                 {m.role === 'supplemental' && <span className="pill-badge sec-supplemental">isolated</span>}
               </td>
               <td data-label="Borrowers" className="r mono">{F.int(m.borrowers)}</td>
-              <td data-label="Debt" className={`r mono${m.debtUsd > 0 ? '' : ' cell-empty'}`}>{m.debtUsd > 0 ? F.usd(m.debtUsd) : <Dash />}</td>
-              <td data-label="Collateral" className={`r mono muted${m.collateralUsd > 0 ? '' : ' cell-empty'}`}>{m.collateralUsd > 0 ? F.usd(m.collateralUsd) : <Dash />}</td>
+              <td data-label="Debt" className={`r mono${m.debtUsd > 0 ? '' : ' cell-empty'}`}>{m.debtUsd > 0 ? <Usd v={m.debtUsd} /> : <Dash />}</td>
+              <td data-label="Collateral" className={`r mono muted${m.collateralUsd > 0 ? '' : ' cell-empty'}`}>{m.collateralUsd > 0 ? <Usd v={m.collateralUsd} /> : <Dash />}</td>
               <td data-label="Within 5% excl. loops" className={`r mono${m.nearLiquidationCount ? '' : ' cell-empty'}`}
                   title={m.nearLiquidationCount == null
                     ? 'Needs the pool contract to read each position\'s e-mode and isolation flags; chain state is unavailable.'
@@ -755,7 +753,7 @@ function MoneyMarketSection({ d, now }: { d: SecurityDashboard; now: number }) {
         <div className="hdx-note">
           {F.int(primary.underwaterCount)} positions in the primary market are under water:
           {' '}{F.int(primary.liquidatableCount)} still cover their debt and are waiting for a liquidator,
-          {' '}{F.int(primary.badDebtCount)} do not and are short {F.usd(primary.badDebtUsd)} between them —
+          {' '}{F.int(primary.badDebtCount)} do not and are short <Usd v={primary.badDebtUsd} /> between them —
           {' '}{primary.debtUsd > 0 ? fmtPct((primary.badDebtUsd / primary.debtUsd) * 100) : '—'} of everything borrowed, written off.
         </div>
       )}

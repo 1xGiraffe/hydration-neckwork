@@ -1,7 +1,7 @@
 import { useAssets } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, setQuery, useQueryValue } from '../router'
-import { Crumbs, F, AssetIcon, Sparkline, EmptyRow, TableSkeleton, rowNav, Dash } from '../components/ui'
+import { Crumbs, Usd, F, AssetIcon, Sparkline, EmptyRow, TableSkeleton, rowNav, Dash } from '../components/ui'
 import type { AssetListItem } from '../types'
 
 type AssetSort = 'tvl' | 'holders' | '24h' | '7d'
@@ -79,7 +79,7 @@ export function Assets() {
                 <td data-label="24H" className="r mono" style={{ color: chCol(a.change24h) }}>{a.change24h != null ? F.pct(a.change24h) : <Dash />}</td>
                 <td data-label="7D" className="r mono" style={{ color: chCol(a.change7d) }}>{a.change7d != null ? F.pct(a.change7d) : <Dash />}</td>
                 <td data-label="Holders" className="r mono">{a.holderCount != null ? F.int(a.holderCount) : <Dash />}</td>
-                <td data-label="TVL" className="r mono">{a.amountUsd != null ? F.usd(a.amountUsd) : <Dash />}</td>
+                <td data-label="TVL" className="r mono">{a.amountUsd != null ? <Usd v={a.amountUsd} /> : <Dash />}</td>
                 <td data-label="Last 7 days" className="r spark-cell">{a.sparkline && a.sparkline.length > 1 ? <Sparkline data={a.sparkline} w={110} h={30} change7d={a.change7d ?? null} /> : <Dash />}</td>
               </tr>
             ))}

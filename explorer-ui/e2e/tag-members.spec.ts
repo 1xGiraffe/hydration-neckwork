@@ -24,7 +24,9 @@ test('a member row behaves like a directory row', async ({ page }) => {
   await page.goto('/tag/kraken')
   const first = page.locator('table.accounts-tbl tbody tr').first()
   await expect(first).toHaveClass(/clickable/)
-  await first.locator('td[data-label="Value"]').click()
+  // The cell's blank corner, not its centre: the figure there owns its own click
+  // (hover reveals the un-compacted value, a click copies it).
+  await first.locator('td[data-label="Value"]').click({ position: { x: 6, y: 6 } })
   await expect(page).toHaveURL(/\/account\//)
 })
 

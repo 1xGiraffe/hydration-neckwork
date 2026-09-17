@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useAccountRevenueBreakdown, useTagRevenueBreakdown } from '../hooks/useExplorerData'
 import { useListTagRevenueBreakdown } from '../hooks/useUser'
-import { AssetChip, ChartSkeleton, F } from './ui'
+import { AssetChip, Usd, ChartSkeleton, F } from './ui'
 import { ShareBar } from './HdxCharts'
 import type { ShareSegment } from './HdxCharts'
 import { ChartTooltipRow as TipRow } from './DashboardPrimitives'
@@ -66,7 +66,7 @@ export function RevenueBreakdownTab({ scope }: { scope: RevenueScope }) {
       <div className="pf-card">
         <div className="revbd-total">
           <span className="k">Protocol revenue, all time</span>
-          <span className="v mono">{F.usd(data.totalUsd)}</span>
+          <span className="v mono"><Usd v={data.totalUsd} /></span>
         </div>
         <ShareBar segments={segments} />
         <table className="tbl rev-breakdown-tbl">
@@ -103,7 +103,7 @@ function StreamRows({ stream, totalUsd, open, onToggle }: { stream: RevenueBreak
           {streamLabel(stream.stream)}
           {expandable && <span className="revbd-chev" aria-hidden="true">{open ? '▾' : '▸'}</span>}
         </td>
-        <td className="num mono" data-label="Revenue">{F.usd(stream.usd)}</td>
+        <td className="num mono" data-label="Revenue"><Usd v={stream.usd} /></td>
         <td className="num mono" data-label="Share">{totalUsd > 0 ? ((stream.usd / totalUsd) * 100).toFixed(1) : '0.0'}%</td>
       </tr>
       {expandable && open && stream.assets.map(a => (
@@ -116,14 +116,14 @@ function StreamRows({ stream, totalUsd, open, onToggle }: { stream: RevenueBreak
               </span>
             </span>
           </td>
-          <td className="num mono" data-label="Revenue">{F.usd(a.usd)}</td>
+          <td className="num mono" data-label="Revenue"><Usd v={a.usd} /></td>
           <td className="num mono muted" data-label="Share">{stream.usd > 0 ? ((a.usd / stream.usd) * 100).toFixed(1) : '0.0'}%</td>
         </tr>
       ))}
       {expandable && open && stream.otherCount > 0 && (
         <tr className="revbd-asset revbd-other">
           <td data-label="Asset"><span className="muted">{stream.otherCount} more {stream.otherCount === 1 ? 'asset' : 'assets'}</span></td>
-          <td className="num mono" data-label="Revenue">{F.usd(stream.otherUsd)}</td>
+          <td className="num mono" data-label="Revenue"><Usd v={stream.otherUsd} /></td>
           <td className="num mono muted" data-label="Share">{stream.usd > 0 ? ((stream.otherUsd / stream.usd) * 100).toFixed(1) : '0.0'}%</td>
         </tr>
       )}

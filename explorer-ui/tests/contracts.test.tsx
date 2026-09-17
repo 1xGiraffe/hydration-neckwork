@@ -79,7 +79,9 @@ describe('Contracts directory', () => {
     const html = render([createdRow()])
     expect(html).toContain('$4.87M')          // value, shared rough scale
     expect(html).toContain('$112k')           // trading volume
-    expect(html).toContain('40k</span>+')     // activity floor (partial total)
+    // Stripped of markup: the amount's reveal-and-copy wrapper sits between the
+    // figure and the '+' that marks the total as a floor.
+    expect(html.replace(/<[^>]+>/g, '')).toContain('40k+')     // activity floor (partial total)
     expect(html).toContain('spark')           // 1Y sparkline
     // Verification is one check, not a chip — the match kind is in its title.
     expect(html).toContain('ok-check')

@@ -36,8 +36,8 @@ describe('LiquidityPositionsTable — venue-aware rows', () => {
     expect(html).toContain('Uniswap v3')
     expect(html).toContain('Gamma vault')
     // The second leg reads under the first, the way an Omnipool row shows its H2O leg.
-    expect(html).toContain('+ 0.3 HOLLAR')
-    expect(html).toContain('+ 1.18 HOLLAR')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('+ 0.3 HOLLAR')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('+ 1.18 HOLLAR')
   })
   it('carries the distinguishing section sub-label', () => {
     const html = renderToStaticMarkup(<LiquidityPositionsTable positions={[pos('Omnipool', '1', 'DOT')]} />)

@@ -4,7 +4,7 @@ import type { AssetLiquidity, AssetLiquiditySource, AssetRef } from '../types'
 import { useAssetLiquidity, useOmnipoolLps } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { Link, paths } from '../router'
-import { accountHref, AddrPill, AssetAmount, Ago, ChartSkeleton, Dash, EmptyRow, F, Pager, pendingRows, PoolBadge, rowNav, TableSkeleton } from './ui'
+import { accountHref, Usd, Amt, AddrPill, AssetAmount, Ago, ChartSkeleton, Dash, EmptyRow, F, Pager, pendingRows, PoolBadge, rowNav, TableSkeleton } from './ui'
 import { ChartLegend, ShareBar, StackedAreaChart, type ShareSegment } from './HdxCharts'
 import { useAssetColors } from '../utils/iconColor'
 
@@ -51,11 +51,11 @@ function SourceCard({ s, asset }: { s: AssetLiquiditySource; asset: AssetRef }) 
         <span>{s.name}</span>
         <PoolBadge pool={KIND_LABEL[s.kind]} />
         {s.hasPegs && <span className="badge" title="This pool trades around drifting price pegs" style={{ background: 'var(--lavender-soft)', color: 'var(--lavender-deep)' }}>pegs</span>}
-        <span className="cap" style={{ marginLeft: 'auto' }}>{s.tvlUsd != null ? `${F.usd(s.tvlUsd)} TVL` : 'TVL —'}</span>
+        <span className="cap" style={{ marginLeft: 'auto' }}>{s.tvlUsd != null ? <><Usd v={s.tvlUsd} /> TVL</> : 'TVL —'}</span>
       </div>
       {segments.length > 0 && <ShareBar segments={segments} h={26} />}
       <div className="hv"><AssetAmount asset={asset} raw={s.assetAmount} link={false} /></div>
-      <div className="hs">{F.usd(s.assetUsd)}{s.assetSharePct != null && <span className="muted"> · {F.sharePct(s.assetSharePct)} of pool</span>}</div>
+      <div className="hs"><Usd v={s.assetUsd} />{s.assetSharePct != null && <span className="muted"> · {F.sharePct(s.assetSharePct)} of pool</span>}</div>
     </>
   )
   return to
@@ -104,10 +104,10 @@ function OmnipoolLpsSection({ asset }: { asset: AssetRef }) {
                       <td data-label="Positions" className="r mono muted">{r.positions > 0 ? F.int(r.positions) : '—'}</td>
                       <td data-label="Amount" className="r">
                         <AssetAmount asset={asset} raw={r.amount} link={false} />
-                        {r.hubAmount !== '0' && <div className="muted" style={{ fontSize: 11 }}>+ {F.amount(r.hubAmount, 12)} H2O</div>}
+                        {r.hubAmount !== '0' && <div className="muted" style={{ fontSize: 11 }}>+ <Amt raw={r.hubAmount} dec={12} /> H2O</div>}
                       </td>
                       <td data-label="Share" className="r mono muted">{F.sharePct(r.sharePct)}</td>
-                      <td data-label="Value" className="r mono">{r.valueUsd != null ? F.usd(r.valueUsd) : <Dash />}</td>
+                      <td data-label="Value" className="r mono">{r.valueUsd != null ? <Usd v={r.valueUsd} /> : <Dash />}</td>
                     </tr>
                   )) : <EmptyRow cols={6}>No liquidity providers</EmptyRow>}
               </tbody>
@@ -169,7 +169,7 @@ export function AssetLiquidityTab({ asset }: { asset: AssetRef }) {
           <div className="sec-title" style={{ marginTop: 4 }}>Current
             {/* Plain text, no AssetAmount: its icon chip breaks the title's
                 baseline alignment, and the page is already about this asset. */}
-            <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · {F.amount(data.totalAmount, asset.decimals)} {asset.symbol} pooled across {data.sources.length} {data.sources.length === 1 ? 'pool' : 'pools'} · {F.usd(data.totalUsd)}</span>
+            <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · <Amt raw={data.totalAmount} dec={asset.decimals} /> {asset.symbol} pooled across {data.sources.length} {data.sources.length === 1 ? 'pool' : 'pools'} · <Usd v={data.totalUsd} /></span>
           </div>
           <div className="hdx-cards pool-cards" style={{ marginTop: 0 }}>
             {cards.map((s, i) => <SourceCard key={`${s.kind}:${s.poolId ?? 'omni'}:${i}`} s={s} asset={asset} />)}
@@ -184,9 +184,9 @@ export function AssetLiquidityTab({ asset }: { asset: AssetRef }) {
                     <tr key={`${s.kind}:${s.poolId ?? i}`} {...(to ? rowNav(to) : {})}>
                       <td data-label="Pool">{to ? <Link to={to} className="hash">{s.name}</Link> : s.name}</td>
                       <td data-label="Venue"><PoolBadge pool={KIND_LABEL[s.kind]} /></td>
-                      <td data-label="TVL" className="r mono">{s.tvlUsd != null ? F.usd(s.tvlUsd) : <Dash />}</td>
+                      <td data-label="TVL" className="r mono">{s.tvlUsd != null ? <Usd v={s.tvlUsd} /> : <Dash />}</td>
                       <td data-label={`${asset.symbol} pooled`} className="r"><AssetAmount asset={asset} raw={s.assetAmount} /></td>
-                      <td data-label="Value" className="r mono">{s.assetUsd != null ? F.usd(s.assetUsd) : <Dash />}</td>
+                      <td data-label="Value" className="r mono">{s.assetUsd != null ? <Usd v={s.assetUsd} /> : <Dash />}</td>
                     </tr>
                   )
                 })}

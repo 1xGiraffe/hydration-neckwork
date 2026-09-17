@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { F, compactAmount } from './ui'
+import { Amt } from './ui'
 import { lockColor } from './lockColors'
 import type { AddressBalance, BalanceLockComponent, BalanceUnlockSlice } from '../types'
 
@@ -322,7 +322,7 @@ export function BalanceBreakdown({ balance }: { balance: AddressBalance }) {
     <>
       <i className="bd-dot" style={{ background: rowColor(r) }} aria-hidden="true" />
       <span className="bd-cause">{r.cause}</span>
-      <span className="bd-sched-amt">{compactAmount(F.num(r.amount.toString(), dec))}</span>
+      <span className="bd-sched-amt"><Amt raw={r.amount.toString()} dec={dec} /></span>
       {r.desc && <span className="bd-note">{r.desc}</span>}
     </>
   )

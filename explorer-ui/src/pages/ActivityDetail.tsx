@@ -6,7 +6,7 @@ import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
 import { BOND_LABELS, LIQ_LABELS, MM_LABELS, intentLabel } from '../components/activityColors'
 import { RevenueRow } from '../components/RevenueRow'
-import { PoolBadge, Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
+import { PoolBadge, Usd, Amt, Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { convictionLabel, voteSideLabel, voteSubjectLabel } from '../utils/voteRows'
 
@@ -95,7 +95,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {/* headed: this page states the row's context in its own title and subtitle,
                 so the description drops what that already says (see ActivityDesc). */}
             <div className="dt">Activity</div><div className="dd"><ActivityDesc r={row} headed now={now} /></div>
-            <div className="dt">Value</div><div className="dd mono">{F.usd(row.valueUsd)}</div>
+            <div className="dt">Value</div><div className="dd mono"><Usd v={row.valueUsd} /></div>
             <RevenueRow revenue={row.revenue} />
             {row.who && <><div className="dt">Account</div><div className="dd"><AddrPill account={row.who} /></div></>}
             {row.type === 'transfer' && row.to && <><div className="dt">To</div><div className="dd"><AddrPill account={row.to} /></div></>}
@@ -113,9 +113,9 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {row.type === 'xcm' && row.xcmFees?.map((fee, i) => <Fragment key={i}>
               <div className="dt">{fee.kind === 'relayer' ? 'Relayer fee' : 'Delivery fee'}</div>
               <div className="dd mono xcm-fee">
-                <span>{F.exact(fee.amount, fee.asset.decimals)} <AssetChip asset={fee.asset} />{fee.valueUsd != null && <span className="muted"> · {F.usd(fee.valueUsd)}</span>}</span>
+                <span>{F.exact(fee.amount, fee.asset.decimals)} <AssetChip asset={fee.asset} />{fee.valueUsd != null && <span className="muted"> · <Usd v={fee.valueUsd} /></span>}</span>
                 {fee.settlement === 'destination' && <span className="muted">deducted from the bridged amount at the destination</span>}
-                {fee.purchase && <span className="muted">bought with {F.amount(fee.purchase.amount, fee.purchase.asset.decimals)} <AssetChip asset={fee.purchase.asset} />{fee.purchase.valueUsd != null && <> · {F.usd(fee.purchase.valueUsd)}</>}</span>}
+                {fee.purchase && <span className="muted">bought with <Amt raw={fee.purchase.amount} dec={fee.purchase.asset.decimals} /> <AssetChip asset={fee.purchase.asset} />{fee.purchase.valueUsd != null && <> · <Usd v={fee.purchase.valueUsd} /></>}</span>}
               </div>
             </Fragment>)}
             {/* Both read the badge's own label maps, so this page cannot name an
