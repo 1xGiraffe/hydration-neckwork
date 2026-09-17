@@ -4,6 +4,7 @@ import {
   enactmentOutcomeFrom,
   referendumEnactmentTaskId,
   referendumTimelineFrom,
+  tasksFiledBy,
 } from '../src/services/governanceService.ts'
 
 const governanceService = readFileSync(new URL('../src/services/governanceService.ts', import.meta.url), 'utf8')
@@ -137,8 +138,94 @@ describe('the named-dispatch projection declaration matches what the reader sele
     // the projection IS the 545 named rows and the directory wants all of them.
     expect(occurrences(governanceService, 'price_data.scheduler_named_dispatches FINAL')).toBe(2)
     expect(governanceService).toContain('WHERE task_id = {task:String}')
-    // Never the raw table: the id is only on 545 of its rows and finding them means decoding
-    // args_json on every Scheduler event the scan reaches.
-    expect(occurrences(governanceService, "'Scheduler.Dispatched'")).toBe(0)
+    // Never by scanning the raw table for the name: the id is on 545 of its rows and finding
+    // them means decoding args_json on every Scheduler event the scan reaches. The chain walk
+    // does read raw Scheduler events, but only ever for a named list of block heights — the
+    // table's sort-key prefix — so it is a point read per block and never a hunt for an id.
+    expect(governanceService).not.toContain("JSONExtractString(args_json, 'id')")
+    // The chain walk does read raw Scheduler events, but only ever for a named list of block
+    // heights — the table's sort-key prefix — so it is a point read per block, never a hunt.
+    // One WHERE and no PREWHERE beside it: this ClickHouse silently returns a fraction of the
+    // matching rows for the two-clause form, which here would drop whole executions.
+    expect(governanceService).toContain("WHERE block_height IN {blocks:Array(UInt32)} AND event_name LIKE 'Scheduler.%'")
+    expect(governanceService).not.toContain('PREWHERE')
+  })
+})
+
+// An approved call often does not DO the thing — it files the thing. Referendum 405 dispatched
+// Ok at 14,672,011 having scheduled one anonymous task for 14,672,012, and everything it was
+// voted through to do happened there, in a block its timeline never named. Attribution is the
+// whole feature: an anonymous task carries no name to join on, so which Scheduled events belong
+// to an enactment is decided by WHERE they sit between the scheduler's terminal events.
+describe('the executions an enactment filed', () => {
+  // Block 14,672,011 as the chain emitted it: the enactment ran as a batch that noted a
+  // preimage and scheduled the next block, then closed with its own Dispatched at 216.
+  const ref405Block = [
+    { event_index: 213, event_name: 'Scheduler.Scheduled', args_json: '{"when":14672012,"index":0}' },
+    { event_index: 216, event_name: 'Scheduler.Dispatched', args_json: '{"task":[14672011,0],"id":"0x790d","result":{"__kind":"Ok"}}' },
+  ]
+
+  it('credits the enactment with the task it filed', () => {
+    expect(tasksFiledBy(ref405Block, 216)).toEqual([{ when: 14_672_012, index: 0 }])
+  })
+
+  // Block 8,438,295 ran six due tasks back to back, each filing one before closing. Only the
+  // events after the previous terminal event are this dispatch's doing — reading everything
+  // below its own index instead would hand one referendum five other tasks' work.
+  const sixTasks = [
+    { event_index: 72, event_name: 'Scheduler.Dispatched', args_json: '{"task":[8438295,0],"id":"0x4113","result":{"__kind":"Ok"}}' },
+    { event_index: 73, event_name: 'Scheduler.Scheduled', args_json: '{"when":8475910,"index":0}' },
+    { event_index: 74, event_name: 'Scheduler.Dispatched', args_json: '{"task":[8438295,1],"result":{"__kind":"Ok"}}' },
+    { event_index: 75, event_name: 'Scheduler.Scheduled', args_json: '{"when":8481816,"index":11}' },
+    { event_index: 76, event_name: 'Scheduler.Dispatched', args_json: '{"task":[8438295,2],"result":{"__kind":"Ok"}}' },
+  ]
+
+  it('gives each dispatch only what it filed, not the whole block', () => {
+    // The first dispatch in the block filed nothing: its window opens at the block's start.
+    expect(tasksFiledBy(sixTasks, 72)).toEqual([])
+    expect(tasksFiledBy(sixTasks, 74)).toEqual([{ when: 8_475_910, index: 0 }])
+    expect(tasksFiledBy(sixTasks, 76)).toEqual([{ when: 8_481_816, index: 11 }])
+  })
+
+  it('ignores what a later task files', () => {
+    // 75 sits above this dispatch and belongs to the one that closes at 76.
+    expect(tasksFiledBy(sixTasks, 74).map(t => t.when)).not.toContain(8_481_816)
+  })
+
+  // A CallUnavailable closes a task exactly as a Dispatched does, so it opens the next window.
+  it('treats every terminal event as a window boundary', () => {
+    const rows = [
+      { event_index: 4, event_name: 'Scheduler.Scheduled', args_json: '{"when":900,"index":0}' },
+      { event_index: 5, event_name: 'Scheduler.CallUnavailable', args_json: '{"task":[800,0],"id":"0x84c1"}' },
+      { event_index: 6, event_name: 'Scheduler.Scheduled', args_json: '{"when":901,"index":0}' },
+      { event_index: 7, event_name: 'Scheduler.Dispatched', args_json: '{"task":[800,1],"result":{"__kind":"Ok"}}' },
+    ]
+    expect(tasksFiledBy(rows, 7)).toEqual([{ when: 901, index: 0 }])
+  })
+
+  // The scheduled rows merge into the timeline by block like everything else, so a follow-on
+  // sits after the enactment that filed it and before the refunds that trail both.
+  it('places the filed executions in block order', () => {
+    const enactment = {
+      event_name: 'Scheduler.Dispatched', block_height: 14_672_011, event_index: 216,
+      extrinsic_index: null, ts: '2026-09-15 10:00:00',
+      args_json: '{"task":[14672011,0],"id":"0x790d","result":{"__kind":"Ok"}}',
+    }
+    const timeline = referendumTimelineFrom(
+      [
+        { event_name: 'Referenda.Confirmed', block_height: 14_671_711, extrinsic_index: null, ts: '2026-09-15 09:30:00' },
+        { event_name: 'Referenda.SubmissionDepositRefunded', block_height: 14_700_000, extrinsic_index: 3, ts: '2026-09-16 09:30:00' },
+      ],
+      enactment,
+      [{
+        event: 'Scheduler.Dispatched', blockHeight: 14_672_012, extrinsicIndex: null,
+        ts: '2026-09-15 10:00:06', timestamp: '2026-09-15 10:00:06', outcome: 'ok',
+        scheduled: { depth: 1, state: 'ran' },
+      } as never],
+    )
+    expect(timeline.map(e => e.blockHeight)).toEqual([14_671_711, 14_672_011, 14_672_012, 14_700_000])
+    expect(timeline[2].scheduled).toEqual({ depth: 1, state: 'ran' })
+    // The enactment itself is never marked scheduled — it is the thing that scheduled.
+    expect(timeline[1].scheduled).toBeUndefined()
   })
 })
