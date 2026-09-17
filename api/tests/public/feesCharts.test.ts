@@ -278,15 +278,6 @@ describe('stream SQL', () => {
       expect(sql, streamType).toMatch(/FINAL|argMax/)
     }
   })
-
-  it('leads the HOLLAR debt window in by one hour so the first hour can be differenced', async () => {
-    const { buildHollarDebtSql } = await import('../../src/public/services/feesCharts.ts')
-    const from = Math.floor(Date.parse('2026-08-04T00:00:00Z') / 1000)
-    const sql = buildHollarDebtSql(3_600, from - 3_600, from + 7 * 86_400)
-    expect(sql).toContain('bucket_seconds = 3600')
-    expect(sql).toContain("start_time = '2026-08-03 23:00:00'")
-    expect(sql).toContain("end_time = '2026-08-11 00:00:00'")
-  })
 })
 
 describe('request validation', () => {
@@ -302,8 +293,8 @@ describe('request validation', () => {
       ['hollar', 'borrow_apr', 'protocol'], ['hollar', 'hsm_revenue', 'protocol'],
     ]) expect(isValidCombination(combo[0], combo[1], combo[2]), combo.join('+')).toBe(true)
     // The incumbent's eleven plus the concentrated-liquidity stream (2026-09-09),
-    // which is only ever protocol revenue: a vault's fee share to the Treasury and a
-    // pool's CollectProtocol.
+    // which is only ever protocol revenue: a vault's fee share to the Treasury and
+    // the pool's own protocol fee as each swap accrues it.
     expect(FEES_COMBINATIONS.length).toBe(12)
     expect(isValidCombination('uniswap-v3', 'uniswap_v3_fee', 'protocol')).toBe(true)
     expect(isValidCombination('uniswap-v3', 'uniswap_v3_fee', 'lp')).toBe(false)
@@ -499,15 +490,20 @@ describe('hollar borrow interest', () => {
     // 1e27 * 1e21 / 1e27 = 1e21 planck, and HOLLAR is 18-decimal, so 1000 HOLLAR
     // — priced here at $1. Two such hours land in one 24hour bucket.
     const debt = [
-      { bucket: '2026-08-03 23:00:00', pool_address: 'core', debt_scaled: '1000000000000000000000000000', borrow_index: '1000000000000000000000000000' },
       { bucket: '2026-08-04 00:00:00', pool_address: 'core', debt_scaled: '1000000000000000000000000000', borrow_index: '1000001000000000000000000000' },
       { bucket: '2026-08-04 01:00:00', pool_address: 'core', debt_scaled: '1000000000000000000000000000', borrow_index: '1000002000000000000000000000' },
+    ]
+    // The 23:00 observation sits before the window, so it reaches the accrual as
+    // the seed. Without it the 00:00 hour has nothing to difference against and
+    // its 1,000 HOLLAR is simply lost — the partition-boundary leak.
+    const seed = [
+      { pool_address: 'core', debt_scaled: '1000000000000000000000000000', borrow_index: '1000000000000000000000000000', index_bucket: '2026-08-03 23:00:00' },
     ]
     const price = [
       { bucket: '2026-08-04 00:00:00', close: '1' },
       { bucket: '2026-08-04 01:00:00', close: '1' },
     ]
-    const app = await buildApp(fakeClient({ '-- pub:fees:hollar-debt': debt, '-- pub:fees:hollar-price': price }))
+    const app = await buildApp(fakeClient({ '-- rev:hollar-debt': debt, '-- rev:hollar-seed': seed, '-- rev:hollar-price': price }))
     const res = await app.inject({ method: 'GET', url: url({
       productType: 'hollar', streamType: 'borrow_apr', feeDestination: 'protocol', bucketSize: '24hour',
       startTime: '2026-08-04T00:00:00.000Z', endTime: '2026-08-04T23:59:59.000Z',
@@ -524,10 +520,13 @@ describe('hollar borrow interest', () => {
     const debt = [
       // Insert core first so the old shared-lastPrice implementation walked its
       // later observation before it started gigahdx's earlier series.
-      { bucket: '2026-08-04 23:00:00', pool_address: 'core', debt_scaled: '1000000000000000000000000000', borrow_index: '1000000000000000000000000000' },
       { bucket: '2026-08-05 02:00:00', pool_address: 'core', debt_scaled: '1000000000000000000000000000', borrow_index: '1000001000000000000000000000' },
-      { bucket: '2026-08-04 23:00:00', pool_address: 'gigahdx', debt_scaled: '1000000000000000000000000000', borrow_index: '1000000000000000000000000000' },
       { bucket: '2026-08-05 00:00:00', pool_address: 'gigahdx', debt_scaled: '1000000000000000000000000000', borrow_index: '1000001000000000000000000000' },
+    ]
+    // Both markets' last observation before the window, each differenced on its own.
+    const seed = [
+      { pool_address: 'core', debt_scaled: '1000000000000000000000000000', borrow_index: '1000000000000000000000000000', index_bucket: '2026-08-04 23:00:00' },
+      { pool_address: 'gigahdx', debt_scaled: '1000000000000000000000000000', borrow_index: '1000000000000000000000000000', index_bucket: '2026-08-04 23:00:00' },
     ]
     const price = [
       // Usable at 23:00 from the prior closed candle. There is deliberately no
@@ -538,7 +537,7 @@ describe('hollar borrow interest', () => {
       // other market's 00:00 accrual.
       { bucket: '2026-08-05 01:00:00', close: '2' },
     ]
-    const app = await buildApp(fakeClient({ '-- pub:fees:hollar-debt': debt, '-- pub:fees:hollar-price': price }))
+    const app = await buildApp(fakeClient({ '-- rev:hollar-debt': debt, '-- rev:hollar-seed': seed, '-- rev:hollar-price': price }))
     const res = await app.inject({ method: 'GET', url: url({
       productType: 'hollar', streamType: 'borrow_apr', feeDestination: 'protocol', bucketSize: '24hour',
       startTime: '2026-08-05T00:00:00.000Z', endTime: '2026-08-05T23:59:59.000Z',
@@ -553,15 +552,16 @@ describe('hollar borrow interest', () => {
     // clickhouse/schema/007_money_market_history.sql: an empty view result means
     // "no model here", and a zeroed series would report the protocol as earning
     // nothing rather than as unmeasured.
-    const client = fakeClient({ '-- pub:fees:hollar-debt': [], '-- pub:fees:hollar-price': [] })
+    const client = fakeClient({ '-- rev:hollar-debt': [], '-- rev:hollar-price': [] })
     const app = await buildApp(client)
     const res = await app.inject({ method: 'GET', url: url({
       productType: 'hollar', streamType: 'borrow_apr', feeDestination: 'protocol',
       bucketSize: '24hour', ...window(),
     }) })
     expect(res.json()).toEqual({ data: [], periodAggregate: 0 })
-    // The price read is skipped entirely — there is nothing to value.
-    expect(client.seen.some(s => s.query.includes('-- pub:fees:hollar-price'))).toBe(false)
+    // The price and seed reads are skipped entirely — there is nothing to value.
+    expect(client.seen.some(s => s.query.includes('-- rev:hollar-price'))).toBe(false)
+    expect(client.seen.some(s => s.query.includes('-- rev:hollar-seed'))).toBe(false)
     await app.close()
   })
 })

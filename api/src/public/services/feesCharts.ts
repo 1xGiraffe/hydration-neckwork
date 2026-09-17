@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cachedSwr } from '../../services/cache.ts'
-import { buildRevenueEventRowsSql, type EventfulRevenueStream } from '../../services/revenueStreams.ts'
+import { buildRevenueEventRowsSql, type EventfulRevenueStream, hollarBorrowHourlyRows } from '../../services/revenueStreams.ts'
 import { DECIMAL_STRINGS, scaledUsd } from './poolVolumes.ts'
 
 // GET /api/v1/fees/charts — the revenue/fees page's data source.
@@ -205,13 +205,6 @@ export const MAX_BUCKETS = 5_000
 /** USD is accumulated as an integer count of 1e-12 USD, as everywhere else here. */
 const USD_UNIT = 1e12
 
-/** Aave's RAY, the scale of every rate and index the money market reports. */
-const RAY = 10n ** 27n
-
-/** HOLLAR's registry id, and the reserve address it is listed under. */
-const HOLLAR_ASSET_ID = 222
-const HOLLAR_RESERVE_ADDRESS = '0x531a654d1696ed52e7275a8cede955e82620f99a'
-
 /** The bucket a timestamp falls in, on the BUCKET_ORIGIN_EPOCH grid. */
 function bucketSql(expr: string): string {
   return `toDateTime(${BUCKET_ORIGIN_EPOCH} + intDiv(toUInt32(${expr}) - ${BUCKET_ORIGIN_EPOCH}, {bucket:UInt32}) * {bucket:UInt32})`
@@ -370,73 +363,11 @@ GROUP BY bucket_start
 ORDER BY bucket_start`
 }
 
-/**
- * Per-bucket HOLLAR debt and borrow index, for the interest accrual.
- *
- * `money_market_reserve_state_history` is a parameterised VIEW, and its three
- * parameters are interpolated rather than bound: ClickHouse resolves view
- * parameters while parsing the table expression, before query_params exist. The
- * two numbers are integers this module computed and the two timestamps are
- * formatted from epoch seconds, so nothing caller-supplied reaches the text
- * unvalidated.
- *
- * It is always asked for HOURLY buckets, never for the response's bucket width.
- * The view buckets with `toStartOfInterval(…, toIntervalSecond(n))`, which aligns
- * to the Unix epoch; this endpoint's grid is anchored at 2000-01-03 (see
- * BUCKET_ORIGIN_EPOCH). The two coincide for an hour, six hours and a day, and
- * they do NOT for seven or thirty — measured as the 1Y and ALL ranges answering
- * with an empty series because not one view bucket landed on a grid instant. An
- * hour is a common divisor of both grids, so the accrual is differenced hourly
- * and folded into whatever bucket the response asks for, which is also the finer
- * (and therefore more exactly priced) computation.
- *
- * `start_time` reaches BEHIND the requested window by one hour on purpose: the
- * accrual over an hour is a DIFFERENCE of indices, so the first hour needs its
- * predecessor. The view is a step function — an hour in which the reserve saw
- * neither a balance delta nor a `ReserveDataUpdated` emits no row — so the caller
- * carries the last observed row forward.
- *
- * An EMPTY result is not zero: the view's contract (clickhouse/schema/
- * 007_money_market_history.sql) is that it returns nothing at all when the aToken
- * anchor has not been snapshotted. The caller answers with an empty series, never
- * a zeroed one.
- */
-export function buildHollarDebtSql(bucketSeconds: number, fromSeconds: number, toSeconds: number): string {
-  const ch = (s: number) => new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')
-  return `-- pub:fees:hollar-debt
-SELECT toString(bucket_start) AS bucket, pool_address,
-       toString(debt_scaled) AS debt_scaled, toString(variable_borrow_index) AS borrow_index
-FROM price_data.money_market_reserve_state_history(
-  bucket_seconds = ${Math.trunc(bucketSeconds)},
-  start_time = '${ch(fromSeconds)}',
-  end_time = '${ch(toSeconds)}')
-WHERE reserve_address = {reserve:String}
-ORDER BY pool_address, bucket_start`
-}
-
-/**
- * HOLLAR's price per hour, keyed by the hour the candle became USABLE
- * (`interval_start + 1 HOUR`) — the bucketed-history rule from AGENTS.md, so an
- * hour's accrual is never valued at a candle that had not closed yet.
- */
-export function buildHollarPriceSql(): string {
-  return `-- pub:fees:hollar-price
-SELECT toString(interval_start + INTERVAL 1 HOUR) AS bucket, toString(argMaxMerge(close_state)) AS close
-FROM price_data.ohlc_1h
-WHERE asset_id = ${HOLLAR_ASSET_ID}
-  AND interval_start > {anchor:DateTime} - INTERVAL {hours:UInt32} HOUR - INTERVAL 30 DAY
-  AND interval_start <= {anchor:DateTime}
-GROUP BY interval_start
-ORDER BY interval_start`
-}
-
 // ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------
 
 interface BucketRow { bucket: string; value: string }
-interface DebtRow { bucket: string; pool_address: string; debt_scaled: string; borrow_index: string }
-interface PriceRow { bucket: string; close: string }
 
 /** ClickHouse hands DateTime back as 'YYYY-MM-DD hh:mm:ss' in UTC (server.ts asserts it). */
 function bucketIso(chDateTime: string): string {
@@ -480,91 +411,24 @@ async function readBuckets(client: ClickHouseClient, query: string, q: FeesChart
  * both this and the derivations job compute from — one source, two consumers.
  */
 async function hollarBorrowInterest(client: ClickHouseClient, q: FeesChartQuery): Promise<Map<number, bigint>> {
-  const HOUR = 3_600
   const width = BUCKET_SECONDS[q.bucketSize]
   const first = firstBucketStart(q.startSeconds, width)
   const last = lastBucketStart(q.endSeconds, width)
-  const params = windowParams(q)
 
-  const debtRes = await client.query({
-    // Hourly, whatever the response's bucket width, and one hour of lead-in so
-    // the first hour has a predecessor to difference against.
-    query: buildHollarDebtSql(HOUR, first - HOUR, q.endSeconds),
-    query_params: { reserve: HOLLAR_RESERVE_ADDRESS },
-    format: 'JSONEachRow',
-    clickhouse_settings: DECIMAL_STRINGS,
-  })
-  const debtRows = await debtRes.json<DebtRow>()
-  // Empty means the anchor is not snapshotted, which is "no model", not "no
-  // interest" (007_money_market_history.sql). An empty series says so.
-  if (!debtRows.length) return new Map()
-
-  const priceRes = await client.query({
-    query: buildHollarPriceSql(),
-    query_params: params,
-    format: 'JSONEachRow',
-    clickhouse_settings: DECIMAL_STRINGS,
-  })
-  const prices = new Map<number, bigint>()
-  for (const row of await priceRes.json<PriceRow>()) prices.set(bucketSeconds(row.bucket), scaledUsd(row.close))
-
-  // Resolve the last CLOSED price for every hour once, independently of the
-  // reserve observations. Price time must advance even through an hour where
-  // debt did not change: otherwise the next accrual reuses an older candle.
-  // Starting from the sorted 30-day lead-in also gives the first accrual the
-  // latest price that predates the requested window. Keeping this timeline out
-  // of the per-pool loop is load-bearing: a mutable lastPrice shared by the two
-  // isolated HOLLAR markets lets the first pool's later hours leak a FUTURE
-  // price into the second pool's earlier accruals.
-  const priceAtHour = new Map<number, bigint>()
-  const sortedPrices = [...prices].sort(([a], [b]) => a - b)
-  let priceIndex = 0
-  let lastPrice = 0n
-  for (let t = first - HOUR; t <= q.endSeconds; t += HOUR) {
-    while (priceIndex < sortedPrices.length && sortedPrices[priceIndex][0] <= t) {
-      const p = sortedPrices[priceIndex][1]
-      if (p > 0n) lastPrice = p
-      priceIndex += 1
-    }
-    priceAtHour.set(t, lastPrice)
-  }
-
-  // HOLLAR is 18-decimal, so an interest amount in planck becomes 1e-12 USD as
-  // planck × price(1e-12 USD) / 1e18 — all integer, no float on the money path.
-  const HOLLAR_UNIT = 10n ** 18n
-  const byPool = new Map<string, DebtRow[]>()
-  for (const row of debtRows) {
-    const list = byPool.get(row.pool_address)
-    if (list) list.push(row)
-    else byPool.set(row.pool_address, [row])
-  }
-
+  // Hourly, whatever the response's bucket width. The view buckets with
+  // `toStartOfInterval(…, toIntervalSecond(n))`, which aligns to the Unix epoch;
+  // this endpoint's grid is anchored at 2000-01-03 (see BUCKET_ORIGIN_EPOCH).
+  // The two coincide for an hour, six hours and a day, and they do NOT for seven
+  // or thirty — measured as the 1Y and ALL ranges answering with an empty series
+  // because not one view bucket landed on a grid instant. An hour is a common
+  // divisor of both grids, so the accrual is differenced hourly and folded into
+  // whatever bucket the response asks for, which is also the finer (and
+  // therefore more exactly priced) computation.
   const interest = new Map<number, bigint>()
-
-  for (const rows of byPool.values()) {
-    const observed = new Map(rows.map(r => [bucketSeconds(r.bucket), r]))
-    let prevDebt: bigint | null = null
-    let prevIndex: bigint | null = null
-    // Walk the lead-in hour too, so the first counted hour differences against
-    // real state rather than against nothing.
-    for (let t = first - HOUR; t <= q.endSeconds; t += HOUR) {
-      const row = observed.get(t)
-      if (!row) continue
-      const debt = BigInt(row.debt_scaled)
-      const index = BigInt(row.borrow_index)
-      if (prevDebt != null && prevIndex != null && index > prevIndex && t >= first) {
-        const planck = (prevDebt * (index - prevIndex)) / RAY
-        const usd = (planck * (priceAtHour.get(t) ?? 0n)) / HOLLAR_UNIT
-        // Fold the hour into the response's bucket. `last` bounds it so a partial
-        // trailing bucket is not reported as a whole one.
-        const bucket = lastBucketStart(t, width)
-        if (bucket >= first && bucket <= last) interest.set(bucket, (interest.get(bucket) ?? 0n) + usd)
-      }
-      // A row whose index is 0 is a delta-only hour the view could not carry an
-      // index into; keep the previous index rather than differencing to zero.
-      prevDebt = debt
-      if (index > 0n) prevIndex = index
-    }
+  for (const row of await hollarBorrowHourlyRows(client, first, q.endSeconds)) {
+    // `last` bounds it so a partial trailing bucket is not reported as a whole one.
+    const bucket = lastBucketStart(row.hour, width)
+    if (bucket >= first && bucket <= last) interest.set(bucket, (interest.get(bucket) ?? 0n) + row.usd1e12)
   }
   // A bucket the reserve did not move in emits nothing: a bucket exists when its
   // source did, and the grid is never filled with zeros.
