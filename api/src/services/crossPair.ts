@@ -19,13 +19,27 @@ import { toClickHouseDateTime } from './ohlcvService.ts'
  * Joining the legs at the block restores the pairing, which is the only way to get
  * a high and a low that were really quoted.
  *
- * COST is bounded by three things, none of them optional:
+ * WHY THE BUCKET COMES FROM `blocks`: `prices.block_timestamp` is declared
+ * `DEFAULT toDateTime(0)` and is only populated from block 13,067,140
+ * (2026-07-10) on, when the writer began refusing a price without one. 89 % of
+ * the table's 184 M rows still carry the default, so bucketing or filtering on
+ * that column silently drops nearly all history — measured on one 50 k-block
+ * slice of HDX/DOT, 486 of 16,113 paired blocks survived it. `blocks` is the
+ * only trustworthy source of a block's time, which is also why the `ohlc_*`
+ * repair path joins it. Nothing here may read `prices.block_timestamp`.
+ *
+ * COST is bounded by four things, none of them optional:
  *  - the block range, resolved once and applied to `prices.block_height`, its sort
  *    key. Filtering on `block_timestamp` alone reads every row the asset ever had:
- *    measured on a 2 h window, 3.65 M rows against 78 k with the bound.
- *  - bucketing on `prices.block_timestamp` rather than joining `blocks` for it.
- *    The join cost 1.50 GiB and 1,057 ms over full history; without it the same
- *    answer is 81 MiB and 448 ms.
+ *    measured on a 2 h window, 3.65 M rows against 78 k with the bound. It is also
+ *    the window itself: block time is strictly monotonic in height (0 inversions
+ *    over all 14.7 M blocks), so the height bound IS the time bound, and no
+ *    timestamp predicate on `prices` is needed on top of it.
+ *  - resolving the bucket through a GRID — one row per candle — rather than
+ *    joining `blocks` per block. The per-block join hashes all 14.7 M blocks and
+ *    peaks at 1.44 GiB over full history, above this module's own ceiling; the
+ *    grid is at most one row per candle the route will return, so ASOF binary-
+ *    searches a handful of rows: same candles to the digit, 746 MiB and 3.43 s.
  *  - MAX_CROSS_BLOCKS and the explicit per-query ceilings below, so a window wider
  *    than anything the chain holds is refused rather than read.
  */
@@ -50,16 +64,16 @@ export class CrossWindowTooWideError extends Error {
   }
 }
 
-/** Interval to the ClickHouse bucketing expression over the base leg's timestamp. */
+/** Interval to the ClickHouse bucketing expression over a block's own timestamp. */
 const INTERVAL_BUCKET: Record<OHLCVInterval, string> = {
-  '5min': 'toStartOfFiveMinute(base.block_timestamp)',
-  '15min': 'toStartOfInterval(base.block_timestamp, toIntervalMinute(15))',
-  '30min': 'toStartOfInterval(base.block_timestamp, toIntervalMinute(30))',
-  '1h': 'toStartOfHour(base.block_timestamp)',
-  '4h': 'toStartOfInterval(base.block_timestamp, toIntervalHour(4))',
-  '1d': 'toStartOfDay(base.block_timestamp)',
-  '1w': 'toStartOfWeek(base.block_timestamp, 1)',
-  '1M': 'toStartOfMonth(base.block_timestamp)',
+  '5min': 'toStartOfFiveMinute(block_timestamp)',
+  '15min': 'toStartOfInterval(block_timestamp, toIntervalMinute(15))',
+  '30min': 'toStartOfInterval(block_timestamp, toIntervalMinute(30))',
+  '1h': 'toStartOfHour(block_timestamp)',
+  '4h': 'toStartOfInterval(block_timestamp, toIntervalHour(4))',
+  '1d': 'toStartOfDay(block_timestamp)',
+  '1w': 'toStartOfWeek(block_timestamp, 1)',
+  '1M': 'toStartOfMonth(block_timestamp)',
 }
 
 /**
@@ -128,8 +142,21 @@ export async function queryCrossPairCandles(
 
   const result = await client.query({
     query: `
+      WITH grid AS (
+        -- One row per candle: the bucket, and the first block that falls in it.
+        -- Block time is strictly monotonic in height, so the ASOF match below —
+        -- the greatest bucket whose first block is at or before this one — names
+        -- exactly the bucket the block belongs to.
+        SELECT
+          ${INTERVAL_BUCKET[options.interval]} AS bucket,
+          {base_id:UInt32} AS anchor,
+          min(block_height) AS bucket_first_block
+        FROM price_data.blocks
+        WHERE block_height BETWEEN {from_block:UInt32} AND {to_block:UInt32}
+        GROUP BY bucket
+      )
       SELECT
-        ${INTERVAL_BUCKET[options.interval]} AS interval_start,
+        g.bucket AS interval_start,
         argMin(divideDecimal(base.usd_price, quote.usd_price, ${CROSS_SCALE}), base.block_height) AS open,
         max(divideDecimal(base.usd_price, quote.usd_price, ${CROSS_SCALE})) AS high,
         min(divideDecimal(base.usd_price, quote.usd_price, ${CROSS_SCALE})) AS low,
@@ -139,12 +166,14 @@ export async function queryCrossPairCandles(
         sum(base.usd_volume_buy) + sum(base.usd_volume_sell) AS volume_total
       FROM price_data.prices AS base
       INNER JOIN price_data.prices AS quote ON base.block_height = quote.block_height
+      -- ASOF needs one equality to key on; \`anchor\` is the base asset on both
+      -- sides, constant, so the inequality does all the work.
+      ASOF INNER JOIN grid AS g
+        ON base.asset_id = g.anchor AND base.block_height >= g.bucket_first_block
       WHERE base.asset_id = {base_id:UInt32}
         AND quote.asset_id = {quote_id:UInt32}
         AND base.block_height BETWEEN {from_block:UInt32} AND {to_block:UInt32}
         AND quote.block_height BETWEEN {from_block:UInt32} AND {to_block:UInt32}
-        AND base.block_timestamp >= {start_time:DateTime}
-        AND base.block_timestamp < {end_time:DateTime}
         AND quote.usd_price > 0
       GROUP BY interval_start
       -- A bucket straddling the window start would otherwise be emitted under its
@@ -161,7 +190,6 @@ export async function queryCrossPairCandles(
       from_block: range.from,
       to_block: range.to,
       start_time: startTime,
-      end_time: endTime,
     },
     // The decimal quotient must reach the caller as text; rendered as a JSON number
     // it would be parsed back as a double and lose the digits this path exists for.

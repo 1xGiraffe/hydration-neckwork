@@ -84,12 +84,38 @@ describe('the cross-pair candle', () => {
     expect(cross.query).toContain('base.block_height BETWEEN {from_block:UInt32} AND {to_block:UInt32}')
     expect(cross.query).toContain('quote.block_height BETWEEN {from_block:UInt32} AND {to_block:UInt32}')
     expect(cross.params).toMatchObject({ from_block: 4_000, to_block: 4_500 })
-    // The bucket timestamp comes off `prices` itself. Joining `blocks` for it cost
-    // 1.50 GiB and 1,057 ms over full history, against 81 MiB and 448 ms without.
-    expect(cross.query).not.toContain('price_data.blocks')
     // A runaway query must fail rather than take the box down with it.
     expect(cross.settings?.max_memory_usage).toBeDefined()
     expect(cross.settings?.max_threads).toBeDefined()
+  })
+
+  // `prices.block_timestamp` is `DEFAULT toDateTime(0)` and was only populated from
+  // block 13,067,140 (2026-07-10) on; 89 % of the table's 184 M rows still hold the
+  // default. Bucketing or filtering on it drops nearly all history without an error
+  // — HDX/DOT went from 142 weekly candles to 69, with holes through 2026-06 — so a
+  // block's time may only ever come from `blocks`.
+  it('never reads a block time from `prices`, only from `blocks`', async () => {
+    const client = fakeClient({ from_block: 4_000, to_block: 4_500 })
+    await queryCrossPairCandles(client as never, WINDOW)
+    const cross = client.seen.find(s => s.query.includes('INNER JOIN price_data.prices'))!
+    expect(cross.query).not.toContain('base.block_timestamp')
+    expect(cross.query).not.toContain('quote.block_timestamp')
+    expect(cross.query).toContain('FROM price_data.blocks')
+  })
+
+  // The grid is one row per candle, so the bucket lookup binary-searches a handful
+  // of rows. Joining `blocks` per block instead hashes all 14.7 M of them and peaks
+  // at 1.44 GiB over full history — above this module's own 1 GB ceiling, which
+  // makes the cheap shape a correctness requirement, not just a fast one.
+  it('resolves the bucket through a per-candle grid, not a per-block join', async () => {
+    const client = fakeClient({ from_block: 4_000, to_block: 4_500 })
+    await queryCrossPairCandles(client as never, WINDOW)
+    const cross = client.seen.find(s => s.query.includes('INNER JOIN price_data.prices'))!
+    expect(cross.query).toContain('min(block_height) AS bucket_first_block')
+    expect(cross.query).toContain('ASOF INNER JOIN grid')
+    expect(cross.query).toContain('base.block_height >= g.bucket_first_block')
+    // The grid reads only the blocks the window already bounded.
+    expect(cross.query).toContain('WHERE block_height BETWEEN {from_block:UInt32} AND {to_block:UInt32}')
   })
 
   it('refuses a window wider than the block budget instead of reading it', async () => {
