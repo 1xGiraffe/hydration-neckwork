@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// The `Hydrated *` money-market wrappers accrue interest, so they are stablecoins
-// but NOT dollars. Their classification decides which price path preis takes: a
-// USD-pegged quote is answered with the base asset's own USD candles, anything
-// else with a real cross-pair ratio. Measured against their own USD candles they
-// went 0.9993 → 1.0195 (HUSDT) and 0.9992 → 1.0159 (HUSDC) between 2025-09-22 and
-// 2026-08-12 — a ~2 %/yr drift that grows without bound.
+// Which assets count as dollars decides which price path preis and the public API
+// take: a USD-pegged quote is answered with the base asset's own USD candles,
+// anything else with a real cross-pair ratio. Substituting the dollar publishes the
+// quote's entire deviation from $1 as a silent, one-directional error in every rate
+// it quotes, so the list holds only assets whose deviation sits below the series'
+// own noise — USDT and USDC (0.0039 %-0.0345 % across their listed ids, 2026-09-17).
+//
+// HOLLAR floats on its own stablepools (0.9983 on 2026-09-17, a 0.172 % error that
+// drifted 0.05 % in 26 h), DAI is an outside peg, and the `Hydrated *` money-market
+// wrappers accrue interest away from par without bound (0.9993 → 1.0195 for HUSDT,
+// 0.9992 → 1.0159 for HUSDC, 2025-09-22 to 2026-08-12, ~2 %/yr). None of them is a
+// dollar, and all of them trade against what they quote, so the cross path has a
+// real market rate to use instead of an assumption.
 
 interface AssetRow {
   asset_id: number
@@ -55,13 +62,23 @@ describe('USD-pegged asset classification', () => {
     }
   })
 
+  // A floating peg is not a dollar either. Both still read as stablecoins, which is
+  // what keeps them grouped in the UI without being substituted for USD.
+  it('does not treat HOLLAR or DAI as dollars, but keeps them stablecoins', async () => {
+    const { getAssetById } = await loadFixture()
+    for (const id of [222, 2]) {
+      expect(getAssetById(id)?.isUsdPegged, `asset ${id}`).toBe(false)
+      expect(getAssetById(id)?.isStablecoin, `asset ${id}`).toBe(true)
+    }
+  })
+
   it('keeps the genuine pegs, and every other classification, unchanged', async () => {
     const { getAllAssets } = await loadFixture()
     const pegged = getAllAssets().filter(a => a.isUsdPegged).map(a => a.symbol).sort()
-    expect(pegged).toEqual(['DAI', 'HOLLAR', 'USDC', 'USDT'])
+    expect(pegged).toEqual(['USDC', 'USDT'])
     // Being a stablecoin is a different question from being worth a dollar: EURC
-    // tracks the euro and the Hydrated wrappers track a growing multiple of a
-    // dollar. Both stay stablecoins.
+    // tracks the euro, HOLLAR and DAI hold their own pegs loosely, and the Hydrated
+    // wrappers track a growing multiple of a dollar. All stay stablecoins.
     const stable = getAllAssets().filter(a => a.isStablecoin).map(a => a.symbol).sort()
     expect(stable).toEqual(['DAI', 'EURC', 'HOLLAR', 'HUSDC', 'HUSDT', 'USDC', 'USDT'])
   })
@@ -108,8 +125,13 @@ describe('GET /candles price path for a Hydrated quote', () => {
     expect(await pathFor(1112)).toBe('cross')
   })
 
+  it('prices a HOLLAR- or DAI-quoted pair as a real cross rate too', async () => {
+    expect(await pathFor(222)).toBe('cross')
+    expect(await pathFor(2)).toBe('cross')
+  })
+
   it('still substitutes the dollar for a genuine peg', async () => {
     expect(await pathFor(10)).toBe('usd')
-    expect(await pathFor(222)).toBe('usd')
+    expect(await pathFor(22)).toBe('usd')
   })
 })

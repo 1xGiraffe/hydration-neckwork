@@ -58,19 +58,29 @@ const DEFAULT_CANDLES = 500
 /**
  * Assets whose price IS the dollar, so a pair quoted in one of them is the base
  * asset's own USD series. The shared list lives in services/assetsService.ts, which
- * is outside the public API's import allow-list, so it is restated here.
+ * is outside the public API's import allow-list, so it is restated here — and the
+ * two must agree, which tests/public/prices.test.ts pins.
  *
- * `HUSDT`/`HUSDC` are deliberately NOT on this list even though the shared one has
- * them. The `Hydrated *` tokens are interest-bearing money-market wrappers, not
- * pegs: measured against their own USD candles they went 0.9993 -> 1.0195 (HUSDT)
- * and 0.9992 -> 1.0159 (HUSDC) between 2025-09-22 and 2026-08-12, a ~2 %/yr drift
- * that grows without bound as interest accrues. Treating one as a dollar quoted
- * the pair at the base asset's raw USD price and understated the rate by exactly
- * that accrued interest. Their siblings `HUSDS`/`HUSDe` — same family, same drift —
- * were never on the list, so the list also contradicted itself. All four now take
- * the cross path, where the quote's own close prices the bucket.
+ * Membership is earned by holding par tightly enough that substituting the dollar
+ * is below the noise of the series, because this branch publishes the BASE asset's
+ * raw USD candles: whatever the quote is worth other than $1 becomes a silent,
+ * one-directional error in every rate it quotes. USDT and USDC clear that bar
+ * (0.0039 %-0.0345 % across their five listed ids, measured 2026-09-17).
+ *
+ * `HOLLAR` and `DAI` do not, and are quoted through the cross path instead. HOLLAR
+ * is protocol-minted and floats on its own stablepools — 0.9983 on 2026-09-17, so
+ * a HOLLAR-quoted pair read 0.172 % low, drifting 0.05 % over 26 h — and DAI is an
+ * outside peg this project does not defend. `HUSDT`/`HUSDC`/`HUSDS`/`HUSDe` fail the
+ * bar by construction: interest-bearing money-market wrappers whose price leaves par
+ * and keeps going (0.9993 -> 1.0195 and 0.9992 -> 1.0159 between 2025-09-22 and
+ * 2026-08-12, ~2 %/yr, unbounded).
+ *
+ * Crossing costs history rather than accuracy: a cross bucket needs BOTH legs, so a
+ * quote drops every bucket it predates (HOLLAR's first candle is 2025-09-22) or is
+ * missing. Nothing can recover those — there was no quote price to divide by — and
+ * the alternative is publishing a rate nobody could have traded at.
  */
-const USD_PEGGED_SYMBOLS = new Set(['USDT', 'USDC', 'HOLLAR', 'DAI'])
+const USD_PEGGED_SYMBOLS = new Set(['USDT', 'USDC'])
 
 /** Digits kept on a cross-pair quotient — enough for a ratio of two 12-decimal prices. */
 const CROSS_SCALE = 18
@@ -317,7 +327,7 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
       summary: 'OHLCV candles for one pair',
       description: [
         'ORIENTATION: the price is `assetIn` quoted in `assetOut` — how much assetOut one assetIn buys — matching the UI\'s pair orientation. `assetIn` and `assetOut` must differ: an asset\'s price in itself is 1, not a series, and the endpoint answers markets.',
-        '`referenceAsset` is `usd` when assetOut is a USD-pegged token (USDT, USDC, HOLLAR, DAI), because the candle model is USD-denominated and that IS the pair. **USD-quoted pairs are the asset\'s own candles, unmodified — everything in the next paragraph is about cross pairs only.** Otherwise `referenceAsset` is assetOut\'s registry id and the candles are the cross rate, composed from the two assets\' USD candles. The interest-bearing `Hydrated *` wrappers (HUSDT, HUSDC, HUSDS, HUSDe) are NOT dollars — they accrue about 2 %/yr away from par — so they quote through the cross path like any other asset. A bucket the quote asset has no candle for is omitted rather than priced at an older rate.',
+        '`referenceAsset` is `usd` when assetOut is a USD-pegged token (USDT, USDC), because the candle model is USD-denominated and that IS the pair. **USD-quoted pairs are the asset\'s own candles, unmodified — everything in the next paragraph is about cross pairs only.** Otherwise `referenceAsset` is assetOut\'s registry id and the candles are the cross rate, composed from the two assets\' USD candles. Only a quote that holds par tightly enough for the substitution to sit below the series\' own noise qualifies: HOLLAR floats on its own stablepools (0.9983 on 2026-09-17, so quoting it as a dollar read 0.172 % low), DAI is an outside peg, and the interest-bearing `Hydrated *` wrappers (HUSDT, HUSDC, HUSDS, HUSDe) accrue about 2 %/yr away from par — all of them quote through the cross path like any other asset. A bucket the quote asset has no candle for is omitted rather than priced at an older rate, so a cross series starts no earlier than the quote asset\'s own first candle.',
         'CROSS-PAIR ACCURACY, and the ONE thing to know before computing volatility from it: `open` and `close` are exact rates, `high` and `low` are a conservative ENVELOPE. `open` is assetIn\'s open over assetOut\'s open and `close` is close over close — each series\' first and last observation in the bucket, which is the same instant for both legs, so these are the real rate (measured against an exact per-block ratio: agreement to 2.7e-16, the published scale). `high` is assetIn\'s high over assetOut\'s LOW and `low` is assetIn\'s low over assetOut\'s HIGH: the widest rates the two independent series admit. That band is GUARANTEED to contain every rate the pair traded at in the bucket (verified on 1,800 live buckets against an exact per-block reference: 100 %, the only apparent misses being that reference\'s own float64 rounding at 3e-17 relative) but it OVERSTATES the width — measured 1.0x-2.3x at 5m-4h and about 7.6x at 1d, and by an unbounded factor on a pair whose ratio is near-constant (a peg-tracking pair such as GDOT/DOT has a true intra-hour range of ~0 while the envelope inherits both legs\' independent USD noise, median 0.56 % at 1h). So `high - low` is an UPPER BOUND on realised range, never an underestimate: the bias has one direction. Use `close` for a return series. An exact per-block high/low is not served because that query is O(blocks in the window) rather than O(candles), measured at 6.8x-20x the wall time and 8x-192x the memory of the two pre-aggregate reads this composes.',
         `\`timestamp\` is the bucket's OPEN, on the candle model's own grid: sub-daily buckets and \`1d\` are UTC-aligned, and \`1w\` is the ISO week, starting MONDAY 00:00 UTC. \`from\` and \`to\` are floored onto that grid, so the bucket containing each is the one you get (the sole exception is a \`1w\` bound inside 1970-01-01…04, which moves up to the epoch's first Monday). Only buckets that have fully closed are returned, so the series never ends on a partial candle (AGENTS.md). The window defaults to the most recent ${DEFAULT_CANDLES} buckets.`,
         `At most ${MAX_CANDLES} candles per request — a wider window is a 400, never a silently truncated series. The count is measured on the window actually READ, i.e. after \`to\` is clamped to the last closed bucket: passing a \`to\` far in the future is not a 400, it just reads up to now, and a window lying entirely beyond the last closed bucket reads nothing at all and returns empty \`items\` without reaching the cap.`,
