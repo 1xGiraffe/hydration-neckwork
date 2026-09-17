@@ -1,15 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, buildRevenueEventRowsSql } from '../src/services/revenueStreams.ts'
 
-// Since 2026-03 the Omnipool protocol fee is no longer split burned/treasury: every
-// leg is paid to the Omnipool pallet account, so it stays in the pool and accrues to
-// LPs. The predicate counted it as protocol revenue regardless of destination, which
-// booked $14.5k of one 30-day window — 21% of reported protocol revenue — that the
-// protocol never received. One swap read $12,588 where it earned $181.
-//
-// The exception is HDX: its Omnipool liquidity is protocol-provided, so a fee retained
-// in the HDX position IS the protocol's. The derivation marks those 'pol' rather than
-// asking this predicate to know which position a hub-denominated fee accrued to.
+// An omnipool fee leg is the protocol's unless the pool kept it for the LPs of the
+// position it landed in. The derivation resolves that position and marks the row, so
+// this predicate only reads the destination class: 'lp' and the legacy destination-less
+// asset-fee leg are the LPs', everything else — routed out, burned, or retained in the
+// protocol-provided HDX position ('pol') — is the protocol's.
 const evaluate = (sql: string, row: { stream: string; dest: string }): boolean => {
   // The predicate is plain SQL over two columns, so it can be checked directly.
   const expr = sql
@@ -56,9 +52,10 @@ describe('which revenue rows are the protocol’s', () => {
   })
 })
 
-// The fee's own asset names the position for an asset fee, but a protocol fee is
-// denominated in the hub asset — so the position it accrued to is the asset that was
-// SOLD, which only the sibling leg knows.
+// Which retained legs the derivation marks 'pol'. An asset fee stays in the position of
+// the asset it was charged in, so the fee's own asset decides; a hub protocol fee is
+// credited to the HDX sub-pool's hub reserve whatever pair was traded, so every one of
+// them is protocol-owned.
 describe('marking a fee retained in the HDX position', () => {
   it('reads the asset fee’s own asset', () => {
     const sql = buildRevenueEventRowsSql('omnipool_asset_fee', '1')
@@ -66,10 +63,10 @@ describe('marking a fee retained in the HDX position', () => {
     expect(sql).toMatch(/asset_id = 0/)
   })
 
-  it('reads the sold asset for the hub-denominated protocol fee', () => {
+  it('marks the hub-denominated protocol fee without consulting the trade', () => {
     const sql = buildRevenueEventRowsSql('omnipool_protocol_fee', '1')
     expect(sql).toContain("'pol'")
-    // The sold side of the same swap event, not the fee's own (hub) asset.
-    expect(sql).toMatch(/leg_kind = 'in'/)
+    expect(sql).not.toMatch(/leg_kind = 'in'/)
+    expect(sql).not.toContain("'lp'")
   })
 })

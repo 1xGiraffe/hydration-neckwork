@@ -64,22 +64,29 @@ export const REVENUE_EVENT_COLUMNS = [
 ] as const
 
 /**
- * Which revenue_events rows are PROTOCOL revenue. Both omnipool fees are split per
- * recipient: the pool-account share stays in the pool and belongs to LPs ('lp'), a
- * legacy pre-2025-01-25 asset-fee leg carries no destination at all ('unknown'), and
- * the routed-out ('protocol') and historically burned ('burned') legs are the
- * protocol's.
+ * Which revenue_events rows are PROTOCOL revenue. Both omnipool fees are classified per
+ * leg by the destination the runtime reported: 'lp' is a share the pool keeps for the
+ * LPs who provided that position's liquidity, 'pol' a share the pool keeps in the
+ * protocol-provided HDX position, 'protocol' a share routed out of the pool, 'burned' a
+ * share destroyed, and 'unknown' a legacy pre-2025-01-25 asset-fee leg the chain
+ * recorded no destination for. Everything but 'lp' and 'unknown' is the protocol's.
  *
- * 'lp' is excluded for the PROTOCOL fee too, not just the asset fee. Since 2026-03 the
- * burned/treasury split stopped and every protocol-fee leg is paid to the Omnipool
- * account, so counting the stream in full booked $14.5k of one 30-day window — 21% of
- * reported protocol revenue — that the protocol never received; one swap read $12,588
- * against $181 actually earned.
+ * 'protocol' is revenue CAPTURED, not revenue the treasury keeps, and for the asset fee
+ * the two are nearly disjoint. The hub fee's routed-out era (blocks 6,975,219 to
+ * 11,394,692) did pay the treasury, but a routed-out ASSET fee never has: it goes to the
+ * fee processor, which pays GigaHDX 15%, the GigaHDX rewards accumulator 25%, staking 5%
+ * and referrals 5% of the whole asset fee (pallet-fee-processor since block 12,848,067;
+ * referrals and staking directly before it). Those are token holders, stakers and
+ * referrers, so such a leg is the protocol's only in the sense that the LPs did not get
+ * it.
  *
- * 'pol' is the exception: HDX's Omnipool liquidity is protocol-provided, so a fee
- * retained in the HDX position IS the protocol's. A hub-denominated protocol fee does
- * not name the position it accrued to, so the derivation resolves it from the sold
- * asset and marks the row rather than leaving that to this predicate.
+ * The hub-denominated PROTOCOL fee is 'pol' or 'burned' and never 'lp', because the
+ * runtime credits every non-burned hub fee to the HDX sub-pool's hub reserve whatever
+ * pair was traded. The data holds three regimes of it: fully burned before block
+ * 6,975,219 (2025-02-16), then half burned and half routed to the treasury, and since
+ * block 11,394,695 (2026-02-16) neither — the whole fee is retained in HDX. The ASSET
+ * fee is charged in the traded asset and stays in that asset's position, so it is the
+ * protocol's only when it was charged in HDX.
  *
  * Every other stream is protocol revenue in full. account_revenue, the
  * explorer dashboard and the account/tag totals all filter through this exact
@@ -150,7 +157,9 @@ export const ICE_FEE_ACCOUNT = '0x6d6f646c6963655f666565230000000000000000000000
 /**
  * The one Omnipool position whose liquidity is protocol-provided, so fees retained in
  * it are the protocol's rather than the LPs'. Measured ~97-99% protocol-owned; treated
- * as wholly so, which is the standing convention for HDX.
+ * as wholly so, which is the standing convention for HDX. It is the position the hub
+ * protocol fee always lands in, and the only asset whose own asset fee is protocol
+ * revenue.
  */
 const POL_ASSET_ID = 0
 
@@ -261,35 +270,26 @@ function omnipoolFeeRowsSql(stream: 'omnipool_asset_fee' | 'omnipool_protocol_fe
   // measured feesCharts choice), and it leaves the source columns readable in
   // WHERE — an argMax alias named like its column would shadow the WHERE
   // reference and ClickHouse rejects the aggregate there.
-  // Which position a retained fee accrued to. An asset fee is charged in the asset
-  // itself, so its own asset_id names the position; a protocol fee is charged in the
-  // hub asset, so the position is the asset that was SOLD — known only from the
-  // sibling 'in' leg of the same swap event. HDX's Omnipool liquidity is
-  // protocol-provided, so a fee retained there is the protocol's, not the LPs'.
-  const soldJoin = stream === 'omnipool_protocol_fee'
-    ? `LEFT JOIN (
-    SELECT block_height, event_index, anyIf(asset_id, leg_kind = 'in') AS sold_asset
-    FROM price_data.pool_swap_legs FINAL
-    WHERE venue = 'omnipool' AND ${WINDOW} AND (${extra})
-    GROUP BY block_height, event_index
-  ) AS s ON s.block_height = f.block_height AND s.event_index = f.event_index`
-    : ''
-  const retainedInHdx = stream === 'omnipool_protocol_fee'
-    ? `s.sold_asset = ${POL_ASSET_ID}`
-    : `f.asset_id = ${POL_ASSET_ID}`
+  // Whose money a leg the pool KEEPS is. The hub protocol fee is credited to the HDX
+  // sub-pool's hub reserve whatever pair was traded (the runtime's
+  // process_protocol_fee), and HDX's Omnipool liquidity is protocol-provided, so every
+  // retained hub leg is the protocol's. An asset fee is charged in the traded asset and
+  // stays in that asset's position, so only a fee charged in HDX is the protocol's and
+  // the rest belongs to that position's LPs.
+  const retained = stream === 'omnipool_protocol_fee'
+    ? `'pol'`
+    : `if(f.asset_id = ${POL_ASSET_ID}, 'pol', 'lp')`
   return `-- rev:${stream}
 WITH rows AS (
   SELECT f.block_height AS block_height, f.event_index AS event_index, f.leg_index AS leg_index,
          f.block_timestamp AS block_time,
          multiIf(f.fee_dest = 'burned', 'burned',
-                 f.fee_recipient = '${OMNIPOOL_ACCOUNT}' AND ${retainedInHdx}, 'pol',
-                 f.fee_recipient = '${OMNIPOOL_ACCOUNT}', 'lp',
+                 f.fee_recipient = '${OMNIPOOL_ACCOUNT}', ${retained},
                  f.fee_recipient != '', 'protocol',
                  'unknown') AS dest,
          if(f.swapper = '${ICE_POT_ACCOUNT}' AND i.owner != '', i.owner, ${attributablePayerSql('f.swapper')}) AS account,
          f.asset_id AS asset_id, f.amount AS amount
   FROM price_data.pool_swap_legs AS f FINAL
-  ${soldJoin}
   LEFT JOIN (${iceSolutionOwnerSql(extra)}) AS i ON i.block_height = f.block_height AND i.extrinsic_index = f.extrinsic_index
   WHERE f.venue = 'omnipool' AND f.leg_kind = 'fee' AND f.${hub}
     AND ${windowOn('f')}

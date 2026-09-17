@@ -9,6 +9,7 @@ import {
   buildRevenueEventRowsSql,
   hollarBorrowHourlyRows,
 } from '../src/services/revenueStreams.ts'
+import { OMNIPOOL_ACCOUNT } from '../src/services/valuation.ts'
 
 type Row = Record<string, unknown>
 
@@ -145,8 +146,33 @@ describe('omnipool fee streams', () => {
     expect(asset).toContain('asset_id != 1')
     expect(hub).toContain('asset_id = 1')
     for (const sql of [asset, hub]) {
-      for (const dest of ["'burned'", "'lp'", "'protocol'", "'unknown'"]) expect(sql).toContain(dest)
+      for (const dest of ["'burned'", "'pol'", "'protocol'", "'unknown'"]) expect(sql).toContain(dest)
     }
+    // Only the asset fee can be an LP's: it stays in the position of the asset it
+    // was charged in, while every retained hub fee lands in HDX (see below).
+    expect(asset).toContain("'lp'")
+    expect(hub).not.toContain("'lp'")
+  })
+
+  // The runtime credits every non-burned hub protocol fee to the HDX sub-pool's hub
+  // reserve (process_protocol_fee → increase_hdx_subpool_hub_reserve), so the leg's
+  // recipient is the whole rule and the traded pair is irrelevant to it. The asset fee
+  // is charged in the traded asset and stays in that asset's position, so there the
+  // fee's own asset decides.
+  it('marks every hub fee the Omnipool keeps as protocol-owned, whatever was sold', () => {
+    const sql = buildRevenueEventRowsSql('omnipool_protocol_fee')
+    expect(sql).toContain(`f.fee_recipient = '${OMNIPOOL_ACCOUNT}', 'pol'`)
+    // Nothing about the swap's other legs may enter the classification.
+    expect(sql).not.toContain("leg_kind = 'in'")
+    expect(sql).not.toContain('sold_asset')
+    // And no era switch: the rule holds for every hub leg the pool ever kept,
+    // because before it the chain burned or routed them out instead.
+    expect(sql).not.toMatch(/block_height\s*[<>]/)
+  })
+
+  it('leaves an asset fee with the LPs unless it was charged in HDX', () => {
+    expect(buildRevenueEventRowsSql('omnipool_asset_fee'))
+      .toContain(`f.fee_recipient = '${OMNIPOOL_ACCOUNT}', if(f.asset_id = 0, 'pol', 'lp')`)
   })
 
   it('unattributes the placeholder swapper', () => {
@@ -184,17 +210,16 @@ describe('omnipool fee streams', () => {
       expect(sql, stream).toContain(`if(f.swapper = '${ICE_POT_ACCOUNT}' AND i.owner != '', i.owner,`)
       // The owner read is bounded like every other source read of the stream.
       const reads = sql.split(marker).length - 1
-      expect(reads, stream).toBeGreaterThanOrEqual(stream === 'omnipool_protocol_fee' ? 3 : 2)
+      expect(reads, stream).toBeGreaterThanOrEqual(2)
     }
   })
 
   it('exports the protocol-revenue predicate the explorer and account model share', () => {
     // Fee legs count as protocol revenue when routed out of the pool, burned, or
-    // retained in the protocol-provided HDX position ('pol'). A leg left with the pool
-    // ('lp') never counts — on EITHER fee stream, which is the correction: since
-    // 2026-03 every hub fee leg is paid to the Omnipool account, and counting the hub
-    // stream in full booked 21% of a 30-day window the protocol never received. Legacy
-    // asset-fee legs whose destination the chain never recorded stay unclassified.
+    // retained in the protocol-provided HDX position ('pol'). A leg left with the LPs
+    // of the position it landed in ('lp') never counts — on either fee stream, though
+    // only the asset fee can produce one. Legacy asset-fee legs whose destination the
+    // chain never recorded stay unclassified.
     expect(PROTOCOL_REVENUE_PREDICATE_SQL).toContain('omnipool_asset_fee')
     expect(PROTOCOL_REVENUE_PREDICATE_SQL).toContain("dest IN ('protocol', 'burned', 'pol')")
     expect(PROTOCOL_REVENUE_PREDICATE_SQL).toContain("dest != 'lp'")
