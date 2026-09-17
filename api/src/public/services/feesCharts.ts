@@ -161,7 +161,8 @@ export const FEES_COMBINATIONS: ReadonlyArray<[FeesProductType, FeesStreamType, 
   ['hollar', 'borrow_apr', 'protocol'],
   ['hollar', 'hsm_revenue', 'protocol'],
   // Not in the incumbent's matrix: the Uniswap v3 pools' protocol take (a Gamma
-  // vault's fee share sent to the Treasury, and a pool's CollectProtocol).
+  // vault's fee share sent to the Treasury, and a pool's own protocol fee as it
+  // accrues on each swap — never its CollectProtocol, which would double it).
   ['uniswap-v3', 'uniswap_v3_fee', 'protocol'],
 ]
 
