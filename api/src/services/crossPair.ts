@@ -1,83 +1,156 @@
 import type { ClickHouseClient } from '../db/client.ts'
-import type { ApiCandle } from '../types.ts'
 import type { OHLCVInterval } from './ohlcvService.ts'
 import { toClickHouseDateTime } from './ohlcvService.ts'
 
 /**
- * Interval to ClickHouse time-bucketing expression.
+ * Cross-pair OHLC, computed from the per-block ratio.
+ *
+ * The one place a pair's candles are derived, for every surface that serves them.
+ *
+ * WHY PER BLOCK, and not from the two assets' stored candles: min and max do not
+ * survive division. `ohlc_*` aggregates each ASSET separately, so a bucket keeps
+ * `max(base)` and `min(quote)` without any record of which observation went with
+ * which — and `max(base)/min(quote)` is a rate formed from two different moments,
+ * one that need never have existed. Given base 10→12 and quote 1→2 across two
+ * blocks, the ratio truly ranged 10→6, while the stored aggregates imply 12/1 = 12
+ * and 10/2 = 5. The error is not small and it is not symmetric: it only ever
+ * widens the candle, without bound on a pair whose ratio is near-constant (BIL
+ * quoted in HOLLAR measured a 0.0134 % hourly wick against a true range of zero).
+ * Joining the legs at the block restores the pairing, which is the only way to get
+ * a high and a low that were really quoted.
+ *
+ * COST is bounded by three things, none of them optional:
+ *  - the block range, resolved once and applied to `prices.block_height`, its sort
+ *    key. Filtering on `block_timestamp` alone reads every row the asset ever had:
+ *    measured on a 2 h window, 3.65 M rows against 78 k with the bound.
+ *  - bucketing on `prices.block_timestamp` rather than joining `blocks` for it.
+ *    The join cost 1.50 GiB and 1,057 ms over full history; without it the same
+ *    answer is 81 MiB and 448 ms.
+ *  - MAX_CROSS_BLOCKS and the explicit per-query ceilings below, so a window wider
+ *    than anything the chain holds is refused rather than read.
  */
+
+/** Digits kept on the quotient — enough for a ratio of two 12-decimal prices. */
+export const CROSS_SCALE = 18
+
+/**
+ * The widest block span a single cross request may read. Full chain history is
+ * ~14.7 M blocks and costs 81 MiB, so this leaves roughly a doubling of headroom
+ * and refuses only a window no data could fill. `max_memory_usage` below is the
+ * hard backstop; this is the one that gives the caller a sentence instead of an
+ * error.
+ */
+export const MAX_CROSS_BLOCKS = 25_000_000
+
+/** Thrown when a request asks for a wider block span than MAX_CROSS_BLOCKS. */
+export class CrossWindowTooWideError extends Error {
+  constructor(readonly blocks: number) {
+    super(`the requested window spans ${blocks} blocks; at most ${MAX_CROSS_BLOCKS} are read per cross-pair request`)
+    this.name = 'CrossWindowTooWideError'
+  }
+}
+
+/** Interval to the ClickHouse bucketing expression over the base leg's timestamp. */
 const INTERVAL_BUCKET: Record<OHLCVInterval, string> = {
-  '5min':  'toStartOfFiveMinute(b.block_timestamp)',
-  '15min': 'toStartOfInterval(b.block_timestamp, toIntervalMinute(15))',
-  '30min': 'toStartOfInterval(b.block_timestamp, toIntervalMinute(30))',
-  '1h':    'toStartOfHour(b.block_timestamp)',
-  '4h':    'toStartOfInterval(b.block_timestamp, toIntervalHour(4))',
-  '1d':    'toStartOfDay(b.block_timestamp)',
-  '1w':    'toStartOfWeek(b.block_timestamp, 1)',
-  '1M':    'toStartOfMonth(b.block_timestamp)',
+  '5min': 'toStartOfFiveMinute(base.block_timestamp)',
+  '15min': 'toStartOfInterval(base.block_timestamp, toIntervalMinute(15))',
+  '30min': 'toStartOfInterval(base.block_timestamp, toIntervalMinute(30))',
+  '1h': 'toStartOfHour(base.block_timestamp)',
+  '4h': 'toStartOfInterval(base.block_timestamp, toIntervalHour(4))',
+  '1d': 'toStartOfDay(base.block_timestamp)',
+  '1w': 'toStartOfWeek(base.block_timestamp, 1)',
+  '1M': 'toStartOfMonth(base.block_timestamp)',
 }
 
 /**
- * Compute cross-pair OHLCV candles directly from the prices table.
- *
- * Joins base and quote prices at the block level, computes the ratio per block,
- * then aggregates into OHLCV buckets. This gives the true high/low of the actual
- * ratio rather than worst-case bounds from independent OHLCV series.
+ * One bucket's exact cross rate. Every price field is decimal TEXT at CROSS_SCALE
+ * digits, never a double: the division happens in ClickHouse's decimal arithmetic
+ * and the client quotes the result, so the value a caller receives is the value
+ * that was computed. Callers that publish numbers narrow at their own edge.
  */
+export interface CrossCandle {
+  /** The bucket's opening instant, unix seconds. */
+  intervalStart: number
+  open: string
+  high: string
+  low: string
+  close: string
+  volumeBuy: string
+  volumeSell: string
+  volumeTotal: string
+}
+
+interface CrossRow {
+  interval_start: string
+  open: string
+  high: string
+  low: string
+  close: string
+  volume_buy: string
+  volume_sell: string
+  volume_total: string
+}
+
+/**
+ * The block range a time window covers. Resolved separately so the main read can
+ * prune on `prices`' sort key, and so a window that lies outside the chain's own
+ * history is answered without reading `prices` at all.
+ */
+async function blockRange(
+  client: ClickHouseClient,
+  startTime: string,
+  endTime: string,
+): Promise<{ from: number; to: number } | null> {
+  const res = await client.query({
+    query: `SELECT min(block_height) AS from_block, max(block_height) AS to_block
+            FROM price_data.blocks
+            WHERE block_timestamp >= {start_time:DateTime} AND block_timestamp < {end_time:DateTime}`,
+    query_params: { start_time: startTime, end_time: endTime },
+    format: 'JSONEachRow',
+  })
+  const row = (await res.json<{ from_block: number | null; to_block: number | null }>())[0]
+  if (row?.from_block == null || row.to_block == null || row.to_block < row.from_block) return null
+  return { from: Number(row.from_block), to: Number(row.to_block) }
+}
+
 export async function queryCrossPairCandles(
   client: ClickHouseClient,
-  options: {
-    baseId: number
-    quoteId: number
-    startTime: Date
-    endTime: Date
-    interval: OHLCVInterval
-  }
-): Promise<ApiCandle[]> {
-  const bucket = INTERVAL_BUCKET[options.interval]
+  options: { baseId: number; quoteId: number; startTime: Date; endTime: Date; interval: OHLCVInterval },
+): Promise<CrossCandle[]> {
   const startTime = toClickHouseDateTime(options.startTime)
   const endTime = toClickHouseDateTime(options.endTime)
+  const range = await blockRange(client, startTime, endTime)
+  // A window the chain has no blocks in has no candles in it either — an empty
+  // series, the same answer a pre-listing window gets, not an error.
+  if (range == null) return []
+  const blocks = range.to - range.from + 1
+  if (blocks > MAX_CROSS_BLOCKS) throw new CrossWindowTooWideError(blocks)
 
   const result = await client.query({
     query: `
-      WITH
-        (SELECT min(block_height) FROM price_data.blocks
-          WHERE block_timestamp >= {start_time:DateTime}
-            AND block_timestamp < {end_time:DateTime}) AS from_block,
-        (SELECT max(block_height) FROM price_data.blocks
-          WHERE block_timestamp >= {start_time:DateTime}
-            AND block_timestamp < {end_time:DateTime}) AS to_block
       SELECT
-        ${bucket} AS interval_start,
-        argMin(sub.ratio, b.block_timestamp) AS open,
-        max(sub.ratio) AS high,
-        min(sub.ratio) AS low,
-        argMax(sub.ratio, b.block_timestamp) AS close,
-        sum(sub.usd_volume_buy) AS volume_buy,
-        sum(sub.usd_volume_sell) AS volume_sell,
-        sum(sub.usd_volume_buy) + sum(sub.usd_volume_sell) AS volume_total
-      FROM (
-        SELECT
-          base.block_height,
-          toFloat64(base.usd_price) / toFloat64(quote.usd_price) AS ratio,
-          base.usd_volume_buy,
-          base.usd_volume_sell
-        FROM price_data.prices base
-        INNER JOIN price_data.prices quote ON base.block_height = quote.block_height
-        WHERE base.asset_id = {base_id:UInt32}
-          AND quote.asset_id = {quote_id:UInt32}
-          AND base.block_height BETWEEN from_block AND to_block
-          AND quote.block_height BETWEEN from_block AND to_block
-          AND toFloat64(quote.usd_price) > 0
-      ) sub
-      INNER JOIN price_data.blocks b ON sub.block_height = b.block_height
-      WHERE b.block_timestamp >= {start_time:DateTime}
-        AND b.block_timestamp < {end_time:DateTime}
+        ${INTERVAL_BUCKET[options.interval]} AS interval_start,
+        argMin(divideDecimal(base.usd_price, quote.usd_price, ${CROSS_SCALE}), base.block_height) AS open,
+        max(divideDecimal(base.usd_price, quote.usd_price, ${CROSS_SCALE})) AS high,
+        min(divideDecimal(base.usd_price, quote.usd_price, ${CROSS_SCALE})) AS low,
+        argMax(divideDecimal(base.usd_price, quote.usd_price, ${CROSS_SCALE}), base.block_height) AS close,
+        sum(base.usd_volume_buy) AS volume_buy,
+        sum(base.usd_volume_sell) AS volume_sell,
+        sum(base.usd_volume_buy) + sum(base.usd_volume_sell) AS volume_total
+      FROM price_data.prices AS base
+      INNER JOIN price_data.prices AS quote ON base.block_height = quote.block_height
+      WHERE base.asset_id = {base_id:UInt32}
+        AND quote.asset_id = {quote_id:UInt32}
+        AND base.block_height BETWEEN {from_block:UInt32} AND {to_block:UInt32}
+        AND quote.block_height BETWEEN {from_block:UInt32} AND {to_block:UInt32}
+        AND base.block_timestamp >= {start_time:DateTime}
+        AND base.block_timestamp < {end_time:DateTime}
+        AND quote.usd_price > 0
       GROUP BY interval_start
       -- A bucket straddling the window start would otherwise be emitted under its
-      -- full bucket timestamp while holding only the trades inside the window, so its
+      -- full bucket timestamp while holding only the part inside the window, so its
       -- open/low/volume would depend on the request. The USD candle views drop that
-      -- leading partial bucket; match them so both chart paths answer one request with
+      -- leading partial bucket; match them so every path answers one request with
       -- the same first candle.
       HAVING interval_start >= {start_time:DateTime}
       ORDER BY interval_start
@@ -85,31 +158,30 @@ export async function queryCrossPairCandles(
     query_params: {
       base_id: options.baseId,
       quote_id: options.quoteId,
+      from_block: range.from,
+      to_block: range.to,
       start_time: startTime,
       end_time: endTime,
+    },
+    // The decimal quotient must reach the caller as text; rendered as a JSON number
+    // it would be parsed back as a double and lose the digits this path exists for.
+    clickhouse_settings: {
+      output_format_json_quote_decimals: 1,
+      max_memory_usage: '1000000000',
+      max_threads: 4,
     },
     format: 'JSONEachRow',
   })
 
-  const rows = await result.json<{
-    interval_start: string
-    open: number
-    high: number
-    low: number
-    close: number
-    volume_buy: string
-    volume_sell: string
-    volume_total: string
-  }>()
-
+  const rows = await result.json<CrossRow>()
   return rows.map(r => ({
-    intervalStart: Math.floor(new Date(r.interval_start.replace(' ', 'T') + 'Z').getTime() / 1000),
+    intervalStart: Math.floor(new Date(`${r.interval_start.replace(' ', 'T')}Z`).getTime() / 1000),
     open: r.open,
     high: r.high,
     low: r.low,
     close: r.close,
-    volumeBuy: parseFloat(r.volume_buy),
-    volumeSell: parseFloat(r.volume_sell),
-    volumeTotal: parseFloat(r.volume_total),
+    volumeBuy: r.volume_buy,
+    volumeSell: r.volume_sell,
+    volumeTotal: r.volume_total,
   }))
 }
