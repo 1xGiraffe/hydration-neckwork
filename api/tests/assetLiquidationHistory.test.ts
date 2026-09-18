@@ -79,7 +79,7 @@ describe('asset liquidation history buckets on the candles own day boundary', ()
     // token total is an exact integer sum and the value never leaves fixed point
     // until the single float conversion that emits USD.
     expect(body).toContain('toString(sum(l.amount)) AS amount')
-    expect(body).toContain('multiplyDecimal(l.amount, toDecimal256(p.close, 12), 12)')
+    expect(body).toContain('sum(l.amount * toDecimal256(p.close, 12))')
     expect(body).toContain(`\${mmAmountInScopeSql(scope, 'liquidated_collateral_amount')} AS amount`)
     expect(occurrences(body, 'toFloat64')).toBe(1)
   })
@@ -142,7 +142,7 @@ describe('an asset page finds its reserve through every alias', () => {
   it('normalizes mixed-decimal reserves to one basis without wrapping', () => {
     const body = functionBody('mmAmountInScopeSql')
     expect(body).toContain('10n ** BigInt(scope.decimals -')
-    expect(body).toContain('multiplyDecimal(toDecimal256(${column}, 0), toDecimal256(${factor}, 0), 0)')
+    expect(body).toContain('(toDecimal256(${column}, 0) * toDecimal256(${factor}, 0))')
     expect(occurrences(body, 'toUInt256')).toBe(0)
     expect(occurrences(body, 'toFloat')).toBe(0)
     // The scope reports the basis its amounts are in, taken as the widest present.
@@ -157,7 +157,7 @@ describe('an asset page finds its reserve through every alias', () => {
 
   it('emits a bare scale for a single reserve, quoted exactly once', () => {
     const sql = mmAmountInScopeSql(scope([['0xaa', 10]], 10), 'amt')
-    expect(sql).toBe(`multiplyDecimal(toDecimal256(amt, 0), toDecimal256('1', 0), 0)`)
+    expect(sql).toBe(`(toDecimal256(amt, 0) * toDecimal256('1', 0))`)
     expect(sql).not.toContain(`''`)
     // Nothing to look up, so a one-reserve scope never reads the address column.
     expect(sql).not.toContain('asset_address')
@@ -166,7 +166,7 @@ describe('an asset page finds its reserve through every alias', () => {
   it('scales each reserve to the widest basis when they disagree', () => {
     // PRIME's 6-decimal legs and 2-Pool-PRIME's 18-decimal legs, summed in 18.
     const sql = mmAmountInScopeSql(scope([['0xprime', 6], ['0xpool', 18]], 18), 'amt')
-    expect(sql).toBe(`multiplyDecimal(toDecimal256(amt, 0), toDecimal256(transform(lower(asset_address), ['0xprime','0xpool'], ['1000000000000','1'], '1'), 0), 0)`)
+    expect(sql).toBe(`(toDecimal256(amt, 0) * toDecimal256(transform(lower(asset_address), ['0xprime','0xpool'], ['1000000000000','1'], '1'), 0))`)
     expect(sql).not.toContain(`''`)
   })
 
@@ -176,6 +176,6 @@ describe('an asset page finds its reserve through every alias', () => {
   })
 
   it('degrades to a literal one when the scope is empty', () => {
-    expect(mmAmountInScopeSql(scope([], 0), 'amt')).toBe(`multiplyDecimal(toDecimal256(amt, 0), toDecimal256('1', 0), 0)`)
+    expect(mmAmountInScopeSql(scope([], 0), 'amt')).toBe(`(toDecimal256(amt, 0) * toDecimal256('1', 0))`)
   })
 })

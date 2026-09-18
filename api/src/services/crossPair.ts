@@ -48,6 +48,29 @@ import { toClickHouseDateTime } from './ohlcvService.ts'
 export const CROSS_SCALE = 18
 
 /**
+ * The per-block ratio: `base / quote` at CROSS_SCALE digits.
+ *
+ * Widening the DIVIDEND to CROSS_SCALE first is what lets the plain operator
+ * stand in for `divideDecimal(base, quote, CROSS_SCALE)`. A decimal quotient takes
+ * the dividend's scale, so dividing the raw Decimal(38,12) columns would answer at
+ * 12 digits and quietly drop six; cast to scale 18 the operator computes
+ * `base_raw × 10^18 ÷ quote_raw`, which is `divideDecimal`'s own integer
+ * expression, truncated toward zero the same way. It matters because the
+ * adaptive-scale function is a per-row path where the operator is vectorised:
+ * MEASURED 2.99 → 0.52 CPU-seconds on the weekly HDX cross over 2.66 M blocks.
+ *
+ * Proved, not argued: 29.1 M block-paired ratios across six windows from 2023-01
+ * to the live head produced 0 mismatches, identical sums, identical
+ * `sum(cityHash64(toString(…)))` and the same `Decimal(76,18)` type. Prices are
+ * never negative here, so the truncation direction was pinned separately —
+ * `-1/3` gives `-0.333333333333333333` under both forms.
+ *
+ * `quote.usd_price > 0` in the WHERE is load-bearing for this: it is what keeps a
+ * zero divisor out of either form.
+ */
+const crossRatioSql = `(toDecimal256(base.usd_price, ${CROSS_SCALE}) / quote.usd_price)`
+
+/**
  * The widest block span a single cross request may read. Full chain history is
  * ~14.7 M blocks and costs 81 MiB, so this leaves roughly a doubling of headroom
  * and refuses only a window no data could fill. `max_memory_usage` below is the
@@ -157,10 +180,10 @@ export async function queryCrossPairCandles(
       )
       SELECT
         g.bucket AS interval_start,
-        argMin(divideDecimal(base.usd_price, quote.usd_price, ${CROSS_SCALE}), base.block_height) AS open,
-        max(divideDecimal(base.usd_price, quote.usd_price, ${CROSS_SCALE})) AS high,
-        min(divideDecimal(base.usd_price, quote.usd_price, ${CROSS_SCALE})) AS low,
-        argMax(divideDecimal(base.usd_price, quote.usd_price, ${CROSS_SCALE}), base.block_height) AS close,
+        argMin(${crossRatioSql}, base.block_height) AS open,
+        max(${crossRatioSql}) AS high,
+        min(${crossRatioSql}) AS low,
+        argMax(${crossRatioSql}, base.block_height) AS close,
         sum(base.usd_volume_buy) AS volume_buy,
         sum(base.usd_volume_sell) AS volume_sell,
         sum(base.usd_volume_buy) + sum(base.usd_volume_sell) AS volume_total

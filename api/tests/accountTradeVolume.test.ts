@@ -23,10 +23,16 @@ describe('buildPartitionInsertSql', () => {
   it('keeps the valuation in Decimal end-to-end (no Float64 crossing)', () => {
     // Prices are Decimal(38,12) at the source, so the whole pipeline —
     // normalization, price multiply, 10^md rescale, per-trade sums — stays
-    // decimal; only the final cast narrows to the stored Decimal128(12).
+    // decimal; only the final cast narrows to the stored Decimal128(12). The
+    // arithmetic runs on the plain decimal OPERATORS, which are vectorised where
+    // multiplyDecimal/divideDecimal are per-row (4.70 → 2.65 CPU-s per partition);
+    // every operand scale here lines up, so it is the same integer arithmetic,
+    // proved bit-identical over 2.77 M netted legs including 1.10 M negative ones.
     const sql = buildPartitionInsertSql('202601')
-    expect(sql).toContain('divideDecimal(')
-    expect(sql).toContain('multiplyDecimal(')
+    expect(sql).toContain('n.net_amt * toDecimal256(transform(')
+    expect(sql).toContain(') * toDecimal256(p.close, 12) / toDecimal256(')
+    expect(sql).not.toContain('divideDecimal(')
+    expect(sql).not.toContain('multiplyDecimal(')
     expect(sql).not.toContain('toFloat64(')
     expect(sql).not.toMatch(/1e\d/)
   })

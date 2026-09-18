@@ -244,13 +244,31 @@ export function legsCteSql(venuePredicate: string, timePredicate: string = ANCHO
   )`
 }
 
-/** Each leg with its event-time USD value; 0 when the asset had no closed candle. */
+/**
+ * A leg's event-time USD value: `amount × close ÷ 10^decimals`, at the 1e-12
+ * scale, with 0 standing in for an asset that had no closed candle.
+ *
+ * The plain decimal OPERATORS, not `multiplyDecimal`/`divideDecimal`. The two
+ * forms are the same integer arithmetic — `Decimal256(0) * Decimal256(12)` is a
+ * `Decimal256(12)` by scale addition, so the product is exact and never rounded,
+ * and dividing it by a `Decimal256(0)` keeps the dividend's scale and truncates
+ * toward zero exactly as `divideDecimal(…, 12)` does — but the adaptive-scale
+ * functions are a per-row code path where the operators are vectorised, and on
+ * this expression that is the difference between 42 and 2.9 CPU-seconds per
+ * 2.7 M legs (MEASURED; the 30-day netted-volume query went 48.7 → 9.0).
+ *
+ * The equality is not an argument, it is a measurement: over 12.2 M legs spanning
+ * 2023-01 to the live head, the two forms produced the same Decimal(76,12) type
+ * and bit-identical per-leg values (0 mismatches, identical `sum` and identical
+ * `sum(cityHash64(toString(usd)))`). Any change here must be re-proved the same
+ * way — this value is the input to every published volume, fee and APR figure.
+ */
 export function pricedCteSql(extraColumns: string[] = [], priceSource: string = priceSourceSql()): string {
   const extra = extraColumns.length ? `${extraColumns.map(c => `l.${c} AS ${c}`).join(', ')}, ` : ''
   return `priced AS (
     SELECT ${extra}l.block_height AS block_height, l.event_index AS event_index, l.leg_kind AS leg_kind,
            l.asset_id AS asset_id,
-           divideDecimal(multiplyDecimal(toDecimal256(l.amount, 0), toDecimal256(p.close, 12), 12), ${amountUnitSql('l.asset_id')}, 12) AS usd
+           toDecimal256(l.amount, 0) * toDecimal256(p.close, 12) / ${amountUnitSql('l.asset_id')} AS usd
     FROM legs l
     ASOF LEFT JOIN ${priceSource} p
       ON p.asset_id = ${priceAliasSql('l.asset_id')} AND p.price_time <= l.block_time

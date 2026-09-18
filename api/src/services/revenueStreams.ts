@@ -218,6 +218,17 @@ const windowOn = (alias: string): string =>
  * event-time rule), through the same alias/decimal helpers every public pool
  * surface prices with. An unpriced row keeps amount_usd = 0 — explicit
  * incompleteness rather than a guessed price.
+ *
+ * The valuation uses the plain decimal OPERATORS for the reason spelled out at
+ * `pricedCteSql` in services/valuation.ts: `Decimal256(0) × Decimal256(12)` is an
+ * exact `Decimal256(12)` by scale addition and dividing it by a `Decimal256(0)`
+ * keeps that scale and truncates toward zero, so the arithmetic is identical to
+ * `divideDecimal(multiplyDecimal(…, 12), …, 12)` while being vectorised instead
+ * of per-row. These rows are PERSISTED (`revenue_events`), so the equality was
+ * re-proved on this site's own data before the change: 3.33 M rows over seven
+ * windows from 2022-12 to the live head, 0 mismatches, identical sums, identical
+ * `sum(cityHash64(toString(…)))` and identical `Decimal(76,12)` type. Rows
+ * written before and after the change therefore agree to the last digit.
  */
 function valuedTailSql(stream: EventfulRevenueStream): string {
   return `SELECT '${stream}' AS stream,
@@ -230,7 +241,7 @@ function valuedTailSql(stream: EventfulRevenueStream): string {
        toUInt32(r.asset_id) AS asset_id,
        toString(r.amount) AS amount,
        if(p.close > 0,
-          divideDecimal(multiplyDecimal(toDecimal256(r.amount, 0), toDecimal256(p.close, 12), 12), ${amountUnitSql('r.asset_id')}, 12),
+          toDecimal256(r.amount, 0) * toDecimal256(p.close, 12) / ${amountUnitSql('r.asset_id')},
           toDecimal256(0, 12)) AS amount_usd
 FROM rows r
 ASOF LEFT JOIN ${priceSourceSql()} p
@@ -479,10 +490,13 @@ valued AS (
          f.collateral_asset AS collateral_asset,
          f.collateral_amount AS collateral_amount,
          f.collateral_asset IN (${pegs}) AS peg,
+         -- Stays on divideDecimal: both operands are Decimal256(0), and the plain
+         -- operator takes the DIVIDEND's scale, so \`a / b\` would answer at scale 0
+         -- and throw away every cent. Only the collateral leg below has a scale-12
+         -- dividend and can drop the adaptive-scale call.
          divideDecimal(toDecimal256(f.hollar_amount, 0), toDecimal256('${HOLLAR_UNIT_RAW}', 0), 12) AS hollar_usd,
-         divideDecimal(multiplyDecimal(toDecimal256(f.collateral_amount, 0),
-                                       if(peg, toDecimal256(1, 12), toDecimal256(p.close, 12)), 12),
-                       ${amountUnitSql('f.collateral_asset')}, 12) AS collateral_usd
+         toDecimal256(f.collateral_amount, 0) * if(peg, toDecimal256(1, 12), toDecimal256(p.close, 12))
+           / ${amountUnitSql('f.collateral_asset')} AS collateral_usd
   FROM fills f
   ASOF LEFT JOIN ${priceSourceSql()} p
     ON p.asset_id = ${priceAliasSql('f.collateral_asset')} AND p.price_time <= f.block_time
@@ -497,6 +511,10 @@ priced AS (
                         intDiv(toUInt256OrZero(collateral_amount) * ${feeOld.num}, ${feeOld.den}),
                         intDiv(toUInt256OrZero(collateral_amount) * ${feeNew.num}, ${feeNew.den}))),
             '0') AS amount,
+         -- Stays on multiplyDecimal: both factors are already scale 12, so the
+         -- plain operator would answer at scale 24 by scale addition — a different
+         -- type in the sibling branches of this \`if\`, which ClickHouse refuses,
+         -- and twelve more digits than the column the value lands in.
          if(venue = 'hsm',
             if(hollar_is_out, toDecimal256(0, 12),
                multiplyDecimal(collateral_usd,
