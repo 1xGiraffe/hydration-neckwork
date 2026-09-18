@@ -21491,7 +21491,30 @@ async function enumeratedActivityRows(
   // freshness at the head, which is what every cached total on this page already costs.
   return cachedSwr(enumeratedActivityKey(accounts, type, from, to),
     ENUMERATED_SOURCE_CACHE_MS, ENUMERATED_SOURCE_STALE_MS,
-    () => enumeratedActivityRowsUncached(accounts, type, from, to))
+    () => enumeratedActivityRowsUncached(accounts, type, from, to),
+    await enumeratedActivityGeneration(accounts, to))
+}
+
+// Which chain state a held snapshot was built for: the newest block the scope has
+// activity in, the same watermark the page cache above it keys on.
+//
+// It rides cachedSwr's generation rather than the KEY because a changed key is a COLD
+// read, and this is the read the stale window exists to keep off the reader — 6.2s on the
+// account holding the most cross-chain history. As a generation it costs nothing when
+// nothing happened: a quiet scope keeps hitting its entry for the full stale window, and
+// one that just acted supersedes it on the very next request instead of coasting to the
+// end of the fresh window.
+//
+// Without it the snapshot carried no notion of the head at all, so a feed could sit a
+// minute behind a row the page cache had ALREADY rebuilt for — and because the key splits
+// on the source set, the same row could be visible under one type chip and missing under
+// another, which is how it was found.
+//
+// A closed dated window has no generation: those rows can no longer change, so a moving
+// watermark would only re-read a snapshot that is already final.
+async function enumeratedActivityGeneration(accounts: string[], to?: string): Promise<number | undefined> {
+  if (datedWindowIsClosed(to)) return undefined
+  return accountActivityWatermark(accounts)
 }
 
 // Re-read the snapshot 92% of activity requests share — the unfiltered, undated
@@ -21501,10 +21524,14 @@ async function enumeratedActivityRows(
 // key must never be satisfied by the value it exists to replace, and it must still share
 // the reader's single flight so a prewarm and a reader's own revalidation collapse into
 // one computation instead of racing.
-function refreshEnumeratedActivitySnapshot(accounts: string[]): Promise<EnumeratedActivity | null> {
+//
+// It installs the entry with the same generation a reader would ask for, or every read
+// after it would find the entry superseded and start a refresh it does not need.
+async function refreshEnumeratedActivitySnapshot(accounts: string[]): Promise<EnumeratedActivity | null> {
   return cacheRefresh(enumeratedActivityKey(accounts, 'all'),
     ENUMERATED_SOURCE_CACHE_MS, ENUMERATED_SOURCE_STALE_MS,
-    () => enumeratedActivityRowsUncached(accounts, 'all'))
+    () => enumeratedActivityRowsUncached(accounts, 'all'),
+    await enumeratedActivityGeneration(accounts))
 }
 
 // Every enumerated source, read with NO action and NO token filter.
