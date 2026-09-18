@@ -11162,6 +11162,37 @@ export function xcmDestinationFromCallArgs(
   return hop
 }
 
+/**
+ * The top-level call args xcmDestinationFromCallArgs reads, and the column
+ * `price_data.xcm_call_destinations` (clickhouse/schema/013) stores each one in as a
+ * raw JSON slice. That table is the ONLY source the destination reads use: it holds
+ * one block-keyed row per top-level PolkadotXcm extrinsic that names a `dest`, so a
+ * feed's scattered claimed blocks read 47k narrow rows instead of dragging whole
+ * granules of raw_extrinsics' `call_args_json` — the widest column in the database.
+ * A key added to the decoder must be added here and to the MV, or it decodes to
+ * nothing on the projection; the test pins the two agree.
+ */
+export const XCM_CALL_DESTINATION_ARGS = {
+  dest: 'dest_json',
+  beneficiary: 'beneficiary_json',
+  customXcmOnDest: 'custom_xcm_on_dest_json',
+} as const
+const XCM_CALL_DESTINATION_COLUMNS_SQL = Object.values(XCM_CALL_DESTINATION_ARGS).join(', ')
+
+/**
+ * A stored row's slices, reassembled into the call-args shape the decoder reads. A
+ * slice is `''` when the call has no such arg (JSONExtractRaw's shape), and stays an
+ * absent key here — exactly as in the full args, so the decode is the same.
+ */
+export function xcmCallDestinationArgs(row: Record<string, unknown>): Record<string, unknown> {
+  const args: Record<string, unknown> = {}
+  for (const [key, column] of Object.entries(XCM_CALL_DESTINATION_ARGS)) {
+    const slice = row[column]
+    if (typeof slice === 'string' && slice) args[key] = safeJson(slice)
+  }
+  return args
+}
+
 // A multilocation interior's junction list — X1 is a single object in XCM v3,
 // an array in v4; Here has no value.
 function xcmJunctions(interior: unknown): Record<string, unknown>[] {
@@ -12494,30 +12525,24 @@ async function xcmExecutedRowsForBlocks(blocks: number[], prices: Map<number, Pr
  * The destination of each executor-dispatched send, keyed `${block}:${extrinsic}`.
  *
  * Their events name no destination at all (see xcmDestinationFromCallArgs), so it is
- * read from the extrinsics themselves — a block-keyed primary-key read over the same
- * extrinsics the rows were already admitted from.
- *
- * The block list is the only bound worth having here, though it looks like it should not
- * be. Narrowing further to the claimed `(block, extrinsic)` tuples, or moving either
- * bound into a PREWHERE, was measured over a 1,949-block claimed set and changed nothing:
- * every form read the same 1.28M rows and ~1.6 GiB (tuples 1.81 → 1.81 GiB, PREWHERE 1.80
- * → 1.61 GiB, FINAL off 1.61 GiB). The cost is not the predicate — it is that
- * `call_args_json` is the widest column in the table and the claimed blocks are scattered,
- * so each one drags in a whole 8192-row granule of it. A tuple filter cannot prune a
- * granule the block list already claimed. Cutting this materially means reading a narrower
- * source, not writing a tighter WHERE.
+ * read from the calls themselves — a block-keyed primary-key read of
+ * `xcm_call_destinations`, the projection holding just the location-naming args of
+ * every top-level PolkadotXcm extrinsic (XCM_CALL_DESTINATION_ARGS). The claimed blocks
+ * are scattered across the whole height range, so this read touches most of the
+ * table's granules whatever the list; the table being 47k narrow rows is what keeps
+ * that cheap. `FINAL` is bounded by the same primary-key predicate.
  */
 async function xcmDestinationsByExtrinsic(blockListSql: string): Promise<Map<string, ReturnType<typeof xcmDestinationFromCallArgs>>> {
   const out = new Map<string, ReturnType<typeof xcmDestinationFromCallArgs>>()
   if (!blockListSql) return out
   const res = await client.query({
-    query: `SELECT block_height, extrinsic_index, call_args_json
-            FROM price_data.raw_extrinsics FINAL
-            WHERE block_height IN (${blockListSql}) AND startsWith(call_name, 'PolkadotXcm.')`,
+    query: `SELECT block_height, extrinsic_index, ${XCM_CALL_DESTINATION_COLUMNS_SQL}
+            FROM price_data.xcm_call_destinations FINAL
+            WHERE block_height IN (${blockListSql})`,
     format: 'JSONEachRow',
   })
-  for (const row of await res.json<{ block_height: number; extrinsic_index: number | null; call_args_json: string }>()) {
-    const dest = xcmDestinationFromCallArgs(safeJson(row.call_args_json))
+  for (const row of await res.json<{ block_height: number; extrinsic_index: number | null } & Record<string, unknown>>()) {
+    const dest = xcmDestinationFromCallArgs(xcmCallDestinationArgs(row))
     if (dest) out.set(executedXcmExtrinsicKey(row.block_height, row.extrinsic_index), dest)
   }
   return out
@@ -12526,13 +12551,13 @@ async function xcmDestinationsByExtrinsic(blockListSql: string): Promise<Map<str
 /** One executor-dispatched send's destination, read from its own call args. */
 async function executedXcmDestinationOf(height: number, index: number): Promise<ReturnType<typeof xcmDestinationFromCallArgs>> {
   const res = await client.query({
-    query: `SELECT call_args_json FROM price_data.raw_extrinsics FINAL
-            WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} AND startsWith(call_name, 'PolkadotXcm.')`,
+    query: `SELECT ${XCM_CALL_DESTINATION_COLUMNS_SQL} FROM price_data.xcm_call_destinations FINAL
+            WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32}`,
     query_params: { h: height, i: index },
     format: 'JSONEachRow',
   })
-  const row = (await res.json<{ call_args_json: string }>())[0]
-  return row ? xcmDestinationFromCallArgs(safeJson(row.call_args_json)) : null
+  const row = (await res.json<Record<string, unknown>>())[0]
+  return row ? xcmDestinationFromCallArgs(xcmCallDestinationArgs(row)) : null
 }
 
 type RouterNetSwap = { assetIn: number; amountIn: string; assetOut: number }
