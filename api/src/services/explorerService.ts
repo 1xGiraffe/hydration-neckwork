@@ -20646,6 +20646,20 @@ const ENUMERATED_SOURCE_CACHE_MS = 60_000
 // a slightly earlier chain state rather than a prefix of the current one, so serving one
 // costs recency at the head and nothing else.
 const ENUMERATED_SOURCE_STALE_MS = 900_000
+// How long a value keyed by the scope's activity watermark is trusted before it is
+// recomputed anyway. A located page and an exact total are pure functions of the scope's
+// rows, and the watermark moves on every row the scope gains, so while it holds the
+// recomputation returns the same answer — the hold is only a backstop for what the
+// watermark cannot see (raw backfilled below the head, a registry change that reroutes a
+// share token's legs). Set to the feed-age bound the page already publishes
+// (LIST_TOTAL_STALE_MS, asserted equal by test), so nothing here may be older than the
+// snapshot it was built from.
+//
+// Measured before it existed: the notifications lane asks for each watched target's
+// first page every 6s, the page cache held it for 60s, and every lapse re-ran the
+// locate query — 0.6–1.0s and 0.3–1.3 GiB per target per minute, ~660 runs an hour
+// for twelve idle accounts, 10.7% of all ClickHouse query CPU.
+const ACTIVITY_WATERMARK_HOLD_MS = 900_000
 // How many bytes of interpolated account literals an arm may carry (see the budget
 // note where it is enforced).
 const MAX_EXACT_ACCOUNT_LIST_BYTES = 150_000
@@ -21343,11 +21357,17 @@ function perBlockSql(plan: ExactActivityPlan): string {
 // most cross-chain history, well past the 256 KiB default. Raised only for these two
 // queries, which is where the literals live.
 const EXACT_ACTIVITY_QUERY_SETTINGS = { max_query_size: '33554432' }
+// The two queries below share their first 100 KB verbatim — the per_block CTE carries
+// the enumerated literal — and ClickHouse hashes the LOGGED text, which
+// log_queries_cut_to_length truncates there, so in system.query_log they collide into
+// one normalized_query_hash. The comment is the only thing that tells them apart.
+const EXACT_TOTAL_LOG_COMMENT = 'activity:exact-total'
+const EXACT_LOCATE_LOG_COMMENT = 'activity:exact-locate'
 
 async function countExactActivity(plan: ExactActivityPlan): Promise<number> {
   const res = await client.query({
     query: `${perBlockSql(plan)} SELECT toString(sum(rows)) AS total FROM per_block`,
-    clickhouse_settings: EXACT_ACTIVITY_QUERY_SETTINGS, format: 'JSONEachRow',
+    clickhouse_settings: { ...EXACT_ACTIVITY_QUERY_SETTINGS, log_comment: EXACT_TOTAL_LOG_COMMENT }, format: 'JSONEachRow',
   })
   return Number((await res.json<{ total: string }>())[0]?.total ?? 0)
 }
@@ -21371,7 +21391,7 @@ async function locateExactActivity(plan: ExactActivityPlan, offset: number, limi
       WHERE cum > {off:UInt64} AND cum - rows < {off:UInt64} + {lim:UInt64}
       ORDER BY block_height DESC`,
     query_params: { off: offset, lim: limit },
-    clickhouse_settings: EXACT_ACTIVITY_QUERY_SETTINGS, format: 'JSONEachRow',
+    clickhouse_settings: { ...EXACT_ACTIVITY_QUERY_SETTINGS, log_comment: EXACT_LOCATE_LOG_COMMENT }, format: 'JSONEachRow',
   })
   const rows = await res.json<{ block_height: number; block_rows: number; cum_rows: string; total_rows: string }>()
   // No block overlaps the requested ranks: the offset is past the end of the feed.
@@ -21441,6 +21461,20 @@ interface EnumeratedActivity {
   // venue read whole, its swaps counted under the trade family and its acts under
   // liquidity by the same type test the page applies.
   v3: ActivityRow[]
+  // The scope's activity watermark this snapshot was read for (see
+  // enumeratedActivityGeneration); undefined for a closed dated window, whose rows are
+  // final. cachedSwr serves a superseded snapshot while its refresh runs, so a plan
+  // built between the act and the refresh landing is built from rows that predate the
+  // act — this is how anything derived from the plan can tell (builtAtWatermark), and
+  // decline to hold that result for as long as one built at the watermark.
+  generation?: number
+}
+
+// Whether a value read for `generation` stands at the scope's watermark `mark`. No
+// generation means the value cannot go stale that way: a closed dated window, or a
+// window read live rather than from a held snapshot.
+export function builtAtWatermark(generation: number | undefined, mark: number): boolean {
+  return generation == null || generation >= mark
 }
 
 // Every enumerated row. All of them are non-transfer, so a transfer feed needs each
@@ -21514,10 +21548,21 @@ async function enumeratedActivityRows(
   // supplies BOTH the per-block counts the locate query is built from and the rows the
   // page renders, so the two always describe the same set however old it is. It costs
   // freshness at the head, which is what every cached total on this page already costs.
+  const generation = await enumeratedActivityGeneration(accounts, to)
   return cachedSwr(enumeratedActivityKey(accounts, type, from, to),
     ENUMERATED_SOURCE_CACHE_MS, ENUMERATED_SOURCE_STALE_MS,
-    () => enumeratedActivityRowsUncached(accounts, type, from, to),
-    await enumeratedActivityGeneration(accounts, to))
+    () => readEnumeratedActivitySnapshot(accounts, type, from, to, generation),
+    generation)
+}
+
+// The one place the snapshot is read for a cache entry: the read itself, stamped with
+// the generation the entry is installed under, so the snapshot carries its own
+// provenance (see EnumeratedActivity.generation) rather than the cache alone knowing it.
+async function readEnumeratedActivitySnapshot(
+  accounts: string[], type: string, from: string | undefined, to: string | undefined, generation: number | undefined,
+): Promise<EnumeratedActivity | null> {
+  const snapshot = await enumeratedActivityRowsUncached(accounts, type, from, to)
+  return snapshot && { ...snapshot, generation }
 }
 
 // Which chain state a held snapshot was built for: the newest block the scope has
@@ -21553,10 +21598,11 @@ async function enumeratedActivityGeneration(accounts: string[], to?: string): Pr
 // It installs the entry with the same generation a reader would ask for, or every read
 // after it would find the entry superseded and start a refresh it does not need.
 async function refreshEnumeratedActivitySnapshot(accounts: string[]): Promise<EnumeratedActivity | null> {
+  const generation = await enumeratedActivityGeneration(accounts)
   return cacheRefresh(enumeratedActivityKey(accounts, 'all'),
     ENUMERATED_SOURCE_CACHE_MS, ENUMERATED_SOURCE_STALE_MS,
-    () => enumeratedActivityRowsUncached(accounts, 'all'),
-    await enumeratedActivityGeneration(accounts))
+    () => readEnumeratedActivitySnapshot(accounts, 'all', undefined, undefined, generation),
+    generation)
 }
 
 // Every enumerated source, read with NO action and NO token filter.
@@ -22564,9 +22610,10 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   const floor = filters.minRevenue
   const readLimit = floor == null ? limit : (offset + limit) * REVENUE_FLOOR_SCOPED_OVERREAD
   const readOffset = floor == null ? offset : 0
-  const located = await locatedAccountActivityPage(accounts, type, readLimit, readOffset, action, filters, from, to)
+  const located = await heldLocatedActivityPage(accounts, type, readLimit, readOffset, action, filters, from, to)
   // Copy before enriching. These rows are the objects held in the cached source
-  // arrays (the enumerated snapshot above all), and the enrichment writes to them:
+  // arrays (the enumerated snapshot above all, and the held located page), and the
+  // enrichment writes to them:
   // `revenue` is assigned to whichever row of an extrinsic is EARLIEST on this page,
   // so a figure left behind on a shared row would reappear on a page where a
   // different row owns it — the exact double-report attachRevenue exists to prevent.
@@ -22581,18 +22628,54 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   return page.filter(row => revenueFloorPasses(row, floor)).slice(offset, offset + limit)
 }
 
+// The located page, held for as long as the scope's activity watermark stands.
+//
+// The page cache above it (getScopedAccountActivity) is keyed by that watermark too, but
+// its 60s TTL is the backstop for the ENRICHMENT the page carries — a price that lands
+// late, an XCM journey that resolves minutes after the transfer, revenue attributed by a
+// later derivation cycle — and a reader polling every few seconds turned that backstop
+// into the schedule: every lapse re-ran the locate query and the located block reads for
+// a scope that had done nothing (see ACTIVITY_WATERMARK_HOLD_MS for what that cost). The
+// rows themselves are a pure function of the scope's rows, so they are held here on the
+// watermark alone, and a lapse of the page cache re-applies the cheap enrichment to held
+// rows instead of locating them again.
+//
+// Only a page built AT the watermark is held. cachedSwr serves a superseded snapshot
+// while its refresh runs, so a plan built between the act and the refresh landing
+// predates the act that moved the watermark; held under the new watermark it would hide
+// the scope's newest enumerated row for the whole hold, while left unheld the next
+// page-cache lapse rebuilds it from the refreshed snapshot. A refusal (null) is not held
+// either: the windowed path answers it, and a refusal can be transient.
+async function heldLocatedActivityPage(
+  accounts: string[], type: string, limit: number, offset: number,
+  action: string | undefined, filters: ValueListFilters, from?: string, to?: string,
+): Promise<ActivityRow[] | null> {
+  const mark = datedWindowIsClosed(to) ? 0 : await accountActivityWatermark(accounts)
+  const located = await cachedFound(
+    `explorer:located-page:${[...accounts].sort().join(',')}:w${mark}:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`,
+    ACTIVITY_WATERMARK_HOLD_MS,
+    () => locatedAccountActivityPage(accounts, type, limit, offset, action, filters, from, to),
+    located => located != null && builtAtWatermark(located.generation, mark))
+  return located?.rows ?? null
+}
+
+// One located page and the watermark its plan's snapshot was read for (see
+// EnumeratedActivity.generation), so the hold above can tell a page built at the
+// scope's watermark from one built while a superseded snapshot was still being served.
+interface LocatedActivityPage { rows: ActivityRow[]; generation?: number }
+
 // Null when this request has no exact plan, when the located blocks and the classifier
 // disagreed, or when a count arm was too heavy to run — the windowed path answers in
 // every one of those cases, with a partial total that says what it covers.
 async function locatedAccountActivityPage(
   accounts: string[], type: string, limit: number, offset: number,
   action: string | undefined, filters: ValueListFilters, from?: string, to?: string,
-): Promise<ActivityRow[] | null> {
+): Promise<LocatedActivityPage | null> {
   try {
     const plan = await planExactActivity(accounts, normalizeActivityTypeKey(type), action, filters, from, to)
     if (!plan) return null
     const location = await locateExactActivity(plan, offset, limit)
-    if (!location.blocks.length) return []
+    if (!location.blocks.length) return { rows: [], generation: plan.enumerated.generation }
     // Only the SQL-counted sources are still read here, and the closed block set — not a
     // row limit — is what bounds them: a source's CANDIDATES in a block can far outnumber
     // the rows it contributes (a block with one real transfer can hold fifty plumbing
@@ -22600,7 +22683,10 @@ async function locatedAccountActivityPage(
     // the classification needs. The enumerated sources are handed over from the plan.
     const built = await collectAccountActivity(accounts, type, MAX_LOCATED_BLOCK_SOURCE_ROWS, action, filters, from, to,
       { blocks: location.blocks, perBlock: location.perBlock, enumerated: plan.enumerated })
-    return built.rows.slice(offset - location.above, offset - location.above + limit)
+    return {
+      rows: built.rows.slice(offset - location.above, offset - location.above + limit),
+      generation: plan.enumerated.generation,
+    }
   } catch (error) {
     if (!exactActivityRefusal(error)) throw error
     console.warn('[explorer] located activity page unavailable', { type, offset, limit, accounts: accounts.length }, (error as Error).message)
@@ -22648,14 +22734,20 @@ const ACTIVITY_COUNT_DEADLINE_MS = 15_000
 // feed (the Omnipool pot references 72.5M activity rows) is counted exactly back to
 // its frontier and says so; only a feed whose narrowest window cannot even be
 // assembled has no total at all.
-async function countAccountActivity(accounts: string[], type: string, action: string | undefined, filters: ValueListFilters, from?: string, to?: string): Promise<ScopedListTotal> {
+//
+// Carries the watermark the exact plan's snapshot was read for (see
+// EnumeratedActivity.generation), so the caller can tell a count built at the scope's
+// watermark from one built while a superseded snapshot was still being served. A
+// windowed count reads its sources live and carries none.
+interface CountedActivityTotal extends ScopedListTotal { generation?: number }
+async function countAccountActivity(accounts: string[], type: string, action: string | undefined, filters: ValueListFilters, from?: string, to?: string): Promise<CountedActivityTotal> {
   // A countable shape needs no window at all: the total is a sum over the feed's
   // blocks, so it is exact and complete however deep the account's history runs. A
   // refusal here is not an error page — it falls through to the window, which reports
   // the prefix it does cover.
   try {
     const plan = await planExactActivity(accounts, normalizeActivityTypeKey(type), action, filters, from, to)
-    if (plan) return { total: await countExactActivity(plan), complete: true }
+    if (plan) return { total: await countExactActivity(plan), complete: true, generation: plan.enumerated.generation }
   } catch (error) {
     if (!exactActivityRefusal(error)) throw error
     console.warn('[explorer] exact activity total unavailable', { type, action, accounts: accounts.length }, (error as Error).message)
@@ -23104,7 +23196,10 @@ export function scopedListTotalKey(scope: string, query: ScopedListQuery): strin
 // The activity total walks the whole classified feed above its frontier, so it is
 // far the most expensive of the four — served stale-while-revalidate: only a cold
 // first hit waits, and an open page refreshes at most once per fresh window. A real
-// total must stay close to a feed that keeps growing, hence the short fresh window.
+// total must stay close to a feed that keeps growing, hence the short fresh window —
+// though for a live activity list that refresh costs nothing while the scope is idle
+// and comes at once when it acts (see scopedListTotal, which carries the scope's
+// activity watermark as the entry's generation and as the exact recount's key).
 const LIST_TOTAL_FRESH_MS = 120_000
 const LIST_TOTAL_STALE_MS = 900_000
 // A prefix total costs the full widening pass to establish — the Omnipool pot's
@@ -23124,13 +23219,33 @@ async function scopedListTotal(accounts: string[], scope: string, query: ScopedL
   const now = Date.now()
   for (const [seen, until] of partialTotalLists) if (until <= now) partialTotalLists.delete(seen)
   const partial = partialTotalLists.has(key)
+  // A LIVE activity list carries the scope's activity watermark twice over. As the
+  // entry's generation, so the total is superseded the moment the scope acts rather than
+  // at the end of its fresh window — the choice enumeratedActivityRows makes for the
+  // same reason: a changed KEY would be a cold read the reader waits on, whereas the
+  // superseded entry is served once more while the recount runs behind it. And as the
+  // key of the exact recount (heldActivityTotal), so the refreshes an idle scope's
+  // fresh window keeps scheduling find the count already made and cost nothing.
+  //
+  // A partial total is withheld from the GENERATION. It is counted to a frontier that
+  // moves with the head whether or not the scope acts, so only time can refresh it — and
+  // a structural pot's watermark moves every block, which as a generation would recount
+  // its 5–11s total on every request. Whether a list is partial is only known once it
+  // has been counted, which is what partialTotalLists records; its first count still
+  // lands under the plain key, so the partial path finds it rather than counting again.
+  // The watermark is still READ for a partial list, and still keys the recount below:
+  // a list that finally counts complete has to be held under the watermark it was
+  // counted at, not under a placeholder no act would ever move.
+  // A closed dated window has no watermark to carry: its rows are final.
+  const live = query.tab === 'activity' && !datedWindowIsClosed(query.to)
+  const mark = live ? await accountActivityWatermark(accounts) : 0
   const result = await cachedSwr(key,
     partial ? LIST_TOTAL_PARTIAL_FRESH_MS : LIST_TOTAL_FRESH_MS,
     partial ? LIST_TOTAL_PARTIAL_STALE_MS : LIST_TOTAL_STALE_MS,
     async (): Promise<ScopedListTotal> => {
       switch (query.tab) {
         case 'activity':
-          return countAccountActivity(accounts, query.type ?? 'all', query.action, query.value ?? {}, query.from, query.to)
+          return heldActivityTotal(accounts, key, mark, query)
         // The other three lists are counted by SQL over their own ordering, so
         // their total is always the whole list.
         case 'extrinsics':
@@ -23140,9 +23255,24 @@ async function scopedListTotal(accounts: string[], scope: string, query: ScopedL
         case 'votes':
           return { total: await countScopedVotes(accounts, scope, query.from, query.to), complete: true }
       }
-    })
+    },
+    live && !partial ? mark : undefined)
   if (!result.complete) partialTotalLists.set(key, Date.now() + LIST_TOTAL_PARTIAL_STALE_MS)
   return result
+}
+
+// The exact count, held on the scope's watermark for as long as it stands (see
+// ACTIVITY_WATERMARK_HOLD_MS). Held only when it is complete — a partial total is counted
+// to a frontier the watermark does not govern — and only when it was built AT that
+// watermark (builtAtWatermark): a count made from a superseded snapshot predates the act
+// that moved the watermark, and held under it would stand in for the scope's newest rows
+// until the hold lapsed. A count that is not held is simply made again on the next
+// refresh, which is what every count was before this existed.
+async function heldActivityTotal(accounts: string[], key: string, mark: number, query: ScopedListQuery): Promise<ScopedListTotal> {
+  const counted = await cachedFound(`${key}:count:w${mark}`, ACTIVITY_WATERMARK_HOLD_MS,
+    () => countAccountActivity(accounts, query.type ?? 'all', query.action, query.value ?? {}, query.from, query.to),
+    counted => counted.complete && builtAtWatermark(counted.generation, mark))
+  return { total: counted.total, complete: counted.complete }
 }
 
 // undefined = unknown account/tag (404). `total: null` = not even the narrowest
