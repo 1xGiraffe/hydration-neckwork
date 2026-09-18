@@ -277,7 +277,7 @@ const DAILY_PRICE_WINDOW = `interval_start > toDateTime({from:String}, 'UTC') - 
 export function buildDailySql(): string {
   const fees = ['fee_total', 'fee_account', 'fee_burned', 'fee_unknown', 'fee_hub']
   return `-- pub:dl:daily
-WITH ${routedNettedCteSql(DAILY_LEG_WINDOW, priceSourceSql(DAILY_PRICE_WINDOW))}
+WITH ${routedNettedCteSql(DAILY_LEG_WINDOW, priceSourceSql(DAILY_PRICE_WINDOW), true)}
 SELECT toString(day) AS day,
        toString(sum(greatest(side_in, side_out))) AS volume_usd,
        toString(sum(fee_total)) AS fee_total_usd,

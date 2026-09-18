@@ -282,7 +282,8 @@ ORDER BY volume DESC, pool_key`
 }
 
 /**
- * The netted-trade chain, from legs to one row per (day, trade, asset) net.
+ * The netted-trade chain, from legs to one row per (trade, asset) net — per
+ * (day, trade, asset) when the caller asks for the day.
  *
  * The group is the Router operation the fill belongs to, scoped to its block. A
  * fill with no Router entry (a direct pallet swap, a block hook, or ANY fill of
@@ -299,12 +300,22 @@ ORDER BY volume DESC, pool_key`
  * Intermediate assets cancel inside a group because each asset's legs are netted
  * before the sides are taken, so a 3-hop route counts once, at its boundaries.
  *
- * `day` is the fill's UTC calendar day, and the four fee columns are the fill's
- * fee legs split by destination. Both ride along for the DefiLlama backfill; the
- * 24h routed total ignores them. They cost no extra rows: a trade lives inside
- * one block, so grouping by (day, trade_key) is grouping by trade_key, and the
- * per-fill fee totals are carried on the fill's FIRST net entry rather than on a
- * synthetic row of their own.
+ * `carryDayAndFees` adds the fill's UTC calendar day and its fee legs split by
+ * destination, which ONLY the DefiLlama day series reads. They cost no extra
+ * rows — a trade lives inside one block, so grouping by (day, trade_key) is
+ * grouping by trade_key, and the per-fill fee totals ride on the fill's FIRST
+ * net entry rather than on a synthetic row of their own — but they are five
+ * Decimal256 aggregates carried through four stages and a wider tuple through
+ * the arrayJoin, and ClickHouse does not prune them out of a chain that ends in
+ * `arrayJoin`. Off, the 30-day netted total measured 7.1 CPU-seconds against
+ * 9.0. The netted surfaces that publish one number leave them off.
+ *
+ * `trade_key` is a TUPLE and not a rendered string: the routed case is keyed on
+ * (block, op_key) and the unrouted one on (block, fill), and building 1.7 M
+ * `concat`/`toString` strings per call to express that measured 1.5 CPU-seconds
+ * of the same query. The two cases cannot collide — the routed one has a
+ * non-empty `op_key` and the unrouted one has none — so the third element is 0
+ * wherever `op_key` carries the identity.
  *
  * Fee legs are never part of a side: `net_usd` counts in and out legs only, so no
  * fee can reach the volume total. That is not only a semantic choice — a
@@ -319,38 +330,58 @@ ORDER BY volume DESC, pool_key`
  * aave leg INSIDE a routed trade is a real hop of a real swap and already
  * cancels in the per-asset net, so only whole-group wraps may be removed.
  */
-export function routedNettedCteSql(timePredicate?: string, priceSource?: string): string {
+export function routedNettedCteSql(timePredicate?: string, priceSource?: string, carryDayAndFees = false): string {
   const zero = 'toDecimal256(0, 12)'
-  return `${legsCteSql('1', timePredicate)},
-${pricedCteSql(['op_key', 'venue', 'fee_dest', 'block_time'], priceSource)},
-fill_asset AS (
-  SELECT block_height, event_index, asset_id,
-         any(op_key) AS op_key, any(venue) AS venue, min(block_time) AS block_time,
-         maxIf(1, leg_kind = 'in') AS has_in,
-         maxIf(1, leg_kind = 'out') AS has_out,
-         sum(multiIf(leg_kind = 'out', usd, leg_kind = 'in', -usd, ${zero})) AS net_usd,
+  const fees = ['fee_total', 'fee_account', 'fee_burned', 'fee_unknown', 'fee_hub']
+  // Every fee-carrying fragment collapses to nothing when the caller does not
+  // read the fees, so the two shapes stay one chain rather than two.
+  const legFees = carryDayAndFees
+    ? `,
          sumIf(usd, leg_kind = 'fee') AS fee_total,
          sumIf(usd, leg_kind = 'fee' AND fee_dest = 'account') AS fee_account,
          sumIf(usd, leg_kind = 'fee' AND fee_dest = 'burned') AS fee_burned,
          sumIf(usd, leg_kind = 'fee' AND fee_dest = '') AS fee_unknown,
-         sumIf(usd, leg_kind = 'fee' AND asset_id = ${H2O_ASSET_ID}) AS fee_hub
+         sumIf(usd, leg_kind = 'fee' AND asset_id = ${H2O_ASSET_ID}) AS fee_hub`
+    : ''
+  const fillDay = carryDayAndFees ? `\n         toDate(min(block_time), 'UTC') AS day,` : ''
+  const fillFees = carryDayAndFees ? `\n         ${fees.map(fee => `sum(${fee}) AS ${fee}`).join(', ')},` : ''
+  const flaggedCarried = carryDayAndFees ? `day, ` : ''
+  const flaggedFees = carryDayAndFees ? `\n         ${fees.join(', ')},` : ''
+  // The fee totals belong to the FILL, so they ride on its first net entry;
+  // without them a net entry is just the (asset, net) pair the array holds.
+  const keyedLeg = carryDayAndFees
+    ? `arrayJoin(arrayMap((n, i) -> tuple(tupleElement(n, 1), tupleElement(n, 2),
+                                            ${fees.map(fee => `if(i = 1, ${fee}, ${zero})`).join(',\n                                            ')}),
+                            nets, arrayEnumerate(nets))) AS leg`
+    : 'arrayJoin(nets) AS leg'
+  const nettedFees = carryDayAndFees
+    ? `,\n         ${fees.map((fee, i) => `sum(tupleElement(leg, ${i + 3})) AS ${fee}`).join(',\n         ')}`
+    : ''
+  // `fee_dest` classifies a fee leg and `block_time` dates the fill: both exist
+  // for the day/fee columns alone, so they are not carried when those are off.
+  const pricedExtras = carryDayAndFees ? ['op_key', 'venue', 'fee_dest', 'block_time'] : ['op_key', 'venue']
+  const fillAssetTime = carryDayAndFees ? ' min(block_time) AS block_time,' : ''
+  return `${legsCteSql('1', timePredicate)},
+${pricedCteSql(pricedExtras, priceSource)},
+fill_asset AS (
+  SELECT block_height, event_index, asset_id,
+         any(op_key) AS op_key, any(venue) AS venue,${fillAssetTime}
+         maxIf(1, leg_kind = 'in') AS has_in,
+         maxIf(1, leg_kind = 'out') AS has_out,
+         sum(multiIf(leg_kind = 'out', usd, leg_kind = 'in', -usd, ${zero})) AS net_usd${legFees}
   FROM priced
   GROUP BY block_height, event_index, asset_id
 ),
 fill AS (
-  SELECT block_height, event_index, any(op_key) AS op_key, any(venue) AS venue,
-         toDate(min(block_time), 'UTC') AS day,
+  SELECT block_height, event_index, any(op_key) AS op_key, any(venue) AS venue,${fillDay}
          maxIf(has_out, asset_id = ${H2O_ASSET_ID}) AS out_hub,
-         maxIf(has_in, asset_id = ${H2O_ASSET_ID}) AS in_hub,
-         sum(fee_total) AS fee_total, sum(fee_account) AS fee_account, sum(fee_burned) AS fee_burned,
-         sum(fee_unknown) AS fee_unknown, sum(fee_hub) AS fee_hub,
+         maxIf(has_in, asset_id = ${H2O_ASSET_ID}) AS in_hub,${fillFees}
          groupArray(tuple(asset_id, net_usd)) AS nets
   FROM fill_asset
   GROUP BY block_height, event_index
 ),
 flagged AS (
-  SELECT block_height, event_index, op_key, venue, day, out_hub, nets,
-         fee_total, fee_account, fee_burned, fee_unknown, fee_hub,
+  SELECT block_height, event_index, op_key, venue, ${flaggedCarried}out_hub, nets,${flaggedFees}
          any(in_hub) OVER nxt AS next_in_hub,
          any(event_index) OVER nxt AS next_event_index,
          any(venue) OVER nxt AS next_venue
@@ -358,31 +389,20 @@ flagged AS (
   ${NEXT_FILL_WINDOW}
 ),
 keyed AS (
-  SELECT day, venue = 'aave' AS is_aave,
-         if(op_key != '', concat('r:', toString(block_height), ':', op_key),
-            concat('f:', toString(block_height), ':',
-                   toString(if(venue = 'omnipool' AND next_venue = 'omnipool' AND ${IS_FIRST_HOP},
-                               event_index + 1, event_index)))) AS trade_key,
-         arrayJoin(arrayMap((n, i) -> tuple(tupleElement(n, 1), tupleElement(n, 2),
-                                            if(i = 1, fee_total, ${zero}),
-                                            if(i = 1, fee_account, ${zero}),
-                                            if(i = 1, fee_burned, ${zero}),
-                                            if(i = 1, fee_unknown, ${zero}),
-                                            if(i = 1, fee_hub, ${zero})),
-                            nets, arrayEnumerate(nets))) AS leg
+  SELECT ${flaggedCarried}venue = 'aave' AS is_aave,
+         tuple(block_height, op_key,
+               if(op_key != '', toUInt32(0),
+                  toUInt32(if(venue = 'omnipool' AND next_venue = 'omnipool' AND ${IS_FIRST_HOP},
+                              event_index + 1, event_index)))) AS trade_key,
+         ${keyedLeg}
   FROM flagged
 ),
 netted AS (
-  SELECT day, trade_key, tupleElement(leg, 1) AS asset_id,
+  SELECT ${flaggedCarried}trade_key, tupleElement(leg, 1) AS asset_id,
          min(is_aave) AS all_aave,
-         sum(tupleElement(leg, 2)) AS net_usd,
-         sum(tupleElement(leg, 3)) AS fee_total,
-         sum(tupleElement(leg, 4)) AS fee_account,
-         sum(tupleElement(leg, 5)) AS fee_burned,
-         sum(tupleElement(leg, 6)) AS fee_unknown,
-         sum(tupleElement(leg, 7)) AS fee_hub
+         sum(tupleElement(leg, 2)) AS net_usd${nettedFees}
   FROM keyed
-  GROUP BY day, trade_key, asset_id
+  GROUP BY ${flaggedCarried}trade_key, asset_id
 )`
 }
 
