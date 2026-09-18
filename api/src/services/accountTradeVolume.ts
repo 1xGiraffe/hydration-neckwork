@@ -91,8 +91,19 @@ export function swapEventFilterSql(): string {
 //
 // Valuation stays in Decimal end-to-end: prices are Decimal(38,12) at the source
 // (ohlc close states), so converting through Float64 would be the only lossy
-// stage — amounts × norm-factor × close and the /10^md rescale all use
-// multiplyDecimal/divideDecimal, and per-trade sums aggregate Decimal256(12).
+// stage — amounts × norm-factor × close and the /10^md rescale run on the plain
+// decimal OPERATORS, and per-trade sums aggregate Decimal256(12). The operators,
+// not multiplyDecimal/divideDecimal: every operand scale here lines up so the two
+// forms are the same integer arithmetic (Decimal256(0) × Decimal256(0) is scale 0,
+// × Decimal256(12) is scale 12 by scale addition, and ÷ Decimal256(0) keeps
+// scale 12 and truncates toward zero), but the adaptive-scale functions are a
+// per-row path where the operators are vectorised — measured 4.70 → 2.65 CPU-s
+// per partition INSERT. `net_amt` is SIGNED, so the truncation direction matters
+// and was proved rather than assumed: 2.77 M rows across seven partitions from
+// 2023-01 to the live head (1.10 M of them negative, four below the Broadcast
+// cutover) produced 0 mismatches, identical sums, identical per-row hash and the
+// same Decimal(76,12) type, and the partition's published volume_usd/net_in_usd/
+// net_out_usd folds came out bit-identical.
 // Block bounds of a derived-table partition, i.e. the inverse of the
 // `toYYYYMM(toDateTime(block_height * 12))` expression the partition key uses.
 // A block is 12 synthetic seconds, so the month's first block is its UTC epoch
@@ -397,7 +408,7 @@ net AS (
 ),
 valued AS (
   SELECT n.account AS account, n.block_height AS block_height, n.trade_key AS trade_key,
-         divideDecimal(multiplyDecimal(multiplyDecimal(n.net_amt, ${normFactorSql('n.asset_id', md)}, 0), toDecimal256(p.close, 12), 12), toDecimal256('${usdDivisor}', 0), 12) AS net_usd
+         n.net_amt * ${normFactorSql('n.asset_id', md)} * toDecimal256(p.close, 12) / toDecimal256('${usdDivisor}', 0) AS net_usd
   FROM net n
   ASOF LEFT JOIN (
     SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close

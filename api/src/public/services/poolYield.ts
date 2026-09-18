@@ -222,13 +222,17 @@ parts AS (
          toDecimal256(sum(reserve), 0), toDecimal256(sum(hub), 0), toUInt64(count())
   FROM samples GROUP BY registry_asset_id
 )
+-- The numerator is the plain operator (two Decimal256(0) factors make a
+-- Decimal256(0), exactly what the adaptive-scale multiply returned), but the RATIO keeps
+-- divideDecimal: its dividend is scale 0, and the plain operator takes the
+-- dividend's scale, so \`a / b\` would answer 0 or 1 instead of a ratio.
 SELECT ifNull(toString(asset), '') AS asset_id,
        toString(sample_count) AS samples,
        toString(if(reserves > 0,
-                   divideDecimal(multiplyDecimal(fees, toDecimal256(sample_count, 0), 0), reserves, ${RATIO_DECIMALS}),
+                   divideDecimal(fees * toDecimal256(sample_count, 0), reserves, ${RATIO_DECIMALS}),
                    toDecimal256(0, ${RATIO_DECIMALS}))) AS fee_ratio,
        toString(if(hubs > 0,
-                   divideDecimal(multiplyDecimal(pfees, toDecimal256(sample_count, 0), 0), hubs, ${RATIO_DECIMALS}),
+                   divideDecimal(pfees * toDecimal256(sample_count, 0), hubs, ${RATIO_DECIMALS}),
                    toDecimal256(0, ${RATIO_DECIMALS}))) AS protocol_fee_ratio
 FROM (
   SELECT asset_id AS asset, sum(fee_raw) AS fees, sum(pfee_raw) AS pfees,
@@ -261,7 +265,7 @@ samples AS (
 ),
 sample_legs AS (
   SELECT s.pool_id AS pool_id, s.block_height AS block_height,
-         divideDecimal(multiplyDecimal(toDecimal256(s.reserve_raw, 0), toDecimal256(p.close, 12), 12), ${amountUnitSql('s.leg_asset')}, 12) AS leg_usd,
+         toDecimal256(s.reserve_raw, 0) * toDecimal256(p.close, 12) / ${amountUnitSql('s.leg_asset')} AS leg_usd,
          p.close AS close
   FROM (
     SELECT pool_id, block_height, sample_time,
@@ -289,8 +293,11 @@ parts AS (
 SELECT pool AS pool_id,
        toString(sample_count) AS samples,
        toString(fees) AS fee_usd,
+       -- Numerator on the plain operator (Decimal256(12) × Decimal256(0) is a
+       -- Decimal256(12) by scale addition); the ratio keeps divideDecimal, which
+       -- is the only way to reach ${RATIO_DECIMALS} digits from a scale-12 dividend.
        toString(if(tvl_total > 0,
-                   divideDecimal(multiplyDecimal(fees, toDecimal256(sample_count, 0), 12), tvl_total, ${RATIO_DECIMALS}),
+                   divideDecimal(fees * toDecimal256(sample_count, 0), tvl_total, ${RATIO_DECIMALS}),
                    toDecimal256(0, ${RATIO_DECIMALS}))) AS fee_ratio
 FROM (
   SELECT pool_id AS pool, sum(fee_usd) AS fees, sum(tvl_sum) AS tvl_total, sum(samples) AS sample_count

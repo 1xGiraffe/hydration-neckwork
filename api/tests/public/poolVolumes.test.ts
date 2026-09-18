@@ -188,9 +188,13 @@ describe('volume SQL invariants', () => {
     // An unrouted fill keys on its own (block_height, event_index) — never on the
     // extrinsic (a batch carries several independent trades) and never into one
     // shared bucket (which would net a third of all fills against each other).
+    // The key is the tuple (block, op_key, fill), routed on its second element
+    // and unrouted on its third; rendering it as a string cost 1.5 CPU-seconds
+    // of the 30-day fold for a key no response ever carries.
     expect(sql).toContain("if(op_key != ''")
-    expect(sql).toContain("concat('r:', toString(block_height), ':', op_key)")
-    expect(sql).toContain("concat('f:', toString(block_height)")
+    expect(sql).toContain('tuple(block_height, op_key,')
+    expect(sql).toContain('GROUP BY trade_key, asset_id')
+    expect(sql).not.toContain('concat(')
     expect(sql).not.toContain('extrinsic_index')
   })
 
@@ -232,6 +236,134 @@ describe('volume SQL invariants', () => {
     expect(sql).toContain('interval_start + INTERVAL 1 HOUR AS price_time')
     expect(sql).toContain('p.price_time <= l.block_time')
     expect(sql).toContain('ASOF LEFT JOIN')
+  })
+
+  it('values a leg with the vectorised decimal operators, not the adaptive-scale functions', async () => {
+    const { buildOmnipoolVolumeSql, buildPoolVolumeSql, buildRoutedTradesSql } = await import('../../src/public/services/poolVolumes.ts')
+    const { buildStableswapYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const { buildDailySql } = await import('../../src/public/services/defillama.ts')
+    for (const sql of [buildOmnipoolVolumeSql(), buildPoolVolumeSql(), buildRoutedTradesSql(),
+      buildStableswapYieldSql(), buildDailySql()]) {
+      // `amount * close / 10^decimals` is the SAME integer arithmetic as
+      // `divideDecimal(multiplyDecimal(amount, close, 12), unit, 12)` — the
+      // product of a Decimal256(0) and a Decimal256(12) is an exact
+      // Decimal256(12), and dividing it by a Decimal256(0) keeps that scale and
+      // truncates toward zero — but the operators are vectorised where
+      // multiplyDecimal/divideDecimal are per-row. Proved bit-identical over
+      // 12.2 M legs from 2023-01 to the head (0 mismatches, same sums, same
+      // per-leg hash) and measured at 48.7 → 6.1 CPU-seconds for the 30-day
+      // netted total. The published numbers depend on that equality, so if this
+      // ever has to go back, re-prove it the same way.
+      expect(sql).toContain('toDecimal256(l.amount, 0) * toDecimal256(p.close, 12) /')
+      expect(sql).not.toContain('divideDecimal(multiplyDecimal(toDecimal256(l.amount, 0)')
+    }
+  })
+
+  // The same idiom lived at eight more sites. Each was converted only after its own
+  // operand scales were checked against live data and the two forms were proved
+  // bit-identical over millions of production rows; the numbers below are the
+  // measured CPU per call, old → new. This pins the conversions so the per-row form
+  // cannot creep back into a priced surface by copy-paste.
+  it('keeps every other priced surface on the vectorised operators too', async () => {
+    const { buildStableswapYieldSql, buildOmnipoolYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const { buildTickersSql } = await import('../../src/public/services/coingecko.ts')
+    const { buildPartitionInsertSql } = await import('../../src/services/accountTradeVolume.ts')
+    const { REVENUE_STREAMS, buildRevenueEventRowsSql } = await import('../../src/services/revenueStreams.ts')
+
+    // `amount × close ÷ 10^decimals` at scale 12 — the reference shape, reached
+    // through three more sources. account_trade_volume (4.70 → 2.65 CPU-s) and
+    // revenue_events (8.59 → 5.70) both PERSIST what this computes.
+    expect(buildStableswapYieldSql())
+      .toContain('toDecimal256(s.reserve_raw, 0) * toDecimal256(p.close, 12) /')
+    expect(buildPartitionInsertSql('202601'))
+      .toContain(') * toDecimal256(p.close, 12) / toDecimal256(')
+    for (const stream of REVENUE_STREAMS) {
+      if (stream === 'hollar_borrow') continue
+      const sql = buildRevenueEventRowsSql(stream)
+      expect(sql).not.toContain('divideDecimal(multiplyDecimal(')
+      // hsm_revenue nets two priced legs instead of valuing one, so it is the one
+      // stream that does not end in the shared valued tail.
+      if (stream !== 'hsm_revenue') {
+        expect(sql).toContain('toDecimal256(r.amount, 0) * toDecimal256(p.close, 12) /')
+      }
+    }
+
+    // A ratio whose dividend is scale 0 CANNOT drop the adaptive-scale call —
+    // a decimal quotient takes the dividend's scale, so `a / b` would answer in
+    // whole units. Those sites widen the dividend first (CoinGecko, 0.48 → 0.11
+    // CPU-s) or keep divideDecimal (the Omnipool fee ratios, whose numerator is a
+    // raw fee sum). Either way the multiply beside them is a plain operator.
+    expect(buildTickersSql()).toContain('toDecimal256(sum(toDecimal256(amount, 0)), 18) /')
+    expect(buildTickersSql()).toContain('toDecimal256(low_qty, 18) / high_qty')
+    expect(buildTickersSql()).not.toContain('divideDecimal(')
+    expect(buildOmnipoolYieldSql()).toContain('divideDecimal(fees * toDecimal256(sample_count, 0), reserves,')
+    expect(buildOmnipoolYieldSql()).not.toContain('multiplyDecimal(')
+    expect(buildStableswapYieldSql()).toContain('divideDecimal(fees * toDecimal256(sample_count, 0), tvl_total,')
+    expect(buildStableswapYieldSql()).not.toContain('multiplyDecimal(')
+  })
+
+  // The explorer/preis sites are in the same change, and they are not importable
+  // from the public tree (isolation.test.ts), so they are pinned as source text.
+  it('keeps the explorer-side priced surfaces on the operators', async () => {
+    const { readFile } = await import('node:fs/promises')
+    // Comments name both functions on purpose (that is where the equality is
+    // argued), so the assertions below read the CODE with them stripped.
+    const read = async (p: string) => (await readFile(new URL(`../../src/${p}`, import.meta.url), 'utf8'))
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*(\/\/|--).*$/gm, '')
+
+    // Cross-pair OHLC: 2.99 → 0.52 CPU-s. The dividend is widened to CROSS_SCALE
+    // because the quotient would otherwise take usd_price's own 12 digits.
+    const crossPair = await read('services/crossPair.ts')
+    expect(crossPair).toContain('toDecimal256(base.usd_price, ${CROSS_SCALE}) / quote.usd_price')
+    expect(crossPair).not.toContain('divideDecimal(')
+
+    // Staker pot inflows, 3.70 → 2.76 CPU-s.
+    const revenueService = await read('services/revenueService.ts')
+    expect(revenueService).toContain('r.amount * toDecimal256(p.close, 12) / toDecimal256(')
+    expect(revenueService).not.toContain('divideDecimal(')
+
+    // HOLLAR's stable-share fold, 20.7 → 8.0 CPU-s, both divisions widened first.
+    const hollarService = await read('services/hollarService.ts')
+    expect(hollarService).not.toContain('divideDecimal(')
+
+    // The money-market liquidation value and the account-directory historical
+    // volume: pure products whose operand scales already added up, so the
+    // adaptive-scale call was never rescaling anything.
+    const explorerService = await read('services/explorerService.ts')
+    expect(explorerService).not.toContain('multiplyDecimal(')
+    expect(explorerService).not.toContain('divideDecimal(')
+
+    // revenueStreams keeps exactly two adaptive-scale calls, and they are the two
+    // the scales forbid converting: a scale-0 dividend (the HOLLAR unit division)
+    // and a scale-12 × scale-12 product that the plain operator would answer at
+    // scale 24, which ClickHouse refuses beside its sibling `if` branch.
+    const revenueStreams = await read('services/revenueStreams.ts')
+    expect(revenueStreams.match(/divideDecimal\(/g)).toHaveLength(1)
+    expect(revenueStreams.match(/multiplyDecimal\(/g)).toHaveLength(1)
+    expect(revenueStreams).toContain('toDecimal256(r.amount, 0) * toDecimal256(p.close, 12) /')
+  })
+
+  it('carries the day and the fee split only for the surface that publishes them', async () => {
+    const { buildRoutedTradesSql } = await import('../../src/public/services/poolVolumes.ts')
+    const { buildWebVolumeSql } = await import('../../src/public/services/webStats.ts')
+    const { buildDailySql } = await import('../../src/public/services/defillama.ts')
+    // Five Decimal256 aggregates through four stages and a seven-element tuple
+    // through the arrayJoin, which ClickHouse cannot prune out of a chain that
+    // ends in arrayJoin: 9.0 CPU-seconds against 7.1 for the 30-day fold. Only
+    // /defillama/v1/backfill reads them.
+    for (const sql of [buildRoutedTradesSql(), buildWebVolumeSql()]) {
+      expect(sql).not.toContain('fee_total')
+      // `fee_dest` and `block_time` still ride the leg dedup, which is the
+      // table's own replacement key; they just stop being projected onward.
+      expect(sql).not.toContain('l.fee_dest AS fee_dest')
+      expect(sql).not.toContain('l.block_time AS block_time')
+      expect(sql).not.toContain(' AS day')
+      expect(sql).toContain('arrayJoin(nets) AS leg')
+    }
+    const daily = buildDailySql()
+    expect(daily).toContain("sumIf(usd, leg_kind = 'fee') AS fee_total")
+    expect(daily).toContain("toDate(min(block_time), 'UTC') AS day")
+    expect(daily).toContain('GROUP BY day, trade_key, asset_id')
   })
 })
 

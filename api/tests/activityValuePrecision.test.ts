@@ -114,7 +114,7 @@ describe('value-aware account activity precision', () => {
 
   it('aggregates historical volume in integer atoms before presentation', () => {
     const sql = historicalVolumeSql('legs', 'valued')
-    expect(sql).toContain('sum(multiplyDecimal(multiplyDecimal(toDecimal256(l.amount, 0)')
+    expect(sql).toContain('sum(((toDecimal256(l.amount, 0) * toDecimal256(transform(')
     expect(sql).toContain('toDecimal256(p.close, 12)')
     expect(sql).not.toContain('toDecimal256OrZero(l.amount')
     expect(sql).toContain('interval_start + INTERVAL 1 HOUR AS price_time')
