@@ -38,16 +38,51 @@ export type VerifyFailure = {
 
 export type VerifyResult = VerifySuccess | VerifyFailure
 
+// solc prefixes a library's RUNTIME bytecode with call protection, so a
+// library can only ever be DELEGATECALLed:
+//
+//   73 <20 zero bytes> 30 14      PUSH20 0x00…00 ; ADDRESS ; EQ
+//
+// The deploying constructor patches that 20-byte operand with the library's own
+// deployed address. Compiler output therefore never byte-equals a deployed
+// library, by design, and no standard-json input can bridge the gap — solc does
+// not patch a library's own protector at compile time even when the library is
+// self-linked through `settings.libraries`, so the output is byte-identical
+// either way.
+//
+// Upstream Sourcify substitutes the address under verification INTO the
+// compiled bytecode before matching. Here the compare happens inside the
+// verifier microservice, which never sees the address, so we perform the mirror
+// image on the one side we own: zero the operand back out of the on-chain code
+// we submit. Same comparison either way, and guarded harder than a
+// zeros-in-compiled-output test would be — we rewrite only when the operand is
+// exactly the address being verified, which is the one value the deploying
+// constructor can write there.
+const CALL_PROTECTION_ZEROED = `73${'0'.repeat(40)}`
+
+export function zeroLibraryCallProtection(bytecode: string, address: string): string {
+  if (!/^0x[0-9a-f]{40}$/i.test(address) || !bytecode.startsWith('0x')) return bytecode
+  const body = bytecode.slice(2)
+  // PUSH20 + operand + ADDRESS + EQ, and nothing shorter can hold them.
+  if (body.length < 46) return bytecode
+  if (body.slice(0, 2).toLowerCase() !== '73' || body.slice(42, 46).toLowerCase() !== '3014') return bytecode
+  if (body.slice(2, 42).toLowerCase() !== address.slice(2).toLowerCase()) return bytecode
+  return `0x${CALL_PROTECTION_ZEROED}${body.slice(42)}`
+}
+
 // A verification failure is HTTP 200 with `status: "FAILURE"` — only transport
 // and request-shape problems are 4xx. Branching on the HTTP code alone would
 // report every bytecode mismatch as a success.
 export async function verifyStandardJson(input: {
+  address: string
   bytecode: string
   compilerVersion: string
   stdJsonInput: unknown
 }): Promise<VerifyResult> {
   const body = JSON.stringify({
-    bytecode: input.bytecode,
+    // Normalised at this boundary rather than at the call site so no future
+    // submit path can forget it; a non-library's code comes through untouched.
+    bytecode: zeroLibraryCallProtection(input.bytecode, input.address),
     // We hold deployed (runtime) bytecode from eth_getCode. CREATION_INPUT would
     // additionally require the constructor args appended, which we do not have.
     bytecodeType: 'DEPLOYED_BYTECODE',

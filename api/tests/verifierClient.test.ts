@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { verifyStandardJson, fetchDeployedBytecode, isEmptyCode } from '../src/services/verifierClient.ts'
+import { verifyStandardJson, fetchDeployedBytecode, isEmptyCode, zeroLibraryCallProtection } from '../src/services/verifierClient.ts'
 
 afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-const input = { bytecode: '0x6080', compilerVersion: '0.8.10+commit.fc410830', stdJsonInput: { language: 'Solidity', sources: {} } }
+const ADDRESS = '0x531a654d1696ed52e7275a8cede955e82620f99a'
+const input = { address: ADDRESS, bytecode: '0x6080', compilerVersion: '0.8.10+commit.fc410830', stdJsonInput: { language: 'Solidity', sources: {} } }
 
 // The Blockscout verifier's failure taxonomy is not expressible through HTTP
 // status alone: a bytecode mismatch is HTTP 200 with status FAILURE, an
@@ -94,6 +95,75 @@ describe('verifyStandardJson failure taxonomy', () => {
       expect(res.sourceFiles['src/Store.sol']).toBe('contract Store {}')
       expect(res.abi).toContain('retrieve')
     }
+  })
+})
+
+// A library's deployed runtime code is its compiled runtime code with the
+// 20-byte call-protection operand patched to the library's own address, so the
+// two can never be byte-equal and no standard-json input can make them so.
+// Measured on NFTDescriptor (Uniswap v3-periphery) at
+// 0x5DCE5306f247984042C18c0AEc99A60E24078Bc9: exactly offsets 1–20 differed,
+// the other 24,521 bytes were identical, and those 20 bytes were the contract's
+// own address. Zeroing the operand back out is what turns that into a match;
+// the guards below are what keep every non-library submission untouched.
+describe('zeroLibraryCallProtection', () => {
+  // PUSH20 <operand> ; ADDRESS ; EQ, then body and a metadata tail.
+  const PROTECTED_BODY = '3014608060405260043610610030575f80fd5ba264697066735822'
+  const withOperand = (operand: string) => `0x73${operand}${PROTECTED_BODY}`
+  const COMPILED = withOperand('0'.repeat(40))
+
+  it('zeroes the operand when the prologue carries the address under verification', () => {
+    expect(zeroLibraryCallProtection(withOperand(ADDRESS.slice(2)), ADDRESS)).toBe(COMPILED)
+  })
+
+  it('rewrites only offsets 1-20, leaving length and every later byte alone', () => {
+    const onChain = withOperand(ADDRESS.slice(2))
+    const out = zeroLibraryCallProtection(onChain, ADDRESS)
+    expect(out).toHaveLength(onChain.length)
+    expect(out.slice(0, 4)).toBe('0x73')
+    expect(out.slice(44)).toBe(onChain.slice(44))
+  })
+
+  it('accepts a checksummed operand from a node that answers in mixed case', () => {
+    expect(zeroLibraryCallProtection(withOperand('531A654D1696ed52E7275a8CEDE955e82620F99A'), ADDRESS)).toBe(COMPILED)
+  })
+
+  it('leaves an ordinary contract untouched: no prologue, nothing to substitute', () => {
+    const runtime = '0x6080604052348015600f57600080fd5b506004361061002b575f80fd5b'
+    expect(zeroLibraryCallProtection(runtime, ADDRESS)).toBe(runtime)
+  })
+
+  it('leaves a leading PUSH20 that is not followed by ADDRESS;EQ untouched', () => {
+    // A contract that merely opens by pushing an address is not call-protected.
+    const runtime = `0x73${ADDRESS.slice(2)}608060405260043610610030575f80fd5b`
+    expect(zeroLibraryCallProtection(runtime, ADDRESS)).toBe(runtime)
+  })
+
+  it('leaves a protector holding some other address untouched', () => {
+    // Only the deploying constructor writes this operand, and it writes the
+    // library's own address. A different one means the code was not produced by
+    // deploying this library here, so it must still fail to match.
+    const runtime = withOperand('5dce5306f247984042c18c0aec99a60e24078bc9')
+    expect(zeroLibraryCallProtection(runtime, ADDRESS)).toBe(runtime)
+  })
+
+  it('leaves an already-zeroed protector and truncated code alone', () => {
+    expect(zeroLibraryCallProtection(COMPILED, ADDRESS)).toBe(COMPILED)
+    const short = `0x73${ADDRESS.slice(2)}30`
+    expect(zeroLibraryCallProtection(short, ADDRESS)).toBe(short)
+  })
+
+  it('is applied on the submit path, so the verifier compares against zeroes', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      text: async () => JSON.stringify({ status: 'FAILURE', message: 'No contract could be verified with provided data' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await verifyStandardJson({ ...input, bytecode: withOperand(ADDRESS.slice(2)) })
+    const sent = JSON.parse(fetchMock.mock.calls[0][1].body) as { bytecode: string; bytecodeType: string }
+    expect(sent.bytecode).toBe(COMPILED)
+    // The substitution must not have leaked into the creation-code path.
+    expect(sent.bytecodeType).toBe('DEPLOYED_BYTECODE')
   })
 })
 
