@@ -71,8 +71,13 @@ describe('the enumerated activity snapshot is one shared read', () => {
     // One read per enumerated source, all six out of the plan's array — a source the page
     // pass read for itself instead would be counted from one set and rendered from another.
     expect(sites(/exact\.enumerated\.(otc|dcaFailures|rewards|staking|votes|xcm)\b/g)).toBe(6)
-    // Only the cache load and the background refresh may run the read itself.
-    expect(sites(/enumeratedActivityRowsUncached\(/g)).toBe(3)
+    // Only the snapshot loader may run the read itself — definition plus that one call —
+    // and both the cache load and the background refresh go through the loader, which is
+    // what stamps the snapshot with the generation it is installed under.
+    expect(sites(/enumeratedActivityRowsUncached\(/g)).toBe(2)
+    expect(body('async function readEnumeratedActivitySnapshot')).toContain('await enumeratedActivityRowsUncached(accounts, type, from, to)')
+    expect(body('async function readEnumeratedActivitySnapshot')).toContain('return snapshot && { ...snapshot, generation }')
+    expect(sites(/readEnumeratedActivitySnapshot\(/g)).toBe(3)   // definition, cache load, background refresh
   })
 })
 
@@ -92,7 +97,7 @@ describe('the snapshot is refreshed behind the reader, not in front of it', () =
   // appear under one type chip while the unfiltered feed still hid it.
   it('supersedes the snapshot as soon as the scope acts', () => {
     expect(body('async function enumeratedActivityRows'))
-      .toContain('await enumeratedActivityGeneration(accounts, to))')
+      .toContain('const generation = await enumeratedActivityGeneration(accounts, to)')
     // The same watermark the page cache above it keys on, so the two agree about the head.
     expect(body('async function enumeratedActivityGeneration')).toContain('accountActivityWatermark(accounts)')
     expect(body('async function getScopedAccountActivity')).toContain('accountActivityWatermark(accounts)')
@@ -102,7 +107,7 @@ describe('the snapshot is refreshed behind the reader, not in front of it', () =
     // The owning pass installs the generation a reader asks for. Installing none would make
     // every subsequent read find the entry superseded and start a refresh it does not need.
     expect(body('async function refreshEnumeratedActivitySnapshot'))
-      .toContain('await enumeratedActivityGeneration(accounts))')
+      .toContain('const generation = await enumeratedActivityGeneration(accounts)')
   })
 
   // What the generation actually buys, against the cache itself: inside the fresh window a
@@ -163,7 +168,7 @@ describe('the snapshot is refreshed behind the reader, not in front of it', () =
     const refresh = body('function refreshEnumeratedActivitySnapshot')
     expect(refresh).toContain("enumeratedActivityKey(accounts, 'all')")
     expect(refresh).toContain('ENUMERATED_SOURCE_CACHE_MS, ENUMERATED_SOURCE_STALE_MS')
-    expect(refresh).toContain("enumeratedActivityRowsUncached(accounts, 'all')")
+    expect(refresh).toContain("readEnumeratedActivitySnapshot(accounts, 'all', undefined, undefined, generation)")
   })
 })
 
