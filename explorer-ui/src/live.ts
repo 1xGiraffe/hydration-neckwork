@@ -50,6 +50,63 @@ let lastBest = 0
 // blocks. A counter, not a height — compared for difference, not order (an api
 // restart resets it).
 let lastPool = 0
+// Pool-only frames arrive many times per block — every mempool entry that
+// appears, drops or is judged bumps the generation — and the generation rides
+// in `liveHeadTag`, so each one is a DIFFERENT cache key and therefore a full
+// rebuild of the three pool-carrying feeds rather than a cache hit. Measured on
+// /activity: 19 refetches in 15 s against 7-8 blocks, ~3.7 s of api time for a
+// viewer who did nothing.
+//
+// So pool pushes are throttled on the LEADING edge: the first one after a quiet
+// stretch dispatches at once (a mempool row still appears the moment it is
+// seen), and any that follow inside the window collapse into a single trailing
+// dispatch. A block frame is never throttled, and it cancels a pending pool
+// dispatch because the block refetch already subsumes it.
+//
+// The window is half a block: pending rows still surface BETWEEN blocks, which
+// is the whole point of the pool generation, but the feed can no longer be
+// asked to rebuild faster than the chain produces it.
+export const POOL_PUSH_THROTTLE_MS = Math.round(LIVE_MS / 2)
+
+export interface PoolThrottle {
+  /** A pool-only frame. Dispatches now, or collapses into the open window. */
+  push(head: number): void
+  /** A block frame or a dropped stream: drop whatever was collapsed. */
+  reset(): void
+}
+// A factory rather than module state so the behaviour is testable on fake
+// timers without an EventSource harness — the rate is the whole point of this
+// code, so it has to be pinned by a test rather than inspected by eye.
+export function createPoolThrottle(dispatch: (head: number) => void, windowMs = POOL_PUSH_THROTTLE_MS): PoolThrottle {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let collapsed = 0
+  // Re-arming on flush (rather than only while frames arrive) is what bounds a
+  // continuous stream: without it, the frame that lands just after a flush
+  // would be a fresh leading edge and the window would never actually cap.
+  const arm = (): void => {
+    timer = setTimeout(() => {
+      timer = null
+      if (!collapsed) return
+      const head = collapsed
+      collapsed = 0
+      arm()
+      dispatch(head)
+    }, windowMs)
+  }
+  return {
+    push(head) {
+      if (timer) { collapsed = Math.max(collapsed, head); return }
+      arm()
+      dispatch(head)
+    },
+    reset() {
+      if (timer) clearTimeout(timer)
+      timer = null
+      collapsed = 0
+    },
+  }
+}
+const poolThrottle = createPoolThrottle(head => dispatchHead(head, true))
 // A head that arrived while the tab was hidden: dispatch is deferred to the
 // next visibilitychange, so a background tab does no work but catches up the
 // moment it is looked at (interval polling is paused while streaming, so
@@ -100,6 +157,10 @@ const healthListeners = new Set<() => void>()
 function setStreamHealthy(v: boolean): void {
   if (streamHealthy === v) return
   streamHealthy = v
+  // A dropped stream hands the feeds back to LIVE_MS polling, and `liveHeadTag`
+  // goes empty while it is down — a throttled dispatch left armed would fire
+  // into that gap for a generation no longer in any URL.
+  if (!v) poolThrottle.reset()
   healthListeners.forEach(l => l())
 }
 export function useHeadStream(): boolean {
@@ -137,8 +198,15 @@ function connectHead(): void {
     const poolOnly = frame.head === lastHead && frame.best === lastBest
     lastHead = frame.head
     lastBest = frame.best
+    // Always current, even for a throttled frame: whenever a dispatch does go
+    // out it must carry the newest generation, or the refetch it triggers would
+    // be keyed to a pool state already superseded.
     lastPool = frame.pool
-    dispatchHead(Math.max(frame.head, frame.best), poolOnly)
+    const head = Math.max(frame.head, frame.best)
+    if (poolOnly) { poolThrottle.push(head); return }
+    // A block refetch already subsumes any pool change collapsed behind it.
+    poolThrottle.reset()
+    dispatchHead(head, false)
   })
   // Network drops auto-reconnect (server sends `retry:`); a non-200 response
   // (e.g. the mocked test API) closes the source for good. Either way the

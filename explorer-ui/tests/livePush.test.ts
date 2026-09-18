@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { LIVE_PUSH_KEYS, POOL_PUSH_KEYS, parseHeadEvent } from '../src/live'
+import { LIVE_MS, LIVE_PUSH_KEYS, POOL_PUSH_KEYS, POOL_PUSH_THROTTLE_MS, createPoolThrottle, parseHeadEvent } from '../src/live'
 import { pendingRefetchMs } from '../src/hooks/useExplorerData'
 
 describe('parseHeadEvent', () => {
@@ -70,6 +70,67 @@ describe('LIVE_PUSH_KEYS', () => {
   it('pool pushes cover exactly the pool-carrying feeds, and each is a live key', () => {
     expect([...POOL_PUSH_KEYS]).toEqual(['extrinsics', 'events', 'activity'])
     for (const key of POOL_PUSH_KEYS) expect([...LIVE_PUSH_KEYS]).toContain(key)
+  })
+})
+
+// Narrowing WHICH feeds a pool frame refetches (above) bounds the blast radius;
+// this bounds the RATE. The generation rides in `liveHeadTag`, so every pool
+// frame is a distinct cache key and a full feed rebuild: measured on /activity,
+// 19 refetches in 15 s against 7-8 blocks. The window is the lever, so the
+// arithmetic is pinned here rather than left to inspection.
+describe('createPoolThrottle', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('is half a block — pending rows still surface between blocks', () => {
+    expect(POOL_PUSH_THROTTLE_MS).toBe(Math.round(LIVE_MS / 2))
+    expect(POOL_PUSH_THROTTLE_MS).toBeLessThan(LIVE_MS)
+  })
+
+  it('dispatches the first frame at once, so a mempool row is never delayed', () => {
+    const seen: number[] = []
+    createPoolThrottle(h => seen.push(h), 1000).push(10)
+    expect(seen).toEqual([10])
+  })
+
+  it('collapses a burst into one trailing dispatch carrying the newest head', () => {
+    const seen: number[] = []
+    const t = createPoolThrottle(h => seen.push(h), 1000)
+    t.push(10)
+    for (const h of [11, 12, 13]) t.push(h)
+    expect(seen).toEqual([10])          // still inside the window
+    vi.advanceTimersByTime(1000)
+    expect(seen).toEqual([10, 13])      // newest, not each
+  })
+
+  it('caps a continuous stream at one dispatch per window', () => {
+    const seen: number[] = []
+    const t = createPoolThrottle(h => seen.push(h), 1000)
+    // A frame every 100ms for 5s: 50 frames, and without the re-arm on flush
+    // each post-flush frame would be a fresh leading edge.
+    for (let i = 1; i <= 50; i++) { t.push(i); vi.advanceTimersByTime(100) }
+    expect(seen.length).toBeLessThanOrEqual(6)
+    expect(seen[0]).toBe(1)
+  })
+
+  it('stays quiet when nothing collapsed into the window', () => {
+    const seen: number[] = []
+    const t = createPoolThrottle(h => seen.push(h), 1000)
+    t.push(10)
+    vi.advanceTimersByTime(5000)
+    expect(seen).toEqual([10])          // no phantom trailing dispatch
+  })
+
+  it('reset drops a collapsed frame — a block refetch subsumes it', () => {
+    const seen: number[] = []
+    const t = createPoolThrottle(h => seen.push(h), 1000)
+    t.push(10)
+    t.push(11)
+    t.reset()
+    vi.advanceTimersByTime(5000)
+    expect(seen).toEqual([10])
+    t.push(12)                          // and the gate is usable again after
+    expect(seen).toEqual([10, 12])
   })
 })
 
