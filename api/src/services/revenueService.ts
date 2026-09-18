@@ -278,6 +278,12 @@ const quotedList = (values: readonly string[]): string => values.map(v => `'${v}
  * block_timestamp, so the client's partition-scoped FINAL setting cannot split
  * a replace pair across partitions. An unpriced hour keeps usd = 0 — explicit
  * incompleteness, same rule as the revenue streams.
+ *
+ * The valuation is the plain decimal operators for the reason at `pricedCteSql`
+ * in valuation.ts — `sum(toDecimal256(amount, 0))` is a Decimal256(0), so the
+ * product with a Decimal256(12) close is an exact Decimal256(12) and dividing by
+ * the Decimal256(0) unit keeps that scale. Measured 3.70 → 2.76 CPU-s all-time,
+ * with the folded per-pot output identical to the digit.
  */
 function stakerInflowsSql(marker: string, bucketExpr: string | null, startSql: string | null): string {
   return `-- rev:dashboard:${marker}
@@ -294,7 +300,7 @@ WITH pot_inflows AS (
 SELECT pot${bucketExpr ? `, toUnixTimestamp(${bucketExpr}) AS t` : ''},
        toString(sum(r.amount)) AS amount,
        toString(sum(if(p.close > 0,
-         divideDecimal(multiplyDecimal(r.amount, toDecimal256(p.close, 12), 12), toDecimal256(${10n ** 12n}, 0), 12),
+         r.amount * toDecimal256(p.close, 12) / toDecimal256(${10n ** 12n}, 0),
          toDecimal256(0, 12)))) AS usd
 FROM pot_inflows r
 ASOF LEFT JOIN (

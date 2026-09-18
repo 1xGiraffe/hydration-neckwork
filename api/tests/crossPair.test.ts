@@ -53,8 +53,11 @@ describe('the cross-pair candle', () => {
     await queryCrossPairCandles(client as never, WINDOW)
     const cross = client.seen.find(s => s.query.includes('INNER JOIN price_data.prices'))!
     // `toFloat64(a)/toFloat64(b)` would cap the quotient at a double's ~15-17
-    // significant digits, and the pair route publishes 18.
-    expect(cross.query).toContain(`divideDecimal(base.usd_price, quote.usd_price, ${CROSS_SCALE})`)
+    // significant digits, and the pair route publishes 18. The dividend is widened
+    // to CROSS_SCALE first because a decimal quotient takes the DIVIDEND's scale:
+    // dividing the raw Decimal(38,12) columns would silently publish 12 digits.
+    expect(cross.query).toContain(`(toDecimal256(base.usd_price, ${CROSS_SCALE}) / quote.usd_price)`)
+    expect(cross.query).not.toContain('divideDecimal(')
     expect(cross.query).not.toContain('toFloat64')
     // ...and the result must reach the caller as text, or JSON.parse turns every
     // price back into the double the decimal division just avoided.
@@ -66,8 +69,8 @@ describe('the cross-pair candle', () => {
     const [candle] = await queryCrossPairCandles(client as never, WINDOW)
     const cross = client.seen.find(s => s.query.includes('INNER JOIN price_data.prices'))!
     // min/max of the quotient, computed after the legs are paired at the block.
-    expect(cross.query).toContain('max(divideDecimal(')
-    expect(cross.query).toContain('min(divideDecimal(')
+    expect(cross.query).toContain(`max((toDecimal256(base.usd_price, ${CROSS_SCALE}) / quote.usd_price))`)
+    expect(cross.query).toContain(`min((toDecimal256(base.usd_price, ${CROSS_SCALE}) / quote.usd_price))`)
     expect(candle).toMatchObject({ open: '200.000000000000000000', high: '260.000000000000000000', low: '190.000000000000000000' })
     // The band always contains the two points it is a range for.
     expect(Number(candle.low)).toBeLessThanOrEqual(Number(candle.open))

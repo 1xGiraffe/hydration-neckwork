@@ -1746,8 +1746,14 @@ export function historicalVolumeSql(legsCte: string, outName: string): string {
   // Decimal256 is ClickHouse's widest overflow-checking fixed-point type. An
   // unrepresentable leg fails the query explicitly; it must never wrap or be
   // coerced to zero in an account ranking.
-  const normalizedAmount = `multiplyDecimal(toDecimal256(l.amount, 0), ${rawAmountNormalizationSql('l.asset_id', maxDecimals)}, 0)`
-  const exactValue = `multiplyDecimal(${normalizedAmount}, toDecimal256(p.close, 12), 12)`
+  // The plain operators, not multiplyDecimal: a product of two Decimal256(0) is a
+  // Decimal256(0) and a Decimal256(0) × Decimal256(12) is a Decimal256(12), by
+  // scale addition, so neither call was rescaling anything — but the operators are
+  // vectorised where multiplyDecimal is per-row. Proved on this path's own rows
+  // (every money-market liquidation call ever indexed): 0 mismatches, identical
+  // sums, identical per-row hash, same Decimal(76,0)/Decimal(76,12) types.
+  const normalizedAmount = `(toDecimal256(l.amount, 0) * ${rawAmountNormalizationSql('l.asset_id', maxDecimals)})`
+  const exactValue = `(${normalizedAmount} * toDecimal256(p.close, 12))`
   return `
             ${outName} AS (
               SELECT l.account_id AS account_id,
@@ -24715,7 +24721,10 @@ export function mmAmountInScopeSql(scope: MmReserveScope, column: string): strin
   const factor = addresses.length > 1
     ? `transform(lower(asset_address), [${addresses.map(a => `'${a}'`).join(',')}], [${factors.join(',')}], '1')`
     : factors[0] ?? `'1'`
-  return `multiplyDecimal(toDecimal256(${column}, 0), toDecimal256(${factor}, 0), 0)`
+  // Plain operator: both factors are Decimal256(0), so the product is a
+  // Decimal256(0) by scale addition — the same value multiplyDecimal(…, 0) gave,
+  // vectorised instead of per-row.
+  return `(toDecimal256(${column}, 0) * toDecimal256(${factor}, 0))`
 }
 
 // Day buckets use `toStartOfDay(block_timestamp)` — the expression ohlc_1d_mv
@@ -24742,7 +24751,7 @@ async function assetLiquidationDays(scope: MmReserveScope): Promise<AssetLiquida
       SELECT toString(l.day) AS day,
              toString(sum(l.amount)) AS amount,
              toUInt32(count()) AS legs,
-             toFloat64(sum(multiplyDecimal(l.amount, toDecimal256(p.close, 12), 12))) / 1e${scope.decimals} AS value_usd
+             toFloat64(sum(l.amount * toDecimal256(p.close, 12))) / 1e${scope.decimals} AS value_usd
       FROM legs l
       ASOF LEFT JOIN ${historicalClosesRelationSql({ priceIds: '{priceId:UInt32}' })} p
         ON p.asset_id = l.price_asset_id AND p.price_time <= l.block_time
