@@ -85,6 +85,46 @@ describe('the snapshot is refreshed behind the reader, not in front of it', () =
     expect(sites(/cachedSwr\(enumeratedActivityKey\(/g)).toBe(1)
   })
 
+  // The key holds no head — deliberately, since a changed key is the cold read the stale
+  // window exists to prevent — so the scope's own activity watermark rides the generation
+  // instead. Without it a snapshot went on being served for the rest of its fresh window
+  // after the account acted, and since the key splits on the source set, the new row could
+  // appear under one type chip while the unfiltered feed still hid it.
+  it('supersedes the snapshot as soon as the scope acts', () => {
+    expect(body('async function enumeratedActivityRows'))
+      .toContain('await enumeratedActivityGeneration(accounts, to))')
+    // The same watermark the page cache above it keys on, so the two agree about the head.
+    expect(body('async function enumeratedActivityGeneration')).toContain('accountActivityWatermark(accounts)')
+    expect(body('async function getScopedAccountActivity')).toContain('accountActivityWatermark(accounts)')
+    // A window that can no longer gain rows has no generation: re-reading a final snapshot
+    // every time the chain moves would be pure waste.
+    expect(body('async function enumeratedActivityGeneration')).toContain('if (datedWindowIsClosed(to)) return undefined')
+    // The owning pass installs the generation a reader asks for. Installing none would make
+    // every subsequent read find the entry superseded and start a refresh it does not need.
+    expect(body('async function refreshEnumeratedActivitySnapshot'))
+      .toContain('await enumeratedActivityGeneration(accounts))')
+  })
+
+  // What the generation actually buys, against the cache itself: inside the fresh window a
+  // reader is still served instantly, but a moved watermark starts the re-read there and
+  // then instead of at the end of the window.
+  it('re-reads inside the fresh window once the generation moves', async () => {
+    vi.resetModules()
+    const { cachedSwr } = await import('../src/services/cache.ts')
+    const key = enumeratedActivityKey(['0xcc'], 'all')
+    const load = vi.fn().mockResolvedValueOnce('before').mockResolvedValueOnce('after')
+
+    await expect(cachedSwr(key, 60_000, 900_000, load, 100)).resolves.toBe('before')
+    // Same generation, well inside the fresh window: no read.
+    await expect(cachedSwr(key, 60_000, 900_000, load, 100)).resolves.toBe('before')
+    expect(load).toHaveBeenCalledTimes(1)
+    // The scope acts. This reader still gets the held snapshot — nobody waits on the
+    // re-read — but the re-read is now running, so the next one is current.
+    await expect(cachedSwr(key, 60_000, 900_000, load, 101)).resolves.toBe('before')
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(2))
+    await expect(cachedSwr(key, 60_000, 900_000, load, 101)).resolves.toBe('after')
+  })
+
   // The staleness a warmed value can reach must not exceed what the same page already
   // publishes. The pager's own total is served stale for LIST_TOTAL_STALE_MS, so the rows
   // under it may age exactly that far and no further.
