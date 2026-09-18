@@ -1,0 +1,59 @@
+<clickhouse>
+    <!--
+      Per-query introspection: OFF by default, available on demand.
+
+      `config.d/logging.xml` bounds how long the system logs are KEPT. A TTL
+      does nothing about the cost of WRITING them, and two of those tables are
+      written for every query and read by nobody:
+
+        system.processors_profile_log   391.7M rows/day    29.6 GiB
+        system.trace_log                 36.9M rows/day     8.3 GiB
+
+      Measured 2026-09-18: zero SELECTs against either table in the 14 days
+      query_log retains, against 36,828 SELECTs of query_log itself over the
+      same window. The processor log is per PROCESSOR per query, so it is not
+      proportional to work done — `SELECT count() FROM numbers(1000)` writes 42
+      rows. At ~4.4M queries/day that is where the 391.7M comes from.
+
+      Turning them off by default costs nothing for investigation, because both
+      are ordinary settings: an actual debugging session asks for them per query
+      or per session and gets the full detail back.
+
+          SELECT … SETTINGS log_processors_profiles = 1
+          SET query_profiler_real_time_period_ns = 1000000000   (1s sampling)
+
+      That is the whole reason this is a default rather than a removal: the
+      earlier decision to keep processor profiling "worth having during an
+      investigation" still holds — it just should not be billed to all 4.4M
+      queries a day to stay available.
+
+      query_log stays ON. It is the one that earns its keep (every performance
+      diagnosis on this deployment reads it) and its retention is a security
+      property, not just a disk one — see the note in config.d/logging.xml.
+    -->
+    <profiles>
+        <default>
+            <log_processors_profiles>0</log_processors_profiles>
+            <!-- Both profiler periods must be 0; either one alone still samples. -->
+            <query_profiler_real_time_period_ns>0</query_profiler_real_time_period_ns>
+            <query_profiler_cpu_time_period_ns>0</query_profiler_cpu_time_period_ns>
+            <!--
+              trace_log has more feeders than the two periods above. Measured
+              over 3 minutes with those already at 0: Memory 19,007 +
+              MemoryPeak 17,587 + Real 15,927 + CPU 307. The memory pair comes
+              from the allocation profiler, which samples every
+              memory_profiler_step bytes (4 MiB) per query thread and is a
+              separate switch.
+
+              The residue is written by threads that do not read this profile
+              (background/merge work takes the SERVER defaults, notably
+              total_memory_profiler_step). Turning that off needs config.d and
+              therefore a ClickHouse restart, which costs the whole stack a
+              multi-minute outage — not worth it for the remainder, so it is
+              left running deliberately.
+            -->
+            <memory_profiler_step>0</memory_profiler_step>
+            <memory_profiler_sample_probability>0</memory_profiler_sample_probability>
+        </default>
+    </profiles>
+</clickhouse>
