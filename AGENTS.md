@@ -94,7 +94,7 @@ Keep in mind for new models:
 - The Omnipool hub asset (registry id 1) is called **H2O** everywhere — UI copy, API field descriptions, docs, comments. Never write LRNA (its legacy name) except when quoting an on-chain identifier that literally spells it.
 - Activity is the sole domain and API term; do not restore Stream names, routes, or compatibility aliases.
 - Display and copy user addresses as canonical SS58 or H160 forms, never raw AccountId public-key hex. Preserve real identity/tag context across local and cross-chain account pills.
-- The primary and GIGAHDX money markets are isolated. Never blend their health factors. Primary-market directory/DefiSim figures stay primary-only; supplemental collateral backing must not be counted twice; tag risk uses the lowest real member health factor.
+- The money markets are isolated from each other — the primary market, GIGAHDX and BIL today, and the rule is per market rather than a closed list. Never blend their health factors. Primary-market directory/DefiSim figures stay primary-only; supplemental collateral backing must not be counted twice; tag risk uses the lowest real member health factor, and an account's risk is the lowest real health factor among the markets it is in, named with the market it came from.
 - Avoid request-time shortcuts that silently omit older history. Pagination, filtering, totals, and chart windows must operate on the full requested dataset.
 - Multi-asset activity filters must match every referenced asset, including nested pool assets and both sides of a pair.
 - Keep unresolved XCM origins and destinations explicit; enrichment runs asynchronously and must not delay explorer requests.
