@@ -197,6 +197,7 @@ describe('getRevenueFlow', () => {
       // The accrual seeds from the last observation BEFORE its window; these
       // fixtures put every observation inside it, so the seed read is empty.
       '-- rev:hollar-seed': [],
+      '-- rev:hollar-internal-debt': [],
       money_market_reserve_state_history: [
         { bucket: ch(hour - 3_600), pool_address: '0xpool', debt_scaled: '3600000000000000000000', borrow_index: '1000000000000000000000000000' },
         { bucket: ch(hour), pool_address: '0xpool', debt_scaled: '3600000000000000000000', borrow_index: '1001000000000000000000000000' },
@@ -227,6 +228,7 @@ describe('getRevenueFlow', () => {
       // The accrual seeds from the last observation BEFORE its window; these
       // fixtures put every observation inside it, so the seed read is empty.
       '-- rev:hollar-seed': [],
+      '-- rev:hollar-internal-debt': [],
       money_market_reserve_state_history: [
         { bucket: ch(hour - 5 * 3_600), pool_address: '0xquiet', debt_scaled: '3600000000000000000000', borrow_index: '1000000000000000000000000000' },
         { bucket: ch(hour), pool_address: '0xquiet', debt_scaled: '3600000000000000000000', borrow_index: '1001000000000000000000000000' },
@@ -256,6 +258,7 @@ describe('getRevenueFlow', () => {
       // The accrual seeds from the last observation BEFORE its window; these
       // fixtures put every observation inside it, so the seed read is empty.
       '-- rev:hollar-seed': [],
+      '-- rev:hollar-internal-debt': [],
       money_market_reserve_state_history: [
         { bucket: ch(stale - 3_600), pool_address: '0xstale', debt_scaled: '3600000000000000000000', borrow_index: '1000000000000000000000000000' },
         { bucket: ch(stale), pool_address: '0xstale', debt_scaled: '3600000000000000000000', borrow_index: '1001000000000000000000000000' },
@@ -282,6 +285,7 @@ describe('getRevenueFlow', () => {
       // The accrual seeds from the last observation BEFORE its window; these
       // fixtures put every observation inside it, so the seed read is empty.
       '-- rev:hollar-seed': [],
+      '-- rev:hollar-internal-debt': [],
       money_market_reserve_state_history: [
         { bucket: ch(hour - 3_600), pool_address: '0xrepaid', debt_scaled: '3600000000000000000000', borrow_index: '1000000000000000000000000000' },
         { bucket: ch(hour), pool_address: '0xrepaid', debt_scaled: '0', borrow_index: '1001000000000000000000000000' },
