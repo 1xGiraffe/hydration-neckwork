@@ -208,7 +208,7 @@ describe('notification rules', () => {
       kind: 'account-activity', params: { address: SS58, type: 'trade' }, name: 'watch', channels: [telegram.channelId], cooldownS: 60,
     })
     await updateRule(OWNER, rule.ruleId, { name: 'watch closely' })
-    await setNotificationState('cursor:raw-live', '9000001')
+    await setNotificationState('cursor:safety', '9000001')
 
     await reload(client)
 
@@ -220,7 +220,7 @@ describe('notification rules', () => {
     // Persisted in the canonical, target-shaped form — a row written under the
     // pre-target spelling reloads normalized, without a migration.
     expect(reloaded.params).toEqual({ target: { kind: 'address', address: SS58 }, type: 'trade' })
-    expect(getNotificationState('cursor:raw-live')).toBe('9000001')
+    expect(getNotificationState('cursor:safety')).toBe('9000001')
   })
 
   it('does not resurrect a deleted rule or channel on reload', async () => {

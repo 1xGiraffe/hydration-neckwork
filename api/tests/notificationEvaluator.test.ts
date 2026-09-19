@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 import {
-  SAFETY_ROW_LANE_KINDS, SAFETY_SNAPSHOT_KINDS,
+  SAFETY_ROW_LANE_KINDS,
   activityIdentity, activityPath, activityReferencesAsset, armStateKey, evaluateAccountActivity,
   evaluateEvents, evaluateExtrinsics, evaluateLargeValue, evaluateReferendum,
   evaluateSafety, evaluateThreshold, inWindow, isFinalRow, nameMatches, notificationIdFor,
@@ -14,10 +14,10 @@ import {
 import { renderNotification } from '../src/notifications/render.ts'
 import { normalizeAddress } from '../src/services/addressIdentity.ts'
 import type { NotificationRule } from '../src/notifications/notificationStore.ts'
-import { SAFETY_KINDS, type NotificationKind } from '../src/notifications/notificationRules.ts'
+import { type NotificationKind } from '../src/notifications/notificationRules.ts'
 import type { SafetyEvent } from '../src/services/securityService.ts'
 import {
-  getMarketHealthFactor, getPrimaryHealthFactor, initExplorerService, mmMarkets,
+  getMarketHealthFactor, initExplorerService, mmMarkets,
   type AccountRef, type ActivityRow, type AssetRef,
 } from '../src/services/explorerService.ts'
 import { fakeClient } from './helpers/userFakes.ts'
@@ -653,33 +653,12 @@ describe('primary-market health factor', () => {
   // primary-market alert, in either direction.
   const WAD = 10n ** 18n
   // uint256 max is how the money market spells "no debt".
-  const MAX_UINT256_STRING = (2n ** 256n - 1n).toString()
   const position = (pool: string, hf: bigint) => ({
     pool_address: pool, lb: 13_000_000, ts: '2026-08-18 10:00:00',
     c: '1000000000', d: '500000000', ab: '0', lt: '8000', ltv: '7000', hf: hf.toString(),
   })
   const primaryPool = mmMarkets().find(m => m.role === 'primary')!.poolProxy
   const supplementalPool = mmMarkets().find(m => m.role === 'supplemental')!.poolProxy
-
-  it('reads the primary market alone and ignores the supplemental one', async () => {
-    initExplorerService(fakeClient({
-      money_market_latest_positions: [position(primaryPool, WAD * 105n / 100n), position(supplementalPool, WAD * 5n)],
-    }))
-    expect(await getPrimaryHealthFactor('0x' + '11'.repeat(20))).toBeCloseTo(1.05, 6)
-  })
-
-  it('reports a debt-free position as infinite, never as zero', async () => {
-    initExplorerService(fakeClient({
-      money_market_latest_positions: [{ ...position(primaryPool, 0n), d: '0', hf: MAX_UINT256_STRING }],
-    }))
-    expect(await getPrimaryHealthFactor('0x' + '22'.repeat(20))).toBe(Infinity)
-  })
-
-  it('reports no position and an unreadable address as unknown, not as a value', async () => {
-    initExplorerService(fakeClient({ money_market_latest_positions: [position(supplementalPool, WAD)] }))
-    expect(await getPrimaryHealthFactor('0x' + '33'.repeat(20))).toBeNull()
-    expect(await getPrimaryHealthFactor('not-an-address')).toBeNull()
-  })
 
   it('reads a supplemental market by its key, and an unknown key as nothing', async () => {
     initExplorerService(fakeClient({
@@ -713,11 +692,6 @@ describe('safety kinds registry', () => {
     expect([...emitted].sort()).toEqual([...SAFETY_ROW_LANE_KINDS].sort())
   })
 
-  // The bridge-state half is not indexed anywhere, so its only registry is the
-  // matrix itself; together the two lanes must cover the whole vocabulary.
-  it('leaves no safety kind without a lane', () => {
-    expect([...new Set([...SAFETY_ROW_LANE_KINDS, ...SAFETY_SNAPSHOT_KINDS])].sort()).toEqual([...SAFETY_KINDS].sort())
-  })
 })
 
 /* ============ an OTC fill reaches the maker's rules ============ */

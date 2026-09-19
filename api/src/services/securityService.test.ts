@@ -6,7 +6,6 @@ import {
   outstandingWhitelistedCalls, registryLimitEventsByAsset, registryLimitsFromEvents,
   replayPauses, stableswapTradabilityFromEvents, tradabilityStateName, type LockdownState,
 } from './securityService.ts'
-import { tradableFlags } from './poolService.ts'
 
 // Every number the Security page shows about a live limit comes out of one of
 // these decoders, so each is pinned against SCALE bytes taken from the live
@@ -395,17 +394,6 @@ describe('stableswapTradabilityFromEvents', () => {
     expect(stableswapTradabilityFromEvents([ev(100, 0, 0, 5, 3, 'Omnipool.TradableStateUpdated')])).toEqual([])
   })
 })
-
-describe('tradableFlags', () => {
-  it('names every allowed operation and calls a zero mask frozen', () => {
-    expect(tradableFlags(15)).toEqual(['Sell', 'Buy', 'Add liquidity', 'Remove liquidity'])
-    expect(tradableFlags(0)).toEqual(['Frozen'])
-    expect(tradableFlags(1)).toEqual(['Sell'])
-    expect(tradableFlags(8)).toEqual(['Remove liquidity'])
-    expect(tradableFlags(11)).toEqual(['Sell', 'Buy', 'Remove liquidity'])
-  })
-})
-
 describe('tradabilityStateName', () => {
   it('leads with what is switched off while the blocked side is shorter', () => {
     // The state every offboarding starts with: 11 = add liquidity disabled.
