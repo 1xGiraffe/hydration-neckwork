@@ -6,9 +6,10 @@ import { PROTOCOL_REVENUE_PREDICATE_SQL, buildRevenueEventRowsSql } from '../src
 // this predicate only reads the destination class: 'lp' and the legacy destination-less
 // asset-fee leg are the LPs', everything else — routed out, burned, or retained in the
 // protocol-provided HDX position ('pol') — is the protocol's.
-const evaluate = (sql: string, row: { stream: string; dest: string }): boolean => {
-  // The predicate is plain SQL over two columns, so it can be checked directly.
+const evaluate = (sql: string, row: { stream: string; dest: string; internal_payer?: number }): boolean => {
+  // The predicate is plain SQL over three columns, so it can be checked directly.
   const expr = sql
+    .replaceAll('internal_payer', String(row.internal_payer ?? 0))
     .replaceAll('stream', JSON.stringify(row.stream))
     .replaceAll('dest', JSON.stringify(row.dest))
     .replaceAll('!=', '!==')
