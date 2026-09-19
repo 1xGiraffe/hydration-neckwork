@@ -80,11 +80,6 @@ export function errorEnvelope(code: string, message: string): { error: { code: s
   return { error: { code, message } }
 }
 
-// The same shape as a response schema, declared ONCE so every route that
-// documents a 4xx/5xx publishes the identical object in OpenAPI. A second copy
-// drifting would change the document for one route only.
-export const zErrorEnvelope = z.object({ error: z.object({ code: z.string(), message: z.string() }) })
-
 // The app's error handler turns a statusCode-carrying throw into that envelope,
 // so a route signals a caller error by throwing one of these rather than by
 // formatting a body itself.
@@ -125,24 +120,6 @@ export function parseAssets(raw: string | undefined): string[] {
   return [...new Set(parsed.data)].sort((a, b) => Number(a) - Number(b))
 }
 
-/**
- * A comma-separated enum filter (`status=`, `kind=`) as sorted, deduplicated
- * members.
- *
- * An unrecognised member is a caller error, never a filter to drop: ignoring it
- * would answer a narrow request with the whole set. `label` names the parameter
- * in that 400.
- */
-export function parseEnumCsv<T extends string>(raw: string | undefined, known: readonly T[], label: string): T[] {
-  const out: T[] = []
-  for (const value of csv(raw)) {
-    const member = known.find(candidate => candidate === value.toLowerCase())
-    if (!member) throw badRequest(`unknown ${label} '${value}'; expected one of ${known.join(', ')}`)
-    out.push(member)
-  }
-  return [...new Set(out)].sort()
-}
-
 // ---------------------------------------------------------------------------
 // Raw on-chain amounts
 // ---------------------------------------------------------------------------
@@ -158,12 +135,3 @@ export function rawAmount(value: unknown): string | null {
   return /^\d+$/.test(input) ? input : null
 }
 
-/** The amount for a field whose wire type is a non-null string. */
-export function rawAmountOrZero(value: unknown): string {
-  return rawAmount(value) ?? '0'
-}
-
-/** The amount as an integer, for arithmetic that never leaves BigInt. */
-export function rawAmountBigInt(value: unknown): bigint {
-  return BigInt(rawAmount(value) ?? '0')
-}

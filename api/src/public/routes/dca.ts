@@ -3,15 +3,13 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { csv, zAssetId, zHexAddress, zIsoTimestamp, zLimitOffset, zPage } from '../schemas/common.ts'
+import { csv, parseAssets, zAssetId, zHexAddress, zIsoTimestamp, zLimitOffset, zPage } from '../schemas/common.ts'
 import type { DcaStatus } from '../services/dcaSchedules.ts'
 import { queryDcaExecutions, queryDcaSchedules } from '../services/dcaSchedules.ts'
 
 // DCA schedules and their executions. See spec section "Trades / DCA".
 
 const DCA_STATUSES = ['created', 'completed', 'terminated', 'cancelled'] as const
-const MAX_ASSET_FILTERS = 20
-
 const zDcaScheduleRow = z.object({
   scheduleId: z.number().int(),
   owner: zHexAddress,
@@ -68,15 +66,6 @@ function parseStatuses(raw: string | undefined): DcaStatus[] {
   }
   return [...new Set(out)].sort()
 }
-
-function parseAssets(raw: string | undefined): string[] {
-  const assets = csv(raw)
-  if (assets.length > MAX_ASSET_FILTERS) throw badRequest(`assets accepts at most ${MAX_ASSET_FILTERS} ids, got ${assets.length}`)
-  const parsed = z.array(zAssetId).safeParse(assets)
-  if (!parsed.success) throw badRequest('assets must be decimal registry ids, e.g. assets=5,10')
-  return [...new Set(parsed.data)].sort((a, b) => Number(a) - Number(b))
-}
-
 const STATUS_DESCRIPTION = [
   '`status` is computed server-side from the schedule\'s events, never stored: `completed` when the pallet reported DCA.Completed, `cancelled` when a DCA.Terminated event came from a SIGNED extrinsic (the owner\'s own dca.terminate call), `terminated` when it came from a block hook (the pallet ending the schedule on an error), and `created` while it is still live. The signed-extrinsic signal is what the explorer\'s DCA page uses, so both surfaces label the same schedule the same way; the older data-lake heuristic (terminated with the last execution still only planned ⇒ cancelled) is the fallback when that signal is unavailable, and it mislabels an error termination that left a pending plan.',
   '`isRollingBudget: true` means the schedule has no total budget: it keeps spending whatever the owner holds. It is `null`, together with `singleTradeAmount`, `budget` and `periodBlocks`, when the schedule\'s terms were never recorded on chain — see PRE-ROUTER SCHEDULES below, the only case where that happens. `executedAmountIn`/`executedAmountOut` sum the schedule\'s DCA.TradeExecuted events and are always known, whatever the terms are. Sorted by most recent event first; a schedule with no events yet sorts last.',

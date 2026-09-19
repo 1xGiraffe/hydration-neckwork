@@ -32,10 +32,3 @@ export const zXcmTransfer = z.object({
   assetId: zAssetId,
   amount: AMOUNT,
 })
-
-export const zAccountXcmEvent = z.object({
-  ...XCM_ROW,
-  direction: z.enum(['in', 'out', 'other']).describe('`other` is a barrier/queue row that names no side; the global feed never serves one, so its enum has no such value.'),
-  assetId: zAssetId,
-  amount: AMOUNT,
-})
