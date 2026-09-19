@@ -9,6 +9,7 @@ import { useMe, useTagMapSync, logout } from '../hooks/useUser'
 import { useNotificationsOverview, usePendingNotificationHandoff } from '../hooks/useNotifications'
 import { AccountEmoji, ShortAddr, showIconFallback } from './ui'
 import { NotificationBell } from './NotificationBell'
+import { PREIS_URL } from '../surfaces'
 import type { AccountRef } from '../types'
 
 // Radix + the dialog itself are only needed once a visitor actually tries to
@@ -25,7 +26,10 @@ const DevicesDialog = lazy(() => import('./DevicesDialog').then(m => ({ default:
 // reveals the rest; `menuItems` orders the dropdown independently of the
 // trigger/highlight `items`. Every route is still reachable so deep links /
 // bookmarks keep working.
-type NavItem = { to: string; label: string; match: Route['name'][] }
+// `external` marks a destination outside this app: `to` is then an absolute URL
+// rather than a route, it can never be the active entry, and it is rendered as
+// a real anchor that opens in a new window and says so first.
+type NavItem = { to: string; label: string; match: Route['name'][]; external?: true }
 type NavGroup = { label: string; items: NavItem[]; menuItems?: NavItem[] }
 const IT = {
   activity: { to: paths.activity(), label: 'Activity', match: ['activity'] } as NavItem,
@@ -43,15 +47,23 @@ const IT = {
   contracts: { to: paths.contracts(), label: 'Contracts', match: ['contracts'] } as NavItem,
   security: { to: paths.security(), label: 'Security', match: ['security'] } as NavItem,
   governance: { to: paths.governance(), label: 'Governance', match: ['governance', 'referendum'] } as NavItem,
+  // Getting started with the MCP server. It sits in the Chain menu because
+  // that is where this app already keeps the destinations that are about the
+  // explorer itself rather than about one entity.
+  mcp: { to: paths.mcp(), label: 'MCP', match: ['mcp'] } as NavItem,
+  // Preis charts the same pairs the Assets list prices, which is why it sits in
+  // the Assets menu — but it is a separate app on its own host, so it leaves
+  // the Explorer and the entry says so.
+  preis: { to: PREIS_URL, label: 'preis charts', match: [], external: true } as NavItem,
 }
 // Liquidity lives under Assets at every width; the trigger navigates to Assets
 // so the menu lists only Liquidity. Security leads the Chain menu (it is the
 // entry a returning operator wants first) while the trigger keeps Blocks.
-const ASSETS_GROUP: NavGroup = { label: 'Assets', items: [IT.assets, IT.liquidity], menuItems: [IT.liquidity] }
+const ASSETS_GROUP: NavGroup = { label: 'Assets', items: [IT.assets, IT.liquidity], menuItems: [IT.liquidity, IT.preis] }
 const CHAIN_GROUP: NavGroup = {
   label: 'Chain',
-  items: [IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.security, IT.governance],
-  menuItems: [IT.security, IT.governance, IT.blocks, IT.extrinsics, IT.events, IT.contracts],
+  items: [IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.security, IT.governance, IT.mcp],
+  menuItems: [IT.security, IT.governance, IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.mcp],
 }
 // Mid-width fold (861–1119px, CSS-gated): HDX/HOLLAR/Revenue and the Assets
 // group collapse into this single wider Assets dropdown so the topbar search
@@ -62,7 +74,7 @@ const FOLDABLE = new Set(['HDX', 'HOLLAR', 'Revenue'])
 const ASSETS_FOLD_GROUP: NavGroup = {
   label: 'Assets',
   items: [IT.assets, IT.liquidity, IT.hdx, IT.hollar, IT.revenue],
-  menuItems: [IT.liquidity, IT.hdx, IT.hollar, IT.revenue],
+  menuItems: [IT.liquidity, IT.hdx, IT.hollar, IT.revenue, IT.preis],
 }
 // The desktop nav in visual order; the drawer keeps every destination flat.
 const NAV_ENTRIES: Array<{ kind: 'link'; item: NavItem } | { kind: 'group'; group: NavGroup; fold?: 'only' | 'hidden' }> = [
@@ -75,11 +87,29 @@ const NAV_ENTRIES: Array<{ kind: 'link'; item: NavItem } | { kind: 'group'; grou
   { kind: 'group', group: ASSETS_FOLD_GROUP, fold: 'only' },
   { kind: 'group', group: CHAIN_GROUP },
 ]
-const DRAWER_LINKS: NavItem[] = [IT.activity, IT.accounts, IT.assets, IT.liquidity, IT.hdx, IT.hollar, IT.revenue]
+const DRAWER_LINKS: NavItem[] = [IT.activity, IT.accounts, IT.assets, IT.liquidity, IT.preis, IT.hdx, IT.hollar, IT.revenue]
 const DRAWER_GROUPS: NavGroup[] = [CHAIN_GROUP]
 
 function matches(item: NavItem, route: Route): boolean {
   return item.match.includes(route.name)
+}
+
+// One destination inside a dropdown or the drawer. An external one is a real
+// anchor — the router cannot route an absolute URL — opening in a new window,
+// and it carries the same trailing arrow the "Open in …" links on detail pages
+// use, so a reader can tell it leaves the Explorer before clicking rather than
+// after. The drawer closes on a real navigation; an external link performs
+// none, so its onClick is what closes it.
+function NavDestination({ item, route, onClick }: { item: NavItem; route: Route; onClick?: () => void }) {
+  const className = matches(item, route) ? 'active' : ''
+  if (item.external) {
+    return (
+      <a href={item.to} className={className} target="_blank" rel="noopener noreferrer" onClick={onClick}>
+        {item.label} ↗
+      </a>
+    )
+  }
+  return <Link to={item.to} className={className} onClick={onClick}>{item.label}</Link>
 }
 
 // Sun/moon theme switch — rendered in the topbar on desktop and inside the
@@ -328,7 +358,7 @@ export function Topbar({ route }: { route: Route }) {
                 </Link>
                 <div className="nav-menu">
                   {(group.menuItems ?? group.items).map(it => (
-                    <Link key={it.to} to={it.to} className={matches(it, route) ? 'active' : ''} onClick={() => setOpenGroup(null)}>{it.label}</Link>
+                    <NavDestination key={it.to} item={it} route={route} onClick={() => setOpenGroup(null)} />
                   ))}
                 </div>
               </div>
@@ -366,14 +396,14 @@ export function Topbar({ route }: { route: Route }) {
             <div className="drawer-sec">
               <div className="sec-lbl">Explore</div>
               {DRAWER_LINKS.map(it => (
-                <Link key={it.to} to={it.to} className={matches(it, route) ? 'active' : ''}>{it.label}</Link>
+                <NavDestination key={it.to} item={it} route={route} onClick={() => setDrawer(false)} />
               ))}
             </div>
             {DRAWER_GROUPS.map(group => (
               <div className="drawer-sec" key={group.label}>
                 <div className="sec-lbl">{group.label}</div>
                 {(group.menuItems ?? group.items).map(it => (
-                  <Link key={it.to} to={it.to} className={matches(it, route) ? 'active' : ''}>{it.label}</Link>
+                  <NavDestination key={it.to} item={it} route={route} onClick={() => setDrawer(false)} />
                 ))}
               </div>
             ))}
