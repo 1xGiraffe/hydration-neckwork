@@ -1,6 +1,19 @@
 import { configDefaults, defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 
+// Regex with a trailing slash, not the '/api' prefix: a bare prefix also captures
+// PAGE routes that merely start with it — /api-tokens was proxied upstream as
+// '-tokens' instead of being served as the SPA. Production nginx matches
+// `location /api/` and never had the problem. Shared so the dev server and
+// `vite preview` cannot drift apart.
+const API_PROXY = {
+  '^/api/': {
+    target: 'http://localhost:3000',
+    changeOrigin: true,
+    rewrite: (path: string) => path.replace(/^\/api/, ''),
+  },
+}
+
 export default defineConfig({
   plugins: [react(), {
     // The authored index.html carries engineering rationale (favicon fallback,
@@ -41,30 +54,14 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      // Regex with a trailing slash, not the '/api' prefix: a bare prefix also
-      // captures PAGE routes that merely start with it — /api-tokens was
-      // proxied upstream as '-tokens' instead of being served as the SPA.
-      // Production nginx matches `location /api/` and never had the problem.
-      '^/api/': {
-        target: 'http://localhost:3000',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ''),
-      },
+      ...API_PROXY,
     },
   },
   // Keep preview behavior aligned with the development server.
   preview: {
     port: 5175,
     proxy: {
-      // Regex with a trailing slash, not the '/api' prefix: a bare prefix also
-      // captures PAGE routes that merely start with it — /api-tokens was
-      // proxied upstream as '-tokens' instead of being served as the SPA.
-      // Production nginx matches `location /api/` and never had the problem.
-      '^/api/': {
-        target: 'http://localhost:3000',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ''),
-      },
+      ...API_PROXY,
     },
   },
   test: {
