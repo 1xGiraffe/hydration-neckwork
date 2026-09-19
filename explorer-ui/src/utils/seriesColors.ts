@@ -106,15 +106,6 @@ function separateOne(color: string, taken: readonly string[], floor: number): st
   return best
 }
 
-// Colours for one list of series, in order, each far enough from the ones
-// before it. Anything unparseable (a CSS variable like the "Other" band) passes
-// through untouched.
-export function separateSeriesColors(colors: readonly string[], floor = FLOOR): string[] {
-  const out: string[] = []
-  for (const color of colors) out.push(separateOne(color, out, floor))
-  return out
-}
-
 // THE app-wide assignment of chart colours to assets: every asset that gets
 // charted anywhere resolves here, in one canonical order, so the same asset
 // wears the same colour on every surface (Omnipool bar vs its history, a pool

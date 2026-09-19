@@ -758,18 +758,6 @@ export interface Tag {
   icon: string
   memberCount: number
 }
-
-export interface IndexerStatus {
-  blockHeight: number
-  blockTimestamp: string
-  lagSeconds: number
-  chainBlockHeight: number
-  blocksBehindHead: number
-  // false when the API could not sample the chain head — blocksBehindHead is then
-  // measured against raw ingestion's own head, so 0 does not mean "in sync".
-  chainHeadSampled?: boolean
-}
-
 export interface EventRow {
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean

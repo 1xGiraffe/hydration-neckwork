@@ -3,7 +3,6 @@ import { noAutofill } from './ui'
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { useQuery, setQuery } from '../router'
 import type { AssetFilterItem } from '../types'
-import { parseUtcTimestamp } from '../utils/time'
 
 export interface ComboOption { value: string; label: string; sub?: string; search?: string }
 export interface FilterField {
@@ -283,11 +282,3 @@ export function useFilters(options: UseFiltersOptions = {}) {
   return { values, onChange, onClear, setDay }
 }
 
-// shared apply helpers
-export function tsInRange(ts: string, from?: string, to?: string): boolean {
-  const t = parseUtcTimestamp(ts)
-  if (!Number.isFinite(t)) return false
-  if (from) { const d = parseUtcTimestamp(from); if (Number.isFinite(d) && t < d) return false }
-  if (to) { const d = parseUtcTimestamp(to); if (Number.isFinite(d) && t >= d + 86_400_000) return false }
-  return true
-}
