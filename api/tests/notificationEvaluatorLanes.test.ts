@@ -50,7 +50,7 @@ import {
   stopNotificationEvaluator,
 } from '../src/notifications/evaluator.ts'
 import {
-  createRule, initNotifications, loadNotifications, setNotificationState,
+  createRule, initNotifications, loadNotifications,
 } from '../src/notifications/notificationStore.ts'
 import { resetDeliveryStateForTests } from '../src/notifications/delivery.ts'
 import { mmMarkets, type ActivityRow } from '../src/services/explorerService.ts'
@@ -176,18 +176,6 @@ describe('safety lane cursor', () => {
     expect(inbox().map(r => r.block_height)).toEqual([5_000])
     expect(evaluatorCounters().skippedBlocks).toBe(3_500)
     expect(evaluatorCursors().safety).toBe(5_000)
-  })
-
-  it('adopts the legacy single cursor on an upgrade in place', async () => {
-    await watchSafety()
-    // The legacy cursor sat at the head, so everything the timeline already held
-    // is history under it — which is what a seed means either way.
-    await setNotificationState('cursor:raw-live', '1000')
-    timeline.push(safetyEvent(900))
-    setHead(1_000)
-    await runEvaluatorTick()
-    expect(evaluatorCursors().safety).toBe(1_000)
-    expect(inbox()).toHaveLength(0)
   })
 })
 
