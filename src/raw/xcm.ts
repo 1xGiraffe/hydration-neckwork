@@ -1,13 +1,7 @@
 import type { RawCall, RawEvent } from './processor.js'
 import { callAddressToString, callSourceIndex, toJsonString } from './json.js'
 import { deriveTruncatedAccountId, extractHexLike, normalizeAccountId, normalizeH160 } from './accountIdentity.js'
-import type { RawBridgeEvidenceRow, RawOperationTraceRow, RawXcmActivityRow } from './types.js'
-
-export interface XcmExtractionResult {
-  xcmActivity: RawXcmActivityRow[]
-  bridgeEvidence: RawBridgeEvidenceRow[]
-  operationTraces: RawOperationTraceRow[]
-}
+import type { RawXcmActivityRow } from './types.js'
 
 interface SourceItem {
   kind: 'event' | 'call'
@@ -32,14 +26,7 @@ function isXcmName(name: string): boolean {
   return /^(PolkadotXcm|XTokens|XcmTransactor|OrmlXcm|MessageQueue|DmpQueue|XcmpQueue|CumulusXcm|Ump|ParachainSystem)\./.test(name)
 }
 
-function isBridgeName(name: string): boolean {
-  if (/hyperbridge/i.test(name)) return false
-  return /(Bridge|BridgeHub|Snowbridge|Wormhole|EthereumInbound|EthereumOutbound|InboundQueue|OutboundQueue|Vaa|TokenBridge)/i.test(name)
-}
 
-function isOperationTraceName(name: string, payload: unknown): boolean {
-  return /^Broadcast\./.test(name) || findFirstByKey(payload, /operation_?stack|route|hops/i) != null
-}
 
 function directionFor(name: string, payload: unknown): string {
   if (/transfer|send|reserve_transfer|teleport|export|outbound/i.test(name)) return 'outbound'
@@ -67,23 +54,7 @@ function visitObjects(value: unknown, cb: (value: unknown, keyHint: string) => b
   return false
 }
 
-function findFirstByKey(value: unknown, keyPattern: RegExp): unknown | null {
-  let found: unknown | null = null
-  visitObjects(value, (current, keyHint) => {
-    if (!keyPattern.test(keyHint)) return
-    found = current
-    return true
-  })
-  return found
-}
 
-function collectByKey(value: unknown, keyPattern: RegExp): unknown[] {
-  const matches: unknown[] = []
-  visitObjects(value, (current, keyHint) => {
-    if (keyPattern.test(keyHint)) matches.push(current)
-  })
-  return matches
-}
 
 function collectLocations(value: unknown): unknown[] {
   const locations: unknown[] = []
@@ -189,44 +160,9 @@ function collectAccount(value: unknown, keys: RegExp): string | null {
   return account
 }
 
-function collectExternalAccount(value: unknown): string | null {
-  let external: string | null = null
-  visitObjects(value, (current, keyHint) => {
-    if (external != null || !/ethereum|evm|h160|accountkey20|external/i.test(keyHint)) return
-    const h160 = normalizeH160(current)
-    if (h160 != null) external = h160
-  })
-  return external
-}
 
-function collectFirstAssetId(value: unknown): string | null {
-  let assetId: string | null = null
-  visitObjects(value, (current, keyHint) => {
-    if (assetId != null || !/asset|currency|token/i.test(keyHint)) return
-    if (typeof current === 'number' && Number.isSafeInteger(current)) assetId = current.toString()
-    if (typeof current === 'bigint') assetId = current.toString()
-    if (typeof current === 'string' && /^\d+$/.test(current)) assetId = current
-  })
-  return assetId
-}
 
-function collectFirstAmount(value: unknown): string | null {
-  let amount: string | null = null
-  visitObjects(value, (current, keyHint) => {
-    if (amount != null || !/amount|balance|fungible|fee|value/i.test(keyHint)) return
-    if (typeof current === 'number' && Number.isFinite(current)) amount = Math.trunc(current).toString()
-    if (typeof current === 'bigint') amount = current.toString()
-    if (typeof current === 'string' && /^\d+$/.test(current)) amount = current
-  })
-  return amount
-}
 
-function bridgeKind(name: string): string {
-  if (/snowbridge/i.test(name)) return 'snowbridge'
-  if (/wormhole|vaa|tokenbridge/i.test(name)) return 'wormhole'
-  if (/ethereum/i.test(name)) return 'ethereum'
-  return 'bridge'
-}
 
 function sourceFromEvent(event: RawEvent): SourceItem {
   return {
@@ -276,60 +212,15 @@ function xcmRow(source: SourceItem, blockTimestamp: string, ingestSource: string
   }
 }
 
-function bridgeRow(source: SourceItem, blockTimestamp: string, ingestSource: string): RawBridgeEvidenceRow {
-  return {
-    block_height: source.blockHeight,
-    block_timestamp: blockTimestamp,
-    source_kind: source.kind,
-    source_index: source.sourceIndex,
-    event_index: source.eventIndex,
-    extrinsic_index: source.extrinsicIndex,
-    call_address: source.callAddress,
-    name: source.name,
-    bridge_kind: bridgeKind(source.name),
-    direction: directionFor(source.name, source.payload),
-    account_id: collectAccount(source.payload, /account|sender|from|origin|recipient|beneficiary|to|user/i),
-    external_account: collectExternalAccount(source.payload),
-    asset_id: collectFirstAssetId(source.payload),
-    amount: collectFirstAmount(source.payload),
-    evidence_json: toJsonString({
-      name: source.name,
-      payload: source.payload,
-      locations: collectLocations(source.payload),
-      external_hints: collectExternalHints(source.payload),
-    }),
-    ingest_source: ingestSource,
-  }
-}
 
-function operationRow(source: SourceItem, blockTimestamp: string, ingestSource: string): RawOperationTraceRow {
-  const operationStack = findFirstByKey(source.payload, /operation_?stack|route|hops/i) ?? null
-  return {
-    block_height: source.blockHeight,
-    block_timestamp: blockTimestamp,
-    trace_id: `${source.blockHeight}:${source.kind}:${source.sourceIndex}`,
-    event_index: source.eventIndex,
-    extrinsic_index: source.extrinsicIndex,
-    call_address: source.callAddress,
-    operation_name: source.name,
-    account_id: collectAccount(source.payload, /account|sender|from|origin|recipient|beneficiary|to|user|who/i),
-    operation_stack_json: toJsonString(operationStack),
-    assets_json: toJsonString(collectByKey(source.payload, /asset|currency|token/i)),
-    amounts_json: toJsonString(collectByKey(source.payload, /amount|balance|fungible|fee|value/i)),
-    evidence_json: toJsonString(source.payload),
-    ingest_source: ingestSource,
-  }
-}
 
-export function extractXcmBridgeAndOperationRows(
+export function extractXcmActivityRows(
   events: RawEvent[],
   calls: RawCall[],
   blockTimestamp: string,
   ingestSource: string,
-): XcmExtractionResult {
+): RawXcmActivityRow[] {
   const xcmActivity: RawXcmActivityRow[] = []
-  const bridgeEvidence: RawBridgeEvidenceRow[] = []
-  const operationTraces: RawOperationTraceRow[] = []
 
   const sources = [
     ...events.map(sourceFromEvent),
@@ -346,13 +237,7 @@ export function extractXcmBridgeAndOperationRows(
     if (isXcmName(source.name)) {
       xcmActivity.push(xcmRow(source, blockTimestamp, ingestSource))
     }
-    if (isBridgeName(source.name)) {
-      bridgeEvidence.push(bridgeRow(source, blockTimestamp, ingestSource))
-    }
-    if (isOperationTraceName(source.name, source.payload)) {
-      operationTraces.push(operationRow(source, blockTimestamp, ingestSource))
-    }
   }
 
-  return { xcmActivity, bridgeEvidence, operationTraces }
+  return xcmActivity
 }

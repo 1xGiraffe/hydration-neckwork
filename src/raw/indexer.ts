@@ -46,7 +46,7 @@ import type {
   RawExtrinsicRow,
   SnapshotState,
 } from './types.js'
-import { extractXcmBridgeAndOperationRows } from './xcm.js'
+import { extractXcmActivityRows } from './xcm.js'
 
 export interface RawRunOptions {
   fromBlock?: number
@@ -579,7 +579,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
           ingestSource,
         ))
       const moneyMarket = await tracePhase(blockHeight, 'money_market', () => extractMoneyMarketRows(evmLogRows, ingestSource))
-      const xcmBridgeOperations = extractXcmBridgeAndOperationRows(block.events, block.calls, blockTimestamp, ingestSource)
+      const xcmActivityRows = extractXcmActivityRows(block.events, block.calls, blockTimestamp, ingestSource)
 
       ctx.store.addAccountAliases(accountAliasRows)
       ctx.store.addEvmLogs(evmLogRows)
@@ -588,18 +588,14 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       ctx.store.addMoneyMarketEvents(moneyMarket.events)
       ctx.store.addMoneyMarketPositions(moneyMarket.positions)
       ctx.store.addMoneyMarketReserves(moneyMarket.reserves)
-      ctx.store.addXcmActivity(xcmBridgeOperations.xcmActivity)
-      ctx.store.addBridgeEvidence(xcmBridgeOperations.bridgeEvidence)
-      ctx.store.addOperationTraces(xcmBridgeOperations.operationTraces)
+      ctx.store.addXcmActivity(xcmActivityRows)
 
       aliasRowsPersisted += accountAliasRows.length
       evmLogsPersisted += evmLogRows.length
       balanceRowsPersisted += balances.observations.length
       parserWarningsPersisted += balances.warnings.length + moneyMarket.warnings.length + synthetic.warnings.length + evmLogRows.filter(row => row.warning != null).length
       moneyMarketRowsPersisted += moneyMarket.events.length + moneyMarket.positions.length + moneyMarket.reserves.length
-      xcmRowsPersisted += xcmBridgeOperations.xcmActivity.length +
-        xcmBridgeOperations.bridgeEvidence.length +
-        xcmBridgeOperations.operationTraces.length
+      xcmRowsPersisted += xcmActivityRows.length
 
       // Track every borrower seen via event-driven positions, then re-snapshot the
       // whole set on chain-time boundaries — the first block past each 12h mark on
