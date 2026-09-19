@@ -64,8 +64,8 @@ export const config: Config = {
   // time is ClickHouse insert round-trips).
   // 750ms rather than 2000ms because the poll interval has to stay well under a
   // block: at a 2s block time 2000ms is exactly one poll per block, so any jitter
-  // costs a full block of lag and a missed poll is invisible. At 6s it oversampled
-  // 3:1; 750ms keeps roughly that ratio at 2s and 8:1 today.
+  // costs a full block of lag and a missed poll is invisible. At the 6s the chain
+  // ran before runtime 440 it oversampled 8:1; at ~2s it still samples ~3:1.
   RPC_HEAD_POLL_MS: integerFromEnvironment('RPC_HEAD_POLL_MS', 750),
 
   // Identity sources beyond Hydration, in falling display priority. The People

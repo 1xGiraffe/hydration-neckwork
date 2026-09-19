@@ -47,9 +47,8 @@ export {
 
 // Pool volumes and fee revenue over a rolling window, from the `pool_swap_legs`
 // projection (clickhouse/schema/006_public.sql). The rules implemented here are
-// normative in docs/superpowers/specs/2026-08-12-public-rest-api-design.md
-// § Semantics 1, 2 and 6; where this file deviates from the data lake, the spec
-// section says so and the endpoint description repeats it.
+// normative here; where this file deviates from the data lake, the endpoint's
+// OpenAPI description says so.
 //
 // Three properties drive the shape of every query below:
 //

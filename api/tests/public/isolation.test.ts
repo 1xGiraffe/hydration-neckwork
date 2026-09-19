@@ -5,7 +5,7 @@ import { join, posix } from 'node:path'
 
 // The public API is a frozen, versioned contract; the explorer's read models are
 // not. This test pins the import allow-list from the design spec
-// (docs/superpowers/specs/2026-08-12-public-rest-api-design.md, "Isolation
+// (AGENTS.md § Public API, "Isolation
 // rule") so neither surface can start depending on the other by accident.
 const API_SRC = fileURLToPath(new URL('../../src/', import.meta.url))
 const PUBLIC_DIR = 'public/'

@@ -118,8 +118,7 @@ export function aprToApy(aprPerc: string, windowDays: number): string {
  * The LP fee APR's numerator is a question about WHO RECEIVED a fee, which the
  * shared helper does not carry — it serves the volume and stableswap paths, where
  * what a trade PAID is the whole question, and adding an argMax there would cost
- * every one of them a column for nobody's benefit. Same departure, and the same
- * reason, as feesCharts' `feeLegsCteSql`.
+ * every one of them a column for nobody's benefit.
  *
  * The GROUP BY is the destination table's ORDER BY (its ReplacingMergeTree
  * replacement key), so a replayed range cannot contribute a leg twice.

@@ -27,10 +27,10 @@ const USD_UNIT = 10n ** BigInt(USD_DECIMALS)
 // out of the map and contributes nothing, rather than valuing today's holdings at
 // a price from months ago.
 //
-// Expressed in HOURS, not blocks. A block-count bound (7,200 blocks ≈ 12 h) holds
-// only while a block is 6 s; at 2 s the same constant would silently become 4 h and
+// Expressed in HOURS, not blocks. A block-count bound (7,200 blocks) means 12 h
+// at a 6 s block and 4 h at the ~2 s the chain runs now, which would silently
 // drop every low-liquidity asset whose feed updates less often than that — a
-// wrong valuation, not a slower one. The bound is resolved to a block height
+// wrong valuation, not a slower one. An hour bound is immune to the cadence. The bound is resolved to a block height
 // against `blocks` at query time (see currentPrices), so the read still prunes on
 // `prices`' primary key.
 const CURRENT_PRICE_WINDOW_HOURS = 12

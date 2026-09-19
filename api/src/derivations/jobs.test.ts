@@ -333,7 +333,7 @@ describe('staging twins', () => {
   })
 })
 
-// pool_swap_hourly exists to keep the public fees charts off a 65 M-leg scan. Its
+// pool_swap_hourly exists to keep the pool/stats/DefiLlama reads off a 65 M-leg scan. Its
 // correctness rests on three things a unit test can pin without a database: the
 // deduplication happens BEFORE the sum, the partition it rebuilds is the source's
 // own month, and the hour in progress is never written.

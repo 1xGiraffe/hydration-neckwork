@@ -1584,9 +1584,9 @@ interface LaneOutcome {
   /**
    * The window the lane matched. The CALLER turns it into the next cursor
    * (`laneCursor`); a lane never names its own. That is what makes the
-   * source-watermark clamp unskippable — while each lane computed its own
-   * cursor, six of the seven re-typed the clamp with the watermark read AFTER
-   * their source query, which defeats it silently.
+   * source-watermark clamp unskippable: a lane that computed its own cursor
+   * could re-type the clamp with the watermark read AFTER its source query,
+   * which defeats it silently.
    */
   window: BlockWindow
   /**
@@ -2267,7 +2267,7 @@ async function dcaStartMatches(rules: NotificationRule[], window: BlockWindow): 
 }
 
 // The measured parachain slot, so a schedule's rate is not computed against a
-// nominal 6s while the chain runs ~4.8s (and 2s is planned). Cached for a minute:
+// nominal 6s while the chain runs at its measured ~2s pace. Cached for a minute:
 // it moves with runtime upgrades, not between ticks.
 let blockMsCache: { ms: number; at: number } | null = null
 async function paraBlockMsForEvaluator(): Promise<number> {

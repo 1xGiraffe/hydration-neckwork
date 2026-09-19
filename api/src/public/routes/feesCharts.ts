@@ -10,8 +10,8 @@ import {
 
 // GET /api/v1/fees/charts — the revenue/fees page, drop-in for
 // hydration-metrics-aggregator. Semantics and the measured deviations from the
-// incumbent are documented in ../services/feesCharts.ts and normative in
-// docs/superpowers/specs/2026-08-12-public-rest-api-design.md § Phase 2.
+// incumbent are normative in ../services/feesCharts.ts and repeated in each
+// route's OpenAPI description.
 //
 // The path is /api/v1/… rather than /v1/… because that is the incumbent's, and a
 // drop-in means a base-URL swap and nothing else. Its values are likewise JSON

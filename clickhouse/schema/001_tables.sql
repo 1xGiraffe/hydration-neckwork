@@ -29,10 +29,10 @@ CREATE TABLE IF NOT EXISTS price_data.account_swap_activity (`account` String, `
 CREATE TABLE IF NOT EXISTS price_data.account_swap_activity_queue (`queued_at` DateTime64(3), `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `asset_in` UInt32, `asset_out` UInt32, `amount_in` String, `amount_out` String, `ingested_at` DateTime) ENGINE = MergeTree PARTITION BY toYYYYMM(queued_at) ORDER BY (queued_at, block_height, event_index, ingested_at) TTL toDateTime(queued_at) + toIntervalDay(7) SETTINGS index_granularity = 1024;
 CREATE TABLE IF NOT EXISTS price_data.account_swap_activity_queue_state (`id` UInt8, `queued_at` DateTime64(3), `block_height` UInt32, `event_index` UInt32, `ingested_at` DateTime, `updated_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(updated_at) ORDER BY id SETTINGS index_granularity = 64;
 CREATE TABLE IF NOT EXISTS price_data.account_tags (`label_id` String, `label_name` String, `color` String DEFAULT '', `note` String DEFAULT '', `icon` String DEFAULT '', `account_id` String, `deleted` UInt8 DEFAULT 0, `created_at` DateTime DEFAULT now(), `updated_at` DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (label_id, account_id) SETTINGS index_granularity = 8192;
--- `toDateTime(block_height * 12)` — the synthetic block clock, six sites.
+-- `toDateTime(block_height * 12)` — the synthetic block clock, eight sites.
 -- ────────────────────────────────────────────────────────────────────────────
 -- The 12 here is NOT the chain's block time — the chain ran at ~12-15s until
--- Q3 2025, ~6s since, and is migrating to 2s; the constant matched the early
+-- Q3 2025, ~6s until runtime 440, ~2s since; the constant matched the early
 -- era by origin but is now decoupled. It is a fixed constant that maps a block height into a
 -- monotonic, evenly spaced pseudo-date, purely so ClickHouse has something to
 -- partition a block-keyed table by without carrying a timestamp column. Nothing
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS price_data.account_tags (`label_id` String, `label_na
 --   * A "month" partition is 216,000 blocks of block-space, which is ~15 real
 --     days at 6s and ~5 at 2s. The partitions get smaller in wall-clock terms as
 --     the chain speeds up; they do not get wrong.
---   * The six sites must carry the SAME constant or partitions stop lining up
+--   * The eight sites must carry the SAME constant or partitions stop lining up
 --     and REPLACE PARTITION publishes into the wrong bucket:
 --       001_tables.sql: account_trade_volume, prices, trade_volume_by_account,
 --                       account_trade_volume_staging (a staging twin's PARTITION BY

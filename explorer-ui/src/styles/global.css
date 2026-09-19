@@ -245,7 +245,7 @@
 
    The floor for badge text is 3:1 rather than 4.5:1 — a deliberate trade to
    buy the range these ramps need. Every shade is checked against it in both
-   themes; see docs/superpowers/specs for the check.
+   themes.
    ------------------------------------------------------------------ */
 
 * , *::before, *::after { box-sizing: border-box; }

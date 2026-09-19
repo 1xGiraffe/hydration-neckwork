@@ -159,7 +159,7 @@ async function atomicFullReplace(
 // (clickhouse/schema), an MV over the same swap-row filter. Asking raw_events
 // directly meant a full-table aggregate every cycle: the derived partition key
 // is toYYYYMM(toDateTime(block_height * 12)) — a synthetic block-space clock, not
-// the chain's block time, identical at all six sites and not to be re-pinned at a
+// the chain's block time, identical at all eight sites and not to be re-pinned at a
 // block-time change (see clickhouse/schema/001_tables.sql above
 // account_trade_volume) — which ClickHouse cannot invert into a primary-key range, and raw_events is partitioned on real
 // block_timestamp, so neither form of pruning applied. max() is idempotent under

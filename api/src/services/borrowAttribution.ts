@@ -1,6 +1,5 @@
 // Per-account borrow-interest attribution for account_revenue — the borrow
-// streams' account-grain truth (spec: docs/superpowers/specs/
-// 2026-08-14-revenue-dashboard-design.md).
+// streams' account-grain truth.
 //
 // The core is Aave's own bookkeeping identity. A holder's debt balance is
 // scaled × index / RAY, and every balance-changing event's principal flow is
