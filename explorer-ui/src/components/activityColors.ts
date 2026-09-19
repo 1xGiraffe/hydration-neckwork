@@ -164,10 +164,6 @@ const INTENT_ACTION_WORD: Record<string, string> = { Place: 'placed', Fill: 'fil
 export function intentLabel(kind: string | undefined, action: string | undefined): string {
   return `${INTENT_KIND_WORD[kind ?? ''] ?? 'Intent'} ${INTENT_ACTION_WORD[action ?? ''] ?? ''}`.trim()
 }
-// The same words as a table, keyed `${kind}:${action}`, for a surface that wants a
-// lookup rather than a call. Derived, so it cannot drift from intentLabel.
-export const INTENT_LABELS: Record<string, string> = Object.fromEntries(
-  Object.keys(INTENT_KIND_WORD).flatMap(kind => Object.keys(INTENT_ACTION_WORD).map(action => [`${kind}:${action}`, intentLabel(kind, action)])))
 // Placing an order, filling it, leaving it (cancelled or expired) and a DCA intent's
 // trade are the four acts a reader tells apart; a partial fill IS a fill and an
 // expiry IS the order leaving, so each shares its sibling's shade.

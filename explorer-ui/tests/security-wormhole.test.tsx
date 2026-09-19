@@ -3,7 +3,7 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Security } from '../src/pages/Security'
-import { WORMHOLE_SEVERITY, WORMHOLE_STATUS, wormholeExplorerLink } from '../src/utils/security'
+import { WORMHOLE_STATUS, wormholeExplorerLink } from '../src/utils/security'
 import type { SecuritySection } from '../src/router'
 import { buildSecurityWormhole, mockSync } from './fixtures/mockApi'
 import type { SecurityDashboard, WormholeBridgeDetail, WormholeStatus } from '../src/types'
@@ -465,15 +465,8 @@ describe('Wormhole rate limits', () => {
 })
 
 describe('Wormhole status table', () => {
-  it('ranks a deficit above every other verdict and a surplus below an unread chain', () => {
-    const order = (['deficit', 'attention', 'unverified', 'unconfigured', 'surplus', 'ok'] as WormholeStatus[])
-      .map(s => WORMHOLE_SEVERITY[s])
-    expect(order).toEqual([...order].sort((a, b) => b - a))
-    expect(WORMHOLE_SEVERITY.unconfigured).toBeGreaterThan(WORMHOLE_SEVERITY.surplus)
-  })
-
   it('gives every verdict a label and a tone', () => {
-    for (const status of Object.keys(WORMHOLE_SEVERITY) as WormholeStatus[]) {
+    for (const status of Object.keys(WORMHOLE_STATUS) as WormholeStatus[]) {
       expect(WORMHOLE_STATUS[status].label, status).toBeTruthy()
       expect(WORMHOLE_STATUS[status].tone, status).toMatch(/^var\(--/)
     }

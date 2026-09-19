@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ethCall, ethCallAt, ethEstimateGas, ethGasPrice, ethGetCode, ethGetTransactionReceipt, EvmRpcError } from '../src/evmRpc'
+import { ethCall, ethCallAt, ethEstimateGas, ethGasPrice, ethGetCode, EvmRpcError } from '../src/evmRpc'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -71,19 +71,6 @@ describe('evmRpc', () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
     expect(body.method).toBe('eth_gasPrice')
     expect(body.params).toEqual([])
-  })
-
-  it('answers null for a pending tx receipt and the object once mined', async () => {
-    const receipt = { status: '0x1', blockNumber: '0x10', transactionHash: '0x' + 'aa'.repeat(32) }
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ jsonrpc: '2.0', id: 1, result: null }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ jsonrpc: '2.0', id: 1, result: receipt }) })
-    vi.stubGlobal('fetch', fetchMock)
-    await expect(ethGetTransactionReceipt(receipt.transactionHash)).resolves.toBeNull()
-    await expect(ethGetTransactionReceipt(receipt.transactionHash)).resolves.toEqual(receipt)
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
-    expect(body.method).toBe('eth_getTransactionReceipt')
-    expect(body.params).toEqual([receipt.transactionHash])
   })
 
   it('replays a call with from/value at a specific block via ethCallAt', async () => {

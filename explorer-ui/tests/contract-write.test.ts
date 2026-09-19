@@ -2,13 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { writeFunctions } from '../src/abiShape'
 import { encodeCall, parseArgs } from '../src/abiCodec'
 import {
-  hydrationChainParams, ensureHydrationChain, gasWithMargin, gasPriceWithMargin, parseWethValue, runEvmWrite,
+  hydrationChainParams, ensureHydrationChain, gasWithMargin, gasPriceWithMargin, parseWethValue,
 } from '../src/contractWrite'
-import type { WriteStage } from '../src/contractWrite'
 
-const TO = '0x531a654d1696ed52e7275a8cede955e82620f99a'
-const FROM = '0x9a1c2b3d4e5f60718293a4b5c6d7e8f901234567'
-const TX_HASH = '0x' + 'aa'.repeat(32)
 const ORIGIN = 'https://hydration-explorer.neckwork.net'
 
 const ABI = [
@@ -140,124 +136,5 @@ describe('parseWethValue', () => {
     expect(() => parseWethValue('abc')).toThrow(/WETH/)
     expect(() => parseWethValue('-1')).toThrow(/WETH/)
     expect(() => parseWethValue('1.2.3')).toThrow(/WETH/)
-  })
-})
-
-describe('runEvmWrite lifecycle', () => {
-  const rpcWith = (receipts: (null | { status: string; blockNumber: string; transactionHash: string })[], callError?: unknown) => {
-    let i = 0
-    return {
-      getTransactionReceipt: async () => receipts[Math.min(i++, receipts.length - 1)],
-      call: async () => { if (callError) throw callError; return '0x' },
-    }
-  }
-
-  it('walks wallet-pending → submitted → in-block → success and sends the exact tx', async () => {
-    const stages: WriteStage[] = []
-    const { provider, calls } = mockProvider(method => {
-      if (method === 'eth_sendTransaction') return TX_HASH
-      return null
-    })
-    const final = await runEvmWrite({
-      provider, from: FROM, to: TO, data: '0xd0e30db0', valueWei: 0n, explorerOrigin: ORIGIN,
-      rpc: rpcWith([null, { status: '0x1', blockNumber: '0x10', transactionHash: TX_HASH }]),
-      decodeRevert: () => null,
-      onStage: s => stages.push(s),
-      pollMs: 0,
-    })
-    expect(stages.map(s => s.phase)).toEqual(['wallet-pending', 'submitted', 'in-block', 'success'])
-    expect(final).toEqual({ phase: 'success', txHash: TX_HASH, blockHeight: 16 })
-    const send = calls.find(c => c.method === 'eth_sendTransaction')!
-    expect(send.params).toEqual([{ from: FROM, to: TO, data: '0xd0e30db0' }])
-  })
-
-  it('carries a payable value as hex wei', async () => {
-    const { provider, calls } = mockProvider(method => (method === 'eth_sendTransaction' ? TX_HASH : null))
-    await runEvmWrite({
-      provider, from: FROM, to: TO, data: '0xd0e30db0', valueWei: 1_500_000_000_000_000_000n, explorerOrigin: ORIGIN,
-      rpc: rpcWith([{ status: '0x1', blockNumber: '0x10', transactionHash: TX_HASH }]),
-      decodeRevert: () => null, onStage: () => {}, pollMs: 0,
-    })
-    const send = calls.find(c => c.method === 'eth_sendTransaction')!
-    expect(send.params).toEqual([{ from: FROM, to: TO, data: '0xd0e30db0', value: '0x14d1120d7b160000' }])
-  })
-
-  it('decodes the revert of a mined-but-failed tx by replaying the call at its block', async () => {
-    const stages: WriteStage[] = []
-    const { provider } = mockProvider(method => (method === 'eth_sendTransaction' ? TX_HASH : null))
-    const final = await runEvmWrite({
-      provider, from: FROM, to: TO, data: '0xd0e30db0', valueWei: 0n, explorerOrigin: ORIGIN,
-      rpc: rpcWith([{ status: '0x0', blockNumber: '0x10', transactionHash: TX_HASH }], Object.assign(new Error('execution reverted'), { data: '0x08c379a0' })),
-      decodeRevert: data => (data === '0x08c379a0' ? 'ERC20: transfer amount exceeds balance' : null),
-      onStage: s => stages.push(s),
-      pollMs: 0,
-    })
-    expect(stages.map(s => s.phase)).toEqual(['wallet-pending', 'submitted', 'in-block', 'reverted'])
-    expect(final).toEqual({ phase: 'reverted', txHash: TX_HASH, blockHeight: 16, reason: 'ERC20: transfer amount exceeds balance' })
-  })
-
-  it('reports a wallet rejection as failed without polling', async () => {
-    const stages: WriteStage[] = []
-    const { provider } = mockProvider(method => {
-      if (method === 'eth_sendTransaction') throw Object.assign(new Error('User rejected the request.'), { code: 4001 })
-      return null
-    })
-    const final = await runEvmWrite({
-      provider, from: FROM, to: TO, data: '0xd0e30db0', valueWei: 0n, explorerOrigin: ORIGIN,
-      rpc: rpcWith([null]), decodeRevert: () => null, onStage: s => stages.push(s), pollMs: 0,
-    })
-    expect(final.phase).toBe('failed')
-    expect((final as { error: string }).error).toMatch(/rejected/i)
-    expect(stages.map(s => s.phase)).toEqual(['wallet-pending', 'failed'])
-  })
-
-  // Three minutes of receipt polling outlives the panel that started it, so an
-  // abort has to stop the RPC calls AND the stages — a stage emitted after the
-  // caller is gone lands on an unmounted component.
-  it('stops polling and stops emitting once the caller aborts', async () => {
-    const stages: WriteStage[] = []
-    const controller = new AbortController()
-    const { provider } = mockProvider(method => (method === 'eth_sendTransaction' ? TX_HASH : null))
-    let receiptCalls = 0
-    const final = await runEvmWrite({
-      provider, from: FROM, to: TO, data: '0xd0e30db0', valueWei: 0n, explorerOrigin: ORIGIN,
-      rpc: {
-        getTransactionReceipt: async () => {
-          receiptCalls++
-          controller.abort()
-          return { status: '0x1', blockNumber: '0x10', transactionHash: TX_HASH }
-        },
-        call: async () => '0x',
-      },
-      decodeRevert: () => null,
-      onStage: s => stages.push(s),
-      pollMs: 0, maxPolls: 60, signal: controller.signal,
-    })
-
-    expect(receiptCalls).toBe(1)
-    expect(stages.map(s => s.phase)).toEqual(['wallet-pending', 'submitted'])
-    expect(final).toEqual({ phase: 'submitted', txHash: TX_HASH })
-  })
-
-  it('never starts polling at all when it is handed an already-aborted signal', async () => {
-    const { provider } = mockProvider(method => (method === 'eth_sendTransaction' ? TX_HASH : null))
-    let receiptCalls = 0
-    const final = await runEvmWrite({
-      provider, from: FROM, to: TO, data: '0xd0e30db0', valueWei: 0n, explorerOrigin: ORIGIN,
-      rpc: { getTransactionReceipt: async () => { receiptCalls++; return null }, call: async () => '0x' },
-      decodeRevert: () => null, onStage: () => {}, pollMs: 0, signal: AbortSignal.abort(),
-    })
-
-    expect(receiptCalls).toBe(0)
-    expect(final).toEqual({ phase: 'submitted', txHash: TX_HASH })
-  })
-
-  it('stays on submitted when the receipt never lands within the poll budget', async () => {
-    const { provider } = mockProvider(method => (method === 'eth_sendTransaction' ? TX_HASH : null))
-    const final = await runEvmWrite({
-      provider, from: FROM, to: TO, data: '0xd0e30db0', valueWei: 0n, explorerOrigin: ORIGIN,
-      rpc: rpcWith([null]), decodeRevert: () => null, onStage: () => {}, pollMs: 0, maxPolls: 3,
-    })
-    expect(final).toEqual({ phase: 'submitted', txHash: TX_HASH })
   })
 })

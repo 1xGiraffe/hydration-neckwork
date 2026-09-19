@@ -101,16 +101,6 @@ export const AUDITS: Audit[] = [
   { date: 'Mar 2022', firm: 'BlockScience', scope: 'Omnipool economics' },
 ]
 
-// Wormhole backing — how each parity verdict reads, and where a custody handle
-// can be inspected on the chain that holds it.
-//
-// Severity runs deficit → attention → unverified → unconfigured → surplus → ok:
-// an unread chain outranks a surplus because "we cannot tell" is a worse answer
-// than "there is more custody than needed", which is the seeded steady state.
-export const WORMHOLE_SEVERITY: Record<WormholeStatus, number> = {
-  deficit: 5, attention: 4, unverified: 3, unconfigured: 2, surplus: 1, ok: 0,
-}
-
 export interface WormholeStatusMeta {
   // Badge wording in the assets table.
   label: string

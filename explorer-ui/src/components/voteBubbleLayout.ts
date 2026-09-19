@@ -119,14 +119,6 @@ export function radiusScale(weights: number[], maxWeight: number, width: number)
   return Math.max(MIN_R, Math.min(scale, HEIGHT / 2.4))
 }
 
-// The referendum page's entry point: fold under nothing (a null resolver keeps
-// every voter individual — VoteBubbles passes resolveTag instead). Kept as the
-// packer's plain-voters form so the pinned coordinate tests keep meaning what
-// they always did.
-export function packVoters(voters: ReferendumVoter[]): Bubble[] {
-  return packItems(foldVoters(voters, () => null))
-}
-
 // ONE cluster holding both sides, so the chart reads as a single population with the
 // balance of the vote visible in the colour mix rather than as two charts to compare.
 // Deterministic spiral placement — no randomness, so the same referendum always
