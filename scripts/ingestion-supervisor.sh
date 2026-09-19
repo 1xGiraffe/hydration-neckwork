@@ -11,7 +11,7 @@ RAW_WORKERS="${RAW_WORKERS:-6}"
 # a 2s block time) rather than bigger ones. That is a supervisor bookkeeping cost,
 # not an ingestion cost: raw-live maps at 5 blocks/s p50 against the 0.5 blocks/s a
 # 2s chain demands, and the per-range overhead is one container start. Measured
-# capacity leaves this comfortable, so nothing here needs to change at the cutover.
+# capacity leaves this comfortable at the 2s the chain runs now.
 RANGE_SIZE="${RANGE_SIZE:-1000}"
 MAIN_MAX_RANGES="${MAIN_MAX_RANGES:-3}"
 # Parallel price backfills keep event-time prices near the raw ingestion frontier.
@@ -722,21 +722,6 @@ FORMAT TSV" || true)"
   log "snapshot live=${live:-unknown} live_main=${live_main:-unknown} main_min=${main_min:-unknown} main_blocks=${main_rows:-unknown} raw_active=$(active_raw_count) main_active=$(active_main_count)"
 }
 
-# Bootstrap the append-only failure log for databases created before this table
-# was added to the schema; idempotent and safe to run on every supervisor start.
-ch_query "
-CREATE TABLE IF NOT EXISTS raw_ingestion_range_failures (
-  \`range_id\` String,
-  \`pipeline_id\` String,
-  \`from_block\` UInt32,
-  \`to_block\` UInt32,
-  \`reason\` String,
-  \`failed_at\` DateTime DEFAULT now()
-) ENGINE = MergeTree
-PARTITION BY toYYYYMM(failed_at)
-ORDER BY (from_block, to_block, failed_at)
-SETTINGS index_granularity = 8192
-"
 
 log "starting ingestion supervisor in $ROOT_DIR"
 

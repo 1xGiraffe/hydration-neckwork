@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "test:e2e:live": "playwright test -c playwright.live.config.ts",
     "typecheck": "tsc -b --pretty false",
     "check": "npm run lint && npm test && npm run build"
   },

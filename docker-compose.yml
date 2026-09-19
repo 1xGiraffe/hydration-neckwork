@@ -411,21 +411,15 @@ services:
       # environment here, not the host's .env — a name missing from this list is
       # permanently empty for every worker however the host is configured. Empty
       # means "use the code default" (src/util/env.ts), so a pass-through entry
-      # costs nothing when unset.
-      - INDEXER_RPC_RATE_LIMIT=${INDEXER_RPC_RATE_LIMIT:-}
-      - INDEXER_RPC_CAPACITY=${INDEXER_RPC_CAPACITY:-}
+      # costs nothing when unset. A knob the spawn passes with its own `-e`
+      # (RPC_URL, the two rate-limit knobs, the pipeline id) does not belong
+      # here: the explicit flag wins and the entry would never be read.
       - INDEXER_BATCH_SIZE=${INDEXER_BATCH_SIZE:-}
       - RPC_HEAD_POLL_MS=${RPC_HEAD_POLL_MS:-}
       - SNAPSHOT_INTERVAL_MINUTES=${SNAPSHOT_INTERVAL_MINUTES:-}
       - SNAPSHOT_INTERVAL=${SNAPSHOT_INTERVAL:-}
       - GRAPH_MIN_PATH_LIQUIDITY_USD=${GRAPH_MIN_PATH_LIQUIDITY_USD:-}
       - RAW_BATCH_SIZE=${RAW_BATCH_SIZE:-}
-      - RAW_PIPELINE_ID=${RAW_PIPELINE_ID:-}
-      - RAW_RPC_RATE_LIMIT=${RAW_RPC_RATE_LIMIT:-}
-      - RAW_RPC_CAPACITY=${RAW_RPC_CAPACITY:-}
-      - RAW_LIVE_BATCH_SIZE=${RAW_LIVE_BATCH_SIZE:-}
-      - RAW_LIVE_RPC_RATE_LIMIT=${RAW_LIVE_RPC_RATE_LIMIT:-}
-      - RAW_LIVE_RPC_CAPACITY=${RAW_LIVE_RPC_CAPACITY:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # The supervisor spawns its workers from this compose file and this script.
