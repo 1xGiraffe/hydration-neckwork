@@ -995,11 +995,14 @@ export async function runXykTotalShares(client: ClickHouseClient): Promise<Deriv
 //    REVENUE_REFRESH_SECONDS because the tail already serves its fresh edge.
 
 import {
+  REVENUE_EVENT_COLUMNS,
   REVENUE_STREAMS,
   buildRevenueEventRowsSql,
   hollarBorrowHourlyRows,
+  loadInternalPayerAccounts,
   type EventfulRevenueStream,
 } from '../services/revenueStreams.ts'
+import { DECIMAL_STRINGS } from '../services/valuation.ts'
 
 const REVENUE_EVENTS_TABLE = 'price_data.revenue_events'
 
@@ -1007,8 +1010,16 @@ const REVENUE_EVENTS_TABLE = 'price_data.revenue_events'
 export const REVENUE_REFRESH_SECONDS = 3_600
 
 /** Every eventful stream, in the order each partition inserts them. */
+/**
+ * The streams the job inserts with a plain INSERT … SELECT.
+ *
+ * The two reserve-level streams are not among them. They name no payer — the
+ * market's whole accrual is booked, then split over per-account weights — so the
+ * protocol's own part cannot be marked on the row the way a fee's payer is, and
+ * has to be carved out in TS against those same weights (see runRevenueEvents).
+ */
 export const REVENUE_EVENT_STREAMS_INSERTED: readonly EventfulRevenueStream[]
-  = REVENUE_STREAMS.filter((s): s is EventfulRevenueStream => s !== 'hollar_borrow')
+  = REVENUE_STREAMS.filter((s): s is EventfulRevenueStream => s !== 'hollar_borrow' && s !== 'asset_reserve')
 
 export function revenueStalePartitionsSql(): string {
   return `
@@ -1065,7 +1076,7 @@ export function revenueEventsInsertSql(
   target = `${REVENUE_EVENTS_TABLE}_staging`,
 ): string {
   const extra = `toYYYYMM(block_timestamp) = ${partition} AND block_timestamp < toDateTime('${cutLiteral}')`
-  return `INSERT INTO ${target} (stream, block_height, block_timestamp, event_index, leg_index, dest, account, asset_id, amount, amount_usd)
+  return `INSERT INTO ${target} (${REVENUE_EVENT_COLUMNS.join(', ')})
 ${buildRevenueEventRowsSql(stream, extra)}`
 }
 
@@ -1093,6 +1104,101 @@ function usd1e12String(value: bigint): string {
   const negative = value < 0n
   const magnitude = negative ? -value : value
   return `${negative ? '-' : ''}${magnitude / 10n ** 12n}.${(magnitude % 10n ** 12n).toString().padStart(12, '0')}`
+}
+
+interface AssetReserveRow {
+  block_height: number
+  block_timestamp: string
+  event_index: number
+  asset_id: number
+  amount: string
+  amount_usd: string
+}
+
+/**
+ * asset_reserve's month, split into what external borrowers generated and what
+ * the protocol's own accounts did.
+ *
+ * A MintedToTreasury is a LUMP: it names no payer, and the attribution splits it
+ * over the interest each borrower accrued since the reserve's previous mint. So
+ * the protocol's own part cannot be marked on the row the way a fee's payer is —
+ * it is the same pro-rata share, taken against the same weights, and booked as a
+ * second row at the next leg index. The two always re-sum to the gross mint, and
+ * `internal_payer` keeps the second out of every protocol-revenue total.
+ *
+ * Built in TS rather than as an INSERT … SELECT because the weights are a
+ * per-window query the SQL cannot carry; at ~18 mints a month that is a handful
+ * of rows either way. The weights query is the one the account_revenue job runs
+ * again for the per-account split — the same numbers, reached twice, so neither
+ * job depends on the other's intermediate state.
+ */
+async function insertAssetReserveRows(
+  client: ClickHouseClient,
+  staging: string,
+  partition: string,
+  cutLiteral: string,
+  priceParams: { anchor: string; hours: number },
+): Promise<void> {
+  const extra = `toYYYYMM(block_timestamp) = ${partition} AND block_timestamp < toDateTime('${cutLiteral}')`
+  const rowsRes = await client.query({
+    query: buildRevenueEventRowsSql('asset_reserve', extra),
+    query_params: priceParams,
+    format: 'JSONEachRow',
+    clickhouse_settings: DECIMAL_STRINGS,
+  })
+  const rows = await rowsRes.json<AssetReserveRow>()
+  if (!rows.length) return
+
+  const mintsRes = await client.query({
+    query: assetReserveMintsSql(),
+    query_params: { end: chTimestamp(monthBounds(partition).endSeconds) },
+    format: 'JSONEachRow',
+  })
+  const windows = new Map((await mintsRes.json<MintRow>())
+    .map(m => [`${m.block_height}-${m.event_index}`, m]))
+  const internalAccounts = await loadInternalPayerAccounts(client)
+
+  const values: Record<string, unknown>[] = []
+  for (const row of rows) {
+    const grossUsd = scaledUsd(row.amount_usd)
+    const grossAmount = BigInt(row.amount || '0')
+    const mint = windows.get(`${row.block_height}-${row.event_index}`)
+    let internalUsd = 0n
+    let internalAmount = 0n
+    if (mint && (grossUsd > 0n || grossAmount > 0n)) {
+      const weights = await borrowWeights(
+        client, mint.reserve, chTimestampSeconds(mint.prev_ts), chTimestampSeconds(mint.mint_ts),
+      )
+      const total = weights.reduce((sum, w) => sum + w.weight, 0n)
+      const internal = weights
+        .filter(w => internalAccounts.has(w.account.toLowerCase()))
+        .reduce((sum, w) => sum + w.weight, 0n)
+      internalUsd = internalShareOf(grossUsd, internal, total)
+      internalAmount = internalShareOf(grossAmount, internal, total)
+    }
+    const base = {
+      stream: 'asset_reserve',
+      block_height: row.block_height,
+      block_timestamp: row.block_timestamp,
+      event_index: row.event_index,
+      dest: '',
+      account: '',
+      asset_id: row.asset_id,
+    }
+    values.push({
+      ...base, leg_index: 0, internal_payer: 0,
+      amount: (grossAmount - internalAmount).toString(),
+      amount_usd: usd1e12String(grossUsd - internalUsd),
+    })
+    if (internalUsd > 0n || internalAmount > 0n) {
+      values.push({
+        ...base, leg_index: 1, internal_payer: 1,
+        amount: internalAmount.toString(),
+        amount_usd: usd1e12String(internalUsd),
+      })
+    }
+  }
+  await client.insert({ table: staging, values, format: 'JSONEachRow' })
 }
 
 export async function runRevenueEvents(client: ClickHouseClient): Promise<DerivationResult> {
@@ -1132,29 +1238,47 @@ export async function runRevenueEvents(client: ClickHouseClient): Promise<Deriva
         query_params: { anchor, hours },
       })
     }
+    await insertAssetReserveRows(client, staging, p, cutLiteral, { anchor, hours })
     // hollar_borrow accrues by index growth, so its hourly rows are computed in
     // TS (exact BigInt identity) and inserted like any other stream's rows. The
     // last bookable hour is one below the cut: the cut hour is still filling.
     const hollarRows = await hollarBorrowHourlyRows(client, startSeconds, Math.min(anchorSeconds, cutSeconds) - 3_600)
     if (hollarRows.length) {
       const byHour = new Map<number, number>()
+      const nextLeg = (hour: number): number => {
+        const leg = byHour.get(hour) ?? 0
+        byHour.set(hour, leg + 1)
+        return leg
+      }
+      // Interest the protocol's own accounts owed is carved out of the same
+      // accrual (see HollarHourlyRow.internalPlanck) and booked beside it, so
+      // the pair re-sums to the market's flow while only the external half is
+      // revenue. An hour with no internal debt writes one row, as before.
       await client.insert({
         table: staging,
-        values: hollarRows.map(row => {
-          const legIndex = byHour.get(row.hour) ?? 0
-          byHour.set(row.hour, legIndex + 1)
-          return {
+        values: hollarRows.flatMap(row => {
+          const base = {
             stream: 'hollar_borrow',
             block_height: 0,
             block_timestamp: chTimestamp(row.hour),
             event_index: Math.floor(row.hour / 3_600),
-            leg_index: legIndex,
             dest: '',
             account: '',
             asset_id: 222,
-            amount: row.amountPlanck.toString(),
-            amount_usd: usd1e12String(row.usd1e12),
           }
+          const out = [{
+            ...base, leg_index: nextLeg(row.hour), internal_payer: 0,
+            amount: (row.amountPlanck - row.internalPlanck).toString(),
+            amount_usd: usd1e12String(row.usd1e12 - row.internalUsd1e12),
+          }]
+          if (row.internalPlanck > 0n) {
+            out.push({
+              ...base, leg_index: nextLeg(row.hour), internal_payer: 1,
+              amount: row.internalPlanck.toString(),
+              amount_usd: usd1e12String(row.internalUsd1e12),
+            })
+          }
+          return out
         }),
         format: 'JSONEachRow',
       })
@@ -1191,6 +1315,7 @@ import {
   accountBorrowInterestSql,
   assetReserveMintsSql,
   distributeUsd1e12,
+  internalShareOf,
 } from '../services/borrowAttribution.ts'
 import { uniswapV3FeePayersSql, uniswapV3RealizationsSql } from '../services/uniswapV3Attribution.ts'
 import { HOLLAR_RESERVE_ADDRESS, PROTOCOL_REVENUE_PREDICATE_SQL } from '../services/revenueStreams.ts'
@@ -1295,6 +1420,26 @@ async function borrowWeights(
   return (await res.json<WeightRow>()).map(r => ({ account: r.account, weight: BigInt(r.interest) }))
 }
 
+/**
+ * The weights an EXTERNAL split runs over. The internal payers' own interest was
+ * already carved out of the stream's booked total (revenue_events), so leaving
+ * their weight in here would hand their share to everybody else — inflating the
+ * very payers the exclusion exists to report honestly. Dropping the weight and
+ * the total together is what keeps the two sides equal.
+ */
+async function externalBorrowWeights(
+  client: ClickHouseClient,
+  reserve: string,
+  startSeconds: number,
+  endSeconds: number,
+): Promise<{ account: string; weight: bigint }[]> {
+  const [weights, internal] = await Promise.all([
+    borrowWeights(client, reserve, startSeconds, endSeconds),
+    loadInternalPayerAccounts(client),
+  ])
+  return weights.filter(w => !internal.has(w.account.toLowerCase()))
+}
+
 export async function runAccountRevenue(client: ClickHouseClient): Promise<DerivationResult> {
   const model = 'account_revenue'
   const live = ACCOUNT_REVENUE_TABLE
@@ -1312,12 +1457,13 @@ export async function runAccountRevenue(client: ClickHouseClient): Promise<Deriv
 
     const hollarTotalRes = await client.query({
       query: `SELECT toString(sum(amount_usd)) AS total FROM ${REVENUE_EVENTS_TABLE}
-              WHERE toYYYYMM(block_timestamp) = ${p} AND stream = 'hollar_borrow'`,
+              WHERE toYYYYMM(block_timestamp) = ${p} AND stream = 'hollar_borrow'
+                AND internal_payer = 0`,
       format: 'JSONEachRow',
     })
     const hollarTotal = scaledUsd((await hollarTotalRes.json<{ total: string | null }>())[0]?.total ?? '0')
     if (hollarTotal > 0n) {
-      const weights = await borrowWeights(client, HOLLAR_RESERVE_ADDRESS, startSeconds, endSeconds)
+      const weights = await externalBorrowWeights(client, HOLLAR_RESERVE_ADDRESS, startSeconds, endSeconds)
       for (const [account, usd] of distributeUsd1e12(hollarTotal, weights)) {
         const k = key(account, 'hollar_borrow')
         attributed.set(k, (attributed.get(k) ?? 0n) + usd)
@@ -1326,7 +1472,8 @@ export async function runAccountRevenue(client: ClickHouseClient): Promise<Deriv
 
     const mintUsdRes = await client.query({
       query: `SELECT block_height, event_index, toString(amount_usd) AS usd FROM ${REVENUE_EVENTS_TABLE}
-              WHERE toYYYYMM(block_timestamp) = ${p} AND stream = 'asset_reserve'`,
+              WHERE toYYYYMM(block_timestamp) = ${p} AND stream = 'asset_reserve'
+                AND internal_payer = 0`,
       format: 'JSONEachRow',
     })
     const mintUsd = new Map((await mintUsdRes.json<{ block_height: number; event_index: number; usd: string }>())
@@ -1342,7 +1489,7 @@ export async function runAccountRevenue(client: ClickHouseClient): Promise<Deriv
       for (const mint of mints) {
         const usd = mintUsd.get(`${mint.block_height}-${mint.event_index}`) ?? 0n
         if (usd <= 0n) continue
-        const weights = await borrowWeights(
+        const weights = await externalBorrowWeights(
           client, mint.reserve, chTimestampSeconds(mint.prev_ts), chTimestampSeconds(mint.mint_ts),
         )
         for (const [account, share] of distributeUsd1e12(usd, weights)) {
@@ -1375,8 +1522,15 @@ export async function runAccountRevenue(client: ClickHouseClient): Promise<Deriv
         },
         format: 'JSONEachRow',
       })
+      // A realization names no payer, so an internal swapper among its weights
+      // would put protocol money on a protocol account's page. Their share
+      // falls to the unattributed bucket instead: the lump itself stays booked
+      // (it is a Treasury RECEIPT from an external vault, not a fee the
+      // protocol charged itself), so only the attribution moves.
+      const internal = await loadInternalPayerAccounts(client)
       const weights = (await payersRes.json<{ account: string; weight: string }>())
         .map(row => ({ account: row.account, weight: BigInt(row.weight) }))
+        .filter(w => !internal.has(w.account.toLowerCase()))
       for (const [account, share] of distributeUsd1e12(usd, weights)) {
         const k = key(account, 'uniswap_v3_fee')
         attributed.set(k, (attributed.get(k) ?? 0n) + share)

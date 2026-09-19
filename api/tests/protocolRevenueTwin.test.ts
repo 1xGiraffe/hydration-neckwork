@@ -9,13 +9,15 @@ import { isProtocolRevenue } from '../src/services/revenueService.ts'
 // exists rather than trusted.
 const DESTINATIONS = ['protocol', 'burned', 'lp', 'pol', 'unknown', ''] as const
 
-// The predicate is plain SQL over two columns, so it can be evaluated directly.
-function evaluateSql(stream: string, dest: string): boolean {
+// The predicate is plain SQL over three columns, so it can be evaluated directly.
+function evaluateSql(stream: string, dest: string, internalPayer = 0): boolean {
   const expr = PROTOCOL_REVENUE_PREDICATE_SQL
+    .replaceAll('internal_payer', String(internalPayer))
     .replaceAll('stream', JSON.stringify(stream))
     .replaceAll('dest', JSON.stringify(dest))
     .replace(/"([^"]*)" IN \(([^)]*)\)/g, (_m, v, list) => `[${list.replaceAll("'", '"')}].includes("${v}")`)
     .replaceAll('!=', '!==')
+    .replaceAll(/(?<![!=<>])=(?!=)/g, '===')
     .replaceAll(' AND ', ' && ')
     .replaceAll(' OR ', ' || ')
   return eval(expr) as boolean
@@ -26,9 +28,13 @@ describe('the TS twin of the protocol-revenue predicate', () => {
     const disagreements: string[] = []
     for (const stream of REVENUE_STREAMS) {
       for (const dest of DESTINATIONS) {
-        const sql = evaluateSql(stream, dest)
-        const ts = isProtocolRevenue(stream, dest)
-        if (sql !== ts) disagreements.push(`${stream}/${dest || '(empty)'}: sql=${sql} ts=${ts}`)
+        // Including the payer dimension: revenue the protocol paid itself is
+        // excluded by both copies, or the splice disagrees across it too.
+        for (const internal of [0, 1]) {
+          const sql = evaluateSql(stream, dest, internal)
+          const ts = isProtocolRevenue(stream, dest, internal)
+          if (sql !== ts) disagreements.push(`${stream}/${dest || '(empty)'}/${internal}: sql=${sql} ts=${ts}`)
+        }
       }
     }
     expect(disagreements).toEqual([])

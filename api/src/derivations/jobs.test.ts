@@ -542,7 +542,7 @@ describe('revenueStalePartitionsSql', () => {
 describe('revenueEventsInsertSql', () => {
   it('targets the staging twin with an explicit column list', () => {
     const sql = revenueEventsInsertSql('network_fee', '202608', '2026-08-14 20:00:00')
-    expect(sql).toContain('INSERT INTO price_data.revenue_events_staging (stream, block_height, block_timestamp, event_index, leg_index, dest, account, asset_id, amount, amount_usd)')
+    expect(sql).toContain('INSERT INTO price_data.revenue_events_staging (stream, block_height, block_timestamp, event_index, leg_index, dest, account, asset_id, amount, internal_payer, amount_usd)')
   })
 
   it('bounds every stream to the republished month and the closed-hour cut', () => {
@@ -554,11 +554,18 @@ describe('revenueEventsInsertSql', () => {
     }
   })
 
-  it('covers every eventful stream exactly once per partition', () => {
+  // asset_reserve is deliberately absent: a MintedToTreasury lump names no
+  // payer, so the protocol's own share of it is carved out against the
+  // attribution weights in TS (insertAssetReserveRows) rather than by an
+  // INSERT … SELECT that cannot see them. hollar_borrow is out for the same
+  // reason plus its hourly TS accrual.
+  it('covers every eventful stream except the two the payer split is computed for', () => {
     expect(REVENUE_EVENT_STREAMS_INSERTED).toEqual([
       'omnipool_asset_fee', 'omnipool_protocol_fee', 'liquidation_penalty',
-      'pepl_liquidation_profit', 'asset_reserve', 'hsm_revenue', 'ice_matched_fee', 'uniswap_v3_fee', 'network_fee',
+      'pepl_liquidation_profit', 'hsm_revenue', 'ice_matched_fee', 'uniswap_v3_fee', 'network_fee',
     ])
+    expect(REVENUE_EVENT_STREAMS_INSERTED).not.toContain('asset_reserve')
+    expect(REVENUE_EVENT_STREAMS_INSERTED).not.toContain('hollar_borrow')
   })
 })
 

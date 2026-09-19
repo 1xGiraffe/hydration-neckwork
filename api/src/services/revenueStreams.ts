@@ -60,7 +60,7 @@ export type EventfulRevenueStream = Exclude<RevenueStream, 'hollar_borrow'>
 /** The revenue_events column list every builder emits, in table order. */
 export const REVENUE_EVENT_COLUMNS = [
   'stream', 'block_height', 'block_timestamp', 'event_index', 'leg_index',
-  'dest', 'account', 'asset_id', 'amount', 'amount_usd',
+  'dest', 'account', 'asset_id', 'amount', 'internal_payer', 'amount_usd',
 ] as const
 
 /**
@@ -92,9 +92,101 @@ export const REVENUE_EVENT_COLUMNS = [
  * explorer dashboard and the account/tag totals all filter through this exact
  * predicate — the public fees API is the one reader that also serves the
  * lp/burned/unknown legs, through its own destination matrix.
+ *
+ * `internal_payer` is the second half of the rule and applies to every stream: a
+ * fee or an interest charge the protocol paid ITSELF is not revenue, however its
+ * destination is classed. See INTERNAL_PAYER_TAGS.
  */
 export const PROTOCOL_REVENUE_PREDICATE_SQL
-  = "(stream != 'omnipool_asset_fee' OR dest IN ('protocol', 'burned', 'pol')) AND dest != 'lp'"
+  = "(stream != 'omnipool_asset_fee' OR dest IN ('protocol', 'burned', 'pol')) AND dest != 'lp' AND internal_payer = 0"
+
+/**
+ * Tags whose members are the protocol's OWN balance sheet. What they pay the
+ * protocol moves between two protocol pockets, so it is neither revenue nor
+ * anybody's payer ranking: the rows keep their value and are MARKED
+ * (`internal_payer = 1`), so the gross flow stays auditable and the public fees
+ * API's destination matrix is untouched, while every protocol-revenue surface
+ * filters them out through PROTOCOL_REVENUE_PREDICATE_SQL.
+ *
+ * Measured all-time when this was introduced: $22,726.66 on the treasury (almost
+ * all of it HOLLAR borrow interest on its own debt) and $166.06 on the multisig.
+ * Every pot tag below was already $0 — pallet accounts blank to the unattributed
+ * bucket through attributablePayerSql long before they reach here — and they are
+ * listed anyway, so a future attribution that starts naming them cannot quietly
+ * book the protocol as its own customer.
+ *
+ * Three deliberate exclusions:
+ *  * `hollar-stability-module` EARNS hsm_revenue (booked with account = '', the
+ *    HSM being the source and never the payer). The account that generates a
+ *    stream must not appear on a list of accounts whose payments are erased.
+ *  * pools, liquidity mining and the money-market contracts are infrastructure
+ *    USERS trade through — a fee attributed to a pool account is a user's fee
+ *    that lost its payer, and erasing it would delete real revenue.
+ *  * `polkadot-treasury`, `moonbeam-treasury`, `kraken`, `polkadot-fellowship`,
+ *    `bil-originator` are other parties' money ($77.8k attributed all-time).
+ *    Another chain's treasury trading here IS a customer.
+ */
+export const INTERNAL_PAYER_TAGS = [
+  'treasury', 'hydration-multisig', 'pallet-pots', 'staking-pot', 'incentive-pot',
+  'gigahdx-pots', 'fee-processor', 'fee-referrals', 'fee-staking-rewards',
+] as const
+
+/**
+ * Every account id an internal payer can appear under, in both forms: the
+ * substrate pubkey the tag holds, and the ETH-mapped form the money-market and
+ * liquidation surfaces name it by (`0x45544800` + first 20 bytes + zero padding).
+ * The treasury pays as the latter, so a join on the substrate id alone reports
+ * zero — which is exactly how this went unnoticed.
+ *
+ * FINAL because account_tags replaces on (label_id, account_id) and carries a
+ * `deleted` flag; the label predicate keeps the key prefix bounded.
+ */
+export function internalPayerAccountsSql(): string {
+  const tags = INTERNAL_PAYER_TAGS.map(t => `'${t}'`).join(', ')
+  const members = `FROM price_data.account_tags FINAL WHERE deleted = 0 AND label_id IN (${tags})`
+  return `SELECT acct FROM (
+    SELECT account_id AS acct ${members}
+    UNION ALL
+    SELECT concat('0x45544800', substring(account_id, 3, 40), repeat('0', 16)) AS acct
+    ${members} AND length(account_id) = 66
+  )`
+}
+
+/** `internal_payer` for a row whose payer is `expr` (a 32-byte substrate account). */
+export function internalPayerFlagSql(expr: string): string {
+  return `toUInt8(${expr} IN (${internalPayerAccountsSql()}))`
+}
+
+/**
+ * The internal payer accounts as a TS set, in both id forms — for the two
+ * reserve-level streams, whose share is computed from per-account weights in the
+ * derivation rather than marked on a row. Read once per process and held: tag
+ * membership is seeded from code and changes only on a deploy, and a stale read
+ * here would silently re-admit a payer the predicate excludes.
+ */
+let internalPayerAccountsCache: Promise<ReadonlySet<string>> | null = null
+export async function loadInternalPayerAccounts(client: ClickHouseClient): Promise<ReadonlySet<string>> {
+  internalPayerAccountsCache ??= (async () => {
+    const res = await client.query({ query: `SELECT acct FROM (${internalPayerAccountsSql()})`, format: 'JSONEachRow' })
+    return new Set((await res.json<{ acct: string }>()).map(r => r.acct.toLowerCase()))
+  })()
+  return internalPayerAccountsCache
+}
+
+/** Test seam — drops the cached set so a following load re-reads the tags. */
+export function resetInternalPayerAccounts(): void { internalPayerAccountsCache = null }
+
+/**
+ * The internal payers as H160s — the first 20 bytes of the tagged account id,
+ * which is how the aToken/variable-debt tables name a holder. Every EVM-side
+ * surface keys on this form.
+ */
+export function internalPayerH160sSql(): string {
+  const tags = INTERNAL_PAYER_TAGS.map(t => `'${t}'`).join(', ')
+  return `SELECT DISTINCT lower(substring(account_id, 1, 42)) AS h160
+    FROM price_data.account_tags FINAL
+    WHERE deleted = 0 AND label_id IN (${tags}) AND length(account_id) = 66`
+}
 
 /** The Substrate Treasury pallet account (modlpy/trsry), pubkey hex. */
 export const TREASURY_ACCOUNT = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000'
@@ -240,6 +332,7 @@ function valuedTailSql(stream: EventfulRevenueStream): string {
        r.account AS account,
        toUInt32(r.asset_id) AS asset_id,
        toString(r.amount) AS amount,
+       ${internalPayerFlagSql('r.account')} AS internal_payer,
        if(p.close > 0,
           toDecimal256(r.amount, 0) * toDecimal256(p.close, 12) / ${amountUnitSql('r.asset_id')},
           toDecimal256(0, 12)) AS amount_usd
@@ -533,6 +626,7 @@ SELECT 'hsm_revenue' AS stream,
        account AS account,
        asset_id AS asset_id,
        amount AS amount,
+       ${internalPayerFlagSql('account')} AS internal_payer,
        usd AS amount_usd
 FROM priced
 WHERE usd > 0`
@@ -820,10 +914,21 @@ export interface HollarHourlyRow {
   hour: number
   poolAddress: string
   reserveAddress: string
-  /** Interest accrued in HOLLAR planck (18 decimals). */
+  /** Interest accrued in HOLLAR planck (18 decimals) — the WHOLE market's. */
   amountPlanck: bigint
   /** The same interest in 1e-12 USD, valued at the candle closed by `hour`. */
   usd1e12: bigint
+  /**
+   * The part of `amountPlanck` that internal payers owed — the protocol's own
+   * accounts paying interest to the protocol, which is not revenue. Carved from
+   * the same index move by the same identity, so external = amount − internal
+   * exactly. Callers that want the MARKET's interest (the fees charts, the drip
+   * rate) read the gross fields and ignore these; the revenue books the
+   * difference. Clamped to the gross amount: see the internal debt series.
+   */
+  internalPlanck: bigint
+  /** `internalPlanck` in 1e-12 USD, at the same candle as `usd1e12`. */
+  internalUsd1e12: bigint
   /**
    * How many hours this row's accrual actually spans — the gap back to the
    * previous index observation for the same pool, at least 1.
@@ -913,6 +1018,56 @@ WHERE reserve_address = {reserve:String}
 GROUP BY pool_address`
 }
 
+/**
+ * The internal payers' own scaled debt on a reserve, as a RUNNING TOTAL per pool
+ * at every hour it changed, up to `end`.
+ *
+ * This is the reserve series restricted to the protocol's own accounts, so that
+ * `internal_scaled × Δindex` carves their interest out of the market's accrual by
+ * the same identity rather than by a ratio averaged over a month. Published
+ * cumulatively (not as deltas) so a consumer can sample any hour by taking the
+ * newest row at or below it.
+ *
+ * Read from the holder-keyed delta table plus the B0 anchor — the same two
+ * sources the balance reconstruction uses — and cheap despite covering all
+ * history, because `holder IN (…)` is this table's sort-key prefix and the
+ * internal set is a couple of dozen accounts.
+ */
+function hollarInternalDebtSql(endSeconds: number): string {
+  const ch = (s: number) => new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')
+  return `-- rev:hollar-internal-debt
+WITH vdebts AS (
+  SELECT DISTINCT lower(vdebt) AS contract, lower(pool_proxy) AS pool
+  FROM price_data.atoken_reserve_map FINAL
+  WHERE vdebt != '' AND lower(asset_address) = {reserve:String}
+),
+b0 AS (SELECT max(anchor_block) AS b FROM price_data.atoken_scaled_anchor),
+holders AS (${internalPayerH160sSql()}),
+observations AS (
+  SELECT pool, bucket, sum(delta) AS delta FROM (
+    SELECT v.pool AS pool, toStartOfHour(d.block_timestamp) AS bucket, toInt256(sum(d.scaled_delta)) AS delta
+    FROM price_data.atoken_scaled_deltas AS d FINAL
+    INNER JOIN vdebts AS v ON v.contract = d.contract_address
+    WHERE d.holder IN (SELECT h160 FROM holders)
+      AND d.block_height > (SELECT b FROM b0)
+      AND d.block_timestamp <= '${ch(endSeconds)}'
+    GROUP BY pool, bucket
+    UNION ALL
+    -- The anchor is the opening balance, before every delta the window can see.
+    SELECT v.pool AS pool, toDateTime(0) AS bucket, toInt256(sum(a.scaled_balance)) AS delta
+    FROM price_data.atoken_scaled_anchor AS a FINAL
+    INNER JOIN vdebts AS v ON v.contract = lower(a.contract_address)
+    WHERE lower(a.holder) IN (SELECT h160 FROM holders)
+    GROUP BY pool
+  )
+  GROUP BY pool, bucket
+)
+SELECT pool AS pool_address, toString(bucket) AS bucket,
+       toString(sum(delta) OVER (PARTITION BY pool ORDER BY bucket ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS scaled
+FROM observations
+ORDER BY pool_address, bucket`
+}
+
 /** HOLLAR's price per hour, keyed by the hour the candle became usable. */
 function hollarPriceSql(): string {
   return `-- rev:hollar-price
@@ -932,6 +1087,8 @@ interface PriceRow { bucket: string; close: string }
 function bucketSeconds(chDateTime: string): number {
   return Math.floor(Date.parse(`${chDateTime.trim().replace(' ', 'T')}.000Z`) / 1000)
 }
+
+const min = (a: bigint, b: bigint): bigint => (a < b ? a : b)
 
 /**
  * Exact hourly HOLLAR interest accrual per pool over (startSeconds,
@@ -972,6 +1129,33 @@ export async function hollarBorrowHourlyRows(
   })
   const seeds = new Map<string, SeedRow>()
   for (const row of await seedRes.json<SeedRow>()) seeds.set(row.pool_address, row)
+
+  // The protocol's own scaled debt on this reserve, over all history up to the
+  // window's end: one step function per pool, sampled at the same observation
+  // each accrual is differenced from.
+  const internalRes = await client.query({
+    query: hollarInternalDebtSql(endSeconds),
+    query_params: { reserve: HOLLAR_RESERVE_ADDRESS },
+    format: 'JSONEachRow',
+    clickhouse_settings: DECIMAL_STRINGS,
+  })
+  const internalByPool = new Map<string, { t: number; scaled: bigint }[]>()
+  for (const row of await internalRes.json<{ pool_address: string; bucket: string; scaled: string }>()) {
+    const list = internalByPool.get(row.pool_address) ?? []
+    list.push({ t: bucketSeconds(row.bucket), scaled: BigInt(row.scaled) })
+    internalByPool.set(row.pool_address, list)
+  }
+  for (const list of internalByPool.values()) list.sort((a, b) => a.t - b.t)
+  const internalDebtAt = (pool: string, at: number): bigint => {
+    const list = internalByPool.get(pool)
+    if (!list?.length) return 0n
+    let value = 0n
+    for (const point of list) {
+      if (point.t > at) break
+      value = point.scaled
+    }
+    return value > 0n ? value : 0n
+  }
 
   const priceRes = await client.query({
     query: hollarPriceSql(),
@@ -1023,6 +1207,9 @@ export async function hollarBorrowHourlyRows(
     // iteration so a delta-only hour (index 0) does not shorten the span to a
     // gap the index was never differenced across.
     let prevIndexHour: number | null = seedIndex > 0n ? bucketSeconds(seed!.index_bucket) : null
+    // The hour prevDebt was observed at — where the internal series is sampled,
+    // so both halves of the accrual describe the same moment's debt.
+    let prevObsHour: number | null = seed ? first - HOUR : null
     for (const { t, row } of observed) {
       if (t < first || t > endSeconds) continue
       const debt = BigInt(row.debt_scaled)
@@ -1030,15 +1217,25 @@ export async function hollarBorrowHourlyRows(
       if (prevDebt != null && prevIndex != null && prevIndexHour != null && index > prevIndex) {
         const planck = (prevDebt * (index - prevIndex)) / RAY
         const usd = (planck * (priceAtHour.get(t) ?? 0n)) / HOLLAR_UNIT
+        // Same index move, internal holders' debt: their part of this accrual.
+        // Clamped at the gross amount — a reconstruction gap must not book a
+        // negative external amount.
+        const internalDebt = internalDebtAt(poolAddress, prevObsHour ?? t)
+        const internalPlanck = planck > 0n
+          ? min(planck, (internalDebt * (index - prevIndex)) / RAY)
+          : 0n
         if (planck > 0n) {
           out.push({
             hour: t, poolAddress, reserveAddress: HOLLAR_RESERVE_ADDRESS,
             amountPlanck: planck, usd1e12: usd,
+            internalPlanck,
+            internalUsd1e12: (internalPlanck * (priceAtHour.get(t) ?? 0n)) / HOLLAR_UNIT,
             hoursCovered: Math.max(1, Math.round((t - prevIndexHour) / HOUR)),
             debtScaledAfter: debt,
           })
         }
       }
+      prevObsHour = t
       // An index of 0 is a delta-only hour the view could not carry an index
       // into; keep the previous index rather than differencing to zero.
       prevDebt = debt

@@ -503,7 +503,7 @@ describe('hollar borrow interest', () => {
       { bucket: '2026-08-04 00:00:00', close: '1' },
       { bucket: '2026-08-04 01:00:00', close: '1' },
     ]
-    const app = await buildApp(fakeClient({ '-- rev:hollar-debt': debt, '-- rev:hollar-seed': seed, '-- rev:hollar-price': price }))
+    const app = await buildApp(fakeClient({ '-- rev:hollar-debt': debt, '-- rev:hollar-seed': seed, '-- rev:hollar-price': price, '-- rev:hollar-internal-debt': [] }))
     const res = await app.inject({ method: 'GET', url: url({
       productType: 'hollar', streamType: 'borrow_apr', feeDestination: 'protocol', bucketSize: '24hour',
       startTime: '2026-08-04T00:00:00.000Z', endTime: '2026-08-04T23:59:59.000Z',
@@ -537,7 +537,7 @@ describe('hollar borrow interest', () => {
       // other market's 00:00 accrual.
       { bucket: '2026-08-05 01:00:00', close: '2' },
     ]
-    const app = await buildApp(fakeClient({ '-- rev:hollar-debt': debt, '-- rev:hollar-seed': seed, '-- rev:hollar-price': price }))
+    const app = await buildApp(fakeClient({ '-- rev:hollar-debt': debt, '-- rev:hollar-seed': seed, '-- rev:hollar-price': price, '-- rev:hollar-internal-debt': [] }))
     const res = await app.inject({ method: 'GET', url: url({
       productType: 'hollar', streamType: 'borrow_apr', feeDestination: 'protocol', bucketSize: '24hour',
       startTime: '2026-08-05T00:00:00.000Z', endTime: '2026-08-05T23:59:59.000Z',

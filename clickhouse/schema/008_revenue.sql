@@ -23,6 +23,17 @@
 --   'burned'; '' for every other stream). The lp/burned legs exist ONLY for
 --   the public fees API's feeDestination matrix: every explorer revenue
 --   surface and account_revenue filter to dest IN ('', 'protocol').
+--   `internal_payer` marks what the protocol paid ITSELF (INTERNAL_PAYER_TAGS
+--   in api/src/services/revenueStreams.ts — the treasury, the protocol
+--   multisig, the pallet pots). Such a row is NOT revenue and leaves every
+--   total and every ranking through PROTOCOL_REVENUE_PREDICATE_SQL, but it is
+--   kept and marked rather than dropped, so the gross flow stays auditable and
+--   the public fees API's destination matrix reads exactly what it always did.
+--   The two reserve-level streams carry no payer, so their internal part is
+--   carved out as a SECOND row (same identity, next leg_index): hollar_borrow
+--   by the internal holders' own scaled debt against the same index move, and
+--   asset_reserve by the internal share of the interest its mint window
+--   accrued. External + internal always re-sums to the gross market flow.
 --   `account` is the PAYER as it appears at source (substrate pubkey hex or
 --   ETH-mapped account form); '' where genuinely unattributable (HSM arb
 --   profit, reserve-level borrow rows, placeholder swapper).
@@ -35,11 +46,12 @@
 -- account_trade_volume note in 001_tables.sql); `rebuild` so a replacing merge
 -- cannot leave it out of sync. Existing deployments materialize it once at
 -- rollout.
-CREATE TABLE IF NOT EXISTS price_data.revenue_events (`stream` LowCardinality(String), `block_height` UInt32, `block_timestamp` DateTime, `event_index` UInt32, `leg_index` UInt16, `dest` LowCardinality(String), `account` String, `asset_id` UInt32, `amount` String, `amount_usd` Decimal(38, 12), `computed_at` DateTime DEFAULT now(), PROJECTION computed_by_partition (SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS der_computed GROUP BY p)) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index, leg_index, stream) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild';
+CREATE TABLE IF NOT EXISTS price_data.revenue_events (`stream` LowCardinality(String), `block_height` UInt32, `block_timestamp` DateTime, `event_index` UInt32, `leg_index` UInt16, `dest` LowCardinality(String), `account` String, `asset_id` UInt32, `amount` String, `internal_payer` UInt8 DEFAULT 0, `amount_usd` Decimal(38, 12), `computed_at` DateTime DEFAULT now(), PROJECTION computed_by_partition (SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS der_computed GROUP BY p)) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index, leg_index, stream) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild';
 
 -- Per-account, per-stream protocol revenue by calendar month (`month` =
 -- toYYYYMM of the event time). Eventful streams are a GROUP BY of
--- revenue_events restricted to dest IN ('', 'protocol'); the borrow streams
+-- revenue_events restricted to PROTOCOL_REVENUE_PREDICATE_SQL (dest
+-- IN ('', 'protocol') and internal_payer = 0); the borrow streams
 -- are attributed here from per-account scaled debt × Δ variable_borrow_index
 -- (hollar_borrow directly — the sum over accounts equals the reserve series by
 -- algebraic identity — and asset_reserve by splitting each MintedToTreasury
@@ -56,7 +68,7 @@ CREATE TABLE IF NOT EXISTS price_data.account_revenue (`account` String, `stream
 -- to their live tables (see the note above account_trade_volume_staging in
 -- 001_tables.sql: engine, ORDER BY and PARTITION BY must match or the swap
 -- publishes the wrong shape).
-CREATE TABLE IF NOT EXISTS price_data.revenue_events_staging (`stream` LowCardinality(String), `block_height` UInt32, `block_timestamp` DateTime, `event_index` UInt32, `leg_index` UInt16, `dest` LowCardinality(String), `account` String, `asset_id` UInt32, `amount` String, `amount_usd` Decimal(38, 12), `computed_at` DateTime DEFAULT now(), PROJECTION computed_by_partition (SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS der_computed GROUP BY p)) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index, leg_index, stream) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild';
+CREATE TABLE IF NOT EXISTS price_data.revenue_events_staging (`stream` LowCardinality(String), `block_height` UInt32, `block_timestamp` DateTime, `event_index` UInt32, `leg_index` UInt16, `dest` LowCardinality(String), `account` String, `asset_id` UInt32, `amount` String, `internal_payer` UInt8 DEFAULT 0, `amount_usd` Decimal(38, 12), `computed_at` DateTime DEFAULT now(), PROJECTION computed_by_partition (SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS der_computed GROUP BY p)) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index, leg_index, stream) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild';
 CREATE TABLE IF NOT EXISTS price_data.account_revenue_staging (`account` String, `stream` LowCardinality(String), `month` UInt32, `revenue_usd` Decimal(38, 12), `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY month ORDER BY (account, stream, month) SETTINGS index_granularity = 8192;
 
 -- MV-fed source watermarks for the revenue jobs' staleness diff, keyed by the

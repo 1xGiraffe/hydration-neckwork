@@ -35,6 +35,7 @@ import {
   REVENUE_STREAMS,
   buildRevenueEventRowsSql,
   hollarBorrowHourlyRows,
+  loadInternalPayerAccounts,
   type EventfulRevenueStream,
   type RevenueStream,
 } from './revenueStreams.ts'
@@ -135,7 +136,8 @@ const USD_UNIT = 1e12
  * The TS twin of PROTOCOL_REVENUE_PREDICATE_SQL — kept in step by
  * tests/protocolRevenueTwin.test.ts, which evaluates both over every combination.
  */
-export function isProtocolRevenue(stream: string, dest: string): boolean {
+export function isProtocolRevenue(stream: string, dest: string, internalPayer = 0): boolean {
+  if (internalPayer !== 0) return false
   if (dest === 'lp') return false
   return stream !== 'omnipool_asset_fee' || dest === 'protocol' || dest === 'burned' || dest === 'pol'
 }
@@ -172,6 +174,7 @@ interface TailRow {
   account: string
   asset_id: number
   amount: string
+  internal_payer: number
   amount_usd: string
 }
 
@@ -443,7 +446,7 @@ LIMIT 10`,
       clickhouse_settings: DECIMAL_STRINGS,
     })
     const tail = (await tailRows(tailHours(marks, nowSeconds), marks))
-      .filter(row => isProtocolRevenue(row.stream, row.dest))
+      .filter(row => isProtocolRevenue(row.stream, row.dest, row.internal_payer))
 
     // Integer 1e-12 USD end to end; one float conversion at the wire below.
     const totals = new Map<RevenueStream, { day: bigint; week: bigint; month: bigint; allTime: bigint }>()
@@ -524,8 +527,13 @@ LIMIT 10`,
         },
         format: 'JSONEachRow',
       })
+      // The internal payers' interest was already carved out of the booked
+      // total, so their weight must come out of the split too — leaving it in
+      // would hand their share to the borrowers beside them.
+      const internal = await loadInternalPayerAccounts(client)
       const weights = (await weightsRes.json<{ account: string; interest: string }>())
         .map(r => ({ account: r.account, weight: BigInt(r.interest) }))
+        .filter(w => !internal.has(w.account.toLowerCase()))
       for (const [account, usd] of distributeUsd1e12(hollarRangeUsd, weights)) addTop(account, usd)
     }
     if ((rangeTotals.get('asset_reserve') ?? 0n) > 0n) {
@@ -706,6 +714,9 @@ async function borrowDrips(blockSeconds: number): Promise<RevenueFlowResponse['d
     return [...latest.values()]
       // Debt fully repaid means nothing is accruing any more, so carrying this
       // pool's last rate forward would invent flow the chain is not producing.
+      // Interest the protocol owes itself is not revenue and must not stream
+      // into the river either, so the rate is the external half of the accrual.
+      .map(r => ({ ...r, usd1e12: r.usd1e12 - r.internalUsd1e12 }))
       .filter(r => r.usd1e12 > 0n && r.debtScaledAfter > 0n)
       .map(r => ({
         key: r.poolAddress,
@@ -728,7 +739,7 @@ export async function getRevenueFlow(after: string | null): Promise<RevenueFlowR
   const cursor = cursorTuple(after)
   const nowSeconds = Math.floor(Date.now() / 1000)
   const items = rows
-    .filter(row => isProtocolRevenue(row.stream, row.dest))
+    .filter(row => isProtocolRevenue(row.stream, row.dest, row.internal_payer))
     // asset_reserve (MintedToTreasury) rides along as ITEMS: there is no
     // reserve-factor drip because that accrual is not observable from events at
     // all — it accumulates in each reserve's on-chain `accruedToTreasury` and

@@ -173,6 +173,23 @@ ORDER BY block_height, event_index`
 }
 
 /**
+ * How much of a lump the INTERNAL payers generated — the protocol's own share of
+ * a reserve-level amount that names no payer, taken against the same weights the
+ * attribution splits it by.
+ *
+ * Floored, so the internal side never rounds up into money external borrowers
+ * generated: the external remainder carries the dust, exactly as
+ * distributeUsd1e12 leaves it on the last share. Zero weight anywhere (no
+ * borrowers, or none of them internal) is zero internal share, never the whole
+ * lump.
+ */
+export function internalShareOf(gross: bigint, internalWeight: bigint, totalWeight: bigint): bigint {
+  if (gross <= 0n || internalWeight <= 0n || totalWeight <= 0n) return 0n
+  if (internalWeight >= totalWeight) return gross
+  return (gross * internalWeight) / totalWeight
+}
+
+/**
  * Splits `total` (1e-12 USD) over `weights` exactly: cumulative floors, so the
  * shares sum to `total` to the last unit, with any weightless remainder (or
  * the whole total, when no weights exist) attributed to '' — never scaled
