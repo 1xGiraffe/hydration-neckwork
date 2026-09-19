@@ -10,7 +10,6 @@ RUN npm ci --omit=dev
 
 # Copy source code
 COPY --chown=node:node src/ ./src/
-COPY --chown=node:node clickhouse/schema/ ./clickhouse/schema/
 
 # Default to the price indexer CLI, but allow compose to override the script path.
 USER node
