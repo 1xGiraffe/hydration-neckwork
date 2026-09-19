@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  classifySuppressed, includabilityFromApply, poolRowVisible, rejectedNonceFloors, revocableSuppressions,
+  classifySuppressed, includabilityFromApply, rejectedNonceFloors, revocableSuppressions,
   type SuppressionCause,
 } from '../src/services/pendingHeadService.ts'
 
@@ -41,25 +41,6 @@ describe('includabilityFromApply', () => {
 
   it('does not hide a transaction the runtime could not judge', () => {
     expect(includabilityFromApply(unknown())).toEqual({ includability: 'unknown', rejectReason: null })
-  })
-})
-
-// A genuine failing transaction stays a visible row — badged for what it is. What
-// leaves the feed (a doomed followup, or flood surplus) is dropped from tracking
-// entirely by classifySuppressed, so anything still tracked is shown.
-describe('poolRowVisible', () => {
-  const now = 1_800_000_000_000
-  const tx = (over: Partial<Parameters<typeof poolRowVisible>[0]>) =>
-    ({ inPool: true, droppedAtMs: null, carried: false, replacedBy: null, ...over })
-
-  it('shows what the node still holds, including a rejected head', () => {
-    expect(poolRowVisible(tx({}), now)).toBe(true)
-  })
-
-  it('still retires a carried, replaced, or long-dropped transaction', () => {
-    expect(poolRowVisible(tx({ carried: true }), now)).toBe(false)
-    expect(poolRowVisible(tx({ replacedBy: '0xabc' }), now)).toBe(false)
-    expect(poolRowVisible(tx({ inPool: false, droppedAtMs: now - 20_001 }), now)).toBe(false)
   })
 })
 

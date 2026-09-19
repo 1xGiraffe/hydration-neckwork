@@ -47,7 +47,10 @@ describe('tradableFlags', () => {
   // 'Add liquidity'/'Remove liquidity' there, out of two copies of one function.
   it('decodes the omnipool bitflags', () => {
     expect(tradableFlags(15)).toEqual(['Sell', 'Buy', 'Add liquidity', 'Remove liquidity'])
+    expect(tradableFlags(11)).toEqual(['Sell', 'Buy', 'Remove liquidity'])
+    expect(tradableFlags(8)).toEqual(['Remove liquidity'])
     expect(tradableFlags(3)).toEqual(['Sell', 'Buy'])
+    expect(tradableFlags(1)).toEqual(['Sell'])
     expect(tradableFlags(0)).toEqual(['Frozen'])
   })
 })

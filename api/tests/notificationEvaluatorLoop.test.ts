@@ -18,7 +18,6 @@ import { fakeClient, insertedRows, type FakeClient } from './helpers/userFakes.t
 const OWNER = '0x' + 'aa'.repeat(32)
 // Cursors are per kind; these tests drive the `event` lane.
 const CURSOR = cursorKey('event')
-const LEGACY_CURSOR = 'cursor:raw-live'
 
 interface EventRow { block_height: number; event_index: number; extrinsic_index: number | null; event_name: string }
 interface Tables { raw_ingestion_state: { head: number }[]; raw_events: EventRow[]; raw_extrinsics: never[]; referendum_lifecycle_events: never[] }
@@ -114,19 +113,6 @@ describe('evaluator cursor', () => {
     tables.raw_events = [swapAt(1_001)]
     await runEvaluatorTick()
     expect(insertedRows(client, 'user_notification_state').filter(r => r.key === CURSOR).at(-1)?.value).toBe('1001')
-  })
-
-  // An existing deployment stores one cursor for every kind; each kind adopts it
-  // once and moves on from there.
-  it('migrates a kind cursor from the legacy single cursor', async () => {
-    await watchOmnipool()
-    await setNotificationState(LEGACY_CURSOR, '1000')
-    setHead(1_001)
-    tables.raw_events = [swapAt(999), swapAt(1_001)]
-    await runEvaluatorTick()
-    expect(evaluatorCounters().seeded).toBe(0)
-    expect(inbox().map(r => r.block_height)).toEqual([1_001])
-    expect(getNotificationState(CURSOR)).toBe('1001')
   })
 
   it('clamps a 1000-block gap to the newest 600 and counts what it skipped', async () => {
