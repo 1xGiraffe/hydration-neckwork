@@ -7522,27 +7522,36 @@ interface RawXcswapOrderRow {
   caller_account_id: string; asset_in: number; amount_in: string; eth_out: string; max_relay_fee: string
 }
 
-// One order as an activity row. The destination half is attached only when the
-// sweep has resolved it; until then the row says what the chain says — this much
-// of this asset left for an Ethereum deposit address — and nothing more.
+// One order as an activity row. A cross-chain swap has THREE legs, and the row
+// carries all three: what the caller paid, what Hydration produced and bridged,
+// and what the destination is to deliver. The first two are on-chain and known
+// immediately; the third is attached only when the sweep has resolved it, so
+// until then the row says what the chain says and nothing more.
+//
+// The middle leg is what stops the row reading as "the input asset travelled":
+// the USDC never leaves Hydration, it is sold for the WETH that does.
 export function xcswapRowFromOrder(
   r: RawXcswapOrderRow,
   prices: Map<number, PriceInfo>,
   settlement: XcswapSettlement | null,
 ): ActivityRow {
   const aIn = asset(r.asset_in)
+  const aOut = asset(XCSWAP_SETTLEMENT_ASSET_ID)
   return {
     type: 'xcswap',
     blockHeight: Number(r.block_height), timestamp: r.ts,
     eventIndex: Number(r.event_index), extrinsicIndex: r.extrinsic_index,
     who: accountRef(r.caller_account_id), to: null,
-    asset: null, assetIn: aIn, assetOut: null,
-    amount: null, amountIn: r.amount_in, amountOut: null,
-    // Valued on the leg Hydration actually recorded — what the caller paid. The
-    // destination's dollar value is a separate, off-chain figure and is carried
-    // as `xcswapDestAmountUsd` rather than replacing this one.
+    asset: null, assetIn: aIn, assetOut: aOut,
+    amount: null, amountIn: r.amount_in, amountOut: r.eth_out,
+    // Valued on the leg the caller PAID, not on the bridged leg: the two are the
+    // same value net of fees, and pricing the input is what every other swap row
+    // does. The destination's dollar value is a separate, off-chain figure and is
+    // carried as `xcswapDestAmountUsd` rather than replacing this one.
     valueUsd: usdValue(prices, aIn.assetId, r.amount_in, aIn.decimals),
-    assetRefs: [aIn.assetId],
+    // Both registry assets the swap touches, so an asset-filtered feed matching
+    // either side returns it — the rule every two-sided activity follows.
+    assetRefs: aIn.assetId === aOut.assetId ? [aIn.assetId] : [aIn.assetId, aOut.assetId],
     xcswapDepositAddress: r.deposit_address,
     xcswapSequence: Number(r.transfer_sequence),
     xcswapEthOut: r.eth_out,
@@ -7609,8 +7618,13 @@ const XCSWAP_COLUMNS_SQL = `
 
 /**
  * Cross-chain swaps, newest first. `accounts` scopes to a caller through the
- * caller-first twin; `assetId` matches the Hydration asset sold, which is the only
- * registry asset a cross-chain swap touches.
+ * caller-first twin.
+ *
+ * `assetId` matches EITHER registry asset the swap touches: the asset sold, which
+ * varies per order and is a sort-key predicate, or the WETH every order is settled
+ * into, which is structural — so filtering on it selects every order rather than
+ * narrowing by a column. Matching only the sold side would hide a swap from a
+ * filter naming an asset its own row displays.
  */
 export async function getRecentXcswaps(
   limit: number,
@@ -7626,7 +7640,11 @@ export async function getRecentXcswaps(
   if (scoped === "''") return []
   const clauses = [tw ?? '1']
   if (scoped) clauses.push(`caller_account_id IN (${scoped})`)
-  if (assetId != null) clauses.push(`asset_in = ${Math.trunc(assetId)}`)
+  // The settlement asset is on every order, so it is not a predicate — narrowing
+  // by it would return nothing, since no row stores it in a column.
+  if (assetId != null && Math.trunc(assetId) !== XCSWAP_SETTLEMENT_ASSET_ID) {
+    clauses.push(`asset_in = ${Math.trunc(assetId)}`)
+  }
   const table = scoped ? 'price_data.xcswap_orders_by_account' : 'price_data.xcswap_orders'
   // Head-keyed like every other classified activity source: this feeds lanes that
   // only move forward, so a page served from a key that omits the live head steps
@@ -11396,6 +11414,16 @@ export function parseOutboundXcm(argsRaw: unknown): ParsedOutboundXcm | null {
 // Hydration's EVM native currency is WETH (asset 20): an EVM `msg.value` is a WETH
 // transfer, which is what a Wormhole Executor relay payment is.
 export const EVM_GAS_ASSET_ID = 20
+
+// The same asset, for a different reason: what the Hydration half of a
+// cross-chain swap PRODUCES. The IntentEmitter's ABI denominates the settlement
+// in ETH (`uint256 ethOut`) and the NTT rail carries it as WETH, so the asset is
+// structural to the bridge rather than a property of the order — the OrderPlaced
+// log never names it. Checked against every order placed since the first
+// (13,797,859): each has exactly one Tokens.Withdrawn of asset 20 whose amount
+// equals `eth_out`, and no other asset ever matches, so `eth_out` IS the bridged
+// amount and needs no second read to confirm it.
+export const XCSWAP_SETTLEMENT_ASSET_ID = EVM_GAS_ASSET_ID
 // Executor.RequestForExecution(address indexed quoterAddress, uint256 amtPaid, uint16 dstChain,
 //                              bytes32 dstAddr, address refundAddr, bytes signedQuote,
 //                              bytes requestBytes, bytes relayInstructions)
