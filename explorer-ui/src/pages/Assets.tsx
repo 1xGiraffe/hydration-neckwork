@@ -2,6 +2,7 @@ import { useAssets } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, setQuery, useQueryValue } from '../router'
 import { Crumbs, Usd, F, AssetIcon, Sparkline, EmptyRow, TableSkeleton, rowNav, Dash } from '../components/ui'
+import { PREIS_URL } from '../surfaces'
 import type { AssetListItem } from '../types'
 
 type AssetSort = 'tvl' | 'holders' | '24h' | '7d'
@@ -55,6 +56,16 @@ export function Assets() {
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Assets' }]} />
         <div className="page-title">Assets <span className="sub">{rows.length} tokens</span></div>
       </div>
+
+      {/* The 7-day sparkline in each row is a glance, not a chart. Preis is the
+          chart app for the same pairs, on its own host — the arrow and the new
+          window are what say so before the click. */}
+      <div className="hdx-note" style={{ marginTop: 0, marginBottom: 16 }}>
+        The last column is a 7-day glance. For the chart behind it &mdash; every pair on the chain, candle by candle,
+        at any timeframe &mdash; read these prices on preis.{' '}
+        <a className="sec-inline-link" href={PREIS_URL} target="_blank" rel="noopener noreferrer">Open preis ↗</a>
+      </div>
+
       <div className="panel">
         <table className="tbl assets-tbl">
           <thead><tr><th>Asset</th><th className="r">Price</th><th className="r">{sTh('24h', '24H')}</th><th className="r">{sTh('7d', '7D')}</th><th className="r">{sTh('holders', 'Holders')}</th><th className="r">{sTh('tvl', 'TVL')}</th><th className="r">Last 7 days</th></tr></thead>

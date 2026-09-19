@@ -3660,3 +3660,134 @@ a.rev-pill-label:hover { color: var(--accent); }
    (the cross-chain fuse table split 36/34 when measured). A block makes every
    priced cell the same two-line shape at every viewport. */
 .sec-usd { display: block; font-size: 11px; white-space: nowrap; }
+
+/* ============ MCP GETTING-STARTED (/mcp) ============
+   The developer-facing page for the MCP server, and the map of which surface
+   answers which question. It is built out of the page furniture the rest of the
+   app already uses — .detail-card, .dl, .tabs, .json.cli-block, .btn, .sec-title
+   — and adds only what this page's own objects need: the interpretation
+   specimen in the intro, the snippet frame, the tool list and the recorded
+   examples. Nothing here is referenced from another page. */
+
+/* An anchored section heading must clear the sticky topbar when a hero button
+   jumps to it, or the heading lands underneath the bar. */
+.sec-title.mcp-anchor { scroll-margin-top: 84px; }
+
+/* This page's headings carry its outline, so they are real h1/h2/h3 in order.
+   The shared .page-title/.sec-title atoms were authored against divs and set no
+   font-weight, which leaves a heading with the user agent's bold; the global
+   `* { margin: 0 }` reset already handles the rest. */
+.mcp-page h2.sec-title { font-weight: 400; }
+
+.mcp-intro { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr); gap: 36px; align-items: start; margin-bottom: 30px; }
+@media (max-width: 900px) { .mcp-intro { grid-template-columns: minmax(0, 1fr); gap: 24px; } }
+.mcp-lede { color: var(--text-medium); font-size: 15px; line-height: 1.62; max-width: 56ch; }
+.mcp-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+/* The page's own primary action carries more weight than a filter pill, while
+   keeping the shared button's shape and voice. */
+.mcp-actions .btn { height: 38px; padding: 0 18px; font-size: 11.5px; }
+
+/* The specimen: one real row as the index stores it, and as a tool hands it to
+   a model. The single loud object on the page, so everything around it stays
+   quiet. */
+.mcp-spec { padding: 18px 20px; }
+.mcp-spec-k { font-size: 10.5px; color: var(--text-low); }
+.mcp-spec-raw { margin: 8px 0 0; font-size: 11.5px; line-height: 1.7; color: var(--text-low); white-space: pre-wrap; overflow-wrap: anywhere; }
+.mcp-spec-out { margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--separator); }
+.mcp-spec-verb { font-size: 10.5px; color: var(--accent); }
+.mcp-spec-line { margin-top: 8px; font-size: 16px; font-weight: 500; line-height: 1.5; color: var(--text-high); overflow-wrap: anywhere; }
+.mcp-spec-usd { margin-top: 4px; font-size: 13px; color: var(--text-medium); }
+/* --text-lowest sits near 2:1 on the light ground; this line carries a real
+   claim, so it takes the quietest token that still reads. */
+.mcp-spec-foot { margin-top: 14px; font-size: 10.5px; line-height: 1.7; color: var(--text-low); }
+.mcp-spec-em { color: var(--text-medium); }
+
+/* Endpoint facts: the shared .dl, plus a trailing muted note per row and the
+   live-probe dot. */
+.mcp-dim { font-size: 11.5px; }
+.mcp-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--text-lowest); }
+.mcp-dot.ok { background: var(--green); }
+.mcp-dot.warn { background: var(--amber); }
+.mcp-dot.down { background: var(--red); }
+.mcp-endpoint { min-width: 0; }
+.mcp-endpoint-url { overflow-wrap: anywhere; min-width: 0; }
+
+.mcp-note { color: var(--text-medium); font-size: 13.5px; line-height: 1.6; max-width: 76ch; margin: -4px 0 14px; }
+/* The probe's finding when the endpoint answered something other than its
+   documented 405: a claim about THIS deployment, not page furniture. */
+.mcp-warn { margin: 12px 0 0; color: var(--amber); }
+.mcp-warn code { color: inherit; }
+.mcp-pad { padding: 18px 20px; }
+@media (max-width: 560px) { .mcp-pad { padding: 16px; } }
+.mcp-where { color: var(--text-medium); font-size: 13.5px; line-height: 1.6; margin-bottom: 12px; }
+.mcp-verify { color: var(--text-medium); font-size: 13.5px; line-height: 1.6; margin-top: 13px; }
+.mcp-verify b { color: var(--text-high); }
+/* Inline code inside this page's prose: the app has no such atom, and a bare
+   .mono loses the boundary that tells a path from a sentence. */
+.mcp-where code, .mcp-verify code, .mcp-note code, .mcp-ex-note code, .dl.mcp-notes code, .dl.mcp-surfaces code { font-size: 12px; color: var(--text-high); }
+.mcp-targets { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px; }
+.mcp-targets code { font-size: 11.5px; color: var(--text-medium); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; }
+
+/* Snippet frame around the shared .json.cli-block: the file it belongs in on
+   the left, the copy on the right. The path is information — it is half the
+   instruction — not a caption. */
+.mcp-snip { border: 1px solid var(--separator); border-radius: 12px; background: var(--bg); overflow: hidden; }
+.mcp-snip-head { display: flex; align-items: center; gap: 10px; padding: 7px 9px 7px 13px; border-bottom: 1px solid var(--separator); min-width: 0; }
+.mcp-snip-path { font-size: 11px; color: var(--text-low); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-snip-head .copy-text-btn { margin-left: auto; flex-shrink: 0; }
+.mcp-snip .json { margin: 0; border: 0; border-radius: 0; background: transparent; color: var(--text-high); padding: 14px 15px; }
+@media (max-width: 560px) { .mcp-snip .json { padding: 12px 13px; font-size: 11.5px; } }
+/* The agent-instruction block is meant to be READ, not only copied, and a
+   full-width card sets it at ~160 monospace characters a line. Cap the frame
+   rather than the text inside it, so the copy button stays on the measure. */
+.mcp-instructions .mcp-snip { max-width: 108ch; }
+
+/* Tool list: one row per registered tool, its long agent-facing description
+   folded away. The descriptions carry their own line structure, so they are set
+   pre-wrapped rather than reflowed as prose. */
+.mcp-empty { padding: 18px 20px; font-size: 13.5px; color: var(--text-medium); line-height: 1.6; }
+.mcp-tool { border-bottom: 1px solid var(--separator); }
+.mcp-tool:last-child { border-bottom: 0; }
+.mcp-tool > summary { display: flex; align-items: baseline; gap: 12px; padding: 13px 18px; cursor: pointer; list-style: none; }
+.mcp-tool > summary::-webkit-details-marker { display: none; }
+.mcp-tool > summary:hover { background: var(--panel); }
+/* The mark is a sibling of the name/title pair, never inside it: with all three
+   in one wrapping row, a long title pushed the mark onto a line of its own. */
+.mcp-tool-id { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; min-width: 0; flex: 1 1 auto; }
+.mcp-tool-name { font-size: 13px; font-weight: 500; color: var(--text-high); }
+.mcp-tool[open] .mcp-tool-name { color: var(--accent); }
+.mcp-tool-title { font-size: 13.5px; color: var(--text-medium); min-width: 0; }
+.mcp-tool-mark { flex: 0 0 auto; font-family: 'GeistMono'; font-size: 14px; color: var(--text-low); }
+.mcp-tool-mark::before { content: '+'; }
+.mcp-tool[open] .mcp-tool-mark { color: var(--accent); }
+.mcp-tool[open] .mcp-tool-mark::before { content: '\2212'; }
+.mcp-tool-desc { margin: 0; padding: 0 18px 18px; font-family: 'GeistMono'; font-size: 12px; line-height: 1.72; color: var(--text-medium); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Recorded exchanges. The accent rule marks where a person spoke; everything
+   under it is what came back. */
+.mcp-ex { padding: 20px 0; border-top: 1px solid var(--separator); }
+.mcp-ex-q { font-size: 15.5px; font-weight: 600; color: var(--text-high); line-height: 1.45; padding-left: 13px; border-left: 2px solid var(--accent); }
+.mcp-ex-call { margin: 10px 0 12px; padding-left: 15px; font-size: 11.5px; color: var(--text-low); overflow-wrap: anywhere; }
+.mcp-ex-body { padding-left: 15px; }
+.mcp-ex-note { margin-top: 11px; font-size: 13px; line-height: 1.6; color: var(--text-low); }
+@media (max-width: 560px) { .mcp-ex-q { padding-left: 11px; } .mcp-ex-call, .mcp-ex-body { padding-left: 13px; } }
+
+/* The reply frame holds the tool's own text, so it is set as text: pre-wrapped
+   at the page's measure rather than laid out as a table. That is also why it
+   does not scroll — a horizontal scroller inside a transcript is unreachable
+   from the keyboard, and these lines lose nothing by wrapping. */
+.mcp-reply { border: 1px solid var(--separator); border-radius: 12px; background: var(--bg); overflow: hidden; }
+.mcp-reply-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; padding: 7px 13px; border-bottom: 1px solid var(--separator); font-size: 11px; color: var(--text-low); }
+/* Quiet, but not quieter than the frame it labels: this says the block is cut,
+   which a reader who misses it will mistake for the whole reply. --text-lowest
+   measured 1.66:1 on the light ground here, so it takes the head row's token. */
+.mcp-reply-cut { margin-left: auto; font-size: 10.5px; color: var(--text-low); }
+.mcp-reply-body { margin: 0; padding: 14px 15px; font-family: 'GeistMono'; font-size: 12px; line-height: 1.72; color: var(--text-medium); white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 560px) { .mcp-reply-body { padding: 12px 13px; font-size: 11.5px; } }
+
+/* These two lists hold sentences, not values: a flex row would make every
+   inline <code> its own gapped item and break the prose apart. */
+.dl.mcp-notes .dd, .dl.mcp-surfaces .dd { display: block; line-height: 1.6; color: var(--text-medium); }
+.dl.mcp-notes .dt, .dl.mcp-surfaces .dt { align-items: flex-start; }
+.dl.mcp-surfaces .dd b { color: var(--text-high); font-weight: 500; }
+.dl.mcp-surfaces .dd .ext-link { margin-left: 6px; }
