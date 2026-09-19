@@ -285,11 +285,14 @@ export function activityAmounts(r: ActivityRow): string | null {
   const inLeg = leg(r.assetIn, r.amountIn)
   const outLeg = leg(r.assetOut, r.amountOut)
   if (r.type === 'xcswap') {
+    // Three legs: sold, bridged, delivered. The middle one is the whole reason a
+    // reader does not mistake this for the input asset being sent to the
+    // destination chain — it is sold on Hydration for the WETH that bridges.
     // The destination is not a registry asset, so it travels as its own fields.
     const dest = r.xcswapDestAmount != null && r.xcswapDestDecimals != null
       ? formatAmount(r.xcswapDestAmount, r.xcswapDestDecimals, r.xcswapDestSymbol ?? undefined)
       : r.xcswapDestSymbol ?? null
-    return [inLeg, dest].filter(Boolean).join(' → ') || null
+    return [inLeg, outLeg, dest].filter(Boolean).join(' → ') || null
   }
   if (inLeg && outLeg) return `${inLeg} → ${outLeg}`
   return inLeg ?? outLeg ?? leg(r.asset, r.amount)
@@ -342,7 +345,16 @@ function qualifiers(r: ActivityRow): string[] {
     }
     case 'xcswap':
       if (r.xcswapDestChain) out.push(`to ${r.xcswapDestChain}`)
-      if (r.xcswapStatus) out.push(`status ${r.xcswapStatus}`)
+      // The status is the SOLVER's, reported by the off-chain sweep, and it is
+      // stored uncoerced. On its own it misreads: the Hydration half has already
+      // settled and bridged by the time a row exists, so a bare "PENDING_DEPOSIT"
+      // sounds like the caller has not paid when what is pending is the delivery.
+      // Name whose half it describes, and keep the upstream token beside it.
+      if (r.xcswapStatus) {
+        out.push(r.xcswapStatus === 'SUCCESS' || r.xcswapStatus === 'REFUNDED' || r.xcswapStatus === 'FAILED'
+          ? `destination ${r.xcswapStatus.toLowerCase()}`
+          : `Hydration leg settled, destination not yet delivered (solver status ${r.xcswapStatus})`)
+      }
       break
     case 'vote': {
       const ref = r.voteRef != null ? `${r.voteRefPallet ?? 'opengov'} #${r.voteRef}` : 'referendum'
