@@ -291,7 +291,7 @@ Playwright is separate: `npm --prefix explorer-ui run test:e2e` and `npm --prefi
 
 - Preserve unrelated working-tree changes.
 - Comments and docs describe current behavior and rationale, not implementation history or a work session.
-- Do not commit task plans, agent reports, screenshots, generated logs/results, ad hoc probes, or one-account repair scripts.
+- Do not commit task plans, design specs, brainstorms, runbooks, agent reports, screenshots, generated logs/results, ad hoc probes, or one-account repair scripts. `docs/superpowers/` and `.superpowers/` are gitignored and stay that way — never un-ignore a path under them, never add a `!` exception, and never cite one of those documents from a tracked file. A document the repo cannot ship cannot be normative: if a rule, a semantic or a design decision matters to someone reading the code, write it into AGENTS.md or into the comment next to the code it governs, where a fresh clone can actually read it.
 - Add focused regression coverage for durable behavior, not fixtures coupled to one transient production example.
 - Keep shared domain logic centralized; avoid near-duplicate helpers or divergent activity builders.
 
