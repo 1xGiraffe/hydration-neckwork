@@ -685,6 +685,72 @@ services:
       - EXPLORER_PUBLIC_URL=${EXPLORER_PUBLIC_URL:-}
       - EXPLORER_EXTRA_ATOKEN_UNDERLYING=${EXPLORER_EXTRA_ATOKEN_UNDERLYING:-}
 
+  # MCP server (docs/superpowers/specs/2026-09-18-hydration-mcp-design.md): the
+  # Model Context Protocol endpoint for LLM agents at hydration-mcp.neckwork.net.
+  # Fifth process on the shared api image, and the only one that never touches
+  # ClickHouse — it reads the explorer `api` over HTTP inside this network and
+  # reshapes the result, which is what guarantees a number here is the number
+  # the Explorer page shows. No schema dependency and no micro-cache: responses
+  # are anonymous, already cached in-process, and the edge proxies straight here.
+  api-mcp:
+    <<: *service
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: hydration-neckwork-api
+    container_name: hydration-neckwork-api-mcp
+    # Unconditional: compose only needs to start `api` first so the name
+    # resolves. A health condition would couple this service's restarts to the
+    # explorer's, and the boot probe already reports an upstream that is still
+    # coming up without refusing to serve.
+    depends_on:
+      - api
+    command: ["./node_modules/.bin/tsx", "src/mcp/server.ts"]
+    ports:
+      - "127.0.0.1:3004:3000"
+    environment:
+      - MCP_PORT=3000
+      # This service's own origin. Every snippet on the getting-started page,
+      # /mcp.json and /llms.txt name it, so it must be the address an agent can
+      # actually reach — not the container.
+      - MCP_PUBLIC_URL=${MCP_PUBLIC_URL:-https://hydration-mcp.neckwork.net}
+      # Upstream: the explorer api by container name, whose in-process caches are
+      # already warm for the live UI. Riding that warm cache is the point.
+      - EXPLORER_API_URL=${EXPLORER_API_URL:-http://hydration-neckwork-api:3000}
+      # Where the canonical link on every rendered record points, so an agent can
+      # hand a human the page a figure came from.
+      - EXPLORER_PUBLIC_URL=${EXPLORER_PUBLIC_URL:-https://hydration-explorer.neckwork.net}
+      # Comma-separated bearer keys. Empty means open, which is the default
+      # posture: every tool reads public chain data only, and the private
+      # /user/ surface is unreachable from this process by construction.
+      - MCP_ACCESS_KEYS=${MCP_ACCESS_KEYS:-}
+      # Sized for the COLD upstream call, not the typical one: scoped activity
+      # measured 38s on a first read and milliseconds on every one after.
+      - MCP_UPSTREAM_TIMEOUT_MS=${MCP_UPSTREAM_TIMEOUT_MS:-60000}
+      # In-flight upstream requests across all agents. The explorer routes are
+      # unthrottled and have no per-caller isolation, so this bound plus
+      # single-flight de-duplication is what stops an agent burst from
+      # contending with the live UI for the same event loop.
+      - MCP_MAX_UPSTREAM_CONCURRENCY=${MCP_MAX_UPSTREAM_CONCURRENCY:-6}
+      # Slots carved OUT of that bound and reserved for the cheap reads (chain
+      # status, the last blocks). Without them a burst of scoped-activity calls
+      # holds every permit and "is the chain live?" waits behind a minute of
+      # someone else's work — the answer an agent needs soonest, last.
+      - MCP_UPSTREAM_CHEAP_LANE_SLOTS=${MCP_UPSTREAM_CHEAP_LANE_SLOTS:-2}
+      # How long a call may wait for a permit before it is shed. Short on
+      # purpose: an agent can act on a fast "busy, retry", and cannot act on an
+      # answer that arrives after a minute in a queue.
+      - MCP_UPSTREAM_QUEUE_TIMEOUT_MS=${MCP_UPSTREAM_QUEUE_TIMEOUT_MS:-5000}
+      # How many calls may wait at once, so a burst is refused at the door
+      # rather than growing a queue behind work that is already oversubscribed.
+      - MCP_UPSTREAM_QUEUE_DEPTH=${MCP_UPSTREAM_QUEUE_DEPTH:-64}
+      # Default per-URL response cache TTL; tools override it per call where the
+      # upstream resource moves more slowly than the feed.
+      - MCP_CACHE_TTL_MS=${MCP_CACHE_TTL_MS:-10000}
+      # Hard cap on one rendered answer, with a truncation note. The tools render
+      # to fit; this is the last guard on an agent's context window.
+      - MCP_MAX_TEXT_CHARS=${MCP_MAX_TEXT_CHARS:-24000}
+
   # Micro-cache in front of api-public: URI-keyed, honors the app's per-route
   # Cache-Control, collapses concurrent misses into one upstream request. The
   # external reverse proxy (outside this repo) points the public hostname here,

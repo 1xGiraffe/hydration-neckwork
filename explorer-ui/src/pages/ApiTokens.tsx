@@ -9,14 +9,13 @@ import { useNow } from '../hooks/useNow'
 import { paths } from '../router'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { Copy, Crumbs, EmptyRow, F, TableSkeleton } from '../components/ui'
+import { DATA_API_URL } from '../surfaces'
 import type { ApiTokenInfo, CreatedApiToken } from '../types'
 
 // Data API tokens: mint, recognize and revoke the bearer tokens the
 // hydration-data host authenticates with. The raw `hdd_…` secret exists
 // client-side exactly once — on the create response — so the create dialog is
 // the only surface that ever shows it, and closing that dialog is final.
-
-export const DATA_API_URL = 'https://hydration-data.neckwork.net'
 
 function CreateTokenDialog({ open, onOpenChange, onCreated }: {
   open: boolean

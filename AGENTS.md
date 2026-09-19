@@ -220,6 +220,51 @@ API it is a **versioned frozen contract**; concept: `~/.g/hydraken-api-concept.m
   600-block pool-state grid, the reserve-index fold) key on the window and a plain TTL,
   not the live head — a head key on a source that moves once an hour never hits.
 
+## MCP server
+
+The `api-mcp` service (`api/src/mcp/`, same image as `api`, own process on port 3004, host
+hydration-mcp.neckwork.net) serves LLM agents a Model Context Protocol surface over the
+*interpreted* explorer dataset.
+
+- It is a **presentation layer, not a read model**. It owns no tables, no materialized views and
+  no SQL: every answer comes from an HTTP call to the explorer `api` on the compose network, so a
+  number here is by construction the number the Explorer page shows. That is what keeps the
+  classification symmetry of **Explorer semantics** true across a third surface. Adding a query
+  here instead of reusing an explorer route is the one change this service must never take.
+- `api/src/mcp/**` may import **nothing** outside its own tree — not `db/client`, not `config.ts`,
+  not `explorerService`, not `public/**` or `data/**`. `api/tests/mcp/isolation.test.ts` is the
+  enforced contract and this sentence must follow it; the allow-list is deliberately empty.
+  `api/tests/mcp/upstreamPaths.test.ts` pins the other half: every upstream path must start with
+  `/explorer/`, `/candles`, `/assets`, `/market-stats` or `/health`, and `/user/` anywhere is a
+  test failure. Together they are the structural guarantee that the private `user_*` data of
+  **Schema and derivations** cannot reach an agent — the routes that read it are unreachable from
+  this tree, rather than merely unused by it.
+- The transport is Streamable HTTP, **stateless**: a fresh `McpServer` and transport per request,
+  closed in `finally`, so no session state accumulates. `POST /mcp` carries every JSON-RPC
+  message; `GET`/`DELETE` answer 405 because there is no stream to resume. Fastify has already
+  parsed the body, so it must be passed to `transport.handleRequest` explicitly or the transport
+  hangs on a consumed stream.
+- A tool reply carries **one** text block and no `structuredContent`: a client that forwards both
+  doubles every answer's token cost. `format: "json"` on every tool is how a caller asks for the
+  structured record instead.
+- Interpretation is the product. Amounts are scaled by the row's own `AssetRef.decimals` and
+  carry their symbol and USD value, accounts render as identity/tag/SS58 (never raw
+  AccountId32 hex), rows arrive classified by the explorer's own feed, and every record carries
+  its canonical Explorer URL. The renderers live once in `api/src/mcp/format/` and reproduce the
+  shared rough number scale of **UI** — they are a deliberate third parallel to
+  `explorer-ui`'s `F`/`compactAmount` and `notifications/render.ts`, so a change to the scale
+  belongs in all three.
+- A tool's `description` is its interface, not its documentation: it is the only thing a model
+  reads before choosing and calling it, so it must carry the parameter semantics and the traps
+  (the activity `type` family behaviour, the isolated money markets, the unconfirmed rows). The
+  registry test pins that every tool has one, carries the shared `format` parameter instance, and
+  appears in `/llms.txt`.
+- Load discipline: agent traffic must never out-compete the live UI on the shared explorer `api`.
+  The upstream client bounds in-flight requests, de-duplicates concurrent identical reads, and
+  caches responses per URL; the edge adds its own per-IP zones. Heavy explorer routes are called
+  in their cheap form (`summary=1` on a tag is 56 KB against 1.5 MB) and every list is trimmed
+  before rendering rather than after.
+
 ## UI
 
 - Reuse existing components, formatting conventions, tokens, and interaction patterns before adding variants.

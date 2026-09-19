@@ -82,6 +82,9 @@ export type Route =
   // Data API token management (logged-in), and its admin surface (allowlist).
   | { name: 'api-tokens' }
   | { name: 'api-admin' }
+  // Getting started with the MCP server — the developer-facing surface map.
+  // It lives here, not on the MCP host, so there is one copy of it.
+  | { name: 'mcp' }
   | { name: 'notfound'; path: string }
 
 // Internal nav event the store listens to (pushState/replaceState don't fire
@@ -184,6 +187,7 @@ export function parseRoute(loc: string): Route {
     case 'link-device': return { name: 'link-device' }
     case 'notifications': return { name: 'notifications' }
     case 'api-tokens': return { name: 'api-tokens' }
+    case 'mcp': return { name: 'mcp' }
     case 'admin': return parts[1] === 'api' ? { name: 'api-admin' } : { name: 'notfound', path: pathOnly }
     default:
       if ((ACTIVITY_SLUGS as readonly string[]).includes(parts[0])) {
@@ -351,6 +355,7 @@ export const paths = {
   // tabbed surface; the inbox is the default and carries no parameter.
   notifications: (tab?: 'alerts' | 'channels' | null) => (tab ? `/notifications?tab=${tab}` : '/notifications'),
   apiTokens: () => '/api-tokens',
+  mcp: () => '/mcp',
   apiAdmin: () => '/admin/api',
 }
 
