@@ -3,17 +3,12 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { csv, notFound, zAssetId, zHexAddress, zIsoTimestamp, zLimitOffset, zPage } from '../schemas/common.ts'
+import { csv, parseAssets, notFound, zAssetId, zHexAddress, zIsoTimestamp, zLimitOffset, zPage } from '../schemas/common.ts'
 import type { IntentKind, IntentStatus } from '../services/intentOrders.ts'
 import {
   INTENT_EVENT_KINDS, INTENT_KINDS, INTENT_STATUSES,
   queryIntentEvents, queryIntentOrderById, queryIntentOrders,
 } from '../services/intentOrders.ts'
-
-// ICE intents (runtime 443's limit orders and DCA intents). See spec section
-// "Trades / DCA".
-
-const MAX_ASSET_FILTERS = 20
 
 const zIntentRow = z.object({
   intentId: z.string(),
@@ -93,15 +88,6 @@ function parseKinds(raw: string | undefined): IntentKind[] {
   }
   return [...new Set(out)].sort()
 }
-
-function parseAssets(raw: string | undefined): string[] {
-  const assets = csv(raw)
-  if (assets.length > MAX_ASSET_FILTERS) throw badRequest(`assets accepts at most ${MAX_ASSET_FILTERS} ids, got ${assets.length}`)
-  const parsed = z.array(zAssetId).safeParse(assets)
-  if (!parsed.success) throw badRequest('assets must be decimal registry ids, e.g. assets=5,10')
-  return [...new Set(parsed.data)].sort((a, b) => Number(a) - Number(b))
-}
-
 const INTENT_DESCRIPTION = [
   'An ICE intent is a resting order: the owner\'s `assetIn` goes under a named reserve at submission and a solver\'s ICE.submit_solution fills it. A **swap** intent is the product\'s **limit order** (`amountOut` is the minimum it accepts); a **dca** intent is runtime 443\'s DCA, where `amountIn` is ONE PERIOD\'s trade and `budget` the whole commitment. The Intent pallet went live at block 14,362,830.',
   '`intentId` is a u128 and travels as a DECIMAL STRING — it is the identity everywhere. `seq` is its low 64 bits, the short "#n" handle the explorer shows; it is a display value and exact only below 2^53, so never key on it.',

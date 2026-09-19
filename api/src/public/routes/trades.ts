@@ -3,7 +3,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { csv, zAssetId, zHexAddress, zIsoTimestamp, zLimitOffset, zPage } from '../schemas/common.ts'
+import { parseAssets, zAssetId, zHexAddress, zIsoTimestamp, zLimitOffset, zPage } from '../schemas/common.ts'
 import { queryTrades } from '../services/trades.ts'
 
 // Market swaps. See spec section "Trades / DCA" for the normative definitions.
@@ -20,10 +20,6 @@ import { queryTrades } from '../services/trades.ts'
 // account: 851,699 net trades, 0.36 s at offset 100,000). Scoped requests keep the
 // surface-wide `zLimitOffset` bound instead.
 const MAX_TRADE_OFFSET = 10_000
-// One request may filter on at most this many assets — a cost ceiling on the
-// uncached path and a cardinality ceiling on the count cache's keys.
-const MAX_ASSET_FILTERS = 20
-
 const zTradeRow = z.object({
   blockHeight: z.number().int(),
   eventIndex: z.number().int(),
@@ -53,18 +49,6 @@ function checkOffset(account: string | null, offset: number): void {
     throw badRequest(`offset accepts at most ${MAX_TRADE_OFFSET} on the global feed, got ${offset}; scope the query to an account to page deeper`)
   }
 }
-
-function parseAssets(raw: string | undefined): string[] {
-  const assets = csv(raw)
-  if (assets.length > MAX_ASSET_FILTERS) {
-    throw badRequest(`assets accepts at most ${MAX_ASSET_FILTERS} ids, got ${assets.length}`)
-  }
-  const parsed = z.array(zAssetId).safeParse(assets)
-  if (!parsed.success) throw badRequest('assets must be decimal registry ids, e.g. assets=5,10')
-  // Sorted and deduplicated, so the cache key is one entry per SET of assets.
-  return [...new Set(parsed.data)].sort((a, b) => Number(a) - Number(b))
-}
-
 const ROW_DESCRIPTION = [
   'Newest first. ONE ROW PER USER-LEVEL TRADE: `swap_activity` holds both the router\'s net summary (assetIn→assetOut end to end) and the AMM event of every hop, and only the net row is returned — a 3-hop route is one trade in the pair the user named, never three trades in intermediate assets. Router hops, DCA keeper-fee legs and (before the router event rename at block 4,542,080) the AMM legs of DCA executions are excluded for the same reason.',
   '`amountIn`/`amountOut` are therefore the end-to-end legs (first input, last output) in raw on-chain integer units.',
