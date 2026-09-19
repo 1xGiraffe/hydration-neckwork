@@ -1,8 +1,9 @@
 import { keccakAsHex } from '@polkadot/util-crypto'
 import { deriveTruncatedAccountId, normalizeH160 } from './accountIdentity.js'
-import { toJsonString } from './json.js'
+import { toClickHouseDateTime, toJsonString } from './json.js'
 import type {
   RawEvmLogRow,
+  RawMoneyMarketCollateralFlagRow,
   RawMoneyMarketEventRow,
   RawMoneyMarketPositionRow,
   RawMoneyMarketReserveRow,
@@ -590,6 +591,96 @@ export async function snapshotMoneyMarketPositions(
 
   positions.sort((left, right) => left.observation_id.localeCompare(right.observation_id))
   return { positions, warnings }
+}
+
+// `getReservesList()` / `getUserConfiguration(address)`. Aave keeps a user's
+// per-reserve state in one word, two bits per reserve in reserve-list order: bit
+// 2i is "borrowing from reserve i", bit 2i+1 is "reserve i is my collateral".
+const RESERVES_LIST_SELECTOR = '0xd1946dbc'
+const USER_CONFIG_SELECTOR = '0x4417a583'
+
+async function readReservesList(poolProxy: string, blockHeight: number, rpcUrl: string): Promise<string[]> {
+  const raw = await fetchMoneyMarketRpc(rpcUrl, {
+    jsonrpc: '2.0', id: 'mm-reserves-list', method: 'eth_call',
+    params: [{ to: poolProxy, data: RESERVES_LIST_SELECTOR }, `0x${blockHeight.toString(16)}`],
+  }) as { result?: unknown }
+  if (typeof raw?.result !== 'string' || raw.result === '0x') return []
+  const body = raw.result.slice(2)
+  const count = Number.parseInt(body.slice(64, 128) || '0', 16)
+  const reserves: string[] = []
+  for (let i = 0; i < count && i < 256; i++) {
+    const word = body.slice(128 + i * 64, 128 + (i + 1) * 64)
+    if (word.length !== 64) return []
+    reserves.push(`0x${word.slice(24)}`.toLowerCase())
+  }
+  return reserves
+}
+
+/**
+ * Every reserve's usage-as-collateral bit for a set of users, read back from the
+ * pool at `blockHeight`.
+ *
+ * This is the ANCHOR half of the collateral model. The Enabled/Disabled events are
+ * exact when they exist, but this chain does not always emit them: EVM-log coverage
+ * before the aToken anchor block is partial, and an aToken that is also a registry
+ * asset (GDOT) is transferred through the substrate side, where the runtime sets the
+ * receiver's bit with no Aave event. Reading the word back is the only statement of
+ * the bit that cannot drift from the chain.
+ *
+ * A row is emitted for EVERY reserve of the pool, disabled ones included — a sweep
+ * that wrote only the enabled ones could never retract an earlier enable.
+ */
+export async function snapshotMoneyMarketCollateralFlags(
+  userAddresses: Iterable<string>,
+  blockHeight: number,
+  poolProxy: string,
+): Promise<{ flags: RawMoneyMarketCollateralFlagRow[]; failedUsers: string[] }> {
+  const flags: RawMoneyMarketCollateralFlagRow[] = []
+  const failedUsers: string[] = []
+  const addresses = uniqueAddresses(userAddresses)
+  if (addresses.length === 0) return { flags, failedUsers }
+
+  const rpcUrl = evmRpcUrl()
+  const reserves = await readReservesList(poolProxy, blockHeight, rpcUrl)
+  if (reserves.length === 0) throw new Error(`Money Market pool ${poolProxy} returned no reserve list at block ${blockHeight}`)
+  const observed_at = toClickHouseDateTime(Date.now())
+
+  await forEachConcurrent(chunk(addresses, moneyMarketBatchSize()), moneyMarketPositionConcurrency(), async batch => {
+    const requests = batch.map(userAddress => ({
+      jsonrpc: '2.0' as const, id: `mm-user-config-${userAddress}`, method: 'eth_call' as const,
+      params: [{ to: poolProxy, data: `${USER_CONFIG_SELECTOR}${userAddress.slice(2).padStart(64, '0')}` }, `0x${blockHeight.toString(16)}`],
+    }))
+    let responses: { id?: unknown; result?: unknown }[]
+    try {
+      const raw = await fetchMoneyMarketRpc(rpcUrl, requests.length === 1 ? requests[0] : requests)
+      responses = Array.isArray(raw) ? raw : [raw]
+    } catch {
+      failedUsers.push(...batch)
+      return
+    }
+    const byId = new Map<string, { result?: unknown }>()
+    for (const response of responses) {
+      if (response != null && typeof response === 'object' && typeof response.id === 'string') byId.set(response.id, response)
+    }
+    for (const userAddress of batch) {
+      const result = byId.get(`mm-user-config-${userAddress}`)?.result
+      // A user the node could not answer for keeps its previous anchor row rather
+      // than being written as "nothing is collateral": an unread bitmap is unknown,
+      // and a silent zero here would strip a live borrower's collateral badge.
+      if (typeof result !== 'string' || result === '0x') { failedUsers.push(userAddress); continue }
+      let bitmap: bigint
+      try { bitmap = BigInt(result) } catch { failedUsers.push(userAddress); continue }
+      reserves.forEach((reserve_address, index) => {
+        flags.push({
+          user_address: userAddress, pool_address: poolProxy, reserve_address,
+          block_height: blockHeight,
+          enabled: (bitmap >> BigInt(index * 2 + 1)) & 1n ? 1 : 0,
+          observed_at,
+        })
+      })
+    }
+  })
+  return { flags, failedUsers }
 }
 
 function reserveMetrics(args: Record<string, unknown>, eventName: string): Record<string, unknown> {
