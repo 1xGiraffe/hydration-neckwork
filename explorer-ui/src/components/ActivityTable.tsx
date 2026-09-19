@@ -318,11 +318,19 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     return <span className="asset-flow"><AssetAmount asset={r.assetIn} raw={r.amountIn} /> → <AssetAmount asset={r.assetOut} raw={r.amountOut} />{r.dcaStatus === 'failed' && <span className="muted">Failed attempt</span>}</span>
   }
   if (r.type === 'xcswap' && r.assetIn) {
+    // Three legs, because that is what a cross-chain swap is: the asset sold, the
+    // WETH it was sold FOR and bridged, and the destination. Showing only the
+    // first and last reads as "the sold asset travelled to another chain", which
+    // is never what happened — it is sold here and never leaves.
+    //
     // The destination is on ANOTHER chain, so it has no asset chip to show: it is
     // named by its symbol and the chain it settled on. Until the off-chain half is
     // resolved the row says where the value went — an Ethereum deposit address —
     // and stops there, rather than implying a delivery that may not have happened.
     const sold = <AssetAmount asset={r.assetIn} raw={r.amountIn} />
+    const bridged = r.assetOut && r.amountOut
+      ? <AssetAmount asset={r.assetOut} raw={r.amountOut} />
+      : null
     const dest = r.xcswapDestSymbol
       ? <span className="trade-leg">
         {/* The destination is not a registry asset, so it has no asset id — but it
@@ -332,7 +340,7 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
         {r.xcswapDestChain && <span className="xc-chain">{r.xcswapDestChain}</span>}
       </span>
       : <span className="muted">bridging out</span>
-    return <span className="asset-flow">{sold} → {dest}
+    return <span className="asset-flow">{sold} → {bridged ? <>{bridged} → </> : null}{dest}
       {!headed && r.xcswapRecipient && <span className="muted mono">{shortForeignAddress(r.xcswapRecipient)}</span>}
       {!headed && r.xcswapStatus === 'REFUNDED' && <span className="muted">refunded</span>}
     </span>
