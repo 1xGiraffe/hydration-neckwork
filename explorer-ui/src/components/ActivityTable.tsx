@@ -153,6 +153,18 @@ export function shortForeignAddress(address: string): string {
   if (address.length <= 20) return address
   return `${address.slice(0, 8)}…${address.slice(-4)}`
 }
+// A destination-chain address, with the tail tinted exactly as ShortAddr tints a
+// Hydration one — the last three characters are what a reader compares when two
+// addresses share a prefix, and a NEAR implicit account is 64 hex of prefix.
+//
+// Only when the address is actually TRUNCATED. A NEAR account can be named
+// (`crypthor.near`), which is shown whole, and tinting the final letters of a
+// word disambiguates nothing — it just reads as a typo.
+export function ForeignAddr({ address }: { address: string }) {
+  const short = shortForeignAddress(address)
+  if (short === address) return <>{address}</>
+  return <>{short.slice(0, -3)}<span className="last3">{short.slice(-3)}</span></>
+}
 
 function coordinateId(r: ActivityRow): string | null {
   if (r.eventIndex != null) return `${r.blockHeight}-e${r.eventIndex}`
@@ -354,12 +366,12 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
         ? <a className="addr-pill ext-account" href={r.xcswapRecipientUrl} target="_blank" rel="noopener"
              title={`${r.xcswapRecipient} · opens ${explorerSiteName(r.xcswapRecipientUrl)}`} data-no-hover="true">
           <AccountEmoji account={{ accountId: r.xcswapRecipient }} />
-          <span className="a mono">{shortForeignAddress(r.xcswapRecipient)}</span>
+          <span className="a mono"><ForeignAddr address={r.xcswapRecipient} /></span>
           <span className="ext-site">{explorerSiteName(r.xcswapRecipientUrl)}</span>
         </a>
         : <span className="addr-pill" title={r.xcswapRecipient}>
           <AccountEmoji account={{ accountId: r.xcswapRecipient }} />
-          <span className="a mono">{shortForeignAddress(r.xcswapRecipient)}</span>
+          <span className="a mono"><ForeignAddr address={r.xcswapRecipient} /></span>
         </span>)
       : null
     return <span className="asset-flow">{sold} → {chain}{delivered}{recipient}
