@@ -1,4 +1,5 @@
 import type { ClickHouseClient } from '../db/client.ts'
+import { usdOfRaw } from './assetValue.ts'
 import { blockClock } from './blockClock.ts'
 import { chDateTime, chTimestamp } from './clickhouseTime.ts'
 import { INTERVAL_VIEW_MAP, type OHLCVInterval } from './ohlcvService.ts'
@@ -1632,11 +1633,11 @@ async function refreshPrices(): Promise<Map<number, PriceInfo>> {
   } catch { /* serve stale on error */ }
   return priceMap
 }
+// The shared valuation leaf (assetValue.ts) under the name this file's ~30 call
+// sites and iceService already use. PriceInfo satisfies its structural
+// AssetPrice, so there is one arithmetic and one $0-vs-unknown rule, not two.
 export function usdValue(prices: Map<number, PriceInfo>, assetId: number, raw: string, decimals: number): number | null {
-  const p = prices.get(assetId)
-  if (!p) return null
-  const amt = Number(raw) / 10 ** decimals
-  return Number.isFinite(amt) ? amt * p.price : null
+  return usdOfRaw(prices, assetId, raw, decimals)
 }
 // A filled swap's execution price: assetOut per 1 assetIn, in display units. Null
 // whenever the ratio is not a price — either side zero, unparseable or non-finite —
@@ -4633,13 +4634,6 @@ export async function getMarketHealthFactor(addressInput: string, marketKey: str
   if (position.healthFactor === 'inf') return Infinity
   const hf = Number(position.healthFactor) / 1e18
   return Number.isFinite(hf) ? hf : null
-}
-
-// The primary market's health factor alone — what every primary-only surface
-// (the directory, DefiSim, tag risk) means by "the" health factor.
-export async function getPrimaryHealthFactor(addressInput: string): Promise<number | null> {
-  const primary = MM_MARKETS.find(m => m.role === 'primary')
-  return primary ? getMarketHealthFactor(addressInput, primary.key) : null
 }
 
 // Per-reserve money-market balances reconstructed from indexed aToken/vDebt

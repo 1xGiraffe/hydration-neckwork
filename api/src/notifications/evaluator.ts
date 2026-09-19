@@ -82,10 +82,9 @@ import {
 // cursor would step over every safety action ever emitted between two ticks. It
 // therefore advances only to the newest block the timeline it saw actually
 // contained. Both keep the same blind spot below the cursor, which is what makes
-// a backfill silent; a fresh install seeds from the legacy single cursor when one
-// is stored, otherwise from the head (or, for safety, its newest timeline row).
+// a backfill silent; a lane with no stored cursor seeds from the head (or, for
+// safety, its newest timeline row) rather than evaluating.
 const LIVE_PIPELINE_ID = 'raw-live'
-const LEGACY_CURSOR_KEY = `cursor:${LIVE_PIPELINE_ID}`
 export const cursorKey = (kind: RowLaneKind): string => `cursor:${kind}`
 
 // How far behind the head a single tick may look. A longer gap (a restart, a
@@ -1393,12 +1392,11 @@ export function initEvaluator(c: ClickHouseClient): void {
 /* ============ per-kind cursor state ============ */
 
 // A kind's cursor: from memory, else from its own state row, else from the
-// legacy single cursor (an upgrade in place), else unknown — which means the
-// lane seeds instead of evaluating.
+// else unknown — which means the lane seeds instead of evaluating.
 function cursorFor(kind: RowLaneKind): number | null {
   const held = cursors.get(kind)
   if (held != null) return held
-  const stored = getNotificationState(cursorKey(kind)) ?? getNotificationState(LEGACY_CURSOR_KEY)
+  const stored = getNotificationState(cursorKey(kind))
   const value = stored == null ? Number.NaN : Number(stored)
   if (!Number.isFinite(value) || value <= 0) return null
   cursors.set(kind, value)
