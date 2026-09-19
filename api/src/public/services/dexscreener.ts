@@ -14,8 +14,7 @@ import { publicStatus } from './status.ts'
 // dexscreener.interfaces.ts) and cross-checked live against
 // https://adapters.kril.hydration.cloud/dexscreener/…, so a consumer can swap the
 // base URL. Three consequences follow, and they are deliberate deviations from
-// the /v1 wire conventions in
-// docs/superpowers/specs/2026-08-12-public-rest-api-design.md:
+// the /v1 wire conventions in ../schemas/common.ts:
 //
 //  * Amounts are DECIMAL-ADJUSTED strings ("20", "3.435069126996"), not raw
 //    integer strings. DexScreener's parser expects token units. The arithmetic

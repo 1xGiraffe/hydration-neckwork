@@ -122,11 +122,10 @@ await fastify.register(compress, { global: true, encodings: ['br', 'gzip', 'defl
 // pattern must be listed above every wider one that would also match it.
 const CACHE_CONTROL: [RegExp, number][] = [
   [/^\/assets$/, 300],
-  // The Live surfaces poll on the chain's block cadence (~6s today, 2s
-  // planned) and their server caches are invalidated per ingested block
-  // (head-keyed keys), so a 5s browser cache would be the freshness
-  // bottleneck. 2s only matters for rapid tab switches — consecutive polls at
-  // today's cadence never hit it either way.
+  // The Live surfaces poll on the chain's ~2s block cadence and their server
+  // caches are invalidated per ingested block (head-keyed keys), so a 5s
+  // browser cache would be the freshness bottleneck. 2s only matters for rapid
+  // tab switches — consecutive polls at that cadence never hit it either way.
   [/^\/explorer\/(stats|blocks|extrinsics|events|activity)$/, 2],
   [/^\/candles/, 5],
   [/^\/explorer\/hdx/, 300],

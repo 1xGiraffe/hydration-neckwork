@@ -591,7 +591,7 @@ services:
       - KRAKEN_BASE_URL=${KRAKEN_BASE_URL:-https://api.kraken.com/0/public}
       - EXPLORER_EXTRA_ATOKEN_UNDERLYING=${EXPLORER_EXTRA_ATOKEN_UNDERLYING:-}
 
-  # Public REST API (docs/superpowers/specs/2026-08-12-public-rest-api-design.md):
+  # Public REST API (AGENTS.md § Public API):
   # the versioned /v1 + /rest surface for the Hydration UI and external feeds.
   # Its own process on the same image/env as `api`, so public traffic never
   # shares an event loop, in-process cache or rate-limit budget with the
@@ -679,7 +679,7 @@ services:
       - EXPLORER_PUBLIC_URL=${EXPLORER_PUBLIC_URL:-}
       - EXPLORER_EXTRA_ATOKEN_UNDERLYING=${EXPLORER_EXTRA_ATOKEN_UNDERLYING:-}
 
-  # MCP server (docs/superpowers/specs/2026-09-18-hydration-mcp-design.md): the
+  # MCP server (AGENTS.md § MCP server): the
   # Model Context Protocol endpoint for LLM agents at hydration-mcp.neckwork.net.
   # Fifth process on the shared api image, and the only one that never touches
   # ClickHouse — it reads the explorer `api` over HTTP inside this network and

@@ -47,9 +47,8 @@ export const uint32Param = z.coerce.number().int().min(0).max(0xffff_ffff)
 // Public list endpoints never render more than 100 rows at once. A modest hard
 // cap prevents a single request from multiplying the feed candidate scans.
 const limitSchema = z.coerce.number().int().min(1).max(250).optional()
-// `updates` was this sort's token for one release while the column was labelled for the
-// balance-observation count it used to show. Still accepted so a link made against it
-// resolves to the column it always meant.
+// `updates` is an accepted alias for this sort, from when the column was
+// labelled for the balance-observation count, so an old link still resolves.
 const accountSortSchema = z.enum(['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'updates', 'volume', 'liquidation', 'revenue'])
 // Exported so the viewer-fold accounts route (routes/user.ts) validates `sort` the
 // exact same way the public directory does — same precedent as offsetParam/limitParam.

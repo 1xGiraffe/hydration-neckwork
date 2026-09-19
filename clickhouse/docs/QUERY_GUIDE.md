@@ -19,8 +19,9 @@ configured credentials to `clickhouse-client`.
 
 ## Price views
 
-The views in `clickhouse/schema/006_query_views.sql` read the deduplicated
-`prices` and `assets` tables.
+The views in `clickhouse/schema/002_views.sql` read the deduplicated `prices`
+and `assets` tables, and `price_at_timestamp` also reads `blocks` to resolve a
+time to a height.
 
 ### Price at a block
 
@@ -132,8 +133,8 @@ FROM price_data.ohlc_1h_query(
 );
 ```
 
-Use the corresponding view name for another interval. Ordered definitions and
-upgrade migrations live in `clickhouse/schema/`.
+Use the corresponding view name for another interval. The definitions live in
+`clickhouse/schema/`; there are no migrations.
 
 ## Direct table queries
 
@@ -220,15 +221,11 @@ observations before aggregation.
 
 ## Schema sources
 
-- `clickhouse/schema/001_prices.sql`: `prices`
-- `clickhouse/schema/002_blocks.sql`: `blocks`
-- `clickhouse/schema/003_assets.sql`: `assets`
-- `clickhouse/schema/006_query_views.sql`: block and timestamp price views
-- `clickhouse/schema/007_ohlc_5min.sql`, `008_ohlc_15min.sql`,
-  `009_ohlc_1h.sql`, `010_ohlc_4h.sql`, `011_ohlc_1d.sql`,
-  `014_ohlc_30min.sql`, `015_ohlc_1w.sql`, and `016_ohlc_1m.sql`: OHLCV tables
-- `clickhouse/schema/012_ohlc_query_views.sql`, `013_volume_migration.sql`, and
-  `017_ohlc_query_views_new.sql`: OHLCV query views
+- `clickhouse/schema/001_tables.sql`: `prices`, `blocks`, `assets` and the
+  `ohlc_*` tables
+- `clickhouse/schema/002_views.sql`: the price and OHLCV query views
+- `clickhouse/schema/003_materialized_views.sql`: the `ohlc_*_mv` feeders
 
-Treat the ordered schema files as the source of truth when this guide and a
-deployed database disagree.
+Treat the schema files as the source of truth when this guide and a deployed
+database disagree. They are applied in numeric order to an empty database and
+never migrated, so a difference means the guide is stale, not the database.

@@ -16,7 +16,7 @@ import {
 } from '../../src/public/schemas/common.ts'
 
 // The wire conventions every /v1 route composes from
-// (docs/superpowers/specs/2026-08-12-public-rest-api-design.md, "Wire
+// (the wire conventions in src/public/schemas/common.ts, "Wire
 // conventions"). These helpers are the shared seam for every later route group,
 // so their behavior is pinned here rather than rediscovered per endpoint.
 const HEX_20 = `0x${'ab'.repeat(20)}`

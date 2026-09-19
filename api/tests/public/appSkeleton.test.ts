@@ -73,10 +73,9 @@ describe('public service routes', () => {
 
   // The metadata probe's incumbent is the Hydration data lake, which is not
   // reachable from this deployment (api.hydradx.io and api.nice.hydration.cloud
-  // both 404 the path), so the reference is the shape the spec pins as normative
-  // — docs/superpowers/specs/2026-08-12-public-rest-api-design.md § Service /
-  // status — and it is pinned here as a serialized document because the UI's
-  // provider-selection client reads it by path, not by schema.
+  // both 404 the path), so this test IS the normative reference for the shape,
+  // pinned as a serialized document because the UI's provider-selection client
+  // reads it by path, not by schema.
   it('serves the metadata document in the data lake\'s own key order and types', async () => {
     const res = await app.inject('/rest/service/metadata')
     const body = res.json() as Record<string, Record<string, unknown>>
