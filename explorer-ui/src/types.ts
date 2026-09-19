@@ -948,6 +948,7 @@ export interface ActivityRow {
   xcswapDestSymbol?: string | null
   /** Recipient account and settling transaction on the destination chain's own
    *  explorer; null until the off-chain half resolves. */
+  xcswapDestChainName?: string | null
   xcswapRecipientUrl?: string | null
   xcswapDestTxUrl?: string | null
   xcswapDestChain?: string | null
