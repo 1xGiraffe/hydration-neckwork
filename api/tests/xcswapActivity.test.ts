@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   suppressXcswapPlumbingRows, xcswapRowFromOrder,
-  XCSWAP_EMITTER_ACCOUNT, XCSWAP_SETTLEMENT_ASSET_ID, type ActivityRow,
+  XCSWAP_EMITTER_ACCOUNT, type ActivityRow,
 } from '../src/services/explorerService.ts'
 
 const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
@@ -117,10 +117,12 @@ describe('suppressXcswapPlumbingRows', () => {
   })
 })
 
-// The row's THREE legs. A cross-chain swap sells the caller's asset on Hydration
-// for WETH and bridges that WETH; the asset sold never leaves the chain. A row
-// that shows only what was paid and where it was headed reads as "the input asset
-// travelled", which is the one thing that never happens.
+// What the row does NOT say. `placeOrder` sells the caller's asset for WETH and
+// bridges that WETH to an ETHEREUM deposit address, where a solver buys the
+// destination asset. So the WETH is the last hop of a route — the Router sell
+// that produces it is already folded away as plumbing — and it lands on neither
+// the chain the caller started on nor the one the swap is going to. A row that
+// names it invites the reader to think the swap delivered WETH to NEAR.
 describe('xcswapRowFromOrder', () => {
   const order = {
     block_height: 14802880, event_index: 105, extrinsic_index: 2, ts: '2026-09-19 21:48:42',
@@ -131,22 +133,21 @@ describe('xcswapRowFromOrder', () => {
     eth_out: '11298990000000000', max_relay_fee: '44986875212342',
   }
 
-  it('carries the bridged leg, not just what was paid', () => {
+  it('states what was put in, and keeps the bridged WETH off the row', () => {
     const r = xcswapRowFromOrder(order, new Map(), null)
     expect(r.assetIn?.assetId).toBe(1000766)
     expect(r.amountIn).toBe('29742734')
-    // `eth_out` IS the bridged amount: every order's Tokens.Withdrawn of asset 20
-    // equals it exactly, so the out leg needs no second read to state.
-    expect(r.assetOut?.assetId).toBe(XCSWAP_SETTLEMENT_ASSET_ID)
-    expect(r.amountOut).toBe('11298990000000000')
+    // The economic action is USDC in, destination asset out — never USDC → WETH.
+    expect(r.assetOut).toBeNull()
+    expect(r.amountOut).toBeNull()
+    // Still carried for the detail surfaces that trace the bridge itself.
+    expect(r.xcswapEthOut).toBe('11298990000000000')
   })
 
-  it('references both registry assets it touches, so either side filters it', () => {
+  it('references only the asset sold, like the route hops it already folds', () => {
     const r = xcswapRowFromOrder(order, new Map(), null)
-    expect(r.assetRefs).toEqual([1000766, XCSWAP_SETTLEMENT_ASSET_ID])
-    // An order that SOLD the settlement asset names it once, not twice.
-    const weth = xcswapRowFromOrder({ ...order, asset_in: XCSWAP_SETTLEMENT_ASSET_ID }, new Map(), null)
-    expect(weth.assetRefs).toEqual([XCSWAP_SETTLEMENT_ASSET_ID])
+    // A WETH filter no more returns these than it returns the other six hops.
+    expect(r.assetRefs).toEqual([1000766])
   })
 
   it('leaves the destination unstated until the sweep resolves it', () => {

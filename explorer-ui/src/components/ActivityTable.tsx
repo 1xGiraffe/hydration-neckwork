@@ -318,31 +318,38 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     return <span className="asset-flow"><AssetAmount asset={r.assetIn} raw={r.amountIn} /> → <AssetAmount asset={r.assetOut} raw={r.amountOut} />{r.dcaStatus === 'failed' && <span className="muted">Failed attempt</span>}</span>
   }
   if (r.type === 'xcswap' && r.assetIn) {
-    // Three legs, because that is what a cross-chain swap is: the asset sold, the
-    // WETH it was sold FOR and bridged, and the destination. Showing only the
-    // first and last reads as "the sold asset travelled to another chain", which
-    // is never what happened — it is sold here and never leaves.
-    //
     // The destination is on ANOTHER chain, so it has no asset chip to show: it is
     // named by its symbol and the chain it settled on. Until the off-chain half is
     // resolved the row says where the value went — an Ethereum deposit address —
     // and stops there, rather than implying a delivery that may not have happened.
     const sold = <AssetAmount asset={r.assetIn} raw={r.amountIn} />
-    const bridged = r.assetOut && r.amountOut
-      ? <AssetAmount asset={r.assetOut} raw={r.amountOut} />
-      : null
     const dest = r.xcswapDestSymbol
       ? <span className="trade-leg">
         {/* The destination is not a registry asset, so it has no asset id — but it
             does have an origin, which is all AssetIcon needs to resolve artwork. */}
         {r.xcswapDestOrigin && <AssetIcon assetId={0} symbol={r.xcswapDestSymbol} origin={r.xcswapDestOrigin} />}
         {' '}<span className="mono">{r.xcswapDestAmount && r.xcswapDestDecimals != null ? <><Amt raw={r.xcswapDestAmount} dec={r.xcswapDestDecimals} />{' '}</> : null}{r.xcswapDestSymbol}</span>
-        {r.xcswapDestChain && <span className="xc-chain">{r.xcswapDestChain}</span>}
+        {r.xcswapDestChain && (r.xcswapDestTxUrl
+          // The chain name carries the proof: it links to the transaction that
+          // paid the recipient, on that chain's own explorer.
+          ? <a className="xc-chain" href={r.xcswapDestTxUrl} target="_blank" rel="noopener"
+               title={`Settling transaction on ${r.xcswapDestChain}`} data-no-hover="true">{r.xcswapDestChain}</a>
+          : <span className="xc-chain">{r.xcswapDestChain}</span>)}
       </span>
       : <span className="muted">bridging out</span>
-    return <span className="asset-flow">{sold} → {bridged ? <>{bridged} → </> : null}{dest}
-      {!headed && r.xcswapRecipient && <span className="muted mono">{shortForeignAddress(r.xcswapRecipient)}</span>}
+    return <span className="asset-flow">{sold} → {dest}
+      {!headed && r.xcswapRecipient && (r.xcswapRecipientUrl
+        ? <a className="muted mono" href={r.xcswapRecipientUrl} target="_blank" rel="noopener"
+             title={`${r.xcswapRecipient} — opens the ${r.xcswapDestChain ?? 'destination'} explorer`}
+             data-no-hover="true">{shortForeignAddress(r.xcswapRecipient)}</a>
+        : <span className="muted mono" title={r.xcswapRecipient}>{shortForeignAddress(r.xcswapRecipient)}</span>)}
       {!headed && r.xcswapStatus === 'REFUNDED' && <span className="muted">refunded</span>}
+      {/* The badge names the action, so the row has to name the OUTCOME: without
+          this, an order whose destination never arrives reads exactly like one
+          that settled. Shown whenever the sweep has not seen a delivery — an
+          unresolved order included, which is the state a fresh order is in. */}
+      {!headed && r.xcswapStatus !== 'SUCCESS' && r.xcswapStatus !== 'REFUNDED' && r.xcswapStatus !== 'FAILED'
+        && <span className="muted">awaiting delivery</span>}
     </span>
   }
   if (r.type === 'intent' && r.assetIn && r.assetOut) {
