@@ -2,7 +2,7 @@ import { RpcClient } from '@subsquid/rpc-client'
 import { createClickHouseClient } from '../db/client.js'
 import { config } from '../config.js'
 import { toClickHouseDateTime } from '../raw/json.js'
-import { moneyMarketDefinitions, snapshotMoneyMarketPositions, type MoneyMarketRuntimeDef } from '../raw/moneyMarket.js'
+import { moneyMarketDefinitions, snapshotMoneyMarketCollateralFlags, snapshotMoneyMarketPositions, type MoneyMarketRuntimeDef } from '../raw/moneyMarket.js'
 import { moneyMarketSweepHasNoSuccess } from '../raw/moneyMarketSnapshot.js'
 import { hasFlag, integerOption, stringOption } from '../util/cliArgs.js'
 
@@ -27,11 +27,18 @@ import { hasFlag, integerOption, stringOption } from '../util/cliArgs.js'
 //   npx tsx src/scripts/snapshot-money-market.ts [--dry-run] [--loop] [--refresh-hours=6]
 //   npx tsx src/scripts/snapshot-money-market.ts --market=gigahdx
 //   npx tsx src/scripts/snapshot-money-market.ts --market=gigahdx,bil --loop --refresh-minutes=15
+//   npx tsx src/scripts/snapshot-money-market.ts --collateral-only
+//
+// Each sweep also re-reads the usage-as-collateral bitmap for the market's
+// position holders (money_market_collateral_anchor), which the explorer merges
+// with the pool's own Enabled/Disabled events. --collateral-only does that half
+// alone, without the exhaustive getUserAccountData pass.
 
 interface BlockHeader { number: string }
 
 const dryRun = hasFlag('dry-run')
 const loop = hasFlag('loop')
+const collateralOnly = hasFlag('collateral-only')
 const refreshHours = integerOption('refresh-hours', 6)
 const refreshMinutes = integerOption('refresh-minutes', 0)
 const insertBatch = integerOption('insert-batch', 5_000)
@@ -117,6 +124,51 @@ async function loadKnownMarketParticipants(market: MoneyMarketRuntimeDef): Promi
   return (await res.json<{ h: string }>()).map(row => row.h.toLowerCase())
 }
 
+// Who needs their usage-as-collateral bitmap re-read for this market: everyone
+// holding a live position, plus everyone the pool ever emitted a collateral event
+// for. The second half matters in the retracting direction — a bit cleared without
+// an event (a native aToken transfer) leaves a stale Enabled standing, and only a
+// fresh read of the word can take it back.
+async function loadCollateralCandidates(poolProxy: string): Promise<string[]> {
+  const res = await client.query({
+    query: `
+      SELECT DISTINCT user_address FROM (
+        SELECT user_address FROM (
+          SELECT user_address, argMaxMerge(position_state) AS pos
+          FROM price_data.money_market_latest_positions
+          WHERE pool_address = {pool:String}
+          GROUP BY user_address
+        ) WHERE tupleElement(pos, 'total_collateral_base') > 0 OR tupleElement(pos, 'total_debt_base') > 0
+        UNION ALL
+        SELECT DISTINCT user_address FROM price_data.money_market_collateral_flags WHERE pool_address = {pool:String}
+      )
+      WHERE match(user_address, '^0x[0-9a-fA-F]{40}$')`,
+    query_params: { pool: poolProxy },
+    format: 'JSONEachRow',
+  })
+  return (await res.json<{ user_address: string }>()).map(row => row.user_address.toLowerCase())
+}
+
+// Re-read the collateral bitmap for one market and replace those users' anchor
+// rows. Separate from the position sweep because it is cheap (one word per user
+// over a few thousand users, against getUserAccountData for every account on the
+// chain) and because a failure here must not discard a completed position sweep.
+async function refreshCollateralAnchor(market: MoneyMarketRuntimeDef, head: number): Promise<{ market: string; users: number; rows: number; failed: number }> {
+  const candidates = await loadCollateralCandidates(market.poolProxy)
+  if (!candidates.length) return { market: market.key, users: 0, rows: 0, failed: 0 }
+  const { flags, failedUsers } = await snapshotMoneyMarketCollateralFlags(candidates, head, market.poolProxy)
+  if (!dryRun && flags.length) {
+    for (let i = 0; i < flags.length; i += insertBatch) {
+      await client.insert({
+        table: 'price_data.money_market_collateral_anchor',
+        values: flags.slice(i, i + insertBatch),
+        format: 'JSONEachRow',
+      })
+    }
+  }
+  return { market: market.key, users: candidates.length, rows: flags.length, failed: failedUsers.length }
+}
+
 async function accountCount(): Promise<number> {
   const res = await client.query({
     query: `SELECT uniqExact(account_id) AS c FROM price_data.raw_balance_observations WHERE account_id != ''`,
@@ -145,6 +197,15 @@ async function runOnce(): Promise<void> {
   if (!markets.length || (requestedMarketKeys != null && markets.length !== requestedMarketKeys.size)) {
     throw new Error(`unknown money market: ${requestedMarket}`)
   }
+  // Anchor-only mode re-reads the collateral bitmaps without the exhaustive
+  // position sweep behind them — the cheap half, for a rollout or a repair.
+  if (collateralOnly) {
+    const anchors = []
+    for (const market of markets) anchors.push(await refreshCollateralAnchor(market, head))
+    console.log(JSON.stringify({ type: 'mm_collateral_anchor_done', dry_run: dryRun, anchor_block: head, markets: anchors }, null, 2))
+    return
+  }
+
   const primary = markets.find(market => market.key === 'core')
   const accounts = primary ? await loadAllAccounts() : []
   const h160s: string[] = []
@@ -211,11 +272,23 @@ async function runOnce(): Promise<void> {
     }
   }
 
+  // After the sweep, so a market that only just materialised a position is
+  // included. Its own failure leaves the position rows already inserted intact.
+  const collateralAnchors = []
+  for (const market of markets) {
+    try {
+      collateralAnchors.push(await refreshCollateralAnchor(market, head))
+    } catch (error) {
+      console.error(`[mm-snapshot] collateral anchor for ${market.key} failed:`, error)
+    }
+  }
+
   console.log(JSON.stringify({
     type: 'mm_sweep_done',
     dry_run: dryRun,
     anchor_block: head,
     primary_candidates: h160s.length,
+    collateral_anchors: collateralAnchors,
     positions_found: positionsFound,
     rows_inserted: inserted,
     warnings: warningCount,

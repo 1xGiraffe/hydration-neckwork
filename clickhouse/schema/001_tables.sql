@@ -160,6 +160,38 @@ CREATE TABLE IF NOT EXISTS price_data.money_market_account_value_snapshots (`sna
 -- Not filtered to the configured markets — MM_MARKETS is runtime-extensible, so
 -- the reader filters and this stays a complete projection of raw.
 CREATE TABLE IF NOT EXISTS price_data.money_market_latest_positions (`user_address` String, `pool_address` String, `position_state` AggregateFunction(argMax, Tuple(total_collateral_base UInt256, total_debt_base UInt256, available_borrows_base UInt256, current_liquidation_threshold UInt256, ltv UInt256, health_factor UInt256, block_height UInt32, block_timestamp DateTime, account_id String), UInt128)) ENGINE = AggregatingMergeTree ORDER BY (user_address, pool_address) SETTINGS index_granularity = 1024;
+-- Whether a reserve counts as a user's COLLATERAL, which is a per-user flag Aave
+-- keeps in its user-configuration bitmap and publishes as a pair of events: a
+-- supply into an empty reserve, a withdrawal down to zero, an aToken transfer, a
+-- liquidation and an explicit setUserUseReserveAsCollateral each emit
+-- ReserveUsedAsCollateralEnabled/Disabled. Supplying is therefore NOT the same as
+-- collateralising: a reserve with no LTV, or one the user turned off, is lent out
+-- and earns interest while backing nothing.
+--
+-- The event stream is kept whole and the flag is the newest event per
+-- (user, pool, reserve) — argMax over (block_height, event_index) — rather than
+-- collapsed into a state, so a replayed range re-inserts identical rows and
+-- backward backfill lands below the read without moving a cursor. User-first so
+-- one account's flags are a key-prefix read. The events are the FORWARD half of
+-- the model; money_market_collateral_anchor below is the half that makes it
+-- complete, and the reader takes whichever of the two observed the bit last.
+-- Node-sourced ANCHOR for the same flag, one row per (user, pool, reserve) holding
+-- the newest observation of getUserConfiguration. The event stream alone is NOT
+-- complete on this chain: EVM-log coverage before the aToken anchor block is
+-- partial, and an aToken that is also a registry asset (GDOT = asset 69 over
+-- reserve 690) moves through Currencies.Transferred, where the runtime sets the
+-- user's bit WITHOUT emitting the Aave event — measured, 16 of 280 rendered reserve
+-- rows were collateral on chain with no event to say so. So the bitmap is read back
+-- per swept user and the events carry it forward between sweeps, exactly as
+-- atoken_scaled_anchor + atoken_scaled_deltas carry a balance.
+--
+-- Reproducible rather than raw: re-reading the bitmap at a pinned block is
+-- deterministic archive state. Written by snapshot-money-market.ts for every user
+-- with a live position or any collateral event, with a row per reserve of the pool
+-- (enabled AND disabled) — omitting the disabled ones would leave a stale enable
+-- standing forever.
+CREATE TABLE IF NOT EXISTS price_data.money_market_collateral_anchor (`user_address` String, `pool_address` String, `reserve_address` String, `block_height` UInt32, `enabled` UInt8, `observed_at` DateTime) ENGINE = ReplacingMergeTree(block_height) ORDER BY (user_address, pool_address, reserve_address) SETTINGS index_granularity = 4096;
+CREATE TABLE IF NOT EXISTS price_data.money_market_collateral_flags (`user_address` String, `pool_address` String, `reserve_address` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `enabled` UInt8, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (user_address, pool_address, reserve_address, block_height, event_index) SETTINGS index_granularity = 4096;
 CREATE TABLE IF NOT EXISTS price_data.money_market_reserve_indices (`pool_address` String, `reserve_address` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `liquidity_index` UInt256, `variable_borrow_index` UInt256, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (pool_address, reserve_address, block_height, event_index) SETTINGS index_granularity = 4096;
 CREATE TABLE IF NOT EXISTS price_data.multisig_call_activity (`block_height` UInt32, `extrinsic_index` Nullable(UInt32), `call_address` String, `block_timestamp` DateTime, `call_name` LowCardinality(String), `args_json` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, ifNull(extrinsic_index, 4294967295), call_address) SETTINGS index_granularity = 256;
 CREATE TABLE IF NOT EXISTS price_data.multisig_event_activity (`block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `multisig` String, `actor` String, `call_hash` String, `timepoint_height` UInt32, `timepoint_index` UInt32, `has_timepoint` UInt8, `result_ok` Nullable(UInt8), `result_error_json` Nullable(String), `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (multisig, event_name, block_height, event_index) SETTINGS index_granularity = 256;

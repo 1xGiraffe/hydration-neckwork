@@ -162,6 +162,18 @@ export interface RawMoneyMarketPositionRow {
   ingest_source: string
 }
 
+// One reserve's usage-as-collateral bit for one user, read back from the pool's
+// getUserConfiguration word. Replaces on (user, pool, reserve) — the newest
+// block_height wins — so a sweep restates a user's whole configuration.
+export interface RawMoneyMarketCollateralFlagRow {
+  user_address: string
+  pool_address: string
+  reserve_address: string
+  block_height: number
+  enabled: 0 | 1
+  observed_at: string
+}
+
 export interface RawMoneyMarketReserveRow {
   block_height: number
   block_timestamp: string
