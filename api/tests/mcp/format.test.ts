@@ -1161,16 +1161,23 @@ describe('activityLine over real rows', () => {
     expect(activitySlug({ ...OTC_PULL, otcAction: 'Fill' })).toBe('otc-fill')
     expect(activitySlug({ ...OTC_PULL, otcAction: 'Place' })).toBe('otc-place')
 
-    // The on-chain half always succeeds; without a settlement status the row is
-    // "sent", never "swapped". Calling an unsettled order a completed swap is
-    // the one reading of this family an agent must not be given.
-    expect(activityKind(XCSWAP_SENT)).toBe('Cross-chain swap sent')
+    // The action is a swap in every state — it is a swap the moment it is placed.
+    // The guarantee that an unsettled order is never read as a completed one is
+    // kept by the LINE, which always states the delivery outcome (asserted
+    // below); calling an unsettled order a completed swap is the one reading of
+    // this family an agent must not be given.
+    expect(activityKind(XCSWAP_SENT)).toBe('Cross-chain swap')
     expect(activityKind({ ...XCSWAP_SENT, xcswapStatus: 'SUCCESS' })).toBe('Cross-chain swap')
     expect(activityKind({ ...XCSWAP_SENT, xcswapStatus: 'REFUNDED' })).toBe('Cross-chain swap refunded')
     expect(activityKind({ ...XCSWAP_SENT, xcswapStatus: 'FAILED' })).toBe('Cross-chain swap failed')
     // The out leg is built from xcswapDest*, not from an assetOut that is not
     // there, and the foreign recipient is elided rather than printed whole.
     const line = activityLine(XCSWAP_SENT, BASE, NOW)
+    // A row with no settlement record at all still says it has not been
+    // delivered — the state a freshly placed order is in.
+    expect(line).toContain('NOT yet delivered')
+    expect(activityLine({ ...XCSWAP_SENT, xcswapStatus: 'PENDING_DEPOSIT' }, BASE, NOW)).toContain('NOT yet delivered')
+    expect(activityLine({ ...XCSWAP_SENT, xcswapStatus: 'SUCCESS' }, BASE, NOW)).toContain('destination success')
     expect(line).toContain('100 USDT → 0.921 SOL')
     expect(line).not.toContain('5jbsKQxSs6bZTcLqFJeKcSYhCH9JQvHRbGdaUZmcwyRgVGKt')
     expect(line).toContain('→ 5jbsKQ')

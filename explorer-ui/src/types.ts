@@ -946,6 +946,10 @@ export interface ActivityRow {
   xcswapStatus?: 'KNOWN_DEPOSIT_TX' | 'PENDING_DEPOSIT' | 'INCOMPLETE_DEPOSIT' | 'PROCESSING' | 'SUCCESS' | 'REFUNDED' | 'FAILED' | null
   xcswapDestAsset?: string | null
   xcswapDestSymbol?: string | null
+  /** Recipient account and settling transaction on the destination chain's own
+   *  explorer; null until the off-chain half resolves. */
+  xcswapRecipientUrl?: string | null
+  xcswapDestTxUrl?: string | null
   xcswapDestChain?: string | null
   // Where the destination's artwork lives; it renders through the ordinary AssetIcon.
   xcswapDestOrigin?: AssetOrigin | null
