@@ -1,6 +1,6 @@
 /* Deterministic API fixtures shared by Vitest and Playwright. */
 import type {
-  ExplorerStats, IndexerStatus, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
+  ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   TransferRow, EventRow, TradeRow, ActivityRow, MoneyMarketResponse, AssetDetail, HoldersResponse,
   AddressDetail, AddressBalance, CloseAccountsResponse, TagDetail, SearchResult, AssetListItem, TopAccountRow, AccountsPage, DailyPoint, Tag,
   ContractInfo, ContractsPage, ContractTransactionsPage, ContractEventsPage, ContractEventRow, DecodedEvmCall, EvmLogDecode, EvmReceipt, EvmTransactionFacts,
@@ -2209,7 +2209,6 @@ function buildIce(): IceDashboard {
 
 const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => unknown }[] = [
   { re: /^\/explorer\/stats$/, fn: () => ({ headBlock: TIP, finalizedBlock: TIP - 2, headTime: tsAt(TIP), avgBlockSec: 5.7, nominalBlockSec: 6, transfers24h: 18204, extrinsics24h: 42318, activeAccounts24h: 7120, hdxPrice: 0.02184 } satisfies ExplorerStats) },
-  { re: /^\/indexer$/, fn: () => ({ blockHeight: TIP, blockTimestamp: tsAt(TIP), lagSeconds: 6, chainBlockHeight: TIP + 1, blocksBehindHead: 1 } satisfies IndexerStatus) },
   // Two shapes off one directory, exactly as the API serves them: the full rows the
   // Assets page renders, and `fields=filter`'s id/symbol/name projection in the same
   // order, which is all a token combo shows and searches.

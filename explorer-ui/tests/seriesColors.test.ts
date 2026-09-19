@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { colorDistance, resolveAssetChartColors, separateSeriesColors } from '../src/utils/seriesColors'
+import { colorDistance, resolveAssetChartColors } from '../src/utils/seriesColors'
 
 // Pool 690 stacks vDOT against aDOT. Both are Polkadot-family icons, so both
 // sample to the same pink and the 100% area chart read as one blob with a line
@@ -26,63 +26,6 @@ describe('colorDistance', () => {
     expect(colorDistance('var(--text-low)', VDOT)).toBe(Infinity)
   })
 })
-
-describe('separateSeriesColors', () => {
-  it('leaves colours alone when they are already tellable apart', () => {
-    const palette = ['#e6007a', '#95caff', '#74C742']
-    expect(separateSeriesColors(palette)).toEqual(palette)
-  })
-
-  it('moves only true near-duplicates — related colours are NOT a collision', () => {
-    // USDT green vs HOLLAR green: same neighbourhood (ΔE ~15) but perfectly
-    // tellable apart. Both keep their exact icon colours.
-    const palette = ['#50af95', '#b3cf92']
-    expect(separateSeriesColors(palette)).toEqual(palette)
-  })
-
-  it('pulls a colliding band far enough away to be seen', () => {
-    const [first, second] = separateSeriesColors([VDOT, ADOT])
-    expect(first).toBe(VDOT)                       // the first series keeps its own colour
-    expect(second).not.toBe(ADOT)
-    expect(colorDistance(first, second)).toBeGreaterThanOrEqual(FLOOR)
-  })
-
-  it('separates every pair, not just neighbours in the list', () => {
-    const out = separateSeriesColors([VDOT, ADOT, '#e30d7e', '#e11b80'])
-    for (let i = 0; i < out.length; i++) {
-      for (let j = i + 1; j < out.length; j++) {
-        expect(colorDistance(out[i], out[j]), `${out[i]} vs ${out[j]}`).toBeGreaterThanOrEqual(FLOOR)
-      }
-    }
-  })
-
-  it('is deterministic, so a chart does not repaint between renders', () => {
-    expect(separateSeriesColors([VDOT, ADOT])).toEqual(separateSeriesColors([VDOT, ADOT]))
-  })
-
-  it('passes a CSS variable through untouched', () => {
-    expect(separateSeriesColors([VDOT, 'var(--text-low)'])).toEqual([VDOT, 'var(--text-low)'])
-  })
-
-  it('separates by SHADE: hue and chroma stay, only lightness moves — and only a little', () => {
-    // "Shades" is what the reader means by related-but-distinct: aDOT stays a
-    // pink, darker or lighter than vDOT's, never another colour family.
-    const [, second] = separateSeriesColors([VDOT, ADOT])
-    expect(Math.abs(hueDelta(ADOT, second))).toBeLessThan(20)         // still the same pink
-    expect(Math.abs(hexL(ADOT) - hexL(second))).toBeGreaterThan(0.05) // a shade apart…
-    expect(Math.abs(hexL(ADOT) - hexL(second))).toBeLessThanOrEqual(0.25) // …but only slightly
-  })
-
-  it('separates two greys into shades of grey — never an invented hue', () => {
-    // GETH (#686868) vs GSOL (#6f7174) sample to near-identical greys (ΔE 3.1).
-    const [first, second] = separateSeriesColors(['#686868', '#6f7174'])
-    expect(first).toBe('#686868')
-    expect(colorDistance(first, second)).toBeGreaterThanOrEqual(FLOOR)
-    const [r, g, b] = [1, 3, 5].map(i => parseInt(second.slice(i, i + 2), 16))
-    expect(Math.max(r, g, b) - Math.min(r, g, b)).toBeLessThan(24) // still a grey
-  })
-})
-
 describe('resolveAssetChartColors', () => {
   const entries = [
     { key: 'hdx', assetId: 0, base: '#f6297c' },   // Hydration pink

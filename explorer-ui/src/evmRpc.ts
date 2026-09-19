@@ -67,11 +67,6 @@ export async function ethEstimateGas(tx: EthTx): Promise<bigint> {
 export async function ethGasPrice(): Promise<bigint> {
   return BigInt(await rpc<string>('eth_gasPrice', []))
 }
-
-export function ethGetTransactionReceipt(txHash: string): Promise<EthReceipt | null> {
-  return rpc<EthReceipt | null>('eth_getTransactionReceipt', [txHash])
-}
-
 // The chain's own clock, for a CallPermit deadline the runtime will accept: it
 // compares the deadline against the block timestamp in seconds, so the browser's
 // clock (and its skew) must not be the source.

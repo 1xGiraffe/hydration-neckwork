@@ -52,7 +52,7 @@ describe('foldVoters', () => {
     expect(items).toHaveLength(0)
   })
 
-  it('a null resolver keeps every voter individual (the anonymous packVoters contract)', () => {
+  it('a null resolver keeps every voter individual', () => {
     const items = foldVoters([
       voter({ blockHeight: 1, account: account(A) }),
       voter({ blockHeight: 2, account: account(B) }),
