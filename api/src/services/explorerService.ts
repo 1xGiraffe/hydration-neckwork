@@ -7522,36 +7522,40 @@ interface RawXcswapOrderRow {
   caller_account_id: string; asset_in: number; amount_in: string; eth_out: string; max_relay_fee: string
 }
 
-// One order as an activity row. A cross-chain swap has THREE legs, and the row
-// carries all three: what the caller paid, what Hydration produced and bridged,
-// and what the destination is to deliver. The first two are on-chain and known
-// immediately; the third is attached only when the sweep has resolved it, so
-// until then the row says what the chain says and nothing more.
+// One order as an activity row: what the caller put in, and what the destination
+// chain delivers. The destination half is attached only when the sweep has
+// resolved it; until then the row says what the chain says and nothing more.
 //
-// The middle leg is what stops the row reading as "the input asset travelled":
-// the USDC never leaves Hydration, it is sold for the WETH that does.
+// The WETH in between is NOT a leg. `placeOrder` sells the caller's asset for
+// WETH and bridges it to an ETHEREUM deposit address, where a solver network
+// buys the destination asset — so the WETH neither is what the caller wanted nor
+// ends up where the swap is going. It is the last hop of a route whose other
+// seven hops this row already folds away, and the Router sell that produces it
+// is suppressed as plumbing by suppressXcswapPlumbingRows. Showing it invites
+// the reader to think the swap delivered WETH to the destination chain. The
+// amount is kept as `xcswapEthOut` for the detail surfaces that trace the
+// bridge; it is not part of the economic action.
 export function xcswapRowFromOrder(
   r: RawXcswapOrderRow,
   prices: Map<number, PriceInfo>,
   settlement: XcswapSettlement | null,
 ): ActivityRow {
   const aIn = asset(r.asset_in)
-  const aOut = asset(XCSWAP_SETTLEMENT_ASSET_ID)
+  const dest = settlement?.destinationAsset
+    ? XC_DESTINATIONS.find(d => d.oneClickId === settlement.destinationAsset) ?? null
+    : null
   return {
     type: 'xcswap',
     blockHeight: Number(r.block_height), timestamp: r.ts,
     eventIndex: Number(r.event_index), extrinsicIndex: r.extrinsic_index,
     who: accountRef(r.caller_account_id), to: null,
-    asset: null, assetIn: aIn, assetOut: aOut,
-    amount: null, amountIn: r.amount_in, amountOut: r.eth_out,
-    // Valued on the leg the caller PAID, not on the bridged leg: the two are the
-    // same value net of fees, and pricing the input is what every other swap row
-    // does. The destination's dollar value is a separate, off-chain figure and is
-    // carried as `xcswapDestAmountUsd` rather than replacing this one.
+    asset: null, assetIn: aIn, assetOut: null,
+    amount: null, amountIn: r.amount_in, amountOut: null,
+    // Valued on the leg Hydration actually recorded — what the caller paid. The
+    // destination's dollar value is a separate, off-chain figure and is carried
+    // as `xcswapDestAmountUsd` rather than replacing this one.
     valueUsd: usdValue(prices, aIn.assetId, r.amount_in, aIn.decimals),
-    // Both registry assets the swap touches, so an asset-filtered feed matching
-    // either side returns it — the rule every two-sided activity follows.
-    assetRefs: aIn.assetId === aOut.assetId ? [aIn.assetId] : [aIn.assetId, aOut.assetId],
+    assetRefs: [aIn.assetId],
     xcswapDepositAddress: r.deposit_address,
     xcswapSequence: Number(r.transfer_sequence),
     xcswapEthOut: r.eth_out,
@@ -7561,9 +7565,15 @@ export function xcswapRowFromOrder(
     // Where the destination's artwork lives, so a row renders its icon through the
     // same origin path every foreign asset uses. Looked up from the 1Click id the
     // settlement names, so a destination added to XC_DESTINATIONS gets one for free.
-    xcswapDestOrigin: (settlement?.destinationAsset
-      ? XC_DESTINATIONS.find(d => d.oneClickId === settlement.destinationAsset)?.origin
-      : undefined) ?? null,
+    xcswapDestOrigin: dest?.origin ?? null,
+    // The destination chain's own record, so the half we cannot prove from
+    // Hydration is checkable where it happened: the recipient's account, and the
+    // transaction that paid it once the sweep has one. Built here rather than in
+    // the UI so the per-chain explorer lives beside the rest of the destination.
+    xcswapRecipientUrl: dest && settlement?.recipient
+      ? `${dest.explorerAccountBase}${encodeURIComponent(settlement.recipient)}` : null,
+    xcswapDestTxUrl: dest && settlement?.destinationTxHash
+      ? `${dest.explorerTxBase}${encodeURIComponent(settlement.destinationTxHash)}` : null,
     xcswapDestSymbol: settlement?.destinationSymbol ?? null,
     xcswapDestChain: settlement?.destinationChain ?? null,
     xcswapDestDecimals: settlement?.destinationDecimals ?? null,
@@ -7620,11 +7630,10 @@ const XCSWAP_COLUMNS_SQL = `
  * Cross-chain swaps, newest first. `accounts` scopes to a caller through the
  * caller-first twin.
  *
- * `assetId` matches EITHER registry asset the swap touches: the asset sold, which
- * varies per order and is a sort-key predicate, or the WETH every order is settled
- * into, which is structural — so filtering on it selects every order rather than
- * narrowing by a column. Matching only the sold side would hide a swap from a
- * filter naming an asset its own row displays.
+ * `assetId` matches the asset SOLD, the only registry asset the row shows. The
+ * WETH every order routes through is plumbing — suppressed as a row, and absent
+ * from `assetRefs` — so a WETH filter no more returns these than it returns the
+ * other six hops of the route.
  */
 export async function getRecentXcswaps(
   limit: number,
@@ -7640,11 +7649,7 @@ export async function getRecentXcswaps(
   if (scoped === "''") return []
   const clauses = [tw ?? '1']
   if (scoped) clauses.push(`caller_account_id IN (${scoped})`)
-  // The settlement asset is on every order, so it is not a predicate — narrowing
-  // by it would return nothing, since no row stores it in a column.
-  if (assetId != null && Math.trunc(assetId) !== XCSWAP_SETTLEMENT_ASSET_ID) {
-    clauses.push(`asset_in = ${Math.trunc(assetId)}`)
-  }
+  if (assetId != null) clauses.push(`asset_in = ${Math.trunc(assetId)}`)
   const table = scoped ? 'price_data.xcswap_orders_by_account' : 'price_data.xcswap_orders'
   // Head-keyed like every other classified activity source: this feeds lanes that
   // only move forward, so a page served from a key that omits the live head steps
@@ -7905,6 +7910,11 @@ export interface XcDestination {
   chainName: string
   /** Where its artwork lives in the shared asset-metadata CDN. */
   origin: AssetOrigin
+  /** The destination chain's own explorer: where its accounts and its
+   *  transactions are readable, so a settled swap can be checked on the chain it
+   *  settled on rather than taken on our word. */
+  explorerAccountBase: string
+  explorerTxBase: string
 }
 
 // The destinations the swap SDK offers today. An explicit list: each one needs a
@@ -7919,11 +7929,19 @@ export const XC_DESTINATIONS: XcDestination[] = [
     platform: 'near', oneClickId: 'nep141:wrap.near', symbol: 'wNEAR', name: 'Wrapped NEAR',
     decimals: 24, chain: 'near', chainName: 'NEAR',
     origin: { ecosystem: 'near', chainId: 'near', assetId: 'NEAR' },
+    // Recipients arrive either named (`crypthor.near`) or as a 64-hex implicit
+    // account; nearblocks resolves both under /address. Its tx hashes are base58.
+    explorerAccountBase: 'https://nearblocks.io/address/',
+    explorerTxBase: 'https://nearblocks.io/txns/',
   },
   {
     platform: 'zec', oneClickId: 'nep141:zec.omft.near', symbol: 'ZEC', name: 'Zcash',
     decimals: 8, chain: 'zec', chainName: 'Zcash',
     origin: { ecosystem: 'zcash', chainId: 'zec', assetId: 'ZEC' },
+    // 1Click settles to TRANSPARENT `t1…` addresses, which a block explorer can
+    // show; a shielded recipient would not be linkable at all.
+    explorerAccountBase: 'https://blockchair.com/zcash/address/',
+    explorerTxBase: 'https://blockchair.com/zcash/transaction/',
   },
 ]
 // Negative, so it can never be mistaken for — or collide with — a registry id.
@@ -10143,6 +10161,10 @@ export interface ActivityRow {
   xcswapStatus?: XcswapStatus | null
   /** 1Click asset id of the destination, e.g. `nep141:zec.omft.near`. */
   xcswapDestAsset?: string | null
+  /** The recipient's account and the settling transaction on the DESTINATION
+   *  chain's own explorer; null until the sweep resolves the order. */
+  xcswapRecipientUrl?: string | null
+  xcswapDestTxUrl?: string | null
   xcswapDestSymbol?: string | null
   xcswapDestChain?: string | null
   xcswapDestOrigin?: AssetOrigin | null
@@ -11414,16 +11436,6 @@ export function parseOutboundXcm(argsRaw: unknown): ParsedOutboundXcm | null {
 // Hydration's EVM native currency is WETH (asset 20): an EVM `msg.value` is a WETH
 // transfer, which is what a Wormhole Executor relay payment is.
 export const EVM_GAS_ASSET_ID = 20
-
-// The same asset, for a different reason: what the Hydration half of a
-// cross-chain swap PRODUCES. The IntentEmitter's ABI denominates the settlement
-// in ETH (`uint256 ethOut`) and the NTT rail carries it as WETH, so the asset is
-// structural to the bridge rather than a property of the order — the OrderPlaced
-// log never names it. Checked against every order placed since the first
-// (13,797,859): each has exactly one Tokens.Withdrawn of asset 20 whose amount
-// equals `eth_out`, and no other asset ever matches, so `eth_out` IS the bridged
-// amount and needs no second read to confirm it.
-export const XCSWAP_SETTLEMENT_ASSET_ID = EVM_GAS_ASSET_ID
 // Executor.RequestForExecution(address indexed quoterAddress, uint256 amtPaid, uint16 dstChain,
 //                              bytes32 dstAddr, address refundAddr, bytes signedQuote,
 //                              bytes requestBytes, bytes relayInstructions)

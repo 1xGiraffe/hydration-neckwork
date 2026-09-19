@@ -141,12 +141,11 @@ export function activityKind(r: ActivityRow): string {
     case 'bond': return BOND_LABELS[r.bondAction ?? ''] ?? 'Bond'
     case 'intent': return intentLabel(r.intentKind, r.intentAction)
     case 'xcswap':
-      return r.xcswapStatus === 'SUCCESS' ? 'Cross-chain swap'
-        : r.xcswapStatus === 'REFUNDED' ? 'Cross-chain swap refunded'
+      // The action is a swap in every state; whether it was DELIVERED is the
+      // separate fact the row's own status line carries.
+      return r.xcswapStatus === 'REFUNDED' ? 'Cross-chain swap refunded'
         : r.xcswapStatus === 'FAILED' ? 'Cross-chain swap failed'
-        // The on-chain half always succeeds and says nothing about delivery, so
-        // an unsettled order is "sent", never "swapped".
-        : 'Cross-chain swap sent'
+        : 'Cross-chain swap'
     case 'vote':
       return !r.voteAction || /^voted$/i.test(r.voteAction) ? 'Vote' : r.voteAction
     case 'liquidity': return LIQ_LABELS[r.liqAction ?? ''] ?? 'Liquidity'
@@ -285,14 +284,14 @@ export function activityAmounts(r: ActivityRow): string | null {
   const inLeg = leg(r.assetIn, r.amountIn)
   const outLeg = leg(r.assetOut, r.amountOut)
   if (r.type === 'xcswap') {
-    // Three legs: sold, bridged, delivered. The middle one is the whole reason a
-    // reader does not mistake this for the input asset being sent to the
-    // destination chain — it is sold on Hydration for the WETH that bridges.
     // The destination is not a registry asset, so it travels as its own fields.
+    // The WETH the order routes through is plumbing and is deliberately absent:
+    // it is bridged to Ethereum, not to the destination chain, so naming it here
+    // reads as though the swap delivered WETH.
     const dest = r.xcswapDestAmount != null && r.xcswapDestDecimals != null
       ? formatAmount(r.xcswapDestAmount, r.xcswapDestDecimals, r.xcswapDestSymbol ?? undefined)
       : r.xcswapDestSymbol ?? null
-    return [inLeg, outLeg, dest].filter(Boolean).join(' → ') || null
+    return [inLeg, dest].filter(Boolean).join(' → ') || null
   }
   if (inLeg && outLeg) return `${inLeg} → ${outLeg}`
   return inLeg ?? outLeg ?? leg(r.asset, r.amount)
@@ -345,15 +344,20 @@ function qualifiers(r: ActivityRow): string[] {
     }
     case 'xcswap':
       if (r.xcswapDestChain) out.push(`to ${r.xcswapDestChain}`)
-      // The status is the SOLVER's, reported by the off-chain sweep, and it is
-      // stored uncoerced. On its own it misreads: the Hydration half has already
-      // settled and bridged by the time a row exists, so a bare "PENDING_DEPOSIT"
-      // sounds like the caller has not paid when what is pending is the delivery.
-      // Name whose half it describes, and keep the upstream token beside it.
-      if (r.xcswapStatus) {
-        out.push(r.xcswapStatus === 'SUCCESS' || r.xcswapStatus === 'REFUNDED' || r.xcswapStatus === 'FAILED'
-          ? `destination ${r.xcswapStatus.toLowerCase()}`
-          : `Hydration leg settled, destination not yet delivered (solver status ${r.xcswapStatus})`)
+      // The kind says "Cross-chain swap" in every state, so this line carries the
+      // OUTCOME — and it must be present even when the sweep has resolved
+      // nothing, or an undelivered order reads as a completed one, which is the
+      // single reading of this family an agent must never be given.
+      //
+      // The status itself is the SOLVER's, reported by the off-chain sweep and
+      // stored uncoerced. Bare it misreads: the Hydration half has already
+      // settled and bridged by the time a row exists, so "PENDING_DEPOSIT"
+      // sounds like the caller never paid when what is pending is the delivery.
+      if (r.xcswapStatus === 'SUCCESS' || r.xcswapStatus === 'REFUNDED' || r.xcswapStatus === 'FAILED') {
+        out.push(`destination ${r.xcswapStatus.toLowerCase()}`)
+      } else {
+        out.push('Hydration leg settled, destination NOT yet delivered'
+          + (r.xcswapStatus ? ` (solver status ${r.xcswapStatus})` : ' (no settlement record yet)'))
       }
       break
     case 'vote': {
