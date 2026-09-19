@@ -774,7 +774,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
           `${balanceRowsPersisted} balances | ` +
           `${evmLogsPersisted} evm logs | ` +
           `${moneyMarketRowsPersisted} money market rows | ` +
-          `${xcmRowsPersisted} xcm/bridge/operation rows | ` +
+          `${xcmRowsPersisted} xcm rows | ` +
           `${parserWarningsPersisted} warnings | ` +
           `${snapshotsRefreshed} refreshed | ` +
           `${snapshotsReused} reused`,
