@@ -10,7 +10,6 @@ import {
 import type {
   RawAccountAliasRow,
   RawBalanceObservationRow,
-  RawBridgeEvidenceRow,
   RawBlockRow,
   RawBlockSnapshotRow,
   RawCallRow,
@@ -20,7 +19,6 @@ import type {
   RawMoneyMarketEventRow,
   RawMoneyMarketPositionRow,
   RawMoneyMarketReserveRow,
-  RawOperationTraceRow,
   RawParserWarningRow,
   RawXcmActivityRow,
 } from './types.js'
@@ -51,8 +49,6 @@ export class RawClickHouseStore {
   private readonly moneyMarketPositionsBatch: BatchAccumulator<RawMoneyMarketPositionRow>
   private readonly moneyMarketReservesBatch: BatchAccumulator<RawMoneyMarketReserveRow>
   private readonly xcmActivityBatch: BatchAccumulator<RawXcmActivityRow>
-  private readonly bridgeEvidenceBatch: BatchAccumulator<RawBridgeEvidenceRow>
-  private readonly operationTracesBatch: BatchAccumulator<RawOperationTraceRow>
   private readonly parserWarningsBatch: BatchAccumulator<RawParserWarningRow>
 
   constructor(client: ClickHouseClient, flushThreshold: number = 10_000) {
@@ -69,8 +65,6 @@ export class RawClickHouseStore {
     this.moneyMarketPositionsBatch = new BatchAccumulator<RawMoneyMarketPositionRow>(flushThreshold)
     this.moneyMarketReservesBatch = new BatchAccumulator<RawMoneyMarketReserveRow>(flushThreshold)
     this.xcmActivityBatch = new BatchAccumulator<RawXcmActivityRow>(flushThreshold)
-    this.bridgeEvidenceBatch = new BatchAccumulator<RawBridgeEvidenceRow>(flushThreshold)
-    this.operationTracesBatch = new BatchAccumulator<RawOperationTraceRow>(flushThreshold)
     this.parserWarningsBatch = new BatchAccumulator<RawParserWarningRow>(flushThreshold)
   }
 
@@ -122,13 +116,7 @@ export class RawClickHouseStore {
     this.xcmActivityBatch.add(rows)
   }
 
-  addBridgeEvidence(rows: RawBridgeEvidenceRow[]): void {
-    this.bridgeEvidenceBatch.add(rows)
-  }
 
-  addOperationTraces(rows: RawOperationTraceRow[]): void {
-    this.operationTracesBatch.add(rows)
-  }
 
   addParserWarnings(rows: RawParserWarningRow[]): void {
     this.parserWarningsBatch.add(rows)
@@ -234,13 +222,7 @@ export class RawClickHouseStore {
     await this.flushBatch(this.xcmActivityBatch, 'price_data.raw_xcm_activity')
   }
 
-  async flushBridgeEvidence(): Promise<void> {
-    await this.flushBatch(this.bridgeEvidenceBatch, 'price_data.raw_bridge_evidence')
-  }
 
-  async flushOperationTraces(): Promise<void> {
-    await this.flushBatch(this.operationTracesBatch, 'price_data.raw_operation_traces')
-  }
 
   async flushParserWarnings(): Promise<void> {
     await this.flushBatch(this.parserWarningsBatch, 'price_data.raw_parser_warnings')
@@ -267,8 +249,6 @@ export class RawClickHouseStore {
       this.moneyMarketPositionsBatch.size,
       this.moneyMarketReservesBatch.size,
       this.xcmActivityBatch.size,
-      this.bridgeEvidenceBatch.size,
-      this.operationTracesBatch.size,
       this.parserWarningsBatch.size,
     )
   }
@@ -286,8 +266,6 @@ export class RawClickHouseStore {
     await this.flushMoneyMarketPositions()
     await this.flushMoneyMarketReserves()
     await this.flushXcmActivity()
-    await this.flushBridgeEvidence()
-    await this.flushOperationTraces()
     await this.flushParserWarnings()
   }
 

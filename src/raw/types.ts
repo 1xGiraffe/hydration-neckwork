@@ -209,40 +209,7 @@ export interface RawXcmActivityRow {
   ingest_source: string
 }
 
-export interface RawBridgeEvidenceRow {
-  block_height: number
-  block_timestamp: string
-  source_kind: string
-  source_index: string
-  event_index: number | null
-  extrinsic_index: number | null
-  call_address: string | null
-  name: string
-  bridge_kind: string
-  direction: string
-  account_id: string | null
-  external_account: string | null
-  asset_id: string | null
-  amount: string | null
-  evidence_json: string
-  ingest_source: string
-}
 
-export interface RawOperationTraceRow {
-  block_height: number
-  block_timestamp: string
-  trace_id: string
-  event_index: number | null
-  extrinsic_index: number | null
-  call_address: string | null
-  operation_name: string
-  account_id: string | null
-  operation_stack_json: string
-  assets_json: string
-  amounts_json: string
-  evidence_json: string
-  ingest_source: string
-}
 
 export interface RawParserWarningRow {
   block_height: number
