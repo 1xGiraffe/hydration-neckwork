@@ -13,7 +13,7 @@ import { runtimeParaBlockMs } from './runtimeConstants.ts'
 //     keeps the hard 6000 in `NOMINAL_RELAY_BLOCK_MS` and must never be routed
 //     through the parachain pace.
 //  2. The parachain's NOMINAL block interval, `MILLISECS_PER_BLOCK` in the
-//     runtime (6000 today, 2000 after the planned upgrade). Every runtime
+//     runtime (2000 since runtime 440, 6000 before it). Every runtime
 //     block-count constant is DERIVED from it — `DAYS`, the GIGAHDX cooldown,
 //     conviction lock periods — so it is the right slope for turning one of
 //     those block counts into a duration. It is NOT `aura.slotDuration`:
@@ -22,9 +22,8 @@ import { runtimeParaBlockMs } from './runtimeConstants.ts'
 //     `runtimeParaBlockMs` for the two wall-clock-premised constants that do
 //     track it.
 //  3. The parachain's MEASURED pace. Elastic scaling means real production runs
-//     ahead of the nominal slot: ~5.4–5.8s per block against a 6000ms nominal
-//     as of Aug 2026. It is the right number for "how many blocks did the chain
-//     actually produce in the last N hours".
+//     ahead of the nominal slot. It is the right number for "how many blocks did
+//     the chain actually produce in the last N hours".
 //
 // (2) is read from runtime metadata when the node is reachable
 // (runtimeConstants.ts — an in-memory property read on the pending layer's
@@ -38,14 +37,15 @@ import { runtimeParaBlockMs } from './runtimeConstants.ts'
 
 // The relay chain's slot time. Not affected by Hydration's 2s migration.
 export const NOMINAL_RELAY_BLOCK_MS = 6_000
-// `MILLISECS_PER_BLOCK` in the Hydration runtime today, and the starting value
-// for the resolution below before anything has been read or measured.
+// The pre-resolution default: the starting value for the resolution below
+// before anything has been read or measured. The live runtime is on 2000 since
+// runtime 440, so this is the conservative floor, not the current interval.
 export const NOMINAL_PARA_BLOCK_MS = 6_000
 // Blocks per hour at the nominal slot time — the pre-measurement constant the
 // window helpers degrade to.
 export const NOMINAL_BLOCKS_PER_HOUR = 3_600_000 / NOMINAL_PARA_BLOCK_MS
 
-// Slot times Hydration's runtime can be on: 6s today, 2s planned. A measured
+// Slot times Hydration's runtime can be on: 6s before runtime 440, 2s since. A measured
 // pace is snapped to the nearest of these, so an inferred nominal is a step
 // function that changes exactly once, at the runtime upgrade, instead of
 // tracking throughput noise.

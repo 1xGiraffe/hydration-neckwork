@@ -195,7 +195,8 @@ export async function buildDataApp({ client, logger = true, onRoute }: DataAppOp
         },
       },
       // Declared globally so the docs portal's test client prompts for the
-      // token natively; the three exempt routes override with `security: []`.
+      // token natively; /v1/status overrides it with `security: []` and the
+      // other exempt routes are hidden from the document entirely.
       security: [{ bearerAuth: [] }],
     },
     transform: jsonSchemaTransform,

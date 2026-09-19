@@ -8,7 +8,7 @@ import { isBuiltin } from 'node:module'
 // ClickHouse connection, reads no schema, and shares no service. That makes its
 // import boundary TOTAL rather than an allow-list — node builtins, npm packages
 // and its own tree, nothing else — which is the design's own isolation claim
-// (docs/superpowers/specs/2026-09-18-hydration-mcp-design.md § Isolation) and
+// (AGENTS.md § MCP server) and
 // the reason the private `user_*` surface cannot be reached from here by any
 // route: the code that reads it is not importable.
 const API_ROOT = fileURLToPath(new URL('../../', import.meta.url))

@@ -97,10 +97,9 @@ export function verifySignedLogin(message: string, address: string, signature: s
 
 // ---- nonce challenges (in-memory only: a lost nonce just means re-requesting
 // a challenge, so a restart mid-login is a retry, not a failure mode — but only
-// because the 'no-challenge' branch below now SAYS so. While every branch read
-// "Signature verification failed", an api restart was indistinguishable from a
-// broken wallet, and three deploys inside 19 minutes on 2026-09-16 each ate a
-// login that way.) ----
+// because the 'no-challenge' branch below SAYS so. If every branch read
+// "Signature verification failed", an api restart would be indistinguishable
+// from a broken wallet and would silently eat a login.) ----
 interface PendingChallenge { accountId: string; address: string; message: string; expiresAt: number }
 // Long enough to cover a hardware signer: plugging a Ledger in, unlocking it,
 // opening the Polkadot app and confirming does not fit in the five minutes this

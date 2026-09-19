@@ -11,10 +11,9 @@
 // index growth, so hollarBorrowHourlyRows() computes exact hourly accrual rows
 // in TypeScript (BigInt, no float on the money path) for the job to insert.
 //
-// The stream semantics were pinned against the incumbent in
-// api/src/public/services/feesCharts.ts and moved here verbatim where they
-// already existed; the two network-fee extractions are new and their traps are
-// spelled out inline (and pinned by api/tests/revenueStreams.test.ts):
+// The stream semantics are the ones api/src/public/services/feesCharts.ts
+// serves; the two network-fee extractions are unique to this model and their
+// traps are spelled out inline (and pinned by api/tests/revenueStreams.test.ts):
 //   * TransactionFeePaid.actualFee INCLUDES the tip (verified 3898/3898 joined
 //     rows) and is ALWAYS denominated in HDX whatever currency the payer was
 //     actually charged in (verified per fee currency) — so it prices off the

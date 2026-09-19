@@ -1,7 +1,6 @@
 // Per-account NET trade volume read model (price_data.account_trade_volume):
 // routed/DCA trades collapsed to their net input/output so intermediate routing
-// hops are not double-counted. See docs/superpowers/specs/2026-07-17-account-
-// trade-volume-dedup-design.md.
+// hops are not double-counted.
 //
 // The netting is a per-trade cross-row aggregation with a block-time ohlc
 // valuation, so it cannot be a plain per-row MV. The derivations runner rebuilds
@@ -109,8 +108,8 @@ export function swapEventFilterSql(): string {
 // A block is 12 synthetic seconds, so the month's first block is its UTC epoch
 // second divided by 12, and the bound is exclusive at the next month's first block.
 // "Synthetic" is load-bearing: 12 is a partitioning constant, decoupled from the
-// chain's real block time (~12-15s until Q3 2025, ~6s since, 2s next), and it must stay identical across all
-// six sites — see the note above account_trade_volume in
+// chain's real block time (~12-15s until Q3 2025, ~6s until runtime 440, ~2s since), and it must stay identical across all
+// eight sites — see the note above account_trade_volume in
 // clickhouse/schema/001_tables.sql. Do not re-pin it at a block-time change; a
 // faster chain just makes each partition span fewer real days (~15 at 6s, ~5 at 2s,
 // so proportionally more partitions go stale per real day and this job rebuilds

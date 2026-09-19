@@ -25,12 +25,10 @@ export interface PublicStatus {
 // so holding it in process for the same window keeps ClickHouse load O(1) in readers.
 //
 // Wall clock, and deliberately not re-derived from the block time: at the chain's
-// present ~6 s cadence this is under one block, and at 2 s it would span one to
-// two, so a poller would see the head move in steps. That is a freshness choice
-// rather than a correctness one — both reads here are metadata-scale `max()`
-// aggregates whose cost does not change with block rate — so the value is left
-// alone and the trade-off is recorded for the cadence change rather than guessed
-// at now. It must stay equal to the route's own max-age in cacheControl.ts.
+// ~2 s cadence this spans one to two blocks, so a poller sees the head move in
+// steps. That is a freshness choice rather than a correctness one — both reads
+// here are metadata-scale `max()` aggregates whose cost does not change with
+// block rate. It must stay equal to the route's own max-age in cacheControl.ts.
 const TTL_MS = 3_000
 
 export function publicStatus(client: ClickHouseClient): Promise<PublicStatus> {

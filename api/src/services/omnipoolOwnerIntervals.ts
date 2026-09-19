@@ -1,7 +1,6 @@
 // Reconstructs account-first economic ownership intervals for Omnipool positions from
 // their NFT + liquidity-mining lifecycle events. Pure and deterministic so it can be
-// unit-tested and re-run idempotently by the checkpointed builder job. See
-// docs/superpowers/specs/2026-07-17-lp-value-history-phase1-omnipool-design.md.
+// unit-tested and re-run idempotently by the checkpointed builder job.
 //
 // Ownership model (verified against raw_events): a position is owned "bare" while its
 // collection-1337 NFT is held by a real account, and "farmed" while its collection-2584

@@ -37,9 +37,7 @@ import { DECIMAL_STRINGS, scaledUsd } from './poolVolumes.ts'
 // derivations cycle — the same freshness contract every partition-incremental
 // model here carries.
 //
-// WHAT EACH STREAM MEANS is documented on the builders in revenueStreams.ts
-// (they were pinned against the incumbent here first — see the git history for
-// the measured ratios):
+// WHAT EACH STREAM MEANS is documented on the builders in revenueStreams.ts:
 //
 //  * omnipool/asset      — the Omnipool's per-asset trade fee: every non-hub fee
 //                          leg. The runtime splits it per recipient, so

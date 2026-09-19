@@ -1,7 +1,7 @@
 -- Money-market read models for the public /v1 REST API: per-reserve interest
 -- rates, and per-reserve supplied/debt state (reserve TVL history and the
 -- current moneyMarketSupplyUsd). Normative definitions:
--- docs/superpowers/specs/2026-08-12-public-rest-api-design.md § Phase 2.
+-- Read by api/src/public/services/feesCharts.ts, which states the semantics.
 --
 -- WHAT RAW HOLDS. raw_money_market_reserves.ReserveDataUpdated carries exactly
 -- five numbers, as RAY-scaled (1e27) decimal STRINGS:

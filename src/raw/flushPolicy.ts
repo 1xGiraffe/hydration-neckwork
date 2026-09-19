@@ -26,8 +26,8 @@
 // one block per 2 s: 43,200 flushes/day against today's 7,367 (5.9x), a 454 ms flush
 // inside a 2 s window = 23% duty cycle, with active parts still one to two orders of
 // magnitude below parts_to_delay_insert. Uncomfortable to look at, not a cliff.
-// Re-measure the gap distribution after the migration before touching any of this;
-// if finality cadence really did change, this comment's premise is what moved.
+// If the finality cadence changes again, the gap distribution is this comment's
+// premise and the thing to re-measure before touching any of it.
 //
 // So batching has to be explicit, and it must not trade the freshness the explorer
 // reads for parts nobody is paying for at head. Hence three independent triggers,

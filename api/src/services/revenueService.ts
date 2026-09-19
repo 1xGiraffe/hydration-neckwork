@@ -15,7 +15,7 @@
 // The per-stream marks are read ONCE per request and threaded into BOTH arms
 // as literals — the cold caps and the tail filters (and the tail's cache
 // identity) — so a REPLACE PARTITION landing mid-request cannot make the arms
-// overlap on an hour or straddle a gap (the SPLIT_BOUNDS argument from the
+// overlap on an hour or straddle a gap (the `cold_mark` split the
 // public fees service, applied across two queries).
 //
 // Explorer surfaces show PROTOCOL revenue only: the omnipool asset fee's

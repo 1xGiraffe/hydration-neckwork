@@ -4717,7 +4717,8 @@ async function getMmReserveTokens(): Promise<MmReserveToken[]> {
 
 // aToken / variable-debt scaled-balance reconstruction (no per-request RPC)
 // balance = ( scaled_anchor@B0 + Σ scaled_delta(events, block > B0) ) · index_now / RAY.
-// See clickhouse/schema/041_atoken_anchors.sql. B0 is read from the anchor table so a
+// The anchor table is atoken_scaled_anchor (clickhouse/schema/001_tables.sql).
+// B0 is read from it so a
 // re-anchor at a new block is picked up automatically; 0 ⇒ anchor missing (guard).
 const ATOKEN_RAY = 10n ** 27n
 
@@ -26369,9 +26370,7 @@ async function enrichTopAssets(
 }
 
 // Per-row enrichment for the accounts directory: the 1Y value sparkline and the
-// activity counter, batched per page. Once the resumable historical aggregate is
-// complete, this reads weekly states; during deployment/backfill it retains the
-// equivalent raw-observation query as a correctness-first fallback.
+// activity counter, batched per page, read from the weekly value states.
 async function enrichAccountRows(
   raw: { label_id: string; sample: string; usd: number; usd_total?: number; gkey?: string }[],
   rows: TopAccountRow[],

@@ -1,9 +1,8 @@
 import { z } from 'zod'
 
-// Shared zod building blocks for the public API's wire conventions
-// (docs/superpowers/specs/2026-08-12-public-rest-api-design.md, "Wire
-// conventions"). Every /v1 route composes its request/response schemas from
-// these, so the contract stays uniform and OpenAPI documents it once.
+// Shared zod building blocks for the public API's wire conventions. Every /v1
+// route composes its request/response schemas from these, so the contract stays
+// uniform and OpenAPI documents it once.
 
 // Addresses are hex public keys — 20 bytes (H160) or 32 bytes (substrate),
 // lowercase. SS58 is never accepted or emitted on this surface.

@@ -3,7 +3,7 @@
 -- identity so a re-inserted raw range replaces its rows instead of adding to
 -- them. pool_swap_legs is fed by five MVs — one per swap-event shape the chain
 -- has emitted — that all write the same leg identity. Normative definitions:
--- docs/superpowers/specs/2026-08-12-public-rest-api-design.md § New ClickHouse models.
+-- api/src/public/ is the only reader; each service states its own semantics.
 --
 -- Extraction paths below are pinned against the shapes raw_events actually holds:
 --
@@ -290,7 +290,7 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.otc_order_events_mv TO price_d
 -- Hourly leg sums: pool_swap_legs folded to one row per
 -- (venue, pool_key, asset_id, leg_kind, fee_dest, fee_recipient, hour).
 -- MEASURED over the whole era: 65,450,926 legs collapse to 3,009,629 rows (22x),
--- and the omnipool fee slice the fees charts read collapses 22,897,119 legs to
+-- and the omnipool fee slice those readers take collapses 22,897,119 legs to
 -- 539,833 rows (42x).
 --
 -- WHY THIS IS NOT A MATERIALIZED VIEW, against the derivation hierarchy in
@@ -330,8 +330,8 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.otc_order_events_mv TO price_d
 --
 -- The job never writes the hour in progress, so every row present is a CLOSED
 -- hour. Readers therefore take closed hours from here and the tail from
--- pool_swap_legs, split at max(hour) + 1 hour (see feeLegsCteSql in
--- api/src/public/services/feesCharts.ts). An empty or lagging table pushes the
+-- pool_swap_legs, split at max(hour) + 1 hour (api/src/data/services/poolsData.ts
+-- and statsData.ts, and public/services/defillama.ts). An empty or lagging table pushes the
 -- cut DOWN, so the raw arm answers more of the range and the split costs time
 -- rather than rows — it is not a coverage gate.
 --

@@ -130,7 +130,7 @@ The `api-public` service (`api/src/public/`, same image as `api`, own process be
   without restating in the description why it exists.
 - The public read models live in `clickhouse/schema/006_public.sql` (`pool_swap_legs` with its
   `op_key` routed-trade key, `farm_config_events`, `otc_order_events`, and the `pool_swap_hourly`
-  pre-aggregate that keeps the fees charts and the DefiLlama backfill off a full leg scan).
+  pre-aggregate that keeps the pool/stats reads and the DefiLlama backfill off a full leg scan).
   External-feed facades
   (CoinGecko/DefiLlama) reuse `pool_swap_legs`, which covers the FULL era: the modern
   `Broadcast.Swapped*` MV plus four legacy per-pallet MVs (< 6,837,788, back to block 1,708,104).
