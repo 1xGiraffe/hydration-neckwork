@@ -5066,6 +5066,45 @@ async function reconstructAccountScaled(h160: string, b0: number): Promise<Map<s
   return m
 }
 
+// Usage-as-collateral flags per holder, keyed `${pool}:${reserve}` to match the
+// reserve-index map. The flag is Aave's user-configuration bit, and it has two
+// observers: the pool's Enabled/Disabled events, exact and immediate but not
+// emitted for every way the bit moves on this chain, and the swept bitmap read
+// (money_market_collateral_anchor), complete but only as fresh as the last sweep.
+// Whichever observed the bit LAST wins, with the sweep taking a tie because it
+// reads the state after that block's events. A reserve neither observed was never
+// collateralised and reads false. Both tables are user-first, so this is a
+// key-prefix read on each; replayed rows repeat their values, so the argMax is
+// idempotent without FINAL.
+async function mmCollateralFlagsByHolder(h160s: string[]): Promise<Map<string, Map<string, boolean>>> {
+  const out = new Map<string, Map<string, boolean>>()
+  const hs = [...new Set(h160s.map(h => h.toLowerCase()).filter(h => /^0x[0-9a-f]{40}$/.test(h)))]
+  if (!hs.length) return out
+  const res = await client.query({
+    query: `
+      SELECT user_address, pool_address, reserve_address, argMax(enabled, observed) AS enabled FROM (
+        SELECT user_address, pool_address, reserve_address, enabled,
+               tuple(block_height, toUInt8(0), event_index) AS observed
+        FROM price_data.money_market_collateral_flags
+        WHERE user_address IN {hs:Array(String)}
+        UNION ALL
+        SELECT user_address, pool_address, reserve_address, enabled,
+               tuple(block_height, toUInt8(1), toUInt32(0)) AS observed
+        FROM price_data.money_market_collateral_anchor
+        WHERE user_address IN {hs:Array(String)}
+      ) GROUP BY user_address, pool_address, reserve_address`,
+    query_params: { hs }, format: 'JSONEachRow',
+  })
+  for (const r of await res.json<{ user_address: string; pool_address: string; reserve_address: string; enabled: number }>()) {
+    const h = r.user_address.toLowerCase()
+    const m = out.get(h) ?? out.set(h, new Map<string, boolean>()).get(h)!
+    m.set(`${r.pool_address.toLowerCase()}:${r.reserve_address.toLowerCase()}`, Number(r.enabled) === 1)
+  }
+  return out
+}
+
+const NO_COLLATERAL_FLAGS: ReadonlyMap<string, boolean> = new Map()
+
 // One reserve row for a holder, from that holder's reconstructed scaled balances.
 // Null when the reserve has no live index, or when the holder neither supplies nor
 // owes anything in it. Shared by the single-account read and its batched twin so a
@@ -5074,13 +5113,21 @@ async function reconstructAccountScaled(h160: string, b0: number): Promise<Map<s
 //
 // Label supplied collateral with the aToken the user holds (DOT->aDOT), matching the
 // Hydration wallet/borrow UI; debt stays the borrowed underlying.
-function mmReserveRow(
+//
+// `collateralFlags` is the holder's own usage-as-collateral state, keyed like the
+// index map. Supplying is not collateralising: a reserve whose flag is off (turned
+// off by the user, or never enabled because the reserve carries no LTV) earns
+// interest while backing no borrow, so it must not wear the badge — the flag is
+// read, never inferred from a positive balance.
+export function mmReserveRow(
   t: MmReserveToken,
   byContract: ReadonlyMap<string, bigint>,
   indices: ReadonlyMap<string, { liq: bigint; vbi: bigint }>,
   prices: ReadonlyMap<number, PriceInfo>,
+  collateralFlags: ReadonlyMap<string, boolean>,
 ): MmReserve | null {
-  const resIdx = indices.get(`${t.poolProxy.toLowerCase()}:${t.asset.toLowerCase()}`)
+  const reserveKey = `${t.poolProxy.toLowerCase()}:${t.asset.toLowerCase()}`
+  const resIdx = indices.get(reserveKey)
   if (!resIdx) return null
   const aScaled = byContract.get(t.aToken.toLowerCase()) ?? 0n
   const dScaled = byContract.get(t.vDebt.toLowerCase()) ?? 0n
@@ -5106,7 +5153,7 @@ function mmReserveRow(
     supplied: sup.toString(), debt: dbt.toString(),
     suppliedUsd: p ? Number(sup) / 10 ** decimals * p.price : null,
     debtUsd: p ? Number(dbt) / 10 ** decimals * p.price : null,
-    collateral: sup > 0n,
+    collateral: sup > 0n && (collateralFlags.get(reserveKey) ?? false),
     marketKey: t.marketKey ?? 'core',
   }
 }
@@ -5126,13 +5173,15 @@ export async function getMoneyMarketReserves(h160: string): Promise<MmReserve[]>
   return cached(`explorer:mm-reserves:${accountValueGenerationEpoch}:${h160.toLowerCase()}`, 15000, async () => {
     const b0 = await aTokenAnchorBlock()
     if (!b0) return []
-    const [prices, tokens, indices, byContract] = await Promise.all([
+    const [prices, tokens, indices, byContract, flags] = await Promise.all([
       ensureAccountValuePrices(), getMmReserveTokens(), reserveIndicesNow(), reconstructAccountScaled(h160, b0),
+      mmCollateralFlagsByHolder([h160]),
     ])
     if (!byContract.size || !tokens.length) return []
+    const holderFlags = flags.get(h160.toLowerCase()) ?? NO_COLLATERAL_FLAGS
     const out: MmReserve[] = []
     for (const t of tokens) {
-      const row = mmReserveRow(t, byContract, indices, prices)
+      const row = mmReserveRow(t, byContract, indices, prices, holderFlags)
       if (row) out.push(row)
     }
     return out.sort((a, b) => (b.suppliedUsd ?? b.debtUsd ?? 0) - (a.suppliedUsd ?? a.debtUsd ?? 0))
@@ -5180,7 +5229,9 @@ async function mmReservesByHolder(h160s: string[]): Promise<Map<string, MmReserv
   if (!hs.length) return out
   const b0 = await aTokenAnchorBlock()
   if (!b0) return out
-  const [prices, tokens, indices] = await Promise.all([ensureAccountValuePrices(), getMmReserveTokens(), reserveIndicesNow()])
+  const [prices, tokens, indices, flags] = await Promise.all([
+    ensureAccountValuePrices(), getMmReserveTokens(), reserveIndicesNow(), mmCollateralFlagsByHolder(hs),
+  ])
   // Reconstruct in small holder chunks: hasAny(participants, …) over the whole
   // raw_evm_logs table blows ClickHouse's per-query memory once the holder set is
   // large, so cap each scan's matched rows AND how many scans run at once.
@@ -5198,9 +5249,10 @@ async function mmReservesByHolder(h160s: string[]): Promise<Map<string, MmReserv
   }
   await Promise.all(Array.from({ length: Math.min(CHUNK_CONCURRENCY, chunks.length) }, chunkWorker))
   for (const [h, byContract] of byHolder) {
+    const holderFlags = flags.get(h) ?? NO_COLLATERAL_FLAGS
     const reserves: MmReserve[] = []
     for (const t of tokens) {
-      const row = mmReserveRow(t, byContract, indices, prices)
+      const row = mmReserveRow(t, byContract, indices, prices, holderFlags)
       if (row) reserves.push(row)
     }
     if (reserves.length) out.set(h, reserves)
