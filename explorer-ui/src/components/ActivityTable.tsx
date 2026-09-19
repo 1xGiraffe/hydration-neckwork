@@ -35,6 +35,8 @@ const CHAIN_COLORS: Record<string, [string, string]> = {
   Phala: ['#c4f142', '#96c214'],
   Unique: ['#00bfff', '#0087b4'],
   KILT: ['#8c145a', '#5e0d3c'],
+  NEAR: ['#00c586', '#00875c'],
+  Zcash: ['#b8860b', '#7a5a08'],
 }
 export function ChainBadge({ chain }: { chain: string }) {
   const c = CHAIN_COLORS[chain] ?? ['#666', '#444']
@@ -54,6 +56,8 @@ export function HydrationBadge() {
 // Ordered longest-suffix first where hosts nest (optimistic.etherscan.io).
 const EXPLORER_SITES: [string, string][] = [
   ['optimistic.etherscan.io', 'Etherscan'],
+  ['nearblocks.io', 'NearBlocks'],
+  ['blockchair.com', 'Blockchair'],
   ['orbmarkets.io', 'Orb'],
   ['robinscan.io', 'Robinscan'],
   ['etherscan.io', 'Etherscan'],
@@ -318,31 +322,47 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     return <span className="asset-flow"><AssetAmount asset={r.assetIn} raw={r.amountIn} /> → <AssetAmount asset={r.assetOut} raw={r.amountOut} />{r.dcaStatus === 'failed' && <span className="muted">Failed attempt</span>}</span>
   }
   if (r.type === 'xcswap' && r.assetIn) {
-    // The destination is on ANOTHER chain, so it has no asset chip to show: it is
-    // named by its symbol and the chain it settled on. Until the off-chain half is
-    // resolved the row says where the value went — an Ethereum deposit address —
-    // and stops there, rather than implying a delivery that may not have happened.
-    const sold = <AssetAmount asset={r.assetIn} raw={r.amountIn} />
-    const dest = r.xcswapDestSymbol
+    // Read as the cross-chain hop above: each side is its chain, then what sits
+    // on it. Hydration's side is the asset sold; the far side is the chain it
+    // settles on, the asset delivered there and the account that receives it.
+    //
+    // The delivered asset is not a registry asset, so it has no asset id — but
+    // it has an origin, which is all AssetIcon needs to resolve artwork, and the
+    // recipient's emoji derives from its own address exactly as every other
+    // account's does. A NEAR account is named (`crypthor.near`) or a 64-hex
+    // implicit one; both are addresses, neither is an identity we resolved.
+    const sold = <><HydrationBadge /><AssetAmount asset={r.assetIn} raw={r.amountIn} /></>
+    const chainName = r.xcswapDestChainName ?? r.xcswapDestChain
+    // The badge carries the proof when there is one: the transaction that paid
+    // the recipient, on that chain's own explorer.
+    const chain = chainName
+      ? (r.xcswapDestTxUrl
+        ? <a href={r.xcswapDestTxUrl} target="_blank" rel="noopener" data-no-hover="true"
+             title={`Settling transaction on ${chainName}`}><ChainBadge chain={chainName} /></a>
+        : <ChainBadge chain={chainName} />)
+      : null
+    const delivered = r.xcswapDestSymbol
       ? <span className="trade-leg">
-        {/* The destination is not a registry asset, so it has no asset id — but it
-            does have an origin, which is all AssetIcon needs to resolve artwork. */}
         {r.xcswapDestOrigin && <AssetIcon assetId={0} symbol={r.xcswapDestSymbol} origin={r.xcswapDestOrigin} />}
         {' '}<span className="mono">{r.xcswapDestAmount && r.xcswapDestDecimals != null ? <><Amt raw={r.xcswapDestAmount} dec={r.xcswapDestDecimals} />{' '}</> : null}{r.xcswapDestSymbol}</span>
-        {r.xcswapDestChain && (r.xcswapDestTxUrl
-          // The chain name carries the proof: it links to the transaction that
-          // paid the recipient, on that chain's own explorer.
-          ? <a className="xc-chain" href={r.xcswapDestTxUrl} target="_blank" rel="noopener"
-               title={`Settling transaction on ${r.xcswapDestChain}`} data-no-hover="true">{r.xcswapDestChain}</a>
-          : <span className="xc-chain">{r.xcswapDestChain}</span>)}
       </span>
       : <span className="muted">bridging out</span>
-    return <span className="asset-flow">{sold} → {dest}
-      {!headed && r.xcswapRecipient && (r.xcswapRecipientUrl
-        ? <a className="muted mono" href={r.xcswapRecipientUrl} target="_blank" rel="noopener"
-             title={`${r.xcswapRecipient} — opens the ${r.xcswapDestChain ?? 'destination'} explorer`}
-             data-no-hover="true">{shortForeignAddress(r.xcswapRecipient)}</a>
-        : <span className="muted mono" title={r.xcswapRecipient}>{shortForeignAddress(r.xcswapRecipient)}</span>)}
+    // The same pill ExternalAccountPill gives an XCM counterparty: emoji, the
+    // address, then the explorer that opens it.
+    const recipient = !headed && r.xcswapRecipient
+      ? (r.xcswapRecipientUrl
+        ? <a className="addr-pill ext-account" href={r.xcswapRecipientUrl} target="_blank" rel="noopener"
+             title={`${r.xcswapRecipient} · opens ${explorerSiteName(r.xcswapRecipientUrl)}`} data-no-hover="true">
+          <AccountEmoji account={{ accountId: r.xcswapRecipient }} />
+          <span className="a mono">{shortForeignAddress(r.xcswapRecipient)}</span>
+          <span className="ext-site">{explorerSiteName(r.xcswapRecipientUrl)}</span>
+        </a>
+        : <span className="addr-pill" title={r.xcswapRecipient}>
+          <AccountEmoji account={{ accountId: r.xcswapRecipient }} />
+          <span className="a mono">{shortForeignAddress(r.xcswapRecipient)}</span>
+        </span>)
+      : null
+    return <span className="asset-flow">{sold} → {chain}{delivered}{recipient}
       {!headed && r.xcswapStatus === 'REFUNDED' && <span className="muted">refunded</span>}
       {/* The badge names the action, so the row has to name the OUTCOME: without
           this, an order whose destination never arrives reads exactly like one

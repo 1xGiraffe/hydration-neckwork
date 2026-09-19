@@ -7576,6 +7576,9 @@ export function xcswapRowFromOrder(
       ? `${dest.explorerTxBase}${encodeURIComponent(settlement.destinationTxHash)}` : null,
     xcswapDestSymbol: settlement?.destinationSymbol ?? null,
     xcswapDestChain: settlement?.destinationChain ?? null,
+    // The chain as people write it. The 1Click registry keys Zcash `zec`, which
+    // beside the ZEC symbol reads as a stutter rather than a place.
+    xcswapDestChainName: dest?.chainName ?? null,
     xcswapDestDecimals: settlement?.destinationDecimals ?? null,
     xcswapDestAmount: settlement?.amountOut ?? null,
     xcswapDestAmountUsd: settlement?.amountOutUsd ?? null,
@@ -10163,6 +10166,7 @@ export interface ActivityRow {
   xcswapDestAsset?: string | null
   /** The recipient's account and the settling transaction on the DESTINATION
    *  chain's own explorer; null until the sweep resolves the order. */
+  xcswapDestChainName?: string | null
   xcswapRecipientUrl?: string | null
   xcswapDestTxUrl?: string | null
   xcswapDestSymbol?: string | null
