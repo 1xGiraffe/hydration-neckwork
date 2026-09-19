@@ -62,29 +62,3 @@ CREATE TABLE IF NOT EXISTS price_data.xcm_arrivals (
 PARTITION BY toYYYYMM(block_timestamp)
 ORDER BY (block_height, event_index)
 SETTINGS index_granularity = 1024;
-
--- Account-first twin, so an account's arrivals are a primary-key read rather than a
--- scan of the block-ordered table. Chained off the base table rather than re-derived,
--- so replay safety rides the base row's replacement identity.
-CREATE TABLE IF NOT EXISTS price_data.xcm_arrivals_by_account (
-  `account` String,
-  `block_height` UInt32,
-  `event_index` UInt32,
-  `block_timestamp` DateTime,
-  `asset_id` UInt32,
-  `amount` String,
-  `message_id` String,
-  `attribution` LowCardinality(String),
-  `from_chain` String,
-  `from_parachain_id` Nullable(UInt32),
-  `computed_at` DateTime
-) ENGINE = ReplacingMergeTree(computed_at)
-PARTITION BY toYYYYMM(block_timestamp)
-ORDER BY (account, block_height, event_index)
-SETTINGS index_granularity = 1024;
-
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.xcm_arrivals_by_account_mv
-TO price_data.xcm_arrivals_by_account AS
-SELECT account, block_height, event_index, block_timestamp, asset_id, amount,
-       message_id, attribution, from_chain, from_parachain_id, computed_at
-FROM price_data.xcm_arrivals;
