@@ -57,6 +57,7 @@ export function HydrationBadge() {
 const EXPLORER_SITES: [string, string][] = [
   ['optimistic.etherscan.io', 'Etherscan'],
   ['nearblocks.io', 'NearBlocks'],
+  ['neuroweb.ai', 'NeuroWeb'],
   ['blockchair.com', 'Blockchair'],
   ['orbmarkets.io', 'Orb'],
   ['robinscan.io', 'Robinscan'],

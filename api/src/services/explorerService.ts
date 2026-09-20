@@ -10955,49 +10955,71 @@ async function v3TradeDetail(act: V3Activity, prices: Map<number, PriceInfo>): P
   await applyEventTimeUsd([detail], tradeDetailValuePick)
   return detail
 }
-interface XcmNetworkMeta { name: string; subscan?: string; ss58?: number }
+interface XcmNetworkMeta {
+  name: string
+  /** Explorer base, no trailing slash. Named as the EVM side already names it:
+   *  most of these are Subscan instances, but not all are, and a chain whose
+   *  Subscan shut down keeps an explorer — it just is not Subscan. */
+  explorer?: string
+  /** Path shapes under that base. Default to Subscan's, which is what every
+   *  Subscan instance uses; a chain running its own explorer overrides them. */
+  accountPath?: string
+  txPath?: string
+  ss58?: number
+}
+const SUBSCAN_ACCOUNT_PATH = '/account/'
+const SUBSCAN_TX_PATH = '/extrinsic/'
+const explorerAccountUrl = (meta: XcmNetworkMeta | undefined, address: string): string | null =>
+  meta?.explorer ? `${meta.explorer}${meta.accountPath ?? SUBSCAN_ACCOUNT_PATH}${encodeURIComponent(address)}` : null
+const explorerTxUrl = (meta: XcmNetworkMeta | undefined, txHash: string): string | null =>
+  meta?.explorer ? `${meta.explorer}${meta.txPath ?? SUBSCAN_TX_PATH}${encodeURIComponent(txHash)}` : null
 // A parachain's product name, for surfaces that hold a bare para id — a sibling
 // sovereign account, an XCM leg. Falls back to the id so an unlisted chain is
 // still named rather than blank.
 export function parachainName(paraId: number): string {
   return PARACHAIN_META[paraId]?.name ?? `Parachain ${paraId}`
 }
-const RELAY_XCM_NETWORK: XcmNetworkMeta = { name: 'Polkadot', subscan: 'https://polkadot.subscan.io', ss58: 0 }
+const RELAY_XCM_NETWORK: XcmNetworkMeta = { name: 'Polkadot', explorer: 'https://polkadot.subscan.io', ss58: 0 }
 // Destination parachain metadata for networks observed in Hydration XCM traffic.
 const PARACHAIN_META: Record<number, XcmNetworkMeta> = {
-  1000: { name: 'AssetHub', subscan: 'https://assethub-polkadot.subscan.io', ss58: 0 },
-  2000: { name: 'Acala', subscan: 'https://acala.subscan.io', ss58: 10 },
-  2004: { name: 'Moonbeam', subscan: 'https://moonbeam.subscan.io' },
-  2006: { name: 'Astar', subscan: 'https://astar.subscan.io', ss58: 5 },
+  1000: { name: 'AssetHub', explorer: 'https://assethub-polkadot.subscan.io', ss58: 0 },
+  2000: { name: 'Acala', explorer: 'https://acala.subscan.io', ss58: 10 },
+  2004: { name: 'Moonbeam', explorer: 'https://moonbeam.subscan.io' },
+  2006: { name: 'Astar', explorer: 'https://astar.subscan.io', ss58: 5 },
   2008: { name: 'Crust' },
-  2012: { name: 'Parallel', subscan: 'https://parallel.subscan.io' },
-  2026: { name: 'Nodle', subscan: 'https://nodle.subscan.io', ss58: 37 },
-  2030: { name: 'Bifrost', subscan: 'https://bifrost.subscan.io', ss58: 6 },
-  2031: { name: 'Centrifuge', subscan: 'https://centrifuge.subscan.io', ss58: 36 },
-  2032: { name: 'Interlay', subscan: 'https://interlay.subscan.io', ss58: 2032 },
+  2012: { name: 'Parallel', explorer: 'https://parallel.subscan.io' },
+  2026: { name: 'Nodle', explorer: 'https://nodle.subscan.io', ss58: 37 },
+  2030: { name: 'Bifrost', explorer: 'https://bifrost.subscan.io', ss58: 6 },
+  2031: { name: 'Centrifuge', explorer: 'https://centrifuge.subscan.io', ss58: 36 },
+  2032: { name: 'Interlay', explorer: 'https://interlay.subscan.io', ss58: 2032 },
   // No subscan: Hydration is no longer indexed there (the host answers 403), so a
   // pill or transaction link pointing back at this chain offers none. The prefix
   // stays — it is how the address is ENCODED, not where it is looked up.
   2034: { name: 'Hydration', ss58: 63 },
-  2035: { name: 'Phala', subscan: 'https://phala.subscan.io', ss58: 30 },
-  2037: { name: 'Unique', subscan: 'https://unique.subscan.io' },
-  2043: { name: 'NeuroWeb', subscan: 'https://origintrail.subscan.io' },
-  2046: { name: 'Darwinia', subscan: 'https://darwinia.subscan.io' },
-  2051: { name: 'Ajuna', subscan: 'https://ajuna.subscan.io' },
-  2086: { name: 'KILT', subscan: 'https://kilt.subscan.io', ss58: 38 },
-  2092: { name: 'Zeitgeist', subscan: 'https://zeitgeist.subscan.io', ss58: 73 },
-  2094: { name: 'Pendulum', subscan: 'https://pendulum.subscan.io', ss58: 56 },
+  2035: { name: 'Phala', explorer: 'https://phala.subscan.io', ss58: 30 },
+  2037: { name: 'Unique', explorer: 'https://unique.subscan.io' },
+  // Subscan shut down its OriginTrail/NeuroWeb instance; the chain runs its own
+  // explorer, which is not a Subscan and keeps accounts and extrinsics at the
+  // root under different words. Prefix 101 is NeuroWeb's own — its explorer
+  // redirects a Polkadot-form address to that form anyway, so linking it
+  // directly saves a hop and matches what the chain's own users read.
+  2043: { name: 'NeuroWeb', explorer: 'https://neuroweb.ai', accountPath: '/address/', txPath: '/tx/', ss58: 101 },
+  2046: { name: 'Darwinia', explorer: 'https://darwinia.subscan.io' },
+  2051: { name: 'Ajuna', explorer: 'https://ajuna.subscan.io' },
+  2086: { name: 'KILT', explorer: 'https://kilt.subscan.io', ss58: 38 },
+  2092: { name: 'Zeitgeist', explorer: 'https://zeitgeist.subscan.io', ss58: 73 },
+  2094: { name: 'Pendulum', explorer: 'https://pendulum.subscan.io', ss58: 56 },
   2101: { name: 'Subsocial' },
-  3345: { name: 'Energy Web X', subscan: 'https://energywebx.subscan.io' },
-  3369: { name: 'Mythos', subscan: 'https://mythos.subscan.io' },
+  3345: { name: 'Energy Web X', explorer: 'https://energywebx.subscan.io' },
+  3369: { name: 'Mythos', explorer: 'https://mythos.subscan.io' },
   3370: { name: 'Laos' },
 }
 // Kusama's side of a bridged journey. Its para ids are KUSAMA's, so they must never
 // be resolved against PARACHAIN_META — 1000 there is Polkadot AssetHub, and a Kusama
 // AssetHub transaction linked to it points at a chain it was never on.
-const KUSAMA_RELAY_META: XcmNetworkMeta = { name: 'Kusama', subscan: 'https://kusama.subscan.io', ss58: 2 }
+const KUSAMA_RELAY_META: XcmNetworkMeta = { name: 'Kusama', explorer: 'https://kusama.subscan.io', ss58: 2 }
 const KUSAMA_PARACHAIN_META: Record<number, XcmNetworkMeta> = {
-  1000: { name: 'Kusama AssetHub', subscan: 'https://assethub-kusama.subscan.io', ss58: 2 },
+  1000: { name: 'Kusama AssetHub', explorer: 'https://assethub-kusama.subscan.io', ss58: 2 },
 }
 function kusamaMeta(chainId: string): XcmNetworkMeta | undefined {
   const paraId = Number(chainId)
@@ -11066,7 +11088,7 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
     const resolved = resolveDisplayAccountId(h)
     return {
       ...remoteAccountRef('AccountId32', h, resolved, address,
-        meta?.subscan ? `${meta.subscan}/account/${encodeURIComponent(chainAddress)}` : null),
+        explorerAccountUrl(meta, chainAddress)),
       profile: profileForAccount(resolved),
       ...(isContractAccount(resolved) ? { isContract: true } : {}),
       ...contractNameOf(resolved),
@@ -11076,7 +11098,7 @@ function externalAccountRef(raw: unknown, meta: XcmNetworkMeta | undefined): Act
     const resolved = resolveDisplayAccountId(h160AccountId(h))
     return {
       ...remoteAccountRef('AccountKey20', h, resolved, h,
-        meta?.subscan ? `${meta.subscan}/account/${encodeURIComponent(h)}` : null),
+        explorerAccountUrl(meta, h)),
       profile: profileForAccount(resolved),
       ...(isContractAccount(resolved) ? { isContract: true } : {}),
       ...contractNameOf(resolved),
@@ -11125,7 +11147,7 @@ function globalConsensusName(value: unknown): string | null {
  */
 const BRIDGED_NETWORK_META: Record<string, XcmNetworkMeta> = {
   Polkadot: RELAY_XCM_NETWORK,
-  Kusama: { name: 'Kusama', subscan: 'https://kusama.subscan.io', ss58: 2 },
+  Kusama: { name: 'Kusama', explorer: 'https://kusama.subscan.io', ss58: 2 },
 }
 export function bridgedNetworkMeta(network: string | null | undefined): XcmNetworkMeta | undefined {
   if (!network) return undefined
@@ -12932,7 +12954,7 @@ export function originTxExplorerUrl(urnStr: string, txHash: string | null): stri
     const paraId = Number(chainId)
     const meta = consensus === 'kusama' ? kusamaMeta(chainId)
       : paraId === 0 ? RELAY_XCM_NETWORK : PARACHAIN_META[paraId]
-    return meta?.subscan ? `${meta.subscan}/extrinsic/${txHash}` : null
+    return explorerTxUrl(meta, txHash)
   }
   if (consensus === 'ethereum') {
     const meta = EVM_CHAIN_META[chainId]
