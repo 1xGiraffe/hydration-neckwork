@@ -123,59 +123,149 @@ export function radiusScale(weights: number[], maxWeight: number, width: number)
 // balance of the vote visible in the colour mix rather than as two charts to compare.
 // Deterministic spiral placement — no randomness, so the same referendum always
 // renders identically. Items arrive pre-folded and pre-filtered (foldVoters).
-export function packItems(items: PackItem[]): Bubble[] {
-  const live = items.filter(item => itemWeight(item) > 0)
-  if (!live.length) return []
-  const weights = live.map(itemWeight)
-  const maxWeight = Math.max(...weights)
-  const maxR = radiusScale(weights, maxWeight, WIDTH)
-  // Largest first: heavy circles claim the centre, small ones fill in around them.
-  const ordered = [...live].sort((a, b) => itemWeight(b) - itemWeight(a))
+//
+// The spiral must be able to reach ANY point of the canvas. A fixed step cap put the
+// ceiling at ~329 units, short of the ~340 two big circles needed between their
+// centres, so a spot that existed was never sampled and the bubble was dropped on
+// top of its neighbour. Derive the cap from the geometry instead: half the diagonal
+// is the farthest a centre can sit from the middle.
+const SPIRAL_GROWTH = 1.9
+const SPIRAL_TURN = 0.35
+const SPIRAL_STEPS = Math.ceil((Math.hypot(WIDTH, HEIGHT) / 2 / SPIRAL_GROWTH) ** 2)
 
+// Clearance between two bubbles' edges: enough that neighbouring strokes read as two
+// circles rather than one blob.
+const BUBBLE_GAP = 0.6
+// How much the whole scale steps down when a packing attempt cannot fit.
+const SHRINK = 0.92
+
+function radiusFor(weight: number, maxWeight: number, maxR: number): number {
+  // sqrt so AREA is proportional to power.
+  return Math.max(MIN_R, Math.sqrt(weight / maxWeight) * maxR)
+}
+
+/**
+ * The spot a circle of radius `r` takes, walking the spiral out from the middle.
+ *
+ * Two searches rather than one with a flag inside it: this loop runs millions of
+ * times per chart and a branch in its body costs ~1.6x, measured on the busiest
+ * referendum there has ever been (499 live voters: 465ms one loop, 747ms two).
+ * Returns -1 when nothing on the spiral is clear.
+ */
+function findClearSpot(
+  r: number, placed: number, cx: Float64Array, cy: Float64Array, cr: Float64Array,
+  out: Float64Array,
+): number {
+  for (let step = 0; step < SPIRAL_STEPS; step++) {
+    const angle = step * SPIRAL_TURN
+    const radius = Math.sqrt(step) * SPIRAL_GROWTH
+    const x = WIDTH / 2 + Math.cos(angle) * radius
+    const y = HEIGHT / 2 + Math.sin(angle) * radius
+    if (x - r < 2 || x + r > WIDTH - 2 || y - r < 2 || y + r > HEIGHT - 2) continue
+    let clear = true
+    for (let i = 0; i < placed; i++) {
+      const dx = cx[i] - x, dy = cy[i] - y, gap = cr[i] + r + BUBBLE_GAP
+      if (dx * dx + dy * dy < gap * gap) { clear = false; break }
+    }
+    if (clear) { out[0] = x; out[1] = y; return step }
+  }
+  return -1
+}
+
+/**
+ * The spot with the MOST room, for a circle that has nowhere clear to go. Only
+ * reached once every scale has been tried, so it may take the slow path and score
+ * every candidate: an unavoidable overlap then lands where it covers least, rather
+ * than on the first spot the spiral offered — which is the middle, on top of the
+ * largest bubble of all.
+ */
+function findRoomiestSpot(
+  r: number, placed: number, cx: Float64Array, cy: Float64Array, cr: Float64Array,
+  out: Float64Array,
+): void {
+  let bestRoom = -Infinity
+  out[0] = WIDTH / 2
+  out[1] = HEIGHT / 2
+  for (let step = 0; step < SPIRAL_STEPS; step++) {
+    const angle = step * SPIRAL_TURN
+    const radius = Math.sqrt(step) * SPIRAL_GROWTH
+    const x = WIDTH / 2 + Math.cos(angle) * radius
+    const y = HEIGHT / 2 + Math.sin(angle) * radius
+    if (x - r < 2 || x + r > WIDTH - 2 || y - r < 2 || y + r > HEIGHT - 2) continue
+    let room = Infinity
+    for (let i = 0; i < placed; i++) {
+      const dx = cx[i] - x, dy = cy[i] - y
+      const edge = Math.sqrt(dx * dx + dy * dy) - cr[i] - r
+      if (edge < room) room = edge
+    }
+    if (room >= BUBBLE_GAP) { out[0] = x; out[1] = y; return }
+    if (room > bestRoom) { bestRoom = room; out[0] = x; out[1] = y }
+  }
+}
+
+/**
+ * One packing attempt at a given scale.
+ *
+ * Returns null the moment a bubble cannot be placed clear of the ones already down,
+ * so a doomed scale costs the caller almost nothing — the abort normally happens on
+ * the second circle. With `force`, nothing is refused.
+ */
+function packAtScale(ordered: PackItem[], maxWeight: number, maxR: number, force: boolean): Bubble[] | null {
   const placed: Bubble[] = []
-  // Flat mirrors of the circles already down. A busy referendum walks ~2.3M spiral
-  // steps and runs ~16.5M pair tests, all on the main thread while the page is
-  // blank, so the innermost loop must stay allocation-free: no closure per step,
-  // no property loads through the Bubble objects, and squared distances instead of
-  // Math.hypot — d >= gap and d^2 >= gap^2 select the same spots, the square root
-  // is pure cost. Referendum 368: 860ms -> 77ms, same coordinates to the bit.
+  // Flat mirrors of the circles already down. A busy referendum walks millions of
+  // spiral steps and pair tests, all on the main thread while the page is blank, so
+  // the innermost loop must stay allocation-free: no closure per step, no property
+  // loads through the Bubble objects, and squared distances instead of Math.hypot —
+  // d >= gap and d^2 >= gap^2 select the same spots, the square root is pure cost.
   const cx = new Float64Array(ordered.length)
   const cy = new Float64Array(ordered.length)
   const cr = new Float64Array(ordered.length)
+  const out = new Float64Array(2)
   for (const item of ordered) {
     const weight = itemWeight(item)
-    // sqrt so AREA is proportional to power.
-    const r = Math.max(MIN_R, Math.sqrt(weight / maxWeight) * maxR)
-    let best: { x: number; y: number } | null = null
-    for (let step = 0; step < 30_000; step++) {
-      const angle = step * 0.35
-      const radius = Math.sqrt(step) * 1.9
-      const x = WIDTH / 2 + Math.cos(angle) * radius
-      const y = HEIGHT / 2 + Math.sin(angle) * radius
-      if (x - r < 2 || x + r > WIDTH - 2 || y - r < 2 || y + r > HEIGHT - 2) continue
-      let clear = true
-      for (let i = 0; i < placed.length; i++) {
-        const dx = cx[i] - x, dy = cy[i] - y, gap = cr[i] + r + 0.6
-        if (dx * dx + dy * dy < gap * gap) { clear = false; break }
-      }
-      if (clear) { best = { x, y }; break }
-      // Remember the first in-bounds spot in case nothing ever clears.
-      if (!best) best = { x, y }
+    const r = radiusFor(weight, maxWeight, maxR)
+    if (findClearSpot(r, placed.length, cx, cy, cr, out) < 0) {
+      if (!force) return null
+      findRoomiestSpot(r, placed.length, cx, cy, cr, out)
     }
-    const x = best?.x ?? WIDTH / 2
-    const y = best?.y ?? HEIGHT / 2
+    const x = out[0], y = out[1]
     cx[placed.length] = x
     cy[placed.length] = y
     cr[placed.length] = r
     placed.push({
-      item,
-      x,
-      y,
-      r,
+      item, x, y, r,
       side: itemSide(item),
       weight,
       label: r >= LABEL_FULL_R ? 'full' : r >= LABEL_EMOJI_R ? 'emoji' : 'none',
     })
   }
   return placed
+}
+
+export function packItems(items: PackItem[]): Bubble[] {
+  const live = items.filter(item => itemWeight(item) > 0)
+  if (!live.length) return []
+  const weights = live.map(itemWeight)
+  const maxWeight = Math.max(...weights)
+  // Largest first: heavy circles claim the centre, small ones fill in around them.
+  const ordered = [...live].sort((a, b) => itemWeight(b) - itemWeight(a))
+
+  // radiusScale sizes the circles so they COLLECTIVELY fill the canvas, which says
+  // nothing about whether they individually fit. Two comparable whales need room
+  // between their centres that a canvas this size cannot always give — on
+  // referendum 411 the top two wanted 340 units apart and the most the box offers
+  // from its middle is 289 — and the old packer answered that by stacking the
+  // second bubble exactly on the first. Shrink the whole scale and try again
+  // instead: every radius moves by the same factor, so AREA stays proportional to
+  // power, which is the only thing this chart claims. Absolute size never meant
+  // anything — radiusScale already clamps it to the canvas.
+  const base = radiusScale(weights, maxWeight, WIDTH)
+  for (let attempt = 0; attempt < 24; attempt++) {
+    const packed = packAtScale(ordered, maxWeight, base * SHRINK ** attempt, false)
+    if (packed) return packed
+  }
+  // Nothing fit in 24 shrinks (every bubble is at the MIN_R floor and there are
+  // thousands of them). Place them anyway, roomiest-spot first, so the chart
+  // degrades into a crowd rather than a pile.
+  return packAtScale(ordered, maxWeight, MIN_R, true)!
 }
