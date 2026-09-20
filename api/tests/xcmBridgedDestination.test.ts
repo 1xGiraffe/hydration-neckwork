@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bridgedNetworkMeta, bridgedXcmNetwork, xcmFinalBeneficiary } from '../src/services/explorerService.ts'
+import { bridgedNetworkMeta, bridgedXcmNetwork, originTxExplorerUrl, xcmFinalBeneficiary } from '../src/services/explorerService.ts'
 
 // A send's top-level `destination` is the first hop only. A bridge hands the assets
 // to an intermediary whose own program forwards them into another consensus system,
@@ -93,12 +93,40 @@ describe('xcmFinalBeneficiary', () => {
 // an account that does not exist there.
 describe('bridgedNetworkMeta', () => {
   it('gives a known consensus its own prefix and explorer', () => {
-    expect(bridgedNetworkMeta('Kusama')).toMatchObject({ name: 'Kusama', subscan: 'https://kusama.subscan.io', ss58: 2 })
-    expect(bridgedNetworkMeta('Polkadot')).toMatchObject({ subscan: 'https://polkadot.subscan.io', ss58: 0 })
+    expect(bridgedNetworkMeta('Kusama')).toMatchObject({ name: 'Kusama', explorer: 'https://kusama.subscan.io', ss58: 2 })
+    expect(bridgedNetworkMeta('Polkadot')).toMatchObject({ explorer: 'https://polkadot.subscan.io', ss58: 0 })
   })
 
   it('offers no link for a consensus it cannot place', () => {
-    expect(bridgedNetworkMeta('Ethereum')?.subscan).toBeUndefined()
+    expect(bridgedNetworkMeta('Ethereum')?.explorer).toBeUndefined()
     expect(bridgedNetworkMeta(null)).toBeUndefined()
+  })
+})
+
+// Not every chain's explorer is a Subscan, and one that WAS can stop being one.
+// Subscan shut down its OriginTrail/NeuroWeb instance, so the link follows the
+// chain to the explorer it runs itself — which keeps accounts and extrinsics at
+// the root under its own words, not Subscan's /account/ and /extrinsic/.
+describe('a chain whose explorer is not a Subscan', () => {
+  const TX = `0x${'ab'.repeat(32)}`
+
+  it('sends a NeuroWeb extrinsic to NeuroWeb, in NeuroWeb\'s own path shape', () => {
+    const url = originTxExplorerUrl('urn:ocn:polkadot:2043', TX)
+    expect(url).toBe(`https://neuroweb.ai/tx/${TX}`)
+    // The instance Subscan retired must not come back through a default.
+    expect(url).not.toContain('subscan')
+    expect(url).not.toContain('/extrinsic/')
+  })
+
+  it('leaves every Subscan chain on Subscan\'s own paths', () => {
+    expect(originTxExplorerUrl('urn:ocn:polkadot:2000', TX)).toBe(`https://acala.subscan.io/extrinsic/${TX}`)
+    expect(originTxExplorerUrl('urn:ocn:polkadot:0', TX)).toBe(`https://polkadot.subscan.io/extrinsic/${TX}`)
+  })
+
+  it('still offers nothing for a chain with no explorer at all', () => {
+    // Hydration is deliberately unlinked: a pill pointing back at this chain
+    // offers a reader nothing.
+    expect(originTxExplorerUrl('urn:ocn:polkadot:2034', TX)).toBeNull()
+    expect(originTxExplorerUrl('urn:ocn:polkadot:2101', TX)).toBeNull()
   })
 })
