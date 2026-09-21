@@ -10,6 +10,10 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.json" />
     <meta name="theme-color" content="#030816" />
+    <!-- Both names, deliberately: Chromium deprecated the apple- prefixed one
+         and warns in the console, while iOS Safari still reads only that one.
+         Dropping either costs standalone launch on one of the two platforms. -->
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
