@@ -1698,6 +1698,11 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
    above still lifts the tail out of it. Inside a pill this is the colour the
    link already had, so it changes nothing there. */
 .addr-head { color: var(--sky); }
+/* ...except in the Identities card, where the address IS the row's content and
+   the label beside it already says which encoding it is. Colouring the ends
+   there only broke one plain string into three, so the whole address takes the
+   cell's own subtle colour. */
+.id-card .addr-head, .id-card .last3 { color: inherit; }
 /* ShortAddr full: desktop shows the whole address, phones the middle-ellipsis
    form — long EVM/SS58 strings otherwise wrap detail headers to 2–3 lines. */
 .addr-short { display: none; }
