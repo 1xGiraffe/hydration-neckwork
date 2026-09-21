@@ -395,6 +395,11 @@ export async function buildMcpApp({ logger = true, onRoute, upstream }: McpAppOp
   // answering 204 keeps it out of the log as a 404.
   app.get('/favicon.ico', async (_req, reply) => reply.code(204).send())
 
+  // No page lives here (the documentation is the Explorer's), so a crawler is
+  // told to index nothing rather than the redirects and JSON-RPC 405s it would
+  // otherwise find. Outside the /mcp gate, like every other orientation route.
+  app.get('/robots.txt', async (_req, reply) => reply.type('text/plain; charset=utf-8').send('User-agent: *\nDisallow: /\n'))
+
   app.setNotFoundHandler(async (req, reply) => {
     await reply.code(404).type('application/json')
       .send({ error: `no route ${req.method} ${req.url}`, endpoint: `${mcpConfig.publicUrl}/mcp`, gettingStarted: startPageUrl })

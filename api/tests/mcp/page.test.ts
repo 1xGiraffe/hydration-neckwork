@@ -47,10 +47,19 @@ describe('the documentation lives in the Explorer, not here', () => {
   })
 
   it('serves no HTML at all', async () => {
-    for (const url of ['/', '/start', '/llms.txt', '/mcp.json', '/tools.json', '/health']) {
+    for (const url of ['/', '/start', '/llms.txt', '/mcp.json', '/tools.json', '/health', '/robots.txt']) {
       const res = await app.inject({ method: 'GET', url })
       expect(String(res.headers['content-type'] ?? ''), url).not.toMatch(/text\/html/)
     }
+  })
+
+  it('tells a crawler to index nothing here', async () => {
+    // With no page of its own, every URL a crawler could find on this host is
+    // a redirect, a JSON document or a JSON-RPC refusal.
+    const res = await app.inject({ method: 'GET', url: '/robots.txt' })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toMatch(/^text\/plain/)
+    expect(res.body).toBe('User-agent: *\nDisallow: /\n')
   })
 
   it('registers no page route and no static template', () => {
@@ -58,7 +67,7 @@ describe('the documentation lives in the Explorer, not here', () => {
     // a static or template-serving one would be the page coming back.
     // ('*' is the CORS plugin's own catch-all.)
     const urls = [...new Set(routes.map(r => r.url))].sort()
-    expect(urls).toEqual(['*', '/', '/favicon.ico', '/health', '/llms.txt', '/mcp', '/mcp.json', '/start', '/tools.json'])
+    expect(urls).toEqual(['*', '/', '/favicon.ico', '/health', '/llms.txt', '/mcp', '/mcp.json', '/robots.txt', '/start', '/tools.json'])
     // The template and its boot-time read are gone together: a file left behind
     // would be a second copy of the page waiting to drift from the Explorer's.
     expect(existsSync(new URL('../../src/mcp/page/start.html', import.meta.url))).toBe(false)

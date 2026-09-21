@@ -79,8 +79,13 @@ declare module 'fastify' {
 // them how to get a token in the first place, and /llms.txt, the compact
 // orientation an automated client reads before deciding what to call.
 // /favicon.ico rides along so a browser on the docs page gets a clean 404
-// instead of a 401 in its console.
-const AUTH_EXEMPT = [/^\/v1\/status$/, /^\/openapi\.json$/, /^\/llms\.txt$/, /^\/docs(\/|$)/, /^\/docs$/, /^\/favicon\.ico$/]
+// instead of a 401 in its console. /robots.txt and /sitemap.xml are what let
+// a search engine index the docs portal: a crawler sends no token, and a 401
+// on robots.txt reads as "crawl nothing".
+const AUTH_EXEMPT = [
+  /^\/v1\/status$/, /^\/openapi\.json$/, /^\/llms\.txt$/, /^\/docs(\/|$)/, /^\/docs$/, /^\/favicon\.ico$/,
+  /^\/robots\.txt$/, /^\/sitemap\.xml$/,
+]
 
 export function isAuthExempt(path: string): boolean {
   return AUTH_EXEMPT.some(pattern => pattern.test(path))
@@ -134,6 +139,15 @@ async function authenticate(req: FastifyRequest, reply: FastifyReply): Promise<v
   req.dataAccountId = accountId
 }
 
+// What a search engine shows for the docs portal. The plugin 301s `/docs` to
+// `/docs/` and serves the HTML there, so that is the canonical form; the
+// description is deliberately one sentence, not the OpenAPI document's
+// getting-started text, because a result snippet is cut at ~160 characters.
+export const DOCS_TITLE = 'Hydration Data API'
+export const DOCS_DESCRIPTION = 'Hydration Data API reference: token-authenticated REST over the full public Hydration on-chain dataset — blocks, accounts, assets, pools, trades, governance, staking, XCM and EVM.'
+export const DOCS_CANONICAL_URL = dataConfig.docsUrl + '/'
+const DOCS_HTML_ROUTE = '/docs/'
+
 const GETTING_STARTED = [
   'REST access to the full public Hydration on-chain dataset: chain core (blocks, extrinsics, events), accounts (balances, history, transfers, trades, DeFi positions), assets and prices, pools and trades, governance, staking, XCM and EVM, plus aggregate stats. Everything answers from purpose-built ClickHouse projections; typical reads are tens of milliseconds.',
   '## Getting started',
@@ -171,6 +185,23 @@ export async function buildDataApp({ client, logger = true, onRoute }: DataAppOp
   app.setSerializerCompiler(serializerCompiler)
 
   await app.register(cors, { origin: '*' })
+
+  // The docs portal is the one page on this host meant to be indexed, and the
+  // Scalar plugin's document gives a crawler almost nothing to index: its
+  // template carries only the `pageTitle` option (set below) — every other
+  // configuration key, `metaData` included, is serialized into the
+  // `createApiReference` call and applied by the bundle in the browser, so the
+  // HTML a crawler fetches has no description and no canonical URL. The
+  // template has no slot for either, so they are spliced in behind the title
+  // here, on the plugin's HTML route alone. Added BEFORE etag and compress so
+  // the validator hashes, and gzip compresses, the body that is actually sent.
+  const docsHeadTags = `<meta name="description" content="${DOCS_DESCRIPTION}" />\n    <link rel="canonical" href="${DOCS_CANONICAL_URL}" />`
+  app.addHook('onSend', async (req, reply, payload) => {
+    if (req.routeOptions.url !== DOCS_HTML_ROUTE || typeof payload !== 'string') return payload
+    if (!String(reply.getHeader('content-type') ?? '').startsWith('text/html')) return payload
+    return payload.replace('</title>', `</title>\n    ${docsHeadTags}`)
+  })
+
   // ETag before compress, exactly as in public/app.ts: the validator hashes the
   // canonical uncompressed body, so identity and gzip responses of one resource
   // carry the same ETag and revalidate as a 304 instead of re-transferring.
@@ -204,11 +235,14 @@ export async function buildDataApp({ client, logger = true, onRoute }: DataAppOp
 
   // The interactive docs portal (Scalar, not Swagger UI): renders the same
   // OpenAPI document, with a built-in test client that sends the Bearer token.
+  // `pageTitle` is the one option the plugin writes into the document it
+  // serves (`<title>`); the plugin's `metaData` would only be applied by the
+  // bundle in the browser, after the crawler has read the page.
   await app.register(scalarApiReference, {
     routePrefix: '/docs',
     configuration: {
       theme: 'purple',
-      metaData: { title: 'Hydration Data API' },
+      pageTitle: DOCS_TITLE,
     },
   })
 
@@ -223,6 +257,37 @@ export async function buildDataApp({ client, logger = true, onRoute }: DataAppOp
     llmsTxt ??= renderLlmsTxt(app.swagger(), dataConfig.publicUrl)
     return reply.type('text/markdown; charset=utf-8').send(llmsTxt)
   })
+
+  // The crawler files. Only the token-free documents a search engine can
+  // actually read are allowed; every /v1 route answers a crawler with a 401
+  // and would be indexed as an error page. `/docs` is allowed as a prefix
+  // because the portal is at `/docs/`, the 401 context points at `/docs`, and
+  // the bundle a crawler needs to render the page is under `/docs/js/`. The
+  // sitemap allows itself: a crawler that honours Disallow for the sitemap
+  // fetch would otherwise never read it. Sitemaps are host-scoped, so this
+  // host names its own one page.
+  app.get('/robots.txt', { schema: { hide: true } }, async (_req, reply) => reply
+    .type('text/plain; charset=utf-8')
+    .send([
+      'User-agent: *',
+      'Allow: /docs',
+      'Allow: /openapi.json',
+      'Allow: /llms.txt',
+      'Allow: /sitemap.xml',
+      'Disallow: /',
+      '',
+      `Sitemap: ${dataConfig.publicUrl}/sitemap.xml`,
+      '',
+    ].join('\n')))
+  app.get('/sitemap.xml', { schema: { hide: true } }, async (_req, reply) => reply
+    .type('application/xml; charset=utf-8')
+    .send([
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+      `  <url><loc>${DOCS_CANONICAL_URL}</loc></url>`,
+      '</urlset>',
+      '',
+    ].join('\n')))
 
   registerCacheControl(app)
 
