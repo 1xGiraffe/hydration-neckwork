@@ -23,15 +23,28 @@
         } catch (e) {}
       })();
     </script>
-    <meta property="og:title" content="preis" />
-    <meta property="og:description" content="Real-time price charts for Hydration assets" />
-    <meta property="og:image" content="/og-image.png" />
+    <meta name="description" content="Live price charts for Hydration assets — candles, volume and market stats for every trading pair, indexed from the chain." />
+    <!-- One canonical URL for the whole app. Every pair and interval
+         (/<base>-<quote>/<interval>) renders from this same shell and the pair
+         is chosen client-side, so a crawler that runs no scripts receives one
+         document whichever path it fetched; pointing them all at the root keeps
+         it from indexing that document once per pair. -->
+    <link rel="canonical" href="https://hydration-preis.neckwork.net/" />
+    <meta property="og:title" content="Hydration Preis" />
+    <meta property="og:description" content="Live price charts for Hydration assets — candles, volume and market stats for every trading pair, indexed from the chain." />
+    <!-- Card scrapers resolve an image only as an absolute URL (X renders no
+         image at all from a relative path), so both card images carry the host. -->
+    <meta property="og:image" content="https://hydration-preis.neckwork.net/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Hydration Preis price charts" />
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Hydration Preis" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="preis" />
-    <meta name="twitter:description" content="Real-time price charts for Hydration assets" />
-    <meta name="twitter:image" content="/og-image.png" />
-    <title>preis</title>
+    <meta name="twitter:title" content="Hydration Preis" />
+    <meta name="twitter:description" content="Live price charts for Hydration assets — candles, volume and market stats for every trading pair, indexed from the chain." />
+    <meta name="twitter:image" content="https://hydration-preis.neckwork.net/og-image.png" />
+    <title>Hydration Preis</title>
   </head>
   <body>
     <div id="root"></div>
