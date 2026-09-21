@@ -2,7 +2,7 @@ import { lazy, Suspense, useState } from 'react'
 import { blockRangeForWindow } from '../utils/chartRefine'
 import { useTag, useTagActivityCounts, useTagListCount, useTagMembers, useTagValueEvents, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
-import { api } from '../api/explorer'
+import { api, PUBLIC_LIST_TAG } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, useQueryValue, setQuery } from '../router'
 import { Crumbs, AddrPill, Copy, ProfilePageSkeleton, DetailTabs, TableSkeleton, TagIcon, accountHref, rowNav } from '../components/ui'
@@ -17,6 +17,7 @@ import { BalancesTreemap } from '../components/BalancesTreemap'
 import { NotifyButton } from '../components/NotifyButton'
 import { listForTag, looksLikeUserTagId, tagMapStatus, useTagMapVersion } from '../userTags'
 import { ListTagDetail } from './ListTagDetail'
+import { usePublicListTagList } from '../hooks/useUser'
 
 const ConnectDialog = lazy(() => import('../components/ConnectDialog').then(m => ({ default: m.ConnectDialog })))
 
@@ -68,21 +69,32 @@ function LoginToViewTag() {
 // fetched once per session (Topbar's useTagMapSync) rather than per tag — so:
 //   - map still loading (session exists, no data yet): skeleton, not a guess.
 //   - map ready and it hits: the user-tag aggregate view (ListTagDetail).
-//   - no session at all: an invitation to log in, not "not found" — a real
-//     answer needs a session this viewer doesn't have.
-//   - map ready and it doesn't hit, OR the fetch failed outright (tagMapStatus
-//     'error' — every retry exhausted, a TERMINAL state, never confused with
-//     'loading'): genuinely unresolved either way, and the system lookup
-//     404s on it exactly like it would on any other unrecognized id, so both
-//     fall through there rather than growing a third/fourth "not found" panel
-//     — the one thing that must never happen is waiting on 'loading' forever.
+//   - the map cannot answer — no session at all, or a map that doesn't hold
+//     this tag: ASK, because a PUBLIC list's tag is readable by anyone holding
+//     a link to it and no viewer's map names a list they don't subscribe to.
+//     A hit there is the same aggregate view over the public surface.
+//   - nothing public either, and no session: an invitation to log in, not
+//     "not found" — a real answer needs a session this viewer doesn't have.
+//   - nothing public either, map ready and it doesn't hit, OR the fetch failed
+//     outright (tagMapStatus 'error' — every retry exhausted, a TERMINAL state,
+//     never confused with 'loading'): genuinely unresolved either way, and the
+//     system lookup 404s on it exactly like it would on any other unrecognized
+//     id, so both fall through there rather than growing a third/fourth "not
+//     found" panel — the one thing that must never happen is waiting on
+//     'loading' forever.
 export function TagDetail({ tagId }: { tagId: string }) {
   useTagMapVersion()   // re-render once the viewer's tag map loads/changes
-  if (!looksLikeUserTagId(tagId)) return <SystemTagDetail tagId={tagId} />
+  const isUserTagId = looksLikeUserTagId(tagId)
   const status = tagMapStatus()
+  const lib = isUserTagId ? listForTag(tagId) : null
+  // Only asked when the viewer's own map cannot answer: a system slug is never
+  // a user tag, a map hit already resolved it, and a map still loading may yet.
+  const asPublic = usePublicListTagList(tagId, isUserTagId && !lib && status !== 'loading')
+  if (!isUserTagId) return <SystemTagDetail tagId={tagId} />
   if (status === 'loading') return <TagDetailSkeleton />
-  const lib = listForTag(tagId)
   if (lib) return <ListTagDetail listId={lib.listId} tagId={tagId} />
+  if (asPublic.isLoading) return <TagDetailSkeleton />
+  if (asPublic.data) return <ListTagDetail listId={PUBLIC_LIST_TAG} tagId={tagId} />
   if (status === 'anonymous') return <LoginToViewTag />
   return <SystemTagDetail tagId={tagId} />
 }

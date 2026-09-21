@@ -1,6 +1,6 @@
-import { userApi } from '../api/explorer'
+import { userApi, PUBLIC_LIST_TAG } from '../api/explorer'
 import { blockRangeForWindow } from '../utils/chartRefine'
-import { useListTag, useListTagActivityCounts, useListTagListCount, useListTagMembers, useListTagValueEvents, useMe } from '../hooks/useUser'
+import { useListTag, useListTagActivityCounts, useListTagListCount, useListTagMembers, useListTagValueEvents, useMe, usePublicListTagList } from '../hooks/useUser'
 import { useSession } from '../session'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -34,15 +34,28 @@ function ListProvenanceLink({ listId, listName, owner }: { listId: string; listN
 }
 
 // A list tag's own aggregate view — same structure as the system TagDetail
-// page, over a viewer's own (or subscribed) list tag. Unlike a system tag,
-// this page has no anonymous form at all: the endpoint is authed and gated by
-// ownership/subscription, so a logged-out or unauthorized viewer sees a distinct
-// hint rather than the plain "not found" a missing tag id gets.
+// page, over a user list's tag. Reached two ways, which is what `listId` says:
+// a real list id means the viewer's own or subscribed tag, read from the authed
+// surface; PUBLIC_LIST_TAG means a PUBLIC list's tag reached by a link alone,
+// read anonymously and addressed by tag id (see api/explorer.ts). A private
+// tag still has no anonymous form, so a logged-out viewer who lands on one sees
+// a distinct hint rather than the plain "not found" a missing tag id gets.
 export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string }) {
   const session = useSession()
   useTagMapVersion()   // re-render if the viewer's own tag map changes (e.g. this tag gets renamed elsewhere)
+  const isPublic = listId === PUBLIC_LIST_TAG
+  // The tag-detail response carries no owner field — only a list's own summary
+  // does — so provenance comes from the viewer's /user/me for a tag they hold,
+  // and from the list the public tag reports belonging to for one they don't.
   const me = useMe()
-  const listSummary = [...(me.data?.lists ?? []), ...(me.data?.subscriptions ?? [])].find(l => l.listId === listId)
+  const publicList = usePublicListTagList(tagId, isPublic)
+  const listSummary = isPublic
+    ? publicList.data
+    : [...(me.data?.lists ?? []), ...(me.data?.subscriptions ?? [])].find(l => l.listId === listId)
+  // Everything addressed BY LIST rather than by tag — the provenance link, a
+  // notification rule's target — needs the real id, never the sentinel. The
+  // read hooks below keep taking `listId`: the sentinel IS their address.
+  const realListId = listSummary?.listId ?? listId
   const { data, isLoading, isError } = useListTag(listId, tagId)
   // The members as directory rows, requested alongside rather than inside the
   // tag's own payload so neither waits on the other.
@@ -61,7 +74,7 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
   const view = rawView === 'activity' && (legacyAtab === 'extrinsics' || legacyAtab === 'events') ? legacyAtab : rawView
   const activityCounts = useListTagActivityCounts(listId, tagId)
 
-  if (!session) {
+  if (!session && !isPublic) {
     return (
       <div className="wrap">
         <div className="page-head"><Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Tag' }]} /></div>
@@ -100,7 +113,7 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
                   variant="link"
                   label="Get notified"
                   title={`Alert me on activity by anyone tagged ${data.name}`}
-                  rule={{ kind: 'account-activity', params: { target: { kind: 'list-tag', listId, tagId } } }}
+                  rule={{ kind: 'account-activity', params: { target: { kind: 'list-tag', listId: realListId, tagId } } }}
                 />
               </div>
               <div className="acct-head">
@@ -114,7 +127,7 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
                       on a narrow viewport once both no longer fit on one line. */}
                   <div className="full" style={{ wordBreak: 'normal', flexWrap: 'wrap' }}>
                     <span className="muted">{members.length} accounts</span>
-                    {listSummary && <span className="muted"> · <ListProvenanceLink listId={listId} listName={listSummary.name} owner={listSummary.owner} /></span>}
+                    {listSummary && <span className="muted"> · <ListProvenanceLink listId={realListId} listName={listSummary.name} owner={listSummary.owner} /></span>}
                   </div>
                 </div>
                 <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} valueUsd={data.portfolioUsd - debtUsd} moneyMarket={mmList} />

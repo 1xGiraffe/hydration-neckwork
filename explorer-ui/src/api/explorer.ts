@@ -75,6 +75,19 @@ async function authedJson<T>(method: string, path: string, body?: unknown, signa
   return response.json() as Promise<T>
 }
 
+// A list tag is served by two surfaces with the same twelve reads (one
+// registration server-side, so they cannot drift): the owner's or subscriber's
+// authed one, and — for a PUBLIC list's tag — an anonymous one addressed by tag
+// id alone, because whoever followed the link was never told the list id.
+// PUBLIC_LIST_TAG is that second address written as a listId, so one set of api
+// functions and one set of hooks cover both; the page picks which by how the tag
+// resolved (see TagDetail).
+export const PUBLIC_LIST_TAG = ''
+const listTagPath = (listId: string, tagId: string, suffix = ''): string =>
+  listId === PUBLIC_LIST_TAG
+    ? `/explorer/list-tag/${encodeURIComponent(tagId)}${suffix}`
+    : `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}${suffix}`
+
 type QueryValue = string | number | boolean | null | undefined
 
 function withQuery(path: string, values: Record<string, QueryValue>): string {
@@ -230,6 +243,12 @@ export const api = {
   tagValueEvents: (tagId: string, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<ValueEvent[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/value-events`, { from, to }), signal),
   tag: (tagId: string, signal?: AbortSignal) => getJson<TagDetail>(`/explorer/tag/${encodeURIComponent(tagId)}`, signal),
+  // Which PUBLIC list a shared tag link belongs to — the tag page's provenance
+  // line, and the probe that tells a public list tag apart from an unknown id
+  // for a viewer with no tag map of their own (anonymous, or simply not
+  // subscribed). 404 means neither: not public, or not a tag at all.
+  publicListTagList: (tagId: string, signal?: AbortSignal) =>
+    getJson<ListSummaryRef>(`/explorer/list-tag/${encodeURIComponent(tagId)}/list`, signal),
   // The tag's members as directory rows — the same shape /explorer/accounts
   // returns, so a tag page renders the directory table rather than its own list.
   tagMembers: (tagId: string, signal?: AbortSignal) =>
@@ -374,13 +393,15 @@ export const userApi = {
   setMemberOrder: (id: string, tagId: string, accountIds: string[]) =>
     authedJson<ListTagDetail>('PUT', `/user/lists/${encodeURIComponent(id)}/tags/${encodeURIComponent(tagId)}/member-order`, { accountIds }),
   // A list tag's own aggregate view (combined balances/history/activity of all
-  // its members) — same TagDetail shape the system /tag/:id page uses, authed
-  // because a private list's tag contents are owner/subscriber-only.
+  // its members) — same TagDetail shape the system /tag/:id page uses. Reaches
+  // the authed surface or the public one depending on listId (see
+  // listTagPath/PUBLIC_LIST_TAG): a private list's tag is owner/subscriber-only,
+  // a public list's tag opens to whoever holds a link to it.
   listTag: (listId: string, tagId: string, signal?: AbortSignal) =>
-    authedJson<TagDetail>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}`, undefined, signal),
+    authedJson<TagDetail>('GET', listTagPath(listId, tagId), undefined, signal),
   // Chart-zoom refinement over the list tag's member set (block window).
   listTagHistoryWindow: (listId: string, tagId: string, fromBlock: number, toBlock: number, signal?: AbortSignal) =>
-    authedJson<AccountHistoryResponse>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/history`, { fromBlock, toBlock }), undefined, signal),
+    authedJson<AccountHistoryResponse>('GET', withQuery(listTagPath(listId, tagId, '/history'), { fromBlock, toBlock }), undefined, signal),
   // The same activity feeds as the public ones, with the viewer's OWN and
   // subscribed tags counting as names for the identity filter. Identical params
   // and response shape, so a caller swaps endpoints and reads it unchanged.
@@ -396,27 +417,27 @@ export const userApi = {
   tagActivity: (tagId: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
     authedJson<ActivityRow[]>('GET', withQuery(`/user/tag/${encodeURIComponent(tagId)}/activity`, { type, offset, limit, action, from, to, ...filters }), undefined, signal),
   listTagMembers: (listId: string, tagId: string, signal?: AbortSignal) =>
-    authedJson<AccountsPage>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/members`, undefined, signal),
+    authedJson<AccountsPage>('GET', listTagPath(listId, tagId, '/members'), undefined, signal),
   listTagSummary: (listId: string, tagId: string, signal?: AbortSignal) =>
-    authedJson<TagDetail>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}`, { summary: '1' }), undefined, signal),
+    authedJson<TagDetail>('GET', withQuery(listTagPath(listId, tagId), { summary: '1' }), undefined, signal),
   listTagActivity: (listId: string, tagId: string, type = 'all', offset = 0, limit = 25, action?: string, from?: string, to?: string, filters?: ValueFilters, signal?: AbortSignal) =>
-    authedJson<ActivityRow[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/activity`, { type, offset, limit, action, from, to, ...filters }), undefined, signal),
+    authedJson<ActivityRow[]>('GET', withQuery(listTagPath(listId, tagId, '/activity'), { type, offset, limit, action, from, to, ...filters }), undefined, signal),
   listTagExtrinsics: (listId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, filters?: ExtrinsicFilters, signal?: AbortSignal) =>
-    authedJson<ExtrinsicSummary[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/extrinsics`, { offset, limit, from, to, ...filters }), undefined, signal),
+    authedJson<ExtrinsicSummary[]>('GET', withQuery(listTagPath(listId, tagId, '/extrinsics'), { offset, limit, from, to, ...filters }), undefined, signal),
   listTagEvents: (listId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, filters?: EventFilters, signal?: AbortSignal) =>
-    authedJson<EventRow[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/events`, { offset, limit, from, to, ...filters }), undefined, signal),
+    authedJson<EventRow[]>('GET', withQuery(listTagPath(listId, tagId, '/events'), { offset, limit, from, to, ...filters }), undefined, signal),
   listTagRevenueBreakdown: (listId: string, tagId: string, signal?: AbortSignal) =>
-    authedJson<RevenueBreakdown>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/revenue-breakdown`, undefined, signal),
+    authedJson<RevenueBreakdown>('GET', listTagPath(listId, tagId, '/revenue-breakdown'), undefined, signal),
   listTagVotes: (listId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
-    authedJson<VoteRow[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), undefined, signal),
+    authedJson<VoteRow[]>('GET', withQuery(listTagPath(listId, tagId, '/votes'), { offset, limit, from, to }), undefined, signal),
   listTagVotesByReferendum: (listId: string, tagId: string, offset = 0, limit = 25, signal?: AbortSignal) =>
-    authedJson<VotesByReferendumPage>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/votes-by-referendum`, { offset, limit }), undefined, signal),
+    authedJson<VotesByReferendumPage>('GET', withQuery(listTagPath(listId, tagId, '/votes-by-referendum'), { offset, limit }), undefined, signal),
   listTagActivityCounts: (listId: string, tagId: string, signal?: AbortSignal) =>
-    authedJson<TabCounts>('GET', `/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/counts`, undefined, signal),
+    authedJson<TabCounts>('GET', listTagPath(listId, tagId, '/counts'), undefined, signal),
   listTagListCount: (listId: string, tagId: string, query: ListCountQuery, signal?: AbortSignal) =>
-    authedJson<ListCount>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/list-count`, { ...query }), undefined, signal),
+    authedJson<ListCount>('GET', withQuery(listTagPath(listId, tagId, '/list-count'), { ...query }), undefined, signal),
   listTagValueEvents: (listId: string, tagId: string, from?: string, to?: string, signal?: AbortSignal) =>
-    authedJson<ValueEvent[]>('GET', withQuery(`/user/list-tag/${encodeURIComponent(listId)}/${encodeURIComponent(tagId)}/value-events`, { from, to }), undefined, signal),
+    authedJson<ValueEvent[]>('GET', withQuery(listTagPath(listId, tagId, '/value-events'), { from, to }), undefined, signal),
   invite: (id: string, address: string) => authedJson<{ ok: true }>('POST', `/user/lists/${encodeURIComponent(id)}/invites`, { address }),
   revokeInvite: (id: string, address: string) => authedJson<{ ok: true }>('DELETE', `/user/lists/${encodeURIComponent(id)}/invites/${encodeURIComponent(address)}`),
   invites: (signal?: AbortSignal) => authedJson<ListSummaryRef[]>('GET', '/user/invites', undefined, signal),
