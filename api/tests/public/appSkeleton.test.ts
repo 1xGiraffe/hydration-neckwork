@@ -216,6 +216,16 @@ describe('public error and cache defaults', () => {
     expect(res.json().info.title).toBe('Hydration Public API')
   })
 
+  it('tells a crawler there is nothing here to index', async () => {
+    // A JSON API has no page worth a search result, and the sidecar in front
+    // serves no files, so the crawler file comes from this process.
+    const res = await app.inject('/robots.txt')
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toMatch(/^text\/plain/)
+    expect(res.body).toBe('User-agent: *\nDisallow: /\n')
+    expect(res.headers['cache-control']).toBe('public, max-age=3600')
+  })
+
   it('labels caller errors as caller errors and hides internal ones', async () => {
     const { PUBLIC_ROUTE_PLUGINS, buildPublicApp } = await import('../../src/public/app.ts')
     const failing: FastifyPluginAsync<{ client: never }> = async fastify => {

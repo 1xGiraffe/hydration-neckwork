@@ -23,6 +23,8 @@ describe('authentication', () => {
     expect((await app.inject('/openapi.json')).statusCode).toBe(200)
     expect((await app.inject('/llms.txt')).statusCode).toBe(200)
     expect((await app.inject('/docs')).statusCode).toBeLessThan(400)
+    expect((await app.inject('/robots.txt')).statusCode).toBe(200)
+    expect((await app.inject('/sitemap.xml')).statusCode).toBe(200)
   })
 
   it('rejects a missing token with the docs pointers in context', async () => {

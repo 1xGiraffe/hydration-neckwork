@@ -157,7 +157,13 @@ API it is a **versioned frozen contract**; concept: `~/.g/hydraken-api-concept.m
   caches use `data:`-prefixed keys; live feeds key on the indexed head via
   `services/head.ts`.
 - A few surfaces answer without a token (`AUTH_EXEMPT` in `data/app.ts` is the list):
-  `/v1/status`, `/openapi.json`, `/docs`, `/llms.txt` and `/favicon.ico`. `/llms.txt` is RENDERED from the OpenAPI document
+  `/v1/status`, `/openapi.json`, `/docs`, `/llms.txt`, `/favicon.ico`, and the crawler files
+  `/robots.txt` and `/sitemap.xml` that let `/docs/` be indexed. Those two MUST answer 200
+  without a token: a 4xx on robots.txt means "no rules, crawl everything" to Google, so the
+  Disallow protecting the keyed routes would simply not exist — and a 429 or 5xx there means
+  the opposite, halting crawling of the whole host for 12 hours and degrading it for up to 30
+  days, so robots.txt must never be rate-limited. Robots allows only exempt paths, which
+  `api/tests/data/indexing.test.ts` pins. `/llms.txt` is RENDERED from the OpenAPI document
   (`data/services/llmsTxt.ts`) — a compact orientation for automated clients, never a
   hand-written second copy of the route list, so a new route appears in it the moment it
   registers. Keep it a map: framing text and per-route summaries only, no parameters or

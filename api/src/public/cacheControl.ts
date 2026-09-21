@@ -93,6 +93,9 @@ export const PUBLIC_CACHE_CONTROL: Array<[RegExp, number]> = [
   // them per reader.
   [/^\/openapi\.json$/, 60],
   [/^\/docs/, 60],
+  // A constant that changes only on deploy; an hour bounds how long a crawler
+  // keeps the old one after a change.
+  [/^\/robots\.txt$/, 3600],
   // Deliberately absent: /proxy/*. Those responses are cached in-process per
   // upstream, so they fall through to no-store and never enter a shared cache.
 ]

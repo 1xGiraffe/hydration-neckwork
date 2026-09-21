@@ -12,7 +12,7 @@ import type { FastifyInstance } from 'fastify'
 // not access control.
 //
 // The unauthenticated surfaces (/v1/status, the OpenAPI document, /llms.txt,
-// the docs portal) are `public` and edge-cacheable.
+// the docs portal, the crawler files) are `public` and edge-cacheable.
 type Visibility = 'public' | 'private'
 
 export const DATA_CACHE_CONTROL: Array<[RegExp, number, Visibility]> = [
@@ -20,6 +20,9 @@ export const DATA_CACHE_CONTROL: Array<[RegExp, number, Visibility]> = [
   [/^\/openapi\.json$/, 60, 'public'],
   [/^\/llms\.txt$/, 300, 'public'],
   [/^\/docs/, 60, 'public'],
+  // Constants that change only on deploy; an hour bounds how long a crawler
+  // keeps the old one after a change.
+  [/^\/(robots\.txt|sitemap\.xml)$/, 3600, 'public'],
 
   // Chain core. Feeds track the head (3 s ≈ one block today); point reads are
   // immutable once indexed, so their TTL is only bounding cache churn.
