@@ -1,3 +1,4 @@
+import { chDateTime } from './clickhouseTime.ts'
 import type { ClickHouseClient } from '../db/client.ts'
 import { u8aToHex, hexToU8a } from '@polkadot/util'
 import { storagePrefix, twox64Concat, u32At, u32Le, u64At, u128At } from './chainPrimitives.ts'
@@ -899,6 +900,12 @@ async function buildSecurityDashboard(): Promise<SecurityDashboard> {
   const registryLimits = snap?.limits ?? await loadRegistryLimits()
   const prices = await ensurePrices()
 
+  // A lockdown says when it lifts as a block height, which reads as nothing. Turn
+  // the ones the chain has already passed into their real timestamps — one bounded
+  // point read per height, and lockdowns are rare — and leave the rest to be
+  // projected from the head at the chain's measured pace.
+  const lockTimes = await resolveLockTimes(lockdownRows, { height: head.block_height, timestamp: head.block_timestamp })
+
   return {
     head: { blockHeight: head.block_height, blockTimestamp: head.block_timestamp },
     chainAsOf: snap ? new Date(snap.takenAt).toISOString() : null,
@@ -919,7 +926,7 @@ async function buildSecurityDashboard(): Promise<SecurityDashboard> {
       upgrades: Number(runtime?.upgrades ?? 0),
       lastUpgrade: runtime ? { blockHeight: runtime.block_height, blockTimestamp: runtime.block_timestamp } : null,
     },
-    timeline: buildTimeline(limitEvents, pauseEvents, lockdownRows, omniTradabilityHistory, registryLimitRows, wormholeManagerEvents),
+    timeline: buildTimeline(limitEvents, pauseEvents, lockdownRows, omniTradabilityHistory, registryLimitRows, wormholeManagerEvents, lockTimes),
     guardians: {
       techCommittee: buildTechCommittee(memberSet),
       memberSetAtBlock: memberSet?.block_height ?? null,
@@ -2004,6 +2011,66 @@ export function withdrawConfigText(args: Record<string, unknown>): string {
 // newest first. Configuration events, pauses, lockdowns and tradability flips read
 // as one story, which is how they were actually applied — several of them arrived
 // in the same committee batch.
+/** The real timestamps of every `until` height the chain has already reached. */
+async function resolveLockTimes(
+  lockdownRows: LimitEventRow[],
+  head: { height: number; timestamp: string },
+): Promise<{ actual: ReadonlyMap<number, string>; head: { height: number; timestamp: string }; paceMs: number }> {
+  const wanted = new Set<number>()
+  for (const e of lockdownRows) {
+    if (e.event_name !== 'CircuitBreaker.AssetLockdown') continue
+    const until = Number(safeJson(e.args_json).until ?? 0)
+    if (until > 0 && until <= head.height) wanted.add(until)
+  }
+  const actual = new Map<number, string>()
+  if (wanted.size) {
+    const res = await client.query({
+      query: `SELECT block_height, block_timestamp FROM price_data.raw_blocks WHERE block_height IN ({hs:Array(UInt32)})`,
+      query_params: { hs: [...wanted] },
+      format: 'JSONEachRow',
+    })
+    for (const r of await res.json<{ block_height: number; block_timestamp: string }>()) {
+      actual.set(Number(r.block_height), r.block_timestamp)
+    }
+  }
+  return { actual, head, paceMs: (await resolveParaBlockTime(client)).nominalMs }
+}
+
+/**
+ * When a lock lifts, stated as a time a reader can act on.
+ *
+ * "until block 14,871,261" is the chain's own answer and an unreadable one: no
+ * reader knows whether that is tomorrow or in March. The height stays — it is
+ * the fact the chain recorded, and the only thing another tool can be pointed
+ * at — but it moves behind the time it means.
+ *
+ * A height the chain has ALREADY reached carries a real timestamp, and is stated
+ * as fact. One it has not is projected from the indexed head at the chain's own
+ * pace and marked `~`, because it moves when the pace does — and the pace has
+ * moved: ~12s blocks until Q3 2025, ~6s until runtime 440, ~2s since. Projecting
+ * a PAST height backwards would cross those eras and quietly lie, which is why
+ * the real timestamp is read instead of estimated.
+ */
+export function lockUntilLabel(
+  until: number,
+  actualTimestamps: ReadonlyMap<number, string>,
+  head: { height: number; timestamp: string } | null,
+  paceMs: number,
+): string {
+  const height = `block ${until.toLocaleString('en-US')}`
+  const known = actualTimestamps.get(until)
+  if (known) return `${utcMinute(known)} (${height})`
+  const headMs = head ? Date.parse(`${head.timestamp.replace(' ', 'T')}Z`) : NaN
+  if (!head || !Number.isFinite(headMs) || until <= head.height || paceMs <= 0) return height
+  const eta = new Date(headMs + (until - head.height) * paceMs)
+  return `~${utcMinute(chDateTime(eta))} (${height})`
+}
+
+/** An indexer timestamp ("YYYY-MM-DD HH:MM:SS") to the minute, named as UTC. */
+function utcMinute(timestamp: string): string {
+  return `${timestamp.slice(0, 16).replace('T', ' ')} UTC`
+}
+
 function buildTimeline(
   limitEvents: LimitEventRow[],
   pauseEvents: PauseEventRow[],
@@ -2011,6 +2078,10 @@ function buildTimeline(
   tradabilityHistory: LimitEventRow[],
   registryLimitRows: RegistryLimitRow[],
   wormholeManagerEvents: readonly WormholeManagerEventRow[] = [],
+  // What a lockdown's `until` height means as a time: the real timestamps of the
+  // heights the chain has reached, and the head/pace to project the rest from.
+  lockTimes: { actual: ReadonlyMap<number, string>; head: { height: number; timestamp: string } | null; paceMs: number }
+    = { actual: new Map(), head: null, paceMs: 0 },
 ): SafetyEvent[] {
   const out: SafetyEvent[] = [
     ...registryLimitChanges(registryLimitRows),
@@ -2082,7 +2153,9 @@ function buildTimeline(
     out.push({
       kind: locked ? 'lockdown' : 'lockdown-lifted',
       label: locked ? 'Deposit fuse tripped' : 'Deposit lockdown cleared',
-      detail: locked ? `${assetDescriptor(assetId).symbol} locked until block ${Number(args.until ?? 0).toLocaleString('en-US')}` : `${assetDescriptor(assetId).symbol} minting resumed`,
+      detail: locked
+        ? `${assetDescriptor(assetId).symbol} locked until ${lockUntilLabel(Number(args.until ?? 0), lockTimes.actual, lockTimes.head, lockTimes.paceMs)}`
+        : `${assetDescriptor(assetId).symbol} minting resumed`,
       blockHeight: e.block_height,
       blockTimestamp: e.block_timestamp,
       extrinsicIndex: extrinsicIndexOf(e.extrinsic_index),

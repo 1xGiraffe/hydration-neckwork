@@ -28188,7 +28188,7 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
         // Only past that lag is a height genuinely unproduced.
         const ahead = h - head
         const lag = Math.round(FUTURE_BLOCK_INDEX_LAG_MINUTES * (perHour / 60))
-        results.push({ type: 'block', value: digits, desc: ahead <= lag ? 'not indexed yet' : 'not produced yet' })
+        results.push({ type: 'block', value: digits, desc: ahead <= lag ? 'not indexed yet' : 'future block' })
       }
     }
 
