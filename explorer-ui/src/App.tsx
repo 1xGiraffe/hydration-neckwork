@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect } from 'react'
+import { useNoindex } from './hooks/useDocumentTitle'
 import { useRoute, Link, paths, redirect } from './router'
 import { Topbar } from './components/Topbar'
 import { HoverCards } from './components/HoverCard'
@@ -51,6 +52,20 @@ const Mcp = lazy(() => import('./pages/Mcp').then(m => ({ default: m.Mcp })))
 function LegacyRedirect({ to }: { to: string }) {
   useEffect(() => redirect(to), [to])
   return null
+}
+
+// A URL that matched no route. The app has already answered 200 — a SPA cannot
+// do otherwise — so the page says so to a crawler itself rather than becoming
+// another soft 404 counted against the site.
+function NotFound({ path }: { path: string }) {
+  useNoindex(true)
+  return (
+    <div className="wrap"><div className="page-head"><div className="page-title">Not found</div></div>
+      <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>
+        No page matching <span className="mono" style={{ color: 'var(--text-high)' }}>{path}</span>.
+        <div style={{ marginTop: 16 }}><Link className="hash" to={paths.dashboard()}>← Back to start</Link></div>
+      </div></div>
+  )
 }
 
 export default function App() {
@@ -116,13 +131,7 @@ export default function App() {
       case 'api-tokens': return <ApiTokens />
       case 'api-admin': return <ApiAdmin />
       case 'mcp': return <Mcp />
-      case 'notfound': return (
-        <div className="wrap"><div className="page-head"><div className="page-title">Not found</div></div>
-          <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>
-            No page matching <span className="mono" style={{ color: 'var(--text-high)' }}>{route.path}</span>.
-            <div style={{ marginTop: 16 }}><Link className="hash" to={paths.dashboard()}>← Back to start</Link></div>
-          </div></div>
-      )
+      case 'notfound': return <NotFound path={route.path} />
     }
   }
 

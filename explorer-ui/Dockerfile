@@ -21,5 +21,7 @@ FROM nginx:alpine
 
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Shared include for the page-URL locations (see seo_page.conf's own comment).
+COPY seo_page.conf /etc/nginx/seo_page.conf
 
 EXPOSE 80

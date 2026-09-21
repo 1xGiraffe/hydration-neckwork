@@ -63,6 +63,22 @@ export async function referendumTitles(): Promise<ReadonlyMap<string, string>> {
   return byRef
 }
 
+// The highest index this pallet is known to have reached, or null while the map
+// is still empty. Referenda are numbered sequentially from 0 and the table
+// covers them densely, so an index above this one names a referendum that does
+// not exist — which is how the SEO layer tells a real page from a fabricated
+// one without a query. Null means "cannot say", never "nothing exists".
+export function highestReferendumIndex(pallet: string): number | null {
+  let highest: number | null = null
+  for (const key of byRef.keys()) {
+    const [keyPallet, index] = key.split(':')
+    if (keyPallet !== pallet) continue
+    const n = Number(index)
+    if (Number.isFinite(n) && (highest == null || n > highest)) highest = n
+  }
+  return highest
+}
+
 // Synchronous lookup for the hot paths (every vote row in every activity feed).
 // Returns null rather than a placeholder when a title has not been fetched yet, so
 // the UI falls back to the index instead of showing an invented name.

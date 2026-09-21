@@ -538,9 +538,18 @@ services:
       - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
       - VAPID_SUBJECT=${VAPID_SUBJECT:-}
       # Origin the links inside a notification point at, and the evaluator's
-      # tick interval.
-      - EXPLORER_PUBLIC_URL=${EXPLORER_PUBLIC_URL:-}
+      # tick interval. EXPLORER_PUBLIC_URL is also the canonical origin every
+      # absolute URL the SEO layer writes is built on — the <link rel=canonical>
+      # on each page, every <loc> in the sitemaps, and the Sitemap line in
+      # robots.txt — so pointing this at another host moves all of them.
+      - EXPLORER_PUBLIC_URL=${EXPLORER_PUBLIC_URL:-https://hydration-explorer.neckwork.net}
       - NOTIFY_EVAL_MS=${NOTIFY_EVAL_MS:-}
+      # The same, for the charts app served from its own host: its canonical
+      # origin and the sitemap it advertises. The SHELL_URLs are where the head
+      # renderer reads each app's built index.html from, on the internal network.
+      - PREIS_PUBLIC_URL=${PREIS_PUBLIC_URL:-https://hydration-preis.neckwork.net}
+      - EXPLORER_SHELL_URL=${EXPLORER_SHELL_URL:-http://hydration-neckwork-explorer-ui:80/index.html}
+      - PREIS_SHELL_URL=${PREIS_SHELL_URL:-http://hydration-neckwork-preis-ui:80/index.html}
       # Data API control plane (routes/apiTokens.ts): the admin allowlist and
       # the default limits the admin page reports beside overrides. Must match
       # the api-data service's values.
