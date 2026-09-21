@@ -403,6 +403,25 @@ export function publicTagById(tagId: string): (TagContents & { listId: string })
   return null
 }
 
+// Every tag of every PUBLIC list, for the sitemap. The same visibility rule
+// publicTagById applies one tag at a time, applied to all of them: a private
+// list contributes nothing, so a tag can only be advertised to a search engine
+// if a link to it would already have opened.
+//
+// `memberCount` rather than the members themselves — the caller decides whether
+// a tag is worth listing, and an empty one is a page about nothing. A plain scan
+// over the resident lists, like publicLists and publicListsTagging beside it.
+export function publicListTags(): { listId: string; tagId: string; name: string; memberCount: number }[] {
+  const out: { listId: string; tagId: string; name: string; memberCount: number }[] = []
+  for (const list of lists.values()) {
+    if (list.visibility !== 'public') continue
+    for (const tag of list.tags.values()) {
+      out.push({ listId: list.listId, tagId: tag.tagId, name: tag.name, memberCount: tag.order.length })
+    }
+  }
+  return out
+}
+
 // A public list's own name and owner, for the provenance line on the tag page
 // above. Already public — it is what /explorer/list/:id and /explorer/lists
 // answer with — and deliberately nothing about the list's other tags.

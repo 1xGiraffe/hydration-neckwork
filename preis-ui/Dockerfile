@@ -17,5 +17,7 @@ FROM nginx:alpine
 
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Shared include for the API-rendered locations (see preis_seo.conf).
+COPY preis_seo.conf /etc/nginx/preis_seo.conf
 
 EXPOSE 80

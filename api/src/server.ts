@@ -24,6 +24,9 @@ import { userRoutes } from './routes/user.ts'
 import { apiTokenRoutes } from './routes/apiTokens.ts'
 import { initUserApiTokenService } from './services/userApiTokenService.ts'
 import { listsRoutes } from './routes/lists.ts'
+import { seoRoutes } from './routes/seo.ts'
+import { sitemapRoutes } from './routes/sitemap.ts'
+import { seoPreisRoutes } from './routes/seoPreis.ts'
 import { verificationRoutes, collapseDuplicateSlashes } from './routes/verification.ts'
 import { loadExplorerAssets, stopExplorerAssetsRefresh } from './services/explorerAssets.ts'
 import { loadRuntimeErrorNames, stopRuntimeErrorNamesRefresh } from './services/runtimeErrorNames.ts'
@@ -221,6 +224,9 @@ await fastify.register(userRoutes)
 await fastify.register(apiTokenRoutes)
 await fastify.register(notificationRoutes)
 await fastify.register(listsRoutes)
+await fastify.register(seoRoutes)
+await fastify.register(sitemapRoutes)
+await fastify.register(seoPreisRoutes)
 await fastify.register(verificationRoutes)
 
 async function start() {
