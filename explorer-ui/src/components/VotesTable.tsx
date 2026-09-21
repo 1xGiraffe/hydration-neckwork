@@ -97,7 +97,7 @@ export function VotesTable({ rows, asset, now, showAccount, showReferendum, sort
 }) {
   const cols = 2 + (showAccount ? 1 : 0) + (showReferendum ? 1 : 0)
   return (
-    <div className="panel"><LiveAnchor anchorRef={anchorRef} /><table className="tbl">
+    <div className="panel"><LiveAnchor anchorRef={anchorRef} /><table className="tbl votes-tbl">
       <thead><tr>
         {showReferendum && <th>Referendum</th>}
         {showAccount && <th>Account</th>}
