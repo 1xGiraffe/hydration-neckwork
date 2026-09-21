@@ -733,6 +733,15 @@ svg { display: block; }
 .tbl.votes-tbl thead th:first-child { width: 100%; }
 .tbl.votes-tbl tbody td:first-child .ref-cell { display: flex; min-width: 0; }
 .tbl.votes-tbl tbody td:first-child .ref-link { flex: 0 1 auto; min-width: 0; max-width: 40ch; }
+/* …and the three that gave up their slack must not pay for it by wrapping. At
+   min-content "AYE 4x", "61.4M HDX" and "11h 17m ago" each break over two lines
+   and every row grows to 66px. Held to one line they settle at their natural
+   width, the title still takes everything left, and a row is 46px again. Desktop
+   only: below 720px each cell is its own card line and wrapping is correct. */
+@media (min-width: 721px) {
+  .tbl.votes-tbl thead th:not(:first-child),
+  .tbl.votes-tbl tbody td:not(:first-child) { white-space: nowrap; }
+}
 @media (min-width: 1100px) { .tbl.votes-tbl tbody td:first-child .ref-link { max-width: 72ch; } }
 @media (min-width: 1280px) { .tbl.votes-tbl tbody td:first-child .ref-link { max-width: 104ch; } }
 .sec-tbl tbody td[data-label="When"], .sec-tbl thead th:last-child { white-space: nowrap; }
