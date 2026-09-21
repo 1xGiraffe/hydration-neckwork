@@ -25646,15 +25646,50 @@ export function getTagMemberAccounts(tagId: string, sort: AccountSort = 'value')
 // members carry the order their owner arranged them in, and the page should
 // show that arrangement, not re-rank it by value.
 export async function getAccountsForMembers(members: string[], sort: AccountSort = 'value', keepOrder = false): Promise<AccountsPage> {
-  const ids = [...new Set(members.map(m => m.toLowerCase()))].sort()
+  // Resolved to the DISPLAY identity before it is asked for, because that is
+  // what the directory keys its rows by. A tag stores whichever address form its
+  // author wrote down, and one of those forms — a tagged derived account's H160,
+  // e.g. the BIL distribution wallet written as the stableswap pool's EVM
+  // address — is a shape the query's boundAccountSql does not itself unwind, so
+  // the member filter went looking for an id no balance row is keyed by and the
+  // account's $607k row was simply absent from its own tag.
+  const ids = [...new Set(members.map(m => memberRowKey(resolveDisplayAccountId(m.toLowerCase()))))].sort()
   if (!ids.length) return { rows: [], total: 0 }
   const page = await accountsPage(0, Math.min(ids.length, 500), sort, false, undefined, ids)
-  if (!keepOrder) return page
-  const position = new Map(members.map((m, i) => [m.toLowerCase(), i]))
-  const rows = [...page.rows].sort((a, b) =>
-    (position.get(a.account?.accountId?.toLowerCase() ?? '') ?? Number.MAX_SAFE_INTEGER)
-    - (position.get(b.account?.accountId?.toLowerCase() ?? '') ?? Number.MAX_SAFE_INTEGER))
+  const all = [...page.rows, ...absentMemberRows(ids, page.rows)].slice(0, Math.min(ids.length, 500))
+  if (!keepOrder) return { ...page, rows: all }
+  const position = new Map(members.map((m, i) => [memberRowKey(resolveDisplayAccountId(m)), i]))
+  const rows = [...all].sort((a, b) =>
+    (position.get(memberRowKey(a.account?.accountId ?? '')) ?? Number.MAX_SAFE_INTEGER)
+    - (position.get(memberRowKey(b.account?.accountId ?? '')) ?? Number.MAX_SAFE_INTEGER))
   return { ...page, rows }
+}
+
+// A member list keys on the DISPLAY identity, never the stored member id:
+// resolveDisplayAccountId is the TS twin of the query's boundAccountSql, so a
+// member stored as a bound H160 matches the substrate row the directory
+// remapped it onto instead of reading as a different account.
+const memberRowKey = (accountId: string): string => accountId.toLowerCase()
+
+// The accounts directory only holds accounts Hydration has seen — a balance, an
+// Omnipool position or a money-market one. A member with none of those (an EVM
+// address tagged before it ever touched the chain) has no directory row at all,
+// and would silently vanish from the list that names it. These are the rows that
+// close the gap: the account, a $0 value — which is what "in none of those
+// sources" means, not a placeholder — and no lending, volume or activity claimed
+// about it, so every other cell reads as absent rather than as a zero nobody
+// measured.
+export function absentMemberRows(ids: string[], present: TopAccountRow[]): TopAccountRow[] {
+  const seen = new Set(present.map(r => memberRowKey(r.account?.accountId ?? '')))
+  const rows: TopAccountRow[] = []
+  for (const id of ids) {
+    const account = accountRef(id)
+    const key = memberRowKey(account.accountId)
+    if (seen.has(key)) continue
+    seen.add(key)
+    rows.push({ account, tag: null, portfolioUsd: 0, lastBlock: 0, suppliedUsd: null, borrowedUsd: null })
+  }
+  return rows
 }
 
 export function getAccountsForViewerFold(offset: number, limit: number, sort: AccountSort, fold: ViewerFold): Promise<AccountsPage> {
