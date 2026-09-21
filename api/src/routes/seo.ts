@@ -424,16 +424,23 @@ function siteJsonLd(): string {
   return `<script type="application/ld+json">${JSON.stringify(data).replace(/</g, '\\u003c')}</script>`
 }
 
-// The entity, as plain HTML, inside the element React mounts into. createRoot
-// replaces the children of #root outright on the first render, so a reader never
-// sees this — but everything that does NOT run JavaScript keeps it, and that is
-// every AI crawler, every chat unfurler and Bing much of the time. It states the
-// same facts the page itself renders, which is what keeps it a prerender rather
-// than a second, different page shown only to crawlers.
+// The entity, as plain HTML, for clients that do not run scripts — every AI
+// crawler, every chat unfurler, and Bing much of the time. They would otherwise
+// receive an empty <div id="root">.
+//
+// It goes in <noscript>, not inside #root. Inside #root it WAS rendered: React
+// only replaces those children once its module script has loaded and mounted, so
+// every page load flashed a screenful of unstyled <h1> first. <noscript> is the
+// element that means exactly this — a browser running JavaScript never renders
+// it at all, so there is nothing to flash, and no CSS trick is needed to hide
+// text that would then be hidden from the clients it exists for.
+//
+// It states the same facts the page itself renders, which is what keeps it a
+// prerender rather than a second, different page shown only to crawlers.
 export function renderBody(meta: PageMeta): string {
   if (!meta.facts?.length) return ''
   const rows = meta.facts.map(([label, value]) => `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join('')
-  return `<h1>${esc(meta.title)}</h1><p>${esc(meta.description)}</p><dl>${rows}</dl>`
+  return `<noscript><h1>${esc(meta.title)}</h1><p>${esc(meta.description)}</p><dl>${rows}</dl></noscript>`
 }
 
 export function renderPage(shellHtml: string, path: string): string {
@@ -441,7 +448,7 @@ export function renderPage(shellHtml: string, path: string): string {
   const body = renderBody(meta)
   const stripped = shellHtml.replace(MANAGED_TAG_RE, '')
   const withHead = stripped.replace('</head>', `${renderHead(meta, path)}\n  </head>`)
-  return body ? withHead.replace('<div id="root"></div>', `<div id="root">${body}</div>`) : withHead
+  return body ? withHead.replace('<div id="root"></div>', `<div id="root"></div>\n    ${body}`) : withHead
 }
 
 export async function seoRoutes(fastify: FastifyInstance): Promise<void> {

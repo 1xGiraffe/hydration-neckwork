@@ -221,22 +221,24 @@ describe('every form of an address is stated, not just the one the page shows', 
     expect(values).toContain(POLKADOT)
   })
 
-  it('renders them into the body, where something that does not run JS can read them', () => {
+  it('renders them where something that does not run JS can read them, and a browser never paints them', () => {
     const html = renderPage(shell, `/account/${POLKADOT}`)
-    // Inside #root, which createRoot empties on the first client render.
-    expect(html).toContain('<div id="root">')
-    expect(html).not.toContain('<div id="root"></div>')
-    const root = html.slice(html.indexOf('<div id="root">'))
-    expect(root).toContain(ACCOUNT_ID)
-    expect(root).toContain(POLKADOT)
-    expect(root).toContain('<h1>')
+    // In <noscript>, NOT inside #root: React replaces #root's children only once
+    // its module script has mounted, so a block there flashed unstyled on every
+    // load. A browser running JavaScript does not render <noscript> at all.
+    expect(html).toContain('<div id="root"></div>')
+    const block = /<noscript>([\s\S]*?)<\/noscript>/.exec(html)
+    expect(block).not.toBeNull()
+    expect(block![1]).toContain(ACCOUNT_ID)
+    expect(block![1]).toContain(POLKADOT)
+    expect(html.indexOf('<noscript>')).toBeGreaterThan(html.indexOf('<div id="root">'))
   })
 
   it('escapes a fact, which can carry a user-written name', () => {
     expect(renderBody({ title: 't', description: 'd', facts: [['Name', '<script>x</script>']] })).not.toContain('<script>')
   })
 
-  it('leaves the shell alone for a page with nothing to state', () => {
-    expect(renderPage(shell, '/blocks')).toContain('<div id="root"></div>')
+  it('adds nothing at all for a page with nothing to state', () => {
+    expect(renderPage(shell, '/blocks')).not.toContain('<noscript>')
   })
 })
