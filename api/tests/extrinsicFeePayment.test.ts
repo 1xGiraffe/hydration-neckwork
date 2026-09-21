@@ -133,3 +133,54 @@ describe('deriveFeePayment', () => {
     expect(deriveFeePayment([withdrawn(10, PAYER, '0'), deposited(10, TREASURY, '0')], PAYER, '1', '0')).toBeNull()
   })
 })
+
+// An EVM dispatch never debits through a Withdraw. It PREPAYS gas as
+// Balances.Burned and refunds the unused part as Balances.Minted, so with only
+// Withdraw counted as a debit nothing was ever charged in the resolver's eyes,
+// every treasury deposit was rejected for naming an undebited currency, and the
+// fee read as unknown on every Ethereum.transact and dispatch_permit there is.
+describe('deriveFeePayment: EVM gas', () => {
+  const EVM_PAYER = '0x455448008b4f80fa734da0c9a51d2895534decc0085e5ac30000000000000000'
+  const burned = (who: string, amount: string): FeePaymentEvent =>
+    ({ name: 'Balances.Burned', args: { who, amount } })
+  const minted = (who: string, amount: string): FeePaymentEvent =>
+    ({ name: 'Balances.Minted', args: { who, amount } })
+
+  // 14872335-2, MultiTransactionPayment.dispatch_permit: a batch of three EVM
+  // calls, each prepaying and refunding its own gas. raw_extrinsics.fee is null
+  // — the dispatch is Pays::No — so the gas is the sum of the deposits, and the
+  // burns net of the mints equal it to the planck.
+  it('states the gas an EVM dispatch actually paid', () => {
+    const events = [
+      burned(EVM_PAYER, '3956683459714'),
+      burned(EVM_PAYER, '335168574794'),
+      minted(EVM_PAYER, '294318228898'),
+      nativeDeposit(TREASURY, '40850345896'),
+      burned(EVM_PAYER, '2011011448764'),
+      minted(EVM_PAYER, '1753516515335'),
+      nativeDeposit(TREASURY, '257494933429'),
+      minted(EVM_PAYER, '3622439950186'),
+      nativeDeposit(TREASURY, '334243509528'),
+    ]
+    // 6,302,863,483,272 burned − 5,670,274,694,419 returned = 632,588,788,853.
+    expect(deriveFeePayment(events, EVM_PAYER, null, null)).toEqual({
+      assetId: 0, amount: '632588788853', tipAmount: null,
+    })
+  })
+
+  it('still ignores a treasury deposit in a currency the payer never paid', () => {
+    const events = [
+      burned(EVM_PAYER, '1000'),
+      // A pool fee leg reaching the treasury in another asset is not this fee.
+      deposited(5, TREASURY, '999999'),
+      nativeDeposit(TREASURY, '400'),
+    ]
+    expect(deriveFeePayment(events, EVM_PAYER, null, null)).toEqual({
+      assetId: 0, amount: '400', tipAmount: null,
+    })
+  })
+
+  it('reports nothing when the payer burned gas but the treasury got none', () => {
+    expect(deriveFeePayment([burned(EVM_PAYER, '1000'), minted(EVM_PAYER, '1000')], EVM_PAYER, null, null)).toBeNull()
+  })
+})
