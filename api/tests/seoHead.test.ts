@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
-import { pageMeta, renderHead, renderPage, PUBLIC_URL } from '../src/routes/seo.ts'
+import { pageMeta, renderHead, renderPage, renderBody, PUBLIC_URL } from '../src/routes/seo.ts'
 
 // The real shell this rewrites, not a stand-in: what matters is that the regex
 // finds the tags THIS file actually ships, so the test has to read it.
@@ -186,5 +186,57 @@ describe('the canonical origin survives an unset environment', () => {
     for (const attr of [/<link rel="canonical" href="([^"]+)"/, /property="og:url" content="([^"]+)"/, /property="og:image" content="([^"]+)"/]) {
       expect(attr.exec(html)?.[1], String(attr)).toMatch(/^https:\/\//)
     }
+  })
+})
+
+// An account answers to several strings that share no prefix — the Polkadot
+// SS58, the Hydration SS58, the 32-byte account id, an H160 where there is one.
+// Only the first ever appeared anywhere, so pasting either of the others into a
+// search engine matched nothing.
+describe('every form of an address is stated, not just the one the page shows', () => {
+  // A real substrate account: 32-byte id, and the two SS58 encodings of it.
+  const ACCOUNT_ID = '0xa32d0f5749bd74dcddfed48e959f42529f8365c5bf321378d7d5209342f1eca1'
+  const POLKADOT = '14gxC4rWay5HmsPuZtFtbapekZvnpcZ1ZZjKHafK3Z7H1ebc'
+
+  it('keeps the short address in the title, and the full one where it is matched', () => {
+    // Every explorer titles an account page with the truncated address, and the
+    // client sets the same string on hydration, so the two never disagree. What
+    // a search engine matches on is the URL, the description and the body.
+    const meta = pageMeta(`/account/${POLKADOT}`)
+    expect(meta.title).toBe('14gxC4…1ebc')
+    expect(meta.description).toContain(POLKADOT)
+  })
+
+  it('lists the other encodings as facts', () => {
+    const labels = (pageMeta(`/account/${POLKADOT}`).facts ?? []).map(([label]) => label)
+    expect(labels).toContain('Polkadot (SS58)')
+    expect(labels).toContain('Hydration (SS58)')
+    expect(labels).toContain('Account ID')
+  })
+
+  it('states each one exactly once, and never the same string twice', () => {
+    const values = (pageMeta(`/account/${POLKADOT}`).facts ?? []).map(([, value]) => value)
+    expect(new Set(values).size).toBe(values.length)
+    expect(values).toContain(ACCOUNT_ID)
+    expect(values).toContain(POLKADOT)
+  })
+
+  it('renders them into the body, where something that does not run JS can read them', () => {
+    const html = renderPage(shell, `/account/${POLKADOT}`)
+    // Inside #root, which createRoot empties on the first client render.
+    expect(html).toContain('<div id="root">')
+    expect(html).not.toContain('<div id="root"></div>')
+    const root = html.slice(html.indexOf('<div id="root">'))
+    expect(root).toContain(ACCOUNT_ID)
+    expect(root).toContain(POLKADOT)
+    expect(root).toContain('<h1>')
+  })
+
+  it('escapes a fact, which can carry a user-written name', () => {
+    expect(renderBody({ title: 't', description: 'd', facts: [['Name', '<script>x</script>']] })).not.toContain('<script>')
+  })
+
+  it('leaves the shell alone for a page with nothing to state', () => {
+    expect(renderPage(shell, '/blocks')).toContain('<div id="root"></div>')
   })
 })

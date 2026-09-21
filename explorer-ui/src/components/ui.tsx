@@ -469,12 +469,17 @@ export function FeeAmount({ payment, hdxRaw, part = 'fee', link = true }: {
 export function ShortAddr({ addr, full }: { addr: string; full?: boolean }) {
   const head = addr.startsWith('0x') ? addr.slice(0, 6) : addr.slice(0, 4)
   const tail = addr.slice(-5)
-  const short = <>{head}…{tail.slice(0, 2)}<span className="last3">{tail.slice(-3)}</span></>
+  // Everything up to the last three characters carries the colour, and those
+  // three the higher contrast — the shape a pill has always had (.addr-pill .a
+  // is this same --sky, with .last3 overriding its tail), now applied to a bare
+  // address too. It used to inherit whatever colour surrounded it, so a 48-char
+  // SS58 in a card header read as one undifferentiated run of mono.
+  const short = <><span className="addr-head">{head}…{tail.slice(0, 2)}</span><span className="last3">{tail.slice(-3)}</span></>
   if (!full) return short
   // `full` renders both forms; ≤720px CSS swaps in the middle-ellipsis one so a
   // 42/48-char EVM/SS58 address never wraps the header (Copy keeps the full value).
   return <>
-    <span className="addr-full">{addr.slice(0, -3)}<span className="last3">{addr.slice(-3)}</span></span>
+    <span className="addr-full"><span className="addr-head">{addr.slice(0, -3)}</span><span className="last3">{addr.slice(-3)}</span></span>
     <span className="addr-short">{short}</span>
   </>
 }
