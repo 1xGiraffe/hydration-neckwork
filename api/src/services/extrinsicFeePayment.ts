@@ -19,6 +19,16 @@
 // `Currencies.Withdrawn`/`Currencies.Deposited` are duplicate mirrors of the
 // orml-tokens events and must never be counted.
 //
+// An EVM dispatch debits differently again: it PREPAYS gas as `Balances.Burned`
+// and refunds the unused part as `Balances.Minted`, so the payer never appears
+// in a Withdraw at all. Without `Balances.Burned` among the debits nothing is
+// ever charged in the resolver's eyes, the treasury deposits are all rejected
+// for naming an undebited currency, and every `Ethereum.transact` and
+// `dispatch_permit` reports no fee — which is what they did. The net of the
+// burns and the mints equals the treasury deposits to the planck (14872335-2:
+// 6,302,863,483,272 burned, 5,670,274,694,419 returned, 632,588,788,853 both
+// paid and received), so summing the deposits states the gas exactly.
+//
 // So the fee is the treasury deposit — but an extrinsic can hold treasury
 // deposits that are not fees (dust from a killed account arrives the same way,
 // and an Omnipool fee leg can deposit H2O). Two conditions pin the right one:
@@ -34,6 +44,7 @@ import { TREASURY_ACCOUNT } from './revenueStreams.ts'
 export const FEE_BALANCE_EVENTS = [
   'Tokens.Withdrawn',
   'Balances.Withdraw',
+  'Balances.Burned',
   'Tokens.Deposited',
   'Balances.Deposit',
 ] as const
@@ -125,7 +136,7 @@ export function deriveFeePayment(
   const debited = new Set<number>()
   const deposits: { assetId: number; amount: bigint }[] = []
   for (const e of events) {
-    if (e.name === 'Tokens.Withdrawn' || e.name === 'Balances.Withdraw') {
+    if (e.name === 'Tokens.Withdrawn' || e.name === 'Balances.Withdraw' || e.name === 'Balances.Burned') {
       if (accountArg(e.args, 'who') !== who) continue
       const cid = currencyOf(e.name, e.args)
       if (cid != null) debited.add(cid)
