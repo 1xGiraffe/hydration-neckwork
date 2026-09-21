@@ -716,6 +716,25 @@ svg { display: block; }
    is the sentence — now carrying a lock's lift time AND its height — and is the
    one that should give. So the time never breaks and the detail always may,
    including inside a long unbroken token. */
+/* The votes table's SUBJECT is the referendum, so its column gets the room the
+   other three do not need, and the title ellipsizes to what is left.
+   Without this the four columns split the panel evenly — a 474px Referendum
+   column holding a 130px title, 344px of it empty — because nothing claimed the
+   slack and the title was capped by the character limit the activity feed needs.
+   That cap is right there, where a vote is one row type among many and the title
+   a detail; here the title IS the row.
+
+   `width: 100%` on the first column makes the other three fall to their own
+   content and hands it the remainder. The cap stays, but per breakpoint and far
+   larger: auto table layout sizes a column from its content, so an uncapped
+   title would grow the table past the panel (measured: 151px of horizontal
+   scroll) rather than ellipsize. Each tier sits inside the room its width
+   leaves once the other columns have taken theirs. */
+.tbl.votes-tbl thead th:first-child { width: 100%; }
+.tbl.votes-tbl tbody td:first-child .ref-cell { display: flex; min-width: 0; }
+.tbl.votes-tbl tbody td:first-child .ref-link { flex: 0 1 auto; min-width: 0; max-width: 40ch; }
+@media (min-width: 1100px) { .tbl.votes-tbl tbody td:first-child .ref-link { max-width: 72ch; } }
+@media (min-width: 1280px) { .tbl.votes-tbl tbody td:first-child .ref-link { max-width: 104ch; } }
 .sec-tbl tbody td[data-label="When"], .sec-tbl thead th:last-child { white-space: nowrap; }
 .sec-tbl tbody td[data-label="Detail"] { white-space: normal; overflow-wrap: anywhere; }
 .tbl .ref-link { max-width: 18ch; }
