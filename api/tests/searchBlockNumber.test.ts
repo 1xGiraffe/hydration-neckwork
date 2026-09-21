@@ -57,13 +57,13 @@ function init(): void {
 const blocks = (r: SearchResult[]) => r.filter(x => x.type === 'block')
 
 describe('search: a height the chain has not reached', () => {
-  it('offers a block past the head, and says it has not happened', async () => {
+  it('offers a block past the head, and names it a future block', async () => {
     init()
     const hits = blocks(await search(String(HEAD + 5_000)))
     expect(hits).toHaveLength(1)
     // The route is built from `value`, so it must stay plain digits.
     expect(hits[0].value).toBe(String(HEAD + 5_000))
-    expect(hits[0].desc).toBe('not produced yet')
+    expect(hits[0].desc).toBe('future block')
   })
 
   // `head` here is the INDEXED head, which trails the chain by the finality lag.

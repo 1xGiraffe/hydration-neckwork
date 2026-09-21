@@ -710,6 +710,14 @@ svg { display: block; }
    with the rows. Cap both INSIDE tables only — a detail page has the room to show
    them whole, and the mobile card layout re-widens them below 720px.
    Neither is a truncation of data: both keep their full text in the title/hover. */
+/* The safety ledger's two text columns pull opposite ways. "When" is one short
+   phrase whose meaning breaks the moment it wraps ("45m 46s" over two lines
+   reads as two numbers), and it sits right-aligned against the edge. "Detail"
+   is the sentence — now carrying a lock's lift time AND its height — and is the
+   one that should give. So the time never breaks and the detail always may,
+   including inside a long unbroken token. */
+.sec-tbl tbody td[data-label="When"], .sec-tbl thead th:last-child { white-space: nowrap; }
+.sec-tbl tbody td[data-label="Detail"] { white-space: normal; overflow-wrap: anywhere; }
 .tbl .ref-link { max-width: 18ch; }
 .tbl tbody td .addr-pill .tag { max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) { .tbl .ref-link, .tbl tbody td .addr-pill .tag { max-width: none; } }
