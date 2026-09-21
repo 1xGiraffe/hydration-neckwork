@@ -702,6 +702,17 @@ svg { display: block; }
    unlike .dim: these rows are stale whether or not you point at them. */
 .tbl tbody.rows-pending { opacity: .4; transition: opacity 120ms; }
 .tbl tbody.rows-pending tr.clickable:hover { background: none; }
+/* A table column is only as narrow as its widest UNBREAKABLE atom, so one outlier
+   row sets the width of the whole list. The activity feed is live, so that outlier
+   arrives and leaves on its own: a referendum title (26ch of nowrap) or a long
+   identity pill would push the table past the 1232px the page container can ever
+   offer, and the panel answered with a horizontal scrollbar that came and went
+   with the rows. Cap both INSIDE tables only — a detail page has the room to show
+   them whole, and the mobile card layout re-widens them below 720px.
+   Neither is a truncation of data: both keep their full text in the title/hover. */
+.tbl .ref-link { max-width: 18ch; }
+.tbl tbody td .addr-pill .tag { max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 720px) { .tbl .ref-link, .tbl tbody td .addr-pill .tag { max-width: none; } }
 .tbl td.r { text-align: right; }
 .tbl td.mono { font-family: 'GeistMono'; }
 /* Failed list request — deliberately louder than the "No activity" empty cell so
