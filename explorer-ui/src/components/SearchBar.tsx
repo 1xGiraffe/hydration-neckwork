@@ -132,6 +132,19 @@ export function SearchResultBody({ r }: { r: Hit }) {
       </span>
     )
   }
+  // A block hit that the chain has not reached yet says so: the page behind it is
+  // a countdown, not a block, and the reader asked for a height rather than an
+  // event they know happened.
+  if (r.type === 'block' && r.desc) {
+    return (
+      <span className="sr-acct">
+        <span className="sr-acct-name">
+          <span className="mono">{F.int(Number(r.value))}</span>
+          <span className="sr-desc">{r.desc}</span>
+        </span>
+      </span>
+    )
+  }
   return <span className="sr-val mono">{r.label || r.value}</span>
 }
 
