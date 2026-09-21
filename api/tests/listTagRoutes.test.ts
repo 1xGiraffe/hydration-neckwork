@@ -4,7 +4,7 @@ import { userRoutes } from '../src/routes/user.ts'
 import { listsRoutes } from '../src/routes/lists.ts'
 import { initUserAuthService, resetUserAuthForTests, issueSession } from '../src/services/userAuthService.ts'
 import {
-  initUserListService, loadUserLists, createList, createTag, setTagMembers,
+  initUserListService, loadUserLists, createList, updateList, createTag, setTagMembers,
   inviteToList, respondToInvite,
 } from '../src/services/userListService.ts'
 import { fakeClient } from './helpers/userFakes.ts'
@@ -162,5 +162,120 @@ describe('/user/list-tag', () => {
 
     const denied = await f.inject({ method: 'GET', url: `/user/list-tag/${listId}/${tagId}/counts`, headers: auth(outsiderToken) })
     expect(denied.statusCode).toBe(404)
+  })
+})
+
+// The other surface for the same twelve reads: a PUBLIC list's tag, addressed
+// by tag id alone because whoever followed the link was never told the list id.
+// This is the ONE place mere public visibility opens a tag's contents, so these
+// pin both halves — that a link works without a session, and that nothing else
+// opened with it.
+describe('/explorer/list-tag', () => {
+  let publicListId: string
+  let publicTagId: string
+  let privateTagId: string
+  let privateListId: string
+  let outsiderToken: string
+
+  beforeEach(async () => {
+    resetUserAuthForTests()
+    await initUserAuthService(fakeClient())
+    initUserListService(fakeClient())
+    await loadUserLists()
+
+    const open = await createList(OWNER, 'Public desk', '', 'public')
+    const openTag = await createTag(OWNER, open.listId, { name: 'Giraffe', color: '#22c55e', icon: '🦒' })
+    await setTagMembers(OWNER, open.listId, openTag.tagId, [MEMBER_ADDRESS], [])
+    publicListId = open.listId
+    publicTagId = openTag.tagId
+
+    const shut = await createList(OWNER, 'Private desk', '', 'private')
+    const shutTag = await createTag(OWNER, shut.listId, { name: 'Hidden', color: '#000', icon: '' })
+    await setTagMembers(OWNER, shut.listId, shutTag.tagId, [MEMBER_ADDRESS], [])
+    privateListId = shut.listId
+    privateTagId = shutTag.tagId
+
+    outsiderToken = await issueSession(OUTSIDER)
+  })
+
+  it('serves a public list tag to an anonymous request, by tag id alone', async () => {
+    const f = await build()
+    const r = await f.inject({ method: 'GET', url: `/explorer/list-tag/${publicTagId}` })
+    expect(r.statusCode).toBe(200)
+    expect(r.json()).toMatchObject({ tagId: publicTagId, name: 'Giraffe', color: '#22c55e' })
+  })
+
+  it('names the list it belongs to, for the provenance line', async () => {
+    const f = await build()
+    const r = await f.inject({ method: 'GET', url: `/explorer/list-tag/${publicTagId}/list` })
+    expect(r.statusCode).toBe(200)
+    expect(r.json()).toMatchObject({ listId: publicListId, name: 'Public desk', visibility: 'public' })
+  })
+
+  it('404s a PRIVATE list\'s tag, indistinguishable from an id that is not a tag at all', async () => {
+    const f = await build()
+    const shut = await f.inject({ method: 'GET', url: `/explorer/list-tag/${privateTagId}` })
+    const unknown = await f.inject({ method: 'GET', url: '/explorer/list-tag/not-a-tag' })
+    expect(shut.statusCode).toBe(404)
+    expect(unknown.statusCode).toBe(404)
+    expect(shut.json()).toEqual(unknown.json())
+    // ...and its list is equally unfindable through the provenance route.
+    const list = await f.inject({ method: 'GET', url: `/explorer/list-tag/${privateTagId}/list` })
+    expect(list.statusCode).toBe(404)
+    expect(list.json()).toEqual(unknown.json())
+  })
+
+  it('closes again the moment the list goes private', async () => {
+    const f = await build()
+    expect((await f.inject({ method: 'GET', url: `/explorer/list-tag/${publicTagId}` })).statusCode).toBe(200)
+    await updateList(OWNER, publicListId, { visibility: 'private' })
+    expect((await f.inject({ method: 'GET', url: `/explorer/list-tag/${publicTagId}` })).statusCode).toBe(404)
+  })
+
+  it('serves the feeds on the same terms as the detail', async () => {
+    const f = await build()
+    const activity = await f.inject({ method: 'GET', url: `/explorer/list-tag/${publicTagId}/activity` })
+    expect(activity.statusCode).toBe(200)
+    expect(activity.json()).toEqual([])
+    const counts = await f.inject({ method: 'GET', url: `/explorer/list-tag/${publicTagId}/counts` })
+    expect(counts.statusCode).toBe(200)
+    const shut = await f.inject({ method: 'GET', url: `/explorer/list-tag/${privateTagId}/activity` })
+    expect(shut.statusCode).toBe(404)
+  })
+
+  it('rejects an unusable filter the way its authed twin does — one registration, one behaviour', async () => {
+    const f = await build()
+    const r = await f.inject({ method: 'GET', url: `/explorer/list-tag/${publicTagId}/activity?type=bogus` })
+    expect(r.statusCode).toBe(400)
+  })
+
+  it('is shared-cacheable — the answer does not depend on who is asking', async () => {
+    const f = await build()
+    const r = await f.inject({ method: 'GET', url: `/explorer/list-tag/${publicTagId}` })
+    // The /user twin stamps no-store on every reply; this surface must not, or
+    // it would never reach the caches the rest of /explorer is served from.
+    expect(r.headers['cache-control']).toBeUndefined()
+  })
+
+  it('opens the tag by link WITHOUT opening the list to browsing', async () => {
+    const f = await build()
+    // A link to the tag works for anyone...
+    expect((await f.inject({ method: 'GET', url: `/explorer/list-tag/${publicTagId}` })).statusCode).toBe(200)
+    // ...while the list's own page still hands a non-subscriber statistics only,
+    // so the curation cannot be browsed or scraped from there.
+    const listPage = await f.inject({ method: 'GET', url: `/explorer/list/${publicListId}` })
+    expect(listPage.statusCode).toBe(200)
+    expect(listPage.json()).toMatchObject({ name: 'Public desk', tagCount: 1, tags: [] })
+    // ...and the authed surface still refuses a signed-in non-subscriber, which
+    // is what keeps a viewer's tag map free of lists they never subscribed to.
+    const authed = await f.inject({ method: 'GET', url: `/user/list-tag/${publicListId}/${publicTagId}`, headers: { authorization: `Bearer ${outsiderToken}` } })
+    expect(authed.statusCode).toBe(404)
+  })
+
+  it('never answers for a private list, even addressed through its own list id', async () => {
+    const f = await build()
+    expect(privateListId).not.toBe(publicListId)
+    const r = await f.inject({ method: 'GET', url: `/explorer/list-tag/${privateTagId}/members` })
+    expect(r.statusCode).toBe(404)
   })
 })

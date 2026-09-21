@@ -339,16 +339,47 @@ describe('TagDetail — routing between system and user-tag views', () => {
   const USER_TAG_ID = '3fa85f64-5717-4562-b3fc-2c963f66afa6'
   beforeEach(() => setTagMap(null))
 
-  it('shows a log-in hint — not "Tag not found" — for a UUID-shaped id with no session', () => {
+  // A viewer's own tag map is not the only thing that can name a UUID: a
+  // PUBLIC list's tag opens to anyone holding a link to it, and no map names a
+  // list the viewer doesn't subscribe to. So a map that cannot answer means
+  // ASK, and only an empty answer is a real miss. `publicProbe` seeds that
+  // answer so these render at the state each one is about.
+  const publicProbe = (client: QueryClient, list: ListSummaryRef | null) =>
+    client.setQueryData(['public-list-tag-list', USER_TAG_ID], list)
+
+  it('shows a log-in hint — not "Tag not found" — for a UUID-shaped id with no session and nothing public behind it', () => {
     // Default reset: no session at all, i.e. tagMapStatus() === 'anonymous'.
-    const html = renderToStaticMarkup(<TagDetail tagId={USER_TAG_ID} />)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    publicProbe(queryClient, null)
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
     expect(html).toMatch(/log in/i)
     expect(html).not.toContain('Tag not found')
   })
 
+  it('waits on the public probe before concluding anything — no hint, no "not found", while it is in flight', () => {
+    // Unseeded: the probe is genuinely in flight. Concluding "log in" here
+    // would flash a wrong answer at every anonymous visitor following a
+    // perfectly good public tag link.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
+    expect(html).toContain('acct-head-skeleton')
+    expect(html).not.toMatch(/log in/i)
+    expect(html).not.toContain('Tag not found')
+  })
+
+  it('routes a public list tag to ListTagDetail with no session at all', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    publicProbe(queryClient, MOCK_LISTS[0])
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
+    // ListTagDetail's own anonymous gate must NOT engage for a public tag —
+    // the one case where that page has an anonymous form (see its comment).
+    expect(html).not.toMatch(/log in to view this tag/i)
+  })
+
   it('shows the page skeleton — not "Tag not found" — for a UUID-shaped id while the tag map is loading', () => {
     setTagMap(null, true) // session exists, map not back yet: tagMapStatus() === 'loading'
-    const html = renderToStaticMarkup(<TagDetail tagId={USER_TAG_ID} />)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
     expect(html).toContain('acct-head-skeleton')
     expect(html).not.toContain('Tag not found')
     expect(html).not.toMatch(/log in/i)
@@ -394,6 +425,7 @@ describe('TagDetail — routing between system and user-tag views', () => {
   it('falls through to the system lookup — not TagDetail\'s own skeleton — once the tag map fetch has failed outright', () => {
     setTagMapError()
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    publicProbe(queryClient, null)   // nothing public behind it either
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><TagDetail tagId={USER_TAG_ID} /></QueryClientProvider>)
     expect(html).not.toMatch(/log in/i)
     expect(html).toContain(`>${USER_TAG_ID}<`)

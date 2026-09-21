@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import type { FastifyInstance, FastifyReply } from 'fastify'
 import rateLimit from '@fastify/rate-limit'
 import { z } from 'zod'
 import {
@@ -8,13 +8,10 @@ import {
 } from '../services/userAuthService.ts'
 import { createDeviceLink, claimDeviceLink, deviceLinkStatus } from '../services/deviceLinkService.ts'
 import {
-  accountRef, resolveDisplayAccountId, getAccounts, getAccountsForViewerFold, getAccountsForMembers,
+  accountRef, resolveDisplayAccountId, getAccounts, getAccountsForViewerFold,
   getRecentActivity, getAssetActivity, getGlobalActivityTotal, getAddressActivity, getTagActivity,
   type ValueListFilters,
   getHolders, getHoldersForViewerFold,
-  getListTagDetail, getListTagHistoryWindow, getListTagActivity, getListTagExtrinsics, getListTagEvents, getListTagVotes,
-  getListTagRevenueBreakdown,
-  getListTagVotesByReferendum, getListTagTabCounts, getListTagListTotal, getListTagValueEvents,
 } from '../services/explorerService.ts'
 import { setProfileName, setProfileAvatar, clearProfileAvatar, profileForAccount, UserDataError } from '../services/userProfileService.ts'
 import { isApiAdmin } from '../services/userApiTokenService.ts'
@@ -29,10 +26,11 @@ import {
 } from '../services/userListService.ts'
 import {
   limitParam, offsetParam, badOffset, textParam, valueFilters, activityTypeParam,
-  extrinsicFilters, eventFilters, dateParam, activityOffsetParam, boundedActivityOffset,
-  maxActivityOffsetFor, maxScopedActivityOffsetFor, scopedListQuery, listTabSchema,
-  unusableFilterParam, accountSortParam, uint32Param, historyWindowSchema,
+  dateParam, activityOffsetParam, boundedActivityOffset,
+  maxActivityOffsetFor, maxScopedActivityOffsetFor,
+  unusableFilterParam, accountSortParam, uint32Param,
 } from './explorer.ts'
+import { listTagReadRoutes } from './listTagRoutes.ts'
 
 // Authenticated, per-user endpoints. Everything here is invisible to the shared
 // caches by construction: `no-store` is stamped on every reply (the server-wide
@@ -535,145 +533,23 @@ export async function userRoutes(fastify: FastifyInstance) {
   })
 
   // ── User-tag aggregate view ─────────────────────────────────────────────
-  // A list tag's own combined portfolio/activity page — the same shape as
-  // the system /explorer/tag/:id routes, over a viewer's own (or subscribed)
-  // list tag instead. Gating is the same rule listDetailResponse's tag
-  // contents use (owner or active subscriber, never mere public visibility):
-  // visibleTagMembers returns null for "not visible or missing" and every
-  // route below answers that with the same 404, so a private list's tag
-  // and an unknown one are indistinguishable from outside.
+  // The viewer's own or subscribed list tag. Gating is the same rule
+  // listDetailResponse's tag contents use (owner or active subscriber, never
+  // mere public visibility): visibleTagMembers returns null for "not visible or
+  // missing" and the shared routes answer that with the same 404, so a private
+  // list's tag and an unknown one are indistinguishable from outside. A PUBLIC
+  // list's tag is served by the same twelve reads under /explorer/list-tag/
+  // (routes/lists.ts) — that surface is the one anonymous direct links land on.
   const listTagParams = z.object({ listId: z.string().min(1).max(64), tagId: z.string().min(1).max(64) })
-  // Resolves params + permission in one place; replies 404 itself on a miss
-  // so every route below just returns on a null.
-  function requireListTag(req: FastifyRequest, reply: FastifyReply, accountId: string) {
-    const params = listTagParams.safeParse(req.params)
-    if (!params.success) { reply.status(400).send({ error: 'Invalid list/tag id' }); return null }
-    const tag = visibleTagMembers(accountId, params.data.listId, params.data.tagId)
-    if (!tag) { reply.status(404).send({ error: 'Tag not found' }); return null }
-    return { listId: params.data.listId, tagId: params.data.tagId, tag }
-  }
-
-  fastify.get('/user/list-tag/:listId/:tagId', async (req, reply) => {
-    const accountId = sessionUser(req)
-    const resolved = requireListTag(req, reply, accountId)
-    if (!resolved) return
-    const { listId, tagId, tag } = resolved
-    const summary = (req.query as { summary?: string })?.summary === '1'
-    const detail = await getListTagDetail(listId, { tagId, name: tag.name, color: tag.color, icon: tag.icon, note: tag.note }, tag.members, { summary })
-    if (!detail) return reply.status(404).send({ error: 'Tag not found' })
-    return detail
-  })
-
-  // Chart-zoom refinement over the list tag's member set (block window). Same
-  // visibility rule as the detail — owner or subscriber, 404 otherwise.
-  fastify.get('/user/list-tag/:listId/:tagId/history', async (req, reply) => {
-    const accountId = sessionUser(req)
-    const resolved = requireListTag(req, reply, accountId)
-    if (!resolved) return
-    const q = req.query as Record<string, unknown>
-    const w = historyWindowSchema.safeParse(q)
-    if (!w.success) return reply.status(400).send({ error: 'Invalid block window' })
-    const windowed = await getListTagHistoryWindow(resolved.listId, resolved.tagId, resolved.tag.members, w.data.fromBlock, w.data.toBlock, { seriesOnly: q.series === '1' })
-    if (!windowed) return reply.status(404).send({ error: 'Tag not found' })
-    return windowed
-  })
-
-  // The list tag's members as DIRECTORY rows — same shape and same renderer as
-  // /explorer/accounts, so a user tag reads like the system tags beside it.
-  fastify.get('/user/list-tag/:listId/:tagId/members', async (req, reply) => {
-    const accountId = sessionUser(req)
-    const resolved = requireListTag(req, reply, accountId)
-    if (!resolved) return
-    // The owner's own arrangement is the default order; an explicit ?sort
-    // (a column header click) still re-ranks like the directory.
-    const q = req.query as Record<string, unknown>
-    return getAccountsForMembers(resolved.tag.members, accountSortParam(q), typeof q.sort !== 'string')
-  })
-
-  fastify.get('/user/list-tag/:listId/:tagId/activity', async (req, reply) => {
-    const accountId = sessionUser(req)
-    const resolved = requireListTag(req, reply, accountId)
-    if (!resolved) return
-    const q = req.query as Record<string, unknown>
-    const activityType = activityTypeParam(q)
-    const maxOffset = maxScopedActivityOffsetFor(q, activityType)
-    const offset = boundedActivityOffset(q, maxOffset)
-    if (offset == null) return reply.status(400).send({ error: `Activity offset must be between 0 and ${maxOffset}` })
-    return getListTagActivity(resolved.listId, resolved.tagId, resolved.tag.members, activityType, limitParam(q, 40), offset, textParam(q, 'action', 32), viewerValueFilters(q, accountId), dateParam(q, 'from'), dateParam(q, 'to'))
-  })
-
-  fastify.get('/user/list-tag/:listId/:tagId/extrinsics', async (req, reply) => {
-    const accountId = sessionUser(req)
-    const resolved = requireListTag(req, reply, accountId)
-    if (!resolved) return
-    const q = req.query as Record<string, unknown>
-    const offset = offsetParam(q)
-    if (offset == null) return badOffset(reply)
-    return getListTagExtrinsics(resolved.listId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset, extrinsicFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
-  })
-
-  fastify.get('/user/list-tag/:listId/:tagId/events', async (req, reply) => {
-    const accountId = sessionUser(req)
-    const resolved = requireListTag(req, reply, accountId)
-    if (!resolved) return
-    const q = req.query as Record<string, unknown>
-    const offset = offsetParam(q)
-    if (offset == null) return badOffset(reply)
-    return getListTagEvents(resolved.listId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset, eventFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
-  })
-
-  fastify.get('/user/list-tag/:listId/:tagId/votes', async (req, reply) => {
-    const accountId = sessionUser(req)
-    const resolved = requireListTag(req, reply, accountId)
-    if (!resolved) return
-    const q = req.query as Record<string, unknown>
-    const offset = activityOffsetParam(q, 'vote')
-    if (offset == null) return reply.status(400).send({ error: `Votes offset must be between 0 and ${maxActivityOffsetFor('vote')}` })
-    return getListTagVotes(resolved.listId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset, dateParam(q, 'from'), dateParam(q, 'to'))
-  })
-
-  // The Protocol Revenue tab: where the revenue this tag's members generated
-  // came from — per stream, per asset within the stream.
-  fastify.get('/user/list-tag/:listId/:tagId/revenue-breakdown', async (req, reply) => {
-    const accountId = sessionUser(req)
-    const resolved = requireListTag(req, reply, accountId)
-    if (!resolved) return
-    return getListTagRevenueBreakdown(resolved.listId, resolved.tagId, resolved.tag.members)
-  })
-
-  // Grouped-mode counterpart of the votes route above — one row per referendum.
-  fastify.get('/user/list-tag/:listId/:tagId/votes-by-referendum', async (req, reply) => {
-    const accountId = sessionUser(req)
-    const resolved = requireListTag(req, reply, accountId)
-    if (!resolved) return
-    const q = req.query as Record<string, unknown>
-    const offset = offsetParam(q)
-    if (offset == null) return badOffset(reply)
-    return getListTagVotesByReferendum(resolved.listId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset)
-  })
-
-  fastify.get('/user/list-tag/:listId/:tagId/counts', async (req, reply) => {
-    const accountId = sessionUser(req)
-    const resolved = requireListTag(req, reply, accountId)
-    if (!resolved) return
-    return getListTagTabCounts(resolved.listId, resolved.tagId, resolved.tag.members)
-  })
-
-  fastify.get('/user/list-tag/:listId/:tagId/list-count', async (req, reply) => {
-    const accountId = sessionUser(req)
-    const resolved = requireListTag(req, reply, accountId)
-    if (!resolved) return
-    const q = req.query as Record<string, unknown>
-    const query = scopedListQuery(q)
-    if (!query) return reply.status(400).send({ error: `List tab must be one of ${listTabSchema.options.join(', ')}` })
-    return getListTagListTotal(resolved.listId, resolved.tagId, resolved.tag.members, query)
-  })
-
-  fastify.get('/user/list-tag/:listId/:tagId/value-events', async (req, reply) => {
-    const accountId = sessionUser(req)
-    const resolved = requireListTag(req, reply, accountId)
-    if (!resolved) return
-    const q = req.query as Record<string, unknown>
-    return getListTagValueEvents(resolved.listId, resolved.tagId, resolved.tag.members, dateParam(q, 'from'), dateParam(q, 'to'))
+  listTagReadRoutes(fastify, {
+    base: '/user/list-tag/:listId/:tagId',
+    resolve: (req, reply) => {
+      const params = listTagParams.safeParse(req.params)
+      if (!params.success) { reply.status(400).send({ error: 'Invalid list/tag id' }); return null }
+      const tag = visibleTagMembers(sessionUser(req), params.data.listId, params.data.tagId)
+      if (!tag) { reply.status(404).send({ error: 'Tag not found' }); return null }
+      return { listId: params.data.listId, tagId: params.data.tagId, tag }
+    },
+    valueFilters: (req, q) => viewerValueFilters(q, sessionUser(req)),
   })
 }
