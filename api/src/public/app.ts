@@ -122,6 +122,13 @@ export async function buildPublicApp({ client, logger = true, onRoute }: PublicA
   // The raw document, for codegen and contract tests.
   app.get('/openapi.json', { schema: { hide: true } }, async () => app.swagger())
 
+  // Nothing on this host is a page: /docs is the Swagger UI of a JSON API and
+  // every other route is data a crawler would list as raw JSON, so the crawler
+  // file forbids everything. It is served by this process rather than by the
+  // nginx sidecar, which is a cache in front of it and serves no files.
+  app.get('/robots.txt', { schema: { hide: true } }, async (_req, reply) => reply
+    .type('text/plain; charset=utf-8').send('User-agent: *\nDisallow: /\n'))
+
   registerCacheControl(app)
 
   app.setNotFoundHandler((req, reply) => {
