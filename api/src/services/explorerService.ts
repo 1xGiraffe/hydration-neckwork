@@ -28131,13 +28131,66 @@ export async function search(q: string): Promise<SearchResult[]> {
   return cached(`explorer:search:${query.toLowerCase()}`, 10000, () => searchUncached(query))
 }
 
+// A number as the UI wrote it. Every height on every page renders through F.int,
+// which is pinned to en-US, so a reader copying one back pastes "14,871,261".
+// Commas, the several spaces and underscores are accepted; a PERIOD is not, or
+// "1.5" would silently become block 15.
+//
+// Returns null unless the separators leave a plain number behind, so an address,
+// a hash or a pool name is never touched. UInt32 is the wire type of every height
+// column, and Number stops being exact past 2^53, so anything wider is not a
+// height anybody can look up.
+const SEARCH_SEPARATORS = /[,'\u00A0\u202F\u2009\u2007 _]/g
+export function searchNumber(query: string): number | null {
+  const digits = query.replace(SEARCH_SEPARATORS, '')
+  if (!/^\d{1,10}$/.test(digits)) return null
+  const n = Number(digits)
+  return n <= 4_294_967_295 ? n : null
+}
+
+// How far past the head a height is still worth offering. The block page answers
+// a future height with a live countdown, so the hit is useful long before the
+// chain gets there — but a typo should not propose a block decades out. Bounded
+// in TIME rather than blocks so it follows the chain across a block-time change:
+// a year was ~2.6M blocks at the 12s era, ~5.3M at 6s and ~15.8M at 2s.
+const FUTURE_BLOCK_SEARCH_DAYS = 365
+// How far past the INDEXED head a block can still be one the chain has already
+// produced. The explorer indexes finalized blocks, which trail the chain head by
+// about a minute; this is that lag with room to spare, and it only decides the
+// wording — the block page works out for itself which of the two it is showing.
+const FUTURE_BLOCK_INDEX_LAG_MINUTES = 5
+
 async function searchUncached(query: string): Promise<SearchResult[]> {
   const results: SearchResult[] = []
 
-  if (/^\d+$/.test(query)) {
-    const h = Number(query)
+  const asNumber = searchNumber(query)
+  if (asNumber != null) {
+    const h = asNumber
+    const digits = String(h)
     const res = await client.query({ query: `SELECT count() AS c FROM price_data.raw_blocks WHERE block_height = {h:UInt32}`, query_params: { h }, format: 'JSONEachRow' })
-    if (Number((await res.json<{ c: string }>())[0]?.c ?? 0) > 0) results.push({ type: 'block', value: query })
+    if (Number((await res.json<{ c: string }>())[0]?.c ?? 0) > 0) {
+      results.push({ type: 'block', value: digits })
+    } else {
+      // Not indexed. Either the chain has not reached it — which the block page
+      // renders as a countdown, and is the whole point of offering it — or it is
+      // past the horizon and no better than a typo.
+      const headRes = await client.query({
+        query: `SELECT max(block_height) AS head FROM price_data.raw_blocks`,
+        format: 'JSONEachRow',
+      })
+      const head = Number((await headRes.json<{ head: string }>())[0]?.head ?? 0)
+      const perHour = blocksPerHour(await paraBlockMs(client))
+      const horizon = Math.round(FUTURE_BLOCK_SEARCH_DAYS * 24 * perHour)
+      if (head > 0 && h > head && h - head <= horizon) {
+        // `head` is the INDEXED head, which trails the chain by the finality lag,
+        // so the first stretch past it is blocks that already exist and are simply
+        // not in the index yet — which is what the block page says about them.
+        // Only past that lag is a height genuinely unproduced.
+        const ahead = h - head
+        const lag = Math.round(FUTURE_BLOCK_INDEX_LAG_MINUTES * (perHour / 60))
+        results.push({ type: 'block', value: digits, desc: ahead <= lag ? 'not indexed yet' : 'not produced yet' })
+      }
+    }
 
     // Referendum index — exact match on either pallet first (both index from 0, so
     // one number can legitimately name two different referenda), then index-prefix
@@ -28145,8 +28198,8 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
     const { getReferenda } = await import('./governanceService.ts')
     const directory = await getReferenda(REFERENDA_SEARCH_DIRECTORY_LIMIT, 0)
     const refHits = [
-      ...directory.filter(r => String(r.index) === query),
-      ...directory.filter(r => String(r.index) !== query && String(r.index).startsWith(query)),
+      ...directory.filter(r => String(r.index) === digits),
+      ...directory.filter(r => String(r.index) !== digits && String(r.index).startsWith(digits)),
     ].slice(0, MAX_REFERENDUM_RESULTS)
     for (const r of refHits) results.push(referendumSearchResult(r))
 
