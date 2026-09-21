@@ -180,10 +180,15 @@ export function Account({ address }: { address: string }) {
               {activeView === 'overview' && (<>
               {(() => {
                 // Identity rows beyond what the header already shows: on-chain identity
-                // fields, plus the account's OTHER address form — the bound SS58 for an
-                // EVM account, the observed H160 (if any) for a substrate account. The
-                // header's primary address, and the raw account id, are never repeated.
+                // fields, plus every OTHER string this account answers to — the bound
+                // SS58 for an EVM account, the observed H160 for a substrate one, the
+                // Hydration-prefix SS58, and the raw account id. Those last two share no
+                // prefix with the header's address and appear nowhere else on the page,
+                // so a reader who arrived holding one had no way to confirm they were
+                // looking at the right account, and a search engine had no way to match
+                // it. The header's own primary address is still never repeated.
                 const observedEvm = !data.evmAddress ? data.aliases.find(a => a.evmAddress)?.evmAddress : null
+                const primaryAddress = data.evmAddress ?? data.ss58Polkadot
                 const rows: { dt: string; dd: React.ReactNode }[] = []
                 if (data.identity?.display) rows.push({
                   dt: 'On-chain identity',
@@ -199,6 +204,8 @@ export function Account({ address }: { address: string }) {
                 }
                 if (data.evmAddress && data.ss58Polkadot) rows.push({ dt: 'Polkadot (SS58)', dd: <span className="mono"><ShortAddr addr={data.ss58Polkadot} full /> <Copy text={data.ss58Polkadot} /></span> })
                 if (observedEvm) rows.push({ dt: 'EVM (H160)', dd: <span className="mono"><ShortAddr addr={observedEvm} full /> <Copy text={observedEvm} /></span> })
+                if (data.ss58 && data.ss58 !== primaryAddress) rows.push({ dt: 'Hydration (SS58)', dd: <span className="mono"><ShortAddr addr={data.ss58} full /> <Copy text={data.ss58} /></span> })
+                if (data.accountId && data.accountId !== primaryAddress) rows.push({ dt: 'Account ID', dd: <span className="mono"><ShortAddr addr={data.accountId} full /> <Copy text={data.accountId} /></span> })
                 if (!rows.length) return null
                 return (
                   <div className="id-card">

@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
-import { normalizeAddress } from '../services/addressIdentity.ts'
+import { normalizeAddress, hydrationAddress, polkadotAddress } from '../services/addressIdentity.ts'
 import { assetDescriptor, knownExplorerAsset, allExplorerAssets } from '../services/explorerAssets.ts'
 import { getTag as getSystemTag, allTags } from '../services/tagService.ts'
 import { publicTagById, publicListSummary } from '../services/userListService.ts'
@@ -88,6 +88,9 @@ function clamp(text: string, max = 160): string {
 }
 
 const num = (n: number): string => n.toLocaleString('en-US')
+// Local copy of explorerService's own test for a genuine H160 display form; not
+// exported there, and one regex is cheaper than widening that module's surface.
+const EVM_RE = /^0x[0-9a-f]{40}$/
 
 export interface PageMeta {
   title: string
@@ -115,6 +118,13 @@ export interface PageMeta {
   // and drops them. Only set where absence is KNOWN, never where a lookup was
   // merely unavailable — an empty registry must not noindex every asset.
   notFound?: boolean
+  // The entity's key facts, as label/value pairs, rendered into the body as
+  // plain HTML. Two jobs: everything that does not run JavaScript — Bing
+  // unreliably, every AI crawler, every chat unfurler — otherwise receives an
+  // empty <div id="root">, and an account's OTHER address forms are different
+  // strings that appear nowhere else, so pasting one into a search engine
+  // matches nothing.
+  facts?: [string, string][]
   // Where the canonical should point when that is NOT this URL — two routes
   // rendering one page, or several views of it. Absent means "this URL".
   canonicalPath?: string
@@ -205,12 +215,29 @@ export function pageMeta(path: string): PageMeta {
     const ref = accountRef(resolveDisplayAccountId(normalized.accountId))
     const name = ref.contractName || ref.profile?.name || ref.identity?.display || ref.tag?.name || null
     const shown = ref.address
+    // The title keeps the truncated address every explorer shows, and the client
+    // sets the same string on hydration so the two never disagree. The full
+    // address is what gets MATCHED, and it is already in the URL, the
+    // description and the body below — a title is not where it has to live.
+    //
+    // One account answers to several strings that share no prefix — the Polkadot
+    // SS58, the Hydration SS58, the 32-byte account id, and an H160 where there
+    // is one — so each is stated rather than left to be derived.
     const short = shown.length > 16 ? `${shown.slice(0, 6)}…${shown.slice(-4)}` : shown
+    const forms: [string, string][] = []
+    const evm = EVM_RE.test(shown) ? shown : null
+    if (evm) forms.push(['EVM (H160)', evm])
+    const polkadot = polkadotAddress(ref.accountId)
+    const hydration = hydrationAddress(ref.accountId)
+    for (const [label, value] of [['Polkadot (SS58)', polkadot], ['Hydration (SS58)', hydration], ['Account ID', ref.accountId]] as [string, string][]) {
+      if (value && value !== evm) forms.push([label, value])
+    }
     return {
       title: name ? `${name} · ${short}` : short,
       description: name
         ? `${name} on Hydration (${shown}) — balances, liquidity, lending, trading history and governance votes.`
         : `Hydration account ${shown} — balances, liquidity, lending, trading history and governance votes.`,
+      facts: [...(name ? [['Name', name] as [string, string]] : []), ...forms],
       crumbs: [CRUMB_HOME, ['Accounts', '/accounts']],
     }
   }
@@ -230,6 +257,8 @@ export function pageMeta(path: string): PageMeta {
       const holders = head === 'holders'
       return {
         ...(holders ? { canonicalPath: `/asset/${id}` } : {}),
+        // `name` is null for a registry entry that carries only a symbol.
+        facts: [['Symbol', asset.symbol], ...(asset.name ? [['Name', asset.name] as [string, string]] : []), ['Asset ID', String(id)]] as [string, string][],
         title: holders ? `${asset.symbol} holders` : `${asset.symbol} — ${asset.name}`,
         description: holders
           ? `Who holds ${asset.symbol} (${asset.name}) on Hydration, largest first.`
@@ -251,6 +280,7 @@ export function pageMeta(path: string): PageMeta {
       const note = 'note' in tag && tag.note ? tag.note : null
       return {
         title: tag.name,
+        facts: [['Tag', tag.name], ['Accounts', num(count)], ...(note ? [['Note', note] as [string, string]] : [])],
         description: clamp(note ?? `${tag.name} on Hydration — ${num(count)} tagged ${count === 1 ? 'account' : 'accounts'}, their combined balances, activity and governance votes.`),
         crumbs: [CRUMB_HOME, ['Tags', '/tags']],
       }
@@ -394,10 +424,24 @@ function siteJsonLd(): string {
   return `<script type="application/ld+json">${JSON.stringify(data).replace(/</g, '\\u003c')}</script>`
 }
 
+// The entity, as plain HTML, inside the element React mounts into. createRoot
+// replaces the children of #root outright on the first render, so a reader never
+// sees this — but everything that does NOT run JavaScript keeps it, and that is
+// every AI crawler, every chat unfurler and Bing much of the time. It states the
+// same facts the page itself renders, which is what keeps it a prerender rather
+// than a second, different page shown only to crawlers.
+export function renderBody(meta: PageMeta): string {
+  if (!meta.facts?.length) return ''
+  const rows = meta.facts.map(([label, value]) => `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join('')
+  return `<h1>${esc(meta.title)}</h1><p>${esc(meta.description)}</p><dl>${rows}</dl>`
+}
+
 export function renderPage(shellHtml: string, path: string): string {
   const meta = pageMeta(path)
+  const body = renderBody(meta)
   const stripped = shellHtml.replace(MANAGED_TAG_RE, '')
-  return stripped.replace('</head>', `${renderHead(meta, path)}\n  </head>`)
+  const withHead = stripped.replace('</head>', `${renderHead(meta, path)}\n  </head>`)
+  return body ? withHead.replace('<div id="root"></div>', `<div id="root">${body}</div>`) : withHead
 }
 
 export async function seoRoutes(fastify: FastifyInstance): Promise<void> {
