@@ -43,7 +43,7 @@ export interface ListSummary {
 }
 
 export const LIMITS = {
-  listsPerUser: 50, tagsPerList: 1_000, membersPerTag: 2_000, membersPerList: 20_000,
+  listsPerUser: 50, tagsPerList: 5_000, membersPerTag: 2_000, membersPerList: 20_000,
   subscriptionsPerUser: 200, nameLen: 48, noteLen: 280,
 } as const
 
@@ -356,13 +356,14 @@ function activeSubscriptionCount(accountId: string): number {
 
 // The aggregate-view seam: everything a tag's own combined portfolio/activity page
 // needs, gated by the SAME rule listDetailResponse's tag contents use — owner or
-// active subscriber, never mere public visibility. A public list still hides its
-// curation from a viewer who hasn't subscribed (see listDetailResponse's comment);
-// this is the same privacy boundary applied to the aggregate page rather than the
-// management page. Returns null for "not visible or missing" so the route can answer
-// both with the same 404 — a private list's tag and an unknown one must be
-// indistinguishable from outside.
-export function visibleTagMembers(viewer: string, listId: string, tagId: string): { name: string; color: string; icon: string; note: string; members: string[] } | null {
+// active subscriber. Mere public visibility does not open a list's curation to
+// BROWSING (see listDetailResponse's comment); a public list's tag is reachable
+// by a link to that tag alone, which is publicTagById below, not this. Returns
+// null for "not visible or missing" so the route can answer both with the same
+// 404 — a private list's tag and an unknown one must be indistinguishable from
+// outside.
+export interface TagContents { name: string; color: string; icon: string; note: string; members: string[] }
+export function visibleTagMembers(viewer: string, listId: string, tagId: string): TagContents | null {
   const list = lists.get(listId)
   if (!list) return null
   const isOwner = list.owner === viewer
@@ -371,6 +372,43 @@ export function visibleTagMembers(viewer: string, listId: string, tagId: string)
   const tag = list.tags.get(tagId)
   if (!tag) return null
   return { name: tag.name, color: tag.color, icon: tagDisplayIcon(tag.icon, tag.order), note: tag.note, members: [...tag.order] }
+}
+
+// The same tag, reached the other way: a PUBLIC list's tag addressed by tag id
+// alone, for anyone who was given the link. A viewer who followed one was never
+// told which list it belongs to, so the list id cannot be part of the address —
+// tag ids are UUIDs minted here, unique across every list, so the id alone
+// identifies it. Only public lists are searched, so a private list's tag is
+// exactly as unfindable as a made-up id.
+//
+// This is the ONE place mere public visibility opens a tag's contents. The
+// list's own detail page still shows nothing but statistics to a non-subscriber
+// (see listDetailResponse) — a link that was handed out works, browsing to the
+// curation does not — and nothing here makes a tag NAME appear on a member's
+// account page, which stays the per-viewer tag map's business.
+//
+// A plain scan over the resident public lists, like publicListsTagging: every
+// list is in memory, and an index would be one more thing to keep true across
+// create/delete/visibility changes and the reload path.
+export function publicTagById(tagId: string): (TagContents & { listId: string }) | null {
+  for (const list of lists.values()) {
+    if (list.visibility !== 'public') continue
+    const tag = list.tags.get(tagId)
+    if (!tag) continue
+    return {
+      listId: list.listId, name: tag.name, color: tag.color,
+      icon: tagDisplayIcon(tag.icon, tag.order), note: tag.note, members: [...tag.order],
+    }
+  }
+  return null
+}
+
+// A public list's own name and owner, for the provenance line on the tag page
+// above. Already public — it is what /explorer/list/:id and /explorer/lists
+// answer with — and deliberately nothing about the list's other tags.
+export function publicListSummary(listId: string): ListSummary | null {
+  const list = lists.get(listId)
+  return list && list.visibility === 'public' ? listSummary(list) : null
 }
 
 export function invitesFor(accountId: string): ListSummary[] {

@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
-import { api, userApi } from '../api/explorer'
+import { api, userApi, PUBLIC_LIST_TAG } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import { useSession, setSession } from '../session'
 import { setTagMap, setTagMapError } from '../userTags'
@@ -58,12 +58,30 @@ export function useAddressTaggedIn(address: string | null) {
 }
 
 // ── List tag aggregate view ──────────────────────────────────────────────
-// Mirrors the useTag*/useAddress* hooks in hooks/useExplorerData.ts, but authed
-// (userApi, gated on a session) — a list tag's combined view has no
-// anonymous/public form. `enabled` still requires listId/tagId themselves so
-// ScopedActivity/VotesTab can pass them through unconditionally, same pattern
-// as their system-tag counterparts.
+// Mirrors the useTag*/useAddress* hooks in hooks/useExplorerData.ts. Two
+// surfaces, one set of hooks: the authed one for a viewer's own or subscribed
+// tag, and the anonymous one a PUBLIC list's tag is reachable on by link
+// (PUBLIC_LIST_TAG as the listId — see api/explorer.ts). `enabled` still
+// requires listId/tagId themselves so ScopedActivity/VotesTab can pass them
+// through unconditionally, same pattern as their system-tag counterparts.
 const LIST_TAG_POLL_MS = 15_000
+
+// Readable now: a public tag needs no session, a private one needs one. listId
+// null is "not resolved yet", which is neither.
+const listTagReadable = (session: unknown, listId: string | null): boolean =>
+  listId === PUBLIC_LIST_TAG || (!!session && !!listId)
+
+// Which public list a shared tag link belongs to — the provenance line's name
+// and owner, and how TagDetail tells a public list tag from an unknown id.
+export function usePublicListTagList(tagId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ['public-list-tag-list', tagId],
+    queryFn: ({ signal }) => api.publicListTagList(tagId as string, signal),
+    enabled: enabled && !!tagId,
+    retry: false,
+    staleTime: 600_000,
+  })
+}
 
 // A user tag's members as directory rows — the same table /accounts renders.
 export function useListTagMembers(listId: string | null, tagId: string | null) {
@@ -71,7 +89,7 @@ export function useListTagMembers(listId: string | null, tagId: string | null) {
   return useQuery({
     queryKey: ['list-tag-members', listId, tagId],
     queryFn: ({ signal }) => userApi.listTagMembers(listId as string, tagId as string, signal),
-    enabled: !!session && !!listId && !!tagId,
+    enabled: listTagReadable(session, listId) && !!tagId,
     staleTime: 60_000,
   })
 }
@@ -81,7 +99,7 @@ export function useListTag(listId: string | null, tagId: string | null) {
   return useQuery({
     queryKey: ['list-tag', listId, tagId],
     queryFn: ({ signal }) => userApi.listTag(listId as string, tagId as string, signal),
-    enabled: !!session && !!listId && !!tagId,
+    enabled: listTagReadable(session, listId) && !!tagId,
     refetchInterval: useInterval(LIST_TAG_POLL_MS),
     staleTime: BLOCK_STALE_MS,
   })
@@ -92,7 +110,7 @@ export function useListTagSummary(listId: string | null, tagId: string | null) {
   return useQuery({
     queryKey: ['list-tag-summary', listId, tagId],
     queryFn: ({ signal }) => userApi.listTagSummary(listId as string, tagId as string, signal),
-    enabled: !!session && !!listId && !!tagId,
+    enabled: listTagReadable(session, listId) && !!tagId,
     staleTime: 30_000,
   })
 }
@@ -101,7 +119,7 @@ export function useListTagActivityCounts(listId: string | null, tagId: string | 
   return useQuery({
     queryKey: ['list-tag-activity-counts', listId, tagId],
     queryFn: ({ signal }) => userApi.listTagActivityCounts(listId as string, tagId as string, signal),
-    enabled: !!session && !!listId && !!tagId,
+    enabled: listTagReadable(session, listId) && !!tagId,
     staleTime: 600_000,
   })
 }
@@ -110,7 +128,7 @@ export function useListTagListCount(listId: string | null, tagId: string | null,
   return useQuery({
     queryKey: ['list-tag-list-count', listId, tagId, query],
     queryFn: ({ signal }) => userApi.listTagListCount(listId as string, tagId as string, query as ListCountQuery, signal),
-    enabled: !!session && !!listId && !!tagId && !!query,
+    enabled: listTagReadable(session, listId) && !!tagId && !!query,
     staleTime: 120_000,
   })
 }
@@ -119,7 +137,7 @@ export function useListTagValueEvents(listId: string | null, tagId: string | nul
   return useQuery({
     queryKey: ['list-tag-value-events', listId, tagId],
     queryFn: ({ signal }) => userApi.listTagValueEvents(listId as string, tagId as string, undefined, undefined, signal),
-    enabled: !!session && !!listId && !!tagId,
+    enabled: listTagReadable(session, listId) && !!tagId,
     staleTime: 600_000,
   })
 }
@@ -130,7 +148,7 @@ export function useListTagActivity(listId: string | null, tagId: string | null, 
   return useHeldRows(useQuery({
     queryKey: key,
     queryFn: ({ signal }) => userApi.listTagActivity(listId as string, tagId as string, type, offset, undefined, action, from, to, filters, signal),
-    enabled: !!session && !!listId && !!tagId,
+    enabled: listTagReadable(session, listId) && !!tagId,
     refetchInterval: offset === 0 ? ri : false,
     staleTime: BLOCK_STALE_MS,
     placeholderData: keepPreviousData,
@@ -143,7 +161,7 @@ export function useListTagExtrinsics(listId: string | null, tagId: string | null
   return useHeldRows(useQuery({
     queryKey: key,
     queryFn: ({ signal }) => userApi.listTagExtrinsics(listId as string, tagId as string, offset, undefined, from, to, filters, signal),
-    enabled: !!session && !!listId && !!tagId,
+    enabled: listTagReadable(session, listId) && !!tagId,
     refetchInterval: offset === 0 ? ri : false,
     staleTime: BLOCK_STALE_MS,
     placeholderData: keepPreviousData,
@@ -156,7 +174,7 @@ export function useListTagEvents(listId: string | null, tagId: string | null, of
   return useHeldRows(useQuery({
     queryKey: key,
     queryFn: ({ signal }) => userApi.listTagEvents(listId as string, tagId as string, offset, undefined, from, to, filters, signal),
-    enabled: !!session && !!listId && !!tagId,
+    enabled: listTagReadable(session, listId) && !!tagId,
     refetchInterval: offset === 0 ? ri : false,
     staleTime: BLOCK_STALE_MS,
     placeholderData: keepPreviousData,
@@ -167,7 +185,7 @@ export function useListTagRevenueBreakdown(listId: string | null, tagId: string 
   return useQuery({
     queryKey: ['list-tag-revenue-breakdown', listId, tagId],
     queryFn: ({ signal }) => userApi.listTagRevenueBreakdown(listId as string, tagId as string, signal),
-    enabled: !!session && !!listId && !!tagId,
+    enabled: listTagReadable(session, listId) && !!tagId,
     staleTime: 300_000,
   })
 }
@@ -178,7 +196,7 @@ export function useListTagVotes(listId: string | null, tagId: string | null, off
   return useHeldRows(useQuery({
     queryKey: key,
     queryFn: ({ signal }) => userApi.listTagVotes(listId as string, tagId as string, offset, undefined, from, to, signal),
-    enabled: !!session && !!listId && !!tagId,
+    enabled: listTagReadable(session, listId) && !!tagId,
     refetchInterval: offset === 0 ? ri : false,
     staleTime: BLOCK_STALE_MS,
     placeholderData: keepPreviousData,
@@ -192,7 +210,7 @@ export function useListTagVotesByReferendum(listId: string | null, tagId: string
   return useQuery({
     queryKey: ['list-tag-votes-by-ref', listId, tagId, offset],
     queryFn: ({ signal }) => userApi.listTagVotesByReferendum(listId as string, tagId as string, offset, undefined, signal),
-    enabled: !!session && !!listId && !!tagId && enabled,
+    enabled: listTagReadable(session, listId) && !!tagId && enabled,
     refetchInterval: offset === 0 ? ri : false,
     staleTime: BLOCK_STALE_MS,
     placeholderData: keepPreviousData,
