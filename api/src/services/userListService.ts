@@ -664,20 +664,28 @@ export interface DirectoryFold {
 // can possibly change the directory's grouping, so the walk is bounded by
 // that (typically tiny) membership footprint, not by the directory itself —
 // EXCEPT that "typically tiny" is not a real bound: LIMITS allows 20,000
-// members per list across up to 200 subscriptions, and this result is
-// shipped to ClickHouse as query_params, which @clickhouse/client 1.18.2
-// puts in the request URI (ClickHouse's default max_uri_size is 1 MiB).
-// Quoted, comma-joined and URL-encoded, each account id costs roughly
-// 90-130 bytes once across fold_ids and fold_keys together, so the real
-// break point is somewhere around 7,000-10,000 pairs. MAX_DIRECTORY_FOLD_PAIRS
-// sits well under half of that estimate, leaving headroom for the rest of
-// the request's query string. Past it, this returns null — no fold AT ALL,
-// not a truncated, viewer-invisible subset of "some of your tags fold, some
-// silently don't" — so the caller falls back to the shared page whole.
-// Checked against `candidates` (an upper bound on `winner.size`) so an
-// oversized viewer skips the O(n) priority walk entirely, not just its
-// output.
-const MAX_DIRECTORY_FOLD_PAIRS = 3_000
+// members per list across up to 200 subscriptions, so 4,000,000 pairs is
+// reachable on paper and the fold needs a ceiling of its own.
+//
+// What that ceiling MEANS changed: the fold used to travel as query_params,
+// which @clickhouse/client puts in the request URI, against a 1 MiB
+// max_uri_size that is server config rather than a per-request setting — so
+// the cap had to sit around 3,000, and a viewer past it lost folding
+// everywhere while their tag pills kept rendering from the uncapped
+// client-side tag map. It now rides the query text in the POST body
+// (viewerFoldWithSql in explorerService), bounded only by max_query_size,
+// which the same call raises per request. So this is no longer a transport
+// limit but a plain budget on how much SQL one page build may carry:
+// roughly 110 bytes per pair across fold_ids and fold_keys, putting 50,000
+// pairs at ~5.5 MB of literals — comfortably inside the 64 MiB the query
+// asks for, and well past any real viewer (the largest today folds ~6,000).
+//
+// Past it this still returns null — no fold AT ALL, not a truncated,
+// viewer-invisible subset of "some of your tags fold, some silently don't" —
+// so the caller falls back to the shared page whole. Checked against
+// `candidates` (an upper bound on `winner.size`) so an oversized viewer skips
+// the O(n) priority walk entirely, not just its output.
+export const MAX_DIRECTORY_FOLD_PAIRS = 50_000
 
 // Returns null when nothing in it would actually win — the common case for a
 // viewer with no tags yet — so the caller can skip the whole per-viewer path.
