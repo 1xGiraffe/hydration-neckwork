@@ -43,6 +43,23 @@ function deadlineDate(deadlineMs: number): string {
   return new Date(deadlineMs).toISOString().slice(0, 16).replace('T', ' · ')
 }
 
+// The order's price limit, both ways round. Which direction reads as "the price"
+// depends on which leg is the money asset, and an order does not say — a limit order
+// selling DOT for USDT reads as USDT per DOT, while a DCA accumulating HDX with
+// HOLLAR reads as HOLLAR per HDX. So both are shown rather than guessed at, rough
+// inline with the exact 12 dp figures in the tooltip.
+function LimitPrice({ data }: { data: IntentOrderDetail }) {
+  const { limitPriceOutPerIn: outPerIn, limitPriceInPerOut: inPerOut, assetIn, assetOut } = data
+  if (outPerIn == null || inPerOut == null) return null
+  if (!Number.isFinite(Number(outPerIn)) || !Number.isFinite(Number(inPerOut))) return null
+  return (
+    <span className="muted mono limit-price" title={`${outPerIn} ${assetOut.symbol} per ${assetIn.symbol}\n${inPerOut} ${assetIn.symbol} per ${assetOut.symbol}`}>
+      <Num v={Number(outPerIn)} /> {assetOut.symbol} per {assetIn.symbol}
+      {' · '}<Num v={Number(inPerOut)} /> {assetIn.symbol} per {assetOut.symbol}
+    </span>
+  )
+}
+
 function ExtrinsicRef({ at }: { at: { block: number; extrinsicIndex: number | null } }) {
   return at.extrinsicIndex != null
     ? <Link to={paths.extrinsicAt(at.block, at.extrinsicIndex)} className="hash">{F.int(at.block)}-{at.extrinsicIndex}</Link>
@@ -139,9 +156,7 @@ export function Intent({ intentId }: { intentId: string }) {
                 {data.order.kind === 'swap' && <>
                   <div className="dt">Limit</div>
                   <div className="dd">≥ <AssetAmount asset={data.assetOut} raw={data.order.amountOut} />
-                    {data.limitPriceOutPerIn != null && Number.isFinite(Number(data.limitPriceOutPerIn)) && <span className="muted mono" title={`${data.limitPriceOutPerIn} ${data.assetOut.symbol} per ${data.assetIn.symbol}`}>
-                      {' · '}<Num v={Number(data.limitPriceOutPerIn)} /> {data.assetOut.symbol} per {data.assetIn.symbol}
-                    </span>}
+                    <LimitPrice data={data} />
                   </div>
                   <div className="dt">Partial fills</div>
                   <div className="dd">{data.order.partial
@@ -170,8 +185,19 @@ export function Intent({ intentId }: { intentId: string }) {
                   </>}
                   {data.order.budget != null && data.order.amountIn !== data.order.budget && !isZero(data.order.amountIn) && <>
                     <div className="dt">Per trade</div>
-                    <div className="dd"><AssetAmount asset={data.assetIn} raw={data.order.amountIn} />
-                      {!isZero(data.order.amountOut) && <> → ≥ <AssetAmount asset={data.assetOut} raw={data.order.amountOut} /></>}
+                    <div className="dd"><AssetAmount asset={data.assetIn} raw={data.order.amountIn} /></div>
+                  </>}
+                  {/* A DCA intent's limit binds ONE PERIOD's trade, not the budget —
+                      and it is a hard floor the pallet enforces on every fill, which
+                      the slippage below never loosens (it builds a second,
+                      oracle-derived floor, and the tighter of the two applies). Its
+                      own row rather than a tail on "Per trade", which an unbudgeted
+                      rolling intent does not render. */}
+                  {!isZero(data.order.amountIn) && !isZero(data.order.amountOut) && <>
+                    <div className="dt">Limit</div>
+                    <div className="dd">≥ <AssetAmount asset={data.assetOut} raw={data.order.amountOut} />
+                      <span className="muted"> per trade</span>
+                      <LimitPrice data={data} />
                     </div>
                   </>}
                 </>}

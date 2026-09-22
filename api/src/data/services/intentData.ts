@@ -1,6 +1,8 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { iso } from '../schemas/common.ts'
 import { accountRefFor, type AccountRef } from './address.ts'
+import { assetDecimalsOrNull } from '../../services/explorerAssets.ts'
+import { intentLimitPrice } from '../../services/intentLimitPrice.ts'
 import { DEDUP_SLACK, dedupPage, orderSql, positionCursorSql, windowSql, type Order, type PositionCursor, type WindowFilters } from './feed.ts'
 
 // ICE intents for /v1/intents/*. Runtime 443 (block 14,362,830) added the Intent
@@ -43,6 +45,13 @@ export interface IntentOrderItem {
   budget: string | null
   /** Blocks between a DCA intent's trades; null on a swap intent. */
   periodBlocks: number | null
+  /**
+   * The order's price limit in whole units, 12 dp, both directions. Stated on both
+   * kinds — the pallet enforces `amountOut` on every fill — and null when an
+   * asset's decimals are unknown or a leg names no amount.
+   */
+  limitPriceOutPerIn: string | null
+  limitPriceInPerOut: string | null
   deadline: string | null
   /** The contract a LazyExecutor callback forwards to on resolution, if any. */
   forwardContract: string | null
@@ -101,6 +110,13 @@ const ORDER_INNER_COLUMNS_SQL = `
 function orderItem(row: OrderRow): IntentOrderItem {
   const dca = row.kind === 'dca'
   const deadlineMs = Number(row.deadline_ms)
+  // `amount_in`/`amount_out` are the terms the pallet enforces on a fill — the
+  // whole order on a swap intent, ONE PERIOD's trade on a DCA intent — so the
+  // limit reads off the same pair for both kinds.
+  const limit = intentLimitPrice(
+    row.amount_in, assetDecimalsOrNull(Number(row.asset_in)),
+    row.amount_out, assetDecimalsOrNull(Number(row.asset_out)),
+  )
   return {
     intentId: String(row.intent_id),
     // Exact below 2^53; above it this is a rounded display handle, never a key.
@@ -121,6 +137,8 @@ function orderItem(row: OrderRow): IntentOrderItem {
     createdAt: iso(row.ts),
     createdAtBlock: Number(row.block_height),
     createdAtEventIndex: Number(row.event_index),
+    limitPriceOutPerIn: limit?.outPerIn ?? null,
+    limitPriceInPerOut: limit?.inPerOut ?? null,
   }
 }
 

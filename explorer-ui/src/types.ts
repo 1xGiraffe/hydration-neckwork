@@ -455,7 +455,10 @@ export interface IntentOrderDetail {
   dca: { remainingBudget: string | null; lastExecutionBlock: number | null; nextEligibleBlock: number | null } | null
   callbacks: { queueId: string; queuedAt: { block: number; extrinsicIndex: number | null; timestamp: string }; fees: string | null; executed: { block: number; result: 'ok' | 'error'; error: string | null } | null }[]
   migratedFrom: number | null
+  // The order's price limit, both ways round, on both kinds — a DCA intent's
+  // covers one period's trade. `limitPriceInPerOut` is the cap on what it buys.
   limitPriceOutPerIn: string | null
+  limitPriceInPerOut: string | null
   links: { submission: { block: number; extrinsicIndex: number | null }; solutions: { block: number; extrinsicIndex: number | null }[] }
 }
 // One `ICE.submit_solution` extrinsic's outcome: the fills it settled, the pot's own
@@ -524,6 +527,11 @@ export interface MmReserve {
 // A concentrated-liquidity position (venue 'Uniswap v3' / 'Gamma vault') holds two tokens:
 // `asset`/`amount` are token0, `assetB`/`amountB` token1; it links to its pool page.
 export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string; assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string }
+// A DCA order's price limit per trade, on one axis whatever its kind or
+// direction: `price` is the most it will pay for a unit of what it buys (assetIn
+// per assetOut), and `amount`/`asset` restate the bound the order placed — a
+// Sell's floor on assetOut, a Buy's cap on assetIn.
+export interface ActiveDcaLimit { price: string; amount: string; asset: 'in' | 'out' }
 export interface ActiveDca {
   // A schedule id, or a DCA intent's short "#n" handle. The two id spaces
   // overlap, so this is a display handle — `intentId` decides which order a row
@@ -546,6 +554,9 @@ export interface ActiveDca {
   fundingBalance: string | null
   // That balance at current prices — the open-ended stand-in for budgetUsd.
   fundingUsd?: number | null
+  // Null when the order set no absolute bound (it rides on slippage against the
+  // oracle alone) or its placement could not be read.
+  limit: ActiveDcaLimit | null
   scheduleBlock: number; scheduleIndex: number | null
   // The schedule's owner — redundant on an account's own page, but the asset
   // page lists schedules across owners, so each row names whose order it is.

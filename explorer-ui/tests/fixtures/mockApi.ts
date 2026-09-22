@@ -1081,8 +1081,13 @@ function buildAddress(accountId: string): AddressDetail {
         : [],
     balances, portfolioUsd, tradingVolumeUsd: portfolioUsd * (18 + (a.accountId.charCodeAt(5) % 11)), liquidationVolumeUsd: hasMm ? portfolioUsd * 0.11 : undefined,
     activeDcas: [
-      { id: 33546, assetIn: aref(assetById.get(0)!), assetOut: aref(assetById.get(10)!), direction: 'Sell', amountPerTrade: raw(60000, 12), totalAmount: raw(1_200_000, 12), filledAmount: raw(480_000, 12), remainingAmount: raw(720_000, 12), executionsDone: 8, period: 180, nextExecutionBlock: TIP + 90, valueUsd: 3080, scheduleBlock: TIP - 40000, scheduleIndex: 2 },
-      { id: 30104, assetIn: aref(assetById.get(5)!), assetOut: aref(assetById.get(0)!), direction: 'Sell', amountPerTrade: raw(1.04, 10), totalAmount: '0', filledAmount: raw(101_818, 10), remainingAmount: null, executionsDone: 97902, period: 10, nextExecutionBlock: TIP + 4, valueUsd: 4.6, scheduleBlock: TIP - 500000, scheduleIndex: 3 },
+      { id: 33546, assetIn: aref(assetById.get(0)!), assetOut: aref(assetById.get(10)!), direction: 'Sell', amountPerTrade: raw(60000, 12), totalAmount: raw(1_200_000, 12), filledAmount: raw(480_000, 12), remainingAmount: raw(720_000, 12), executionsDone: 8, period: 180, nextExecutionBlock: TIP + 90, valueUsd: 3080, scheduleBlock: TIP - 40000, scheduleIndex: 2,
+        // 60,000 HDX per trade for at least 400 USDT — a ceiling of 150 HDX per USDT.
+        limit: { price: '150.000000000000', amount: raw(400, 6), asset: 'out' } },
+      { id: 30104, assetIn: aref(assetById.get(5)!), assetOut: aref(assetById.get(0)!), direction: 'Sell', amountPerTrade: raw(1.04, 10), totalAmount: '0', filledAmount: raw(101_818, 10), remainingAmount: null, executionsDone: 97902, period: 10, nextExecutionBlock: TIP + 4, valueUsd: 4.6, scheduleBlock: TIP - 500000, scheduleIndex: 3,
+        // No absolute bound — this one rides on slippage alone, which the column
+        // shows as a dash rather than as a limit of zero.
+        limit: null },
     ],
     balanceHistory: [
       ...balances.slice(0, 5).map(b => {
@@ -2811,7 +2816,9 @@ function mockIntentOrder(id: string, offset: number, limit: number): IntentOrder
     return {
       order: {
         intentId: id, seq, owner: A.fox.accountId, kind: 'dca', assetIn: 5, assetOut: 0,
-        amountIn: budget, amountOut: '0', partial: false, partialMin: null, slippagePpm: 30_000,
+        // One period's trade and the floor it must fetch — NOT the budget: a DCA
+        // intent's limit binds each trade, which is what the fills above spend.
+        amountIn: raw(12.5, 10), amountOut: raw(2500, 12), partial: false, partialMin: null, slippagePpm: 30_000,
         budget, period: 300, deadlineMs: null, forwardContract: null,
         blockHeight: TIP - 600, extrinsicIndex: null, timestamp: tsAt(TIP - 600),
       },
@@ -2819,7 +2826,9 @@ function mockIntentOrder(id: string, offset: number, limit: number): IntentOrder
       filledIn: raw(25, 10), filledOut: raw(25 * 4.4422 / 0.02184, 12),
       fills: trades.slice(offset, offset + limit), fillsTotal: trades.length,
       dca: { remainingBudget: raw(4975, 10), lastExecutionBlock: TIP - 100, nextEligibleBlock: TIP + 200 },
-      callbacks: [], migratedFrom: 33546, limitPriceOutPerIn: null,
+      callbacks: [], migratedFrom: 33546,
+      // 12.5 DOT for at least 2500 HDX: 200 HDX per DOT, or 0.005 DOT per HDX.
+      limitPriceOutPerIn: '200.000000000000', limitPriceInPerOut: '0.005000000000',
       links: { submission: { block: TIP - 600, extrinsicIndex: null }, solutions: [{ block: TIP - 100, extrinsicIndex: 1 }, { block: TIP - 400, extrinsicIndex: 1 }] },
     }
   }
@@ -2850,7 +2859,8 @@ function mockIntentOrder(id: string, offset: number, limit: number): IntentOrder
       fees: raw(0.35, 12),
       executed: { block: TIP - 469, result: 'ok', error: null },
     }],
-    migratedFrom: null, limitPriceOutPerIn: '4.500000000000',
+    // 1000 DOT for at least 4500 USDT: 4.5 USDT per DOT, or 0.2222… DOT per USDT.
+    migratedFrom: null, limitPriceOutPerIn: '4.500000000000', limitPriceInPerOut: '0.222222222222',
     links: { submission: { block: TIP - 500, extrinsicIndex: 2 }, solutions: [{ block: TIP - 470, extrinsicIndex: 1 }, { block: TIP - 480, extrinsicIndex: 1 }] },
   }
 }

@@ -14,7 +14,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, allExplorerAssets, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, assetDecimalsOrNull, allExplorerAssets, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT } from './tagService.ts'
@@ -48,6 +48,7 @@ import { feeTierLabel, loadV3Registry, v3ActivitiesAt, v3FeedActivities, v3PoolF
 import { loadV3AccountPositions, v3AccountPositions } from './uniswapV3Positions.ts'
 import { xcswapSettlementsFor, type XcswapSettlement, type XcswapStatus } from './xcswapSettlements.ts'
 import { loadForeignCandles } from './foreignCandles.ts'
+import { intentLimitPrice } from './intentLimitPrice.ts'
 
 let client: ClickHouseClient
 export function initExplorerService(c: ClickHouseClient): void { client = c }
@@ -6849,6 +6850,7 @@ export async function loadXykPrincipalHistory(accounts: string[], candidateAsset
 // Completed/Terminated. DCA.Scheduled carries the full order (assetIn/Out, per-trade
 // amount, totalAmount, period); progress is summed from DCA.TradeExecuted and the
 // next slot from DCA.ExecutionPlanned. totalAmount "0" = open-ended (no remaining).
+export interface ActiveDcaLimit { price: string; amount: string; asset: 'in' | 'out' }
 export interface ActiveDca {
   // A classic schedule's id, or — for a DCA intent — the low 64 bits of its u128
   // id, the short "#n" handle. The two id spaces overlap (schedule 76 and intent
@@ -6873,6 +6875,13 @@ export interface ActiveDca {
   // amounts the schedule will still spend, so today's price is the right one
   // (unlike an execution, which is valued at the price it traded at).
   valueUsd: number | null; budgetUsd: number | null
+  // The order's own price limit per trade, on ONE axis whatever its kind or
+  // direction: `price` is the most it will pay for a unit of what it buys
+  // (assetIn per assetOut, 12 dp), and `amount`/`asset` restate the bound the
+  // order actually placed — a Sell's floor on assetOut, a Buy's cap on assetIn.
+  // Null when the order set no absolute bound (it then rides on slippage against
+  // the oracle alone), or when its placement could not be read.
+  limit: ActiveDcaLimit | null
   // Owner's spendable balance of the sold asset, on open-ended orders only. Those
   // have no budget to run out of — they run until the wallet does — so the
   // balance is the only thing that can date their end. Null for budgeted orders,
@@ -7043,10 +7052,14 @@ async function getDcaScheduleLinks(ids: Array<string | number>): Promise<Map<str
 // to enrichActiveDcas. A pallet-DCA schedule and a runtime-443 DCA intent are the
 // same product, so they are normalised to one row here and stay merged from then
 // on; `intent_id` empty means the schedule.
-interface ActiveDcaScheduleRow {
+export interface ActiveDcaScheduleRow {
   id: number; intent_id?: string; who: string; sblock: number; sidx: number | null
   asset_in: number; asset_out: number; direction: string
   amt_per: string; total: string; period: number
+  // A DCA intent states its per-trade floor on the order row itself; a pallet
+  // schedule does not store one at all (dca_schedules has no bound column), so
+  // its terms are read from the placement by dcaScheduleBounds below.
+  amount_out?: string
 }
 
 // The events after which a schedule no longer runs. Runtime 443 added two: a live
@@ -7072,7 +7085,7 @@ const ACTIVE_DCA_INTENT_COLUMNS = `
   toUInt64(seq) AS id, toString(intent_id) AS intent_id, owner AS who,
   block_height AS sblock, extrinsic_index AS sidx,
   asset_in, asset_out, 'Sell' AS direction, amount_in AS amt_per,
-  if(budget = '', '0', budget) AS total, period`
+  if(budget = '', '0', budget) AS total, period, amount_out`
 
 async function getActiveDcas(accounts: string[]): Promise<ActiveDca[]> {
   const list = sqlAccountList(accounts)
@@ -7182,12 +7195,104 @@ async function dcaIntentProgress(scheds: ActiveDcaScheduleRow[]): Promise<Map<st
 // current-price valuations, and — for open-ended orders — the owner's spendable
 // balance of the sold asset. Schedules and DCA intents arrive mixed and leave
 // mixed; only the progress lookup differs, and each source loads its own.
+// The absolute per-trade bound a PALLET schedule placed, for the rows on one page.
+//
+// dca_schedules stores no bound (see its DESCRIBE: amount_per, total_amount,
+// period, max_retries and nothing else), so the only record is the placement
+// itself — the DCA.Scheduled event's `order`, falling back to the DCA.schedule
+// call for pre-router schedules whose event carried none. That is the same pair
+// of sources the schedule DETAIL page reads through dcaScheduleTerms, so a row
+// and the page it links to state the same bound by construction.
+//
+// Batched over the page's own rows rather than one read per row: both tables are
+// keyed block-first, so a handful of `block_height IN (…)` point ranges is the
+// cheapest shape available, and these lists only ever carry LIVE orders (24 chain
+// -wide today) — this is page-scoped primary-key enrichment, not a scan.
+//
+// EVM owners schedule through dispatch_permit/Ethereum.transact, whose inner call
+// survives only as opaque SCALE hex, so ~9% of schedules have nothing to read and
+// keep a null bound rather than a guessed one.
+async function dcaScheduleBounds(scheds: ActiveDcaScheduleRow[]): Promise<Map<string, DcaOrderTerms>> {
+  const out = new Map<string, DcaOrderTerms>()
+  const rows = scheds.filter(x => !x.intent_id)
+  if (!rows.length) return out
+  const blocks = [...new Set(rows.map(r => r.sblock))]
+  const withExt = rows.filter(r => r.sidx != null)
+  const [eventRes, callRes] = await Promise.all([
+    client.query({
+      query: `SELECT toString(toUInt64(JSONExtractInt(args_json, 'id'))) AS sid, args_json
+              FROM price_data.raw_events
+              WHERE block_height IN {blocks:Array(UInt32)} AND event_name = 'DCA.Scheduled'`,
+      query_params: { blocks }, format: 'JSONEachRow',
+    }),
+    withExt.length ? client.query({
+      query: `SELECT block_height, extrinsic_index, args_json
+              FROM price_data.raw_calls
+              WHERE block_height IN {blocks:Array(UInt32)} AND call_address = 'root'
+                AND extrinsic_index IN {idxs:Array(UInt32)}`,
+      query_params: { blocks, idxs: [...new Set(withExt.map(r => r.sidx as number))] }, format: 'JSONEachRow',
+    }) : null,
+  ])
+  const byId = new Map<string, string>()
+  for (const r of await eventRes.json<{ sid: string; args_json: string }>()) byId.set(r.sid, r.args_json)
+  const byExtrinsic = new Map<string, string>()
+  if (callRes) {
+    for (const r of await callRes.json<{ block_height: number; extrinsic_index: number; args_json: string }>()) {
+      byExtrinsic.set(`${r.block_height}|${r.extrinsic_index}`, r.args_json)
+    }
+  }
+  for (const r of rows) {
+    const eventArgs = byId.get(String(r.id))
+    const callArgs = r.sidx == null ? undefined : byExtrinsic.get(`${r.sblock}|${r.sidx}`)
+    const order = eventArgs ? dcaOrderTermsFromEventArgs(eventArgs) : null
+    const fromCall = callArgs ? dcaOrderTermsFromCallArgs(callArgs) : null
+    if (!order && !fromCall) continue
+    out.set(String(r.id), {
+      minAmountOut: order?.minAmountOut ?? fromCall?.minAmountOut ?? null,
+      maxAmountIn: order?.maxAmountIn ?? fromCall?.maxAmountIn ?? null,
+      route: null,
+    })
+  }
+  return out
+}
+
+// One order's price limit, stated the SAME way for every kind and direction: the
+// most it will pay for one unit of what it buys (assetIn per assetOut). A Sell
+// order floors what it receives and a Buy order caps what it pays, which look
+// like opposite constraints but are the same one seen from two sides — both put a
+// CEILING on the price paid. Quoting them on one axis is what lets a mixed table
+// (pallet schedules and DCA intents, Buy rows and Sell rows) carry one column
+// that means one thing.
+//
+// `amount` is the bound as the order itself states it, so the row can show the
+// term that was actually placed underneath the derived price.
+//
+// A zero bound is NO bound (see dcaOrderTerms): a floor of nothing rejects
+// nothing, and roughly a fifth of Sell schedules set one deliberately to rely on
+// slippage against the oracle instead. Those report null, never a limit of 0.
+export function activeDcaLimit(s: ActiveDcaScheduleRow, aIn: AssetRef, aOut: AssetRef, bound: DcaOrderTerms | undefined): ActiveDcaLimit | null {
+  const buy = s.direction === 'Buy'
+  // Sell: `amt_per` of assetIn per trade, for at least `floor` of assetOut.
+  // Buy:  `amt_per` of assetOut per trade, for at most `cap` of assetIn.
+  const floor = s.intent_id ? s.amount_out ?? null : bound?.minAmountOut ?? null
+  const cap = bound?.maxAmountIn ?? null
+  const amountIn = buy ? cap : s.amt_per
+  const amountOut = buy ? s.amt_per : floor
+  if (amountIn == null || amountOut == null) return null
+  const price = intentLimitPrice(amountIn, assetDecimalsOrNull(aIn.assetId), amountOut, assetDecimalsOrNull(aOut.assetId))
+  if (!price) return null
+  return buy
+    ? { price: price.inPerOut, amount: cap!, asset: 'in' }
+    : { price: price.inPerOut, amount: floor!, asset: 'out' }
+}
+
 async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveDca[]> {
   if (!scheds.length) return []
-  const [prices, scheduleProgress, intentProgress] = await Promise.all([
+  const [prices, scheduleProgress, intentProgress, bounds] = await Promise.all([
     ensurePrices(),
     dcaScheduleProgress(scheds.filter(s => !s.intent_id)),
     dcaIntentProgress(scheds),
+    dcaScheduleBounds(scheds),
   ])
   // Only open-ended orders need it: a budgeted one already knows where it ends.
   const funds = await spendableBalances(
@@ -7216,6 +7321,7 @@ async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveD
       fundingBalance,
       fundingUsd: fundingBalance != null ? usdValue(prices, aIn.assetId, fundingBalance, aIn.decimals) : null,
       scheduleBlock: s.sblock, scheduleIndex: s.sidx,
+      limit: activeDcaLimit(s, aIn, aOut, bounds.get(String(s.id))),
       who: accountRef(s.who),
     }
   })
@@ -14808,7 +14914,12 @@ export interface IntentOrderDetail {
   dca: { remainingBudget: string | null; lastExecutionBlock: number | null; nextEligibleBlock: number | null } | null
   callbacks: { queueId: string; queuedAt: { block: number; extrinsicIndex: number | null; timestamp: string }; fees: string | null; executed: { block: number; result: 'ok' | 'error'; error: string | null } | null }[]
   migratedFrom: number | null
-  limitPriceOutPerIn: string | null   // amountOut/amountIn as decimal string (12 dp), swap intents only
+  // The order's price limit as decimal strings (12 dp), both directions, on BOTH
+  // kinds: a swap intent's limit covers its whole order, a dca intent's covers one
+  // period's trade. Null when the order names no amount on a leg. See
+  // services/intentLimitPrice.ts for why slippage is not folded in.
+  limitPriceOutPerIn: string | null   // amountOut per one whole amountIn
+  limitPriceInPerOut: string | null   // amountIn per one whole amountOut — the cap on what it buys
   links: { submission: { block: number; extrinsicIndex: number | null }; solutions: { block: number; extrinsicIndex: number | null }[] }
 }
 // `events` = the lifecycle event names in chain order. A cancel or an expiry is
@@ -14920,18 +15031,9 @@ export async function iceSettlementsFor(events: readonly RawIntentEvent[], order
   for (const [id, order] of await getIntentOrders(fills.map(f => f.intentId).filter(id => !orders.has(id)))) orders.set(id, order)
   return iceSettlementAmounts(fills, orders, legs)
 }
-const LIMIT_PRICE_DP = 12
-// The order's limit as OUT per IN in whole units — out/10^dOut ÷ in/10^dIn, carried
-// to 12 decimal places in integer arithmetic (truncated, never rounded). Null for a
-// zero or unreadable input amount.
-export function limitPriceOutPerIn(amountIn: string, decimalsIn: number, amountOut: string, decimalsOut: number): string | null {
-  if (!/^\d+$/.test(amountIn) || !/^\d+$/.test(amountOut)) return null
-  const inRaw = BigInt(amountIn)
-  if (inRaw === 0n) return null
-  const scaled = BigInt(amountOut) * 10n ** BigInt(decimalsIn + LIMIT_PRICE_DP) / (inRaw * 10n ** BigInt(decimalsOut))
-  const digits = scaled.toString().padStart(LIMIT_PRICE_DP + 1, '0')
-  return `${digits.slice(0, -LIMIT_PRICE_DP)}.${digits.slice(-LIMIT_PRICE_DP)}`
-}
+// The order's price limit, both ways round. Defined once in a leaf so the public
+// API and the Data API state the same limit without importing this module.
+export { intentLimitPrice, type IntentLimitPrice } from './intentLimitPrice.ts'
 // A LazyExecutor.Executed outcome: `result` is a Result<(), DispatchError>-shaped
 // enum. The error names the variant (and the nested one for a Module error's
 // shape) rather than a decoded pallet error — that decode wants the spec version,
@@ -15082,6 +15184,10 @@ export async function getIntentOrder(intentId: string, offset = 0, limit = 25): 
     const lastBlock = Number(totals?.last_block ?? 0) || null
     const lastRemaining = totals?.last_rb && /^\d+$/.test(totals.last_rb) ? totals.last_rb : null
     const aIn = asset(order.assetIn), aOut = asset(order.assetOut)
+    const priceLimit = intentLimitPrice(
+      order.amountIn, assetDecimalsOrNull(order.assetIn),
+      order.amountOut, assetDecimalsOrNull(order.assetOut),
+    )
     const solutions = solutionRows.map(r => ({ block: Number(r.block_height), extrinsicIndex: r.extrinsic_index == null ? null : Number(r.extrinsic_index) }))
     return {
       order,
@@ -15100,7 +15206,11 @@ export async function getIntentOrder(intentId: string, offset = 0, limit = 25): 
       } : null,
       callbacks,
       migratedFrom,
-      limitPriceOutPerIn: order.kind === 'swap' ? limitPriceOutPerIn(order.amountIn, aIn.decimals, order.amountOut, aOut.decimals) : null,
+      // Both kinds state a limit: `amountIn` is the whole order on a swap intent and
+      // one period's trade on a dca intent, and the pallet enforces `amountOut`
+      // against whichever of the two it is.
+      limitPriceOutPerIn: priceLimit?.outPerIn ?? null,
+      limitPriceInPerOut: priceLimit?.inPerOut ?? null,
       links: { submission: { block: order.blockHeight, extrinsicIndex: order.extrinsicIndex }, solutions },
     }
   })

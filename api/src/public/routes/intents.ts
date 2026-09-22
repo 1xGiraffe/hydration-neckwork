@@ -36,6 +36,17 @@ const zIntentRow = z.object({
   createdAt: zIsoTimestamp,
   createdAtBlock: z.number().int(),
   lastEventAt: zIsoTimestamp.nullable(),
+  // The order's price limit in whole units, 12 dp, both directions — `amountOut`
+  // per one `amountIn` and its inverse. Stated on BOTH kinds: pallet_intent
+  // enforces `amountOut` on every fill, over the whole order for a swap intent and
+  // over ONE PERIOD's trade for a dca intent. `slippagePpm` does NOT loosen it —
+  // on a dca intent it builds a second, oracle-derived floor and the pallet takes
+  // the tighter of the two, so the effective floor at fill time can only be better
+  // for the owner. Both directions are published because inverting one 12 dp
+  // decimal does not reproduce the other's truncation. Null when the registry
+  // cannot vouch for an asset's decimals, or a leg names no amount.
+  limitPriceOutPerIn: z.string().nullable(),
+  limitPriceInPerOut: z.string().nullable(),
 })
 
 const zIntentEventRow = z.object({

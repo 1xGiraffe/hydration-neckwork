@@ -421,6 +421,8 @@ export interface IntentOrderDetail {
   migratedFrom?: number | null
   /** assetOut units per one assetIn, as a 12 dp decimal string. */
   limitPriceOutPerIn: string | null
+  /** assetIn units per one assetOut — the cap on what the order buys. 12 dp decimal string. */
+  limitPriceInPerOut: string | null
   links?: { submission?: { block: number; extrinsicIndex: number | null } | null; solutions?: { block: number; extrinsicIndex: number | null }[] }
 }
 

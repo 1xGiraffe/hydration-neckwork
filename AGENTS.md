@@ -119,7 +119,8 @@ The `api-public` service (`api/src/public/`, same image as `api`, own process be
   `api/tests/public/isolation.test.ts` — that test is the enforced contract, and this
   sentence must follow it: today `db/client`, `config`, `types`, the
   `cache`/`explorerAssets`/`ohlcvService`/`crossPair`/`poolService`/`volumeService`/`valuation`/
-  `revenueStreams`/`moneyMarketCaps`/`foreignCandles`/`uniswapV3History` services, and the
+  `revenueStreams`/`moneyMarketCaps`/`foreignCandles`/`uniswapV3History`/`intentLimitPrice`
+  services, and the
   api package manifest (`../package.json`, for the version string
   `/rest/service/metadata` publishes). Never `explorerService`. The one sanctioned transitive coupling —
   `initPoolService` wiring an explorerService client when none is set — is documented at the
@@ -171,8 +172,8 @@ API it is a **versioned frozen contract**; concept: `~/.g/hydraken-api-concept.m
 - `api/src/data/**` may import only the allow-list pinned by
   `api/tests/data/isolation.test.ts` — that test is the enforced contract, and this
   sentence must follow it: today `db/client`, `config`, `types`, and the
-  `cache`/`explorerAssets`/`ohlcvService`/`valuation`/`lpMath`/`uniswapV3Positions`/`uniswapV3Ranges`
-  services. Never `explorerService`, never
+  `cache`/`explorerAssets`/`ohlcvService`/`valuation`/`lpMath`/`uniswapV3Positions`/`uniswapV3Ranges`/
+  `intentLimitPrice` services. Never `explorerService`, never
   `userAuthService`, never `public/**`; nothing outside `src/data/` imports from it.
   Address parsing/rendering is self-contained in `data/services/address.ts`. Pure domain
   arithmetic both surfaces need (the LP position math) lives in a leaf module under

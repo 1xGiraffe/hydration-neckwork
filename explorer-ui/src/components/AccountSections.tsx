@@ -543,6 +543,9 @@ function DcaTotalsRow({ dcas, showOwner, headBlock, headTime, now, blockSec }: {
         {agg.perDayUsd > 0 ? <><span className="mono">≈ <Usd v={agg.perDayUsd} /></span><span className="muted">/day</span></> : <Dash />}
         <span className="dca-sub mono muted">combined rate</span>
       </td>
+      {/* Deliberately blank: these orders are limits on different pairs quoted in
+          different assets, so there is no total of them to state. */}
+      <td data-label="Limit" className="r"><Dash /></td>
       <td data-label="Budget" className="r">
         {agg.pricedOrders > 0 ? <>
           <span className="mono">≈ <Usd v={agg.budgetUsd} /></span>
@@ -575,6 +578,28 @@ function DcaTotalsRow({ dcas, showOwner, headBlock, headTime, now, blockSec }: {
 // the owner there), keeps an empty section visible (`emptyText`) so a reader
 // sent to "sells" can see there are none rather than wonder where the table
 // went, and leads with the aggregate of the whole section (`totals`).
+// A DCA order's price ceiling, one axis for every kind and direction: the most it
+// pays for a unit of what it buys. The exact 12 dp figure and the order's own term
+// (a Sell's floor on what it receives, a Buy's cap on what it pays) ride in the
+// title, since the cell shows the rough scale like every other number here.
+function DcaLimitCell({ dca }: { dca: ActiveDca }) {
+  const { limit, assetIn, assetOut } = dca
+  if (!limit || !Number.isFinite(Number(limit.price))) {
+    return <span className="muted" title="No absolute limit — this order relies on its slippage tolerance against the oracle price">—</span>
+  }
+  // The order's own term, scaled — a tooltip that stated raw integer units would
+  // be a number nobody can compare to the amounts in the row beside it.
+  const bound = limit.asset === 'out'
+    ? `at least ${F.exact(limit.amount, assetOut.decimals)} ${assetOut.symbol} per trade`
+    : `at most ${F.exact(limit.amount, assetIn.decimals)} ${assetIn.symbol} per trade`
+  return (
+    <span title={`Pays at most ${limit.price} ${assetIn.symbol} per ${assetOut.symbol} — the order asks for ${bound}`}>
+      ≤ <Num v={Number(limit.price)} /> <span className="muted">{assetIn.symbol}</span>
+      <span className="dca-sub mono muted">per {assetOut.symbol}</span>
+    </span>
+  )
+}
+
 export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title, showOwner, emptyText, totals }: {
   dcas: ActiveDca[]; headBlock: number; headTime?: string; now: number; blockSec?: number
   title?: ReactNode; showOwner?: boolean; emptyText?: ReactNode; totals?: boolean
@@ -589,13 +614,13 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
       <div className="panel"><table className={'tbl dca-tbl' + (showOwner ? ' dca-tbl-aligned' : '')}>
         <thead><tr>
           {showOwner && <th>Owner</th>}
-          <th>Selling → Buying</th><th className="r">Per trade</th><th className="r">Budget</th>
+          <th>Selling → Buying</th><th className="r">Per trade</th><th className="r">Limit</th><th className="r">Budget</th>
           <th className="r">Filled</th><th className="r">Every</th><th className="r">Next trade</th><th className="r">Runs out</th>
         </tr></thead>
         <tbody>
           {/* A sum of one order would just repeat the order. */}
           {totals && dcas.length > 1 && <DcaTotalsRow dcas={dcas} showOwner={showOwner} headBlock={headBlock} headTime={headTime} now={now} blockSec={blockSec} />}
-          {!dcas.length ? <EmptyRow cols={showOwner ? 8 : 7}>{emptyText}</EmptyRow> : dcas.map(d => {
+          {!dcas.length ? <EmptyRow cols={showOwner ? 9 : 8}>{emptyText}</EmptyRow> : dcas.map(d => {
             // Buy orders specify the output per trade ("buy 80 USDC"); sell orders the input.
             const isBuy = d.direction === 'Buy'
             const perAsset = isBuy ? d.assetOut : d.assetIn
@@ -644,6 +669,15 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
                 <td data-label="Per trade" className="r">
                   <AssetAmount asset={perAsset} raw={d.amountPerTrade} />{isBuy ? <span className="muted"> bought</span> : null}
                   {d.valueUsd != null && <span className="dca-sub mono muted"><Usd v={d.valueUsd} /></span>}
+                </td>
+                {/* The most it will pay for what it buys. A Sell order floors what
+                    it receives and a Buy order caps what it pays; those read as
+                    opposite terms but bound the same thing, so both are quoted as
+                    a ceiling on the price and the order's own term sits under it.
+                    An order with no absolute bound rides on slippage against the
+                    oracle alone — that is a dash, not a limit of zero. */}
+                <td data-label="Limit" className="r mono">
+                  <DcaLimitCell dca={d} />
                 </td>
                 <td data-label="Budget" className="r">
                   {openEnded ? <>
