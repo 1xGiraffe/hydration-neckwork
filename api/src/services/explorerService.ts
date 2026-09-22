@@ -11029,18 +11029,23 @@ function v3PoolsForAssets(registry: V3Registry, assetIds: number[]): string[] {
 // V3Activity → ActivityRow. `who` is the account the log names (recipient, position
 // owner, vault beneficiary); a Mint straight into the pool names only contracts, so
 // the extrinsic's signer stands for it.
-async function v3ActivityRows(acts: V3Activity[], prices: Map<number, PriceInfo>): Promise<ActivityRow[]> {
+// `keepRoutedHops` is the POOL page's reading. Everywhere else a v3 Swap log
+// inside a Router route is plumbing — the route's own row already states that
+// fill, so showing the hop beside it counts one trade twice. On the pool's own
+// page the hop IS the subject: it is a swap in that pool whatever routed it, and
+// suppressing it leaves the page of the only live v3 pool empty.
+async function v3ActivityRows(acts: V3Activity[], prices: Map<number, PriceInfo>, keepRoutedHops = false): Promise<ActivityRow[]> {
   if (!acts.length) return []
   const unsigned = acts.filter(a => a.whoAccountId == null && a.extrinsicIndex != null).map(a => [a.blockHeight, a.extrinsicIndex] as [number, number | null])
   const [signers, routed] = await Promise.all([
     unsigned.length ? actorsFor(unsigned) : new Map<string, string>(),
-    routedV3SwapExtrinsics(acts.filter(a => a.kind === 'swap' && a.extrinsicIndex != null).map(a => [a.blockHeight, a.extrinsicIndex as number])),
+    keepRoutedHops ? new Set<string>() : routedV3SwapExtrinsics(acts.filter(a => a.kind === 'swap').map(a => [a.blockHeight, a.extrinsicIndex])),
   ])
   const out: ActivityRow[] = []
   for (const a of acts) {
     // A Router-routed hop through the pool is already the route's trade (swap_activity
     // renders it, the exact count's swap arm counts it): its Swap log is not a second one.
-    if (a.kind === 'swap' && a.extrinsicIndex != null && routed.has(`${a.blockHeight}:${a.extrinsicIndex}`)) continue
+    if (a.kind === 'swap' && routed.has(v3RoutedKey(a.blockHeight, a.extrinsicIndex))) continue
     const who = a.whoAccountId ?? (a.extrinsicIndex != null ? signers.get(`${a.blockHeight}:${a.extrinsicIndex}`) : undefined) ?? null
     const common = {
       blockHeight: a.blockHeight, timestamp: a.timestamp, eventIndex: a.eventIndex, extrinsicIndex: a.extrinsicIndex,
@@ -11121,15 +11126,35 @@ export function blockExtrinsicTupleList(keys: readonly string[]): string {
   return keys.map(k => { const at = k.indexOf(':'); return `(${Number(k.slice(0, at))},${Number(k.slice(at + 1))})` }).join(',')
 }
 
-// The (block:extrinsic) keys among `pairs` whose extrinsic executed a Router route —
-// a v3 Swap log inside one is a hop of that route, not a trade of its own.
-async function routedV3SwapExtrinsics(pairs: [number, number][]): Promise<Set<string>> {
-  const keys = [...new Set(pairs.map(([h, e]) => `${h}:${e}`))]
+// A route executed from a block HOOK has no extrinsic to be indexed against: its
+// events carry a null extrinsic_index, and so does the v3 Swap log inside it. That
+// is not an edge case — runtime 443's DCA intents settle in a hook, so a block of
+// them holds only the two inherents and 35 hookless events. Both sides of the join
+// therefore collapse null onto the same sentinel `uniswap_v3_legs` uses for exactly
+// this reason: SQL's null never equals null, so an un-sentinelled tuple silently
+// matches nothing and every hop survives as its own trade.
+const NO_EXTRINSIC = 4294967295
+export const v3RoutedKey = (blockHeight: number, extrinsicIndex: number | null): string =>
+  `${blockHeight}:${extrinsicIndex ?? NO_EXTRINSIC}`
+
+// The (block:extrinsic) keys among `pairs` whose extrinsic — or, for a hookless
+// route, whose block — executed a Router route. A v3 Swap log inside one is a hop
+// of that route, not a trade of its own.
+//
+// Keying a hookless route by block alone is wider than keying one by extrinsic, so
+// it could in principle suppress a hookless v3 swap that was NOT part of a route
+// sharing its block. Nothing emits one: a direct EVM swap arrives through
+// Ethereum.transact/dispatch_permit and therefore HAS an extrinsic index, which
+// keys it separately and leaves it standing.
+async function routedV3SwapExtrinsics(pairs: [number, number | null][]): Promise<Set<string>> {
+  const keys = [...new Set(pairs.map(([h, e]) => v3RoutedKey(h, e)))]
   if (!keys.length) return new Set()
   const tuples = blockExtrinsicTupleList(keys)
   const res = await client.query({
-    query: `SELECT DISTINCT block_height, extrinsic_index FROM price_data.swap_activity
-            WHERE (block_height, extrinsic_index) IN (${tuples}) AND event_name IN (${ROUTER_NET_EVENTS_SQL})`,
+    query: `SELECT DISTINCT block_height, ifNull(extrinsic_index, ${NO_EXTRINSIC}) AS extrinsic_index
+            FROM price_data.swap_activity
+            WHERE (block_height, ifNull(extrinsic_index, ${NO_EXTRINSIC})) IN (${tuples})
+              AND event_name IN (${ROUTER_NET_EVENTS_SQL})`,
     format: 'JSONEachRow',
   })
   return new Set((await res.json<{ block_height: number; extrinsic_index: number }>()).map(r => `${r.block_height}:${r.extrinsic_index}`))
@@ -11143,7 +11168,7 @@ export async function getV3PoolActivity(address: string, limit = 25): Promise<Ac
   return cached(`explorer:v3-pool-activity:${pool.address}:${limit}:${await liveHeadTag()}`, LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const acts = await v3FeedActivities(registry, { kind: 'all', pools: [pool.address], limit })
-    const rows = await v3ActivityRows(acts, prices)
+    const rows = await v3ActivityRows(acts, prices, true)
     await Promise.all([applyHistoricalUsd(rows, activityHistPick), applyActivityRevenue(rows)])
     return rows
   })
