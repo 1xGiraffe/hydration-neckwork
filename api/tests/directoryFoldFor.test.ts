@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import {
   initUserListService, loadUserLists, ensurePersonalList, createList, createTag, updateTag, setTagMembers, setMemberOrder,
-  subscribePublic, listOrderFor, directoryFoldFor,
+  subscribePublic, listOrderFor, directoryFoldFor, LIMITS, MAX_DIRECTORY_FOLD_PAIRS,
 } from '../src/services/userListService.ts'
 import { initTagService, loadTags } from '../src/services/tagService.ts'
 import { fakeClient } from './helpers/userFakes.ts'
@@ -201,9 +201,11 @@ describe('directoryFoldFor', () => {
 })
 
 // C2: an oversized fold is dropped WHOLESALE, not truncated — see
-// directoryFoldFor's own MAX_DIRECTORY_FOLD_PAIRS comment for the sizing
-// (query_params land in the ClickHouse request URI, whose default
-// max_uri_size is 1 MiB; the estimated break point is ~7,000-10,000 pairs).
+// directoryFoldFor's own MAX_DIRECTORY_FOLD_PAIRS comment for the sizing. The
+// cap is a budget on how much SQL one page build carries (the fold rides the
+// query text), not the request-URI limit it used to be, so the counts here are
+// derived from the constant rather than written out: a cap change must move
+// this test's data with it, never quietly stop exercising the boundary.
 describe('directoryFoldFor — the fold-size cap', () => {
   beforeEach(async () => {
     initUserListService(fakeClient())
@@ -215,16 +217,38 @@ describe('directoryFoldFor — the fold-size cap', () => {
   const idsFrom = (offset: number, n: number): string[] =>
     Array.from({ length: n }, (_, i) => '0x' + (offset + i).toString(16).padStart(64, '0'))
 
+  // One list cannot reach the cap on its own (LIMITS.membersPerList), and one
+  // tag cannot fill a list (LIMITS.membersPerTag), so an oversized viewer is
+  // necessarily spread over several lists and many tags — which is exactly the
+  // shape a heavy tagger has, and the shape that used to lose folding silently.
   it('returns null once candidates exceed the cap, rather than folding a truncated subset', async () => {
-    const lib = await ensurePersonalList(VIEWER)
-    const tagA = await createTag(VIEWER, lib.listId, { name: 'A', color: '#000' })
-    const tagB = await createTag(VIEWER, lib.listId, { name: 'B', color: '#000' })
-    // 1,600 + 1,600 = 3,200 candidates — over MAX_DIRECTORY_FOLD_PAIRS (3,000),
-    // both individually under LIMITS.membersPerTag (2,000).
-    await setTagMembers(VIEWER, lib.listId, tagA.tagId, idsFrom(0, 1_600), [])
-    await setTagMembers(VIEWER, lib.listId, tagB.tagId, idsFrom(10_000, 1_600), [])
-
+    let next = 0
+    let placed = 0
+    for (let l = 0; placed <= MAX_DIRECTORY_FOLD_PAIRS; l++) {
+      const list = l === 0 ? await ensurePersonalList(VIEWER) : await createList(VIEWER, `L${l}`, '', 'private')
+      for (let t = 0; t < LIMITS.membersPerList / LIMITS.membersPerTag && placed <= MAX_DIRECTORY_FOLD_PAIRS; t++) {
+        const tag = await createTag(VIEWER, list.listId, { name: `T${l}-${t}`, color: '#000' })
+        await setTagMembers(VIEWER, list.listId, tag.tagId, idsFrom(next, LIMITS.membersPerTag), [])
+        next += LIMITS.membersPerTag
+        placed += LIMITS.membersPerTag
+      }
+    }
+    expect(placed).toBeGreaterThan(MAX_DIRECTORY_FOLD_PAIRS)
     expect(directoryFoldFor(VIEWER)).toBeNull()
+  })
+
+  // The regression this cap's old value caused: a viewer with a few thousand
+  // tagged accounts folds, where under the URI-bound cap of 3,000 they silently
+  // got the anonymous directory back while their tag pills kept rendering.
+  it('folds a viewer whose footprint is in the thousands', async () => {
+    const lib = await ensurePersonalList(VIEWER)
+    for (let t = 0; t < 4; t++) {
+      const tag = await createTag(VIEWER, lib.listId, { name: `T${t}`, color: '#000' })
+      await setTagMembers(VIEWER, lib.listId, tag.tagId, idsFrom(t * 2_000, 2_000), [])
+    }
+    const fold = directoryFoldFor(VIEWER)
+    expect(fold).not.toBeNull()
+    expect(fold!.ids).toHaveLength(8_000)
   })
 
   it('a viewer comfortably under the cap still folds normally', async () => {
