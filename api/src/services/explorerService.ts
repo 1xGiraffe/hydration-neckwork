@@ -5860,7 +5860,15 @@ async function getFoldedDisplayAssetHolders(displayAssetId: number, shareAssetId
   const claims = await cached(`explorer:folded-display-claims:${displayAssetId}`, 30000, async (): Promise<HolderBalanceClaim[]> => {
     const normalizedShareIds = [...new Set(shareAssetIds.filter(id => SHARE_TOKEN_UNDERLYING_ID[id] === displayAssetId))]
     if (!normalizedShareIds.length) return []
-    const sourceIds = [displayAssetId, ...normalizedShareIds]
+    // A display asset can itself be an aToken — BIL is the bil market's aToken over
+    // uBIL AND the display asset of 2-Pool-BIL, the only id that is both. Its
+    // balances are then NOT in the substrate table (an aToken's live in EVM
+    // storage), so reading them there returns a near-empty list with no error:
+    // BIL showed 2 holders against the 78 its own contract has. Such an asset is
+    // dropped from the direct read and reconstructed below instead, exactly as the
+    // plain aToken page does it.
+    const displayIsAToken = ATOKEN_UNDERLYING_ID[displayAssetId] != null
+    const sourceIds = displayIsAToken ? normalizedShareIds : [displayAssetId, ...normalizedShareIds]
     const [tokens, indices, b0] = await Promise.all([getMmReserveTokens(), reserveIndicesNow(), aTokenAnchorBlock()])
     const shareSet = new Set(normalizedShareIds)
     const reserveTokens = tokens.filter(token => {
@@ -5887,7 +5895,20 @@ async function getFoldedDisplayAssetHolders(displayAssetId: number, shareAssetId
           holders: await reconstructHolderScaled(token.aToken, b0),
         })))
       : Promise.resolve([])
-    const [directRes, reconstructed] = await Promise.all([directPromise, reconstructedPromise])
+    // The display asset's OWN aToken, when it is one. `reserveTokens` above covers
+    // the aTokens whose reserve is one of the SHARE ids; this is the other
+    // direction, and nothing reconstructed it before. mmReserveAddressForAsset
+    // resolves the aToken id through ATOKEN_UNDERLYING_ID itself, so it is handed
+    // the display id.
+    const displayReserves = new Set(mmReserveAddressForAsset(displayAssetId).map(address => address.toLowerCase()))
+    const displayToken = displayIsAToken ? tokens.find(token => displayReserves.has(token.asset.toLowerCase())) : undefined
+    const displayLiquidityIndex = displayToken
+      ? indices.get(`${displayToken.poolProxy.toLowerCase()}:${displayToken.asset.toLowerCase()}`)?.liq ?? 0n
+      : 0n
+    const displayHoldersPromise = displayToken && b0 > 0 && displayLiquidityIndex > 0n
+      ? reconstructHolderScaled(displayToken.aToken, b0)
+      : Promise.resolve([])
+    const [directRes, reconstructed, displayHolders] = await Promise.all([directPromise, reconstructedPromise, displayHoldersPromise])
 
     // The aToken contract is the on-chain custodian of supplied pool shares. Its
     // direct Tokens balance is replaced only to the extent that the indexed
@@ -5901,6 +5922,15 @@ async function getFoldedDisplayAssetHolders(displayAssetId: number, shareAssetId
     }
 
     const claims: HolderBalanceClaim[] = []
+    // Holders of the display asset itself. Already in its own decimals, so no
+    // rescale, and the memberKey keeps a tagged holder's members distinguishable
+    // the same way groupATokenHolderRows does.
+    for (const holder of displayHolders) {
+      const accountId = accountIdFromH160(holder.holder)
+      if (!accountId || holder.scaled <= 0n) continue
+      const bal = (holder.scaled * displayLiquidityIndex) / ATOKEN_RAY
+      if (bal > 0n) claims.push({ accountId, bal, lastBlock: 0, memberKey: holder.holder })
+    }
     const custodyByContract = new Map<string, HolderBalanceClaim>()
     for (const row of await directRes.json<{ account_id: string; asset_id: string; balance: string; last_block: number }>()) {
       const sourceId = Number(row.asset_id)
