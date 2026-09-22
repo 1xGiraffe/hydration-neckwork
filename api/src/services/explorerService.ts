@@ -9547,9 +9547,14 @@ function swapEventToHop(e: { name: string; args: Record<string, unknown> }): Tra
 //
 // Correlated by `operationStack` carrying this Router.Executed's own `eventId`,
 // not by an event-index window: two router trades in one block interleave their
-// legs, and the id says which are whose. `filler` is the venue's own account —
-// for a v3 hop that is the pool contract, so the hop can link to it without the
-// registry lookup attachV3HopPools needs.
+// legs, and the id says which are whose.
+//
+// Only `fillerType` is read, never `filler`. On most venues `filler` is the
+// instrument — a Stableswap pool's own account, an Aave leg's aToken — but on a
+// UniswapV3 leg it is the SwapRouter that Parameters.UniswapV3AddressesSet
+// registered, the same constant on every such leg ever emitted, naming no pool
+// at all. Reading it as the venue would collapse every concentrated-liquidity
+// pool onto one address, so the pool is resolved below from its own Swap log.
 async function swapped3RouterRoute(height: number, routerEventId: number | null): Promise<TradeHop[]> {
   if (routerEventId == null) return []
   const res = await client.query({
@@ -9583,11 +9588,10 @@ async function swapped3RouterRoute(height: number, routerEventId: number | null)
   const v3SwapsOnce = async (h: number) => (swapsOnce ??= v3RegistryOnce().then(r => v3ActivitiesAt(r, h))).then(list => list.filter(a => a.kind === 'swap'))
   // A concentrated-liquidity venue reports no fee on its leg: Swapped3's `fees`
   // is empty there because the fee is taken inside the pool, as a share of the
-  // input set by the pool's own tier. The pool is found through its Swap log in
-  // this block — NOT through `filler`, which on such a leg is the venue's router
-  // contract and not the pool at all — and the fee is then the same
-  // amountIn x tier / 1e6 the declared-route path computes. Loaded once, and
-  // only when such a leg is present.
+  // input set by the pool's own tier. So the pool is matched from its own Swap
+  // log in this block (see the note above on why not from `filler`), and the fee
+  // is then the same amountIn x tier / 1e6 the declared-route path computes.
+  // Loaded once, and only when such a leg is present.
   for (const row of rows) {
     const args = safeJson(row.args_json) as Record<string, unknown> | null
     if (!args) continue
