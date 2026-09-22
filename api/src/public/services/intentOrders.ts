@@ -1,6 +1,8 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { iso } from '../schemas/common.ts'
 import { resolveSingleAccountForms } from './accountBalances.ts'
+import { assetDecimalsOrNull } from '../../services/explorerAssets.ts'
+import { intentLimitPrice } from '../../services/intentLimitPrice.ts'
 
 // ICE intents for /v1/intents. Runtime 443 (block 14,362,830) added the Intent
 // pallet: a SWAP intent is the product's limit order, a DCA intent is the new
@@ -125,6 +127,8 @@ export interface IntentRow {
   createdAt: string
   createdAtBlock: number
   lastEventAt: string | null
+  limitPriceOutPerIn: string | null
+  limitPriceInPerOut: string | null
 }
 
 interface OrderSqlRow {
@@ -258,6 +262,13 @@ function intentRow(raw: OrderSqlRow, agg: AggregateSqlRow | undefined): IntentRo
   // A dca intent's whole commitment is its budget; a swap intent's is the one
   // amount it placed. Both shrink by what the fills have taken.
   const committed = kind === 'dca' && raw.budget ? raw.budget : raw.amount_in
+  // The order's price limit. `amount_in`/`amount_out` are the terms the pallet
+  // enforces on a fill — the whole order on a swap intent, ONE PERIOD's trade on a
+  // dca intent — so the limit reads off the same pair for both kinds.
+  const limit = intentLimitPrice(
+    raw.amount_in, assetDecimalsOrNull(Number(raw.asset_in)),
+    raw.amount_out, assetDecimalsOrNull(Number(raw.asset_out)),
+  )
   return {
     intentId: String(raw.intent_id),
     // Exact below 2^53; above it a rounded display handle, never a key.
@@ -288,6 +299,8 @@ function intentRow(raw: OrderSqlRow, agg: AggregateSqlRow | undefined): IntentRo
     createdAt: iso(raw.ts),
     createdAtBlock: Number(raw.block_height),
     lastEventAt: agg?.last_ts ? iso(agg.last_ts) : null,
+    limitPriceOutPerIn: limit?.outPerIn ?? null,
+    limitPriceInPerOut: limit?.inPerOut ?? null,
   }
 }
 

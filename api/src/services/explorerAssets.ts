@@ -214,6 +214,15 @@ export function knownExplorerAsset(assetId: number): boolean {
   return cache.has(assetId)
 }
 
+// The asset's decimals, or null when the registry has never seen the id. Callers
+// doing ARITHMETIC across two assets must use this rather than
+// `assetDescriptor(id).decimals`: the descriptor answers an unknown id with a
+// 12-decimal placeholder, which is fine for a label but silently scales a
+// computed rate by orders of magnitude.
+export function assetDecimalsOrNull(assetId: number): number | null {
+  return cache.get(assetId)?.decimals ?? null
+}
+
 export function assetDescriptor(assetId: number): ExplorerAsset {
   return cache.get(assetId) ?? {
     assetId,

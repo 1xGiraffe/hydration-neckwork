@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 
 // Regression cover for the ICE intents service behind /v1/intents. The page is
@@ -221,6 +221,47 @@ function detailClient(overrides: { orders?: Row[]; events?: Row[]; aggregates?: 
   }
   return client
 }
+
+// The price limit an order states. It reads off amount_in/amount_out for BOTH
+// kinds — a dca intent's pair is one period's trade, which is exactly what the
+// pallet enforces a fill against — and it is scaled by each leg's decimals, so an
+// asset the registry has never seen must yield NO price rather than one built on
+// the descriptor's 12-decimal placeholder.
+describe('the order\'s limit price', () => {
+  const registryRow = (assetId: number, symbol: string, decimals: number) => ({
+    asset_id: assetId, symbol, name: symbol, decimals,
+    parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null,
+  })
+
+  afterEach(async () => {
+    const { stopExplorerAssetsRefresh } = await import('../../src/services/explorerAssets.ts')
+    stopExplorerAssetsRefresh()
+  })
+
+  it('states a dca intent\'s limit both ways round, from one period\'s trade', async () => {
+    const { loadExplorerAssets } = await import('../../src/services/explorerAssets.ts')
+    await loadExplorerAssets({ query: vi.fn(async () => ({ json: async () => [registryRow(222, 'HOLLAR', 18), registryRow(0, 'HDX', 12)] })) } as never)
+    const { queryIntentOrders } = await import('../../src/public/services/intentOrders.ts')
+    // The live order at block 14,899,760: 8.333… HOLLAR per trade for ≥ 1126.126126126126 HDX.
+    const client = fakeClient([order({ kind: 'dca', asset_in: 222, asset_out: 0, amount_in: '8333333333333333333', amount_out: '1126126126126126', budget: '500000000000000000000', period: 30 })])
+    const { items } = await queryIntentOrders(client as never, OPTIONS)
+    expect(items[0].limitPriceOutPerIn).toBe('135.135135135135')
+    // The price the owner set: it buys HDX at no more than 0.0074 HOLLAR. Inverting
+    // the truncated outPerIn would give 0.00740000000000000037 instead.
+    expect(items[0].limitPriceInPerOut).toBe('0.007400000000')
+  })
+
+  it('publishes no price when the registry cannot vouch for a leg\'s decimals', async () => {
+    const { stopExplorerAssetsRefresh, loadExplorerAssets } = await import('../../src/services/explorerAssets.ts')
+    stopExplorerAssetsRefresh()
+    await loadExplorerAssets({ query: vi.fn(async () => ({ json: async () => [registryRow(222, 'HOLLAR', 18)] })) } as never)
+    const { queryIntentOrders } = await import('../../src/public/services/intentOrders.ts')
+    const client = fakeClient([order({ kind: 'dca', asset_in: 222, asset_out: 999999, amount_in: '8333333333333333333', amount_out: '1126126126126126' })])
+    const { items } = await queryIntentOrders(client as never, OPTIONS)
+    expect(items[0].limitPriceOutPerIn).toBeNull()
+    expect(items[0].limitPriceInPerOut).toBeNull()
+  })
+})
 
 describe('queryIntentOrderById', () => {
   it('publishes the identical row the listing publishes for the same order', async () => {

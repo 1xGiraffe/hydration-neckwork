@@ -28,7 +28,7 @@ import {
   v3PoolUrl, xcDestinationUrl,
 } from '../format/refs.ts'
 import {
-  DASH, formatAmount, formatBase1e8, formatCount, formatHealthFactor, formatNumber,
+  DASH, formatAmount, formatBase1e8, formatCount, formatDecimalString, formatHealthFactor, formatNumber,
   formatPercent, formatPercentChange, formatUsd,
 } from '../format/units.ts'
 import { blocksToDuration, formatDuration, formatTime, isUnrecordedTime, relativeAge } from '../format/time.ts'
@@ -937,7 +937,16 @@ async function renderIntent(intentId: string, ctx: ToolContext): Promise<ToolOut
       ['Offered', formatAmount(o.amountIn, inDec, assetLabelWithId(d.assetIn))],
       ['Wanted', formatAmount(o.amountOut, outDec, assetLabelWithId(d.assetOut))],
       ['Filled', `${formatAmount(d.filledIn, inDec, assetLabel(d.assetIn))} → ${formatAmount(d.filledOut, outDec, assetLabel(d.assetOut))} over ${formatCount(d.fillsTotal)} fill${d.fillsTotal === 1 ? '' : 's'}`],
-      ['Limit price', d.limitPriceOutPerIn ? `${d.limitPriceOutPerIn} ${assetLabel(d.assetOut)} per ${assetLabel(d.assetIn)}` : null],
+      // Both ways round: the rate of what the order sells, and the cap on what it
+      // buys — an order accumulating an asset is read as the second, and neither
+      // is recoverable from the other by inverting a truncated decimal. On a DCA
+      // intent the limit binds ONE PERIOD's trade, and its slippage never loosens
+      // it (pallet_intent enforces the tighter of this floor and an oracle one).
+      ['Limit price', d.limitPriceOutPerIn && d.limitPriceInPerOut
+        ? `${formatDecimalString(d.limitPriceOutPerIn)} ${assetLabel(d.assetOut)} per ${assetLabel(d.assetIn)}`
+          + ` · ${formatDecimalString(d.limitPriceInPerOut)} ${assetLabel(d.assetIn)} per ${assetLabel(d.assetOut)}`
+          + (o.kind === 'dca' ? ' (per trade)' : '')
+        : null],
       ['Partial fills', o.partial ? 'allowed' : 'all-or-nothing'],
       ['Deadline', o.deadlineMs ? formatTime(new Date(o.deadlineMs).toISOString().replace('T', ' ').slice(0, 19)) : null],
       ['Placed', `block ${formatCount(o.blockHeight)} · ${timeLine(o.timestamp)}`],

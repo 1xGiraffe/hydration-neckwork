@@ -1257,6 +1257,10 @@ svg { display: block; }
    so the basis is what puts the breakdown on its own line under the total
    instead of trailing it as another inline item. */
 .dl .dd .revenue-streams { flex-basis: 100%; font-size: 11px; }
+/* An intent's limit price, stated both ways round. Same basis trick: two "X per Y"
+   clauses trailing the amount inline would overflow a 390px row, so they sit on
+   their own line under it. */
+.dl .dd .limit-price { flex-basis: 100%; font-size: 11px; }
 .dl .dt:nth-last-child(2), .dl .dd:last-child { border-bottom: 0; }
 @media (max-width: 720px){ .dl .dt { border-bottom: 0; padding-bottom: 2px; } }
 

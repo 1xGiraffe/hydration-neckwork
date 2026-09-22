@@ -8,7 +8,7 @@ const dca = (id: number, budgetUsd: number | null, fundingUsd: number | null = n
   assetOut: { assetId: 0, iconAssetId: 0, symbol: 'HDX', name: null, decimals: 12, parachainId: null, origin: null },
   amountPerTrade: '1', totalAmount: budgetUsd == null ? '0' : '10', filledAmount: '0', remainingAmount: null,
   executionsDone: 0, period: 100, nextExecutionBlock: null, periodSeconds: null,
-  valueUsd: null, budgetUsd, fundingBalance: null, fundingUsd,
+  valueUsd: null, budgetUsd, fundingBalance: null, fundingUsd, limit: null,
   scheduleBlock: 1, scheduleIndex: 0,
   who: { accountId: '0x' + '11'.repeat(32), address: '1abc', emoji: '🐟', tag: null, identity: null, profile: null },
 })

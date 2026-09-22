@@ -28,6 +28,8 @@ export const zIntent = z.object({
   slippagePpm: z.number().int(),
   budget: z.string().nullable().describe('A dca intent\'s total budget. Null on a swap intent, and null on a dca intent that set none — the pallet\'s rolling re-reserve, which keeps spending whatever the owner holds. Never 0 standing in for "unset".'),
   periodBlocks: z.number().int().nullable().describe('Blocks between a dca intent\'s trades; null on a swap intent.'),
+  limitPriceOutPerIn: z.string().nullable().describe('The order\'s price limit: `amountOut` per one whole `amountIn`, 12 dp. Stated on BOTH kinds — pallet_intent enforces `amountOut` on every fill, over the whole order for a swap intent and over ONE PERIOD\'s trade for a dca intent. `slippagePpm` does NOT loosen it: on a dca intent it builds a second, oracle-derived floor and the pallet enforces the tighter of the two, so the floor that applies at fill time can only be better for the owner. Null when a leg names no amount or an asset\'s decimals are unknown.'),
+  limitPriceInPerOut: z.string().nullable().describe('The same limit inverted: `amountIn` per one whole `amountOut` — the cap on what the order buys, which is how an accumulating dca intent reads. Published rather than left to the caller because inverting the 12 dp `limitPriceOutPerIn` does not reproduce this truncation (135.135135135135 inverts to 0.00740000000000000037, not the exact 0.0074 the raw amounts state).'),
   deadline: zIsoTimestamp.nullable().describe('Expiry, when the placement carried one.'),
   forwardContract: z.string().nullable().describe('Contract a LazyExecutor callback forwards the output to on resolution, if any.'),
   createdAt: zIsoTimestamp,

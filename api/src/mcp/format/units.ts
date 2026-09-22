@@ -222,6 +222,22 @@ export function formatBasisPoints(value: string | number | null | undefined, dig
 }
 
 /**
+ * A fixed-precision decimal string, trimmed. An order's limit price is a
+ * precision surface — it is the exact term the owner set, so it keeps every
+ * significant digit rather than going through the rough scale of
+ * `formatNumber`, which would render a limit of 135.135135135135 as "135".
+ * All the trimming removes is the padding to a fixed dp: "0.007400000000"
+ * says 0.0074, and the zeros are an artefact of the wire format, not precision
+ * the order stated.
+ */
+export function formatDecimalString(value: string | null | undefined): string {
+  if (value == null) return DASH
+  const trimmed = String(value).trim()
+  if (!/^-?\d+\.\d+$/.test(trimmed)) return trimmed || DASH
+  return trimmed.replace(/0+$/, '').replace(/\.$/, '')
+}
+
+/**
  * A health factor, spelled out. `'inf'` means the account owes nothing, which is
  * a different statement from a very large ratio, so it is said in words rather
  * than printed as a number. Anything else is the 1e18 scaling.
