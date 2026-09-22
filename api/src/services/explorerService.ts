@@ -9430,7 +9430,115 @@ function swapEventToHop(e: { name: string; args: Record<string, unknown> }): Tra
   }
 }
 
-async function inferredRouterRoute(height: number, eventIndex: number, netAmts: SwapAmounts): Promise<TradeHop[]> {
+// Every leg of one router execution, from the Broadcast.Swapped3 events that
+// name it in their operation stack.
+//
+// This is what the pallet-event scan below cannot see. A leg filled on an
+// EVM-backed venue — Uniswap v3, or an Aave wrap — emits NO pallet
+// `*.SellExecuted`, only this event, so a route through them came back holding
+// just the hops that happened to be pallet-native: USDT -> DOT via
+// Aave/Stableswap/UniswapV3/Aave rendered as the one Stableswap hop in the
+// middle, with the swap's actual venue missing entirely.
+//
+// Correlated by `operationStack` carrying this Router.Executed's own `eventId`,
+// not by an event-index window: two router trades in one block interleave their
+// legs, and the id says which are whose. `filler` is the venue's own account —
+// for a v3 hop that is the pool contract, so the hop can link to it without the
+// registry lookup attachV3HopPools needs.
+async function swapped3RouterRoute(height: number, routerEventId: number | null): Promise<TradeHop[]> {
+  if (routerEventId == null) return []
+  const res = await client.query({
+    query: `
+      SELECT event_index, args_json
+      FROM price_data.raw_events
+      WHERE block_height = {h:UInt32} AND event_name = 'Broadcast.Swapped3'
+      ORDER BY event_index ASC`,
+    query_params: { h: height }, format: 'JSONEachRow',
+  })
+  const rows = await res.json<{ event_index: number; args_json: string }>()
+  const hops: TradeHop[] = []
+  // A pallet-native leg ALSO emits its pallet event, which is the only thing that
+  // names the pool it used (Stableswap's pool id, say). Swapped3 carries the leg
+  // but not that, so the two are merged: Swapped3 decides which legs exist,
+  // the pallet event fills in the pool a badge links to.
+  const palletNames = SWAP_EVENTS.filter(n => !isRouterNet(n)).map(n => `'${n}'`).join(',')
+  const palletRes = await client.query({
+    query: `
+      SELECT event_name, args_json
+      FROM price_data.raw_events
+      WHERE block_height = {h:UInt32} AND event_name IN (${palletNames})
+      ORDER BY event_index ASC`,
+    query_params: { h: height }, format: 'JSONEachRow',
+  })
+  const palletHops = (await palletRes.json<{ event_name: string; args_json: string }>())
+    .map(r => swapEventToHop({ name: r.event_name, args: (safeJson(r.args_json) ?? {}) as Record<string, unknown> }))
+  let registryOnce: Promise<V3Registry> | null = null
+  let swapsOnce: Promise<V3Activity[]> | null = null
+  const v3RegistryOnce = () => (registryOnce ??= v3Registry())
+  const v3SwapsOnce = async (h: number) => (swapsOnce ??= v3RegistryOnce().then(r => v3ActivitiesAt(r, h))).then(list => list.filter(a => a.kind === 'swap'))
+  // A concentrated-liquidity venue reports no fee on its leg: Swapped3's `fees`
+  // is empty there because the fee is taken inside the pool, as a share of the
+  // input set by the pool's own tier. The pool is found through its Swap log in
+  // this block — NOT through `filler`, which on such a leg is the venue's router
+  // contract and not the pool at all — and the fee is then the same
+  // amountIn x tier / 1e6 the declared-route path computes. Loaded once, and
+  // only when such a leg is present.
+  for (const row of rows) {
+    const args = safeJson(row.args_json) as Record<string, unknown> | null
+    if (!args) continue
+    const stack = Array.isArray(args.operationStack) ? args.operationStack as Record<string, unknown>[] : []
+    if (!stack.some(entry => entry?.__kind === 'Router' && Number(entry.value) === routerEventId)) continue
+    const leg = (side: unknown): { asset: number; amount: string } | null => {
+      const first = Array.isArray(side) ? (side as Record<string, unknown>[])[0] : null
+      return first && Number.isFinite(Number(first.asset)) ? { asset: Number(first.asset), amount: String(first.amount ?? '') } : null
+    }
+    const input = leg(args.inputs)
+    const output = leg(args.outputs)
+    if (!input || !output) continue
+    const feeLeg = leg(args.fees)
+    const venue = swapped3Venue(args.fillerType)
+    let feeTier: number | undefined
+    let poolAddress: string | undefined
+    if (venue.pool === V3_HOP_VENUE) {
+      const registry = await v3RegistryOnce()
+      const swap = (await v3SwapsOnce(height)).find(a => a.pool
+        && ((a.asset0 === input.asset && a.asset1 === output.asset) || (a.asset1 === input.asset && a.asset0 === output.asset)))
+      const pool = swap?.pool ? [...registry.pools.values()].find(p => p.address.toLowerCase() === swap.pool!.toLowerCase()) : null
+      if (pool) { poolAddress = pool.address; feeTier = pool.fee }
+    }
+    const tierFee = feeTier != null && input.amount
+      ? { amount: (BigInt(input.amount) * BigInt(feeTier) / 1_000_000n).toString(), asset: asset(input.asset) }
+      : null
+    const pallet = palletHops.find(h => h.assetIn.assetId === input.asset && h.assetOut.assetId === output.asset && h.amountIn === input.amount)
+    hops.push({
+      ...venue,
+      ...(pallet?.poolId != null ? { poolId: pallet.poolId } : {}),
+      ...(feeTier != null ? { feeTier } : {}),
+      ...(poolAddress ? { poolAddress } : {}),
+      assetIn: asset(input.asset),
+      assetOut: asset(output.asset),
+      amountIn: input.amount || null,
+      amountOut: output.amount || null,
+      fee: feeLeg && feeLeg.amount ? { amount: feeLeg.amount, asset: asset(feeLeg.asset) } : (tierFee ?? pallet?.fee ?? null),
+    })
+  }
+  return hops
+}
+
+// The venue label for a Swapped3 filler kind. The enum spells two of them
+// differently from the names the rest of the explorer uses for the same places.
+function swapped3Venue(fillerType: unknown): { pool: string; poolId: number | null } {
+  const kind = typeof fillerType === 'object' && fillerType ? String((fillerType as Record<string, unknown>).__kind ?? '') : String(fillerType ?? '')
+  if (kind === 'UniswapV3') return { pool: V3_HOP_VENUE, poolId: null }
+  if (kind === 'AAVE') return { pool: 'Aave', poolId: null }
+  return { pool: kind || 'Router', poolId: null }
+}
+
+async function inferredRouterRoute(height: number, eventIndex: number, netAmts: SwapAmounts, routerEventId: number | null = null): Promise<TradeHop[]> {
+  // Preferred when the runtime emitted it: it covers every venue, pallet-native
+  // or EVM-backed, and says which router execution each leg belongs to.
+  const broadcast = await swapped3RouterRoute(height, routerEventId)
+  if (broadcast.length) return broadcast
   const names = SWAP_EVENTS.filter(n => !isRouterNet(n)).map(n => `'${n}'`).join(',')
   const res = await client.query({
     query: `
@@ -9621,6 +9729,16 @@ export async function getTradeDetail(height: number, index: number, routeEvent?:
     const v3Swaps = routeSpecs.some(spec => spec.feeTier != null)
       ? (await v3ActivitiesAt(await v3Registry(), height, index)).filter(a => a.kind === 'swap')
       : []
+    // No declared hops to read: the call came in WRAPPED (Dispatcher.dispatch*
+    // carries the Router call as an argument, so `route` is not on the top-level
+    // args), leaving only the legs that emitted a pallet event — which an
+    // EVM-backed venue never does. A USDT -> DOT route through
+    // Aave/Stableswap/UniswapV3/Aave rendered as the one Stableswap hop in the
+    // middle, its actual venue missing. The Broadcast.Swapped3 legs name every
+    // venue and say which router execution they belong to.
+    const broadcastRoute = !routeSpecs.length && routerNet
+      ? await swapped3RouterRoute(height, Number.isFinite(Number(net.args.eventId)) ? Number(net.args.eventId) : null)
+      : []
     const route: TradeHop[] = routeSpecs.length
       ? await attachV3HopPools(routeSpecs.map(spec => {
           // Match the executed event for this hop by its asset pair; Aave wrap
@@ -9635,7 +9753,7 @@ export async function getTradeDetail(height: number, index: number, routeEvent?:
             fee: ev ? tradeHopFee(ev.name, ev.args, spec.assetOut) : v3Fee,
           }
         }))
-      : hopEvents.map(swapEventToHop)
+      : broadcastRoute.length ? broadcastRoute : hopEvents.map(swapEventToHop)
 
     const limitSpec = parseTradeLimit(callName, callArgs)
     const limit = limitSpec ? {
@@ -9778,7 +9896,9 @@ export async function getTradeDetailByEvent(height: number, eventIndex: number):
     const actorId = dca?.who || (ACCOUNT_RE.test(netWho) && netWho !== ROUTER_PALLET_ACCT ? netWho : null)
 
     const route: TradeHop[] = isRouterNet(ev.event_name)
-      ? await inferredRouterRoute(height, eventIndex, netAmts)
+      // `eventId` is this router execution's own id, which its legs name in
+      // their operation stack (see swapped3RouterRoute).
+      ? await inferredRouterRoute(height, eventIndex, netAmts, Number.isFinite(Number(args.eventId)) ? Number(args.eventId) : null)
       : [swapEventToHop({ name: ev.event_name, args })]
 
     const detail: TradeDetail = {
