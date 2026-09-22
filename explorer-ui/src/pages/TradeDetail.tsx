@@ -1,9 +1,10 @@
 import { useEffect } from 'react'
+import type { ReactNode } from 'react'
 import { useTrade } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect } from '../router'
-import { Crumbs, Usd, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, MomentLink, PoolBadge, poolHref, SkeletonRows, AwaitingBlockCard } from '../components/ui'
+import { Crumbs, Usd, ExactAmt, CopyValue, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, MomentLink, PoolBadge, poolHref, SkeletonRows, AwaitingBlockCard } from '../components/ui'
 import { blockOf } from '../utils/activityIds'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import type { TradeHop } from '../types'
@@ -71,16 +72,16 @@ function displayRoute(hops: TradeHop[], totalAmountIn: string, totalAmountOut: s
 
 function RouteAmount({ asset, amount }: { asset: TradeHop['assetIn']; amount: string | null }) {
   return amount
-    ? <AssetValue asset={asset}>{F.exact(amount, asset.decimals)}</AssetValue>
+    ? <AssetValue asset={asset}><ExactAmt raw={amount} dec={asset.decimals} /></AssetValue>
     : <span className="muted mono">—</span>
 }
 
-function AssetValue({ asset, children }: { asset: TradeHop['assetIn']; children: string }) {
+function AssetValue({ asset, children }: { asset: TradeHop['assetIn']; children: ReactNode }) {
   return <span className="trade-leg"><AssetChip asset={asset} /> <span className="mono">{children}</span></span>
 }
 
 function AssetAmount({ asset, amount }: { asset: TradeHop['assetIn']; amount: string | null | undefined }) {
-  return amount ? <AssetValue asset={asset}>{F.exact(amount, asset.decimals)}</AssetValue> : <span className="muted mono">—</span>
+  return amount ? <AssetValue asset={asset}><ExactAmt raw={amount} dec={asset.decimals} /></AssetValue> : <span className="muted mono">—</span>
 }
 
 export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swap' | 'dca' }) {
@@ -134,7 +135,14 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                     <span className="asset-flow">
                       <AssetValue asset={data.assetIn}>1</AssetValue>
                       {' = '}
-                      <AssetValue asset={data.assetOut}>{data.executionPrice.toLocaleString('en-US', { maximumSignificantDigits: 6 })}</AssetValue>
+                      <AssetValue asset={data.assetOut}>
+                        {/* A derived ratio, so the widened form is every digit
+                            the division produced — not a raw integer scaled by
+                            decimals, which is what ExactAmt widens. */}
+                        <CopyValue full={String(data.executionPrice)} plain={String(data.executionPrice)}>
+                          {data.executionPrice.toLocaleString('en-US', { maximumSignificantDigits: 6 })}
+                        </CopyValue>
+                      </AssetValue>
                     </span>
                   </div>
                 </>}
