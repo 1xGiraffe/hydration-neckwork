@@ -7120,7 +7120,13 @@ const ACTIVE_DCA_INTENT_COLUMNS = `
 async function getActiveDcas(accounts: string[]): Promise<ActiveDca[]> {
   const list = sqlAccountList(accounts)
   if (list === "''") return []
-  return cached(`explorer:dca-active:${[...accounts].sort().join(',')}`, 15000, async () => {
+  // Head-keyed, not TTL-bound. These two reads cost ~6 ms (dca_schedules is ~34k
+  // rows, intent_orders a few hundred), so a key that turns over once per ingested
+  // block is both LIVER than any TTL and cheaper than a short one: it rebuilds
+  // exactly when the chain moved, and never otherwise. LIVE_CACHE_MS is the same
+  // short TTL every other head-keyed read uses: once the head moves the old key is
+  // never read again, so a long one would only squat LRU slots the live keys want.
+  return cached(`explorer:dca-active:${await liveHeadTag()}:${[...accounts].sort().join(',')}`, LIVE_CACHE_MS, async () => {
     const [schedRes, intentRes] = await Promise.all([
       client.query({
         // FINAL for the same reason getAssetDcas uses it: dca_schedules replaces on
@@ -7562,7 +7568,8 @@ export function compareLimitOrdersByValueDesc(x: OpenLimitOrder, y: OpenLimitOrd
 export async function getOpenLimitOrders(accounts: string[]): Promise<OpenLimitOrder[]> {
   const list = sqlAccountList(accounts)
   if (list === "''") return []
-  return cached(`explorer:limit-orders:${[...accounts].sort().join(',')}`, 15000, async () =>
+  // Head-keyed for the same reason as getActiveDcas above.
+  return cached(`explorer:limit-orders:${await liveHeadTag()}:${[...accounts].sort().join(',')}`, LIVE_CACHE_MS, async () =>
     (await loadOpenLimitOrders(`owner IN (${list})`, {})).sort(compareLimitOrdersByValueDesc))
 }
 
@@ -27606,7 +27613,7 @@ async function buildTagDetailForMembers(
 ): Promise<TagDetail> {
   const summary = opts.summary === true
   const refresh = opts.refresh === true
-  return cached(opts.cacheKey, opts.ttlMs ?? 30_000, async () => {
+  const detail = await cached(opts.cacheKey, opts.ttlMs ?? 30_000, async () => {
     if (opts.snapshot && !summary && !refresh) {
       const snapshot = await loadTagDetailSnapshot(opts.snapshot.tagId, opts.snapshot.membershipKey).catch(() => null)
       if (snapshot) return withTagPresentation(snapshot, presentation)
@@ -27700,6 +27707,19 @@ async function buildTagDetailForMembers(
       .catch(error => console.error('[tag-detail] snapshot persist failed', error))
     return detail
   })
+  // The resting orders are overlaid on the cached blob rather than living inside
+  // it. Everything else here — balances, the money market, the portfolio walk —
+  // is a 4.1 s rebuild reading GiB, which is what the 30 s TTL exists to protect;
+  // these two are ~6 ms and head-keyed, so a DCA the owner just started appears
+  // within a block instead of waiting out a cache kept long for the chart's sake.
+  //
+  // Safe to splice because they are terminal: neither feeds portfolioUsd, the
+  // series, nor any figure computed above — they are only placed into the object.
+  // A summary response carries neither by design (the hover card shows no
+  // positions), so it returns untouched and stays cheap.
+  if (summary) return detail
+  const [activeDcas, openLimitOrders] = await Promise.all([getActiveDcas(members), getOpenLimitOrders(members)])
+  return { ...detail, activeDcas, openLimitOrders }
 }
 
 export async function getTag(tagId: string, opts: { summary?: boolean; refresh?: boolean } = {}): Promise<TagDetail | null> {
