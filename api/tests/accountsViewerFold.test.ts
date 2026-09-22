@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { viewerFoldWithSql } from '../src/services/explorerService.ts'
 
 const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
 
@@ -89,17 +90,34 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
     expect(body).toContain('${hasIdentitySql},\n            ${dispNameSql},')
   })
 
-  // query_params only grows when a fold is present — the anonymous call site
-  // never sends fold_ids/fold_keys/fold_group_keys/fold_group_names at all,
-  // so ClickHouse never even sees an unused parameter on that path.
-  it('fold_ids/fold_keys/fold_group_keys/fold_group_names are added to query_params only when viewerFold is present', () => {
+  // The fold's arrays must NOT be query_params. @clickhouse/client puts those in
+  // the request URI, whose 1 MiB max_uri_size is server config rather than a
+  // per-request setting — that transport is what held MAX_DIRECTORY_FOLD_PAIRS
+  // down to a few thousand and silently disabled folding for a heavy tagger.
+  // They ride the query text (POST body) as WITH aliases instead, with
+  // max_query_size raised per call. query_params carries only the small scalars.
+  it('sends the fold in the query text, never as query_params', () => {
     const body = accountsPageBody()
     const at = body.indexOf('query_params: {')
-    const params = body.slice(at, body.indexOf('},\n        format:', at))
+    const params = body.slice(at, body.indexOf('format:', at))
     expect(params).toContain('limit, offset,')
-    expect(params).toContain('...(viewerFold ? {')
-    expect(params).toContain('fold_ids: viewerFold.ids, fold_keys: viewerFold.keys,')
-    expect(params).toContain('fold_group_keys: [...viewerFold.groups.keys()], fold_group_names: [...viewerFold.groups.values()].map(g => g.name),')
+    expect(params).not.toContain('fold_ids')
+    expect(params).not.toContain('fold_group_keys')
+    // The arrays are named once, as WITH aliases prepended to the query's own WITH.
+    expect(body).toContain('${viewerFoldWithSql(viewerFold)}tags AS (')
+    // And the setting that lets a body past the 256 KiB default reach the parser.
+    expect(body).toContain('clickhouse_settings: viewerFoldSettings(viewerFold),')
+  })
+
+  // One alias per array, however many expressions reference it: gkeySql and
+  // labelIdSql alone name fold_ids/fold_keys four times between them, and
+  // inlining the literal at each site would multiply the payload by the number
+  // of REFERENCES rather than the number of accounts.
+  it('references the fold arrays by alias so each appears in the text once', () => {
+    const body = accountsPageBody()
+    expect(body).toContain("transform(${idExpr}, fold_ids, fold_keys, '')")
+    expect(body).toContain("transform(g.gkey, fold_group_keys, fold_group_names, '')")
+    expect(body).not.toContain('{fold_ids:Array(String)}')
   })
 
   // The shared snapshot load/persist is skipped by an early branch, not a
@@ -335,5 +353,52 @@ describe('the viewer-fold activity budget bounds waiting, not coverage', () => {
     // Fold totals stay in memory; only shared gkeys reach account_activity_totals.
     expect(sweep).not.toContain('persistActivityTotals')
     expect(sweep).toContain('foldTotals.set')
+  })
+})
+
+// The fold's arrays are SQL literals now, and one of them — the group names —
+// is arbitrary user text a viewer types when they name a tag. That is the one
+// place a tag name reaches a query as anything other than a bound parameter,
+// so the escaping is pinned here rather than left to reading the builder.
+describe('viewerFoldWithSql escaping', () => {
+  const fold = (name: string) => ({
+    ids: ['0x' + '11'.repeat(32)],
+    keys: ['u:tag-1'],
+    fingerprint: 'f',
+    groups: new Map([['u:tag-1', { tagId: 'tag-1', listId: 'l', name, color: '', icon: '', memberCount: 1 }]]),
+  })
+
+  it('emits one WITH alias per array, each named once', () => {
+    const sql = viewerFoldWithSql(fold('Whales'))
+    expect(sql).toContain("['0x1111111111111111111111111111111111111111111111111111111111111111'] AS fold_ids")
+    expect(sql).toContain("['u:tag-1'] AS fold_keys")
+    expect(sql).toContain("['u:tag-1'] AS fold_group_keys")
+    expect(sql).toContain("['Whales'] AS fold_group_names")
+  })
+
+  it('escapes a quote in a tag name instead of closing the literal', () => {
+    const sql = viewerFoldWithSql(fold("O'Brien"))
+    expect(sql).toContain("['O\\'Brien'] AS fold_group_names")
+    // The names literal still opens and closes exactly once: the only unescaped
+    // quotes left in that tail are its own delimiters.
+    expect(sql.slice(sql.indexOf('AS fold_group_keys')).match(/(?<!\\)'/g)).toHaveLength(2)
+  })
+
+  it('escapes a backslash so it cannot escape the closing quote', () => {
+    // `\'` would end the string early if the backslash were passed through.
+    expect(viewerFoldWithSql(fold("a\\"))).toContain("['a\\\\'] AS fold_group_names")
+  })
+
+  it('escapes newlines, so a name cannot introduce its own SQL', () => {
+    const sql = viewerFoldWithSql(fold("x\n-- drop"))
+    expect(sql).toContain("['x\\n-- drop'] AS fold_group_names")
+    expect(sql).not.toMatch(/\n-- drop/)
+  })
+
+  // Absent a fold the query is character-for-character what it always was, and
+  // `transform` never sees an empty array (whose element type it cannot infer).
+  it('is empty absent a fold, or for a fold naming no accounts', () => {
+    expect(viewerFoldWithSql(undefined)).toBe('')
+    expect(viewerFoldWithSql({ ...fold('x'), ids: [], keys: [] })).toBe('')
   })
 })

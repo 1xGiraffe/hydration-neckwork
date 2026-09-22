@@ -151,9 +151,16 @@ describe('the holders viewer fold cannot drift the anonymous path', () => {
     expect(body).toContain('GROUP BY group_key, label_id')
   })
 
-  it('query_params only grows when a fold is present, and the anonymous cache key is unchanged', () => {
+  // The same transport rule the accounts directory follows (see
+  // accountsViewerFold.test.ts): the fold is query TEXT, never query_params,
+  // because the client puts those in a URI the server caps at 1 MiB — the limit
+  // that used to silently switch folding off for a viewer with many tags.
+  it('sends the fold in the query text, and leaves the anonymous cache key unchanged', () => {
     const body = getHoldersBody()
-    expect(body).toContain("...(viewerFold ? { fold_ids: viewerFold.ids, fold_keys: viewerFold.keys } : {})")
+    expect(body).toContain('query_params: { asset: String(assetId), limit, offset },')
+    expect(body).toContain('${viewerFoldWithSql(viewerFold)}tags AS (')
+    expect(body).toContain('clickhouse_settings: viewerFoldSettings(viewerFold),')
+    expect(body).not.toContain('fold_ids: viewerFold.ids')
     // The shared key every anonymous request uses, byte-identical to before;
     // per-viewer entries carry their own prefix + fingerprint.
     expect(body).toContain('`explorer:holders:${assetId}:${limit}:${offset}`')

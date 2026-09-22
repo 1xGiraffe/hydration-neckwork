@@ -3301,7 +3301,7 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
     // alongside the group key): a viewer's fold overrides the grouping for
     // exactly the accounts it names, before GROUP BY runs — and absent a fold
     // both branches are the exact original expressions, unchanged.
-    const foldKey = `transform(latest.account_id, {fold_ids:Array(String)}, {fold_keys:Array(String)}, '')`
+    const foldKey = `transform(latest.account_id, fold_ids, fold_keys, '')`
     const groupKeySql = viewerFold
       ? `if(${foldKey} != '', ${foldKey}, if(t.label_id = '', latest.account_id, t.label_id))`
       : `if(t.label_id = '', latest.account_id, t.label_id)`
@@ -3311,7 +3311,7 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
     const res = await client.query({
       query: `
         WITH
-          tags AS (
+          ${viewerFoldWithSql(viewerFold)}tags AS (
             SELECT account_id, any(label_id) AS label_id, any(label_name) AS label_name, any(color) AS color, any(icon) AS icon
             FROM price_data.account_tags FINAL WHERE deleted = 0 GROUP BY account_id
           ),
@@ -3374,10 +3374,9 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
         FROM grouped
         ORDER BY gbal DESC
         LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-      query_params: {
-        asset: String(assetId), limit, offset,
-        ...(viewerFold ? { fold_ids: viewerFold.ids, fold_keys: viewerFold.keys } : {}),
-      }, format: 'JSONEachRow',
+      query_params: { asset: String(assetId), limit, offset },
+      clickhouse_settings: viewerFoldSettings(viewerFold),
+      format: 'JSONEachRow',
     })
     const rows = await res.json<{ group_key: string; label_id: string; label_name: string; color: string; icon: string; member_count: string; balance: string; last_block: number; sample_account: string; total: string; total_bal: string }>()
     const total = rows.length ? Number(rows[0].total) : 0
@@ -25742,6 +25741,59 @@ export interface ViewerFold {
   groups: Map<string, ViewerFoldGroup>   // group key -> presentation
 }
 
+// A viewer's fold travels in the QUERY TEXT, not as query_params.
+//
+// @clickhouse/client sends a `query()` call's SQL in the POST body but every
+// `query_param` in the request URI (`param_<name>=…`, see toSearchParams), and the
+// server caps a URI at `max_uri_size` (1 MiB, a server config, not a session
+// setting we could raise per request). That put a hard ceiling on how many
+// accounts a viewer could fold — and because a partial fold is worse than none
+// (see MAX_DIRECTORY_FOLD_PAIRS in userListService), passing it meant a viewer's
+// tags silently stopped grouping ANYWHERE, while their tag pills kept rendering
+// from the uncapped client-side tag map.
+//
+// As literals in the SQL the same arrays ride the body, which has no URI bound —
+// only `max_query_size`, a SESSION setting this raises per query (FOLD_QUERY_SETTINGS).
+// Emitted as WITH aliases so each array appears in the text ONCE however many
+// expressions reference it: gkeySql and labelIdSql alone name `fold_ids` four
+// times between them, and inlining the literal at each site would multiply the
+// payload by the number of references rather than the number of accounts.
+const CH_STRING_ESCAPES: Record<string, string> = {
+  '\\': '\\\\', "'": "\\'", '\0': '\\0', '\b': '\\b', '\f': '\\f', '\n': '\\n', '\r': '\\r', '\t': '\\t',
+}
+// A ClickHouse string literal. Tag NAMES reach this and they are arbitrary user
+// text, so this escapes rather than validates — the ids and group keys around it
+// are machine-generated, but one escaper for all of them means no site is left
+// deciding whether its own input is trusted.
+function chStringLiteral(value: string): string {
+  return `'${value.replace(/[\\'\0\b\f\n\r\t]/g, c => CH_STRING_ESCAPES[c])}'`
+}
+function chStringArrayLiteral(values: string[]): string {
+  return `[${values.map(chStringLiteral).join(',')}]`
+}
+// The WITH-alias prelude naming a fold's arrays, ready to prepend to a query's
+// own `WITH`. Empty string absent a fold, so the query is character-for-character
+// what it always was. An empty array would make `transform` ambiguous about its
+// element type, so a fold with no ids never gets here (getAccountsForViewerFold
+// routes it to getAccounts).
+export function viewerFoldWithSql(viewerFold?: ViewerFold): string {
+  if (!viewerFold?.ids.length) return ''
+  return `${chStringArrayLiteral(viewerFold.ids)} AS fold_ids,
+            ${chStringArrayLiteral(viewerFold.keys)} AS fold_keys,
+            ${chStringArrayLiteral([...viewerFold.groups.keys()])} AS fold_group_keys,
+            ${chStringArrayLiteral([...viewerFold.groups.values()].map(g => g.name))} AS fold_group_names,
+            `
+}
+// `max_query_size` defaults to 256 KiB and is measured against the body, so a
+// fold large enough to be worth having would otherwise fail to PARSE (verified:
+// a 6,060-account fold is ~836 KB of SQL and returns "Max query size exceeded"
+// until this is raised). 64 MiB is far above MAX_DIRECTORY_FOLD_PAIRS' worst
+// case, so the pair cap — not this — is what actually bounds the request.
+const FOLD_QUERY_SETTINGS = { max_query_size: '67108864' } as const
+function viewerFoldSettings(viewerFold?: ViewerFold): Record<string, string> {
+  return viewerFold?.ids.length ? { ...FOLD_QUERY_SETTINGS } : {}
+}
+
 // The accounts directory, folded under one viewer's OWN tags in addition to
 // the shared system ones. Runs the exact same bounded whole-directory query
 // getAccounts does (see accountsPage's cost comment) — this adds no new
@@ -25990,7 +26042,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
       // from. Each member is its own row instead.
       if (members) return idExpr
       if (!viewerFold) return `if(t.lid = '', ${idExpr}, t.lid)`
-      const userKey = `transform(${idExpr}, {fold_ids:Array(String)}, {fold_keys:Array(String)}, '')`
+      const userKey = `transform(${idExpr}, fold_ids, fold_keys, '')`
       return `if(${userKey} != '', ${userKey}, if(t.lid = '', ${idExpr}, t.lid))`
     }
     // The `grouped` CTE's other half of the same grouping key (see gkeySql just
@@ -26002,7 +26054,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     const labelIdSql = (idExpr: string): string => {
       if (members) return `''`
       if (!viewerFold) return 't.lid'
-      const userKey = `transform(${idExpr}, {fold_ids:Array(String)}, {fold_keys:Array(String)}, '')`
+      const userKey = `transform(${idExpr}, fold_ids, fold_keys, '')`
       return `if(${userKey} != '', '', t.lid)`
     }
     // The activity ordering and value both come from the background leaderboard, keyed
@@ -26156,7 +26208,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     // name already does via `g.lname`. Every piece here is '' absent a fold, so
     // the SELECT list is character-for-character what it always was.
     const gkeySelect = viewerFold ? 'g.gkey AS gkey,\n            ' : ''
-    const groupNameExpr = viewerFold ? `transform(g.gkey, {fold_group_keys:Array(String)}, {fold_group_names:Array(String)}, '')` : ''
+    const groupNameExpr = viewerFold ? `transform(g.gkey, fold_group_keys, fold_group_names, '')` : ''
     const hasIdentitySql = viewerFold
       ? `if(${groupNameExpr} != '' OR g.label_id != '' OR ident.account_id != '', 1, 0) AS has_identity`
       : `if(g.label_id != '' OR ident.account_id != '', 1, 0) AS has_identity`
@@ -26168,7 +26220,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
       client.query({
         query: `
           WITH
-            tags AS (SELECT account_id, any(label_id) AS lid, any(label_name) AS lname, any(color) AS c, any(icon) AS ic
+            ${viewerFoldWithSql(viewerFold)}tags AS (SELECT account_id, any(label_id) AS lid, any(label_name) AS lname, any(color) AS c, any(icon) AS ic
                        FROM price_data.account_tags FINAL WHERE deleted = 0 GROUP BY account_id),
             -- H160 → bound substrate owner (EVMAccounts.Bound; the bound H160 is
             -- the owner's first 20 bytes, so the ETH-prefixed row is the same
@@ -26326,11 +26378,8 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
         query_params: {
           limit, offset,
           ...(members ? { members } : {}),
-          ...(viewerFold ? {
-            fold_ids: viewerFold.ids, fold_keys: viewerFold.keys,
-            fold_group_keys: [...viewerFold.groups.keys()], fold_group_names: [...viewerFold.groups.values()].map(g => g.name),
-          } : {}),
         },
+        clickhouse_settings: viewerFoldSettings(viewerFold),
         format: 'JSONEachRow',
       }),
       // Unaffected by a viewer's fold: the row TOTAL stays the shared,
