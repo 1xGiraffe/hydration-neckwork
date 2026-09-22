@@ -347,6 +347,26 @@ export function Amt({ raw, dec }: { raw?: string | null; dec: number }) {
   return <CopyValue full={F.preciseAmount(raw, dec)} plain={plain}>{F.amount(raw, dec)}</CopyValue>
 }
 
+// The same figure at full display precision, for a DETAIL page — where a list
+// shows "500.0" a detail page shows "500.0131", and both should widen to every
+// digit behind them on hover and copy on a second click. Detail pages were
+// printing F.exact into a bare span, so the one screen a reader opens *to get a
+// number off* was the screen they could not take it from.
+export function ExactAmt({ raw, dec }: { raw?: string | null; dec: number }) {
+  if (raw == null || raw === '') return <>—</>
+  const plain = F.preciseAmountPlain(raw, dec)
+  if (plain === '—') return <>{F.exact(raw, dec)}</>
+  return <CopyValue full={F.preciseAmount(raw, dec)} plain={plain}>{F.exact(raw, dec)}</CopyValue>
+}
+
+// A price, which priceStr rounds to a readable number of significant digits —
+// so the figure on screen is not the figure behind it, and a reader comparing
+// against another venue needs the one behind it.
+export function PriceUsd({ v }: { v?: number | null }) {
+  if (v == null || !Number.isFinite(v)) return <>—</>
+  return <CopyValue full={'$' + v} plain={String(v)}>{F.priceUsd(v)}</CopyValue>
+}
+
 // A USD figure. Unlike Amt this can only promise the UN-COMPACTED number, never
 // an exact one: the API sends USD as a float it has already valued and rounded,
 // so there is no exact source behind "$40k" — the chip widens it to "$40,127.44"

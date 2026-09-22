@@ -6,7 +6,7 @@ import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
 import { BOND_LABELS, LIQ_LABELS, MM_LABELS, intentLabel } from '../components/activityColors'
 import { RevenueRow } from '../components/RevenueRow'
-import { PoolBadge, Usd, Amt, Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
+import { PoolBadge, Usd, Amt, ExactAmt, Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { convictionLabel, voteSideLabel, voteSubjectLabel } from '../utils/voteRows'
 
@@ -113,7 +113,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {row.type === 'xcm' && row.xcmFees?.map((fee, i) => <Fragment key={i}>
               <div className="dt">{fee.kind === 'relayer' ? 'Relayer fee' : 'Delivery fee'}</div>
               <div className="dd mono xcm-fee">
-                <span>{F.exact(fee.amount, fee.asset.decimals)} <AssetChip asset={fee.asset} />{fee.valueUsd != null && <span className="muted"> · <Usd v={fee.valueUsd} /></span>}</span>
+                <span><ExactAmt raw={fee.amount} dec={fee.asset.decimals} /> <AssetChip asset={fee.asset} />{fee.valueUsd != null && <span className="muted"> · <Usd v={fee.valueUsd} /></span>}</span>
                 {fee.settlement === 'destination' && <span className="muted">deducted from the bridged amount at the destination</span>}
                 {fee.purchase && <span className="muted">bought with <Amt raw={fee.purchase.amount} dec={fee.purchase.asset.decimals} /> <AssetChip asset={fee.purchase.asset} />{fee.purchase.valueUsd != null && <> · <Usd v={fee.purchase.valueUsd} /></>}</span>}
               </div>
@@ -133,7 +133,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
                   for 1:1 at maturity. The issue fee is charged in that asset too, and
                   stays with the Treasury. */}
               {row.bondUnderlying && <><div className="dt">Underlying</div><div className="dd"><AssetChip asset={row.bondUnderlying} /></div></>}
-              {row.bondAction === 'Issue' && row.bondFee != null && row.bondUnderlying && <><div className="dt">Issue fee</div><div className="dd mono">{F.exact(row.bondFee, row.bondUnderlying.decimals)} <AssetChip asset={row.bondUnderlying} /></div></>}
+              {row.bondAction === 'Issue' && row.bondFee != null && row.bondUnderlying && <><div className="dt">Issue fee</div><div className="dd mono"><ExactAmt raw={row.bondFee} dec={row.bondUnderlying.decimals} /> <AssetChip asset={row.bondUnderlying} /></div></>}
             </>}
             {row.type === 'vote' && <>
               {/* The subtitle carries these too, but a subtitle is scenery: a reader
@@ -162,7 +162,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
               {row.otcAction === 'Fill' && row.to && <><div className="dt">Maker</div><div className="dd"><AddrPill account={row.to} /></div></>}
               {row.otcAction === 'Place' && <><div className="dt">Partially fillable</div><div className="dd">{row.otcPartiallyFillable ? 'Yes' : 'No'}</div></>}
               {row.otcAction === 'Fill' && <><div className="dt">Partial fill</div><div className="dd">{row.otcPartial ? 'Yes' : 'No'}</div></>}
-              {row.otcAction === 'Fill' && row.otcFee != null && row.assetOut && <><div className="dt">Fee</div><div className="dd mono">{F.exact(row.otcFee, row.assetOut.decimals)} <AssetChip asset={row.assetOut} /></div></>}
+              {row.otcAction === 'Fill' && row.otcFee != null && row.assetOut && <><div className="dt">Fee</div><div className="dd mono"><ExactAmt raw={row.otcFee} dec={row.assetOut.decimals} /> <AssetChip asset={row.assetOut} /></div></>}
             </>}
             {row.type === 'intent' && <>
               {/* The order is what this event belongs to; its page lists every event of
@@ -175,7 +175,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
               {row.intentAction === 'Place' && <><div className="dt">Partial fills</div><div className="dd">{row.intentPartial ? 'Allowed' : 'Not allowed'}</div></>}
               {row.intentDeadline && <><div className="dt">Deadline</div><div className="dd mono">{F.datetime(row.intentDeadline)}</div></>}
               {row.intentForward && <><div className="dt">Forward contract</div><div className="dd mono" style={{ overflowWrap: 'anywhere' }}>{row.intentForward}</div></>}
-              {row.intentRemainingBudget != null && row.assetIn && <><div className="dt">Remaining budget</div><div className="dd mono">{F.exact(row.intentRemainingBudget, row.assetIn.decimals)} <AssetChip asset={row.assetIn} /></div></>}
+              {row.intentRemainingBudget != null && row.assetIn && <><div className="dt">Remaining budget</div><div className="dd mono"><ExactAmt raw={row.intentRemainingBudget} dec={row.assetIn.decimals} /> <AssetChip asset={row.assetIn} /></div></>}
               {row.intentMigratedFrom != null && <><div className="dt">Migrated from</div><div className="dd mono"><Link to={paths.dcaSchedule(row.intentMigratedFrom)} className="hash">DCA schedule #{row.intentMigratedFrom}</Link></div></>}
             </>}
             {row.dca && row.dcaStatus === 'failed' && <><div className="dt">Result</div><div className="dd"><StatusBadge ok={false} /></div></>}
