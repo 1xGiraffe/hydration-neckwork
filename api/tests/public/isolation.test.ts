@@ -32,6 +32,10 @@ const ALLOWED_SHARED = new Set([
   // need the same prices the public pair route composes.
   'services/foreignCandles.ts',
   'services/valuation.ts',
+  // The price limit an ICE intent states, both directions, from the raw integer
+  // amounts. A leaf (no imports at all); shared so the explorer, this surface and
+  // the other API cannot quote one order's limit two ways.
+  'services/intentLimitPrice.ts',
   // The canonical per-stream revenue definitions — feesCharts reads the same
   // builders the derivations jobs and the explorer revenue surfaces use, so
   // the public series and the explorer can never drift apart.

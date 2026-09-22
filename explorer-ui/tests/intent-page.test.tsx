@@ -99,7 +99,10 @@ describe('the Intent page — a filled limit order', () => {
   })
   it('states the limit, the owner, and where it was submitted and settled', () => {
     expect(html).toContain('Limit')
+    // Both directions: which one reads as "the price" depends on which leg is the
+    // money asset, and the order does not say.
     expect(html).toContain('USDT per DOT')
+    expect(html).toContain('DOT per USDT')
     expect(html).toContain('1L53bU')                               // the owner pill
     expect(html).toContain('href="/extrinsic/')                    // submission + solutions
     expect(html).toContain('Callbacks')
@@ -116,6 +119,14 @@ describe('the Intent page — an open DCA intent', () => {
     expect(html).toContain('Budget')
     expect(html).toContain(' left')
     expect(html).toContain('every ')
+  })
+  // The limit binds ONE PERIOD's trade, and it used to be shown for swap intents
+  // only — leaving a DCA intent's whole reason for resting off its own page.
+  it('states the per-trade limit and its price, both ways round', () => {
+    expect(html).toContain('Limit')
+    expect(html).toContain('per trade')
+    expect(html).toContain('HDX per DOT')
+    expect(html).toContain('DOT per HDX')
   })
   it('names the DCA schedule it was migrated from', () => {
     expect(html).toContain('Migrated from')

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { activityTypes } from '../src/routes/explorer'
-import { ICE_POT_ACCOUNT, INTENT_EVENT_NAMES, activityPagesInMemory, activityRowMatchesAction, activityTypeMatchesFamily, activityWindowPlan, dcaMigratedScheduleId, dcaMigrationReason, dcaScheduleStatus, iceMatchedInUsd, iceSettlementAmounts, intentActivityParts, intentOrderStatus, intentRowFromEvent, intentSeqOf, isIntentOnlyTradeRequest, limitPriceOutPerIn, resolveIntentActions, suppressIcePotSettlementTrades, type ActivityRow, type IceSettlementFill, type IceSettlementLeg, type IntentOrder } from '../src/services/explorerService'
+import { ICE_POT_ACCOUNT, INTENT_EVENT_NAMES, activityPagesInMemory, activityRowMatchesAction, activityTypeMatchesFamily, activityWindowPlan, dcaMigratedScheduleId, dcaMigrationReason, dcaScheduleStatus, iceMatchedInUsd, iceSettlementAmounts, intentActivityParts, intentOrderStatus, intentRowFromEvent, intentLimitPrice, intentSeqOf, isIntentOnlyTradeRequest, resolveIntentActions, suppressIcePotSettlementTrades, type ActivityRow, type IceSettlementFill, type IceSettlementLeg, type IntentOrder } from '../src/services/explorerService'
 import type { PriceInfo } from '../src/services/explorerService'
 import { isClassifiedAction } from '../src/services/pendingActivity'
 import { activityPath, activityTypeSelects, dcaHourly, dcaIntentScheduleRow, evaluateDcaStart, largeTradeRowEligible, renderMatch, type RuleMatch } from '../src/notifications/evaluator'
@@ -373,18 +373,27 @@ describe('intentOrderStatus', () => {
   })
 })
 
-// amountOut/amountIn in whole units, 12 decimal places, integer arithmetic only.
-describe('limitPriceOutPerIn', () => {
+// The order's limit in whole units, 12 decimal places, integer arithmetic only.
+describe('intentLimitPrice', () => {
   it('scales both legs by their decimals', () => {
     // 1000 DOT (10 dp) for 4500 USDT (6 dp) → 4.5 USDT per DOT
-    expect(limitPriceOutPerIn('10000000000000', 10, '4500000000', 6)).toBe('4.500000000000')
+    expect(intentLimitPrice('10000000000000', 10, '4500000000', 6)?.outPerIn).toBe('4.500000000000')
     // 2 HDX (12 dp) for 0.03 USDT → 0.015
-    expect(limitPriceOutPerIn('2000000000000', 12, '30000', 6)).toBe('0.015000000000')
+    expect(intentLimitPrice('2000000000000', 12, '30000', 6)?.outPerIn).toBe('0.015000000000')
   })
-  it('truncates past twelve places and refuses a zero or unreadable input', () => {
-    expect(limitPriceOutPerIn('3000000000000', 12, '1000000', 6)).toBe('0.333333333333')
-    expect(limitPriceOutPerIn('0', 12, '1000000', 6)).toBeNull()
-    expect(limitPriceOutPerIn('abc', 12, '1000000', 6)).toBeNull()
+  it('states the inverse from the raw amounts rather than by inverting the decimal', () => {
+    // A dca intent buying HDX (12 dp) with HOLLAR (18 dp): 8.3333… HOLLAR per trade
+    // for at least 1126.126126126126 HDX. Inverting the truncated outPerIn gives
+    // 0.00740000000000000037 — the raw amounts give exactly 0.0074.
+    const p = intentLimitPrice('8333333333333333333', 18, '1126126126126126', 12)
+    expect(p?.outPerIn).toBe('135.135135135135')
+    expect(p?.inPerOut).toBe('0.007400000000')
+  })
+  it('truncates past twelve places and refuses a zero or unreadable amount on either leg', () => {
+    expect(intentLimitPrice('3000000000000', 12, '1000000', 6)?.outPerIn).toBe('0.333333333333')
+    expect(intentLimitPrice('0', 12, '1000000', 6)).toBeNull()
+    expect(intentLimitPrice('3000000000000', 12, '0', 6)).toBeNull()
+    expect(intentLimitPrice('abc', 12, '1000000', 6)).toBeNull()
   })
 })
 
