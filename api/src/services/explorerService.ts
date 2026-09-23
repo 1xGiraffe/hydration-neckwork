@@ -3620,8 +3620,14 @@ export interface MoneyMarketPosition {
   ltv: string
   healthFactor: string
   // Present for aggregate/tag positions: a real member whose position can be
-  // opened in DefiSim (never the tag id or an unrelated first member).
+  // opened in DefiSim (never the tag id or an unrelated first member). Also set
+  // on a per-account row so it links to that account — so it does NOT mean
+  // "aggregate"; `memberCount` does.
   simAccount?: string
+  // How many members this row sums. Absent on a single account's own position,
+  // and 1 on a tag whose market has exactly one holder — in both cases the
+  // health factor is that account's, not the lowest of several.
+  memberCount?: number
   reserves?: MmReserve[]
 }
 // Proxy & multisig relations resolved to displayable account refs.
@@ -6034,19 +6040,56 @@ function hfRank(hf: string): number {
 // a combined health factor, and merges per-asset reserves. Markets stay SEPARATE
 // (isolated pools have independent health factors). Returns [] when no member holds
 // any position. Reuses the same per-H160 indexed reads the account view uses.
-async function aggregateMoneyMarket(members: { h160: string; simAccount: string }[]): Promise<MoneyMarketPosition[]> {
+// One member's own money-market position per market, reserves attached. The tag
+// page's Positions tab shows these rather than the aggregate: a combined health
+// factor belongs in the header summary, but a position a reader might act on is
+// one account's, and DefiSim can only be opened for one account at a time.
+//
+// Built from the same two reads the aggregate already makes, so per-account costs
+// nothing extra — it is the same data before it is summed.
+export interface AccountMoneyMarket { account: AccountRef; markets: MoneyMarketPosition[] }
+
+// The reserves a single member holds, grouped onto that member's own positions.
+// The aggregate below SUMS reserves across members into one row per market; here
+// each account keeps its own, which is the whole point of the split.
+function memberMoneyMarket(simAccount: string, positions: MoneyMarketPosition[], reserves: MmReserve[]): MoneyMarketPosition[] {
+  const byMarket = new Map<string, MmReserve[]>()
+  for (const r of reserves) {
+    const key = r.marketKey ?? 'core'
+    const list = byMarket.get(key) ?? byMarket.set(key, []).get(key)!
+    list.push({ ...r })
+  }
+  return orderMoneyMarkets(positions.map(pos => {
+    const own = valueSingleUnpricedSupply(
+      (byMarket.get(pos.marketKey) ?? []).sort((x, y) => (y.suppliedUsd ?? y.debtUsd ?? 0) - (x.suppliedUsd ?? x.debtUsd ?? 0)),
+      pos.totalCollateralBase,
+    )
+    return {
+      ...pos,
+      reserves: own.length ? own : pos.reserves,
+      // Only the primary market is simulable; MoneyMarketPositions reads
+      // defiSimSupported and never offers the link for an isolated one.
+      ...(pos.defiSimSupported ? { simAccount: defiSimTargetForAccountId(simAccount) } : {}),
+    }
+  }))
+}
+
+async function aggregateMoneyMarket(members: { h160: string; simAccount: string }[]): Promise<{ markets: MoneyMarketPosition[]; byAccount: AccountMoneyMarket[] }> {
   const byH160 = new Map<string, string>()
   for (const member of members) {
     if (/^0x[0-9a-fA-F]{40}$/.test(member.h160) && ACCOUNT_RE.test(member.simAccount)) {
       if (!byH160.has(member.h160.toLowerCase())) byH160.set(member.h160.toLowerCase(), member.simAccount)
     }
   }
-  if (!byH160.size) return []
+  if (!byH160.size) return { markets: [], byAccount: [] }
   const perMember = await Promise.all([...byH160].map(async ([h, simAccount]) => ({ h, simAccount, positions: await getMoneyMarketPositions(h), reserves: await getMoneyMarketReserves(h) })))
   interface Acc {
     key: string; label: string; role: 'primary' | 'supplemental'; defiSimSupported: boolean; stakingBacked: boolean
     collateral: bigint; supplied: bigint; debt: bigint; avail: bigint; liqWeighted: bigint; ltvWeighted: bigint
     lastBlock: number; ts: string; simAccount?: string; simRank: number; worstHealthFactor: string; reserves: Map<number, MmReserve>
+    // Who actually contributes to this summed row. The health factor below is the
+    // WORST of them, which is only worth saying when there is more than one.
+    members: Set<string>
   }
   const acc = new Map<string, Acc>()
   for (const { simAccount, positions, reserves } of perMember) {
@@ -6057,10 +6100,11 @@ async function aggregateMoneyMarket(members: { h160: string; simAccount: string 
           key: pos.marketKey, label: pos.market, role: pos.role, defiSimSupported: pos.defiSimSupported,
           stakingBacked: pos.stakingBacked ?? false, collateral: 0n, supplied: 0n, debt: 0n, avail: 0n,
           liqWeighted: 0n, ltvWeighted: 0n, lastBlock: 0, ts: '', simRank: Infinity,
-          worstHealthFactor: 'inf', reserves: new Map(),
+          worstHealthFactor: 'inf', reserves: new Map(), members: new Set(),
         }
         acc.set(pos.marketKey, a)
       }
+      a.members.add(simAccount)
       const c = BigInt(pos.totalCollateralBase || '0')
       a.collateral += c; a.supplied += BigInt((pos.totalSuppliedBase ?? pos.totalCollateralBase) || '0'); a.debt += BigInt(pos.totalDebtBase || '0'); a.avail += BigInt(pos.availableBorrowsBase || '0')
       a.liqWeighted += c * BigInt(pos.liquidationThreshold || '0')   // basis-point ratios — collateral-weighted
@@ -6101,10 +6145,24 @@ async function aggregateMoneyMarket(members: { h160: string; simAccount: string 
       totalCollateralBase: a.collateral.toString(), totalSuppliedBase: maxBase8(a.supplied.toString(), reserveSuppliedBase), totalDebtBase: a.debt.toString(), availableBorrowsBase: a.avail.toString(),
       liquidationThreshold: liqThr, ltv, healthFactor: a.worstHealthFactor,
       ...(a.simAccount ? { simAccount: a.simAccount } : {}),
+      // How many members this row sums. The card says "Lowest member health"
+      // only above one — a tag with a single holder has a health factor, not a
+      // lowest one, and a per-account row (memberCount absent) never does.
+      memberCount: a.members.size,
       reserves: mergedReserves,
     })
   }
-  return orderMoneyMarkets(out)
+  // An account with no position at all is not a row — the list names who HAS one.
+  const byAccount = perMember
+    .map(m => ({ account: accountRef(m.simAccount), markets: memberMoneyMarket(m.simAccount, m.positions, m.reserves) }))
+    .filter(entry => entry.markets.length > 0)
+    .sort((x, y) => mmPositionValueUsd(y.markets) - mmPositionValueUsd(x.markets))
+  return { markets: orderMoneyMarkets(out), byAccount }
+}
+
+// Rank accounts by the money actually at stake, so the biggest position leads.
+function mmPositionValueUsd(markets: MoneyMarketPosition[]): number {
+  return markets.reduce((sum, m) => sum + Number(m.totalCollateralBase || '0') / 1e8 + Number(m.totalDebtBase || '0') / 1e8, 0)
 }
 
 // Fold supplied aToken collateral into the wallet balances list (it IS the
@@ -27513,6 +27571,10 @@ export interface TagDetail {
   liquidationVolumeUsd?: number
   revenueUsd?: number
   moneyMarket: MoneyMarketPosition[]
+  // The same positions unaggregated, one entry per member that holds one. The
+  // header summarises; the Positions tab lists, because a health factor is an
+  // account's and DefiSim opens one account at a time.
+  moneyMarketByAccount?: AccountMoneyMarket[]
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
   openLimitOrders?: OpenLimitOrder[]
@@ -27712,7 +27774,8 @@ async function buildTagDetailForMembers(
       ...members,
       ...members.map(evmAccountForm).filter(Boolean) as string[],
     ])]
-    let moneyMarket = await aggregateMoneyMarket(mmMembers)
+    const mmAll = await aggregateMoneyMarket(mmMembers)
+    let moneyMarket = mmAll.markets
     // LP stays (it feeds the displayed value); only the heavy portfolio-history walk
     // and DCA — neither shown on the card — are skipped in summary.
     const [history, bareLp, farmLp, xykLp, v3Lp, activeDcas, openLimitOrders] = await Promise.all([
@@ -27768,7 +27831,8 @@ async function buildTagDetailForMembers(
       ...(tradingVolumeUsd > 0 ? { tradingVolumeUsd } : {}),
       ...(liquidationVolumeUsd > 0 ? { liquidationVolumeUsd } : {}),
       ...(revenueUsd > 0 ? { revenueUsd } : {}),
-      moneyMarket, liquidityPositions: [...lpPositions, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)), activeDcas, openLimitOrders,
+      moneyMarket, moneyMarketByAccount: mmAll.byAccount,
+      liquidityPositions: [...lpPositions, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)), activeDcas, openLimitOrders,
       portfolioSeries, portfolioSeriesExHdx, portfolioDates: history.portfolioDates, portfolioBlocks: history.portfolioBlocks,
       // Holdings without indexed historical observations remain absent rather
       // than being projected backward from their current balance.

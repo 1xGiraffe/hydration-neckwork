@@ -166,9 +166,24 @@ describe('primary-first Money Market presentation', () => {
       .toEqual({ key: 'activity', label: 'Activity' })
   })
 
-  it('labels a tag aggregate as the lowest real member health', () => {
-    const html = renderToStaticMarkup(<MoneyMarketPositions markets={[position({ simAccount: '0xabc' })]} />)
+  // Only a row that SUMS several members shows the worst of them, so only that
+  // row may say so. This used to key off simAccount, which meant "has a DefiSim
+  // target" — true of the tag aggregate alone until per-account rows gained one
+  // so each could link to its own address, at which point every single account
+  // claimed to be showing the lowest of several.
+  it('labels a multi-member aggregate as the lowest real member health', () => {
+    const html = renderToStaticMarkup(<MoneyMarketPositions markets={[position({ simAccount: '0xabc', memberCount: 3 })]} />)
     expect(html).toContain('Lowest member health')
+  })
+
+  it('calls it a health factor when the row is one account, DefiSim target or not', () => {
+    // A per-account row on a tag page: carries a sim target, sums nobody.
+    const perAccount = renderToStaticMarkup(<MoneyMarketPositions markets={[position({ simAccount: '0xabc' })]} />)
+    expect(perAccount).toContain('Health factor')
+    expect(perAccount).not.toContain('Lowest member health')
+    // A tag whose market has exactly one holder has a health factor, not a lowest one.
+    const single = renderToStaticMarkup(<MoneyMarketPositions markets={[position({ simAccount: '0xabc', memberCount: 1 })]} />)
+    expect(single).not.toContain('Lowest member health')
   })
 })
 

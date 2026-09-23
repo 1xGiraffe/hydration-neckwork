@@ -3859,3 +3859,9 @@ a.rev-pill-label:hover { color: var(--accent); }
 .dl.mcp-notes .dt, .dl.mcp-surfaces .dt { align-items: flex-start; }
 .dl.mcp-surfaces .dd b { color: var(--text-high); font-weight: 500; }
 .dl.mcp-surfaces .dd .ext-link { margin-left: 6px; }
+
+/* A tag's money-market positions, split per member. Each block is one account's
+   cards under its own address pill; the gap is what keeps two members' health
+   factors from reading as one position. */
+.mm-account { margin-bottom: 18px; }
+.mm-account-head { display: flex; align-items: center; gap: 8px; }
