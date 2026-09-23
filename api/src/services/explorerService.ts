@@ -1637,6 +1637,32 @@ async function refreshPrices(): Promise<Map<number, PriceInfo>> {
 // The shared valuation leaf (assetValue.ts) under the name this file's ~30 call
 // sites and iceService already use. PriceInfo satisfies its structural
 // AssetPrice, so there is one arithmetic and one $0-vs-unknown rule, not two.
+// How a stated price limit compares with the market right now: the limit's own
+// assetIn-per-assetOut over the market's. 1.0 sits on market.
+//
+// Both an intent's and a DCA schedule's limit is a CEILING on what it pays, and
+// pallet_intent enforces the tighter of it and an oracle-derived floor built from
+// `slippage`. So a ceiling far ABOVE market cannot reject a fill — it is not what
+// the order runs under, the slippage band is — and one far BELOW market cannot
+// fill at today's price at all. Neither is a defect, but a limit reading 5 HOLLAR
+// per HDX beside a market of 0.0075 reads exactly like one, so the ratio travels
+// with the limit and the surfaces can say which case it is.
+//
+// Null when either leg has no price: an unpriced pair has no market to compare
+// to, and a missing comparison must read as absent rather than as "on market".
+export function limitMarketRatio(
+  prices: Map<number, PriceInfo>, inPerOut: string | null, assetIn: AssetRef, assetOut: AssetRef,
+): number | null {
+  const limit = Number(inPerOut)
+  if (!inPerOut || !Number.isFinite(limit) || limit <= 0) return null
+  const unit = (a: AssetRef) => usdValue(prices, a.assetId, (10n ** BigInt(a.decimals)).toString(), a.decimals)
+  const usdIn = unit(assetIn), usdOut = unit(assetOut)
+  if (usdIn == null || usdOut == null || usdIn <= 0 || usdOut <= 0) return null
+  const market = usdOut / usdIn          // assetIn per one assetOut, at market
+  const ratio = limit / market
+  return Number.isFinite(ratio) && ratio > 0 ? ratio : null
+}
+
 export function usdValue(prices: Map<number, PriceInfo>, assetId: number, raw: string, decimals: number): number | null {
   return usdOfRaw(prices, assetId, raw, decimals)
 }
@@ -6880,7 +6906,7 @@ export async function loadXykPrincipalHistory(accounts: string[], candidateAsset
 // Completed/Terminated. DCA.Scheduled carries the full order (assetIn/Out, per-trade
 // amount, totalAmount, period); progress is summed from DCA.TradeExecuted and the
 // next slot from DCA.ExecutionPlanned. totalAmount "0" = open-ended (no remaining).
-export interface ActiveDcaLimit { price: string; amount: string; asset: 'in' | 'out' }
+export interface ActiveDcaLimit { price: string; amount: string; asset: 'in' | 'out'; marketRatio: number | null }
 export interface ActiveDca {
   // A classic schedule's id, or — for a DCA intent — the low 64 bits of its u128
   // id, the short "#n" handle. The two id spaces overlap (schedule 76 and intent
@@ -7306,7 +7332,7 @@ async function dcaScheduleBounds(scheds: ActiveDcaScheduleRow[]): Promise<Map<st
 // A zero bound is NO bound (see dcaOrderTerms): a floor of nothing rejects
 // nothing, and roughly a fifth of Sell schedules set one deliberately to rely on
 // slippage against the oracle instead. Those report null, never a limit of 0.
-export function activeDcaLimit(s: ActiveDcaScheduleRow, aIn: AssetRef, aOut: AssetRef, bound: DcaOrderTerms | undefined): ActiveDcaLimit | null {
+export function activeDcaLimit(s: ActiveDcaScheduleRow, aIn: AssetRef, aOut: AssetRef, bound: DcaOrderTerms | undefined, prices: Map<number, PriceInfo> = new Map()): ActiveDcaLimit | null {
   const buy = s.direction === 'Buy'
   // Sell: `amt_per` of assetIn per trade, for at least `floor` of assetOut.
   // Buy:  `amt_per` of assetOut per trade, for at most `cap` of assetIn.
@@ -7317,9 +7343,10 @@ export function activeDcaLimit(s: ActiveDcaScheduleRow, aIn: AssetRef, aOut: Ass
   if (amountIn == null || amountOut == null) return null
   const price = intentLimitPrice(amountIn, assetDecimalsOrNull(aIn.assetId), amountOut, assetDecimalsOrNull(aOut.assetId))
   if (!price) return null
+  const marketRatio = limitMarketRatio(prices, price.inPerOut, aIn, aOut)
   return buy
-    ? { price: price.inPerOut, amount: cap!, asset: 'in' }
-    : { price: price.inPerOut, amount: floor!, asset: 'out' }
+    ? { price: price.inPerOut, amount: cap!, asset: 'in', marketRatio }
+    : { price: price.inPerOut, amount: floor!, asset: 'out', marketRatio }
 }
 
 async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveDca[]> {
@@ -7357,7 +7384,7 @@ async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveD
       fundingBalance,
       fundingUsd: fundingBalance != null ? usdValue(prices, aIn.assetId, fundingBalance, aIn.decimals) : null,
       scheduleBlock: s.sblock, scheduleIndex: s.sidx,
-      limit: activeDcaLimit(s, aIn, aOut, bounds.get(String(s.id))),
+      limit: activeDcaLimit(s, aIn, aOut, bounds.get(String(s.id)), prices),
       who: accountRef(s.who),
     }
   })
@@ -15025,6 +15052,10 @@ export interface IntentOrderDetail {
   // services/intentLimitPrice.ts for why slippage is not folded in.
   limitPriceOutPerIn: string | null   // amountOut per one whole amountIn
   limitPriceInPerOut: string | null   // amountIn per one whole amountOut — the cap on what it buys
+  // The limit over the market rate (1.0 = on market). See limitMarketRatio: far
+  // above 1 the ceiling cannot bind and the slippage band is the real constraint;
+  // far below, the order cannot fill at today's price. Null for an unpriced pair.
+  limitMarketRatio: number | null
   links: { submission: { block: number; extrinsicIndex: number | null }; solutions: { block: number; extrinsicIndex: number | null }[] }
 }
 // `events` = the lifecycle event names in chain order. A cancel or an expiry is
@@ -15316,6 +15347,7 @@ export async function getIntentOrder(intentId: string, offset = 0, limit = 25): 
       // against whichever of the two it is.
       limitPriceOutPerIn: priceLimit?.outPerIn ?? null,
       limitPriceInPerOut: priceLimit?.inPerOut ?? null,
+      limitMarketRatio: limitMarketRatio(prices, priceLimit?.inPerOut ?? null, aIn, aOut),
       links: { submission: { block: order.blockHeight, extrinsicIndex: order.extrinsicIndex }, solutions },
     }
   })

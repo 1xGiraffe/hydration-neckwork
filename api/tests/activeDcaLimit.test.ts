@@ -39,7 +39,8 @@ describe('activeDcaLimit', () => {
   // 60,000 HDX per trade for at least 400 USDT → it pays at most 150 HDX per USDT.
   it('quotes a Sell schedule as a ceiling on the price it pays', () => {
     const limit = activeDcaLimit(row(), aIn(), aOut(), terms('400000000', null))
-    expect(limit).toEqual({ price: '150.000000000000', amount: '400000000', asset: 'out' })
+    // No price map passed, so no market to compare against — null, never a claim.
+    expect(limit).toEqual({ price: '150.000000000000', amount: '400000000', asset: 'out', marketRatio: null })
   })
 
   // Buy fixes the OUTPUT: buy 400 USDT per trade, paying at most 60,000 HDX. The
@@ -48,13 +49,13 @@ describe('activeDcaLimit', () => {
     const limit = activeDcaLimit(
       row({ direction: 'Buy', amt_per: '400000000' }), aIn(), aOut(), terms(null, '60000000000000000'),
     )
-    expect(limit).toEqual({ price: '150.000000000000', amount: '60000000000000000', asset: 'in' })
+    expect(limit).toEqual({ price: '150.000000000000', amount: '60000000000000000', asset: 'in', marketRatio: null })
   })
 
   // An intent carries its floor on its own row; no placement lookup is involved.
   it('reads a DCA intent floor from the order row, not from a schedule bound', () => {
     const limit = activeDcaLimit(row({ intent_id: '77', amount_out: '400000000' }), aIn(), aOut(), undefined)
-    expect(limit).toEqual({ price: '150.000000000000', amount: '400000000', asset: 'out' })
+    expect(limit).toEqual({ price: '150.000000000000', amount: '400000000', asset: 'out', marketRatio: null })
   })
 
   // A zero bound IS no bound (dcaOrderTerms strips it to null): a floor of nothing
@@ -79,5 +80,17 @@ describe('activeDcaLimit', () => {
   it('reports no limit when an asset is outside the registry', () => {
     const unknown = { ...aOut(), assetId: 987654 }
     expect(activeDcaLimit(row({ asset_out: 987654 }), aIn(), unknown, terms('400000000', null))).toBeNull()
+  })
+
+  // The ratio is what lets a surface say whether the stated limit is the constraint
+  // the order actually runs under. A ceiling far above market cannot reject a fill.
+  it('reports how the limit compares with the market when prices are known', () => {
+    const prices = new Map([
+      [HDX, { price: 1, change24h: 0 }],
+      [USDT, { price: 150, change24h: 0 }],
+    ])
+    // Market: 150 HDX per USDT, and the order's ceiling is exactly 150 -> on market.
+    const onMarket = activeDcaLimit(row(), aIn(), aOut(), terms('400000000', null), prices)
+    expect(onMarket?.marketRatio).toBeCloseTo(1, 6)
   })
 })
