@@ -2,6 +2,7 @@
 import { useMemo } from 'react'
 import { F, Amt, Usd, Num, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash, EmptyRow, Copy } from './ui'
 import type { ChartMarker, DetailTab } from './ui'
+import type { AccountMoneyMarket } from '../types'
 import { Link, paths, setQuery } from '../router'
 import { limitBinding } from '../utils/limitBinding'
 import type { ActivitySlug } from '../router'
@@ -441,7 +442,13 @@ function MoneyMarketCard({ mm, defisimAddress }: { mm: MoneyMarketPosition; defi
           <div className="mm-stat"><span className="k">Borrowed</span><span className="v">{debtUsd > 0 ? <Usd v={debtUsd} /> : '—'}</span></div>
           <div className="mm-stat"><span className="k">Net worth</span><span className="v"><Usd v={supplyUsd - debtUsd} /></span></div>
           <div className="mm-stat"><span className="k">Available to borrow</span><span className="v"><Usd v={Number(mm.availableBorrowsBase) / 1e8} /></span></div>
-          <div className="mm-stat"><span className="k">{mm.simAccount ? 'Lowest member health' : 'Health factor'}</span><span className={`v hf ${hf.cls}`}>{hf.label}</span></div>
+          {/* "Lowest member health" is only true of a row that SUMS several
+              members, where the figure is the worst of them. It used to key off
+              simAccount, which was a proxy for "this is an aggregate" — until a
+              per-account row started carrying one so it could link to its own
+              address. memberCount says it directly: absent on one account's own
+              position, and 1 on a tag whose market has a single holder. */}
+          <div className="mm-stat"><span className="k">{(mm.memberCount ?? 0) > 1 ? 'Lowest member health' : 'Health factor'}</span><span className={`v hf ${hf.cls}`}>{hf.label}</span></div>
         </div>
         <MoneyMarketRiskBar mm={mm} />
         <MoneyMarketReserveColumns mm={mm} />
@@ -453,6 +460,34 @@ function MoneyMarketCard({ mm, defisimAddress }: { mm: MoneyMarketPosition; defi
 // Shared account/tag renderer. The role comes from the API so presentation does
 // not depend on risk order or on a magic market label. Every market renders as
 // the same full card — primary first, DefiSim scoped to it.
+// A tag's money-market positions, one block per member rather than one summed
+// block for the tag. A combined health factor is a useful headline — it is what
+// the header stat shows — but it is not a position anyone can act on: liquidation
+// happens per account, and DefiSim simulates one account at a time. So each member
+// that holds a position gets its own card set, addressed and linkable.
+//
+// Ordered by the money at stake, so the account that matters leads. Members with
+// no position are absent rather than rendered empty.
+export function MoneyMarketByAccount({ accounts }: { accounts: AccountMoneyMarket[] }) {
+  if (!accounts.length) return null
+  return (
+    <>
+      {accounts.map(entry => (
+        <div key={entry.account.accountId} className="mm-account">
+          <div className="sec-title mm-account-head">
+            <AddrPill account={entry.account} />
+          </div>
+          {/* The same cards the account page renders, so a position reads the same
+              wherever it is met. defisimAddress falls back to this member's own
+              address; the card itself withholds the link on an isolated market,
+              which DefiSim cannot simulate. */}
+          <MoneyMarketPositions markets={entry.markets} defisimAddress={entry.account.address} />
+        </div>
+      ))}
+    </>
+  )
+}
+
 export function MoneyMarketPositions({ markets, defisimAddress }: { markets: MoneyMarketPosition[]; defisimAddress?: string }) {
   const primary = markets.find(m => m.role === 'primary') ?? markets.find(m => m.marketKey === 'core')
   const others = markets.filter(m => m !== primary)

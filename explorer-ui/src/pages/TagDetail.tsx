@@ -12,7 +12,7 @@ import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
-import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, ActiveDcaTable, LimitOrdersTable, LiquidityPositionsTable } from '../components/AccountSections'
+import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, MoneyMarketByAccount, ActiveDcaTable, LimitOrdersTable, LiquidityPositionsTable } from '../components/AccountSections'
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { NotifyButton } from '../components/NotifyButton'
 import { listForTag, looksLikeUserTagId, tagMapStatus, useTagMapVersion } from '../userTags'
@@ -211,7 +211,13 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
               )}
 
               {activeView === 'positions' && (<>
-              <MoneyMarketPositions markets={mmList} />
+              {/* Per member, not summed: the header stat carries the tag-wide
+                  figure, while a position here is one account's — which is the
+                  only form in which it can be simulated or acted on. Falls back
+                  to the aggregate only if the per-account split is absent. */}
+              {data.moneyMarketByAccount?.length
+                ? <MoneyMarketByAccount accounts={data.moneyMarketByAccount} />
+                : <MoneyMarketPositions markets={mmList} />}
               {activeDcas.length > 0 && <ActiveDcaTable dcas={activeDcas} headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />}
               {limitOrders.length > 0 && <LimitOrdersTable orders={limitOrders} now={now} />}
               {liquidityPositions.length > 0 && <LiquidityPositionsTable positions={liquidityPositions} />}
