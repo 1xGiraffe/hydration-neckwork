@@ -459,6 +459,8 @@ export interface IntentOrderDetail {
   // covers one period's trade. `limitPriceInPerOut` is the cap on what it buys.
   limitPriceOutPerIn: string | null
   limitPriceInPerOut: string | null
+  // The limit over the market rate; 1.0 sits on market. Null for an unpriced pair.
+  limitMarketRatio: number | null
   links: { submission: { block: number; extrinsicIndex: number | null }; solutions: { block: number; extrinsicIndex: number | null }[] }
 }
 // One `ICE.submit_solution` extrinsic's outcome: the fills it settled, the pot's own
@@ -531,7 +533,7 @@ export interface LpPosition { positionId: string; asset: AssetRef; amount: strin
 // direction: `price` is the most it will pay for a unit of what it buys (assetIn
 // per assetOut), and `amount`/`asset` restate the bound the order placed — a
 // Sell's floor on assetOut, a Buy's cap on assetIn.
-export interface ActiveDcaLimit { price: string; amount: string; asset: 'in' | 'out' }
+export interface ActiveDcaLimit { price: string; amount: string; asset: 'in' | 'out'; marketRatio: number | null }
 export interface ActiveDca {
   // A schedule id, or a DCA intent's short "#n" handle. The two id spaces
   // overlap, so this is a display handle — `intentId` decides which order a row

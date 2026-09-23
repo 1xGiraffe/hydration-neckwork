@@ -3,6 +3,7 @@ import { useIntentOrder, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
+import { limitBinding } from '../utils/limitBinding'
 import { Crumbs, Num, Amt, F, AddrPill, AssetChip, AssetAmount, FeeAmount, ProgressRing, SkeletonRows, MomentLink, Pager } from '../components/ui'
 import { ActivityTable } from '../components/ActivityTable'
 import { intentLabel } from '../components/activityColors'
@@ -52,10 +53,14 @@ function LimitPrice({ data }: { data: IntentOrderDetail }) {
   const { limitPriceOutPerIn: outPerIn, limitPriceInPerOut: inPerOut, assetIn, assetOut } = data
   if (outPerIn == null || inPerOut == null) return null
   if (!Number.isFinite(Number(outPerIn)) || !Number.isFinite(Number(inPerOut))) return null
+  // A ceiling orders of magnitude off market is not what the order runs under; say
+  // so rather than leaving the reader to wonder whether the figure is a bug.
+  const binding = limitBinding(data.limitMarketRatio)
   return (
     <span className="muted mono limit-price" title={`${outPerIn} ${assetOut.symbol} per ${assetIn.symbol}\n${inPerOut} ${assetIn.symbol} per ${assetOut.symbol}`}>
       <Num v={Number(outPerIn)} /> {assetOut.symbol} per {assetIn.symbol}
       {' · '}<Num v={Number(inPerOut)} /> {assetIn.symbol} per {assetOut.symbol}
+      {binding && <span className={`limit-flag limit-flag-${binding.kind}`} title={binding.title}>{binding.label}</span>}
     </span>
   )
 }
