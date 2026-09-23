@@ -9,7 +9,7 @@ import { useMe, useTagMapSync, logout } from '../hooks/useUser'
 import { useNotificationsOverview, usePendingNotificationHandoff } from '../hooks/useNotifications'
 import { AccountEmoji, ShortAddr, showIconFallback } from './ui'
 import { NotificationBell } from './NotificationBell'
-import { PREIS_URL } from '../surfaces'
+import { DATA_API_URL, PREIS_URL } from '../surfaces'
 import type { AccountRef } from '../types'
 
 // Radix + the dialog itself are only needed once a visitor actually tries to
@@ -55,10 +55,15 @@ const IT = {
   // that is where this app already keeps the destinations that are about the
   // explorer itself rather than about one entity.
   mcp: { to: paths.mcp(), label: 'MCP', match: ['mcp'] } as NavItem,
+  // The Data API's own docs portal, for the same reason MCP sits here: it is
+  // about the explorer rather than about one entity. Its own host, so it leaves
+  // the Explorer and the entry says so.
+  dataApi: { to: `${DATA_API_URL}/docs`, label: 'API', match: [], external: true } as NavItem,
   // Preis charts the same pairs the Assets list prices, which is why it sits in
   // the Assets menu — but it is a separate app on its own host, so it leaves
-  // the Explorer and the entry says so.
-  preis: { to: PREIS_URL, label: 'preis charts', match: [], external: true } as NavItem,
+  // the Explorer and the entry says so. Labelled for what it IS to a reader
+  // rather than for the app's name, which means nothing from this side.
+  preis: { to: PREIS_URL, label: 'Charts', match: [], external: true } as NavItem,
 }
 // Liquidity lives under Assets at every width; the trigger navigates to Assets
 // so the menu lists only Liquidity. Security leads the Chain menu (it is the
@@ -71,8 +76,8 @@ const ASSETS_GROUP: NavGroup = { label: 'Assets', items: [IT.assets, IT.liquidit
 const ACCOUNTS_GROUP: NavGroup = { label: 'Accounts', items: [IT.accounts, IT.tags], menuItems: [IT.tags] }
 const CHAIN_GROUP: NavGroup = {
   label: 'Chain',
-  items: [IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.security, IT.governance, IT.mcp],
-  menuItems: [IT.security, IT.governance, IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.mcp],
+  items: [IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.security, IT.governance, IT.dataApi, IT.mcp],
+  menuItems: [IT.security, IT.governance, IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.dataApi, IT.mcp],
 }
 // Mid-width fold (861–1119px, CSS-gated): HDX/HOLLAR/Revenue and the Assets
 // group collapse into this single wider Assets dropdown so the topbar search
