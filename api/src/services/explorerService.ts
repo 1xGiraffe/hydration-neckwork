@@ -11075,19 +11075,58 @@ function v3PoolsForAssets(registry: V3Registry, assetIds: number[]): string[] {
 // fill, so showing the hop beside it counts one trade twice. On the pool's own
 // page the hop IS the subject: it is a swap in that pool whatever routed it, and
 // suppressing it leaves the page of the only live v3 pool empty.
+// The account a routed v3 hop belongs to, keyed `block:ext:amountIn`.
+//
+// A pool's Swap log names only contracts: its `recipient` on a routed hop is the
+// router's own account, so a row built from the log alone credits every such swap
+// to "Pallet Pot" — which is what the pool page showed for all 25 of its rows. The
+// owner is on the `Broadcast.Swapped3` leg the same hop emitted, so it is matched
+// the way uniswap_v3_legs already matches it: same block, same extrinsic (null
+// collapsed onto NO_EXTRINSIC, since these routes run in a hook), same input
+// amount. The amount is what disambiguates several routes sharing one hookless
+// block, where the block alone cannot.
+async function routedV3Swappers(acts: readonly V3Activity[]): Promise<Map<string, string>> {
+  const swaps = acts.filter(a => a.kind === 'swap' && a.amountIn != null)
+  if (!swaps.length) return new Map()
+  const blocks = [...new Set(swaps.map(a => a.blockHeight))]
+  const res = await client.query({
+    query: `SELECT block_height, extrinsic_index,
+                   JSONExtractString(args_json, 'swapper') AS swapper,
+                   JSONExtractString(JSONExtractArrayRaw(args_json, 'inputs')[1], 'amount') AS amount_in
+            FROM price_data.raw_events
+            WHERE block_height IN {blocks:Array(UInt32)} AND event_name = 'Broadcast.Swapped3'
+              AND JSONExtractString(args_json, 'fillerType', '__kind') = 'UniswapV3'`,
+    query_params: { blocks }, format: 'JSONEachRow',
+  })
+  const out = new Map<string, string>()
+  for (const r of await res.json<{ block_height: number; extrinsic_index: number | null; swapper: string; amount_in: string }>()) {
+    if (!r.swapper || !r.amount_in) continue
+    out.set(`${v3RoutedKey(r.block_height, r.extrinsic_index)}:${r.amount_in}`, r.swapper)
+  }
+  return out
+}
+
 async function v3ActivityRows(acts: V3Activity[], prices: Map<number, PriceInfo>, keepRoutedHops = false): Promise<ActivityRow[]> {
   if (!acts.length) return []
   const unsigned = acts.filter(a => a.whoAccountId == null && a.extrinsicIndex != null).map(a => [a.blockHeight, a.extrinsicIndex] as [number, number | null])
-  const [signers, routed] = await Promise.all([
+  const [signers, routed, routedSwappers] = await Promise.all([
     unsigned.length ? actorsFor(unsigned) : new Map<string, string>(),
     keepRoutedHops ? new Set<string>() : routedV3SwapExtrinsics(acts.filter(a => a.kind === 'swap').map(a => [a.blockHeight, a.extrinsicIndex])),
+    // Only the pool page keeps routed hops, and it is the only reading that needs
+    // their owner; elsewhere they are suppressed, so the lookup is skipped.
+    keepRoutedHops ? routedV3Swappers(acts) : Promise.resolve(new Map<string, string>()),
   ])
   const out: ActivityRow[] = []
   for (const a of acts) {
     // A Router-routed hop through the pool is already the route's trade (swap_activity
     // renders it, the exact count's swap arm counts it): its Swap log is not a second one.
     if (a.kind === 'swap' && routed.has(v3RoutedKey(a.blockHeight, a.extrinsicIndex))) continue
-    const who = a.whoAccountId ?? (a.extrinsicIndex != null ? signers.get(`${a.blockHeight}:${a.extrinsicIndex}`) : undefined) ?? null
+    // The route's owner wins over the log's recipient: on a routed hop the
+    // recipient is the router's own account, which names nobody a reader knows.
+    const routedWho = a.kind === 'swap' && a.amountIn != null
+      ? routedSwappers.get(`${v3RoutedKey(a.blockHeight, a.extrinsicIndex)}:${a.amountIn}`)
+      : undefined
+    const who = routedWho ?? a.whoAccountId ?? (a.extrinsicIndex != null ? signers.get(`${a.blockHeight}:${a.extrinsicIndex}`) : undefined) ?? null
     const common = {
       blockHeight: a.blockHeight, timestamp: a.timestamp, eventIndex: a.eventIndex, extrinsicIndex: a.extrinsicIndex,
       who: who ? accountRef(who) : null, to: null, linkBlock: a.blockHeight, linkIndex: a.extrinsicIndex,

@@ -50,3 +50,31 @@ describe('v3 routed-hop suppression is null-safe', () => {
     expect(src).toContain('keepRoutedHops ? new Set<string>() : routedV3SwapExtrinsics(')
   })
 })
+
+// On the pool page a routed hop is kept, and it must name the account whose route
+// it was. The pool's Swap log names only contracts — its recipient on a routed hop
+// is the router's own account — so a row built from the log alone credited every
+// swap in the pool to "Pallet Pot" (all 25 rows of it).
+describe('a kept routed hop names its owner, not the router', () => {
+  it('matches the owner off the Swapped3 leg the same hop emitted', () => {
+    expect(src).toContain("JSONExtractString(args_json, 'swapper') AS swapper")
+    expect(src).toContain("JSONExtractString(args_json, 'fillerType', '__kind') = 'UniswapV3'")
+  })
+
+  // Block + extrinsic is not enough: these routes run in a hook, so several share
+  // one block with a null extrinsic. The input amount is what tells them apart —
+  // the same key uniswap_v3_legs already matches on.
+  it('keys on the input amount, not the block alone', () => {
+    expect(src).toContain('out.set(`${v3RoutedKey(r.block_height, r.extrinsic_index)}:${r.amount_in}`, r.swapper)')
+    expect(src).toContain('routedSwappers.get(`${v3RoutedKey(a.blockHeight, a.extrinsicIndex)}:${a.amountIn}`)')
+  })
+
+  it('prefers the route owner over the log recipient', () => {
+    expect(src).toContain('const who = routedWho ?? a.whoAccountId ??')
+  })
+
+  // Everywhere but the pool page the hop is suppressed, so the lookup is wasted.
+  it('only runs the lookup where routed hops are kept', () => {
+    expect(src).toContain('keepRoutedHops ? routedV3Swappers(acts) : Promise.resolve(new Map<string, string>())')
+  })
+})
