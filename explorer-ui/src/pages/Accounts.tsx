@@ -1,6 +1,6 @@
 import { useAccounts, useAccountsDaily } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { Link, paths, usePageParam, useQueryValue, setPage, setQuery } from '../router'
+import { paths, usePageParam, useQueryValue, setPage, setQuery } from '../router'
 import { Crumbs, F, Pager } from '../components/ui'
 import { AccountsChart } from '../components/AccountsChart'
 import { AccountsSortSelect, AccountsTable, type AccountSortKey } from '../components/AccountsTable'
@@ -39,7 +39,6 @@ export function Accounts() {
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Accounts' }]} />
         <div className="detail-header">
           <div className="page-title">Accounts <span className="sub">{total ? `${F.int(total)} accounts` : ''}</span></div>
-          <Link to={paths.tags()} className="ext-link" style={{ marginLeft: 'auto', textTransform: 'none', letterSpacing: 0 }}>🏷️ Tags →</Link>
         </div>
       </div>
 
