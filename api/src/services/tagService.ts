@@ -181,6 +181,21 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     addresses: ['13cKp89NgPL56sRoVRpBcjkGZPrk4Vf4tS6ePUD96XhAXozG'],
   },
   {
+    // Snowbridge's Polkadot-side account — the Ethereum <-> Polkadot bridge. Named
+    // for the same reason as the Moonbeam/Wormhole contract below: an asset that
+    // crossed a bridge arrives from the bridge's own account, so without a label
+    // the counterparty on such a transfer reads as an anonymous address rather
+    // than as "this came over Snowbridge".
+    //
+    // Colour: the tag renders as TEXT (`color: tag.color` on .tag), so it has to
+    // carry on both themes — #EFEDEA in light, #030816 in dark. A true ice blue
+    // cannot: the palest house blue (#86c4f5) is 1.6:1 on light. This is the
+    // bluest tone that clears 3:1 on BOTH (3.43:1 light, 4.99:1 dark) and still
+    // reads as Snowbridge's ice blue rather than a generic navy.
+    tagId: 'snowbridge', name: 'Snowbridge', color: '#1B85C9', note: 'Snowbridge — the Ethereum ↔ Polkadot bridge; assets bridged from Ethereum arrive from this account', icon: '❄️',
+    addresses: ['16PL8D6JXsi18EQZKuap9eLbsehMRMgcqdCf735qBmA5NSFc'],
+  },
+  {
     // The Moonbeam-side bridge forwarding contract for inbound cross-chain assets
     // (e.g. Solana via Wormhole): the far leg arrives here, then hops to Hydration
     // over XCM, so our chain sees this contract as the origin rather than the real
@@ -318,7 +333,7 @@ export function stableswapPoolAccount(poolId: number): string {
 // Tags whose members are protocol PLUMBING (pools, pots, farm sub-accounts) —
 // excluded from "economic actor" surfaces like the HDX top movers, unlike the
 // Treasury/HSM/fee tags which represent deliberate actors.
-export const SYSTEM_TAG_IDS = new Set(['money-market', 'omnipool', 'staking-pot', 'fee-processor', 'gigahdx-pots', 'pallet-pots', 'incentive-pot', 'liquidity-mining', 'xyk-pools', 'stableswap-pools', 'lbp-pools', 'sovereigns', 'moonbeam-wormhole'])
+export const SYSTEM_TAG_IDS = new Set(['money-market', 'omnipool', 'staking-pot', 'fee-processor', 'gigahdx-pots', 'pallet-pots', 'incentive-pot', 'liquidity-mining', 'xyk-pools', 'stableswap-pools', 'lbp-pools', 'sovereigns', 'moonbeam-wormhole', 'snowbridge'])
 
 // Tagged module (modl) accounts that count as economic actors — the top-movers
 // exception list: module plumbing stays hidden, the Treasury's DCA program shows.
