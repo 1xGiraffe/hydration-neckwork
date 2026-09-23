@@ -602,6 +602,7 @@ export interface AssetBookEntry extends OpenLimitOrder {
   total: string
 }
 export interface AssetLimitOrderBook { bids: AssetBookEntry[]; asks: AssetBookEntry[] }
+export interface AccountMoneyMarket { account: AccountRef; markets: MoneyMarketPosition[] }
 export interface MoneyMarketPosition {
   marketKey: string
   market: string                 // display label, e.g. 'Money Market' or 'GIGAHDX'
@@ -617,7 +618,15 @@ export interface MoneyMarketPosition {
   liquidationThreshold: string
   ltv: string
   healthFactor: string
+  // Present for aggregate/tag positions: a real member whose position can be
+  // opened in DefiSim (never the tag id or an unrelated first member). Also set
+  // on a per-account row so it links to that account — so it does NOT mean
+  // "aggregate"; `memberCount` does.
   simAccount?: string
+  // How many members this row sums. Absent on a single account's own position,
+  // and 1 on a tag whose market has exactly one holder — in both cases the
+  // health factor is that account's, not the lowest of several.
+  memberCount?: number
   reserves?: MmReserve[]
 }
 export interface AddressAlias {
@@ -1584,6 +1593,9 @@ export interface TagDetail {
   liquidationVolumeUsd?: number
   revenueUsd?: number
   moneyMarket: MoneyMarketPosition[]
+  // The same positions unaggregated, one entry per member holding one: the header
+  // summarises the tag, the Positions tab lists the accounts.
+  moneyMarketByAccount?: AccountMoneyMarket[]
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
   openLimitOrders?: OpenLimitOrder[]
