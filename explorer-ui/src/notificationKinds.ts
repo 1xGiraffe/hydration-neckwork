@@ -41,7 +41,7 @@ export const KIND_HINTS: Record<NotificationKind, string> = {
   'health-factor': 'A position in one money market falling toward liquidation.',
   referendum: 'Governance referenda entering the phases you care about.',
   'tc-motion': 'Technical Committee motions — proposals, member votes and outcomes.',
-  safety: 'Circuit breakers, pauses, freezes, lockdowns, and the Wormhole bridge losing its backing or filling a rate limit.',
+  safety: 'Circuit breakers, pauses, freezes, lockdowns, the chain-wide withdraw limit filling up, and the Wormhole bridge losing its backing or filling a rate limit.',
   extrinsic: 'A specific call, by pallet and method.',
   event: 'A specific runtime event, by pallet and method.',
   'protocol-revenue': 'An extrinsic earning the protocol more than a threshold — the protocol share, not the LPs\'.',
@@ -76,18 +76,21 @@ export type TcMotionPhase = typeof TC_MOTION_PHASES[number]
 // the backing snapshot watches. One kind, so no event is ever delivered twice —
 // `pause`/`unpause` cover a manager on either chain, `queued`/`released` a
 // transfer a rate limiter took hold of and let go, `deficit` bridged supply
-// that lost its custody backing, and `fuse` a rate limit close to spent.
+// that lost its custody backing, `fuse` a rate limit close to spent, and
+// `egress` Hydration's chain-wide withdraw limit filling up.
 export const SAFETY_KINDS = [
   'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze',
-  'deficit', 'queued', 'released', 'fuse',
+  'deficit', 'queued', 'released', 'fuse', 'egress',
 ] as const
 export type SafetyKind = typeof SAFETY_KINDS[number]
-// The two numeric floors, restated from the server's own schema defaults so the
+// The three numeric floors, restated from the server's own schema defaults so the
 // form shows the values an omitted parameter would get: how much bridged supply
-// may go unbacked before `deficit` fires, and how spent a rate limit has to be
-// before `fuse` does.
+// may go unbacked before `deficit` fires, how spent a rate limit has to be
+// before `fuse` does, and how full the chain-wide withdraw limit before `egress`
+// warns (a full one, at 99%, always alerts as well).
 export const SAFETY_DEFICIT_DEFAULT_USD = 100
 export const SAFETY_FUSE_DEFAULT_PCT = 90
+export const SAFETY_EGRESS_DEFAULT_PCT = 90
 
 // Hydration's OpenGov tracks, id → runtime name. The chain reports the numeric
 // id, so a rule stores the id and a picker offers the name; the server accepts
@@ -315,7 +318,7 @@ function normalizeParams(kind: NotificationKind, params: Record<string, unknown>
     // flag, so nothing is invented for it.
     case 'large-trade':
       return { ...p, dcaStart: p.dcaStart === false ? false : true }
-    // Same reason as above: both security floors have schema defaults, so a
+    // Same reason as above: every security floor has a schema default, so a
     // stored rule carries numbers the "Get notified" button never sent. Without
     // the defaults applied on both sides that button would read "not subscribed"
     // forever. An empty event set is "every event", which is what omitting the
@@ -325,6 +328,7 @@ function normalizeParams(kind: NotificationKind, params: Record<string, unknown>
         ...p,
         deficitUsd: Number(p.deficitUsd ?? SAFETY_DEFICIT_DEFAULT_USD),
         fusePct: Number(p.fusePct ?? SAFETY_FUSE_DEFAULT_PCT),
+        egressPct: Number(p.egressPct ?? SAFETY_EGRESS_DEFAULT_PCT),
       }
     default:
       return p

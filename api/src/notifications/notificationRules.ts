@@ -46,14 +46,16 @@ export const TC_MOTION_PHASES = ['proposed', 'voted', 'approved', 'disapproved',
 //     NTT managers' own governance and queue logs);
 //   * states of the Wormhole bridge nothing on Hydration indexes — a backing
 //     deficit, an origin-chain rate-limiter queue, an origin manager's pause
-//     flag, and a rate-limit fuse running out.
+//     flag, and a rate-limit fuse running out;
+//   * the level of Hydration's chain-wide global withdraw limit (`egress`),
+//     read off the security dashboard — a level, so no indexed row carries it.
 //
 // Which source delivers which event is fixed by the delivery matrix in
 // evaluator.ts (SAFETY_ROW_LANE_KINDS / SAFETY_SNAPSHOT_KINDS), so no event can
 // arrive twice. A rule may narrow to any subset.
 export const SAFETY_KINDS = [
   'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze',
-  'deficit', 'queued', 'released', 'fuse',
+  'deficit', 'queued', 'released', 'fuse', 'egress',
 ] as const
 export type SafetyKind = typeof SAFETY_KINDS[number]
 
@@ -250,7 +252,7 @@ export const tcMotionParams = z.object({
 // An absent `kinds` means every event: the point of the kind is "tell me when
 // something is wrong with the protocol", and narrowing is the exception.
 //
-// The two floors belong to the two LEVEL events. Both defaults are explicit
+// The three floors belong to the three LEVEL events. All defaults are explicit
 // rather than optional (the large-trade `dcaStart` precedent) so one rule has
 // one canonical parameter set: a bell posting `params: {}` and a stored rule
 // carrying the defaults have to be the same subscription, or pressing the bell
@@ -261,6 +263,8 @@ export const safetyParams = z.object({
   deficitUsd: z.number().min(0).default(100),
   /** Origin rate-limit utilization, in percent, at which the fuse event fires. */
   fusePct: z.number().min(0).max(100).default(90),
+  /** Global withdraw limit utilization, in percent, at which the egress warning fires; a full budget (99%) always alerts too. */
+  egressPct: z.number().min(0).max(100).default(90),
 }).strict()
 
 export const extrinsicParams = z.object({
@@ -421,6 +425,7 @@ export function describeRule(
       const floors: string[] = []
       if (p.kinds?.includes('deficit')) floors.push(`deficit ≥ ${compactUsd(p.deficitUsd)}`)
       if (p.kinds?.includes('fuse')) floors.push(`fuse ≥ ${p.fusePct}%`)
+      if (p.kinds?.includes('egress')) floors.push(`egress ≥ ${p.egressPct}%`)
       const events = p.kinds?.length ? p.kinds.join(', ') : 'every action'
       return `Security · ${floors.length ? `${floors.join(', ')} · ` : ''}${events}`
     }

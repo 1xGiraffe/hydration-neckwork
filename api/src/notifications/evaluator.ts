@@ -294,7 +294,9 @@ export type MatchPayload =
       /** Queue events only. */
       digest?: string; amount?: number; releasableAt?: string | null
       /** Fuse only: which leg, how spent it is, and what it is spending. */
-      direction?: FuseDirection; utilizationPct?: number; limit?: number; durationSec?: number }
+      direction?: FuseDirection; utilizationPct?: number; limit?: number; durationSec?: number
+      /** Egress only: which level crossed, and the HDX the budget has charged (`limit` is its cap). */
+      level?: 'warn' | 'full'; used?: number }
 
 /** A DCA schedule as it was created: the standing order, not any one execution.
  * Since runtime 443 a DCA intent is one too: `intentId` names it (its u128 id as a
@@ -561,6 +563,8 @@ export function activityReferencesAsset(row: ActivityRow, assetId: number): bool
 //   released           | never (no log marks a release)      | yes, on a digest seen held
 //   deficit            | never (not an indexed fact at all)  | yes
 //   fuse               | never (an origin limiter's level)   | yes
+//   egress             | never (a level, not an action)      | yes, from the dashboard's
+//                      |                                     |   global withdraw meter
 //
 // The two pause halves are what makes this delicate: the snapshot carries BOTH
 // flags, and reporting its `pausedLocal` would restate the ledger's own row.
@@ -577,7 +581,7 @@ export const SAFETY_ROW_LANE_KINDS: readonly SafetyKind[] = [
   'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze', 'queued',
 ]
 /** The events the bridge snapshot delivers; `queued` and the pause pair are split by SIDE, not by kind. */
-export const SAFETY_SNAPSHOT_KINDS = ['deficit', 'queued', 'released', 'fuse', 'pause', 'unpause'] as const
+export const SAFETY_SNAPSHOT_KINDS = ['deficit', 'queued', 'released', 'fuse', 'pause', 'unpause', 'egress'] as const
 export type SafetyStateEvent = typeof SAFETY_SNAPSHOT_KINDS[number]
 /** Hydration-centric fuse legs: `in` is the entry limiter, `out` the release leg of an exit. */
 export type FuseDirection = 'in' | 'out'
@@ -1110,7 +1114,24 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       return { title, body: [plan, size], path: row.intentId ? `/intent/${row.intentId}` : `/dca/${row.id}` }
     }
     case 'safety-state': {
-      // Every one of these is a statement about the bridge's own state, so they
+      if (p.event === 'egress') {
+        // The one event here that is not the bridge: Hydration's own chain-wide
+        // outflow budget. Like the fuse it warns before the limit binds, so the
+        // body says what happens past it.
+        const window = humanDuration((p.durationSec ?? 0) * 1000)
+        const pct = compactAmount(p.utilizationPct ?? 0)
+        return {
+          title: [textPart(p.level === 'full' ? `Chain-wide withdraw limit full (${pct}%)` : `Chain-wide withdraw limit at ${pct}%`)],
+          body: [[
+            amountPart(p.used ?? 0, 'HDX'),
+            textPart('of the'),
+            amountPart(p.limit ?? 0, 'HDX'),
+            textPart(`per ${window} budget is used — a withdrawal or outbound transfer that would reach the limit is refused.`),
+          ]],
+          path: '/security/cross-chain',
+        }
+      }
+      // Every other one is a statement about the bridge's own state, so they
       // all open the same page; the headline carries which asset and which leg.
       const path = '/security/wormhole'
       if (p.event === 'deficit') {
@@ -2852,126 +2873,157 @@ async function safetySnapshotMatches(): Promise<RuleMatch[]> {
   const state = await getWormholeAlertState()
   // No snapshot yet is not "nothing is wrong": a monitor that has measured
   // nothing must not report a clean bridge, and it must not arm anything either.
-  if (!state) return []
+  // The egress budget is read only when a rule watches it, and an unconfigured
+  // or unreadable one is null — never 0%, which would re-arm every rule.
+  const egress = rules.some(r => wantsSafetyEvent(r.params as RuleParams['safety'], 'egress')) ? await egressReading() : null
+  if (!state && !egress) return []
 
   const matches: RuleMatch[] = []
   // What the snapshot holds right now, read once: every rule judges the same set.
-  const held = new Set(state.queued.map(q => q.digest))
+  const held = new Set(state?.queued.map(q => q.digest) ?? [])
   for (const rule of rules) {
     const params = rule.params as RuleParams['safety']
     const prev = parseMemberArmStates(getNotificationState(armStateKey(rule.ruleId))) ?? new Map<string, ArmState>()
     const next = new Map(prev)
     let changed = false
 
-    if (wantsSafetyEvent(params, 'deficit')) {
+    if (egress && wantsSafetyEvent(params, 'egress')) {
       const { fired, next: armed } = evaluateThreshold(
-        state.assets.map(a => ({
-          ruleId: `deficit${STATE_KEY_SEP}${a.assetId}`,
+        EGRESS_LEVELS.map(level => ({
+          ruleId: `egress${STATE_KEY_SEP}${level}`,
           direction: 'above' as const,
-          threshold: params.deficitUsd,
-          // A shortfall is a NEGATIVE residual, so the watched value is its
-          // magnitude — but only once the classifier has graded it. A negative
-          // residual with any other status is either an unconfirmed first
-          // reading (the sampling skew the confirmation pass exists to refute)
-          // or an unverifiable gap on a deployment that is not checking
-          // in-flight transfers, where every routine transfer opens one; paging
-          // on either would contradict the page the alert links to. A readable
-          // clean reading is 0 so the threshold can re-arm; an unread residual
-          // is null and changes nothing — an unreadable custody balance must
-          // never read as a total deficit.
-          value: a.residualUsd == null ? null
-            : a.status === 'deficit' || a.status === 'attention' ? Math.max(0, -a.residualUsd)
-              : 0,
+          threshold: level === 'full' ? EGRESS_FULL_PCT : params.egressPct,
+          value: egress.usagePct,
         })),
         prev,
       )
       for (const [key, arm] of armed) { next.set(key, arm); changed = true }
+      // One jump can cross both levels at once; the warning is then old news,
+      // so only the full reading is sent (the warning still disarms above).
+      const levels = new Set(fired.map(f => f.ruleId.slice(f.ruleId.indexOf(STATE_KEY_SEP) + 1)))
       for (const fire of fired) {
-        const assetId = Number(fire.ruleId.slice(fire.ruleId.indexOf(STATE_KEY_SEP) + 1))
-        const asset = state.assets.find(a => a.assetId === assetId)
-        if (!asset) continue
-        matches.push(stateMatch(rule, `deficit:${assetId}:${fire.epoch}`, {
-          lane: 'safety-state', event: 'deficit', symbol: asset.symbol, chainName: asset.originChainName, deficitUsd: fire.value,
+        const level = fire.ruleId.slice(fire.ruleId.indexOf(STATE_KEY_SEP) + 1) as EgressLevel
+        if (level === 'warn' && levels.has('full')) continue
+        matches.push(stateMatch(rule, `egress:${level}:${fire.epoch}`, {
+          lane: 'safety-state', event: 'egress', symbol: 'HDX', chainName: 'Hydration', level,
+          utilizationPct: fire.value, used: egress.used, limit: egress.limit, durationSec: egress.windowMs / 1000,
         }))
       }
     }
 
-    // A fuse warns BEFORE the limit binds: past it the origin limiter holds the
-    // transfer for a whole refill window, which is what the 'queued' event
-    // reports. Only the ORIGIN legs are evaluated — Hydration's own are uncapped
-    // at the u64 trimmed ceiling, so their utilization is meaninglessly ~0; were
-    // that ever to change, the origin table would still be the operative one,
-    // because a transfer has to clear both.
-    if (wantsSafetyEvent(params, 'fuse')) {
-      const legs = state.assets.flatMap(a => FUSE_DIRECTIONS.map(dir => ({ asset: a, dir, fuse: a.fuses[dir] })))
-      const { fired, next: armed } = evaluateThreshold(
-        legs.map(leg => ({
-          ruleId: `fuse${STATE_KEY_SEP}${leg.asset.assetId}:${leg.dir}`,
-          direction: 'above' as const,
-          threshold: params.fusePct,
-          // An unread origin limiter is null, not 0%: a chain that failed to
-          // answer must neither fire nor re-arm anything.
-          value: leg.fuse?.utilizationPct ?? null,
-        })),
-        prev,
-      )
-      for (const [key, arm] of armed) { next.set(key, arm); changed = true }
-      for (const fire of fired) {
-        const key = fire.ruleId.slice(fire.ruleId.indexOf(STATE_KEY_SEP) + 1)
-        const leg = legs.find(l => `${l.asset.assetId}:${l.dir}` === key)
-        if (!leg?.fuse) continue
-        matches.push(stateMatch(rule, `fuse:${leg.asset.assetId}:${leg.dir}:${fire.epoch}`, {
-          lane: 'safety-state', event: 'fuse', symbol: leg.asset.symbol, chainName: leg.asset.originChainName,
-          direction: leg.dir, utilizationPct: fire.value, limit: leg.fuse.limit, durationSec: leg.fuse.durationSec,
-        }))
+    // Everything below is the Wormhole bridge, which has nothing to say until
+    // its monitor has measured something.
+    if (state) {
+      if (wantsSafetyEvent(params, 'deficit')) {
+        const { fired, next: armed } = evaluateThreshold(
+          state.assets.map(a => ({
+            ruleId: `deficit${STATE_KEY_SEP}${a.assetId}`,
+            direction: 'above' as const,
+            threshold: params.deficitUsd,
+            // A shortfall is a NEGATIVE residual, so the watched value is its
+            // magnitude — but only once the classifier has graded it. A negative
+            // residual with any other status is either an unconfirmed first
+            // reading (the sampling skew the confirmation pass exists to refute)
+            // or an unverifiable gap on a deployment that is not checking
+            // in-flight transfers, where every routine transfer opens one; paging
+            // on either would contradict the page the alert links to. A readable
+            // clean reading is 0 so the threshold can re-arm; an unread residual
+            // is null and changes nothing — an unreadable custody balance must
+            // never read as a total deficit.
+            value: a.residualUsd == null ? null
+              : a.status === 'deficit' || a.status === 'attention' ? Math.max(0, -a.residualUsd)
+                : 0,
+          })),
+          prev,
+        )
+        for (const [key, arm] of armed) { next.set(key, arm); changed = true }
+        for (const fire of fired) {
+          const assetId = Number(fire.ruleId.slice(fire.ruleId.indexOf(STATE_KEY_SEP) + 1))
+          const asset = state.assets.find(a => a.assetId === assetId)
+          if (!asset) continue
+          matches.push(stateMatch(rule, `deficit:${assetId}:${fire.epoch}`, {
+            lane: 'safety-state', event: 'deficit', symbol: asset.symbol, chainName: asset.originChainName, deficitUsd: fire.value,
+          }))
+        }
       }
-    }
 
-    // Both directions come out of ONE flip evaluation, so a rule narrowed to
-    // 'pause' still tracks the unpause that has to happen before it can fire
-    // again; the unwanted side is dropped at the match, not at the state.
-    if (wantsSafetyEvent(params, 'pause') || wantsSafetyEvent(params, 'unpause')) {
-      const inputs: FlagInput[] = state.assets.map(a => ({
-        key: `pause${STATE_KEY_SEP}${a.assetId}:origin`, value: a.pausedOrigin,
-      }))
-      const { fired, next: flipped } = evaluateStateFlip(inputs, prev)
-      for (const [key, arm] of flipped) { next.set(key, arm); changed = true }
-      for (const flip of fired) {
-        const event: SafetyStateEvent = flip.value ? 'pause' : 'unpause'
-        if (!wantsSafetyEvent(params, event)) continue
-        const [assetIdText] = flip.key.slice(flip.key.indexOf(STATE_KEY_SEP) + 1).split(':')
-        const asset = state.assets.find(a => a.assetId === Number(assetIdText))
-        if (!asset) continue
-        matches.push(stateMatch(rule, `${event}:${assetIdText}:origin:${flip.epoch}`, {
-          lane: 'safety-state', event, symbol: asset.symbol, chainName: asset.originChainName,
-        }))
+      // A fuse warns BEFORE the limit binds: past it the origin limiter holds the
+      // transfer for a whole refill window, which is what the 'queued' event
+      // reports. Only the ORIGIN legs are evaluated — Hydration's own are uncapped
+      // at the u64 trimmed ceiling, so their utilization is meaninglessly ~0; were
+      // that ever to change, the origin table would still be the operative one,
+      // because a transfer has to clear both.
+      if (wantsSafetyEvent(params, 'fuse')) {
+        const legs = state.assets.flatMap(a => FUSE_DIRECTIONS.map(dir => ({ asset: a, dir, fuse: a.fuses[dir] })))
+        const { fired, next: armed } = evaluateThreshold(
+          legs.map(leg => ({
+            ruleId: `fuse${STATE_KEY_SEP}${leg.asset.assetId}:${leg.dir}`,
+            direction: 'above' as const,
+            threshold: params.fusePct,
+            // An unread origin limiter is null, not 0%: a chain that failed to
+            // answer must neither fire nor re-arm anything.
+            value: leg.fuse?.utilizationPct ?? null,
+          })),
+          prev,
+        )
+        for (const [key, arm] of armed) { next.set(key, arm); changed = true }
+        for (const fire of fired) {
+          const key = fire.ruleId.slice(fire.ruleId.indexOf(STATE_KEY_SEP) + 1)
+          const leg = legs.find(l => `${l.asset.assetId}:${l.dir}` === key)
+          if (!leg?.fuse) continue
+          matches.push(stateMatch(rule, `fuse:${leg.asset.assetId}:${leg.dir}:${fire.epoch}`, {
+            lane: 'safety-state', event: 'fuse', symbol: leg.asset.symbol, chainName: leg.asset.originChainName,
+            direction: leg.dir, utilizationPct: fire.value, limit: leg.fuse.limit, durationSec: leg.fuse.durationSec,
+          }))
+        }
       }
-    }
 
-    if (wantsSafetyEvent(params, 'queued')) {
-      for (const entry of state.queued) {
-        // Announced on the pass that first sees it, not on every pass: the
-        // monitor keeps probing a digest for as long as the limiter holds it —
-        // weeks, past the inbox dedup set's TTL — and re-emitting it each tick
-        // would page subscribers again whenever it outlives that window. After
-        // a restart the set is empty, so a still-held digest re-emits once and
-        // the inbox dedup collapses it unless it has already outlived the TTL.
-        if (seenOriginQueued.has(entry.digest)) continue
-        matches.push(stateMatch(rule, `queued:${entry.digest}`, {
-          lane: 'safety-state', event: 'queued', symbol: entry.symbol, chainName: entry.chainName,
-          digest: entry.digest, amount: entry.amount, releasableAt: entry.releasableAt,
+      // Both directions come out of ONE flip evaluation, so a rule narrowed to
+      // 'pause' still tracks the unpause that has to happen before it can fire
+      // again; the unwanted side is dropped at the match, not at the state.
+      if (wantsSafetyEvent(params, 'pause') || wantsSafetyEvent(params, 'unpause')) {
+        const inputs: FlagInput[] = state.assets.map(a => ({
+          key: `pause${STATE_KEY_SEP}${a.assetId}:origin`, value: a.pausedOrigin,
         }))
+        const { fired, next: flipped } = evaluateStateFlip(inputs, prev)
+        for (const [key, arm] of flipped) { next.set(key, arm); changed = true }
+        for (const flip of fired) {
+          const event: SafetyStateEvent = flip.value ? 'pause' : 'unpause'
+          if (!wantsSafetyEvent(params, event)) continue
+          const [assetIdText] = flip.key.slice(flip.key.indexOf(STATE_KEY_SEP) + 1).split(':')
+          const asset = state.assets.find(a => a.assetId === Number(assetIdText))
+          if (!asset) continue
+          matches.push(stateMatch(rule, `${event}:${assetIdText}:origin:${flip.epoch}`, {
+            lane: 'safety-state', event, symbol: asset.symbol, chainName: asset.originChainName,
+          }))
+        }
       }
-    }
-    if (wantsSafetyEvent(params, 'released')) {
-      for (const digest of seenOriginQueued) {
-        if (held.has(digest)) continue
-        const remembered = originQueuedMemo.get(digest)
-        if (!remembered) continue
-        matches.push(stateMatch(rule, `released:${digest}`, {
-          lane: 'safety-state', event: 'released', symbol: remembered.symbol, chainName: remembered.chainName,
-          digest, amount: remembered.amount, releasableAt: remembered.releasableAt,
-        }))
+
+      if (wantsSafetyEvent(params, 'queued')) {
+        for (const entry of state.queued) {
+          // Announced on the pass that first sees it, not on every pass: the
+          // monitor keeps probing a digest for as long as the limiter holds it —
+          // weeks, past the inbox dedup set's TTL — and re-emitting it each tick
+          // would page subscribers again whenever it outlives that window. After
+          // a restart the set is empty, so a still-held digest re-emits once and
+          // the inbox dedup collapses it unless it has already outlived the TTL.
+          if (seenOriginQueued.has(entry.digest)) continue
+          matches.push(stateMatch(rule, `queued:${entry.digest}`, {
+            lane: 'safety-state', event: 'queued', symbol: entry.symbol, chainName: entry.chainName,
+            digest: entry.digest, amount: entry.amount, releasableAt: entry.releasableAt,
+          }))
+        }
+      }
+      if (wantsSafetyEvent(params, 'released')) {
+        for (const digest of seenOriginQueued) {
+          if (held.has(digest)) continue
+          const remembered = originQueuedMemo.get(digest)
+          if (!remembered) continue
+          matches.push(stateMatch(rule, `released:${digest}`, {
+            lane: 'safety-state', event: 'released', symbol: remembered.symbol, chainName: remembered.chainName,
+            digest, amount: remembered.amount, releasableAt: remembered.releasableAt,
+          }))
+        }
       }
     }
 
@@ -2984,7 +3036,7 @@ async function safetySnapshotMatches(): Promise<RuleMatch[]> {
   // stops a digest being announced twice, so writing it before the inbox write
   // lands means a failed write drops the alert for good: the next tick skips a
   // digest nobody was ever told about (and the mirror case loses the release).
-  commitAfterDispatch(() => {
+  if (state) commitAfterDispatch(() => {
     for (const entry of state.queued) {
       seenOriginQueued.add(entry.digest)
       originQueuedMemo.set(entry.digest, entry)
@@ -2997,6 +3049,21 @@ async function safetySnapshotMatches(): Promise<RuleMatch[]> {
 }
 
 const FUSE_DIRECTIONS: readonly FuseDirection[] = ['in', 'out']
+
+// The global withdraw limit's two alert levels. `warn` is the rule's own
+// `egressPct`; `full` is fixed, because the pallet refuses any charge that would
+// take the accumulator TO the limit (`new_current < limit`), so the meter never
+// reads 100% — at 99% the next ~1% of the budget is all that is left.
+const EGRESS_LEVELS = ['warn', 'full'] as const
+type EgressLevel = typeof EGRESS_LEVELS[number]
+export const EGRESS_FULL_PCT = 99
+
+/** The chain-wide egress budget as `/security` shows it, or null when there is nothing to judge. */
+async function egressReading(): Promise<{ usagePct: number; used: number; limit: number; windowMs: number } | null> {
+  const w = (await getSecurityDashboard()).withdraw
+  if (!w?.configured || w.usagePct == null || w.used == null || w.limit == null || w.windowMs == null) return null
+  return { usagePct: w.usagePct, used: w.used, limit: w.limit, windowMs: w.windowMs }
+}
 
 // What a queued transfer looked like while it was held, so its release can be
 // described after it has left the snapshot.

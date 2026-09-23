@@ -10,7 +10,7 @@ import { useNotificationsOverview } from '../hooks/useNotifications'
 import {
   ACTIVITY_TYPES, COOLDOWN_CHOICES, HEALTH_FACTOR_DEFAULT, HEALTH_FACTOR_DEFAULT_MARKET, HEALTH_FACTOR_MAX, HEALTH_FACTOR_MIN,
   HEALTH_FACTOR_PRESETS, KIND_HINTS, KIND_LABELS, LARGE_VALUE_MIN_USD, NOTIFICATION_KINDS, PRICE_STEP_PCTS,
-  REFERENDUM_PHASES, REFERENDUM_TRACKS, SAFETY_DEFICIT_DEFAULT_USD, SAFETY_FUSE_DEFAULT_PCT, SAFETY_KINDS,
+  REFERENDUM_PHASES, REFERENDUM_TRACKS, SAFETY_DEFICIT_DEFAULT_USD, SAFETY_EGRESS_DEFAULT_PCT, SAFETY_FUSE_DEFAULT_PCT, SAFETY_KINDS,
   TC_MOTION_PHASES, USD_FLOOR_PRESETS, isAddressLike,
   isPalletNameLike, priceAtStep, priceStepLabel, readTarget, suggestPriceDirection, targetParams,
 } from '../notificationKinds'
@@ -230,16 +230,21 @@ export function buildRuleParams(
       const watches = (kind: string) => !kinds.length || kinds.includes(kind)
       const deficitUsd = num(v.deficitUsd ?? '')
       const fusePct = num(v.fusePct ?? '')
+      const egressPct = num(v.egressPct ?? '')
       if (watches('deficit') && deficitUsd != null && deficitUsd < 0) {
         return { ok: false, error: 'The deficit floor cannot be negative' }
       }
       if (watches('fuse') && fusePct != null && (fusePct < 0 || fusePct > 100)) {
         return { ok: false, error: 'The fuse threshold must be between 0 and 100' }
       }
+      if (watches('egress') && egressPct != null && (egressPct < 0 || egressPct > 100)) {
+        return { ok: false, error: 'The withdraw-limit threshold must be between 0 and 100' }
+      }
       return { ok: true, params: {
         ...(kinds.length ? { kinds } : {}),
         ...(watches('deficit') && deficitUsd != null ? { deficitUsd } : {}),
         ...(watches('fuse') && fusePct != null ? { fusePct } : {}),
+        ...(watches('egress') && egressPct != null ? { egressPct } : {}),
       } }
     }
     case 'extrinsic': {
@@ -788,7 +793,21 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
                         transfer is held for a whole window, so the alert is
                         worth having while there is still headroom to use. */}
                     <div className="muted" style={{ fontSize: 11 }}>
-                      How much of a bridge rate limit may be spent before this alerts. The other events have no threshold.
+                      How much of a bridge rate limit may be spent before this alerts.
+                    </div>
+                  </div>
+                )}
+                {(!safetyKinds.length || safetyKinds.includes('egress')) && (
+                  <div className="field">
+                    <label htmlFor="alert-safety-egress">Withdraw limit threshold (%)</label>
+                    <input {...noAutofill} id="alert-safety-egress" type="number" min={0} max={100}
+                      placeholder={String(SAFETY_EGRESS_DEFAULT_PCT)}
+                      value={values.egressPct ?? ''} disabled={pending} onChange={e => set('egressPct', e.target.value)} />
+                    {/* The pallet refuses any charge that would reach the limit,
+                        so the meter never reads 100%: 99% is "full", and alerts
+                        whatever this threshold is. */}
+                    <div className="muted" style={{ fontSize: 11 }}>
+                      How full the chain-wide withdraw limit may get before this warns; a full limit (99%) always alerts. The other events have no threshold.
                     </div>
                   </div>
                 )}

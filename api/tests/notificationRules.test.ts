@@ -33,11 +33,12 @@ describe('rule kind registry', () => {
   // The security kind spans two sources. Its LEDGER half must name kinds
   // securityService actually emits; its bridge-state half (deficit, released,
   // fuse) exists only in the Wormhole monitor's snapshot and has no counterpart
-  // there. `queued` is in both — Hydration-side queue logs on the ledger,
+  // there, and `egress` is a level read off the dashboard's withdraw meter, not
+  // a timeline row. `queued` is in both — Hydration-side queue logs on the ledger,
   // origin-side queues in the snapshot.
   it('covers every safety timeline kind the security service emits', () => {
     const src = readFileSync(join(srcDir, 'services/securityService.ts'), 'utf8')
-    const snapshotOnly = new Set(['deficit', 'released', 'fuse'])
+    const snapshotOnly = new Set(['deficit', 'released', 'fuse', 'egress'])
     for (const kind of SAFETY_KINDS) {
       if (snapshotOnly.has(kind)) continue
       expect(src, kind).toContain(`'${kind}'`)

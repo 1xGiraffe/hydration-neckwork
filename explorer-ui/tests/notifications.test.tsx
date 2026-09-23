@@ -19,7 +19,7 @@ import {
   HEALTH_FACTOR_MAX, HEALTH_FACTOR_MIN, HEALTH_FACTOR_PRESETS, KIND_LABELS, LARGE_VALUE_MIN_USD,
   NOTIFICATION_KINDS, PRICE_STEP_PCTS, priceAtStep, priceStepLabel, readTarget, REFERENDUM_PHASES,
   REFERENDUM_TRACKS, ruleSubject, ruleTagTarget,
-  TC_MOTION_PHASES, SAFETY_DEFICIT_DEFAULT_USD, SAFETY_FUSE_DEFAULT_PCT, clearInboxConfirmBody,
+  TC_MOTION_PHASES, SAFETY_DEFICIT_DEFAULT_USD, SAFETY_FUSE_DEFAULT_PCT, SAFETY_EGRESS_DEFAULT_PCT, clearInboxConfirmBody,
   SAFETY_KINDS, sameRuleParams, suggestPriceDirection, USD_FLOOR_PRESETS, subscribedLabel } from '../src/notificationKinds'
 import {
   MOCK_NOTIFICATION_CHANNELS, MOCK_NOTIFICATION_INBOX, MOCK_NOTIFICATION_RULES,
@@ -313,10 +313,13 @@ describe('per-surface subscribe affordances', () => {
     // defaults filled in, which is the only form it is ever read back in.
     const stored: NotificationRule = {
       id: 'rule-security', kind: 'safety', kindLabel: 'Security', name: 'Security', summary: '',
-      params: { deficitUsd: SAFETY_DEFICIT_DEFAULT_USD, fusePct: SAFETY_FUSE_DEFAULT_PCT },
+      params: { deficitUsd: SAFETY_DEFICIT_DEFAULT_USD, fusePct: SAFETY_FUSE_DEFAULT_PCT, egressPct: SAFETY_EGRESS_DEFAULT_PCT },
       channels: [], muted: false, cooldownS: 0,
     }
     expect(findEquivalentRule([stored], security[0])?.id).toBe('rule-security')
+    // A rule stored before `egress` existed has no `egressPct`, and is still the same subscription.
+    const older = { ...stored, params: { deficitUsd: SAFETY_DEFICIT_DEFAULT_USD, fusePct: SAFETY_FUSE_DEFAULT_PCT } }
+    expect(findEquivalentRule([older], security[0])?.id).toBe('rule-security')
   })
 
   it('offers three prefilled alerts in the asset header', () => {
@@ -685,12 +688,15 @@ describe('buildRuleParams — security', () => {
       .toEqual({ ok: true, params: { kinds: ['deficit'], deficitUsd: 2500 } })
     expect(buildRuleParams('safety', { deficitUsd: '2500', fusePct: '50' }, { ...sets, safetyKinds: ['fuse'] }))
       .toEqual({ ok: true, params: { kinds: ['fuse'], fusePct: 50 } })
+    expect(buildRuleParams('safety', { fusePct: '50', egressPct: '75' }, { ...sets, safetyKinds: ['egress'] }))
+      .toEqual({ ok: true, params: { kinds: ['egress'], egressPct: 75 } })
   })
 
   it('refuses a negative floor and a percentage that is not one', () => {
     expect(buildRuleParams('safety', { deficitUsd: '-5' }, sets).ok).toBe(false)
     expect(buildRuleParams('safety', { fusePct: '140' }, sets).ok).toBe(false)
     expect(buildRuleParams('safety', { fusePct: '-1' }, sets).ok).toBe(false)
+    expect(buildRuleParams('safety', { egressPct: '101' }, sets).ok).toBe(false)
   })
 
   // The server fills both numbers in from its schema defaults, so a stored rule
@@ -698,7 +704,8 @@ describe('buildRuleParams — security', () => {
   // without the defaults applied on both sides that button reads "not
   // subscribed" forever.
   it('reads defaulted numbers as the same subscription as omitted ones', () => {
-    expect(sameRuleParams('safety', {}, { deficitUsd: SAFETY_DEFICIT_DEFAULT_USD, fusePct: SAFETY_FUSE_DEFAULT_PCT })).toBe(true)
+    expect(sameRuleParams('safety', {}, { deficitUsd: SAFETY_DEFICIT_DEFAULT_USD, fusePct: SAFETY_FUSE_DEFAULT_PCT, egressPct: SAFETY_EGRESS_DEFAULT_PCT })).toBe(true)
+    expect(sameRuleParams('safety', {}, { egressPct: 80 })).toBe(false)
     expect(sameRuleParams('safety', {}, { deficitUsd: SAFETY_DEFICIT_DEFAULT_USD })).toBe(true)
     expect(sameRuleParams('safety', {}, { deficitUsd: 2500 })).toBe(false)
     expect(sameRuleParams('safety', {}, { fusePct: 50 })).toBe(false)
@@ -708,7 +715,7 @@ describe('buildRuleParams — security', () => {
     expect(sameRuleParams('safety', { kinds: ['fuse', 'deficit'] }, { kinds: ['deficit', 'fuse'] })).toBe(true)
   })
 
-  it('offers all eleven event kinds in the dialog, each number behind its own chip', () => {
+  it('offers all twelve event kinds in the dialog, each number behind its own chip', () => {
     const dialog = readFileSync(new URL('../src/components/NewAlertDialog.tsx', import.meta.url), 'utf8')
     expect(dialog).toContain("kind === 'safety'")
     expect(dialog).toContain('options={SAFETY_KINDS}')
@@ -717,10 +724,12 @@ describe('buildRuleParams — security', () => {
     expect(dialog).toContain("safetyKinds.includes('fuse')")
     expect(dialog).toContain('Deficit over (USD)')
     expect(dialog).toContain('Fuse threshold (%)')
-    expect(SAFETY_KINDS).toHaveLength(11)
+    expect(dialog).toContain("safetyKinds.includes('egress')")
+    expect(dialog).toContain('Withdraw limit threshold (%)')
+    expect(SAFETY_KINDS).toHaveLength(12)
     expect(SAFETY_KINDS).toEqual([
       'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze',
-      'deficit', 'queued', 'released', 'fuse',
+      'deficit', 'queued', 'released', 'fuse', 'egress',
     ])
   })
 })

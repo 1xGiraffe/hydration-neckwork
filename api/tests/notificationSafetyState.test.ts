@@ -19,8 +19,11 @@ vi.mock('../src/services/wormholeNttService.ts', () => ({
   getWormholeSummary: async () => null,
 }))
 const timeline: SafetyEvent[] = []
+// The global withdraw meter as the dashboard hands it over; null reads as a
+// chain with no limit configured.
+let withdraw: { configured: boolean; limit: number | null; used: number | null; usagePct: number | null; windowMs: number | null } | null = null
 vi.mock('../src/services/securityService.ts', () => ({
-  getSecurityDashboard: async () => ({ timeline: [...timeline] }),
+  getSecurityDashboard: async () => ({ timeline: [...timeline], withdraw }),
 }))
 // Counted, not stubbed out: the price lane's read is how a test sees whether the
 // VALUE half of the snapshot lane ran on a given tick.
@@ -94,6 +97,7 @@ beforeEach(async () => {
   alertCalls.length = 0
   priceReads.length = 0
   timeline.length = 0
+  withdraw = null
   tables = { raw_ingestion_state: [{ head: 1_000 }] }
   client = fakeClient(tables as unknown as Record<string, Record<string, unknown>[]>)
   initNotifications(client)
@@ -113,7 +117,7 @@ describe('the unified security kind', () => {
   it('keeps the event enumeration in the order the UI mirrors', () => {
     expect(SAFETY_KINDS).toEqual([
       'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze',
-      'deficit', 'queued', 'released', 'fuse',
+      'deficit', 'queued', 'released', 'fuse', 'egress',
     ])
   })
 
@@ -129,16 +133,17 @@ describe('the unified security kind', () => {
 
   it('round-trips its parameters and defaults both floors', () => {
     const bare = parseRuleParams('safety', {})
-    expect(bare).toEqual({ ok: true, params: { deficitUsd: 100, fusePct: 90 } })
+    expect(bare).toEqual({ ok: true, params: { deficitUsd: 100, fusePct: 90, egressPct: 90 } })
     const narrowed = parseRuleParams('safety', { kinds: ['deficit', 'fuse'], deficitUsd: 5_000, fusePct: 50 })
-    expect(narrowed).toEqual({ ok: true, params: { kinds: ['deficit', 'fuse'], deficitUsd: 5_000, fusePct: 50 } })
+    expect(narrowed).toEqual({ ok: true, params: { kinds: ['deficit', 'fuse'], deficitUsd: 5_000, fusePct: 50, egressPct: 90 } })
     // A rule written before the bridge events existed keeps validating, and
     // simply gains the defaults.
     expect(parseRuleParams('safety', { kinds: ['freeze', 'unfreeze'] }))
-      .toEqual({ ok: true, params: { kinds: ['freeze', 'unfreeze'], deficitUsd: 100, fusePct: 90 } })
+      .toEqual({ ok: true, params: { kinds: ['freeze', 'unfreeze'], deficitUsd: 100, fusePct: 90, egressPct: 90 } })
     expect(parseRuleParams('safety', { kinds: ['nonsense'] }).ok).toBe(false)
     expect(parseRuleParams('safety', { unexpected: 1 }).ok).toBe(false)
     expect(parseRuleParams('safety', { fusePct: 101 }).ok).toBe(false)
+    expect(parseRuleParams('safety', { egressPct: 101 }).ok).toBe(false)
   })
 
   // Two bells — the Security overview's and the Wormhole section's — post the
@@ -146,7 +151,7 @@ describe('the unified security kind', () => {
   // ONE subscription, or the second bell mints a rule beside the one it owns.
   it('treats a bare rule and its defaulted twin as one subscription', async () => {
     const bare = await createRule(OWNER, { kind: 'safety', params: {} })
-    const spelled = await createRule(OWNER, { kind: 'safety', params: { deficitUsd: 100, fusePct: 90 } })
+    const spelled = await createRule(OWNER, { kind: 'safety', params: { deficitUsd: 100, fusePct: 90, egressPct: 90 } })
     expect(spelled.ruleId).toBe(bare.ruleId)
     expect(findEquivalentRule(OWNER, 'safety', {})?.ruleId).toBe(bare.ruleId)
   })
@@ -158,6 +163,8 @@ describe('the unified security kind', () => {
       .toBe('Security · deficit ≥ $100, fuse ≥ 90% · deficit, fuse')
     expect(describeRule('safety', { kinds: ['deficit'], deficitUsd: 5_000 }))
       .toBe('Security · deficit ≥ $5k · deficit')
+    expect(describeRule('safety', { kinds: ['egress'], egressPct: 80 }))
+      .toBe('Security · egress ≥ 80% · egress')
   })
 })
 
@@ -447,6 +454,120 @@ describe('the fuse event', () => {
     await watch({ kinds: ['deficit'] })
     await snapshotTick()
     alertState = state({ assets: [asset({ fuses: { in: fuse(99), out: fuse(99) } })] })
+    await snapshotTick()
+    expect(inbox()).toHaveLength(0)
+  })
+})
+
+describe('the egress event', () => {
+  const watch = (params: Record<string, unknown> = {}) => createRule(OWNER, { kind: 'safety', params })
+  const meter = (usagePct: number) => {
+    withdraw = { configured: true, limit: 100_000_000, used: usagePct * 1_000_000, usagePct, windowMs: 6 * 3_600_000 }
+  }
+
+  it('warns when the global withdraw limit crosses the default 90%', async () => {
+    await watch()
+    meter(40)
+    await snapshotTick()                                   // arms at 40%
+    meter(92.94)
+    await snapshotTick()
+    expect(inbox()).toHaveLength(1)
+    expect(inbox()[0].title).toBe('Chain-wide withdraw limit at 92.9%')
+    expect(inbox()[0].body).toBe('92.9M HDX of the 100M HDX per 6h budget is used — a withdrawal or outbound transfer that would reach the limit is refused.')
+    expect(inbox()[0].url).toBe('/security/cross-chain')
+  })
+
+  it('alerts again when the limit is full, and not while it merely stays high', async () => {
+    await watch({ kinds: ['egress'] })
+    meter(10)
+    await snapshotTick()
+    meter(91)
+    await snapshotTick()
+    meter(95)
+    await snapshotTick()
+    expect(inbox()).toHaveLength(1)
+    meter(99.4)
+    await snapshotTick()
+    expect(inbox().map(r => r.title)).toEqual([
+      'Chain-wide withdraw limit at 91%', 'Chain-wide withdraw limit full (99.4%)',
+    ])
+  })
+
+  it('sends only the full alert when one jump crosses both levels', async () => {
+    await watch()
+    meter(31)
+    await snapshotTick()
+    meter(99.5)
+    await snapshotTick()
+    expect(inbox().map(r => r.title)).toEqual(['Chain-wide withdraw limit full (99.5%)'])
+    // The warning was disarmed by the same jump, so decaying through 90% says nothing.
+    meter(93)
+    await snapshotTick()
+    expect(inbox()).toHaveLength(1)
+  })
+
+  it('re-arms once the budget has decayed past the hysteresis band', async () => {
+    await watch({ kinds: ['egress'] })
+    meter(50)
+    await snapshotTick()
+    meter(91)
+    await snapshotTick()
+    meter(89)                                              // inside the band: still disarmed
+    await snapshotTick()
+    meter(91)
+    await snapshotTick()
+    expect(inbox()).toHaveLength(1)
+    meter(60)
+    await snapshotTick()
+    meter(91)
+    await snapshotTick()
+    expect(inbox()).toHaveLength(2)
+  })
+
+  it('honours the rule’s own threshold', async () => {
+    await watch({ kinds: ['egress'], egressPct: 70 })
+    meter(10)
+    await snapshotTick()
+    meter(75)
+    await snapshotTick()
+    expect(inbox().map(r => r.title)).toEqual(['Chain-wide withdraw limit at 75%'])
+  })
+
+  it('arms on first sight, so a rule made while the budget is full stays quiet', async () => {
+    await watch()
+    meter(97)
+    await snapshotTick()
+    meter(98)
+    await snapshotTick()
+    expect(inbox()).toHaveLength(0)
+  })
+
+  it('treats an unconfigured or unreadable limit as no news, never as 0%', async () => {
+    await watch({ kinds: ['egress'] })
+    meter(95)
+    await snapshotTick()                                   // arms disarmed at 95%
+    withdraw = { configured: false, limit: null, used: null, usagePct: null, windowMs: null }
+    await snapshotTick()
+    meter(95)
+    await snapshotTick()
+    expect(inbox()).toHaveLength(0)
+  })
+
+  it('works without a Wormhole snapshot', async () => {
+    await watch({ kinds: ['egress'] })
+    alertState = null
+    meter(10)
+    await snapshotTick()
+    meter(92)
+    await snapshotTick()
+    expect(inbox()).toHaveLength(1)
+  })
+
+  it('is silent for a rule that did not ask for it', async () => {
+    await watch({ kinds: ['deficit'] })
+    meter(10)
+    await snapshotTick()
+    meter(99)
     await snapshotTick()
     expect(inbox()).toHaveLength(0)
   })
