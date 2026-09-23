@@ -1261,6 +1261,13 @@ svg { display: block; }
    clauses trailing the amount inline would overflow a 390px row, so they sit on
    their own line under it. */
 .dl .dd .limit-price { flex-basis: 100%; font-size: 11px; }
+/* A limit orders of magnitude off market is not what its order runs under. The
+   flag says which case it is; it is quiet type because the figure beside it is
+   still the order's own stated term, not an error. */
+.limit-flag { margin-left: 6px; padding: 0 5px; border-radius: 4px; font-size: 10px; white-space: nowrap;
+  border: 1px solid var(--separator); color: var(--text-medium); }
+.limit-flag-not-binding { border-color: color-mix(in srgb, var(--amber, #b7791f) 45%, transparent); }
+.limit-flag-below-market { border-color: color-mix(in srgb, var(--sky, #4a90d9) 45%, transparent); }
 .dl .dt:nth-last-child(2), .dl .dd:last-child { border-bottom: 0; }
 @media (max-width: 720px){ .dl .dt { border-bottom: 0; padding-bottom: 2px; } }
 

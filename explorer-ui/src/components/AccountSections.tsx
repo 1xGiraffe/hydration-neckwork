@@ -3,6 +3,7 @@ import { useMemo } from 'react'
 import { F, Amt, Usd, Num, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash, EmptyRow, Copy } from './ui'
 import type { ChartMarker, DetailTab } from './ui'
 import { Link, paths, setQuery } from '../router'
+import { limitBinding } from '../utils/limitBinding'
 import type { ActivitySlug } from '../router'
 import { performancePoints } from './performance'
 import { CAT } from './activityColors'
@@ -589,13 +590,16 @@ function DcaLimitCell({ dca }: { dca: ActiveDca }) {
   }
   // The order's own term, scaled — a tooltip that stated raw integer units would
   // be a number nobody can compare to the amounts in the row beside it.
+  const binding = limitBinding(limit.marketRatio)
   const bound = limit.asset === 'out'
     ? `at least ${F.exact(limit.amount, assetOut.decimals)} ${assetOut.symbol} per trade`
     : `at most ${F.exact(limit.amount, assetIn.decimals)} ${assetIn.symbol} per trade`
   return (
     <span title={`Pays at most ${limit.price} ${assetIn.symbol} per ${assetOut.symbol} — the order asks for ${bound}`}>
       ≤ <Num v={Number(limit.price)} /> <span className="muted">{assetIn.symbol}</span>
-      <span className="dca-sub mono muted">per {assetOut.symbol}</span>
+      <span className="dca-sub mono muted">per {assetOut.symbol}
+        {binding && <span className={`limit-flag limit-flag-${binding.kind}`} title={binding.title}>{binding.label}</span>}
+      </span>
     </span>
   )
 }

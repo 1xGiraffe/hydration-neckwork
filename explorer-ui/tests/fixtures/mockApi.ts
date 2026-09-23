@@ -1083,7 +1083,7 @@ function buildAddress(accountId: string): AddressDetail {
     activeDcas: [
       { id: 33546, assetIn: aref(assetById.get(0)!), assetOut: aref(assetById.get(10)!), direction: 'Sell', amountPerTrade: raw(60000, 12), totalAmount: raw(1_200_000, 12), filledAmount: raw(480_000, 12), remainingAmount: raw(720_000, 12), executionsDone: 8, period: 180, nextExecutionBlock: TIP + 90, valueUsd: 3080, scheduleBlock: TIP - 40000, scheduleIndex: 2,
         // 60,000 HDX per trade for at least 400 USDT — a ceiling of 150 HDX per USDT.
-        limit: { price: '150.000000000000', amount: raw(400, 6), asset: 'out' } },
+        limit: { price: '150.000000000000', amount: raw(400, 6), asset: 'out', marketRatio: 1.02 } },
       { id: 30104, assetIn: aref(assetById.get(5)!), assetOut: aref(assetById.get(0)!), direction: 'Sell', amountPerTrade: raw(1.04, 10), totalAmount: '0', filledAmount: raw(101_818, 10), remainingAmount: null, executionsDone: 97902, period: 10, nextExecutionBlock: TIP + 4, valueUsd: 4.6, scheduleBlock: TIP - 500000, scheduleIndex: 3,
         // No absolute bound — this one rides on slippage alone, which the column
         // shows as a dash rather than as a limit of zero.
@@ -2828,7 +2828,7 @@ function mockIntentOrder(id: string, offset: number, limit: number): IntentOrder
       dca: { remainingBudget: raw(4975, 10), lastExecutionBlock: TIP - 100, nextEligibleBlock: TIP + 200 },
       callbacks: [], migratedFrom: 33546,
       // 12.5 DOT for at least 2500 HDX: 200 HDX per DOT, or 0.005 DOT per HDX.
-      limitPriceOutPerIn: '200.000000000000', limitPriceInPerOut: '0.005000000000',
+      limitPriceOutPerIn: '200.000000000000', limitPriceInPerOut: '0.005000000000', limitMarketRatio: 1.02,
       links: { submission: { block: TIP - 600, extrinsicIndex: null }, solutions: [{ block: TIP - 100, extrinsicIndex: 1 }, { block: TIP - 400, extrinsicIndex: 1 }] },
     }
   }
@@ -2860,7 +2860,8 @@ function mockIntentOrder(id: string, offset: number, limit: number): IntentOrder
       executed: { block: TIP - 469, result: 'ok', error: null },
     }],
     // 1000 DOT for at least 4500 USDT: 4.5 USDT per DOT, or 0.2222… DOT per USDT.
-    migratedFrom: null, limitPriceOutPerIn: '4.500000000000', limitPriceInPerOut: '0.222222222222',
+    // Far above market: the flag says the slippage band is the real constraint.
+    migratedFrom: null, limitPriceOutPerIn: '4.500000000000', limitPriceInPerOut: '0.222222222222', limitMarketRatio: 670,
     links: { submission: { block: TIP - 500, extrinsicIndex: 2 }, solutions: [{ block: TIP - 470, extrinsicIndex: 1 }, { block: TIP - 480, extrinsicIndex: 1 }] },
   }
 }
