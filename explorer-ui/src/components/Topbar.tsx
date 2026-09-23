@@ -33,7 +33,11 @@ type NavItem = { to: string; label: string; match: Route['name'][]; external?: t
 type NavGroup = { label: string; items: NavItem[]; menuItems?: NavItem[] }
 const IT = {
   activity: { to: paths.activity(), label: 'Activity', match: ['activity'] } as NavItem,
-  accounts: { to: paths.accounts(), label: 'Accounts', match: ['accounts', 'account', 'tags', 'tags-hydration', 'tag', 'lists', 'list'] } as NavItem,
+  accounts: { to: paths.accounts(), label: 'Accounts', match: ['accounts', 'account', 'lists', 'list'] } as NavItem,
+  // The tag routes moved off `accounts` and onto their own entry: the group below
+  // still highlights for either, and inside the menu only the entry a reader is
+  // actually on lights up.
+  tags: { to: paths.tags(), label: 'Tags', match: ['tags', 'tags-hydration', 'tag'] } as NavItem,
   assets: { to: paths.assets(), label: 'Assets', match: ['assets', 'asset', 'holders'] } as NavItem,
   // Pools live under Liquidity, so a pool or the Omnipool highlights there.
   liquidity: { to: paths.liquidity(), label: 'Liquidity', match: ['liquidity', 'pool', 'omnipool'] } as NavItem,
@@ -60,6 +64,11 @@ const IT = {
 // so the menu lists only Liquidity. Security leads the Chain menu (it is the
 // entry a returning operator wants first) while the trigger keeps Blocks.
 const ASSETS_GROUP: NavGroup = { label: 'Assets', items: [IT.assets, IT.liquidity], menuItems: [IT.liquidity, IT.preis] }
+// Same shape as Assets: the trigger still goes to Accounts (items[0]), and the
+// menu lists only the destination the trigger is not. Tags used to be reachable
+// only from a link on the accounts page itself, which is a place you have to
+// already be in order to leave.
+const ACCOUNTS_GROUP: NavGroup = { label: 'Accounts', items: [IT.accounts, IT.tags], menuItems: [IT.tags] }
 const CHAIN_GROUP: NavGroup = {
   label: 'Chain',
   items: [IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.security, IT.governance, IT.mcp],
@@ -79,7 +88,7 @@ const ASSETS_FOLD_GROUP: NavGroup = {
 // The desktop nav in visual order; the drawer keeps every destination flat.
 const NAV_ENTRIES: Array<{ kind: 'link'; item: NavItem } | { kind: 'group'; group: NavGroup; fold?: 'only' | 'hidden' }> = [
   { kind: 'link', item: IT.activity },
-  { kind: 'link', item: IT.accounts },
+  { kind: 'group', group: ACCOUNTS_GROUP },
   { kind: 'group', group: ASSETS_GROUP, fold: 'hidden' },
   { kind: 'link', item: IT.hdx },
   { kind: 'link', item: IT.hollar },
@@ -87,7 +96,7 @@ const NAV_ENTRIES: Array<{ kind: 'link'; item: NavItem } | { kind: 'group'; grou
   { kind: 'group', group: ASSETS_FOLD_GROUP, fold: 'only' },
   { kind: 'group', group: CHAIN_GROUP },
 ]
-const DRAWER_LINKS: NavItem[] = [IT.activity, IT.accounts, IT.assets, IT.liquidity, IT.preis, IT.hdx, IT.hollar, IT.revenue]
+const DRAWER_LINKS: NavItem[] = [IT.activity, IT.accounts, IT.tags, IT.assets, IT.liquidity, IT.preis, IT.hdx, IT.hollar, IT.revenue]
 const DRAWER_GROUPS: NavGroup[] = [CHAIN_GROUP]
 
 function matches(item: NavItem, route: Route): boolean {
