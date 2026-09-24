@@ -156,6 +156,7 @@ function fakeClient(overrides: {
   snapshot?: Row[]
   claimsPointer?: Row[]
   claims?: Row[]
+  v3?: { managerEvents?: Row[]; ranges?: Row[]; shareEvents?: Row[]; flows?: Row[]; vaults?: Row[] }
 } = {}) {
   const seen: Seen[] = []
   // Published snapshot state, as ClickHouse actually holds it: a pointer naming the
@@ -189,6 +190,16 @@ function fakeClient(overrides: {
     query: vi.fn(({ query, query_params }: { query: string; query_params?: Record<string, unknown> }) => {
       const params = query_params ?? {}
       seen.push({ query, params })
+      // The concentrated-liquidity history (services/uniswapV3Positions), by its tags.
+      // Share transfers are account-filtered as the SQL filters them.
+      if (query.includes('-- lp:v3-manager-history')) return queryResult(overrides.v3?.managerEvents ?? [])
+      if (query.includes('-- lp:v3-manager-ranges')) return queryResult(overrides.v3?.ranges ?? [])
+      if (query.includes('-- lp:v3-vault-share-history')) {
+        const wanted = new Set((params.accounts as string[]) ?? [])
+        return queryResult((overrides.v3?.shareEvents ?? []).filter(r => wanted.has(String(r.src)) || wanted.has(String(r.dst))))
+      }
+      if (query.includes('-- lp:v3-vault-pools')) return queryResult(overrides.v3?.vaults ?? [])
+      if (query.includes('-- lp:v3-vault-flow-history')) return queryResult(overrides.v3?.flows ?? [])
       if (query.includes('FROM price_data.assets FINAL')) return queryResult(ASSET_ROWS)
       if (query.includes('Bonds.TokenCreated')) return queryResult([])
       // Ordered before the `blocks` branch, not incidentally: the current-price
@@ -318,7 +329,7 @@ describe('GET /v1/accounts/balances', () => {
         lockedUsd: '2.25',
         // The claim's asset leg 2 DOT × 4.5 plus its hub leg 4 LRNA × 0.5 — a
         // position is not valued by its asset side alone.
-        lpUsd: '11.00',
+        lpUsd: '11.00', uniswapV3Usd: '0.00',
         // 5 HOLLAR × 1.0, reported alongside and netted out of nothing.
         debtUsd: '5.00',
         // Gross assets: transferable + locked + lp. The picker's figure is
@@ -396,9 +407,58 @@ describe('GET /v1/accounts/balances', () => {
       account: ACCOUNT_B,
       transferableUsd: '0.00',
       lockedUsd: '0.00',
-      lpUsd: '4.50',
+      lpUsd: '4.50', uniswapV3Usd: '0.00',
       debtUsd: '0.00',
       totalUsd: '4.50',
+      blockHeight: 0,
+    })
+  })
+
+  it('values concentrated-liquidity holdings through the account\'s EVM forms, per account', async () => {
+    // ACCOUNT_B never bound an address, so its positions sit under the runtime\'s
+    // truncation of its AccountId32 — the first 20 bytes.
+    const bTruncated = `0x${'22'.repeat(20)}`
+    const stranger = `0x${'77'.repeat(20)}`
+    const MANAGER = `0x${'d5'.repeat(20)}`
+    const VAULT = `0x${'a2'.repeat(20)}`
+    const POOL = `0x${'5c'.repeat(20)}`
+    const DOT = precompile(5)
+    const HDX = precompile(0)
+    const client = fakeClient({
+      latest: [], erc20: [], snapshot: [], claims: [],
+      v3: {
+        managerEvents: [
+          // #7: 1 DOT + 100 HDX in, still held = 4.50 + 2.00.
+          { mgr: MANAGER, tid: '7', b: 10, i: 0, ev: 'Transfer', holder: bTruncated, liq: '0', a0: '0', a1: '0' },
+          { mgr: MANAGER, tid: '7', b: 10, i: 1, ev: 'IncreaseLiquidity', holder: '', liq: '1000', a0: '10000000000', a1: '100000000000000' },
+          // #8: opened, then sent to a stranger — no longer the account\'s.
+          { mgr: MANAGER, tid: '8', b: 11, i: 0, ev: 'Transfer', holder: bTruncated, liq: '0', a0: '0', a1: '0' },
+          { mgr: MANAGER, tid: '8', b: 11, i: 1, ev: 'IncreaseLiquidity', holder: '', liq: '5000', a0: '50000000000', a1: '0' },
+          { mgr: MANAGER, tid: '8', b: 12, i: 0, ev: 'Transfer', holder: stranger, liq: '0', a0: '0', a1: '0' },
+        ],
+        ranges: [
+          { mgr: MANAGER, tid: '7', pool_addr: POOL, t0: DOT, t1: HDX, pool_fee: 3000, lo: -60, hi: 60, opened: 10 },
+          { mgr: MANAGER, tid: '8', pool_addr: POOL, t0: DOT, t1: HDX, pool_fee: 3000, lo: -60, hi: 60, opened: 11 },
+        ],
+        // 25 of the vault\'s 100 shares, against 4 DOT = 1 DOT = 4.50.
+        shareEvents: [{ vault: VAULT, b: 13, i: 0, src: `0x${'00'.repeat(20)}`, dst: bTruncated, value: '25' }],
+        vaults: [{ vault: VAULT, token0: DOT, token1: HDX, fee: 3000, pool: POOL }],
+        flows: [{ vault: VAULT, b: 13, i: 1, ev: 'Deposit', shares: '100', a0: '40000000000', a1: '0' }],
+      },
+    })
+    const services = await freshBalances(client)
+    const rows = await services.queryLatestBalances(client as never, [ACCOUNT_A, ACCOUNT_B])
+    services.stopAssets()
+    // Folded per account: ACCOUNT_A has no EVM holdings and gets none of B\'s.
+    expect(rows.find(r => r.account === ACCOUNT_A)?.uniswapV3Usd ?? '0.00').toBe('0.00')
+    expect(rows.find(r => r.account === ACCOUNT_B)).toEqual({
+      account: ACCOUNT_B,
+      transferableUsd: '0.00',
+      lockedUsd: '0.00',
+      lpUsd: '0.00',
+      uniswapV3Usd: '11.00',
+      debtUsd: '0.00',
+      totalUsd: '11.00',
       blockHeight: 0,
     })
   })
@@ -494,7 +554,7 @@ describe('GET /v1/accounts/balances', () => {
       account: ACCOUNT_A,
       transferableUsd: '18.00',
       lockedUsd: '0.00',
-      lpUsd: '0.00',
+      lpUsd: '0.00', uniswapV3Usd: '0.00',
       debtUsd: '5.00',
       totalUsd: '18.00',
       blockHeight: 1200,
@@ -564,7 +624,7 @@ describe('GET /v1/accounts/balances', () => {
         account: ACCOUNT_H160,
         transferableUsd: '0.04',
         lockedUsd: '0.00',
-        lpUsd: '0.00',
+        lpUsd: '0.00', uniswapV3Usd: '0.00',
         debtUsd: '0.00',
         totalUsd: '0.04',
         blockHeight: 900,
@@ -580,12 +640,12 @@ describe('GET /v1/accounts/balances', () => {
     expect(byEvm.statusCode).toBe(200)
     // 3 HDX × 0.02, keyed to the H160 the caller asked about.
     expect(byEvm.json().items).toEqual([
-      { account: BOUND_EVM, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
+      { account: BOUND_EVM, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
     ])
 
     const bySubstrate = await app.inject(`/v1/accounts/balances?accounts=${BOUND_SUBSTRATE}`)
     expect(bySubstrate.json().items).toEqual([
-      { account: BOUND_SUBSTRATE, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
+      { account: BOUND_SUBSTRATE, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
     ])
   })
 
@@ -596,8 +656,8 @@ describe('GET /v1/accounts/balances', () => {
     // indistinguishable from "this address holds nothing", so each is echoed with
     // the shared identity's figures; a caller indexes by `account` and must not sum.
     expect(res.json().items).toEqual([
-      { account: BOUND_EVM, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
-      { account: BOUND_SUBSTRATE, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
+      { account: BOUND_EVM, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
+      { account: BOUND_SUBSTRATE, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
     ])
   })
 
@@ -632,7 +692,7 @@ describe('GET /v1/accounts/balances', () => {
       // 1 HDX × 0.02 + 2 HDX × 0.02 (the EVM-side pot) + 2 DOT × 4.5 supplied.
       transferableUsd: '9.06',
       lockedUsd: '0.00',
-      lpUsd: '0.00',
+      lpUsd: '0.00', uniswapV3Usd: '0.00',
       // 3 HOLLAR × 1.0 — zero before the fix, which is exactly the "no debt for a
       // leveraged account" failure mode the honest-null discipline forbids.
       debtUsd: '3.00',
@@ -675,7 +735,7 @@ describe('GET /v1/accounts/balances', () => {
     // in: its binding already yielded the same key.
     const byEvm = await app.inject(`/v1/accounts/balances?accounts=${BOUND_SUBSTRATE}`)
     expect(byEvm.json().items).toEqual([
-      { account: BOUND_SUBSTRATE, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
+      { account: BOUND_SUBSTRATE, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
     ])
   })
 

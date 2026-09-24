@@ -1,5 +1,6 @@
-// The concentrated-liquidity (Uniswap v3) positions an account holds RIGHT NOW,
-// read from the uniswap_v3_events projection (clickhouse/schema/010_uniswap_v3.sql):
+// The concentrated-liquidity (Uniswap v3) positions an account holds — now, or at
+// the end of any block — folded from the uniswap_v3_events projection
+// (clickhouse/schema/010_uniswap_v3.sql) by one definition (v3AccountPositionsRawAt):
 //
 //  * Manager positions — one per NonfungiblePositionManager NFT the account owns.
 //    Ownership is the newest ERC-721 Transfer of that token id (a burnt NFT's last
@@ -12,9 +13,11 @@
 //    the newest Rebalance's totals plus every deposit and withdrawal since
 //    (v3VaultTotals — the same definition the pool page's vault card uses).
 //
-// Two surfaces read this: the explorer's account page (LpPosition rows, valued at
-// current prices) and the Data API's /v1/accounts/{address}/liquidity/positions.
-// The Data API is an import leaf, so this module takes its ClickHouse client as an
+// Four surfaces read this: the explorer's account page (LpPosition rows, valued at
+// current prices), the explorer's value-history chart (the fold stopped at each
+// bucket's end block, valued at that bucket's prices), the Data API's
+// /v1/accounts/{address}/liquidity/positions and the public API's account balances.
+// Both APIs are import leaves, so this module takes its ClickHouse client as an
 // argument, imports nothing that reaches explorerService, and resolves a pool's
 // token contracts to registry asset ids on its own: the `0x…01 + id` asset
 // precompile rule, else the registry tracker's `assets.evm_address` (aTokens,
@@ -191,39 +194,185 @@ export async function v3VaultTotals(client: ClickHouseClient, vaults: readonly s
   return out
 }
 
+// ---------------------------------------------------------------------------
+// the account's venue history, and the fold that states it at any block
+// ---------------------------------------------------------------------------
+
+export interface V3ManagerEventRow {
+  manager: string
+  tokenId: string
+  block: number
+  index: number
+  event: 'Transfer' | 'IncreaseLiquidity' | 'DecreaseLiquidity'
+  /** A Transfer's recipient; empty on the liquidity events. */
+  holder: string
+  liquidity: string
+  amount0: string
+  amount1: string
+}
+
+export interface V3ManagerRangeRow {
+  manager: string
+  tokenId: string
+  pool: string | null
+  token0: string
+  token1: string
+  fee: number | null
+  tickLower: number
+  tickUpper: number
+  openedBlock: number
+}
+
+export interface V3VaultShareEventRow { vault: string; block: number; index: number; from: string; to: string; value: string }
+
+export interface V3VaultFlowRow {
+  vault: string
+  block: number
+  index: number
+  event: 'Deposit' | 'Withdraw' | 'Rebalance'
+  /** Shares minted (Deposit) or burnt (Withdraw); unused on a Rebalance. */
+  shares: string
+  amount0: string
+  amount1: string
+}
+
+export interface V3VaultMetaRow { vault: string; pool: string | null; token0: string; token1: string; fee: number }
+
 /**
- * Everything the account-position readers need, for the H160s an account acts
- * through: the manager positions those addresses currently own, the vault shares
- * they hold (with the vault totals to redeem them against), and the asset id of
- * every token contract involved. Account-first and tiny: the venue's whole
- * history is a few thousand rows.
+ * Every row of the venue that bears on what `accounts` held, at any block: the
+ * events of each position NFT they were ever sent, the pool range each position
+ * opened into, the share transfers of every vault they touched, and those vaults'
+ * whole deposit/withdraw/rebalance record (a holder's redeemable legs depend on
+ * every other holder's flows).
  */
-export async function loadV3AccountPositions(client: ClickHouseClient, accountsH160: readonly string[]): Promise<V3AccountPositionsRaw> {
+export interface V3AccountHistoryRaw {
+  accounts: string[]
+  managerEvents: V3ManagerEventRow[]
+  ranges: V3ManagerRangeRow[]
+  shareEvents: V3VaultShareEventRow[]
+  vaultFlows: V3VaultFlowRow[]
+  vaults: V3VaultMetaRow[]
+  tokenAssets: ReadonlyMap<string, number>
+}
+
+const upTo = (atBlock: number) => (r: { block: number }) => r.block <= atBlock
+const after = (a: { block: number; index: number }, b: { block: number; index: number }) => a.block > b.block || (a.block === b.block && a.index > b.index)
+
+/**
+ * What the accounts held at the END of block `atBlock` (Infinity: at the head of
+ * the projection), in the raw form v3AccountPositions redeems. The same definition
+ * at every block:
+ *
+ *  * a position NFT is the accounts' when its newest Transfer up to the block went
+ *    to one of them; what is in it is IncreaseLiquidity minus DecreaseLiquidity up
+ *    to the block (liquidity and both principals);
+ *  * a vault holding is the accounts' share transfers in minus out; the shares
+ *    outstanding are deposits minus withdrawals, and the totals they redeem against
+ *    are the newest Rebalance's plus the deposits and withdrawals after it (net
+ *    deposits before the first rebalance) — v3VaultTotals, stopped at the block.
+ *
+ * A transfer between two of the accounts nets to nothing, so a tag's members are
+ * one holder. Pure and pinned by api/tests/uniswapV3Positions.test.ts.
+ */
+export function v3AccountPositionsRawAt(history: V3AccountHistoryRaw, atBlock = Infinity): V3AccountPositionsRaw {
+  const accounts = new Set(history.accounts)
+  const seen = upTo(atBlock)
+  const rangeOf = new Map(history.ranges.map(r => [`${r.manager}:${r.tokenId}`, r]))
+
+  const byToken = new Map<string, { holder: string; liquidity: bigint; amount0: bigint; amount1: bigint; lastBlock: number; manager: string; tokenId: string }>()
+  for (const e of history.managerEvents) {
+    if (!seen(e)) continue
+    const key = `${e.manager}:${e.tokenId}`
+    const t = byToken.get(key) ?? { holder: '', liquidity: 0n, amount0: 0n, amount1: 0n, lastBlock: 0, manager: e.manager, tokenId: e.tokenId }
+    // Rows arrive in (block, event) order, so the last Transfer seen names the holder.
+    if (e.event === 'Transfer') t.holder = e.holder
+    const sign = e.event === 'IncreaseLiquidity' ? 1n : e.event === 'DecreaseLiquidity' ? -1n : 0n
+    t.liquidity += sign * big(e.liquidity)
+    t.amount0 += sign * big(e.amount0)
+    t.amount1 += sign * big(e.amount1)
+    t.lastBlock = Math.max(t.lastBlock, e.block)
+    byToken.set(key, t)
+  }
+  const positions: V3ManagerPositionRow[] = []
+  for (const [key, t] of byToken) {
+    if (!accounts.has(t.holder)) continue
+    const r = rangeOf.get(key)
+    positions.push({
+      manager: t.manager, tokenId: t.tokenId, pool: r?.pool ?? null, token0: r?.token0 ?? '', token1: r?.token1 ?? '',
+      fee: r?.pool ? r.fee : null, tickLower: r?.tickLower ?? 0, tickUpper: r?.tickUpper ?? 0,
+      liquidity: t.liquidity.toString(), amount0: t.amount0.toString(), amount1: t.amount1.toString(),
+      openedBlock: r?.openedBlock ?? 0, lastBlock: t.lastBlock,
+    })
+  }
+  positions.sort((a, b) => a.openedBlock - b.openedBlock || (BigInt(a.tokenId) < BigInt(b.tokenId) ? -1 : 1))
+
+  const held = new Map<string, bigint>()
+  for (const e of history.shareEvents) {
+    if (!seen(e)) continue
+    const value = big(e.value)
+    held.set(e.vault, (held.get(e.vault) ?? 0n) + (accounts.has(e.to) ? value : 0n) - (accounts.has(e.from) ? value : 0n))
+  }
+  const metaOf = new Map(history.vaults.map(v => [v.vault, v]))
+  const vaults: V3VaultHoldingRow[] = []
+  for (const [vault, shares] of held) {
+    const meta = metaOf.get(vault)
+    if (shares <= 0n || !meta) continue
+    const flows = history.vaultFlows.filter(f => f.vault === vault && seen(f))
+    let rebalance: V3VaultFlowRow | null = null
+    for (const f of flows) if (f.event === 'Rebalance' && (!rebalance || after(f, rebalance))) rebalance = f
+    let totalShares = 0n
+    let total0 = rebalance ? big(rebalance.amount0) : 0n
+    let total1 = rebalance ? big(rebalance.amount1) : 0n
+    for (const f of flows) {
+      if (f.event === 'Rebalance') continue
+      const sign = f.event === 'Deposit' ? 1n : -1n
+      totalShares += sign * big(f.shares)
+      if (!rebalance || after(f, rebalance)) { total0 += sign * big(f.amount0); total1 += sign * big(f.amount1) }
+    }
+    vaults.push({
+      vault, pool: meta.pool, token0: meta.token0, token1: meta.token1, fee: meta.fee,
+      shares: shares.toString(), totalShares: totalShares.toString(), total0: total0.toString(), total1: total1.toString(),
+    })
+  }
+  return { positions, vaults, tokenAssets: history.tokenAssets }
+}
+
+/**
+ * The venue history behind v3AccountPositionsRawAt, for the H160s an account (or
+ * a tag's members) acts through. Account-first and tiny: the venue's whole history
+ * is a few thousand rows, and an account's share of it a handful.
+ */
+export async function loadV3AccountHistory(client: ClickHouseClient, accountsH160: readonly string[]): Promise<V3AccountHistoryRaw> {
   const accounts = h160List(accountsH160)
-  const empty: V3AccountPositionsRaw = { positions: [], vaults: [], tokenAssets: new Map() }
+  const empty: V3AccountHistoryRaw = { accounts, managerEvents: [], ranges: [], shareEvents: [], vaultFlows: [], vaults: [], tokenAssets: new Map() }
   if (!accounts.length) return empty
-  const [positionRows, heldRows] = await Promise.all([
-    // A manager is any contract that ever emitted IncreaseLiquidity, so an ERC-721
-    // collection that merely transfers 4-topic Transfers (the projection admits
-    // them) cannot pose as a position. The pool and range come from the pool Mint
-    // the manager's first IncreaseLiquidity sits beside in the same extrinsic.
-    rows<{ mgr: string; tid: string; pool_addr: string; t0: string; t1: string; pool_fee: number; lo: number; hi: number; opened: number; net_liquidity: string; net0: string; net1: string; last_block: number }>(client, `-- lp:v3-manager-positions
-        WITH managers AS (
+  // A manager is any contract that ever emitted IncreaseLiquidity, so an ERC-721
+  // collection that merely transfers 4-topic Transfers (the projection admits
+  // them) cannot pose as a position.
+  const touched = `
+        managers AS (
           SELECT DISTINCT contract_address FROM price_data.uniswap_v3_events
           WHERE kind = 'manager' AND event_name = 'IncreaseLiquidity'
         ),
-        owned AS (
-          SELECT contract_address AS manager, token_id,
-                 argMax(counterparty, (block_height, event_index)) AS holder
-          FROM price_data.uniswap_v3_events FINAL
-          WHERE kind = 'manager' AND event_name = 'Transfer'
+        touched AS (
+          SELECT DISTINCT contract_address, token_id FROM price_data.uniswap_v3_events
+          WHERE kind = 'manager' AND event_name = 'Transfer' AND counterparty IN {accounts:Array(String)}
             AND contract_address IN (SELECT contract_address FROM managers)
-            AND (contract_address, token_id) IN (
-              SELECT contract_address, token_id FROM price_data.uniswap_v3_events
-              WHERE kind = 'manager' AND event_name = 'Transfer' AND counterparty IN {accounts:Array(String)})
-          GROUP BY manager, token_id
-          HAVING holder IN {accounts:Array(String)}
-        ),
+        )`
+  const [managerRows, rangeRows, shareRows] = await Promise.all([
+    rows<{ mgr: string; tid: string; b: number; i: number; ev: V3ManagerEventRow['event']; holder: string; liq: string; a0: string; a1: string }>(client, `-- lp:v3-manager-history
+        WITH ${touched}
+        SELECT contract_address AS mgr, toString(token_id) AS tid, block_height AS b, event_index AS i, event_name AS ev,
+               if(event_name = 'Transfer', counterparty, '') AS holder,
+               toString(liquidity) AS liq, toString(amount0) AS a0, toString(amount1) AS a1
+        FROM price_data.uniswap_v3_events FINAL
+        WHERE kind = 'manager' AND event_name IN ('Transfer', 'IncreaseLiquidity', 'DecreaseLiquidity')
+          AND (contract_address, token_id) IN (SELECT contract_address, token_id FROM touched)
+        ORDER BY b, i`, { accounts }),
+    // The pool and range come from the pool Mint the manager's first
+    // IncreaseLiquidity sits beside in the same extrinsic.
+    rows<{ mgr: string; tid: string; pool_addr: string; t0: string; t1: string; pool_fee: number; lo: number; hi: number; opened: number }>(client, `-- lp:v3-manager-ranges
+        WITH ${touched},
         ranges AS (
           SELECT m.contract_address AS manager, m.token_id AS token_id,
                  argMin(p.contract_address, (m.block_height, m.event_index)) AS pool,
@@ -235,35 +384,24 @@ export async function loadV3AccountPositions(client: ClickHouseClient, accountsH
             ON p.block_height = m.block_height AND p.extrinsic_index = m.extrinsic_index
            AND p.kind = 'pool' AND p.event_name = 'Mint' AND p.owner = m.contract_address
           WHERE m.kind = 'manager' AND m.event_name = 'IncreaseLiquidity'
-            AND (m.contract_address, m.token_id) IN (SELECT manager, token_id FROM owned)
+            AND (m.contract_address, m.token_id) IN (SELECT contract_address, token_id FROM touched)
           GROUP BY manager, token_id
         )
-        SELECT o.manager AS mgr, toString(o.token_id) AS tid,
-               r.pool AS pool_addr, pl.token0 AS t0, pl.token1 AS t1, pl.fee AS pool_fee,
-               r.tick_lower AS lo, r.tick_upper AS hi, r.opened_block AS opened,
-               toString(sumIf(toInt256(e.liquidity), e.event_name = 'IncreaseLiquidity') - sumIf(toInt256(e.liquidity), e.event_name = 'DecreaseLiquidity')) AS net_liquidity,
-               toString(sumIf(e.amount0, e.event_name = 'IncreaseLiquidity') - sumIf(e.amount0, e.event_name = 'DecreaseLiquidity')) AS net0,
-               toString(sumIf(e.amount1, e.event_name = 'IncreaseLiquidity') - sumIf(e.amount1, e.event_name = 'DecreaseLiquidity')) AS net1,
-               max(e.block_height) AS last_block
-        FROM owned AS o
-        LEFT JOIN ranges AS r ON r.manager = o.manager AND r.token_id = o.token_id
-        LEFT JOIN (SELECT pool_address, token0, token1, fee FROM price_data.uniswap_v3_pools FINAL) AS pl ON pl.pool_address = r.pool
-        INNER JOIN price_data.uniswap_v3_events AS e FINAL
-          ON e.contract_address = o.manager AND e.token_id = o.token_id AND e.kind = 'manager'
-        GROUP BY mgr, tid, pool_addr, t0, t1, pool_fee, lo, hi, opened
-        ORDER BY opened, tid`, { accounts }),
+        SELECT r.manager AS mgr, toString(r.token_id) AS tid, r.pool AS pool_addr, pl.token0 AS t0, pl.token1 AS t1, pl.fee AS pool_fee,
+               r.tick_lower AS lo, r.tick_upper AS hi, r.opened_block AS opened
+        FROM ranges AS r
+        LEFT JOIN (SELECT pool_address, token0, token1, fee FROM price_data.uniswap_v3_pools FINAL) AS pl ON pl.pool_address = r.pool`, { accounts }),
     // The vault's ERC-20 share Transfers: a mint comes from the zero address, a
-    // burn goes to it, and a self-transfer nets to nothing.
-    rows<{ vault: string; held: string }>(client, `-- lp:v3-vault-shares
-        SELECT contract_address AS vault,
-               toString(sumIf(toInt256(liquidity), counterparty IN {accounts:Array(String)}) - sumIf(toInt256(liquidity), actor IN {accounts:Array(String)})) AS held
+    // burn goes to it.
+    rows<{ vault: string; b: number; i: number; src: string; dst: string; value: string }>(client, `-- lp:v3-vault-share-history
+        SELECT contract_address AS vault, block_height AS b, event_index AS i, actor AS src, counterparty AS dst, toString(liquidity) AS value
         FROM price_data.uniswap_v3_events FINAL
         WHERE kind = 'vault' AND event_name = 'Transfer'
           AND (actor IN {accounts:Array(String)} OR counterparty IN {accounts:Array(String)})
-        GROUP BY vault`, { accounts }),
+        ORDER BY b, i`, { accounts }),
   ])
-  const heldVaults = heldRows.filter(r => big(r.held) > 0n)
-  const [vaultMeta, totals] = heldVaults.length
+  const touchedVaults = [...new Set(shareRows.map(r => r.vault))]
+  const [metaRows, flowRows] = touchedVaults.length
     ? await Promise.all([
         // A vault names its pool by (token0, token1, fee); the pool row with the same triple is it.
         rows<{ vault: string; token0: string; token1: string; fee: number; pool: string }>(client, `-- lp:v3-vault-pools
@@ -271,29 +409,23 @@ export async function loadV3AccountPositions(client: ClickHouseClient, accountsH
             FROM price_data.uniswap_v3_vaults AS v FINAL
             LEFT JOIN (SELECT pool_address, token0, token1, fee FROM price_data.uniswap_v3_pools FINAL) AS p
               ON p.token0 = v.token0 AND p.token1 = v.token1 AND p.fee = v.fee
-            WHERE v.vault_address IN {vaults:Array(String)}`, { vaults: heldVaults.map(r => r.vault) }),
-        v3VaultTotals(client, heldVaults.map(r => r.vault)),
+            WHERE v.vault_address IN {vaults:Array(String)}`, { vaults: touchedVaults }),
+        rows<{ vault: string; b: number; i: number; ev: V3VaultFlowRow['event']; shares: string; a0: string; a1: string }>(client, `-- lp:v3-vault-flow-history
+            SELECT contract_address AS vault, block_height AS b, event_index AS i, event_name AS ev,
+                   toString(liquidity) AS shares, toString(amount0) AS a0, toString(amount1) AS a1
+            FROM price_data.uniswap_v3_events FINAL
+            WHERE kind = 'vault' AND event_name IN ('Deposit', 'Withdraw', 'Rebalance') AND contract_address IN {vaults:Array(String)}
+            ORDER BY b, i`, { vaults: touchedVaults }),
       ])
-    : [[], new Map<string, { shares: bigint; total0: bigint; total1: bigint }>()]
-  const metaByVault = new Map(vaultMeta.map(m => [m.vault, m]))
-  const vaults: V3VaultHoldingRow[] = []
-  for (const r of heldVaults) {
-    const meta = metaByVault.get(r.vault)
-    const total = totals.get(r.vault)
-    if (!meta) continue
-    vaults.push({
-      vault: r.vault, pool: meta.pool || null, token0: meta.token0, token1: meta.token1, fee: Number(meta.fee),
-      shares: r.held, totalShares: (total?.shares ?? 0n).toString(), total0: (total?.total0 ?? 0n).toString(), total1: (total?.total1 ?? 0n).toString(),
-    })
-  }
-  const positions: V3ManagerPositionRow[] = positionRows.map(r => ({
+    : [[], []]
+  const ranges: V3ManagerRangeRow[] = rangeRows.map(r => ({
     manager: r.mgr, tokenId: String(r.tid), pool: r.pool_addr || null, token0: r.t0 ?? '', token1: r.t1 ?? '',
-    fee: r.pool_addr ? Number(r.pool_fee) : null, tickLower: Number(r.lo), tickUpper: Number(r.hi),
-    liquidity: r.net_liquidity, amount0: r.net0, amount1: r.net1, openedBlock: Number(r.opened), lastBlock: Number(r.last_block),
+    fee: r.pool_addr ? Number(r.pool_fee) : null, tickLower: Number(r.lo), tickUpper: Number(r.hi), openedBlock: Number(r.opened),
   }))
+  const vaults: V3VaultMetaRow[] = metaRows.map(m => ({ vault: m.vault, pool: m.pool || null, token0: m.token0, token1: m.token1, fee: Number(m.fee) }))
   // Token contracts → asset ids. The precompile rule needs no lookup; a deployed
   // ERC-20 (an aToken, HOLLAR) is whatever the registry tracker persisted for it.
-  const tokens = [...new Set([...positions.flatMap(p => [p.token0, p.token1]), ...vaults.flatMap(v => [v.token0, v.token1])].map(t => t.toLowerCase()).filter(t => H160_RE.test(t)))]
+  const tokens = [...new Set([...ranges.flatMap(p => [p.token0, p.token1]), ...vaults.flatMap(v => [v.token0, v.token1])].map(t => t.toLowerCase()).filter(t => H160_RE.test(t)))]
   const unresolved = tokens.filter(t => precompileAssetId(t) == null)
   const tokenAssets = new Map<string, number>()
   for (const t of tokens) { const id = precompileAssetId(t); if (id != null) tokenAssets.set(t, id) }
@@ -303,5 +435,21 @@ export async function loadV3AccountPositions(client: ClickHouseClient, accountsH
         WHERE evm_address != '' AND lower(evm_address) IN {addrs:Array(String)}`, { addrs: unresolved })
     for (const r of found) tokenAssets.set(r.addr, Number(r.asset_id))
   }
-  return { positions, vaults, tokenAssets }
+  return {
+    accounts,
+    managerEvents: managerRows.map(r => ({
+      manager: r.mgr, tokenId: String(r.tid), block: Number(r.b), index: Number(r.i), event: r.ev, holder: r.holder ?? '',
+      liquidity: r.liq, amount0: r.a0, amount1: r.a1,
+    })),
+    ranges,
+    shareEvents: shareRows.map(r => ({ vault: r.vault, block: Number(r.b), index: Number(r.i), from: r.src, to: r.dst, value: r.value })),
+    vaultFlows: flowRows.map(r => ({ vault: r.vault, block: Number(r.b), index: Number(r.i), event: r.ev, shares: r.shares, amount0: r.a0, amount1: r.a1 })),
+    vaults,
+    tokenAssets,
+  }
+}
+
+/** What the H160s an account acts through hold now: the history folded at its head. */
+export async function loadV3AccountPositions(client: ClickHouseClient, accountsH160: readonly string[]): Promise<V3AccountPositionsRaw> {
+  return v3AccountPositionsRawAt(await loadV3AccountHistory(client, accountsH160))
 }

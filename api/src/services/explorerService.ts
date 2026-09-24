@@ -45,7 +45,7 @@ import { parsePoolAssetIds } from './stableswapSnapshot.ts'
 import { findMempoolTx, findPendingBlock, findPendingExtrinsic, findPendingExtrinsicByHash, mempoolTxs, pendingBestHeight, pendingBlocksDesc, type MempoolTx, type PendingBlock, type PendingExtrinsicRow } from './pendingHeadService.ts'
 import { buildMempoolActivities, buildPendingActivities, type PendingActivity, type PendingTradeActivity } from './pendingActivity.ts'
 import { feeTierLabel, loadV3Registry, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3SwapAt, type V3Activity, type V3Registry } from './uniswapV3Service.ts'
-import { loadV3AccountPositions, v3AccountPositions } from './uniswapV3Positions.ts'
+import { loadV3AccountHistory, loadV3AccountPositions, v3AccountPositions, v3AccountPositionsRawAt } from './uniswapV3Positions.ts'
 import { xcswapSettlementsFor, type XcswapSettlement, type XcswapStatus } from './xcswapSettlements.ts'
 import { loadForeignCandles } from './foreignCandles.ts'
 import { intentLimitPrice } from './intentLimitPrice.ts'
@@ -6690,16 +6690,7 @@ async function getXykPositions(accounts: string[], balances: AddressBalance[]): 
 async function getUniswapV3Positions(accounts: string[]): Promise<LpPosition[]> {
   const h160s = [...new Set(accounts.map(evmAccountForm).filter((x): x is string => x != null).map(x => '0x' + x.slice(10, 50)))]
   if (!h160s.length) return []
-  const [raw, registry, prices] = await Promise.all([loadV3AccountPositions(client, h160s), v3Registry(), ensureAccountValuePrices()])
-  // The registry resolves a token three ways (precompile, aToken reserve map, deployed
-  // ERC-20); the module's own SQL fallback answers what it does not know.
-  const registryAsset = (addr: string): number | null => {
-    for (const pool of registry.pools.values()) {
-      if (pool.token0 === addr) return pool.asset0
-      if (pool.token1 === addr) return pool.asset1
-    }
-    return null
-  }
+  const [raw, registryAsset, prices] = await Promise.all([loadV3AccountPositions(client, h160s), v3RegistryAssetResolver(), ensureAccountValuePrices()])
   const out: LpPosition[] = []
   for (const p of v3AccountPositions(raw, registryAsset)) {
     if (p.asset0 == null || p.asset1 == null) continue
@@ -6715,6 +6706,45 @@ async function getUniswapV3Positions(accounts: string[]): Promise<LpPosition[]> 
     })
   }
   return out.sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
+}
+
+// The registry resolves a v3 pool's token three ways (precompile, aToken reserve map,
+// deployed ERC-20); uniswapV3Positions' own SQL fallback answers what it does not know.
+async function v3RegistryAssetResolver(): Promise<(addr: string) => number | null> {
+  const registry = await v3Registry()
+  return (addr: string): number | null => {
+    for (const pool of registry.pools.values()) {
+      if (pool.token0 === addr) return pool.asset0
+      if (pool.token1 === addr) return pool.asset1
+    }
+    return null
+  }
+}
+
+// Historical concentrated-liquidity (Uniswap v3) principal for the value-history chart:
+// the account page's own fold (v3AccountPositionsRawAt) stopped at each bucket's end
+// block — manager-NFT principal and Gamma vault shares redeemed against the vault's
+// totals at that block — so the curve's last bucket and the page's current value are
+// one definition. Uncollected fees are in neither. Raw legs; callers apply the bucket's
+// closed price. Account-bounded, and the venue's whole history is a few thousand rows.
+interface V3HistoryLeg { asset0: number; asset1: number; amount0: bigint; amount1: bigint }
+async function loadV3PrincipalHistory(accounts: string[], bk: Bucketing): Promise<{ legsByBucket: V3HistoryLeg[][]; assetIds: number[] }> {
+  const h160s = [...new Set(accounts.map(historyH160).filter((x): x is string => x != null))]
+  const empty = { legsByBucket: Array.from({ length: bk.N + 1 }, () => [] as V3HistoryLeg[]), assetIds: [] }
+  if (!h160s.length) return empty
+  const [history, registryAsset] = await Promise.all([loadV3AccountHistory(client, h160s), v3RegistryAssetResolver()])
+  if (!history.managerEvents.length && !history.shareEvents.length) return empty
+  const assetIds = new Set<number>()
+  const legsByBucket = empty.legsByBucket
+  for (let b = 0; b <= bk.N; b++) {
+    for (const p of v3AccountPositions(v3AccountPositionsRawAt(history, bk.endHeight(b)), registryAsset)) {
+      // An unresolvable token cannot be priced; the current-value twin drops it too.
+      if (p.asset0 == null || p.asset1 == null) continue
+      legsByBucket[b].push({ asset0: p.asset0, asset1: p.asset1, amount0: p.amount0, amount1: p.amount1 })
+      assetIds.add(p.asset0).add(p.asset1)
+    }
+  }
+  return { legsByBucket, assetIds: [...assetIds] }
 }
 
 // Historical Omnipool principal for the value-history chart: for every position the account
@@ -20648,12 +20678,16 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // Historical XYK LP principal (direct wallet shareToken balances + collection-5389 farm
   // deposits) valued at pool NAV. Loaded before the price query so both pool assets are priced.
   const xykHist = await loadXykPrincipalHistory(accounts, assetIds.map(Number), bk)
+  // Historical concentrated-liquidity principal, folded per bucket before the price
+  // query so both sides of every pair — a since-closed position's included — are priced.
+  const v3Hist = await loadV3PrincipalHistory(accounts, bk)
   // aTokens have no price feed of their own — query the underlying reserve's
   // historical prices for them (priceAssetId maps aPRIME→PRIME, etc.).
   const priceIdFor = new Map(assetIds.map(id => [id, String(priceAssetId(Number(id)))]))
   const lpPriceIds = omniAssetIds.length ? [...new Set(omniAssetIds.map(id => String(priceAssetId(id))))].concat(String(H2O_ASSET_ID)) : []
   const xykPriceIds = xykHist ? xykHist.underlyingAssetIds.map(id => String(priceAssetId(id))) : []
-  const priceIds = [...new Set([...priceIdFor.values(), ...lpPriceIds, ...xykPriceIds])]
+  const v3PriceIds = v3Hist.assetIds.map(id => String(priceAssetId(id)))
+  const priceIds = [...new Set([...priceIdFor.values(), ...lpPriceIds, ...xykPriceIds, ...v3PriceIds])]
   // The daily close states are a replay-safe compact projection of prices, and the
   // only price source this path may use: the raw table holds a row for every asset at
   // every indexed block, and grouping it here reads hundreds of millions of rows for a
@@ -20945,6 +20979,20 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
         // keeping it would leave a fragment of an excluded position in the curve.
         if (leg.assetId !== HDX_ASSET_ID) portfolioExHdx[b] += withdrawValue
       }
+    }
+  }
+
+  // Concentrated-liquidity principal on the historical curve: both token legs at the
+  // bucket's closed price. A position is a claim on both sides of its pair at once, so
+  // an HDX-paired one leaves the ex-HDX curve entirely (isHdxLpPosition's twin).
+  for (let b = 0; b <= N; b++) {
+    for (const leg of v3Hist.legsByBucket[b]) {
+      const px0 = pxByPriceId.get(String(priceAssetId(leg.asset0)))
+      const px1 = pxByPriceId.get(String(priceAssetId(leg.asset1)))
+      const value = (Number(leg.amount0) / 10 ** asset(leg.asset0).decimals) * (px0?.get(b) ?? earliestBucketPrice(px0))
+        + (Number(leg.amount1) / 10 ** asset(leg.asset1).decimals) * (px1?.get(b) ?? earliestBucketPrice(px1))
+      portfolio[b] += value
+      if (leg.asset0 !== HDX_ASSET_ID && leg.asset1 !== HDX_ASSET_ID) portfolioExHdx[b] += value
     }
   }
 
