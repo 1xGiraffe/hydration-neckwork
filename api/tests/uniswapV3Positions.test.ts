@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
-  precompileAssetId, v3AccountPositions, vaultShareLegs,
-  type V3AccountPositionsRaw, type V3ManagerPositionRow, type V3VaultHoldingRow,
+  precompileAssetId, v3AccountPositions, v3AccountPositionsRawAt, vaultShareLegs,
+  type V3AccountHistoryRaw, type V3AccountPositionsRaw, type V3ManagerPositionRow, type V3VaultHoldingRow,
 } from '../src/services/uniswapV3Positions.ts'
 
 // The account-position math, pinned against the first deployment (aDOT/HOLLAR 0.3%,
@@ -89,5 +89,72 @@ describe('v3AccountPositions', () => {
     const rows = raw([position({ token0: dot, token1: '0x9999999999999999999999999999999999999999' })], [], [])
     expect(v3AccountPositions(rows)[0]).toMatchObject({ asset0: 5, asset1: null })
     expect(v3AccountPositions(rows, addr => (addr === '0x9999999999999999999999999999999999999999' ? 4242 : null))[0]).toMatchObject({ asset0: 5, asset1: 4242 })
+  })
+})
+
+describe('v3AccountPositionsRawAt', () => {
+  const ME = `0x${'61'.repeat(20)}`
+  const ALT = `0x${'62'.repeat(20)}`
+  const OTHER = `0x${'77'.repeat(20)}`
+  const ZERO = `0x${'00'.repeat(20)}`
+  const history = (over: Partial<V3AccountHistoryRaw> = {}): V3AccountHistoryRaw => ({
+    accounts: [ME],
+    managerEvents: [
+      { manager: MANAGER, tokenId: '1', block: 100, index: 0, event: 'Transfer', holder: ME, liquidity: '0', amount0: '0', amount1: '0' },
+      { manager: MANAGER, tokenId: '1', block: 100, index: 1, event: 'IncreaseLiquidity', holder: '', liquidity: '1000', amount0: '400', amount1: '600' },
+      { manager: MANAGER, tokenId: '1', block: 200, index: 0, event: 'DecreaseLiquidity', holder: '', liquidity: '250', amount0: '100', amount1: '150' },
+      { manager: MANAGER, tokenId: '1', block: 300, index: 0, event: 'Transfer', holder: OTHER, liquidity: '0', amount0: '0', amount1: '0' },
+    ],
+    ranges: [{ manager: MANAGER, tokenId: '1', pool: POOL, token0: ADOT, token1: HOLLAR, fee: 3000, tickLower: -60, tickUpper: 60, openedBlock: 100 }],
+    shareEvents: [
+      { vault: VAULT, block: 110, index: 0, from: ZERO, to: ME, value: '10' },
+      { vault: VAULT, block: 400, index: 0, from: ME, to: ZERO, value: '10' },
+    ],
+    vaultFlows: [
+      { vault: VAULT, block: 110, index: 1, event: 'Deposit', shares: '10', amount0: '100', amount1: '200' },
+      { vault: VAULT, block: 120, index: 0, event: 'Deposit', shares: '30', amount0: '300', amount1: '600' },
+      // The rebalance restates the whole vault (fees earned): 440 / 880.
+      { vault: VAULT, block: 150, index: 0, event: 'Rebalance', shares: '0', amount0: '440', amount1: '880' },
+      { vault: VAULT, block: 160, index: 0, event: 'Deposit', shares: '10', amount0: '110', amount1: '220' },
+      { vault: VAULT, block: 400, index: 1, event: 'Withdraw', shares: '10', amount0: '110', amount1: '220' },
+    ],
+    vaults: [{ vault: VAULT, pool: POOL, token0: ADOT, token1: HOLLAR, fee: 3000 }],
+    tokenAssets: new Map([[ADOT, 1001], [HOLLAR, 222]]),
+    ...over,
+  })
+  const at = (h: V3AccountHistoryRaw, block?: number) => v3AccountPositions(v3AccountPositionsRawAt(h, block))
+
+  it('holds nothing before the first event', () => {
+    expect(at(history(), 99)).toEqual([])
+  })
+  it('states the position principal as of the block: opened, then partly decreased', () => {
+    expect(at(history(), 100)).toMatchObject([{ kind: 'position', tokenId: '1', shares: 1000n, amount0: 400n, amount1: 600n }])
+    expect(at(history(), 250).find(p => p.kind === 'position')).toMatchObject({ shares: 750n, amount0: 300n, amount1: 450n })
+  })
+  it('drops a position once its NFT is transferred away', () => {
+    expect(at(history(), 300).filter(p => p.kind === 'position')).toEqual([])
+  })
+  it('redeems vault shares against the totals as of the block, before and after a rebalance', () => {
+    // Block 120: net deposits, 10 of 40 shares -> a quarter of 400 / 800.
+    expect(at(history(), 120).find(p => p.kind === 'vault')).toMatchObject({ shares: 10n, totalShares: 40n, amount0: 100n, amount1: 200n })
+    // Block 160: the rebalance's 440 / 880 plus the later deposit, 10 of 50 shares.
+    expect(at(history(), 160).find(p => p.kind === 'vault')).toMatchObject({ shares: 10n, totalShares: 50n, amount0: 110n, amount1: 220n })
+    expect(at(history(), 400).filter(p => p.kind === 'vault')).toEqual([])
+  })
+  it('matches the current reader at the head', () => {
+    expect(at(history())).toEqual(at(history(), 10_000))
+    expect(at(history())).toEqual([])
+  })
+  it('nets a transfer between two of the holders, so a tag is one holder', () => {
+    const h = history({
+      accounts: [ME, ALT],
+      shareEvents: [
+        { vault: VAULT, block: 110, index: 0, from: ZERO, to: ME, value: '10' },
+        { vault: VAULT, block: 130, index: 0, from: ME, to: ALT, value: '10' },
+      ],
+    })
+    expect(at(h, 140).find(p => p.kind === 'vault')).toMatchObject({ shares: 10n })
+    // Folded for ME alone the shares left at block 130.
+    expect(at({ ...h, accounts: [ME] }, 140).filter(p => p.kind === 'vault')).toEqual([])
   })
 })

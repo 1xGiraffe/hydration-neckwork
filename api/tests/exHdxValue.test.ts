@@ -40,18 +40,21 @@ describe('the ex-HDX exclusion covers every path HDX takes into the portfolio', 
     // The XYK leg: a share is a claim on both reserves, so an HDX-paired pool leaves
     // the curve whole rather than contributing its other half.
     expect(body).toContain('if (st.assetA !== HDX_ASSET_ID && st.assetB !== HDX_ASSET_ID) portfolioExHdx[b] += nav')
+    // The concentrated-liquidity leg: a position claims both sides of its pair, so the
+    // XYK rule applies.
+    expect(body).toContain('if (leg.asset0 !== HDX_ASSET_ID && leg.asset1 !== HDX_ASSET_ID) portfolioExHdx[b] += value')
   })
 
   // Pinned by count so a NEW value source added to the total curve cannot quietly
   // skip the second one: every `portfolio[b] +=` site must have made a decision
-  // about `portfolioExHdx[b]`. Four sites — balances, XYK NAV, the money-market
-  // fold, Omnipool principal.
+  // about `portfolioExHdx[b]`. Five sites — balances, XYK NAV, the money-market
+  // fold, Omnipool principal, concentrated-liquidity principal.
   it('feeds both curves from every value source', () => {
     const body = fn('getAccountHistory')
     const total = [...body.matchAll(/\bportfolio\[b\] \+=/g)]
     const exHdx = [...body.matchAll(/\bportfolioExHdx\[b\] \+=/g)]
-    expect(total).toHaveLength(4)
-    expect(exHdx).toHaveLength(4)
+    expect(total).toHaveLength(5)
+    expect(exHdx).toHaveLength(5)
   })
 
   // The exclusion is HDX and HDX LP only. Netting the same money-market debt off
