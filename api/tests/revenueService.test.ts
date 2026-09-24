@@ -71,7 +71,7 @@ describe('getRevenueDashboard', () => {
     // Each test advances time past every in-process cache TTL of the previous one.
     const { seen, client } = fakeClient({
       'toString(max(block_timestamp)) AS mark': [{ stream: 'network_fee', mark: '2026-08-14 10:00:00' }],
-      '-- rev:dashboard:totals': [{ stream: 'network_fee', day: '1.5', week: '1.5', month: '1.5', all_time: '1.5' }],
+      '-- rev:protocol-revenue-windows': [{ stream: 'network_fee', day: '1.5', week: '1.5', month: '1.5', all_time: '1.5' }],
       '-- rev:dashboard:buckets': [{ stream: 'network_fee', t: Math.floor(NOW / 1000 / 86_400) * 86_400, usd: '1.5' }],
       '-- rev:dashboard:top-accounts': [{ account: ACCOUNT_A, usd: '1.5' }],
       '-- rev:network_fee': [
@@ -94,7 +94,7 @@ describe('getRevenueDashboard', () => {
     // The cold arm must be capped at the same literal marks the tail was built
     // from — that is what makes the two arms disjoint under a concurrent
     // REPLACE PARTITION.
-    const totalsQuery = seen.find(s => s.query.includes('-- rev:dashboard:totals'))!.query
+    const totalsQuery = seen.find(s => s.query.includes('-- rev:protocol-revenue-windows'))!.query
     expect(totalsQuery).toContain("(stream = 'network_fee' AND block_timestamp <= toDateTime('2026-08-14 10:00:00'))")
     expect(totalsQuery).toContain("stream != 'omnipool_asset_fee' OR dest IN ('protocol', 'burned', 'pol')")
     const tailQuery = seen.find(s => s.query.includes('-- rev:network_fee'))!.query
@@ -107,7 +107,7 @@ describe('getRevenueDashboard', () => {
     const dayStart = Math.floor((NOW + 600_000) / 1000 / 86_400) * 86_400
     const { seen, client } = fakeClient({
       'toString(max(block_timestamp)) AS mark': [{ stream: 'hollar_borrow', mark: '2026-08-14 10:00:00' }],
-      '-- rev:dashboard:totals': [{ stream: 'hollar_borrow', day: '10', week: '10', month: '10', all_time: '10' }],
+      '-- rev:protocol-revenue-windows': [{ stream: 'hollar_borrow', day: '10', week: '10', month: '10', all_time: '10' }],
       '-- rev:dashboard:buckets': [{ stream: 'hollar_borrow', t: dayStart, usd: '10' }],
       '-- rev:dashboard:top-accounts': [{ account: ACCOUNT_A, usd: '4' }],
       '-- rev:borrow-weights': [
@@ -313,7 +313,7 @@ describe('top payer ranking completeness', () => {
     const dayStart = Math.floor((NOW + 2_400_000) / 1000 / 86_400) * 86_400
     const { seen, client } = fakeClient({
       'toString(max(block_timestamp)) AS mark': [{ stream: 'hollar_borrow', mark: '2026-08-14 10:00:00' }],
-      '-- rev:dashboard:totals': [{ stream: 'hollar_borrow', day: '10', week: '10', month: '10', all_time: '10' }],
+      '-- rev:protocol-revenue-windows': [{ stream: 'hollar_borrow', day: '10', week: '10', month: '10', all_time: '10' }],
       '-- rev:dashboard:buckets': [{ stream: 'hollar_borrow', t: dayStart, usd: '10' }],
       '-- rev:dashboard:top-accounts': [{ account: ACCOUNT_A, usd: '4' }],
       '-- rev:borrow-weights': [{ account: ACCOUNT_B, interest: '1000000000000000000' }],
@@ -348,7 +348,7 @@ describe('split marks under a mid-request refresh', () => {
           const mark = marksCalls === 1 ? '2026-08-14 10:00:00' : '2026-08-14 11:00:00'
           return { json: async () => [{ stream: 'network_fee', mark }] }
         }
-        if (query.includes('-- rev:dashboard:totals')) {
+        if (query.includes('-- rev:protocol-revenue-windows')) {
           // Outlive the marks cache while the request is still composing.
           vi.setSystemTime(Date.now() + 16_000)
         }
@@ -358,7 +358,7 @@ describe('split marks under a mid-request refresh', () => {
     initRevenueService(client as never)
     await getRevenueDashboard('30d')
     expect(marksCalls).toBe(1)
-    const totalsQuery = seen.find(s => s.query.includes('-- rev:dashboard:totals'))!.query
+    const totalsQuery = seen.find(s => s.query.includes('-- rev:protocol-revenue-windows'))!.query
     const tailQuery = seen.find(s => s.query.includes('-- rev:network_fee'))!.query
     expect(totalsQuery).toContain("(stream = 'network_fee' AND block_timestamp <= toDateTime('2026-08-14 10:00:00'))")
     expect(tailQuery).toContain("block_timestamp > toDateTime('2026-08-14 10:00:00')")

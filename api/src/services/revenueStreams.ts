@@ -29,6 +29,8 @@
 //     actualFee = 0, so the two arms cannot double count.
 
 import type { ClickHouseClient } from '../db/client.ts'
+import { cached } from './cache.ts'
+import { chTimestamp } from './clickhouseTime.ts'
 // The Omnipool's hub asset (H2O) — its fee legs are the protocol fee, never an
 // asset fee — from the module that owns the Omnipool's own math.
 import { HUB_ASSET_ID } from './lpMath.ts'
@@ -1246,4 +1248,172 @@ export async function hollarBorrowHourlyRows(
   }
   out.sort((a, b) => a.hour - b.hour || (a.poolAddress < b.poolAddress ? -1 : 1))
   return out
+}
+
+// ---------------------------------------------------------------------------
+// Protocol revenue totals — cold table + raw tail, the one composition
+// ---------------------------------------------------------------------------
+//
+// The explorer's /revenue dashboard and the public /v1/stats/platform headline
+// state the SAME protocol revenue totals, so the composition lives here once:
+//
+//   cold — revenue_events, capped at each stream's own high-water mark;
+//   tail — the same builders over raw for everything past that mark.
+//
+// The marks are read ONCE and threaded into both arms as literals, so a
+// REPLACE PARTITION landing between the two reads cannot make them overlap on
+// an hour or straddle a gap. hollar_borrow accrues per hour and has no eventful
+// raw form: its figures end at the last booked hour (up to ~2h behind now).
+
+const EVENTFUL_STREAMS: readonly EventfulRevenueStream[]
+  = REVENUE_STREAMS.filter((s): s is EventfulRevenueStream => s !== 'hollar_borrow')
+
+/**
+ * The TS twin of PROTOCOL_REVENUE_PREDICATE_SQL, for the raw tail — kept in step
+ * by tests/protocolRevenueTwin.test.ts, which evaluates both over every combination.
+ */
+export function isProtocolRevenue(stream: string, dest: string, internalPayer = 0): boolean {
+  if (internalPayer !== 0) return false
+  if (dest === 'lp') return false
+  return stream !== 'omnipool_asset_fee' || dest === 'protocol' || dest === 'burned' || dest === 'pol'
+}
+
+const CH_TS = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
+const EPOCH_TS = '1970-01-01 00:00:00'
+
+/**
+ * Each stream's cold high-water mark (max block_timestamp in revenue_events). A
+ * stream the job has not materialized yet has no entry, which hands its whole
+ * window to the raw arm.
+ */
+export async function revenueColdMarks(client: ClickHouseClient): Promise<Map<RevenueStream, string>> {
+  return cached('revenue:cold-marks', 15_000, async () => {
+    const res = await client.query({
+      query: `-- rev:cold-marks
+SELECT stream, toString(max(block_timestamp)) AS mark FROM price_data.revenue_events GROUP BY stream`,
+      format: 'JSONEachRow',
+    })
+    const out = new Map<RevenueStream, string>()
+    for (const row of await res.json<{ stream: RevenueStream; mark: string }>()) {
+      if (CH_TS.test(row.mark)) out.set(row.stream, row.mark)
+    }
+    return out
+  })
+}
+
+/** Streams' cold caps as one predicate, so the cold arm never crosses the marks the tail was built from. */
+export function revenueColdCapPredicateSql(marks: ReadonlyMap<RevenueStream, string>): string {
+  const arms = REVENUE_STREAMS.map(stream =>
+    `(stream = '${stream}' AND block_timestamp <= toDateTime('${marks.get(stream) ?? EPOCH_TS}'))`)
+  return `(${arms.join(' OR ')})`
+}
+
+/**
+ * How far the raw tail must reach: the oldest cold mark, floored so a stream the
+ * job has never built (no mark) cannot demand an unbounded raw scan — its
+ * history is simply incomplete until the job lands, which the derivations
+ * freshness contract states rather than hides.
+ */
+const MAX_TAIL_HOURS = 26
+
+export function revenueTailHours(marks: ReadonlyMap<RevenueStream, string>, nowSeconds: number): number {
+  let oldest = nowSeconds
+  for (const stream of EVENTFUL_STREAMS) {
+    const mark = marks.get(stream)
+    const seconds = mark ? Math.floor(Date.parse(`${mark.replace(' ', 'T')}Z`) / 1000) : 0
+    if (seconds < oldest) oldest = seconds
+  }
+  return Math.min(MAX_TAIL_HOURS, Math.max(1, Math.ceil((nowSeconds - oldest) / 3_600) + 1))
+}
+
+export interface RevenueTailRow {
+  stream: RevenueStream
+  block_height: number
+  block_timestamp: string
+  event_index: number
+  leg_index: number
+  dest: string
+  account: string
+  asset_id: number
+  amount: string
+  internal_payer: number
+  amount_usd: string
+}
+
+/**
+ * The raw tail: every eventful stream's rows past its own cold mark, one UNION
+ * query through the shared builders, bounded to `hours` before now and sorted by
+ * chain position. Cached briefly (single-flight) so concurrent readers share one
+ * execution. The marks are part of the cache identity — a tail built from older
+ * marks must never be paired with fresher cold caps (rows between the two mark
+ * generations would count twice) or vice versa (counted in neither arm).
+ */
+export async function revenueTailRows(client: ClickHouseClient, hours: number, marks: ReadonlyMap<RevenueStream, string>): Promise<RevenueTailRow[]> {
+  const marksKey = [...marks].map(([s, m]) => `${s}=${m}`).sort().join(',')
+  return cached(`revenue:tail:${hours}:${marksKey}`, 2_000, async () => {
+    const arms = EVENTFUL_STREAMS.map(stream => `SELECT * FROM (
+${buildRevenueEventRowsSql(stream)}
+) WHERE block_timestamp > toDateTime('${marks.get(stream) ?? EPOCH_TS}')`)
+    const res = await client.query({
+      query: `-- rev:tail\n${arms.join('\nUNION ALL\n')}`,
+      query_params: { anchor: chTimestamp(Math.floor(Date.now() / 1000)), hours },
+      format: 'JSONEachRow',
+      clickhouse_settings: DECIMAL_STRINGS,
+    })
+    const rows = await res.json<RevenueTailRow>()
+    rows.sort((a, b) => a.block_height - b.block_height || a.event_index - b.event_index || a.leg_index - b.leg_index)
+    return rows
+  })
+}
+
+export function revenueTailSeconds(row: RevenueTailRow): number {
+  return Math.floor(Date.parse(`${row.block_timestamp.replace(' ', 'T')}Z`) / 1000)
+}
+
+/** One stream's protocol revenue over the trailing windows, in integer 1e-12 USD. */
+export interface ProtocolRevenueWindows { day: bigint; week: bigint; month: bigint; allTime: bigint }
+
+/**
+ * Protocol revenue per stream over the trailing 24h / 7d / 30d and all time,
+ * in integer 1e-12 USD: the cold sums under PROTOCOL_REVENUE_PREDICATE_SQL and
+ * the marks' caps, plus every positive tail row the TS twin admits. `tail` must
+ * be built from the SAME `marks` (revenueTailRows); pass it in so a caller that
+ * also needs the rows (the dashboard's buckets and payer ranking) reads raw once.
+ */
+export async function protocolRevenueWindows(
+  client: ClickHouseClient,
+  marks: ReadonlyMap<RevenueStream, string>,
+  tail: readonly RevenueTailRow[],
+  nowSeconds: number,
+): Promise<Map<RevenueStream, ProtocolRevenueWindows>> {
+  const res = await client.query({
+    query: `-- rev:protocol-revenue-windows
+SELECT stream,
+       toString(sumIf(amount_usd, block_timestamp > toDateTime('${chTimestamp(nowSeconds - 86_400)}'))) AS day,
+       toString(sumIf(amount_usd, block_timestamp > toDateTime('${chTimestamp(nowSeconds - 7 * 86_400)}'))) AS week,
+       toString(sumIf(amount_usd, block_timestamp > toDateTime('${chTimestamp(nowSeconds - 30 * 86_400)}'))) AS month,
+       toString(sum(amount_usd)) AS all_time
+FROM price_data.revenue_events
+WHERE ${PROTOCOL_REVENUE_PREDICATE_SQL} AND ${revenueColdCapPredicateSql(marks)}
+GROUP BY stream`,
+    format: 'JSONEachRow',
+    clickhouse_settings: DECIMAL_STRINGS,
+  })
+  const totals = new Map<RevenueStream, ProtocolRevenueWindows>()
+  for (const row of await res.json<{ stream: RevenueStream; day: string; week: string; month: string; all_time: string }>()) {
+    totals.set(row.stream, { day: scaledUsd(row.day), week: scaledUsd(row.week), month: scaledUsd(row.month), allTime: scaledUsd(row.all_time) })
+  }
+  for (const row of tail) {
+    if (!isProtocolRevenue(row.stream, row.dest, row.internal_payer)) continue
+    const usd = scaledUsd(row.amount_usd)
+    if (usd <= 0n) continue
+    const t = revenueTailSeconds(row)
+    const w = totals.get(row.stream) ?? { day: 0n, week: 0n, month: 0n, allTime: 0n }
+    if (t > nowSeconds - 86_400) w.day += usd
+    if (t > nowSeconds - 7 * 86_400) w.week += usd
+    if (t > nowSeconds - 30 * 86_400) w.month += usd
+    w.allTime += usd
+    totals.set(row.stream, w)
+  }
+  return totals
 }

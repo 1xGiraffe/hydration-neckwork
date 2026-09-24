@@ -79,6 +79,11 @@ function fakeClient(overrides: Record<string, Row[]> = {}) {
     '-- pub:vol:pool': [],
     '-- pub:vol:xyk-pools': [],
     '-- pub:vol:routed': [],
+    // …and its HOLLAR-supply and protocol-revenue halves.
+    '-- pub:cg:supply:erc20': [{ holders: '1', total: '1' }],
+    '-- rev:cold-marks': [],
+    '-- rev:protocol-revenue-windows': [],
+    '-- rev:tail': [],
     ...overrides,
   }
   const seen: { query: string; params: Record<string, unknown> }[] = []
