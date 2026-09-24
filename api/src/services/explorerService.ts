@@ -16253,10 +16253,21 @@ function activityExtrinsicSet(rows: ActivityRow[]): Set<string> {
 // stays visible next to a governance-dispatched placement in the same block, which is
 // the pairing a reader of that block needs to see.
 //
+// Nor does a liquidity act by a pallet account — the Treasury's protocol-owned
+// liquidity, dispatched by governance in on_initialize. Its pool legs are pot
+// plumbing the transfer arms already drop, so claiming the block can only swallow
+// what the same dispatch paid out next to it: block 14,777,845 removed a Treasury
+// position and paid nine assets to a contributor, and the payouts vanished from the
+// block feed and their detail pages while the recipient's feed listed them. The
+// account feed's transfer path (suppressTransferCandidates) already refuses these
+// owners (`who LIKE '0x6d6f646c%'`); this is the same rule for every other feed.
+//
 // Exported because planExactActivity mirrors this same split when it counts a
 // transfer feed: two copies of the rule is how a total and its page drift apart.
 export function hookActivityOwnsBlockTransfers(row: ActivityRow): boolean {
-  return !(row.type === 'otc' && row.otcAction !== 'Fill')
+  if (row.type === 'otc' && row.otcAction !== 'Fill') return false
+  if (row.type === 'liquidity' && isModuleAcct(row.who)) return false
+  return true
 }
 
 export function suppressSubordinateActivityRows<T extends ActivityRow>(rows: T[]): T[] {
