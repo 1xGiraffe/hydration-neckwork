@@ -91,9 +91,32 @@ function fakeClient(byMarker: Record<string, Answer> = {}) {
   return client
 }
 
+// The protocol-revenue half (services/revenueStreams.ts protocolRevenueWindows): the
+// cold per-stream sums, and a raw tail past the marks. One tail row an hour old joins
+// every window; one paid by the protocol's own account (internal_payer) never counts.
+const chTs = (seconds: number) => new Date(seconds * 1000).toISOString().slice(0, 19).replace('T', ' ')
+const REVENUE_SOURCES: Record<string, Answer> = {
+  '-- rev:cold-marks': [{ stream: 'network_fee', mark: '2026-08-12 18:00:00' }, { stream: 'hollar_borrow', mark: '2026-08-12 18:00:00' }],
+  '-- rev:protocol-revenue-windows': [
+    { stream: 'network_fee', day: '1.504999999999', week: '10.25', month: '40', all_time: '12345.674999999999' },
+    { stream: 'hollar_borrow', day: '0.000000000001', week: '0', month: '5', all_time: '100' },
+  ],
+  '-- rev:tail': () => [
+    { stream: 'network_fee', block_height: 9123500, block_timestamp: chTs(Math.floor(Date.now() / 1000) - 3_600), event_index: 3, leg_index: 0, dest: 'protocol', account: '', asset_id: 0, amount: '1', internal_payer: 0, amount_usd: '0.5' },
+    { stream: 'network_fee', block_height: 9123501, block_timestamp: chTs(Math.floor(Date.now() / 1000) - 3_600), event_index: 4, leg_index: 0, dest: 'protocol', account: '', asset_id: 0, amount: '1', internal_payer: 1, amount_usd: '1000' },
+  ],
+  // HOLLAR's ERC-20 wallet balances, summed: 12,818,562.2052… HOLLAR.
+  '-- pub:cg:supply:erc20': [{ holders: '392', total: '12818562205222144421754300' }],
+}
+
 /** Every source a full stats response reads. */
 function fullClient() {
-  return fakeClient({
+  return fakeClient(fullSources())
+}
+
+function fullSources(): Record<string, Answer> {
+  return {
+    ...REVENUE_SOURCES,
     '-- pub:vol:anchor': [ANCHOR_ROW],
     '-- pub:vol:omnipool': [
       { scope: 'asset', asset_id: '5', volume_usd: '900.000000000000', fee_usd: '1.000000000000', protocol_fee_usd: '0.000000000000' },
@@ -114,7 +137,7 @@ function fullClient() {
     ],
     '-- mm:reserve-state': RESERVE_ROWS,
     'FROM price_data.prices': PRICE_ROWS,
-  })
+  }
 }
 
 let stopAssets: () => void
@@ -174,6 +197,12 @@ describe('GET /v1/stats/platform', () => {
           // 1000 (in side wins) + 505.5 (out side wins)
           totalRoutedUsd: '1505.50',
         },
+        // Raw 18-decimal units, per the /v1 amount convention.
+        hollar: { totalSupply: '12818562205222144421754300' },
+        // Summed at full scale and rounded once: 1.504999999999 + 0.000000000001 +
+        // the tail's 0.5 = 2.005 → 2.01, where rounding each stream first would
+        // give 2.00. The internal payer's $1,000 is in none of them.
+        protocolRevenue: { last24hUsd: '2.01', last7dUsd: '10.75', last30dUsd: '45.50', allTimeUsd: '12446.17' },
       })
       expect(res.headers['cache-control']).toBe('public, max-age=60')
     } finally { await app.close(); stop() }
@@ -190,11 +219,23 @@ describe('GET /v1/stats/platform', () => {
       // holds no snapshot — the one-way RPC failure the 007 header describes.
       '-- mm:reserve-state': [],
       'FROM price_data.prices': PRICE_ROWS,
+      ...REVENUE_SOURCES,
     })
     const { app, stop } = await freshApp(client)
     try {
       const res = await app.inject('/v1/stats/platform')
       expect(res.json().tvl.moneyMarketSupplyUsd).toBeNull()
+    } finally { await app.close(); stop() }
+  })
+
+  it('reports an unreadable HOLLAR supply as null, never as zero', async () => {
+    // No indexed ERC-20 balances at all: an unknown supply, not an empty one.
+    const client = fakeClient({ ...fullSources(), '-- pub:cg:supply:erc20': [{ holders: '0', total: '0' }] })
+    const { app, stop } = await freshApp(client)
+    try {
+      const res = await app.inject('/v1/stats/platform')
+      expect(res.statusCode).toBe(200)
+      expect(res.json().hollar).toEqual({ totalSupply: null })
     } finally { await app.close(); stop() }
   })
 

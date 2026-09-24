@@ -763,6 +763,18 @@ async function readSupplyRaw(client: ClickHouseClient, token: string, source: Su
 }
 
 /**
+ * The published supply of one token in RAW on-chain units (the /v1 wire form;
+ * /v1/stats/platform's `hollar.totalSupply`). Same sources and the same refusal
+ * to publish an unreadable supply as the CoinGecko route below, which renders
+ * this very read in whole tokens — one definition of each supply on the surface.
+ */
+export async function totalSupplyRaw(client: ClickHouseClient, token: string): Promise<string | null> {
+  const source = SUPPLY_SOURCES[token]
+  if (!source) return null
+  return cachedSwr(`pub:supply:raw:${token}`, 300_000, 900_000, () => readSupplyRaw(client, token, source))
+}
+
+/**
  * The published supply of one token, in whole units. null for an unknown token
  * name, which the route turns into the 404 the old endpoint answers with;
  * SupplyUnresolvableError for a source this model could not read.
@@ -780,6 +792,6 @@ export async function coingeckoTotalSupply(client: ClickHouseClient, token: stri
       throw new SupplyUnresolvableError(`asset ${source.assetId} has ${published} decimals but its source `
         + `asset ${source.sourceAssetId} has ${decimals} — a 1:1 supply cannot span two scales`)
     }
-    return formatUnits(await readSupplyRaw(client, token, source), decimals)
+    return formatUnits((await totalSupplyRaw(client, token)) ?? '0', decimals)
   })
 }

@@ -14,7 +14,7 @@ export const statsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
   app.get('/v1/stats/platform', {
     schema: {
       tags: ['stats'],
-      summary: 'Chain-wide TVL and 24h volume',
+      summary: 'Chain-wide TVL, 24h volume, HOLLAR supply and protocol revenue',
       description: [
         'TVL is CURRENT pooled value at current prices; the Omnipool figure excludes the LRNA hub leg, which is the pool\'s internal accounting unit rather than deposited value. A pool whose legs cannot all be priced contributes nothing to its venue instead of making the venue unknown. `uniswapV3Usd` is the concentrated-liquidity (Uniswap v3) pools on Hydration\'s EVM, valued from the holdings their own Mint/Burn/Collect/Swap logs imply; it is part of `totalUsd` like the three pallet venues.',
         '`moneyMarketSupplyUsd` is every money-market reserve\'s supplied side at current prices, across all three isolated markets (core, GIGAHDX, BIL), reconstructed from the aToken anchor plus indexed scaled deltas. It is null, never 0, when the reserve-state model has no rows (the aToken anchor has not been snapshotted) or when nothing in it could be priced, and a reserve the pool has delisted is excluded rather than frozen at its last balance.',
@@ -22,6 +22,8 @@ export const statsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
         'The two fold components are published so the surfaces reconcile: `totalUsd + moneyMarketSupplyUsd - moneyMarketFoldedUsd - pooledATokenUsd` equals `/hydration-web/v1/stats`\'s `tvl` to the cent WITHIN ONE COMPUTATION — that endpoint folds these very strings — but two HTTP requests cannot be made to share one computation. This response recomputes about every 60s while that one is memoised 600s (stale-while-revalidate to 1800s), so a back-to-back pair agrees exactly only while it is still serving the generation its fold was built from: measured 2026-08-13, 21 back-to-back pairs over 7 minutes were **4 exact, 17 not**. Neither obvious workaround helps — a query-string cache-buster bypasses the HTTP micro-cache only (both services memoise under fixed keys), and polling until that endpoint\'s ETag changes and then reading this one at once was still $179.07 out, because stale-while-revalidate computes the new value before the request that first serves it. **So check the MAGNITUDE, not equality:** the gap is whatever the components moved in between, measured over that run at $179.07 to $8,254.19 on a ~$59.4M base, i.e. ≤0.014%. Agreement inside ~0.02% is correct — checkable in two requests — an exact match is a bonus, and anything larger is worth investigating. Both folds are restricted to pools that HAVE a TVL: poolService gives a pool none unless every leg is priced, so an unpriced pool added nothing and nothing of it may be subtracted.',
         '`volume24h` is the rolling 24 hours of swap legs, each fill counted ONCE (its out side, falling back to its in side). `totalRoutedUsd` nets each routed trade end to end — a multi-hop route counts once, at the larger of its two boundary sides — so the per-venue sums legitimately exceed it. It also drops trades whose every fill is an aToken mint or redeem: those are 1:1 money-market wraps, not swaps. An aToken hop inside a routed swap still counts, as part of that swap; the four per-venue fields are unaffected either way, since `aave` is not among them. `uniswapV3Usd` counts a Uniswap v3 pool\'s fills whether they arrived as a Router-routed hop or as a direct EVM swap (the latter reach the leg model a few minutes behind, through the uniswap_v3_legs derivation).',
         '`asOf`/`blockHeight` describe the indexed-block volume anchor. The TVL snapshot is another current-state model and can sit a few blocks apart. Both are null only while no swap legs are indexed at all.',
+        '`hollar.totalSupply` is the HOLLAR outstanding — minted through the money-market facilitators and the HSM, less what repayments and HSM buybacks burned — i.e. the ERC-20\'s `totalSupply`, as a raw integer string in the token\'s own units (asset `222`, 18 decimals; resolve decimals via `/v1/assets`). It is reconstructed from the indexed ERC-20 wallet balances, with no per-request RPC, and is the same read `/coingecko/v1/totalsupply/hollar` publishes in whole tokens. Null — never 0 — when that balance model has no rows.',
+        '`protocolRevenue` is the protocol\'s revenue over the trailing 24 hours, 7 days, 30 days and all time: Omnipool trade fees (the protocol\'s share and the H2O fee), liquidation penalties and the protocol liquidator\'s profit, the reserve-factor share of borrow interest, HOLLAR borrow interest, HSM revenue, ICE matched fees, Uniswap v3 protocol fees and network fees. Each amount is valued in USD at event time (the 1h candle closed when it happened) and only the protocol\'s own share counts — the liquidity providers\' part of a trade fee is not revenue — and a payment the protocol\'s own accounts made to it (the Treasury\'s HOLLAR interest, for example) is excluded. These are exactly the totals the explorer\'s Protocol revenue page shows, from one shared computation. HOLLAR borrow interest accrues hourly, so its share lags up to about two hours; every other stream is current to the indexed head. The per-stream, bucketed series is `/api/v1/fees/charts`, which keeps its incumbent\'s stream matrix and does not apply the own-account exclusion, so its sums can differ from these totals.',
       ].join('\n\n'),
       response: {
         200: z.object({
@@ -43,6 +45,15 @@ export const statsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
             xykUsd: z.string(),
             uniswapV3Usd: z.string(),
             totalRoutedUsd: z.string(),
+          }),
+          hollar: z.object({
+            totalSupply: z.string().nullable(),
+          }),
+          protocolRevenue: z.object({
+            last24hUsd: z.string(),
+            last7dUsd: z.string(),
+            last30dUsd: z.string(),
+            allTimeUsd: z.string(),
           }),
         }),
       },
