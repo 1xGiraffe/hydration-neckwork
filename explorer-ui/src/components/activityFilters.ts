@@ -37,7 +37,7 @@ export function activityFilterFields(type: string, assets: AssetFilterItem[], in
     // from the row's own value: a $13.7k liquidation earned $458 while a $13.7k
     // stablecoin swap earns cents. Always USD — there is no token denomination to
     // pick — so it deliberately ignores the unit toggle.
-    { kind: 'number', key: 'minRevenue', placeholder: '$ revenue from' },
+    { kind: 'number', key: 'minRevenue', placeholder: '$ P. Revenue from', title: 'Minimum protocol revenue (USD) the extrinsic generated' },
   ]
 }
 

@@ -44,7 +44,7 @@ const IT = {
   hdx: { to: paths.hdx(), label: 'HDX', match: ['hdx'] } as NavItem,
   hollar: { to: paths.hollar(), label: 'HOLLAR', match: ['hollar'] } as NavItem,
   // /ice (ICE dashboard) is deliberately URL-only until the venue has live activity — no nav entry yet.
-  revenue: { to: paths.revenue(), label: 'Revenue', match: ['revenue'] } as NavItem,
+  revenue: { to: paths.revenue(), label: 'Protocol revenue', match: ['revenue'] } as NavItem,
   blocks: { to: paths.blocks(), label: 'Blocks', match: ['blocks', 'block'] } as NavItem,
   extrinsics: { to: paths.extrinsics(), label: 'Extrinsics', match: ['extrinsics', 'extrinsic'] } as NavItem,
   events: { to: paths.events(), label: 'Events', match: ['events', 'event'] } as NavItem,
@@ -79,12 +79,12 @@ const CHAIN_GROUP: NavGroup = {
   items: [IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.security, IT.governance, IT.dataApi, IT.mcp],
   menuItems: [IT.security, IT.governance, IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.dataApi, IT.mcp],
 }
-// Mid-width fold (861–1119px, CSS-gated): HDX/HOLLAR/Revenue and the Assets
+// Mid-width fold (861–1119px, CSS-gated): HDX/HOLLAR/Protocol revenue and the Assets
 // group collapse into this single wider Assets dropdown so the topbar search
 // keeps a usable width. Direct links carry .nav-fold and hide in that window;
 // the permanent Assets group carries .nav-unfold-group and hides there too;
 // this group is hidden everywhere else.
-const FOLDABLE = new Set(['HDX', 'HOLLAR', 'Revenue'])
+const FOLDABLE = new Set(['HDX', 'HOLLAR', 'Protocol revenue'])
 const ASSETS_FOLD_GROUP: NavGroup = {
   label: 'Assets',
   items: [IT.assets, IT.liquidity, IT.hdx, IT.hollar, IT.revenue],

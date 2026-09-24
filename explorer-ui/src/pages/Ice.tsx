@@ -226,16 +226,16 @@ function FeeSection({ d }: { d: IceDashboard }) {
   const line: AreaSeries[] = [{ key: 'fee', label: 'Fee per day', color: FEE_COLOR, values: perDay.map(x => x.usd) }]
   return (
     <>
-      <SecTitle title="Fee revenue" subtitle={`${fmtPermill(d.status.protocolFeePpm)} of matched volume, swept from the pot to the fee account per solution`} />
+      <SecTitle title="Protocol fee revenue" subtitle={`${fmtPermill(d.status.protocolFeePpm)} of matched volume, swept from the pot to the fee account per solution`} />
       <div className="pf-card">
         {total > 0 ? (
           <>
             <ChartLegend items={[{ label: 'Fee per day', color: FEE_COLOR }]} />
             <MultiLineChart buckets={days} series={line} h={170} yFmt={v => F.usd(v)} floorZero />
           </>
-        ) : <div className="hdx-note" style={{ marginTop: 0 }}>No fee revenue yet — the fee is charged on matched volume only, never on the routed part.</div>}
+        ) : <div className="hdx-note" style={{ marginTop: 0 }}>No protocol fee revenue yet — the fee is charged on matched volume only, never on the routed part.</div>}
         <div className="hdx-cards">
-          <Card k={WINDOW_LABEL} v={<Usd v={total} />} dot={FEE_COLOR} s="booked as ICE matched fee on the revenue page" />
+          <Card k={WINDOW_LABEL} v={<Usd v={total} />} dot={FEE_COLOR} s="booked as ICE matched fee on the protocol revenue page" />
           <Card k="In the fee account" v={<Usd v={holdingsUsd} />} s="held right now, at current prices" />
         </div>
         {holdings.length > 0 && (
@@ -344,7 +344,7 @@ function IceSkeleton() {
       <SecTitle title="Open orders" /><ChartSkeleton h={160} />
       <SecTitle title="Fills" /><ChartSkeleton h={260} />
       <SecTitle title="Execution quality" /><ChartSkeleton h={120} />
-      <SecTitle title="Fee revenue" /><ChartSkeleton h={230} />
+      <SecTitle title="Protocol fee revenue" /><ChartSkeleton h={230} />
       <SecTitle title="DCA migration" /><ChartSkeleton h={200} />
       <SecTitle title="Top pairs" />
       <div className="panel"><table className="tbl"><tbody><TableSkeleton cols={3} rows={4} /></tbody></table></div>
