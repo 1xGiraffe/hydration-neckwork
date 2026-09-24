@@ -194,6 +194,34 @@ describe('GET /v1/accounts/:address/balances/history', () => {
     app = await freshDataApp(fakeDataClient())
     expect((await app.inject({ url: `/v1/accounts/${ACC}/balances/history`, headers: AUTH })).statusCode).toBe(400)
   })
+
+  // A day has no aggregate of its own: the hourly states are merged per UTC day,
+  // which yields that day's last observation (argMax), and the time cursor, window
+  // and order all apply to the day start.
+  it('serves day buckets by merging the hourly states per UTC day', async () => {
+    const seen: string[] = []
+    const client = fakeDataClient((query, params) => {
+      if (!query.includes('-- data:accounts:balance-history')) return undefined
+      seen.push(query)
+      return params.cursor == null
+        ? [{ ts: '2026-08-28 00:00:00', balance: '1000', last_block: 100 }, { ts: '2026-08-27 00:00:00', balance: '990', last_block: 80 }]
+        : [{ ts: '2026-08-27 00:00:00', balance: '990', last_block: 80 }]
+    })
+    app = await freshDataApp(client)
+    const res = await app.inject({ url: `/v1/accounts/${ACC}/balances/history?asset=5&bucket=day&limit=1`, headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().items).toEqual([{ intervalStart: '2026-08-28T00:00:00.000Z', balance: '1000', lastBlock: 100 }])
+    expect(seen[0]).toContain('FROM price_data.account_balance_hourly')
+    expect(seen[0]).toContain('GROUP BY account_id, asset_id, toStartOfDay(interval_start)')
+    const next = await app.inject({ url: `/v1/accounts/${ACC}/balances/history?asset=5&bucket=day&limit=1&cursor=${res.json().nextCursor}`, headers: AUTH })
+    expect(next.json().items.map((i: { intervalStart: string }) => i.intervalStart)).toEqual(['2026-08-27T00:00:00.000Z'])
+    expect(seen[1]).toContain('toStartOfDay(interval_start) < toDateTime({cursor:UInt32})')
+  })
+
+  it('rejects an unknown bucket', async () => {
+    app = await freshDataApp(fakeDataClient())
+    expect((await app.inject({ url: `/v1/accounts/${ACC}/balances/history?asset=5&bucket=month`, headers: AUTH })).statusCode).toBe(400)
+  })
 })
 
 describe('GET /v1/accounts/:address/events', () => {
