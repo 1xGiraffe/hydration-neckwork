@@ -37,6 +37,23 @@ describe('suppressSubordinateActivityRows', () => {
     expect(suppressSubordinateActivityRows([fee, unrelated, dca])).toEqual([unrelated, dca])
   })
 
+  // Block 14,777,845: a governance-dispatched Treasury batch removed Omnipool position
+  // 69068 and paid nine assets out to 12Tyz…31xK, all in on_initialize. The removal is a
+  // hook liquidity row whose `who` is the Treasury pot, and it used to own every transfer
+  // in the block naming the Treasury — so the payouts vanished from the block feed (and
+  // their detail pages said "not an activity of its own") while the recipient's own feed,
+  // whose transfer path never lets a pallet account's liquidity own anything, listed them.
+  it('does not let a pallet account\'s hook liquidity act own the block\'s transfers', () => {
+    const treasury = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000'
+    const removal = row('liquidity', { extrinsicIndex: null, eventIndex: 13, who: account(treasury) })
+    const payout = row('transfer', { extrinsicIndex: null, eventIndex: 17, who: account(treasury), to: account('0x40d0') })
+    expect(suppressSubordinateActivityRows([removal, payout])).toEqual([removal, payout])
+    // An ordinary account's hook liquidity act still owns its own legs.
+    const userRemoval = row('liquidity', { extrinsicIndex: null, eventIndex: 13, who: account('0xuser') })
+    const leg = row('transfer', { extrinsicIndex: null, eventIndex: 17, who: account('0xuser'), to: account('0xpool') })
+    expect(suppressSubordinateActivityRows([userRemoval, leg])).toEqual([userRemoval])
+  })
+
   it('keeps transfers from a different extrinsic or block', () => {
     const parent = row('staking')
     const otherExtrinsic = row('transfer', { extrinsicIndex: 3 })
