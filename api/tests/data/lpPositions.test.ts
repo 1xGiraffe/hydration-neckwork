@@ -28,22 +28,23 @@ const SNAPSHOT: Row = {
 }
 
 // The concentrated-liquidity arm (services/uniswapV3Positions): the account's
-// manager positions and vault-share balance, then the held vaults' pool, totals
-// and the token contracts' asset ids. Default: nothing held.
+// venue history — its position NFTs' events and ranges, its vault-share transfers,
+// then the touched vaults' pool and flows and the token contracts' asset ids —
+// folded at the head. Default: nothing held.
 const V3_VAULT = `0x${'a2'.repeat(20)}`
 const V3_POOL = `0x${'5c'.repeat(20)}`
 const ADOT_CONTRACT = `0x${'02'.repeat(20)}`
 const HOLLAR_CONTRACT = `0x${'53'.repeat(20)}`
-function lpClient(overrides: { omni?: Row[]; farmed?: Row[]; shares?: Row[]; v3Positions?: Row[]; v3Shares?: Row[] } = {}) {
+function lpClient(overrides: { omni?: Row[]; farmed?: Row[]; shares?: Row[]; v3Events?: Row[]; v3Ranges?: Row[]; v3Shares?: Row[] } = {}) {
+  const forAccount = (params: Record<string, unknown>, rows: Row[] | undefined) =>
+    ((params.accounts as string[]).includes(`0x${'61'.repeat(20)}`) ? rows ?? [] : [])
   return fakeDataClient(
-    (query, params) => (query.includes('-- lp:v3-manager-positions')
-      ? ((params.accounts as string[]).includes(`0x${'61'.repeat(20)}`) ? overrides.v3Positions ?? [] : [])
-      : undefined),
-    (query, params) => (query.includes('-- lp:v3-vault-shares')
-      ? ((params.accounts as string[]).includes(`0x${'61'.repeat(20)}`) ? overrides.v3Shares ?? [] : [])
-      : undefined),
+    (query, params) => (query.includes('-- lp:v3-manager-history') ? forAccount(params, overrides.v3Events) : undefined),
+    (query, params) => (query.includes('-- lp:v3-manager-ranges') ? forAccount(params, overrides.v3Ranges) : undefined),
+    (query, params) => (query.includes('-- lp:v3-vault-share-history') ? forAccount(params, overrides.v3Shares) : undefined),
     query => (query.includes('-- lp:v3-vault-pools') ? [{ vault: V3_VAULT, token0: ADOT_CONTRACT, token1: HOLLAR_CONTRACT, fee: 3000, pool: V3_POOL }] : undefined),
-    query => (query.includes('-- lp:v3-vault-totals') ? [{ vault: V3_VAULT, shares_out: '1000', total0: '5000', total1: '9000' }] : undefined),
+    // 1000 shares outstanding against 5000 / 9000.
+    query => (query.includes('-- lp:v3-vault-flow-history') ? [{ vault: V3_VAULT, b: 9_000_001, i: 0, ev: 'Deposit', shares: '1000', a0: '5000', a1: '9000' }] : undefined),
     query => (query.includes('-- lp:v3-token-assets') ? [{ asset_id: 1000085, addr: ADOT_CONTRACT }, { asset_id: 5, addr: HOLLAR_CONTRACT }] : undefined),
     query => (query.includes('-- data:pools:snapshot') ? [SNAPSHOT] : undefined),
     query => (query.includes('-- data:pools:xyk-registry') ? [{ pool_account: XYK_POOL, lp_asset_id: 1000086 }] : undefined),
@@ -131,8 +132,12 @@ describe('GET /v1/accounts/:address/liquidity/positions', () => {
   it('adds concentrated-liquidity positions: the manager NFT principal and vault shares pro-rata', async () => {
     const client = lpClient({
       omni: [], farmed: [], shares: [],
-      v3Positions: [{ mgr: `0x${'d5'.repeat(20)}`, tid: '7', pool_addr: V3_POOL, t0: ADOT_CONTRACT, t1: HOLLAR_CONTRACT, pool_fee: 3000, lo: 184980, hi: 185100, opened: 9_000_001, net_liquidity: '555', net0: '400', net1: '300', last_block: 9_000_002 }],
-      v3Shares: [{ vault: V3_VAULT, held: '250' }],
+      v3Events: [
+        { mgr: `0x${'d5'.repeat(20)}`, tid: '7', b: 9_000_001, i: 0, ev: 'Transfer', holder: `0x${'61'.repeat(20)}`, liq: '0', a0: '0', a1: '0' },
+        { mgr: `0x${'d5'.repeat(20)}`, tid: '7', b: 9_000_001, i: 1, ev: 'IncreaseLiquidity', holder: '', liq: '555', a0: '400', a1: '300' },
+      ],
+      v3Ranges: [{ mgr: `0x${'d5'.repeat(20)}`, tid: '7', pool_addr: V3_POOL, t0: ADOT_CONTRACT, t1: HOLLAR_CONTRACT, pool_fee: 3000, lo: 184980, hi: 185100, opened: 9_000_001 }],
+      v3Shares: [{ vault: V3_VAULT, b: 9_000_002, i: 0, src: `0x${'00'.repeat(20)}`, dst: `0x${'61'.repeat(20)}`, value: '250' }],
     })
     app = await freshDataApp(client)
     const res = await app.inject({ url: `/v1/accounts/${ACC}/liquidity/positions`, headers: AUTH })
@@ -148,7 +153,7 @@ describe('GET /v1/accounts/:address/liquidity/positions', () => {
     // 250 of 1000 shares -> a quarter of 5000 and of 9000; the vault is the pool key.
     expect(by('gamma')).toMatchObject({ venue: 'gamma', farmed: false, positionId: null, poolKey: V3_VAULT, shareAssetId: null, shares: '250', legs: [{ assetId: '1000085', amount: '1250' }, { assetId: '5', amount: '2250' }] })
     expect(body.items).toHaveLength(2)
-    const asked = client.seen.filter(q => q.query.includes('-- lp:v3-vault-shares')).map(q => q.params.accounts)
+    const asked = client.seen.filter(q => q.query.includes('-- lp:v3-vault-share-history')).map(q => q.params.accounts)
     expect(asked).toEqual([[`0x${'61'.repeat(20)}`]])
   })
 

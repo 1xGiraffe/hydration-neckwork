@@ -119,7 +119,7 @@ The `api-public` service (`api/src/public/`, same image as `api`, own process be
   `api/tests/public/isolation.test.ts` — that test is the enforced contract, and this
   sentence must follow it: today `db/client`, `config`, `types`, the
   `cache`/`explorerAssets`/`ohlcvService`/`crossPair`/`poolService`/`volumeService`/`valuation`/
-  `revenueStreams`/`moneyMarketCaps`/`foreignCandles`/`uniswapV3History`/`intentLimitPrice`
+  `revenueStreams`/`moneyMarketCaps`/`foreignCandles`/`uniswapV3History`/`uniswapV3Positions`/`intentLimitPrice`
   services, and the
   api package manifest (`../package.json`, for the version string
   `/rest/service/metadata` publishes). Never `explorerService`. The one sanctioned transitive coupling —

@@ -47,6 +47,10 @@ const ALLOWED_SHARED = new Set([
   // The concentrated-liquidity pool history: one builder serves the explorer's pool
   // page and /v1/pools/uniswapv3/:pool/history, so the two cannot disagree on a bucket.
   'services/uniswapV3History.ts',
+  // The concentrated-liquidity account fold: /v1/accounts/balances values an
+  // account's v3 positions and Gamma shares by the same definition the explorer's
+  // account page and value-history chart use.
+  'services/uniswapV3Positions.ts',
 ])
 
 // Not a shared source module: the api package manifest, imported for the

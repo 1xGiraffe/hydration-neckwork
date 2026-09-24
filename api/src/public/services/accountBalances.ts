@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import { ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
+import { loadV3AccountHistory, v3AccountPositions, v3AccountPositionsRawAt } from '../../services/uniswapV3Positions.ts'
 import { scaledDecimal } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
 
@@ -274,6 +275,8 @@ export interface AccountBalanceRow {
   lockedUsd: string
   /** Omnipool LP claims, or null when their snapshot is stale/missing. */
   lpUsd: string | null
+  /** Concentrated-liquidity (Uniswap v3) position principal and Gamma vault shares. */
+  uniswapV3Usd: string
   /** Money-market debt, or null when the value snapshot is stale/missing. */
   debtUsd: string | null
   totalUsd: string
@@ -580,6 +583,40 @@ async function omnipoolClaims(client: ClickHouseClient, forms: string[]): Promis
   })
 }
 
+/**
+ * Concentrated-liquidity holdings per requested account, in raw units: manager-NFT
+ * principal and Gamma vault shares redeemed against the vault's totals, from the
+ * same event fold the explorer's account page and the Data API state
+ * (services/uniswapV3Positions). Positions are held by H160, so an account's are
+ * those of every EVM form in its form set — its binding and the runtime's
+ * truncation alike. Uncollected fees are not included: no log restates them.
+ *
+ * One history read serves the whole batch; each account is folded with ONLY its
+ * own H160s as holders, so a batch never merges two accounts' positions.
+ */
+async function concentratedLiquidity(client: ClickHouseClient, formsByAccount: Map<string, string[]>): Promise<Map<string, Array<{ assetId: number; amount: bigint }>>> {
+  const h160sByAccount = new Map<string, string[]>()
+  for (const [account, forms] of formsByAccount) {
+    const h160s = [...new Set(forms.map(h160Of).filter((x): x is string => x != null))]
+    if (h160s.length) h160sByAccount.set(account, h160s)
+  }
+  const out = new Map<string, Array<{ assetId: number; amount: bigint }>>()
+  const all = [...new Set([...h160sByAccount.values()].flat())]
+  if (!all.length) return out
+  const history = await loadV3AccountHistory(client, all)
+  if (!history.managerEvents.length && !history.shareEvents.length) return out
+  for (const [account, h160s] of h160sByAccount) {
+    const legs: Array<{ assetId: number; amount: bigint }> = []
+    for (const p of v3AccountPositions(v3AccountPositionsRawAt({ ...history, accounts: h160s }))) {
+      // A token the registry cannot name has no price; the explorer drops it too.
+      if (p.asset0 == null || p.asset1 == null) continue
+      legs.push({ assetId: p.asset0, amount: p.amount0 }, { assetId: p.asset1, amount: p.amount1 })
+    }
+    if (legs.length) out.set(account, legs)
+  }
+  return out
+}
+
 // Registry aToken ids. A pallet-side balance row for one of these is the SAME
 // economic position the value snapshot reports as `supplied` on the underlying
 // reserve, so it is replaced by the snapshot rather than added to it — the
@@ -602,8 +639,9 @@ interface LatestBalanceRow {
  * `transferableUsd` values free balances plus the ERC-20-backed wallet pot plus
  * money-market SUPPLIED balances (the aToken side, spec "Semantics" rule 7);
  * `lockedUsd` values reserved ones; `lpUsd` values Omnipool LP claims, bare and
- * farmed, including each position's hub (H2O) leg. `totalUsd` is the sum of the
- * three — GROSS assets. `debtUsd` is reported alongside and is never netted into
+ * farmed, including each position's hub (H2O) leg; `uniswapV3Usd` values
+ * concentrated-liquidity positions and Gamma vault shares (concentratedLiquidity).
+ * `totalUsd` is the sum of the four — GROSS assets. `debtUsd` is reported alongside and is never netted into
  * any of them, so the Hydration account picker's figure is `totalUsd - debtUsd`.
  *
  * Both the money-market and the LP slice come from the indexer's own persisted
@@ -624,7 +662,7 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
   const formsByAccount = await resolveAccountForms(client, accounts)
   const forms = allForms(formsByAccount)
 
-  const [substrateRes, erc20Res, prices, mm, claims] = await Promise.all([
+  const [substrateRes, erc20Res, prices, mm, claims, v3] = await Promise.all([
     client.query({
       // account_id is the leading primary-key column, so an IN list of at most
       // 150 forms is a bounded set of key ranges rather than a scan.
@@ -661,6 +699,7 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
     currentPrices(client),
     moneyMarketPositions(client, forms),
     omnipoolClaims(client, forms),
+    concentratedLiquidity(client, formsByAccount),
   ])
 
   // Indexed by stored form, so each requested address can fold in exactly the forms
@@ -682,6 +721,7 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
     let transferable = 0n
     let locked = 0n
     let lp = 0n
+    let v3Usd = 0n
     let debt = 0n
     let blockHeight = 0
     let seen = false
@@ -732,6 +772,11 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
       }
     }
 
+    for (const leg of v3.get(account) ?? []) {
+      seen = true
+      v3Usd += usdScaled(leg.amount, priceFor(prices, leg.assetId), assetDescriptor(leg.assetId).decimals)
+    }
+
     if (seen) items.push({
       account,
       transferableUsd: formatUsd(transferable),
@@ -739,8 +784,9 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
       // Absent rather than zero when the claim snapshot is stale — and then absent
       // from totalUsd too, since `lp` stays 0 in that case.
       lpUsd: claims ? formatUsd(lp) : null,
+      uniswapV3Usd: formatUsd(v3Usd),
       debtUsd: mm ? formatUsd(debt) : null,
-      totalUsd: formatUsd(transferable + locked + lp),
+      totalUsd: formatUsd(transferable + locked + lp + v3Usd),
       blockHeight,
     })
   }
