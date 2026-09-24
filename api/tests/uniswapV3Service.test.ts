@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { blockExtrinsicTupleList } from '../src/services/explorerService.ts'
 import {
-  classifyV3Events, ethPrefixedAccountId, feeTierLabel, resolveV3TokenAsset, sqrtPriceX96ToPrice, tickToPrice, v3PoolForHop,
-  type V3ClassifyContext, type V3EventRow, type V3Pool,
+  classifyV3Events, ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, resolveV3TokenAsset, sqrtPriceX96ToPrice, tickToPrice, v3FeedActivities, v3PoolForHop,
+  type V3ClassifyContext, type V3EventRow, type V3Pool, type V3Registry,
 } from '../src/services/uniswapV3Service.ts'
 
 // Everything here is pinned against the first deployment (aDOT/HOLLAR 0.3%, pool
@@ -212,5 +212,34 @@ describe('v3PoolForHop', () => {
     expect(v3PoolForHop(registry, 1001, 222, 10000)).toBeNull()
     expect(v3PoolForHop(registry, 1001, 5, 3000)).toBeNull()
     expect(v3PoolForHop(registry, 222, 222, 3000)).toBeNull()
+  })
+})
+
+// A vault Rebalance names no account — the operator signs rebalance() and the log
+// carries only the vault's new range — so the global feed credits it to the signer
+// while the operator's own feed never anchored it: its account filter matched only
+// logs that NAME the account. The account-scoped anchor admits every Rebalance, and
+// the caller (getRecentV3Rows) keeps one only when its extrinsic's signer is in scope.
+describe('v3FeedActivities account scope', () => {
+  const OPERATOR = '0x0b0be14c1158ba09b720812e70f819366614cb96'
+  const registry = {
+    pools: new Map([[POOL, { address: POOL }]]), vaults: new Map([[VAULT, { address: VAULT, pool: POOL }]]),
+    managers: new Set([MANAGER]), byAsset: new Map(), ctx,
+  } as unknown as V3Registry
+  const rebalance = row({ block_height: 14991345, event_index: 33, extrinsic_index: 2, contract_address: VAULT, kind: 'vault', event_name: 'Rebalance', amount0: '516511297970979', amount1: '1', tick: 185060 })
+
+  it('anchors a Rebalance for an account the log does not name, leaving the signer check to the caller', async () => {
+    const seen: string[] = []
+    initUniswapV3Service({
+      query: async ({ query }: { query: string }) => {
+        seen.push(query)
+        // The anchor read names the account filter; the extrinsic read returns the group.
+        const rows = query.includes('ORDER BY block_height DESC') ? [{ block_height: 14991345, extrinsic_index: 2 }] : [rebalance]
+        return { json: async () => rows }
+      },
+    } as never)
+    const acts = await v3FeedActivities(registry, { kind: 'liquidity', accountsH160: [OPERATOR], limit: 10 })
+    expect(seen[0]).toContain("(kind = 'vault' AND event_name = 'Rebalance')")
+    expect(acts).toMatchObject([{ kind: 'liquidity', action: 'Rebalance', whoAccountId: null, vault: VAULT, blockHeight: 14991345 }])
   })
 })

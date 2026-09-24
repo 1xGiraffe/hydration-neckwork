@@ -519,7 +519,14 @@ export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions
   }
   if (opts.accountsH160) {
     const list = sqlList(opts.accountsH160)
+    // A vault Rebalance names no account at all — the operator signs rebalance() and
+    // the log carries only the vault's new range — so no log predicate can find it for
+    // the operator, while the global feed credits it to the extrinsic's signer. Every
+    // Rebalance is anchored (a handful a day venue-wide) and the caller keeps one only
+    // when that signer is in scope (getRecentV3Rows); without this the operator's own
+    // feed never listed an act the home page showed under its name.
     where.push(`(actor IN (${list}) OR counterparty IN (${list}) OR owner IN (${list})
+      OR (kind = 'vault' AND event_name = 'Rebalance')
       OR (kind = 'manager' AND (contract_address, token_id) IN (
         SELECT contract_address, token_id FROM price_data.uniswap_v3_events
         WHERE kind = 'manager' AND event_name = 'Transfer' AND counterparty IN (${list}))))`)
