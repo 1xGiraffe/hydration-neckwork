@@ -439,7 +439,7 @@ function BorrowingSection({ t }: { t: HollarTrends }) {
         </div>
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Borrowers{trendSub('accounts with open HOLLAR debt')}</div>
         <StackedAreaChart buckets={t.weeks} series={borrowersSeries} h={150} showShare={false} yFmt={v => F.int(Math.round(v))} zoomKey="zbor" />
-        <div className="sec-title" style={{ margin: '18px 0 6px' }}>Interest revenue{trendSub('cumulative USD booked from HOLLAR borrow interest')}</div>
+        <div className="sec-title" style={{ margin: '18px 0 6px' }}>Protocol interest revenue{trendSub('cumulative USD booked from HOLLAR borrow interest')}</div>
         <StackedAreaChart buckets={t.weeks} series={revenueSeries} h={150} showShare={false} yFmt={v => F.usd(v)} zoomKey="zrev" />
         <div className="hdx-note">The March 2026 rate cut landed at the demand trough — borrowing has grown roughly eightfold since.</div>
       </div>

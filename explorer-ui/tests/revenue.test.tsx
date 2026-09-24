@@ -86,7 +86,7 @@ describe('Revenue page', () => {
 
   it('gives every table cell a data-label so the 720px card layout can name it', () => {
     const html = render(fixture())
-    for (const label of ['data-label="Stream"', 'data-label="Revenue"', 'data-label="Share"', 'data-label="Account"', 'data-label="Revenue paid"']) {
+    for (const label of ['data-label="Stream"', 'data-label="Protocol revenue"', 'data-label="Share"', 'data-label="Account"', 'data-label="Protocol revenue paid"']) {
       expect(html).toContain(label)
     }
   })
@@ -96,7 +96,7 @@ describe('Revenue page', () => {
       { ...fixture(), history: { range: '30d', bucketSeconds: DAY, series: [] }, breakdown: [], topAccounts: [] },
       { range: '30d', bucketSeconds: DAY, series: [], totals: { hdx: 0, usd: 0 }, allTime: { hdx: 0, usd: 0 } },
     )
-    expect(empty).toContain('No revenue recorded in this range yet.')
+    expect(empty).toContain('No protocol revenue recorded in this range yet.')
     expect(empty).toContain('No attributable payers in this range yet.')
     expect(empty).toContain('No staker distributions in this range yet.')
   })

@@ -108,7 +108,7 @@ function stakerColumns(d: StakerDistributions, range: RevenueRange, unit: Staker
 }
 
 export function Revenue() {
-  useDocumentTitle('Revenue')
+  useDocumentTitle('Protocol revenue')
   const rawRange = useQueryValue('range', '30d') as RevenueRange
   const range = RANGES.some(r => r.key === rawRange) ? rawRange : '30d'
   const { data } = useRevenueDashboard(range)
@@ -141,7 +141,7 @@ export function Revenue() {
   return (
     <div className="wrap">
       <div className="page-head">
-        <h1 className="page-title">Revenue</h1>
+        <h1 className="page-title">Protocol revenue</h1>
       </div>
 
       <div className="panel rev-hero">
@@ -181,7 +181,7 @@ export function Revenue() {
       <SecTitle title="History" subtitle="protocol revenue by stream" />
       <div className="pf-card">
         {!data && <ChartSkeleton />}
-        {data && columns.length === 0 && <div className="rev-empty">No revenue recorded in this range yet.</div>}
+        {data && columns.length === 0 && <div className="rev-empty">No protocol revenue recorded in this range yet.</div>}
         {data && columns.length > 0 && (
           <>
             <StackedColumnChart columns={columns} h={230} yFmt={v => F.usd(v)} />
@@ -195,13 +195,13 @@ export function Revenue() {
           <SecTitle title="Breakdown" subtitle={rangeCaption} />
           <div className="pf-card">
             {!data && <ChartSkeleton />}
-            {data && shareSegments.length === 0 && <div className="rev-empty">No revenue recorded in this range yet.</div>}
+            {data && shareSegments.length === 0 && <div className="rev-empty">No protocol revenue recorded in this range yet.</div>}
             {data && shareSegments.length > 0 && (
               <>
                 <ShareBar segments={shareSegments} />
                 <table className="tbl rev-breakdown-tbl">
                   <thead>
-                    <tr><th>Stream</th><th className="num">Revenue</th><th className="num">Share</th></tr>
+                    <tr><th>Stream</th><th className="num">Protocol revenue</th><th className="num">Share</th></tr>
                   </thead>
                   <tbody>
                     {data.breakdown.map(b => (
@@ -210,7 +210,7 @@ export function Revenue() {
                           <span className="rev-dot" style={{ background: REVENUE_STREAM_COLOR[b.stream], marginRight: 8 }} />
                           {REVENUE_STREAM_LABEL[b.stream]}
                         </td>
-                        <td className="num mono" data-label="Revenue"><Usd v={b.usd} /></td>
+                        <td className="num mono" data-label="Protocol revenue"><Usd v={b.usd} /></td>
                         <td className="num mono" data-label="Share">{(b.share * 100).toFixed(1)}%</td>
                       </tr>
                     ))}
@@ -228,13 +228,13 @@ export function Revenue() {
             {data && data.topAccounts.length > 0 && (
               <table className="tbl">
                 <thead>
-                  <tr><th>Account</th><th className="num">Revenue paid</th></tr>
+                  <tr><th>Account</th><th className="num">Protocol revenue paid</th></tr>
                 </thead>
                 <tbody>
                   {data.topAccounts.map(row => (
                     <tr key={row.account.accountId}>
                       <td data-label="Account"><AddrPill account={row.account} noCopy /></td>
-                      <td className="num mono" data-label="Revenue paid"><Usd v={row.usd} /></td>
+                      <td className="num mono" data-label="Protocol revenue paid"><Usd v={row.usd} /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -303,11 +303,11 @@ export function Revenue() {
         remaining 5%). Before 22 Jun 2026 the referrals converter and direct in-HDX
         fee legs played the same role. Treasury incentive programmes paying into the
         same pots are excluded — only fee-derived flows count. These amounts are the
-        stakers' share of the trade-fee stream above, not additional revenue.
+        stakers' share of the trade-fee stream above, not additional protocol revenue.
       </p>
 
       <p className="rev-note">
-        Revenue counts what the protocol earns from usage: trade fees, liquidations,
+        Protocol revenue counts what the protocol earns from usage: trade fees, liquidations,
         borrow interest and network fees. Returns on the treasury's own investments —
         for example looped PRIME or BIL allocations — are not income from users and
         are not included here.

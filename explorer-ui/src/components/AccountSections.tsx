@@ -262,7 +262,7 @@ export function profileTabs(
     { key: 'extrinsics', label: 'Extrinsics', ...(extrinsicsCount == null ? {} : { count: extrinsicsCount }) },
     { key: 'events', label: 'Events', ...(eventsCount == null ? {} : { count: eventsCount }) },
     ...(votesCount && votesCount > 0 ? [{ key: 'votes', label: 'Votes', count: votesCount }] : []),
-    ...(revenueUsd && revenueUsd > 0 ? [{ key: 'revenue', label: 'Protocol Revenue' }] : []),
+    ...(revenueUsd && revenueUsd > 0 ? [{ key: 'revenue', label: 'Protocol revenue' }] : []),
   ]
 }
 
@@ -326,7 +326,7 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUs
       {revenue > 0 && <div className="acct-bal subtle">
         {/* "Protocol revenue" where the row has room; the narrow swap keeps the
             four stat tiles on one line on phones. */}
-        <div className="lab"><span className="lab-wide">Protocol revenue</span><span className="lab-narrow">Revenue</span></div>
+        <div className="lab"><span className="lab-wide">Protocol revenue</span><span className="lab-narrow" title="Protocol revenue">P. Revenue</span></div>
         <div className="amt"><Usd v={revenue} /></div>
       </div>}
       {exHdxValueUsd != null && <div className="acct-bal subtle">

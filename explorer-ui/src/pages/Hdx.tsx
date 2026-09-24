@@ -520,7 +520,7 @@ function CostBasisSection({ s }: { s: HdxStructure }) {
           <div className="hdx-card">
             <div className="hk"><i style={{ background: 'var(--green)' }} />{narrow ? 'Treasury BB' : 'Treasury bought back'}</div>
             <div className="hv"><Num v={buybackNow} /> <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HDX</span></div>
-            <div className="hs">revenue recycled into HDX since Oct 2024</div>
+            <div className="hs">protocol revenue recycled into HDX since Oct 2024</div>
           </div>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: OWNERSHIP_COLORS.kraken }} />Kraken custody</div>
@@ -528,7 +528,7 @@ function CostBasisSection({ s }: { s: HdxStructure }) {
             <div className="hs">−{krakenPeak > 0 ? ((1 - krakenNow / krakenPeak) * 100).toFixed(0) : 0}% from its <Num v={krakenPeak} /> peak</div>
           </div>
         </div>
-        <div className="sec-title" style={{ margin: '18px 0 6px' }}>Treasury buyback{trendSub('cumulative HDX the protocol bought with its own revenue')}</div>
+        <div className="sec-title" style={{ margin: '18px 0 6px' }}>Treasury buyback{trendSub('cumulative HDX the protocol bought with protocol revenue')}</div>
         <StackedAreaChart buckets={t.months} series={buyback} h={160} showShare={false} zoomKey="zbb" />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Top-100 share of user supply{trendSub('whales have re-accumulated since the 2025 trough')}</div>
         <MultiLineChart buckets={t.months} series={whaleLine} h={160} yFmt={v => `${v.toFixed(1)}%`} zoomKey="zt100" />
