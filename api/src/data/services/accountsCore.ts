@@ -308,7 +308,7 @@ export async function accountBalances(client: ClickHouseClient, parsed: ParsedAd
 export interface BalanceHistoryPoint { intervalStart: string; balance: string; lastBlock: number }
 
 export interface BalanceHistoryOptions {
-  bucket: 'hour' | 'week'
+  bucket: 'hour' | 'day' | 'week'
   assetId: string
   limit: number
   order: Order
@@ -318,9 +318,12 @@ export interface BalanceHistoryOptions {
 }
 
 export async function balanceHistory(client: ClickHouseClient, parsed: ParsedAddress, options: BalanceHistoryOptions): Promise<{ items: BalanceHistoryPoint[]; hasMore: boolean }> {
-  const hourly = options.bucket === 'hour'
-  const table = hourly ? 'account_balance_hourly' : 'account_balance_weekly'
-  const column = hourly ? 'interval_start' : 'week_start'
+  // A day has no aggregate of its own: it is the hourly states merged per UTC day.
+  // Those states are argMax by (block, observation, ingested_at), so merging a
+  // day's hours yields exactly that day's last observation — the end-of-day
+  // balance — from the same (account, asset, …) key range an hourly read uses.
+  const table = options.bucket === 'week' ? 'account_balance_weekly' : 'account_balance_hourly'
+  const column = options.bucket === 'week' ? 'week_start' : options.bucket === 'day' ? 'toStartOfDay(interval_start)' : 'interval_start'
   const params: Record<string, unknown> = { account: parsed.accountId, asset: options.assetId, bound: options.limit + 1 }
   const clauses: string[] = ['account_id = {account:String}', 'asset_id = {asset:String}']
   if (options.fromTime != null) { clauses.push(`${column} >= toDateTime({fromTime:UInt32})`); params.fromTime = options.fromTime }

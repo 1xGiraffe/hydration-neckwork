@@ -110,15 +110,16 @@ export const accountsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = 
   app.get('/v1/accounts/:address/balances/history', {
     schema: {
       tags: ['accounts'],
-      summary: 'Balance history of one asset, hourly or weekly',
+      summary: 'Balance history of one asset, hourly, daily or weekly',
       description: [
         'End-of-interval balances from the hourly/weekly aggregates. `asset` is required — the backing keys are (account, asset, interval), so one asset\'s history is a key-range read.',
+        '`bucket`: `hour` (default), `day` (UTC days — the hourly states merged per day, so a day\'s value is its last hourly observation) or `week` (UTC weeks starting Monday). `intervalStart` is the interval\'s start; the balance is as at its end.',
         'Intervals with no observation are absent, not zero: the balance only changes when an observation lands, so a consumer should carry the last seen value forward. ' + UNSEEN_IS_EMPTY,
       ].join('\n\n'),
       params: zAccountParams,
       querystring: z.object({
         asset: zAssetId,
-        bucket: z.enum(['hour', 'week']).default('hour'),
+        bucket: z.enum(['hour', 'day', 'week']).default('hour'),
         limit: zLimit,
         cursor: zCursor,
         order: zOrder,
