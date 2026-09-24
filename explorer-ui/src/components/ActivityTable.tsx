@@ -479,7 +479,7 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
   const fresh = useNewRows(keys, !!live)
   return (
     <div className="panel"><LiveAnchor anchorRef={anchorRef} /><table className="tbl">
-      <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r" title="Protocol revenue this extrinsic generated">Revenue</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
+      <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r" title="Protocol revenue this extrinsic generated">P. Revenue</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
       <tbody {...pendingRows(pending)}>
         {loading && !rows.length ? <TableSkeleton cols={cols} rows={pageSize} />
           : error && !rows.length ? <ErrorRow cols={cols} title="Couldn’t load activity" error={error} onRetry={onRetry} />
