@@ -2,10 +2,13 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cachedSwr } from '../../services/cache.ts'
 import { ATOKEN_UNDERLYING_ID } from '../../services/explorerAssets.ts'
 import { getPoolsIndex } from '../../services/poolService.ts'
+import { protocolRevenueWindows, revenueColdMarks, revenueTailHours, revenueTailRows } from '../../services/revenueStreams.ts'
+import { renderUsd } from '../../services/valuation.ts'
 import { decimalToScaled, formatUsd } from './accountBalances.ts'
 import { type MmReserveState, type MoneyMarketSupply, moneyMarketSupply } from './moneyMarketReserves.ts'
 import { omnipoolVolumes, poolVolumes, routedTradesUsd } from './poolVolumes.ts'
 import { ensurePoolService } from './poolWiring.ts'
+import { SupplyUnresolvableError, totalSupplyRaw } from './coingecko.ts'
 
 // GET /v1/stats/platform: the chain-wide TVL and 24-hour volume headline.
 //
@@ -49,6 +52,19 @@ import { ensurePoolService } from './poolWiring.ts'
 // The identity is per computation: the two routes are held for 600 s and 60 s, so
 // two responses fetched minutes apart differ by whatever moved in between.
 // A consumer that wants one platform headline should use /hydration-web/v1/stats.
+//
+// Two more headline figures ride beside them, each from the model that already
+// states it elsewhere, so no number here has a second definition:
+//
+//  * `hollar.totalSupply` — HOLLAR outstanding: minted (money-market borrows and
+//    HSM sales) minus burned (repayments and HSM buybacks), i.e. the ERC-20's
+//    `totalSupply`, reconstructed from the wallet-balance model. The read
+//    /coingecko/v1/totalsupply/hollar renders in whole tokens, published here
+//    raw per the /v1 amount convention. Null — never 0 — when unreadable.
+//  * `protocolRevenue` — the explorer's /revenue headline totals, from the shared
+//    cold/tail composition in services/revenueStreams.ts (protocolRevenueWindows):
+//    event-time USD, protocol share only, the protocol's own accounts' payments
+//    to itself excluded.
 
 /** The window the headline reports. */
 const VOLUME_WINDOW = '24h' as const
@@ -91,6 +107,42 @@ export interface PlatformStats {
      * poolVolumes.ts, which this shares with the DefiLlama facade.
      */
     totalRoutedUsd: string
+  }
+  hollar: {
+    /** Raw on-chain units (asset 222, 18 decimals); null — never 0 — when the supply model is unreadable. */
+    totalSupply: string | null
+  }
+  protocolRevenue: {
+    last24hUsd: string
+    last7dUsd: string
+    last30dUsd: string
+    allTimeUsd: string
+  }
+}
+
+/** HOLLAR's total supply, or null when the ERC-20 balance model cannot state it. */
+async function hollarTotalSupply(client: ClickHouseClient): Promise<string | null> {
+  try {
+    return await totalSupplyRaw(client, 'hollar')
+  } catch (err) {
+    if (!(err instanceof SupplyUnresolvableError)) throw err
+    console.error('[public-api] platform stats: HOLLAR supply unresolvable', err.message)
+    return null
+  }
+}
+
+/** The four trailing windows the explorer's /revenue tiles show, summed over every stream. */
+async function protocolRevenueTotals(client: ClickHouseClient): Promise<PlatformStats['protocolRevenue']> {
+  const nowSeconds = Math.floor(Date.now() / 1000)
+  const marks = await revenueColdMarks(client)
+  const tail = await revenueTailRows(client, revenueTailHours(marks, nowSeconds), marks)
+  const windows = [...(await protocolRevenueWindows(client, marks, tail, nowSeconds)).values()]
+  const sum = (pick: (w: (typeof windows)[number]) => bigint): string => renderUsd(windows.reduce((a, w) => a + pick(w), 0n))
+  return {
+    last24hUsd: sum(w => w.day),
+    last7dUsd: sum(w => w.week),
+    last30dUsd: sum(w => w.month),
+    allTimeUsd: sum(w => w.allTime),
   }
 }
 
@@ -291,7 +343,7 @@ export function foldedPlatformTvl(components: TvlComponents): bigint | null {
 export async function platformStats(client: ClickHouseClient): Promise<PlatformStats> {
   return cachedSwr('pub:stats:platform', 60_000, 300_000, async () => {
     ensurePoolService(client)
-    const [index, omniVolume, stableVolume, xykVolume, v3Volume, routed, moneyMarket] = await Promise.all([
+    const [index, omniVolume, stableVolume, xykVolume, v3Volume, routed, moneyMarket, hollarSupply, revenue] = await Promise.all([
       getPoolsIndex(),
       omnipoolVolumes(client, VOLUME_WINDOW),
       poolVolumes(client, 'stableswap', VOLUME_WINDOW),
@@ -299,6 +351,8 @@ export async function platformStats(client: ClickHouseClient): Promise<PlatformS
       poolVolumes(client, 'uniswapv3', VOLUME_WINDOW),
       routedTradesUsd(client, VOLUME_WINDOW),
       moneyMarketSupply(client),
+      hollarTotalSupply(client),
+      protocolRevenueTotals(client),
     ])
 
     // The pool index already carries the Omnipool's TVL, computed by the same
@@ -318,6 +372,8 @@ export async function platformStats(client: ClickHouseClient): Promise<PlatformS
         uniswapV3Usd: v3Volume.totalVolumeUsd,
         totalRoutedUsd: routed.totalUsd,
       },
+      hollar: { totalSupply: hollarSupply },
+      protocolRevenue: revenue,
     }
   })
 }
