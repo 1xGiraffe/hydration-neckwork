@@ -58,6 +58,12 @@ export const processor = new SubstrateBatchProcessor()
       // 2026-09-10 it is 27,560 events/day, against 21,565 for Broadcast.Swapped3
       // and 15,732 for Tokens.Transfer, both already subscribed.
       'Currencies.Transferred',
+      // Native HDX moves as `Balances.Transfer` alone, and HDX is an Omnipool and
+      // XYK reserve: the indexer's price-irrelevance skip (POOL_TRANSFER_EVENTS in
+      // indexer.ts) must see a direct HDX transfer into or out of a pool account,
+      // or that block's moved reserve reaches no price row. Measured on 2026-09-25
+      // it is ~15,800 events/day, the same order as Currencies.Transferred (~12,900).
+      'Balances.Transfer',
       // Asset-registry changes (a rename, a new registration, a location fix)
       // must reach the live block's event list: the indexer forces a registry
       // re-scan when it SEES one of these, and without the subscription the
