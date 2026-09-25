@@ -1094,6 +1094,20 @@ describe('activityLine over real rows', () => {
     expect(activityUrlFor(LIQUIDITY_ADD, BASE)).toBe(`${BASE}/add-liquidity/14742679-e16`)
   })
 
+  it('joins the two legs of a liquidity act with +, never the swap arrow', () => {
+    // An XYK add moves both of the pair's assets the same way (as a pool creation
+    // and a concentrated-liquidity act do); `→` would read it as a swap.
+    const ewt = { ...LIQUIDITY_ADD.asset!, assetId: 252525, iconAssetId: 252525, symbol: 'EWT', name: 'Energy Web X', decimals: 18 }
+    const dot = { ...LIQUIDITY_ADD.asset!, assetId: 5, iconAssetId: 5, symbol: 'DOT', name: 'Polkadot', decimals: 10 }
+    const pair: ActivityRow = {
+      ...LIQUIDITY_ADD, asset: ewt, amount: '74998035088573853375',
+      assetIn: ewt, assetOut: dot, amountIn: '74998035088573853375', amountOut: '194266520234',
+    }
+    const line = activityLine(pair, BASE, NOW)
+    expect(line).toMatch(/EWT \+ [\d.]+ DOT/)
+    expect(line).not.toContain('→')
+  })
+
   it('marks an unconfirmed row and never presents it as settled', () => {
     expect(isUnconfirmed(UNCONFIRMED_SWAP)).toBe(true)
     const line = activityLine(UNCONFIRMED_SWAP, BASE, NOW)
