@@ -55,6 +55,55 @@ describe('the extrinsic pages row identity', () => {
   })
 })
 
+// A direct pool call is represented by its own *Executed event, and XYK (like LBP)
+// names its amounts amount/buyPrice/salePrice rather than amountIn/amountOut. Read
+// under the router's keys the row rendered with empty amounts and no value, while
+// the same trade through Router.buy — represented by Router.Executed — was complete.
+describe('the extrinsic page reads a direct XYK trade its own amounts', () => {
+  beforeEach(() => resetCacheForTests())
+
+  const WHO = `0x${'c3'.repeat(32)}`
+  const POOL = `0x${'d4'.repeat(32)}`
+  const swap = (blockHeight: number, eventName: string, args: Record<string, unknown>) => ({
+    block_height: blockHeight,
+    ts: '2026-09-25 14:20:00',
+    event_index: 9,
+    extrinsic_index: 2,
+    event_name: eventName,
+    call_address: '',
+    args_json: JSON.stringify({ who: WHO, pool: POOL, feeAsset: 22, feeAmount: '909711', ...args }),
+  })
+
+  it('maps XYK.BuyExecuted buyPrice/amount onto in/out', async () => {
+    initExplorerService(fakeClient([swap(900_300, 'XYK.BuyExecuted', { assetOut: 252525, assetIn: 22, amount: '1000000000000000000000', buyPrice: '303237610' })]))
+    const rows = (await getExtrinsicActivity(900_300, 2, { revenue: false })).filter(r => r.type === 'trade')
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].assetIn?.assetId).toBe(22)
+    expect(rows[0].assetOut?.assetId).toBe(252525)
+    expect(rows[0].amountIn).toBe('303237610')
+    expect(rows[0].amountOut).toBe('1000000000000000000000')
+  })
+
+  it('maps XYK.SellExecuted amount/salePrice onto in/out', async () => {
+    initExplorerService(fakeClient([swap(900_301, 'XYK.SellExecuted', { assetIn: 252525, assetOut: 22, amount: '100000000000000000000', salePrice: '30533665' })]))
+    const rows = (await getExtrinsicActivity(900_301, 2, { revenue: false })).filter(r => r.type === 'trade')
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].amountIn).toBe('100000000000000000000')
+    expect(rows[0].amountOut).toBe('30533665')
+  })
+
+  it('still reads the router net summary under amountIn/amountOut', async () => {
+    initExplorerService(fakeClient([swap(900_302, 'Router.Executed', { assetIn: 1000085, assetOut: 222, amountIn: '2099633665560911318', amountOut: '100000000000000000000' })]))
+    const rows = (await getExtrinsicActivity(900_302, 2, { revenue: false })).filter(r => r.type === 'trade')
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].amountIn).toBe('2099633665560911318')
+    expect(rows[0].amountOut).toBe('100000000000000000000')
+  })
+})
+
 // One wire field, one behaviour. Four surfaces spelled the execution price as
 // `out > 0 ? out / in : null` and one as a finiteness check, so the same zero-output
 // trade rendered 0 on one page and no price on the others.

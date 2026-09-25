@@ -9833,6 +9833,11 @@ export function swapEventAmounts(name: string, args: Record<string, unknown>): S
   if (name === 'XYK.BuyExecuted' || name === 'LBP.BuyExecuted') return { ...base, amountIn: s(args.buyPrice), amountOut: s(args.amount) }
   return { ...base, amountIn: s(args.amountIn), amountOut: s(args.amountOut) }
 }
+// swapEventAmounts' amountIn, decoded from a raw event's args in SQL — the very
+// expression swap_activity_mv stores as `amount_in`, so a read over raw_events and a
+// read over the pre-decoded projection state one value for every swap event.
+export const SWAP_EVENT_AMOUNT_IN_SQL =
+  `multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted'), JSONExtractString(args_json,'amount'), event_name IN ('XYK.BuyExecuted','LBP.BuyExecuted'), JSONExtractString(args_json,'buyPrice'), JSONExtractString(args_json,'amountIn'))`
 
 export interface TradeLimitSpec { kind: 'minReceived' | 'maxPaid'; amount: string; assetId: number }
 // The slippage-protection limit of a swap call. XYK's `maxLimit` arg is the
@@ -19293,6 +19298,12 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
           return otherRep.event_index > rep.event_index && otherRep.event_index <= dcaExec.event_index
         })
       const dcaArgs = ownsDca && dcaExec ? (safeJson(dcaExec.args_json) ?? {}) as Record<string, unknown> : null
+      // A direct pool call is represented by its own *Executed event, and XYK and LBP
+      // name their amounts amount/buyPrice/salePrice rather than amountIn/amountOut
+      // (swapEventAmounts); a DCA execution's own event carries amountIn/amountOut.
+      const legAmounts = swapEventAmounts(rep.event_name, args)
+      const amountIn = dcaArgs ? argStr(dcaArgs, 'amountIn') : legAmounts.amountIn
+      const amountOut = dcaArgs ? argStr(dcaArgs, 'amountOut') : legAmounts.amountOut
       rows.push({
         type: dcaArgs ? 'dca' : 'trade',
         blockHeight: rep.block_height,
@@ -19305,9 +19316,9 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
         assetIn: aIn,
         assetOut: aOut,
         amount: null,
-        amountIn: argStr(dcaArgs ?? args, 'amountIn'),
-        amountOut: argStr(dcaArgs ?? args, 'amountOut'),
-        valueUsd: usdValue(prices, aOut.assetId, argStr(dcaArgs ?? args, 'amountOut'), aOut.decimals),
+        amountIn,
+        amountOut,
+        valueUsd: usdValue(prices, aOut.assetId, amountOut, aOut.decimals),
         dca: !!dcaArgs,
         dcaScheduleId: dcaArgs ? Number(argStr(dcaArgs, 'id')) || undefined : undefined,
         linkBlock: rep.block_height,
@@ -22210,15 +22221,13 @@ function accountSwapTradeArm(list: string, bound: string, tokenIds?: number[]): 
 //
 // So the leg is restated instead, over `swap_activity` (the same events, pre-decoded,
 // ordered by block) with the page's own pairing rule: the nearest swap leg BEFORE the
-// execution carrying the same amountIn. `amountIn` is read exactly as the page reads
-// it, which is why the XYK/LBP events — whose amount lives under a different arg and
-// so never matches there — are blanked here too. An execution with no leg renders
+// execution carrying the same amountIn. `amount_in` there is SWAP_EVENT_AMOUNT_IN_SQL
+// over the event's args — the expression the page decodes its legs with — so the two
+// reads agree on every venue, XYK and LBP included. An execution with no leg renders
 // without assets and is dropped by the token test, which the inner join does for free.
 // The page additionally CONSUMES each leg as it is claimed, so two executions sharing a
 // block, an amount and a differing pair could still be paired differently; that is a
 // per-block disagreement the reconciliation refuses rather than a silent miscount.
-const DCA_LEG_AMOUNT_IN_SQL =
-  `if(event_name IN ('XYK.SellExecuted','XYK.BuyExecuted','LBP.SellExecuted','LBP.BuyExecuted'), '', amount_in)`
 function accountDcaTradeArm(list: string, bound: string, tokenIds?: number[]): ActivityCountArm {
   // Account-first twin: dca_events is keyed (event_name, block_height, …), so
   // `who` pruned nothing there and this arm read the table whole (271 MiB per
@@ -22236,7 +22245,7 @@ function accountDcaTradeArm(list: string, bound: string, tokenIds?: number[]): A
              argMax(l.asset_out, l.event_index) AS leg_out
       FROM (${execs}) AS x
       INNER JOIN (
-        SELECT block_height, event_index, asset_in, asset_out, ${DCA_LEG_AMOUNT_IN_SQL} AS amount_in
+        SELECT block_height, event_index, asset_in, asset_out, amount_in
         FROM price_data.swap_activity
         WHERE block_height IN (SELECT block_height FROM (${execs}))
       ) AS l ON l.block_height = x.block_height AND l.amount_in = x.amount_in
@@ -23692,7 +23701,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       const chunks = await mapChunksConcurrently(blocks, 2_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
         const res = await client.query({
           query: `SELECT block_height, event_index, event_name, JSONExtractInt(args_json,'assetIn') AS asset_in, JSONExtractInt(args_json,'assetOut') AS asset_out,
-                    JSONExtractString(args_json,'amountIn') AS amount_in
+                    ${SWAP_EVENT_AMOUNT_IN_SQL} AS amount_in
                   FROM price_data.raw_events WHERE block_height IN {blocks:Array(UInt32)} AND event_name IN (${names})`,
           query_params: { blocks: chunk },
           format: 'JSONEachRow',
