@@ -269,6 +269,95 @@ describe('GET /v1/accounts/:address/liquidity', () => {
       eventName: 'Omnipool.LiquidityAdded', action: 'Add', assetId: '5', amount: '100', amountA: null, amountB: null, assetB: null, poolAccount: null, assetRefs: ['5'],
       poolAddress: null, tokenId: null, tickLower: null, tickUpper: null, vault: null, shares: null,
     })
+    // A page whose rows all state their amount loads no legs.
+    expect(client.seen.some(s => s.query.includes('-- data:enrich:liquidity-legs'))).toBe(false)
+  })
+
+  // The projection keeps only the figure an event states in its own asset: an XYK
+  // add's amountA (never its amountB), an XYK removal nothing (shares only), an
+  // Omnipool removal nothing (sharesRemoved). The real amounts are the pool↔account
+  // transfer legs beside the event, recovered per page with the explorer's own
+  // matcher — the v3 arm states both amounts itself and is never a candidate.
+  describe('recovers the legs a pallet event does not state', () => {
+    const POOL = `0x${'d4'.repeat(32)}`
+    const TREASURY = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000'
+    const EWT = 252525, DOT = 5, MYTH = 30
+    // Block 14998656 extrinsic 3: XYK.LiquidityAdded EWT+DOT (event 24) after the
+    // two who→pool deposits (each emitted twice: Currencies + Tokens) and the
+    // LP-token existential deposit to the treasury.
+    const XYK_ADD = { ...SUBSTRATE_ROW, block_height: 14998656, event_index: 24, extrinsic_index: 3, event_name: 'XYK.LiquidityAdded', asset_id: EWT, amount: '', amount_a: '74998035088573853375', asset_b: DOT, asset_refs: [EWT, DOT] }
+    const ADD_LEGS = [
+      { block_height: 14998656, event_index: 13, extrinsic_index: 3, asset_id: EWT, from_account: ACC, to_account: POOL, amount: '74998035088573853375' },
+      { block_height: 14998656, event_index: 14, extrinsic_index: 3, asset_id: EWT, from_account: ACC, to_account: POOL, amount: '74998035088573853375' },
+      { block_height: 14998656, event_index: 15, extrinsic_index: 3, asset_id: DOT, from_account: ACC, to_account: POOL, amount: '194266520234' },
+      { block_height: 14998656, event_index: 16, extrinsic_index: 3, asset_id: DOT, from_account: ACC, to_account: POOL, amount: '194266520234' },
+      { block_height: 14998656, event_index: 17, extrinsic_index: 3, asset_id: 0, from_account: ACC, to_account: TREASURY, amount: '1100000000000' },
+    ]
+    // Block 14634282 extrinsic 2: XYK.LiquidityRemoved DOT+MYTH (event 44) after the
+    // two pool→who payouts.
+    const XYK_REMOVE = { ...SUBSTRATE_ROW, block_height: 14634282, event_index: 44, extrinsic_index: 2, event_name: 'XYK.LiquidityRemoved', asset_id: DOT, amount: '', amount_a: '', asset_b: MYTH, asset_refs: [DOT, MYTH] }
+    const REMOVE_LEGS = [
+      { block_height: 14634282, event_index: 35, extrinsic_index: 2, asset_id: DOT, from_account: POOL, to_account: ACC, amount: '1616158587135' },
+      { block_height: 14634282, event_index: 37, extrinsic_index: 2, asset_id: MYTH, from_account: POOL, to_account: ACC, amount: '59603890213654510857286' },
+    ]
+    const OMNI_REMOVE = { ...SUBSTRATE_ROW, block_height: 500, event_index: 9, extrinsic_index: null, event_name: 'Omnipool.LiquidityRemoved', asset_id: DOT, amount: '', asset_b: 0 }
+    const OMNI_LEG = { block_height: 500, event_index: 7, extrinsic_index: null, asset_id: DOT, from_account: POOL, to_account: ACC, amount: '4200' }
+    // The route fills the rows it reads in place, as it may: a query's rows are its
+    // own. The fixtures above are shared, so each read hands out copies.
+    const rows = (...items: Row[]): Row[] => items.map(item => ({ ...item }))
+
+    it('states both legs of an XYK add and removal, assetA\'s as amount and assetB\'s as amountB', async () => {
+      const client = fakeDataClient(
+        query => (query.includes('-- data:accounts:liquidity') ? rows(XYK_ADD, XYK_REMOVE) : undefined),
+        query => (query.includes('-- data:enrich:liquidity-legs') ? [...ADD_LEGS, ...REMOVE_LEGS] : undefined),
+      )
+      app = await freshDataApp(client)
+      const res = await app.inject({ url: `/v1/accounts/${ACC}/liquidity`, headers: AUTH })
+      expect(res.statusCode).toBe(200)
+      const [add, remove] = res.json().items
+      expect(add).toMatchObject({ eventName: 'XYK.LiquidityAdded', action: 'Add', assetId: String(EWT), amount: '74998035088573853375', amountA: '74998035088573853375', amountB: '194266520234', assetB: String(DOT) })
+      expect(remove).toMatchObject({ eventName: 'XYK.LiquidityRemoved', action: 'Remove', assetId: String(DOT), amount: '1616158587135', amountA: null, amountB: '59603890213654510857286', assetB: String(MYTH) })
+    })
+
+    it('reads the legs by primary key for the page\'s own extrinsics, in the rows\' own assets only', async () => {
+      const client = fakeDataClient(
+        query => (query.includes('-- data:accounts:liquidity') ? rows(XYK_ADD, OMNI_REMOVE, SUBSTRATE_ROW) : undefined),
+        query => (query.includes('-- data:enrich:liquidity-legs') ? [...ADD_LEGS, OMNI_LEG] : undefined),
+      )
+      app = await freshDataApp(client)
+      const res = await app.inject({ url: `/v1/accounts/${ACC}/liquidity`, headers: AUTH })
+      const [add, omni, stated] = res.json().items
+      expect(add).toMatchObject({ amount: '74998035088573853375', amountB: '194266520234' })
+      // An Omnipool removal has one leg — its asset's, from a runtime-hook scope here.
+      expect(omni).toMatchObject({ eventName: 'Omnipool.LiquidityRemoved', amount: '4200', amountB: null, assetB: null })
+      expect(stated).toMatchObject({ amount: '100' })
+      const reads = client.seen.filter(s => s.query.includes('-- data:enrich:liquidity-legs'))
+      expect(reads).toHaveLength(1)
+      const { query, params } = reads[0]
+      expect(query).toContain('FROM price_data.transfer_activity_by_time')
+      expect(query).not.toContain('PREWHERE')
+      // Only the amountless rows' keys: the add's extrinsic, the hook removal's block.
+      expect(params).toMatchObject({ blocks: [14998656, 500], bs: [14998656], es: [3], hs: [500], assets: [EWT, DOT] })
+    })
+
+    it('leaves a row whose leg is not there amountless rather than guessing', async () => {
+      const client = fakeDataClient(
+        query => (query.includes('-- data:accounts:liquidity') ? rows(XYK_REMOVE) : undefined),
+        query => (query.includes('-- data:enrich:liquidity-legs') ? [REMOVE_LEGS[0]] : undefined),
+      )
+      app = await freshDataApp(client)
+      const res = await app.inject({ url: `/v1/accounts/${ACC}/liquidity`, headers: AUTH })
+      // assetA's leg alone: the pair stays incomplete on the wire.
+      expect(res.json().items[0]).toMatchObject({ amount: '1616158587135', amountB: null })
+    })
+
+    it('never treats a concentrated-liquidity act as a candidate', async () => {
+      const client = fakeDataClient(query => (query.includes('-- data:accounts:liquidity') ? [{ ...V3_ROW, amount: '' }] : undefined))
+      app = await freshDataApp(client)
+      const res = await app.inject({ url: `/v1/accounts/${ACC}/liquidity`, headers: AUTH })
+      expect(res.statusCode).toBe(200)
+      expect(client.seen.some(s => s.query.includes('-- data:enrich:liquidity-legs'))).toBe(false)
+    })
   })
 
   it('serves a concentrated-liquidity act with its pool, position and range beside the pallet events', async () => {

@@ -12,6 +12,7 @@ import {
   type Order, type PositionCursor, type WindowFilters,
 } from './feed.ts'
 import { V3_LIQUIDITY_H160_PARAM, substrateLiquidityAction, uniswapV3LiquidityCtesSql, type LiquidityAction } from './uniswapV3Liquidity.ts'
+import { fillLiquidityAmounts } from './liquidityAmounts.ts'
 
 // The per-account DeFi feeds: trades, DCA, OTC, staking, votes, liquidity,
 // XCM, money market, liquidations, protocol fees. All account-first reads.
@@ -478,6 +479,10 @@ export async function accountLiquidity(client: ClickHouseClient, parsed: ParsedA
     format: 'JSONEachRow',
   })
   const { page, hasMore } = dedupPage(await res.json<LiquidityRow>(), row => `${row.block_height}:${row.event_index}`, options.limit)
+  // The pallet rows recover the legs their events do not state, in place: assetA's
+  // into `amount`, an XYK add's or removal's second into `amount_b`. The v3 arm
+  // states both amounts from its own logs and is not a candidate.
+  await fillLiquidityAmounts(client, page.filter(row => substrateLiquidityAction(row.event_name) != null).map(row => Object.assign(row, { who: parsed.accountId })))
   const str = (value: string | null | undefined): string | null => (value ? String(value) : null)
   return {
     items: await attachExtrinsicHashes(client, page.map(row => ({

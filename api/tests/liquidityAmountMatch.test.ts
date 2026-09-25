@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
+// Through explorerService's re-export: the explorer and the Data API share one
+// matcher (services/liquidityLegs.ts), and this import pins that the explorer
+// still exposes it.
 import { matchLiquidityAmounts, type LiquidityAmountCandidate, type LiquidityTransferLeg } from '../src/services/explorerService.ts'
+import { liquidityLegAssetIds, missingLiquidityAmounts } from '../src/services/liquidityLegs.ts'
 
 // Omnipool.LiquidityRemoved/LiquidityAdded carry only sharesRemoved/shares, never
 // the underlying token amount — that lives on the paired pool↔who transfer leg.
@@ -172,5 +176,31 @@ describe('matchLiquidityAmounts on an XYK pair', () => {
     matchLiquidityAmounts(rows, [leg({ asset_id: DOT, event_index: 35, extrinsic_index: 2, amount: '1616158587135' })])
     expect(rows[0].amount).toBe('1616158587135')
     expect(rows[0].amount_b).toBeUndefined()
+  })
+})
+
+// Which rows a surface recovers, and which legs it loads for them, are the
+// matcher's own rules — every loader (the explorer's chunked one, the Data API's
+// page-scoped one) takes them from here rather than restating them.
+describe('the rows and assets a leg loader takes', () => {
+  const DOT = 5
+  const MYTH = 30
+
+  it('recovers only amountless pallet rows with an account, never a PoolDestroyed', () => {
+    const stated = removal({ event_index: 1, amount: '111' })
+    const gap = removal({ event_index: 2 })
+    const destroyed = removal({ event_name: 'XYK.PoolDestroyed', event_index: 3 })
+    const nobody = removal({ event_index: 4, who: '' })
+    expect(missingLiquidityAmounts([stated, gap, destroyed, nobody])).toEqual([gap])
+  })
+
+  it('loads both of an XYK pair\'s assets and one asset for every other row, each once', () => {
+    const rows = [
+      removal({ event_name: 'XYK.LiquidityRemoved', asset_id: DOT, asset_b: MYTH, event_index: 1 }),
+      removal({ event_name: 'XYK.LiquidityAdded', asset_id: DOT, asset_b: 0, event_index: 2 }),
+      removal({ event_name: 'Omnipool.LiquidityRemoved', asset_id: MYTH, event_index: 3 }),
+    ]
+    // HDX (asset 0) is a real second asset of an XYK pair, not "none".
+    expect(liquidityLegAssetIds(rows)).toEqual([DOT, MYTH, 0])
   })
 })
