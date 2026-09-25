@@ -99,3 +99,66 @@ describe('resampleValueSeriesToTrailingYear', () => {
     expect(resampleValueSeriesToTrailingYear([], [], now)).toEqual(new Array(SPARK_WEEKS).fill(0))
   })
 })
+
+// The accounts directory folds a row's members in ClickHouse: per (account, asset)
+// the week's last state CARRIED forward from the baseline, then summed per (row,
+// asset, week), and buildValueSparkline runs on those sums under the row's key.
+// That is exact only because the carry happens before the sum — a sum of the raw
+// weekly states would drop an account's holding in every week it was not observed.
+describe('buildValueSparkline over row-folded states', () => {
+  const carried = (obs: { account_id: string; asset_id: string; b: number; bal: string }[], baseline: Map<string, string>) => {
+    const byKey = new Map<string, Map<number, bigint>>()
+    for (const [k, bal] of baseline) byKey.set(k, new Map([[-1, BigInt(bal)]]))
+    for (const r of obs) (byKey.get(`${r.account_id}|${r.asset_id}`) ?? byKey.set(`${r.account_id}|${r.asset_id}`, new Map()).get(`${r.account_id}|${r.asset_id}`)!).set(r.b, BigInt(r.bal))
+    const sums = new Map<string, bigint>()
+    for (const [k, m] of byKey) {
+      const asset = k.slice(k.indexOf('|') + 1)
+      let bal = m.get(-1) ?? null
+      for (let b = -1; b < SPARK_WEEKS; b++) {
+        if (m.has(b)) bal = m.get(b)!
+        if (bal != null && bal > 0n) sums.set(`${asset}|${b}`, (sums.get(`${asset}|${b}`) ?? 0n) + bal)
+      }
+    }
+    const rows = [...sums].map(([k, v]) => ({ asset_id: k.slice(0, k.indexOf('|')), b: Number(k.slice(k.indexOf('|') + 1)), bal: v.toString() }))
+    return {
+      obs: rows.filter(r => r.b >= 0).map(r => ({ account_id: 'row', asset_id: r.asset_id, b: r.b, bal: r.bal })),
+      baseline: new Map(rows.filter(r => r.b === -1).map(r => [`row|${r.asset_id}`, r.bal])),
+    }
+  }
+
+  it('equals the per-account assembly when members are observed in different weeks', () => {
+    // A: baseline 100, observed at week 10 (300) and 40 (0). B: born at week 5 (50),
+    // observed again at week 20 (70). Prices 2 throughout, 12 decimals.
+    const obs = [
+      { account_id: 'a', asset_id: '5', b: 10, bal: '300000000000000' },
+      { account_id: 'a', asset_id: '5', b: 40, bal: '0' },
+      { account_id: 'b', asset_id: '5', b: 5, bal: '50000000000000' },
+      { account_id: 'b', asset_id: '5', b: 20, bal: '70000000000000' },
+    ]
+    const baseline = new Map([['a|5', '100000000000000']])
+    const prices = px('5', 2)
+    const decimals = new Map([['5', 12]])
+    const perAccount = buildValueSparkline(obs, baseline, prices, decimals)!
+    const folded = carried(obs, baseline)
+    expect(buildValueSparkline(folded.obs, folded.baseline, prices, decimals)).toEqual(perAccount)
+    expect(perAccount[0]).toBe(200)   // A's baseline alone
+    expect(perAccount[5]).toBe(300)   // + B's 50
+    expect(perAccount[10]).toBe(700)  // A now 300
+    expect(perAccount[20]).toBe(740)  // B now 70
+    expect(perAccount[40]).toBe(140)  // A out
+  })
+
+  it('a sum of the raw weekly states is not the same series', () => {
+    const obs = [
+      { account_id: 'a', asset_id: '5', b: 10, bal: '300000000000000' },
+      { account_id: 'b', asset_id: '5', b: 5, bal: '50000000000000' },
+    ]
+    const prices = px('5', 2)
+    const decimals = new Map([['5', 12]])
+    const perAccount = buildValueSparkline(obs, new Map(), prices, decimals)!
+    // Raw states under one key: week 10 overwrites the carry instead of adding to it.
+    const raw = buildValueSparkline(obs.map(r => ({ ...r, account_id: 'row' })), new Map(), prices, decimals)!
+    expect(raw[10]).toBe(600)
+    expect(perAccount[10]).toBe(700)
+  })
+})
