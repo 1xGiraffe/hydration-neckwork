@@ -46,7 +46,9 @@ import type { ClickHouseStore } from './store/clickhouseStore.js'
 const BACKFILL_ASSET_SNAPSHOT_INTERVAL_MINUTES = 1_000
 
 // Transfer events that can move a pool reserve, and so must stop a block being
-// skipped as price-irrelevant. Both are already subscribed (see processor.ts).
+// skipped as price-irrelevant. Every one must also be subscribed in processor.ts —
+// an unsubscribed name never appears in `block.events`, so listing it here alone
+// matches nothing (tests/processorSubscriptions.test.ts pins the two together).
 //
 // `Currencies.Transferred` is the load-bearing half: an aToken or ERC-20 leg is
 // reported as that event ALONE, and those are exactly the reserves the GDOT /
@@ -54,9 +56,10 @@ const BACKFILL_ASSET_SNAPSHOT_INTERVAL_MINUTES = 1_000
 // aToken liquidity add into one of those pools skip its own block — the
 // Stableswap.LiquidityAdded that accompanies it is deliberately ignored by the
 // composition cache — so the moved reserve reached no price row until some later
-// swap happened to unskip a block. Only `from`/`to` are read, and both events
-// carry them.
-const POOL_TRANSFER_EVENTS = new Set(['Tokens.Transfer', 'Currencies.Transferred'])
+// swap happened to unskip a block. `Balances.Transfer` is the same case for
+// native HDX, an Omnipool and XYK reserve that no Tokens/Currencies event reports.
+// Only `from`/`to` are read, and all three events carry them.
+const POOL_TRANSFER_EVENTS = new Set(['Tokens.Transfer', 'Currencies.Transferred', 'Balances.Transfer'])
 
 let errorNamesRpc: RpcClient | null = null
 // Snapshot a spec version's pallet error names into runtime_error_names. Loads
