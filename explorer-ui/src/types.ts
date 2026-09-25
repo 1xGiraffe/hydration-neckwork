@@ -529,7 +529,14 @@ export interface MmReserve {
 // A concentrated-liquidity position (venue 'Uniswap v3' / 'Gamma vault') holds two tokens:
 // `asset`/`amount` are token0, `assetB`/`amountB` token1; it links to its pool page.
 // `owner`: the member holding an NFT-held Omnipool position (fungible share rows carry none).
-export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string; assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string; owner?: AccountRef; unclaimedRewards?: LpUnclaimedReward[] }
+export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string; assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string; owner?: AccountRef; unclaimedRewards?: LpUnclaimedReward[]; wrapper?: LpShareWrapper }
+// A Stablepool row whose share is a money-market reserve (a "Hydrated" pool:
+// HUSDT over 2-Pool-HUSDT): the aToken minted over the share and its market. The
+// pool's headline rate is what that aToken earns (yields.moneyMarket[marketKey]
+// [asset.assetId].supply), as the Hydration app states it; the row's shares are
+// UNWRAPPED and earn the pool's fee and legs only. `named`: the pool goes by the
+// wrapper's name, as the balances already show it.
+export interface LpShareWrapper { asset: AssetRef; marketKey: string; named: boolean }
 
 // Unclaimed liquidity-mining rewards as the account API ships them
 // (`farmRewards` on the account/tag detail, `unclaimedRewards` on farmed LP rows).

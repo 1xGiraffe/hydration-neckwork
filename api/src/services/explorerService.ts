@@ -17,7 +17,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, assetDecimalsOrNull, allExplorerAssets, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, assetDecimalsOrNull, allExplorerAssets, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT } from './tagService.ts'
@@ -3604,11 +3604,19 @@ async function queryLockBreakdownsSafe(accountListSql: string): Promise<Map<numb
 // card, and GIGA tokens (GDOT/GETH/GSOL) stay ordinary balances (they're products,
 // not something the holder LP'd into). Display-only rows: their USD value is
 // already counted once via the folded wallet balances, so callers must NOT add
-// them into lpUsd/portfolio.
+// them into lpUsd/portfolio. A share that is a money-market reserve names its
+// wrapper (LpPosition.wrapper), so the row can be shown and rated as the app's
+// "Hydrated" pool while the shares stay what they are: unwrapped.
 export function stableswapLpPositions(balances: AddressBalance[]): LpPosition[] {
   return balances
     .filter(b => b.total !== '0' && (SHARE_TOKEN_UNDERLYING_ID[b.asset.assetId] != null || /^\d+-Pool(-|$)/.test(b.asset.symbol)))
-    .map(b => ({ positionId: `share-${b.asset.assetId}`, asset: b.asset, amount: b.total, shares: b.total, valueUsd: b.valueUsd, venue: 'Stablepool' }))
+    .map(b => {
+      const w = shareWrapperOf(b.asset.assetId)
+      return {
+        positionId: `share-${b.asset.assetId}`, asset: b.asset, amount: b.total, shares: b.total, valueUsd: b.valueUsd, venue: 'Stablepool',
+        ...(w ? { wrapper: { asset: asset(w.aTokenId), marketKey: w.marketKey, named: w.named } } : {}),
+      }
+    })
 }
 export interface MoneyMarketPosition {
   marketKey: string                 // 'core', 'gigahdx', … — which isolated market
@@ -6603,6 +6611,15 @@ export interface LpPosition {
   // Liquidity tab can name the member behind each position. Fungible share rows
   // (Stablepool, XYK) are summed across holders and carry none.
   owner?: AccountRef
+  // Stablepool rows whose share is a money-market reserve (a "Hydrated" pool:
+  // HUSDT over 2-Pool-HUSDT, GDOT over 2-Pool-GDOT): the aToken minted over the
+  // share and its market. The pool's headline rate is what that aToken earns
+  // (/explorer/yields moneyMarket[marketKey][asset.assetId].supply — fee, legs,
+  // the reserve's supply APY and its incentives), the figure the Hydration app
+  // states for the pool; the row itself holds UNWRAPPED shares, which earn the
+  // pool's fee and legs only. `named`: the pool goes by the wrapper's name, as
+  // the balances fold already shows it (shareWrapperOf).
+  wrapper?: { asset: AssetRef; marketKey: string; named: boolean }
   // Farmed rows only ('Omnipool Farm', 'XYK Farm'): what each of the position's
   // farm entries would pay if claimed now. Never part of valueUsd — the principal
   // is what withdrawing the liquidity returns; a reward is a different claim.

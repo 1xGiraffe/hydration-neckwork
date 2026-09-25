@@ -111,13 +111,13 @@ async function discoverATokenUnderlyings(client: ClickHouseClient, rows: readonl
     const addr = (r.evm_address ?? '').toLowerCase()
     if (addr) byContract.set(addr, r.asset_id)
   }
-  let reserves: { asset_address: string; atoken: string }[]
+  let reserves: { asset_address: string; atoken: string; market_key: string }[]
   try {
     const res = await client.query({
-      query: `SELECT asset_address, atoken FROM price_data.atoken_reserve_map FINAL WHERE atoken != ''`,
+      query: `SELECT asset_address, atoken, market_key FROM price_data.atoken_reserve_map FINAL WHERE atoken != ''`,
       format: 'JSONEachRow',
     })
-    reserves = await res.json<{ asset_address: string; atoken: string }>()
+    reserves = await res.json<{ asset_address: string; atoken: string; market_key: string }>()
   } catch (err) {
     // The map is an enrichment, never a gate: without it the seeded pairs still work.
     console.error('[ExplorerAssets] aToken reserve map unavailable:', err)
@@ -126,9 +126,14 @@ async function discoverATokenUnderlyings(client: ClickHouseClient, rows: readonl
   for (const reserve of reserves) {
     const aTokenId = byContract.get((reserve.atoken ?? '').toLowerCase())
     if (aTokenId == null) continue
+    const underlyingId = underlyingAssetIdOf(reserve.asset_address, byContract)
+    // A reserve over a pool share is that share's wrapper whatever the alias
+    // direction below decides — the map is the only source of the pairing.
+    if (underlyingId != null && underlyingId !== aTokenId && isStableswapShareToken(underlyingId) && MM_MARKETS.some(m => m.key === reserve.market_key)) {
+      SHARE_WRAPPER[underlyingId] = { aTokenId, marketKey: reserve.market_key }
+    }
     // A hand-written pairing wins: it encodes a direction the map cannot.
     if (ATOKEN_UNDERLYING_ID[aTokenId] != null) continue
-    const underlyingId = underlyingAssetIdOf(reserve.asset_address, byContract)
     if (underlyingId == null || underlyingId === aTokenId) continue
     // Never invert an alias that already runs the other way. The map calls
     // 2-Pool-GDOT the reserve of GDOT, while the share table prices the pool share
@@ -540,6 +545,28 @@ export function displayAssetId(assetId: number): number {
 export const UNDERLYING_TO_ATOKEN_ID: Record<number, number> = Object.fromEntries(
   Object.entries(ATOKEN_UNDERLYING_ID).map(([aToken, underlying]) => [underlying, Number(aToken)]),
 )
+
+// A stableswap share that is itself a money-market reserve → the aToken minted
+// over it and the market it is in: the Hydration app's "Hydrated" pools (HUSDT
+// over 2-Pool-HUSDT, GDOT over 2-Pool-GDOT, a3-Pool over 3-Pool), whose
+// add-liquidity flow supplies the share and hands the holder the aToken. Filled
+// from the reserve map at registry load (discoverATokenUnderlyings) as a fact
+// about the reserve, recorded whichever way the price alias runs — which is why
+// UNDERLYING_TO_ATOKEN_ID (the alias direction) cannot serve: the share prices
+// OFF its wrapper there, so the pair is skipped. The wrapper NAMES the pool
+// (`named`) exactly when the share already displays as it (SHARE_TOKEN_UNDERLYING_ID,
+// the balances fold): HUSDT and GDOT, never a3-Pool.
+export interface ShareWrapper { aTokenId: number; marketKey: string }
+export const SHARE_WRAPPER: Record<number, ShareWrapper> = {}
+export function shareWrapperOf(shareId: number): (ShareWrapper & { named: boolean }) | undefined {
+  const w = SHARE_WRAPPER[shareId]
+  return w ? { ...w, named: SHARE_TOKEN_UNDERLYING_ID[shareId] === w.aTokenId } : undefined
+}
+/** Test seam: pair a share with its wrapper the way a registry load would. */
+export function registerShareWrapper(shareId: number, wrapper: ShareWrapper | null): void {
+  if (wrapper) SHARE_WRAPPER[shareId] = wrapper
+  else delete SHARE_WRAPPER[shareId]
+}
 
 // Reverse of SHARE_TOKEN_UNDERLYING_ID: main asset id → the pool-share token ids
 // that display as it. The share token can be what a protocol actually holds while

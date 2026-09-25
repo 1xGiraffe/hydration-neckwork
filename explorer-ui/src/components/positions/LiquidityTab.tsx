@@ -37,6 +37,10 @@ const HISTORY_PAGE = 25
 
 const POOL_NOTE = 'Estimated APR of the pool: the last 30 days of fees at current TVL (concentrated liquidity: 7 days, range-wide), live farm rewards at full loyalty, the lending yield of money-market legs and the own yield of yield-bearing legs (vDOT, wstETH, PRIME… at the current APY the Hydration UI shows, else their on-chain rate). Impermanent loss is not considered.'
 const POSITION_NOTE = 'This position\'s estimated APR: the pool\'s fee-side yield plus each farm it is in at the entry\'s current loyalty. Impermanent loss is not considered.'
+// A pool whose share is a money-market reserve (HUSDT over 2-Pool-HUSDT, GDOT over
+// 2-Pool-GDOT): the Hydration app's add-liquidity flow supplies the share and
+// hands the holder the aToken, so the app rates the pool as that aToken earns.
+const wrappedPoolNote = (symbol: string) => `Estimated APR of the pool as the Hydration app states it: what ${symbol}, the pool share supplied to the money market, earns — the last 30 days of fees at current TVL, the lending yield and own yield of the pool's legs, the reserve's supply APY and its incentive programmes. Shares held unwrapped earn the fee and legs only (see each position). Impermanent loss is not considered.`
 const REWARDS_TITLE = 'What claiming every farm entry now would pay (loyalty applied, already-claimed rewards subtracted), at current prices. Beside the positions\' value, never inside it.'
 
 export function LiquidityTab({ scope, positions, farmRewards, showOwner }: {
@@ -173,7 +177,10 @@ function PoolsTable({ groups, showOwner, yieldsFailed }: { groups: PoolGroup[]; 
           {groups.map(g => {
             const open = isOpen(g.id)
             const toggle = () => setOverrides(o => ({ ...o, [g.id]: !open }))
-            const farmIcons = g.yield?.farms.map(f => f.rewardAsset).filter((a, i, all) => all.findIndex(b => b.assetId === a.assetId) === i)
+            // Reward assets beside the total, like the Hydration UI's icons: every
+            // farm's, and each lending incentive's (PRIME on a Hydrated pool).
+            const rewardAssets = [...(g.yield?.farms.map(f => f.rewardAsset) ?? []), ...(g.yield?.components ?? []).flatMap(c => (c.kind === 'mm-incentive' && c.asset ? [c.asset] : []))]
+            const farmIcons = rewardAssets.filter((a, i, all) => all.findIndex(b => b.assetId === a.assetId) === i)
             return [
               <tr key={g.id} {...rowNav(g.to)} className="clickable lpt-pool">
                 <td data-label="Pool">
@@ -193,7 +200,7 @@ function PoolsTable({ groups, showOwner, yieldsFailed }: { groups: PoolGroup[]; 
                 <td data-label="Amounts" className="r mono"><Legs legs={g.legs} /></td>
                 <td data-label="Value" className="r mono"><Usd v={g.valueUsd} />{g.unpricedPositions > 0 && <span className="lpt-note"> (+ {g.unpricedPositions} unpriced)</span>}</td>
                 <td data-label="APR" className="r">
-                  <YieldHover total={g.yield?.totalAprPct ?? null} rows={poolAprRows(g.yield)} icons={farmIcons} title={`${g.label} · pool APR`} note={POOL_NOTE} />
+                  <YieldHover total={g.yield?.totalAprPct ?? null} rows={poolAprRows(g.yield)} icons={farmIcons} title={`${g.label} · pool APR`} note={g.wrapper ? wrappedPoolNote(g.wrapper.asset.symbol) : POOL_NOTE} />
                 </td>
                 <td data-label="Unclaimed" className="r mono"><Rewards tally={g.rewards} /></td>
               </tr>,
