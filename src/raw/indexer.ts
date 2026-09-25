@@ -32,6 +32,7 @@ import {
   toJsonString,
 } from './json.js'
 import { assertMoneyMarketPositionConfig, extractMoneyMarketRows, snapshotMoneyMarketPositions } from './moneyMarket.js'
+import { captureLmFarmEntries, entryEventsFromRawEvents } from './lmFarmEntries.js'
 import { synthesizeNestedCallRows, type EvmExecution, type RuntimeCallDecoder } from './nestedCalls.js'
 import { createClickHouseClient } from '../db/client.js'
 import { minutesFromEnvironment } from '../util/env.js'
@@ -463,6 +464,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
   let evmLogsPersisted = 0
   let moneyMarketRowsPersisted = 0
   let xcmRowsPersisted = 0
+  let lmEntryRowsPersisted = 0
   let parserWarningsPersisted = 0
   let snapshotsRefreshed = 0
   let snapshotsReused = 0
@@ -553,6 +555,32 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       extrinsicsPersisted += extrinsicRows.length
       callsPersisted += callRows.length + synthetic.rows.length
       eventsPersisted += eventRows.length
+
+      // Liquidity-mining farm entries (raw_lm_farm_entries): an entry's stake is
+      // storage-only, so every deposit this block's SharesDeposited/Redeposited
+      // events name is read at the block's end, decoded by the runtime that
+      // EXECUTED the block — the parent's code (see lmFarmEntries.ts). No RPC for a
+      // block without such events. Like the money-market position reads below, a
+      // failed read degrades to a parser warning for that deposit and never aborts
+      // the block; the anchors loop (atoken-anchor) repairs what it names each
+      // cycle, and snapshot-lm-entries.ts is the manual repair.
+      const lmEntryEvents = entryEventsFromRawEvents(eventRows)
+      if (lmEntryEvents.length > 0) {
+        const lm = await tracePhase(blockHeight, 'lm_farm_entries', () => captureLmFarmEntries(
+          { height: blockHeight, hash: block.header.hash, timestamp: blockTimestamp },
+          lmEntryEvents,
+          // The parent-state runtime (not header.specVersion's): see lmFarmEntries.ts.
+          block.header._runtime,
+          ingestSource,
+        ))
+        ctx.store.addLmFarmEntries(lm.rows)
+        ctx.store.addParserWarnings(lm.warnings)
+        lmEntryRowsPersisted += lm.rows.length
+        parserWarningsPersisted += lm.warnings.length
+        if (lm.warnings.length > 0) {
+          console.warn(`[Raw][LM] Block ${blockHeight}: ${lm.warnings.length} farm-entry deposit read(s) failed (${lm.warnings[0].warning}); recorded as raw_parser_warnings`)
+        }
+      }
 
       // Bound events go in first so that when a block both binds an address and
       // logs it, the explicit binding is the row `dedupeAliasRows` keeps for the
@@ -775,6 +803,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
           `${evmLogsPersisted} evm logs | ` +
           `${moneyMarketRowsPersisted} money market rows | ` +
           `${xcmRowsPersisted} xcm rows | ` +
+          `${lmEntryRowsPersisted} lm entry rows | ` +
           `${parserWarningsPersisted} warnings | ` +
           `${snapshotsRefreshed} refreshed | ` +
           `${snapshotsReused} reused`,
@@ -790,6 +819,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
         evmLogsPersisted = 0
         moneyMarketRowsPersisted = 0
         xcmRowsPersisted = 0
+        lmEntryRowsPersisted = 0
         parserWarningsPersisted = 0
         snapshotsRefreshed = 0
         snapshotsReused = 0

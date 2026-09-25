@@ -22,6 +22,7 @@ import type {
   RawParserWarningRow,
   RawXcmActivityRow,
 } from './types.js'
+import type { LmFarmEntryRow } from './lmFarmEntries.js'
 
 function chunkSizeForBalanceObservations(): number {
   return Math.min(integerFromEnvironment('RAW_BALANCE_INSERT_CHUNK_SIZE', 5_000), 50_000)
@@ -49,6 +50,7 @@ export class RawClickHouseStore {
   private readonly moneyMarketPositionsBatch: BatchAccumulator<RawMoneyMarketPositionRow>
   private readonly moneyMarketReservesBatch: BatchAccumulator<RawMoneyMarketReserveRow>
   private readonly xcmActivityBatch: BatchAccumulator<RawXcmActivityRow>
+  private readonly lmFarmEntriesBatch: BatchAccumulator<LmFarmEntryRow>
   private readonly parserWarningsBatch: BatchAccumulator<RawParserWarningRow>
 
   constructor(client: ClickHouseClient, flushThreshold: number = 10_000) {
@@ -65,6 +67,7 @@ export class RawClickHouseStore {
     this.moneyMarketPositionsBatch = new BatchAccumulator<RawMoneyMarketPositionRow>(flushThreshold)
     this.moneyMarketReservesBatch = new BatchAccumulator<RawMoneyMarketReserveRow>(flushThreshold)
     this.xcmActivityBatch = new BatchAccumulator<RawXcmActivityRow>(flushThreshold)
+    this.lmFarmEntriesBatch = new BatchAccumulator<LmFarmEntryRow>(flushThreshold)
     this.parserWarningsBatch = new BatchAccumulator<RawParserWarningRow>(flushThreshold)
   }
 
@@ -114,6 +117,10 @@ export class RawClickHouseStore {
 
   addXcmActivity(rows: RawXcmActivityRow[]): void {
     this.xcmActivityBatch.add(rows)
+  }
+
+  addLmFarmEntries(rows: LmFarmEntryRow[]): void {
+    this.lmFarmEntriesBatch.add(rows)
   }
 
 
@@ -222,6 +229,10 @@ export class RawClickHouseStore {
     await this.flushBatch(this.xcmActivityBatch, 'price_data.raw_xcm_activity')
   }
 
+  async flushLmFarmEntries(): Promise<void> {
+    await this.flushBatch(this.lmFarmEntriesBatch, 'price_data.raw_lm_farm_entries')
+  }
+
 
 
   async flushParserWarnings(): Promise<void> {
@@ -249,6 +260,7 @@ export class RawClickHouseStore {
       this.moneyMarketPositionsBatch.size,
       this.moneyMarketReservesBatch.size,
       this.xcmActivityBatch.size,
+      this.lmFarmEntriesBatch.size,
       this.parserWarningsBatch.size,
     )
   }
@@ -266,6 +278,7 @@ export class RawClickHouseStore {
     await this.flushMoneyMarketPositions()
     await this.flushMoneyMarketReserves()
     await this.flushXcmActivity()
+    await this.flushLmFarmEntries()
     await this.flushParserWarnings()
   }
 
