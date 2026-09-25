@@ -183,4 +183,32 @@ describe('deriveFeePayment: EVM gas', () => {
   it('reports nothing when the payer burned gas but the treasury got none', () => {
     expect(deriveFeePayment([burned(EVM_PAYER, '1000'), minted(EVM_PAYER, '1000')], EVM_PAYER, null, null)).toBeNull()
   })
+
+  // With no substrate fee every HDX treasury deposit is summed, and the payer's
+  // gas burn vouches for HDX — so the dust of an account the call killed, swept
+  // to the treasury as the Balances.Deposit right after Balances.DustLost, would
+  // be read as gas. Taking the last deposit (the substrate-fee case) never met
+  // this; the sum does.
+  it('leaves the dust sweep after DustLost out of the gas sum', () => {
+    const events = [
+      burned(EVM_PAYER, '5000'),
+      { name: 'Balances.DustLost', args: { account: EVM_PAYER, amount: '333' } },
+      nativeDeposit(TREASURY, '333'),
+      minted(EVM_PAYER, '1000'),
+      nativeDeposit(TREASURY, '4000'),
+    ]
+    expect(deriveFeePayment(events, EVM_PAYER, null, null)).toEqual({
+      assetId: 0, amount: '4000', tipAmount: null,
+    })
+  })
+
+  it('still reads a deposit that merely follows a dust sweep at a distance', () => {
+    const events = [
+      { name: 'Balances.DustLost', args: { account: EVM_PAYER, amount: '333' } },
+      nativeDeposit(TREASURY, '333'),
+      burned(EVM_PAYER, '5000'),
+      nativeDeposit(TREASURY, '4000'),
+    ]
+    expect(deriveFeePayment(events, EVM_PAYER, null, null)?.amount).toBe('4000')
+  })
 })
