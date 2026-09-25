@@ -100,6 +100,15 @@ interface HdxChainSnapshot {
 let snapshot: HdxChainSnapshot | null = null
 
 const toHdx = (raw: bigint) => Number(raw / 10n ** (HDX_DECIMALS - 4n)) / 1e4
+// An exact planck sum as the wire's HDX number: converted ONCE from its decimal
+// string, so the figure is the double nearest the exact total — never a float sum
+// of per-entry roundings (125 pending unstakes summed via toHdx lost 0.0066 HDX
+// and printed as 18680902.217899997).
+export const hdxNumberFromRaw = (raw: bigint): number => {
+  const unit = 10n ** HDX_DECIMALS
+  const neg = raw < 0n, a = neg ? -raw : raw
+  return Number(`${neg ? '-' : ''}${a / unit}.${(a % unit).toString().padStart(Number(HDX_DECIMALS), '0')}`)
+}
 
 // The unlock series the dashboard charts. One key per lock kind that has its
 // own schedule, plus `other` for everything else the binding timeline can
@@ -757,7 +766,7 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
         later.vesting += (s.periodCount - prev) * perHdx
       }
     }
-    const gigaPendingTotal = snap?.pendingUnstakes.reduce((a, p) => a + p.payoutHdx, 0) ?? 0
+    const gigaPendingTotal = hdxNumberFromRaw(snap?.pendingUnstakes.reduce((a, p) => a + p.payoutRaw, 0n) ?? 0n)
     const nextGiga = snap?.pendingUnstakes.find(p => blockTs(p.expiryBlock) > now)
     // Positions whose cooldown has elapsed: claimable with an unlock call. This
     // counts POSITIONS, so it stays a true statement about the pallet even
@@ -803,7 +812,7 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
           totalHdx: gigaPendingTotal,
           nextUnlockTs: nextGiga ? iso(blockTs(nextGiga.expiryBlock)) : null,
           maturedCount: gigaMatured.length,
-          maturedHdx: gigaMatured.reduce((a, p) => a + p.payoutHdx, 0),
+          maturedHdx: hdxNumberFromRaw(gigaMatured.reduce((a, p) => a + p.payoutRaw, 0n)),
         },
       },
       flows: { daily: flows, dca },
