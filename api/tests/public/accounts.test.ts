@@ -47,6 +47,10 @@ const ASSET_ROWS: Row[] = [
   { asset_id: 46, symbol: 'apyUSD', name: 'apyUSD', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
   { asset_id: 146, symbol: '2-Pool-apyUSD', name: '2-Pool-apyUSD', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
 ]
+// The money market's receipt for supplied DOT: a registered ERC-20 asset with
+// DOT's decimals. Added to the registry only by the tests that hold it — a
+// symbol search for "dot" would otherwise resolve to it as well.
+const ADOT_ROW: Row = { asset_id: 1001, symbol: 'aDOT', name: 'aDOT', decimals: 10, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null }
 
 // DOT 4.5, HDX 0.02, LRNA 0.5, HOLLAR 1.0 — the Decimal(38,12) rendering ClickHouse
 // returns.
@@ -173,6 +177,7 @@ const MM_EVENT_ROWS: Row[] = [
 interface Seen { query: string; params: Record<string, unknown> }
 
 function fakeClient(overrides: {
+  assets?: Row[]
   latest?: Row[]
   erc20?: Row[]
   hourly?: Row[]
@@ -270,7 +275,7 @@ function fakeClient(overrides: {
       }
       if (query.includes('-- lp:v3-vault-pools')) return queryResult(overrides.v3?.vaults ?? [])
       if (query.includes('-- lp:v3-vault-flow-history')) return queryResult(overrides.v3?.flows ?? [])
-      if (query.includes('FROM price_data.assets FINAL')) return queryResult(ASSET_ROWS)
+      if (query.includes('FROM price_data.assets FINAL')) return queryResult(overrides.assets ?? ASSET_ROWS)
       if (query.includes('Bonds.TokenCreated')) return queryResult([])
       // Ordered before the `blocks` branch, not incidentally: the current-price
       // read names BOTH tables — it resolves its 12-hour staleness bound to a
@@ -865,15 +870,18 @@ describe('GET /v1/accounts/balances', () => {
     expect(pointers).toHaveLength(1)
   })
 
-  it('replaces a pallet-side aToken row with the snapshot instead of adding both', async () => {
-    // aDOT (1001) is the receipt for DOT supplied to the money market: its pallet
-    // row carries the position as `reserved` while `free` is 0, and the snapshot
-    // reports the same position as supplied DOT. Counting both would double the
-    // reserved slice, so the pallet row is replaced (AGENTS.md: replace attributed
-    // custody, never add it).
+  it('replaces a pallet-side aToken row\'s free side with the snapshot and keeps its reserved slice as locked', async () => {
+    // aDOT (1001) is the receipt for DOT supplied to the money market. Its pallet
+    // row's free side is always 0 — the balance lives in EVM contract storage and
+    // the snapshot reports it as supplied DOT — so the snapshot replaces it
+    // (AGENTS.md: replace attributed custody, never add it). Its reserved side is a
+    // DIFFERENT holding: a DCA order selling aDOT reserves it through Tokens, which
+    // moves those aTokens OUT of the holder's balanceOf (what `supplied` is) into
+    // the pallet's holding. Dropping the row dropped that slice from every figure.
     const dual = fakeClient({
+      assets: [...ASSET_ROWS, ADOT_ROW],
       latest: [
-        { account_id: ACCOUNT_A, asset_id: '1001', free: '0', reserved: '40000000000', last_block: 1200 },
+        { account_id: ACCOUNT_A, asset_id: '1001', free: '0', reserved: '20000000000', last_block: 1200 },
       ],
       erc20: [],
       claims: [],
@@ -881,16 +889,38 @@ describe('GET /v1/accounts/balances', () => {
     const { queryLatestBalances, stopAssets: stop } = await freshBalances(dual)
     const [row] = await queryLatestBalances(dual as never, [ACCOUNT_A])
     stop()
-    // 4 DOT supplied × 4.5 = 18.00, counted ONCE — not 36.00, and not as locked.
+    // 4 DOT supplied × 4.5 = 18.00 transferable; 2 aDOT reserved × 4.5 (priced
+    // through DOT) = 9.00 locked — each once, neither doubled.
     expect(row).toEqual({
       account: ACCOUNT_A,
       transferableUsd: '18.00',
-      lockedUsd: '0.00',
+      lockedUsd: '9.00',
       lpUsd: '0.00', uniswapV3Usd: '0.00', xykLpUsd: '0.00', farmRewardsUsd: '0.00', moneyMarketRewardsUsd: '0.00',
       debtUsd: '5.00',
-      totalUsd: '18.00',
+      totalUsd: '27.00',
       blockHeight: 1200,
     })
+  })
+
+  it('keeps an aToken\'s reserved slice when the money-market snapshot is stale', async () => {
+    // The reserve is a pallet fact read from the balance table, not from the
+    // snapshot, so a stale snapshot drops the supplied side and nothing else.
+    const stale = fakeClient({
+      assets: [...ASSET_ROWS, ADOT_ROW],
+      latest: [
+        { account_id: ACCOUNT_A, asset_id: '1001', free: '0', reserved: '20000000000', last_block: 1200 },
+      ],
+      erc20: [],
+      claims: [],
+      snapshotPointer: [{ snapshot_id: 'snap-1', age_seconds: 7200 }],
+    })
+    const { queryLatestBalances, stopAssets: stop } = await freshBalances(stale)
+    const [row] = await queryLatestBalances(stale as never, [ACCOUNT_A])
+    stop()
+    expect(row.transferableUsd).toBe('0.00')
+    expect(row.lockedUsd).toBe('9.00')
+    expect(row.debtUsd).toBeNull()
+    expect(row.totalUsd).toBe('9.00')
   })
 
   it('excludes staking-backed markets, whose collateral never left the wallet', async () => {
