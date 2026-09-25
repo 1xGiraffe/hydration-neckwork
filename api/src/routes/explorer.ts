@@ -30,6 +30,11 @@ import { getHdxDashboard } from '../services/hdxService.ts'
 import { FLOW_CURSOR_RE, REVENUE_RANGES, getRevenueDashboard, getRevenueFlow, getStakerDistributions } from '../services/revenueService.ts'
 import { getHollarDashboard } from '../services/hollarService.ts'
 import { getExplorerYields } from '../services/positionYield.ts'
+import {
+  getAddressLiquidityRewards, getAddressOrderHistory, getAddressPositionsPresence,
+  getTagLiquidityRewards, getTagOrderHistory, getTagPositionsPresence, type OrderHistoryQuery,
+} from '../services/positionsPresence.ts'
+import { ORDER_HISTORY_MAX_LIMIT } from '../services/orderHistory.ts'
 import { getIceDashboard } from '../services/iceService.ts'
 import { getSecurityDashboard } from '../services/securityService.ts'
 import { getWormholeBridgeDetail } from '../services/wormholeNttService.ts'
@@ -158,6 +163,17 @@ export function badOffset(reply: FastifyReply): FastifyReply {
 export function limitParam(q: Record<string, unknown>, fallback: number): number {
   const n = limitSchema.safeParse(q.limit)
   return n.success ? n.data ?? fallback : fallback
+}
+// The order-history page query (address, tag and list-tag twins): `kind` all|dca|limit,
+// `offset`, `limit` (default 25, at most ORDER_HISTORY_MAX_LIMIT). Null on a bad value.
+const orderHistoryQuerySchema = z.object({
+  kind: z.enum(['all', 'dca', 'limit']).default('all'),
+  offset: listOffsetSchema.default(0),
+  limit: z.coerce.number().int().min(1).max(ORDER_HISTORY_MAX_LIMIT).default(25),
+})
+export function orderHistoryQuery(q: Record<string, unknown>): OrderHistoryQuery | null {
+  const parsed = orderHistoryQuerySchema.safeParse(q)
+  return parsed.success ? { kind: parsed.data.kind, offset: parsed.data.offset ?? 0, limit: parsed.data.limit } : null
 }
 export function textParam(q: Record<string, unknown>, key: string, max = 128): string | undefined {
   const v = q[key]
@@ -731,6 +747,32 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return history
   })
 
+  // The tag twins of the address order-history / positions-presence / liquidity-rewards
+  // routes, over the tag's members (see services/positionsPresence.ts).
+  fastify.get('/explorer/tag/:tagId/order-history', async (req, reply) => {
+    const params = tagParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag' })
+    const q = orderHistoryQuery(req.query as Record<string, unknown>)
+    if (!q) return reply.status(400).send({ error: 'Invalid order-history query' })
+    const page = await getTagOrderHistory(params.data.tagId, q)
+    if (!page) return reply.status(404).send({ error: 'Tag not recognized' })
+    return page
+  })
+  fastify.get('/explorer/tag/:tagId/positions-presence', async (req, reply) => {
+    const params = tagParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag' })
+    const presence = await getTagPositionsPresence(params.data.tagId)
+    if (!presence) return reply.status(404).send({ error: 'Tag not recognized' })
+    return presence
+  })
+  fastify.get('/explorer/tag/:tagId/liquidity-rewards', async (req, reply) => {
+    const params = tagParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag' })
+    const claimed = await getTagLiquidityRewards(params.data.tagId)
+    if (!claimed) return reply.status(404).send({ error: 'Tag not recognized' })
+    return claimed
+  })
+
   fastify.get('/explorer/tag/:tagId/close-accounts', async (req, reply) => {
     const params = tagParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
@@ -850,6 +892,34 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const history = await getAddressLiquidityHistory(params.data.address, w.window)
     if (!history) return reply.status(404).send({ error: 'Address not recognized' })
     return history
+  })
+
+  // Finished DCA schedules and intents over the related set, paged deterministically
+  // (services/orderHistory.ts); `kind` all|dca|limit.
+  fastify.get('/explorer/address/:address/order-history', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const q = orderHistoryQuery(req.query as Record<string, unknown>)
+    if (!q) return reply.status(400).send({ error: 'Invalid order-history query' })
+    const page = await getAddressOrderHistory(params.data.address, q)
+    if (!page) return reply.status(404).send({ error: 'Address not recognized' })
+    return page
+  })
+  // Whether the Orders / Liquidity / Borrow tabs have history behind them (cheap probes).
+  fastify.get('/explorer/address/:address/positions-presence', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const presence = await getAddressPositionsPresence(params.data.address)
+    if (!presence) return reply.status(404).send({ error: 'Address not recognized' })
+    return presence
+  })
+  // Claimed liquidity-mining rewards, all-time, valued at each claim's event time.
+  fastify.get('/explorer/address/:address/liquidity-rewards', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const claimed = await getAddressLiquidityRewards(params.data.address)
+    if (!claimed) return reply.status(404).send({ error: 'Address not recognized' })
+    return claimed
   })
 
   // Per-market money-market history on the same grid (getAddressMoneyMarketHistory);
@@ -1010,6 +1080,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
   fastify.get('/explorer/hollar', async () => {
     return getHollarDashboard()
   })
+
   // Current yield composition of every liquidity venue and money-market reserve
   // (services/positionYield.ts). Global; SWR-cached ten minutes.
   fastify.get('/explorer/yields', async () => getExplorerYields())

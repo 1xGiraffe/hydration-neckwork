@@ -10,8 +10,9 @@ import {
   limitParam, offsetParam, badOffset, textParam, activityTypeParam,
   extrinsicFilters, eventFilters, dateParam, activityOffsetParam, boundedActivityOffset,
   maxActivityOffsetFor, maxScopedActivityOffsetFor, scopedListQuery, listTabSchema,
-  accountSortParam, historyWindowSchema, optionalHistoryWindow,
+  accountSortParam, historyWindowSchema, optionalHistoryWindow, orderHistoryQuery,
 } from './explorer.ts'
+import { getListTagLiquidityRewards, getListTagOrderHistory, getListTagPositionsPresence } from '../services/positionsPresence.ts'
 
 // A list tag resolved to the two things every route below needs: which tag it
 // is (listId + tagId together key the aggregate models' caches) and who is in
@@ -23,7 +24,7 @@ export interface ResolvedListTag {
   tag: { name: string; color: string; icon: string; note: string; members: string[] }
 }
 
-// The two ways the same thirteen reads are served. A list tag's aggregate view is
+// The two ways the same sixteen reads are served. A list tag's aggregate view is
 // one page, so it must not become two drifting sets of handlers — the surface
 // carries only what genuinely differs between them:
 //
@@ -83,6 +84,32 @@ export function listTagReadRoutes(fastify: FastifyInstance, surface: ListTagRead
     const history = await getListTagLiquidityHistory(resolved.listId, resolved.tagId, resolved.tag.members, w.window)
     if (!history) return reply.status(404).send({ error: 'Tag not found' })
     return history
+  })
+
+  // Order history, positions presence and claimed LP rewards over the list tag's
+  // members — the same wire shapes as the address and system-tag routes.
+  fastify.get(`${base}/order-history`, async (req, reply) => {
+    const resolved = resolve(req, reply)
+    if (!resolved) return
+    const q = orderHistoryQuery(query(req))
+    if (!q) return reply.status(400).send({ error: 'Invalid order-history query' })
+    const page = await getListTagOrderHistory(resolved.listId, resolved.tagId, resolved.tag.members, q)
+    if (!page) return reply.status(404).send({ error: 'Tag not found' })
+    return page
+  })
+  fastify.get(`${base}/positions-presence`, async (req, reply) => {
+    const resolved = resolve(req, reply)
+    if (!resolved) return
+    const presence = await getListTagPositionsPresence(resolved.listId, resolved.tagId, resolved.tag.members)
+    if (!presence) return reply.status(404).send({ error: 'Tag not found' })
+    return presence
+  })
+  fastify.get(`${base}/liquidity-rewards`, async (req, reply) => {
+    const resolved = resolve(req, reply)
+    if (!resolved) return
+    const claimed = await getListTagLiquidityRewards(resolved.listId, resolved.tagId, resolved.tag.members)
+    if (!claimed) return reply.status(404).send({ error: 'Tag not found' })
+    return claimed
   })
 
   // The list tag's members as DIRECTORY rows — same shape and same renderer as
