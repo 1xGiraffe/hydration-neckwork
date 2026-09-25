@@ -95,3 +95,82 @@ describe('matchLiquidityAmounts', () => {
     expect(rows.map(r => r.amount)).toEqual(['111', ''])
   })
 })
+
+// An XYK add or remove moves BOTH of the pair's assets against one pool account,
+// and names neither amount in the row's denomination — so a row of either recovers
+// its two legs together. Read as a single-leg event an add matched nothing (its legs
+// run who→pool, the payout direction's opposite) and a removal stated assetA alone,
+// halving its value.
+describe('matchLiquidityAmounts on an XYK pair', () => {
+  const DOT = 5
+  const MYTH = 30
+  const EWT = 252525
+  const HDX = 0
+
+  it('fills BOTH legs of an add from the who→pool pair', () => {
+    const rows = [removal({ event_name: 'XYK.LiquidityAdded', asset_id: EWT, asset_b: DOT, event_index: 24, extrinsic_index: 3 })]
+    matchLiquidityAmounts(rows, [
+      leg({ asset_id: EWT, from_account: ALICE, to_account: POOL, event_index: 13, extrinsic_index: 3, amount: '74998035088573853375' }),
+      leg({ asset_id: DOT, from_account: ALICE, to_account: POOL, event_index: 15, extrinsic_index: 3, amount: '194266520234' }),
+    ])
+    expect(rows[0].amount).toBe('74998035088573853375')
+    expect(rows[0].amount_b).toBe('194266520234')
+  })
+
+  it('fills BOTH legs of a removal from the pool→who pair', () => {
+    const rows = [removal({ event_name: 'XYK.LiquidityRemoved', asset_id: DOT, asset_b: MYTH, event_index: 44, extrinsic_index: 2 })]
+    matchLiquidityAmounts(rows, [
+      leg({ asset_id: DOT, event_index: 35, extrinsic_index: 2, amount: '1616158587135' }),
+      leg({ asset_id: MYTH, event_index: 37, extrinsic_index: 2, amount: '59603890213654510857286' }),
+    ])
+    expect(rows[0].amount).toBe('1616158587135')
+    expect(rows[0].amount_b).toBe('59603890213654510857286')
+  })
+
+  it('keeps the LP-token existential deposit out of an HDX-paired add', () => {
+    // A first add endows the LP-token account, paying its existential deposit to the
+    // Treasury AFTER the pool deposits — the nearest preceding HDX leg from `who`.
+    const rows = [removal({ event_name: 'XYK.LiquidityAdded', asset_id: HDX, asset_b: DOT, event_index: 24, extrinsic_index: 3 })]
+    matchLiquidityAmounts(rows, [
+      leg({ asset_id: HDX, from_account: ALICE, to_account: POOL, event_index: 13, extrinsic_index: 3, amount: '5000' }),
+      leg({ asset_id: DOT, from_account: ALICE, to_account: POOL, event_index: 15, extrinsic_index: 3, amount: '700' }),
+      leg({ asset_id: HDX, from_account: ALICE, to_account: TREASURY_POT, event_index: 17, extrinsic_index: 3, amount: '1100000000000' }),
+    ])
+    expect(rows[0].amount).toBe('5000')
+    expect(rows[0].amount_b).toBe('700')
+  })
+
+  it('takes both legs against ONE pool account, past a nearer same-asset leg elsewhere', () => {
+    // A batch: the add's two pool deposits, then a plain DOT transfer to Bob before
+    // the event. Bob received no HDX, so he is not the pair's pool.
+    const rows = [removal({ event_name: 'XYK.LiquidityAdded', asset_id: DOT, asset_b: HDX, event_index: 24, extrinsic_index: 3 })]
+    matchLiquidityAmounts(rows, [
+      leg({ asset_id: HDX, from_account: ALICE, to_account: POOL, event_index: 13, extrinsic_index: 3, amount: '5000' }),
+      leg({ asset_id: DOT, from_account: ALICE, to_account: POOL, event_index: 15, extrinsic_index: 3, amount: '700' }),
+      leg({ asset_id: DOT, from_account: ALICE, to_account: BOB, event_index: 20, extrinsic_index: 3, amount: '999' }),
+    ])
+    expect(rows[0].amount).toBe('700')
+    expect(rows[0].amount_b).toBe('5000')
+  })
+
+  it('pairs two adds to one pool in one batch with their own legs, in feed order', () => {
+    const rows = [
+      removal({ event_name: 'XYK.LiquidityAdded', asset_id: DOT, asset_b: HDX, event_index: 18, extrinsic_index: 3 }),
+      removal({ event_name: 'XYK.LiquidityAdded', asset_id: DOT, asset_b: HDX, event_index: 8, extrinsic_index: 3 }),
+    ]
+    matchLiquidityAmounts(rows, [
+      leg({ asset_id: DOT, from_account: ALICE, to_account: POOL, event_index: 3, extrinsic_index: 3, amount: '100' }),
+      leg({ asset_id: HDX, from_account: ALICE, to_account: POOL, event_index: 5, extrinsic_index: 3, amount: '10' }),
+      leg({ asset_id: DOT, from_account: ALICE, to_account: POOL, event_index: 13, extrinsic_index: 3, amount: '200' }),
+      leg({ asset_id: HDX, from_account: ALICE, to_account: POOL, event_index: 15, extrinsic_index: 3, amount: '20' }),
+    ])
+    expect(rows.map(r => [r.amount, r.amount_b])).toEqual([['200', '20'], ['100', '10']])
+  })
+
+  it('states assetA alone when no assetB leg exists, leaving the pair incomplete', () => {
+    const rows = [removal({ event_name: 'XYK.LiquidityRemoved', asset_id: DOT, asset_b: MYTH, event_index: 44, extrinsic_index: 2 })]
+    matchLiquidityAmounts(rows, [leg({ asset_id: DOT, event_index: 35, extrinsic_index: 2, amount: '1616158587135' })])
+    expect(rows[0].amount).toBe('1616158587135')
+    expect(rows[0].amount_b).toBeUndefined()
+  })
+})

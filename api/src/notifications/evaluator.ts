@@ -958,7 +958,9 @@ function activityAmountLine(row: ActivityRow, viewerTag: ViewerTag): RenderPart[
   const inAmount = humanAmount(row.amountIn, row.assetIn?.decimals ?? 0)
   const outAmount = humanAmount(row.amountOut, row.assetOut?.decimals ?? 0)
   if (row.assetIn && inAmount != null && row.assetOut && outAmount != null) {
-    parts.push(amountPart(inAmount, row.assetIn.symbol), textPart('→'), amountPart(outAmount, row.assetOut.symbol))
+    // A two-leg liquidity act (an XYK pair, a pool creation, a concentrated-liquidity
+    // position) moves both assets the same way; an arrow would read it as a swap.
+    parts.push(amountPart(inAmount, row.assetIn.symbol), textPart(row.type === 'liquidity' ? '+' : '→'), amountPart(outAmount, row.assetOut.symbol))
   } else {
     const one = humanAmount(row.amount, row.asset?.decimals ?? 0)
     if (row.asset && one != null) parts.push(amountPart(one, row.asset.symbol))
