@@ -19,12 +19,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <script>
       (function () {
-        try {
-          var t = localStorage.getItem('preis-theme');
-          if (t === 'light' || t === 'dark') {
-            document.documentElement.setAttribute('data-theme', t);
-          }
-        } catch (e) {}
+        // A saved choice wins; without one, follow the OS setting.
+        var t = null;
+        try { t = localStorage.getItem('preis-theme'); } catch (e) {}
+        if (t !== 'light' && t !== 'dark') {
+          try { t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'; } catch (e) { t = 'dark'; }
+        }
+        document.documentElement.setAttribute('data-theme', t);
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute('content', t === 'dark' ? '#030816' : '#EFEDEA');
       })();
     </script>
     <meta name="description" content="Live price charts for Hydration assets — candles, volume and market stats for every trading pair, indexed from the chain." />
