@@ -36,12 +36,15 @@
     <link rel="preload" href="/fonts/GeistMonoMedium-latin.woff2" as="font" type="font/woff2" crossorigin />
     <script>
       (function () {
-        try {
-          var t = localStorage.getItem('explorer-theme');
-          if (t === 'light' || t === 'dark') {
-            document.documentElement.setAttribute('data-theme', t);
-          }
-        } catch (e) {}
+        // A saved choice wins; without one, follow the OS setting.
+        var t = null;
+        try { t = localStorage.getItem('explorer-theme'); } catch (e) {}
+        if (t !== 'light' && t !== 'dark') {
+          try { t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'; } catch (e) { t = 'dark'; }
+        }
+        document.documentElement.setAttribute('data-theme', t);
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute('content', t === 'dark' ? '#030816' : '#EFEDEA');
       })();
     </script>
     <meta property="og:title" content="Hydration Explorer" />
