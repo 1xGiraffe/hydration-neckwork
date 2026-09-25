@@ -34,6 +34,9 @@ describe('explorer money-market history', async () => {
     if (query.includes('-- mm:reserve-update-phase')) return [{ block_height: 950, event_index: 1, init: 0 }]
     if (query.includes('-- mm:block-times')) return (params.hs as number[]).map(h => ({ block_height: h, t: T0 + (h - 1000) * 6 }))
     if (query.includes('-- lp:bucket-closes')) return [{ asset_id: 5, closed_at: T0, px: '2' }]
+    if (query.includes('-- mm:incentive-claims-total')) return [{ reward: DOT, ts: T0 + 2 * H, amount: '3000000000000' }]
+    if (query.includes('-- mm:incentive-programmes')) return [{ asset: 'a5', reward: DOT }]
+    if (query.includes('-- mm:incentive-claim-closes')) return [{ asset_id: 5, closed_at: T0 + H, px: '2' }]
     return []
   }
   initExplorerService({
@@ -56,6 +59,13 @@ describe('explorer money-market history', async () => {
     expect(core.reserves[0].asset.assetId).toBe(5)
     expect(core.reserves[0].points.map(p => p.i)).toEqual([0, 1, 2])
     expect(core.reserves[0].points[0]).toMatchObject({ supplied: '1000000000000', suppliedUsd: 2, collateral: null })
+    // Interest on a flat index is zero, rendered once; claimed incentives are filed under
+    // the reward's market and valued at the hour closed by the claim.
+    expect(core.reserves[0].points[2]).toMatchObject({ interestEarned: '0', interestPaid: '0', interestEarnedUsd: 0, interestPaidUsd: 0, interestIncomplete: false })
+    expect(core.reserves[0].interest).toEqual({ interestEarned: '0', interestPaid: '0', interestEarnedUsd: 0, interestPaidUsd: 0, interestIncomplete: false })
+    expect(core.points[2]).toMatchObject({ interestEarnedUsd: 0, interestPaidUsd: 0, interestUnpriced: 0 })
+    expect(core).toMatchObject({ interestEarnedUsd: 0, interestPaidUsd: 0, interestUnpriced: 0 })
+    expect(core.claimedIncentives).toEqual([{ asset: expect.objectContaining({ assetId: 5 }), amount: '3000000000000', valueUsd: 6, claims: 1, unpricedClaims: 0 }])
   })
 
   it('starts an EVM account without a balance range at its first observation', async () => {

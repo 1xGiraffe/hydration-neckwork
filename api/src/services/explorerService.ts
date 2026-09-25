@@ -51,7 +51,9 @@ import { buildMempoolActivities, buildPendingActivities, type PendingActivity, t
 import { feeTierLabel, loadV3Registry, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3SwapAt, type V3Activity, type V3Registry } from './uniswapV3Service.ts'
 import { loadV3AccountPositions, v3AccountPositions } from './uniswapV3Positions.ts'
 import { loadMmIncentiveProgrammeRows, scaledSeriesFromBuckets } from './mmIncentiveHistory.ts'
-import { loadCurrentCollateralFlags, loadMmIncentiveHistory, loadMmReserveMap, loadMoneyMarketHistory, mmHistoryStart, mmMarketCompare, mmObservationOrderSql, type MmIncentiveHistory, type MmObservation } from './moneyMarketHistory.ts'
+import { loadCurrentCollateralFlags, loadMmIncentiveHistory, loadMmReserveMap, loadMoneyMarketHistory, mmHistoryStart, mmMarketCompare, mmObservationOrderSql, type MmHistoryInterest, type MmIncentiveHistory, type MmObservation } from './moneyMarketHistory.ts'
+import { loadMmIncentiveClaims } from './mmIncentiveClaims.ts'
+import { loadMmLiquidations } from './mmLiquidations.ts'
 import { currentMmIncentiveGenerationSql, loadMmIncentives, mmCountedIncentiveRowsSql, type MmIncentiveSnapshotView } from './mmIncentiveSnapshot.ts'
 import { xcswapSettlementsFor, type XcswapSettlement, type XcswapStatus } from './xcswapSettlements.ts'
 import { loadForeignCandles } from './foreignCandles.ts'
@@ -4549,6 +4551,9 @@ export interface MoneyMarketHistoryObservationView {
   availableBorrowsBase: string
   ltv: string
   liquidationThreshold: string
+  /** The lowest health factor in force during the bucket (every observation in it and the one carried into it; a published day folds its finer buckets), and the block that observed it. */
+  lowestHealthFactor: string
+  lowestAtBlock: number
 }
 export interface MoneyMarketHistoryReserveView {
   /** The reserve's underlying asset; amounts are in its raw units. */
@@ -4557,7 +4562,26 @@ export interface MoneyMarketHistoryReserveView {
   aToken: AssetRef | null
   reserveAddress: string
   /** `i` indexes the shared dates/blocks arrays; only buckets where something was supplied or owed. */
-  points: Array<{ i: number; supplied: string; borrowed: string; suppliedUsd: number | null; borrowedUsd: number | null; collateral: boolean | null }>
+  points: Array<{
+    i: number; supplied: string; borrowed: string; suppliedUsd: number | null; borrowedUsd: number | null; collateral: boolean | null
+  } & MoneyMarketHistoryInterestView>
+  /** Cumulative interest at the grid's last bucket — includes what accrued after the reserve's last point (the bucket it was closed in). */
+  interest: MoneyMarketHistoryInterestView
+}
+/**
+ * Interest on one reserve, cumulative from the first stated bucket (moneyMarketHistory.ts
+ * reserveInterestSide: the principal held at the previous bucket end accrues through the
+ * bucket, so an intra-bucket change starts accruing the next one). Raw units of the
+ * reserve's asset; USD sums each bucket's accrual at that bucket's closed candle and is
+ * null once an accrual was unpriced or unstatable. interestIncomplete: some accrual
+ * could not be stated, so the raw figures are lower bounds.
+ */
+export interface MoneyMarketHistoryInterestView {
+  interestEarned: string
+  interestPaid: string
+  interestEarnedUsd: number | null
+  interestPaidUsd: number | null
+  interestIncomplete: boolean
 }
 export interface MoneyMarketHistoryMarketView {
   marketKey: string
@@ -4576,8 +4600,36 @@ export interface MoneyMarketHistoryMarketView {
     eModeCategoryId: number | null
     /** Unclaimed incentives listed under this market at the bucket end (settled; never in the USD above). */
     unclaimedRewards: Array<{ asset: AssetRef; amount: string; valueUsd: number | null; settledAtBlock: number | null }>
+    /** Cumulative interest over the reserves whose figure is priced and stated; null before reserveHistoryFrom. */
+    interestEarnedUsd: number | null
+    interestPaidUsd: number | null
+    /** Reserve sides left out of the two sums (unpriced or unstatable). Not in `unpriced`. */
+    interestUnpriced: number
   }>
   reserves: MoneyMarketHistoryReserveView[]
+  /** The market's cumulative interest at the grid's last bucket (points' figures, untrimmed). */
+  interestEarnedUsd: number | null
+  interestPaidUsd: number | null
+  interestUnpriced: number
+  /**
+   * Lending incentives the holders claimed, all indexed history (never windowed), per
+   * reward asset, filed under the reward's primary market (mmIncentiveClaims.ts); each
+   * claim valued at the hourly candle closed by its block. valueUsd sums the priced
+   * claims, null when none is priced; unpricedClaims are left out of it.
+   */
+  claimedIncentives: Array<{ asset: AssetRef; amount: string; valueUsd: number | null; claims: number; unpricedClaims: number }>
+  /**
+   * The holders' liquidations in this market as the liquidated user (mmLiquidations.ts),
+   * all indexed history, newest first: the collateral seized and the debt repaid, each
+   * valued at the hourly candle closed by the liquidation's block. `i` indexes the
+   * shared dates/blocks arrays — the first bucket ending at or after the liquidation's
+   * block — and is null when that falls outside the served buckets.
+   */
+  liquidations: Array<{
+    blockHeight: number; eventIndex: number; timestamp: string; i: number | null
+    collateral: { asset: AssetRef | null; amount: string; valueUsd: number | null }
+    debt: { asset: AssetRef | null; amount: string | null; valueUsd: number | null }
+  }>
 }
 export interface AddressMoneyMarketHistory {
   stepSec: number
@@ -4610,14 +4662,32 @@ export async function buildMoneyMarketHistory(accounts: string[], window?: { fro
   const { bk } = grid
   const allDates = Array.from({ length: bk.N + 1 }, (_, b) => formatUtcSeconds(bk.endSec(b)))
   const keep = window ? allDates.map((_, b) => b) : lastBucketOfEachDay(allDates)
-  const mm = await loadMoneyMarketHistory(client, { h160s, primary }, bk, { grain: CHART_PRICE_GRAIN, buckets: keep })
+  const [mm, claimed, liquidations] = await Promise.all([
+    loadMoneyMarketHistory(client, { h160s, primary }, bk, { grain: CHART_PRICE_GRAIN, buckets: keep }),
+    loadMmReserveMap(client).then(map => loadMmIncentiveClaims(client, h160s, map.reserves)),
+    loadMmReserveMap(client).then(map => loadMmLiquidations(client, h160s, map.reserves)),
+  ])
+  const keptHeights = keep.map(b => bk.endHeight(b))
+  // The first served bucket whose end block is at or after `h` (binary search).
+  const bucketOfHeight = (h: number): number | null => {
+    let lo = 0, hi = keptHeights.length - 1, hit = -1
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (keptHeights[mid] >= h) { hit = mid; hi = mid - 1 } else lo = mid + 1 }
+    // A liquidation before the first served bucket's own start is outside it too.
+    const start = keep[0] > 0 ? bk.endHeight(keep[0] - 1) : bk.floorHeight
+    return hit < 0 || (hit === 0 && h <= start) ? null : hit
+  }
   const indexOf = new Map(keep.map((b, i) => [b, i]))
   const usd = (v: bigint | null) => (v == null ? null : Number(renderUsd(v)))
   const time = (h: number) => { const t = mm.blockTimes.get(h); return t == null ? null : formatUtcSeconds(t) }
+  const interest = (x: MmHistoryInterest): MoneyMarketHistoryInterestView => ({
+    interestEarned: x.interestEarned.toString(), interestPaid: x.interestPaid.toString(),
+    interestEarnedUsd: usd(x.interestEarnedUsd), interestPaidUsd: usd(x.interestPaidUsd), interestIncomplete: x.interestIncomplete,
+  })
   const observation = (o: MmObservation | null): MoneyMarketHistoryObservationView | null => o && {
     observedAtBlock: o.block, timestamp: time(o.block), healthFactor: o.healthFactor,
     totalCollateralBase: o.totalCollateralBase, totalDebtBase: o.totalDebtBase, availableBorrowsBase: o.availableBorrowsBase,
     ltv: o.ltv, liquidationThreshold: o.liquidationThreshold,
+    lowestHealthFactor: o.lowestHealthFactor ?? o.healthFactor, lowestAtBlock: o.lowestAtBlock ?? o.block,
   }
   return {
     stepSec: bk.step,
@@ -4639,13 +4709,24 @@ export async function buildMoneyMarketHistory(accounts: string[], window?: { fro
           i: indexOf.get(p.b)!, suppliedUsd: usd(p.suppliedUsd), borrowedUsd: usd(p.borrowedUsd), netUsd: usd(p.netUsd),
           unpriced: p.unpriced, observation: observation(p.observation), eModeCategoryId: p.eModeCategoryId,
           unclaimedRewards: p.unclaimedRewards.map(r => ({ asset: asset(r.rewardAssetId), amount: r.amount.toString(), valueUsd: usd(r.valueUsd), settledAtBlock: r.settledAtBlock })),
+          interestEarnedUsd: usd(p.interestEarnedUsd), interestPaidUsd: usd(p.interestPaidUsd), interestUnpriced: p.interestUnpriced,
         })),
         reserves: m.reserves.map(r => ({
           asset: asset(r.assetId), aToken: r.aTokenAssetId == null ? null : asset(r.aTokenAssetId), reserveAddress: r.reserveAddress,
           points: r.points.map(p => ({
             i: indexOf.get(p.b)!, supplied: p.supplied.toString(), borrowed: p.borrowed.toString(),
-            suppliedUsd: usd(p.suppliedUsd), borrowedUsd: usd(p.borrowedUsd), collateral: p.collateral,
+            suppliedUsd: usd(p.suppliedUsd), borrowedUsd: usd(p.borrowedUsd), collateral: p.collateral, ...interest(p),
           })),
+          interest: interest(r),
+        })),
+        interestEarnedUsd: usd(m.interestEarnedUsd), interestPaidUsd: usd(m.interestPaidUsd), interestUnpriced: m.interestUnpriced,
+        claimedIncentives: claimed.filter(c => c.marketKey === m.marketKey).map(c => ({
+          asset: asset(c.rewardAssetId), amount: c.amount.toString(), valueUsd: usd(c.valueUsd), claims: c.claims, unpricedClaims: c.unpricedClaims,
+        })),
+        liquidations: liquidations.filter(l => l.marketKey === m.marketKey).map(l => ({
+          blockHeight: l.blockHeight, eventIndex: l.eventIndex, timestamp: formatUtcSeconds(l.ts), i: bucketOfHeight(l.blockHeight),
+          collateral: { asset: l.collateralAssetId == null ? null : asset(l.collateralAssetId), amount: l.collateralAmount.toString(), valueUsd: usd(l.collateralUsd) },
+          debt: { asset: l.debtAssetId == null ? null : asset(l.debtAssetId), amount: l.debtAmount?.toString() ?? null, valueUsd: usd(l.debtUsd) },
         })),
       }
     }),
