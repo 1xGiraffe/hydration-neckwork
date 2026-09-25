@@ -209,10 +209,14 @@ export function Account({ address }: { address: string }) {
                   const handle = data.identity.twitter.replace(/^@/, '')
                   rows.push({ dt: 'X', dd: <span className="mono"><a href={`https://x.com/${handle}`} target="_blank" rel="noopener">@{handle}</a></span> })
                 }
-                if (data.evmAddress && data.ss58Polkadot) rows.push({ dt: 'Polkadot (SS58)', dd: <span className="mono"><ShortAddr addr={data.ss58Polkadot} full /> <Copy text={data.ss58Polkadot} /></span> })
-                if (observedEvm) rows.push({ dt: 'EVM (H160)', dd: <span className="mono"><ShortAddr addr={observedEvm} full /> <Copy text={observedEvm} /></span> })
-                if (data.ss58 && data.ss58 !== primaryAddress) rows.push({ dt: 'Hydration (SS58)', dd: <span className="mono"><ShortAddr addr={data.ss58} full /> <Copy text={data.ss58} /></span> })
-                if (data.accountId && data.accountId !== primaryAddress) rows.push({ dt: 'Account ID', dd: <span className="mono"><ShortAddr addr={data.accountId} full /> <Copy text={data.accountId} /></span> })
+                // Above the 720px short-form swap the full string is shown, and a 66-char
+                // account id is wider than the value column until ~830px: the cell breaks
+                // it across lines rather than run past the card (the same wrap-anywhere as
+                // the block and extrinsic hash cells), so the whole value stays readable.
+                if (data.evmAddress && data.ss58Polkadot) rows.push({ dt: 'Polkadot (SS58)', dd: <span className="mono wrap-anywhere"><ShortAddr addr={data.ss58Polkadot} full /> <Copy text={data.ss58Polkadot} /></span> })
+                if (observedEvm) rows.push({ dt: 'EVM (H160)', dd: <span className="mono wrap-anywhere"><ShortAddr addr={observedEvm} full /> <Copy text={observedEvm} /></span> })
+                if (data.ss58 && data.ss58 !== primaryAddress) rows.push({ dt: 'Hydration (SS58)', dd: <span className="mono wrap-anywhere"><ShortAddr addr={data.ss58} full /> <Copy text={data.ss58} /></span> })
+                if (data.accountId && data.accountId !== primaryAddress) rows.push({ dt: 'Account ID', dd: <span className="mono wrap-anywhere"><ShortAddr addr={data.accountId} full /> <Copy text={data.accountId} /></span> })
                 if (!rows.length) return null
                 return (
                   <div className="id-card">
