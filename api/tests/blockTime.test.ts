@@ -9,8 +9,8 @@ vi.mock('../src/services/runtimeConstants.ts', async importOriginal => ({
   ...(await importOriginal<typeof import('../src/services/runtimeConstants.ts')>()),
   runtimeParaBlockMs: vi.fn(() => 2_000),
 }))
-import { paraBlockMsFromConstants } from '../src/services/runtimeConstants.ts'
-import { fusePeriodPinWarning, parseFusePeriodBlocks, shouldLogFusePinWarning } from '../src/services/securityService.ts'
+import { breakerDefaultsFromJson, paraBlockMsFromConstants, rationalFromJson } from '../src/services/runtimeConstants.ts'
+import { fusePeriodFromBlockTime, fusePeriodWarning, shouldLogStandingWarning } from '../src/services/securityService.ts'
 import { gigaUnbondingBlocks, parseGigaUnbondingBlocks } from '../src/services/lockBreakdownService.ts'
 
 // Hydration's block time is ~6s today and 2s is planned. Everything derived
@@ -169,90 +169,105 @@ describe('relay block time', () => {
   })
 })
 
-// ── the deposit fuse's period pin ───────────────────────────────────────────
-// pallet_circuit_breaker's `Period = DAYS` is derived from MILLISECS_PER_BLOCK
-// and is NOT a metadata constant (verified against the live runtime: the pallet
-// publishes only its three default limit rationals), so it is pinned in code
-// and re-pinned by hand at the migration. The tripwire is what makes a stale
-// pin loud instead of silently flipping live fuses to `expired`.
-describe('parseFusePeriodBlocks', () => {
-  it('defaults to one day of 6s blocks', () => {
-    expect(parseFusePeriodBlocks(undefined)).toBe(14_400)
-    expect(parseFusePeriodBlocks('')).toBe(14_400)
-    expect(parseFusePeriodBlocks('   ')).toBe(14_400)
+// ── the circuit breaker's per-block defaults ────────────────────────────────
+// Metadata constants that the 2s runtime cut to a third: a per-block cap is a
+// per-6s cap only while a block is 6s. These pin the decode of what polkadot-js
+// hands back, so a pinned 6s-era copy can never be read as the runtime's.
+describe('rationalFromJson', () => {
+  it('reads a (u32, u32) pair', () => {
+    expect(rationalFromJson([1670, 10000])).toEqual([1670, 10000])
+    expect(rationalFromJson([500, 10000])).toEqual([500, 10000])
   })
-
-  it('takes the migration-day override', () => {
-    expect(parseFusePeriodBlocks('43200')).toBe(43_200)
-    expect(parseFusePeriodBlocks(' 43200 ')).toBe(43_200)
-  })
-
-  it('keeps the default rather than adopting a nonsense override', () => {
-    for (const bad of ['0', '-1', 'DAYS', '43_200', '1.5']) {
-      expect(parseFusePeriodBlocks(bad)).toBe(14_400)
+  it('refuses anything the pallet could not hold', () => {
+    for (const bad of [null, undefined, [], [1670], [1670, 0], [-1, 10000], [1.5, 10000], ['1670', 'x'], { num: 1, den: 2 }]) {
+      expect(rationalFromJson(bad)).toBeNull()
     }
   })
 })
 
+describe('breakerDefaultsFromJson', () => {
+  it('reads the spec-440 defaults', () => {
+    expect(breakerDefaultsFromJson([1670, 10000], [167, 10000], [167, 10000]))
+      .toEqual({ trade: [1670, 10000], add: [167, 10000], remove: [167, 10000] })
+  })
+  it('reads the 6s-era defaults the same way', () => {
+    expect(breakerDefaultsFromJson([5000, 10000], [500, 10000], [500, 10000]))
+      .toEqual({ trade: [5000, 10000], add: [500, 10000], remove: [500, 10000] })
+  })
+  it('keeps a `None` liquidity default as disabled, not as unreadable', () => {
+    expect(breakerDefaultsFromJson([1670, 10000], null, [167, 10000]))
+      .toEqual({ trade: [1670, 10000], add: null, remove: [167, 10000] })
+  })
+  it('refuses the whole set when any part is not a limit', () => {
+    expect(breakerDefaultsFromJson(null, [167, 10000], [167, 10000])).toBeNull()
+    expect(breakerDefaultsFromJson([1670, 10000], [167, 0], [167, 10000])).toBeNull()
+    expect(breakerDefaultsFromJson([1670, 10000], [167, 10000], 'x')).toBeNull()
+  })
+})
+
+// ── the deposit fuse's period ───────────────────────────────────────────────
+// pallet_circuit_breaker's `Period = DAYS` is derived from MILLISECS_PER_BLOCK
+// and is NOT a metadata constant (verified against the live runtime: the pallet
+// publishes only its three default limit rationals), so it is derived from the
+// resolved block time and follows a runtime upgrade by itself. The env pin it
+// replaced sat at 14 400 for ~1.27M blocks of the 2s runtime.
 const resolved = (nominalMs: number, source: 'metadata' | 'measured' | 'held', measuredMs: number | null): ResolvedBlockTime =>
   ({ nominalMs, source, measuredMs })
 
-describe('fusePeriodPinWarning', () => {
-  it('is silent while the pin matches the runtime', () => {
-    // Today: pin 14 400, chain measured at 4.8-5.8s/block against a 6s slot.
-    for (const measured of [4_806, 4_970, 5_588, 5_810, 6_000]) {
-      expect(fusePeriodPinWarning(14_400, resolved(6_000, 'measured', measured))).toBeNull()
+describe('fusePeriodFromBlockTime', () => {
+  it('is one day of blocks at the runtime slot time', () => {
+    expect(fusePeriodFromBlockTime(resolved(6_000, 'metadata', null))).toEqual({ blocks: 14_400, source: 'metadata' })
+    expect(fusePeriodFromBlockTime(resolved(2_000, 'metadata', 2_140))).toEqual({ blocks: 43_200, source: 'metadata' })
+  })
+  it('follows an inferred slot time when the node is unreachable', () => {
+    expect(fusePeriodFromBlockTime(resolved(2_000, 'measured', 2_140))).toEqual({ blocks: 43_200, source: 'measured' })
+  })
+  it('carries a held resolution as held, so the caller can say the verdicts are unverified', () => {
+    expect(fusePeriodFromBlockTime(resolved(6_000, 'held', null))).toEqual({ blocks: 14_400, source: 'held' })
+  })
+  it('does not depend on the measured pace, only on the nominal', () => {
+    // Elastic scaling runs ~7% ahead of nominal; the runtime still means 43 200.
+    for (const measured of [1_850, 2_000, 2_140, 2_727]) {
+      expect(fusePeriodFromBlockTime(resolved(2_000, 'metadata', measured)).blocks).toBe(43_200)
     }
-    // And silent on the authoritative source, which carries no measurement.
-    expect(fusePeriodPinWarning(14_400, resolved(6_000, 'metadata', null))).toBeNull()
+  })
+})
+
+describe('fusePeriodWarning', () => {
+  it('is silent on an established block time', () => {
+    expect(fusePeriodWarning(resolved(2_000, 'metadata', null))).toBeNull()
+    expect(fusePeriodWarning(resolved(2_000, 'metadata', 2_140))).toBeNull()
+    expect(fusePeriodWarning(resolved(2_000, 'measured', 2_140))).toBeNull()
   })
 
-  it('trips loudly when the 2s runtime redefines DAYS', () => {
-    const warning = fusePeriodPinWarning(14_400, resolved(2_000, 'metadata', 1_980))
-    expect(warning).toContain('43200')
-    expect(warning).toContain('SECURITY_FUSE_PERIOD_BLOCKS')
-    expect(warning).toContain('STALE')
-    expect(warning).toContain('runtime metadata')
-  })
-
-  it('goes silent again once the pin is moved', () => {
-    expect(fusePeriodPinWarning(43_200, resolved(2_000, 'metadata', null))).toBeNull()
-    expect(fusePeriodPinWarning(43_200, resolved(2_000, 'measured', 2_100))).toBeNull()
-  })
-
-  it('trips on a pin that was moved too early', () => {
-    expect(fusePeriodPinWarning(43_200, resolved(6_000, 'measured', 5_588))).toContain('14400')
-  })
-
-  // The whole point of the null-vs-number distinction: "I checked and it
-  // matches" and "I could not check" must not read the same in a log.
-  it('says UNVERIFIED rather than nothing when the chain could not be consulted', () => {
-    const warning = fusePeriodPinWarning(14_400, resolved(6_000, 'held', null))
+  // "I checked and it holds" and "I could not check" must not read the same.
+  it('says UNVERIFIED when the chain could not be consulted', () => {
+    const warning = fusePeriodWarning(resolved(6_000, 'held', null))
     expect(warning).toContain('UNVERIFIED')
-    expect(warning).not.toContain('STALE')
-    // ...and it does not claim the pin is wrong, because it does not know.
-    expect(warning).toContain('could not be checked')
+    expect(warning).toContain('14400 blocks')
+    expect(warning).toContain('could not be measured')
   })
 
-  it('surfaces a stall that held the resolution, even though the pin matches', () => {
-    const warning = fusePeriodPinWarning(14_400, resolved(6_000, 'held', 10_454))
-    expect(warning).toContain('still matches')
+  it('surfaces a stall that held the resolution', () => {
+    const warning = fusePeriodWarning(resolved(2_000, 'held', 10_454))
+    expect(warning).toContain('held at 43200 blocks')
     expect(warning).toContain('10454ms/block')
+    expect(warning).not.toContain('UNVERIFIED')
   })
 })
 
 // The check runs on every 60s security refresh, but the condition it reports is
 // a standing one, so the log is rate limited.
-describe('shouldLogFusePinWarning', () => {
+describe('shouldLogStandingWarning', () => {
   it('always logs the first occurrence', () => {
-    expect(shouldLogFusePinWarning(1_000_000, 0)).toBe(true)
+    expect(shouldLogStandingWarning(1_000_000, 0)).toBe(true)
   })
 
   it('stays quiet for an hour and then repeats', () => {
     const at = 1_000_000_000
-    expect(shouldLogFusePinWarning(at + 60_000, at)).toBe(false)
-    expect(shouldLogFusePinWarning(at + 59 * 60_000, at)).toBe(false)
-    expect(shouldLogFusePinWarning(at + 3_600_000, at)).toBe(true)
+    expect(shouldLogStandingWarning(at + 60_000, at)).toBe(false)
+    expect(shouldLogStandingWarning(at + 59 * 60_000, at)).toBe(false)
+    expect(shouldLogStandingWarning(at + 3_600_000, at)).toBe(true)
   })
 })
 
@@ -334,8 +349,8 @@ describe('decideParaBlockTime', () => {
     const d = decideParaBlockTime(2_000, 5_588, 6_000)
     expect(d.nominalMs).toBe(2_000)
     expect(d.source).toBe('metadata')
-    // ...and says so, because every hand-pinned block count now needs re-pinning.
-    expect(d.warning).toContain('SECURITY_FUSE_PERIOD_BLOCKS')
+    // ...and says so, because every block count derived from it is about to move.
+    expect(d.warning).toContain('deposit-fuse period')
   })
 
   it('is quiet when metadata confirms what was already held', () => {

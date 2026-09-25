@@ -38,9 +38,9 @@ function saidInUnits(mins: number): string {
 // block times answer two different questions (api/src/services/blockTime.ts):
 //
 //   - A runtime CONSTANT — the fuse period, a scheduled lockdown span — is
-//     derived from the runtime's slot time (`DAYS` = 14 400 blocks at 6s), so it
-//     is said at the NOMINAL rate (`stats.nominalBlockSec`). At the measured
-//     5.7s the pallet's 24h day would read 22.8h, which is not a number the
+//     derived from the runtime's slot time (`DAYS` = 43 200 blocks at 2s), so it
+//     is said at the NOMINAL rate (`stats.nominalBlockSec`). At a measured
+//     2.2s the pallet's 24h day would read 26.4h, which is not a number the
 //     runtime has ever meant.
 //   - A LIVE delta — blocks between the head and an unlock — plays out at the
 //     pace the chain is actually producing, so it is said at the MEASURED rate

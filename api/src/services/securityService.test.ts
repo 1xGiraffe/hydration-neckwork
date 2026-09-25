@@ -143,17 +143,19 @@ describe('assetIdFromBlakeKey', () => {
 describe('classifyFuse', () => {
   const limit = 1_000n
   const head = 100_000
+  // `Period = DAYS` on the 6s runtime; the 2s runtime's 43 200 is pinned below.
+  const period = 14_400
   it('reports a live lockdown and zero headroom', () => {
-    const v = classifyFuse(limit, { kind: 'locked', untilBlock: head + 5_000 }, 10_000n, head)
+    const v = classifyFuse(limit, { kind: 'locked', untilBlock: head + 5_000 }, 10_000n, head, period)
     expect(v).toMatchObject({ status: 'locked', headroomRaw: 0n, usagePct: 100, untilBlock: head + 5_000 })
   })
   it('treats an elapsed lockdown as idle, because the next mint re-baselines it', () => {
-    const v = classifyFuse(limit, { kind: 'locked', untilBlock: head - 1 }, 10_000n, head)
+    const v = classifyFuse(limit, { kind: 'locked', untilBlock: head - 1 }, 10_000n, head, period)
     expect(v).toMatchObject({ status: 'expired', usedRaw: 0n, headroomRaw: limit, usagePct: 0 })
   })
   it('measures issuance against the period baseline inside the window', () => {
     const state: LockdownState = { kind: 'unlocked', periodStartBlock: head - 100, baselineRaw: 5_000n }
-    const v = classifyFuse(limit, state, 5_250n, head)
+    const v = classifyFuse(limit, state, 5_250n, head, period)
     expect(v).toMatchObject({ status: 'active', usedRaw: 250n, headroomRaw: 750n, usagePct: 25 })
     expect(v.periodEndBlock).toBe(head - 100 + 14_400)
   })
@@ -162,35 +164,45 @@ describe('classifyFuse', () => {
   // so a net burn simply leaves the full allowance.
   it('saturates a net burn to zero used, never to extra headroom', () => {
     const state: LockdownState = { kind: 'unlocked', periodStartBlock: head - 100, baselineRaw: 5_000n }
-    const v = classifyFuse(limit, state, 4_000n, head)
+    const v = classifyFuse(limit, state, 4_000n, head, period)
     expect(v).toMatchObject({ usedRaw: 0n, headroomRaw: limit, usagePct: 0 })
   })
   it('caps usage at the limit when issuance has already overshot it', () => {
     const state: LockdownState = { kind: 'unlocked', periodStartBlock: head - 100, baselineRaw: 5_000n }
-    const v = classifyFuse(limit, state, 9_000n, head)
+    const v = classifyFuse(limit, state, 9_000n, head, period)
     expect(v).toMatchObject({ usedRaw: 4_000n, headroomRaw: 0n, usagePct: 100 })
   })
   it('reports an elapsed period as idle', () => {
     const state: LockdownState = { kind: 'unlocked', periodStartBlock: head - 14_400, baselineRaw: 5_000n }
-    expect(classifyFuse(limit, state, 9_000n, head).status).toBe('expired')
+    expect(classifyFuse(limit, state, 9_000n, head, period).status).toBe('expired')
+  })
+  // SKY at head 15,034,337 on the 2s runtime: its period started at block
+  // 15,012,343. The 6s-era pin (14 400) ended it at 15,026,743 and reported
+  // `expired`; the runtime's real `DAYS` (43 200) ends it at 15,055,543, so the
+  // fuse is live and its used/headroom are measured, not reset.
+  it('keeps a period open for the runtime day it was actually given', () => {
+    const head2s = 15_034_337
+    const state: LockdownState = { kind: 'unlocked', periodStartBlock: 15_012_343, baselineRaw: 5_000n }
+    expect(classifyFuse(limit, state, 5_250n, head2s, 14_400)).toMatchObject({ status: 'expired', usedRaw: 0n, periodEndBlock: 15_026_743 })
+    expect(classifyFuse(limit, state, 5_250n, head2s, 43_200)).toMatchObject({ status: 'active', usedRaw: 250n, headroomRaw: 750n, periodEndBlock: 15_055_543 })
   })
   it('reports an asset with no lockdown row as unarmed with the full allowance', () => {
-    expect(classifyFuse(limit, undefined, undefined, head)).toMatchObject({ status: 'unarmed', headroomRaw: limit })
+    expect(classifyFuse(limit, undefined, undefined, head, period)).toMatchObject({ status: 'unarmed', headroomRaw: limit })
   })
   it('reads a zero limit as frozen, whatever the period says', () => {
     // `Some(0)` is not "no limit": the fuse arms with no headroom, so the first
     // deposit of any size is reserved and the asset locked down.
     for (const state of [undefined, { kind: 'locked', untilBlock: head - 1 }, { kind: 'unlocked', periodStartBlock: head - 100, baselineRaw: 0n }] as (LockdownState | undefined)[]) {
-      expect(classifyFuse(0n, state, 0n, head)).toMatchObject({ status: 'frozen', usedRaw: 0n, headroomRaw: 0n, usagePct: 100 })
+      expect(classifyFuse(0n, state, 0n, head, period)).toMatchObject({ status: 'frozen', usedRaw: 0n, headroomRaw: 0n, usagePct: 100 })
     }
   })
   it('still names a live lockdown on a frozen asset, so its unlock block stays readable', () => {
-    expect(classifyFuse(0n, { kind: 'locked', untilBlock: head + 5_000 }, 0n, head))
+    expect(classifyFuse(0n, { kind: 'locked', untilBlock: head + 5_000 }, 0n, head, period))
       .toMatchObject({ status: 'locked', untilBlock: head + 5_000 })
   })
   it('holds back a usage figure when issuance could not be read', () => {
     const state: LockdownState = { kind: 'unlocked', periodStartBlock: head - 100, baselineRaw: 5_000n }
-    expect(classifyFuse(limit, state, undefined, head)).toMatchObject({ status: 'active', usedRaw: 0n, usagePct: 0 })
+    expect(classifyFuse(limit, state, undefined, head, period)).toMatchObject({ status: 'active', usedRaw: 0n, usagePct: 0 })
   })
 })
 

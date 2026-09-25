@@ -8,7 +8,8 @@ import { HUB_ASSET_ID } from './lpMath.ts'
 import { substrateStorageBatch, substrateAllKeys, SUBSTRATE_RPC_URL } from './substrateRpc.ts'
 import { cachedSwr } from './cache.ts'
 import { RareEventLedger, type RareEventRow } from './rareEventLedger.ts'
-import { nominalBlockMsMismatch, resolveParaBlockTime, type ResolvedBlockTime } from './blockTime.ts'
+import { MS_PER_DAY, nominalBlockMsMismatch, resolveParaBlockTime, type BlockTimeSource, type ResolvedBlockTime } from './blockTime.ts'
+import { runtimeCircuitBreakerDefaults } from './runtimeConstants.ts'
 import { accountRef, ensurePrices, mmMarkets, parachainName, type AccountRef, type AssetRef, type PriceInfo } from './explorerService.ts'
 import { usdOfRaw } from './assetValue.ts'
 import { assetDescriptor } from './explorerAssets.ts'
@@ -28,12 +29,14 @@ import { parseNttLimitUpdate, parseNttPauseEvent, parseNttQueuedTransfer, TOPIC 
 //      snapshot below.
 //   2. Per-asset deposit fuses — every orml-tokens mint is measured against the
 //      asset's registry `xcm_rate_limit` over a one-day period, which the
-//      runtime expresses as a block count (14 400 blocks at today's 6s slot
-//      time; see FUSE_PERIOD_BLOCKS). The limit is reconstructed from indexed
-//      AssetRegistry events; the baseline and the lockdown state are chain state.
+//      runtime expresses as a block count derived from its slot time (43 200
+//      blocks at 2s; see fusePeriodFromBlockTime). The limit is reconstructed
+//      from indexed AssetRegistry events; the baseline and the lockdown state
+//      are chain state.
 //   3. Omnipool per-block trade/liquidity limits — a fraction of the asset's
 //      reserve at the block's first guarded touch. The fractions are chain state
-//      (defaults when unset); the reserves come from the block snapshot.
+//      (the runtime's metadata defaults when unset); the reserves come from the
+//      block snapshot.
 //   4. Paused calls — TransactionPause emits an event on every state change, so
 //      the ledger of pauses is exactly reconstructible from raw. Chain state is
 //      still read as the authority, and the two are expected to agree.
@@ -47,108 +50,99 @@ let client: ClickHouseClient
 export function initSecurityService(c: ClickHouseClient): void { client = c }
 
 // ────────────────────────────────────────────────────────────────────────────
-// MIGRATION-DAY ACTION — 2s block times
+// The deposit fuse's period
 //
-// The deposit fuse's period is `pallet_circuit_breaker::Config::Period = DAYS`
-// (runtime/hydradx/src/assets.rs). `DAYS` is derived from MILLISECS_PER_BLOCK,
-// so the 2s runtime upgrade silently REDEFINES it from 14 400 to 43 200 blocks
-// with no storage or event change to notice.
+// `pallet_circuit_breaker::Config::Period = DAYS` (runtime/hydradx/src/assets.rs),
+// and `DAYS` is `86 400 000 / MILLISECS_PER_BLOCK`: one nominal day of blocks,
+// 14 400 on the 6s runtime and 43 200 since the 2s one (spec 440, block
+// 13,762,621 — the same upgrade restated treasury.spendPeriod 14 400 → 43 200).
+// The pallet publishes no `Period` constant — verified on specs 435 and 443,
+// `api.consts.circuitBreaker` holds only the three default limit rationals —
+// so the period is DERIVED from the runtime's nominal block time, which
+// runtimeConstants.ts reads out of two metadata constants that do track it
+// (system.blockHashCount, gigaHdx.cooldownPeriod) and blockTime.ts infers
+// from the indexed pace when the node is unreachable. A runtime upgrade is
+// followed within one resolution cache window (5 min) with no operator action.
 //
-// It is the ONE block-count constant this service cannot read: verified against
-// the live runtime (spec 435), the CircuitBreaker pallet publishes only
-// defaultMaxNetTradeVolumeLimitPerBlock, defaultMaxAddLiquidityLimitPerBlock and
-// defaultMaxRemoveLiquidityLimitPerBlock — `Period` is not a metadata constant,
-// unlike aura.slotDuration and gigaHdx.cooldownPeriod, which runtimeConstants.ts
-// does read. So it is pinned here, and the pin is what has to move.
-//
-// ON THE DAY THE 2s RUNTIME GOES LIVE: set SECURITY_FUSE_PERIOD_BLOCKS=43200
-// (or bump the default below and redeploy). Until the pin moves, every fuse
-// whose period started more than 14 400 blocks ago is reported `expired` while
-// it is still active, and its used/headroom figures read as a fresh period.
-//
-// checkFusePeriodPin() below turns that into a self-detecting tripwire: it runs
-// on every security-state refresh (backgroundRefresh, 60s) and warns — at most
-// hourly — when the runtime's slot time says this pin is wrong, or when it
-// could not be verified at all.
+// This replaced an env pin (SECURITY_FUSE_PERIOD_BLOCKS = 14 400) that nobody
+// moved at the upgrade: for ~1.27M blocks every fuse whose period had started
+// more than 14 400 blocks earlier read `expired` while it was still active,
+// with its used/headroom figures shown as a fresh period.
 // ────────────────────────────────────────────────────────────────────────────
-const DEFAULT_FUSE_PERIOD_BLOCKS = 14_400
-export function parseFusePeriodBlocks(raw: string | undefined): number {
-  const value = raw?.trim()
-  if (!value) return DEFAULT_FUSE_PERIOD_BLOCKS
-  const n = Number(value)
-  if (!Number.isSafeInteger(n) || n <= 0) {
-    console.error(`[security] SECURITY_FUSE_PERIOD_BLOCKS must be a positive integer, received ${JSON.stringify(raw)}; keeping ${DEFAULT_FUSE_PERIOD_BLOCKS}`)
-    return DEFAULT_FUSE_PERIOD_BLOCKS
-  }
-  return n
+export interface FusePeriod {
+  blocks: number
+  source: BlockTimeSource
 }
-const FUSE_PERIOD_BLOCKS = parseFusePeriodBlocks(process.env.SECURITY_FUSE_PERIOD_BLOCKS)
-
-// The pin's tripwire, as a pure function over a resolved block time: `Period =
-// DAYS` means one day's worth of blocks at the runtime's NOMINAL slot time, so
-// the pin is correct exactly when it equals 86 400 000 / MILLISECS_PER_BLOCK.
-// That is an equality, not a tolerance, which is why elastic scaling cannot
-// raise a false alarm — today's chain runs ~7% more blocks per day than the pin
-// and still resolves to the same 6000ms slot.
-//
-// Three outcomes, deliberately distinct:
-//   null                  the pin is verified correct;
-//   "PIN UNVERIFIED"      neither metadata nor a usable measurement was
-//                         available, so nothing is known — NOT the same as
-//                         "matches", and the caller retries next refresh;
-//   "PIN IS STALE"        the runtime's slot time says the pin is wrong.
-export function fusePeriodPinWarning(pinBlocks: number, resolved: ResolvedBlockTime): string | null {
-  if (resolved.source === 'held' && resolved.measuredMs == null) {
-    return `[security] FUSE PERIOD PIN UNVERIFIED: runtime metadata is unavailable and the chain could not be measured, `
-      + `so the pinned ${pinBlocks}-block fuse period could not be checked against the runtime. Retrying on the next refresh.`
-  }
-  const expected = Math.round(86_400_000 / resolved.nominalMs)
-  const origin = resolved.source === 'metadata'
-    ? 'runtime metadata reports a slot time of'
-    : `the chain measures ${Math.round(resolved.measuredMs ?? resolved.nominalMs)}ms/block against a slot time of`
-  if (expected === pinBlocks) {
-    // A held resolution with an out-of-band sample still matches the pin, but
-    // the sample itself is worth surfacing once: it is how a stall looks.
-    const anomaly = resolved.measuredMs == null ? null : nominalBlockMsMismatch(resolved.measuredMs)
-    return resolved.source === 'held' && anomaly
-      ? `[security] fuse period pin ${pinBlocks} still matches the runtime, but ${anomaly}`
-      : null
-  }
-  return `[security] FUSE PERIOD PIN IS STALE: ${origin} ${resolved.nominalMs}ms, `
-    + `so pallet_circuit_breaker's Period = DAYS is now ${expected} blocks, not the pinned ${pinBlocks}. `
-    + `Every deposit fuse verdict is wrong until SECURITY_FUSE_PERIOD_BLOCKS=${expected} is set.`
+export function fusePeriodFromBlockTime(resolved: ResolvedBlockTime): FusePeriod {
+  return { blocks: Math.round(MS_PER_DAY / resolved.nominalMs), source: resolved.source }
 }
 
-// Log at most once an hour: the condition is a standing one (it stays true
-// until an operator re-pins and redeploys), and the check runs every 60s.
-const FUSE_PIN_LOG_INTERVAL_MS = 3_600_000
-let lastFusePinLogAt = 0
-export function shouldLogFusePinWarning(nowMs: number, lastLoggedAt: number): boolean {
-  return lastLoggedAt === 0 || nowMs - lastLoggedAt >= FUSE_PIN_LOG_INTERVAL_MS
+// What an operator should hear about the period, or null while it rests on an
+// established block time. A HELD resolution is the one case that deserves a
+// line: the verdicts are being served on a value nothing could confirm.
+//   measuredMs null   neither metadata nor a usable measurement — the period
+//                     is UNVERIFIED, which is not the same as "matches";
+//   measuredMs set    the sample was out of band (a stall, a burst), so the
+//                     resolution refused to move; the sample is worth seeing.
+export function fusePeriodWarning(resolved: ResolvedBlockTime): string | null {
+  if (resolved.source !== 'held') return null
+  const { blocks } = fusePeriodFromBlockTime(resolved)
+  if (resolved.measuredMs == null) {
+    return `[security] FUSE PERIOD UNVERIFIED: runtime metadata is unavailable and the chain could not be measured, `
+      + `so the deposit-fuse period is held at ${blocks} blocks (${resolved.nominalMs}ms/block) unconfirmed. Retrying on the next refresh.`
+  }
+  const anomaly = nominalBlockMsMismatch(resolved.measuredMs)
+  return anomaly ? `[security] fuse period held at ${blocks} blocks (${resolved.nominalMs}ms/block), but ${anomaly}` : null
 }
+
+// Standing conditions (a held block time, unreadable metadata) are re-checked
+// every 60s refresh and stay true until something outside this process changes,
+// so each is logged at most once an hour.
+const STANDING_WARNING_LOG_INTERVAL_MS = 3_600_000
+export function shouldLogStandingWarning(nowMs: number, lastLoggedAt: number): boolean {
+  return lastLoggedAt === 0 || nowMs - lastLoggedAt >= STANDING_WARNING_LOG_INTERVAL_MS
+}
+let lastFusePeriodLogAt = 0
 
 // Runs on every security-state refresh. Best effort: it must never be able to
-// fail the refresh it rides on, and a fuse verdict is still served (with the
-// pin as it stands) either way.
-async function checkFusePeriodPin(): Promise<void> {
+// fail the refresh it rides on, and a fuse verdict is still served either way.
+async function checkFusePeriod(): Promise<void> {
   try {
-    const warning = fusePeriodPinWarning(FUSE_PERIOD_BLOCKS, await resolveParaBlockTime(client))
+    const warning = fusePeriodWarning(await resolveParaBlockTime(client))
     if (!warning) return
     const now = Date.now()
-    if (!shouldLogFusePinWarning(now, lastFusePinLogAt)) return
-    lastFusePinLogAt = now
+    if (!shouldLogStandingWarning(now, lastFusePeriodLogAt)) return
+    lastFusePeriodLogAt = now
     console.warn(warning)
   } catch (err) {
-    console.warn('[security] fuse period pin check failed', err)
+    console.warn('[security] fuse period check failed', err)
   }
+}
+
+// The Omnipool per-block limits an asset runs when governance has set none, as
+// fractions of its reserve. They ARE metadata constants
+// (runtimeConstants.runtimeCircuitBreakerDefaults), read at every snapshot; the
+// 2s runtime cut all three to a third — (5000, 10000) → (1670, 10000) net
+// trade, (500, 10000) → (167, 10000) each liquidity direction — so the 6s-era
+// pin this replaced overstated every allowance 3×. The pinned values below are
+// the FALLBACK for a snapshot taken while the node's metadata cannot be
+// consulted, and are the spec-440 ones.
+export interface BreakerDefaults { trade: Rational; add: Rational | null; remove: Rational | null }
+const FALLBACK_BREAKER_DEFAULTS: BreakerDefaults = { trade: [1_670, 10_000], add: [167, 10_000], remove: [167, 10_000] }
+let lastDefaultsLogAt = 0
+function breakerDefaults(): BreakerDefaults {
+  const fromRuntime = runtimeCircuitBreakerDefaults()
+  if (fromRuntime) return fromRuntime
+  const now = Date.now()
+  if (shouldLogStandingWarning(now, lastDefaultsLogAt)) {
+    lastDefaultsLogAt = now
+    console.warn('[security] circuit-breaker default limits could not be read from runtime metadata; using the pinned spec-440 fallback (16.7% trade, 1.67% add/remove)')
+  }
+  return FALLBACK_BREAKER_DEFAULTS
 }
 
 // Hydration's reference currency for the global withdraw limit is HDX.
 const HDX_DECIMALS = 12
-// Runtime defaults: (5000, 10000) net trade volume and Some((500, 10000)) for
-// both liquidity directions (runtime/hydradx/src/assets.rs).
-const DEFAULT_TRADE_LIMIT: Rational = [5_000, 10_000]
-const DEFAULT_LIQUIDITY_LIMIT: Rational = [500, 10_000]
 const CIRCUIT_BREAKER_PALLET_INDEX = 65
 
 export type Rational = [number, number]
@@ -265,7 +259,7 @@ export interface FuseVerdict {
   untilBlock: number | null
   periodEndBlock: number | null
 }
-export function classifyFuse(limitRaw: bigint, state: LockdownState | undefined, issuanceRaw: bigint | undefined, headBlock: number): FuseVerdict {
+export function classifyFuse(limitRaw: bigint, state: LockdownState | undefined, issuanceRaw: bigint | undefined, headBlock: number, periodBlocks: number): FuseVerdict {
   if (state?.kind === 'locked' && state.untilBlock > headBlock) {
     return { status: 'locked', usedRaw: limitRaw, headroomRaw: 0n, usagePct: 100, untilBlock: state.untilBlock, periodEndBlock: null }
   }
@@ -280,7 +274,7 @@ export function classifyFuse(limitRaw: bigint, state: LockdownState | undefined,
   if (!state || state.kind === 'locked') {
     return { status: state ? 'expired' : 'unarmed', usedRaw: 0n, headroomRaw: limitRaw, usagePct: 0, untilBlock: null, periodEndBlock: null }
   }
-  const periodEndBlock = state.periodStartBlock + FUSE_PERIOD_BLOCKS
+  const periodEndBlock = state.periodStartBlock + periodBlocks
   if (periodEndBlock <= headBlock) {
     return { status: 'expired', usedRaw: 0n, headroomRaw: limitRaw, usagePct: 0, untilBlock: null, periodEndBlock }
   }
@@ -321,6 +315,10 @@ interface ChainSnapshot {
   tradeLimits: Map<number, Rational>
   addLimits: Map<number, Rational | null>
   removeLimits: Map<number, Rational | null>
+  // The runtime defaults the per-asset maps fall back to, read from metadata
+  // at the same instant, so a limit is never paired with another runtime's
+  // default.
+  defaults: BreakerDefaults
   egressAccounts: string[]
   localCategoryAssets: number[]
   externalCategoryCount: number
@@ -608,6 +606,7 @@ export async function refreshSecurityChainState(): Promise<void> {
       tradeLimits,
       addLimits,
       removeLimits,
+      defaults: breakerDefaults(),
       egressAccounts: egressKeys.map(k => '0x' + k.slice(-64)),
       localCategoryAssets: [...categories.entries()].filter(([, c]) => c === 'local').map(([id]) => id).sort((a, b) => a - b),
       externalCategoryCount: [...categories.values()].filter(c => c === 'external').length,
@@ -619,12 +618,12 @@ export async function refreshSecurityChainState(): Promise<void> {
     // Cached responses are built from the snapshot, so a new snapshot must be
     // publishable immediately rather than after the response TTL.
     snapshotGeneration += 1
-    // Re-verify the one block-count constant this service has to pin. It rides
+    // Re-check the block time the deposit-fuse period is derived from. It rides
     // this refresh rather than a task of its own: the check is a cached read
     // plus arithmetic, and the thing it guards is exactly what this snapshot
     // feeds. A boot-only check would never notice a runtime upgrade on a
     // process that has been up for weeks.
-    await checkFusePeriodPin()
+    await checkFusePeriod()
   })().finally(() => { refreshInFlight = null })
   return refreshInFlight
 }
@@ -800,11 +799,25 @@ export interface SecurityDashboard {
   chainAsOf: string | null
   chainBlock: number | null
   withdraw: WithdrawLimitView
-  fuses: { periodBlocks: number; rows: FuseRow[]; lockedCount: number; frozenCount: number; lockdownTotal: number; releaseTotal: number; lockdowns: LockdownEvent[] }
+  fuses: {
+    periodBlocks: number
+    // Where the block time behind `periodBlocks` came from (blockTime.ts):
+    // 'metadata' and 'measured' are established answers; 'held' means neither
+    // was available and the previous (or starting) value is being kept, so
+    // every verdict below rests on an unverified period until the next refresh.
+    periodSource: BlockTimeSource
+    rows: FuseRow[]
+    lockedCount: number
+    frozenCount: number
+    lockdownTotal: number
+    releaseTotal: number
+    lockdowns: LockdownEvent[]
+  }
   perBlock: {
     defaultTradePct: number
-    defaultAddPct: number
-    defaultRemovePct: number
+    // Null when the runtime's default DISABLES that direction's limit.
+    defaultAddPct: number | null
+    defaultRemovePct: number | null
     rows: PerBlockRow[]
     peakWindowDays: number
   }
@@ -899,6 +912,9 @@ async function buildSecurityDashboard(): Promise<SecurityDashboard> {
   // section renders its assets with no usage rather than a guessed one.
   const registryLimits = snap?.limits ?? await loadRegistryLimits()
   const prices = await ensurePrices()
+  // Cached 5 min in blockTime.ts and a property read on the node's metadata
+  // underneath — nothing here touches the chain per request.
+  const fusePeriod = fusePeriodFromBlockTime(await resolveParaBlockTime(client))
 
   // A lockdown says when it lifts as a block height, which reads as nothing. Turn
   // the ones the chain has already passed into their real timestamps — one bounded
@@ -911,7 +927,7 @@ async function buildSecurityDashboard(): Promise<SecurityDashboard> {
     chainAsOf: snap ? new Date(snap.takenAt).toISOString() : null,
     chainBlock: snap?.headBlock ?? null,
     withdraw: buildWithdrawView(snap, limitEvents),
-    fuses: buildFuses(snap, registryLimits, lockdownRows, releaseTotal, headBlock, prices),
+    fuses: buildFuses(snap, registryLimits, lockdownRows, releaseTotal, headBlock, prices, fusePeriod),
     perBlock: buildPerBlock(snap, pools, prices, peaks),
     trips: buildTrips(tripRows),
     freezes: buildFreezes(snap, pools, pauseEvents, stableTradability, omniTradabilityHistory),
@@ -1566,6 +1582,7 @@ function buildFuses(
   releaseTotal: number,
   headBlock: number,
   prices: Map<number, PriceInfo>,
+  period: FusePeriod,
 ): SecurityDashboard['fuses'] {
   const lockdowns = pairLockdowns(lockdownRows)
   const perAssetLockdowns = new Map<number, number>()
@@ -1575,7 +1592,7 @@ function buildFuses(
   for (const [assetId, limitRaw] of registryLimits) {
     const descriptor = asset(assetId)
     const verdict = snap
-      ? classifyFuse(limitRaw, snap.lockdowns.get(assetId), snap.issuance.get(assetId), headBlock)
+      ? classifyFuse(limitRaw, snap.lockdowns.get(assetId), snap.issuance.get(assetId), headBlock, period.blocks)
       : null
     rows.push({
       asset: descriptor,
@@ -1599,7 +1616,8 @@ function buildFuses(
   rows.sort((a, b) => b.usagePct - a.usagePct || b.lockdownCount - a.lockdownCount || a.asset.symbol.localeCompare(b.asset.symbol))
 
   return {
-    periodBlocks: FUSE_PERIOD_BLOCKS,
+    periodBlocks: period.blocks,
+    periodSource: period.source,
     rows,
     lockedCount: rows.filter(r => r.status === 'locked').length,
     frozenCount: rows.filter(r => r.status === 'frozen').length,
@@ -1723,12 +1741,13 @@ function buildPerBlock(
   peaks: Map<number, PeakRow>,
 ): SecurityDashboard['perBlock'] {
   const rows: PerBlockRow[] = []
+  const defaults = snap?.defaults ?? breakerDefaults()
   for (const [assetId, state] of pools.omnipool) {
     if (assetId === HUB_ASSET_ID) continue
     const descriptor = asset(assetId)
-    const tradeLimit = snap?.tradeLimits.get(assetId) ?? DEFAULT_TRADE_LIMIT
-    const addLimit = snap?.addLimits.has(assetId) ? snap.addLimits.get(assetId)! : DEFAULT_LIQUIDITY_LIMIT
-    const removeLimit = snap?.removeLimits.has(assetId) ? snap.removeLimits.get(assetId)! : DEFAULT_LIQUIDITY_LIMIT
+    const tradeLimit = snap?.tradeLimits.get(assetId) ?? defaults.trade
+    const addLimit = snap?.addLimits.has(assetId) ? snap.addLimits.get(assetId)! : defaults.add
+    const removeLimit = snap?.removeLimits.has(assetId) ? snap.removeLimits.get(assetId)! : defaults.remove
     const tradeAllowance = allowanceFor(state.reserve, tradeLimit) ?? 0n
     const peak = peaks.get(assetId)
     const peakNet = peak ? BigInt(peak.peak_net) : null
@@ -1752,9 +1771,9 @@ function buildPerBlock(
   }
   rows.sort((a, b) => (b.reserveUsd ?? -1) - (a.reserveUsd ?? -1))
   return {
-    defaultTradePct: rationalPct(DEFAULT_TRADE_LIMIT),
-    defaultAddPct: rationalPct(DEFAULT_LIQUIDITY_LIMIT),
-    defaultRemovePct: rationalPct(DEFAULT_LIQUIDITY_LIMIT),
+    defaultTradePct: rationalPct(defaults.trade),
+    defaultAddPct: defaults.add ? rationalPct(defaults.add) : null,
+    defaultRemovePct: defaults.remove ? rationalPct(defaults.remove) : null,
     rows,
     peakWindowDays: PEAK_WINDOW_DAYS,
   }
@@ -1964,6 +1983,7 @@ function buildLiquidityMoves(
   pools: Awaited<ReturnType<typeof loadCurrentPools>>,
 ): LiquidityMove[] {
   const out: LiquidityMove[] = []
+  const defaults = snap?.defaults ?? breakerDefaults()
   for (const r of rows) {
     const assetId = Number(r.asset_id)
     if (assetId === HUB_ASSET_ID) continue
@@ -1973,7 +1993,7 @@ function buildLiquidityMoves(
     const kind: LiquidityMove['kind'] = r.event_name === 'Omnipool.LiquidityRemoved' ? 'remove' : 'add'
     const state = pools.omnipool.get(assetId)
     const overrides = kind === 'add' ? snap?.addLimits : snap?.removeLimits
-    const limit = overrides?.has(assetId) ? overrides.get(assetId)! : DEFAULT_LIQUIDITY_LIMIT
+    const limit = overrides?.has(assetId) ? overrides.get(assetId)! : defaults[kind]
     const allowance = state ? allowanceFor(state.reserve, limit) : null
     out.push({
       asset: asset(assetId), kind,
