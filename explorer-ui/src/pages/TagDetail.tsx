@@ -12,7 +12,12 @@ import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
-import { moneyMarketDebtUsd, profileTabs, ProfileStats, PortfolioChart, MoneyMarketPositions, MoneyMarketByAccount, ActiveDcaTable, LimitOrdersTable, LiquidityPositionsTable } from '../components/AccountSections'
+import { moneyMarketDebtUsd, profileTabs, resolveProfileView, ProfileStats, PortfolioChart } from '../components/AccountSections'
+import { OrdersTab } from '../components/positions/OrdersTab'
+import { LiquidityTab } from '../components/positions/LiquidityTab'
+import { BorrowTab } from '../components/positions/BorrowTab'
+import { tagBorrowAreas } from '../components/positions/borrowAreas'
+import { usePositionsPresence } from '../hooks/usePositions'
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { NotifyButton } from '../components/NotifyButton'
 import { listForTag, looksLikeUserTagId, tagMapStatus, useTagMapVersion } from '../userTags'
@@ -118,6 +123,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
   // first-level views now, so those URLs land on the promoted tab.
   const view = rawView === 'activity' && (legacyAtab === 'extrinsics' || legacyAtab === 'events') ? legacyAtab : rawView
   const activityCounts = useTagActivityCounts(tagId)
+  const presence = usePositionsPresence({ kind: 'tag', tagId }, !!data)
 
   return (
     <div className="wrap">
@@ -138,8 +144,9 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
           // Zoom refinement needs the base points' block heights, aligned 1:1.
           const tagHistoryBlocks = data.portfolioBlocks && data.portfolioBlocks.length === portfolioSeries.length ? data.portfolioBlocks : undefined
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(balances.length, mmList, activeDcas.length + limitOrders.length, liquidityPositions.length, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
-          const activeView = tabs.some(t => t.key === view) ? view : 'overview'
+          const borrowAreas = tagBorrowAreas(data.moneyMarketByAccount, mmList)
+          const tabs = profileTabs(balances.length, { orders: activeDcas.length + limitOrders.length, liquidity: liquidityPositions.length, borrow: borrowAreas.reduce((n, a) => n + a.markets.length, 0), presence: presence.data, presenceLoading: presence.isLoading, requestedView: view }, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
+          const activeView = resolveProfileView(view, tabs)
           return (
             <>
               {/* Same placement as the account page's own bell — above the
@@ -210,18 +217,18 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
                 refineWindow={(fromBlock, toBlock) => api.tagHistoryWindow(tagId, fromBlock, toBlock)} />
               )}
 
-              {activeView === 'positions' && (<>
-              {/* Per member, not summed: the header stat carries the tag-wide
-                  figure, while a position here is one account's — which is the
-                  only form in which it can be simulated or acted on. Falls back
-                  to the aggregate only if the per-account split is absent. */}
-              {data.moneyMarketByAccount?.length
-                ? <MoneyMarketByAccount accounts={data.moneyMarketByAccount} />
-                : <MoneyMarketPositions markets={mmList} />}
-              {activeDcas.length > 0 && <ActiveDcaTable dcas={activeDcas} headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />}
-              {limitOrders.length > 0 && <LimitOrdersTable orders={limitOrders} now={now} />}
-              {liquidityPositions.length > 0 && <LiquidityPositionsTable positions={liquidityPositions} />}
-              </>)}
+              {activeView === 'orders' && (
+                <OrdersTab scope={{ kind: 'tag', tagId }} activeDcas={activeDcas} openLimitOrders={limitOrders} showOwner
+                  headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />
+              )}
+
+              {activeView === 'liquidity' && (
+                <LiquidityTab scope={{ kind: 'tag', tagId }} positions={liquidityPositions} farmRewards={data.farmRewards ?? null} showOwner />
+              )}
+
+              {/* Per member, not summed: liquidation happens per account and
+                  DefiSim simulates one account at a time. */}
+              {activeView === 'borrow' && <BorrowTab areas={borrowAreas} showOwner />}
 
               {activeView === 'activity' && <ScopedActivity scope={{ kind: 'tag', tagId }} tab="activity" />}
 

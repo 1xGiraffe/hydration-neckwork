@@ -1840,6 +1840,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .bal-xaxis { display: flex; justify-content: space-between; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); margin-top: 4px; }
 .bal-legend { display: flex; gap: 16px; align-items: center; margin-top: 14px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); flex-wrap: wrap; }
 .bal-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+.bal-legend i.lg-dash { width: 12px; height: 0; border-radius: 0; border-top: 2px dashed currentColor; opacity: 0.8; }
 
 
 .perf .pk { font-family: 'GeistMono'; font-size: 10px; letter-spacing: 0.1em; color: var(--text-low); text-transform: uppercase; }
@@ -3865,3 +3866,213 @@ a.rev-pill-label:hover { color: var(--accent); }
    factors from reading as one position. */
 .mm-account { margin-bottom: 18px; }
 .mm-account-head { display: flex; align-items: center; gap: 8px; }
+
+/* ===== Orders tab (components/positions/OrdersTab.tsx) ===== */
+/* The working-orders line: label over value, cells in one row that wraps on a
+   phone. The ribbon's type (mono label, mono value) at table-cell scale, so it
+   reads as a caption of the tables beneath rather than a second page header. */
+.ord-kpis { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 26px; margin: 24px 0 0; padding: 12px 16px; border: 1px solid var(--separator); border-radius: 14px; background: var(--bg-elev); }
+.ord-kpi { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ord-kpi .k { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); white-space: nowrap; }
+.ord-kpi .v { font-family: 'GeistMono'; font-size: 14px; font-weight: 600; color: var(--text-high); white-space: nowrap; }
+.ord-kpi .u { font-weight: 400; font-size: 11px; color: var(--text-low); }
+.ord-kpi-sep { width: 1px; align-self: stretch; background: var(--separator); }
+.ord-none { margin: 24px 0 0; color: var(--text-low); font-size: 13px; }
+@media (max-width: 620px) {
+  .ord-kpis { gap: 10px 18px; padding: 10px 14px; }
+  .ord-kpi-sep { display: none; }
+}
+/* The kind filter sits on the section title's line and keeps its own width —
+   three short words do not need the activity bar's full-width track. */
+.sec-title-row .ord-seg { flex: 0 0 auto; }
+/* Kind word under the pair: the shared .dca-kind pill, tinted per kind in the
+   activity palette — a pallet DCA in the trade family's DCA shade, the two
+   intent kinds in the intent violets. */
+.ord-id { display: flex; align-items: center; gap: 6px; }
+.dca-kind.ord-kind-dca { color: var(--cat-trade-dca); background: color-mix(in srgb, var(--cat-trade-dca) 14%, transparent); }
+.dca-kind.ord-kind-dca-intent { color: var(--cat-intent-dca); background: color-mix(in srgb, var(--cat-intent-dca) 14%, transparent); }
+.ord-state { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap; }
+.ord-tbl .asset-flow { flex-wrap: nowrap; white-space: nowrap; }
+.ord-tbl td[data-label="Avg price"], .ord-tbl td[data-label="Trades"], .ord-tbl td[data-label="Sold"], .ord-tbl td[data-label="Received"] { white-space: nowrap; }
+.ord-reason { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 720px) {
+  .ord-id { justify-content: flex-end; }
+  .ord-reason { max-width: none; }
+}
+
+/* ===== Liquidity tab (components/positions/LiquidityTab.tsx) ===== */
+.lpt-fold { display: block; margin: 8px 0 0 auto; font-size: 12px; }
+/* The summary ribbon: the Orders tab's ribbon type (mono label over mono value)
+   on an even five-column grid, each figure with an optional caption line that
+   names what it leaves out (unpriced, unpayable, APR coverage). */
+.lpt-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px 22px; margin: 24px 0 0; padding: 12px 16px; border: 1px solid var(--separator); border-radius: 14px; background: var(--bg-elev); }
+.lpt-kpi { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.lpt-kpi .lab { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); white-space: nowrap; }
+.lpt-kpi .amt { font-family: 'GeistMono'; font-size: 15px; font-weight: 600; color: var(--text-high); white-space: nowrap; }
+.lpt-kpi .hint { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 720px) { .lpt-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 10px 14px; } }
+/* Section header with the Expand/Collapse all control on its line. */
+.lpt-head { justify-content: space-between; }
+.lpt-head .lpt-title { margin: 0; }
+.lpt-sub-title { margin-left: 10px; font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-low); }
+.lpt-toggle-all { font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); padding: 4px 10px; border: 1px solid var(--separator); border-radius: 9999px; }
+.lpt-toggle-all:hover { color: var(--text-high); border-color: var(--text-low); }
+.lpt-toggle-all:focus-visible, .lpt-tbl .exp-btn:focus-visible { outline: 2px solid var(--sky-deep); outline-offset: 2px; }
+/* Pool row: caret, icon, name over its venue badges. */
+.lpt-pool-cell { gap: 10px; }
+.lpt-pool-cell .exp-btn { flex: none; }
+.lpt-pool-link { color: var(--text-high); text-decoration: none; }
+.lpt-pool-link:hover { text-decoration: underline; }
+.lpt-badges { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.lpt-badges .badge, .lpt-pos-name .badge, .lpt-earned .badge { padding: 1px 7px; font-size: 9.5px; }
+/* Position sub-rows sit under their pool, indented past the caret and a shade
+   deeper, so the aggregate and its parts read as one block. */
+.lpt-tbl tr.lpt-pos > td { background: color-mix(in srgb, var(--bg) 55%, transparent); padding-top: 8px; padding-bottom: 8px; }
+.lpt-pos-name { display: flex; align-items: center; gap: 8px; padding-left: 44px; }
+.lpt-leg2 { font-size: 11px; font-weight: 400; color: var(--text-low); }
+.lpt-note { font-size: 11px; color: var(--text-low); }
+.lpt-warn { font-size: 12px; margin: -4px 0 10px; }
+.lpt-empty { padding: 18px 16px; font-size: 13px; }
+.lpt-subsec { margin-top: 20px; }
+.lpt-foot { font-size: 11px; margin-top: 8px; }
+.lpt-active { color: var(--green); font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+.lpt-tbl tr.lpt-total > td { border-top: 1px solid var(--border); font-weight: 600; color: var(--text-high); }
+.lpt-total-lab { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-medium); }
+@media (max-width: 720px) {
+  /* The pool cell is the card's title: left-aligned, no floated label. */
+  .lpt-tbl tbody td[data-label="Pool"] { text-align: left; }
+  .lpt-tbl tbody td[data-label="Pool"] .asset-row { justify-content: flex-start; }
+  .lpt-tbl tbody td[data-label="Pool"]::before { display: none; }
+  .lpt-tbl tbody td.cell-empty { display: none; }
+  .lpt-tbl tbody td[data-label="Position"] { text-align: left; }
+  .lpt-tbl tbody td[data-label="Position"]::before { display: none; }
+  .lpt-pos-name { padding-left: 0; }
+  .lpt-tbl tr.lpt-pos { margin-left: 14px; border-left: 2px solid var(--separator); }
+  .lpt-head .lpt-sub-title { display: none; }
+  /* Position history cards: pool and last value on the title line, venue and
+     handle under them, then the two dates — four lines instead of six. */
+  .lpt-hist tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+  .lpt-hist tbody td { grid-column: 1 / -1; }
+  .lpt-hist tbody td[colspan] { grid-column: 1 / -1; }
+  .lpt-hist tbody td[data-label="Pool"] { grid-column: 1; grid-row: 1; }
+  .lpt-hist tbody td[data-label="Last value"] { grid-column: 2; grid-row: 1; padding-top: 9px; font-weight: 600; color: var(--text-high); }
+  .lpt-hist tbody td[data-label="Venue"] { grid-column: 1; grid-row: 2; text-align: left; }
+  .lpt-hist tbody td[data-label="Position"] { grid-column: 2; grid-row: 2; text-align: right; }
+  .lpt-hist tbody td[data-label="Pool"]::before, .lpt-hist tbody td[data-label="Last value"]::before,
+  .lpt-hist tbody td[data-label="Venue"]::before, .lpt-hist tbody td[data-label="Position"]::before { display: none; }
+}
+
+/* ===== Borrow tab (components/positions/BorrowTab.tsx) ===== */
+/* One card per (account × market). The header carries who, which market and the
+   health factor; the body is a dense strip: risk bar, KPI row, reserves table,
+   then the collapsible history. Series hues: supply side / debt side / incentives,
+   one step per theme (CVD-checked against each surface). */
+.bw-card { --bw-sup: #3D8FE8; --bw-debt: #D2672A; margin-bottom: 14px; }
+:root[data-theme="light"] .bw-card { --bw-sup: #2C89E9; --bw-debt: #D9601C; }
+.bw-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin: 0 2px 8px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-medium); }
+.bw-title { font-size: 12px; font-weight: 600; color: var(--text-high); margin: 0; }
+.bw-head-end { margin-left: auto; display: inline-flex; align-items: center; gap: 12px; }
+.bw-hf { display: inline-flex; align-items: center; gap: 6px; }
+.bw-hf-k { color: var(--text-low); font-size: 10px; }
+.bw-hf .hf { font-size: 15px; padding: 2px 9px; letter-spacing: 0; }
+.bw-closed-badge { background: var(--panel); color: var(--text-low); }
+.ext-link.bw-defisim { margin-left: 0; text-transform: none; letter-spacing: 0; }
+.bw-body.mm-card { padding: 12px 16px 6px; }
+.bw-closed .bw-body.mm-card { border-style: dashed; }
+.bw-risk { display: flex; align-items: center; gap: 12px; padding: 2px 0 10px; }
+.bw-risk .mm-bar-track { flex: 1 1 auto; height: 6px; }
+.bw-risk-lab { display: inline-flex; gap: 8px; flex: 0 0 auto; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); white-space: nowrap; }
+/* The disclosure rule below is the seam; the summary's own border would double it. */
+.bw-kpis.mm-summary { gap: 10px 26px; padding-bottom: 6px; border-bottom: 0; }
+.bw-kpis .mm-stat .v { font-size: 15px; display: inline-flex; align-items: baseline; gap: 2px; }
+.bw-kpis .mm-stat .v .yh-trigger { font-weight: 600; }
+.bw-inc { display: inline-flex; align-items: baseline; gap: 6px; }
+.bw-inc-part { display: inline-flex; align-items: baseline; gap: 4px; }
+.bw-inc-k { font-size: 10px; font-weight: 400; color: var(--text-low); }
+.bw-inc-sep { color: var(--text-low); font-weight: 400; }
+.bw-unpriced { font-size: 10px; font-weight: 400; color: var(--amber); }
+.bw-tbl-wrap { overflow-x: auto; margin: 0 -4px; border-bottom: 1px solid var(--separator); }
+.tbl.bw-tbl { min-width: 0; }
+.bw-tbl thead th { padding: 8px 8px; }
+.bw-tbl tbody td { padding: 6px 8px; font-size: 12px; white-space: nowrap; }
+.bw-tbl .r { text-align: right; }
+.bw-asset { display: inline-flex; align-items: center; gap: 6px; }
+.bw-usd { font-size: 11px; }
+.bw-closed-note { margin-left: 8px; font-family: 'GeistMono'; font-size: 10px; }
+.bw-row-closed td { color: var(--text-medium); }
+.bw-earned { color: var(--bw-sup); }
+.bw-paid { color: var(--bw-debt); }
+/* The card's disclosure (DisclosureRule): a full-width hairline seam with the
+   label centred on it. The whole row is the hit target; the pill lifts on hover
+   and the rules firm up, so the affordance shows without shouting. The nested
+   closed-reserves variant is the same shape a step quieter. */
+.bw-rule { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 12px; width: 100%; padding: 4px 0; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.bw-rule::before, .bw-rule::after { content: ''; flex: 1 1 0; height: 1px; background: var(--border); transition: background-color 160ms var(--ease-standard, ease); }
+.bw-rule-pill { display: inline-flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; padding: 4px 12px; border: 1px solid transparent; border-radius: 999px; font-size: 12px; line-height: 16px; color: var(--text-medium); transition: color 160ms var(--ease-standard, ease), background-color 160ms var(--ease-standard, ease), border-color 160ms var(--ease-standard, ease); }
+.bw-rule-label { white-space: nowrap; font-weight: 500; }
+.bw-rule-meta { color: var(--text-low); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bw-rule-chev { flex: 0 0 auto; color: var(--text-low); transition: transform 200ms var(--ease-out-soft, ease), color 160ms var(--ease-standard, ease); }
+.bw-rule[aria-expanded="true"] .bw-rule-chev { transform: rotate(180deg); }
+.bw-rule:hover .bw-rule-pill { color: var(--text-high); background: var(--panel-hover); border-color: var(--border); }
+.bw-rule:hover .bw-rule-chev { color: var(--text-medium); }
+.bw-rule:hover::before, .bw-rule:hover::after { background: var(--text-lowest); }
+.bw-rule:focus-visible .bw-rule-pill { color: var(--text-high); outline: 2px solid var(--accent); outline-offset: 1px; }
+.bw-rule-sub { padding: 6px 0 2px; }
+.bw-rule-sub .bw-rule-pill { font-size: 11.5px; padding: 3px 10px; }
+.bw-rule-sub::before, .bw-rule-sub::after { background: var(--separator); }
+.bw-details { padding-top: 4px; }
+.bw-tbl-wrap:has(+ .bw-rule) { border-bottom: 0; }
+.bw-reserves { padding-bottom: 6px; }
+.bw-hist-body { padding: 8px 0 6px; }
+.bw-hist-loading { padding: 18px 0; font-family: 'GeistMono'; font-size: 12px; }
+.bw-hist { display: flex; flex-direction: column; gap: 10px; }
+.bw-chart { margin: 0; }
+.bw-chart + .bw-chart { padding-top: 8px; border-top: 1px solid var(--separator); }
+.bw-chart-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 2px; }
+.bw-chart-head .bal-legend { margin: 0 !important; gap: 12px; font-size: 10.5px; }
+.bw-chart-title { font-size: 12px; font-weight: 500; color: var(--text-high); }
+.bw-chart-sub { font-family: 'GeistMono'; font-size: 10.5px; color: var(--text-low); }
+.bw-chart-note { margin: 2px 0 0; font-size: 11px; color: var(--text-low); }
+.bw-card-loading { padding: 16px; font-family: 'GeistMono'; font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { .bw-rule::before, .bw-rule::after, .bw-rule-pill, .bw-rule-chev { transition: none; } }
+@media (max-width: 720px) {
+  .bw-head-end { margin-left: 0; width: 100%; justify-content: space-between; }
+  .bw-body.mm-card { padding: 10px 12px 4px; }
+  .bw-kpis.mm-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+  .bw-kpis .bw-kpi-inc { grid-column: 1 / -1; }
+  .bw-tbl-wrap { margin: 0; overflow: visible; }
+  .bw-tbl tbody tr { padding: 6px 0; }
+  .bw-tbl tbody td { padding: 3px 2px; white-space: normal; }
+  /* The shared card rule clips each cell (overflow: hidden) to contain its floated
+     label; a clipping cell scrolls itself to reveal a focused rate trigger, and that
+     scroll closes the rate card. flow-root contains the float without clipping. */
+  .bw-tbl tbody td[data-label] { overflow: visible; display: flow-root; }
+  .bw-tbl tbody td[data-label].bw-nil { display: none; }
+  .bw-tbl tbody td[data-label="Asset"] { text-align: left; }
+  .bw-tbl tbody td[data-label="Asset"]::before { display: none; }
+  /* The charts scale an 860-unit viewBox down ~2.5x here; axis type is sized in
+     viewBox units so it lands near 7px. */
+  .bw-hist .hdx-ax { font-size: 18px; }
+  /* y-axis labels at this size reach a little past the chart's gutter, into the card padding. */
+  .bw-hist .day-chart { overflow: visible; }
+}
+
+/* ===== Yield hover (components/positions/YieldHover.tsx) ===== */
+.yh { display: inline-flex; position: relative; }
+.yh-trigger { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; gap: 6px; cursor: help; padding: 1px 4px; margin: -1px -4px; border-radius: 6px; color: var(--text-high); border-bottom: 1px dotted var(--text-low); }
+.yh-trigger:hover, .yh-trigger:focus-visible { background: var(--panel); }
+.yh-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.yh-icons { display: inline-flex; }
+.yh-icons > * + * { margin-left: -4px; }
+.yh-card { position: fixed; z-index: 320; width: min(300px, calc(100vw - 24px)); display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 16px 40px rgba(0,0,0,0.45); font-family: 'Geist', sans-serif; font-size: 12px; color: var(--text-medium); text-align: left; white-space: normal; cursor: default; }
+.yh-card.above { transform: translateY(-100%); }
+.yh-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-low); margin-bottom: 4px; }
+.yh-group { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-low); margin-top: 6px; }
+.yh-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 0; }
+.yh-row .mono { font-family: 'GeistMono'; color: var(--text-high); white-space: nowrap; }
+.yh-lab { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.yh-note { color: var(--text-low); font-size: 11px; }
+.yh-total { margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--separator); color: var(--text-high); font-weight: 500; }
+.yh-foot { margin-top: 6px; font-size: 11px; line-height: 1.4; color: var(--text-low); }
+@media (prefers-reduced-motion: no-preference) { .yh-card { animation: yh-in 120ms ease-out; } }
+@keyframes yh-in { from { opacity: 0; } to { opacity: 1; } }

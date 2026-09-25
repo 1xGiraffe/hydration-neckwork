@@ -1,4 +1,5 @@
 import { Fragment, useState } from 'react'
+import { ORDER_STATE_TONE } from '../components/positions/ordersFormat'
 import { useIntentOrder, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -16,10 +17,7 @@ const PAGE = 25
 // An open order is live; a filled, completed or partially-filled one has been (or is
 // being) met, so it wears the settled shade; a cancel is the owner's own quiet exit
 // and an expiry is the order failing to find a match in time.
-const STATUS_TONE: Record<IntentOrderStatus, string> = {
-  open: 'var(--green)', 'partially-filled': 'var(--sky)', filled: 'var(--sky)', completed: 'var(--sky)',
-  cancelled: 'var(--text-low)', expired: 'var(--red)',
-}
+const STATUS_TONE: Record<IntentOrderStatus, string> = ORDER_STATE_TONE
 
 // A share of a raw amount in another, to two decimals of a percent, by integer
 // arithmetic: 128-bit amounts exist and Number would round them.

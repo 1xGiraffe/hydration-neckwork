@@ -32,6 +32,8 @@ test('dual-market account renders GIGAHDX as a full market card below the primar
   await expect(giga.locator('.mm-title')).toHaveText('Money Market')
   await expect(giga.locator('.mm-title-note').first()).toContainText('GIGAHDX · lend & borrow')
   await expect(giga.locator('.mm-title-note img')).toHaveAttribute('src', /\/67\/icon/)
+  // With two cards both start as their summary; the reserves are one click away.
+  await giga.locator('.bw-rule').first().click()
   await expect(giga).toContainText('HOLLAR')
 })
 
@@ -44,7 +46,7 @@ test('tag view keeps supplemental debt contextual and DefiSim on the primary mar
   await page.goto('/tag/kraken')
   await expect(page.locator('.mm-secondary-debt')).toContainText('GIGAHDX debt')
 
-  await page.getByRole('button', { name: /Positions/ }).click()
+  await page.locator('.detail-tabs button', { hasText: 'Borrow' }).click()
   await expect(page.locator('.mm-market-section[data-market-key="core"]')).toBeVisible()
   await expect(page.locator('.mm-market-section[data-market-key="gigahdx"]')).toBeVisible()
   await expect(page.getByRole('link', { name: /Open in DefiSim/ })).toHaveCount(1)

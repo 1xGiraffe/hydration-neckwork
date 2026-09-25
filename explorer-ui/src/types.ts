@@ -528,7 +528,8 @@ export interface MmReserve {
 }
 // A concentrated-liquidity position (venue 'Uniswap v3' / 'Gamma vault') holds two tokens:
 // `asset`/`amount` are token0, `assetB`/`amountB` token1; it links to its pool page.
-export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string; assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string; unclaimedRewards?: LpUnclaimedReward[] }
+// `owner`: the member holding an NFT-held Omnipool position (fungible share rows carry none).
+export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string; assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string; owner?: AccountRef; unclaimedRewards?: LpUnclaimedReward[] }
 
 // Unclaimed liquidity-mining rewards as the account API ships them
 // (`farmRewards` on the account/tag detail, `unclaimedRewards` on farmed LP rows).
@@ -544,7 +545,7 @@ export interface FarmRewardsSummary {
   totalUsd: number
   // Per entry, as far as the summary needs it: an unpriced non-zero reward is
   // still a reward, so it is counted aloud rather than silently left out.
-  items?: { claimable: string; claimableUsd: number | null; payable?: boolean }[]
+  items?: ({ claimable: string; claimableUsd: number | null; payable?: boolean } & Partial<FarmRewardEntry>)[]
 }
 
 // Claimable money-market (lending) incentives as the account API ships them
@@ -2556,3 +2557,223 @@ export interface TreasuryTipRow {
   closedAt: { blockHeight: number; extrinsicIndex: number | null; timestamp: string } | null
 }
 export interface TreasuryTipsPage { total: number; rows: TreasuryTipRow[] }
+
+// ─── Orders · Liquidity · Borrow tabs ─────────────────────────────────────────
+// The three account/tag tabs that replaced "Positions". Which holder a read is
+// about: one account, a system tag, or a list tag (owner/subscriber or public).
+export type PositionScope =
+  | { kind: 'account'; address: string }
+  | { kind: 'tag'; tagId: string }
+  | { kind: 'list-tag'; listId: string; tagId: string }
+
+// GET /explorer/yields — current APR composition per pool and APYs per money-
+// market reserve. Percent units (12.3 = 12.3%); null = an input is missing,
+// never zero.
+export type YieldComponentKind = 'omnipool-fee' | 'stablepool-fee' | 'xyk-fee' | 'v3-fee' | 'mm-supply' | 'mm-incentive' | 'token-yield' | 'farm'
+// Where a token-yield rate comes from: the Hydration UI's external sources (DeFiLlama,
+// Kamino), else the token's on-chain redemption-rate growth over 180 days.
+export type TokenYieldSource = 'defillama' | 'kamino' | 'on-chain'
+export interface YieldComponent { kind: YieldComponentKind; aprPct: number | null; asset?: AssetRef; weightPct?: number; source?: TokenYieldSource }
+export interface FarmYield { globalFarmId: number; yieldFarmId: number; rewardAsset: AssetRef; aprPct: number | null }
+export interface PoolYield { totalAprPct: number | null; components: YieldComponent[]; farms: FarmYield[] }
+export interface ReserveIncentiveYield { rewardAsset: AssetRef; aprPct: number | null }
+export interface ReserveYield {
+  supplyApyPct: number | null
+  borrowApyPct: number | null
+  supplyIncentives: ReserveIncentiveYield[]
+  borrowIncentives: ReserveIncentiveYield[]
+  /** Everything supplying earns: the reserve's rate and incentives plus the underlying's own accrual (a share's fee and legs, a yield-bearing token's rate). */
+  supply?: PoolYield
+}
+export interface ExplorerYields {
+  asOf: string
+  feeWindow: string
+  omnipool: Record<string, PoolYield>
+  stableswap: Record<string, PoolYield>
+  xyk: Record<string, PoolYield>
+  uniswapV3: Record<string, PoolYield>
+  moneyMarket: Record<string, Record<string, ReserveYield>>
+}
+
+// GET …/order-history — finished DCA schedules, DCA intents and limit orders.
+export type OrderHistoryKind = 'all' | 'dca' | 'limit'
+export type FinishedOrderStatus = 'completed' | 'terminated' | 'cancelled' | 'migrated' | 'migration-cancelled' | 'filled' | 'expired'
+export interface OrderHistoryRow {
+  kind: 'dca' | 'dca-intent' | 'limit'
+  id: string
+  seq?: number
+  /** Null when the owner is not resolved. */
+  who: AccountRef | null
+  assetIn: AssetRef
+  assetOut: AssetRef
+  direction: 'Sell' | 'Buy' | null
+  status: FinishedOrderStatus
+  statusReason: string | null
+  migratedToIntentId: string | null
+  budgetAmount: string | null
+  soldAmount: string
+  receivedAmount: string
+  soldUsd: number | null
+  trades: number
+  failedTrades: number
+  openedBlock: number
+  openedIndex: number | null
+  openedAt: string
+  endedBlock: number
+  endedEventIndex: number
+  endedAt: string
+}
+export interface OrderHistoryPage { total: number; offset: number; limit: number; rows: OrderHistoryRow[] }
+
+// GET …/positions-presence — whether a holder with nothing open now has history
+// that makes a tab worth showing.
+export interface PositionsPresence { orderHistory: number; liquidityHistory: boolean; moneyMarketHistory: boolean }
+
+// GET …/liquidity-rewards — liquidity-mining rewards claimed over the whole history.
+export interface LiquidityRewardClaimRow {
+  pallet: 'omnipool' | 'xyk'
+  /** Null when the farm's creation is not indexed. */
+  poolAsset: AssetRef | null
+  /** XYK rows: the pair behind the share token (a share token has no symbol of its own). */
+  poolPair?: [AssetRef, AssetRef]
+  rewardAsset: AssetRef
+  amount: string
+  valueUsd: number | null
+  unpricedClaims: number
+  claims: number
+  firstAt: string
+  lastAt: string
+}
+export interface LiquidityRewardsClaimed { rows: LiquidityRewardClaimRow[]; totalClaimedUsd: number; unpricedClaims: number }
+
+// The full per-entry farm reward the account/tag detail ships in
+// `farmRewards.items` (FarmRewardsSummary types only what the header needs).
+export interface FarmRewardEntry {
+  depositId: string
+  positionId: string | null
+  globalFarmId: number
+  yieldFarmId: number
+  venue: 'Omnipool Farm' | 'XYK Farm'
+  farmState: 'active' | 'stopped' | 'terminated'
+  asset: AssetRef
+  claimable: string
+  claimableUsd: number | null
+  forfeitIfWithdrawnNow: string
+  projected: boolean
+  belowExistentialDeposit: boolean
+  payable: boolean
+  loyaltyPct: number
+  lastSyncPeriod: number
+}
+
+// GET /explorer/{address|tag|list-tag}/…/liquidity-history
+export type LpHistoryVenue = 'omnipool' | 'stableswap' | 'xyk' | 'uniswapv3' | 'gamma'
+export interface LiquidityHistoryLeg { asset: AssetRef; amount: string; valueUsd: number | null }
+export interface LiquidityHistoryReward { depositId: string; globalFarmId: number; yieldFarmId: number; asset: AssetRef; amount: string; valueUsd: number | null }
+export interface LiquidityHistoryPosition {
+  venue: LpHistoryVenue
+  farmed: boolean
+  positionId: string | null
+  poolKey: string
+  shareAsset: AssetRef | null
+  spans: { fromBlock: number; fromTime: string | null; toBlock: number | null; toTime: string | null; kind: 'direct' | 'farmed' }[]
+  points: { i: number; shares: string; legs: LiquidityHistoryLeg[]; valueUsd: number | null; unclaimedRewards: LiquidityHistoryReward[] }[]
+}
+export interface LiquidityHistory {
+  stepSec: number
+  priceGrain: '1h' | '1d'
+  dates: string[]
+  blocks: number[]
+  valueUsd: number[]
+  unpriced: number[]
+  unclaimedRewardsUsd: number[]
+  rewardsIncomplete: number[]
+  positions: LiquidityHistoryPosition[]
+  positionsOmitted: number
+}
+
+// GET /explorer/address/:a/money-market-history (per account; markets isolated).
+export interface MoneyMarketHistoryObservation {
+  observedAtBlock: number
+  timestamp: string | null
+  healthFactor: string
+  totalCollateralBase: string
+  totalDebtBase: string
+  availableBorrowsBase: string
+  ltv: string
+  liquidationThreshold: string
+  /** The lowest health factor in force during the bucket (1e18 fixed point), and the block that observed it. */
+  lowestHealthFactor: string
+  lowestAtBlock: number
+}
+export interface MoneyMarketHistoryReservePoint {
+  i: number
+  supplied: string
+  borrowed: string
+  suppliedUsd: number | null
+  borrowedUsd: number | null
+  collateral: boolean | null
+  interestEarned: string
+  interestPaid: string
+  interestEarnedUsd: number | null
+  interestPaidUsd: number | null
+  /** Some bucket's accrual could not be stated: raw figures are a lower bound and USD is null from there. */
+  interestIncomplete: boolean
+}
+// Cumulative interest at the grid's last bucket (a closed reserve has no later point).
+export interface MoneyMarketReserveInterest { interestEarned: string; interestPaid: string; interestEarnedUsd: number | null; interestPaidUsd: number | null; interestIncomplete: boolean }
+export interface MoneyMarketHistoryReserve { asset: AssetRef; aToken: AssetRef | null; reserveAddress: string; points: MoneyMarketHistoryReservePoint[]; interest: MoneyMarketReserveInterest }
+export interface MoneyMarketClaimedIncentive { asset: AssetRef; amount: string; valueUsd: number | null; claims: number; unpricedClaims: number }
+// One LiquidationCall against the account: collateral seized, debt repaid, each at
+// the hourly candle closed by its block. `i`: the first served bucket ending at or
+// after it (null outside the served buckets).
+export interface MoneyMarketLiquidation {
+  blockHeight: number
+  eventIndex: number
+  timestamp: string
+  i: number | null
+  collateral: { asset: AssetRef | null; amount: string; valueUsd: number | null }
+  debt: { asset: AssetRef | null; amount: string | null; valueUsd: number | null }
+}
+export interface MoneyMarketHistoryMarket {
+  marketKey: string
+  market: string
+  poolAddress: string
+  role: 'primary' | 'supplemental'
+  stakingBacked: boolean
+  points: {
+    i: number
+    suppliedUsd: number | null
+    borrowedUsd: number | null
+    netUsd: number | null
+    unpriced: number
+    observation: MoneyMarketHistoryObservation | null
+    eModeCategoryId: number | null
+    unclaimedRewards: { asset: AssetRef; amount: string; valueUsd: number | null; settledAtBlock: number | null }[]
+    interestEarnedUsd: number | null
+    interestPaidUsd: number | null
+    /** Reserves whose accrual is unpriced and so left out of the two USD figures. */
+    interestUnpriced: number
+  }[]
+  reserves: MoneyMarketHistoryReserve[]
+  claimedIncentives?: MoneyMarketClaimedIncentive[]
+  /** The account's liquidations in this market (as the liquidated user), newest first. */
+  liquidations?: MoneyMarketLiquidation[]
+  /** Cumulative market totals at the grid's last bucket. */
+  interestEarnedUsd: number | null
+  interestPaidUsd: number | null
+  interestUnpriced: number
+}
+export interface MoneyMarketHistory {
+  stepSec: number
+  priceGrain: '1h' | '1d'
+  dates: string[]
+  blocks: number[]
+  reserveHistoryFrom: { blockHeight: number; time: string | null } | null
+  suppliedUsd: (number | null)[]
+  borrowedUsd: (number | null)[]
+  unpriced: number[]
+  unclaimedRewardsUsd: (number | null)[]
+  rewardsIncomplete: number[]
+  markets: MoneyMarketHistoryMarket[]
+}
