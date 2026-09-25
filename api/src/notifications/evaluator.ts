@@ -130,14 +130,14 @@ const SNAPSHOT_EVERY_TICKS = 5
 const ACTIVITY_PAGE = 50
 const ACTIVITY_PAGE_WIDE = 250
 // Activity source fetches one tick may spend PER KIND. Groups beyond it are
-// deferred to a later tick by a persistent rotation, and the kind's cursor does
-// NOT advance while any group is deferred — so a deferred group loses nothing
-// until the window clamp catches up with it. At 25 fetches per 6s tick the
-// rotation covers 250 groups a minute, and the clamp is ~600 blocks (~20
-// minutes), so a deployment stays lossless up to a few thousand distinct watched
-// addresses. The budget is per kind rather than shared because the row lane
-// visits the kinds in a fixed order, and a shared budget the first kind can
-// exhaust would starve the second one forever.
+// deferred to a later tick by a persistent rotation, and the kind's cursor
+// advances only as far as EVERY group has been read (see groupsCoveredTo) — so
+// a deferred group loses nothing until the window clamp catches up with it. At
+// 25 fetches per 6s tick the rotation covers 250 groups a minute, and the clamp
+// is ~600 blocks (~20 minutes), so a deployment stays lossless up to a few
+// thousand distinct watched addresses. The budget is per kind rather than shared
+// because the row lane visits the kinds in a fixed order, and a shared budget
+// the first kind can exhaust would starve the second one forever.
 const SOURCE_FETCH_CAP = 25
 // Bound on a raw window query. The window is at most 600 blocks, so this is
 // only ever reached by a rule matching a very common pallet.
@@ -195,6 +195,42 @@ export const inWindow = (blockHeight: number, w: BlockWindow): boolean => blockH
  */
 export function windowCoveredTo(window: BlockWindow, sourceHead: number): number {
   return Math.max(window.from, Math.min(window.to, sourceHead))
+}
+
+/** The source groups a page-backed lane rotates over, and the ones this tick asked. */
+export interface GroupVisit { all: readonly string[]; visited: readonly string[] }
+
+/**
+ * Where a lane that rotates over source GROUPS may stand: the oldest block any
+ * of its current groups was last read up to.
+ *
+ * The fetch budget lets one tick ask only SOURCE_FETCH_CAP groups, so with more
+ * groups than that every tick leaves some unasked. Holding the whole lane while
+ * any group was deferred was the wrong cure: past the cap EVERY tick defers one,
+ * so the cursor never moved again — the account-activity cursor stood at the
+ * same block from 2026-09-16 to 2026-09-25 while the clamp re-read the same 600
+ * blocks each tick, with a 750-block page for every target where a few blocks
+ * would do (and a busy target's page saturates over 750 blocks, which IS a loss).
+ *
+ * Per group instead: a group this tick visited has been read up to `covered`
+ * (the window the tick matched, clamped to the source watermark); a group never
+ * visited holds the lane at `held`, which a rotation reaches within a few ticks;
+ * and the lane stands at the minimum over the groups it has NOW, so a group
+ * whose rules were deleted stops holding anything. `seen` is the kind's
+ * coverage, updated in place and pruned to the current group set. Never below
+ * `held`: a cursor does not regress.
+ */
+export function groupsCoveredTo(seen: Map<string, number>, groups: GroupVisit, covered: number, held: number): number {
+  for (const key of groups.visited) seen.set(key, Math.max(seen.get(key) ?? 0, covered))
+  const current = new Set(groups.all)
+  for (const key of [...seen.keys()]) if (!current.has(key)) seen.delete(key)
+  let floor = covered
+  for (const key of groups.all) {
+    const at = seen.get(key)
+    if (at == null) return held
+    floor = Math.min(floor, at)
+  }
+  return Math.max(held, floor)
 }
 
 // Finality gate: the pending-head layer marks its rows `finalized: false` and
@@ -1407,6 +1443,11 @@ const dirtyCursors = new Set<RowLaneKind>()
 let cursorsPersistedAtMs = 0
 // Where the round-robin over activity source groups resumes, per kind.
 const rotation = new Map<RowLaneKind, number>()
+// How far each activity source group has been read, per kind (see
+// groupsCoveredTo). In memory like the rotation it pairs with: after a restart
+// every group is unread and the lane holds its persisted cursor until one
+// rotation has asked them all, which is a few ticks.
+const groupCoverage = new Map<RowLaneKind, Map<string, number>>()
 
 export function initEvaluator(c: ClickHouseClient): void {
   client = c
@@ -1511,6 +1552,7 @@ export function resetEvaluatorForTests(): void {
   parked = null
   parkedDirty = false
   rotation.clear()
+  groupCoverage.clear()
   cursorsPersistedAtMs = 0
   seenOriginQueued.clear()
   originQueuedMemo.clear()
@@ -1613,10 +1655,12 @@ interface LaneOutcome {
    */
   window: BlockWindow
   /**
-   * A source group has not seen this window yet, so the cursor waits for it
-   * rather than stepping over the group's rows.
+   * The source groups a page-backed lane rotates over, and which of them this
+   * tick actually asked. The cursor advances only as far as every group has
+   * been read (see groupsCoveredTo): a group the budget deferred has not seen
+   * this window, and stepping over its rows would lose them for good.
    */
-  deferred?: boolean
+  groups?: GroupVisit
   /**
    * State the lane may only keep once this tick's rows are durably in the inbox —
    * applied exactly where the cursor advances. The referendum lane's parked
@@ -1632,16 +1676,22 @@ interface LaneOutcome {
  * `sourceHead` is the every-block watermark read at the top of the tick (see
  * `visibleSourceHead`). Three cases, and only this function decides them:
  *
- *   * a DEFERRED lane holds exactly where it was — a group never asked its source;
  *   * an UNREADABLE watermark holds the lane at `window.from`, the blocks the
  *     clamp already wrote off. "We cannot tell what the source has" must never
  *     mean "advance to the ingestion head";
  *   * otherwise the lane advances only as far as the watermark proves its source
- *     had reached BEFORE the lane read it.
+ *     had reached BEFORE the lane read it;
+ *   * and a lane that rotates over source GROUPS only as far as every group has
+ *     been read (see groupsCoveredTo) — a group the budget deferred never asked
+ *     its source this tick, and a group never asked at all holds the lane where
+ *     it was.
  */
 function laneCursor(lane: LaneOutcome, sourceHead: number | null): number {
-  if (lane.deferred) return cursors.get(lane.kind) ?? lane.window.from
-  return windowCoveredTo(lane.window, sourceHead ?? lane.window.from)
+  const covered = windowCoveredTo(lane.window, sourceHead ?? lane.window.from)
+  if (!lane.groups) return covered
+  let seen = groupCoverage.get(lane.kind)
+  if (!seen) groupCoverage.set(lane.kind, seen = new Map())
+  return groupsCoveredTo(seen, lane.groups, covered, cursors.get(lane.kind) ?? lane.window.from)
 }
 
 /** Activity source fetches this kind has left this tick. */
@@ -1671,26 +1721,27 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
   // here could have returned, and advancing to it drops them silently.
   switch (kind) {
     case 'account-activity': {
-      const { matches, deferred } = await accountActivityMatches(rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
-      return { kind, matches, window, deferred }
+      const { matches, groups } = await accountActivityMatches(rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
+      return { kind, matches, window, groups }
     }
     case 'large-trade':
     case 'large-transfer': {
       const feedType = kind === 'large-trade' ? 'trade' : 'transfer'
-      const { matches, deferred } = await largeValueMatches(kind, feedType, rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
+      const { matches, groups } = await largeValueMatches(kind, feedType, rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
       // A large-trade rule also watches DCA STARTS: a standing order pushing this
       // much per hour is the same event to a subscriber as one big swap. Only the
-      // trade kind has schedules to watch, and a deferred fetch must not let the
-      // cursor step over them either.
+      // trade kind has schedules to watch; they are queried over the whole window
+      // every tick, so a cursor the groups hold back re-reads them harmlessly
+      // rather than stepping over them.
       const dca = kind === 'large-trade' ? await dcaStartMatches(rules, window) : []
-      return { kind, matches: [...matches, ...dca], window, deferred }
+      return { kind, matches: [...matches, ...dca], window, groups }
     }
     case 'protocol-revenue':
     case 'liquidation': {
-      const { matches, deferred } = kind === 'protocol-revenue'
+      const { matches, groups } = kind === 'protocol-revenue'
         ? await protocolRevenueMatches(rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
         : await liquidationMatches(rules, recheckWindow(window), { left: SOURCE_FETCH_CAP })
-      return { kind, matches, window, deferred }
+      return { kind, matches, window, groups }
     }
     case 'referendum':
       return { kind, ...await referendumMatches(rules, window), window }
@@ -1785,7 +1836,7 @@ async function fetchTargetActivity(
 // the liquidation produced, which is most of the point of watching one.
 async function protocolRevenueMatches(
   rules: NotificationRule[], window: BlockWindow, budget: FetchBudget,
-): Promise<{ matches: RuleMatch[]; deferred: boolean }> {
+): Promise<{ matches: RuleMatch[]; groups: GroupVisit }> {
   // No server-side revenue filter exists, so every rule reads the SAME page whatever
   // its floor — one group, one fetch, floors applied per rule in the evaluator.
   const groups = groupRules(rules, () => 'all')
@@ -1800,7 +1851,7 @@ async function protocolRevenueMatches(
 
 async function liquidationMatches(
   rules: NotificationRule[], window: BlockWindow, budget: FetchBudget,
-): Promise<{ matches: RuleMatch[]; deferred: boolean }> {
+): Promise<{ matches: RuleMatch[]; groups: GroupVisit }> {
   // The fetch differs only by target, so rules sharing one target share a page. An
   // untargeted rule watches the whole chain and reads the plain mm feed.
   const groups = groupRules(rules, rule => {
@@ -1819,7 +1870,7 @@ async function liquidationMatches(
   })
 }
 
-async function accountActivityMatches(rules: NotificationRule[], window: BlockWindow, budget: FetchBudget): Promise<{ matches: RuleMatch[]; deferred: boolean }> {
+async function accountActivityMatches(rules: NotificationRule[], window: BlockWindow, budget: FetchBudget): Promise<{ matches: RuleMatch[]; groups: GroupVisit }> {
   const groups = new Map<string, NotificationRule[]>()
   for (const rule of rules) {
     const key = activitySourceKey(rule)
@@ -1887,7 +1938,7 @@ const FORWARD_ONLY_REVENUE_PAGE = { revenue: true, forwardOnly: true } as const
 async function largeValueMatches(
   kind: 'large-trade' | 'large-transfer', feedType: 'trade' | 'transfer',
   rules: NotificationRule[], window: BlockWindow, budget: FetchBudget,
-): Promise<{ matches: RuleMatch[]; deferred: boolean }> {
+): Promise<{ matches: RuleMatch[]; groups: GroupVisit }> {
   const groups = groupRules(rules, rule => largeValueKey(rule.params as RuleParams['large-trade']))
   // The feed walks HISTORY until `limit` rows clear the value floor — and a rule
   // whose floor matches almost nothing (a $10k floor on one token) walks past
@@ -1938,29 +1989,31 @@ function groupRules(rules: readonly NotificationRule[], keyOf: (rule: Notificati
 
 // Visit at most `budget.left` groups, resuming where the last tick stopped so no
 // group is starved: the rotation index is kept per kind for the life of the
-// process. Groups it does not reach are counted and reported as deferred, which
-// holds the kind's cursor back until they have been seen.
+// process. Groups it does not reach are counted as deferred; which groups exist
+// and which were asked is reported back, so the kind's cursor can stand at the
+// oldest block any group has been read up to (see groupsCoveredTo).
 async function visitGroups(
   kind: RowLaneKind,
   groups: Map<string, NotificationRule[]>,
   budget: FetchBudget,
   run: (group: NotificationRule[]) => Promise<RuleMatch[]>,
-): Promise<{ matches: RuleMatch[]; deferred: boolean }> {
+): Promise<{ matches: RuleMatch[]; groups: GroupVisit }> {
   const keys = [...groups.keys()].sort()
-  if (!keys.length) return { matches: [], deferred: false }
+  if (!keys.length) return { matches: [], groups: { all: [], visited: [] } }
   const start = (rotation.get(kind) ?? 0) % keys.length
   const take = Math.min(keys.length, Math.max(budget.left, 0))
   const matches: RuleMatch[] = []
+  const visited: string[] = []
   for (let i = 0; i < take; i++) {
     const key = keys[(start + i) % keys.length]
     budget.left--
     counters.sourceFetches++
+    visited.push(key)
     matches.push(...await run(groups.get(key)!))
   }
   rotation.set(kind, (start + take) % keys.length)
-  const deferred = keys.length - take
-  counters.deferredGroups += deferred
-  return { matches, deferred: deferred > 0 }
+  counters.deferredGroups += keys.length - take
+  return { matches, groups: { all: keys, visited } }
 }
 
 // One page, widened once if it turns out to start above the cursor. A page that
