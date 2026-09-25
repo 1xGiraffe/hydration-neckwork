@@ -81,4 +81,33 @@ describe('account swap queue', () => {
     const signed = accountSwapDestinationRows([queued], [{ block_height: 42, extrinsic_index: 3, signer: 'alice', effective_signer: null }], new Map([['42:7', 'ice-pot']]))
     expect(signed.map(row => row.account)).toEqual(['alice'])
   })
+
+  // A Proxy.proxy(real=X) or Multisig.as_multi dispatch moves X's funds, not the
+  // signatory's: the block and extrinsic feeds already attribute its swaps to X
+  // (actorsFor), and the account projection must key them the same way. Keyed on the
+  // signatory, an account whose every trade ran through its proxy showed two incoming
+  // transfers and no trades, while the proxy signer's page carried 348 trades of funds
+  // it never held.
+  it('keys an on-behalf dispatch\'s swap to the account it ran as, keeping the signatory as signer', () => {
+    const signed = [{ block_height: 42, extrinsic_index: 3, signer: 'proxy-signer', effective_signer: null }]
+    const rows = accountSwapDestinationRows([queued], signed, new Map(), new Map([['42:3', 'real']]))
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ account: 'real', signer: 'proxy-signer', block_height: 42, event_index: 7, extrinsic_index: 3 })
+    // The signatory gets no row of its own: the trade is not its economic action.
+    expect(rows.map(row => row.account)).not.toContain('proxy-signer')
+  })
+
+  it('keys an on-behalf dispatch by its exact extrinsic tuple, never by block alone', () => {
+    const signed = [{ block_height: 42, extrinsic_index: 3, signer: 'alice', effective_signer: null }]
+    const other = accountSwapDestinationRows([queued], signed, new Map(), new Map([['42:4', 'real']]))
+    expect(other.map(row => row.account)).toEqual(['alice'])
+  })
+
+  // An EVM dispatch (Ethereum.transact, dispatch_permit) has no substrate signer; its
+  // effective signer is the actor unless the call itself ran on behalf of someone.
+  it('lets an on-behalf actor override an effective signer too', () => {
+    const evm = [{ block_height: 42, extrinsic_index: 3, signer: null, effective_signer: 'evm-alice' }]
+    expect(accountSwapDestinationRows([queued], evm, new Map(), new Map([['42:3', 'real']])).map(row => [row.account, row.signer])).toEqual([['real', 'evm-alice']])
+  })
 })
