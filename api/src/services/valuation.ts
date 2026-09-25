@@ -1,5 +1,5 @@
 // Venue-neutral money and event-time valuation helpers shared by the public
-// pool surfaces (public/services/poolVolumes.ts re-exports everything here so
+// pool surfaces (services/poolVolumes.ts re-exports everything here so
 // its consumers keep one import site) and the revenue read models
 // (services/revenueStreams.ts). Moved out of the public tree because the
 // public API is an import LEAF (api/tests/public/isolation.test.ts): shared

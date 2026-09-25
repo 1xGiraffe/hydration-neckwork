@@ -118,7 +118,7 @@ function cfgRow(event: string, args: string, over: Partial<Row> = {}): Row {
 }
 
 async function fold(rows: Row[]) {
-  const { foldLiveFarms } = await import('../../src/public/services/farmApr.ts')
+  const { foldLiveFarms } = await import('../../src/services/farmApr.ts')
   return foldLiveFarms(rows as never)
 }
 
@@ -251,7 +251,7 @@ const FARM = {
 const USD = 10n ** 12n
 
 async function apr(farm: typeof FARM, farmedValueUsd: bigint | null, rewardPriceUsd: bigint | null) {
-  const { farmAprPercScaled, renderPerc } = await import('../../src/public/services/farmApr.ts')
+  const { farmAprPercScaled, renderPerc } = await import('../../src/services/farmApr.ts')
   const scaled = farmAprPercScaled(farm, farmedValueUsd, rewardPriceUsd)
   return scaled == null ? null : renderPerc(scaled)
 }
@@ -328,7 +328,7 @@ describe('omnipoolFarmAprByAsset', () => {
 
   async function run(byMarker: Record<string, Row[]>) {
     const client = fakeClient(byMarker)
-    const { omnipoolFarmAprByAsset } = await import('../../src/public/services/farmApr.ts')
+    const { omnipoolFarmAprByAsset } = await import('../../src/services/farmApr.ts')
     return { client, apr: await omnipoolFarmAprByAsset(client as never, ANCHOR) }
   }
 
@@ -473,13 +473,14 @@ describe('omnipoolFarmAprByAsset', () => {
 
 describe('farm SQL invariants', () => {
   it('reads only the Omnipool liquidity-mining farms', async () => {
-    const { buildFarmConfigSql } = await import('../../src/public/services/farmApr.ts')
-    // XYK farms incentivise XYK shares, which no yield endpoint serves.
+    const { buildFarmConfigSql } = await import('../../src/services/farmApr.ts')
+    // The public yield endpoints serve Omnipool farms only; XYK farms are read
+    // by the explorer's /explorer/yields through the pallet argument.
     expect(buildFarmConfigSql()).toContain("pallet = 'omnipool_lm'")
   })
 
   it('orders the lifecycle NUMERICALLY, not by the string the columns carry', async () => {
-    const { buildFarmConfigSql } = await import('../../src/public/services/farmApr.ts')
+    const { buildFarmConfigSql } = await import('../../src/services/farmApr.ts')
     // The projected columns are toString()ed for the wire, and ClickHouse resolves
     // ORDER BY against those aliases — so a bare `ORDER BY block_height` sorts
     // '5305748' after '12228202'. The TS fold re-sorts numerically, so this is a
@@ -489,7 +490,7 @@ describe('farm SQL invariants', () => {
   })
 
   it('deduplicates every replayable source before it aggregates', async () => {
-    const { buildFarmConfigSql, buildFarmTvlSql } = await import('../../src/public/services/farmApr.ts')
+    const { buildFarmConfigSql, buildFarmTvlSql } = await import('../../src/services/farmApr.ts')
     expect(buildFarmConfigSql()).toContain('argMax(args_json, ingested_at)')
     const tvl = buildFarmTvlSql()
     expect(tvl).toContain('argMax(valid_to_block, run_id)')
@@ -499,7 +500,7 @@ describe('farm SQL invariants', () => {
   })
 
   it('bounds the pool-state sample and the price candle against staleness', async () => {
-    const { buildFarmTvlSql, buildFarmPriceSql } = await import('../../src/public/services/farmApr.ts')
+    const { buildFarmTvlSql, buildFarmPriceSql } = await import('../../src/services/farmApr.ts')
     // A delisted asset keeps its last state row forever and a dead feed its last
     // close; both would value today's stake at a months-old number.
     expect(buildFarmTvlSql()).toContain('block_timestamp > {anchor:DateTime} - INTERVAL {stateHours:UInt32} HOUR')

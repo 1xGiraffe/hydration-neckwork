@@ -61,7 +61,7 @@ async function buildApp(client: ReturnType<typeof fakeClient>): Promise<FastifyI
 
 describe('annualizeApr', () => {
   it('scales a period ratio to a yearly percentage at four decimals', async () => {
-    const { annualizeApr } = await import('../../src/public/services/poolYield.ts')
+    const { annualizeApr } = await import('../../src/services/poolYield.ts')
     // 100 · 0.001 · 365/30 = 1.21666… %
     expect(annualizeApr('0.001', 30)).toBe('1.2167')
     // A full year is the identity case: 100 · 0.0005 · 1 = 0.05 %
@@ -74,20 +74,20 @@ describe('annualizeApr', () => {
   })
 
   it('rounds half up on the exact midpoint', async () => {
-    const { annualizeApr } = await import('../../src/public/services/poolYield.ts')
+    const { annualizeApr } = await import('../../src/services/poolYield.ts')
     // 100 · 0.0000005 · 365 = 0.018250 exactly → 0.0183, not 0.0182
     expect(annualizeApr('0.0000005', 1)).toBe('0.0183')
   })
 
   it('keeps full precision on ratios no double could hold', async () => {
-    const { annualizeApr } = await import('../../src/public/services/poolYield.ts')
+    const { annualizeApr } = await import('../../src/services/poolYield.ts')
     // 18 significant decimals: a float would have dropped the tail before scaling.
     expect(annualizeApr('0.000000000000000001', 365)).toBe('0.0000')
     expect(annualizeApr('0.123456789012345678', 365)).toBe('12.3457')
   })
 
   it('refuses a window that cannot annualize', async () => {
-    const { annualizeApr } = await import('../../src/public/services/poolYield.ts')
+    const { annualizeApr } = await import('../../src/services/poolYield.ts')
     expect(() => annualizeApr('0.001', 0)).toThrow(RangeError)
     expect(() => annualizeApr('0.001', -30)).toThrow(RangeError)
   })
@@ -95,7 +95,7 @@ describe('annualizeApr', () => {
 
 describe('aprToApy', () => {
   it('compounds the period return over a year', async () => {
-    const { aprToApy } = await import('../../src/public/services/poolYield.ts')
+    const { aprToApy } = await import('../../src/services/poolYield.ts')
     // period return 1.2167 · 30/365 % → compounded 365/30 times = 1.22351… %
     expect(aprToApy('1.2167', 30)).toBe('1.2235')
     expect(aprToApy('0.7044', 30)).toBe('0.7067')
@@ -106,7 +106,7 @@ describe('aprToApy', () => {
   })
 
   it('never emits exponent notation for an absurd rate', async () => {
-    const { aprToApy } = await import('../../src/public/services/poolYield.ts')
+    const { aprToApy } = await import('../../src/services/poolYield.ts')
     const huge = aprToApy('36500', 1)
     expect(huge).not.toMatch(/e/i)
     expect(huge).toMatch(/^\d+\.\d{4}$/)
@@ -115,7 +115,7 @@ describe('aprToApy', () => {
 
 describe('yield SQL invariants', () => {
   it('counts only non-burned fee legs', async () => {
-    const { buildOmnipoolYieldSql, buildStableswapYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const { buildOmnipoolYieldSql, buildStableswapYieldSql } = await import('../../src/services/poolYield.ts')
     for (const sql of [buildOmnipoolYieldSql(), buildStableswapYieldSql()]) {
       expect(sql).toContain("fee_dest != 'burned'")
     }
@@ -126,8 +126,8 @@ describe('yield SQL invariants', () => {
     // recipient, so "not burned" is about half the fee: the rest goes to staking
     // and referrals (until 2026-06-22) or to the fee processor (since). An
     // unfiltered numerator publishes ~1.9x the rate an LP earns.
-    const { OMNIPOOL_ACCOUNT } = await import('../../src/public/services/poolVolumes.ts')
-    const { buildOmnipoolYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const { OMNIPOOL_ACCOUNT } = await import('../../src/services/poolVolumes.ts')
+    const { buildOmnipoolYieldSql } = await import('../../src/services/poolYield.ts')
     const sql = buildOmnipoolYieldSql()
     expect(sql).toContain('argMax(fee_recipient, ingested_at) AS fee_recipient')
     // The asset-fee numerator is recipient-filtered; the legacy '' recipient is
@@ -145,14 +145,14 @@ describe('yield SQL invariants', () => {
   it('leaves the LRNA protocol fee unfiltered by recipient', async () => {
     // Every destination the hub fee has ever had is protocol revenue, so
     // narrowing it to the pool account would report a rate nobody earns.
-    const { buildOmnipoolYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const { buildOmnipoolYieldSql } = await import('../../src/services/poolYield.ts')
     const hubFee = /sumIf\(toDecimal256\(amount, 0\), (.*?)\) AS hub_fee_raw/.exec(buildOmnipoolYieldSql())
     expect(hubFee).not.toBeNull()
     expect(hubFee![1]).toBe("leg_kind = 'fee' AND asset_id = 1 AND fee_dest != 'burned'")
   })
 
   it('deduplicates both the legs and the state-history samples before averaging', async () => {
-    const { buildOmnipoolYieldSql, buildStableswapYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const { buildOmnipoolYieldSql, buildStableswapYieldSql } = await import('../../src/services/poolYield.ts')
     const omni = buildOmnipoolYieldSql()
     expect(omni).toMatch(/GROUP BY venue, pool_key, block_height, event_index, leg_kind, leg_index/)
     expect(omni).toContain('argMax(reserve_raw, ingested_at)')
@@ -164,7 +164,7 @@ describe('yield SQL invariants', () => {
   })
 
   it('guards the Int32 asset id under a name the cast does not shadow', async () => {
-    const { buildOmnipoolYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const { buildOmnipoolYieldSql } = await import('../../src/services/poolYield.ts')
     const sql = buildOmnipoolYieldSql()
     // omnipool_pool_state_history.asset_id is Int32. Without the guard a negative
     // row wraps through toUInt32 to 4294967295 and is published as an Omnipool
@@ -178,7 +178,7 @@ describe('yield SQL invariants', () => {
   })
 
   it('averages the reserve over in-window grid samples only', async () => {
-    const { buildOmnipoolYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const { buildOmnipoolYieldSql } = await import('../../src/services/poolYield.ts')
     const sql = buildOmnipoolYieldSql()
     // A delisted asset keeps its last state row forever, so an unwindowed argMax
     // would value today's fees against a months-old reserve.
@@ -198,7 +198,7 @@ describe('omnipoolYield', () => {
         { asset_id: '222', samples: '0', fee_ratio: '0.000000000000000000', protocol_fee_ratio: '0.000000000000000000' },
       ],
     })
-    const { omnipoolYield } = await import('../../src/public/services/poolYield.ts')
+    const { omnipoolYield } = await import('../../src/services/poolYield.ts')
     expect(await omnipoolYield(client as never, '30d')).toEqual({
       asOf: ANCHOR_ISO,
       items: [
@@ -242,7 +242,7 @@ describe('omnipoolYield', () => {
       }],
       '-- pub:farm:price': [{ asset_id: '222', close: '1.000000000000', price_time: '2026-08-12 18:00:00' }],
     })
-    const { omnipoolYield } = await import('../../src/public/services/poolYield.ts')
+    const { omnipoolYield } = await import('../../src/services/poolYield.ts')
     const { items } = await omnipoolYield(client as never, '24h')
     expect(items).toEqual([
       { assetId: '5', feeAprPerc: '36.5000', feeApyPerc: '44.0251', farmAprPerc: null, farmRewardAssets: [], protocolFeeAprPerc: '0.0000' },

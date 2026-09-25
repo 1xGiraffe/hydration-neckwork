@@ -6,7 +6,7 @@ import { protocolRevenueWindows, revenueColdMarks, revenueTailHours, revenueTail
 import { renderUsd } from '../../services/valuation.ts'
 import { decimalToScaled, formatUsd } from './accountBalances.ts'
 import { type MmReserveState, type MoneyMarketSupply, moneyMarketSupply } from './moneyMarketReserves.ts'
-import { omnipoolVolumes, poolVolumes, routedTradesUsd } from './poolVolumes.ts'
+import { omnipoolVolumes, poolVolumes, routedTradesUsd } from '../../services/poolVolumes.ts'
 import { ensurePoolService } from './poolWiring.ts'
 import { SupplyUnresolvableError, totalSupplyRaw } from './coingecko.ts'
 

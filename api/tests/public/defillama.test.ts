@@ -302,7 +302,7 @@ describe('daily SQL invariants', () => {
 
   it('drops a trade whose every fill is an aToken wrap, on both netted surfaces', async () => {
     const { buildDailySql } = await import('../../src/public/services/defillama.ts')
-    const { buildRoutedTradesSql } = await import('../../src/public/services/poolVolumes.ts')
+    const { buildRoutedTradesSql } = await import('../../src/services/poolVolumes.ts')
     for (const sql of [buildDailySql(), buildRoutedTradesSql()]) {
       // An aToken mint/redeem is a 1:1 money-market wrap, not a swap, and both
       // of these totals are published as DEX volume.

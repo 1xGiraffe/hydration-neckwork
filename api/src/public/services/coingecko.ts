@@ -3,7 +3,7 @@ import { cachedSwr } from '../../services/cache.ts'
 import { ATOKEN_UNDERLYING_ID, SHARE_TOKEN_UNDERLYING_ID, assetDescriptor } from '../../services/explorerAssets.ts'
 import { getPoolsIndex, type PoolListResponse } from '../../services/poolService.ts'
 import { tvlUsdString } from './platformStats.ts'
-import { DECIMAL_STRINGS, amountUnitSql, formatUnits, legsCteSql, readAnchor, scaledDecimal, xykPoolMeta } from './poolVolumes.ts'
+import { DECIMAL_STRINGS, amountUnitSql, formatUnits, legsCteSql, readAnchor, scaledDecimal, xykPoolMeta } from '../../services/poolVolumes.ts'
 import { ensurePoolService } from './poolWiring.ts'
 
 // The CoinGecko facade: a drop-in replacement for HydraDX-api's
