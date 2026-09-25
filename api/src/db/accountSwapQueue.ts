@@ -1,4 +1,5 @@
 import { createLongOpClickHouseClient, type ClickHouseClient } from './client.ts'
+import { onBehalfActorsFor } from '../services/onBehalfActors.ts'
 
 export interface AccountSwapQueueRow {
   queued_at: string
@@ -45,10 +46,19 @@ const tupleKey = (block: number, index: number) => `${block}:${index}`
 // twice on its owner's page.
 export type HookSwapActors = Map<string, string>
 
+// The account a signed extrinsic dispatched AS, keyed by (block, extrinsic index):
+// the proxied account of a Proxy.proxy, the multisig of a Multisig.as_multi
+// (onBehalfActorsFor). Its swaps are that account's trades — the block and extrinsic
+// feeds already say so (actorsFor) — so the projection keys them there rather than on
+// the signatory, whose page would otherwise carry trades its funds never made while
+// the account whose funds moved showed none.
+export type OnBehalfActors = Map<string, string>
+
 export function accountSwapDestinationRows(
   queued: AccountSwapQueueRow[],
   extrinsics: AccountSwapExtrinsic[],
   hookActors: HookSwapActors = new Map(),
+  onBehalf: OnBehalfActors = new Map(),
 ): AccountSwapDestinationRow[] {
   const byTuple = new Map(extrinsics.map(row => [tupleKey(row.block_height, row.extrinsic_index), row]))
   const out: AccountSwapDestinationRow[] = []
@@ -77,8 +87,11 @@ export function accountSwapDestinationRows(
     }
     const extrinsic = byTuple.get(tupleKey(row.block_height, row.extrinsic_index))
     if (!extrinsic) continue
-    const accounts = [...new Set([extrinsic.signer, extrinsic.effective_signer].filter((account): account is string => !!account))]
     const signer = extrinsic.signer || extrinsic.effective_signer || ''
+    // An on-behalf dispatch is keyed to the account it ran AS; the signatory stays in
+    // the signer column as the extrinsic's own fact, never as a key.
+    const actor = onBehalf.get(tupleKey(row.block_height, row.extrinsic_index))
+    const accounts = actor ? [actor] : [...new Set([extrinsic.signer, extrinsic.effective_signer].filter((account): account is string => !!account))]
     if (!accounts.length) {
       // An UNSIGNED extrinsic — ICE.submit_solution, the off-chain worker's solution —
       // has an extrinsic and no signer of any form; its Router swaps are the ICE pot's,
@@ -237,7 +250,11 @@ export async function drainAccountSwapActivityQueue(
     const queued = await queuePage(client, cursor, batchSize)
     if (!queued.length) break
     const extrinsics = await queueExtrinsics(client, queued)
-    const destination = accountSwapDestinationRows(queued, extrinsics, await hookSwapActors(client, queued, extrinsics))
+    const [hookActors, onBehalf] = await Promise.all([
+      hookSwapActors(client, queued, extrinsics),
+      onBehalfActorsFor(client, extrinsics.map(e => [e.block_height, e.extrinsic_index] as [number, number])),
+    ])
+    const destination = accountSwapDestinationRows(queued, extrinsics, hookActors, onBehalf)
     if (destination.length) {
       await client.insert({ table: 'price_data.account_swap_activity', values: destination, format: 'JSONEachRow' })
     }

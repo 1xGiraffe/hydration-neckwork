@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { closingNetEvent, groupSwapRows, onBehalfActor, routeGroups, routeStartAfter, swapRouteReps, tradeRowKey, type RawSwapEventRow } from '../src/services/explorerService.ts'
+import { closingNetEvent, groupSwapRows, routeGroups, routeStartAfter, swapRouteReps, tradeRowKey, type RawSwapEventRow } from '../src/services/explorerService.ts'
+import { onBehalfActor } from '../src/services/onBehalfActors.ts'
 
 // A swap event as the read model returns it — the feed reads them newest-first, so
 // within an extrinsic the rows arrive in DESCENDING event order.
