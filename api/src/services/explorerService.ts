@@ -28128,33 +28128,70 @@ async function enrichAccountRows(
   const all = [...new Set(rowAccounts.flat())]
   const moduleAccounts = [...new Set(rowModuleAccounts.flat())]
   if (!all.length && !moduleAccounts.length) return
-  const list = all.length ? sqlAccountList(all) : "''"
 
   const winStart = sparklineCalendarWindowStart().toISOString().slice(0, 10)
 
-  // The weekly-state query merges all pre-window states into bucket -1, whose argMax is
-  // the exact baseline. It counts nothing beyond that: the directory's Activity cell
-  // carries the account's own feed total from the background ranking, never a count of
-  // balance observations, which is a different unit (see The activity ordering).
-  let allObs: { account_id: string; asset_id: string; b: number; bal: string }[] = []
+  // The weekly-state read folds each row's members in ClickHouse: per (account,
+  // asset) the week's last state, carried forward over the window from the exact
+  // pre-window baseline (every earlier state merges into bucket -1), summed per
+  // (row, asset, week), and read back only at the weeks the sum CHANGES (from 0),
+  // which buildValueSparkline's own carry restores to the full series. A page's
+  // rows cover thousands of accounts (the xyk-pools tag alone is 730 members plus
+  // their twins) and per-account rows ran past the client's result-row cap; the
+  // fold is bounded by rows × assets × weeks instead. Summing the CARRIED states is
+  // exact: the per-key carry, applied before the sum instead of after it (a sum of
+  // raw states would sawtooth, see getAccountHistory). A member of two of the
+  // page's tags counts in both rows, as the rows do. It counts nothing beyond
+  // that: the directory's Activity cell carries the account's own feed total from
+  // the background ranking, never a count of balance observations, which is a
+  // different unit (see The activity ordering).
+  let rowObs: { row: number; asset_id: string; b: number; bal: string }[] = []
   if (all.length) {
+    // The (account, row) relation is inlined (ACCOUNT_RE-validated hex): a page's
+    // few thousand ids exceed a query parameter's size, not the SQL text's.
+    const rowsOf = rowAccounts.flatMap((accs, i) => accs.map(a => `('${a}',${i})`)).join(',')
     const obsRes = await client.query({
-      query: `SELECT
-              account_id,
-              asset_id,
-              toInt32(greatest(dateDiff('week', {ws:Date}, week_start), -1)) AS b,
-              argMaxMerge(balance_state) AS bal
-            FROM price_data.account_balance_weekly
-            WHERE account_id IN (${list})
-              AND week_start < addWeeks({ws:Date}, ${SPARK_WEEKS})
-            GROUP BY account_id, asset_id, b`,
+      query: `WITH rows_of AS (SELECT account_id, row FROM VALUES('account_id String, row UInt32', ${rowsOf}))
+            SELECT row, asset_id, tupleElement(c, 1) AS b, toString(tupleElement(c, 2)) AS bal
+            FROM (
+              SELECT row, asset_id,
+                     arraySort(x -> tupleElement(x, 1), groupArray((wk, held_sum))) AS series,
+                     arrayFilter((x, i) -> tupleElement(x, 2) != if(i = 1, toUInt256(0), tupleElement(series[i - 1], 2)), series, arrayEnumerate(series)) AS changes
+              FROM (
+                SELECT m.row AS row, s.asset_id AS asset_id, s.wk AS wk, sum(s.held) AS held_sum
+                FROM (
+                  SELECT account_id, asset_id, tupleElement(p, 1) AS wk, tupleElement(p, 2) AS held
+                  FROM (
+                    SELECT account_id, asset_id,
+                           arraySort(x -> tupleElement(x, 1), groupArray((wk0, bal0))) AS states,
+                           arrayMap(w -> (toInt32(w), tupleElement(arrayLast(x -> tupleElement(x, 1) <= w, states), 2)), range(-1, ${SPARK_WEEKS})) AS filled
+                    FROM (
+                      SELECT account_id, asset_id,
+                             toInt32(greatest(dateDiff('week', {ws:Date}, week_start), -1)) AS wk0,
+                             toUInt256OrZero(argMaxMerge(balance_state)) AS bal0
+                      FROM price_data.account_balance_weekly
+                      WHERE account_id IN (SELECT account_id FROM rows_of)
+                        AND week_start < addWeeks({ws:Date}, ${SPARK_WEEKS})
+                      GROUP BY account_id, asset_id, wk0
+                    )
+                    GROUP BY account_id, asset_id
+                  )
+                  ARRAY JOIN filled AS p
+                ) AS s
+                INNER JOIN rows_of AS m ON m.account_id = s.account_id
+                GROUP BY m.row, s.asset_id, s.wk
+              )
+              GROUP BY row, asset_id
+            )
+            ARRAY JOIN changes AS c`,
       query_params: { ws: winStart },
       format: 'JSONEachRow',
     })
-    allObs = await obsRes.json<{ account_id: string; asset_id: string; b: number; bal: string }>()
+    rowObs = await obsRes.json<{ row: number; asset_id: string; b: number; bal: string }>()
   }
-  const obsRows = allObs.filter(r => r.asset_id !== '' && r.b >= 0)
-  const baseRows = allObs.filter(r => r.asset_id !== '' && r.b === -1)
+  // The row index is buildValueSparkline's account key from here on.
+  const obsRows = rowObs.filter(r => r.asset_id !== '' && r.b >= 0).map(r => ({ account_id: String(r.row), asset_id: r.asset_id, b: Number(r.b), bal: r.bal }))
+  const baseRows = rowObs.filter(r => r.asset_id !== '' && r.b === -1).map(r => ({ account_id: String(r.row), asset_id: r.asset_id, bal: r.bal }))
 
   let moduleBalanceRows: { account_id: string; asset_id: string; bal: string }[] = []
   if (moduleAccounts.length) {
@@ -28277,10 +28314,10 @@ async function enrichAccountRows(
     }
   }
 
-  const obsByAccount = new Map<string, { account_id: string; asset_id: string; b: number; bal: string }[]>()
-  for (const r of obsRows) (obsByAccount.get(r.account_id) ?? obsByAccount.set(r.account_id, []).get(r.account_id)!).push(r)
-  const baseByAccount = new Map<string, { asset_id: string; bal: string }[]>()
-  for (const r of baseRows) (baseByAccount.get(r.account_id) ?? baseByAccount.set(r.account_id, []).get(r.account_id)!).push(r)
+  const obsByRow = new Map<string, { account_id: string; asset_id: string; b: number; bal: string }[]>()
+  for (const r of obsRows) (obsByRow.get(r.account_id) ?? obsByRow.set(r.account_id, []).get(r.account_id)!).push(r)
+  const baseByRow = new Map<string, { asset_id: string; bal: string }[]>()
+  for (const r of baseRows) (baseByRow.get(r.account_id) ?? baseByRow.set(r.account_id, []).get(r.account_id)!).push(r)
   const moduleBalancesByAccount = new Map<string, { account_id: string; asset_id: string; bal: string }[]>()
   for (const r of moduleBalanceRows) (moduleBalancesByAccount.get(r.account_id) ?? moduleBalancesByAccount.set(r.account_id, []).get(r.account_id)!).push(r)
   const [volumeByAccount, liquidationByAccount, revenueByAccountAll] = await Promise.all([
@@ -28292,9 +28329,9 @@ async function enrichAccountRows(
   rows.forEach((row, i) => {
     const accs = rowAccounts[i]
     const moduleAccs = rowModuleAccounts[i]
-    const obs = accs.flatMap(a => obsByAccount.get(a) ?? [])
+    const obs = obsByRow.get(String(i)) ?? []
     const baseline = new Map<string, string>()
-    for (const a of accs) for (const b of baseByAccount.get(a) ?? []) baseline.set(`${a}|${b.asset_id}`, b.bal)
+    for (const b of baseByRow.get(String(i)) ?? []) baseline.set(`${i}|${b.asset_id}`, b.bal)
     let spark = accs.length ? buildValueSparkline(obs, baseline, pricesByAsset, decimalsById) : null
     const moduleBalances = moduleAccs.flatMap(a => moduleBalancesByAccount.get(a) ?? [])
     // Module/sovereign accounts can have millions of observations. Their current
