@@ -6553,6 +6553,10 @@ function mmCollateralShortfallUsd(moneyMarket: MoneyMarketPosition | null, folde
 export interface LpPosition {
   positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string
   assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string
+  // Who holds the position NFT now (Omnipool / Omnipool Farm rows), so a tag's
+  // Liquidity tab can name the member behind each position. Fungible share rows
+  // (Stablepool, XYK) are summed across holders and carry none.
+  owner?: AccountRef
   // Farmed rows only ('Omnipool Farm', 'XYK Farm'): what each of the position's
   // farm entries would pay if claimed now. Never part of valueUsd — the principal
   // is what withdrawing the liquidity returns; a reward is a different claim.
@@ -6618,7 +6622,8 @@ function valueOmnipoolPosition(pos: DecodedPosition, st: OmnipoolAssetState, pri
 // amount, price) from the latest Omnipool.PositionCreated/PositionUpdated. `raw_events`
 // is complete from genesis, so current state is exact. Event `price` is FixedU128
 // (= priceNum/priceDen · 1e18), so priceDen = OMNI_FIXED reproduces the storage rational.
-interface DecodedLpPosition { positionId: string; dec: DecodedPosition; venue: 'Omnipool' | 'Omnipool Farm' }
+// `owner`: the account holding the position NFT (or the farm deposit NFT) now.
+interface DecodedLpPosition { positionId: string; dec: DecodedPosition; venue: 'Omnipool' | 'Omnipool Farm'; owner?: string }
 async function reconstructOmnipoolPositions(accounts: string[]): Promise<DecodedLpPosition[]> {
   const accs = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => /^0x[0-9a-f]{64}$/.test(a))
   if (!accs.length) return []
@@ -6632,18 +6637,18 @@ async function reconstructOmnipoolPositions(accounts: string[]): Promise<Decoded
         own AS (SELECT collection, item, argMaxMerge(owner) AS owner FROM price_data.nft_owner_latest GROUP BY collection, item),
         posn AS (SELECT position_id, argMaxMerge(asset_id) AS asset_id, argMaxMerge(shares) AS shares, argMaxMerge(amount) AS amount, argMaxMerge(price) AS price FROM price_data.omnipool_position_latest GROUP BY position_id),
         dep AS (SELECT deposit_id, argMaxMerge(position_id) AS position_id FROM price_data.farm_deposit_latest GROUP BY deposit_id)
-        SELECT 'Omnipool' AS venue, own.item AS positionId, posn.asset_id AS assetId, posn.shares AS shares, posn.amount AS amount, posn.price AS price
+        SELECT 'Omnipool' AS venue, own.item AS positionId, posn.asset_id AS assetId, posn.shares AS shares, posn.amount AS amount, posn.price AS price, own.owner AS owner
         FROM own INNER JOIN posn ON own.item = posn.position_id
         WHERE own.collection = '1337' AND own.owner IN {accs:Array(String)}
         UNION ALL
-        SELECT 'Omnipool Farm' AS venue, dep.position_id AS positionId, posn.asset_id, posn.shares, posn.amount, posn.price
+        SELECT 'Omnipool Farm' AS venue, dep.position_id AS positionId, posn.asset_id, posn.shares, posn.amount, posn.price, own.owner
         FROM own INNER JOIN dep ON own.item = dep.deposit_id INNER JOIN posn ON dep.position_id = posn.position_id
         WHERE own.collection = '2584' AND own.owner IN {accs:Array(String)}`,
       query_params: { accs }, format: 'JSONEachRow',
     })
-    const rows = await res.json<{ venue: 'Omnipool' | 'Omnipool Farm'; positionId: string; assetId: number; shares: string; amount: string; price: string }>()
+    const rows = await res.json<{ venue: 'Omnipool' | 'Omnipool Farm'; positionId: string; assetId: number; shares: string; amount: string; price: string; owner: string }>()
     return rows.map(r => ({
-      positionId: r.positionId, venue: r.venue,
+      positionId: r.positionId, venue: r.venue, owner: r.owner,
       dec: { assetId: r.assetId, amount: BigInt(r.amount || '0'), shares: BigInt(r.shares || '0'), priceNum: BigInt(r.price || '0'), priceDen: OMNI_FIXED } as DecodedPosition,
     }))
   })
@@ -6922,10 +6927,10 @@ async function getOmnipoolPositions(accounts: string[]): Promise<LpPosition[]> {
   if (!accounts.length) return []
   const [recon, prices, st] = await Promise.all([reconstructOmnipoolPositions(accounts), ensureAccountValuePrices(), loadOmnipoolState()])
   const out: LpPosition[] = []
-  for (const { positionId, dec } of recon.filter(r => r.venue === 'Omnipool')) {
+  for (const { positionId, dec, owner } of recon.filter(r => r.venue === 'Omnipool')) {
     const state = st.get(dec.assetId); if (!state) continue
     const { amount, hub, valueUsd } = valueOmnipoolPosition(dec, state, prices)
-    out.push({ positionId, asset: asset(dec.assetId), amount: amount.toString(), hubAmount: hub > 0n ? hub.toString() : undefined, shares: dec.shares.toString(), valueUsd, venue: 'Omnipool' })
+    out.push({ positionId, asset: asset(dec.assetId), amount: amount.toString(), hubAmount: hub > 0n ? hub.toString() : undefined, shares: dec.shares.toString(), valueUsd, venue: 'Omnipool', ...(owner ? { owner: accountRef(owner) } : {}) })
   }
   return out.sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
 }
@@ -6937,10 +6942,10 @@ async function getFarmingPositions(accounts: string[]): Promise<LpPosition[]> {
   if (!accounts.length) return []
   const [recon, prices, st] = await Promise.all([reconstructOmnipoolPositions(accounts), ensureAccountValuePrices(), loadOmnipoolState()])
   const out: LpPosition[] = []
-  for (const { positionId, dec } of recon.filter(r => r.venue === 'Omnipool Farm')) {
+  for (const { positionId, dec, owner } of recon.filter(r => r.venue === 'Omnipool Farm')) {
     const state = st.get(dec.assetId); if (!state) continue
     const { amount, hub, valueUsd } = valueOmnipoolPosition(dec, state, prices)
-    out.push({ positionId, asset: asset(dec.assetId), amount: amount.toString(), hubAmount: hub > 0n ? hub.toString() : undefined, shares: dec.shares.toString(), valueUsd, venue: 'Omnipool Farm' })
+    out.push({ positionId, asset: asset(dec.assetId), amount: amount.toString(), hubAmount: hub > 0n ? hub.toString() : undefined, shares: dec.shares.toString(), valueUsd, venue: 'Omnipool Farm', ...(owner ? { owner: accountRef(owner) } : {}) })
   }
   return out.sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
 }
