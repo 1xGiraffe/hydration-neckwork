@@ -66,8 +66,9 @@ import { loadV3Registry, v3PoolStats } from './uniswapV3Service.ts'
 // and a total with a null component is null.
 
 // 'token-yield': what a yield-bearing token accrues by itself (vDOT's staking, a
-// vault share's appreciation) — the growth of its stableswap peg multiplier, which
-// is the token's redemption rate (tokenAccrualAprs).
+// vault share's appreciation) — the Hydration UI's external figure where fresh,
+// else the growth of its stableswap peg multiplier, which is the token's
+// redemption rate when the peg behaves like one (tokenAccrualAprs).
 export type YieldComponentKind = 'omnipool-fee' | 'stablepool-fee' | 'xyk-fee' | 'v3-fee' | 'mm-supply' | 'mm-incentive' | 'token-yield' | 'farm'
 /** Where a token-yield rate comes from: the Hydration UI's external sources, else the on-chain peg growth. */
 export type TokenYieldSource = 'defillama' | 'kamino' | 'on-chain'
@@ -298,16 +299,34 @@ export function underlyingParts(assetId: number, weight: bigint | null, ctx: Yie
 const SECONDS_PER_YEAR_BIG = 365n * 86_400n
 
 /**
+ * The most a peg may have given back from its running high over the window and
+ * still be read as a redemption rate. A rate accrues and never returns what it
+ * accrued, so its only dips are the oracle's own noise — measured at most 0.16 %
+ * over 180 days (sUSDS, sUSDe on the money-market oracle; vDOT, wstETH, jitoSOL,
+ * PRIME, BIL exactly 0). A price pegged the same way moves both ways: EUR/USD on
+ * 2-Pool-HEURC's aEURC leg gave back 4.1 % in the same window.
+ */
+export const TOKEN_YIELD_MAX_GIVE_BACK = 0.01
+
+/**
  * A yield-bearing token's own APR from its peg multiplier: a stableswap pool pegs
  * such a token to its partner by the token's redemption rate (vDOT against DOT, a
  * vault share against its asset), so the rate's growth over the window (up to
  * TOKEN_YIELD_WINDOW_DAYS, see PEG_WINDOW_SQL), annualised
  * (simple, not compounded), is what holding the token earns by itself. Pure; the
- * rows are one pool's peg vectors at the window's two ends. A leg whose peg did not
- * move (a fixed conversion, an unpegged leg) accrues nothing and is left out; a
- * token pegged in several pools takes the first stated one (they track one rate).
+ * rows are one pool's peg vectors at the window's two ends plus, per leg, the most
+ * the peg gave back from its running high in between (`gave_back`, a fraction).
+ *
+ * A peg is read as a rate only when it behaved like one: a redemption rate only
+ * accrues, so a peg that ended below where it started, or gave back more than
+ * TOKEN_YIELD_MAX_GIVE_BACK from its high at any sample, is a PRICE relayed
+ * through the peg (an FX rate against the pool's numeraire, as EUR/USD on
+ * 2-Pool-HEURC), and holding the token earns nothing by it — such a leg is left
+ * out, never stated as a negative yield or an FX drift. So is a leg whose peg did
+ * not move (a fixed conversion, an unpegged leg); a token pegged in several pools
+ * takes the first stated one (they track one rate).
  */
-export function tokenAccrualAprs(rows: ReadonlyArray<{ asset_ids: Array<number | string>; n0: string[]; d0: string[]; n1: string[]; d1: string[]; t0: number | string; t1: number | string }>): Map<number, bigint> {
+export function tokenAccrualAprs(rows: ReadonlyArray<{ asset_ids: Array<number | string>; n0: string[]; d0: string[]; n1: string[]; d1: string[]; t0: number | string; t1: number | string; gave_back?: Array<number | string | null> }>): Map<number, bigint> {
   const out = new Map<number, bigint>()
   for (const r of rows) {
     const dt = BigInt(Number(r.t1) - Number(r.t0))
@@ -319,7 +338,9 @@ export function tokenAccrualAprs(rows: ReadonlyArray<{ asset_ids: Array<number |
       if (n0 <= 0n || d0 <= 0n || n1 <= 0n || d1 <= 0n) return
       // growth = (n1/d1) / (n0/d0) − 1, as a fraction n1·d0 / (d1·n0) − 1.
       const num = n1 * d0 - d1 * n0, den = d1 * n0
-      if (num === 0n) return
+      if (num <= 0n) return
+      const gaveBack = Number(r.gave_back?.[i] ?? 0)
+      if (!(gaveBack <= TOKEN_YIELD_MAX_GIVE_BACK)) return
       out.set(id, divHalfUp(num * 100n * PCT_UNIT * SECONDS_PER_YEAR_BIG, den * dt))
     })
   }
@@ -327,22 +348,50 @@ export function tokenAccrualAprs(rows: ReadonlyArray<{ asset_ids: Array<number |
 }
 
 // Each stableswap pool's peg vectors at the newest 600-block sample and at the
-// earliest sample of the TOKEN_YIELD_WINDOW_DAYS before it. Longer than the fee
-// window on purpose: some redemption rates move in irregular bursts weeks apart
-// (PRIME's paused from 2026-05-19 to 2026-07-31), so a 30-day window can fall
-// between two bursts and read a real yield as zero. A pool with less history uses
-// what it has, from TOKEN_YIELD_MIN_DAYS on. Bounded to the window's own samples.
+// earliest sample of the TOKEN_YIELD_WINDOW_DAYS before it, and per leg the most
+// the peg gave back from its running high across the window's samples (a Float64
+// fraction: a threshold test against TOKEN_YIELD_MAX_GIVE_BACK, where the
+// division's 1e-16 rounding is immaterial). Longer than the fee window on
+// purpose: some redemption rates move in irregular bursts weeks apart (PRIME's
+// paused from 2026-05-19 to 2026-07-31), so a 30-day window can fall between two
+// bursts and read a real yield as zero. A pool with less history uses what it
+// has, from TOKEN_YIELD_MIN_DAYS on. Bounded to the window's own samples.
 const TOKEN_YIELD_WINDOW_DAYS = 180
 const TOKEN_YIELD_MIN_DAYS = 30
 const PEG_WINDOW_SQL = `-- explorer:yields:peg-window
-SELECT pool_id, asset_ids,
-       argMax(peg_num, block_height) AS n1, argMax(peg_den, block_height) AS d1, toUInt32(max(block_timestamp)) AS t1,
-       argMin(peg_num, block_height) AS n0, argMin(peg_den, block_height) AS d0, toUInt32(min(block_timestamp)) AS t0
-FROM price_data.stableswap_pool_state_history FINAL
-WHERE block_timestamp >= toDateTime({anchor:UInt32}) - INTERVAL ${TOKEN_YIELD_WINDOW_DAYS} DAY AND block_timestamp <= toDateTime({anchor:UInt32})
-  AND notEmpty(peg_num)
-GROUP BY pool_id, asset_ids
-HAVING t1 - t0 >= ${TOKEN_YIELD_MIN_DAYS} * 86400`
+WITH samples AS (
+  SELECT pool_id, asset_ids, block_height, block_timestamp, peg_num, peg_den
+  FROM price_data.stableswap_pool_state_history FINAL
+  WHERE block_timestamp >= toDateTime({anchor:UInt32}) - INTERVAL ${TOKEN_YIELD_WINDOW_DAYS} DAY AND block_timestamp <= toDateTime({anchor:UInt32})
+    AND notEmpty(peg_num)
+),
+ends AS (
+  SELECT pool_id, asset_ids,
+         argMax(peg_num, block_height) AS n1, argMax(peg_den, block_height) AS d1, toUInt32(max(block_timestamp)) AS t1,
+         argMin(peg_num, block_height) AS n0, argMin(peg_den, block_height) AS d0, toUInt32(min(block_timestamp)) AS t0
+  FROM samples
+  GROUP BY pool_id, asset_ids
+  HAVING t1 - t0 >= ${TOKEN_YIELD_MIN_DAYS} * 86400
+),
+legs AS (
+  SELECT pool_id, asset_ids, block_height, i,
+         toFloat64(toUInt256OrZero(peg_num[i])) / toFloat64(toUInt256OrZero(peg_den[i])) AS r
+  FROM samples ARRAY JOIN arrayEnumerate(peg_num) AS i
+  WHERE toUInt256OrZero(peg_den[i]) > 0
+),
+peaks AS (
+  SELECT pool_id, asset_ids, i, r,
+         max(r) OVER (PARTITION BY pool_id, asset_ids, i ORDER BY block_height ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS peak
+  FROM legs
+),
+gave_back AS (
+  SELECT pool_id, asset_ids, arrayMap(x -> x.2, arraySort(x -> x.1, groupArray((i, dd)))) AS gave_back
+  FROM (SELECT pool_id, asset_ids, i, max(1 - r / peak) AS dd FROM peaks GROUP BY pool_id, asset_ids, i)
+  GROUP BY pool_id, asset_ids
+)
+SELECT e.pool_id AS pool_id, e.asset_ids AS asset_ids, e.n1 AS n1, e.d1 AS d1, e.t1 AS t1, e.n0 AS n0, e.d0 AS d0, e.t0 AS t0, g.gave_back AS gave_back
+FROM ends AS e
+LEFT JOIN gave_back AS g ON g.pool_id = e.pool_id AND g.asset_ids = e.asset_ids`
 
 /**
  * The token rates a composition uses: each token's current APY from the Hydration
@@ -513,7 +562,7 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
     rows<{ lp_asset_id: number | string; shares: string }>(c, XYK_FARMED_SQL),
     loadV3Registry(assetIdFromMmAddress),
     c.query({ query: PEG_WINDOW_SQL, query_params: { anchor: Number(anchorSec) }, format: 'JSONEachRow' })
-      .then(r => r.json<{ asset_ids: number[]; n0: string[]; d0: string[]; n1: string[]; d1: string[]; t0: number; t1: number }>()),
+      .then(r => r.json<{ asset_ids: number[]; n0: string[]; d0: string[]; n1: string[]; d1: string[]; t0: number; t1: number; gave_back: number[] }>()),
   ])
   const price = priceLookup(prices)
   const reserves = await loadMmReserves(c, anchorSec, price)

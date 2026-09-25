@@ -62,6 +62,44 @@ describe('groupPools', () => {
     expect(v3.valueUsd).toBe(1_900)
     expect(v3.unpricedPositions).toBe(1)
   })
+
+  describe('a share wrapped by a money-market aToken (the app\'s "Hydrated" pool)', () => {
+    const husdtPool = { assetId: 111, symbol: '2-Pool-HUSDT', name: null, decimals: 18, parachainId: null }
+    const husdt = { assetId: 1111, symbol: 'HUSDT', name: 'Hydrated Tether', decimals: 18, parachainId: null }
+    const prime = { assetId: 43, symbol: 'PRIME', name: null, decimals: 6, parachainId: null }
+    const shares: LpPosition = { positionId: 'share-111', asset: husdtPool, amount: '5', shares: '5', valueUsd: 500, venue: 'Stablepool', wrapper: { asset: husdt, marketKey: 'core', named: true } }
+    const own: PoolYield = { totalAprPct: 2.75, components: [{ kind: 'stablepool-fee', aprPct: 1.57 }, { kind: 'mm-supply', aprPct: 1.18, asset: { ...prime, assetId: 10, symbol: 'USDT' }, weightPct: 44 }], farms: [] }
+    const wrapped: PoolYield = { totalAprPct: 8.47, components: [...own.components, { kind: 'mm-incentive', aprPct: 5.72, asset: prime }], farms: [] }
+    const yields = { ...mockYields(), stableswap: { 111: own }, moneyMarket: { core: { 1111: { supplyApyPct: 0, borrowApyPct: null, supplyIncentives: [{ rewardAsset: prime, aprPct: 5.72 }], borrowIncentives: [], supply: wrapped } } } }
+
+    it('goes by the wrapper and is rated as the wrapper earns, while the shares keep their own rate', () => {
+      const [g] = groupPools([shares], yields, null)
+      expect(g.id).toBe('stableswap:111')
+      expect(g.label).toBe('HUSDT')
+      expect(g.icon.assetId).toBe(1111)
+      expect(g.wrapper?.asset.symbol).toBe('HUSDT')
+      expect(g.yield?.totalAprPct).toBe(8.47)
+      expect(g.to).toBe('/pool/111')
+      // The row holds unwrapped 2-Pool-HUSDT shares: the legs and the position rate say so.
+      expect(g.legs.map(l => l.asset.symbol)).toEqual(['2-Pool-HUSDT'])
+      expect(g.positions[0].apr.total).toBe(2.75)
+      expect(g.positions[0].apr.note).toContain('paid on HUSDT')
+      expect(liquidityKpis([g], null, null).apr.pct).toBe(2.75)
+    })
+    it('keeps the pool\'s own name when the wrapper does not name it (a3-Pool over 3-Pool), still rated as the wrapper', () => {
+      const threePool = { ...shares, positionId: 'share-103', asset: { ...husdtPool, assetId: 103, symbol: '3-Pool' }, wrapper: { asset: { ...husdt, assetId: 1008, symbol: 'a3-Pool' }, marketKey: 'core', named: false } }
+      const y = { ...yields, moneyMarket: { core: { 1008: yields.moneyMarket.core[1111] } } }
+      const [g] = groupPools([threePool], y, null)
+      expect(g.label).toBe('3-Pool')
+      expect(g.icon.assetId).toBe(103)
+      expect(g.yield?.totalAprPct).toBe(8.47)
+    })
+    it('reads an unknown headline, never the shares\' own rate, when the yields lack the wrapper', () => {
+      const [g] = groupPools([shares], { ...yields, moneyMarket: {} }, null)
+      expect(g.yield).toBeNull()
+      expect(g.positions[0].apr.total).toBe(2.75)
+    })
+  })
 })
 
 describe('positionApr — fees plus farms at the entry\'s loyalty', () => {
