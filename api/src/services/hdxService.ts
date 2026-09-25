@@ -9,7 +9,7 @@ import { collectLockBreakdownRows, gigaUnbondingBlocks, persistLockSnapshot, unv
 import { cachedSwr } from './cache.ts'
 import { NOMINAL_RELAY_BLOCK_MS, paraBlockMs } from './blockTime.ts'
 import { allTags, economicModuleAccounts } from './tagService.ts'
-import { accountRef, ensurePrices, cutoffHeightForWindow, getGigaMarketStats, getGigaLiquidationLevels, type AccountRef, type GigaMarketReserveStat, type GigaLiquidations } from './explorerService.ts'
+import { accountRef, bindCteSql, boundAccountSql, ensurePrices, cutoffHeightForWindow, getGigaMarketStats, getGigaLiquidationLevels, type AccountRef, type GigaMarketReserveStat, type GigaLiquidations } from './explorerService.ts'
 
 export { gigaUnbondingBlocks }
 
@@ -840,11 +840,23 @@ async function loadSupplyCohorts(): Promise<HdxDashboard['supply'] & { cohorts: 
     const cond = `NOT startsWith(account_id, '0x6d6f646c') AND bal > ${lo}${hi ? ` AND bal <= ${hi}` : ''}`
     return `countIf(${cond}) AS ${c.key}_n, sumIf(bal, ${cond}) AS ${c.key}_s`
   }).join(',\n        ')
+  // `holders` is the explorer's one holder definition (HoldersPage in
+  // explorerService): accounts with a positive balance, an account's bound
+  // EVM-side pot folded onto it — so the figure here is the asset page's and
+  // the directory's, and the cohorts band the same folded accounts.
   const res = await client.query({
     query: `
-      WITH h AS (
-        SELECT account_id, toFloat64(argMaxMerge(total_state)) / 1e12 AS bal
-        FROM price_data.account_asset_latest_balances WHERE asset_id = '0'
+      WITH bind AS (
+        ${bindCteSql()}
+      ),
+      h AS (
+        SELECT ${boundAccountSql('l')} AS account_id, toFloat64(sum(l.bal)) / 1e12 AS bal
+        FROM (
+          SELECT account_id, toUInt256OrZero(argMaxMerge(total_state)) AS bal
+          FROM price_data.account_asset_latest_balances WHERE asset_id = '0'
+          GROUP BY account_id
+        ) l
+        LEFT JOIN bind b ON b.eth_id = l.account_id
         GROUP BY account_id HAVING bal > 0
       ),
       (SELECT sum(bal) FROM h) AS total

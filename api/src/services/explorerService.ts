@@ -983,7 +983,7 @@ export function nonPlumbingTransferLegSql(fromExpr: string, toExpr: string, plum
 // ''-keyed group (114,045 directory rows became 3,217, with one $135M row holding every
 // HDX on the chain). Test emptiness explicitly so the fallback cannot depend on the
 // column's nullability, this join's algorithm, or join_use_nulls.
-function boundAccountSql(alias: string): string {
+export function boundAccountSql(alias: string): string {
   const account = `${alias}.account_id`
   return `if(ifNull(b.owner, '') != '', ifNull(b.owner, ''), if(
                 substring(${account}, 3, 8) = '45544800' AND substring(${account}, 11, 8) IN ('6d6f646c', '7369626c', '70617261'),
@@ -998,7 +998,7 @@ const MM_ETH_FORM_SQL = (expr: string): string => `if(
                 lower(${expr}),
                 concat('0x45544800', substring(lower(${expr}), 3, 40), '0000000000000000'))`
 
-function bindCteSql(): string {
+export function bindCteSql(): string {
   const pairs = taggedTruncationPairs()
     .map(([h160, owner]) => `('0x45544800${h160.slice(2).toLowerCase()}0000000000000000', '${owner.toLowerCase()}')`)
   return `SELECT eth_id, owner FROM (
@@ -3253,7 +3253,23 @@ export interface HolderRow {
   share?: number                             // fraction of the asset's total held USD
 }
 
-export interface HoldersPage { asset: AssetRef; holders: HolderRow[]; total: number; totalUsd: number }
+// ONE definition of "how many hold this asset", for every surface that states
+// it (the asset page and its hover card, the assets directory, the HDX and
+// HOLLAR dashboards): the distinct ACCOUNTS with a positive balance, where an
+// account's bound EVM-side pot (the ETH-form AccountId32 of its bound H160)
+// is the same account — bindCteSql/boundAccountSql, the directory's own key —
+// and a tagged account counts as itself. `total` is the number of ROWS the
+// list pages, one per system tag with several members, so it sizes the pager
+// and nothing else; `holderCount` is the account count. Counting rows made the
+// figure shrink every time an account was tagged (532 tagged HDX holders read
+// as 17), and the directory read a different number again.
+export interface HoldersPage { asset: AssetRef; holders: HolderRow[]; total: number; totalUsd: number; holderCount: number }
+
+// The account count behind a holder list: a tag row stands for its members
+// HOLDING the asset (`memberCount`), an account row for one.
+export function holderAccountCount(rows: ReadonlyArray<Pick<HolderRow, 'tag'>>): number {
+  return rows.reduce((n, row) => n + (row.tag ? row.tag.memberCount : 1), 0)
+}
 
 // The holders list, folded under one viewer's OWN (or subscribed) tags in
 // addition to the shared system ones — getAccountsForViewerFold's exact
@@ -3324,7 +3340,7 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
       const totalUsd = usdValue(prices, assetId, totalRaw.toString(), a.decimals) ?? 0
       const page = all.slice(offset, limit > 0 ? offset + limit : all.length)
         .map((holder, index) => ({ ...holder, rank: offset + index + 1 }))
-      return { asset: a, holders: enrichShare(page, prices, totalUsd), total: all.length, totalUsd }
+      return { asset: a, holders: enrichShare(page, prices, totalUsd), total: all.length, totalUsd, holderCount: holderAccountCount(all) }
     })
   }
 
@@ -3347,7 +3363,7 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
         : all.reduce((sum, h) => sum + (usdValue(prices, assetId, h.balance, a.decimals) ?? 0), 0)
       const page = all.slice(offset, limit > 0 ? offset + limit : all.length)
         .map((h, i) => ({ ...h, rank: offset + i + 1 }))
-      return { asset: a, holders: enrichShare(page, prices, totalUsd), total: all.length, totalUsd }
+      return { asset: a, holders: enrichShare(page, prices, totalUsd), total: all.length, totalUsd, holderCount: holderAccountCount(all) }
     })
   }
   return cached(pageKey, 30000, async () => {
@@ -3407,6 +3423,11 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
             ) l
             LEFT JOIN bind b ON b.eth_id = l.account_id
             GROUP BY account_id
+            -- Only accounts HOLDING the asset reach the grouping: a tag row's
+            -- member_count is its holding members, and their sum across the
+            -- rows is the holder count. (The latest-balance aggregate keeps a
+            -- zero row for every account that ever held the asset.)
+            HAVING bal > 0
           ),
           grouped AS (
             SELECT
@@ -3426,7 +3447,8 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
           )
         SELECT group_key, label_id, label_name, color, icon, member_count,
                toString(gbal) AS balance, last_block, sample_account,
-               count() OVER () AS total, toString(sum(gbal) OVER ()) AS total_bal
+               count() OVER () AS total, toString(sum(gbal) OVER ()) AS total_bal,
+               toUInt64(sum(member_count) OVER ()) AS holder_count
         FROM grouped
         ORDER BY gbal DESC
         LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
@@ -3434,8 +3456,9 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
       clickhouse_settings: viewerFoldSettings(viewerFold),
       format: 'JSONEachRow',
     })
-    const rows = await res.json<{ group_key: string; label_id: string; label_name: string; color: string; icon: string; member_count: string; balance: string; last_block: number; sample_account: string; total: string; total_bal: string }>()
+    const rows = await res.json<{ group_key: string; label_id: string; label_name: string; color: string; icon: string; member_count: string; balance: string; last_block: number; sample_account: string; total: string; total_bal: string; holder_count: string }>()
     const total = rows.length ? Number(rows[0].total) : 0
+    const holderCount = rows.length ? Number(rows[0].holder_count) : 0
     const totalUsd = rows.length ? (usdValue(prices, assetId, rows[0].total_bal, a.decimals) ?? 0) : 0
     const holders: HolderRow[] = rows.map((r, i) => {
       // A viewer's own tag wins the row over a system one — directoryFoldFor
@@ -3456,7 +3479,7 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
         share: totalUsd > 0 ? (valueUsd ?? 0) / totalUsd : 0,
       }
     })
-    return { asset: a, holders, total, totalUsd }
+    return { asset: a, holders, total, totalUsd, holderCount }
   })
 }
 
@@ -8656,12 +8679,19 @@ async function getAssetTotals(): Promise<Map<number, bigint>> {
   })
 }
 
+// The assets directory's holder counts, on HoldersPage's definition: distinct
+// accounts with a positive balance, an account's bound EVM-side pot folded onto
+// it (the same `bind` join the holder page and the account directory use) — so
+// the directory column, the asset page and the dashboards state one number.
 export async function getAssetHolderCounts(): Promise<Map<number, number>> {
   return cached('explorer:asset-holder-counts', 60000, async () => {
     const res = await client.query({
       query: `
+        WITH bind AS (
+          ${bindCteSql()}
+        )
         SELECT asset_id, count() AS n FROM (
-          SELECT account_id, asset_id, sum(bal) AS total_bal FROM (
+          SELECT ${boundAccountSql('l')} AS holder_id, l.asset_id AS asset_id, sum(l.bal) AS total_bal FROM (
             SELECT account_id, asset_id, toUInt256OrZero(argMaxMerge(total_state)) AS bal
             FROM price_data.account_asset_latest_balances
             GROUP BY account_id, asset_id
@@ -8669,8 +8699,9 @@ export async function getAssetHolderCounts(): Promise<Map<number, number>> {
             SELECT account_id, asset_id, toUInt256OrZero(argMax(total, updated_at)) AS bal
             FROM price_data.erc20_wallet_balances
             GROUP BY account_id, asset_id
-          )
-          GROUP BY account_id, asset_id
+          ) l
+          LEFT JOIN bind b ON b.eth_id = l.account_id
+          GROUP BY holder_id, asset_id
           HAVING total_bal > 0
         )
         GROUP BY asset_id`,
@@ -8725,7 +8756,8 @@ async function foldedDisplayHolderCounts(): Promise<Map<number, number>> {
   const counts = new Map<number, number>()
   await Promise.all([...shareIdsByDisplay].map(async ([displayId, shareIds]) => {
     const holders = await getFoldedDisplayAssetHolders(displayId, shareIds)
-    if (holders.length) counts.set(displayId, holders.length)
+    // Accounts, not rows — the detail page's `holderCount` (HoldersPage).
+    if (holders.length) counts.set(displayId, holderAccountCount(holders))
   }))
   return counts
 }
@@ -26313,8 +26345,9 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
     const type = explorerAssetType(a)
 
     // The full holder list is paginated via /explorer/holders; here we only need
-    // the holder count and total held USD (a one-row page carries both via the
-    // window aggregates), so the asset-detail payload stays small.
+    // the holder count (`holderCount`, the account count — see HoldersPage) and
+    // total held USD (a one-row page carries both via the window aggregates), so
+    // the asset-detail payload stays small.
     const hsummary = await getHolders(assetId, 1, 0)
     // `amountUsd` is the total USD held of this asset — the same value the asset
     // list surfaces — so reuse the holder summary's total here.
@@ -26352,7 +26385,7 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
       ? { decimals: scope.decimals, days, total: totalAssetLiquidations(days) }
       : null
 
-    return { asset: assetItem, holderCount: hsummary.total, dcaCount, limitOrderCount, totalUsd: hsummary.totalUsd, priceSeries, priceDates, liquidations }
+    return { asset: assetItem, holderCount: hsummary.holderCount, dcaCount, limitOrderCount, totalUsd: hsummary.totalUsd, priceSeries, priceDates, liquidations }
   })
 }
 

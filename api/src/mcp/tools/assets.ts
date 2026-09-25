@@ -270,8 +270,9 @@ const listAssets: ToolDefinition = {
         change24hFraction: a.change24h,
         valueHeldUsd: a.amountUsd,
         volumeUsd24h: sort === 'volume' ? volumeById.get(a.assetId) ?? null : undefined,
-        // Addresses with a positive balance, which is not the folded holder
-        // count `get_asset` and the asset page report.
+        // Accounts with a positive balance — the same figure `get_asset` and the
+        // asset page report (a bound EVM address counts with its substrate
+        // owner). The key name predates that alignment and stays for callers.
         holderAddressCount: a.holderCount ?? null,
         origin: originLabel(a),
         url: assetHref(base, a),
@@ -656,7 +657,7 @@ const getAsset: ToolDefinition = {
         ['Type', synthetic ? null : a.type ?? null],
         ['Origin', synthetic ? null : originLabel(a)],
         ['Value held on Hydration', detail.totalUsd == null ? DASH : formatUsd(detail.totalUsd)],
-        ['Holders', `${formatCount(detail.holderCount)} — the asset page's figure: system-tag members count as one holder and a bound EVM address counts with its substrate owner (\`list_assets\` counts raw addresses instead, so it reads higher)`],
+        ['Holders', `${formatCount(detail.holderCount)} accounts with a positive balance — a bound EVM address counts with its substrate owner, and every member of a system tag counts (the holder list folds a tag's members into one row, so it has fewer rows than this)`],
         ['Liquidity venues', detail.liquiditySourceCount == null ? null : formatCount(detail.liquiditySourceCount)],
         ['Active DCA schedules', detail.dcaCount ? formatCount(detail.dcaCount) : null],
         ['Open limit orders', detail.limitOrderCount ? formatCount(detail.limitOrderCount) : null],
