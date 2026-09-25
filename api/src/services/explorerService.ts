@@ -1922,63 +1922,102 @@ function exactUsdMeetsMinimum(legs: ExactUsdLeg[], minimum: number): boolean {
   const threshold = decimalFraction(minimum)
   return valueNumerator * threshold.denominator >= threshold.numerator * valueDenominator
 }
-// valueUsd basis pickers per FEED row shape: a trade/activity row is valued on its
-// OUT leg (the asset received), a transfer/liquidity/mm flow on the moved asset.
-// A trade detail page instead picks its more reliably priced leg (applyEventTimeUsd).
+// valueUsd basis pickers per FEED row shape: a transfer/liquidity/mm flow is valued
+// on the moved asset; a trade-like row — a swap, a DCA execution, an OTC order or
+// fill — on its OUT leg (the asset received) when that leg has a block-time close,
+// else on its IN leg. A trade detail page instead picks its more reliably priced
+// leg (applyEventTimeUsd). The feed keeps the OUT leg FIRST rather than adopting
+// that order, so a row both of whose legs price keeps the value it always had; the
+// IN leg only ever replaces no value at all — a swap of 1 DOT into an asset no
+// candle covers is worth the DOT it paid, not nothing, and the row's value filter
+// judges the same leg the row displays (rowMeetsExactUsdMinimum). Only a real
+// block-time close ever values a row here, never a current price.
 //
-// A pick may name SEVERAL legs, for a row whose value is their sum rather than any
-// one of them (a concentrated-liquidity LP act moves both of a pool's tokens). Every
-// named leg must then price, or the row's value is unknown — the same rule pool
-// creation applies (enrichPoolCreations), and for the same reason: a sum missing one
-// leg is a plausible-looking wrong number, not a partial one.
+// A pick may name SEVERAL legs, in one of two senses:
+//   - a SUM (`HistLeg[]`): a row whose value is their total rather than any one of
+//     them (a concentrated-liquidity LP act moves both of a pool's tokens). Every
+//     named leg must then price, or the row's value is unknown — the same rule pool
+//     creation applies (enrichPoolCreations), and for the same reason: a sum missing
+//     one leg is a plausible-looking wrong number, not a partial one.
+//   - ALTERNATIVES (`{ alternatives }`): an ordered list of which the FIRST leg with
+//     a close is the whole value; a later leg is never added to it and never chosen
+//     over an earlier one that prices.
 type HistLeg = { assetId: number; decimals: number; raw: string; ts: string }
-type HistPick = HistLeg | HistLeg[] | null
+type HistPick = HistLeg | HistLeg[] | { alternatives: HistLeg[] } | null
+function histLeg(asset: AssetRef, raw: string, ts: string): HistLeg {
+  return { assetId: asset.assetId, decimals: asset.decimals, raw, ts }
+}
+// The trade-family basis: OUT leg first, IN leg as the alternative (see HistPick);
+// a row with one leg recorded (a cross-chain swap records only what the caller
+// paid) is valued on that leg.
+function tradeLegsPick(
+  assetIn: AssetRef | null, amountIn: string | null, assetOut: AssetRef | null, amountOut: string | null, ts: string,
+): HistPick {
+  const out = assetOut && amountOut != null ? histLeg(assetOut, amountOut, ts) : null
+  const paid = assetIn && amountIn != null ? histLeg(assetIn, amountIn, ts) : null
+  return out && paid ? { alternatives: [out, paid] } : out ?? paid
+}
 export function activityHistPick(r: ActivityRow): HistPick {
   // Create rows already carry their combined BLOCK-TIME value (both seed legs, see
   // enrichPoolCreations); Destroy rows carry no value at all by construction.
   if (r.type === 'liquidity' && (r.liqAction === 'Create' || r.liqAction === 'Destroy')) return null
   // A two-leg liquidity row — a concentrated-liquidity act, an XYK add or remove
-  // (xykPairLegs) — is worth BOTH its legs; the out-leg pick below would re-value it
+  // (xykPairLegs) — is worth BOTH its legs; the trade pick below would value it
   // as one token alone.
   if (r.type === 'liquidity' && (r.poolAddress || r.assetIn || r.assetOut)) {
     return r.assetIn && r.assetOut && r.amountIn != null && r.amountOut != null
-      ? [
-          { assetId: r.assetIn.assetId, decimals: r.assetIn.decimals, raw: r.amountIn, ts: r.timestamp },
-          { assetId: r.assetOut.assetId, decimals: r.assetOut.decimals, raw: r.amountOut, ts: r.timestamp },
-        ]
+      ? [histLeg(r.assetIn, r.amountIn, r.timestamp), histLeg(r.assetOut, r.amountOut, r.timestamp)]
       : null
   }
-  // An intent row is valued on its IN leg — what the order holds (Place/Cancel/
-  // Expire) or what a fill took — the leg its SQL value mirror (getRecentIntents)
-  // judges; its OUT leg is a limit the order may never reach.
-  if (r.type === 'intent') return r.assetIn && r.amountIn != null ? { assetId: r.assetIn.assetId, decimals: r.assetIn.decimals, raw: r.amountIn, ts: r.timestamp } : null
-  if (r.assetOut && r.amountOut != null) return { assetId: r.assetOut.assetId, decimals: r.assetOut.decimals, raw: r.amountOut, ts: r.timestamp }
-  if (r.asset && r.amount != null) return { assetId: r.asset.assetId, decimals: r.asset.decimals, raw: r.amount, ts: r.timestamp }
+  // An intent row is valued on its IN leg alone — what the order holds (Place/
+  // Cancel/Expire) or what a fill took — the leg its SQL value mirror
+  // (getRecentIntents) judges; its OUT leg is a limit the order may never reach,
+  // so it is no alternative either.
+  if (r.type === 'intent') return r.assetIn && r.amountIn != null ? histLeg(r.assetIn, r.amountIn, r.timestamp) : null
+  if (r.assetOut && r.amountOut != null) return tradeLegsPick(r.assetIn, r.amountIn, r.assetOut, r.amountOut, r.timestamp)
+  if (r.asset && r.amount != null) return histLeg(r.asset, r.amount, r.timestamp)
+  if (r.assetIn && r.amountIn != null) return histLeg(r.assetIn, r.amountIn, r.timestamp)
   return null
 }
 function tradeHistPick(r: TradeRow): HistPick {
-  return { assetId: r.assetOut.assetId, decimals: r.assetOut.decimals, raw: r.amountOut, ts: r.timestamp }
+  return tradeLegsPick(r.assetIn, r.amountIn, r.assetOut, r.amountOut, r.timestamp)
 }
 function transferHistPick(r: TransferRow): HistPick {
-  return { assetId: r.asset.assetId, decimals: r.asset.decimals, raw: r.amount, ts: r.timestamp }
+  return histLeg(r.asset, r.amount, r.timestamp)
 }
 // Rewrite each row's valueUsd to its block-time value. `pick` returns the asset
-// + raw amount that valueUsd represents (the OUT leg of a trade, the moved asset
-// of a transfer, both tokens of an LP act, …) and the row's timestamp, or null to
-// leave the row untouched.
+// + raw amount that valueUsd represents (the OUT leg of a trade with its IN leg
+// as the alternative, the moved asset of a transfer, both tokens of an LP act, …)
+// and the row's timestamp, or null to leave the row untouched.
+type ResolvedHistPick = { sum: HistLeg[] } | { alternatives: HistLeg[] }
 export async function applyHistoricalUsd<T>(rows: T[], pick: (r: T) => HistPick): Promise<void> {
-  const picks = rows.map(r => {
+  const picks = rows.map((r): ResolvedHistPick | null => {
     const p = pick(r)
-    return p == null ? null : Array.isArray(p) ? (p.length ? p : null) : [p]
+    if (p == null) return null
+    if (Array.isArray(p)) return p.length ? { sum: p } : null
+    if ('alternatives' in p) return p.alternatives.length ? { alternatives: p.alternatives } : null
+    return { sum: [p] }
   })
-  const pairs = picks.flatMap(p => p ?? []).map(leg => ({ assetId: leg.assetId, ts: leg.ts }))
+  const legsOf = (p: ResolvedHistPick): HistLeg[] => ('sum' in p ? p.sum : p.alternatives)
+  const pairs = picks.flatMap(p => (p ? legsOf(p) : [])).map(leg => ({ assetId: leg.assetId, ts: leg.ts }))
   if (!pairs.length) return
   const closes = await historicalCloses(pairs)
   rows.forEach((r, i) => {
     const p = picks[i]
     if (!p) return
-    const legs = p.map(leg => exactUsdLeg(leg.raw, leg.decimals, closes.get(historicalPriceKey(leg.assetId, leg.ts))))
-    const priced = legs.every((leg): leg is ExactUsdLeg => leg != null) ? legs : null
+    const priceLeg = (leg: HistLeg) => exactUsdLeg(leg.raw, leg.decimals, closes.get(historicalPriceKey(leg.assetId, leg.ts)))
+    let priced: ExactUsdLeg[] | null
+    if ('sum' in p) {
+      const legs = p.sum.map(priceLeg)
+      priced = legs.every((leg): leg is ExactUsdLeg => leg != null) ? legs : null
+    } else {
+      let chosen: ExactUsdLeg | null = null
+      for (const leg of p.alternatives) {
+        chosen = priceLeg(leg)
+        if (chosen) break
+      }
+      priced = chosen ? [chosen] : null
+    }
     if (typeof r === 'object' && r != null) {
       if (priced) exactHistoricalValues.set(r, priced)
       else exactHistoricalValues.delete(r)
@@ -25158,7 +25197,7 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
     // signed swap the account happens to make in the same block still surfaces).
     const dcaExecsSql = `SELECT id, block_height, event_index, block_timestamp, who, amount_out FROM price_data.dca_events_by_account
                     WHERE event_name = 'DCA.TradeExecuted' AND who IN (${list}) AND ${bound}`
-    const [eventRes, liqRes, dcaRes, windowRes, xcmSentRes, dcaWindowRes] = await Promise.all([
+    const [eventRes, liqRes, dcaRes, windowRes, xcmSentRes] = await Promise.all([
       client.query({
         query: `
           SELECT block_height, event_index, any(extrinsic_index) AS extrinsic_index, any(event_name) AS event_name,
@@ -25313,21 +25352,28 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
                   AND extrinsic_index IS NOT NULL AND event_index IS NOT NULL AND (${windowCondFor('block_height')})`,
         format: 'JSONEachRow',
       }),
-      // Which windows' blocks are DCA executions, and of which schedule — the
-      // scoring collapses their hook swaps under the schedule, not 'swap'.
-      !windows.length ? Promise.resolve(null) : client.query({
-        query: `SELECT toUInt32(id) AS schedule_id, block_height FROM price_data.dca_events_by_account
-                WHERE event_name = 'DCA.TradeExecuted' AND who IN (${list}) AND (${windowCondFor('block_height')})
-                GROUP BY schedule_id, block_height`,
-        format: 'JSONEachRow',
-      }),
     ])
     const rows = await eventRes.json<ValueEventCandidateRow>()
     const liqRows = liqRes ? await liqRes.json<{ block_height: number; event_index: number; ts: string; asset_id: number; value_usd: number }>() : []
     const dcaRows = await dcaRes.json<{ schedule_id: number; total_value_usd: number; trades: number; block_height: number; event_index: number; ts: string; asset_id: number }>()
     const windowRows = windowRes ? await windowRes.json<ValueEventCandidateRow & { w: number }>() : []
     const xcmSentRows = xcmSentRes ? await xcmSentRes.json<{ block_height: number; extrinsic_index: number; event_index: number; name: string }>() : []
-    const dcaWindowRows = dcaWindowRes ? await dcaWindowRes.json<{ schedule_id: number; block_height: number }>() : []
+    // Which of the windows' hook-context swap candidates are DCA executions, and
+    // of which schedule — the scoring collapses those under the schedule, never
+    // 'swap'. Asked at exactly the candidates' blocks, a primary-key read of
+    // dca_events_by_account (who, then block): the scoped accounts' executions
+    // across the windows are unbounded — the treasury pot's buyback schedules
+    // execute in 100k+ of its jump windows' blocks, past the client's result-row
+    // cap — while the candidates are at most VALUE_JUMP_WINDOW_ROWS per window.
+    const dcaCandidateBlocks = [...new Set(windowRows
+      .filter(r => r.extrinsic_index == null && SWAP_EVENTS.includes(r.event_name))
+      .map(r => Number(r.block_height)))]
+    const dcaWindowRows = dcaCandidateBlocks.length ? await (await client.query({
+      query: `SELECT block_height, event_index, toUInt32(id) AS schedule_id FROM price_data.dca_events_by_account
+              WHERE event_name = 'DCA.TradeExecuted' AND who IN (${list}) AND block_height IN {blocks:Array(UInt32)}
+              GROUP BY block_height, event_index, schedule_id`,
+      query_params: { blocks: dcaCandidateBlocks }, format: 'JSONEachRow',
+    })).json<{ block_height: number; event_index: number; schedule_id: number }>() : []
 
     // Transfer direction + counterparty from the transfer read model (the v3
     // index carries no from/to): a bounded point lookup for at most `fetch`
@@ -25491,8 +25537,12 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
         const p = xcmEventPriority(r.event_name)
         if (p > (xcmPriority.get(key) ?? 0)) xcmPriority.set(key, p)
       }
-      const dcaScheduleByBlock = new Map<number, number>()
-      for (const r of dcaWindowRows) dcaScheduleByBlock.set(Number(r.block_height), Number(r.schedule_id))
+      const dcaExecutionsByBlock = new Map<number, DcaExecutionRef[]>()
+      for (const r of dcaWindowRows) {
+        const block = Number(r.block_height)
+        ;(dcaExecutionsByBlock.get(block) ?? dcaExecutionsByBlock.set(block, []).get(block)!).push({ eventIndex: Number(r.event_index), scheduleId: Number(r.schedule_id) })
+      }
+      const dcaScheduleFor = (r: ValueEventCandidateRow) => dcaScheduleOfHookSwap(dcaExecutionsByBlock.get(Number(r.block_height)), Number(r.event_index))
       // Outbound markers point at the XTokens/pallet-xcm Sent event — the row
       // the activity feed keeps (the legacy event wins over its mirror), so the
       // marker's link resolves; the withdrawal is just its funding leg.
@@ -25544,7 +25594,7 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
           continue
         }
         if (SWAP_EVENTS.includes(r.event_name)) {
-          const scheduleId = r.extrinsic_index == null ? dcaScheduleByBlock.get(Number(r.block_height)) : undefined
+          const scheduleId = r.extrinsic_index == null ? dcaScheduleFor(r) : undefined
           if (scheduleId != null) {
             // DCA executions sum under their schedule — tracked so a schedule-
             // driven jump doesn't get a bogus 'price' marker, but they surface
