@@ -86,7 +86,7 @@ describe('Revenue page', () => {
 
   it('gives every table cell a data-label so the 720px card layout can name it', () => {
     const html = render(fixture())
-    for (const label of ['data-label="Stream"', 'data-label="Protocol revenue"', 'data-label="Share"', 'data-label="Account"', 'data-label="Protocol revenue paid"']) {
+    for (const label of ['data-label="Stream"', 'data-label="Protocol Revenue"', 'data-label="Share"', 'data-label="Account"', 'data-label="Protocol Revenue paid"']) {
       expect(html).toContain(label)
     }
   })

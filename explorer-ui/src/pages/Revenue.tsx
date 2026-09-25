@@ -108,7 +108,7 @@ function stakerColumns(d: StakerDistributions, range: RevenueRange, unit: Staker
 }
 
 export function Revenue() {
-  useDocumentTitle('Protocol revenue')
+  useDocumentTitle('Protocol Revenue')
   const rawRange = useQueryValue('range', '30d') as RevenueRange
   const range = RANGES.some(r => r.key === rawRange) ? rawRange : '30d'
   const { data } = useRevenueDashboard(range)
@@ -141,7 +141,7 @@ export function Revenue() {
   return (
     <div className="wrap">
       <div className="page-head">
-        <h1 className="page-title">Protocol revenue</h1>
+        <h1 className="page-title">Protocol Revenue</h1>
       </div>
 
       <div className="panel rev-hero">
@@ -201,7 +201,7 @@ export function Revenue() {
                 <ShareBar segments={shareSegments} />
                 <table className="tbl rev-breakdown-tbl">
                   <thead>
-                    <tr><th>Stream</th><th className="num">Protocol revenue</th><th className="num">Share</th></tr>
+                    <tr><th>Stream</th><th className="num">Protocol Revenue</th><th className="num">Share</th></tr>
                   </thead>
                   <tbody>
                     {data.breakdown.map(b => (
@@ -210,7 +210,7 @@ export function Revenue() {
                           <span className="rev-dot" style={{ background: REVENUE_STREAM_COLOR[b.stream], marginRight: 8 }} />
                           {REVENUE_STREAM_LABEL[b.stream]}
                         </td>
-                        <td className="num mono" data-label="Protocol revenue"><Usd v={b.usd} /></td>
+                        <td className="num mono" data-label="Protocol Revenue"><Usd v={b.usd} /></td>
                         <td className="num mono" data-label="Share">{(b.share * 100).toFixed(1)}%</td>
                       </tr>
                     ))}
@@ -228,13 +228,13 @@ export function Revenue() {
             {data && data.topAccounts.length > 0 && (
               <table className="tbl">
                 <thead>
-                  <tr><th>Account</th><th className="num">Protocol revenue paid</th></tr>
+                  <tr><th>Account</th><th className="num">Protocol Revenue paid</th></tr>
                 </thead>
                 <tbody>
                   {data.topAccounts.map(row => (
                     <tr key={row.account.accountId}>
                       <td data-label="Account"><AddrPill account={row.account} noCopy /></td>
-                      <td className="num mono" data-label="Protocol revenue paid"><Usd v={row.usd} /></td>
+                      <td className="num mono" data-label="Protocol Revenue paid"><Usd v={row.usd} /></td>
                     </tr>
                   ))}
                 </tbody>
