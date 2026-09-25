@@ -528,17 +528,17 @@ function PerBlockSection({ d }: { d: SecurityDashboard }) {
         <div className="hdx-cards">
           <div className="hdx-card">
             <div className="hk">Net trade volume</div>
-            <div className="hv">{fmtPct(pb.defaultTradePct, 0)}</div>
+            <div className="hv">{fmtPct(pb.defaultTradePct)}</div>
             <div className="hs">of the asset&apos;s reserve, per block</div>
           </div>
           <div className="hdx-card">
             <div className="hk">Add liquidity</div>
-            <div className="hv">{fmtPct(pb.defaultAddPct, 0)}</div>
+            <div className="hv">{fmtPct(pb.defaultAddPct)}</div>
             <div className="hs">of the reserve, per block</div>
           </div>
           <div className="hdx-card">
             <div className="hk">Remove liquidity</div>
-            <div className="hv">{fmtPct(pb.defaultRemovePct, 0)}</div>
+            <div className="hv">{fmtPct(pb.defaultRemovePct)}</div>
             <div className="hs">of the reserve, per block</div>
           </div>
           <div className="hdx-card">
@@ -802,6 +802,14 @@ function MoneyMarketSection({ d, now }: { d: SecurityDashboard; now: number }) {
   )
 }
 
+// The runtime's default liquidity share, as the caption under the moves table
+// states it. It is read from the dashboard, not written into the copy: the 2s
+// runtime cut it from 5% to 1.67%, and the two directions may differ.
+function defaultShare(d: SecurityDashboard): string {
+  const { defaultAddPct: add, defaultRemovePct: remove } = d.perBlock
+  return add === remove ? fmtPct(add) : `${fmtPct(add)} (add) or ${fmtPct(remove)} (remove)`
+}
+
 function LiquidityMovesSection({ d, now }: { d: SecurityDashboard; now: number }) {
   return (
     <>
@@ -828,7 +836,7 @@ function LiquidityMovesSection({ d, now }: { d: SecurityDashboard; now: number }
         </table>
       </div>
       <div className="hdx-note" style={{ marginTop: 12 }}>
-        The allowance shown is 5% of the asset&apos;s reserve <em>today</em>, so a share above 100% means the move happened when the pool held less —
+        The allowance shown is {defaultShare(d)} of the asset&apos;s reserve <em>today</em>, so a share above 100% means the move happened when the pool held less —
         it was inside the limit at the time, or it would have been rejected. Every{' '}
         <Link className="hash" to={`${paths.activity()}?tab=liquidity&min=${LARGE_MOVEMENT_USD}`}>liquidity move</Link>{' '}
         is in the activity feed.
@@ -1030,9 +1038,9 @@ export function Security({ section }: { section: SecuritySection | null }) {
   // the blocks between here and an unlock — plays out at the pace the chain is
   // actually running. A pallet CONSTANT (the fuse period, a scheduled lockdown
   // span) is derived from the runtime's slot time, so it converts at the
-  // nominal: at 5.7s measured, the 14 400-block day the runtime means as 24h
-  // would otherwise be reported as 22.8h. See api/src/services/blockTime.ts for
-  // the three block times and which question each one answers.
+  // nominal: the 43 200-block day the runtime means as 24h would otherwise
+  // stretch and shrink with the measured pace. See api/src/services/blockTime.ts
+  // for the three block times and which question each one answers.
   const { data: stats } = useStats()
   const blockSec = blockSeconds(stats?.avgBlockSec)
   const nominalSec = blockSeconds(stats?.nominalBlockSec)

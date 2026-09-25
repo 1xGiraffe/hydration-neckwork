@@ -20,9 +20,10 @@ import { pendingNodeApi } from './pendingHeadService.ts'
 //                                          blocks measure ~2.14s since spec 440)
 //   gigaHdx.cooldownPeriod   = 1209600    (28 nominal days of 2s blocks; was
 //                                          403200 up to block 13,762,621)
-// and, for contrast, pallet_circuit_breaker publishes ONLY its three default
-// limit rationals — its `Period = DAYS` is not a metadata constant at all,
-// which is why securityService still has to pin that one by hand.
+// and pallet_circuit_breaker publishes ONLY its three default limit rationals
+// (`runtimeCircuitBreakerDefaults` below — also rescaled at spec 440); its
+// `Period = DAYS` is not a metadata constant at all, so securityService derives
+// it from the block time this module reads out (`fusePeriodFromBlockTime`).
 
 function constantBigInt(pallet: string, name: string): bigint | null {
   const api = pendingNodeApi()
@@ -110,4 +111,63 @@ export function runtimeParaBlockMs(): number | null {
 // (hdxService.withIndexedExpiries reads it from the event instead).
 export function runtimeGigaCooldownBlocks(): number | null {
   return constantNumber('gigaHdx', 'cooldownPeriod', 100_000_000)
+}
+
+// A `(u32, u32)` limit rational as polkadot-js hands a decoded constant back
+// (`toJSON()` → `[num, den]` as numbers; an `Option` gives null for `None`).
+// The pallet keeps both parts under MAX_LIMIT_VALUE (10 000) and refuses a zero
+// denominator, so anything else is a bad read, not a limit.
+export function rationalFromJson(raw: unknown): [number, number] | null {
+  if (!Array.isArray(raw) || raw.length !== 2) return null
+  const [num, den] = raw.map(Number)
+  if (!Number.isSafeInteger(num) || !Number.isSafeInteger(den) || num < 0 || den <= 0) return null
+  return [num, den]
+}
+
+// The Omnipool per-block limits an asset runs when governance has set none:
+// `circuitBreaker.defaultMax{NetTradeVolume,AddLiquidity,RemoveLiquidity}LimitPerBlock`,
+// each a fraction of the asset's reserve. The two liquidity defaults are
+// `Option`s: `None` DISABLES that limit by default, which is a value, not an
+// unreadable one.
+//
+// The 2s runtime cut all three to a third — a per-block cap is a per-6s cap
+// only while a block is 6s — so a pinned copy overstated every allowance 3×:
+//   spec ≤ 439 (6s)  trade (5000, 10000) = 50 %    add/remove (500, 10000) = 5 %
+//   spec 440+  (2s)  trade (1670, 10000) = 16.7 %  add/remove (167, 10000) = 1.67 %
+export interface RuntimeBreakerDefaults {
+  trade: [number, number]
+  add: [number, number] | null
+  remove: [number, number] | null
+}
+
+// Pure over the three decoded JSON values, so the shape is unit-testable; null
+// when any of them is not a limit the pallet could hold.
+export function breakerDefaultsFromJson(trade: unknown, add: unknown, remove: unknown): RuntimeBreakerDefaults | null {
+  const tradeLimit = rationalFromJson(trade)
+  if (!tradeLimit) return null
+  const optional = (raw: unknown): [number, number] | null | undefined => (raw == null ? null : rationalFromJson(raw) ?? undefined)
+  const addLimit = optional(add)
+  const removeLimit = optional(remove)
+  if (addLimit === undefined || removeLimit === undefined) return null
+  return { trade: tradeLimit, add: addLimit, remove: removeLimit }
+}
+
+function constantJson(pallet: string, name: string): { value: unknown } | null {
+  const api = pendingNodeApi()
+  if (!api) return null
+  try {
+    const consts = (api.consts as Record<string, Record<string, unknown> | undefined>)[pallet]
+    const value = consts?.[name] as { toJSON: () => unknown } | undefined
+    return value == null ? null : { value: value.toJSON() }
+  } catch {
+    return null
+  }
+}
+
+export function runtimeCircuitBreakerDefaults(): RuntimeBreakerDefaults | null {
+  const trade = constantJson('circuitBreaker', 'defaultMaxNetTradeVolumeLimitPerBlock')
+  const add = constantJson('circuitBreaker', 'defaultMaxAddLiquidityLimitPerBlock')
+  const remove = constantJson('circuitBreaker', 'defaultMaxRemoveLiquidityLimitPerBlock')
+  if (!trade || !add || !remove) return null
+  return breakerDefaultsFromJson(trade.value, add.value, remove.value)
 }

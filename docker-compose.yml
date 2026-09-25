@@ -515,9 +515,9 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       # Live money-market reads use a Hydration RPC reachable from the container.
       - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
-      # Runtime block-count constants that must remain operator-overridable at a
-      # cadence migration. Empty preserves the code/metadata fallback.
-      - SECURITY_FUSE_PERIOD_BLOCKS=${SECURITY_FUSE_PERIOD_BLOCKS:-}
+      # Operator override for the GIGAHDX cooldown, which is otherwise read from
+      # runtime metadata; empty keeps that read. (The deposit-fuse period is
+      # derived from the runtime's block time and has no override.)
       - GIGA_UNBONDING_BLOCKS=${GIGA_UNBONDING_BLOCKS:-}
       - EXPLORER_OCELLOIDS_URL=${EXPLORER_OCELLOIDS_URL:-https://api.ocelloids.net}
       - EXPLORER_OCELLOIDS_TOKEN=${EXPLORER_OCELLOIDS_TOKEN:-}

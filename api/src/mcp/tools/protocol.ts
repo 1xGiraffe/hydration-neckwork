@@ -100,7 +100,7 @@ interface SecurityDashboard {
     everTripped: boolean; externalAssetCount: number
   }
   fuses: { periodBlocks: number; rows: SecurityFuse[]; lockedCount: number; frozenCount: number; lockdownTotal: number; releaseTotal: number }
-  perBlock: { defaultTradePct: number; defaultAddPct: number; defaultRemovePct: number; rows: SecurityPerBlockRow[]; peakWindowDays: number }
+  perBlock: { defaultTradePct: number; defaultAddPct: number | null; defaultRemovePct: number | null; rows: SecurityPerBlockRow[]; peakWindowDays: number }
   trips: { total: number; enforcementTotal: number; directTotal: number; nestedTotal: number; byError: { name: string; count: number; enforcement: boolean }[] }
   freezes: { paused: { pallet: string; call: string; pausedAtTimestamp: string }[]; hubTradability: string[]; omnipool: unknown[]; omnipoolAssetCount: number; delisted: unknown[]; stableswap: unknown[] }
   risk: { windowDays: number; markets: SecurityMarket[]; liquidations: { day: number; week: number; month: number; total: number; lastTimestamp: string | null } }
@@ -493,7 +493,9 @@ function renderSecurity(d: SecurityDashboard, ctx: ToolContext): string {
     ])),
     h3('Omnipool per-block allowances'),
     kv([
-      ['Defaults', d.perBlock ? `${formatPercent(d.perBlock.defaultTradePct, 0)} trade · ${formatPercent(d.perBlock.defaultAddPct, 0)} add · ${formatPercent(d.perBlock.defaultRemovePct, 0)} remove, each of the asset's reserve` : null],
+      // Two digits: the 2s runtime's defaults are 16.7% and 1.67%, which zero
+      // digits would round to 17% and 2%.
+      ['Defaults', d.perBlock ? `${formatPercent(d.perBlock.defaultTradePct)} trade · ${formatPercent(d.perBlock.defaultAddPct)} add · ${formatPercent(d.perBlock.defaultRemovePct)} remove, each of the asset's reserve` : null],
       ['Peak window', d.perBlock ? `${formatCount(d.perBlock.peakWindowDays)} days` : null],
     ]),
     table(['Asset', 'Reserve', 'Trade / add / remove', 'Peak pressure', 'Tradable'], perBlock.map(r => [
