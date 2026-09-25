@@ -73,6 +73,8 @@ export function parseSuffixEmojiQuery(query: string): { suffix: string; glyphs: 
 const POLKADOT_SS58_PREFIX = 0
 const HYDRATION_SS58_PREFIX = 63
 const SS58_CHECKSUM_PREFIX = Buffer.from('SS58PRE')
+/** The most a request ever waits for the emoji source; past it the defaults serve. */
+const SNAKEWATCH_LOAD_BUDGET_MS = 3000
 const SNAKEWATCH_EMOJIFY_URL = 'https://raw.githubusercontent.com/galacticcouncil/snakewatch/refs/heads/main/src/utils/emojify.js'
 const SNAKEWATCH_EMOJIFY_CACHE_MS = 60 * 60 * 1000
 
@@ -281,19 +283,33 @@ export async function ensureSnakewatchEmojiSourceLoaded(): Promise<void> {
   if (snakewatchEmojiSource && Date.now() < snakewatchEmojiSourceExpiresAt) return
   if (snakewatchEmojiSourceLoad) return snakewatchEmojiSourceLoad
 
+  // Every candle request awaits this load, so it must settle within its budget
+  // whatever the upstream does. The fetch's own abort signal does not guarantee
+  // that (a stalled body read or a collected timeout signal can leave it pending
+  // for good — which hung every /candles request until a restart), so the load
+  // races an explicit timer and aborts the fetch itself when the timer wins.
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new Error(`Snakewatch emojify fetch timed out after ${SNAKEWATCH_LOAD_BUDGET_MS} ms`))
+    }, SNAKEWATCH_LOAD_BUDGET_MS)
+  })
   snakewatchEmojiSourceLoad = (async () => {
     try {
-      const response = await fetch(SNAKEWATCH_EMOJIFY_URL, {
-        signal: AbortSignal.timeout(3000),
-      })
-      if (!response.ok) throw new Error(`Snakewatch emojify fetch failed: ${response.status}`)
-      applySnakewatchEmojiSource(await response.text())
+      await Promise.race([deadline, (async () => {
+        const response = await fetch(SNAKEWATCH_EMOJIFY_URL, { signal: controller.signal })
+        if (!response.ok) throw new Error(`Snakewatch emojify fetch failed: ${response.status}`)
+        applySnakewatchEmojiSource(await response.text())
+      })()])
     } catch (error) {
       if (!snakewatchEmojiSource) {
         snakewatchEmojiSourceExpiresAt = Date.now() + 5 * 60 * 1000
       }
       console.warn(error instanceof Error ? error.message : 'Snakewatch emojify fetch failed')
     } finally {
+      clearTimeout(timer)
       snakewatchEmojiSourceLoad = null
     }
   })()
