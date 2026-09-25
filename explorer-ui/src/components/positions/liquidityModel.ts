@@ -61,9 +61,13 @@ export function wrapperYieldOf(yields: ExplorerYields | null | undefined, wrappe
   return yields.moneyMarket?.[wrapper.marketKey]?.[String(wrapper.asset.assetId)]?.supply ?? null
 }
 
-/** The rate a wrapped pool's unwrapped shares miss, named in the position's hover. */
-export function unwrappedNote(wrapper: LpShareWrapper): string {
-  return `Unwrapped pool shares: the money market's supply APY and incentives on this pool are paid on ${wrapper.asset.symbol}, the share supplied there — these shares earn the pool's fee and legs.`
+/**
+ * The rate a wrapped pool's unwrapped shares miss, named in the position's hover.
+ * The share goes by the wrapper's name (the API's display face), so the note
+ * names it by its on-chain name (`name`: 2-Pool-HUSDT) to keep the two apart.
+ */
+export function unwrappedNote(wrapper: LpShareWrapper, share: AssetRef): string {
+  return `Unwrapped ${share.name ?? share.symbol} pool shares: the money market's supply APY and incentives on this pool are paid on ${wrapper.asset.symbol}, the share supplied there — these shares earn the pool's fee and legs.`
 }
 
 export const isFarmVenue = (venue: string): boolean => venue === 'Omnipool Farm' || venue === 'XYK Farm'
@@ -99,7 +103,7 @@ export function positionApr(p: LpPosition, y: PoolYield | null, entries: FarmIte
   if (!y) return { total: null, rows: [] }
   const rows = y.components.map(yieldComponentRow).filter(r => r.group !== 'Farm rewards')
   const terms: (number | null)[] = y.components.filter(c => c.kind !== 'farm').map(c => c.aprPct)
-  let note: string | undefined = p.wrapper ? unwrappedNote(p.wrapper) : undefined
+  let note: string | undefined = p.wrapper ? unwrappedNote(p.wrapper, p.asset) : undefined
   if (isFarmVenue(p.venue)) {
     const live = entries.filter(e => e.farmState == null || e.farmState === 'active')
     if (!entries.length) {

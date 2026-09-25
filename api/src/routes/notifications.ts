@@ -11,7 +11,7 @@ import {
 } from '../notifications/notificationStore.ts'
 import { NOTIFICATION_KINDS, describeRule, KIND_LABELS, type NotificationKind } from '../notifications/notificationRules.ts'
 import { activityTargetOf, resolveActivityTarget } from '../notifications/ruleTargets.ts'
-import { assetDescriptor } from '../services/explorerAssets.ts'
+import { displayDescriptor } from '../services/explorerAssets.ts'
 import { accountRef, mmMarketByKey, mmMarkets, resolveDisplayAccountId } from '../services/explorerService.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
 import { renderNotification, text } from '../notifications/render.ts'
@@ -59,7 +59,7 @@ function ruleRef(r: NotificationRule) {
     name: r.name,
     summary: describeRule(
       r.kind, r.params,
-      assetId => assetDescriptor(assetId).symbol,
+      assetId => displayDescriptor(assetId).symbol,
       t => resolveActivityTarget(r.accountId, t),
       key => mmMarketByKey(key)?.label ?? null,
     ),

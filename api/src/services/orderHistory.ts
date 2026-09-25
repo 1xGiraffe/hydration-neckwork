@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
-import { assetDescriptor } from './explorerAssets.ts'
+import { displayDescriptor } from './explorerAssets.ts'
 import { loadHourlyFlowPricer } from './eventTimeCloses.ts'
 import {
   DCA_ENDED_EVENTS_SQL, INTENT_ACTION_EVENTS, INTENT_ENDED_EVENTS_SQL,
@@ -296,7 +296,7 @@ async function enrichDca(entries: OrderHistoryEntry[], accs: string[]): Promise<
     out.set(`dca:${e.id}`, {
       kind: 'dca', id: e.id,
       who: ACCOUNT_RE.test(s.who) ? accountRef(s.who) : null,
-      assetIn: assetDescriptor(pair.assetIn), assetOut: assetDescriptor(pair.assetOut),
+      assetIn: displayDescriptor(pair.assetIn), assetOut: displayDescriptor(pair.assetOut),
       direction: direction(recovered[i]?.direction ?? s.direction),
       status: e.status,
       statusReason: e.hookTermination ? reasonAt.get(`${e.hookTermination.bh}:${e.hookTermination.ei}`) ?? null : null,
@@ -365,7 +365,7 @@ async function enrichIntents(entries: OrderHistoryEntry[]): Promise<Map<string, 
     out.set(`${e.kind}:${e.id}`, {
       kind: e.kind, id: e.id, seq: intentSeqOf(e.id),
       who: ACCOUNT_RE.test(order.owner) ? accountRef(order.owner) : null,
-      assetIn: assetDescriptor(order.assetIn), assetOut: assetDescriptor(order.assetOut),
+      assetIn: displayDescriptor(order.assetIn), assetOut: displayDescriptor(order.assetOut),
       direction: null,
       status: e.status, statusReason: null, migratedToIntentId: null,
       // A swap intent places its whole amount; a DCA intent's budget is optional on

@@ -1,7 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cachedSwr } from './cache.ts'
 import { ICE_FEE_ACCOUNT, ICE_POT_ACCOUNT, applyEventTimeUsd, dcaMigrationReason, ensurePrices, getIntentOrders, iceSettlementsFor, usdValue, type AssetRef, type PriceInfo, type RawIntentEvent } from './explorerService.ts'
-import { assetDescriptor } from './explorerAssets.ts'
+import { displayDescriptor } from './explorerAssets.ts'
 
 // ICE dashboard — the intent venue runtime 443 added: swap intents (the product's
 // "limit orders") and DCA intents, settled inside unsigned `ICE.submit_solution`
@@ -34,7 +34,7 @@ const FILL_EVENTS_SQL = ['Intent.IntentResolved', 'Intent.IntentResovedPartially
 const DCA_COMPLETED_EVENT = 'Intent.DcaCompleted'
 const TERMINAL_EVENTS_SQL = ['Intent.IntentResolved', 'Intent.IntentCanceled', 'Intent.IntentExpired', 'Intent.DcaCompleted'].map(n => `'${n}'`).join(', ')
 
-const asset = (id: number): AssetRef => assetDescriptor(id)
+const asset = (id: number): AssetRef => displayDescriptor(id)
 
 function safeJsonObj(s: string | null | undefined): Record<string, unknown> {
   if (!s) return {}

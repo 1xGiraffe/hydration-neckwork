@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BorrowTab } from '../src/components/positions/BorrowTab'
-import { HF_CAP, borrowCards, marketInterest, marketSeries, netApy, parseHealthFactor, reserveBorrowPct, reserveInterest, reserveSupplyPct } from '../src/components/positions/borrowMath'
+import { HF_CAP, borrowCards, marketInterest, marketSeries, netApy, parseHealthFactor, reserveBorrowPct, reserveInterest, reserveRows, reserveSupplyPct } from '../src/components/positions/borrowMath'
 import { MM_DIP, mockMoneyMarketHistory, mockMoneyMarketYields } from './fixtures/positionsMock'
-import type { MmReserve, MoneyMarketPosition, ReserveYield } from '../src/types'
+import type { MmReserve, MoneyMarketHistoryMarket, MoneyMarketHistoryReserve, MoneyMarketPosition, ReserveYield } from '../src/types'
 
 const HDX = { assetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12, parachainId: null }
 const FOX = '1L53bUTBopXqDXSXjBdQXFV7jZ8FtdRZS5JoMjGq5z3Cv2zr'
@@ -249,5 +249,33 @@ describe('<BorrowTab>', () => {
     expect(html).not.toContain('data-chart="')
     // The KPI row's history-backed figures are loading, never a dash that reads as "none".
     expect(html).toContain('<span class="k">Interest earned</span><span class="v"><span class="muted">…</span>')
+  })
+})
+
+// The history files a reserve under its underlying and carries the aToken beside
+// it, while a current row names a supplied reserve by the aToken held (aDOT) and a
+// debt-only one by the asset owed (DOT): the join answers to both ids, so a reserve
+// still held never doubles as a "closed" one and its interest lands on its own row.
+describe('reserveRows', () => {
+  const DOT = { assetId: 5, symbol: 'DOT', name: 'Polkadot', decimals: 10, parachainId: null }
+  const ADOT = { assetId: 1001, symbol: 'aDOT', name: null, decimals: 10, parachainId: null }
+  const HOLLAR = { assetId: 1000, symbol: 'HOLLAR', name: null, decimals: 18, parachainId: null }
+  const GETH = { assetId: 420, symbol: 'GETH', name: 'GIGAETH', decimals: 18, parachainId: null }
+  const hist = (asset: MoneyMarketHistoryReserve['asset'], aToken: MoneyMarketHistoryReserve['aToken'], earnedUsd: number, paidUsd = 0): MoneyMarketHistoryReserve =>
+    ({ asset, aToken, reserveAddress: `0x${asset.assetId}`, points: [], interest: { interestEarned: '1', interestPaid: '0', interestEarnedUsd: earnedUsd, interestPaidUsd: paidUsd, interestIncomplete: false } })
+  const market = { marketKey: 'core', reserves: [hist(DOT, ADOT, 94), hist(HOLLAR, null, 0, 12), hist(GETH, null, 3)] } as unknown as MoneyMarketHistoryMarket
+  const spec = { marketKey: 'core', label: 'Money Market', role: 'primary' as const, stakingBacked: false, current: position({ reserves: [
+    reserve({ assetId: 1001, symbol: 'aDOT', decimals: 10, supplied: '50', suppliedUsd: 5, collateral: true }),
+    reserve({ assetId: 1000, symbol: 'HOLLAR', decimals: 18, debt: '7', debtUsd: 7 }),
+  ] }) }
+
+  it('matches a supplied reserve shown as its aToken to the history filed under the underlying, and closes only what no current row claimed', () => {
+    const rows = reserveRows(spec, market)
+    expect(rows.map(r => [r.asset.symbol, r.closed, r.interest?.earnedUsd ?? null, r.interest?.paidUsd ?? null]))
+      .toEqual([['aDOT', false, 94, 0], ['HOLLAR', false, 0, 12], ['GETH', true, 3, 0]])
+  })
+  it('lists every history reserve as closed when nothing is held now', () => {
+    const rows = reserveRows({ ...spec, current: null }, market)
+    expect(rows.map(r => [r.asset.symbol, r.closed])).toEqual([['DOT', true], ['HOLLAR', true], ['GETH', true]])
   })
 })

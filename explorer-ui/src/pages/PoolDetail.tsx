@@ -121,7 +121,7 @@ function PoolBody({ d }: { d: PoolDetailData }) {
           <div className="dt">Max peg drift</div>
           <div className="dd mono">{fmtPerbill(d.maxPegUpdatePerbill)} <span className="muted">per block</span></div>
         </>}
-        <div className="dt">Share token</div><div className="dd"><AssetChip asset={d.shareToken} /> <span className="muted mono">#{d.poolId}</span></div>
+        <div className="dt">Share token</div><div className="dd"><AssetChip asset={d.shareToken} /> <span className="muted mono">#{d.poolId}</span>{d.shareToken.name && d.shareToken.name !== d.shareToken.symbol && <span className="muted"> · {d.shareToken.name}</span>}</div>
         <div className="dt">LP supply</div><div className="dd mono"><Amt raw={d.totalIssuance} dec={d.shareToken.decimals} /> <Link to={paths.holders(d.poolId)} className="hash" style={{ marginLeft: 8 }}>holders</Link></div>
         {d.createdAt && <>
           <div className="dt">Created</div>
@@ -281,6 +281,8 @@ export function PoolDetail({ poolId }: { poolId: number }) {
           <div className="page-title">
             {data && <AssetIcon assetId={data.shareToken.assetId} iconAssetId={data.shareToken.iconAssetId} iconAssetIds={data.shareToken.iconAssetIds} symbol={data.shareToken.symbol} size={30} parachainId={data.shareToken.parachainId} origin={data.shareToken.origin} />}
             {' '}{data?.name ?? `Pool #${poolId}`}
+            {/* A Hydrated pool goes by its product name (GDOT); its on-chain share name stays beside it. */}
+            {data && data.shareToken.name && data.shareToken.name !== data.name && <span className="sub muted" style={{ marginLeft: 8 }}>{data.shareToken.name}</span>}
             {data && <span className="sub muted" style={{ marginLeft: 8 }}><PoolBadge pool={data.kind === 'stableswap' ? 'Stableswap' : 'XYK'} /></span>}
           </div>
         </div>
