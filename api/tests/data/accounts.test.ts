@@ -152,6 +152,41 @@ describe('GET /v1/accounts/:address/balances', () => {
     expect(client.seen.filter(s => s.query.includes('-- data:accounts:reserve-indices'))).toHaveLength(1)
   })
 
+  it('keeps an aToken\'s pallet row — its reserved slice — beside the supplied position', async () => {
+    // A DCA order selling aDOT (1001) reserves it through Tokens: those aTokens
+    // leave the holder's balanceOf (the `atoken` item, supplied) for the pallet's
+    // holding, mirrored as the pallet row's `reserved`. Two holdings, two items,
+    // each once — the aToken row is never dropped as "the same position".
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ')
+    const client = fakeDataClient(
+      query => (query.includes('-- data:accounts:balances-substrate')
+        ? [{ asset_id: '1001', total: '10000000000000', free: '0', reserved: '10000000000000' }]
+        : undefined),
+      query => (query.includes('-- data:accounts:balances-erc20') ? [] : undefined),
+      query => (query.includes('-- data:accounts:atoken-anchor-block') ? [{ b0: 8_200_000 }] : undefined),
+      (query, params) => (query.includes('-- data:accounts:atoken-scaled')
+        ? (params.h === `0x${ACC.slice(2, 42)}` ? [{ contract: ATOKEN, scaled: '1000000000000' }] : [])
+        : undefined),
+      query => (query.includes('-- data:accounts:atoken-map')
+        ? [{ asset_address: PRECOMPILE_5, atoken: ATOKEN, vdebt: VDEBT, pool_proxy: POOL, market_key: 'core' }]
+        : undefined),
+      query => (query.includes('-- data:accounts:reserve-indices')
+        ? [{ pool_address: POOL, reserve_address: PRECOMPILE_5, liq: (2n * RAY).toString(), vbi: RAY.toString() }]
+        : undefined),
+      query => (query.includes('-- data:assets:current-prices') ? [{ asset_id: 5, price: '2', block: 8_999_000, ts: now }] : undefined),
+    )
+    app = await freshDataApp(client)
+    const res = await app.inject({ url: `/v1/accounts/${ACC}/balances`, headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    const { items, totals } = res.json()
+    const byKind = Object.fromEntries(items.map((i: { kind: string }) => [i.kind, i]))
+    // 10 aDOT reserved, priced through DOT (the aToken's price alias) at $2.
+    expect(byKind.substrate).toMatchObject({ assetId: '1001', amount: '10000000000000', free: '0', reserved: '10000000000000', valueUsd: '20.00' })
+    // Supplied = scaled 1 × liquidity index 2 RAY / RAY = 2 DOT at $2.
+    expect(byKind.atoken).toMatchObject({ assetId: '5', amount: '2000000000000', valueUsd: '4.00' })
+    expect(totals).toEqual({ assetsUsd: '24.00', debtUsd: '0.00', netUsd: '24.00' })
+  })
+
   it('answers an unseen account with empty items, not 404', async () => {
     const client = fakeDataClient(
       query => (query.includes('-- data:accounts:balances-substrate') ? [] : undefined),

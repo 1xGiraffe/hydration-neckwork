@@ -883,12 +883,14 @@ async function xykPrincipal(
   return out
 }
 
-// Registry aToken ids. A pallet-side balance row for one of these is the SAME
-// economic position the value snapshot reports as `supplied` on the underlying
-// reserve, so it is replaced by the snapshot rather than added to it — the
-// replace-never-add rule for receipt-token views (AGENTS.md). Adding both would
-// double-count the reserved slice these rows carry (`free` is always 0 for them,
-// since the balance lives in EVM contract storage).
+// Registry aToken ids. A pallet-side balance row for one of these carries no
+// wallet balance (`free` is always 0: the balance lives in EVM contract storage,
+// and the value snapshot reports it as `supplied` on the underlying reserve — the
+// replace-never-add rule for receipt-token views, AGENTS.md). Its `reserved` side
+// is a different holding: a named reserve on an aToken (a DCA order's `dcaorder`)
+// moves the aTokens out of the holder's balanceOf — which is what `supplied` is —
+// into the pallet's holding and mirrors the amount here, so the snapshot never
+// covers it and it is valued once, as locked.
 const ATOKEN_IDS = new Set(Object.keys(ATOKEN_UNDERLYING_ID).map(Number))
 
 interface LatestBalanceRow {
@@ -1019,11 +1021,15 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
         // superseded below — otherwise an account holding only aTokens would report
         // blockHeight 0 despite having been observed.
         blockHeight = Math.max(blockHeight, Number(row.last_block) || 0)
-        // An aToken's pallet row is the money-market position the snapshot reports
-        // on the underlying reserve; counting both would double the reserved slice.
-        // Replaced, not added — and dropped outright when the snapshot is stale,
-        // since this row is not a usable substitute for it either.
-        if (ATOKEN_IDS.has(assetId)) continue
+        // An aToken's pallet row: its free side is the money-market position the
+        // snapshot reports on the underlying reserve — replaced, not added, and not
+        // a usable substitute when the snapshot is stale. Its reserved side is the
+        // pallet's own holding (see ATOKEN_IDS), outside the snapshot, so it counts
+        // as locked whatever the snapshot's state.
+        if (ATOKEN_IDS.has(assetId)) {
+          locked += usdScaled(rawAmount(row.reserved), priceFor(prices, assetId), assetDescriptor(assetId).decimals)
+          continue
+        }
         // An XYK LP token is valued once, by what it redeems (xykLpUsd), never as a
         // wallet balance at a token price. No XYK LP token has a price feed today, so
         // this moves nothing out of transferable/locked; it keeps a future feed from
