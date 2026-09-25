@@ -75,11 +75,14 @@ describe('attachHookSwapActors — one resolution shared by every surface', () =
     expect(explorerService.match(/await attachHookSwapActors\(/g)).toHaveLength(6)
   })
 
-  // The account page reads the account-first projection instead, whose signer-less
-  // rows exist only because the Broadcast swapper keyed them to this account — so
-  // the row's account IS the actor, and the ICE pot's page names the pot on its trades.
-  it('names the account itself on a signer-less row of the account page', () => {
-    expect(explorerService).toMatch(/const who = rep\.signer \|\| rep\.account/)
+  // The account page reads the account-first projection instead, whose account column
+  // IS the actor: the signatory of an ordinary swap, the account a proxied or multisig
+  // dispatch ran as, or the Broadcast swapper that keyed a signer-less row here. So the
+  // ICE pot's page names the pot on its trades, and a proxied account's page names the
+  // proxied account rather than the proxy signer in its signer column.
+  it('names the account itself on a row of the account page, never the signer column', () => {
+    expect(explorerService).toMatch(/const who = rep\.account\b/)
+    expect(explorerService).not.toMatch(/const who = rep\.signer/)
   })
 })
 
