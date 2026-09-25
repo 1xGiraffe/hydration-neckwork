@@ -528,7 +528,31 @@ export interface MmReserve {
 }
 // A concentrated-liquidity position (venue 'Uniswap v3' / 'Gamma vault') holds two tokens:
 // `asset`/`amount` are token0, `assetB`/`amountB` token1; it links to its pool page.
-export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string; assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string }
+export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string; assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string; unclaimedRewards?: LpUnclaimedReward[] }
+
+// Unclaimed liquidity-mining rewards as the account API ships them
+// (`farmRewards` on the account/tag detail, `unclaimedRewards` on farmed LP rows).
+// The API already counts the priced total INSIDE portfolioUsd (and so in Value
+// and the chart), but never inside a position's valueUsd — so the UI adds them
+// to nothing: it only says how much of the value they are.
+// `payable: false` — below the reward asset's existential deposit while the owner
+// holds less than it: a claim now pays the treasury, so its value is 0 and it is
+// counted nowhere (the amount stays visible).
+export interface LpUnclaimedReward { depositId: string; globalFarmId: number; yieldFarmId: number; asset: AssetRef; amount: string; valueUsd: number | null; projected: boolean; belowExistentialDeposit?: boolean; payable?: boolean }
+export interface FarmRewardsSummary {
+  asOfBlock: number
+  totalUsd: number
+  // Per entry, as far as the summary needs it: an unpriced non-zero reward is
+  // still a reward, so it is counted aloud rather than silently left out.
+  items?: { claimable: string; claimableUsd: number | null; payable?: boolean }[]
+}
+
+// Claimable money-market (lending) incentives as the account API ships them
+// (`moneyMarketRewards` on the account/tag detail, `unclaimedRewards` per market):
+// the chain's own getAllUserRewards. Like farm rewards, already INSIDE
+// portfolioUsd and never inside a market's collateral — the UI states the share.
+export interface MoneyMarketRewardUi { marketKey: string; asset: AssetRef; claimable: string; claimableUsd: number | null; belowExistentialDeposit?: boolean }
+export interface MoneyMarketRewardsSummary { asOfBlock: number; totalUsd: number; items?: MoneyMarketRewardUi[] }
 // A DCA order's price limit per trade, on one axis whatever its kind or
 // direction: `price` is the most it will pay for a unit of what it buys (assetIn
 // per assetOut), and `amount`/`asset` restate the bound the order placed — a
@@ -628,6 +652,9 @@ export interface MoneyMarketPosition {
   // health factor is that account's, not the lowest of several.
   memberCount?: number
   reserves?: MmReserve[]
+  // Claimable incentives accruing on this market's aTokens (display only: the
+  // value counts them once, through the detail's `moneyMarketRewards`).
+  unclaimedRewards?: MoneyMarketRewardUi[]
 }
 export interface AddressAlias {
   accountId: string | null
@@ -686,6 +713,9 @@ export interface AddressDetail {
   portfolioSeriesExHdx?: number[]
   portfolioDates?: string[]
   balanceHistory?: AssetBalanceHistory[]
+  // Unclaimed rewards, already inside `portfolioUsd`; absent when their snapshot is stale.
+  farmRewards?: FarmRewardsSummary
+  moneyMarketRewards?: MoneyMarketRewardsSummary
 }
 
 export interface AssetBalancePoint { ts: string; blockHeight: number; balance: number }
@@ -1604,6 +1634,9 @@ export interface TagDetail {
   portfolioDates?: string[]
   portfolioBlocks?: number[]
   balanceHistory: AssetBalanceHistory[]
+  // See AddressDetail.farmRewards / moneyMarketRewards — summed over the member set.
+  farmRewards?: FarmRewardsSummary
+  moneyMarketRewards?: MoneyMarketRewardsSummary
 }
 
 // One leg of a DCA schedule's route. Only Stableswap names a specific pool; the

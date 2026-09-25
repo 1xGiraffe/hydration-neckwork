@@ -8,8 +8,9 @@ import {
 } from './explorerService.ts'
 import { v3PoolHistory, v3PoolLiquidity, type V3History, type V3HistoryPool, type V3PoolLiquidity } from './uniswapV3History.ts'
 import { ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, sqrtPriceX96ToPrice, tickToPrice, v3ManagerPositions, v3PoolStats, v3PricePoints, v3VaultStats, type V3Pool, type V3Registry } from './uniswapV3Service.ts'
-import { H2O_ASSET_ID, assetDescriptor, priceAssetId } from './explorerAssets.ts'
+import { H2O_ASSET_ID, assetDescriptor, currentPriceOf, priceAssetId } from './explorerAssets.ts'
 import { usdAtPrice } from './assetValue.ts'
+import { xykReserveAssets } from './lpMath.ts'
 import { OMNIPOOL_ACCOUNT } from './valuation.ts'
 import { stableswapPoolAccount } from './tagService.ts'
 import { hasDriftingPegs, parseStableswapPools, pegPrice, type StableswapPoolSnapshot } from './stableswapSnapshot.ts'
@@ -55,11 +56,10 @@ const XYK_FEE_PERMILL = 3000
 
 const asset = (id: number): AssetRef => assetDescriptor(id)
 
+// currentPriceOf: own entry first, else the alias (stopped at a share token — a
+// share's price is its own derived entry or none).
 function priceOf(prices: Map<number, PriceInfo>, assetId: number): number | null {
-  const direct = prices.get(assetId)?.price
-  if (direct != null) return direct
-  const aliased = prices.get(priceAssetId(assetId))?.price
-  return aliased ?? null
+  return currentPriceOf(prices, assetId)?.price ?? null
 }
 
 function usdOf(prices: Map<number, PriceInfo>, assetId: number, raw: bigint): number | null {
@@ -182,7 +182,7 @@ export interface CurrentPools {
 }
 
 interface SnapshotOmniAsset { asset_id: number; hub_reserve: string; reserve: string; shares: string; protocol_shares?: string; cap?: string; tradable?: number }
-interface SnapshotXykPool { pool_account: string; asset_a: number; asset_b: number; reserve_a: string; reserve_b: string }
+interface SnapshotXykPool { pool_account: string; asset_a?: number; asset_b?: number; reserve_a: string; reserve_b: string }
 
 function safeJson(s: string | null | undefined): unknown {
   if (!s) return null
@@ -229,21 +229,26 @@ export async function loadCurrentPools(): Promise<CurrentPools> {
 
     // A pool pair account can be reused across create → destroy → recreate
     // cycles; the live incarnation is the newest registry row for the account.
-    const regByAccount = new Map<string, { lp: number; createdBlock: number }>()
+    const regByAccount = new Map<string, { lp: number; createdBlock: number; assetA: number; assetB: number }>()
     for (const r of registry) {
       const prev = regByAccount.get(r.pool_account)
-      if (!prev || r.created_block > prev.createdBlock) regByAccount.set(r.pool_account, { lp: r.lp_asset_id, createdBlock: r.created_block })
+      if (!prev || r.created_block > prev.createdBlock) regByAccount.set(r.pool_account, { lp: r.lp_asset_id, createdBlock: r.created_block, assetA: Number(r.asset_a), assetB: Number(r.asset_b) })
     }
     const xykByLp = new Map<number, XykPoolSnapshot>()
     const xykByAccount = new Map<string, XykPoolSnapshot>()
     const xykPools = (safeJson(snap?.x) as { pools?: SnapshotXykPool[] } | null)?.pools ?? []
     for (const p of xykPools) {
       const reg = regByAccount.get(p.pool_account)
+      // A legacy row without asset ids pairs by the registry order (presence, never
+      // truthiness: HDX is asset 0); one the registry does not name is left out.
+      const hasIds = p.asset_a != null && p.asset_b != null
+      if (!hasIds && !reg) continue
+      const [assetA, assetB] = xykReserveAssets(hasIds, Number(p.asset_a), Number(p.asset_b), reg?.assetA ?? 0, reg?.assetB ?? 0)
       const pool: XykPoolSnapshot = {
         lpAssetId: reg?.lp ?? null,
         poolAccount: p.pool_account,
-        assetA: p.asset_a,
-        assetB: p.asset_b,
+        assetA,
+        assetB,
         reserveA: BigInt(p.reserve_a),
         reserveB: BigInt(p.reserve_b),
         createdBlock: reg?.createdBlock ?? null,

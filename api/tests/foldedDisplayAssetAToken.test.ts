@@ -31,7 +31,7 @@ describe('a display asset that is itself an aToken', () => {
     expect(src).toContain('const displayToken = displayIsAToken ? tokens.find(token => displayReserves.has(token.asset.toLowerCase())) : undefined')
     expect(src).toContain('reconstructHolderScaled(displayToken.aToken, b0)')
     // Scaled balances are only balances once multiplied by the reserve's index.
-    expect(src).toContain('const bal = (holder.scaled * displayLiquidityIndex) / ATOKEN_RAY')
+    expect(src).toContain('const bal = settledAmount(holder.scaled, displayLiquidityIndex)')
   })
 
   // Same guards the plain aToken path uses: without an anchor block or a live

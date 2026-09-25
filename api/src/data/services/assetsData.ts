@@ -1,10 +1,12 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { allExplorerAssets, type ExplorerAsset } from '../../services/explorerAssets.ts'
+import { allExplorerAssets, assetDecimalsOrNull, currentPriceOf, isStableswapShareToken, type ExplorerAsset } from '../../services/explorerAssets.ts'
+import { SHARE_POOL_MAX_AGE_SECONDS, withStableswapSharePrices } from '../../services/lpMath.ts'
 import { queryOHLCV, type OHLCVInterval } from '../../services/ohlcvService.ts'
-import { scaledUsd } from '../../services/valuation.ts'
+import { formatUnits, scaledUsd } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
 import { dataStatus } from './head.ts'
+import { poolSnapshot, type PoolSnapshot } from './poolSnapshot.ts'
 
 // Asset registry + price reads for /v1/assets*. The registry itself is the
 // shared in-memory snapshot (explorerAssets, refreshed every 5 minutes); prices
@@ -59,14 +61,50 @@ export async function currentPrices(client: ClickHouseClient): Promise<Map<numbe
 // The fresh current price per asset as a scaled USD integer (the valuation
 // module's fixed-point form), for valuing CURRENT holdings: a feed outside the
 // freshness bound is absent, never its final close.
+//
+// A stableswap share token's entry is what one share redeems for (its pro-rata
+// reserves in the newest pool snapshot, valued at these same fresh leg prices —
+// lpMath.stableswapSharePrices, the definition the explorer and the public API
+// state too), replacing whatever feed the share has; a share with an unpriced leg,
+// or with a snapshot over an hour old, is absent. Look entries up through
+// currentPriceOf, which never walks a share on to an underlying.
 export async function freshPriceMap(client: ClickHouseClient): Promise<Map<number, bigint>> {
-  const [prices, status] = await Promise.all([currentPrices(client), dataStatus(client)])
-  const out = new Map<number, bigint>()
+  return (await currentPriceState(client)).fresh
+}
+
+interface CurrentPriceState {
+  prices: Map<number, PriceEntry>
+  head: number
+  fresh: Map<number, bigint>
+  /** The snapshot the share prices were derived from; null when none could be (every share unpriced). */
+  shareSnapshot: PoolSnapshot | null
+}
+
+async function currentPriceState(client: ClickHouseClient): Promise<CurrentPriceState> {
+  // An unreadable pool snapshot leaves every share token unpriced, never the
+  // rest of the map (nor the request) failed.
+  const [prices, status, snapshot] = await Promise.all([currentPrices(client), dataStatus(client), poolSnapshot(client).catch(() => null)])
+  const feeds = new Map<number, bigint>()
   for (const [assetId, entry] of prices) {
     const { priceUsd } = freshPrice(entry, status.indexedHead)
-    if (priceUsd != null) out.set(assetId, scaledUsd(priceUsd))
+    if (priceUsd != null) feeds.set(assetId, scaledUsd(priceUsd))
   }
-  return out
+  const shareSnapshot = snapshot && snapshot.blockHeight > 0 && Date.now() - Date.parse(snapshot.timestamp) <= SHARE_POOL_MAX_AGE_SECONDS * 1000 ? snapshot : null
+  const pools = shareSnapshot ? [...shareSnapshot.stableswap.values()] : null
+  const fresh = withStableswapSharePrices(feeds, pools, id => currentPriceOf(feeds, id), assetDecimalsOrNull, isStableswapShareToken)
+  return { prices, head: status.indexedHead, fresh, shareSnapshot }
+}
+
+// A share token's published price: its derived redeemable value from `fresh`
+// (at the 1e-12 USD scale), dated by the pool snapshot it was derived from; both
+// null when the share is unpriced. A share's own price feed is never published as
+// its current price. Null for an asset that is not a share token.
+const USD_DECIMALS = 12
+function sharePrice(assetId: number, state: CurrentPriceState): { priceUsd: string | null; block: number | null; time: string | null } | null {
+  if (!isStableswapShareToken(assetId) && !state.shareSnapshot?.stableswap.has(assetId)) return null
+  const derived = state.fresh.get(assetId)
+  if (derived == null || !state.shareSnapshot) return { priceUsd: null, block: null, time: null }
+  return { priceUsd: formatUnits(derived.toString(), USD_DECIMALS), block: state.shareSnapshot.blockHeight, time: state.shareSnapshot.timestamp }
 }
 
 function freshPrice(entry: PriceEntry | undefined, head: number): { priceUsd: string | null; priceUpdatedAt: string | null } {
@@ -80,7 +118,8 @@ function freshPrice(entry: PriceEntry | undefined, head: number): { priceUsd: st
   }
 }
 
-function assetItem(asset: ExplorerAsset, prices: Map<number, PriceEntry>, head: number): AssetItem {
+function assetItem(asset: ExplorerAsset, state: CurrentPriceState): AssetItem {
+  const share = sharePrice(asset.assetId, state)
   return {
     assetId: String(asset.assetId),
     symbol: asset.symbol,
@@ -88,22 +127,21 @@ function assetItem(asset: ExplorerAsset, prices: Map<number, PriceEntry>, head: 
     decimals: asset.decimals,
     parachainId: asset.parachainId,
     origin: asset.origin ? { ecosystem: asset.origin.ecosystem, chainId: asset.origin.chainId, assetId: asset.origin.assetId } : null,
-    ...freshPrice(prices.get(asset.assetId), head),
+    ...(share ? { priceUsd: share.priceUsd, priceUpdatedAt: share.time } : freshPrice(state.prices.get(asset.assetId), state.head)),
   }
 }
 
 export async function listAssets(client: ClickHouseClient): Promise<AssetItem[]> {
-  const [prices, status] = await Promise.all([currentPrices(client), dataStatus(client)])
+  const state = await currentPriceState(client)
   return allExplorerAssets()
     .sort((a, b) => a.assetId - b.assetId)
-    .map(asset => assetItem(asset, prices, status.indexedHead))
+    .map(asset => assetItem(asset, state))
 }
 
 export async function getAsset(client: ClickHouseClient, assetId: number): Promise<AssetItem | null> {
   const registered = allExplorerAssets().find(asset => asset.assetId === assetId)
   if (!registered) return null
-  const [prices, status] = await Promise.all([currentPrices(client), dataStatus(client)])
-  return assetItem(registered, prices, status.indexedHead)
+  return assetItem(registered, await currentPriceState(client))
 }
 
 // ---------------------------------------------------------------------------
@@ -170,9 +208,11 @@ export async function priceAtTime(client: ClickHouseClient, assetId: number, epo
 }
 
 export async function currentPrice(client: ClickHouseClient, assetId: number): Promise<PriceAt> {
-  const [prices, status] = await Promise.all([currentPrices(client), dataStatus(client)])
-  const entry = prices.get(assetId)
-  const { priceUsd } = freshPrice(entry, status.indexedHead)
+  const state = await currentPriceState(client)
+  const share = sharePrice(assetId, state)
+  if (share) return { assetId: String(assetId), priceUsd: share.priceUsd, atBlock: share.block, atTime: share.time }
+  const entry = state.prices.get(assetId)
+  const { priceUsd } = freshPrice(entry, state.head)
   return {
     assetId: String(assetId),
     priceUsd,

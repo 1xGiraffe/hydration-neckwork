@@ -1095,13 +1095,12 @@ function reserveUsable(row: FillRow): boolean {
  *
  * A fill proves the pool held both assets at that block, so a 0 on either side is
  * a projection artefact rather than the pool's state — and publishing it would
- * tell DexScreener the pool is empty and its liquidity worthless. The known cause
- * is `xyk_pool_reserve_history`: native HDX lives in `System.Account`, not
- * `Tokens`, so every HDX-quoted XYK pool reads 0 on its HDX side (measured over
- * blocks > 13,500,000: 1,859 of 1,859 rows with `asset_a = 0`, and 2,002 of 2,002
- * with `asset_b = 0`). Fixing the projection is separate schema work; until then
- * the field is omitted rather than wrong. The check is applied to every venue, not
- * just XYK, because a zero reserve under a fill is never right anywhere.
+ * tell DexScreener the pool is empty and its liquidity worthless. A reserve side
+ * is read where its asset lives (System.Account for native HDX, EVM storage for an
+ * Erc20 asset, Tokens otherwise — `readXYKState` in src/raw/snapshot.ts); a side
+ * the state grid still reads as 0 is omitted rather than published. The check is
+ * applied to every venue, not just XYK, because a zero reserve under a fill is
+ * never right anywhere.
  */
 function bothSided(reserves: { asset0: string; asset1: string }): { asset0: string; asset1: string } | undefined {
   const zero = (v: string) => !v || /^0(\.0*)?$/.test(v)

@@ -160,9 +160,75 @@ describe('get_account', () => {
     expect(out.markdown).toContain('holdings minus money-market debt')
     // Both halves are shown, so the arithmetic is checkable rather than a
     // second opinion — and neither is labelled with the other's name.
-    expect(out.markdown).toContain('Holdings (gross: balances + LP positions)')
+    expect(out.markdown).toContain('Holdings (gross: balances + LP positions + claimable farm rewards and lending incentives)')
     expect(out.markdown).toContain('Money-market debt (netted out above)')
     expect(out.markdown).not.toMatch(/\*\*Portfolio:\*\*/)
+  })
+
+  // The upstream portfolioUsd already counts the claimable farm rewards; the tool
+  // says how much of Holdings they are (and on the farmed row), never adds them.
+  it('states the farm rewards inside Holdings and beside the farmed position', async () => {
+    const reward = { depositId: '9', globalFarmId: 133, yieldFarmId: 139, asset: hdx, amount: '2000000000000000', valueUsd: 8.7, projected: true, belowExistentialDeposit: false }
+    const detail = addressDetail({
+      liquidityPositions: [{ positionId: '73215', asset: hdx, amount: '900000000000000', shares: '900000000000000', valueUsd: 3930.91, venue: 'Omnipool Farm', unclaimedRewards: [reward] }],
+      farmRewards: {
+        asOfBlock: 14_745_000, totalUsd: 8.7,
+        items: [
+          { depositId: '9', positionId: '73215', globalFarmId: 133, yieldFarmId: 139, venue: 'Omnipool Farm', farmState: 'active', asset: hdx, claimable: '2000000000000000', claimableUsd: 8.7, forfeitIfWithdrawnNow: '0', projected: true, belowExistentialDeposit: false, loyaltyPct: 50, lastSyncPeriod: 1 },
+          { depositId: '9', positionId: '73215', globalFarmId: 134, yieldFarmId: 140, venue: 'Omnipool Farm', farmState: 'active', asset: hdx, claimable: '5', claimableUsd: null, forfeitIfWithdrawnNow: '0', projected: true, belowExistentialDeposit: true, loyaltyPct: 50, lastSyncPeriod: 1 },
+          { depositId: '9', positionId: '73215', globalFarmId: 135, yieldFarmId: 141, venue: 'Omnipool Farm', farmState: 'active', asset: hdx, claimable: '7', claimableUsd: 0, forfeitIfWithdrawnNow: '0', projected: true, belowExistentialDeposit: true, payable: false, loyaltyPct: 50, lastSyncPeriod: 1 },
+        ],
+      },
+    })
+    const { upstream } = fakeUpstream({ [DETAIL_PATH]: detail })
+    const out = await tool('get_account').handler({ address: ADDRESS }, ctxWith(upstream))
+    const json = out.json as { holdingsUsd: number; farmRewardsUsd: number | null; farmRewardsAsOfBlock: number | null; liquidityPositions: { unclaimedRewards?: unknown[]; valueUsd: number }[] }
+    expect(out.markdown).toContain('Unclaimed farm rewards (inside holdings)')
+    expect(out.markdown).toContain('as of block 14,745,000')
+    expect(out.markdown).toContain('plus 1 entry the index cannot price (not counted)')
+    expect(out.markdown).toContain('| Unclaimed rewards |')
+    expect(out.markdown).toContain("counted in the account's Holdings and Value above")
+    // Holdings is the upstream figure as it stands — no reward added a second time.
+    expect(json.holdingsUsd).toBeCloseTo(12_660.67, 6)
+    expect(json.farmRewardsUsd).toBe(8.7)
+    expect(json.farmRewardsAsOfBlock).toBe(14_745_000)
+    // The unpriced entry is counted aloud; the unpayable one is named, not counted.
+    expect((json as unknown as { farmRewardsUnpriced: number }).farmRewardsUnpriced).toBe(1)
+    expect(out.markdown).toContain('1 entry is below the reward asset\'s existential deposit while the account holds less than it')
+    expect(json.liquidityPositions[0].valueUsd).toBe(3930.91)
+    expect(json.liquidityPositions[0].unclaimedRewards).toHaveLength(1)
+  })
+
+  // The upstream portfolioUsd already counts the claimable lending incentives too;
+  // the tool states them inside Holdings and under their market, never adds them.
+  it('states the money-market incentives inside Holdings and under their market', async () => {
+    const gdot = { assetId: 69, iconAssetId: 69, symbol: 'GDOT', name: null, decimals: 18, parachainId: null, origin: null }
+    const item = { marketKey: 'core', holder: '0x4a9ab52a6f688ede97c23d946f7e8ef4f1e47a47', asset: gdot, claimable: '2100000000000000000', claimableUsd: 12.5, reconciled: true, belowExistentialDeposit: true, legs: [] }
+    const base = addressDetail() as { moneyMarket: Array<Record<string, unknown>> }
+    const detail = addressDetail({
+      moneyMarketRewards: { asOfBlock: 15_000_000, totalUsd: 12.5, items: [item] },
+      moneyMarket: base.moneyMarket.map(m => (m.marketKey === 'core' ? { ...m, unclaimedRewards: [item] } : m)),
+    })
+    const { upstream } = fakeUpstream({ [DETAIL_PATH]: detail })
+    const out = await tool('get_account').handler({ address: ADDRESS }, ctxWith(upstream))
+    const json = out.json as { holdingsUsd: number; moneyMarketRewardsUsd: number | null; moneyMarketRewardsAsOfBlock: number | null }
+    expect(out.markdown).toContain('Unclaimed lending incentives (inside holdings)')
+    expect(out.markdown).toContain("the chain's own RewardsController.getAllUserRewards")
+    expect(out.markdown).toContain('below the reward asset\'s existential deposit')
+    expect(out.markdown).toContain("Unclaimed incentives (in the account value, not in this market's collateral)")
+    expect(out.markdown).toContain('2.1 GDOT ($12.5')
+    expect(json.holdingsUsd).toBeCloseTo(12_660.67, 6)
+    expect(json.moneyMarketRewardsUsd).toBe(12.5)
+    expect(json.moneyMarketRewardsAsOfBlock).toBe(15_000_000)
+    expect((json as unknown as { moneyMarketRewardsUnpriced: number }).moneyMarketRewardsUnpriced).toBe(0)
+  })
+
+  it('shows no reward line or column for an account without farm rewards', async () => {
+    const { upstream } = fakeUpstream({ [DETAIL_PATH]: addressDetail() })
+    const out = await tool('get_account').handler({ address: ADDRESS }, ctxWith(upstream))
+    expect(out.markdown).not.toContain('Unclaimed farm rewards (inside holdings)')
+    expect(out.markdown).not.toContain('| Unclaimed rewards |')
+    expect((out.json as { farmRewardsUsd: number | null }).farmRewardsUsd).toBeNull()
   })
 
   it('does not invent a debt subtraction for an account that owes nothing', async () => {
@@ -553,6 +619,258 @@ describe('get_account_history', () => {
   })
 })
 
+/* ---- kind 'liquidity' ---- */
+
+const LP_HISTORY_PATH = `/explorer/address/${ADDRESS}/liquidity-history`
+const dot = { assetId: 5, symbol: 'DOT', name: 'Polkadot', decimals: 10 }
+const h2o = { assetId: 1, symbol: 'H2O', name: null, decimals: 12 }
+const pool2 = { assetId: 102, symbol: '2-Pool', name: null, decimals: 18 }
+const lpDates = ['2026-09-20 00:00:00', '2026-09-21 00:00:00', '2026-09-22 00:00:00', '2026-09-23 00:00:00']
+const lpBlocks = [14_000_000, 14_014_400, 14_028_800, 14_043_200]
+
+function lpHistoryFixture(extraPositions = 0) {
+  const omnipool = {
+    venue: 'omnipool', farmed: true, positionId: '5690', poolKey: 'omnipool', shareAsset: null,
+    spans: [
+      { fromBlock: 13_990_000, fromTime: '2026-09-19 10:00:00', toBlock: 14_010_000, toTime: '2026-09-20 18:00:00', kind: 'direct' },
+      { fromBlock: 14_010_000, fromTime: '2026-09-20 18:00:00', toBlock: null, toTime: null, kind: 'farmed' },
+    ],
+    points: [
+      { i: 0, shares: '1000', valueUsd: 900, legs: [{ asset: dot, amount: '2000000000000', valueUsd: 900 }] },
+      { i: 1, shares: '1000', valueUsd: 700, legs: [{ asset: dot, amount: '1500000000000', valueUsd: 650 }, { asset: h2o, amount: '50000000000000', valueUsd: 50 }] },
+      { i: 3, shares: '1000', valueUsd: 1_234, legs: [{ asset: dot, amount: '2500000000000', valueUsd: 1_134 }, { asset: h2o, amount: '100000000000000', valueUsd: 100 }] },
+    ],
+  }
+  const stable = {
+    venue: 'stableswap', farmed: false, positionId: null, poolKey: '102', shareAsset: pool2, spans: [],
+    points: [
+      { i: 0, shares: '5', valueUsd: 50, legs: [{ asset: usdc, amount: '50000000', valueUsd: 50 }] },
+      { i: 1, shares: '5', valueUsd: null, legs: [{ asset: usdc, amount: '50000000', valueUsd: null }] },
+    ],
+  }
+  const tail = Array.from({ length: extraPositions }, (_, k) => ({
+    venue: 'omnipool', farmed: false, positionId: String(9000 + k), poolKey: 'omnipool', shareAsset: null, spans: [],
+    points: [{ i: 3, shares: '1', valueUsd: 1 + k, legs: [{ asset: dot, amount: '10000000000', valueUsd: 1 + k }] }],
+  }))
+  return {
+    stepSec: 86_400, priceGrain: '1d', dates: lpDates, blocks: lpBlocks,
+    valueUsd: [950, 700, 800, 1_234 + tail.reduce((s, p) => s + p.points[0].valueUsd, 0)],
+    unpriced: [0, 1, 0, 0],
+    positions: [stable, ...tail, omnipool],
+    positionsOmitted: 7,
+  }
+}
+
+describe("get_account_history kind 'liquidity'", () => {
+  it('reads the explorer LP-history route with the block window and nothing else', async () => {
+    const { upstream, calls } = fakeUpstream({ [LP_HISTORY_PATH]: lpHistoryFixture() })
+    await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity' }, ctxWith(upstream))
+    expect(calls).toEqual([{ path: LP_HISTORY_PATH, query: undefined }])
+
+    const windowed = fakeUpstream({ [LP_HISTORY_PATH]: lpHistoryFixture() })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity', fromBlock: 14_000_000, toBlock: 14_050_000 }, ctxWith(windowed.upstream))
+    expect(windowed.calls).toEqual([{ path: LP_HISTORY_PATH, query: { fromBlock: 14_000_000, toBlock: 14_050_000 } }])
+    expect(out.markdown).toContain('WINDOWED')
+  })
+
+  it('renders the LP value line and a position row with its H2O leg', async () => {
+    const { upstream } = fakeUpstream({ [LP_HISTORY_PATH]: lpHistoryFixture() })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity' }, ctxWith(upstream))
+    expect(out.markdown).toContain('## LP history')
+    expect(out.markdown).toContain('## LP value line')
+    expect(out.markdown).toContain('4 buckets of 1d')
+    expect(out.markdown).toContain('not a return')
+    const row = out.markdown.split('\n').find(l => l.includes('DOT #5690'))
+    expect(row).toBeDefined()
+    expect(row).toContain('Omnipool (farmed)')
+    // Spans exist: the exact open time, to the minute, not the first bucket end.
+    expect(row).toContain('2026-09-19 10:00 → still held')
+    expect(row).toContain('250 DOT + 100 H2O')
+    // The largest last-held value leads; the unpriced last point is a dash, not $0.
+    expect(out.markdown.indexOf('DOT #5690')).toBeLessThan(out.markdown.indexOf('2-Pool (#102)'))
+    const stableRow = out.markdown.split('\n').find(l => l.includes('2-Pool (#102)'))!
+    expect(stableRow).not.toContain('$0')
+    // Span-less venue: the first and last bucket end it was held at, marked `~`.
+    expect(stableRow).toContain('~2026-09-20 → ~2026-09-21')
+    expect(out.markdown).toContain('A `~date` is a point date')
+  })
+
+  it('never reports a low that exists only because a position dropped out unpriced', async () => {
+    // Bucket 1 totals $700 only because the stableswap position is unpriced there.
+    const { upstream } = fakeUpstream({ [LP_HISTORY_PATH]: lpHistoryFixture() })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity' }, ctxWith(upstream))
+    expect(out.markdown).toMatch(/\*\*Low \(fully priced buckets only\):\*\* \$800/)
+    expect(out.markdown).not.toMatch(/\*\*Low[^*]*:\*\* \$700/)
+    expect(out.markdown).toContain('the 1 with an unpriced position are left out')
+
+    // An unpriced ENDPOINT is named, and no percentage is taken against it.
+    const partial = { ...lpHistoryFixture(), unpriced: [0, 1, 0, 2] }
+    const p2 = fakeUpstream({ [LP_HISTORY_PATH]: partial })
+    const out2 = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity' }, ctxWith(p2.upstream))
+    expect(out2.markdown).toMatch(/\*\*Last:\*\* [^\n]*2 held position\(s\) unpriced there and left out/)
+    expect(out2.markdown).toContain('no percentage: an endpoint leaves unpriced positions out')
+    const json = (await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity', format: 'json' }, ctxWith(p2.upstream))).json as { series: { changeFraction: number | null; unpricedAtLast: number } }
+    expect(json.series.changeFraction).toBeNull()
+    expect(json.series.unpricedAtLast).toBe(2)
+  })
+
+  it('adds a sampled path of the LP value line, in markdown and JSON', async () => {
+    const n = 40
+    const long = {
+      ...lpHistoryFixture(),
+      dates: Array.from({ length: n }, (_, i) => `2026-0${1 + Math.floor(i / 20)}-${String((i % 20) + 1).padStart(2, '0')} 00:00:00`),
+      blocks: Array.from({ length: n }, (_, i) => 14_000_000 + i * 1000),
+      valueUsd: Array.from({ length: n }, (_, i) => 100 + i),
+      unpriced: Array.from({ length: n }, () => 0),
+      positions: [],
+      positionsOmitted: 0,
+    }
+    const { upstream } = fakeUpstream({ [LP_HISTORY_PATH]: long })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity' }, ctxWith(upstream))
+    expect(out.markdown).toMatch(/## Sampled path \(\d+ of 40 points, every \d+\w+ point\)/)
+    const json = (await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity', format: 'json' }, ctxWith(upstream))).json as { series: { sampled: unknown[]; sampleStride: number } }
+    expect(json.series.sampled.length).toBeLessThanOrEqual(13)
+    expect(json.series.sampleStride).toBeGreaterThan(1)
+  })
+
+  it('names the collapsed daily grid of an un-windowed sub-day step, and a window\'s end as the window\'s', async () => {
+    const hourly = { ...lpHistoryFixture(), stepSec: 10_800 }
+    const { upstream } = fakeUpstream({ [LP_HISTORY_PATH]: hourly })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity' }, ctxWith(upstream))
+    expect(out.markdown).toContain('4 daily points (the last 3h bucket of each day)')
+    expect(out.markdown).not.toContain('buckets of 3h')
+    expect(out.markdown).toContain('inside one day has no point')
+    const json = (await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity', format: 'json' }, ctxWith(upstream))).json as { grid: string; pointSpacingSec: number }
+    expect(json).toMatchObject({ grid: 'daily', pointSpacingSec: 86_400 })
+
+    // A window keeps every bucket, and "held at the last point" is the window's end.
+    const w = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity', fromBlock: 14_000_000, toBlock: 14_050_000 }, ctxWith(upstream))
+    expect(w.markdown).toContain('4 buckets of 3h')
+    expect(w.markdown).toContain('→ held at window end')
+    expect(w.markdown).not.toContain('still held')
+    const wj = (await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity', fromBlock: 14_000_000, toBlock: 14_050_000, format: 'json' }, ctxWith(upstream))).json as { grid: string; asOf: { block: number }; positions: { heldAtLastBucket: boolean }[] }
+    expect(wj.grid).toBe('step')
+    expect(wj.asOf.block).toBe(14_043_200)
+    expect(wj.positions[0].heldAtLastBucket).toBe(true)
+  })
+
+  it('marks a position farmed earlier and closes its Held on the exact span end', async () => {
+    const closed = {
+      venue: 'omnipool', farmed: false, positionId: '77', poolKey: 'omnipool', shareAsset: null,
+      spans: [
+        { fromBlock: 13_990_000, fromTime: '2026-09-19 08:15:30', toBlock: 14_000_100, toTime: '2026-09-20 00:10:00', kind: 'farmed' },
+        { fromBlock: 14_000_100, fromTime: '2026-09-20 00:10:00', toBlock: 14_020_000, toTime: '2026-09-21 09:45:12', kind: 'direct' },
+      ],
+      points: [{ i: 0, shares: '1', valueUsd: 10, legs: [{ asset: dot, amount: '10000000000', valueUsd: 10 }] }, { i: 1, shares: '1', valueUsd: 12, legs: [{ asset: dot, amount: '10000000000', valueUsd: 12 }] }],
+    }
+    const { upstream } = fakeUpstream({ [LP_HISTORY_PATH]: { ...lpHistoryFixture(), positions: [closed], positionsOmitted: 0 } })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity' }, ctxWith(upstream))
+    const row = out.markdown.split('\n').find(l => l.includes('DOT #77'))!
+    expect(row).toContain('Omnipool (farmed earlier)')
+    expect(row).toContain('2026-09-19 08:15 → 2026-09-21 09:45')
+    expect(out.markdown).toContain('`(farmed earlier)`')
+    const json = (await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity', format: 'json' }, ctxWith(upstream))).json as { positions: Record<string, unknown>[] }
+    expect(json.positions[0]).toMatchObject({
+      farmed: false, farmedEver: true, heldAtLastBucket: false,
+      heldFrom: { date: '2026-09-19 08:15:30', block: 13_990_000, source: 'span' },
+      heldTo: { date: '2026-09-21 09:45:12', block: 14_020_000, source: 'span' },
+    })
+  })
+
+  it('keeps the first span when it trims a long span history', async () => {
+    const spans = Array.from({ length: 14 }, (_, k) => ({ fromBlock: 13_000_000 + k * 10, fromTime: null, toBlock: k === 13 ? null : 13_000_010 + k * 10, toTime: null, kind: k % 2 ? 'farmed' : 'direct' }))
+    const flipper = { venue: 'omnipool', farmed: true, positionId: '88', poolKey: 'omnipool', shareAsset: null, spans, points: [{ i: 3, shares: '1', valueUsd: 5, legs: [{ asset: dot, amount: '10000000000', valueUsd: 5 }] }] }
+    const { upstream } = fakeUpstream({ [LP_HISTORY_PATH]: { ...lpHistoryFixture(), positions: [flipper], positionsOmitted: 0 } })
+    const json = (await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity', format: 'json' }, ctxWith(upstream))).json as { positions: { spans: { fromBlock: number }[]; spansOmitted: number }[] }
+    expect(json.positions[0].spans).toHaveLength(10)
+    expect(json.positions[0].spans[0].fromBlock).toBe(13_000_000)
+    expect(json.positions[0].spans[9].fromBlock).toBe(13_000_130)
+    expect(json.positions[0].spansOmitted).toBe(4)
+  })
+
+  it('states the closed-candle pricing, the excluded fees and the unpriced counting', async () => {
+    const { upstream } = fakeUpstream({ [LP_HISTORY_PATH]: lpHistoryFixture() })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity' }, ctxWith(upstream))
+    expect(out.markdown).toMatch(/candle fully CLOSED by the bucket end/)
+    expect(out.markdown).toContain("differs from `get_account`'s current Value")
+    expect(out.markdown).toContain('uncollected fees are excluded')
+    expect(out.markdown).toContain('The portfolio kind\'s value line and `get_account`\'s Value DO count them')
+    expect(out.markdown).toContain('COUNTED and left out of the line, not valued at zero')
+    expect(out.markdown).toContain('related set')
+  })
+
+  it('states the settled farm rewards at the last point beside the LP line, not in it', async () => {
+    const fixture = { ...lpHistoryFixture(), unclaimedRewardsUsd: [0, 1, 2, 3.5], rewardsIncomplete: [0, 0, 0, 1] }
+    const { upstream } = fakeUpstream({ [LP_HISTORY_PATH]: fixture })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity' }, ctxWith(upstream))
+    expect(out.markdown).toContain('Unclaimed farm rewards at the last point')
+    expect(out.markdown).toContain('(+ 1 farm entry not stated or unpriced, left out) — settled, beside the LP line and not in it')
+    const json = out.json as { unclaimedRewardsUsdAtLast: number | null; rewardsIncompleteAtLast: number; series: { last: { value: number } } }
+    expect(json.unclaimedRewardsUsdAtLast).toBe(3.5)
+    expect(json.rewardsIncompleteAtLast).toBe(1)
+    // The LP line itself is untouched.
+    expect(json.series.last.value).toBe(fixture.valueUsd[3])
+  })
+
+  it('lists positions still held first, then closed ones, each by last value with unpriced last', async () => {
+    const pos = (id: string, lastI: number, valueUsd: number | null) => ({
+      venue: 'omnipool', farmed: false, positionId: id, poolKey: 'omnipool', shareAsset: null, spans: [],
+      points: [{ i: lastI, shares: '1', valueUsd, legs: [{ asset: dot, amount: '10000000000', valueUsd }] }],
+    })
+    const fixture = {
+      ...lpHistoryFixture(),
+      // Route order (last-held value alone): the big closed position leads.
+      positions: [pos('1', 1, 50_000), pos('2', 3, 300), pos('3', 2, 900), pos('4', 3, 20), pos('5', 3, null), pos('6', 0, null)],
+      positionsOmitted: 0,
+    }
+    const { upstream } = fakeUpstream({ [LP_HISTORY_PATH]: fixture })
+    const md = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity' }, ctxWith(upstream))
+    const order = md.markdown.split('\n').map(l => /DOT #(\d+)/.exec(l)?.[1]).filter(Boolean)
+    expect(order).toEqual(['2', '4', '5', '1', '3', '6'])
+    const json = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity', format: 'json' }, ctxWith(upstream))
+    expect((json.json as { positions: { positionId: string }[] }).positions.map(p => p.positionId)).toEqual(['2', '4', '5', '1', '3', '6'])
+  })
+
+  it('trims to limit and counts what it did not show, the route\'s own cap included', async () => {
+    const { upstream } = fakeUpstream({ [LP_HISTORY_PATH]: lpHistoryFixture(5) })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity', limit: 3 }, ctxWith(upstream))
+    const rows = out.markdown.split('\n').filter(l => /^\| (Omnipool|Stableswap)/.test(l))
+    expect(rows).toHaveLength(3)
+    // 7 positions in, 3 shown, 7 more beyond the explorer's cap.
+    expect(out.markdown).toMatch(/11 more position\(s\) not shown \(7 of them beyond/)
+  })
+
+  it('answers format:"json" with the series stats and a positions array', async () => {
+    const { upstream } = fakeUpstream({ [LP_HISTORY_PATH]: lpHistoryFixture() })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity', format: 'json' }, ctxWith(upstream))
+    const parsed = JSON.parse(JSON.stringify(out.json))
+    expect(parsed.kind).toBe('liquidity')
+    expect(parsed.grid).toBe('step')
+    expect(parsed.series.points).toBe(4)
+    expect(parsed.series.min.value).toBe(800)
+    expect(parsed.series.fullyPricedPoints).toBe(3)
+    expect(parsed.series.pointsWithUnpriced).toBe(1)
+    expect(parsed.positions).toHaveLength(2)
+    const omni = parsed.positions[0]
+    expect(omni).toMatchObject({ venue: 'omnipool', positionId: '5690', farmed: true, heldAtLastBucket: true, heldTo: null, lastUsd: 1_234, lowUsd: 700, lastSharesRaw: '1000' })
+    expect(omni.lastLegs).toEqual([
+      { asset: { assetId: 5, symbol: 'DOT', decimals: 10 }, amount: 250, valueUsd: 1_134 },
+      { asset: { assetId: 1, symbol: 'H2O', decimals: 12 }, amount: 100, valueUsd: 100 },
+    ])
+    expect(omni.spans[0]).toMatchObject({ fromTime: '2026-09-19 10:00:00', kind: 'direct' })
+    expect(parsed.positions[1]).toMatchObject({ venue: 'stableswap', lastUsd: null, heldAtLastBucket: false, shareAsset: { assetId: 102, symbol: '2-Pool', decimals: 18 }, heldFrom: { source: 'bucket' } })
+    expect(parsed.positions[1].lastShares).toBeCloseTo(5e-18)
+    expect(parsed.positionsNotShown).toBe(7)
+    expect(parsed.positionsBeyondExplorerCap).toBe(7)
+  })
+
+  it('names a missing address as NOT_FOUND', async () => {
+    const { upstream } = fakeUpstream({})
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'liquidity' }, ctxWith(upstream))
+    expect(out.errors?.[0].code).toBe('NOT_FOUND')
+  })
+})
+
 /* ============ list_accounts ============ */
 
 const directoryPage = {
@@ -583,6 +901,124 @@ const directoryPage = {
     },
   ],
 }
+
+/* ---- kind 'money-market' ---- */
+
+const MM_HISTORY_PATH = `/explorer/address/${ADDRESS}/money-market-history`
+const MAX_UINT = '115792089237316195423570985008687907853269984665640564039457584007913129639935'
+
+function mmHistoryFixture() {
+  const obs = (block: number, hf: string, debt = '1000000000') => ({ observedAtBlock: block, timestamp: '2026-09-20 00:00:00', healthFactor: hf, totalCollateralBase: '5000000000', totalDebtBase: debt, availableBorrowsBase: '100', ltv: '7500', liquidationThreshold: '8000' })
+  return {
+    stepSec: 86_400, priceGrain: '1d', dates: lpDates, blocks: lpBlocks,
+    reserveHistoryFrom: { blockHeight: 14_010_000, time: '2026-09-20 12:00:00' },
+    suppliedUsd: [null, 900, 950, 1_000],
+    borrowedUsd: [null, 400, 450, 420],
+    unpriced: [0, 0, 1, 0],
+    unclaimedRewardsUsd: [null, 0, 0, 18],
+    rewardsIncomplete: [0, 0, 0, 1],
+    markets: [
+      {
+        marketKey: 'core', market: 'Money Market', poolAddress: '0x1b02e051683b5cfac5929c25e84adb26ecf87b38', role: 'primary', stakingBacked: false,
+        points: [
+          { i: 0, suppliedUsd: null, borrowedUsd: null, netUsd: null, unpriced: 0, observation: obs(13_999_000, '1800000000000000000'), eModeCategoryId: null },
+          { i: 1, suppliedUsd: 900, borrowedUsd: 400, netUsd: 500, unpriced: 0, observation: obs(14_013_000, '1150000000000000000'), eModeCategoryId: 1 },
+          { i: 2, suppliedUsd: 950, borrowedUsd: 450, netUsd: null, unpriced: 1, observation: obs(14_013_000, '1150000000000000000'), eModeCategoryId: 1 },
+          { i: 3, suppliedUsd: 1_000, borrowedUsd: 420, netUsd: 580, unpriced: 0, observation: obs(14_040_000, '1420000000000000000'), eModeCategoryId: 1,
+            unclaimedRewards: [{ asset: { assetId: 69, iconAssetId: 69, symbol: 'GDOT', name: null, decimals: 18, parachainId: null, origin: null }, amount: '3000000000000000000', valueUsd: 18, settledAtBlock: 14_039_990 }] },
+        ],
+        reserves: [
+          { asset: dot, aToken: { assetId: 1001, symbol: 'aDOT', name: null, decimals: 10 }, reserveAddress: '0x0000000000000000000000000000000100000005',
+            points: [{ i: 1, supplied: '2000000000000', borrowed: '0', suppliedUsd: 900, borrowedUsd: 0, collateral: true }, { i: 3, supplied: '2200000000000', borrowed: '0', suppliedUsd: 1_000, borrowedUsd: 0, collateral: true }] },
+          { asset: hollar, aToken: null, reserveAddress: '0x531a654d1696ed52e7275a8cede955e82620f99a',
+            points: [{ i: 1, supplied: '0', borrowed: '400000000000000000000', suppliedUsd: 0, borrowedUsd: 400, collateral: false }, { i: 3, supplied: '0', borrowed: '420000000000000000000', suppliedUsd: 0, borrowedUsd: 420, collateral: false }] },
+          { asset: usdc, aToken: null, reserveAddress: '0x0000000000000000000000000000000100000016',
+            points: [{ i: 2, supplied: '5000000', borrowed: '0', suppliedUsd: null, borrowedUsd: 0, collateral: null }] },
+        ],
+      },
+      {
+        marketKey: 'gigahdx', market: 'GIGAHDX', poolAddress: '0x2ce2cfff743cdb6637f4b5d351937a541b8c8923', role: 'supplemental', stakingBacked: true,
+        points: [{ i: 3, suppliedUsd: 300, borrowedUsd: 0, netUsd: 300, unpriced: 0, observation: obs(14_041_000, MAX_UINT, '0'), eModeCategoryId: null }],
+        reserves: [],
+      },
+    ],
+  }
+}
+
+describe("get_account_history kind 'money-market'", () => {
+  it('reads the explorer money-market-history route with the block window and nothing else', async () => {
+    const { upstream, calls } = fakeUpstream({ [MM_HISTORY_PATH]: mmHistoryFixture() })
+    await tool('get_account_history').handler({ address: ADDRESS, kind: 'money-market' }, ctxWith(upstream))
+    expect(calls).toEqual([{ path: MM_HISTORY_PATH, query: undefined }])
+    const windowed = fakeUpstream({ [MM_HISTORY_PATH]: mmHistoryFixture() })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'money-market', fromBlock: 14_000_000, toBlock: 14_050_000 }, ctxWith(windowed.upstream))
+    expect(windowed.calls).toEqual([{ path: MM_HISTORY_PATH, query: { fromBlock: 14_000_000, toBlock: 14_050_000 } }])
+    expect(out.markdown).toContain('WINDOWED')
+  })
+
+  it('states each market\'s observed health factor with its block, never blended', async () => {
+    const { upstream } = fakeUpstream({ [MM_HISTORY_PATH]: mmHistoryFixture() })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'money-market' }, ctxWith(upstream))
+    expect(out.markdown).toContain('## Money-market history')
+    expect(out.markdown).toContain('### Money Market (core, primary market)')
+    expect(out.markdown).toContain('### GIGAHDX (gigahdx, supplemental market) — staking-backed collateral')
+    // Last and lowest, each at the block the chain was read at; the repeated
+    // carried-forward observation counts once.
+    expect(out.markdown).toMatch(/Observed health factor — last:\*\* 1\.4200 \(observed at block 14,040,000/)
+    expect(out.markdown).toMatch(/Observed health factor — lowest:\*\* 1\.1500 \(observed at block 14,013,000/)
+    expect(out.markdown).toMatch(/Observations in the reading:\*\* 3/)
+    // No debt is said in words, never a 1e59 ratio.
+    expect(out.markdown).toContain('∞ (no debt)')
+    expect(out.markdown).toContain('ISOLATED')
+    expect(out.markdown).toContain('AS OBSERVED')
+  })
+
+  it('tables the reserves held at the last point and says a pre-floor point states nothing', async () => {
+    const { upstream } = fakeUpstream({ [MM_HISTORY_PATH]: mmHistoryFixture() })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'money-market' }, ctxWith(upstream))
+    const dotRow = out.markdown.split('\n').find(l => l.includes('DOT (#5)'))!
+    expect(dotRow).toContain('220')
+    expect(dotRow).toContain('yes')
+    const hollarRow = out.markdown.split('\n').find(l => l.includes('HOLLAR (#222)'))!
+    expect(hollarRow).toContain('420')
+    // USDC was held only earlier.
+    expect(out.markdown).not.toContain('USDC (#22)')
+    expect(out.markdown).toContain('1 reserve(s) held earlier')
+    expect(out.markdown).toContain('end before the reserve coverage floor')
+    expect(out.markdown).toContain('block 14,010,000')
+  })
+
+  it('returns one structured entry per isolated market and stats over fully priced points', async () => {
+    const { upstream } = fakeUpstream({ [MM_HISTORY_PATH]: mmHistoryFixture() })
+    const json = (await tool('get_account_history').handler({ address: ADDRESS, kind: 'money-market', format: 'json' }, ctxWith(upstream))).json as {
+      kind: string
+      series: { statedPoints: number; fullyPricedPoints: number; suppliedUsd: { min: { value: number } }; borrowedUsdAtLast: number }
+      markets: Array<{ marketKey: string; observedHealthFactor: { last: { ratio: number | null; observedAtBlock: number }; lowest: { ratio: number } | null }; reservesAtLast: unknown[]; reservesHeldEarlierOnly: number }>
+    }
+    expect(json.kind).toBe('money-market')
+    expect(json.series).toMatchObject({ statedPoints: 3, fullyPricedPoints: 2, borrowedUsdAtLast: 420 })
+    expect(json.series.suppliedUsd.min.value).toBe(900)
+    expect(json.markets.map(m => m.marketKey)).toEqual(['core', 'gigahdx'])
+    expect(json.markets[0].observedHealthFactor.last).toMatchObject({ ratio: 1.42, observedAtBlock: 14_040_000 })
+    expect(json.markets[0].observedHealthFactor.lowest?.ratio).toBe(1.15)
+    expect(json.markets[0].reservesAtLast).toHaveLength(2)
+    expect(json.markets[0].reservesHeldEarlierOnly).toBe(1)
+    expect(json.markets[1].observedHealthFactor.last.ratio).toBeNull()
+  })
+})
+
+describe("get_account_history kind 'money-market' incentives", () => {
+  it('states the settled incentives at the last point beside, never inside, the supplied figures', async () => {
+    const { upstream } = fakeUpstream({ [MM_HISTORY_PATH]: mmHistoryFixture() })
+    const out = await tool('get_account_history').handler({ address: ADDRESS, kind: 'money-market' }, ctxWith(upstream))
+    expect(out.markdown).toContain('Unclaimed lending incentives at the last point (settled):** $18')
+    expect(out.markdown).toContain('+ 1 reward(s) not stated or not priced, left out')
+    expect(out.markdown).toContain('3 GDOT ($18) settled at block 14,039,990')
+    expect(out.markdown).toContain('SETTLED at each point')
+    const json = (await tool('get_account_history').handler({ address: ADDRESS, kind: 'money-market', format: 'json' }, ctxWith(upstream))).json as { series: { unclaimedRewardsUsdAtLast: number; rewardsIncompleteAtLast: number } }
+    expect(json.series).toMatchObject({ unclaimedRewardsUsdAtLast: 18, rewardsIncompleteAtLast: 1 })
+  })
+})
 
 describe('list_accounts', () => {
   it('renders rank, label, portfolio, activity and volume, and links every account', async () => {

@@ -2,6 +2,7 @@ import { vi } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import type { ClickHouseClient } from '../../src/db/client.ts'
 import { resetDataAuthForTests } from '../../src/data/services/auth.ts'
+import { resetPoolSnapshotForTests } from '../../src/data/services/poolSnapshot.ts'
 import { resetCacheForTests } from '../../src/services/cache.ts'
 import { assertNoShadowedAlias } from './sqlGuard.ts'
 
@@ -87,6 +88,7 @@ export function sha256Hex(value: string): string {
 export async function freshDataApp(client: FakeDataClient): Promise<FastifyInstance> {
   resetDataAuthForTests()
   resetCacheForTests()
+  resetPoolSnapshotForTests()
   const { buildDataApp } = await import('../../src/data/app.ts')
   return buildDataApp({ client: client as unknown as ClickHouseClient, logger: false })
 }

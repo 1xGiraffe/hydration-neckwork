@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BUCKET_STEPS_SEC, chooseBucketStep, FINEST_STEP_SEC, makeBucketing } from '../src/services/bucketLadder.ts'
+import { BUCKET_STEPS_SEC, CANONICAL_GRID_STEPS, canonicalGrid, canonicalPlan, chooseBucketStep, FINEST_STEP_SEC, makeBucketing } from '../src/services/bucketLadder.ts'
 
 const H = 3_600
 const D = 86_400
@@ -122,5 +122,59 @@ describe('makeBucketing interval convention', () => {
     expect(bk.ofTs('ts')).toContain('- 1,')
     // floor(), because intDiv truncates toward zero and would lose the -1 carry.
     expect(bk.ofTsCarry('ts')).toContain('floor(')
+  })
+})
+
+describe('canonical grids', () => {
+  const H = 3_600
+  const T0 = 1_000 * H
+  // One block every 6 s from T0, so every instant has an exact height.
+  const heightAt = (sec: number) => (sec < T0 ? null : Math.floor((sec - T0) / 6))
+  const exact = { key: 'exact', heightAt }
+  const stub = { hours: [], heights: [], builtAt: 0 }
+  // An account grid as the explorer builds one: lattice-aligned start, range end at the head instant.
+  const accountGrid = (fromSec: number, toSec: number) =>
+    makeBucketing(stub, fromSec, toSec, heightAt(fromSec) ?? 0, undefined, undefined, { stepSec: H, heightAt: s => (s === toSec ? heightAt(toSec)! : heightAt(s)), dating: exact })
+
+  it('maps every lattice bucket of an account grid onto one shared grid, and two accounts onto the same one', () => {
+    const a = accountGrid(T0 + 300 * H + 17, T0 + 400 * H + 1_234)
+    const b = accountGrid(T0 + 350 * H, T0 + 400 * H + 1_234)
+    const ca = canonicalGrid(a)!
+    const cb = canonicalGrid(b)!
+    expect(ca.key).toBe(cb.key)
+    expect(ca.bk.step).toBe(H)
+    expect(ca.bk.N + 1).toBe(CANONICAL_GRID_STEPS)
+    expect(ca.bk.endSec(ca.bk.N)).toBe(T0 + 400 * H)
+    for (let i = 0; i < a.N; i++) {
+      const c = ca.map[i]!
+      expect(ca.bk.endSec(c)).toBe(a.endSec(i))
+      expect(ca.bk.endHeight(c)).toBe(a.endHeight(i))
+    }
+    // The last bucket ends at the head instant, no lattice point.
+    expect(ca.map[a.N]).toBeNull()
+  })
+
+  it('plans the head bucket as a tail after the lattice boundary below it', () => {
+    const a = accountGrid(T0 + 300 * H, T0 + 400 * H + 1_234)
+    const plan = canonicalPlan(a)!
+    expect(plan.tail).toEqual({ b: a.N, prev: plan.grid.map[a.N - 1], fromHeight: heightAt(T0 + 400 * H)! + 1, toHeight: heightAt(T0 + 400 * H + 1_234) })
+    // A grid ending on a lattice point has no tail.
+    expect(canonicalPlan(accountGrid(T0 + 300 * H, T0 + 400 * H))!.tail).toBeNull()
+  })
+
+  it('has no canonical twin without a named dating rule, or when a boundary does not fit it', () => {
+    const custom = makeBucketing(stub, T0, T0 + 10 * H, 0, undefined, undefined, { stepSec: H, heightAt })
+    expect(canonicalGrid(custom)).toBeNull()
+    expect(canonicalPlan(custom)).toBeNull()
+    // Wider than the canonical reach: an early bucket does not map, so the caller folds on its own grid.
+    expect(canonicalPlan(accountGrid(T0 + 10 * H, T0 + 400 * H + 5))).toBeNull()
+    // A boundary dated differently (a moved clock) does not map either.
+    const moved = makeBucketing(stub, T0 + 300 * H, T0 + 400 * H, 0, undefined, undefined, { stepSec: H, heightAt: s => heightAt(s)! + (s === T0 + 350 * H ? 1 : 0), dating: exact })
+    expect(canonicalGrid(moved)!.map.filter(i => i == null)).toHaveLength(1)
+  })
+
+  it('names the chart\'s own dating when a grid has no heightAt', () => {
+    const clock = { hours: [T0, T0 + H], heights: [599, 1_199], builtAt: 0 }
+    expect(makeBucketing(clock, T0, T0 + 2 * H, 0).dating?.key).toBe('chart')
   })
 })

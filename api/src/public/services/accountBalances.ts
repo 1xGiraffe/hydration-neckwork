@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
+import { ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, assetDecimalsOrNull, assetDescriptor, currentPriceOf, isStableswapShareToken, priceAssetId } from '../../services/explorerAssets.ts'
+import { lmCountedClaimable, loadLmRewards } from '../../services/lmRewardSnapshot.ts'
+import { withStableswapSharePrices, xykReserveAssets, xykShareLegs } from '../../services/lpMath.ts'
+import { loadMmIncentives } from '../../services/mmIncentiveSnapshot.ts'
+import { currentStableswapSharePools } from '../../services/stableswapSharePools.ts'
 import { loadV3AccountHistory, v3AccountPositions, v3AccountPositionsRawAt } from '../../services/uniswapV3Positions.ts'
 import { scaledDecimal } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
@@ -277,6 +281,12 @@ export interface AccountBalanceRow {
   lpUsd: string | null
   /** Concentrated-liquidity (Uniswap v3) position principal and Gamma vault shares. */
   uniswapV3Usd: string
+  /** XYK LP principal (wallet LP tokens + farmed deposits), or null when the pool state is stale/missing. */
+  xykLpUsd: string | null
+  /** Claimable-now liquidity-mining rewards, or null when their snapshot is stale/missing. */
+  farmRewardsUsd: string | null
+  /** Claimable-now money-market incentives, or null when their snapshot is stale/missing. */
+  moneyMarketRewardsUsd: string | null
   /** Money-market debt, or null when the value snapshot is stale/missing. */
   debtUsd: string | null
   totalUsd: string
@@ -345,19 +355,26 @@ export function currentPrices(client: ClickHouseClient): Promise<PriceMap> {
       query_params: { windowHours: CURRENT_PRICE_WINDOW_HOURS },
       format: 'JSONEachRow',
     })
-    const prices: PriceMap = new Map()
+    const feeds: PriceMap = new Map()
     for (const row of await res.json<{ asset_id: number; price: string }>()) {
       const scaled = decimalToScaled(row.price, USD_DECIMALS)
-      if (scaled > 0n) prices.set(Number(row.asset_id), scaled)
+      if (scaled > 0n) feeds.set(Number(row.asset_id), scaled)
     }
-    return prices
+    // Stableswap share tokens carry what one share redeems for at these same leg
+    // prices (lpMath.stableswapSharePrices over the newest pool snapshot), the one
+    // definition the explorer and the Data API state too — never an underlying's
+    // price, and nothing when a leg is unpriced.
+    const pools = await currentStableswapSharePools(client)
+    return withStableswapSharePrices(feeds, pools, id => currentPriceOf(feeds, id), assetDecimalsOrNull, isStableswapShareToken)
   })
 }
 
-// The price to value a held asset at: its own feed, or the feed of the asset it
-// is priced through (aTokens and pool-share tokens carry no feed of their own).
+// The price to value a held asset at: currentPriceOf, the one rule the explorer and
+// the Data API apply — its own entry first, else the entry of the asset it is
+// priced through. A stableswap share token resolves to itself — its entry is its
+// derived redeemable value — so it is never valued at an underlying's price.
 export function priceFor(prices: PriceMap, assetId: number): bigint {
-  return prices.get(priceAssetId(assetId)) ?? 0n
+  return currentPriceOf(prices, assetId) ?? 0n
 }
 
 // Registry assets whose wallet balance lives in EVM contract storage rather than
@@ -584,6 +601,56 @@ async function omnipoolClaims(client: ClickHouseClient, forms: string[]): Promis
 }
 
 /**
+ * Claimable-now liquidity-mining rewards per stored form, in raw units of the
+ * reward asset — the explorer's own read of the `lm-rewards` snapshot
+ * (services/lmRewardSnapshot), so this endpoint and the account page cannot
+ * value the same entries two ways. Null when no snapshot is published or its
+ * pointer is older than the leaf's LM_REWARD_MAX_AGE_SECONDS (the explorer then
+ * leaves rewards out of its value too). A deposit belongs to one AccountId32, so
+ * only the 32-byte forms can own one.
+ */
+async function farmRewards(client: ClickHouseClient, forms: string[]): Promise<Map<string, Array<{ assetId: number; amount: bigint }>> | null> {
+  const snapshot = await loadLmRewards(client, forms)
+  if (snapshot.asOfBlock == null) return null
+  const out = new Map<string, Array<{ assetId: number; amount: bigint }>>()
+  for (const row of snapshot.rows) {
+    // An unpayable entry (below the existential deposit, owner holding less) pays nothing.
+    const amount = lmCountedClaimable(row)
+    if (amount <= 0n) continue
+    const form = row.accountId.toLowerCase()
+    out.set(form, [...(out.get(form) ?? []), { assetId: row.rewardAssetId, amount }])
+  }
+  return out
+}
+
+/**
+ * Claimable-now money-market incentives per stored form, in raw units of the reward
+ * asset — the explorer's own read of the `mm-incentives` snapshot
+ * (services/mmIncentiveSnapshot: the chain's getAllUserRewards per holder), so this
+ * endpoint and the account page cannot value them two ways. Null when no snapshot
+ * is published or it is older than MM_INCENTIVE_MAX_AGE_SECONDS. Incentives accrue
+ * to an H160; they are keyed by its ETH-form AccountId32, the form the money-market
+ * slice above reads, so exactly the forms that carry a money-market position here
+ * carry its incentives.
+ */
+async function moneyMarketRewards(client: ClickHouseClient, forms: string[]): Promise<Map<string, Array<{ assetId: number; amount: bigint }>> | null> {
+  const h160ByForm = new Map<string, string>()
+  for (const form of forms) {
+    const lower = form.toLowerCase()
+    if (lower.length === 66 && lower.startsWith(`0x${EVM_MARKER}`)) { const h = h160Of(lower); if (h) h160ByForm.set(lower, h) }
+  }
+  const snapshot = await loadMmIncentives(client, [...new Set(h160ByForm.values())])
+  if (snapshot.asOfBlock == null) return null
+  const out = new Map<string, Array<{ assetId: number; amount: bigint }>>()
+  for (const reward of snapshot.rewards) {
+    if (reward.claimable <= 0n) continue
+    const form = reward.accountId.toLowerCase()
+    out.set(form, [...(out.get(form) ?? []), { assetId: reward.rewardAssetId, amount: reward.claimable }])
+  }
+  return out
+}
+
+/**
  * Concentrated-liquidity holdings per requested account, in raw units: manager-NFT
  * principal and Gamma vault shares redeemed against the vault's totals, from the
  * same event fold the explorer's account page and the Data API state
@@ -617,6 +684,205 @@ async function concentratedLiquidity(client: ClickHouseClient, formsByAccount: M
   return out
 }
 
+/** One live XYK pool at the head snapshot: its pair, reserves and LP token id. */
+interface XykPool {
+  lpAssetId: number
+  assetA: number
+  assetB: number
+  reserveA: bigint
+  reserveB: bigint
+}
+
+/** The live XYK pools of the head snapshot, keyed by LP token id. */
+interface XykState {
+  pools: Map<number, XykPool>
+}
+
+/** Every XYK LP token id the registry has issued, live pool or not. */
+async function xykLpTokenIds(client: ClickHouseClient): Promise<Set<number>> {
+  return new Set((await xykRegistry(client)).map(r => Number(r.lp_asset_id)))
+}
+
+function xykRegistry(client: ClickHouseClient): Promise<Array<{ lp_asset_id: number; pool_account: string; asset_a: number; asset_b: number; created_block: number }>> {
+  // ~730 rows and append-only (a new pool is a new row), so held for 5 min.
+  return cached('public:v1:accounts:xyk-registry', 300_000, async () => {
+    const res = await client.query({
+      query: `-- public:accounts:xyk-registry
+          SELECT lp_asset_id, lower(pool_account) AS pool_account, asset_a, asset_b, created_block
+          FROM price_data.xyk_pool_registry FINAL`,
+      format: 'JSONEachRow',
+    })
+    return res.json()
+  })
+}
+
+/**
+ * Current XYK pool state: the live pools of the newest per-block snapshot, keyed by
+ * LP token id.
+ *
+ * The same sources the explorer's account page and the Data API value XYK LP at —
+ * the newest `raw_block_snapshots` row's `xyk.pools` for reserves, paired in the
+ * snapshot's own asset order, and `xyk_pool_registry` for the LP token — restated
+ * here because the explorer's reader is outside the import allow-list. A pool
+ * account can be reused across create → destroy → recreate, so only its newest
+ * registry incarnation maps to the live reserves; an older incarnation's LP id is
+ * a burned token and values to nothing.
+ *
+ * Null when there is no snapshot, it carries no XYK section, or it is older than
+ * SNAPSHOT_MAX_AGE_SECONDS: the slice is then absent, never zero.
+ */
+
+function xykState(client: ClickHouseClient): Promise<XykState | null> {
+  // Reserves move every block; held only as long as the endpoint's own 3 s.
+  return cached('public:v1:accounts:xyk-state', 3_000, async () => {
+    const [registry, snapRes] = await Promise.all([
+      xykRegistry(client),
+      client.query({
+        // One row, located by the table's own ORDER BY (block_height); the pool list is
+        // flattened into parallel arrays in SQL so reserves arrive as the exact strings
+        // the snapshot stores, never through a float JSON parse. MEASURED: 5 ms.
+        query: `-- public:accounts:xyk-pool-state
+            WITH JSONExtractArrayRaw(JSONExtractRaw(payload_json, 'xyk'), 'pools') AS pools
+            SELECT
+              toUInt32(greatest(0, dateDiff('second', block_timestamp, now()))) AS age_seconds,
+              JSONHas(payload_json, 'xyk') AS has_xyk,
+              arrayMap(p -> lower(JSONExtractString(p, 'pool_account')), pools) AS pool_accounts,
+              arrayMap(p -> JSONHas(p, 'asset_a') AND JSONHas(p, 'asset_b'), pools) AS has_assets,
+              arrayMap(p -> toInt32(JSONExtractInt(p, 'asset_a')), pools) AS assets_a,
+              arrayMap(p -> toInt32(JSONExtractInt(p, 'asset_b')), pools) AS assets_b,
+              arrayMap(p -> JSONExtractString(p, 'reserve_a'), pools) AS reserves_a,
+              arrayMap(p -> JSONExtractString(p, 'reserve_b'), pools) AS reserves_b
+            FROM price_data.raw_block_snapshots
+            WHERE block_height = (SELECT max(block_height) FROM price_data.raw_block_snapshots)
+            ORDER BY ingested_at DESC
+            LIMIT 1`,
+        format: 'JSONEachRow',
+      }),
+    ])
+    const [snap] = await snapRes.json<{
+      age_seconds: number; has_xyk: number; pool_accounts: string[]; has_assets: number[]; assets_a: number[]; assets_b: number[]; reserves_a: string[]; reserves_b: string[]
+    }>()
+    if (!snap || !Number(snap.has_xyk) || Number(snap.age_seconds) > SNAPSHOT_MAX_AGE_SECONDS) return null
+    const live = new Map<string, { lp: number; assetA: number; assetB: number; createdBlock: number }>()
+    for (const r of registry) {
+      const prev = live.get(r.pool_account)
+      if (!prev || Number(r.created_block) > prev.createdBlock) {
+        live.set(r.pool_account, { lp: Number(r.lp_asset_id), assetA: Number(r.asset_a), assetB: Number(r.asset_b), createdBlock: Number(r.created_block) })
+      }
+    }
+    const pools = new Map<number, XykPool>()
+    snap.pool_accounts.forEach((account, i) => {
+      const reg = live.get(account)
+      if (!reg) return
+      // The snapshot's own asset order pairs with its reserves; it can differ from the
+      // registry's PoolCreated order. The registry order is the fallback for a legacy
+      // snapshot row that carries no asset ids — decided by the keys' PRESENCE, not
+      // by a non-zero id: HDX is asset 0, and reading 0 as "missing" would pair an HDX
+      // pool's reserves in the registry's order, reversed whenever the two differ
+      // (measured live: 1 of the 28 HDX pools).
+      const [assetA, assetB] = xykReserveAssets(Number(snap.has_assets[i]) === 1, Number(snap.assets_a[i]), Number(snap.assets_b[i]), reg.assetA, reg.assetB)
+      pools.set(reg.lp, { lpAssetId: reg.lp, assetA, assetB, reserveA: rawAmount(snap.reserves_a[i]), reserveB: rawAmount(snap.reserves_b[i]) })
+    })
+    return { pools }
+  })
+}
+
+/**
+ * Open XYK farm-deposit principal per stored form (collection 5389), in LP-token
+ * raw units, from the derivations service's `xyk_farm_principal_intervals`
+ * reconstruction — the read the explorer's account page and the Data API make.
+ * Deposits belong to an AccountId32; the table is ~1 k rows, so the IN list is a
+ * filter over a trivially small read.
+ */
+async function xykFarmedShares(client: ClickHouseClient, forms: string[]): Promise<Map<string, Array<{ lpAssetId: number; shares: bigint }>>> {
+  const res = await client.query({
+    query: `-- public:accounts:xyk-farm-principal
+        SELECT lower(account_id) AS account_id, lp_asset_id, toString(sum(toInt256(principal_shares_raw))) AS shares
+        FROM price_data.xyk_farm_principal_intervals FINAL
+        WHERE account_id IN ({accounts:Array(String)}) AND valid_to_block = 0
+        GROUP BY account_id, lp_asset_id`,
+    query_params: { accounts: forms },
+    format: 'JSONEachRow',
+  })
+  const out = new Map<string, Array<{ lpAssetId: number; shares: bigint }>>()
+  for (const row of await res.json<{ account_id: string; lp_asset_id: number; shares: string }>()) {
+    const shares = rawAmount(row.shares)
+    if (shares <= 0n) continue
+    out.set(row.account_id, [...(out.get(row.account_id) ?? []), { lpAssetId: Number(row.lp_asset_id), shares }])
+  }
+  return out
+}
+
+/**
+ * XYK LP principal per requested account, in raw units of each pool's two assets:
+ * the account's LP-token balance (free + reserved, every stored form) and its open
+ * farm-deposit principal (xykFarmedShares), each redeemed pro-rata against the
+ * pool's current reserves and total shares (lpMath.xykShareLegs, the explorer's and
+ * the Data API's arithmetic). Wallet and farmed shares are disjoint on chain — a
+ * deposit moves the LP tokens into the liquidity-mining pallet's account — so the
+ * two are added, never de-duplicated. They are redeemed separately, as the explorer
+ * states them, so the per-leg flooring matches its figure.
+ *
+ * Total shares are the reconstructed step function's newest point for the pool
+ * (`xyk_lp_total_shares_history`), the explorer's denominator.
+ */
+async function xykPrincipal(
+  client: ClickHouseClient,
+  formsByAccount: Map<string, string[]>,
+  walletShares: (form: string) => Array<{ lpAssetId: number; shares: bigint }>,
+  farmedByForm: Map<string, Array<{ lpAssetId: number; shares: bigint }>>,
+  state: XykState,
+): Promise<Map<string, Array<Array<{ assetId: number; amount: bigint }>>>> {
+  // Per account: wallet and farmed share totals per live pool.
+  const held = new Map<string, { wallet: Map<number, bigint>; farmed: Map<number, bigint> }>()
+  const candidates = new Set<number>()
+  for (const [account, accountForms] of formsByAccount) {
+    const wallet = new Map<number, bigint>()
+    const farmed = new Map<number, bigint>()
+    for (const form of accountForms) {
+      for (const [target, entries] of [[wallet, walletShares(form)], [farmed, farmedByForm.get(form) ?? []]] as const) {
+        for (const { lpAssetId, shares } of entries) {
+          if (!state.pools.has(lpAssetId)) continue
+          target.set(lpAssetId, (target.get(lpAssetId) ?? 0n) + shares)
+          candidates.add(lpAssetId)
+        }
+      }
+    }
+    if (wallet.size || farmed.size) held.set(account, { wallet, farmed })
+  }
+  const out = new Map<string, Array<Array<{ assetId: number; amount: bigint }>>>()
+  if (!candidates.size) return out
+
+  const totalRes = await client.query({
+    // (lp_asset_id, block_height) is the key, so this is one key range per pool.
+    query: `-- public:accounts:xyk-total-shares
+        SELECT lp_asset_id, argMax(total_shares_raw, block_height) AS total
+        FROM price_data.xyk_lp_total_shares_history
+        WHERE lp_asset_id IN ({lps:Array(Int32)})
+        GROUP BY lp_asset_id`,
+    query_params: { lps: [...candidates] },
+    format: 'JSONEachRow',
+  })
+  const totals = new Map<number, bigint>()
+  for (const row of await totalRes.json<{ lp_asset_id: number; total: string }>()) totals.set(Number(row.lp_asset_id), rawAmount(row.total))
+
+  for (const [account, { wallet, farmed }] of held) {
+    const positions: Array<Array<{ assetId: number; amount: bigint }>> = []
+    for (const byLp of [wallet, farmed]) {
+      for (const [lp, shares] of byLp) {
+        const pool = state.pools.get(lp)
+        const total = totals.get(lp) ?? 0n
+        // No outstanding shares means no pool to redeem against — nothing, not a guess.
+        if (!pool || total <= 0n || shares <= 0n) continue
+        const { amountA, amountB } = xykShareLegs(shares, pool.reserveA, pool.reserveB, total)
+        positions.push([{ assetId: pool.assetA, amount: amountA }, { assetId: pool.assetB, amount: amountB }])
+      }
+    }
+    if (positions.length) out.set(account, positions)
+  }
+  return out
+}
+
 // Registry aToken ids. A pallet-side balance row for one of these is the SAME
 // economic position the value snapshot reports as `supplied` on the underlying
 // reserve, so it is replaced by the snapshot rather than added to it — the
@@ -640,8 +906,12 @@ interface LatestBalanceRow {
  * money-market SUPPLIED balances (the aToken side, spec "Semantics" rule 7);
  * `lockedUsd` values reserved ones; `lpUsd` values Omnipool LP claims, bare and
  * farmed, including each position's hub (H2O) leg; `uniswapV3Usd` values
- * concentrated-liquidity positions and Gamma vault shares (concentratedLiquidity).
- * `totalUsd` is the sum of the four — GROSS assets. `debtUsd` is reported alongside and is never netted into
+ * concentrated-liquidity positions and Gamma vault shares (concentratedLiquidity);
+ * `xykLpUsd` values XYK LP principal, wallet LP tokens and farmed deposits alike,
+ * redeemed at current pool state (xykPrincipal);
+ * `farmRewardsUsd` values claimable-now liquidity-mining rewards (farmRewards);
+ * `moneyMarketRewardsUsd` claimable-now money-market incentives (moneyMarketRewards).
+ * `totalUsd` is the sum of the seven — GROSS assets. `debtUsd` is reported alongside and is never netted into
  * any of them, so the Hydration account picker's figure is `totalUsd - debtUsd`.
  *
  * Both the money-market and the LP slice come from the indexer's own persisted
@@ -662,7 +932,7 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
   const formsByAccount = await resolveAccountForms(client, accounts)
   const forms = allForms(formsByAccount)
 
-  const [substrateRes, erc20Res, prices, mm, claims, v3] = await Promise.all([
+  const [substrateRes, erc20Res, prices, mm, claims, v3, rewards, mmRewards, xyk, xykFarmed, xykLpIds] = await Promise.all([
     client.query({
       // account_id is the leading primary-key column, so an IN list of at most
       // 150 forms is a bounded set of key ranges rather than a scan.
@@ -700,6 +970,11 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
     moneyMarketPositions(client, forms),
     omnipoolClaims(client, forms),
     concentratedLiquidity(client, formsByAccount),
+    farmRewards(client, forms),
+    moneyMarketRewards(client, forms),
+    xykState(client),
+    xykFarmedShares(client, forms),
+    xykLpTokenIds(client),
   ])
 
   // Indexed by stored form, so each requested address can fold in exactly the forms
@@ -709,6 +984,13 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
     const form = row.account_id.toLowerCase()
     substrateByForm.set(form, [...(substrateByForm.get(form) ?? []), row])
   }
+  // XYK LP tokens held in the wallet, per stored form: the share side of the XYK
+  // slice below. Free and reserved alike — both redeem.
+  const xykWallet = (form: string) => (substrateByForm.get(form) ?? [])
+    .filter(row => xykLpIds.has(Number(row.asset_id)))
+    .map(row => ({ lpAssetId: Number(row.asset_id), shares: rawAmount(row.free) + rawAmount(row.reserved) }))
+    .filter(entry => entry.shares > 0n)
+  const xykPositions = xyk ? await xykPrincipal(client, formsByAccount, xykWallet, xykFarmed, xyk) : null
   const erc20ByForm = new Map<string, { asset_id: string; total: string }[]>()
   for (const row of await erc20Res.json<{ account_id: string; asset_id: string; total: string }>()) {
     const form = row.account_id.toLowerCase()
@@ -722,6 +1004,9 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
     let locked = 0n
     let lp = 0n
     let v3Usd = 0n
+    let xykUsd = 0n
+    let farm = 0n
+    let lending = 0n
     let debt = 0n
     let blockHeight = 0
     let seen = false
@@ -739,6 +1024,12 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
         // Replaced, not added — and dropped outright when the snapshot is stale,
         // since this row is not a usable substitute for it either.
         if (ATOKEN_IDS.has(assetId)) continue
+        // An XYK LP token is valued once, by what it redeems (xykLpUsd), never as a
+        // wallet balance at a token price. No XYK LP token has a price feed today, so
+        // this moves nothing out of transferable/locked; it keeps a future feed from
+        // counting the same shares twice. Registry-wide, so it holds even while the
+        // XYK slice is absent (xykLpUsd null).
+        if (xykLpIds.has(assetId)) continue
         const { decimals } = assetDescriptor(assetId)
         const price = priceFor(prices, assetId)
         transferable += usdScaled(rawAmount(row.free), price, decimals)
@@ -770,11 +1061,33 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
         lp += usdScaled(claim.amount, priceFor(prices, claim.assetId), assetDescriptor(claim.assetId).decimals)
         lp += usdScaled(claim.hubAmount, priceFor(prices, H2O_ASSET_ID), assetDescriptor(H2O_ASSET_ID).decimals)
       }
+      for (const reward of rewards?.get(form) ?? []) {
+        seen = true
+        // What one claim would pay now, in the reward asset; not a balance until
+        // claimed, and a claim moves exactly this amount into the wallet slice.
+        farm += usdScaled(reward.amount, priceFor(prices, reward.assetId), assetDescriptor(reward.assetId).decimals)
+      }
+      for (const reward of mmRewards?.get(form) ?? []) {
+        seen = true
+        // The chain's claimable-now incentive, in the reward asset; the farm-reward
+        // rule: not a balance until claimed, and a claim moves exactly this amount
+        // into the wallet slice.
+        lending += usdScaled(reward.amount, priceFor(prices, reward.assetId), assetDescriptor(reward.assetId).decimals)
+      }
     }
 
     for (const leg of v3.get(account) ?? []) {
       seen = true
       v3Usd += usdScaled(leg.amount, priceFor(prices, leg.assetId), assetDescriptor(leg.assetId).decimals)
+    }
+
+    for (const legs of xykPositions?.get(account) ?? []) {
+      seen = true
+      // All legs or nothing, the explorer's and the Data API's rule for an XYK
+      // position: most XYK pools pair a priced asset with an unpriced one, and
+      // valuing only the priced half would state a position no surface agrees on.
+      if (legs.some(leg => priceFor(prices, leg.assetId) === 0n)) continue
+      for (const leg of legs) xykUsd += usdScaled(leg.amount, priceFor(prices, leg.assetId), assetDescriptor(leg.assetId).decimals)
     }
 
     if (seen) items.push({
@@ -785,8 +1098,16 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
       // from totalUsd too, since `lp` stays 0 in that case.
       lpUsd: claims ? formatUsd(lp) : null,
       uniswapV3Usd: formatUsd(v3Usd),
+      // Absent rather than zero when the pool snapshot is stale — and then out of
+      // totalUsd too, since `xykUsd` stays 0 in that case.
+      xykLpUsd: xykPositions ? formatUsd(xykUsd) : null,
+      // Absent rather than zero when the reward snapshot is stale, and then out
+      // of totalUsd too — the lpUsd rule.
+      farmRewardsUsd: rewards ? formatUsd(farm) : null,
+      // The same rule for the lending incentives: absent (and out of totalUsd) when stale.
+      moneyMarketRewardsUsd: mmRewards ? formatUsd(lending) : null,
       debtUsd: mm ? formatUsd(debt) : null,
-      totalUsd: formatUsd(transferable + locked + lp + v3Usd),
+      totalUsd: formatUsd(transferable + locked + lp + v3Usd + xykUsd + farm + lending),
       blockHeight,
     })
   }

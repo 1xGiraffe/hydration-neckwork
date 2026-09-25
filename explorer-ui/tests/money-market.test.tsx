@@ -249,3 +249,28 @@ describe('supplemental market hints', () => {
     expect(renderToStaticMarkup(<ActivityBadge r={{ ...row, mmMarketKey: 'core', mmMarket: 'Money Market' }} />)).not.toContain('mm-activity-market')
   })
 })
+
+// Claimable lending incentives are already inside the account's Value; the UI
+// states their share on the profile and under the market they accrue on, never
+// adding them to Lent — and an unpriced one reads as its amount, never "$0.00".
+describe('unclaimed lending incentives', () => {
+  const gdot = { assetId: 69, symbol: 'GDOT', name: null, decimals: 18, parachainId: null }
+  const text = (html: string) => html.replace(/<[^>]+>/g, '')
+  const item = (over: Record<string, unknown> = {}) => ({ marketKey: 'core', asset: gdot, claimable: '2100000000000000000', claimableUsd: 12.5, ...over })
+
+  it('states the account total as part of the value, counting unpriced ones aloud', () => {
+    const html = text(renderToStaticMarkup(<ProfileStats valueUsd={1000} moneyMarketRewards={{ asOfBlock: 15_000_000, totalUsd: 12.5, items: [item(), item({ claimableUsd: null })] }} />))
+    expect(html).toContain('Incl. $12.50 unclaimed lending incentives (+ 1 unpriced, not included)')
+    expect(text(renderToStaticMarkup(<ProfileStats valueUsd={1000} moneyMarketRewards={{ asOfBlock: 1, totalUsd: 0, items: [] }} />))).not.toContain('lending incentives')
+  })
+
+  it('shows the market\'s incentives as a card stat, and raw amounts when none is priced', () => {
+    const priced = text(renderToStaticMarkup(<MoneyMarketPositions markets={[position({ unclaimedRewards: [item()] } as Partial<MoneyMarketPosition>)]} />))
+    expect(priced).toContain('Unclaimed incentives$12.50')
+    const unpriced = text(renderToStaticMarkup(<MoneyMarketPositions markets={[position({ unclaimedRewards: [item({ claimableUsd: null })] } as Partial<MoneyMarketPosition>)]} />))
+    expect(unpriced).toContain('Unclaimed incentives2.1 GDOT')
+    expect(unpriced).not.toContain('Unclaimed incentives$0.00')
+    const none = text(renderToStaticMarkup(<MoneyMarketPositions markets={[position()]} />))
+    expect(none).not.toContain('Unclaimed incentives')
+  })
+})

@@ -518,7 +518,30 @@ export interface MoneyMarketPosition {
   healthFactor: string
   simAccount?: string
   reserves?: MmReserve[]
+  /** Claimable incentives accruing on this market's aTokens (display; counted once, via AddressDetail.moneyMarketRewards). */
+  unclaimedRewards?: MoneyMarketRewardItem[]
 }
+
+/** One (holder, reward asset) claimable money-market incentive: the chain's own getAllUserRewards. */
+export interface MoneyMarketRewardItem {
+  marketKey: string
+  holder: string
+  asset: AssetRef
+  /** Raw integer in the reward asset's decimals: what one claimAllRewards would pay now. */
+  claimable: string
+  claimableUsd: number | null
+  /** Whether the indexed log arithmetic reproduces the chain's amount (false: a gap; the history cannot state it). */
+  reconciled: boolean
+  /** 0 < claimable < the reward asset's existential deposit: claimAllRewards including it reverts until the account holds that deposit. Owed, not forfeited. */
+  belowExistentialDeposit: boolean
+  legs: Array<{ aToken: AssetRef | null; aTokenAddress: string; pending: string }>
+}
+
+/**
+ * The account's claimable money-market incentives. `totalUsd` (priced items only)
+ * IS inside `portfolioUsd`; absent when nothing is claimable or no fresh snapshot.
+ */
+export interface MoneyMarketRewards { asOfBlock: number; items: MoneyMarketRewardItem[]; totalUsd: number }
 
 /** A concentrated-liquidity position holds two tokens: `asset`/`amount` is token0. */
 export interface LpPosition {
@@ -533,7 +556,55 @@ export interface LpPosition {
   amountB?: string
   poolAddress?: string
   tokenId?: string
+  /**
+   * Farmed rows only: the claimable-now rewards of the farm entries behind the
+   * position. Beside `valueUsd`, never in it — though the account's
+   * `portfolioUsd` does count them (see AddressDetail.farmRewards).
+   */
+  unclaimedRewards?: LpUnclaimedReward[]
 }
+
+export interface LpUnclaimedReward {
+  depositId: string
+  globalFarmId: number
+  yieldFarmId: number
+  asset: AssetRef
+  amount: string
+  valueUsd: number | null
+  projected: boolean
+  belowExistentialDeposit?: boolean
+  /** false: below the existential deposit with the owner holding less — a claim pays nothing, so `valueUsd` is 0. */
+  payable?: boolean
+}
+
+/** One farm entry (deposit, yield farm) of the account's liquidity-mining deposits. */
+export interface FarmRewardItem {
+  depositId: string
+  positionId: string | null
+  globalFarmId: number
+  yieldFarmId: number
+  venue: 'Omnipool Farm' | 'XYK Farm'
+  farmState: 'active' | 'stopped' | 'terminated'
+  asset: AssetRef
+  /** Raw integer in the reward asset's decimals: what one claim would pay now. */
+  claimable: string
+  claimableUsd: number | null
+  forfeitIfWithdrawnNow: string
+  /** false: an active farm whose runtime projection failed; the amount is as of its last sync (a lower bound). */
+  projected: boolean
+  belowExistentialDeposit: boolean
+  /** false: below the existential deposit with the owner holding less — a claim pays nothing, so `claimableUsd` is 0 and it is not counted. */
+  payable?: boolean
+  loyaltyPct: number
+  lastSyncPeriod: number
+}
+
+/**
+ * The account's unclaimed liquidity-mining rewards. `totalUsd` (priced entries
+ * only) IS inside `portfolioUsd`; absent when there is no farm entry or no fresh
+ * snapshot (and then no reward is in the value either).
+ */
+export interface FarmRewards { asOfBlock: number; items: FarmRewardItem[]; totalUsd: number }
 
 export interface ActiveDca {
   /** A schedule id, or a DCA intent's short "#n" handle — `intentId` decides which. */
@@ -634,6 +705,8 @@ export interface AddressDetail {
   revenueUsd?: number
   moneyMarket: MoneyMarketPosition[]
   liquidityPositions?: LpPosition[]
+  farmRewards?: FarmRewards
+  moneyMarketRewards?: MoneyMarketRewards
   activeDcas?: ActiveDca[]
   openLimitOrders?: OpenLimitOrder[]
   /** null under `summary=1` — these are live node reads. */
@@ -695,6 +768,100 @@ export interface AccountHistory {
   portfolioBlocks?: number[]
   /** Per-asset reconstructions; large, and rendered by the tool that asks for it. */
   balanceHistory: unknown[]
+}
+
+/**
+ * `/explorer/address/:a/liquidity-history`: every LP position the account's
+ * related set held, per bucket of the value chart's grid, stated as the legs a
+ * redemption would have returned at the pool state sampled at or before the
+ * bucket end and valued at the candle fully closed by then. USD is null (never
+ * zero) where a leg has no price.
+ */
+export interface LiquidityHistoryLeg { asset: AssetRef; amount: string; valueUsd: number | null }
+export interface LiquidityHistorySpan { fromBlock: number; fromTime: string | null; toBlock: number | null; toTime: string | null; kind: 'direct' | 'farmed' }
+export interface LiquidityHistoryPosition {
+  venue: 'omnipool' | 'stableswap' | 'xyk' | 'uniswapv3' | 'gamma'
+  /** How the position was held at its last held bucket; `spans` carry every flip. */
+  farmed: boolean
+  positionId: string | null
+  poolKey: string
+  shareAsset: AssetRef | null
+  spans: LiquidityHistorySpan[]
+  /** `i` indexes the shared dates/blocks arrays; only the buckets where the position was held. */
+  points: Array<{ i: number; shares: string; legs: LiquidityHistoryLeg[]; valueUsd: number | null; unclaimedRewards?: Array<{ asset: AssetRef; amount: string; valueUsd: number | null }> }>
+}
+export interface LiquidityHistory {
+  stepSec: number
+  priceGrain: '1h' | '1d'
+  dates: string[]
+  blocks: number[]
+  /** Sum of every priced position per bucket. */
+  valueUsd: number[]
+  /** Positions held at the bucket end that are left out of valueUsd for want of a price or a pool state. */
+  unpriced: number[]
+  /** Priced unclaimed farm rewards of every entry held at the bucket end (settled); NOT in valueUsd. */
+  unclaimedRewardsUsd?: number[]
+  /** Farm entries held at the bucket end left out of unclaimedRewardsUsd (not stated, or unpriced). */
+  rewardsIncomplete?: number[]
+  /** Largest last-held value first, unpriced last; capped upstream. */
+  positions: LiquidityHistoryPosition[]
+  positionsOmitted: number
+}
+
+/**
+ * `/explorer/address/:address/money-market-history` — per isolated market, the
+ * account's reserves at each bucket end (balanceOf at that block, valued at the
+ * closed candle; null before `reserveHistoryFrom`, never zero) beside the chain's own
+ * getUserAccountData observation as of its block at or before the end.
+ */
+export interface MoneyMarketHistoryObservation {
+  observedAtBlock: number
+  timestamp: string | null
+  healthFactor: string
+  totalCollateralBase: string
+  totalDebtBase: string
+  availableBorrowsBase: string
+  ltv: string
+  liquidationThreshold: string
+}
+export interface MoneyMarketHistoryReserve {
+  asset: AssetRef
+  aToken: AssetRef | null
+  reserveAddress: string
+  points: Array<{ i: number; supplied: string; borrowed: string; suppliedUsd: number | null; borrowedUsd: number | null; collateral: boolean | null }>
+}
+export interface MoneyMarketHistoryMarket {
+  marketKey: string
+  market: string
+  poolAddress: string
+  role: 'primary' | 'supplemental'
+  stakingBacked: boolean
+  points: Array<{
+    i: number
+    suppliedUsd: number | null
+    borrowedUsd: number | null
+    netUsd: number | null
+    unpriced: number
+    observation: MoneyMarketHistoryObservation | null
+    eModeCategoryId: number | null
+    /** Settled unclaimed incentives under this market at the bucket end; never in the USD above. Absent from an older upstream. */
+    unclaimedRewards?: Array<{ asset: AssetRef; amount: string; valueUsd: number | null; settledAtBlock: number | null }>
+  }>
+  reserves: MoneyMarketHistoryReserve[]
+}
+export interface MoneyMarketHistory {
+  stepSec: number
+  priceGrain: '1h' | '1d'
+  dates: string[]
+  blocks: number[]
+  reserveHistoryFrom: { blockHeight: number; time: string | null } | null
+  suppliedUsd: Array<number | null>
+  borrowedUsd: Array<number | null>
+  unpriced: number[]
+  /** Priced settled incentives across markets; null before reserveHistoryFrom. Absent from an older upstream. */
+  unclaimedRewardsUsd?: Array<number | null>
+  rewardsIncomplete?: number[]
+  markets: MoneyMarketHistoryMarket[]
 }
 
 export interface ValueEvent {

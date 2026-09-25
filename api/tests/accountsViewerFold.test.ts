@@ -40,7 +40,8 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
 
   // All five sites that used to spell out `if(t.lid = '', <id>, t.lid) AS gkey`
   // inline now call the one shared helper instead — never a second, divergent
-  // copy of the fold-aware expression.
+  // copy of the fold-aware expression. The reward sums are per account and join
+  // into `grouped`, so they add no gkey site of their own.
   it('every gkey site in the query routes through gkeySql, and none still inlines the old expression', () => {
     const body = accountsPageBody()
     const calls = [...body.matchAll(/\$\{gkeySql\('([a-zA-Z_.]+)'\)\} AS gkey/g)].map(m => m[1])

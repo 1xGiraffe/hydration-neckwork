@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { badRequest, iso } from '../schemas/common.ts'
-import { assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
+import { assetDescriptor, currentPriceOf } from '../../services/explorerAssets.ts'
 import { renderUsd, scaledUsd } from '../../services/valuation.ts'
 import { freshPriceMap } from './assetsData.ts'
 import { poolSnapshot } from './poolSnapshot.ts'
@@ -280,7 +280,7 @@ ORDER BY p.pool_address`,
 
 function usdOf(reserve: bigint, assetId: number, prices: Map<number, bigint>, unpriced: Set<string>): bigint {
   if (reserve === 0n) return 0n
-  const price = prices.get(assetId) ?? prices.get(priceAssetId(assetId))
+  const price = currentPriceOf(prices, assetId)
   if (price == null) {
     unpriced.add(String(assetId))
     return 0n

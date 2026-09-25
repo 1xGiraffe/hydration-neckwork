@@ -249,6 +249,17 @@ describe('GET /v1/accounts/:address/liquidity', () => {
     pool_address: '', token_id: '', tick_lower: null, tick_upper: null, vault: '', shares: '',
   }
 
+  it('names HDX (asset 0) as an XYK event\'s second asset instead of dropping it', async () => {
+    const XYK_ROW = {
+      ...SUBSTRATE_ROW, event_name: 'XYK.LiquidityAdded', asset_id: 1000286, amount: '', amount_a: '5000', asset_b: 0,
+      pool_account: `0x${'c3'.repeat(32)}`, asset_refs: [1000286, 0],
+    }
+    const client = fakeDataClient(query => (query.includes('-- data:accounts:liquidity') ? [XYK_ROW] : undefined))
+    app = await freshDataApp(client)
+    const res = await app.inject({ url: `/v1/accounts/${ACC}/liquidity`, headers: AUTH })
+    expect(res.json().items[0]).toMatchObject({ eventName: 'XYK.LiquidityAdded', assetId: '1000286', assetB: '0' })
+  })
+
   it('maps the liquidity event columns and names the pallet event\'s act', async () => {
     const client = fakeDataClient(query => (query.includes('-- data:accounts:liquidity') ? [SUBSTRATE_ROW] : undefined))
     app = await freshDataApp(client)

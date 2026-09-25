@@ -70,6 +70,8 @@ import { initIceService } from './services/iceService.ts'
 import { initPoolService } from './services/poolService.ts'
 import { initSecurityService } from './services/securityService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
+import { initLmRewardService } from './services/lmRewardService.ts'
+import { initMmIncentiveService } from './services/mmIncentiveService.ts'
 import { initWormholeNttService } from './services/wormholeNttService.ts'
 import { initXcswapSettlements } from './services/xcswapSettlements.ts'
 import { startBackgroundRefresh, stopBackgroundRefresh } from './services/backgroundRefresh.ts'
@@ -279,6 +281,10 @@ async function start() {
     initPendingHeadService(client)
     startPendingHeadService()
     initErc20WalletService(client)
+    // Must precede startBackgroundRefresh(): the lm-rewards cycle reads deposit
+    // owners from ClickHouse and publishes its generation there.
+    initLmRewardService(client)
+    initMmIncentiveService(client)
     // Must precede startBackgroundRefresh(): its initial pass discovers the NTT
     // asset set from ClickHouse before it reads any chain.
     initWormholeNttService(client)

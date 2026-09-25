@@ -149,6 +149,9 @@ async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<voi
   })
   const rows = await res.json<AssetRow>()
   const poolMembers = await loadStableswapMembers(client)
+  // Additive only: a failed member read must not make a known share token look like
+  // an ordinary asset, which would let currentPriceAssetId alias it again.
+  for (const poolId of poolMembers.keys()) STABLESWAP_SHARE_IDS.add(poolId)
   // Before the cache is built: iconAssetIdFor reads the pairing, so a newly
   // discovered aToken must know its reserve to borrow that reserve's artwork.
   await discoverATokenUnderlyings(client, rows)
@@ -286,6 +289,50 @@ export const ATOKEN_UNDERLYING_ID: Record<number, number> = {
   ...envIdMap('EXPLORER_EXTRA_ATOKEN_UNDERLYING'),
 }
 
+// Money-market reserve contracts that aren't the standard ERC-20 precompile (HOLLAR).
+// Extend via EXPLORER_EXTRA_MM_CONTRACT_ASSET ({"0x…":<assetId>}) when a new market adds a
+// deployed-token reserve. Read once at module load, like EXPLORER_EXTRA_ATOKEN_UNDERLYING,
+// in every process that imports this leaf (api, derivations, api-public, api-data);
+// docker-compose.yml passes both variables to exactly those four services. api-mcp
+// imports no service leaf (it answers over HTTP from `api`), so it needs neither.
+function envContractAssetMap(): Record<string, number> {
+  const raw = process.env.EXPLORER_EXTRA_MM_CONTRACT_ASSET?.trim()
+  if (!raw) return {}
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const out: Record<string, number> = {}
+    for (const [k, v] of Object.entries(parsed)) {
+      const id = Number(v)
+      if (/^0x[0-9a-fA-F]{40}$/.test(k) && Number.isInteger(id)) out[k.toLowerCase()] = id
+    }
+    return out
+  } catch {
+    console.error('[ExplorerAssets] EXPLORER_EXTRA_MM_CONTRACT_ASSET is not valid JSON; ignoring')
+    return {}
+  }
+}
+export const MM_CONTRACT_ASSET: Readonly<Record<string, number>> = { '0x531a654d1696ed52e7275a8cede955e82620f99a': 222, ...envContractAssetMap() }
+
+// A money-market reserve address → its registry asset id: the ERC-20 precompile
+// (0x…01 + 8-hex asset id) encodes the id, and a deployed contract (HOLLAR) is looked up.
+export function assetIdFromMmAddress(addr: string): number | null {
+  const h = (addr ?? '').toLowerCase().replace(/^0x/, '')
+  if (MM_CONTRACT_ASSET['0x' + h] != null) return MM_CONTRACT_ASSET['0x' + h]
+  if (h.length === 40 && /^0{30}01/.test(h)) return parseInt(h.slice(32), 16)
+  return null
+}
+
+// The reverse: every reserve address an asset (or its aToken) can be filed under — the
+// standard precompile plus any deployed contract mapped to the same id.
+export function mmReserveAddressForAsset(assetId: number): string[] {
+  const reserveId = ATOKEN_UNDERLYING_ID[assetId] ?? assetId
+  const standard = '0x' + '0'.repeat(30) + '01' + reserveId.toString(16).padStart(8, '0')
+  const deployed = Object.entries(MM_CONTRACT_ASSET)
+    .filter(([, id]) => id === reserveId)
+    .map(([addr]) => addr)
+  return [...new Set([standard, ...deployed])]
+}
+
 // aTokens normally borrow their reserve asset's artwork (aDOT → DOT). Branded
 // product tokens are the exception: they ship their own CDN icon, so they must NOT
 // alias to the underlying's — GIGAHDX's underlying stHDX has no icon at all, which
@@ -371,10 +418,11 @@ async function injectBonds(client: ClickHouseClient): Promise<void> {
   }
 }
 
-// Stableswap/pool SHARE tokens (2-Pool-GDOT, 2-Pool-HUSDC, …) carry no price feed
-// of their own, so they inherit their main underlying's display price. Per-share value
-// is approximately the underlying value for these near-peg two-asset pools; this is a
-// unit-price proxy, not exact NAV.
+// Stableswap/pool SHARE tokens (2-Pool-GDOT, 2-Pool-HUSDC, …) → the main asset they
+// display as (displayAssetId) and borrow artwork from. For HISTORICAL valuation
+// (candles) the share also prices through it — a unit-price proxy, not NAV, since a
+// share has no redeemable-value history. CURRENT valuation never uses this alias: a
+// share's current price is its derived redeemable value (see currentPriceAssetId).
 export const SHARE_TOKEN_UNDERLYING_ID: Record<number, number> = {
   104: 34,     // 2-Pool-WETH   → ETH
   110: 1110,   // 2-Pool-HUSDC  → HUSDC
@@ -426,6 +474,54 @@ export function priceAssetId(assetId: number): number {
   return id
 }
 
+// Every stableswap share token (a pool's id IS its share token's registry id): the
+// hand-kept SHARE_TOKEN_UNDERLYING_ID keys plus every pool the state history has ever
+// seen, added at each registry load (loadStableswapMembers), so a pool registered
+// tomorrow is recognised with no code change.
+const STABLESWAP_SHARE_IDS = new Set<number>(Object.keys(SHARE_TOKEN_UNDERLYING_ID).map(Number))
+export function isStableswapShareToken(assetId: number): boolean {
+  return STABLESWAP_SHARE_IDS.has(assetId)
+}
+/** Test seam: register a share token id the way a registry load would. */
+export function registerStableswapShareToken(assetId: number): void {
+  STABLESWAP_SHARE_IDS.add(assetId)
+}
+
+// The id whose CURRENT price values `assetId` when it has no entry of its own:
+// priceAssetId's alias walk, stopped at the first stableswap share token. A share's
+// current price is never borrowed from an underlying — each current price map
+// carries the share's own derived redeemable value (lpMath.stableswapSharePrices)
+// under the share's id, or nothing when a leg is unpriced — so an aToken over a
+// share (a3-Pool → 3-Pool) without a feed of its own values through the share, and
+// the share itself resolves to itself. Look prices up through currentPriceOf, which
+// applies the one precedence rule; this is the alias half of it. priceAssetId keeps
+// the full walk for HISTORICAL (candle) valuation: a share has no redeemable-value
+// history, and its underlying's close stays the documented proxy there.
+export function currentPriceAssetId(assetId: number): number {
+  let id = assetId
+  for (let hop = 0; hop < 4; hop++) {
+    if (STABLESWAP_SHARE_IDS.has(id)) return id
+    const next = PRICE_ALIAS_ID[id]
+    if (next == null || next === id) return id
+    id = next
+  }
+  return id
+}
+
+/**
+ * The CURRENT price of `assetId` in a surface's current price map — the ONE lookup
+ * rule every current-value surface (explorer price map, public /v1/accounts/balances,
+ * Data API) applies: the asset's OWN entry first (its feed, or for a share token its
+ * derived redeemable value), else the entry of the asset currentPriceAssetId
+ * resolves it to. So an aToken with a feed of its own (GDOT, over the 2-Pool-GDOT
+ * share) values at that feed, and one without values through its alias — a share
+ * where the walk reaches one. A share with no entry is unpriced: currentPriceAssetId
+ * resolves a share to itself, so it is never walked on to an underlying.
+ */
+export function currentPriceOf<T>(prices: ReadonlyMap<number, T>, assetId: number): T | undefined {
+  return prices.get(assetId) ?? prices.get(currentPriceAssetId(assetId))
+}
+
 // The asset id under which `assetId` should be DISPLAYED in per-account holdings:
 // a held Stableswap pool-share token (2-Pool-GDOT, …) is shown as its underlying
 // main asset (GDOT), mirroring preis-ui which hides "-Pool" tokens. Unlike
@@ -456,6 +552,73 @@ export const UNDERLYING_TO_SHARE_IDS: Record<number, number[]> = (() => {
   const out: Record<number, number[]> = {}
   for (const [share, underlying] of Object.entries(SHARE_TOKEN_UNDERLYING_ID)) {
     (out[underlying] ??= []).push(Number(share))
+  }
+  return out
+})()
+
+// ─── Money-market markets ─────────────────────────────────────────────────────
+// AAVE v3 markets are isolated pools: getUserAccountData(user) on one pool returns
+// ONLY that pool's aggregate, with its OWN health factor. A borrower in two markets
+// (e.g. core + GIGAHDX) therefore has TWO independent positions/health factors — they
+// are never blended, since liquidation is per market. Core is primary; GIGAHDX and BIL
+// are built-in supplemental markets; EXPLORER_MM_MARKETS adds future deployments (read
+// once at module load in every process that imports this leaf).
+// `stakingBacked` marks a market (GIGAHDX) whose collateral (stHDX) is backed by HDX
+// that stays LOCKED IN THE WALLET — so its collateral is display-only and must not be
+// added to an account's value (the locked HDX is already counted).
+export interface MmMarket {
+  key: string
+  label: string
+  poolProxy: string
+  role: 'primary' | 'supplemental'
+  defiSimSupported: boolean
+  stakingBacked: boolean
+}
+export const CORE_MM_MARKET: MmMarket = {
+  key: 'core', label: 'Money Market', poolProxy: '0x1b02e051683b5cfac5929c25e84adb26ecf87b38',
+  role: 'primary', defiSimSupported: true, stakingBacked: false,
+}
+export const GIGAHDX_MM_MARKET: MmMarket = {
+  key: 'gigahdx', label: 'GIGAHDX', poolProxy: '0x2ce2cfff743cdb6637f4b5d351937a541b8c8923',
+  role: 'supplemental', defiSimSupported: false, stakingBacked: true,
+}
+// Isolated BIL market (Decentral × DUX Group invoice factoring): uBIL + HOLLAR
+// reserves, BIL (asset 55) as the uBIL reserve's aToken. Deposits are ordinary
+// EVM pool supplies — no staking pallet moves collateral — so unlike GIGAHDX it
+// is not staking-backed and its Supply/Withdraw rows are real user acts.
+export const BIL_MM_MARKET: MmMarket = {
+  key: 'bil', label: 'BIL', poolProxy: '0x69310fda58c819ad82df7d2cb61841c853337a53',
+  role: 'supplemental', defiSimSupported: false, stakingBacked: false,
+}
+function envMmMarkets(): MmMarket[] {
+  const raw = process.env.EXPLORER_MM_MARKETS?.trim()
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    const out: MmMarket[] = []
+    parsed.forEach((e, i) => {
+      const r = (e ?? {}) as Record<string, unknown>
+      const poolProxy = typeof r.poolProxy === 'string' && /^0x[0-9a-fA-F]{40}$/.test(r.poolProxy) ? r.poolProxy.toLowerCase() : null
+      if (!poolProxy) { console.error(`[ExplorerAssets] EXPLORER_MM_MARKETS[${i}].poolProxy invalid; skipping`); return }
+      const key = typeof r.key === 'string' && r.key.trim() ? r.key.trim() : `market${i + 1}`
+      out.push({
+        key, label: typeof r.label === 'string' && r.label.trim() ? r.label.trim() : key, poolProxy,
+        role: 'supplemental', defiSimSupported: false, stakingBacked: r.stakingBacked === true,
+      })
+    })
+    return out
+  } catch {
+    console.error('[ExplorerAssets] EXPLORER_MM_MARKETS is not valid JSON; ignoring')
+    return []
+  }
+}
+/** The configured markets in display order: core first, then the rest, deduped by pool proxy and key. */
+export const MM_MARKETS: readonly MmMarket[] = (() => {
+  const seen = new Set<string>(); const out: MmMarket[] = []
+  const keys = new Set<string>()
+  for (const m of [CORE_MM_MARKET, GIGAHDX_MM_MARKET, BIL_MM_MARKET, ...envMmMarkets()]) {
+    if (!seen.has(m.poolProxy) && !keys.has(m.key)) { seen.add(m.poolProxy); keys.add(m.key); out.push(m) }
   }
   return out
 })()

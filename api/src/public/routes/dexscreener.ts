@@ -200,7 +200,7 @@ export const dexscreenerRoutes: FastifyPluginAsync<{ client: ClickHouseClient }>
         ASSET_IDS,
         TXN_ID,
         `\`reserves\` is the pool's state at the nearest sample AT OR BEFORE the fill's block. The state histories are sampled on a ${RESERVE_GRID_BLOCKS}-block grid — ≈1 h at the chain's present ~6 s block time, ≈20 min if it moves to 2 s — so that sample is normally one grid step old; past ${RESERVE_MAX_STALE_BLOCKS} blocks (two grid steps, whatever the block time) the field is omitted rather than publishing a stale reserve (a delisted Omnipool asset keeps its final sample forever). The bound is deliberately counted in blocks rather than in wall clock: the grid is block-counted too, so two grid steps means the same thing at any cadence. For an Omnipool pair the two sides are the asset's hub reserve and its own reserve; for a stableswap pair against the pool share token, the share side is the pool's total issuance.`,
-        '`reserves` is also omitted when either side would read 0. A fill proves the pool held both assets, so a zero is an indexing artefact rather than the pool\'s state, and publishing it would report the pool as empty. This currently suppresses reserves for every HDX-quoted XYK pool: native HDX balances live in `System.Account` rather than `Tokens`, so the XYK reserve history reads 0 on the HDX side.',
+        '`reserves` is also omitted when either side would read 0. A fill proves the pool held both assets, so a zero is an indexing artefact rather than the pool\'s state, and publishing it would report the pool as empty.',
         SKIPPED_ASSETS,
         VENUES,
         NO_LIQUIDITY,

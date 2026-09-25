@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { testBucketing } from './support/bucketing.ts'
+import { loadOmnipoolPrincipalHistory } from '../src/services/lpHistory.ts'
 import {
-  initExplorerService,
-  loadOmnipoolPrincipalHistory,
   omnipoolLegsForBucket,
   omnipoolRemoveLiquidity,
   type DecodedPosition,
@@ -82,7 +81,7 @@ describe('loadOmnipoolPrincipalHistory', () => {
   const posState: DecodedPosition = { assetId: 10, amount: 1000n, shares: 1000n, priceNum: 10n ** 18n, priceDen: 10n ** 18n }
 
   it('resolves ownership per bucket, dedups bare/farmed, and values from historical state', async () => {
-    initExplorerService(fakeClient({
+    const client = (fakeClient({
       // Position '1': bare [1015,1025) then farmed [1025, open) — same account, no overlap.
       intervals: [
         { position_id: '1', valid_from_block: 1015, valid_to_block: 1025 },
@@ -97,7 +96,7 @@ describe('loadOmnipoolPrincipalHistory', () => {
       ],
     }))
 
-    const hist = await loadOmnipoolPrincipalHistory([ACC], bk)
+    const hist = await loadOmnipoolPrincipalHistory(client, [ACC], bk)
     const expected = omnipoolRemoveLiquidity(poolState, posState)
 
     expect(hist.assetIds).toEqual([10])
@@ -113,7 +112,7 @@ describe('loadOmnipoolPrincipalHistory', () => {
   })
 
   it('drops a position from the bucket once it is destroyed', async () => {
-    initExplorerService(fakeClient({
+    const client = (fakeClient({
       intervals: [{ position_id: '2', valid_from_block: 1005, valid_to_block: 0 }],
       state: [
         { position_id: '2', block_height: 1002, event_kind: 'created', asset_id: 10, amount_raw: '1000', shares_raw: '1000', price_raw: (10n ** 18n).toString(), active: 1 },
@@ -121,7 +120,7 @@ describe('loadOmnipoolPrincipalHistory', () => {
       ],
       pool: [{ asset_id: 10, b: -1, reserve: '1000000', hub_reserve: '500000', shares: '2000000' }],
     }))
-    const hist = await loadOmnipoolPrincipalHistory([ACC], bk)
+    const hist = await loadOmnipoolPrincipalHistory(client, [ACC], bk)
     // Destroyed at 1035: present through bucket 3 (end 1039 sees the destroy → none), so
     // legs exist for buckets 0..2 (ends 1009,1019,1029 < 1035) and vanish from bucket 3.
     expect(hist.legsByBucket[2]).toHaveLength(1)

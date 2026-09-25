@@ -12,7 +12,7 @@ import {
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressListTotal, getTagListTotal,
   getAddressValueEvents, getTagValueEvents,
-  getAssetPriceWindow, getAddressHistoryWindow, getTagHistoryWindow,
+  getAssetPriceWindow, getAddressHistoryWindow, getAddressLiquidityHistory, getAddressMoneyMarketHistory, getTagHistoryWindow, getTagLiquidityHistory,
   getTagActivity, getTagExtrinsics, getTagEvents,
   getAddressVotes, getTagVotes, getTagVotesByReferendum,
   getAddressRevenueBreakdown, getTagRevenueBreakdown,
@@ -63,6 +63,15 @@ export const historyWindowSchema = z.object({
   fromBlock: z.coerce.number().int().min(0).max(0xffff_ffff),
   toBlock: z.coerce.number().int().min(1).max(0xffff_ffff),
 }).refine(w => w.toBlock > w.fromBlock, { message: 'toBlock must exceed fromBlock' })
+// The same window where it is optional (the address value, LP and money-market
+// histories, the tag LP history):
+// neither bound → the whole range (`{}`), a valid pair → that window, anything
+// else → null (400).
+export function optionalHistoryWindow(q: Record<string, unknown>): { window?: { fromBlock: number; toBlock: number } } | null {
+  if (q.fromBlock == null && q.toBlock == null) return {}
+  const w = historyWindowSchema.safeParse(q)
+  return w.success ? { window: w.data } : null
+}
 const analyzableAddressParam = z.object({ address: z.string().min(3).max(128) })
 const tagParam = z.object({ tagId: z.string().min(1).max(64) })
 // The multi-source categories assemble one candidate window per source, classify
@@ -708,6 +717,19 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return windowed
   })
 
+  // The tag twin of /explorer/address/:a/liquidity-history: the same wire shape
+  // over the tag's member set, with the same optional `fromBlock`+`toBlock` window.
+  // Money-market history is deliberately not aggregated to tags.
+  fastify.get('/explorer/tag/:tagId/liquidity-history', async (req, reply) => {
+    const params = tagParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag' })
+    const w = optionalHistoryWindow(req.query as Record<string, unknown>)
+    if (!w) return reply.status(400).send({ error: 'Invalid block window' })
+    const history = await getTagLiquidityHistory(params.data.tagId, w.window)
+    if (!history) return reply.status(404).send({ error: 'Tag not recognized' })
+    return history
+  })
+
   fastify.get('/explorer/tag/:tagId/close-accounts', async (req, reply) => {
     const params = tagParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
@@ -804,16 +826,39 @@ export async function explorerRoutes(fastify: FastifyInstance) {
   fastify.get('/explorer/address/:address/history', async (req, reply) => {
     const params = addressParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
-    const q = req.query as Record<string, unknown>
     const seriesOnly = (req.query as { series?: string })?.series === '1'
-    if (q.fromBlock != null || q.toBlock != null) {
-      const w = historyWindowSchema.safeParse(q)
-      if (!w.success) return reply.status(400).send({ error: 'Invalid block window' })
-      const windowed = await getAddressHistoryWindow(params.data.address, w.data.fromBlock, w.data.toBlock, { seriesOnly })
+    const w = optionalHistoryWindow(req.query as Record<string, unknown>)
+    if (!w) return reply.status(400).send({ error: 'Invalid block window' })
+    if (w.window) {
+      const windowed = await getAddressHistoryWindow(params.data.address, w.window.fromBlock, w.window.toBlock, { seriesOnly })
       if (!windowed) return reply.status(404).send({ error: 'Address not recognized' })
       return windowed
     }
     const history = await getAddressHistory(params.data.address, { seriesOnly })
+    if (!history) return reply.status(404).send({ error: 'Address not recognized' })
+    return history
+  })
+
+  // Per-position LP history on the value chart's grid (getAddressLiquidityHistory);
+  // `fromBlock`+`toBlock` re-bucket it over that block window, like /history.
+  fastify.get('/explorer/address/:address/liquidity-history', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const w = optionalHistoryWindow(req.query as Record<string, unknown>)
+    if (!w) return reply.status(400).send({ error: 'Invalid block window' })
+    const history = await getAddressLiquidityHistory(params.data.address, w.window)
+    if (!history) return reply.status(404).send({ error: 'Address not recognized' })
+    return history
+  })
+
+  // Per-market money-market history on the same grid (getAddressMoneyMarketHistory);
+  // `fromBlock`+`toBlock` re-bucket it over that block window, like /history.
+  fastify.get('/explorer/address/:address/money-market-history', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const w = optionalHistoryWindow(req.query as Record<string, unknown>)
+    if (!w) return reply.status(400).send({ error: 'Invalid block window' })
+    const history = await getAddressMoneyMarketHistory(params.data.address, w.window)
     if (!history) return reply.status(404).send({ error: 'Address not recognized' })
     return history
   })

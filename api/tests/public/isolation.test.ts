@@ -51,6 +51,22 @@ const ALLOWED_SHARED = new Set([
   // account's v3 positions and Gamma shares by the same definition the explorer's
   // account page and value-history chart use.
   'services/uniswapV3Positions.ts',
+  // The farm-reward snapshot read: /v1/accounts/balances counts an account's
+  // claimable liquidity-mining rewards by the same rows, claimable rule and
+  // staleness gate the explorer's account value uses.
+  'services/lmRewardSnapshot.ts',
+  // The money-market incentive snapshot read: /v1/accounts/balances counts an
+  // account's claimable lending incentives by the same rows and staleness gate the
+  // explorer's account value uses.
+  'services/mmIncentiveSnapshot.ts',
+  // The pure LP redemption arithmetic (no imports): /v1/accounts/balances redeems an
+  // account's XYK LP shares by the same xykShareLegs the explorer's account page and
+  // the Data API use, so the three cannot state one position two ways.
+  'services/lpMath.ts',
+  // The current stableswap pool state (newest snapshot) a share token's derived
+  // redeemable price is computed from: /v1/accounts/balances prices a share by the
+  // same state read and lpMath derivation the explorer's price map uses.
+  'services/stableswapSharePools.ts',
 ])
 
 // Not a shared source module: the api package manifest, imported for the
