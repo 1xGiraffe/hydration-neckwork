@@ -65,10 +65,44 @@ export function chooseBucketStep(fromSec: number, toSec: number, budget: number,
 
 // ─── The bucketing a reconstruction runs on ───────────────────────────────────
 
-import { heightsForBoundaries, type BlockClock } from './blockClock.ts'
+import { heightAtOrBefore, heightsForBoundaries, type BlockClock } from './blockClock.ts'
+
+/**
+ * 1970-01-05 00:00 UTC, the first Monday of the epoch. An epoch-anchored 7-day
+ * step ends on Thursdays; anchoring it here makes it the calendar week starting
+ * Monday UTC (`toMonday`), the week every other weekly surface uses.
+ */
+export const MONDAY_ANCHOR_SEC = 4 * 86_400
+
+export interface BucketingOptions {
+  /**
+   * A fixed step instead of the ladder's budget choice: a surface whose caller
+   * names its grain (hour/day/week) must get exactly that grain. Whole hours.
+   */
+  stepSec?: number
+  /** The instant the step grid is aligned to (default the epoch). */
+  anchorSec?: number
+  /**
+   * How a boundary instant resolves to a block height (default the chart's
+   * heightAtOrBefore via heightsForBoundaries). Null falls back to floorHeight.
+   */
+  heightAt?: (sec: number) => number | null
+  /**
+   * The rule `heightAt` applies to an arbitrary instant, named: what lets a
+   * canonical grid (canonicalGrid) date its own boundaries the way this grid does.
+   * `heightAt` itself may special-case an instant (the explorer pins its range end
+   * to the head's height), so it cannot serve for other instants. Without
+   * `heightAt` the chart's heightAtOrBefore is implied ('chart'); a grid with a
+   * `heightAt` but no `dating` has no canonical twin.
+   */
+  dating?: BucketDating
+}
+
+/** A named instant → height rule (see BucketingOptions.dating). */
+export interface BucketDating { key: string; heightAt: (sec: number) => number | null }
 
 export interface Bucketing {
-  /** Bucket epoch (unix seconds), aligned to `step`. */
+  /** Bucket epoch (unix seconds), aligned to `step` from the anchor (the epoch unless `anchorSec`). */
   t0: number
   /** Bucket duration in seconds — always a ladder member. */
   step: number
@@ -90,6 +124,8 @@ export interface Bucketing {
   floorHeight: number
   /** The bucket a block height falls in, in TS. */
   bucketOfHeight(height: number): number
+  /** How the boundaries were dated, when that rule is a named one (see BucketingOptions.dating). */
+  dating?: BucketDating
 }
 
 /**
@@ -104,9 +140,12 @@ export function makeBucketing(
   floorHeight: number,
   budget = 180,
   minStepSec: number = FINEST_STEP_SEC,
+  opts: BucketingOptions = {},
 ): Bucketing {
-  const step = chooseBucketStep(fromSec, toSec, budget, minStepSec)
-  const t0 = Math.floor(fromSec / step) * step
+  const step = opts.stepSec ?? chooseBucketStep(fromSec, toSec, budget, minStepSec)
+  if (!Number.isInteger(step) || step <= 0 || step % 3_600 !== 0) throw new RangeError(`bucket step must be a whole number of hours: ${step}`)
+  const anchor = opts.anchorSec ?? 0
+  const t0 = anchor + Math.floor((fromSec - anchor) / step) * step
   // ceil - 1, not floor: buckets are (start, end], so covering the range takes
   // ceil(span / step) of them. floor() produced one bucket too many whenever the
   // span divided exactly, and its last two shared an end instant — a duplicate
@@ -116,7 +155,10 @@ export function makeBucketing(
   // past its end). N = 0 is a valid bucketing — one bucket, index 0.
   const N = Math.max(0, Math.ceil((toSec - t0) / step) - 1)
   const endSec = (b: number) => Math.min(t0 + (b + 1) * step, toSec)
-  const endHeights = heightsForBoundaries(clock, Array.from({ length: N + 1 }, (_, b) => endSec(b)), floorHeight)
+  const ends = Array.from({ length: N + 1 }, (_, b) => endSec(b))
+  const heightAt = opts.heightAt
+  const dating: BucketDating | undefined = opts.dating ?? (heightAt ? undefined : { key: 'chart', heightAt: sec => heightAtOrBefore(clock, sec) })
+  const endHeights = heightAt ? ends.map(t => heightAt(t) ?? floorHeight) : heightsForBoundaries(clock, ends, floorHeight)
   // The first height IN each bucket, so a height landing exactly on a bucket-end
   // resolves to that bucket rather than the next — the (start, end] rule above.
   const startHeights = [floorHeight, ...endHeights.slice(0, N).map(h => h + 1)]
@@ -136,6 +178,7 @@ export function makeBucketing(
     // before the range would land in bucket 0 instead of the -1 carry.
     ofTsCarry: tsExpr => `toInt32(greatest(-1, least(${N}, toInt64(floor((toInt64(toUnixTimestamp(${tsExpr})) - ${t0} - 1) / ${step})))))`,
     floorHeight,
+    ...(dating ? { dating } : {}),
     // Height-keyed sources resolve through the same boundaries, so they agree
     // with the timestamped ones bucket for bucket. roundDown lands on the
     // bucket's start height; indexOf turns that into its index.
@@ -155,4 +198,82 @@ export function makeBucketing(
       return lo
     },
   }
+}
+
+// ─── Canonical grids ──────────────────────────────────────────────────────────
+//
+// A global (not per-account) fold over a bucket grid — the reserve indices, the
+// incentive programme indices — is the same for every account whose grid shares
+// its boundaries. Two account grids on one step share every boundary but their
+// first and last: t0 is the step lattice point at or below the account's start,
+// and the range ends at the head instant, which is no lattice point. So the fold
+// runs once on a CANONICAL grid — the step lattice's newest CANONICAL_GRID_STEPS
+// boundaries up to the account grid's last lattice point, dated by the same rule —
+// and an account's bucket takes the canonical bucket ending at the same instant
+// AND height. A budget-180 ladder grid always fits inside it; anything that does
+// not map (a longer custom window, a clock that has moved) falls back to its own
+// per-grid fold, so the canonical path is an optimisation with an exact fallback.
+
+/** How many lattice steps back from its last boundary a canonical grid reaches. */
+export const CANONICAL_GRID_STEPS = 200
+
+const STUB_CLOCK: BlockClock = { hours: [], heights: [], builtAt: 0 }
+
+export interface CanonicalGrid {
+  /** Cache-key fragment naming the grid: step, lattice phase, dating rule, last boundary, reach. */
+  key: string
+  bk: Bucketing
+  /** Per bucket of the source grid: the canonical bucket ending at the same instant and height, or null. */
+  map: (number | null)[]
+}
+
+/** The canonical grid a bucketing's buckets can be looked up on; null when its dating rule is not a named one. */
+export function canonicalGrid(bk: Bucketing, steps: number = CANONICAL_GRID_STEPS): CanonicalGrid | null {
+  const dating = bk.dating
+  if (!dating || steps < 1) return null
+  const step = bk.step
+  const phase = ((bk.t0 % step) + step) % step
+  const last = bk.t0 + Math.floor((bk.endSec(bk.N) - bk.t0) / step) * step
+  if (last <= bk.t0 - step * steps) return null
+  const from = last - steps * step
+  // Bucket 0 opens at the first block after its start instant (buckets are (start, end]).
+  const floor = (dating.heightAt(from) ?? 0) + 1
+  const cb = makeBucketing(STUB_CLOCK, from, last, floor, undefined, undefined, { stepSec: step, anchorSec: phase, heightAt: dating.heightAt, dating })
+  const map: (number | null)[] = new Array(bk.N + 1).fill(null)
+  for (let b = 0; b <= bk.N; b++) {
+    const t = bk.endSec(b)
+    if (t <= from || t > last || (t - from) % step !== 0) continue
+    const i = (t - from) / step - 1
+    if (cb.endHeight(i) === bk.endHeight(b)) map[b] = i
+  }
+  return { key: `${step}:${phase}:${dating.key}:${last}:${steps}`, bk: cb, map }
+}
+
+/**
+ * How a bucketing reads a canonical fold: every bucket mapped, or every bucket
+ * but the last — the range end at the head, which is no lattice point — whose
+ * state is then the canonical state at the lattice boundary below it plus the
+ * rows in (that boundary's height, its own end height]. Null when any other
+ * bucket does not map: the caller folds on its own grid instead.
+ */
+export interface CanonicalPlan {
+  grid: CanonicalGrid
+  tail: { b: number; prev: number; fromHeight: number; toHeight: number } | null
+}
+
+export function canonicalPlan(bk: Bucketing, steps: number = CANONICAL_GRID_STEPS): CanonicalPlan | null {
+  const grid = canonicalGrid(bk, steps)
+  if (!grid) return null
+  for (let b = 0; b < bk.N; b++) if (grid.map[b] == null) return null
+  if (grid.map[bk.N] != null) return { grid, tail: null }
+  const end = bk.endSec(bk.N)
+  const lattice = grid.bk.t0 + Math.floor((end - grid.bk.t0) / bk.step) * bk.step
+  const prev = (lattice - grid.bk.t0) / bk.step - 1
+  if (prev < 0 || prev > grid.bk.N) return null
+  // The boundary below must be the previous bucket's own end where there is one.
+  if (bk.N > 0 && grid.map[bk.N - 1] !== prev) return null
+  const fromHeight = grid.bk.endHeight(prev) + 1
+  const toHeight = bk.endHeight(bk.N)
+  if (toHeight < fromHeight - 1) return null
+  return { grid, tail: { b: bk.N, prev, fromHeight, toHeight } }
 }

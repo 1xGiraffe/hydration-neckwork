@@ -5,6 +5,8 @@ import { refreshContractCode } from './contractRegistryService.ts'
 import { refreshSecurityChainState } from './securityService.ts'
 import { refreshWormholeBacking } from './wormholeNttService.ts'
 import { refreshXcswapSettlements } from './xcswapSettlements.ts'
+import { refreshLmRewards } from './lmRewardService.ts'
+import { refreshMmIncentives } from './mmIncentiveService.ts'
 
 // Coordinated scheduler for the background refreshers that read node-full
 // (chain-state enumeration and EVM eth_call). Previously each ran on its own
@@ -22,9 +24,27 @@ import { refreshXcswapSettlements } from './xcswapSettlements.ts'
 //   wormhole-backing ~2.7s node-full (≈23 throttled eth_call, one batched
 //                    array of 4 fuse reads per manager, 1 pinned storage
 //                    batch) + 3 ClickHouse reads                   → every tick (60s)
-// Worst case (every fifteenth minute all of them run back to back) ≈ 7s of
-// node-full time per 60s window — a low single-digit duty cycle, comfortably
-// below the one backfill worker the node sustains before live ingestion lags.
+//   lm-rewards     ~0.8s node-full (≈38 HTTP round trips carrying ~2k
+//                    JSON-RPC calls: the finalized head, ~8 key pages, the
+//                    values of the ~1.9k LM deposits and ~60 farms in batches
+//                    of 80, one ValidationData read, and one DryRunApi claim
+//                    per active yield farm behind the snapshot block — 8 today,
+//                    at most 3 probes each — plus one CurrenciesApi.free_balance
+//                    per owner of a below-ED entry, ~120, 8 in flight, ~60ms)
+//                    + 3 ClickHouse reads and one ~2.3k-row
+//                    generation write                           → every 2nd tick (120s)
+//   mm-incentives  ~12–24s node-full (measured 2026-09-25: one getAllUserRewards
+//                    eth_call per candidate holder — 4,487, over the 7
+//                    incentivized aTokens — in batches of 50, ≈90 round trips,
+//                    plus 7 getAssetDecimals, 12 getAssetIndex and one
+//                    AssetRegistry read; the spread is the node's load) + ~0.3s
+//                    of ClickHouse (the scaled fold of the 7 aTokens and the
+//                    incentive log sums) and one ~11k-row generation write
+//                                                              → every 5th tick (300s)
+// Worst case (every thirtieth minute — the cadences' common multiple — all of
+// them run back to back) ≈ 20–32s of node-full time in that 60s window, ≈ 7s in
+// the other windows — a low duty cycle, comfortably below the one backfill
+// worker the node sustains before live ingestion lags.
 // The Wormhole cycle also reaches OFF-chain endpoints (origin RPCs,
 // Wormholescan); those are bounded by their own timeouts and never block a
 // request path, since every response is served from the snapshot it leaves.
@@ -88,6 +108,18 @@ const TASKS: RefreshTask[] = [
   // proportional to open orders rather than to orders ever placed — and an
   // order settles in minutes, so it wants the base cadence.
   { name: 'xcswap-settlements', everyTicks: 1, run: refreshXcswapSettlements },
+  // Unclaimed liquidity-mining rewards: every LM deposit and farm read at one
+  // finalized block, active farms projected to THAT block (not the head) by a
+  // DryRunApi claim. Active farms accrue every relay block, so the published
+  // claimable trails the chain by up to one cadence plus finality — stated as
+  // its block.
+  { name: 'lm-rewards', everyTicks: 2, run: refreshLmRewards },
+  // Claimable money-market incentives: the RewardsController's getAllUserRewards
+  // per candidate holder at the indexed head, with the log arithmetic reconciled
+  // beside it. The heaviest node-full lane here (~12–24s), so it runs every fifth
+  // tick: 300s keeps the published figure three cycles inside the 15-minute
+  // staleness gate the snapshot readers apply.
+  { name: 'mm-incentives', everyTicks: 5, run: refreshMmIncentives },
 ]
 
 // Tasks due on a given 1-based tick number (exported for testing the cadence).

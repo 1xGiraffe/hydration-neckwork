@@ -12,6 +12,10 @@ vi.mock('../src/services/proxyMultisigService.ts', () => ({ refreshProxyMultisig
 vi.mock('../src/services/erc20WalletService.ts', () => ({ refreshErc20Wallets: () => erc20() }))
 vi.mock('../src/services/contractRegistryService.ts', () => ({ refreshContractCode: () => contractCode() }))
 vi.mock('../src/services/wormholeNttService.ts', () => ({ refreshWormholeBacking: () => wormhole() }))
+const lmRewards = vi.fn(async () => {})
+vi.mock('../src/services/lmRewardService.ts', () => ({ refreshLmRewards: () => lmRewards() }))
+const mmIncentives = vi.fn(async () => {})
+vi.mock('../src/services/mmIncentiveService.ts', () => ({ refreshMmIncentives: () => mmIncentives() }))
 
 const { startBackgroundRefresh, stopBackgroundRefresh, dueTasks } = await import('../src/services/backgroundRefresh.ts')
 
@@ -37,6 +41,26 @@ describe('dueTasks cadence', () => {
   // rather than an hour, so the cycle runs at the base cadence.
   it('schedules the Wormhole backing check on every tick (~60s)', () => {
     for (const tick of [1, 2, 3, 4]) expect(dueTasks(tick).map(t => t.name), `tick ${tick}`).toContain('wormhole-backing')
+  })
+})
+
+describe('lm-rewards cadence', () => {
+  it('reads the reward snapshot every 2nd tick (~120s)', () => {
+    expect(dueTasks(1).map(t => t.name)).not.toContain('lm-rewards')
+    expect(dueTasks(2).map(t => t.name)).toContain('lm-rewards')
+    expect(dueTasks(4).map(t => t.name)).toContain('lm-rewards')
+  })
+})
+
+describe('mm-incentives cadence', () => {
+  // ~12–24s of node-full per cycle, so every 5th tick; 300s stays three cycles inside
+  // the 15-minute staleness gate (MM_INCENTIVE_MAX_AGE_SECONDS) the readers apply.
+  it('reads the incentive snapshot every 5th tick (~300s), inside the staleness gate', async () => {
+    const { MM_INCENTIVE_MAX_AGE_SECONDS } = await import('../src/services/mmIncentiveSnapshot.ts')
+    expect(dueTasks(4).map(t => t.name)).not.toContain('mm-incentives')
+    expect(dueTasks(5).map(t => t.name)).toContain('mm-incentives')
+    expect(dueTasks(10).map(t => t.name)).toContain('mm-incentives')
+    expect(5 * 60 * 3).toBeLessThanOrEqual(MM_INCENTIVE_MAX_AGE_SECONDS)
   })
 })
 

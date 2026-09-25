@@ -41,6 +41,9 @@ export const DATA_CACHE_CONTROL: Array<[RegExp, number, Visibility]> = [
   // summaries and monthly fee folds hold longer.
   [/^\/v1\/accounts\/[^/]+\/balances\/history$/, 60, 'private'],
   [/^\/v1\/accounts\/[^/]+\/liquidity\/positions$/, 10, 'private'],
+  [/^\/v1\/accounts\/[^/]+\/liquidity\/history$/, 60, 'private'],
+  [/^\/v1\/accounts\/[^/]+\/money-market\/positions$/, 10, 'private'],
+  [/^\/v1\/accounts\/[^/]+\/money-market\/history$/, 60, 'private'],
   [/^\/v1\/accounts\/[^/]+\/otc\/fills$/, 5, 'private'],
   [/^\/v1\/accounts\/[^/]+\/(balances|events|extrinsics|transfers|trades|dca|intents|otc|liquidity|xcm|money-market)$/, 5, 'private'],
   [/^\/v1\/accounts\/[^/]+\/(staking|votes|liquidations)$/, 10, 'private'],

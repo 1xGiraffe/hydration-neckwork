@@ -576,6 +576,7 @@ services:
       # reads the same variable, and the two must name the same site.
       - SUBSQUARE_BASE_URL=${SUBSQUARE_BASE_URL:-https://hydration.subsquare.io}
       - EXPLORER_EXTRA_ATOKEN_UNDERLYING=${EXPLORER_EXTRA_ATOKEN_UNDERLYING:-}
+      - EXPLORER_EXTRA_MM_CONTRACT_ASSET=${EXPLORER_EXTRA_MM_CONTRACT_ASSET:-}
 
   # Long-running recompute loop for the derivation jobs registered in
   # api/src/derivations/runner.ts (read models a plain materialized view can't
@@ -607,6 +608,7 @@ services:
       # Reference USD candles for cross-chain destinations that do not trade here.
       - KRAKEN_BASE_URL=${KRAKEN_BASE_URL:-https://api.kraken.com/0/public}
       - EXPLORER_EXTRA_ATOKEN_UNDERLYING=${EXPLORER_EXTRA_ATOKEN_UNDERLYING:-}
+      - EXPLORER_EXTRA_MM_CONTRACT_ASSET=${EXPLORER_EXTRA_MM_CONTRACT_ASSET:-}
 
   # Public REST API (AGENTS.md § Public API):
   # the versioned /v1 + /rest surface for the Hydration UI and external feeds.
@@ -644,6 +646,7 @@ services:
       - PUBLIC_API_MASTER=${PUBLIC_API_MASTER:-true}
       # Same asset-registry snapshot as `api` (aToken aliases feed /v1/assets).
       - EXPLORER_EXTRA_ATOKEN_UNDERLYING=${EXPLORER_EXTRA_ATOKEN_UNDERLYING:-}
+      - EXPLORER_EXTRA_MM_CONTRACT_ASSET=${EXPLORER_EXTRA_MM_CONTRACT_ASSET:-}
       # XCM volume for /hydration-web/v1/stats, from the same Ocelloids account the
       # explorer's journey enrichment uses. Without the token that one field is
       # served as null; the rest of the response is unaffected.
@@ -695,6 +698,7 @@ services:
       - DATA_API_PUBLIC_URL=${DATA_API_PUBLIC_URL:-}
       - EXPLORER_PUBLIC_URL=${EXPLORER_PUBLIC_URL:-}
       - EXPLORER_EXTRA_ATOKEN_UNDERLYING=${EXPLORER_EXTRA_ATOKEN_UNDERLYING:-}
+      - EXPLORER_EXTRA_MM_CONTRACT_ASSET=${EXPLORER_EXTRA_MM_CONTRACT_ASSET:-}
 
   # MCP server (AGENTS.md § MCP server): the
   # Model Context Protocol endpoint for LLM agents at hydration-mcp.neckwork.net.

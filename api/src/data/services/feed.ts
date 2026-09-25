@@ -63,6 +63,10 @@ export function windowKey(filters: WindowFilters): string {
   return `${filters.fromBlock ?? ''}~${filters.toBlock ?? ''}~${filters.fromTime ?? ''}~${filters.toTime ?? ''}`
 }
 
+// When a bucketed window has stopped moving: services/lpHistory.ts, the one rule
+// the Data API's and the explorer's history caches share.
+export { bucketWindowIsClosed } from '../../services/lpHistory.ts'
+
 // ---------------------------------------------------------------------------
 // Keyset cursor over (block_height, <index column>)
 // ---------------------------------------------------------------------------

@@ -34,6 +34,26 @@ const ALLOWED_SHARED = new Set([
   // The same pool's range book (active liquidity, tick table, segments): one
   // definition shared by the explorer, the public API and this one. Also a leaf.
   'services/uniswapV3Ranges.ts',
+  // The LP-history definition (per-position legs per bucket, closed-candle
+  // integer valuation) the explorer's liquidity-history route serves too, plus the
+  // bucket grid and chain clock it runs on. Leaves: client type and other leaves only.
+  'services/lpHistory.ts',
+  'services/bucketLadder.ts',
+  'services/blockClock.ts',
+  // The unclaimed liquidity-mining reward snapshot reader (lm_reward_snapshots by
+  // account), so the explorer's account page and /liquidity/positions state one
+  // farm entry's reward one way. A leaf: the client type only.
+  'services/lmRewardSnapshot.ts',
+  // The money-market history definition (per-reserve amounts exact at each bucket
+  // end, the chain's observations beside them, closed-candle integer valuation) the
+  // explorer's money-market-history route serves too, and the Aave interest
+  // arithmetic it rests on. Leaves: client type and other leaves only.
+  'services/moneyMarketHistory.ts',
+  'services/aaveMath.ts',
+  // The claimable money-market incentive snapshot reader (mm_incentive_snapshots by
+  // holder), so the explorer's account value and /money-market/positions state one
+  // reward one way. A leaf: the client type only.
+  'services/mmIncentiveSnapshot.ts',
 ])
 
 function walk(dir: string, prefix = ''): string[] {

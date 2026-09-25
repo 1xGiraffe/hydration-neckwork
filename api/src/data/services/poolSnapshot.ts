@@ -1,5 +1,6 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
+import { SHARE_POOL_MAX_AGE_SECONDS, xykReserveAssets } from '../../services/lpMath.ts'
 import { iso } from '../schemas/common.ts'
 
 // The current state of every pool, from the newest raw_block_snapshots row.
@@ -35,9 +36,35 @@ export interface PoolSnapshot {
 
 const TTL_MS = 3_000
 
-export function poolSnapshot(client: ClickHouseClient): Promise<PoolSnapshot> {
-  return cached('data:pools:snapshot', TTL_MS, () => loadPoolSnapshot(client))
+// The last snapshot read successfully. A failed or empty read serves it — the
+// explorer's stableswapSharePools rule — but only while it is inside the share
+// price age bound (lpMath SHARE_POOL_MAX_AGE_SECONDS): past it the failure
+// surfaces as it did, never an hours-old state dressed as current. The served
+// snapshot carries its own blockHeight/timestamp, so every figure is dated by it.
+let lastGood: PoolSnapshot | null = null
+
+/** lastGood when it is inside the age bound at `nowMs`, else null. Pure over its inputs. */
+export function usableLastGood(snapshot: PoolSnapshot | null, nowMs: number): PoolSnapshot | null {
+  if (!snapshot || snapshot.blockHeight <= 0) return null
+  return nowMs - Date.parse(snapshot.timestamp) <= SHARE_POOL_MAX_AGE_SECONDS * 1000 ? snapshot : null
 }
+
+export function poolSnapshot(client: ClickHouseClient): Promise<PoolSnapshot> {
+  return cached('data:pools:snapshot', TTL_MS, async () => {
+    try {
+      const snapshot = await loadPoolSnapshot(client)
+      if (snapshot.blockHeight > 0) { lastGood = snapshot; return snapshot }
+      return usableLastGood(lastGood, Date.now()) ?? snapshot
+    } catch (err) {
+      const fallback = usableLastGood(lastGood, Date.now())
+      if (fallback) return fallback
+      throw err
+    }
+  })
+}
+
+/** Forget the last good snapshot (tests). */
+export function resetPoolSnapshotForTests(): void { lastGood = null }
 
 interface RawOmnipoolAsset { asset_id: number; reserve: string; hub_reserve: string; shares: string; protocol_shares: string }
 interface RawStableswapPool {
@@ -45,7 +72,10 @@ interface RawStableswapPool {
   initial_amplification: number; final_amplification: number; initial_block: number; final_block: number
   fee: number; total_issuance: string
 }
-interface RawXykPool { pool_account: string; asset_a: number; asset_b: number; reserve_a: string; reserve_b: string }
+interface RawXykPool { pool_account: string; asset_a?: number; asset_b?: number; reserve_a: string; reserve_b: string }
+
+/** A pool account's two assets in the registry's (PoolCreated) order: the fallback for a legacy snapshot row without asset ids. */
+export type XykRegistryOrder = ReadonlyMap<string, { assetA: number; assetB: number }>
 interface Payload {
   omnipool?: { assets?: RawOmnipoolAsset[] }
   stableswap?: { pools?: RawStableswapPool[] }
@@ -70,9 +100,20 @@ export function stableswapAssetIds(assets: string | number[] | undefined): numbe
   return []
 }
 
-export function parsePoolSnapshot(blockHeight: number, timestamp: string, payloadJson: string): PoolSnapshot {
-  let payload: Payload = {}
-  try { payload = JSON.parse(payloadJson) as Payload } catch { /* an unreadable snapshot is an empty state, never invented pools */ }
+const hasXykIds = (p: RawXykPool): boolean => p.asset_a != null && p.asset_b != null
+
+function parsePayload(payloadJson: string): Payload {
+  try { return JSON.parse(payloadJson) as Payload } catch { return {} /* an unreadable snapshot is an empty state, never invented pools */ }
+}
+
+/**
+ * `registry` pairs a legacy XYK row that carries no asset ids with its reserves
+ * (lpMath.xykReserveAssets: the snapshot's own order whenever the row names its
+ * ids — by PRESENCE, HDX being asset 0 — else the registry's). A legacy row the
+ * registry does not name is left out rather than stated with guessed assets.
+ */
+export function parsePoolSnapshot(blockHeight: number, timestamp: string, payloadJson: string | Payload, registry: XykRegistryOrder = new Map()): PoolSnapshot {
+  const payload = typeof payloadJson === 'string' ? parsePayload(payloadJson) : payloadJson
   const omnipool = new Map<number, OmnipoolAssetSnapshot>()
   for (const a of payload.omnipool?.assets ?? []) {
     omnipool.set(Number(a.asset_id), {
@@ -98,7 +139,11 @@ export function parsePoolSnapshot(blockHeight: number, timestamp: string, payloa
   for (const p of payload.xyk?.pools ?? []) {
     const account = String(p.pool_account ?? '').toLowerCase()
     if (!/^0x[0-9a-f]{64}$/.test(account)) continue
-    xyk.set(account, { poolAccount: account, assetA: Number(p.asset_a), assetB: Number(p.asset_b), reserveA: big(p.reserve_a), reserveB: big(p.reserve_b) })
+    const hasIds = hasXykIds(p)
+    const reg = registry.get(account)
+    if (!hasIds && !reg) continue
+    const [assetA, assetB] = xykReserveAssets(hasIds, Number(p.asset_a), Number(p.asset_b), reg?.assetA ?? 0, reg?.assetB ?? 0)
+    xyk.set(account, { poolAccount: account, assetA, assetB, reserveA: big(p.reserve_a), reserveB: big(p.reserve_b) })
   }
   return { blockHeight, timestamp, omnipool, stableswap, xyk }
 }
@@ -115,5 +160,22 @@ async function loadPoolSnapshot(client: ClickHouseClient): Promise<PoolSnapshot>
   })
   const [row] = await res.json<{ block_height: number; ts: string; payload_json: string }>()
   if (!row) return { blockHeight: 0, timestamp: iso(0), omnipool: new Map(), stableswap: new Map(), xyk: new Map() }
-  return parsePoolSnapshot(Number(row.block_height), iso(row.ts), row.payload_json)
+  const payload = parsePayload(row.payload_json)
+  // The registry is read only for a snapshot holding a legacy XYK row without ids.
+  const registry = (payload.xyk?.pools ?? []).some(p => !hasXykIds(p)) ? await xykRegistryOrder(client) : new Map()
+  return parsePoolSnapshot(Number(row.block_height), iso(row.ts), payload, registry)
+}
+
+// Newest pool per account (an account can be re-created), in PoolCreated order.
+async function xykRegistryOrder(client: ClickHouseClient): Promise<XykRegistryOrder> {
+  const res = await client.query({
+    query: `-- data:pools:xyk-registry-order
+        SELECT lower(pool_account) AS acct, argMax(asset_a, created_block) AS a, argMax(asset_b, created_block) AS b
+        FROM price_data.xyk_pool_registry FINAL
+        GROUP BY acct`,
+    format: 'JSONEachRow',
+  })
+  const out = new Map<string, { assetA: number; assetB: number }>()
+  for (const r of await res.json<{ acct: string; a: number; b: number }>()) out.set(r.acct, { assetA: Number(r.a), assetB: Number(r.b) })
+  return out
 }

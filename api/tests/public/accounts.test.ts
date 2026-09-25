@@ -42,6 +42,10 @@ const ASSET_ROWS: Row[] = [
   { asset_id: 1, symbol: 'LRNA', name: 'LRNA', decimals: 12, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
   { asset_id: 5, symbol: 'DOT', name: 'Polkadot', decimals: 10, parachain_id: 0, origin_ecosystem: 'polkadot', origin_chain_id: '0', origin_asset_id: null },
   { asset_id: 222, symbol: 'HOLLAR', name: 'Hollar', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
+  // A stableswap pool share (apyUSD + HOLLAR) and its main asset, held by no fixture
+  // account unless a test says so.
+  { asset_id: 46, symbol: 'apyUSD', name: 'apyUSD', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
+  { asset_id: 146, symbol: '2-Pool-apyUSD', name: '2-Pool-apyUSD', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
 ]
 
 // DOT 4.5, HDX 0.02, LRNA 0.5, HOLLAR 1.0 — the Decimal(38,12) rendering ClickHouse
@@ -130,6 +134,32 @@ const CLAIMS_ROWS: Row[] = [
   { account_id: ACCOUNT_A, asset_id: 5, amount: '20000000000', hub_amount: '4000000000000' },
 ]
 
+// The farm-reward snapshot pointer: published 90 s ago, well inside the 15-minute bound.
+const LM_POINTER: Row[] = [{ snapshot_id: 'lm-1', block_height: 9_000, age_seconds: 90 }]
+// One stored farm entry, as lm_reward_snapshots holds it.
+const lmRow = (over: Row): Row => ({
+  account_id: ACCOUNT_A, pallet: 'omnipool', deposit_id: '77', yield_farm_id: 139, global_farm_id: 133, pool_key: '5',
+  position_id: '4712', lp_asset_id: null, reward_asset_id: 0, farm_state: 'active', settled_s: '0', projected_s: null,
+  max_reward_s: '0', forfeit_s: '0', loyalty_s: '0', farm_updated_at_period: 1, current_period: 2, below_ed: 0, snapshot_block: 9_000,
+  ...over,
+})
+
+// The money-market incentive snapshot pointer (services/mmIncentiveSnapshot), fresh.
+const MMR_POINTER: Row[] = [{ snapshot_id: 'mmr-1', block_height: 9_000, age_seconds: 120 }]
+// ACCOUNT_A's money-market holder: the runtime's truncation of it, in the ETH form the snapshot keys on.
+const ACCOUNT_A_MM_FORM = `0x45544800${'11'.repeat(20)}0000000000000000`
+// One stored (holder, reward) total row, as mm_incentive_snapshots holds it.
+const mmrRow = (over: Row): Row => ({
+  account_id: ACCOUNT_A_MM_FORM, holder: `0x${'11'.repeat(20)}`, reward_asset_id: 0, reward_address: '0x0000000000000000000000000000000100000000',
+  asset_address: '', market_key: 'core', claimable_s: '0', model_s: '0', accrued_s: '0', pending_s: '0', scaled_s: '0',
+  user_index_s: '0', asset_index_s: '0', reconciled: 1, below_ed: 0, snapshot_block: 9_000,
+  ...over,
+})
+
+// The newest per-block pool snapshot's XYK section, flattened into parallel arrays
+// as the SQL returns it: fresh and empty unless a test adds pools.
+const XYK_EMPTY_STATE: Row[] = [{ age_seconds: 6, has_xyk: 1, pool_accounts: [], has_assets: [], assets_a: [], assets_b: [], reserves_a: [], reserves_b: [] }]
+
 // LiquidationCall carries debtToCover in `amount` (denominated in the DEBT asset)
 // and the seized collateral in `liquidated_collateral_amount` — the only amount
 // that agrees with the row's own `asset_address` (the collateral reserve).
@@ -156,7 +186,16 @@ function fakeClient(overrides: {
   snapshot?: Row[]
   claimsPointer?: Row[]
   claims?: Row[]
+  lmPointer?: Row[]
+  lmRows?: Row[]
+  lmEvents?: Row[]
+  mmrClaims?: Row[]
+  mmrPointer?: Row[]
+  mmrRows?: Row[]
   v3?: { managerEvents?: Row[]; ranges?: Row[]; shareEvents?: Row[]; flows?: Row[]; vaults?: Row[] }
+  xyk?: { registry?: Row[]; state?: Row[]; totals?: Row[]; farmed?: Row[] }
+  prices?: Row[]
+  sharePools?: Row[]
 } = {}) {
   const seen: Seen[] = []
   // Published snapshot state, as ClickHouse actually holds it: a pointer naming the
@@ -190,6 +229,9 @@ function fakeClient(overrides: {
     query: vi.fn(({ query, query_params }: { query: string; query_params?: Record<string, unknown> }) => {
       const params = query_params ?? {}
       seen.push({ query, params })
+      // The current stableswap pool state share tokens are priced from: no pools
+      // unless a test adds them.
+      if (query.includes('-- stableswap:share-pools')) return queryResult(overrides.sharePools ?? [])
       // The concentrated-liquidity history (services/uniswapV3Positions), by its tags.
       // Share transfers are account-filtered as the SQL filters them.
       if (query.includes('-- lp:v3-manager-history')) return queryResult(overrides.v3?.managerEvents ?? [])
@@ -197,6 +239,34 @@ function fakeClient(overrides: {
       if (query.includes('-- lp:v3-vault-share-history')) {
         const wanted = new Set((params.accounts as string[]) ?? [])
         return queryResult((overrides.v3?.shareEvents ?? []).filter(r => wanted.has(String(r.src)) || wanted.has(String(r.dst))))
+      }
+      // The farm-reward snapshot (services/lmRewardSnapshot), by its tags: a
+      // fresh pointer with no rows unless a test says otherwise.
+      if (query.includes('-- lm:reward-snapshot-state')) return queryResult(overrides.lmPointer ?? LM_POINTER)
+      if (query.includes('-- lm:reward-snapshot-rows')) {
+        const wanted = new Set((params.accs as string[]) ?? [])
+        return queryResult((overrides.lmRows ?? []).filter(r => wanted.has(String(r.account_id))))
+      }
+      // Claims and withdrawals indexed after the snapshot block: none unless asked.
+      if (query.includes('-- lm:reward-post-snapshot-events')) return queryResult(overrides.lmEvents ?? [])
+      if (query.includes('-- mm:incentive-post-snapshot-claims')) return queryResult(overrides.mmrClaims ?? [])
+      // The money-market incentive snapshot, by its tags: fresh, no rows unless asked.
+      if (query.includes('-- mm:incentive-snapshot-state')) return queryResult(overrides.mmrPointer ?? MMR_POINTER)
+      if (query.includes('-- mm:incentive-snapshot-rows')) {
+        const wanted = new Set((params.accs as string[]) ?? [])
+        return queryResult((overrides.mmrRows ?? []).filter(r => wanted.has(String(r.account_id))))
+      }
+      // The XYK slice, by its tags: a fresh pool snapshot with no XYK pools unless a
+      // test says otherwise. Account-filtered as the SQL filters.
+      if (query.includes('-- public:accounts:xyk-registry')) return queryResult(overrides.xyk?.registry ?? [])
+      if (query.includes('-- public:accounts:xyk-pool-state')) return queryResult(overrides.xyk?.state ?? XYK_EMPTY_STATE)
+      if (query.includes('-- public:accounts:xyk-total-shares')) {
+        const wanted = new Set(((params.lps as number[]) ?? []).map(Number))
+        return queryResult((overrides.xyk?.totals ?? []).filter(r => wanted.has(Number(r.lp_asset_id))))
+      }
+      if (query.includes('-- public:accounts:xyk-farm-principal')) {
+        const wanted = new Set((params.accounts as string[]) ?? [])
+        return queryResult((overrides.xyk?.farmed ?? []).filter(r => wanted.has(String(r.account_id))))
       }
       if (query.includes('-- lp:v3-vault-pools')) return queryResult(overrides.v3?.vaults ?? [])
       if (query.includes('-- lp:v3-vault-flow-history')) return queryResult(overrides.v3?.flows ?? [])
@@ -207,7 +277,7 @@ function fakeClient(overrides: {
       // block height through `blocks` so the scan still prunes on `prices`'
       // primary key — so matching on `blocks` first would answer it with block
       // boundaries and leave every holding unpriced.
-      if (query.includes('FROM price_data.prices')) return queryResult(PRICE_ROWS)
+      if (query.includes('FROM price_data.prices')) return queryResult(overrides.prices ?? PRICE_ROWS)
       // Ordered before the `blocks` branch: the debt reads name `blocks` too (to
       // resolve the window's block-height bounds and to map a block to its bucket),
       // so matching on `blocks` first would answer them with the wrong rows.
@@ -329,7 +399,7 @@ describe('GET /v1/accounts/balances', () => {
         lockedUsd: '2.25',
         // The claim's asset leg 2 DOT × 4.5 plus its hub leg 4 LRNA × 0.5 — a
         // position is not valued by its asset side alone.
-        lpUsd: '11.00', uniswapV3Usd: '0.00',
+        lpUsd: '11.00', uniswapV3Usd: '0.00', xykLpUsd: '0.00', farmRewardsUsd: '0.00', moneyMarketRewardsUsd: '0.00',
         // 5 HOLLAR × 1.0, reported alongside and netted out of nothing.
         debtUsd: '5.00',
         // Gross assets: transferable + locked + lp. The picker's figure is
@@ -407,7 +477,7 @@ describe('GET /v1/accounts/balances', () => {
       account: ACCOUNT_B,
       transferableUsd: '0.00',
       lockedUsd: '0.00',
-      lpUsd: '4.50', uniswapV3Usd: '0.00',
+      lpUsd: '4.50', uniswapV3Usd: '0.00', xykLpUsd: '0.00', farmRewardsUsd: '0.00', moneyMarketRewardsUsd: '0.00',
       debtUsd: '0.00',
       totalUsd: '4.50',
       blockHeight: 0,
@@ -457,9 +527,271 @@ describe('GET /v1/accounts/balances', () => {
       lockedUsd: '0.00',
       lpUsd: '0.00',
       uniswapV3Usd: '11.00',
+      xykLpUsd: '0.00',
+      farmRewardsUsd: '0.00', moneyMarketRewardsUsd: '0.00',
       debtUsd: '0.00',
       totalUsd: '11.00',
       blockHeight: 0,
+    })
+  })
+
+  it('counts claimable farm rewards in farmRewardsUsd and totalUsd', async () => {
+    const farming = fakeClient({
+      lmRows: [
+        // Projected: 50 HDX × 0.02 = 1.00 (the settled 40 HDX is superseded).
+        lmRow({ settled_s: '40000000000000', projected_s: '50000000000000' }),
+        // Settled only (the runtime projection failed): 1 DOT × 4.5 = 4.50.
+        lmRow({ yield_farm_id: 140, reward_asset_id: 5, settled_s: '10000000000' }),
+        // Another account's entry never leaks into this one.
+        lmRow({ account_id: ACCOUNT_B, settled_s: '99000000000000' }),
+      ],
+    })
+    const services = await freshBalances(farming)
+    const [row] = await services.queryLatestBalances(farming as never, [ACCOUNT_A])
+    services.stopAssets()
+    expect(row.farmRewardsUsd).toBe('5.50')
+    // 43.27 of assets (the first case) plus the rewards.
+    expect(row.totalUsd).toBe('48.77')
+    expect(row.transferableUsd).toBe('30.02')
+    expect(row.lpUsd).toBe('11.00')
+  })
+
+  // A reward claimed after the snapshot block is already in the wallet; an entry the
+  // runtime would pay to the treasury (below ED, owner holding less) pays nothing.
+  it('leaves claimed-since and unpayable farm entries out of farmRewardsUsd', async () => {
+    const farming = fakeClient({
+      lmRows: [
+        lmRow({ settled_s: '40000000000000', projected_s: '50000000000000' }),
+        lmRow({ yield_farm_id: 140, reward_asset_id: 5, settled_s: '10000000000', below_ed: 2 }),
+      ],
+      lmEvents: [{ pallet: String(lmRow({}).pallet), deposit_id: String(lmRow({}).deposit_id), yield_farm_id: Number(lmRow({}).yield_farm_id), kind: 'claimed', amount_s: '30000000000000' }],
+    })
+    const services = await freshBalances(farming)
+    const [row] = await services.queryLatestBalances(farming as never, [ACCOUNT_A])
+    services.stopAssets()
+    // (50 − 30) HDX × 0.02; the unpayable DOT entry adds nothing.
+    expect(row.farmRewardsUsd).toBe('0.40')
+  })
+
+  it('includes an account known only by its farm rewards', async () => {
+    const rewardOnly = fakeClient({ latest: [], erc20: [], snapshot: [], claims: [], lmRows: [lmRow({ account_id: ACCOUNT_B, settled_s: '100000000000000' })] })
+    const services = await freshBalances(rewardOnly)
+    const [row] = await services.queryLatestBalances(rewardOnly as never, [ACCOUNT_B])
+    services.stopAssets()
+    // 100 HDX × 0.02.
+    expect(row).toMatchObject({ account: ACCOUNT_B, farmRewardsUsd: '2.00', totalUsd: '2.00', blockHeight: 0 })
+  })
+
+  it('reports farmRewardsUsd null, and leaves it out of totalUsd, when the reward snapshot is stale or absent', async () => {
+    for (const lmPointer of [[{ snapshot_id: 'lm-1', block_height: 9_000, age_seconds: 16 * 60 }], []]) {
+      const stale = fakeClient({ lmPointer, lmRows: [lmRow({ settled_s: '50000000000000' })] })
+      const services = await freshBalances(stale)
+      const [row] = await services.queryLatestBalances(stale as never, [ACCOUNT_A])
+      services.stopAssets()
+      expect(row.farmRewardsUsd).toBeNull()
+      expect(row.totalUsd).toBe('43.27')
+    }
+  })
+
+  it('counts claimable money-market incentives in moneyMarketRewardsUsd and totalUsd', async () => {
+    const lending = fakeClient({
+      mmrRows: [
+        // The chain's claimable: 100 HDX × 0.02 = 2.00 …
+        mmrRow({ claimable_s: '100000000000000' }),
+        // … and 1 DOT × 4.5 = 4.50, below the existential deposit but still counted.
+        mmrRow({ reward_asset_id: 5, reward_address: '0x0000000000000000000000000000000100000005', claimable_s: '10000000000', below_ed: 1 }),
+        // A leg row carries a breakdown, not a second amount.
+        mmrRow({ asset_address: '0x34d5ffb83d14d82f87aaf2f13be895a3c814c2ad', pending_s: '7', claimable_s: '0' }),
+      ],
+    })
+    const services = await freshBalances(lending)
+    const [row] = await services.queryLatestBalances(lending as never, [ACCOUNT_A])
+    services.stopAssets()
+    expect(row.moneyMarketRewardsUsd).toBe('6.50')
+    expect(row.totalUsd).toBe('49.77')
+  })
+
+  it('reports moneyMarketRewardsUsd null, and leaves it out of totalUsd, when the incentive snapshot is stale or absent', async () => {
+    for (const mmrPointer of [[{ snapshot_id: 'mmr-1', block_height: 9_000, age_seconds: 16 * 60 }], []]) {
+      const stale = fakeClient({ mmrPointer, mmrRows: [mmrRow({ claimable_s: '100000000000000' })] })
+      const services = await freshBalances(stale)
+      const [row] = await services.queryLatestBalances(stale as never, [ACCOUNT_A])
+      services.stopAssets()
+      expect(row.moneyMarketRewardsUsd).toBeNull()
+      expect(row.totalUsd).toBe('43.27')
+    }
+  })
+
+  describe('XYK LP principal', () => {
+    // One live DOT/HDX pool: 100 DOT and 10,000 HDX against 1,000,000 LP shares, so
+    // a share redeems 0.0001 DOT + 0.01 HDX = 0.00065 USD.
+    const XYK_POOL = `0x${'aa'.repeat(32)}`
+    const XYK_LP = 1000100
+    // The same pool account's earlier incarnation: its LP id is a burned token.
+    const XYK_LP_OLD = 1000050
+    // A live pool pairing DOT with an asset that has no price.
+    const XYK_POOL_UNPRICED = `0x${'bb'.repeat(32)}`
+    const XYK_LP_UNPRICED = 1000200
+    const registry: Row[] = [
+      { lp_asset_id: XYK_LP_OLD, pool_account: XYK_POOL, asset_a: 5, asset_b: 0, created_block: 100 },
+      { lp_asset_id: XYK_LP, pool_account: XYK_POOL, asset_a: 0, asset_b: 5, created_block: 500 },
+      { lp_asset_id: XYK_LP_UNPRICED, pool_account: XYK_POOL_UNPRICED, asset_a: 5, asset_b: 777, created_block: 600 },
+    ]
+    // The snapshot's own asset order (DOT, HDX) differs from the registry's (HDX, DOT)
+    // and is the one its reserves pair with.
+    const state = (over: Row = {}): Row[] => [{
+      age_seconds: 6, has_xyk: 1,
+      pool_accounts: [XYK_POOL, XYK_POOL_UNPRICED], has_assets: [1, 1],
+      assets_a: [5, 5], assets_b: [0, 777],
+      reserves_a: ['1000000000000', '1000000000000'], reserves_b: ['10000000000000000', '5000'],
+      ...over,
+    }]
+    const totals: Row[] = [
+      { lp_asset_id: XYK_LP, total: '1000000' },
+      { lp_asset_id: XYK_LP_OLD, total: '1000000' },
+      { lp_asset_id: XYK_LP_UNPRICED, total: '1000' },
+    ]
+    // ACCOUNT_A: 80,000 free + 20,000 reserved LP tokens (10 % of the pool), 500 LP
+    // tokens of the unpriced pool, and a stale balance of the burned incarnation.
+    const xykWallet: Row[] = [
+      { account_id: ACCOUNT_A, asset_id: String(XYK_LP), free: '80000', reserved: '20000', last_block: 1000 },
+      { account_id: ACCOUNT_A, asset_id: String(XYK_LP_UNPRICED), free: '500', reserved: '0', last_block: 1000 },
+      { account_id: ACCOUNT_A, asset_id: String(XYK_LP_OLD), free: '300000', reserved: '0', last_block: 1000 },
+    ]
+    // 5 % of the pool in an open farm deposit; another account's never leaks in.
+    const farmed: Row[] = [
+      { account_id: ACCOUNT_A, lp_asset_id: XYK_LP, shares: '50000' },
+      { account_id: ACCOUNT_B, lp_asset_id: XYK_LP, shares: '400000' },
+    ]
+    // An LP token price feed, which no XYK LP token has today — present here to
+    // prove the wallet fold never values the tokens a second time.
+    const pricedLp: Row[] = [...PRICE_ROWS, { asset_id: XYK_LP, price: '1000.000000000000' }, { asset_id: XYK_LP_UNPRICED, price: '1000.000000000000' }]
+
+    const run = async (over: Parameters<typeof fakeClient>[0], accounts = [ACCOUNT_A]) => {
+      const probe = fakeClient(over)
+      const services = await freshBalances(probe)
+      const rows = await services.queryLatestBalances(probe as never, accounts)
+      services.stopAssets()
+      return { rows, probe }
+    }
+
+    it('redeems wallet LP tokens and farmed principal pro-rata at current pool state', async () => {
+      const { rows: [row] } = await run({
+        latest: [...LATEST_BALANCE_ROWS, ...xykWallet],
+        prices: pricedLp,
+        xyk: { registry, state: state(), totals, farmed },
+      })
+      // Wallet 100,000 shares → 10 DOT (45.00) + 1,000 HDX (20.00) = 65.00; farmed
+      // 50,000 → 5 DOT + 500 HDX = 32.50. The unpriced pool's shares count nothing,
+      // and the burned incarnation's LP id redeems against no pool.
+      expect(row.xykLpUsd).toBe('97.50')
+      // The LP token rows stay out of the wallet slices despite their price feed.
+      expect(row.transferableUsd).toBe('30.02')
+      expect(row.lockedUsd).toBe('2.25')
+      // 43.27 of the first case plus the XYK principal.
+      expect(row.totalUsd).toBe('140.77')
+    })
+
+    // An XYK LP token is valued only through its pool: free or reserved, and even
+    // with a price feed of its own, it never reaches the wallet slices.
+    it('keeps a wallet XYK LP token out of transferableUsd and lockedUsd', async () => {
+      const { rows: [row] } = await run({
+        latest: xykWallet.slice(0, 1), erc20: [], snapshot: [], claims: [],
+        prices: pricedLp,
+        xyk: { registry, state: state(), totals, farmed: [] },
+      })
+      expect(row).toMatchObject({ transferableUsd: '0.00', lockedUsd: '0.00', xykLpUsd: '65.00', totalUsd: '65.00' })
+    })
+
+    it('pairs reserves in the snapshot\'s own asset order, HDX (asset 0) included, and in the registry\'s only when the row names no assets', async () => {
+      const wallet = xykWallet.slice(0, 1)
+      const snapshotOrder = await run({ latest: wallet, erc20: [], snapshot: [], claims: [], xyk: { registry, state: state(), totals, farmed: [] } })
+      // 10 DOT + 1,000 HDX — the snapshot names DOT first, HDX (id 0) second.
+      expect(snapshotOrder.rows[0].xykLpUsd).toBe('65.00')
+      const legacy = await run({ latest: wallet, erc20: [], snapshot: [], claims: [], xyk: { registry, state: state({ has_assets: [0, 1], assets_a: [0, 5], assets_b: [0, 777] }), totals, farmed: [] } })
+      // Registry order (HDX, DOT): 0.1 HDX (0.002) + 100,000 DOT (450,000.00).
+      expect(legacy.rows[0].xykLpUsd).toBe('450000.00')
+    })
+
+    it('reads each pool\'s outstanding shares for the held live pools only', async () => {
+      const { probe } = await run({ latest: [...LATEST_BALANCE_ROWS, ...xykWallet], xyk: { registry, state: state(), totals, farmed } })
+      const [read] = probe.seen.filter(s => s.query.includes('-- public:accounts:xyk-total-shares'))
+      expect([...(read.params.lps as number[])].sort()).toEqual([XYK_LP, XYK_LP_UNPRICED])
+    })
+
+    it('includes an account known only by its farmed XYK principal', async () => {
+      const { rows: [row] } = await run({ latest: [], erc20: [], snapshot: [], claims: [], xyk: { registry, state: state(), totals, farmed } }, [ACCOUNT_B])
+      // 40 % of the pool: 40 DOT (180.00) + 4,000 HDX (80.00).
+      expect(row).toMatchObject({ account: ACCOUNT_B, xykLpUsd: '260.00', totalUsd: '260.00', blockHeight: 0 })
+    })
+
+    it('reports xykLpUsd 0.00 for a fresh snapshot in which the account holds no XYK shares', async () => {
+      const { rows: [row] } = await run({ xyk: { registry, state: state(), totals, farmed: [] } })
+      expect(row.xykLpUsd).toBe('0.00')
+      expect(row.totalUsd).toBe('43.27')
+    })
+
+    it('reports xykLpUsd null, and leaves it out of totalUsd, when the pool snapshot is stale or has no XYK section', async () => {
+      for (const s of [state({ age_seconds: 3601 }), state({ has_xyk: 0 }), []]) {
+        const { rows: [row] } = await run({
+          latest: [...LATEST_BALANCE_ROWS, ...xykWallet],
+          prices: pricedLp,
+          xyk: { registry, state: s, totals, farmed },
+        })
+        expect(row.xykLpUsd).toBeNull()
+        // Still never valued as a wallet balance: the slice is absent, not moved.
+        expect(row.transferableUsd).toBe('30.02')
+        expect(row.totalUsd).toBe('43.27')
+      }
+    })
+  })
+
+  describe('stableswap share tokens', () => {
+    const E18 = 10n ** 18n
+    // $277.20 of apyUSD (200 × 1.386) + $722.80 of HOLLAR over 1,000 shares: $1.00 a
+    // share, where apyUSD's own price would say $1.386.
+    const pool = (assets: number[], ageSeconds = 12): Row[] => [{
+      ts: Math.floor(Date.now() / 1000) - ageSeconds,
+      ss: JSON.stringify({ pools: [{ pool_id: 146, assets, reserves: [String(200n * E18), String(7228n * E18 / 10n)], amplification: '100', fee: 400, total_issuance: String(1000n * E18) }] }),
+    }]
+    const prices: Row[] = [...PRICE_ROWS, { asset_id: 46, price: '1.386000000000' }]
+    const run = async (over: Parameters<typeof fakeClient>[0]) => {
+      const probe = fakeClient({
+        latest: [{ account_id: ACCOUNT_B, asset_id: '146', free: String(10n * E18), reserved: '0', last_block: 1000 }],
+        erc20: [], claims: [],
+        // 5 more shares supplied to the money market.
+        snapshot: [{ account_id: ACCOUNT_B, asset_id: 146, supplied_raw: String(5n * E18), debt_raw: '0' }],
+        prices,
+        ...over,
+      })
+      const services = await freshBalances(probe)
+      const rows = await services.queryLatestBalances(probe as never, [ACCOUNT_B])
+      services.stopAssets()
+      return rows[0]
+    }
+
+    it('values a held and a supplied share at what one share redeems for, never at its main asset\'s price', async () => {
+      const row = await run({ sharePools: pool([46, 222]) })
+      // 10 wallet shares + 5 supplied, at $1.00 — not 15 × $1.386 = $20.79.
+      expect(row.transferableUsd).toBe('15.00')
+      expect(row.totalUsd).toBe('15.00')
+    })
+
+    it('leaves a share unpriced when one of its legs is, rather than falling back to the underlying', async () => {
+      const row = await run({ sharePools: pool([46, 999]) })
+      expect(row.transferableUsd).toBe('0.00')
+    })
+
+    it('leaves a share unpriced when the pool state is not available', async () => {
+      const row = await run({ sharePools: [] })
+      expect(row.transferableUsd).toBe('0.00')
+    })
+
+    it('leaves a share unpriced when the pool snapshot is over an hour old (the XYK rule)', async () => {
+      expect((await run({ sharePools: pool([46, 222], 3_500) })).transferableUsd).toBe('15.00')
+      const row = await run({ sharePools: pool([46, 222], 3_700) })
+      expect(row.transferableUsd).toBe('0.00')
+      expect(row.totalUsd).toBe('0.00')
     })
   })
 
@@ -554,7 +886,7 @@ describe('GET /v1/accounts/balances', () => {
       account: ACCOUNT_A,
       transferableUsd: '18.00',
       lockedUsd: '0.00',
-      lpUsd: '0.00', uniswapV3Usd: '0.00',
+      lpUsd: '0.00', uniswapV3Usd: '0.00', xykLpUsd: '0.00', farmRewardsUsd: '0.00', moneyMarketRewardsUsd: '0.00',
       debtUsd: '5.00',
       totalUsd: '18.00',
       blockHeight: 1200,
@@ -624,7 +956,7 @@ describe('GET /v1/accounts/balances', () => {
         account: ACCOUNT_H160,
         transferableUsd: '0.04',
         lockedUsd: '0.00',
-        lpUsd: '0.00', uniswapV3Usd: '0.00',
+        lpUsd: '0.00', uniswapV3Usd: '0.00', xykLpUsd: '0.00', farmRewardsUsd: '0.00', moneyMarketRewardsUsd: '0.00',
         debtUsd: '0.00',
         totalUsd: '0.04',
         blockHeight: 900,
@@ -640,12 +972,12 @@ describe('GET /v1/accounts/balances', () => {
     expect(byEvm.statusCode).toBe(200)
     // 3 HDX × 0.02, keyed to the H160 the caller asked about.
     expect(byEvm.json().items).toEqual([
-      { account: BOUND_EVM, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
+      { account: BOUND_EVM, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', xykLpUsd: '0.00', farmRewardsUsd: '0.00', moneyMarketRewardsUsd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
     ])
 
     const bySubstrate = await app.inject(`/v1/accounts/balances?accounts=${BOUND_SUBSTRATE}`)
     expect(bySubstrate.json().items).toEqual([
-      { account: BOUND_SUBSTRATE, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
+      { account: BOUND_SUBSTRATE, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', xykLpUsd: '0.00', farmRewardsUsd: '0.00', moneyMarketRewardsUsd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
     ])
   })
 
@@ -656,8 +988,8 @@ describe('GET /v1/accounts/balances', () => {
     // indistinguishable from "this address holds nothing", so each is echoed with
     // the shared identity's figures; a caller indexes by `account` and must not sum.
     expect(res.json().items).toEqual([
-      { account: BOUND_EVM, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
-      { account: BOUND_SUBSTRATE, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
+      { account: BOUND_EVM, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', xykLpUsd: '0.00', farmRewardsUsd: '0.00', moneyMarketRewardsUsd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
+      { account: BOUND_SUBSTRATE, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', xykLpUsd: '0.00', farmRewardsUsd: '0.00', moneyMarketRewardsUsd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
     ])
   })
 
@@ -692,7 +1024,7 @@ describe('GET /v1/accounts/balances', () => {
       // 1 HDX × 0.02 + 2 HDX × 0.02 (the EVM-side pot) + 2 DOT × 4.5 supplied.
       transferableUsd: '9.06',
       lockedUsd: '0.00',
-      lpUsd: '0.00', uniswapV3Usd: '0.00',
+      lpUsd: '0.00', uniswapV3Usd: '0.00', xykLpUsd: '0.00', farmRewardsUsd: '0.00', moneyMarketRewardsUsd: '0.00',
       // 3 HOLLAR × 1.0 — zero before the fix, which is exactly the "no debt for a
       // leveraged account" failure mode the honest-null discipline forbids.
       debtUsd: '3.00',
@@ -735,7 +1067,7 @@ describe('GET /v1/accounts/balances', () => {
     // in: its binding already yielded the same key.
     const byEvm = await app.inject(`/v1/accounts/balances?accounts=${BOUND_SUBSTRATE}`)
     expect(byEvm.json().items).toEqual([
-      { account: BOUND_SUBSTRATE, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
+      { account: BOUND_SUBSTRATE, transferableUsd: '0.06', lockedUsd: '0.00', lpUsd: '0.00', uniswapV3Usd: '0.00', xykLpUsd: '0.00', farmRewardsUsd: '0.00', moneyMarketRewardsUsd: '0.00', debtUsd: '0.00', totalUsd: '0.06', blockHeight: 880 },
     ])
   })
 

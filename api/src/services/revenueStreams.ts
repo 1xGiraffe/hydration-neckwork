@@ -1033,6 +1033,14 @@ GROUP BY pool_address`
  * sources the balance reconstruction uses — and cheap despite covering all
  * history, because `holder IN (…)` is this table's sort-key prefix and the
  * internal set is a couple of dozen accounts.
+ *
+ * Not restated on purpose: revenue rows computed before the 2026-09-25 half-up
+ * rebuild of atoken_scaled_deltas read these inputs — and the seed above — off by
+ * at most 1 scaled unit per changed delta row, i.e. ≤ 1 × Δindex / RAY per row
+ * per hour (~1e-18 HOLLAR/hour). The same day's re-capture of the B0 anchor from
+ * scaledBalanceOf/scaledTotalSupply moved changed anchor rows by ~6e-9 relative,
+ * which shifts the hourly interest by that same relative amount. Both are far
+ * below any displayed precision, so persisted rows are left as they are.
  */
 function hollarInternalDebtSql(endSeconds: number): string {
   const ch = (s: number) => new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')

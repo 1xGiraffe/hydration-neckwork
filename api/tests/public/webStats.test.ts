@@ -59,8 +59,14 @@ const RESERVE_ROWS: Row[] = [
     supplied: '200000000000000000000', debt: '0', listed: 1,
   },
 ]
-// $0.75 DOT; GDOT at $2.00 prices the 2-Pool-GDOT share token through its alias.
+// $0.75 DOT and GDOT at $2.00. The 2-Pool-GDOT share token is priced at what one
+// share redeems for, never through GDOT: the pool below holds 8 DOT ($6.00) against
+// 3 shares, so a share is $2.00. One leg keeps the fixture's arithmetic readable.
 const PRICE_ROWS: Row[] = [{ asset_id: 5, price: '0.75' }, { asset_id: 69, price: '2.00' }]
+const SHARE_POOL_ROWS: Row[] = [{
+  ts: Math.floor(Date.now() / 1000),
+  ss: JSON.stringify({ pools: [{ pool_id: 690, assets: [5], reserves: ['80000000000'], amplification: '100', fee: 690, total_issuance: '3000000000000000000' }] }),
+}]
 
 const XCM_VOLUME = 23_748_747.0802
 /** What the wire carries: the upstream double rounded to cents, like `tvl` and `vol_30d`. */
@@ -73,6 +79,7 @@ function fakeClient(overrides: Record<string, Row[]> = {}) {
     '-- pub:webstats:accounts': [{ accounts: '115318' }],
     '-- mm:reserve-state': RESERVE_ROWS,
     'FROM price_data.prices': PRICE_ROWS,
+    '-- stableswap:share-pools': SHARE_POOL_ROWS,
     // /v1/stats/platform's volume half, so the reconciliation case can read the
     // TVL components this endpoint folds from.
     '-- pub:vol:omnipool': [{ scope: 'total', asset_id: '', volume_usd: '0.000000000000', fee_usd: '0.000000000000', protocol_fee_usd: '0.000000000000' }],
