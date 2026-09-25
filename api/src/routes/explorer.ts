@@ -29,6 +29,7 @@ import {
 import { getHdxDashboard } from '../services/hdxService.ts'
 import { FLOW_CURSOR_RE, REVENUE_RANGES, getRevenueDashboard, getRevenueFlow, getStakerDistributions } from '../services/revenueService.ts'
 import { getHollarDashboard } from '../services/hollarService.ts'
+import { getExplorerYields } from '../services/positionYield.ts'
 import { getIceDashboard } from '../services/iceService.ts'
 import { getSecurityDashboard } from '../services/securityService.ts'
 import { getWormholeBridgeDetail } from '../services/wormholeNttService.ts'
@@ -1009,6 +1010,9 @@ export async function explorerRoutes(fastify: FastifyInstance) {
   fastify.get('/explorer/hollar', async () => {
     return getHollarDashboard()
   })
+  // Current yield composition of every liquidity venue and money-market reserve
+  // (services/positionYield.ts). Global; SWR-cached ten minutes.
+  fastify.get('/explorer/yields', async () => getExplorerYields())
 
   fastify.get('/explorer/ice', async () => {
     return getIceDashboard()
