@@ -1376,6 +1376,29 @@ function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
   )
 }
 
+// The flags of a chart's markers over a time domain [t0, t0 + span] (ms): clustered,
+// one open at a time. `style` insets the layer to a chart's plot area (a y-axis
+// gutter); `onOpenChange` lets the chart hide its own crosshair tip while a marker
+// tip is open, since the two would overlap at the top edge. Key it by its domain
+// so a zoom (a new domain) starts with every tip closed.
+export function ChartMarkerLayer({ markers, t0, span, style, onOpenChange }: {
+  markers: ChartMarker[]; t0: number; span: number; style?: CSSProperties; onOpenChange?: (open: boolean) => void
+}) {
+  const [openMark, setOpenMark] = useState<number | null>(null)
+  const narrow = useMediaQuery('(max-width: 720px)')
+  const clusters = useMemo(() => (span > 0 ? clusterChartMarkers(markers, t0, span, narrow ? 0.045 : 0.015) : []), [markers, t0, span, narrow])
+  useEffect(() => { onOpenChange?.(openMark != null) }, [openMark, onOpenChange])
+  if (!clusters.length) return null
+  return (
+    <div className="apx-marks" style={style}>
+      {clusters.map((c, i) => (
+        <ChartMarkerFlag key={`${c.frac}:${c.items.length}`} cluster={c} open={openMark === i}
+          onOpen={() => setOpenMark(i)} onClose={() => setOpenMark(cur => (cur === i ? null : cur))} />
+      ))}
+    </div>
+  )
+}
+
 // Area/line chart with an optional target line and a crosshair tooltip on hover.
 // `dates` (parallel to `data`) makes the tooltip show the point's date; `valueFmt`
 // formats the displayed value (default F.usd, used by the portfolio charts).
@@ -1404,7 +1427,7 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   // page cannot collide and take each other's fill.
   const gid = `area-${useId()}`
   const [hover, setHover] = useState<{ xPct: number; yPct: number; val: string; ovVal: string | null; date: string } | null>(null)
-  const [openMark, setOpenMark] = useState<number | null>(null)
+  const [markOpen, setMarkOpen] = useState(false)
   // On phones 1.5% of the chart is a few px — caps would collide, so cluster
   // wider there. Same breakpoint as the stylesheet's table→card switch.
   const narrow = useMediaQuery('(max-width: 720px)')
@@ -1429,7 +1452,7 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
       const r = wrapRef.current?.getBoundingClientRect()
       return r?.width ? Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) : 0
     },
-    () => { setHover(null); setOpenMark(null) },
+    () => setHover(null),
     zoomKey,
   )
   // Everything below sees only the zoom window; the axes, markers and tooltip
@@ -1507,10 +1530,7 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   // Markers key off the EXACT axis the line uses (timeAxisSpan is the same guard
   // as viewFractions): render only when the line is time-proportional, so a flag
   // never drifts off a curve that fell back to index spacing.
-  const markClusters = useMemo(() => {
-    const markAxis = markers?.length ? timeAxisSpan(vData?.length ?? 0, vDates) : null
-    return markers && markAxis ? clusterChartMarkers(markers, markAxis.t0, markAxis.span, narrow ? 0.045 : 0.015) : []
-  }, [markers, vData, vDates, narrow])
+  const markAxis = useMemo(() => (markers?.length ? timeAxisSpan(vData?.length ?? 0, vDates) : null), [markers, vData, vDates])
 
   if (!geom) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
   const { xFrac, sy, line, area, overlayLine, ov, col } = geom
@@ -1557,18 +1577,11 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
             the headline curve. */}
         {overlayLine && <path className="chart-line" d={overlayLine} fill="none" stroke={ovCol} strokeWidth="1.5" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />}
       </svg>
-      {markClusters.length > 0 && (
-        <div className="apx-marks">
-          {markClusters.map((c, i) => (
-            <ChartMarkerFlag key={`${c.frac}:${c.items.length}`} cluster={c} open={openMark === i}
-              onOpen={() => setOpenMark(i)} onClose={() => setOpenMark(cur => (cur === i ? null : cur))} />
-          ))}
-        </div>
-      )}
+      {markers && markAxis && <ChartMarkerLayer key={`${markAxis.t0}:${markAxis.span}`} markers={markers} t0={markAxis.t0} span={markAxis.span} onOpenChange={setMarkOpen} />}
       {hover && !zoom.selecting && <div className="apx-cross"><div className="apx-vline" style={{ left: `${hover.xPct}%` }} /><div className="apx-dot" style={{ left: `${hover.xPct}%`, top: `${hover.yPct}%` }} /></div>}
       {/* The crosshair value tip yields while a marker tip is open — the two
           would otherwise overlap at the top edge. */}
-      {hover && !zoom.selecting && openMark == null && (
+      {hover && !zoom.selecting && !markOpen && (
         <ChartTip xPct={hover.xPct}>
           {hover.date && <span className="t-d">{hover.date}</span>}
           {/* With two curves the tooltip has to say which value is which — an

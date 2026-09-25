@@ -1,7 +1,8 @@
 /* eslint-disable react-refresh/only-export-components -- chart primitives + shared tick-formatter/color-token module (mirrors ui.tsx) */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { ChartTip, compactAmount } from './ui'
+import { ChartMarkerLayer, ChartTip, compactAmount } from './ui'
+import type { ChartMarker } from './ui'
 import { ZoomReset, ZoomSelection, bracketToView, fracOfTime, useChartZoom, useZoomRefineValue } from './chartZoom'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { parseUtcTimestamp, utcDay, utcSeconds, utcStamp } from '../utils/time'
@@ -53,10 +54,11 @@ export const AGE_COLORS: Record<string, string> = {
 
 /* ============ legend ============ */
 // Small legend row: colored dot + label (GeistMono 11px, reuses .bal-legend).
-export function ChartLegend({ items }: { items: { label: string; color: string }[] }) {
+// `dashed` draws the swatch as a short dashed stroke, for a series drawn dashed.
+export function ChartLegend({ items }: { items: { label: string; color: string; dashed?: boolean }[] }) {
   return (
     <div className="bal-legend" style={{ margin: '0 0 10px' }}>
-      {items.map(it => <span key={it.label}><i style={{ background: it.color }} />{it.label}</span>)}
+      {items.map(it => <span key={it.label}>{it.dashed ? <i className="lg-dash" style={{ color: it.color }} /> : <i style={{ background: it.color }} />}{it.label}</span>)}
     </div>
   )
 }
@@ -270,7 +272,9 @@ export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCap
 // light halo under its top edge — for brand-black bands (GIGAHDX) that would
 // otherwise vanish into a dark background. The light marks disappear on light
 // surfaces, where the black fill carries itself.
-export interface AreaSeries { key: string; label: string; color: string; values: (number | null)[]; hatch?: boolean }
+// `dashed` (MultiLineChart only) draws the line dashed and fainter — a figure from
+// another source than the solid lines beside it — and leaves it unmarked by markLast.
+export interface AreaSeries { key: string; label: string; color: string; values: (number | null)[]; hatch?: boolean; dashed?: boolean }
 
 // Cumulative stack tops, bottom-up in the order given (largest first from the
 // API). A null contributes nothing to its bucket — the band is absent there,
@@ -553,7 +557,7 @@ export function zoneSpan(zone: ChartZone, min: number, max: number): { top: numb
   return { top, bottom, covers: bottom - top > 0.95, loInside: lo > min, hiInside: hi < max }
 }
 
-export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero, band, zones, markLast, zoomKey, refine }: {
+export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero, band, zones, markLast, markers, zoomKey, refine, syncTime, onSyncTime }: {
   buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string; floorZero?: boolean
   /**
    * Draw two of the series as one filled low/high envelope: a RANGE reads as an
@@ -571,12 +575,30 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
   zones?: ChartZone[]
   /** Mark the newest point of each drawn line, so "where it stands now" is visible without hovering. */
   markLast?: boolean
+  /**
+   * Events flagged on the same time axis (the AreaChart's markers — liquidations on
+   * a health-factor line). Drawn only on a time axis, inside the plot's gutters.
+   */
+  markers?: ChartMarker[]
   /** Query-param name persisting the zoom window (back-navigable, shareable). */
   zoomKey?: string
   /** Refetch-on-zoom: a finer grid for base-index window [lo, hi]. */
   refine?: (fromSec: number, toSec: number, points: number) => Promise<RefinedGrid | null>
+  /**
+   * Shared hover across sibling charts (unix seconds). A chart reports the time of
+   * the bucket it is hovering through `onSyncTime` (null when the hover ends), and
+   * a chart that is not hovered itself draws a plain vertical line — no tooltip —
+   * at its own bucket nearest `syncTime`, when that falls inside its window. Time,
+   * not index, so each chart keeps its own grid and zoom.
+   */
+  syncTime?: number | null
+  onSyncTime?: (t: number | null) => void
 }) {
-  const [hover, setHover] = useState<number | null>(null)
+  const [hover, setHoverState] = useState<number | null>(null)
+  const [markOpen, setMarkOpen] = useState(false)
+  // Every hover change is reported to the siblings; the time comes from the drawn
+  // axis, which only onMove knows, so this reports the clears.
+  const setHover = (i: null) => { setHoverState(i); onSyncTime?.(null) }
   const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
   const W = LINE_W, padL = LINE_PAD_L, padR = LINE_PAD_R, padT = 12, padB = 18
   const plotW = W - padL - padR
@@ -660,7 +682,14 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
     : []
   // Back/forward can change the window without a gesture; a stale hover index
   // past the new slice must not address it.
-  if (hover != null && hover > n - 1) setHover(null)
+  if (hover != null && hover > n - 1) setHoverState(null)
+  // A sibling's hover, at this chart's nearest bucket — only inside its own window.
+  let syncIdx: number | null = null
+  if (hover == null && syncTime != null && timeAxis && syncTime >= zoom.view.from && syncTime <= zoom.view.to) {
+    let best = 0
+    for (let k = 1; k < n; k++) if (Math.abs(vTimes[k] - syncTime) < Math.abs(vTimes[best] - syncTime)) best = k
+    syncIdx = best
+  }
   function onMove(e: React.PointerEvent) {
     if (zoom.selecting || zoom.pinching) return
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -674,7 +703,9 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
       for (let k = 1; k < n; k++) if (Math.abs(xf(k) - f) < Math.abs(xf(best) - f)) best = k
       i = best
     }
-    setHover(Math.min(n - 1, Math.max(0, i)))
+    const at = Math.min(n - 1, Math.max(0, i))
+    setHoverState(at)
+    onSyncTime?.(timeAxis ? vTimes[at] : null)
   }
   const selPct = (f: number) => (padL + Math.min(1, Math.max(0, f)) * plotW) / W * 100
   return (
@@ -718,15 +749,15 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
           // instead of the full 2px a standalone line gets.
           const edge = bandKeys.includes(s.key)
           return (
-            <g key={s.key} strokeOpacity={edge ? 0.5 : 1}>
+            <g key={s.key} strokeOpacity={edge ? 0.5 : s.dashed ? 0.7 : 1} data-series={s.key}>
               {lineRuns(s.values).map(([a, b]) => a === b
-                ? <circle key={a} cx={sx(a).toFixed(1)} cy={sy(s.values[a]!).toFixed(1)} r="2.5" fill={s.color} fillOpacity={edge ? 0.5 : 1} />
+                ? <circle key={a} cx={sx(a).toFixed(1)} cy={sy(s.values[a]!).toFixed(1)} r="2.5" fill={s.color} fillOpacity={edge ? 0.5 : s.dashed ? 0.7 : 1} />
                 : <path key={a} d={s.values.slice(a, b + 1).map((v, j) => `${j ? 'L' : 'M'} ${sx(a + j).toFixed(1)} ${sy(v!).toFixed(1)}`).join(' ')}
-                    fill="none" stroke={s.color} strokeWidth={edge ? 1 : 2} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />)}
+                    fill="none" stroke={s.color} strokeWidth={edge ? 1 : s.dashed ? 1.5 : 2} strokeDasharray={s.dashed ? '5 4' : undefined} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />)}
             </g>
           )
         })}
-        {markLast && vSeries.filter(s => !bandKeys.includes(s.key)).map(s => {
+        {markLast && vSeries.filter(s => !bandKeys.includes(s.key) && !s.dashed).map(s => {
           // The newest drawn point, so "where it stands now" needs no hover.
           for (let i = s.values.length - 1; i >= 0; i--) {
             if (s.values[i] == null) continue
@@ -738,8 +769,13 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
           <text key={i} className="hdx-ax" x={sx(i).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{axisTick(vBuckets[i], timeAxis ? viewSpan : 0, grainSec)}</text>
         ))}
         {hover != null && !zoom.selecting && <line x1={sx(hover).toFixed(1)} x2={sx(hover).toFixed(1)} y1={padT} y2={h - padB} stroke="var(--text-medium)" strokeOpacity="0.55" />}
+        {syncIdx != null && !zoom.selecting && <line className="mlc-sync" x1={sx(syncIdx).toFixed(1)} x2={sx(syncIdx).toFixed(1)} y1={padT} y2={h - padB} stroke="var(--text-medium)" strokeOpacity="0.4" strokeDasharray="2 3" />}
       </svg>
-      {hover != null && !zoom.selecting && (
+      {markers && markers.length > 0 && timeAxis && (
+        <ChartMarkerLayer key={`${zoom.view.from}:${viewSpan}`} markers={markers} t0={zoom.view.from * 1000} span={viewSpan * 1000}
+          style={{ left: `${(padL / W * 100).toFixed(3)}%`, right: `${(padR / W * 100).toFixed(3)}%` }} onOpenChange={setMarkOpen} />
+      )}
+      {hover != null && !zoom.selecting && !markOpen && (
         <ChartTip className="hdx-tip" xPct={sx(hover) / W * 100} top={2}>
           <span className="t-d">{tipDate(vBuckets[hover], grainSec)}</span>
           {vSeries.filter(s => !bandKeys.includes(s.key)).map(s => s.values[hover] != null && (
