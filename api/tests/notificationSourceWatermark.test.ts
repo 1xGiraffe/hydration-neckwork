@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
-  evaluatorCursors, initEvaluator, resetEvaluatorForTests, resolveWindow, runEvaluatorTick,
+  evaluatorCursors, groupsCoveredTo, initEvaluator, resetEvaluatorForTests, resolveWindow, runEvaluatorTick,
   stopNotificationEvaluator, windowCoveredTo,
 } from '../src/notifications/evaluator.ts'
 import { createRule, initNotifications, loadNotifications } from '../src/notifications/notificationStore.ts'
@@ -45,6 +45,46 @@ describe('the cursor a feed-backed lane may advance to', () => {
     // The blocks the source had not revealed are still above the new cursor.
     expect(next.window.from).toBe(150)
     expect(next.skipped).toBe(0)
+  })
+})
+
+// A lane that rotates over source groups under a per-tick fetch cap asks only
+// some of them each tick. Holding the lane while ANY group was deferred froze
+// the account-activity cursor for nine days once the watched targets outnumbered
+// the cap (every tick deferred one). The lane instead stands at the oldest block
+// any of its current groups has been read up to.
+describe('the cursor a lane rotating over source groups may advance to', () => {
+  const groups = (all: string[], visited: string[]) => ({ all, visited })
+
+  it('holds where it was while any group has never been read', () => {
+    const seen = new Map<string, number>()
+    expect(groupsCoveredTo(seen, groups(['a', 'b'], ['a']), 200, 100)).toBe(100)
+    // The group that was read is vouched for, so the next rotation can release.
+    expect(seen.get('a')).toBe(200)
+  })
+
+  it('stands at the oldest block any group was read up to once all have been', () => {
+    const seen = new Map([['a', 200]])
+    expect(groupsCoveredTo(seen, groups(['a', 'b'], ['b']), 250, 100)).toBe(200)
+    // The rotation comes back to a; the floor moves with the slowest group.
+    expect(groupsCoveredTo(seen, groups(['a', 'b'], ['a']), 300, 200)).toBe(250)
+    expect(groupsCoveredTo(seen, groups(['a', 'b'], ['b']), 320, 250)).toBe(300)
+  })
+
+  it('stops waiting for a group whose rules are gone', () => {
+    // c was deferred on every tick so far; its last rule is deleted.
+    const seen = new Map([['a', 200], ['c', 150]])
+    expect(groupsCoveredTo(seen, groups(['a'], []), 250, 100)).toBe(200)
+    expect(seen.has('c')).toBe(false)
+  })
+
+  it('advances no further than this tick’s window vouches for, and never regresses', () => {
+    // An earlier tick read a to 300; this one's watermark only vouches for 250.
+    const seen = new Map([['a', 300]])
+    expect(groupsCoveredTo(seen, groups(['a'], ['a']), 250, 250)).toBe(250)
+    expect(seen.get('a')).toBe(300)
+    // No groups at all: the window itself.
+    expect(groupsCoveredTo(new Map(), groups([], []), 250, 100)).toBe(250)
   })
 })
 
