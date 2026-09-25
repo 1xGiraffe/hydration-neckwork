@@ -2996,10 +2996,14 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
    know what room is left: a 40ch title that fits beside "HDX 15k" wraps beside
    "HDX 15.1k". So the row stops wrapping and the title alone absorbs the
    difference, ellipsizing to exactly the space the others leave. Below 720px
-   there is not enough width to give the title anything worth reading, so the
-   row wraps there instead and keeps the character cap. */
+   there is not enough width to give the title anything worth reading beside
+   the others, so the row wraps there instead and the uncapped title takes a
+   line of its own. The cap on the row's width holds at every size: a wrapping
+   flex row is otherwise as wide as its widest item — the nowrap title — and
+   sat 200px past its card line, cut off by the cell with no ellipsis. */
+.asset-flow.vote-flow { max-width: 100%; }
 @media (min-width: 721px) {
-  .asset-flow.vote-flow { flex-wrap: nowrap; max-width: 100%; }
+  .asset-flow.vote-flow { flex-wrap: nowrap; }
   .vote-flow > * { flex: none; }
   .vote-flow > .ref-link { flex: 0 1 auto; min-width: 8ch; }
 }
