@@ -65,6 +65,18 @@ describe('activityHistPick', () => {
     expect(activityHistPick({ ...v3LpRow(), amountOut: null })).toBeNull()
   })
 
+  it('names BOTH legs of an XYK add or remove, and neither when one is unrecovered', () => {
+    // The pair shape xykPairLegs gives an XYK row: assetA's leg doubles as
+    // `asset`/`amount`, and there is no pool contract to mark it by.
+    const xyk: ActivityRow = { ...v3LpRow(), poolAddress: undefined, liqAction: 'Remove' }
+    expect(activityHistPick(xyk)).toEqual([
+      { assetId: TOKEN0, decimals: 10, raw: '21245733705342', ts: TS },
+      { assetId: TOKEN1, decimals: 18, raw: '2500000000000000000000', ts: TS },
+    ])
+    expect(activityHistPick({ ...xyk, amountOut: null })).toBeNull()
+    expect(activityHistPick({ ...xyk, amountIn: null })).toBeNull()
+  })
+
   it('still values an ordinary row on its OUT leg and a flow on its moved asset', () => {
     const trade: ActivityRow = {
       type: 'trade', blockHeight: 1, timestamp: TS, eventIndex: 1, extrinsicIndex: 1,

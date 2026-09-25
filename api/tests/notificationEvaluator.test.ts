@@ -518,6 +518,20 @@ describe('renderMatch', () => {
     expect(out.url).toMatch(/\/swap\/1050-e7$/)
   })
 
+  it('joins the two legs of a liquidity act with +, never the swap arrow', () => {
+    // An XYK removal pays out both of the pair's assets (as a pool creation seeds
+    // both and a concentrated-liquidity act moves both); `→` would read it as a swap.
+    const r = rule('account-activity', { address: WHALE })
+    const row = activity({
+      type: 'liquidity', liqAction: 'Remove', asset: asset(5, 'DOT', 10), amount: '1616158587135',
+      assetIn: asset(5, 'DOT', 10), assetOut: asset(30, 'MYTH', 18),
+      amountIn: '1616158587135', amountOut: '59603890213654510857286', valueUsd: 320,
+    })
+    const out = renderNotification(renderMatch(match({ lane: 'activity', row }, 'account-activity'), r, noViewerTag))
+    expect(out.title).toContain('Remove liquidity')
+    expect(out.body).toContain('162 DOT + 59.6k MYTH · $320')
+  })
+
   // A large transfer goes through the same activity shape a watched account's
   // transfer does, so the two read identically: the sender in the headline, the
   // amount and the recipient on the line under it — both in the shared account

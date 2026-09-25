@@ -293,7 +293,9 @@ export function activityAmounts(r: ActivityRow): string | null {
       : r.xcswapDestSymbol ?? null
     return [inLeg, dest].filter(Boolean).join(' → ') || null
   }
-  if (inLeg && outLeg) return `${inLeg} → ${outLeg}`
+  // A two-leg liquidity act (an XYK pair, a pool creation, a concentrated-liquidity
+  // position) moves both assets the same way; an arrow would read it as a swap.
+  if (inLeg && outLeg) return r.type === 'liquidity' ? `${inLeg} + ${outLeg}` : `${inLeg} → ${outLeg}`
   return inLeg ?? outLeg ?? leg(r.asset, r.amount)
 }
 

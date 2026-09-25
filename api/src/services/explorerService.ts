@@ -1044,8 +1044,8 @@ export const LIQUIDITY_AMOUNT_ARG: Record<string, string> = {
   'Omnipool.PositionCreated': 'amount',                    // asset + amount (listing grant)
   'Stableswap.LiquidityAdded': 'shares',                   // asset_id IS the share token
   'Stableswap.LiquidityRemoved': 'shares',
-  'XYK.LiquidityAdded': '',                                // amountA/amountB vs assetA
-  'XYK.LiquidityRemoved': '',                              // shares vs assetA
+  'XYK.LiquidityAdded': '',                                // a pair of legs, recovered together (XYK_PAIR_EVENTS)
+  'XYK.LiquidityRemoved': '',                              // shares vs assetA; a pair of legs, recovered together
   'XYK.PoolCreated': '',                                   // initialSharesAmount vs assetA
   'XYK.PoolDestroyed': '',                                 // no amount field; see AMOUNTLESS_LIQUIDITY_EVENTS
   'OmnipoolLiquidityMining.RewardClaimed': 'claimed',      // claimed + rewardCurrency
@@ -1063,6 +1063,19 @@ export const AMOUNTLESS_LIQUIDITY_EVENTS: ReadonlySet<string> = new Set(['XYK.Po
 export function isAmountlessLiquidityEvent(eventName: string): boolean {
   return AMOUNTLESS_LIQUIDITY_EVENTS.has(eventName)
 }
+
+// An XYK add or remove moves BOTH of the pair's assets between `who` and the pool,
+// and its event states neither amount in the row's denomination (LiquidityAdded
+// carries amountA/amountB beside assetA/assetB, LiquidityRemoved only `shares`), so a
+// row of either is a PAIR of transfer legs recovered together (matchLiquidityAmounts)
+// and rendered the way a pool creation is (xykPairLegs): assetA's leg as
+// `asset`/`amount` and `assetIn`/`amountIn`, assetB's as `assetOut`/`amountOut`,
+// valued as their block-time sum (activityHistPick). Rendering assetA's leg alone
+// halved every XYK removal's value and left every add empty.
+export const XYK_PAIR_EVENTS: ReadonlySet<string> = new Set(['XYK.LiquidityAdded', 'XYK.LiquidityRemoved'])
+// The liquidity events whose recovered legs run who→pool; every other event's leg
+// is a pool→who payout.
+const XYK_DEPOSIT_EVENTS: ReadonlySet<string> = new Set(['XYK.PoolCreated', 'XYK.LiquidityAdded'])
 
 // The only two events a pool account itself is a party to — creation and
 // destruction — named explicitly rather than derived from a string suffix, so the
@@ -1671,6 +1684,21 @@ export function liquidityRowAmount(eventName: string, prices: Map<number, PriceI
   if (isAmountlessLiquidityEvent(eventName)) return { amount: null, valueUsd: null }
   return { amount: raw, valueUsd: usdValue(prices, assetId, raw, decimals) }
 }
+// The two-leg shape of an XYK add or remove (XYK_PAIR_EVENTS) — the shape a pool
+// creation already has (enrichPoolCreations): assetA's leg stays the row's
+// `asset`/`amount` and is also its `assetIn`/`amountIn`, assetB's leg is
+// `assetOut`/`amountOut`. A leg the pairing could not recover is null, and the row
+// then carries no value at all rather than the priced half — a sum missing one leg
+// is a wrong number, not a partial one — until applyHistoricalUsd values a complete
+// pair at its block-time closes (activityHistPick names both legs).
+export function xykPairLegs(row: ActivityRow, r: { event_name: string; asset_b?: number | null; amount_b?: string }): void {
+  if (!XYK_PAIR_EVENTS.has(r.event_name) || !row.asset || r.asset_b == null) return
+  row.assetIn = row.asset
+  row.assetOut = asset(r.asset_b)
+  row.amountIn = row.amount || null
+  row.amountOut = r.amount_b || null
+  row.valueUsd = null
+}
 function priceTransformArrays(prices: Map<number, PriceInfo>): { idsSql: string; unitsSql: string } {
   const ids: string[] = []
   const units: string[] = []
@@ -1906,9 +1934,13 @@ function exactUsdMeetsMinimum(legs: ExactUsdLeg[], minimum: number): boolean {
 type HistLeg = { assetId: number; decimals: number; raw: string; ts: string }
 type HistPick = HistLeg | HistLeg[] | null
 export function activityHistPick(r: ActivityRow): HistPick {
-  // A concentrated-liquidity LP row is worth BOTH its legs; the out-leg pick below
-  // would re-value it as token1 alone.
-  if (r.type === 'liquidity' && r.poolAddress) {
+  // Create rows already carry their combined BLOCK-TIME value (both seed legs, see
+  // enrichPoolCreations); Destroy rows carry no value at all by construction.
+  if (r.type === 'liquidity' && (r.liqAction === 'Create' || r.liqAction === 'Destroy')) return null
+  // A two-leg liquidity row — a concentrated-liquidity act, an XYK add or remove
+  // (xykPairLegs) — is worth BOTH its legs; the out-leg pick below would re-value it
+  // as one token alone.
+  if (r.type === 'liquidity' && (r.poolAddress || r.assetIn || r.assetOut)) {
     return r.assetIn && r.assetOut && r.amountIn != null && r.amountOut != null
       ? [
           { assetId: r.assetIn.assetId, decimals: r.assetIn.decimals, raw: r.amountIn, ts: r.timestamp },
@@ -1916,9 +1948,6 @@ export function activityHistPick(r: ActivityRow): HistPick {
         ]
       : null
   }
-  // Create rows already carry their combined BLOCK-TIME value (both seed legs, see
-  // enrichPoolCreations); Destroy rows carry no value at all by construction.
-  if (r.type === 'liquidity' && (r.liqAction === 'Create' || r.liqAction === 'Destroy')) return null
   // An intent row is valued on its IN leg — what the order holds (Place/Cancel/
   // Expire) or what a fill took — the leg its SQL value mirror (getRecentIntents)
   // judges; its OUT leg is a limit the order may never reach.
@@ -11281,6 +11310,10 @@ export interface LiquidityAmountCandidate {
   who: string
   asset_id: number
   amount: string
+  // The pair's second asset and its recovered leg — XYK add/remove only
+  // (XYK_PAIR_EVENTS); every other event has one leg, `amount`.
+  asset_b?: number | null
+  amount_b?: string
 }
 
 export interface LiquidityTransferLeg {
@@ -11303,43 +11336,70 @@ export interface LiquidityTransferLeg {
 // offboarded force-removes every position from a runtime hook) carry no extrinsic
 // and scope to the block's out-of-extrinsic legs. Isolating the scopes stops a
 // signed same-block transfer from being mistaken for an offboarding leg.
+//
+// An XYK add or remove (XYK_PAIR_EVENTS) recovers BOTH of its legs, as a pair
+// against ONE counterparty: the pallet moves assetA and assetB between `who` and
+// the same pool account, so assetA's candidates are tried nearest-first and the
+// first with an assetB leg against the same account wins both. That is what keeps
+// a same-asset leg to some other account in the same extrinsic — a batched
+// transfer, the LP-token existential deposit — out of the pair.
 export function matchLiquidityAmounts(missing: LiquidityAmountCandidate[], legs: LiquidityTransferLeg[]): void {
   const scopeOf = (ext: number | null | undefined): string => ext == null ? 'blk' : String(ext)
-  const byTo = new Map<string, { event_index: number; amount: string; used: boolean }[]>()
-  // Pool creation legs run who→pool (the opposite direction of a removal's
-  // pool→who), so they're additionally indexed by the SENDER.
-  const byFrom = new Map<string, { event_index: number; amount: string; used: boolean }[]>()
-  const push = (map: Map<string, { event_index: number; amount: string; used: boolean }[]>, key: string, entry: { event_index: number; amount: string; used: boolean }): void => {
+  type LegEntry = { event_index: number; amount: string; counterparty: string; used: boolean }
+  // Payout legs run pool→who and are found by their RECIPIENT; pool creation and
+  // XYK add legs run who→pool (XYK_DEPOSIT_EVENTS) and are found by their SENDER.
+  const byTo = new Map<string, LegEntry[]>()
+  const byFrom = new Map<string, LegEntry[]>()
+  const push = (map: Map<string, LegEntry[]>, key: string, entry: LegEntry): void => {
     const list = map.get(key) ?? []
     list.push(entry)
     map.set(key, list)
   }
   for (const t of legs) {
     if (!t.amount) continue
-    // A payout leg always comes from the pool. The Treasury only appears in a
-    // liquidity extrinsic to refund the XYK pool-creation deposit when the last
-    // LP exits and the pool is destroyed — and that refund is emitted AFTER the
-    // pool's own payout, so adjacency would pick the 1 HDX deposit over the real
-    // withdrawal on every HDX-paired final removal.
-    if (t.from_account.toLowerCase() === TREASURY_POT) continue
-    const entry = { event_index: t.event_index, amount: t.amount, used: false }
+    const from = t.from_account.toLowerCase()
+    const to = t.to_account.toLowerCase()
     const scope = scopeOf(t.extrinsic_index)
-    push(byTo, `${t.block_height}:${scope}:${t.asset_id}:${t.to_account.toLowerCase()}`, entry)
-    push(byFrom, `${t.block_height}:${scope}:${t.asset_id}:${t.from_account.toLowerCase()}`, entry)
+    // The pool side of a leg is never the Treasury. It appears in a liquidity
+    // extrinsic only to take the XYK pool-creation / LP-token existential deposit
+    // (who→Treasury, emitted AFTER the pool deposits) or to refund it when the last
+    // LP exits and the pool is destroyed (Treasury→who, AFTER the pool's own
+    // payout) — so adjacency alone would report the 1 HDX deposit as the real leg
+    // on every HDX-paired action.
+    if (from !== TREASURY_POT) push(byTo, `${t.block_height}:${scope}:${t.asset_id}:${to}`, { event_index: t.event_index, amount: t.amount, counterparty: from, used: false })
+    if (to !== TREASURY_POT) push(byFrom, `${t.block_height}:${scope}:${t.asset_id}:${from}`, { event_index: t.event_index, amount: t.amount, counterparty: to, used: false })
   }
   for (const list of byTo.values()) list.sort((a, b) => a.event_index - b.event_index)
   for (const list of byFrom.values()) list.sort((a, b) => a.event_index - b.event_index)
+  // Unused legs nearest-first: the closest preceding leg, then the rest before it,
+  // then any that follow — the order a lone leg is taken in.
+  const candidates = (list: LegEntry[] | undefined, eventIndex: number): LegEntry[] => {
+    const free = (list ?? []).filter(t => !t.used)
+    return [...free.filter(t => t.event_index < eventIndex).reverse(), ...free.filter(t => t.event_index >= eventIndex)]
+  }
   for (const row of missing) {
     if (row.amount || !row.who || row.asset_id == null) continue
     const scope = scopeOf(row.extrinsic_index)
-    const lookup = row.event_name === 'XYK.PoolCreated' ? byFrom : byTo
-    const transfers = lookup.get(`${row.block_height}:${scope}:${row.asset_id}:${row.who.toLowerCase()}`)
-    if (!transfers?.length) continue
-    const before = transfers
-      .filter(t => !t.used && t.event_index < row.event_index)
-      .at(-1)
-    const match = before ?? transfers.find(t => !t.used)
-    if (!match) continue
+    const lookup = XYK_DEPOSIT_EVENTS.has(row.event_name) ? byFrom : byTo
+    const key = (assetId: number): string => `${row.block_height}:${scope}:${assetId}:${row.who.toLowerCase()}`
+    const legsA = candidates(lookup.get(key(row.asset_id)), row.event_index)
+    if (!legsA.length) continue
+    if (XYK_PAIR_EVENTS.has(row.event_name) && row.asset_b != null) {
+      const legsB = candidates(lookup.get(key(row.asset_b)), row.event_index)
+      const pair = legsA.flatMap(a => {
+        const b = legsB.find(t => t.counterparty === a.counterparty)
+        return b ? [[a, b]] : []
+      })[0]
+      if (pair) {
+        pair[0].used = pair[1].used = true
+        row.amount = pair[0].amount
+        row.amount_b = pair[1].amount
+        continue
+      }
+    }
+    // No pair: assetA's nearest leg alone, the single-leg display (xykPairLegs
+    // leaves such a row's assetB leg and value unstated).
+    const match = legsA[0]
     match.used = true
     row.amount = match.amount
   }
@@ -11355,10 +11415,11 @@ async function fillMissingLiquidityAmounts(rows: LiquidityAmountCandidate[]): Pr
   const nullExtBlocks = [...new Set(missing.filter(r => r.extrinsic_index == null).map(r => r.block_height))]
   const columns = `block_height, event_index, extrinsic_index, asset_id, from_account, to_account, amount`
   const legs: LiquidityTransferLeg[] = []
-  // Only legs in one of the missing rows' own assets can ever be matched (the
-  // match key carries asset_id), so a batch or routed extrinsic's unrelated legs
-  // are left in ClickHouse rather than shipped and discarded.
-  const fillAssetIds = [...new Set(missing.map(r => r.asset_id!))]
+  // Only legs in one of the missing rows' own assets — both of an XYK pair's — can
+  // ever be matched (the match key carries asset_id), so a batch or routed
+  // extrinsic's unrelated legs are left in ClickHouse rather than shipped and
+  // discarded.
+  const fillAssetIds = [...new Set(missing.flatMap(r => XYK_PAIR_EVENTS.has(r.event_name) && r.asset_b != null ? [r.asset_id, r.asset_b] : [r.asset_id]))]
   const assetFilter = `AND asset_id IN (${sqlUIntList(fillAssetIds)})`
   // Chunked far smaller than a row-per-key lookup would need: this returns EVERY
   // matching leg of each key, and legs per liquidity extrinsic run p50 11, p99 132,
@@ -11449,7 +11510,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         query_params: { limit: pageLimit, offset: pageOffset }, format: 'JSONEachRow',
       })
-      const raw = await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; asset_b: number; pool_acc: string; asset_refs: number[] }>()
+      const raw = await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; amount_b?: string; asset_b: number; pool_acc: string; asset_refs: number[] }>()
       await fillMissingLiquidityAmounts(raw)
       const seen = new Set<string>()
       const out: ActivityRow[] = []
@@ -11466,6 +11527,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
           assetRefs: r.asset_refs,
           liqAction: liqActionFor(r.event_name),
         }
+        xykPairLegs(row, r)
         if (r.event_name === 'XYK.PoolCreated') createCands.push({ row, pool: r.pool_acc, assetB: r.asset_b })
         out.push(row)
       }
@@ -19557,6 +19619,7 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
         liqAction: liqActionFor(r.event_name),
         linkBlock: r.block_height, linkIndex: r.extrinsic_index,
       }
+      xykPairLegs(row, r)
       if (r.event_name === 'XYK.PoolCreated') createCands.push({ row, pool: r.pool_acc, assetB: r.asset_b })
       rows.push(row)
     }
@@ -19927,7 +19990,8 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
                   JSONHas(args_json,'assetA'), JSONExtractInt(args_json,'assetA'),
                   JSONHas(args_json,'asset'), JSONExtractInt(args_json,'asset'),
                   JSONExtractInt(args_json,'asset_id')) AS asset_id,
-                multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares')) AS amount
+                multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares')) AS amount,
+                toUInt32(greatest(0, JSONExtractInt(args_json,'assetB'))) AS asset_b
               FROM price_data.raw_events
               WHERE block_height = {h:UInt32} AND extrinsic_index IS NULL
                 AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
@@ -20111,12 +20175,14 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
     if (seenLiquidity.has(key)) continue
     seenLiquidity.add(key)
     const a = asset(r.asset_id)
-    rows.push({
+    const row: ActivityRow = {
       type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
       who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
       ...liquidityRowAmount(r.event_name, prices, a.assetId, r.amount, a.decimals), amountIn: null, amountOut: null,
       liqAction: liqActionFor(r.event_name),
-    })
+    }
+    xykPairLegs(row, r)
+    rows.push(row)
   }
 
   // Money-market events with no resolvable substrate extrinsic — mirrors
@@ -20486,6 +20552,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
           query: `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
             who AS who,
+            asset_id AS asset_id,
             amount AS amount,
             asset_b AS asset_b,
             pool_account AS pool_acc
@@ -20500,10 +20567,12 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
           LIMIT {n:UInt32}`,
           query_params: { n: pageLimit, assetId }, format: 'JSONEachRow',
         })
-        const rows = (await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; amount: string; asset_b: number; pool_acc: string }>())
-          .map(r => ({ ...r, asset_id: assetId }))
+        // The row displays the page's asset — except an XYK add or remove, which
+        // renders both legs of its pair in the pair's own order on either asset's
+        // page (xykPairLegs): pinning it would collapse both legs into one asset.
+        const rows = (await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; amount_b?: string; asset_b: number; pool_acc: string }>())
+          .map(r => ({ ...r, asset_id: XYK_PAIR_EVENTS.has(r.event_name) ? r.asset_id : assetId }))
         await fillMissingLiquidityAmounts(rows)
-        const a = asset(assetId)
         const seen = new Set<string>()
         const out: ActivityRow[] = []
         const createCands: { row: ActivityRow; pool: string; assetB: number }[] = []
@@ -20511,6 +20580,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
           const key = `${r.block_height}:${r.event_index}`
           if (seen.has(key)) continue
           seen.add(key)
+          const a = asset(r.asset_id)
           const row: ActivityRow = {
             type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
             who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
@@ -20518,6 +20588,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
             liqAction: liqActionFor(r.event_name),
             linkBlock: r.block_height, linkIndex: r.extrinsic_index,
           }
+          xykPairLegs(row, r)
           // Enrich only from the assetA side — this builder pins asset_id to the
           // page's asset, so on the assetB page both legs would collapse into B.
           if (r.event_name === 'XYK.PoolCreated' && r.asset_b !== assetId) createCands.push({ row, pool: r.pool_acc, assetB: r.asset_b })
@@ -23789,7 +23860,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
         query_params: { n: pageLimit },
         format: 'JSONEachRow',
       })
-      const liqRows = await liqRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; asset_b: number; pool_acc: string; asset_refs: number[] }>()
+      const liqRows = await liqRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; amount_b?: string; asset_b: number; pool_acc: string; asset_refs: number[] }>()
       await fillMissingLiquidityAmounts(liqRows)
       const built: ActivityRow[] = []
       const liqCreateCands: { row: ActivityRow; pool: string; assetB: number }[] = []
@@ -23803,6 +23874,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
           liqAction: liqActionFor(r.event_name),
           linkBlock: r.block_height, linkIndex: r.extrinsic_index,
         }
+        xykPairLegs(row, r)
         if (r.event_name === 'XYK.PoolCreated') liqCreateCands.push({ row, pool: r.pool_acc, assetB: r.asset_b })
         built.push(row)
       }
