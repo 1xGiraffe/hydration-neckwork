@@ -235,7 +235,7 @@ function FeeSection({ d }: { d: IceDashboard }) {
           </>
         ) : <div className="hdx-note" style={{ marginTop: 0 }}>No protocol fee revenue yet — the fee is charged on matched volume only, never on the routed part.</div>}
         <div className="hdx-cards">
-          <Card k={WINDOW_LABEL} v={<Usd v={total} />} dot={FEE_COLOR} s="booked as ICE matched fee on the protocol revenue page" />
+          <Card k={WINDOW_LABEL} v={<Usd v={total} />} dot={FEE_COLOR} s="booked as ICE matched fee on the Protocol Revenue page" />
           <Card k="In the fee account" v={<Usd v={holdingsUsd} />} s="held right now, at current prices" />
         </div>
         {holdings.length > 0 && (

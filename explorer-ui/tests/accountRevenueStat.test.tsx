@@ -23,6 +23,6 @@ describe('accounts revenue sort', () => {
   it('offers Revenue in the mobile sort select', () => {
     const html = renderToStaticMarkup(<AccountsSortSelect id="s" sort="revenue" onSort={() => {}} />)
     expect(html).toContain('value="revenue"')
-    expect(html).toContain('>Protocol revenue<')
+    expect(html).toContain('>Protocol Revenue<')
   })
 })

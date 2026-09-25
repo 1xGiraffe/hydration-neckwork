@@ -77,7 +77,7 @@ export function AccountRow({ r, memberView }: { r: TopAccountRow; memberView?: b
         : hf ? <span className={`hf ${hf.cls}`}>{hf.label}</span> : <Dash />}</td>
       <td data-label="Liquidation $" className={`r mono${emptyIf(!r.liquidationVolumeUsd)}`}>{r.liquidationVolumeUsd ? <Usd v={r.liquidationVolumeUsd} /> : <Dash />}</td>
       <td data-label="Trading $" className={`r mono${emptyIf(!r.tradingVolumeUsd)}`}>{r.tradingVolumeUsd ? <Usd v={r.tradingVolumeUsd} /> : <Dash />}</td>
-      <td data-label="Protocol revenue" className={`r mono${emptyIf(!r.revenueUsd)}`}>{r.revenueUsd ? <Usd v={r.revenueUsd} /> : <Dash />}</td>
+      <td data-label="Protocol Revenue" className={`r mono${emptyIf(!r.revenueUsd)}`}>{r.revenueUsd ? <Usd v={r.revenueUsd} /> : <Dash />}</td>
       {/* A partial total is a floor: the feed runs deeper than it could be
           counted, so it reads as "at least this" instead of as exact. */}
       <td data-label="Activity" className={`r${emptyIf(r.activityCount == null)}`}>{count(r.activityCount)}{r.activityCount != null && r.activityCountComplete === false ? '+' : ''}</td>
@@ -143,7 +143,7 @@ export function AccountsSortSelect({ id, sort, onSort }: { id: string; sort: Acc
         <option value="health">Health</option>
         <option value="liquidation">Liquidation $</option>
         <option value="volume">Trading $</option>
-        <option value="revenue">Protocol revenue</option>
+        <option value="revenue">Protocol Revenue</option>
         <option value="activity">Activity</option>
       </select>
     </div>

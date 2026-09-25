@@ -514,7 +514,7 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
                     <td data-label="Activity"><ActivityDesc r={r} now={now} /></td>
                     {/* A dash is "not booked yet", never "$0": the revenue model trails
                         the head, and the field is only present once the block is booked. */}
-                    <td data-label="Protocol revenue" className="r mono muted">{r.revenue ? <Usd v={r.revenue.protocolUsd} /> : <Dash />}</td>
+                    <td data-label="Protocol Revenue" className="r mono muted">{r.revenue ? <Usd v={r.revenue.protocolUsd} /> : <Dash />}</td>
                     <td data-label="Value" className="r mono">{r.valueUsd != null ? <Usd v={r.valueUsd} /> : <Dash />}</td>
                     <td data-label="Time" className="r mono muted">{mempool ? <><PoolChip /><Waiting ts={r.timestamp} now={now} /></> : <Ago ts={r.timestamp} now={now} />}</td>
                   </tr>

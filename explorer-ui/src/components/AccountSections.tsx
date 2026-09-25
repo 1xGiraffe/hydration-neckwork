@@ -262,7 +262,7 @@ export function profileTabs(
     { key: 'extrinsics', label: 'Extrinsics', ...(extrinsicsCount == null ? {} : { count: extrinsicsCount }) },
     { key: 'events', label: 'Events', ...(eventsCount == null ? {} : { count: eventsCount }) },
     ...(votesCount && votesCount > 0 ? [{ key: 'votes', label: 'Votes', count: votesCount }] : []),
-    ...(revenueUsd && revenueUsd > 0 ? [{ key: 'revenue', label: 'Protocol revenue' }] : []),
+    ...(revenueUsd && revenueUsd > 0 ? [{ key: 'revenue', label: 'Protocol Revenue' }] : []),
   ]
 }
 
@@ -324,13 +324,13 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUs
         <div className="amt"><Usd v={liquidation} /></div>
       </div>}
       {revenue > 0 && <div className="acct-bal subtle">
-        {/* "Protocol revenue" where the row has room; the narrow swap keeps the
+        {/* "Protocol Revenue" where the row has room; the narrow swap keeps the
             four stat tiles on one line on phones. */}
-        <div className="lab"><span className="lab-wide">Protocol revenue</span><span className="lab-narrow" title="Protocol revenue">P. Revenue</span></div>
+        <div className="lab"><span className="lab-wide">Protocol Revenue</span><span className="lab-narrow" title="Protocol Revenue">P. Revenue</span></div>
         <div className="amt"><Usd v={revenue} /></div>
       </div>}
       {exHdxValueUsd != null && <div className="acct-bal subtle">
-        {/* Same wide/narrow pair as Protocol revenue — "Ex-HDX value" where the row
+        {/* Same wide/narrow pair as Protocol Revenue — "Ex-HDX value" where the row
             has room, "Ex-HDX" on phones, so the tiles stay on one line. */}
         <div className="lab"><span className="lab-wide">Ex-HDX value</span><span className="lab-narrow">Ex-HDX</span></div>
         <div className="amt"><Usd v={exHdxValueUsd} /></div>
