@@ -996,8 +996,11 @@ export interface HolderRow {
 export interface HoldersPage {
   asset: AssetRef
   holders: HolderRow[]
+  /** Rows in the list — a system tag's members fold into one row. */
   total: number
   totalUsd: number
+  /** Accounts holding the asset (`get_asset`'s Holders figure). */
+  holderCount?: number
 }
 
 export interface XcDestinationDetail {

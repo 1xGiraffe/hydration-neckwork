@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cachedSwr } from './cache.ts'
-import { ensurePrices, getAtokenSuppliedDailyHistory, getMoneyMarketReserves, mmMarkets, type AssetRef, type PriceInfo } from './explorerService.ts'
+import { bindCteSql, boundAccountSql, ensurePrices, getAtokenSuppliedDailyHistory, getMoneyMarketReserves, mmMarkets, type AssetRef, type PriceInfo } from './explorerService.ts'
 import { assetDescriptor } from './explorerAssets.ts'
 import { usdOfRaw } from './assetValue.ts'
 import { HOLLAR_ASSET_ID } from './revenueStreams.ts'
@@ -229,16 +229,21 @@ async function loadPeg(): Promise<HollarDashboard['peg']> {
 
 // HOLLAR balances can exist on both the EVM ERC-20 and Substrate Tokens sides, so
 // the current ERC-20 snapshot combines with indexed Tokens balances. Each account's
-// two pots are folded before it is counted, so a holder with both is one holder —
-// the same grouping getAssetHolderCounts uses for the asset directory.
+// two pots are folded before it is counted, so a holder with both is one holder,
+// and an account's bound EVM-side pot folds onto it — the explorer's one holder
+// definition (HoldersPage in explorerService), which getAssetHolderCounts gives
+// the asset directory and the asset page states.
 export function hollarSupplySql(): string {
   return `
+      WITH bind AS (
+        ${bindCteSql()}
+      )
       SELECT
         toString(sum(bal)) AS total,
         count() AS holders,
         toString(sumIf(bal, account_id = {omnipool:String})) AS omnipool_bal
       FROM (
-        SELECT account_id, sum(bal) AS bal FROM (
+        SELECT ${boundAccountSql('l')} AS account_id, sum(l.bal) AS bal FROM (
           SELECT account_id, toUInt256OrZero(argMaxMerge(total_state)) AS bal
           FROM price_data.account_asset_latest_balances WHERE asset_id = {id:String}
           GROUP BY account_id
@@ -246,7 +251,8 @@ export function hollarSupplySql(): string {
           SELECT account_id, toUInt256OrZero(argMax(total, updated_at)) AS bal
           FROM price_data.erc20_wallet_balances WHERE asset_id = {id:String}
           GROUP BY account_id
-        )
+        ) l
+        LEFT JOIN bind b ON b.eth_id = l.account_id
         GROUP BY account_id
       )
       WHERE bal > 0`
