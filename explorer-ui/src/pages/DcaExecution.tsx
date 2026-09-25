@@ -1,11 +1,13 @@
+import { useEffect } from 'react'
 import { useDcaExecution, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { Link, paths } from '../router'
+import { Link, paths, redirect } from '../router'
 import { Crumbs, Usd, AddrPill, AssetChip, AssetAmount, StatusBadge, FinalizedBadge, FailureReasonRow, SkeletonRows, MomentLink, AwaitingBlockCard } from '../components/ui'
 import { isAwaitingBlock } from '../queryRetry'
 import { DcaResolve } from './DcaSchedule'
 import { RevenueRow } from '../components/RevenueRow'
+import { canonicalDcaExecutionPath } from '../utils/dca'
 
 // One DCA execution attempt: the block/time it ran, the swap it performed (or,
 // for a failed attempt, the intended sell and the decoded failure reason), and
@@ -15,10 +17,11 @@ export function DcaExecution({ height, eventIndex }: { height: number; eventInde
   const { data: stats } = useStats(!!data)
   const now = useNow()
   useDocumentTitle(`DCA execution ${height}-e${eventIndex}`)
+  const canonical = canonicalDcaExecutionPath(height, eventIndex, data)
+  useEffect(() => { if (canonical) redirect(canonical) }, [canonical])
 
-  // Legacy event-form links carried the swap event index, not the DCA event
-  // index, so nothing resolves exactly there — fall back to the schedule
-  // resolver rather than dead-ending.
+  // An index past the block's last execution resolves to nothing — fall back to
+  // the schedule resolver rather than dead-ending.
   //
   // Only a 404 the API itself described as "the block is not indexed yet" waits
   // here (queryRetry.ts), never the finality heuristic useAwaitingBlock also

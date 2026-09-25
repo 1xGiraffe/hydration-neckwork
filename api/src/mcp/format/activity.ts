@@ -596,7 +596,7 @@ export function describeActivityFilters(f: ActivityFilters): string {
     // The most dangerous of the three traps, repeated where the rows are, not
     // only in the tool description an agent read once.
     f.type === 'dca'
-      ? '`type=dca` selects the whole TRADE family, so ordinary swaps appear beside DCA fills and both render from the same rows — only the lines labelled "DCA execution" (`dca: true`) are DCA — the global feed carries no `dcaScheduleId`, so the flag is the only marker. For DCA fills alone, pass `type=trade, action=dca`.'
+      ? '`type=dca` selects the whole TRADE family, so ordinary swaps appear beside DCA fills and both render from the same rows — only the lines labelled "DCA execution" (`dca: true`, with `dcaScheduleId` naming the schedule) are DCA. For DCA fills alone, pass `type=trade, action=dca`.'
       : null,
   ].filter(Boolean)
   return `Filtered: ${parts.join(', ')}.${caveats.length ? ` ${caveats.join(' ')}` : ''}`
