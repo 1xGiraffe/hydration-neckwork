@@ -164,6 +164,11 @@ CREATE TABLE IF NOT EXISTS price_data.liquidity_activity (`block_height` UInt32,
 -- `reward_currency`; the shares moved for the other kinds). Deposit-first for the farm-reward
 -- history, which reads one account's deposits. Fed by lm_deposit_farm_events_mv.
 CREATE TABLE IF NOT EXISTS price_data.lm_deposit_farm_events (`pallet` LowCardinality(String), `deposit_id` String, `yield_farm_id` UInt32, `global_farm_id` UInt32, `block_height` UInt32, `event_index` UInt32, `event_kind` LowCardinality(String), `amount` UInt128, `reward_currency` UInt32, `who` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (pallet, deposit_id, block_height, event_index) SETTINGS index_granularity = 1024;
+-- Every liquidity-mining RewardClaimed (both warehouse instances), account-first: the claimed-
+-- rewards read of the account/tag Liquidity tab, which lm_deposit_farm_events (deposit-first) can
+-- only answer by scanning. Chained off lm_deposit_farm_events_mv's target so the extraction exists
+-- once; one row per claim event, (who, block_height, event_index) the replacement identity.
+CREATE TABLE IF NOT EXISTS price_data.lm_reward_claims_by_account (`who` String, `block_height` UInt32, `event_index` UInt32, `pallet` LowCardinality(String), `deposit_id` String, `yield_farm_id` UInt32, `global_farm_id` UInt32, `reward_currency` UInt32, `amount` UInt128, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (who, block_height, event_index) SETTINGS index_granularity = 1024;
 CREATE TABLE IF NOT EXISTS price_data.lm_reward_snapshot_state (`snapshot_key` LowCardinality(String), `snapshot_id` String, `row_count` UInt32, `block_height` UInt32, `block_hash` String, `relay_height` UInt32, `projected_farms` UInt16, `unprojected_farms` UInt16, `source_checksum` String, `computed_at` DateTime) ENGINE = ReplacingMergeTree(computed_at) ORDER BY snapshot_key SETTINGS index_granularity = 64;
 -- below_ed: 0 = claimable not below the reward asset's ED; 1 = below it but payable (the owner
 -- holds that ED); 2 = below it and unpayable (claim_rewards reverts, so the value counts 0).
