@@ -28,15 +28,18 @@ describe('bound-account directory key', () => {
   })
 
   it('builds every bound-account key through the one helper', () => {
-    // 5 call sites: asset holders, trade volume, liquidation volume, the accounts
-    // directory itself, and the member filter that scopes that same directory
-    // query to one tag — which must key members the SAME way the rows do, or a
-    // member's module truncation or bound H160 pot would be filtered out of its
-    // own row. The weekly-activity site went with the directory's
-    // balance-observation counter, which the account's own feed total replaced.
-    // The directory's farm-reward sum (lm_acct) keys its owners the same way, so
-    // a bound H160's rewards fold into the substrate row its balances do.
-    expect((explorerService.match(/\$\{boundAccountSql\('\w+'\)\}/g) ?? []).length).toBe(7)
+    // Call sites: asset holders, the assets directory's holder counts (the same
+    // holder definition as the asset page — one number on both), trade volume,
+    // liquidation volume, the accounts directory itself, and the member filter
+    // that scopes that same directory query to one tag — which must key members
+    // the SAME way the rows do, or a member's module truncation or bound H160
+    // pot would be filtered out of its own row. The weekly-activity site went
+    // with the directory's balance-observation counter, which the account's own
+    // feed total replaced. The directory's farm-reward sum (lm_acct) keys its
+    // owners the same way, so a bound H160's rewards fold into the substrate
+    // row its balances do. (The HDX and HOLLAR dashboards import the helper for
+    // their holder counts; they live outside this file.)
+    expect((explorerService.match(/\$\{boundAccountSql\('\w+'\)\}/g) ?? []).length).toBe(8)
     expect((explorerService.match(/substring\(\$\{account\}, 11, 8\) IN \('6d6f646c', '7369626c', '70617261'\)/g) ?? []).length).toBe(1)
   })
 

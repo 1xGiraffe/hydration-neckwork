@@ -491,7 +491,10 @@ export interface HolderRow {
   valueUsd?: number | null
   share?: number
 }
-export interface HoldersResponse { asset: AssetRef; holders: HolderRow[]; total: number; totalUsd: number }
+// `total` is the number of ROWS (a tag's members fold into one row) and sizes
+// the pager; `holderCount` is the accounts holding the asset — the asset
+// page's figure.
+export interface HoldersResponse { asset: AssetRef; holders: HolderRow[]; total: number; totalUsd: number; holderCount?: number }
 
 // A lock decomposed by WHEN it can release: already releasable (an unlock or
 // claim call away), scheduled for an estimated time, or open-ended while votes,
