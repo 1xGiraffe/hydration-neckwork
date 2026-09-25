@@ -22,11 +22,10 @@
 //     Treasury.Deposit events are dust sweeps; neither is a network fee, and
 //     deriving substrate fees from treasury deposits generally is wrong
 //     because Omnipool fee legs land there in the same extrinsics.
-//   * EVM gas has no fee event at all: it is the treasury deposit inside the
-//     EVM extrinsic — WETH (asset 20) via Tokens.Deposited for
-//     Ethereum.transact, HDX via Balances.Deposit for EVM.call /
-//     Dispatcher.dispatch_evm_call — and those extrinsics carry
-//     actualFee = 0, so the two arms cannot double count.
+//   * EVM gas and the whole fee of a MultiTransactionPayment.dispatch_permit
+//     have no fee event at all: they are treasury deposits inside the
+//     extrinsic, in whatever currency the payer was charged in, read by the
+//     rules the extrinsic page's fee resolver applies (see networkFeeRowsSql).
 
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
@@ -809,11 +808,59 @@ ${valuedTailSql('uniswap_v3_fee')}`
 }
 
 /**
- * Network fees — the two arms described in the module header. Both arms carry
- * a positive-amount guard: ~5% of TransactionFeePaid rows are paysFee-No zeros
- * and a zero deposit is nothing.
+ * The events pallet-evm emits for a transaction it ran — the mark of an
+ * extrinsic that paid gas, whatever call wrapped it.
+ */
+export const EVM_EXECUTION_EVENTS = ['EVM.Executed', 'EVM.ExecutedFailed', 'Ethereum.Executed'] as const
+
+/**
+ * Network fees — everything the treasury is paid for executing an extrinsic.
+ * Two arms, disjoint by construction:
+ *
+ *   * the substrate fee: `TransactionPayment.TransactionFeePaid.actualFee`,
+ *     always HDX-denominated and tip-inclusive (module header), valued off the
+ *     HDX series. What the treasury actually received — the same fee converted
+ *     at the block's oracle price into the payer's fee currency — agrees with
+ *     that to within a percent in every era probed (2023-02 through the live
+ *     head, per currency), so the HDX figure is the book value and is never
+ *     restated in the paid asset;
+ *   * the fee paths the substrate arm cannot see: EVM gas, and the whole fee of
+ *     a `MultiTransactionPayment.dispatch_permit` (an unsigned EVM-permit
+ *     dispatch, charged in the permit signer's fee currency and emitting no
+ *     TransactionFeePaid at all). Both exist only as treasury deposits inside
+ *     the extrinsic, so this arm is the SQL form of the extrinsic page's own
+ *     resolver (services/extrinsicFeePayment.ts) and the two agree by
+ *     construction:
+ *       - scope: every extrinsic pallet-evm ran a transaction in
+ *         (EVM_EXECUTION_EVENTS — the marker survives any wrapper, a
+ *         `Utility.batch_all` of `EVM.call`s included, where a call-name list
+ *         did not), plus every `dispatch_permit`;
+ *       - a treasury deposit counts only in a currency the PAYER was debited
+ *         in within the same extrinsic (`Tokens.Withdrawn` / `Balances.Withdraw`
+ *         / `Balances.Burned`, the EVM prepay) — what separates a fee from an
+ *         Omnipool fee leg or another account's transfer landing there;
+ *       - the fee currency is the LAST such deposit's and every deposit in it
+ *         is fee (gas arrives in pieces: a charge plus a rounding remainder, or
+ *         one per wrapped call), EXCEPT the last one when the extrinsic also
+ *         paid a substrate fee: `correct_and_deposit_fee` runs post-dispatch,
+ *         so that deposit IS `actualFee` and the first arm has it (a
+ *         `Dispatcher.dispatch_evm_call` pays both — gas mid-dispatch, the
+ *         substrate fee last). "Paid a substrate fee" is the extrinsic's own
+ *         `fee + tip > 0`, the page's `hasSubstrateFee`;
+ *       - a deposit right after `Balances.DustLost` is the dust of an account
+ *         the call killed, swept to the treasury by the same hook — not a fee.
+ *     The payer is the extrinsic's signer, or for the unsigned shapes
+ *     (`Ethereum.transact`, `dispatch_permit`) its recovered effective signer.
+ *
+ * Both arms carry a positive-amount guard: ~5% of TransactionFeePaid rows are
+ * paysFee-No zeros and a zero deposit is nothing.
  */
 function networkFeeRowsSql(extra: string): string {
+  const evmMarkers = EVM_EXECUTION_EVENTS.map(n => `'${n}'`).join(', ')
+  // The deposit arm's extrinsics as a bare key set (no FINAL, no payer), so
+  // each source scan filters on it before touching a JSON column; the payer
+  // join below reads the deduplicated row.
+  const scoped = '(block_height, assumeNotNull(extrinsic_index)) IN (SELECT block_height, ext_index FROM gas_scope)'
   return `-- rev:network_fee
 WITH fee_events AS (
   SELECT block_height, event_index, min(block_timestamp) AS block_time,
@@ -824,34 +871,83 @@ WITH fee_events AS (
     AND (${extra})
   GROUP BY block_height, event_index
 ),
-evm_extrinsics AS (
-  SELECT block_height, extrinsic_index AS ext_index, call_name AS cname,
-         ifNull(signer, '') AS csigner
-  FROM price_data.raw_extrinsics FINAL
-  WHERE call_name IN ('Ethereum.transact', 'EVM.call', 'Dispatcher.dispatch_evm_call')
+gas_scope AS (
+  SELECT block_height, extrinsic_index AS ext_index
+  FROM price_data.raw_extrinsics
+  WHERE call_name = 'MultiTransactionPayment.dispatch_permit'
+    AND ${WINDOW}
+    AND (${extra})
+  UNION DISTINCT
+  SELECT block_height, assumeNotNull(extrinsic_index) AS ext_index
+  FROM price_data.raw_events
+  WHERE event_name IN (${evmMarkers}) AND extrinsic_index IS NOT NULL
     AND ${WINDOW}
     AND (${extra})
 ),
-eth_executed AS (
-  SELECT block_height, assumeNotNull(extrinsic_index) AS ext_index,
-         argMax(args_json, ingested_at) AS args
+gas_extrinsics AS (
+  SELECT block_height, extrinsic_index AS ext_index,
+         coalesce(signer, effective_signer, '') AS payer,
+         toUInt8(toUInt256OrZero(ifNull(fee, '0')) + toUInt256OrZero(ifNull(tip, '0')) > 0) AS substrate_fee
+  FROM price_data.raw_extrinsics FINAL
+  WHERE ${WINDOW}
+    AND (${extra})
+    AND (block_height, extrinsic_index) IN (SELECT block_height, ext_index FROM gas_scope)
+),
+gas_debits AS (
+  SELECT DISTINCT block_height, assumeNotNull(extrinsic_index) AS ext_index,
+         JSONExtractString(args_json, 'who') AS who,
+         if(event_name = 'Tokens.Withdrawn', toUInt32(JSONExtractUInt(args_json, 'currencyId')), toUInt32(0)) AS currency
   FROM price_data.raw_events
-  WHERE event_name = 'Ethereum.Executed' AND extrinsic_index IS NOT NULL
+  WHERE event_name IN ('Tokens.Withdrawn', 'Balances.Withdraw', 'Balances.Burned')
+    AND extrinsic_index IS NOT NULL
     AND ${WINDOW}
     AND (${extra})
-  GROUP BY block_height, ext_index
+    AND ${scoped}
+),
+dust_sweeps AS (
+  SELECT DISTINCT block_height, event_index + 1 AS deposit_index
+  FROM price_data.raw_events
+  WHERE event_name = 'Balances.DustLost' AND extrinsic_index IS NOT NULL
+    AND ${WINDOW}
+    AND (${extra})
+    AND ${scoped}
 ),
 gas_deposits AS (
   SELECT block_height, event_index, assumeNotNull(extrinsic_index) AS ext_index,
-         event_name, min(block_timestamp) AS block_time,
-         argMax(args_json, ingested_at) AS args
+         min(block_timestamp) AS block_time,
+         argMax(if(event_name = 'Tokens.Deposited', toUInt32(JSONExtractUInt(args_json, 'currencyId')), toUInt32(0)), ingested_at) AS currency,
+         argMax(toUInt256OrZero(replaceAll(JSONExtractRaw(args_json, 'amount'), '"', '')), ingested_at) AS amount
   FROM price_data.raw_events
   WHERE event_name IN ('Tokens.Deposited', 'Balances.Deposit')
     AND extrinsic_index IS NOT NULL
     AND JSONExtractString(args_json, 'who') = '${TREASURY_ACCOUNT}'
     AND ${WINDOW}
     AND (${extra})
-  GROUP BY block_height, event_index, ext_index, event_name
+    AND ${scoped}
+  GROUP BY block_height, event_index, ext_index
+),
+gas_candidates AS (
+  SELECT d.block_height AS block_height, d.event_index AS event_index, d.ext_index AS ext_index,
+         d.block_time AS block_time, d.currency AS currency, d.amount AS amount,
+         x.payer AS payer, x.substrate_fee AS substrate_fee
+  FROM gas_deposits AS d
+  INNER JOIN gas_extrinsics AS x ON x.block_height = d.block_height AND x.ext_index = d.ext_index
+  WHERE d.amount > 0
+    AND (d.block_height, d.ext_index, x.payer, d.currency) IN (SELECT block_height, ext_index, who, currency FROM gas_debits)
+    AND (d.block_height, d.event_index) NOT IN (SELECT block_height, deposit_index FROM dust_sweeps)
+),
+gas_fee_shape AS (
+  SELECT block_height, ext_index, argMax(currency, event_index) AS fee_currency, max(event_index) AS last_index
+  FROM gas_candidates
+  GROUP BY block_height, ext_index
+),
+gas_rows AS (
+  SELECT c.block_height AS block_height, c.block_time AS block_time, c.event_index AS event_index,
+         c.payer AS payer, c.currency AS currency, c.amount AS amount
+  FROM gas_candidates AS c
+  INNER JOIN gas_fee_shape AS s ON s.block_height = c.block_height AND s.ext_index = c.ext_index
+  WHERE c.currency = s.fee_currency
+    AND NOT (c.substrate_fee = 1 AND c.event_index = s.last_index)
 ),
 rows AS (
   SELECT block_height, block_time, event_index, toUInt16(0) AS leg_index, '' AS dest,
@@ -861,19 +957,12 @@ rows AS (
   FROM fee_events
   WHERE JSONExtractString(args, 'actualFee') != '0'
   UNION ALL
-  SELECT d.block_height AS block_height, d.block_time AS block_time, d.event_index AS event_index,
+  SELECT g.block_height AS block_height, g.block_time AS block_time, g.event_index AS event_index,
          toUInt16(0) AS leg_index, '' AS dest,
-         ${attributablePayerSql(`if(x.cname = 'Ethereum.transact',
-            if(e.args != '', ${ethMappedAccountSql("JSONExtractString(e.args, 'from')")}, ''),
-            x.csigner)`)} AS account,
-         if(d.event_name = 'Tokens.Deposited', toUInt32(20), toUInt32(0)) AS asset_id,
-         JSONExtractString(d.args, 'amount') AS amount
-  FROM gas_deposits d
-  INNER JOIN evm_extrinsics x ON x.block_height = d.block_height AND x.ext_index = d.ext_index
-  LEFT JOIN eth_executed e ON e.block_height = d.block_height AND e.ext_index = d.ext_index
-  WHERE (d.event_name = 'Tokens.Deposited') = (x.cname = 'Ethereum.transact')
-    AND (d.event_name != 'Tokens.Deposited' OR JSONExtractInt(d.args, 'currencyId') = 20)
-    AND JSONExtractString(d.args, 'amount') != '0'
+         ${attributablePayerSql('g.payer')} AS account,
+         g.currency AS asset_id,
+         toString(g.amount) AS amount
+  FROM gas_rows AS g
 )
 ${valuedTailSql('network_fee')}`
 }

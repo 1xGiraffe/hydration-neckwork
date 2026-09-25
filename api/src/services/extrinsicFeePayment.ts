@@ -31,12 +31,22 @@
 //
 // So the fee is the treasury deposit — but an extrinsic can hold treasury
 // deposits that are not fees (dust from a killed account arrives the same way,
-// and an Omnipool fee leg can deposit H2O). Two conditions pin the right one:
+// and an Omnipool fee leg can deposit H2O). Three conditions pin the right one:
 //
 //   * its currency was also DEBITED from the fee payer in the same extrinsic —
-//     which is what separates a fee from a dust sweep or a pool fee leg, and
+//     which is what separates a fee from a pool fee leg or another account's
+//     transfer,
+//   * it does not immediately follow `Balances.DustLost`: the dust of an HDX
+//     account the call killed is swept to the treasury by that hook, as a
+//     `Balances.Deposit` in the very next event, and the payer's own HDX debit
+//     would otherwise vouch for it (orml dust moves as a `Tokens.Transfer`,
+//     never a deposit, so it needs no rule), and
 //   * it is the LAST such deposit, because `correct_and_deposit_fee` runs in
 //     post-dispatch, after every event the call itself produced.
+//
+// The revenue model's network-fee stream (services/revenueStreams.ts,
+// networkFeeRowsSql) applies these same rules in SQL, so the fee a page shows
+// and the fee the protocol books are one figure.
 //
 // Verified against 13759746-2 (DOT), 13756091-3 (H2O), 13706669-3 (HDX fee
 // alongside 0.0001 HDX of dust) and 13443355-3 (EVM, three WETH gas deposits).
@@ -47,6 +57,8 @@ export const FEE_BALANCE_EVENTS = [
   'Balances.Burned',
   'Tokens.Deposited',
   'Balances.Deposit',
+  // Moves no fee itself; it marks the one treasury deposit that is not one.
+  'Balances.DustLost',
 ] as const
 
 
@@ -135,13 +147,19 @@ export function deriveFeePayment(
 
   const debited = new Set<number>()
   const deposits: { assetId: number; amount: bigint }[] = []
+  // `events` is the extrinsic's own sequence in chain order (a caller that
+  // pre-filters by FEE_BALANCE_EVENTS keeps it), so "the deposit right after
+  // DustLost" is the previous element.
+  let afterDustLost = false
   for (const e of events) {
+    const dustSweep = afterDustLost
+    afterDustLost = e.name === 'Balances.DustLost'
     if (e.name === 'Tokens.Withdrawn' || e.name === 'Balances.Withdraw' || e.name === 'Balances.Burned') {
       if (accountArg(e.args, 'who') !== who) continue
       const cid = currencyOf(e.name, e.args)
       if (cid != null) debited.add(cid)
     } else if (e.name === 'Tokens.Deposited' || e.name === 'Balances.Deposit') {
-      if (accountArg(e.args, 'who') !== TREASURY_ACCOUNT) continue
+      if (dustSweep || accountArg(e.args, 'who') !== TREASURY_ACCOUNT) continue
       const cid = currencyOf(e.name, e.args)
       const amount = amountArg(e.args)
       if (cid != null && amount != null && amount > 0n) deposits.push({ assetId: cid, amount })

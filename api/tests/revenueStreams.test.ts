@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
+  EVM_EXECUTION_EVENTS,
   ICE_FEE_ACCOUNT,
   ICE_POT_ACCOUNT, TREASURY_H160,
   PROTOCOL_REVENUE_PREDICATE_SQL,
@@ -99,14 +100,53 @@ describe('network_fee', () => {
     expect(sql).not.toContain("'Treasury.Deposit'")
   })
 
-  it('scopes EVM gas deposits to the three EVM call names and the treasury', () => {
+  // The deposit arm is the extrinsic page's fee resolver (extrinsicFeePayment.ts)
+  // restated in SQL; each rule below is one the resolver's own tests pin.
+  it('scopes the deposit arm by the pallet-evm execution events and dispatch_permit, not by call name', () => {
+    for (const marker of EVM_EXECUTION_EVENTS) expect(sql).toContain(`'${marker}'`)
+    expect(sql).toContain("'MultiTransactionPayment.dispatch_permit'")
+    // A call-name list missed every EVM call inside a Utility.batch_all and had
+    // no way to say dispatch_permit; the marker events survive any wrapper.
     for (const call of ['Ethereum.transact', 'EVM.call', 'Dispatcher.dispatch_evm_call']) {
-      expect(sql).toContain(`'${call}'`)
+      expect(sql).not.toContain(`'${call}'`)
     }
     expect(sql).toContain(TREASURY_ACCOUNT)
-    // WETH gas arrives as Tokens.Deposited currencyId 20; HDX gas as Balances.Deposit.
     expect(sql).toContain("'Tokens.Deposited'")
     expect(sql).toContain("'Balances.Deposit'")
+  })
+
+  it('books a treasury deposit in whatever currency the payer was debited in', () => {
+    // dispatch_permit fees settle in the permit signer's fee currency (USDT, DOT,
+    // …) and EVM gas in the account's; pinning WETH (20) or HDX dropped them all.
+    expect(sql).not.toMatch(/toUInt32\(20\)/)
+    expect(sql).not.toMatch(/currencyId'\)\s*=\s*20/)
+    for (const debit of ['Tokens.Withdrawn', 'Balances.Withdraw', 'Balances.Burned']) {
+      expect(sql).toContain(`'${debit}'`)
+    }
+    // The debit must be the payer's and in the deposit's currency.
+    expect(sql).toContain('(d.block_height, d.ext_index, x.payer, d.currency) IN (SELECT block_height, ext_index, who, currency FROM gas_debits)')
+    // The payer is the signer, or the recovered signer of an unsigned dispatch.
+    expect(sql).toContain("coalesce(signer, effective_signer, '') AS payer")
+  })
+
+  it('takes every deposit in the last candidate currency except a substrate fee the first arm booked', () => {
+    expect(sql).toContain('argMax(currency, event_index) AS fee_currency')
+    expect(sql).toContain('c.currency = s.fee_currency')
+    // hasSubstrateFee's `fee + tip > 0`, from the extrinsic's own columns; a
+    // dispatch_evm_call's post-dispatch fee deposit IS actualFee, and booking it
+    // here as well counted the substrate fee twice.
+    expect(sql).toContain("toUInt256OrZero(ifNull(fee, '0')) + toUInt256OrZero(ifNull(tip, '0')) > 0")
+    expect(sql).toContain('NOT (c.substrate_fee = 1 AND c.event_index = s.last_index)')
+  })
+
+  it('leaves the dust of a killed account to the treasury without booking it', () => {
+    expect(sql).toContain("'Balances.DustLost'")
+    expect(sql).toContain('NOT IN (SELECT block_height, deposit_index FROM dust_sweeps)')
+  })
+
+  it('never counts the Currencies.* mirror events', () => {
+    expect(sql).not.toContain('Currencies.Deposited')
+    expect(sql).not.toContain('Currencies.Withdrawn')
   })
 
   it('prices the substrate arm as HDX regardless of the charged fee currency', () => {
