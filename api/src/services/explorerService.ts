@@ -6511,15 +6511,32 @@ function mmPositionValueUsd(markets: MoneyMarketPosition[]): number {
 // Shared by the account and tag views so both surface MM collateral identically.
 // Returns the USD value actually folded into balances so the caller can detect a
 // shortfall (per-reserve reconstruction unavailable) and still count collateral.
-function applyMmCollateralToBalances(balances: AddressBalance[], moneyMarket: Pick<MoneyMarketPosition, 'blockHeight' | 'reserves'> | null, prices: Map<number, PriceInfo>): number {
+//
+// `supplied` is the holder's own aToken balanceOf, so it replaces the pallet row's
+// FREE side (which reads 0 for an ERC-20 registry asset — the balance lives in
+// contract storage) and never its RESERVED side: a named reserve on an aToken (a
+// DCA order's `dcaorder`) moves the aTokens out of the holder's balanceOf into the
+// pallet's holding and mirrors the amount in Tokens.Accounts.reserved, so it is a
+// separate holding the money market no longer sees. The row keeps it — the
+// runtime's own CurrenciesApi.account reads the same way (free = balanceOf,
+// reserved = the pallet's) — and only the supplied part is reported as folded,
+// since the collateral aggregate never covered the reserve.
+export function applyMmCollateralToBalances(balances: AddressBalance[], moneyMarket: Pick<MoneyMarketPosition, 'blockHeight' | 'reserves'> | null, prices: Map<number, PriceInfo>): number {
   let foldedUsd = 0
   for (const r of moneyMarket?.reserves ?? []) {
     if (r.supplied === '0' || r.assetId < 0) continue
-    const valueUsd = usdValue(prices, r.assetId, r.supplied, r.decimals)
-    foldedUsd += valueUsd ?? 0
+    foldedUsd += usdValue(prices, r.assetId, r.supplied, r.decimals) ?? 0
     const existing = balances.find(b => b.asset.assetId === r.assetId)
-    if (existing) { existing.total = r.supplied; existing.free = r.supplied; existing.reserved = '0'; existing.valueUsd = valueUsd }
-    else balances.push({ asset: asset(r.assetId), total: r.supplied, free: r.supplied, reserved: '0', lastBlock: moneyMarket?.blockHeight ?? 0, valueUsd })
+    if (existing) {
+      const reserved = BigInt(existing.reserved || '0')
+      const total = (BigInt(r.supplied) + reserved).toString()
+      existing.total = total
+      existing.free = r.supplied
+      existing.reserved = reserved.toString()
+      existing.valueUsd = usdValue(prices, r.assetId, total, r.decimals)
+    } else {
+      balances.push({ asset: asset(r.assetId), total: r.supplied, free: r.supplied, reserved: '0', lastBlock: moneyMarket?.blockHeight ?? 0, valueUsd: usdValue(prices, r.assetId, r.supplied, r.decimals) })
+    }
   }
   balances.sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
   return foldedUsd
