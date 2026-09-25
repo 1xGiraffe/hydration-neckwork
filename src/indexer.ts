@@ -30,7 +30,7 @@ import {
 } from './nativeAsset.js'
 import { toClickHouseBlockTime } from './db/timestamp.js'
 import { fetchChainHead } from './rpc/head.js'
-import { detectPoolAffectingSetStorage } from './raw/snapshot.js'
+import { detectPoolAffectingSetStorage, readXYKState as readSnapshotXykState } from './raw/snapshot.js'
 import { createSnapshotRpcClient, loadRuntimeAt } from './scripts/snapshotRuntime.js'
 import { extractRuntimeErrorNames } from './raw/runtimeErrorNames.js'
 import type { RpcClient } from '@subsquid/rpc-client'
@@ -239,52 +239,25 @@ async function readOmnipoolState(block: Block, assetIds: number[]): Promise<Map<
 }
 
 /**
- * Read XYK pool states from chain storage using cached pool entries
- *
- * XYK pools are indexed by their sovereign account (AccountId32).
- * We use cached pool entries (account -> asset pair) and read only Tokens.Accounts
- * for the pool's token reserves.
+ * Read XYK pool states from chain storage using cached pool entries — the raw
+ * snapshot's reader (`raw/snapshot.ts`), which takes each side from where its asset
+ * lives (System.Account for HDX, EVM storage for Erc20 assets, Tokens otherwise).
  */
 async function readXYKState(
   block: Block,
   pools: Array<{ poolAccount: string; assetA: number; assetB: number }>
 ): Promise<XYKPool[]> {
-  const xykPools: XYKPool[] = []
-
-  if (!storage.tokens.accounts.v108.is(block)) {
-    throw new Error(`Unsupported Tokens.Accounts storage for XYK pools at block ${block.height}`)
-  }
-
   try {
-    // Batch-read all pool balances in one call (2 keys per pool)
-    const keys: [string, number][] = []
-    for (const { poolAccount, assetA, assetB } of pools) {
-      keys.push([poolAccount, assetA])
-      keys.push([poolAccount, assetB])
-    }
-
-    const balances = await storage.tokens.accounts.v108.getMany(block, keys)
-
-    // Process results in pairs (index i*2 and i*2+1 for pool i)
-    for (let i = 0; i < pools.length; i++) {
-      const { assetA, assetB } = pools[i]
-      const balanceA = balances[i * 2]
-      const balanceB = balances[i * 2 + 1]
-
-      if (balanceA && balanceB) {
-        xykPools.push({
-          assetA,
-          assetB,
-          reserveA: balanceA.free,
-          reserveB: balanceB.free,
-        })
-      }
-    }
+    const states = await readSnapshotXykState(block, pools)
+    return states.map(state => ({
+      assetA: state.asset_a,
+      assetB: state.asset_b,
+      reserveA: BigInt(state.reserve_a),
+      reserveB: BigInt(state.reserve_b),
+    }))
   } catch (error) {
     throw new Error(`Failed to read XYK state at block ${block.height}`, { cause: error })
   }
-
-  return xykPools
 }
 
 let stableswapPegStorageSeen = false

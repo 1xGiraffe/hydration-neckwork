@@ -169,6 +169,36 @@ export async function readOmnipoolState(block: Block, assetIds: number[]): Promi
   return assets.sort((a, b) => a.asset_id - b.asset_id)
 }
 
+/** Registry id of native HDX, which the Balances pallet holds in `System.Account`. */
+export const NATIVE_ASSET_ID = 0
+
+/**
+ * Free native (HDX) balance of each account at `block`, from `System.Account`.
+ * An account with no entry holds 0.
+ */
+export async function readNativeFreeBalances(block: Block, accounts: string[]): Promise<bigint[]> {
+  if (accounts.length === 0) return []
+  if (storage.system.account.v205.is(block)) {
+    const infos = await getManyChunked(accounts, page => storage.system.account.v205.getMany(block, page))
+    return infos.map(info => info?.data.free ?? 0n)
+  }
+  if (storage.system.account.v100.is(block)) {
+    const infos = await getManyChunked(accounts, page => storage.system.account.v100.getMany(block, page))
+    return infos.map(info => info?.data.free ?? 0n)
+  }
+  throw new Error(`Unsupported System.Account storage at block ${block.height}`)
+}
+
+/**
+ * An XYK pool's reserves are the pool account's FREE balance of each asset — the
+ * pallet's own `free_balance(asset, pool_account)` — and each asset keeps it in a
+ * different place: native HDX in `System.Account` (the Balances pallet; there is
+ * no `Tokens.Accounts` entry for asset 0 at all), an Erc20 registry asset (HOLLAR,
+ * GDOT, the Hydrated stablecoins) in its contract's EVM storage, every other asset
+ * in `Tokens.Accounts`. Reading `Tokens.Accounts` for all of them publishes 0 for
+ * the HDX side of every HDX pool and the Erc20 side of every Erc20 pool, which the
+ * price graph then drops and every LP valuation reads as an empty side.
+ */
 export async function readXYKState(
   block: Block,
   pools: Array<{ poolAccount: string; assetA: number; assetB: number }>
@@ -177,24 +207,72 @@ export async function readXYKState(
     throw new Error(`Unsupported Tokens.Accounts storage for XYK pools at block ${block.height}`)
   }
 
-  const keys: [string, number][] = []
-  for (const pool of pools) {
-    keys.push([pool.poolAccount, pool.assetA])
-    keys.push([pool.poolAccount, pool.assetB])
-  }
+  // reserves[i] = [reserveA, reserveB] of pools[i]
+  const reserves = pools.map(() => [0n, 0n] as [bigint, bigint])
+  const tokenKeys: [string, number][] = []
+  const tokenSlots: Array<[number, 0 | 1]> = []
+  const nativeAccounts: string[] = []
+  const nativeSlots: Array<[number, 0 | 1]> = []
+  pools.forEach((pool, index) => {
+    ;([pool.assetA, pool.assetB] as const).forEach((assetId, side) => {
+      const slot: [number, 0 | 1] = [index, side as 0 | 1]
+      if (assetId === NATIVE_ASSET_ID) {
+        nativeAccounts.push(pool.poolAccount)
+        nativeSlots.push(slot)
+      } else {
+        tokenKeys.push([pool.poolAccount, assetId])
+        tokenSlots.push(slot)
+      }
+    })
+  })
 
-  const balances = await getManyChunked(keys, page => storage.tokens.accounts.v108.getMany(block, page))
-  return pools.map((pool, index) => {
-    const balanceA = balances[index * 2]
-    const balanceB = balances[index * 2 + 1]
-    return {
-      pool_account: pool.poolAccount,
-      asset_a: pool.assetA,
-      asset_b: pool.assetB,
-      reserve_a: (balanceA?.free ?? 0n).toString(),
-      reserve_b: (balanceB?.free ?? 0n).toString(),
+  const [tokenBalances, nativeBalances] = await Promise.all([
+    getManyChunked(tokenKeys, page => storage.tokens.accounts.v108.getMany(block, page)),
+    readNativeFreeBalances(block, nativeAccounts).catch((error: unknown) => {
+      throw new Error(`System.Account HDX reserve read failed for XYK pools at block ${block.height}`, { cause: error })
+    }),
+  ])
+  tokenSlots.forEach(([index, side], i) => { reserves[index][side] = tokenBalances[i]?.free ?? 0n })
+  nativeSlots.forEach(([index, side], i) => { reserves[index][side] = nativeBalances[i] })
+
+  // An Erc20 asset has no Tokens balance: read the pool's EVM balance for any side
+  // that came back 0 (the Omnipool/Stableswap readers' rule). A 0 from the EVM read
+  // means "nothing read", so it never overwrites.
+  const erc20Pools = pools
+    .map((pool, index) => ({ pool, index }))
+    .filter(({ pool, index }) =>
+      (reserves[index][0] === 0n && isKnownErc20(pool.assetA)) || (reserves[index][1] === 0n && isKnownErc20(pool.assetB)))
+  await forEachConcurrent(erc20Pools, snapshotReadBatchConcurrency(), async ({ pool, index }) => {
+    const evmBalances = await readErc20Balances(block, [pool.assetA, pool.assetB], pool.poolAccount)
+    for (const side of [0, 1] as const) {
+      if (reserves[index][side] === 0n && evmBalances[side] > 0n) reserves[index][side] = evmBalances[side]
     }
   })
+
+  return pools.map((pool, index) => ({
+    pool_account: pool.poolAccount,
+    asset_a: pool.assetA,
+    asset_b: pool.assetB,
+    reserve_a: reserves[index][0].toString(),
+    reserve_b: reserves[index][1].toString(),
+  }))
+}
+
+/**
+ * Transfer events that can move a pool account's reserves without a swap event:
+ * `Tokens.Transfer` for Tokens assets, `Currencies.Transferred` for an aToken or
+ * other Erc20 asset (reported as that event ALONE — the GDOT/GETH/GSOL stableswap
+ * reserves), and `Balances.Transfer` for native HDX (an HDX leg of an XYK
+ * add/remove-liquidity, or a donation to a pool account). All three carry
+ * `from`/`to`. Returns the two accounts, or nothing for any other event.
+ */
+const RESERVE_TRANSFER_EVENTS = new Set(['Tokens.Transfer', 'Currencies.Transferred', 'Balances.Transfer'])
+
+export function reserveTransferAccounts(event: { name?: string; args?: unknown }): [string, string] | null {
+  if (event.name == null || !RESERVE_TRANSFER_EVENTS.has(event.name)) return null
+  const args = event.args as { from?: unknown; to?: unknown } | undefined
+  if (typeof args?.from !== 'string' || typeof args?.to !== 'string') return null
+  return [args.from, args.to]
 }
 
 let stableswapPegStorageSeen = false
