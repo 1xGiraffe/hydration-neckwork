@@ -15,6 +15,7 @@
     "snapshot:balances": "tsx src/scripts/snapshot-balances.ts",
     "snapshot:identities": "tsx src/scripts/snapshot-identities.ts",
     "snapshot:money-market": "tsx src/scripts/snapshot-money-market.ts",
+    "snapshot:lm-entries": "tsx src/scripts/snapshot-lm-entries.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
