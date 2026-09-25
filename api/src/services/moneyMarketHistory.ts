@@ -494,6 +494,36 @@ export interface MmObservation {
   liquidationThreshold: string
   ltv: string
   healthFactor: string
+  /**
+   * The lowest health factor in force during the bucket: the minimum over the
+   * observations inside it and the one carried into it (the previous bucket's last)
+   * — the chain's own figures, never interpolated. Absent where no observation is
+   * known yet; `lowestAtBlock` is the block that observed it.
+   */
+  lowestHealthFactor?: string
+  lowestAtBlock?: number
+}
+
+/**
+ * The lowest health factor per bucket (MmObservation.lowestHealthFactor) over the
+ * forward-filled series and each bucket's own in-bucket minimum. Pure; returns new
+ * objects (the filled series shares one object across a quiet run).
+ */
+export function withLowestHealthFactor(filled: (MmObservation | undefined)[], inBucketMin: ReadonlyMap<number, { hf: string; block: number }>, before?: MmObservation): (MmObservation | undefined)[] {
+  const big = (v: string) => (/^\d+$/.test(v) ? BigInt(v) : null)
+  return filled.map((o, b) => {
+    if (!o) return o
+    const carried = b > 0 ? filled[b - 1] : before
+    let hf = carried ? carried.healthFactor : null
+    let at = carried ? carried.block : null
+    const own = inBucketMin.get(b)
+    if (own) {
+      const ownV = big(own.hf), curV = hf == null ? null : big(hf)
+      if (ownV != null && (curV == null || ownV < curV)) { hf = own.hf; at = own.block }
+    }
+    if (hf == null) { hf = o.healthFactor; at = o.block }
+    return { ...o, lowestHealthFactor: hf, lowestAtBlock: at ?? o.block }
+  })
 }
 
 /**
@@ -556,7 +586,7 @@ export async function loadObservationHistory(
   const holderAccs = holderOf ? holderPools.map(p => holderOf!.get(p)!) : []
   const holderFilter = holderOf ? `AND account_id = transform(pool_address, {hp:Array(String)}, {ha:Array(String)}, '')` : ''
   const o = mmObservationOrderSql()
-  type Row = { pool: string; b: number; obs_block: number; coll: string; debt: string; avail: string; lt: string; max_ltv: string; hf: string }
+  type Row = { pool: string; b: number; obs_block: number; coll: string; debt: string; avail: string; lt: string; max_ltv: string; hf: string; hf_min: string; hf_min_block: number }
   const read = async (tag: string, bucketSql: string, poolsIn: string[], lo: number, hi: number): Promise<Row[]> => {
     const res = await client.query(tagged({
       query: `-- ${tag}
@@ -567,7 +597,9 @@ export async function loadObservationHistory(
                 argMax(available_borrows_base, ${o}) AS avail,
                 argMax(current_liquidation_threshold, ${o}) AS lt,
                 argMax(ltv, ${o}) AS max_ltv,
-                argMax(health_factor, ${o}) AS hf
+                argMax(health_factor, ${o}) AS hf,
+                toString(min(health_factor)) AS hf_min,
+                argMin(block_height, health_factor) AS hf_min_block
               FROM price_data.account_money_market_position_history
               WHERE account_id IN {accs:Array(String)} AND pool_address IN {pools:Array(String)}
                 AND block_height >= {lo:UInt32} AND block_height <= {hi:UInt32} ${holderFilter}
@@ -587,8 +619,13 @@ export async function loadObservationHistory(
     if (quiet.length) rows = [...await read('mm:observations-carry', 'toInt32(-1)', quiet, 0, lo - 1), ...rows]
   }
   const byPool = new Map<string, Map<number, MmObservation>>()
+  const minByPool = new Map<string, Map<number, { hf: string; block: number }>>()
   for (const r of rows) {
     const pool = r.pool.toLowerCase()
+    if (Number(r.b) >= 0 && r.hf_min != null) {
+      const mins = minByPool.get(pool) ?? minByPool.set(pool, new Map()).get(pool)!
+      mins.set(Number(r.b), { hf: String(r.hf_min), block: Number(r.hf_min_block) })
+    }
     const m = byPool.get(pool) ?? new Map<number, MmObservation>()
     m.set(Number(r.b), {
       block: Number(r.obs_block), totalCollateralBase: String(r.coll ?? '0'), totalDebtBase: String(r.debt ?? '0'),
@@ -596,7 +633,7 @@ export async function loadObservationHistory(
     })
     byPool.set(pool, m)
   }
-  for (const [pool, m] of byPool) out.set(pool, forwardFill(bk.N, m))
+  for (const [pool, m] of byPool) out.set(pool, withLowestHealthFactor(forwardFill(bk.N, m), minByPool.get(pool) ?? new Map(), m.get(-1)))
   return out
 }
 
@@ -748,6 +785,74 @@ export function reserveAmountsAt(aScaled: bigint, dScaled: bigint, idx: ReserveI
   }
 }
 
+/** One side (supply or debt) of a reserve's cumulative interest, per bucket 0..N. */
+export interface InterestSide {
+  /** Raw units accrued from the first stated bucket through bucket b; 0 before it. A lower bound where `incomplete`. */
+  raw: bigint[]
+  /** Σ of each bucket's accrual at that bucket's closed candle; null from the first unpriced or unstatable accrual on — never zero for one. */
+  usd: (bigint | null)[]
+  /** From the first bucket whose accrual could not be stated (held principal, but an index or a bucket-end time unknown) on. */
+  incomplete: boolean[]
+}
+
+/**
+ * A reserve's interest earned (supply) or paid (debt) per bucket, cumulative — pure
+ * and integer. Bucket b's accrual is what the principal held at the previous bucket's
+ * end gained by this bucket's end:
+ *
+ *   accrual_b = rayMul(scaled_{b−1}, I(t_b)) − rayMul(scaled_{b−1}, I(t_{b−1}))
+ *
+ * with I the reserve's normalizedIncome (supply, over the aToken's scaled sum) or
+ * normalizedDebt (debt, over the variable-debt token's), each compounded from the
+ * index state in force at that bucket end to the end block's timestamp — the
+ * reserve points' own balanceOf arithmetic, so it is scaled × ΔI / RAY in Aave's
+ * half-up rounding and, for a principal held unchanged, the cumulative equals the
+ * balance's growth exactly. APPROXIMATION: the principal of bucket b−1's end is taken
+ * as held through all of bucket b; a supply, withdrawal, borrow or repay inside a
+ * bucket starts (or stops) accruing only from the next bucket, so a bucket's accrual
+ * is off by the delta's interest over the part of the bucket it was (not) held.
+ *
+ * Cumulative from the first stated bucket (the coverage floor B0 or the grid's first
+ * bucket, whichever is later): the first stated bucket itself accrues nothing, since
+ * its predecessor's principal is not stated. A bucket whose principal was positive
+ * but whose accrual cannot be stated contributes nothing and marks the side
+ * incomplete from there on (raw is then a lower bound, usd null). A positive accrual
+ * `price` cannot value nulls usd from there on; a zero accrual needs no price.
+ */
+export function reserveInterestSide(
+  scaled: readonly (bigint | undefined)[] | undefined,
+  indices: readonly (ReserveIndexState | null | undefined)[] | undefined,
+  endTimes: readonly (number | null)[],
+  side: 'supply' | 'debt',
+  stated: (b: number) => boolean,
+  N: number,
+  price: (amount: bigint, b: number) => bigint | null,
+): InterestSide {
+  const out: InterestSide = { raw: new Array(N + 1), usd: new Array(N + 1), incomplete: new Array(N + 1) }
+  const indexAt = (idx: ReserveIndexState, t: number): bigint => side === 'supply'
+    ? normalizedIncome(idx.liquidityIndex, idx.liquidityRate, idx.tLast, BigInt(t))
+    : normalizedDebt(idx.variableBorrowIndex, idx.variableBorrowRate, idx.tLast, BigInt(t))
+  let raw = 0n
+  let usd: bigint | null = 0n
+  let incomplete = false
+  for (let b = 0; b <= N; b++) {
+    const s = b > 0 && stated(b) && stated(b - 1) ? (scaled?.[b - 1] ?? 0n) : 0n
+    if (s > 0n) {
+      const i0 = indices?.[b - 1], i1 = indices?.[b], t0 = endTimes[b - 1], t1 = endTimes[b]
+      const accrual = i0 && i1 && t0 != null && t1 != null ? rayMul(s, indexAt(i1, t1)) - rayMul(s, indexAt(i0, t0)) : null
+      // An index never decreases; a negative difference is an unstatable pair of states.
+      if (accrual == null || accrual < 0n) { incomplete = true; usd = null } else if (accrual > 0n) {
+        raw += accrual
+        if (usd != null) { const v = price(accrual, b); usd = v == null ? null : usd + v }
+      }
+    }
+    out.raw[b] = raw
+    out.usd[b] = usd
+    out.incomplete[b] = incomplete
+  }
+  return out
+}
+
 export interface MmHistoryParts {
   reserveMap: MmReserveMap
   /** Per token contract per bucket (sumScaledByContract over loadScaledHistoryByHolder). */
@@ -772,14 +877,32 @@ export interface MmHistoryReservePoint {
   borrowedUsd: bigint | null
   /** Supplying is not collateralising: false while nothing is supplied; null when no observer had seen the flag by the bucket end. */
   collateral: boolean | null
+  /** Cumulative raw interest on the supply / debt side through this bucket (reserveInterestSide). */
+  interestEarned: bigint
+  interestPaid: bigint
+  /** Their USD, each bucket's accrual at that bucket's candle; null once an accrual was unpriced or unstatable. */
+  interestEarnedUsd: bigint | null
+  interestPaidUsd: bigint | null
+  /** Some accrual on either side could not be stated by here: the raw figures are lower bounds. */
+  interestIncomplete: boolean
 }
-export interface MmHistoryReserve {
+export interface MmHistoryInterest {
+  interestEarned: bigint
+  interestPaid: bigint
+  interestEarnedUsd: bigint | null
+  interestPaidUsd: bigint | null
+  interestIncomplete: boolean
+}
+export interface MmHistoryReserve extends MmHistoryInterest {
   /** The reserve's underlying registry asset. */
   assetId: number
   reserveAddress: string
   aTokenAssetId: number | null
   /** Only the buckets at whose end something was supplied or owed, ascending. */
   points: MmHistoryReservePoint[]
+  // The MmHistoryInterest fields here are the cumulative at the GRID's last bucket —
+  // interest a bucket accrued after the reserve's last held point (the bucket it was
+  // closed in) is in them, and bucket selection never trims them.
 }
 export interface MmHistoryMarketPoint {
   b: number
@@ -794,6 +917,11 @@ export interface MmHistoryMarketPoint {
   eModeCategoryId: number | null
   /** Unclaimed incentives listed under this market, per reward asset, summed over the account's holders; never in the USD sums above. */
   unclaimedRewards: MmHistoryReward[]
+  /** Cumulative interest earned / paid through this bucket over the reserves whose figure is priced and stated; null before the coverage floor. */
+  interestEarnedUsd: bigint | null
+  interestPaidUsd: bigint | null
+  /** Reserve sides (earned or paid) left out of those sums: unpriced or unstatable (their USD is null). Not in `unpriced`, which counts held legs. */
+  interestUnpriced: number
 }
 export interface MmHistoryReward {
   rewardAssetId: number
@@ -811,6 +939,10 @@ export interface MmHistoryMarket {
   /** Buckets where a reserve was held, the market's observation shows collateral or debt, or incentives were unclaimed. */
   points: MmHistoryMarketPoint[]
   reserves: MmHistoryReserve[]
+  /** The market points' interest figures at the grid's last bucket (never trimmed by bucket selection). */
+  interestEarnedUsd: bigint | null
+  interestPaidUsd: bigint | null
+  interestUnpriced: number
 }
 export interface MoneyMarketHistory {
   /** B0: reserve amounts exist only from here; null without a published anchor. */
@@ -835,6 +967,8 @@ const newestExposure = (r: MmHistoryReserve) => ({ exposureUsd: reserveExposureU
  * counted in its bucket's `unpriced`, never valued at zero. A held reserve whose
  * amount cannot be stated at a bucket (its index update is unresolved) has no point
  * there and is counted too. Before the coverage floor every reserve figure is null.
+ * Interest earned/paid (reserveInterestSide) is accumulated here on the full grid, so
+ * the cumulative figures survive selectMoneyMarketBuckets.
  */
 export function assembleMoneyMarketHistory(parts: MmHistoryParts, pricer: BucketPricer, bk: Pick<Bucketing, 'N' | 'endHeight'>): MoneyMarketHistory {
   const N = bk.N
@@ -842,13 +976,19 @@ export function assembleMoneyMarketHistory(parts: MmHistoryParts, pricer: Bucket
   const stated = (b: number) => b0 > 0 && bk.endHeight(b) >= b0
   const want = (key: string) => !parts.markets || parts.markets.has(key)
 
-  interface MarketAcc { key: string; pool: string; supplied: (bigint | null)[]; borrowed: (bigint | null)[]; unpriced: number[]; held: boolean[]; reserves: MmHistoryReserve[] }
+  interface MarketAcc {
+    key: string; pool: string; supplied: (bigint | null)[]; borrowed: (bigint | null)[]; unpriced: number[]; held: boolean[]; reserves: MmHistoryReserve[]
+    earnedUsd: (bigint | null)[]; paidUsd: (bigint | null)[]; interestUnpriced: number[]
+  }
   const markets = new Map<string, MarketAcc>()
   const marketFor = (key: string, pool: string): MarketAcc => {
     let m = markets.get(pool)
     if (!m) {
-      m = { key, pool, supplied: new Array(N + 1).fill(null), borrowed: new Array(N + 1).fill(null), unpriced: new Array(N + 1).fill(0), held: new Array(N + 1).fill(false), reserves: [] }
-      for (let b = 0; b <= N; b++) if (stated(b)) { m.supplied[b] = 0n; m.borrowed[b] = 0n }
+      m = {
+        key, pool, supplied: new Array(N + 1).fill(null), borrowed: new Array(N + 1).fill(null), unpriced: new Array(N + 1).fill(0), held: new Array(N + 1).fill(false), reserves: [],
+        earnedUsd: new Array(N + 1).fill(null), paidUsd: new Array(N + 1).fill(null), interestUnpriced: new Array(N + 1).fill(0),
+      }
+      for (let b = 0; b <= N; b++) if (stated(b)) { m.supplied[b] = 0n; m.borrowed[b] = 0n; m.earnedUsd[b] = 0n; m.paidUsd[b] = 0n }
       markets.set(pool, m)
     }
     return m
@@ -864,6 +1004,14 @@ export function assembleMoneyMarketHistory(parts: MmHistoryParts, pricer: Bucket
     const idxSeries = parts.indices.get(reserveKey(r.poolProxy, r.assetAddress))
     const flags = parts.collateral.get(reserveKey(r.poolProxy, r.assetAddress))
     const assetId = assetIdFromMmAddress(r.assetAddress)
+    // Interest on the FULL grid, before any bucket selection (reserveInterestSide).
+    const price = (amount: bigint, b: number) => (assetId == null ? null : pricer.usd(assetId, amount, b))
+    const earned = reserveInterestSide(aSeries, idxSeries, parts.endTimes, 'supply', stated, N, price)
+    const paid = reserveInterestSide(dSeries, idxSeries, parts.endTimes, 'debt', stated, N, price)
+    const interestAt = (b: number): MmHistoryInterest => ({
+      interestEarned: earned.raw[b], interestPaid: paid.raw[b], interestEarnedUsd: earned.usd[b], interestPaidUsd: paid.usd[b],
+      interestIncomplete: earned.incomplete[b] || paid.incomplete[b],
+    })
     const points: MmHistoryReservePoint[] = []
     for (let b = 0; b <= N; b++) {
       if (!stated(b)) continue
@@ -886,10 +1034,16 @@ export function assembleMoneyMarketHistory(parts: MmHistoryParts, pricer: Bucket
         suppliedUsd: supplied > 0n ? suppliedUsd : 0n,
         borrowedUsd: borrowed > 0n ? borrowedUsd : 0n,
         collateral: supplied > 0n ? (flags?.[b] ?? null) : false,
+        ...interestAt(b),
       })
     }
     if (points.length && assetId != null) {
-      m.reserves.push({ assetId, reserveAddress: r.assetAddress, aTokenAssetId: UNDERLYING_TO_ATOKEN_ID[assetId] ?? null, points })
+      m.reserves.push({ assetId, reserveAddress: r.assetAddress, aTokenAssetId: UNDERLYING_TO_ATOKEN_ID[assetId] ?? null, points, ...interestAt(N) })
+      for (let b = 0; b <= N; b++) {
+        if (!stated(b)) continue
+        if (earned.usd[b] == null) m.interestUnpriced[b]++; else m.earnedUsd[b]! += earned.usd[b]!
+        if (paid.usd[b] == null) m.interestUnpriced[b]++; else m.paidUsd[b]! += paid.usd[b]!
+      }
     }
   }
 
@@ -956,11 +1110,15 @@ export function assembleMoneyMarketHistory(parts: MmHistoryParts, pricer: Bucket
         observation: o ?? null,
         eModeCategoryId: emode?.[b] ?? null,
         unclaimedRewards,
+        interestEarnedUsd: m.earnedUsd[b], interestPaidUsd: m.paidUsd[b], interestUnpriced: m.interestUnpriced[b],
       })
     }
     if (!points.length) continue
     m.reserves.sort((x, y) => compareReserveExposure(newestExposure(x), newestExposure(y)))
-    out.push({ marketKey: m.key, poolAddress: m.pool, stakingBacked: mmMarketStakingBacked(m.key), points, reserves: m.reserves })
+    out.push({
+      marketKey: m.key, poolAddress: m.pool, stakingBacked: mmMarketStakingBacked(m.key), points, reserves: m.reserves,
+      interestEarnedUsd: m.earnedUsd[N], interestPaidUsd: m.paidUsd[N], interestUnpriced: m.interestUnpriced[N],
+    })
   }
   out.sort((x, y) => mmMarketCompare(x.marketKey, y.marketKey))
   return { reserveHistoryFrom: b0 > 0 ? { blockHeight: b0 } : null, points: totals, markets: out }
@@ -972,11 +1130,31 @@ export function selectMoneyMarketBuckets(history: MoneyMarketHistory, keep: read
   const markets = history.markets
     .map(m => ({
       ...m,
-      points: m.points.filter(p => kept.has(p.b)),
+      points: foldLowestHealthFactor(m.points, kept),
       reserves: m.reserves.map(r => ({ ...r, points: r.points.filter(p => kept.has(p.b)) })).filter(r => r.points.length > 0),
     }))
     .filter(m => m.points.length > 0)
   return { ...history, points: history.points.filter(p => kept.has(p.b)), markets }
+}
+
+/**
+ * The kept market points, each carrying the lowest health factor of every point
+ * since the previous kept one (a published day folds its finer buckets), so a dip
+ * inside a dropped bucket still shows on the bucket that publishes it. Pure.
+ */
+function foldLowestHealthFactor(points: MmHistoryMarketPoint[], kept: ReadonlySet<number>): MmHistoryMarketPoint[] {
+  const out: MmHistoryMarketPoint[] = []
+  let low: { hf: string; block: number } | null = null
+  for (const p of points) {
+    const o = p.observation
+    if (o?.lowestHealthFactor != null && /^\d+$/.test(o.lowestHealthFactor) && (low == null || BigInt(o.lowestHealthFactor) < BigInt(low.hf))) {
+      low = { hf: o.lowestHealthFactor, block: o.lowestAtBlock ?? o.block }
+    }
+    if (!kept.has(p.b)) continue
+    out.push(o && low ? { ...p, observation: { ...o, lowestHealthFactor: low.hf, lowestAtBlock: low.block } } : p)
+    low = null
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------

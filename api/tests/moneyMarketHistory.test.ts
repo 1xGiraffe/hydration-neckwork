@@ -5,7 +5,7 @@ import type { BucketPricer } from '../src/services/lpHistory.ts'
 import {
   CARRY_LOOKBACK_BLOCKS, assembleMoneyMarketHistory, chooseObservationHolders, loadCollateralFlagHistory, loadCurrentCollateralFlags, loadCurrentEmode,
   loadEmodeHistory, loadObservationHistory, loadReserveIndexHistory, loadScaledHistoryByHolder, mmEthAccountForm,
-  mmHistoryStart, mmMarketCompare, reserveAmountsAt, reserveKey, selectMoneyMarketBuckets, sumScaledByContract,
+  mmHistoryStart, mmMarketCompare, reserveAmountsAt, reserveInterestSide, reserveKey, selectMoneyMarketBuckets, sumScaledByContract,
   type MmHistoryParts, type MmObservation, type ReserveIndexState,
 } from '../src/services/moneyMarketHistory.ts'
 import { heightAtOrBeforeExact, type BlockClock } from '../src/services/blockClock.ts'
@@ -505,5 +505,124 @@ describe('reserve indices on a canonical grid', () => {
     await loadReserveIndexHistory(client as never, [{ pool: CORE, reserve: DOT }], bk, [{ pool: CORE, reserve: DOT }, { pool: CORE, reserve: R2 }])
     const fold = client.seen.find(s => tagged('mm:reserve-indices')(s.query))!
     expect(fold.params.reserves).toEqual([DOT])
+  })
+})
+
+// Interest earned/paid: bucket b accrues what the principal held at b−1's end gained
+// by b's end (rayMul(scaled, I(t_b)) − rayMul(scaled, I(t_{b−1}))), cumulative from the
+// first stated bucket, on the full grid so bucket selection cannot lose any of it.
+describe('reserveInterestSide', () => {
+  const at = (liquidityIndex: bigint, tLast: bigint, over: Partial<ReserveIndexState> = {}): ReserveIndexState =>
+    ({ liquidityIndex, variableBorrowIndex: RAY, liquidityRate: 0n, variableBorrowRate: 0n, tLast, block: 1, initPhase: false, ...over })
+  const always = () => true
+  const oneDollar = (amount: bigint) => amount // 1 raw unit = 1 scaled-USD unit
+  const times = [100, 200, 300, 400]
+
+  it('accrues nothing on a constant index', () => {
+    const side = reserveInterestSide([5n * E12, 5n * E12, 5n * E12, 5n * E12], times.map(() => at(RAY, 0n)), times, 'supply', always, 3, oneDollar)
+    expect(side.raw).toEqual([0n, 0n, 0n, 0n])
+    expect(side.usd).toEqual([0n, 0n, 0n, 0n])
+    expect(side.incomplete).toEqual([false, false, false, false])
+  })
+
+  it('is exact bigint on known index growth, in Aave\'s half-up rounding, telescoping for a held principal', () => {
+    const idx = [at(RAY, 100n), at((RAY * 11n) / 10n, 200n), at((RAY * 121n) / 100n, 300n)]
+    const side = reserveInterestSide([E12, E12, E12], idx, times, 'supply', always, 2, oneDollar)
+    expect(side.raw).toEqual([0n, E12 / 10n, (E12 * 21n) / 100n])
+    expect(side.usd).toEqual([0n, E12 / 10n, (E12 * 21n) / 100n])
+    // 3 × 1.5 = 4.5 rounds half-up to 5: accrual 2, not 1.5 truncated.
+    expect(reserveInterestSide([3n, 3n], [at(RAY, 100n), at((RAY * 3n) / 2n, 200n)], times, 'supply', always, 1, oneDollar).raw[1]).toBe(2n)
+  })
+
+  it('compounds the index from each bucket\'s own state to the bucket-end time (debt side on normalizedDebt)', () => {
+    const rate = 50_000_000_000_000_000_000_000_000n // 5% APR in ray
+    const idx = [at(RAY, 50n, { variableBorrowRate: rate }), at(RAY, 50n, { variableBorrowRate: rate })]
+    const side = reserveInterestSide([7n * E12, 7n * E12], idx, [100, 100 + 86_400], 'debt', always, 1, oneDollar)
+    const expected = rayMul(7n * E12, normalizedDebt(RAY, rate, 50n, BigInt(100 + 86_400))) - rayMul(7n * E12, normalizedDebt(RAY, rate, 50n, 100n))
+    expect(expected).toBeGreaterThan(0n)
+    expect(side.raw[1]).toBe(expected)
+    // The supply side of the same reserve reads the liquidity index (flat here).
+    expect(reserveInterestSide([7n * E12, 7n * E12], idx, [100, 100 + 86_400], 'supply', always, 1, oneDollar).raw[1]).toBe(0n)
+  })
+
+  it('accrues the previous bucket\'s principal: an intra-bucket supply starts accruing the next bucket', () => {
+    const idx = [at(RAY, 100n), at(2n * RAY, 200n), at(3n * RAY, 300n)]
+    const side = reserveInterestSide([10n, 30n, 30n], idx, times, 'supply', always, 2, oneDollar)
+    expect(side.raw).toEqual([0n, 10n, 40n])
+  })
+
+  it('starts at the first stated bucket: its predecessor\'s principal is not stated', () => {
+    const idx = [at(RAY, 100n), at(2n * RAY, 200n), at(3n * RAY, 300n)]
+    const side = reserveInterestSide([undefined, 10n, 10n], idx, times, 'supply', b => b >= 1, 2, oneDollar)
+    expect(side.raw).toEqual([0n, 0n, 10n])
+    expect(side.usd).toEqual([0n, 0n, 10n])
+  })
+
+  it('an unstatable accrual contributes nothing and marks the side incomplete — usd null — from there on', () => {
+    const idx = [at(RAY, 100n), null, at(2n * RAY, 300n), at(3n * RAY, 400n)]
+    const side = reserveInterestSide([10n, 10n, 10n, 10n], idx, times, 'supply', always, 3, oneDollar)
+    // b1 and b2 each need the missing state; b3 accrues again (a lower bound).
+    expect(side.raw).toEqual([0n, 0n, 0n, 10n])
+    expect(side.usd).toEqual([0n, null, null, null])
+    expect(side.incomplete).toEqual([false, true, true, true])
+    // A missing bucket-end time is the same gap; nothing held means nothing to state.
+    expect(reserveInterestSide([10n, 10n], [at(RAY, 0n), at(RAY, 0n)], [100, null], 'supply', always, 1, oneDollar).incomplete[1]).toBe(true)
+    expect(reserveInterestSide([0n, 0n], [at(RAY, 0n), null], times, 'supply', always, 1, oneDollar).incomplete[1]).toBe(false)
+  })
+
+  it('an unpriced accrual nulls usd from there on, never zero, while raw keeps counting', () => {
+    const idx = [at(RAY, 100n), at(2n * RAY, 200n), at(3n * RAY, 300n)]
+    const side = reserveInterestSide([10n, 10n, 10n], idx, times, 'supply', always, 2, (amount, b) => (b === 1 ? null : amount))
+    expect(side.raw).toEqual([0n, 10n, 20n])
+    expect(side.usd).toEqual([0n, null, null])
+    expect(side.incomplete).toEqual([false, false, false])
+  })
+})
+
+describe('assembleMoneyMarketHistory interest', () => {
+  // stHDX ($1) grows 10% a bucket; USDT (unpriced) grows too.
+  const grow = (liquidityIndex: bigint, tLast: bigint): ReserveIndexState => ({ liquidityIndex, variableBorrowIndex: RAY, liquidityRate: 0n, variableBorrowRate: 0n, tLast, block: 1, initPhase: false })
+  const growing = [grow(RAY, 0n), grow(RAY, 100n), grow((RAY * 11n) / 10n, 200n), grow((RAY * 12n) / 10n, 300n)]
+  const interestParts = () => parts({
+    indices: new Map<string, (ReserveIndexState | null | undefined)[]>([
+      [reserveKey(CORE, DOT), [flat(1), flat(1), null, flat(200_250)]],
+      [reserveKey(CORE, USDT), growing],
+      [reserveKey(GIGA, STHDX), growing],
+    ]),
+    endTimes: [0, 100, 200, 300],
+  })
+
+  it('accumulates on the full grid, so a selected bucket carries every earlier bucket\'s accrual', () => {
+    const full = assembleMoneyMarketHistory(interestParts(), pricer, bk)
+    const giga = full.markets.find(m => m.marketKey === 'gigahdx')!
+    expect(giga.reserves[0].points.map(p => p.interestEarned)).toEqual([0n, E12 / 10n, (E12 * 2n) / 10n])
+    expect(giga.points.map(p => p.interestEarnedUsd)).toEqual([0n, USD / 10n, (USD * 2n) / 10n])
+    const kept = selectMoneyMarketBuckets(full, [1, 3])
+    const keptGiga = kept.markets.find(m => m.marketKey === 'gigahdx')!
+    expect(keptGiga.reserves[0].points.map(p => [p.b, p.interestEarned, p.interestEarnedUsd])).toEqual([[1, 0n, 0n], [3, (E12 * 2n) / 10n, (USD * 2n) / 10n]])
+    expect(keptGiga.points.at(-1)).toMatchObject({ b: 3, interestEarnedUsd: (USD * 2n) / 10n, interestPaidUsd: 0n, interestUnpriced: 0 })
+    expect(keptGiga).toMatchObject({ interestEarnedUsd: (USD * 2n) / 10n, interestPaidUsd: 0n, interestUnpriced: 0 })
+  })
+
+  it('keeps a closed reserve\'s last accrual in its grid-end totals', () => {
+    // Supplied through bucket 2, withdrawn by bucket 3's end: bucket 3 still accrued on bucket 2's principal.
+    const h = assembleMoneyMarketHistory(parts({ ...interestParts(), scaled: new Map([['a670', [undefined, E12, E12, 0n]]]) }), pricer, bk)
+    const r = h.markets.find(m => m.marketKey === 'gigahdx')!.reserves[0]
+    expect(r.points.map(p => p.b)).toEqual([1, 2])
+    expect(r.points.at(-1)!.interestEarned).toBe(E12 / 10n)
+    expect(r).toMatchObject({ interestEarned: (E12 * 2n) / 10n, interestEarnedUsd: (USD * 2n) / 10n, interestIncomplete: false })
+  })
+
+  it('leaves unpriced and unstatable reserves out of the market sums, counted apart from `unpriced`', () => {
+    const h = assembleMoneyMarketHistory(interestParts(), pricer, bk)
+    const core = h.markets.find(m => m.marketKey === 'core')!
+    const usdt = core.reserves.find(r => r.assetId === 10)!
+    expect(usdt.points.map(p => [p.interestEarned, p.interestEarnedUsd])).toEqual([[0n, 0n], [(E12 * 5n) / 10n, null], [E12, null]])
+    const dot = core.reserves.find(r => r.assetId === 5)!
+    // DOT's index is unstated at bucket 2: both sides incomplete from there, USD null.
+    expect(dot.points.map(p => [p.b, p.interestIncomplete, p.interestEarnedUsd, p.interestPaidUsd])).toEqual([[1, false, 0n, 0n], [3, true, null, null]])
+    // Bucket 2: USDT earned unpriced + DOT's two incomplete sides; `unpriced` keeps counting held legs only.
+    expect(core.points[2]).toMatchObject({ interestEarnedUsd: 0n, interestPaidUsd: 0n, interestUnpriced: 3, unpriced: 3 })
+    expect(core.points[0]).toMatchObject({ interestEarnedUsd: null, interestPaidUsd: null, interestUnpriced: 0 })
   })
 })
