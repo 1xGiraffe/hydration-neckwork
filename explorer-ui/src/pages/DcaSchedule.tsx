@@ -56,7 +56,10 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
   const active = data?.status === 'active'
   const { data: stats } = useStats(!!active)
   const now = useNow()
-  useDocumentTitle(`DCA #${scheduleId}`)
+  // The document title says "schedule" where the page heading says only "DCA":
+  // a tab or a shared link stands alone, and the SEO head (api/src/routes/seo.ts)
+  // names this page the same way so the two never disagree.
+  useDocumentTitle(`DCA schedule #${scheduleId}`)
 
   // An open-ended order has no budget to be a fraction of, so its progress and
   // its end are projected from the wallet still funding it.

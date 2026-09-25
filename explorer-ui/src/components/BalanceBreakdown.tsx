@@ -34,6 +34,7 @@ const SOURCE_META: Record<string, SourceMeta> = {
   sufficiency: { label: 'ED cover', color: 'var(--text-low)' },
   dca: { label: 'DCA budget', color: 'var(--bd-clear)' },
   otc: { label: 'OTC order', color: 'var(--bd-clear)' },
+  intent: { label: 'ICE intent', color: 'var(--bd-clear)' },
   preimage: { label: 'preimage deposit', color: 'var(--bd-clear)' },
   identity: { label: 'identity deposit', color: 'var(--bd-clear)' },
   proxy: { label: 'proxy deposit', color: 'var(--bd-clear)' },
@@ -75,18 +76,29 @@ function relWhen(until: string | undefined): string {
 // One row of the unlock schedule: reason · how much · lock-duration description.
 interface ScheduleRow { key: string; cause: string; amount: bigint; desc?: string; color: string; toneOverride?: string; gradient?: boolean }
 
-// Static reserve-side rows collapse into as few slices as possible: DCA and OTC
-// orders stay their own (product) slices; every deposit-shaped rest — identity,
-// proxy, multisig, referenda, preimages, plus whatever stays unattributed —
-// merges into ONE "until cleared" slice named by its parts.
+// The order reserves — capital an open order holds until it clears — and how
+// each one clears: a DCA schedule is cancelled, an OTC order is pulled, an ICE
+// intent (a limit order or a DCA intent; the reserve is one id for both) is
+// filled. Named by the product, never by the reserve id, and kept to a few
+// words so the note survives the phone-width legend without clipping.
+const ORDER_RESERVES = new Map<string, { label: string; detail: string }>([
+  ['dca', { label: 'DCA', detail: 'until cancelled' }],
+  ['otc', { label: 'OTC', detail: 'until pulled' }],
+  ['intent', { label: 'ICE intent', detail: 'until filled' }],
+])
+
+// Static reserve-side rows collapse into as few slices as possible: DCA, OTC
+// and ICE orders stay their own (product) slices; every deposit-shaped rest —
+// identity, proxy, multisig, referenda, preimages, plus whatever stays
+// unattributed — merges into ONE "until cleared" slice named by its parts.
 function mergeStatics(statics: BalanceLockComponent[]): { label: string; color: string; amount: bigint; detail: string }[] {
-  const orders = statics.filter(c => c.source === 'dca' || c.source === 'otc')
-  const deposits = statics.filter(c => c.source !== 'dca' && c.source !== 'otc')
+  const orders = statics.filter(c => ORDER_RESERVES.has(c.source))
+  const deposits = statics.filter(c => !ORDER_RESERVES.has(c.source))
   const out = orders.map(c => ({
-    label: c.source === 'otc' ? 'OTC' : 'DCA',
+    label: ORDER_RESERVES.get(c.source)!.label,
     color: sourceMeta(c.source).color,
     amount: big(c.amount),
-    detail: c.source === 'otc' ? 'until pulled' : 'until cancelled',
+    detail: ORDER_RESERVES.get(c.source)!.detail,
   }))
   if (deposits.length) {
     out.push({
