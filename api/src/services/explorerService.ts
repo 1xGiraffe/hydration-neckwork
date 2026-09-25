@@ -2150,7 +2150,7 @@ export async function applyEventTimeUsd<T extends object>(rows: T[], pick: (r: T
 // the replaced entry carried (its own feed's, else the underlying's) — a derived
 // price has no 24h series of its own.
 const PRICE_USD_DECIMALS = 12
-function scaledFromPriceInfo(p: PriceInfo | undefined): bigint | null {
+export function scaledFromPriceInfo(p: PriceInfo | undefined): bigint | null {
   if (!p) return null
   try {
     const scaled = scaledUsd(p.priceRaw ?? String(p.price))
