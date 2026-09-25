@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
 import { normalizeAddress, hydrationAddress, polkadotAddress } from '../services/addressIdentity.ts'
-import { assetDescriptor, knownExplorerAsset, allExplorerAssets } from '../services/explorerAssets.ts'
+import { displayDescriptor, knownExplorerAsset, allExplorerAssets } from '../services/explorerAssets.ts'
 import { getTag as getSystemTag, allTags } from '../services/tagService.ts'
 import { publicTagById, publicListSummary } from '../services/userListService.ts'
 import { referendumTitleFor, isGenericReferendumTitle, highestReferendumIndex } from '../services/referendumTitleService.ts'
@@ -253,7 +253,7 @@ export function pageMeta(path: string): PageMeta {
       return allExplorerAssets().length > 0 ? missing(assetCrumbs) : unknownYet(assetCrumbs)
     }
     {
-      const asset = assetDescriptor(id)
+      const asset = displayDescriptor(id)
       const holders = head === 'holders'
       return {
         ...(holders ? { canonicalPath: `/asset/${id}` } : {}),
@@ -330,7 +330,8 @@ export function pageMeta(path: string): PageMeta {
 
   if (head === 'pool' && a) {
     const id = Number(a)
-    const name = Number.isFinite(id) && knownExplorerAsset(id) ? assetDescriptor(id).name : null
+    // The page titles itself by the share token's display symbol (GDOT for pool 690).
+    const name = Number.isFinite(id) && knownExplorerAsset(id) ? displayDescriptor(id).symbol : null
     return {
       title: name ? `${name} pool` : 'Pool',
       description: name

@@ -3,11 +3,11 @@ import type { ReactNode } from 'react'
 import { F, Amt, Usd, AssetIcon, AddrPill, healthFactorDisplay } from '../ui'
 import { Link, paths } from '../../router'
 import { useMoneyMarketHistories, useMoneyMarketHistory, useYields } from '../../hooks/usePositions'
-import type { AccountRef, AssetRef, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMarketPosition, ReserveYield } from '../../types'
+import type { AccountRef, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMarketPosition, ReserveYield } from '../../types'
 import { YieldHover } from './YieldHover'
 import { yieldComponentRow, type YieldRow } from './yieldFormat'
 import { BorrowHistoryCharts } from './BorrowHistory'
-import { borrowCards, claimedIncentivesUsd, rawHeld, marketInterest, netApy, reserveBorrowPct, reserveInterest, reserveSupplyPct } from './borrowMath'
+import { borrowCards, claimedIncentivesUsd, rawHeld, marketInterest, netApy, reserveBorrowPct, reserveRows, reserveSupplyPct } from './borrowMath'
 import type { BorrowCardSpec, InterestTotals } from './borrowMath'
 
 // One holder's money-market footprint: the address its history is read by, the
@@ -279,33 +279,6 @@ function BorrowKpis({ mm, yields, yieldsLoading, hist }: { mm: MoneyMarketPositi
       </Stat>
     </div>
   )
-}
-
-interface ReserveRowModel {
-  asset: AssetRef
-  supplied: string
-  debt: string
-  suppliedUsd: number | null
-  debtUsd: number | null
-  collateral: boolean
-  interest: InterestTotals | null
-  /** Held only in the past: its interest remains, its balance is gone. */
-  closed: boolean
-}
-
-function reserveRows(spec: BorrowCardSpec, market: MoneyMarketHistoryMarket | undefined): ReserveRowModel[] {
-  const byAsset = new Map((market?.reserves ?? []).map(r => [r.asset.assetId, r]))
-  const rows: ReserveRowModel[] = (spec.current?.reserves ?? []).filter(r => rawHeld(r.supplied) || rawHeld(r.debt)).map(r => ({
-    asset: { assetId: r.assetId, iconAssetId: r.iconAssetId, iconAssetIds: r.iconAssetIds, symbol: r.symbol, name: null, decimals: r.decimals, parachainId: r.parachainId ?? null, origin: r.origin },
-    supplied: r.supplied, debt: r.debt, suppliedUsd: r.suppliedUsd, debtUsd: r.debtUsd, collateral: r.collateral,
-    interest: reserveInterest(byAsset.get(r.assetId)), closed: false,
-  }))
-  const seen = new Set(rows.map(r => r.asset.assetId))
-  for (const h of market?.reserves ?? []) {
-    if (seen.has(h.asset.assetId)) continue
-    rows.push({ asset: h.asset, supplied: '0', debt: '0', suppliedUsd: null, debtUsd: null, collateral: false, interest: reserveInterest(h), closed: true })
-  }
-  return rows
 }
 
 function supplyRows(y: ReserveYield): YieldRow[] {

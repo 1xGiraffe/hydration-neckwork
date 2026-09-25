@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached, cachedSwr } from './cache.ts'
-import { assetDescriptor } from './explorerAssets.ts'
+import { displayDescriptor } from './explorerAssets.ts'
 import { loadHourlyFlowPricer, type HourlyFlowPricer } from './eventTimeCloses.ts'
 import type { AssetRef } from './explorerService.ts'
 import { tagged } from './queryTag.ts'
@@ -200,12 +200,12 @@ export async function buildLiquidityRewardsClaimed(accountsIn: readonly string[]
   return {
     rows: agg.rows.map(r => ({
       pallet: r.pallet,
-      poolAsset: r.poolAssetId == null ? null : assetDescriptor(r.poolAssetId),
+      poolAsset: r.poolAssetId == null ? null : displayDescriptor(r.poolAssetId),
       ...(() => {
         const pair = r.pallet === 'xyk' && r.poolAssetId != null ? xykPairs.get(r.poolAssetId) : undefined
-        return pair ? { poolPair: [assetDescriptor(pair[0]), assetDescriptor(pair[1])] as [AssetRef, AssetRef] } : {}
+        return pair ? { poolPair: [displayDescriptor(pair[0]), displayDescriptor(pair[1])] as [AssetRef, AssetRef] } : {}
       })(),
-      rewardAsset: assetDescriptor(r.rewardAssetId),
+      rewardAsset: displayDescriptor(r.rewardAssetId),
       amount: r.amount.toString(),
       valueUsd: r.valueUsd == null ? null : Number(renderUsd(r.valueUsd)),
       unpricedClaims: r.unpricedClaims,

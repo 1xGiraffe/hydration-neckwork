@@ -1,7 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cachedSwr } from './cache.ts'
 import { bindCteSql, boundAccountSql, ensurePrices, getAtokenSuppliedDailyHistory, getMoneyMarketReserves, mmMarkets, type AssetRef, type PriceInfo } from './explorerService.ts'
-import { assetDescriptor } from './explorerAssets.ts'
+import { displayDescriptor } from './explorerAssets.ts'
 import { usdOfRaw } from './assetValue.ts'
 import { HOLLAR_ASSET_ID } from './revenueStreams.ts'
 import { OMNIPOOL_ACCOUNT } from './valuation.ts'
@@ -23,7 +23,7 @@ const HSM_ACCOUNT = '0x6d6f646c70792f68736d6f64000000000000000000000000000000000
 const PEG_WINDOW_DAYS = 30
 const CHART_WINDOW_DAYS = 60
 
-const asset = (id: number): AssetRef => assetDescriptor(id)
+const asset = (id: number): AssetRef => displayDescriptor(id)
 
 function safeJsonObj(s: string | null | undefined): Record<string, unknown> {
   if (!s) return {}

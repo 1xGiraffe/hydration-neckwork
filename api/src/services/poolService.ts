@@ -8,7 +8,7 @@ import {
 } from './explorerService.ts'
 import { v3PoolHistory, v3PoolLiquidity, type V3History, type V3HistoryPool, type V3PoolLiquidity } from './uniswapV3History.ts'
 import { ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, sqrtPriceX96ToPrice, tickToPrice, v3ManagerPositions, v3PoolStats, v3PricePoints, v3VaultStats, type V3Pool, type V3Registry } from './uniswapV3Service.ts'
-import { H2O_ASSET_ID, assetDescriptor, currentPriceOf, priceAssetId } from './explorerAssets.ts'
+import { H2O_ASSET_ID, assetDescriptor, currentPriceOf, displayDescriptor, priceAssetId } from './explorerAssets.ts'
 import { usdAtPrice } from './assetValue.ts'
 import { xykReserveAssets } from './lpMath.ts'
 import { OMNIPOOL_ACCOUNT } from './valuation.ts'
@@ -54,7 +54,7 @@ export function initPoolService(c: ClickHouseClient): void {
 // XYK trade fee is a runtime constant: Permill 0.3% (3/1000).
 const XYK_FEE_PERMILL = 3000
 
-const asset = (id: number): AssetRef => assetDescriptor(id)
+const asset = (id: number): AssetRef => displayDescriptor(id)
 
 // currentPriceOf: own entry first, else the alias (stopped at a share token — a
 // share's price is its own derived entry or none).
@@ -1090,7 +1090,7 @@ function buildStableswapHistory(
       const px = dayCloses?.get(buckets[i])
       return px != null ? a * px : null
     })
-    return { asset: assetDescriptor(id), amounts, usd }
+    return { asset: asset(id), amounts, usd }
   })
 
   const tvlUsd = buckets.map((_, i) => {
@@ -1106,7 +1106,7 @@ function buildStableswapHistory(
   // Only drifting pegs make a chart — constant 1/1 legs are noise.
   const pegSeries = [...pegPoints.entries()]
     .filter(([, points]) => [...points.values()].some(v => v !== 1))
-    .map(([id, points]) => ({ asset: assetDescriptor(id), prices: carrySeries(buckets, points) }))
+    .map(([id, points]) => ({ asset: asset(id), prices: carrySeries(buckets, points) }))
 
   return {
     buckets,
@@ -1188,7 +1188,7 @@ async function xykDetail(
       const px = dayCloses?.get(buckets[i])
       return px != null ? a * px : null
     })
-    return { asset: assetDescriptor(id), amounts, usd }
+    return { asset: asset(id), amounts, usd }
   })
   const tvlSeries = buckets.map((_, i) => {
     let sum = 0
@@ -1361,7 +1361,7 @@ export async function getOmnipoolDetail(grain: HistoryGrain = DAILY_GRAIN, win?:
     })
 
     const { ids: topIds, restIds } = selectCompositionSeries(usdByAsset, buckets.length, 14, [0])
-    const composition = topIds.map(id => ({ asset: assetDescriptor(id), usd: usdByAsset.get(id)! }))
+    const composition = topIds.map(id => ({ asset: asset(id), usd: usdByAsset.get(id)! }))
     if (restIds.length) {
       const other: (number | null)[] = buckets.map((_, i) => {
         let sum: number | null = null

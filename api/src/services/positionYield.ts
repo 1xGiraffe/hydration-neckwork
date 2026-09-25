@@ -3,7 +3,7 @@ import { RAY, SECONDS_PER_YEAR as AAVE_SECONDS_PER_YEAR, rayMul } from './aaveMa
 import { cachedSwr } from './cache.ts'
 import { externalTokenApys } from './externalTokenApy.ts'
 import {
-  MM_MARKETS, assetDecimalsOrNull, assetDescriptor, assetIdFromMmAddress, currentPriceOf, isStableswapShareToken,
+  MM_MARKETS, assetDecimalsOrNull, assetDescriptor, assetIdFromMmAddress, currentPriceOf, displayDescriptor, isStableswapShareToken,
   type ExplorerAsset,
 } from './explorerAssets.ts'
 import { ensurePrices, loadXykCurrentState, scaledFromPriceInfo, type PriceInfo, type XykCurrentPool } from './explorerService.ts'
@@ -219,7 +219,7 @@ export function assemblePoolYield(parts: Part[], farms: FarmYield[] = []): PoolY
   for (const p of ordered) total = total == null || p.apr == null ? null : total + p.apr
   const components = ordered.map(p => {
     const c: YieldComponent = { kind: p.kind, aprPct: pctNumber(p.apr) }
-    if (p.assetId != null) c.asset = assetDescriptor(p.assetId)
+    if (p.assetId != null) c.asset = displayDescriptor(p.assetId)
     if (p.source) c.source = p.source
     if ((p.kind === 'mm-supply' || p.kind === 'token-yield') && p.weight != null) c.weightPct = pctNumber(divHalfUp(p.weight * 100n * PCT_UNIT, WEIGHT_UNIT)) as number
     return c
@@ -580,7 +580,7 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
   const moneyMarket: ExplorerYields['moneyMarket'] = {}
   for (const r of reserves) {
     if (r.underlyingId == null) continue
-    const incentives = (list: MmReserve['supplyIncentives']) => list.map(i => ({ rewardAsset: assetDescriptor(i.rewardAssetId), aprPct: pctNumber(i.apr) }))
+    const incentives = (list: MmReserve['supplyIncentives']) => list.map(i => ({ rewardAsset: displayDescriptor(i.rewardAssetId), aprPct: pctNumber(i.apr) }))
     const entry = {
       supplyApyPct: pctNumber(r.supplyApy),
       borrowApyPct: pctNumber(r.borrowApy),
@@ -617,7 +617,7 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
     const farms = (farmsByAsset.get(id) ?? []).map(e => ({ rewardAssetId: e.farm.rewardAssetId, apr: pctFromFarmScaled(e.aprScaled), g: e.farm.globalFarmId, y: e.farm.yieldFarmId }))
     omnipool[String(id)] = assemblePoolYield(
       [{ kind: 'omnipool-fee', apr: pctFromPerc(omniFee.get(id)) }, ...underlyingParts(id, WEIGHT_UNIT, ctx), ...farmPartsByReward(farms)],
-      farms.map(f => ({ globalFarmId: f.g, yieldFarmId: f.y, rewardAsset: assetDescriptor(f.rewardAssetId), aprPct: pctNumber(f.apr) })),
+      farms.map(f => ({ globalFarmId: f.g, yieldFarmId: f.y, rewardAsset: displayDescriptor(f.rewardAssetId), aprPct: pctNumber(f.apr) })),
     )
   }
 
@@ -668,7 +668,7 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
         { kind: 'xyk-fee', apr: feeAprPctScaled(feeByLp.get(lp) ?? 0n, xykTvlUsd(st, price), WINDOW_DAYS['30d']) },
         ...farmPartsByReward(farms.map(f => ({ rewardAssetId: f.farm.rewardAssetId, apr: f.apr }))),
       ],
-      farms.map(f => ({ globalFarmId: f.farm.globalFarmId, yieldFarmId: f.farm.yieldFarmId, rewardAsset: assetDescriptor(f.farm.rewardAssetId), aprPct: pctNumber(f.apr) })),
+      farms.map(f => ({ globalFarmId: f.farm.globalFarmId, yieldFarmId: f.farm.yieldFarmId, rewardAsset: displayDescriptor(f.farm.rewardAssetId), aprPct: pctNumber(f.apr) })),
     )
   }
 
