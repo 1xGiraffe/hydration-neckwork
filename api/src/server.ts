@@ -66,6 +66,8 @@ import { initProxyMultisigService } from './services/proxyMultisigService.ts'
 import { initHdxService } from './services/hdxService.ts'
 import { initRevenueService } from './services/revenueService.ts'
 import { initHollarService } from './services/hollarService.ts'
+import { initPositionYield } from './services/positionYield.ts'
+import { initExternalTokenApy } from './services/externalTokenApy.ts'
 import { initIceService } from './services/iceService.ts'
 import { initPoolService } from './services/poolService.ts'
 import { initSecurityService } from './services/securityService.ts'
@@ -274,6 +276,9 @@ async function start() {
     initIceService(client)
     initPoolService(client)
     initSecurityService(client)
+    initPositionYield(client)
+    // Token APYs from the Hydration UI's sources, refreshed in the background.
+    initExternalTokenApy()
     initLiveHeadService(client)
     // The pending-head follower is always-on (feeds merge its rows whether or
     // not any SSE client is connected); it degrades to finalized-only silently
