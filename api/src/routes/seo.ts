@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
-import { accountRef, resolveDisplayAccountId } from '../services/explorerService.ts'
+import { accountRef, resolveDisplayAccountId, xcDestinationBySlug } from '../services/explorerService.ts'
 import { normalizeAddress, hydrationAddress, polkadotAddress } from '../services/addressIdentity.ts'
-import { displayDescriptor, knownExplorerAsset, allExplorerAssets } from '../services/explorerAssets.ts'
+import { displayDescriptor, knownExplorerAsset, allExplorerAssets, isStableswapShareToken } from '../services/explorerAssets.ts'
 import { getTag as getSystemTag, allTags } from '../services/tagService.ts'
 import { publicTagById, publicListSummary } from '../services/userListService.ts'
 import { referendumTitleFor, isGenericReferendumTitle, highestReferendumIndex } from '../services/referendumTitleService.ts'
@@ -175,7 +175,47 @@ export const UNBOUNDED_PREFIXES = new Set([
   'intent-place', 'intent-fill', 'intent-cancel', 'intent-expire', 'intent-dca-trade',
 ])
 
+// The product's name for each activity family, keyed by its URL slug, with what
+// that one row's page states. These are the words the explorer's own rows and
+// tab titles use (explorer-ui's SLUG_LABEL, LIQ_LABELS, BOND_LABELS and
+// intentLabel): a DCA, an OTC order and an ICE intent are written in capitals,
+// a swap intent is a limit order, and an OTC cancellation is a pull. A title
+// built by capitalising the slug spelled them "Dca", "Otc fill" and "Intent
+// place", which is a product no one would recognise. Block, extrinsic, event,
+// DCA and intent pages name themselves in their own branches.
+export const ACTIVITY_PAGES: Record<string, { label: string; about: string }> = {
+  swap: { label: 'Swap', about: 'the assets exchanged, the route it took, the price and the fee' },
+  transfer: { label: 'Transfer', about: 'the asset, the amount, the sender and the recipient' },
+  'cross-chain': { label: 'Cross-chain transfer', about: 'the asset and amount, the chain it came from or went to, and how it got there' },
+  'add-liquidity': { label: 'Add liquidity', about: 'the pool, the assets deposited and the shares received' },
+  'remove-liquidity': { label: 'Remove liquidity', about: 'the pool, the shares redeemed and the assets withdrawn' },
+  'create-pool': { label: 'Create pool', about: 'the pool created, its assets and its initial liquidity' },
+  'destroy-pool': { label: 'Destroy pool', about: 'the pool removed and the liquidity it returned' },
+  'claim-rewards': { label: 'Claim rewards', about: 'the rewards paid out, the position they came from and who received them' },
+  'claim-referral-rewards': { label: 'Claim referral rewards', about: 'the referral rewards paid out and who received them' },
+  'collect-fees': { label: 'Collect fees', about: 'the fees collected from a liquidity position and who received them' },
+  rebalance: { label: 'Rebalance vault', about: 'the vault rebalanced and the liquidity it moved' },
+  lend: { label: 'Lend', about: 'the money-market reserve supplied, the amount and the account' },
+  withdraw: { label: 'Withdraw', about: 'the money-market reserve withdrawn from, the amount and the account' },
+  borrow: { label: 'Borrow', about: 'the money-market reserve borrowed from, the amount and the account' },
+  repay: { label: 'Repay', about: 'the money-market debt repaid, the amount and the account' },
+  liquidate: { label: 'Liquidate', about: 'the position liquidated, the collateral taken, the debt covered and the liquidator' },
+  staking: { label: 'Staking', about: 'the staking action, the amount of HDX and the account' },
+  vote: { label: 'Vote', about: 'the referendum, the side, the conviction and the voter' },
+  'otc-place': { label: 'OTC place', about: 'the OTC order placed, its assets, amounts and price' },
+  'otc-pull': { label: 'OTC pull', about: 'the OTC order pulled and what it returned to its owner' },
+  'otc-fill': { label: 'OTC fill', about: 'the OTC order filled, the amounts exchanged and who filled it' },
+  'bond-issue': { label: 'Bond issue', about: 'the bond issued, the amount and the account' },
+  'bond-redeem': { label: 'Bond redeem', about: 'the bond redeemed, the amount and the account' },
+  'intent-place': { label: 'Limit order placed', about: 'the ICE intent placed, its assets, amounts and owner' },
+  'intent-fill': { label: 'Limit order filled', about: 'the ICE intent filled, the amounts settled and the solver that filled it' },
+  'intent-cancel': { label: 'Limit order cancelled', about: 'the ICE intent cancelled and what it returned to its owner' },
+  'intent-expire': { label: 'Limit order expired', about: 'the ICE intent that expired and what it returned to its owner' },
+  'intent-dca-trade': { label: 'DCA intent trade', about: 'one trade of a DCA intent: what it sold, what it bought and at what price' },
+}
+
 const CRUMB_HOME: [string, string] = ['Home', '/']
+const CRUMB_ACTIVITY: [string, string] = ['Activity', '/activity']
 
 // A page this recognises the shape of but cannot describe, because the index it
 // would have read has not loaded. Deliberately NOT marked notFound: "absent from
@@ -208,6 +248,27 @@ export function pageMeta(path: string): PageMeta {
     return { title: `Event ${a}`, description: `Hydration runtime event ${a}, with its decoded arguments and the extrinsic that emitted it.`, crawlerExcluded: true, crumbs: [CRUMB_HOME, ['Events', '/events']] }
   }
 
+  // A DCA is a SCHEDULE, not a single fill: /dca/<id> is the schedule's page,
+  // /dca/<height>-e<index> is one of its executions, and the extrinsic form
+  // /dca/<height>-<index> is the scheduling extrinsic, which the app resolves to
+  // the schedule it created. One word — "DCA 37917" — could not say which.
+  if (head === 'dca' && a) {
+    const crumbs: [string, string][] = [CRUMB_HOME, CRUMB_ACTIVITY]
+    if (/^\d+$/.test(a)) {
+      return { title: `DCA schedule #${a}`, description: `DCA schedule #${a} on Hydration — what it sells and buys, how often, its budget and progress, and every execution it has made.`, crawlerExcluded: true, crumbs }
+    }
+    if (/^\d+-e\d+$/.test(a)) {
+      return { title: `DCA execution ${a}`, description: `DCA execution ${a} on Hydration — one execution of a DCA schedule: what it sold, what it bought, at what price, and the schedule it belongs to.`, crawlerExcluded: true, crumbs }
+    }
+    return { title: `DCA ${a}`, description: `The DCA schedule Hydration extrinsic ${a} set up — what it sells and buys, how often, and its executions.`, crawlerExcluded: true, crumbs }
+  }
+  // An ICE intent's order page: a limit order or a DCA intent, addressed by its
+  // u128 id. Which of the two it is takes a ClickHouse read this route does not
+  // make, so the description names both.
+  if (head === 'intent' && a) {
+    return { title: `ICE intent ${a}`, description: `ICE intent ${a} on Hydration — a limit order or DCA intent: what it asked for, how much of that has filled, who placed it and how the solver settled it.`, crawlerExcluded: true, crumbs: [CRUMB_HOME, CRUMB_ACTIVITY] }
+  }
+
   if (head === 'account' && a) {
     const normalized = normalizeAddress(a)
     // Pure parsing, no index behind it, so this one is always knowable.
@@ -232,13 +293,38 @@ export function pageMeta(path: string): PageMeta {
     for (const [label, value] of [['Polkadot (SS58)', polkadot], ['Hydration (SS58)', hydration], ['Account ID', ref.accountId]] as [string, string][]) {
       if (value && value !== evm) forms.push([label, value])
     }
+    // A deployed contract's page is its source, ABI and calls before it is a
+    // wallet's, so its copy says what it is rather than listing a wallet's tabs.
+    const contract = ref.isContract === true
     return {
       title: name ? `${name} · ${short}` : short,
-      description: name
-        ? `${name} on Hydration (${shown}) — balances, liquidity, lending, trading history and governance votes.`
-        : `Hydration account ${shown} — balances, liquidity, lending, trading history and governance votes.`,
+      description: contract
+        ? `${name ?? 'EVM contract'} on Hydration (${shown}) — a deployed contract: its verified source, calls, events, balances and history.`
+        : name
+          ? `${name} on Hydration (${shown}) — balances, liquidity, lending, trading history and governance votes.`
+          : `Hydration account ${shown} — balances, liquidity, lending, trading history and governance votes.`,
       facts: [...(name ? [['Name', name] as [string, string]] : []), ...forms],
       crumbs: [CRUMB_HOME, ['Accounts', '/accounts']],
+    }
+  }
+
+  // /asset/xc/<slug> — a cross-chain swap destination, an asset Hydration never
+  // holds. The list is a constant in memory, so a slug it lacks is KNOWN to name
+  // nothing; a slug that is an alias (the symbol, the name) canonicalises to the
+  // platform key the app links by.
+  if (head === 'asset' && a === 'xc' && b) {
+    const xcCrumbs: [string, string][] = [CRUMB_HOME, ['Assets', '/assets']]
+    const dest = xcDestinationBySlug(b)
+    if (!dest) return missing(xcCrumbs)
+    // "Zcash (ZEC) on Zcash" is a stutter: the chain is named only where it
+    // adds something the asset's name did not already say.
+    const where = dest.name === dest.chainName ? '' : ` on ${dest.chainName}`
+    return {
+      title: `${dest.symbol} · cross-chain`,
+      description: `${dest.name} (${dest.symbol})${where} — a cross-chain swap destination reachable from Hydration: its reference price and the swaps that delivered it.`,
+      facts: [['Symbol', dest.symbol], ['Name', dest.name], ['Chain', dest.chainName]],
+      ...(b !== dest.platform ? { canonicalPath: `/asset/xc/${dest.platform}` } : {}),
+      crumbs: xcCrumbs,
     }
   }
 
@@ -329,15 +415,30 @@ export function pageMeta(path: string): PageMeta {
   }
 
   if (head === 'pool' && a) {
-    const id = Number(a)
-    // The page titles itself by the share token's display symbol (GDOT for pool 690).
-    const name = Number.isFinite(id) && knownExplorerAsset(id) ? displayDescriptor(id).symbol : null
+    const poolCrumbs: [string, string][] = [CRUMB_HOME, ['Liquidity', '/liquidity']]
+    // A concentrated-liquidity pool is addressed by its contract address, which
+    // the registry has no entry for; it gets the generic pool copy.
+    if (EVM_RE.test(a.toLowerCase())) {
+      return { title: 'Pool', description: 'A Hydration concentrated-liquidity pool — its reserves, volume, fees and providers.', crumbs: poolCrumbs }
+    }
+    // A stableswap pool or an XYK pair is addressed by its share token's id, and
+    // the page titles itself by that token's display symbol (GDOT for pool 690).
+    // An id the loaded registry lacks is no token at all, so no pool; a registry
+    // token that is not a pool share is not knowable from memory, so it keeps the
+    // generic copy rather than being called missing.
+    const id = /^\d+$/.test(a) ? Number(a) : NaN
+    if (!(Number.isFinite(id) && knownExplorerAsset(id))) {
+      return allExplorerAssets().length > 0 ? missing(poolCrumbs) : unknownYet(poolCrumbs)
+    }
+    const share = displayDescriptor(id)
+    // The on-chain name stays beside the product face (GDOT and 2-Pool-GDOT).
+    const named = share.name && share.name !== share.symbol ? `${share.symbol} (${share.name})` : share.symbol
+    const kind = isStableswapShareToken(id) ? 'a stableswap pool' : 'a liquidity pool'
     return {
-      title: name ? `${name} pool` : 'Pool',
-      description: name
-        ? `${name} on Hydration — liquidity, volume, fees and the providers behind them.`
-        : 'A Hydration liquidity pool — its reserves, volume, fees and providers.',
-      crumbs: [CRUMB_HOME, ['Liquidity', '/liquidity']],
+      title: `${share.symbol} pool`,
+      description: `${named}, ${kind} on Hydration — its reserves, volume, fees and the liquidity providers behind them.`,
+      facts: [['Pool', share.symbol], ...(share.name ? [['Name', share.name] as [string, string]] : []), ['Share token ID', String(id)]],
+      crumbs: poolCrumbs,
     }
   }
 
@@ -349,9 +450,14 @@ export function pageMeta(path: string): PageMeta {
     }
   }
 
+  // One activity row, named by its family's product word. Every slug in
+  // UNBOUNDED_PREFIXES that is not handled above has an entry (pinned by test);
+  // the capitalised slug is only the last resort for one that does not.
   if (head && UNBOUNDED_PREFIXES.has(head) && a) {
-    const label = head.replace(/-/g, ' ').replace(/^./, c => c.toUpperCase())
-    return { title: `${label} ${a}`, description: `${label} ${a} on Hydration — what moved, between whom, and what it cost.`, crawlerExcluded: true, crumbs: [CRUMB_HOME, ['Activity', '/activity']] }
+    const page = ACTIVITY_PAGES[head]
+    const label = page?.label ?? head.replace(/-/g, ' ').replace(/^./, c => c.toUpperCase())
+    const about = page?.about ?? 'what moved, between whom, and what it cost'
+    return { title: `${label} ${a}`, description: `${label} ${a} on Hydration — ${about}.`, crawlerExcluded: true, crumbs: [CRUMB_HOME, CRUMB_ACTIVITY] }
   }
 
   // An URL shape this does not recognise at all. Every recognised shape above

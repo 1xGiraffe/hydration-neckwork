@@ -17,6 +17,7 @@ import {
   mergeTranches,
   buildBindingTimeline,
   mergeTimelines,
+  RESERVE_ID_SOURCES,
   type TimelineSource,
 } from '../src/services/lockBreakdownService.ts'
 import { attachLockBreakdowns, type AddressBalance } from '../src/services/explorerService.ts'
@@ -32,6 +33,18 @@ describe('lock/reserve vec decoding', () => {
     expect(dca).toEqual([{ id: 'dcaorder', amount: 47568651674341244n }])
     const otc = decodeIdAmountVec(hexToU8a('0x046f74636f7264657200407a10f35a00000000000000000000'), 24)
     expect(otc).toEqual([{ id: 'otcorder', amount: 100000000000000n }])
+  })
+
+  it('maps every named reserve the order pallets take to its product source', () => {
+    // One Tokens.Reserves value holding the Intent pallet's reserve: id(8) +
+    // amount(16 LE), no reasons byte. `ICE_int#` shipped verbatim as a balance
+    // breakdown source until it was mapped, beside `dca` and `otc`.
+    const item = (id: string, amountLeHex: string) => Buffer.from(id, 'latin1').toString('hex') + amountLeHex
+    const vec = '0x04' + item('ICE_int#', '00e40b5402' + '00'.repeat(11))
+    const [reserve] = decodeIdAmountVec(hexToU8a(vec), 24)
+    expect(reserve).toEqual({ id: 'ICE_int#', amount: 10_000_000_000n })
+    expect(RESERVE_ID_SOURCES[reserve.id]).toBe('intent')
+    expect(RESERVE_ID_SOURCES).toEqual({ dcaorder: 'dca', otcorder: 'otc', 'ICE_int#': 'intent' })
   })
 
   it('decodes Balances.Locks entries (25-byte items, trailing reasons byte)', () => {

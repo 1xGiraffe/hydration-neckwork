@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
-import { pageMeta, renderHead, renderPage, renderBody, PUBLIC_URL } from '../src/routes/seo.ts'
+import { pageMeta, renderHead, renderPage, renderBody, PUBLIC_URL, UNBOUNDED_PREFIXES, ACTIVITY_PAGES } from '../src/routes/seo.ts'
 
 // The real shell this rewrites, not a stand-in: what matters is that the regex
 // finds the tags THIS file actually ships, so the test has to read it.
@@ -32,6 +32,66 @@ describe('pageMeta names the page', () => {
     for (const path of ['/', '/accounts', '/asset/5', '/tag/kraken', '/referendum/opengov/411', '/account/0xabc']) {
       expect(pageMeta(path).crawlerExcluded, path).toBeUndefined()
     }
+  })
+
+  it('names an activity row by the product word, never by its capitalised slug', () => {
+    // These shipped as "Dca 37917", "Dca 15027912-e35" and "Otc fill …" — a
+    // schedule, an execution and a fill, all spelled as no one spells them.
+    expect(pageMeta('/dca/37917').title).toBe('DCA schedule #37917')
+    expect(pageMeta('/dca/37917').description).toMatch(/^DCA schedule #37917 on Hydration — .*execution/)
+    expect(pageMeta('/dca/15027912-e35').title).toBe('DCA execution 15027912-e35')
+    expect(pageMeta('/dca/15027912-e35').description).toContain('one execution of a DCA schedule')
+    expect(pageMeta('/dca/15027912-35').title).toBe('DCA 15027912-35')
+    expect(pageMeta('/dca/15027912-35').description).toContain('extrinsic 15027912-35')
+    expect(pageMeta('/otc-fill/14940263-e14').title).toBe('OTC fill 14940263-e14')
+    expect(pageMeta('/otc-pull/1-e2').title).toBe('OTC pull 1-e2')
+    expect(pageMeta('/intent-place/1-e2').title).toBe('Limit order placed 1-e2')
+    expect(pageMeta('/intent-dca-trade/1-e2').title).toBe('DCA intent trade 1-e2')
+    expect(pageMeta('/cross-chain/1-e2').title).toBe('Cross-chain transfer 1-e2')
+    expect(pageMeta('/intent/340282366920938463463374607431768211456').title).toBe('ICE intent 340282366920938463463374607431768211456')
+    expect(pageMeta('/intent/1').description).toMatch(/limit order or DCA intent/)
+  })
+
+  it('has a product word for every activity slug, in the product’s own spelling', () => {
+    // A slug added to UNBOUNDED_PREFIXES without an entry here would fall back
+    // to the capitalised slug, which is how "Otc fill" shipped.
+    const selfNamed = new Set(['block', 'extrinsic', 'event', 'dca', 'intent'])
+    for (const slug of UNBOUNDED_PREFIXES) {
+      if (selfNamed.has(slug)) continue
+      expect(ACTIVITY_PAGES[slug], slug).toBeDefined()
+      const meta = pageMeta(`/${slug}/14940263-e14`)
+      expect(meta.crawlerExcluded, slug).toBe(true)
+      expect(meta.description, slug).toContain(`${ACTIVITY_PAGES[slug].label} 14940263-e14 on Hydration — `)
+      // HOLLAR, OTC and DCA are written in capitals; the hub asset is H2O, never
+      // its legacy name; an OTC cancellation is a pull.
+      for (const text of [meta.title, meta.description]) {
+        expect(text, slug).not.toMatch(/\bDca\b|\bOtc\b|\bIce\b|\bHollar\b|LRNA|OTC cancel/)
+      }
+    }
+  })
+
+  it('describes a cross-chain destination from the constant list, and calls an unknown one missing', () => {
+    const zec = pageMeta('/asset/xc/zec')
+    expect(zec.title).toBe('ZEC · cross-chain')
+    expect(zec.notFound).toBeUndefined()
+    // The chain is named only when the asset's name has not already said it.
+    expect(zec.description).toMatch(/^Zcash \(ZEC\) — /)
+    expect(pageMeta('/asset/xc/near').description).toMatch(/^Wrapped NEAR \(wNEAR\) on NEAR — /)
+    expect(zec.facts).toContainEqual(['Chain', 'Zcash'])
+    expect(zec.canonicalPath).toBeUndefined()
+    // An alias (the symbol) is the same page; its canonical is the platform key.
+    expect(pageMeta('/asset/xc/ZEC').canonicalPath).toBe('/asset/xc/zec')
+    // The list is a constant, so absence from it is known, not "not loaded yet".
+    expect(pageMeta('/asset/xc/doge').notFound).toBe(true)
+  })
+
+  it('names a pool by its share token, and says nothing about one an unloaded registry lacks', () => {
+    // A v3 pool is addressed by its contract address — no registry entry, generic copy.
+    expect(pageMeta(`/pool/0x${'ab'.repeat(20)}`).title).toBe('Pool')
+    expect(pageMeta(`/pool/0x${'ab'.repeat(20)}`).notFound).toBeUndefined()
+    // The registry is empty in a unit test: not a verdict on any id.
+    expect(pageMeta('/pool/999999').notFound).toBeUndefined()
+    expect(pageMeta('/pool/999999').title).toBe('Hydration Explorer')
   })
 
   it('refuses to name a page whose id names nothing, and keeps it out of the index', () => {
