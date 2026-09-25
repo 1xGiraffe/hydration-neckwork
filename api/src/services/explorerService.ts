@@ -1,5 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { settledAmount } from './aaveMath.ts'
+import { onBehalfActorsFor } from './onBehalfActors.ts'
 import { usdOfRaw } from './assetValue.ts'
 import { blockClock, heightAtOrBeforeExact, timeUpperBoundOfHeight, type BlockClock } from './blockClock.ts'
 import { chDateTime, chTimestamp } from './clickhouseTime.ts'
@@ -17,7 +18,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, assetDecimalsOrNull, allExplorerAssets, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT } from './tagService.ts'
@@ -87,9 +88,14 @@ export interface AccountRef {
   contractName?: string               // verified source's contract name — the pill's label, like an identity display
 }
 
+// The explorer's AssetRef: the registry entry under its DISPLAY face — a pool share
+// wrapped by a product-named money-market aToken (2-Pool-GDOT under GDOT) is named
+// as the Hydration app names it, on every surface this service builds
+// (explorerAssets.ts, displayDescriptor). Logic never keys on a symbol: a share is
+// isStableswapShareToken(id), a fold is displayAssetId(id).
 function asset(assetIdStr: string | number): AssetRef {
   const id = typeof assetIdStr === 'number' ? assetIdStr : parseInt(assetIdStr, 10)
-  return assetDescriptor(Number.isFinite(id) ? id : 0)
+  return displayDescriptor(Number.isFinite(id) ? id : 0)
 }
 
 // EVM-truncated AccountId32 → H160 (else null).
@@ -3672,7 +3678,7 @@ async function queryLockBreakdownsSafe(accountListSql: string): Promise<Map<numb
 // "Hydrated" pool while the shares stay what they are: unwrapped.
 export function stableswapLpPositions(balances: AddressBalance[]): LpPosition[] {
   return balances
-    .filter(b => b.total !== '0' && (SHARE_TOKEN_UNDERLYING_ID[b.asset.assetId] != null || /^\d+-Pool(-|$)/.test(b.asset.symbol)))
+    .filter(b => b.total !== '0' && (isStableswapShareToken(b.asset.assetId) || SHARE_TOKEN_UNDERLYING_ID[b.asset.assetId] != null || /^\d+-Pool(-|$)/.test(b.asset.symbol)))
     .map(b => {
       const w = shareWrapperOf(b.asset.assetId)
       return {
@@ -4811,14 +4817,16 @@ export async function buildMoneyMarketHistory(accounts: string[], window?: { fro
           unclaimedRewards: p.unclaimedRewards.map(r => ({ asset: asset(r.rewardAssetId), amount: r.amount.toString(), valueUsd: usd(r.valueUsd), settledAtBlock: r.settledAtBlock })),
           interestEarnedUsd: usd(p.interestEarnedUsd), interestPaidUsd: usd(p.interestPaidUsd), interestUnpriced: p.interestUnpriced,
         })),
-        reserves: m.reserves.map(r => ({
+        // Filed under the id the Borrow tab shows the reserve's current balance as
+        // (foldShareReserves' twin), so history and current row meet on one key.
+        reserves: foldShareHistoryReserves(m.reserves.map(r => ({
           asset: asset(r.assetId), aToken: r.aTokenAssetId == null ? null : asset(r.aTokenAssetId), reserveAddress: r.reserveAddress,
           points: r.points.map(p => ({
             i: indexOf.get(p.b)!, supplied: p.supplied.toString(), borrowed: p.borrowed.toString(),
             suppliedUsd: usd(p.suppliedUsd), borrowedUsd: usd(p.borrowedUsd), collateral: p.collateral, ...interest(p),
           })),
           interest: interest(r),
-        })),
+        }))),
         interestEarnedUsd: usd(m.interestEarnedUsd), interestPaidUsd: usd(m.interestPaidUsd), interestUnpriced: m.interestUnpriced,
         claimedIncentives: claimed.filter(c => c.marketKey === m.marketKey).map(c => ({
           asset: asset(c.rewardAssetId), amount: c.amount.toString(), valueUsd: usd(c.valueUsd), claims: c.claims, unpricedClaims: c.unpricedClaims,
@@ -5170,6 +5178,53 @@ export function foldShareReserves(reserves: MmReserve[]): MmReserve[] {
     }
   }
   return [...byId.values()].sort((a, b) => (b.suppliedUsd ?? b.debtUsd ?? 0) - (a.suppliedUsd ?? a.debtUsd ?? 0))
+}
+// The money-market HISTORY's twin of foldShareReserves, on the explorer wire shape:
+// a pool-share reserve's history is filed under the id the Borrow tab shows its
+// current balance as (2-Pool-GETH → GETH), with every point's raw amounts and
+// interest rescaled to that asset's decimals, so the tab matches a reserve's
+// history to its current row instead of listing the share as a second, "closed"
+// reserve. Two reserves folding onto one id merge point by point (`i` is the
+// bucket): raw sums, USD sums that stay null once either side is null, collateral
+// if either was, an incomplete flag if either is. DISPLAY only — the Data API's
+// money-market history keeps the reserve under its own registry id.
+export function foldShareHistoryReserves(reserves: MoneyMarketHistoryReserveView[]): MoneyMarketHistoryReserveView[] {
+  if (!reserves.some(r => displayAssetId(r.asset.assetId) !== r.asset.assetId)) return reserves
+  const usdSum = (a: number | null, b: number | null) => (a == null || b == null ? null : a + b)
+  const rawSum = (a: string, b: string) => (BigInt(a || '0') + BigInt(b || '0')).toString()
+  const byId = new Map<number, MoneyMarketHistoryReserveView>()
+  for (const r of reserves) {
+    const did = displayAssetId(r.asset.assetId)
+    const d = did === r.asset.assetId ? null : asset(did)
+    const scale = (raw: string) => (d ? rescaleRaw(raw, r.asset.decimals, d.decimals) : raw)
+    const scaledInterest = (x: MoneyMarketHistoryInterestView) => ({ interestEarned: scale(x.interestEarned), interestPaid: scale(x.interestPaid) })
+    const folded: MoneyMarketHistoryReserveView = d
+      ? {
+          ...r, asset: d,
+          points: r.points.map(p => ({ ...p, supplied: scale(p.supplied), borrowed: scale(p.borrowed), ...scaledInterest(p) })),
+          interest: { ...r.interest, ...scaledInterest(r.interest) },
+        }
+      : r
+    const cur = byId.get(did)
+    if (!cur) { byId.set(did, folded); continue }
+    const mergeInterest = (a: MoneyMarketHistoryInterestView, b: MoneyMarketHistoryInterestView): MoneyMarketHistoryInterestView => ({
+      interestEarned: rawSum(a.interestEarned, b.interestEarned), interestPaid: rawSum(a.interestPaid, b.interestPaid),
+      interestEarnedUsd: usdSum(a.interestEarnedUsd, b.interestEarnedUsd), interestPaidUsd: usdSum(a.interestPaidUsd, b.interestPaidUsd),
+      interestIncomplete: a.interestIncomplete || b.interestIncomplete,
+    })
+    const points = new Map(cur.points.map(p => [p.i, p]))
+    for (const p of folded.points) {
+      const q = points.get(p.i)
+      points.set(p.i, q ? {
+        i: p.i, supplied: rawSum(q.supplied, p.supplied), borrowed: rawSum(q.borrowed, p.borrowed),
+        suppliedUsd: usdSum(q.suppliedUsd, p.suppliedUsd), borrowedUsd: usdSum(q.borrowedUsd, p.borrowedUsd),
+        collateral: q.collateral || p.collateral ? true : q.collateral == null || p.collateral == null ? null : false,
+        ...mergeInterest(q, p),
+      } : p)
+    }
+    byId.set(did, { ...cur, aToken: cur.aToken ?? folded.aToken, points: [...points.values()].sort((a, b) => a.i - b.i), interest: mergeInterest(cur.interest, folded.interest) })
+  }
+  return [...byId.values()]
 }
 // Reserve set, per-account balances, and totals come from the indexed anchor table
 // and event deltas. The shared reserve configuration is cached and reused by the
@@ -8874,8 +8929,10 @@ async function getWeeklyPriceSamples(): Promise<Map<number, number[]>> {
 export async function getAssets(): Promise<AssetListItem[]> {
   return cachedSwr('explorer:assets-list', 30_000, 5 * 60_000, async () => {
     const [prices, totals, holderCounts, samples] = await Promise.all([ensurePrices(), getAssetTotals(), getAssetHolderCounts(), getWeeklyPriceSamples()])
+    // Pool shares stay out of the directory whatever they display as (a Hydrated
+    // pool's share goes by its wrapper's name, which the wrapper already lists).
     const listed = allExplorerAssets()
-      .filter(a => !a.symbol.includes('-Pool') && !a.symbol.startsWith('Asset') && a.symbol.trim() !== '')
+      .filter(a => !isStableswapShareToken(a.assetId) && !a.symbol.includes('-Pool') && !a.symbol.startsWith('Asset') && a.symbol.trim() !== '')
       .map(a => {
         // Derivatives (bonds, aTokens) carry no price feed of their own — fall back
         // to the asset they're priced through (a bond redeems 1:1 for its underlying).
@@ -9732,7 +9789,7 @@ export function foldRevenueBreakdown(
     streams.push({
       stream: total.stream,
       usd: total.usd,
-      assets: shown.map(r => ({ asset: assetDescriptor(r.asset_id), usd: r.usd })),
+      assets: shown.map(r => ({ asset: asset(r.asset_id), usd: r.usd })),
       otherUsd: tail.reduce((s, r) => s + r.usd, 0),
       otherCount: tail.length,
     })
@@ -10456,7 +10513,7 @@ export async function getTradeDetail(height: number, index: number, routeEvent?:
     const netWho = String(net.args.who ?? '')
     // A proxied or multisig dispatch moves the funds of the account it ran AS, so the
     // detail names the same actor the feed does rather than the signatory.
-    const onBehalf = (await onBehalfActorsFor([[height, index]])).get(`${height}:${index}`)
+    const onBehalf = (await onBehalfActorsFor(client, [[height, index]])).get(`${height}:${index}`)
     const actorId = onBehalf || ext?.effective_signer || ext?.signer || (ACCOUNT_RE.test(netWho) && netWho !== ROUTER_PALLET_ACCT ? netWho : null)
     const detail: TradeDetail = {
       blockHeight: height, timestamp: ext?.ts ?? net.ts, extrinsicIndex: index, eventIndex: net.idx,
@@ -10617,85 +10674,14 @@ export async function getTradeDetailByEvent(height: number, eventIndex: number):
   })
 }
 
-// The account a dispatch ran AS, when it was not the signatory's own.
-//
-// A swap dispatched through a proxy or a multisig moves the funds of the account the
-// call ran as, never those of the signatory who submitted it. The innermost proxy
-// wins: Multisig.as_multi → Proxy.proxy(real=X) executes its batch with X's origin,
-// so X is whose HUSDT left. Call addresses form a path tree ('root', '0', '0.0', …),
-// so depth is the dot count and 'root' is shallowest.
-//
-// With no proxy, the multisig account itself is the actor. With neither, there is no
-// on-behalf account and the signer stands.
-export interface OnBehalfCandidateSet {
-  proxies?: { callAddress: string; account: string }[]
-  multisig?: string
-}
-export function onBehalfActor(candidates: OnBehalfCandidateSet): string | undefined {
-  const depth = (callAddress: string) => callAddress === 'root' ? 0 : callAddress.split('.').length
-  const innermost = (candidates.proxies ?? [])
-    .filter(p => p.account)
-    .sort((l, r) => depth(r.callAddress) - depth(l.callAddress))[0]
-  return innermost?.account || candidates.multisig || undefined
-}
-
-// Map (block_height, extrinsic_index) → the account each extrinsic dispatched AS.
-// Both reads are purpose-built on-behalf models rather than the raw call args, which
-// would need a JSON path per nesting depth. Neither is keyed on (block, extrinsic),
-// so each is a full scan — of 4,679 and 4,884 rows respectively, because only
-// proxied/multisig dispatches land in them at all, against the ~2M swap extrinsics
-// that do not.
-async function onBehalfActorsFor(pairs: [number, number | null][]): Promise<Map<string, string>> {
-  const out = new Map<string, string>()
-  const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
-  if (!keys.length) return out
-  const tuples = keys.map(k => { const [h, i] = k.split(':'); return `(${h},${i})` }).join(',')
-  const [proxyRes, msRes] = await Promise.all([
-    client.query({
-      query: `SELECT block_height, extrinsic_index, call_address, real_account
-              FROM price_data.proxy_call_activity
-              WHERE (block_height, extrinsic_index) IN (${tuples})`,
-      format: 'JSONEachRow',
-    }),
-    client.query({
-      // The column is selected raw and assumeNotNull applied only in the predicate:
-      // aliasing the wrapped expression back to `extrinsic_index` makes the later
-      // reference resolve to the alias rather than to the column. The predicate's own
-      // tuple keys are non-null by construction, so only real rows match.
-      query: `SELECT block_height, extrinsic_index, multisig
-              FROM price_data.multisig_event_activity
-              WHERE (block_height, assumeNotNull(extrinsic_index)) IN (${tuples})
-                AND event_name = 'Multisig.MultisigExecuted' AND multisig != ''`,
-      format: 'JSONEachRow',
-    }),
-  ])
-  const candidates = new Map<string, OnBehalfCandidateSet>()
-  for (const r of await proxyRes.json<{ block_height: number; extrinsic_index: number; call_address: string; real_account: string }>()) {
-    const key = `${r.block_height}:${r.extrinsic_index}`
-    const at = candidates.get(key) ?? {}
-    ;(at.proxies ??= []).push({ callAddress: r.call_address, account: r.real_account })
-    candidates.set(key, at)
-  }
-  for (const r of await msRes.json<{ block_height: number; extrinsic_index: number; multisig: string }>()) {
-    const key = `${r.block_height}:${r.extrinsic_index}`
-    const at = candidates.get(key) ?? {}
-    at.multisig ??= r.multisig
-    candidates.set(key, at)
-  }
-  for (const [key, set] of candidates) {
-    const actor = onBehalfActor(set)
-    if (actor) out.set(key, actor)
-  }
-  return out
-}
-
 // Map (block_height, extrinsic_index) → the account to attribute its pallet-internal
 // events (trades) to: the account the extrinsic dispatched AS when it ran through a
-// proxy or a multisig, else its signer. Attributing to the signatory credited a
+// proxy or a multisig (`onBehalfActorsFor`, the rule the account-first swap
+// projection keys on too), else its signer. Attributing to the signatory credited a
 // multisig member with the proxied account's $79.7k swap while the account whose
 // funds moved showed nothing.
 async function actorsFor(pairs: [number, number | null][]): Promise<Map<string, string>> {
-  const [signers, onBehalf] = await Promise.all([signersFor(pairs), onBehalfActorsFor(pairs)])
+  const [signers, onBehalf] = await Promise.all([signersFor(pairs), onBehalfActorsFor(client, pairs)])
   for (const [key, actor] of onBehalf) signers.set(key, actor)
   return signers
 }
@@ -17443,7 +17429,7 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
 // Transfers); liquidity owns share-asset trade legs (routing into/out of a pool
 // share inside an add/remove is mechanics, not a trade); module-account rows
 // are protocol internals, not user activity.
-const isShareAssetId = (id: number) => displayAssetId(id) !== id || asset(id).symbol.includes('-Pool')
+const isShareAssetId = (id: number) => isStableswapShareToken(id) || displayAssetId(id) !== id || asset(id).symbol.includes('-Pool')
 function dropShareRoutedTrades<T extends { blockHeight: number; extrinsicIndex: number | null; assetIn: AssetRef | null; assetOut: AssetRef | null }>(trades: T[], liquidityExtrinsics: Set<string>): T[] {
   return trades.filter(t => !(t.extrinsicIndex != null && liquidityExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)
     && ((t.assetIn && isShareAssetId(t.assetIn.assetId)) || (t.assetOut && isShareAssetId(t.assetOut.assetId)))))
@@ -23563,10 +23549,14 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       if (rep.extrinsic_index != null) tradeExt.add(`${rep.block_height}:${rep.extrinsic_index}`)
       if (rep.extrinsic_index != null && liqExt.has(`${rep.block_height}:${rep.extrinsic_index}`)) continue
       if (!wantTrades) continue
-      // A signer-less row — a hook swap, or one of an unsigned extrinsic (ICE.submit_solution)
-      // — was keyed to this account BECAUSE the Broadcast event named it the swapper
-      // (accountSwapDestinationRows), so the account column is its actor.
-      const who = rep.signer || rep.account
+      // The account column IS the row's actor (accountSwapDestinationRows): the signatory
+      // of an ordinary signed swap, the account a proxied or multisig dispatch ran AS, or
+      // the Broadcast swapper of a hook swap and of an unsigned extrinsic's
+      // (ICE.submit_solution). The signer column stays the signatory, who for an
+      // on-behalf dispatch paid the fee but whose funds did not move — so naming it here
+      // would credit a proxy signer with the trade the extrinsic page attributes to the
+      // proxied account.
+      const who = rep.account
       const aOut = asset(rep.asset_out)
       const row: ActivityRow = {
         type: 'trade', blockHeight: rep.block_height, timestamp: rep.ts, eventIndex: rep.event_index, extrinsicIndex: rep.extrinsic_index,
@@ -26309,7 +26299,7 @@ function totalAssetLiquidations(days: AssetLiquidationDay[]): AssetLiquidationTo
 export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
   return cached(`explorer:asset:${assetId}`, 30000, async () => {
     const prices = await ensurePrices()
-    const a = assetDescriptor(assetId)
+    const a = asset(assetId)
     const p = prices.get(assetId)
     const type = explorerAssetType(a)
 
@@ -29778,7 +29768,7 @@ function poolSearchResult(p: import('./poolService.ts').PoolListEntry): SearchRe
     tvlUsd: p.tvlUsd,
     // A stableswap's identity is its share token; an XYK pair or a v3 pool shows its
     // largest leg. The Omnipool hit deliberately carries no asset — no single icon is it.
-    asset: p.kind === 'stableswap' && p.poolId != null ? assetDescriptor(p.poolId) : p.kind === 'xyk' || p.kind === 'uniswapv3' ? p.composition[0]?.asset : undefined,
+    asset: p.kind === 'stableswap' && p.poolId != null ? asset(p.poolId) : p.kind === 'xyk' || p.kind === 'uniswapv3' ? p.composition[0]?.asset : undefined,
   }
 }
 

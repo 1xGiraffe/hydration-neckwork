@@ -1,4 +1,4 @@
-import type { MmReserve, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMarketHistoryReserve, MoneyMarketPosition, ReserveYield } from '../../types'
+import type { AssetRef, MmReserve, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMarketHistoryReserve, MoneyMarketPosition, ReserveYield } from '../../types'
 import { sumPct } from './yieldFormat'
 
 // Pure arithmetic behind the Borrow tab — rates, health factors and history
@@ -217,4 +217,44 @@ export function reserveInterest(reserve: MoneyMarketHistoryReserve | undefined):
   if (!reserve) return null
   const t = reserve.interest
   return { earnedUsd: t.interestEarnedUsd, paidUsd: t.interestPaidUsd, earnedRaw: t.interestEarned, paidRaw: t.interestPaid, incomplete: t.interestIncomplete, unpriced: 0 }
+}
+
+export interface ReserveRowModel {
+  asset: AssetRef
+  supplied: string
+  debt: string
+  suppliedUsd: number | null
+  debtUsd: number | null
+  collateral: boolean
+  interest: InterestTotals | null
+  /** Held only in the past: its interest remains, its balance is gone. */
+  closed: boolean
+}
+
+// A current row names a supplied reserve by the aToken held (aDOT) and a debt-only
+// one by the asset owed (DOT), while the history files a reserve under its
+// underlying and carries the aToken beside it — so a history reserve answers to
+// both ids, and a reserve is "closed" only when no current row claimed it.
+export function reserveRows(spec: BorrowCardSpec, market: MoneyMarketHistoryMarket | undefined): ReserveRowModel[] {
+  type HistoryReserve = MoneyMarketHistoryMarket['reserves'][number]
+  const byAsset = new Map<number, HistoryReserve>()
+  for (const h of market?.reserves ?? []) {
+    byAsset.set(h.asset.assetId, h)
+    if (h.aToken) byAsset.set(h.aToken.assetId, h)
+  }
+  const claimed = new Set<HistoryReserve>()
+  const rows: ReserveRowModel[] = (spec.current?.reserves ?? []).filter(r => rawHeld(r.supplied) || rawHeld(r.debt)).map(r => {
+    const h = byAsset.get(r.assetId)
+    if (h) claimed.add(h)
+    return {
+      asset: { assetId: r.assetId, iconAssetId: r.iconAssetId, iconAssetIds: r.iconAssetIds, symbol: r.symbol, name: null, decimals: r.decimals, parachainId: r.parachainId ?? null, origin: r.origin },
+      supplied: r.supplied, debt: r.debt, suppliedUsd: r.suppliedUsd, debtUsd: r.debtUsd, collateral: r.collateral,
+      interest: reserveInterest(h), closed: false,
+    }
+  })
+  for (const h of market?.reserves ?? []) {
+    if (claimed.has(h)) continue
+    rows.push({ asset: h.asset, supplied: '0', debt: '0', suppliedUsd: null, debtUsd: null, collateral: false, interest: reserveInterest(h), closed: true })
+  }
+  return rows
 }

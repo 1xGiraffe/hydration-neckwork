@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
-import { assetDescriptor } from '../services/explorerAssets.ts'
+import { assetDescriptor, displayDescriptor } from '../services/explorerAssets.ts'
 import { avgBlockMsSql, clampBlockMs, NOMINAL_PARA_BLOCK_MS } from '../services/blockTime.ts'
 import {
   accountRef, activityRowMatchesAction, activityTypeMatchesFamily, assetIdFromMmAddress, ensurePrices,
@@ -1083,7 +1083,7 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       return { title, body, path: `/extrinsic/${p.row.blockHeight}-${p.row.extrinsicIndex}` }
     }
     case 'price': {
-      const symbol = assetDescriptor(p.assetId).symbol
+      const symbol = displayDescriptor(p.assetId).symbol
       return {
         title: [textPart(`${symbol} ${p.direction} ${compactUsd(p.threshold)}`)],
         body: [[textPart('Now'), usdPart(p.value)]],
@@ -1092,8 +1092,8 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
     }
     case 'dca-start': {
       const row = p.row
-      const inSym = assetDescriptor(row.assetIn).symbol
-      const outSym = assetDescriptor(row.assetOut).symbol
+      const inSym = displayDescriptor(row.assetIn).symbol
+      const outSym = displayDescriptor(row.assetOut).symbol
       const title: RenderPart[] = [textPart(`${row.intentId ? 'DCA intent' : 'DCA'} started ${inSym} → ${outSym}`)]
       if (row.who) title.push(textPart('by'), accountPart(renderAccount(accountRef(row.who), viewerTag)))
       // The notification states the PLAN: what each trade moves, how often, and

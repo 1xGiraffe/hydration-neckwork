@@ -186,6 +186,7 @@ async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<voi
   }
   inheritATokenOrigins()
   await injectBonds(client)
+  buildDisplayFaces()
   if (!refreshTimer) {
     refreshTimer = setInterval(() => {
       loadExplorerAssets(client).catch(err => console.error('[ExplorerAssets] refresh failed:', err))
@@ -560,12 +561,77 @@ export interface ShareWrapper { aTokenId: number; marketKey: string }
 export const SHARE_WRAPPER: Record<number, ShareWrapper> = {}
 export function shareWrapperOf(shareId: number): (ShareWrapper & { named: boolean }) | undefined {
   const w = SHARE_WRAPPER[shareId]
-  return w ? { ...w, named: SHARE_TOKEN_UNDERLYING_ID[shareId] === w.aTokenId } : undefined
+  return w ? { ...w, named: SHARE_DISPLAY_FACE[shareId] === w.aTokenId } : undefined
 }
 /** Test seam: pair a share with its wrapper the way a registry load would. */
 export function registerShareWrapper(shareId: number, wrapper: ShareWrapper | null): void {
   if (wrapper) SHARE_WRAPPER[shareId] = wrapper
   else delete SHARE_WRAPPER[shareId]
+  refreshDisplayFace(shareId)
+}
+
+// ─── Display face ─────────────────────────────────────────────────────────────
+// The ONE display-name rule for pool shares: a stableswap share whose money-market
+// wrapper is a NAMED PRODUCT shows under the wrapper's face — its symbol and its
+// artwork — on every reader-facing explorer surface, while keeping its own id,
+// decimals and amounts. That is the Hydration app's naming: the app lists the
+// "Hydrated" pool as HUSDT, GDOT, GETH, HEURC, GSOL… and never shows the
+// 2-Pool-… share the aToken is minted over, so a reader who supplied "GDOT" finds
+// the same word on the Borrow tab (the reserve IS the share), on the Liquidity
+// tab, on every activity row that moves the share (a money-market supply, an
+// add-liquidity, a trade routed through it) and in the MCP renderer.
+//
+// A wrapper carries a product name when its registry symbol is not the aToken
+// default — `a` + the share's symbol: HUSDT over 2-Pool-HUSDT and GDOT over
+// 2-Pool-GDOT are products, a3-Pool over 3-Pool and a2-Pool-PRIME over
+// 2-Pool-PRIME are not, and those shares keep their own name. Both ends must be
+// registry rows; a placeholder never names anything. Read at registry load from
+// the reserve map (SHARE_WRAPPER), so a Hydrated pool opened tomorrow is named
+// with no code change.
+//
+// The face changes the NAME only. The share's on-chain name stays in `name`
+// (2-Pool-GDOT), so an asset or pool page still states which registry entry it
+// is, and `assetDescriptor` still answers the registry's own symbol for the
+// public and Data APIs, whose contracts are frozen. Folding a HOLDING into the
+// wrapper's row (displayAssetId / SHARE_TOKEN_UNDERLYING_ID, which is also the
+// historical price proxy) is a separate, hand-kept rule; this one names, it
+// never merges or prices.
+export const SHARE_DISPLAY_FACE: Record<number, number> = {}
+const displayFaces = new Map<number, ExplorerAsset>()
+/** Whether an aToken's symbol names a product rather than restating its reserve (`a<reserve>`). */
+export function isProductWrapperSymbol(wrapperSymbol: string, reserveSymbol: string): boolean {
+  return wrapperSymbol.trim().toLowerCase() !== `a${reserveSymbol.trim()}`.toLowerCase()
+}
+function refreshDisplayFace(shareId: number): void {
+  delete SHARE_DISPLAY_FACE[shareId]
+  displayFaces.delete(shareId)
+  const w = SHARE_WRAPPER[shareId]
+  const share = w && cache.get(shareId)
+  const wrapper = w && cache.get(w.aTokenId)
+  if (!share || !wrapper || !isProductWrapperSymbol(wrapper.symbol, share.symbol)) return
+  SHARE_DISPLAY_FACE[shareId] = wrapper.assetId
+  // Own id, decimals and origin; the wrapper's symbol and artwork (both icon
+  // fields, so the share draws exactly as the wrapper does); the on-chain name kept.
+  const { iconAssetIds: _own, ...own } = share
+  displayFaces.set(shareId, {
+    ...own,
+    symbol: wrapper.symbol,
+    name: share.name ?? share.symbol,
+    iconAssetId: wrapper.iconAssetId,
+    ...(wrapper.iconAssetIds ? { iconAssetIds: wrapper.iconAssetIds } : {}),
+  })
+}
+function buildDisplayFaces(): void {
+  for (const id of new Set([...Object.keys(SHARE_DISPLAY_FACE), ...Object.keys(SHARE_WRAPPER)].map(Number))) refreshDisplayFace(id)
+}
+/**
+ * The descriptor a reader-facing explorer surface shows for `assetId`: the registry
+ * entry, or for a pool share with a product-named wrapper its display face (above).
+ * The explorer's AssetRef builder and every explorer-only renderer read this;
+ * `assetDescriptor` stays the registry's own name.
+ */
+export function displayDescriptor(assetId: number): ExplorerAsset {
+  return displayFaces.get(assetId) ?? assetDescriptor(assetId)
 }
 
 // Reverse of SHARE_TOKEN_UNDERLYING_ID: main asset id → the pool-share token ids
