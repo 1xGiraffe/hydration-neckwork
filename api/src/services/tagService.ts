@@ -182,7 +182,7 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
   },
   {
     // Snowbridge's Polkadot-side account — the Ethereum <-> Polkadot bridge. Named
-    // for the same reason as the Moonbeam/Wormhole contract below: an asset that
+    // for the same reason as the Wormhole Relay below: an asset that
     // crossed a bridge arrives from the bridge's own account, so without a label
     // the counterparty on such a transfer reads as an anonymous address rather
     // than as "this came over Snowbridge".
@@ -196,13 +196,23 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     addresses: ['16PL8D6JXsi18EQZKuap9eLbsehMRMgcqdCf735qBmA5NSFc'],
   },
   {
-    // The Moonbeam-side bridge forwarding contract for inbound cross-chain assets
-    // (e.g. Solana via Wormhole): the far leg arrives here, then hops to Hydration
-    // over XCM, so our chain sees this contract as the origin rather than the real
-    // sender. One contract fans out to 100+ Hydration recipients — labelling it
-    // makes clear the transfer came through the Moonbeam/Wormhole bridge.
-    tagId: 'moonbeam-wormhole', name: 'Moonbeam Wormhole', color: '#2ba69c', note: 'Moonbeam-side Wormhole bridge forwarding contract — inbound cross-chain assets (e.g. Solana → Wormhole → Moonbeam) arrive from here before the XCM hop to Hydration', icon: '🌉',
-    addresses: ['0xf1db8c4bfbb3d6a97c9b669a2ffc0b70f41f3547'],
+    // The Wormhole Relay: a fast path for inbound Wormhole transfers (see
+    // wormholeFastRelay.ts). The relayer account 0xf1db…3547 submits each fast
+    // message, the receiver 0x35bf…8a verifies it, and the pool 0x70e9…f976 pays the
+    // user out of inventory; the NTT transfer that settles it mints into the pool
+    // minutes later. Until the Moonbeam route ended (2026-07) the same relayer reached
+    // Hydration over XCM from Moonbeam, which is why it also appears as the far-side
+    // sender of Moonbeam arrivals. Labelled so the pool's payouts and refills — and the
+    // relayer's gas legs — read as the relay's, not as an anonymous contract's.
+    //
+    // The id keeps its original slug: it is the tag's URL, and renaming it would
+    // break every link to /tag/moonbeam-wormhole for no gain in meaning.
+    tagId: 'moonbeam-wormhole', name: 'Wormhole Relay', color: '#2ba69c', note: 'Wormhole Relay — fast delivery of inbound Wormhole transfers: the relayer submits the fast message, the pool pays the recipient at once, and the NTT transfer that follows refills the pool', icon: '📡',
+    addresses: [
+      '0xf1db8c4bfbb3d6a97c9b669a2ffc0b70f41f3547', // relayer
+      '0x70e9b12c3b19cb5f0e59984a5866278ab69df976', // liquidity pool (pays deliveries, receives settlements)
+      '0x35bf3a1b9ac564c8f66c97cea1ee410cd3f97c8a', // fast-message receiver
+    ],
   },
   {
     // Explicit icon: with no explicit icon a tag borrows its first member's

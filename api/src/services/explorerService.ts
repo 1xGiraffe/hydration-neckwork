@@ -41,6 +41,7 @@ import { PRICE_LOOKBACK_DAYS, formatUnits, renderUsd, scaledUsd } from './valuat
 import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
+import { FAST_RELAY_FILLED_TOPIC, FastRelayIndexStore, fastRelayFeeRaw, fastRelayLegExclusionSql, isFastRelayLeg, type FastRelayDeposit, type FastRelayFill, type FastRelayIndex, type FastRelayLeg } from './wormholeFastRelay.ts'
 import { createHash } from 'node:crypto'
 import { resolveModuleError } from './runtimeErrorNames.ts'
 import { profileForAccount } from './userProfileService.ts'
@@ -3068,7 +3069,9 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
     // A transfer of an NTT asset to its minter is that asset's outbound Wormhole send —
     // a cross-chain row, not a transfer (see getRecentNttOut, which renders exactly the
     // rows this predicate removes).
-    const nttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts())
+    // A transfer out of the Wormhole Relay's pool in a fill block is a fast delivery —
+    // a cross-chain row (getRecentFastRelayIn), by the same one-rule-two-sides split.
+    const nttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts()) + ' ' + fastRelayLegExclusionSql(await fastRelayIndex())
     // userOnly drops pallet/pool/fee legs (module accounts 0x6d6f646c…) so the
     // Activity's "Transfers" tab shows genuine user↔user transfers, not swap noise.
     const plumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
@@ -10815,6 +10818,20 @@ export interface ActivityRow {
   // hops they take, not in being Snowbridge, and a version we cannot always
   // determine is not a fact worth showing a reader.
   bridge?: string | null
+  // A Wormhole Relay fast transfer (see wormholeFastRelay.ts) is two rows: the DELIVERY,
+  // the pool paying the user out of inventory as soon as the fast message lands, and the
+  // SETTLEMENT, the NTT mint of the gross amount into the pool — usually minutes after
+  // the delivery, but it can land before it. Each points at the other (`pair`, null
+  // until the other half is indexed, and always null on a Moonbeam-era delivery, which
+  // carries no NTT message to pair by); `pool` is the relay's pool contract.
+  // `pairMessageId` is the settlement's VAA id on a delivery row, which is how the
+  // delivery borrows the settlement's journey to name its sender.
+  fastRelay?: {
+    role: 'delivery' | 'settlement'
+    pool: AccountRef | null
+    pair: { blockHeight: number; eventIndex: number } | null
+    pairMessageId: string | null
+  }
   dca?: boolean
   dcaStatus?: 'failed'
   dcaError?: string
@@ -13785,6 +13802,7 @@ async function applyXcmOutDests(rows: ActivityRow[]): Promise<void> {
 // Remote-side enrichment of a final PAGE of activity rows — at most a page worth
 // of lookups per request; both passes share the journey cache.
 async function applyXcmJourneys(rows: ActivityRow[]): Promise<void> {
+  await applyFastRelaySources(rows)
   await applyXcmInSources(rows)
   await applyXcmOutRemoteSources(rows)
   await applyXcmOutDests(rows)
@@ -14142,7 +14160,7 @@ async function getRecentNttOut(limit: number, from?: string, to?: string, accoun
 // The source CHAIN is the transceiver's ReceivedMessage word; the sending USER is in
 // the NTT payload (calldata, never logged), so no source account is shown — a named
 // chain with no pill is honest, an inferred pill would not be.
-async function getRecentNttIn(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
+async function getRecentNttRedeems(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
   return cached(`explorer:ntt-in:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
@@ -14202,6 +14220,7 @@ async function getRecentNttIn(limit: number, from?: string, to?: string, account
           ...(journeys.length === 1 ? { messageId: journeys[0] } : {}),
         })
       }
+      annotateFastRelaySettlements(out, await fastRelayIndex())
       await applyHistoricalUsd(out, activityHistPick)
       return out
     }
@@ -14214,6 +14233,239 @@ async function getRecentNttIn(limit: number, from?: string, to?: string, account
     )
     return rows.slice(offset, offset + limit)
   })
+}
+
+// Every inbound Wormhole arrival: NTT redeems, and the Wormhole Relay's fast deliveries
+// (which reach the user as a transfer out of the relay's pool, see below). One source
+// for both, so every surface that reads Wormhole arrivals — global, the xcm tab, asset,
+// account, the enumerated exact counts — reads both without a second arm to forget.
+// Each part yields its own newest `offset + limit`, so the merged prefix is exact.
+async function getRecentNttIn(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
+  const want = offset + limit
+  const [redeems, deliveries] = await Promise.all([
+    getRecentNttRedeems(want, from, to, accounts, 0, filters),
+    getRecentFastRelayIn(want, from, to, accounts, 0, filters),
+  ])
+  if (!deliveries.length) return redeems.slice(offset, offset + limit)
+  return [...redeems, ...deliveries].sort(compareActivityRowsNewestFirst).slice(offset, offset + limit)
+}
+
+// Wormhole Relay fast deliveries (the protocol, the index and its one membership rule
+// — fastRelayLegExclusionSql/isFastRelayLeg on the transfer side, getRecentFastRelayIn
+// on the cross-chain side — are in wormholeFastRelay.ts). The set is small (one leg
+// per delivery ever, 155 fills by 2026-09); the store keeps what is final and re-reads
+// only the blocks near the head.
+// The EVM call input of `block:extrinsic` pairs. Calldata is immutable chain history,
+// so pairs safely below the head are memoized (the same margin nttLogsFor uses).
+const evmInputMemo = new Map<string, string | null>()
+async function evmInputsFor(keys: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const missing: string[] = []
+  for (const key of new Set(keys)) {
+    const hit = evmInputMemo.get(key)
+    if (hit === undefined) missing.push(key)
+    else if (hit) out.set(key, hit)
+  }
+  if (!missing.length) return out
+  const memoFloor = (await indexedRawHead()) - NTT_LOGS_FINALITY_MARGIN_BLOCKS
+  const tuples = missing.map(key => { const [h, i] = key.split(':'); return `(${Number(h)},${Number(i)})` }).join(',')
+  const res = await client.query({
+    query: `SELECT block_height, extrinsic_index,
+                   JSONExtractString(call_args_json, 'transaction', 'value', 'input') AS input
+            FROM price_data.raw_extrinsics
+            WHERE (block_height, extrinsic_index) IN (${tuples}) AND call_name = 'Ethereum.transact'
+            LIMIT 1 BY block_height, extrinsic_index`,
+    format: 'JSONEachRow',
+  })
+  const fetched = new Map<string, string>()
+  for (const r of await res.json<{ block_height: number; extrinsic_index: number; input: string }>()) {
+    if (r.input) fetched.set(`${r.block_height}:${r.extrinsic_index}`, r.input)
+  }
+  for (const key of missing) {
+    const input = fetched.get(key) ?? null
+    if (input) out.set(key, input)
+    if (Number(key.slice(0, key.indexOf(':'))) <= memoFloor) evmInputMemo.set(key, input)
+  }
+  return out
+}
+
+// The base below the margin is re-anchored hourly, which bounds how long a fill raw
+// backfilled below it can read as a transfer.
+const FAST_RELAY_REANCHOR_MS = 3_600_000
+const fastRelayStore = new FastRelayIndexStore({
+  marginBlocks: NTT_LOGS_FINALITY_MARGIN_BLOCKS,
+  reanchorMs: FAST_RELAY_REANCHOR_MS,
+  onError: err => console.error('[Explorer] fast relay index read failed:', err instanceof Error ? err.message : err),
+})
+
+// The index at `head`, through the store. Every read is bounded below by `after` on its
+// table's block_height, which is each table's sort key or the key right after its
+// account prefix, so an incremental load reads the last few hundred blocks, not all of
+// history.
+async function loadFastRelayIndex(head: number): Promise<FastRelayIndex> {
+  return fastRelayStore.index(head, {
+    async fills(after) {
+      const res = await client.query({
+        query: `SELECT block_height, event_index, lower(contract_address) AS contract
+                FROM price_data.raw_evm_logs
+                WHERE topic0 = '${FAST_RELAY_FILLED_TOPIC}'${after != null ? ` AND block_height > ${Number(after)}` : ''}
+                LIMIT 1 BY block_height, event_index`,
+        format: 'JSONEachRow',
+      })
+      const out = new Map<string, FastRelayFill>()
+      for (const r of await res.json<{ block_height: number; event_index: number; contract: string }>()) {
+        if (!/^0x[0-9a-f]{40}$/.test(r.contract)) continue
+        const pool = h160AccountId(r.contract).toLowerCase()
+        out.set(`${r.block_height}:${pool}`, { block: Number(r.block_height), pool })
+      }
+      return [...out.values()]
+    },
+    async legs(fills) {
+      const poolList = [...new Set(fills.map(f => `'${f.pool}'`))].join(',')
+      const pairsSql = fills.map(f => `(${f.block},'${f.pool}')`).join(',')
+      const res = await client.query({
+        // Pallet mirrors of one transfer collapse to the most specific event, exactly as
+        // the transfer feed and getRecentNttOut dedupe — so the row keeps the identity the
+        // leg had as a transfer. `from_account` is lowercase in this read model.
+        query: `SELECT block_height, ts, event_index, extrinsic_index, from_acc, to_acc, amount, asset_id
+                FROM (
+                  SELECT DISTINCT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+                    from_account AS from_acc, lower(to_account) AS to_acc, amount, asset_id,
+                    multiIf(event_name = 'Currencies.Transferred', 3, event_name = 'Tokens.Transfer', 2, 1) AS priority
+                  FROM price_data.account_transfer_activity
+                  WHERE account IN (${poolList})
+                    AND block_height >= ${Math.min(...fills.map(f => f.block))}
+                    AND (block_height, from_account) IN (${pairsSql})
+                  ORDER BY block_height DESC, priority DESC, event_index DESC
+                  LIMIT 1 BY block_height, extrinsic_index, asset_id, from_acc, to_acc, amount
+                )
+                ORDER BY block_height DESC, event_index DESC`,
+        format: 'JSONEachRow',
+      })
+      return (await res.json<FastRelayLeg>()).map(l => ({ ...l, block_height: Number(l.block_height), event_index: Number(l.event_index), asset_id: Number(l.asset_id), extrinsic_index: l.extrinsic_index == null ? null : Number(l.extrinsic_index) }))
+    },
+    async deposits(pools, after) {
+      const res = await client.query({
+        // Candidate settlements: every NTT-style mint into a pool inside an extrinsic. Only
+        // one whose calldata names a delivery's pair key becomes a settlement.
+        query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, asset_id, amount
+                FROM ${xcmEventActivityByAccountTable()}
+                WHERE who IN (${pools.map(p => `'${p}'`).join(',')}) AND event_name = 'Currencies.Deposited' AND extrinsic_index IS NOT NULL
+                  ${after != null ? `AND block_height > ${Number(after)}` : ''}
+                LIMIT 1 BY block_height, event_index`,
+        format: 'JSONEachRow',
+      })
+      return (await res.json<FastRelayDeposit>()).map(d => ({ ...d, block_height: Number(d.block_height), event_index: Number(d.event_index), extrinsic_index: Number(d.extrinsic_index), asset_id: Number(d.asset_id), amount: String(d.amount) }))
+    },
+    inputs: evmInputsFor,
+  })
+}
+
+// Keyed on the ingested head, so a fill indexed in the newest block is a delivery on the
+// very next read rather than a transfer for a TTL. A failed read serves the last good
+// index, and fails the request when there is none yet (see FastRelayIndexStore).
+export async function fastRelayIndex(): Promise<FastRelayIndex> {
+  const head = await indexedRawHead()
+  return cached(`explorer:fast-relay:${head}`, 30_000, () => loadFastRelayIndex(head))
+}
+
+export { fastRelayLegExclusionSql, isFastRelayLeg, type FastRelayIndex }
+
+export function fastRelayDeliveryRow(leg: FastRelayLeg, index: FastRelayIndex, prices: Map<number, PriceInfo>): ActivityRow {
+  const a = asset(leg.asset_id)
+  const delivery = index.deliveryOf.get(`${leg.block_height}:${leg.event_index}`)
+  const settlement = delivery ? index.settlementOf.get(delivery.pairKey) : undefined
+  // The origin chain is the fast message's emitter chain — the first field of its pair
+  // key. A Moonbeam-era fill has no message here, so it names no chain rather than the
+  // hop it was relayed through.
+  const origin = delivery ? nttOriginChain(Number(delivery.pairKey.slice(0, delivery.pairKey.indexOf(':')))) : null
+  const row: ActivityRow = {
+    type: 'xcm', blockHeight: leg.block_height, timestamp: leg.ts, eventIndex: leg.event_index, extrinsicIndex: leg.extrinsic_index,
+    who: accountRef(leg.to_acc), to: null, asset: a, assetIn: null, assetOut: null,
+    amount: String(leg.amount), amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, String(leg.amount), a.decimals),
+    xcmDir: 'in', bridge: 'Wormhole', ...(origin ?? {}), linkBlock: leg.block_height, linkIndex: leg.extrinsic_index,
+    ...(delivery ? { messageId: delivery.vaaId } : {}),
+    fastRelay: {
+      role: 'delivery', pool: accountRef(leg.from_acc),
+      pair: settlement ? { blockHeight: settlement.blockHeight, eventIndex: settlement.eventIndex } : null,
+      pairMessageId: settlement?.journeyId ?? null,
+    },
+  }
+  // The pool keeps the difference between what the settlement minted and what it paid
+  // out — the relay's fee, taken from the bridged amount before it reached the user.
+  const fee = fastRelayFeeRaw(leg, settlement)
+  if (fee) row.xcmFees = [xcmFeeLeg('relayer', a.assetId, fee, prices, 'destination')]
+  return row
+}
+
+// A settlement's NTT row, marked as such and pointed at the delivery it settled. Its
+// recipient is the pool, which is exactly what it shows; the user's arrival is the
+// delivery row this links to.
+export function annotateFastRelaySettlements(rows: ActivityRow[], index: FastRelayIndex): void {
+  if (!index.settlementKeyOf.size) return
+  for (const r of rows) {
+    if (r.type !== 'xcm' || r.xcmDir !== 'in' || r.eventIndex == null) continue
+    const key = index.settlementKeyOf.get(`${r.blockHeight}:${r.eventIndex}`)
+    const leg = key ? index.deliveryLegOf.get(key) : undefined
+    if (!leg) continue
+    r.fastRelay = { role: 'settlement', pool: r.who, pair: { blockHeight: leg.block_height, eventIndex: leg.event_index }, pairMessageId: null }
+  }
+}
+
+// The deliveries of one block — of one extrinsic, or (extrinsicIndex null) of the
+// block's hooks, where the Moonbeam-era fills ran.
+export async function fastRelayRowsAt(height: number, extrinsicIndex: number | null, prices: Map<number, PriceInfo>): Promise<ActivityRow[]> {
+  const index = await fastRelayIndex()
+  return index.legs
+    .filter(l => l.block_height === height && l.extrinsic_index === extrinsicIndex)
+    .map(l => fastRelayDeliveryRow(l, index, prices))
+}
+
+// Deliveries as cross-chain rows for the feeds. `accounts` matches either party: the
+// recipient, whose arrival it is, and the pool, whose outgoing transfer it was — the
+// pool's own page would otherwise lose the leg to the transfer exclusion.
+async function getRecentFastRelayIn(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
+  const tw = timeWindow(from, to)
+  const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
+  return cached(`explorer:fast-relay-in:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+    if (acctList === "''") return []
+    const index = await fastRelayIndex()
+    if (!index.legs.length) return []
+    const prices = await ensurePrices()
+    const inWindow = timeWindowMatcher(from, to)
+    const wanted = accounts && accounts.length ? new Set(accounts.map(a => a.toLowerCase())) : null
+    const tokenIds = assetIdsForToken(filters.token)
+    const legs = index.legs.filter(l => inWindow(l.ts)
+      && (!wanted || wanted.has(l.to_acc) || wanted.has(l.from_acc))
+      && (tokenIds == null || tokenIds.includes(l.asset_id)))
+    const rows = legs.map(l => fastRelayDeliveryRow(l, index, prices))
+    await applyHistoricalUsd(rows, activityHistPick)
+    return rows.filter(r => activityRowMatchesFilters(r, filters)).slice(offset, offset + limit)
+  })
+}
+
+// A delivery's sender and origin transaction are the settlement's: the fast message does
+// not name its sender, but the one origin transaction published both messages, and the
+// NTT half is what Ocelloids indexes. Runs before applyXcmInSources, which then leaves a
+// row it resolved alone.
+async function applyFastRelaySources(rows: ActivityRow[]): Promise<void> {
+  const deliveries = rows.filter(r => r.fastRelay?.role === 'delivery' && r.fastRelay.pairMessageId && !r.fromAccount)
+  if (!deliveries.length) return
+  const sources = await xcmJourneySourcesFor(deliveries.map(r => ({
+    messageId: r.fastRelay!.pairMessageId!,
+    timestampMs: activityRowTimestampMs(r),
+    bridge: true,
+  })))
+  for (const r of deliveries) {
+    const src = sources.get(r.fastRelay!.pairMessageId!)
+    if (!src || journeyStartedHere(src)) continue
+    const origin = externalChainRef(src.origin, src.from, src.fromFormatted)
+    if (!origin) continue
+    r.fromChain = origin.chain
+    r.fromParachainId = origin.paraId
+    r.fromAccount = origin.account
+    r.fromTxUrl = originTxExplorerUrl(src.origin, src.originTx)
+  }
 }
 
 // Global money-market transactions (supply/borrow/repay/withdraw/liquidation) by
@@ -19157,6 +19409,13 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       }
     }
 
+    // Wormhole Relay fast deliveries: the pool's payout in this extrinsic is the user's
+    // arrival (the same rows getRecentFastRelayIn gives the feeds), and an NTT arrival
+    // that settles the pool's side of one is marked as that delivery's settlement.
+    const fastRelay = await fastRelayIndex()
+    rows.push(...await fastRelayRowsAt(height, index, prices))
+    annotateFastRelaySettlements(rows, fastRelay)
+
     const liqRouteEndpoints = routerRouteEndpoints(events)
     const liqRows = suppressPositionCreatedCompanions(events
       .filter(e => LIQUIDITY_EVENTS.includes(e.event_name))
@@ -19327,6 +19586,8 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
     const mmReserves = await mmReserveAccountIds()
     for (const t of dedupeTransferEvents(transferRows)) {
       if (!t.from_acc || !t.to_acc || !t.amount) continue
+      // A fast delivery's leg is its cross-chain row above, never also a transfer.
+      if (isFastRelayLeg(fastRelay, t.block_height, t.from_acc)) continue
       const moduleLeg = /^0x(6d6f646c|7369626c|70617261|506172656e74)/.test(t.from_acc) || /^0x(6d6f646c|7369626c|70617261|506172656e74)/.test(t.to_acc)
       const poolLeg = pools.has(t.from_acc.toLowerCase()) || pools.has(t.to_acc.toLowerCase())
         || mmReserves.has(t.from_acc.toLowerCase()) || mmReserves.has(t.to_acc.toLowerCase())
@@ -19710,8 +19971,13 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
   // same one getExtrinsicActivity uses for its per-extrinsic transfer legs).
   const transferEvents = dedupeTransferEvents(
     await transferRes.json<RawTransferEventRow>())
+  // The Moonbeam-era Wormhole Relay fills ran here, in the block's hooks: each pool
+  // payout is a cross-chain delivery (getRecentFastRelayIn), not a transfer.
+  const fastRelay = await fastRelayIndex()
+  rows.push(...await fastRelayRowsAt(height, null, prices))
   for (const t of transferEvents) {
     if (!t.from_acc || !t.to_acc || !t.amount) continue
+    if (isFastRelayLeg(fastRelay, t.block_height, t.from_acc)) continue
     const a = asset(t.asset_id)
     rows.push({
       type: 'transfer', blockHeight: t.block_height, timestamp: t.ts, eventIndex: t.event_index, extrinsicIndex: t.extrinsic_index,
@@ -20000,6 +20266,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       // The asset's outbound Wormhole sends are its cross-chain rows (nttInP/nttOutP),
       // not its transfers — same predicate both sides, so a leg is exactly one of the two.
       const nttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts(), '{assetId:UInt32}')
+        + ' ' + fastRelayLegExclusionSql(await fastRelayIndex())
       const res = await client.query({
         query: `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
@@ -22164,6 +22431,10 @@ async function transferCandidatePotFiltersSql(accCond: string[]): Promise<string
   // an exception would render the same leg twice.
   const nttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts())
   if (nttExclusion) parts.push(nttExclusion)
+  // A Wormhole Relay fast delivery likewise lives in the cross-chain family
+  // (getRecentFastRelayIn), for the recipient and the pool alike.
+  const fastRelayExclusion = fastRelayLegExclusionSql(await fastRelayIndex())
+  if (fastRelayExclusion) parts.push(fastRelayExclusion)
   return parts.join('\n                ')
 }
 
@@ -23186,10 +23457,12 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     // The read-model form of all three exclusions, shared verbatim with the count arm
     // so the rows it counts and the rows this reads can never be a different set.
     const readModelPotFilters = await transferCandidatePotFiltersSql(accCond)
-    // The raw-events spelling of the NTT minter-leg exclusion the read-model path
-    // carries inside its pot filters (see transferCandidatePotFiltersSql).
+    // The raw-events spelling of the NTT minter-leg and fast-relay exclusions the
+    // read-model path carries inside its pot filters (see transferCandidatePotFiltersSql).
+    // Raw args are not normalized, so this spelling lowercases the sender itself.
     const rawNttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts(),
       transferAssetIdSql(), `JSONExtractString(args_json,'to')`)
+      + ' ' + fastRelayLegExclusionSql(await fastRelayIndex(), 'block_height', `lower(JSONExtractString(args_json,'from'))`)
     const readTransfers = async (refsFilter: string): Promise<RawTransferEventRow[]> => {
       const res = await client.query({
         query: useTransferReadModel
@@ -28841,9 +29114,16 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
             WHERE ${since} AND topic0 = '${NTT_TRANSFER_REDEEMED_TOPIC}'
               AND lower(contract_address) IN (${[...minters.values()].map(a => `'${nttMinterH160(a)}'`).join(',')})
             GROUP BY d` : ''
+        // Wormhole Relay fast deliveries are cross-chain rows too, one per pool Filled log.
+        const fastRelayArm = `
+          UNION ALL SELECT toString(toDate(block_timestamp)) AS d, toUInt64(uniqExact((block_height, event_index))) AS v
+            FROM price_data.raw_evm_logs
+            WHERE ${since} AND topic0 = '${FAST_RELAY_FILLED_TOPIC}'
+            GROUP BY d`
         query = `SELECT d, toUInt64(sum(v)) AS v FROM (
             ${daily('raw_xcm_activity', '', '(block_height, source_index)')}
             ${nttArms}
+            ${fastRelayArm}
           ) GROUP BY d ORDER BY d`
       } else {
         // 'all' — union of raw_events categories; OR each category's own token

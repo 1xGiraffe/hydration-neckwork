@@ -50,10 +50,11 @@ describe('every dated feed cache', () => {
   it('tells its tag helper which window it is caching, so today-touching reads stay head-keyed', () => {
     const dated = [...explorerService.matchAll(/live(?:Feed|Head)Tag\(Boolean\(tw\)[^)]*\)/g)].map(m => m[0])
 
-    // 21 = the three `liveFeedTag` feeds plus eighteen `liveHeadTag` ones, the
-    // newest being getRecentXcswaps: a cross-chain swap feed keyed without the head
-    // is the same permanent loss for a forward-only reader as any other lane's.
-    expect(dated.length).toBe(21)
+    // 22 = the three `liveFeedTag` feeds plus nineteen `liveHeadTag` ones, the
+    // newest being getRecentFastRelayIn (Wormhole Relay deliveries) after
+    // getRecentXcswaps: a cross-chain feed keyed without the head is the same
+    // permanent loss for a forward-only reader as any other lane's.
+    expect(dated.length).toBe(22)
     for (const call of dated) {
       expect(call).toMatch(/datedWindowIsClosed\(/)
     }
