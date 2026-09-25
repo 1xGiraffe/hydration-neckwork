@@ -66,14 +66,14 @@ async function buildApp(client: ReturnType<typeof fakeClient>): Promise<FastifyI
 
 describe('nettedTradeScaled', () => {
   it('is the larger of the two boundary sides', async () => {
-    const { nettedTradeScaled, scaledUsd } = await import('../../src/public/services/poolVolumes.ts')
+    const { nettedTradeScaled, scaledUsd } = await import('../../src/services/poolVolumes.ts')
     expect(nettedTradeScaled('100', '120')).toBe(scaledUsd('120'))
     expect(nettedTradeScaled('120.5', '120.25')).toBe(scaledUsd('120.5'))
     expect(nettedTradeScaled('0', '0')).toBe(0n)
   })
 
   it('compares at full Decimal(38,12) precision, never as floats', async () => {
-    const { nettedTradeScaled, scaledUsd } = await import('../../src/public/services/poolVolumes.ts')
+    const { nettedTradeScaled, scaledUsd } = await import('../../src/services/poolVolumes.ts')
     // Two values that are the same IEEE double; the last digit decides.
     expect(nettedTradeScaled('9007199254740993.000000000001', '9007199254740993.000000000002'))
       .toBe(scaledUsd('9007199254740993.000000000002'))
@@ -81,7 +81,7 @@ describe('nettedTradeScaled', () => {
   })
 
   it('answers at the full scale so a caller sums exactly, not in rounded cents', async () => {
-    const { nettedTradeScaled, renderUsd } = await import('../../src/public/services/poolVolumes.ts')
+    const { nettedTradeScaled, renderUsd } = await import('../../src/services/poolVolumes.ts')
     // Ten sub-cent trades are worth 4 cents together and nothing apart: the netting
     // rule must hand the caller the exact value, not the wire string.
     let total = 0n
@@ -92,7 +92,7 @@ describe('nettedTradeScaled', () => {
 
 describe('renderUsd', () => {
   it('is the surface\'s 2-decimal wire form, rounded half-up', async () => {
-    const { renderUsd, scaledUsd } = await import('../../src/public/services/poolVolumes.ts')
+    const { renderUsd, scaledUsd } = await import('../../src/services/poolVolumes.ts')
     // Same shape and rounding as the accounts service's formatUsd, so the two
     // halves of a stats response cannot publish USD in different precisions.
     expect(renderUsd(scaledUsd('232389.517003038334'))).toBe('232389.52')
@@ -111,7 +111,7 @@ describe('renderUsd', () => {
 describe('window anchor', () => {
   it('anchors on the newest indexed LEG, never on the newest block', async () => {
     const client = fakeClient({ '-- pub:vol:anchor': [ANCHOR_ROW] })
-    const { readAnchor } = await import('../../src/public/services/poolVolumes.ts')
+    const { readAnchor } = await import('../../src/services/poolVolumes.ts')
     expect(await readAnchor(client as never)).toEqual({ anchor: '2026-08-12 18:22:36', blockHeight: 9123456 })
     const [{ query }] = client.seen
     // A block is indexed before the MV has projected its legs. Anchoring on the
@@ -126,7 +126,7 @@ describe('window anchor', () => {
 
   it('reports no anchor at all for an empty leg model', async () => {
     const client = fakeClient({ '-- pub:vol:anchor': [{ legs: '0', anchor: '1970-01-01 00:00:00', block_height: 0 }] })
-    const { readAnchor } = await import('../../src/public/services/poolVolumes.ts')
+    const { readAnchor } = await import('../../src/services/poolVolumes.ts')
     // Never 1970: an empty model has no window, rather than one starting at the epoch.
     expect(await readAnchor(client as never)).toBeNull()
   })
@@ -134,7 +134,7 @@ describe('window anchor', () => {
 
 describe('volume SQL invariants', () => {
   it('deduplicates the replaceable leg identity before any sum', async () => {
-    const { buildOmnipoolVolumeSql, buildPoolVolumeSql, buildRoutedTradesSql } = await import('../../src/public/services/poolVolumes.ts')
+    const { buildOmnipoolVolumeSql, buildPoolVolumeSql, buildRoutedTradesSql } = await import('../../src/services/poolVolumes.ts')
     for (const sql of [buildOmnipoolVolumeSql(), buildPoolVolumeSql(), buildRoutedTradesSql()]) {
       // pool_swap_legs is ReplacingMergeTree(ingested_at): a replayed range inserts
       // a second copy of every leg, so the newest copy per leg identity has to win
@@ -146,8 +146,8 @@ describe('volume SQL invariants', () => {
   })
 
   it('reads the window exactly once — every stage is referenced by one other stage', async () => {
-    const { buildOmnipoolVolumeSql, buildPoolVolumeSql, buildRoutedTradesSql } = await import('../../src/public/services/poolVolumes.ts')
-    const { buildOmnipoolYieldSql, buildStableswapYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const { buildOmnipoolVolumeSql, buildPoolVolumeSql, buildRoutedTradesSql } = await import('../../src/services/poolVolumes.ts')
+    const { buildOmnipoolYieldSql, buildStableswapYieldSql } = await import('../../src/services/poolYield.ts')
     // ClickHouse inlines a CTE at EVERY reference and re-reads it there. Naming
     // `priced` three times cost three windowed scans, three deduplications and
     // three ASOF price joins of the same rows — measured 7x for the Omnipool
@@ -167,14 +167,14 @@ describe('volume SQL invariants', () => {
   })
 
   it('values a fill by its out side and falls back to its in side', async () => {
-    const { buildOmnipoolVolumeSql, buildPoolVolumeSql } = await import('../../src/public/services/poolVolumes.ts')
+    const { buildOmnipoolVolumeSql, buildPoolVolumeSql } = await import('../../src/services/poolVolumes.ts')
     for (const sql of [buildOmnipoolVolumeSql(), buildPoolVolumeSql()]) {
       expect(sql).toContain('if(out_usd > 0, out_usd, in_usd)')
     }
   })
 
   it('excludes the LRNA hub leg from omnipool per-asset volume', async () => {
-    const { buildOmnipoolVolumeSql } = await import('../../src/public/services/poolVolumes.ts')
+    const { buildOmnipoolVolumeSql } = await import('../../src/services/poolVolumes.ts')
     const sql = buildOmnipoolVolumeSql()
     // The hub asset is dropped from the per-asset detail the fill carries…
     expect(sql).toContain('asset_id != 1) AS asset_parts')
@@ -183,7 +183,7 @@ describe('volume SQL invariants', () => {
   })
 
   it('groups routed legs by the router operation and unrouted fills by themselves', async () => {
-    const { buildRoutedTradesSql } = await import('../../src/public/services/poolVolumes.ts')
+    const { buildRoutedTradesSql } = await import('../../src/services/poolVolumes.ts')
     const sql = buildRoutedTradesSql()
     // An unrouted fill keys on its own (block_height, event_index) — never on the
     // extrinsic (a batch carries several independent trades) and never into one
@@ -199,7 +199,7 @@ describe('volume SQL invariants', () => {
   })
 
   it('folds an Omnipool hub hop into the fill that completes the swap', async () => {
-    const { buildOmnipoolVolumeSql, buildRoutedTradesSql } = await import('../../src/public/services/poolVolumes.ts')
+    const { buildOmnipoolVolumeSql, buildRoutedTradesSql } = await import('../../src/services/poolVolumes.ts')
     // The Omnipool emits A→LRNA and LRNA→B as two fills of one user swap, so a
     // count of trades that took each fill for a trade would double the venue.
     for (const sql of [buildOmnipoolVolumeSql(), buildRoutedTradesSql()]) {
@@ -211,7 +211,7 @@ describe('volume SQL invariants', () => {
   })
 
   it('keeps the NULL-asset guard readable: the rendered id never shadows the column it reads', async () => {
-    const { buildOmnipoolVolumeSql } = await import('../../src/public/services/poolVolumes.ts')
+    const { buildOmnipoolVolumeSql } = await import('../../src/services/poolVolumes.ts')
     const sql = buildOmnipoolVolumeSql()
     // A fill with no non-hub in/out leg emits scope='asset' with a NULL id, and
     // this predicate is what drops it. Aliasing `ifNull(toString(...), '')` back
@@ -226,12 +226,12 @@ describe('volume SQL invariants', () => {
     expect(sql).toContain('ORDER BY volume DESC, asset')
     expect(sql).not.toContain('ORDER BY volume DESC, asset_id')
     // …and the same rule the yield endpoint already follows.
-    const { buildOmnipoolYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const { buildOmnipoolYieldSql } = await import('../../src/services/poolYield.ts')
     expect(buildOmnipoolYieldSql()).toContain('WHERE asset IS NOT NULL')
   })
 
   it('prices every leg at a candle that had closed before the fill', async () => {
-    const { buildOmnipoolVolumeSql } = await import('../../src/public/services/poolVolumes.ts')
+    const { buildOmnipoolVolumeSql } = await import('../../src/services/poolVolumes.ts')
     const sql = buildOmnipoolVolumeSql()
     expect(sql).toContain('interval_start + INTERVAL 1 HOUR AS price_time')
     expect(sql).toContain('p.price_time <= l.block_time')
@@ -239,8 +239,8 @@ describe('volume SQL invariants', () => {
   })
 
   it('values a leg with the vectorised decimal operators, not the adaptive-scale functions', async () => {
-    const { buildOmnipoolVolumeSql, buildPoolVolumeSql, buildRoutedTradesSql } = await import('../../src/public/services/poolVolumes.ts')
-    const { buildStableswapYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const { buildOmnipoolVolumeSql, buildPoolVolumeSql, buildRoutedTradesSql } = await import('../../src/services/poolVolumes.ts')
+    const { buildStableswapYieldSql } = await import('../../src/services/poolYield.ts')
     const { buildDailySql } = await import('../../src/public/services/defillama.ts')
     for (const sql of [buildOmnipoolVolumeSql(), buildPoolVolumeSql(), buildRoutedTradesSql(),
       buildStableswapYieldSql(), buildDailySql()]) {
@@ -265,7 +265,7 @@ describe('volume SQL invariants', () => {
   // measured CPU per call, old → new. This pins the conversions so the per-row form
   // cannot creep back into a priced surface by copy-paste.
   it('keeps every other priced surface on the vectorised operators too', async () => {
-    const { buildStableswapYieldSql, buildOmnipoolYieldSql } = await import('../../src/public/services/poolYield.ts')
+    const { buildStableswapYieldSql, buildOmnipoolYieldSql } = await import('../../src/services/poolYield.ts')
     const { buildTickersSql } = await import('../../src/public/services/coingecko.ts')
     const { buildPartitionInsertSql } = await import('../../src/services/accountTradeVolume.ts')
     const { REVENUE_STREAMS, buildRevenueEventRowsSql } = await import('../../src/services/revenueStreams.ts')
@@ -344,7 +344,7 @@ describe('volume SQL invariants', () => {
   })
 
   it('carries the day and the fee split only for the surface that publishes them', async () => {
-    const { buildRoutedTradesSql } = await import('../../src/public/services/poolVolumes.ts')
+    const { buildRoutedTradesSql } = await import('../../src/services/poolVolumes.ts')
     const { buildWebVolumeSql } = await import('../../src/public/services/webStats.ts')
     const { buildDailySql } = await import('../../src/public/services/defillama.ts')
     // Five Decimal256 aggregates through four stages and a seven-element tuple
@@ -377,7 +377,7 @@ describe('omnipoolVolumes', () => {
         { scope: 'total', asset_id: '', volume_usd: '1500.000000000000', fee_usd: '0.000000000000', protocol_fee_usd: '0.000000000000' },
       ],
     })
-    const { omnipoolVolumes } = await import('../../src/public/services/poolVolumes.ts')
+    const { omnipoolVolumes } = await import('../../src/services/poolVolumes.ts')
     const out = await omnipoolVolumes(client as never, '1h')
     expect(out).toEqual({
       asOf: ANCHOR_ISO,
@@ -407,7 +407,7 @@ describe('omnipoolVolumes', () => {
         { scope: 'total', asset_id: '', volume_usd: '1000.500000000000', fee_usd: '0.000000000000', protocol_fee_usd: '0.000000000000' },
       ],
     })
-    const { omnipoolVolumes } = await import('../../src/public/services/poolVolumes.ts')
+    const { omnipoolVolumes } = await import('../../src/services/poolVolumes.ts')
     const out = await omnipoolVolumes(client as never, '24h')
     expect(out.items).toEqual([{ assetId: '5', volumeUsd: '1000.50', feeUsd: '2.25', protocolFeeUsd: '0.75' }])
     // The venue total is the 'total' row and is unaffected by the drop.
@@ -416,7 +416,7 @@ describe('omnipoolVolumes', () => {
 
   it('reports no data instead of a 1970 anchor when the model is empty', async () => {
     const client = fakeClient({ '-- pub:vol:anchor': [{ legs: '0', anchor: '1970-01-01 00:00:00', block_height: 0 }] })
-    const { omnipoolVolumes } = await import('../../src/public/services/poolVolumes.ts')
+    const { omnipoolVolumes } = await import('../../src/services/poolVolumes.ts')
     const out = await omnipoolVolumes(client as never, '7d')
     expect(out).toEqual({ asOf: null, blockHeight: null, totalVolumeUsd: '0.00', items: [] })
     // The windowed scan is not even issued: there is nothing to scan.
@@ -433,7 +433,7 @@ describe('routedTradesUsd', () => {
         { in_usd: '10.000000000000', out_usd: '10.250000000000' },
       ],
     })
-    const { routedTradesUsd } = await import('../../src/public/services/poolVolumes.ts')
+    const { routedTradesUsd } = await import('../../src/services/poolVolumes.ts')
     // 100 (in wins) + 10.25 (out wins), summed at full scale and rounded once
     expect(await routedTradesUsd(client as never, '1h')).toEqual({ asOf: ANCHOR_ISO, blockHeight: 9123456, totalUsd: '110.25' })
   })

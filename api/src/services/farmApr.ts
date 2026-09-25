@@ -1,11 +1,15 @@
-import type { ClickHouseClient } from '../../db/client.ts'
-import { assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
-import { iso } from '../schemas/common.ts'
+import type { ClickHouseClient } from '../db/client.ts'
+import { assetDescriptor, priceAssetId } from './explorerAssets.ts'
+import { iso } from './isoTimestamp.ts'
 import { DECIMAL_STRINGS, PRICE_LOOKBACK_DAYS, scaledDecimal, scaledUsd } from './poolVolumes.ts'
 
 // Liquidity-mining ("farm") APR per Omnipool asset, from the indexed farm
 // lifecycle in `price_data.farm_config_events` (clickhouse/schema/006_public.sql).
 // Normative definition: spec § Semantics 9.
+//
+// Shared by /v1/pools/omnipool/yield (per asset, `omnipoolFarmAprByAsset`) and the
+// explorer's /explorer/yields (per farm, `omnipoolFarmAprs`, plus the XYK farms
+// through `foldLiveXykFarms` / `xykFarmAprPercScaled`), so both state one rate.
 //
 // WHAT THE PALLET PAYS. A global farm hands out, per period,
 //
@@ -104,6 +108,9 @@ const FIXED_ONE = 10n ** 18n
  */
 const STATE_SAMPLE_HOURS = 24
 
+/** The liquidity-mining pallet a `farm_config_events` row belongs to. */
+export type FarmPallet = 'omnipool_lm' | 'xyk_lm'
+
 /** One row of the farm lifecycle, as `farm_config_events` carries it. */
 export interface FarmConfigRow {
   event_name: string
@@ -142,6 +149,24 @@ export interface LiveFarm {
 }
 
 /**
+ * A live XYK yield farm. The XYK pallet names the pool by its asset PAIR (the
+ * `assetPair` of YieldFarmCreated, order as created), never by the share token, so
+ * the caller resolves the pair to the pool's share token against the XYK registry.
+ */
+export interface LiveXykFarm extends Omit<LiveFarm, 'assetId'> {
+  assetPair: [number, number]
+}
+
+/** The farm terms a rate is computed from — what both farm pallets share. */
+export type FarmRateTerms = Pick<LiveFarm, 'rewardAssetId' | 'multiplier' | 'yieldPerPeriod' | 'maxRewardPerPeriod' | 'blocksPerPeriod'>
+
+/** One live farm with its APR, an integer count of 10^-PERC_DECIMALS percent (null when unknown). */
+export interface FarmAprEntry<F = LiveFarm> {
+  farm: F
+  aprScaled: bigint | null
+}
+
+/**
  * The APR of the farms on one Omnipool asset, and which assets pay for them.
  *
  * An asset has an entry here IF AND ONLY IF a farm is live on it, so the pair
@@ -172,8 +197,8 @@ export interface AssetFarmApr {
  * either way, but a query whose stated order is not chain order is a trap for the
  * next reader: it is one removed `.sort()` from resurrecting stopped farms.
  */
-export function buildFarmConfigSql(): string {
-  return `-- pub:farm:config
+export function buildFarmConfigSql(pallet: FarmPallet = 'omnipool_lm'): string {
+  return `${pallet === 'omnipool_lm' ? '-- pub:farm:config' : '-- farm:config:xyk'}
 SELECT event_name,
        toString(global_farm_id) AS global_farm_id,
        ifNull(toString(yield_farm_id), '') AS yield_farm_id,
@@ -182,7 +207,7 @@ SELECT event_name,
        toString(block_timestamp) AS block_timestamp,
        argMax(args_json, ingested_at) AS args_json
 FROM price_data.farm_config_events
-WHERE pallet = 'omnipool_lm'
+WHERE pallet = '${pallet}'
 GROUP BY event_name, global_farm_id, yield_farm_id, block_height, event_index, block_timestamp
 ORDER BY toUInt64(block_height), toUInt64(event_index)`
 }
@@ -287,6 +312,8 @@ interface YieldFarmState {
   globalFarmId: number
   yieldFarmId: number
   assetId: number
+  /** XYK farms only: the pool's asset pair. */
+  assetPair: [number, number] | null
   multiplier: bigint
   live: boolean
 }
@@ -306,6 +333,50 @@ function chainOrder(a: FarmConfigRow, b: FarmConfigRow): number {
  * in the chain's history satisfies exactly, so the new schedule re-derives it.
  */
 export function foldLiveFarms(rows: FarmConfigRow[]): LiveFarm[] {
+  const live: LiveFarm[] = []
+  for (const { farm, global, endsAt } of foldLiveYieldFarms(rows)) {
+    if (!Number.isFinite(farm.assetId)) continue
+    live.push({ globalFarmId: farm.globalFarmId, yieldFarmId: farm.yieldFarmId, assetId: farm.assetId, ...liveTerms(farm, global, endsAt) })
+  }
+  return live.sort((a, b) => a.assetId - b.assetId || a.globalFarmId - b.globalFarmId)
+}
+
+/**
+ * The XYK yield farms live in storage, by the same lifecycle replay as
+ * `foldLiveFarms` (the two pallets are one warehouse-LM implementation and emit
+ * the same lifecycle events); an XYK yield farm names its pool by `assetPair`.
+ */
+export function foldLiveXykFarms(rows: FarmConfigRow[]): LiveXykFarm[] {
+  const live: LiveXykFarm[] = []
+  for (const { farm, global, endsAt } of foldLiveYieldFarms(rows)) {
+    if (!farm.assetPair) continue
+    live.push({ globalFarmId: farm.globalFarmId, yieldFarmId: farm.yieldFarmId, assetPair: farm.assetPair, ...liveTerms(farm, global, endsAt) })
+  }
+  return live.sort((a, b) => a.assetPair[0] - b.assetPair[0] || a.assetPair[1] - b.assetPair[1] || a.globalFarmId - b.globalFarmId)
+}
+
+function liveTerms(farm: YieldFarmState, global: GlobalFarmState, endsAt: Date): Omit<LiveFarm, 'globalFarmId' | 'yieldFarmId' | 'assetId'> {
+  return {
+    rewardAssetId: global.rewardAssetId,
+    multiplier: farm.multiplier,
+    yieldPerPeriod: global.yieldPerPeriod,
+    maxRewardPerPeriod: global.maxRewardPerPeriod,
+    blocksPerPeriod: global.blocksPerPeriod,
+    plannedYieldingPeriods: global.plannedYieldingPeriods,
+    startedAt: global.startedAt,
+    endsAt,
+  }
+}
+
+function pairOf(value: unknown): [number, number] | null {
+  if (value == null || typeof value !== 'object') return null
+  const pair = value as Record<string, unknown>
+  const a = Number(pair.assetIn), b = Number(pair.assetOut)
+  return Number.isInteger(a) && Number.isInteger(b) ? [a, b] : null
+}
+
+/** The lifecycle replay both folds share: every live yield farm with its live global farm. */
+function foldLiveYieldFarms(rows: FarmConfigRow[]): Array<{ farm: YieldFarmState; global: GlobalFarmState; endsAt: Date }> {
   const globals = new Map<number, GlobalFarmState>()
   const yields = new Map<string, YieldFarmState>()
 
@@ -348,6 +419,7 @@ export function foldLiveFarms(rows: FarmConfigRow[]): LiveFarm[] {
           globalFarmId,
           yieldFarmId,
           assetId: args.assetId != null ? Number(args.assetId) : previous?.assetId ?? Number.NaN,
+          assetPair: pairOf(args.assetPair) ?? previous?.assetPair ?? null,
           multiplier: args.multiplier != null ? BigInt(String(args.multiplier)) : previous?.multiplier ?? 0n,
           live: true,
         })
@@ -364,27 +436,15 @@ export function foldLiveFarms(rows: FarmConfigRow[]): LiveFarm[] {
     }
   }
 
-  const live: LiveFarm[] = []
+  const out: Array<{ farm: YieldFarmState; global: GlobalFarmState; endsAt: Date }> = []
   for (const farm of yields.values()) {
     const global = globals.get(farm.globalFarmId)
-    if (!farm.live || !global?.live || !Number.isFinite(farm.assetId)) continue
+    if (!farm.live || !global?.live) continue
     const endsAt = new Date(global.startedAt.getTime()
       + global.plannedYieldingPeriods * global.blocksPerPeriod * Number(RELAY_BLOCK_SECONDS) * 1000)
-    live.push({
-      globalFarmId: farm.globalFarmId,
-      yieldFarmId: farm.yieldFarmId,
-      assetId: farm.assetId,
-      rewardAssetId: global.rewardAssetId,
-      multiplier: farm.multiplier,
-      yieldPerPeriod: global.yieldPerPeriod,
-      maxRewardPerPeriod: global.maxRewardPerPeriod,
-      blocksPerPeriod: global.blocksPerPeriod,
-      plannedYieldingPeriods: global.plannedYieldingPeriods,
-      startedAt: global.startedAt,
-      endsAt,
-    })
+    out.push({ farm, global, endsAt })
   }
-  return live.sort((a, b) => a.assetId - b.assetId || a.globalFarmId - b.globalFarmId)
+  return out
 }
 
 /**
@@ -396,7 +456,7 @@ export function foldLiveFarms(rows: FarmConfigRow[]): LiveFarm[] {
  * had two live yield farms; rather than publish an overstatement if one appears,
  * every asset under such a farm reports null.
  */
-function splitAcrossYieldFarms(farms: LiveFarm[]): Set<number> {
+export function splitAcrossYieldFarms(farms: ReadonlyArray<{ globalFarmId: number }>): Set<number> {
   const perGlobal = new Map<number, number>()
   for (const farm of farms) perGlobal.set(farm.globalFarmId, (perGlobal.get(farm.globalFarmId) ?? 0) + 1)
   return new Set([...perGlobal].filter(([, count]) => count > 1).map(([id]) => id))
@@ -419,15 +479,41 @@ function divRoundHalfUp(numerator: bigint, denominator: bigint): bigint {
  * nothing staked in it takes the uncapped branch, which is the pallet's own
  * `total_shares_z <= 0` case.
  */
-export function farmAprPercScaled(farm: LiveFarm, farmedValueUsd: bigint | null, rewardPriceUsd: bigint | null): bigint | null {
+export function farmAprPercScaled(farm: FarmRateTerms, farmedValueUsd: bigint | null, rewardPriceUsd: bigint | null): bigint | null {
+  return farmRate(farm, farmedValueUsd, rewardPriceUsd, 1n)
+}
+
+/**
+ * An XYK farm's APR: the same pallet rule (the XYK and Omnipool LM pallets are one
+ * warehouse-LM implementation) with the UNCAPPED branch halved.
+ *
+ * Why only that branch. The XYK pallet values a deposit's shares in the global
+ * farm's incentivized asset — `valued_shares` is the amount of asset A the LP
+ * shares redeem for, which at the pool's own price is HALF the position's value
+ * (the other half is asset B). The uncapped branch is `yield_per_period` per unit
+ * of `valued_shares`, so per unit of the WHOLE position it pays half the farm's
+ * yield rate — the Hydration UI's LiquidityMiningApi.farmData divides its XYK rate
+ * by two for this reason. The capped branch is the fixed period budget spread over
+ * the stake, and `farmedValueUsd` here is the stake's FULL value (both legs, at
+ * NAV), so the budget over it is already the rate per unit of position value:
+ * halving it too would state half of what the budget pays out. (farmData halves
+ * both because its capped term divides by `total_shares_z · price_adjustment`, the
+ * half-value measure.)
+ */
+export function xykFarmAprPercScaled(farm: FarmRateTerms, farmedValueUsd: bigint | null, rewardPriceUsd: bigint | null): bigint | null {
+  return farmRate(farm, farmedValueUsd, rewardPriceUsd, 2n)
+}
+
+function farmRate(farm: FarmRateTerms, farmedValueUsd: bigint | null, rewardPriceUsd: bigint | null, uncappedDivisor: bigint): bigint | null {
   if (farmedValueUsd == null || rewardPriceUsd == null) return null
   if (farm.blocksPerPeriod <= 0) return null
   const periodBlocks = BigInt(farm.blocksPerPeriod)
 
   // 100 · multiplier · yield_per_period · secondsPerYear / (6 · blocksPerPeriod)
+  // (÷ 2 on an XYK farm, folded into the one rounding).
   const uncapped = divRoundHalfUp(
     farm.multiplier * farm.yieldPerPeriod * SECONDS_PER_YEAR * 100n * PERC_UNIT,
-    FIXED_ONE * FIXED_ONE * RELAY_BLOCK_SECONDS * periodBlocks,
+    FIXED_ONE * FIXED_ONE * RELAY_BLOCK_SECONDS * periodBlocks * uncappedDivisor,
   )
   if (farmedValueUsd <= 0n) return uncapped
 
@@ -478,16 +564,20 @@ function isFarmedModelEmpty(rows: FarmTvlRow[]): boolean {
   return rows.length > 0 && rows.every(row => Number(row.positions) === 0)
 }
 
-/** Farm APR per Omnipool asset id, at the yield surface's anchor. */
-export async function omnipoolFarmAprByAsset(client: ClickHouseClient, anchor: string): Promise<Map<string, AssetFarmApr>> {
+/**
+ * Farm APR per live Omnipool yield farm, at the yield surface's anchor — the per-farm
+ * terms `omnipoolFarmAprByAsset` sums, exposed so the explorer can state each farm
+ * (and each reward asset) of a pool on its own.
+ */
+export async function omnipoolFarmAprs(client: ClickHouseClient, anchor: string): Promise<FarmAprEntry[]> {
   const configRes = await client.query({ query: buildFarmConfigSql(), format: 'JSONEachRow' })
   const farms = foldLiveFarms(await configRes.json<FarmConfigRow>())
-  if (!farms.length) return new Map()
+  if (!farms.length) return []
 
   const at = new Date(iso(anchor))
   const split = splitAcrossYieldFarms(farms)
   if (split.size) {
-    console.warn(`[public-api] farm APR: global farm(s) ${[...split].join(', ')} run more than one live yield farm — `
+    console.warn(`[pool-yield] farm APR: global farm(s) ${[...split].join(', ')} run more than one live yield farm — `
       + 'their budget is split across yield farms but the staked value is per asset, so those assets report null')
   }
   // A farm past its planned schedule or under a split global farm still appears in
@@ -504,32 +594,40 @@ export async function omnipoolFarmAprByAsset(client: ClickHouseClient, anchor: s
 
   const outage = isFarmedModelEmpty(tvlRows)
   if (outage) {
-    console.warn(`[public-api] farm APR: not one farmed Omnipool position across ${tvlRows.length} incentivised assets — `
+    console.warn(`[pool-yield] farm APR: not one farmed Omnipool position across ${tvlRows.length} incentivised assets — `
       + 'reporting null (check omnipool_position_owner_intervals and the derivations service)')
   }
   const staked = new Map(tvlRows.map(row => [Number(row.asset_id), row]))
 
-  const byAsset = new Map<string, AssetFarmApr>()
-  for (const farm of farms) {
-    const key = String(farm.assetId)
-    const previous = byAsset.get(key)
+  return farms.map(farm => {
     const row = staked.get(farm.assetId)
     const value = outage || !row ? null : farmedValueUsd(row, prices.get(priceAssetId(farm.assetId)))
-    const apr = farm.endsAt > at && !split.has(farm.globalFarmId)
+    const aprScaled = farm.endsAt > at && !split.has(farm.globalFarmId)
       ? farmAprPercScaled(farm, value, prices.get(priceAssetId(farm.rewardAssetId)) ?? null)
       : null
-    // An asset's rate is the sum over its farms, and a sum missing one of its terms
-    // is not a smaller sum — it is unknown. The reward assets are listed either way,
-    // so a null rate still says a farm is there.
-    const total = apr == null || previous?.farmAprPerc === null
-      ? null
-      : renderPerc(scaled(previous?.farmAprPerc ?? '0', PERC_DECIMALS) + apr)
-    byAsset.set(key, {
-      farmAprPerc: total,
-      rewardAssetIds: [...new Set([...previous?.rewardAssetIds ?? [], String(farm.rewardAssetId)])],
-    })
+    return { farm, aprScaled }
+  })
+}
+
+/**
+ * Per-farm APRs folded per Omnipool asset. An asset's rate is the sum over its
+ * farms, and a sum missing one of its terms is not a smaller sum — it is unknown.
+ * The reward assets are listed either way, so a null rate still says a farm is there.
+ */
+export function farmAprByAsset(entries: ReadonlyArray<FarmAprEntry>): Map<string, AssetFarmApr> {
+  const sums = new Map<string, { total: bigint | null; rewardAssetIds: string[] }>()
+  for (const { farm, aprScaled } of entries) {
+    const key = String(farm.assetId)
+    const previous = sums.get(key)
+    const total = aprScaled == null || previous?.total === null ? null : (previous?.total ?? 0n) + aprScaled
+    sums.set(key, { total, rewardAssetIds: [...new Set([...previous?.rewardAssetIds ?? [], String(farm.rewardAssetId)])] })
   }
-  return byAsset
+  return new Map([...sums].map(([key, { total, rewardAssetIds }]) => [key, { farmAprPerc: total == null ? null : renderPerc(total), rewardAssetIds }]))
+}
+
+/** Farm APR per Omnipool asset id, at the yield surface's anchor. */
+export async function omnipoolFarmAprByAsset(client: ClickHouseClient, anchor: string): Promise<Map<string, AssetFarmApr>> {
+  return farmAprByAsset(await omnipoolFarmAprs(client, anchor))
 }
 
 /** The staked value and current prices the rateable farms need, read together. */

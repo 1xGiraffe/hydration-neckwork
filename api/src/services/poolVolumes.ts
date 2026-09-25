@@ -1,6 +1,6 @@
-import type { ClickHouseClient } from '../../db/client.ts'
-import { cachedSwr } from '../../services/cache.ts'
-import { H2O_ASSET_ID } from '../../services/explorerAssets.ts'
+import type { ClickHouseClient } from '../db/client.ts'
+import { cachedSwr } from './cache.ts'
+import { H2O_ASSET_ID } from './explorerAssets.ts'
 import {
   ANCHORED_LEG_WINDOW,
   ANCHORED_PRICE_WINDOW,
@@ -18,14 +18,14 @@ import {
   scaledDecimal,
   scaledUsd,
   usdString,
-} from '../../services/valuation.ts'
-import { iso } from '../schemas/common.ts'
+} from './valuation.ts'
+import { iso } from './isoTimestamp.ts'
 
 // The venue-neutral money/valuation helpers live in services/valuation.ts so
 // the revenue read models can share them without importing the public tree
 // (which is an import leaf). Re-exported so this file stays the public
 // surfaces' single import site for them.
-export type { DecimalRounding } from '../../services/valuation.ts'
+export type { DecimalRounding } from './valuation.ts'
 export {
   ANCHORED_LEG_WINDOW,
   ANCHORED_PRICE_WINDOW,
@@ -135,7 +135,7 @@ export interface XykPoolMeta {
  */
 function warnIfNothingPriced(venue: string, window: string, fills: number, totalScaled: bigint): void {
   if (fills === 0 || totalScaled !== 0n) return
-  console.warn(`[public-api] ${venue} ${window} volume is 0 across ${fills} priced groups — `
+  console.warn(`[pool-yield] ${venue} ${window} volume is 0 across ${fills} priced groups — `
     + 'no leg in the window could be valued (check the price feed and the asset alias map)')
 }
 

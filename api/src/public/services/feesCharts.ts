@@ -1,7 +1,7 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cachedSwr } from '../../services/cache.ts'
 import { buildRevenueEventRowsSql, type EventfulRevenueStream, hollarBorrowHourlyRows } from '../../services/revenueStreams.ts'
-import { DECIMAL_STRINGS, scaledUsd } from './poolVolumes.ts'
+import { DECIMAL_STRINGS, scaledUsd } from '../../services/poolVolumes.ts'
 
 // GET /api/v1/fees/charts — the revenue/fees page's data source.
 //
