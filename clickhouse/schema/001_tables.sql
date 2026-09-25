@@ -150,6 +150,39 @@ CREATE TABLE IF NOT EXISTS price_data.liquidity_activity (`block_height` UInt32,
 -- `reward_currency`; the shares moved for the other kinds). Deposit-first for the farm-reward
 -- history, which reads one account's deposits. Fed by lm_deposit_farm_events_mv.
 CREATE TABLE IF NOT EXISTS price_data.lm_deposit_farm_events (`pallet` LowCardinality(String), `deposit_id` String, `yield_farm_id` UInt32, `global_farm_id` UInt32, `block_height` UInt32, `event_index` UInt32, `event_kind` LowCardinality(String), `amount` UInt128, `reward_currency` UInt32, `who` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (pallet, deposit_id, block_height, event_index) SETTINGS index_granularity = 1024;
+-- Lending incentives of the Aave v3 RewardsController (0x7472a3d0891df2401d981a5954d07e364f05060f).
+-- The indexer stores this contract's logs undecoded (topics + data in raw_evm_logs), so the
+-- models below decode them in SQL: an indexed address is `topics[k]`'s low 20 bytes, a uint256
+-- data word i is `data` bytes [32·i, 32·i + 32) read big-endian. Per (user, reward) the chain's
+-- stored accrual is exactly Σ Accrued.rewardsAccrued − Σ RewardsClaimed.amount (every change to
+-- it emits one of the two, and every Accrued sets the user's index to the asset index it carries),
+-- so with the B0 anchor below the models restate the chain's number from B0 on. All keyed by the
+-- log's own (block_height, event_index), so a replayed range rewrites the same rows.
+--
+-- Accrued(asset, reward, user, assetIndex, userIndex, rewardsAccrued), user-first: an account's
+-- accrual history is a key-prefix read. Fed by mm_incentive_accruals_mv.
+CREATE TABLE IF NOT EXISTS price_data.mm_incentive_accruals (`user_address` String, `asset_address` String, `reward_address` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `asset_index` UInt256, `user_index` UInt256, `rewards_accrued` UInt256, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (user_address, asset_address, reward_address, block_height, event_index) SETTINGS index_granularity = 1024;
+-- The chain's own RewardsController state at the anchor block B0 (8,200,000 — the aToken
+-- anchor's block), captured by the anchors loop (src/scripts/snapshot-atoken-anchors.ts --loop,
+-- the atoken-anchor service; manual modes src/scripts/snapshot-mm-incentive-anchors.ts) because
+-- EVM-log coverage before B0 is incomplete. Three row kinds, all `value` = what the view returned:
+--   user != '', asset  = ''  → getUserAccruedRewards(user, reward) (stored accrual, all assets);
+--   user != '', asset != ''  → getUserAssetIndex(user, asset, reward);
+--   user  = '', asset != ''  → getRewardsData(asset, reward).index (the programme's stored index).
+-- Reproducible (archive state at a pinned block); rows are written only for programmes that
+-- existed at B0, and a zero value is not written (a missing row reads as 0, which the chain agrees with).
+CREATE TABLE IF NOT EXISTS price_data.mm_incentive_anchor (`user_address` String, `asset_address` String, `reward_address` String, `value` UInt256, `anchor_block` UInt32, `updated_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (user_address, asset_address, reward_address) SETTINGS index_granularity = 1024;
+-- RewardsClaimed(user, reward, to, claimer, amount), user-first: what reduced the user's
+-- accrual. Fed by mm_incentive_claims_mv.
+CREATE TABLE IF NOT EXISTS price_data.mm_incentive_claims (`user_address` String, `reward_address` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `to_address` String, `claimer` String, `amount` UInt256, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (user_address, reward_address, block_height, event_index) SETTINGS index_granularity = 1024;
+-- Every value a programme's (asset, reward) index was stored at, programme-first — the "last
+-- index at or before block h" source: each Accrued (source 'accrued') and each AssetConfigUpdated
+-- (source 'config'), the only two places the index is written. Fed by two MVs.
+CREATE TABLE IF NOT EXISTS price_data.mm_incentive_index_updates (`asset_address` String, `reward_address` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `asset_index` UInt256, `source` LowCardinality(String), `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (asset_address, reward_address, block_height, event_index) SETTINGS index_granularity = 1024;
+-- AssetConfigUpdated(asset, reward, oldEmission, newEmission, oldDistributionEnd,
+-- newDistributionEnd, assetIndex): the incentive programmes and every change to their emission
+-- or end. Fed by mm_incentive_programmes_mv.
+CREATE TABLE IF NOT EXISTS price_data.mm_incentive_programmes (`asset_address` String, `reward_address` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `old_emission` UInt256, `new_emission` UInt256, `old_distribution_end` UInt256, `new_distribution_end` UInt256, `asset_index` UInt256, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (asset_address, reward_address, block_height, event_index) SETTINGS index_granularity = 256;
 CREATE TABLE IF NOT EXISTS price_data.money_market_account_value_snapshot_state (`snapshot_key` LowCardinality(String), `snapshot_id` String, `source_holding_count` UInt32, `source_position_count` UInt32, `claim_count` UInt32, `source_checksum` String, `computed_at` DateTime) ENGINE = ReplacingMergeTree(computed_at) ORDER BY snapshot_key SETTINGS index_granularity = 64;
 CREATE TABLE IF NOT EXISTS price_data.money_market_account_value_snapshots (`snapshot_id` String, `account_id` String, `holder` String, `pool_address` String, `market_key` LowCardinality(String), `reserve_present` UInt8, `asset_id` UInt32, `supplied` UInt256, `debt` UInt256, `total_collateral_base` UInt256, `total_debt_base` UInt256, `available_borrows_base` UInt256, `liquidation_threshold` UInt32, `ltv` UInt256, `health_factor` UInt256, `block_height` UInt32, `block_timestamp` DateTime, `computed_at` DateTime) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY snapshot_id ORDER BY (snapshot_id, account_id, pool_address, reserve_present, asset_id) SETTINGS index_granularity = 1024;
 -- Current aggregate money-market position per (holder, market): the winning
