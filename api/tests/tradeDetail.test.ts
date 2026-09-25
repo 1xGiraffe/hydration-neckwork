@@ -1,5 +1,9 @@
+import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
-import { swapEventAmounts, parseTradeLimit, parseRouteHops, limitMarginPct, routeHopVenue } from '../src/services/explorerService.ts'
+import { SWAP_EVENT_AMOUNT_IN_SQL, swapEventAmounts, parseTradeLimit, parseRouteHops, limitMarginPct, routeHopVenue } from '../src/services/explorerService.ts'
+
+const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
+const materializedViews = readFileSync(new URL('../../clickhouse/schema/003_materialized_views.sql', import.meta.url), 'utf8')
 
 // Trade-detail parsing: swap-event amount extraction (XYK uses amount/salePrice/
 // buyPrice instead of amountIn/amountOut), slippage-limit extraction per call
@@ -17,6 +21,33 @@ describe('swapEventAmounts', () => {
   it('maps XYK buy amount/buyPrice onto out/in', () => {
     const a = swapEventAmounts('XYK.BuyExecuted', { assetIn: 5, assetOut: 16, amount: '222', buyPrice: '444' })
     expect(a).toEqual({ assetIn: 5, assetOut: 16, amountIn: '444', amountOut: '222' })
+  })
+})
+
+// The SQL twin decodes a raw event's amountIn the way swap_activity_mv stores it, so
+// a page that reads legs from raw_events and a count that reads the projection agree
+// on XYK and LBP legs too — the venues whose amount lives under another arg.
+describe('SWAP_EVENT_AMOUNT_IN_SQL', () => {
+  const squash = (s: string) => s.replace(/\s+/g, '')
+
+  it('is the amount_in expression of swap_activity_mv', () => {
+    const mv = materializedViews.split('\n').find(line => line.includes('price_data.swap_activity_mv '))
+    expect(mv).toBeDefined()
+    const stored = /(multiIf\(.*?\)\)) AS amount_in,/.exec(mv!)
+    expect(stored).not.toBeNull()
+    expect(squash(stored![1])).toBe(squash(SWAP_EVENT_AMOUNT_IN_SQL))
+  })
+
+  it('decodes the DCA legs the account page pairs, and the count arm reads the stored column', () => {
+    const legRead = explorerService.indexOf('${SWAP_EVENT_AMOUNT_IN_SQL} AS amount_in')
+    expect(legRead).toBeGreaterThan(-1)
+    expect(explorerService.slice(legRead, legRead + 200)).toContain('FROM price_data.raw_events WHERE block_height IN {blocks:Array(UInt32)} AND event_name IN (${names})')
+
+    const at = explorerService.indexOf('function accountDcaTradeArm')
+    expect(at).toBeGreaterThan(-1)
+    const arm = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
+    expect(arm).toContain('SELECT block_height, event_index, asset_in, asset_out, amount_in\n        FROM price_data.swap_activity')
+    expect(arm).not.toContain("'XYK.SellExecuted'")
   })
 })
 
