@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { Fragment, type ReactNode } from 'react'
 import { useHdxDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
@@ -266,18 +266,22 @@ function UnlocksSection({ d }: { d: HdxDashboard }) {
         {nowTotal > 0 && (
           // Dots are 6px rather than the legend's 8px: they tie each figure to
           // its series without giving this caption the weight of the legend
-          // below it.
+          // below it. Each dot + label + figure is one unbreakable unit, but
+          // the separator between units stays outside the nowrap span: inside
+          // it the whole run was one line, 45px past a 390px viewport.
           <div className="hdx-note" style={{ marginTop: 0, marginBottom: 10 }}>
             Claimable now, an unlock or claim call away —{' '}
             {nowKeys.map((k, i) => (
-              <span key={k} style={{ whiteSpace: 'nowrap' }}>
+              <Fragment key={k}>
                 {i > 0 && ' · '}
-                <i style={{
-                  display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
-                  background: lockColor(k), marginRight: 5, verticalAlign: 'middle',
-                }} />
-                {LOCK_LABELS[k]} <Num v={nowHdx[k] ?? 0} />
-              </span>
+                <span style={{ whiteSpace: 'nowrap' }}>
+                  <i style={{
+                    display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+                    background: lockColor(k), marginRight: 5, verticalAlign: 'middle',
+                  }} />
+                  {LOCK_LABELS[k]} <Num v={nowHdx[k] ?? 0} />
+                </span>
+              </Fragment>
             ))}
             {nowKeys.length > 1 && <> (<Num v={nowTotal} /> total)</>}
           </div>
