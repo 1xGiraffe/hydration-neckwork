@@ -6,7 +6,11 @@ import { api } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, Copy, ShortAddr, ProfilePageSkeleton, DetailTabs, moduleName, emojiName, TagIcon, AccountEmoji, UserTagPill, rowNav, EmptyRow } from '../components/ui'
-import { PortfolioChart, ProfileStats, MoneyMarketPositions, moneyMarketDebtUsd, profileTabs, ActiveDcaTable, LimitOrdersTable, LiquidityPositionsTable, ProxyMultisigSection, ContractSection } from '../components/AccountSections'
+import { PortfolioChart, ProfileStats, moneyMarketDebtUsd, profileTabs, resolveProfileView, ProxyMultisigSection, ContractSection } from '../components/AccountSections'
+import { OrdersTab } from '../components/positions/OrdersTab'
+import { LiquidityTab } from '../components/positions/LiquidityTab'
+import { BorrowTab } from '../components/positions/BorrowTab'
+import { usePositionsPresence } from '../hooks/usePositions'
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
@@ -80,6 +84,9 @@ export function Account({ address }: { address: string }) {
   // for the same key, so the two share one request.
   const activityCounts = useAccountActivityCounts(address)
   const headBlock = stats?.headBlock ?? 0
+  // Whether finished orders / past LP / past money-market use exist, so the
+  // position tabs show for a holder with nothing open now.
+  const presence = usePositionsPresence({ kind: 'account', address: canonicalAddress ?? address }, !!data)
 
   // Document title mirrors the header's display-name logic: best-known name
   // (module > profile name > identity > emoji name) plus the
@@ -113,8 +120,8 @@ export function Account({ address }: { address: string }) {
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
           // Debt counts from every market and is netted out of the portfolio Value.
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(data.balances.length, mmList, (data.activeDcas?.length ?? 0) + (data.openLimitOrders?.length ?? 0), data.liquidityPositions?.length ?? 0, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
-          const activeView = tabs.some(t => t.key === view) ? view : 'overview'
+          const tabs = profileTabs(data.balances.length, { orders: (data.activeDcas?.length ?? 0) + (data.openLimitOrders?.length ?? 0), liquidity: data.liquidityPositions?.length ?? 0, borrow: mmList.length, presence: presence.data, presenceLoading: presence.isLoading, requestedView: view }, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
+          const activeView = resolveProfileView(view, tabs)
           return (
             <>
               {/* Above the header card and right-aligned, matching "Open in preis"
@@ -244,12 +251,18 @@ export function Account({ address }: { address: string }) {
                 refineWindow={(fromBlock, toBlock) => api.addressHistoryWindow(canonicalAddress ?? address, fromBlock, toBlock)} />
               )}
 
-              {activeView === 'positions' && (<>
-              <MoneyMarketPositions markets={mmList} defisimAddress={data.evmAddress ?? explicitEvmBinding ?? data.accountId} />
-              {data.activeDcas && <ActiveDcaTable dcas={data.activeDcas} headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />}
-              {data.openLimitOrders && <LimitOrdersTable orders={data.openLimitOrders} now={now} />}
-              {data.liquidityPositions && <LiquidityPositionsTable positions={data.liquidityPositions} />}
-              </>)}
+              {activeView === 'orders' && (
+                <OrdersTab scope={{ kind: 'account', address: canonicalAddress ?? address }} activeDcas={data.activeDcas ?? []} openLimitOrders={data.openLimitOrders ?? []}
+                  headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />
+              )}
+
+              {activeView === 'liquidity' && (
+                <LiquidityTab scope={{ kind: 'account', address: canonicalAddress ?? address }} positions={data.liquidityPositions ?? []} farmRewards={data.farmRewards ?? null} />
+              )}
+
+              {activeView === 'borrow' && (
+                <BorrowTab areas={[{ address: canonicalAddress ?? address, markets: mmList, defisimAddress: data.evmAddress ?? explicitEvmBinding ?? data.accountId }]} />
+              )}
 
               {activeView === 'contract' && data.contract && (
                 <Suspense fallback={null}>

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from 'react'
+import { ORDER_STATE_TONE } from '../components/positions/ordersFormat'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/explorer'
 import { useDcaSchedule, useStats } from '../hooks/useExplorerData'
@@ -29,12 +30,7 @@ function OrderLine({ data, cadence }: { data: DcaScheduleDetail; cadence: number
   )
 }
 
-const STATUS_TONE: Record<DcaScheduleDetail['status'], string> = {
-  active: 'var(--green)', completed: 'var(--sky)', terminated: 'var(--red)', cancelled: 'var(--text-low)',
-  // Runtime 443 moved live schedules onto ICE intents: a migration is the schedule
-  // finishing by other means, a failed one is a termination.
-  migrated: 'var(--sky)', 'migration-cancelled': 'var(--red)',
-}
+const STATUS_TONE: Record<DcaScheduleDetail['status'], string> = ORDER_STATE_TONE
 
 // The dollar figure beside a planned amount. A live schedule still has that money
 // to spend, so it is priced today; a finished one is priced at the day it stopped
