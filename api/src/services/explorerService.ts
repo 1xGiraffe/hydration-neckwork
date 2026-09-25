@@ -1446,7 +1446,7 @@ const utcToday = (): string => new Date().toISOString().slice(0, 10)
 export function datedWindowIsClosed(to?: string, today: string = utcToday()): boolean {
   return !!to && DATE_RE.test(to) && to < today
 }
-async function liveHeadTag(timeWindowed = false, closed = false): Promise<string> {
+export async function liveHeadTag(timeWindowed = false, closed = false): Promise<string> {
   return headCacheTag(timeWindowed && closed ? null : await indexedRawHead())
 }
 // Tag for the feeds that merge PENDING (unfinalized) rows: a new best block
@@ -4674,7 +4674,7 @@ export async function getAddressMoneyMarketHistory(addressInput: string, window?
  * the set the tag's value chart (getTag, getTagHistoryWindow) reconstructs, so the
  * LP history sits on the same grid as that chart.
  */
-function tagHistoryAccountSet(members: string[]): string[] {
+export function tagHistoryAccountSet(members: string[]): string[] {
   return [...new Set([...members, ...members.map(evmAccountForm).filter(Boolean) as string[]])]
 }
 
@@ -7410,7 +7410,7 @@ export interface ActiveDcaScheduleRow {
 // The events after which a schedule no longer runs. Runtime 443 added two: a live
 // schedule is converted into a DCA intent (Migrated) or, when it cannot be, ended
 // with its remainder refunded (MigrationCancelled). Either one leaves the live lists.
-const DCA_ENDED_EVENTS_SQL = "'DCA.Completed','DCA.Terminated','DCA.Migrated','DCA.MigrationCancelled'"
+export const DCA_ENDED_EVENTS_SQL = "'DCA.Completed','DCA.Terminated','DCA.Migrated','DCA.MigrationCancelled'"
 
 // The events after which an INTENT no longer rests: a limit order that fully
 // resolved, either kind cancelled or expired, and the DCA trade that spent the
@@ -7418,7 +7418,7 @@ const DCA_ENDED_EVENTS_SQL = "'DCA.Completed','DCA.Terminated','DCA.Migrated','D
 // leaves the remainder resting and keeps filling it (id …96250533888086 took
 // eight partials before its owner cancelled), so treating one as terminal would
 // hide a live order.
-const INTENT_ENDED_EVENTS_SQL = "'Intent.IntentResolved','Intent.IntentCanceled','Intent.IntentExpired','Intent.DcaCompleted'"
+export const INTENT_ENDED_EVENTS_SQL = "'Intent.IntentResolved','Intent.IntentCanceled','Intent.IntentExpired','Intent.DcaCompleted'"
 const INTENT_RESTING_SQL = `intent_id NOT IN (SELECT intent_id FROM price_data.intent_events WHERE event_name IN (${INTENT_ENDED_EVENTS_SQL}))`
 
 // A DCA intent as an ActiveDcaScheduleRow. The pallet's DCA intent is fixed-INPUT
@@ -18599,7 +18599,7 @@ export function dcaExecutionOutcome(
 // so the schedule's swap is the nearest owner-matching one BEFORE that event —
 // an owner running several DCAs in the same block has several swaps there, and
 // the first one in the block may belong to a different schedule.
-async function resolveDcaTradedPair(scheduleId: number, storedIn: number, storedOut: number, who: string): Promise<{ assetIn: number; assetOut: number }> {
+export async function resolveDcaTradedPair(scheduleId: number, storedIn: number, storedOut: number, who: string): Promise<{ assetIn: number; assetOut: number }> {
   if (storedIn !== 0 || storedOut !== 0) return { assetIn: storedIn, assetOut: storedOut }
   const swapRes = await client.query({
     query: `WITH (
@@ -18729,7 +18729,7 @@ function dcaOrderFromCallArgs(argsJson: string): DcaScheduleOrder | null {
   }
 }
 
-async function recoverDcaScheduleOrder(blockHeight: number, extrinsicIndex: number | null): Promise<DcaScheduleOrder | null> {
+export async function recoverDcaScheduleOrder(blockHeight: number, extrinsicIndex: number | null): Promise<DcaScheduleOrder | null> {
   if (extrinsicIndex == null) return null
   const res = await client.query({
     query: `SELECT args_json FROM price_data.raw_calls
@@ -18911,7 +18911,7 @@ async function dcaScheduleTerms(scheduleId: number, blockHeight: number, extrins
 // of the same column the block page's `intentMigratedFrom` link is built from — the
 // two surfaces agree by construction. Null until the row is indexed or when the id
 // did not extract (0 is never a real id: ids are `(deadline_ms << 64) | counter`).
-async function dcaMigratedIntentId(row: { bh: number; ei: number } | undefined): Promise<string | null> {
+export async function dcaMigratedIntentId(row: { bh: number; ei: number } | undefined): Promise<string | null> {
   if (!row) return null
   const res = await client.query({
     query: `SELECT toString(intent_id) AS intent_id FROM price_data.intent_events FINAL
@@ -20741,7 +20741,7 @@ export function reconstructATokenBalanceBuckets(
   return out
 }
 
-function historyH160(accountId: string): string | null {
+export function historyH160(accountId: string): string | null {
   const id = accountId.toLowerCase()
   return evmFromAccountId(id)?.toLowerCase() ?? (/^0x[0-9a-f]{64}$/.test(id) ? `0x${id.slice(2, 42)}` : null)
 }
@@ -28783,7 +28783,7 @@ export async function getTagVotesByReferendum(tagId: string, limit = 25, offset 
 // create/delete arbitrarily many list tags at will.
 export interface ListTagPresentation { tagId: string; name: string; color: string; icon: string; note: string }
 
-function listTagMembers(members: string[]): string[] {
+export function listTagMembers(members: string[]): string[] {
   return members.filter(m => ACCOUNT_RE.test(m))
 }
 // Every cache the member-list internals key purely by this scope string (none of

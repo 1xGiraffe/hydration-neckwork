@@ -943,14 +943,14 @@ export function selectLpHistoryBuckets(history: LpHistory, keep: readonly number
 // never be cached against a list that is missing a pool it needed.
 const LP_ID_LIST_TTL_MS = 10 * 60_000
 
-function xykLpAssetIdList(client: ClickHouseClient): Promise<number[]> {
+export function xykLpAssetIdList(client: ClickHouseClient): Promise<number[]> {
   return cached('lp:xyk-lp-ids', LP_ID_LIST_TTL_MS, async () => {
     const res = await client.query(tagged({ query: '-- lp:xyk-lp-ids\nSELECT DISTINCT lp_asset_id FROM price_data.xyk_pool_registry FINAL', format: 'JSONEachRow' }))
     return (await res.json<{ lp_asset_id: number }>()).map(r => Number(r.lp_asset_id))
   })
 }
 
-function stableswapPoolIdList(client: ClickHouseClient): Promise<number[]> {
+export function stableswapPoolIdList(client: ClickHouseClient): Promise<number[]> {
   return cached('lp:stableswap-pool-ids', LP_ID_LIST_TTL_MS, async () => {
     const res = await client.query(tagged({ query: '-- lp:stableswap-pool-ids\nSELECT DISTINCT pool_id FROM price_data.stableswap_pool_state_history', format: 'JSONEachRow' }))
     return (await res.json<{ pool_id: number }>()).map(r => Number(r.pool_id))
