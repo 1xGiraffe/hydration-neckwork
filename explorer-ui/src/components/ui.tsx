@@ -1928,7 +1928,7 @@ function ActivityPanelSkeleton({ rows = 6, noActor = false }: { rows?: number; n
   return (
     <div className="panel">
       <table className="tbl">
-        <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r">Protocol revenue</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
+        <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r" title="Protocol revenue this extrinsic generated">P. Revenue</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
         <tbody><TableSkeleton cols={cols} rows={rows} /></tbody>
       </table>
     </div>

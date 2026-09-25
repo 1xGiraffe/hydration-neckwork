@@ -11,7 +11,7 @@ import { F, Usd } from './ui'
 export function RevenueRow({ revenue }: { revenue: ActivityRevenue | undefined }) {
   if (!revenue) return null
   return <>
-    <div className="dt" title="Protocol revenue this extrinsic generated">Protocol revenue</div>
+    <div className="dt" title="Protocol revenue this extrinsic generated">Protocol Revenue</div>
     <div className="dd mono">
       <Usd v={revenue.protocolUsd} />
       {revenue.lpUsd > 0 && <span className="muted"> · <Usd v={revenue.lpUsd} /> to LPs</span>}
