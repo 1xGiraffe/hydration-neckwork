@@ -37,6 +37,9 @@ import { runtimeParaBlockMs } from './runtimeConstants.ts'
 
 // The relay chain's slot time. Not affected by Hydration's 2s migration.
 export const NOMINAL_RELAY_BLOCK_MS = 6_000
+// One wall-clock day. The runtime's `DAYS` is this over MILLISECS_PER_BLOCK, so
+// it is the numerator behind every block count that means "one day".
+export const MS_PER_DAY = 86_400_000
 // The pre-resolution default: the starting value for the resolution below
 // before anything has been read or measured. The live runtime is on 2000 since
 // runtime 440, so this is the conservative floor, not the current interval.
@@ -139,7 +142,7 @@ export function clampBlockMs(ms: number | null | undefined): number {
 // cannot support an average. Pure, so the guards are unit-testable.
 export function dailyBlockMs(blocksInDay: number | null | undefined): number | null {
   if (blocksInDay == null || !Number.isFinite(blocksInDay) || blocksInDay < MIN_DAILY_SAMPLE_BLOCKS) return null
-  const ms = 86_400_000 / blocksInDay
+  const ms = MS_PER_DAY / blocksInDay
   if (ms < MIN_PLAUSIBLE_BLOCK_MS || ms > MAX_PLAUSIBLE_BLOCK_MS) return null
   return ms
 }
@@ -250,7 +253,7 @@ export function decideParaBlockTime(
       source: 'metadata',
       measuredMs,
       warning: changed
-        ? `runtime slot time changed ${heldMs}ms → ${fromMetadata}ms; re-pin the block-count constants that are NOT read from metadata (SECURITY_FUSE_PERIOD_BLOCKS)`
+        ? `runtime slot time changed ${heldMs}ms → ${fromMetadata}ms; every block count derived from it (the deposit-fuse period, projected unlock dates) follows on the next resolution`
         : null,
     }
   }

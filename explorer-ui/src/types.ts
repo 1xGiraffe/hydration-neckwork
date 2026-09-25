@@ -53,9 +53,10 @@ export interface ExplorerStats {
   // The chain's MEASURED pace — elastic scaling runs it a little ahead of the
   // slot time. Use it for a live block delta (a countdown to a future block).
   avgBlockSec: number
-  // The runtime's NOMINAL slot time (6 today, 2 planned). Runtime block-count
-  // constants — a fuse period, a lock duration — are DERIVED from it, so a
-  // pallet's 14 400-block day is stated at this rate, never at the measured one.
+  // The runtime's NOMINAL slot time (2 since runtime 440, 6 before). Runtime
+  // block-count constants — a fuse period, a lock duration — are DERIVED from
+  // it, so a pallet's 43 200-block day is stated at this rate, never at the
+  // measured one.
   nominalBlockSec: number
   transfers24h: number
   extrinsics24h: number
@@ -2263,8 +2264,9 @@ export interface SecurityDashboard {
   }
   perBlock: {
     defaultTradePct: number
-    defaultAddPct: number
-    defaultRemovePct: number
+    // Null when the runtime's default disables that direction's limit.
+    defaultAddPct: number | null
+    defaultRemovePct: number | null
     rows: SecurityPerBlockRow[]
     peakWindowDays: number
   }
