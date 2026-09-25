@@ -1,7 +1,8 @@
 import type { ClickHouseClient } from '../../db/client.ts'
-import { assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
+import { assetDescriptor, currentPriceOf } from '../../services/explorerAssets.ts'
 import { HUB_ASSET_ID, OMNI_FIXED, omnipoolRemoveLiquidity, stableswapShareLegs, xykShareLegs } from '../../services/lpMath.ts'
 import { loadV3AccountPositions, v3AccountPositions } from '../../services/uniswapV3Positions.ts'
+import { lmCountedClaimable, loadLmRewards, type LmRewardRow } from '../../services/lmRewardSnapshot.ts'
 import { renderUsd } from '../../services/valuation.ts'
 import type { ParsedAddress } from './address.ts'
 import { freshPriceMap } from './assetsData.ts'
@@ -33,8 +34,27 @@ import { xykLpAssetIds } from './poolsData.ts'
 //
 // USD is at the current price (positions are holdings, not flows); an asset
 // with no fresh price leaves `valueUsd` null on its leg and the position.
+//
+// A farmed position also states its farm entries' unclaimed rewards
+// (services/lmRewardSnapshot: what one claim_rewards would pay at the reward
+// snapshot's block, loyalty-adjusted, less what was claimed), at current prices
+// and in a field of their own — never in the legs or the position's valueUsd.
+// An Omnipool position carries its deposit's entries; an XYK farmed position,
+// which is the pool's whole farmed principal, every deposit of that pool.
 
 export interface LpLeg { assetId: string; amount: string; valueUsd: string | null }
+
+export interface LpUnclaimedReward {
+  depositId: string
+  globalFarmId: number
+  yieldFarmId: number
+  assetId: string
+  amount: string
+  valueUsd: string | null
+  projected: boolean
+  belowExistentialDeposit: boolean
+  payable: boolean
+}
 
 export interface LpPositionItem {
   venue: 'omnipool' | 'stableswap' | 'xyk' | 'uniswapv3' | 'gamma'
@@ -45,12 +65,14 @@ export interface LpPositionItem {
   shares: string
   legs: LpLeg[]
   valueUsd: string | null
+  unclaimedRewards: LpUnclaimedReward[]
 }
 
 export interface LpPositionsResult {
   items: LpPositionItem[]
   asOfBlock: number
-  totals: { valueUsd: string }
+  rewardsAsOfBlock: number | null
+  totals: { valueUsd: string; unclaimedRewardsUsd: string }
 }
 
 const big = (value: unknown): bigint => {
@@ -59,7 +81,7 @@ const big = (value: unknown): bigint => {
 }
 
 function legOf(assetId: number, amount: bigint, prices: Map<number, bigint>): { leg: LpLeg; usd: bigint | null } {
-  const price = prices.get(assetId) ?? prices.get(priceAssetId(assetId))
+  const price = currentPriceOf(prices, assetId)
   const usd = price == null ? null : (amount * price) / 10n ** BigInt(assetDescriptor(assetId).decimals)
   return { leg: { assetId: String(assetId), amount: amount.toString(), valueUsd: usd == null ? null : renderUsd(usd) }, usd }
 }
@@ -74,7 +96,21 @@ function assemble(venue: LpPositionItem['venue'], farmed: boolean, positionId: s
     out.push(leg)
     total = total == null || usd == null ? null : total + usd
   }
-  return { item: { venue, farmed, positionId, poolKey, shareAssetId, shares: shares.toString(), legs: out, valueUsd: total == null ? null : renderUsd(total) }, usd: total }
+  return { item: { venue, farmed, positionId, poolKey, shareAssetId, shares: shares.toString(), legs: out, valueUsd: total == null ? null : renderUsd(total), unclaimedRewards: [] }, usd: total }
+}
+
+// The farm entries behind one farmed item, each valued at the current price;
+// the scaled USD of the priced ones is returned for the exact account total. An
+// unpayable entry keeps its amount and values at 0 (lmCountedClaimable).
+function rewardsOf(rows: LmRewardRow[], prices: Map<number, bigint>): { rewards: LpUnclaimedReward[]; usd: bigint } {
+  let usd = 0n
+  const rewards = rows.map(r => {
+    const { leg } = legOf(r.rewardAssetId, r.claimable, prices)
+    const { leg: counted, usd: legUsd } = legOf(r.rewardAssetId, lmCountedClaimable(r), prices)
+    if (legUsd != null) usd += legUsd
+    return { depositId: r.depositId, globalFarmId: r.globalFarmId, yieldFarmId: r.yieldFarmId, assetId: leg.assetId, amount: leg.amount, valueUsd: counted.valueUsd, projected: r.projected, belowExistentialDeposit: r.belowExistentialDeposit, payable: r.payable }
+  })
+  return { rewards, usd }
 }
 
 interface OmnipoolPositionRow { position_id: string; farmed: number; asset_id: number; shares: string; amount: string; price: string }
@@ -187,13 +223,17 @@ export async function liquidityPositions(client: ClickHouseClient, parsed: Parse
   // the AccountId32 (the first 20 bytes), which is where a substrate account's
   // position NFTs and vault shares are held.
   const h160 = parsed.evmAddress ?? `0x${parsed.accountId.slice(2, 42)}`
-  const [snapshot, prices, lpByPool, omni, farmed, v3] = await Promise.all([
+  const [snapshot, prices, lpByPool, omni, farmed, v3, rewardSnapshot] = await Promise.all([
     poolSnapshot(client),
     freshPriceMap(client),
     xykLpAssetIds(client),
     omnipoolPositions(client, parsed.accountId),
     xykFarmedShares(client, parsed.accountId),
     loadV3AccountPositions(client, [h160]),
+    // The reward snapshot is a figure beside the positions, not part of them: a
+    // failed read states it as unavailable (rewardsAsOfBlock null) rather than
+    // failing the positions.
+    loadLmRewards(client, [parsed.accountId]).catch(() => ({ asOfBlock: null, rows: [] as LmRewardRow[] })),
   ])
   const poolByLp = new Map<number, string>()
   for (const [pool, lp] of lpByPool) poolByLp.set(lp, pool)
@@ -247,9 +287,27 @@ export async function liquidityPositions(client: ClickHouseClient, parsed: Parse
     else assembled.push(assemble('gamma', false, null, p.vault ?? '', null, p.shares, legs, prices))
   }
 
+  // Attach each farm entry to the farmed item it belongs to. An entry whose
+  // position this read does not list (a deposit younger than the index, or an
+  // XYK pool whose principal the reconstruction has not reached yet) is left
+  // out of the items but still counted in the total, which is the account's.
+  for (const { item } of assembled) {
+    if (!item.farmed) continue
+    const rows = rewardSnapshot.rows.filter(r => item.venue === 'omnipool'
+      ? r.pallet === 'omnipool' && r.positionId === item.positionId
+      : item.venue === 'xyk' && r.pallet === 'xyk' && r.lpAssetId != null && String(r.lpAssetId) === item.shareAssetId)
+    item.unclaimedRewards = rewardsOf(rows, prices).rewards
+  }
+  const rewardsUsd = rewardsOf(rewardSnapshot.rows, prices).usd
+
   let totalUsd = 0n
   for (const { usd } of assembled) if (usd != null) totalUsd += usd
   // Largest first; unpriced positions last.
   assembled.sort((a, b) => (b.usd ?? -1n) > (a.usd ?? -1n) ? 1 : (b.usd ?? -1n) < (a.usd ?? -1n) ? -1 : 0)
-  return { items: assembled.map(a => a.item), asOfBlock: snapshot.blockHeight, totals: { valueUsd: renderUsd(totalUsd) } }
+  return {
+    items: assembled.map(a => a.item),
+    asOfBlock: snapshot.blockHeight,
+    rewardsAsOfBlock: rewardSnapshot.asOfBlock,
+    totals: { valueUsd: renderUsd(totalUsd), unclaimedRewardsUsd: renderUsd(rewardsUsd) },
+  }
 }

@@ -26,14 +26,15 @@ const zAssetItem = z.object({
   origin: z.object({ ecosystem: z.string(), chainId: z.string(), assetId: z.string().nullable() }).nullable()
     .describe('Where a bridged asset originates; null for native assets.'),
   priceUsd: z.string().nullable()
-    .describe('Current USD price as a decimal string; null when the asset has no price fresher than 30 days (an asset whose feed died is unpriced, never priced at its final close).'),
-  priceUpdatedAt: zIsoTimestamp.nullable(),
+    .describe('Current USD price as a decimal string; null when the asset has no price fresher than 30 days (an asset whose feed died is unpriced, never priced at its final close). A stableswap share token (a pool\'s id is its share token\'s id: 2-Pool-GDOT = 690, …) is priced at what one share REDEEMS for — its pro-rata slice of every reserve of its pool in the newest per-block pool snapshot, each leg at its current price (the valuation `/v1/accounts/{address}/balances` applies) — never at its own price feed or at its underlying asset\'s price, and its timestamp is that snapshot\'s. A share with a leg without a current price, no outstanding issuance, no pool in the snapshot, or a snapshot older than 1 h is unpriced (null).'),
+  priceUpdatedAt: zIsoTimestamp.nullable()
+    .describe('When the price was observed: its feed\'s last close, or for a stableswap share token the timestamp of the pool snapshot its price is derived from; null when unpriced or undated.'),
 })
 
 const zPriceAt = z.object({
   assetId: zAssetId,
   priceUsd: z.string().nullable(),
-  atBlock: z.number().int().nullable().describe('The block the reported price actually comes from — the newest price row at or before the requested point.'),
+  atBlock: z.number().int().nullable().describe('The block the reported price actually comes from — the newest price row at or before the requested point; for the CURRENT price of a stableswap share token, the block of the pool snapshot its derived price is read from.'),
   atTime: zIsoTimestamp.nullable(),
 })
 
@@ -66,7 +67,7 @@ export const assetsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
     schema: {
       tags: ['assets'],
       summary: 'The full asset registry with current prices',
-      description: 'Every registered asset (native, bridged, aToken forms), with decimals and symbols — the lookup table for every `assetId` and raw amount on this surface. The registry is an in-memory snapshot refreshed every 5 minutes; prices refresh every 5 minutes. The Omnipool hub asset (id 1) is named H2O.',
+      description: 'Every registered asset (native, bridged, aToken forms), with decimals and symbols — the lookup table for every `assetId` and raw amount on this surface. The registry is an in-memory snapshot refreshed every 5 minutes; prices refresh every 5 minutes. The Omnipool hub asset (id 1) is named H2O. A stableswap share token (a pool\'s id is its share token\'s id: 2-Pool-GDOT = 690, …) is priced at what one share REDEEMS for — its pro-rata slice of every reserve of its pool in the newest per-block pool snapshot, each leg at its current price (the valuation `/v1/accounts/{address}/balances` applies) — never at its own price feed or at its underlying asset\'s price, and its timestamp is that snapshot\'s. A share with a leg without a current price, no outstanding issuance, no pool in the snapshot, or a snapshot older than 1 h is unpriced (null).',
       response: { 200: z.object({ items: z.array(zAssetItem) }) },
     },
   }, async () => ({ items: await listAssets(opts.client) }))
@@ -75,7 +76,7 @@ export const assetsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
     schema: {
       tags: ['assets'],
       summary: 'One asset by registry id',
-      description: 'One registry entry: symbol, name, decimals and origin, plus the current USD price. `priceUsd` is subject to the 30-day freshness rule — an asset whose feed has not produced a price in the last 30 days reports null rather than its final close, so a dead feed is visible as unpriced instead of frozen. The Omnipool hub asset (id 1) is named **H2O**. 404 for an id the registry does not hold.',
+      description: 'One registry entry: symbol, name, decimals and origin, plus the current USD price. `priceUsd` is subject to the 30-day freshness rule — an asset whose feed has not produced a price in the last 30 days reports null rather than its final close, so a dead feed is visible as unpriced instead of frozen. A stableswap share token (a pool\'s id is its share token\'s id: 2-Pool-GDOT = 690, …) is priced at what one share REDEEMS for — its pro-rata slice of every reserve of its pool in the newest per-block pool snapshot, each leg at its current price (the valuation `/v1/accounts/{address}/balances` applies) — never at its own price feed or at its underlying asset\'s price, and its timestamp is that snapshot\'s. A share with a leg without a current price, no outstanding issuance, no pool in the snapshot, or a snapshot older than 1 h is unpriced (null). The Omnipool hub asset (id 1) is named **H2O**. 404 for an id the registry does not hold.',
       params: z.object({ id: zAssetId }),
       response: { 200: zAssetItem, 400: zError, 404: zError },
     },
@@ -94,7 +95,8 @@ export const assetsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
       tags: ['assets'],
       summary: 'USD price, current or at a block/time',
       description: [
-        'Without `at=`: the current price, subject to the 30-day freshness bound (a stale feed reports null).',
+        'Without `at=`: the current price, subject to the 30-day freshness bound (a stale feed reports null). A stableswap share token (a pool\'s id is its share token\'s id: 2-Pool-GDOT = 690, …) is priced at what one share REDEEMS for — its pro-rata slice of every reserve of its pool in the newest per-block pool snapshot, each leg at its current price (the valuation `/v1/accounts/{address}/balances` applies) — never at its own price feed or at its underlying asset\'s price, and its timestamp is that snapshot\'s. A share with a leg without a current price, no outstanding issuance, no pool in the snapshot, or a snapshot older than 1 h is unpriced (null). `atBlock`/`atTime` are then that snapshot\'s.',
+        'With `at=`, a stableswap share token reports its own price feed\'s last row as of that point, like any asset — a share has no redeemable-value history, so the as-of read is the feed, not the derived price.',
         'With `at=` (a block height, or an ISO-8601 time): the LAST price known at that point — an as-of read with NO staleness bound, deliberately: historical valuation uses the latest price known at the event. For an asset whose feed died this is its final close however old, so always read `atBlock`/`atTime` to see where the price actually comes from.',
       ].join('\n\n'),
       params: z.object({ id: zAssetId }),

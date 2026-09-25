@@ -10,7 +10,7 @@ import { performancePoints } from './performance'
 import { CAT } from './activityColors'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds, blockSpanSeconds, dcaAmountLeft, dcaCadence, dcaLeftUsd, dcaProgress, dcaRunway, fmtDuration } from '../utils/dca'
-import type { MoneyMarketPosition, LpPosition, ActiveDca, OpenLimitOrder, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent, ContractInfo } from '../types'
+import type { MoneyMarketPosition, LpPosition, ActiveDca, OpenLimitOrder, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent, ContractInfo, LpUnclaimedReward, FarmRewardsSummary, MoneyMarketRewardsSummary } from '../types'
 import type { ListCount } from '../api/explorer'
 import type { ReactNode } from 'react'
 
@@ -290,7 +290,21 @@ function moneyMarketValueBreakdown(markets: MoneyMarketPosition[]): ReactNode {
   )
 }
 
-export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, valueUsd, exHdxValueUsd, moneyMarket }: {
+const MM_REWARDS_TITLE = 'What claiming every lending incentive now would pay (the money market\'s own getAllUserRewards), at current prices. Included in Value; rewards whose asset has no price are not.'
+const MM_BELOW_ED_TITLE = ' Some amounts are below the reward asset\'s existential deposit: a claim including them reverts until the account holds at least that much of the asset. Still owed.'
+
+const FARM_REWARDS_TITLE = 'What claiming every farm entry now would pay (loyalty multiplier applied, already-claimed rewards subtracted), at current prices. Included in Value; rewards whose asset has no price are not.'
+const BELOW_ED_TITLE = ' Some amounts are below the reward asset\'s existential deposit while the account holds less than that of the asset: a claim now would pay them to the treasury (a withdraw forfeits them the same way), so they are not counted.'
+// Non-zero rewards whose asset has no price: they are in no USD sum.
+const unpricedCount = (entries: { amount: string; valueUsd: number | null }[]): number =>
+  entries.filter(e => e.amount !== '0' && e.valueUsd == null).length
+// Non-zero farm rewards a claim would not pay the account (below ED, owner holding less).
+const unpayableCount = (entries: { amount: string; payable?: boolean }[]): number =>
+  entries.filter(e => e.amount !== '0' && e.payable === false).length
+const unpayableNote = (n: number): string => (n > 0 ? ` (+ ${n} unpayable)` : '')
+const unpricedNote = (n: number): string => (n > 0 ? ` (+ ${n} unpriced)` : '')
+
+export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, valueUsd, exHdxValueUsd, moneyMarket, farmRewards, moneyMarketRewards }: {
   tradingVolumeUsd?: number | null
   liquidationVolumeUsd?: number | null
   // Protocol revenue earned from this account (fees paid, penalties, interest).
@@ -307,11 +321,19 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUs
   // explaining the same subtraction differently — or, as the account page did,
   // not at all.
   moneyMarket?: MoneyMarketPosition[]
+  // Unclaimed farm rewards: already inside `valueUsd`; stated as its share.
+  farmRewards?: FarmRewardsSummary | null
+  // Claimable lending incentives: the same — inside `valueUsd`, stated as its share.
+  moneyMarketRewards?: MoneyMarketRewardsSummary | null
 }) {
   const trading = tradingVolumeUsd ?? 0
   const liquidation = liquidationVolumeUsd ?? 0
   const revenue = revenueUsd ?? 0
   const valueHint = moneyMarket?.length ? moneyMarketValueBreakdown(moneyMarket) : null
+  const rewardsUnpriced = unpricedCount((farmRewards?.items ?? []).map(i => ({ amount: i.claimable, valueUsd: i.claimableUsd })))
+  const rewardsUnpayable = unpayableCount((farmRewards?.items ?? []).map(i => ({ amount: i.claimable, payable: i.payable })))
+  const incentivesUnpriced = unpricedCount((moneyMarketRewards?.items ?? []).map(i => ({ amount: i.claimable, valueUsd: i.claimableUsd })))
+  const incentivesBelowEd = (moneyMarketRewards?.items ?? []).some(i => i.belowExistentialDeposit)
   return (
     <>
     <div className="acct-stats">
@@ -344,6 +366,12 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUs
         stats, so it can run left under trading/liquidation instead of
         wrapping inside the value's narrow column. */}
     {valueHint && <div className="acct-stats-hint">{valueHint}</div>}
+    {farmRewards && (farmRewards.totalUsd > 0 || rewardsUnpriced > 0 || rewardsUnpayable > 0) && <div className="acct-stats-hint">
+      <div className="hint" title={`${FARM_REWARDS_TITLE}${rewardsUnpayable > 0 ? BELOW_ED_TITLE : ''} As of block ${F.int(farmRewards.asOfBlock)}.`}>Incl. <Usd v={farmRewards.totalUsd} /> unclaimed farm rewards{rewardsUnpriced > 0 ? ` (+ ${rewardsUnpriced} unpriced, not included)` : ''}{rewardsUnpayable > 0 ? ` (+ ${rewardsUnpayable} unpayable, not included)` : ''}</div>
+    </div>}
+    {moneyMarketRewards && (moneyMarketRewards.totalUsd > 0 || incentivesUnpriced > 0) && <div className="acct-stats-hint">
+      <div className="hint" title={`${MM_REWARDS_TITLE}${incentivesBelowEd ? MM_BELOW_ED_TITLE : ''} As of block ${F.int(moneyMarketRewards.asOfBlock)}.`}>Incl. <Usd v={moneyMarketRewards.totalUsd} /> unclaimed lending incentives{incentivesUnpriced > 0 ? ` (+ ${incentivesUnpriced} unpriced, not included)` : ''}</div>
+    </div>}
   </>
   )
 }
@@ -426,6 +454,11 @@ function MoneyMarketCard({ mm, defisimAddress }: { mm: MoneyMarketPosition; defi
   const headingId = `money-market-${mm.marketKey.replace(/[^a-z0-9_-]/gi, '-')}`
   const isPrimary = mm.role === 'primary'
   const iconAsset = MARKET_ICON_ASSET[mm.marketKey]
+  // The market's claimable incentives (already in Value, never in Lent).
+  const rewards = (mm.unclaimedRewards ?? []).filter(r => r.claimable !== '0')
+  const pricedRewards = rewards.filter(r => r.claimableUsd != null)
+  const rewardsUsd = pricedRewards.reduce((s, r) => s + (r.claimableUsd ?? 0), 0)
+  const rewardsUnpriced = unpricedCount(rewards.map(r => ({ amount: r.claimable, valueUsd: r.claimableUsd })))
   return (
     <section className="mm-market-section" aria-labelledby={headingId} data-market-key={mm.marketKey}>
       <header className="sec-title mm-title-row">
@@ -449,6 +482,14 @@ function MoneyMarketCard({ mm, defisimAddress }: { mm: MoneyMarketPosition; defi
               address. memberCount says it directly: absent on one account's own
               position, and 1 on a tag whose market has a single holder. */}
           <div className="mm-stat"><span className="k">{(mm.memberCount ?? 0) > 1 ? 'Lowest member health' : 'Health factor'}</span><span className={`v hf ${hf.cls}`}>{hf.label}</span></div>
+          {rewards.length > 0 && <div className="mm-stat" title={`${MM_REWARDS_TITLE}${rewards.some(r => r.belowExistentialDeposit) ? MM_BELOW_ED_TITLE : ''} Not part of Lent.`}>
+            <span className="k">Unclaimed incentives</span>
+            {/* With no priced incentive the raw amounts stand in — an unpriced
+                reward still reads as a reward, never as $0.00. */}
+            <span className="v">{pricedRewards.length
+              ? <><Usd v={rewardsUsd} />{unpricedNote(rewardsUnpriced)}</>
+              : rewards.map((r, i) => <span key={`${r.asset.assetId}-${i}`}>{i > 0 ? ' · ' : ''}<Amt raw={r.claimable} dec={r.asset.decimals} /> {r.asset.symbol}</span>)}</span>
+          </div>}
         </div>
         <MoneyMarketRiskBar mm={mm} />
         <MoneyMarketReserveColumns mm={mm} />
@@ -870,6 +911,27 @@ function lpPositionName(p: LpPosition): string {
   return `Position #${p.tokenId ?? p.positionId}`
 }
 
+// The farmed row's rewards in one quiet line under its value: their USD sum
+// (naming how many unpriced ones it leaves out), or — when no reward asset is
+// priced — the raw amounts per asset, so an unpriced reward still reads as a
+// reward rather than as nothing.
+function UnclaimedRewardsLine({ rewards }: { rewards: LpUnclaimedReward[] }) {
+  const held = rewards.filter(r => r.amount !== '0')
+  if (!held.length) return null
+  const unpayable = unpayableCount(held)
+  const priced = held.filter(r => r.valueUsd != null && r.payable !== false)
+  const usd = priced.reduce((sum, r) => sum + (r.valueUsd ?? 0), 0)
+  const unprojected = held.some(r => !r.projected)
+  const title = `${FARM_REWARDS_TITLE}${unprojected ? ' Some amounts are as of the farm\'s last on-chain sync (the head projection failed this cycle).' : ''}${unpayable ? BELOW_ED_TITLE : ''}`
+  return (
+    <div className="muted" style={{ fontSize: 11, fontWeight: 400 }} title={title}>
+      {priced.length
+        ? <>+ <Usd v={usd} />{unpricedNote(unpricedCount(held))}{unpayableNote(unpayable)} unclaimed</>
+        : held.map((r, i) => <span key={`${r.depositId}-${r.yieldFarmId}`}>{i > 0 ? ' · ' : '+ '}<Amt raw={r.amount} dec={r.asset.decimals} /> {r.asset.symbol}{r.payable === false ? ' (unpayable)' : ''}</span>)}
+    </div>
+  )
+}
+
 export function LiquidityPositionsTable({ positions }: { positions: LpPosition[] }) {
   if (!positions.length) return null
   return (
@@ -898,7 +960,10 @@ export function LiquidityPositionsTable({ positions }: { positions: LpPosition[]
                   {p.hubAmount && <div className="muted" style={{ fontSize: 11, fontWeight: 400 }}>+ <Amt raw={p.hubAmount} dec={12} /> H2O</div>}
                   {p.assetB && p.amountB != null && <div className="muted" style={{ fontSize: 11, fontWeight: 400 }}>+ <Amt raw={p.amountB} dec={p.assetB.decimals} /> {p.assetB.symbol}</div>}
                 </td>
-                <td data-label="Value" className="r mono"><Usd v={p.valueUsd} /></td>
+                <td data-label="Value" className="r mono">
+                  <Usd v={p.valueUsd} />
+                  {p.unclaimedRewards && <UnclaimedRewardsLine rewards={p.unclaimedRewards} />}
+                </td>
               </tr>
             )
           })}

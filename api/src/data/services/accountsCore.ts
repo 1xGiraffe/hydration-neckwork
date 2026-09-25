@@ -1,7 +1,8 @@
 import type { ClickHouseClient } from '../../db/client.ts'
+import { settledAmount } from '../../services/aaveMath.ts'
 import { cached } from '../../services/cache.ts'
 import { attachExtrinsicHashes, type WithExtrinsicHash } from './extrinsicHashes.ts'
-import { assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
+import { assetDescriptor, assetIdFromMmAddress, currentPriceOf } from '../../services/explorerAssets.ts'
 import { renderUsd } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
 import { freshPriceMap } from './assetsData.ts'
@@ -120,20 +121,6 @@ export interface BalanceTotals { assetsUsd: string; debtUsd: string; netUsd: str
 
 export interface AccountBalances { items: BalanceItem[]; totals: BalanceTotals }
 
-const RAY = 10n ** 27n
-
-// HOLLAR is the one deployed-token reserve; every other money-market reserve is
-// the ERC-20 precompile of a registry asset (0x…01 + 8-hex asset id). Mirrors
-// the explorer's assetIdFromMmAddress.
-const MM_CONTRACT_ASSET: Record<string, number> = { '0x531a654d1696ed52e7275a8cede955e82620f99a': 222 }
-
-export function assetIdFromMmAddress(addr: string): number | null {
-  const h = (addr ?? '').toLowerCase().replace(/^0x/, '')
-  if (MM_CONTRACT_ASSET[`0x${h}`] != null) return MM_CONTRACT_ASSET[`0x${h}`]
-  if (h.length === 40 && /^0{30}01/.test(h)) return parseInt(h.slice(32), 16)
-  return null
-}
-
 function bigIntOrZero(value: unknown): bigint {
   try { return BigInt(String(value ?? '0') || '0') } catch { return 0n }
 }
@@ -196,6 +183,33 @@ async function loadMoneyMarketReserveState(client: ClickHouseClient): Promise<Mo
   return { anchorBlock: Number(b0) || 0, reserves, indices, marketByPool }
 }
 
+/**
+ * The account's current scaled balance per aToken / variable-debt contract: the B0
+ * anchor plus every indexed delta after it (holder-first reads), positive ones only.
+ * Shared by /balances and /money-market/positions so the two state one reserve row
+ * one way.
+ */
+export async function accountScaledBalances(client: ClickHouseClient, h160: string, anchorBlock: number): Promise<Map<string, bigint>> {
+  const scaledRes = await client.query({
+    query: `-- data:accounts:atoken-scaled
+        SELECT contract, toString(sum(anchor) + sum(delta)) AS scaled FROM (
+          SELECT lower(contract_address) AS contract, toInt256(scaled_balance) AS anchor, toInt256(0) AS delta
+          FROM price_data.atoken_scaled_anchor FINAL WHERE holder = {h:String}
+          UNION ALL
+          SELECT contract_address AS contract, toInt256(0) AS anchor, sum(scaled_delta) AS delta
+          FROM price_data.atoken_scaled_deltas FINAL
+          WHERE holder = {h:String} AND block_height > {b0:UInt32}
+          GROUP BY contract
+        ) GROUP BY contract HAVING (sum(anchor) + sum(delta)) > 0`,
+    query_params: { h: h160, b0: anchorBlock },
+    format: 'JSONEachRow',
+  })
+  const scaled = new Map<string, bigint>()
+  for (const row of await scaledRes.json<{ contract: string; scaled: string }>()) scaled.set(row.contract, bigIntOrZero(row.scaled))
+  return scaled
+}
+
+
 export async function accountBalances(client: ClickHouseClient, parsed: ParsedAddress): Promise<AccountBalances> {
   const h160 = h160For(parsed)
   const [substrateRes, erc20Res, reserveState, prices] = await Promise.all([
@@ -245,22 +259,7 @@ export async function accountBalances(client: ClickHouseClient, parsed: ParsedAd
   // reserve's current index / RAY — the explorer's own reconstruction, and the
   // reason a supplied DOT never shows in the substrate table.
   if (reserveState.anchorBlock) {
-    const scaledRes = await client.query({
-      query: `-- data:accounts:atoken-scaled
-          SELECT contract, toString(sum(anchor) + sum(delta)) AS scaled FROM (
-            SELECT lower(contract_address) AS contract, toInt256(scaled_balance) AS anchor, toInt256(0) AS delta
-            FROM price_data.atoken_scaled_anchor FINAL WHERE holder = {h:String}
-            UNION ALL
-            SELECT contract_address AS contract, toInt256(0) AS anchor, sum(scaled_delta) AS delta
-            FROM price_data.atoken_scaled_deltas FINAL
-            WHERE holder = {h:String} AND block_height > {b0:UInt32}
-            GROUP BY contract
-          ) GROUP BY contract HAVING (sum(anchor) + sum(delta)) > 0`,
-      query_params: { h: h160, b0: reserveState.anchorBlock },
-      format: 'JSONEachRow',
-    })
-    const scaled = new Map<string, bigint>()
-    for (const row of await scaledRes.json<{ contract: string; scaled: string }>()) scaled.set(row.contract, bigIntOrZero(row.scaled))
+    const scaled = await accountScaledBalances(client, h160, reserveState.anchorBlock)
     for (const reserve of reserveState.reserves) {
       const index = reserveState.indices.get(`${reserve.poolProxy}:${reserve.assetAddress}`)
       if (!index) continue
@@ -268,8 +267,8 @@ export async function accountBalances(client: ClickHouseClient, parsed: ParsedAd
       if (underlyingId == null) continue
       const aScaled = scaled.get(reserve.atoken) ?? 0n
       const dScaled = scaled.get(reserve.vdebt) ?? 0n
-      const supplied = aScaled > 0n ? (aScaled * index.liq) / RAY : 0n
-      const debt = dScaled > 0n ? (dScaled * index.vbi) / RAY : 0n
+      const supplied = settledAmount(aScaled, index.liq)
+      const debt = settledAmount(dScaled, index.vbi)
       if (supplied > 0n) items.push({ assetId: String(underlyingId), kind: 'atoken', amount: supplied.toString(), free: null, reserved: null })
       if (debt > 0n) items.push({ assetId: String(underlyingId), kind: 'vdebt', amount: debt.toString(), free: null, reserved: null })
     }
@@ -279,10 +278,11 @@ export async function accountBalances(client: ClickHouseClient, parsed: ParsedAd
   let debtUsd = 0n
   const priced = items.map(item => {
     const descriptor = assetDescriptor(Number(item.assetId))
-    // An asset priced through another (aTokens, pool shares) falls back to its
-    // price alias when it carries no feed of its own.
+    // The one current lookup (currentPriceOf): own entry first, else the alias —
+    // a pool share's entry is its derived redeemable value (freshPriceMap) and is
+    // never walked on to an underlying.
     const assetId = Number(item.assetId)
-    const price = prices.get(assetId) ?? prices.get(priceAssetId(assetId))
+    const price = currentPriceOf(prices, assetId)
     const usd = price != null && price > 0n ? (BigInt(item.amount) * price) / 10n ** BigInt(descriptor.decimals) : null
     if (usd != null) {
       if (item.kind === 'vdebt') debtUsd += usd

@@ -1,10 +1,13 @@
 import type { ClickHouseClient } from '../db/client.ts'
+import { settledAmount } from './aaveMath.ts'
 import { usdOfRaw } from './assetValue.ts'
-import { blockClock } from './blockClock.ts'
+import { blockClock, heightAtOrBeforeExact, timeUpperBoundOfHeight, type BlockClock } from './blockClock.ts'
 import { chDateTime, chTimestamp } from './clickhouseTime.ts'
 import { INTERVAL_VIEW_MAP, type OHLCVInterval } from './ohlcvService.ts'
 import { makeBucketing, type Bucketing } from './bucketLadder.ts'
-import { OMNI_FIXED, omnipoolRemoveLiquidity, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
+import { BUCKET_HISTORY_CLOSED_TTL_MS, BUCKET_HISTORY_FINALITY_SEC, BUCKET_HISTORY_SETTLING_TTL_MS, bucketWindowIsClosed, loadFarmRewardHistory, loadLpHistory, loadOmnipoolPrincipalHistory, loadV3PrincipalHistory, loadXykPrincipalHistory, xykLegsByBucket, type FarmRewardHistory, type LpSpan, type LpVenue, type PriceGrain, type OmnipoolPrincipalHistory, type V3PrincipalHistory, type XykBucketLeg } from './lpHistory.ts'
+import { OMNI_FIXED, omnipoolRemoveLiquidity, withStableswapSharePrices, xykReserveAssets, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
+import { currentLmRewardGenerationSql, lmCountedClaimable, lmCountedRewardRowsSql, loadLmRewards, type LmRewardRow } from './lmRewardSnapshot.ts'
 import { cached, cachedFound, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
 import { NOMINAL_BLOCKS_PER_HOUR, blocksPerHour, measuredParaBlockMs, newestBlockTimestampsSql, paraBlockMs } from './blockTime.ts'
 import { RareEventLedger } from './rareEventLedger.ts'
@@ -14,7 +17,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, assetDecimalsOrNull, allExplorerAssets, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, displayAssetId, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, assetDecimalsOrNull, allExplorerAssets, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT } from './tagService.ts'
@@ -34,18 +37,21 @@ import {
 } from './onBehalfActivity.ts'
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
 import { FEE_BALANCE_EVENTS, deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
-import { PRICE_LOOKBACK_DAYS } from './valuation.ts'
+import { PRICE_LOOKBACK_DAYS, formatUnits, renderUsd, scaledUsd } from './valuation.ts'
 import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
 import { createHash } from 'node:crypto'
 import { resolveModuleError } from './runtimeErrorNames.ts'
 import { profileForAccount } from './userProfileService.ts'
-import { parsePoolAssetIds } from './stableswapSnapshot.ts'
+import { currentStableswapSharePools } from './stableswapSharePools.ts'
 import { findMempoolTx, findPendingBlock, findPendingExtrinsic, findPendingExtrinsicByHash, mempoolTxs, pendingBestHeight, pendingBlocksDesc, type MempoolTx, type PendingBlock, type PendingExtrinsicRow } from './pendingHeadService.ts'
 import { buildMempoolActivities, buildPendingActivities, type PendingActivity, type PendingTradeActivity } from './pendingActivity.ts'
 import { feeTierLabel, loadV3Registry, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3SwapAt, type V3Activity, type V3Registry } from './uniswapV3Service.ts'
-import { loadV3AccountHistory, loadV3AccountPositions, v3AccountPositions, v3AccountPositionsRawAt } from './uniswapV3Positions.ts'
+import { loadV3AccountPositions, v3AccountPositions } from './uniswapV3Positions.ts'
+import { loadMmIncentiveProgrammeRows, scaledSeriesFromBuckets } from './mmIncentiveHistory.ts'
+import { loadCurrentCollateralFlags, loadMmIncentiveHistory, loadMmReserveMap, loadMoneyMarketHistory, mmHistoryStart, mmMarketCompare, mmObservationOrderSql, type MmIncentiveHistory, type MmObservation } from './moneyMarketHistory.ts'
+import { currentMmIncentiveGenerationSql, loadMmIncentives, mmCountedIncentiveRowsSql, type MmIncentiveSnapshotView } from './mmIncentiveSnapshot.ts'
 import { xcswapSettlementsFor, type XcswapSettlement, type XcswapStatus } from './xcswapSettlements.ts'
 import { loadForeignCandles } from './foreignCandles.ts'
 import { intentLimitPrice } from './intentLimitPrice.ts'
@@ -97,45 +103,9 @@ function evmAccountForm(acc: string): string | null {
 function evmAccountFormSql(column: string): string {
   return `concat('0x45544800', substring(lower(${column}), 3, 40), '0000000000000000')`
 }
-// Money-market reserve EVM address → substrate asset id. Reserves are either the
-// ERC20 precompile (0x…01 + 8-hex assetId) or a deployed token (e.g. HOLLAR).
-// Money-market reserve contracts that aren't the standard ERC20 precompile (e.g.
-// HOLLAR). Extend via EXPLORER_EXTRA_MM_CONTRACT_ASSET ({"0x…":<assetId>}) when a
-// new market adds a deployed-token reserve.
-function envContractAssetMap(): Record<string, number> {
-  const raw = process.env.EXPLORER_EXTRA_MM_CONTRACT_ASSET?.trim()
-  if (!raw) return {}
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>
-    const out: Record<string, number> = {}
-    for (const [k, v] of Object.entries(parsed)) {
-      const id = Number(v)
-      if (/^0x[0-9a-fA-F]{40}$/.test(k) && Number.isInteger(id)) out[k.toLowerCase()] = id
-    }
-    return out
-  } catch {
-    console.error('[Explorer] EXPLORER_EXTRA_MM_CONTRACT_ASSET is not valid JSON; ignoring')
-    return {}
-  }
-}
-const MM_CONTRACT_ASSET: Record<string, number> = { '0x531a654d1696ed52e7275a8cede955e82620f99a': 222, ...envContractAssetMap() }
-// A money-market reserve address → its registry asset id: the ERC-20 precompile
-// encodes the id, and a deployed contract (HOLLAR) is looked up. Exported for the
-// cap alert, which reads reserves by address and names them by ticker.
-export function assetIdFromMmAddress(addr: string): number | null {
-  const h = (addr ?? '').toLowerCase().replace(/^0x/, '')
-  if (MM_CONTRACT_ASSET['0x' + h] != null) return MM_CONTRACT_ASSET['0x' + h]
-  if (h.length === 40 && /^0{30}01/.test(h)) return parseInt(h.slice(32), 16)
-  return null
-}
-export function mmReserveAddressForAsset(assetId: number): string[] {
-  const reserveId = ATOKEN_UNDERLYING_ID[assetId] ?? assetId
-  const standard = '0x' + '0'.repeat(30) + '01' + reserveId.toString(16).padStart(8, '0')
-  const deployed = Object.entries(MM_CONTRACT_ASSET)
-    .filter(([, id]) => id === reserveId)
-    .map(([addr]) => addr)
-  return [...new Set([standard, ...deployed])]
-}
+// The money-market reserve address ↔ asset id primitives live in the explorerAssets leaf
+// (shared with the Data API and pure-domain leaves); re-exported here for existing importers.
+export { assetIdFromMmAddress, mmReserveAddressForAsset }
 
 // Every id whose money-market rows belong to `assetId`. Up to three aliases can
 // stand between the id a reader asks for and the id the market files rows under:
@@ -1018,6 +988,13 @@ function boundAccountSql(alias: string): string {
                 ${account}))`
 }
 
+// A directory actor's money-market holder key: an ETH-form id as it is, any other
+// account the ETH form of its first 20 bytes — the id money-market snapshots key on.
+const MM_ETH_FORM_SQL = (expr: string): string => `if(
+                substring(lower(${expr}), 3, 8) = '45544800' AND substring(lower(${expr}), 51, 16) = '0000000000000000',
+                lower(${expr}),
+                concat('0x45544800', substring(lower(${expr}), 3, 40), '0000000000000000'))`
+
 function bindCteSql(): string {
   const pairs = taggedTruncationPairs()
     .map(([h160, owner]) => `('0x45544800${h160.slice(2).toLowerCase()}0000000000000000', '${owner.toLowerCase()}')`)
@@ -1615,19 +1592,22 @@ async function refreshPrices(): Promise<Map<number, PriceInfo>> {
         if (Number.isFinite(price) && price > 0) m.set(r.asset_id, { price, priceRaw: r.price_raw, change24h: change })
       }
     }
-    // aTokens carry no price feed — alias each to its priced underlying (resolved
-    // TRANSITIVELY: GIGAHDX → stHDX → HDX) so every value/volume computation that
-    // reads this map values them 1:1.
+    // Pool-SHARE tokens are priced at what one share redeems for, never at a feed
+    // or an underlying (withExplorerSharePrices), BEFORE the alias loop so an aToken
+    // over a share without a feed of its own (a3-Pool → 3-Pool) borrows the share's
+    // redeemable value.
+    await withExplorerSharePrices(m)
+    // An aliased asset (aToken, duplicate) with no entry of its own takes its
+    // alias's — resolved TRANSITIVELY: GIGAHDX → stHDX → HDX, and stopped at a share
+    // token — so every value/volume computation that reads this map values it 1:1.
+    // currentPriceOf is the one precedence rule (own entry first) the public API and
+    // the Data API apply too. A share token itself is never aliased: unpriced stays
+    // unpriced.
     for (const aToken of Object.keys(PRICE_ALIAS_ID)) {
-      const u = m.get(priceAssetId(Number(aToken)))
-      if (u && !m.has(Number(aToken))) m.set(Number(aToken), u)
-    }
-    // Replace the 1:1 underlying-proxy price of pool-SHARE tokens with their true
-    // per-share NAV (Σ reserve×price / issuance). Done after the alias loop so the
-    // reserves (including aTokens) are already priced. A pool we can't fully price
-    // keeps the proxy. See loadStableswapNav.
-    for (const [shareId, navPerShare] of await loadStableswapNav(m)) {
-      m.set(shareId, { price: navPerShare, priceRaw: String(navPerShare), change24h: m.get(shareId)?.change24h ?? 0 })
+      const id = Number(aToken)
+      if (isStableswapShareToken(id)) continue
+      const u = currentPriceOf(m, id)
+      if (u) m.set(id, u)
     }
     priceMap = m
     priceLoadedAt = Date.now()
@@ -1717,8 +1697,10 @@ function priceTransformArrays(prices: Map<number, PriceInfo>): { idsSql: string;
 // the closed-candle rule is the right compaction for a bucketed history, not for
 // one event, where it can be an hour stale.
 
-// Every aliased asset — aTokens, bonds and pool shares alike — values through the
-// same terminal priced id its current-price path uses. Pool shares have no
+// Every aliased asset — aTokens, bonds and pool shares alike — values HISTORICALLY
+// through the terminal priced id of priceAssetId's full alias walk. (The current
+// path differs for a share: currentPriceAssetId stops at it, and it is priced at
+// its redeemable value, lpMath.stableswapSharePrices.) Pool shares have no
 // historical NAV series, but their own feed is not a substitute for one: a share
 // token is quoted only while it is the pool's tradeable leg (2-Pool-GDOT was
 // quoted for six hours before GDOT took over), and the ASOF match below has no
@@ -2154,50 +2136,42 @@ export async function applyEventTimeUsd<T extends object>(rows: T[], pick: (r: T
   })
 }
 
-// stableswap share-token NAV pricing
+// stableswap share-token pricing
 // A pool-share token (2-Pool-apyUSD, GIGA GDOT/GETH/GSOL, the stable n-Pools, …)
 // is worth its slice of the pool's reserves, NOT one unit of a "main underlying".
-// We compute the market NAV per share
-//     navPerShare = Σ(reserve_i × usdPrice_i) / totalIssuance
-// from the latest per-block stableswap snapshot. The on-chain `peg_multipliers`
-// scale only the internal trading curve and are deliberately NOT applied to a
-// reserve-value NAV. Reserve prices come from the already-aliased price map
-// (aTokens resolved to their underlying); a pool whose
-// reserves we can't fully price is skipped so the caller keeps the 1:1 proxy.
-interface SnapshotPool { pool_id: number; assets: string | number[]; reserves: string[]; total_issuance: string }
-let navMap = new Map<number, number>()
-let navLoadedAt = 0
-async function loadStableswapNav(prices: Map<number, PriceInfo>): Promise<Map<number, number>> {
-  if (navMap.size && Date.now() - navLoadedAt < 30_000) return navMap
+// Its entry in this map is the one derived redeemable value every current surface
+// states (lpMath.stableswapSharePrices over the newest per-block snapshot), from
+// this map's own leg prices — currentPriceOf, the rule the alias loop in
+// refreshPrices applies — computed in integers from
+// the feeds' decimal strings. A share with
+// an unpriced leg, or whose pool the snapshot does not hold, is removed: unpriced,
+// never valued at its own stale feed or at an underlying. Its 24h change is the one
+// the replaced entry carried (its own feed's, else the underlying's) — a derived
+// price has no 24h series of its own.
+const PRICE_USD_DECIMALS = 12
+function scaledFromPriceInfo(p: PriceInfo | undefined): bigint | null {
+  if (!p) return null
   try {
-    const res = await client.query({
-      query: `SELECT JSONExtractRaw(payload_json, 'stableswap') AS ss
-              FROM price_data.raw_block_snapshots
-              WHERE block_height = (SELECT max(block_height) FROM price_data.raw_block_snapshots)
-              LIMIT 1`,
-      format: 'JSONEachRow',
-    })
-    const row = (await res.json<{ ss: string }>())[0]
-    const pools = (safeJson(row?.ss) as { pools?: SnapshotPool[] } | null)?.pools ?? []
-    const m = new Map<number, number>()
-    for (const pool of pools) {
-      const ids = parsePoolAssetIds(pool.assets)
-      const reserves = pool.reserves ?? []
-      if (!ids.length || ids.length !== reserves.length) continue
-      let nav = 0, ok = true
-      for (let i = 0; i < ids.length; i++) {
-        const px = prices.get(ids[i])?.price
-        if (px == null) { ok = false; break }
-        nav += (Number(reserves[i]) / 10 ** asset(ids[i]).decimals) * px
-      }
-      // navPerShare must be USD per whole share, so scale issuance by the share
-      // token's own decimals (its asset id == pool_id).
-      const issuance = Number(pool.total_issuance) / 10 ** asset(pool.pool_id).decimals
-      if (ok && issuance > 0 && Number.isFinite(nav)) m.set(pool.pool_id, nav / issuance)
-    }
-    if (m.size) { navMap = m; navLoadedAt = Date.now() }
-  } catch { /* keep last good NAV map */ }
-  return navMap
+    const scaled = scaledUsd(p.priceRaw ?? String(p.price))
+    return scaled > 0n ? scaled : null
+  } catch { return null }
+}
+async function withExplorerSharePrices(m: Map<number, PriceInfo>): Promise<void> {
+  const pools = await currentStableswapSharePools(client)
+  const feeds = new Map<number, bigint>()
+  for (const [id, p] of m) { const s = scaledFromPriceInfo(p); if (s != null) feeds.set(id, s) }
+  const legPrice = (id: number) => currentPriceOf(feeds, id)
+  const priced = withStableswapSharePrices(feeds, pools, legPrice, assetDecimalsOrNull, isStableswapShareToken)
+  const shareIds = new Set<number>([...m.keys()].filter(isStableswapShareToken))
+  for (const pool of pools ?? []) shareIds.add(pool.poolId)
+  for (const id of shareIds) {
+    const derived = priced.get(id)
+    const change24h = (m.get(id) ?? m.get(priceAssetId(id)))?.change24h ?? 0
+    m.delete(id)
+    if (derived == null) continue
+    const priceRaw = formatUnits(derived.toString(), PRICE_USD_DECIMALS)
+    m.set(id, { price: Number(priceRaw), priceRaw, change24h })
+  }
 }
 
 // overview
@@ -3502,8 +3476,9 @@ function rescaleRaw(raw: string, fromDec: number, toDec: number): string {
 
 // Fold held Stableswap pool-share tokens (2-Pool-GDOT, …) into their underlying
 // main asset (GDOT) for per-account display, mirroring preis-ui which hides
-// "-Pool" tokens. The share token is already priced via its underlying, so value
-// is preserved and the portfolio total is unchanged; rows for the same underlying
+// "-Pool" tokens. Each row keeps the USD value it was given at its own price (a
+// share's is its derived redeemable value), so the portfolio total is unchanged
+// while the folded amount is a share count shown under the main asset; rows for the same underlying
 // merge. The share token and its underlying can carry different decimals (e.g.
 // 2-Pool-PRIME has 18, PRIME has 6), so raw amounts are normalised to the display
 // asset's scale before summing. No-op when the account holds no share tokens.
@@ -3629,6 +3604,10 @@ export interface MoneyMarketPosition {
   // health factor is that account's, not the lowest of several.
   memberCount?: number
   reserves?: MmReserve[]
+  // The claimable incentives accruing on this market's aTokens (a subset of the
+  // detail's moneyMarketRewards items). Display only: the value counts them once,
+  // through moneyMarketRewards — never inside this position's collateral.
+  unclaimedRewards?: MoneyMarketRewardItem[]
 }
 // Proxy & multisig relations resolved to displayable account refs.
 export interface ProxyRelationDisplay { account: AccountRef; proxyType: string; delay: number }
@@ -3977,6 +3956,20 @@ export interface AddressDetail {
   revenueUsd?: number
   moneyMarket: MoneyMarketPosition[]          // one entry per isolated market the account has a position in
   liquidityPositions?: LpPosition[]
+  // Unclaimed liquidity-mining rewards of the account's farm deposits, from the
+  // lm-rewards snapshot (see FarmRewards). `totalUsd` (the priced, claimable-now
+  // amount) IS in portfolioUsd (the HDX-denominated part leaves
+  // portfolioExHdxUsd); unpriced entries are in neither. Absent when the account
+  // has no farm entry or no fresh snapshot is published — then no reward is in
+  // the value either.
+  farmRewards?: FarmRewards
+  // Claimable money-market (lending) incentives of the account's EVM holder, from
+  // the mm-incentives snapshot (see MoneyMarketRewards) — the chain's own
+  // getAllUserRewards. `totalUsd` IS in portfolioUsd (HDX-denominated part out of
+  // portfolioExHdxUsd), like farmRewards; absent when nothing is claimable or no
+  // fresh snapshot is published, and then in no value either. Each market's share
+  // also rides on its MoneyMarketPosition as `unclaimedRewards`.
+  moneyMarketRewards?: MoneyMarketRewards
   activeDcas?: ActiveDca[]
   openLimitOrders?: OpenLimitOrder[]
   proxy: AccountProxyDisplay | null
@@ -4274,6 +4267,17 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // already counted in portfolioUsd, they're appended for display only.
     const lpUsd = lpPositions.reduce((s, p) => s + (p.valueUsd ?? 0), 0)
     const lpExHdxUsd = lpPositions.reduce((s, p) => s + (isHdxLpPosition(p) ? 0 : p.valueUsd ?? 0), 0)
+    // Unclaimed farm rewards count in the value (claimable now, priced; see
+    // unclaimedRewardValue) — never inside a position's own valueUsd. They are not a
+    // balance until claimed, and a claim moves exactly the amount it pays from
+    // `claimable` into the wallet, so nothing here is counted twice. Read in
+    // `summary` too: the hover card shows this value, and must agree with the page.
+    // Claimable lending incentives count the same way, for every EVM identity of
+    // the related set (moneyMarketIdentities — the holders the value chart's
+    // incentive series sums, so its pinned last point and its interior agree).
+    const { farmRewards, moneyMarketRewards, lpPositions: lpShown } = await getUnclaimedRewards([...related], moneyMarketIdentities([...related], norm).h160s, lpPositions)
+    const rewardValue = unclaimedRewardValue({ farmRewards, moneyMarketRewards })
+    moneyMarket = withMarketRewards(moneyMarket, moneyMarketRewards)
     return {
       input: addressInput,
       kind: norm.kind,
@@ -4291,13 +4295,15 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
       aliases: aliasRows.map(a => ({ accountId: a.account_id, evmAddress: a.evm_address, primaryProfile: a.primary_profile, relationship: a.relationship, confidence: a.confidence })),
       balances,
       topAssets: topHeldTokens(balances),
-      portfolioUsd: portfolioUsd + lpUsd,
-      ...(showsExHdxValue(tag?.tagId) ? { portfolioExHdxUsd: balancesExHdxUsd + lpExHdxUsd } : {}),
+      portfolioUsd: portfolioUsd + lpUsd + rewardValue.usd,
+      ...(showsExHdxValue(tag?.tagId) ? { portfolioExHdxUsd: balancesExHdxUsd + lpExHdxUsd + rewardValue.exHdxUsd } : {}),
       tradingVolumeUsd,
       liquidationVolumeUsd,
       ...(revenueUsd > 0 ? { revenueUsd } : {}),
       moneyMarket,
-      liquidityPositions: [...lpPositions, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)),
+      liquidityPositions: [...lpShown, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)),
+      ...(farmRewards ? { farmRewards } : {}),
+      ...(moneyMarketRewards ? { moneyMarketRewards } : {}),
       activeDcas,
       openLimitOrders,
       proxy,
@@ -4318,7 +4324,11 @@ export async function getAddressHistory(addressInput: string, opts: { seriesOnly
   if (!detail) return null
   // The reconstruction is cached under the same scope key the value-event jump
   // detection uses, so chart and markers share one heavy walk. Only the trivial
-  // final-point pin is recomputed per request.
+  // final-point pin is recomputed per request. Both sides carry the unclaimed
+  // farm rewards: the history the SETTLED claimable at each bucket end, the pin
+  // (portfolioUsd) the claimable PROJECTED to the snapshot block — so the last
+  // point is exact and the step into it also carries the accrual since each
+  // active farm's last on-chain sync (its last deposit, claim or withdrawal).
   const history = await getAccountHistoryShared(detail.relatedAccountIds, `addr:${detail.accountId}`)
   const debtUsd = detail.moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)
   const portfolioSeries = history.portfolioSeries.slice()
@@ -4364,6 +4374,318 @@ export async function getAddressHistoryWindow(addressInput: string, fromBlock: n
   }
 }
 
+// ─── LP history ────────────────────────────────────────────────────────────────
+// Every liquidity position the account's related set held, per bucket of the value
+// chart's own time grid (accountBucketing), stated as the legs redeeming it would
+// have returned at the pool state sampled at or before the bucket end, valued at the
+// candle fully closed by then (lpHistory.ts, the definition the Data API's
+// /v1/accounts/{address}/liquidity/history serves). Unlike the chart this is never
+// back-filled from a later price and its last point is NOT pinned to the current
+// value; bucket ends are dated by the exact at-or-before height.
+export interface LiquidityHistoryLegView { asset: AssetRef; amount: string; valueUsd: number | null }
+export interface LiquidityHistorySpanView { fromBlock: number; fromTime: string | null; toBlock: number | null; toTime: string | null; kind: 'direct' | 'farmed' }
+export interface LiquidityHistoryPositionView {
+  venue: LpVenue
+  farmed: boolean
+  positionId: string | null
+  poolKey: string
+  shareAsset: AssetRef | null
+  spans: LiquidityHistorySpanView[]
+  /**
+   * `i` indexes the shared dates/blocks arrays; only buckets where the position was
+   * held. `unclaimedRewards`: the farm entries behind a farmed position (settled
+   * claimable at the bucket end, lmRewardHistory.ts) — never in `legs`/`valueUsd`.
+   */
+  points: Array<{ i: number; shares: string; legs: LiquidityHistoryLegView[]; valueUsd: number | null; unclaimedRewards: LiquidityHistoryRewardView[] }>
+}
+export interface LiquidityHistoryRewardView { depositId: string; globalFarmId: number; yieldFarmId: number; asset: AssetRef; amount: string; valueUsd: number | null }
+export interface AddressLiquidityHistory {
+  stepSec: number
+  /** Always CHART_PRICE_GRAIN: the value chart's own candles, at every zoom. */
+  priceGrain: '1h' | '1d'
+  dates: string[]
+  blocks: number[]
+  /** Sum of every priced position per bucket. */
+  valueUsd: number[]
+  /**
+   * Positions held at the bucket end left out of valueUsd: a leg without a price,
+   * or legs that cannot be stated (no pool state at or before the end, an
+   * unresolvable v3 token — those have no point in `positions` there).
+   */
+  unpriced: number[]
+  /** Sum of every priced farm-entry reward held at the bucket end; NOT in valueUsd. */
+  unclaimedRewardsUsd: number[]
+  /** Farm entries held at the bucket end left out of unclaimedRewardsUsd (not stated, or unpriced). */
+  rewardsIncomplete: number[]
+  positions: LiquidityHistoryPositionView[]
+  positionsOmitted: number
+}
+
+/**
+ * The candles the value-history chart prices every bucket with (getAccountHistory
+ * reads ohlc_1d whatever the step). The LP history on the chart's grid uses the
+ * same grain at every zoom — hourly closes on a sub-day step would disagree with
+ * the chart's LP line for the same bucket.
+ */
+export const CHART_PRICE_GRAIN: PriceGrain = '1d'
+
+const EMPTY_LIQUIDITY_HISTORY: AddressLiquidityHistory = { stepSec: 0, priceGrain: CHART_PRICE_GRAIN, dates: [], blocks: [], valueUsd: [], unpriced: [], unclaimedRewardsUsd: [], rewardsIncomplete: [], positions: [], positionsOmitted: 0 }
+
+/**
+ * The buckets the un-windowed value chart publishes: the last of each calendar day
+ * (downsampleDaily's rule, on the same dates), so both responses index one date
+ * per day. The chart additionally drops its leading zero-value buckets, so its
+ * dates are a suffix of these; a windowed (zoom) request keeps every bucket on
+ * both, as the chart does.
+ */
+export function lastBucketOfEachDay(dates: readonly string[]): number[] {
+  const keep: number[] = []
+  for (let b = 0; b < dates.length; b++) {
+    if (b === dates.length - 1 || dates[b].slice(0, 10) !== dates[b + 1].slice(0, 10)) keep.push(b)
+  }
+  return keep
+}
+
+export async function buildLiquidityHistory(accounts: string[], window?: { fromBlock: number; toBlock: number }): Promise<AddressLiquidityHistory> {
+  const grid = await accountBucketing(accounts, window, { exactHeights: true })
+  if (!grid) return EMPTY_LIQUIDITY_HISTORY
+  const { bk } = grid
+  const allDates = Array.from({ length: bk.N + 1 }, (_, b) => formatUtcSeconds(bk.endSec(b)))
+  const keep = window ? allDates.map((_, b) => b) : lastBucketOfEachDay(allDates)
+  const lp = await loadLpHistory(client, {
+    accounts,
+    h160s: accounts.map(historyH160).filter((x): x is string => x != null),
+  }, bk, { grain: CHART_PRICE_GRAIN, resolveToken: await v3RegistryAssetResolver(), buckets: keep })
+  const indexOf = new Map(keep.map((b, i) => [b, i]))
+  const usd = (v: bigint | null) => (v == null ? null : Number(renderUsd(v)))
+  const time = (sec: number | null) => (sec == null ? null : formatUtcSeconds(sec))
+  const spanView = (s: LpSpan): LiquidityHistorySpanView => ({ fromBlock: s.fromBlock, fromTime: time(s.fromTime), toBlock: s.toBlock, toTime: time(s.toTime), kind: s.kind })
+  return {
+    stepSec: bk.step,
+    priceGrain: CHART_PRICE_GRAIN,
+    dates: keep.map(b => allDates[b]),
+    blocks: keep.map(b => bk.endHeight(b)),
+    valueUsd: lp.points.map(p => Number(renderUsd(p.usd))),
+    unpriced: lp.points.map(p => p.unpriced),
+    unclaimedRewardsUsd: lp.points.map(p => Number(renderUsd(p.rewardsUsd))),
+    rewardsIncomplete: lp.points.map(p => p.rewardsIncomplete),
+    positions: lp.positions.map(p => ({
+      venue: p.venue, farmed: p.farmed, positionId: p.positionId, poolKey: p.poolKey,
+      shareAsset: p.shareAssetId == null ? null : asset(p.shareAssetId),
+      spans: p.spans.map(spanView),
+      points: p.points.map(pt => ({
+        i: indexOf.get(pt.b)!, shares: pt.shares.toString(), valueUsd: usd(pt.usd),
+        legs: pt.legs.map(l => ({ asset: asset(l.assetId), amount: l.amount.toString(), valueUsd: usd(l.usd) })),
+        unclaimedRewards: pt.rewards.map(r => ({ depositId: r.depositId, globalFarmId: r.globalFarmId, yieldFarmId: r.yieldFarmId, asset: asset(r.assetId), amount: r.amount.toString(), valueUsd: usd(r.usd) })),
+      })),
+    })),
+    positionsOmitted: lp.positionsOmitted,
+  }
+}
+
+/**
+ * How long the UN-windowed LP and money-market histories are served as fresh.
+ * Their key carries no head (the whole range, up to the head), and unlike the value
+ * chart (/history) their last bucket is NOT pinned to a live figure: it IS the
+ * head's own point — the positions and incentives at the head block. Under a plain
+ * 30-minute TTL that point froze for half an hour. So they are stale-while-
+ * revalidate: fresh for a minute, then served stale (up to ACCOUNT_HISTORY_TTL_MS)
+ * while ONE background rebuild replaces them, so no request waits on the rebuild
+ * but the head point is at most about a minute behind an active reader. A
+ * chart-zoom window is a block range and takes the finality rule instead
+ * (windowedHistoryTtlMs).
+ */
+const UNWINDOWED_HISTORY_FRESH_MS = 60_000
+
+/**
+ * The cache key of an LP history: `scope` (whose history — `addr:<accountId>`,
+ * `tag:<tagId>`, a list tag's scope), the window (`all` for the whole range) and
+ * the account-set fingerprint, so a different set — a related-set change, a list
+ * tag's membership edit — never reads another set's entry.
+ */
+export function liquidityHistoryKey(scope: string, accounts: string[], window?: { fromBlock: number; toBlock: number }): string {
+  return `explorer:lp-history:${scope}:${window ? `w:${window.fromBlock}-${window.toBlock}` : 'all'}:${accountSetFingerprint(accounts)}`
+}
+
+/**
+ * The LP history over an account set, cached: un-windowed it is
+ * stale-while-revalidate (UNWINDOWED_HISTORY_FRESH_MS), a window takes the
+ * bucketed-history finality rule (windowedHistoryTtlMs). The address and tag
+ * routes both come through here.
+ */
+async function cachedLiquidityHistory(scope: string, accounts: string[], window?: { fromBlock: number; toBlock: number }): Promise<AddressLiquidityHistory> {
+  const key = liquidityHistoryKey(scope, accounts, window)
+  if (!window) return cachedSwr(key, UNWINDOWED_HISTORY_FRESH_MS, ACCOUNT_HISTORY_TTL_MS, () => buildLiquidityHistory(accounts))
+  return cached(key, await windowedHistoryTtlMs(window.toBlock), () => buildLiquidityHistory(accounts, window))
+}
+
+/**
+ * The account's LP history (see AddressLiquidityHistory) over its related set, on
+ * the value chart's grid — the whole range, or a chart-zoom block window.
+ */
+export async function getAddressLiquidityHistory(addressInput: string, window?: { fromBlock: number; toBlock: number }): Promise<AddressLiquidityHistory | null> {
+  const detail = await getAddress(addressInput)
+  if (!detail) return null
+  return cachedLiquidityHistory(`addr:${detail.accountId}`, detail.relatedAccountIds, window)
+}
+
+// ─── Money-market history ──────────────────────────────────────────────────────
+// Per isolated market, the account's supplied and borrowed reserves at each bucket
+// end of the value chart's grid — what balanceOf returned at that block (interest
+// accrued to it), valued at the candle fully closed by the end — beside the chain's
+// own getUserAccountData observation as of its block at or before the end
+// (moneyMarketHistory.ts, the definition the Data API's
+// /v1/accounts/{address}/money-market/history serves). Same grid, dating and price
+// grain as the LP history, so the two routes line up bucket for bucket.
+export interface MoneyMarketHistoryObservationView {
+  observedAtBlock: number
+  timestamp: string | null
+  healthFactor: string
+  totalCollateralBase: string
+  totalDebtBase: string
+  availableBorrowsBase: string
+  ltv: string
+  liquidationThreshold: string
+}
+export interface MoneyMarketHistoryReserveView {
+  /** The reserve's underlying asset; amounts are in its raw units. */
+  asset: AssetRef
+  /** The aToken a supply of it is held as, when the registry lists one. */
+  aToken: AssetRef | null
+  reserveAddress: string
+  /** `i` indexes the shared dates/blocks arrays; only buckets where something was supplied or owed. */
+  points: Array<{ i: number; supplied: string; borrowed: string; suppliedUsd: number | null; borrowedUsd: number | null; collateral: boolean | null }>
+}
+export interface MoneyMarketHistoryMarketView {
+  marketKey: string
+  market: string
+  poolAddress: string
+  role: 'primary' | 'supplemental'
+  stakingBacked: boolean
+  /** Buckets where a reserve was held or the observation shows collateral or debt. */
+  points: Array<{
+    i: number
+    suppliedUsd: number | null
+    borrowedUsd: number | null
+    netUsd: number | null
+    unpriced: number
+    observation: MoneyMarketHistoryObservationView | null
+    eModeCategoryId: number | null
+    /** Unclaimed incentives listed under this market at the bucket end (settled; never in the USD above). */
+    unclaimedRewards: Array<{ asset: AssetRef; amount: string; valueUsd: number | null; settledAtBlock: number | null }>
+  }>
+  reserves: MoneyMarketHistoryReserveView[]
+}
+export interface AddressMoneyMarketHistory {
+  stepSec: number
+  /** Always CHART_PRICE_GRAIN, as on the LP history. */
+  priceGrain: '1h' | '1d'
+  dates: string[]
+  blocks: number[]
+  /** B0: reserve amounts exist from here on; null without a published anchor. */
+  reserveHistoryFrom: { blockHeight: number; time: string | null } | null
+  /** Sums across the isolated markets of priced legs; null before reserveHistoryFrom. */
+  suppliedUsd: Array<number | null>
+  borrowedUsd: Array<number | null>
+  /** Held legs left out of the sums (unpriced, or not statable). */
+  unpriced: number[]
+  /** Priced unclaimed incentives across the markets, settled; null before reserveHistoryFrom. Not in suppliedUsd. */
+  unclaimedRewardsUsd: Array<number | null>
+  /** Incentive amounts owed but left out of unclaimedRewardsUsd (not statable, not reconciled with the chain, unpriced). */
+  rewardsIncomplete: number[]
+  markets: MoneyMarketHistoryMarketView[]
+}
+
+const EMPTY_MONEY_MARKET_HISTORY: AddressMoneyMarketHistory = { stepSec: 0, priceGrain: CHART_PRICE_GRAIN, dates: [], blocks: [], reserveHistoryFrom: null, suppliedUsd: [], borrowedUsd: [], unpriced: [], unclaimedRewardsUsd: [], rewardsIncomplete: [], markets: [] }
+
+export async function buildMoneyMarketHistory(accounts: string[], window?: { fromBlock: number; toBlock: number }, owner?: { accountId: string; evmAddress?: string | null }): Promise<AddressMoneyMarketHistory> {
+  const { h160s, primary } = moneyMarketIdentities(accounts, owner)
+  // An EVM identity with no balance history is dated by its first money-market
+  // trace: an observation, a scaled-balance delta, or its B0 anchor row.
+  const grid = await accountBucketing(accounts, window, { exactHeights: true, fallbackStart: () => mmHistoryStart(client, h160s) })
+  if (!grid) return EMPTY_MONEY_MARKET_HISTORY
+  const { bk } = grid
+  const allDates = Array.from({ length: bk.N + 1 }, (_, b) => formatUtcSeconds(bk.endSec(b)))
+  const keep = window ? allDates.map((_, b) => b) : lastBucketOfEachDay(allDates)
+  const mm = await loadMoneyMarketHistory(client, { h160s, primary }, bk, { grain: CHART_PRICE_GRAIN, buckets: keep })
+  const indexOf = new Map(keep.map((b, i) => [b, i]))
+  const usd = (v: bigint | null) => (v == null ? null : Number(renderUsd(v)))
+  const time = (h: number) => { const t = mm.blockTimes.get(h); return t == null ? null : formatUtcSeconds(t) }
+  const observation = (o: MmObservation | null): MoneyMarketHistoryObservationView | null => o && {
+    observedAtBlock: o.block, timestamp: time(o.block), healthFactor: o.healthFactor,
+    totalCollateralBase: o.totalCollateralBase, totalDebtBase: o.totalDebtBase, availableBorrowsBase: o.availableBorrowsBase,
+    ltv: o.ltv, liquidationThreshold: o.liquidationThreshold,
+  }
+  return {
+    stepSec: bk.step,
+    priceGrain: CHART_PRICE_GRAIN,
+    dates: keep.map(b => allDates[b]),
+    blocks: keep.map(b => bk.endHeight(b)),
+    reserveHistoryFrom: mm.reserveHistoryFrom ? { blockHeight: mm.reserveHistoryFrom.blockHeight, time: time(mm.reserveHistoryFrom.blockHeight) } : null,
+    suppliedUsd: mm.points.map(p => usd(p.suppliedUsd)),
+    borrowedUsd: mm.points.map(p => usd(p.borrowedUsd)),
+    unpriced: mm.points.map(p => p.unpriced),
+    unclaimedRewardsUsd: mm.points.map(p => usd(p.unclaimedRewardsUsd)),
+    rewardsIncomplete: mm.points.map(p => p.rewardsIncomplete),
+    markets: mm.markets.map(m => {
+      const config = MM_MARKET_BY_KEY.get(m.marketKey)
+      return {
+        marketKey: m.marketKey, market: config?.label ?? m.marketKey, poolAddress: m.poolAddress,
+        role: config?.role ?? 'supplemental', stakingBacked: m.stakingBacked,
+        points: m.points.map(p => ({
+          i: indexOf.get(p.b)!, suppliedUsd: usd(p.suppliedUsd), borrowedUsd: usd(p.borrowedUsd), netUsd: usd(p.netUsd),
+          unpriced: p.unpriced, observation: observation(p.observation), eModeCategoryId: p.eModeCategoryId,
+          unclaimedRewards: p.unclaimedRewards.map(r => ({ asset: asset(r.rewardAssetId), amount: r.amount.toString(), valueUsd: usd(r.valueUsd), settledAtBlock: r.settledAtBlock })),
+        })),
+        reserves: m.reserves.map(r => ({
+          asset: asset(r.assetId), aToken: r.aTokenAssetId == null ? null : asset(r.aTokenAssetId), reserveAddress: r.reserveAddress,
+          points: r.points.map(p => ({
+            i: indexOf.get(p.b)!, supplied: p.supplied.toString(), borrowed: p.borrowed.toString(),
+            suppliedUsd: usd(p.suppliedUsd), borrowedUsd: usd(p.borrowedUsd), collateral: p.collateral,
+          })),
+        })),
+      }
+    }),
+  }
+}
+
+/**
+ * The account's money-market history (see AddressMoneyMarketHistory) over its
+ * related set, on the value chart's grid — the whole range, or a chart-zoom block
+ * window. Cached like the LP history (stale-while-revalidate un-windowed, the
+ * finality rule for a window). Legs and incentives sum every EVM identity of the set;
+ * each market's observation is the primary identity's (moneyMarketIdentities).
+ */
+export async function getAddressMoneyMarketHistory(addressInput: string, window?: { fromBlock: number; toBlock: number }): Promise<AddressMoneyMarketHistory | null> {
+  const detail = await getAddress(addressInput)
+  if (!detail) return null
+  const accounts = detail.relatedAccountIds
+  const key = `explorer:mm-history:addr:${detail.accountId}:${window ? `w:${window.fromBlock}-${window.toBlock}` : 'all'}:${accountSetFingerprint(accounts)}`
+  const owner = { accountId: detail.accountId, evmAddress: detail.evmAddress }
+  if (!window) return cachedSwr(key, UNWINDOWED_HISTORY_FRESH_MS, ACCOUNT_HISTORY_TTL_MS, () => buildMoneyMarketHistory(accounts, undefined, owner))
+  return cached(key, await windowedHistoryTtlMs(window.toBlock), () => buildMoneyMarketHistory(accounts, window, owner))
+}
+
+/**
+ * The account set a tag's LP history covers: its members plus their EVM twins —
+ * the set the tag's value chart (getTag, getTagHistoryWindow) reconstructs, so the
+ * LP history sits on the same grid as that chart.
+ */
+function tagHistoryAccountSet(members: string[]): string[] {
+  return [...new Set([...members, ...members.map(evmAccountForm).filter(Boolean) as string[]])]
+}
+
+/**
+ * The tag twin of getAddressLiquidityHistory: the same builder and wire shape over
+ * the tag's member set, keyed `tag:<id>` plus the set's fingerprint. (Money-market
+ * history is deliberately not aggregated to tags.)
+ */
+export async function getTagLiquidityHistory(tagId: string, window?: { fromBlock: number; toBlock: number }): Promise<AddressLiquidityHistory | null> {
+  const tag = getTagRecord(tagId)
+  if (!tag || !tag.members.length) return null
+  return cachedLiquidityHistory(`tag:${tagId}`, tagHistoryAccountSet(tag.members), window)
+}
+
 /** The tag twin of getAddressHistoryWindow, over the tag's member set + EVM twins. */
 export async function getTagHistoryWindow(tagId: string, fromBlock: number, toBlock: number, opts: { seriesOnly?: boolean } = {}): Promise<{ portfolioSeries: number[]; portfolioSeriesExHdx: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] } | null> {
   const tag = getTagRecord(tagId)
@@ -4382,71 +4704,11 @@ export async function getTagHistoryWindow(tagId: string, fromBlock: number, toBl
 // indexed Money Market positions
 // Event observations plus the periodic snapshot service keep current aggregate
 // positions in ClickHouse; account requests perform no per-user RPC reads.
-// AAVE v3 markets are isolated pools: getUserAccountData(user) on one pool returns
-// ONLY that pool's aggregate, with its OWN health factor. A borrower in two markets
-// (e.g. core + GIGAHDX) therefore has TWO independent positions/health factors — we
-// never blend them, since liquidation is per-market. Core is primary and GIGAHDX
-// is a built-in supplemental market; EXPLORER_MM_MARKETS remains available for
-// future deployments.
-// `stakingBacked` marks a market (GIGAHDX) whose collateral (stHDX) is backed by HDX
-// that stays LOCKED IN THE WALLET — so its collateral is display-only and must not be
-// added to portfolioUsd (the locked HDX is already counted). See applyMmCollateralToBalances.
-export interface ApiMmMarket {
-  key: string
-  label: string
-  poolProxy: string
-  role: 'primary' | 'supplemental'
-  defiSimSupported: boolean
-  stakingBacked: boolean
-}
-const CORE_MM_MARKET: ApiMmMarket = {
-  key: 'core', label: 'Money Market', poolProxy: '0x1b02e051683b5cfac5929c25e84adb26ecf87b38',
-  role: 'primary', defiSimSupported: true, stakingBacked: false,
-}
-const GIGAHDX_MM_MARKET: ApiMmMarket = {
-  key: 'gigahdx', label: 'GIGAHDX', poolProxy: '0x2ce2cfff743cdb6637f4b5d351937a541b8c8923',
-  role: 'supplemental', defiSimSupported: false, stakingBacked: true,
-}
-// Isolated BIL market (Decentral × DUX Group invoice factoring): uBIL + HOLLAR
-// reserves, BIL (asset 55) as the uBIL reserve's aToken. Deposits are ordinary
-// EVM pool supplies — no staking pallet moves collateral — so unlike GIGAHDX it
-// is not staking-backed and its Supply/Withdraw rows are real user acts.
-const BIL_MM_MARKET: ApiMmMarket = {
-  key: 'bil', label: 'BIL', poolProxy: '0x69310fda58c819ad82df7d2cb61841c853337a53',
-  role: 'supplemental', defiSimSupported: false, stakingBacked: false,
-}
-function envMmMarkets(): ApiMmMarket[] {
-  const raw = process.env.EXPLORER_MM_MARKETS?.trim()
-  if (!raw) return []
-  try {
-    const parsed = JSON.parse(raw) as unknown
-    if (!Array.isArray(parsed)) return []
-    const out: ApiMmMarket[] = []
-    parsed.forEach((e, i) => {
-      const r = (e ?? {}) as Record<string, unknown>
-      const poolProxy = typeof r.poolProxy === 'string' && /^0x[0-9a-fA-F]{40}$/.test(r.poolProxy) ? r.poolProxy.toLowerCase() : null
-      if (!poolProxy) { console.error(`[Explorer] EXPLORER_MM_MARKETS[${i}].poolProxy invalid; skipping`); return }
-      const key = typeof r.key === 'string' && r.key.trim() ? r.key.trim() : `market${i + 1}`
-      out.push({
-        key, label: typeof r.label === 'string' && r.label.trim() ? r.label.trim() : key, poolProxy,
-        role: 'supplemental', defiSimSupported: false, stakingBacked: r.stakingBacked === true,
-      })
-    })
-    return out
-  } catch {
-    console.error('[Explorer] EXPLORER_MM_MARKETS is not valid JSON; ignoring')
-    return []
-  }
-}
-// Core first, then extra markets, deduped by pool proxy.
-const MM_MARKETS: ApiMmMarket[] = (() => {
-  const seen = new Set<string>(); const out: ApiMmMarket[] = []
-  const keys = new Set<string>()
-  for (const m of [CORE_MM_MARKET, GIGAHDX_MM_MARKET, BIL_MM_MARKET, ...envMmMarkets()]) {
-    if (!seen.has(m.poolProxy) && !keys.has(m.key)) { seen.add(m.poolProxy); keys.add(m.key); out.push(m) }
-  }
-  return out
-})()
+// The markets (isolated pools, per-market health factors, `stakingBacked`) are
+// declared once in explorerAssets.ts, so the Data API's money-market routes and
+// this service name, order and classify them identically.
+export type ApiMmMarket = MmMarket
+const MM_MARKETS: ApiMmMarket[] = [...MM_MARKET_LIST]
 // The configured markets, in display order. Exported so a surface that reports per
 // market (the Security page's solvency panel) uses the same set and the same
 // primary/supplemental roles the money-market pages do — the two isolated markets
@@ -4458,7 +4720,6 @@ const MM_MARKET_BY_KEY = new Map<string, ApiMmMarket>(MM_MARKETS.map(m => [m.key
 // no deployment configured — which is how a notification rule naming a market is
 // validated at creation and labelled at render time.
 export function mmMarketByKey(key: string): ApiMmMarket | undefined { return MM_MARKET_BY_KEY.get(key) }
-const MM_MARKET_ORDER = new Map<string, number>(MM_MARKETS.map((m, i) => [m.key, i]))
 const configuredMmPoolsSql = () => MM_MARKETS.map(m => `'${m.poolProxy}'`).join(',')
 const supplementalMmPoolsSql = () => MM_MARKETS.filter(m => m.role === 'supplemental').map(m => `'${m.poolProxy}'`).join(',') || "''"
 const countedMmPoolsSql = () => MM_MARKETS.filter(m => !m.stakingBacked).map(m => `'${m.poolProxy}'`).join(',') || "''"
@@ -4497,7 +4758,7 @@ function moneyMarketFields(m: ApiMmMarket): Pick<MoneyMarketPosition, 'marketKey
   return { marketKey: m.key, market: m.label, role: m.role, defiSimSupported: m.defiSimSupported, stakingBacked: m.stakingBacked }
 }
 function orderMoneyMarkets<T extends Pick<MoneyMarketPosition, 'marketKey'>>(positions: T[]): T[] {
-  return positions.sort((a, b) => (MM_MARKET_ORDER.get(a.marketKey) ?? Number.MAX_SAFE_INTEGER) - (MM_MARKET_ORDER.get(b.marketKey) ?? Number.MAX_SAFE_INTEGER))
+  return positions.sort((a, b) => mmMarketCompare(a.marketKey, b.marketKey))
 }
 // ERC-20-backed wallet assets (HOLLAR): served from the erc20_wallet_balances table
 // (refreshed every 10 min by erc20WalletService) rather than a per-request eth_call.
@@ -4691,8 +4952,8 @@ export interface MmReserve {
 // Fold money-market reserves like wallet balances: a pool-share reserve (Hydration's
 // money market uses the 2-Pool tokens, e.g. 2-Pool-GETH / 2-Pool-HUSDC) is shown as
 // its underlying main asset (GETH / HUSDC), rescaling the supplied/debt amounts to
-// the underlying's decimals. USD values are unchanged (the share token is priced via
-// its underlying); reserves that fold to the same id merge. DISPLAY only — apply
+// the underlying's decimals. USD values are unchanged (each reserve keeps the value
+// its own price gave it — a share's derived redeemable value); reserves that fold to the same id merge. DISPLAY only — apply
 // AFTER MM collateral is folded into wallet balances, since that step matches on the
 // unfolded reserve id (folding first would overwrite the wallet's own pool holding).
 export function foldShareReserves(reserves: MmReserve[]): MmReserve[] {
@@ -4748,11 +5009,10 @@ async function getMmReserveTokens(): Promise<MmReserveToken[]> {
 }
 
 // aToken / variable-debt scaled-balance reconstruction (no per-request RPC)
-// balance = ( scaled_anchor@B0 + Σ scaled_delta(events, block > B0) ) · index_now / RAY.
-// The anchor table is atoken_scaled_anchor (clickhouse/schema/001_tables.sql).
-// B0 is read from it so a
+// balance = settledAmount( scaled_anchor@B0 + Σ scaled_delta(events, block > B0), index_now )
+// (aaveMath: · index / RAY, truncating). The anchor table is atoken_scaled_anchor
+// (clickhouse/schema/001_tables.sql). B0 is read from it so a
 // re-anchor at a new block is picked up automatically; 0 ⇒ anchor missing (guard).
-const ATOKEN_RAY = 10n ** 27n
 
 async function aTokenAnchorBlock(): Promise<number> {
   return cached('explorer:atoken-b0', 60000, async () => {
@@ -4906,8 +5166,8 @@ export async function getGigaMarketStats(): Promise<GigaMarketReserveStat[] | nu
       if (!idx || assetId == null) continue
       const reg = asset(assetId)
       const dec = 10 ** (reg.decimals ?? 12)
-      const supplied = Number((totals.get(t.aToken.toLowerCase()) ?? 0n) * idx.liq / ATOKEN_RAY) / dec
-      const debt = Number((totals.get(t.vDebt.toLowerCase()) ?? 0n) * idx.vbi / ATOKEN_RAY) / dec
+      const supplied = Number(settledAmount(totals.get(t.aToken.toLowerCase()) ?? 0n, idx.liq)) / dec
+      const debt = Number(settledAmount(totals.get(t.vDebt.toLowerCase()) ?? 0n, idx.vbi)) / dec
       const price = prices.get(assetId)?.price ?? (assetId === 670 ? prices.get(0)?.price : undefined)
       out.push({
         asset: reg,
@@ -5027,7 +5287,7 @@ export async function getGigaLiquidationLevels(hdxPerStHdx: number): Promise<Gig
     const collateralOf = new Map<string, number>()
     for (const h of holdings) {
       if (h.contract !== token.aToken.toLowerCase()) continue
-      collateralOf.set(h.holder.toLowerCase(), Number((h.scaled * idx.liq) / ATOKEN_RAY) / dec)
+      collateralOf.set(h.holder.toLowerCase(), Number(settledAmount(h.scaled, idx.liq)) / dec)
     }
     const rows = (await res.json<GigaPositionQueryRow>())
       .map(r => ({ ...r, collateral: collateralOf.get(r.holder.toLowerCase()) ?? 0 }))
@@ -5104,30 +5364,7 @@ async function reconstructAccountScaled(h160: string, b0: number): Promise<Map<s
 // key-prefix read on each; replayed rows repeat their values, so the argMax is
 // idempotent without FINAL.
 async function mmCollateralFlagsByHolder(h160s: string[]): Promise<Map<string, Map<string, boolean>>> {
-  const out = new Map<string, Map<string, boolean>>()
-  const hs = [...new Set(h160s.map(h => h.toLowerCase()).filter(h => /^0x[0-9a-f]{40}$/.test(h)))]
-  if (!hs.length) return out
-  const res = await client.query({
-    query: `
-      SELECT user_address, pool_address, reserve_address, argMax(enabled, observed) AS enabled FROM (
-        SELECT user_address, pool_address, reserve_address, enabled,
-               tuple(block_height, toUInt8(0), event_index) AS observed
-        FROM price_data.money_market_collateral_flags
-        WHERE user_address IN {hs:Array(String)}
-        UNION ALL
-        SELECT user_address, pool_address, reserve_address, enabled,
-               tuple(block_height, toUInt8(1), toUInt32(0)) AS observed
-        FROM price_data.money_market_collateral_anchor
-        WHERE user_address IN {hs:Array(String)}
-      ) GROUP BY user_address, pool_address, reserve_address`,
-    query_params: { hs }, format: 'JSONEachRow',
-  })
-  for (const r of await res.json<{ user_address: string; pool_address: string; reserve_address: string; enabled: number }>()) {
-    const h = r.user_address.toLowerCase()
-    const m = out.get(h) ?? out.set(h, new Map<string, boolean>()).get(h)!
-    m.set(`${r.pool_address.toLowerCase()}:${r.reserve_address.toLowerCase()}`, Number(r.enabled) === 1)
-  }
-  return out
+  return loadCurrentCollateralFlags(client, h160s)
 }
 
 const NO_COLLATERAL_FLAGS: ReadonlyMap<string, boolean> = new Map()
@@ -5158,8 +5395,8 @@ export function mmReserveRow(
   if (!resIdx) return null
   const aScaled = byContract.get(t.aToken.toLowerCase()) ?? 0n
   const dScaled = byContract.get(t.vDebt.toLowerCase()) ?? 0n
-  const sup = aScaled > 0n ? (aScaled * resIdx.liq) / ATOKEN_RAY : 0n
-  const dbt = dScaled > 0n ? (dScaled * resIdx.vbi) / ATOKEN_RAY : 0n
+  const sup = settledAmount(aScaled, resIdx.liq)
+  const dbt = settledAmount(dScaled, resIdx.vbi)
   if (sup <= 0n && dbt <= 0n) return null
   const underId = assetIdFromMmAddress(t.asset)
   const reg = underId != null ? asset(underId) : null
@@ -5363,7 +5600,7 @@ export function buildMoneyMarketAccountValueClaims(
     if (!idx) throw new Error(`missing money-market reserve index ${mapped.token.poolProxy}:${mapped.token.asset}`)
     const assetId = assetIdFromMmAddress(mapped.token.asset)
     if (assetId == null) throw new Error(`unmapped money-market reserve asset ${mapped.token.asset}`)
-    const actual = holding.scaled * (mapped.side === 'supplied' ? idx.liq : idx.vbi) / ATOKEN_RAY
+    const actual = settledAmount(holding.scaled, mapped.side === 'supplied' ? idx.liq : idx.vbi)
     const holderMarket = `${holder}|${mapped.token.poolProxy}`
     holderMarkets.add(holderMarket)
     if (actual <= 0n) continue
@@ -5432,11 +5669,7 @@ export function buildMoneyMarketAccountValueClaims(
 // which needs one winner across a whole alias group — neither is expressible
 // against a single-row-per-key projection.
 function moneyMarketPositionOrderSql(prefix = ''): string {
-  const observation = `${prefix}observation_id`
-  return `tuple(${prefix}block_height,
-    if(startsWith(${observation}, 'money-market-periodic:'), toUInt32(4294967295),
-      toUInt32OrZero(arrayElement(splitByChar(':', ${observation}), 3))),
-    ${observation}, ${prefix}ingested_at)`
+  return mmObservationOrderSql(prefix)
 }
 
 // Current aggregate position per (holder, market), one row per key, from the
@@ -5786,6 +6019,30 @@ function mmH160ForAccount(accountId: string): string | null {
   return ACCOUNT_RE.test(accountId) ? '0x' + accountId.slice(2, 42) : null
 }
 
+/**
+ * The EVM identities an account set holds money-market positions and incentives
+ * under — each member's H160 (its ETH-form, else its first 20 bytes, the runtime's
+ * AccountId→EVM mapping) — and the PRIMARY one, when the set is one account's: its
+ * bound EVM address, else its own first-20-byte H160 (the identity the page's
+ * indexed money-market card reads).
+ *
+ * The one definition of "whose incentives" for every surface that states them for
+ * an account or tag: the page's and tag's claimable-now (getUnclaimedRewards), the
+ * value chart's incentive series (getAccountHistory) and the money-market history.
+ * The chart pins its LAST point to the page's value and draws its interior from
+ * the history, so the two must sum the same holders or the final step would jump
+ * by whatever a second identity is owed. The money-market history also takes the
+ * primary for its per-market observation (chooseObservationHolders): legs and
+ * incentives sum every identity, a health factor stays one position's.
+ */
+export function moneyMarketIdentities(accounts: readonly string[], owner?: { accountId: string; evmAddress?: string | null }): { h160s: string[]; primary: string | null } {
+  const primary = owner ? (owner.evmAddress ?? mmH160ForAccount(owner.accountId.toLowerCase()))?.toLowerCase() ?? null : null
+  const set = new Set<string>()
+  for (const a of accounts) { const h = mmH160ForAccount(a.toLowerCase()); if (h) set.add(h.toLowerCase()) }
+  if (primary) set.add(primary)
+  return { h160s: [...set].sort(), primary }
+}
+
 // Reverse of evmFromAccountId: an EVM H160 → the truncated AccountId32 form
 // (0x45544800 + h160 + zeros) the chain uses for EVM accounts. accountRef then
 // renders this as the H160 again. Money-market events index users by H160, so
@@ -5815,7 +6072,7 @@ async function getATokenHolders(aTokenAssetId: number, limit: number, viewerFold
     const scaled = await reconstructHolderScaled(reserve.token.aToken, b0)
     return scaled
       .filter(s => !s.holder.startsWith('0x6d6f646c'))   // exclude module/pallet accounts from the list
-      .map(s => ({ h160: s.holder, bal: (s.scaled * reserve.liquidityIndex) / ATOKEN_RAY }))
+      .map(s => ({ h160: s.holder, bal: settledAmount(s.scaled, reserve.liquidityIndex) }))
       .filter(h => h.bal > 0n)
   })
   return groupATokenHolderRows(held, viewerFoldRefFor(viewerFold), accountIdFromH160).slice(0, limit)
@@ -5960,7 +6217,7 @@ async function getFoldedDisplayAssetHolders(displayAssetId: number, shareAssetId
     for (const holder of displayHolders) {
       const accountId = accountIdFromH160(holder.holder)
       if (!accountId || holder.scaled <= 0n) continue
-      const bal = (holder.scaled * displayLiquidityIndex) / ATOKEN_RAY
+      const bal = settledAmount(holder.scaled, displayLiquidityIndex)
       if (bal > 0n) claims.push({ accountId, bal, lastBlock: 0, memberKey: holder.holder })
     }
     const custodyByContract = new Map<string, HolderBalanceClaim>()
@@ -5986,7 +6243,7 @@ async function getFoldedDisplayAssetHolders(displayAssetId: number, shareAssetId
       for (const holder of holders) {
         const accountId = accountIdFromH160(holder.holder)
         if (!accountId) continue
-        const actual = holder.scaled > 0n ? (holder.scaled * liquidityIndex) / ATOKEN_RAY : 0n
+        const actual = settledAmount(holder.scaled, liquidityIndex)
         const raw = rescaleRaw(actual.toString(), asset(reserveId).decimals, asset(displayAssetId).decimals)
         const bal = BigInt(raw || '0')
         if (bal > 0n) {
@@ -6209,11 +6466,18 @@ function mmCollateralShortfallUsd(moneyMarket: MoneyMarketPosition | null, folde
 // A concentrated-liquidity position (venue 'Uniswap v3' or 'Gamma vault') holds TWO
 // tokens: `asset`/`amount` carry token0, `assetB`/`amountB` token1; it links to its
 // pool page (`poolAddress`) and a manager position names its NFT (`tokenId`).
-export interface LpPosition { positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string; assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string }
+export interface LpPosition {
+  positionId: string; asset: AssetRef; amount: string; hubAmount?: string; shares: string; valueUsd: number | null; venue: string
+  assetB?: AssetRef; amountB?: string; poolAddress?: string; tokenId?: string
+  // Farmed rows only ('Omnipool Farm', 'XYK Farm'): what each of the position's
+  // farm entries would pay if claimed now. Never part of valueUsd — the principal
+  // is what withdrawing the liquidity returns; a reward is a different claim.
+  unclaimedRewards?: LpUnclaimedReward[]
+}
 // The position arithmetic lives in services/lpMath.ts (shared with the Data
 // API, which may not import this module); re-exported for the callers and
 // tests that reach it through here.
-export { OMNI_FIXED, omnipoolRemoveLiquidity, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
+export { OMNI_FIXED, omnipoolLegsForBucket, omnipoolRemoveLiquidity, xykShareLegs, type DecodedPosition, type HistoricalOwnedPosition, type OmnipoolAssetState } from './lpMath.ts'
 
 // Omnipool state (per-asset reserve/hub/shares) for LP withdraw value
 // Reads the latest per-block stableswap/omnipool snapshot (raw_block_snapshots →
@@ -6261,25 +6525,6 @@ function valueOmnipoolPosition(pos: DecodedPosition, st: OmnipoolAssetState, pri
   const hubUsd = h2oPx != null ? Number(hub) / 10 ** (asset(H2O_ASSET_ID).decimals) * h2oPx : 0
   const valueUsd = assetUsd == null ? null : assetUsd + hubUsd
   return { amount: liquidity, hub, valueUsd }
-}
-
-// Raw withdraw legs for the positions economically owned at a single historical chart
-// bucket. Dedupes by positionId so a position is valued exactly once regardless of whether
-// it is held bare or farmed; skips positions with no pool state (never fabricates a zero
-// leg) or non-positive shares. Returns raw integer legs — callers apply the bucket's
-// event-time price. Shared by the historical value path (see valueOmnipoolPrincipalHistory).
-export interface HistoricalOwnedPosition { positionId: string; assetId: number; state: DecodedPosition; pool: OmnipoolAssetState | undefined }
-export function omnipoolLegsForBucket(positions: HistoricalOwnedPosition[]): { positionId: string; assetId: number; liquidity: bigint; hub: bigint }[] {
-  const out: { positionId: string; assetId: number; liquidity: bigint; hub: bigint }[] = []
-  const seen = new Set<string>()
-  for (const { positionId, assetId, state, pool } of positions) {
-    if (seen.has(positionId)) continue
-    seen.add(positionId)
-    if (!pool || state.shares <= 0n) continue
-    const { liquidity, hub } = omnipoolRemoveLiquidity(pool, state)
-    out.push({ positionId, assetId, liquidity, hub })
-  }
-  return out
 }
 
 // Current open omnipool positions owned by a set of accounts, reconstructed from
@@ -6619,8 +6864,8 @@ async function getFarmingPositions(accounts: string[]): Promise<LpPosition[]> {
 // Current XYK pool state (reserves from the latest snapshot, total supply from the latest
 // reconstructed step point) for the given LP tokens, to value XYK LP at current NAV. Mirrors
 // loadOmnipoolState but for the fungible XYK share tokens.
-interface XykCurrentPool { assetA: number; assetB: number; reserveA: bigint; reserveB: bigint; totalShares: bigint }
-async function loadXykCurrentState(lpAssetIds: number[]): Promise<Map<number, XykCurrentPool>> {
+export interface XykCurrentPool { assetA: number; assetB: number; reserveA: bigint; reserveB: bigint; totalShares: bigint }
+export async function loadXykCurrentState(lpAssetIds: number[]): Promise<Map<number, XykCurrentPool>> {
   const out = new Map<number, XykCurrentPool>()
   if (!lpAssetIds.length) return out
   const regRes = await client.query({ query: `SELECT lp_asset_id, pool_account, asset_a, asset_b FROM price_data.xyk_pool_registry FINAL WHERE lp_asset_id IN {lps:Array(Int32)}`, query_params: { lps: lpAssetIds }, format: 'JSONEachRow' })
@@ -6629,6 +6874,7 @@ async function loadXykCurrentState(lpAssetIds: number[]): Promise<Map<number, Xy
   const pools = [...new Set(reg.map(r => r.pool_account))]
   const resvRes = await client.query({
     query: `SELECT JSONExtractString(p,'pool_account') AS pool,
+              JSONHas(p,'asset_a') AND JSONHas(p,'asset_b') AS has_ids,
               toInt32(JSONExtractInt(p,'asset_a')) AS aa, toInt32(JSONExtractInt(p,'asset_b')) AS ab,
               JSONExtractString(p,'reserve_a') AS ra, JSONExtractString(p,'reserve_b') AS rb
             FROM price_data.raw_block_snapshots
@@ -6636,8 +6882,10 @@ async function loadXykCurrentState(lpAssetIds: number[]): Promise<Map<number, Xy
             WHERE block_height = (SELECT max(block_height) FROM price_data.raw_block_snapshots) AND JSONExtractString(p,'pool_account') IN {pools:Array(String)}`,
     query_params: { pools }, format: 'JSONEachRow',
   })
-  const reserveByPool = new Map<string, { aa: number; ab: number; ra: bigint; rb: bigint }>()
-  for (const r of await resvRes.json<{ pool: string; aa: number; ab: number; ra: string; rb: string }>()) reserveByPool.set(r.pool, { aa: r.aa, ab: r.ab, ra: BigInt(r.ra || '0'), rb: BigInt(r.rb || '0') })
+  const reserveByPool = new Map<string, { hasIds: boolean; aa: number; ab: number; ra: bigint; rb: bigint }>()
+  for (const r of await resvRes.json<{ pool: string; has_ids: number | boolean; aa: number; ab: number; ra: string; rb: string }>()) {
+    reserveByPool.set(r.pool, { hasIds: Boolean(Number(r.has_ids)), aa: Number(r.aa), ab: Number(r.ab), ra: BigInt(r.ra || '0'), rb: BigInt(r.rb || '0') })
+  }
   const tsRes = await client.query({ query: `SELECT lp_asset_id, argMax(total_shares_raw, block_height) AS total FROM price_data.xyk_lp_total_shares_history WHERE lp_asset_id IN {lps:Array(Int32)} GROUP BY lp_asset_id`, query_params: { lps: lpAssetIds }, format: 'JSONEachRow' })
   const totalByLp = new Map<number, bigint>()
   for (const r of await tsRes.json<{ lp_asset_id: number; total: string }>()) totalByLp.set(r.lp_asset_id, BigInt(r.total || '0'))
@@ -6646,8 +6894,10 @@ async function loadXykCurrentState(lpAssetIds: number[]): Promise<Map<number, Xy
     if (rv && ts && ts > 0n) {
       // Pair reserves with the snapshot's own asset order, which can differ from the
       // registry's PoolCreated order (see loadXykPrincipalHistory); registry fallback for
-      // legacy snapshot rows without asset ids.
-      const [assetA, assetB] = rv.aa > 0 && rv.ab > 0 ? [rv.aa, rv.ab] : [r.asset_a, r.asset_b]
+      // legacy snapshot rows without asset ids — decided by the keys' PRESENCE, never by a
+      // non-zero id: HDX is asset 0, and reading it as missing paired an HDX pool's
+      // reserves in the registry order, swapped wherever the two orders differ.
+      const [assetA, assetB] = xykReserveAssets(rv.hasIds, rv.aa, rv.ab, Number(r.asset_a), Number(r.asset_b))
       out.set(r.lp_asset_id, { assetA, assetB, reserveA: rv.ra, reserveB: rv.rb, totalShares: ts })
     }
   }
@@ -6658,7 +6908,7 @@ async function loadXykCurrentState(lpAssetIds: number[]): Promise<Map<number, Xy
 // deposits) valued at pool NAV, so the account's headline value and the history's pinned
 // final point include XYK. Direct LP token balances contribute NAV here, not their (null)
 // token price in `balances` — no double count.
-async function getXykPositions(accounts: string[], balances: AddressBalance[]): Promise<LpPosition[]> {
+export async function getXykPositions(accounts: string[], balances: AddressBalance[]): Promise<LpPosition[]> {
   const accs = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => /^0x[0-9a-f]{64}$/.test(a))
   if (!accs.length) return []
   const farmedByLp = new Map<number, bigint>()
@@ -6676,10 +6926,226 @@ async function getXykPositions(accounts: string[], balances: AddressBalance[]): 
       const usdA = usdValue(prices, st.assetA, amountA.toString(), asset(st.assetA).decimals)
       const usdB = usdValue(prices, st.assetB, amountB.toString(), asset(st.assetB).decimals)
       const valueUsd = usdA == null || usdB == null ? null : usdA + usdB
-      out.push({ positionId: `xyk:${lp}:${venue === 'XYK Farm' ? 'farm' : 'direct'}`, asset: asset(lp), amount: amountA.toString(), shares: shares.toString(), valueUsd, venue })
+      // Both legs, in the pool's reserve order (loadXykCurrentState pairs it by the
+      // snapshot's ids — HDX, asset 0, included); the LP token itself is what
+      // `shares` counts, never the leg's asset.
+      out.push({
+        positionId: `xyk:${lp}:${venue === 'XYK Farm' ? 'farm' : 'direct'}`,
+        asset: asset(st.assetA), amount: amountA.toString(), assetB: asset(st.assetB), amountB: amountB.toString(),
+        shares: shares.toString(), valueUsd, venue,
+      })
     }
   }
   return out.sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
+}
+
+// ── unclaimed liquidity-mining rewards (lm-rewards snapshot) ──
+// One farm entry = (deposit, yield farm). `claimable` is what one claim_rewards
+// would pay at the snapshot block: loyalty-adjusted, less what was already
+// claimed. `projected: false` marks an active farm whose runtime projection
+// failed that cycle — its amount is as of the farm's last on-chain sync, a
+// firm lower bound. Valued at current prices, like any current holding.
+export interface FarmRewardItem {
+  depositId: string
+  positionId: string | null
+  globalFarmId: number
+  yieldFarmId: number
+  venue: 'Omnipool Farm' | 'XYK Farm'
+  farmState: 'active' | 'stopped' | 'terminated'
+  asset: AssetRef
+  claimable: string
+  claimableUsd: number | null
+  // gross − loyalty · gross: what leaving the farm now would forfeit. Claiming
+  // does not forfeit it (a later claim pays loyalty(later) · gross − claimed).
+  forfeitIfWithdrawnNow: string
+  projected: boolean
+  // 0 < claimable < the reward asset's existential deposit: a claim pays it only
+  // to an account already holding at least that much of the asset (else it goes
+  // to the treasury), and a withdraw forfeits it the same way.
+  belowExistentialDeposit: boolean
+  // false when belowExistentialDeposit AND the owner holds less than that deposit
+  // of the reward asset at the snapshot block: a claim now pays the owner nothing,
+  // so `claimable` stays visible but `claimableUsd` is 0 and nothing is counted.
+  payable: boolean
+  loyaltyPct: number
+  // The yield farm's last on-chain sync, in relay-chain blocks when the farm's
+  // period is one relay block (every farm on chain today; it is the period number).
+  lastSyncPeriod: number
+}
+export interface FarmRewards { asOfBlock: number; items: FarmRewardItem[]; totalUsd: number }
+export interface LpUnclaimedReward { depositId: string; globalFarmId: number; yieldFarmId: number; asset: AssetRef; amount: string; valueUsd: number | null; projected: boolean; belowExistentialDeposit: boolean; payable: boolean }
+
+// The loyalty multiplier as a percentage, 2 decimals (FixedU128 inner / 1e16).
+const loyaltyPct = (inner: bigint): number => Number(inner / 10n ** 14n) / 100
+
+/**
+ * The account's reward snapshot rows as the account page states them, and each
+ * farmed LP row with the entries of the deposits behind it: an Omnipool Farm
+ * row is one position NFT (its deposit's entries), an XYK Farm row is the whole
+ * pool's farmed principal (every deposit of that pool). Pure, for the tests.
+ */
+export function assembleFarmRewards(
+  asOfBlock: number | null, rows: LmRewardRow[], lpPositions: LpPosition[],
+  value: (assetId: number, raw: bigint) => number | null,
+): { farmRewards: FarmRewards | undefined; lpPositions: LpPosition[] } {
+  if (asOfBlock == null || !rows.length) return { farmRewards: undefined, lpPositions }
+  const items: FarmRewardItem[] = rows.map(r => ({
+    depositId: r.depositId,
+    positionId: r.pallet === 'omnipool' ? r.positionId : r.lpAssetId != null ? `xyk:${r.lpAssetId}:farm` : null,
+    globalFarmId: r.globalFarmId,
+    yieldFarmId: r.yieldFarmId,
+    venue: r.pallet === 'omnipool' ? 'Omnipool Farm' : 'XYK Farm',
+    farmState: r.farmState,
+    asset: asset(r.rewardAssetId),
+    claimable: r.claimable.toString(),
+    claimableUsd: lmCountedClaimable(r) > 0n ? value(r.rewardAssetId, r.claimable) : 0,
+    forfeitIfWithdrawnNow: r.forfeitIfWithdrawnNow.toString(),
+    projected: r.projected,
+    belowExistentialDeposit: r.belowExistentialDeposit,
+    payable: r.payable,
+    loyaltyPct: loyaltyPct(r.loyalty),
+    lastSyncPeriod: r.farmUpdatedAtPeriod,
+  }))
+  const byPosition = new Map<string, LpUnclaimedReward[]>()
+  for (const item of items) {
+    if (!item.positionId) continue
+    const list = byPosition.get(`${item.venue}|${item.positionId}`) ?? []
+    list.push({ depositId: item.depositId, globalFarmId: item.globalFarmId, yieldFarmId: item.yieldFarmId, asset: item.asset, amount: item.claimable, valueUsd: item.claimableUsd, projected: item.projected, belowExistentialDeposit: item.belowExistentialDeposit, payable: item.payable })
+    byPosition.set(`${item.venue}|${item.positionId}`, list)
+  }
+  const withRewards = lpPositions.map(p => {
+    const list = (p.venue === 'Omnipool Farm' || p.venue === 'XYK Farm') ? byPosition.get(`${p.venue}|${p.positionId}`) : undefined
+    return list ? { ...p, unclaimedRewards: list } : p
+  })
+  const totalUsd = items.reduce((sum, i) => sum + (i.claimableUsd ?? 0), 0)
+  return { farmRewards: { asOfBlock, items, totalUsd }, lpPositions: withRewards }
+}
+
+// ── claimable money-market incentives (mm-incentives snapshot) ──
+// One (holder, reward asset): the chain's own getAllUserRewards at the snapshot
+// block — what one claimAllRewards would pay then. `reconciled` says the indexed
+// log arithmetic reproduces it (a false one is still the chain's figure, but its
+// history is not stated); `legs` carries that arithmetic's pending part per
+// incentivized aToken. Valued at current prices, like any current holding.
+export interface MoneyMarketRewardItem {
+  marketKey: string
+  holder: string
+  asset: AssetRef
+  claimable: string
+  claimableUsd: number | null
+  reconciled: boolean
+  // 0 < claimable < the reward asset's existential deposit: a claimAllRewards
+  // including it reverts until the account holds that deposit of the asset (or
+  // the amount grows past it). Owed, not forfeited — still counted.
+  belowExistentialDeposit: boolean
+  legs: Array<{ aToken: AssetRef | null; aTokenAddress: string; pending: string }>
+}
+export interface MoneyMarketRewards { asOfBlock: number; items: MoneyMarketRewardItem[]; totalUsd: number }
+
+/** The snapshot's rewards as the account page states them (claimable > 0 only). Pure, for the tests. */
+export function assembleMoneyMarketRewards(
+  snapshot: MmIncentiveSnapshotView,
+  value: (assetId: number, raw: bigint) => number | null,
+  aTokenOf: (aTokenAddress: string) => AssetRef | null,
+): MoneyMarketRewards | undefined {
+  if (snapshot.asOfBlock == null) return undefined
+  const items: MoneyMarketRewardItem[] = snapshot.rewards.filter(r => r.claimable > 0n).map(r => ({
+    marketKey: r.marketKey,
+    holder: r.holder,
+    asset: asset(r.rewardAssetId),
+    claimable: r.claimable.toString(),
+    claimableUsd: value(r.rewardAssetId, r.claimable),
+    reconciled: r.reconciled,
+    belowExistentialDeposit: r.belowExistentialDeposit,
+    legs: r.legs.map(l => ({ aToken: aTokenOf(l.assetAddress), aTokenAddress: l.assetAddress, pending: l.pending.toString() })),
+  }))
+  if (!items.length) return undefined
+  return { asOfBlock: snapshot.asOfBlock, items, totalUsd: items.reduce((s, i) => s + (i.claimableUsd ?? 0), 0) }
+}
+
+/** Each market's incentives beside its position (display only; see MoneyMarketPosition.unclaimedRewards). */
+export function withMarketRewards(positions: MoneyMarketPosition[], rewards: MoneyMarketRewards | undefined): MoneyMarketPosition[] {
+  if (!rewards) return positions
+  return positions.map(p => {
+    const items = rewards.items.filter(i => i.marketKey === p.marketKey)
+    return items.length ? { ...p, unclaimedRewards: items } : p
+  })
+}
+
+/** The unclaimed rewards an account value carries: farm entries and money-market incentives. */
+export interface UnclaimedRewards { farmRewards?: FarmRewards; moneyMarketRewards?: MoneyMarketRewards }
+
+/**
+ * The part of the account value the unclaimed rewards carry — farm entries and
+ * money-market incentives alike: every PRICED claimable-now USD (an unpriced one
+ * is in no sum, and the UI counts it aloud), with the HDX-denominated ones left
+ * out of the ex-HDX twin — the rule chartFarmRewardSeries and
+ * chartMmIncentiveSeries apply per bucket, so the value chart's history and its
+ * live-pinned last point take rewards in the same way.
+ */
+export function unclaimedRewardValue(rewards: UnclaimedRewards): { usd: number; exHdxUsd: number } {
+  let usd = 0
+  let exHdxUsd = 0
+  for (const item of [...(rewards.farmRewards?.items ?? []), ...(rewards.moneyMarketRewards?.items ?? [])]) {
+    const v = item.claimableUsd ?? 0
+    usd += v
+    if (item.asset.assetId !== HDX_ASSET_ID) exHdxUsd += v
+  }
+  return { usd, exHdxUsd }
+}
+
+/** Both reward reads for one value: the farm entries of `accounts` and the incentives of `h160s`. */
+async function getUnclaimedRewards(accounts: string[], h160s: Array<string | null>, lpPositions: LpPosition[]): Promise<UnclaimedRewards & { lpPositions: LpPosition[] }> {
+  const [farm, moneyMarketRewards] = await Promise.all([
+    getFarmRewards(accounts, lpPositions),
+    getMoneyMarketRewards(h160s.filter((h): h is string => h != null)),
+  ])
+  return { farmRewards: farm.farmRewards, moneyMarketRewards, lpPositions: farm.lpPositions }
+}
+
+// A failed snapshot read leaves the incentives absent (and out of the value), as
+// before the first snapshot or once it goes stale — never a failed page.
+async function getMoneyMarketRewards(h160s: string[]): Promise<MoneyMarketRewards | undefined> {
+  const hs = [...new Set(h160s.map(h => h.toLowerCase()))].filter(h => /^0x[0-9a-f]{40}$/.test(h)).sort()
+  if (!hs.length) return undefined
+  try {
+    const [snapshot, prices, reserveMap] = await Promise.all([
+      cached(`explorer:mm-incentives:${hs.join(',')}`, 15_000, () => loadMmIncentives(client, hs)),
+      ensureAccountValuePrices(),
+      loadMmReserveMap(client),
+    ])
+    const byAtoken = new Map(reserveMap.reserves.map(r => [r.atoken, r]))
+    return assembleMoneyMarketRewards(snapshot,
+      (assetId, raw) => usdValue(prices, assetId, raw.toString(), asset(assetId).decimals),
+      addr => {
+        const reserve = byAtoken.get(addr.toLowerCase())
+        const underlying = reserve ? assetIdFromMmAddress(reserve.assetAddress) : null
+        const id = underlying != null ? UNDERLYING_TO_ATOKEN_ID[underlying] : undefined
+        return id != null ? asset(id) : null
+      })
+  } catch (err) {
+    console.error('[mm-incentives] snapshot read failed', err)
+    return undefined
+  }
+}
+
+// A failed snapshot read leaves the figure absent — the page renders without
+// it (and without it in the value), as it does before the first snapshot is
+// published or once it goes stale — rather than failing the account page.
+async function getFarmRewards(accounts: string[], lpPositions: LpPosition[]): Promise<{ farmRewards: FarmRewards | undefined; lpPositions: LpPosition[] }> {
+  try {
+    // Briefly cached per account set: the snapshot republishes every ~2 minutes,
+    // and the hover cards (account and tag) now read it for their value too.
+    const [snapshot, prices] = await Promise.all([
+      cached(`explorer:lm-rewards:${accountSetFingerprint(accounts)}`, 15_000, () => loadLmRewards(client, accounts)),
+      ensureAccountValuePrices(),
+    ])
+    return assembleFarmRewards(snapshot.asOfBlock, snapshot.rows, lpPositions,
+      (assetId, raw) => usdValue(prices, assetId, raw.toString(), asset(assetId).decimals))
+  } catch (err) {
+    console.error('[lm-rewards] snapshot read failed', err)
+    return { farmRewards: undefined, lpPositions }
+  }
 }
 
 // Concentrated-liquidity positions: position NFTs held through a manager and Gamma
@@ -6719,274 +7185,6 @@ async function v3RegistryAssetResolver(): Promise<(addr: string) => number | nul
     }
     return null
   }
-}
-
-// Historical concentrated-liquidity (Uniswap v3) principal for the value-history chart:
-// the account page's own fold (v3AccountPositionsRawAt) stopped at each bucket's end
-// block — manager-NFT principal and Gamma vault shares redeemed against the vault's
-// totals at that block — so the curve's last bucket and the page's current value are
-// one definition. Uncollected fees are in neither. Raw legs; callers apply the bucket's
-// closed price. Account-bounded, and the venue's whole history is a few thousand rows.
-interface V3HistoryLeg { asset0: number; asset1: number; amount0: bigint; amount1: bigint }
-async function loadV3PrincipalHistory(accounts: string[], bk: Bucketing): Promise<{ legsByBucket: V3HistoryLeg[][]; assetIds: number[] }> {
-  const h160s = [...new Set(accounts.map(historyH160).filter((x): x is string => x != null))]
-  const empty = { legsByBucket: Array.from({ length: bk.N + 1 }, () => [] as V3HistoryLeg[]), assetIds: [] }
-  if (!h160s.length) return empty
-  const [history, registryAsset] = await Promise.all([loadV3AccountHistory(client, h160s), v3RegistryAssetResolver()])
-  if (!history.managerEvents.length && !history.shareEvents.length) return empty
-  const assetIds = new Set<number>()
-  const legsByBucket = empty.legsByBucket
-  for (let b = 0; b <= bk.N; b++) {
-    for (const p of v3AccountPositions(v3AccountPositionsRawAt(history, bk.endHeight(b)), registryAsset)) {
-      // An unresolvable token cannot be priced; the current-value twin drops it too.
-      if (p.asset0 == null || p.asset1 == null) continue
-      legsByBucket[b].push({ asset0: p.asset0, asset1: p.asset1, amount0: p.amount0, amount1: p.amount1 })
-      assetIds.add(p.asset0).add(p.asset1)
-    }
-  }
-  return { legsByBucket, assetIds: [...assetIds] }
-}
-
-// Historical Omnipool principal for the value-history chart: for every position the account
-// economically owned at each bucket (bare or farmed), the raw withdraw legs from its TRUE
-// per-block state — not current shares, never request-time snapshot JSON. Account-bounded:
-// ownership intervals by account, position state by referenced positions, pool state by
-// referenced assets. Callers apply the bucket's event-time price to the raw legs.
-// See the value-history path in getAccountHistory.
-export interface OmnipoolHistoryLeg { assetId: number; liquidity: bigint; hub: bigint }
-export interface OmnipoolPrincipalHistory { legsByBucket: OmnipoolHistoryLeg[][]; assetIds: number[]; fromBucket: number | null }
-export async function loadOmnipoolPrincipalHistory(accounts: string[], bk: Bucketing): Promise<OmnipoolPrincipalHistory> {
-  const n = bk.N
-  const minb = bk.floorHeight
-  const empty: OmnipoolPrincipalHistory = { legsByBucket: Array.from({ length: n + 1 }, () => []), assetIds: [], fromBucket: null }
-  const accs = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => /^0x[0-9a-f]{64}$/.test(a))
-  if (!accs.length) return empty
-  const maxb = bk.endHeight(n)
-  const bucketEndBlock = (b: number) => bk.endHeight(b)
-
-  // 1) Ownership intervals overlapping the range (account-bounded).
-  const ivRes = await client.query({
-    query: `SELECT position_id, valid_from_block, valid_to_block
-            FROM price_data.omnipool_position_owner_intervals FINAL
-            WHERE account_id IN {accs:Array(String)}
-              AND valid_from_block <= ${maxb}
-              AND (valid_to_block = 0 OR valid_to_block >= ${minb})`,
-    query_params: { accs }, format: 'JSONEachRow',
-  })
-  const intervals = await ivRes.json<{ position_id: string; valid_from_block: number; valid_to_block: number }>()
-  if (!intervals.length) return empty
-  const positionIds = [...new Set(intervals.map(i => i.position_id))]
-
-  // 2) Position state events for those positions (position-bounded); forward-fill the
-  //    latest active state to each bucket end, dropping the position once destroyed.
-  const stRes = await client.query({
-    query: `SELECT position_id, block_height, event_kind, asset_id, amount_raw, shares_raw, price_raw, active
-            FROM price_data.omnipool_position_state_events FINAL
-            WHERE position_id IN {pids:Array(String)}
-            ORDER BY position_id, block_height, event_index`,
-    query_params: { pids: positionIds }, format: 'JSONEachRow',
-  })
-  const stRows = await stRes.json<{ position_id: string; block_height: number; event_kind: string; asset_id: number; amount_raw: string; shares_raw: string; price_raw: string; active: number }>()
-  const eventsByPosition = new Map<string, typeof stRows>()
-  for (const r of stRows) { if (!eventsByPosition.has(r.position_id)) eventsByPosition.set(r.position_id, []); eventsByPosition.get(r.position_id)!.push(r) }
-  const stateByPosition = new Map<string, (DecodedPosition | null)[]>()
-  const assetByPosition = new Map<string, number>()
-  for (const pid of positionIds) {
-    const evs = eventsByPosition.get(pid) ?? []
-    const series: (DecodedPosition | null)[] = new Array(n + 1).fill(null)
-    let cursor = 0
-    let last: DecodedPosition | null = null
-    for (let b = 0; b <= n; b++) {
-      const be = bucketEndBlock(b)
-      while (cursor < evs.length && evs[cursor].block_height <= be) {
-        const e = evs[cursor]
-        if (e.event_kind === 'destroyed' || e.active === 0) last = null
-        else { last = { assetId: e.asset_id, amount: BigInt(e.amount_raw || '0'), shares: BigInt(e.shares_raw || '0'), priceNum: BigInt(e.price_raw || '0'), priceDen: OMNI_FIXED }; assetByPosition.set(pid, e.asset_id) }
-        cursor++
-      }
-      series[b] = last
-    }
-    stateByPosition.set(pid, series)
-  }
-
-  // 3) Pool state per (asset, bucket): the latest snapshot at/before each bucket end,
-  //    forward-filled (b = -1 carries the pre-range state). Asset-bounded.
-  const assetIds = [...new Set([...assetByPosition.values()])]
-  const poolByAssetBucket = new Map<number, (OmnipoolAssetState | undefined)[]>()
-  if (assetIds.length) {
-    const poolRes = await client.query({
-      query: `SELECT asset_id,
-                ${bk.ofTsCarry('block_timestamp')} AS b,
-                argMax(reserve_raw, block_height) AS reserve,
-                argMax(hub_reserve_raw, block_height) AS hub_reserve,
-                argMax(shares_raw, block_height) AS shares
-              FROM price_data.omnipool_pool_state_history
-              WHERE asset_id IN {aids:Array(Int32)} AND block_height <= ${maxb}
-              GROUP BY asset_id, b ORDER BY asset_id, b`,
-      query_params: { aids: assetIds }, format: 'JSONEachRow',
-    })
-    const poolRows = await poolRes.json<{ asset_id: number; b: number; reserve: string; hub_reserve: string; shares: string }>()
-    const byAsset = new Map<number, Map<number, OmnipoolAssetState>>()
-    for (const r of poolRows) {
-      if (!byAsset.has(r.asset_id)) byAsset.set(r.asset_id, new Map())
-      byAsset.get(r.asset_id)!.set(r.b, { reserve: BigInt(r.reserve || '0'), hub: BigInt(r.hub_reserve || '0'), shares: BigInt(r.shares || '0') })
-    }
-    for (const aid of assetIds) {
-      const perBucket = byAsset.get(aid) ?? new Map<number, OmnipoolAssetState>()
-      const series: (OmnipoolAssetState | undefined)[] = new Array(n + 1).fill(undefined)
-      let last: OmnipoolAssetState | undefined = perBucket.get(-1)
-      for (let b = 0; b <= n; b++) { if (perBucket.has(b)) last = perBucket.get(b); series[b] = last }
-      poolByAssetBucket.set(aid, series)
-    }
-  }
-
-  // 4) Per bucket: positions active at the bucket end (dedup by positionId), raw legs.
-  const legsByBucket: OmnipoolHistoryLeg[][] = Array.from({ length: n + 1 }, () => [])
-  let fromBucket: number | null = null
-  for (let b = 0; b <= n; b++) {
-    const be = bucketEndBlock(b)
-    const owned: HistoricalOwnedPosition[] = []
-    for (const iv of intervals) {
-      if (iv.valid_from_block <= be && (iv.valid_to_block === 0 || iv.valid_to_block > be)) {
-        const state = stateByPosition.get(iv.position_id)?.[b] ?? null
-        if (!state) continue
-        owned.push({ positionId: iv.position_id, assetId: state.assetId, state, pool: poolByAssetBucket.get(state.assetId)?.[b] })
-      }
-    }
-    const legs = omnipoolLegsForBucket(owned)
-    if (legs.length && fromBucket === null) fromBucket = b
-    legsByBucket[b] = legs.map(l => ({ assetId: l.assetId, liquidity: l.liquidity, hub: l.hub }))
-  }
-  return { legsByBucket, assetIds, fromBucket }
-}
-
-// Historical XYK principal for the value-history chart (Phase 2). For the account's LP holdings
-// — direct wallet shareToken balances AND collection-5389 farm-deposit principal — this loads
-// the per-bucket pool state needed to value each at NAV (reserves × shares / total supply).
-// Total supply is the reconstructed step function; reserves are the sampled snapshot. All
-// account/pool/asset-bounded. Callers combine direct + farmed shares and apply xykShareLegs.
-export interface XykBucketState { assetA: number; assetB: number; reserveA: bigint; reserveB: bigint; totalShares: bigint }
-export interface XykPrincipalHistory {
-  lpAssetIds: Set<number>
-  underlyingAssetIds: number[]
-  stateByLp: Map<number, (XykBucketState | undefined)[]>
-  farmSharesByLp: Map<number, bigint[]>
-}
-export async function loadXykPrincipalHistory(accounts: string[], candidateAssetIds: number[], bk: Bucketing): Promise<XykPrincipalHistory> {
-  const n = bk.N
-  const minb = bk.floorHeight
-  const empty: XykPrincipalHistory = { lpAssetIds: new Set(), underlyingAssetIds: [], stateByLp: new Map(), farmSharesByLp: new Map() }
-  const accs = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => /^0x[0-9a-f]{64}$/.test(a))
-  const maxb = bk.endHeight(n)
-  const bucketEndBlock = (b: number) => bk.endHeight(b)
-
-  // 1) Farm principal intervals → per (lp, bucket) summed active principal.
-  const farmSharesByLp = new Map<number, bigint[]>()
-  const farmedLps = new Set<number>()
-  if (accs.length) {
-    const fRes = await client.query({
-      query: `SELECT lp_asset_id, principal_shares_raw, valid_from_block, valid_to_block
-              FROM price_data.xyk_farm_principal_intervals FINAL
-              WHERE account_id IN {accs:Array(String)} AND valid_from_block <= ${maxb} AND (valid_to_block = 0 OR valid_to_block >= ${minb})`,
-      query_params: { accs }, format: 'JSONEachRow',
-    })
-    for (const r of await fRes.json<{ lp_asset_id: number; principal_shares_raw: string; valid_from_block: number; valid_to_block: number }>()) {
-      farmedLps.add(r.lp_asset_id)
-      if (!farmSharesByLp.has(r.lp_asset_id)) farmSharesByLp.set(r.lp_asset_id, new Array(n + 1).fill(0n))
-      const arr = farmSharesByLp.get(r.lp_asset_id)!
-      const principal = BigInt(r.principal_shares_raw || '0')
-      for (let b = 0; b <= n; b++) { const be = bucketEndBlock(b); if (r.valid_from_block <= be && (r.valid_to_block === 0 || r.valid_to_block > be)) arr[b] += principal }
-    }
-  }
-
-  // 2) Which candidate assets (+ farmed lps) are XYK LP tokens? → registry mapping.
-  const lpCandidates = [...new Set([...candidateAssetIds, ...farmedLps])]
-  if (!lpCandidates.length) return empty
-  const rRes = await client.query({
-    query: `SELECT lp_asset_id, pool_account, asset_a, asset_b FROM price_data.xyk_pool_registry FINAL WHERE lp_asset_id IN {lps:Array(Int32)}`,
-    query_params: { lps: lpCandidates }, format: 'JSONEachRow',
-  })
-  const regRows = await rRes.json<{ lp_asset_id: number; pool_account: string; asset_a: number; asset_b: number }>()
-  if (!regRows.length) return empty
-  const lpAssetIds = new Set(regRows.map(r => r.lp_asset_id))
-  const poolByLp = new Map(regRows.map(r => [r.lp_asset_id, r]))
-  const pools = [...new Set(regRows.map(r => r.pool_account))]
-
-  // 3) Reserves per (pool, bucket) — sampled, forward-filled (b=-1 carry-in). Carry the
-  // snapshot's own asset order (aa/ab), taken from the SAME latest row as the reserves
-  // (all argMax by block_height): it can differ from — and even flips across blocks
-  // within — the registry's PoolCreated order, so reserves must be paired by it (step 5).
-  const reserveByPoolBucket = new Map<string, ({ aa: number; ab: number; ra: bigint; rb: bigint } | undefined)[]>()
-  {
-    const resvRes = await client.query({
-      query: `SELECT pool_account,
-                ${bk.ofTsCarry('block_timestamp')} AS b,
-                argMax(asset_a, block_height) AS aa, argMax(asset_b, block_height) AS ab,
-                argMax(reserve_a_raw, block_height) AS ra, argMax(reserve_b_raw, block_height) AS rb
-              FROM price_data.xyk_pool_reserve_history WHERE pool_account IN {pools:Array(String)} AND block_height <= ${maxb}
-              GROUP BY pool_account, b ORDER BY pool_account, b`,
-      query_params: { pools }, format: 'JSONEachRow',
-    })
-    const byPool = new Map<string, Map<number, { aa: number; ab: number; ra: bigint; rb: bigint }>>()
-    for (const r of await resvRes.json<{ pool_account: string; b: number; aa: number; ab: number; ra: string; rb: string }>()) {
-      if (!byPool.has(r.pool_account)) byPool.set(r.pool_account, new Map())
-      byPool.get(r.pool_account)!.set(r.b, { aa: r.aa, ab: r.ab, ra: BigInt(r.ra || '0'), rb: BigInt(r.rb || '0') })
-    }
-    for (const pool of pools) {
-      const per = byPool.get(pool) ?? new Map<number, { aa: number; ab: number; ra: bigint; rb: bigint }>()
-      const arr: ({ aa: number; ab: number; ra: bigint; rb: bigint } | undefined)[] = new Array(n + 1).fill(undefined)
-      let last = per.get(-1)
-      for (let b = 0; b <= n; b++) { if (per.has(b)) last = per.get(b); arr[b] = last }
-      reserveByPoolBucket.set(pool, arr)
-    }
-  }
-
-  // 4) Total shares per (lp, bucket) — reconstructed step function, forward-filled.
-  const totalByLpBucket = new Map<number, (bigint | undefined)[]>()
-  {
-    const tRes = await client.query({
-      query: `SELECT lp_asset_id,
-                ${bk.ofHeightCarry('block_height')} AS b,
-                argMax(total_shares_raw, block_height) AS total
-              FROM price_data.xyk_lp_total_shares_history WHERE lp_asset_id IN {lps:Array(Int32)} AND block_height <= ${maxb}
-              GROUP BY lp_asset_id, b ORDER BY lp_asset_id, b`,
-      query_params: { lps: [...lpAssetIds] }, format: 'JSONEachRow',
-    })
-    const byLp = new Map<number, Map<number, bigint>>()
-    for (const r of await tRes.json<{ lp_asset_id: number; b: number; total: string }>()) {
-      if (!byLp.has(r.lp_asset_id)) byLp.set(r.lp_asset_id, new Map())
-      byLp.get(r.lp_asset_id)!.set(r.b, BigInt(r.total || '0'))
-    }
-    for (const lp of lpAssetIds) {
-      const per = byLp.get(lp) ?? new Map<number, bigint>()
-      const arr: (bigint | undefined)[] = new Array(n + 1).fill(undefined)
-      let last = per.get(-1)
-      for (let b = 0; b <= n; b++) { if (per.has(b)) last = per.get(b); arr[b] = last }
-      totalByLpBucket.set(lp, arr)
-    }
-  }
-
-  // 5) Assemble per-lp per-bucket state (only where reserves + positive total supply exist).
-  const stateByLp = new Map<number, (XykBucketState | undefined)[]>()
-  for (const lp of lpAssetIds) {
-    const reg = poolByLp.get(lp)!
-    const reserves = reserveByPoolBucket.get(reg.pool_account)
-    const totals = totalByLpBucket.get(lp)
-    const arr: (XykBucketState | undefined)[] = new Array(n + 1).fill(undefined)
-    for (let b = 0; b <= n; b++) {
-      const rv = reserves?.[b]; const ts = totals?.[b]
-      if (rv && ts && ts > 0n) {
-        // Pair each reserve with the asset it belongs to via the snapshot's own
-        // (asset_a↔reserve_a) order; fall back to the registry order only for legacy
-        // rows that predate the snapshot asset columns.
-        const [assetA, assetB] = rv.aa > 0 && rv.ab > 0 ? [rv.aa, rv.ab] : [reg.asset_a, reg.asset_b]
-        arr[b] = { assetA, assetB, reserveA: rv.ra, reserveB: rv.rb, totalShares: ts }
-      }
-    }
-    stateByLp.set(lp, arr)
-  }
-  const underlyingAssetIds = [...new Set(regRows.flatMap(r => [r.asset_a, r.asset_b]))]
-  return { lpAssetIds, underlyingAssetIds, stateByLp, farmSharesByLp }
 }
 
 // active DCA schedules (reconstructed from indexed events, no RPC)
@@ -8383,7 +8581,7 @@ async function getATokenTotalSupplies(): Promise<Map<number, bigint>> {
     for (const { assetId, token, liquidityIndex } of entries) {
       const scaledTotal = scaledByContract.get(token.aToken.toLowerCase()) ?? 0n
       if (scaledTotal <= 0n) continue
-      out.set(assetId, (out.get(assetId) ?? 0n) + (scaledTotal * liquidityIndex) / ATOKEN_RAY)
+      out.set(assetId, (out.get(assetId) ?? 0n) + settledAmount(scaledTotal, liquidityIndex))
     }
     return out
   })
@@ -8457,7 +8655,7 @@ export async function getAssets(): Promise<AssetListItem[]> {
       .map(a => {
         // Derivatives (bonds, aTokens) carry no price feed of their own — fall back
         // to the asset they're priced through (a bond redeems 1:1 for its underlying).
-        const p = prices.get(a.assetId) ?? prices.get(priceAssetId(a.assetId))
+        const p = currentPriceOf(prices, a.assetId)
         const type = explorerAssetType(a)
         const raw = totals.get(a.assetId) ?? 0n
         const amountUsd = p ? (Number(raw) / 10 ** a.decimals) * p.price : null
@@ -20270,7 +20468,7 @@ export function reconstructATokenBalanceBuckets(
     const nextIndex = indexByBucket.get(b)
     if (nextIndex != null && nextIndex > 0n) liquidityIndex = nextIndex
     if (liquidityIndex <= 0n) continue
-    const actual = scaled > 0n ? (scaled * liquidityIndex) / ATOKEN_RAY : 0n
+    const actual = settledAmount(scaled, liquidityIndex)
     out.push({ b, value: actual.toString() })
   }
   return out
@@ -20281,34 +20479,36 @@ function historyH160(accountId: string): string | null {
   return evmFromAccountId(id)?.toLowerCase() ?? (/^0x[0-9a-f]{64}$/.test(id) ? `0x${id.slice(2, 42)}` : null)
 }
 
-// Add supplied money-market collateral to the per-asset history only. Portfolio
-// value continues to use the indexed per-market collateral/debt snapshots below,
-// avoiding a double count while making the balance tabs agree with live balances.
-async function appendMoneyMarketBalanceRows(
-  accounts: string[],
-  maxBlock: number,
-  bk: Bucketing,
-  rows: HistoryBalanceRow[],
-): Promise<Map<string, number>> {
-  const availableFromBucket = new Map<string, number>()
-  const holders = [...new Set(accounts.map(historyH160).filter(Boolean) as string[])]
-  if (!holders.length) return availableFromBucket
-  const anchorBlock = await aTokenAnchorBlock()
-  if (!anchorBlock) return availableFromBucket
+/**
+ * The accounts' aToken scaled principal for ONE history rebuild, read once and
+ * shared by its two consumers: the balance tabs' supplied collateral
+ * (appendMoneyMarketBalanceRows) and the settled lending incentives
+ * (loadMmIncentiveHistory's `scaled`). One read of atoken_scaled_deltas over the
+ * union of their aTokens, grouped by BOTH bucket keys the two use today, so
+ * neither moves: the balance rows bucket by `bk.ofTs(block_timestamp)` like every
+ * other balance row of the chart (deltas up to `maxBlock`, the range's own end),
+ * the incentive history by `bk.ofHeightCarry(block_height)` like the rest of its
+ * height-keyed sources (deltas up to the last bucket's end height). A row outside
+ * one consumer's bound carries -2 in that key and is skipped there.
+ */
+export interface AccountScaledRead {
+  anchorBlock: number
+  /** `${holder}|${contract}` → scaled balance at B0 (atoken_scaled_anchor). */
+  anchors: Map<string, bigint>
+  /** `${holder}|${contract}` → ofTs bucket → Σ scaled delta. */
+  byTs: Map<string, Map<number, bigint>>
+  /** `${holder}|${contract}` → ofHeightCarry bucket (-1 carry) → Σ scaled delta. */
+  byHeight: Map<string, Map<number, bigint>>
+}
 
-  const tokens = (await getMmReserveTokens()).filter(token => {
-    const market = MM_MARKET_BY_KEY.get(token.marketKey)
-    // The staking-backed market's supplied stHDX is already represented by the
-    // locked HDX wallet curve, matching getAddress's current-balance semantics.
-    return !market?.stakingBacked && assetIdFromMmAddress(token.asset) != null
-  })
-  const contracts = [...new Set(tokens.map(token => token.aToken.toLowerCase()))]
-  if (!contracts.length) return availableFromBucket
-  const anchorBucket = bk.bucketOfHeight(anchorBlock)
-
+async function loadAccountScaledRead(holders: string[], contracts: string[], anchorBlock: number, maxBlock: number, bk: Bucketing): Promise<AccountScaledRead> {
+  const read: AccountScaledRead = { anchorBlock, anchors: new Map(), byTs: new Map(), byHeight: new Map() }
+  if (!holders.length || !contracts.length) return read
+  const endN = bk.endHeight(bk.N)
   const [anchorRes, deltaRes] = await Promise.all([
     client.query({
-      query: `SELECT lower(holder) AS holder, lower(contract_address) AS contract,
+      query: `-- explorer:history-scaled-anchor
+              SELECT lower(holder) AS holder, lower(contract_address) AS contract,
                 toString(scaled_balance) AS scaled
               FROM price_data.atoken_scaled_anchor FINAL
               WHERE holder IN ({holders:Array(String)})
@@ -20317,30 +20517,98 @@ async function appendMoneyMarketBalanceRows(
       query_params: { holders, contracts, anchorBlock }, format: 'JSONEachRow',
     }),
     client.query({
-      query: `SELECT holder, contract_address AS contract,
-                ${bk.ofTs('block_timestamp')} AS b,
+      query: `-- explorer:history-scaled-deltas
+              SELECT holder, contract_address AS contract,
+                if(block_height <= {maxBlock:UInt32}, toInt32(${bk.ofTs('block_timestamp')}), toInt32(-2)) AS bts,
+                if(block_height <= {endN:UInt32}, ${bk.ofHeightCarry('block_height')}, toInt32(-2)) AS bh,
                 toString(sum(scaled_delta)) AS delta
               FROM price_data.atoken_scaled_deltas FINAL
               WHERE holder IN ({holders:Array(String)})
                 AND contract_address IN ({contracts:Array(String)})
                 AND block_height > {anchorBlock:UInt32}
-                AND block_height <= {maxBlock:UInt32}
-              GROUP BY holder, contract, b ORDER BY holder, contract, b`,
-      query_params: { holders, contracts, anchorBlock, maxBlock }, format: 'JSONEachRow',
+                AND block_height <= {hi:UInt32}
+              GROUP BY holder, contract, bts, bh`,
+      query_params: { holders, contracts, anchorBlock, maxBlock, endN, hi: Math.max(maxBlock, endN) }, format: 'JSONEachRow',
     }),
   ])
-  const anchors = await anchorRes.json<{ holder: string; contract: string; scaled: string }>()
-  const deltaRows = await deltaRes.json<{ holder: string; contract: string; b: number; delta: string }>()
-  const state = new Map<string, { holder: string; contract: string; anchor: string; deltas: ScaledBalanceBucket[] }>()
-  for (const row of anchors) {
-    if (BigInt(row.scaled || '0') === 0n) continue
-    const key = `${row.holder}:${row.contract}`
-    state.set(key, { holder: row.holder, contract: row.contract, anchor: row.scaled, deltas: [] })
+  for (const row of await anchorRes.json<{ holder: string; contract: string; scaled: string }>()) {
+    const key = `${row.holder}|${row.contract}`
+    read.anchors.set(key, (read.anchors.get(key) ?? 0n) + BigInt(row.scaled || '0'))
   }
-  for (const row of deltaRows) {
-    const key = `${row.holder}:${row.contract}`
-    const entry = state.get(key) ?? { holder: row.holder, contract: row.contract, anchor: '0', deltas: [] }
-    entry.deltas.push({ b: Number(row.b), value: row.delta })
+  const add = (m: Map<string, Map<number, bigint>>, key: string, b: number, v: bigint) => {
+    const per = m.get(key) ?? m.set(key, new Map()).get(key)!
+    per.set(b, (per.get(b) ?? 0n) + v)
+  }
+  for (const row of await deltaRes.json<{ holder: string; contract: string; bts: number; bh: number; delta: string }>()) {
+    const key = `${row.holder.toLowerCase()}|${row.contract.toLowerCase()}`
+    const v = BigInt(row.delta || '0')
+    if (Number(row.bts) !== -2) add(read.byTs, key, Number(row.bts), v)
+    if (Number(row.bh) !== -2) add(read.byHeight, key, Number(row.bh), v)
+  }
+  return read
+}
+
+/** The incentive history's per-holder scaled series from the shared read (scaledSeriesFromBuckets per aToken). */
+export function incentiveScaledSeries(read: AccountScaledRead, bk: Pick<Bucketing, 'N' | 'endHeight'>): Map<string, (bigint | undefined)[]> {
+  const out = new Map<string, (bigint | undefined)[]>()
+  for (const key of new Set([...read.anchors.keys(), ...read.byHeight.keys()])) {
+    out.set(key, scaledSeriesFromBuckets(read.anchors.get(key) ?? 0n, read.byHeight.get(key) ?? new Map(), bk, read.anchorBlock))
+  }
+  return out
+}
+
+/** The aTokens whose supplied balances the balance tabs chart (appendMoneyMarketBalanceRows). */
+async function historyBalanceTokens(): Promise<MmReserveToken[]> {
+  return (await getMmReserveTokens()).filter(token => {
+    const market = MM_MARKET_BY_KEY.get(token.marketKey)
+    // The staking-backed market's supplied stHDX is already represented by the
+    // locked HDX wallet curve, matching getAddress's current-balance semantics.
+    return !market?.stakingBacked && assetIdFromMmAddress(token.asset) != null
+  })
+}
+
+/**
+ * The one scaled read of a history rebuild (loadAccountScaledRead) over the
+ * balance tabs' aTokens and every incentive programme aToken; null without a
+ * published scaled anchor (both consumers then state nothing from it).
+ */
+async function loadHistoryScaledRead(holders: string[], maxBlock: number, bk: Bucketing): Promise<AccountScaledRead | null> {
+  if (!holders.length) return null
+  const anchorBlock = await aTokenAnchorBlock()
+  if (!anchorBlock) return null
+  const [tokens, programmes] = await Promise.all([historyBalanceTokens(), loadMmIncentiveProgrammeRows(client)])
+  const contracts = [...new Set([...tokens.map(token => token.aToken.toLowerCase()), ...programmes.map(p => p.asset.toLowerCase())])].sort()
+  return loadAccountScaledRead(holders, contracts, anchorBlock, maxBlock, bk)
+}
+
+// Add supplied money-market collateral to the per-asset history only. Portfolio
+// value continues to use the indexed per-market collateral/debt snapshots below,
+// avoiding a double count while making the balance tabs agree with live balances.
+// The scaled principal comes from the rebuild's shared read (loadHistoryScaledRead).
+async function appendMoneyMarketBalanceRows(
+  read: AccountScaledRead | null,
+  maxBlock: number,
+  bk: Bucketing,
+  rows: HistoryBalanceRow[],
+): Promise<Map<string, number>> {
+  const availableFromBucket = new Map<string, number>()
+  if (!read) return availableFromBucket
+  const tokens = await historyBalanceTokens()
+  const contractSet = new Set(tokens.map(token => token.aToken.toLowerCase()))
+  if (!contractSet.size) return availableFromBucket
+  const anchorBucket = bk.bucketOfHeight(read.anchorBlock)
+
+  const state = new Map<string, { holder: string; contract: string; anchor: string; deltas: ScaledBalanceBucket[] }>()
+  for (const [key, scaled] of read.anchors) {
+    const [holder, contract] = key.split('|')
+    if (!contractSet.has(contract) || scaled === 0n) continue
+    state.set(key, { holder, contract, anchor: scaled.toString(), deltas: [] })
+  }
+  for (const [key, perBucket] of read.byTs) {
+    const [holder, contract] = key.split('|')
+    if (!contractSet.has(contract)) continue
+    const entry = state.get(key) ?? { holder, contract, anchor: '0', deltas: [] }
+    for (const [b, v] of [...perBucket].sort((x, y) => x[0] - y[0])) entry.deltas.push({ b, value: v.toString() })
     state.set(key, entry)
   }
   if (!state.size) return availableFromBucket
@@ -20513,20 +20781,44 @@ function formatUtcSeconds(sec: number): string {
   return new Date(sec * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
 }
 
-// MM positions are re-snapshotted periodically by the raw indexer (every N
-// blocks, every borrower — not just on the borrower's own MM events), so the
-// stored net is dense and the series forward-fills only across a short gap before
-// the caller pins the final point to the live net worth.
-async function getAccountHistory(accounts: string[], window?: { fromBlock: number; toBlock: number }): Promise<{ portfolioSeries: number[]; portfolioSeriesExHdx: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] }> {
+// The value-history chart's range and bucket grid for an account set: the
+// account's first balance observation to the chain head (or the zoom window),
+// on the wall-clock ladder. Shared by getAccountHistory and the LP-history route
+// so both sit on one grid. Null when the accounts have no balance history.
+//
+// `exactHeights` dates each bucket end by the true height at or before it
+// (heightAtOrBeforeExact) instead of the chart's heightAtOrBefore, which on an
+// hour mark resolves to the END of the hour starting there; the grid in time is
+// the same either way. The chart keeps its own dating (see heightAtOrBefore).
+interface AccountBucketing {
+  list: string
+  useAccountBalanceHourly: boolean
+  rng: { minb: number; maxb: number; mint: number; maxt: number }
+  clock: BlockClock
+  bk: Bucketing
+}
+async function accountBucketing(
+  accounts: string[],
+  window?: { fromBlock: number; toBlock: number },
+  opts: {
+    exactHeights?: boolean
+    /**
+     * Where the range starts when the accounts' balance history spans no range —
+     * none at all, or a single observation, as for an EVM account seen almost only
+     * in the money market. Used only then, so an account with a balance history
+     * keeps the value chart's grid exactly.
+     */
+    fallbackStart?: () => Promise<{ minb: number; mint: number } | null>
+  } = {},
+): Promise<AccountBucketing | null> {
   const list = sqlAccountList(accounts)
-  if (list === "''") return { portfolioSeries: [], portfolioSeriesExHdx: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
+  if (list === "''") return null
   // Single ordinary accounts are already selective in the account-first exact
   // history and avoid the merge overhead of the hourly model. Multi-member tags
   // and dense structural accounts are the shapes for which hourly compaction is
   // materially smaller.
   const useAccountBalanceHourly =
     (accounts.length > 4 || accounts.some(account => /^0x(6d6f646c|7369626c|70617261)/.test(account)))
-  const prices = await ensurePrices()
   const rangeRes = await client.query({
     query: useAccountBalanceHourly
       ? `SELECT minMerge(first_block_state) AS minb, maxMerge(last_block_state) AS maxb,
@@ -20539,8 +20831,15 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
         WHERE account_id IN (${list})`,
     format: 'JSONEachRow',
   })
-  const rng = (await rangeRes.json<{ minb: number; maxb: number; mint: number; maxt: number }>())[0]
-  if (!rng || !rng.maxb || rng.maxb <= rng.minb) return { portfolioSeries: [], portfolioSeriesExHdx: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
+  let rng = (await rangeRes.json<{ minb: number; maxb: number; mint: number; maxt: number }>())[0]
+  if (!rng || !rng.maxb || rng.maxb <= rng.minb) {
+    const start = opts.fallbackStart ? await opts.fallbackStart() : null
+    if (!start) return null
+    // A single balance observation still dates the account's start when it is earlier.
+    rng = rng?.maxb && rng.minb <= start.minb
+      ? { ...rng }
+      : { minb: start.minb, maxb: start.minb, mint: start.mint, maxt: start.mint }
+  }
   // A chart-zoom refinement clamps the reconstruction to the caller's block
   // window: the same reconstruction, re-bucketed over [fromBlock, toBlock] on the
   // wall-clock ladder (bucketLadder) rather than by block count.
@@ -20555,15 +20854,21 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // last change. Extended before the window clamp so the clamp is the window's.
   const clock = await blockClock(client)
   if (clock.hours.length) {
-    const headSec = Math.min(clock.hours[clock.hours.length - 1] + 3_600, Math.floor(Date.now() / 1000))
+    // The head's own block time where the clock knows it, so the range end and
+    // its height (the clock's newest) name the same instant. The newest hour's
+    // end is only an upper bound: with ingestion behind the wall clock it dated
+    // the head block up to an hour late — and the last bucket's closed candle
+    // with it, a price from after the state it values.
+    const headSec = Math.min(clock.lastTime ?? clock.hours[clock.hours.length - 1] + 3_600, Math.floor(Date.now() / 1000))
     const headHeight = clock.heights[clock.heights.length - 1]
     if (headSec > rng.maxt) rng.maxt = headSec
     if (headHeight > rng.maxb) rng.maxb = headHeight
   }
+  if (rng.maxb <= rng.minb) return null
   if (window) {
     rng.minb = Math.max(Number(rng.minb), window.fromBlock)
     rng.maxb = Math.min(Number(rng.maxb), window.toBlock)
-    if (rng.maxb <= rng.minb) return { portfolioSeries: [], portfolioSeriesExHdx: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
+    if (rng.maxb <= rng.minb) return null
     // Real endpoint timestamps for the interpolated-date FALLBACK — left at the
     // account's global range they would mislabel every fallback date by the
     // account's whole lifetime. `blocks` is complete, so both lookups resolve.
@@ -20586,8 +20891,33 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // Boundary heights come from the shared chain clock, not a per-account query:
   // the wall-clock -> height mapping is a property of the CHAIN, so one cached
   // index serves every request. Every ladder step is a whole number of hours, so
-  // each boundary lands on a mark the clock already holds.
-  const bk = makeBucketing(clock, rng.mint, rng.maxt, rng.minb)
+  // each boundary lands on a mark the clock already holds. The range end is the
+  // one boundary that need not be a mark; its height is the range's own maxb.
+  const bk = opts.exactHeights
+    ? makeBucketing(clock, rng.mint, rng.maxt, rng.minb, undefined, undefined, {
+        heightAt: sec => (sec === rng.maxt ? rng.maxb : heightAtOrBeforeExact(clock, sec)),
+        dating: { key: 'exact', heightAt: sec => heightAtOrBeforeExact(clock, sec) },
+      })
+    : makeBucketing(clock, rng.mint, rng.maxt, rng.minb)
+  return { list, useAccountBalanceHourly, rng, clock, bk }
+}
+
+// MM positions are re-snapshotted periodically by the raw indexer (every N
+// blocks, every borrower — not just on the borrower's own MM events), so the
+// stored net is dense and the series forward-fills only across a short gap before
+// the caller pins the final point to the live net worth.
+// The accounts' unclaimed farm rewards and money-market incentives per chart
+// point — lmRewardHistory's and mmIncentiveHistory's settled claimable at each
+// bucket end, priced like the chart's LP legs — are folded INTO portfolioSeries /
+// portfolioSeriesExHdx. The current value
+// (portfolioUsd) carries rewards too, so the pinned last point and the history
+// behind it measure the same thing.
+async function getAccountHistory(accounts: string[], window?: { fromBlock: number; toBlock: number }): Promise<{ portfolioSeries: number[]; portfolioSeriesExHdx: number[]; portfolioDates: string[]; portfolioBlocks: number[]; balanceHistory: AssetBalanceHistory[] }> {
+  if (sqlAccountList(accounts) === "''") return { portfolioSeries: [], portfolioSeriesExHdx: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
+  const prices = await ensurePrices()
+  const grid = await accountBucketing(accounts, window)
+  if (!grid) return { portfolioSeries: [], portfolioSeriesExHdx: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
+  const { list, useAccountBalanceHourly, rng, bk } = grid
   const N = bk.N
   // A bucket is dated by its END — the value it carries is the balance as at that
   // instant — and the last bucket closes at the range end rather than past it.
@@ -20673,7 +21003,11 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
       if (accountId) balRows.push({ account_id: `${accountId}#erc20`, asset_id: String(ea.assetId), b: r.b, bal: (cum < 0n ? 0n : cum).toString() })
     }
   }
-  const mmAvailableFromBucket = await appendMoneyMarketBalanceRows(accounts, rng.maxb, bk, balRows)
+  // Money-market identities, and the ONE scaled read the balance tabs and the
+  // settled incentives share (loadHistoryScaledRead).
+  const historyH160s = moneyMarketIdentities(accounts).h160s
+  const scaledRead = await loadHistoryScaledRead(historyH160s, rng.maxb, bk)
+  const mmAvailableFromBucket = await appendMoneyMarketBalanceRows(scaledRead, rng.maxb, bk, balRows)
   const assetIds = [...new Set(balRows.map(r => r.asset_id))]
   if (!assetIds.length) return { portfolioSeries: [], portfolioSeriesExHdx: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [] }
   // Open omnipool LP positions (bare + farmed) for the period LP-value reconstruction
@@ -20684,21 +21018,32 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // full history. Loaded before the price query so the assets of historically-owned
   // (incl. since-closed) positions are priced, and before openPositions so the
   // fallback reconstruction query is skipped entirely when the new path is active.
-  const omniHist = await loadOmnipoolPrincipalHistory(accounts, bk)
+  // The three principal loaders and the unclaimed farm rewards per bucket (folded
+  // into both curves below; see the header) are independent reads of the same
+  // bucketing, so they run together; their price ids merge afterwards.
+  const [omniHist, xykHist, v3Hist, farmRewards, mmIncentives] = await Promise.all([
+    loadOmnipoolPrincipalHistory(client, accounts, bk),
+    // Historical XYK LP principal (direct wallet shareToken balances + collection-5389 farm
+    // deposits) valued at pool NAV. Loaded before the price query so both pool assets are priced.
+    loadXykPrincipalHistory(client, accounts, assetIds.map(Number), bk),
+    // Historical concentrated-liquidity principal, folded per bucket before the price
+    // query so both sides of every pair — a since-closed position's included — are priced.
+    v3RegistryAssetResolver().then(resolve => loadV3PrincipalHistory(client, accounts.map(historyH160).filter((x): x is string => x != null), bk, resolve)),
+    loadFarmRewardHistory(client, accounts, bk),
+    // The accounts' settled money-market incentives per bucket (mmIncentiveHistory),
+    // folded into both curves beside the farm rewards.
+    loadMmReserveMap(client).then(map => loadMmIncentiveHistory(client, historyH160s, bk, map.reserves,
+      scaledRead ? { scaled: incentiveScaledSeries(scaledRead, bk), scaledAnchorBlock: scaledRead.anchorBlock } : {})),
+  ])
   const omniAssetIds = omniHist ? omniHist.assetIds : []
-  // Historical XYK LP principal (direct wallet shareToken balances + collection-5389 farm
-  // deposits) valued at pool NAV. Loaded before the price query so both pool assets are priced.
-  const xykHist = await loadXykPrincipalHistory(accounts, assetIds.map(Number), bk)
-  // Historical concentrated-liquidity principal, folded per bucket before the price
-  // query so both sides of every pair — a since-closed position's included — are priced.
-  const v3Hist = await loadV3PrincipalHistory(accounts, bk)
   // aTokens have no price feed of their own — query the underlying reserve's
   // historical prices for them (priceAssetId maps aPRIME→PRIME, etc.).
   const priceIdFor = new Map(assetIds.map(id => [id, String(priceAssetId(Number(id)))]))
   const lpPriceIds = omniAssetIds.length ? [...new Set(omniAssetIds.map(id => String(priceAssetId(id))))].concat(String(H2O_ASSET_ID)) : []
   const xykPriceIds = xykHist ? xykHist.underlyingAssetIds.map(id => String(priceAssetId(id))) : []
   const v3PriceIds = v3Hist.assetIds.map(id => String(priceAssetId(id)))
-  const priceIds = [...new Set([...priceIdFor.values(), ...lpPriceIds, ...xykPriceIds, ...v3PriceIds])]
+  const rewardPriceIds = [...farmRewards.rewardAssetIds, ...mmIncentives.rewardAssetIds].map(id => String(priceAssetId(id)))
+  const priceIds = [...new Set([...priceIdFor.values(), ...lpPriceIds, ...xykPriceIds, ...v3PriceIds, ...rewardPriceIds])]
   // The daily close states are a replay-safe compact projection of prices, and the
   // only price source this path may use: the raw table holds a row for every asset at
   // every indexed block, and grouping it here reads hundreds of millions of rows for a
@@ -20760,6 +21105,10 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
     earliestBucketPriceCache.set(m, earliest)
     return earliest
   }
+  // The LP valuations' price at bucket b: the bucket's close, else the earliest
+  // close in range (the chart's leading back-fill).
+  const chartPrice: ChartPriceAt = (priceId, b) => { const px = pxByPriceId.get(priceId); return px?.get(b) ?? earliestBucketPrice(px) }
+  const decimalsOf = (id: number) => asset(id).decimals
   const earliestPxByAsset = new Map<string, number>()
   for (const id of assetIds) earliestPxByAsset.set(id, earliestBucketPrice(pxByAsset.get(id)!))
   // Per (asset, account) bucketed balances — forward-filled per account, summed
@@ -20856,36 +21205,19 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // bucket, decompose to underlying reserve legs (integer), value at the bucket's closed
   // price. Replaces the (null) direct-token contribution suppressed above — no double count.
   if (xykHist && xykHist.lpAssetIds.size) {
+    // Direct wallet shares per bucket: forward-fill the raw shareToken balance across the
+    // account's own (non-MM-pseudo) balance series, summed.
+    const directSharesByLp = new Map<number, bigint[]>()
     for (const lp of xykHist.lpAssetIds) {
-      const state = xykHist.stateByLp.get(lp)
-      if (!state) continue
-      const farm = xykHist.farmSharesByLp.get(lp) ?? new Array<bigint>(N + 1).fill(0n)
-      // Direct wallet shares per bucket: forward-fill the raw shareToken balance across the
-      // account's own (non-MM-pseudo) balance series, summed.
       const directRaw = new Array<bigint>(N + 1).fill(0n)
       for (const [accountId, balMap] of balByAcctAsset.get(String(lp)) ?? new Map<string, Map<number, string>>()) {
         if (accountId.includes('#mm:')) continue
         let last = 0n
         for (let b = 0; b <= N; b++) { const v = balMap.get(b); if (v !== undefined) last = BigInt(v); directRaw[b] += last }
       }
-      for (let b = 0; b <= N; b++) {
-        const st = state[b]
-        if (!st) continue
-        const shares = directRaw[b] + farm[b]
-        if (shares <= 0n) continue
-        const { amountA, amountB } = xykShareLegs(shares, st.reserveA, st.reserveB, st.totalShares)
-        const pxA = pxByPriceId.get(String(priceAssetId(st.assetA)))
-        const pxB = pxByPriceId.get(String(priceAssetId(st.assetB)))
-        const priceA = pxA?.get(b) ?? earliestBucketPrice(pxA)
-        const priceB = pxB?.get(b) ?? earliestBucketPrice(pxB)
-        const nav = (Number(amountA) / 10 ** asset(st.assetA).decimals) * priceA + (Number(amountB) / 10 ** asset(st.assetB).decimals) * priceB
-        portfolio[b] += nav
-        // A share is a claim on both reserves at once — there is no way to hold the
-        // non-HDX half — so an HDX-paired pool leaves the ex-HDX curve entirely
-        // rather than contributing its other leg.
-        if (st.assetA !== HDX_ASSET_ID && st.assetB !== HDX_ASSET_ID) portfolioExHdx[b] += nav
-      }
+      directSharesByLp.set(lp, directRaw)
     }
+    addChartXykValue(portfolio, portfolioExHdx, xykLegsByBucket(xykHist, directSharesByLp, N), chartPrice, decimalsOf)
   }
 
   // Money-market net worth folded into the portfolio. Each isolated pool is
@@ -20972,40 +21304,33 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // and compact pool state — never current shares or request-time snapshot JSON. When
   // loadOmnipoolPrincipalHistory returns null, Omnipool value is omitted rather than
   // approximated (explicit incompleteness).
-  if (omniHist) {
-    const h2oPx = pxByPriceId.get(String(H2O_ASSET_ID))
-    const h2oDec = asset(H2O_ASSET_ID).decimals
-    const fallbackH2o = earliestBucketPrice(h2oPx)
-    for (let b = 0; b <= N; b++) {
-      const h2o = h2oPx?.get(b) ?? fallbackH2o
-      for (const leg of omniHist.legsByBucket[b]) {
-        const priceId = String(priceAssetId(leg.assetId))
-        const px = pxByPriceId.get(priceId)
-        const price = px?.get(b) ?? earliestBucketPrice(px)
-        const aDec = asset(leg.assetId).decimals
-        const withdrawValue = (Number(leg.liquidity) / 10 ** aDec) * price + (Number(leg.hub) / 10 ** h2oDec) * h2o
-        portfolio[b] += withdrawValue
-        // An HDX position drops out with BOTH its legs: the hub leg is part of that
-        // position's withdraw value, not H2O the account could hold on its own, so
-        // keeping it would leave a fragment of an excluded position in the curve.
-        if (leg.assetId !== HDX_ASSET_ID) portfolioExHdx[b] += withdrawValue
-      }
-    }
-  }
+  if (omniHist) addChartOmnipoolValue(portfolio, portfolioExHdx, omniHist, chartPrice, decimalsOf)
 
   // Concentrated-liquidity principal on the historical curve: both token legs at the
   // bucket's closed price. A position is a claim on both sides of its pair at once, so
   // an HDX-paired one leaves the ex-HDX curve entirely (isHdxLpPosition's twin).
-  for (let b = 0; b <= N; b++) {
-    for (const leg of v3Hist.legsByBucket[b]) {
-      const px0 = pxByPriceId.get(String(priceAssetId(leg.asset0)))
-      const px1 = pxByPriceId.get(String(priceAssetId(leg.asset1)))
-      const value = (Number(leg.amount0) / 10 ** asset(leg.asset0).decimals) * (px0?.get(b) ?? earliestBucketPrice(px0))
-        + (Number(leg.amount1) / 10 ** asset(leg.asset1).decimals) * (px1?.get(b) ?? earliestBucketPrice(px1))
-      portfolio[b] += value
-      if (leg.asset0 !== HDX_ASSET_ID && leg.asset1 !== HDX_ASSET_ID) portfolioExHdx[b] += value
-    }
-  }
+  addChartV3Value(portfolio, portfolioExHdx, v3Hist, chartPrice, decimalsOf)
+
+  // Unclaimed farm rewards on the historical curve: the SETTLED claimable at each
+  // bucket end (lmRewardHistory), at the bucket's price like every LP leg, the
+  // HDX-denominated ones left out of the ex-HDX curve. Not a balance until
+  // claimed — a claim moves the amount it pays out of here and into the wallet
+  // curve above, so no bucket counts it twice. The live-pinned last point
+  // (portfolioUsd) carries the runtime-PROJECTED amount instead, so the final
+  // step also carries the accrual since each active farm's last on-chain sync.
+  const rewardCurves = chartFarmRewardSeries(farmRewards, chartPrice, decimalsOf)
+  for (let b = 0; b <= N; b++) { portfolio[b] += rewardCurves.total[b] ?? 0; portfolioExHdx[b] += rewardCurves.exHdx[b] ?? 0 }
+
+  // Unclaimed money-market incentives on the historical curve: the SETTLED claimable
+  // at each bucket end (mmIncentiveHistory — the controller's stored accrual plus the
+  // pending accrual up to each programme's last on-chain index update), at the
+  // bucket's price, HDX-denominated ones out of the ex-HDX curve. Not a balance until
+  // claimed; a claim moves what it pays into the wallet curve, so no bucket counts it
+  // twice. A reward the arithmetic cannot state (or that does not reconcile with the
+  // chain now) is not in it. The live-pinned last point carries the chain's own
+  // claimable at its snapshot block instead.
+  const incentiveCurves = chartMmIncentiveSeries(mmIncentives, chartPrice, decimalsOf)
+  for (let b = 0; b <= N; b++) { portfolio[b] += incentiveCurves.total[b] ?? 0; portfolioExHdx[b] += incentiveCurves.exHdx[b] ?? 0 }
 
   // Drop leading zero buckets, keep a clean series.
   let start = 0; while (start < portfolio.length - 1 && portfolio[start] === 0) start++
@@ -21034,6 +21359,98 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // Return every asset that has a historical balance (sorted by current value),
   // not just the top N — the per-asset chip list should be complete.
   return { portfolioSeries, portfolioSeriesExHdx, portfolioDates, portfolioBlocks, balanceHistory: alignedBalanceHistory }
+}
+
+// The value-history chart's LP contributions, float, added in place into the
+// total and ex-HDX curves bucket by bucket (the accumulation order is the
+// chart's, so its rounded output is unchanged). The integer, un-back-filled
+// twin every LP-history surface publishes is assembleLpHistory; the parity test
+// pins the two together where both have prices.
+export type ChartPriceAt = (priceId: string, b: number) => number
+
+// XYK LP principal on the historical curve, valued at pool NAV: the account's direct
+// wallet shareToken balance and its collection-5389 farm-deposit principal summed per
+// bucket, decomposed to underlying reserve legs (integer), valued at the bucket's
+// closed price. Replaces the (null) direct-token contribution the balance loop
+// suppresses — no double count.
+export function addChartXykValue(portfolio: number[], portfolioExHdx: number[], legsByBucket: XykBucketLeg[][], price: ChartPriceAt, decimalsOf: (id: number) => number): void {
+  for (let b = 0; b < legsByBucket.length; b++) {
+    for (const leg of legsByBucket[b]) {
+      const priceA = price(String(priceAssetId(leg.assetA)), b)
+      const priceB = price(String(priceAssetId(leg.assetB)), b)
+      const nav = (Number(leg.amountA) / 10 ** decimalsOf(leg.assetA)) * priceA + (Number(leg.amountB) / 10 ** decimalsOf(leg.assetB)) * priceB
+      portfolio[b] += nav
+      // A share is a claim on both reserves at once — there is no way to hold the
+      // non-HDX half — so an HDX-paired pool leaves the ex-HDX curve entirely
+      // rather than contributing its other leg.
+      if (leg.assetA !== HDX_ASSET_ID && leg.assetB !== HDX_ASSET_ID) portfolioExHdx[b] += nav
+    }
+  }
+}
+
+// Omnipool LP principal on the historical curve, valued at WITHDRAW value (asset +
+// H2O hub legs) per bucket from true per-block position state, ownership intervals,
+// and compact pool state — never current shares or request-time snapshot JSON.
+export function addChartOmnipoolValue(portfolio: number[], portfolioExHdx: number[], omniHist: OmnipoolPrincipalHistory, price: ChartPriceAt, decimalsOf: (id: number) => number): void {
+  const h2oDec = decimalsOf(H2O_ASSET_ID)
+  for (let b = 0; b < omniHist.legsByBucket.length; b++) {
+    const h2o = price(String(H2O_ASSET_ID), b)
+    for (const leg of omniHist.legsByBucket[b]) {
+      const px = price(String(priceAssetId(leg.assetId)), b)
+      const withdrawValue = (Number(leg.liquidity) / 10 ** decimalsOf(leg.assetId)) * px + (Number(leg.hub) / 10 ** h2oDec) * h2o
+      portfolio[b] += withdrawValue
+      // An HDX position drops out with BOTH its legs: the hub leg is part of that
+      // position's withdraw value, not H2O the account could hold on its own, so
+      // keeping it would leave a fragment of an excluded position in the curve.
+      if (leg.assetId !== HDX_ASSET_ID) portfolioExHdx[b] += withdrawValue
+    }
+  }
+}
+
+// Concentrated-liquidity principal on the historical curve: both token legs at the
+// bucket's closed price. A position is a claim on both sides of its pair at once, so
+// an HDX-paired one leaves the ex-HDX curve entirely (isHdxLpPosition's twin).
+export function addChartV3Value(portfolio: number[], portfolioExHdx: number[], v3Hist: V3PrincipalHistory, price: ChartPriceAt, decimalsOf: (id: number) => number): void {
+  for (let b = 0; b < v3Hist.legsByBucket.length; b++) {
+    for (const leg of v3Hist.legsByBucket[b]) {
+      const value = (Number(leg.amount0) / 10 ** decimalsOf(leg.asset0)) * price(String(priceAssetId(leg.asset0)), b)
+        + (Number(leg.amount1) / 10 ** decimalsOf(leg.asset1)) * price(String(priceAssetId(leg.asset1)), b)
+      portfolio[b] += value
+      if (leg.asset0 !== HDX_ASSET_ID && leg.asset1 !== HDX_ASSET_ID) portfolioExHdx[b] += value
+    }
+  }
+}
+
+// Unclaimed farm rewards per bucket in the chart's float USD, at the chart's own
+// bucket prices (the LP legs' ChartPriceAt). HDX-denominated rewards leave the
+// ex-HDX curve, as HDX holdings do.
+export function chartFarmRewardSeries(rewards: FarmRewardHistory, price: ChartPriceAt, decimalsOf: (id: number) => number): { total: number[]; exHdx: number[] } {
+  const total = rewards.itemsByBucket.map(() => 0)
+  const exHdx = rewards.itemsByBucket.map(() => 0)
+  rewards.itemsByBucket.forEach((items, b) => {
+    for (const item of items) {
+      const value = (Number(item.amount) / 10 ** decimalsOf(item.rewardAssetId)) * price(String(priceAssetId(item.rewardAssetId)), b)
+      total[b] += value
+      if (item.rewardAssetId !== HDX_ASSET_ID) exHdx[b] += value
+    }
+  })
+  return { total, exHdx }
+}
+
+// Unclaimed money-market incentives per bucket in the chart's float USD, at the
+// chart's own bucket prices — chartFarmRewardSeries' twin. HDX-denominated
+// incentives leave the ex-HDX curve, as HDX holdings do.
+export function chartMmIncentiveSeries(incentives: MmIncentiveHistory, price: ChartPriceAt, decimalsOf: (id: number) => number): { total: number[]; exHdx: number[] } {
+  const total = incentives.itemsByBucket.map(() => 0)
+  const exHdx = incentives.itemsByBucket.map(() => 0)
+  incentives.itemsByBucket.forEach((items, b) => {
+    for (const item of items) {
+      const value = (Number(item.amount) / 10 ** decimalsOf(item.rewardAssetId)) * price(String(priceAssetId(item.rewardAssetId)), b)
+      total[b] += value
+      if (item.rewardAssetId !== HDX_ASSET_ID) exHdx[b] += value
+    }
+  })
+  return { total, exHdx }
 }
 
 // One point per calendar day (the last bucket of each day), preserving order. The
@@ -21088,14 +21505,33 @@ function accountSetFingerprint(accounts: string[]): string {
 }
 
 /**
+ * How long a chart-zoom window's history (value, LP, money-market) is cached: the
+ * Data API's bucketed-history rule (lpHistory bucketWindowIsClosed) — once the
+ * indexed head is BUCKET_HISTORY_FINALITY_SEC past the window's end block nothing
+ * restates it short of a backfill (BUCKET_HISTORY_CLOSED_TTL_MS), before that it is
+ * still settling (late candle rows, a derivations cycle: BUCKET_HISTORY_SETTLING_TTL_MS).
+ * The key is the block window, never the head: a window ending below the head gains
+ * no rows, and one reaching it settles within the short TTL. The end block's time
+ * is bounded from above by the chain clock's hour, so a window closes late, never
+ * early. The short lifetimes also bound how long the zoom entries — one per
+ * window, per account — occupy the in-process cache.
+ */
+async function windowedHistoryTtlMs(toBlock: number): Promise<number> {
+  const clock = await blockClock(client)
+  const endSec = timeUpperBoundOfHeight(clock, toBlock)
+  const headSec = clock.lastTime ?? (clock.hours.length ? clock.hours[clock.hours.length - 1] : Number.NaN)
+  return endSec != null && bucketWindowIsClosed(endSec, headSec, BUCKET_HISTORY_FINALITY_SEC) ? BUCKET_HISTORY_CLOSED_TTL_MS : BUCKET_HISTORY_SETTLING_TTL_MS
+}
+
+/**
  * Windowed twin of getAccountHistoryShared. Its own key namespace (`:w:`) —
  * a windowed reconstruction must never collide with the full-history entry the
- * detail page and sparklines share. Historical windows barely move, so the TTL
- * can be generous without staleness showing.
+ * detail page and sparklines share. Cached by the bucketed-history finality rule
+ * (windowedHistoryTtlMs).
  */
-function getAccountHistoryWindowed(accounts: string[], scopeKey: string, fromBlock: number, toBlock: number): Promise<Awaited<ReturnType<typeof getAccountHistory>>> {
+async function getAccountHistoryWindowed(accounts: string[], scopeKey: string, fromBlock: number, toBlock: number): Promise<Awaited<ReturnType<typeof getAccountHistory>>> {
   const key = `explorer:account-history:${scopeKey}:w:${fromBlock}-${toBlock}:${accountSetFingerprint(accounts)}`
-  return cached(key, ACCOUNT_HISTORY_TTL_MS, () => getAccountHistory(accounts, { fromBlock, toBlock }))
+  return cached(key, await windowedHistoryTtlMs(toBlock), () => getAccountHistory(accounts, { fromBlock, toBlock }))
 }
 
 function getAccountHistoryShared(accounts: string[], scopeKey: string): Promise<Awaited<ReturnType<typeof getAccountHistory>>> {
@@ -24133,7 +24569,11 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
   return cached(`explorer:value-events:${cacheKey}:${from ?? ''}:${to ?? ''}:${limit}`, 600_000, async () => {
     const bound = timeWindow(from, to) ?? '1'
     // The value series the chart draws (cache shared with getAddressHistory/
-    // getTag): its biggest deltas are the jumps that must end up annotated.
+    // getTag): its biggest deltas are the jumps that must end up annotated. It
+    // carries the unclaimed farm rewards, so a reward claim (claimable → wallet)
+    // nets out but for the accrual since the farm's previous sync, which the
+    // settled history only recognises at that sync — rewards add small steps at
+    // farm syncs, never a claim-sized jump.
     const history = await getAccountHistoryShared(historyAccounts, cacheKey).catch(() => null)
     const jumps = selectValueJumps(history, from, to, limit)
     const windows = [...jumps].sort((x, y) => x.startBlock - y.startBlock)
@@ -25986,9 +26426,14 @@ async function loadAccountDirectorySnapshot(
   } catch { return null }
 }
 
+// `-r3`: the value includes the members' COUNTED claimable farm rewards and
+// money-market incentives (lm_acct / mmr_acct in accountsPage: unpayable entries
+// 0, claims indexed after the snapshot subtracted, incentives keyed like the
+// money-market value). Part of every page and tag-detail key, so a payload
+// persisted under an earlier reward definition is never served as this one.
 function accountDirectoryModelVersion(): string {
-  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3'
-  return omnipoolAccountClaimsReady ? 'v2' : 'v1'
+  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3-r3'
+  return omnipoolAccountClaimsReady ? 'v2-r3' : 'v1-r3'
 }
 
 async function persistAccountDirectorySnapshot(snapshotKey: string, page: AccountsPage): Promise<void> {
@@ -26537,6 +26982,37 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             )` : ''
     const lpJoin = omnipoolAccountClaimsReady ? 'LEFT JOIN lp_grouped lp ON lp.gkey = g.gkey' : ''
     const lpValue = omnipoolAccountClaimsReady ? 'ifNull(lp.usd, 0)' : '0.'
+    // The group's claimable rewards, the part of the account page's value
+    // (unclaimedRewardValue) that is neither a balance nor a position: the current
+    // lm-rewards and mm-incentives generations under the page's own staleness
+    // gates, each entry's COUNTED claimable (lmCountedRewardRowsSql /
+    // mmCountedIncentiveRowsSql: unpayable farm entries 0, claims indexed since
+    // the snapshot subtracted) at the same current prices, unpriced 0 — so a row
+    // ranks by the value its account/tag page prints. Summed per account here and
+    // joined into `grouped`, which already carries the tag join: farm rewards on
+    // the remapped account id `latest` groups by (a bound H160's ETH-form owner
+    // folds into its substrate account, as its balances do), lending incentives on
+    // the holder's ETH-form id exactly as mm_grouped keys the money-market value.
+    // They only join onto groups that are directory actors already: an Omnipool
+    // farmer always is (its deposit is in lp_claims), while an account whose ONLY
+    // holding is an XYK farm deposit is absent from the directory together with
+    // that principal.
+    const rewardsCte = `,
+            lm_acct AS (
+              SELECT ${boundAccountSql('r')} AS account_id,
+                sum(toFloat64(r.counted_raw) * transform(toString(r.reward_asset_id), ${idsSql}, ${unitsSql}, 0.)) AS usd
+              FROM (${lmCountedRewardRowsSql(currentLmRewardGenerationSql())}) r
+              LEFT JOIN bind b ON b.eth_id = r.account_id
+              GROUP BY account_id
+              HAVING usd != 0
+            ),
+            mmr_acct AS (
+              SELECT i.account_id AS account_id,
+                sum(toFloat64(i.counted_raw) * transform(toString(i.reward_asset_id), ${idsSql}, ${unitsSql}, 0.)) AS usd
+              FROM (${mmCountedIncentiveRowsSql(currentMmIncentiveGenerationSql())}) i
+              GROUP BY account_id
+              HAVING usd != 0
+            )`
     const mmLatestCte = moneyMarketAccountValuesReady ? `mm_latest AS (
               SELECT account_id,lower(pool_address) AS pool_address,
                 greatest(max(toFloat64(total_collateral_base)),
@@ -26625,7 +27101,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             -- One latest row per configured isolated market. With complete
             -- reserve-principal coverage this is a tiny published generation;
             -- the raw aggregate remains the correctness-first upgrade fallback.
-            ${mmLatestCte},
+            ${mmLatestCte}${rewardsCte},
             -- One name per account across every identity source: lowest chain
             -- priority wins (0 = Hydration), chain key breaks a tie so the
             -- directory's identity sort is stable. Blank displays are retired
@@ -26653,8 +27129,14 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
                 -- detail pages' hover card additionally folds in money-market
                 -- collateral (aTokens) and EVM-side ERC-20 that only a forward
                 -- per-account read can attribute, so the two can differ for those.
-                sumMap([latest.asset_id], [toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.)]) AS asset_usd_map
+                sumMap([latest.asset_id], [toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.)]) AS asset_usd_map,
+                -- Rewards are per account while latest is per (account, asset): each
+                -- account's sum enters once, deduplicated on (key, usd).
+                arraySum(x -> tupleElement(x, 2), groupUniqArrayIf((latest.account_id, lm.usd), lm.usd != 0)) AS lm_usd,
+                arraySum(x -> tupleElement(x, 2), groupUniqArrayIf((${MM_ETH_FORM_SQL('latest.account_id')}, mmr.usd), mmr.usd != 0)) AS mmr_usd
               FROM latest LEFT JOIN tags t ON t.account_id = latest.account_id
+              LEFT JOIN lm_acct lm ON lm.account_id = latest.account_id
+              LEFT JOIN mmr_acct mmr ON mmr.account_id = ${MM_ETH_FORM_SQL('latest.account_id')}
               GROUP BY gkey, label_id
             )
             ${lpGroupedCte},
@@ -26679,10 +27161,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
                   m.pool_address IN (${supplementalMmPoolsSql()}) AND toFloat64(m.risk_debt) > 0) AS supplemental_worst_hf
               FROM actors a
               LEFT JOIN tags t ON t.account_id = a.account_id
-              INNER JOIN mm_latest m ON lower(m.account_id) = if(
-                substring(lower(a.account_id), 3, 8) = '45544800' AND substring(lower(a.account_id), 51, 16) = '0000000000000000',
-                lower(a.account_id),
-                concat('0x45544800', substring(lower(a.account_id), 3, 40), '0000000000000000'))
+              INNER JOIN mm_latest m ON lower(m.account_id) = ${MM_ETH_FORM_SQL('a.account_id')}
               GROUP BY gkey
             )
             ${volumeCte}
@@ -26705,7 +27184,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             multiIf(ifNull(mg.risk_debt, 0) > 0, toString(toUInt256(mg.worst_hf * 1e18)),
                     ifNull(mg.col, 0) > 0, '${MAX_UINT256}', '') AS mm_hf,
             multiIf(ifNull(mg.risk_debt, 0) > 0, mg.worst_hf * 1e18, ifNull(mg.col, 0) > 0, 1e30, 1e31) AS mm_hf_num,
-            g.usd + ${lpValue} + ifNull(mg.value_delta, 0) / 1e8 AS usd_total,
+            g.usd + ${lpValue} + g.lm_usd + g.mmr_usd + ifNull(mg.value_delta, 0) / 1e8 AS usd_total,
             ${hasIdentitySql},
             ${dispNameSql},
             ${activitySelect} AS activity_count,
@@ -27635,6 +28114,13 @@ export interface TagDetail {
   // account's and DefiSim opens one account at a time.
   moneyMarketByAccount?: AccountMoneyMarket[]
   liquidityPositions?: LpPosition[]
+  // The members' unclaimed farm rewards (see AddressDetail.farmRewards): overlaid
+  // after the cached/persisted build, which is reward-free, and added into
+  // portfolioUsd / portfolioExHdxUsd and the series' pinned last point there.
+  farmRewards?: FarmRewards
+  // The members' claimable money-market incentives (see AddressDetail.moneyMarketRewards),
+  // overlaid and added into the value exactly like farmRewards.
+  moneyMarketRewards?: MoneyMarketRewards
   activeDcas?: ActiveDca[]
   openLimitOrders?: OpenLimitOrder[]
   portfolioSeries: number[]
@@ -27911,9 +28397,54 @@ async function buildTagDetailForMembers(
   // series, nor any figure computed above — they are only placed into the object.
   // A summary response carries neither by design (the hover card shows no
   // positions), so it returns untouched and stays cheap.
-  if (summary) return detail
-  const [activeDcas, openLimitOrders] = await Promise.all([getActiveDcas(members), getOpenLimitOrders(members)])
-  return { ...detail, activeDcas, openLimitOrders }
+  //
+  // The members' unclaimed rewards — farm entries and money-market incentives —
+  // ride the same overlay: a persisted tag snapshot must not freeze a reward that
+  // accrues every block, and they are added into the value HERE, never inside the
+  // cached/persisted build, so the blob stays reward-free and an overlay can never
+  // count them twice (see withUnclaimedRewardsInValue). The hover card (summary)
+  // shows the value, so it takes them too; it still skips the resting orders.
+  const rewardH160s = moneyMarketIdentities(members).h160s
+  if (summary) {
+    const rewards = await getUnclaimedRewards(members, rewardH160s, detail.liquidityPositions ?? [])
+    return withUnclaimedRewardsInValue(detail, rewards)
+  }
+  const [activeDcas, openLimitOrders, rewards] = await Promise.all([
+    getActiveDcas(members), getOpenLimitOrders(members), getUnclaimedRewards(members, rewardH160s, detail.liquidityPositions ?? []),
+  ])
+  return withUnclaimedRewardsInValue({
+    ...detail, activeDcas, openLimitOrders,
+    ...(detail.liquidityPositions ? { liquidityPositions: rewards.lpPositions } : {}),
+    ...(rewards.farmRewards ? { farmRewards: rewards.farmRewards } : {}),
+    ...(rewards.moneyMarketRewards ? { moneyMarketRewards: rewards.moneyMarketRewards, moneyMarket: withMarketRewards(detail.moneyMarket, rewards.moneyMarketRewards) } : {}),
+  }, rewards)
+}
+
+/**
+ * A reward-free tag build with the members' claimable rewards (farm entries and
+ * money-market incentives) added into its value: portfolioUsd, portfolioExHdxUsd
+ * where the build carries it, and the
+ * live-pinned last point of each series (pinned to `value − debt` in the build,
+ * so adding the reward keeps the pin equal to the value the page prints). The
+ * interior points already carry reward history (getAccountHistory folds it in).
+ * Pure, for the tests; applied exactly once, to a build that never holds them.
+ */
+export function withUnclaimedRewardsInValue<T extends Pick<TagDetail, 'portfolioUsd' | 'portfolioExHdxUsd' | 'portfolioSeries' | 'portfolioSeriesExHdx'>>(detail: T, rewards: UnclaimedRewards): T {
+  const { usd, exHdxUsd } = unclaimedRewardValue(rewards)
+  if (usd === 0 && exHdxUsd === 0) return detail
+  const repin = (series: number[], add: number): number[] => {
+    if (!series.length) return series
+    const out = series.slice()
+    out[out.length - 1] = +(out[out.length - 1] + add).toFixed(2)
+    return out
+  }
+  return {
+    ...detail,
+    portfolioUsd: detail.portfolioUsd + usd,
+    ...(detail.portfolioExHdxUsd != null ? { portfolioExHdxUsd: detail.portfolioExHdxUsd + exHdxUsd } : {}),
+    portfolioSeries: repin(detail.portfolioSeries, usd),
+    portfolioSeriesExHdx: repin(detail.portfolioSeriesExHdx, exHdxUsd),
+  }
 }
 
 export async function getTag(tagId: string, opts: { summary?: boolean; refresh?: boolean } = {}): Promise<TagDetail | null> {
@@ -28015,6 +28546,13 @@ export async function getListTagHistoryWindow(listId: string, tagId: string, mem
     portfolioBlocks: history.portfolioBlocks,
     balanceHistory: opts.seriesOnly ? [] : history.balanceHistory,
   }
+}
+
+/** The list-tag twin of getTagLiquidityHistory, on the detail's scope key. */
+export async function getListTagLiquidityHistory(listId: string, tagId: string, members: string[], window?: { fromBlock: number; toBlock: number }): Promise<AddressLiquidityHistory | null> {
+  const valid = listTagMembers(members)
+  if (!valid.length) return null
+  return cachedLiquidityHistory(listTagScope(listId, tagId, valid), tagHistoryAccountSet(valid), window)
 }
 
 export async function getListTagActivity(listId: string, tagId: string, members: string[], type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {

@@ -5,6 +5,7 @@ const read = (p: string) => readFileSync(new URL(p, import.meta.url), 'utf8')
 const collapse = (sql: string) => sql.replace(/\s+/g, ' ').trim()
 
 const explorerService = read('../src/services/explorerService.ts')
+const moneyMarketHistory = read('../src/services/moneyMarketHistory.ts')
 const rawMoneyMarket = read('../../src/raw/moneyMarket.ts')
 const tables = read('../../clickhouse/schema/001_tables.sql')
 const materializedViews = read('../../clickhouse/schema/003_materialized_views.sql')
@@ -96,9 +97,10 @@ describe('money_market_latest_positions schema', () => {
     expect(packed.match(/observation_id/g)).toHaveLength(2)
   })
 
-  // The history passes still order rows with moneyMarketPositionOrderSql, so the
-  // rank arm now exists in two places. They must stay character-identical or the
-  // current-state and history views of the same block could disagree.
+  // The history passes still order rows with mmObservationOrderSql (the leaf that
+  // explorerService's moneyMarketPositionOrderSql delegates to), so the rank arm
+  // exists in two places. They must stay character-identical or the current-state
+  // and history views of the same block could disagree.
   it('ranks observations exactly as the history reader does', () => {
     const rankArm = /if\(startsWith\(observation_id, 'money-market-periodic:'\), toUInt32\(4294967295\), toUInt32OrZero\(arrayElement\(splitByChar\(':', observation_id\), 3\)\)\)/
 
@@ -106,10 +108,11 @@ describe('money_market_latest_positions schema', () => {
     // The history reader interpolates the column through `observation`, which is
     // `${prefix}observation_id` — unprefixed here, since only its own subquery
     // aliases the table.
-    const fromReader = collapse(explorerService.slice(
-      explorerService.indexOf('function moneyMarketPositionOrderSql('),
-      explorerService.indexOf('function latestMoneyMarketPositionsSql('),
+    const fromReader = collapse(moneyMarketHistory.slice(
+      moneyMarketHistory.indexOf('export function mmObservationOrderSql('),
+      moneyMarketHistory.indexOf('/** An H160\'s ETH-truncated AccountId32'),
     )).replaceAll('${observation}', 'observation_id').match(rankArm)
+    expect(explorerService).toContain('return mmObservationOrderSql(prefix)')
 
     expect(fromView).toHaveLength(1)
     expect(fromReader).toHaveLength(1)

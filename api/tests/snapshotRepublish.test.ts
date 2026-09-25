@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { ClickHouseClient } from '../src/db/client.ts'
 import { REPUBLISH_FLOOR_MS, skipDecision, type PublishedGeneration } from '../src/services/snapshotRepublish.ts'
+import { lmRewardChecksumFields } from '../src/services/lmRewardService.ts'
 import {
   lockRowChecksumFields, paraBlockProjector, persistLockSnapshot, relayBlockProjector, snapProjection,
   PROJECTION_GRID_MS, type BreakdownRow,
@@ -182,6 +183,10 @@ const coverage: CoverageCase[] = [
     identity: ['snapshot_id', 'computed_at'], derived: {},
   },
   {
+    table: 'lm_reward_snapshots', file: 'lmRewardService.ts', checksum: lmRewardChecksumFields,
+    identity: ['snapshot_id', 'computed_at'], derived: {},
+  },
+  {
     table: 'money_market_account_value_snapshots', file: 'explorerService.ts', checksum: moneyMarketClaimChecksumFields,
     identity: ['snapshot_id', 'computed_at'],
     derived: {
@@ -192,10 +197,11 @@ const coverage: CoverageCase[] = [
 ]
 
 describe('snapshot checksums cover every stored column', () => {
-  it('pins the three checksummed snapshot tables', () => {
+  it('pins the four checksummed snapshot tables', () => {
     expect(coverage.map(c => c.table)).toEqual([
       'account_lock_snapshots',
       'omnipool_account_claim_snapshots',
+      'lm_reward_snapshots',
       'money_market_account_value_snapshots',
     ])
   })
@@ -205,6 +211,7 @@ describe('snapshot checksums cover every stored column', () => {
   const expectedCovered: Record<string, number> = {
     account_lock_snapshots: 7,
     omnipool_account_claim_snapshots: 6,
+    lm_reward_snapshots: 27,
     money_market_account_value_snapshots: 14,
   }
 

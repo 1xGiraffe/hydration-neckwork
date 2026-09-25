@@ -4,6 +4,7 @@ import { AUTH, fakeDataClient, freshDataApp } from './helpers.ts'
 import { loadExplorerAssets } from '../../src/services/explorerAssets.ts'
 import type { ClickHouseClient } from '../../src/db/client.ts'
 import { encodeAddress } from '@polkadot/util-crypto'
+import { parsePoolSnapshot } from '../../src/data/services/poolSnapshot.ts'
 
 // Contract tests for /v1/pools*: the snapshot (with the delisted flag), the
 // three histories, fill pages under the parametric trades route, and volumes.
@@ -351,5 +352,52 @@ describe('GET /v1/pools/:venue/:poolKey/volumes', () => {
     const res = await app.inject({ url: '/v1/pools/stableswap/100/volumes?fromTime=2025-01-01T00:00:00Z&toTime=2026-01-01T00:00:00Z', headers: AUTH })
     expect(res.statusCode).toBe(400)
     expect(res.json().error.context.maxWindowDays).toBe(90)
+  })
+})
+
+describe('parsePoolSnapshot — XYK asset pairing', () => {
+  const account = `0x${'c3'.repeat(32)}`
+  const other = `0x${'d4'.repeat(32)}`
+  const payload = (pools: unknown[]) => JSON.stringify({ xyk: { pools } })
+
+  it('pairs reserves by the row\'s own ids (HDX, asset 0, included) and ignores the registry then', () => {
+    const snap = parsePoolSnapshot(1, '2026-09-25T00:00:00.000Z', payload([{ pool_account: account, asset_a: 0, asset_b: 1000286, reserve_a: '7', reserve_b: '9' }]),
+      new Map([[account, { assetA: 1000286, assetB: 0 }]]))
+    expect(snap.xyk.get(account)).toMatchObject({ assetA: 0, assetB: 1000286, reserveA: 7n, reserveB: 9n })
+  })
+
+  it('pairs a legacy row without ids in the registry order, and leaves out one the registry does not name', () => {
+    const snap = parsePoolSnapshot(1, '2026-09-25T00:00:00.000Z', payload([
+      { pool_account: account, reserve_a: '7', reserve_b: '9' },
+      { pool_account: other, reserve_a: '1', reserve_b: '2' },
+    ]), new Map([[account, { assetA: 1000286, assetB: 0 }]]))
+    expect(snap.xyk.get(account)).toMatchObject({ assetA: 1000286, assetB: 0, reserveA: 7n, reserveB: 9n })
+    expect(snap.xyk.has(other)).toBe(false)
+    for (const p of snap.xyk.values()) expect(Number.isNaN(p.assetA) || Number.isNaN(p.assetB)).toBe(false)
+  })
+})
+
+// The explorer's stableswapSharePools rule on the data tree's pool snapshot: a
+// failed or empty read serves the last good snapshot, but only inside the share
+// price age bound, dated by its own block.
+describe('poolSnapshot last good', () => {
+  it('serves the last good snapshot within the age bound after a failed read, and surfaces the failure past it', async () => {
+    const { poolSnapshot, resetPoolSnapshotForTests, usableLastGood } = await import('../../src/data/services/poolSnapshot.ts')
+    const { resetCacheForTests } = await import('../../src/services/cache.ts')
+    const { SHARE_POOL_MAX_AGE_SECONDS } = await import('../../src/services/lpMath.ts')
+    resetPoolSnapshotForTests(); resetCacheForTests()
+    const ts = (secAgo: number) => new Date(Date.now() - secAgo * 1000).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+    let fail = false
+    const client = { query: async () => { if (fail) throw new Error('down'); return { json: async () => [{ block_height: 9_000, ts: ts(60), payload_json: '{}' }] } } }
+    const good = await poolSnapshot(client as unknown as ClickHouseClient)
+    expect(good.blockHeight).toBe(9_000)
+    fail = true
+    resetCacheForTests()
+    expect((await poolSnapshot(client as unknown as ClickHouseClient)).blockHeight).toBe(9_000)
+    // Past the bound the last good is not usable: the failure surfaces.
+    expect(usableLastGood(good, Date.parse(good.timestamp) + (SHARE_POOL_MAX_AGE_SECONDS + 1) * 1000)).toBeNull()
+    expect(usableLastGood(good, Date.parse(good.timestamp) + SHARE_POOL_MAX_AGE_SECONDS * 1000)).toBe(good)
+    resetPoolSnapshotForTests(); resetCacheForTests()
+    await expect(poolSnapshot(client as unknown as ClickHouseClient)).rejects.toThrow('down')
   })
 })

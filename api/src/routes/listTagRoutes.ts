@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import {
   getAccountsForMembers,
-  getListTagDetail, getListTagHistoryWindow, getListTagActivity, getListTagExtrinsics, getListTagEvents,
+  getListTagDetail, getListTagHistoryWindow, getListTagLiquidityHistory, getListTagActivity, getListTagExtrinsics, getListTagEvents,
   getListTagVotes, getListTagRevenueBreakdown, getListTagVotesByReferendum, getListTagTabCounts,
   getListTagListTotal, getListTagValueEvents,
   type ValueListFilters,
@@ -10,7 +10,7 @@ import {
   limitParam, offsetParam, badOffset, textParam, activityTypeParam,
   extrinsicFilters, eventFilters, dateParam, activityOffsetParam, boundedActivityOffset,
   maxActivityOffsetFor, maxScopedActivityOffsetFor, scopedListQuery, listTabSchema,
-  accountSortParam, historyWindowSchema,
+  accountSortParam, historyWindowSchema, optionalHistoryWindow,
 } from './explorer.ts'
 
 // A list tag resolved to the two things every route below needs: which tag it
@@ -23,7 +23,7 @@ export interface ResolvedListTag {
   tag: { name: string; color: string; icon: string; note: string; members: string[] }
 }
 
-// The two ways the same twelve reads are served. A list tag's aggregate view is
+// The two ways the same thirteen reads are served. A list tag's aggregate view is
 // one page, so it must not become two drifting sets of handlers — the surface
 // carries only what genuinely differs between them:
 //
@@ -71,6 +71,18 @@ export function listTagReadRoutes(fastify: FastifyInstance, surface: ListTagRead
     const windowed = await getListTagHistoryWindow(resolved.listId, resolved.tagId, resolved.tag.members, w.data.fromBlock, w.data.toBlock, { seriesOnly: q.series === '1' })
     if (!windowed) return reply.status(404).send({ error: 'Tag not found' })
     return windowed
+  })
+
+  // LP history over the list tag's member set — the same wire shape and optional
+  // block window as the address and system-tag routes.
+  fastify.get(`${base}/liquidity-history`, async (req, reply) => {
+    const resolved = resolve(req, reply)
+    if (!resolved) return
+    const w = optionalHistoryWindow(query(req))
+    if (!w) return reply.status(400).send({ error: 'Invalid block window' })
+    const history = await getListTagLiquidityHistory(resolved.listId, resolved.tagId, resolved.tag.members, w.window)
+    if (!history) return reply.status(404).send({ error: 'Tag not found' })
+    return history
   })
 
   // The list tag's members as DIRECTORY rows — same shape and same renderer as

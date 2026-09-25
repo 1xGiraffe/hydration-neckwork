@@ -491,7 +491,9 @@ export async function accountLiquidity(client: ClickHouseClient, parsed: ParsedA
       amount: str(row.amount),
       amountA: str(row.amount_a),
       amountB: str(row.amount_b),
-      assetB: Number(row.asset_b) > 0 ? String(row.asset_b) : null,
+      // An XYK event always names its second asset, and HDX is asset 0 — so for XYK
+      // the column is the id even when it reads 0. Elsewhere 0 means "no second asset".
+      assetB: row.event_name.startsWith('XYK.') || Number(row.asset_b) > 0 ? String(row.asset_b) : null,
       poolAccount: str(row.pool_account),
       assetRefs: (row.asset_refs ?? []).map(String),
       poolAddress: str(row.pool_address),

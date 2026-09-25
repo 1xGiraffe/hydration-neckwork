@@ -6,10 +6,14 @@ import { showsExHdxValue } from '../src/services/tagService.ts'
 const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
 
 const fn = (name: string) => {
-  const at = explorerService.indexOf(`async function ${name}(`)
+  const at = explorerService.search(new RegExp(`(async )?function ${name}\\(`))
   expect(at, name).toBeGreaterThan(-1)
   return explorerService.slice(at, explorerService.indexOf('\n}\n', at))
 }
+
+// The LP value sources are added through one helper per venue, each called with
+// both curves; the helpers are where the exclusion decisions live.
+const LP_HELPERS = ['addChartXykValue', 'addChartOmnipoolValue', 'addChartV3Value']
 
 const assetRef = (assetId: number) => ({
   assetId, iconAssetId: assetId, symbol: `A${assetId}`, name: null, decimals: 12,
@@ -36,25 +40,43 @@ describe('the ex-HDX exclusion covers every path HDX takes into the portfolio', 
     expect(body).toContain('if (exHdx) portfolioExHdx[b] += portfolioCombined[b] * (lastPx || 0)')
     // The Omnipool leg, dropped with its hub half — that leg is part of the excluded
     // position's withdraw value, not H2O the account holds separately.
-    expect(body).toContain('if (leg.assetId !== HDX_ASSET_ID) portfolioExHdx[b] += withdrawValue')
+    expect(fn('addChartOmnipoolValue')).toContain('if (leg.assetId !== HDX_ASSET_ID) portfolioExHdx[b] += withdrawValue')
     // The XYK leg: a share is a claim on both reserves, so an HDX-paired pool leaves
     // the curve whole rather than contributing its other half.
-    expect(body).toContain('if (st.assetA !== HDX_ASSET_ID && st.assetB !== HDX_ASSET_ID) portfolioExHdx[b] += nav')
+    expect(fn('addChartXykValue')).toContain('if (leg.assetA !== HDX_ASSET_ID && leg.assetB !== HDX_ASSET_ID) portfolioExHdx[b] += nav')
     // The concentrated-liquidity leg: a position claims both sides of its pair, so the
     // XYK rule applies.
-    expect(body).toContain('if (leg.asset0 !== HDX_ASSET_ID && leg.asset1 !== HDX_ASSET_ID) portfolioExHdx[b] += value')
+    expect(fn('addChartV3Value')).toContain('if (leg.asset0 !== HDX_ASSET_ID && leg.asset1 !== HDX_ASSET_ID) portfolioExHdx[b] += value')
+    // The unclaimed farm rewards: HDX-denominated ones leave the ex-HDX curve, by
+    // the same rule the current value's unclaimedRewardValue applies.
+    expect(fn('chartFarmRewardSeries')).toContain('if (item.rewardAssetId !== HDX_ASSET_ID) exHdx[b] += value')
+    expect(fn('unclaimedRewardValue')).toContain('if (item.asset.assetId !== HDX_ASSET_ID) exHdxUsd += v')
+    // The unclaimed money-market incentives, by the same rule.
+    expect(fn('chartMmIncentiveSeries')).toContain('if (item.rewardAssetId !== HDX_ASSET_ID) exHdx[b] += value')
   })
 
   // Pinned by count so a NEW value source added to the total curve cannot quietly
   // skip the second one: every `portfolio[b] +=` site must have made a decision
-  // about `portfolioExHdx[b]`. Five sites — balances, XYK NAV, the money-market
-  // fold, Omnipool principal, concentrated-liquidity principal.
+  // about `portfolioExHdx[b]`. Seven sites — balances, XYK NAV, the money-market
+  // fold, Omnipool principal, concentrated-liquidity principal, unclaimed farm
+  // rewards, unclaimed money-market incentives; the three LP ones through their
+  // helpers, each handed BOTH curves.
   it('feeds both curves from every value source', () => {
     const body = fn('getAccountHistory')
     const total = [...body.matchAll(/\bportfolio\[b\] \+=/g)]
     const exHdx = [...body.matchAll(/\bportfolioExHdx\[b\] \+=/g)]
-    expect(total).toHaveLength(5)
-    expect(exHdx).toHaveLength(5)
+    const helperCalls = LP_HELPERS.filter(name => body.includes(`${name}(portfolio, portfolioExHdx,`))
+    expect(total.length + helperCalls.length).toBe(7)
+    expect(exHdx.length + helperCalls.length).toBe(7)
+    // The reward site folds the curves chartFarmRewardSeries built, total into
+    // total and ex-HDX into ex-HDX.
+    expect(body).toContain('portfolio[b] += rewardCurves.total[b] ?? 0; portfolioExHdx[b] += rewardCurves.exHdx[b] ?? 0')
+    expect(body).toContain('portfolio[b] += incentiveCurves.total[b] ?? 0; portfolioExHdx[b] += incentiveCurves.exHdx[b] ?? 0')
+    for (const name of LP_HELPERS) {
+      const helper = fn(name)
+      expect([...helper.matchAll(/\bportfolio\[b\] \+=/g)], name).toHaveLength(1)
+      expect([...helper.matchAll(/\bportfolioExHdx\[b\] \+=/g)], name).toHaveLength(1)
+    }
   })
 
   // The exclusion is HDX and HDX LP only. Netting the same money-market debt off

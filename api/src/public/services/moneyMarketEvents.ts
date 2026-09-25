@@ -1,5 +1,5 @@
 import type { ClickHouseClient } from '../../db/client.ts'
-import { ATOKEN_UNDERLYING_ID, UNDERLYING_TO_SHARE_IDS, allExplorerAssets } from '../../services/explorerAssets.ts'
+import { ATOKEN_UNDERLYING_ID, UNDERLYING_TO_SHARE_IDS, allExplorerAssets, assetIdFromMmAddress, MM_CONTRACT_ASSET } from '../../services/explorerAssets.ts'
 import { iso } from '../schemas/common.ts'
 import { resolveSingleAccountForms } from './accountBalances.ts'
 
@@ -53,16 +53,14 @@ export function precompileAddress(assetId: number): string {
   return `0x${PRECOMPILE_PREFIX}${assetId.toString(16).padStart(8, '0')}`
 }
 
-// Reserves backed by a deployed contract instead of the precompile. HOLLAR is the
-// only one; the shared list lives in services/erc20WalletService.ts, outside the
-// public API's import allow-list, so it is restated here.
-const DEPLOYED_RESERVE_ASSET_ID = new Map<string, number>([
-  ['0x531a654d1696ed52e7275a8cede955e82620f99a', 222], // HOLLAR
-])
-
 /**
  * Reserve EVM address → registry asset id, or null when the row references no
- * reserve (UserEModeSet carries an empty address).
+ * reserve (UserEModeSet carries an empty address) or is not a well-formed H160.
+ *
+ * Delegates to the shared `assetIdFromMmAddress` (services/explorerAssets.ts), so
+ * the precompile decoding and the deployed-contract reserves (`MM_CONTRACT_ASSET`:
+ * HOLLAR, plus any EXPLORER_EXTRA_MM_CONTRACT_ASSET entries) are one definition
+ * across the explorer, the Data API and this surface.
  *
  * Verified against the live model: every `asset_address` on these events is either
  * the precompile or HOLLAR's contract, so no lookup through `atoken_reserve_map` is
@@ -71,10 +69,7 @@ const DEPLOYED_RESERVE_ASSET_ID = new Map<string, number>([
 export function assetIdFromReserveAddress(address: string | null | undefined): number | null {
   const lower = (address ?? '').trim().toLowerCase()
   if (!/^0x[0-9a-f]{40}$/.test(lower)) return null
-  const deployed = DEPLOYED_RESERVE_ASSET_ID.get(lower)
-  if (deployed != null) return deployed
-  const body = lower.slice(2)
-  return body.startsWith(PRECOMPILE_PREFIX) ? parseInt(body.slice(32), 16) : null
+  return assetIdFromMmAddress(lower)
 }
 
 /**
@@ -101,7 +96,7 @@ export function reserveAddressesForSearch(search: string): string[] {
   const addresses = new Set<string>()
   for (const id of reserveIds) {
     addresses.add(precompileAddress(id))
-    for (const [address, assetId] of DEPLOYED_RESERVE_ASSET_ID) {
+    for (const [address, assetId] of Object.entries(MM_CONTRACT_ASSET)) {
       if (assetId === id) addresses.add(address)
     }
   }

@@ -151,7 +151,7 @@ const HUBS: Record<string, { title: string; description: string }> = {
   '/hdx': { title: 'HDX', description: 'HDX price, supply, staking, treasury buybacks and Omnipool position.' },
   '/hollar': { title: 'HOLLAR', description: 'HOLLAR supply, the stability module, collateral and peg behaviour.' },
   '/ice': { title: 'ICE', description: 'ICE intents and solver settlements on Hydration.' },
-  '/revenue': { title: 'Revenue', description: 'Protocol revenue on Hydration by stream — trading fees, the money market, HOLLAR and liquidations.' },
+  '/revenue': { title: 'Protocol Revenue', description: 'Protocol revenue on Hydration by stream — trading fees, the money market, HOLLAR and liquidations.' },
   '/security': { title: 'Security', description: 'Hydration\u2019s live safety controls: circuit breakers, cross-chain limits, oracle health, freezes and guardians.' },
   '/mcp': { title: 'MCP server', description: 'Connect an AI assistant to Hydration chain data over the Model Context Protocol.' },
 }

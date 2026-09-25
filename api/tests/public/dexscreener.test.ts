@@ -672,8 +672,8 @@ describe('assets the registry cannot resolve', () => {
 
 describe('reserves that would read zero', () => {
   it('omits both sides rather than reporting an HDX-quoted XYK pool as empty', async () => {
-    // xyk_pool_reserve_history reads 0 for native HDX (it lives in System.Account,
-    // not Tokens), so every HDX-quoted pool's HDX side is 0 while the pool trades.
+    // A state-grid row whose HDX side reads 0 while the pool trades is a
+    // projection artefact, never the pool's state.
     const hdxSide: Row[] = [{ ...XYK_EVENT_ROWS[0], reserve_a_raw: '0' }]
     const client = fakeClient({ 'pub:ds:events:xyk': hdxSide })
     await withApp(client, async app => {
