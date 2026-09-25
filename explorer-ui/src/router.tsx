@@ -320,6 +320,8 @@ export const paths = {
   extrinsicAt: (h: number, i: number) => `/extrinsic/${h}-${i}`,
   activityDetail: (slug: ActivitySlug, id: string) => `/${slug}/${id}`,
   dcaSchedule: (scheduleId: number) => `/dca/${scheduleId}`,
+  // One execution attempt, addressed by its DCA.TradeExecuted / TradeFailed event.
+  dcaExecution: (h: number, eventIndex: number) => `/dca/${h}-e${eventIndex}`,
   // An ICE intent's page (the order — every event of its life). The id is the u128 as
   // a decimal string, never a number.
   intent: (intentId: string) => `/intent/${intentId}`,

@@ -78,6 +78,7 @@ describe('activity detail routes', () => {
     expect(p('/dca/33546')).toEqual({ name: 'dca-schedule', scheduleId: 33546 })
     expect(p('/dca/13072380-4')).toEqual({ name: 'dca-resolve', height: 13072380, index: 4, kind: 'extrinsic' })
     expect(p('/dca/13072380-e2')).toEqual({ name: 'dca-execution', height: 13072380, eventIndex: 2 })
+    expect(p(paths.dcaExecution(13072380, 2))).toEqual({ name: 'dca-execution', height: 13072380, eventIndex: 2 })
   })
   it('rejects malformed activity ids', () => {
     expect(p('/swap/abc')).toEqual({ name: 'legacy', to: '/activity?tab=trade' })
