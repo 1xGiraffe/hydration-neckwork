@@ -25138,6 +25138,26 @@ interface ValueEventCandidateRow {
   value_usd: number
 }
 
+/** One DCA execution in a block: its settling DCA.TradeExecuted's index and its schedule. */
+export interface DcaExecutionRef { eventIndex: number; scheduleId: number }
+
+// The schedule a hook-context swap leg executed under, among the scoped accounts'
+// executions in its block (any order). An execution's swap legs precede its
+// DCA.TradeExecuted (block 15,027,912: Router.Executed e34, TradeExecuted e35),
+// and several schedules can execute in one block, so the leg belongs to the
+// nearest execution event after it — a leg past the block's last execution event
+// to that last one. Pure.
+export function dcaScheduleOfHookSwap(executions: readonly DcaExecutionRef[] | undefined, eventIndex: number): number | undefined {
+  if (!executions?.length) return undefined
+  let after: DcaExecutionRef | undefined
+  let last = executions[0]
+  for (const e of executions) {
+    if (e.eventIndex >= eventIndex && (!after || e.eventIndex < after.eventIndex)) after = e
+    if (e.eventIndex > last.eventIndex) last = e
+  }
+  return (after ?? last).scheduleId
+}
+
 // Value-chart markers for an explicit account set, bounded to the optional day
 // window (default: the full indexed range, matching the value-history chart's
 // span). Two selection passes share one candidate machinery:
