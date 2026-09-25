@@ -19,6 +19,10 @@ const ALLOWED_SHARED = new Set([
   'services/explorerAssets.ts',
   'services/valuation.ts',
   'services/lpMath.ts',
+  // The amounts a pallet liquidity event does not state, matched from the
+  // transfer legs beside it — the explorer's own pairing, so an XYK add's or
+  // removal's two legs read the same on /liquidity. A leaf (no imports at all).
+  'services/liquidityLegs.ts',
   // The price limit an ICE intent states, both directions, from the raw integer
   // amounts. A leaf (no imports at all); shared so the explorer, this surface and
   // the other API cannot quote one order's limit two ways.

@@ -45,6 +45,10 @@ export function fakeDataClient(...handlers: QueryHandler[]): FakeDataClient {
     // default answers nothing (items render extrinsicHash: null); a test that
     // asserts the join passes its own handler for this marker.
     query => (query.includes('-- data:enrich:extrinsic-hashes') ? [] : undefined),
+    // The page-scoped transfer legs the liquidity feed recovers amountless pallet
+    // rows from. The default answers nothing (amounts stay null); a test that
+    // asserts the recovery passes its own handler for this marker.
+    query => (query.includes('-- data:enrich:liquidity-legs') ? [] : undefined),
     // The page-scoped event-time closes every historical flow feed prices with.
     // The default answers nothing (valueUsd renders null); a test that asserts
     // valuation passes its own handler for this marker.
