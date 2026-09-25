@@ -264,12 +264,39 @@ describe('activity source fan-out', () => {
 
     const firstPass = new Set(activityCalls.map(c => c.address))
     activityCalls.length = 0
+    setHead(1_020)
     await runEvaluatorTick()
     expect(activityCalls).toHaveLength(25)
     // The rotation resumed where it stopped, so the deferred five came first.
     const secondPass = activityCalls.slice(0, 5).map(c => String(c.address))
     expect(secondPass.some(a => firstPass.has(a))).toBe(false)
     expect(new Set([...firstPass, ...secondPass]).size).toBe(30)
+    // Every group has now been read — the five to 1020, twenty revisited to 1020,
+    // and the five the rotation has not come back to at 1010 — so the lane
+    // stands at 1010, the oldest block any of its groups is vouched for.
+    expect(evaluatorCursors()['account-activity']).toBe(1_010)
+  })
+
+  // Measured live 2026-09-16 to 2026-09-25: 32 watched targets against a cap of
+  // 25, so every tick deferred some group, the lane held "where it was" on every
+  // tick, and the persisted cursor did not move for nine days while the clamp
+  // re-read the newest 600 blocks each tick against a 750-block page per target.
+  // Past the cap the cursor must keep pace, one rotation behind the head.
+  it('keeps advancing while there are more groups than one tick can ask', async () => {
+    const many = Array.from({ length: 30 }, (_, i) => `0x${(i + 1).toString(16).padStart(2, '0').repeat(20)}`)
+    for (const address of many) await createRule(OWNER, { kind: 'account-activity', params: { address } })
+    await runEvaluatorTick()                       // seeds at 1000
+
+    const cursorAfter: number[] = []
+    for (const head of [1_010, 1_020, 1_030, 1_040, 1_050]) {
+      setHead(head)
+      await runEvaluatorTick()
+      cursorAfter.push(evaluatorCursors()['account-activity'])
+    }
+    // The first tick holds (five groups unread); from then on the lane stands
+    // one rotation behind the head and never stops.
+    expect(cursorAfter).toEqual([1_000, 1_010, 1_020, 1_030, 1_040])
+    expect(evaluatorCounters().deferredGroups).toBe(25)
   })
 
   // The two value-floor kinds read the SAME feed under different types, so a
