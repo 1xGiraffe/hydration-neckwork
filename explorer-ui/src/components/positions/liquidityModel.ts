@@ -1,6 +1,6 @@
 import type {
   AssetRef, ExplorerYields, FarmRewardEntry, FarmRewardsSummary, LiquidityHistoryPosition, LiquidityRewardsClaimed,
-  LpPosition, LpUnclaimedReward, PoolYield,
+  LpPosition, LpShareWrapper, LpUnclaimedReward, PoolYield,
 } from '../../types'
 import { paths } from '../../router'
 import { sumPct, yieldComponentRow, type YieldRow } from './yieldFormat'
@@ -50,6 +50,22 @@ export function poolYieldOf(yields: ExplorerYields | null | undefined, id: PoolI
   return yields[id.family]?.[id.key] ?? null
 }
 
+/**
+ * What a wrapped share's aToken earns — the headline the Hydration app states for a
+ * "Hydrated" pool (HUSDT over 2-Pool-HUSDT): the pool's fee and legs plus the
+ * reserve's supply APY and its incentive programmes, read from the money-market
+ * yields under the aToken's own id.
+ */
+export function wrapperYieldOf(yields: ExplorerYields | null | undefined, wrapper: LpShareWrapper | undefined): PoolYield | null {
+  if (!yields || !wrapper) return null
+  return yields.moneyMarket?.[wrapper.marketKey]?.[String(wrapper.asset.assetId)]?.supply ?? null
+}
+
+/** The rate a wrapped pool's unwrapped shares miss, named in the position's hover. */
+export function unwrappedNote(wrapper: LpShareWrapper): string {
+  return `Unwrapped pool shares: the money market's supply APY and incentives on this pool are paid on ${wrapper.asset.symbol}, the share supplied there — these shares earn the pool's fee and legs.`
+}
+
 export const isFarmVenue = (venue: string): boolean => venue === 'Omnipool Farm' || venue === 'XYK Farm'
 
 type FarmItem = NonNullable<FarmRewardsSummary['items']>[number]
@@ -75,13 +91,15 @@ export interface PositionApr { total: number | null; rows: YieldRow[]; note?: st
  * cannot be stated makes the total unknown, never smaller: a farmed row with no
  * entries to read (rewards snapshot stale), an entry whose farm the yields do not
  * list, an entry without its loyalty, or deposits in one farm at different
- * loyalty (the split of the principal between them is not on the row).
+ * loyalty (the split of the principal between them is not on the row). `y` is
+ * the pool's OWN yield: for a wrapped share (HUSDT over 2-Pool-HUSDT) the fee and
+ * legs the unwrapped shares earn, not the wrapper's headline.
  */
 export function positionApr(p: LpPosition, y: PoolYield | null, entries: FarmItem[]): PositionApr {
   if (!y) return { total: null, rows: [] }
   const rows = y.components.map(yieldComponentRow).filter(r => r.group !== 'Farm rewards')
   const terms: (number | null)[] = y.components.filter(c => c.kind !== 'farm').map(c => c.aprPct)
-  let note: string | undefined
+  let note: string | undefined = p.wrapper ? unwrappedNote(p.wrapper) : undefined
   if (isFarmVenue(p.venue)) {
     const live = entries.filter(e => e.farmState == null || e.farmState === 'active')
     if (!entries.length) {
@@ -159,7 +177,10 @@ export interface PoolGroup {
   legs: Leg[]
   valueUsd: number
   unpricedPositions: number
+  /** The pool's headline rate: its own yield, or for a wrapped share what the wrapper earns. */
   yield: PoolYield | null
+  /** Set when the pool's share is a money-market reserve (a "Hydrated" pool), the source of the headline. */
+  wrapper?: LpShareWrapper
   rewards: RewardTally
   to: string
 }
@@ -185,7 +206,10 @@ function addLeg(legs: Leg[], asset: AssetRef, raw: string | undefined) {
 }
 
 /** Positions grouped by pool, each pool with its summed legs (H2O included),
- *  priced value, rate and unclaimed rewards; pools by value, positions by value. */
+ *  priced value, rate and unclaimed rewards; pools by value, positions by value.
+ *  A pool whose share is a money-market reserve goes by its wrapper (HUSDT for
+ *  2-Pool-HUSDT, where the wrapper names it) and is rated as the wrapper earns —
+ *  the Hydration app's pool row — while each position keeps its own rate. */
 export function groupPools(positions: LpPosition[], yields: ExplorerYields | null | undefined, farmRewards: FarmRewardsSummary | null | undefined): PoolGroup[] {
   const groups = new Map<string, PoolGroup>()
   for (const p of positions) {
@@ -196,10 +220,12 @@ export function groupPools(positions: LpPosition[], yields: ExplorerYields | nul
     const view: PositionView = { p, entries, apr: positionApr(p, y, entries), rewards: tallyRewards(p.unclaimedRewards) }
     let g = groups.get(id)
     if (!g) {
+      const face = p.wrapper?.named ? p.wrapper.asset : p.asset
       g = {
-        id, identity, label: p.assetB ? `${p.asset.symbol} / ${p.assetB.symbol}` : p.asset.symbol,
-        icon: pairIcon(p.asset, p.assetB), venues: [], positions: [], legs: [], valueUsd: 0, unpricedPositions: 0,
-        yield: y, rewards: { usd: 0, unpriced: 0, unpayable: 0, held: [] }, to: poolLink(p, identity),
+        id, identity, label: p.assetB ? `${face.symbol} / ${p.assetB.symbol}` : face.symbol,
+        icon: pairIcon(face, p.assetB), venues: [], positions: [], legs: [], valueUsd: 0, unpricedPositions: 0,
+        yield: p.wrapper ? wrapperYieldOf(yields, p.wrapper) : y, ...(p.wrapper ? { wrapper: p.wrapper } : {}),
+        rewards: { usd: 0, unpriced: 0, unpayable: 0, held: [] }, to: poolLink(p, identity),
       }
       groups.set(id, g)
     }

@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect } from 'vitest'
+import { registerShareWrapper } from '../src/services/explorerAssets.ts'
 import { stableswapLpPositions } from '../src/services/explorerService.ts'
 import type { AddressBalance, AssetRef } from '../src/services/explorerService.ts'
 
@@ -34,5 +35,24 @@ describe('stableswapLpPositions', () => {
       bal(ref(690, '2-Pool-GDOT'), '0', 0),  // dust-cleared position
     ])
     expect(out).toHaveLength(0)
+  })
+
+  describe('a share that is a money-market reserve names its wrapper', () => {
+    afterEach(() => { registerShareWrapper(111, null); registerShareWrapper(103, null) })
+
+    it('carries the aToken and market, named when the share already displays as it', () => {
+      registerShareWrapper(111, { aTokenId: 1111, marketKey: 'core' })  // 2-Pool-HUSDT displays as HUSDT
+      registerShareWrapper(103, { aTokenId: 1008, marketKey: 'core' })  // 3-Pool stays 3-Pool
+      const out = stableswapLpPositions([bal(ref(111, '2-Pool-HUSDT'), '7', 7), bal(ref(103, '3-Pool'), '3', 3)])
+      expect(out.map(p => [p.asset.assetId, p.wrapper?.asset.assetId, p.wrapper?.marketKey, p.wrapper?.named]))
+        .toEqual([[111, 1111, 'core', true], [103, 1008, 'core', false]])
+      // The shares themselves are what the row holds — never relabelled.
+      expect(out[0].asset.symbol).toBe('2-Pool-HUSDT')
+      expect(out[0].positionId).toBe('share-111')
+    })
+
+    it('carries none for a share no reserve wraps', () => {
+      expect(stableswapLpPositions([bal(ref(690, '2-Pool-GDOT'), '100', 42)])[0].wrapper).toBeUndefined()
+    })
   })
 })

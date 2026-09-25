@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { assetDescriptor } from '../src/services/explorerAssets.ts'
 import { farmAprByAsset, farmAprPercScaled, renderPerc, xykFarmAprPercScaled, type LiveFarm } from '../src/services/farmApr.ts'
 import {
-  WEIGHT_UNIT, assemblePoolYield, tokenAccrualAprs, farmPartsByReward, feeAprPctScaled, incentiveAprPctScaled, legWeights, pctFromPerc,
-  pctNumber, rayAprToApyPctScaled, underlyingParts, v3LpFee, type YieldContext,
+  TOKEN_YIELD_MAX_GIVE_BACK, WEIGHT_UNIT, assemblePoolYield, tokenAccrualAprs, farmPartsByReward, feeAprPctScaled, incentiveAprPctScaled, legWeights,
+  pctFromPerc, pctNumber, rayAprToApyPctScaled, underlyingParts, v3LpFee, type YieldContext,
 } from '../src/services/positionYield.ts'
 
 const RAY = 10n ** 27n
@@ -132,6 +132,24 @@ describe('composition', () => {
     // 0.5% × 365/30 = 6.083333%
     expect(out.get(15)).toBe(6_083_333n)
     expect(tokenAccrualAprs([{ ...rows[0], t1: 0 }]).size).toBe(0)
+  })
+
+  it('reads a peg as a rate only when it behaved like one: no FX drift, no negative yield', () => {
+    const DAY = 86_400
+    const grew = { asset_ids: [222, 1044], n0: ['1', '11473'], d0: ['1', '10000'], n1: ['1', '11800'], d1: ['1', '10000'], t0: 0, t1: 180 * DAY }
+    // The same +2.85 % end to end, read three ways: an accruing rate (oracle noise
+    // of 0.16 % on the way), a price that gave back 4 % from its high in between,
+    // and the EUR/USD case that also ended below its start.
+    // 327/11473 × 365/180 = 5.779511 %
+    expect(tokenAccrualAprs([{ ...grew, gave_back: [0, 0.0016] }]).get(1044)).toBe(5_779_511n)
+    expect(tokenAccrualAprs([{ ...grew, gave_back: [0, 0.041] }]).has(1044)).toBe(false)
+    const fell = { ...grew, n1: ['1', '11393'], gave_back: [0, 0.041] }
+    expect(tokenAccrualAprs([fell]).size).toBe(0)
+    // Ended below its start with no give-back stated at all: still not a yield.
+    expect(tokenAccrualAprs([{ ...grew, n1: ['1', '11393'] }]).size).toBe(0)
+    // The threshold itself passes; a hair over it does not.
+    expect(tokenAccrualAprs([{ ...grew, gave_back: [0, TOKEN_YIELD_MAX_GIVE_BACK] }]).has(1044)).toBe(true)
+    expect(tokenAccrualAprs([{ ...grew, gave_back: [0, TOKEN_YIELD_MAX_GIVE_BACK + 1e-9] }]).has(1044)).toBe(false)
   })
 
   it('reads a share with no current pool state as unknown, never as its fee alone', () => {
