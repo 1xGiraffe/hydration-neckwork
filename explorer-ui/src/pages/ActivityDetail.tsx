@@ -18,6 +18,12 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
   const row = rows?.find(r =>
     SLUG_TYPES[slug].includes(r.type)
     && (ref!.eventIndex != null ? r.eventIndex === ref!.eventIndex : r.extrinsicIndex === ref!.extrinsicIndex))
+  // The same event now classified as another family (a Wormhole Relay payout was a
+  // transfer before it was a cross-chain delivery): follow it rather than calling the
+  // old link a miss. Event-addressed only — an event names one row, an extrinsic may not.
+  const reclassified = rows && !row && ref?.eventIndex != null
+    ? rows.find(r => r.eventIndex === ref.eventIndex) ?? null
+    : null
   // Two ways this page is early rather than wrong: the block is not in the
   // index at all, or it is served from the pending layer, which decodes trades,
   // transfers, money-market actions and outbound XCM — so a liquidity, staking,
@@ -37,7 +43,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
   // a family the event never belonged to and strands the reader one click from what
   // it is. So resolve the event to its extrinsic and hand over to the activity that
   // owns it. Fetched only on that miss, so the found path costs nothing extra.
-  const missedEventId = rows && !row && !awaiting && ref?.eventIndex != null ? `${ref.height}-${ref.eventIndex}` : null
+  const missedEventId = rows && !row && !reclassified && !awaiting && ref?.eventIndex != null ? `${ref.height}-${ref.eventIndex}` : null
   const { data: missedEvent } = useEventAt(missedEventId)
   const handover = missedEvent ? subordinateActivityTarget(rows ?? [], missedEvent.extrinsicIndex) : null
 
@@ -48,6 +54,11 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
     const target = canonicalTarget(row, slug, id)
     if (target) redirect(target)
   }, [row, slug, id])
+  useEffect(() => {
+    if (row || !reclassified) return
+    const target = canonicalTarget(reclassified, slug, id)
+    if (target) redirect(target)
+  }, [row, reclassified, slug, id])
 
   // Hand a subordinate event over to the activity that owns it.
   useEffect(() => {
@@ -80,6 +91,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
         : isError ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>No {label.toLowerCase()} activity found at {id}</div>
         : rows && !row && missedEventId && !missedEvent ? <div className="detail-card"><SkeletonRows /></div>
         : rows && !row && handover ? <div className="detail-card"><SkeletonRows /></div>
+        : rows && !row && reclassified ? <div className="detail-card"><SkeletonRows /></div>
         : rows && !row ? (
           <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>
             {/* The event may exist and simply not be an activity of its own (a fee leg,
@@ -107,6 +119,23 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {row.type === 'xcm' && row.destTxUrl && <><div className="dt">Destination transaction</div><div className="dd"><a className="ext-link" href={row.destTxUrl} target="_blank" rel="noopener">{explorerSiteName(row.destTxUrl)} ↗</a></div></>}
             {row.type === 'xcm' && row.messageId && <><div className="dt">Message ID</div><div className="dd mono" style={{ overflowWrap: 'anywhere' }}>{row.messageId}</div></>}
             {row.type === 'xcm' && row.bridge && <><div className="dt">Bridge</div><div className="dd">{row.bridge}</div></>}
+            {/* A Wormhole Relay transfer is two halves: the pool pays the delivery out of
+                inventory, and the NTT transfer mints the gross amount into the pool —
+                usually later, though it can land first. Each half names the other, so
+                neither reads as the whole story. A delivery with no message id (the
+                Moonbeam-era fills) names no NTT transfer, so its settlement is not
+                identified rather than pending. */}
+            {row.type === 'xcm' && row.fastRelay?.role === 'delivery' && <>
+              {row.fastRelay.pool && <><div className="dt">Paid by</div><div className="dd"><AddrPill account={row.fastRelay.pool} /> <span className="muted">fast delivery from the relay's pool</span></div></>}
+              <div className="dt">Settlement</div>
+              <div className="dd">{row.fastRelay.pair
+                ? <><Link to={paths.activityDetail('cross-chain', `${row.fastRelay.pair.blockHeight}-e${row.fastRelay.pair.eventIndex}`)} className="hash mono">{row.fastRelay.pair.blockHeight}-e{row.fastRelay.pair.eventIndex}</Link> <span className="muted">the NTT transfer that settles this delivery with the pool</span></>
+                : <span className="muted">{row.messageId ? 'not yet indexed' : 'not identified'}</span>}</div>
+            </>}
+            {row.type === 'xcm' && row.fastRelay?.role === 'settlement' && row.fastRelay.pair && <>
+              <div className="dt">Settles</div>
+              <div className="dd"><Link to={paths.activityDetail('cross-chain', `${row.fastRelay.pair.blockHeight}-e${row.fastRelay.pair.eventIndex}`)} className="hash mono">{row.fastRelay.pair.blockHeight}-e{row.fastRelay.pair.eventIndex}</Link> <span className="muted">the fast delivery this settles — the user was paid there</span></div>
+            </>}
             {/* What the send cost beyond its payload. A swap batched in to buy the fee
                 asset is not a trade the sender made, so it is not a row of its own: it
                 reads here, against the fee it paid for. */}

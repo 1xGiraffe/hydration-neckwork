@@ -941,6 +941,18 @@ export interface ActivityRow {
   // versioned on purpose: Snowbridge v1 and v2 differ in the hops they take, not in
   // being Snowbridge, and the version is not always determinable.
   bridge?: string | null
+  // A Wormhole Relay fast transfer is two rows: the DELIVERY (the relay's pool pays the
+  // user as soon as the fast message lands) and the SETTLEMENT (the NTT mint of the
+  // gross amount into the pool — usually after the delivery, but it can land first).
+  // Each points at the other; `pair` is null until the other half is indexed, and
+  // always null on a delivery with no `messageId` (a Moonbeam-era fill), which names
+  // no NTT transfer to pair with.
+  fastRelay?: {
+    role: 'delivery' | 'settlement'
+    pool: AccountRef | null
+    pair: { blockHeight: number; eventIndex: number } | null
+    pairMessageId: string | null
+  }
   mmAction?: string
   mmMarketKey?: string
   mmMarket?: string
