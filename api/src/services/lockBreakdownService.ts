@@ -177,7 +177,11 @@ export const LOCK_ID_SOURCES: Record<string, string> = {
   phrelect: 'elections',
   insuffED: 'sufficiency',
 }
-export const RESERVE_ID_SOURCES: Record<string, string> = { dcaorder: 'dca', otcorder: 'otc' }
+// Named reserves are the order pallets' capital: a DCA schedule's budget, an
+// OTC order's offer, and an ICE intent's sell side (`ICE_int#` is the Intent
+// pallet's one reserve id for a limit order and a DCA intent alike, so the
+// source cannot say which; the account's open orders can).
+export const RESERVE_ID_SOURCES: Record<string, string> = { dcaorder: 'dca', otcorder: 'otc', 'ICE_int#': 'intent' }
 // RuntimeHoldReason is (pallet index, variant index); Preimage is pallet 15.
 const HOLD_PALLET_SOURCES: Record<number, string> = { 15: 'preimage' }
 

@@ -126,6 +126,26 @@ describe('BalanceBreakdown', () => {
     expect(html).not.toContain('DCA budget')
     expect(html).not.toContain('anytime')
   })
+
+  it('an ICE intent reserve is an order slice named by the product, never folded into deposits', () => {
+    // The Intent pallet's one named reserve backs a limit order and a DCA
+    // intent alike; the server maps it to `intent`, and it reads beside DCA and
+    // OTC as the third kind of open order rather than as an unexplained deposit.
+    const html = render(bal({
+      breakdown: [
+        { kind: 'reserve', source: 'intent', amount: raw(50) },
+        { kind: 'deposit', source: 'identity', amount: raw(30) },
+      ],
+    }))
+    expect(html).toContain('ICE intent')
+    expect(html).toContain('until filled')
+    expect(html).toContain('deposits')
+    expect(html).not.toContain('ICE_int#')
+    // Never the bare source string as a cause label.
+    expect(html).not.toContain('>intent<')
+    // Reading order: the order before the merged deposits.
+    expect(html.indexOf('ICE intent')).toBeLessThan(html.indexOf('deposits'))
+  })
 })
 
 // Without a server-supplied unlock timeline the whole frozen amount renders as one
