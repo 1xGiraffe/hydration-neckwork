@@ -23,6 +23,7 @@ import {
   readOmnipoolState,
   readStableswapState,
   readXYKState,
+  reserveTransferAccounts,
 } from './snapshot.js'
 import {
   callAddressToString,
@@ -716,9 +717,9 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       }
 
       for (const event of block.events) {
-        if (event.name === 'Tokens.Transfer') {
-          const args = event.args as { from: string; to: string }
-          for (const account of [args.from, args.to]) {
+        const transferAccounts = reserveTransferAccounts(event)
+        if (transferAccounts != null) {
+          for (const account of transferAccounts) {
             if (account === omnipoolPoolAccount) {
               refreshFamilies.add('omnipool')
             } else if (xykPoolAccounts.has(account)) {
