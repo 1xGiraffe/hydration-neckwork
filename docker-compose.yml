@@ -336,9 +336,17 @@ services:
       - --loop
       - --refresh-minutes=${MM_SUPPLEMENTAL_SNAPSHOT_MINUTES:-15}
 
-  # aToken / variable-debt scaled-balance anchor (see clickhouse/schema/007_money_market_history.sql).
-  # Refreshes the reserve map each cycle and self-re-establishes the balanceOf@B0 anchor
-  # whenever the anchor table is empty (e.g. after a wipe & reindex). One-time bounded RPC.
+  # The B0 anchors loop (see src/scripts/anchorLoop.ts). aToken / variable-debt
+  # scaled-balance anchor (clickhouse/schema/007_money_market_history.sql): refreshes
+  # the reserve map each cycle and self-re-establishes the scaledBalanceOf@B0 anchor
+  # whenever its table is empty (e.g. after a wipe & reindex). Money-market incentive
+  # anchor (price_data.mm_incentive_anchor; src/scripts/mmIncentiveAnchor.ts): the
+  # RewardsController's own per-user accrual and indexes at B0, captured once its
+  # table is empty and the controller's logs are indexed back to its first
+  # configuration. One-time bounded RPC each. Every cycle it also repairs the
+  # liquidity-mining entry capture (price_data.raw_lm_farm_entries, captured in-block
+  # by the raw indexer): each block with an open raw_parser_warnings row is re-read
+  # against this service's archive RPC_URL (src/scripts/lmEntryCapture.ts).
   atoken-anchor:
     <<: *service
     image: hydration-neckwork-indexer:latest
