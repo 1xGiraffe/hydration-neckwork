@@ -1,10 +1,13 @@
+import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 import {
   SPARKLINE_BUCKETS, SPARKLINE_BUCKET_HOURS, SPARKLINE_WINDOW_HOURS,
-  STATS_COUNTS_CACHE_MS, STATS_COUNTS_SQL,
+  STATS_COUNTS_CACHE_MS, STATS_COUNTS_SQL, TRANSFER_EVENT_NAMES_SQL,
   cutoffWindowSql, fallbackCutoffHeight, feedWindowBoundSql,
 } from '../src/services/explorerService.ts'
 import { blocksPerHour } from '../src/services/blockTime.ts'
+
+const explorerSource = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
 
 // Timestamp-derived cutoff heights back the "24h"/"7d" windows so they track
 // wall-clock time as block production drifts (blocks now run ~5.6s, not the 6s
@@ -110,6 +113,30 @@ describe('explorer stats count isolation', () => {
   it('deduplicates replayable identities before counting', () => {
     expect(STATS_COUNTS_SQL).toContain('uniqExact((block_height, event_index))')
     expect(STATS_COUNTS_SQL).toContain('uniqExact((block_height, extrinsic_index))')
-    expect(STATS_COUNTS_SQL).toContain('uniqExact(account_id)')
+    expect(STATS_COUNTS_SQL).toContain('uniqExact(coalesce(signer, effective_signer))')
+  })
+
+  // An active account is one that ACTED — a distinct extrinsic signer, the
+  // Accounts page's daily-active definition. raw_balance_observations is a
+  // balance ledger: a full-state snapshot sweep writes one snapshot_bootstrap
+  // row per account at one block, which read as ~103k accounts "active" for a
+  // day, and its event rows name pallet pots and passive recipients too.
+  it('counts active accounts as extrinsic signers, never balance observations', () => {
+    const active = STATS_COUNTS_SQL.slice(STATS_COUNTS_SQL.lastIndexOf('SELECT uniqExact(coalesce(signer, effective_signer))'))
+    expect(active).toContain('FROM price_data.raw_extrinsics')
+    expect(active).toContain('AS active_accounts_24h')
+    expect(STATS_COUNTS_SQL).not.toContain('raw_balance_observations')
+  })
+
+  // The 24h transfer figure and the indexed total are one definition (raw
+  // Balances/Tokens transfer events); Currencies.Transferred re-emits the same
+  // movement beside its Tokens/Balances event and would count it twice.
+  it('sizes transfers with one event family, without the Currencies echo', () => {
+    expect(TRANSFER_EVENT_NAMES_SQL).toBe(`('Balances.Transfer','Tokens.Transfer')`)
+    expect(STATS_COUNTS_SQL).toContain(`event_name IN ${TRANSFER_EVENT_NAMES_SQL}`)
+    const listCounts = explorerSource.slice(explorerSource.indexOf('export async function getListCounts'))
+    const transfersTotal = listCounts.slice(0, listCounts.indexOf('contracts: allContracts().length'))
+    expect(transfersTotal).toContain('event_name IN ${TRANSFER_EVENT_NAMES_SQL}')
+    expect(transfersTotal).not.toContain('Currencies.Transferred')
   })
 })
