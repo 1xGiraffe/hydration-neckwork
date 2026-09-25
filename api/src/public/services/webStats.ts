@@ -5,7 +5,7 @@ import { getPoolsIndex } from '../../services/poolService.ts'
 import { formatUsd } from './accountBalances.ts'
 import { moneyMarketSupply } from './moneyMarketReserves.ts'
 import { foldedPlatformTvl, tvlComponents } from './platformStats.ts'
-import { DECIMAL_STRINGS, WINDOW_HOURS, nettedTradeSidesSql, readAnchor, renderUsd, routedNettedCteSql, scaledUsd } from './poolVolumes.ts'
+import { DECIMAL_STRINGS, WINDOW_HOURS, nettedTradeSidesSql, readAnchor, renderUsd, routedNettedCteSql, scaledUsd } from '../../services/poolVolumes.ts'
 import { ensurePoolService } from './poolWiring.ts'
 
 // GET /hydration-web/v1/stats — the five numbers hydration.net's homepage reads.

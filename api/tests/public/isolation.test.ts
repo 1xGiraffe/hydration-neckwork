@@ -67,6 +67,15 @@ const ALLOWED_SHARED = new Set([
   // redeemable price is computed from: /v1/accounts/balances prices a share by the
   // same state read and lpMath derivation the explorer's price map uses.
   'services/stableswapSharePools.ts',
+  // The pool fee and farm yield read models: /v1/pools/*/yield and the explorer's
+  // /explorer/yields read one fee APR and one farm APR arithmetic, so the rate an
+  // LP sees on the explorer is the rate the Hydration UI is served. poolVolumes
+  // carries the window/anchor machinery the yield queries compose; isoTimestamp is
+  // the one DateTime → wire conversion both surfaces use.
+  'services/poolVolumes.ts',
+  'services/farmApr.ts',
+  'services/poolYield.ts',
+  'services/isoTimestamp.ts',
 ])
 
 // Not a shared source module: the api package manifest, imported for the

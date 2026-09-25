@@ -125,7 +125,8 @@ The `api-public` service (`api/src/public/`, same image as `api`, own process be
   sentence must follow it: today `db/client`, `config`, `types`, the
   `cache`/`explorerAssets`/`ohlcvService`/`crossPair`/`poolService`/`volumeService`/`valuation`/
   `revenueStreams`/`moneyMarketCaps`/`foreignCandles`/`uniswapV3History`/`uniswapV3Positions`/`intentLimitPrice`/
-  `lmRewardSnapshot`/`mmIncentiveSnapshot`/`lpMath`/`stableswapSharePools` services, and the
+  `lmRewardSnapshot`/`mmIncentiveSnapshot`/`lpMath`/`stableswapSharePools`/`poolVolumes`/`farmApr`/`poolYield`/
+  `isoTimestamp` services, and the
   api package manifest (`../package.json`, for the version string
   `/rest/service/metadata` publishes). Never `explorerService`. The one sanctioned transitive coupling —
   `initPoolService` wiring an explorerService client when none is set — is documented at the

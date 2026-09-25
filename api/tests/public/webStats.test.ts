@@ -205,7 +205,7 @@ describe('GET /hydration-web/v1/stats', () => {
   it('folds the 30-day netted total in SQL, by the same rule nettedTradeScaled applies per trade', async () => {
     vi.resetModules()
     const { buildWebVolumeSql } = await import('../../src/public/services/webStats.ts')
-    const { nettedTradeScaled, scaledUsd } = await import('../../src/public/services/poolVolumes.ts')
+    const { nettedTradeScaled, scaledUsd } = await import('../../src/services/poolVolumes.ts')
     const sql = buildWebVolumeSql()
     // A 30-day window returns ~200 k trades, well past the client's row cap, so the
     // netting max cannot be applied row by row in TS as the 24h surface does.

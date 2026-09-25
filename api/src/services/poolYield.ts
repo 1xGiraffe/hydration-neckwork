@@ -1,6 +1,6 @@
-import type { ClickHouseClient } from '../../db/client.ts'
-import { cachedSwr } from '../../services/cache.ts'
-import { iso } from '../schemas/common.ts'
+import type { ClickHouseClient } from '../db/client.ts'
+import { cachedSwr } from './cache.ts'
+import { iso } from './isoTimestamp.ts'
 import { PERC_DECIMALS, omnipoolFarmAprByAsset, renderPerc, scaled } from './farmApr.ts'
 import {
   ANCHORED_LEG_WINDOW, DECIMAL_STRINGS, OMNIPOOL_ACCOUNT, WINDOW_DAYS, WINDOW_HOURS, amountUnitSql,
@@ -315,7 +315,7 @@ interface StableswapYieldRow { pool_id: string; samples: string; fee_usd: string
  */
 function warnIfNoDenominator(venue: string, window: string, aprs: Array<string | null>): void {
   if (aprs.length === 0 || aprs.some(apr => apr != null)) return
-  console.warn(`[public-api] ${venue} ${window} yield has no denominator for any of ${aprs.length} entries — `
+  console.warn(`[pool-yield] ${venue} ${window} yield has no denominator for any of ${aprs.length} entries — `
     + 'no in-window state-history sample could be used (check the pool state history and the price feed)')
 }
 

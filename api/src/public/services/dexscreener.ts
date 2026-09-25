@@ -1,7 +1,7 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import { allExplorerAssets } from '../../services/explorerAssets.ts'
-import { xykPoolMeta } from './poolVolumes.ts'
+import { xykPoolMeta } from '../../services/poolVolumes.ts'
 import { uniswapV3PoolMeta } from '../../services/poolService.ts'
 import { publicStatus } from './status.ts'
 

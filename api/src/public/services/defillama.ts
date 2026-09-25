@@ -3,7 +3,7 @@ import { cachedSwr } from '../../services/cache.ts'
 import {
   DECIMAL_STRINGS, PRICE_LOOKBACK_DAYS, nettedTradeSidesSql, priceSourceSql, renderUsd,
   routedNettedCteSql, routedTradesUsd, scaledUsd,
-} from './poolVolumes.ts'
+} from '../../services/poolVolumes.ts'
 
 // The DefiLlama facade (spec § Phase 2 → "DefiLlama facade"). Two endpoints,
 // both shaped by HydraDX-api's incumbent /defillama/v1/* so that repointing the

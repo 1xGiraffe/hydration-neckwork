@@ -36,23 +36,11 @@ export const zAssetId = z.string()
 export const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 export const zIsoTimestamp = z.string().regex(ISO_TIMESTAMP_RE, 'expected an ISO-8601 UTC timestamp')
 
-// The single conversion into the wire format. ClickHouse hands DateTime columns
-// back as 'YYYY-MM-DD hh:mm:ss' in the session timezone, which the public
-// service asserts is UTC at boot (src/public/server.ts) — that assertion is what
-// makes appending 'Z' correct here rather than a guess.
-export function iso(d: Date | string | number): string {
-  if (d instanceof Date) return assertValid(d, d)
-  if (typeof d === 'number') return assertValid(new Date(d), d)
-  const trimmed = d.trim()
-  // Already carries a zone (…Z or ±hh:mm) — let Date parse it as-is.
-  const zoned = /[Zz]$/.test(trimmed) || /[+-]\d{2}:?\d{2}$/.test(trimmed)
-  return assertValid(new Date(zoned ? trimmed : `${trimmed.replace(' ', 'T')}Z`), d)
-}
-
-function assertValid(parsed: Date, input: Date | string | number): string {
-  if (Number.isNaN(parsed.getTime())) throw new RangeError(`not a timestamp: ${JSON.stringify(input)}`)
-  return parsed.toISOString()
-}
+// The single conversion into the wire format lives in services/isoTimestamp.ts so
+// the shared yield read models (services/poolYield.ts and friends) state a
+// timestamp exactly as this surface does. Re-exported so every public route keeps
+// importing it from here.
+export { iso } from '../../services/isoTimestamp.ts'
 
 // Enums are lowercase and unwrapped everywhere on the wire.
 export const zPeriod = z.enum(['1h', '24h', '7d', '30d', '1y', 'all'])
