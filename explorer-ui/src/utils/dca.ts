@@ -4,6 +4,9 @@
 // the schedule pages lead with, so the DCA detail page, the account's active
 // orders and the hover card cannot drift apart on what "every" or "left" means.
 
+import { paths } from '../router'
+import type { DcaExecutionDetail } from '../types'
+
 // Last-resort block time, for the moment before any payload has arrived.
 // Nothing displayed should reach for it: the chain publishes both of its own
 // block times in the stats payload — `avgBlockSec`, the measured pace, for a
@@ -225,4 +228,15 @@ export function fmtPermill(permill: number): string {
   if (!Number.isFinite(permill)) return '—'
   const pct = permill / 10_000
   return `${Number(pct.toFixed(4))}%`
+}
+
+// Where a /dca/<block>-e<index> link should land once the execution it names has
+// loaded: null when it already carries the execution event's own index (the
+// canonical identity every surface shares), else the canonical path. A link
+// keyed on a swap leg's index — what feed rows carried before the identity was
+// unified — still resolves, because the API answers with the execution that
+// follows the leg, and the page moves to that execution's own URL.
+export function canonicalDcaExecutionPath(height: number, eventIndex: number, data: Pick<DcaExecutionDetail, 'blockHeight' | 'eventIndex'> | undefined): string | null {
+  if (!data || (data.blockHeight === height && data.eventIndex === eventIndex)) return null
+  return paths.dcaExecution(data.blockHeight, data.eventIndex)
 }

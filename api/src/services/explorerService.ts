@@ -9881,7 +9881,10 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
         const actor = signer ?? dcaHit?.who ?? (rep.who && ACCOUNT_RE.test(rep.who) ? rep.who : null)
         const aOut = asset(rep.asset_out)
         out.push({
-          blockHeight: rep.block_height, timestamp: rep.ts, eventIndex: rep.event_index, extrinsicIndex: rep.extrinsic_index,
+          // A DCA execution's identity is its DCA.TradeExecuted event — the index
+          // the schedule page, the block and account feeds and /dca/<block>-e<i>
+          // all share — never the swap leg it was paired with here.
+          blockHeight: rep.block_height, timestamp: rep.ts, eventIndex: dcaHit ? dcaHit.event_index : rep.event_index, extrinsicIndex: rep.extrinsic_index,
           who: actor ? accountRef(actor) : null,
           assetIn: asset(rep.asset_in), assetOut: aOut, amountIn: rep.amount_in, amountOut: rep.amount_out,
           valueUsd: usdValue(prices, aOut.assetId, rep.amount_out, aOut.decimals),
@@ -18093,7 +18096,9 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
   const toTradeRow = (t: TradeRow): ActivityRow => ({
     type: 'trade', blockHeight: t.blockHeight, timestamp: t.timestamp, eventIndex: t.eventIndex, extrinsicIndex: t.extrinsicIndex,
     who: t.who, to: null, asset: null, assetIn: t.assetIn, assetOut: t.assetOut, amount: null, amountIn: t.amountIn, amountOut: t.amountOut, valueUsd: t.valueUsd,
-    dca: t.dca, linkBlock: t.linkBlock, linkIndex: t.linkIndex,
+    // The schedule rides along so a DCA row here links to its schedule, as the
+    // account, block and asset feeds' rows do.
+    dca: t.dca, dcaScheduleId: t.dcaScheduleId, linkBlock: t.linkBlock, linkIndex: t.linkIndex,
   })
   // Whether the collective (Council / Technical Committee) votes join this
   // window's vote source. Decided on the caller's OWN filters, not on the
@@ -18785,6 +18790,8 @@ export interface DcaExecutionDetail {
   who: AccountRef | null
   blockHeight: number
   timestamp: string
+  // The execution event's OWN index (DCA.TradeExecuted / DCA.TradeFailed): the
+  // canonical /dca/<block>-e<index> identity, whatever index the request carried.
   eventIndex: number
   extrinsicIndex: number | null
   assetIn: AssetRef
@@ -18867,11 +18874,13 @@ export async function getDcaExecution(height: number, eventIndex: number): Promi
   return cachedFound(`explorer:dca-exec:${height}:${eventIndex}`, 60_000, async () => {
     // Nearest-following resolution: an execution's swap legs always PRECEDE
     // its closing TradeExecuted/TradeFailed event, so any event id from inside
-    // the bundle (an activity row's Broadcast leg, a Router event) resolves to
-    // the execution it belongs to. An exact TradeExecuted id — the canonical
-    // /dca/<block>-e<index> form the schedule page links — matches first.
+    // the bundle (a Broadcast leg, the Router.Executed index older feed links
+    // carried) resolves to the execution it belongs to. An exact TradeExecuted
+    // id — the canonical /dca/<block>-e<index> form — matches first, and the
+    // detail always reports THAT event's index as its own, so a reader who
+    // arrived by a leg's index learns the canonical one and can redirect.
     const evRes = await client.query({
-      query: `SELECT toString(id) AS id, event_name, extrinsic_index, toString(block_timestamp) AS ts,
+      query: `SELECT toString(id) AS id, event_name, event_index, extrinsic_index, toString(block_timestamp) AS ts,
                      toString(amount_in) AS amount_in, toString(amount_out) AS amount_out, error
               FROM price_data.dca_events
               WHERE block_height = {h:UInt32} AND event_index >= {i:UInt32}
@@ -18879,7 +18888,7 @@ export async function getDcaExecution(height: number, eventIndex: number): Promi
               ORDER BY event_index ASC LIMIT 1`,
       query_params: { h: height, i: eventIndex }, format: 'JSONEachRow',
     })
-    const ev = (await evRes.json<{ id: string; event_name: string; extrinsic_index: number | null; ts: string; amount_in: string; amount_out: string; error: string }>())[0]
+    const ev = (await evRes.json<{ id: string; event_name: string; event_index: number; extrinsic_index: number | null; ts: string; amount_in: string; amount_out: string; error: string }>())[0]
     if (!ev) return null
     const scheduleId = Number(ev.id)
     const schedRes = await client.query({
@@ -18908,7 +18917,7 @@ export async function getDcaExecution(height: number, eventIndex: number): Promi
     const detail: DcaExecutionDetail = {
       scheduleId, status: outcome.status,
       who: ACCOUNT_RE.test(sched.who) ? accountRef(sched.who) : null,
-      blockHeight: height, timestamp: ev.ts, eventIndex, extrinsicIndex: ev.extrinsic_index,
+      blockHeight: height, timestamp: ev.ts, eventIndex: Number(ev.event_index), extrinsicIndex: ev.extrinsic_index,
       assetIn: aIn, assetOut: aOut,
       amountIn: outcome.amountIn, amountOut: outcome.amountOut,
       valueUsd: null, executionPrice: outcome.executionPrice, period: sched.period, failureReason,
@@ -19264,8 +19273,10 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
       // A failed attempt only knows the schedule's fixed per-trade leg; value
       // it on that leg. Executed attempts are valued on the received leg.
       const legs = failed ? dcaPerTradeLegs(sched.direction, sched.amount_per) : { amountIn: x.amount_in, amountOut: x.amount_out }
+      // The feeds' own classification — a trade row carrying the dca flag, keyed
+      // on the execution event — so one execution is one row shape everywhere.
       return {
-        type: 'dca', blockHeight: x.block_height, timestamp: x.ts, eventIndex: x.event_index, extrinsicIndex: x.extrinsic_index,
+        type: 'trade', blockHeight: x.block_height, timestamp: x.ts, eventIndex: x.event_index, extrinsicIndex: x.extrinsic_index,
         who: ACCOUNT_RE.test(sched.who) ? accountRef(sched.who) : null, to: null, asset: null, assetIn: aIn, assetOut: aOut,
         amount: null, amountIn: legs.amountIn, amountOut: legs.amountOut,
         valueUsd: legs.amountOut != null
@@ -19440,7 +19451,8 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       const aIn = asset(Number(args.assetIn ?? 0))
       const aOut = asset(Number(args.assetOut ?? 0))
       // A DCA execution reports the schedule its swap belongs to and follows that
-      // swap's events, so it claims the last route that opened before it.
+      // swap's events, so it claims the last route that opened before it — and the
+      // row then takes the execution event's index as its identity, like the feeds.
       const ownsDca = dcaExec != null && rep.event_index <= dcaExec.event_index
         && !routeGroups(swapEvents).some(other => {
           const otherRep = other.find(e => isRouterNet(e.event_name)) ?? other[other.length - 1]
@@ -19454,10 +19466,10 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       const amountIn = dcaArgs ? argStr(dcaArgs, 'amountIn') : legAmounts.amountIn
       const amountOut = dcaArgs ? argStr(dcaArgs, 'amountOut') : legAmounts.amountOut
       rows.push({
-        type: dcaArgs ? 'dca' : 'trade',
+        type: 'trade',
         blockHeight: rep.block_height,
         timestamp: rep.ts,
-        eventIndex: rep.event_index,
+        eventIndex: dcaArgs && dcaExec ? dcaExec.event_index : rep.event_index,
         extrinsicIndex: rep.extrinsic_index,
         who: dcaArgs && argStr(dcaArgs, 'who') ? accountRef(argStr(dcaArgs, 'who')) : signer ? accountRef(signer) : null,
         to: null,
@@ -19870,7 +19882,7 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       })
       for (const x of await exRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; amount_in: string; amount_out: string }>()) {
         rows.push({
-          type: 'dca', blockHeight: x.block_height, timestamp: x.ts, eventIndex: x.event_index, extrinsicIndex: x.extrinsic_index,
+          type: 'trade', blockHeight: x.block_height, timestamp: x.ts, eventIndex: x.event_index, extrinsicIndex: x.extrinsic_index,
           who: owner ? accountRef(owner) : null, to: null, asset: null, assetIn: aIn, assetOut: aOut,
           amount: null, amountIn: x.amount_in, amountOut: x.amount_out,
           valueUsd: usdValue(prices, aOut.assetId, x.amount_out, aOut.decimals),
@@ -20150,7 +20162,9 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
       type: 'trade',
       blockHeight: height,
       timestamp: d.ts,
-      eventIndex: match?.row.event_index ?? d.event_index,
+      // The matched swap supplies the traded pair only; the row's identity is the
+      // DCA.TradeExecuted event, as on the schedule page and in every feed.
+      eventIndex: d.event_index,
       extrinsicIndex: null,
       who: d.who && ACCOUNT_RE.test(d.who) ? accountRef(d.who) : null,
       to: null,
@@ -20577,15 +20591,22 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       })
       const rows = await res.json<RawSwapEventRow>()
       if (!rows.length) return []
-      // DCA owner attribution (executions are unsigned block hooks).
+      // DCA owner attribution (executions are unsigned block hooks). Every
+      // candidate is kept and claimed by adjacency, as the trade feed does: one
+      // per-trade amount recurs across schedules in a block, and the claim also
+      // hands the row its identity — the DCA.TradeExecuted event's index.
       const dcaRes = await client.query({
-        query: `SELECT block_height, who, amount_in
+        query: `SELECT block_height, event_index, who, toString(id) AS id, amount_in
                 FROM price_data.dca_events
                 WHERE event_name='DCA.TradeExecuted' AND block_height IN (${[...new Set(rows.map(r => r.block_height))].join(',') || '0'})`,
         format: 'JSONEachRow',
       })
-      const dcaByAmount = new Map<string, string>()
-      for (const d of await dcaRes.json<{ block_height: number; who: string; amount_in: string }>()) dcaByAmount.set(`${d.block_height}:${d.amount_in}`, d.who)
+      const dcaExecutions = adjacencyClaimIndex(
+        (await dcaRes.json<{ block_height: number; event_index: number; who: string; id: string; amount_in: string }>())
+          .map(d => ({ ...d, event_index: Number(d.event_index) })),
+        d => `${d.block_height}:${d.amount_in}`,
+        d => d.event_index,
+      )
       const pairs = rows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null])
       const [signers, liqExt] = await Promise.all([actorsFor(pairs), liquidationExtrinsics(pairs)])
       const out: ActivityRow[] = []
@@ -20598,15 +20619,16 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
         // Skip a liquidation's internal swap — it's surfaced as the mm row instead.
         if (rep.extrinsic_index != null && liqExt.has(`${rep.block_height}:${rep.extrinsic_index}`)) continue
         const signer = rep.extrinsic_index != null ? signers.get(`${rep.block_height}:${rep.extrinsic_index}`) : undefined
-        const dcaWho = rep.extrinsic_index == null ? dcaByAmount.get(`${rep.block_height}:${rep.amount_in}`) : undefined
-        const actor = signer ?? dcaWho ?? (rep.who && ACCOUNT_RE.test(rep.who) ? rep.who : null)
+        const dcaHit = rep.extrinsic_index == null ? dcaExecutions.claimAfter(`${rep.block_height}:${rep.amount_in}`, rep.event_index) : undefined
+        const actor = signer ?? dcaHit?.who ?? (rep.who && ACCOUNT_RE.test(rep.who) ? rep.who : null)
         const aOut = asset(rep.asset_out)
         out.push({
-          type: 'trade', blockHeight: rep.block_height, timestamp: rep.ts, eventIndex: rep.event_index, extrinsicIndex: rep.extrinsic_index,
+          type: 'trade', blockHeight: rep.block_height, timestamp: rep.ts, eventIndex: dcaHit ? dcaHit.event_index : rep.event_index, extrinsicIndex: rep.extrinsic_index,
           who: actor ? accountRef(actor) : null, to: null, asset: null, assetIn: asset(rep.asset_in), assetOut: aOut,
           amount: null, amountIn: rep.amount_in, amountOut: rep.amount_out,
           valueUsd: usdValue(prices, aOut.assetId, rep.amount_out, aOut.decimals),
-          dca: !!dcaWho, linkBlock: rep.extrinsic_index != null ? rep.block_height : null, linkIndex: rep.extrinsic_index,
+          dca: !!dcaHit, dcaScheduleId: dcaHit ? Number(dcaHit.id) || undefined : undefined,
+          linkBlock: rep.extrinsic_index != null ? rep.block_height : null, linkIndex: rep.extrinsic_index,
         })
       }
       await attachHookSwapActors(out)
@@ -23873,9 +23895,10 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     // (block, amountIn) lookup collides whenever one block settles two schedules of
     // the same size — a popular round DCA amount does this constantly — and the
     // collision is silent: both rows take the surviving map entry, so one renders
-    // against the other's swap and the two share a (block, eventIndex) identity.
-    // DCA.TradeExecuted is emitted immediately after the swap it settles, so the
-    // nearest unclaimed leg BEFORE the execution is its own; claiming consumes it.
+    // against the other's swap. DCA.TradeExecuted is emitted immediately after the
+    // swap it settles, so the nearest unclaimed leg BEFORE the execution is its
+    // own; claiming consumes it. The leg supplies the traded pair only: the row's
+    // identity is the execution event itself, as on every other surface.
     const legs = adjacencyClaimIndex(swapLegs, s => `${s.block_height}:${s.amount_in}`, s => s.event_index)
     for (const d of [...dcaExecs].sort((a, b) => a.block_height - b.block_height || a.event_index - b.event_index)) {
       const sw = legs.claimBefore(`${d.block_height}:${d.amount_in}`, d.event_index)
@@ -23883,7 +23906,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       const aOut = sw ? asset(sw.asset_out) : null
       const sched = schedById.get(d.id)
       const row: ActivityRow = {
-        type: 'trade', blockHeight: d.block_height, timestamp: d.ts, eventIndex: sw?.event_index ?? null, extrinsicIndex: null,
+        type: 'trade', blockHeight: d.block_height, timestamp: d.ts, eventIndex: d.event_index, extrinsicIndex: null,
         who: accountRef(d.who), to: null, asset: null, assetIn: aIn, assetOut: aOut,
         amount: null, amountIn: d.amount_in, amountOut: d.amount_out,
         valueUsd: aOut ? usdValue(prices, aOut.assetId, d.amount_out, aOut.decimals) : null,

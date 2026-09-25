@@ -366,12 +366,17 @@ describe('inspect_entity detection', () => {
     // A zero total is an open-ended schedule, not a zero budget.
     expect(schedule.markdown).toContain('open-ended')
 
+    // Reached by a swap leg's index (18): the API answers with the execution event
+    // that follows it (19), and THAT is the identity the Explorer link carries.
     const asExecution = fake({ '/explorer/dca/exec/100/18': {
       scheduleId: 30104, status: 'executed', who: ACTOR, blockHeight: 100, timestamp: '2026-09-18 10:00:00',
-      eventIndex: 18, extrinsicIndex: null, assetIn: HDX, assetOut: { assetId: 222, symbol: 'HOLLAR', decimals: 18 },
+      eventIndex: 19, extrinsicIndex: null, assetIn: HDX, assetOut: { assetId: 222, symbol: 'HOLLAR', decimals: 18 },
       amountIn: RAW_AMOUNT, amountOut: '7570000000000000000', valueUsd: 5.96, executionPrice: 6.13, period: 30, failureReason: null,
     } })
-    expect((await call(inspect, { identifier: '100-18', kind: 'dca' }, asExecution)).markdown).toContain('DCA execution — schedule #30104')
+    const execution = await call(inspect, { identifier: '100-18', kind: 'dca' }, asExecution)
+    expect(execution.markdown).toContain('DCA execution — schedule #30104')
+    expect(execution.markdown).toContain('https://explorer.test/dca/100-e19')
+    expect(execution.markdown).not.toContain('/dca/100-e18')
   })
 
   it('reads a cross-chain destination without ever naming its sentinel id', async () => {

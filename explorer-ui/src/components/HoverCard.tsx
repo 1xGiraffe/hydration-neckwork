@@ -459,7 +459,7 @@ function DcaExecutionHover({ id }: { id: string }) {
         <span className="hc-emoji">⏱</span>
         <div>
           <div className="hc-title">DCA execution</div>
-          <div className="hc-sub mono">{id} · DCA #{data.scheduleId}</div>
+          <div className="hc-sub mono">{data.blockHeight}-e{data.eventIndex} · DCA #{data.scheduleId}</div>
         </div>
       </div>
       <div className="hc-row"><span>Result</span><StatusBadge ok={data.status === 'executed'} /></div>
