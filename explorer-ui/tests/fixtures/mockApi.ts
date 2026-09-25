@@ -1,4 +1,5 @@
 /* Deterministic API fixtures shared by Vitest and Playwright. */
+import { POSITIONS_ROUTES } from './positionsMock'
 import type {
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   TransferRow, EventRow, TradeRow, ActivityRow, MoneyMarketResponse, AssetDetail, HoldersResponse,
@@ -2213,6 +2214,8 @@ function buildIce(): IceDashboard {
 }
 
 const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => unknown }[] = [
+  // Orders · Liquidity · Borrow tab reads, ahead of the address/tag catch-alls.
+  ...POSITIONS_ROUTES,
   { re: /^\/explorer\/stats$/, fn: () => ({ headBlock: TIP, finalizedBlock: TIP - 2, headTime: tsAt(TIP), avgBlockSec: 5.7, nominalBlockSec: 6, transfers24h: 18204, extrinsics24h: 42318, activeAccounts24h: 7120, hdxPrice: 0.02184 } satisfies ExplorerStats) },
   // Two shapes off one directory, exactly as the API serves them: the full rows the
   // Assets page renders, and `fields=filter`'s id/symbol/name projection in the same

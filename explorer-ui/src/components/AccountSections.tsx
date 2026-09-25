@@ -10,7 +10,7 @@ import { performancePoints } from './performance'
 import { CAT } from './activityColors'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds, blockSpanSeconds, dcaAmountLeft, dcaCadence, dcaLeftUsd, dcaProgress, dcaRunway, fmtDuration } from '../utils/dca'
-import type { MoneyMarketPosition, LpPosition, ActiveDca, OpenLimitOrder, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent, ContractInfo, LpUnclaimedReward, FarmRewardsSummary, MoneyMarketRewardsSummary } from '../types'
+import type { PositionsPresence, MoneyMarketPosition, ActiveDca, OpenLimitOrder, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent, ContractInfo, FarmRewardsSummary, MoneyMarketRewardsSummary } from '../types'
 import type { ListCount } from '../api/explorer'
 import type { ReactNode } from 'react'
 
@@ -218,9 +218,9 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
 }
 
 // One count per isolated market: the API aggregates money market positions to
-// one entry per market (core, GIGAHDX, BIL, …), and the Positions tab renders
-// one card per entry — so the tab badge counts what the tab shows. Collapsing
-// the family to 1 undercounted every multi-market account and tag.
+// one entry per market (core, GIGAHDX, BIL, …), and the Borrow tab renders one
+// card per entry — so the tab badge counts what the tab shows. Collapsing the
+// family to 1 undercounted every multi-market account and tag.
 export function mmPositionCount(markets: MoneyMarketPosition[]): number {
   return markets.length
 }
@@ -229,13 +229,29 @@ export function moneyMarketDebtUsd(markets: MoneyMarketPosition[]): number {
   return markets.reduce((total, market) => total + Number(market.totalDebtBase) / 1e8, 0)
 }
 
+// What the three position tabs hold right now, plus whether the holder has
+// history worth a tab of its own when nothing is open (positions-presence).
+// Orders counts active DCAs + resting limit orders, Liquidity the LP position
+// rows, Borrow one per (account × market) area — each badge counts what its
+// tab lists first.
+export interface PositionTabCounts {
+  orders: number
+  liquidity: number
+  borrow: number
+  presence?: PositionsPresence | null
+  /**
+   * positions-presence is still loading: the position tab a `?view=` names is
+   * kept (without a badge) until it answers, so a deep link does not fall back to
+   * Overview and then jump once presence lands.
+   */
+  presenceLoading?: boolean
+  /** The `?view=` the page was asked for. */
+  requestedView?: string
+}
+
 export function profileTabs(
   balanceCount: number,
-  markets: MoneyMarketPosition[],
-  // Ongoing DCA orders plus resting limit orders — both are money committed and
-  // both live on the Positions tab, so both count toward its badge.
-  dcaCount: number,
-  liquidityPositionCount: number,
+  positions: PositionTabCounts,
   // The activity list's own total. `activity.complete === false` means it counts
   // only the newest rows of a longer feed, which the badge marks with a `+` rather
   // than passing off as the account's whole history.
@@ -249,11 +265,18 @@ export function profileTabs(
   // the stat does, so the two can never disagree about whether there is any.
   revenueUsd?: number,
 ): DetailTab[] {
-  const positionCount = mmPositionCount(markets) + dcaCount + liquidityPositionCount
+  const p = positions.presence
+  // A tab with nothing open still shows when its history exists; its badge then
+  // stays off rather than reading "0".
+  const positionTab = (key: string, label: string, count: number, hasHistory: boolean): DetailTab[] =>
+    count > 0 ? [{ key, label, count }]
+      : hasHistory || (positions.presenceLoading && positions.requestedView === key) ? [{ key, label }] : []
   return [
     { key: 'overview', label: 'Overview' },
     { key: 'balances', label: 'Balances', count: balanceCount },
-    ...(positionCount > 0 ? [{ key: 'positions', label: 'Positions', count: positionCount }] : []),
+    ...positionTab('orders', 'Orders', positions.orders, (p?.orderHistory ?? 0) > 0),
+    ...positionTab('liquidity', 'Liquidity', positions.liquidity, !!p?.liquidityHistory),
+    ...positionTab('borrow', 'Borrow', positions.borrow, !!p?.moneyMarketHistory),
     ...(hasContract ? [{ key: 'contract', label: 'Contract' }] : []),
     { key: 'activity', label: 'Activity', ...(activity?.total == null ? {} : { count: activity.total, countAtLeast: !activity.complete }) },
     // Extrinsics and Events are first-level tabs, not sub-tabs of Activity: all
@@ -264,6 +287,16 @@ export function profileTabs(
     ...(votesCount && votesCount > 0 ? [{ key: 'votes', label: 'Votes', count: votesCount }] : []),
     ...(revenueUsd && revenueUsd > 0 ? [{ key: 'revenue', label: 'Protocol Revenue' }] : []),
   ]
+}
+
+// The tab a `?view=` asks for, among the tabs the page actually has. The old
+// Positions tab split into Orders · Liquidity · Borrow, so a `positions` link
+// lands on the first of those the holder has — Borrow first, since the money
+// market card is what Positions used to lead with.
+export function resolveProfileView(view: string, tabs: DetailTab[]): string {
+  const has = (key: string) => tabs.some(t => t.key === key)
+  if (view === 'positions') return ['borrow', 'liquidity', 'orders'].find(has) ?? 'overview'
+  return has(view) ? view : 'overview'
 }
 
 // The Value stat is portfolio MINUS money-market debt on every surface that shows
@@ -301,7 +334,6 @@ const unpricedCount = (entries: { amount: string; valueUsd: number | null }[]): 
 // Non-zero farm rewards a claim would not pay the account (below ED, owner holding less).
 const unpayableCount = (entries: { amount: string; payable?: boolean }[]): number =>
   entries.filter(e => e.amount !== '0' && e.payable === false).length
-const unpayableNote = (n: number): string => (n > 0 ? ` (+ ${n} unpayable)` : '')
 const unpricedNote = (n: number): string => (n > 0 ? ` (+ ${n} unpriced)` : '')
 
 export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, valueUsd, exHdxValueUsd, moneyMarket, farmRewards, moneyMarketRewards }: {
@@ -885,84 +917,6 @@ export function LimitOrdersTable({ orders, now, title, showOwner, emptyText }: {
                 </td>
                 <td data-label="Placed" className="r mono">
                   <MomentLink at={{ blockHeight: o.placedBlock, extrinsicIndex: o.placedIndex, timestamp: o.timestamp }} now={now} />
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table></div>
-    </>
-  )
-}
-
-// Venue → badge colour, so the LP products read apart at a glance: NFT-held
-// Omnipool positions (bare / farmed) vs wallet-held stableswap pool shares, and
-// the concentrated-liquidity pair (a position NFT, a vault share). All of them are
-// liquidity, so they stay inside that family's blues rather than borrowing a hue
-// that means something else elsewhere.
-const LP_VENUE_COLORS: Record<string, string> = {
-  Omnipool: CAT.liquidity, 'Omnipool Farm': CAT.liquidityCreate, Stablepool: 'var(--sky-deep)',
-  'Uniswap v3': CAT.liquidityClaim, 'Gamma vault': 'var(--sky-deep)',
-}
-// What the row is, under the asset symbol: fungible shares, or the position NFT.
-function lpPositionName(p: LpPosition): string {
-  if (p.venue === 'Stablepool') return 'Pool shares'
-  if (p.venue === 'Gamma vault') return 'Vault shares'
-  return `Position #${p.tokenId ?? p.positionId}`
-}
-
-// The farmed row's rewards in one quiet line under its value: their USD sum
-// (naming how many unpriced ones it leaves out), or — when no reward asset is
-// priced — the raw amounts per asset, so an unpriced reward still reads as a
-// reward rather than as nothing.
-function UnclaimedRewardsLine({ rewards }: { rewards: LpUnclaimedReward[] }) {
-  const held = rewards.filter(r => r.amount !== '0')
-  if (!held.length) return null
-  const unpayable = unpayableCount(held)
-  const priced = held.filter(r => r.valueUsd != null && r.payable !== false)
-  const usd = priced.reduce((sum, r) => sum + (r.valueUsd ?? 0), 0)
-  const unprojected = held.some(r => !r.projected)
-  const title = `${FARM_REWARDS_TITLE}${unprojected ? ' Some amounts are as of the farm\'s last on-chain sync (the head projection failed this cycle).' : ''}${unpayable ? BELOW_ED_TITLE : ''}`
-  return (
-    <div className="muted" style={{ fontSize: 11, fontWeight: 400 }} title={title}>
-      {priced.length
-        ? <>+ <Usd v={usd} />{unpricedNote(unpricedCount(held))}{unpayableNote(unpayable)} unclaimed</>
-        : held.map((r, i) => <span key={`${r.depositId}-${r.yieldFarmId}`}>{i > 0 ? ' · ' : '+ '}<Amt raw={r.amount} dec={r.asset.decimals} /> {r.asset.symbol}{r.payable === false ? ' (unpayable)' : ''}</span>)}
-    </div>
-  )
-}
-
-export function LiquidityPositionsTable({ positions }: { positions: LpPosition[] }) {
-  if (!positions.length) return null
-  return (
-    <>
-      <div className="sec-title" style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>Liquidity positions · {positions.length}
-        <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11, fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>provided to pools & farms</span>
-      </div>
-      <div className="panel"><table className="tbl assets-tbl">
-        <thead><tr><th>Pool asset</th><th>Venue</th><th className="r">Amount</th><th className="r">Value</th></tr></thead>
-        <tbody>
-          {positions.map(p => {
-            const col = LP_VENUE_COLORS[p.venue] ?? CAT.liquidity
-            // A two-token position (concentrated liquidity) is the pool's, not one asset's.
-            const to = p.poolAddress ? paths.v3Pool(p.poolAddress) : paths.asset(p.asset.assetId)
-            return (
-              <tr key={p.positionId} {...rowNav(to)}>
-                <td data-label="Pool asset">
-                  <div className="asset-row">
-                    <AssetIcon assetId={p.asset.assetId} iconAssetId={p.asset.iconAssetId} iconAssetIds={p.asset.iconAssetIds} symbol={p.asset.symbol} size={30} parachainId={p.asset.parachainId} origin={p.asset.origin} />
-                    <div className="ar-meta"><span className="ar-sym">{p.asset.symbol}{p.assetB ? ` / ${p.assetB.symbol}` : ''}</span><span className="ar-name">{lpPositionName(p)}</span></div>
-                  </div>
-                </td>
-                <td data-label="Venue"><span className="badge" style={{ background: `color-mix(in srgb, ${col} 14%, transparent)`, color: col }}>{p.venue}</span></td>
-                <td data-label="Amount" className="r mono">
-                  <Amt raw={p.amount} dec={p.asset.decimals} /> {p.asset.symbol}
-                  {p.hubAmount && <div className="muted" style={{ fontSize: 11, fontWeight: 400 }}>+ <Amt raw={p.hubAmount} dec={12} /> H2O</div>}
-                  {p.assetB && p.amountB != null && <div className="muted" style={{ fontSize: 11, fontWeight: 400 }}>+ <Amt raw={p.amountB} dec={p.assetB.decimals} /> {p.assetB.symbol}</div>}
-                </td>
-                <td data-label="Value" className="r mono">
-                  <Usd v={p.valueUsd} />
-                  {p.unclaimedRewards && <UnclaimedRewardsLine rewards={p.unclaimedRewards} />}
                 </td>
               </tr>
             )

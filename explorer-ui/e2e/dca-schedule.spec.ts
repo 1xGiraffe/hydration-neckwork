@@ -89,7 +89,7 @@ test('legacy per-execution DCA links resolve to the schedule page', async ({ pag
 })
 
 test('active-DCA rows show the budget and open the schedule page', async ({ page }) => {
-  await page.goto('/account/1L53bUTBopXqDXSXjBdQXFV7jZ8FtdRZS5JoMjGq5z3Cv2zr?view=positions')
+  await page.goto('/account/1L53bUTBopXqDXSXjBdQXFV7jZ8FtdRZS5JoMjGq5z3Cv2zr?view=orders')
   const row = page.locator('tr[data-dca-schedule="33546"]')
   await expect(row).toBeVisible()
   await expect(row.locator('[data-label="Budget"]')).toContainText('1.2M')

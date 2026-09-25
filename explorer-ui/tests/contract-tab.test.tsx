@@ -278,7 +278,7 @@ describe('ContractSection verification chip', () => {
 
 describe('profileTabs', () => {
   it('adds the Contract tab only for contract accounts', () => {
-    expect(profileTabs(1, [], 0, 0, undefined, undefined, true).some(t => t.key === 'contract')).toBe(true)
-    expect(profileTabs(1, [], 0, 0, undefined, undefined, false).some(t => t.key === 'contract')).toBe(false)
+    expect(profileTabs(1, { orders: 0, liquidity: 0, borrow: 0 }, undefined, undefined, true).some(t => t.key === 'contract')).toBe(true)
+    expect(profileTabs(1, { orders: 0, liquidity: 0, borrow: 0 }, undefined, undefined, false).some(t => t.key === 'contract')).toBe(false)
   })
 })

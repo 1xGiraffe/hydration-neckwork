@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MoneyMarketPositions, ProfileStats, mmPositionCount, moneyMarketDebtUsd, profileTabs } from '../src/components/AccountSections'
+import { MoneyMarketPositions, ProfileStats, mmPositionCount, moneyMarketDebtUsd, profileTabs, resolveProfileView } from '../src/components/AccountSections'
+
+const NO_POSITIONS = { orders: 0, liquidity: 0, borrow: 0 }
 import { ActivityBadge } from '../src/components/ActivityTable'
 import { DetailTabs } from '../src/components/ui'
 import { Account } from '../src/pages/Account'
@@ -129,7 +131,7 @@ describe('primary-first Money Market presentation', () => {
     expect(html).toContain('href="/asset/1143"')
   })
 
-  // The Positions tab renders one card per isolated market, so the badge counts
+  // The Borrow tab renders one card per isolated market, so the badge counts
   // one per market — an account lending in core, GIGAHDX and BIL shows 3, not 1.
   it('counts one position per isolated money market', () => {
     expect(mmPositionCount([])).toBe(0)
@@ -139,10 +141,12 @@ describe('primary-first Money Market presentation', () => {
   it('shares profile debt and tab calculations between accounts and tags', () => {
     const markets = [position(), supplemental]
     expect(moneyMarketDebtUsd(markets)).toBe(6_240)
-    expect(profileTabs(3, markets, 2, 1, { total: 42, complete: true }, 7, false, 120, 340)).toEqual([
+    expect(profileTabs(3, { orders: 2, liquidity: 1, borrow: mmPositionCount(markets) }, { total: 42, complete: true }, 7, false, 120, 340)).toEqual([
       { key: 'overview', label: 'Overview' },
       { key: 'balances', label: 'Balances', count: 3 },
-      { key: 'positions', label: 'Positions', count: 5 },
+      { key: 'orders', label: 'Orders', count: 2 },
+      { key: 'liquidity', label: 'Liquidity', count: 1 },
+      { key: 'borrow', label: 'Borrow', count: 2 },
       { key: 'activity', label: 'Activity', count: 42, countAtLeast: false },
       { key: 'extrinsics', label: 'Extrinsics', count: 120 },
       { key: 'events', label: 'Events', count: 340 },
@@ -150,19 +154,54 @@ describe('primary-first Money Market presentation', () => {
     ])
   })
 
+  // Nothing open now, but history exists: the tab shows without a badge, so a
+  // closed-out borrower or a finished DCA user can still reach their history.
+  it('shows a position tab for history alone, without a count', () => {
+    const tabs = profileTabs(0, { ...NO_POSITIONS, presence: { orderHistory: 4, liquidityHistory: false, moneyMarketHistory: true } })
+    expect(tabs.find(t => t.key === 'orders')).toEqual({ key: 'orders', label: 'Orders' })
+    expect(tabs.find(t => t.key === 'borrow')).toEqual({ key: 'borrow', label: 'Borrow' })
+    expect(tabs.some(t => t.key === 'liquidity')).toBe(false)
+  })
+
+  // Old links named the combined tab; they land on the first split tab the
+  // holder has, Borrow first.
+  it('maps a legacy positions view onto the split tabs', () => {
+    const all = profileTabs(0, { orders: 1, liquidity: 1, borrow: 1 })
+    expect(resolveProfileView('positions', all)).toBe('borrow')
+    expect(resolveProfileView('positions', profileTabs(0, { orders: 1, liquidity: 1, borrow: 0 }))).toBe('liquidity')
+    expect(resolveProfileView('positions', profileTabs(0, { orders: 1, liquidity: 0, borrow: 0 }))).toBe('orders')
+    expect(resolveProfileView('positions', profileTabs(0, NO_POSITIONS))).toBe('overview')
+    expect(resolveProfileView('nonsense', all)).toBe('overview')
+    expect(resolveProfileView('liquidity', all)).toBe('liquidity')
+  })
+
+  // A deep link to a position tab must not bounce through Overview while
+  // positions-presence is still answering whether the tab exists.
+  it('keeps the requested position tab while presence loads', () => {
+    const loading = profileTabs(0, { ...NO_POSITIONS, presenceLoading: true, requestedView: 'borrow' })
+    expect(loading.find(t => t.key === 'borrow')).toEqual({ key: 'borrow', label: 'Borrow' })
+    expect(resolveProfileView('borrow', loading)).toBe('borrow')
+    // Only the tab asked for; the others wait for the answer.
+    expect(loading.some(t => t.key === 'orders' || t.key === 'liquidity')).toBe(false)
+    // Once presence says there is nothing, the tab goes and the view falls back.
+    const answered = profileTabs(0, { ...NO_POSITIONS, presence: { orderHistory: 0, liquidityHistory: false, moneyMarketHistory: false }, requestedView: 'borrow' })
+    expect(resolveProfileView('borrow', answered)).toBe('overview')
+    expect(resolveProfileView('orders', profileTabs(0, { ...NO_POSITIONS, presenceLoading: true, requestedView: 'orders' }))).toBe('orders')
+  })
+
   // A feed too deep to walk to its end is counted exactly back to its frontier, so
   // the badge is a floor, not the account's whole history — it has to read "24,322+".
   it('marks an activity badge counted over part of the feed', () => {
-    const tabs = profileTabs(0, [], 0, 0, { total: 24_322, complete: false })
+    const tabs = profileTabs(0, NO_POSITIONS, { total: 24_322, complete: false })
 
     expect(tabs.find(t => t.key === 'activity')).toEqual({ key: 'activity', label: 'Activity', count: 24_322, countAtLeast: true })
     expect(renderToStaticMarkup(<DetailTabs tabs={tabs} active="activity" onChange={() => {}} />)).toContain('24,322+')
   })
 
   it('leaves the badge off entirely while no total is known', () => {
-    expect(profileTabs(0, [], 0, 0, { total: null, complete: false }).find(t => t.key === 'activity'))
+    expect(profileTabs(0, NO_POSITIONS, { total: null, complete: false }).find(t => t.key === 'activity'))
       .toEqual({ key: 'activity', label: 'Activity' })
-    expect(profileTabs(0, [], 0, 0, undefined).find(t => t.key === 'activity'))
+    expect(profileTabs(0, NO_POSITIONS, undefined).find(t => t.key === 'activity'))
       .toEqual({ key: 'activity', label: 'Activity' })
   })
 

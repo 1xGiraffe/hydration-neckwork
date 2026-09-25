@@ -12,6 +12,7 @@ import type {
   NotificationChannel, NotificationRule, NotificationRuleInput, NotificationRulePatch,
   NotificationsOverview, NotificationInboxPage, NotificationTelegramLink, NotificationLinkStatus,
   WebPushSubscriptionInput,
+  PositionScope, ExplorerYields, OrderHistoryKind, OrderHistoryPage, PositionsPresence, LiquidityRewardsClaimed, LiquidityHistory, MoneyMarketHistory,
 } from '../types'
 import { getSession, setSession } from '../session'
 // Live feeds stamp the pushed head onto their URLs (`h=`): the nginx
@@ -490,4 +491,30 @@ export const userApi = {
   // this is not unsubscribing, which is why the UI puts it behind a confirm.
   clearNotificationInbox: () =>
     authedJson<{ ok: true; cleared: number; unread: number }>('POST', '/user/notifications/inbox/clear', {}),
+}
+
+// ── Orders · Liquidity · Borrow tabs ─────────────────────────────────────
+// One read per scope: an account, a system tag, or a list tag (authed for an
+// owner/subscriber, anonymous for a public list's tag — see listTagPath).
+function scopedJson<T>(scope: PositionScope, suffix: string, query: Record<string, QueryValue> = {}, signal?: AbortSignal): Promise<T> {
+  if (scope.kind === 'account') return getJson<T>(withQuery(`/explorer/address/${encodeURIComponent(scope.address)}${suffix}`, query), signal)
+  if (scope.kind === 'tag') return getJson<T>(withQuery(`/explorer/tag/${encodeURIComponent(scope.tagId)}${suffix}`, query), signal)
+  return authedJson<T>('GET', withQuery(listTagPath(scope.listId, scope.tagId, suffix), query), undefined, signal)
+}
+
+export const positionsApi = {
+  yields: (signal?: AbortSignal) => getJson<ExplorerYields>('/explorer/yields', signal),
+  orderHistory: (scope: PositionScope, offset = 0, limit = 25, kind: OrderHistoryKind = 'all', signal?: AbortSignal) =>
+    scopedJson<OrderHistoryPage>(scope, '/order-history', { offset, limit, kind: kind === 'all' ? null : kind }, signal),
+  presence: (scope: PositionScope, signal?: AbortSignal) => scopedJson<PositionsPresence>(scope, '/positions-presence', {}, signal),
+  liquidityRewards: (scope: PositionScope, signal?: AbortSignal) => scopedJson<LiquidityRewardsClaimed>(scope, '/liquidity-rewards', {}, signal),
+  liquidityHistory: (scope: PositionScope, signal?: AbortSignal) => scopedJson<LiquidityHistory>(scope, '/liquidity-history', {}, signal),
+  liquidityHistoryWindow: (scope: PositionScope, fromBlock: number, toBlock: number, signal?: AbortSignal) =>
+    scopedJson<LiquidityHistory>(scope, '/liquidity-history', { fromBlock, toBlock }, signal),
+  // Money-market history is per account only: markets are isolated and a tag's
+  // members are never blended, so a tag reads each member's own.
+  moneyMarketHistory: (address: string, signal?: AbortSignal) =>
+    getJson<MoneyMarketHistory>(`/explorer/address/${encodeURIComponent(address)}/money-market-history`, signal),
+  moneyMarketHistoryWindow: (address: string, fromBlock: number, toBlock: number, signal?: AbortSignal) =>
+    getJson<MoneyMarketHistory>(withQuery(`/explorer/address/${encodeURIComponent(address)}/money-market-history`, { fromBlock, toBlock }), signal),
 }
