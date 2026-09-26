@@ -40,21 +40,25 @@ describe('v3 routed-hop suppression is null-safe', () => {
     expect(src).toContain("if (a.kind === 'swap' && routed.has(v3RoutedKey(a.blockHeight, a.extrinsicIndex))) continue")
   })
 
-  // The pool's own page is the one reading where a routed hop is NOT plumbing: it
-  // is a swap in that pool whatever routed it. Suppressing it there emptied the
-  // page of the only live v3 pool entirely.
-  it('keeps routed hops on the pool page, and only there', () => {
-    expect(src).toContain('const rows = await v3ActivityRows(acts, prices, true)')
-    // The feed path keeps the default, so a hop stays suppressed everywhere else.
-    expect(src).toContain('let rows = await v3ActivityRows(acts, prices)')
+  // The pool's own reading is the one where a routed hop is NOT plumbing: it is a
+  // swap in that pool whatever routed it, and the route's own row belongs to the
+  // swapper, whom a pool scope never holds. Suppressing it there emptied the page
+  // of the only live v3 pool entirely. That reading is the pool contract's scoped
+  // feed, which the pool page reads through — so hops are kept exactly where the
+  // scope holds a pool, and stay suppressed on every other scope and on the
+  // global, asset and account feeds.
+  it('keeps routed hops for a scoped pool, and only there', () => {
+    expect(src).toContain('v3ActivityRows(acts, prices, venues != null && venues.pools.length > 0)')
+    // The pool page is that scope, not a reading of its own.
+    expect(src).toContain("getRecentV3Rows('all', limit, undefined, undefined, 0, {}, { accounts: [poolAccount] })")
     expect(src).toContain('keepRoutedHops ? new Set<string>() : routedV3SwapExtrinsics(')
   })
 })
 
-// On the pool page a routed hop is kept, and it must name the account whose route
-// it was. The pool's Swap log names only contracts — its recipient on a routed hop
-// is the router's own account — so a row built from the log alone credited every
-// swap in the pool to "Pallet Pot" (all 25 rows of it).
+// Where a routed hop is kept it must name the account whose route it was. The
+// pool's Swap log names only contracts — its recipient on a routed hop is the
+// router's own account — so a row built from the log alone credited every swap in
+// the pool to "Pallet Pot" (all 25 rows of it).
 describe('a kept routed hop names its owner, not the router', () => {
   it('matches the owner off the Swapped3 leg the same hop emitted', () => {
     expect(src).toContain("JSONExtractString(args_json, 'swapper') AS swapper")
@@ -73,7 +77,7 @@ describe('a kept routed hop names its owner, not the router', () => {
     expect(src).toContain('const who = routedWho ?? a.whoAccountId ??')
   })
 
-  // Everywhere but the pool page the hop is suppressed, so the lookup is wasted.
+  // Everywhere else the hop is suppressed, so the lookup is wasted.
   it('only runs the lookup where routed hops are kept', () => {
     expect(src).toContain('keepRoutedHops ? routedV3Swappers(acts) : Promise.resolve(new Map<string, string>())')
   })
