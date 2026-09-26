@@ -7,7 +7,7 @@ import { withStableswapSharePrices, xykReserveAssets, xykShareLegs } from '../..
 import { loadMmIncentives } from '../../services/mmIncentiveSnapshot.ts'
 import { currentStableswapSharePools } from '../../services/stableswapSharePools.ts'
 import { loadV3AccountHistory, v3AccountPositions, v3AccountPositionsRawAt } from '../../services/uniswapV3Positions.ts'
-import { scaledDecimal } from '../../services/valuation.ts'
+import { isPoolOwnHubHolding, scaledDecimal } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
 
 // Account valuation for GET /v1/accounts/balances and
@@ -1036,6 +1036,10 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
         // counting the same shares twice. Registry-wide, so it holds even while the
         // XYK slice is absent (xykLpUsd null).
         if (xykLpIds.has(assetId)) continue
+        // A pool account's own hub reserve (the Omnipool's H2O) is a balance and
+        // no value: H2O is priced off the pooled assets, so valuing it would state
+        // the pool's TVL a second time (poolOwnHubHolding). Free and reserved alike.
+        if (isPoolOwnHubHolding(form, assetId)) continue
         const { decimals } = assetDescriptor(assetId)
         const price = priceFor(prices, assetId)
         transferable += usdScaled(rawAmount(row.free), price, decimals)

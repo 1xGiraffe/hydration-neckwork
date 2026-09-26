@@ -14,7 +14,7 @@
 //  * `pool_swap_legs` is ReplacingMergeTree — every reader collapses the leg
 //    identity (the table's ORDER BY) BEFORE summing.
 
-import { PRICE_ALIAS_ID, allExplorerAssets, priceAssetId } from './explorerAssets.ts'
+import { H2O_ASSET_ID, PRICE_ALIAS_ID, allExplorerAssets, priceAssetId } from './explorerAssets.ts'
 
 /**
  * The Omnipool's own pallet account, `modl` + `omnipool` — the fee recipient that
@@ -33,6 +33,40 @@ import { PRICE_ALIAS_ID, allExplorerAssets, priceAssetId } from './explorerAsset
  * decide per surface how to treat that unknown, and say so where they do.
  */
 export const OMNIPOOL_ACCOUNT = '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000'
+
+/**
+ * A pool account's holding of its OWN hub asset is a balance, never a value:
+ * shown as the amount it is, counted in no total.
+ *
+ * The Omnipool prices H2O off the assets it pools (TVL ÷ hub reserve), so the
+ * hub reserve the pallet account holds, valued at that price, restates the
+ * pooled assets the same total already counts — the two together state the pool
+ * twice (measured live: a $25.3M account against a $12.7M TVL). The rule is
+ * exactly (pool account, its hub asset): only the Omnipool has a hub asset, and
+ * nobody else's H2O is excluded — an LP's hub leg, the treasury's H2O and a
+ * wallet's H2O are claims on the pool, not the pool.
+ *
+ * Every surface that states the account's value applies it: the explorer's
+ * balance rows (`AddressBalance.uncounted`), the account and tag values, the
+ * value chart, the accounts directory, the hover cards, the public
+ * `/v1/accounts/balances` and the Data API's balance totals.
+ */
+export const POOL_OWN_HUB_HOLDINGS: ReadonlyArray<{ account: string; assetId: number }> = [
+  { account: OMNIPOOL_ACCOUNT, assetId: H2O_ASSET_ID },
+]
+
+export function isPoolOwnHubHolding(accountId: string, assetId: number): boolean {
+  const account = accountId.toLowerCase()
+  return POOL_OWN_HUB_HOLDINGS.some(holding => holding.account === account && holding.assetId === assetId)
+}
+
+/**
+ * The same rule as a SQL predicate over a lowercase String account-id column and
+ * a String asset-id column (the balance tables' types).
+ */
+export function poolOwnHubHoldingSql(accountExpr: string, assetExpr: string): string {
+  return `(${POOL_OWN_HUB_HOLDINGS.map(holding => `(${accountExpr} = '${holding.account}' AND ${assetExpr} = '${holding.assetId}')`).join(' OR ')})`
+}
 
 /**
  * How far before the window an asset's last candle may sit and still price its

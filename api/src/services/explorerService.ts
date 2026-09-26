@@ -38,7 +38,7 @@ import {
 } from './onBehalfActivity.ts'
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
 import { FEE_BALANCE_EVENTS, deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
-import { PRICE_LOOKBACK_DAYS, formatUnits, renderUsd, scaledUsd } from './valuation.ts'
+import { PRICE_LOOKBACK_DAYS, formatUnits, isPoolOwnHubHolding, poolOwnHubHoldingSql, renderUsd, scaledUsd } from './valuation.ts'
 import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
@@ -3514,13 +3514,30 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
 // components and `timeline` the binding unlock schedule (when how much of the
 // frozen balance actually unlocks, and which lock causes it) — both from the
 // background lock snapshot (see lockBreakdownService).
-export interface AddressBalance { asset: AssetRef; total: string; free: string; reserved: string; frozen?: string; breakdown?: BalanceLockComponent[]; timeline?: BalanceUnlockSlice[]; lastBlock: number; valueUsd: number | null }
-interface AggregatedBalanceRow { asset_id: string; total: string; free: string; reserved: string; last_block: number }
+// `uncounted` is the part of `total` that is deliberately in NO value: `valueUsd`
+// — and so every figure built from it (portfolioUsd, topAssets, the directory
+// row) — covers only the rest, while the row keeps the whole amount, because
+// the balance is real. Today the one case is the Omnipool's own H2O reserve
+// (`poolOwnHubHolding` in valuation.ts): H2O is priced off the pooled assets
+// the value already counts. A row whose whole total is uncounted values 0, not
+// null — it is priced, and left out on purpose.
+export interface AddressBalance { asset: AssetRef; total: string; free: string; reserved: string; frozen?: string; breakdown?: BalanceLockComponent[]; timeline?: BalanceUnlockSlice[]; lastBlock: number; valueUsd: number | null; uncounted?: UncountedBalance }
+export interface UncountedBalance { amount: string; reason: 'pool-hub-reserve' }
+interface AggregatedBalanceRow { asset_id: string; total: string; free: string; reserved: string; uncounted?: string; last_block: number }
+
+// The part of a row's total its value covers: everything but the uncounted slice.
+function countedAmount(balance: Pick<AddressBalance, 'total' | 'uncounted'>): string {
+  const uncounted = BigInt(balance.uncounted?.amount ?? '0')
+  if (uncounted <= 0n) return balance.total
+  const counted = BigInt(balance.total || '0') - uncounted
+  return (counted > 0n ? counted : 0n).toString()
+}
 
 async function queryAggregatedBalances(accountListSql: string): Promise<AggregatedBalanceRow[]> {
   const result = await client.query({
     query: `
-      SELECT asset_id, toString(sum(t)) AS total, toString(sum(f)) AS free, toString(sum(rsv)) AS reserved, max(lb) AS last_block FROM (
+      SELECT asset_id, toString(sum(t)) AS total, toString(sum(f)) AS free, toString(sum(rsv)) AS reserved,
+        toString(sumIf(t, ${poolOwnHubHoldingSql('account_id', 'asset_id')})) AS uncounted, max(lb) AS last_block FROM (
         SELECT account_id, asset_id,
           toUInt256OrZero(argMaxMerge(total_state)) AS t,
           toUInt256OrZero(argMaxMerge(free_state)) AS f,
@@ -3535,17 +3552,20 @@ async function queryAggregatedBalances(accountListSql: string): Promise<Aggregat
   return result.json<AggregatedBalanceRow>()
 }
 
-function valueAccountBalances(rows: AggregatedBalanceRow[], prices: Map<number, PriceInfo>): AddressBalance[] {
+export function valueAccountBalances(rows: AggregatedBalanceRow[], prices: Map<number, PriceInfo>): AddressBalance[] {
   return rows
     .map(row => {
       const balanceAsset = asset(row.asset_id)
+      const uncountedRaw = BigInt(row.uncounted ?? '0')
+      const uncounted: UncountedBalance | undefined = uncountedRaw > 0n ? { amount: uncountedRaw.toString(), reason: 'pool-hub-reserve' } : undefined
       return {
         asset: balanceAsset,
         total: row.total,
         free: row.free,
         reserved: row.reserved,
         lastBlock: row.last_block,
-        valueUsd: usdValue(prices, balanceAsset.assetId, row.total, balanceAsset.decimals),
+        valueUsd: usdValue(prices, balanceAsset.assetId, countedAmount({ total: row.total, uncounted }), balanceAsset.decimals),
+        ...(uncounted ? { uncounted } : {}),
       }
     })
     .sort((left, right) => (right.valueUsd ?? 0) - (left.valueUsd ?? 0))
@@ -3594,15 +3614,19 @@ export function foldShareBalances(balances: AddressBalance[]): AddressBalance[] 
     const total = rescaleRaw(b.total, b.asset.decimals, dispAsset.decimals)
     const free = rescaleRaw(b.free, b.asset.decimals, dispAsset.decimals)
     const reserved = rescaleRaw(b.reserved, b.asset.decimals, dispAsset.decimals)
+    const uncounted = b.uncounted ? { ...b.uncounted, amount: rescaleRaw(b.uncounted.amount, b.asset.decimals, dispAsset.decimals) } : undefined
     const cur = byId.get(did)
     if (!cur) {
-      byId.set(did, { ...b, asset: dispAsset, total, free, reserved })
+      byId.set(did, { ...b, asset: dispAsset, total, free, reserved, ...(uncounted ? { uncounted } : {}) })
     } else {
       cur.total = (BigInt(cur.total) + BigInt(total)).toString()
       cur.free = (BigInt(cur.free) + BigInt(free)).toString()
       cur.reserved = (BigInt(cur.reserved) + BigInt(reserved)).toString()
       cur.valueUsd = (cur.valueUsd ?? 0) + (b.valueUsd ?? 0)
       cur.lastBlock = Math.max(cur.lastBlock, b.lastBlock)
+      // The uncounted slice merges like the amounts do, so the folded row still
+      // says how much of its total its value leaves out.
+      if (uncounted) cur.uncounted = { ...uncounted, amount: (BigInt(cur.uncounted?.amount ?? '0') + BigInt(uncounted.amount)).toString() }
     }
   }
   return [...byId.values()].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0))
@@ -5046,7 +5070,9 @@ export function mergeErc20Balances(balances: AddressBalance[], holdings: { asset
       const b = out[existing]
       const total = (BigInt(b.total || '0') + h.raw).toString()
       const free = (BigInt(b.free || '0') + h.raw).toString()
-      out[existing] = { ...b, total, free, valueUsd: usdValue(prices, b.asset.assetId, total, b.asset.decimals) }
+      // Re-valued from the merged total less the row's uncounted slice, which the
+      // ERC-20 pot never adds to (the pool's hub reserve is a pallet balance).
+      out[existing] = { ...b, total, free, valueUsd: usdValue(prices, b.asset.assetId, countedAmount({ total, uncounted: b.uncounted }), b.asset.decimals) }
     } else {
       const total = h.raw.toString()
       out.push({ asset: h.asset, total, free: total, reserved: '0', lastBlock: 0, valueUsd: usdValue(prices, h.asset.assetId, total, h.asset.decimals) })
@@ -6688,7 +6714,9 @@ export function applyMmCollateralToBalances(balances: AddressBalance[], moneyMar
       existing.total = total
       existing.free = r.supplied
       existing.reserved = reserved.toString()
-      existing.valueUsd = usdValue(prices, r.assetId, total, r.decimals)
+      // Re-valued from the folded total less the row's uncounted slice (the
+      // pool's hub reserve is never supplied collateral, but the rule is the row's).
+      existing.valueUsd = usdValue(prices, r.assetId, countedAmount(existing), r.decimals)
     } else {
       balances.push({ asset: asset(r.assetId), total: r.supplied, free: r.supplied, reserved: '0', lastBlock: moneyMarket?.blockHeight ?? 0, valueUsd: usdValue(prices, r.assetId, r.supplied, r.decimals) })
     }
@@ -21595,13 +21623,17 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
     const portfolioCombined = new Array(N + 1).fill(0)
     const observedBucket = new Array(N + 1).fill(false)
     for (const [accountId, balMap] of byAcct) {
+      // Supplied MM reserves are already present in the aggregate collateral
+      // snapshots added below; these pseudo-accounts are display-history only.
+      // So is a pool account's own hub reserve (the Omnipool's H2O): charted as
+      // the balance it is, in no bucket's value — the current-value twin is
+      // AddressBalance.uncounted, and the live-pinned last point agrees with it.
+      const valued = !accountId.includes('#mm:') && !isPoolOwnHubHolding(accountId, Number(id))
       let lastBal = 0
       for (let b = 0; b <= N; b++) {
         if (balMap.has(b)) { lastBal = Number(balMap.get(b)) / 10 ** a.decimals; observedBucket[b] = true }
         combined[b] += lastBal
-        // Supplied MM reserves are already present in the aggregate collateral
-        // snapshots added below; these pseudo-accounts are display-history only.
-        if (!accountId.includes('#mm:')) portfolioCombined[b] += lastBal
+        if (valued) portfolioCombined[b] += lastBal
       }
     }
     let lastPx = earliestPx
@@ -26913,14 +26945,16 @@ async function loadAccountDirectorySnapshot(
   } catch { return null }
 }
 
-// `-r3`: the value includes the members' COUNTED claimable farm rewards and
+// `-r4`: the value includes the members' COUNTED claimable farm rewards and
 // money-market incentives (lm_acct / mmr_acct in accountsPage: unpayable entries
 // 0, claims indexed after the snapshot subtracted, incentives keyed like the
-// money-market value). Part of every page and tag-detail key, so a payload
-// persisted under an earlier reward definition is never served as this one.
+// money-market value) and leaves out a pool account's own hub reserve (the
+// Omnipool's H2O: poolOwnHubHoldingSql in `grouped`). Part of every page and
+// tag-detail key, so a payload persisted under an earlier value definition is
+// never served as this one.
 function accountDirectoryModelVersion(): string {
-  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3-r3'
-  return omnipoolAccountClaimsReady ? 'v2-r3' : 'v1-r3'
+  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3-r4'
+  return omnipoolAccountClaimsReady ? 'v2-r4' : 'v1-r4'
 }
 
 async function persistAccountDirectorySnapshot(snapshotKey: string, page: AccountsPage): Promise<void> {
@@ -27610,13 +27644,17 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
                 ${gkeySql('latest.account_id')} AS gkey,
                 ${labelIdSql('latest.account_id')} AS label_id, any(t.lname) AS lname, any(t.c) AS color, any(t.ic) AS icon,
                 uniqExact(latest.account_id) AS members, any(latest.account_id) AS sample, max(latest.lb) AS last_block,
-                sum(toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.)) AS usd,
+                -- A pool account's own hub reserve (the Omnipool's H2O) is a balance
+                -- and no value, here as on the account page (AddressBalance.uncounted),
+                -- stated in SQL by poolOwnHubHoldingSql so the row ranks by the value
+                -- its page prints.
+                sum(if(${poolOwnHubHoldingSql('latest.account_id', 'latest.asset_id')}, 0., toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.))) AS usd,
                 -- Per-asset USD merged across the group's members → top-holding icons.
                 -- Fast single-query approximation from the wallet balance tables; the
                 -- detail pages' hover card additionally folds in money-market
                 -- collateral (aTokens) and EVM-side ERC-20 that only a forward
                 -- per-account read can attribute, so the two can differ for those.
-                sumMap([latest.asset_id], [toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.)]) AS asset_usd_map,
+                sumMap([latest.asset_id], [if(${poolOwnHubHoldingSql('latest.account_id', 'latest.asset_id')}, 0., toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.))]) AS asset_usd_map,
                 -- Rewards are per account while latest is per (account, asset): each
                 -- account's sum enters once, deduplicated on (key, usd).
                 arraySum(x -> tupleElement(x, 2), groupUniqArrayIf((latest.account_id, lm.usd), lm.usd != 0)) AS lm_usd,

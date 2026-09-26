@@ -10,7 +10,8 @@ import { performancePoints } from './performance'
 import { CAT } from './activityColors'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds, blockSpanSeconds, dcaAmountLeft, dcaCadence, dcaLeftUsd, dcaProgress, dcaRunway, fmtDuration } from '../utils/dca'
-import type { PositionsPresence, MoneyMarketPosition, ActiveDca, OpenLimitOrder, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent, ContractInfo, FarmRewardsSummary, MoneyMarketRewardsSummary } from '../types'
+import type { PositionsPresence, MoneyMarketPosition, ActiveDca, OpenLimitOrder, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent, ContractInfo, FarmRewardsSummary, MoneyMarketRewardsSummary, AddressBalance } from '../types'
+import { UNCOUNTED_REASON } from '../types'
 import type { ListCount } from '../api/explorer'
 import type { ReactNode } from 'react'
 
@@ -336,7 +337,9 @@ const unpayableCount = (entries: { amount: string; payable?: boolean }[]): numbe
   entries.filter(e => e.amount !== '0' && e.payable === false).length
 const unpricedNote = (n: number): string => (n > 0 ? ` (+ ${n} unpriced)` : '')
 
-export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, valueUsd, exHdxValueUsd, moneyMarket, farmRewards, moneyMarketRewards }: {
+const UNCOUNTED_TITLE = 'A balance the value leaves out on purpose. The Omnipool prices H2O off the assets it pools, so its own hub reserve valued at that price would restate the pooled assets Value already counts. Shown as a balance, counted in no value.'
+
+export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, valueUsd, exHdxValueUsd, moneyMarket, farmRewards, moneyMarketRewards, balances }: {
   tradingVolumeUsd?: number | null
   liquidationVolumeUsd?: number | null
   // Protocol revenue earned from this account (fees paid, penalties, interest).
@@ -357,11 +360,17 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUs
   farmRewards?: FarmRewardsSummary | null
   // Claimable lending incentives: the same — inside `valueUsd`, stated as its share.
   moneyMarketRewards?: MoneyMarketRewardsSummary | null
+  // The balance rows `valueUsd` was summed from: a row with an `uncounted` slice
+  // (the Omnipool's own H2O reserve) is named beside the Value the way the
+  // rewards are — so a reader of the figure learns what it leaves out without
+  // opening the Balances tab.
+  balances?: AddressBalance[]
 }) {
   const trading = tradingVolumeUsd ?? 0
   const liquidation = liquidationVolumeUsd ?? 0
   const revenue = revenueUsd ?? 0
   const valueHint = moneyMarket?.length ? moneyMarketValueBreakdown(moneyMarket) : null
+  const uncounted = (balances ?? []).filter((b): b is AddressBalance & { uncounted: NonNullable<AddressBalance['uncounted']> } => b.uncounted != null && b.uncounted.amount !== '0')
   const rewardsUnpriced = unpricedCount((farmRewards?.items ?? []).map(i => ({ amount: i.claimable, valueUsd: i.claimableUsd })))
   const rewardsUnpayable = unpayableCount((farmRewards?.items ?? []).map(i => ({ amount: i.claimable, payable: i.payable })))
   const incentivesUnpriced = unpricedCount((moneyMarketRewards?.items ?? []).map(i => ({ amount: i.claimable, valueUsd: i.claimableUsd })))
@@ -398,6 +407,9 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUs
         stats, so it can run left under trading/liquidation instead of
         wrapping inside the value's narrow column. */}
     {valueHint && <div className="acct-stats-hint">{valueHint}</div>}
+    {uncounted.length > 0 && <div className="acct-stats-hint">
+      <div className="hint" title={UNCOUNTED_TITLE}>Excl. {uncounted.map((b, i) => <span key={b.asset.assetId}>{i > 0 && ', '}{F.amount(b.uncounted.amount, b.asset.decimals)} {b.asset.symbol}</span>)} — {UNCOUNTED_REASON[uncounted[0].uncounted.reason]}; shown as a balance, not counted</div>
+    </div>}
     {farmRewards && (farmRewards.totalUsd > 0 || rewardsUnpriced > 0 || rewardsUnpayable > 0) && <div className="acct-stats-hint">
       <div className="hint" title={`${FARM_REWARDS_TITLE}${rewardsUnpayable > 0 ? BELOW_ED_TITLE : ''} As of block ${F.int(farmRewards.asOfBlock)}.`}>Incl. <Usd v={farmRewards.totalUsd} /> unclaimed farm rewards{rewardsUnpriced > 0 ? ` (+ ${rewardsUnpriced} unpriced, not included)` : ''}{rewardsUnpayable > 0 ? ` (+ ${rewardsUnpayable} unpayable, not included)` : ''}</div>
     </div>}

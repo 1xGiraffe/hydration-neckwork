@@ -187,6 +187,44 @@ describe('GET /v1/accounts/:address/balances', () => {
     expect(totals).toEqual({ assetsUsd: '24.00', debtUsd: '0.00', netUsd: '24.00' })
   })
 
+  it('prices the Omnipool\'s own H2O reserve but leaves it out of the totals', async () => {
+    // The Omnipool pallet account: its H2O balance is the pool's hub reserve, and
+    // H2O is priced off the assets the pool holds — counting it would state the
+    // pool's TVL twice. The item keeps its price and is flagged; the totals hold
+    // only the pooled asset. Any other account's H2O is counted as usual.
+    const OMNIPOOL = '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000'
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ')
+    const client = fakeDataClient(
+      query => (query.includes('-- data:accounts:balances-substrate')
+        ? [{ asset_id: '1', total: '2000000000000', free: '2000000000000', reserved: '0' },
+           { asset_id: '5', total: '3000000000000', free: '3000000000000', reserved: '0' }]
+        : undefined),
+      query => (query.includes('-- data:accounts:balances-erc20') ? [] : undefined),
+      query => (query.includes('-- data:accounts:atoken-anchor-block') ? [{ b0: 0 }] : undefined),
+      query => (query.includes('-- data:accounts:atoken-map') ? [] : undefined),
+      query => (query.includes('-- data:accounts:reserve-indices') ? [] : undefined),
+      query => (query.includes('-- data:assets:current-prices')
+        ? [{ asset_id: 1, price: '6', block: 8_999_000, ts: now }, { asset_id: 5, price: '2', block: 8_999_000, ts: now }]
+        : undefined),
+    )
+    app = await freshDataApp(client)
+    const pool = await app.inject({ url: `/v1/accounts/${OMNIPOOL}/balances`, headers: AUTH })
+    expect(pool.statusCode).toBe(200)
+    const { items, totals } = pool.json()
+    const byAsset = Object.fromEntries(items.map((i: { assetId: string }) => [i.assetId, i]))
+    // 2 H2O at $6: priced, flagged, in no total.
+    expect(byAsset['1']).toMatchObject({ assetId: '1', kind: 'substrate', valueUsd: '12.00', uncounted: 'pool-hub-reserve' })
+    // 3 DOT at $2: the pooled asset, counted.
+    expect(byAsset['5']).toMatchObject({ assetId: '5', valueUsd: '6.00' })
+    expect(byAsset['5'].uncounted).toBeUndefined()
+    expect(totals).toEqual({ assetsUsd: '6.00', debtUsd: '0.00', netUsd: '6.00' })
+
+    // The same rows under another account: H2O is a claim on the pool and counts.
+    const other = await app.inject({ url: `/v1/accounts/${OTHER}/balances`, headers: AUTH })
+    expect(other.json().totals.assetsUsd).toBe('18.00')
+    expect(other.json().items.every((i: { uncounted?: string }) => i.uncounted === undefined)).toBe(true)
+  })
+
   it('answers an unseen account with empty items, not 404', async () => {
     const client = fakeDataClient(
       query => (query.includes('-- data:accounts:balances-substrate') ? [] : undefined),
