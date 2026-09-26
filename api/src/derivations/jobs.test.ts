@@ -21,8 +21,11 @@ import {
   xcmArrivalsStalePartitionsSql,
   xcmArrivalsPendingBlocksSql,
   REVENUE_REFRESH_SECONDS,
+  ACCOUNT_REVENUE_ATTRIBUTED_STREAMS,
   accountRevenueEventfulInsertSql,
+  accountRevenueKeyCollisionsSql,
   accountRevenueStalePartitionsSql,
+  accountRevenueV3AccruedSql,
   revenueEventsInsertSql,
   revenueStalePartitionsSql,
   stagingBusySql,
@@ -733,13 +736,62 @@ describe('accountRevenueEventfulInsertSql', () => {
     expect(sql).toContain('INSERT INTO price_data.account_revenue_staging (account, stream, month, revenue_usd)')
   })
 
-  it('folds only protocol revenue and leaves the borrow streams to attribution', () => {
+  it('folds only protocol revenue and leaves the attributed streams to the accumulator', () => {
     expect(sql).toContain("stream NOT IN ('hollar_borrow', 'asset_reserve', 'uniswap_v3_fee')")
     // The shared protocol predicate: lp/burned/unknown omnipool asset-fee legs
     // exist only for the public destination matrix and are never account revenue.
     expect(sql).toContain("(stream != 'omnipool_asset_fee' OR dest IN ('protocol', 'burned', 'pol')) AND dest != 'lp'")
     expect(sql).toContain('GROUP BY account, stream')
     expect(sql).toContain('toYYYYMM(block_timestamp) = 202608')
+  })
+
+  // account_revenue is a ReplacingMergeTree over (account, stream, month), so a
+  // key written by two statements of one build is not two addends: the next merge
+  // keeps one row and the other's revenue is gone. Measured live before this was
+  // pinned: uniswap_v3_fee's accrued rows were inserted here AND its realization
+  // shares by the batch, 194 of 195 accounts collided, and the month read $10
+  // under FINAL against the $868 the rows summed to. The exclusion list must be
+  // the accumulator's own, with no stream re-admitted for "part" of its rows.
+  it('excludes every accumulator stream whole, uniswap_v3_fee included', () => {
+    for (const stream of ACCOUNT_REVENUE_ATTRIBUTED_STREAMS) {
+      expect(sql).toContain(`'${stream}'`)
+    }
+    expect(ACCOUNT_REVENUE_ATTRIBUTED_STREAMS).toContain('uniswap_v3_fee')
+    expect(sql).not.toContain("stream = 'uniswap_v3_fee'")
+    expect(sql).not.toContain("account != ''")
+  })
+})
+
+describe('accountRevenueV3AccruedSql', () => {
+  const sql = accountRevenueV3AccruedSql('202609')
+
+  // The accrued half is READ, not inserted: it joins the realization shares in the
+  // accumulator so an account that has both gets one row for the month.
+  it('reads the accrued rows per account for the accumulator, never inserting', () => {
+    expect(sql.trimStart().startsWith('-- rev:account-revenue:v3-accrued\nSELECT')).toBe(true)
+    expect(sql).not.toContain('INSERT')
+    expect(sql).toContain('toString(sum(amount_usd)) AS usd')
+    expect(sql).toContain('GROUP BY account')
+  })
+
+  // The stream's two arms are told apart by dest, never by whether the payer is
+  // named: a blanked swapper's accrual (a pallet's own swap) is still an accrued
+  // row and must land on account '' as unattributed, not vanish from the model.
+  it('selects the per-swap accruals of the partition by dest, whatever the payer', () => {
+    expect(sql).toContain("stream = 'uniswap_v3_fee' AND dest = 'accrued'")
+    expect(sql).toContain('toYYYYMM(block_timestamp) = 202609')
+    expect(sql).toContain("(stream != 'omnipool_asset_fee' OR dest IN ('protocol', 'burned', 'pol')) AND dest != 'lp'")
+    expect(sql).not.toContain("account != ''")
+  })
+})
+
+describe('accountRevenueKeyCollisionsSql', () => {
+  // The guard the build runs on its staged month before REPLACE PARTITION: any
+  // key held twice means a second writer for a stream, and the month stays
+  // unpublished rather than losing revenue at its next merge.
+  it('counts the staged month\'s doubled (account, stream) keys exactly', () => {
+    const sql = accountRevenueKeyCollisionsSql('202609')
+    expect(sql).toBe('SELECT count() - uniqExact(account, stream) AS n FROM price_data.account_revenue_staging WHERE month = 202609')
   })
 })
 
