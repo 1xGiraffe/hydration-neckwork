@@ -26,6 +26,13 @@
 //     have no fee event at all: they are treasury deposits inside the
 //     extrinsic, in whatever currency the payer was charged in, read by the
 //     rules the extrinsic page's fee resolver applies (see networkFeeRowsSql).
+//   * The XCM weight trader has no fee event either: what a message pays for
+//     its execution here — an inbound transfer's fee, a local
+//     PolkadotXcm.execute's — is a treasury deposit the trader makes when the
+//     executor drops, told from every other treasury deposit by sitting
+//     directly before the execution's barrier event (see
+//     xcmExecutionFeeRowsSql). It is its own stream, and the network-fee
+//     deposit arm excludes it by the same definition.
 
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
@@ -41,6 +48,10 @@ import {
   priceSourceSql,
   scaledUsd,
 } from './valuation.ts'
+// The XCM execution vocabulary the activity feed's inbound walk is built from —
+// one leaf, so the fee stream and the feed agree on what closes a message and
+// what the executor emits around its deposits.
+import { XCM_BARRIER_EVENTS, XCM_EXECUTE_BARRIER_EVENT, XCM_FEE_RUN_EVENTS } from './xcmWalkEvents.ts'
 
 export const REVENUE_STREAMS = [
   'omnipool_asset_fee',
@@ -53,6 +64,7 @@ export const REVENUE_STREAMS = [
   'ice_matched_fee',
   'uniswap_v3_fee',
   'network_fee',
+  'xcm_execution_fee',
 ] as const
 export type RevenueStream = (typeof REVENUE_STREAMS)[number]
 export type EventfulRevenueStream = Exclude<RevenueStream, 'hollar_borrow'>
@@ -190,6 +202,19 @@ export function internalPayerH160sSql(): string {
 
 /** The Substrate Treasury pallet account (modlpy/trsry), pubkey hex. */
 export const TREASURY_ACCOUNT = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000'
+
+/** The relay chain's sovereign account here (`Parent`, zero-padded), pubkey hex. */
+export const PARENT_SOVEREIGN_ACCOUNT = '0x506172656e740000000000000000000000000000000000000000000000000000'
+
+/**
+ * A sibling parachain's sovereign account here: `sibl` + the para id as a
+ * little-endian u32, zero-padded to 32 bytes. `reinterpretAsString` yields the
+ * id's little-endian bytes with trailing zero bytes dropped, which the padding
+ * restores (1000 → `0x7369626ce803…`, 2030 → `0x7369626cee07…`).
+ */
+export function siblingSovereignAccountSql(paraIdExpr: string): string {
+  return `rpad(concat('0x7369626c', lower(hex(reinterpretAsString(toUInt32(${paraIdExpr}))))), 66, '0')`
+}
 
 /**
  * The swapper the legs MV stamps when the actor is unknown (a literal 0x2a2a…
@@ -861,6 +886,13 @@ function networkFeeRowsSql(extra: string): string {
   // each source scan filters on it before touching a JSON column; the payer
   // join below reads the deduplicated row.
   const scoped = '(block_height, assumeNotNull(extrinsic_index)) IN (SELECT block_height, ext_index FROM gas_scope)'
+  // The XCM weight trader's deposits among the scoped extrinsics' treasury
+  // deposits — a `dispatch_permit` or an `Ethereum.transact` can run a
+  // `PolkadotXcm.execute`, whose fee the payer's WithdrawAsset debit would
+  // otherwise vouch for as gas. Found by the definition the xcm_execution_fee
+  // stream books them under, so the two arms are disjoint by construction.
+  const xcmFeeCtes = xcmFeeRunCtesSql([XCM_EXECUTE_BARRIER_EVENT],
+    'SELECT block_height, event_index, ext_index AS ctx FROM gas_deposits', extra)
   return `-- rev:network_fee
 WITH fee_events AS (
   SELECT block_height, event_index, min(block_timestamp) AS block_time,
@@ -926,6 +958,7 @@ gas_deposits AS (
     AND ${scoped}
   GROUP BY block_height, event_index, ext_index
 ),
+${xcmFeeCtes},
 gas_candidates AS (
   SELECT d.block_height AS block_height, d.event_index AS event_index, d.ext_index AS ext_index,
          d.block_time AS block_time, d.currency AS currency, d.amount AS amount,
@@ -935,6 +968,7 @@ gas_candidates AS (
   WHERE d.amount > 0
     AND (d.block_height, d.ext_index, x.payer, d.currency) IN (SELECT block_height, ext_index, who, currency FROM gas_debits)
     AND (d.block_height, d.event_index) NOT IN (SELECT block_height, deposit_index FROM dust_sweeps)
+    AND (d.block_height, d.event_index) NOT IN (SELECT block_height, event_index FROM xf_fees)
 ),
 gas_fee_shape AS (
   SELECT block_height, ext_index, argMax(currency, event_index) AS fee_currency, max(event_index) AS last_index
@@ -968,6 +1002,172 @@ ${valuedTailSql('network_fee')}`
 }
 
 /**
+ * Execution context of a hook-phase event (`extrinsic_index` NULL) as the XCM fee
+ * CTEs key it — the MessageQueue era runs every inbound message in on_initialize.
+ * Any extrinsic-context value is the extrinsic's own index.
+ */
+const HOOK_CONTEXT = 4294967295
+
+/**
+ * The XCM weight trader's treasury deposits, as CTEs. The runtime's Trader is
+ * `MultiCurrencyTrader<…, ToFeeReceiver<…, TreasuryAccount>>` (xcm.rs): a program
+ * that buys weight here pays for it in any accepted currency, and what the trader
+ * kept is deposited to the treasury when the executor DROPS — after every
+ * instruction, so it is the last thing the execution emits before its barrier:
+ * `MessageQueue.Processed` (or the pre-migration `DmpQueue.ExecutedDownward` /
+ * `XcmpQueue.Success` / `XcmpQueue.Fail`) for an inbound message,
+ * `PolkadotXcm.Attempted` for a local `PolkadotXcm.execute`. Delivery fees never
+ * reach the treasury: `FeeManager = ()` and both routers carry
+ * `NoPriceForMessageDelivery`.
+ *
+ * The deposit is found the way the activity feed finds a message's credits
+ * (xcmCreditRun): walking back from the barrier, within the barrier's own
+ * context and never past the previous barrier, over XCM_FEE_RUN_EVENTS only. A
+ * treasury deposit outside that run is not the trader's — measured on the
+ * shapes that share a segment with one: the WETH gas of an EVM call an inbound
+ * message Transacts (31,748 messages, 2026-04 → 07), the HDX dust of an account
+ * a `transfer_assets` fee withdrawal killed (the same `Balances.DustLost` sweep
+ * the network-fee arm skips, excluded here as well), and the on_initialize
+ * deposits of the DCA and Scheduler hooks, which run before MessageQueue's in a
+ * block's first segment. Inside the run the LAST treasury deposit is the
+ * trader's; a barrier that pays nothing — the in-credit local leg of a
+ * `transfer_assets`, whose `Attempted` is the same event, or a message the
+ * Barrier refused — finds no deposit and yields no row (0 of 580
+ * `transfer_assets` Attempted barriers carried one in 300k blocks; 41 of 41
+ * `execute` did).
+ *
+ * `deposits` is a SELECT of the treasury deposits to consider, with
+ * (block_height, event_index, ctx) and any further columns the caller reads
+ * back; it may narrow itself on `xf_contexts`, the (block, context) pairs the
+ * barriers occupy, which every other read here does.
+ */
+function xcmFeeRunCtesSql(barriers: readonly string[], deposits: string, extra: string): string {
+  const barrierList = barriers.map(n => `'${n}'`).join(', ')
+  const runList = XCM_FEE_RUN_EVENTS.map(n => `'${n}'`).join(', ')
+  const inContext = `(block_height, ifNull(extrinsic_index, ${HOOK_CONTEXT})) IN (SELECT block_height, ctx FROM xf_contexts)`
+  return `xf_barriers AS (
+  SELECT block_height, event_index, ifNull(extrinsic_index, ${HOOK_CONTEXT}) AS ctx,
+         any(event_name) AS barrier_name, argMax(args_json, ingested_at) AS args
+  FROM price_data.raw_events
+  WHERE event_name IN (${barrierList})
+    AND (extrinsic_index IS NULL OR event_name != 'MessageQueue.Processed')
+    AND ${WINDOW}
+    AND (${extra})
+  GROUP BY block_height, event_index, ctx
+),
+xf_contexts AS (SELECT DISTINCT block_height, ctx FROM xf_barriers),
+xf_deposits AS (
+  ${deposits}
+),
+xf_run_events AS (
+  SELECT block_height, ifNull(extrinsic_index, ${HOOK_CONTEXT}) AS ctx, groupUniqArray(event_index) AS idx
+  FROM price_data.raw_events
+  WHERE event_name IN (${runList})
+    AND ${WINDOW}
+    AND (${extra})
+    AND ${inContext}
+  GROUP BY block_height, ctx
+),
+xf_dust AS (
+  SELECT DISTINCT block_height, event_index + 1 AS deposit_index
+  FROM price_data.raw_events
+  WHERE event_name = 'Balances.DustLost'
+    AND ${WINDOW}
+    AND (${extra})
+    AND ${inContext}
+),
+xf_runs AS (
+  SELECT block_height, ctx, event_index AS barrier, barrier_name, args,
+         lagInFrame(toInt64(event_index), 1, toInt64(-1)) OVER (PARTITION BY block_height, ctx ORDER BY event_index ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS floor
+  FROM xf_barriers
+),
+xf_fees AS (
+  SELECT r.block_height AS block_height, r.ctx AS ctx, r.barrier AS barrier,
+         any(r.barrier_name) AS barrier_name, any(r.args) AS barrier_args,
+         max(d.event_index) AS event_index
+  FROM xf_runs AS r
+  INNER JOIN xf_deposits AS d ON d.block_height = r.block_height AND d.ctx = r.ctx
+  LEFT JOIN xf_run_events AS p ON p.block_height = r.block_height AND p.ctx = r.ctx
+  WHERE toInt64(d.event_index) > r.floor AND d.event_index < r.barrier
+    AND length(arrayFilter(i -> i > d.event_index AND i < r.barrier, p.idx)) = toInt64(r.barrier) - toInt64(d.event_index) - 1
+    AND (d.block_height, d.event_index) NOT IN (SELECT block_height, deposit_index FROM xf_dust)
+  GROUP BY r.block_height, r.ctx, r.barrier
+)`
+}
+
+/**
+ * XCM execution fees — what the XCM weight trader kept for running a program
+ * here, deposited to the treasury (xcmFeeRunCtesSql has the mechanism). Two
+ * shapes, one definition:
+ *
+ *   * an INBOUND message's fee (the bulk: ~179k HDX-paid and ~124k DOT-paid
+ *     messages since the MessageQueue migration alone), executed in hook
+ *     context — or inside the `set_validation_data` inherent before block
+ *     5,433,625 — and closed by the message's barrier;
+ *   * a local `PolkadotXcm.execute`'s fee, executed inside its extrinsic and
+ *     closed by `PolkadotXcm.Attempted`. Its substrate transaction fee is the
+ *     next deposit, after the barrier, and network_fee's; an EVM-dispatched
+ *     execute (`Ethereum.transact`, `dispatch_permit`) sees network_fee's
+ *     deposit arm leave this deposit out (it read the XCM fee as gas whenever
+ *     the two settled in one currency — 21 permits in a million blocks).
+ *
+ * The payer. An inbound message's fee is funded from the holding its origin
+ * filled — a sovereign account's `WithdrawAsset` (205 of 614 fees in a recent
+ * 100k-block window) or a reserve asset minted on arrival (408, no local debit
+ * at all) — so the payer is the ORIGIN the barrier names: the sibling's
+ * sovereign account, the relay's `Parent` account, or nobody for a pre-migration
+ * XCMP barrier that names no sender. A message that descended to a user's own
+ * account and paid from it (1 of 614) is attributed to its origin chain like
+ * the rest: the barrier is the one origin the chain records per message, and
+ * another chain executing here IS a user (attributablePayerSql keeps sovereigns
+ * attributed). A local execute's payer is the extrinsic's signer or, for the
+ * unsigned EVM shapes, its recovered effective signer — network_fee's rule.
+ */
+function xcmExecutionFeeRowsSql(extra: string): string {
+  const deposits = `SELECT block_height, event_index, ifNull(extrinsic_index, ${HOOK_CONTEXT}) AS ctx,
+         min(block_timestamp) AS block_time,
+         argMax(if(event_name = 'Tokens.Deposited', toUInt32(JSONExtractUInt(args_json, 'currencyId')), toUInt32(0)), ingested_at) AS currency,
+         argMax(toUInt256OrZero(replaceAll(JSONExtractRaw(args_json, 'amount'), '"', '')), ingested_at) AS amount
+  FROM price_data.raw_events
+  WHERE event_name IN ('Tokens.Deposited', 'Balances.Deposit')
+    AND JSONExtractString(args_json, 'who') = '${TREASURY_ACCOUNT}'
+    AND ${WINDOW}
+    AND (${extra})
+    AND (block_height, ifNull(extrinsic_index, ${HOOK_CONTEXT})) IN (SELECT block_height, ctx FROM xf_contexts)
+  GROUP BY block_height, event_index, ctx`
+  const originKind = "JSONExtractString(f.barrier_args, 'origin', '__kind')"
+  const sovereign = `multiIf(
+           f.barrier_name = 'DmpQueue.ExecutedDownward' OR ${originKind} = 'Parent', '${PARENT_SOVEREIGN_ACCOUNT}',
+           ${originKind} = 'Sibling', ${siblingSovereignAccountSql("JSONExtractUInt(f.barrier_args, 'origin', 'value')")},
+           '')`
+  return `-- rev:xcm_execution_fee
+WITH ${xcmFeeRunCtesSql([...XCM_BARRIER_EVENTS, XCM_EXECUTE_BARRIER_EVENT], deposits, extra)},
+xf_payers AS (
+  SELECT block_height, extrinsic_index AS ctx, coalesce(signer, effective_signer, '') AS payer
+  FROM price_data.raw_extrinsics FINAL
+  WHERE ${WINDOW}
+    AND (${extra})
+    AND (block_height, extrinsic_index) IN (SELECT block_height, ctx FROM xf_fees WHERE barrier_name = '${XCM_EXECUTE_BARRIER_EVENT}')
+),
+paid AS (
+  SELECT f.block_height AS block_height, f.ctx AS ctx, f.event_index AS event_index,
+         if(f.barrier_name = '${XCM_EXECUTE_BARRIER_EVENT}', x.payer, ${sovereign}) AS payer
+  FROM xf_fees AS f
+  LEFT JOIN xf_payers AS x ON x.block_height = f.block_height AND x.ctx = f.ctx
+),
+rows AS (
+  SELECT d.block_height AS block_height, d.block_time AS block_time, d.event_index AS event_index,
+         toUInt16(0) AS leg_index, '' AS dest,
+         ${attributablePayerSql('f.payer')} AS account,
+         d.currency AS asset_id, toString(d.amount) AS amount
+  FROM paid AS f
+  INNER JOIN xf_deposits AS d ON d.block_height = f.block_height AND d.ctx = f.ctx AND d.event_index = f.event_index
+  WHERE d.amount > 0
+)
+${valuedTailSql('xcm_execution_fee')}`
+}
+
+/**
  * The full SELECT for one eventful stream over the anchored window, in the
  * unified revenue_events row shape. `extraPredicate` reaches EVERY source read
  * (the derivations job injects the month-partition bound and the closed-hour
@@ -992,6 +1192,8 @@ export function buildRevenueEventRowsSql(stream: EventfulRevenueStream, extraPre
       return uniswapV3FeeRowsSql(extraPredicate)
     case 'network_fee':
       return networkFeeRowsSql(extraPredicate)
+    case 'xcm_execution_fee':
+      return xcmExecutionFeeRowsSql(extraPredicate)
   }
 }
 

@@ -7,11 +7,12 @@ import type { RevenueStream, StakerPot } from '../types'
 // variants), assigned by BRAND semantics: Omnipool blues for the two Omnipool
 // fees (the deep blue is the hub/H2O fee), HOLLAR sage (--hollar, the brand pair from ui.tsx) for HOLLAR interest,
 // borrow amber for the reserve factor, red/orange for the liquidation pair,
-// HDX pink for network fees (paid to the treasury in HDX terms), lavender for
-// the HSM, and the intent family's --cat-intent for the ICE matched fee, so the
-// fee and the intent activity badges keep one hue in both themes. The palette
-// was validated for adjacent-pair CVD separation in BOTH themes in the stack
-// order below.
+// HDX pink for network fees (paid to the treasury in HDX terms), the cross-chain
+// family's --cat-xcm for XCM execution fees (a message paying for its execution
+// here, the same hue as its activity badge), lavender for the HSM, and the intent
+// family's --cat-intent for the ICE matched fee, so the fee and the intent
+// activity badges keep one hue in both themes. The palette was validated for
+// adjacent-pair CVD separation in BOTH themes in the stack order below.
 export const REVENUE_STREAM_COLOR: Record<RevenueStream, string> = {
   omnipool_asset_fee: 'var(--cat-liquidity)',
   omnipool_protocol_fee: 'var(--cat-liquidity-remove)',
@@ -26,6 +27,7 @@ export const REVENUE_STREAM_COLOR: Record<RevenueStream, string> = {
   // the liquidity family's pool-lifecycle shade, unused by any other stream.
   uniswap_v3_fee: 'var(--cat-liquidity-create)',
   network_fee: 'var(--accent)',
+  xcm_execution_fee: 'var(--cat-xcm)',
 }
 
 export const REVENUE_STREAM_LABEL: Record<RevenueStream, string> = {
@@ -41,6 +43,9 @@ export const REVENUE_STREAM_LABEL: Record<RevenueStream, string> = {
   ice_matched_fee: 'ICE matched fee',
   uniswap_v3_fee: 'Uniswap v3 pool fees',
   network_fee: 'Network fees',
+  // What the XCM weight trader charged a message (an inbound transfer, a local
+  // PolkadotXcm.execute) for its execution here, paid to the treasury.
+  xcm_execution_fee: 'XCM execution fees',
 }
 
 /**
@@ -49,7 +54,7 @@ export const REVENUE_STREAM_LABEL: Record<RevenueStream, string> = {
  * theme surfaces — reordering it re-opens that check.
  */
 export const REVENUE_STREAMS_ORDERED: RevenueStream[] = [
-  'network_fee', 'hollar_borrow', 'omnipool_asset_fee', 'pepl_liquidation_profit',
+  'network_fee', 'xcm_execution_fee', 'hollar_borrow', 'omnipool_asset_fee', 'pepl_liquidation_profit',
   'omnipool_protocol_fee', 'asset_reserve', 'hsm_revenue', 'ice_matched_fee', 'uniswap_v3_fee', 'liquidation_penalty',
 ]
 

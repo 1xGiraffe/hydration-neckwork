@@ -134,6 +134,90 @@ describe('deriveFeePayment', () => {
   })
 })
 
+// A PolkadotXcm.execute pays its program's weight to the treasury through the XCM
+// weight trader, which deposits when the executor drops — the last thing before
+// PolkadotXcm.Attempted. The program's WithdrawAsset debited the payer in that
+// currency, so the debit rule alone admits the deposit as a fee; the revenue
+// model books it as the xcm_execution_fee stream instead, and the two readers
+// apply one rule.
+describe('deriveFeePayment: XCM execution fee', () => {
+  const attempted: FeePaymentEvent = { name: 'PolkadotXcm.Attempted', args: { outcome: { __kind: 'Complete' } } }
+  const mirror = (currencyId: number, who: string, amount: string): FeePaymentEvent =>
+    ({ name: 'Currencies.Deposited', args: { currencyId, who, amount } })
+
+  // 15038567-3, a bare PolkadotXcm.execute: 0.00637 DOT to the trader right before
+  // Attempted, then the 1.2676 HDX substrate fee after it.
+  it('drops the trader deposit before Attempted and keeps the substrate fee after it', () => {
+    const events = [
+      nativeWithdraw(PAYER, '1267652060185'),
+      withdrawn(5, PAYER, '363436585125'),
+      { name: 'XcmpQueue.XcmpMessageSent', args: { messageHash: '0x71' } },
+      deposited(5, PAYER, '2101331'),
+      deposited(5, TREASURY, '6369393'),
+      mirror(5, TREASURY, '6369393'),
+      attempted,
+      nativeDeposit(PAYER, '26966971'),
+      nativeDeposit(TREASURY, '1267625093214'),
+      { name: 'Balances.Issued', args: { amount: '1267625093214' } },
+    ]
+    expect(deriveFeePayment(events, PAYER, '1267625093214', '0')).toEqual({
+      assetId: 0, amount: '1267625093214', tipAmount: null,
+    })
+  })
+
+  // 14934388-2, a dispatch_permit running an execute, both settling in DOT: the
+  // trader took 8107653 (event 11) and the permit fee was 7418021 (event 15).
+  // Summing the candidates in the fee currency counted both as the fee.
+  it('does not sum the trader deposit into a same-currency permit fee', () => {
+    const evmPayer = '0x45544800ece792e16f847add756d2c421801ff82999d23330000000000000000'
+    const events = [
+      withdrawn(5, evmPayer, '150852673'),
+      withdrawn(5, evmPayer, '23595741780'),
+      withdrawn(39, evmPayer, '10000000000000000000'),
+      { name: 'XcmpQueue.XcmpMessageSent', args: { messageHash: '0x36' } },
+      deposited(5, evmPayer, '2673992'),
+      deposited(5, TREASURY, '8107653'),
+      mirror(5, TREASURY, '8107653'),
+      attempted,
+      deposited(5, evmPayer, '143434652'),
+      deposited(5, TREASURY, '7418021'),
+    ]
+    expect(deriveFeePayment(events, evmPayer, '0', '0')).toEqual({
+      assetId: 5, amount: '7418021', tipAmount: null,
+    })
+  })
+
+  // 12607469-2, PolkadotXcm.transfer_assets_using_type_and_then: the fee withdrawal
+  // killed the HDX account, its dust reached the treasury, and the in-credit local
+  // leg emitted the same Attempted — with withdrawals between the two. Nothing
+  // before that barrier is the trader's; the fee is the deposit after it.
+  it('leaves a treasury deposit alone when anything but run bookkeeping separates it from the barrier', () => {
+    const events = [
+      nativeWithdraw(PAYER, '882499267177'),
+      { name: 'Balances.DustLost', args: { account: PAYER, amount: '471485963310' } },
+      nativeDeposit(TREASURY, '471485963310'),
+      { name: 'Treasury.Deposit', args: { value: '471485963310' } },
+      withdrawn(5, PAYER, '15939847684'),
+      withdrawn(1000766, PAYER, '26499192'),
+      attempted,
+      { name: 'PolkadotXcm.FeesPaid', args: {} },
+      nativeDeposit(TREASURY, '882499267177'),
+    ]
+    expect(deriveFeePayment(events, PAYER, '882499267177', '0')).toEqual({
+      assetId: 0, amount: '882499267177', tipAmount: null,
+    })
+    // The same shape without the dust: a treasury deposit that a withdrawal
+    // separates from Attempted is not the trader's and stays the fee candidate.
+    const gasThenTransfer = [
+      nativeWithdraw(PAYER, '5000'),
+      nativeDeposit(TREASURY, '5000'),
+      withdrawn(5, PAYER, '15939847684'),
+      attempted,
+    ]
+    expect(deriveFeePayment(gasThenTransfer, PAYER, '0', '0')).toEqual({ assetId: 0, amount: '5000', tipAmount: null })
+  })
+})
+
 // An EVM dispatch never debits through a Withdraw. It PREPAYS gas as
 // Balances.Burned and refunds the unused part as Balances.Minted, so with only
 // Withdraw counted as a debit nothing was ever charged in the resolver's eyes,

@@ -31,7 +31,9 @@
 //
 // So the fee is the treasury deposit — but an extrinsic can hold treasury
 // deposits that are not fees (dust from a killed account arrives the same way,
-// and an Omnipool fee leg can deposit H2O). Three conditions pin the right one:
+// an Omnipool fee leg can deposit H2O, and a `PolkadotXcm.execute` pays its
+// program's weight to the treasury through the XCM weight trader). Four
+// conditions pin the right one:
 //
 //   * its currency was also DEBITED from the fee payer in the same extrinsic —
 //     which is what separates a fee from a pool fee leg or another account's
@@ -40,27 +42,37 @@
 //     account the call killed is swept to the treasury by that hook, as a
 //     `Balances.Deposit` in the very next event, and the payer's own HDX debit
 //     would otherwise vouch for it (orml dust moves as a `Tokens.Transfer`,
-//     never a deposit, so it needs no rule), and
+//     never a deposit, so it needs no rule),
+//   * it is not the XCM weight trader's: the trader deposits its revenue when
+//     the executor drops, which is the last thing before `PolkadotXcm.Attempted`
+//     — so a treasury deposit separated from that barrier only by the run's own
+//     bookkeeping (XCM_FEE_RUN_EVENTS: its Currencies mirror, the HDX
+//     `Balances.Issued` twin, a `PolkadotXcm.Sent`) is the XCM execution fee,
+//     which the revenue model books as its own stream. The payer WAS debited in
+//     that currency (the program's `WithdrawAsset`), so the debit rule alone
+//     admits it — and a `dispatch_permit` whose permit fee settles in the same
+//     currency counted both as one fee. A treasury deposit before the barrier
+//     with anything else between (a withdrawal, a dust sweep's `Treasury.Deposit`)
+//     is not the trader's, and stays a candidate; the in-credit local leg of a
+//     `transfer_assets` emits the same barrier and never a trader deposit, and
 //   * it is the LAST such deposit, because `correct_and_deposit_fee` runs in
 //     post-dispatch, after every event the call itself produced.
+//
+// The resolver therefore takes the extrinsic's WHOLE event sequence in chain
+// order — a pre-filtered list cannot tell a contiguous run from a gap.
 //
 // The revenue model's network-fee stream (services/revenueStreams.ts,
 // networkFeeRowsSql) applies these same rules in SQL, so the fee a page shows
 // and the fee the protocol books are one figure.
 //
 // Verified against 13759746-2 (DOT), 13756091-3 (H2O), 13706669-3 (HDX fee
-// alongside 0.0001 HDX of dust) and 13443355-3 (EVM, three WETH gas deposits).
+// alongside 0.0001 HDX of dust), 13443355-3 (EVM, three WETH gas deposits) and
+// 15038567-3 (a bare PolkadotXcm.execute: 0.00637 DOT to the trader, then the
+// 1.2676 HDX substrate fee).
 import { TREASURY_ACCOUNT } from './revenueStreams.ts'
-export const FEE_BALANCE_EVENTS = [
-  'Tokens.Withdrawn',
-  'Balances.Withdraw',
-  'Balances.Burned',
-  'Tokens.Deposited',
-  'Balances.Deposit',
-  // Moves no fee itself; it marks the one treasury deposit that is not one.
-  'Balances.DustLost',
-] as const
+import { XCM_EXECUTE_BARRIER_EVENT, XCM_FEE_RUN_EVENTS } from './xcmWalkEvents.ts'
 
+const XCM_FEE_RUN = new Set<string>(XCM_FEE_RUN_EVENTS)
 
 export interface FeePaymentEvent {
   name: string
@@ -119,8 +131,9 @@ export function hasSubstrateFee(feeHdx: string | null, tipHdx: string | null): b
  * the extrinsic's events do not name one (no payer, no matching treasury
  * deposit, an inherent).
  *
- * `feeHdx`/`tipHdx` are `raw_extrinsics.fee`/`tip` — the HDX-equivalent base fee
- * and tip.
+ * `events` is the extrinsic's own event sequence, WHOLE and in chain order (see
+ * the module header for why a filtered list will not do). `feeHdx`/`tipHdx` are
+ * `raw_extrinsics.fee`/`tip` — the HDX-equivalent base fee and tip.
  *
  * When they say the substrate charged NOTHING, the cost is EVM gas and every
  * matching treasury deposit is summed rather than only the last one taken: one
@@ -147,14 +160,23 @@ export function deriveFeePayment(
 
   const debited = new Set<number>()
   const deposits: { assetId: number; amount: bigint }[] = []
-  // `events` is the extrinsic's own sequence in chain order (a caller that
-  // pre-filters by FEE_BALANCE_EVENTS keeps it), so "the deposit right after
-  // DustLost" is the previous element.
+  // "The deposit right after DustLost" is the previous element of the sequence.
   let afterDustLost = false
+  // Whether the newest treasury deposit is still joined to the events after it by
+  // nothing but the XCM run's own bookkeeping — true right after it is pushed,
+  // false at the first event that is not in XCM_FEE_RUN_EVENTS. An XCM barrier
+  // arriving while it holds names that deposit as the weight trader's.
+  let lastDepositContiguous = false
   for (const e of events) {
     const dustSweep = afterDustLost
     afterDustLost = e.name === 'Balances.DustLost'
+    if (e.name === XCM_EXECUTE_BARRIER_EVENT) {
+      if (lastDepositContiguous) deposits.pop()
+      lastDepositContiguous = false
+      continue
+    }
     if (e.name === 'Tokens.Withdrawn' || e.name === 'Balances.Withdraw' || e.name === 'Balances.Burned') {
+      lastDepositContiguous = false
       if (accountArg(e.args, 'who') !== who) continue
       const cid = currencyOf(e.name, e.args)
       if (cid != null) debited.add(cid)
@@ -162,7 +184,12 @@ export function deriveFeePayment(
       if (dustSweep || accountArg(e.args, 'who') !== TREASURY_ACCOUNT) continue
       const cid = currencyOf(e.name, e.args)
       const amount = amountArg(e.args)
-      if (cid != null && amount != null && amount > 0n) deposits.push({ assetId: cid, amount })
+      if (cid != null && amount != null && amount > 0n) {
+        deposits.push({ assetId: cid, amount })
+        lastDepositContiguous = true
+      }
+    } else if (!XCM_FEE_RUN.has(e.name)) {
+      lastDepositContiguous = false
     }
   }
 

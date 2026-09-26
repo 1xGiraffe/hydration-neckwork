@@ -137,6 +137,14 @@ describe('Revenue page', () => {
     expect(REVENUE_STREAM_LABEL.uniswap_v3_fee).toBe('Uniswap v3 pool fees')
   })
 
+  it('stacks the XCM execution fee beside the network fee, in the cross-chain hue', () => {
+    // Both are per-event treasury fees, a fraction of a cent each; the river
+    // floors their motes together and the stack keeps them adjacent.
+    expect(REVENUE_STREAMS_ORDERED.indexOf('xcm_execution_fee')).toBe(REVENUE_STREAMS_ORDERED.indexOf('network_fee') + 1)
+    expect(REVENUE_STREAM_LABEL.xcm_execution_fee).toBe('XCM execution fees')
+    expect(REVENUE_STREAM_COLOR.xcm_execution_fee).toBe('var(--cat-xcm)')
+  })
+
   it('keeps one color per staker pot', () => {
     const colors = Object.values(STAKER_POT_COLOR)
     expect(new Set(colors).size).toBe(colors.length)

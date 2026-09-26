@@ -3,14 +3,17 @@ import {
   EVM_EXECUTION_EVENTS,
   ICE_FEE_ACCOUNT,
   ICE_POT_ACCOUNT, TREASURY_H160,
+  PARENT_SOVEREIGN_ACCOUNT,
   PROTOCOL_REVENUE_PREDICATE_SQL,
   REVENUE_EVENT_COLUMNS,
   REVENUE_STREAMS,
   TREASURY_ACCOUNT,
   buildRevenueEventRowsSql,
   hollarBorrowHourlyRows,
+  siblingSovereignAccountSql,
 } from '../src/services/revenueStreams.ts'
 import { OMNIPOOL_ACCOUNT } from '../src/services/valuation.ts'
+import { XCM_BARRIER_EVENTS, XCM_EXECUTE_BARRIER_EVENT, XCM_FEE_RUN_EVENTS } from '../src/services/xcmWalkEvents.ts'
 
 type Row = Record<string, unknown>
 
@@ -145,15 +148,103 @@ describe('network_fee', () => {
   })
 
   it('never counts the Currencies.* mirror events', () => {
-    expect(sql).not.toContain('Currencies.Deposited')
-    expect(sql).not.toContain('Currencies.Withdrawn')
+    // The mirrors appear only in the XCM run vocabulary (events a treasury deposit
+    // may be separated from its barrier by), never in a read that books or
+    // vouches for a deposit.
+    const counting = sql.slice(sql.indexOf('gas_debits AS ('), sql.indexOf('xf_barriers AS ('))
+    expect(counting).toContain('gas_deposits AS (')
+    expect(counting).not.toContain('Currencies.Deposited')
+    expect(counting).not.toContain('Currencies.Withdrawn')
+    expect(sql.slice(sql.indexOf('gas_candidates AS ('))).not.toContain('Currencies.')
+  })
+
+  it("leaves the XCM weight trader's deposit to the xcm_execution_fee stream", () => {
+    // A dispatch_permit or an Ethereum.transact can run a PolkadotXcm.execute; its
+    // program's WithdrawAsset debits the payer in the fee currency, so the trader's
+    // treasury deposit passed the debit rule and — whenever the permit fee settled
+    // in the same currency (21 permits in a million blocks) — was summed into the
+    // gas. Excluded by the fee stream's own definition, so the two are disjoint.
+    expect(sql).toContain(`xf_barriers AS (`)
+    expect(sql).toContain(`event_name IN ('${XCM_EXECUTE_BARRIER_EVENT}')`)
+    expect(sql).toContain('SELECT block_height, event_index, ext_index AS ctx FROM gas_deposits')
+    expect(sql).toContain('AND (d.block_height, d.event_index) NOT IN (SELECT block_height, event_index FROM xf_fees)')
+    // The inbound-message barriers are not this arm's concern: every deposit it
+    // reads sits inside an extrinsic, so the local-execution barrier is the only
+    // one its run CTEs read.
+    expect(sql).not.toMatch(/event_name IN \([^)]*'(MessageQueue\.Processed|DmpQueue\.ExecutedDownward|XcmpQueue\.Success|XcmpQueue\.Fail)'/)
   })
 
   it('prices the substrate arm as HDX regardless of the charged fee currency', () => {
     // actualFee is ALWAYS denominated in HDX (asset 0) — verified across every
     // fee currency; reading the charged currency here would misprice ~25% of rows.
     expect(sql).toMatch(/toUInt32\(0\) AS asset_id/)
-    expect(sql).not.toContain('Currencies.Withdrawn')
+    expect(sql.slice(0, sql.indexOf('xf_barriers AS ('))).not.toContain('Currencies.Withdrawn')
+  })
+})
+
+describe('xcm_execution_fee', () => {
+  const sql = buildRevenueEventRowsSql('xcm_execution_fee')
+
+  it('is listed once, last, so every ordered consumer agrees', () => {
+    expect(REVENUE_STREAMS.indexOf('xcm_execution_fee')).toBe(REVENUE_STREAMS.length - 1)
+    expect(REVENUE_STREAMS.filter(s => s === 'xcm_execution_fee')).toHaveLength(1)
+  })
+
+  it("reads the trader's deposit to the treasury before every execution barrier, in every era", () => {
+    expect(sql).toContain('-- rev:xcm_execution_fee')
+    expect(sql).toContain(`JSONExtractString(args_json, 'who') = '${TREASURY_ACCOUNT}'`)
+    expect(sql).toContain("event_name IN ('Tokens.Deposited', 'Balances.Deposit')")
+    // The inbound barriers of both runtime eras (the feed's own list) plus the
+    // local-execution barrier, in one list — a decode that only knows
+    // MessageQueue.Processed drops every pre-migration message's fee.
+    const barriers = [...XCM_BARRIER_EVENTS, XCM_EXECUTE_BARRIER_EVENT].map(n => `'${n}'`).join(', ')
+    expect(sql).toContain(`event_name IN (${barriers})`)
+    // MessageQueue.Processed is hook-only (its rare extrinsic-context occurrences
+    // are ServiceQueues calls); the pre-migration barriers ran inside the
+    // set_validation_data inherent and keep its extrinsic index as their context.
+    expect(sql).toContain("(extrinsic_index IS NULL OR event_name != 'MessageQueue.Processed')")
+    expect(sql).toContain('ifNull(extrinsic_index, 4294967295) AS ctx')
+  })
+
+  it('takes the last treasury deposit joined to the barrier by run events only, never past the previous barrier', () => {
+    // The trader deposits when the executor drops — after every instruction — so
+    // only the run's own bookkeeping (XCM_FEE_RUN_EVENTS: mirrors, the HDX Issued
+    // twin, AssetsTrapped, Sent, …) may sit between the deposit and the barrier.
+    // The WETH gas of an EVM call the message Transacted, a DCA hook deposit in a
+    // block's first segment and a dust sweep all fail that rule and stay out.
+    const runList = XCM_FEE_RUN_EVENTS.map(n => `'${n}'`).join(', ')
+    expect(sql).toContain(`event_name IN (${runList})`)
+    expect(XCM_FEE_RUN_EVENTS).not.toContain(XCM_EXECUTE_BARRIER_EVENT)
+    expect(sql).toContain('length(arrayFilter(i -> i > d.event_index AND i < r.barrier, p.idx)) = toInt64(r.barrier) - toInt64(d.event_index) - 1')
+    expect(sql).toContain('max(d.event_index) AS event_index')
+    expect(sql).toContain('lagInFrame(toInt64(event_index), 1, toInt64(-1)) OVER (PARTITION BY block_height, ctx ORDER BY event_index')
+    expect(sql).toContain('toInt64(d.event_index) > r.floor AND d.event_index < r.barrier')
+    expect(sql).toContain("'Balances.DustLost'")
+    expect(sql).toContain('NOT IN (SELECT block_height, deposit_index FROM xf_dust)')
+  })
+
+  it('attributes an inbound fee to the origin the barrier names and a local execute to its signer', () => {
+    // Sibling(id) → the `sibl` + LE u32 sovereign; Parent (and every DmpQueue
+    // barrier) → the relay's `Parent` account; a pre-migration XCMP barrier names
+    // no sender and yields ''. A PolkadotXcm.execute pays from its dispatcher:
+    // the signer, or the recovered effective signer of an unsigned EVM dispatch.
+    expect(sql).toContain(`'${PARENT_SOVEREIGN_ACCOUNT}'`)
+    expect(PARENT_SOVEREIGN_ACCOUNT).toMatch(/^0x506172656e74(00){26}$/)
+    expect(sql).toContain(siblingSovereignAccountSql("JSONExtractUInt(f.barrier_args, 'origin', 'value')"))
+    expect(siblingSovereignAccountSql('1000')).toContain("concat('0x7369626c'")
+    expect(sql).toContain("coalesce(signer, effective_signer, '') AS payer")
+    expect(sql).toContain(`if(f.barrier_name = '${XCM_EXECUTE_BARRIER_EVENT}', x.payer,`)
+    // Sovereigns stay attributed (another chain executing here is a user); the
+    // protocol's own pallet accounts blank to the unattributed bucket.
+    expect(sql).toContain("startsWith(f.payer, '0x6d6f646c')")
+    expect(sql).toContain('FROM price_data.raw_extrinsics FINAL')
+  })
+
+  it('books the deposit in its own currency, positive amounts only, valued at event time', () => {
+    expect(sql).toContain("if(event_name = 'Tokens.Deposited', toUInt32(JSONExtractUInt(args_json, 'currencyId')), toUInt32(0))")
+    expect(sql).toContain('WHERE d.amount > 0')
+    expect(sql).toMatch(/'' AS dest/)
+    expect(sql).toContain('ASOF LEFT JOIN')
   })
 })
 
