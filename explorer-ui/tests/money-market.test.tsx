@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MoneyMarketPositions, ProfileStats, mmPositionCount, moneyMarketDebtUsd, profileTabs, resolveProfileView } from '../src/components/AccountSections'
+import { ProfileStats, mmPositionCount, moneyMarketDebtUsd, profileTabs, resolveProfileView } from '../src/components/AccountSections'
 
 const NO_POSITIONS = { orders: 0, liquidity: 0, borrow: 0 }
 import { ActivityBadge } from '../src/components/ActivityTable'
@@ -43,96 +43,7 @@ const supplemental = position({
   healthFactor: '2380000000000000000',
 })
 
-describe('primary-first Money Market presentation', () => {
-  it('renders every market as a full card, primary first, GIGAHDX labeled with its logo', () => {
-    const html = renderToStaticMarkup(<MoneyMarketPositions markets={[supplemental, position()]} defisimAddress="0xabc" />)
-
-    expect(html.indexOf('data-market-key="core"')).toBeLessThan(html.indexOf('data-market-key="gigahdx"'))
-    expect(html).not.toContain('mm-secondary')
-    expect(html).toContain('GIGAHDX · lend &amp; borrow')
-    expect(html).toContain('/assets/67/icon')
-    // both markets carry the full summary stats
-    expect(html.match(/mm-summary/g)).toHaveLength(2)
-    expect(html.match(/https:\/\/defisim\.neckwork\.net/g)).toHaveLength(1)
-  })
-
-  it('never offers DefiSim when only the GIGAHDX market is active', () => {
-    const html = renderToStaticMarkup(<MoneyMarketPositions markets={[supplemental]} defisimAddress="0xabc" />)
-    expect(html).toContain('GIGAHDX · lend &amp; borrow')
-    expect(html).not.toContain('defisim.neckwork.net')
-  })
-
-  it('uses debt divided by collateral for current LTV and exposes an accessible meter', () => {
-    const html = renderToStaticMarkup(<MoneyMarketPositions markets={[position({ totalSuppliedBase: '15000000000' })]} defisimAddress="0xabc" />)
-    expect(html).toContain('$150')
-    expect(html).toContain('Current LTV 40.0%')
-    expect(html).not.toContain('Current LTV 26.7%')
-    expect(html).not.toContain('Current LTV 65.0%')
-    expect(html).toContain('role="meter"')
-    expect(html).toContain('aria-valuetext="40.0% current loan-to-value; liquidation threshold 80%"')
-  })
-
-  it('renders origin badges on supplied aTokens', () => {
-    const html = renderToStaticMarkup(<MoneyMarketPositions markets={[position({
-      reserves: [{
-        assetId: 1003,
-        iconAssetId: 22,
-        symbol: 'aUSDC',
-        decimals: 6,
-        parachainId: 1000,
-        origin: { ecosystem: 'polkadot', chainId: '1000', assetId: null },
-        supplied: '1000000',
-        debt: '0',
-        suppliedUsd: 1,
-        debtUsd: null,
-        collateral: true,
-      }],
-    })]} />)
-
-    expect(html).toContain('/polkadot/1000/icon.svg')
-    expect(html).toContain('/polkadot/2034/assets/22/icon.svg')
-  })
-
-  // A reserve that IS a pool share has no single icon to borrow: a2-Pool-PRIME is
-  // PRIME+HOLLAR, so it draws as that cluster, exactly as the activity feed draws
-  // it. Without the members it fell back to a bare glyph.
-  it('draws a pool-share reserve as its pool, not as one bare glyph', () => {
-    const html = renderToStaticMarkup(<MoneyMarketPositions markets={[position({
-      reserves: [{
-        assetId: 1143,
-        iconAssetId: 143,
-        iconAssetIds: [43, 222],
-        symbol: 'a2-Pool-PRIME',
-        decimals: 18,
-        parachainId: null,
-        origin: null,
-        supplied: '1000000000000000000',
-        debt: '0',
-        suppliedUsd: 1,
-        debtUsd: null,
-        collateral: true,
-      }],
-    })]} />)
-    // 43 ships a .png and 222 an .svg, so the pair is asserted extension-agnostically.
-    expect(html).toContain('/assets/43/icon.')
-    expect(html).toContain('/assets/222/icon.')
-  })
-
-  // A reserve names an asset the reader can open — every other surface links its
-  // assets, and the positions card left them as dead text.
-  it('links each reserve to its asset page', () => {
-    const html = renderToStaticMarkup(<MoneyMarketPositions markets={[position({
-      reserves: [{
-        assetId: 1143, iconAssetId: 143, symbol: 'a2-Pool-PRIME', decimals: 18,
-        parachainId: null, origin: null, supplied: '1000000000000000000', debt: '0',
-        suppliedUsd: 1, debtUsd: null, collateral: true,
-      }],
-    })]} />)
-    expect(html).toContain('href="/asset/1143"')
-  })
-
-  // The Borrow tab renders one card per isolated market, so the badge counts
-  // one per market — an account lending in core, GIGAHDX and BIL shows 3, not 1.
+describe('money-market profile helpers', () => {
   it('counts one position per isolated money market', () => {
     expect(mmPositionCount([])).toBe(0)
     expect(mmPositionCount([position(), supplemental])).toBe(2)
@@ -205,25 +116,6 @@ describe('primary-first Money Market presentation', () => {
       .toEqual({ key: 'activity', label: 'Activity' })
   })
 
-  // Only a row that SUMS several members shows the worst of them, so only that
-  // row may say so. This used to key off simAccount, which meant "has a DefiSim
-  // target" — true of the tag aggregate alone until per-account rows gained one
-  // so each could link to its own address, at which point every single account
-  // claimed to be showing the lowest of several.
-  it('labels a multi-member aggregate as the lowest real member health', () => {
-    const html = renderToStaticMarkup(<MoneyMarketPositions markets={[position({ simAccount: '0xabc', memberCount: 3 })]} />)
-    expect(html).toContain('Lowest member health')
-  })
-
-  it('calls it a health factor when the row is one account, DefiSim target or not', () => {
-    // A per-account row on a tag page: carries a sim target, sums nobody.
-    const perAccount = renderToStaticMarkup(<MoneyMarketPositions markets={[position({ simAccount: '0xabc' })]} />)
-    expect(perAccount).toContain('Health factor')
-    expect(perAccount).not.toContain('Lowest member health')
-    // A tag whose market has exactly one holder has a health factor, not a lowest one.
-    const single = renderToStaticMarkup(<MoneyMarketPositions markets={[position({ simAccount: '0xabc', memberCount: 1 })]} />)
-    expect(single).not.toContain('Lowest member health')
-  })
 })
 
 // Both surfaces show Value as portfolio MINUS money-market debt, so the stat is
@@ -289,9 +181,9 @@ describe('supplemental market hints', () => {
   })
 })
 
-// Claimable lending incentives are already inside the account's Value; the UI
-// states their share on the profile and under the market they accrue on, never
-// adding them to Lent — and an unpriced one reads as its amount, never "$0.00".
+// Claimable lending incentives are already inside the account's Value; the
+// profile states their share, counting unpriced ones aloud, never adding them to
+// Lent. The per-market line is the Borrow tab's (borrow-tab.test.tsx).
 describe('unclaimed lending incentives', () => {
   const gdot = { assetId: 69, symbol: 'GDOT', name: null, decimals: 18, parachainId: null }
   const text = (html: string) => html.replace(/<[^>]+>/g, '')
@@ -301,15 +193,5 @@ describe('unclaimed lending incentives', () => {
     const html = text(renderToStaticMarkup(<ProfileStats valueUsd={1000} moneyMarketRewards={{ asOfBlock: 15_000_000, totalUsd: 12.5, items: [item(), item({ claimableUsd: null })] }} />))
     expect(html).toContain('Incl. $12.50 unclaimed lending incentives (+ 1 unpriced, not included)')
     expect(text(renderToStaticMarkup(<ProfileStats valueUsd={1000} moneyMarketRewards={{ asOfBlock: 1, totalUsd: 0, items: [] }} />))).not.toContain('lending incentives')
-  })
-
-  it('shows the market\'s incentives as a card stat, and raw amounts when none is priced', () => {
-    const priced = text(renderToStaticMarkup(<MoneyMarketPositions markets={[position({ unclaimedRewards: [item()] } as Partial<MoneyMarketPosition>)]} />))
-    expect(priced).toContain('Unclaimed incentives$12.50')
-    const unpriced = text(renderToStaticMarkup(<MoneyMarketPositions markets={[position({ unclaimedRewards: [item({ claimableUsd: null })] } as Partial<MoneyMarketPosition>)]} />))
-    expect(unpriced).toContain('Unclaimed incentives2.1 GDOT')
-    expect(unpriced).not.toContain('Unclaimed incentives$0.00')
-    const none = text(renderToStaticMarkup(<MoneyMarketPositions markets={[position()]} />))
-    expect(none).not.toContain('Unclaimed incentives')
   })
 })
