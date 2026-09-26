@@ -1092,6 +1092,25 @@ export function liquidityCandidateArgs(eventName: string, args: Record<string, u
   }
 }
 
+// The candidate row a raw liquidity event yields — the in-memory twin of a
+// liquidity_activity row, for the two builders that read raw_events themselves:
+// the extrinsic page and the block page's hook section. ONE construction, through
+// liquidityCandidateArgs, so neither can restate the amount pairing in SQL and
+// drift from LIQUIDITY_AMOUNT_ARG (the block page once read `shares` through a
+// bare presence chain, the fallthrough liquidityAmountPairing forbids the MVs).
+interface RawLiquidityActivityEvent { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; args_json: string }
+export function liquidityCandidateFromEvent(e: RawLiquidityActivityEvent): LiquidityAmountCandidate & { ts: string; asset_b: number; pool_acc: string } {
+  const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
+  return {
+    block_height: e.block_height,
+    event_index: e.event_index,
+    extrinsic_index: e.extrinsic_index,
+    event_name: e.event_name,
+    ts: e.ts,
+    ...liquidityCandidateArgs(e.event_name, args),
+  }
+}
+
 // Drop every Omnipool.PositionCreated candidate whose block also holds an
 // Omnipool.LiquidityAdded naming the same account and asset: those are the two
 // companion events of one user add_liquidity, already rendered by the
@@ -19814,17 +19833,7 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
     const liqRouteEndpoints = routerRouteEndpoints(events)
     const liqRows = suppressPositionCreatedCompanions(events
       .filter(e => LIQUIDITY_EVENTS.includes(e.event_name))
-      .map(e => {
-        const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
-        return {
-          block_height: e.block_height,
-          extrinsic_index: e.extrinsic_index,
-          event_name: e.event_name,
-          ...liquidityCandidateArgs(e.event_name, args),
-          ts: e.ts,
-          event_index: e.event_index,
-        }
-      })
+      .map(liquidityCandidateFromEvent)
       .filter(r => !isRouterHopLiquidity(r.event_name, r.who, r.asset_id,
         r.extrinsic_index == null ? undefined : liqRouteEndpoints.get(r.extrinsic_index))))
     await fillMissingLiquidityAmounts(liqRows)
@@ -20199,22 +20208,15 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
     }),
     // Extrinsic-less liquidity (Stableswap/Omnipool add/remove triggered by a
     // hook, e.g. protocol-owned liquidity rebalances) — same event list +
-    // module-account exclusion as getRecentLiquidity (source of truth).
+    // module-account exclusion as getRecentLiquidity (source of truth). The row's
+    // who/asset/amount are read from the args in memory (liquidityCandidateFromEvent,
+    // as on the extrinsic page), never restated here in SQL.
     client.query({
-      query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-                if(JSONHas(args_json,'who'), JSONExtractString(args_json,'who'), JSONExtractString(args_json,'owner')) AS who,
-                multiIf(JSONHas(args_json,'rewardCurrency'), JSONExtractInt(args_json,'rewardCurrency'),
-                  JSONHas(args_json,'assetId'), JSONExtractInt(args_json,'assetId'),
-                  JSONHas(args_json,'poolId'), JSONExtractInt(args_json,'poolId'),
-                  JSONHas(args_json,'assetA'), JSONExtractInt(args_json,'assetA'),
-                  JSONHas(args_json,'asset'), JSONExtractInt(args_json,'asset'),
-                  JSONExtractInt(args_json,'asset_id')) AS asset_id,
-                multiIf(JSONHas(args_json,'claimed'), JSONExtractString(args_json,'claimed'), JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'shares')) AS amount,
-                toUInt32(greatest(0, JSONExtractInt(args_json,'assetB'))) AS asset_b
+      query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
               FROM price_data.raw_events
               WHERE block_height = {h:UInt32} AND extrinsic_index IS NULL
                 AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
-                ${liquidityWhoExclusionSql()}
+                ${liquidityWhoExclusionSql("if(JSONHas(args_json,'who'), JSONExtractString(args_json,'who'), JSONExtractString(args_json,'owner'))")}
               ORDER BY event_index`,
       query_params: { h: height },
       format: 'JSONEachRow',
@@ -20386,9 +20388,9 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
   }
 
   // Extrinsic-less liquidity — mirrors getRecentLiquidity's construction
-  // (including its fillMissingLiquidityAmounts backfill, a no-op here since it
-  // only applies to extrinsic-scoped rows).
-  const liqRows = suppressPositionCreatedCompanions(await liquidityRes.json<LiquidityAmountCandidate & { ts: string }>())
+  // (including its fillMissingLiquidityAmounts backfill, which scopes a hook row's
+  // legs to the block's out-of-extrinsic transfers).
+  const liqRows = suppressPositionCreatedCompanions((await liquidityRes.json<RawLiquidityActivityEvent>()).map(liquidityCandidateFromEvent))
   await fillMissingLiquidityAmounts(liqRows)
   const seenLiquidity = new Set<string>()
   for (const r of liqRows) {
