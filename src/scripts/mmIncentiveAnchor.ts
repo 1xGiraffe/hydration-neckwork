@@ -16,8 +16,17 @@
 //
 // for every reward / programme that existed at B0. Never derived: each value is
 // what the view returned at B0. A zero is not stored (a missing row reads as 0).
+//
+// Captured whole once and then TOPPED UP every cycle (incentiveKeysToRead), the
+// aToken anchor's way: a candidate user the sources name since the last capture
+// that has no row is read at B0. The candidate sources are log-fed and the logs
+// before B0 are partial, so a user whose every pre-B0 log fell in a gap — measured
+// at B0: 18 users, some holding an unclaimed accrual to this day — is named only
+// once a source that does not share the gap (the Substrate legs of the registry
+// asset over the aToken) is read, and is then anchored the cycle after — never
+// left out for good.
 
-import { blockTag, padAddress, parseUint, type EthCall, type EthCallRequest } from './atokenAnchor.js'
+import { blockTag, padAddress, parseUint, type AnchorMode, type EthCall, type EthCallRequest } from './atokenAnchor.js'
 
 export const REWARDS_CONTROLLER = '0x7472a3d0891df2401d981a5954d07e364f05060f'
 
@@ -43,8 +52,10 @@ export interface IncentiveAnchorRow {
   anchor_block: number
 }
 
+export type IncentiveAnchorKey = Pick<IncentiveAnchorRow, 'user_address' | 'asset_address' | 'reward_address'>
+
 /** The read that states one anchor row. */
-export function anchorCall(row: Pick<IncentiveAnchorRow, 'user_address' | 'asset_address' | 'reward_address'>, controller = REWARDS_CONTROLLER): EthCallRequest {
+export function anchorCall(row: IncentiveAnchorKey, controller = REWARDS_CONTROLLER): EthCallRequest {
   const { user_address: user, asset_address: asset, reward_address: reward } = row
   if (user === '' && asset !== '') return { to: controller, data: `0x${INCENTIVE_SEL.getRewardsData}${padAddress(asset)}${padAddress(reward)}` }
   if (user !== '' && asset === '') return { to: controller, data: `0x${INCENTIVE_SEL.getUserAccruedRewards}${padAddress(user)}${padAddress(reward)}` }
@@ -59,9 +70,9 @@ export function anchorValue(hex: string): bigint | null {
 }
 
 /** Every key the anchor reads at B0: programme indexes, then per user one accrual per reward and one index per programme. */
-export function anchorKeys(users: string[], programmes: Programme[]): Array<Pick<IncentiveAnchorRow, 'user_address' | 'asset_address' | 'reward_address'>> {
+export function anchorKeys(users: string[], programmes: Programme[]): IncentiveAnchorKey[] {
   const rewards = [...new Set(programmes.map(p => p.reward))].sort()
-  const keys: Array<Pick<IncentiveAnchorRow, 'user_address' | 'asset_address' | 'reward_address'>> = []
+  const keys: IncentiveAnchorKey[] = []
   for (const p of programmes) keys.push({ user_address: '', asset_address: p.asset, reward_address: p.reward })
   for (const user of users) {
     for (const reward of rewards) keys.push({ user_address: user, asset_address: '', reward_address: reward })
@@ -70,14 +81,36 @@ export function anchorKeys(users: string[], programmes: Programme[]): Array<Pick
   return keys
 }
 
+/** What the table already holds, at the grain a capture reads: users with any row, programmes (`${asset}|${reward}`) with an index row. */
+export interface AnchoredIncentiveKeys { users: ReadonlySet<string>; programmes: ReadonlySet<string> }
+
+export const NOTHING_ANCHORED: AnchoredIncentiveKeys = { users: new Set(), programmes: new Set() }
+
 /**
- * Read every anchor key at `anchorBlock` and keep the non-zero values. An empty
- * return (a reverted view) throws: the controller existed at B0 for every
- * programme passed in, so an empty answer is a failed read, not a zero.
+ * The keys one cycle reads, normalised (lowercased, H160-shaped, deduplicated,
+ * sorted). A full capture reads every key (anchorKeys); a top-up reads the
+ * programme rows the table lacks and every key of each user the table holds NO row
+ * for. The grain is the user, not the key: a capture reads a user's keys together
+ * (one accrual per reward, one index per programme, and the programmes at B0 are
+ * fixed once the controller's logs are in), so a user with any row was read whole.
+ * A user with none either read zero everywhere — a post-B0 user, re-read at one
+ * call per key, the aToken top-up's rule — or was never a candidate: one the
+ * sources name since the last capture, which is what the top-up is for.
  */
-export async function readIncentiveAnchor(users: string[], programmes: Programme[], anchorBlock: number, ethCall: EthCall, controller = REWARDS_CONTROLLER): Promise<IncentiveAnchorRow[]> {
+export function incentiveKeysToRead(users: readonly string[], programmes: readonly Programme[], anchored: AnchoredIncentiveKeys, mode: AnchorMode): IncentiveAnchorKey[] {
   const normUsers = [...new Set(users.map(u => u.toLowerCase()))].filter(u => /^0x[0-9a-f]{40}$/.test(u)).sort()
   const keys = anchorKeys(normUsers, programmes.map(p => ({ asset: p.asset.toLowerCase(), reward: p.reward.toLowerCase() })))
+  if (mode === 'full') return keys
+  return keys.filter(k => (k.user_address === '' ? !anchored.programmes.has(`${k.asset_address}|${k.reward_address}`) : !anchored.users.has(k.user_address)))
+}
+
+/**
+ * Read the given anchor keys at `anchorBlock` and keep the non-zero values. An
+ * empty return (a reverted view) throws: the controller existed at B0 for every
+ * programme passed in, so an empty answer is a failed read, not a zero.
+ */
+export async function readIncentiveAnchorKeys(keys: readonly IncentiveAnchorKey[], anchorBlock: number, ethCall: EthCall, controller = REWARDS_CONTROLLER): Promise<IncentiveAnchorRow[]> {
+  if (!keys.length) return []
   const results = await ethCall(keys.map(k => anchorCall(k, controller)), blockTag(anchorBlock))
   const rows: IncentiveAnchorRow[] = []
   keys.forEach((key, i) => {
@@ -86,6 +119,11 @@ export async function readIncentiveAnchor(users: string[], programmes: Programme
     if (value > 0n) rows.push({ ...key, value: value.toString(), anchor_block: anchorBlock })
   })
   return rows
+}
+
+/** A full capture: every anchor key of every user and programme, read at `anchorBlock`. */
+export async function readIncentiveAnchor(users: string[], programmes: Programme[], anchorBlock: number, ethCall: EthCall, controller = REWARDS_CONTROLLER): Promise<IncentiveAnchorRow[]> {
+  return readIncentiveAnchorKeys(incentiveKeysToRead(users, programmes, NOTHING_ANCHORED, 'full'), anchorBlock, ethCall, controller)
 }
 
 export interface IncentiveVerifyResult {
@@ -120,6 +158,8 @@ export async function verifyIncentiveAnchor(rows: IncentiveAnchorRow[], ethCall:
  * capture: the backfill low-water, just below the controller's first log
  * (its Initialized/first AssetConfigUpdated at 7,346,897; first Accrued 7,347,162).
  * The candidate set is read from those logs, so capturing on a partial backfill
- * would anchor too few users — and, the table then being non-empty, never again.
+ * would anchor too few users; later cycles top the table up with the candidates
+ * the sources name since (incentiveKeysToRead), but the full capture is the one
+ * that reads them all at once.
  */
 export const CONTROLLER_LOGS_FROM = 7_346_900
