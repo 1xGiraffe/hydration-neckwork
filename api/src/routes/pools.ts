@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { getAssetLiquidity, getOmnipoolAssetLps, getOmnipoolDetail, getPoolDetail, getPoolLps, getPoolsIndex, getUniswapV3PoolDetail, getUniswapV3PoolHistory, getUniswapV3PoolLiquidity } from '../services/poolService.ts'
+import { getAssetLiquidity, getOmnipoolAssetLps, getOmnipoolDetail, getPoolDetail, getPoolLps, getPoolSnapshots, getPoolsIndex, getUniswapV3PoolDetail, getUniswapV3PoolHistory, getUniswapV3PoolLiquidity } from '../services/poolService.ts'
 import { getAssetActivity, getPoolSwaps, getV3PoolActivity } from '../services/explorerService.ts'
 import { DAILY_GRAIN, grainForWindow } from '../services/historyGrain.ts'
+import { DEFAULT_SNAPSHOT_POINTS, MAX_SNAPSHOT_POINTS, SNAPSHOT_RESOLUTIONS, snapshotRequestProblem } from '../services/poolSnapshots.ts'
 
 // Liquidity-pool endpoints: the asset Liquidity tab, stableswap/XYK pool detail
 // pages (keyed by the share/LP asset id) and the Omnipool page. All models are
@@ -19,6 +20,21 @@ const windowSchema = z.object({
   fromTs: z.coerce.number().int().min(0).max(0xffff_ffff),
   toTs: z.coerce.number().int().min(0).max(0xffff_ffff),
   points: z.coerce.number().int().min(10).max(400).optional(),
+})
+
+// The snapshot route's window: heights or unix seconds, either end optional (the
+// service defaults a missing end to the pool's life and the newest `limit`
+// points), a resolution off the declared list and a point budget. Consistency
+// between the fields (from ≤ to, `block` resolution addressed by height) is
+// snapshotRequestProblem's, so the tool tier can quote the same sentence.
+const snapshotQuerySchema = z.object({
+  fromBlock: uint32Schema.optional(),
+  toBlock: uint32Schema.optional(),
+  fromTs: uint32Schema.optional(),
+  toTs: uint32Schema.optional(),
+  resolution: z.enum(SNAPSHOT_RESOLUTIONS).optional(),
+  stepBlocks: z.coerce.number().int().min(1).max(100_000_000).optional(),
+  limit: z.coerce.number().int().min(1).max(MAX_SNAPSHOT_POINTS).optional(),
 })
 
 function historyWindow(query: unknown): { grain: typeof DAILY_GRAIN; win?: { fromSec: number; toSec: number } } {
@@ -85,6 +101,26 @@ export async function poolsRoutes(fastify: FastifyInstance) {
     const detail = await getPoolDetail(poolId.data, grain, win)
     if (!detail) return reply.status(404).send({ error: 'Pool not found' })
     return detail
+  })
+
+  // The pool's state as exact observations — raw integer reserves, pegs,
+  // issuance, amplification and fee, each stamped with the block it was read at
+  // — over a bounded window at a declared resolution. The detail route's daily
+  // `history` is the same source scaled and carried for a chart; a simulation
+  // calibrates on this one. Bounds are `fromBlock`/`toBlock` or `fromTs`/`toTs`
+  // (unix seconds; never `from`/`to`, the calendar-day filter names); the
+  // response states its own semantics, coverage and truncation.
+  fastify.get('/explorer/pool/:poolId/snapshots', async (req, reply) => {
+    const poolId = uint32Schema.safeParse((req.params as { poolId: string }).poolId)
+    if (!poolId.success) return reply.status(400).send({ error: 'Invalid pool id' })
+    const q = snapshotQuerySchema.safeParse(req.query)
+    if (!q.success) return reply.status(400).send({ error: `Invalid snapshot query: ${q.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}` })
+    const request = { ...q.data, resolution: q.data.resolution ?? 'grid', limit: q.data.limit ?? DEFAULT_SNAPSHOT_POINTS }
+    const problem = snapshotRequestProblem(request)
+    if (problem) return reply.status(400).send({ error: problem })
+    const snapshots = await getPoolSnapshots(poolId.data, request)
+    if (!snapshots) return reply.status(404).send({ error: 'Pool not found' })
+    return snapshots
   })
 
   // A pool's recent activity: the swaps that happened IN it, merged with what
