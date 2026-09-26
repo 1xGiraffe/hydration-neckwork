@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { LIQUIDITY_AMOUNT_ARG, liquidityAmountFromArgs } from '../src/services/explorerService.ts'
+import { LIQUIDITY_AMOUNT_ARG, liquidityAmountFromArgs, liquidityCandidateFromEvent } from '../src/services/explorerService.ts'
 
 const schema = readFileSync(new URL('../../clickhouse/schema/003_materialized_views.sql', import.meta.url), 'utf8')
+const service = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
 
 // A liquidity row displays one amount against one asset_id, and the event arg that
 // holds that amount differs per event. A generic presence chain
@@ -72,6 +73,29 @@ describe('liquidity display amount pairing', () => {
     for (const [name, args, expected] of cases) {
       expect(liquidityAmountFromArgs(name, args), name).toBe(expected)
     }
+  })
+
+  // The two builders that read raw_events themselves (the extrinsic page, the
+  // block page's hook section) construct their rows in memory through the arg map,
+  // so a raw row of each event yields exactly what liquidityAmountFromArgs decides.
+  it('builds an in-memory candidate from a raw event through the same arg map', () => {
+    const base = { block_height: 100, event_index: 7, extrinsic_index: null, ts: '2026-08-01 00:00:00' }
+    const removed = liquidityCandidateFromEvent({ ...base, event_name: 'XYK.LiquidityRemoved', args_json: JSON.stringify({ who: 'x', assetA: 1000085, assetB: 5, shares: '21174522741' }) })
+    expect(removed).toMatchObject({ block_height: 100, event_index: 7, extrinsic_index: null, who: 'x', asset_id: 1000085, asset_b: 5, amount: '', pool_acc: '' })
+    const stable = liquidityCandidateFromEvent({ ...base, event_name: 'Stableswap.LiquidityRemoved', args_json: JSON.stringify({ poolId: 102, who: 'x', shares: '800', amounts: [], fee: '1' }) })
+    expect(stable).toMatchObject({ who: 'x', asset_id: 102, asset_b: 0, amount: '800' })
+    const grant = liquidityCandidateFromEvent({ ...base, event_name: 'Omnipool.PositionCreated', args_json: JSON.stringify({ positionId: '1', owner: 'x', asset: 1000771, amount: '300', shares: '300', price: '7' }) })
+    expect(grant).toMatchObject({ who: 'x', asset_id: 1000771, amount: '300' })
+    const created = liquidityCandidateFromEvent({ ...base, event_name: 'XYK.PoolCreated', args_json: JSON.stringify({ who: 'x', assetA: 0, assetB: 5, initialSharesAmount: '500', shareToken: 9, pool: 'p' }) })
+    expect(created).toMatchObject({ who: 'x', asset_id: 0, asset_b: 5, amount: '', pool_acc: 'p' })
+  })
+
+  // The block page's hook section once restated the amount in SQL as a bare
+  // presence chain (claimed → amount → shares) — the fallthrough the views above
+  // may not have. Every raw-event builder goes through liquidityCandidateFromEvent,
+  // so the service holds no SQL extraction of `shares` at all.
+  it('never derives a liquidity amount from shares in SQL in the explorer service', () => {
+    expect(service).not.toMatch(/JSONExtractString\(args_json,\s*'shares'\)/)
   })
 
   it('gates the shares branch of both materialized views on the share-denominated events', () => {
