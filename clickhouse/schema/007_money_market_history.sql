@@ -93,12 +93,20 @@
 --
 -- CONSERVATION (AGENTS.md's receipt-token rule). For each reserve contract,
 --   total_scaled = Σ_holders holder_scaled + anchor_gap
--- where anchor_gap = totalSupply()@B0 − Σ balanceOf(holder)@B0 is the holders
--- the anchor enumeration missed. The gap is 0–400 scaled units for 14 of the 16
--- anchored contracts, and 2.49e23 (aGDOT) / 3.62e14 (a1000765) / 1.39e6 (aUSDT)
--- for the other three. These views report the TOTAL — never the holder sum
--- scaled up to it — so the gap stays visible as a difference against
--- money_market_account_value_snapshots rather than being smeared over holders.
+-- where anchor_gap = scaledTotalSupply()@B0 − Σ scaledBalanceOf(holder)@B0 is the
+-- holders the anchor's candidate sources have not named yet — a holder who
+-- received before B0 inside a gap of the pre-B0 log coverage and never moved.
+-- The anchors loop tops the table up every cycle from sources beyond the money
+-- market's own logs (the collateral sweep, the pool's decoded events, the
+-- Substrate legs of the registry asset over the aToken), so the gap closes as
+-- those name a holder: measured at block 15,047,000, 79 such holders (77 aGDOT,
+-- one aUSDT, one atBTC) were the whole gap of their contracts — 1.04e22 (aGDOT),
+-- 3.62e14 (atBTC), 1.39e6 (aUSDT) — and every other anchored contract had none.
+-- The post-B0 deltas are complete: the chain's scaledTotalSupply equalled the B0
+-- total plus every indexed delta for all 43 live contracts. These views report
+-- the TOTAL — never the holder sum scaled up to it — so any gap stays visible as
+-- a difference against money_market_account_value_snapshots rather than being
+-- smeared over holders.
 --
 -- TWO TRAPS, both silent, both pinned by api/tests/public/schemaMoneyMarket.test.ts:
 --   * RAY must be written toUInt256('1000000000000000000000000000'). The bare

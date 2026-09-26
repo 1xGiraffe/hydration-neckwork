@@ -4,11 +4,15 @@
 // own gate:
 //
 //   aToken scaled-balance anchor (atoken_scaled_anchor): the reserve map is
-//     refreshed every cycle; the anchor is captured when its table is empty (or
-//     every cycle under --force) AND raw ingestion has completed every block from
-//     MM_LOGS_FROM to B0 — its candidate holders come from the money market's own
-//     logs and the models fed by them, so a capture on a partial backfill would
-//     anchor too few holders and, the table then being non-empty, never again.
+//     refreshed every cycle; once raw ingestion has completed every block from
+//     MM_LOGS_FROM to B0, the anchor is captured whole when its table is empty (or
+//     every cycle under --force) and TOPPED UP every other cycle: each candidate
+//     the sources name that has no row yet is read at B0 (atokenAnchor.ts,
+//     anchorKeysToRead). The candidates come from the money market's own logs and
+//     the models fed by them, whose coverage before B0 is partial, plus the
+//     collateral sweep and the Substrate legs of the registry assets over the
+//     aTokens, which fill in over time — so a holder no source named at the first
+//     capture is anchored by the cycle after a source names it, rather than never.
 //     The coverage gate holds under --force too.
 //   money-market incentive anchor (mm_incentive_anchor): captured when its table
 //     is empty (or under --force-incentive) AND raw ingestion has completed every
@@ -30,8 +34,11 @@
 // each retries next cycle.
 
 import type { LmReconcileResult } from './lmEntryCapture.js'
+import type { AnchorMode } from './atokenAnchor.js'
 
-export type AnchorDecision = { capture: true } | { capture: false; reason: string; detail?: Record<string, unknown> }
+type AnchorSkip = { capture: false; reason: string; detail?: Record<string, unknown> }
+export type AnchorDecision = { capture: true } | AnchorSkip
+export type AtokenAnchorDecision = { capture: true; mode: AnchorMode } | AnchorSkip
 
 export interface AtokenAnchorPort {
   /** Refresh atoken_reserve_map (every cycle; picks up newly added reserves). */
@@ -39,7 +46,8 @@ export interface AtokenAnchorPort {
   anchorRowCount(): Promise<number>
   /** The gaps in completed raw ingestion over MM_LOGS_FROM..B0. */
   logGaps(): Promise<Array<{ fromBlock: number; toBlock: number }>>
-  capture(): Promise<void>
+  /** 'full': every candidate; 'top-up': only the candidates without a row. */
+  capture(mode: AnchorMode): Promise<void>
 }
 
 export interface IncentiveAnchorPort {
@@ -52,16 +60,14 @@ export interface LmEntryReconcilePort {
   reconcile(): Promise<LmReconcileResult>
 }
 
-export async function atokenAnchorDecision(port: Pick<AtokenAnchorPort, 'anchorRowCount' | 'logGaps'>, force: boolean, logsFrom: number, anchorBlock: number): Promise<AnchorDecision> {
-  if (!force) {
-    const existing = await port.anchorRowCount()
-    if (existing > 0) return { capture: false, reason: 'anchor already present', detail: { existing_anchor_rows: existing } }
-  }
+export async function atokenAnchorDecision(port: Pick<AtokenAnchorPort, 'anchorRowCount' | 'logGaps'>, force: boolean, logsFrom: number, anchorBlock: number): Promise<AtokenAnchorDecision> {
   const gaps = await port.logGaps()
   if (gaps.length) {
     return { capture: false, reason: `raw ingestion has not completed ${logsFrom}..${anchorBlock} (the money market's logs)`, detail: { gaps: gaps.length, first_gaps: gaps.slice(0, 5) } }
   }
-  return { capture: true }
+  if (force) return { capture: true, mode: 'full' }
+  const existing = await port.anchorRowCount()
+  return { capture: true, mode: existing > 0 ? 'top-up' : 'full' }
 }
 
 export async function incentiveAnchorDecision(port: Pick<IncentiveAnchorPort, 'anchorRowCount' | 'controllerLogGaps'>, force: boolean, logsFrom: number, anchorBlock: number): Promise<AnchorDecision> {
@@ -76,7 +82,8 @@ export async function incentiveAnchorDecision(port: Pick<IncentiveAnchorPort, 'a
   return { capture: true }
 }
 
-export type AnchorOutcome = 'captured' | 'skipped' | 'failed'
+/** captured: a full capture. topped-up: the candidates without a row were read. */
+export type AnchorOutcome = 'captured' | 'topped-up' | 'skipped' | 'failed'
 
 /**
  * clean: nothing was open or missing. repaired: every gap found was closed.
@@ -108,8 +115,8 @@ export async function runAnchorCycle(
     await ports.atoken.refreshReserveMap()
     const decision = await atokenAnchorDecision(ports.atoken, opts.forceAtoken, opts.atokenLogsFrom, opts.anchorBlock)
     if (decision.capture) {
-      await ports.atoken.capture()
-      result.atoken = 'captured'
+      await ports.atoken.capture(decision.mode)
+      result.atoken = decision.mode === 'full' ? 'captured' : 'topped-up'
     } else {
       log({ type: 'atoken_anchor_done', skipped_anchor: true, reason: decision.reason, ...decision.detail })
       result.atoken = 'skipped'
