@@ -9,8 +9,8 @@ import { renderLlmsTxt } from '../../src/mcp/llmsTxt.ts'
 // tool is a change to a published contract, so it fails here until the
 // declaration is updated to match.
 describe('tool registry', () => {
-  it('declares the thirteen names the design pins, uniquely', () => {
-    expect(EXPECTED_TOOL_NAMES).toHaveLength(13)
+  it('declares the fourteen names the design pins, uniquely', () => {
+    expect(EXPECTED_TOOL_NAMES).toHaveLength(14)
     expect(new Set(EXPECTED_TOOL_NAMES).size).toBe(EXPECTED_TOOL_NAMES.length)
   })
 
@@ -36,7 +36,7 @@ describe('tool registry', () => {
     for (const tool of TOOL_DEFINITIONS) {
       expect(Object.keys(tool.inputSchema), `${tool.name} must accept 'format'`).toContain('format')
       // The same instance, so the wording an agent reads is identical on every
-      // tool rather than thirteen near-copies that drift.
+      // tool rather than fourteen near-copies that drift.
       expect(tool.inputSchema.format, `${tool.name} must reuse formatParam from toolTypes.ts`).toBe(formatParam)
     }
   })

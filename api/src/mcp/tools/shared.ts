@@ -647,7 +647,7 @@ export function fit(markdown: string, ctx: ToolContext, advice?: string): string
  * which for JSON means a document that no longer parses. The margin buys space
  * for that section so the trimming stays here, where it can drop whole records.
  */
-const JSON_BUDGET_MARGIN = 2_000
+export const JSON_BUDGET_MARGIN = 2_000
 
 /**
  * The uniform reply: a reading, the record behind it, and any gaps in it.

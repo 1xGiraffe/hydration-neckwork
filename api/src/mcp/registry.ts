@@ -5,6 +5,7 @@ import { activityTools } from './tools/activity.ts'
 import { accountTools } from './tools/account.ts'
 import { assetTools } from './tools/assets.ts'
 import { poolTools } from './tools/pools.ts'
+import { poolHistoryTools } from './tools/poolHistory.ts'
 import { moneyMarketTools } from './tools/moneyMarket.ts'
 import { governanceTools } from './tools/governance.ts'
 import { networkTools } from './tools/network.ts'
@@ -22,15 +23,17 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ...accountTools,
   ...assetTools,
   ...poolTools,
+  ...poolHistoryTools,
   ...moneyMarketTools,
   ...governanceTools,
   ...networkTools,
   ...protocolTools,
 ]
 
-// The thirteen names the design pins (spec § 3), in registration order. It is
-// the contract a client codes against, so it is declared here rather than
-// derived from whatever happens to be registered.
+// The fourteen names the design pins (spec § 3, plus the pool state history
+// added for simulation calibration), in registration order. It is the contract
+// a client codes against, so it is declared here rather than derived from
+// whatever happens to be registered.
 export const EXPECTED_TOOL_NAMES: readonly string[] = [
   'search',
   'inspect_entity',
@@ -41,6 +44,7 @@ export const EXPECTED_TOOL_NAMES: readonly string[] = [
   'list_assets',
   'get_asset',
   'get_pools',
+  'get_pool_history',
   'get_money_market',
   'get_governance',
   'get_network_status',

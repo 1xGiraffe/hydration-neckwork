@@ -1096,6 +1096,63 @@ export interface PoolDetail {
   history?: unknown
 }
 
+/* ============ pool state snapshots ============ */
+
+export type PoolSnapshotResolution = 'grid' | 'hour' | 'day' | 'block'
+
+export interface PoolSnapshotPeg { num: string; den: string; price: number }
+
+/** One observation of `/explorer/pool/:poolId/snapshots`: chain storage at exactly `block`. */
+export interface PoolSnapshotPoint {
+  block: number
+  hash: string | null
+  /** `YYYY-MM-DD HH:MM:SS` UTC. */
+  time: string
+  t: number
+  /** `hour`/`day` resolution only: the calendar bucket this observation stands for. */
+  bucket?: string
+  /** Raw integers in the response's `assets` order; null where the observation lacks that asset. */
+  reserves: (string | null)[]
+  pegs: (PoolSnapshotPeg | null)[] | null
+  issuance: string | null
+  amplification: number | null
+  amplificationRamp: { initial: number; final: number; initialBlock: number; finalBlock: number } | null
+  /** Substrate Permill: parts per MILLION. */
+  feePermill: number | null
+  specVersion: number | null
+}
+
+export interface PoolSnapshotCoverage {
+  firstObservedBlock: number | null
+  lastObservedBlock: number | null
+  expected: number
+  returned: number
+  missingCount: number
+  missing: (number | string)[]
+  remaining: number
+  truncated: boolean
+  nextFromBlock: number | null
+}
+
+/**
+ * `/explorer/pool/:poolId/snapshots` — a stableswap or XYK pool's state as exact
+ * observations over a bounded window. The response states its own sampling
+ * semantics and coverage; a tool repeats them rather than restating them.
+ */
+export interface PoolSnapshots {
+  kind: 'stableswap' | 'xyk'
+  poolId: number
+  name: string
+  shareToken: AssetRef
+  account: AccountRef
+  assets: AssetRef[]
+  window: { fromBlock: number; toBlock: number }
+  resolution: { kind: PoolSnapshotResolution; stepBlocks: number | null; stepSec: number | null; gridBlocks: number }
+  semantics: { points: string; reserves: string; missing: string; issuance: string; fee: string }
+  coverage: PoolSnapshotCoverage
+  points: PoolSnapshotPoint[]
+}
+
 export interface PoolLpRow {
   account: AccountRef | null
   shares: string

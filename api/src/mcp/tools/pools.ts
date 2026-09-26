@@ -224,7 +224,7 @@ With 'pool' set, the identifier decides the route, and the three forms are not i
 - a numeric id — a stableswap or XYK pool addressed by its SHARE-TOKEN asset id (690, 4200, 110...), not by a position in a list. If no pool carries that share token, the id is retried as an OMNIPOOL-LISTED ASSET and the answer becomes that asset's Omnipool liquidity providers.
 - a 0x-prefixed 40-hex address — a Uniswap v3 (concentrated liquidity) pool, addressed by its contract.
 
-'include' adds sections: 'composition' (on by default for one pool), 'lps' (largest liquidity providers; for a v3 pool the open position ranges instead), 'activity' (the pool's recent classified swaps and liquidity events), 'liquidity' (v3 only: the tick table and open ranges by owner), and 'history' (a first/last/min/max summary of the pool's TVL series, never the raw points).
+'include' adds sections: 'composition' (on by default for one pool), 'lps' (largest liquidity providers; for a v3 pool the open position ranges instead), 'activity' (the pool's recent classified swaps and liquidity events), 'liquidity' (v3 only: the tick table and open ranges by owner), and 'history' (a first/last/min/max summary of the pool's TVL series, never the raw points — for a stableswap or XYK pool's exact reserve/peg/issuance observations with their source blocks, call get_pool_history).
 
 Traps worth knowing. An Omnipool asset that has been DELISTED — DOT, asset id 5, is the standing example — returns "Asset not in the Omnipool" rather than an empty pool; this tool says that in words instead of surfacing an error. Omnipool liquidity is owned per LISTED ASSET, not for the pool as a whole, so 'lps' on pool 'omnipool' has no single answer and the tool names the per-asset call instead. Pool history windows are unix SECONDS (fromTs/toTs upstream), not calendar dates. Every amount is scaled by its own asset's decimals and every row carries its explorer URL.`
 
@@ -427,7 +427,13 @@ function renderPoolDetail(d: PoolDetail, ctx: ToolContext, includes: Set<Include
     head,
     includes.has('composition') ? joinBlocks(h3('Composition'), table(['Asset', 'Amount', 'USD', 'Share', 'Peg', 'Peg source'], assetRows)) : null,
     params.length ? joinBlocks(h3('Parameter changes'), bullets(params)) : null,
-    includes.has('history') ? joinBlocks(h3('TVL history'), historySummary(d.history as PoolHistory | undefined) ?? note('no history series in this response')) : null,
+    includes.has('history')
+      ? joinBlocks(
+        h3('TVL history'),
+        historySummary(d.history as PoolHistory | undefined) ?? note('no history series in this response'),
+        note(`This is the daily chart's summary. For the observations behind it — raw per-asset reserves, pegs, issuance, amplification and fee at exact blocks, windowed and paged — call get_pool_history with pool "${d.poolId}".`),
+      )
+      : null,
   )
 }
 

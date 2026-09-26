@@ -3,12 +3,18 @@ import { DAILY_GRAIN, keySeconds, type HistoryGrain } from './historyGrain.ts'
 import { cachedSwr } from './cache.ts'
 import {
   accountRef, ensurePrices, hasExplorerClient, initExplorerService,
-  omnipoolRemoveLiquidity, reconstructAllOmnipoolPositions, resolveDisplayAccountId, v3Registry,
+  omnipoolRemoveLiquidity, reconstructAllOmnipoolPositions, resolveDisplayAccountId, v3Registry, windowedHistoryTtlMs,
   type AccountRef, type AssetRef, type PriceInfo,
 } from './explorerService.ts'
+import { cached } from './cache.ts'
+import {
+  MAX_EXACT_BLOCKS, SNAPSHOT_GRID_BLOCKS, alignToAssets, bucketKeyOf, bucketSlots, countSlots, gridSlots, headerAssetIds,
+  missingSlots, normalizeStride, resolutionDescriptor, snapshotSemantics, strideFor,
+  type PoolSnapshotPoint, type PoolSnapshotsResponse, type SnapshotRequest,
+} from './poolSnapshots.ts'
 import { v3PoolHistory, v3PoolLiquidity, type V3History, type V3HistoryPool, type V3PoolLiquidity } from './uniswapV3History.ts'
 import { ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, sqrtPriceX96ToPrice, tickToPrice, v3ManagerPositions, v3PoolStats, v3PricePoints, v3VaultStats, type V3Pool, type V3Registry } from './uniswapV3Service.ts'
-import { H2O_ASSET_ID, assetDescriptor, currentPriceOf, displayDescriptor, priceAssetId } from './explorerAssets.ts'
+import { ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, assetDescriptor, currentPriceOf, displayDescriptor, priceAssetId } from './explorerAssets.ts'
 import { usdAtPrice } from './assetValue.ts'
 import { xykReserveAssets } from './lpMath.ts'
 import { OMNIPOOL_ACCOUNT } from './valuation.ts'
@@ -1962,6 +1968,406 @@ export async function getUniswapV3PoolHistory(address: string, win?: { fromSec: 
     return {
       ...history, token0: asset(pool.asset0), token1: asset(pool.asset1), fee: pool.fee,
       vaultRanges: (detail?.vault?.ranges ?? []).map(r => ({ priceLower: r.priceLower, priceUpper: r.priceUpper, liquidity: r.liquidity })),
+    }
+  })
+}
+
+// ── Bounded state snapshots ───────────────────────────────────────────────────
+//
+// `/explorer/pool/:poolId/snapshots`: a pool's state as EXACT observations —
+// raw integer reserves per asset, peg rationals, share issuance, amplification
+// and fee — each stamped with the block it was read at (height, hash, time),
+// over a bounded window at a declared resolution. The pool page's daily
+// `history` is the same source scaled and carried forward for a chart; this is
+// the series a simulation calibrates on. The rules of the shape (stride,
+// coverage, alignment, the sentences every response carries) live in
+// poolSnapshots.ts; this half only asks the database.
+//
+// Sources, every one bounded by the pool's own rows: the 600-block grid tables
+// (stableswap_pool_state_history by pool_id, xyk_pool_reserve_history by pool
+// account) for `grid`/`hour`/`day`, and raw_block_snapshots itself for `block`
+// — the indexer stores EVERY block's payload, so an exact replay is a bounded
+// read over a short height range (MAX_EXACT_BLOCKS) rather than an RPC. Hashes
+// come from raw_block_snapshots by height. A response is cached per resolved
+// block window under the bucketed-history finality rule (windowedHistoryTtlMs):
+// a window the head is an hour past cannot change short of a backfill.
+
+interface SnapshotLife { first: number; last: number; first_t: number; last_t: number; assetIds: number[] }
+interface GridEdge { block: number; t: number }
+
+/** Where a pool's grid rows live, as the two predicates every bounded read here starts with. */
+type GridSource =
+  | { kind: 'stableswap'; poolId: number }
+  | { kind: 'xyk'; account: string; createdBlock: number }
+
+function gridTable(src: GridSource): { table: string; where: string; params: Record<string, unknown> } {
+  return src.kind === 'stableswap'
+    ? { table: 'price_data.stableswap_pool_state_history', where: 'pool_id = {pid:UInt32}', params: { pid: src.poolId } }
+    : { table: 'price_data.xyk_pool_reserve_history', where: 'pool_account = {acc:String} AND block_height >= {created:UInt32}', params: { acc: src.account, created: src.createdBlock } }
+}
+
+/** The pool's first and last grid observation, or null when it was never sampled. */
+async function gridLife(src: GridSource): Promise<SnapshotLife | null> {
+  const g = gridTable(src)
+  const res = await client.query({
+    query: `-- pool-snapshots:life
+            SELECT min(block_height) AS first, max(block_height) AS last,
+                   toUnixTimestamp(min(block_timestamp)) AS first_t, toUnixTimestamp(max(block_timestamp)) AS last_t,
+                   ${src.kind === 'stableswap' ? 'argMax(asset_ids, block_height)' : '[argMax(asset_a, block_height), argMax(asset_b, block_height)]'} AS ids
+            FROM ${g.table} WHERE ${g.where} HAVING count() > 0`,
+    query_params: g.params, format: 'JSONEachRow',
+  })
+  const row = (await res.json<{ first: number; last: number; first_t: number; last_t: number; ids: number[] }>())[0]
+  return row ? { first: Number(row.first), last: Number(row.last), first_t: Number(row.first_t), last_t: Number(row.last_t), assetIds: row.ids.map(Number) } : null
+}
+
+/**
+ * The first grid observation at or after a bound, or the last at or before one.
+ * A time bound resolves to the nearest observation inside it, which is what a
+ * window given in seconds can mean on a table keyed by height.
+ */
+async function gridEdge(src: GridSource, side: 'first' | 'last', bound: { block?: number; ts?: number }): Promise<GridEdge | null> {
+  const g = gridTable(src)
+  const agg = side === 'first' ? 'min' : 'max'
+  const cmp = side === 'first' ? '>=' : '<='
+  const cond = bound.block != null ? `block_height ${cmp} {edge:UInt32}` : `block_timestamp ${cmp} toDateTime({edge:UInt32})`
+  const res = await client.query({
+    query: `-- pool-snapshots:edge
+            SELECT ${agg}(block_height) AS block, toUnixTimestamp(${agg}(block_timestamp)) AS t
+            FROM ${g.table} WHERE ${g.where} AND ${cond} HAVING count() > 0`,
+    query_params: { ...g.params, edge: bound.block ?? bound.ts }, format: 'JSONEachRow',
+  })
+  const row = (await res.json<GridEdge>())[0]
+  return row ? { block: Number(row.block), t: Number(row.t) } : null
+}
+
+/** One observation before it is laid out under the header's asset columns. */
+interface Observation {
+  block: number
+  time: string
+  t: number
+  specVersion: number | null
+  assetIds: number[]
+  reserves: string[]
+  pegs: { num: bigint; den: bigint }[] | null
+  issuance: string | null
+  amplification: number | null
+  ramp: PoolSnapshotPoint['amplificationRamp']
+  feePermill: number | null
+}
+
+interface SsGridRow {
+  block_height: number; block_timestamp: string; t: number; asset_ids: number[]; reserves_raw: string[]
+  amplification: number; initial_amplification: number; final_amplification: number; initial_block: number; final_block: number
+  fee_permill: number; total_issuance_raw: string; peg_num: string[]; peg_den: string[]; spec_version: number
+}
+interface XykGridRow { block_height: number; block_timestamp: string; t: number; asset_a: number; asset_b: number; reserve_a_raw: string; reserve_b_raw: string }
+
+function stableswapObservation(s: {
+  block: number; time: string; t: number; specVersion: number | null; assetIds: number[]; reserves: string[]
+  amplification: number; initialAmplification: number; finalAmplification: number; initialBlock: number; finalBlock: number
+  feePermill: number; totalIssuance: string; pegs: { num: bigint; den: bigint }[] | null
+}): Observation {
+  const ramping = s.initialAmplification !== s.finalAmplification
+  return {
+    block: s.block, time: s.time, t: s.t, specVersion: s.specVersion,
+    assetIds: s.assetIds, reserves: s.reserves,
+    pegs: s.pegs,
+    issuance: s.totalIssuance,
+    amplification: s.amplification,
+    ramp: ramping ? { initial: s.initialAmplification, final: s.finalAmplification, initialBlock: s.initialBlock, finalBlock: s.finalBlock } : null,
+    feePermill: s.feePermill,
+  }
+}
+
+const SS_GRID_COLUMNS = `block_height, toString(block_timestamp) AS block_timestamp, toUnixTimestamp(block_timestamp) AS t,
+  asset_ids, reserves_raw, amplification, initial_amplification, final_amplification, initial_block, final_block,
+  fee_permill, total_issuance_raw, peg_num, peg_den, spec_version`
+const XYK_GRID_COLUMNS = `block_height, toString(block_timestamp) AS block_timestamp, toUnixTimestamp(block_timestamp) AS t,
+  asset_a, asset_b, reserve_a_raw, reserve_b_raw`
+
+/**
+ * The grid observations of a window: every `step`-th grid block, or the last
+ * observation of each calendar bucket. `FINAL` is bounded by the pool predicate
+ * on the sort key; it is what makes a replayed grid row appear once.
+ */
+async function gridObservations(src: GridSource, fromBlock: number, toBlock: number, sel: { step: number } | { bucket: 'hour' | 'day' }, n: number): Promise<Observation[]> {
+  const g = gridTable(src)
+  const selection = 'step' in sel
+    ? `block_height % {step:UInt32} = 0`
+    : `block_height IN (SELECT max(block_height) FROM ${g.table} WHERE ${g.where} AND block_height BETWEEN {f:UInt32} AND {t:UInt32}
+                        GROUP BY toStartOfInterval(block_timestamp, INTERVAL 1 ${sel.bucket === 'day' ? 'DAY' : 'HOUR'}))`
+  const res = await client.query({
+    query: `-- pool-snapshots:points
+            SELECT ${src.kind === 'stableswap' ? SS_GRID_COLUMNS : XYK_GRID_COLUMNS}
+            FROM ${g.table} FINAL
+            WHERE ${g.where} AND block_height BETWEEN {f:UInt32} AND {t:UInt32} AND ${selection}
+            ORDER BY block_height LIMIT {n:UInt32}`,
+    query_params: { ...g.params, f: fromBlock, t: toBlock, step: 'step' in sel ? sel.step : 0, n },
+    format: 'JSONEachRow',
+  })
+  if (src.kind === 'stableswap') {
+    return (await res.json<SsGridRow>()).map(r => stableswapObservation({
+      block: Number(r.block_height), time: r.block_timestamp, t: Number(r.t), specVersion: Number(r.spec_version) || null,
+      assetIds: r.asset_ids.map(Number), reserves: r.reserves_raw,
+      amplification: Number(r.amplification), initialAmplification: Number(r.initial_amplification), finalAmplification: Number(r.final_amplification),
+      initialBlock: Number(r.initial_block), finalBlock: Number(r.final_block),
+      feePermill: Number(r.fee_permill), totalIssuance: r.total_issuance_raw,
+      pegs: r.peg_num.length === r.asset_ids.length && r.peg_num.length > 0 ? r.peg_num.map((num, i) => ({ num: BigInt(num), den: BigInt(r.peg_den[i]) })) : null,
+    }))
+  }
+  return (await res.json<XykGridRow>()).map(r => ({
+    block: Number(r.block_height), time: r.block_timestamp, t: Number(r.t), specVersion: null,
+    assetIds: [Number(r.asset_a), Number(r.asset_b)], reserves: [r.reserve_a_raw, r.reserve_b_raw],
+    pegs: null, issuance: null, amplification: null, ramp: null, feePermill: XYK_FEE_PERMILL,
+  }))
+}
+
+/**
+ * The exact replay: one observation per block, decoded from each block's own
+ * snapshot payload. The pool's entry is parsed by the same reader the current-
+ * state surfaces use (parseStableswapPools), so an exact point and the live
+ * page can never read one payload two ways. A block whose payload lacks the
+ * pool yields no observation — the coverage names it.
+ */
+async function exactObservations(src: GridSource, fromBlock: number, toBlock: number): Promise<{ observations: Observation[]; hashes: Map<number, string | null> }> {
+  const family = src.kind === 'stableswap' ? 'stableswap' : 'xyk'
+  const res = await client.query({
+    query: `-- pool-snapshots:exact
+            SELECT block_height, argMax(block_hash, ingested_at) AS hash,
+                   toString(max(block_timestamp)) AS time, toUnixTimestamp(max(block_timestamp)) AS t,
+                   max(spec_version) AS spec,
+                   argMax(JSONExtractRaw(payload_json, '${family}'), ingested_at) AS section
+            FROM price_data.raw_block_snapshots
+            WHERE block_height BETWEEN {f:UInt32} AND {t:UInt32}
+            GROUP BY block_height ORDER BY block_height`,
+    query_params: { f: fromBlock, t: toBlock }, format: 'JSONEachRow',
+  })
+  const observations: Observation[] = []
+  const hashes = new Map<number, string | null>()
+  for (const r of await res.json<{ block_height: number; hash: string; time: string; t: number; spec: number; section: string }>()) {
+    const block = Number(r.block_height)
+    hashes.set(block, r.hash || null)
+    const section = safeJson(r.section)
+    if (src.kind === 'stableswap') {
+      const pool = parseStableswapPools(section).find(p => p.poolId === src.poolId)
+      if (!pool) continue
+      observations.push(stableswapObservation({
+        block, time: r.time, t: Number(r.t), specVersion: Number(r.spec) || null,
+        assetIds: pool.assetIds, reserves: pool.reserves.map(x => x.toString()),
+        amplification: pool.amplification, initialAmplification: pool.initialAmplification, finalAmplification: pool.finalAmplification,
+        initialBlock: pool.initialBlock, finalBlock: pool.finalBlock,
+        feePermill: pool.feePermill, totalIssuance: pool.totalIssuance.toString(), pegs: pool.pegs,
+      }))
+    } else {
+      const pools = (section as { pools?: SnapshotXykPool[] } | null)?.pools
+      const pool = Array.isArray(pools) ? pools.find(p => p.pool_account === src.account) : undefined
+      if (!pool || pool.asset_a == null || pool.asset_b == null) continue
+      observations.push({
+        block, time: r.time, t: Number(r.t), specVersion: Number(r.spec) || null,
+        assetIds: [Number(pool.asset_a), Number(pool.asset_b)], reserves: [String(pool.reserve_a), String(pool.reserve_b)],
+        pegs: null, issuance: null, amplification: null, ramp: null, feePermill: XYK_FEE_PERMILL,
+      })
+    }
+  }
+  return { observations, hashes }
+}
+
+/** Block hashes by height, from the snapshot rows themselves. */
+async function snapshotHashes(blocks: number[]): Promise<Map<number, string | null>> {
+  const out = new Map<number, string | null>()
+  if (!blocks.length) return out
+  const res = await client.query({
+    query: `-- pool-snapshots:hashes
+            SELECT block_height, argMax(block_hash, ingested_at) AS block_hash
+            FROM price_data.raw_block_snapshots WHERE block_height IN {blocks:Array(UInt32)} GROUP BY block_height`,
+    query_params: { blocks }, format: 'JSONEachRow',
+  })
+  for (const r of await res.json<{ block_height: number; block_hash: string }>()) out.set(Number(r.block_height), r.block_hash || null)
+  return out
+}
+
+/**
+ * XYK LP supply standing at each observation's block: the last supply change at
+ * or before it. Block-exact, because the supply moves only on liquidity events
+ * and xyk_lp_total_shares_history records every one.
+ */
+async function xykIssuanceAt(lpAssetId: number, observations: Observation[]): Promise<void> {
+  if (!observations.length) return
+  const res = await client.query({
+    query: `-- pool-snapshots:xyk-issuance
+            SELECT block_height, total_shares_raw FROM price_data.xyk_lp_total_shares_history FINAL
+            WHERE lp_asset_id = {id:Int32} AND block_height <= {t:UInt32} ORDER BY block_height`,
+    query_params: { id: lpAssetId, t: observations[observations.length - 1].block }, format: 'JSONEachRow',
+  })
+  const changes = (await res.json<{ block_height: number; total_shares_raw: string }>()).map(r => ({ block: Number(r.block_height), total: r.total_shares_raw }))
+  let i = 0
+  let standing: string | null = null
+  for (const o of observations) {
+    while (i < changes.length && changes[i].block <= o.block) { standing = changes[i].total; i += 1 }
+    o.issuance = standing
+  }
+}
+
+function layOut(observations: Observation[], assets: number[], hashes: Map<number, string | null>, bucket?: 'hour' | 'day'): PoolSnapshotPoint[] {
+  return observations.map(o => ({
+    block: o.block,
+    hash: hashes.get(o.block) ?? null,
+    time: o.time,
+    t: o.t,
+    ...(bucket ? { bucket: bucketKeyOf(bucket, o.t) } : {}),
+    reserves: alignToAssets(assets, o.assetIds, o.reserves),
+    pegs: o.pegs ? alignToAssets(assets, o.assetIds, o.pegs.map(p => ({ num: p.num.toString(), den: p.den.toString(), price: pegPrice(p.num, p.den) }))) : null,
+    issuance: o.issuance,
+    amplification: o.amplification,
+    amplificationRamp: o.ramp,
+    feePermill: o.feePermill,
+    specVersion: o.specVersion,
+  }))
+}
+
+/**
+ * A pool's state observations over a bounded window. Null when no stableswap or
+ * XYK pool carries the share-token id. The request's own consistency
+ * (snapshotRequestProblem) is the route's to check before calling.
+ */
+export async function getPoolSnapshots(poolId: number, req: SnapshotRequest): Promise<PoolSnapshotsResponse | null> {
+  const ssLife = await gridLife({ kind: 'stableswap', poolId })
+  let src: GridSource
+  let life: SnapshotLife | null
+  let identity: { kind: 'stableswap' | 'xyk'; name: string; account: AccountRef; assetIds: number[] }
+  if (ssLife) {
+    src = { kind: 'stableswap', poolId }
+    life = ssLife
+    identity = { kind: 'stableswap', name: asset(poolId).symbol, account: accountRef(stableswapPoolAccount(poolId)), assetIds: ssLife.assetIds }
+  } else {
+    const regRes = await client.query({
+      query: `-- pool-snapshots:xyk-registry
+              SELECT pool_account, asset_a, asset_b, created_block FROM price_data.xyk_pool_registry FINAL WHERE lp_asset_id = {id:Int32} LIMIT 1`,
+      query_params: { id: poolId }, format: 'JSONEachRow',
+    })
+    const reg = (await regRes.json<{ pool_account: string; asset_a: number; asset_b: number; created_block: number }>())[0]
+    if (!reg) return null
+    src = { kind: 'xyk', account: reg.pool_account, createdBlock: Number(reg.created_block) }
+    life = await gridLife(src)
+    identity = { kind: 'xyk', name: xykName(Number(reg.asset_a), Number(reg.asset_b)), account: accountRef(reg.pool_account), assetIds: [Number(reg.asset_a), Number(reg.asset_b)] }
+  }
+
+  const limit = Math.max(1, req.limit)
+  const resolution = req.resolution
+  const semanticsFor = (assetIds: number[], stepBlocks: number | null) =>
+    snapshotSemantics(identity.kind, resolution, stepBlocks, assetIds.filter(id => ATOKEN_UNDERLYING_ID[id] != null).map(asset))
+  const empty = (fromBlock: number, toBlock: number, stepBlocks: number | null): PoolSnapshotsResponse => ({
+    kind: identity.kind, poolId, name: identity.name, shareToken: asset(poolId), account: identity.account,
+    assets: identity.assetIds.map(asset),
+    window: { fromBlock, toBlock },
+    resolution: resolutionDescriptor(resolution, stepBlocks),
+    semantics: semanticsFor(identity.assetIds, stepBlocks),
+    coverage: { firstObservedBlock: life?.first ?? null, lastObservedBlock: life?.last ?? null, expected: 0, returned: 0, missingCount: 0, missing: [], remaining: 0, truncated: false, nextFromBlock: null },
+    points: [],
+  })
+
+  /* --- the exact replay: every block of a short height range --- */
+  if (resolution === 'block') {
+    const head = (await loadCurrentPools()).blockHeight
+    const cap = Math.min(limit, MAX_EXACT_BLOCKS)
+    const toRequested = Math.min(req.toBlock ?? head, head)
+    const fromBlock = Math.max(0, req.fromBlock ?? (toRequested - cap + 1))
+    if (fromBlock > toRequested) return empty(fromBlock, toRequested, 1)
+    const toBlock = Math.min(toRequested, fromBlock + cap - 1)
+    const key = `explorer:pool-snapshots:${poolId}:block:${fromBlock}-${toBlock}`
+    return cached(key, await windowedHistoryTtlMs(toBlock), async () => {
+      const { observations, hashes } = await exactObservations(src, fromBlock, toBlock)
+      if (src.kind === 'xyk') await xykIssuanceAt(poolId, observations)
+      const assets = observations.length ? headerAssetIds(observations) : identity.assetIds
+      const points = layOut(observations, assets, hashes)
+      const slots = gridSlots(fromBlock, toBlock, 1)
+      const { missingCount, missing } = missingSlots(slots, points.map(p => p.block))
+      const truncated = toBlock < toRequested
+      return {
+        ...empty(fromBlock, toBlock, 1),
+        assets: assets.map(asset),
+        semantics: semanticsFor(assets, 1),
+        window: { fromBlock, toBlock },
+        coverage: {
+          firstObservedBlock: life?.first ?? null, lastObservedBlock: life?.last ?? null,
+          expected: slots.length, returned: points.length, missingCount, missing,
+          remaining: truncated ? toRequested - toBlock : 0,
+          truncated, nextFromBlock: truncated ? toBlock + 1 : null,
+        },
+        points,
+      }
+    })
+  }
+
+  /* --- the grid: every Nth sampled block, or one observation per calendar bucket --- */
+  const gridStride = resolution === 'grid' ? (req.stepBlocks != null ? normalizeStride(req.stepBlocks) : SNAPSHOT_GRID_BLOCKS) : null
+  if (!life) return empty(req.fromBlock ?? 0, req.toBlock ?? 0, gridStride)
+  const last = req.toBlock != null
+    ? (req.toBlock >= life.last ? { block: life.last, t: life.last_t } : await gridEdge(src, 'last', { block: req.toBlock }))
+    : req.toTs != null ? await gridEdge(src, 'last', { ts: req.toTs }) : { block: life.last, t: life.last_t }
+  if (!last) return empty(req.fromBlock ?? life.first, req.toBlock ?? life.first, gridStride)
+  const toBlock = last.block
+  let fromBlock: number
+  let stride: number | null = null
+  if (resolution === 'grid') {
+    // The window's stride is fixed before its lower bound is defaulted, because
+    // the default IS "the newest `limit` points at that stride".
+    const requestedStride = req.stepBlocks != null ? normalizeStride(req.stepBlocks) : null
+    if (req.fromBlock != null) fromBlock = Math.max(req.fromBlock, life.first)
+    else if (req.fromTs != null) fromBlock = (await gridEdge(src, 'first', { ts: req.fromTs }))?.block ?? toBlock + 1
+    else fromBlock = Math.max(life.first, toBlock - (limit - 1) * (requestedStride ?? SNAPSHOT_GRID_BLOCKS))
+    stride = requestedStride ?? (fromBlock <= toBlock ? strideFor(fromBlock, toBlock, limit) : SNAPSHOT_GRID_BLOCKS)
+  } else {
+    const stepSec = resolution === 'hour' ? 3_600 : 86_400
+    if (req.fromBlock != null) fromBlock = Math.max(req.fromBlock, life.first)
+    else if (req.fromTs != null) fromBlock = (await gridEdge(src, 'first', { ts: req.fromTs }))?.block ?? toBlock + 1
+    else {
+      const firstBucketStart = Math.floor(last.t / stepSec) * stepSec - (limit - 1) * stepSec
+      fromBlock = (await gridEdge(src, 'first', { ts: firstBucketStart }))?.block ?? life.first
+    }
+  }
+  if (fromBlock > toBlock) return empty(fromBlock, toBlock, stride)
+
+  const key = `explorer:pool-snapshots:${poolId}:${resolution}:${stride ?? ''}:${fromBlock}-${toBlock}:${limit}`
+  return cached(key, await windowedHistoryTtlMs(toBlock), async () => {
+    const bucket = resolution === 'grid' ? undefined : resolution
+    const fetched = await gridObservations(src, fromBlock, toBlock, bucket ? { bucket } : { step: stride! }, limit + 1)
+    const truncated = fetched.length > limit
+    const observations = truncated ? fetched.slice(0, limit) : fetched
+    const next = truncated ? fetched[limit] : null
+    if (src.kind === 'xyk') await xykIssuanceAt(poolId, observations)
+    const assets = observations.length ? headerAssetIds(observations) : identity.assetIds
+    const hashes = await snapshotHashes(observations.map(o => o.block))
+    const points = layOut(observations, assets, hashes, bucket)
+    // Coverage is judged over the span the page actually examined: up to the
+    // last returned point when the window continues past it.
+    const spanTo = truncated ? observations[observations.length - 1].block : toBlock
+    let expected: (number | string)[]
+    let remaining = 0
+    if (!bucket) {
+      expected = gridSlots(fromBlock, spanTo, stride!)
+      remaining = next ? countSlots(next.block, toBlock, stride!) : 0
+    } else {
+      // Buckets are judged between the first and last observation the span
+      // holds: a bucket outside that has no observation to be missing.
+      const firstT = observations[0]?.t ?? last.t
+      const lastT = observations[observations.length - 1]?.t ?? last.t
+      expected = observations.length ? bucketSlots(bucket, firstT, lastT) : []
+      remaining = next ? bucketSlots(bucket, next.t, last.t).length : 0
+    }
+    const { missingCount, missing } = missingSlots(expected, bucket ? points.map(p => p.bucket!) : points.map(p => p.block))
+    return {
+      ...empty(fromBlock, toBlock, stride),
+      assets: assets.map(asset),
+      semantics: semanticsFor(assets, stride),
+      window: { fromBlock, toBlock: spanTo },
+      coverage: {
+        firstObservedBlock: life.first, lastObservedBlock: life.last,
+        expected: expected.length, returned: points.length, missingCount, missing, remaining,
+        truncated, nextFromBlock: next ? next.block : null,
+      },
+      points,
     }
   })
 }
