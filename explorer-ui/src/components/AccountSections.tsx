@@ -1,8 +1,7 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
 import { useMemo } from 'react'
-import { F, Amt, Usd, Num, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, healthFactorDisplay, AddrPill, MomentLink, ProgressRing, rowNav, Dash, EmptyRow, Copy } from './ui'
+import { F, Amt, Usd, Num, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, AddrPill, MomentLink, ProgressRing, rowNav, Dash, EmptyRow, Copy } from './ui'
 import type { ChartMarker, DetailTab } from './ui'
-import type { AccountMoneyMarket } from '../types'
 import { Link, paths, setQuery } from '../router'
 import { limitBinding } from '../utils/limitBinding'
 import type { ActivitySlug } from '../router'
@@ -16,8 +15,9 @@ import type { ListCount } from '../api/explorer'
 import type { ReactNode } from 'react'
 
 // Render helpers shared by the Account and Tag detail pages so both surface the
-// same on-chain data (balances, money-market card, DCA orders, LP positions,
-// portfolio chart, balance history) with identical markup.
+// same on-chain data (balances, DCA orders, LP positions, portfolio chart,
+// balance history) with identical markup. The money-market position itself is
+// the Borrow tab's (positions/BorrowTab.tsx).
 
 // Live "next execution" cell for an Active DCA order: the distance to its planned
 // block at the chain's measured pace (`blockSec`, from stats — block time has been
@@ -335,7 +335,6 @@ const unpricedCount = (entries: { amount: string; valueUsd: number | null }[]): 
 // Non-zero farm rewards a claim would not pay the account (below ED, owner holding less).
 const unpayableCount = (entries: { amount: string; payable?: boolean }[]): number =>
   entries.filter(e => e.amount !== '0' && e.payable === false).length
-const unpricedNote = (n: number): string => (n > 0 ? ` (+ ${n} unpriced)` : '')
 
 const UNCOUNTED_TITLE = 'A balance the value leaves out on purpose. The Omnipool prices H2O off the assets it pools, so its own hub reserve valued at that price would restate the pooled assets Value already counts. Shown as a balance, counted in no value.'
 
@@ -417,172 +416,6 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUs
       <div className="hint" title={`${MM_REWARDS_TITLE}${incentivesBelowEd ? MM_BELOW_ED_TITLE : ''} As of block ${F.int(moneyMarketRewards.asOfBlock)}.`}>Incl. <Usd v={moneyMarketRewards.totalUsd} /> unclaimed lending incentives{incentivesUnpriced > 0 ? ` (+ ${incentivesUnpriced} unpriced, not included)` : ''}</div>
     </div>}
   </>
-  )
-}
-
-function currentLtvPct(mm: MoneyMarketPosition): number {
-  const collateral = Number(mm.totalCollateralBase)
-  const debt = Number(mm.totalDebtBase)
-  return collateral > 0 && debt > 0 ? debt / collateral * 100 : 0
-}
-
-function MoneyMarketRiskBar({ mm }: { mm: MoneyMarketPosition }) {
-  const debtUsd = Number(mm.totalDebtBase) / 1e8
-  if (debtUsd <= 0 || mm.healthFactor === 'unknown' || Number(mm.liquidationThreshold) <= 0) return null
-  const ltvPct = currentLtvPct(mm)
-  const liqPct = Number(mm.liquidationThreshold) / 100
-  const fillPct = liqPct > 0 ? Math.min(100, ltvPct / liqPct * 100) : 0
-  return (
-    <div className="mm-bar">
-      <div
-        className="mm-bar-track"
-        role="meter"
-        aria-label={`${mm.market} current loan-to-value`}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.min(100, ltvPct)}
-        aria-valuetext={`${ltvPct.toFixed(1)}% current loan-to-value; liquidation threshold ${liqPct.toFixed(0)}%`}
-      >
-        <div className="mm-bar-fill" style={{ width: `${fillPct.toFixed(1)}%` }} />
-        <div className="mm-bar-liq" />
-      </div>
-      <div className="mm-bar-lab"><span>Current LTV {ltvPct.toFixed(1)}%</span><span className="muted">liquidation @ {liqPct.toFixed(0)}%</span></div>
-    </div>
-  )
-}
-
-function MoneyMarketReserveColumns({ mm }: { mm: MoneyMarketPosition }) {
-  if (!mm.reserves?.length) return null
-  const supplied = mm.reserves.filter(r => r.supplied !== '0')
-  const borrowed = mm.reserves.filter(r => r.debt !== '0')
-  return (
-    <div className="mm-cols">
-      <div>
-        <div className="mm-col-head">Lent</div>
-        {supplied.map(r => (
-          <div className="mm-row" key={`s${r.assetId}`}>
-            <Link to={paths.asset(r.assetId)} className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} iconAssetIds={r.iconAssetIds} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></Link>
-            <span className="mono"><Amt raw={r.supplied} dec={r.decimals} /></span>
-            <span className="mono muted"><Usd v={r.suppliedUsd} /></span>
-            {r.collateral ? <span className="badge ok mm-collateral-badge">collateral</span> : null}
-          </div>
-        ))}
-        {!supplied.length && <div className="mm-empty">None</div>}
-      </div>
-      <div>
-        <div className="mm-col-head">Borrowed</div>
-        {borrowed.map(r => (
-          <div className="mm-row" key={`d${r.assetId}`}>
-            <Link to={paths.asset(r.assetId)} className="trade-leg"><AssetIcon assetId={r.assetId} iconAssetId={r.iconAssetId} iconAssetIds={r.iconAssetIds} symbol={r.symbol} size={18} parachainId={r.parachainId} origin={r.origin} /> <span className="mono">{r.symbol}</span></Link>
-            <span className="mono"><Amt raw={r.debt} dec={r.decimals} /></span>
-            <span className="mono muted"><Usd v={r.debtUsd} /></span>
-          </div>
-        ))}
-        {!borrowed.length && <div className="mm-empty">No outstanding debt</div>}
-      </div>
-    </div>
-  )
-}
-
-// Non-primary market labels that map to a registered asset get its CDN icon
-// next to the label (GIGAHDX → asset 67, BIL → asset 55 — the token each
-// market is named after).
-const MARKET_ICON_ASSET: Record<string, number> = { gigahdx: 67, bil: 55 }
-
-// Every market gets the full position treatment; only the primary market is
-// allowed to deep-link into DefiSim.
-function MoneyMarketCard({ mm, defisimAddress }: { mm: MoneyMarketPosition; defisimAddress?: string }) {
-  const hf = healthFactorDisplay(mm.healthFactor)
-  const supplyUsd = Number(mm.totalSuppliedBase ?? mm.totalCollateralBase) / 1e8
-  const debtUsd = Number(mm.totalDebtBase) / 1e8
-  const headingId = `money-market-${mm.marketKey.replace(/[^a-z0-9_-]/gi, '-')}`
-  const isPrimary = mm.role === 'primary'
-  const iconAsset = MARKET_ICON_ASSET[mm.marketKey]
-  // The market's claimable incentives (already in Value, never in Lent).
-  const rewards = (mm.unclaimedRewards ?? []).filter(r => r.claimable !== '0')
-  const pricedRewards = rewards.filter(r => r.claimableUsd != null)
-  const rewardsUsd = pricedRewards.reduce((s, r) => s + (r.claimableUsd ?? 0), 0)
-  const rewardsUnpriced = unpricedCount(rewards.map(r => ({ amount: r.claimable, valueUsd: r.claimableUsd })))
-  return (
-    <section className="mm-market-section" aria-labelledby={headingId} data-market-key={mm.marketKey}>
-      <header className="sec-title mm-title-row">
-        <h2 id={headingId} className="mm-title">{isPrimary ? mm.market : 'Money Market'}</h2>
-        <span className="mm-title-note">
-          {isPrimary ? 'primary' : <>{iconAsset != null && <AssetIcon assetId={iconAsset} symbol={mm.market} size={14} />} {mm.market}</>} · lend &amp; borrow
-        </span>
-        {mm.stakingBacked && <span className="mm-title-note">collateral is staked HDX — counted once in the wallet balance</span>}
-        {!!mm.unstatedCollateral?.length && <span className="mm-title-note" title="The explorer reconstructs supplied reserves from the money market's own logs. This collateral reached the account before the explorer's anchor block, outside its log coverage, and is not anchored yet — or has no price here — so Lent and the Value take the market's own collateral figure for it.">{mm.unstatedCollateral.map(a => a.symbol).join(', ')} collateral not stated per reserve — valued by the market's own figure</span>}
-        {defisimAddress && <a className="ext-link mm-defisim-link" href={`https://defisim.neckwork.net/?address=${encodeURIComponent(defisimAddress)}`} target="_blank" rel="noopener noreferrer">Open in DefiSim ↗</a>}
-      </header>
-      <div className="mm-card">
-        <div className="mm-summary">
-          <div className="mm-stat"><span className="k">Lent</span><span className="v"><Usd v={supplyUsd} /></span></div>
-          <div className="mm-stat"><span className="k">Borrowed</span><span className="v">{debtUsd > 0 ? <Usd v={debtUsd} /> : '—'}</span></div>
-          <div className="mm-stat"><span className="k">Net worth</span><span className="v"><Usd v={supplyUsd - debtUsd} /></span></div>
-          <div className="mm-stat"><span className="k">Available to borrow</span><span className="v"><Usd v={Number(mm.availableBorrowsBase) / 1e8} /></span></div>
-          {/* "Lowest member health" is only true of a row that SUMS several
-              members, where the figure is the worst of them. It used to key off
-              simAccount, which was a proxy for "this is an aggregate" — until a
-              per-account row started carrying one so it could link to its own
-              address. memberCount says it directly: absent on one account's own
-              position, and 1 on a tag whose market has a single holder. */}
-          <div className="mm-stat"><span className="k">{(mm.memberCount ?? 0) > 1 ? 'Lowest member health' : 'Health factor'}</span><span className={`v hf ${hf.cls}`}>{hf.label}</span></div>
-          {rewards.length > 0 && <div className="mm-stat" title={`${MM_REWARDS_TITLE}${rewards.some(r => r.belowExistentialDeposit) ? MM_BELOW_ED_TITLE : ''} Not part of Lent.`}>
-            <span className="k">Unclaimed incentives</span>
-            {/* With no priced incentive the raw amounts stand in — an unpriced
-                reward still reads as a reward, never as $0.00. */}
-            <span className="v">{pricedRewards.length
-              ? <><Usd v={rewardsUsd} />{unpricedNote(rewardsUnpriced)}</>
-              : rewards.map((r, i) => <span key={`${r.asset.assetId}-${i}`}>{i > 0 ? ' · ' : ''}<Amt raw={r.claimable} dec={r.asset.decimals} /> {r.asset.symbol}</span>)}</span>
-          </div>}
-        </div>
-        <MoneyMarketRiskBar mm={mm} />
-        <MoneyMarketReserveColumns mm={mm} />
-      </div>
-    </section>
-  )
-}
-
-// Shared account/tag renderer. The role comes from the API so presentation does
-// not depend on risk order or on a magic market label. Every market renders as
-// the same full card — primary first, DefiSim scoped to it.
-// A tag's money-market positions, one block per member rather than one summed
-// block for the tag. A combined health factor is a useful headline — it is what
-// the header stat shows — but it is not a position anyone can act on: liquidation
-// happens per account, and DefiSim simulates one account at a time. So each member
-// that holds a position gets its own card set, addressed and linkable.
-//
-// Ordered by the money at stake, so the account that matters leads. Members with
-// no position are absent rather than rendered empty.
-export function MoneyMarketByAccount({ accounts }: { accounts: AccountMoneyMarket[] }) {
-  if (!accounts.length) return null
-  return (
-    <>
-      {accounts.map(entry => (
-        <div key={entry.account.accountId} className="mm-account">
-          <div className="sec-title mm-account-head">
-            <AddrPill account={entry.account} />
-          </div>
-          {/* The same cards the account page renders, so a position reads the same
-              wherever it is met. defisimAddress falls back to this member's own
-              address; the card itself withholds the link on an isolated market,
-              which DefiSim cannot simulate. */}
-          <MoneyMarketPositions markets={entry.markets} defisimAddress={entry.account.address} />
-        </div>
-      ))}
-    </>
-  )
-}
-
-export function MoneyMarketPositions({ markets, defisimAddress }: { markets: MoneyMarketPosition[]; defisimAddress?: string }) {
-  const primary = markets.find(m => m.role === 'primary') ?? markets.find(m => m.marketKey === 'core')
-  const others = markets.filter(m => m !== primary)
-  const primaryDefisim = primary?.defiSimSupported ? (primary.simAccount ?? defisimAddress) : undefined
-  return (
-    <>
-      {primary && <MoneyMarketCard mm={primary} defisimAddress={primaryDefisim} />}
-      {others.map(mm => <MoneyMarketCard key={mm.marketKey} mm={mm} />)}
-    </>
   )
 }
 
