@@ -157,6 +157,14 @@ export function useChartZoom(
 ): ChartZoomApi {
   const [rawWin, setWin] = useState<TimeWindow | null>(null)
   const [sel, setSel] = useState<{ a: number; b: number } | null>(null)
+  // The live selection and the plain-mode window also live in refs, so a lift
+  // commits from the event handler itself — never from inside a state updater.
+  // React may run an updater during the next render, and a commit made there
+  // fires onWindowChange, which a chart with a shared hover forwards to its
+  // parent's state: an update to one component while another renders.
+  const selRef = useRef<{ a: number; b: number } | null>(null)
+  const winRef = useRef<TimeWindow | null>(null)
+  const select = useCallback((s: { a: number; b: number } | null) => { selRef.current = s; setSel(s) }, [])
   const [pinching, setPinching] = useState(false)
   const drag = useRef<{ start: number; active: boolean } | null>(null)
   const touchSel = useRef<{ id: number; start: number; timer: ReturnType<typeof setTimeout> | null; active: boolean } | null>(null)
@@ -211,10 +219,10 @@ export function useChartZoom(
       }
       return
     }
-    setWin(cur => {
-      if ((w?.from ?? -1) !== (cur?.from ?? -1) || (w?.to ?? -1) !== (cur?.to ?? -1)) changed.current?.()
-      return w
-    })
+    const cur = winRef.current
+    winRef.current = w
+    setWin(w)
+    if ((w?.from ?? -1) !== (cur?.from ?? -1) || (w?.to ?? -1) !== (cur?.to ?? -1)) changed.current?.()
   }, [urlKey])
 
   const reset = useCallback(() => apply(null), [apply])
@@ -237,7 +245,7 @@ export function useChartZoom(
         const ts = touchSel.current
         if (ts) {
           if (ts.timer) clearTimeout(ts.timer)
-          if (ts.active) setSel(null)
+          if (ts.active) select(null)
           touchSel.current = null
         }
         const [[id1, p1], [id2, p2]] = [...touches.current]
@@ -252,12 +260,12 @@ export function useChartZoom(
           entry.timer = null
           entry.active = true
           try { navigator.vibrate?.(15) } catch { /* not supported */ }
-          setSel({ a: entry.start, b: entry.start })
+          select({ a: entry.start, b: entry.start })
         }, LONG_PRESS_MS)
         touchSel.current = entry
       }
     }
-  }, [plotFrac])
+  }, [plotFrac, select])
 
   const onPointerMove = useCallback((e: ReactPointerEvent) => {
     if (e.pointerType === 'mouse') {
@@ -268,13 +276,13 @@ export function useChartZoom(
         d.active = true
         e.currentTarget.setPointerCapture(e.pointerId)
       }
-      if (d.active) setSel({ a: d.start, b: f })
+      if (d.active) select({ a: d.start, b: f })
     } else if (touches.current.has(e.pointerId)) {
       const f = plotFrac(e)
       touches.current.set(e.pointerId, f)
       const ts = touchSel.current
       if (ts && e.pointerId === ts.id) {
-        if (ts.active) { setSel({ a: ts.start, b: f }); return }
+        if (ts.active) { select({ a: ts.start, b: f }); return }
         if (ts.timer && Math.abs(f - ts.start) > TOUCH_SLOP_FRAC) {
           clearTimeout(ts.timer)
           touchSel.current = null
@@ -286,21 +294,23 @@ export function useChartZoom(
         if (next) apply(next, true)
       }
     }
-  }, [plotFrac, apply])
+  }, [plotFrac, apply, select])
+
+  // A lift commits the selection the ref holds (the last move's), then clears it.
+  const commit = useCallback((cancelled: boolean) => {
+    const cur = selRef.current
+    select(null)
+    if (cur && !cancelled) {
+      const next = commitSelection(viewRef.current, cur.a, cur.b)
+      if (next) apply(next)
+    }
+  }, [apply, select])
 
   const endPointer = useCallback((e: ReactPointerEvent) => {
     if (e.pointerType === 'mouse') {
       const d = drag.current
       drag.current = null
-      if (d?.active) {
-        setSel(cur => {
-          if (cur) {
-            const next = commitSelection(viewRef.current, cur.a, cur.b)
-            if (next) apply(next)
-          }
-          return null
-        })
-      }
+      if (d?.active) commit(false)
     } else {
       touches.current.delete(e.pointerId)
       const ts = touchSel.current
@@ -310,14 +320,7 @@ export function useChartZoom(
         if (ts.active) {
           // pointercancel (the browser took the gesture, e.g. a vertical
           // scroll) abandons the selection; a lift commits it like the mouse.
-          const cancelled = e.type === 'pointercancel'
-          setSel(cur => {
-            if (cur && !cancelled) {
-              const next = commitSelection(viewRef.current, cur.a, cur.b)
-              if (next) apply(next)
-            }
-            return null
-          })
+          commit(e.type === 'pointercancel')
           return
         }
       }
@@ -335,7 +338,7 @@ export function useChartZoom(
         }
       }
     }
-  }, [apply, urlKey])
+  }, [commit, urlKey])
 
   return {
     view,
