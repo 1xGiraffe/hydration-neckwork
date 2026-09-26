@@ -18,7 +18,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT } from './tagService.ts'
@@ -830,16 +830,6 @@ function matchesCallFilter(name: string, filter: string): boolean {
   if (name.replace(/\./g, ' ').toLowerCase().includes(visible.toLowerCase())) return true
   const compact = raw.toLowerCase().replace(/[^0-9a-z]+/g, '')
   return name.toLowerCase().replace(/[^0-9a-z]+/g, '').includes(compact)
-}
-
-function assetIdsForToken(token?: string): number[] | undefined {
-  const t = token?.trim()
-  if (!t) return undefined
-  const n = Number.parseInt(t, 10)
-  const ids = allExplorerAssets()
-    .filter(a => a.symbol.toLowerCase() === t.toLowerCase() || (Number.isInteger(n) && a.assetId === n))
-    .map(a => a.assetId)
-  return [...new Set(ids)]
 }
 
 /**
@@ -30250,18 +30240,24 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
 
   // Asset symbol/name match — always run and surfaced high, so an account whose
   // identity contains the query (e.g. "HDXKobi") never hides the asset itself
-  // (e.g. HDX). Ranked: exact symbol, then symbol prefix, then symbol substring,
-  // then name substring; shortest symbol wins ties.
+  // (e.g. HDX). Matched and labelled under the display face (displayDescriptor),
+  // as every other explorer surface names an asset: a Hydrated pool's share is
+  // found by its product name and offered as "GDOT · 2-Pool-GDOT", its on-chain
+  // name in `desc`. Ranked: exact symbol, then symbol prefix, then symbol
+  // substring, then name substring; shortest symbol wins ties, and a share
+  // follows the asset it is named for.
   if (/[A-Za-z]/.test(query)) {
     const ql = query.toLowerCase()
     const ranked = allExplorerAssets()
+      .map(a => displayDescriptor(a.assetId))
       .map(a => {
         const sym = a.symbol.toLowerCase(), name = (a.name ?? '').toLowerCase()
         const rank = sym === ql ? 0 : sym.startsWith(ql) ? 1 : sym.includes(ql) ? 2 : name.includes(ql) ? 3 : -1
         return { a, rank }
       })
       .filter(x => x.rank >= 0)
-      .sort((x, y) => x.rank - y.rank || x.a.symbol.length - y.a.symbol.length)
+      .sort((x, y) => x.rank - y.rank || x.a.symbol.length - y.a.symbol.length
+        || Number(isStableswapShareToken(x.a.assetId)) - Number(isStableswapShareToken(y.a.assetId)))
       .slice(0, 6)
     for (const { a } of ranked) results.push({ type: 'asset', value: String(a.assetId), label: a.symbol, desc: a.name ?? undefined, asset: a })
   }

@@ -633,6 +633,38 @@ function buildDisplayFaces(): void {
 export function displayDescriptor(assetId: number): ExplorerAsset {
   return displayFaces.get(assetId) ?? assetDescriptor(assetId)
 }
+/**
+ * The ids one name stands for on a reader-facing surface: `assetId` itself and
+ * every pool share that displays under it (SHARE_DISPLAY_FACE) — GDOT 69 is also
+ * 2-Pool-GDOT 690, whose rows say "GDOT". A share names itself alone.
+ */
+export function idsDisplayedAs(assetId: number): number[] {
+  const shares = Object.entries(SHARE_DISPLAY_FACE).filter(([, face]) => face === assetId).map(([share]) => Number(share))
+  return [assetId, ...shares]
+}
+/**
+ * The registry ids an activity token filter names. `token` is an asset id (the
+ * whole string — `2-Pool-GDOT` is a symbol, never asset 2) or a symbol, matched
+ * case-insensitively against the registry's own symbols; symbols are not unique,
+ * so `USDC` is several ids. Each named id then widens to the shares that display
+ * under it (idsDisplayedAs), because the filter's promise is the rows that show
+ * that name: a reader who filters by `GDOT` — or by 69, the id the Activity
+ * page's token picker sends for it, since the share is not in the directory —
+ * finds an add-liquidity on 2-Pool-GDOT and a trade routed through it, which the
+ * feed labels GDOT. The share's own symbol or id names the share alone.
+ *
+ * Undefined for a blank token (unfiltered, which every source reads as absent);
+ * empty when nothing is named, which no row can satisfy.
+ */
+export function assetIdsForToken(token?: string): number[] | undefined {
+  const t = token?.trim()
+  if (!t) return undefined
+  const lower = t.toLowerCase()
+  const id = /^\d+$/.test(t) ? Number(t) : null
+  return [...new Set(allExplorerAssets()
+    .filter(a => a.assetId === id || a.symbol.toLowerCase() === lower)
+    .flatMap(a => idsDisplayedAs(a.assetId)))]
+}
 
 // Reverse of SHARE_TOKEN_UNDERLYING_ID: main asset id → the pool-share token ids
 // that display as it. The share token can be what a protocol actually holds while
