@@ -12,21 +12,22 @@ import { createIncentiveAnchorJob } from './mmIncentiveAnchorJob.js'
 // after B0 to it.
 //
 // The service capture is the anchors loop (`snapshot-atoken-anchors.ts --loop`,
-// the `atoken-anchor` service): each cycle it captures this anchor while the table
-// is empty and raw ingestion has COMPLETED every block from CONTROLLER_LOGS_FROM
-// (the backfill low-water, below the controller's first log) to B0, so a fresh
-// database self-establishes it once its logs are all in, never from a partial
-// candidate set.
+// the `atoken-anchor` service): once raw ingestion has COMPLETED every block from
+// CONTROLLER_LOGS_FROM (the backfill low-water, below the controller's first log)
+// to B0, each cycle captures this anchor whole while the table is empty — so a
+// fresh database self-establishes it once its logs are all in, never from a
+// partial candidate set — and tops it up otherwise: a candidate user a source
+// names since that has no row is read at B0 (mmIncentiveAnchor.ts).
 //
 // Usage:
 //   npx tsx src/scripts/snapshot-mm-incentive-anchors.ts [--dry-run] [--out=rows.jsonl] [--anchor-block=8200000] [--force]
 //   npx tsx src/scripts/snapshot-mm-incentive-anchors.ts --verify
 //
-// (no mode) captures when the table is empty (--force: always; the rows are pinned
-// at B0, so a recapture rewrites identical values); --dry-run reads and prints,
-// inserts nothing (--out writes the rows as JSONEachRow). --verify is read-only:
-// re-reads EVERY stored row at its anchor block and exits non-zero on any
-// mismatch.
+// (no mode) captures whole when the table is empty and tops it up otherwise
+// (--force: a full capture always; the rows are pinned at B0, so a recapture
+// rewrites identical values); --dry-run reads every key and prints, inserts
+// nothing (--out writes the rows as JSONEachRow). --verify is read-only: re-reads
+// EVERY stored row at its anchor block and exits non-zero on any mismatch.
 
 const dryRun = hasFlag('dry-run')
 const verifyOnly = hasFlag('verify')
@@ -44,11 +45,9 @@ const job = createIncentiveAnchorJob({
 
 async function main(): Promise<void> {
   if (verifyOnly) { if (!await job.verify()) process.exitCode = 1; return }
-  if (!dryRun && !force) {
-    const existing = await job.anchorRowCount()
-    if (existing > 0) { console.log(JSON.stringify({ type: 'mm_incentive_anchor_done', skipped: true, reason: 'anchor already present', existing_rows: existing })); return }
-  }
-  await job.capture({ dryRun, outFile })
+  // A dry run reads every key, so what the table holds cannot skip it (the loop's rule).
+  const mode = force || dryRun || await job.anchorRowCount() === 0 ? 'full' : 'top-up'
+  await job.capture({ dryRun, mode, outFile })
 }
 
 main()

@@ -56,9 +56,10 @@ import { createSnapshotRpcClient } from './snapshotRuntime.js'
 // newly added reserves) and, once raw ingestion has completed every block from
 // MM_LOGS_FROM to B0 (the candidate holders are read from that raw; --force does
 // not lift this gate), captures this anchor at --anchor-block whole when its table
-// is empty (--force: every cycle) and tops it up otherwise; then captures the money-market incentive anchor
-// (mm_incentive_anchor, mmIncentiveAnchorJob.ts) when its table is empty (or under
-// --force-incentive) and raw ingestion has completed its controller's logs. The
+// is empty (--force: every cycle) and tops it up otherwise; then the money-market
+// incentive anchor (mm_incentive_anchor, mmIncentiveAnchorJob.ts) the same way on
+// its own gate — whole when its table is empty (or under --force-incentive), a
+// top-up otherwise, once raw ingestion has completed its controller's logs. The
 // incentive anchor's manual modes (--verify, a one-off capture) are
 // snapshot-mm-incentive-anchors.ts. Last, every cycle, it reconciles the
 // liquidity-mining entry capture (raw_lm_farm_entries): each block with an open
@@ -361,7 +362,7 @@ async function runLoopCycle(): Promise<void> {
     incentive: {
       anchorRowCount: () => incentive.anchorRowCount(),
       controllerLogGaps: () => incentive.controllerLogGaps(),
-      capture: () => incentive.capture({ dryRun }),
+      capture: mode => incentive.capture({ dryRun, mode }),
     },
     lmEntries: {
       reconcile: () => {

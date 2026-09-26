@@ -25,7 +25,7 @@ function fakes(state: { atokenRows?: number; incentiveRows?: number; gaps?: Arra
   const incentive: IncentiveAnchorPort = {
     anchorRowCount: async () => { calls.push('incentive.count'); return state.incentiveRows ?? 0 },
     controllerLogGaps: async () => { calls.push('incentive.gaps'); return state.gaps ?? [] },
-    capture: async () => { calls.push('incentive.capture'); if (state.incentiveFails) throw new Error('empty return') },
+    capture: async mode => { calls.push(`incentive.capture:${mode}`); if (state.incentiveFails) throw new Error('empty return') },
   }
   const lmEntries: LmEntryReconcilePort = {
     reconcile: async () => { calls.push('lm.reconcile'); if (state.lm === 'throw') throw new Error('clickhouse down'); return state.lm ?? CLEAN },
@@ -50,13 +50,17 @@ describe('each anchor keeps its own gate', () => {
     expect(await atokenAnchorDecision(port(12, [GAP]), false, MM_FROM, B0)).toMatchObject({ capture: false, reason: `raw ingestion has not completed ${MM_FROM}..${B0} (the money market's logs)` })
   })
 
-  it('incentive: needs an empty table AND complete controller-log coverage; --force-incentive lifts only the first', async () => {
+  it('incentive: needs complete controller-log coverage; then a full capture on an empty table (or --force-incentive), a top-up otherwise', async () => {
     const port = (rows: number, gaps: typeof GAP[]) => ({ anchorRowCount: async () => rows, controllerLogGaps: async () => gaps })
-    expect(await incentiveAnchorDecision(port(0, []), false, LOGS_FROM, B0)).toEqual({ capture: true })
-    expect(await incentiveAnchorDecision(port(5, []), false, LOGS_FROM, B0)).toMatchObject({ capture: false, reason: 'anchor already present' })
-    expect(await incentiveAnchorDecision(port(0, [GAP]), false, LOGS_FROM, B0)).toMatchObject({ capture: false, reason: `raw ingestion has not completed ${LOGS_FROM}..${B0} (the controller's logs)`, detail: { gaps: 1 } })
-    expect(await incentiveAnchorDecision(port(5, []), true, LOGS_FROM, B0)).toEqual({ capture: true })
+    expect(await incentiveAnchorDecision(port(0, []), false, LOGS_FROM, B0)).toEqual({ capture: true, mode: 'full' })
+    // A non-empty table is topped up, never left alone: a user no source named at
+    // the first capture (its every pre-B0 log in a gap) is anchored once one does.
+    expect(await incentiveAnchorDecision(port(5, []), false, LOGS_FROM, B0)).toEqual({ capture: true, mode: 'top-up' })
+    expect(await incentiveAnchorDecision(port(0, [GAP]), false, LOGS_FROM, B0)).toMatchObject({ capture: false, reason: `raw ingestion has not completed ${LOGS_FROM}..${B0} (the controller's logs)`, detail: { gaps: 1, first_gaps: [GAP] } })
+    expect(await incentiveAnchorDecision(port(5, []), true, LOGS_FROM, B0)).toEqual({ capture: true, mode: 'full' })
     expect(await incentiveAnchorDecision(port(5, [GAP]), true, LOGS_FROM, B0)).toMatchObject({ capture: false })
+    // The gate is decided before the table is counted: a gap skips a top-up too.
+    expect(await incentiveAnchorDecision(port(5, [GAP]), false, LOGS_FROM, B0)).toMatchObject({ capture: false, reason: `raw ingestion has not completed ${LOGS_FROM}..${B0} (the controller's logs)` })
   })
 })
 
@@ -65,21 +69,25 @@ describe('runAnchorCycle', () => {
     const f = fakes()
     expect(await runAnchorCycle(f.ports, opts, f.log)).toEqual({ atoken: 'captured', incentive: 'captured', lmEntries: 'clean' })
     // The incentive candidates include the aToken anchor's holders: it runs second.
-    expect(f.calls).toEqual(['atoken.map', 'atoken.gaps', 'atoken.count', 'atoken.capture:full', 'incentive.count', 'incentive.gaps', 'incentive.capture', 'lm.reconcile'])
+    expect(f.calls).toEqual(['atoken.map', 'atoken.gaps', 'atoken.count', 'atoken.capture:full', 'incentive.gaps', 'incentive.count', 'incentive.capture:full', 'lm.reconcile'])
   })
 
-  it('in steady state refreshes the reserve map, tops the aToken anchor up and runs the LM reconcile', async () => {
+  it('in steady state refreshes the reserve map, tops both anchors up and runs the LM reconcile', async () => {
     const f = fakes({ atokenRows: 900, incentiveRows: 70 })
-    expect(await runAnchorCycle(f.ports, opts, f.log)).toEqual({ atoken: 'topped-up', incentive: 'skipped', lmEntries: 'clean' })
-    expect(f.calls).toEqual(['atoken.map', 'atoken.gaps', 'atoken.count', 'atoken.capture:top-up', 'incentive.count', 'lm.reconcile'])
-    expect(f.logs.map(l => l.type)).toEqual(['mm_incentive_anchor_done', 'lm_entries_reconcile'])
+    expect(await runAnchorCycle(f.ports, opts, f.log)).toEqual({ atoken: 'topped-up', incentive: 'topped-up', lmEntries: 'clean' })
+    expect(f.calls).toEqual(['atoken.map', 'atoken.gaps', 'atoken.count', 'atoken.capture:top-up', 'incentive.gaps', 'incentive.count', 'incentive.capture:top-up', 'lm.reconcile'])
+    expect(f.logs.map(l => l.type)).toEqual(['lm_entries_reconcile'])
   })
 
   it('waits for the backfill before the incentive anchor, cycle after cycle, while the aToken anchor goes ahead', async () => {
     const f = fakes({ gaps: [GAP] })
     expect(await runAnchorCycle(f.ports, opts, f.log)).toEqual({ atoken: 'captured', incentive: 'skipped', lmEntries: 'clean' })
-    expect(f.calls).not.toContain('incentive.capture')
+    expect(f.calls.filter(c => c.startsWith('incentive.capture'))).toEqual([])
     expect(f.logs[0]).toMatchObject({ type: 'mm_incentive_anchor_done', skipped: true, gaps: 1, first_gaps: [GAP] })
+    // Gated while the table is non-empty too: a top-up on a partial backfill would read a partial candidate set.
+    const partial = fakes({ incentiveRows: 70, gaps: [GAP] })
+    expect((await runAnchorCycle(partial.ports, opts, partial.log)).incentive).toBe('skipped')
+    expect(partial.calls.filter(c => c.startsWith('incentive.capture'))).toEqual([])
   })
 
   it('on a fresh database with a partial backfill captures neither anchor, and captures the aToken one once its range is in', async () => {
@@ -137,10 +145,13 @@ describe('reconcileOutcome', () => {
 
   it('passes each force flag to its own anchor only', async () => {
     const f = fakes({ atokenRows: 900, incentiveRows: 70 })
-    expect(await runAnchorCycle(f.ports, { ...opts, forceAtoken: true }, f.log)).toEqual({ atoken: 'captured', incentive: 'skipped', lmEntries: 'clean' })
+    expect(await runAnchorCycle(f.ports, { ...opts, forceAtoken: true }, f.log)).toEqual({ atoken: 'captured', incentive: 'topped-up', lmEntries: 'clean' })
     expect(f.calls).toContain('atoken.capture:full')
+    expect(f.calls).toContain('incentive.capture:top-up')
     const g = fakes({ atokenRows: 900, incentiveRows: 70 })
     expect(await runAnchorCycle(g.ports, { ...opts, forceIncentive: true }, g.log)).toEqual({ atoken: 'topped-up', incentive: 'captured', lmEntries: 'clean' })
+    expect(g.calls).toContain('atoken.capture:top-up')
+    expect(g.calls).toContain('incentive.capture:full')
   })
 })
 
