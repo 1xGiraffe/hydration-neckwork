@@ -1533,16 +1533,11 @@ svg { display: block; }
 }
 
 /* money market card */
-.mm-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .mm-title { font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; }
 /* inline-flex + centered items: a market-logo icon inside the note (GIGAHDX)
    would otherwise sit on the text baseline and push the whole note upward
    relative to the primary market's plain-text note. */
 .mm-title-note { display: inline-flex; align-items: center; gap: 4px; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
-/* Compound selector on purpose: the generic `.ext-link` rule is declared later with
-   equal specificity, so a bare `.mm-defisim-link { margin-left: auto }` lost to its
-   `margin-left: 4px` and the link sat mid-row instead of right-aligned. */
-.ext-link.mm-defisim-link { margin-left: auto; text-transform: none; letter-spacing: 0; }
 /* Stays right-aligned once the title row wraps, so it lines up with the other
    "Open in …" links instead of sliding under the heading on narrow screens. */
 .ext-link-row { display: flex; justify-content: flex-end; margin-bottom: 8px; }
@@ -1578,17 +1573,7 @@ svg { display: block; }
 .mm-bar-track { position: relative; height: 8px; background: var(--panel); border-radius: 9999px; overflow: hidden; }
 .mm-bar-fill { height: 100%; background: linear-gradient(90deg, var(--green), var(--amber)); border-radius: 9999px; }
 .mm-bar-liq { position: absolute; top: -2px; bottom: -2px; left: 100%; width: 2px; background: var(--red); transform: translateX(-1px); }
-.mm-bar-lab { display: flex; justify-content: space-between; margin-top: 8px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); }
-.mm-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding-top: 16px; }
-@media (max-width: 720px){ .mm-cols { grid-template-columns: 1fr; } }
-.mm-col-head { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); margin-bottom: 10px; }
-.mm-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--separator); font-size: 12px; }
-.mm-row:last-child { border-bottom: 0; }
-.mm-row .mono { font-family: 'GeistMono'; }
-.mm-row .asset-chip { min-width: 86px; }
-.mm-row > .mono:nth-child(2) { margin-left: auto; }
 .mm-collateral-badge { font-size: 9px; }
-.mm-empty { color: var(--text-low); font-family: 'GeistMono'; font-size: 12px; padding: 8px 0; }
 
 /* The supplemental GIGAHDX debt a primary-market summary line names. */
 .mm-secondary-debt { color: var(--cat-borrow); }
@@ -3864,12 +3849,6 @@ a.rev-pill-label:hover { color: var(--accent); }
 .dl.mcp-notes .dt, .dl.mcp-surfaces .dt { align-items: flex-start; }
 .dl.mcp-surfaces .dd b { color: var(--text-high); font-weight: 500; }
 .dl.mcp-surfaces .dd .ext-link { margin-left: 6px; }
-
-/* A tag's money-market positions, split per member. Each block is one account's
-   cards under its own address pill; the gap is what keeps two members' health
-   factors from reading as one position. */
-.mm-account { margin-bottom: 18px; }
-.mm-account-head { display: flex; align-items: center; gap: 8px; }
 
 /* ===== Orders tab (components/positions/OrdersTab.tsx) ===== */
 /* The working-orders line: label over value, cells in one row that wraps on a
