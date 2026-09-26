@@ -100,7 +100,7 @@ describe('the rule reaches every value surface', () => {
     const at = explorerService.indexOf('function accountDirectoryModelVersion(): string {')
     expect(at).toBeGreaterThan(-1)
     const version = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
-    expect(version).toContain("'v3-r4'")
+    expect(version).toContain("'v3-r5'")
     expect(version).not.toContain('-r3')
   })
 

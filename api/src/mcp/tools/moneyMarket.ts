@@ -149,6 +149,7 @@ function renderPosition(p: MoneyMarketPosition, ctx: ToolContext): string {
       ['Max LTV', formatBasisPoints(p.ltv)],
       ['Liquidation threshold', formatBasisPoints(p.liquidationThreshold)],
       ['Staking-backed', p.stakingBacked ? 'yes' : null],
+      ['Collateral not stated per reserve', p.unstatedCollateral?.length ? `${p.unstatedCollateral.map(a => a.symbol).join(', ')} — reached the holder outside the market's logs or has no price here; the market's own collateral figure stands in for it in Supplied and the account value` : null],
       // A zero blockHeight is "this was read live, not from an indexed
       // position"; printed as "block 0" it reads as a genesis-era snapshot.
       ['As of', `${formatTime(p.timestamp)}${p.blockHeight > 0 ? ` · block ${formatCount(p.blockHeight)}` : ' · read live from chain state, not from an indexed block'}`],

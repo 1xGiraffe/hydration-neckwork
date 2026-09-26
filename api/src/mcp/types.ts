@@ -522,6 +522,8 @@ export interface MoneyMarketPosition {
   healthFactor: string
   simAccount?: string
   reserves?: MmReserve[]
+  /** Reserves the explorer cannot state per reserve (reached the holder Substrate-side, or unpriced); supplied and the value take the market's own collateral figure for them. */
+  unstatedCollateral?: AssetRef[]
   /** Claimable incentives accruing on this market's aTokens (display; counted once, via AddressDetail.moneyMarketRewards). */
   unclaimedRewards?: MoneyMarketRewardItem[]
 }

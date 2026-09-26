@@ -141,9 +141,10 @@ describe('farm rewards in the accounts directory', () => {
   it('keys its pages on a model version that carries the rewards', () => {
     const version = src.slice(src.indexOf('function accountDirectoryModelVersion('), src.indexOf('\n}\n', src.indexOf('function accountDirectoryModelVersion(')))
     // `-r3` brought the rewards in; `-r4` also leaves a pool account's own hub
-    // reserve out (poolOwnHubHolding.test.ts). Either way a page persisted under
-    // a reward-free value is never served as this one.
-    expect(version).toContain("return 'v3-r4'")
+    // reserve out (poolOwnHubHolding.test.ts); `-r5` values money-market collateral
+    // by the folded reserves (mmUnstatedCollateral.test.ts). Either way a page
+    // persisted under a reward-free value is never served as this one.
+    expect(version).toContain("return 'v3-r5'")
     expect(version).not.toMatch(/return 'v3'\s*$/m)
   })
 })

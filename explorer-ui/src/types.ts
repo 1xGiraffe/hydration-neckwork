@@ -675,6 +675,10 @@ export interface MoneyMarketPosition {
   // health factor is that account's, not the lowest of several.
   memberCount?: number
   reserves?: MmReserve[]
+  // Reserves whose collateral the explorer cannot state per reserve (an aToken
+  // that reached the holder Substrate-side, or one without a price); Lent and
+  // the Value then take the market's own collateral figure.
+  unstatedCollateral?: AssetRef[]
   // Claimable incentives accruing on this market's aTokens (display only: the
   // value counts them once, through the detail's `moneyMarketRewards`).
   unclaimedRewards?: MoneyMarketRewardUi[]
