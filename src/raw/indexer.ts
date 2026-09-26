@@ -33,6 +33,7 @@ import {
   toJsonString,
 } from './json.js'
 import { assertMoneyMarketPositionConfig, extractMoneyMarketRows, snapshotMoneyMarketPositions } from './moneyMarket.js'
+import { openPositionKey, trackOpenPositions } from './moneyMarketSnapshot.js'
 import { captureLmFarmEntries, entryEventsFromRawEvents } from './lmFarmEntries.js'
 import { synthesizeNestedCallRows, type EvmExecution, type RuntimeCallDecoder } from './nestedCalls.js'
 import { createClickHouseClient } from '../db/client.js'
@@ -251,6 +252,36 @@ async function loadKnownBorrowers(): Promise<Map<string, number>> {
   return borrowers
 }
 
+// The (market, holder) pairs whose projected aggregate is non-zero, seeded from
+// the projection and then kept current from every observation this worker writes.
+// The periodic re-snapshot records a zero only for one of these: it is the exit
+// of a position no pool event announced (a native aToken transfer), and skipping
+// it would leave the stale aggregate current for good. A fresh database yields an
+// empty set that fills from the event-driven positions as blocks are processed.
+async function loadOpenPositions(): Promise<Set<string>> {
+  const open = new Set<string>()
+  const client = createClickHouseClient()
+  try {
+    const res = await client.query({
+      query: `SELECT user_address, pool_address
+              FROM (
+                SELECT user_address, pool_address, argMaxMerge(position_state) AS pos
+                FROM price_data.money_market_latest_positions
+                WHERE user_address != ''
+                GROUP BY user_address, pool_address
+              )
+              WHERE tupleElement(pos, 'total_collateral_base') > 0 OR tupleElement(pos, 'total_debt_base') > 0`,
+      format: 'JSONEachRow',
+    })
+    for (const row of await res.json<{ user_address: string; pool_address: string }>()) {
+      open.add(openPositionKey(row.pool_address, row.user_address))
+    }
+  } finally {
+    await client.close()
+  }
+  return open
+}
+
 // Borrowers whose first known position is at or below the snapshot height. Reading
 // the rest would ask the pool contract for accounts that do not exist yet, which
 // answers with a decode failure per borrower rather than a position.
@@ -440,10 +471,12 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
   const atokenReserves = new AtokenReserveMap()
   await atokenReserves.refresh()
   let knownBorrowers = new Map<string, number>()
+  let openPositions = new Set<string>()
   if (mmSnapshotEnabled) {
     try {
       knownBorrowers = await loadKnownBorrowers()
-      console.log(`[Raw] Money Market periodic snapshot enabled (every ${mmSnapshotIntervalMs / MS_PER_MINUTE} minutes of chain time); seeded ${knownBorrowers.size} borrowers`)
+      openPositions = await loadOpenPositions()
+      console.log(`[Raw] Money Market periodic snapshot enabled (every ${mmSnapshotIntervalMs / MS_PER_MINUTE} minutes of chain time); seeded ${knownBorrowers.size} borrowers, ${openPositions.size} open positions`)
     } catch (error) {
       console.warn('[Raw] Failed to seed Money Market borrower set; will accumulate from events', error)
     }
@@ -636,17 +669,21 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       // is no previous block to compare with; that boundary is skipped rather than
       // guessed at, which costs one sample and keeps replays reproducible.
       // eth_call failures degrade to parser warnings, never abort the block.
+      // A borrower the projection shows open who now reads zero is written as a
+      // zero (`tombstoneFor`): the exit of a position no pool event announced.
       if (mmSnapshotEnabled) {
         for (const position of moneyMarket.positions) {
           if (!position.user_address) continue
           const firstBlock = knownBorrowers.get(position.user_address)
           if (firstBlock == null || blockHeight < firstBlock) knownBorrowers.set(position.user_address, blockHeight)
         }
+        trackOpenPositions(openPositions, moneyMarket.positions)
         if (crossedChainTimeBoundary(priorBlockTimestampMs, block.header.timestamp, mmSnapshotIntervalMs)) {
           const borrowers = borrowersAtHeight(knownBorrowers, blockHeight)
           if (borrowers.length > 0) {
             const mmSnapshot = await tracePhase(blockHeight, 'mm_periodic_snapshot', () =>
-              snapshotMoneyMarketPositions(borrowers, blockHeight, blockTimestamp, ingestSource))
+              snapshotMoneyMarketPositions(borrowers, blockHeight, blockTimestamp, ingestSource, { tombstoneFor: openPositions }))
+            trackOpenPositions(openPositions, mmSnapshot.positions)
             ctx.store.addMoneyMarketPositions(mmSnapshot.positions)
             ctx.store.addParserWarnings(mmSnapshot.warnings)
             moneyMarketRowsPersisted += mmSnapshot.positions.length

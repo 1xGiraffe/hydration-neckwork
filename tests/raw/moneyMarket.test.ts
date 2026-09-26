@@ -7,9 +7,11 @@ import {
   extractMoneyMarketRows,
   snapshotMoneyMarketPositions,
 } from '../../src/raw/moneyMarket.ts'
+import { openPositionKey } from '../../src/raw/moneyMarketSnapshot.ts'
 import { DEFAULT_RPC_URL } from '../../src/config.ts'
 import type { RawEvmLogRow } from '../../src/raw/types.ts'
 
+const CORE_POOL_PROXY = '0x1b02e051683b5cfac5929c25e84adb26ecf87b38'
 const USER = '0xf34e845538cc8a498edd97d7cde16fdfef3d4d99'
 const RESERVE = '0x00000000000000000000000000000000000003e8'
 // A contract that supplies for others (the BIL issuer's shape) and one of its depositors.
@@ -205,6 +207,46 @@ describe('raw Money Market rows', () => {
       total_collateral_base: '0',
       total_debt_base: '0',
     })
+  })
+
+  it('writes a zero for a holder the projection shows open, in that market only', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ result: `0x${'0'.repeat(64 * 6)}` }),
+    } as unknown as Response)
+
+    const args = [
+      [USER],
+      13_000_000,
+      '2026-07-01 00:00:00',
+      'test',
+    ] as const
+    // The exhaustive sweep never writes a zero for an account that was never a user…
+    const inactive = await snapshotMoneyMarketPositions(...args, { marketKeys: ['core'] })
+    expect(inactive.positions).toHaveLength(0)
+    // …but a zero read for a holder whose latest aggregate is non-zero is the exit,
+    // and the only observation of it a natively transferred aToken ever produces.
+    const exit = await snapshotMoneyMarketPositions(...args, {
+      marketKeys: ['core'],
+      tombstoneFor: new Set([openPositionKey(CORE_POOL_PROXY, USER)]),
+    })
+    expect(exit.positions).toHaveLength(1)
+    expect(exit.positions[0]).toMatchObject({
+      pool_address: CORE_POOL_PROXY,
+      user_address: USER,
+      observation_id: `money-market-periodic:13000000:${USER}`,
+      total_collateral_base: '0',
+      total_debt_base: '0',
+    })
+    // The markets are isolated: a position open in one market says nothing about
+    // the same holder in another, so the set is keyed per (market, holder).
+    const otherMarket = await snapshotMoneyMarketPositions(...args, {
+      marketKeys: ['core'],
+      tombstoneFor: new Set([openPositionKey(GIGAHDX_POOL_PROXY, USER)]),
+    })
+    expect(otherMarket.positions).toHaveLength(0)
   })
 
   it('projects supplemental events without performing position RPC reads', async () => {
