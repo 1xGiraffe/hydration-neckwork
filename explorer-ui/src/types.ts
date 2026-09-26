@@ -425,6 +425,10 @@ export interface FeePayment {
   asset: AssetRef
   amount: string
   tipAmount: string | null
+  // EVM gas charged BESIDE the substrate fee — a Dispatcher.dispatch_evm_call, a
+  // batch of EVM calls — in its own asset. Absent when the gas is the whole
+  // charge (an Ethereum.transact), where `amount` already is it.
+  gas?: { asset: AssetRef; amount: string }
 }
 
 export interface ExtrinsicDetail extends ExtrinsicSummary {

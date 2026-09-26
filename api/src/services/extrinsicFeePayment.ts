@@ -61,18 +61,32 @@
 // The resolver therefore takes the extrinsic's WHOLE event sequence in chain
 // order — a pre-filtered list cannot tell a contiguous run from a gap.
 //
+// An extrinsic can pay BOTH: a `Dispatcher.dispatch_evm_call`, a
+// `Utility.batch_all` of `EVM.call`s or any other signed wrapper that runs the
+// EVM is `Pays::Yes`, so it prepays gas mid-dispatch (one treasury deposit per
+// call) and settles the substrate fee post-dispatch (the last deposit). The
+// substrate fee is `amount`; the gas is `gas`, the other candidates in the fee
+// currency — stated only when the extrinsic ran the EVM (EVM_EXECUTION_EVENTS
+// among its events), because outside that scope an earlier same-currency
+// treasury deposit is not a charge the payer made. 15011574-3 (dispatch_evm_call):
+// 1,765,954,456,969 burned, 1,418,746,619,275 minted back, 347,207,837,694 to
+// the treasury as gas at event 35, then the 928,231,574,052 fee at event 49.
+//
 // The revenue model's network-fee stream (services/revenueStreams.ts,
-// networkFeeRowsSql) applies these same rules in SQL, so the fee a page shows
-// and the fee the protocol books are one figure.
+// networkFeeRowsSql) applies these same rules in SQL — the substrate arm books
+// `amount`, the deposit arm books `gas` under the same scope and the same
+// "every deposit in the fee currency but the post-dispatch one" rule — so the
+// fee a page shows and the fee the protocol books are one figure.
 //
 // Verified against 13759746-2 (DOT), 13756091-3 (H2O), 13706669-3 (HDX fee
-// alongside 0.0001 HDX of dust), 13443355-3 (EVM, three WETH gas deposits) and
+// alongside 0.0001 HDX of dust), 13443355-3 (EVM, three WETH gas deposits),
 // 15038567-3 (a bare PolkadotXcm.execute: 0.00637 DOT to the trader, then the
-// 1.2676 HDX substrate fee).
-import { TREASURY_ACCOUNT } from './revenueStreams.ts'
+// 1.2676 HDX substrate fee), 15011574-3 and 15055487-2 (gas beside the fee).
+import { EVM_EXECUTION_EVENTS, TREASURY_ACCOUNT } from './revenueStreams.ts'
 import { XCM_EXECUTE_BARRIER_EVENT, XCM_FEE_RUN_EVENTS } from './xcmWalkEvents.ts'
 
 const XCM_FEE_RUN = new Set<string>(XCM_FEE_RUN_EVENTS)
+const EVM_EXECUTION = new Set<string>(EVM_EXECUTION_EVENTS)
 
 export interface FeePaymentEvent {
   name: string
@@ -85,6 +99,13 @@ export interface DerivedFeePayment {
   amount: string
   /** Raw integer tip in the same asset; null when the extrinsic carried no tip. */
   tipAmount: string | null
+  /**
+   * EVM gas the extrinsic charged BESIDE its substrate fee (`amount`), with its
+   * own asset: what the EVM burned net of its refund, as the treasury received
+   * it. Present only when the extrinsic paid a substrate fee and ran the EVM;
+   * when there is no substrate fee the gas IS `amount`.
+   */
+  gas?: { assetId: number; amount: string }
 }
 
 function argOf(args: unknown, key: string): unknown {
@@ -144,6 +165,15 @@ export function hasSubstrateFee(feeHdx: string | null, tipHdx: string | null): b
  * arrives as its own deposit plus a rounding remainder (13749778-2: 342257016041
  * + 1 planck of BNC — taking the last alone would state one planck).
  *
+ * When they say the substrate charged something AND the events say the EVM ran
+ * (EVM_EXECUTION_EVENTS — a `Dispatcher.dispatch_evm_call`, a `Utility.batch_all`
+ * of `EVM.call`s, any `Pays::Yes` wrapper around one), the extrinsic paid both:
+ * the last candidate is the post-dispatch substrate fee and every earlier one
+ * in its currency is gas, returned as `gas` so the page can state what the
+ * account actually paid. Without the marker an earlier same-currency treasury
+ * deposit is nothing the payer was charged (the revenue model books none), so
+ * `gas` stays absent.
+ *
  * The tip is split off by the exact `tip / (fee + tip)` ratio. The runtime
  * converts fee and tip through the same price with independent truncation, so
  * the split can differ from the chain's own by at most one raw unit — which no
@@ -160,6 +190,7 @@ export function deriveFeePayment(
 
   const debited = new Set<number>()
   const deposits: { assetId: number; amount: bigint }[] = []
+  let ranEvm = false
   // "The deposit right after DustLost" is the previous element of the sequence.
   let afterDustLost = false
   // Whether the newest treasury deposit is still joined to the events after it by
@@ -170,6 +201,7 @@ export function deriveFeePayment(
   for (const e of events) {
     const dustSweep = afterDustLost
     afterDustLost = e.name === 'Balances.DustLost'
+    if (EVM_EXECUTION.has(e.name)) ranEvm = true
     if (e.name === XCM_EXECUTE_BARRIER_EVENT) {
       if (lastDepositContiguous) deposits.pop()
       lastDepositContiguous = false
@@ -197,16 +229,23 @@ export function deriveFeePayment(
   const last = candidates[candidates.length - 1]
   if (!last) return null
 
-  const paid = hasSubstrateFee(feeHdx, tipHdx)
-    ? last.amount
-    : candidates.filter(c => c.assetId === last.assetId).reduce((sum, c) => sum + c.amount, 0n)
+  const substrateFee = hasSubstrateFee(feeHdx, tipHdx)
+  const inFeeCurrency = candidates.filter(c => c.assetId === last.assetId)
+  const paid = substrateFee ? last.amount : inFeeCurrency.reduce((sum, c) => sum + c.amount, 0n)
+  // With a substrate fee the last candidate is that fee; what the EVM charged
+  // before it, in the same currency, is the gas the revenue model's deposit arm
+  // books — one rule for both readers.
+  const gasPaid = substrateFee && ranEvm
+    ? inFeeCurrency.slice(0, -1).reduce((sum, c) => sum + c.amount, 0n)
+    : 0n
+  const gas = gasPaid > 0n ? { gas: { assetId: last.assetId, amount: String(gasPaid) } } : {}
 
   const fee = parseBig(feeHdx)
   const tip = parseBig(tipHdx)
   if (fee != null && tip != null && tip > 0n) {
     const actual = fee + tip
     const tipPart = (paid * tip) / actual
-    return { assetId: last.assetId, amount: String(paid - tipPart), tipAmount: String(tipPart) }
+    return { assetId: last.assetId, amount: String(paid - tipPart), tipAmount: String(tipPart), ...gas }
   }
-  return { assetId: last.assetId, amount: String(paid), tipAmount: null }
+  return { assetId: last.assetId, amount: String(paid), tipAmount: null, ...gas }
 }

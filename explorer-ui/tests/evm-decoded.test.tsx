@@ -283,3 +283,31 @@ describe('evmTransactionEnvelope', () => {
       .toEqual({ kind: 'Legacy', nonce: null, value: null, gasLimit: null, gasPrice: null })
   })
 })
+
+// A signed dispatch that runs the EVM pays twice: gas mid-dispatch and the
+// substrate fee after. The api states the gas beside the fee (`feePayment.gas`,
+// in its own asset) and the page gives it its own line — the two together are
+// what the account paid and what the activity row's revenue attributes
+// (15011574-3: a 0.928 HDX fee and 0.347 HDX of gas, where the page said 0.928).
+describe('EVM gas beside the substrate fee', () => {
+  const id = '12848613-4'
+  const plain = mockSync<ExtrinsicDetail>(`/explorer/extrinsic-at/12848613/4`)!
+  const hdx = { assetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12, parachainId: null }
+
+  it('gives the gas its own line, in its asset, beside the fee', () => {
+    const detail: ExtrinsicDetail = {
+      ...plain, callName: 'Dispatcher.dispatch_evm_call', fee: '928231574052', tip: '0',
+      feePayment: { asset: hdx, amount: '928231574052', tipAmount: null, gas: { asset: hdx, amount: '347207837694' } },
+    }
+    const text = render(<ExtrinsicDetailPage id={id} />, qc => qc.setQueryData(['extrinsic', id], detail)).replace(/<[^>]+>/g, '')
+    // Both on the shared rough scale, each with its asset in front of the figure.
+    expect(text).toContain('Fee HDX 0.928')
+    expect(text).toContain('EVM gas HDX 0.347')
+  })
+
+  it('adds no gas line to an extrinsic that charged none', () => {
+    expect(plain.feePayment?.gas).toBeUndefined()
+    const out = render(<ExtrinsicDetailPage id={id} />, qc => qc.setQueryData(['extrinsic', id], plain))
+    expect(out).not.toContain('EVM gas')
+  })
+})
