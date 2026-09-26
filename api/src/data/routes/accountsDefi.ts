@@ -616,7 +616,10 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
               borrowedUsd: z.string().nullable().describe('This market\'s priced borrowed legs; null before reserveHistoryFrom.'),
               netUsd: z.string().nullable().describe('suppliedUsd − borrowedUsd, only when every held leg is priced and stated; else null.'),
               unpriced: z.number().int(),
-              observation: zMmObservation.nullable().describe('The newest getUserAccountData at or before the bucket end; null when none is indexed by then.'),
+              observation: zMmObservation.extend({
+                lowestHealthFactor: z.string().describe('The LOWEST health factor the chain observed in the bucket (every getUserAccountData indexed inside it, and the one carried in from before it), 1e18-scaled — the chain\'s own figures, never recomputed. The bucket-end `healthFactor` alone hides a dip inside the bucket, the one a LiquidationCall observed, so read risk from this.'),
+                lowestAtBlock: z.number().int().describe('The block that observed lowestHealthFactor.'),
+              }).nullable().describe('The newest getUserAccountData at or before the bucket end; null when none is indexed by then.'),
               eModeCategoryId: z.number().int().nullable(),
               unclaimedRewards: z.array(zMmRewardPoint).describe('Unclaimed incentives listed under this market at the bucket end, per reward asset; [] when none.'),
             })),
