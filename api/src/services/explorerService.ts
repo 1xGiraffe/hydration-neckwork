@@ -22295,7 +22295,7 @@ function accountSetFingerprint(accounts: string[]): string {
  * early. The short lifetimes also bound how long the zoom entries — one per
  * window, per account — occupy the in-process cache.
  */
-async function windowedHistoryTtlMs(toBlock: number): Promise<number> {
+export async function windowedHistoryTtlMs(toBlock: number): Promise<number> {
   const clock = await blockClock(client)
   const endSec = timeUpperBoundOfHeight(clock, toBlock)
   const headSec = clock.lastTime ?? (clock.hours.length ? clock.hours[clock.hours.length - 1] : Number.NaN)

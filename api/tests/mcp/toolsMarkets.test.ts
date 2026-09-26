@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { poolTools } from '../../src/mcp/tools/pools.ts'
+import { poolHistoryTools, trimToBudget } from '../../src/mcp/tools/poolHistory.ts'
 import { moneyMarketTools } from '../../src/mcp/tools/moneyMarket.ts'
 import { governanceTools } from '../../src/mcp/tools/governance.ts'
 import { UpstreamError, type UpstreamClient } from '../../src/mcp/upstream.ts'
@@ -566,5 +567,130 @@ describe('get_governance', () => {
     expect(parsed.pallet).toBe('opengov')
     expect(parsed.index).toBe(410)
     expect(parsed.directTally.support).toBe('654370578430344261387')
+  })
+})
+
+/* ============ get_pool_history ============ */
+
+const poolHistory = tool(poolHistoryTools, 'get_pool_history')
+
+const PRIME = { assetId: 43, iconAssetId: 43, symbol: 'PRIME', name: 'PRIME', decimals: 6, parachainId: null, origin: null }
+const SHARE_143 = { assetId: 143, iconAssetId: 143, symbol: '2-Pool-PRIME', name: null, decimals: 18, parachainId: null, origin: null }
+
+/** Trimmed from the live /explorer/pool/143/snapshots answer: two grid points, one deliberately missing between them. */
+const point = (block: number, time: string, prime: string, hollar: string, num: string, den: string, price: number) => ({
+  block, hash: `0x${block.toString(16).padStart(64, '0')}`, time, t: Date.parse(`${time.replace(' ', 'T')}Z`) / 1000,
+  reserves: [prime, hollar],
+  pegs: [{ num, den, price }, { num: '1', den: '1', price: 1 }],
+  issuance: '1052470789450309759848156', amplification: 100, amplificationRamp: null, feePermill: 400, specVersion: 443,
+})
+const SNAPSHOTS_143 = {
+  kind: 'stableswap', poolId: 143, name: '2-Pool-PRIME', shareToken: SHARE_143, account: ACCOUNT,
+  assets: [PRIME, HOLLAR],
+  window: { fromBlock: 14_400_000, toBlock: 14_401_200 },
+  resolution: { kind: 'grid', stepBlocks: 600, stepSec: null, gridBlocks: 600 },
+  semantics: {
+    points: 'Each point is the pool\'s state read from chain storage at exactly the block it names. Nothing between points is interpolated or carried forward.',
+    reserves: 'reserves are raw integers in the asset\'s own base units, aligned to `assets`.',
+    missing: 'coverage.missing lists block heights inside the window with no observation of this pool.',
+    issuance: 'issuance is the share token\'s total supply as read from storage at the point\'s block.',
+    fee: 'feePermill is Substrate\'s Permill, parts per MILLION (400 = 0.04%).',
+  },
+  coverage: { firstObservedBlock: 11_434_800, lastObservedBlock: 15_072_600, expected: 3, returned: 2, missingCount: 1, missing: [14_400_600], remaining: 12, truncated: true, nextFromBlock: 14_401_800 },
+  points: [
+    point(14_400_000, '2026-09-09 11:09:00', '341678543723', '711375545478512829651973', '215787937978549511914791986252642354203', '205414505453164694826075189198136462831', 1.0505),
+    point(14_401_200, '2026-09-09 11:52:36', '345800680313', '707176738348135169156806', '287608738040904029868395259012075661610', '273228822889597479415815711933413161541', 1.0526),
+  ],
+}
+
+describe('get_pool_history', () => {
+  it('asks the snapshot route with the window, resolution and point budget it was given', async () => {
+    const upstream = fakeUpstream({ '/explorer/pool/143/snapshots': SNAPSHOTS_143 })
+    await poolHistory.handler({ pool: '143', fromBlock: 14_400_000, toBlock: 14_401_200, resolution: 'grid', stepBlocks: 600, limit: 2 }, ctxFor(upstream))
+    expect(upstream.calls).toEqual(['/explorer/pool/143/snapshots?fromBlock=14400000&toBlock=14401200&resolution=grid&stepBlocks=600&limit=2'])
+    // The defaults travel as absence, so the route applies its own.
+    const bare = fakeUpstream({ '/explorer/pool/143/snapshots': SNAPSHOTS_143 })
+    await poolHistory.handler({ pool: '143' }, ctxFor(bare))
+    expect(bare.calls).toEqual(['/explorer/pool/143/snapshots?limit=48'])
+  })
+
+  it('renders every point with its block, scaled reserves and the drifting peg, and repeats the route\'s semantics', async () => {
+    const out = await run(poolHistory, { pool: '143' }, { '/explorer/pool/143/snapshots': SNAPSHOTS_143 })
+    expect(out.errors ?? []).toEqual([])
+    expect(out.markdown).toContain('2-Pool-PRIME — state snapshots')
+    expect(out.markdown).toContain('| Time | Block | PRIME | HOLLAR | Peg PRIME | Issuance (2-Pool-PRIME) | A | Fee |')
+    // 341678543723 raw / 1e6 → 342k on the rough scale; the raw integer never prints.
+    expect(out.markdown).toContain('342k')
+    expect(out.markdown).toContain('711k')
+    expect(out.markdown).not.toContain('341678543723')
+    expect(out.markdown).toContain('[14,400,000](https://explorer.example/block/14400000)')
+    // Pegs print to four decimals: on the rough scale 1.0505 and 1.0526 are the same "1.05".
+    expect(out.markdown).toContain('| 1.0505 |')
+    expect(out.markdown).toContain('| 1.0526 |')
+    // The HOLLAR peg sits at 1/1 throughout, so it earns no column.
+    expect(out.markdown).not.toContain('Peg HOLLAR')
+    expect(out.markdown).toContain('0.040%')
+    // Provenance, coverage and the gap are stated, not implied.
+    expect(out.markdown).toContain('exactly the block it names')
+    expect(out.markdown).toContain('3 expected · 2 returned · 1 missing · 12 more past the last point — continue with fromBlock 14,401,800')
+    expect(out.markdown).toContain('Missing (1): 14400600')
+    expect(out.markdown).toContain('not zero')
+    expect(out.markdown).toContain('every grid block')
+  })
+
+  it('carries the raw integers, hashes and coverage in the structured record', async () => {
+    const out = await run(poolHistory, { pool: '143', format: 'json' }, { '/explorer/pool/143/snapshots': SNAPSHOTS_143 })
+    const parsed = JSON.parse(JSON.stringify(out.json)) as typeof SNAPSHOTS_143
+    expect(parsed.points[0].reserves).toEqual(['341678543723', '711375545478512829651973'])
+    expect(parsed.points[0].pegs?.[0]).toEqual({ num: '215787937978549511914791986252642354203', den: '205414505453164694826075189198136462831', price: 1.0505 })
+    expect(parsed.points[1].hash).toBe(SNAPSHOTS_143.points[1].hash)
+    expect(parsed.coverage).toEqual(SNAPSHOTS_143.coverage)
+    expect(parsed.semantics.points).toContain('carried forward')
+  })
+
+  it('cuts the json form to the text budget by whole points and restates the coverage as a page', () => {
+    // Twelve grid points; a budget that fits about four of them.
+    const points = Array.from({ length: 12 }, (_, i) => point(14_400_000 + i * 600, '2026-09-09 11:09:00', '1', '2', '3', '4', 1.01))
+    const wide = { ...SNAPSHOTS_143, coverage: { ...SNAPSHOTS_143.coverage, expected: 13, returned: 12, missingCount: 1, missing: [14_406_000], remaining: 0, truncated: false, nextFromBlock: null }, points }
+    const budget = 2_000 + JSON.stringify({ ...wide, points: [] }, null, 2).length
+    const cut = trimToBudget(wide as never, budget)
+    expect(cut.points.length).toBeGreaterThanOrEqual(1)
+    expect(cut.points.length).toBeLessThan(12)
+    expect(JSON.stringify(cut, null, 2).length).toBeLessThanOrEqual(budget)
+    expect(cut.coverage.truncated).toBe(true)
+    expect(cut.coverage.returned).toBe(cut.points.length)
+    expect(cut.coverage.nextFromBlock).toBe(points[cut.points.length].block)
+    expect(cut.coverage.remaining).toBe(12 - cut.points.length)
+    expect(cut.window.toBlock).toBe(cut.points[cut.points.length - 1].block)
+    // The missing slot past the cut is no longer the caller's to see, so it is
+    // neither named nor counted; one before the cut stays.
+    expect(cut.coverage.missing).toEqual([])
+    expect(cut.coverage.missingCount).toBe(0)
+    const early = trimToBudget({ ...wide, coverage: { ...wide.coverage, missing: [14_400_000 - 1], missingCount: 1 } } as never, budget)
+    expect(early.coverage.missing).toEqual([14_400_000 - 1])
+    expect(early.coverage.missingCount).toBe(1)
+    // A record that fits is returned untouched.
+    expect(trimToBudget(wide as never, 1_000_000)).toBe(wide)
+  })
+
+  it('refuses the Omnipool, a v3 address and a name, each with the tool to call instead', async () => {
+    for (const [pool, hint] of [['omnipool', 'get_pools'], [V3_POOL.address, 'get_pools'], ['PRIME pool', 'search']] as const) {
+      const upstream = fakeUpstream({})
+      const out = await poolHistory.handler({ pool }, ctxFor(upstream))
+      expect(out.errors?.[0].code, pool).toBe('INVALID_ARGUMENT')
+      expect(out.errors?.[0].message, pool).toContain(hint)
+      expect(upstream.calls, pool).toEqual([])
+    }
+  })
+
+  it('turns the route\'s 404 into a statement about share-token ids, and its 400 into the rule it broke', async () => {
+    const miss = await run(poolHistory, { pool: '999' }, {})
+    expect(miss.errors?.[0].code).toBe('INVALID_ARGUMENT')
+    expect(miss.errors?.[0].message).toContain('share-token id 999')
+    const refused = await run(poolHistory, { pool: '143', resolution: 'block', fromTs: 1 }, {
+      '/explorer/pool/143/snapshots': new UpstreamError("resolution 'block' is addressed by height: window it with fromBlock/toBlock, not fromTs/toTs", 400, { error: 'x' }, '/explorer/pool/143/snapshots'),
+    })
+    expect(refused.errors?.[0].code).toBe('INVALID_ARGUMENT')
+    expect(refused.errors?.[0].message).toContain('fromBlock/toBlock')
   })
 })
