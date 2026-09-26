@@ -1311,6 +1311,18 @@ export async function runRevenueEvents(client: ClickHouseClient): Promise<Deriva
 // valued amount over its inter-mint window (asset_reserve) — cumulative-floor
 // exact, remainder on account = '', so per stream and month the account sums
 // equal the protocol-revenue event sums to the last 1e-12 USD.
+//
+// ONE ROW PER (account, stream, month) PER BUILD. The table is a
+// ReplacingMergeTree over exactly that key, so two rows written for one key in
+// the same publication are not two addends: a merge keeps the newer and the
+// other's revenue vanishes, silently and only once the merge happens to run —
+// a plain sum reads the truth until then, FINAL and argMax read the loss at
+// once. Every stream therefore has exactly one writer: the GROUP BY for the
+// streams it lists, the accumulator below for ACCOUNT_REVENUE_ATTRIBUTED_STREAMS.
+// A stream with two sources (uniswap_v3_fee: per-swap accruals naming their
+// payer beside vault realizations spread over a window) folds its eventful
+// half into the accumulator, and accountRevenueKeyCollisionsSql refuses to
+// publish a partition where a key was written twice anyway.
 
 import {
   accountBorrowInterestSql,
@@ -1382,22 +1394,58 @@ export function accountRevenueStalePartitionsSql(): string {
 }
 
 /**
+ * The streams the accumulator in runAccountRevenue writes, and which the
+ * eventful GROUP BY therefore never touches — the two writers must stay
+ * disjoint (see the section note). uniswap_v3_fee is here although half of it
+ * is eventful: its accrued rows are folded into the accumulator beside the
+ * realization shares so an account earns ONE row for the month.
+ */
+export const ACCOUNT_REVENUE_ATTRIBUTED_STREAMS = ['hollar_borrow', 'asset_reserve', 'uniswap_v3_fee'] as const
+
+/**
  * The attributed eventful streams, straight off the fresh revenue_events
  * partition. No FINAL: a partition is always exactly one publication (REPLACE
- * PARTITION swaps it whole), and identities within one build are unique.
+ * PARTITION swaps it whole), and identities within one build are unique —
+ * accountRevenueKeyCollisionsSql checks that before the swap.
  */
 export function accountRevenueEventfulInsertSql(partition: string, target = `${ACCOUNT_REVENUE_TABLE}_staging`): string {
   return `INSERT INTO ${target} (account, stream, month, revenue_usd)
 SELECT account, stream, toUInt32(${partition}) AS month, sum(amount_usd) AS revenue_usd
 FROM ${REVENUE_EVENTS_TABLE}
 WHERE toYYYYMM(block_timestamp) = ${partition}
-  -- uniswap_v3_fee is half eventful: its accrued rows name the swapper who paid
-  -- them and belong here, while the Gamma vault's lump names no payer and is
-  -- spread over a window by the realization pass below.
-  AND (stream NOT IN ('hollar_borrow', 'asset_reserve', 'uniswap_v3_fee')
-       OR (stream = 'uniswap_v3_fee' AND account != ''))
+  AND stream NOT IN (${ACCOUNT_REVENUE_ATTRIBUTED_STREAMS.map(s => `'${s}'`).join(', ')})
   AND ${PROTOCOL_REVENUE_PREDICATE_SQL}
 GROUP BY account, stream`
+}
+
+/**
+ * The eventful half of uniswap_v3_fee: the pool's protocol share booked per
+ * swap under dest = 'accrued', each row naming the swapper who paid it — or ''
+ * where the stream blanked a pallet's own swap, which stays booked as
+ * unattributed rather than dropped. Read into the accumulator, not inserted:
+ * the same account may also hold a share of a vault realization for the month
+ * (dest = '', spread by the realization pass), and the two must add up into
+ * one row for the key.
+ */
+export function accountRevenueV3AccruedSql(partition: string): string {
+  return `-- rev:account-revenue:v3-accrued
+SELECT account, toString(sum(amount_usd)) AS usd
+FROM ${REVENUE_EVENTS_TABLE}
+WHERE toYYYYMM(block_timestamp) = ${partition}
+  AND stream = 'uniswap_v3_fee' AND dest = 'accrued'
+  AND ${PROTOCOL_REVENUE_PREDICATE_SQL}
+GROUP BY account`
+}
+
+/**
+ * How many (account, stream) keys the staged month holds more than once. Any
+ * is a bug in the build above — a second writer for a stream — and the month
+ * must not be published: a ReplacingMergeTree would keep one row per key and
+ * lose the other's revenue at its next merge. The staged month is a few
+ * thousand rows, so the exact count is cheap.
+ */
+export function accountRevenueKeyCollisionsSql(partition: string, staging = `${ACCOUNT_REVENUE_TABLE}_staging`): string {
+  return `SELECT count() - uniqExact(account, stream) AS n FROM ${staging} WHERE month = ${partition}`
 }
 
 const accountRevenueRebuilt = new Map<string, string>()
@@ -1500,11 +1548,22 @@ export async function runAccountRevenue(client: ClickHouseClient): Promise<Deriv
       }
     }
 
-    // Uniswap v3 protocol fees, split over the swappers whose fees accrued them.
-    // Only the Gamma vault's REALIZATION needs this: it pays the Treasury a lump
-    // covering many swaps, and the vault is not the payer — see
-    // services/uniswapV3Attribution.ts. The pool-level share is booked per swap
-    // and already carries its swapper, so it takes the generic path instead.
+    // Uniswap v3 protocol fees. The pool-level share is booked per swap and
+    // already carries its swapper, so its month is a GROUP BY — folded in HERE
+    // rather than inserted by the eventful statement, because the same account
+    // may take a share of a realization below and the key admits one row.
+    const accruedRes = await client.query({
+      query: accountRevenueV3AccruedSql(p),
+      format: 'JSONEachRow',
+    })
+    for (const row of await accruedRes.json<{ account: string; usd: string }>()) {
+      const k = key(row.account, 'uniswap_v3_fee')
+      attributed.set(k, (attributed.get(k) ?? 0n) + scaledUsd(row.usd))
+    }
+
+    // Only the Gamma vault's REALIZATION needs spreading: it pays the Treasury a
+    // lump covering many swaps, and the vault is not the payer — see
+    // services/uniswapV3Attribution.ts.
     const realizationsRes = await client.query({
       query: uniswapV3RealizationsSql(),
       query_params: { partition: Number(p) },
@@ -1547,6 +1606,15 @@ export async function runAccountRevenue(client: ClickHouseClient): Promise<Deriv
         }),
         format: 'JSONEachRow',
       })
+    }
+
+    // Refuse to publish a month that would lose revenue at its next merge; the
+    // live table keeps serving the month's previous publication and the error
+    // reaches the cycle log (the runner catches per job).
+    const collisionsRes = await client.query({ query: accountRevenueKeyCollisionsSql(p, staging), format: 'JSONEachRow' })
+    const collisions = Number((await collisionsRes.json<{ n: string }>())[0]?.n ?? 0)
+    if (collisions > 0) {
+      throw new Error(`account_revenue ${p}: ${collisions} (account, stream) keys written twice — a ReplacingMergeTree keeps one row per key, so the month was not published`)
     }
   })
   return { model, rows: await countPublished(client, live, 'month', built) }
