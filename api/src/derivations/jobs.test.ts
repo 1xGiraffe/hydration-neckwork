@@ -563,6 +563,7 @@ describe('revenueEventsInsertSql', () => {
     expect(REVENUE_EVENT_STREAMS_INSERTED).toEqual([
       'omnipool_asset_fee', 'omnipool_protocol_fee', 'liquidation_penalty',
       'pepl_liquidation_profit', 'hsm_revenue', 'ice_matched_fee', 'uniswap_v3_fee', 'network_fee',
+      'xcm_execution_fee',
     ])
     expect(REVENUE_EVENT_STREAMS_INSERTED).not.toContain('asset_reserve')
     expect(REVENUE_EVENT_STREAMS_INSERTED).not.toContain('hollar_borrow')

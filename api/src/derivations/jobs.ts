@@ -32,7 +32,8 @@ import { allExplorerAssets } from '../services/explorerAssets.ts'
 import { chTimestamp } from '../services/clickhouseTime.ts'
 // The feed's own inbound-XCM walk. Imported, not reimplemented: see the xcm_arrivals
 // section below for the four ways a SQL restatement of it drifted.
-import { xcmInboundCreditsForBlocks, XCM_BARRIER_EVENTS, type XcmInboundCredit } from '../services/explorerService.ts'
+import { xcmInboundCreditsForBlocks, type XcmInboundCredit } from '../services/explorerService.ts'
+import { XCM_BARRIER_EVENTS } from '../services/xcmWalkEvents.ts'
 import {
   buildOmnipoolOwnerIntervals,
   type OwnerLifecycleEvent,
