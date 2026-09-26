@@ -177,6 +177,33 @@ describe('matchLiquidityAmounts on an XYK pair', () => {
     expect(rows[0].amount).toBe('1616158587135')
     expect(rows[0].amount_b).toBeUndefined()
   })
+
+  it('fills BOTH seed legs of a pool creation, whose event precedes its deposits', () => {
+    // Block 13627345 extrinsic 2: XYK.PoolCreated HDX+222 at event 5, THEN the two
+    // who→pool seed deposits (HDX emitted twice) and the LP-token existential
+    // deposit to the Treasury after them.
+    const rows = [removal({ event_name: 'XYK.PoolCreated', asset_id: HDX, asset_b: 222, event_index: 5, extrinsic_index: 2 })]
+    matchLiquidityAmounts(rows, [
+      leg({ asset_id: HDX, from_account: ALICE, to_account: POOL, event_index: 8, extrinsic_index: 2, amount: '100000000000000' }),
+      leg({ asset_id: HDX, from_account: ALICE, to_account: POOL, event_index: 9, extrinsic_index: 2, amount: '100000000000000' }),
+      leg({ asset_id: 222, from_account: ALICE, to_account: POOL, event_index: 11, extrinsic_index: 2, amount: '956109315637016847' }),
+      leg({ asset_id: HDX, from_account: ALICE, to_account: TREASURY_POT, event_index: 12, extrinsic_index: 2, amount: '1100000000000' }),
+    ])
+    expect(rows[0].amount).toBe('100000000000000')
+    expect(rows[0].amount_b).toBe('956109315637016847')
+  })
+
+  it('takes one leg for a row that names the same asset on both sides', () => {
+    // A surface that pins a creation to its assetB hands the matcher
+    // asset_id = asset_b; a pair is two assets, so that is the single leg, never a
+    // self-pair.
+    const rows = [removal({ event_name: 'XYK.PoolCreated', asset_id: 222, asset_b: 222, event_index: 5, extrinsic_index: 2 })]
+    matchLiquidityAmounts(rows, [
+      leg({ asset_id: 222, from_account: ALICE, to_account: POOL, event_index: 11, extrinsic_index: 2, amount: '956109315637016847' }),
+    ])
+    expect(rows[0].amount).toBe('956109315637016847')
+    expect(rows[0].amount_b).toBeUndefined()
+  })
 })
 
 // Which rows a surface recovers, and which legs it loads for them, are the
@@ -199,8 +226,10 @@ describe('the rows and assets a leg loader takes', () => {
       removal({ event_name: 'XYK.LiquidityRemoved', asset_id: DOT, asset_b: MYTH, event_index: 1 }),
       removal({ event_name: 'XYK.LiquidityAdded', asset_id: DOT, asset_b: 0, event_index: 2 }),
       removal({ event_name: 'Omnipool.LiquidityRemoved', asset_id: MYTH, event_index: 3 }),
+      removal({ event_name: 'XYK.PoolCreated', asset_id: DOT, asset_b: 222, event_index: 4 }),
     ]
-    // HDX (asset 0) is a real second asset of an XYK pair, not "none".
-    expect(liquidityLegAssetIds(rows)).toEqual([DOT, MYTH, 0])
+    // HDX (asset 0) is a real second asset of an XYK pair, not "none"; a pool
+    // creation seeds both of its assets.
+    expect(liquidityLegAssetIds(rows)).toEqual([DOT, MYTH, 0, 222])
   })
 })
