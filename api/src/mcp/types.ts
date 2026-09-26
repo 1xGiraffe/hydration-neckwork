@@ -198,11 +198,15 @@ export interface ExtrinsicSummary {
   errorReason?: FailureReason | null
 }
 
-/** The fee as actually paid, when the signer's fee currency is not HDX. */
+/**
+ * The fee as actually paid, when the signer's fee currency is not HDX — or when
+ * EVM gas was charged beside the substrate fee (`gas`, in its own asset).
+ */
 export interface FeePayment {
   asset: AssetRef
   amount: string
   tipAmount: string | null
+  gas?: { asset: AssetRef; amount: string }
 }
 
 export interface ExtrinsicEventRow {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { deriveFeePayment, type FeePaymentEvent } from '../src/services/extrinsicFeePayment.ts'
+import { EVM_EXECUTION_EVENTS } from '../src/services/revenueStreams.ts'
 
 // The fee's real asset comes out of the extrinsic's own balance events, so these
 // fixtures are the event shapes as indexed, taken from the blocks named on each
@@ -294,5 +295,108 @@ describe('deriveFeePayment: EVM gas', () => {
       nativeDeposit(TREASURY, '4000'),
     ]
     expect(deriveFeePayment(events, EVM_PAYER, null, null)?.amount).toBe('4000')
+  })
+})
+
+// A signed extrinsic that runs the EVM is Pays::Yes: it prepays gas mid-dispatch
+// (one treasury deposit per EVM call, net of the refund) AND settles the
+// substrate fee post-dispatch. Taking the last deposit alone stated the fee and
+// lost the gas — 15011574-3's page said 0.928 HDX while its activity row's
+// revenue booked 1.275 HDX. The gas is every earlier candidate in the fee
+// currency, under the scope the revenue stream's deposit arm uses
+// (EVM_EXECUTION_EVENTS), so page and book are one figure.
+describe('deriveFeePayment: gas beside a substrate fee', () => {
+  const burned = (who: string, amount: string): FeePaymentEvent => ({ name: 'Balances.Burned', args: { who, amount } })
+  const minted = (who: string, amount: string): FeePaymentEvent => ({ name: 'Balances.Minted', args: { who, amount } })
+  const evmExecuted: FeePaymentEvent = { name: 'EVM.Executed', args: { address: '0x2ce2cfff743cdb6637f4b5d351937a541b8c8923' } }
+
+  // 15011574-3, Dispatcher.dispatch_evm_call: 1,765,954,456,969 burned,
+  // 1,418,746,619,275 minted back, 347,207,837,694 to the treasury as gas
+  // (event 35), then the 928,231,574,052 fee (event 49). revenue_events books
+  // exactly those two rows for the extrinsic.
+  it('states the gas a dispatch_evm_call paid beside its HDX fee', () => {
+    const events = [
+      nativeWithdraw(PAYER, '931327713168'),
+      burned(PAYER, '1765954456969'),
+      minted(PAYER, '1418746619275'),
+      nativeDeposit(TREASURY, '347207837694'),
+      { name: 'EVM.Log', args: {} },
+      evmExecuted,
+      nativeDeposit(PAYER, '3096139116'),
+      nativeDeposit(TREASURY, '928231574052'),
+    ]
+    expect(deriveFeePayment(events, PAYER, '928231574052', '0')).toEqual({
+      assetId: 0, amount: '928231574052', tipAmount: null,
+      gas: { assetId: 0, amount: '347207837694' },
+    })
+  })
+
+  // 15055487-2, Utility.batch_all of EVM calls: the batch pays one substrate fee
+  // (1,627,066,659,277, event 91) and each call its own gas (670,667,471,565 at
+  // event 12 here, folded to one deposit in the fixture).
+  it('sums every gas deposit of a batch under one fee', () => {
+    const events = [
+      nativeWithdraw(PAYER, '1629456357681'),
+      burned(PAYER, '1764960845192'),
+      minted(PAYER, '1094293373627'),
+      nativeDeposit(TREASURY, '400000000000'),
+      evmExecuted,
+      burned(PAYER, '100000000000'),
+      nativeDeposit(TREASURY, '270667471565'),
+      evmExecuted,
+      nativeDeposit(PAYER, '2389698404'),
+      nativeDeposit(TREASURY, '1627066659277'),
+    ]
+    expect(deriveFeePayment(events, PAYER, '1627066659277', '0')).toEqual({
+      assetId: 0, amount: '1627066659277', tipAmount: null,
+      gas: { assetId: 0, amount: '670667471565' },
+    })
+  })
+
+  it('carries the gas in the fee currency when that is not HDX', () => {
+    const events = [
+      withdrawn(10, PAYER, '30000'),
+      deposited(10, TREASURY, '12000'),
+      evmExecuted,
+      deposited(10, TREASURY, '30000'),
+    ]
+    expect(deriveFeePayment(events, PAYER, '500000000000', '0')).toEqual({
+      assetId: 10, amount: '30000', tipAmount: null, gas: { assetId: 10, amount: '12000' },
+    })
+  })
+
+  // The scope is the revenue stream's: only an extrinsic the EVM ran in has gas.
+  // Outside it an earlier same-currency treasury deposit is not a charge the
+  // payer made, and the deposit arm books none — so the page states none.
+  it('reads no gas into an extrinsic that never ran the EVM', () => {
+    const events = [
+      nativeWithdraw(PAYER, '5000'),
+      nativeDeposit(TREASURY, '300'),
+      nativeDeposit(TREASURY, '5000'),
+    ]
+    expect(deriveFeePayment(events, PAYER, '5000', '0')).toEqual({ assetId: 0, amount: '5000', tipAmount: null })
+  })
+
+  it('admits gas under exactly the markers the revenue stream scopes on', () => {
+    for (const marker of EVM_EXECUTION_EVENTS) {
+      const events = [burned(PAYER, '900'), nativeDeposit(TREASURY, '300'), { name: marker, args: {} }, nativeDeposit(TREASURY, '5000')]
+      expect(deriveFeePayment(events, PAYER, '5000', '0')?.gas, marker).toEqual({ assetId: 0, amount: '300' })
+    }
+  })
+
+  // The tip split stays the fee's own — gas never enters the fee + tip ratio.
+  it('splits the tip out of the fee alone, with the gas beside it', () => {
+    const events = [burned(PAYER, '900'), nativeDeposit(TREASURY, '300'), evmExecuted, nativeDeposit(TREASURY, '30000')]
+    expect(deriveFeePayment(events, PAYER, '500000000000', '2500000000000')).toEqual({
+      assetId: 0, amount: '5000', tipAmount: '25000', gas: { assetId: 0, amount: '300' },
+    })
+  })
+
+  // With no substrate fee the gas IS the fee figure (the Ethereum.transact and
+  // Pays::No shapes above); nothing is stated twice.
+  it('states no separate gas when the gas is the whole charge', () => {
+    const events = [burned(PAYER, '900'), nativeDeposit(TREASURY, '300'), evmExecuted, nativeDeposit(TREASURY, '600')]
+    expect(deriveFeePayment(events, PAYER, null, null)).toEqual({ assetId: 0, amount: '900', tipAmount: null })
+    expect(deriveFeePayment(events, PAYER, '0', '0')).toEqual({ assetId: 0, amount: '900', tipAmount: null })
   })
 })

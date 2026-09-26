@@ -137,7 +137,9 @@ describe('network_fee', () => {
     expect(sql).toContain('c.currency = s.fee_currency')
     // hasSubstrateFee's `fee + tip > 0`, from the extrinsic's own columns; a
     // dispatch_evm_call's post-dispatch fee deposit IS actualFee, and booking it
-    // here as well counted the substrate fee twice.
+    // here as well counted the substrate fee twice. The deposits this arm keeps
+    // for such an extrinsic are what the page's resolver returns as `gas`
+    // (extrinsicFeePayment.test.ts pins 15011574-3 both ways).
     expect(sql).toContain("toUInt256OrZero(ifNull(fee, '0')) + toUInt256OrZero(ifNull(tip, '0')) > 0")
     expect(sql).toContain('NOT (c.substrate_fee = 1 AND c.event_index = s.last_index)')
   })

@@ -2918,14 +2918,20 @@ export async function getRecentExtrinsics(limit: number, signedOnly: boolean, fr
 
 // single extrinsic
 // What the fee actually cost the payer, when that is not the HDX figure `fee`
-// states. Present only when the extrinsic settled its fee in a non-native asset,
-// or when there is no HDX figure to state at all (the EVM shape — see
-// extrinsicFeePayment.ts). Absent for an ordinary HDX-paying extrinsic, so a
-// reader that has it should show it INSTEAD of `fee`/`tip`.
+// states. Present when the extrinsic settled its fee in a non-native asset,
+// when there is no HDX figure to state at all (the EVM shape — see
+// extrinsicFeePayment.ts), or when EVM gas was charged BESIDE the substrate fee
+// (`gas`: a `Dispatcher.dispatch_evm_call`, a `Utility.batch_all` of EVM calls).
+// Absent for an ordinary HDX-paying extrinsic, so a reader that has it should
+// show it INSTEAD of `fee`/`tip`, and a reader that has `gas` shows that too —
+// the revenue the activity row attributes is `amount` + `gas`.
 export interface FeePayment {
   asset: AssetRef
   amount: string
   tipAmount: string | null
+  // EVM gas charged alongside `amount`, in its own asset. Additive; absent when
+  // the extrinsic paid no substrate fee (the gas is then `amount` itself).
+  gas?: { asset: AssetRef; amount: string }
 }
 
 export interface ExtrinsicDetail extends ExtrinsicSummary {
@@ -3008,6 +3014,9 @@ interface ExtrinsicDetailRow {
 // re-deriving it from the treasury deposit could only lose precision. A zero
 // substrate fee is NOT that case — an `EVM.call` dispatched `Pays::No` reports
 // `actualFee: 0` and charges real gas, so an HDX-paying one still needs this.
+// Nor is an HDX fee with EVM gas beside it: `fee` states the fee alone, and the
+// gas the account also paid (15011574-3: 0.347 HDX next to a 0.928 HDX fee) is
+// nowhere else on the page.
 function feePaymentOf(
   events: readonly FeePaymentEvent[],
   payer: string | null,
@@ -3015,8 +3024,11 @@ function feePaymentOf(
   tip: string | null,
 ): FeePayment | undefined {
   const derived = deriveFeePayment(events, payer, fee, tip)
-  if (!derived || (derived.assetId === 0 && hasSubstrateFee(fee, tip))) return undefined
-  return { asset: asset(derived.assetId), amount: derived.amount, tipAmount: derived.tipAmount }
+  if (!derived || (derived.assetId === 0 && !derived.gas && hasSubstrateFee(fee, tip))) return undefined
+  return {
+    asset: asset(derived.assetId), amount: derived.amount, tipAmount: derived.tipAmount,
+    ...(derived.gas ? { gas: { asset: asset(derived.gas.assetId), amount: derived.gas.amount } } : {}),
+  }
 }
 
 async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<ExtrinsicDetail> {

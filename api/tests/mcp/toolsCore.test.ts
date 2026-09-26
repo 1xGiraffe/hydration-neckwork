@@ -221,6 +221,20 @@ describe('inspect_entity detection', () => {
     expect(out.errors?.[0].code).toBe('NOT_FOUND')
   })
 
+  // A signed dispatch that runs the EVM pays gas mid-dispatch AND the substrate
+  // fee after; the api states the gas beside the fee in its own asset, and the
+  // fee line names both — together they are what the activity row's revenue
+  // attributes (15011574-3: 0.928 HDX fee, 0.347 HDX gas).
+  it('names the EVM gas a dispatch charged beside its fee', async () => {
+    const paid = {
+      ...EXTRINSIC, callName: 'Dispatcher.dispatch_evm_call', fee: '928231574052', tip: '0',
+      feePayment: { asset: HDX, amount: '928231574052', tipAmount: null, gas: { asset: HDX, amount: '347207837694' } },
+    }
+    const f = fake({ '/explorer/extrinsic-at/100/2': paid, '/explorer/extrinsic-at/100/2/activity': [] })
+    const out = await call(inspect, { identifier: '100-2' }, f)
+    expect(out.markdown).toContain('**Fee:** 0.928 HDX · EVM gas 0.347 HDX')
+  })
+
   it('reads height-index as an extrinsic, and as an event or a trade when kind says so', async () => {
     const routes = {
       '/explorer/extrinsic-at/100/2': EXTRINSIC,

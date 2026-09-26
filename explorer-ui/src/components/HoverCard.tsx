@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api/explorer'
 import { useAddressSummary, useAsset, useExtrinsic, useBlock, useTagSummary, useTrade, useStats, useDcaSchedule, useDcaExecution } from '../hooks/useExplorerData'
 import { useListTagSummary } from '../hooks/useUser'
-import { F, AssetIcon, AssetChip, AssetAmount, FeeAmount, hasTip, AddrPill, CallPill, PoolBadge, poolHref, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow, UserTagPill } from './ui'
+import { F, AssetIcon, AssetChip, AssetAmount, FeeAmount, hasTip, hasGas, AddrPill, CallPill, PoolBadge, poolHref, StatusBadge, FinalizedBadge, AccountEmoji, emojiName, moduleName, TagIcon, TokenIconRow, UserTagPill } from './ui'
 import { ayeSharePct, selectTally } from '../utils/referendumVotes'
 import { dcaCadence, dcaProgress, fmtDuration } from '../utils/dca'
 import { resolveTag, allAssociations, useTagMapVersion, listForTag, tagMapStatus, looksLikeUserTagId } from '../userTags'
@@ -495,6 +495,7 @@ function ExtrinsicHover({ id }: { id: string }) {
       {data.signer && <div className="hc-row"><span>Signer</span><AddrPill account={data.signer} noCopy /></div>}
       <div className="hc-row"><span>Fee</span><span className="mono"><FeeAmount payment={data.feePayment} hdxRaw={data.fee} link={false} /></span></div>
       {hasTip(data.feePayment, data.tip) && <div className="hc-row"><span>Tip</span><span className="mono"><FeeAmount payment={data.feePayment} hdxRaw={data.tip} part="tip" link={false} /></span></div>}
+      {hasGas(data.feePayment) && <div className="hc-row"><span>EVM gas</span><span className="mono"><FeeAmount payment={data.feePayment} part="gas" link={false} /></span></div>}
     </>
   )
 }
