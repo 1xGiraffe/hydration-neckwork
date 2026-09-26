@@ -3739,6 +3739,12 @@ export interface MoneyMarketPosition {
   // health factor is that account's, not the lowest of several.
   memberCount?: number
   reserves?: MmReserve[]
+  // Reserves whose collateral the per-reserve fold cannot state for this holder
+  // (mmUnstatedReserves): one the holder's own usage-as-collateral configuration
+  // names while the fold holds nothing of it, or a supplied one without a price.
+  // Present only when non-empty; then totalSuppliedBase and the account value
+  // take the market's own aggregate where it exceeds the folded reserves.
+  unstatedCollateral?: AssetRef[]
   // The claimable incentives accruing on this market's aTokens (a subset of the
   // detail's moneyMarketRewards items). Display only: the value counts them once,
   // through moneyMarketRewards — never inside this position's collateral.
@@ -4307,15 +4313,20 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     for (const [marketKey, position] of indexedByMarket) byMarket.set(marketKey, position)
     // Attach indexed per-reserve detail (supplied/debt tokens) to each market.
     // Reserve balances include supplied assets that are not collateral-enabled, so
-    // read them even when the aggregate position has no collateral or debt.
+    // read them even when the aggregate position has no collateral or debt. A
+    // market with a position and an unstated reserve but no reserve row (GDOT that
+    // reached the holder Substrate-side) is attached too, so the position names it.
     const reservesByMarket = new Map<string, MmReserve[]>()
-    for (const r of await getMoneyMarketReserves(mmH160)) {
+    const [reserveRows, unstatedReserves] = await Promise.all([getMoneyMarketReserves(mmH160), getMoneyMarketUnstatedReserves(mmH160)])
+    for (const r of reserveRows) {
       const k = r.marketKey ?? 'core'
       ;(reservesByMarket.get(k) ?? reservesByMarket.set(k, []).get(k)!).push(r)
     }
-    for (const [k, rs] of reservesByMarket) {
+    for (const k of new Set([...reservesByMarket.keys(), ...unstatedReserves.map(u => u.marketKey)])) {
+      const rs = reservesByMarket.get(k) ?? []
       const pos = byMarket.get(k)
-      byMarket.set(k, pos ? attachMmReserves(pos, rs, prices) : moneyMarketFromReserves(k, rs, prices))
+      if (pos) byMarket.set(k, attachMmReserves(pos, rs, prices, unstatedReserves))
+      else if (rs.length) byMarket.set(k, moneyMarketFromReserves(k, rs, prices))
     }
 
     // Surface supplied aToken collateral as a wallet balance — it IS the account's
@@ -4323,9 +4334,11 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // markets (GIGAHDX): there the collateral (stHDX) is backed by HDX that stays locked
     // in the wallet, which is already counted — so we never fold it into balances or
     // portfolio value (it remains visible in that market's card). Debt is not a balance.
+    // A market with an unstated reserve keeps, on top of what it folded, the part
+    // of its own aggregate the fold could not state (mmUnstatedCollateralUsd).
     let moneyMarket = orderMoneyMarkets([...byMarket.values()])
     const countedPositions = moneyMarket.filter(p => !p.stakingBacked)
-    const foldedMmUsd = countedPositions.reduce((s, p) => s + applyMmCollateralToBalances(balances, p, prices), 0)
+    const unstatedMmUsd = countedPositions.reduce((s, p) => s + mmUnstatedCollateralUsd(p, applyMmCollateralToBalances(balances, p, prices)), 0)
     // MM collateral is added under the reserve's own asset id (Hydration's money
     // market uses the pool tokens, e.g. the 2-Pool-GETH reserve), so re-fold to
     // merge that supplied collateral into the underlying main asset as well.
@@ -4338,16 +4351,12 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // Fold each market's borrow-position display the same way (2-Pool-GETH → GETH);
     // done now, after applyMmCollateralToBalances has consumed the unfolded reserves.
     moneyMarket = moneyMarket.map(p => p.reserves?.length ? { ...p, reserves: foldShareReserves(p.reserves) } : p)
-    // Count MM collateral the per-reserve read couldn't surface (RPC shortfall) so a
-    // borrower's portfolio stays correct (collateral − debt > 0). Staking-backed
-    // markets are excluded — their collateral is the already-counted locked HDX.
-    const collateralShortfall = countedPositions.reduce((s, p) => s + mmCollateralShortfallUsd(p, 0), 0)
-    const portfolioUsd = balances.reduce((s, b) => s + (b.valueUsd ?? 0), 0) + Math.max(0, collateralShortfall - foldedMmUsd)
+    const portfolioUsd = balances.reduce((s, b) => s + (b.valueUsd ?? 0), 0) + unstatedMmUsd
     // The HDX-free twin of the balance side. The money-market fold is deliberately
     // identical (the exclusion is HDX and HDX LP only), so the two figures differ by
     // exactly the HDX the account holds and the HDX LP it owns — nothing else.
     const balancesExHdxUsd = balances.reduce((s, b) => s + (b.asset.assetId === HDX_ASSET_ID ? 0 : b.valueUsd ?? 0), 0)
-      + Math.max(0, collateralShortfall - foldedMmUsd)
+      + unstatedMmUsd
     const volumeAccounts = [...new Set([...related, ...[...related].map(evmAccountForm).filter(Boolean) as string[]])]
     const [tradingVolumeUsd, liquidationVolumeUsd, revenueUsd] = await Promise.all([
       tradingVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
@@ -5628,8 +5637,20 @@ async function reconstructAccountScaled(h160: string, b0: number): Promise<Map<s
 // collateralised and reads false. Both tables are user-first, so this is a
 // key-prefix read on each; replayed rows repeat their values, so the argMax is
 // idempotent without FINAL.
+//
+// Read per 500 holders: the addresses travel as one query parameter (an HTTP form
+// field ClickHouse caps far below the account-value generation's ~5.5k holders,
+// "Field value too long") and every holder answers with a row per reserve it was
+// ever observed in, which the request client caps at 100k rows.
 async function mmCollateralFlagsByHolder(h160s: string[]): Promise<Map<string, Map<string, boolean>>> {
-  return loadCurrentCollateralFlags(client, h160s)
+  const CHUNK = 500
+  const hs = [...new Set(h160s.map(h => h.toLowerCase()))]
+  if (hs.length <= CHUNK) return loadCurrentCollateralFlags(client, hs)
+  const out = new Map<string, Map<string, boolean>>()
+  for (let i = 0; i < hs.length; i += CHUNK) {
+    for (const [h, flags] of await loadCurrentCollateralFlags(client, hs.slice(i, i + CHUNK))) out.set(h, flags)
+  }
+  return out
 }
 
 const NO_COLLATERAL_FLAGS: ReadonlyMap<string, boolean> = new Map()
@@ -5692,29 +5713,95 @@ export function mmReserveRow(
 //
 // Reconstructed per request rather than read from the published account-value
 // snapshot, for the same freshness reason as getMoneyMarketPositions — and it must
-// move in lockstep with it: attachMmReserves raises the card's displayed totals to
+// move in lockstep with it: attachMmReserves raises the card's displayed debt to
 // max(aggregate, reserve-derived), so pairing a fresh aggregate with five-minute-old
 // reserves would let a stale-high debt survive a repay. Bounded to the account's own
 // rows (holder leads atoken_scaled_deltas' sort key); the anchor scan it adds is
 // ~92k rows / 12 MiB / 14 ms per uncached call.
 export async function getMoneyMarketReserves(h160: string): Promise<MmReserve[]> {
-  if (!/^0x[0-9a-fA-F]{40}$/.test(h160)) return []
+  return (await loadMoneyMarketReserveRead(h160)).reserves
+}
+
+// The reserves the fold cannot state for this holder (mmUnstatedReserves), read
+// beside the reserve rows from the same generation.
+export async function getMoneyMarketUnstatedReserves(h160: string): Promise<MmUnstatedReserve[]> {
+  return (await loadMoneyMarketReserveRead(h160)).unstated
+}
+
+interface MoneyMarketReserveRead { reserves: MmReserve[]; unstated: MmUnstatedReserve[] }
+const NO_RESERVE_READ: MoneyMarketReserveRead = { reserves: [], unstated: [] }
+
+async function loadMoneyMarketReserveRead(h160: string): Promise<MoneyMarketReserveRead> {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(h160)) return NO_RESERVE_READ
   return cached(`explorer:mm-reserves:${accountValueGenerationEpoch}:${h160.toLowerCase()}`, 15000, async () => {
     const b0 = await aTokenAnchorBlock()
-    if (!b0) return []
+    // Without an anchor the fold holds nothing for anyone; the collateral flags
+    // still name every reserve it therefore leaves unstated.
     const [prices, tokens, indices, byContract, flags] = await Promise.all([
-      ensureAccountValuePrices(), getMmReserveTokens(), reserveIndicesNow(), reconstructAccountScaled(h160, b0),
+      ensureAccountValuePrices(), getMmReserveTokens(), reserveIndicesNow(),
+      b0 ? reconstructAccountScaled(h160, b0) : new Map<string, bigint>(),
       mmCollateralFlagsByHolder([h160]),
     ])
-    if (!byContract.size || !tokens.length) return []
+    if (!tokens.length) return NO_RESERVE_READ
     const holderFlags = flags.get(h160.toLowerCase()) ?? NO_COLLATERAL_FLAGS
-    const out: MmReserve[] = []
+    const reserves: MmReserve[] = []
     for (const t of tokens) {
       const row = mmReserveRow(t, byContract, indices, prices, holderFlags)
-      if (row) out.push(row)
+      if (row) reserves.push(row)
     }
-    return out.sort((a, b) => (b.suppliedUsd ?? b.debtUsd ?? 0) - (a.suppliedUsd ?? a.debtUsd ?? 0))
+    reserves.sort((a, b) => (b.suppliedUsd ?? b.debtUsd ?? 0) - (a.suppliedUsd ?? a.debtUsd ?? 0))
+    return { reserves, unstated: mmUnstatedReserves(tokens, byContract, indices, prices, holderFlags) }
   })
+}
+
+export interface MmUnstatedReserve {
+  /** The id the reserve folds into the wallet under (the aToken where one is registered). */
+  assetId: number
+  marketKey: string
+  reason: 'unreconstructed' | 'unpriced'
+}
+
+// The reserves whose collateral USD this holder's fold cannot state — the only
+// place the market's own aggregate (getUserAccountData's totalCollateralBase, at
+// its oracle's prices as of its observation) is allowed to stand in for it:
+//
+//  - `unreconstructed`: the holder's usage-as-collateral configuration names the
+//    reserve (Aave clears the bit at a zero balance, so the bit means a balance)
+//    while the anchor+delta fold holds nothing of it. An aToken that reached the
+//    holder Substrate-side — GDOT bought on the Omnipool, a DCA fill — moved inside
+//    a runtime-internal EVM call that emits no EVM.Log, so the fold never saw it:
+//    71 core-market holders on live data, every one on 2-Pool-GDOT.
+//  - `unpriced`: the fold holds the reserve but the explorer's own prices cannot
+//    value it (WBTC's feed ended with the Moonbeam route; the oracle still prices
+//    it), so the wallet row carries the amount and no value.
+//
+// Everywhere else the fold is exact, and an aggregate above it is staleness (an
+// observation from before a DCA reserved the aTokens) or the oracle's gap to our
+// prices — never collateral. The account-value snapshot carries the first case as
+// reserve_present = 2 rows so the directory applies the same rule in SQL.
+export function mmUnstatedReserves(
+  tokens: MmReserveToken[],
+  byContract: ReadonlyMap<string, bigint>,
+  indices: ReadonlyMap<string, { liq: bigint; vbi: bigint }>,
+  prices: ReadonlyMap<number, PriceInfo>,
+  collateralFlags: ReadonlyMap<string, boolean>,
+): MmUnstatedReserve[] {
+  const out: MmUnstatedReserve[] = []
+  for (const t of tokens) {
+    const marketKey = t.marketKey ?? 'core'
+    const row = mmReserveRow(t, byContract, indices, prices, collateralFlags)
+    if (row && row.supplied !== '0') {
+      if (row.assetId < 0 || usdValue(prices as Map<number, PriceInfo>, row.assetId, row.supplied, row.decimals) == null) {
+        out.push({ assetId: row.assetId, marketKey, reason: 'unpriced' })
+      }
+      continue
+    }
+    if (!collateralFlags.get(`${t.poolProxy.toLowerCase()}:${t.asset.toLowerCase()}`)) continue
+    const underId = assetIdFromMmAddress(t.asset)
+    if (underId == null) continue
+    out.push({ assetId: UNDERLYING_TO_ATOKEN_ID[underId] ?? underId, marketKey, reason: 'unreconstructed' })
+  }
+  return out
 }
 
 // Batched form of reconstructAccountScaled: current scaled aToken/vDebt balances
@@ -5815,6 +5902,10 @@ export interface MoneyMarketAccountValueClaim {
   poolAddress: string
   marketKey: string
   reservePresent: boolean
+  // A collateral reserve the fold holds nothing of (mmUnstatedReserves'
+  // `unreconstructed`): stored as reserve_present = 2 with zero amounts, so the
+  // directory values the market by its aggregate exactly where the page does.
+  unstated: boolean
   assetId: number
   supplied: bigint
   debt: bigint
@@ -5837,6 +5928,10 @@ export function buildMoneyMarketAccountValueClaims(
   tokens: MmReserveToken[],
   indices: Map<string, { liq: bigint; vbi: bigint }>,
   aggregates: LatestMoneyMarketAggregate[],
+  // Each holder's current usage-as-collateral flags (loadCurrentCollateralFlags),
+  // keyed `${pool}:${reserve}`: a flagged reserve with no positive supply claim is
+  // stored as an unstated claim (reserve_present = 2).
+  collateralFlags: ReadonlyMap<string, ReadonlyMap<string, boolean>> = new Map(),
 ): MoneyMarketAccountValueClaim[] {
   const contractMap = new Map<string, { token: MmReserveToken; side: 'supplied' | 'debt' }>()
   for (const token of tokens) {
@@ -5897,7 +5992,7 @@ export function buildMoneyMarketAccountValueClaims(
     const marketKey = aggregate?.marketKey ?? tokens.find(token => token.poolProxy.toLowerCase() === poolAddress)?.marketKey
     if (!marketKey) throw new Error(`unknown money-market pool ${poolAddress}`)
     claims.push({
-      accountId, holder, poolAddress, marketKey, reservePresent: false, assetId: 0,
+      accountId, holder, poolAddress, marketKey, reservePresent: false, unstated: false, assetId: 0,
       supplied: 0n, debt: 0n,
       totalCollateralBase: aggregate?.totalCollateralBase ?? 0n,
       totalDebtBase: aggregate?.totalDebtBase ?? 0n,
@@ -5908,11 +6003,32 @@ export function buildMoneyMarketAccountValueClaims(
       blockTimestamp: aggregate?.blockTimestamp ?? '1970-01-01 00:00:00',
     })
     const prefix = `${holderMarket}|`
+    const suppliedAssets = new Set<number>()
     for (const [key, reserve] of [...reserves.entries()].filter(([key]) => key.startsWith(prefix)).sort(([a], [b]) => a.localeCompare(b))) {
       const assetId = Number(key.slice(prefix.length))
+      if (reserve.supplied > 0n) suppliedAssets.add(assetId)
       claims.push({
-        accountId, holder, poolAddress, marketKey, reservePresent: true, assetId,
+        accountId, holder, poolAddress, marketKey, reservePresent: true, unstated: false, assetId,
         supplied: reserve.supplied, debt: reserve.debt,
+        totalCollateralBase: 0n, totalDebtBase: 0n, availableBorrowsBase: 0n,
+        liquidationThreshold: 0, ltv: 0n, healthFactor: 0n,
+        blockHeight: 0, blockTimestamp: '1970-01-01 00:00:00',
+      })
+    }
+    // The reserves this holder's configuration names as collateral that the fold
+    // holds no supply of (mmUnstatedReserves' `unreconstructed`), in asset order.
+    const holderFlags = collateralFlags.get(holder)
+    if (!holderFlags) continue
+    const unstatedAssets = new Set<number>()
+    for (const token of tokens) {
+      if (token.poolProxy.toLowerCase() !== poolAddress || !holderFlags.get(`${poolAddress}:${token.asset.toLowerCase()}`)) continue
+      const assetId = assetIdFromMmAddress(token.asset)
+      if (assetId != null && !suppliedAssets.has(assetId)) unstatedAssets.add(assetId)
+    }
+    for (const assetId of [...unstatedAssets].sort((a, b) => a - b)) {
+      claims.push({
+        accountId, holder, poolAddress, marketKey, reservePresent: true, unstated: true, assetId,
+        supplied: 0n, debt: 0n,
         totalCollateralBase: 0n, totalDebtBase: 0n, availableBorrowsBase: 0n,
         liquidationThreshold: 0, ltv: 0n, healthFactor: 0n,
         blockHeight: 0, blockTimestamp: '1970-01-01 00:00:00',
@@ -5921,6 +6037,11 @@ export function buildMoneyMarketAccountValueClaims(
   }
   return claims
 }
+
+// The stored reserve_present of a claim: 0 the market's aggregate row, 1 a reserve
+// with a reconstructed amount, 2 a collateral reserve the fold holds nothing of.
+export const moneyMarketClaimReservePresent = (claim: Pick<MoneyMarketAccountValueClaim, 'reservePresent' | 'unstated'>): 0 | 1 | 2 =>
+  claim.unstated ? 2 : claim.reservePresent ? 1 : 0
 
 // Position snapshots can be emitted several times in one block. Event-derived
 // observations order by their event index; a periodic full-block observation is
@@ -6051,7 +6172,7 @@ export async function moneyMarketAccountValueSnapshotReady(): Promise<boolean> {
 // columns already covered — `holder` (the H160 whose account id this is) and
 // `market_key` (the configured market of `pool_address`).
 export const moneyMarketClaimChecksumFields = (claim: MoneyMarketAccountValueClaim): string =>
-  `${claim.accountId}|${claim.poolAddress}|${claim.reservePresent ? 1 : 0}|${claim.assetId}|${claim.supplied}|${claim.debt}|${claim.totalCollateralBase}|${claim.totalDebtBase}|${claim.availableBorrowsBase}|${claim.liquidationThreshold}|${claim.ltv}|${claim.healthFactor}|${claim.blockHeight}|${claim.blockTimestamp}\n`
+  `${claim.accountId}|${claim.poolAddress}|${moneyMarketClaimReservePresent(claim)}|${claim.assetId}|${claim.supplied}|${claim.debt}|${claim.totalCollateralBase}|${claim.totalDebtBase}|${claim.availableBorrowsBase}|${claim.liquidationThreshold}|${claim.ltv}|${claim.healthFactor}|${claim.blockHeight}|${claim.blockTimestamp}\n`
 
 // Two price maps are the same account-value generation only if every asset
 // carries the same price and 24h change: the pinned map values the whole
@@ -6071,7 +6192,10 @@ async function refreshMoneyMarketAccountValuesUncached(): Promise<'republished' 
   ])
   if (!anchorBlock || !tokens.length) throw new Error('money-market anchor or reserve map missing')
   const holdings = await reconstructAllActiveMoneyMarketScaled(tokens.flatMap(token => [token.aToken, token.vDebt]), anchorBlock)
-  const claims = buildMoneyMarketAccountValueClaims(holdings, tokens, indices, aggregates)
+  // Every holder in the generation's flags, read once (two user-first tables), so a
+  // collateral reserve the fold holds nothing of is stored beside the amounts.
+  const collateralFlags = await mmCollateralFlagsByHolder([...new Set([...holdings.map(h => h.holder), ...aggregates.map(a => a.holder)])])
+  const claims = buildMoneyMarketAccountValueClaims(holdings, tokens, indices, aggregates, collateralFlags)
   if (!claims.length) throw new Error('money-market account value generation is empty')
 
   const snapshotId = String(Date.now())
@@ -6082,7 +6206,7 @@ async function refreshMoneyMarketAccountValuesUncached(): Promise<'republished' 
   const checksum = createHash('sha256')
   const ordered = [...claims].sort((a, b) => a.accountId.localeCompare(b.accountId)
     || a.poolAddress.localeCompare(b.poolAddress)
-    || Number(a.reservePresent) - Number(b.reservePresent)
+    || moneyMarketClaimReservePresent(a) - moneyMarketClaimReservePresent(b)
     || a.assetId - b.assetId)
   for (const claim of ordered) checksum.update(moneyMarketClaimChecksumFields(claim))
   const digest = checksum.digest('hex')
@@ -6117,7 +6241,7 @@ async function refreshMoneyMarketAccountValuesUncached(): Promise<'republished' 
       values: claims.slice(offset,offset + batchSize).map(claim => ({
         snapshot_id: snapshotId, account_id: claim.accountId, holder: claim.holder,
         pool_address: claim.poolAddress, market_key: claim.marketKey,
-        reserve_present: claim.reservePresent ? 1 : 0, asset_id: claim.assetId,
+        reserve_present: moneyMarketClaimReservePresent(claim), asset_id: claim.assetId,
         supplied: claim.supplied.toString(), debt: claim.debt.toString(),
         total_collateral_base: claim.totalCollateralBase.toString(),
         total_debt_base: claim.totalDebtBase.toString(), available_borrows_base: claim.availableBorrowsBase.toString(),
@@ -6245,18 +6369,25 @@ export function valueSingleUnpricedSupply(reserves: MmReserve[], collateralBase:
   return reserves.map(reserve => reserve === unpriced[0] ? { ...reserve, suppliedUsd: remainder } : reserve)
 }
 
-function attachMmReserves(pos: MoneyMarketPosition, reserves: MmReserve[], prices: Map<number, PriceInfo>): MoneyMarketPosition {
+export function attachMmReserves(pos: MoneyMarketPosition, reserves: MmReserve[], prices: Map<number, PriceInfo>, unstated: readonly MmUnstatedReserve[] = []): MoneyMarketPosition {
   // Reserve balances capture all supplied aTokens, including assets that are not
   // enabled as collateral. Keep that display total separate: overwriting Aave's
   // eligible collateral would understate current LTV and liquidation risk.
   const valuedReserves = valueSingleUnpricedSupply(reserves, pos.totalCollateralBase)
   const suppliedBase = usdBase8(reserveUsdTotal(valuedReserves, prices, 'supplied'))
   const debtBase = usdBase8(reserveUsdTotal(valuedReserves, prices, 'debt'))
+  const unstatedCollateral = unstated.filter(u => u.marketKey === pos.marketKey).map(u => asset(u.assetId))
   return {
     ...pos,
-    totalSuppliedBase: maxBase8(pos.totalSuppliedBase ?? pos.totalCollateralBase, suppliedBase),
+    // The reserves state what is supplied, at our prices and as of the head. The
+    // aggregate stands in only for a reserve they cannot state (unstatedCollateral,
+    // the rule mmUnstatedCollateralUsd values by); elsewhere its excess over them
+    // is a stale observation or the oracle's gap, not supply. Debt keeps the max
+    // (see getMoneyMarketReserves).
+    totalSuppliedBase: unstatedCollateral.length ? maxBase8(pos.totalSuppliedBase ?? pos.totalCollateralBase, suppliedBase) : suppliedBase,
     totalDebtBase: maxBase8(pos.totalDebtBase, debtBase),
     reserves: valuedReserves,
+    ...(unstatedCollateral.length ? { unstatedCollateral } : {}),
   }
 }
 
@@ -6574,7 +6705,7 @@ export interface AccountMoneyMarket { account: AccountRef; markets: MoneyMarketP
 // The reserves a single member holds, grouped onto that member's own positions.
 // The aggregate below SUMS reserves across members into one row per market; here
 // each account keeps its own, which is the whole point of the split.
-function memberMoneyMarket(simAccount: string, positions: MoneyMarketPosition[], reserves: MmReserve[]): MoneyMarketPosition[] {
+function memberMoneyMarket(simAccount: string, positions: MoneyMarketPosition[], reserves: MmReserve[], unstated: MmUnstatedReserve[], prices: Map<number, PriceInfo>): MoneyMarketPosition[] {
   const byMarket = new Map<string, MmReserve[]>()
   for (const r of reserves) {
     const key = r.marketKey ?? 'core'
@@ -6582,13 +6713,12 @@ function memberMoneyMarket(simAccount: string, positions: MoneyMarketPosition[],
     list.push({ ...r })
   }
   return orderMoneyMarkets(positions.map(pos => {
-    const own = valueSingleUnpricedSupply(
-      (byMarket.get(pos.marketKey) ?? []).sort((x, y) => (y.suppliedUsd ?? y.debtUsd ?? 0) - (x.suppliedUsd ?? x.debtUsd ?? 0)),
-      pos.totalCollateralBase,
-    )
+    const own = (byMarket.get(pos.marketKey) ?? []).sort((x, y) => (y.suppliedUsd ?? y.debtUsd ?? 0) - (x.suppliedUsd ?? x.debtUsd ?? 0))
+    // The member's row states its market the way its own account page does
+    // (attachMmReserves); a position the fold has nothing on stays the aggregate.
+    const stated = own.length || unstated.some(u => u.marketKey === pos.marketKey) ? attachMmReserves(pos, own, prices, unstated) : pos
     return {
-      ...pos,
-      reserves: own.length ? own : pos.reserves,
+      ...stated,
       // Only the primary market is simulable; MoneyMarketPositions reads
       // defiSimSupported and never offers the link for an isolated one.
       ...(pos.defiSimSupported ? { simAccount: defiSimTargetForAccountId(simAccount) } : {}),
@@ -6604,17 +6734,22 @@ async function aggregateMoneyMarket(members: { h160: string; simAccount: string 
     }
   }
   if (!byH160.size) return { markets: [], byAccount: [] }
-  const perMember = await Promise.all([...byH160].map(async ([h, simAccount]) => ({ h, simAccount, positions: await getMoneyMarketPositions(h), reserves: await getMoneyMarketReserves(h) })))
+  const prices = await ensureAccountValuePrices()
+  const perMember = await Promise.all([...byH160].map(async ([h, simAccount]) => ({
+    h, simAccount, positions: await getMoneyMarketPositions(h), reserves: await getMoneyMarketReserves(h), unstated: await getMoneyMarketUnstatedReserves(h),
+  })))
   interface Acc {
     key: string; label: string; role: 'primary' | 'supplemental'; defiSimSupported: boolean; stakingBacked: boolean
     collateral: bigint; supplied: bigint; debt: bigint; avail: bigint; liqWeighted: bigint; ltvWeighted: bigint
     lastBlock: number; ts: string; simAccount?: string; simRank: number; worstHealthFactor: string; reserves: Map<number, MmReserve>
+    // Reserves some member's fold could not state (attachMmReserves), by asset id.
+    unstated: Map<number, AssetRef>
     // Who actually contributes to this summed row. The health factor below is the
     // WORST of them, which is only worth saying when there is more than one.
     members: Set<string>
   }
   const acc = new Map<string, Acc>()
-  for (const { simAccount, positions, reserves } of perMember) {
+  for (const { simAccount, positions, reserves, unstated } of perMember) {
     for (const pos of positions) {
       let a = acc.get(pos.marketKey)
       if (!a) {
@@ -6622,7 +6757,7 @@ async function aggregateMoneyMarket(members: { h160: string; simAccount: string 
           key: pos.marketKey, label: pos.market, role: pos.role, defiSimSupported: pos.defiSimSupported,
           stakingBacked: pos.stakingBacked ?? false, collateral: 0n, supplied: 0n, debt: 0n, avail: 0n,
           liqWeighted: 0n, ltvWeighted: 0n, lastBlock: 0, ts: '', simRank: Infinity,
-          worstHealthFactor: 'inf', reserves: new Map(), members: new Set(),
+          worstHealthFactor: 'inf', reserves: new Map(), unstated: new Map(), members: new Set(),
         }
         acc.set(pos.marketKey, a)
       }
@@ -6651,6 +6786,10 @@ async function aggregateMoneyMarket(members: { h160: string; simAccount: string 
         ex.collateral = ex.collateral || r.collateral
       } else a.reserves.set(r.assetId, { ...r })
     }
+    for (const u of unstated) {
+      const a = acc.get(u.marketKey); if (!a) continue
+      if (!a.unstated.has(u.assetId)) a.unstated.set(u.assetId, asset(u.assetId))
+    }
   }
   const out: MoneyMarketPosition[] = []
   for (const a of acc.values()) {
@@ -6664,7 +6803,9 @@ async function aggregateMoneyMarket(members: { h160: string; simAccount: string 
     out.push({
       marketKey: a.key, market: a.label, role: a.role, defiSimSupported: a.defiSimSupported, stakingBacked: a.stakingBacked,
       blockHeight: a.lastBlock, timestamp: a.ts || new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ''),
-      totalCollateralBase: a.collateral.toString(), totalSuppliedBase: maxBase8(a.supplied.toString(), reserveSuppliedBase), totalDebtBase: a.debt.toString(), availableBorrowsBase: a.avail.toString(),
+      // The members' reserves state the supplied total; their aggregates only
+      // where one of them has a reserve the fold cannot state (attachMmReserves).
+      totalCollateralBase: a.collateral.toString(), totalSuppliedBase: a.unstated.size ? maxBase8(a.supplied.toString(), reserveSuppliedBase) : reserveSuppliedBase, totalDebtBase: a.debt.toString(), availableBorrowsBase: a.avail.toString(),
       liquidationThreshold: liqThr, ltv, healthFactor: a.worstHealthFactor,
       ...(a.simAccount ? { simAccount: a.simAccount } : {}),
       // How many members this row sums. The card says "Lowest member health"
@@ -6672,11 +6813,12 @@ async function aggregateMoneyMarket(members: { h160: string; simAccount: string 
       // lowest one, and a per-account row (memberCount absent) never does.
       memberCount: a.members.size,
       reserves: mergedReserves,
+      ...(a.unstated.size ? { unstatedCollateral: [...a.unstated.values()] } : {}),
     })
   }
   // An account with no position at all is not a row — the list names who HAS one.
   const byAccount = perMember
-    .map(m => ({ account: accountRef(m.simAccount), markets: memberMoneyMarket(m.simAccount, m.positions, m.reserves) }))
+    .map(m => ({ account: accountRef(m.simAccount), markets: memberMoneyMarket(m.simAccount, m.positions, m.reserves, m.unstated, prices) }))
     .filter(entry => entry.markets.length > 0)
     .sort((x, y) => mmPositionValueUsd(y.markets) - mmPositionValueUsd(x.markets))
   return { markets: orderMoneyMarkets(out), byAccount }
@@ -6690,8 +6832,9 @@ function mmPositionValueUsd(markets: MoneyMarketPosition[]): number {
 // Fold supplied aToken collateral into the wallet balances list (it IS the
 // account's aToken holding, e.g. aDOT, which never hits substrate balances).
 // Shared by the account and tag views so both surface MM collateral identically.
-// Returns the USD value actually folded into balances so the caller can detect a
-// shortfall (per-reserve reconstruction unavailable) and still count collateral.
+// Returns the USD of the supplied collateral it folded, which the caller measures
+// the market's aggregate against where a reserve went unstated
+// (mmUnstatedCollateralUsd).
 //
 // `supplied` is the holder's own aToken balanceOf, so it replaces the pallet row's
 // FREE side (which reads 0 for an ERC-20 registry asset — the balance lives in
@@ -6725,17 +6868,19 @@ export function applyMmCollateralToBalances(balances: AddressBalance[], moneyMar
   return foldedUsd
 }
 
-// The collateral USD that must be added to a portfolio total ON TOP of the spot
-// balances. Per-reserve reconstruction can be unavailable even when an aggregate
-// snapshot exists; in that case no aToken balance gets folded into `balances`,
-// so portfolioUsd would omit the
-// collateral entirely and the header (portfolioUsd − debt) goes deeply negative
-// for a borrower (cf. #14). The aggregate totalCollateralBase is already USD
-// (base-8), so when the folded reserve value falls short of it, count the
-// remainder. We never DOUBLE-count: if reserves folded the full collateral in,
-// the shortfall is ~0.
-function mmCollateralShortfallUsd(moneyMarket: MoneyMarketPosition | null, foldedUsd: number): number {
-  if (!moneyMarket) return 0
+// The collateral USD a counted market adds to a portfolio total ON TOP of the
+// folded balances: the market's own aggregate (totalCollateralBase, already USD
+// base-8 — the chain's collateral figure at its oracle's prices as of its
+// observation) less what the reserves folded at our prices, floored at zero.
+// Only for a market naming an unstated reserve (attachMmReserves /
+// mmUnstatedReserves): there the aggregate is the only statement of that
+// collateral, and it is never double-counted because the folded part is taken
+// off. Everywhere else the fold is exact and the aggregate's excess over it is
+// staleness — an observation from before a DCA reserved 0.12 atBTC read +$10.9k
+// on a wallet already holding the reserve — or the oracle's gap to our prices;
+// counting it would be phantom value, so the fold's own number stands.
+export function mmUnstatedCollateralUsd(moneyMarket: Pick<MoneyMarketPosition, 'totalCollateralBase' | 'unstatedCollateral'>, foldedUsd: number): number {
+  if (!moneyMarket.unstatedCollateral?.length) return 0
   const aggCollateralUsd = Number(moneyMarket.totalCollateralBase || '0') / 1e8
   if (!Number.isFinite(aggCollateralUsd) || aggCollateralUsd <= 0) return 0
   return Math.max(0, aggCollateralUsd - foldedUsd)
@@ -26945,16 +27090,32 @@ async function loadAccountDirectorySnapshot(
   } catch { return null }
 }
 
-// `-r4`: the value includes the members' COUNTED claimable farm rewards and
+// `-r5`: the value includes the members' COUNTED claimable farm rewards and
 // money-market incentives (lm_acct / mmr_acct in accountsPage: unpayable entries
 // 0, claims indexed after the snapshot subtracted, incentives keyed like the
-// money-market value) and leaves out a pool account's own hub reserve (the
-// Omnipool's H2O: poolOwnHubHoldingSql in `grouped`). Part of every page and
+// money-market value), leaves out a pool account's own hub reserve (the
+// Omnipool's H2O: poolOwnHubHoldingSql in `grouped`), and values money-market
+// collateral by the folded reserves, the market's aggregate standing in only
+// where a reserve is unstated (mmSnapshotCollateralSql). Part of every page and
 // tag-detail key, so a payload persisted under an earlier value definition is
 // never served as this one.
 function accountDirectoryModelVersion(): string {
-  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3-r4'
-  return omnipoolAccountClaimsReady ? 'v2-r4' : 'v1-r4'
+  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3-r5'
+  return omnipoolAccountClaimsReady ? 'v2-r5' : 'v1-r5'
+}
+
+// The snapshot's counted collateral for one (account, pool) group, base-8 USD:
+// the reconstructed reserve rows at this generation's prices, the market's own
+// aggregate (the greater of the two) only where a reserve is unstated — a
+// reserve_present = 2 row (the holder's usage-as-collateral configuration names a
+// reserve the fold holds nothing of) or a supplied row without a price in this
+// generation. The SQL twin of attachMmReserves + mmUnstatedCollateralUsd, so a
+// directory row values a market as the account page it links to does.
+function mmSnapshotCollateralSql(idsSql: string, unitsSql: string): string {
+  const folded = `sumIf(toFloat64(supplied) * transform(toString(asset_id), ${idsSql}, ${unitsSql}, 0.) * 1e8, reserve_present = 1)`
+  return `if(countIf(reserve_present = 2) > 0
+      OR countIf(reserve_present = 1 AND supplied > 0 AND transform(toString(asset_id), ${idsSql}, ${unitsSql}, 0.) = 0) > 0,
+    greatest(max(toFloat64(total_collateral_base)), ${folded}), ${folded})`
 }
 
 async function persistAccountDirectorySnapshot(snapshotKey: string, page: AccountsPage): Promise<void> {
@@ -27536,8 +27697,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             )`
     const mmLatestCte = moneyMarketAccountValuesReady ? `mm_latest AS (
               SELECT account_id,lower(pool_address) AS pool_address,
-                greatest(max(toFloat64(total_collateral_base)),
-                  sumIf(toFloat64(supplied) * transform(toString(asset_id), ${idsSql}, ${unitsSql}, 0.) * 1e8, reserve_present=1)) AS col,
+                ${mmSnapshotCollateralSql(idsSql, unitsSql)} AS col,
                 greatest(max(toFloat64(total_debt_base)),
                   sumIf(toFloat64(debt) * transform(toString(asset_id), ${idsSql}, ${unitsSql}, 0.) * 1e8, reserve_present=1)) AS debt,
                 max(toFloat64(total_collateral_base)) AS risk_col,
@@ -28561,8 +28721,7 @@ async function refreshContractMetricsUncached(): Promise<void> {
              sum(debt) / 1e8 AS debt
       FROM (
         SELECT account_id, lower(pool_address) AS pool_address,
-          greatest(max(toFloat64(total_collateral_base)),
-            sumIf(toFloat64(supplied) * transform(toString(asset_id), ${idsSql}, ${unitsSql}, 0.) * 1e8, reserve_present = 1)) AS col,
+          ${mmSnapshotCollateralSql(idsSql, unitsSql)} AS col,
           greatest(max(toFloat64(total_debt_base)),
             sumIf(toFloat64(debt) * transform(toString(asset_id), ${idsSql}, ${unitsSql}, 0.) * 1e8, reserve_present = 1)) AS debt
         FROM price_data.money_market_account_value_snapshots
@@ -28900,7 +29059,9 @@ async function buildTagDetailForMembers(
     // Staking-backed markets (GIGAHDX): collateral is the already-counted locked HDX,
     // so don't fold it into balances/portfolio (see getAddress). Debt still counts.
     const countedMm = moneyMarket.filter(p => !p.stakingBacked)
-    const foldedMmUsd = countedMm.reduce((s, p) => s + applyMmCollateralToBalances(balances, p, prices), 0)
+    // Per market, the part of the members' aggregates the fold could not state
+    // (mmUnstatedCollateralUsd, the account page's rule) rides on top of the fold.
+    const unstatedMmUsd = countedMm.reduce((s, p) => s + mmUnstatedCollateralUsd(p, applyMmCollateralToBalances(balances, p, prices)), 0)
     balances = foldShareBalances(balances) // fold MM collateral rows too (see getAddress)
     balances = mergeErc20Balances(
       balances,
@@ -28913,11 +29074,10 @@ async function buildTagDetailForMembers(
     moneyMarket = moneyMarket.map(p => p.reserves?.length ? { ...p, reserves: foldShareReserves(p.reserves) } : p)
     const lpUsd = lpPositions.reduce((s, p) => s + (p.valueUsd ?? 0), 0)
     const lpExHdxUsd = lpPositions.reduce((s, p) => s + (isHdxLpPosition(p) ? 0 : p.valueUsd ?? 0), 0)
-    const collateralShortfall = countedMm.reduce((s, p) => s + mmCollateralShortfallUsd(p, 0), 0)
-    const portfolioUsd = balances.reduce((s, b) => s + (b.valueUsd ?? 0), 0) + lpUsd + Math.max(0, collateralShortfall - foldedMmUsd)
+    const portfolioUsd = balances.reduce((s, b) => s + (b.valueUsd ?? 0), 0) + lpUsd + unstatedMmUsd
     // See getAddress: same exclusion (HDX balance + HDX-legged LP), same MM fold.
     const portfolioExHdxUsd = balances.reduce((s, b) => s + (b.asset.assetId === HDX_ASSET_ID ? 0 : b.valueUsd ?? 0), 0)
-      + lpExHdxUsd + Math.max(0, collateralShortfall - foldedMmUsd)
+      + lpExHdxUsd + unstatedMmUsd
     // Pin the history's last point to the current net worth (see getAddress) so the
     // chart ends at the displayed figure rather than a stale stored-MM bucket.
     const debtUsd = moneyMarket.reduce((s, p) => s + Number(p.totalDebtBase) / 1e8, 0)

@@ -476,7 +476,9 @@ interface MoneyMarketPositions {
  * asset), in raw units — the indexer's own persisted position reconstruction rather
  * than a second implementation of it. `reserve_present = 1` selects the per-reserve
  * rows; the `reserve_present = 0` rows carry position-level aggregates with no
- * per-asset amount and must not be summed.
+ * per-asset amount and must not be summed, and `reserve_present = 2` rows name a
+ * collateral reserve the reconstruction holds nothing of (GDOT that reached the
+ * holder Substrate-side) with zero amounts — not a balance this endpoint can state.
  *
  * The two sides are filtered differently, on purpose. Supplied balances from a
  * staking-backed market are dropped (the collateral never left the wallet, see

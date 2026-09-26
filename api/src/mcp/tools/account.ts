@@ -404,6 +404,7 @@ function moneyMarketBlock(positions: MoneyMarketPosition[], base: string, now: D
         ['Max LTV', formatBasisPoints(p.ltv)],
         ['Liquidation threshold', formatBasisPoints(p.liquidationThreshold)],
         ['Staking-backed collateral', p.stakingBacked ? 'yes' : null],
+        ['Collateral not stated per reserve', p.unstatedCollateral?.length ? `${p.unstatedCollateral.map(a => a.symbol).join(', ')} — the market's own collateral figure stands in for it` : null],
         ['Unclaimed incentives (in the account value, not in this market\'s collateral)', marketRewardsLine(p)],
         ['Priced at', `block ${explorerLink(formatCount(p.blockHeight), blockUrl(base, p.blockHeight))} · ${formatTime(p.timestamp)} (${relativeAge(p.timestamp, now)})`],
       ]),
