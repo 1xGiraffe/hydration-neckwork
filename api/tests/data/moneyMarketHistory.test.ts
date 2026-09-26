@@ -134,6 +134,8 @@ describe('GET /v1/accounts/:address/money-market/history', () => {
       observation: {
         observedAtBlock: 950_000, timestamp: new Date(timeOf(950_000) * 1000).toISOString(),
         totalCollateralBase: '2000000000', totalDebtBase: '800000000', availableBorrowsBase: '100', liquidationThreshold: '8000', ltv: '7500', healthFactor: '2000000000000000000',
+        // Carried in from before the window and never undercut inside it.
+        lowestHealthFactor: '2000000000000000000', lowestAtBlock: 950_000,
       },
     })
     expect(core.reserves).toHaveLength(1)

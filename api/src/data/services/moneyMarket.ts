@@ -42,6 +42,19 @@ const wireObservation = (o: MmObservation, time: string | null): WireObservation
   liquidationThreshold: o.liquidationThreshold, ltv: o.ltv, healthFactor: o.healthFactor,
 })
 
+// A history point's observation also carries the bucket's LOWEST observed health
+// factor: the bucket-end figure alone hides a dip inside the bucket — the one a
+// LiquidationCall observed — so a liquidated account would never read below 1.
+interface WireHistoryObservation extends WireObservation {
+  lowestHealthFactor: string
+  lowestAtBlock: number
+}
+
+const wireHistoryObservation = (o: MmObservation, time: string | null): WireHistoryObservation => ({
+  ...wireObservation(o, time),
+  lowestHealthFactor: o.lowestHealthFactor ?? o.healthFactor, lowestAtBlock: o.lowestAtBlock ?? o.block,
+})
+
 // ---------------------------------------------------------------------------
 // Current positions
 // ---------------------------------------------------------------------------
@@ -197,7 +210,7 @@ export interface MmHistoryResponse {
       borrowedUsd: string | null
       netUsd: string | null
       unpriced: number
-      observation: WireObservation | null
+      observation: WireHistoryObservation | null
       eModeCategoryId: number | null
       unclaimedRewards: Array<{ assetId: string; amount: string; valueUsd: string | null; settledAtBlock: number | null }>
     }>
@@ -237,7 +250,7 @@ export async function moneyMarketHistory(
     points: m.points.map(p => ({
       bucket: startIso(p.b), blockHeight: bk.endHeight(p.b),
       suppliedUsd: usd(p.suppliedUsd), borrowedUsd: usd(p.borrowedUsd), netUsd: usd(p.netUsd), unpriced: p.unpriced,
-      observation: p.observation ? wireObservation(p.observation, time(p.observation.block)) : null,
+      observation: p.observation ? wireHistoryObservation(p.observation, time(p.observation.block)) : null,
       eModeCategoryId: p.eModeCategoryId,
       unclaimedRewards: p.unclaimedRewards.map(r => ({ assetId: String(r.rewardAssetId), amount: r.amount.toString(), valueUsd: usd(r.valueUsd), settledAtBlock: r.settledAtBlock })),
     })),
