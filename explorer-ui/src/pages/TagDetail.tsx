@@ -166,7 +166,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
                   <div className="tag">{data.name} <span className="em" style={{ color: data.color }}>· tag</span></div>
                   <div className="full"><span className="muted">{members.length} accounts</span></div>
                 </div>
-                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} valueUsd={data.portfolioUsd - debtUsd} exHdxValueUsd={data.portfolioExHdxUsd == null ? null : data.portfolioExHdxUsd - debtUsd} moneyMarket={mmList} farmRewards={data.farmRewards ?? null} moneyMarketRewards={data.moneyMarketRewards ?? null} />
+                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} valueUsd={data.portfolioUsd - debtUsd} exHdxValueUsd={data.portfolioExHdxUsd == null ? null : data.portfolioExHdxUsd - debtUsd} moneyMarket={mmList} farmRewards={data.farmRewards ?? null} moneyMarketRewards={data.moneyMarketRewards ?? null} balances={balances} />
               </div>
 
               <DetailTabs tabs={tabs} active={activeView} onChange={k => setQuery({ view: k === 'overview' ? null : k })} />

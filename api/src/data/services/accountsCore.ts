@@ -3,7 +3,7 @@ import { settledAmount } from '../../services/aaveMath.ts'
 import { cached } from '../../services/cache.ts'
 import { attachExtrinsicHashes, type WithExtrinsicHash } from './extrinsicHashes.ts'
 import { assetDescriptor, assetIdFromMmAddress, currentPriceOf } from '../../services/explorerAssets.ts'
-import { renderUsd } from '../../services/valuation.ts'
+import { isPoolOwnHubHolding, renderUsd } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
 import { freshPriceMap } from './assetsData.ts'
 import { accountRefFor, accountRefOrNull, h160For, type AccountRef, type ParsedAddress } from './address.ts'
@@ -112,6 +112,9 @@ export interface BalanceItem {
   free: string | null
   reserved: string | null
   valueUsd: string | null
+  // Present on the one holding the totals leave out: the Omnipool's own H2O
+  // reserve (poolOwnHubHolding). `valueUsd` still prices it; no total counts it.
+  uncounted?: 'pool-hub-reserve'
 }
 
 // The wallet's headline numbers: what it holds (substrate + ERC-20 + supplied
@@ -284,11 +287,14 @@ export async function accountBalances(client: ClickHouseClient, parsed: ParsedAd
     const assetId = Number(item.assetId)
     const price = currentPriceOf(prices, assetId)
     const usd = price != null && price > 0n ? (BigInt(item.amount) * price) / 10n ** BigInt(descriptor.decimals) : null
-    if (usd != null) {
+    // A pool account's own hub reserve (the Omnipool's H2O): priced, and in no
+    // total — H2O is priced off the pooled assets the totals already hold.
+    const uncounted = item.kind === 'substrate' && isPoolOwnHubHolding(parsed.accountId, assetId)
+    if (usd != null && !uncounted) {
       if (item.kind === 'vdebt') debtUsd += usd
       else assetsUsd += usd
     }
-    return { item: { ...item, symbol: descriptor.symbol, decimals: descriptor.decimals, valueUsd: usd == null ? null : renderUsd(usd) }, usd }
+    return { item: { ...item, symbol: descriptor.symbol, decimals: descriptor.decimals, valueUsd: usd == null ? null : renderUsd(usd), ...(uncounted ? { uncounted: 'pool-hub-reserve' as const } : {}) }, usd }
   })
   priced.sort((a, b) => {
     const av = a.usd ?? -1n

@@ -42,10 +42,11 @@ const zBalanceItem = z.object({
   free: z.string().nullable(),
   reserved: z.string().nullable(),
   valueUsd: z.string().nullable().describe('At the CURRENT price (balances are positions, not flows); null when the asset has no fresh price.'),
+  uncounted: z.literal('pool-hub-reserve').optional().describe('Present on the one holding no total counts: the Omnipool pallet account\'s own H2O reserve. H2O is priced off the assets that pool holds, so its `valueUsd` restates the pool\'s TVL; the item keeps it, `totals` leave it out.'),
 })
 
 const zBalanceTotals = z.object({
-  assetsUsd: z.string().describe('Everything held (substrate, ERC-20, supplied money-market positions) at current prices, priced items only.'),
+  assetsUsd: z.string().describe('Everything held (substrate, ERC-20, supplied money-market positions) at current prices, priced items only, less any item flagged `uncounted`.'),
   debtUsd: z.string().describe('Variable debt owed, at current prices.'),
   netUsd: z.string().describe('assetsUsd − debtUsd; negative when the debt exceeds the priced holdings.'),
 })
@@ -97,7 +98,7 @@ export const accountsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = 
       summary: 'Current balances: substrate, ERC-20, and money-market positions',
       description: [
         'Three composed sources, deliberately separate kinds: substrate pallet balances, EVM wallet (ERC-20) balances, and money-market positions reconstructed from the scaled-balance anchor plus indexed deltas times the live reserve index (integer arithmetic end to end). A supplied asset does NOT appear as a substrate balance — it appears as its `atoken` row; variable debt appears as `vdebt`.',
-        'USD values are at the current price (the same freshness rule as /v1/assets: a feed older than 30 days prices nothing), and `totals` sums the priced items exactly. ' + UNSEEN_IS_EMPTY,
+        'USD values are at the current price (the same freshness rule as /v1/assets: a feed older than 30 days prices nothing), and `totals` sums the priced items exactly — except an item flagged `uncounted`: the Omnipool pallet account\'s own H2O reserve, which H2O is priced off, so counting it would state the pool\'s TVL a second time. ' + UNSEEN_IS_EMPTY,
       ].join('\n\n'),
       params: zAccountParams,
       response: { 200: z.object({ items: z.array(zBalanceItem), totals: zBalanceTotals }), 400: zError },

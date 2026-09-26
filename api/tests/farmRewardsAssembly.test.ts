@@ -140,7 +140,10 @@ describe('farm rewards in the accounts directory', () => {
 
   it('keys its pages on a model version that carries the rewards', () => {
     const version = src.slice(src.indexOf('function accountDirectoryModelVersion('), src.indexOf('\n}\n', src.indexOf('function accountDirectoryModelVersion(')))
-    expect(version).toContain("return 'v3-r3'")
+    // `-r3` brought the rewards in; `-r4` also leaves a pool account's own hub
+    // reserve out (poolOwnHubHolding.test.ts). Either way a page persisted under
+    // a reward-free value is never served as this one.
+    expect(version).toContain("return 'v3-r4'")
     expect(version).not.toMatch(/return 'v3'\s*$/m)
   })
 })

@@ -5,6 +5,7 @@ import { BalanceBreakdown } from './BalanceBreakdown'
 import { useQueryValue, setQuery } from '../router'
 import { squarify } from '../utils/squarify'
 import { useAssetColor } from '../utils/iconColor'
+import { UNCOUNTED_REASON } from '../types'
 import type { AccountHistoryResponse, AddressBalance, AssetBalanceHistory, AssetRef } from '../types'
 
 // Balances rendered as a value-weighted treemap that doubles as the selector for
@@ -49,6 +50,8 @@ function pctStr(share: number): string {
 function assetName(a: AssetRef): string {
   return a.name ?? `#${a.assetId}`
 }
+
+const isPriced = (b: AddressBalance) => b.valueUsd != null && b.valueUsd > 0
 
 
 // Progressive tile-face content, revealed only when it comfortably fits so text is
@@ -198,8 +201,9 @@ function FocusedDetail({ balance, hist, allHistory, refineWindow }: {
 }) {
   const asset = balance?.asset ?? hist?.asset
   if (!asset) return null
-  const priced = balance != null && balance.valueUsd != null && balance.valueUsd > 0
+  const priced = balance != null && isPriced(balance)
   const lastHeld = balance == null ? lastHeldDate(hist) : null
+  const uncounted = balance?.uncounted
   return (
     <div className="tm-detail" aria-live="polite">
       <div className="tm-detail-band">
@@ -223,9 +227,19 @@ function FocusedDetail({ balance, hist, allHistory, refineWindow }: {
               </span>}
             />
             {priced && <Metric label="Value" value={<Usd v={balance.valueUsd} />} />}
+            {!priced && uncounted && <Metric label="Value" value="not counted" />}
           </div>
         )}
         {balance != null && <BalanceBreakdown balance={balance} />}
+        {/* A balance the value leaves out on purpose says so where its value
+            would be, and names the amount: on a whole-row exclusion that is the
+            balance itself; on a merged row (a list-tag folding the pool with other
+            holders of the asset) only that slice. */}
+        {uncounted && (
+          <div className="tm-detail-note">
+            Not counted in value: <Amt raw={uncounted.amount} dec={asset.decimals} /> {asset.symbol} is {UNCOUNTED_REASON[uncounted.reason]}.
+          </div>
+        )}
       </div>
       {balance == null && (
         <div className="tm-detail-note">Not currently held{lastHeld ? ` · last held ${lastHeld.slice(0, 10)}` : ''}</div>
@@ -264,11 +278,13 @@ function OtherDetail({ members, value, share, selectedId, onSelect }: {
 
 // Selectable rows beneath the map + graph: priced holdings too small to draw as
 // a tile (a portfolio dominated by one asset squeezes the rest below a pixel),
-// current holdings that have no market price (can't be sized by value), and
-// assets held only in the past (have a balance history but no current holding).
-// Selecting one focuses it above.
-function BalanceRows({ hidden, unpriced, historical, selectedId, onSelect }: {
-  hidden: AddressBalance[]; unpriced: AddressBalance[]; historical: AssetBalanceHistory[]; selectedId: number | null; onSelect: (id: number) => void
+// holdings the value leaves out on purpose (priced, so never "without a market
+// price"; the chip carries the amount, the detail above says why), current
+// holdings that have no market price (can't be sized by value), and assets held
+// only in the past (have a balance history but no current holding). Selecting
+// one focuses it above.
+function BalanceRows({ hidden, uncounted, unpriced, historical, selectedId, onSelect }: {
+  hidden: AddressBalance[]; uncounted: AddressBalance[]; unpriced: AddressBalance[]; historical: AssetBalanceHistory[]; selectedId: number | null; onSelect: (id: number) => void
 }) {
   return (
     <div className="tm-unpriced">
@@ -278,6 +294,16 @@ function BalanceRows({ hidden, unpriced, historical, selectedId, onSelect }: {
           <div className="tm-chips">
             {hidden.map(b => (
               <SelectChip key={b.asset.assetId} asset={b.asset} value={F.usd(b.valueUsd)} active={selectedId === b.asset.assetId} onSelect={() => onSelect(b.asset.assetId)} />
+            ))}
+          </div>
+        </div>
+      )}
+      {uncounted.length > 0 && (
+        <div className="tm-rowgroup">
+          <span className="tm-unpriced-cap">{uncounted.length} holding{uncounted.length === 1 ? '' : 's'} not counted in value</span>
+          <div className="tm-chips">
+            {uncounted.map(b => (
+              <SelectChip key={b.asset.assetId} asset={b.asset} value={F.amount(b.total, b.asset.decimals)} active={selectedId === b.asset.assetId} onSelect={() => onSelect(b.asset.assetId)} />
             ))}
           </div>
         </div>
@@ -311,10 +337,14 @@ export function BalancesTreemap({ balances, balanceHistory = [], refineWindow }:
   refineWindow?: (fromBlock: number, toBlock: number) => Promise<AccountHistoryResponse | null>
 }) {
   const priced = useMemo(
-    () => balances.filter(b => b.valueUsd != null && b.valueUsd > 0).sort((a, b) => (b.valueUsd ?? 0) - (a.valueUsd ?? 0)),
+    () => balances.filter(isPriced).sort((a, b) => (b.valueUsd ?? 0) - (a.valueUsd ?? 0)),
     [balances],
   )
-  const unpriced = useMemo(() => balances.filter(b => !(b.valueUsd != null && b.valueUsd > 0)), [balances])
+  // A whole-row uncounted holding (the Omnipool's own H2O) values 0 on purpose:
+  // it is priced, so it is its own row group, never "without a market price". A
+  // partly uncounted row still has a counted value and draws as a tile.
+  const uncounted = useMemo(() => balances.filter(b => !isPriced(b) && b.uncounted), [balances])
+  const unpriced = useMemo(() => balances.filter(b => !isPriced(b) && !b.uncounted), [balances])
   const total = useMemo(() => priced.reduce((s, b) => s + (b.valueUsd ?? 0), 0), [priced])
 
   // Historically held: an asset with a balance history but no current holding —
@@ -385,7 +415,7 @@ export function BalancesTreemap({ balances, balanceHistory = [], refineWindow }:
   // the hover, else the default (largest priced holding, else the first asset in
   // any group).
   const rawParam = useQueryValue('asset', '')
-  const defaultId = priced[0]?.asset.assetId ?? unpriced[0]?.asset.assetId ?? historical[0]?.asset.assetId ?? null
+  const defaultId = priced[0]?.asset.assetId ?? uncounted[0]?.asset.assetId ?? unpriced[0]?.asset.assetId ?? historical[0]?.asset.assetId ?? null
   const selectableIds = useMemo(
     () => new Set<number>([...balances.map(b => b.asset.assetId), ...historical.map(h => h.asset.assetId)]),
     [balances, historical],
@@ -413,7 +443,7 @@ export function BalancesTreemap({ balances, balanceHistory = [], refineWindow }:
   const preview = (cell: Sel) => { if (locked == null && cell.kind !== 'other') setHover(cell) }
   const unpreview = (cell: Sel) => { if (locked == null) setHover(h => (selEq(h, cell) ? null : h)) }
 
-  if (priced.length === 0 && unpriced.length === 0 && historical.length === 0) {
+  if (priced.length === 0 && uncounted.length === 0 && unpriced.length === 0 && historical.length === 0) {
     // No section heading — the Balances tab already labels this view and its count.
     return <div className="panel tm-panel tm-empty">No balances observed</div>
   }
@@ -456,8 +486,8 @@ export function BalancesTreemap({ balances, balanceHistory = [], refineWindow }:
           : active?.kind === 'asset' && (
             <FocusedDetail balance={balanceById.get(active.id) ?? null} hist={historyById.get(active.id) ?? null} allHistory={balanceHistory} refineWindow={refineWindow} />
           )}
-        {(hidden.length > 0 || unpriced.length > 0 || historical.length > 0) && (
-          <BalanceRows hidden={hidden} unpriced={unpriced} historical={historical} selectedId={activeId} onSelect={selectAsset} />
+        {(hidden.length > 0 || uncounted.length > 0 || unpriced.length > 0 || historical.length > 0) && (
+          <BalanceRows hidden={hidden} uncounted={uncounted} unpriced={unpriced} historical={historical} selectedId={activeId} onSelect={selectAsset} />
         )}
     </div>
   )

@@ -456,6 +456,40 @@ describe('GET /v1/accounts/balances', () => {
     expect(row.totalUsd).toBe('0.01')
   })
 
+  it('leaves the Omnipool\'s own H2O reserve out of every valued field', async () => {
+    // The Omnipool pallet account: its H2O is the pool's hub reserve, and H2O is
+    // priced off the assets the pool holds — valuing it would state the pool's
+    // TVL twice. Free and reserved alike; the pooled asset itself still counts,
+    // and the H2O row still dates the account.
+    const OMNIPOOL = '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000'
+    const pool = fakeClient({
+      latest: [
+        // 2 H2O free + 1 H2O reserved at 0.5, and 2 DOT free at 4.5.
+        { account_id: OMNIPOOL, asset_id: '1', free: '2000000000000', reserved: '1000000000000', last_block: 1200 },
+        { account_id: OMNIPOOL, asset_id: '5', free: '20000000000', reserved: '0', last_block: 1100 },
+      ],
+      erc20: [], snapshot: [], claims: [],
+    })
+    const services = await freshBalances(pool)
+    const [row] = await services.queryLatestBalances(pool as never, [OMNIPOOL])
+    services.stopAssets()
+    expect(row.transferableUsd).toBe('9.00')
+    expect(row.lockedUsd).toBe('0.00')
+    expect(row.totalUsd).toBe('9.00')
+    expect(row.blockHeight).toBe(1200)
+
+    // The same H2O under any other account is a claim on the pool and counts.
+    const holder = fakeClient({
+      latest: [{ account_id: ACCOUNT_A, asset_id: '1', free: '2000000000000', reserved: '1000000000000', last_block: 1200 }],
+      erc20: [], snapshot: [], claims: [],
+    })
+    const holderServices = await freshBalances(holder)
+    const [holderRow] = await holderServices.queryLatestBalances(holder as never, [ACCOUNT_A])
+    holderServices.stopAssets()
+    expect(holderRow.transferableUsd).toBe('1.00')
+    expect(holderRow.lockedUsd).toBe('0.50')
+  })
+
   it('reports lpUsd 0.00 for an account with a fresh claim snapshot and no positions', async () => {
     // Present-and-zero, not null: the snapshot is current and says this account has
     // no Omnipool position. Null is reserved for "the slice is unavailable".
