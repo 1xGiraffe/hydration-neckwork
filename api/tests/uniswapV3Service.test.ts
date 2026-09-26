@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { blockExtrinsicTupleList } from '../src/services/explorerService.ts'
+import { blockExtrinsicTupleList, v3ActReadLimit, v3RowsInScope } from '../src/services/explorerService.ts'
 import {
-  classifyV3Events, ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, resolveV3TokenAsset, sqrtPriceX96ToPrice, tickToPrice, v3FeedActivities, v3PoolForHop,
+  classifyV3Events, ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, resolveV3TokenAsset, sqrtPriceX96ToPrice, tickToPrice, v3ActOnVenue, v3AnchorScan, v3FeedActivities, v3PoolForHop, v3VenuesInScope,
   type V3ClassifyContext, type V3EventRow, type V3Pool, type V3Registry,
 } from '../src/services/uniswapV3Service.ts'
 
@@ -241,5 +241,99 @@ describe('v3FeedActivities account scope', () => {
     const acts = await v3FeedActivities(registry, { kind: 'liquidity', accountsH160: [OPERATOR], limit: 10 })
     expect(seen[0]).toContain("(kind = 'vault' AND event_name = 'Rebalance')")
     expect(acts).toMatchObject([{ kind: 'liquidity', action: 'Rebalance', whoAccountId: null, vault: VAULT, blockHeight: 14991345 }])
+  })
+})
+
+// A contract's account page shows the activity of the venue it IS: a scoped H160 that
+// is a pool, a vault or a position manager is party to every act on it, whoever acted.
+describe('v3FeedActivities venue scope', () => {
+  const registry = {
+    pools: new Map([[POOL, { address: POOL }]]), vaults: new Map([[VAULT, { address: VAULT, pool: POOL }]]),
+    managers: new Set([MANAGER]), byAsset: new Map(), ctx,
+  } as unknown as V3Registry
+  const swap = row({ block_height: 15072289, event_index: 34, extrinsic_index: 3, contract_address: POOL, kind: 'pool', event_name: 'Swap', actor: ROUTER, counterparty: ROUTER, amount0: '1000000', amount1: '-1200000000000000' })
+
+  it('tells the venue contracts of a scope from its accounts, case-insensitively', () => {
+    expect(v3VenuesInScope(registry, [POOL.toUpperCase().replace('0X', '0x'), VAULT, MANAGER, USER])).toEqual({ pools: [POOL], vaults: [VAULT], managers: [MANAGER] })
+    expect(v3VenuesInScope(registry, [USER])).toEqual({ pools: [], vaults: [], managers: [] })
+  })
+  it('reads an act as on a venue through its pool, its vault or its contract', () => {
+    const venues = new Set([VAULT])
+    expect(v3ActOnVenue({ pool: POOL, vault: VAULT, contract: VAULT }, venues)).toBe(true)
+    expect(v3ActOnVenue({ pool: POOL, contract: POOL }, venues)).toBe(false)
+    expect(v3ActOnVenue({ pool: POOL, contract: POOL }, new Set([POOL]))).toBe(true)
+    expect(v3ActOnVenue({ pool: null, contract: MANAGER }, new Set([MANAGER]))).toBe(true)
+  })
+  it('anchors the pool rows for a scoped pool and keeps a swap the scope does not name', async () => {
+    const seen: string[] = []
+    initUniswapV3Service({
+      query: async ({ query }: { query: string }) => {
+        seen.push(query)
+        const rows = query.includes('ORDER BY block_height DESC') ? [{ block_height: 15072289, extrinsic_index: 3 }] : [swap]
+        return { json: async () => rows }
+      },
+    } as never)
+    const acts = await v3FeedActivities(registry, { kind: 'all', accountsH160: [POOL], limit: 10 })
+    // The pool's own rows and its vault's, plus the manager rows of an extrinsic that
+    // touched the pool — the pool page's own predicate, OR'd into the account scope.
+    expect(seen[0]).toContain(`OR (contract_address IN ('${POOL}','${VAULT}')`)
+    expect(acts).toMatchObject([{ kind: 'swap', pool: POOL, whoAccountId: ethPrefixedAccountId(ROUTER) }])
+  })
+  it('still drops an act the scope neither names nor hosts', async () => {
+    initUniswapV3Service({
+      query: async ({ query }: { query: string }) => ({
+        json: async () => (query.includes('ORDER BY block_height DESC') ? [{ block_height: 15072289, extrinsic_index: 3 }] : [swap]),
+      }),
+    } as never)
+    expect(await v3FeedActivities(registry, { kind: 'all', accountsH160: [USER], limit: 10 })).toEqual([])
+  })
+})
+
+// The exact activity plan asks every source for its cap + 1 rows and takes a short
+// read as proof the source is exhausted, so a read must be able to return `want`
+// acts when they exist — a fixed ceiling below the cap counted a busy scope short.
+describe('v3 read bounds', () => {
+  it('scans enough anchors for the acts asked, at any depth', () => {
+    for (const want of [1, 25, 2_001, 20_001, 90_000]) expect(v3AnchorScan(want)).toBeGreaterThanOrEqual(want)
+    expect(v3AnchorScan(1)).toBe(100)
+  })
+  it('reads enough acts for the rows asked, at any depth', () => {
+    for (const want of [1, 40, 2_001, 20_001, 90_000]) expect(v3ActReadLimit(want)).toBeGreaterThanOrEqual(want)
+  })
+  it('reads the anchors\' extrinsics in query-size-safe chunks', async () => {
+    const registry = { pools: new Map([[POOL, { address: POOL }]]), vaults: new Map(), managers: new Set(), byAsset: new Map(), ctx } as unknown as V3Registry
+    const extrinsicReads: string[] = []
+    initUniswapV3Service({
+      query: async ({ query }: { query: string }) => {
+        if (query.includes('ORDER BY block_height DESC')) return { json: async () => Array.from({ length: 12_000 }, (_, i) => ({ block_height: 15_000_000 + i, extrinsic_index: 2 })) }
+        extrinsicReads.push(query)
+        return { json: async () => [] }
+      },
+    } as never)
+    await v3FeedActivities(registry, { kind: 'all', pools: [POOL], limit: 3_000 })
+    expect(extrinsicReads).toHaveLength(3)
+    for (const q of extrinsicReads) expect(q.length).toBeLessThan(200_000)
+  })
+})
+
+// The scoped read keeps a row for the scope three ways: its actor is scoped, the act
+// is on a scoped venue, or the dispatch called a scoped contract (a keeper's rebalance
+// on its proxy's page). Keys are block:eventIndex.
+describe('v3RowsInScope', () => {
+  const who = (accountId: string) => ({ accountId, address: accountId, emoji: '', tag: null, identity: null, profile: null })
+  const rows = [
+    { blockHeight: 1, eventIndex: 5, who: who(ethPrefixedAccountId(USER)!) },
+    { blockHeight: 2, eventIndex: 7, who: who(ethPrefixedAccountId(ROUTER)!) },
+    { blockHeight: 3, eventIndex: 9, who: who(ethPrefixedAccountId(ROUTER)!) },
+    { blockHeight: 4, eventIndex: 1, who: null },
+  ] as never[]
+  it('keeps the actor\'s rows, the venue\'s acts and the called contract\'s acts, nothing else', () => {
+    const kept = v3RowsInScope(rows, new Set([ethPrefixedAccountId(USER)!]), new Set(['2:7']), new Set(['4:1']))
+    expect(kept.map(r => r.blockHeight)).toEqual([1, 2, 4])
+  })
+  it('matches the actor through the truncated-H160 form too', () => {
+    const substrate = '0x' + USER.slice(2) + '0'.repeat(24)
+    const kept = v3RowsInScope([{ blockHeight: 1, eventIndex: 5, who: who(substrate) }] as never[], new Set([ethPrefixedAccountId(USER)!]), new Set(), new Set())
+    expect(kept).toHaveLength(1)
   })
 })

@@ -50,7 +50,7 @@ import { profileForAccount } from './userProfileService.ts'
 import { currentStableswapSharePools } from './stableswapSharePools.ts'
 import { findMempoolTx, findPendingBlock, findPendingExtrinsic, findPendingExtrinsicByHash, mempoolTxs, pendingBestHeight, pendingBlocksDesc, type MempoolTx, type PendingBlock, type PendingExtrinsicRow } from './pendingHeadService.ts'
 import { buildMempoolActivities, buildPendingActivities, type PendingActivity, type PendingTradeActivity } from './pendingActivity.ts'
-import { feeTierLabel, loadV3Registry, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3SwapAt, type V3Activity, type V3Registry } from './uniswapV3Service.ts'
+import { ethPrefixedAccountId, feeTierLabel, loadV3Registry, v3ActOnVenue, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3SwapAt, v3VenueSet, v3VenuesInScope, type V3Activity, type V3Registry } from './uniswapV3Service.ts'
 import { loadV3AccountPositions, v3AccountPositions } from './uniswapV3Positions.ts'
 import { loadMmIncentiveProgrammeRows, scaledSeriesFromBuckets } from './mmIncentiveHistory.ts'
 import { loadCurrentCollateralFlags, loadMmIncentiveHistory, loadMmReserveMap, loadMoneyMarketHistory, mmHistoryStart, mmMarketCompare, mmObservationOrderSql, type MmHistoryInterest, type MmIncentiveHistory, type MmObservation } from './moneyMarketHistory.ts'
@@ -11909,10 +11909,81 @@ async function v3ActivityRows(acts: V3Activity[], prices: Map<number, PriceInfo>
   return out
 }
 
+// Acts to read for a page of `want` rows: over-read ×4, since built rows are still
+// filtered (token, action, value, the scope's signer check), with no ceiling of its
+// own — the caller bounds `want` (a page, the exact plan's cap + 1, the windowed
+// source ceiling) and must be able to receive `want` rows when they exist, or a short
+// read could not prove the source exhausted. A 2,000-act ceiling here counted a scope
+// short, silently, the moment it held more: a pool's own page holds every swap in it.
+export function v3ActReadLimit(want: number): number {
+  return Math.max(want * 4, 50)
+}
+
+const v3ActKey = (act: { blockHeight: number; eventIndex?: number | null }): string => `${act.blockHeight}:${act.eventIndex ?? -1}`
+
+// The rows of a scoped v3 read the scope keeps. A row whose actor only the extrinsic
+// knew was admitted unverified by the anchor read; now that it has a signer it stays
+// when the signer is one of the scoped accounts — or when the act is on a scoped venue
+// (`venueActs`: whoever acted, the contract is party to it) or the dispatch CALLED a
+// scoped contract (`calledActs`: a keeper's rebalance, on the page of the proxy it
+// rebalanced through). Keys are `block:eventIndex`.
+export function v3RowsInScope(rows: readonly ActivityRow[], wanted: ReadonlySet<string>, venueActs: ReadonlySet<string>, calledActs: ReadonlySet<string>): ActivityRow[] {
+  return rows.filter(r => {
+    const key = v3ActKey(r)
+    if (venueActs.has(key) || calledActs.has(key)) return true
+    return r.who != null && (wanted.has(r.who.accountId.toLowerCase()) || wanted.has(evmAccountForm(r.who.accountId.toLowerCase()) ?? ''))
+  })
+}
+
+// Map `block:extrinsic` → the H160 an EVM dispatch called: `Ethereum.Executed.to`
+// for Ethereum.transact / dispatch_permit, `EVM.Executed.address` for EVM.call. Read
+// by block from raw_events (its key), a page's worth of blocks per query.
+async function evmCallTargets(pairs: readonly [number, number][]): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const blocks = [...new Set(pairs.map(([h]) => h))]
+  const wanted = new Set(pairs.map(([h, e]) => `${h}:${e}`))
+  const chunks = await mapChunksConcurrently(blocks, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
+    const res = await client.query({
+      query: `SELECT block_height, extrinsic_index,
+                     lower(if(event_name = 'Ethereum.Executed', JSONExtractString(args_json, 'to'), JSONExtractString(args_json, 'address'))) AS target
+              FROM price_data.raw_events
+              PREWHERE block_height IN {blocks:Array(UInt32)}
+              WHERE event_name IN ('Ethereum.Executed', 'EVM.Executed') AND extrinsic_index IS NOT NULL`,
+      query_params: { blocks: chunk }, format: 'JSONEachRow',
+    })
+    return res.json<{ block_height: number; extrinsic_index: number; target: string }>()
+  })
+  for (const r of chunks.flat()) {
+    const key = `${r.block_height}:${r.extrinsic_index}`
+    if (r.target && wanted.has(key)) out.set(key, r.target)
+  }
+  return out
+}
+
+// The keys of the signer-attributed acts whose extrinsic was an EVM call into one of
+// the scoped contracts — the calls through a contract. A vault Rebalance names no
+// account (the operator signs, the log carries the range), so it reaches the page of
+// the operator's rebalance proxy only this way; the acts a log names need no such
+// lookup, so only the unnamed ones are asked.
+async function v3ActsCalling(acts: readonly V3Activity[], accountsH160: readonly string[]): Promise<Set<string>> {
+  const unnamed = acts.filter((a): a is V3Activity & { extrinsicIndex: number } => a.whoAccountId == null && a.extrinsicIndex != null)
+  if (!unnamed.length) return new Set()
+  const targets = await evmCallTargets(unnamed.map(a => [a.blockHeight, a.extrinsicIndex]))
+  const scoped = new Set(accountsH160.map(h => h.toLowerCase()))
+  return new Set(unnamed.filter(a => scoped.has(targets.get(`${a.blockHeight}:${a.extrinsicIndex}`) ?? '')).map(v3ActKey))
+}
+
 // A feed page of v3 rows: swaps (`swap`), LP acts (`liquidity`) or both, newest first,
 // optionally narrowed to the pools holding an asset / the token filter and to the acts
 // of some accounts. The venue is small, so filters are applied on built rows and no
 // deep walker is needed.
+//
+// A scoped account that IS a venue contract reads as that venue — every act on it,
+// whoever acted (v3VenuesInScope) — so a pool's, a vault's or a manager's account page
+// is the venue's own feed, the one reading getV3PoolActivity serves the pool page from.
+// Through a scoped pool the routed hops are the subject: the route's own row belongs to
+// the swapper, which this scope never holds, so suppressing the hop would leave the
+// pool's page bare of exactly the swaps it exists to show.
 async function getRecentV3Rows(
   kind: 'swap' | 'liquidity' | 'all', limit: number, from?: string, to?: string, offset = 0, filters: ValueListFilters = {},
   scope: { accounts?: string[]; assetId?: number; action?: string } = {},
@@ -11930,17 +12001,22 @@ async function getRecentV3Rows(
     ? [...new Set(scope.accounts.map(evmAccountForm).filter((x): x is string => x != null).map(x => '0x' + x.slice(10, 50)))]
     : undefined
   if (scope.accounts && !accountsH160?.length) return []
+  const venues = accountsH160 ? v3VenuesInScope(registry, accountsH160) : null
   const key = `explorer:v3:${kind}:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${scope.assetId ?? ''}:${scope.action ?? ''}:${(accountsH160 ?? []).join(',')}`
   return cached(key, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const want = offset + limit
-    const acts = await v3FeedActivities(registry, { bound: tw ?? '1', kind, accountsH160, pools, limit: Math.min(Math.max(want * 4, 50), 2_000) })
-    let rows = await v3ActivityRows(acts, prices)
-    if (scope.accounts) {
-      // A row whose actor only the extrinsic knew was admitted unverified above; now that
-      // it has a signer, keep it only when the signer is one of the scoped accounts.
+    const acts = await v3FeedActivities(registry, { bound: tw ?? '1', kind, accountsH160, pools, limit: v3ActReadLimit(want) })
+    const venueSet = venues ? v3VenueSet(venues) : new Set<string>()
+    const [calledActs, built] = await Promise.all([
+      accountsH160 ? v3ActsCalling(acts, accountsH160) : new Set<string>(),
+      v3ActivityRows(acts, prices, venues != null && venues.pools.length > 0),
+    ])
+    let rows = built
+    if (scope.accounts && accountsH160) {
       const wanted = new Set(scope.accounts.flatMap(a => [a.toLowerCase(), evmAccountForm(a.toLowerCase()) ?? '']))
-      rows = rows.filter(r => r.who != null && (wanted.has(r.who.accountId.toLowerCase()) || wanted.has(evmAccountForm(r.who.accountId.toLowerCase()) ?? '')))
+      const venueActs = new Set(acts.filter(a => v3ActOnVenue(a, venueSet)).map(v3ActKey))
+      rows = v3RowsInScope(rows, wanted, venueActs, calledActs)
     }
     // Every feed source values its own rows at block time before it filters them
     // (getRecentLiquidity, getRecentTrades, … all do): the page-level pass its
@@ -11993,16 +12069,20 @@ async function routedV3SwapExtrinsics(pairs: [number, number | null][]): Promise
   return new Set((await res.json<{ block_height: number; extrinsic_index: number }>()).map(r => `${r.block_height}:${r.extrinsic_index}`))
 }
 
-/** A v3 pool's own recent activity — swaps in it, positions and vault acts on it. */
+/** A v3 pool's own recent activity — swaps in it, positions and vault acts on it: the
+ *  feed of the pool contract's account (getRecentV3Rows scoped to it), ONE reading, so
+ *  the pool page and the contract's account page cannot show two different feeds. */
 export async function getV3PoolActivity(address: string, limit = 25): Promise<ActivityRow[]> {
   const registry = await v3Registry()
   const pool = registry.pools.get(address.toLowerCase())
-  if (!pool) return []
+  const poolAccount = pool ? ethPrefixedAccountId(pool.address) : null
+  if (!pool || !poolAccount) return []
   return cached(`explorer:v3-pool-activity:${pool.address}:${limit}:${await liveHeadTag()}`, LIVE_CACHE_MS, async () => {
-    const prices = await ensurePrices()
-    const acts = await v3FeedActivities(registry, { kind: 'all', pools: [pool.address], limit })
-    const rows = await v3ActivityRows(acts, prices, true)
-    await Promise.all([applyHistoricalUsd(rows, activityHistPick), applyActivityRevenue(rows)])
+    // Copied before enriching: the scoped read's rows are its own cached objects, and
+    // revenue is written onto the row (see getAccountActivity for why that must not
+    // land on a shared one).
+    const rows = (await getRecentV3Rows('all', limit, undefined, undefined, 0, {}, { accounts: [poolAccount] })).map(row => ({ ...row }))
+    await applyActivityRevenue(rows)
     return rows
   })
 }
@@ -24232,8 +24312,9 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     : wantXcswaps ? await getRecentXcswaps(catFetch, from, to, accounts, 0) : []
   noteSource(xcswaps.length, oldestWindowBlock(xcswaps, r => r.blockHeight))
   // Concentrated-liquidity acts of the accounts: swaps under the trade family, position and
-  // vault acts under liquidity. Not part of an exact plan's enumeration (its count does
-  // not include them either).
+  // vault acts under liquidity. Under an exact plan they are the plan's own enumerated
+  // read (the `v3` slot), so the count and the page cannot differ on them; a scope that
+  // IS a venue contract reads as that venue (see getRecentV3Rows).
   const v3Rows = exact ? exact.enumerated.v3
     : !(type === 'all' || type === 'trade' || type === 'liquidity') ? []
       : await getRecentV3Rows(type === 'trade' ? 'swap' : type === 'liquidity' ? 'liquidity' : 'all', catFetch, from, to, 0, queryFilters, { accounts, action })

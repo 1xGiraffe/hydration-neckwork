@@ -481,12 +481,60 @@ export interface V3FeedOptions {
   /** SQL predicate on block_height / block_timestamp for the window ('1' = everything). */
   bound?: string
   kind: 'swap' | 'liquidity' | 'all'
-  /** H160s whose acts are wanted (a log naming them, or a position NFT they hold). */
+  /**
+   * H160s whose acts are wanted: a log naming them, a position NFT they hold — and,
+   * for one that IS a venue contract (a pool, a vault, a position manager), every
+   * act on that venue, since the contract is party to all of them (v3VenuesInScope).
+   */
   accountsH160?: string[]
   /** Pool addresses to narrow to (a vault's or manager's rows join through their pool). */
   pools?: string[]
   limit: number
   offset?: number
+}
+
+/** The scoped H160s that are venue contracts of this registry — by which the account
+ *  page of a pool, a vault or a position manager shows the venue's own activity. */
+export interface V3ScopedVenues { pools: string[]; vaults: string[]; managers: string[] }
+export function v3VenuesInScope(registry: Pick<V3Registry, 'pools' | 'vaults' | 'managers'>, accountsH160: readonly string[]): V3ScopedVenues {
+  const venues: V3ScopedVenues = { pools: [], vaults: [], managers: [] }
+  for (const raw of new Set(accountsH160.map(h => h.toLowerCase()))) {
+    if (registry.pools.has(raw)) venues.pools.push(raw)
+    else if (registry.vaults.has(raw)) venues.vaults.push(raw)
+    else if (registry.managers.has(raw)) venues.managers.push(raw)
+  }
+  return venues
+}
+export const v3VenueSet = (venues: V3ScopedVenues): Set<string> => new Set([...venues.pools, ...venues.vaults, ...venues.managers])
+
+/** Whether an act is on one of the venues: in the pool (a swap, a position on it, a
+ *  vault's deposit into it), of the vault, or through the manager. */
+export function v3ActOnVenue(act: Pick<V3Activity, 'pool' | 'vault' | 'contract'>, venues: ReadonlySet<string>): boolean {
+  return (act.pool != null && venues.has(act.pool)) || (act.vault != null && venues.has(act.vault)) || venues.has(act.contract)
+}
+
+// The rows of some pools: their own logs, their vaults' logs, and the manager rows
+// of an extrinsic that touched one of them (manager rows carry no pool; the pool
+// rows they sit beside do).
+function poolRowsSql(registry: Pick<V3Registry, 'vaults'>, pools: readonly string[], bound: string): string {
+  const vaults = [...registry.vaults.values()].filter(v => v.pool && pools.includes(v.pool)).map(v => v.address)
+  return `(contract_address IN (${sqlList([...pools, ...vaults])})
+      OR (kind = 'manager' AND (block_height, ifNull(extrinsic_index, 4294967295)) IN (
+        SELECT block_height, ifNull(extrinsic_index, 4294967295) FROM price_data.uniswap_v3_events
+        WHERE kind = 'pool' AND contract_address IN (${sqlList(pools)}) AND ${bound})))`
+}
+
+// Anchors to scan for `want` acts. Several logs collapse into one act (a decrease
+// and its collect; a vault's plumbing) and some anchors yield none (a collect that
+// only settled principal), so anchors over-fetch — and there is deliberately no
+// ceiling of the scan's own: a caller asking for its cap + 1 acts must be able to
+// receive cap + 1 when they exist, or a short read could not prove the source
+// exhausted (the exact activity plan's whole contract; a ceiling here counted a
+// venue short the moment one scope — a pool's own page — held more acts than it).
+// The callers bound `want` (a page, the plan's cap, the windowed source ceiling),
+// and the read itself is bounded by the venue's size.
+export function v3AnchorScan(want: number): number {
+  return Math.max(want * 4, 100)
 }
 
 /**
@@ -496,7 +544,8 @@ export interface V3FeedOptions {
  */
 export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions): Promise<V3Activity[]> {
   if (!client || !registry.pools.size) return []
-  const where: string[] = [opts.bound ?? '1']
+  const bound = opts.bound ?? '1'
+  const where: string[] = [bound]
   const anchor = opts.kind === 'all' ? `(${ANCHOR_EVENTS.swap} OR ${ANCHOR_EVENTS.liquidity})` : ANCHOR_EVENTS[opts.kind]
   where.push(anchor)
   // A pool Mint/Burn/Collect owned by a manager or a vault is that contract's plumbing
@@ -507,34 +556,34 @@ export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions
   if (plumbingOwners.length) {
     where.push(`NOT (kind = 'pool' AND event_name IN ('Mint', 'Burn', 'Collect') AND owner IN (${sqlList(plumbingOwners)}))`)
   }
-  if (opts.pools) {
-    const pools = opts.pools.map(p => p.toLowerCase())
-    const vaults = [...registry.vaults.values()].filter(v => v.pool && pools.includes(v.pool)).map(v => v.address)
-    // Manager rows carry no pool; the pool rows they sit beside do, so manager
-    // anchors are kept when their extrinsic touched one of the pools.
-    where.push(`(contract_address IN (${sqlList([...pools, ...vaults])})
-      OR (kind = 'manager' AND (block_height, ifNull(extrinsic_index, 4294967295)) IN (
-        SELECT block_height, ifNull(extrinsic_index, 4294967295) FROM price_data.uniswap_v3_events
-        WHERE kind = 'pool' AND contract_address IN (${sqlList(pools)}) AND ${opts.bound ?? '1'})))`)
-  }
-  if (opts.accountsH160) {
+  if (opts.pools) where.push(poolRowsSql(registry, opts.pools.map(p => p.toLowerCase()), bound))
+  const venues = opts.accountsH160 ? v3VenuesInScope(registry, opts.accountsH160) : null
+  if (opts.accountsH160 && venues) {
     const list = sqlList(opts.accountsH160)
     // A vault Rebalance names no account at all — the operator signs rebalance() and
     // the log carries only the vault's new range — so no log predicate can find it for
     // the operator, while the global feed credits it to the extrinsic's signer. Every
     // Rebalance is anchored (a handful a day venue-wide) and the caller keeps one only
-    // when that signer is in scope (getRecentV3Rows); without this the operator's own
-    // feed never listed an act the home page showed under its name.
+    // when that signer — or the contract it called — is in scope (getRecentV3Rows);
+    // without this the operator's own feed never listed an act the home page showed
+    // under its name.
+    //
+    // A scoped account that is a venue contract is party to every act on it: the
+    // pool's rows are its swaps and the positions and vault deposits in it (the pool
+    // page's own reading), a vault's or manager's rows are the acts through it.
+    const venueRows = [
+      ...(venues.pools.length ? [poolRowsSql(registry, venues.pools, bound)] : []),
+      ...(venues.vaults.length || venues.managers.length ? [`contract_address IN (${sqlList([...venues.vaults, ...venues.managers])})`] : []),
+    ]
     where.push(`(actor IN (${list}) OR counterparty IN (${list}) OR owner IN (${list})
       OR (kind = 'vault' AND event_name = 'Rebalance')
       OR (kind = 'manager' AND (contract_address, token_id) IN (
         SELECT contract_address, token_id FROM price_data.uniswap_v3_events
-        WHERE kind = 'manager' AND event_name = 'Transfer' AND counterparty IN (${list}))))`)
+        WHERE kind = 'manager' AND event_name = 'Transfer' AND counterparty IN (${list})))${venueRows.map(sql => `
+      OR ${sql}`).join('')})`)
   }
   const want = (opts.offset ?? 0) + opts.limit
-  // Several logs collapse into one act (a decrease and its collect; a vault's
-  // plumbing), so anchors over-fetch.
-  const scan = Math.min(Math.max(want * 4, 100), 20_000)
+  const scan = v3AnchorScan(want)
   const anchors = await queryRows<{ block_height: number; extrinsic_index: number | null }>({
     query: `SELECT block_height, extrinsic_index FROM price_data.uniswap_v3_events FINAL
             WHERE ${where.join(' AND ')}
@@ -549,23 +598,32 @@ export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions
     const pools = new Set(opts.pools.map(p => p.toLowerCase()))
     acts = acts.filter(a => a.pool && pools.has(a.pool))
   }
-  if (opts.accountsH160) {
+  if (opts.accountsH160 && venues) {
     const ids = new Set(opts.accountsH160.map(ethPrefixedAccountId).filter((x): x is string => x != null))
-    acts = acts.filter(a => a.whoAccountId == null || ids.has(a.whoAccountId))
+    const venueSet = v3VenueSet(venues)
+    acts = acts.filter(a => a.whoAccountId == null || ids.has(a.whoAccountId) || v3ActOnVenue(a, venueSet))
   }
   return acts.slice(opts.offset ?? 0, want)
 }
 
+// Tuples per extrinsic read. A tuple is ~13 bytes of query text and ClickHouse parses
+// at most 256 KiB of it (max_query_size), which 20,000 anchors already exceed.
+const EXTRINSIC_TUPLES_PER_QUERY = 5_000
+
 async function eventsOfExtrinsics(pairs: [number, number | null][]): Promise<V3EventRow[]> {
   const keys = [...new Set(pairs.map(([h, e]) => `${h}:${e ?? 'hook'}`))]
-  if (!keys.length) return []
-  const tuples = keys.map(k => { const [h, e] = k.split(':'); return `(${h},${e === 'hook' ? 4294967295 : e})` }).join(',')
-  return queryRows<V3EventRow>({
-    query: `SELECT ${EVENT_COLUMNS} FROM price_data.uniswap_v3_events FINAL
-            WHERE (block_height, ifNull(extrinsic_index, 4294967295)) IN (${tuples})
-            ORDER BY block_height, event_index`,
-    format: 'JSONEachRow',
-  })
+  const rows: V3EventRow[] = []
+  for (let start = 0; start < keys.length; start += EXTRINSIC_TUPLES_PER_QUERY) {
+    const tuples = keys.slice(start, start + EXTRINSIC_TUPLES_PER_QUERY)
+      .map(k => { const [h, e] = k.split(':'); return `(${h},${e === 'hook' ? 4294967295 : e})` }).join(',')
+    rows.push(...await queryRows<V3EventRow>({
+      query: `SELECT ${EVENT_COLUMNS} FROM price_data.uniswap_v3_events FINAL
+              WHERE (block_height, ifNull(extrinsic_index, 4294967295)) IN (${tuples})
+              ORDER BY block_height, event_index`,
+      format: 'JSONEachRow',
+    }))
+  }
+  return rows
 }
 
 /** The acts of one extrinsic (its Activity section) or of a whole block. */
