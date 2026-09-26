@@ -1,15 +1,17 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  eventValueAlternativesFilterSql,
   eventValueFilterSql,
   exactHistoricalValuePredicateSql,
   exactValuePredicateSql,
+  historicalLegPricedSql,
   historicalPriceAssetId,
   historicalVolumeSql,
   minimumRawAmountForValue,
   activityRowMatchesFilters,
   voteDetails,
 } from '../src/services/explorerService.ts'
-import { PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, priceAssetId } from '../src/services/explorerAssets.ts'
+import { PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, loadExplorerAssets, priceAssetId, stopExplorerAssetsRefresh } from '../src/services/explorerAssets.ts'
 
 describe('value-aware account activity precision', () => {
   it('sums split vote balances without JavaScript number coercion', () => {
@@ -190,4 +192,61 @@ describe('pool-share flows value through their underlying price feed', () => {
       from.forEach((id, i) => expect(to[i]).toBe(historicalPriceAssetId(id)))
     }
   })
+})
+
+// The SQL mirror of an alternatives pick judges the leg the row displays: the
+// FIRST leg that prices, and that leg alone. Needs a registry: the thresholds are
+// one per known asset, and an empty registry judges nothing.
+describe('alternatives value mirror', () => {
+  beforeEach(async () => {
+    await loadExplorerAssets({
+      query: vi.fn(async () => ({ json: async () => [
+        { asset_id: 5, symbol: 'DOT', name: 'DOT', decimals: 10, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
+      ] })),
+    } as never)
+  })
+  afterEach(() => {
+    stopExplorerAssetsRefresh()
+    vi.restoreAllMocks()
+  })
+
+  // The SQL mirror of an alternatives pick judges the leg the row displays: the
+  // FIRST leg that prices, and that leg alone.
+  it('walks alternative legs in order and judges the floor on the first that prices', () => {
+    const thresholds = [{ assetId: 5, numerator: (10n * 1_000_000_000_000n * 10n ** 10n).toString() }]
+    const priced = historicalLegPricedSql('asset_out', 'amount_out', 'out_price.close', thresholds, { hasAmountExpr: 'has_out' })
+    const judged = exactHistoricalValuePredicateSql('asset_out', 'amount_out', 'out_price.close', thresholds, '1', { hasAmountExpr: 'has_out' })
+    // The choice and the judgement open with the same test, so the leg that decides
+    // "priced" is the leg whose amount is compared.
+    expect(judged.startsWith(`(${priced} AND (`)).toBe(true)
+    expect(priced).toContain('has_out AND')
+    expect(priced).toContain('out_price.close > 0')
+
+    const legs = [
+      { assetExpr: 'asset_out', rawAmountExpr: 'amount_out', alias: 'out_price', hasAmountExpr: 'has_out' },
+      { assetExpr: 'asset_in', rawAmountExpr: 'amount_in', alias: 'in_price', hasAmountExpr: 'has_in' },
+    ]
+    const usd = eventValueAlternativesFilterSql(legs, 'block_timestamp', { min: 10, unit: 'usd' })
+    expect(usd.joinSql.match(/ASOF LEFT JOIN/g)).toHaveLength(2)
+    expect(usd.joinSql).toContain('out_price\n')
+    expect(usd.joinSql).toContain('in_price\n')
+    expect(usd.joinSql).toContain('out_price.price_time <= block_timestamp')
+    expect(usd.joinSql).toContain('in_price.price_time <= block_timestamp')
+    expect(usd.predicateSql.startsWith('AND multiIf(')).toBe(true)
+    expect(usd.predicateSql.endsWith(', 0)')).toBe(true)
+    // OUT leg's choice, OUT leg's judgement, then the IN leg's pair — in that order.
+    const outChoice = usd.predicateSql.indexOf('has_out AND')
+    const outJudged = usd.predicateSql.indexOf('toUInt256OrZero(amount_out)')
+    const inChoice = usd.predicateSql.indexOf('has_in AND')
+    const inJudged = usd.predicateSql.indexOf('toUInt256OrZero(amount_in)')
+    expect(outChoice).toBeGreaterThan(-1)
+    expect(outJudged).toBeGreaterThan(outChoice)
+    expect(inChoice).toBeGreaterThan(outJudged)
+    expect(inJudged).toBeGreaterThan(inChoice)
+    expect(usd.predicateSql).not.toContain('Float64')
+    // A token-unit floor is judged on the built row by every caller; no SQL here.
+    expect(eventValueAlternativesFilterSql(legs, 'block_timestamp', { min: 10, unit: 'token' })).toEqual({ joinSql: '', predicateSql: '' })
+    expect(eventValueAlternativesFilterSql(legs, 'block_timestamp', {})).toEqual({ joinSql: '', predicateSql: '' })
+  })
+
 })
