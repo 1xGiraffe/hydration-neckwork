@@ -16,8 +16,33 @@
 //   Tokens.Deposited  {currencyId, who: treasury}  the fee, INCLUDING the tip
 //
 // HDX uses the `Balances.Withdraw`/`Balances.Deposit` pair instead.
-// `Currencies.Withdrawn`/`Currencies.Deposited` are duplicate mirrors of the
-// orml-tokens events and must never be counted.
+//
+// pallet-currencies emits its own `Currencies.Withdrawn`/`Currencies.Deposited`
+// AFTER the pallet it routed the movement to has emitted its event, so for a
+// Tokens asset the Currencies event repeats a `Tokens.*` twin sitting directly
+// before it (or behind the bookkeeping of an account the debit killed), and for
+// HDX a `Balances.*` twin one `Balances.Issued`/`Balances.Rescinded` earlier.
+// For an ERC-20 registry asset (HOLLAR, GDOT, BIL, the aTokens) there is no
+// twin: the balance lives in contract storage, the adapter's transfer leaves
+// only the contract's `EVM.Log`, and the Currencies event is the ONLY record of
+// the movement — a fee charged in HOLLAR appears in nothing else. Measured over
+// every Currencies event of 20k blocks: a Tokens or HDX one always has its
+// twin, an ERC-20 one never. So a `Currencies.Deposited` to the treasury counts
+// exactly when it is not the mirror of the treasury deposit directly before it
+// (a `Tokens.Deposited`/`Balances.Deposit` of the same currency and amount),
+// and a `Currencies.Withdrawn` of the payer always names a currency they were
+// debited in — for a mirror the twin already named it, which a set absorbs.
+//
+// One ERC-20 debit has no pallet event at all: the EVM gas prepay. The fee
+// handler burns it through the adapter (`burn_from`, the ERC-20 form of
+// `Balances.Burned`), which is a bare contract `transfer` from the payer to the
+// adapter's holding address — an `EVM.Log` and nothing else — so an
+// `Ethereum.transact` or `dispatch_permit` charged in HOLLAR or GDOT debits its
+// payer in no Currencies event (a signed dispatch still has the pre-dispatch
+// `Currencies.Withdrawn` of its substrate fee). The `Transfer(payer, holding)`
+// log IS that debit, on the contract whose own log sits directly before the
+// bare `Currencies.Deposited` that paid the treasury; the payer's H160 is the
+// runtime's `EvmAccounts::evm_address` of the AccountId32 (evmAddressOfAccount).
 //
 // An EVM dispatch debits differently again: it PREPAYS gas as `Balances.Burned`
 // and refunds the unused part as `Balances.Minted`, so the payer never appears
@@ -81,12 +106,21 @@
 // Verified against 13759746-2 (DOT), 13756091-3 (H2O), 13706669-3 (HDX fee
 // alongside 0.0001 HDX of dust), 13443355-3 (EVM, three WETH gas deposits),
 // 15038567-3 (a bare PolkadotXcm.execute: 0.00637 DOT to the trader, then the
-// 1.2676 HDX substrate fee), 15011574-3 and 15055487-2 (gas beside the fee).
-import { EVM_EXECUTION_EVENTS, TREASURY_ACCOUNT } from './revenueStreams.ts'
+// 1.2676 HDX substrate fee), 15011574-3 and 15055487-2 (gas beside the fee),
+// 15033063-2 (dispatch_evm_call paid in HOLLAR: 0.0031 HOLLAR of gas, then the
+// 0.0070 HOLLAR fee, every movement a bare Currencies event), 15049694-2
+// (Pays::No EVM.call in GDOT: gas plus a 1-wei rebasing remainder) and
+// 14802829-2 (dispatch_permit paid in GDOT: the prepay a contract log alone).
+import { evmAddressOfAccount } from './addressIdentity.ts'
+import {
+  ERC20_HOLDING_ADDRESS, ERC20_TRANSFER_TOPIC, EVM_EXECUTION_EVENTS, FEE_DEBIT_EVENTS, FEE_DEPOSIT_EVENTS, TREASURY_ACCOUNT,
+} from './revenueStreams.ts'
 import { XCM_EXECUTE_BARRIER_EVENT, XCM_FEE_RUN_EVENTS } from './xcmWalkEvents.ts'
 
 const XCM_FEE_RUN = new Set<string>(XCM_FEE_RUN_EVENTS)
 const EVM_EXECUTION = new Set<string>(EVM_EXECUTION_EVENTS)
+const DEBIT_EVENTS = new Set<string>(FEE_DEBIT_EVENTS)
+const DEPOSIT_EVENTS = new Set<string>(FEE_DEPOSIT_EVENTS)
 
 export interface FeePaymentEvent {
   name: string
@@ -124,7 +158,8 @@ function amountArg(args: unknown): bigint | null {
   return null
 }
 
-// A `Balances.*` event is the native asset by construction; `Tokens.*` names it.
+// A `Balances.*` event is the native asset by construction; `Tokens.*` and
+// `Currencies.*` name it.
 function currencyOf(name: string, args: unknown): number | null {
   if (name.startsWith('Balances.')) return 0
   const v = argOf(args, 'currencyId')
@@ -133,6 +168,24 @@ function currencyOf(name: string, args: unknown): number | null {
 
 function parseBig(raw: string | null | undefined): bigint | null {
   return raw != null && /^\d+$/.test(raw) ? BigInt(raw) : null
+}
+
+// An `EVM.Log` event's contract and, when it is an ERC-20 Transfer, its parties
+// (lowercase H160s out of the padded indexed topics).
+function evmLogOf(args: unknown): { contract: string; from: string | null; to: string | null } | null {
+  const log = argOf(args, 'log')
+  const address = argOf(log, 'address')
+  if (typeof address !== 'string') return null
+  const topics = argOf(log, 'topics')
+  const transfer = Array.isArray(topics) && topics.length >= 3 && typeof topics[0] === 'string'
+    && topics[0].toLowerCase() === ERC20_TRANSFER_TOPIC
+  const party = (topic: unknown): string | null =>
+    typeof topic === 'string' && topic.length === 66 ? '0x' + topic.slice(26).toLowerCase() : null
+  return {
+    contract: address.toLowerCase(),
+    from: transfer ? party(topics[1]) : null,
+    to: transfer ? party(topics[2]) : null,
+  }
 }
 
 /**
@@ -187,10 +240,16 @@ export function deriveFeePayment(
 ): DerivedFeePayment | null {
   if (!payer) return null
   const who = payer.toLowerCase()
+  const whoEvm = evmAddressOfAccount(who)
 
   const debited = new Set<number>()
-  const deposits: { assetId: number; amount: bigint }[] = []
+  // Contracts the ERC-20 adapter withdrew the payer's balance from — the debit
+  // of a bare Currencies deposit made on the same contract (module header).
+  const erc20Debited = new Set<string>()
+  const deposits: { assetId: number; amount: bigint; contract: string | null }[] = []
   let ranEvm = false
+  // The contract of the `EVM.Log` directly before the current event, else null.
+  let previousLogContract: string | null = null
   // "The deposit right after DustLost" is the previous element of the sequence.
   let afterDustLost = false
   // Whether the newest treasury deposit is still joined to the events after it by
@@ -198,34 +257,52 @@ export function deriveFeePayment(
   // false at the first event that is not in XCM_FEE_RUN_EVENTS. An XCM barrier
   // arriving while it holds names that deposit as the weight trader's.
   let lastDepositContiguous = false
+  // The treasury deposit before the current one, dust sweeps included: a
+  // `Currencies.Deposited` repeating its currency and amount is its mirror.
+  let previousTreasuryDeposit: { name: string; assetId: number | null; amount: bigint | null } | null = null
   for (const e of events) {
     const dustSweep = afterDustLost
     afterDustLost = e.name === 'Balances.DustLost'
+    const logContract = previousLogContract
+    previousLogContract = null
     if (EVM_EXECUTION.has(e.name)) ranEvm = true
     if (e.name === XCM_EXECUTE_BARRIER_EVENT) {
       if (lastDepositContiguous) deposits.pop()
       lastDepositContiguous = false
       continue
     }
-    if (e.name === 'Tokens.Withdrawn' || e.name === 'Balances.Withdraw' || e.name === 'Balances.Burned') {
+    if (DEBIT_EVENTS.has(e.name)) {
       lastDepositContiguous = false
       if (accountArg(e.args, 'who') !== who) continue
       const cid = currencyOf(e.name, e.args)
       if (cid != null) debited.add(cid)
-    } else if (e.name === 'Tokens.Deposited' || e.name === 'Balances.Deposit') {
-      if (dustSweep || accountArg(e.args, 'who') !== TREASURY_ACCOUNT) continue
+    } else if (DEPOSIT_EVENTS.has(e.name)) {
+      if (accountArg(e.args, 'who') !== TREASURY_ACCOUNT) continue
       const cid = currencyOf(e.name, e.args)
       const amount = amountArg(e.args)
+      const previous = previousTreasuryDeposit
+      previousTreasuryDeposit = { name: e.name, assetId: cid, amount }
+      const mirror = e.name === 'Currencies.Deposited' && previous != null
+        && previous.name !== 'Currencies.Deposited' && previous.assetId === cid && previous.amount === amount
+      if (dustSweep || mirror) continue
       if (cid != null && amount != null && amount > 0n) {
-        deposits.push({ assetId: cid, amount })
+        deposits.push({ assetId: cid, amount, contract: e.name === 'Currencies.Deposited' ? logContract : null })
         lastDepositContiguous = true
+      }
+    } else if (e.name === 'EVM.Log') {
+      // Run bookkeeping for the XCM rule (XCM_FEE_RUN_EVENTS), and the adapter's
+      // own record of an ERC-20 debit when it is the payer's transfer to holding.
+      const log = evmLogOf(e.args)
+      if (log) {
+        previousLogContract = log.contract
+        if (log.from === whoEvm && log.to === ERC20_HOLDING_ADDRESS) erc20Debited.add(log.contract)
       }
     } else if (!XCM_FEE_RUN.has(e.name)) {
       lastDepositContiguous = false
     }
   }
 
-  const candidates = deposits.filter(d => debited.has(d.assetId))
+  const candidates = deposits.filter(d => debited.has(d.assetId) || (d.contract != null && erc20Debited.has(d.contract)))
   const last = candidates[candidates.length - 1]
   if (!last) return null
 

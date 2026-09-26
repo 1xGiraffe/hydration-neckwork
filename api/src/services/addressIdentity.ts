@@ -23,6 +23,19 @@ function evmTruncatedAccountId(h160NoPrefix: string): string {
   return '0x' + EVM_MARKER + h160NoPrefix.toLowerCase() + ZERO16
 }
 
+/**
+ * The runtime's `EvmAccounts::evm_address` of an AccountId32 — the H160 the EVM
+ * sees an account as (lowercase `0x` + 40 hex): a bound EVM account's own H160,
+ * read back out of the truncated form; every other account's first 20 bytes,
+ * which is how a substrate signer (and the treasury) holds an ERC-20 balance.
+ * `evmAddressSql` in services/revenueStreams.ts is the SQL twin.
+ */
+export function evmAddressOfAccount(accountId: string): string {
+  const acc = accountId.toLowerCase()
+  if (acc.slice(2, 10) === EVM_MARKER && acc.slice(50) === ZERO16) return '0x' + acc.slice(10, 50)
+  return acc.slice(0, 42)
+}
+
 // Reserved substrate account prefixes: pallet ('modl'), sibling parachain
 // ('sibl') and parachain ('para') accounts are 20 meaningful bytes + 12 zero
 // bytes. An H160 carrying one of these is the runtime's TRUNCATION of that

@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
+  ERC20_HOLDING_ADDRESS,
+  ERC20_TRANSFER_TOPIC,
   EVM_EXECUTION_EVENTS,
+  FEE_DEBIT_EVENTS,
+  FEE_DEPOSIT_EVENTS,
   ICE_FEE_ACCOUNT,
   ICE_POT_ACCOUNT, TREASURY_H160,
   PARENT_SOVEREIGN_ACCOUNT,
@@ -9,6 +13,7 @@ import {
   REVENUE_STREAMS,
   TREASURY_ACCOUNT,
   buildRevenueEventRowsSql,
+  evmAddressSql,
   hollarBorrowHourlyRows,
   siblingSovereignAccountSql,
 } from '../src/services/revenueStreams.ts'
@@ -123,9 +128,10 @@ describe('network_fee', () => {
     // …) and EVM gas in the account's; pinning WETH (20) or HDX dropped them all.
     expect(sql).not.toMatch(/toUInt32\(20\)/)
     expect(sql).not.toMatch(/currencyId'\)\s*=\s*20/)
-    for (const debit of ['Tokens.Withdrawn', 'Balances.Withdraw', 'Balances.Burned']) {
-      expect(sql).toContain(`'${debit}'`)
-    }
+    // The pre-dispatch withdrawal, the EVM prepay, and the Currencies event that
+    // is an ERC-20 asset's only debit record.
+    expect(FEE_DEBIT_EVENTS).toEqual(['Tokens.Withdrawn', 'Balances.Withdraw', 'Balances.Burned', 'Currencies.Withdrawn'])
+    expect(sql).toContain(`event_name IN (${FEE_DEBIT_EVENTS.map(n => `'${n}'`).join(', ')})`)
     // The debit must be the payer's and in the deposit's currency.
     expect(sql).toContain('(d.block_height, d.ext_index, x.payer, d.currency) IN (SELECT block_height, ext_index, who, currency FROM gas_debits)')
     // The payer is the signer, or the recovered signer of an unsigned dispatch.
@@ -149,15 +155,38 @@ describe('network_fee', () => {
     expect(sql).toContain('NOT IN (SELECT block_height, deposit_index FROM dust_sweeps)')
   })
 
-  it('never counts the Currencies.* mirror events', () => {
-    // The mirrors appear only in the XCM run vocabulary (events a treasury deposit
-    // may be separated from its barrier by), never in a read that books or
-    // vouches for a deposit.
-    const counting = sql.slice(sql.indexOf('gas_debits AS ('), sql.indexOf('xf_barriers AS ('))
-    expect(counting).toContain('gas_deposits AS (')
-    expect(counting).not.toContain('Currencies.Deposited')
-    expect(counting).not.toContain('Currencies.Withdrawn')
-    expect(sql.slice(sql.indexOf('gas_candidates AS ('))).not.toContain('Currencies.')
+  it('counts a Currencies deposit as the movement itself only where no Tokens or Balances twin records it', () => {
+    // pallet-currencies emits after the pallet it routed to: over a Tokens or
+    // HDX deposit its event repeats the twin directly before it and is left
+    // out; over an ERC-20 registry asset (HOLLAR, GDOT, the aTokens) it is the
+    // ONLY record, and skipping it booked the gas of no such dispatch
+    // (15033063-2: 0.0031 HOLLAR of gas beside a 0.0070 HOLLAR fee).
+    expect(FEE_DEPOSIT_EVENTS).toEqual(['Tokens.Deposited', 'Balances.Deposit', 'Currencies.Deposited'])
+    const deposits = sql.slice(sql.indexOf('gas_deposits AS ('), sql.indexOf('gas_erc20_logs AS ('))
+    expect(deposits).toContain(`event_name IN (${FEE_DEPOSIT_EVENTS.map(n => `'${n}'`).join(', ')})`)
+    expect(deposits).toContain("if(event_name = 'Balances.Deposit', toUInt32(0), toUInt32(JSONExtractUInt(args_json, 'currencyId')))")
+    expect(deposits).toContain('WINDOW w AS (PARTITION BY block_height, ext_index ORDER BY event_index ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)')
+    expect(deposits).toContain("WHERE NOT (deposit_event = 'Currencies.Deposited' AND prev_event IN ('Tokens.Deposited', 'Balances.Deposit') AND prev_currency = currency AND prev_amount = amount)")
+  })
+
+  it("vouches a bare Currencies deposit by the ERC-20 adapter's transfer of the payer to its holding address", () => {
+    // The gas prepay of an unsigned dispatch charged in an ERC-20 currency is a
+    // `burn_from` on the adapter — a contract Transfer to 0xff…ff and no pallet
+    // event — so a permit paid in GDOT (14802829-2) had no debit in the
+    // resolver's eyes and its fee was booked nowhere. The log is read only for
+    // the extrinsics holding a bare Currencies deposit, and the contract it must
+    // be on is the one whose own log sits directly before that deposit.
+    expect(ERC20_HOLDING_ADDRESS).toBe('0x' + 'f'.repeat(40))
+    expect(ERC20_TRANSFER_TOPIC).toBe('0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef')
+    expect(sql).toContain("(block_height, assumeNotNull(extrinsic_index)) IN (SELECT block_height, ext_index FROM gas_deposits WHERE deposit_event = 'Currencies.Deposited')")
+    expect(sql).toContain('SELECT block_height, ext_index, event_index + 1 AS deposit_index, contract FROM gas_erc20_logs')
+    expect(sql).toContain(`lower(l.topics[1]) = '${ERC20_TRANSFER_TOPIC}'`)
+    expect(sql).toContain(`concat('0x', substring(lower(l.topics[2]), 27, 40)) = ${evmAddressSql('x.payer')}`)
+    expect(sql).toContain(`concat('0x', substring(lower(l.topics[3]), 27, 40)) = '${ERC20_HOLDING_ADDRESS}'`)
+    expect(sql).toContain("OR (d.deposit_event = 'Currencies.Deposited' AND (d.block_height, d.ext_index, l.contract) IN (SELECT block_height, ext_index, contract FROM gas_erc20_debits))")
+    // The runtime's EvmAccounts::evm_address: a bound account's embedded H160,
+    // anyone else's first 20 bytes.
+    expect(evmAddressSql('p')).toBe("if(startsWith(p, '0x45544800') AND substring(p, 51) = '0000000000000000', concat('0x', substring(p, 11, 40)), substring(p, 1, 42))")
   })
 
   it("leaves the XCM weight trader's deposit to the xcm_execution_fee stream", () => {
@@ -180,7 +209,7 @@ describe('network_fee', () => {
     // actualFee is ALWAYS denominated in HDX (asset 0) — verified across every
     // fee currency; reading the charged currency here would misprice ~25% of rows.
     expect(sql).toMatch(/toUInt32\(0\) AS asset_id/)
-    expect(sql.slice(0, sql.indexOf('xf_barriers AS ('))).not.toContain('Currencies.Withdrawn')
+    expect(sql.slice(0, sql.indexOf('gas_scope AS ('))).not.toMatch(/currencyId|Currencies\./)
   })
 })
 
@@ -195,7 +224,13 @@ describe('xcm_execution_fee', () => {
   it("reads the trader's deposit to the treasury before every execution barrier, in every era", () => {
     expect(sql).toContain('-- rev:xcm_execution_fee')
     expect(sql).toContain(`JSONExtractString(args_json, 'who') = '${TREASURY_ACCOUNT}'`)
-    expect(sql).toContain("event_name IN ('Tokens.Deposited', 'Balances.Deposit')")
+    // One row per movement, whichever record it has: a HOLLAR-paid message's fee
+    // is a bare Currencies.Deposited (169 of them dropped while only the Tokens
+    // and Balances records were read), a DOT-paid one a Tokens.Deposited with
+    // its mirror folded away — the network-fee arm's own deposit read.
+    expect(sql).toContain(`event_name IN (${FEE_DEPOSIT_EVENTS.map(n => `'${n}'`).join(', ')})`)
+    expect(sql).toContain('WINDOW w AS (PARTITION BY block_height, ctx ORDER BY event_index ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)')
+    expect(sql).toContain("WHERE NOT (deposit_event = 'Currencies.Deposited' AND prev_event IN ('Tokens.Deposited', 'Balances.Deposit') AND prev_currency = currency AND prev_amount = amount)")
     // The inbound barriers of both runtime eras (the feed's own list) plus the
     // local-execution barrier, in one list — a decode that only knows
     // MessageQueue.Processed drops every pre-migration message's fee.
@@ -243,7 +278,7 @@ describe('xcm_execution_fee', () => {
   })
 
   it('books the deposit in its own currency, positive amounts only, valued at event time', () => {
-    expect(sql).toContain("if(event_name = 'Tokens.Deposited', toUInt32(JSONExtractUInt(args_json, 'currencyId')), toUInt32(0))")
+    expect(sql).toContain("if(event_name = 'Balances.Deposit', toUInt32(0), toUInt32(JSONExtractUInt(args_json, 'currencyId')))")
     expect(sql).toContain('WHERE d.amount > 0')
     expect(sql).toMatch(/'' AS dest/)
     expect(sql).toContain('ASOF LEFT JOIN')

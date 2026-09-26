@@ -400,3 +400,181 @@ describe('deriveFeePayment: gas beside a substrate fee', () => {
     expect(deriveFeePayment(events, PAYER, '0', '0')).toEqual({ assetId: 0, amount: '900', tipAmount: null })
   })
 })
+
+// pallet-currencies emits `Currencies.Withdrawn`/`Currencies.Deposited` after the
+// pallet it routed to: over a Tokens or HDX movement it repeats a twin that sits
+// directly before it, and over an ERC-20 registry asset (HOLLAR, GDOT, BIL, the
+// aTokens — balances in contract storage) it is the ONLY record, the underlying
+// leaving nothing but the contract's EVM.Log. Skipping every Currencies event as a
+// mirror made a HOLLAR fee invisible: the page fell back to the HDX figure and the
+// revenue model booked the gas of no ERC-20-paying dispatch.
+describe('deriveFeePayment: Currencies events of an ERC-20 fee currency', () => {
+  const currenciesWithdrawn = (currencyId: number, who: string, amount: string): FeePaymentEvent =>
+    ({ name: 'Currencies.Withdrawn', args: { currencyId, who, amount } })
+  const currenciesDeposited = (currencyId: number, who: string, amount: string): FeePaymentEvent =>
+    ({ name: 'Currencies.Deposited', args: { currencyId, who, amount } })
+  const evmLog: FeePaymentEvent = { name: 'EVM.Log', args: { log: { address: '0x531a654d1696ed52e7275a8cede955e82620f99a', topics: [], data: '0x' } } }
+  const evmExecuted: FeePaymentEvent = { name: 'EVM.Executed', args: { address: '0x2ce2cfff743cdb6637f4b5d351937a541b8c8923' } }
+
+  // 15033063-2, Dispatcher.dispatch_evm_call paid in HOLLAR (222): the
+  // pre-dispatch withdrawal (event 4), the gas deposit (8), the refund (17) and
+  // the fee deposit (19) are each a bare Currencies event behind the contract's
+  // Transfer log; the EVM prepay and its refund are logs alone.
+  it('reads a HOLLAR fee and its gas off bare Currencies events', () => {
+    const hollarPayer = '0xf61d983487817667805f61db0f5ba60b29efa3b8563ed79379e56872d394207f'
+    const events = [
+      evmLog,
+      currenciesWithdrawn(222, hollarPayer, '7047366697622991'),
+      evmLog, evmLog, evmLog,
+      currenciesDeposited(222, TREASURY, '3095806610000484'),
+      evmLog,
+      evmExecuted,
+      evmLog,
+      currenciesDeposited(222, hollarPayer, '29058565494202'),
+      evmLog,
+      currenciesDeposited(222, TREASURY, '7018308132128789'),
+    ]
+    expect(deriveFeePayment(events, hollarPayer, '981751934865', '0')).toEqual({
+      assetId: 222, amount: '7018308132128789', tipAmount: null,
+      gas: { assetId: 222, amount: '3095806610000484' },
+    })
+  })
+
+  // 15049694-2, EVM.call dispatched Pays::No in GDOT (69, a rebasing aToken):
+  // the gas deposit plus a 1-wei remainder, the refund a wei short of the
+  // withdrawal. Nothing was charged on the substrate side, so both are summed.
+  it('sums the gas of a Pays::No dispatch paid in an aToken', () => {
+    const gdotPayer = '0x5477ba60781dfea03c2dd9362e53fc10036852b3ea91450ca7336208bf283b77'
+    const events = [
+      evmLog,
+      currenciesWithdrawn(69, gdotPayer, '7189908168283688'),
+      evmLog,
+      currenciesDeposited(69, TREASURY, '3035606701717149'),
+      evmExecuted,
+      evmLog,
+      currenciesDeposited(69, gdotPayer, '7189908168283687'),
+      evmLog,
+      currenciesDeposited(69, TREASURY, '1'),
+    ]
+    expect(deriveFeePayment(events, gdotPayer, '0', '0')).toEqual({
+      assetId: 69, amount: '3035606701717150', tipAmount: null,
+    })
+  })
+
+  // The mirror of a Tokens deposit repeats its currency and amount directly
+  // after it; the mirror of an HDX deposit has the pallet's own `Balances.Issued`
+  // between the two. Neither is a second deposit — summed, a Pays::No fee in DOT
+  // or HDX would double.
+  it('does not count the mirror of a Tokens or HDX treasury deposit', () => {
+    const dot = [
+      withdrawn(5, PAYER, '150852673'),
+      currenciesWithdrawn(5, PAYER, '150852673'),
+      deposited(5, TREASURY, '8107653'),
+      currenciesDeposited(5, TREASURY, '8107653'),
+      deposited(5, TREASURY, '1'),
+      currenciesDeposited(5, TREASURY, '1'),
+    ]
+    expect(deriveFeePayment(dot, PAYER, '0', '0')).toEqual({ assetId: 5, amount: '8107654', tipAmount: null })
+    const hdx = [
+      nativeWithdraw(PAYER, '5000'),
+      { name: 'Balances.Rescinded', args: { amount: '5000' } },
+      currenciesWithdrawn(0, PAYER, '5000'),
+      nativeDeposit(TREASURY, '4000'),
+      { name: 'Balances.Issued', args: { amount: '4000' } },
+      currenciesDeposited(0, TREASURY, '4000'),
+    ]
+    expect(deriveFeePayment(hdx, PAYER, '0', '0')).toEqual({ assetId: 0, amount: '4000', tipAmount: null })
+  })
+
+  // Two movements of one amount are two deposits; a Currencies event is a mirror
+  // only of the deposit directly before it, never of an earlier one.
+  it('keeps a Currencies deposit that repeats nothing directly before it', () => {
+    const events = [
+      withdrawn(5, PAYER, '9000'),
+      currenciesWithdrawn(222, PAYER, '4000'),
+      deposited(5, TREASURY, '4000'),
+      currenciesDeposited(5, TREASURY, '4000'),
+      evmLog,
+      currenciesDeposited(222, TREASURY, '4000'),
+    ]
+    expect(deriveFeePayment(events, PAYER, '0', '0')).toEqual({ assetId: 222, amount: '4000', tipAmount: null })
+  })
+
+  it("still needs the payer's own debit in the ERC-20 currency", () => {
+    const events = [
+      currenciesWithdrawn(222, '0x455448001973e7044d9a7c7bb2d6ea1693a296a9e4b7e4480000000000000000', '5000'),
+      currenciesDeposited(222, TREASURY, '4000'),
+    ]
+    expect(deriveFeePayment(events, PAYER, '0', '0')).toBeNull()
+  })
+})
+
+// The EVM gas prepay of a dispatch charged in an ERC-20 currency is a `burn_from`
+// on the runtime's ERC-20 adapter: the contract's Transfer from the payer to the
+// adapter's holding address, an EVM.Log and no pallet event. An unsigned dispatch
+// (Ethereum.transact, dispatch_permit) has no pre-dispatch withdrawal either, so
+// nothing named a debit and its fee read as unknown — 866 permits over the
+// ERC-20 era. The log IS the debit, on the contract whose own log sits directly
+// before the bare Currencies deposit that paid the treasury.
+describe("deriveFeePayment: the ERC-20 adapter's transfer as the debit", () => {
+  const GDOT = '0x34d5ffb83d86dfa8ac5ba64e5e29f74f8b8d6e91'
+  const HOLDING = '0x' + 'f'.repeat(40)
+  const TREASURY_H160 = '0x6d6f646c70792f74727372790000000000000000'
+  // 14802829-2's permit signer: a bound EVM account, stored as "ETH\0" + H160 + 8 zero bytes.
+  const permitSigner = '0x45544800336f25787ee2bfb521e49eeb9b006abdc83976500000000000000000'
+  const permitSignerH160 = '0x336f25787ee2bfb521e49eeb9b006abdc8397650'
+  const pad = (h160: string): string => '0x' + '0'.repeat(24) + h160.slice(2)
+  const transfer = (contract: string, from: string, to: string, value: string): FeePaymentEvent => ({
+    name: 'EVM.Log',
+    args: { log: { address: contract, topics: ['0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef', pad(from), pad(to)], data: value } },
+  })
+  const balanceTransfer = (contract: string): FeePaymentEvent => ({
+    name: 'EVM.Log',
+    args: { log: { address: contract, topics: ['0x4beccb90f994c31aced7a23b5611020728a23d8ec5cddd1a3e9d97b96fda8666'], data: '0x' } },
+  })
+  const currenciesDeposited = (currencyId: number, who: string, amount: string): FeePaymentEvent =>
+    ({ name: 'Currencies.Deposited', args: { currencyId, who, amount } })
+
+  // 14802829-2, MultiTransactionPayment.dispatch_permit paid in GDOT (69): the
+  // prepay (event 5), its refund (9) and the treasury's share (12) are Transfer
+  // logs of the aToken, each followed by its BalanceTransfer log; only the
+  // treasury's is followed by a Currencies.Deposited. Pays::No, no fee figure.
+  it('reads the gas of a permit paid in an aToken off the adapter transfers', () => {
+    const events = [
+      transfer(GDOT, permitSignerH160, HOLDING, '18905780577002739'),
+      balanceTransfer(GDOT),
+      { name: 'MultiTransactionPayment.CurrencySet', args: { accountId: permitSigner, assetId: 69 } },
+      transfer(GDOT, HOLDING, permitSignerH160, '7482926956190260'),
+      balanceTransfer(GDOT),
+      transfer(GDOT, HOLDING, TREASURY_H160, '11422853620812479'),
+      balanceTransfer(GDOT),
+      currenciesDeposited(69, TREASURY, '11422853620812479'),
+    ]
+    expect(deriveFeePayment(events, permitSigner, null, null)).toEqual({
+      assetId: 69, amount: '11422853620812479', tipAmount: null,
+    })
+  })
+
+  it("maps a substrate payer to its first 20 bytes, the runtime's evm_address", () => {
+    const events = [
+      transfer(GDOT, PAYER.slice(0, 42), HOLDING, '500'),
+      transfer(GDOT, HOLDING, TREASURY_H160, '400'),
+      currenciesDeposited(69, TREASURY, '400'),
+    ]
+    expect(deriveFeePayment(events, PAYER, null, null)?.amount).toBe('400')
+  })
+
+  it('vouches only through a transfer of the payer, to holding, on the contract that paid the treasury', () => {
+    const other = '0x1973e7044d9a7c7bb2d6ea1693a296a9e4b7e448'
+    const otherContract = '0x531a654d1696ed52e7275a8cede955e82620f99a'
+    const deposit = [transfer(GDOT, HOLDING, TREASURY_H160, '400'), currenciesDeposited(69, TREASURY, '400')]
+    expect(deriveFeePayment([transfer(GDOT, other, HOLDING, '500'), ...deposit], permitSigner, null, null)).toBeNull()
+    expect(deriveFeePayment([transfer(GDOT, permitSignerH160, other, '500'), ...deposit], permitSigner, null, null)).toBeNull()
+    expect(deriveFeePayment([transfer(otherContract, permitSignerH160, HOLDING, '500'), ...deposit], permitSigner, null, null)).toBeNull()
+    // A Currencies deposit with no contract log directly before it names no
+    // contract, so the adapter rule cannot vouch for it.
+    const detached = [transfer(GDOT, permitSignerH160, HOLDING, '500'), transfer(GDOT, HOLDING, TREASURY_H160, '400'),
+      { name: 'EVM.Executed', args: {} }, currenciesDeposited(69, TREASURY, '400')]
+    expect(deriveFeePayment(detached, permitSigner, null, null)).toBeNull()
+  })
+})
