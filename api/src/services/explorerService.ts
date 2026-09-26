@@ -1258,6 +1258,28 @@ function historicalValueThresholds(minValue: number): { thresholds: HistoricalRa
   return { thresholds, denominator: min.denominator.toString() }
 }
 
+/**
+ * Whether a leg HAS a block-time value at all: it is present, its asset is one the
+ * registry knows, and its ASOF close is a positive price. Stated once, so that an
+ * alternatives mirror (eventValueAlternativesFilterSql) asks "does this leg
+ * price?" with exactly the test its own floor predicate applies — the leg the
+ * mirror judges is then the leg applyHistoricalUsd displays.
+ */
+export function historicalLegPricedSql(
+  assetExpr: string,
+  rawAmountExpr: string,
+  closeExpr: string,
+  thresholds: HistoricalRawValueThreshold[],
+  options: { hasAmountExpr?: string } = {},
+): string {
+  if (!thresholds.length) return '0'
+  const ids = thresholds.map(t => t.assetId).join(',')
+  const asset = `toUInt32(${assetExpr})`
+  const hasAmount = options.hasAmountExpr ?? `notEmpty(toString(${rawAmountExpr}))`
+  const priceAtoms = `toUInt256(${closeExpr} * toDecimal128('1000000000000', 0))`
+  return `(${hasAmount} AND ${asset} IN (${ids}) AND ${closeExpr} > 0 AND ${priceAtoms} > 0)`
+}
+
 /** Exact UInt256 comparison against a row's Decimal128(12) historical close. */
 export function exactHistoricalValuePredicateSql(
   assetExpr: string,
@@ -1268,14 +1290,13 @@ export function exactHistoricalValuePredicateSql(
   options: { amountIsUInt256?: boolean; hasAmountExpr?: string } = {},
 ): string {
   if (!thresholds.length) return '0'
-  const ids = thresholds.map(t => t.assetId).join(',')
   const denominatorValue = BigInt(minDenominator)
   const calculable = thresholds.filter(t => denominatorValue <= BigInt(t.numerator))
   const oneRawUnit = thresholds.filter(t => BigInt(t.numerator) > 0n && denominatorValue > BigInt(t.numerator))
   const zeroThreshold = thresholds.filter(t => BigInt(t.numerator) === 0n)
   const asset = `toUInt32(${assetExpr})`
   const amount = options.amountIsUInt256 ? `toUInt256(${rawAmountExpr})` : `toUInt256OrZero(${rawAmountExpr})`
-  const hasAmount = options.hasAmountExpr ?? `notEmpty(toString(${rawAmountExpr}))`
+  const priced = historicalLegPricedSql(assetExpr, rawAmountExpr, closeExpr, thresholds, options)
   const priceAtoms = `toUInt256(${closeExpr} * toDecimal128('1000000000000', 0))`
   const branches: string[] = []
   if (zeroThreshold.length) branches.push(`(${asset} IN (${zeroThreshold.map(t => t.assetId).join(',')}) AND ${amount} >= toUInt256(0))`)
@@ -1290,7 +1311,7 @@ export function exactHistoricalValuePredicateSql(
     const threshold = `(intDivOrZero(${quotient}, ${priceAtoms}) + toUInt256(${remainder} != 0 OR moduloOrZero(${quotient}, ${priceAtoms}) != 0))`
     branches.push(`(${asset} IN (${calcIds}) AND ${amount} >= ${threshold})`)
   }
-  return `(${hasAmount} AND ${asset} IN (${ids}) AND ${closeExpr} > 0 AND ${priceAtoms} > 0 AND (${branches.join(' OR ') || '0'}))`
+  return `(${priced} AND (${branches.join(' OR ') || '0'}))`
 }
 
 /**
@@ -1338,11 +1359,62 @@ export function eventValueFilterSql(
   }
   const { thresholds, denominator } = historicalValueThresholds(filters.min)
   return {
-    joinSql: `ASOF LEFT JOIN ${historicalClosesRelationSql({ joinKey: true })} ${alias}
+    joinSql: historicalCloseJoinSql(assetExpr, timestampExpr, alias),
+    predicateSql: `AND ${exactHistoricalValuePredicateSql(assetExpr, rawAmountExpr, `${alias}.close`, thresholds, denominator, options)}`,
+  }
+}
+
+// The ASOF join that labels a row with `alias`.close — the last hourly close of
+// its leg's price feed completed at or before the row's own time.
+function historicalCloseJoinSql(assetExpr: string, timestampExpr: string, alias: string): string {
+  return `ASOF LEFT JOIN ${historicalClosesRelationSql({ joinKey: true })} ${alias}
               ON ${alias}.asof_join_key = toUInt8(isNotNull(${timestampExpr}))
              AND ${alias}.asset_id = ${priceAliasIdSql(assetExpr)}
-             AND ${alias}.price_time <= ${timestampExpr}`,
-    predicateSql: `AND ${exactHistoricalValuePredicateSql(assetExpr, rawAmountExpr, `${alias}.close`, thresholds, denominator, options)}`,
+             AND ${alias}.price_time <= ${timestampExpr}`
+}
+
+export interface EventValueFilterLeg {
+  assetExpr: string
+  rawAmountExpr: string
+  /** Unique per leg: each leg is ASOF-joined to the closes under its own alias. */
+  alias: string
+  /** When the leg is present at all; an absent leg passes the choice to the next. */
+  hasAmountExpr?: string
+  amountIsUInt256?: boolean
+}
+
+/**
+ * SQL mirror of an ALTERNATIVES pick (HistPick): the FIRST leg with a block-time
+ * close is the row's whole value, so the USD floor is judged on that leg alone —
+ * never on a later leg that also prices, and never on a sum. One ASOF join per
+ * leg; the predicate walks the legs in order and settles on the first that
+ * prices (historicalLegPricedSql — the same test the chosen leg's own predicate
+ * opens with, so the leg that decides "priced" is the leg that is judged), and a
+ * row none of whose legs price is under every floor, as its displayed value is
+ * null. Mirrors applyHistoricalUsd's alternatives walk leg for leg.
+ *
+ * USD floors only: a token-unit floor is a threshold on one leg's own amount and
+ * every caller of this mirror judges it on the built row instead
+ * (activityRowMatchesFilters), so it yields no SQL here.
+ */
+export function eventValueAlternativesFilterSql(
+  legs: EventValueFilterLeg[],
+  timestampExpr: string,
+  filters: ValueListFilters | undefined,
+): EventValueFilterSql {
+  if (filters?.min == null || filters.unit === 'token' || !legs.length) return { joinSql: '', predicateSql: '' }
+  const { thresholds, denominator } = historicalValueThresholds(filters.min)
+  const branches = legs.flatMap(leg => {
+    const close = `${leg.alias}.close`
+    const options = { amountIsUInt256: leg.amountIsUInt256, hasAmountExpr: leg.hasAmountExpr }
+    return [
+      historicalLegPricedSql(leg.assetExpr, leg.rawAmountExpr, close, thresholds, options),
+      exactHistoricalValuePredicateSql(leg.assetExpr, leg.rawAmountExpr, close, thresholds, denominator, options),
+    ]
+  })
+  return {
+    joinSql: legs.map(leg => historicalCloseJoinSql(leg.assetExpr, timestampExpr, leg.alias)).join('\n'),
+    predicateSql: `AND multiIf(${branches.join(', ')}, 0)`,
   }
 }
 
@@ -1910,8 +1982,8 @@ function exactUsdMeetsMinimum(legs: ExactUsdLeg[], minimum: number): boolean {
 }
 // valueUsd basis pickers per FEED row shape: a transfer/liquidity/mm flow is valued
 // on the moved asset; a trade-like row — a swap, a DCA execution, an OTC order or
-// fill — on its OUT leg (the asset received) when that leg has a block-time close,
-// else on its IN leg. A trade detail page instead picks its more reliably priced
+// fill, an intent fill — on its OUT leg (the asset received) when that leg has a
+// block-time close, else on its IN leg. A trade detail page instead picks its more reliably priced
 // leg (applyEventTimeUsd). The feed keeps the OUT leg FIRST rather than adopting
 // that order, so a row both of whose legs price keeps the value it always had; the
 // IN leg only ever replaces no value at all — a swap of 1 DOT into an asset no
@@ -1955,11 +2027,16 @@ export function activityHistPick(r: ActivityRow): HistPick {
       ? [histLeg(r.assetIn, r.amountIn, r.timestamp), histLeg(r.assetOut, r.amountOut, r.timestamp)]
       : null
   }
-  // An intent row is valued on its IN leg alone — what the order holds (Place/
-  // Cancel/Expire) or what a fill took — the leg its SQL value mirror
-  // (getRecentIntents) judges; its OUT leg is a limit the order may never reach,
-  // so it is no alternative either.
-  if (r.type === 'intent') return r.assetIn && r.amountIn != null ? histLeg(r.assetIn, r.amountIn, r.timestamp) : null
+  // An intent FILL settled real amounts on both legs — what the solution took and
+  // what it paid — so it is the trade it is: OUT leg first, IN leg as the
+  // alternative, the same pick a swap or a DCA schedule's execution gets, and the
+  // legs its SQL value mirror (getRecentIntents) judges. A placement, cancel or
+  // expiry is valued on its IN leg alone — what the order holds — and its OUT leg,
+  // a limit the order may never reach, is no alternative.
+  if (r.type === 'intent') {
+    if (isIntentFillAction(r.intentAction)) return tradeLegsPick(r.assetIn, r.amountIn, r.assetOut, r.amountOut, r.timestamp)
+    return r.assetIn && r.amountIn != null ? histLeg(r.assetIn, r.amountIn, r.timestamp) : null
+  }
   if (r.assetOut && r.amountOut != null) return tradeLegsPick(r.assetIn, r.amountIn, r.assetOut, r.amountOut, r.timestamp)
   if (r.asset && r.amount != null) return histLeg(r.asset, r.amount, r.timestamp)
   if (r.assetIn && r.amountIn != null) return histLeg(r.assetIn, r.amountIn, r.timestamp)
@@ -15654,6 +15731,16 @@ const INTENT_DCA_COMPLETED = 'Intent.DcaCompleted'
 const INTENT_EVENT_ACTION: Record<string, IntentAction> = Object.fromEntries(
   Object.entries(INTENT_ACTION_EVENTS).flatMap(([a, names]) => names.map(n => [n, a as IntentAction])),
 )
+// The actions that SETTLED amounts — a solution took the order's asset_in and paid
+// its asset_out. A placement, cancel or expiry moves nothing: its amounts are the
+// order's limits. One definition for everything that turns on the distinction —
+// the feed's valuation (activityHistPick), its SQL value mirror (getRecentIntents)
+// and the large-trade notification lane (largeTradeRowEligible).
+export const INTENT_FILL_ACTIONS: readonly IntentAction[] = ['Fill', 'PartialFill', 'DcaTrade']
+export function isIntentFillAction(action: IntentAction | string | undefined): boolean {
+  return action != null && (INTENT_FILL_ACTIONS as readonly string[]).includes(action)
+}
+const INTENT_FILL_EVENTS = INTENT_FILL_ACTIONS.flatMap(a => INTENT_ACTION_EVENTS[a])
 // The UI's action dropdown sends hyphenated slugs (`intent-fill` covers both the
 // full and the partial resolution); the bare action words are accepted too.
 const INTENT_ACTION_ALIASES: Record<string, IntentAction[]> = {
@@ -15809,18 +15896,33 @@ export function intentRowFromEvent(
   return { row, intentId: parts.intentId, owner }
 }
 
-// SQL mirrors for the value push-down. The feed's valued asset is the order's
-// asset_in, which lives in intent_orders, and its amount is the event's own
-// realized amount_in (fills, DCA trades) or else the order's (Place/Cancel/Expire)
-// — the choice intentRowFromEvent makes. eventValueFilterSql builds its ASOF join
-// and predicate from bare column expressions, so the events ⟕ orders join is
-// wrapped in a subquery that exposes these as plain columns and the value filter
-// is applied outside it. An event whose order is not indexed gets the join's
-// defaults ('' / 0, and 0 is HDX), so `owner != ''` gates every order-derived
-// predicate: such a row has no pair and no value, exactly as its built row has.
+// SQL mirrors for the value push-down — the legs activityHistPick names, in its
+// order. A fill is valued on its OUT leg first: the order's asset_out (in
+// intent_orders) at the event's own realized amount_out, which every fill event
+// states. A completion (DcaCompleted) states none — its amounts come from the
+// settlement legs, which live outside SQL — so it falls through to the IN leg
+// here, valued at the order's per-trade amount_in, the closest figure SQL has
+// (the completion trade spends at most that). The IN leg is the order's asset_in
+// at the event's own amount_in (fills, DCA trades) or else the order's
+// (Place/Cancel/Expire) — the choice intentRowFromEvent makes — and for a
+// placement, cancel or expiry it is the only leg: the OUT leg's gate names the
+// fill events, so a limit is never judged as a value. The pair columns live in
+// intent_orders and the mirror builds its ASOF joins and predicate from bare
+// column expressions, so the events ⟕ orders join is wrapped in a subquery that
+// exposes these as plain columns and the value filter is applied outside it. An
+// event whose order is not indexed gets the join's defaults ('' / 0, and 0 is
+// HDX), so `owner != ''` gates every order-derived predicate: such a row has no
+// pair and no value, exactly as its built row has.
 const INTENT_ASSET_SQL = 'asset_in'
 const INTENT_AMOUNT_SQL = 'amount_in_eff'
 const INTENT_HAS_AMOUNT_SQL = `(owner != '' AND amount_in_eff != '')`
+const INTENT_OUT_ASSET_SQL = 'asset_out'
+const INTENT_OUT_AMOUNT_SQL = 'amount_out'
+const INTENT_HAS_OUT_AMOUNT_SQL = `(owner != '' AND amount_out != '' AND event_name IN (${sqlEventNameList(INTENT_FILL_EVENTS)}))`
+const INTENT_VALUE_LEGS: EventValueFilterLeg[] = [
+  { assetExpr: INTENT_OUT_ASSET_SQL, rawAmountExpr: INTENT_OUT_AMOUNT_SQL, alias: 'intent_out_price', hasAmountExpr: INTENT_HAS_OUT_AMOUNT_SQL },
+  { assetExpr: INTENT_ASSET_SQL, rawAmountExpr: INTENT_AMOUNT_SQL, alias: 'intent_price', hasAmountExpr: INTENT_HAS_AMOUNT_SQL },
+]
 type RawIntentFeedEvent = RawIntentEvent & { intent_id: string }
 // Windowed intent feed — the shape of getRecentBonds over intent_events joined to
 // intent_orders. Action, account, token/asset and USD-minimum predicates are pushed
@@ -15846,7 +15948,7 @@ export async function getRecentIntents(limit: number, from?: string, to?: string
     const tokenIds = assetIdsForToken(filters.token)
     const pushValue = filters.min != null && filters.unit !== 'token'
     const valueFilter = pushValue
-      ? eventValueFilterSql(INTENT_ASSET_SQL, INTENT_AMOUNT_SQL, 'block_timestamp', filters, prices, 'intent_price', { hasAmountExpr: INTENT_HAS_AMOUNT_SQL })
+      ? eventValueAlternativesFilterSql(INTENT_VALUE_LEGS, 'block_timestamp', filters)
       : { joinSql: '', predicateSql: '' }
     const rowFilter = [
       acctList ? `AND owner != '' AND owner IN (${acctList})` : '',
@@ -15861,9 +15963,9 @@ export async function getRecentIntents(limit: number, from?: string, to?: string
                   SELECT ie.block_height AS block_height, ie.block_timestamp AS block_timestamp, ie.event_index AS event_index, ie.extrinsic_index AS extrinsic_index,
                          ie.event_name AS event_name, ie.args_json AS args_json, ie.intent_id AS intent_id,
                          o.owner AS owner, o.asset_in AS asset_in, o.asset_out AS asset_out,
-                         if(ie.amount_in != '', ie.amount_in, o.amount_in) AS amount_in_eff
+                         if(ie.amount_in != '', ie.amount_in, o.amount_in) AS amount_in_eff, ie.amount_out AS amount_out
                   FROM (
-                    SELECT intent_id, block_height, block_timestamp, event_index, extrinsic_index, event_name, args_json, amount_in
+                    SELECT intent_id, block_height, block_timestamp, event_index, extrinsic_index, event_name, args_json, amount_in, amount_out
                     FROM price_data.intent_events FINAL
                     WHERE ${bound} AND event_name IN (${names})
                   ) AS ie
@@ -15930,7 +16032,6 @@ export function intentOrderStatus(kind: 'swap' | 'dca', events: string[]): Inten
   if (events.includes('Intent.IntentResovedPartially')) return 'partially-filled'
   return 'open'
 }
-const INTENT_FILL_EVENTS = ['Intent.IntentResolved', 'Intent.IntentResovedPartially', 'Intent.DcaTradeExecuted', INTENT_DCA_COMPLETED]
 
 // ---------------------------------------------------------------------------
 // The DCA's final trade. pallet_ice moves every fill through the pot — one
