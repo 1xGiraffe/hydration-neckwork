@@ -917,8 +917,8 @@ const noisyPotList = () => NOISY_TRANSFER_POTS.map(a => `'${a}'`).join(',')
 // fees/deposits, not user transfers: a routed swap's fee leg is already dropped as
 // trade noise, but non-swap fees/deposits (Referrals.register_code, XCM inherents
 // like ParachainSystem.set_validation_data, plain batches) are not. So on a normal
-// account's transfer feed a transfer *to* the treasury is surfaced only when its
-// originating extrinsic is itself a token-transfer call (a genuine donation);
+// account's transfer feed a transfer *to* the treasury is surfaced only when the
+// extrinsic that emitted it DISPATCHES a token-transfer call (a genuine donation);
 // payouts *from* the treasury stay visible.
 const TRANSFER_CALL_NAMES = new Set([
   'Balances.transfer', 'Balances.transfer_keep_alive', 'Balances.transfer_all', 'Balances.transfer_allow_death',
@@ -927,6 +927,25 @@ const TRANSFER_CALL_NAMES = new Set([
   'XTokens.transfer', 'XTokens.transfer_multiasset', 'XTokens.transfer_multicurrencies',
   'XTokens.transfer_multiassets', 'XTokens.transfer_with_fee', 'XTokens.transfer_multiasset_with_fee',
 ])
+
+// The (block, extrinsic) pairs under `bound` that dispatch a token-transfer call
+// ANYWHERE in their call tree. Read from raw_calls — the decomposed tree (`root`, a
+// batch's `0`/`1`, a proxied batch's `0.1`, the Dispatcher's `root.inner`) — rather
+// than raw_extrinsics' outer `call_name`, which names only the wrapper: a
+// `Utility.batch_all` of six `Tokens.transfer_all` to the treasury is six donations,
+// and the outer-call test read it as a batch fee and dropped every one (block
+// 15,072,883). The same applies to a donation behind `Proxy.proxy`,
+// `Multisig.as_multi` or `Dispatcher.dispatch_with_extra_gas`. The bound is spelled
+// on the table's own sort key `(block_height, ifNull(extrinsic_index, 4294967295),
+// call_address)`, so a tuple or block bound is a primary-key read. DISTINCT because a
+// batch holds the call once per leg. ONE rule for the account feed's page read
+// (transferCallExtrinsics) and its count arm (accountTransferArm): two spellings of
+// it is how a total and its page drift apart.
+export function transferCallDispatchSql(bound: string): string {
+  return `SELECT DISTINCT block_height, ifNull(extrinsic_index, 4294967295) AS xi
+    FROM price_data.raw_calls
+    WHERE ${bound} AND call_name IN (${sqlEventNameList([...TRANSFER_CALL_NAMES])})`
+}
 
 // Liquidity actors that are module (modl) accounts stay hidden as plumbing —
 // EXCEPT the tagged economic ones (economicModuleAccounts: e.g. the Treasury).
@@ -11074,26 +11093,25 @@ async function liquidationExtrinsics(pairs: [number, number | null][]): Promise<
   return out
 }
 
-// The subset of (block, extrinsic) pairs whose call is a genuine token-transfer
-// call. Used to keep only real donations to the treasury pot on a transfer feed:
-// a transfer *to* py/trsry emitted by any other call (a batch/swap fee, a
+// The subset of (block, extrinsic) pairs that dispatch a genuine token-transfer
+// call somewhere in their call tree (transferCallDispatchSql). Used to keep only
+// real donations to the treasury pot on a transfer feed: a transfer *to* py/trsry
+// emitted by an extrinsic that dispatches no transfer call (a swap's fee, a
 // Referrals.register_code deposit, an XCM inherent's fee) is a fee/deposit, not a
 // user transfer.
-async function transferCallExtrinsics(pairs: [number, number | null][]): Promise<Set<string>> {
+export async function transferCallExtrinsics(pairs: [number, number | null][]): Promise<Set<string>> {
   const out = new Set<string>()
   const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
   if (!keys.length) return out
-  const callList = [...TRANSFER_CALL_NAMES].map(c => `'${c}'`).join(',')
   const chunks = await mapChunksConcurrently(keys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
     const res = await client.query({
-      query: `SELECT block_height, extrinsic_index FROM price_data.raw_extrinsics
-              WHERE (block_height, extrinsic_index) IN (${blockExtrinsicTupleList(chunk)}) AND call_name IN (${callList})`,
+      query: transferCallDispatchSql(`(block_height, ifNull(extrinsic_index, 4294967295)) IN (${blockExtrinsicTupleList(chunk)})`),
       format: 'JSONEachRow',
     })
-    return res.json<{ block_height: number; extrinsic_index: number }>()
+    return res.json<{ block_height: number; xi: number }>()
   })
   for (const rows of chunks) {
-    for (const r of rows) out.add(`${r.block_height}:${r.extrinsic_index}`)
+    for (const r of rows) out.add(`${r.block_height}:${r.xi}`)
   }
   return out
 }
@@ -23101,14 +23119,13 @@ function accountTransferArm(args: {
 }): ActivityCountArm {
   const { accounts, accList, list, evmList, bound, potFilters, tokenFilter, viewingTreasury } = args
   // A transfer INTO the treasury pot is a fee or a deposit unless the extrinsic that
-  // emitted it is itself a token-transfer call — only then is it a donation the account
-  // made. Bounded to the candidates' own blocks so the 32.3M-row extrinsic table is
-  // read by primary key rather than scanned for a call name.
+  // emitted it dispatches a token-transfer call — only then is it a donation the
+  // account made (transferCallDispatchSql, the page read's rule). Bounded to the
+  // candidates' own blocks so the call table is read by primary key rather than
+  // scanned for a call name.
   const treasuryFilter = viewingTreasury ? '' : `
     AND NOT (to_account = '${TREASURY_POT}' AND (block_height, xi) NOT IN (
-      SELECT block_height, ifNull(extrinsic_index, 4294967295) FROM price_data.raw_extrinsics
-      WHERE block_height IN (SELECT block_height FROM cand WHERE to_account = '${TREASURY_POT}')
-        AND call_name IN (${sqlEventNameList([...TRANSFER_CALL_NAMES])})))`
+      ${transferCallDispatchSql(`block_height IN (SELECT block_height FROM cand WHERE to_account = '${TREASURY_POT}')`)}))`
   return `SELECT block_height, count() AS rows FROM (
       WITH cand AS (${transferCandidateSql(accList, bound, potFilters, tokenFilter)}),
            sem_ext AS (${semanticExtrinsicSql(list, evmList, bound, args.enumeratedExtrinsics)}),
@@ -24038,7 +24055,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     }
     noteSource(rawTransferRows.length, oldestWindowBlock(rawTransferRows, r => r.block_height))
     // Transfers *to* the treasury pot are fees/deposits unless the originating
-    // extrinsic is itself a token-transfer call — surface only genuine donations
+    // extrinsic dispatches a token-transfer call — surface only genuine donations
     // (payouts *from* the treasury are unaffected). Skipped when the viewed
     // account IS the treasury, whose page is exactly those legs.
     const viewingTreasury = accCond.includes(TREASURY_POT)
@@ -24060,7 +24077,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       if (r.extrinsic_index != null && (tradeExt.has(`${r.block_height}:${r.extrinsic_index}`)
         || otcExt.has(`${r.block_height}:${r.extrinsic_index}`)
         || otcSettlementExt.has(`${r.block_height}:${r.extrinsic_index}`))) continue
-      // A transfer to the treasury that is not itself a transfer call is a
+      // A transfer to the treasury whose extrinsic dispatches no transfer call is a
       // fee/deposit (register_code, an XCM inherent, a non-swap batch fee), not a
       // user transfer.
       if (!viewingTreasury && r.to_acc === TREASURY_POT
