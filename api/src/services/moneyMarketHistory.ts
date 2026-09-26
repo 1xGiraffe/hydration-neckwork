@@ -586,7 +586,14 @@ export async function loadObservationHistory(
   const holderAccs = holderOf ? holderPools.map(p => holderOf!.get(p)!) : []
   const holderFilter = holderOf ? `AND account_id = transform(pool_address, {hp:Array(String)}, {ha:Array(String)}, '')` : ''
   const o = mmObservationOrderSql()
-  type Row = { pool: string; b: number; obs_block: number; coll: string; debt: string; avail: string; lt: string; max_ltv: string; hf: string; hf_min: string; hf_min_block: number }
+  type Row = { pool: string; b: number; obs_block: number; coll: string; debt: string; avail: string; lt: string; max_ltv: string; hf: string; hf_min: string | null; hf_min_block: number }
+  // The in-bucket minimum is over the NUMERIC health factor. `health_factor` is a
+  // String column, and a string min is lexicographic: a liquidatable HF has 18
+  // digits (0.996e18), a healthy one 19 (1.04e18) and a debt-free one 78 (the
+  // contract's uint256 max), and '1' < '9' sorts every one of those wrong — the
+  // dip below 1 that a LiquidationCall observed never won a bucket, and a
+  // debt-free observation "undercut" a 2.2 to draw the bucket at the cap.
+  const hfNum = 'toUInt256OrNull(health_factor)'
   const read = async (tag: string, bucketSql: string, poolsIn: string[], lo: number, hi: number): Promise<Row[]> => {
     const res = await client.query(tagged({
       query: `-- ${tag}
@@ -598,8 +605,8 @@ export async function loadObservationHistory(
                 argMax(current_liquidation_threshold, ${o}) AS lt,
                 argMax(ltv, ${o}) AS max_ltv,
                 argMax(health_factor, ${o}) AS hf,
-                toString(min(health_factor)) AS hf_min,
-                argMin(block_height, health_factor) AS hf_min_block
+                toString(min(${hfNum})) AS hf_min,
+                argMin(block_height, ${hfNum}) AS hf_min_block
               FROM price_data.account_money_market_position_history
               WHERE account_id IN {accs:Array(String)} AND pool_address IN {pools:Array(String)}
                 AND block_height >= {lo:UInt32} AND block_height <= {hi:UInt32} ${holderFilter}
