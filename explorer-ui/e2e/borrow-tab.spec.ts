@@ -146,6 +146,33 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile
       await expect(hf.locator('line.mlc-sync')).toHaveCount(0)
     })
 
+    test('zooming one chart zooms the other, and a reset on either clears both', async ({ page }) => {
+      await withPrimaryOnly(page)
+      await page.goto(`/account/${FOX}?view=borrow`)
+      const core = page.locator('.bw-card').first()
+      const exposure = core.locator('[data-chart="exposure"] .hdx-chart-wrap')
+      const hf = core.locator('[data-chart="hf"] .hdx-chart-wrap')
+      await expect(hf).toBeVisible()
+      await expect(exposure).toHaveAttribute('data-zoom-key', 'zmm-core')
+      await expect(hf).toHaveAttribute('data-zoom-key', 'zmm-core')
+      await exposure.scrollIntoViewIfNeeded()
+      const box = (await exposure.boundingBox())!
+      const y = box.y + box.height / 2
+      await page.mouse.move(box.x + box.width * 0.3, y)
+      await page.mouse.down()
+      for (const f of [0.45, 0.6, 0.75]) await page.mouse.move(box.x + box.width * f, y, { steps: 4 })
+      await page.mouse.up()
+      // One window in the URL, and both charts stand zoomed on it.
+      await expect(page).toHaveURL(/zmm-core=\d+-\d+/)
+      await expect(exposure.locator('.chart-zoom-reset')).toHaveCount(1)
+      await expect(hf.locator('.chart-zoom-reset')).toHaveCount(1)
+      // The other chart's reset clears both.
+      await hf.locator('.chart-zoom-reset').click()
+      await expect(page).not.toHaveURL(/zmm-core=/)
+      await expect(exposure.locator('.chart-zoom-reset')).toHaveCount(0)
+      await expect(hf.locator('.chart-zoom-reset')).toHaveCount(0)
+    })
+
     test('legacy ?view=positions lands on the Borrow tab', async ({ page }) => {
       await page.goto(`/account/${FOX}?view=positions`)
       await expect(page.locator('.bw-card[data-market-key="core"]')).toBeVisible()

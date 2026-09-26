@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BorrowTab } from '../src/components/positions/BorrowTab'
-import { HF_CAP, borrowCards, marketInterest, marketSeries, netApy, parseHealthFactor, reserveBorrowPct, reserveInterest, reserveRows, reserveSupplyPct } from '../src/components/positions/borrowMath'
+import { BorrowHistoryCharts } from '../src/components/positions/BorrowHistory'
+import { HF_CAP, borrowCards, exposureLines, healthFactorLines, marketInterest, marketSeries, netApy, parseHealthFactor, reserveBorrowPct, reserveInterest, reserveRows, reserveSupplyPct, windowedMarketSeries } from '../src/components/positions/borrowMath'
 import { MM_DIP, mockMoneyMarketHistory, mockMoneyMarketYields } from './fixtures/positionsMock'
 import type { MmReserve, MoneyMarketHistoryMarket, MoneyMarketHistoryReserve, MoneyMarketPosition, ReserveYield } from '../src/types'
 
@@ -220,6 +221,8 @@ describe('<BorrowTab>', () => {
     expect(html).toContain('data-series="debtChain"')
     expect(html).toContain('stroke-dasharray="5 4"')
     expect(html).toContain('getUserAccountData')
+    // Both charts share the card's zoom window.
+    expect(html.match(/data-zoom-key="zmm-core"/g)).toHaveLength(2)
   })
 
   it('renders history-only markets as closed cards, collapsed when there are several', () => {
@@ -256,6 +259,34 @@ describe('<BorrowTab>', () => {
 // it, while a current row names a supplied reserve by the aToken held (aDOT) and a
 // debt-only one by the asset owed (DOT): the join answers to both ids, so a reserve
 // still held never doubles as a "closed" one and its interest lands on its own row.
+describe('borrow history charts', () => {
+  it('gives both charts one zoom window, told apart per member on a tag', () => {
+    const h = mockMoneyMarketHistory(FOX)
+    const html = renderToStaticMarkup(<BorrowHistoryCharts history={h} market={h.markets[0]} address={FOX} zoomKey="zmm-core-3cv2zr" />)
+    expect(html.match(/data-zoom-key="zmm-core-3cv2zr"/g)).toHaveLength(2)
+    const acc = { accountId: FOX, address: FOX, emoji: '🦊', tag: null }
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    qc.setQueryData(['money-market-history', FOX], h)
+    const tag = renderToStaticMarkup(<QueryClientProvider client={qc}><BorrowTab areas={[{ address: FOX, account: acc, markets: [position()] }]} showOwner /></QueryClientProvider>)
+    expect(tag.match(/data-zoom-key="zmm-core-3cv2zr"/g)).toHaveLength(2)
+  })
+  it('refines a zoom window to the same lines on the finer grid', () => {
+    const h = mockMoneyMarketHistory(FOX)
+    const c = { supplied: 's', borrowed: 'b', healthFactor: 'h' }
+    const w = windowedMarketSeries(h, 'core')!
+    expect(w.dates).toEqual(marketSeries(h, h.markets[0]).dates)
+    // The line set is decided by the base view, so a window carries the same keys.
+    expect(exposureLines(w, true, c).map(l => l.key)).toEqual(['sup', 'debt', 'colChain', 'debtChain'])
+    expect(exposureLines(w, false, c).map(l => l.key)).toEqual(['sup', 'debt'])
+    expect(exposureLines(w, true, c).filter(l => l.dashed).map(l => l.key)).toEqual(['colChain', 'debtChain'])
+    expect(healthFactorLines(w, c).map(l => l.key)).toEqual(['hf'])
+    for (const l of [...exposureLines(w, true, c), ...healthFactorLines(w, c)]) expect(l.values).toHaveLength(w.dates.length)
+    // A window in which the market has no point, or an unknown market, refines nothing.
+    expect(windowedMarketSeries(h, 'nope')).toBeNull()
+    expect(windowedMarketSeries({ ...h, dates: h.dates.slice(0, 1) }, 'core')).toBeNull()
+  })
+})
+
 describe('reserveRows', () => {
   const DOT = { assetId: 5, symbol: 'DOT', name: 'Polkadot', decimals: 10, parachainId: null }
   const ADOT = { assetId: 1001, symbol: 'aDOT', name: null, decimals: 10, parachainId: null }
