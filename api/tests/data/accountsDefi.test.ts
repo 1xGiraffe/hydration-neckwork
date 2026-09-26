@@ -302,6 +302,17 @@ describe('GET /v1/accounts/:address/liquidity', () => {
     ]
     const OMNI_REMOVE = { ...SUBSTRATE_ROW, block_height: 500, event_index: 9, extrinsic_index: null, event_name: 'Omnipool.LiquidityRemoved', asset_id: DOT, amount: '', asset_b: 0 }
     const OMNI_LEG = { block_height: 500, event_index: 7, extrinsic_index: null, asset_id: DOT, from_account: POOL, to_account: ACC, amount: '4200' }
+    // Block 13627345 extrinsic 2: XYK.PoolCreated HDX+222 (event 5) BEFORE its two
+    // who→pool seed deposits (HDX emitted twice) and the LP-token existential
+    // deposit to the treasury.
+    const HDX = 0, SEED_B = 222
+    const XYK_CREATE = { ...SUBSTRATE_ROW, block_height: 13627345, event_index: 5, extrinsic_index: 2, event_name: 'XYK.PoolCreated', asset_id: HDX, amount: '', amount_a: '', asset_b: SEED_B, pool_account: POOL, asset_refs: [HDX, SEED_B] }
+    const CREATE_LEGS = [
+      { block_height: 13627345, event_index: 8, extrinsic_index: 2, asset_id: HDX, from_account: ACC, to_account: POOL, amount: '100000000000000' },
+      { block_height: 13627345, event_index: 9, extrinsic_index: 2, asset_id: HDX, from_account: ACC, to_account: POOL, amount: '100000000000000' },
+      { block_height: 13627345, event_index: 11, extrinsic_index: 2, asset_id: SEED_B, from_account: ACC, to_account: POOL, amount: '956109315637016847' },
+      { block_height: 13627345, event_index: 12, extrinsic_index: 2, asset_id: HDX, from_account: ACC, to_account: TREASURY, amount: '1100000000000' },
+    ]
     // The route fills the rows it reads in place, as it may: a query's rows are its
     // own. The fixtures above are shared, so each read hands out copies.
     const rows = (...items: Row[]): Row[] => items.map(item => ({ ...item }))
@@ -317,6 +328,22 @@ describe('GET /v1/accounts/:address/liquidity', () => {
       const [add, remove] = res.json().items
       expect(add).toMatchObject({ eventName: 'XYK.LiquidityAdded', action: 'Add', assetId: String(EWT), amount: '74998035088573853375', amountA: '74998035088573853375', amountB: '194266520234', assetB: String(DOT) })
       expect(remove).toMatchObject({ eventName: 'XYK.LiquidityRemoved', action: 'Remove', assetId: String(DOT), amount: '1616158587135', amountA: null, amountB: '59603890213654510857286', assetB: String(MYTH) })
+    })
+
+    it('states both seed legs of a pool creation, as the explorer shows them', async () => {
+      const client = fakeDataClient(
+        query => (query.includes('-- data:accounts:liquidity') ? rows(XYK_CREATE) : undefined),
+        query => (query.includes('-- data:enrich:liquidity-legs') ? [...CREATE_LEGS] : undefined),
+      )
+      app = await freshDataApp(client)
+      const res = await app.inject({ url: `/v1/accounts/${ACC}/liquidity`, headers: AUTH })
+      expect(res.statusCode).toBe(200)
+      expect(res.json().items[0]).toMatchObject({
+        eventName: 'XYK.PoolCreated', action: 'Create', assetId: String(HDX), amount: '100000000000000', amountA: null, amountB: '956109315637016847', assetB: String(SEED_B), poolAccount: POOL,
+      })
+      // Both of the pair's assets are read for the creation's extrinsic.
+      const { params } = client.seen.find(s => s.query.includes('-- data:enrich:liquidity-legs'))!
+      expect(params).toMatchObject({ blocks: [13627345], bs: [13627345], es: [2], hs: [], assets: [HDX, SEED_B] })
     })
 
     it('reads the legs by primary key for the page\'s own extrinsics, in the rows\' own assets only', async () => {
