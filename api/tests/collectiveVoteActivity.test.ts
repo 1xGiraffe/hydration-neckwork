@@ -39,6 +39,8 @@ describe('collective vote rows', () => {
     // zero would read as a vote with no weight rather than one with no stake.
     expect(row.amount).toBeNull()
     expect(row.conviction).toBeNull()
+    // No amount, no value: null renders as a dash, where a 0 would render as "$0".
+    expect(row.valueUsd).toBeNull()
     expect(row.asset.assetId).toBe(0)
   })
 
@@ -57,7 +59,7 @@ const vote = (block: number, index: number, collective: boolean): VoteRow => ({
   account: null, pallet: collective ? 'Technical Committee' : 'ConvictionVoting', action: 'Voted',
   referendum: collective ? '0x0529aa…664b5b' : '371', side: 'Aye',
   conviction: collective ? null : 'Locked3x', amount: collective ? null : '1000',
-  asset: HDX, valueUsd: collective ? 0 : 1,
+  asset: HDX, valueUsd: collective ? null : 1,
 })
 
 const newestFirst = (a: VoteRow, b: VoteRow) => b.blockHeight - a.blockHeight || b.eventIndex - a.eventIndex
