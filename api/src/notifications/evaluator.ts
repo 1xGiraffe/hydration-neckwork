@@ -5,7 +5,7 @@ import { assetDescriptor, displayDescriptor } from '../services/explorerAssets.t
 import { avgBlockMsSql, clampBlockMs, NOMINAL_PARA_BLOCK_MS } from '../services/blockTime.ts'
 import {
   accountRef, activityRowMatchesAction, activityTypeMatchesFamily, assetIdFromMmAddress, ensurePrices,
-  getAddressActivity, getListTagActivity, getMarketHealthFactor, getRecentActivity, getTagActivity,
+  getAddressActivity, getListTagActivity, getMarketHealthFactor, getRecentActivity, getTagActivity, isIntentFillAction,
   mmMarketByKey, mmReserveIdsForAsset,
   type AccountRef, type ActivityRow,
 } from '../services/explorerService.ts'
@@ -525,9 +525,7 @@ export function evaluateLargeValue(rows: readonly ActivityRow[], rules: readonly
 // is judged by dcaStartMatches on its per-hour notional, not here.
 export function largeTradeRowEligible(r: ActivityRow): boolean {
   if (r.type === 'otc') return r.otcAction === 'Fill'
-  if (r.type === 'intent') {
-    return r.intentAction === 'Fill' || r.intentAction === 'PartialFill' || r.intentAction === 'DcaTrade'
-  }
+  if (r.type === 'intent') return isIntentFillAction(r.intentAction)
   return true
 }
 

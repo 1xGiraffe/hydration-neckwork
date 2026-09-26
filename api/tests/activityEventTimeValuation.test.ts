@@ -115,9 +115,25 @@ describe('activityHistPick', () => {
       .toEqual({ assetId: TOKEN0, decimals: 10, raw: '1', ts: TS })
   })
 
-  it('keeps an intent row on its IN leg alone — its OUT leg is a limit, not an alternative', () => {
-    expect(activityHistPick({ ...tradeRow(), type: 'intent', intentAction: 'Place' }))
-      .toEqual({ assetId: TOKEN0, decimals: 10, raw: '1', ts: TS })
+  it('keeps a placed, cancelled or expired intent on its IN leg alone — its OUT leg is a limit, not an alternative', () => {
+    for (const intentAction of ['Place', 'Cancel', 'Expire'] as const) {
+      expect(activityHistPick({ ...tradeRow(), type: 'intent', intentAction }))
+        .toEqual({ assetId: TOKEN0, decimals: 10, raw: '1', ts: TS })
+    }
+  })
+
+  it('values an intent fill as the trade it is: OUT leg first, IN leg as the alternative', () => {
+    // A fill, a partial fill and a DCA intent's trade all settled real amounts on
+    // both legs — the same pick a swap or a DCA schedule's execution gets.
+    for (const intentAction of ['Fill', 'PartialFill', 'DcaTrade'] as const) {
+      expect(activityHistPick({ ...tradeRow(), type: 'intent', intentAction })).toEqual({ alternatives: [
+        { assetId: TOKEN1, decimals: 18, raw: '2', ts: TS },
+        { assetId: TOKEN0, decimals: 10, raw: '1', ts: TS },
+      ] })
+    }
+    // A completion whose settlement legs could not be told apart has no amounts at
+    // all, and so no value — never the order's limits.
+    expect(activityHistPick({ ...tradeRow(), type: 'intent', intentAction: 'DcaTrade', amountIn: null, amountOut: null })).toBeNull()
   })
 
   it('leaves pool creation and destruction to their own builders', () => {
@@ -178,6 +194,29 @@ describe('applyHistoricalUsd', () => {
     // The USD floor judges the exact value of the leg the row displays.
     expect(activityRowMatchesFilters(row, { min: 1.23, unit: 'usd' })).toBe(true)
     expect(activityRowMatchesFilters(row, { min: 1.24, unit: 'usd' })).toBe(false)
+  })
+
+  it('values an intent fill whose sold asset has no candle on what it received, and a placement not at all', async () => {
+    initExplorerService(fakeClient({ [TOKEN1]: '0.999000000000' }).client)
+    // 1.5 UNPRICED sold for 2500 TOKEN1: a DCA intent's trade, then the same order's
+    // placement. The trade is worth the TOKEN1 it received; the placement holds
+    // only the unpriced asset and its OUT amount is a limit, so it stays unvalued.
+    const legs = { assetIn: ref(UNPRICED, 12), amountIn: '1500000000000', amountOut: '2500000000000000000000' }
+    const fill: ActivityRow = { ...tradeRow(), ...legs, type: 'intent', intentAction: 'DcaTrade', valueUsd: null }
+    const placed: ActivityRow = { ...tradeRow(), ...legs, type: 'intent', intentAction: 'Place', valueUsd: null }
+    await applyHistoricalUsd([fill, placed], activityHistPick)
+    expect(fill.valueUsd).toBeCloseTo(2500 * 0.999, 6)
+    expect(activityRowMatchesFilters(fill, { min: 2_497, unit: 'usd' })).toBe(true)
+    expect(activityRowMatchesFilters(fill, { min: 2_498, unit: 'usd' })).toBe(false)
+    expect(placed.valueUsd).toBeNull()
+    expect(activityRowMatchesFilters(placed, { min: 0.01, unit: 'usd' })).toBe(false)
+  })
+
+  it('values an intent fill both of whose legs price on the leg it received, like a swap', async () => {
+    initExplorerService(fakeClient({ [TOKEN0]: '1.176707870000', [TOKEN1]: '0.999000000000' }).client)
+    const row: ActivityRow = { ...tradeRow(), type: 'intent', intentAction: 'Fill', amountIn: '21245733705342', amountOut: '2500000000000000000000', valueUsd: null }
+    await applyHistoricalUsd([row], activityHistPick)
+    expect(row.valueUsd).toBeCloseTo(2500 * 0.999, 6)
   })
 
   it('leaves a trade unvalued when neither leg has a close — never the placeholder', async () => {
