@@ -176,6 +176,9 @@ function BorrowCard({ spec, area, yields, yieldsLoading, owner, defaultOpen, def
   const headingId = `bw-${(area.address || 'agg').slice(-10)}-${spec.marketKey}`.replace(/[^a-z0-9_-]/gi, '-')
   const detailsId = useId()
   const hf = mm ? healthFactorDisplay(mm.healthFactor) : null
+  // One zoom window per card, shared by its two history charts and carried in the
+  // URL: `zmm-<market>`, plus the member on a tag so two members' windows stay apart.
+  const zoomKey = `zmm-${spec.marketKey}${owner ? `-${area.address.slice(-6).toLowerCase()}` : ''}`
   return (
     <section className={`mm-market-section bw-card${mm ? '' : ' bw-closed'}`} aria-labelledby={headingId} data-market-key={spec.marketKey} data-address={area.address || undefined}>
       <header className="bw-head">
@@ -208,7 +211,7 @@ function BorrowCard({ spec, area, yields, yieldsLoading, owner, defaultOpen, def
               <div className="bw-hist-body">
                 {hist.loading ? <div className="bw-hist-loading muted" aria-busy="true">Loading history…</div>
                   : hist.error ? <div className="muted">History could not be loaded.</div>
-                    : hist.data && hist.market ? <BorrowHistoryCharts history={hist.data} market={hist.market} />
+                    : hist.data && hist.market ? <BorrowHistoryCharts history={hist.data} market={hist.market} address={area.address} zoomKey={zoomKey} />
                       : <div className="muted">No history for this market yet.</div>}
               </div>
             )}

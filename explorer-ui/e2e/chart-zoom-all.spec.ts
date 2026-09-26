@@ -15,8 +15,10 @@ test.setTimeout(90_000)
 
 const ACCOUNT = '13dxxbqUHL7YJPyFnyo9pPuACoiZZtifHMUr1sSZ6RkXcbRU'
 
-/** Every zoom key in the app, with a page that renders it. */
-const CHARTS: { key: string; path: string; note?: string }[] = [
+const BORROWER = '0xece792e16f847add756d2c421801ff82999d2333'
+
+/** Every zoom key in the app, with a page that renders it (`open`: a disclosure to click first). */
+const CHARTS: { key: string; path: string; note?: string; open?: string }[] = [
   { key: 'zv', path: `/account/${ACCOUNT}`, note: 'portfolio value' },
   { key: 'zb', path: `/account/${ACCOUNT}?view=balances&asset=0`, note: 'asset balance' },
   { key: 'zp', path: '/asset/5', note: 'asset price' },
@@ -42,6 +44,9 @@ const CHARTS: { key: string; path: string; note?: string }[] = [
   { key: 'zshare', path: '/hollar' },
   { key: 'zpegw', path: '/hollar' },
   { key: 'zhsmres', path: '/hollar', note: 'HSM reserves' },
+  // A liquidated borrower in two markets, so its cards start collapsed: open the
+  // primary one, whose two history charts share this key.
+  { key: 'zmm-core', path: `/account/${BORROWER}?view=borrow`, note: 'borrow history', open: '.bw-card[data-market-key="core"] .bw-rule' },
 ]
 
 /** The block-time chart plots a live tail, so a persisted window is meaningless. */
@@ -66,9 +71,10 @@ async function settle(page: import('@playwright/test').Page, path: string) {
 // while dragging and the committed range miss by up to a day and a half.
 //
 // It also exercises the SECOND zoom level, where that defect actually appeared.
-for (const { key, path, note } of CHARTS) {
+for (const { key, path, note, open } of CHARTS) {
   test(`${key}${note ? ` (${note})` : ''} commits the window that was dragged`, async ({ page }) => {
     await settle(page, path)
+    if (open) await page.locator(open).first().click()
     const chart = page.locator(`[data-zoom-key="${key}"]`).first()
     await expect(chart, `${key} should render on ${path}`).toBeVisible({ timeout: 20_000 })
     await chart.scrollIntoViewIfNeeded()
