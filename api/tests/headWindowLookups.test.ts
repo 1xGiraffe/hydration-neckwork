@@ -76,10 +76,12 @@ describe('a lookup whose block has not been indexed yet', () => {
 
     // The block lands. Under a cached miss the endpoint would keep answering
     // 404 for the rest of its 60s TTL — measured at 54 of those 60 seconds.
+    // The finalized detail reads the extrinsic's whole event list and keeps the
+    // swap events by name, so the row is the Router's own summary event.
     stage.rows = {
       raw_events: [{
-        event_index: 5, event_name: 'Broadcast.Swapped3', ts: '2026-09-04 03:54:24',
-        args_json: JSON.stringify({ swapper: SWAPPER, inputs: [{ assetId: 0, amount: '1000000000000' }], outputs: [{ assetId: 10, amount: '5000000' }] }),
+        event_index: 5, event_name: 'Router.Executed', ts: '2026-09-04 03:54:24',
+        args_json: JSON.stringify({ assetIn: 0, assetOut: 10, amountIn: '1000000000000', amountOut: '5000000' }),
       }],
     }
     const trade = await getTradeDetail(height, 2)

@@ -9,6 +9,10 @@ import {
   type FlowScheduler,
 } from '../hooks/useRevenueFlowStream'
 import { REVENUE_STREAM_COLOR, REVENUE_STREAM_LABEL } from './revenueColors'
+import type { RevenueStream } from '../types'
+
+/** The per-event fee streams: frequent, each worth a fraction of a cent. */
+const TINY_FEE_STREAMS: ReadonlySet<RevenueStream> = new Set<RevenueStream>(['network_fee', 'xcm_execution_fee'])
 
 // The revenue river — the page's signature. Every protocol income drifts from
 // the right edge into the treasury counter on the left (top → bottom on
@@ -57,10 +61,11 @@ function toParticle(e: FlowEmission, vertical: boolean, fullscreen: boolean, tra
     ...e,
     lane: 10 + laneSeed * 74,
     durationMs: Math.round((base + paceSeed * base * 0.4) * (fullscreen ? 1.25 : 1)),
-    // Network fees are rare (about one a minute) AND tiny (half a cent), so
-    // pure value-sizing made the stream read as absent; floor their motes at a
-    // clearly visible size — rarity already keeps them honest.
-    sizePx: e.kind === 'merged' ? 13 : e.stream === 'network_fee' ? Math.max(9, moteSize(e.usd)) : moteSize(e.usd),
+    // Network and XCM execution fees are rare (about one a minute) AND tiny
+    // (half a cent), so pure value-sizing made the streams read as absent;
+    // floor their motes at a clearly visible size — rarity already keeps them
+    // honest.
+    sizePx: e.kind === 'merged' ? 13 : TINY_FEE_STREAMS.has(e.stream) ? Math.max(9, moteSize(e.usd)) : moteSize(e.usd),
     travelPx,
   }
 }

@@ -37,7 +37,8 @@ import {
   type MultisigOperationState,
 } from './onBehalfActivity.ts'
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
-import { FEE_BALANCE_EVENTS, deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
+import { deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
+import { XCM_BARRIER_EVENTS, XCM_IN_DEPOSIT_EVENTS, XCM_IN_WALK_EVENTS, XCM_WALK_CROSSABLE_EVENTS } from './xcmWalkEvents.ts'
 import { PRICE_LOOKBACK_DAYS, formatUnits, isPoolOwnHubHolding, poolOwnHubHoldingSql, renderUsd, scaledUsd } from './valuation.ts'
 import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
@@ -10682,15 +10683,16 @@ export async function getTradeDetail(height: number, index: number, routeEvent?:
   }
   return cachedFound(`explorer:trade:${height}:${index}:${routeEvent ?? ''}`, 60_000, async () => {
     const prices = await ensurePrices()
-    // The fee-currency events ride along in the same read rather than a second
-    // round trip, then are partitioned straight back out: the route slicing
-    // below counts on `evRows` holding swap events only.
-    const names = [...SWAP_EVENTS, ...FEE_BALANCE_EVENTS].map(n => `'${n}'`).join(',')
+    // The extrinsic's whole event sequence in one read: the fee resolver needs it
+    // entire (an XCM execution fee is told from the fee by what sits between a
+    // treasury deposit and its barrier), and the swap events are partitioned
+    // straight back out of it — the route slicing below counts on `evRows`
+    // holding swap events only.
     const [evRes, extRes] = await Promise.all([
       client.query({
         query: `SELECT event_index, event_name, args_json, toString(block_timestamp) AS ts
                 FROM price_data.raw_events
-                WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32} AND event_name IN (${names})
+                WHERE block_height = {h:UInt32} AND extrinsic_index = {i:UInt32}
                 ORDER BY event_index`,
         query_params: { h: height, i: index }, format: 'JSONEachRow',
       }),
@@ -10702,10 +10704,9 @@ export async function getTradeDetail(height: number, index: number, routeEvent?:
       }),
     ])
     const allRows = await evRes.json<{ event_index: number; event_name: string; args_json: string; ts: string }>()
-    const feeEventNames = new Set<string>(FEE_BALANCE_EVENTS)
-    const feeEvents: FeePaymentEvent[] = allRows.filter(r => feeEventNames.has(r.event_name))
-      .map(r => ({ name: r.event_name, args: safeJson(r.args_json) }))
-    const evRows = allRows.filter(r => !feeEventNames.has(r.event_name))
+    const feeEvents: FeePaymentEvent[] = allRows.map(r => ({ name: r.event_name, args: safeJson(r.args_json) }))
+    const swapEventNames = new Set<string>(SWAP_EVENTS)
+    const evRows = allRows.filter(r => swapEventNames.has(r.event_name))
     if (!evRows.length) return null
     const allEvs = evRows.map(r => ({ idx: r.event_index, name: r.event_name, ts: r.ts, args: (safeJson(r.args_json) ?? {}) as Record<string, unknown> }))
     // Slice the addressed route out, by the same boundaries the feed groups on.
@@ -12903,16 +12904,12 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
   })
 }
 
-// The barrier events every XCM decode below pairs its legs with. MessageQueue.Processed
-// closes every inbound message since the MessageQueue runtime migration (block
-// 5,433,625); before it, DMP messages from the relay closed with
-// DmpQueue.ExecutedDownward and HRMP messages from sibling parachains with
-// XcmpQueue.Success/Fail — a decode that only knows the new barrier drops every
-// pre-migration cross-chain transfer (~120k messages) on the floor. Nothing predates
-// these four: before the first XcmpQueue/DmpQueue event (block 1,439,879) not one
-// user-account hook deposit shares a block with a downward message — measured, all
-// 24,800 of them are on-initialize reward/vesting credits, not XCM.
-export const XCM_BARRIER_EVENTS = ['MessageQueue.Processed', 'DmpQueue.ExecutedDownward', 'XcmpQueue.Success', 'XcmpQueue.Fail']
+// The barrier events every XCM decode below pairs its legs with, the deposit family
+// the inbound walk credits and the executor bookkeeping it steps over all live in
+// services/xcmWalkEvents.ts (one leaf, three readers: this decode, the xcm_arrivals
+// derivation and the revenue model's XCM execution-fee stream). Re-exported so the
+// walk's tests keep reading them from the module that applies them.
+export { XCM_BARRIER_EVENTS, XCM_IN_WALK_EVENTS, XCM_WALK_CROSSABLE_EVENTS }
 const XCM_BARRIER_EVENTS_SQL = XCM_BARRIER_EVENTS.map(n => `'${n}'`).join(',')
 // Outbound send events. XTokens emitted TransferredMultiAssets until the same
 // MessageQueue migration renamed it TransferredAssets; both carry the identical
@@ -13057,48 +13054,16 @@ function xcmMessageId(barrier: Pick<XcmBarrierRow, 'message_id'>): string | null
 // Inbound XCM detection. An incoming message executes outside any extrinsic and
 // ends with a barrier event (XCM_BARRIER_EVENTS — MessageQueue.Processed names
 // the origin chain; the pre-migration barriers name at most the relay). The
-// beneficiary credit is the run of deposit events directly before that barrier:
-// walk back while events stay in the deposit family, keep non-module/
-// non-sovereign recipients, and fold the Currencies/Tokens/Balances mirror
-// duplicates into one row per (who, currency, amount). A remote-execution
-// message (Transact/swap) cuts the walk at its first non-deposit event, so only
-// what the message actually credited to a user account surfaces.
-const XCM_IN_DEPOSIT_EVENTS = ['Currencies.Deposited', 'Tokens.Deposited', 'Balances.Deposit']
-export const XCM_IN_WALK_EVENTS = [...XCM_IN_DEPOSIT_EVENTS, 'Balances.Issued', 'Balances.Endowed', 'Tokens.Endowed', 'Balances.Minted', 'System.NewAccount']
+// beneficiary credit is the run of deposit events directly before that barrier
+// (XCM_IN_WALK_EVENTS, stepping over XCM_WALK_CROSSABLE_EVENTS — both in
+// services/xcmWalkEvents.ts with the reasoning behind each name): walk back while
+// events stay in the deposit family, keep non-module/non-sovereign recipients, and
+// fold the Currencies/Tokens/Balances mirror duplicates into one row per (who,
+// currency, amount). A remote-execution message (Transact/swap) cuts the walk at
+// its first non-deposit event, so only what the message actually credited to a
+// user account surfaces.
 const RESERVED_ACCOUNT_RE = /^0x(6d6f646c|7369626c|70617261)/ // modl / sibl / para prefixes
 const sqlEventNameList = (names: string[]): string => names.map(n => `'${n}'`).join(',')
-
-// Events the XCM executor emits WHILE running a message, between the deposits it
-// credits and the MessageQueue.Processed that closes it. The credit run steps over
-// these; anything else ends it.
-//
-// `AssetsTrapped` is the one that matters: it is emitted when part of a message's
-// assets cannot be delivered — a Snowbridge transfer whose DOT fee remainder could
-// not be deposited traps it here — and it lands directly before the barrier, which
-// is precisely where a contiguity rule cannot survive it.
-//
-// `EVM.Log` is the second: an ERC20-backed asset keeps its balances in a contract, so
-// the currency adapter mirrors every leg as an ERC20 Transfer log and emits no
-// Tokens.Deposited at all. HOLLAR (222) arrives that way — EVM.Log, Currencies.Deposited,
-// EVM.Log, Currencies.Deposited, barrier — so the mirror separates the beneficiary's
-// credit from the treasury fee credit above it and the run ended one step short of the
-// user: 149 of the first 151 HOLLAR arrivals decoded to nothing at all. The log is the
-// bookkeeping half of a credit the run already walks, never a credit of its own, so
-// crossing it can only reunite a run the mirror split.
-//
-// Deliberately NOT crossable: MessageQueue.*, DmpQueue.* and XcmpQueue.Success/Fail.
-// Each of those closes or reports a DIFFERENT message, so crossing one would let a
-// run reach into the message before it. Nor `EVM.Executed`/`EVM.ExecutedFailed`: those
-// mark a program the message DISPATCHED rather than a balance it credited, and they are
-// what cuts the walk on a Transact — a Moonbeam MRL message moves sub-cent WETH fee legs
-// inside its own execution, which are not credits this message made.
-export const XCM_WALK_CROSSABLE_EVENTS = [
-  'PolkadotXcm.AssetsTrapped', 'PolkadotXcm.AssetsClaimed', 'PolkadotXcm.FeesPaid',
-  'PolkadotXcm.Sent', 'PolkadotXcm.Attempted', 'PolkadotXcm.SupportedVersionChanged',
-  'PolkadotXcm.VersionNotifyRequested', 'PolkadotXcm.VersionChangeNotified',
-  'PolkadotXcm.VersionNotifyStarted', 'PolkadotXcm.VersionMigrationFinished',
-  'XcmpQueue.XcmpMessageSent', 'EVM.Log',
-]
 
 // The event indices one inbound message credited, walking back from its barrier.
 //

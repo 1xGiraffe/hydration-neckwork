@@ -308,7 +308,7 @@ export function Revenue() {
 
       <p className="rev-note">
         Protocol revenue counts what the protocol earns from usage: trade fees, liquidations,
-        borrow interest and network fees. Returns on the treasury's own investments —
+        borrow interest, network fees and XCM execution fees. Returns on the treasury's own investments —
         for example looped PRIME or BIL allocations — are not income from users and
         are not included here.
       </p>

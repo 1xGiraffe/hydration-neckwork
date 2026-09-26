@@ -2,6 +2,9 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
+// The walk's event vocabulary lives in its own leaf (the revenue model's XCM fee
+// stream and the fee resolver read it too); the decoder imports it from there.
+const xcmWalkEvents = readFileSync(new URL('../src/services/xcmWalkEvents.ts', import.meta.url), 'utf8')
 const tables = readFileSync(new URL('../../clickhouse/schema/001_tables.sql', import.meta.url), 'utf8')
 const views = readFileSync(new URL('../../clickhouse/schema/003_materialized_views.sql', import.meta.url), 'utf8')
 
@@ -30,12 +33,12 @@ function commentAbove(name: string): string {
   return out.join('\n')
 }
 
-// The event names of a `const NAME = [...]` array literal in explorerService.ts,
+// The event names of a `const NAME = [...]` array literal in xcmWalkEvents.ts,
 // following one level of spread into another such constant.
 function eventNameConstant(name: string): string[] {
-  const at = explorerService.indexOf(`const ${name} = [`)
+  const at = xcmWalkEvents.indexOf(`const ${name} = [`)
   expect(at, name).toBeGreaterThan(-1)
-  const literal = explorerService.slice(at, explorerService.indexOf(']', at) + 1)
+  const literal = xcmWalkEvents.slice(at, xcmWalkEvents.indexOf(']', at) + 1)
   const spread = /\.\.\.([A-Z_]+)/.exec(literal)
   const own = [...literal.matchAll(/'([A-Za-z]+\.[A-Za-z]+)'/g)].map(m => m[1])
   return spread ? [...eventNameConstant(spread[1]), ...own] : own

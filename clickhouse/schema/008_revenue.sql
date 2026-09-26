@@ -8,7 +8,8 @@
 -- revenue_events: one row per revenue event, event-time valued.
 --   stream ∈ omnipool_asset_fee | omnipool_protocol_fee | liquidation_penalty |
 --            pepl_liquidation_profit | asset_reserve | hollar_borrow |
---            hsm_revenue | network_fee.
+--            hsm_revenue | ice_matched_fee | uniswap_v3_fee | network_fee |
+--            xcm_execution_fee (REVENUE_STREAMS in revenueStreams.ts is the list).
 --   Eventful streams carry their chain identity (block_height, event_index,
 --   leg_index — leg_index disambiguates multi-row splits such as the
 --   liquidation-penalty pro-rata attribution). The two borrow-interest streams
@@ -81,8 +82,10 @@ CREATE TABLE IF NOT EXISTS price_data.account_revenue_staging (`account` String,
 --
 -- `kind` splits the staleness semantics:
 --   'events' — sources that only affect their own month (fee legs, fee-paid
---              events, liquidation transfers/calls, HSM fills, treasury gas
---              deposits): partition p is stale when wm(p) > computed_at(p).
+--              events, liquidation transfers/calls, HSM fills, treasury fee
+--              deposits — EVM gas, permit fees and the XCM weight trader's
+--              revenue alike, whose barrier events land in the same block
+--              insert): partition p is stale when wm(p) > computed_at(p).
 --   'debt'   — sources whose rows change OPENING state of every later month
 --              (debt-token scaled deltas feed a cumulative balance; reserve
 --              index/mint rows feed cross-boundary accrual): partition p is
@@ -98,8 +101,10 @@ CREATE TABLE IF NOT EXISTS price_data.revenue_source_partition_watermarks (`kind
 CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_source_wm_legs_mv TO price_data.revenue_source_partition_watermarks (`kind` LowCardinality(String), `p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime), `src_min_ts` SimpleAggregateFunction(min, DateTime)) AS SELECT 'events' AS kind, toYYYYMM(block_timestamp) AS p, max(ingested_at) AS src_ingest, max(block_height) AS src_maxb, max(block_timestamp) AS src_max_ts, min(block_timestamp) AS src_min_ts FROM price_data.pool_swap_legs GROUP BY p;
 
 -- Substrate events the revenue builders read: fee-paid (network fees), HSM arb
--- markers, PEPL profits, and the treasury gas deposits (who-filtered so the
--- torrent of unrelated Balances.Deposit rows stays out of the watermark).
+-- markers, PEPL profits, and the treasury deposits (who-filtered so the torrent
+-- of unrelated Balances.Deposit rows stays out of the watermark) — the gas and
+-- permit fees of network_fee and the XCM weight trader's revenue of
+-- xcm_execution_fee alike.
 CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_source_wm_events_mv TO price_data.revenue_source_partition_watermarks (`kind` LowCardinality(String), `p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime), `src_min_ts` SimpleAggregateFunction(min, DateTime)) AS SELECT 'events' AS kind, toYYYYMM(block_timestamp) AS p, max(ingested_at) AS src_ingest, max(block_height) AS src_maxb, max(block_timestamp) AS src_max_ts, min(block_timestamp) AS src_min_ts FROM price_data.raw_events WHERE (event_name IN ('TransactionPayment.TransactionFeePaid', 'HSM.ArbitrageExecuted', 'Liquidation.Liquidated')) OR ((event_name IN ('Tokens.Deposited', 'Balances.Deposit')) AND (JSONExtractString(args_json, 'who') = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000')) GROUP BY p;
 
 -- Liquidation-penalty transfer source (aToken BalanceTransfer into the
