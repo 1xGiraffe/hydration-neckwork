@@ -185,6 +185,7 @@ function BorrowCard({ spec, area, yields, yieldsLoading, owner, defaultOpen, def
           {isPrimary ? 'primary' : <>{iconAsset != null && <AssetIcon assetId={iconAsset} symbol={spec.label} size={14} />} {spec.label}</>} · lend &amp; borrow
         </span>
         {spec.stakingBacked && <span className="mm-title-note bw-staking" title="Collateral is staked HDX — counted once, in the wallet balance">staked-HDX collateral</span>}
+        {!!mm?.unstatedCollateral?.length && <span className="mm-title-note bw-unstated" title="The explorer reconstructs supplied reserves from the money market's own logs. This collateral is not in that reconstruction yet (it reached the account before the explorer's anchor block, outside its log coverage) or has no price here, so Lent and the Value take the market's own collateral figure for it.">{mm.unstatedCollateral.map(a => a.symbol).join(', ')} collateral not stated per reserve</span>}
         <span className="bw-head-end">
           {mm && hf
             ? <span className="bw-hf" title={(mm.memberCount ?? 0) > 1 ? 'Lowest member health factor' : 'Health factor (the chain\'s own figure)'}>

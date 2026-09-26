@@ -20,7 +20,7 @@ function fakes(state: { atokenRows?: number; incentiveRows?: number; gaps?: Arra
     refreshReserveMap: async () => { calls.push('atoken.map'); if (state.atokenFails === 'map') throw new Error('reserve map unreadable') },
     anchorRowCount: async () => { calls.push('atoken.count'); return state.atokenRows ?? 0 },
     logGaps: async () => { calls.push('atoken.gaps'); return state.atokenGaps ?? [] },
-    capture: async () => { calls.push('atoken.capture'); if (state.atokenFails === 'capture') throw new Error('rpc down') },
+    capture: async mode => { calls.push(`atoken.capture:${mode}`); if (state.atokenFails === 'capture') throw new Error('rpc down') },
   }
   const incentive: IncentiveAnchorPort = {
     anchorRowCount: async () => { calls.push('incentive.count'); return state.incentiveRows ?? 0 },
@@ -36,14 +36,18 @@ function fakes(state: { atokenRows?: number; incentiveRows?: number; gaps?: Arra
 const opts = { forceAtoken: false, forceIncentive: false, atokenLogsFrom: MM_FROM, incentiveLogsFrom: LOGS_FROM, anchorBlock: B0 }
 
 describe('each anchor keeps its own gate', () => {
-  it('aToken: needs an empty table AND complete money-market log coverage; --force lifts only the first', async () => {
+  it('aToken: needs complete money-market log coverage; then a full capture on an empty table (or --force), a top-up otherwise', async () => {
     const port = (rows: number, gaps: typeof GAP[]) => ({ anchorRowCount: async () => rows, logGaps: async () => gaps })
-    expect(await atokenAnchorDecision(port(0, []), false, MM_FROM, B0)).toEqual({ capture: true })
-    expect(await atokenAnchorDecision(port(12, []), false, MM_FROM, B0)).toMatchObject({ capture: false, reason: 'anchor already present' })
+    expect(await atokenAnchorDecision(port(0, []), false, MM_FROM, B0)).toEqual({ capture: true, mode: 'full' })
+    // A non-empty table is topped up, never left alone: a holder no source named at
+    // the first capture is anchored once a source names it.
+    expect(await atokenAnchorDecision(port(12, []), false, MM_FROM, B0)).toEqual({ capture: true, mode: 'top-up' })
     expect(await atokenAnchorDecision(port(0, [GAP]), false, MM_FROM, B0)).toMatchObject({ capture: false, reason: `raw ingestion has not completed ${MM_FROM}..${B0} (the money market's logs)`, detail: { gaps: 1, first_gaps: [GAP] } })
-    expect(await atokenAnchorDecision(port(12, []), true, MM_FROM, B0)).toEqual({ capture: true })
+    expect(await atokenAnchorDecision(port(12, []), true, MM_FROM, B0)).toEqual({ capture: true, mode: 'full' })
     expect(await atokenAnchorDecision(port(12, [GAP]), true, MM_FROM, B0)).toMatchObject({ capture: false })
     expect(await atokenAnchorDecision(port(0, [GAP]), true, MM_FROM, B0)).toMatchObject({ capture: false })
+    // The gate is decided before the table is counted: a gap skips a top-up too.
+    expect(await atokenAnchorDecision(port(12, [GAP]), false, MM_FROM, B0)).toMatchObject({ capture: false, reason: `raw ingestion has not completed ${MM_FROM}..${B0} (the money market's logs)` })
   })
 
   it('incentive: needs an empty table AND complete controller-log coverage; --force-incentive lifts only the first', async () => {
@@ -61,14 +65,14 @@ describe('runAnchorCycle', () => {
     const f = fakes()
     expect(await runAnchorCycle(f.ports, opts, f.log)).toEqual({ atoken: 'captured', incentive: 'captured', lmEntries: 'clean' })
     // The incentive candidates include the aToken anchor's holders: it runs second.
-    expect(f.calls).toEqual(['atoken.map', 'atoken.count', 'atoken.gaps', 'atoken.capture', 'incentive.count', 'incentive.gaps', 'incentive.capture', 'lm.reconcile'])
+    expect(f.calls).toEqual(['atoken.map', 'atoken.gaps', 'atoken.count', 'atoken.capture:full', 'incentive.count', 'incentive.gaps', 'incentive.capture', 'lm.reconcile'])
   })
 
-  it('in steady state only refreshes the reserve map and runs the LM reconcile', async () => {
+  it('in steady state refreshes the reserve map, tops the aToken anchor up and runs the LM reconcile', async () => {
     const f = fakes({ atokenRows: 900, incentiveRows: 70 })
-    expect(await runAnchorCycle(f.ports, opts, f.log)).toEqual({ atoken: 'skipped', incentive: 'skipped', lmEntries: 'clean' })
-    expect(f.calls).toEqual(['atoken.map', 'atoken.count', 'incentive.count', 'lm.reconcile'])
-    expect(f.logs.map(l => l.type)).toEqual(['atoken_anchor_done', 'mm_incentive_anchor_done', 'lm_entries_reconcile'])
+    expect(await runAnchorCycle(f.ports, opts, f.log)).toEqual({ atoken: 'topped-up', incentive: 'skipped', lmEntries: 'clean' })
+    expect(f.calls).toEqual(['atoken.map', 'atoken.gaps', 'atoken.count', 'atoken.capture:top-up', 'incentive.count', 'lm.reconcile'])
+    expect(f.logs.map(l => l.type)).toEqual(['mm_incentive_anchor_done', 'lm_entries_reconcile'])
   })
 
   it('waits for the backfill before the incentive anchor, cycle after cycle, while the aToken anchor goes ahead', async () => {
@@ -81,7 +85,7 @@ describe('runAnchorCycle', () => {
   it('on a fresh database with a partial backfill captures neither anchor, and captures the aToken one once its range is in', async () => {
     const partial = fakes({ atokenGaps: [GAP], gaps: [GAP] })
     expect(await runAnchorCycle(partial.ports, opts, partial.log)).toEqual({ atoken: 'skipped', incentive: 'skipped', lmEntries: 'clean' })
-    expect(partial.calls).not.toContain('atoken.capture')
+    expect(partial.calls.filter(c => c.startsWith('atoken.capture'))).toEqual([])
     expect(partial.logs[0]).toMatchObject({ type: 'atoken_anchor_done', skipped_anchor: true, gaps: 1, first_gaps: [GAP] })
     // Still gated under --force: the table staying empty is what lets a later cycle capture.
     const forced = fakes({ atokenGaps: [GAP] })
@@ -94,7 +98,7 @@ describe('runAnchorCycle', () => {
     const mapDown = fakes({ atokenFails: 'map' })
     expect(await runAnchorCycle(mapDown.ports, opts, mapDown.log)).toEqual({ atoken: 'failed', incentive: 'captured', lmEntries: 'clean' })
     // The reserve map failing aborts the aToken capture (it would anchor nothing).
-    expect(mapDown.calls).not.toContain('atoken.capture')
+    expect(mapDown.calls.filter(c => c.startsWith('atoken.capture'))).toEqual([])
     expect(mapDown.logs[0]).toEqual({ type: 'atoken_anchor_error', reason: 'reserve map unreadable' })
 
     const incentiveDown = fakes({ incentiveFails: true })
@@ -134,8 +138,9 @@ describe('reconcileOutcome', () => {
   it('passes each force flag to its own anchor only', async () => {
     const f = fakes({ atokenRows: 900, incentiveRows: 70 })
     expect(await runAnchorCycle(f.ports, { ...opts, forceAtoken: true }, f.log)).toEqual({ atoken: 'captured', incentive: 'skipped', lmEntries: 'clean' })
+    expect(f.calls).toContain('atoken.capture:full')
     const g = fakes({ atokenRows: 900, incentiveRows: 70 })
-    expect(await runAnchorCycle(g.ports, { ...opts, forceIncentive: true }, g.log)).toEqual({ atoken: 'skipped', incentive: 'captured', lmEntries: 'clean' })
+    expect(await runAnchorCycle(g.ports, { ...opts, forceIncentive: true }, g.log)).toEqual({ atoken: 'topped-up', incentive: 'captured', lmEntries: 'clean' })
   })
 })
 
