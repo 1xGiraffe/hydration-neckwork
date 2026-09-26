@@ -61,8 +61,12 @@ CREATE TABLE IF NOT EXISTS price_data.revenue_events (`stream` LowCardinality(St
 -- account = '', so per stream and month
 --   sum(account_revenue.revenue_usd) == sum(protocol-dest revenue_events.amount_usd)
 -- holds exactly; readers must treat account = '' as "unattributed", never a
--- real payer. Account-first ORDER BY serves the directory join and the
--- account/tag lookups.
+-- real payer. A publication writes each (account, stream, month) key ONCE
+-- (a stream with two sources, uniswap_v3_fee, is folded before the insert;
+-- the job refuses to publish a month with a doubled key): the replacing
+-- engine would keep one row per key at its next merge, so readers sum the
+-- rows as written and never rely on FINAL to add them. Account-first ORDER
+-- BY serves the directory join and the account/tag lookups.
 CREATE TABLE IF NOT EXISTS price_data.account_revenue (`account` String, `stream` LowCardinality(String), `month` UInt32, `revenue_usd` Decimal(38, 12), `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY month ORDER BY (account, stream, month) SETTINGS index_granularity = 8192;
 
 -- Staging twins for the atomic REPLACE PARTITION publications — byte-identical
