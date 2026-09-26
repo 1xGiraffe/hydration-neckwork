@@ -462,7 +462,10 @@ export interface BalanceUnlockSlice {
 
 /**
  * One asset's balance. `frozen`, `breakdown` and `timeline` come from the
- * background lock snapshot and are omitted under `summary=1`.
+ * background lock snapshot and are omitted under `summary=1`. `uncounted` is
+ * the part of `total` the explorer deliberately values at nothing — the
+ * Omnipool's own H2O reserve, priced off the pooled assets the value already
+ * counts — so `valueUsd` covers only the rest.
  */
 export interface AddressBalance {
   asset: AssetRef
@@ -474,6 +477,7 @@ export interface AddressBalance {
   timeline?: BalanceUnlockSlice[]
   lastBlock: number
   valueUsd: number | null
+  uncounted?: { amount: string; reason: 'pool-hub-reserve' }
 }
 
 /** One reserve of a money-market position. Amounts are raw units of that reserve. */

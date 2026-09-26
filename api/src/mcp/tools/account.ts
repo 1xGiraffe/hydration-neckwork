@@ -295,8 +295,13 @@ function balancesBlock(d: AddressDetail, summarized: boolean): string {
   const tailWorth = tailUnpriced === tail.length
     ? 'none of them priced by the index'
     : `worth ${formatUsd(tailUsd)} in total${tailUnpriced ? `, plus ${tailUnpriced} the index cannot price` : ''}`
+  // A balance the explorer shows but values at nothing (the Omnipool's own H2O
+  // reserve): its USD cell is the counted part, so the amount left out is named
+  // here rather than left to read as a worthless holding.
+  const uncounted = rows.filter(b => b.uncounted)
   return joinBlocks(
     table(headers, body, 'this account holds no balance the index has seen'),
+    uncounted.length ? note(`${uncounted.map(b => formatAmount(b.uncounted!.amount, b.asset.decimals, assetLabel(b.asset))).join(', ')} ${uncounted.length === 1 ? 'is' : 'are'} the pool's own hub reserve — H2O is priced off the assets the pool holds, which the value already counts — so it is shown as a balance and counted in no value.`) : '',
     tail.length ? note(`${tail.length} smaller holding${tail.length === 1 ? '' : 's'} not shown, ${tailWorth}: ${tail.slice(0, 12).map(b => assetLabel(b.asset)).join(', ')}${tail.length > 12 ? ' and more' : ''}.`) : '',
     summarized ? note('Locks and reserves are not in this reading: it used the cheap summary build. Ask for `include: ["balances"]` to get the lock snapshot.') : '',
   )

@@ -513,7 +513,18 @@ export interface BalanceLockComponent { kind: 'lock' | 'reserve' | 'hold' | 'dep
 export interface BalanceUnlockSlice { state: 'releasable' | 'scheduled' | 'active'; cause: string; amount: string; until?: string; linear?: boolean; conditional?: boolean }
 // `frozen` is the non-transferable part of `free` (per-account max lock, summed
 // across the account set for tags).
-export interface AddressBalance { asset: AssetRef; total: string; free: string; reserved: string; frozen?: string; breakdown?: BalanceLockComponent[]; timeline?: BalanceUnlockSlice[]; lastBlock: number; valueUsd: number | null }
+// `uncounted`: the part of `total` the API values at nothing on purpose — the
+// Omnipool's own H2O reserve, priced off the pooled assets the value already
+// counts — so `valueUsd` (and Value, the chart, the directory) covers only the
+// rest while the row keeps the whole amount. Whole-row uncounted values 0, not
+// null: priced, and left out.
+export interface AddressBalance { asset: AssetRef; total: string; free: string; reserved: string; frozen?: string; breakdown?: BalanceLockComponent[]; timeline?: BalanceUnlockSlice[]; lastBlock: number; valueUsd: number | null; uncounted?: UncountedBalance }
+export interface UncountedBalance { amount: string; reason: 'pool-hub-reserve' }
+// Why a balance is shown and counted in no value, as the Balances tab and the
+// Value hint both phrase it. The one reason today: the Omnipool's own hub reserve.
+export const UNCOUNTED_REASON: Record<UncountedBalance['reason'], string> = {
+  'pool-hub-reserve': 'the pool\'s own hub reserve — H2O is priced off the assets the pool holds, which the value already counts',
+}
 export interface MmReserve {
   assetId: number
   iconAssetId?: number
