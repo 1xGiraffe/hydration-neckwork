@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
-import { assetDescriptor, displayDescriptor } from '../services/explorerAssets.ts'
+import { assetDescriptor, displayDescriptor, idsDisplayedAs } from '../services/explorerAssets.ts'
 import { avgBlockMsSql, clampBlockMs, NOMINAL_PARA_BLOCK_MS } from '../services/blockTime.ts'
 import {
   accountRef, activityRowMatchesAction, activityTypeMatchesFamily, assetIdFromMmAddress, ensurePrices,
@@ -571,12 +571,15 @@ export function evaluateLiquidations(rows: readonly ActivityRow[], rules: readon
 }
 
 // Every asset a row references, matching the feed's own multi-asset filter
-// semantics: nested pool assets and both sides of a pair count.
+// semantics: nested pool assets and both sides of a pair count, and the rule's
+// asset names its display face (idsDisplayedAs) — a rule on GDOT 69, the id the
+// alert form's asset picker offers, fires on a trade routed through 2-Pool-GDOT
+// 690, which the row labels GDOT.
 export function activityReferencesAsset(row: ActivityRow, assetId: number): boolean {
-  return row.asset?.assetId === assetId
-    || row.assetIn?.assetId === assetId
-    || row.assetOut?.assetId === assetId
-    || (row.assetRefs?.includes(assetId) ?? false)
+  return idsDisplayedAs(assetId).some(id => row.asset?.assetId === id
+    || row.assetIn?.assetId === id
+    || row.assetOut?.assetId === id
+    || (row.assetRefs?.includes(id) ?? false))
 }
 
 /* ============ the security delivery matrix ============ */
