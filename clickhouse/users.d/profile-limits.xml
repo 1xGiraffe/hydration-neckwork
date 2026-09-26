@@ -1,0 +1,71 @@
+<clickhouse>
+    <!--
+      Execution-time ceiling for every query on this server.
+
+      The stock default is max_execution_time = 0: no limit at all. On 2026-09-26
+      that let `SELECT count() FROM system.numbers LIMIT 1000` (an aggregate over an
+      infinite source; the LIMIT applies to the one result row, never to the input)
+      run for 189.6 hours on one core, reading trillions of rows, until it was found
+      and killed by hand. It had been started by a shell whose caller had long since
+      timed out and gone away, so nothing on the client side was ever going to stop
+      it. The same shape recurs whenever a session is abandoned mid-query.
+
+      Every service connects as the one `default` user, so the profile below is the
+      floor under all of them, and the numbers are set from what actually runs
+      (system.query_log, 14 days to 2026-09-26, ~4.4M queries/day):
+
+        client                          own setting   slowest observed
+        api / api-public / api-data     20 s          20 s cap; overshoots to 89 s
+                                                      because the check is per block
+        derivations (long-op client)    3600 s        13.6 s (INSERT SELECT), 5.7 s
+        account affinity                5 s           4.2 s
+        raw-live / main-live / snapshot (none)        3.8 s SELECT, 2.6 s INSERT
+        async-insert flushes            inherited     2.5 s
+        user-backup / contract-backup   (none)        73 ms
+        schema-bootstrap                (none)        15 ms per statement
+        ad-hoc clickhouse-client        (none)        152 s
+        external readers                120 s CONST   (readonly_analyst, outside
+                                                      the repo, unaffected here)
+
+      600 s is four times the slowest legitimate statement that ran without a
+      setting of its own and 150 times the slowest ingestion statement, so it
+      changes nothing that runs today; it only bounds the abandoned query. A client
+      that has a reason to run longer says so on the statement or the connection
+      (clickhouse-js `clickhouse_settings.max_execution_time`, clickhouse-client
+      `max_execution_time=N`), as the derivations client already does.
+
+      The constraints are the part that makes the ceiling real. Without them, a
+      client can set max_execution_time = 0 and be back to unlimited; the `min` of
+      1 s refuses that value outright (SETTING_CONSTRAINT_VIOLATION), and the `max`
+      of 4 hours is the hard limit no setting can raise, a comfortable multiple of
+      the 1 hour the long-op client asks for. Constraints declared on the default
+      profile are the server-wide defaults for every user, so a reader profile that
+      pins its own CONST value keeps it (120 s lies inside the range).
+
+      throw is the overflow mode already in force; it is restated so nobody flips it
+      to `break`, which would return a truncated result as if it were complete.
+
+      Not set, deliberately: max_execution_time_leaf is a distributed-query knob and
+      this is one server; max_estimated_execution_time kills a query once its
+      projected total exceeds the bound, but the projection needs a known input size,
+      which an infinite source does not have, and it misjudges queries that stop at a
+      LIMIT, so it would add false kills without catching the case above.
+
+      Reloads without a restart: copy into the container's
+      /etc/clickhouse-server/users.d/ and run SYSTEM RELOAD CONFIG; a parse error is
+      only reported there, never by the copy. Verify on a NEW connection:
+      SELECT name, value, min, max FROM system.settings WHERE name = 'max_execution_time'.
+    -->
+    <profiles>
+        <default>
+            <max_execution_time>600</max_execution_time>
+            <timeout_overflow_mode>throw</timeout_overflow_mode>
+            <constraints>
+                <max_execution_time>
+                    <min>1</min>
+                    <max>14400</max>
+                </max_execution_time>
+            </constraints>
+        </default>
+    </profiles>
+</clickhouse>
