@@ -11,6 +11,7 @@ import type {
 } from './types.js'
 import { chunk, forEachConcurrent } from '../util/collections.js'
 import { DEFAULT_RPC_URL } from '../config.js'
+import { isZeroPosition, openPositionKey } from './moneyMarketSnapshot.js'
 
 const POOL_IMPLEMENTATION_PROXY = '0x1b02e051683b5cfac5929c25e84adb26ecf87b38'
 const ATOKEN = '0xc0df4c545bafa1788a4ee55f79704d12fc2c7b5c'
@@ -523,17 +524,24 @@ function periodicPositionWarning(
 // drifts (interest accrual + oracle price moves), so event-only snapshots leave
 // the curve frozen until the next user action. Mirrors hydration-data-lake's
 // per-oracle-update position aggregation (handleAllAccountsMmPositionDataUpdate).
-// Zero positions are skipped by default: core opens/exits are already captured by
-// the event-driven snapshots, so a zero there is just an inactive account and would
-// bloat the table. Supplemental followers can intentionally request zero rows as
-// tombstones because a still-running older raw worker does not emit their exit
-// snapshots; the bounded sparse sweep then closes positions correctly.
+// Zero positions are skipped by default: a zero for an account that was never a
+// user is just an inactive account and would bloat the table. Two exceptions
+// record a zero, and both are how an exit reaches the projection:
+//   - `tombstoneFor` names the (market, holder) pairs (`openPositionKey`) whose
+//     latest observation is non-zero. A zero read for one of them IS the exit —
+//     the event-driven snapshots only re-read a holder the pool emitted an event
+//     for, and an aToken moved natively (a registry-asset aToken sold or sent)
+//     empties a position with no pool event at all. Skipping that zero leaves the
+//     holder's stale aggregate as the current one for good.
+//   - `includeZeroPositions` writes every zero: what the bounded supplemental
+//     sweeps request over their small candidate set, since a still-running older
+//     raw worker does not emit their exit snapshots either.
 export async function snapshotMoneyMarketPositions(
   userAddresses: Iterable<string>,
   blockHeight: number,
   blockTimestamp: string,
   ingestSource: string,
-  options: { marketKeys?: Iterable<string>; includeZeroPositions?: boolean } = {},
+  options: { marketKeys?: Iterable<string>; includeZeroPositions?: boolean; tombstoneFor?: ReadonlySet<string> } = {},
 ): Promise<{ positions: RawMoneyMarketPositionRow[]; warnings: RawParserWarningRow[] }> {
   const positions: RawMoneyMarketPositionRow[] = []
   const warnings: RawParserWarningRow[] = []
@@ -572,9 +580,9 @@ export async function snapshotMoneyMarketPositions(
         warnings.push(periodicPositionWarning(userAddress, blockHeight, blockTimestamp, rpcUrl, ingestSource, new Error('eth_call returned no position')))
         continue
       }
-      if (!options.includeZeroPositions
-        && position.metrics.total_collateral_base === '0'
-        && position.metrics.total_debt_base === '0') continue
+      if (isZeroPosition(position.metrics)
+        && !options.includeZeroPositions
+        && !options.tombstoneFor?.has(openPositionKey(market.poolProxy, userAddress))) continue
       positions.push({
         block_height: blockHeight,
         block_timestamp: blockTimestamp,

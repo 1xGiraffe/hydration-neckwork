@@ -3,7 +3,7 @@ import { createClickHouseClient } from '../db/client.js'
 import { config } from '../config.js'
 import { toClickHouseDateTime } from '../raw/json.js'
 import { moneyMarketDefinitions, snapshotMoneyMarketCollateralFlags, snapshotMoneyMarketPositions, type MoneyMarketRuntimeDef } from '../raw/moneyMarket.js'
-import { moneyMarketSweepHasNoSuccess } from '../raw/moneyMarketSnapshot.js'
+import { isZeroPosition, moneyMarketSweepHasNoSuccess, openPositionKey } from '../raw/moneyMarketSnapshot.js'
 import { hasFlag, integerOption, stringOption } from '../util/cliArgs.js'
 
 // Full money-market position sweep.
@@ -19,9 +19,14 @@ import { hasFlag, integerOption, stringOption } from '../util/cliArgs.js'
 // launched within complete raw-EVM coverage instead sweep only addresses observed
 // in their own contracts. This gives immediate coverage without multiplying the
 // dominant all-account RPC workload. Zero positions are skipped (Aave returns
-// zeroed totals for non-users). The bounded secondary sweep also writes zero
-// tombstones so an account that fully exits cannot retain a stale last position
-// while raw-live remains on an older image.
+// zeroed totals for non-users) EXCEPT for a holder whose projected aggregate is
+// still non-zero: that zero is the exit, written as a tombstone so the projection
+// closes the position. A position emptied by a native aToken transfer has no pool
+// event, so the sweeps are the only observers of that exit — every such holder is
+// therefore re-read each cycle whether or not the balance snapshot named it. The
+// bounded secondary sweep writes every zero instead, so an account that fully
+// exits cannot retain a stale last position while raw-live remains on an older
+// image.
 //
 // Usage:
 //   npx tsx src/scripts/snapshot-money-market.ts [--dry-run] [--loop] [--refresh-hours=6]
@@ -124,6 +129,27 @@ async function loadKnownMarketParticipants(market: MoneyMarketRuntimeDef): Promi
   return (await res.json<{ h: string }>()).map(row => row.h.toLowerCase())
 }
 
+// Holders whose projected aggregate in this market is currently non-zero — the
+// positions the explorer shows as open. Each of them is re-read every sweep, and
+// a zero read for one of them is written (see snapshotMoneyMarketPositions'
+// `tombstoneFor`): it is the exit nothing else will ever record.
+const OPEN_HOLDERS_SQL = `
+  SELECT user_address FROM (
+    SELECT user_address, argMaxMerge(position_state) AS pos
+    FROM price_data.money_market_latest_positions
+    WHERE pool_address = {pool:String}
+    GROUP BY user_address
+  ) WHERE tupleElement(pos, 'total_collateral_base') > 0 OR tupleElement(pos, 'total_debt_base') > 0`
+
+async function loadOpenPositionHolders(poolProxy: string): Promise<string[]> {
+  const res = await client.query({
+    query: `SELECT user_address FROM (${OPEN_HOLDERS_SQL}) WHERE match(user_address, '^0x[0-9a-fA-F]{40}$')`,
+    query_params: { pool: poolProxy },
+    format: 'JSONEachRow',
+  })
+  return (await res.json<{ user_address: string }>()).map(row => row.user_address.toLowerCase())
+}
+
 // Who needs their usage-as-collateral bitmap re-read for this market: everyone
 // holding a live position, plus everyone the pool ever emitted a collateral event
 // for. The second half matters in the retracting direction — a bit cleared without
@@ -133,12 +159,7 @@ async function loadCollateralCandidates(poolProxy: string): Promise<string[]> {
   const res = await client.query({
     query: `
       SELECT DISTINCT user_address FROM (
-        SELECT user_address FROM (
-          SELECT user_address, argMaxMerge(position_state) AS pos
-          FROM price_data.money_market_latest_positions
-          WHERE pool_address = {pool:String}
-          GROUP BY user_address
-        ) WHERE tupleElement(pos, 'total_collateral_base') > 0 OR tupleElement(pos, 'total_debt_base') > 0
+        ${OPEN_HOLDERS_SQL}
         UNION ALL
         SELECT DISTINCT user_address FROM price_data.money_market_collateral_flags WHERE pool_address = {pool:String}
       )
@@ -219,7 +240,9 @@ async function runOnce(): Promise<void> {
   let positionsFound = 0
   let inserted = 0
   let warningCount = 0
-  const marketStats: Array<{ market: string; candidates: number; positions: number; warnings: number }> = []
+  const marketStats: Array<{ market: string; candidates: number; positions: number; zeros: number; warnings: number }> = []
+  const zeroCount = (positions: Awaited<ReturnType<typeof snapshotMoneyMarketPositions>>['positions']): number =>
+    positions.filter(isZeroPosition).length
 
   async function insertPositions(positions: Awaited<ReturnType<typeof snapshotMoneyMarketPositions>>['positions']): Promise<number> {
     if (dryRun) return 0
@@ -236,16 +259,21 @@ async function runOnce(): Promise<void> {
     return count
   }
 
-  // Preserve the existing exhaustive candidate strategy for the primary market.
+  // Preserve the existing exhaustive candidate strategy for the primary market,
+  // plus every holder the projection still shows open: those are read whether or
+  // not the balance snapshot named them, and a zero for one of them is written.
   if (primary) {
-    const primaryResult = await snapshotMoneyMarketPositions(h160s, head, timestamp, 'rpc', { marketKeys: [primary.key] })
+    const openHolders = await loadOpenPositionHolders(primary.poolProxy)
+    const candidates = [...new Set([...h160s, ...openHolders])]
+    const tombstoneFor = new Set(openHolders.map(holder => openPositionKey(primary.poolProxy, holder)))
+    const primaryResult = await snapshotMoneyMarketPositions(candidates, head, timestamp, 'rpc', { marketKeys: [primary.key], tombstoneFor })
     if (moneyMarketSweepHasNoSuccess(primaryResult.positions.length, primaryResult.warnings.length)) {
       throw new Error(`primary money-market sweep produced no successful positions (${primaryResult.warnings.length} RPC warnings)`)
     }
     positionsFound += primaryResult.positions.length
     warningCount += primaryResult.warnings.length
     inserted += await insertPositions(primaryResult.positions)
-    marketStats.push({ market: primary.key, candidates: h160s.length, positions: primaryResult.positions.length, warnings: primaryResult.warnings.length })
+    marketStats.push({ market: primary.key, candidates: candidates.length, positions: primaryResult.positions.length, zeros: zeroCount(primaryResult.positions), warnings: primaryResult.warnings.length })
   }
 
   // Supplemental markets are independent and sparse. A failure in one must not
@@ -263,7 +291,7 @@ async function runOnce(): Promise<void> {
       positionsFound += result.positions.length
       warningCount += result.warnings.length
       inserted += await insertPositions(result.positions)
-      marketStats.push({ market: market.key, candidates: participants.length, positions: result.positions.length, warnings: result.warnings.length })
+      marketStats.push({ market: market.key, candidates: participants.length, positions: result.positions.length, zeros: zeroCount(result.positions), warnings: result.warnings.length })
     } catch (error) {
       console.error(`[mm-snapshot] supplemental market ${market.key} failed:`, error)
       // A dedicated supplemental worker has no other useful work to preserve.
