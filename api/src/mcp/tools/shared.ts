@@ -332,7 +332,7 @@ export interface TradeDetail {
   limit: { kind: 'minReceived' | 'maxPaid'; amount: string; asset: AssetRef; marginPct: number | null } | null
   extrinsicFee: string | null
   extrinsicTip: string | null
-  feePayment?: { asset: AssetRef; amount: string; tipAmount: string | null }
+  feePayment?: { asset: AssetRef; amount: string; tipAmount: string | null; gas?: { asset: AssetRef; amount: string } }
   route: TradeHop[]
   dca?: boolean
   revenue?: ActivityRevenue

@@ -4,7 +4,7 @@ import { useEvmReceipt, useExtrinsic, useExtrinsicActivity, useStats } from '../
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, redirect } from '../router'
-import { Crumbs, Usd, Amt, F, AddrPill, AssetAmount, CallPill, FeeAmount, StatusBadge, MempoolResultBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows, AwaitingBlockCard } from '../components/ui'
+import { Crumbs, Usd, Amt, F, AddrPill, AssetAmount, CallPill, FeeAmount, hasGas, StatusBadge, MempoolResultBadge, FinalizedBadge, FailureReasonRow, Copy, CopyTextButton, JsonView, ParamsTable, SkeletonRows, AwaitingBlockCard } from '../components/ui'
 import { blockOf } from '../utils/activityIds'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { api } from '../api/explorer'
@@ -213,7 +213,11 @@ export function ExtrinsicDetail({ id }: { id: string }) {
               {data.signer
                 ? <><div className="dt">Signer</div><div className="dd"><AddrPill account={data.signer} /></div>
                   <div className="dt">Fee</div><div className="dd mono"><FeeAmount payment={data.feePayment} hdxRaw={data.fee} /></div>
-                  <div className="dt">Tip</div><div className="dd mono"><FeeAmount payment={data.feePayment} hdxRaw={data.tip} part="tip" /></div></>
+                  <div className="dt">Tip</div><div className="dd mono"><FeeAmount payment={data.feePayment} hdxRaw={data.tip} part="tip" /></div>
+                  {/* Gas the EVM charged on top of the fee (a dispatch_evm_call, a
+                      batch of EVM calls): a second charge, so a second line —
+                      what the account paid is the two together. */}
+                  {hasGas(data.feePayment) && <><div className="dt">EVM gas</div><div className="dd mono"><FeeAmount payment={data.feePayment} part="gas" /></div></>}</>
                 : <><div className="dt">Type</div><div className="dd"><span className="badge pending" style={{ background: 'var(--panel)', color: 'var(--text-medium)' }}>Inherent</span></div></>}
               {data.callName === 'Ethereum.transact' && <EvmTxRows tx={data.evmTx} callArgs={data.callArgs} />}
             </div></div>
@@ -264,6 +268,12 @@ export function ExtrinsicDetail({ id }: { id: string }) {
                   fee_asset_id: data.feePayment.asset.assetId,
                   fee_paid: data.feePayment.amount,
                   tip_paid: data.feePayment.tipAmount,
+                  // EVM gas charged beside the fee, in its own asset.
+                  ...(data.feePayment.gas ? {
+                    gas_asset: data.feePayment.gas.asset.symbol,
+                    gas_asset_id: data.feePayment.gas.asset.assetId,
+                    gas_paid: data.feePayment.gas.amount,
+                  } : {}),
                 } : {}),
                 call_args: data.callArgs,
               }

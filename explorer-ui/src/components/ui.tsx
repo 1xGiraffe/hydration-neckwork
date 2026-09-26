@@ -468,12 +468,24 @@ export function hasTip(payment?: FeePayment | null, hdxTipRaw?: string | null): 
   return raw != null && raw !== '' && !/^0*$/.test(raw)
 }
 
+// Whether EVM gas was charged BESIDE the fee (a Dispatcher.dispatch_evm_call, a
+// batch of EVM calls) — a second charge the account paid, in its own asset,
+// that the fee row does not contain. Shown as its own "EVM gas" line wherever
+// the fee is; an Ethereum.transact has no such line, its gas IS the fee row.
+export function hasGas(payment?: FeePayment | null): boolean {
+  return payment?.gas != null && !/^0*$/.test(payment.gas.amount)
+}
+
 export function FeeAmount({ payment, hdxRaw, part = 'fee', link = true }: {
   payment?: FeePayment | null
   hdxRaw?: string | null
-  part?: 'fee' | 'tip'
+  part?: 'fee' | 'tip' | 'gas'
   link?: boolean
 }) {
+  if (part === 'gas') {
+    if (!payment?.gas) return <Dash />
+    return <AssetAmount asset={payment.gas.asset} raw={payment.gas.amount} link={link} />
+  }
   const asset = payment?.asset ?? NATIVE_ASSET
   // A tip is zero only when there was an HDX figure saying so. An EVM
   // transaction has none — its priority fee is bundled into the gas charge and

@@ -339,11 +339,12 @@ function genExtrinsic(height: number, idx: number): ExtrinsicDetail {
         { eventIndex: 3, name: 'System.ExtrinsicSuccess', args: { weight: 412_000_000 } },
       ]
       : [{ eventIndex: 0, name: 'System.ExtrinsicFailed', args: { dispatch_error: 'Token.BelowMinimum' } }]
-  const feePayment = mockFeePayment(height, idx, isEvmTx, isInherent)
+  const fee = isInherent || isEvmTx ? null : raw(0.002 + r() * 0.05, 12)
+  const feePayment = mockFeePayment(height, idx, isEvmTx, isInherent, call, fee)
   return {
     blockHeight: height, index: idx, hash: hx(height * 17 + idx, 64), timestamp: tsAt(height),
     signer: isInherent ? null : signer, success: isInherent || isEvmTx ? true : success, callName,
-    fee: isInherent || isEvmTx ? null : raw(0.002 + r() * 0.05, 12), version: 4,
+    fee, version: 4,
     // An Ethereum.transact extrinsic has no substrate fee OR tip figure — the EVM
     // charges its own gas and no TransactionFeePaid is emitted.
     tip: mockTip(idx, isEvmTx, isInherent),
@@ -371,18 +372,24 @@ function mockTip(idx: number, isEvmTx: boolean, isInherent: boolean): string | n
 // this from the extrinsic's own balance events (extrinsicFeePayment.ts), so the
 // mock has to state it the same way: an EVM transaction pays in WETH and has no
 // substrate tip figure at all (tipAmount null → the row reads as unknown), while
-// a nominated-currency payer pays fee and tip in that asset.
-function mockFeePayment(height: number, idx: number, isEvmTx: boolean, isInherent: boolean): FeePayment | null {
+// a nominated-currency payer pays fee and tip in that asset. A SIGNED EVM call is
+// Pays::Yes — it prepays gas mid-dispatch and settles the substrate fee after —
+// so the api states the gas beside the fee (`gas`, in the fee currency), and an
+// HDX payer then carries a payment too, its fee restated so the gas has a home.
+function mockFeePayment(height: number, idx: number, isEvmTx: boolean, isInherent: boolean, call: string, feeHdx: string | null): FeePayment | null {
   if (isInherent) return null
   if (isEvmTx) return { asset: aref(assetById.get(20)!), amount: raw(0.0000031, 18), tipAmount: null }
   const assetId = MOCK_FEE_CURRENCY[idx]
-  const a = assetId != null ? assetById.get(assetId) : undefined
+  const a = assetId != null ? assetById.get(assetId) : assetById.get(0)!
   if (!a) return null
+  const gas = call.startsWith('EVM') ? { gas: { asset: aref(a), amount: raw(0.37 * (1 + (height % 5) / 10), a.decimals) } } : {}
+  if (assetId == null) return call.startsWith('EVM') && feeHdx ? { asset: aref(a), amount: feeHdx, tipAmount: '0', ...gas } : null
   const amount = raw(0.0041 * (1 + (height % 7) / 10), a.decimals)
   return {
     asset: aref(a),
     amount,
     tipAmount: idx === MOCK_TIP_INDEX ? raw(0.0041 * 3, a.decimals) : '0',
+    ...gas,
   }
 }
 

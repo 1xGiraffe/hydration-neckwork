@@ -4,7 +4,7 @@ import { useTrade } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect } from '../router'
-import { Crumbs, Usd, ExactAmt, CopyValue, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, MomentLink, PoolBadge, poolHref, SkeletonRows, AwaitingBlockCard } from '../components/ui'
+import { Crumbs, Usd, ExactAmt, CopyValue, AddrPill, AssetChip, FeeAmount, hasTip, hasGas, StatusBadge, FinalizedBadge, MomentLink, PoolBadge, poolHref, SkeletonRows, AwaitingBlockCard } from '../components/ui'
 import { blockOf } from '../utils/activityIds'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import type { TradeHop } from '../types'
@@ -173,6 +173,7 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                 {!extId && eventId && <><div className="dt">Event</div><div className="dd mono"><Link to={paths.event(eventId)} className="hash">{eventId}</Link></div></>}
                 {(data.extrinsicFee || data.feePayment) && <><div className="dt">Fee</div><div className="dd"><FeeAmount payment={data.feePayment} hdxRaw={data.extrinsicFee} /></div></>}
                 {hasTip(data.feePayment, data.extrinsicTip) && <><div className="dt">Tip</div><div className="dd"><FeeAmount payment={data.feePayment} hdxRaw={data.extrinsicTip} part="tip" /></div></>}
+                {hasGas(data.feePayment) && <><div className="dt">EVM gas</div><div className="dd"><FeeAmount payment={data.feePayment} part="gas" /></div></>}
               </div></div>
 
               {hasRoute && <>

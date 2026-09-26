@@ -6,7 +6,7 @@ import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
 import { BOND_LABELS, LIQ_LABELS, MM_LABELS, intentLabel } from '../components/activityColors'
 import { RevenueRow } from '../components/RevenueRow'
-import { PoolBadge, Usd, Amt, ExactAmt, Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
+import { PoolBadge, Usd, Amt, ExactAmt, Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, hasGas, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { convictionLabel, voteSideLabel, voteSubjectLabel } from '../utils/voteRows'
 
@@ -216,6 +216,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
               <div className="dt">Result</div><div className="dd"><StatusBadge ok={ext.success} /></div>
               {(ext.fee || ext.feePayment) && <><div className="dt">Fee</div><div className="dd mono"><FeeAmount payment={ext.feePayment} hdxRaw={ext.fee} /></div></>}
               {hasTip(ext.feePayment, ext.tip) && <><div className="dt">Tip</div><div className="dd mono"><FeeAmount payment={ext.feePayment} hdxRaw={ext.tip} part="tip" /></div></>}
+              {hasGas(ext.feePayment) && <><div className="dt">EVM gas</div><div className="dd mono"><FeeAmount payment={ext.feePayment} part="gas" /></div></>}
             </>}
           </div></div>
         )}

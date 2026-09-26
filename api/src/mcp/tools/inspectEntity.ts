@@ -429,12 +429,17 @@ const NOISE_EVENTS = new Set([
   'Tokens.Endowed', 'System.NewAccount', 'Treasury.Deposit',
 ])
 
-/** Fee as actually charged: the signer's own currency when it is not HDX. */
+/**
+ * Fee as actually charged: the signer's own currency when it is not HDX, and the
+ * EVM gas a dispatch charged beside the fee (its own asset) — both the account
+ * paid, and together they are what the activity row's revenue attributes.
+ */
 function feeLine(fee: string | null, tip: string | null | undefined, payment: ExtrinsicDetail['feePayment']): string | null {
   const parts: string[] = []
   if (payment) {
     parts.push(formatAmount(payment.amount, payment.asset.decimals, assetLabel(payment.asset)))
     if (payment.tipAmount && payment.tipAmount !== '0') parts.push(`tip ${formatAmount(payment.tipAmount, payment.asset.decimals, assetLabel(payment.asset))}`)
+    if (payment.gas) parts.push(`EVM gas ${formatAmount(payment.gas.amount, payment.gas.asset.decimals, assetLabel(payment.gas.asset))}`)
     return parts.join(' · ')
   }
   if (fee == null) return null
