@@ -14,12 +14,15 @@
 //     aTokens, which fill in over time — so a holder no source named at the first
 //     capture is anchored by the cycle after a source names it, rather than never.
 //     The coverage gate holds under --force too.
-//   money-market incentive anchor (mm_incentive_anchor): captured when its table
-//     is empty (or under --force-incentive) AND raw ingestion has completed every
-//     block from CONTROLLER_LOGS_FROM to B0 — its candidates come from the
-//     controller's logs, so a capture on a partial backfill would anchor too few
-//     users and, the table then being non-empty, never again. The coverage gate
-//     holds under --force-incentive too.
+//   money-market incentive anchor (mm_incentive_anchor): the same shape on its own
+//     gate — once raw ingestion has completed every block from CONTROLLER_LOGS_FROM
+//     to B0, captured whole when its table is empty (or every cycle under
+//     --force-incentive) and TOPPED UP every other cycle: each candidate user the
+//     sources name that has no row yet is read at B0 (mmIncentiveAnchor.ts,
+//     incentiveKeysToRead). Its candidates come from the controller's and the
+//     programme aTokens' logs, the aToken anchor and the Substrate legs of the
+//     registry assets over the programme aTokens, which fill in over time. The
+//     coverage gate holds under --force-incentive too.
 //   liquidity-mining entry reconcile (raw_lm_farm_entries): every cycle. The raw
 //     indexer captures entries in-block and leaves a raw_parser_warnings row for a
 //     deposit it could not read; a failure that is deterministic for that block
@@ -37,49 +40,51 @@ import type { LmReconcileResult } from './lmEntryCapture.js'
 import type { AnchorMode } from './atokenAnchor.js'
 
 type AnchorSkip = { capture: false; reason: string; detail?: Record<string, unknown> }
-export type AnchorDecision = { capture: true } | AnchorSkip
-export type AtokenAnchorDecision = { capture: true; mode: AnchorMode } | AnchorSkip
+/** A B0 anchor's cycle: a full capture, a top-up, or a skip with its reason. */
+export type B0AnchorDecision = { capture: true; mode: AnchorMode } | AnchorSkip
+
+type RawGap = { fromBlock: number; toBlock: number }
 
 export interface AtokenAnchorPort {
   /** Refresh atoken_reserve_map (every cycle; picks up newly added reserves). */
   refreshReserveMap(): Promise<void>
   anchorRowCount(): Promise<number>
   /** The gaps in completed raw ingestion over MM_LOGS_FROM..B0. */
-  logGaps(): Promise<Array<{ fromBlock: number; toBlock: number }>>
+  logGaps(): Promise<RawGap[]>
   /** 'full': every candidate; 'top-up': only the candidates without a row. */
   capture(mode: AnchorMode): Promise<void>
 }
 
 export interface IncentiveAnchorPort {
   anchorRowCount(): Promise<number>
-  controllerLogGaps(): Promise<Array<{ fromBlock: number; toBlock: number }>>
-  capture(): Promise<void>
+  /** The gaps in completed raw ingestion over CONTROLLER_LOGS_FROM..B0. */
+  controllerLogGaps(): Promise<RawGap[]>
+  /** 'full': every key of every candidate; 'top-up': only the keys without a row. */
+  capture(mode: AnchorMode): Promise<void>
 }
 
 export interface LmEntryReconcilePort {
   reconcile(): Promise<LmReconcileResult>
 }
 
-export async function atokenAnchorDecision(port: Pick<AtokenAnchorPort, 'anchorRowCount' | 'logGaps'>, force: boolean, logsFrom: number, anchorBlock: number): Promise<AtokenAnchorDecision> {
-  const gaps = await port.logGaps()
+// The gate is decided before the table is counted, so a gap skips a top-up too;
+// past it, --force is a full capture, an empty table a full capture, a non-empty
+// one a top-up.
+async function b0AnchorDecision(gaps: RawGap[], rowCount: () => Promise<number>, force: boolean, source: string, logsFrom: number, anchorBlock: number): Promise<B0AnchorDecision> {
   if (gaps.length) {
-    return { capture: false, reason: `raw ingestion has not completed ${logsFrom}..${anchorBlock} (the money market's logs)`, detail: { gaps: gaps.length, first_gaps: gaps.slice(0, 5) } }
+    return { capture: false, reason: `raw ingestion has not completed ${logsFrom}..${anchorBlock} (${source})`, detail: { gaps: gaps.length, first_gaps: gaps.slice(0, 5) } }
   }
   if (force) return { capture: true, mode: 'full' }
-  const existing = await port.anchorRowCount()
+  const existing = await rowCount()
   return { capture: true, mode: existing > 0 ? 'top-up' : 'full' }
 }
 
-export async function incentiveAnchorDecision(port: Pick<IncentiveAnchorPort, 'anchorRowCount' | 'controllerLogGaps'>, force: boolean, logsFrom: number, anchorBlock: number): Promise<AnchorDecision> {
-  if (!force) {
-    const existing = await port.anchorRowCount()
-    if (existing > 0) return { capture: false, reason: 'anchor already present', detail: { existing_rows: existing } }
-  }
-  const gaps = await port.controllerLogGaps()
-  if (gaps.length) {
-    return { capture: false, reason: `raw ingestion has not completed ${logsFrom}..${anchorBlock} (the controller's logs)`, detail: { gaps: gaps.length, first_gaps: gaps.slice(0, 5) } }
-  }
-  return { capture: true }
+export async function atokenAnchorDecision(port: Pick<AtokenAnchorPort, 'anchorRowCount' | 'logGaps'>, force: boolean, logsFrom: number, anchorBlock: number): Promise<B0AnchorDecision> {
+  return b0AnchorDecision(await port.logGaps(), () => port.anchorRowCount(), force, "the money market's logs", logsFrom, anchorBlock)
+}
+
+export async function incentiveAnchorDecision(port: Pick<IncentiveAnchorPort, 'anchorRowCount' | 'controllerLogGaps'>, force: boolean, logsFrom: number, anchorBlock: number): Promise<B0AnchorDecision> {
+  return b0AnchorDecision(await port.controllerLogGaps(), () => port.anchorRowCount(), force, "the controller's logs", logsFrom, anchorBlock)
 }
 
 /** captured: a full capture. topped-up: the candidates without a row were read. */
@@ -128,8 +133,8 @@ export async function runAnchorCycle(
   try {
     const decision = await incentiveAnchorDecision(ports.incentive, opts.forceIncentive, opts.incentiveLogsFrom, opts.anchorBlock)
     if (decision.capture) {
-      await ports.incentive.capture()
-      result.incentive = 'captured'
+      await ports.incentive.capture(decision.mode)
+      result.incentive = decision.mode === 'full' ? 'captured' : 'topped-up'
     } else {
       log({ type: 'mm_incentive_anchor_done', skipped: true, reason: decision.reason, ...decision.detail })
       result.incentive = 'skipped'
