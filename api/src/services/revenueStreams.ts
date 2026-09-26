@@ -839,6 +839,91 @@ ${valuedTailSql('uniswap_v3_fee')}`
 export const EVM_EXECUTION_EVENTS = ['EVM.Executed', 'EVM.ExecutedFailed', 'Ethereum.Executed'] as const
 
 /**
+ * The events that debit an account inside an extrinsic: the pre-dispatch fee
+ * withdrawal (`Tokens.Withdrawn` / `Balances.Withdraw`) and the EVM gas prepay
+ * (`Balances.Burned`), plus the `Currencies.Withdrawn` pallet-currencies emits
+ * over either — and ALONE for an ERC-20 registry asset, whose balance lives in
+ * contract storage and leaves no Tokens or Balances event (HOLLAR, GDOT, BIL,
+ * the aTokens). Read as a set of currencies, so the mirror of a Tokens or HDX
+ * debit repeats a member and changes nothing.
+ */
+export const FEE_DEBIT_EVENTS = ['Tokens.Withdrawn', 'Balances.Withdraw', 'Balances.Burned', 'Currencies.Withdrawn'] as const
+
+/**
+ * The events that credit an account: `Tokens.Deposited` / `Balances.Deposit`
+ * and the `Currencies.Deposited` emitted over either — a mirror exactly when
+ * the deposit directly before it, to the same account, is one of those two in
+ * the same currency and amount (pallet-currencies emits after the pallet it
+ * routed to; measured: every Tokens or HDX one has that twin, no ERC-20 one
+ * does), else the only record of the movement. Both fee readers count a
+ * treasury deposit by this rule (extrinsicFeePayment.ts; networkFeeRowsSql).
+ */
+export const FEE_DEPOSIT_EVENTS = ['Tokens.Deposited', 'Balances.Deposit', 'Currencies.Deposited'] as const
+
+/**
+ * How the runtime's ERC-20 currency adapter (`Erc20Currency`, runtime/evm)
+ * moves a registry asset it holds in contract storage: a withdrawal is the
+ * contract's `transfer` from the account to the adapter's HOLDING address
+ * (every byte 0xff), a deposit a transfer from that address to the account —
+ * so the only trace of an ERC-20 debit that no pallet event names (the EVM gas
+ * prepay of an `Ethereum.transact` or `dispatch_permit` charged in HOLLAR or
+ * GDOT: `burn_from` on the adapter, which emits no Currencies event) is the
+ * contract's `Transfer(payer, holding, amount)` log. The contract that log is
+ * on is the one whose deposit to the treasury (`Transfer(holding, treasury)`
+ * directly before the bare `Currencies.Deposited`) states the currency.
+ */
+export const ERC20_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+export const ERC20_HOLDING_ADDRESS = '0xffffffffffffffffffffffffffffffffffffffff'
+
+/**
+ * The runtime's `EvmAccounts::evm_address` of an AccountId32 (lowercase hex),
+ * in SQL: a bound EVM account is stored as the "ETH\0" marker, its 20-byte H160
+ * and 8 zero bytes and maps back to that H160; every other account maps to its
+ * first 20 bytes. The TypeScript twin is `evmAddressOfAccount`
+ * (services/addressIdentity.ts), which the extrinsic page's fee resolver uses.
+ */
+export function evmAddressSql(accountExpr: string): string {
+  return `if(startsWith(${accountExpr}, '0x45544800') AND substring(${accountExpr}, 51) = '0000000000000000', concat('0x', substring(${accountExpr}, 11, 40)), substring(${accountExpr}, 1, 42))`
+}
+
+/**
+ * The treasury's deposits within one execution context (an extrinsic, or a
+ * block hook run), one row per MOVEMENT: FEE_DEPOSIT_EVENTS read whole, then
+ * every `Currencies.Deposited` that mirrors the treasury deposit directly before
+ * it in the same context (a `Tokens.Deposited`/`Balances.Deposit` of the same
+ * currency and amount) left out — a Tokens or HDX deposit is one row through its
+ * twin, an ERC-20 one is one row through the only record it has. The extrinsic
+ * page's resolver applies the same rule event by event (extrinsicFeePayment.ts).
+ * `ctxSql` computes the context and `ctxName` names its column; `scope` bounds
+ * the read to the caller's own key set.
+ */
+function treasuryDepositsSql(ctxSql: string, ctxName: string, extra: string, scope: string): string {
+  const depositEvents = FEE_DEPOSIT_EVENTS.map(n => `'${n}'`).join(', ')
+  return `SELECT block_height, event_index, ${ctxName}, block_time, deposit_event, currency, amount
+  FROM (
+    SELECT block_height, event_index, ${ctxName}, block_time, deposit_event, currency, amount,
+           lagInFrame(deposit_event, 1, '') OVER w AS prev_event,
+           lagInFrame(currency, 1, toUInt32(0)) OVER w AS prev_currency,
+           lagInFrame(amount, 1, toUInt256(0)) OVER w AS prev_amount
+    FROM (
+      SELECT block_height, event_index, ${ctxSql} AS ${ctxName},
+             min(block_timestamp) AS block_time, any(event_name) AS deposit_event,
+             argMax(if(event_name = 'Balances.Deposit', toUInt32(0), toUInt32(JSONExtractUInt(args_json, 'currencyId'))), ingested_at) AS currency,
+             argMax(toUInt256OrZero(replaceAll(JSONExtractRaw(args_json, 'amount'), '"', '')), ingested_at) AS amount
+      FROM price_data.raw_events
+      WHERE event_name IN (${depositEvents})
+        AND JSONExtractString(args_json, 'who') = '${TREASURY_ACCOUNT}'
+        AND ${WINDOW}
+        AND (${extra})
+        AND ${scope}
+      GROUP BY block_height, event_index, ${ctxName}
+    )
+    WINDOW w AS (PARTITION BY block_height, ${ctxName} ORDER BY event_index ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+  )
+  WHERE NOT (deposit_event = 'Currencies.Deposited' AND prev_event IN ('Tokens.Deposited', 'Balances.Deposit') AND prev_currency = currency AND prev_amount = amount)`
+}
+
+/**
  * Network fees — everything the treasury is paid for executing an extrinsic.
  * Two arms, disjoint by construction:
  *
@@ -861,9 +946,22 @@ export const EVM_EXECUTION_EVENTS = ['EVM.Executed', 'EVM.ExecutedFailed', 'Ethe
  *         `Utility.batch_all` of `EVM.call`s included, where a call-name list
  *         did not), plus every `dispatch_permit`;
  *       - a treasury deposit counts only in a currency the PAYER was debited
- *         in within the same extrinsic (`Tokens.Withdrawn` / `Balances.Withdraw`
- *         / `Balances.Burned`, the EVM prepay) — what separates a fee from an
- *         Omnipool fee leg or another account's transfer landing there;
+ *         in within the same extrinsic — what separates a fee from an Omnipool
+ *         fee leg or another account's transfer landing there. A debit is a
+ *         FEE_DEBIT_EVENTS event of the payer (`Tokens.Withdrawn` /
+ *         `Balances.Withdraw` / `Balances.Burned`, the EVM prepay, and the
+ *         `Currencies.Withdrawn` that is an ERC-20 asset's only debit record),
+ *         or, for a bare `Currencies.Deposited`, the ERC-20 adapter's
+ *         `Transfer(payer, holding)` log on the contract whose own log sits
+ *         directly before that deposit (ERC20_HOLDING_ADDRESS): the gas prepay
+ *         of an unsigned dispatch charged in an ERC-20 currency emits no pallet
+ *         event at all (14802829-2, a permit paid in GDOT);
+ *       - the deposits are FEE_DEPOSIT_EVENTS read by treasuryDepositsSql, a
+ *         `Currencies.Deposited` that repeats the currency and amount of the
+ *         `Tokens.Deposited` / `Balances.Deposit` directly before it left out as
+ *         that deposit's mirror, one that repeats nothing counted as the
+ *         movement itself — the HOLLAR gas of 15033063-2 exists in no other
+ *         event;
  *       - the fee currency is the LAST such deposit's and every deposit in it
  *         is fee (gas arrives in pieces: a charge plus a rounding remainder, or
  *         one per wrapped call), EXCEPT the last one when the extrinsic also
@@ -882,6 +980,7 @@ export const EVM_EXECUTION_EVENTS = ['EVM.Executed', 'EVM.ExecutedFailed', 'Ethe
  */
 function networkFeeRowsSql(extra: string): string {
   const evmMarkers = EVM_EXECUTION_EVENTS.map(n => `'${n}'`).join(', ')
+  const debitEvents = FEE_DEBIT_EVENTS.map(n => `'${n}'`).join(', ')
   // The deposit arm's extrinsics as a bare key set (no FINAL, no payer), so
   // each source scan filters on it before touching a JSON column; the payer
   // join below reads the deduplicated row.
@@ -928,9 +1027,9 @@ gas_extrinsics AS (
 gas_debits AS (
   SELECT DISTINCT block_height, assumeNotNull(extrinsic_index) AS ext_index,
          JSONExtractString(args_json, 'who') AS who,
-         if(event_name = 'Tokens.Withdrawn', toUInt32(JSONExtractUInt(args_json, 'currencyId')), toUInt32(0)) AS currency
+         if(event_name IN ('Balances.Withdraw', 'Balances.Burned'), toUInt32(0), toUInt32(JSONExtractUInt(args_json, 'currencyId'))) AS currency
   FROM price_data.raw_events
-  WHERE event_name IN ('Tokens.Withdrawn', 'Balances.Withdraw', 'Balances.Burned')
+  WHERE event_name IN (${debitEvents})
     AND extrinsic_index IS NOT NULL
     AND ${WINDOW}
     AND (${extra})
@@ -945,18 +1044,29 @@ dust_sweeps AS (
     AND ${scoped}
 ),
 gas_deposits AS (
-  SELECT block_height, event_index, assumeNotNull(extrinsic_index) AS ext_index,
-         min(block_timestamp) AS block_time,
-         argMax(if(event_name = 'Tokens.Deposited', toUInt32(JSONExtractUInt(args_json, 'currencyId')), toUInt32(0)), ingested_at) AS currency,
-         argMax(toUInt256OrZero(replaceAll(JSONExtractRaw(args_json, 'amount'), '"', '')), ingested_at) AS amount
+  ${treasuryDepositsSql('assumeNotNull(extrinsic_index)', 'ext_index', extra, `extrinsic_index IS NOT NULL AND ${scoped}`)}
+),
+gas_erc20_logs AS (
+  SELECT block_height, assumeNotNull(extrinsic_index) AS ext_index, event_index,
+         argMax(lower(JSONExtractString(args_json, 'log', 'address')), ingested_at) AS contract,
+         argMax(JSONExtract(args_json, 'log', 'topics', 'Array(String)'), ingested_at) AS topics
   FROM price_data.raw_events
-  WHERE event_name IN ('Tokens.Deposited', 'Balances.Deposit')
-    AND extrinsic_index IS NOT NULL
-    AND JSONExtractString(args_json, 'who') = '${TREASURY_ACCOUNT}'
+  WHERE event_name = 'EVM.Log' AND extrinsic_index IS NOT NULL
     AND ${WINDOW}
     AND (${extra})
-    AND ${scoped}
-  GROUP BY block_height, event_index, ext_index
+    AND (block_height, assumeNotNull(extrinsic_index)) IN (SELECT block_height, ext_index FROM gas_deposits WHERE deposit_event = 'Currencies.Deposited')
+  GROUP BY block_height, ext_index, event_index
+),
+gas_deposit_contracts AS (
+  SELECT block_height, ext_index, event_index + 1 AS deposit_index, contract FROM gas_erc20_logs
+),
+gas_erc20_debits AS (
+  SELECT DISTINCT l.block_height AS block_height, l.ext_index AS ext_index, l.contract AS contract
+  FROM gas_erc20_logs AS l
+  INNER JOIN gas_extrinsics AS x ON x.block_height = l.block_height AND x.ext_index = l.ext_index
+  WHERE length(l.topics) >= 3 AND lower(l.topics[1]) = '${ERC20_TRANSFER_TOPIC}'
+    AND concat('0x', substring(lower(l.topics[2]), 27, 40)) = ${evmAddressSql('x.payer')}
+    AND concat('0x', substring(lower(l.topics[3]), 27, 40)) = '${ERC20_HOLDING_ADDRESS}'
 ),
 ${xcmFeeCtes},
 gas_candidates AS (
@@ -965,8 +1075,10 @@ gas_candidates AS (
          x.payer AS payer, x.substrate_fee AS substrate_fee
   FROM gas_deposits AS d
   INNER JOIN gas_extrinsics AS x ON x.block_height = d.block_height AND x.ext_index = d.ext_index
+  LEFT JOIN gas_deposit_contracts AS l ON l.block_height = d.block_height AND l.ext_index = d.ext_index AND l.deposit_index = d.event_index
   WHERE d.amount > 0
-    AND (d.block_height, d.ext_index, x.payer, d.currency) IN (SELECT block_height, ext_index, who, currency FROM gas_debits)
+    AND ((d.block_height, d.ext_index, x.payer, d.currency) IN (SELECT block_height, ext_index, who, currency FROM gas_debits)
+      OR (d.deposit_event = 'Currencies.Deposited' AND (d.block_height, d.ext_index, l.contract) IN (SELECT block_height, ext_index, contract FROM gas_erc20_debits)))
     AND (d.block_height, d.event_index) NOT IN (SELECT block_height, deposit_index FROM dust_sweeps)
     AND (d.block_height, d.event_index) NOT IN (SELECT block_height, event_index FROM xf_fees)
 ),
@@ -1124,17 +1236,12 @@ xf_fees AS (
  * unsigned EVM shapes, its recovered effective signer — network_fee's rule.
  */
 function xcmExecutionFeeRowsSql(extra: string): string {
-  const deposits = `SELECT block_height, event_index, ifNull(extrinsic_index, ${HOOK_CONTEXT}) AS ctx,
-         min(block_timestamp) AS block_time,
-         argMax(if(event_name = 'Tokens.Deposited', toUInt32(JSONExtractUInt(args_json, 'currencyId')), toUInt32(0)), ingested_at) AS currency,
-         argMax(toUInt256OrZero(replaceAll(JSONExtractRaw(args_json, 'amount'), '"', '')), ingested_at) AS amount
-  FROM price_data.raw_events
-  WHERE event_name IN ('Tokens.Deposited', 'Balances.Deposit')
-    AND JSONExtractString(args_json, 'who') = '${TREASURY_ACCOUNT}'
-    AND ${WINDOW}
-    AND (${extra})
-    AND (block_height, ifNull(extrinsic_index, ${HOOK_CONTEXT})) IN (SELECT block_height, ctx FROM xf_contexts)
-  GROUP BY block_height, event_index, ctx`
+  // One row per treasury movement (treasuryDepositsSql): a HOLLAR-paid message's
+  // fee is a bare `Currencies.Deposited`, a DOT-paid one a `Tokens.Deposited`
+  // with its mirror folded away — so "the last deposit before the barrier" is
+  // the same deposit whichever record it has.
+  const deposits = treasuryDepositsSql(`ifNull(extrinsic_index, ${HOOK_CONTEXT})`, 'ctx', extra,
+    `(block_height, ifNull(extrinsic_index, ${HOOK_CONTEXT})) IN (SELECT block_height, ctx FROM xf_contexts)`)
   const originKind = "JSONExtractString(f.barrier_args, 'origin', '__kind')"
   const sovereign = `multiIf(
            f.barrier_name = 'DmpQueue.ExecutedDownward' OR ${originKind} = 'Parent', '${PARENT_SOVEREIGN_ACCOUNT}',
