@@ -16822,7 +16822,8 @@ async function getRecentVotes(limit: number, from?: string, to?: string, offset 
 // directly — the event-name set index plus the tiny row volume keep the scan
 // bounded. These events carry no conviction, balance, or referendum index; the
 // proposal hash (shortened) stands in for the referendum and the row carries no
-// token amount.
+// token amount — and so no value: null, like `weighted`, never a zero that would
+// read as a vote worth nothing rather than one with no stake.
 const COLLECTIVE_VOTE_EVENTS = ['Council.Voted', 'TechnicalCommittee.Voted']
 function shortProposalHash(hash: string): string {
   return /^0x[0-9a-f]+$/i.test(hash) && hash.length > 18 ? `${hash.slice(0, 8)}…${hash.slice(-6)}` : hash
@@ -16850,7 +16851,7 @@ export function collectiveVoteRow(e: RawCollectiveVoteEvent, hdx: AssetRef): Vot
     pallet: e.event_name === 'Council.Voted' ? 'Council' : 'Technical Committee',
     action: 'Voted', referendum: hash ? shortProposalHash(hash) : null,
     side: args.voted === true ? 'Aye' : args.voted === false ? 'Nay' : 'Vote',
-    conviction: null, amount: null, asset: hdx, valueUsd: 0,
+    conviction: null, amount: null, asset: hdx, valueUsd: null,
   }
 }
 
