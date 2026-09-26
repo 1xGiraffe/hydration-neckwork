@@ -24,12 +24,17 @@ export function isAmountlessLiquidityEvent(eventName: string): boolean {
   return AMOUNTLESS_LIQUIDITY_EVENTS.has(eventName)
 }
 
-// An XYK add or remove moves BOTH of the pair's assets between `who` and the pool,
-// and its event states neither amount in the row's denomination (LiquidityAdded
-// carries amountA/amountB beside assetA/assetB, LiquidityRemoved only `shares`), so a
-// row of either is a PAIR of transfer legs recovered together: assetA's leg as the
+// An XYK add, removal or pool creation moves BOTH of the pair's assets between
+// `who` and the pool, and its event states neither amount in the row's
+// denomination (LiquidityAdded carries amountA/amountB beside assetA/assetB,
+// LiquidityRemoved only `shares`, PoolCreated only `initialSharesAmount`), so a row
+// of any of them is a PAIR of transfer legs recovered together: assetA's leg as the
 // row's `amount`, assetB's as `amount_b`. Rendering assetA's leg alone halved every
-// XYK removal's value and left every add empty.
+// XYK removal's value, left every add empty and stated half of every pool's seed.
+export const XYK_TWO_LEG_EVENTS: ReadonlySet<string> = new Set(['XYK.LiquidityAdded', 'XYK.LiquidityRemoved', 'XYK.PoolCreated'])
+// The add and the removal alone — the two the explorer renders from the recovered
+// pair (xykPairLegs); it builds a pool creation's seed legs and their value in its
+// own builder (enrichPoolCreations). The Data API publishes all three pairs alike.
 export const XYK_PAIR_EVENTS: ReadonlySet<string> = new Set(['XYK.LiquidityAdded', 'XYK.LiquidityRemoved'])
 // The liquidity events whose recovered legs run who→pool; every other event's leg
 // is a pool→who payout.
@@ -43,8 +48,8 @@ export interface LiquidityAmountCandidate {
   who: string
   asset_id: number
   amount: string
-  // The pair's second asset and its recovered leg — XYK add/remove only
-  // (XYK_PAIR_EVENTS); every other event has one leg, `amount`.
+  // The pair's second asset and its recovered leg — an XYK add, removal or pool
+  // creation only (XYK_TWO_LEG_EVENTS); every other event has one leg, `amount`.
   asset_b?: number | null
   amount_b?: string
 }
@@ -69,7 +74,7 @@ export function missingLiquidityAmounts<T extends LiquidityAmountCandidate>(rows
 // pair's — so a loader ships only those legs rather than a batch or routed
 // extrinsic's unrelated ones.
 export function liquidityLegAssetIds(missing: readonly LiquidityAmountCandidate[]): number[] {
-  return [...new Set(missing.flatMap(r => XYK_PAIR_EVENTS.has(r.event_name) && r.asset_b != null ? [r.asset_id, r.asset_b] : [r.asset_id]))]
+  return [...new Set(missing.flatMap(r => XYK_TWO_LEG_EVENTS.has(r.event_name) && r.asset_b != null ? [r.asset_id, r.asset_b] : [r.asset_id]))]
 }
 
 // Omnipool/Stableswap liquidity events carry only shares (sharesRemoved / shares),
@@ -83,12 +88,14 @@ export function liquidityLegAssetIds(missing: readonly LiquidityAmountCandidate[
 // and scope to the block's out-of-extrinsic legs. Isolating the scopes stops a
 // signed same-block transfer from being mistaken for an offboarding leg.
 //
-// An XYK add or remove (XYK_PAIR_EVENTS) recovers BOTH of its legs, as a pair
-// against ONE counterparty: the pallet moves assetA and assetB between `who` and
-// the same pool account, so assetA's candidates are tried nearest-first and the
-// first with an assetB leg against the same account wins both. That is what keeps
-// a same-asset leg to some other account in the same extrinsic — a batched
-// transfer, the LP-token existential deposit — out of the pair.
+// An XYK add, removal or pool creation (XYK_TWO_LEG_EVENTS) recovers BOTH of its
+// legs, as a pair against ONE counterparty: the pallet moves assetA and assetB
+// between `who` and the same pool account, so assetA's candidates are tried
+// nearest-first and the first with an assetB leg against the same account wins
+// both. That is what keeps a same-asset leg to some other account in the same
+// extrinsic — a batched transfer, the LP-token existential deposit — out of the
+// pair. A pool creation's event PRECEDES its two deposits, so its legs are found
+// among the candidates that follow it.
 export function matchLiquidityAmounts(missing: LiquidityAmountCandidate[], legs: LiquidityTransferLeg[]): void {
   const scopeOf = (ext: number | null | undefined): string => ext == null ? 'blk' : String(ext)
   type LegEntry = { event_index: number; amount: string; counterparty: string; used: boolean }
@@ -130,7 +137,9 @@ export function matchLiquidityAmounts(missing: LiquidityAmountCandidate[], legs:
     const key = (assetId: number): string => `${row.block_height}:${scope}:${assetId}:${row.who.toLowerCase()}`
     const legsA = candidates(lookup.get(key(row.asset_id)), row.event_index)
     if (!legsA.length) continue
-    if (XYK_PAIR_EVENTS.has(row.event_name) && row.asset_b != null) {
+    // A pair names two distinct assets: a row pinned to one of them on both sides
+    // (a surface showing the creation under its assetB) takes the single leg.
+    if (XYK_TWO_LEG_EVENTS.has(row.event_name) && row.asset_b != null && row.asset_b !== row.asset_id) {
       const legsB = candidates(lookup.get(key(row.asset_b)), row.event_index)
       const pair = legsA.flatMap(a => {
         const b = legsB.find(t => t.counterparty === a.counterparty)
