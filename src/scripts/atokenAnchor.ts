@@ -17,11 +17,14 @@
  * The lowest block raw ingestion must have completed before the anchor's first
  * capture: just below the money market's first log (the aToken implementation's
  * Initialized at 6,382,885; the reserve aToken / variable-debt proxies initialize
- * from 6,382,902 and the pool's first ReserveDataUpdated is at 6,468,408). Every
- * candidate source — the contracts' own logs, the scaled-delta model fed by them,
- * and the RewardsController's Accrued (from 7,346,897, inside this window) — is
- * read from raw indexed in this window, so capturing on a partial backfill would
- * anchor too few holders and, the table then being non-empty, never again.
+ * from 6,382,902 and the pool's first ReserveDataUpdated is at 6,468,408). The
+ * candidate sources — the contracts' own logs, the scaled-delta model fed by them,
+ * the RewardsController's Accrued (from 7,346,897, inside this window), the
+ * collateral sweep's users and the Substrate legs of the registry assets over the
+ * aTokens — are read from raw indexed in this window, so a capture on a partial
+ * backfill would anchor too few holders; later cycles top the table up with the
+ * candidates the sources name since (anchorKeysToRead), but the full capture is
+ * the one that reads them all at once.
  */
 export const MM_LOGS_FROM = 6_382_800
 
@@ -112,6 +115,23 @@ export function makeEthCallBatch(rpcUrl: string, fetchImpl: typeof fetch = fetch
   }
 }
 
+export type AnchorMode = 'full' | 'top-up'
+
+/**
+ * The anchor keys ('' for the total, else a holder) one cycle reads for a
+ * contract. A full capture reads every candidate; a top-up reads only the keys the
+ * table holds no row for — a candidate a source named since the last capture (a
+ * pre-B0 holder outside the money market's own log coverage, swept later as a
+ * collateral user, or named by a Substrate transfer of the registry asset over the
+ * aToken). Rows are pinned at B0, so re-reading an anchored key could only repeat
+ * it; a candidate that read zero has no row and is read again, which costs one
+ * call and keeps a holder from being missed for good.
+ */
+export function anchorKeysToRead(candidates: readonly string[], anchored: ReadonlySet<string>, mode: AnchorMode): string[] {
+  const keys = ['', ...candidates]
+  return mode === 'full' ? keys : keys.filter(key => !anchored.has(key))
+}
+
 /**
  * The anchor rows of one scaled-balance contract at `anchorBlock`: the
  * scaledTotalSupply() total (holder = '') and scaledBalanceOf(h) for every
@@ -119,7 +139,12 @@ export function makeEthCallBatch(rpcUrl: string, fetchImpl: typeof fetch = fetch
  * (no code at B0: a reserve created after it) and a zero balance yield no row.
  */
 export async function anchorForContract(contract: string, holders: string[], anchorBlock: number, ethCall: EthCall): Promise<AnchorRow[]> {
-  const keys = ['', ...holders]
+  return anchorRowsForKeys(contract, ['', ...holders], anchorBlock, ethCall)
+}
+
+/** anchorForContract over an explicit key list (anchorKeysToRead's output). */
+export async function anchorRowsForKeys(contract: string, keys: readonly string[], anchorBlock: number, ethCall: EthCall): Promise<AnchorRow[]> {
+  if (!keys.length) return []
   const results = await ethCall(keys.map(h => scaledCall(contract, h)), blockTag(anchorBlock))
   const rows: AnchorRow[] = []
   keys.forEach((holder, i) => {
@@ -180,9 +205,14 @@ export async function verifyAnchors(rows: AnchorRow[], ethCall: EthCall): Promis
  * so a holder who received the aToken inside a gap and did nothing afterwards
  * appears in no Transfer at all; the RewardsController's Accrued/anchor rows name
  * such a holder when it was incentivized (a claim or any balance change re-emits
- * Accrued for it). A candidate costs one scaledBalanceOf, and a non-holder reads 0
- * and yields no row, so over-including is free while under-including drops a
- * holder from the anchor for good.
+ * Accrued for it), the collateral sweep names it once the money market reads its
+ * position, and a Substrate transfer or swap of the registry asset over the aToken
+ * (GDOT over aGDOT) names it from the substrate side. Measured at block 15,047,000:
+ * 79 holders (77 aGDOT, one aUSDT, one atBTC) held their whole balance since
+ * before B0, were in none of the log-fed sources, and summed exactly to each
+ * contract's total-minus-holders gap. A candidate costs one scaledBalanceOf, and a
+ * non-holder reads 0 and yields no row, so over-including is free while
+ * under-including drops a holder from the anchor until a source names it.
  */
 export function unionCandidates(sources: Record<string, readonly string[]>): { holders: string[]; counts: Record<string, number> } {
   const set = new Set<string>()

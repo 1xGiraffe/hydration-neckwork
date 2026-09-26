@@ -5767,10 +5767,17 @@ export interface MmUnstatedReserve {
 //
 //  - `unreconstructed`: the holder's usage-as-collateral configuration names the
 //    reserve (Aave clears the bit at a zero balance, so the bit means a balance)
-//    while the anchor+delta fold holds nothing of it. An aToken that reached the
-//    holder Substrate-side — GDOT bought on the Omnipool, a DCA fill — moved inside
-//    a runtime-internal EVM call that emits no EVM.Log, so the fold never saw it:
-//    71 core-market holders on live data, every one on 2-Pool-GDOT.
+//    while the anchor+delta fold holds nothing of it. The post-B0 deltas are
+//    complete (every aToken move since B0 carries the contract's own logs,
+//    Substrate-dispatched ones included — conservation held to the wei for every
+//    live contract at block 15,047,000); what the fold lacks is a holder who
+//    received BEFORE B0 inside a gap of the pre-B0 log coverage and never moved,
+//    whom the anchor's log-fed candidate sources never named — 77 aGDOT holders
+//    on live data, plus one aUSDT and one atBTC. The anchors loop now tops the
+//    anchor up every cycle from the collateral sweep, the pool's events and the
+//    Substrate legs of the registry asset over the aToken, so such a holder is
+//    stated per reserve one cycle after a source names it; until then this is
+//    the honest reading of the bit.
 //  - `unpriced`: the fold holds the reserve but the explorer's own prices cannot
 //    value it (WBTC's feed ended with the Moonbeam route; the oracle still prices
 //    it), so the wallet row carries the amount and no value.

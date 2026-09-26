@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import {
-  MM_LOGS_FROM, SEL, anchorForContract, blockTag, makeEthCallBatch, parseUint, scaledCall, unionCandidates, verificationSample, verifyAnchors,
+  MM_LOGS_FROM, SEL, anchorForContract, anchorKeysToRead, anchorRowsForKeys, blockTag, makeEthCallBatch, parseUint, scaledCall, unionCandidates, verificationSample, verifyAnchors,
   type AnchorRow, type EthCall, type EthCallRequest,
 } from '../../src/scripts/atokenAnchor.ts'
 
@@ -72,6 +72,32 @@ describe('anchorForContract', () => {
   it('yields nothing for a contract with no code at B0', async () => {
     const { ethCall } = fakeChain({ [B0]: {} })
     expect(await anchorForContract(VDEBT, [HOLDER], B0, ethCall)).toEqual([])
+  })
+})
+
+// A holder no source named at the first capture — one who received before B0
+// inside a gap of the pre-B0 log coverage and never moved (79 on live data, all of
+// them the whole of their contract's total-minus-holders gap) — is anchored by the
+// cycle after a source names it: the top-up reads exactly the keys without a row.
+describe('anchorKeysToRead', () => {
+  const anchored = new Set(['', HOLDER])
+  it('a full capture reads the total and every candidate', () => {
+    expect(anchorKeysToRead([HOLDER, OTHER], anchored, 'full')).toEqual(['', HOLDER, OTHER])
+  })
+  it('a top-up reads only the keys the table lacks — the total too, when a contract had no code at B0', () => {
+    expect(anchorKeysToRead([HOLDER, OTHER], anchored, 'top-up')).toEqual([OTHER])
+    expect(anchorKeysToRead([HOLDER, OTHER], new Set([HOLDER]), 'top-up')).toEqual(['', OTHER])
+    expect(anchorKeysToRead([HOLDER], anchored, 'top-up')).toEqual([])
+  })
+  it('a top-up reads a newly named pre-B0 holder at B0 and makes no call for an empty key list', async () => {
+    const { ethCall, seen } = fakeChain({ [B0]: { [ADOT]: { '': 147187126603907355n, [HOLDER]: 109543927060313n, [OTHER]: 5n } } })
+    expect(await anchorRowsForKeys(ADOT, anchorKeysToRead([HOLDER, OTHER], anchored, 'top-up'), B0, ethCall)).toEqual([
+      { contract_address: ADOT, holder: OTHER, scaled_balance: '5', anchor_block: B0 },
+    ])
+    expect(seen).toHaveLength(1)
+    expect(seen[0].calls).toEqual([scaledCall(ADOT, OTHER)])
+    expect(await anchorRowsForKeys(ADOT, [], B0, ethCall)).toEqual([])
+    expect(seen).toHaveLength(1)
   })
 })
 
@@ -175,8 +201,18 @@ describe('the capture gate', () => {
     expect(script).toMatch(/atokenAnchorDecision\(\{ anchorRowCount, logGaps \}/)
   })
 
-  it('offers no in-place patch modes: an anchor is only ever captured whole', () => {
+  it('offers no manual patch modes: the loop itself tops the anchor up from every source', () => {
     const script = readFileSync(new URL('../../src/scripts/snapshot-atoken-anchors.ts', import.meta.url), 'utf8')
     expect(script).not.toMatch(/hasFlag\('(recapture|add-missing)'\)/)
+    expect(script).toMatch(/anchorKeysToRead\(candidates\.holders, anchored\.get\(contract\)/)
+    // The sources beyond the money market's own logs, which the pre-B0 log gaps
+    // leave partial: the collateral sweep, every decoded pool event, and the
+    // Substrate legs of the registry asset over the aToken (first 20 bytes of the
+    // AccountId32, the runtime's address mapping).
+    expect(script).toContain('FROM price_data.money_market_collateral_anchor')
+    expect(script).toContain('FROM price_data.raw_money_market_events')
+    expect(script).toContain('FROM price_data.transfer_activity WHERE asset_id IN (')
+    expect(script).toContain('FROM price_data.asset_swap_activity WHERE asset_id IN (')
+    expect(script).toContain("lower(substring(acc, 1, 42))")
   })
 })
