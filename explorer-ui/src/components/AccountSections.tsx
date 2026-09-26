@@ -511,6 +511,7 @@ function MoneyMarketCard({ mm, defisimAddress }: { mm: MoneyMarketPosition; defi
           {isPrimary ? 'primary' : <>{iconAsset != null && <AssetIcon assetId={iconAsset} symbol={mm.market} size={14} />} {mm.market}</>} · lend &amp; borrow
         </span>
         {mm.stakingBacked && <span className="mm-title-note">collateral is staked HDX — counted once in the wallet balance</span>}
+        {!!mm.unstatedCollateral?.length && <span className="mm-title-note" title="The explorer reconstructs supplied reserves from the money market's own logs. This collateral reached the account without them (bought on the Omnipool, say) or has no price here, so Lent and the Value take the market's own collateral figure for it.">{mm.unstatedCollateral.map(a => a.symbol).join(', ')} collateral not stated per reserve — valued by the market's own figure</span>}
         {defisimAddress && <a className="ext-link mm-defisim-link" href={`https://defisim.neckwork.net/?address=${encodeURIComponent(defisimAddress)}`} target="_blank" rel="noopener noreferrer">Open in DefiSim ↗</a>}
       </header>
       <div className="mm-card">

@@ -30,8 +30,9 @@ describe('applyMmCollateralToBalances', () => {
     expect(balances[0].free).toBe(units(ATBTC, 6))
     expect(balances[0].reserved).toBe(units(ATBTC, 1))
     expect(balances[0].valueUsd).toBeCloseTo(7 * PRICE)
-    // Only the supplied part is money-market collateral: the aggregate the
-    // shortfall is measured against never covered the reserve.
+    // Only the supplied part is money-market collateral: the reserve is a wallet
+    // holding the market never saw, so it is not measured against the aggregate
+    // (mmUnstatedCollateralUsd).
     expect(folded).toBeCloseTo(6 * PRICE)
   })
 

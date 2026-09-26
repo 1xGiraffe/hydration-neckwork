@@ -27,9 +27,11 @@ describe('tag membership keys', () => {
     // model version. Reusing the counts form for the detail table is the failure
     // this pins.
     expect(key.endsWith(`|${list}`)).toBe(true)
-    // `-r4`: the account value carries the COUNTED claimable farm rewards and
-    // money-market incentives (`-r3`) and leaves a pool account's own hub reserve out.
-    expect(key.slice(0, key.indexOf('|'))).toMatch(/^v[123]-r4$/)
+    // `-r5`: the account value carries the COUNTED claimable farm rewards and
+    // money-market incentives (`-r3`), leaves a pool account's own hub reserve out
+    // (`-r4`) and values money-market collateral by the folded reserves, the
+    // market's aggregate standing in only where a reserve is unstated.
+    expect(key.slice(0, key.indexOf('|'))).toMatch(/^v[123]-r5$/)
     expect(key).not.toBe(list)
   })
 

@@ -1,6 +1,7 @@
 import { describe,expect,it } from 'vitest'
 import {
   buildMoneyMarketAccountValueClaims,
+  moneyMarketClaimReservePresent,
   mmReserveAddressForAsset,
   type LatestMoneyMarketAggregate,
   type MmReserveToken,
@@ -51,6 +52,33 @@ describe('buildMoneyMarketAccountValueClaims',()=>{
     )).toHaveLength(2)
     expect(()=>buildMoneyMarketAccountValueClaims(holdings,[token],new Map(),[]))
       .toThrow('missing money-market reserve index')
+  })
+
+  // A holder's usage-as-collateral bit means a balance (Aave clears it at zero), so a
+  // flagged reserve the fold holds no supply of — GDOT that reached the holder
+  // Substrate-side, outside the aToken logs — is stored as reserve_present = 2 with
+  // zero amounts: the directory then values that market by its aggregate, as the
+  // account page does (mmUnstatedCollateralUsd), and nowhere else.
+  it('stores a collateral reserve the fold holds nothing of as an unstated claim',()=>{
+    const indices=new Map([[`${pool}:${token.asset}`,{liq:RAY,vbi:RAY}]])
+    const on=new Map([[holder,new Map([[`${pool}:${token.asset.toLowerCase()}`,true]])]])
+    const claims=buildMoneyMarketAccountValueClaims([],[token],indices,[aggregate],on)
+    expect(claims).toHaveLength(2)
+    expect(claims[1]).toMatchObject({reservePresent:true,unstated:true,assetId:5,supplied:0n,debt:0n,totalCollateralBase:0n})
+    expect(claims.map(moneyMarketClaimReservePresent)).toEqual([0,2])
+    // A debt-only reserve row leaves the supply just as unstated; the two rows differ
+    // in reserve_present, so the generation's (account, pool, reserve_present, asset)
+    // identity stays unique.
+    const debtOnly=buildMoneyMarketAccountValueClaims([{holder,contract:vDebt,scaled:300n}],[token],indices,[aggregate],on)
+    expect(debtOnly.map(moneyMarketClaimReservePresent)).toEqual([0,1,2])
+    // A reconstructed supply satisfies the bit.
+    const supplied=buildMoneyMarketAccountValueClaims([{holder,contract:aToken,scaled:1_000n}],[token],indices,[aggregate],on)
+    expect(supplied.map(moneyMarketClaimReservePresent)).toEqual([0,1])
+    // A cleared bit (the holder exited; the aggregate is a stale observation) and a
+    // holder with neither aggregate nor holding name nothing.
+    const off=new Map([[holder,new Map([[`${pool}:${token.asset.toLowerCase()}`,false]])]])
+    expect(buildMoneyMarketAccountValueClaims([],[token],indices,[aggregate],off).map(moneyMarketClaimReservePresent)).toEqual([0])
+    expect(buildMoneyMarketAccountValueClaims([],[token],indices,[],on)).toHaveLength(0)
   })
 
   it('rejects duplicate logical scaled holdings before aggregation',()=>{

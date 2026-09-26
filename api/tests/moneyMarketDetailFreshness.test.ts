@@ -23,7 +23,7 @@ const SNAPSHOT_TABLE = 'money_market_account_value_snapshots'
 // after a refresh tick, against ~45s for the projection the snapshot copies from.
 describe('money-market account detail reads the projection, not the snapshot', () => {
   const positions = bodyOf('async function getMoneyMarketPositions(h160: string)')
-  const reserves = bodyOf('export async function getMoneyMarketReserves(h160: string)')
+  const reserves = bodyOf('async function loadMoneyMarketReserveRead(h160: string)')
 
   it('reads aggregate position state from the insert-time projection', () => {
     expect(positions).toContain('latestMoneyMarketPositionsSql(')
@@ -35,7 +35,7 @@ describe('money-market account detail reads the projection, not the snapshot', (
     expect(reserves).not.toContain(SNAPSHOT_TABLE)
   })
 
-  // Both must move together. attachMmReserves raises the card's displayed totals to
+  // Both must move together. attachMmReserves raises the card's displayed debt to
   // max(aggregate, reserve-derived), so a fresh aggregate beside five-minute-old
   // reserves would let a stale-high debt survive a repay — worse than either alone.
   it('gates neither path on the snapshot generation', () => {
@@ -44,14 +44,16 @@ describe('money-market account detail reads the projection, not the snapshot', (
   })
 
   // The other direction: the snapshot is still the only global source of per-reserve
-  // supplied/debt for every account at once, which the directory's value ranking folds
-  // in via greatest(aggregate, sum(reserve rows)) to catch supplied-but-not-collateral
-  // balances the aggregate omits. Dropping it would silently understate those accounts.
+  // supplied/debt for every account at once, which the directory's value ranking
+  // values through mmSnapshotCollateralSql — the reserve rows, the aggregate only
+  // where a reserve is unstated — so it catches supplied-but-not-collateral balances
+  // the aggregate omits. Dropping it would silently understate those accounts.
   it('leaves the accounts directory reading the snapshot', () => {
     const mmLatest = explorerService.slice(
       explorerService.indexOf('mm_latest AS ('),
       explorerService.indexOf('// Additive projections for a viewer'))
     expect(mmLatest).toContain(SNAPSHOT_TABLE)
+    expect(mmLatest).toContain('mmSnapshotCollateralSql(')
     expect(mmLatest).toContain('reserve_present=1')
   })
 })
