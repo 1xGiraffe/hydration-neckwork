@@ -1,4 +1,5 @@
 import type { AssetRef, MmReserve, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMarketHistoryReserve, MoneyMarketPosition, ReserveYield } from '../../types'
+import type { AreaSeries } from '../HdxCharts'
 import { sumPct } from './yieldFormat'
 
 // Pure arithmetic behind the Borrow tab — rates, health factors and history
@@ -187,6 +188,41 @@ export function marketSeries(history: MoneyMarketHistory, market: MoneyMarketHis
     }
   }
   return out
+}
+
+/** The colours the Borrow tab's history charts draw in (custom properties on .bw-card). */
+export interface BorrowChartColours { supplied: string; borrowed: string; healthFactor: string }
+
+/**
+ * The exposure chart's lines on a series: supplied and borrowed, plus the market's
+ * own collateral and debt totals (dashed) when `chain`. Decided on the BASE series,
+ * so a zoom window's grid carries the same keys as the view it refines and the
+ * legend stays true of both.
+ */
+export function exposureLines(s: BorrowSeries, chain: boolean, c: BorrowChartColours): AreaSeries[] {
+  return [
+    { key: 'sup', label: 'Supplied', color: c.supplied, values: s.supplied },
+    { key: 'debt', label: 'Borrowed', color: c.borrowed, values: s.borrowed },
+    ...(chain ? [
+      { key: 'colChain', label: 'Collateral (chain)', color: c.supplied, values: s.collateralChain, dashed: true },
+      { key: 'debtChain', label: 'Debt (chain)', color: c.borrowed, values: s.debtChain, dashed: true },
+    ] : []),
+  ]
+}
+
+/** The health-factor chart's one line: the lowest the chain observed in each bucket. */
+export function healthFactorLines(s: BorrowSeries, c: BorrowChartColours): AreaSeries[] {
+  return [{ key: 'hf', label: 'Lowest health factor', color: c.healthFactor, values: s.hf }]
+}
+
+/**
+ * A chart-zoom window's series: the same market on the history re-bucketed over
+ * the window — the API's ladder, so a week-stepped history refines to days, then
+ * to hours, as the window narrows. Null when the window has no market to draw.
+ */
+export function windowedMarketSeries(window: MoneyMarketHistory, marketKey: string): BorrowSeries | null {
+  const m = window.markets.find(x => x.marketKey === marketKey)
+  return m && window.dates.length > 1 ? marketSeries(window, m) : null
 }
 
 /** Σ claimed incentives' USD, with the claims that carry no price counted aloud. */
