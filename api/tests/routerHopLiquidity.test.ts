@@ -54,20 +54,21 @@ describe('router-hop liquidity classification', () => {
   // on the block/extrinsic page is exactly the bug this fixes. Every liquidity_activity
   // read that renders or counts rows must apply the shared builder before its LIMIT.
   it('is applied by every liquidity_activity read that renders or counts rows', () => {
-    // The four SQL reads by name: the global liquidity feed, the asset page's
-    // liquidity arm, the account count arm, and the account page's liquidity fetch.
+    // The five SQL reads by name: the global liquidity feed, the asset page's
+    // liquidity arm, the account count arm, the account page's liquidity fetch, and a
+    // pool account's venue source (which pages and counts the pool's own liquidity).
     // Each builds the join/predicate pair with exactly ONE call and destructures it,
     // so the predicate can never end up built from different arguments than the join
     // it is paired with.
-    for (const name of ['getRecentLiquidity', 'assetActivityPage', 'accountLiquidityArm', 'collectAccountActivity']) {
+    for (const name of ['getRecentLiquidity', 'assetActivityPage', 'accountLiquidityArm', 'collectAccountActivity', 'venueSources']) {
       const at = explorerService.indexOf(`function ${name}(`)
       expect(at, name).toBeGreaterThan(-1)
       const fn = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
       expect((fn.match(/routerHopLiquiditySql\(/g) ?? []).length, name).toBe(1)
     }
-    // Those four plus the definition, and nothing else: a fifth read cannot appear
+    // Those five plus the definition, and nothing else: a sixth read cannot appear
     // without this list being revisited.
-    expect((explorerService.match(/routerHopLiquiditySql\(/g) ?? []).length).toBe(5)
+    expect((explorerService.match(/routerHopLiquiditySql\(/g) ?? []).length).toBe(6)
     // The block/extrinsic builder holds the block's events already and uses the mirror.
     expect(explorerService).toContain('isRouterHopLiquidity(r.event_name, r.who, r.asset_id')
   })
