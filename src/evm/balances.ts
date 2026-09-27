@@ -154,21 +154,36 @@ export async function readErc20Balances(
   assetIds: number[],
   poolAccountHex: string
 ): Promise<bigint[]> {
-  // For efficiency, batch all storage reads
-  const queries: Array<{ index: number; contract: string; storageKey: string; reserve: AtokenReserveRef | null; isAToken: boolean }> = []
-  const results: bigint[] = new Array(assetIds.length).fill(0n)
-  const evmAddr = substrateToEvmAddress(poolAccountHex)
+  const [balances] = await readErc20BalancesForHolders(block, [{ assetIds, poolAccountHex }])
+  return balances
+}
 
-  for (let i = 0; i < assetIds.length; i++) {
-    const contract = erc20Contracts.get(assetIds[i])
-    if (!contract) continue
+/**
+ * `readErc20Balances` for several holders in ONE storage read: every holder's
+ * balance words and the reserve words their aTokens accrue by go into a single
+ * batched `EVM.AccountStorages` query. Returns one array per request, aligned with
+ * its `assetIds`, with the same zero-means-unread rule.
+ */
+export async function readErc20BalancesForHolders(
+  block: Block,
+  requests: Array<{ assetIds: number[]; poolAccountHex: string }>,
+): Promise<bigint[][]> {
+  const queries: Array<{ request: number; index: number; contract: string; storageKey: string; reserve: AtokenReserveRef | null; isAToken: boolean }> = []
+  const results: bigint[][] = requests.map(request => new Array(request.assetIds.length).fill(0n))
 
-    const isAToken = atokenIds.has(assetIds[i])
-    const slot = isAToken ? AAVE_USER_STATE_SLOT : ERC20_BALANCE_SLOT
-    const storageKey = mappingStorageKey(evmAddr, slot)
-    const reserve = isAToken ? atokenReserves.get(contract.toLowerCase()) ?? null : null
-    queries.push({ index: i, contract, storageKey, reserve, isAToken })
-  }
+  requests.forEach(({ assetIds, poolAccountHex }, request) => {
+    const evmAddr = substrateToEvmAddress(poolAccountHex)
+    for (let i = 0; i < assetIds.length; i++) {
+      const contract = erc20Contracts.get(assetIds[i])
+      if (!contract) continue
+
+      const isAToken = atokenIds.has(assetIds[i])
+      const slot = isAToken ? AAVE_USER_STATE_SLOT : ERC20_BALANCE_SLOT
+      const storageKey = mappingStorageKey(evmAddr, slot)
+      const reserve = isAToken ? atokenReserves.get(contract.toLowerCase()) ?? null : null
+      queries.push({ request, index: i, contract, storageKey, reserve, isAToken })
+    }
+  })
 
   if (queries.length === 0) return results
   if (!storage.evm.accountStorages.v193.is(block)) {
@@ -206,7 +221,7 @@ export async function readErc20Balances(
       if (!hex || hex === '0'.repeat(64)) continue
 
       const query = queries[qi]
-      const assetId = assetIds[query.index]
+      const assetId = requests[query.request].assetIds[query.index]
 
       if (query.isAToken) {
         const userState = BigInt('0x' + hex)
@@ -230,9 +245,9 @@ export async function readErc20Balances(
           warnAtokenUnusable(block, assetId, query.contract, 'reserve has no liquidity index')
           continue
         }
-        results[query.index] = atokenBalanceFromUserState(userState, income)
+        results[query.request][query.index] = atokenBalanceFromUserState(userState, income)
       } else {
-        results[query.index] = BigInt('0x' + hex)
+        results[query.request][query.index] = BigInt('0x' + hex)
       }
     }
   } catch (error) {

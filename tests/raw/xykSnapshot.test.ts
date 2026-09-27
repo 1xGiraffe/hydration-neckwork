@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { updateErc20Registry } from '../../src/evm/balances.ts'
-import { poolPalletEventFamily, readXYKState, reserveTransferAccounts } from '../../src/raw/snapshot.ts'
+import {
+  eventAccounts,
+  eventCurrencyId,
+  getStableswapPoolAccount,
+  poolPalletEventFamily,
+  readXYKState,
+  refreshAccruingPoolFields,
+  stableswapAmplificationAt,
+} from '../../src/raw/snapshot.ts'
+import type { SnapshotStableswapPoolState } from '../../src/raw/types.ts'
 import * as evmStorage from '../../src/types/evm/storage.ts'
 import * as systemStorage from '../../src/types/system/storage.ts'
 import * as tokensStorage from '../../src/types/tokens/storage.ts'
@@ -128,20 +137,126 @@ describe('readXYKState', () => {
   })
 })
 
-describe('reserveTransferAccounts', () => {
-  it('names both accounts of a Tokens, Currencies or Balances transfer', () => {
+describe('eventAccounts', () => {
+  it('names every account in the arguments, not only a transfer\'s two', () => {
     // An aToken / Erc20 leg is reported as Currencies.Transferred alone.
-    expect(reserveTransferAccounts({ name: 'Currencies.Transferred', args: { currencyId: 69, from: '0x03', to: TOKEN_POOL, amount: 1n } })).toEqual(['0x03', TOKEN_POOL])
-    expect(reserveTransferAccounts({ name: 'Balances.Transfer', args: { from: '0x01', to: HDX_POOL, amount: 1n } })).toEqual(['0x01', HDX_POOL])
-    expect(reserveTransferAccounts({ name: 'Tokens.Transfer', args: { currencyId: 5, from: TOKEN_POOL, to: '0x02', amount: 1n } })).toEqual([TOKEN_POOL, '0x02'])
+    expect(eventAccounts({ args: { currencyId: 69, from: `0x${'03'.repeat(32)}`, to: TOKEN_POOL, amount: 1n } }))
+      .toEqual(new Set([`0x${'03'.repeat(32)}`, TOKEN_POOL]))
+    // Deposits and withdrawals move a pool account's free balance with no transfer beside them.
+    expect(eventAccounts({ args: { who: HDX_POOL, amount: 1n } })).toEqual(new Set([HDX_POOL]))
+    expect(eventAccounts({ args: { currencyId: 5, who: TOKEN_POOL, amount: 1n } })).toEqual(new Set([TOKEN_POOL]))
+    // Nested structures (a filler, a route) are searched too.
+    expect(eventAccounts({ args: { filler: { account: ERC20_POOL }, route: [{ pool: HDX_POOL }] } })).toEqual(new Set([ERC20_POOL, HDX_POOL]))
   })
 
-  it('ignores every other event and malformed args', () => {
-    expect(reserveTransferAccounts({ name: 'Balances.Deposit', args: { who: HDX_POOL, amount: 1n } })).toBeNull()
-    expect(reserveTransferAccounts({ name: 'Balances.Transfer', args: { from: '0x01' } })).toBeNull()
-    expect(reserveTransferAccounts({ name: 'Balances.Transfer' })).toBeNull()
-    expect(reserveTransferAccounts({ name: 'Currencies.Transferred', args: { to: TOKEN_POOL } })).toBeNull()
-    expect(reserveTransferAccounts({ args: { from: '0x01', to: TOKEN_POOL } })).toBeNull()
+  it('names nothing for events without account arguments', () => {
+    expect(eventAccounts({ args: { amount: 1n, assetId: 5 } })).toEqual(new Set())
+    expect(eventAccounts({ args: { evmAddress: '0x531a654d1696ed52e7275a8cede955e82620f99a' } })).toEqual(new Set())
+    expect(eventAccounts({})).toEqual(new Set())
+  })
+})
+
+describe('eventCurrencyId', () => {
+  it('reads the currency a Tokens or Currencies event moves', () => {
+    // A stableswap share minted to a holder changes the pool's total_issuance.
+    expect(eventCurrencyId({ name: 'Tokens.Deposited', args: { currencyId: 102, who: '0x01', amount: 1n } })).toBe(102)
+    expect(eventCurrencyId({ name: 'Currencies.Withdrawn', args: { currencyId: 690, who: '0x01', amount: 1n } })).toBe(690)
+  })
+
+  it('ignores other pallets and malformed ids', () => {
+    expect(eventCurrencyId({ name: 'Omnipool.SellExecuted', args: { currencyId: 5 } })).toBeNull()
+    expect(eventCurrencyId({ name: 'Tokens.Deposited', args: { currencyId: '5' } })).toBeNull()
+    expect(eventCurrencyId({ name: 'Tokens.Deposited' })).toBeNull()
+  })
+})
+
+describe('stableswapAmplificationAt', () => {
+  const ramp = { initialAmplification: 100, finalAmplification: 300, initialBlock: 1_000, finalBlock: 3_000 }
+
+  it('steps the ramp linearly every block and holds its ends', () => {
+    expect(stableswapAmplificationAt(ramp, 999)).toBe(100n)
+    expect(stableswapAmplificationAt(ramp, 1_000)).toBe(100n)
+    expect(stableswapAmplificationAt(ramp, 2_000)).toBe(200n)
+    expect(stableswapAmplificationAt(ramp, 2_001)).toBe(200n)
+    expect(stableswapAmplificationAt(ramp, 2_010)).toBe(201n)
+    expect(stableswapAmplificationAt(ramp, 3_000)).toBe(300n)
+    expect(stableswapAmplificationAt(ramp, 9_000)).toBe(300n)
+  })
+})
+
+describe('refreshAccruingPoolFields', () => {
+  const ATOKEN = 1001
+  const ATOKEN_CONTRACT = `0x${'44'.repeat(20)}`
+  const PLAIN = 5
+  const OMNIPOOL = `0x${'dd'.repeat(32)}`
+  const ssPool = (overrides: Partial<SnapshotStableswapPoolState> = {}): SnapshotStableswapPoolState => ({
+    pool_id: 690, assets: [PLAIN, ATOKEN], reserves: ['10', '20'], amplification: '100', fee: 200,
+    initial_amplification: 100, final_amplification: 100, initial_block: 0, final_block: 0, ...overrides,
+  })
+
+  function installEvm(value: bigint): Array<Array<[string, string]>> {
+    const reads: Array<Array<[string, string]>> = []
+    patch(evmStorage.accountStorages.v193, {
+      is: () => true,
+      getMany: async (_b: Block, keys: Array<[string, string]>) => {
+        reads.push(keys)
+        return keys.map(() => `0x${value.toString(16).padStart(64, '0')}`)
+      },
+    })
+    return reads
+  }
+
+  it('re-reads every reused Erc20 leg in one batched storage read', async () => {
+    updateErc20Registry(new Map([[HOLLAR, '0x531a654d1696ed52e7275a8cede955e82620f99a'], [ATOKEN, ATOKEN_CONTRACT]]), new Set())
+    const reads = installEvm(777n)
+
+    const next = await refreshAccruingPoolFields(block, {
+      omnipool_account: OMNIPOOL,
+      omnipool_assets: [
+        { asset_id: 0, hub_reserve: '1', reserve: '2', shares: '3', protocol_shares: '0', cap: '1', tradable: 15 },
+        { asset_id: ATOKEN, hub_reserve: '1', reserve: '5', shares: '5', protocol_shares: '0', cap: '1', tradable: 15 },
+      ],
+      xyk_pools: [
+        { pool_account: ERC20_POOL, asset_a: 0, asset_b: HOLLAR, reserve_a: '9', reserve_b: '8' },
+        { pool_account: TOKEN_POOL, asset_a: 5, asset_b: 10, reserve_a: '7', reserve_b: '11' },
+      ],
+      stableswap_pools: [ssPool()],
+    }, { omnipool: true, xyk: true, stableswap: true })
+
+    expect(reads).toHaveLength(1)
+    expect(reads[0].map(([contract]) => contract)).toEqual([ATOKEN_CONTRACT, '0x531a654d1696ed52e7275a8cede955e82620f99a', ATOKEN_CONTRACT])
+    expect(next.omnipool_assets.map(asset => asset.reserve)).toEqual(['2', '777'])
+    expect(next.xyk_pools.map(pool => [pool.reserve_a, pool.reserve_b])).toEqual([['9', '777'], ['7', '11']])
+    expect(next.stableswap_pools[0].reserves).toEqual(['10', '777'])
+  })
+
+  it('leaves refreshed families alone and keeps a leg that reads zero', async () => {
+    updateErc20Registry(new Map([[ATOKEN, ATOKEN_CONTRACT]]), new Set())
+    const reads = installEvm(0n)
+    const state = {
+      omnipool_account: OMNIPOOL,
+      omnipool_assets: [{ asset_id: ATOKEN, hub_reserve: '1', reserve: '5', shares: '5', protocol_shares: '0', cap: '1', tradable: 15 }],
+      xyk_pools: [],
+      stableswap_pools: [ssPool()],
+    }
+
+    const next = await refreshAccruingPoolFields(block, state, { omnipool: false, xyk: true, stableswap: true })
+
+    expect(reads[0].map(([, key]) => key)).toHaveLength(1)
+    expect(next.omnipool_assets).toBe(state.omnipool_assets)
+    expect(next.stableswap_pools).toBe(state.stableswap_pools)
+  })
+
+  it('steps a reused stableswap ramp to the block height with no storage read', async () => {
+    patch(evmStorage.accountStorages.v193, { is: () => true, getMany: async () => { throw new Error('unexpected EVM read') } })
+    const pool = ssPool({ assets: [PLAIN, 10], initial_amplification: 100, final_amplification: 300, initial_block: 15_000_000, final_block: 15_026_400, amplification: '100' })
+
+    const next = await refreshAccruingPoolFields(block, { omnipool_account: OMNIPOOL, omnipool_assets: [], xyk_pools: [], stableswap_pools: [pool] },
+      { omnipool: true, xyk: true, stableswap: true })
+
+    // block 15,013,200 is halfway through the ramp.
+    expect(next.stableswap_pools[0].amplification).toBe('200')
+    expect(getStableswapPoolAccount(690)).toMatch(/^0x[0-9a-f]{64}$/)
   })
 })
 
