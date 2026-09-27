@@ -5,7 +5,7 @@ import { deriveOmnipoolAccount, deriveStableswapPoolAccount } from '../util/acco
 import type { AssetMetadata } from '../registry/types.ts'
 import type { Block } from '../types/support.ts'
 import * as storage from '../types/storage.ts'
-import { isKnownErc20, readErc20Balances } from '../evm/balances.js'
+import { isKnownErc20, readErc20Balances, readErc20BalancesForHolders } from '../evm/balances.js'
 import { toClickHouseDateTime } from './json.js'
 import type {
   SnapshotOmnipoolAsset,
@@ -259,20 +259,39 @@ export async function readXYKState(
 }
 
 /**
- * Transfer events that can move a pool account's reserves without a swap event:
- * `Tokens.Transfer` for Tokens assets, `Currencies.Transferred` for an aToken or
- * other Erc20 asset (reported as that event ALONE — the GDOT/GETH/GSOL stableswap
- * reserves), and `Balances.Transfer` for native HDX (an HDX leg of an XYK
- * add/remove-liquidity, or a donation to a pool account). All three carry
- * `from`/`to`. Returns the two accounts, or nothing for any other event.
+ * Every account an event names, anywhere in its arguments (AccountId32 hex).
+ *
+ * A pool account's free balance only moves with an event naming it — Tokens,
+ * Balances and Currencies report every mutation with the account as `who`/`from`/
+ * `to` — but not only with a transfer: `Tokens.Deposited`/`Withdrawn`,
+ * `Balances.Deposit`/`Withdraw`/`Endowed`/`DustLost`, `Currencies.Deposited` and
+ * the rest move reserves too. The snapshot refreshes the family of every pool
+ * account named here, whatever the event.
  */
-const RESERVE_TRANSFER_EVENTS = new Set(['Tokens.Transfer', 'Currencies.Transferred', 'Balances.Transfer'])
+export function eventAccounts(event: { args?: unknown }): Set<string> {
+  const accounts = new Set<string>()
+  const visit = (value: unknown, depth: number): void => {
+    if (typeof value === 'string') {
+      if (value.length === 66 && value.startsWith('0x')) accounts.add(value)
+      return
+    }
+    if (value == null || typeof value !== 'object' || depth > 6) return
+    for (const item of Array.isArray(value) ? value : Object.values(value)) visit(item, depth + 1)
+  }
+  visit(event.args, 0)
+  return accounts
+}
 
-export function reserveTransferAccounts(event: { name?: string; args?: unknown }): [string, string] | null {
-  if (event.name == null || !RESERVE_TRANSFER_EVENTS.has(event.name)) return null
-  const args = event.args as { from?: unknown; to?: unknown } | undefined
-  if (typeof args?.from !== 'string' || typeof args?.to !== 'string') return null
-  return [args.from, args.to]
+/**
+ * The currency a Tokens / Currencies event moves, when it names one. A stableswap
+ * pool's share issuance (`Tokens.TotalIssuance` of the pool id, published as
+ * `total_issuance`) changes with a `Deposited`/`Withdrawn` of the share to or from
+ * a holder — an event that need not name the pool account.
+ */
+export function eventCurrencyId(event: { name?: string; args?: unknown }): number | null {
+  if (event.name == null || !(event.name.startsWith('Tokens.') || event.name.startsWith('Currencies.'))) return null
+  const currencyId = (event.args as { currencyId?: unknown } | undefined)?.currencyId
+  return typeof currencyId === 'number' && Number.isSafeInteger(currencyId) ? currencyId : null
 }
 
 /**
@@ -295,6 +314,34 @@ export function poolPalletEventFamily(event: { name?: string }): 'omnipool' | 'x
   const dot = event.name?.indexOf('.') ?? -1
   if (dot <= 0) return null
   return POOL_PALLET_FAMILIES.get(event.name!.slice(0, dot)) ?? null
+}
+
+/**
+ * A stableswap pool's amplification at `height`: the pallet's linear ramp from
+ * `initialAmplification` at `initialBlock` to `finalAmplification` at `finalBlock`.
+ * It moves every block of a ramp with no event, so a reused snapshot state must
+ * restate it per block (`refreshAccruingPoolFields`), not carry the refresh block's.
+ */
+export function stableswapAmplificationAt(
+  pool: { initialAmplification: number; finalAmplification: number; initialBlock: number; finalBlock: number },
+  height: number,
+): bigint {
+  try {
+    return BigInt(calculate_amplification(
+      pool.initialAmplification.toString(),
+      pool.finalAmplification.toString(),
+      pool.initialBlock.toString(),
+      pool.finalBlock.toString(),
+      height.toString(),
+    ))
+  } catch {
+    if (height >= pool.finalBlock) return BigInt(pool.finalAmplification)
+    if (height <= pool.initialBlock) return BigInt(pool.initialAmplification)
+    const totalBlocks = pool.finalBlock - pool.initialBlock
+    const elapsedBlocks = height - pool.initialBlock
+    return BigInt(pool.initialAmplification) +
+      ((BigInt(pool.finalAmplification - pool.initialAmplification) * BigInt(elapsedBlocks)) / BigInt(totalBlocks))
+  }
 }
 
 let stableswapPegStorageSeen = false
@@ -364,27 +411,7 @@ export async function readStableswapState(
       }
     }
 
-    let amplification: bigint
-    try {
-      amplification = BigInt(calculate_amplification(
-        pool.initialAmplification.toString(),
-        pool.finalAmplification.toString(),
-        pool.initialBlock.toString(),
-        pool.finalBlock.toString(),
-        block.height.toString(),
-      ))
-    } catch {
-      if (block.height >= pool.finalBlock) {
-        amplification = BigInt(pool.finalAmplification)
-      } else if (block.height <= pool.initialBlock) {
-        amplification = BigInt(pool.initialAmplification)
-      } else {
-        const totalBlocks = pool.finalBlock - pool.initialBlock
-        const elapsedBlocks = block.height - pool.initialBlock
-        amplification = BigInt(pool.initialAmplification) +
-          ((BigInt(pool.finalAmplification - pool.initialAmplification) * BigInt(elapsedBlocks)) / BigInt(totalBlocks))
-      }
-    }
+    const amplification = stableswapAmplificationAt(pool, block.height)
 
     let pegMultipliers: [string, string][] | undefined
     try {
@@ -431,6 +458,100 @@ export async function readStableswapState(
   })
 
   return result.sort((a, b) => a.pool_id - b.pool_id)
+}
+
+/**
+ * Restate the fields of a REUSED family that move every block with no event.
+ *
+ * The raw indexer carries a family's last-read state forward while no trigger
+ * fires, which is exact for every storage-backed field but two kinds:
+ * - an Erc20 leg: an aToken's balance is its scaled balance times the reserve's
+ *   normalized income at the block's timestamp, so it accrues interest every block
+ *   (and a plain ERC-20 balance can move by an EVM transfer no Substrate event names);
+ * - a stableswap pool's amplification during a ramp (`stableswapAmplificationAt`).
+ * Every Erc20 leg of the reused families is re-read in ONE batched EVM storage read
+ * (the readers' own rule: a value read replaces the leg, a zero keeps it), and each
+ * reused stableswap pool's amplification is recomputed for `block.height`.
+ */
+export async function refreshAccruingPoolFields(
+  block: Block,
+  state: Pick<SnapshotState, 'omnipool_account' | 'omnipool_assets' | 'xyk_pools' | 'stableswap_pools'>,
+  reused: { omnipool: boolean; xyk: boolean; stableswap: boolean },
+): Promise<Pick<SnapshotState, 'omnipool_assets' | 'xyk_pools' | 'stableswap_pools'>> {
+  const requests: Array<{ assetIds: number[]; poolAccountHex: string }> = []
+  const omnipoolErc20 = reused.omnipool
+    ? state.omnipool_assets.map((asset, index) => ({ asset, index })).filter(({ asset }) => isKnownErc20(asset.asset_id))
+    : []
+  const omnipoolRequest = omnipoolErc20.length > 0
+    ? requests.push({ assetIds: omnipoolErc20.map(({ asset }) => asset.asset_id), poolAccountHex: state.omnipool_account }) - 1
+    : -1
+  const xykRequests = new Map<number, number>()
+  if (reused.xyk) {
+    state.xyk_pools.forEach((pool, index) => {
+      if (!isKnownErc20(pool.asset_a) && !isKnownErc20(pool.asset_b)) return
+      xykRequests.set(index, requests.push({ assetIds: [pool.asset_a, pool.asset_b], poolAccountHex: pool.pool_account }) - 1)
+    })
+  }
+  const stableswapRequests = new Map<number, number>()
+  if (reused.stableswap) {
+    state.stableswap_pools.forEach((pool, index) => {
+      if (!pool.assets.some(isKnownErc20)) return
+      stableswapRequests.set(index, requests.push({ assetIds: [...pool.assets], poolAccountHex: getStableswapPoolAccount(pool.pool_id) }) - 1)
+    })
+  }
+
+  const balances = requests.length > 0 ? await readErc20BalancesForHolders(block, requests) : []
+  const read = (request: number, index: number): string | null => {
+    const value = balances[request][index]
+    return value > 0n ? value.toString() : null
+  }
+
+  let omnipoolAssets = state.omnipool_assets
+  if (omnipoolRequest >= 0) {
+    const next = [...state.omnipool_assets]
+    let changed = false
+    omnipoolErc20.forEach(({ asset, index }, i) => {
+      const reserve = read(omnipoolRequest, i)
+      if (reserve != null && reserve !== asset.reserve) {
+        next[index] = { ...asset, reserve }
+        changed = true
+      }
+    })
+    if (changed) omnipoolAssets = next
+  }
+
+  let xykPools = state.xyk_pools
+  if (xykRequests.size > 0) {
+    const next = state.xyk_pools.map((pool, index) => {
+      const request = xykRequests.get(index)
+      if (request == null) return pool
+      const reserveA = isKnownErc20(pool.asset_a) ? read(request, 0) ?? pool.reserve_a : pool.reserve_a
+      const reserveB = isKnownErc20(pool.asset_b) ? read(request, 1) ?? pool.reserve_b : pool.reserve_b
+      return reserveA === pool.reserve_a && reserveB === pool.reserve_b ? pool : { ...pool, reserve_a: reserveA, reserve_b: reserveB }
+    })
+    if (next.some((pool, index) => pool !== state.xyk_pools[index])) xykPools = next
+  }
+
+  let stableswapPools = state.stableswap_pools
+  if (reused.stableswap) {
+    const next = state.stableswap_pools.map((pool, index) => {
+      const request = stableswapRequests.get(index)
+      const reserves = request == null
+        ? pool.reserves
+        : pool.reserves.map((reserve, i) => (isKnownErc20(pool.assets[i]) ? read(request, i) ?? reserve : reserve))
+      const amplification = stableswapAmplificationAt({
+        initialAmplification: pool.initial_amplification,
+        finalAmplification: pool.final_amplification,
+        initialBlock: pool.initial_block,
+        finalBlock: pool.final_block,
+      }, block.height).toString()
+      const same = amplification === pool.amplification && reserves.every((reserve, i) => reserve === pool.reserves[i])
+      return same ? pool : { ...pool, reserves, amplification }
+    })
+    if (next.some((pool, index) => pool !== state.stableswap_pools[index])) stableswapPools = next
+  }
+
+  return { omnipool_assets: omnipoolAssets, xyk_pools: xykPools, stableswap_pools: stableswapPools }
 }
 
 export function buildSnapshotState(input: {
