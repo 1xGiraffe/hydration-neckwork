@@ -27978,7 +27978,7 @@ export function getAccounts(offset: number, limit: number, sort: AccountSort = '
 // The directory's prewarmed pages: block-aligned windows of ACCOUNT_PAGE_BLOCK
 // rows that the background pass rebuilds every cycle, so they are always cached.
 // Any other (offset, limit) is its own cache key and pays a cold whole-directory
-// ranking (~1.5 s of ClickHouse plus the per-row enrichment — 3–5 s) the first
+// ranking (the ranking query plus the per-row enrichment — seconds) the first
 // time it is asked for; a window inside these blocks is instead sliced out of
 // them, which is the same rows because each row is enriched on its own and the
 // ranking is one ORDER BY over the whole directory.
@@ -28330,7 +28330,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     // `label_id` must be neutralized alongside it (see labelIdSql below), or the
     // `grouped` CTE's `GROUP BY gkey, label_id` still splits one fold across
     // however many distinct system labels its folded members carry, and the
-    // gkey-only satellite joins (mm_grouped, lp_grouped, trade_volume,
+    // gkey-only satellite joins (lp_grouped, trade_volume,
     // liquidation_volume) then hand each split row the WHOLE group's totals.
     // Absent a fold this returns the exact original expression, unchanged.
     // Applied to the REMAPPED account id, so a member's module truncation or
@@ -28484,7 +28484,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     // joined into `grouped`, which already carries the tag join: farm rewards on
     // the remapped account id `latest` groups by (a bound H160's ETH-form owner
     // folds into its substrate account, as its balances do), lending incentives on
-    // the holder's ETH-form id exactly as mm_grouped keys the money-market value.
+    // the holder's ETH-form id exactly as mm_acct keys the money-market value.
     // They only join onto groups that are directory actors already: an Omnipool
     // farmer always is (its deposit is in lp_claims), while an account whose ONLY
     // holding is an XYK farm deposit is absent from the directory together with
@@ -28593,6 +28593,31 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             -- reserve-principal coverage this is a tiny published generation;
             -- the raw aggregate remains the correctness-first upgrade fallback.
             ${mmLatestCte}${rewardsCte},
+            -- The money-market side per holder (ETH-form id, as mm_latest keys it),
+            -- one pass over the tiny latest-position set for three separate
+            -- concerns: PRIMARY-only columns/risk/DefiSim, all-market net value, and
+            -- a compact supplemental-exposure badge. It joins into \`grouped\` below
+            -- rather than being grouped from a second read of \`latest\`: ClickHouse
+            -- inlines a CTE at every reference, so a second reader of \`latest\`
+            -- re-aggregated every balance state (~760k rows) on each cold build.
+            mm_acct AS (
+              SELECT
+                lower(m.account_id) AS holder,
+                sumIf(toFloat64(m.col), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS col,
+                sumIf(toFloat64(m.debt), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS debt,
+                sumIf(toFloat64(m.risk_debt), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS risk_debt,
+                countIf(m.pool_address = '${CORE_MM_MARKET.poolProxy}' AND toFloat64(m.risk_debt) > 0) AS hf_n,
+                minIf(toFloat64(m.risk_col) * toFloat64(m.liqthr) / 10000. / toFloat64(m.risk_debt),
+                  m.pool_address = '${CORE_MM_MARKET.poolProxy}' AND toFloat64(m.risk_debt) > 0) AS worst_hf,
+                sum(if(m.pool_address IN (${countedMmPoolsSql()}), toFloat64(m.col), 0.)) - sum(toFloat64(m.debt)) AS value_delta,
+                countIf(m.pool_address IN (${supplementalMmPoolsSql()})) AS supplemental_positions,
+                sumIf(toFloat64(m.debt), m.pool_address IN (${supplementalMmPoolsSql()})) AS supplemental_debt,
+                countIf(m.pool_address IN (${supplementalMmPoolsSql()}) AND toFloat64(m.risk_debt) > 0) AS supplemental_hf_n,
+                minIf(toFloat64(m.risk_col) * toFloat64(m.liqthr) / 10000. / toFloat64(m.risk_debt),
+                  m.pool_address IN (${supplementalMmPoolsSql()}) AND toFloat64(m.risk_debt) > 0) AS supplemental_worst_hf
+              FROM mm_latest m
+              GROUP BY holder
+            ),
             -- One name per account across every identity source: lowest chain
             -- priority wins (0 = Hydration), chain key breaks a tie so the
             -- directory's identity sort is stable. Blank displays are retired
@@ -28628,37 +28653,28 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
                 -- Rewards are per account while latest is per (account, asset): each
                 -- account's sum enters once, deduplicated on (key, usd).
                 arraySum(x -> tupleElement(x, 2), groupUniqArrayIf((latest.account_id, lm.usd), lm.usd != 0)) AS lm_usd,
-                arraySum(x -> tupleElement(x, 2), groupUniqArrayIf((${MM_ETH_FORM_SQL('latest.account_id')}, mmr.usd), mmr.usd != 0)) AS mmr_usd
+                arraySum(x -> tupleElement(x, 2), groupUniqArrayIf((${MM_ETH_FORM_SQL('latest.account_id')}, mmr.usd), mmr.usd != 0)) AS mmr_usd,
+                -- The money-market side, likewise per account once: each member's
+                -- mm_acct row enters once, deduplicated on the account id; the
+                -- minima need no deduplication.
+                groupUniqArrayIf((latest.account_id, mma.col, mma.debt, mma.risk_debt, mma.value_delta,
+                  mma.supplemental_positions, mma.supplemental_debt), mma.holder != '') AS mm_parts,
+                arraySum(x -> tupleElement(x, 2), mm_parts) AS mmg_col,
+                arraySum(x -> tupleElement(x, 3), mm_parts) AS mmg_debt,
+                arraySum(x -> tupleElement(x, 4), mm_parts) AS mmg_risk_debt,
+                arraySum(x -> tupleElement(x, 5), mm_parts) AS mmg_value_delta,
+                arraySum(x -> tupleElement(x, 6), mm_parts) AS mmg_supplemental_positions,
+                arraySum(x -> tupleElement(x, 7), mm_parts) AS mmg_supplemental_debt,
+                minIf(mma.worst_hf, mma.hf_n > 0) AS mmg_worst_hf,
+                argMinIf(latest.account_id, mma.worst_hf, mma.hf_n > 0) AS mmg_worst_acct,
+                minIf(mma.supplemental_worst_hf, mma.supplemental_hf_n > 0) AS mmg_supplemental_worst_hf
               FROM latest LEFT JOIN tags t ON t.account_id = latest.account_id
               LEFT JOIN lm_acct lm ON lm.account_id = latest.account_id
               LEFT JOIN mmr_acct mmr ON mmr.account_id = ${MM_ETH_FORM_SQL('latest.account_id')}
+              LEFT JOIN mm_acct mma ON mma.holder = ${MM_ETH_FORM_SQL('latest.account_id')}
               GROUP BY gkey, label_id
             )
-            ${lpGroupedCte},
-            actors AS (SELECT DISTINCT account_id FROM latest),
-            -- One pass over the tiny latest-position set computes three separate
-            -- concerns: PRIMARY-only columns/risk/DefiSim, all-market net value,
-            -- and a compact supplemental-exposure badge.
-            mm_grouped AS (
-              SELECT
-                ${gkeySql('a.account_id')} AS gkey,
-                sumIf(toFloat64(m.col), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS col,
-                sumIf(toFloat64(m.debt), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS debt,
-                sumIf(toFloat64(m.risk_debt), m.pool_address = '${CORE_MM_MARKET.poolProxy}') AS risk_debt,
-                minIf(toFloat64(m.risk_col) * toFloat64(m.liqthr) / 10000. / toFloat64(m.risk_debt),
-                  m.pool_address = '${CORE_MM_MARKET.poolProxy}' AND toFloat64(m.risk_debt) > 0) AS worst_hf,
-                argMinIf(a.account_id, toFloat64(m.risk_col) * toFloat64(m.liqthr) / 10000. / toFloat64(m.risk_debt),
-                  m.pool_address = '${CORE_MM_MARKET.poolProxy}' AND toFloat64(m.risk_debt) > 0) AS worst_acct,
-                sum(if(m.pool_address IN (${countedMmPoolsSql()}), toFloat64(m.col), 0.)) - sum(toFloat64(m.debt)) AS value_delta,
-                countIf(m.pool_address IN (${supplementalMmPoolsSql()})) AS supplemental_positions,
-                sumIf(toFloat64(m.debt), m.pool_address IN (${supplementalMmPoolsSql()})) AS supplemental_debt,
-                minIf(toFloat64(m.risk_col) * toFloat64(m.liqthr) / 10000. / toFloat64(m.risk_debt),
-                  m.pool_address IN (${supplementalMmPoolsSql()}) AND toFloat64(m.risk_debt) > 0) AS supplemental_worst_hf
-              FROM actors a
-              LEFT JOIN tags t ON t.account_id = a.account_id
-              INNER JOIN mm_latest m ON lower(m.account_id) = ${MM_ETH_FORM_SQL('a.account_id')}
-              GROUP BY gkey
-            )
+            ${lpGroupedCte}
             ${volumeCte}
             ${liquidationCte}
             ${revenueCte}
@@ -28668,18 +28684,18 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             -- JSONEachRow -- raw[i].usd then read undefined and the sparkline final-bucket
             -- pin silently became 0 (every sparkline cliffed to zero at the end).
             ${gkeySelect}g.label_id, g.lname, g.color, g.icon, g.members, g.sample, g.last_block, g.usd AS usd,
-            ifNull(mg.col, 0) AS mm_col, ifNull(mg.debt, 0) AS mm_debt, mg.worst_acct AS mm_worst_acct,
-            if(ifNull(mg.col, 0) > 0 OR ifNull(mg.debt, 0) > 0, 1, 0) AS mm_present,
-            ifNull(mg.supplemental_positions, 0) AS supplemental_present,
-            ifNull(mg.supplemental_debt, 0) AS supplemental_debt,
-            multiIf(ifNull(mg.supplemental_debt, 0) > 0, toString(toUInt256(mg.supplemental_worst_hf * 1e18)), '') AS supplemental_hf,
+            g.mmg_col AS mm_col, g.mmg_debt AS mm_debt, g.mmg_worst_acct AS mm_worst_acct,
+            if(g.mmg_col > 0 OR g.mmg_debt > 0, 1, 0) AS mm_present,
+            g.mmg_supplemental_positions AS supplemental_present,
+            g.mmg_supplemental_debt AS supplemental_debt,
+            multiIf(g.mmg_supplemental_debt > 0, toString(toUInt256(g.mmg_supplemental_worst_hf * 1e18)), '') AS supplemental_hf,
             -- 1e18-scaled WORST per-position health factor (string); MAX_UINT256 for a
             -- pure supplier so the UI renders "No debt". mm_hf_num is the numeric key
             -- the health sort orders by (riskiest position first).
-            multiIf(ifNull(mg.risk_debt, 0) > 0, toString(toUInt256(mg.worst_hf * 1e18)),
-                    ifNull(mg.col, 0) > 0, '${MAX_UINT256}', '') AS mm_hf,
-            multiIf(ifNull(mg.risk_debt, 0) > 0, mg.worst_hf * 1e18, ifNull(mg.col, 0) > 0, 1e30, 1e31) AS mm_hf_num,
-            g.usd + ${lpValue} + g.lm_usd + g.mmr_usd + ifNull(mg.value_delta, 0) / 1e8 AS usd_total,
+            multiIf(g.mmg_risk_debt > 0, toString(toUInt256(g.mmg_worst_hf * 1e18)),
+                    g.mmg_col > 0, '${MAX_UINT256}', '') AS mm_hf,
+            multiIf(g.mmg_risk_debt > 0, g.mmg_worst_hf * 1e18, g.mmg_col > 0, 1e30, 1e31) AS mm_hf_num,
+            g.usd + ${lpValue} + g.lm_usd + g.mmr_usd + g.mmg_value_delta / 1e8 AS usd_total,
             ${hasIdentitySql},
             ${dispNameSql},
             ${activitySelect} AS activity_count,
@@ -28704,7 +28720,6 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             -- page lists, which is why only this surface shows a count at all.
             greatest(0, toUInt32(arrayCount(v -> v > 10., tupleElement(g.asset_usd_map, 2))) - toUInt32(length(top_assets))) AS other_assets
           FROM grouped g
-          LEFT JOIN mm_grouped mg ON mg.gkey = g.gkey
           ${lpJoin}
           LEFT JOIN ident ON g.label_id = '' AND lower(g.sample) = ident.account_id
           ${activityJoin}
@@ -29523,7 +29538,7 @@ async function refreshContractMetricsUncached(): Promise<void> {
   // accounts directory ranks on and with its exact per-pool value expression:
   // counted-market collateral, and all debt regardless of market. Staking-backed
   // collateral is excluded from the value (it is already-counted locked HDX) but
-  // its debt still nets out, mirroring mm_grouped.value_delta.
+  // its debt still nets out, mirroring mm_acct.value_delta.
   const mmRes = moneyMarketAccountValuesReady ? await client.query({
     query: `
       SELECT account_id,
