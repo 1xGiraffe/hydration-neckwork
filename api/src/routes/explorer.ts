@@ -204,6 +204,13 @@ export function activityTypeParam(query: Record<string, unknown>): string {
   return ACTIVITY_TYPE_ALIASES[t] ?? t
 }
 
+// The daily bars take the same wire type as the feed, translated the same way: the
+// histogram branches on the row type ('staking'), so an untranslated 'stake' fell
+// through to the merged count and the Stake chart drew every category's bars.
+export function dailyActivityFilters<T extends { type?: string }>(filters: T): T {
+  return filters.type == null ? filters : { ...filters, type: ACTIVITY_TYPE_ALIASES[filters.type] ?? filters.type }
+}
+
 // A supplied filter the server cannot honour used to be dropped in silence: an
 // unrecognized `type` fell back to `all` and answered with the UNFILTERED total
 // under the caller's own filtered parameters, and a malformed `min`/`unit`/`from`/
@@ -342,7 +349,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!params.success) return reply.status(400).send({ error: 'Invalid scope' })
     // Optional filters so the chart can mirror the activity page's tab + filters.
     const q = z.object({ type: z.string().max(20).optional(), action: z.string().max(40).optional(), token: z.string().max(40).optional() }).safeParse(req.query)
-    return getDailyActivity(params.data.scope, q.success ? q.data : {})
+    return getDailyActivity(params.data.scope, q.success ? dailyActivityFilters(q.data) : {})
   })
 
   fastify.get('/explorer/accounts-daily', async () => getDailyAccounts())
