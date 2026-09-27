@@ -38,14 +38,14 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
     expect(fn).toContain(`if (!viewerFold) return \`if(t.lid = '', \${idExpr}, t.lid)\``)
   })
 
-  // All five sites that used to spell out `if(t.lid = '', <id>, t.lid) AS gkey`
-  // inline now call the one shared helper instead — never a second, divergent
-  // copy of the fold-aware expression. The reward sums are per account and join
-  // into `grouped`, so they add no gkey site of their own.
+  // Every site that used to spell out `if(t.lid = '', <id>, t.lid) AS gkey`
+  // inline now calls the one shared helper instead — never a second, divergent
+  // copy of the fold-aware expression. The reward sums and the money-market side
+  // are per account and join into `grouped`, so they add no gkey site of their own.
   it('every gkey site in the query routes through gkeySql, and none still inlines the old expression', () => {
     const body = accountsPageBody()
     const calls = [...body.matchAll(/\$\{gkeySql\('([a-zA-Z_.]+)'\)\} AS gkey/g)].map(m => m[1])
-    expect(calls.sort()).toEqual(['a.account_id', 'latest.account_id', 'p.account_id', 'v.account_id', 'v.account_id', 'v.account_id'].sort())
+    expect(calls.sort()).toEqual(['latest.account_id', 'p.account_id', 'v.account_id', 'v.account_id', 'v.account_id'].sort())
     expect(body).not.toContain("if(t.lid = '', v.account_id, t.lid) AS gkey")
     expect(body).not.toContain("if(t.lid = '', p.account_id, t.lid) AS gkey")
     expect(body).not.toContain("if(t.lid = '', latest.account_id, t.lid) AS gkey")
@@ -58,7 +58,7 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
   // outranks the reserved 'system' slot by default), and `grouped` groups by
   // `(gkey, label_id)`. Without also neutralizing label_id, one fold key
   // would split into one row per distinct label_id among its members, and
-  // the gkey-only satellite joins (mm_grouped, lp_grouped, trade_volume,
+  // the gkey-only satellite joins (lp_grouped, trade_volume,
   // liquidation_volume) would then hand EACH split row the whole group's
   // totals — see the 'C1 regression' suite below for the concrete proof.
   it('labelIdSql degrades to the original bare `t.lid` when no fold is passed, and grouped routes through it', () => {

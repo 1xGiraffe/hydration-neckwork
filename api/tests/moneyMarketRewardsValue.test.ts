@@ -96,9 +96,9 @@ describe('the chart and the directory take the incentives the same way', () => {
   const src = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
   const page = src.slice(src.indexOf('async function accountsPage('), src.indexOf('\n}\n', src.indexOf('async function accountsPage(')))
   it('ranks the directory by the chain claimable of the current, fresh generation — total rows only', () => {
-    // Keyed like mm_grouped: the actor's money-market holder (ETH-form) id.
+    // Keyed like mm_acct: the actor's money-market holder (ETH-form) id.
     expect(page).toContain("LEFT JOIN mmr_acct mmr ON mmr.account_id = ${MM_ETH_FORM_SQL('latest.account_id')}")
-    expect(page).toContain("INNER JOIN mm_latest m ON lower(m.account_id) = ${MM_ETH_FORM_SQL('a.account_id')}")
+    expect(page).toContain("LEFT JOIN mm_acct mma ON mma.holder = ${MM_ETH_FORM_SQL('latest.account_id')}")
     expect(page).toContain('FROM (${mmCountedIncentiveRowsSql(currentMmIncentiveGenerationSql())}) i')
     expect(page).toContain('sum(toFloat64(i.counted_raw) * transform(toString(i.reward_asset_id), ${idsSql}, ${unitsSql}, 0.)) AS usd')
     // Pair totals only, less the claims indexed after the snapshot block.
