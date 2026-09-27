@@ -1,9 +1,10 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { getAssetLiquidity, getOmnipoolAssetLps, getOmnipoolDetail, getPoolDetail, getPoolLps, getPoolSnapshots, getPoolsIndex, getUniswapV3PoolDetail, getUniswapV3PoolHistory, getUniswapV3PoolLiquidity } from '../services/poolService.ts'
+import { getAssetLiquidity, getOmnipoolAssetLps, getOmnipoolDetail, getOmnipoolSnapshots, getPoolDetail, getPoolLps, getPoolSnapshots, getPoolsIndex, getUniswapV3PoolDetail, getUniswapV3PoolHistory, getUniswapV3PoolLiquidity } from '../services/poolService.ts'
 import { getAssetActivity, getPoolSwaps, getV3PoolActivity } from '../services/explorerService.ts'
 import { DAILY_GRAIN, grainForWindow } from '../services/historyGrain.ts'
 import { DEFAULT_SNAPSHOT_POINTS, MAX_SNAPSHOT_POINTS, SNAPSHOT_RESOLUTIONS, snapshotRequestProblem } from '../services/poolSnapshots.ts'
+import { parseOmnipoolAssetParam } from '../services/omnipoolSnapshots.ts'
 
 // Liquidity-pool endpoints: the asset Liquidity tab, stableswap/XYK pool detail
 // pages (keyed by the share/LP asset id) and the Omnipool page. All models are
@@ -51,6 +52,29 @@ export async function poolsRoutes(fastify: FastifyInstance) {
   })
 
   // Every pool on the chain, largest first — the /liquidity index.
+  // The Omnipool's state per listed asset as exact observations — reserve, hub
+  // reserve, shares, protocol shares, cap, tradability and the asset fee last
+  // charged, beside the pool-wide H2O totals, each stamped with the block it
+  // was read at. The twin of /explorer/pool/:poolId/snapshots (same window,
+  // resolution, limit and coverage rules) for the one venue with no share
+  // token; `asset` takes one or more ids, and a delisted asset ends at its
+  // removal. The response states its own semantics.
+  fastify.get('/explorer/omnipool/snapshots', async (req, reply) => {
+    const { asset: assetParam, ...rest } = req.query as Record<string, unknown>
+    const ids = parseOmnipoolAssetParam(assetParam)
+    if (typeof ids === 'string') return reply.status(400).send({ error: ids })
+    const q = snapshotQuerySchema.safeParse(rest)
+    if (!q.success) return reply.status(400).send({ error: `Invalid snapshot query: ${q.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')}` })
+    const request = { ...q.data, resolution: q.data.resolution ?? 'grid', limit: q.data.limit ?? DEFAULT_SNAPSHOT_POINTS }
+    const problem = snapshotRequestProblem(request)
+    if (problem) return reply.status(400).send({ error: problem })
+    const snapshots = await getOmnipoolSnapshots(ids, request)
+    if ('neverListed' in snapshots) {
+      return reply.status(404).send({ error: `Not an Omnipool asset: ${snapshots.neverListed.join(', ')} ${snapshots.neverListed.length === 1 ? 'has' : 'have'} never been listed in the Omnipool (H2O, asset 1, is its hub asset: its totals are on every point)` })
+    }
+    return snapshots
+  })
+
   fastify.get('/explorer/pools', async () => {
     return getPoolsIndex()
   })
