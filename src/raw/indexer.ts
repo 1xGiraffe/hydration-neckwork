@@ -24,7 +24,9 @@ import {
   readOmnipoolState,
   readStableswapState,
   readXYKState,
-  reserveTransferAccounts,
+  eventAccounts,
+  eventCurrencyId,
+  refreshAccruingPoolFields,
 } from './snapshot.js'
 import {
   callAddressToString,
@@ -488,6 +490,10 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
   let previousBlockHeight: number | null = null
   let previousBlockTimestampMs: number | null = null
   let previousSpecVersion: number | null = null
+  // The block after an upgrade block runs the new runtime's migrations
+  // (on_runtime_upgrade executes at the start of the first block the new code
+  // executes), which may rewrite pool storage with no event: read it whole too.
+  let upgradeMigrationPending = false
 
   let lastLogBlock = startBlock
   let blocksProcessed = 0
@@ -722,7 +728,8 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       // an aToken leg accrues its reserve's interest, a stableswap ramp steps its
       // amplification — so a reused grid row would sample the refresh block's values
       // into the history tables, not this block's. One full read per grid step.
-      let forceAllPoolFamilies = currentState == null || specChanged || isMvSnapshotGridHeight(blockHeight)
+      let forceAllPoolFamilies = currentState == null || specChanged || upgradeMigrationPending || isMvSnapshotGridHeight(blockHeight)
+      upgradeMigrationPending = specChanged
 
       const hasSetStorageAffectingPools = detectPoolAffectingSetStorage(block.calls)
       if (hasSetStorageAffectingPools) {
@@ -744,6 +751,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       const omnipoolPoolAccount = getOmnipoolAccount()
       const xykPoolAccounts = new Set<string>()
       const stableswapPoolAccounts = new Set<string>()
+      const stableswapShareIds = new Set<number>()
       const poolAccounts = new Set<string>([omnipoolPoolAccount])
       if (xykPoolEntries != null) {
         for (const pool of xykPoolEntries) {
@@ -755,25 +763,25 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
         for (const pool of stableswapPoolEntries) {
           const account = getStableswapPoolAccount(pool.poolId)
           stableswapPoolAccounts.add(account)
+          stableswapShareIds.add(pool.poolId)
           poolAccounts.add(account)
         }
       }
 
       for (const event of block.events) {
-        const transferAccounts = reserveTransferAccounts(event)
-        if (transferAccounts != null) {
-          for (const account of transferAccounts) {
-            if (account === omnipoolPoolAccount) {
-              refreshFamilies.add('omnipool')
-            } else if (xykPoolAccounts.has(account)) {
-              refreshFamilies.add('xyk')
-            } else if (stableswapPoolAccounts.has(account)) {
-              refreshFamilies.add('stableswap')
-            } else if (poolAccounts.has(account)) {
-              forceAllPoolFamilies = true
-            }
+        for (const account of eventAccounts(event)) {
+          if (account === omnipoolPoolAccount) {
+            refreshFamilies.add('omnipool')
+          } else if (xykPoolAccounts.has(account)) {
+            refreshFamilies.add('xyk')
+          } else if (stableswapPoolAccounts.has(account)) {
+            refreshFamilies.add('stableswap')
+          } else if (poolAccounts.has(account)) {
+            forceAllPoolFamilies = true
           }
         }
+        const currencyId = eventCurrencyId(event)
+        if (currencyId != null && stableswapShareIds.has(currencyId)) refreshFamilies.add('stableswap')
         const palletFamily = poolPalletEventFamily(event)
         if (palletFamily != null) refreshFamilies.add(palletFamily)
         addSwapFamilies(event, specVersion, refreshFamilies, () => {
@@ -821,6 +829,18 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
 
       if (currentState == null) {
         throw new Error(`Snapshot state not initialized at block ${blockHeight}`)
+      }
+
+      // A reused family still moves every block where its value is a function of
+      // time: Erc20 (aToken) legs accrue interest, a stableswap ramp steps its
+      // amplification. Restate those fields for this block (one batched EVM read).
+      const reusedFamilies = { omnipool: !refreshOmnipool, xyk: !refreshXyk, stableswap: !refreshStableswap }
+      if (reusedFamilies.omnipool || reusedFamilies.xyk || reusedFamilies.stableswap) {
+        const state = currentState
+        const accrued = await tracePhase(blockHeight, 'pool_accrual', () => refreshAccruingPoolFields(block.header, state, reusedFamilies))
+        if (accrued.omnipool_assets !== state.omnipool_assets || accrued.xyk_pools !== state.xyk_pools || accrued.stableswap_pools !== state.stableswap_pools) {
+          currentState = { ...state, ...accrued }
+        }
       }
 
       // The ~273 KB payload is built and stored per block by default. Under a
