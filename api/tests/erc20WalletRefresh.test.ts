@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { walletBalanceRows } from '../src/services/erc20WalletService.ts'
+import { TRUNCATED_SUBSTRATE_ACCOUNTS_SQL, walletBalanceRows } from '../src/services/erc20WalletService.ts'
 
 // The refresh reads ~1.2k HOLLAR holders in batched eth_calls. A batch that times
 // out or comes back as an error leaves its addresses unread, and the published
@@ -83,5 +83,18 @@ describe('erc20 wallet refresh rows', () => {
     const rows = walletBalanceRows(222, [h(1), h(2)], new Map([[h(1), 5n]]), sameOwner, [])
 
     expect(rows).toEqual([{ account_id: substrate, asset_id: '222', total: '5' }])
+  })
+})
+
+// The truncated-account anchor read runs every refresh cycle with ~1.4k HOLLAR
+// holders. Per-holder sort-key ranges OR'd together prune nothing on a table
+// the candidates spread across, and cost thousands of string comparisons per
+// row; the read must stay one hash-set membership test on the 42-char prefix.
+describe('erc20 wallet truncated-account anchor read', () => {
+  it('matches the H160 prefix through one bound array parameter', () => {
+    expect(TRUNCATED_SUBSTRATE_ACCOUNTS_SQL).toContain('substring(b.account_id, 1, 42) IN {evms:Array(String)}')
+    expect(TRUNCATED_SUBSTRATE_ACCOUNTS_SQL).toContain('length(b.account_id) = 66')
+    expect(TRUNCATED_SUBSTRATE_ACCOUNTS_SQL).not.toMatch(/\bOR\b/)
+    expect(TRUNCATED_SUBSTRATE_ACCOUNTS_SQL).not.toContain('>=')
   })
 })
