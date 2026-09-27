@@ -131,9 +131,9 @@ describe('activity paging bounds', () => {
     for (const route of ['/explorer/address/alice/activity', '/explorer/tag/whales/activity']) {
       expect((await app.inject(`${route}?offset=900001`)).statusCode, route).not.toBe(400)
 
-      const located = await app.inject(`${route}?offset=5000001`)
+      const located = await app.inject(`${route}?offset=20000001`)
       expect(located.statusCode, route).toBe(400)
-      expect(located.json()).toEqual({ error: 'Activity offset must be between 0 and 5000000' })
+      expect(located.json()).toEqual({ error: 'Activity offset must be between 0 and 20000000' })
 
       const windowed = await app.inject(`${route}?offset=900001&min=10`)
       expect(windowed.statusCode, route).toBe(400)

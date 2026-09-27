@@ -409,16 +409,28 @@ const LM_PREFIXES = ['OmniWhLM', 'Omni//LM', 'XYK///LM', 'xykLMpID'].map(id => (
 // markers: 'sibl' for a sibling parachain, 'para' for a (relay-registered) para
 // id. Matching only 'sibl' left the 'para' form untagged.
 export const SOVEREIGN_PREFIXES = ['sibl', 'para'].map(id => ('0x' + Buffer.from(id, 'latin1').toString('hex')).toLowerCase())
-interface PoolCreatedRow extends RareEventRow { acc: string }
+interface PoolCreatedRow extends RareEventRow { acc: string; assets?: number[] }
 const lbpPoolLedger = new RareEventLedger<PoolCreatedRow>({
   eventNames: ['LBP.PoolCreated'],
-  columnsSql: `block_height, event_index, JSONExtractString(args_json, 'pool') AS acc`,
+  columnsSql: `block_height, event_index, JSONExtractString(args_json, 'pool') AS acc,
+    JSONExtract(args_json, 'data', 'assets', 'Array(UInt32)') AS assets`,
   head: async () => {
     const res = await client.query({ query: `SELECT max(block_height) AS h FROM price_data.raw_blocks`, format: 'JSONEachRow' })
     return Number((await res.json<{ h: number }>())[0]?.h ?? 0)
   },
   client: () => client,
 })
+
+// Every LBP pool the chain has created: its account and the pair it trades, read off
+// the same ledger the lbp-pools tag is built from.
+export async function lbpPools(): Promise<{ account: string; assets: [number, number] }[]> {
+  const out: { account: string; assets: [number, number] }[] = []
+  for (const row of await lbpPoolLedger.rows()) {
+    const account = row.acc.toLowerCase()
+    if (/^0x[0-9a-f]{64}$/.test(account) && row.assets?.length === 2) out.push({ account, assets: [Number(row.assets[0]), Number(row.assets[1])] })
+  }
+  return out
+}
 
 const STRUCTURAL_TAGS = [
   { tagId: 'xyk-pools', name: 'XYK Pool', color: '#86c4f5', note: 'XYK AMM pair account — holds the pool reserves', icon: '💧' },

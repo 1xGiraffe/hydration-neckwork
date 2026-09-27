@@ -21,7 +21,8 @@ import { weightedFromLabels } from './convictionWeight.ts'
 import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
-import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT } from './tagService.ts'
+import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT, lbpPools, stableswapPoolAccount } from './tagService.ts'
+import { locateVenuePage, poolVenueForScope, venueKeysUnionSql, venueLiquidityEvents, venueLiquidityKeysSql, venueTradeKeysSql, venueTradeSource, walkVenueRows, type PoolVenue, type VenueKey, type VenueKeyReader, type VenueSourceSql } from './poolVenue.ts'
 import { identityForAccount, searchIdentitiesByDisplay, type AccountIdentity } from './identityService.ts'
 import { normalizeAddress, hydrationAddress, polkadotAddress, reservedH160AccountId, type NormalizedAddress } from './addressIdentity.ts'
 import { accountIcon, emojisMatchingName, emojiNameFor, parseSuffixEmojiQuery } from './omniwatchIdentity.ts'
@@ -39,7 +40,7 @@ import {
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
 import { deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
 import { XCM_BARRIER_EVENTS, XCM_IN_DEPOSIT_EVENTS, XCM_IN_WALK_EVENTS, XCM_WALK_CROSSABLE_EVENTS } from './xcmWalkEvents.ts'
-import { PRICE_LOOKBACK_DAYS, formatUnits, isPoolOwnHubHolding, poolOwnHubHoldingSql, renderUsd, scaledUsd } from './valuation.ts'
+import { OMNIPOOL_ACCOUNT, PRICE_LOOKBACK_DAYS, formatUnits, isPoolOwnHubHolding, poolOwnHubHoldingSql, renderUsd, scaledUsd } from './valuation.ts'
 import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
@@ -11817,6 +11818,46 @@ async function fillMissingLiquidityAmounts(rows: LiquidityAmountCandidate[]): Pr
   matchLiquidityAmounts(missing, legs)
 }
 
+// A liquidity_activity row as the liquidity feeds read it (LIQUIDITY_ACTIVITY_COLUMNS_SQL).
+interface RawLiquidityActivityRow { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; amount_b?: string; asset_b: number; pool_acc: string; asset_refs: number[] }
+const LIQUIDITY_ACTIVITY_COLUMNS_SQL = `block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+            who AS who,
+            asset_id AS asset_id,
+            amount AS amount,
+            asset_b AS asset_b,
+            pool_account AS pool_acc,
+            asset_refs AS asset_refs`
+
+// liquidity_activity rows → liquidity activity rows, valued at event time. ONE builder
+// for every feed that renders liquidity_activity (the global feed and a pool venue's
+// page), so an add or a removal reads the same wherever it is shown: the blank amounts
+// recovered from their transfer legs, an XYK pair's two legs, a pool creation's seed.
+async function liquidityActivityRows(raw: RawLiquidityActivityRow[], prices: Map<number, PriceInfo>): Promise<ActivityRow[]> {
+  await fillMissingLiquidityAmounts(raw)
+  const seen = new Set<string>()
+  const out: ActivityRow[] = []
+  const createCands: { row: ActivityRow; pool: string; assetB: number }[] = []
+  for (const r of raw) {
+    const key = `${r.block_height}:${r.event_index}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const a = asset(r.asset_id)
+    const row: ActivityRow = {
+      type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
+      who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
+      ...liquidityRowAmount(r.event_name, prices, a.assetId, r.amount, a.decimals), amountIn: null, amountOut: null,
+      assetRefs: r.asset_refs,
+      liqAction: liqActionFor(r.event_name),
+    }
+    xykPairLegs(row, r)
+    if (r.event_name === 'XYK.PoolCreated') createCands.push({ row, pool: r.pool_acc, assetB: r.asset_b })
+    out.push(row)
+  }
+  await enrichPoolCreations(createCands)
+  await applyHistoricalUsd(out, activityHistPick)
+  return out
+}
+
 // Liquidity provision/removal/creation events for Activity. The
 // action filter pushes down to event names — pool creations are rare, so a
 // post-filter over a recency window would mostly return empty pages.
@@ -11859,13 +11900,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
       const routerHop = routerHopLiquiditySql(bound, assetExpr)
       const res = await client.query({
         query: `
-          SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-            who AS who,
-            ${assetExpr} AS asset_id,
-            ${amountExpr} AS amount,
-            asset_b AS asset_b,
-            pool_account AS pool_acc,
-            asset_refs AS asset_refs
+          SELECT ${LIQUIDITY_ACTIVITY_COLUMNS_SQL}
           FROM price_data.liquidity_activity
           ${amountFilter.joinSql}
           ${routerHop.joinSql}
@@ -11879,30 +11914,7 @@ async function getRecentLiquidity(limit: number, from?: string, to?: string, off
           LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         query_params: { limit: pageLimit, offset: pageOffset }, format: 'JSONEachRow',
       })
-      const raw = await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; amount_b?: string; asset_b: number; pool_acc: string; asset_refs: number[] }>()
-      await fillMissingLiquidityAmounts(raw)
-      const seen = new Set<string>()
-      const out: ActivityRow[] = []
-      const createCands: { row: ActivityRow; pool: string; assetB: number }[] = []
-      for (const r of raw) {
-        const key = `${r.block_height}:${r.event_index}`
-        if (seen.has(key)) continue
-        seen.add(key)
-        const a = asset(r.asset_id)
-        const row: ActivityRow = {
-          type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
-          who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
-          ...liquidityRowAmount(r.event_name, prices, a.assetId, r.amount, a.decimals), amountIn: null, amountOut: null,
-          assetRefs: r.asset_refs,
-          liqAction: liqActionFor(r.event_name),
-        }
-        xykPairLegs(row, r)
-        if (r.event_name === 'XYK.PoolCreated') createCands.push({ row, pool: r.pool_acc, assetB: r.asset_b })
-        out.push(row)
-      }
-      await enrichPoolCreations(createCands)
-      await applyHistoricalUsd(out, activityHistPick)
-      return out
+      return liquidityActivityRows(await res.json<RawLiquidityActivityRow>(), prices)
     }
     if (postFilter) {
       // Token is already enforced SQL-side over asset_refs — the post-match
@@ -20929,6 +20941,263 @@ export async function getPoolSwaps(poolId: number, members: number[], kind: stri
   })
 }
 
+// ── A native pool's account, read as the pool ────────────────────────────────
+//
+// See services/poolVenue.ts for why. The account feed and its count come here instead
+// of the account machinery when the scope is one pool account (poolVenueOf), so the
+// page, its total, the directory's Activity column and a single-pool tag (the Omnipool
+// tag) are one reading. The rows are the pool's trades — each one its hop in this
+// pool, attributed to the Broadcast swapper who caused it rather than the router pot
+// that executed it, the pool page's reading (getPoolSwaps, getV3PoolActivity) — and the
+// liquidity actions on it, classified exactly as the global feed classifies them. The
+// pool's transfer legs are not rows: every leg touching a pool account is plumbing on
+// every other surface (nonPlumbingTransferLegSql), and on its own page they are the
+// legs of the rows shown.
+
+// Every native pool account the chain has, keyed by account. Pools are created
+// rarely, so the map is held for minutes; a pool created since is an ordinary account
+// until the next read, never a wrong venue.
+async function nativePoolVenues(): Promise<Map<string, PoolVenue>> {
+  return cached('explorer:native-pool-venues', 10 * 60_000, async () => {
+    const [stableRes, xykRes, lbp] = await Promise.all([
+      client.query({
+        query: `SELECT DISTINCT pool_id FROM price_data.stableswap_pool_params FINAL WHERE event_name = 'Stableswap.PoolCreated'`,
+        format: 'JSONEachRow',
+      }),
+      client.query({
+        query: `SELECT lower(pool_account) AS acc, any(asset_a) AS a, any(asset_b) AS b
+                FROM price_data.xyk_pool_registry FINAL GROUP BY acc`,
+        format: 'JSONEachRow',
+      }),
+      lbpPools(),
+    ])
+    const venues = new Map<string, PoolVenue>([[OMNIPOOL_ACCOUNT, { kind: 'omnipool', account: OMNIPOOL_ACCOUNT }]])
+    for (const r of await stableRes.json<{ pool_id: number }>()) {
+      if (Number(r.pool_id) <= 0) continue
+      const account = stableswapPoolAccount(Number(r.pool_id))
+      venues.set(account, { kind: 'stableswap', account, poolId: Number(r.pool_id) })
+    }
+    for (const r of await xykRes.json<{ acc: string; a: number; b: number }>()) {
+      if (ACCOUNT_RE.test(r.acc)) venues.set(r.acc, { kind: 'xyk', account: r.acc, assetA: Number(r.a), assetB: Number(r.b) })
+    }
+    for (const p of lbp) venues.set(p.account, { kind: 'lbp', account: p.account, assetA: p.assets[0], assetB: p.assets[1] })
+    return venues
+  })
+}
+
+async function poolVenueOf(accounts: string[]): Promise<PoolVenue | null> {
+  return poolVenueForScope(accounts, await nativePoolVenues())
+}
+
+// The sources a (type, action, token) request reads from the venue. The action
+// semantics are activityRowMatchesAction's on the rows built here: a venue trade row is
+// a swap (`dca` false — the schedule belongs to the route's owner, not to the pool),
+// and a liquidity row answers to its liqAction, so the event list is
+// liquidityActionEventNames' — the one inverse of that label.
+function venueSources(venue: PoolVenue, type: string, action: string | undefined, tokenIds: number[] | undefined): VenueSourceSql[] {
+  const sources: VenueSourceSql[] = []
+  if ((type === 'all' || type === 'trade') && (!action || action === 'swap')) {
+    sources.push({ src: 'trade', sql: bound => venueTradeKeysSql(venue, bound, tokenIds) })
+  }
+  if (type === 'all' || type === 'liquidity') {
+    const wanted = new Set(liquidityActionEventNames(action))
+    const events = venueLiquidityEvents(venue).filter(name => wanted.has(name))
+    if (events.length) {
+      sources.push({
+        src: 'liquidity',
+        sql: bound => {
+          const routerHop = routerHopLiquiditySql(bound)
+          return venueLiquidityKeysSql(venue, bound, events, tokenIds,
+            { joinSql: routerHop.joinSql, predicateSql: `${liquidityWhoExclusionSql()} ${routerHop.predicateSql}` })
+        },
+      })
+    }
+  }
+  return sources
+}
+
+function venueKeyReader(sources: VenueSourceSql[]): VenueKeyReader {
+  return {
+    async count(bound) {
+      const res = await client.query({ query: `SELECT toString(count()) AS c FROM (${venueKeysUnionSql(sources, bound)})`, format: 'JSONEachRow' })
+      return Number((await res.json<{ c: string }>())[0]?.c ?? 0)
+    },
+    async buckets(bound, width) {
+      const res = await client.query({
+        query: `SELECT intDiv(block_height, {w:UInt32}) AS bucket, toUInt32(count()) AS rows
+                FROM (${venueKeysUnionSql(sources, bound)}) GROUP BY bucket ORDER BY bucket DESC`,
+        query_params: { w: width }, format: 'JSONEachRow',
+      })
+      return (await res.json<{ bucket: number; rows: number }>()).map(r => ({ bucket: Number(r.bucket), rows: Number(r.rows) }))
+    },
+    async read(bound, limit) {
+      const res = await client.query({
+        query: `SELECT block_height, event_index, src FROM (${venueKeysUnionSql(sources, bound)})
+                ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
+        query_params: { n: limit }, format: 'JSONEachRow',
+      })
+      return (await res.json<VenueKey>()).map(k => ({ block_height: Number(k.block_height), event_index: Number(k.event_index), src: k.src }))
+    },
+  }
+}
+
+// The venue's trades at the given keys, each a hop in this pool.
+async function venueTradeRows(venue: PoolVenue, keys: VenueKey[], prices: Map<number, PriceInfo>): Promise<ActivityRow[]> {
+  if (!keys.length) return []
+  const source = venueTradeSource(venue)
+  const blocks = [...new Set(keys.map(k => k.block_height))]
+  const tuples = blockExtrinsicTupleList(keys.map(k => `${k.block_height}:${k.event_index}`))
+  interface VenueTrade { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; who: string; asset_in: number; asset_out: number; amount_in: string; amount_out: string }
+  const trades = new Map<string, VenueTrade>()
+  const legsWhere = `venue = {venue:String} ${source.legsPoolKey != null ? 'AND pool_key = {poolKey:String}' : ''} AND block_height IN {blocks:Array(UInt32)}`
+  const legsParams = { venue: source.legsVenue, poolKey: source.legsPoolKey ?? '', blocks }
+  if (source.table === 'swap_activity') {
+    const [res, fillRes] = await Promise.all([
+      client.query({
+        query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, who, asset_in, asset_out, amount_in, amount_out
+                FROM price_data.swap_activity
+                WHERE block_height IN {blocks:Array(UInt32)} AND (block_height, event_index) IN (${tuples})`,
+        query_params: { blocks }, format: 'JSONEachRow',
+      }),
+      // The swapper rides on the Broadcast fill the trade emitted: the fill itself in
+      // the legacy era, the one right after the pallet event since (a modern Omnipool
+      // trade's first half). So a trade's swapper is its block's first fill at or
+      // after its own event.
+      client.query({
+        query: `SELECT block_height, event_index, any(swapper) AS swapper FROM price_data.pool_swap_legs
+                WHERE ${legsWhere} GROUP BY block_height, event_index`,
+        query_params: legsParams, format: 'JSONEachRow',
+      }),
+    ])
+    const fills = new Map<number, { event_index: number; swapper: string }[]>()
+    for (const f of await fillRes.json<{ block_height: number; event_index: number; swapper: string }>()) {
+      const list = fills.get(Number(f.block_height)) ?? []
+      list.push({ event_index: Number(f.event_index), swapper: f.swapper })
+      fills.set(Number(f.block_height), list)
+    }
+    for (const list of fills.values()) list.sort((a, b) => a.event_index - b.event_index)
+    for (const r of await res.json<VenueTrade>()) {
+      const key = `${r.block_height}:${r.event_index}`
+      if (trades.has(key)) continue
+      const fill = fills.get(Number(r.block_height))?.find(f => f.event_index >= r.event_index)
+      trades.set(key, { ...r, who: fill?.swapper || r.who })
+    }
+  } else {
+    // A fill is its legs; the first `in` and `out` leg are its two sides. The table
+    // replaces on the leg key, so a replayed leg is read once.
+    const res = await client.query({
+      query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, leg_kind, leg_index, asset_id, amount, swapper
+              FROM price_data.pool_swap_legs
+              WHERE ${legsWhere} AND leg_kind IN ('in', 'out') AND (block_height, event_index) IN (${tuples})
+              ORDER BY block_height, event_index, leg_kind, leg_index`,
+      query_params: legsParams, format: 'JSONEachRow',
+    })
+    for (const l of await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; leg_kind: 'in' | 'out'; leg_index: number; asset_id: number; amount: string; swapper: string }>()) {
+      const key = `${l.block_height}:${l.event_index}`
+      const trade = trades.get(key) ?? {
+        block_height: Number(l.block_height), ts: l.ts, event_index: Number(l.event_index), extrinsic_index: l.extrinsic_index,
+        who: l.swapper, asset_in: -1, asset_out: -1, amount_in: '0', amount_out: '0',
+      }
+      if (l.leg_kind === 'in' && trade.asset_in < 0) { trade.asset_in = Number(l.asset_id); trade.amount_in = l.amount }
+      if (l.leg_kind === 'out' && trade.asset_out < 0) { trade.asset_out = Number(l.asset_id); trade.amount_out = l.amount }
+      trades.set(key, trade)
+    }
+  }
+  const built = [...trades.values()].filter(t => t.asset_in >= 0 && t.asset_out >= 0)
+  // A trade whose fill names no account (a legacy fill without a swapper) falls back to
+  // the account the extrinsic ran as.
+  const unnamed = built.filter(t => !ACCOUNT_RE.test(t.who ?? '') && t.extrinsic_index != null)
+  const actors = unnamed.length ? await actorsFor(unnamed.map(t => [t.block_height, t.extrinsic_index] as [number, number | null])) : new Map<string, string>()
+  const rows: ActivityRow[] = built.map(t => {
+    const aIn = asset(t.asset_in), aOut = asset(t.asset_out)
+    const actor = ACCOUNT_RE.test(t.who ?? '') ? t.who
+      : (t.extrinsic_index != null ? actors.get(`${t.block_height}:${t.extrinsic_index}`) : undefined) ?? null
+    return {
+      type: 'trade' as const,
+      blockHeight: t.block_height, timestamp: t.ts, eventIndex: t.event_index, extrinsicIndex: t.extrinsic_index,
+      who: actor ? accountRef(actor) : null, to: null, asset: null,
+      assetIn: aIn, assetOut: aOut, amount: null, amountIn: t.amount_in, amountOut: t.amount_out,
+      valueUsd: usdValue(prices, t.asset_out, t.amount_out, aOut.decimals) ?? usdValue(prices, t.asset_in, t.amount_in, aIn.decimals),
+      assetRefs: [t.asset_in, t.asset_out],
+      dca: false,
+      linkBlock: t.block_height, linkIndex: t.extrinsic_index,
+    }
+  })
+  await applyHistoricalUsd(rows, activityHistPick)
+  return rows
+}
+
+async function venueLiquidityRows(keys: VenueKey[], prices: Map<number, PriceInfo>): Promise<ActivityRow[]> {
+  if (!keys.length) return []
+  const res = await client.query({
+    query: `SELECT ${LIQUIDITY_ACTIVITY_COLUMNS_SQL} FROM price_data.liquidity_activity
+            WHERE block_height IN {blocks:Array(UInt32)}
+              AND (block_height, event_index) IN (${blockExtrinsicTupleList(keys.map(k => `${k.block_height}:${k.event_index}`))})`,
+    query_params: { blocks: [...new Set(keys.map(k => k.block_height))] }, format: 'JSONEachRow',
+  })
+  return liquidityActivityRows(await res.json<RawLiquidityActivityRow>(), prices)
+}
+
+// The rows at the given keys, in the keys' order. A key whose row cannot be built
+// (a fill missing a side) is left out rather than invented.
+async function venueRowsAt(venue: PoolVenue, keys: VenueKey[]): Promise<ActivityRow[]> {
+  if (!keys.length) return []
+  const prices = await ensurePrices()
+  const [trades, liquidity] = await Promise.all([
+    venueTradeRows(venue, keys.filter(k => k.src === 'trade'), prices),
+    venueLiquidityRows(keys.filter(k => k.src === 'liquidity'), prices),
+  ])
+  const byKey = new Map<string, ActivityRow>()
+  for (const row of [...trades, ...liquidity]) byKey.set(`${row.blockHeight}:${row.eventIndex}`, row)
+  return keys.map(k => byKey.get(`${k.block_height}:${k.event_index}`)).filter((row): row is ActivityRow => row != null)
+}
+
+// How many candidates a row-level filter (min value, identity) may examine before the
+// venue says its answer is partial. Those filters are decided on the built, valued row,
+// and a venue's feed runs to millions of rows, so the walk is bounded and its count
+// says `complete: false` when it stopped short of the end.
+const VENUE_ROW_FILTER_CANDIDATES = 10_000
+const VENUE_ROW_FILTER_PAGE = 1_000
+
+interface VenueRequest { venue: PoolVenue; sources: VenueSourceSql[]; ranges: string[]; rowLevel: ValueListFilters | null }
+function venueRequest(venue: PoolVenue, type: string, action: string | undefined, filters: ValueListFilters, from?: string, to?: string): VenueRequest {
+  const tw = timeWindow(from, to)
+  return {
+    venue,
+    sources: venueSources(venue, normalizeActivityTypeKey(type), action, assetIdsForToken(filters.token)),
+    ranges: tw ? [tw] : feedRangeBoundsSql(),
+    rowLevel: hasRowLevelFilter(filters) ? rowLevelFilters(filters) : null,
+  }
+}
+
+async function venueActivityPage(venue: PoolVenue, type: string, limit: number, offset: number, action: string | undefined, filters: ValueListFilters, from?: string, to?: string): Promise<ActivityRow[]> {
+  const req = venueRequest(venue, type, action, filters, from, to)
+  if (!req.sources.length) return []
+  const reader = venueKeyReader(req.sources)
+  if (req.rowLevel) {
+    const rowLevel = req.rowLevel
+    const walked = await walkVenueRows(reader, req.ranges, offset + limit, VENUE_ROW_FILTER_CANDIDATES, VENUE_ROW_FILTER_PAGE,
+      keys => venueRowsAt(venue, keys), row => activityRowMatchesFilters(row, rowLevel))
+    if (!walked.exhausted && walked.rows.length < offset + limit && offset >= walked.rows.length) throw activityQueryTooBroad()
+    return walked.rows.slice(offset, offset + limit)
+  }
+  return venueRowsAt(venue, await locateVenuePage(reader, req.ranges, offset, limit))
+}
+
+async function countVenueActivity(venue: PoolVenue, type: string, action: string | undefined, filters: ValueListFilters, from?: string, to?: string): Promise<CountedActivityTotal> {
+  const req = venueRequest(venue, type, action, filters, from, to)
+  if (!req.sources.length) return { total: 0, complete: true }
+  const reader = venueKeyReader(req.sources)
+  if (req.rowLevel) {
+    const rowLevel = req.rowLevel
+    const walked = await walkVenueRows(reader, req.ranges, Infinity, VENUE_ROW_FILTER_CANDIDATES, VENUE_ROW_FILTER_PAGE,
+      keys => venueRowsAt(venue, keys), row => activityRowMatchesFilters(row, rowLevel))
+    return { total: walked.rows.length, complete: walked.exhausted }
+  }
+  const counts = await Promise.all(req.ranges.map(range => reader.count(range)))
+  return { total: counts.reduce((a, b) => a + b, 0), complete: true }
+}
+
 // asset-scoped activity (asset detail page)
 // A per-asset activity feed built SERVER-SIDE so it works regardless of how
 // recent the asset's activity is. Each category is filtered by the asset at the SQL level
@@ -24202,10 +24471,12 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
       ? `AND JSONExtractString(args_json,'from') NOT IN (${[...poolAccs].map(a => `'${a}'`).join(',')}) AND JSONExtractString(args_json,'to') NOT IN (${[...poolAccs].map(a => `'${a}'`).join(',')})`
       : ''
     // The noisy-pot legs are plumbing on a NORMAL account's page, but when the
-    // viewed account IS one of those pots (fee processor, omnipool, router) they
-    // ARE its activity — otherwise every row is dropped and the page is empty
-    // while the tab count is large. Mirror the viewingPool/viewingMmContract
-    // exception and skip the noisy-pot exclusion in that case.
+    // viewed account IS one of those pots (fee processor, router) they ARE its
+    // activity — otherwise every row is dropped and the page is empty while the
+    // tab count is large. Mirror the viewingPool/viewingMmContract exception and
+    // skip the noisy-pot exclusion in that case. (A single pool account — the
+    // Omnipool's included — never reaches this read: it reads as its venue, see
+    // poolVenueOf; only a scope holding pools among other accounts does.)
     const viewingNoisyPot = accCond.some(a => NOISY_TRANSFER_POTS.includes(a))
     const rawNoisyPotFilter = viewingNoisyPot ? '' :
       `AND JSONExtractString(args_json,'from') NOT IN (${noisyPotList()}) AND JSONExtractString(args_json,'to') NOT IN (${noisyPotList()})`
@@ -24679,7 +24950,10 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   const floor = filters.minRevenue
   const readLimit = floor == null ? limit : (offset + limit) * REVENUE_FLOOR_SCOPED_OVERREAD
   const readOffset = floor == null ? offset : 0
-  const located = await heldLocatedActivityPage(accounts, type, readLimit, readOffset, action, filters, from, to)
+  // A scope that is one native pool's account reads as that pool (see poolVenueOf).
+  const venue = await poolVenueOf(accounts)
+  const located = venue ? await venueActivityPage(venue, type, readLimit, readOffset, action, filters, from, to)
+    : await heldLocatedActivityPage(accounts, type, readLimit, readOffset, action, filters, from, to)
   // Copy before enriching. These rows are the objects held in the cached source
   // arrays (the enumerated snapshot above all, and the held located page), and the
   // enrichment writes to them:
@@ -24810,6 +25084,9 @@ const ACTIVITY_COUNT_DEADLINE_MS = 15_000
 // windowed count reads its sources live and carries none.
 interface CountedActivityTotal extends ScopedListTotal { generation?: number }
 async function countAccountActivity(accounts: string[], type: string, action: string | undefined, filters: ValueListFilters, from?: string, to?: string): Promise<CountedActivityTotal> {
+  // A pool account's feed is its venue's, counted over the venue's own keyed sources.
+  const venue = await poolVenueOf(accounts)
+  if (venue) return countVenueActivity(venue, type, action, filters, from, to)
   // A countable shape needs no window at all: the total is a sum over the feed's
   // blocks, so it is exact and complete however deep the account's history runs. A
   // refusal here is not an error page — it falls through to the window, which reports
@@ -24908,7 +25185,8 @@ async function getScopedAccountActivity(
   opts: ActivityPageOptions = {},
 ): Promise<ActivityRow[]> {
   const window = timeWindow(from, to)
-  noteHotActivityScope(cacheScope, accounts)
+  // A pool venue never reads the enumerated snapshot the hot-scope pass keeps warm.
+  if (!(await poolVenueOf(accounts))) noteHotActivityScope(cacheScope, accounts)
   // A CLOSED dated view is history and cannot change; a live one — or a dated one
   // still reaching today — is keyed by the account's own activity height, so the
   // TTL is only a backstop (see datedWindowIsClosed).

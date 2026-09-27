@@ -119,8 +119,11 @@ const MAX_WINDOWED_ACTIVITY_OFFSET = 900_000
 // offset near the end costs what one near the start does. The bound only has to stay
 // above any total this path publishes — the longest feeds indexed are the busiest
 // trader's 1.22M merged activities (counted in 7.7s, pages 3.3s at every depth) and the
-// routerex pallet's 1.70M liquidity rows (0.106s / 0.232s at offset 899,999).
-const MAX_LOCATED_ACTIVITY_OFFSET = 5_000_000
+// routerex pallet's 1.70M liquidity rows (0.106s / 0.232s at offset 899,999) — and a
+// pool account read as its venue, which locates its ranks by block-bucket counts over
+// its own keyed sources: the Omnipool's ~8.1M trades and liquidity actions, growing by
+// ~50k a week.
+const MAX_LOCATED_ACTIVITY_OFFSET = 20_000_000
 // An action or a token no longer changes which bound applies: both are counted exactly,
 // so a filtered feed is servable to the end of the total it publishes just like the
 // unfiltered one. A per-account refusal (a structural pot whose transfer subordination
