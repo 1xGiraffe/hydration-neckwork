@@ -1,7 +1,7 @@
 /**
  * Swap Event Registry Catalog
  *
- * Catalogs all swap events across Omnipool, XYK, and Stableswap pallets with:
+ * Catalogs all swap events across Omnipool, XYK, Stableswap and LBP pallets with:
  * - Full qualified event names
  * - Pallet identification
  * - First-appearance block heights
@@ -36,13 +36,16 @@ interface SwapEventEntry {
   /** Full qualified event name, e.g. 'Omnipool.SellExecuted' */
   name: string
   /** Pallet that emits this event */
-  pallet: 'Omnipool' | 'XYK' | 'Stableswap'
+  pallet: 'Omnipool' | 'XYK' | 'Stableswap' | 'LBP'
   /** Block height where this event first appeared */
   firstBlock: number
   /** Schema-change versions with first-appearance blocks */
   versions: SwapEventVersion[]
-  /** Typegen-generated event object with .vXXX.is() and .vXXX.decode() methods */
-  codec: Record<string, unknown>
+  /**
+   * Typegen-generated event object with .vXXX.is() and .vXXX.decode() methods;
+   * null for a pallet decoded from the block metadata's JSON form instead.
+   */
+  codec: Record<string, unknown> | null
 }
 
 /**
@@ -140,6 +143,36 @@ const STABLESWAP_SWAP_EVENTS: SwapEventEntry[] = [
 ]
 
 /**
+ * LBP swap events
+ *
+ * Every legacy-era LBP fill on chain sits in blocks 3,681,850–4,198,163 (runtime
+ * 183–196). There is no typegen for the pallet: extractVolume and the repair
+ * decoder read the JSON form of the block's own metadata, and both pin the
+ * pallet's buy field order (amount = paid, buyPrice = received), which is the
+ * reverse of XYK's.
+ */
+const LBP_SWAP_EVENTS: SwapEventEntry[] = [
+  {
+    name: 'LBP.SellExecuted',
+    pallet: 'LBP',
+    firstBlock: 3681850,
+    versions: [
+      { specVersion: 183, firstBlock: 3681850 },
+    ],
+    codec: null,
+  },
+  {
+    name: 'LBP.BuyExecuted',
+    pallet: 'LBP',
+    firstBlock: 3684309,
+    versions: [
+      { specVersion: 183, firstBlock: 3684309 },
+    ],
+    codec: null,
+  },
+]
+
+/**
  * Unified swap events emitted by the Broadcast pallet.
  *
  * These events supersede the legacy per-pallet *Executed events from spec v282
@@ -155,15 +188,17 @@ export const UNIFIED_SWAP_EVENT_NAMES = [
 /**
  * Unified swap event catalog across all pool types
  *
- * Total: 6 swap events (2 per pool type × 3 pool types)
+ * Total: 8 swap events (2 per pool type × 4 pool types)
  * - Omnipool: SellExecuted, BuyExecuted (3 schema versions)
  * - XYK: SellExecuted, BuyExecuted (1 schema version)
  * - Stableswap: SellExecuted, BuyExecuted (1 schema version)
+ * - LBP: SellExecuted, BuyExecuted (1 schema version, no typegen)
  */
 const SWAP_EVENT_CATALOG: SwapEventEntry[] = [
   ...OMNIPOOL_SWAP_EVENTS,
   ...XYK_SWAP_EVENTS,
   ...STABLESWAP_SWAP_EVENTS,
+  ...LBP_SWAP_EVENTS,
 ]
 
 /**
@@ -204,6 +239,10 @@ const EVENT_CLASSIFICATION: Record<string, EventCategory> = {
   'Stableswap.SellExecuted': EventCategory.SWAP,
   'Stableswap.BuyExecuted': EventCategory.SWAP,
 
+  // LBP swap events
+  'LBP.SellExecuted': EventCategory.SWAP,
+  'LBP.BuyExecuted': EventCategory.SWAP,
+
   // Unified swap events
   'Broadcast.Swapped': EventCategory.SWAP,
   'Broadcast.Swapped2': EventCategory.SWAP,
@@ -219,7 +258,7 @@ const EVENT_CLASSIFICATION: Record<string, EventCategory> = {
  *
  * @param eventName - Full qualified event name (e.g., 'Omnipool.SellExecuted')
  * Runtime-aware behavior:
- * - pre-v282: legacy Omnipool / XYK / Stableswap *Executed events are swaps
+ * - pre-v282: legacy Omnipool / XYK / Stableswap / LBP *Executed events are swaps
  * - v282+: Broadcast.Swapped* events are swaps
  *
  * @param specVersion - Runtime spec version for the block being processed

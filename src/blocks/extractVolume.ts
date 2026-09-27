@@ -412,6 +412,8 @@ function tradeToVolumeRows(
  * - XYK.SellExecuted: amount -> amountIn, salePrice -> amountOut
  * - XYK.BuyExecuted: buyPrice -> amountIn, amount -> amountOut
  * - Stableswap: direct field mapping
+ * - LBP.SellExecuted: amount -> amountIn, salePrice -> amountOut
+ * - LBP.BuyExecuted: amount -> amountIn, buyPrice -> amountOut (NOT XYK's order)
  *
  * @param event - Event-like object with name, block, and args
  * @returns DecodedSwap or null if event is not a swap or decoding fails
@@ -424,13 +426,19 @@ function decodeSwapEvent(event: EventLike): DecodedSwap | null {
     name === 'XYK.SellExecuted' ||
     name === 'XYK.BuyExecuted' ||
     name === 'Stableswap.SellExecuted' ||
-    name === 'Stableswap.BuyExecuted';
+    name === 'Stableswap.BuyExecuted' ||
+    name === 'LBP.SellExecuted' ||
+    name === 'LBP.BuyExecuted';
 
   if (!isLegacySwapName) {
     return null;
   }
 
   try {
+    if (name === 'LBP.SellExecuted' || name === 'LBP.BuyExecuted') {
+      return decodeLbpSwap(event);
+    }
+
     // Omnipool.SellExecuted
     if (name === 'Omnipool.SellExecuted') {
       // Try newest to oldest: v201 -> v170 -> v115
@@ -564,6 +572,33 @@ function decodeSwapEvent(event: EventLike): DecodedSwap | null {
     console.warn(`[extractVolume] Error decoding swap event ${name}:`, error);
     return null;
   }
+}
+
+// Legacy LBP fills (blocks 3,681,850–4,198,163, runtime 183–196) have no typegen
+// arm, so they are read in the JSON form the block's own metadata produces — the
+// form the raw indexer stores as args_json. The pallet names its fields by role and
+// disagrees with XYK on buys: LBP.BuyExecuted is (amount = paid, buyPrice =
+// received), XYK.BuyExecuted the reverse; sells agree (amount paid, salePrice
+// received). Reading an LBP buy in XYK's order swaps the trade's sides, and since
+// the two assets rarely share decimals the error is unbounded (see swap_activity_mv
+// in clickhouse/schema/003_materialized_views.sql, which pins the same mapping).
+function decodeLbpSwap(event: EventLike): DecodedSwap | null {
+  const runtime = event.block?._runtime;
+  if (typeof runtime?.decodeJsonEventRecordArguments !== 'function') return null;
+  const args = runtime.decodeJsonEventRecordArguments(event) as Record<string, unknown> | null;
+  if (!args || typeof args !== 'object') return null;
+  const received = event.name === 'LBP.BuyExecuted' ? args.buyPrice : args.salePrice;
+  const isAmount = (v: unknown): v is string | number | bigint =>
+    typeof v === 'string' || typeof v === 'number' || typeof v === 'bigint';
+  if (typeof args.assetIn !== 'number' || typeof args.assetOut !== 'number') return null;
+  if (!isAmount(args.amount) || !isAmount(received)) return null;
+  return {
+    trader: normalizeAccount(args.who),
+    assetIn: args.assetIn,
+    assetOut: args.assetOut,
+    amountIn: BigInt(args.amount),
+    amountOut: BigInt(received),
+  };
 }
 
 // Typegen arms are structural pins on the block's runtime metadata: one new enum

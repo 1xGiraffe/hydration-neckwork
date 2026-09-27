@@ -16,6 +16,25 @@ describe('trade event decoder', () => {
     })
   })
 
+  // Real args from blocks 3,681,850 and 3,684,309. LBP.BuyExecuted names its
+  // fields the reverse of XYK.BuyExecuted: amount is what was PAID.
+  it('decodes legacy LBP fills with the pallet\'s own buy field order', () => {
+    expect(decodeRawTrade(event('LBP.SellExecuted', {
+      who: '0xseller', assetIn: 5, assetOut: 1000010, amount: '104144616278', salePrice: '8721207687887822', feeAsset: 5, feeAmount: '523339780',
+    }))).toEqual({
+      account: '0xseller',
+      inputs: [{ assetId: 5, amount: 104144616278n }],
+      outputs: [{ assetId: 1000010, amount: 8721207687887822n }],
+    })
+    expect(decodeRawTrade(event('LBP.BuyExecuted', {
+      who: '0xbuyer', assetOut: 1000010, assetIn: 5, amount: '2696150731', buyPrice: '425000000000000', feeAsset: 5, feeAmount: '13548496',
+    }))).toEqual({
+      account: '0xbuyer',
+      inputs: [{ assetId: 5, amount: 2696150731n }],
+      outputs: [{ assetId: 1000010, amount: 425000000000000n }],
+    })
+  })
+
   it('decodes nested Broadcast accounts and bigint-compatible amounts', () => {
     expect(decodeRawTrade(event('Broadcast.Swapped2', {
       swapper: { value: '0xaccount' },
