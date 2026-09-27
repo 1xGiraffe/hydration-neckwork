@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, assetDecimalsOrNull, assetDescriptor, currentPriceOf, isStableswapShareToken, priceAssetId } from '../../services/explorerAssets.ts'
+import { H2O_ASSET_ID, assetDecimalsOrNull, assetDescriptor, currentPriceOf, isMoneyMarketAToken, isStableswapShareToken, priceAssetId } from '../../services/explorerAssets.ts'
 import { lmCountedClaimable, loadLmRewards } from '../../services/lmRewardSnapshot.ts'
 import { withStableswapSharePrices, xykReserveAssets, xykShareLegs } from '../../services/lpMath.ts'
 import { loadMmIncentives } from '../../services/mmIncentiveSnapshot.ts'
@@ -892,8 +892,8 @@ async function xykPrincipal(
 // is a different holding: a named reserve on an aToken (a DCA order's `dcaorder`)
 // moves the aTokens out of the holder's balanceOf — which is what `supplied` is —
 // into the pallet's holding and mirrors the amount here, so the snapshot never
-// covers it and it is valued once, as locked.
-const ATOKEN_IDS = new Set(Object.keys(ATOKEN_UNDERLYING_ID).map(Number))
+// covers it and it is valued once, as locked. Every registry aToken, the Hydrated
+// wrappers (HUSDT, GDOT, …) included (isMoneyMarketAToken).
 
 interface LatestBalanceRow {
   account_id: string
@@ -1026,9 +1026,9 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
         // An aToken's pallet row: its free side is the money-market position the
         // snapshot reports on the underlying reserve — replaced, not added, and not
         // a usable substitute when the snapshot is stale. Its reserved side is the
-        // pallet's own holding (see ATOKEN_IDS), outside the snapshot, so it counts
-        // as locked whatever the snapshot's state.
-        if (ATOKEN_IDS.has(assetId)) {
+        // pallet's own holding (see isMoneyMarketAToken above), outside the snapshot,
+        // so it counts as locked whatever the snapshot's state.
+        if (isMoneyMarketAToken(assetId)) {
           locked += usdScaled(rawAmount(row.reserved), priceFor(prices, assetId), assetDescriptor(assetId).decimals)
           continue
         }

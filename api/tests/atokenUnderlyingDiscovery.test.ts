@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  ATOKEN_RESERVE_ID,
   ATOKEN_UNDERLYING_ID,
+  isMoneyMarketAToken,
   loadExplorerAssets,
   priceAssetId,
   stopExplorerAssetsRefresh,
@@ -76,6 +78,29 @@ describe('aToken underlyings discovered from the reserve map', () => {
     ))
     expect(ATOKEN_UNDERLYING_ID[69]).toBeUndefined()
     expect(priceAssetId(690)).toBe(69)
+  })
+
+  // The price alias is skipped, the receipt fact is not: GDOT, HUSDT and the other
+  // Hydrated wrappers are aTokens over their share, and a surface asking "is this a
+  // money-market receipt" (the platform TVL's pooled-aToken fold) must see them.
+  it('still records a Hydrated wrapper as an aToken over its share', async () => {
+    await loadExplorerAssets(clientWith(
+      [asset(1111, 'HUSDT', '0x1806860d27ee903c1ec7586d4f7d598d7591f124'), asset(111, '2-Pool-HUSDT')],
+      [{ asset_address: precompile(111), atoken: '0x1806860d27ee903c1ec7586d4f7d598d7591f124' }],
+    ))
+    expect(ATOKEN_UNDERLYING_ID[1111]).toBeUndefined()
+    expect(priceAssetId(111)).toBe(1111)
+    expect(ATOKEN_RESERVE_ID[1111]).toBe(111)
+    expect(isMoneyMarketAToken(1111)).toBe(true)
+    expect(isMoneyMarketAToken(111)).toBe(false)
+  })
+
+  it('keeps every hand-written pairing in the receipt map', async () => {
+    await loadExplorerAssets(clientWith(
+      [asset(55, 'BIL', '0x8184e2f7c477d165772c21f7a2dbbb61a76e7fc4'), asset(550, 'uBIL')],
+      [{ asset_address: precompile(550), atoken: '0x8184e2f7c477d165772c21f7a2dbbb61a76e7fc4' }],
+    ))
+    for (const [aToken, reserve] of Object.entries(ATOKEN_UNDERLYING_ID)) expect(ATOKEN_RESERVE_ID[Number(aToken)]).toBe(reserve)
   })
 
   it('ignores a reserve whose aToken or underlying this chain does not know', async () => {

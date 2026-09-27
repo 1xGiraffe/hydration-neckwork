@@ -18,7 +18,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT, lbpPools, stableswapPoolAccount } from './tagService.ts'
@@ -9072,7 +9072,7 @@ export function xcDestinationListItems(prices: ReadonlyMap<string, number>): Ass
 
 function explorerAssetType(asset: AssetRef): ExplorerAssetType {
   if (asset.assetId === 0) return 'Native'
-  return ATOKEN_UNDERLYING_ID[asset.assetId] != null || asset.symbol.startsWith('v') || asset.symbol === 'GDOT'
+  return isMoneyMarketAToken(asset.assetId) || asset.symbol.startsWith('v')
     ? 'Derivative'
     : 'Token'
 }
@@ -10532,7 +10532,7 @@ function tradeHopFee(name: string, args: Record<string, unknown>, outId: number)
 }
 
 function syntheticRoutePool(assetInId: number, assetOutId: number): string {
-  if (ATOKEN_UNDERLYING_ID[assetInId] === assetOutId || ATOKEN_UNDERLYING_ID[assetOutId] === assetInId) return 'Aave'
+  if (ATOKEN_RESERVE_ID[assetInId] === assetOutId || ATOKEN_RESERVE_ID[assetOutId] === assetInId) return 'Aave'
   if (assetInId === HOLLAR_ASSET_ID || assetOutId === HOLLAR_ASSET_ID) return 'Hollar'
   return 'Router'
 }
