@@ -214,7 +214,7 @@ describe('network_fee', () => {
     // gas. Excluded by the fee stream's own definition, so the two are disjoint.
     expect(sql).toContain(`xf_barriers AS (`)
     expect(sql).toContain(`event_name IN ('${XCM_EXECUTE_BARRIER_EVENT}')`)
-    expect(sql).toContain('SELECT block_height, event_index, ext_index AS ctx FROM gas_deposits')
+    expect(sql).toContain('SELECT block_height, event_index, ext_index AS ctx, block_time, currency, amount FROM gas_deposits')
     expect(sql).toContain('AND (d.block_height, d.event_index) NOT IN (SELECT block_height, event_index FROM xf_fees)')
     // The inbound-message barriers are not this arm's concern: every deposit it
     // reads sits inside an extrinsic, so the local-execution barrier is the only
@@ -296,9 +296,22 @@ describe('xcm_execution_fee', () => {
 
   it('books the deposit in its own currency, positive amounts only, valued at event time', () => {
     expect(sql).toContain("if(event_name = 'Balances.Deposit', toUInt32(0), toUInt32(JSONExtractUInt(args_json, 'currencyId')))")
-    expect(sql).toContain('WHERE d.amount > 0')
+    expect(sql).toContain('WHERE f.amount > 0')
     expect(sql).toMatch(/'' AS dest/)
     expect(sql).toContain('ASOF LEFT JOIN')
+  })
+
+  it('carries the booked deposit on the fee row, so the run chain is analyzed once', () => {
+    // ClickHouse inlines a CTE at every reference. Joining xf_deposits back for
+    // the booked deposit and scoping the payer read on xf_fees put the whole run
+    // chain into the query tree twice more (430 KB; ~0.35 s of the explorer's
+    // per-block revenue tail, whose blocks rarely hold a fee at all).
+    expect(sql).toContain('argMax(d.amount, d.event_index) AS amount')
+    expect(sql).toContain('argMax(d.currency, d.event_index) AS currency')
+    expect(sql).toContain('argMax(d.block_time, d.event_index) AS block_time')
+    expect(sql.match(/FROM xf_fees\b/g)).toHaveLength(1)
+    expect(sql.match(/JOIN xf_deposits\b/g)).toHaveLength(1)
+    expect(sql).toContain(`IN (SELECT block_height, ctx FROM xf_barriers WHERE barrier_name = '${XCM_EXECUTE_BARRIER_EVENT}')`)
   })
 })
 

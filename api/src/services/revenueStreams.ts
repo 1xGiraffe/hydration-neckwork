@@ -991,7 +991,7 @@ function networkFeeRowsSql(extra: string): string {
   // otherwise vouch for as gas. Found by the definition the xcm_execution_fee
   // stream books them under, so the two arms are disjoint by construction.
   const xcmFeeCtes = xcmFeeRunCtesSql([XCM_EXECUTE_BARRIER_EVENT],
-    'SELECT block_height, event_index, ext_index AS ctx FROM gas_deposits', extra)
+    'SELECT block_height, event_index, ext_index AS ctx, block_time, currency, amount FROM gas_deposits', extra)
   return `-- rev:network_fee
 WITH fee_events AS (
   SELECT block_height, event_index, min(block_timestamp) AS block_time,
@@ -1145,9 +1145,12 @@ const HOOK_CONTEXT = 4294967295
  * `execute` did).
  *
  * `deposits` is a SELECT of the treasury deposits to consider, with
- * (block_height, event_index, ctx) and any further columns the caller reads
- * back; it may narrow itself on `xf_contexts`, the (block, context) pairs the
- * barriers occupy, which every other read here does.
+ * (block_height, event_index, ctx, block_time, currency, amount); it may narrow
+ * itself on `xf_contexts`, the (block, context) pairs the barriers occupy,
+ * which every other read here does. `xf_fees` carries the trader's deposit
+ * itself (the run's last), so no caller joins `xf_deposits` back: ClickHouse
+ * inlines a CTE at every reference, and a second reference to this chain doubled
+ * the analyzed query tree of the explorer's per-block revenue tail.
  */
 function xcmFeeRunCtesSql(barriers: readonly string[], deposits: string, extra: string): string {
   const barrierList = barriers.map(n => `'${n}'`).join(', ')
@@ -1192,7 +1195,10 @@ xf_runs AS (
 xf_fees AS (
   SELECT r.block_height AS block_height, r.ctx AS ctx, r.barrier AS barrier,
          any(r.barrier_name) AS barrier_name, any(r.args) AS barrier_args,
-         max(d.event_index) AS event_index
+         max(d.event_index) AS event_index,
+         argMax(d.block_time, d.event_index) AS block_time,
+         argMax(d.currency, d.event_index) AS currency,
+         argMax(d.amount, d.event_index) AS amount
   FROM xf_runs AS r
   INNER JOIN xf_deposits AS d ON d.block_height = r.block_height AND d.ctx = r.ctx
   LEFT JOIN xf_run_events AS p ON p.block_height = r.block_height AND p.ctx = r.ctx
@@ -1250,22 +1256,22 @@ xf_payers AS (
   FROM price_data.raw_extrinsics FINAL
   WHERE ${WINDOW}
     AND (${extra})
-    AND (block_height, extrinsic_index) IN (SELECT block_height, ctx FROM xf_fees WHERE barrier_name = '${XCM_EXECUTE_BARRIER_EVENT}')
+    AND (block_height, extrinsic_index) IN (SELECT block_height, ctx FROM xf_barriers WHERE barrier_name = '${XCM_EXECUTE_BARRIER_EVENT}')
 ),
 paid AS (
-  SELECT f.block_height AS block_height, f.ctx AS ctx, f.event_index AS event_index,
+  SELECT f.block_height AS block_height, f.block_time AS block_time, f.event_index AS event_index,
+         f.currency AS currency, f.amount AS amount,
          if(f.barrier_name = '${XCM_EXECUTE_BARRIER_EVENT}', x.payer, ${sovereign}) AS payer
   FROM xf_fees AS f
   LEFT JOIN xf_payers AS x ON x.block_height = f.block_height AND x.ctx = f.ctx
 ),
 rows AS (
-  SELECT d.block_height AS block_height, d.block_time AS block_time, d.event_index AS event_index,
+  SELECT f.block_height AS block_height, f.block_time AS block_time, f.event_index AS event_index,
          toUInt16(0) AS leg_index, '' AS dest,
          ${attributablePayerSql('f.payer')} AS account,
-         d.currency AS asset_id, toString(d.amount) AS amount
+         f.currency AS asset_id, toString(f.amount) AS amount
   FROM paid AS f
-  INNER JOIN xf_deposits AS d ON d.block_height = f.block_height AND d.ctx = f.ctx AND d.event_index = f.event_index
-  WHERE d.amount > 0
+  WHERE f.amount > 0
 )
 ${valuedTailSql('xcm_execution_fee')}`
 }
