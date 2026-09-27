@@ -20,6 +20,7 @@ export const STAKING_EVENT_NAMES = [
   'GigaHdx.UnstakeCancelled',
   'GigaHdx.Unlocked',
   'GigaHdx.MigratedFromLegacy',
+  'GigaHdx.YieldRealized',
   'GigaHdxRewards.RewardsClaimed',
   'Staking.PositionCreated',
   'Staking.StakeAdded',
