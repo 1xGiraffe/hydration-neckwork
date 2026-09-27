@@ -278,6 +278,71 @@ describe('raw balance event extraction', () => {
   })
 })
 
+// An Erc20 registry asset (HOLLAR 222, the aTokens) moves in EVM storage and
+// reports only a Currencies.* event; reading Tokens.Accounts for it observed a
+// ledger the move never touched and wrote a zero per touch. An orml move's
+// Currencies echo stays beside its Tokens event exactly as before.
+describe('raw balance Currencies echo', () => {
+  const OTHER = '0x' + '11'.repeat(32)
+  const currenciesTransfer = (currencyId: number, index: number) => ({
+    name: 'Currencies.Transferred',
+    index,
+    callAddress: [0],
+    args: { currencyId, from: ACCOUNT, to: OTHER, amount: 100n },
+  }) as unknown as RawEvent
+
+  async function withTokens<T>(run: (reads: Array<[string, number]>) => Promise<T>): Promise<T> {
+    const originalIs = tokensStorage.accounts.v108.is
+    const originalGet = tokensStorage.accounts.v108.get
+    const originalDefault = tokensStorage.accounts.v108.getDefault
+    const reads: Array<[string, number]> = []
+    ;(tokensStorage.accounts.v108 as unknown as { is: typeof originalIs }).is = () => true
+    ;(tokensStorage.accounts.v108 as unknown as { get: typeof originalGet }).get = (async (_b: unknown, account: string, asset: number) => {
+      reads.push([account, asset])
+      return { free: 7n, reserved: 0n, frozen: 0n }
+    }) as never
+    ;(tokensStorage.accounts.v108 as unknown as { getDefault: typeof originalDefault }).getDefault = () => ({ free: 0n, reserved: 0n, frozen: 0n } as never)
+    try {
+      return await run(reads)
+    } finally {
+      ;(tokensStorage.accounts.v108 as unknown as { is: typeof originalIs }).is = originalIs
+      ;(tokensStorage.accounts.v108 as unknown as { get: typeof originalGet }).get = originalGet
+      ;(tokensStorage.accounts.v108 as unknown as { getDefault: typeof originalDefault }).getDefault = originalDefault
+    }
+  }
+
+  it('writes no Tokens.Accounts observation for a Currencies.Transferred nothing else in the block backs', async () => {
+    const block = { height: 6, hash: '0x06' } as unknown as StorageBlock
+    await withTokens(async (reads) => {
+      const result = await extractBalanceObservations(block, '2026-06-19 00:00:00', [currenciesTransfer(222, 3)], [], 'rpc')
+      expect(result.observations).toEqual([])
+      expect(result.warnings).toEqual([])
+      expect(reads).toEqual([])
+    })
+  })
+
+  it('writes no observation for a Currencies.transfer call of an Erc20 asset', async () => {
+    const block = { height: 7, hash: '0x07' } as unknown as StorageBlock
+    const call = { name: 'Currencies.transfer', address: [0], id: 'c', block: { height: 7 }, args: { dest: OTHER, currencyId: 222, amount: 100n } } as unknown as RawCall
+    await withTokens(async (reads) => {
+      const result = await extractBalanceObservations(block, '2026-06-19 00:00:00', [], [call], 'rpc')
+      expect(result.observations).toEqual([])
+      expect(reads).toEqual([])
+    })
+  })
+
+  it('keeps the Currencies echo of an orml move beside its Tokens.Transfer', async () => {
+    const block = { height: 8, hash: '0x08' } as unknown as StorageBlock
+    const tokensTransfer = { name: 'Tokens.Transfer', index: 2, callAddress: [0], args: { currencyId: 5, from: ACCOUNT, to: OTHER, amount: 100n } } as unknown as RawEvent
+    await withTokens(async () => {
+      const result = await extractBalanceObservations(block, '2026-06-19 00:00:00', [tokensTransfer, currenciesTransfer(5, 3)], [], 'rpc')
+      const bySource = result.observations.map(o => `${o.source_name}:${o.account_id === ACCOUNT ? 'from' : 'to'}`).sort()
+      expect(bySource).toEqual(['Currencies.Transferred:from', 'Currencies.Transferred:to', 'Tokens.Transfer:from', 'Tokens.Transfer:to'])
+      expect(result.observations.every(o => o.asset_id === '5' && o.total === '7')).toBe(true)
+    })
+  })
+})
+
 describe('raw balance call extraction', () => {
   it('compacts Balances.upgrade_accounts evidence instead of duplicating the account list', async () => {
     const block = { height: 42, hash: '0x2a' } as unknown as StorageBlock

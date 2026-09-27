@@ -15,7 +15,7 @@ const STORAGE_PREFIXES = {
   tokensAccounts: storagePrefix('Tokens', 'Accounts'),
 }
 
-interface BalanceCandidate {
+export interface BalanceCandidate {
   accountId: string
   assetId: string
   assetKind: string
@@ -987,6 +987,29 @@ export async function streamBalanceSnapshot(
   return counts
 }
 
+// The Currencies pallet keeps no balance storage of its own: it routes a move
+// to the ledger that holds the asset. An orml or native move is reported
+// beside its Currencies.* event by the Tokens.*/Balances.* event of the same
+// movement, which already names the (account, asset) and reads the very same
+// storage. An Erc20 registry asset (HOLLAR, the aTokens, GDOT) moves in EVM
+// contract storage instead, and its Currencies.* event (or Currencies.transfer
+// call) is the only Substrate trace — a Tokens.Accounts read for it observes a
+// ledger the move never touched, which is a zero on nearly every touch (millions
+// of HOLLAR rows alone) and never the holder's balance. So a Currencies-sourced
+// candidate is kept only when another source in the block names the same
+// (account, asset); the Erc20 side of a balance comes from the EVM paths. The
+// rule reads the block's own events and calls, so a replay makes the same call.
+export function withoutUnbackedCurrenciesCandidates(candidates: BalanceCandidate[]): BalanceCandidate[] {
+  const isCurrencies = (candidate: BalanceCandidate) =>
+    (candidate.sourceKind === 'event' || candidate.sourceKind === 'call') && candidate.sourceName.startsWith('Currencies.')
+  const backed = new Set<string>()
+  for (const candidate of candidates) {
+    if (!isCurrencies(candidate)) backed.add(`${candidate.assetKind}:${candidate.assetId}:${candidate.accountId}`)
+  }
+  return candidates.filter(candidate =>
+    !isCurrencies(candidate) || backed.has(`${candidate.assetKind}:${candidate.assetId}:${candidate.accountId}`))
+}
+
 export async function extractBalanceObservations(
   block: StorageBlock,
   blockTimestamp: string,
@@ -1066,7 +1089,7 @@ export async function extractBalanceObservations(
     }
   }
 
-  const rows = await buildRowsFromCandidates(block, blockTimestamp, ingestSource, candidates)
+  const rows = await buildRowsFromCandidates(block, blockTimestamp, ingestSource, withoutUnbackedCurrenciesCandidates(candidates))
   return {
     observations: rows.observations,
     warnings: [...warnings, ...rows.warnings],
