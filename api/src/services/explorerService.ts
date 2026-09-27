@@ -527,6 +527,28 @@ const FEED_WINDOW_HOURS = 168
 export function feedWindowBoundSql(): string {
   return `block_height > (${cutoffWindowSql(FEED_WINDOW_HOURS)})`
 }
+
+// The block ranges a whole-history walk reads in turn, newest first: the feed window,
+// then ranges widening fourfold (a week, a month, a season, a year and a bit, five
+// years) until one predates the chain, and finally everything below that. Each is a
+// PRIMARY-KEY range on `block_height`. This ClickHouse (26.3) plans `ORDER BY <sort
+// key> DESC LIMIT n` as a top-N over every granule the WHERE admits — no reverse
+// read-in-order under any setting — so a page over `1` sorts millions of rows to
+// return a thousand (9.3M rows, 1.9 GiB, ~260 ms for a first page, measured), while
+// the same page under a block range reads that range's granules only (86k rows,
+// 6 ms). The ranges are disjoint, so a block — and so every mirror of a transfer —
+// lies in exactly one, and their concatenation is the feed's own order.
+export function feedRangeBoundsSql(): string[] {
+  const bounds = [feedWindowBoundSql()]
+  let hours = FEED_WINDOW_HOURS
+  for (let step = 0; step < 4; step++) {
+    const wider = hours * 4
+    bounds.push(`block_height <= (${cutoffWindowSql(hours)}) AND block_height > (${cutoffWindowSql(wider)})`)
+    hours = wider
+  }
+  bounds.push(`block_height <= (${cutoffWindowSql(hours)})`)
+  return bounds
+}
 // A Hydration block targets roughly six seconds today (2s is planned). Keep hot
 // feed results for most of that interval so staggered clients share one
 // ClickHouse read per block.
@@ -888,12 +910,14 @@ function currencyIdSql(args = 'args_json'): string {
 export const ICE_POT_ACCOUNT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
 export const ICE_FEE_ACCOUNT = '0x6d6f646c6963655f666565230000000000000000000000000000000000000000'
 
-// Module pots whose transfer legs are pure swap/fee plumbing on an ACCOUNT
-// page (the trade/dca rows already represent the action): router hops, pool
-// legs, fee sweeps, ICE settlement. Other pallet pots — treasury
-// (donations/funding), vesting payouts, LM reward claims — are the account's
-// real value movements and stay visible. The GLOBAL transfer feed keeps its
-// blanket module exclusion.
+// Module pots whose transfer legs are pure swap/fee plumbing on every transfer
+// feed (the trade/dca rows already represent the action): router hops, pool
+// legs, fee sweeps, ICE settlement. Other pallet pots — treasury (donations,
+// payouts, funding), vesting payouts, LM reward claims, the staking pot — are
+// real value movements and stay visible on the account, global, asset and block
+// feeds alike (nonPlumbingTransferLegSql); what is plumbing among their legs is
+// decided by the semantic ownership rules and dropTreasuryFeeLegs, never by the
+// account being a pallet's.
 export const NOISY_TRANSFER_POTS = [
   '0x6d6f646c726f7574657265780000000000000000000000000000000000000000', // routerex (swap hops)
   '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000', // omnipool (pool legs)
@@ -912,39 +936,56 @@ export const NOISY_TRANSFER_POTS = [
 ]
 const noisyPotList = () => NOISY_TRANSFER_POTS.map(a => `'${a}'`).join(',')
 
-// The treasury pot receives every extrinsic's transaction fee — and deposits such
-// as a referral-code registration — as a Balances/Currencies transfer. Those are
-// fees/deposits, not user transfers: a routed swap's fee leg is already dropped as
-// trade noise, but non-swap fees/deposits (Referrals.register_code, XCM inherents
-// like ParachainSystem.set_validation_data, plain batches) are not. So on a normal
-// account's transfer feed a transfer *to* the treasury is surfaced only when the
-// extrinsic that emitted it DISPATCHES a token-transfer call (a genuine donation);
-// payouts *from* the treasury stay visible.
+// The treasury pot receives transaction fees — every fee paid in a currency other
+// than HDX arrives as a Tokens/Currencies transfer from the payer, the way
+// MultiTransactionPayment settles it — and deposits such as a referral-code
+// registration, an OTC or XYK fee. Those are fees/deposits, not user transfers: a
+// routed swap's fee leg is already dropped as trade noise, but non-swap
+// fees/deposits (Referrals.register_code, XCM inherents like
+// ParachainSystem.set_validation_data, plain batches) are not. So on a transfer feed
+// a transfer *to* the treasury is surfaced only when the extrinsic that emitted it
+// DISPATCHES a token-transfer call NAMING the pot (a genuine donation); payouts
+// *from* the treasury stay visible on the account feed.
+//
+// Local transfer calls only. A cross-chain send (XTokens) names a MultiLocation,
+// never the local pot, so it can be no donation.
 const TRANSFER_CALL_NAMES = new Set([
   'Balances.transfer', 'Balances.transfer_keep_alive', 'Balances.transfer_all', 'Balances.transfer_allow_death',
   'Tokens.transfer', 'Tokens.transfer_all', 'Tokens.transfer_keep_alive',
   'Currencies.transfer', 'Currencies.transfer_native_currency',
-  'XTokens.transfer', 'XTokens.transfer_multiasset', 'XTokens.transfer_multicurrencies',
-  'XTokens.transfer_multiassets', 'XTokens.transfer_with_fee', 'XTokens.transfer_multiasset_with_fee',
 ])
 
-// The (block, extrinsic) pairs under `bound` that dispatch a token-transfer call
-// ANYWHERE in their call tree. Read from raw_calls — the decomposed tree (`root`, a
-// batch's `0`/`1`, a proxied batch's `0.1`, the Dispatcher's `root.inner`) — rather
-// than raw_extrinsics' outer `call_name`, which names only the wrapper: a
-// `Utility.batch_all` of six `Tokens.transfer_all` to the treasury is six donations,
-// and the outer-call test read it as a batch fee and dropped every one (block
-// 15,072,883). The same applies to a donation behind `Proxy.proxy`,
-// `Multisig.as_multi` or `Dispatcher.dispatch_with_extra_gas`. The bound is spelled
-// on the table's own sort key `(block_height, ifNull(extrinsic_index, 4294967295),
-// call_address)`, so a tuple or block bound is a primary-key read. DISTINCT because a
-// batch holds the call once per leg. ONE rule for the account feed's page read
-// (transferCallExtrinsics) and its count arm (accountTransferArm): two spellings of
-// it is how a total and its page drift apart.
+// The (block, extrinsic) pairs under `bound` that dispatch a token-transfer call TO
+// THE TREASURY POT anywhere in their call tree. Read from raw_calls — the decomposed
+// tree (`root`, a batch's `0`/`1`, a proxied batch's `0.1`, the Dispatcher's
+// `root.inner`) — rather than raw_extrinsics' outer `call_name`, which names only
+// the wrapper: a `Utility.batch_all` of six `Tokens.transfer_all` to the treasury is
+// six donations, and the outer-call test read it as a batch fee and dropped every
+// one (block 15,072,883). The same applies to a donation behind `Proxy.proxy`,
+// `Multisig.as_multi` or `Dispatcher.dispatch_with_extra_gas`.
+//
+// The call must NAME the pot (`dest`): the call's presence alone is not enough. The
+// app's swap-and-send `Utility.batch_all [set_currency, Router.sell, Tokens.transfer,
+// set_currency]` pays its fee in the set currency as a transfer INTO the pot while
+// dispatching a transfer call to someone else — every one of the 22 such extrinsics
+// in 100k blocks (14,975,000–15,075,000) read as a donation under a presence test and
+// stayed hidden only because the swap owned the leg first; a plain batch of a
+// non-native-fee transfer would not. Every local transfer call spells `dest` as the
+// plain AccountId hex, in every runtime era (sampled at blocks 1.5M, 4M, 7M, 10M,
+// 13M and the head).
+//
+// The bound is spelled on the table's own sort key `(block_height,
+// ifNull(extrinsic_index, 4294967295), call_address)`, so a tuple or block bound is a
+// primary-key read; `dest` is read only for the rows the call name admits. DISTINCT
+// because a batch holds the call once per leg. ONE rule for every surface's page read
+// (transferCallExtrinsics — behind dropTreasuryFeeLegs on the global, asset, block and
+// extrinsic feeds, and the account feed's own read) and the account count arm
+// (accountTransferArm): two spellings of it is how a total and its page drift apart.
 export function transferCallDispatchSql(bound: string): string {
   return `SELECT DISTINCT block_height, ifNull(extrinsic_index, 4294967295) AS xi
     FROM price_data.raw_calls
-    WHERE ${bound} AND call_name IN (${sqlEventNameList([...TRANSFER_CALL_NAMES])})`
+    WHERE ${bound} AND call_name IN (${sqlEventNameList([...TRANSFER_CALL_NAMES])})
+      AND JSONExtractString(args_json, 'dest') = '${TREASURY_POT}'`
 }
 
 // Liquidity actors that are module (modl) accounts stay hidden as plumbing —
@@ -966,15 +1007,26 @@ function liquidityWhoExclusionSql(column = 'who'): string {
 // payout sources such as the treasury.
 const XCM_SOVEREIGN_PREFIXES = ['7369626c', '70617261', '506172656e74']
 
-// Non-plumbing transfer-leg filter shared by user-facing surfaces: keep a leg
-// only when NEITHER side is a pure-plumbing account — a noisy swap/fee pot
-// (router/omnipool/feeproc), an XCM sovereign/system account, or an AMM pool /
-// money-market reserve (`plumbingList`). Unlike the GLOBAL feed's blanket
-// `0x6d6f646c…` module exclusion, this keeps genuine pallet-pot payouts
-// (treasury funding, vesting, LM rewards) — the account's real value movements.
-// Block activity, the superset that re-derives every /transfer detail link, must
-// classify with this so a treasury payout shown on an account page also resolves
-// on its own detail page.
+// Non-plumbing transfer-leg filter shared by every chain-wide transfer read — the
+// global feed, an asset's feed and the block page's hook arm: keep a leg only when
+// NEITHER side is a pure-plumbing account — a noisy swap/fee pot
+// (router/omnipool/feeproc/ICE), an XCM sovereign/system account, or an AMM pool /
+// money-market reserve (`plumbingList`). Not a module-account exclusion: a pallet
+// pot's genuine legs — treasury donations and payouts, vesting, LM rewards, the
+// staking pot — stay, and what is plumbing among them (a DCA execution's keeper
+// fee, a claim's payout leg, a fee into the treasury) is decided by the semantic
+// ownership rules and dropTreasuryFeeLegs, the same on every surface. The global
+// feed must classify with this so the transfer rows it shows over a window are
+// exactly the union of the block pages' over the same blocks — and a treasury
+// payout shown on an account page resolves on its own detail page.
+//
+// The one pot leg refused here is the hook half of the treasury fee rule: a
+// hook-phase leg INTO the treasury pot is a fee or a deposit nobody signed (a DCA
+// execution's keeper fee), which dropTreasuryFeeLegs refuses on every surface
+// without a read — and there are 9.2M of them in the table, one row in nine, so a
+// read that admitted them would page through mostly rows it then drops. Legs OUT
+// of the treasury (payouts, pot funding) and signed legs into it (donations, resolved
+// by the call tree) stay candidates.
 export function nonPlumbingTransferLegSql(fromExpr: string, toExpr: string, plumbingList: string): string {
   const xcm = XCM_SOVEREIGN_PREFIXES.join('|')
   return `AND ${fromExpr} NOT IN (${noisyPotList()})
@@ -982,7 +1034,8 @@ export function nonPlumbingTransferLegSql(fromExpr: string, toExpr: string, plum
                 AND NOT match(${fromExpr}, '^0x(${xcm})')
                 AND NOT match(${toExpr}, '^0x(${xcm})')
                 AND ${fromExpr} NOT IN (${plumbingList})
-                AND ${toExpr} NOT IN (${plumbingList})`
+                AND ${toExpr} NOT IN (${plumbingList})
+                AND NOT (${toExpr} = '${TREASURY_POT}' AND extrinsic_index IS NULL)`
 }
 
 // The `bind` CTE body shared by grouped rankings: ETH-prefixed rows standing
@@ -3248,9 +3301,9 @@ function isUnpricedAsset(assetId: number): boolean {
   return SHARE_TOKEN_UNDERLYING_ID[assetId] != null
 }
 
-async function getRecentTransfers(limit: number, from?: string, to?: string, offset = 0, userOnly = false, filters: ValueListFilters = {}): Promise<TransferRow[]> {
+async function getRecentTransfers(limit: number, from?: string, to?: string, offset = 0, nonPlumbing = false, filters: ValueListFilters = {}): Promise<TransferRow[]> {
   const tw = timeWindow(from, to)
-  return cached(`explorer:transfers:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${userOnly}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:transfers:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${nonPlumbing}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
     // Two decoded read models over the same events, each leading its ORDER BY with the
@@ -3267,17 +3320,20 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
     // A transfer out of the Wormhole Relay's pool in a fill block is a fast delivery —
     // a cross-chain row (getRecentFastRelayIn), by the same one-rule-two-sides split.
     const nttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts()) + ' ' + fastRelayLegExclusionSql(await fastRelayIndex())
-    // userOnly drops pallet/pool/fee legs (module accounts 0x6d6f646c…) so the
-    // Activity's "Transfers" tab shows genuine user↔user transfers, not swap noise.
+    // nonPlumbing drops the pure-plumbing legs in SQL — the block page's own rule
+    // (nonPlumbingTransferLegSql): noisy swap/fee pots, XCM sovereigns, AMM pools,
+    // money-market reserves and the hook-phase fees into the treasury. Every other
+    // leg is a candidate, a pallet pot's included (a treasury donation or payout, an
+    // LM reward, the GIGAHDX pot's funding), and the consumers of this read decide
+    // which of those are plumbing by the semantic ownership rules
+    // (suppressTransferCandidates / suppressSubordinateActivityRows) and
+    // dropTreasuryFeeLegs — never by the account being a pallet's.
     const plumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
     const plumbingList = plumbing.length ? plumbing.map(a => `'${a}'`).join(',') : "''"
-    const userFilter = userOnly
-      ? `AND NOT match(from_account, '^0x(6d6f646c|7369626c|70617261|506172656e74)')
-         AND NOT match(to_account, '^0x(6d6f646c|7369626c|70617261|506172656e74)')
-         AND from_account NOT IN (${plumbingList})
-         AND to_account NOT IN (${plumbingList})`
-      : ''
+    const userFilter = nonPlumbing ? nonPlumbingTransferLegSql('from_account', 'to_account', plumbingList) : ''
     const want = offset + limit
+    // A USD floor is decided on the built row's event-time value, so that walk values
+    // every page as it goes; every other shape values once, the rows it returns.
     const buildTransferRows = async (rawRows: RawTransferEventRow[]): Promise<TransferRow[]> => {
       const raw = dedupeTransferEvents(rawRows)
       const seen = new Set<string>()
@@ -3293,91 +3349,75 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
           valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
         })
       }
-      await applyHistoricalUsd(out, transferHistPick)
+      if (postUsdFilter) await applyHistoricalUsd(out, transferHistPick)
       return out
     }
-    // Collapses the pallet mirror events in SQL, so the page LIMIT counts displayed
-    // rows. Identity and winner are exactly dedupeTransferEvents' and the account
-    // arm's (transferCandidateSql): one identity is (block, extrinsic, asset, from,
-    // to, amount) and the most specific pallet wins, but rows that TIE on priority
-    // all survive — a batch with two identical legs is two transfers, and a window
-    // maximum keeps both where `LIMIT 1 BY` would have shown one. The global feed
-    // and the account feed must classify the same events identically.
-    const fetchPage = async (bound: string, pageLimit: number, pageOffset: number): Promise<TransferRow[]> => {
+    // ONE read path for every shape: raw rows newest-first in bounded pages under a
+    // primary-key block range (feedRangeBoundsSql; a dated window is its own bound),
+    // the page's boundary block completed, the pallet mirror events collapsed in TS
+    // (dedupeTransferEvents: one identity is (block, extrinsic, asset, from, to,
+    // amount), the most specific pallet wins, ties all survive — the account arm's
+    // rule, so the global and account feeds classify the same events identically),
+    // walked deeper — and range by range further back — until `want` displayed rows
+    // exist or history ends. A window function that collapsed the mirrors in SQL
+    // (max(priority) OVER the identity, the LIMIT outside it) had to sort every row of
+    // the whole history that passed the filter before its LIMIT could apply: for a
+    // sparse shape (min=25000, a deep offset) it read 83.7M rows and sorted 1.98 GiB
+    // under the old module exclusion, and hit the 3.73 GiB memory cap once pallet-pot
+    // legs were admitted. A top-N read under a range is bounded by its page and its
+    // range, not by history. The caller judges saturation on the rows it receives,
+    // which is why a page is never returned short of `want` while raw rows remain:
+    // each range's walk stops only at `want` or at a raw page that came back short of
+    // its own limit, and the next range continues below it.
+    let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
+    let rangeBound: string | null = tw
+    const runRaw = async (rawBound: string, rawLimit: number): Promise<RawTransferEventRow[]> => {
       const res = await client.query({
-        query: `
-          SELECT block_height, ts, event_index, extrinsic_index,
-            event_name,
-            from_acc, to_acc, amount, asset_id
-          FROM
-          (
-            SELECT *, max(priority) OVER (
-              PARTITION BY block_height, ifNull(extrinsic_index, 4294967295), asset_id,
-                           lower(from_acc), lower(to_acc), amount) AS top_priority
-            FROM
-            (
-              SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index,
-                event_name,
-                from_account AS from_acc,
-                to_account AS to_acc,
-                amount,
-                asset_id,
-                multiIf(event_name = 'Currencies.Transferred', 3, event_name = 'Tokens.Transfer', 2, 1) AS priority
-              FROM price_data.${transferTable}
-              ${amountFilter.joinSql}
-              WHERE ${bound}
-                ${userFilter}
-                ${nttExclusion}
-                ${tokenFilter}
-                ${amountFilter.predicateSql}
-            )
-          )
-          WHERE priority = top_priority
-          ORDER BY block_height DESC, event_index DESC
-          LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-        query_params: { limit: pageLimit, offset: pageOffset }, format: 'JSONEachRow',
+        query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+                  from_account AS from_acc, to_account AS to_acc, amount, asset_id
+                FROM price_data.${transferTable}
+                ${amountFilter.joinSql}
+                WHERE ${rawBound}
+                  ${userFilter} ${nttExclusion} ${tokenFilter} ${amountFilter.predicateSql}
+                ORDER BY block_height DESC, event_index DESC
+                LIMIT {limit:UInt32}`,
+        query_params: { limit: rawLimit }, format: 'JSONEachRow',
       })
-      return buildTransferRows(await res.json<RawTransferEventRow>())
+      return res.json<RawTransferEventRow>()
     }
-    if (postUsdFilter) {
-      let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
-      const fetchValuePage = async (bound: string, pageLimit: number): Promise<TransferRow[]> => {
-        const runRaw = async (rawBound: string, rawLimit: number): Promise<RawTransferEventRow[]> => {
-          const res = await client.query({
-            query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-                      from_account AS from_acc, to_account AS to_acc, amount, asset_id
-                    FROM price_data.${transferTable}
-                    ${amountFilter.joinSql}
-                    WHERE ${rawBound}
-                      ${userFilter} ${nttExclusion} ${tokenFilter} ${amountFilter.predicateSql}
-                    ORDER BY block_height DESC, event_index DESC
-                    LIMIT {limit:UInt32}`,
-            query_params: { limit: rawLimit }, format: 'JSONEachRow',
-          })
-          return res.json<RawTransferEventRow>()
-        }
-        let raw = await runRaw(bound, pageLimit)
-        pageState = {
-          scanned: raw.length,
-          cursor: raw.length ? { blockHeight: raw.at(-1)!.block_height, eventIndex: raw.at(-1)!.event_index } : null,
-        }
-        // Complete the boundary block before collapsing pallet mirror events;
-        // otherwise a LIMIT split could keep a lower-priority mirror on one
-        // page and its canonical Currencies.Transferred sibling on the next.
-        const completed = await completeBoundaryBlock(raw, pageLimit, tw, runRaw)
-        raw = completed.rows
-        if (completed.boundary != null) pageState.cursor = { blockHeight: completed.boundary, eventIndex: 0 }
-        return buildTransferRows(raw)
+    const fetchRawPage = async (bound: string, pageLimit: number): Promise<TransferRow[]> => {
+      let raw = await runRaw(bound, pageLimit)
+      pageState = {
+        scanned: raw.length,
+        cursor: raw.length ? { blockHeight: raw.at(-1)!.block_height, eventIndex: raw.at(-1)!.event_index } : null,
       }
-      const deep = await fetchFilteredDeep(tw, want,
-        fetchValuePage,
-        row => rowMeetsExactUsdMinimum(row, filters.min!),
+      // Complete the boundary block before collapsing pallet mirror events;
+      // otherwise a LIMIT split could keep a lower-priority mirror on one
+      // page and its canonical Currencies.Transferred sibling on the next.
+      const completed = await completeBoundaryBlock(raw, pageLimit, rangeBound, runRaw)
+      raw = completed.rows
+      if (completed.boundary != null) pageState.cursor = { blockHeight: completed.boundary, eventIndex: 0 }
+      return buildTransferRows(raw)
+    }
+    // A USD floor is decided on the built row (event-time value); every shape pages to
+    // its size and grows geometrically (fetchFilteredDeep's own sizing) — a page under
+    // a block range is cheap, and a fixed 25k page valued thousands of rows a sparse
+    // floor then dropped (7.2M rows read for a $1,000 floor's first page).
+    const matches = postUsdFilter ? (row: TransferRow) => rowMeetsExactUsdMinimum(row, filters.min!) : () => true
+    const deep: TransferRow[] = []
+    for (const bound of tw ? [tw] : feedRangeBoundsSql()) {
+      if (deep.length >= want) break
+      rangeBound = bound
+      deep.push(...await fetchFilteredDeep(bound, want - deep.length,
+        fetchRawPage,
+        matches,
         row => row.blockHeight, row => row.eventIndex,
         row => `${row.blockHeight}:${row.eventIndex}`,
-        { pageSize: 25_000, pageState: () => pageState })
-      return deep.slice(offset, offset + limit)
+        { pageState: () => pageState }))
     }
-    return withFeedWindow(tw, limit, offset + limit, bound => fetchPage(bound, limit, offset))
+    const page = deep.slice(offset, offset + limit)
+    if (!postUsdFilter) await applyHistoricalUsd(page, transferHistPick)
+    return page
   })
 }
 
@@ -9940,6 +9980,10 @@ export function eventfulRevenueStreams(): readonly EventfulRevenueStream[] {
 // prunes the read, so the window only has to be wide enough to contain the unbooked
 // tail — it is a bound, not a filter we rely on.
 const REVENUE_TAIL_WINDOW_HOURS = 6
+// How long a recomputed tail is kept for one (visible head, block set) — see
+// applyActivityRevenue. Short: the derivation books these blocks within the hour
+// and the page cache in front of it turns over per block.
+const REVENUE_TAIL_MEMO_MS = 60_000
 
 // The derivation publishes only up to an hour boundary, so the newest ~1-2h of
 // blocks are unbooked. Recomputing those blocks per event measured identical to the
@@ -10021,10 +10065,18 @@ export async function applyActivityRevenue(rows: readonly RevenueBearing[]): Pro
   let coveredThrough = bookedThrough
   if (tailBlocks.length) {
     try {
-      const [tail, visibleHead] = await Promise.all([
-        revenueTailByExtrinsic(tailBlocks),
-        visibleEventHeadWithin(tailBlocks),
-      ])
+      // Visibility first, then the recompute keyed on it: for a fixed block set under
+      // a fixed visible head the tail is a pure function of indexed rows, so it is
+      // kept for a minute rather than recomputed for every head the page is built
+      // under. It costs ~850 ms (the fee stream's six-hour window), and a live first
+      // page nearly always carries a block past the watermark now that the treasury's
+      // hourly funding of the GIGAHDX pot is a transfer row: the page cache turns over
+      // per block, the tail's inputs do not. A block that becomes visible later
+      // changes the key, so a tail computed without its rows is never served as if it
+      // had them.
+      const visibleHead = await visibleEventHeadWithin(tailBlocks)
+      const tail = await cached(`explorer:revenue-tail:${visibleHead}:${tailBlocks.join(',')}`, REVENUE_TAIL_MEMO_MS,
+        () => revenueTailByExtrinsic(tailBlocks))
       for (const [key, entry] of tail) map.set(key, entry)
       // Only as far as the events are visible: the live feed runs ahead of
       // raw_events, and those blocks would otherwise report a confident $0.00.
@@ -11094,11 +11146,11 @@ async function liquidationExtrinsics(pairs: [number, number | null][]): Promise<
 }
 
 // The subset of (block, extrinsic) pairs that dispatch a genuine token-transfer
-// call somewhere in their call tree (transferCallDispatchSql). Used to keep only
-// real donations to the treasury pot on a transfer feed: a transfer *to* py/trsry
-// emitted by an extrinsic that dispatches no transfer call (a swap's fee, a
-// Referrals.register_code deposit, an XCM inherent's fee) is a fee/deposit, not a
-// user transfer.
+// call to the treasury pot somewhere in their call tree (transferCallDispatchSql).
+// Used to keep only real donations to the pot on a transfer feed: a transfer *to*
+// py/trsry emitted by an extrinsic that dispatches no such call (a non-native
+// transaction fee, a swap's fee, a Referrals.register_code deposit, an XCM
+// inherent's fee) is a fee/deposit, not a user transfer.
 export async function transferCallExtrinsics(pairs: [number, number | null][]): Promise<Set<string>> {
   const out = new Set<string>()
   const keys = [...new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))]
@@ -11114,6 +11166,30 @@ export async function transferCallExtrinsics(pairs: [number, number | null][]): 
     for (const r of rows) out.add(`${r.block_height}:${r.xi}`)
   }
   return out
+}
+
+// Of a feed's transfer candidates, the ones paid INTO the treasury pot are donations
+// only when their extrinsic dispatches a transfer call naming the pot
+// (transferCallExtrinsics); the rest — a non-native transaction fee, a
+// Referrals.register_code deposit, a DCA execution's keeper fee — are fees and
+// deposits and are dropped, a hook-phase leg among them (nothing anyone signed;
+// the chain-wide reads already refuse those in SQL, nonPlumbingTransferLegSql).
+// ONE rule on every surface: the global and asset feeds, the block page's hook arm,
+// the extrinsic page (and so every /transfer detail link) and the account feed's
+// own read, so a fee leg is a transfer nowhere and a donation is one everywhere.
+// Resolved on the bounded candidates by their exact (block, extrinsic), like every
+// other ownership decision the feeds make after SQL: the SQL admission
+// (nonPlumbingTransferLegSql) is deliberately wider than the rule so the call table
+// is read by primary key for the few pot legs, rather than joined under the whole
+// feed window — which for a whole-history read is the whole call table. Callers
+// judge saturation on the candidates BEFORE this runs, as they do for every other
+// dropped leg, so a short result here never reads as the end of history.
+export async function dropTreasuryFeeLegs<T extends { blockHeight: number; extrinsicIndex: number | null; to: AccountRef | null }>(rows: T[]): Promise<T[]> {
+  const potLegs = rows.filter(r => isTreasuryPot(r.to))
+  if (!potLegs.length) return rows
+  const donations = await transferCallExtrinsics(potLegs.map(r => [r.blockHeight, r.extrinsicIndex]))
+  return rows.filter(r => !isTreasuryPot(r.to)
+    || (r.extrinsicIndex != null && donations.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
 }
 
 // Which of these extrinsics settled an OTC order.
@@ -17191,6 +17267,7 @@ async function countScopedVotes(accounts: string[], cacheKey: string, from?: str
 }
 
 const isModuleAcct = (a: AccountRef | null | undefined): boolean => !!a && a.accountId.startsWith('0x6d6f646c')
+const isTreasuryPot = (a: AccountRef | null | undefined): boolean => !!a && a.accountId.toLowerCase() === TREASURY_POT
 function activityExtrinsicSet(rows: ActivityRow[]): Set<string> {
   return new Set(rows.filter(r => r.extrinsicIndex != null).map(r => `${r.blockHeight}:${r.extrinsicIndex}`))
 }
@@ -17356,6 +17433,10 @@ async function suppressActivityPlumbing<T extends ActivityRow>(rows: T[], opts: 
 // (block,extrinsic); hook rows use the same block+account rule as
 // suppressSubordinateActivityRows.
 async function suppressTransferCandidates(transfers: TransferRow[]): Promise<TransferRow[]> {
+  if (!transfers.length) return []
+  // A leg into the treasury pot is a candidate until its call tree says it is a
+  // donation; the fees among them are settled before ownership is asked.
+  transfers = await dropTreasuryFeeLegs(transfers)
   if (!transfers.length) return []
   const signedKeys = [...new Set(transfers
     .filter(row => row.extrinsicIndex != null)
@@ -18551,9 +18632,11 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
           ? loadClassifiedSource('v3Liquidity', (sourceLimit, sourceFrom) => getRecentV3Rows('liquidity', sourceLimit, sourceFrom, to, 0, sourceFilters))
           : Promise.resolve([]),
       ])
+      // Either way the treasury legs the source admitted are resolved to donation or
+      // fee first (suppressTransferCandidates begins with the same step).
       const sourceFilteredTransfers = sourceValueFiltered
         ? await suppressTransferCandidates(transfers)
-        : transfers
+        : await dropTreasuryFeeLegs(transfers)
       const liquidityExtrinsics = needsFullClassification && !sourceValueFiltered
         ? activityExtrinsicSet(liquidity)
         : new Set([
@@ -18566,11 +18649,13 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       // send that is in the page still receives the purchase before the trade goes.
       const feeSwapKeys = await feePurchaseSwapKeys(trades)
       const userTrades = dropShareRoutedTrades(trades, liquidityExtrinsics)
-      // Drop swap-internal transfer legs: any transfer in a trade's extrinsic, or
-      // touching a pallet/pool account (hops, fees, referral pot). OTC fills
-      // settle peer-to-peer (real Transfer events between taker/maker, unlike an
-      // AMM swap's pool-internal Withdrawn/Deposited), so their extrinsics own
-      // their transfer legs the same way trades/staking/mm do.
+      // Drop swap-internal transfer legs: any transfer in a trade's extrinsic (the
+      // pure-plumbing pot and pool legs are already out in SQL; a pallet pot's other
+      // legs are candidates like anyone's). OTC fills settle peer-to-peer (real
+      // Transfer events between taker/maker, unlike an AMM swap's pool-internal
+      // Withdrawn/Deposited), so their extrinsics own their transfer legs the same
+      // way trades/staking/mm do. A hook-phase leg — a DCA execution's keeper fee —
+      // falls to its DCA row through suppressSubordinateActivityRows below.
       const tradeExtrinsics = new Set(trades.filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
       // A Router-routed v3 hop already stands as the route's trade; its Swap log is not a second one.
       const userV3Trades = v3Trades.filter(r => !(r.extrinsicIndex != null && tradeExtrinsics.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
@@ -18585,8 +18670,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && intentExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
-        !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
-        !isModuleAcct(t.from) && !isModuleAcct(t.to))
+        !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)))
       // Module-account MM rows are pool-proxy internals, not user activity.
       const userMm = mm.filter(r => !isModuleAcct(r.who))
       type SourceCursor = { blockHeight: number; eventIndex: number }
@@ -20100,6 +20184,7 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
     const createdPools = new Set(liqRows.filter(r => r.event_name === 'XYK.PoolCreated').map(r => r.pool_acc).filter(Boolean))
     const pools = ammPoolAccounts()
     const mmReserves = await mmReserveAccountIds()
+    const transferLegs: ActivityRow[] = []
     for (const t of dedupeTransferEvents(transferRows)) {
       if (!t.from_acc || !t.to_acc || !t.amount) continue
       // A fast delivery's leg is its cross-chain row above, never also a transfer.
@@ -20109,13 +20194,19 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
         || mmReserves.has(t.from_acc.toLowerCase()) || mmReserves.has(t.to_acc.toLowerCase())
       if (semanticExtrinsic && (moduleLeg || poolLeg || hasOtcFill || createdPools.has(t.to_acc) || createdPools.has(t.from_acc))) continue
       const a = asset(t.asset_id)
-      rows.push({
+      transferLegs.push({
         type: 'transfer', blockHeight: t.block_height, timestamp: t.ts, eventIndex: t.event_index, extrinsicIndex: t.extrinsic_index,
         who: accountRef(t.from_acc), to: accountRef(t.to_acc), asset: a, assetIn: null, assetOut: null,
         amount: t.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, t.amount, a.decimals),
         linkBlock: t.block_height, linkIndex: t.extrinsic_index,
       })
     }
+    // A leg into the treasury pot is a transfer only when this extrinsic dispatches a
+    // transfer call naming the pot — a fee-only extrinsic's non-native transaction fee
+    // (a plain Tokens.transfer paying in USDT, block 14,822,107) showed here as a
+    // second transfer, into the Treasury, that the payer's own feed never listed.
+    // The same rule as every feed's, so the /transfer detail link agrees with them.
+    rows.push(...await dropTreasuryFeeLegs(transferLegs))
 
     // A DCA-scheduling extrinsic performs no trades itself — surface its
     // schedule's FIRST execution as the one representative row (the schedule
@@ -20297,9 +20388,9 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
       format: 'JSONEachRow',
     }),
     // Extrinsic-less transfers (hook-driven treasury/vesting/reward payouts and
-    // user↔user moves). Classified with the shared non-plumbing leg filter — NOT
-    // a blanket module exclusion — so genuine pallet-pot payouts stay visible and
-    // resolve on their detail page, mirroring the account feed. Cross-event-name
+    // user↔user moves). Classified with the shared non-plumbing leg filter, the
+    // global and asset feeds' own SQL rule, so genuine pallet-pot payouts stay
+    // visible and resolve on their detail page. Cross-event-name
     // de-dup (a single transfer often emits both Currencies.Transferred and a
     // Tokens.Transfer/Balances.Transfer) is handled afterwards by the shared
     // dedupeTransferEvents helper.
@@ -20487,16 +20578,20 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
   // payout is a cross-chain delivery (getRecentFastRelayIn), not a transfer.
   const fastRelay = await fastRelayIndex()
   rows.push(...await fastRelayRowsAt(height, null, prices))
+  const hookTransfers: ActivityRow[] = []
   for (const t of transferEvents) {
     if (!t.from_acc || !t.to_acc || !t.amount) continue
     if (isFastRelayLeg(fastRelay, t.block_height, t.from_acc)) continue
     const a = asset(t.asset_id)
-    rows.push({
+    hookTransfers.push({
       type: 'transfer', blockHeight: t.block_height, timestamp: t.ts, eventIndex: t.event_index, extrinsicIndex: t.extrinsic_index,
       who: accountRef(t.from_acc), to: accountRef(t.to_acc), asset: a, assetIn: null, assetOut: null,
       amount: t.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, t.amount, a.decimals),
     })
   }
+  // A hook-phase leg into the treasury pot is a fee or a deposit nobody signed (a
+  // DCA execution's keeper fee): the feeds' rule, applied here without a read.
+  rows.push(...await dropTreasuryFeeLegs(hookTransfers))
 
   // Extrinsic-less liquidity — mirrors getRecentLiquidity's construction
   // (including its fillMissingLiquidityAmounts backfill, which scopes a hook row's
@@ -20746,8 +20841,13 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       : filters
     const fixedAssetFilters: ValueListFilters = { ...queryFilters, token: undefined }
 
-    // Transfers: filter by asset and user-facing accounts in SQL before limiting,
-    // otherwise busy module/pool activity can fill a page and hide real transfers.
+    // Transfers: filter by asset and drop the pure-plumbing legs in SQL before
+    // limiting (nonPlumbingTransferLegSql — the global feed's and the block page's
+    // rule), otherwise pool and router activity fills a page and hides real
+    // transfers. A pallet pot's other legs are candidates, resolved where the page
+    // classifies its transfers (the semantic extrinsic sets, dropTreasuryFeeLegs,
+    // suppressActivityPlumbing) — after the saturation rule has judged the source's
+    // own row count.
     type = normalizeActivityTypeKey(type)
     // An intent action on the Trade tab reads the intent source alone (see
     // isIntentOnlyTradeRequest): the swap, failed-DCA and OTC sources — and the
@@ -20781,6 +20881,8 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       // not its transfers — same predicate both sides, so a leg is exactly one of the two.
       const nttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts(), '{assetId:UInt32}')
         + ' ' + fastRelayLegExclusionSql(await fastRelayIndex())
+      const transferPlumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
+      const transferPlumbingList = transferPlumbing.length ? transferPlumbing.map(a => `'${a}'`).join(',') : "''"
       const res = await client.query({
         query: `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
@@ -20788,8 +20890,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
           FROM price_data.transfer_activity
           ${transferValueFilter.joinSql}
           WHERE ${bound} AND asset_id = {assetId:UInt32}
-            AND from_account NOT LIKE '0x6d6f646c%'
-            AND to_account NOT LIKE '0x6d6f646c%'
+            ${nonPlumbingTransferLegSql('from_account', 'to_account', transferPlumbingList)}
             ${nttExclusion}
             ${transferValueFilter.predicateSql}
           ORDER BY block_height DESC, event_index DESC
@@ -21182,7 +21283,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     const intentExtrinsics = activityExtrinsicSet(intents)
     const mmExtrinsics = activityExtrinsicSet(mm)
     const otcExtrinsics = activityExtrinsicSet(otc)
-    const userTransfers = transfers.filter(t =>
+    const userTransfers = (await dropTreasuryFeeLegs(transfers)).filter(t =>
       !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&

@@ -20,10 +20,24 @@ describe('treasury donations are recognised through the call tree', () => {
     expect(sql).toContain('ifNull(extrinsic_index, 4294967295) AS xi')
     // A batch holds the call once per leg; the pair is reported once.
     expect(sql).toContain('SELECT DISTINCT block_height')
-    // Every token-transfer call, batched or not, is a donation.
+    // Every local token-transfer call, batched or not, can carry a donation.
     for (const call of ['Tokens.transfer_all', 'Tokens.transfer', 'Currencies.transfer', 'Balances.transfer_keep_alive']) {
       expect(sql).toContain(`'${call}'`)
     }
+    // A cross-chain send names a MultiLocation, never the local pot.
+    expect(sql).not.toContain('XTokens')
+  })
+
+  it('requires the transfer call to NAME the pot, not merely to be present', () => {
+    // The app's swap-and-send batch — `Utility.batch_all [set_currency, Router.sell,
+    // Balances.transfer_keep_alive, set_currency]` (block 15,068,556) — pays its fee in
+    // the set currency as a transfer INTO the pot while dispatching a transfer call to
+    // someone else. A presence test reads that fee as a donation; only the swap owning
+    // the leg first kept it hidden, and a plain non-native-fee transfer batch has no
+    // swap to do that. So the rule matches the call's `dest` against the pot, which
+    // every local transfer call spells as the plain AccountId hex.
+    const sql = transferCallDispatchSql('block_height IN (15068556)')
+    expect(sql).toContain("JSONExtractString(args_json, 'dest') = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000'")
   })
 
   it('admits a batched transfer call by its extrinsic and skips hook-phase candidates', async () => {
