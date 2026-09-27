@@ -139,15 +139,30 @@ describe('network_fee', () => {
   })
 
   it('takes every deposit in the last candidate currency except a substrate fee the first arm booked', () => {
-    expect(sql).toContain('argMax(currency, event_index) AS fee_currency')
-    expect(sql).toContain('c.currency = s.fee_currency')
+    expect(sql).toContain('argMax(currency, event_index) OVER fee_shape AS fee_currency')
+    expect(sql).toContain('max(event_index) OVER fee_shape AS last_index')
+    expect(sql).toContain('WINDOW fee_shape AS (PARTITION BY block_height, ext_index)')
+    expect(sql).toContain('WHERE currency = fee_currency')
     // hasSubstrateFee's `fee + tip > 0`, from the extrinsic's own columns; a
     // dispatch_evm_call's post-dispatch fee deposit IS actualFee, and booking it
     // here as well counted the substrate fee twice. The deposits this arm keeps
     // for such an extrinsic are what the page's resolver returns as `gas`
     // (extrinsicFeePayment.test.ts pins 15011574-3 both ways).
     expect(sql).toContain("toUInt256OrZero(ifNull(fee, '0')) + toUInt256OrZero(ifNull(tip, '0')) > 0")
-    expect(sql).toContain('NOT (c.substrate_fee = 1 AND c.event_index = s.last_index)')
+    expect(sql).toContain('NOT (substrate_fee = 1 AND event_index = last_index)')
+  })
+
+  it('reads each candidate CTE once, so the analyzer does not inline the chain several times over', () => {
+    // ClickHouse inlines a CTE at every reference, and this arm's CTEs nest: a
+    // second reference to gas_candidates (a GROUP BY joined back to it) and a
+    // second read of the ERC-20 logs doubled the query tree to 1.2 MB, and its
+    // analysis alone cost ~0.9 s on the explorer's per-block revenue tail, whose
+    // blocks almost never hold a gas deposit. The fee shape is a window over the
+    // candidates and the holding transfers ride on the log rows.
+    expect(sql.match(/FROM gas_candidates\b/g)).toHaveLength(1)
+    expect(sql.match(/FROM gas_erc20_logs\b/g)).toHaveLength(1)
+    expect(sql).not.toContain('gas_fee_shape')
+    expect(sql).not.toContain('gas_erc20_debits')
   })
 
   it('leaves the dust of a killed account to the treasury without booking it', () => {
@@ -179,11 +194,13 @@ describe('network_fee', () => {
     expect(ERC20_HOLDING_ADDRESS).toBe('0x' + 'f'.repeat(40))
     expect(ERC20_TRANSFER_TOPIC).toBe('0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef')
     expect(sql).toContain("(block_height, assumeNotNull(extrinsic_index)) IN (SELECT block_height, ext_index FROM gas_deposits WHERE deposit_event = 'Currencies.Deposited')")
-    expect(sql).toContain('SELECT block_height, ext_index, event_index + 1 AS deposit_index, contract FROM gas_erc20_logs')
-    expect(sql).toContain(`lower(l.topics[1]) = '${ERC20_TRANSFER_TOPIC}'`)
-    expect(sql).toContain(`concat('0x', substring(lower(l.topics[2]), 27, 40)) = ${evmAddressSql('x.payer')}`)
-    expect(sql).toContain(`concat('0x', substring(lower(l.topics[3]), 27, 40)) = '${ERC20_HOLDING_ADDRESS}'`)
-    expect(sql).toContain("OR (d.deposit_event = 'Currencies.Deposited' AND (d.block_height, d.ext_index, l.contract) IN (SELECT block_height, ext_index, contract FROM gas_erc20_debits))")
+    expect(sql).toContain('SELECT block_height, ext_index, event_index + 1 AS deposit_index, contract,')
+    // Every holding transfer's sender on the same contract in the same extrinsic.
+    expect(sql).toContain(`lower(topics[1]) = '${ERC20_TRANSFER_TOPIC}'`)
+    expect(sql).toContain(`groupUniqArrayIf(concat('0x', substring(lower(topics[2]), 27, 40)),`)
+    expect(sql).toContain(`concat('0x', substring(lower(topics[3]), 27, 40)) = '${ERC20_HOLDING_ADDRESS}')`)
+    expect(sql).toContain('OVER (PARTITION BY block_height, ext_index, contract) AS holding_senders')
+    expect(sql).toContain(`OR (d.deposit_event = 'Currencies.Deposited' AND has(l.holding_senders, ${evmAddressSql('x.payer')})))`)
     // The runtime's EvmAccounts::evm_address: a bound account's embedded H160,
     // anyone else's first 20 bytes.
     expect(evmAddressSql('p')).toBe("if(startsWith(p, '0x45544800') AND substring(p, 51) = '0000000000000000', concat('0x', substring(p, 11, 40)), substring(p, 1, 42))")

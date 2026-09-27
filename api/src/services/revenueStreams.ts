@@ -1058,15 +1058,12 @@ gas_erc20_logs AS (
   GROUP BY block_height, ext_index, event_index
 ),
 gas_deposit_contracts AS (
-  SELECT block_height, ext_index, event_index + 1 AS deposit_index, contract FROM gas_erc20_logs
-),
-gas_erc20_debits AS (
-  SELECT DISTINCT l.block_height AS block_height, l.ext_index AS ext_index, l.contract AS contract
-  FROM gas_erc20_logs AS l
-  INNER JOIN gas_extrinsics AS x ON x.block_height = l.block_height AND x.ext_index = l.ext_index
-  WHERE length(l.topics) >= 3 AND lower(l.topics[1]) = '${ERC20_TRANSFER_TOPIC}'
-    AND concat('0x', substring(lower(l.topics[2]), 27, 40)) = ${evmAddressSql('x.payer')}
-    AND concat('0x', substring(lower(l.topics[3]), 27, 40)) = '${ERC20_HOLDING_ADDRESS}'
+  SELECT block_height, ext_index, event_index + 1 AS deposit_index, contract,
+         groupUniqArrayIf(concat('0x', substring(lower(topics[2]), 27, 40)),
+                          length(topics) >= 3 AND lower(topics[1]) = '${ERC20_TRANSFER_TOPIC}'
+                          AND concat('0x', substring(lower(topics[3]), 27, 40)) = '${ERC20_HOLDING_ADDRESS}')
+           OVER (PARTITION BY block_height, ext_index, contract) AS holding_senders
+  FROM gas_erc20_logs
 ),
 ${xcmFeeCtes},
 gas_candidates AS (
@@ -1078,22 +1075,21 @@ gas_candidates AS (
   LEFT JOIN gas_deposit_contracts AS l ON l.block_height = d.block_height AND l.ext_index = d.ext_index AND l.deposit_index = d.event_index
   WHERE d.amount > 0
     AND ((d.block_height, d.ext_index, x.payer, d.currency) IN (SELECT block_height, ext_index, who, currency FROM gas_debits)
-      OR (d.deposit_event = 'Currencies.Deposited' AND (d.block_height, d.ext_index, l.contract) IN (SELECT block_height, ext_index, contract FROM gas_erc20_debits)))
+      OR (d.deposit_event = 'Currencies.Deposited' AND has(l.holding_senders, ${evmAddressSql('x.payer')})))
     AND (d.block_height, d.event_index) NOT IN (SELECT block_height, deposit_index FROM dust_sweeps)
     AND (d.block_height, d.event_index) NOT IN (SELECT block_height, event_index FROM xf_fees)
 ),
-gas_fee_shape AS (
-  SELECT block_height, ext_index, argMax(currency, event_index) AS fee_currency, max(event_index) AS last_index
-  FROM gas_candidates
-  GROUP BY block_height, ext_index
-),
 gas_rows AS (
-  SELECT c.block_height AS block_height, c.block_time AS block_time, c.event_index AS event_index,
-         c.payer AS payer, c.currency AS currency, c.amount AS amount
-  FROM gas_candidates AS c
-  INNER JOIN gas_fee_shape AS s ON s.block_height = c.block_height AND s.ext_index = c.ext_index
-  WHERE c.currency = s.fee_currency
-    AND NOT (c.substrate_fee = 1 AND c.event_index = s.last_index)
+  SELECT block_height, block_time, event_index, payer, currency, amount
+  FROM (
+    SELECT block_height, block_time, event_index, payer, currency, amount, substrate_fee,
+           argMax(currency, event_index) OVER fee_shape AS fee_currency,
+           max(event_index) OVER fee_shape AS last_index
+    FROM gas_candidates
+    WINDOW fee_shape AS (PARTITION BY block_height, ext_index)
+  )
+  WHERE currency = fee_currency
+    AND NOT (substrate_fee = 1 AND event_index = last_index)
 ),
 rows AS (
   SELECT block_height, block_time, event_index, toUInt16(0) AS leg_index, '' AS dest,
