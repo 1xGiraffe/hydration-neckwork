@@ -14,7 +14,7 @@ import {
 } from './poolSnapshots.ts'
 import { v3PoolHistory, v3PoolLiquidity, type V3History, type V3HistoryPool, type V3PoolLiquidity } from './uniswapV3History.ts'
 import { ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, sqrtPriceX96ToPrice, tickToPrice, v3ManagerPositions, v3PoolStats, v3PricePoints, v3VaultStats, type V3Pool, type V3Registry } from './uniswapV3Service.ts'
-import { ATOKEN_UNDERLYING_ID, H2O_ASSET_ID, assetDescriptor, currentPriceOf, displayDescriptor, priceAssetId } from './explorerAssets.ts'
+import { H2O_ASSET_ID, isMoneyMarketAToken, assetDescriptor, currentPriceOf, displayDescriptor, priceAssetId } from './explorerAssets.ts'
 import { usdAtPrice } from './assetValue.ts'
 import { xykReserveAssets } from './lpMath.ts'
 import { OMNIPOOL_ACCOUNT } from './valuation.ts'
@@ -2266,7 +2266,7 @@ export async function getPoolSnapshots(poolId: number, req: SnapshotRequest): Pr
   const limit = Math.max(1, req.limit)
   const resolution = req.resolution
   const semanticsFor = (assetIds: number[], stepBlocks: number | null) =>
-    snapshotSemantics(identity.kind, resolution, stepBlocks, assetIds.filter(id => ATOKEN_UNDERLYING_ID[id] != null).map(asset))
+    snapshotSemantics(identity.kind, resolution, stepBlocks, assetIds.filter(isMoneyMarketAToken).map(asset))
   const empty = (fromBlock: number, toBlock: number, stepBlocks: number | null): PoolSnapshotsResponse => ({
     kind: identity.kind, poolId, name: identity.name, shareToken: asset(poolId), account: identity.account,
     assets: identity.assetIds.map(asset),
@@ -2697,7 +2697,7 @@ export async function getOmnipoolSnapshots(ids: number[], req: SnapshotRequest):
 
   const limit = Math.max(1, req.limit)
   const resolution = req.resolution
-  const atokens = ids.filter(id => ATOKEN_UNDERLYING_ID[id] != null).map(asset)
+  const atokens = ids.filter(isMoneyMarketAToken).map(asset)
   const empty = (fromBlock: number, toBlock: number, stepBlocks: number | null): OmnipoolSnapshotsResponse => ({
     kind: 'omnipool', name: 'Omnipool', account: accountRef(OMNIPOOL_ACCOUNT), hubAsset: asset(H2O_ASSET_ID),
     assets: ids.map(asset), listings,
