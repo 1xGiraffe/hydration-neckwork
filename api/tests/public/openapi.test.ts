@@ -72,6 +72,24 @@ describe('public OpenAPI document', () => {
     expect(tvl).not.toMatch(/\$\d/)
   })
 
+  // The Omnipool hub asset is H2O; LRNA is its legacy on-chain spelling.
+  it('names the hub asset H2O, never LRNA', async () => {
+    const doc = (await app.inject('/openapi.json')).body
+    expect(doc).toContain('H2O')
+    expect(doc).not.toMatch(/LRNA/i)
+  })
+
+  // The hub fee has not been burned since 2026-02-16: the runtime credits it to
+  // the HDX sub-pool's hub reserve. The burned class must say it ended.
+  it('dates the end of the burned hub fee in the DefiLlama fee fields', async () => {
+    const doc = (await app.inject('/openapi.json')).json()
+    const day = doc.paths['/defillama/v1/backfill'].get.responses['200'].content['application/json'].schema.items
+    const burned = day.properties.dailyFeesBurned.description as string
+    expect(burned).toContain('2026-02-16')
+    expect(burned).toContain('HDX sub-pool')
+    expect(burned).not.toMatch(/most of the chain/)
+  })
+
   it('declares a 200 response schema for every documented path', async () => {
     const doc = (await app.inject('/openapi.json')).json()
     const missing: string[] = []

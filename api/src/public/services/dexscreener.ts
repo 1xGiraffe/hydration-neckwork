@@ -35,7 +35,7 @@ export const DEX_KEY = 'hydration'
 /** The Omnipool pallet account ("modlomnipool"), used as the Omnipool's pair-id pool component. */
 export const OMNIPOOL_ACCOUNT = '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000'
 
-/** LRNA, the Omnipool hub asset. Every Omnipool fill has exactly one hub side (verified: 0 of 118,820 fills without one). */
+/** H2O, the Omnipool hub asset. Every Omnipool fill has exactly one hub side (verified: 0 of 118,820 fills without one). */
 export const HUB_ASSET_ID = 1
 
 /**
@@ -449,7 +449,7 @@ export function orderPairSides(forms: PairIdForms, a: number, b: number): [numbe
  *  * Uniswap v3 — the pool CONTRACT alone (0x + 40 hex), for the same reason: one
  *    pool is one pair at one fee tier.
  *  * Omnipool — `<omnipool pallet account>-<asset0>-<asset1>`. Every asset trades
- *    against the LRNA hub and only against it.
+ *    against the H2O hub and only against it.
  *  * Stableswap — `<pool account>-<asset0>-<asset1>`, the pool's on-chain account
  *    rather than its pool id. A pool whose account is not derivable falls back to
  *    the pool id, which keeps the id well-formed and unique rather than dropping
@@ -632,7 +632,7 @@ export function poolUniverse(client: ClickHouseClient): Promise<PoolUniverse> {
  * Resolves a pair id against the pools that actually exist, per venue:
  *
  *  * Omnipool — every asset trades against the hub and only against the hub, so
- *    one side must be LRNA and the other an Omnipool asset. A direct A→B swap is
+ *    one side must be H2O and the other an Omnipool asset. A direct A→B swap is
  *    two fills (A→hub, hub→B) on two pairs, which is also why per-pair volume here
  *    is not double-counted.
  *  * Stableswap — a side is either one of the pool's underlying assets or the
