@@ -67,7 +67,7 @@ export const ACTIVITY_ACTIONS: Record<string, string[]> = {
   stake: [
     'Stake', 'Add stake', 'Unstake', 'Force unstake', 'Staking reward',
     'GIGAHDX Stake', 'GIGAHDX Unstake', 'GIGAHDX Cancel Unstake', 'GIGAHDX Unlock',
-    'GIGAHDX Migrate', 'GIGAHDX Reward', 'Collator payout',
+    'GIGAHDX Migrate', 'GIGAHDX Yield', 'GIGAHDX Reward', 'Collator payout',
   ],
   bond: ['Issue', 'Redeem'],
   vote: ['Aye', 'Nay'],

@@ -125,6 +125,8 @@ describe('activity category coding', () => {
     same('Stake', 'GIGAHDX Stake')
     same('Unstake', 'GIGAHDX Unstake')
     same('Staking reward', 'GIGAHDX Reward')
+    // A realized GIGAHDX yield is collected like a reward.
+    same('Staking reward', 'GIGAHDX Yield')
     expect(activityBadge(row({ type: 'otc', otcAction: 'Pull' })).col)
       .toBe(activityBadge(row({ type: 'otc', otcAction: 'Place' })).col)
     // A partial fill IS a fill, and an expiry IS the order leaving unfilled — each

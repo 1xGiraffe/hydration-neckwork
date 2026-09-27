@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
-import { STAKING_EVENT_NAMES, stakingAmountAndAsset, stakingAmountSql } from '../src/services/explorerService.ts'
+import { STAKING_EVENT_NAMES, mmStakingPlumbingExclusionSql, stakingAmountAndAsset, stakingAmountSql } from '../src/services/explorerService.ts'
+import { STAKING_EVENT_NAMES as DATA_STAKING_EVENT_NAMES } from '../src/data/services/stakingFeed.ts'
 
 // Staking rows are dropped when their amount resolves empty or zero, so an
 // amount expression that reads a key the event does not emit silently deletes a
@@ -47,6 +49,12 @@ const SHAPES: Record<string, { action: string; shapes: Shape[] }> = {
       { field: 'hdxUnlocked', args: { hdxUnlocked: '80000000000000000', gigahdxReceived: '72000000000000000' } },
       { field: 'gigahdxReceived', args: { hdxUnlocked: '80000000000000000', gigahdxReceived: '72000000000000000' }, assetId: 670 },
     ],
+  },
+  // realize_yield pays accrued yield from the gigahdx! pot into the staker's locked
+  // HDX; no stHDX moves, so like Unlocked it only carries an asset-0 shape.
+  'GigaHdx.YieldRealized': {
+    action: 'GIGAHDX Yield',
+    shapes: [{ field: 'amount', args: { who: '0xea8057c0e08d8832d8ae590bd9d4711f6b6bf5b255494b164fcc8e4491afd15a', amount: '6031885551040644' } }],
   },
   'GigaHdxRewards.RewardsClaimed': {
     action: 'GIGAHDX Reward',
@@ -125,4 +133,28 @@ describe('staking amount fields', () => {
       })
     }
   }
+})
+
+// Every classified staking event has to reach the feed's sources: the windowed and
+// account feeds read staking_activity, and the daily bars read the histogram MV. An
+// event classified here but missing from either renders on the block page and
+// nowhere else (GigaHdx.YieldRealized was absent from both, so a realized yield
+// showed as a bare transfer from the gigahdx! pot).
+describe('staking event sources', () => {
+  const views = readFileSync(new URL('../../clickhouse/schema/003_materialized_views.sql', import.meta.url), 'utf8')
+  const mvLine = (name: string) => views.split('\n').find(line => line.includes(`price_data.${name} TO`)) ?? ''
+  it('staking_activity_mv selects exactly STAKING_EVENT_NAMES', () => {
+    const where = mvLine('staking_activity_mv').split(' WHERE ')[1] ?? ''
+    expect([...where.matchAll(/'([A-Za-z]+\.[A-Za-z]+)'/g)].map(m => m[1]).sort()).toEqual([...STAKING_EVENT_NAMES].sort())
+  })
+  it('the activity histogram counts every staking event in both arms', () => {
+    const mv = mvLine('activity_histogram_events_mv')
+    for (const name of STAKING_EVENT_NAMES) expect(mv.match(new RegExp(`'${name.replace('.', '\\.')}'`, 'g'))?.length, name).toBe(2)
+  })
+  it('the Data API staking vocabulary follows the MV', () => {
+    expect([...DATA_STAKING_EVENT_NAMES].sort()).toEqual([...STAKING_EVENT_NAMES].sort())
+  })
+  it('a yield realization is no evidence of a GIGAHDX collateral leg', () => {
+    expect(mmStakingPlumbingExclusionSql()).toContain("event_name != 'GigaHdx.YieldRealized'")
+  })
 })

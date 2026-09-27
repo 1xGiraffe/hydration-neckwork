@@ -5135,9 +5135,11 @@ const stakingBackedMmPoolsSql = () => MM_MARKETS.filter(m => m.stakingBacked).ma
 // single act; unstaking withdraws it again, and migrating a legacy position or
 // claiming rewards tops it up. The GIGAHDX Stake / Unstake / Migrate / Reward /
 // Cancel unstake row IS that act, so the Supply/Withdraw beside it is plumbing and
-// every surface renders only the staking row. stHDX already held can still be
-// supplied straight into the market through the EVM pool — with no staking event
-// beside it, that keeps a Lend row of its own.
+// every surface renders only the staking row. A yield realization moves no stHDX
+// (it only locks HDX from the gigahdx! pot), so it is no evidence of a
+// collateral leg. stHDX already held can still be supplied straight into the
+// market through the EVM pool — with no staking event beside it, that keeps a
+// Lend row of its own.
 //
 // The test is a GigaHdx.* event for the same account in the same block. The
 // money-market models are EVM logs with no extrinsic index (it is resolved per row
@@ -5155,7 +5157,7 @@ export function mmStakingPlumbingExclusionSql(poolColumn = "ifNull(pool_address,
                   OR (block_height, lower(${accountColumn})) NOT IN (
                        SELECT block_height, ${evmAccountFormSql('who')}
                        FROM price_data.staking_activity
-                       WHERE event_name LIKE 'GigaHdx%' AND length(who) = 66))`
+                       WHERE event_name LIKE 'GigaHdx%' AND event_name != 'GigaHdx.YieldRealized' AND length(who) = 66))`
 }
 function moneyMarketFields(m: ApiMmMarket): Pick<MoneyMarketPosition, 'marketKey' | 'market' | 'role' | 'defiSimSupported' | 'stakingBacked'> {
   return { marketKey: m.key, market: m.label, role: m.role, defiSimSupported: m.defiSimSupported, stakingBacked: m.stakingBacked }
@@ -15184,6 +15186,7 @@ export const STAKING_EVENT_NAMES = [
   'GigaHdx.UnstakeCancelled',
   'GigaHdx.Unlocked',
   'GigaHdx.MigratedFromLegacy',
+  'GigaHdx.YieldRealized',
   'GigaHdxRewards.RewardsClaimed',
   'Staking.PositionCreated',
   'Staking.StakeAdded',
@@ -15246,6 +15249,11 @@ export function stakingAmountAndAsset(eventName: string, args: Record<string, un
   // it has no stHDX leg, so an stHDX-scoped view drops it (empty amount).
   if (eventName === 'GigaHdx.Unlocked') return { assetId: 0, amount: wantStHdx ? '' : argStr(args, 'amount'), action: 'GIGAHDX Unlock' }
   if (eventName === 'GigaHdx.MigratedFromLegacy') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdxReceived') : argStr(args, 'hdxUnlocked'), action: 'GIGAHDX Migrate' }
+  // realize_yield pays the position's accrued yield out of the gigahdx! pot into the
+  // staker's locked HDX (a Balances.Transfer from the pot, then Balances.Locked). The
+  // row IS that payout, so the pot leg beside it is plumbing. No stHDX moves, so an
+  // stHDX-scoped view drops it (empty amount), like Unlocked.
+  if (eventName === 'GigaHdx.YieldRealized') return { assetId: 0, amount: wantStHdx ? '' : argStr(args, 'amount'), action: 'GIGAHDX Yield' }
   if (eventName === 'GigaHdxRewards.RewardsClaimed') return { assetId: wantStHdx ? 670 : 0, amount: wantStHdx ? argStr(args, 'gigahdxReceived') : argStr(args, 'totalHdx'), action: 'GIGAHDX Reward' }
   if (preferredAssetId != null && preferredAssetId !== 0) return null
   if (eventName === 'Staking.PositionCreated') return { assetId: 0, amount: argStr(args, 'stake') || argStr(args, 'amount'), action: 'Stake' }
@@ -15372,6 +15380,7 @@ const STAKING_ACTION_EVENTS: Record<string, string[]> = {
   'GIGAHDX Cancel Unstake': ['GigaHdx.UnstakeCancelled'],
   'GIGAHDX Unlock': ['GigaHdx.Unlocked'],
   'GIGAHDX Migrate': ['GigaHdx.MigratedFromLegacy'],
+  'GIGAHDX Yield': ['GigaHdx.YieldRealized'],
   'GIGAHDX Reward': ['GigaHdxRewards.RewardsClaimed'],
   'Collator payout': ['CollatorRewards.CollatorRewarded'],
 }
@@ -15388,6 +15397,7 @@ export function stakingAmountSql(gigaAssetId: number): string {
       event_name='GigaHdx.UnstakeCancelled', ${giga('gigahdx', 'amount')},
       event_name='GigaHdx.Unlocked', ${gigaAssetId === 670 ? "''" : "JSONExtractString(args_json,'amount')"},
       event_name='GigaHdx.MigratedFromLegacy', ${giga('gigahdxReceived', 'hdxUnlocked')},
+      event_name='GigaHdx.YieldRealized', ${gigaAssetId === 670 ? "''" : "JSONExtractString(args_json,'amount')"},
       event_name='GigaHdxRewards.RewardsClaimed', ${giga('gigahdxReceived', 'totalHdx')},
       event_name='Staking.PositionCreated', if(JSONHas(args_json,'stake'), JSONExtractString(args_json,'stake'), JSONExtractString(args_json,'amount')),
       event_name='Staking.StakeAdded', if(JSONHas(args_json,'amount'), JSONExtractString(args_json,'amount'), JSONExtractString(args_json,'stake')),
