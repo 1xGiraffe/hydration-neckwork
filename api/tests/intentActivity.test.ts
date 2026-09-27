@@ -460,6 +460,13 @@ describe('notification parity', () => {
     expect(largeTradeRowEligible(intent('Cancel'))).toBe(false)
     expect(largeTradeRowEligible(intent('Expire'))).toBe(false)
     expect(largeTradeRowEligible({ ...base, type: 'trade' })).toBe(true)
+    expect(largeTradeRowEligible({ ...base, type: 'transfer' })).toBe(true)
+  })
+
+  // A vault compound is worth the fees it realized, not size changing hands.
+  it('never admits a liquidity row to the large-value lanes, a compound included', () => {
+    expect(largeTradeRowEligible({ ...base, type: 'liquidity', liqAction: 'Compound' })).toBe(false)
+    expect(largeTradeRowEligible({ ...base, type: 'liquidity', liqAction: 'Add' })).toBe(false)
   })
 
   it('lets a dca rule and the dca action filter see DCA intents', () => {

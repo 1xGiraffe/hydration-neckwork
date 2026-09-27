@@ -50,7 +50,7 @@ import { profileForAccount } from './userProfileService.ts'
 import { currentStableswapSharePools } from './stableswapSharePools.ts'
 import { findMempoolTx, findPendingBlock, findPendingExtrinsic, findPendingExtrinsicByHash, mempoolTxs, pendingBestHeight, pendingBlocksDesc, type MempoolTx, type PendingBlock, type PendingExtrinsicRow } from './pendingHeadService.ts'
 import { buildMempoolActivities, buildPendingActivities, type PendingActivity, type PendingTradeActivity } from './pendingActivity.ts'
-import { ethPrefixedAccountId, feeTierLabel, loadV3Registry, v3ActOnVenue, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3SwapAt, v3VenueSet, v3VenuesInScope, type V3Activity, type V3Registry } from './uniswapV3Service.ts'
+import { ethPrefixedAccountId, feeTierLabel, loadV3Registry, v3ActOnVenue, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3SwapAt, v3UnnamedActExtrinsics, v3VenueSet, v3VenuesInScope, type V3Activity, type V3Registry } from './uniswapV3Service.ts'
 import { loadV3AccountPositions, v3AccountPositions } from './uniswapV3Positions.ts'
 import { loadMmIncentiveProgrammeRows, scaledSeriesFromBuckets } from './mmIncentiveHistory.ts'
 import { loadCurrentCollateralFlags, loadMmIncentiveHistory, loadMmReserveMap, loadMoneyMarketHistory, mmHistoryStart, mmMarketCompare, mmObservationOrderSql, type MmHistoryInterest, type MmIncentiveHistory, type MmObservation } from './moneyMarketHistory.ts'
@@ -11291,7 +11291,7 @@ export interface ActivityRow {
   assetRefs?: number[]
   /** Protocol revenue the row's EXTRINSIC generated (absent when it generated none). */
   revenue?: ActivityRevenue
-  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy' | 'CollectFees' | 'Rebalance'   // Create = pool creation; Destroy = pool closure (no value); Claim = LM reward claim; ClaimReferral = referral-program reward claim; CollectFees = a concentrated-liquidity position collecting its earned fees; Rebalance = a vault operator re-ranging its positions
+  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy' | 'CollectFees' | 'Rebalance' | 'Compound'   // Create = pool creation; Destroy = pool closure (no value); Claim = LM reward claim; ClaimReferral = referral-program reward claim; CollectFees = a concentrated-liquidity position collecting its earned fees; Rebalance = a vault operator re-ranging its positions; Compound = a vault's keeper collecting its positions' fees and reinvesting them (the legs are the fees)
   // Concentrated-liquidity (Uniswap v3) rows: the pool contract the act is in, the
   // position NFT it concerns (manager positions), the Gamma vault it went through.
   poolAddress?: string
@@ -12062,9 +12062,69 @@ async function evmCallTargets(pairs: readonly [number, number][]): Promise<Map<s
 async function v3ActsCalling(acts: readonly V3Activity[], accountsH160: readonly string[]): Promise<Set<string>> {
   const unnamed = acts.filter((a): a is V3Activity & { extrinsicIndex: number } => a.whoAccountId == null && a.extrinsicIndex != null)
   if (!unnamed.length) return new Set()
-  const targets = await evmCallTargets(unnamed.map(a => [a.blockHeight, a.extrinsicIndex]))
+  // A vault act's target is already known (v3UnnamedCallers, filled by the anchor read
+  // that admitted it): a keeper's page holds hundreds of compounds, and asking raw_events
+  // for each again read ~3M rows per page build.
+  const targets = new Map<string, string>()
+  const ask: [number, number][] = []
+  for (const a of unnamed) {
+    const key = `${a.blockHeight}:${a.extrinsicIndex}`
+    const known = v3UnnamedCallers.get(key)?.target
+    if (known) targets.set(key, known)
+    else ask.push([a.blockHeight, a.extrinsicIndex])
+  }
+  if (ask.length) for (const [key, target] of await evmCallTargets(ask)) targets.set(key, target)
   const scoped = new Set(accountsH160.map(h => h.toLowerCase()))
   return new Set(unnamed.filter(a => scoped.has(targets.get(`${a.blockHeight}:${a.extrinsicIndex}`) ?? '')).map(v3ActKey))
+}
+
+// The H160 an account id acts as on the EVM side (its truncated form), lowercase.
+const h160Of = (accountId: string): string | null => {
+  const form = evmAccountForm(accountId.toLowerCase())
+  return form ? '0x' + form.slice(10, 50) : null
+}
+
+// `block:extrinsic` → who a vault act no log names (a Rebalance, a compound) is
+// credited to and the contract its EVM dispatch called. Both are facts of an indexed
+// extrinsic that never change, so each is resolved once — through actorsFor, the
+// rule the rows themselves are built with, and evmCallTargets — and kept.
+const v3UnnamedCallers = new Map<string, V3UnnamedCaller>()
+
+// The blocks of the unnamed vault acts the scope signed or called: what the scoped
+// anchor read admits them by (v3FeedActivities `unnamedActBlocks`). A superset of what
+// the scope keeps — v3RowsInScope decides per row — but only of acts that can be kept,
+// so an account that never touched a vault anchors none of them.
+export async function v3UnnamedActBlocks(accountsH160: readonly string[]): Promise<number[]> {
+  const pairs = await v3UnnamedActExtrinsics()
+  const missing = pairs.filter(([h, e]) => !v3UnnamedCallers.has(`${h}:${e}`))
+  // Resolved this call but not kept: an extrinsic whose signer or EVM call target is
+  // not visible yet (its raw rows can land after the logs) is asked again next time.
+  const pending = new Map<string, V3UnnamedCaller>()
+  if (missing.length) {
+    const [actors, targets] = await Promise.all([actorsFor(missing), evmCallTargets(missing)])
+    for (const [h, e] of missing) {
+      const key = `${h}:${e}`
+      const actor = actors.get(key)
+      const target = targets.get(key) ?? null
+      const entry: V3UnnamedCaller = { block: h, actorH160: actor ? h160Of(actor) : null, target }
+      if (entry.actorH160 && target) v3UnnamedCallers.set(key, entry)
+      else pending.set(key, entry)
+    }
+  }
+  const callers = pairs.map(([h, e]) => v3UnnamedCallers.get(`${h}:${e}`) ?? pending.get(`${h}:${e}`))
+    .filter((c): c is V3UnnamedCaller => c != null)
+  return v3UnnamedBlocksFor(callers, accountsH160)
+}
+
+export interface V3UnnamedCaller { block: number; actorH160: string | null; target: string | null }
+/** The blocks of the callers the scope signed (its actor) or called (its target), ascending. */
+export function v3UnnamedBlocksFor(callers: readonly V3UnnamedCaller[], accountsH160: readonly string[]): number[] {
+  const scoped = new Set(accountsH160.map(a => a.toLowerCase()))
+  const blocks = new Set<number>()
+  for (const c of callers) {
+    if ((c.actorH160 && scoped.has(c.actorH160)) || (c.target && scoped.has(c.target))) blocks.add(c.block)
+  }
+  return [...blocks].sort((a, b) => a - b)
 }
 
 // A feed page of v3 rows: swaps (`swap`), LP acts (`liquidity`) or both, newest first,
@@ -12100,7 +12160,8 @@ async function getRecentV3Rows(
   return cached(key, tw ? 30000 : LIVE_CACHE_MS, async () => {
     const prices = await ensurePrices()
     const want = offset + limit
-    const acts = await v3FeedActivities(registry, { bound: tw ?? '1', kind, accountsH160, pools, limit: v3ActReadLimit(want) })
+    const unnamedActBlocks = accountsH160 && kind !== 'swap' ? await v3UnnamedActBlocks(accountsH160) : undefined
+    const acts = await v3FeedActivities(registry, { bound: tw ?? '1', kind, accountsH160, pools, unnamedActBlocks, limit: v3ActReadLimit(want) })
     const venueSet = venues ? v3VenueSet(venues) : new Set<string>()
     const [calledActs, built] = await Promise.all([
       accountsH160 ? v3ActsCalling(acts, accountsH160) : new Set<string>(),
@@ -29620,12 +29681,34 @@ const TRANSFER_EVENTS = ['Balances.Transfer', 'Tokens.Transfer', 'Currencies.Tra
 // Rebalance stand for the vault (its pool rows are plumbing). Grouped by the action
 // the feed gives the act, so the bars follow the action filter like the list.
 const V3_SWAP_HISTOGRAM_EVENTS = ['UniswapV3.Swap']
+// A compound is one act per EXTRINSIC however many positions it poked, so its rows
+// (uniswap_v3_compound_histogram_mv, one per ZeroBurn) carry the extrinsic as their
+// activity_index and count in an identity space of their own (histogramIdentitySql).
+// The same poke opens every deposit, withdrawal and rebalance, where it is that act's
+// plumbing (classifyV3Events), so those extrinsics are left out at read time
+// (v3CompoundPlumbingSql) — an insert-time MV sees one log and cannot tell.
+export const V3_COMPOUND_HISTOGRAM_EVENT = 'Gamma.Compound'
 const V3_LIQUIDITY_HISTOGRAM_EVENTS: Record<string, string[]> = {
   Add: ['UniswapV3.Mint', 'Gamma.Deposit'], Remove: ['UniswapV3.Burn', 'Gamma.Withdraw'],
-  CollectFees: ['UniswapV3.Collect'], Rebalance: ['Gamma.Rebalance'],
+  CollectFees: ['UniswapV3.Collect'], Rebalance: ['Gamma.Rebalance'], Compound: [V3_COMPOUND_HISTOGRAM_EVENT],
 }
 const V3_LIQUIDITY_HISTOGRAM_NAMES = Object.values(V3_LIQUIDITY_HISTOGRAM_EVENTS).flat()
 export const V3_HISTOGRAM_NAMES = [...V3_SWAP_HISTOGRAM_EVENTS, ...V3_LIQUIDITY_HISTOGRAM_NAMES]
+// The activity identity of a histogram row: a swap is its extrinsic (a routed hop and
+// its Router.Executed are one trade), a compound is its extrinsic too but in a space of
+// its own (extrinsic 2's compound is not event 2 of the block), anything else its event.
+export function histogramIdentitySql(): string {
+  return `tuple(block_height, multiIf(event_name IN (${HISTOGRAM_SWAP_EVENTS_SQL}), 1, event_name = '${V3_COMPOUND_HISTOGRAM_EVENT}', 2, 0), activity_index)`
+}
+// A ZeroBurn inside a deposit, a withdrawal or a rebalance is that act's plumbing, not a
+// compound. Those extrinsics are few (a vault's user flows) and read off the venue table
+// over the histogram's own 90-day reach.
+export function v3CompoundPlumbingSql(): string {
+  return `NOT (event_name = '${V3_COMPOUND_HISTOGRAM_EVENT}' AND (block_height, activity_index) IN (
+            SELECT block_height, assumeNotNull(extrinsic_index) FROM price_data.uniswap_v3_events
+            WHERE kind = 'vault' AND event_name IN ('Deposit', 'Withdraw', 'Rebalance') AND extrinsic_index IS NOT NULL
+              AND block_timestamp > now() - INTERVAL 91 DAY))`
+}
 export function v3LiquidityHistogramNames(action?: string): string[] {
   return action ? (V3_LIQUIDITY_HISTOGRAM_EVENTS[action] ?? []) : V3_LIQUIDITY_HISTOGRAM_NAMES
 }
@@ -29750,9 +29833,10 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
       // An action no event in this category produces selects nothing — the same answer
       // the list gives it — rather than an empty `IN ()`.
       const nameFilter = names.length ? `event_name IN (${sqlNames(names)})` : '0'
-      query = `SELECT toString(day) AS d, toUInt64(uniqExact(tuple(block_height, event_name IN (${HISTOGRAM_SWAP_EVENTS_SQL}), activity_index))) AS v
+      const compoundPlumbing = names.includes(V3_COMPOUND_HISTOGRAM_EVENT) ? ` AND ${v3CompoundPlumbingSql()}` : ''
+      query = `SELECT toString(day) AS d, toUInt64(uniqExact(${histogramIdentitySql()})) AS v
                FROM price_data.activity_histogram_events
-               WHERE day > today() - 90 AND ${nameFilter} ${assetFilter}
+               WHERE day > today() - 90 AND ${nameFilter} ${assetFilter}${compoundPlumbing}
                GROUP BY day ORDER BY day`
     } else if (scope === 'events' || scope === 'extrinsics')
       query = `SELECT toString(day) AS d, toUInt64(groupBitmapMerge(identity_state)) AS v

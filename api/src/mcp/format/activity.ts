@@ -62,7 +62,7 @@ export const ACTIVITY_ACTIONS: Record<string, string[]> = {
     'xcswap',
   ],
   xcm: ['out', 'in'],
-  liquidity: ['Add', 'Remove', 'Create', 'Destroy', 'Claim', 'ClaimReferral', 'CollectFees', 'Rebalance'],
+  liquidity: ['Add', 'Remove', 'Create', 'Destroy', 'Claim', 'ClaimReferral', 'CollectFees', 'Rebalance', 'Compound'],
   mm: ['Supply', 'Withdraw', 'Borrow', 'Repay', 'LiquidationCall', 'ClaimRewards'],
   stake: [
     'Stake', 'Add stake', 'Unstake', 'Force unstake', 'Staking reward',
@@ -115,7 +115,7 @@ export const ACTIVITY_TYPE_NOTES =
 const LIQ_LABELS: Record<string, string> = {
   Add: 'Add liquidity', Remove: 'Remove liquidity', Create: 'Create pool', Destroy: 'Destroy pool',
   Claim: 'Claim LP rewards', ClaimReferral: 'Claim referral rewards',
-  CollectFees: 'Collect fees', Rebalance: 'Rebalance vault',
+  CollectFees: 'Collect fees', Rebalance: 'Rebalance vault', Compound: 'Compound',
 }
 const MM_LABELS: Record<string, string> = {
   Supply: 'Lend', ClaimRewards: 'Claim lend rewards',
@@ -182,6 +182,7 @@ export function activitySlug(r: ActivityRow): string {
         : r.liqAction === 'ClaimReferral' ? 'claim-referral-rewards'
         : r.liqAction === 'CollectFees' ? 'collect-fees'
         : r.liqAction === 'Rebalance' ? 'rebalance'
+        : r.liqAction === 'Compound' ? 'compound'
         : 'add-liquidity'
     case 'mm': return MM_SLUG[r.mmAction ?? ''] ?? 'lend'
     case 'staking': return 'staking'

@@ -39,8 +39,9 @@ describe('histogram names', () => {
     expect(v3LiquidityHistogramNames('Remove')).toEqual(['UniswapV3.Burn', 'Gamma.Withdraw'])
     expect(v3LiquidityHistogramNames('CollectFees')).toEqual(['UniswapV3.Collect'])
     expect(v3LiquidityHistogramNames('Rebalance')).toEqual(['Gamma.Rebalance'])
+    expect(v3LiquidityHistogramNames('Compound')).toEqual(['Gamma.Compound'])
     expect(v3LiquidityHistogramNames('Claim')).toEqual([])
-    expect(v3LiquidityHistogramNames()).toHaveLength(6)
+    expect(v3LiquidityHistogramNames()).toHaveLength(7)
     expect(V3_HISTOGRAM_NAMES).toContain('UniswapV3.Swap')
   })
 })
@@ -62,15 +63,22 @@ describe('getDailyActivity', () => {
     expect(trade).toContain("'UniswapV3.Swap'")
     expect(swap).toContain("'UniswapV3.Swap'")
     expect(dca).not.toContain('UniswapV3')
-    for (const name of ['UniswapV3.Mint', 'UniswapV3.Burn', 'UniswapV3.Collect', 'Gamma.Deposit', 'Gamma.Withdraw', 'Gamma.Rebalance']) expect(liquidity).toContain(`'${name}'`)
+    for (const name of ['UniswapV3.Mint', 'UniswapV3.Burn', 'UniswapV3.Collect', 'Gamma.Deposit', 'Gamma.Withdraw', 'Gamma.Rebalance', 'Gamma.Compound']) expect(liquidity).toContain(`'${name}'`)
     expect(liquidity).not.toContain("'UniswapV3.Swap'")
     expect(collect).toContain("'UniswapV3.Collect'")
     expect(collect).not.toContain("'UniswapV3.Mint'")
     expect(collect).not.toContain("'Gamma.Deposit'")
     expect(all).toContain("'Gamma.Rebalance'")
+    expect(all).toContain("'Gamma.Compound'")
     // A routed hop's Swap log and its Router.Executed row are one trade: the swap-class
     // identity in the uniqExact tuple must name the v3 swap too.
-    expect(queries[0]).toMatch(/event_name IN \([^)]*'UniswapV3\.Swap'[^)]*\), activity_index/)
+    expect(queries[0]).toMatch(/multiIf\(event_name IN \([^)]*'UniswapV3\.Swap'[^)]*\), 1, event_name = 'Gamma\.Compound', 2, 0\), activity_index/)
+    // A compound counts once per extrinsic, and never where its poke opened a deposit,
+    // a withdrawal or a rebalance; only the queries that name compounds pay for that.
+    expect(queries[3]).toContain("NOT (event_name = 'Gamma.Compound' AND (block_height, activity_index) IN (")
+    expect(queries[5]).toContain("NOT (event_name = 'Gamma.Compound'")
+    expect(queries[0]).not.toContain("NOT (event_name = 'Gamma.Compound'")
+    expect(queries[4]).not.toContain("NOT (event_name = 'Gamma.Compound'")
   })
 })
 

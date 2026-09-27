@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { blockExtrinsicTupleList, v3ActReadLimit, v3RowsInScope } from '../src/services/explorerService.ts'
+import { blockExtrinsicTupleList, v3ActReadLimit, v3RowsInScope, v3UnnamedBlocksFor } from '../src/services/explorerService.ts'
 import {
   classifyV3Events, ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, resolveV3TokenAsset, sqrtPriceX96ToPrice, tickToPrice, v3ActOnVenue, v3AnchorScan, v3FeedActivities, v3PoolForHop, v3VenuesInScope,
   type V3ClassifyContext, type V3EventRow, type V3Pool, type V3Registry,
@@ -169,6 +169,37 @@ describe('classifyV3Events', () => {
     expect(out[0]).toMatchObject({ tickLower: 1, tickUpper: 2 })
   })
 
+  // Compound 15072081-2 (the keeper through the vault's Admin contract): each position
+  // is poked — burn(0), collect to the vault, ZeroBurn with the fees — and the vault
+  // re-mints. ONE act for the extrinsic, identified by its first ZeroBurn, its legs the
+  // fees of both positions summed; the pool rows and the re-mint are plumbing.
+  it('reads a keeper compound as one Compound act with both positions\' fees', () => {
+    const at = { block_height: 15072081, extrinsic_index: 2 }
+    const burnBase = row({ ...at, event_index: 7, event_name: 'Burn', actor: VAULT, owner: VAULT, tick_lower: 185280, tick_upper: 187260, liquidity: '0' })
+    const collectBase = row({ ...at, event_index: 14, event_name: 'Collect', actor: VAULT, owner: VAULT, counterparty: VAULT, tick_lower: 185280, tick_upper: 187260, amount0: '51593848360' })
+    const zbBase = row({ ...at, event_index: 15, contract_address: VAULT, kind: 'vault', event_name: 'ZeroBurn', owner: VAULT, amount0: '51593848360', aux0: '255' })
+    const burnLimit = row({ ...at, event_index: 20, event_name: 'Burn', actor: VAULT, owner: VAULT, tick_lower: 185640, tick_upper: 186600, liquidity: '0' })
+    const collectLimit = row({ ...at, event_index: 23, event_name: 'Collect', actor: VAULT, owner: VAULT, counterparty: VAULT, tick_lower: 185640, tick_upper: 186600, amount0: '207358349332', amount1: '5' })
+    const zbLimit = row({ ...at, event_index: 24, contract_address: VAULT, kind: 'vault', event_name: 'ZeroBurn', owner: VAULT, amount0: '207358349332', amount1: '5', aux0: '255' })
+    const remint = row({ ...at, event_index: 34, event_name: 'Mint', actor: VAULT, owner: VAULT, tick_lower: 185280, tick_upper: 187260, liquidity: '77', amount0: '258952197692', amount1: '5' })
+    const out = classifyV3Events([burnBase, collectBase, zbBase, burnLimit, collectLimit, zbLimit, remint], ctx)
+    expect(out).toHaveLength(1)
+    expect(out[0]).toMatchObject({
+      kind: 'liquidity', action: 'Compound', pool: POOL, vault: VAULT, contract: VAULT, asset0: 1001, asset1: 222,
+      amount0: '258952197692', amount1: '5', whoAccountId: null, blockHeight: 15072081, eventIndex: 15, extrinsicIndex: 2,
+    })
+  })
+
+  // Gamma pokes the positions at the start of every deposit, withdrawal and rebalance
+  // too; there the ZeroBurn is that act's plumbing, never a second act.
+  it('keeps a ZeroBurn opening a rebalance, deposit or withdrawal inside that act', () => {
+    const zb = row({ event_index: 2, contract_address: VAULT, kind: 'vault', event_name: 'ZeroBurn', owner: VAULT, amount0: '9', amount1: '9', aux0: '255' })
+    for (const [event_name, action] of [['Rebalance', 'Rebalance'], ['Deposit', 'Add'], ['Withdraw', 'Remove']] as const) {
+      const act = row({ event_index: 5, contract_address: VAULT, kind: 'vault', event_name, actor: USER, counterparty: USER, amount0: '1', amount1: '1' })
+      expect(classifyV3Events([zb, act], ctx).map(a => a.action)).toEqual([action])
+    }
+  })
+
   it('keeps event order and never invents a row for an unknown pool', () => {
     const strangerPool = row({ contract_address: '0x1234567890123456789012345678901234567890', event_name: 'Swap', amount0: '1', amount1: '-1' })
     expect(classifyV3Events([strangerPool], ctx)).toHaveLength(0)
@@ -215,11 +246,12 @@ describe('v3PoolForHop', () => {
   })
 })
 
-// A vault Rebalance names no account — the operator signs rebalance() and the log
-// carries only the vault's new range — so the global feed credits it to the signer
-// while the operator's own feed never anchored it: its account filter matched only
-// logs that NAME the account. The account-scoped anchor admits every Rebalance, and
-// the caller (getRecentV3Rows) keeps one only when its extrinsic's signer is in scope.
+// A vault Rebalance or compound names no account — the operator signs rebalance() or
+// compound() and the logs carry only the vault's range or fees — so the global feed
+// credits it to the signer while the operator's own feed never anchored it: its account
+// filter matched only logs that NAME the account. The account-scoped anchor admits them
+// through the blocks the scope signed or called (unnamedActBlocks), and the caller
+// (getRecentV3Rows) keeps one only when its extrinsic's signer or target is in scope.
 describe('v3FeedActivities account scope', () => {
   const OPERATOR = '0x0b0be14c1158ba09b720812e70f819366614cb96'
   const registry = {
@@ -229,18 +261,47 @@ describe('v3FeedActivities account scope', () => {
   const rebalance = row({ block_height: 14991345, event_index: 33, extrinsic_index: 2, contract_address: VAULT, kind: 'vault', event_name: 'Rebalance', amount0: '516511297970979', amount1: '1', tick: 185060 })
 
   it('anchors a Rebalance for an account the log does not name, leaving the signer check to the caller', async () => {
-    const seen: string[] = []
+    const seen: { query: string; params: Record<string, unknown> }[] = []
     initUniswapV3Service({
-      query: async ({ query }: { query: string }) => {
-        seen.push(query)
+      query: async ({ query, query_params }: { query: string; query_params: Record<string, unknown> }) => {
+        seen.push({ query, params: query_params })
         // The anchor read names the account filter; the extrinsic read returns the group.
         const rows = query.includes('ORDER BY block_height DESC') ? [{ block_height: 14991345, extrinsic_index: 2 }] : [rebalance]
         return { json: async () => rows }
       },
     } as never)
-    const acts = await v3FeedActivities(registry, { kind: 'liquidity', accountsH160: [OPERATOR], limit: 10 })
-    expect(seen[0]).toContain("(kind = 'vault' AND event_name = 'Rebalance')")
+    const acts = await v3FeedActivities(registry, { kind: 'liquidity', accountsH160: [OPERATOR], unnamedActBlocks: [14991345], limit: 10 })
+    expect(seen[0].query).toContain("(kind = 'vault' AND event_name IN ('Rebalance', 'ZeroBurn') AND block_height IN {unnamedBlocks:Array(UInt32)})")
+    expect(seen[0].params.unnamedBlocks).toEqual([14991345])
     expect(acts).toMatchObject([{ kind: 'liquidity', action: 'Rebalance', whoAccountId: null, vault: VAULT, blockHeight: 14991345 }])
+  })
+
+  // Compounds run dozens a day: anchored for every scope they crowded a newest-first
+  // anchor page until an account's own older acts fell off it.
+  it('anchors no unnamed vault act for a scope that signed or called none', async () => {
+    const seen: string[] = []
+    initUniswapV3Service({
+      query: async ({ query }: { query: string }) => { seen.push(query); return { json: async () => [] } },
+    } as never)
+    await v3FeedActivities(registry, { kind: 'liquidity', accountsH160: [USER], unnamedActBlocks: [], limit: 10 })
+    expect(seen[0]).not.toContain('unnamedBlocks')
+    expect(seen[0]).not.toContain("event_name IN ('Rebalance', 'ZeroBurn')")
+  })
+})
+
+describe('v3UnnamedBlocksFor', () => {
+  const KEEPER = '0x0b0be14c1158ba09b720812e70f819366614cb96'
+  const ADMIN = '0x8fc8a0d7cb9c6b2366ec08f1bf03067d54b67bc5'
+  const callers = [
+    { block: 15072081, actorH160: KEEPER, target: ADMIN },
+    { block: 15066294, actorH160: KEEPER, target: '0x8b7dd119fb5e2dcf3b2fe0e3dd8b3ee75bac8c94' },
+    { block: 14397240, actorH160: USER, target: VAULT },
+  ]
+  it('selects the blocks the scope signed or called, ascending and once', () => {
+    expect(v3UnnamedBlocksFor(callers, [KEEPER])).toEqual([15066294, 15072081])
+    expect(v3UnnamedBlocksFor(callers, [ADMIN.toUpperCase().replace('0X', '0x')])).toEqual([15072081])
+    expect(v3UnnamedBlocksFor([...callers, callers[0]], [KEEPER, ADMIN])).toEqual([15066294, 15072081])
+    expect(v3UnnamedBlocksFor(callers, [ROUTER])).toEqual([])
   })
 })
 

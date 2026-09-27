@@ -306,6 +306,10 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
             <div className="dd mono">{v.feeSharePct != null ? `${v.feeSharePct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% of earned fees` : <Dash />} <span className="muted">· paid to the Treasury on every compound</span></div>
             <div className="dt">Rebalances</div>
             <div className="dd mono">{F.int(v.rebalances)}{v.lastRebalanceAt && v.lastRebalanceBlock != null && <span className="muted" style={{ marginLeft: 8 }}>· last <Link to={paths.block(v.lastRebalanceBlock)} className="hash"><Ago ts={v.lastRebalanceAt} now={now} /></Link></span>}</div>
+            {v.compounds != null && <>
+              <div className="dt">Compounds</div>
+              <div className="dd mono">{F.int(v.compounds)}{v.lastCompoundAt && v.lastCompoundBlock != null && <span className="muted" style={{ marginLeft: 8 }}>· last <Link to={paths.block(v.lastCompoundBlock)} className="hash"><Ago ts={v.lastCompoundAt} now={now} /></Link></span>}</div>
+            </>}
             {v.ranges.map((r, i) => (
               <div key={`${r.tickLower}:${r.tickUpper}`} style={{ display: 'contents' }}>
                 <div className="dt">{i === 0 ? 'Ranges' : ''}</div>

@@ -25,7 +25,8 @@
 //                                a collect that paid nothing beyond the same
 //                                extrinsic's burns are never acts.
 //
-// A vault Rebalance is the operator's act, names no account, and has no row here.
+// A vault Rebalance or compound is the operator's act, names no account, and has no
+// row here.
 // Tokens resolve to registry assets through assets.evm_address or the
 // `0x…01 + id` asset precompile; an act in a pool whose token neither names, or a
 // manager act whose pool row cannot be read, is omitted rather than published with

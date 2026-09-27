@@ -42,6 +42,7 @@ Disallow: /claim-rewards/
 Disallow: /claim-referral-rewards/
 Disallow: /collect-fees/
 Disallow: /rebalance/
+Disallow: /compound/
 Disallow: /lend/
 Disallow: /withdraw/
 Disallow: /borrow/

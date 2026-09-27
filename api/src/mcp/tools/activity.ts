@@ -115,6 +115,7 @@ TYPE vocabulary (default \`all\`): ${ACTIVITY_TYPES.join(', ')}.
 
 ACTION requires a TYPE and is validated here before the call. Upstream it is not a filter on its own — with no \`type\` the server ignores it and answers the unfiltered feed — and an unrecognised value is not an error either: scoped it returns an empty page, while on the global feed it walks the whole candidate set for about 45 seconds and then answers 503. So an \`action\` without a \`type\`, on a type that takes none, or outside its type's list is refused immediately with the accepted values:
 ${ACTION_TABLE}
+Liquidity \`Rebalance\` and \`Compound\` are a Gamma vault keeper's acts, credited to the keeper; a Compound's amount is the fees it collected and reinvested.
 
 ${ACTIVITY_TYPE_NOTES} For DCA fills only, pass \`type=trade, action=dca\`, or keep the rows flagged \`dca\`. A ROW's own \`type\` is one of ${ACTIVITY_ROW_TYPES.join(', ')} — not the query vocabulary above.
 
