@@ -16,7 +16,7 @@ import * as storage from './types/storage.ts'
 import { hasAssetRegistryMetadataEvent } from './registry/events.js'
 import { isSwapEvent } from './registry/swapEvents.js'
 import { extractTradeVolumeFromSwaps, extractVolumeFromSwaps, mergePriceAndVolumeRows } from './blocks/extractVolume.js'
-import { readErc20Balances, isKnownErc20, updateErc20Registry } from './evm/balances.js'
+import { readErc20Balances, isKnownErc20, updateErc20Registry, type AtokenReserveRef } from './evm/balances.js'
 import {
   ClickHouseSnapshotReader,
   diffAssetRows,
@@ -115,6 +115,7 @@ function syncRegistryPricingState(
   registry: AssetRegistryTracker,
   existingLpEquivalences: Map<number, number>,
   atokenUnderlyings: Map<string, number>,
+  atokenReserveRefs: Map<string, AtokenReserveRef>,
   uniswapV3Pools: UniswapV3PoolTracker,
 ): {
   atokenEquivalences: [number, number][]
@@ -135,7 +136,7 @@ function syncRegistryPricingState(
   }
 
   const erc20Contracts = registry.getErc20Contracts()
-  updateErc20Registry(erc20Contracts, aaveTokenIds)
+  updateErc20Registry(erc20Contracts, aaveTokenIds, atokenReserveRefs)
   uniswapV3Pools.setErc20Contracts(erc20Contracts)
 
   return { atokenEquivalences, atokenIds, lpEquivalences }
@@ -702,7 +703,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
           await registry.maybeSnapshot(blockHeight, block.header, { force: true })
           await atokenReserves.refresh()
           ;({ atokenEquivalences, atokenIds, lpEquivalences } =
-            syncRegistryPricingState(registry, lpEquivalences, atokenReserves.underlyings, uniswapV3Pools))
+            syncRegistryPricingState(registry, lpEquivalences, atokenReserves.underlyings, atokenReserves.reserves, uniswapV3Pools))
           historicalRegistryInitialized = true
         }
 
@@ -777,7 +778,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
         if (newAssets.length > 0 || hasAssetRegistryChange) {
           await atokenReserves.refresh()
           ;({ atokenEquivalences, atokenIds, lpEquivalences } =
-            syncRegistryPricingState(registry, lpEquivalences, atokenReserves.underlyings, uniswapV3Pools))
+            syncRegistryPricingState(registry, lpEquivalences, atokenReserves.underlyings, atokenReserves.reserves, uniswapV3Pools))
         }
 
         currentAtokenEquivalences = atokenEquivalences
