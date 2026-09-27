@@ -109,12 +109,12 @@ const MM_COLORS: Record<string, string> = {
 // Staking has more actions than a ramp can hold apart, so the GIGAHDX/plain
 // variants of one act share a shade — Stake and GIGAHDX Stake are the same act on
 // different products, and telling THOSE apart is the label's job. What must stay
-// separate is what the act does: enter, exit, collect, migrate, or call off a
-// pending exit. Cancel is tested before exit because a cancelled unstake names both.
+// separate is what the act does: enter, exit, collect (a reward, a payout, a
+// realized GIGAHDX yield), migrate, or call off a pending exit. Cancel is tested before exit because a cancelled unstake names both.
 function stakingColor(action: string): string {
   if (/migrat/i.test(action)) return CAT.stakeMigrate
   if (/cancel/i.test(action)) return CAT.stakeCancel
-  if (/reward|payout/i.test(action)) return CAT.stakeReward
+  if (/reward|payout|yield/i.test(action)) return CAT.stakeReward
   if (/unstake/i.test(action)) return CAT.stakeExit
   return CAT.stake
 }
