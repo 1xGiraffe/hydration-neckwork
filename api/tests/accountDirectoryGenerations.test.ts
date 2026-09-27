@@ -216,7 +216,9 @@ describe('the directory wiring keeps the generation out of its keys', () => {
     expect(at).toBeGreaterThan(-1)
     const body = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
 
-    expect([...body.matchAll(/refreshAccountsPage\(/g)]).toHaveLength(2)
+    // One refresh per prewarmed block — the same list getAccounts composes from.
+    expect([...body.matchAll(/refreshAccountsPage\(/g)]).toHaveLength(1)
+    expect(body).toContain('of prewarmedAccountBlocks()')
     expect(body).not.toContain('getAccounts(')
   })
 
