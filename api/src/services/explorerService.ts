@@ -15217,23 +15217,53 @@ function stakingActivityKey(row: RawStakingActivityEvent): string | null {
   const who = argStr(args, 'who').toLowerCase()
   return who ? `${row.block_height}:${row.extrinsic_index}:${who}` : null
 }
+// A GIGAHDX reward claim restakes what it pays, a cancelled unstake stakes the
+// position's HDX again and a legacy migration force-unstakes the old position and
+// stakes the new one, so each also emits the COMPANION events named here for the
+// same (block, extrinsic, who). The parent row is the act; the
+// companion is its plumbing and never renders beside it. One table for both halves
+// of the rule: suppressGigaCompanionEvents over an extrinsic's or block's own events,
+// and gigaCompanionExclusionSql for the paged feeds, which must drop the companions
+// BEFORE their LIMIT — a page that dropped them afterwards comes back short while
+// more rows exist, which the pagers read as the end of the feed.
+const GIGA_COMPANION_PARENTS: Record<string, string[]> = {
+  'GigaHdx.Staked': ['GigaHdxRewards.RewardsClaimed', 'GigaHdx.UnstakeCancelled', 'GigaHdx.MigratedFromLegacy'],
+  'Staking.ForceUnstaked': ['GigaHdx.MigratedFromLegacy'],
+}
 export function suppressGigaCompanionEvents<T extends RawStakingActivityEvent>(rows: T[]): T[] {
-  const migrationKeys = new Set<string>()
-  const rewardKeys = new Set<string>()
+  const parentKeys = new Map<string, Set<string>>()
   for (const row of rows) {
     const key = stakingActivityKey(row)
     if (!key) continue
-    if (row.event_name === 'GigaHdx.MigratedFromLegacy') migrationKeys.add(key)
-    if (row.event_name === 'GigaHdxRewards.RewardsClaimed') rewardKeys.add(key)
+    let names = parentKeys.get(key)
+    if (!names) parentKeys.set(key, names = new Set())
+    names.add(row.event_name)
   }
-  if (!migrationKeys.size && !rewardKeys.size) return rows
   return rows.filter(row => {
-    if (row.event_name !== 'GigaHdx.Staked' && row.event_name !== 'Staking.ForceUnstaked') return true
+    const parents = GIGA_COMPANION_PARENTS[row.event_name]
+    if (!parents) return true
     const key = stakingActivityKey(row)
-    if (!key) return true
-    if (row.event_name === 'GigaHdx.Staked' && rewardKeys.has(key)) return false
-    return !migrationKeys.has(key)
+    const present = key ? parentKeys.get(key) : undefined
+    return !present || !parents.some(name => present.has(name))
   })
+}
+// The same rule as a predicate on (block_height, event_index), so it applies both to
+// staking_activity and to the account_activity_v3 references that prune it. `bound`
+// must be block-granular (a date window or `1`), never a (block, event) cursor: a
+// parent's event index can sit on either side of its companion's, so a cursor
+// between them would hide the parent from this lookup and resurrect the companion.
+export function gigaCompanionExclusionSql(bound: string): string {
+  const quote = (names: string[]) => names.map(n => `'${n}'`).join(',')
+  const keyed = `extrinsic_index IS NOT NULL AND who != ''`
+  const key = `block_height, assumeNotNull(extrinsic_index), lower(who)`
+  const arms = Object.entries(GIGA_COMPANION_PARENTS).map(([companion, parents]) =>
+    `(event_name = '${companion}' AND (${key}) IN (
+          SELECT ${key} FROM price_data.staking_activity
+          WHERE ${bound} AND ${keyed} AND event_name IN (${quote(parents)})))`)
+  return `(block_height, event_index) NOT IN (
+      SELECT block_height, event_index FROM price_data.staking_activity
+      WHERE ${bound} AND ${keyed} AND event_name IN (${quote(Object.keys(GIGA_COMPANION_PARENTS))})
+        AND (${arms.join('\n          OR ')}))`
 }
 export function stakingAmountAndAsset(eventName: string, args: Record<string, unknown>, preferredAssetId?: number): { amount: string; assetId: number; action: string } | null {
   const wantStHdx = preferredAssetId === 670
@@ -15425,17 +15455,18 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
       : preferredAssetId === 670
         ? ['GigaHdx.Staked', 'GigaHdx.Unstaked', 'GigaHdx.UnstakeCancelled', 'GigaHdx.MigratedFromLegacy', 'GigaHdxRewards.RewardsClaimed']
         : STAKING_EVENT_NAMES
-    // A subordinate-only filter still needs its possible parent events as
-    // classification context. They are removed again after hierarchy folding,
-    // so filtering for "GIGAHDX Stake" does not resurrect reward/migration plumbing.
-    const contextNames = action === 'GIGAHDX Stake'
-      ? ['GigaHdxRewards.RewardsClaimed', 'GigaHdx.MigratedFromLegacy']
-      : action === 'Force unstake' ? ['GigaHdx.MigratedFromLegacy'] : []
-    const sourceNames = [...new Set([...selectedNames, ...contextNames])]
-    const names = sourceNames.map(n => `'${n}'`).join(',')
+    const names = selectedNames.map(n => `'${n}'`).join(',')
+    // The companion a reward claim or migration emits beside its own row is dropped
+    // in SQL, before every LIMIT below (the account references included), so each
+    // page and each source read holds as many rows as its limit while rows remain.
+    // The lookup lives in staking_activity itself, so a "GIGAHDX Stake" filter still
+    // sees the parents it must not render.
+    const companionFilter = selectedNames.some(n => n in GIGA_COMPANION_PARENTS)
+      ? `AND ${gigaCompanionExclusionSql(bound)}`
+      : ''
     // Account-scoped: prune via the activity index; global: recency window.
     const accountRefsFilter = acctList && !postFilter
-      ? `AND ${accountActivityRefsSql(accounts!, `event_name IN (${names})`, bound, scanOffset + scanLimit)}`
+      ? `AND ${accountActivityRefsSql(accounts!, `event_name IN (${names}) ${companionFilter}`, bound, scanOffset + scanLimit)}`
       : ''
     const accountFilter = acctList
       ? `AND who IN (${acctList})`
@@ -15448,7 +15479,7 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
         query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
                 FROM price_data.staking_activity FINAL
                 ${stakingValueFilter.joinSql}
-                WHERE ${b} ${accountRefsFilter} AND event_name IN (${names}) ${accountFilter}
+                WHERE ${b} ${accountRefsFilter} AND event_name IN (${names}) ${companionFilter} ${accountFilter}
                 ${stakingValueFilter.predicateSql}
                 ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         query_params: { limit: pageLimit, offset: pageOffset }, format: 'JSONEachRow',
@@ -15458,7 +15489,7 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
     const buildRows = (raw: { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; args_json: string }[]) => {
       const out: { row: ActivityRow; key: string }[] = []
       const seen = new Set<string>()
-      for (const r of suppressGigaCompanionEvents(raw)) {
+      for (const r of raw) {
         const built = stakingRowFromEvent(r, prices, { preferredAssetId })
         if (!built) continue
         if (action != null && built.row.stakingAction !== action) continue
@@ -18941,12 +18972,12 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
 // other; getVoteFeedRows' rank translation only decides WHICH rows a page shows,
 // never how many the feed holds.
 //
-// Nothing else does, for two different reasons. Staking is read the same way, but
-// its row builder discards source events three ways — suppressGigaCompanionEvents
-// drops the GigaHdx.Staked/Staking.ForceUnstaked companion of a migration or reward
-// claim, stakingRowFromEvent returns null for an event carrying no amount in the
-// requested asset, and repeats of one (block, extrinsic, event, who, asset, amount)
-// collapse to a single row — so a source count is not its feed's length. OTC's row builder
+// Nothing else does, for two different reasons. Staking is read the same way (its
+// migration/reward companions are dropped in the read itself, gigaCompanionExclusionSql),
+// but its row builder still discards source events two ways — stakingRowFromEvent
+// returns null for an event carrying no amount in the requested asset, and repeats of
+// one (block, extrinsic, event, who, asset, amount) collapse to a single row — so a
+// source count is not its feed's length. OTC's row builder
 // discards nothing: all three branches of otcRowFromEvent return a row, and a
 // missing Placed leg only leaves the asset legs and amounts null. OTC is excluded
 // because its FILTERS are not predicates over the rows being counted: a

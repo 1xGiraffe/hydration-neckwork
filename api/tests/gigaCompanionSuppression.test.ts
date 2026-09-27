@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { mmStakingPlumbingExclusionSql, suppressGigaCompanionEvents } from '../src/services/explorerService.ts'
+import { gigaCompanionExclusionSql, mmStakingPlumbingExclusionSql, suppressGigaCompanionEvents } from '../src/services/explorerService.ts'
 
 const ev = (block: number, extrinsic: number | null, eventName: string, who: string) => ({
   block_height: block,
@@ -46,6 +46,18 @@ describe('suppressGigaCompanionEvents', () => {
     expect(suppressGigaCompanionEvents(rows).map(r => r.event_name)).toEqual(['GigaHdxRewards.RewardsClaimed'])
   })
 
+  it('collapses a cancelled unstake to the cancel row only', () => {
+    // cancel_unstake stakes the position's HDX again and emits GigaHdx.Staked for
+    // the same amount right before UnstakeCancelled.
+    const who = '0x1111111111111111111111111111111111111111111111111111111111111111'
+    const rows = [
+      ev(30, 3, 'GigaHdx.Staked', who),
+      ev(30, 3, 'GigaHdx.UnstakeCancelled', who),
+    ]
+
+    expect(suppressGigaCompanionEvents(rows).map(r => r.event_name)).toEqual(['GigaHdx.UnstakeCancelled'])
+  })
+
   it('does not hide a separate account stake in the reward extrinsic', () => {
     const rewardOwner = '0x1111111111111111111111111111111111111111111111111111111111111111'
     const other = '0x2222222222222222222222222222222222222222222222222222222222222222'
@@ -58,6 +70,42 @@ describe('suppressGigaCompanionEvents', () => {
       'GigaHdx.Staked',
       'GigaHdxRewards.RewardsClaimed',
     ])
+  })
+})
+
+// The paged staking feeds drop the same companions in SQL, before their LIMIT: a page
+// that dropped them afterwards came back one row short per reward claim while more
+// rows existed, and every pager (the explorer UI's, the MCP's "page until a page
+// comes back short") read that as the end of the feed. The predicate is generated
+// from the table suppressGigaCompanionEvents reads, so the two cannot drift; its
+// parity with the JS rule over all indexed history is verified against the live
+// stack, and these pin the decisions it encodes.
+describe('gigaCompanionExclusionSql', () => {
+  const sql = gigaCompanionExclusionSql('1')
+  const key = 'block_height, assumeNotNull(extrinsic_index), lower(who)'
+
+  it('removes events by identity, so it can prune the account activity references too', () => {
+    expect(sql).toMatch(/^\(block_height, event_index\) NOT IN \(/)
+  })
+
+  it('hides a stake behind a reward claim, a cancelled unstake or a migration, a force-unstake behind a migration only', () => {
+    expect(sql).toContain(`event_name = 'GigaHdx.Staked' AND (${key}) IN (`)
+    expect(sql).toContain("event_name IN ('GigaHdxRewards.RewardsClaimed','GigaHdx.UnstakeCancelled','GigaHdx.MigratedFromLegacy')")
+    expect(sql).toContain(`event_name = 'Staking.ForceUnstaked' AND (${key}) IN (`)
+    expect(sql).toContain("event_name IN ('GigaHdx.MigratedFromLegacy')")
+    // Nothing else is ever a companion.
+    expect(sql).toContain("event_name IN ('GigaHdx.Staked','Staking.ForceUnstaked')")
+  })
+
+  it('pairs the extrinsic and the account, never the block alone', () => {
+    // Mirrors stakingActivityKey: an event without an extrinsic or an account is
+    // never a companion, and another account's stake in the claim's extrinsic stays.
+    expect(sql.match(/extrinsic_index IS NOT NULL AND who != ''/g)).toHaveLength(3)
+  })
+
+  it('applies the caller\'s block-granular bound to every lookup', () => {
+    const bounded = gigaCompanionExclusionSql("block_timestamp >= '2026-09-01 00:00:00'")
+    expect(bounded.match(/WHERE block_timestamp >= '2026-09-01 00:00:00' AND/g)).toHaveLength(3)
   })
 })
 
