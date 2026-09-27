@@ -24,7 +24,7 @@ const zVolumePeriod = zPeriod.exclude(['all', '1y'])
 const zYieldWindow = zVolumePeriod.exclude(['1h'])
 
 /** Coverage note repeated on every endpoint below (spec § New ClickHouse models). */
-const COVERAGE = 'Coverage is the full indexed swap history, back to the first Omnipool fill at block 1,708,104. Before block 6,837,788 an Omnipool event records the user\'s direct asset pair rather than the router\'s internal LRNA hops, so an LRNA per-asset row exists there only when the user actually traded LRNA.'
+const COVERAGE = 'Coverage is the full indexed swap history, back to the first Omnipool fill at block 1,708,104. Before block 6,837,788 an Omnipool event records the user\'s direct asset pair rather than the router\'s internal H2O hops, so an H2O per-asset row exists there only when the user actually traded H2O.'
 const ANCHORING = 'The window is rolling and anchored to the newest indexed swap fill (`asOf`), not to wall clock or to an independently advancing blocks head, so model catch-up cannot shorten it. `asOf` is null while the swap-leg model holds no data at all.'
 const VALUATION = 'Legs are valued at the 1-hour candle that had already CLOSED when the fill happened; an asset whose last close is more than 30 days older than the window is treated as unpriced and contributes 0.'
 
@@ -172,7 +172,7 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
       summary: 'Omnipool volume and fees per asset',
       description: [
         'Per-asset traded volume over a rolling window. A fill contributes the USD value of ITS legs in that asset; when those legs are unpriced it inherits the fill\'s own value (out side, falling back to the in side). Volume is SINGLE-counted per fill — the data lake counts both sides, so its per-fill numbers are about twice these — and fees are not added to volume.',
-        'The LRNA hub legs are not per-asset volume. `feeUsd` is the asset fee that accrues to liquidity providers; `protocolFeeUsd` is the LRNA-denominated protocol fee of the same fills, attributed to the non-hub asset that was sold into the hub.',
+        'The H2O hub legs are not per-asset volume. `feeUsd` is the asset fee that accrues to liquidity providers; `protocolFeeUsd` is the H2O-denominated protocol fee of the same fills, attributed to the non-hub asset that was sold into the hub.',
         ANCHORING, VALUATION, COVERAGE,
       ].join('\n\n'),
       querystring: z.object({ period: zVolumePeriod.default('24h') }),
@@ -413,7 +413,7 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
         '`feeAprPerc = 100 × (fee_amount_in_asset / mean_reserve) × 365/W`, a RAW-UNIT ratio: numerator and denominator are the same token, so no price enters and no feed can distort it. `feeApyPerc` compounds that period return over a year.',
         '**The numerator is the LP\'s share, not the whole fee.** Since the unified `Broadcast.Swapped` era (2025-01-25) the runtime splits each asset fee across recipients and emits one fee leg per recipient, so the fee is filtered by RECIPIENT: only legs that stayed in the Omnipool pallet account count. The rest — staking and referrals until 2026-06-22, the protocol\'s fee processor since — is real revenue but it does not accrue to liquidity providers. Measured over the rolling 30 days at 2026-08-12, the pool\'s own share is 50.1–55.0 % of the non-burned asset fee depending on the asset, so counting every non-burned leg would publish roughly 1.9× the rate an LP earns.',
         'There is still no ÷2: the data lake halves the WHOLE fee, which is a different correction that happens to land near this one. Against the recipient-filtered rate the lake\'s figure is 0–10 % low (its ÷2 against the pool\'s measured 50.1–55.0 % share), so a consumer switching from the lake to this endpoint sees a small change here, not the ~2× it would have seen against an unfiltered numerator.',
-        '`protocolFeeAprPerc` is the LRNA-denominated protocol fee measured against the asset\'s own hub reserve, reported separately and never blended into the LP APR. `farmAprPerc` is reported separately too — a consumer that wants the total APR adds it to `feeAprPerc`.',
+        '`protocolFeeAprPerc` is the H2O-denominated protocol fee measured against the asset\'s own hub reserve, reported separately and never blended into the LP APR: that fee does not accrue to the asset\'s liquidity providers (it was burned until 2025-02-16, half burned and half paid to the Treasury until 2026-02-16, and is credited to the HDX sub-pool\'s hub reserve, protocol-owned liquidity, since). `farmAprPerc` is reported separately too — a consumer that wants the total APR adds it to `feeAprPerc`.',
         'The denominator is the mean of the asset\'s `omnipool_pool_state_history` samples INSIDE the window. That grid is uniform (every 600 blocks — ≈1 h at the chain\'s present ~6 s block time, ≈20 min if it moves to 2 s), so the simple mean is the time-weighted average up to grid jitter whatever the cadence; a shorter block time only makes the mean finer. An asset with no in-window sample reports null rather than a rate computed against a stale reserve.',
         FARMS, FARMS_DEVIATION, FARMS_NULLS,
         ANCHORING, COVERAGE,

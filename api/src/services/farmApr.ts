@@ -40,7 +40,7 @@ import { DECIMAL_STRINGS, PRICE_LOOKBACK_DAYS, scaledDecimal, scaledUsd } from '
 // yield farm reports null instead (splitAcrossYieldFarms below).
 //
 // THE ONE APPROXIMATION, ITS SIZE AND ITS DIRECTION. `total_shares_z` is pallet
-// state: the sum of each entry's `valued_shares`, the position's LRNA value FROZEN
+// state: the sum of each entry's `valued_shares`, the position's H2O value FROZEN
 // at the block it was deposited. No event carries it, so the denominator here is the
 // CURRENT value of the Omnipool positions that are currently farmed
 // (`omnipool_position_owner_intervals` with ownership_kind='farmed', valued at the
@@ -543,7 +543,7 @@ interface FarmPriceRow { asset_id: string; close: string; price_time: string }
  * shares, taken out of the pool's reserve, at the asset's own current price.
  *
  * The reserve side is used rather than the hub side on purpose — it is the same
- * value at spot, and it avoids resting every farm's denominator on the LRNA feed,
+ * value at spot, and it avoids resting every farm's denominator on the H2O feed,
  * which hangs off one thin position.
  */
 function farmedValueUsd(row: FarmTvlRow, priceUsd: bigint | undefined): bigint | null {
