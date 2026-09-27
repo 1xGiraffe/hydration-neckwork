@@ -212,6 +212,16 @@ samples AS (
     AND block_timestamp <= {anchor:DateTime}
   GROUP BY registry_asset_id, block_height
 ),
+listed AS (
+  -- The assets in the Omnipool NOW: those in the newest in-window sample. Every
+  -- sample block is written whole (one snapshot row, every asset in it), while a
+  -- delisted asset simply stops appearing — its earlier in-window samples and
+  -- fees would otherwise keep it published for up to a window after removal. An
+  -- asset with fees but no sample at all (listed since the newest grid block)
+  -- stays, and reports the null a missing denominator gets.
+  SELECT registry_asset_id FROM samples
+  WHERE block_height = (SELECT max(block_height) FROM samples)
+),
 parts AS (
   SELECT asset_id, fee_raw, pfee_raw,
          toDecimal256(0, 0) AS reserve_sum, toDecimal256(0, 0) AS hub_sum, toUInt64(0) AS samples
@@ -236,7 +246,10 @@ SELECT ifNull(toString(asset), '') AS asset_id,
 FROM (
   SELECT asset_id AS asset, sum(fee_raw) AS fees, sum(pfee_raw) AS pfees,
          sum(reserve_sum) AS reserves, sum(hub_sum) AS hubs, sum(samples) AS sample_count
-  FROM parts GROUP BY asset_id
+  FROM parts
+  WHERE asset_id IN (SELECT registry_asset_id FROM listed)
+     OR asset_id NOT IN (SELECT registry_asset_id FROM samples)
+  GROUP BY asset_id
 )
 WHERE asset IS NOT NULL
 ORDER BY asset`
