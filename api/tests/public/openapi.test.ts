@@ -57,6 +57,21 @@ describe('public OpenAPI document', () => {
     expect(expected.filter(path => !documented.includes(path))).toEqual([])
   })
 
+  // A current-state figure quoted from one day goes stale the next and reads as
+  // if it were today's; the stats fields publish their own amounts, so their
+  // descriptions state relationships and tolerances, never dated snapshots.
+  it('quotes no dated dollar amounts in the TVL descriptions', async () => {
+    const doc = (await app.inject('/openapi.json')).json()
+    const platform = doc.paths['/v1/stats/platform'].get.description as string
+    expect(platform).not.toMatch(/[Mm]easured 20\d\d-/)
+    expect(platform).not.toMatch(/\$\d/)
+    const web = doc.paths['/hydration-web/v1/stats']?.get.description as string | undefined
+    const tvl = web?.split('\n\n').find(part => part.startsWith('**`tvl`**'))
+    expect(tvl).toBeDefined()
+    expect(tvl).not.toMatch(/[Mm]easured 20\d\d-/)
+    expect(tvl).not.toMatch(/\$\d/)
+  })
+
   it('declares a 200 response schema for every documented path', async () => {
     const doc = (await app.inject('/openapi.json')).json()
     const missing: string[] = []
