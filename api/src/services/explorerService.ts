@@ -27434,6 +27434,16 @@ const ACTIVITY_LEADERBOARD_DIRECTORY_POOL_MAX = 400
 // days, so it is persisted with the ranking and re-derived on its own slow schedule
 // instead of once per cycle.
 const ACTIVITY_LEADERBOARD_POOL_TTL_MS = 6 * 3_600_000
+// A stored total whose row has left both pools (it fell off every prewarmed first page,
+// and is not among the busiest accounts) is still in the swept table, and the directory
+// still shows it wherever that row is rendered. So it is recounted like a pool member,
+// oldest first, but only from the budget the pools leave over — the rate above is sized
+// for the pools, and a carried entry must never delay one. The carried set only grows
+// as the demand pool churns, so the spare budget cannot be promised to reach all of it:
+// an entry that is still stale this long after its count is dropped from the ranking
+// and the table, and renders no number rather than an old one (measured: a row last
+// counted 31 days earlier read 146 against a live 226).
+const ACTIVITY_LEADERBOARD_CARRIED_MAX_AGE_MS = 36 * 3_600_000
 
 interface ActivityLeaderboardEntry {
   // The directory's grouping key: a tag id for a tagged member, else the account id.
@@ -27563,6 +27573,52 @@ function activityLeaderboardEntryAge(entry: ActivityLeaderboardEntry | undefined
   return Number.isFinite(at) ? Date.now() - at : Infinity
 }
 
+/**
+ * Which members one cycle recounts, and which carried-forward entries it drops.
+ *
+ * Pool members (reference and demand) past the TTL come first, oldest first. After them,
+ * with whatever budget is left, every other stored entry past the TTL — the rows that
+ * left both pools but are still in the swept table — oldest first too, counted through
+ * the account its key names (a tag through one of its members). A carried key that no
+ * longer resolves to its own directory row (an empty tag, an account that has since been
+ * tagged and is grouped under the tag) is dropped outright; one the budget did not reach
+ * and whose count is older than ACTIVITY_LEADERBOARD_CARRIED_MAX_AGE_MS is dropped too.
+ */
+export function activityLeaderboardSchedule(
+  members: ActivityLeaderboardPoolMember[],
+  entries: ReadonlyMap<string, ActivityLeaderboardEntry>,
+  gkeyOf: (account: string) => string,
+  memberOfTag: (tagId: string) => string | null,
+  ageOf: (entry: ActivityLeaderboardEntry | undefined) => number = activityLeaderboardEntryAge,
+  perCycle = ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE,
+): { due: Array<[string, ActivityLeaderboardPoolMember]>; dropped: string[] } {
+  const byAge = ([a]: [string, unknown], [b]: [string, unknown]) => ageOf(entries.get(b)) - ageOf(entries.get(a))
+  const pooled = new Set<string>()
+  const poolDue = new Map<string, ActivityLeaderboardPoolMember>()
+  for (const member of members) {
+    const gkey = gkeyOf(member.account)
+    if (pooled.has(gkey)) continue
+    pooled.add(gkey)
+    if (ageOf(entries.get(gkey)) <= ACTIVITY_LEADERBOARD_ENTRY_TTL_MS) continue
+    poolDue.set(gkey, member)
+  }
+  const dropped: string[] = []
+  const carriedDue: Array<[string, ActivityLeaderboardPoolMember]> = []
+  for (const [gkey, entry] of entries) {
+    if (pooled.has(gkey) || ageOf(entry) <= ACTIVITY_LEADERBOARD_ENTRY_TTL_MS) continue
+    const account = ACCOUNT_RE.test(gkey) ? gkey : memberOfTag(gkey)
+    if (!account || gkeyOf(account) !== gkey) { dropped.push(gkey); continue }
+    carriedDue.push([gkey, { account, refs: 0 }])
+  }
+  const poolFirst = [...poolDue.entries()].sort(byAge).slice(0, perCycle)
+  const carriedTaken = carriedDue.sort(byAge).slice(0, Math.max(0, perCycle - poolFirst.length))
+  const taken = new Set(carriedTaken.map(([gkey]) => gkey))
+  for (const [gkey] of carriedDue) {
+    if (!taken.has(gkey) && ageOf(entries.get(gkey)) > ACTIVITY_LEADERBOARD_CARRIED_MAX_AGE_MS) dropped.push(gkey)
+  }
+  return { due: [...poolFirst, ...carriedTaken], dropped }
+}
+
 // Recount the few members whose stored total has aged out, then publish. Ordering is by
 // (exact before partial, then total), and `rankedDepth` stops at the first rank the
 // reference bound no longer covers — so every page the directory offers is one this pass
@@ -27598,16 +27654,18 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
       tagId => tagMembers(tagId)?.[0] ?? null,
     ),
   ]
-  const dueByGkey = new Map<string, ActivityLeaderboardPoolMember>()
-  for (const member of members) {
-    const gkey = activityLeaderboardGkey(member.account)
-    if (dueByGkey.has(gkey)) continue
-    if (activityLeaderboardEntryAge(byGkey.get(gkey)) <= ACTIVITY_LEADERBOARD_ENTRY_TTL_MS) continue
-    dueByGkey.set(gkey, member)
+  // Pool members past ACTIVITY_LEADERBOARD_ENTRY_TTL_MS first, then carried entries from
+  // the budget left over (see activityLeaderboardSchedule), at most
+  // ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE in all.
+  const { due, dropped } = activityLeaderboardSchedule(
+    members, byGkey, activityLeaderboardGkey, tagId => tagMembers(tagId)?.[0] ?? null,
+  )
+  // Dropped from the table BEFORE the ranking stops carrying them: a failed delete keeps
+  // the entry, so the next cycle retries rather than leaving an orphaned stale row that
+  // no published entry would ever age again.
+  if (dropped.length && await dropActivityTotals(dropped)) {
+    for (const gkey of dropped) byGkey.delete(gkey)
   }
-  const due = [...dueByGkey.entries()]
-    .sort(([a], [b]) => activityLeaderboardEntryAge(byGkey.get(b)) - activityLeaderboardEntryAge(byGkey.get(a)))
-    .slice(0, ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE)
   let counted = 0
   const countedNow = new Set<string>()
   for (const [, member] of due) {
@@ -27659,7 +27717,7 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
   }
   activityLeaderboard = { entries, rankedDepth, computedAt: new Date().toISOString(), pool, refsOutside, poolAt }
   await persistActivityLeaderboard(activityLeaderboard)
-  console.info('[explorer] activity leaderboard', { entries: entries.length, members: members.length, due: due.length, counted, rankedDepth, refsOutside })
+  console.info('[explorer] activity leaderboard', { entries: entries.length, members: members.length, due: due.length, counted, dropped: dropped.length, rankedDepth, refsOutside })
 }
 
 // The sweep's write side. One row per directory grouping key; ReplacingMergeTree keyed
@@ -27682,6 +27740,22 @@ async function persistActivityTotals(entries: ActivityLeaderboardEntry[]): Promi
     })),
     format: 'JSONEachRow',
   }).catch(error => console.warn('[explorer] activity totals persist failed', error))
+}
+
+// The sweep's drop side: a carried entry the schedule gave up on leaves the table, so the
+// directory renders no number for it (see ACTIVITY_LEADERBOARD_CARRIED_MAX_AGE_MS). The
+// table is a few hundred rows, so the lightweight delete is a point operation.
+async function dropActivityTotals(gkeys: string[]): Promise<boolean> {
+  try {
+    await client.command({
+      query: 'DELETE FROM price_data.account_activity_totals WHERE gkey IN {gkeys:Array(String)}',
+      query_params: { gkeys },
+    })
+    return true
+  } catch (error) {
+    console.warn('[explorer] activity totals drop failed', error)
+    return false
+  }
 }
 
 // Persisted so a restart serves the last published ranking instead of an empty one; the
