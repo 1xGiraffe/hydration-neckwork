@@ -224,7 +224,7 @@ With 'pool' set, the identifier decides the route, and the three forms are not i
 - a numeric id — a stableswap or XYK pool addressed by its SHARE-TOKEN asset id (690, 4200, 110...), not by a position in a list. If no pool carries that share token, the id is retried as an OMNIPOOL-LISTED ASSET and the answer becomes that asset's Omnipool liquidity providers.
 - a 0x-prefixed 40-hex address — a Uniswap v3 (concentrated liquidity) pool, addressed by its contract.
 
-'include' adds sections: 'composition' (on by default for one pool), 'lps' (largest liquidity providers; for a v3 pool the open position ranges instead), 'activity' (the pool's recent classified swaps and liquidity events), 'liquidity' (v3 only: the tick table and open ranges by owner), and 'history' (a first/last/min/max summary of the pool's TVL series, never the raw points — for a stableswap or XYK pool's exact reserve/peg/issuance observations with their source blocks, call get_pool_history).
+'include' adds sections: 'composition' (on by default for one pool), 'lps' (largest liquidity providers; for a v3 pool the open position ranges instead), 'activity' (the pool's recent classified swaps and liquidity events), 'liquidity' (v3 only: the tick table and open ranges by owner), and 'history' (a first/last/min/max summary of the pool's TVL series, never the raw points — for a stableswap or XYK pool's exact reserve/peg/issuance observations with their source blocks, or an Omnipool asset's reserve/hub/fee observations, call get_pool_history).
 
 Traps worth knowing. An Omnipool asset that has been DELISTED — DOT, asset id 5, is the standing example — returns "Asset not in the Omnipool" rather than an empty pool; this tool says that in words instead of surfacing an error. Omnipool liquidity is owned per LISTED ASSET, not for the pool as a whole, so 'lps' on pool 'omnipool' has no single answer and the tool names the per-asset call instead. Pool history windows are unix SECONDS (fromTs/toTs upstream), not calendar dates. Every amount is scaled by its own asset's decimals and every row carries its explorer URL.`
 
@@ -381,7 +381,13 @@ function renderOmnipool(d: OmnipoolResponse, ctx: ToolContext, includes: Set<Inc
     h3('Assets'),
     table(['Asset', 'Reserve', 'Reserve USD', `Hub (${HUB_SYMBOL})`, 'Weight', 'Cap', 'Tradable'], rows),
     note('Weight is the asset\'s share of the pool\'s hub reserve. An asset at or over its cap takes no further liquidity until governance raises the cap — an asset can sit OVER its cap, because the cap bounds new additions rather than forcing a reduction. "Tradable: all" means sell, buy, add and remove liquidity are all permitted.'),
-    includes.has('history') ? joinBlocks(h3('TVL history'), historySummary(d.history) ?? note('no history series in this response')) : null,
+    includes.has('history')
+      ? joinBlocks(
+        h3('TVL history'),
+        historySummary(d.history) ?? note('no history series in this response'),
+        note('This is the daily chart\'s summary. For the per-asset observations behind it — raw reserve, hub reserve, shares, cap, tradability and the asset fee at exact blocks, with delisted assets ending at their removal — call get_pool_history with pool "omnipool" and `asset` (for example "222").'),
+      )
+      : null,
     includes.has('lps')
       ? note('Omnipool liquidity is owned per LISTED ASSET rather than for the pool as a whole — each provider holds position NFTs in one asset\'s sub-pool. Call get_pools again with that asset\'s id as `pool` (for example `pool: "1001"`) to see its providers.')
       : null,

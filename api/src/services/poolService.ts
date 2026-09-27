@@ -20,6 +20,11 @@ import { xykReserveAssets } from './lpMath.ts'
 import { OMNIPOOL_ACCOUNT } from './valuation.ts'
 import { stableswapPoolAccount } from './tagService.ts'
 import { hasDriftingPegs, parseStableswapPools, pegPrice, type StableswapPoolSnapshot } from './stableswapSnapshot.ts'
+import {
+  FEE_SALE_MIN_OUT, anyListedAt, paramReadBlocks, invertAssetFeePermill, isListedAt, listingIntervals, omnipoolSnapshotSemantics, parseOmnipoolSection, unlistedBetween,
+  type ListingEventRow, type OmnipoolAssetFee, type OmnipoolPayloadAsset, type OmnipoolListing, type OmnipoolListingInterval, type OmnipoolSnapshotPoint, type OmnipoolSnapshotsResponse,
+} from './omnipoolSnapshots.ts'
+import { RareEventLedger } from './rareEventLedger.ts'
 
 // Liquidity-pool read models: the asset Liquidity tab, the stableswap/XYK pool
 // detail pages and the Omnipool page. Current state comes from the latest
@@ -2366,6 +2371,447 @@ export async function getPoolSnapshots(poolId: number, req: SnapshotRequest): Pr
         firstObservedBlock: life.first, lastObservedBlock: life.last,
         expected: expected.length, returned: points.length, missingCount, missing, remaining,
         truncated, nextFromBlock: next ? next.block : null,
+      },
+      points,
+    }
+  })
+}
+
+// ── Omnipool state snapshots ──────────────────────────────────────────────────
+//
+// `/explorer/omnipool/snapshots?asset=…`: the Omnipool twin of the pool
+// snapshots above, per listed asset — the same window, resolution, limit,
+// coverage and caching contract, with the shape's rules in omnipoolSnapshots.ts.
+//
+// Sources, each bounded: the omnipool_pool_state_history grid (asset-first)
+// chooses the points — the requested assets' grid heights, thinned by stride or
+// the last of each calendar bucket — and serves their per-asset state and the
+// pool-wide hub total (omnipoolGridObservations: the MV's extraction of the
+// block's own payload, with cap and tradability from the payload at the few
+// points where they can have changed); the exact replay decodes each block's
+// raw_block_snapshots payload. Both read the same per-block snapshot, verified
+// point-for-point identical over 3,000+ grid, hour and day points spanning
+// listings, removals, relistings and cap/tradability changes. The grid table
+// keeps a delisted asset's last row forever, which is why a point is laid out
+// against the listing history. Listing history comes from the Omnipool's own add/remove events
+// through a RareEventLedger (~80 rows over the chain's life); the asset fee from
+// each asset's newest sale out of the pool at or before each point
+// (asset_swap_activity, asset-first, then the few events by primary key).
+
+const OMNI_GRID = 'price_data.omnipool_pool_state_history'
+/** event_index packed under the height, so one ASOF key orders (block, event). */
+const EVENT_KEY_SHIFT = 1_048_576
+/**
+ * Only a sale whose output is at least 1e6 base units fixes a single fee rate
+ * (invertAssetFeePermill): below that, neighbouring Permill values produce the
+ * same split, so such sales are passed over rather than guessed at.
+ */
+const FEE_SALE_SIZE_SQL = `toUInt256OrZero(amount_out) >= ${FEE_SALE_MIN_OUT}`
+
+const omnipoolListingLedger = new RareEventLedger<ListingEventRow>({
+  eventNames: ['Omnipool.TokenAdded', 'Omnipool.TokenRemoved'],
+  columnsSql: `block_height, event_index, toString(event_name) AS event_name, toUInt32(JSONExtractUInt(args_json, 'assetId')) AS asset_id`,
+  head: async () => (await loadCurrentPools()).blockHeight,
+  client: () => client,
+})
+
+interface OmniLife { first: number; last: number; first_t: number; last_t: number }
+
+/** Each requested asset's first and last grid observation. */
+async function omnipoolGridLives(ids: number[]): Promise<Map<number, OmniLife>> {
+  const res = await client.query({
+    query: `-- omnipool-snapshots:life
+            SELECT asset_id, min(block_height) AS first, max(block_height) AS last,
+                   toUnixTimestamp(min(block_timestamp)) AS first_t, toUnixTimestamp(max(block_timestamp)) AS last_t
+            FROM ${OMNI_GRID} WHERE asset_id IN {ids:Array(Int32)} GROUP BY asset_id`,
+    query_params: { ids }, format: 'JSONEachRow',
+  })
+  const out = new Map<number, OmniLife>()
+  for (const r of await res.json<{ asset_id: number; first: number; last: number; first_t: number; last_t: number }>()) {
+    out.set(Number(r.asset_id), { first: Number(r.first), last: Number(r.last), first_t: Number(r.first_t), last_t: Number(r.last_t) })
+  }
+  return out
+}
+
+/** The first grid observation of any requested asset at or after a bound, or the last at or before one. */
+async function omnipoolGridEdge(ids: number[], side: 'first' | 'last', bound: { block?: number; ts?: number }): Promise<GridEdge | null> {
+  const agg = side === 'first' ? 'min' : 'max'
+  const cmp = side === 'first' ? '>=' : '<='
+  const cond = bound.block != null ? `block_height ${cmp} {edge:UInt32}` : `block_timestamp ${cmp} toDateTime({edge:UInt32})`
+  const res = await client.query({
+    query: `-- omnipool-snapshots:edge
+            SELECT ${agg}(block_height) AS block, toUnixTimestamp(${agg}(block_timestamp)) AS t
+            FROM ${OMNI_GRID} WHERE asset_id IN {ids:Array(Int32)} AND ${cond} HAVING count() > 0`,
+    query_params: { ids, edge: bound.block ?? bound.ts }, format: 'JSONEachRow',
+  })
+  const row = (await res.json<GridEdge>())[0]
+  return row ? { block: Number(row.block), t: Number(row.t) } : null
+}
+
+/** The grid heights a window's points stand on: every `step`-th, or the last of each calendar bucket. */
+async function omnipoolGridBlocks(ids: number[], fromBlock: number, toBlock: number, sel: { step: number } | { bucket: 'hour' | 'day' }, n: number): Promise<GridEdge[]> {
+  const selection = 'step' in sel
+    ? `block_height % {step:UInt32} = 0`
+    : `block_height IN (SELECT max(block_height) FROM ${OMNI_GRID} WHERE asset_id IN {ids:Array(Int32)} AND block_height BETWEEN {f:UInt32} AND {t:UInt32}
+                        GROUP BY toStartOfInterval(block_timestamp, INTERVAL 1 ${sel.bucket === 'day' ? 'DAY' : 'HOUR'}))`
+  const res = await client.query({
+    query: `-- omnipool-snapshots:points
+            SELECT block_height AS block, toUnixTimestamp(any(block_timestamp)) AS t FROM ${OMNI_GRID}
+            WHERE asset_id IN {ids:Array(Int32)} AND block_height BETWEEN {f:UInt32} AND {t:UInt32} AND ${selection}
+            GROUP BY block_height ORDER BY block_height LIMIT {n:UInt32}`,
+    query_params: { ids, f: fromBlock, t: toBlock, step: 'step' in sel ? sel.step : 0, n },
+    format: 'JSONEachRow',
+  })
+  return (await res.json<GridEdge>()).map(r => ({ block: Number(r.block), t: Number(r.t) }))
+}
+
+interface OmniObservation { block: number; hash: string | null; time: string; t: number; specVersion: number | null; section: ReturnType<typeof parseOmnipoolSection> }
+
+/** Every change of an asset's cap or tradability is one of these (or a listing, or a runtime upgrade). */
+const omnipoolParamLedger = new RareEventLedger<{ block_height: number; event_index: number; asset_id: number }>({
+  eventNames: ['Omnipool.TradableStateUpdated', 'Omnipool.AssetWeightCapUpdated'],
+  columnsSql: `block_height, event_index, toUInt32(JSONExtractUInt(args_json, 'assetId')) AS asset_id`,
+  head: async () => (await loadCurrentPools()).blockHeight,
+  client: () => client,
+})
+
+/**
+ * Grid points without decoding a payload per point. A whole-block payload is
+ * ~270 KB and a thousand scattered heights read ~7 GiB, so the per-asset state
+ * and the pool-wide hub total come from the grid table — the MV's own
+ * extraction of the same payload at the same height, one row per asset in the
+ * pool there — and hashes from the snapshot rows' hash column. Cap and
+ * tradability are not on the grid; storage changes them only in add_token,
+ * set_asset_tradable_state and set_asset_weight_cap (a TokenAdded /
+ * TradableStateUpdated / AssetWeightCapUpdated event), so the payload is read at
+ * the first point and at the first point at or after each such event (or a
+ * runtime upgrade), and carried between — exactly the values a payload read at
+ * every point would give.
+ */
+async function omnipoolGridObservations(ids: number[], blocks: number[], listingRows: readonly ListingEventRow[]): Promise<OmniObservation[]> {
+  if (!blocks.length) return []
+  const [stateRes, hubRes, hashes, paramRows] = await Promise.all([
+    client.query({
+      query: `-- omnipool-snapshots:grid-states
+              SELECT block_height, asset_id, argMax(reserve_raw, ingested_at) AS reserve, argMax(hub_reserve_raw, ingested_at) AS hub,
+                     argMax(shares_raw, ingested_at) AS shares, argMax(protocol_shares_raw, ingested_at) AS protocol_shares
+              FROM ${OMNI_GRID} WHERE asset_id IN {ids:Array(Int32)} AND block_height IN {blocks:Array(UInt32)}
+              GROUP BY block_height, asset_id`,
+      query_params: { ids, blocks }, format: 'JSONEachRow',
+    }),
+    client.query({
+      query: `-- omnipool-snapshots:grid-hub
+              SELECT block_height, toString(sum(toUInt256OrZero(hub))) AS total, count() AS n, max(spec) AS spec,
+                     toString(max(ts)) AS time, toUnixTimestamp(max(ts)) AS t
+              FROM (SELECT block_height, asset_id, argMax(hub_reserve_raw, ingested_at) AS hub, argMax(spec_version, ingested_at) AS spec, max(block_timestamp) AS ts
+                    FROM ${OMNI_GRID} WHERE block_height IN {blocks:Array(UInt32)} GROUP BY block_height, asset_id)
+              GROUP BY block_height ORDER BY block_height`,
+      query_params: { blocks }, format: 'JSONEachRow',
+    }),
+    snapshotHashes(blocks),
+    omnipoolParamLedger.rows(),
+  ])
+  const states = new Map<number, Map<number, { reserve: string; hub: string; shares: string; protocol_shares: string }>>()
+  for (const r of await stateRes.json<{ block_height: number; asset_id: number; reserve: string; hub: string; shares: string; protocol_shares: string }>()) {
+    const b = Number(r.block_height)
+    if (!states.has(b)) states.set(b, new Map())
+    states.get(b)!.set(Number(r.asset_id), r)
+  }
+  const hubRows = await hubRes.json<{ block_height: number; total: string; n: number; spec: number; time: string; t: number }>()
+
+  // The payload reads: the first point, and the first point at or after each
+  // parameter change of a requested asset or runtime upgrade inside the span.
+  const wanted = new Set(ids)
+  const changeBlocks = [
+    ...paramRows.filter(r => wanted.has(Number(r.asset_id))).map(r => Number(r.block_height)),
+    ...listingRows.filter(r => wanted.has(Number(r.asset_id)) && r.event_name === 'Omnipool.TokenAdded').map(r => Number(r.block_height)),
+  ]
+  const reads = paramReadBlocks(hubRows.map(h => ({ block: Number(h.block_height), specVersion: Number(h.spec) })), changeBlocks)
+  const params = new Map<number, Map<number, { cap: string; tradable: number }>>()
+  for (const o of await omnipoolPayloads(reads)) {
+    params.set(o.block, new Map([...o.section.assets].filter(([id]) => wanted.has(id)).map(([id, a]) => [id, { cap: a.cap, tradable: a.tradable }])))
+  }
+
+  let standing = new Map<number, { cap: string; tradable: number }>()
+  return hubRows.map(h => {
+    const block = Number(h.block_height)
+    standing = params.get(block) ?? standing
+    const assets = new Map<number, OmnipoolPayloadAsset>()
+    for (const [id, r] of states.get(block) ?? []) {
+      const p = standing.get(id)
+      // A parameter the carried read does not hold (an asset absent from it) is
+      // not guessed: the asset is left out of the point, and coverage counts it.
+      if (!p) continue
+      assets.set(id, { reserve: r.reserve, hubReserve: r.hub, shares: r.shares, protocolShares: r.protocol_shares, cap: p.cap, tradable: p.tradable })
+    }
+    return {
+      block, hash: hashes.get(block) ?? null, time: h.time, t: Number(h.t), specVersion: Number(h.spec) || null,
+      section: { assets, hubReserveTotal: BigInt(h.total), assetCount: Number(h.n) },
+    }
+  })
+}
+
+/**
+ * Each block's own snapshot payload, Omnipool section only: a list of heights,
+ * or every block of a short range. A block with no snapshot row yields no
+ * observation — the coverage names it.
+ */
+async function omnipoolPayloads(blocks: number[] | { from: number; to: number }): Promise<OmniObservation[]> {
+  if (Array.isArray(blocks) && !blocks.length) return []
+  const range = !Array.isArray(blocks)
+  const res = await client.query({
+    query: `-- omnipool-snapshots:payload
+            SELECT block_height, argMax(block_hash, ingested_at) AS hash,
+                   toString(max(block_timestamp)) AS time, toUnixTimestamp(max(block_timestamp)) AS t,
+                   max(spec_version) AS spec,
+                   argMax(JSONExtractRaw(payload_json, 'omnipool'), ingested_at) AS section
+            FROM price_data.raw_block_snapshots
+            WHERE ${range ? 'block_height BETWEEN {f:UInt32} AND {t:UInt32}' : 'block_height IN {blocks:Array(UInt32)}'}
+            GROUP BY block_height ORDER BY block_height`,
+    query_params: range ? { f: blocks.from, t: blocks.to } : { blocks },
+    format: 'JSONEachRow',
+  })
+  return (await res.json<{ block_height: number; hash: string; time: string; t: number; spec: number; section: string }>()).map(r => ({
+    block: Number(r.block_height), hash: r.hash || null, time: r.time, t: Number(r.t), specVersion: Number(r.spec) || null,
+    section: parseOmnipoolSection(safeJson(r.section)),
+  }))
+}
+
+/**
+ * The asset fee standing at each point for each asset: the newest Omnipool sale
+ * with the asset OUT at or before the point (an ASOF join over the asset's own
+ * rows, seeded with the last sale before the first point), read back from that
+ * event by primary key. Keyed `${assetId}:${block}`.
+ */
+async function omnipoolAssetFees(ids: number[], blocks: number[]): Promise<Map<string, OmnipoolAssetFee>> {
+  const out = new Map<string, OmnipoolAssetFee>()
+  if (!blocks.length) return out
+  const lo = blocks[0]
+  const hi = blocks[blocks.length - 1]
+  const picks = await Promise.all(ids.map(async id => {
+    const res = await client.query({
+      query: `-- omnipool-snapshots:fee-asof
+              SELECT p.b AS point, intDiv(s.k, ${EVENT_KEY_SHIFT}) AS block, s.k % ${EVENT_KEY_SHIFT} AS event_index
+              FROM (SELECT arrayJoin({blocks:Array(UInt32)}) AS b, toUInt64(b) * ${EVENT_KEY_SHIFT} + ${EVENT_KEY_SHIFT - 1} AS k, 1 AS one) AS p
+              ASOF LEFT JOIN (
+                SELECT toUInt64(block_height) * ${EVENT_KEY_SHIFT} + event_index AS k, 1 AS one
+                FROM price_data.asset_swap_activity
+                WHERE asset_id = {id:UInt32} AND asset_out = {id:UInt32} AND event_name = 'Omnipool.SellExecuted' AND ${FEE_SALE_SIZE_SQL}
+                  AND block_height <= {hi:UInt32}
+                  AND block_height >= (SELECT block_height FROM price_data.asset_swap_activity
+                                       WHERE asset_id = {id:UInt32} AND asset_out = {id:UInt32} AND event_name = 'Omnipool.SellExecuted' AND ${FEE_SALE_SIZE_SQL}
+                                         AND block_height <= {lo:UInt32}
+                                       ORDER BY block_height DESC LIMIT 1)
+              ) AS s ON p.one = s.one AND p.k >= s.k`,
+      query_params: { blocks, id, lo, hi }, format: 'JSONEachRow',
+    })
+    return { id, rows: (await res.json<{ point: number; block: number; event_index: number }>()).filter(r => Number(r.block) > 0) }
+  }))
+  const keys = new Set<number>()
+  const heights = new Set<number>()
+  for (const p of picks) for (const r of p.rows) { keys.add(Number(r.block) * EVENT_KEY_SHIFT + Number(r.event_index)); heights.add(Number(r.block)) }
+  if (!keys.size) return out
+  const res = await client.query({
+    query: `-- omnipool-snapshots:fee-events
+            SELECT block_height, event_index,
+                   any(JSONExtractString(args_json, 'amountOut')) AS amount_out, any(JSONExtractString(args_json, 'assetFeeAmount')) AS fee
+            FROM price_data.raw_events
+            WHERE block_height IN {heights:Array(UInt32)} AND event_name = 'Omnipool.SellExecuted'
+              AND toUInt64(block_height) * ${EVENT_KEY_SHIFT} + event_index IN {keys:Array(UInt64)}
+            GROUP BY block_height, event_index`,
+    query_params: { heights: [...heights], keys: [...keys] }, format: 'JSONEachRow',
+  })
+  const rates = new Map<number, number | null>()
+  for (const r of await res.json<{ block_height: number; event_index: number; amount_out: string; fee: string }>()) {
+    const rate = /^\d+$/.test(r.amount_out) && /^\d+$/.test(r.fee) ? invertAssetFeePermill(BigInt(r.amount_out), BigInt(r.fee)) : null
+    rates.set(Number(r.block_height) * EVENT_KEY_SHIFT + Number(r.event_index), rate)
+  }
+  for (const p of picks) {
+    for (const r of p.rows) {
+      const rate = rates.get(Number(r.block) * EVENT_KEY_SHIFT + Number(r.event_index))
+      if (rate != null) out.set(`${p.id}:${Number(r.point)}`, { permill: rate, block: Number(r.block), eventIndex: Number(r.event_index) })
+    }
+  }
+  return out
+}
+
+function layOutOmnipool(
+  observations: OmniObservation[], ids: number[], intervals: (OmnipoolListingInterval[] | undefined)[],
+  fees: Map<string, OmnipoolAssetFee>, bucket?: 'hour' | 'day',
+): { points: OmnipoolSnapshotPoint[]; assetGaps: { assetId: number; count: number }[] } {
+  const gaps = ids.map(() => 0)
+  const points = observations.map(o => ({
+    block: o.block,
+    hash: o.hash,
+    time: o.time,
+    t: o.t,
+    ...(bucket ? { bucket: bucketKeyOf(bucket, o.t) } : {}),
+    specVersion: o.specVersion,
+    hub: { reserveTotal: o.section.hubReserveTotal.toString(), assetCount: o.section.assetCount },
+    assets: ids.map((id, i) => {
+      const a = o.section.assets.get(id)
+      if (!a) {
+        if (isListedAt(intervals[i], o.block)) gaps[i] += 1
+        return null
+      }
+      return { ...a, tradableFlags: tradableFlags(a.tradable), assetFee: fees.get(`${id}:${o.block}`) ?? null }
+    }),
+  }))
+  return { points, assetGaps: ids.map((assetId, i) => ({ assetId, count: gaps[i] })) }
+}
+
+/**
+ * The Omnipool's per-asset state observations over a bounded window.
+ * `neverListed` names requested ids the Omnipool has never held (the hub asset
+ * included), which the route answers with a 404. The request's own consistency
+ * (snapshotRequestProblem) is the route's to check before calling.
+ */
+export async function getOmnipoolSnapshots(ids: number[], req: SnapshotRequest): Promise<OmnipoolSnapshotsResponse | { neverListed: number[] }> {
+  const [lives, ledger] = await Promise.all([omnipoolGridLives(ids), omnipoolListingLedger.rows()])
+  const byAsset = listingIntervals(ledger)
+  const neverListed = ids.filter(id => id === H2O_ASSET_ID || (!lives.has(id) && !byAsset.has(id)))
+  if (neverListed.length) return { neverListed }
+  const intervals = ids.map(id => byAsset.get(id))
+
+  let life: OmniLife | null = null
+  for (const l of lives.values()) {
+    life = life
+      ? { first: Math.min(life.first, l.first), last: Math.max(life.last, l.last), first_t: Math.min(life.first_t, l.first_t), last_t: Math.max(life.last_t, l.last_t) }
+      : { ...l }
+  }
+  const listings: OmnipoolListing[] = ids.map((id, i) => {
+    const iv = intervals[i] ?? []
+    return {
+      assetId: id,
+      status: iv.length && iv[iv.length - 1].removedAt == null ? 'listed' : 'delisted',
+      intervals: iv,
+      firstObservedBlock: lives.get(id)?.first ?? null,
+      lastObservedBlock: lives.get(id)?.last ?? null,
+    }
+  })
+
+  const limit = Math.max(1, req.limit)
+  const resolution = req.resolution
+  const atokens = ids.filter(id => ATOKEN_UNDERLYING_ID[id] != null).map(asset)
+  const empty = (fromBlock: number, toBlock: number, stepBlocks: number | null): OmnipoolSnapshotsResponse => ({
+    kind: 'omnipool', name: 'Omnipool', account: accountRef(OMNIPOOL_ACCOUNT), hubAsset: asset(H2O_ASSET_ID),
+    assets: ids.map(asset), listings,
+    window: { fromBlock, toBlock },
+    resolution: resolutionDescriptor(resolution, stepBlocks),
+    semantics: omnipoolSnapshotSemantics(resolution, stepBlocks, atokens),
+    coverage: {
+      firstObservedBlock: life?.first ?? null, lastObservedBlock: life?.last ?? null,
+      expected: 0, returned: 0, missingCount: 0, missing: [], remaining: 0, truncated: false, nextFromBlock: null,
+      assetGaps: ids.map(assetId => ({ assetId, count: 0 })),
+    },
+    points: [],
+  })
+  const idKey = ids.join(',')
+
+  /* --- the exact replay: every block of a short height range --- */
+  if (resolution === 'block') {
+    const head = (await loadCurrentPools()).blockHeight
+    // With no upper bound, a request whose assets have all left the pool ends at
+    // the last block that still held one of them, not at a run of empty blocks.
+    const lastHeld = intervals.every(iv => iv?.length && iv[iv.length - 1].removedAt != null)
+      ? Math.max(...intervals.map(iv => iv![iv!.length - 1].removedAt! - 1))
+      : head
+    const cap = Math.min(limit, MAX_EXACT_BLOCKS)
+    const toRequested = Math.min(req.toBlock ?? lastHeld, head)
+    const fromBlock = Math.max(0, req.fromBlock ?? (toRequested - cap + 1))
+    if (fromBlock > toRequested) return empty(fromBlock, toRequested, 1)
+    const toBlock = Math.min(toRequested, fromBlock + cap - 1)
+    const key = `explorer:omnipool-snapshots:${idKey}:block:${fromBlock}-${toBlock}`
+    return cached(key, await windowedHistoryTtlMs(toBlock), async () => {
+      const observations = await omnipoolPayloads({ from: fromBlock, to: toBlock })
+      const fees = await omnipoolAssetFees(ids, observations.map(o => o.block))
+      const { points, assetGaps } = layOutOmnipool(observations, ids, intervals, fees)
+      const slots = gridSlots(fromBlock, toBlock, 1)
+      const { missingCount, missing } = missingSlots(slots, points.map(p => p.block))
+      const truncated = toBlock < toRequested
+      return {
+        ...empty(fromBlock, toBlock, 1),
+        coverage: {
+          firstObservedBlock: life?.first ?? null, lastObservedBlock: life?.last ?? null,
+          expected: slots.length, returned: points.length, missingCount, missing,
+          remaining: truncated ? toRequested - toBlock : 0,
+          truncated, nextFromBlock: truncated ? toBlock + 1 : null,
+          assetGaps,
+        },
+        points,
+      }
+    })
+  }
+
+  /* --- the grid: every Nth sampled block, or one observation per calendar bucket --- */
+  const gridStride = resolution === 'grid' ? (req.stepBlocks != null ? normalizeStride(req.stepBlocks) : SNAPSHOT_GRID_BLOCKS) : null
+  if (!life) return empty(req.fromBlock ?? 0, req.toBlock ?? 0, gridStride)
+  const last = req.toBlock != null
+    ? (req.toBlock >= life.last ? { block: life.last, t: life.last_t } : await omnipoolGridEdge(ids, 'last', { block: req.toBlock }))
+    : req.toTs != null ? await omnipoolGridEdge(ids, 'last', { ts: req.toTs }) : { block: life.last, t: life.last_t }
+  if (!last) return empty(req.fromBlock ?? life.first, req.toBlock ?? life.first, gridStride)
+  const toBlock = last.block
+  let fromBlock: number
+  let stride: number | null = null
+  if (resolution === 'grid') {
+    const requestedStride = req.stepBlocks != null ? normalizeStride(req.stepBlocks) : null
+    if (req.fromBlock != null) fromBlock = Math.max(req.fromBlock, life.first)
+    else if (req.fromTs != null) fromBlock = (await omnipoolGridEdge(ids, 'first', { ts: req.fromTs }))?.block ?? toBlock + 1
+    else fromBlock = Math.max(life.first, toBlock - (limit - 1) * (requestedStride ?? SNAPSHOT_GRID_BLOCKS))
+    stride = requestedStride ?? (fromBlock <= toBlock ? strideFor(fromBlock, toBlock, limit) : SNAPSHOT_GRID_BLOCKS)
+  } else {
+    const stepSec = resolution === 'hour' ? 3_600 : 86_400
+    if (req.fromBlock != null) fromBlock = Math.max(req.fromBlock, life.first)
+    else if (req.fromTs != null) fromBlock = (await omnipoolGridEdge(ids, 'first', { ts: req.fromTs }))?.block ?? toBlock + 1
+    else {
+      const firstBucketStart = Math.floor(last.t / stepSec) * stepSec - (limit - 1) * stepSec
+      fromBlock = (await omnipoolGridEdge(ids, 'first', { ts: firstBucketStart }))?.block ?? life.first
+    }
+  }
+  if (fromBlock > toBlock) return empty(fromBlock, toBlock, stride)
+
+  const key = `explorer:omnipool-snapshots:${idKey}:${resolution}:${stride ?? ''}:${fromBlock}-${toBlock}:${limit}`
+  const lifeNow = life
+  return cached(key, await windowedHistoryTtlMs(toBlock), async () => {
+    const bucket = resolution === 'grid' ? undefined : resolution
+    const fetched = await omnipoolGridBlocks(ids, fromBlock, toBlock, bucket ? { bucket } : { step: stride! }, limit + 1)
+    const truncated = fetched.length > limit
+    const chosen = truncated ? fetched.slice(0, limit) : fetched
+    const observations = await omnipoolGridObservations(ids, chosen.map(c => c.block), ledger)
+    const fees = await omnipoolAssetFees(ids, observations.map(o => o.block))
+    const { points, assetGaps } = layOutOmnipool(observations, ids, intervals, fees, bucket)
+    // Coverage is judged over the span the page actually examined: up to the
+    // last chosen point when the window continues past it.
+    const spanTo = truncated ? chosen[chosen.length - 1].block : toBlock
+    const next = truncated ? fetched[limit] : null
+    let expected: (number | string)[]
+    let remaining = 0
+    if (!bucket) {
+      // A grid slot at which none of the assets was in the pool has nothing to be missing.
+      expected = gridSlots(fromBlock, spanTo, stride!).filter(b => anyListedAt(intervals, b))
+      remaining = next ? countSlots(next.block, toBlock, stride!) : 0
+    } else {
+      // Buckets between consecutive observations are expected unless the assets
+      // were all out of the pool somewhere between them.
+      const seen = new Set<string>()
+      expected = []
+      const add = (keys: string[]) => { for (const k of keys) if (!seen.has(k)) { seen.add(k); expected.push(k) } }
+      observations.forEach((o, i) => {
+        const prev = observations[i - 1]
+        if (!prev || unlistedBetween(intervals, prev.block, o.block)) add([bucketKeyOf(bucket, o.t)])
+        else add(bucketSlots(bucket, prev.t, o.t))
+      })
+      remaining = next ? bucketSlots(bucket, next.t, last.t).length : 0
+    }
+    const { missingCount, missing } = missingSlots(expected, bucket ? points.map(p => p.bucket!) : points.map(p => p.block))
+    return {
+      ...empty(fromBlock, toBlock, stride),
+      window: { fromBlock, toBlock: spanTo },
+      coverage: {
+        firstObservedBlock: lifeNow.first, lastObservedBlock: lifeNow.last,
+        expected: expected.length, returned: points.length, missingCount, missing, remaining,
+        truncated, nextFromBlock: next ? next.block : null,
+        assetGaps,
       },
       points,
     }
