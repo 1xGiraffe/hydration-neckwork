@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { unvestedByAccountRaw } from '../src/services/lockBreakdownService.ts'
-import { alignMonthly, backfillAllocationMints, buildHdxStructure, carryForward, correctVestingLocks, decodeCompactBig, gigaUnbondingBlocks, moverAccountFilterSql, nonNegativeUIntDifferenceSql, resolveRotationAnchors, cooldownExpiresAt, unlockKeyForCause, unlockSeriesFromTimelines, withCooldownExpiries, type HdxStructureWeekRow } from '../src/services/hdxService.ts'
+import { GIGAHDX_LOCKED_DELTA_SQL, alignMonthly, backfillAllocationMints, buildHdxStructure, carryForward, correctVestingLocks, decodeCompactBig, gigaUnbondingBlocks, moverAccountFilterSql, nonNegativeUIntDifferenceSql, resolveRotationAnchors, cooldownExpiresAt, unlockKeyForCause, unlockSeriesFromTimelines, withCooldownExpiries, type HdxStructureWeekRow } from '../src/services/hdxService.ts'
 import { hexToU8a } from '@polkadot/util'
 
 describe('decodeCompactBig', () => {
@@ -485,5 +485,21 @@ describe('unlockKeyForCause', () => {
     expect(unlockKeyForCause('democracy')).toBe('other')
     expect(unlockKeyForCause('somenewpallet')).toBe('other')
     expect(unlockKeyForCause('')).toBe('other')
+  })
+})
+
+// The structure page's GIGAHDX band is the pallet's TotalLocked, whose flow sum is
+// Σ Staked + Σ YieldRealized − Σ Unstaked.payout (equal to storage at the head).
+// A cancelled unstake and a migration each emit a GigaHdx.Staked twin, and a
+// realization grows the lock that the Unstaked payout later releases.
+describe('GIGAHDX locked delta', () => {
+  it('adds stakes and realized yield and removes unstake payouts', () => {
+    expect(GIGAHDX_LOCKED_DELTA_SQL).toContain("event_name IN ('GigaHdx.Staked', 'GigaHdx.YieldRealized')")
+    expect(GIGAHDX_LOCKED_DELTA_SQL).toContain("JSONExtractString(args_json, 'payout')), event_name = 'GigaHdx.Unstaked'")
+  })
+
+  it('never counts the twin of a Staked event a second time', () => {
+    expect(GIGAHDX_LOCKED_DELTA_SQL).not.toContain('UnstakeCancelled')
+    expect(GIGAHDX_LOCKED_DELTA_SQL).not.toContain('MigratedFromLegacy')
   })
 })
