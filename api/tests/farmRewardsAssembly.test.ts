@@ -106,12 +106,28 @@ describe('farm rewards in the account value', () => {
 
 // The directory ranks by the value the account page prints, so it takes the
 // rewards in by the same rows, claimable rule and staleness gate.
+describe('the accounts directory ranking reads the balances once', () => {
+  const src = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
+  const page = src.slice(src.indexOf('async function accountsPage('), src.indexOf('\n}\n', src.indexOf('async function accountsPage(')))
+
+  // ClickHouse inlines a CTE at every reference: a second reader of `latest`
+  // (the money-market actors) re-aggregated every balance state per cold build.
+  it('groups the money-market side inside `grouped`, per account once', () => {
+    expect(page.match(/FROM latest\b/g)).toHaveLength(1)
+    expect(page).not.toContain('mm_grouped')
+    expect(page).toContain('GROUP BY holder')
+    expect(page).toContain("groupUniqArrayIf((latest.account_id, mma.col, mma.debt, mma.risk_debt, mma.value_delta,")
+    expect(page).toContain('minIf(mma.worst_hf, mma.hf_n > 0) AS mmg_worst_hf')
+    expect(page).toContain('argMinIf(latest.account_id, mma.worst_hf, mma.hf_n > 0) AS mmg_worst_acct')
+  })
+})
+
 describe('farm rewards in the accounts directory', () => {
   const src = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
   const page = src.slice(src.indexOf('async function accountsPage('), src.indexOf('\n}\n', src.indexOf('async function accountsPage(')))
 
   it('adds the group\'s counted, priced claimable to usd_total from the current, fresh generation', () => {
-    expect(page).toContain('g.usd + ${lpValue} + g.lm_usd + g.mmr_usd + ifNull(mg.value_delta, 0) / 1e8 AS usd_total')
+    expect(page).toContain('g.usd + ${lpValue} + g.lm_usd + g.mmr_usd + g.mmg_value_delta / 1e8 AS usd_total')
     expect(page).toContain('FROM (${lmCountedRewardRowsSql(currentLmRewardGenerationSql())}) r')
     expect(page).toContain('sum(toFloat64(r.counted_raw) * transform(toString(r.reward_asset_id), ${idsSql}, ${unitsSql}, 0.)) AS usd')
     // Per account, joined into `grouped` (which carries the tag join) once per account.
