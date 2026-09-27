@@ -2429,15 +2429,12 @@ interface ExplorerStatsCounts {
 // head-keyed and update every block.
 export const STATS_COUNTS_CACHE_MS = 30_000
 // What the three numbers ARE, since none of them is the activity feed's count:
-// - transfers_24h: raw transfer EVENTS — every Balances.Transfer and
-//   Tokens.Transfer, the internal legs of a routed swap, a pool deposit or a
-//   fee included. It is the same family TRANSFER_EVENT_NAMES_SQL sizes the
-//   indexed total with, so the two read on one scale. Currencies.Transferred
-//   stays out because the Currencies pallet re-emits it beside the underlying
-//   Tokens/Balances event of the same movement, which would count each
-//   Currencies.transfer twice. The feed's "Transfer" rows are what is left
-//   after classification suppresses plumbing (a far smaller set), and that
-//   classification has no bounded 24h count — a cheap proxy is not it.
+// - transfers_24h: raw transfer EVENTS, one per movement — the internal legs
+//   of a routed swap, a pool deposit or a fee included (transferMovementsSql,
+//   which also sizes the indexed total, so the two read on one scale). The
+//   feed's "Transfer" rows are what is left after classification suppresses
+//   plumbing (a far smaller set), and that classification has no bounded 24h
+//   count — a cheap proxy is not it.
 // - extrinsics_24h: signed extrinsics (a signer, or the recovered effective
 //   signer of an EVM transaction).
 // - active_accounts_24h: distinct signers of those extrinsics — the account
@@ -2448,11 +2445,34 @@ export const STATS_COUNTS_CACHE_MS = 30_000
 //   account at a single block (~103k accounts, every one of them "active" for
 //   the next 24h), and event-sourced rows name pallet pots and passive
 //   recipients beside the actors.
-export const TRANSFER_EVENT_NAMES_SQL = `('Balances.Transfer','Tokens.Transfer')`
+//
+// A movement is reported by one of three events, and which one depends on the
+// asset. The Currencies pallet re-emits an orml or native move as
+// Currencies.Transferred BESIDE its Tokens.Transfer/Balances.Transfer (every
+// one of them is mirrored), while an Erc20 registry asset (HOLLAR, the aTokens,
+// GDOT) moves in EVM storage and Currencies.Transferred is its ONLY Substrate
+// report. Across the indexed history an asset is exactly one of the two: no
+// asset with a Currencies.Transferred it lacks a mirror for has ever emitted a
+// Tokens/Balances transfer. So per asset the larger of the two counts is its
+// movements — the Tokens/Balances side for a mirrored asset, the Currencies
+// side for an Erc20 one — which matches pairing the events identity by
+// identity (block, extrinsic, asset, from, to, amount) without the per-row
+// grouping. `exact` deduplicates replayed rows (the 24h window); the indexed
+// total takes plain counts, whose replay overcount is negligible on a figure
+// that only sizes the pager.
+export function transferMovementsSql(bound: string, exact: boolean): string {
+  const n = (cond: string) => exact ? `uniqExactIf((block_height, event_index), ${cond})` : `countIf(${cond})`
+  return `SELECT sum(greatest(mirror, currencies)) FROM (
+      SELECT asset_id,
+        ${n(`event_name != 'Currencies.Transferred'`)} AS mirror,
+        ${n(`event_name = 'Currencies.Transferred'`)} AS currencies
+      FROM price_data.transfer_activity
+      WHERE ${bound}
+      GROUP BY asset_id)`
+}
 export const STATS_COUNTS_SQL = `
   SELECT
-    toUInt64((SELECT uniqExact((block_height, event_index)) FROM price_data.raw_events
-      WHERE block_height > {cutoff24h:UInt32} AND event_name IN ${TRANSFER_EVENT_NAMES_SQL})) AS transfers_24h,
+    toUInt64((${transferMovementsSql('block_height > {cutoff24h:UInt32}', true)})) AS transfers_24h,
     toUInt64((SELECT uniqExact((block_height, extrinsic_index)) FROM price_data.raw_extrinsics
       WHERE block_height > {cutoff24h:UInt32} AND coalesce(signer, effective_signer) IS NOT NULL)) AS extrinsics_24h,
     toUInt64((SELECT uniqExact(coalesce(signer, effective_signer)) FROM price_data.raw_extrinsics
@@ -29987,9 +30007,9 @@ export async function getListCounts(): Promise<{ blocks: number; extrinsics: num
       // per cold call, against an overcount of a couple of hundred replayed rows
       // (0.0001%) on a value that only sizes the pager.
       q(`SELECT toString(count()) AS c FROM price_data.raw_events`),
-      // Raw transfer events on the same definition as the 24h figure
+      // Raw transfer movements on the same definition as the 24h figure
       // (STATS_COUNTS_SQL), so the two are one number's total and its window.
-      q(`SELECT toString(count()) AS c FROM price_data.raw_events WHERE event_name IN ${TRANSFER_EVENT_NAMES_SQL}`),
+      q(`SELECT toString((${transferMovementsSql('1', false)})) AS c`),
     ])
     return { blocks, extrinsics, events, transfers, contracts: allContracts().length }
   })
