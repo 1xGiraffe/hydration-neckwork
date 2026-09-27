@@ -22,6 +22,44 @@ describe('swapEventAmounts', () => {
     const a = swapEventAmounts('XYK.BuyExecuted', { assetIn: 5, assetOut: 16, amount: '222', buyPrice: '444' })
     expect(a).toEqual({ assetIn: 5, assetOut: 16, amountIn: '444', amountOut: '222' })
   })
+  // LBP uses XYK's field names for the opposite sides of a buy: its Tokens.Transfer
+  // legs pay `amount` of assetIn and receive `buyPrice` of assetOut.
+  it('maps LBP buy amount/buyPrice onto in/out, unlike XYK', () => {
+    const a = swapEventAmounts('LBP.BuyExecuted', { assetIn: 5, assetOut: 1000010, amount: '4880513094693', buyPrice: '600000000000000000' })
+    expect(a).toEqual({ assetIn: 5, assetOut: 1000010, amountIn: '4880513094693', amountOut: '600000000000000000' })
+  })
+  it('maps LBP sell amount/salePrice onto in/out', () => {
+    const a = swapEventAmounts('LBP.SellExecuted', { assetIn: 1000010, assetOut: 5, amount: '7', salePrice: '9' })
+    expect(a).toEqual({ assetIn: 1000010, assetOut: 5, amountIn: '7', amountOut: '9' })
+  })
+})
+
+// Every swap projection over raw_events states the legacy XYK/LBP amounts one way:
+// an LBP buy pays `amount` and receives `buyPrice`, an XYK buy the reverse.
+describe('legacy LBP buy amounts in the swap projections', () => {
+  const squash = (s: string) => s.replace(/\s+/g, '')
+  const mvLine = (name: string) => {
+    const line = materializedViews.split('\n').find(l => l.includes(`price_data.${name} `))
+    expect(line).toBeDefined()
+    return squash(line!)
+  }
+  const amountIn = squash(`multiIf(event_name IN ('XYK.SellExecuted', 'LBP.SellExecuted', 'LBP.BuyExecuted'), JSONExtractString(args_json, 'amount'), event_name = 'XYK.BuyExecuted', JSONExtractString(args_json, 'buyPrice'), JSONExtractString(args_json, 'amountIn')) AS amount_in`)
+  const amountOut = squash(`multiIf(event_name IN ('XYK.SellExecuted', 'LBP.SellExecuted'), JSONExtractString(args_json, 'salePrice'), event_name = 'XYK.BuyExecuted', JSONExtractString(args_json, 'amount'), event_name = 'LBP.BuyExecuted', JSONExtractString(args_json, 'buyPrice'), JSONExtractString(args_json, 'amountOut')) AS amount_out`)
+
+  for (const name of ['swap_activity_mv', 'asset_swap_activity_mv', 'account_swap_activity_queue_mv']) {
+    it(`${name} reads an LBP buy in LBP order`, () => {
+      const mv = mvLine(name)
+      expect(mv).toContain(amountIn)
+      expect(mv).toContain(amountOut)
+      expect(mv).not.toContain(squash(`event_name IN ('XYK.BuyExecuted', 'LBP.BuyExecuted')`))
+    })
+  }
+
+  it('account_activity_v3_mv books an LBP buy at its received buyPrice', () => {
+    const mv = mvLine('account_activity_v3_mv')
+    expect(mv).toContain(squash(`WITH multiIf(event_name IN ('XYK.SellExecuted', 'LBP.SellExecuted'), JSONExtractString(args_json, 'salePrice'), event_name = 'XYK.BuyExecuted', JSONExtractString(args_json, 'amount'), event_name = 'LBP.BuyExecuted', JSONExtractString(args_json, 'buyPrice'),`))
+    expect(mv).not.toContain(squash(`event_name IN ('XYK.BuyExecuted', 'LBP.BuyExecuted')`))
+  })
 })
 
 // The SQL twin decodes a raw event's amountIn the way swap_activity_mv stores it, so

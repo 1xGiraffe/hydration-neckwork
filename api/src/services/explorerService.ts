@@ -10391,21 +10391,24 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
 // single *Executed event. The call args carry the route and the slippage limit.
 
 export interface SwapAmounts { assetIn: number; assetOut: number; amountIn: string; amountOut: string }
-// XYK events name their amounts amount/salePrice (sell) and amount/buyPrice
-// (buy); everything else uses amountIn/amountOut.
+// XYK and LBP events name their amounts by role: a sell is (amount paid, salePrice
+// received) on both, but a buy is (buyPrice paid, amount received) on XYK and
+// (amount paid, buyPrice received) on LBP — the pallets use the same field names
+// for opposite sides. Everything else uses amountIn/amountOut.
 export function swapEventAmounts(name: string, args: Record<string, unknown>): SwapAmounts {
   const s = (v: unknown) => typeof v === 'string' ? v : typeof v === 'number' ? String(v) : ''
   const n = (v: unknown) => Number(v ?? NaN)
   const base = { assetIn: n(args.assetIn), assetOut: n(args.assetOut) }
   if (name === 'XYK.SellExecuted' || name === 'LBP.SellExecuted') return { ...base, amountIn: s(args.amount), amountOut: s(args.salePrice) }
-  if (name === 'XYK.BuyExecuted' || name === 'LBP.BuyExecuted') return { ...base, amountIn: s(args.buyPrice), amountOut: s(args.amount) }
+  if (name === 'LBP.BuyExecuted') return { ...base, amountIn: s(args.amount), amountOut: s(args.buyPrice) }
+  if (name === 'XYK.BuyExecuted') return { ...base, amountIn: s(args.buyPrice), amountOut: s(args.amount) }
   return { ...base, amountIn: s(args.amountIn), amountOut: s(args.amountOut) }
 }
 // swapEventAmounts' amountIn, decoded from a raw event's args in SQL — the very
 // expression swap_activity_mv stores as `amount_in`, so a read over raw_events and a
 // read over the pre-decoded projection state one value for every swap event.
 export const SWAP_EVENT_AMOUNT_IN_SQL =
-  `multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted'), JSONExtractString(args_json,'amount'), event_name IN ('XYK.BuyExecuted','LBP.BuyExecuted'), JSONExtractString(args_json,'buyPrice'), JSONExtractString(args_json,'amountIn'))`
+  `multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted','LBP.BuyExecuted'), JSONExtractString(args_json,'amount'), event_name = 'XYK.BuyExecuted', JSONExtractString(args_json,'buyPrice'), JSONExtractString(args_json,'amountIn'))`
 
 export interface TradeLimitSpec { kind: 'minReceived' | 'maxPaid'; amount: string; assetId: number }
 // The slippage-protection limit of a swap call. XYK's `maxLimit` arg is the
