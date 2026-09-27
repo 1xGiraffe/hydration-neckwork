@@ -71,7 +71,7 @@ async function handler(_input: Record<string, unknown>, ctx: ToolContext): Promi
     // classified count, and "transfers" here are raw events, plumbing included.
     throughput = kv([
       ['Extrinsics (24 h)', `${formatCount(stats.extrinsics24h)} signed extrinsics`],
-      ['Transfers (24 h)', `${formatCount(stats.transfers24h)} raw Balances/Tokens transfer events — the internal legs of swaps, pool deposits and fees included, so far more than the Transfer rows get_activity classifies`],
+      ['Transfers (24 h)', `${formatCount(stats.transfers24h)} raw transfer events, one per movement (Erc20 registry assets such as HOLLAR included) — the internal legs of swaps, pool deposits and fees included, so far more than the Transfer rows get_activity classifies`],
       ['Active accounts (24 h)', `${formatCount(stats.activeAccounts24h)} distinct accounts that signed an extrinsic (the Accounts page's daily-active definition); receiving a transfer does not count`],
     ])
   }
