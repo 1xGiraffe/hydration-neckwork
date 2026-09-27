@@ -167,7 +167,7 @@ const LP_FEE_LEG = `leg_kind = 'fee' AND asset_id != 1 AND fee_dest != 'burned'
  * `omnipool_pool_state_history` reserves, deduplicated per (asset, block) first
  * because that table replaces on ingestion time too.
  *
- * The protocol fee is charged in LRNA on the leg that sold an asset INTO the hub,
+ * The protocol fee is charged in H2O on the leg that sold an asset INTO the hub,
  * so it is attributed to the fill's non-hub in-asset and measured against that
  * asset's own hub reserve — reported separately, never blended into the LP APR.
  * It is NOT recipient-filtered: every destination it has is protocol revenue, and

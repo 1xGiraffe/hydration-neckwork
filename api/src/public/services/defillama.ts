@@ -27,7 +27,7 @@ import {
 // The Hydration Data Lake's platformTotalVolumesByPeriod, which the DefiLlama
 // adapter reads today, counts one side of every FILL instead — so a routed
 // multi-hop swap counts once per hop, and an Omnipool swap counts twice because
-// the router reports A→LRNA and LRNA→B separately. MEASURED over the closed week
+// the router reports A→H2O and H2O→B separately. MEASURED over the closed week
 // 2026-08-03..09: 6,333,852.59 here against 16,974,943.20 there, a ratio of
 // 0.373, and per day the ratio moves between 0.29 and 0.50 with the day's
 // routing mix. Our own per-fill (unnetted) sum for 2026-08-09 is 1,931,579
@@ -39,9 +39,13 @@ import {
 //
 //   'account'  the fee was credited to an account — a pool, a referrer, staking,
 //              the treasury. Which one is not decided here.
-//   'burned'   the fee was destroyed (the legacy Omnipool LRNA protocol fee:
-//              115,913 of 115,913 such legs at the era boundary were Burned).
-//              It accrues to nobody.
+//   'burned'   the fee was destroyed. It accrues to nobody. Only the Omnipool
+//              H2O protocol fee is ever burned: all of it until block 6,975,219
+//              (2025-02-16; 115,913 of 115,913 such legs at the Broadcast era
+//              boundary were Burned), half of it (the other half to the
+//              Treasury) until block 11,394,695 (2026-02-16), none since — the
+//              runtime now credits it to the HDX sub-pool's hub reserve, an
+//              'account' leg paid to the Omnipool pallet account.
 //   ''         UNKNOWN. The pre-Broadcast Omnipool events name no destination,
 //              and the same measurement found the asset fee reaching the pool,
 //              referrals and staking in comparable numbers — so the legacy era's

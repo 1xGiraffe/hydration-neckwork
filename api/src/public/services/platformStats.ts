@@ -15,7 +15,7 @@ import { SupplyUnresolvableError, totalSupplyRaw } from './coingecko.ts'
 // The two halves come from different clocks and say so:
 //  * TVL is CURRENT state, read from the shared pool service — the same model the
 //    explorer's /liquidity page renders, so the public number and the page can
-//    never disagree. Its Omnipool total excludes the LRNA hub leg (the hub is the
+//    never disagree. Its Omnipool total excludes the H2O hub leg (the hub is the
 //    pool's internal accounting unit, not deposited value).
 //  * Volume is the rolling 24 hours of `pool_swap_legs`, anchored to the newest
 //    indexed block. `asOf`/`blockHeight` describe THAT anchor; the TVL snapshot is
