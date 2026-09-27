@@ -27887,7 +27887,63 @@ function accountsCacheKey(modelVersion: string, sort: AccountSort, offset: numbe
 // enrichment, and identity-presence are all resolved server-side so a single
 // page can be ordered correctly against the whole set.
 export function getAccounts(offset: number, limit: number, sort: AccountSort = 'value'): Promise<AccountsPage> {
+  const blocks = prewarmedBlocksCovering(offset, limit, sort)
+  if (blocks) {
+    // Compose only from blocks that are servable right now (stored or already
+    // computing): a missing block would cost one whole-directory ranking per
+    // block, where the direct read costs exactly one.
+    const modelVersion = accountDirectoryModelVersion()
+    if (blocks.every(b => cacheExpiry(accountsCacheKey(modelVersion, sort, b, ACCOUNT_PAGE_BLOCK)) != null)) {
+      return Promise.all(blocks.map(b => accountsPage(b, ACCOUNT_PAGE_BLOCK, sort, false)))
+        .then(pages => composeAccountBlocks(pages, offset - blocks[0], limit))
+    }
+  }
   return accountsPage(offset, limit, sort, false)
+}
+
+// The directory's prewarmed pages: block-aligned windows of ACCOUNT_PAGE_BLOCK
+// rows that the background pass rebuilds every cycle, so they are always cached.
+// Any other (offset, limit) is its own cache key and pays a cold whole-directory
+// ranking (~1.5 s of ClickHouse plus the per-row enrichment — 3–5 s) the first
+// time it is asked for; a window inside these blocks is instead sliced out of
+// them, which is the same rows because each row is enriched on its own and the
+// ranking is one ORDER BY over the whole directory.
+const ACCOUNT_PAGE_BLOCK = 50
+const ACCOUNT_SORTS_PREWARMED: AccountSort[] = ['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'volume', 'liquidation']
+export function prewarmedAccountBlocks(): { offset: number; sort: AccountSort }[] {
+  return [
+    ...ACCOUNT_SORTS_PREWARMED.map(sort => ({ offset: 0, sort })),
+    { offset: ACCOUNT_PAGE_BLOCK, sort: 'value' as AccountSort },
+  ]
+}
+
+// The block offsets whose rows cover [offset, offset + limit), when every one of
+// them is prewarmed for this sort; null otherwise.
+export function prewarmedBlocksCovering(offset: number, limit: number, sort: AccountSort): number[] | null {
+  if (limit <= 0) return null
+  const first = Math.floor(offset / ACCOUNT_PAGE_BLOCK) * ACCOUNT_PAGE_BLOCK
+  const blocks: number[] = []
+  for (let b = first; b < offset + limit; b += ACCOUNT_PAGE_BLOCK) blocks.push(b)
+  const warm = new Set(prewarmedAccountBlocks().filter(p => p.sort === sort).map(p => p.offset))
+  return blocks.every(b => warm.has(b)) ? blocks : null
+}
+
+// Consecutive blocks → the requested window. A short block is the directory's
+// end, so nothing after it is read. `total` and `rankedDepth` are properties of
+// the whole ordering, identical on every block of one generation; the first
+// block's are taken.
+export function composeAccountBlocks(pages: AccountsPage[], skip: number, limit: number): AccountsPage {
+  const rows: TopAccountRow[] = []
+  for (const page of pages) {
+    rows.push(...page.rows)
+    if (page.rows.length < ACCOUNT_PAGE_BLOCK) break
+  }
+  const head = pages[0]
+  return {
+    rows: rows.slice(skip, skip + limit),
+    total: head.total,
+    ...(head.rankedDepth != null ? { rankedDepth: head.rankedDepth } : {}),
+  }
 }
 
 // The prewarm's entry point: rebuild the page for the current generation even
@@ -30467,10 +30523,10 @@ async function prewarmAccountDirectoryUncached(): Promise<void> {
   // WHICH rows it rendered: those are the demand half of the ranking's pool, so the
   // Activity column fills in for the pages a reader actually opens rather than only for
   // the chain's busiest accounts (see demandPoolMembers).
-  const sorts: AccountSort[] = ['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'volume', 'liquidation']
   const rendered: string[] = []
-  for (const sort of sorts) rendered.push(...directoryRowGkeys((await refreshAccountsPage(0, 50, sort))?.rows ?? []))
-  rendered.push(...directoryRowGkeys((await refreshAccountsPage(50, 50, 'value'))?.rows ?? []))
+  for (const { offset, sort } of prewarmedAccountBlocks()) {
+    rendered.push(...directoryRowGkeys((await refreshAccountsPage(offset, ACCOUNT_PAGE_BLOCK, sort))?.rows ?? []))
+  }
   // Replaced whole, never appended to: a pass that failed partway must not narrow the
   // pool to what it managed, and a row that left the directory must leave the pool.
   if (rendered.length) directoryPoolGkeys = rendered
