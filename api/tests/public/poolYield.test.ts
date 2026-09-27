@@ -185,6 +185,18 @@ describe('yield SQL invariants', () => {
     expect(sql).toContain('block_timestamp > {anchor:DateTime} - INTERVAL {hours:UInt32} HOUR')
     expect(sql).toContain('block_timestamp <= {anchor:DateTime}')
   })
+
+  it('publishes only the assets still in the Omnipool', async () => {
+    const { buildOmnipoolYieldSql } = await import('../../src/services/poolYield.ts')
+    const sql = buildOmnipoolYieldSql()
+    // A delisted asset has in-window samples and fee legs until the window rolls
+    // past its removal, so being in the window is not being listed: the listed
+    // set is the newest in-window grid sample, which is written whole.
+    expect(sql).toMatch(/listed AS \(\s*(--[^\n]*\n\s*)*SELECT registry_asset_id FROM samples\s+WHERE block_height = \(SELECT max\(block_height\) FROM samples\)/)
+    expect(sql).toContain('WHERE asset_id IN (SELECT registry_asset_id FROM listed)')
+    // An asset with no sample at all is kept, to report a null rate.
+    expect(sql).toContain('OR asset_id NOT IN (SELECT registry_asset_id FROM samples)')
+  })
 })
 
 describe('omnipoolYield', () => {
