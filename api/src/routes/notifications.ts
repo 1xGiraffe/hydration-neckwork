@@ -15,7 +15,9 @@ import { displayDescriptor } from '../services/explorerAssets.ts'
 import { accountRef, mmMarketByKey, mmMarkets, resolveDisplayAccountId } from '../services/explorerService.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
 import { renderNotification, text } from '../notifications/render.ts'
-import { sendToChannel, vapidPublicKey, webPushConfigured, telegramConfigured } from '../notifications/delivery.ts'
+import { deliveryCounters, sendToChannel, vapidPublicKey, webPushConfigured, telegramConfigured } from '../notifications/delivery.ts'
+import { evaluatorStatus } from '../notifications/evaluator.ts'
+import { isApiAdmin } from '../services/userApiTokenService.ts'
 import { createTelegramLink, telegramLinkStatus, telegramBotUsername } from '../notifications/telegramBot.ts'
 
 // Per-account notification management. Everything lives under
@@ -283,5 +285,14 @@ export async function notificationRoutes(fastify: FastifyInstance) {
     const accountId = sessionUser(req)
     const cleared = await clearInbox(accountId)
     return { ok: true, cleared, unread: 0 }
+  })
+
+  // The evaluator's and the delivery path's health, for the operators on
+  // ADMIN_ACCOUNT_IDS — the same allow-list and the same 404-for-everyone-else as
+  // the Data API admin surface. It names lanes, cursors, counts and the head;
+  // never a rule's parameters, an account or a channel.
+  fastify.get('/user/admin/notifications/status', async (req, reply) => {
+    if (!isApiAdmin(sessionUser(req))) return reply.status(404).send({ error: 'Not found' })
+    return { evaluator: evaluatorStatus(), delivery: deliveryCounters() }
   })
 }

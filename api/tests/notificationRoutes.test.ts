@@ -8,6 +8,8 @@ import { initUserAuthService, issueSession, resetUserAuthForTests } from '../src
 import { initNotifications, loadNotifications, channelsFor, rulesFor } from '../src/notifications/notificationStore.ts'
 import { resetTelegramLinksForTests, telegramLinkStatus } from '../src/notifications/telegramBot.ts'
 import { resetDeliveryStateForTests } from '../src/notifications/delivery.ts'
+import { ROW_LANE_KINDS } from '../src/notifications/evaluator.ts'
+import { initUserApiTokenService } from '../src/services/userApiTokenService.ts'
 import { initTagService, loadTags } from '../src/services/tagService.ts'
 import { fakeClient, type FakeClient } from './helpers/userFakes.ts'
 
@@ -416,5 +418,36 @@ describe('inbox', () => {
     const res = await f.inject({ method: 'POST', url: '/user/notifications/inbox/clear', headers: auth(), payload: {} })
     expect(res.json()).toEqual({ ok: true, cleared: 0, unread: 0 })
     expect(client.inserts).toHaveLength(0)
+  })
+})
+
+describe('admin status', () => {
+  const ADMIN = '0x' + 'ad'.repeat(32)
+  async function withAdmin() {
+    setEnv('ADMIN_ACCOUNT_IDS', ADMIN)
+    initUserApiTokenService(fakeClient())
+    return issueSession(ADMIN)
+  }
+
+  it('is invisible (404) to a non-admin session', async () => {
+    await withAdmin()
+    const f = await build()
+    const res = await f.inject({ method: 'GET', url: '/user/admin/notifications/status', headers: auth() })
+    expect(res.statusCode).toBe(404)
+    expect(res.headers['cache-control']).toBe('no-store')
+  })
+
+  it('states every lane with its cursor, the counters and delivery, never a rule\'s parameters', async () => {
+    const adminToken = await withAdmin()
+    const f = await build()
+    const res = await f.inject({ method: 'GET', url: '/user/admin/notifications/status', headers: { authorization: `Bearer ${adminToken}` } })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['cache-control']).toBe('no-store')
+    const body = res.json()
+    expect(body.evaluator.lanes.map((l: { kind: string }) => l.kind)).toEqual(ROW_LANE_KINDS)
+    for (const lane of body.evaluator.lanes) expect(Object.keys(lane).sort()).toEqual(['behind', 'cursor', 'kind', 'rules'])
+    expect(body.evaluator.counters).toHaveProperty('deferredGroups')
+    expect(body.evaluator.counters).toHaveProperty('skippedBlocks')
+    expect(body.delivery).toHaveProperty('telegramFailed')
   })
 })

@@ -1407,6 +1407,11 @@ const counters = {
   deferredGroups: 0, sourceFetches: 0, digested: 0, outboundDuplicates: 0,
 }
 export function evaluatorCounters(): Readonly<typeof counters> { return { ...counters } }
+// When the last tick STARTED and the live head it read — the stall signals the
+// counters alone cannot give: a tick that hangs stops `lastTickAtMs`, a lane
+// whose cursor stops moving shows as a growing gap to `lastHead`.
+let lastTickAtMs = 0
+let lastHead: number | null = null
 
 let client: ClickHouseClient | null = null
 let timer: ReturnType<typeof setInterval> | null = null
@@ -1524,6 +1529,51 @@ export function evaluatorCursors(): Record<string, number> {
   return Object.fromEntries(cursors)
 }
 
+/** One row lane's state, for the admin status surface. */
+export interface EvaluatorLaneStatus {
+  kind: RowLaneKind
+  /** Active rules the lane evaluates; a lane with none is idle and holds its cursor. */
+  rules: number
+  cursor: number | null
+  /** Blocks between the cursor and the live head the last tick read, null when either is unknown. */
+  behind: number | null
+}
+export interface EvaluatorStatus {
+  running: boolean
+  inFlight: boolean
+  intervalMs: number
+  lastTickAt: string | null
+  liveHead: number | null
+  counters: Readonly<typeof counters>
+  lanes: EvaluatorLaneStatus[]
+}
+
+/**
+ * The loop's health: counters, the last tick and head, and every lane's cursor
+ * with its gap to that head — so a lane that stopped advancing (a stuck cursor)
+ * is visible without reading the state table. Carries rule COUNTS only, never a
+ * rule's parameters or a channel.
+ */
+export function evaluatorStatus(): EvaluatorStatus {
+  return {
+    running: timer != null,
+    inFlight,
+    intervalMs: evaluatorIntervalMs(),
+    lastTickAt: lastTickAtMs ? new Date(lastTickAtMs).toISOString() : null,
+    liveHead: lastHead,
+    counters: evaluatorCounters(),
+    lanes: ROW_LANE_KINDS.map(kind => {
+      const cursor = cursorFor(kind)
+      return {
+        kind,
+        rules: activeRulesByKind(kind).length,
+        cursor,
+        behind: cursor != null && lastHead != null ? Math.max(0, lastHead - cursor) : null,
+      }
+    }),
+  }
+}
+
 export function evaluatorIntervalMs(): number {
   const raw = Number(process.env.NOTIFY_EVAL_MS)
   return Number.isFinite(raw) && raw >= 1000 ? Math.floor(raw) : DEFAULT_EVAL_MS
@@ -1561,6 +1611,8 @@ export function resetEvaluatorForTests(): void {
   rotation.clear()
   groupCoverage.clear()
   cursorsPersistedAtMs = 0
+  lastTickAtMs = 0
+  lastHead = null
   seenOriginQueued.clear()
   originQueuedMemo.clear()
   lastCapSeen.clear()
@@ -1591,8 +1643,10 @@ export async function runEvaluatorTick(): Promise<void> {
   try {
     counters.ticks++
     tick++
+    lastTickAtMs = Date.now()
     const head = await queryLiveHead()
     if (head == null) return
+    lastHead = head
     // The source watermark, read ONCE and BEFORE any lane touches its source.
     // Read after a lane's query it would prove nothing: a lane spends seconds in
     // its source (account-activity alone makes up to 25 sequential feed fetches),
