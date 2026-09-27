@@ -111,6 +111,16 @@ export function decodeRawTrade(row: RawTradeEventRow): DecodedRawTrade | null {
     }
   }
 
+  // LBP names its buy fields the other way round from XYK: amount = paid,
+  // buyPrice = received (sells agree with XYK). See decodeLbpSwap in extractVolume.
+  if (row.event_name === 'LBP.SellExecuted' || row.event_name === 'LBP.BuyExecuted') {
+    return {
+      account: normalizeAccount(args.who),
+      inputs: [{ assetId: Number(args.assetIn), amount: BigInt(args.amount as string) }],
+      outputs: [{ assetId: Number(args.assetOut), amount: BigInt((row.event_name === 'LBP.BuyExecuted' ? args.buyPrice : args.salePrice) as string) }],
+    }
+  }
+
   if (row.event_name === 'XYK.BuyExecuted') {
     return {
       account: normalizeAccount(args.who),

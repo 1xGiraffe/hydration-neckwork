@@ -451,6 +451,27 @@ describe('extractVolumeFromSwaps', () => {
     expect(rows[1].native_volume_buy).toBe('2000000000000');
   });
 
+  // LBP.BuyExecuted is (amount = paid, buyPrice = received) — the reverse of
+  // XYK.BuyExecuted — so the paid leg is the SELL side of the paid asset.
+  it('books legacy LBP fills with the pallet\'s own buy field order', () => {
+    const buy = createMockEvent('LBP.BuyExecuted', {
+      who: '0xbuyer', assetOut: 10, assetIn: 5, amount: '3000000000000', buyPrice: '7000000000000', feeAsset: 5, feeAmount: '1',
+    });
+    const sell = createMockEvent('LBP.SellExecuted', {
+      who: '0xseller', assetIn: 5, assetOut: 10, amount: '1000000000000', salePrice: '2000000000000', feeAsset: 5, feeAmount: '1',
+    });
+
+    const rows = extractVolumeFromSwaps([buy, sell], 100, 183, prices, decimals);
+
+    expect(rows.map(r => [r.asset_id, r.native_volume_sell, r.native_volume_buy])).toEqual([
+      [5, '3000000000000', '0'],
+      [10, '0', '7000000000000'],
+      [5, '1000000000000', '0'],
+      [10, '0', '2000000000000'],
+    ]);
+    expect(extractVolumeFromSwaps([buy], 100, 282, prices, decimals)).toEqual([]);
+  });
+
   it('ignores legacy swap events after the unified swap cutoff', () => {
     const event = createMockEvent('Omnipool.SellExecuted', {
       assetIn: 5,
