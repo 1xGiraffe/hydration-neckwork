@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 import {
   SPARKLINE_BUCKETS, SPARKLINE_BUCKET_HOURS, SPARKLINE_WINDOW_HOURS,
-  STATS_COUNTS_CACHE_MS, STATS_COUNTS_SQL, TRANSFER_EVENT_NAMES_SQL,
+  STATS_COUNTS_CACHE_MS, STATS_COUNTS_SQL, transferMovementsSql,
   cutoffWindowSql, fallbackCutoffHeight, feedWindowBoundSql,
 } from '../src/services/explorerService.ts'
 import { blocksPerHour } from '../src/services/blockTime.ts'
@@ -111,7 +111,6 @@ describe('explorer stats count isolation', () => {
   })
 
   it('deduplicates replayable identities before counting', () => {
-    expect(STATS_COUNTS_SQL).toContain('uniqExact((block_height, event_index))')
     expect(STATS_COUNTS_SQL).toContain('uniqExact((block_height, extrinsic_index))')
     expect(STATS_COUNTS_SQL).toContain('uniqExact(coalesce(signer, effective_signer))')
   })
@@ -128,15 +127,22 @@ describe('explorer stats count isolation', () => {
     expect(STATS_COUNTS_SQL).not.toContain('raw_balance_observations')
   })
 
-  // The 24h transfer figure and the indexed total are one definition (raw
-  // Balances/Tokens transfer events); Currencies.Transferred re-emits the same
-  // movement beside its Tokens/Balances event and would count it twice.
-  it('sizes transfers with one event family, without the Currencies echo', () => {
-    expect(TRANSFER_EVENT_NAMES_SQL).toBe(`('Balances.Transfer','Tokens.Transfer')`)
-    expect(STATS_COUNTS_SQL).toContain(`event_name IN ${TRANSFER_EVENT_NAMES_SQL}`)
+  // The 24h transfer figure and the indexed total are one definition: one count
+  // per movement. An orml/native move is reported twice (Tokens/Balances plus
+  // the Currencies echo), an Erc20 registry asset's (HOLLAR, aTokens) only as
+  // Currencies.Transferred — so each asset counts the larger side, never both
+  // and never only the Tokens/Balances family that leaves Erc20 moves out.
+  it('counts each transfer movement once, Erc20 registry assets included', () => {
+    const window = transferMovementsSql('block_height > {cutoff24h:UInt32}', true)
+    expect(window).toContain('FROM price_data.transfer_activity')
+    expect(window).toContain('GROUP BY asset_id')
+    expect(window).toContain('sum(greatest(mirror, currencies))')
+    expect(window).toContain(`uniqExactIf((block_height, event_index), event_name = 'Currencies.Transferred')`)
+    expect(window).toContain(`uniqExactIf((block_height, event_index), event_name != 'Currencies.Transferred')`)
+    expect(STATS_COUNTS_SQL).toContain(window)
+    expect(transferMovementsSql('1', false)).toContain(`countIf(event_name = 'Currencies.Transferred')`)
     const listCounts = explorerSource.slice(explorerSource.indexOf('export async function getListCounts'))
     const transfersTotal = listCounts.slice(0, listCounts.indexOf('contracts: allContracts().length'))
-    expect(transfersTotal).toContain('event_name IN ${TRANSFER_EVENT_NAMES_SQL}')
-    expect(transfersTotal).not.toContain('Currencies.Transferred')
+    expect(transfersTotal).toContain("transferMovementsSql('1', false)")
   })
 })
