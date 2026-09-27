@@ -497,6 +497,7 @@ describe('renderMatch', () => {
     expect(activityPath(activity({ poolAddress: pool, eventIndex: 34, extrinsicIndex: 4 }))).toBe('/swap/1050-e34')
     expect(activityPath(activity({ type: 'liquidity', liqAction: 'CollectFees', poolAddress: pool, v3TokenId: '1' }))).toBe('/collect-fees/1050-e7')
     expect(activityPath(activity({ type: 'liquidity', liqAction: 'Rebalance', poolAddress: pool, v3Vault: '0xa206d0959813f17c17c87147271c49065438648a' }))).toBe('/rebalance/1050-e7')
+    expect(activityPath(activity({ type: 'liquidity', liqAction: 'Compound', poolAddress: pool, v3Vault: '0xa206d0959813f17c17c87147271c49065438648a' }))).toBe('/compound/1050-e7')
     expect(activityPath(activity({ type: 'liquidity', liqAction: 'Add', poolAddress: pool }))).toBe('/add-liquidity/1050-e7')
   })
 
@@ -505,6 +506,7 @@ describe('renderMatch', () => {
     const headline = (row: ActivityRow) => renderNotification(renderMatch(match({ lane: 'activity', row }, 'account-activity'), r, noViewerTag)).title
     expect(headline(activity({ type: 'liquidity', liqAction: 'CollectFees', asset: asset(1001, 'aDOT', 10), amount: '5' }))).toContain('Collect fees')
     expect(headline(activity({ type: 'liquidity', liqAction: 'Rebalance', who: null }))).toContain('Rebalance vault')
+    expect(headline(activity({ type: 'liquidity', liqAction: 'Compound' }))).toContain('Compound')
     expect(headline(activity({ type: 'liquidity', liqAction: 'Add' }))).toContain('Add liquidity')
   })
 

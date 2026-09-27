@@ -1001,7 +1001,7 @@ export interface ActivityRow {
   voteRef?: string | null
   voteSide?: string
   voteConviction?: string | null
-  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy' | 'CollectFees' | 'Rebalance'   // Create = pool creation; Destroy = pool closure; Claim = LM rewards; ClaimReferral = referral rewards; CollectFees / Rebalance = concentrated-liquidity position fees / vault re-ranging
+  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy' | 'CollectFees' | 'Rebalance' | 'Compound'   // Create = pool creation; Destroy = pool closure; Claim = LM rewards; ClaimReferral = referral rewards; CollectFees / Rebalance / Compound = concentrated-liquidity position fees / vault re-ranging / vault fees collected and reinvested
   // Concentrated-liquidity (Uniswap v3) rows: the pool contract, the position NFT, the Gamma vault.
   poolAddress?: string
   v3TokenId?: string
@@ -1310,6 +1310,10 @@ export interface UniswapV3VaultInfo {
   lastRebalanceBlock: number | null
   lastRebalanceAt: string | null
   lastRebalanceTick: number | null
+  // Additive on the wire: absent from an api that predates them.
+  compounds?: number
+  lastCompoundBlock?: number | null
+  lastCompoundAt?: string | null
   ranges: { tickLower: number; tickUpper: number; priceLower: number; priceUpper: number; liquidity: string; inRange: boolean }[]
 }
 export interface UniswapV3PoolDetail {

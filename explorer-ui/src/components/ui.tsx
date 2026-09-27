@@ -2115,7 +2115,7 @@ export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = 
     { v: 'xcswap', label: 'Cross-chain swap' },
   ],
   xcm: [{ v: 'out', label: 'Outgoing' }, { v: 'in', label: 'Incoming' }],
-  liquidity: [{ v: 'Add', label: 'Add liquidity' }, { v: 'Remove', label: 'Remove liquidity' }, { v: 'Create', label: 'Create pool' }, { v: 'Destroy', label: 'Destroy pool' }, { v: 'Claim', label: LIQ_LABELS.Claim }, { v: 'ClaimReferral', label: LIQ_LABELS.ClaimReferral }, { v: 'CollectFees', label: LIQ_LABELS.CollectFees }, { v: 'Rebalance', label: LIQ_LABELS.Rebalance }],
+  liquidity: [{ v: 'Add', label: 'Add liquidity' }, { v: 'Remove', label: 'Remove liquidity' }, { v: 'Create', label: 'Create pool' }, { v: 'Destroy', label: 'Destroy pool' }, { v: 'Claim', label: LIQ_LABELS.Claim }, { v: 'ClaimReferral', label: LIQ_LABELS.ClaimReferral }, { v: 'CollectFees', label: LIQ_LABELS.CollectFees }, { v: 'Rebalance', label: LIQ_LABELS.Rebalance }, { v: 'Compound', label: LIQ_LABELS.Compound }],
   mm: [{ v: 'Supply', label: MM_LABELS.Supply }, { v: 'Withdraw', label: 'Withdraw' }, { v: 'Borrow', label: 'Borrow' }, { v: 'Repay', label: 'Repay' }, { v: 'LiquidationCall', label: MM_LABELS.LiquidationCall }, { v: 'ClaimRewards', label: MM_LABELS.ClaimRewards }],
   // Staking values ARE their labels — the server sends the action as a word, not a
   // runtime event name — so there is no mapping here to keep in step.

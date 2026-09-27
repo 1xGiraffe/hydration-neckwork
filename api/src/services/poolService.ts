@@ -1713,6 +1713,10 @@ export interface UniswapV3VaultInfo {
   lastRebalanceBlock: number | null
   lastRebalanceAt: string | null
   lastRebalanceTick: number | null
+  /** Compounds (fees collected and reinvested by the keeper) — the vault's Compound activity rows. */
+  compounds: number
+  lastCompoundBlock: number | null
+  lastCompoundAt: string | null
   ranges: { tickLower: number; tickUpper: number; priceLower: number; priceUpper: number; liquidity: string; inRange: boolean }[]
 }
 export interface UniswapV3PoolDetail {
@@ -1875,6 +1879,7 @@ export async function getUniswapV3PoolDetail(address: string): Promise<UniswapV3
           fees0: vs.fees0, fees1: vs.fees1, feesUsd: f0 == null && f1 == null ? null : (f0 ?? 0) + (f1 ?? 0),
           feeDivisor: vs.feeDivisor, feeSharePct: vs.feeDivisor ? 100 / vs.feeDivisor : null,
           lastRebalanceBlock: vs.lastRebalanceBlock, lastRebalanceAt: vs.lastRebalanceAt, lastRebalanceTick: vs.lastRebalanceTick,
+          compounds: vs.compounds, lastCompoundBlock: vs.lastCompoundBlock, lastCompoundAt: vs.lastCompoundAt,
           ranges: vs.ranges.map(r => ({
             ...r, priceLower: tickPrice(r.tickLower), priceUpper: tickPrice(r.tickUpper),
             inRange: tick != null && r.tickLower <= tick && tick < r.tickUpper,
