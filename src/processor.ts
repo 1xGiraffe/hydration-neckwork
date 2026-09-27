@@ -37,6 +37,8 @@ export const processor = new SubstrateBatchProcessor()
       'XYK.BuyExecuted',
       'Stableswap.SellExecuted',
       'Stableswap.BuyExecuted',
+      'LBP.SellExecuted',
+      'LBP.BuyExecuted',
       'Broadcast.Swapped',
       'Broadcast.Swapped2',
       'Broadcast.Swapped3',
