@@ -5,6 +5,7 @@ import { moneyMarketTools } from '../../src/mcp/tools/moneyMarket.ts'
 import { governanceTools } from '../../src/mcp/tools/governance.ts'
 import { UpstreamError, type UpstreamClient } from '../../src/mcp/upstream.ts'
 import type { ToolContext, ToolDefinition, ToolOutput } from '../../src/mcp/toolTypes.ts'
+import type { OmnipoolSnapshots, PoolSnapshots } from '../../src/mcp/types.ts'
 
 /**
  * The market-facing tools against recorded shapes, with no network.
@@ -653,7 +654,7 @@ describe('get_pool_history', () => {
     const points = Array.from({ length: 12 }, (_, i) => point(14_400_000 + i * 600, '2026-09-09 11:09:00', '1', '2', '3', '4', 1.01))
     const wide = { ...SNAPSHOTS_143, coverage: { ...SNAPSHOTS_143.coverage, expected: 13, returned: 12, missingCount: 1, missing: [14_406_000], remaining: 0, truncated: false, nextFromBlock: null }, points }
     const budget = 2_000 + JSON.stringify({ ...wide, points: [] }, null, 2).length
-    const cut = trimToBudget(wide as never, budget)
+    const cut = trimToBudget(wide as unknown as PoolSnapshots, budget)
     expect(cut.points.length).toBeGreaterThanOrEqual(1)
     expect(cut.points.length).toBeLessThan(12)
     expect(JSON.stringify(cut, null, 2).length).toBeLessThanOrEqual(budget)
@@ -666,14 +667,14 @@ describe('get_pool_history', () => {
     // neither named nor counted; one before the cut stays.
     expect(cut.coverage.missing).toEqual([])
     expect(cut.coverage.missingCount).toBe(0)
-    const early = trimToBudget({ ...wide, coverage: { ...wide.coverage, missing: [14_400_000 - 1], missingCount: 1 } } as never, budget)
+    const early = trimToBudget({ ...wide, coverage: { ...wide.coverage, missing: [14_400_000 - 1], missingCount: 1 } } as unknown as PoolSnapshots, budget)
     expect(early.coverage.missing).toEqual([14_400_000 - 1])
     expect(early.coverage.missingCount).toBe(1)
     // A record that fits is returned untouched.
-    expect(trimToBudget(wide as never, 1_000_000)).toBe(wide)
+    expect(trimToBudget(wide as unknown as PoolSnapshots, 1_000_000)).toBe(wide)
   })
 
-  it('refuses the Omnipool, a v3 address and a name, each with the tool to call instead', async () => {
+  it('refuses the Omnipool without an asset, a v3 address and a name, each with the tool to call instead', async () => {
     for (const [pool, hint] of [['omnipool', 'get_pools'], [V3_POOL.address, 'get_pools'], ['PRIME pool', 'search']] as const) {
       const upstream = fakeUpstream({})
       const out = await poolHistory.handler({ pool }, ctxFor(upstream))
@@ -692,5 +693,94 @@ describe('get_pool_history', () => {
     })
     expect(refused.errors?.[0].code).toBe('INVALID_ARGUMENT')
     expect(refused.errors?.[0].message).toContain('fromBlock/toBlock')
+  })
+})
+
+/* ============ get_pool_history · omnipool ============ */
+
+const H2O = { assetId: 1, iconAssetId: 1, symbol: 'H2O', name: null, decimals: 12, parachainId: null, origin: null }
+const DOT = { assetId: 5, iconAssetId: 5, symbol: 'DOT', name: 'Polkadot', decimals: 10, parachainId: null, origin: null }
+const OMNI_ACCOUNT = { ...ACCOUNT, accountId: '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000', address: '13UVJyLnPLowAMzbZewu9zwEGiSMQKniJ2cp4vM4ru2nci9N' }
+
+/** Trimmed from the live /explorer/omnipool/snapshots?asset=222,5&resolution=day answer: HOLLAR listed, DOT long gone. */
+const omniPoint = (block: number, bucket: string, time: string, reserve: string, hub: string, total: string, fee: number) => ({
+  block, hash: `0x${block.toString(16).padStart(64, '0')}`, time, t: Date.parse(`${time.replace(' ', 'T')}Z`) / 1000, bucket, specVersion: 443,
+  hub: { reserveTotal: total, assetCount: 13 },
+  assets: [
+    { reserve, hubReserve: hub, shares: '4097622498575083691977528', protocolShares: '29517240516125848944066', cap: '200000000000000000', tradable: 15, tradableFlags: ['Sell', 'Buy', 'Add liquidity', 'Remove liquidity'], assetFee: { permill: fee, block: block - 73, eventIndex: 21 } },
+    null,
+  ],
+})
+const OMNI_SNAPSHOTS: OmnipoolSnapshots = {
+  kind: 'omnipool', name: 'Omnipool', account: OMNI_ACCOUNT as never, hubAsset: H2O as never,
+  assets: [HOLLAR, DOT] as never,
+  listings: [
+    { assetId: 222, status: 'listed', intervals: [{ listedAt: 10_436_402, removedAt: null }], firstObservedBlock: 10_437_000, lastObservedBlock: 15_101_400 },
+    { assetId: 5, status: 'delisted', intervals: [{ listedAt: 1_708_101, removedAt: 11_052_733 }], firstObservedBlock: 1_708_200, lastObservedBlock: 11_052_600 },
+  ],
+  window: { fromBlock: 15_076_800, toBlock: 15_101_400 },
+  resolution: { kind: 'day', stepBlocks: null, stepSec: 86_400, gridBlocks: 600 },
+  semantics: {
+    points: 'Each point is the Omnipool\'s state in the indexer\'s snapshot of exactly the block it names.',
+    reserves: 'reserve is a raw integer in the asset\'s own base units.',
+    hub: 'hub is the pool-wide H2O side at the point.',
+    fees: 'assetFee is the Omnipool asset fee charged on the asset\'s most recent SALE out of the pool; the protocol fee is not served.',
+    listing: 'A point after an asset\'s removal carries null for it — the asset ended there.',
+    missing: 'coverage.missing lists calendar buckets with no grid observation of any requested asset.',
+  },
+  coverage: { firstObservedBlock: 1_708_200, lastObservedBlock: 15_101_400, expected: 2, returned: 2, missingCount: 0, missing: [], remaining: 0, truncated: false, nextFromBlock: null, assetGaps: [{ assetId: 222, count: 0 }, { assetId: 5, count: 0 }] },
+  points: [
+    omniPoint(15_076_800, '2026-09-26', '2026-09-26 23:57:36', '2390697330149425074711969', '397097626007365886', '2112625112084512179', 2500),
+    omniPoint(15_101_400, '2026-09-27', '2026-09-27 15:50:12', '2383372488464335271528404', '398359299401302638', '2110084858645825928', 2564),
+  ],
+}
+
+describe('get_pool_history · omnipool', () => {
+  it('asks the omnipool snapshot route with the assets, window and budget, and needs an asset', async () => {
+    const upstream = fakeUpstream({ '/explorer/omnipool/snapshots': OMNI_SNAPSHOTS })
+    await poolHistory.handler({ pool: 'omnipool', asset: '222, 5', resolution: 'day', limit: 2 }, ctxFor(upstream))
+    expect(upstream.calls).toEqual(['/explorer/omnipool/snapshots?asset=222,5&resolution=day&limit=2'])
+    const bare = fakeUpstream({})
+    const out = await poolHistory.handler({ pool: 'omnipool' }, ctxFor(bare))
+    expect(out.errors?.[0].code).toBe('INVALID_ARGUMENT')
+    expect(out.errors?.[0].message).toContain("'asset'")
+    expect(bare.calls).toEqual([])
+    const named = await poolHistory.handler({ pool: 'omnipool', asset: 'HOLLAR' }, ctxFor(bare))
+    expect(named.errors?.[0].message).toContain('search')
+    // `asset` belongs to the Omnipool only.
+    const stray = await poolHistory.handler({ pool: '143', asset: '222' }, ctxFor(bare))
+    expect(stray.errors?.[0].code).toBe('INVALID_ARGUMENT')
+    expect(bare.calls).toEqual([])
+  })
+
+  it('renders one table per asset with price, weight and fee, and ends a delisted asset in words', async () => {
+    const out = await run(poolHistory, { pool: 'omnipool', asset: '222,5' }, { '/explorer/omnipool/snapshots': OMNI_SNAPSHOTS })
+    expect(out.errors ?? []).toEqual([])
+    expect(out.markdown).toContain('Omnipool — state snapshots of HOLLAR, DOT')
+    expect(out.markdown).toContain('| Bucket | Block | Reserve (HOLLAR) | Hub (H2O) | Price (H2O) | Weight | Asset fee | Tradable |')
+    // 2,390,697 HOLLAR on the rough scale; 397,097 H2O; 397097.6/2390697.3 = 0.166 H2O; 18.80% of the hub total.
+    expect(out.markdown).toContain('2.39M')
+    expect(out.markdown).toContain('397k')
+    expect(out.markdown).toContain('0.166')
+    expect(out.markdown).toContain('18.80%')
+    expect(out.markdown).toContain('0.26%')
+    expect(out.markdown).toContain('| all |')
+    expect(out.markdown).toContain('DOT (#5): DELISTED — listed 1,708,101 → removed at block 11,052,733')
+    expect(out.markdown).toContain('not in the pool')
+    expect(out.markdown).not.toContain('2390697330149425074711969')
+    expect(out.markdown).toContain('protocol fee is not served')
+  })
+
+  it('carries the raw record in json and turns the route\'s 404 into its own sentence', async () => {
+    const out = await run(poolHistory, { pool: 'omnipool', asset: '222,5', format: 'json' }, { '/explorer/omnipool/snapshots': OMNI_SNAPSHOTS })
+    const parsed = JSON.parse(JSON.stringify(out.json)) as OmnipoolSnapshots
+    expect(parsed.points[1].assets[0]?.assetFee).toEqual({ permill: 2564, block: 15_101_327, eventIndex: 21 })
+    expect(parsed.points[1].assets[1]).toBeNull()
+    expect(parsed.listings[1].intervals[0].removedAt).toBe(11_052_733)
+    const miss = await run(poolHistory, { pool: 'omnipool', asset: '99999' }, {
+      '/explorer/omnipool/snapshots': new UpstreamError('Not an Omnipool asset: 99999 has never been listed in the Omnipool', 404, { error: 'Not an Omnipool asset: 99999 has never been listed in the Omnipool' }, '/explorer/omnipool/snapshots'),
+    })
+    expect(miss.errors?.[0].code).toBe('INVALID_ARGUMENT')
+    expect(miss.errors?.[0].message).toContain('never been listed')
   })
 })

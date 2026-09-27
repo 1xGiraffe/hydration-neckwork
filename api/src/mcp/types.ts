@@ -1153,6 +1153,52 @@ export interface PoolSnapshots {
   points: PoolSnapshotPoint[]
 }
 
+/** One requested asset at one `/explorer/omnipool/snapshots` point; raw integers throughout. */
+export interface OmnipoolSnapshotAsset {
+  reserve: string
+  /** Raw H2O, 12 decimals. */
+  hubReserve: string
+  shares: string
+  protocolShares: string
+  /** FixedU128-scaled, 1e18 = 100% of the pool's hub reserve. */
+  cap: string
+  tradable: number
+  tradableFlags: string[]
+  /** The asset fee its newest qualifying sale out of the pool charged, parts per MILLION, and that sale. */
+  assetFee: { permill: number; block: number; eventIndex: number } | null
+}
+
+export interface OmnipoolSnapshotPoint {
+  block: number
+  hash: string | null
+  time: string
+  t: number
+  bucket?: string
+  specVersion: number | null
+  hub: { reserveTotal: string; assetCount: number }
+  /** In the response's `assets` order; null where the asset is not in the pool at this block. */
+  assets: (OmnipoolSnapshotAsset | null)[]
+}
+
+/**
+ * `/explorer/omnipool/snapshots?asset=…` — the Omnipool's state per listed asset
+ * as observations over a bounded window, with the listing history that ends a
+ * delisted asset. Same window/resolution/coverage contract as PoolSnapshots.
+ */
+export interface OmnipoolSnapshots {
+  kind: 'omnipool'
+  name: string
+  account: AccountRef
+  hubAsset: AssetRef
+  assets: AssetRef[]
+  listings: { assetId: number; status: 'listed' | 'delisted'; intervals: { listedAt: number | null; removedAt: number | null }[]; firstObservedBlock: number | null; lastObservedBlock: number | null }[]
+  window: { fromBlock: number; toBlock: number }
+  resolution: { kind: PoolSnapshotResolution; stepBlocks: number | null; stepSec: number | null; gridBlocks: number }
+  semantics: { points: string; reserves: string; hub: string; fees: string; listing: string; missing: string }
+  coverage: PoolSnapshotCoverage & { assetGaps: { assetId: number; count: number }[] }
+  points: OmnipoolSnapshotPoint[]
+}
+
 export interface PoolLpRow {
   account: AccountRef | null
   shares: string
