@@ -1,8 +1,10 @@
+import type { AtokenReserveRef } from '../evm/balances.js'
 import { createClickHouseClient } from '../db/client.js'
 
 export interface AtokenReserveRow {
   asset_address: string
   atoken: string
+  pool_proxy?: string
 }
 
 // A Hydration asset's ERC-20 precompile address is 0x…01 followed by the asset id
@@ -29,25 +31,48 @@ export function atokenUnderlyingsFromReserveRows(rows: AtokenReserveRow[]): Map<
   return underlyings
 }
 
+// aToken contract address → the Aave reserve it belongs to (pool proxy and the
+// underlying address), which the EVM balance reader needs to accrue the reserve's
+// liquidity index to a block (`readErc20Balances`).
+export function atokenReserveRefsFromRows(rows: AtokenReserveRow[]): Map<string, AtokenReserveRef> {
+  const refs = new Map<string, AtokenReserveRef>()
+  for (const row of rows) {
+    const atoken = row.atoken?.trim().toLowerCase()
+    const poolProxy = row.pool_proxy?.trim().toLowerCase()
+    const assetAddress = row.asset_address?.trim().toLowerCase()
+    if (!atoken || !poolProxy || !assetAddress) continue
+    refs.set(atoken, { poolProxy, assetAddress })
+  }
+  return refs
+}
+
 // The map the money-market anchor snapshot materializes from Aave's initialized
 // reserves. Tiny (one row per reserve) and immutable once a reserve exists, so a
 // read failure keeps the previously loaded map rather than dropping pairings.
 export class AtokenReserveMap {
   private map = new Map<string, number>()
+  private refs = new Map<string, AtokenReserveRef>()
 
   get underlyings(): Map<string, number> {
     return this.map
+  }
+
+  get reserves(): Map<string, AtokenReserveRef> {
+    return this.refs
   }
 
   async refresh(): Promise<void> {
     const client = createClickHouseClient()
     try {
       const res = await client.query({
-        query: `SELECT asset_address, atoken FROM price_data.atoken_reserve_map FINAL`,
+        query: `SELECT asset_address, atoken, pool_proxy FROM price_data.atoken_reserve_map FINAL`,
         format: 'JSONEachRow',
       })
-      const loaded = atokenUnderlyingsFromReserveRows(await res.json<AtokenReserveRow>())
+      const rows = await res.json<AtokenReserveRow>()
+      const loaded = atokenUnderlyingsFromReserveRows(rows)
       if (loaded.size > 0 || this.map.size === 0) this.map = loaded
+      const refs = atokenReserveRefsFromRows(rows)
+      if (refs.size > 0 || this.refs.size === 0) this.refs = refs
     } catch (error) {
       console.warn('[AtokenReserves] Failed to read atoken_reserve_map; keeping the previous mapping', error)
     } finally {

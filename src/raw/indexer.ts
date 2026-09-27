@@ -709,7 +709,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       for (const [, displayId] of lpEquivalences) {
         aaveTokenIds.add(displayId)
       }
-      updateErc20Registry(registry.getErc20Contracts(), aaveTokenIds)
+      updateErc20Registry(registry.getErc20Contracts(), aaveTokenIds, atokenReserves.reserves)
 
       const compositionChanges = compositionCache.processEvents(block.events)
       const refreshFamilies = new Set<PoolFamily>()

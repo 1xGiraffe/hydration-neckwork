@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { atokenEquivalencesFor, lpAliasesFor } from '../../src/registry/tracker.ts'
 import type { AssetMetadata } from '../../src/registry/types.ts'
 import {
+  atokenReserveRefsFromRows,
   atokenUnderlyingsFromReserveRows,
   underlyingAssetIdFromReserveAddress,
 } from '../../src/registry/atokenReserves.ts'
@@ -40,6 +41,21 @@ describe('reserve address decoding', () => {
     ])
     expect(map.get(A_USDC)).toBe(22)
     expect(map.has('0xdead')).toBe(false)
+  })
+
+  // The balance reader accrues an aToken's reserve index from the Pool's storage, so it
+  // needs the pool proxy and the underlying address — including a non-precompile
+  // underlying (HOLLAR) that the id map cannot express.
+  it('maps aToken contracts to their reserve for the balance reader', () => {
+    const refs = atokenReserveRefsFromRows([
+      { asset_address: '0x531A654D1696ED52E7275A8CEDE955E82620F99A', atoken: '0x8C0F3B9602374198974D2B2679D14A386F5B108E', pool_proxy: '0x1B02E051683B5CFAC5929C25E84ADB26ECF87B38' },
+      { asset_address: '0x0000000000000000000000000000000100000016', atoken: A_USDC },
+    ])
+    expect(refs.get('0x8c0f3b9602374198974d2b2679d14a386f5b108e')).toEqual({
+      poolProxy: '0x1b02e051683b5cfac5929c25e84adb26ecf87b38',
+      assetAddress: '0x531a654d1696ed52e7275a8cede955e82620f99a',
+    })
+    expect(refs.has(A_USDC)).toBe(false)
   })
 })
 
