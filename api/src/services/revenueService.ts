@@ -307,6 +307,9 @@ export async function getStakerDistributions(range: RevenueRange): Promise<Stake
   })
 }
 
+/** Accounts per top-account-sums read: ~35 KiB of parameter, well under the server's field cap. */
+export const TOP_ACCOUNT_SUMS_CHUNK = 500
+
 export async function getRevenueDashboard(range: RevenueRange): Promise<RevenueDashboard> {
   return cachedSwr(`revenue:dashboard:${range}`, 60_000, 300_000, async () => {
     const nowSeconds = Math.floor(Date.now() / 1000)
@@ -453,8 +456,13 @@ GROUP BY account`,
     // eventful revenue the LIMIT dropped; without it the combined ranking
     // would compare partial totals. Fetch those accounts' exact cold sums
     // (bounded: tail actors + borrowers + reserve payers), then merge.
+    // The list travels as a URL parameter, which the server caps at
+    // http_max_field_value_size (128 KiB, ~1,800 quoted account ids) — the all-time
+    // range's reserve payers and borrowers alone reach that — so it goes in chunks.
     const missing = [...adds.keys()].filter(account => !top.has(account))
-    if (missing.length > 0) {
+    const sumChunks: string[][] = []
+    for (let i = 0; i < missing.length; i += TOP_ACCOUNT_SUMS_CHUNK) sumChunks.push(missing.slice(i, i + TOP_ACCOUNT_SUMS_CHUNK))
+    const sumRows = await Promise.all(sumChunks.map(async accounts => {
       const sumsRes = await client.query({
         query: `-- rev:dashboard:top-account-sums
 SELECT account, toString(sum(amount_usd)) AS usd
@@ -463,13 +471,14 @@ WHERE ${PROTOCOL_REVENUE_PREDICATE_SQL} AND ${caps}
   AND block_timestamp >= toDateTime('${chTimestamp(rangeStart)}')
   AND account IN {accounts:Array(String)}
 GROUP BY account`,
-        query_params: { accounts: missing },
+        query_params: { accounts },
         format: 'JSONEachRow',
         clickhouse_settings: DECIMAL_STRINGS,
       })
-      for (const row of await sumsRes.json<{ account: string; usd: string }>()) {
-        top.set(row.account, scaledUsd(row.usd))
-      }
+      return sumsRes.json<{ account: string; usd: string }>()
+    }))
+    for (const row of sumRows.flat()) {
+      top.set(row.account, scaledUsd(row.usd))
     }
     for (const [account, usd] of adds) {
       top.set(account, (top.get(account) ?? 0n) + usd)

@@ -433,3 +433,25 @@ describe('getStakerDistributions', () => {
     expect(dist.allTime).toEqual({ hdx: 0, usd: 0 })
   })
 })
+
+describe('top payer sums over many accounts', () => {
+  it('reads the missing accounts in chunks the server\'s parameter cap admits', async () => {
+    vi.setSystemTime(NOW + 5_400_000)
+    const { initRevenueService, getRevenueDashboard, TOP_ACCOUNT_SUMS_CHUNK } = await service()
+    const dayStart = Math.floor((NOW + 5_400_000) / 1000 / 86_400) * 86_400
+    const borrowers = Array.from({ length: 1_201 }, (_, i) => ({ account: `0x${i.toString(16).padStart(64, '0')}`, interest: '1000000000000' }))
+    const { seen, client } = fakeClient({
+      'toString(max(block_timestamp)) AS mark': [{ stream: 'hollar_borrow', mark: '2026-08-14 10:00:00' }],
+      '-- rev:protocol-revenue-windows': [{ stream: 'hollar_borrow', day: '10', week: '10', month: '10', all_time: '10' }],
+      '-- rev:dashboard:buckets': [{ stream: 'hollar_borrow', t: dayStart, usd: '10' }],
+      '-- rev:borrow-weights': borrowers,
+    })
+    initRevenueService(client)
+    await getRevenueDashboard('30d')
+    const calls = seen.filter(x => x.query.includes('-- rev:dashboard:top-account-sums'))
+    // 1,201 ids × ~71 bytes quoted is past the 128 KiB field cap in one parameter.
+    expect(calls).toHaveLength(Math.ceil(1_201 / TOP_ACCOUNT_SUMS_CHUNK))
+    expect(calls.every(c => (c.params.accounts as string[]).length <= TOP_ACCOUNT_SUMS_CHUNK)).toBe(true)
+    expect(calls.flatMap(c => c.params.accounts as string[]).sort()).toEqual(borrowers.map(b => b.account).sort())
+  })
+})
