@@ -169,7 +169,7 @@ const SECURITY_SECTIONS: Record<string, string> = {
 export const UNBOUNDED_PREFIXES = new Set([
   'block', 'extrinsic', 'event', 'dca', 'intent',
   'swap', 'transfer', 'cross-chain', 'add-liquidity', 'remove-liquidity', 'create-pool', 'destroy-pool',
-  'claim-rewards', 'claim-referral-rewards', 'collect-fees', 'rebalance',
+  'claim-rewards', 'claim-referral-rewards', 'collect-fees', 'rebalance', 'compound',
   'lend', 'withdraw', 'borrow', 'repay', 'liquidate', 'staking', 'vote',
   'otc-place', 'otc-pull', 'otc-fill', 'bond-issue', 'bond-redeem',
   'intent-place', 'intent-fill', 'intent-cancel', 'intent-expire', 'intent-dca-trade',
@@ -195,6 +195,7 @@ export const ACTIVITY_PAGES: Record<string, { label: string; about: string }> = 
   'claim-referral-rewards': { label: 'Claim referral rewards', about: 'the referral rewards paid out and who received them' },
   'collect-fees': { label: 'Collect fees', about: 'the fees collected from a liquidity position and who received them' },
   rebalance: { label: 'Rebalance vault', about: 'the vault rebalanced and the liquidity it moved' },
+  compound: { label: 'Compound', about: 'the vault whose positions\' fees were collected and reinvested, and the fees' },
   lend: { label: 'Lend', about: 'the money-market reserve supplied, the amount and the account' },
   withdraw: { label: 'Withdraw', about: 'the money-market reserve withdrawn from, the amount and the account' },
   borrow: { label: 'Borrow', about: 'the money-market reserve borrowed from, the amount and the account' },

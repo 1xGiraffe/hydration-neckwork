@@ -70,6 +70,8 @@ interface V3Vault {
   feesUsd: number | null
   feeSharePct: number | null
   lastRebalanceAt: string | null
+  compounds?: number
+  lastCompoundAt?: string | null
 }
 interface UniswapV3PoolDetail {
   kind: 'uniswapv3'
@@ -475,6 +477,7 @@ function renderV3Detail(d: UniswapV3PoolDetail, ctx: ToolContext, includes: Set<
       ['Vault TVL', formatUsd(d.vault.tvlUsd)],
       ['Depositors', `${formatCount(d.vault.depositors)} · ${formatCount(d.vault.deposits)} deposits, ${formatCount(d.vault.withdrawals)} withdrawals`],
       ['Rebalances', `${formatCount(d.vault.rebalances)}${d.vault.lastRebalanceAt ? ` · last ${relativeAge(d.vault.lastRebalanceAt)}` : ''}`],
+      ['Compounds', d.vault.compounds != null ? `${formatCount(d.vault.compounds)}${d.vault.lastCompoundAt ? ` · last ${relativeAge(d.vault.lastCompoundAt)}` : ''}` : null],
       ['Fees earned', formatUsd(d.vault.feesUsd)],
     ])
     : null

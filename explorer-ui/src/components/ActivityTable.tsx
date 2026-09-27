@@ -132,7 +132,7 @@ export function activitySlug(r: ActivityRow): ActivitySlug {
     case 'trade': return r.dca ? 'dca' : 'swap'
     case 'dca': return 'dca'
     case 'xcm': return 'cross-chain'
-    case 'liquidity': return r.liqAction === 'Remove' ? 'remove-liquidity' : r.liqAction === 'Create' ? 'create-pool' : r.liqAction === 'Destroy' ? 'destroy-pool' : r.liqAction === 'Claim' ? 'claim-rewards' : r.liqAction === 'ClaimReferral' ? 'claim-referral-rewards' : r.liqAction === 'CollectFees' ? 'collect-fees' : r.liqAction === 'Rebalance' ? 'rebalance' : 'add-liquidity'
+    case 'liquidity': return r.liqAction === 'Remove' ? 'remove-liquidity' : r.liqAction === 'Create' ? 'create-pool' : r.liqAction === 'Destroy' ? 'destroy-pool' : r.liqAction === 'Claim' ? 'claim-rewards' : r.liqAction === 'ClaimReferral' ? 'claim-referral-rewards' : r.liqAction === 'CollectFees' ? 'collect-fees' : r.liqAction === 'Rebalance' ? 'rebalance' : r.liqAction === 'Compound' ? 'compound' : 'add-liquidity'
     case 'mm': return MM_SLUG[r.mmAction ?? ''] ?? 'lend'
     case 'staking': return 'staking'
     case 'bond': return r.bondAction === 'Redeem' ? 'bond-redeem' : 'bond-issue'
@@ -203,7 +203,7 @@ export function activityHref(r: ActivityRow, id: string): string {
 const SLUG_LABEL: Record<ActivitySlug, string> = {
   swap: 'Swap', dca: 'DCA', transfer: 'Transfer', 'cross-chain': 'Cross-chain',
   'add-liquidity': 'Add liquidity', 'remove-liquidity': 'Remove liquidity', 'create-pool': 'Create pool', 'destroy-pool': 'Destroy pool', 'claim-rewards': 'Claim rewards', 'claim-referral-rewards': 'Claim referral rewards',
-  'collect-fees': LIQ_LABELS.CollectFees, rebalance: LIQ_LABELS.Rebalance,
+  'collect-fees': LIQ_LABELS.CollectFees, rebalance: LIQ_LABELS.Rebalance, compound: LIQ_LABELS.Compound,
   lend: 'Lend', withdraw: 'Withdraw', borrow: 'Borrow', repay: 'Repay',
   liquidate: 'Liquidate', staking: 'Staking', vote: 'Vote',
   'otc-place': 'OTC place', 'otc-pull': 'OTC pull', 'otc-fill': 'OTC fill',
@@ -218,7 +218,7 @@ export function activityLabel(slug: ActivitySlug): string { return SLUG_LABEL[sl
 export const SLUG_TYPES: Record<ActivitySlug, ActivityRow['type'][]> = {
   swap: ['trade', 'dca'], dca: ['trade', 'dca'], transfer: ['transfer'],
   'cross-chain': ['xcm'], 'add-liquidity': ['liquidity'], 'remove-liquidity': ['liquidity'], 'create-pool': ['liquidity'], 'destroy-pool': ['liquidity'], 'claim-rewards': ['liquidity', 'mm'], 'claim-referral-rewards': ['liquidity'],
-  'collect-fees': ['liquidity'], rebalance: ['liquidity'],
+  'collect-fees': ['liquidity'], rebalance: ['liquidity'], compound: ['liquidity'],
   lend: ['mm'], withdraw: ['mm'], borrow: ['mm'], repay: ['mm'], liquidate: ['mm'],
   staking: ['staking'], vote: ['vote'],
   'otc-place': ['otc'], 'otc-pull': ['otc'], 'otc-fill': ['otc'],

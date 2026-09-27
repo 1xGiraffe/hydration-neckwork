@@ -523,7 +523,11 @@ export function evaluateLargeValue(rows: readonly ActivityRow[], rules: readonly
 // maker repeating themselves rather than size changing hands. A fill realizes the
 // value and is judged like a swap. A DCA-intent placement is a standing order and
 // is judged by dcaStartMatches on its per-hour notional, not here.
+//
+// A liquidity row is never size changing hands, whatever feed hands it over: a vault
+// compound is worth the fees it realized and a deposit is worth what was parked.
 export function largeTradeRowEligible(r: ActivityRow): boolean {
+  if (r.type === 'liquidity') return false
   if (r.type === 'otc') return r.otcAction === 'Fill'
   if (r.type === 'intent') return isIntentFillAction(r.intentAction)
   return true
@@ -936,7 +940,8 @@ export function activityPath(row: ActivityRow): string {
             : row.liqAction === 'Claim' ? 'claim-rewards'
               : row.liqAction === 'ClaimReferral' ? 'claim-referral-rewards'
                 : row.liqAction === 'CollectFees' ? 'collect-fees'
-                  : row.liqAction === 'Rebalance' ? 'rebalance' : 'add-liquidity'
+                  : row.liqAction === 'Rebalance' ? 'rebalance'
+                    : row.liqAction === 'Compound' ? 'compound' : 'add-liquidity'
       case 'mm': return MM_SLUG[row.mmAction ?? ''] ?? 'lend'
       case 'staking': return 'staking'
       case 'bond': return row.bondAction === 'Redeem' ? 'bond-redeem' : 'bond-issue'
@@ -978,6 +983,7 @@ function activityHeadline(row: ActivityRow): string {
   // The concentrated-liquidity acts read as the UI labels them (LIQ_LABELS).
   if (row.type === 'liquidity' && row.liqAction === 'CollectFees') return 'Collect fees'
   if (row.type === 'liquidity' && row.liqAction === 'Rebalance') return 'Rebalance vault'
+  if (row.type === 'liquidity' && row.liqAction === 'Compound') return 'Compound'
   if (row.type === 'liquidity' && row.liqAction) return `${row.liqAction} liquidity`
   if (row.type === 'mm' && row.mmAction) return row.mmAction
   if (row.type === 'otc' && row.otcAction) return `OTC ${row.otcAction.toLowerCase()}`

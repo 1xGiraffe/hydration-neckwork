@@ -363,7 +363,7 @@ export interface ActivityRow {
   voteConviction?: string | null
 
   // liquidity
-  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy' | 'CollectFees' | 'Rebalance'
+  liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy' | 'CollectFees' | 'Rebalance' | 'Compound'
   poolAddress?: string
   v3TokenId?: string
   v3Vault?: string

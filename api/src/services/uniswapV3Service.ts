@@ -134,7 +134,9 @@ export interface V3ClassifyContext {
   ownerOfToken: ReadonlyMap<string, string>
 }
 
-export type V3Action = 'Add' | 'Remove' | 'CollectFees' | 'Rebalance' | 'Create'
+// Compound = a Gamma vault's keeper collecting the fees its positions earned and
+// reinvesting them (Admin.compound → the vault's ZeroBurn per position).
+export type V3Action = 'Add' | 'Remove' | 'CollectFees' | 'Rebalance' | 'Compound' | 'Create'
 
 export interface V3Activity {
   kind: 'swap' | 'liquidity'
@@ -226,6 +228,10 @@ function classifyGroup(rows: V3EventRow[], ctx: V3ClassifyContext): V3Activity[]
   const decreased = new Map<string, { a0: bigint; a1: bigint }>()
   // Same idea for a pool-direct Burn (per owner + range).
   const burned = new Map<string, { a0: bigint; a1: bigint }>()
+  // A vault's ZeroBurn logs in this extrinsic, one per position it poked (base and
+  // limit), and whether the vault also did something a reader names here.
+  const zeroBurns = new Map<string, V3EventRow[]>()
+  const vaultActed = new Set<string>()
 
   for (const r of rows) {
     if (r.kind === 'manager' && ctx.managers.has(r.contract_address)) {
@@ -275,6 +281,11 @@ function classifyGroup(rows: V3EventRow[], ctx: V3ClassifyContext): V3Activity[]
       const pool = poolOf(poolAddr) ?? null
       // The vault's own pool rows are its plumbing whatever it did.
       for (const p of poolRows) if (p.owner === r.contract_address) claimed.add(p)
+      if (r.event_name === 'ZeroBurn') {
+        zeroBurns.set(r.contract_address, [...(zeroBurns.get(r.contract_address) ?? []), r])
+        continue
+      }
+      if (r.event_name === 'Deposit' || r.event_name === 'Withdraw' || r.event_name === 'Rebalance') vaultActed.add(r.contract_address)
       if (r.event_name === 'Deposit' || r.event_name === 'Withdraw') {
         const to = r.counterparty && r.counterparty !== ZERO ? r.counterparty : r.actor
         out.push({
@@ -334,6 +345,27 @@ function classifyGroup(rows: V3EventRow[], ctx: V3ClassifyContext): V3Activity[]
         })
       }
     }
+  }
+  // A compound: the vault's fees realized and put back to work. Gamma pokes every
+  // position (burn(0) + collect, then a ZeroBurn with the fees collected) at the
+  // start of each deposit, withdrawal and rebalance too, and there the poke is that
+  // act's plumbing — it prices the shares or re-ranges with the fees included. Only
+  // an extrinsic whose vault did nothing else is the keeper compounding: ONE act for
+  // the extrinsic whatever the number of positions poked, identified by its first
+  // ZeroBurn, its legs the fees summed (gross: the vault's 1/fee cut to the
+  // Treasury is inside them and is the extrinsic's protocol revenue). The re-mint
+  // that follows is the vault's own pool rows, claimed above.
+  for (const [vault, logs] of zeroBurns) {
+    if (vaultActed.has(vault)) continue
+    const poolAddr = ctx.vaults.get(vault)
+    if (!poolAddr) continue
+    const first = logs[0]
+    const fee0 = logs.reduce((sum, l) => sum + big(l.amount0), 0n)
+    const fee1 = logs.reduce((sum, l) => sum + big(l.amount1), 0n)
+    out.push({
+      kind: 'liquidity', action: 'Compound', ...base(first, poolOf(poolAddr) ?? null), amount0: pos(fee0), amount1: pos(fee1),
+      whoAccountId: null, vault,
+    })
   }
   return out
 }
@@ -469,7 +501,7 @@ const EVENT_COLUMNS = `block_height, event_index, extrinsic_index, toString(bloc
 const ANCHOR_EVENTS: Record<'swap' | 'liquidity', string> = {
   swap: `(kind = 'pool' AND event_name = 'Swap')`,
   liquidity: `((kind = 'manager' AND event_name IN ('IncreaseLiquidity', 'DecreaseLiquidity', 'Collect'))
-    OR (kind = 'vault' AND event_name IN ('Deposit', 'Withdraw', 'Rebalance'))
+    OR (kind = 'vault' AND event_name IN ('Deposit', 'Withdraw', 'Rebalance', 'ZeroBurn'))
     OR (kind = 'pool' AND event_name IN ('Mint', 'Burn', 'Collect')))`,
 }
 
@@ -489,6 +521,12 @@ export interface V3FeedOptions {
   accountsH160?: string[]
   /** Pool addresses to narrow to (a vault's or manager's rows join through their pool). */
   pools?: string[]
+  /**
+   * With `accountsH160`: the blocks holding a vault act no log names (a Rebalance, a
+   * compound) whose extrinsic the scope signed or called — v3UnnamedActBlocks in
+   * explorerService, which resolves each such extrinsic's actor and call target once.
+   */
+  unnamedActBlocks?: readonly number[]
   limit: number
   offset?: number
 }
@@ -560,13 +598,15 @@ export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions
   const venues = opts.accountsH160 ? v3VenuesInScope(registry, opts.accountsH160) : null
   if (opts.accountsH160 && venues) {
     const list = sqlList(opts.accountsH160)
-    // A vault Rebalance names no account at all — the operator signs rebalance() and
-    // the log carries only the vault's new range — so no log predicate can find it for
-    // the operator, while the global feed credits it to the extrinsic's signer. Every
-    // Rebalance is anchored (a handful a day venue-wide) and the caller keeps one only
-    // when that signer — or the contract it called — is in scope (getRecentV3Rows);
-    // without this the operator's own feed never listed an act the home page showed
-    // under its name.
+    // A vault Rebalance or compound names no account at all — the keeper signs
+    // rebalance()/compound() and the logs carry only the vault's range or fees — so no
+    // log predicate can find it for the keeper, while the global feed credits it to
+    // the extrinsic's signer. They are anchored through the blocks whose extrinsic the
+    // scope signed or called (`unnamedActBlocks`), and the caller keeps one only when
+    // that signer — or the contract it called — is in scope (getRecentV3Rows). Not
+    // every such act for every scope: compounds run dozens a day, and anchoring them
+    // all would crowd a newest-first anchor page with other people's acts until an
+    // account's own older ones fell off it.
     //
     // A scoped account that is a venue contract is party to every act on it: the
     // pool's rows are its swaps and the positions and vault deposits in it (the pool
@@ -575,8 +615,11 @@ export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions
       ...(venues.pools.length ? [poolRowsSql(registry, venues.pools, bound)] : []),
       ...(venues.vaults.length || venues.managers.length ? [`contract_address IN (${sqlList([...venues.vaults, ...venues.managers])})`] : []),
     ]
-    where.push(`(actor IN (${list}) OR counterparty IN (${list}) OR owner IN (${list})
-      OR (kind = 'vault' AND event_name = 'Rebalance')
+    const unnamed = opts.unnamedActBlocks?.length
+      ? `
+      OR (kind = 'vault' AND event_name IN ('Rebalance', 'ZeroBurn') AND block_height IN {unnamedBlocks:Array(UInt32)})`
+      : ''
+    where.push(`(actor IN (${list}) OR counterparty IN (${list}) OR owner IN (${list})${unnamed}
       OR (kind = 'manager' AND (contract_address, token_id) IN (
         SELECT contract_address, token_id FROM price_data.uniswap_v3_events
         WHERE kind = 'manager' AND event_name = 'Transfer' AND counterparty IN (${list})))${venueRows.map(sql => `
@@ -588,7 +631,7 @@ export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions
     query: `SELECT block_height, extrinsic_index FROM price_data.uniswap_v3_events FINAL
             WHERE ${where.join(' AND ')}
             ORDER BY block_height DESC, event_index DESC LIMIT {scan:UInt32}`,
-    query_params: { scan }, format: 'JSONEachRow',
+    query_params: { scan, ...(opts.accountsH160 && opts.unnamedActBlocks?.length ? { unnamedBlocks: [...opts.unnamedActBlocks] } : {}) }, format: 'JSONEachRow',
   })
   if (!anchors.length) return []
   const rows = await eventsOfExtrinsics(anchors.map(a => [a.block_height, a.extrinsic_index]))
@@ -624,6 +667,18 @@ async function eventsOfExtrinsics(pairs: [number, number | null][]): Promise<V3E
     }))
   }
   return rows
+}
+
+/** Every extrinsic holding a vault act no log names — a Rebalance, or the ZeroBurn of
+ *  a compound (or of the poke opening a deposit, a withdrawal or a rebalance). */
+export async function v3UnnamedActExtrinsics(): Promise<[number, number][]> {
+  if (!client) return []
+  const rows = await queryRows<{ block_height: number; extrinsic_index: number }>({
+    query: `SELECT DISTINCT block_height, assumeNotNull(extrinsic_index) AS extrinsic_index FROM price_data.uniswap_v3_events
+            WHERE kind = 'vault' AND event_name IN ('Rebalance', 'ZeroBurn') AND extrinsic_index IS NOT NULL`,
+    format: 'JSONEachRow',
+  })
+  return rows.map(r => [Number(r.block_height), Number(r.extrinsic_index)])
 }
 
 /** The acts of one extrinsic (its Activity section) or of a whole block. */
@@ -798,6 +853,10 @@ export interface V3VaultStats {
   lastRebalanceBlock: number | null
   lastRebalanceAt: string | null
   lastRebalanceTick: number | null
+  /** Compounds: extrinsics that collected and reinvested the positions' fees and did nothing else (the feed's Compound acts). */
+  compounds: number
+  lastCompoundBlock: number | null
+  lastCompoundAt: string | null
   /** The divisor of the vault's fee cut: 1/feeDivisor of earned fees goes to the fee recipient. */
   feeDivisor: number | null
   /** Live tick ranges of the vault's positions in the pool, from its most recent mints. */
@@ -819,10 +878,21 @@ export async function v3VaultStats(vault: V3Vault): Promise<V3VaultStats | null>
                 maxIf(block_height, event_name = 'Rebalance') AS last_reb_block,
                 toString(maxIf(block_timestamp, event_name = 'Rebalance')) AS last_reb_at,
                 argMaxIf(tick, (block_height, event_index), event_name = 'Rebalance') AS last_reb_tick,
+                uniqExactIf((block_height, extrinsic_index), is_compound) AS compounds,
+                maxIf(block_height, is_compound) AS last_compound_block,
+                toString(maxIf(block_timestamp, is_compound)) AS last_compound_at,
                 toString(argMaxIf(aux0, (block_height, event_index), event_name = 'SetFee')) AS fee_divisor,
                 countIf(event_name = 'SetFee') AS fee_sets
-              FROM price_data.uniswap_v3_events FINAL
-              WHERE kind = 'vault' AND contract_address = {vault:String}`,
+              FROM (
+                -- A ZeroBurn is a compound unless it opened one of the vault's named acts
+                -- (classifyV3Events: there it is that act's plumbing).
+                SELECT *, event_name = 'ZeroBurn' AND extrinsic_index IS NOT NULL
+                          AND (block_height, assumeNotNull(extrinsic_index)) NOT IN (
+                            SELECT block_height, assumeNotNull(extrinsic_index) FROM price_data.uniswap_v3_events
+                            WHERE kind = 'vault' AND contract_address = {vault:String} AND extrinsic_index IS NOT NULL
+                              AND event_name IN ('Deposit', 'Withdraw', 'Rebalance')) AS is_compound
+                FROM price_data.uniswap_v3_events FINAL
+                WHERE kind = 'vault' AND contract_address = {vault:String})`,
       query_params: { vault: vault.address }, format: 'JSONEachRow',
     }),
     v3VaultTotals(client, [vault.address]),
@@ -854,6 +924,9 @@ export async function v3VaultStats(vault: V3Vault): Promise<V3VaultStats | null>
     lastRebalanceBlock: rebalances > 0 ? Number(r.last_reb_block) : null,
     lastRebalanceAt: rebalances > 0 ? String(r.last_reb_at) : null,
     lastRebalanceTick: rebalances > 0 ? Number(r.last_reb_tick) : null,
+    compounds: Number(r.compounds ?? 0),
+    lastCompoundBlock: Number(r.compounds ?? 0) > 0 ? Number(r.last_compound_block) : null,
+    lastCompoundAt: Number(r.compounds ?? 0) > 0 ? String(r.last_compound_at) : null,
     feeDivisor: Number(r.fee_sets) > 0 ? Number(r.fee_divisor) : null,
     ranges: rangeRows.map(x => ({ tickLower: Number(x.tick_lower), tickUpper: Number(x.tick_upper), liquidity: String(x.liquidity) })),
   }

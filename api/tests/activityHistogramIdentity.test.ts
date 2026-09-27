@@ -34,7 +34,18 @@ describe('daily activity histogram identity', () => {
     const at = explorerService.indexOf('FROM price_data.activity_histogram_events')
     const query = explorerService.slice(explorerService.lastIndexOf('query = `', at), at)
 
-    expect(query).toContain('uniqExact(tuple(block_height, event_name IN (${HISTOGRAM_SWAP_EVENTS_SQL}), activity_index))')
+    expect(query).toContain('uniqExact(${histogramIdentitySql()})')
+    const def = explorerService.slice(explorerService.indexOf('export function histogramIdentitySql'))
+    expect(def.slice(0, def.indexOf('\n}'))).toContain("tuple(block_height, multiIf(event_name IN (${HISTOGRAM_SWAP_EVENTS_SQL}), 1, event_name = '${V3_COMPOUND_HISTOGRAM_EVENT}', 2, 0), activity_index)")
+  })
+
+  // A compound row carries its extrinsic too (uniswap_v3_compound_histogram_mv), in a
+  // space of its own: extrinsic 2's compound is not event 2 of the block.
+  it('keys a compound on its extrinsic in the MV that writes it', () => {
+    const v3 = readFileSync(new URL('../../clickhouse/schema/010_uniswap_v3.sql', import.meta.url), 'utf8')
+    const mv = v3.slice(v3.indexOf('CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.uniswap_v3_compound_histogram_mv'))
+    expect(mv).toContain("assumeNotNull(extrinsic_index) AS activity_index, 'Gamma.Compound' AS event_name")
+    expect(explorerService).toContain("export const V3_COMPOUND_HISTOGRAM_EVENT = 'Gamma.Compound'")
   })
 
   it('mirrors the materialized view that writes activity_index', () => {
