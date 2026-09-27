@@ -32,8 +32,13 @@ describe('nonPlumbingTransferLegSql', () => {
   // The bug: a blanket `0x6d6f646c…` module exclusion drops treasury payouts, so
   // a treasury transfer shown on an account page can't be re-derived from block
   // activity and its detail page 404s. Genuine pallet-pot payouts must stay.
-  it('keeps genuine pallet-pot payouts — no blanket module exclusion, treasury visible', () => {
+  it('keeps genuine pallet-pot payouts — no module-prefix exclusion, the treasury pays out visibly', () => {
     expect(sql).not.toContain("LIKE '0x6d6f646c%'")
-    expect(sql).not.toContain(TREASURY)
+    expect(sql).not.toContain("'^0x(6d6f646c")
+    // The treasury is named once, as the RECEIVER of a hook-phase leg (a DCA
+    // execution's keeper fee — the hook half of the treasury fee rule, 9.2M rows the
+    // feeds would otherwise page through and drop); never as a sender.
+    expect(sql.split(TREASURY).length - 1).toBe(1)
+    expect(sql).toContain(`AND NOT (JSONExtractString(args_json,'to') = '${TREASURY}' AND extrinsic_index IS NULL)`)
   })
 })
