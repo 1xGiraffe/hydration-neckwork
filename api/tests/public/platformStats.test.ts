@@ -255,6 +255,20 @@ describe('GET /v1/stats/platform', () => {
     expect(pooledATokenUsd([{ kind: 'stableswap', poolId: 1, tvlUsd: 5, composition: [leg(5, 5)] }])).toBe(0)
   })
 
+  // GETH (420) is the aToken over 2-Pool-GETH (4200), a Hydrated wrapper the price
+  // alias leaves out (the share prices off it). The Omnipool's GETH leg is a claim
+  // on reserve 4200's supply, which moneyMarketFoldedUsd already removed as share
+  // collateral — so it is the pool-held receipt this fold exists for, and missing it
+  // counted pool 4200's liquidity twice in the headline.
+  it('folds a pool-held Hydrated wrapper aToken like any other', async () => {
+    const { pooledATokenUsd } = await import('../../src/public/services/platformStats.ts')
+    const { ATOKEN_RESERVE_ID } = await import('../../src/services/explorerAssets.ts')
+    ATOKEN_RESERVE_ID[420] = 4200
+    try {
+      expect(pooledATokenUsd([{ kind: 'omnipool', poolId: null, tvlUsd: 10, composition: [leg(420, 3), leg(5, 7)] }])).toBe(3)
+    } finally { delete ATOKEN_RESERVE_ID[420] }
+  })
+
   it('balances the conservation equation to the published cent', async () => {
     const { tvlComponents, foldedPlatformTvl } = await import('../../src/public/services/platformStats.ts')
     const { formatUsd, decimalToScaled } = await import('../../src/public/services/accountBalances.ts')

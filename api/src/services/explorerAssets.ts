@@ -132,9 +132,11 @@ async function discoverATokenUnderlyings(client: ClickHouseClient, rows: readonl
     if (underlyingId != null && underlyingId !== aTokenId && isStableswapShareToken(underlyingId) && MM_MARKETS.some(m => m.key === reserve.market_key)) {
       SHARE_WRAPPER[underlyingId] = { aTokenId, marketKey: reserve.market_key }
     }
+    if (underlyingId == null || underlyingId === aTokenId) continue
+    // The receipt fact, recorded before any alias decision below skips the pair.
+    if (ATOKEN_RESERVE_ID[aTokenId] == null) ATOKEN_RESERVE_ID[aTokenId] = underlyingId
     // A hand-written pairing wins: it encodes a direction the map cannot.
     if (ATOKEN_UNDERLYING_ID[aTokenId] != null) continue
-    if (underlyingId == null || underlyingId === aTokenId) continue
     // Never invert an alias that already runs the other way. The map calls
     // 2-Pool-GDOT the reserve of GDOT, while the share table prices the pool share
     // OFF GDOT; taking both would alias the pair in a cycle, and priceAssetId would
@@ -293,6 +295,23 @@ export const ATOKEN_UNDERLYING_ID: Record<number, number> = {
   67: 670,        // GIGAHDX→ stHDX (the gigahdx market's aToken — HDX staking receipt)
   55: 550,        // BIL    → uBIL (the bil market's aToken — Brazilian invoice receivables)
   ...envIdMap('EXPLORER_EXTRA_ATOKEN_UNDERLYING'),
+}
+
+// EVERY registry aToken → the reserve asset it is a receipt for, whichever way its
+// price runs. ATOKEN_UNDERLYING_ID above is the PRICE/DISPLAY direction and so leaves
+// out the wrappers a pool share prices off — the Hydrated pools' GDOT, GETH, GSOL,
+// HUSDC, HUSDT, HUSDS, HUSDe and HEURC, whose share (2-Pool-GDOT, …) displays as the
+// wrapper (SHARE_TOKEN_UNDERLYING_ID) — because aliasing both ways would cycle. Those
+// ARE aTokens all the same: rebasing receipts in EVM storage whose value is a
+// money-market supply. So a question about the receipt itself ("does a pool leg sit
+// in the money market", "is this pallet row a receipt") reads this map; a price or
+// display lookup, and the share-fold machinery that owns the wrappers' holders and
+// supply, keep ATOKEN_UNDERLYING_ID. Seeded with the hand-written pairs and completed
+// from atoken_reserve_map at every registry load (discoverATokenUnderlyings), so a
+// Hydrated pool opened tomorrow is recognised with no code change.
+export const ATOKEN_RESERVE_ID: Record<number, number> = { ...ATOKEN_UNDERLYING_ID }
+export function isMoneyMarketAToken(assetId: number): boolean {
+  return ATOKEN_RESERVE_ID[assetId] != null
 }
 
 // Money-market reserve contracts that aren't the standard ERC-20 precompile (HOLLAR).

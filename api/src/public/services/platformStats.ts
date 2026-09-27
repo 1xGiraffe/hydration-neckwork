@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cachedSwr } from '../../services/cache.ts'
-import { ATOKEN_UNDERLYING_ID } from '../../services/explorerAssets.ts'
+import { isMoneyMarketAToken } from '../../services/explorerAssets.ts'
 import { getPoolsIndex } from '../../services/poolService.ts'
 import { protocolRevenueWindows, revenueColdMarks, revenueTailHours, revenueTailRows } from '../../services/revenueStreams.ts'
 import { renderUsd } from '../../services/valuation.ts'
@@ -231,15 +231,18 @@ export function poolShareAssetIds(pools: FoldablePool[]): Set<number> {
  * leg read here is one that WAS added (measured live: zero unpriced legs inside
  * priced pools, which is poolService's rule restated as data).
  *
- * `ATOKEN_UNDERLYING_ID` is the registry's own aToken list, so a newly listed
- * aToken folds without a deploy — the same property `poolShareAssetIds` has.
+ * `isMoneyMarketAToken` is every registry aToken the reserve map names — the
+ * Hydrated wrappers (GETH, GSOL in the Omnipool) included, whose value is inside
+ * `moneyMarketSupplyUsd` as their share reserve's supply exactly like aDOT's — so a
+ * newly listed aToken folds without a deploy, the same property
+ * `poolShareAssetIds` has.
  */
 export function pooledATokenUsd(pools: FoldablePool[]): number {
   let total = 0
   for (const pool of pools) {
     if (pool.tvlUsd == null) continue
     for (const leg of pool.composition ?? []) {
-      if (ATOKEN_UNDERLYING_ID[leg.asset.assetId] != null) total += leg.usd ?? 0
+      if (isMoneyMarketAToken(leg.asset.assetId)) total += leg.usd ?? 0
     }
   }
   return total
