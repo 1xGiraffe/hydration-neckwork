@@ -454,10 +454,11 @@ LIMIT 10`,
     // weights the account_revenue job uses, with the weights window ending at
     // the stream's cold mark — the last booked hour — so a borrower who only
     // opened debt after the mark takes no share of interest booked before
-    // they borrowed. asset_reserve (no mint booked since
-    // 2026-06-25) joins from account_revenue for months FULLY inside the
-    // range — exact for "all", and a mint in a partial boundary month simply
-    // stays out of the ranking rather than being time-scaled onto payers.
+    // they borrowed. asset_reserve joins from account_revenue for months
+    // FULLY inside the range — the range ends now, so the live month counts
+    // once it starts inside it — exact for "all", and a mint in a month that
+    // began before the range simply stays out of the ranking rather than
+    // being time-scaled onto payers.
     const hollarRangeUsd = rangeTotals.get('hollar_borrow') ?? 0n
     if (hollarRangeUsd > 0n) {
       const weightsRes = await client.query({
@@ -479,18 +480,12 @@ LIMIT 10`,
       for (const [account, usd] of distributeUsd1e12(hollarRangeUsd, weights)) addTop(account, usd)
     }
     if ((rangeTotals.get('asset_reserve') ?? 0n) > 0n) {
-      const firstFullMonth = firstMonthInside
-      const lastFullMonth = (s: number): number => {
-        const d = new Date(s * 1000)
-        const prev = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) - 1)
-        return Number(`${prev.getUTCFullYear()}${String(prev.getUTCMonth() + 1).padStart(2, '0')}`)
-      }
       const reserveRes = await client.query({
         query: `-- rev:dashboard:reserve-payers
 SELECT account, toString(sum(revenue_usd)) AS usd
 FROM price_data.account_revenue
 WHERE stream = 'asset_reserve' AND account != ''
-  AND month >= ${firstFullMonth(Math.max(rangeStart, 0))} AND month <= ${lastFullMonth(nowSeconds)}
+  AND month >= ${firstMonthInside(Math.max(rangeStart, 0))}
 GROUP BY account`,
         format: 'JSONEachRow',
         clickhouse_settings: DECIMAL_STRINGS,

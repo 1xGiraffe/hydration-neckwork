@@ -477,6 +477,27 @@ describe('uniswap v3 realization shares in the payer ranking', () => {
   })
 })
 
+describe('reserve mints in the payer ranking', () => {
+  it('counts the live month\'s reserve payers, since the range ends now', async () => {
+    vi.setSystemTime(NOW + 6_300_000)
+    const { initRevenueService, getRevenueDashboard } = await service()
+    const monthStart = Date.UTC(2026, 7, 1) / 1000
+    const { seen, client } = fakeClient({
+      'toString(max(block_timestamp)) AS mark': [{ stream: 'asset_reserve', mark: '2026-08-14 10:00:00' }],
+      '-- rev:protocol-revenue-windows': [{ stream: 'asset_reserve', day: '3', week: '3', month: '3', all_time: '3' }],
+      '-- rev:dashboard:buckets': [{ stream: 'asset_reserve', t: monthStart, usd: '3' }],
+      '-- rev:dashboard:reserve-payers': [{ account: ACCOUNT_B, usd: '3' }],
+    })
+    initRevenueService(client)
+    const dash = await getRevenueDashboard('all')
+    expect(new Map(dash.topAccounts.map(r => [r.account.accountId, r.usd])).get(ACCOUNT_B)).toBeCloseTo(3, 9)
+    const sql = seen.find(x => x.query.includes('-- rev:dashboard:reserve-payers'))!.query
+    expect(sql).toContain('month >= 197001')
+    // No upper month bound: the live month (202608 at the frozen clock) is inside the range.
+    expect(sql).not.toContain('month <=')
+  })
+})
+
 describe('top payer sums over many accounts', () => {
   it('reads the missing accounts in chunks the server\'s parameter cap admits', async () => {
     vi.setSystemTime(NOW + 5_400_000)
