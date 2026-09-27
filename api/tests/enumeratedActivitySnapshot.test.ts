@@ -211,7 +211,8 @@ describe('the prewarm is bounded by demand as well as by time', () => {
     expect(sites(/prewarmHotActivitySnapshots\(\)/g)).toBe(2)   // definition + one call
     const prewarm = body('async function prewarmAccountDirectoryUncached')
     expect(prewarm).toContain('await prewarmHotActivitySnapshots()')
-    expect(prewarm.indexOf('prewarmHotActivitySnapshots')).toBeGreaterThan(prewarm.indexOf('refreshAccountsPage(50, 50'))
+    expect(prewarm).toContain('refreshAccountsPage(offset, ACCOUNT_PAGE_BLOCK')
+    expect(prewarm.indexOf('prewarmHotActivitySnapshots')).toBeGreaterThan(prewarm.indexOf('refreshAccountsPage(offset, ACCOUNT_PAGE_BLOCK'))
     expect(explorerService).toContain('accountsPrewarmTimer = setInterval(() => { void prewarmAccountDirectory().catch(() => {}) }, 5 * 60_000)')
   })
 })
