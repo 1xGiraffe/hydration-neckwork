@@ -81,14 +81,23 @@ export function walletBalanceRows(
   return rows
 }
 
-// The sort-key ranges that hold every AccountId32 whose first 20 bytes are one
-// of these H160s. Each input must already be a validated `0x` + 40 lower-case
-// hex digits, so the bounds are literal and unambiguous.
-export function truncationRangesSql(h160s: string[]): string {
-  return h160s
-    .map(h => `(b.account_id >= '${h}${'0'.repeat(24)}' AND b.account_id <= '${h}${'f'.repeat(24)}')`)
-    .join(' OR ')
-}
+// Every balance-holding substrate account whose first 20 bytes are one of the
+// `{evms:Array(String)}` H160s (each a validated `0x` + 40 lower-case hex digits).
+// A truncated substrate account IS its H160 followed by 12 more bytes; account ids
+// are stored as lower-case 66-character hex (normalizeAccountId in the raw
+// indexer), so its first 42 characters are exactly the H160. One hash-set `IN`
+// per row reads the table's ~730k keys in ~15 ms. Per-candidate sort-key ranges
+// are the wrong shape here: the ~1.4k candidates land in most of the table's
+// granules, so they prune nothing, and their OR of ~2.9k string comparisons is an
+// expression ClickHouse JIT-compiles — up to 89 s under the server's global
+// compiler lock, stalling every other query that compiles an expression
+// meanwhile. The ETH-prefixed EVM form is excluded — it is the fallback anchor,
+// not a substrate account.
+export const TRUNCATED_SUBSTRATE_ACCOUNTS_SQL = `SELECT DISTINCT concat('0x', substring(b.account_id, 3, 40)) AS evm, b.account_id AS account_id
+                FROM price_data.account_asset_latest_balances AS b
+                WHERE length(b.account_id) = 66
+                  AND substring(b.account_id, 1, 42) IN {evms:Array(String)}
+                  AND substring(b.account_id, 3, 8) != '45544800'`
 
 // Refresh candidates are every address that ever appeared in a Transfer log of
 // the backing contract (~1.2k for HOLLAR); each H160 is anchored to its
@@ -119,18 +128,8 @@ async function refresh(): Promise<void> {
         query_params: { evms: h160s }, format: 'JSONEachRow',
       }),
       client.query({
-        // A truncated substrate account IS its H160 followed by 12 more bytes, so
-        // each candidate is one contiguous range of the table's sort key
-        // (ORDER BY account_id, asset_id). Expressing it that way lets ClickHouse
-        // read only those ranges; the equivalent `concat(substring(account_id…))
-        // IN (…)` predicate prunes nothing and reads the whole table on every
-        // refresh cycle. Account ids are stored lower-case hex (normalizeAccountId
-        // in the raw indexer), which is what makes a plain string range exact.
-        query: `SELECT DISTINCT concat('0x', substring(b.account_id, 3, 40)) AS evm, b.account_id AS account_id
-                FROM price_data.account_asset_latest_balances AS b
-                WHERE (${truncationRangesSql(h160s)})
-                  AND substring(b.account_id, 3, 8) != '45544800'`,
-        format: 'JSONEachRow',
+        query: TRUNCATED_SUBSTRATE_ACCOUNTS_SQL,
+        query_params: { evms: h160s }, format: 'JSONEachRow',
       }),
     ])
     const anchor = new Map<string, string>()
