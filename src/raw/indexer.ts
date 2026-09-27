@@ -20,6 +20,7 @@ import {
   detectPoolAffectingSetStorage,
   getOmnipoolAccount,
   getStableswapPoolAccount,
+  poolPalletEventFamily,
   readOmnipoolState,
   readStableswapState,
   readXYKState,
@@ -768,6 +769,8 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
             }
           }
         }
+        const palletFamily = poolPalletEventFamily(event)
+        if (palletFamily != null) refreshFamilies.add(palletFamily)
         addSwapFamilies(event, specVersion, refreshFamilies, () => {
           forceAllPoolFamilies = true
         })
