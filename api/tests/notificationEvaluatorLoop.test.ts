@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
-  cursorKey, evaluatorCounters, evaluatorCursors, initEvaluator, notificationIdFor,
+  cursorKey, evaluatorCounters, evaluatorCursors, evaluatorStatus, initEvaluator, notificationIdFor,
   MAX_OUTBOUND_SENDS, resetEvaluatorForTests, runEvaluatorTick, startNotificationEvaluator,
   stopNotificationEvaluator,
 } from '../src/notifications/evaluator.ts'
@@ -134,6 +134,29 @@ describe('evaluator cursor', () => {
     initEvaluator(broken as unknown as FakeClient)
     await expect(runEvaluatorTick()).resolves.toBeUndefined()
     expect(evaluatorCounters().errors).toBeGreaterThan(0)
+  })
+
+  // The status surface is how a stuck lane is seen at all: its cursor stops while
+  // the head the ticks read keeps moving.
+  it('reports each lane\'s gap to the live head, so a lane that stopped advancing shows', async () => {
+    await watchOmnipool()
+    expect(evaluatorStatus().lastTickAt).toBeNull()
+    await runEvaluatorTick()                       // seeds at 1000
+    const lane = () => evaluatorStatus().lanes.find(l => l.kind === 'event')!
+    expect(lane()).toEqual({ kind: 'event', rules: 1, cursor: 1_000, behind: 0 })
+    expect(evaluatorStatus().liveHead).toBe(1_000)
+    expect(evaluatorStatus().lastTickAt).not.toBeNull()
+    expect(evaluatorStatus().lanes.find(l => l.kind === 'large-trade')).toEqual({ kind: 'large-trade', rules: 0, cursor: null, behind: null })
+
+    setHead(1_250)
+    const sourceDown = { ...client, query: async (q: { query: string }) => {
+      if (q.query.includes('raw_ingestion_state')) return client.query(q as never)
+      throw new Error('source is down')
+    } }
+    initEvaluator(sourceDown as unknown as FakeClient)
+    await runEvaluatorTick()
+    expect(lane()).toEqual({ kind: 'event', rules: 1, cursor: 1_000, behind: 250 })
+    expect(evaluatorStatus().counters.errors).toBeGreaterThan(0)
   })
 
   // Delivery is at-least-once within the clamp: a lane that threw has not seen
