@@ -40,7 +40,7 @@ import { synthesizeNestedCallRows, type EvmExecution, type RuntimeCallDecoder } 
 import { createClickHouseClient } from '../db/client.js'
 import { minutesFromEnvironment } from '../util/env.js'
 import { MS_PER_MINUTE, crossedChainTimeBoundary } from '../util/chainTimeCadence.js'
-import { retainsSnapshotAtHeight, snapshotEveryNBlocksFromEnvironment } from './snapshotCadence.js'
+import { isMvSnapshotGridHeight, retainsSnapshotAtHeight, snapshotEveryNBlocksFromEnvironment } from './snapshotCadence.js'
 import { fetchChainHead, fetchFinalizedHead } from '../rpc/head.js'
 import type {
   RawBlockRow,
@@ -717,7 +717,12 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       if (compositionChanges.omnipoolChanged) refreshFamilies.add('omnipool')
       if (compositionChanges.xykChanged) refreshFamilies.add('xyk')
       if (compositionChanges.stableswapChanged) refreshFamilies.add('stableswap')
-      let forceAllPoolFamilies = currentState == null || specChanged
+      // A pool-history grid height is always read whole: the reused state carries
+      // what the last refresh saw, and some fields move every block with no event —
+      // an aToken leg accrues its reserve's interest, a stableswap ramp steps its
+      // amplification — so a reused grid row would sample the refresh block's values
+      // into the history tables, not this block's. One full read per grid step.
+      let forceAllPoolFamilies = currentState == null || specChanged || isMvSnapshotGridHeight(blockHeight)
 
       const hasSetStorageAffectingPools = detectPoolAffectingSetStorage(block.calls)
       if (hasSetStorageAffectingPools) {
