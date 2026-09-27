@@ -187,3 +187,61 @@ describe('the demand-driven half of the activity pool', () => {
     expect(body).not.toContain('directoryPoolGkeys.push')
   })
 })
+
+// A stored total whose row has left both pools is still in the swept table and still
+// rendered wherever the directory shows that row, so it must keep being recounted — or
+// be dropped. Carried forward untouched, one read 146 against a live 226 a month on.
+describe('carried-forward activity totals', () => {
+  const H = 3_600_000
+  const ACC = (b: string) => '0x' + b.repeat(32)
+  const P = ACC('01'), Q = ACC('02'), X = ACC('0a'), Y = ACC('0b'), Z = ACC('0c')
+  const entry = (gkey: string, ageH: number) => ({ gkey, total: 1, complete: true, countedAt: String(ageH) })
+  const boardOf = (...list: ReturnType<typeof entry>[]) => new Map(list.map(e => [e.gkey, e]))
+  // Ages in hours stand in for timestamps; an entry that is absent has never been counted.
+  const ageOf = (e: { countedAt?: string } | undefined) => (e?.countedAt == null ? Infinity : Number(e.countedAt) * H)
+  const self = (account: string) => account
+  const noTag = () => null
+
+  it('recounts a stale carried entry from the budget the pools leave over, pool first', async () => {
+    const { activityLeaderboardSchedule } = await import('../src/services/explorerService.ts')
+    const board = boardOf(entry(P, 13), entry(Q, 1), entry(X, 20), entry(Y, 700))
+    const { due, dropped } = activityLeaderboardSchedule([{ account: P, refs: 9 }, { account: Q, refs: 8 }], board, self, noTag, ageOf, 3)
+    // P is a stale pool member; Q is fresh. Y (700 h) is older than X, so it goes first.
+    expect(due.map(([gkey]) => gkey)).toEqual([P, Y, X])
+    expect(dropped).toEqual([])
+  })
+
+  it('never lets a carried entry take a pool member\'s count', async () => {
+    const { activityLeaderboardSchedule } = await import('../src/services/explorerService.ts')
+    const board = boardOf(entry(P, 13), entry(Q, 13), entry(X, 20))
+    const { due } = activityLeaderboardSchedule([{ account: P, refs: 9 }, { account: Q, refs: 8 }], board, self, noTag, ageOf, 2)
+    expect(due.map(([gkey]) => gkey).sort()).toEqual([P, Q].sort())
+  })
+
+  it('drops a carried entry the budget cannot reach once it is past the carried bound, never a fresh one', async () => {
+    const { activityLeaderboardSchedule } = await import('../src/services/explorerService.ts')
+    const board = boardOf(entry(X, 700), entry(Y, 40), entry(Z, 20))
+    const { due, dropped } = activityLeaderboardSchedule([], board, self, noTag, ageOf, 1)
+    expect(due.map(([gkey]) => gkey)).toEqual([X])
+    // Y is 40 h old (past 36 h) and was not reached; Z is stale but still inside the bound.
+    expect(dropped).toEqual([Y])
+  })
+
+  it('counts a carried tag through a member, and drops a key that no longer names its own row', async () => {
+    const { activityLeaderboardSchedule } = await import('../src/services/explorerService.ts')
+    const board = boardOf(entry('treasury', 20), entry('ghost', 20), entry(X, 20))
+    // X has since been tagged, so the directory groups it under 'treasury' now.
+    const gkeyOf = (account: string) => (account === X || account === Z ? 'treasury' : account)
+    const memberOfTag = (tagId: string) => (tagId === 'treasury' ? Z : null)
+    const { due, dropped } = activityLeaderboardSchedule([], board, gkeyOf, memberOfTag, ageOf, 5)
+    expect(due).toEqual([['treasury', { account: Z, refs: 0 }]])
+    expect(dropped.sort()).toEqual(['ghost', X].sort())
+  })
+
+  it('leaves the table only through the drop, and only drops what the delete removed', () => {
+    const at = explorerService.indexOf('async function refreshActivityLeaderboardUncached')
+    const body = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
+    expect(body).toContain('activityLeaderboardSchedule(')
+    expect(body).toContain('if (dropped.length && await dropActivityTotals(dropped))')
+  })
+})
