@@ -1209,6 +1209,10 @@ export function backfillAllocationMints(
 // and holder-age bands. ~11M dense rows, ~5s — computed once per cache TTL.
 // account_balance_weekly's balance_state argMax picks each week's LAST
 // observation, so a within-week round trip collapses to its closing state.
+// One month's change in the pallet's TotalLocked over staking_activity rows — see
+// the staked series in loadStructure for why exactly these three flows.
+export const GIGAHDX_LOCKED_DELTA_SQL = `sumIf(toFloat64OrZero(JSONExtractString(args_json, 'amount')), event_name IN ('GigaHdx.Staked', 'GigaHdx.YieldRealized'))
+            - sumIf(toFloat64OrZero(JSONExtractString(args_json, 'payout')), event_name = 'GigaHdx.Unstaked')`
 async function loadStructure(): Promise<HdxStructure> {
   return cachedSwr('explorer:hdx-structure:model:2', 3_600_000, 48 * 3_600_000, async () => {
     // USER accounts only (no modl, no pool/Kraken custody), balances as sorted
@@ -1385,10 +1389,16 @@ async function loadStructure(): Promise<HdxStructure> {
     const monthsSql = `arrayMap(i -> toLastDayOfMonth(addMonths(toDate('2022-07-01'), i)),
       range(toUInt64(dateDiff('month', toDate('2022-07-01'), today()) + 1)))`
     // Staking sinks, cumulative per month. Classic staking uses its lock; the
-    // GigaHdx migration DOUBLE-EMITS GigaHdx.Staked next to MigratedFromLegacy,
-    // so only Staked is summed (counting both overcounts by ~1B) while the
-    // matching classic ForceUnstaked drains the classic side — the migration
-    // then reads as a handoff between the two bands, not new stake.
+    // GIGAHDX band is the pallet's TotalLocked, which is exactly
+    // Σ Staked.amount + Σ YieldRealized.amount − Σ Unstaked.payout (the flow sum
+    // gigahdx_stake_events documents; equal to storage at the head). A migration
+    // DOUBLE-EMITS GigaHdx.Staked next to MigratedFromLegacy, and so does a
+    // cancelled unstake next to UnstakeCancelled, so only Staked is summed —
+    // counting either twin overcounts — while the matching classic ForceUnstaked
+    // drains the classic side, so the migration reads as a handoff between the
+    // two bands, not new stake. YieldRealized moves the gigahdx! pot's yield into
+    // the staker's lock, and the Unstaked payout later releases it with the rest,
+    // so leaving it out drifts the band low by every realization.
     const stakedQuery = client.query({
       query: `
         SELECT toString(s.m) AS m,
@@ -1399,9 +1409,8 @@ async function loadStructure(): Promise<HdxStructure> {
             sumIf(toFloat64OrZero(JSONExtractString(args_json, 'stake')), event_name IN ('Staking.PositionCreated', 'Staking.StakeAdded'))
             - sumIf(toFloat64OrZero(JSONExtractString(args_json, 'unlockedStake')), event_name = 'Staking.Unstaked')
             - sumIf(toFloat64OrZero(JSONExtractString(args_json, 'stake')), event_name = 'Staking.ForceUnstaked') AS classic_delta,
-            sumIf(toFloat64OrZero(JSONExtractString(args_json, 'amount')), event_name IN ('GigaHdx.Staked', 'GigaHdx.UnstakeCancelled'))
-            - sumIf(toFloat64OrZero(JSONExtractString(args_json, 'payout')), event_name = 'GigaHdx.Unstaked') AS giga_delta
-          FROM price_data.staking_activity
+            ${GIGAHDX_LOCKED_DELTA_SQL} AS giga_delta
+          FROM price_data.staking_activity FINAL
           GROUP BY m
         ) AS s ORDER BY s.m`,
       format: 'JSONEachRow',
