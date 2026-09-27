@@ -310,6 +310,60 @@ export async function getStakerDistributions(range: RevenueRange): Promise<Stake
 /** Accounts per top-account-sums read: ~35 KiB of parameter, well under the server's field cap. */
 export const TOP_ACCOUNT_SUMS_CHUNK = 500
 
+/** The first calendar month (YYYYMM) that starts at or after `s`. */
+export function firstMonthInside(s: number): number {
+  const d = new Date(s * 1000)
+  const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / 1000
+  const next = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1))
+  return s <= monthStart ? Number(`${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}`)
+    : Number(`${next.getUTCFullYear()}${String(next.getUTCMonth() + 1).padStart(2, '0')}`)
+}
+
+/**
+ * Each swapper's share of the Uniswap v3 vault realizations from `fromMonth`
+ * on: account_revenue's uniswap_v3_fee row (accrued + realization share, one
+ * key) less the account's accrued rows in revenue_events for the same month.
+ * Only months whose account_revenue build is at least as new as their
+ * revenue_events publication take part — the two halves then come from one
+ * input, and the difference is exactly the share the job distributed.
+ */
+export function uniswapV3RealizationPayersSql(fromMonth: number): string {
+  return `-- rev:dashboard:v3-realization-payers
+WITH months AS (
+  SELECT a.month AS month
+  FROM (
+    SELECT month, max(computed_at) AS built
+    FROM price_data.account_revenue
+    WHERE stream = 'uniswap_v3_fee' AND month >= ${fromMonth}
+    GROUP BY month
+  ) AS a
+  INNER JOIN (
+    -- Exactly the computed_by_partition projection's shape, so this reads it
+    -- rather than every row's timestamp.
+    SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS published
+    FROM price_data.revenue_events
+    GROUP BY p
+  ) AS r ON r.p = a.month
+  WHERE a.built >= r.published
+)
+SELECT account, toString(sum(part)) AS usd
+FROM (
+  SELECT account, sum(revenue_usd) AS part
+  FROM price_data.account_revenue
+  WHERE stream = 'uniswap_v3_fee' AND account != '' AND month IN (SELECT month FROM months)
+  GROUP BY account
+  UNION ALL
+  SELECT account, -sum(amount_usd) AS part
+  FROM price_data.revenue_events
+  WHERE stream = 'uniswap_v3_fee' AND dest = 'accrued' AND account != ''
+    AND ${PROTOCOL_REVENUE_PREDICATE_SQL}
+    AND toUInt32(toYYYYMM(block_timestamp)) IN (SELECT month FROM months)
+  GROUP BY account
+)
+GROUP BY account
+HAVING sum(part) > 0`
+}
+
 export async function getRevenueDashboard(range: RevenueRange): Promise<RevenueDashboard> {
   return cachedSwr(`revenue:dashboard:${range}`, 60_000, 300_000, async () => {
     const nowSeconds = Math.floor(Date.now() / 1000)
@@ -425,13 +479,7 @@ LIMIT 10`,
       for (const [account, usd] of distributeUsd1e12(hollarRangeUsd, weights)) addTop(account, usd)
     }
     if ((rangeTotals.get('asset_reserve') ?? 0n) > 0n) {
-      const firstFullMonth = (s: number): number => {
-        const d = new Date(s * 1000)
-        const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / 1000
-        const next = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1))
-        return s <= monthStart ? Number(`${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}`)
-          : Number(`${next.getUTCFullYear()}${String(next.getUTCMonth() + 1).padStart(2, '0')}`)
-      }
+      const firstFullMonth = firstMonthInside
       const lastFullMonth = (s: number): number => {
         const d = new Date(s * 1000)
         const prev = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) - 1)
@@ -448,6 +496,27 @@ GROUP BY account`,
         clickhouse_settings: DECIMAL_STRINGS,
       })
       for (const row of await reserveRes.json<{ account: string; usd: string }>()) {
+        addTop(row.account, scaledUsd(row.usd))
+      }
+    }
+
+    // Uniswap v3 vault realizations are booked in revenue_events with no payer
+    // (a vault's lump to the Treasury covers many swaps), so the cold ranking
+    // above counts only the stream's accrued half. account_revenue holds each
+    // swapper's share of those lumps beside the accrued half, under one key, so
+    // the share is that row less the account's accrued rows of the same month —
+    // for months fully inside the range (the range ends now, so the live month
+    // counts once it starts inside it) and only where the month's attribution is
+    // at least as new as its revenue_events publication, which is what makes the
+    // difference exact. A month still awaiting its rebuild stays out of the
+    // ranking for that refresh rather than being approximated.
+    if ((rangeTotals.get('uniswap_v3_fee') ?? 0n) > 0n) {
+      const sharesRes = await client.query({
+        query: uniswapV3RealizationPayersSql(firstMonthInside(Math.max(rangeStart, 0))),
+        format: 'JSONEachRow',
+        clickhouse_settings: DECIMAL_STRINGS,
+      })
+      for (const row of await sharesRes.json<{ account: string; usd: string }>()) {
         addTop(row.account, scaledUsd(row.usd))
       }
     }

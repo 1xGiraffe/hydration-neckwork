@@ -434,6 +434,49 @@ describe('getStakerDistributions', () => {
   })
 })
 
+describe('uniswap v3 realization shares in the payer ranking', () => {
+  it('adds each swapper\'s share of the payer-less vault realizations', async () => {
+    vi.setSystemTime(NOW + 4_500_000)
+    const { initRevenueService, getRevenueDashboard } = await service()
+    const monthStart = Date.UTC(2026, 7, 1) / 1000
+    const { seen, client } = fakeClient({
+      'toString(max(block_timestamp)) AS mark': [{ stream: 'uniswap_v3_fee', mark: '2026-08-14 10:00:00' }],
+      '-- rev:protocol-revenue-windows': [{ stream: 'uniswap_v3_fee', day: '5', week: '5', month: '5', all_time: '5' }],
+      '-- rev:dashboard:buckets': [{ stream: 'uniswap_v3_fee', t: monthStart, usd: '5' }],
+      // The accrued half names its swapper; the realization rows carry none.
+      '-- rev:dashboard:top-accounts': [{ account: ACCOUNT_A, usd: '1' }],
+      '-- rev:dashboard:v3-realization-payers': [
+        { account: ACCOUNT_A, usd: '1.5' },
+        { account: ACCOUNT_B, usd: '2.5' },
+      ],
+      '-- rev:dashboard:top-account-sums': [],
+    })
+    initRevenueService(client)
+    const dash = await getRevenueDashboard('all')
+    const byId = new Map(dash.topAccounts.map(r => [r.account.accountId, r.usd]))
+    // The ranking now sums to the stream total: 1 accrued + 4 realized.
+    expect(byId.get(ACCOUNT_A)).toBeCloseTo(2.5, 9)
+    expect(byId.get(ACCOUNT_B)).toBeCloseTo(2.5, 9)
+    const sql = seen.find(x => x.query.includes('-- rev:dashboard:v3-realization-payers'))!.query
+    expect(sql).toContain('month >= 197001')
+  })
+
+  it('takes the share as account_revenue less the accrued half, from matching publications only', async () => {
+    const { uniswapV3RealizationPayersSql, firstMonthInside } = await service()
+    const sql = uniswapV3RealizationPayersSql(202609)
+    expect(sql).toContain("FROM price_data.account_revenue\n  WHERE stream = 'uniswap_v3_fee' AND account != ''")
+    expect(sql).toContain("SELECT account, -sum(amount_usd) AS part")
+    expect(sql).toContain("stream = 'uniswap_v3_fee' AND dest = 'accrued'")
+    expect(sql).toContain('WHERE a.built >= r.published')
+    expect(sql).toContain('SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS published\n    FROM price_data.revenue_events\n    GROUP BY p')
+    expect(sql).toContain('month >= 202609')
+    // A month partly before the range stays out; one starting inside it counts.
+    expect(firstMonthInside(Date.UTC(2026, 8, 1) / 1000)).toBe(202609)
+    expect(firstMonthInside(Date.UTC(2026, 8, 1) / 1000 + 1)).toBe(202610)
+    expect(firstMonthInside(0)).toBe(197001)
+  })
+})
+
 describe('top payer sums over many accounts', () => {
   it('reads the missing accounts in chunks the server\'s parameter cap admits', async () => {
     vi.setSystemTime(NOW + 5_400_000)
