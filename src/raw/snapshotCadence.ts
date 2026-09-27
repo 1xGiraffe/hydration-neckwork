@@ -25,6 +25,11 @@
 /** The `% 600` grid the pool-history MVs sample at. Every retained cadence must divide it. */
 export const MV_SNAPSHOT_GRID_BLOCKS = 600
 
+/** Whether the pool-history MVs sample this height — the raw indexer re-reads every pool family there. */
+export function isMvSnapshotGridHeight(blockHeight: number): boolean {
+  return blockHeight % MV_SNAPSHOT_GRID_BLOCKS === 0
+}
+
 /** Divisors of 600 — the cadences that keep every MV grid height materialized. */
 export function validSnapshotCadences(): number[] {
   const divisors: number[] = []

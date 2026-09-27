@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   assertSnapshotEveryNBlocks,
+  isMvSnapshotGridHeight,
   MV_SNAPSHOT_GRID_BLOCKS,
   retainsSnapshotAtHeight,
   snapshotEveryNBlocksFromEnvironment,
@@ -51,5 +52,17 @@ describe('raw snapshot cadence', () => {
       if (retainsSnapshotAtHeight(height, 3)) retained.push(height)
     }
     expect(retained).toEqual([1_002, 1_005, 1_008, 1_011, 1_014, 1_017, 1_020, 1_023, 1_026, 1_029])
+  })
+})
+
+describe('pool-history grid heights', () => {
+  // The raw indexer re-reads every pool family at these heights instead of reusing
+  // the last refresh: aToken legs accrue and stableswap ramps step with no event.
+  it('names exactly the heights the % 600 history MVs sample', () => {
+    expect(isMvSnapshotGridHeight(15_105_600)).toBe(true)
+    expect(isMvSnapshotGridHeight(0)).toBe(true)
+    expect(isMvSnapshotGridHeight(15_105_601)).toBe(false)
+    expect(isMvSnapshotGridHeight(15_105_599)).toBe(false)
+    expect(isMvSnapshotGridHeight(MV_SNAPSHOT_GRID_BLOCKS * 7)).toBe(true)
   })
 })
