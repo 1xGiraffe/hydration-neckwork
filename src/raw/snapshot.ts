@@ -275,6 +275,28 @@ export function reserveTransferAccounts(event: { name?: string; args?: unknown }
   return [args.from, args.to]
 }
 
+/**
+ * The pool family whose state an event of its own pallet reports a change to.
+ * Several of them move snapshot fields with no transfer and no swap beside them —
+ * `Omnipool.AssetWeightCapUpdated` (cap), `Omnipool.TradableStateUpdated`
+ * (tradable), `Omnipool.PositionDestroyed` from `sacrifice_position`
+ * (protocol_shares) — so the swap and transfer triggers alone leave the reused
+ * state stale until the family's next trade (measured: every cap of block
+ * 6,012,000, the tradable bits of 4,089,600). Every event of the pallet refreshes
+ * its family; the pallets emit little besides trades, which refresh it already.
+ */
+const POOL_PALLET_FAMILIES = new Map<string, 'omnipool' | 'xyk' | 'stableswap'>([
+  ['Omnipool', 'omnipool'],
+  ['XYK', 'xyk'],
+  ['Stableswap', 'stableswap'],
+])
+
+export function poolPalletEventFamily(event: { name?: string }): 'omnipool' | 'xyk' | 'stableswap' | null {
+  const dot = event.name?.indexOf('.') ?? -1
+  if (dot <= 0) return null
+  return POOL_PALLET_FAMILIES.get(event.name!.slice(0, dot)) ?? null
+}
+
 let stableswapPegStorageSeen = false
 
 export async function readStableswapState(

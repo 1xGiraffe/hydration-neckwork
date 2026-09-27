@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { updateErc20Registry } from '../../src/evm/balances.ts'
-import { readXYKState, reserveTransferAccounts } from '../../src/raw/snapshot.ts'
+import { poolPalletEventFamily, readXYKState, reserveTransferAccounts } from '../../src/raw/snapshot.ts'
 import * as evmStorage from '../../src/types/evm/storage.ts'
 import * as systemStorage from '../../src/types/system/storage.ts'
 import * as tokensStorage from '../../src/types/tokens/storage.ts'
@@ -142,5 +142,24 @@ describe('reserveTransferAccounts', () => {
     expect(reserveTransferAccounts({ name: 'Balances.Transfer' })).toBeNull()
     expect(reserveTransferAccounts({ name: 'Currencies.Transferred', args: { to: TOKEN_POOL } })).toBeNull()
     expect(reserveTransferAccounts({ args: { from: '0x01', to: TOKEN_POOL } })).toBeNull()
+  })
+})
+
+describe('poolPalletEventFamily', () => {
+  it('refreshes the family on every event of its pallet, not only trades', () => {
+    // Block 6,012,000: an AssetWeightCapUpdated with no Omnipool trade or transfer in the block.
+    expect(poolPalletEventFamily({ name: 'Omnipool.AssetWeightCapUpdated' })).toBe('omnipool')
+    expect(poolPalletEventFamily({ name: 'Omnipool.TradableStateUpdated' })).toBe('omnipool')
+    expect(poolPalletEventFamily({ name: 'Omnipool.PositionDestroyed' })).toBe('omnipool')
+    expect(poolPalletEventFamily({ name: 'Stableswap.PoolPegSourceUpdated' })).toBe('stableswap')
+    expect(poolPalletEventFamily({ name: 'XYK.LiquidityRemoved' })).toBe('xyk')
+  })
+
+  it('ignores other pallets and malformed names', () => {
+    expect(poolPalletEventFamily({ name: 'OmnipoolLiquidityMining.RewardClaimed' })).toBeNull()
+    expect(poolPalletEventFamily({ name: 'XYKLiquidityMining.DepositDestroyed' })).toBeNull()
+    expect(poolPalletEventFamily({ name: 'Broadcast.Swapped3' })).toBeNull()
+    expect(poolPalletEventFamily({ name: 'Omnipool' })).toBeNull()
+    expect(poolPalletEventFamily({})).toBeNull()
   })
 })
