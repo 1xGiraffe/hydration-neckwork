@@ -293,14 +293,20 @@ describe('readStableswapState', () => {
 
   it('publishes the pool parameters Stableswap.Pools stores, not the cached copy', async () => {
     // Pool 146 at grid height 12,561,600: the cache published the new pool with
-    // initial_block/final_block 0 and a fee of 400; storage holds its creation block and 200.
-    installStableswap({ 146: { assets: [46, 222], initialAmplification: 100, finalAmplification: 100, initialBlock: 12_561_497, finalBlock: 12_561_497, fee: 200 } })
+    // initial_block/final_block 0; storage holds its creation block.
+    // Pool 100 at 6,990,000: the cache held a fee of 400; storage holds 200.
+    installStableswap({
+      146: { assets: [46, 222], initialAmplification: 100, finalAmplification: 100, initialBlock: 12_561_497, finalBlock: 12_561_497, fee: 400 },
+      100: { assets: [10, 21], initialAmplification: 320, finalAmplification: 320, initialBlock: 3_640_110, finalBlock: 3_640_110, fee: 200 },
+    })
 
-    const [pool] = await readStableswapState({ height: 12_561_600 } as Block, [
+    const [pool100, pool146] = await readStableswapState({ height: 12_561_600 } as Block, [
       { poolId: 146, assets: [46, 222], initialAmplification: 100, finalAmplification: 100, initialBlock: 0, finalBlock: 0, fee: 400 },
+      { poolId: 100, assets: [10, 21], initialAmplification: 320, finalAmplification: 320, initialBlock: 3_640_110, finalBlock: 3_640_110, fee: 400 },
     ])
 
-    expect(pool).toMatchObject({ pool_id: 146, initial_block: 12_561_497, final_block: 12_561_497, fee: 200, amplification: '100' })
+    expect(pool146).toMatchObject({ pool_id: 146, initial_block: 12_561_497, final_block: 12_561_497, fee: 400, amplification: '100' })
+    expect(pool100).toMatchObject({ pool_id: 100, fee: 200, amplification: '320' })
   })
 
   it('computes the amplification from the stored ramp', async () => {
