@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
 import { contractByH160 } from './contractRegistryService.ts'
-import { fetchDeployedBytecode, verifyStandardJson, type MatchType } from './verifierClient.ts'
+import { fetchDeployedBytecode, resolveCreationTransaction, verifyStandardJson, type CreationTransaction, type MatchType } from './verifierClient.ts'
 import { chDateTime as toClickHouseDateTime } from './clickhouseTime.ts'
 
 // Contract verification: owns the job lifecycle and the three ClickHouse tables
@@ -35,12 +35,31 @@ export function toMatchLevel(matchType: MatchType | '' | undefined): MatchLevel 
   return null
 }
 
+// Sourcify's overall `match`: the better of the runtime and creation matches.
+// A contract only counts as verified here once its RUNTIME code matched (that is
+// the code the explorer attributes the sources to), so the overall level is
+// null without one, and a creation match can only raise it.
+export function overallMatchLevel(runtime: MatchType | '' | undefined, creation: MatchType | '' | undefined): MatchLevel {
+  const r = toMatchLevel(runtime)
+  if (!r) return null
+  return r === 'exact_match' || toMatchLevel(creation) === 'exact_match' ? 'exact_match' : 'match'
+}
+
+function parseMatchType(raw: string | undefined): MatchType | '' {
+  return raw === 'FULL' ? 'FULL' : raw === 'PARTIAL' ? 'PARTIAL' : ''
+}
+
 export type JobState = {
   verificationId: string
   address: string
   chainId: string
   status: 'pending' | 'verified' | 'failed'
+  // The runtime (deployed bytecode) match; `creationMatchType` is the creation
+  // transaction's, '' when no creation transaction was submitted, its init code
+  // could not be read, or it did not match.
   matchType: MatchType | ''
+  creationMatchType: MatchType | ''
+  creationTxHash: string
   contractIdentifier: string
   compilerVersion: string
   errorCode: string
@@ -79,6 +98,7 @@ export interface VerifiedContractInfo {
   name: string
   compilerVersion: string
   matchType: MatchType | ''
+  creationMatchType: MatchType | ''
   source: string          // 'verified' | 'import:blockscout' | 'manual'
   verifiedAt: string
   abiPresent: boolean
@@ -93,13 +113,13 @@ async function loadVerifiedUncached(): Promise<void> {
     client
       .query({
         query: `
-          SELECT address, contract_name, compiler_version, match_type, source, code_hash,
+          SELECT address, contract_name, compiler_version, match_type, creation_match_type, source, code_hash,
                  toString(updated_at) AS verified_at, abi_json != '' AS abi_present
           FROM price_data.contract_abis FINAL
           WHERE deleted = 0`,
         format: 'JSONEachRow',
       })
-      .then(r => r.json<{ address: string; contract_name: string; compiler_version: string; match_type: string; source: string; code_hash: string; verified_at: string; abi_present: number }>()),
+      .then(r => r.json<{ address: string; contract_name: string; compiler_version: string; match_type: string; creation_match_type: string; source: string; code_hash: string; verified_at: string; abi_present: number }>()),
     client
       .query({
         query: `
@@ -119,7 +139,8 @@ async function loadVerifiedUncached(): Promise<void> {
       address,
       name: row.contract_name,
       compilerVersion: row.compiler_version,
-      matchType: row.match_type === 'FULL' ? 'FULL' : row.match_type === 'PARTIAL' ? 'PARTIAL' : '',
+      matchType: parseMatchType(row.match_type),
+      creationMatchType: parseMatchType(row.creation_match_type),
       source: row.source,
       verifiedAt: row.verified_at,
       abiPresent: !!Number(row.abi_present),
@@ -223,6 +244,7 @@ export function searchVerifiedNames(q: string, entries: Map<string, VerifiedCont
 export type VerifiedContract = {
   address: string
   matchType: MatchType
+  creationMatchType: MatchType | ''
   contractName: string
   compilerVersion: string
 }
@@ -236,6 +258,7 @@ export async function getVerifiedContract(address: string): Promise<VerifiedCont
   return {
     address: info.address,
     matchType: info.matchType === 'FULL' ? 'FULL' : 'PARTIAL',
+    creationMatchType: info.creationMatchType,
     contractName: info.name,
     compilerVersion: info.compilerVersion,
   }
@@ -396,6 +419,7 @@ export function verifiedArtifactRows(args: {
   codeHash: string
   previousPaths: string[]
   source?: string
+  creationMatchType?: MatchType | ''
 }): { abiRow: Record<string, unknown>; sourceRows: Record<string, unknown>[] } {
   const { address, result, codeHash, previousPaths } = args
   const settings = parseSettings(result.compilerSettings)
@@ -406,6 +430,7 @@ export function verifiedArtifactRows(args: {
     compiler_version: result.compilerVersion,
     source: args.source ?? 'verified',
     match_type: result.matchType,
+    creation_match_type: args.creationMatchType ?? '',
     code_hash: codeHash,
     deleted: 0,
   }
@@ -511,11 +536,12 @@ export type SubmitInput = {
   compilerVersion: string
   contractIdentifier: string
   stdJsonInput: unknown
+  creationTransactionHash?: string
 }
 
 export type SubmitOutcome =
   | { ok: true; verificationId: string }
-  | { ok: false; code: 'already_verified' | 'cannot_fetch_bytecode'; message: string }
+  | { ok: false; code: 'already_verified' | 'cannot_fetch_bytecode' | 'invalid_parameter' | 'internal_error'; message: string }
 
 export async function submitVerification(input: SubmitInput): Promise<SubmitOutcome> {
   const existing = await getVerifiedContract(input.address)
@@ -532,6 +558,15 @@ export async function submitVerification(input: SubmitInput): Promise<SubmitOutc
     }
   }
 
+  // Checked before the job exists, so a hash that did not create this address is
+  // a clean 4xx on submit instead of being carried silently into the job.
+  let creation: CreationTransaction | null = null
+  if (input.creationTransactionHash != null) {
+    const resolved = await resolveCreationTransaction(input.creationTransactionHash, input.address)
+    if (!resolved.ok) return { ok: false, code: resolved.code, message: resolved.message }
+    creation = resolved.creation
+  }
+
   const verificationId = randomUUID()
   const job: JobState = {
     verificationId,
@@ -539,6 +574,8 @@ export async function submitVerification(input: SubmitInput): Promise<SubmitOutc
     chainId: input.chainId,
     status: 'pending',
     matchType: '',
+    creationMatchType: '',
+    creationTxHash: creation?.txHash ?? '',
     contractIdentifier: input.contractIdentifier,
     compilerVersion: input.compilerVersion,
     errorCode: '',
@@ -552,7 +589,7 @@ export async function submitVerification(input: SubmitInput): Promise<SubmitOutc
 
   // Fire and forget: the client polls. Any throw is captured onto the job so a
   // failure surfaces as a clean verification failure rather than a hung poll.
-  void runVerification(job, input).catch(async err => {
+  void runVerification(job, input, creation?.initCode ?? null).catch(async err => {
     job.status = 'failed'
     job.errorCode = 'internal_error'
     job.errorMessage = err instanceof Error ? err.message : String(err)
@@ -563,16 +600,30 @@ export async function submitVerification(input: SubmitInput): Promise<SubmitOutc
   return { ok: true, verificationId }
 }
 
-async function runVerification(job: JobState, input: SubmitInput): Promise<void> {
-  const result = await verifyStandardJson({
-    // `deployedBytecode` stays the verbatim eth_getCode answer wherever it is
-    // stored or read back; passing the address is what lets the client zero a
-    // library's call protection on the way out to the verifier.
-    address: job.address,
-    bytecode: job.deployedBytecode,
-    compilerVersion: input.compilerVersion,
-    stdJsonInput: input.stdJsonInput,
-  })
+// The runtime and creation comparisons are two verifier calls (its standard-json
+// route compares one bytecode per request), run side by side so a creation
+// transaction costs no extra wall time against the client's poll budget.
+async function runVerification(job: JobState, input: SubmitInput, initCode: string | null): Promise<void> {
+  const [result, creationResult] = await Promise.all([
+    verifyStandardJson({
+      // `deployedBytecode` stays the verbatim eth_getCode answer wherever it is
+      // stored or read back; passing the address is what lets the client zero a
+      // library's call protection on the way out to the verifier.
+      address: job.address,
+      bytecode: job.deployedBytecode,
+      compilerVersion: input.compilerVersion,
+      stdJsonInput: input.stdJsonInput,
+    }),
+    initCode
+      ? verifyStandardJson({
+          address: job.address,
+          bytecode: initCode,
+          bytecodeType: 'CREATION_INPUT',
+          compilerVersion: input.compilerVersion,
+          stdJsonInput: input.stdJsonInput,
+        })
+      : Promise.resolve(null),
+  ])
 
   if (!result.ok) {
     job.status = 'failed'
@@ -585,8 +636,16 @@ async function runVerification(job: JobState, input: SubmitInput): Promise<void>
 
   job.status = 'verified'
   job.matchType = result.matchType
+  job.creationMatchType = creationResult?.ok ? creationResult.matchType : ''
+  if (creationResult && !creationResult.ok) {
+    console.warn(`[verification] ${job.address}: runtime matched, creation transaction ${job.creationTxHash} did not (${creationResult.code}: ${creationResult.message})`)
+  }
   job.completedAt = new Date()
-  await Promise.all([persistJob(job), persistVerified(job.address, result)])
+  // A creation match is what proves the constructor arguments: they are the
+  // creation input's remainder after the compiled init code, which a runtime
+  // comparison never sees.
+  const artifacts = creationResult?.ok ? { ...result, constructorArguments: creationResult.constructorArguments } : result
+  await Promise.all([persistJob(job), persistVerified(job.address, artifacts, job.creationMatchType)])
   // Flip the in-memory map so the probe, directory chip and account card render
   // verified immediately, not on the next timer pass.
   await loadVerifiedContracts().catch(() => {})
@@ -601,6 +660,8 @@ async function persistJob(job: JobState): Promise<void> {
         address: job.address,
         status: job.status,
         match_type: job.matchType,
+        creation_match_type: job.creationMatchType,
+        creation_tx_hash: job.creationTxHash,
         contract_identifier: job.contractIdentifier,
         compiler_version: job.compilerVersion,
         error_code: job.errorCode,
@@ -614,7 +675,7 @@ async function persistJob(job: JobState): Promise<void> {
   })
 }
 
-async function persistVerified(address: string, result: VerifiedArtifacts): Promise<void> {
+async function persistVerified(address: string, result: VerifiedArtifacts, creationMatchType: MatchType | ''): Promise<void> {
   const previousPaths = await client
     .query({
       query: `SELECT path FROM price_data.contract_sources FINAL WHERE address = {address:String} AND deleted = 0`,
@@ -628,6 +689,7 @@ async function persistVerified(address: string, result: VerifiedArtifacts): Prom
     result,
     codeHash: contractByH160(address)?.codeHash ?? '',
     previousPaths,
+    creationMatchType,
   })
   await Promise.all([
     client.insert({ table: 'price_data.contract_abis', values: [abiRow], format: 'JSONEachRow' }),
@@ -646,7 +708,7 @@ export async function getJob(verificationId: string): Promise<JobState | null> {
   const rows = await client
     .query({
       query: `
-        SELECT verification_id, address, status, match_type, contract_identifier,
+        SELECT verification_id, address, status, match_type, creation_match_type, creation_tx_hash, contract_identifier,
                compiler_version, error_code, error_message, deployed_bytecode,
                toUnixTimestamp(submitted_at) AS submitted_ts,
                toUnixTimestamp(ifNull(completed_at, toDateTime(0))) AS completed_ts
@@ -662,6 +724,8 @@ export async function getJob(verificationId: string): Promise<JobState | null> {
         address: string
         status: string
         match_type: string
+        creation_match_type: string
+        creation_tx_hash: string
         contract_identifier: string
         compiler_version: string
         error_code: string
@@ -679,7 +743,9 @@ export async function getJob(verificationId: string): Promise<JobState | null> {
     address: row.address,
     chainId: CHAIN_ID,
     status: row.status === 'verified' ? 'verified' : row.status === 'failed' ? 'failed' : 'pending',
-    matchType: row.match_type === 'FULL' ? 'FULL' : row.match_type === 'PARTIAL' ? 'PARTIAL' : '',
+    matchType: parseMatchType(row.match_type),
+    creationMatchType: parseMatchType(row.creation_match_type),
+    creationTxHash: row.creation_tx_hash,
     contractIdentifier: row.contract_identifier,
     compilerVersion: row.compiler_version,
     errorCode: row.error_code,

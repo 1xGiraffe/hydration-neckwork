@@ -33,6 +33,8 @@ function job(over: Partial<JobState> = {}): JobState {
     chainId: '222222',
     status: 'pending',
     matchType: '',
+    creationMatchType: '',
+    creationTxHash: '',
     contractIdentifier: 'src/Store.sol:Store',
     compilerVersion: '0.8.10+commit.fc410830',
     errorCode: '',
@@ -114,9 +116,21 @@ describe('jobResponse', () => {
     expect(res.error?.message).toBeTruthy()
   })
 
-  it('never claims a creation-input match, since only runtime bytecode is compared', () => {
+  it('claims no creation match when no creation input was compared', () => {
     const res = jobResponse(job({ status: 'verified', matchType: 'FULL', completedAt: new Date() }))
     expect(res.contract.creationMatch).toBeNull()
+  })
+
+  it('reports runtime and creation matches separately, the overall match as the better one', () => {
+    const res = jobResponse(job({ status: 'verified', matchType: 'PARTIAL', creationMatchType: 'FULL', completedAt: new Date() }))
+    expect(res.contract).toMatchObject({ match: 'exact_match', runtimeMatch: 'match', creationMatch: 'exact_match' })
+  })
+
+  it('never lets a creation match stand in for a missing runtime match', () => {
+    // Verified means the RUNTIME code matched; a failed job has no match at all.
+    const res = jobResponse(job({ status: 'failed', matchType: '', creationMatchType: 'FULL', completedAt: new Date() }))
+    expect(res.contract).toMatchObject({ match: null, runtimeMatch: null, creationMatch: null })
+    expect(res.error?.customCode).toBe('no_match')
   })
 })
 
@@ -178,11 +192,41 @@ describe('sourcify V2 route shapes', () => {
 
   it('answers a verified probe with the match levels', async () => {
     const app = await buildApp({
-      getVerifiedContract: vi.fn().mockResolvedValue({ address: ADDRESS, matchType: 'FULL', contractName: 'Store', compilerVersion: '', abi: '[]' }),
+      getVerifiedContract: vi.fn().mockResolvedValue({ address: ADDRESS, matchType: 'FULL', creationMatchType: '', contractName: 'Store', compilerVersion: '', abi: '[]' }),
     })
     const res = await app.inject(`/v2/contract/1/${ADDRESS}`)
     expect(res.statusCode).toBe(200)
     expect(res.json()).toMatchObject({ match: 'exact_match', runtimeMatch: 'exact_match', creationMatch: null })
+    await app.close()
+  })
+
+  it('answers a probe with a stored creation match', async () => {
+    const app = await buildApp({
+      getVerifiedContract: vi.fn().mockResolvedValue({ address: ADDRESS, matchType: 'PARTIAL', creationMatchType: 'PARTIAL', contractName: 'Store', compilerVersion: '' }),
+    })
+    const res = await app.inject(`/v2/contract/222222/${ADDRESS}`)
+    expect(res.json()).toMatchObject({ match: 'match', runtimeMatch: 'match', creationMatch: 'match' })
+    await app.close()
+  })
+
+  it('passes creationTransactionHash to the submit and maps a rejected hash to a 400 error envelope', async () => {
+    const submitVerification = vi.fn().mockResolvedValue({ ok: false, code: 'invalid_parameter', message: 'Transaction 0x11 was not found in a block on this chain' })
+    const app = await buildApp({ submitVerification })
+    const hash = `0x${'11'.repeat(32)}`
+    const res = await app.inject({ method: 'POST', url: `/v2/verify/222222/${ADDRESS}`, payload: { ...validBody, creationTransactionHash: hash } })
+    expect(submitVerification.mock.calls[0][0].creationTransactionHash).toBe(hash)
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toMatchObject({ customCode: 'invalid_parameter', message: expect.stringContaining('not found') })
+    expect(typeof res.json().errorId).toBe('string')
+    await app.close()
+  })
+
+  it('reads a null creationTransactionHash as absent', async () => {
+    const submitVerification = vi.fn().mockResolvedValue({ ok: true, verificationId: 'abc' })
+    const app = await buildApp({ submitVerification })
+    const res = await app.inject({ method: 'POST', url: `/v2/verify/222222/${ADDRESS}`, payload: { ...validBody, creationTransactionHash: null } })
+    expect(res.statusCode).toBe(202)
+    expect(submitVerification.mock.calls[0][0].creationTransactionHash).toBeUndefined()
     await app.close()
   })
 

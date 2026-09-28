@@ -81,6 +81,7 @@ describe('verificationDisplay', () => {
     name: 'GhoToken',
     compilerVersion: 'v0.8.10+commit.fc410830',
     matchType: 'FULL',
+    creationMatchType: '',
     source: 'verified',
     verifiedAt: '2026-08-04 10:00:00',
     abiPresent: true,
@@ -170,9 +171,9 @@ describe('parseSettings', () => {
 
 describe('searchVerifiedNames', () => {
   const entries: [string, VerifiedContractInfo][] = [
-    ['0x01', { address: '0x01', name: 'GhoToken', compilerVersion: '', matchType: 'FULL', source: 'verified', verifiedAt: '', abiPresent: true, sourceFileCount: 1, codeHash: '' }],
-    ['0x02', { address: '0x02', name: 'AaveOracle', compilerVersion: '', matchType: 'PARTIAL', source: 'import:blockscout', verifiedAt: '', abiPresent: true, sourceFileCount: 1, codeHash: '' }],
-    ['0x03', { address: '0x03', name: 'GhoTokenHelper', compilerVersion: '', matchType: 'FULL', source: 'verified', verifiedAt: '', abiPresent: true, sourceFileCount: 1, codeHash: '' }],
+    ['0x01', { address: '0x01', name: 'GhoToken', compilerVersion: '', matchType: 'FULL', creationMatchType: '', source: 'verified', verifiedAt: '', abiPresent: true, sourceFileCount: 1, codeHash: '' }],
+    ['0x02', { address: '0x02', name: 'AaveOracle', compilerVersion: '', matchType: 'PARTIAL', creationMatchType: '', source: 'import:blockscout', verifiedAt: '', abiPresent: true, sourceFileCount: 1, codeHash: '' }],
+    ['0x03', { address: '0x03', name: 'GhoTokenHelper', compilerVersion: '', matchType: 'FULL', creationMatchType: '', source: 'verified', verifiedAt: '', abiPresent: true, sourceFileCount: 1, codeHash: '' }],
   ]
 
   it('ranks exact and prefix name matches ahead of substring hits', () => {
