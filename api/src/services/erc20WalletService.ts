@@ -16,6 +16,10 @@ import { erc20Precompile } from './chainPrimitives.ts'
 // in the `erc20_transfer_deltas_mv` filter, which supplies the holder set this
 // refresh reads. GIGAHDX is excluded because the underlying staked HDX remains in
 // the holder's wallet; aTokens are supplied by money-market reserve reconstruction.
+// A money-market underlying listed here (uBIL under the BIL market's aToken) shows
+// the aToken contract as a holder of its custody, exactly as a Tokens-side reserve
+// (DOT under aDOT) does: that row is the contract's own balance, while the aToken
+// holders' claims are valued as the aToken — two assets, not one counted twice.
 //
 // This list is the source of truth, and two restatements must agree with it — the
 // MV's contract filter (`clickhouse/schema/003_materialized_views.sql`, a declarative
@@ -26,6 +30,7 @@ import { erc20Precompile } from './chainPrimitives.ts'
 export const ERC20_WALLET_ASSETS: { assetId: number; contract: string }[] = [
   { assetId: 222, contract: '0x531a654d1696ed52e7275a8cede955e82620f99a' }, // HOLLAR
   { assetId: 1001354, contract: '0xa206d0959813f17c17c87147271c49065438648a' }, // aDOT-HOLLAR, the Gamma vault share
+  { assetId: 550, contract: '0x6a21891db0940491603f3cca0a9f4dba4c6e810c' }, // uBIL, the BIL market's reserve (ERC-4626/7540 vault share)
 ]
 export const ERC20_WALLET_ASSET_IDS = ERC20_WALLET_ASSETS.map(a => a.assetId)
 

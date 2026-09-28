@@ -25,6 +25,17 @@ describe('ERC-20-backed wallet assets', () => {
     expect(new Set(ERC20_WALLET_ASSETS.map(a => a.contract)).size).toBe(ERC20_WALLET_ASSETS.length)
   })
 
+  it('covers every Erc20-kind registry asset that is not a money-market aToken', () => {
+    // The registry binds these three to a contract and no reserve map names them as
+    // a receipt, so nothing else reconstructs their holders (uBIL is the BIL
+    // market's underlying, not its aToken — asset 55 BIL is).
+    expect(ERC20_WALLET_ASSETS).toEqual(expect.arrayContaining([
+      { assetId: 222, contract: '0x531a654d1696ed52e7275a8cede955e82620f99a' },
+      { assetId: 1001354, contract: '0xa206d0959813f17c17c87147271c49065438648a' },
+      { assetId: 550, contract: '0x6a21891db0940491603f3cca0a9f4dba4c6e810c' },
+    ]))
+  })
+
   it('captures exactly those contracts in the transfer-deltas materialized view', () => {
     // The declarative schema cannot import the list, so the two are pinned instead.
     // A contract missing here has no indexed holder set at all; one listed here and

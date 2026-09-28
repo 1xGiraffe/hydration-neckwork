@@ -384,7 +384,7 @@ export function priceFor(prices: PriceMap, assetId: number): bigint {
 // allow-list, so it is restated here — and pinned against it by
 // api/tests/erc20WalletAssets.test.ts, because a list that diverges makes this
 // surface report a holder of the missing asset as holding nothing.
-const ERC20_WALLET_ASSET_IDS = [222, 1001354] // HOLLAR, aDOT-HOLLAR
+const ERC20_WALLET_ASSET_IDS = [222, 1001354, 550] // HOLLAR, aDOT-HOLLAR, uBIL
 
 /**
  * How stale a persisted current-state snapshot may be before it is ignored.
