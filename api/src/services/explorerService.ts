@@ -18,7 +18,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareFoldsIntoDisplaySupply, supplyFoldedShareIds, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT, lbpPools, stableswapPoolAccount } from './tagService.ts'
@@ -3533,9 +3533,9 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
   // GETH←4200, …). Their economic holder list combines direct display/share
   // balances and replaces each money-market aToken custody row with its actual
   // suppliers; otherwise the visible asset has zero holders or names the vault.
-  const foldedShareIds = Object.entries(SHARE_TOKEN_UNDERLYING_ID)
-    .filter(([, displayId]) => displayId === assetId)
-    .map(([shareId]) => Number(shareId))
+  // A share whose pool holds the asset itself (2-Pool-BIL under BIL) is not folded:
+  // the pool is already one of the asset's holders (shareFoldsIntoDisplaySupply).
+  const foldedShareIds = supplyFoldedShareIds(assetId)
   if (foldedShareIds.length) {
     return cached(pageKey, 30000, async () => {
       const prices = await ensurePrices()
@@ -6731,15 +6731,14 @@ async function getFoldedDisplayAssetHolders(displayAssetId: number, shareAssetId
   // Claims (viewer-independent) are the cached unit; grouping runs per call —
   // same split as getATokenHolders above, for the same per-viewer fold reason.
   const claims = await cached(`explorer:folded-display-claims:${displayAssetId}`, 30000, async (): Promise<HolderBalanceClaim[]> => {
-    const normalizedShareIds = [...new Set(shareAssetIds.filter(id => SHARE_TOKEN_UNDERLYING_ID[id] === displayAssetId))]
+    const normalizedShareIds = [...new Set(shareAssetIds.filter(id => SHARE_TOKEN_UNDERLYING_ID[id] === displayAssetId && shareFoldsIntoDisplaySupply(id)))]
     if (!normalizedShareIds.length) return []
-    // A display asset can itself be an aToken — BIL is the bil market's aToken over
-    // uBIL AND the display asset of 2-Pool-BIL, the only id that is both. Its
-    // balances are then NOT in the substrate table (an aToken's live in EVM
-    // storage), so reading them there returns a near-empty list with no error:
-    // BIL showed 2 holders against the 78 its own contract has. Such an asset is
-    // dropped from the direct read and reconstructed below instead, exactly as the
-    // plain aToken page does it.
+    // A display asset can itself be an aToken (BIL is the bil market's aToken over
+    // uBIL and the display face of 2-Pool-BIL, though that share does not fold into
+    // its supply — its pool holds BIL). Its balances are then NOT in the substrate
+    // table (an aToken's live in EVM storage), so reading them there returns a
+    // near-empty list with no error. Such an asset is dropped from the direct read
+    // and reconstructed below instead, exactly as the plain aToken page does it.
     const displayIsAToken = ATOKEN_UNDERLYING_ID[displayAssetId] != null
     const sourceIds = displayIsAToken ? normalizedShareIds : [displayAssetId, ...normalizedShareIds]
     const [tokens, indices, b0] = await Promise.all([getMmReserveTokens(), reserveIndicesNow(), aTokenAnchorBlock()])
@@ -9102,9 +9101,12 @@ async function getAssetTotals(): Promise<Map<number, bigint>> {
     for (const [assetId, raw] of await getATokenTotalSupplies()) m.set(assetId, raw)
     // Pool-share assets are hidden from the directory and displayed as their Giga
     // underlying. Move—not duplicate—their held total onto that visible id. The
-    // raw total already includes the aToken custody row exactly once.
+    // raw total already includes the aToken custody row exactly once. A share whose
+    // pool holds the display asset itself stays out: that asset's total already
+    // counts the pool's holding (shareFoldsIntoDisplaySupply).
     for (const [shareIdText, displayId] of Object.entries(SHARE_TOKEN_UNDERLYING_ID)) {
       const shareId = Number(shareIdText)
+      if (!shareFoldsIntoDisplaySupply(shareId)) continue
       const shareRaw = m.get(shareId) ?? 0n
       if (shareRaw <= 0n) continue
       const normalized = BigInt(rescaleRaw(shareRaw.toString(), asset(shareId).decimals, asset(displayId).decimals))
@@ -9184,6 +9186,7 @@ export async function getAssetHolderCounts(): Promise<Map<number, number>> {
 async function foldedDisplayHolderCounts(): Promise<Map<number, number>> {
   const shareIdsByDisplay = new Map<number, number[]>()
   for (const [shareId, displayId] of Object.entries(SHARE_TOKEN_UNDERLYING_ID)) {
+    if (!shareFoldsIntoDisplaySupply(Number(shareId))) continue
     const ids = shareIdsByDisplay.get(displayId) ?? []
     ids.push(Number(shareId))
     shareIdsByDisplay.set(displayId, ids)

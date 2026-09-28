@@ -8,12 +8,15 @@ const src = readFileSync(new URL('../src/services/explorerService.ts', import.me
 // display-asset branch runs first and returns, so an asset that is both a
 // display asset and an aToken never reaches the aToken branch.
 //
-// BIL is exactly that — the bil market's aToken over uBIL, and the display asset
-// of 2-Pool-BIL. Its holders came from the substrate balance table, where an
-// aToken has none (its balances live in EVM storage), so the page showed 2
-// holders against the 78 its own contract has, with no error anywhere.
+// BIL is both an aToken (the bil market's, over uBIL) and the display face of
+// 2-Pool-BIL. That share no longer folds into BIL's supply (its pool holds BIL —
+// see shareSupplyFold.test.ts), so BIL takes the plain aToken path; the guards
+// below keep the display branch correct for any aToken a share does fold into.
+// Its holders once came from the substrate balance table, where an aToken has
+// none (its balances live in EVM storage): 2 holders against the 78 its own
+// contract had, with no error anywhere.
 describe('a display asset that is itself an aToken', () => {
-  it('BIL is both, which is what makes the two folds collide', () => {
+  it('BIL is both an aToken and a display face', () => {
     expect(ATOKEN_UNDERLYING_ID[55]).toBe(550)
     expect(SHARE_TOKEN_UNDERLYING_ID[10055]).toBe(55)
   })

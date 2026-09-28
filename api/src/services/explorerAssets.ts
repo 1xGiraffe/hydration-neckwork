@@ -158,7 +158,10 @@ async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<voi
   const poolMembers = await loadStableswapMembers(client)
   // Additive only: a failed member read must not make a known share token look like
   // an ordinary asset, which would let currentPriceAssetId alias it again.
-  for (const poolId of poolMembers.keys()) STABLESWAP_SHARE_IDS.add(poolId)
+  for (const [poolId, members] of poolMembers) {
+    STABLESWAP_SHARE_IDS.add(poolId)
+    STABLESWAP_POOL_MEMBERS.set(poolId, members)
+  }
   // Before the cache is built: iconAssetIdFor reads the pairing, so a newly
   // discovered aToken must know its reserve to borrow that reserve's artwork.
   await discoverATokenUnderlyings(client, rows)
@@ -510,6 +513,46 @@ export function isStableswapShareToken(assetId: number): boolean {
 /** Test seam: register a share token id the way a registry load would. */
 export function registerStableswapShareToken(assetId: number): void {
   STABLESWAP_SHARE_IDS.add(assetId)
+}
+
+// Each stableswap pool's member assets, as of the newest state-history row, kept
+// from the registry load's member read. Additive like STABLESWAP_SHARE_IDS: a
+// failed read keeps the last known members rather than forgetting them.
+const STABLESWAP_POOL_MEMBERS = new Map<number, number[]>()
+/** Test seam: record a pool's members the way a registry load would. */
+export function registerStableswapPoolMembers(poolId: number, members: number[] | null): void {
+  if (members) STABLESWAP_POOL_MEMBERS.set(poolId, members)
+  else STABLESWAP_POOL_MEMBERS.delete(poolId)
+}
+
+/**
+ * Whether a share's holdings add to its display asset's SUPPLY — the assets
+ * directory's total and holder count, and the asset page's holder list — rather
+ * than only borrowing its name and artwork (displayAssetId).
+ *
+ * They do when the share IS the display asset's economic substance: GDOT, HUSDT,
+ * GETH… are money-market wrappers over the share, so the share count is the
+ * product's supply. They do not when the share's pool holds the display asset
+ * itself, directly or as an aToken claim on it — 2-Pool-BIL holds BIL, 2-Pool-PRIME
+ * holds PRIME, 2-Pool-WETH holds aETH over ETH. That asset's own supply already
+ * counts the pool's holding (the pool account is one of its holders), so adding the
+ * shares — a claim on that holding plus the pool's other legs — counts the pool's
+ * reserve twice and prices its other legs as the display asset: BIL read $3.14M
+ * against a $2.52M supply. A pool whose members are not known yet keeps the fold.
+ */
+export function shareFoldsIntoDisplaySupply(shareId: number): boolean {
+  const displayId = SHARE_TOKEN_UNDERLYING_ID[shareId]
+  if (displayId == null) return false
+  const members = STABLESWAP_POOL_MEMBERS.get(shareId)
+  if (!members) return true
+  return !members.some(member => member === displayId || ATOKEN_UNDERLYING_ID[member] === displayId)
+}
+
+/** The share ids whose holdings add to `displayId`'s supply (shareFoldsIntoDisplaySupply). */
+export function supplyFoldedShareIds(displayId: number): number[] {
+  return Object.entries(SHARE_TOKEN_UNDERLYING_ID)
+    .filter(([shareId, id]) => id === displayId && shareFoldsIntoDisplaySupply(Number(shareId)))
+    .map(([shareId]) => Number(shareId))
 }
 
 // The id whose CURRENT price values `assetId` when it has no entry of its own:
