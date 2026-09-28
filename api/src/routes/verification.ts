@@ -8,6 +8,7 @@ import {
   getVerifiedContract,
   isH160,
   normalizeAddressParam,
+  overallMatchLevel,
   submitVerification,
   toMatchLevel,
   type JobState,
@@ -33,7 +34,10 @@ const submitBody = z.object({
   stdJsonInput: z.object({ language: z.string(), sources: z.record(z.string(), z.unknown()) }).loose(),
   compilerVersion: z.string().min(1).max(120),
   contractIdentifier: z.string().min(1).max(512),
-  creationTransactionHash: z.string().optional(),
+  // Checked against the chain on submit (it must have created the address) and,
+  // for a direct deployment, compared as the creation input — see
+  // `resolveCreationTransaction`. Null is read as absent.
+  creationTransactionHash: z.string().max(80).nullish(),
 })
 
 // Errors are a uniform {customCode, message, errorId}. hardhat requires all
@@ -52,7 +56,8 @@ function unverifiedLookup(chainId: string, address: string) {
 }
 
 export function jobResponse(job: JobState) {
-  const match = toMatchLevel(job.matchType)
+  const match = overallMatchLevel(job.matchType, job.creationMatchType)
+  const runtimeMatch = toMatchLevel(job.matchType)
   return {
     isJobCompleted: job.status !== 'pending',
     verificationId: job.verificationId,
@@ -65,10 +70,10 @@ export function jobResponse(job: JobState) {
     // failure, so it is always present — with nulls when there is no match.
     contract: {
       match,
-      // We verify against deployed (runtime) bytecode only, so a creation-input
-      // match is never claimed.
-      creationMatch: null,
-      runtimeMatch: match,
+      // Claimed only when a submitted creation transaction's input matched; a
+      // factory deployment's init code is not readable here, so it stays null.
+      creationMatch: runtimeMatch ? toMatchLevel(job.creationMatchType) : null,
+      runtimeMatch,
       chainId: job.chainId,
       address: job.address,
       ...(job.completedAt && match ? { verifiedAt: job.completedAt.toISOString() } : {}),
@@ -103,11 +108,10 @@ async function sourcifyV2(fastify: FastifyInstance) {
     const verified = await getVerifiedContract(address)
     if (!verified) return reply.status(404).send(unverifiedLookup(CHAIN_ID, params.data.address))
 
-    const match = toMatchLevel(verified.matchType)
     return reply.send({
-      match,
-      creationMatch: null,
-      runtimeMatch: match,
+      match: overallMatchLevel(verified.matchType, verified.creationMatchType),
+      creationMatch: toMatchLevel(verified.creationMatchType),
+      runtimeMatch: toMatchLevel(verified.matchType),
       chainId: CHAIN_ID,
       address: params.data.address,
     })
@@ -149,10 +153,15 @@ async function sourcifyV2(fastify: FastifyInstance) {
       compilerVersion: body.data.compilerVersion,
       contractIdentifier: body.data.contractIdentifier,
       stdJsonInput: body.data.stdJsonInput,
+      creationTransactionHash: body.data.creationTransactionHash ?? undefined,
     })
 
     if (!outcome.ok) {
-      const status = outcome.code === 'already_verified' ? 409 : 404
+      const status =
+        outcome.code === 'already_verified' ? 409
+        : outcome.code === 'invalid_parameter' ? 400
+        : outcome.code === 'internal_error' ? 500
+        : 404
       return reply.status(status).send(sourcifyError(outcome.code, outcome.message))
     }
     return reply.status(202).send({ verificationId: outcome.verificationId })

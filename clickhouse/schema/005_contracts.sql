@@ -15,7 +15,10 @@
 -- the registry's code hash at verification time: a CREATE2 redeploy at the same
 -- address surfaces as "verified against superseded bytecode" instead of
 -- silently mislabelling the new code.
-CREATE TABLE IF NOT EXISTS price_data.contract_abis (`address` String, `abi_json` String CODEC(ZSTD(6)), `contract_name` String DEFAULT '', `compiler_version` String DEFAULT '', `source` LowCardinality(String), `match_type` LowCardinality(String) DEFAULT '', `code_hash` String DEFAULT '', `deleted` UInt8 DEFAULT 0, `updated_at` DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY address SETTINGS index_granularity = 64;
+-- `match_type` is the runtime-code match (the one verification requires);
+-- `creation_match_type` the submitted creation transaction's, '' when none was
+-- compared or it did not match.
+CREATE TABLE IF NOT EXISTS price_data.contract_abis (`address` String, `abi_json` String CODEC(ZSTD(6)), `contract_name` String DEFAULT '', `compiler_version` String DEFAULT '', `source` LowCardinality(String), `match_type` LowCardinality(String) DEFAULT '', `creation_match_type` LowCardinality(String) DEFAULT '', `code_hash` String DEFAULT '', `deleted` UInt8 DEFAULT 0, `updated_at` DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY address SETTINGS index_granularity = 64;
 
 -- One row per source file of a verified contract, keyed (address, path) so a
 -- re-verification replaces files in place; paths absent from the newest
@@ -27,4 +30,4 @@ CREATE TABLE IF NOT EXISTS price_data.contract_sources (`address` String, `path`
 -- mid-verification must not turn a client's poll into "job not found".
 -- `deployed_bytecode` is cached here at submit time precisely so the read paths
 -- never have to call eth_getCode (AGENTS.md forbids per-request RPC).
-CREATE TABLE IF NOT EXISTS price_data.contract_verifications (`verification_id` String, `address` String, `status` LowCardinality(String), `match_type` LowCardinality(String) DEFAULT '', `contract_identifier` String DEFAULT '', `compiler_version` String DEFAULT '', `error_code` LowCardinality(String) DEFAULT '', `error_message` String DEFAULT '', `deployed_bytecode` String DEFAULT '' CODEC(ZSTD(6)), `submitted_at` DateTime DEFAULT now(), `completed_at` Nullable(DateTime), `updated_at` DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY verification_id SETTINGS index_granularity = 64;
+CREATE TABLE IF NOT EXISTS price_data.contract_verifications (`verification_id` String, `address` String, `status` LowCardinality(String), `match_type` LowCardinality(String) DEFAULT '', `creation_match_type` LowCardinality(String) DEFAULT '', `creation_tx_hash` String DEFAULT '', `contract_identifier` String DEFAULT '', `compiler_version` String DEFAULT '', `error_code` LowCardinality(String) DEFAULT '', `error_message` String DEFAULT '', `deployed_bytecode` String DEFAULT '' CODEC(ZSTD(6)), `submitted_at` DateTime DEFAULT now(), `completed_at` Nullable(DateTime), `updated_at` DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY verification_id SETTINGS index_granularity = 64;
