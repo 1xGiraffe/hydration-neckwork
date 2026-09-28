@@ -161,13 +161,13 @@ describe('GET /v1/assets/:id/transfers and /swaps', () => {
 })
 
 describe('GET /v1/assets/:id/holders', () => {
-  it('ranks substrate holders with the exact holder count, falling back to the ERC-20 snapshot when empty', async () => {
+  it('ranks holders over both balance pots with the exact holder count', async () => {
     const client = marketsClient([
-      (query, params) => (query.includes('-- data:assets:holders-erc20')
-        ? [{ account_id: HOLDER, total: '5000', holder_count: '3' }]
-        : query.includes('-- data:assets:holders')
-          ? (params.assetId === '5' ? [{ account_id: HOLDER, total: '123456', last_block: 9_000_000, holder_count: '4711' }] : [])
-          : undefined),
+      (query, params) => (query.includes('-- data:assets:holders')
+        ? (params.assetId === '5'
+          ? [{ account_id: HOLDER, amount: '123456', last_block: 9_000_000, holder_count: '4711' }]
+          : [{ account_id: HOLDER, amount: '5000', last_block: 0, holder_count: '3' }])
+        : undefined),
     ])
     app = await freshDataApp(client)
     const substrate = await app.inject({ url: '/v1/assets/5/holders?limit=10', headers: AUTH })
@@ -176,12 +176,17 @@ describe('GET /v1/assets/:id/holders', () => {
       items: [{ account: { address: HOLDER_SS58, accountIdHex: HOLDER, evmAddress: null }, amount: '123456', lastBlock: 9_000_000 }],
       holderCount: 4711,
     })
-    // The count rides on the ranking read as a window aggregate — no second fold.
-    const read = client.seen.find(s => s.query.includes('-- data:assets:holders'))!
-    expect(read.query).toMatch(/count\(\) OVER \(\) AS holder_count/)
+    // One read: the count rides on the ranking as a window aggregate, and the
+    // ranking sums each account's Tokens-side and ERC-20-side pots — HOLLAR has
+    // holders on both sides, so a fallback taken only when one side is empty
+    // silently drops the other.
+    const reads = client.seen.filter(s => s.query.includes('-- data:assets:holders'))
+    expect(reads).toHaveLength(1)
+    expect(reads[0].query).toMatch(/count\(\) OVER \(\) AS holder_count/)
+    expect(reads[0].query).toMatch(/FROM price_data\.asset_account_latest_balances[\s\S]*UNION ALL[\s\S]*FROM price_data\.erc20_wallet_balances/)
+    expect(reads[0].query).toMatch(/sum\(pot_bal\) AS bal[\s\S]*GROUP BY account_id\s+HAVING bal > 0/)
 
-    // Asset 222 has no substrate balance rows: the ERC-20 snapshot answers,
-    // whose rows carry no observation block.
+    // A holder found only in the ERC-20 snapshot has no observation block.
     const erc20 = await app.inject({ url: '/v1/assets/222/holders?limit=10', headers: AUTH })
     expect(erc20.json().items[0]).toMatchObject({ amount: '5000', lastBlock: null })
     expect(erc20.json().holderCount).toBe(3)
