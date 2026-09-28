@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { verifyStandardJson, fetchDeployedBytecode, isEmptyCode, zeroLibraryCallProtection } from '../src/services/verifierClient.ts'
+import { verifyStandardJson, fetchDeployedBytecode, isEmptyCode, resolveCreationTransaction, zeroLibraryCallProtection } from '../src/services/verifierClient.ts'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -164,6 +164,100 @@ describe('zeroLibraryCallProtection', () => {
     expect(sent.bytecode).toBe(COMPILED)
     // The substitution must not have leaked into the creation-code path.
     expect(sent.bytecodeType).toBe('DEPLOYED_BYTECODE')
+  })
+})
+
+describe('creation-input verification', () => {
+  it('submits the creation input verbatim as CREATION_INPUT, without the runtime substitution', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      text: async () => JSON.stringify({ status: 'FAILURE', message: 'No contract could be verified with provided data' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    // An init code that happens to open like a protected runtime must not be rewritten.
+    const initCode = `0x73${ADDRESS.slice(2)}3014600b`
+    await verifyStandardJson({ ...input, bytecode: initCode, bytecodeType: 'CREATION_INPUT' })
+    const sent = JSON.parse(fetchMock.mock.calls[0][1].body) as { bytecode: string; bytecodeType: string }
+    expect(sent).toMatchObject({ bytecode: initCode, bytecodeType: 'CREATION_INPUT' })
+  })
+})
+
+// A submitted creationTransactionHash must be a successful transaction that
+// created the address — it is never silently accepted and ignored.
+describe('resolveCreationTransaction', () => {
+  const HASH = `0x${'ab'.repeat(32)}`
+  const INIT = '0x6080604052348015600f57600080fd5b'
+  type Answers = { tx?: unknown; receipt?: unknown; code?: Record<string, string>; fail?: string }
+  function rpc(answers: Answers) {
+    return vi.fn(async (_url: string, init: { body: string }) => {
+      const { method, params } = JSON.parse(init.body) as { method: string; params: unknown[] }
+      if (answers.fail === method) return { ok: false, status: 502, json: async () => ({}) }
+      const result =
+        method === 'eth_getTransactionByHash' ? answers.tx ?? null
+        : method === 'eth_getTransactionReceipt' ? answers.receipt ?? null
+        : method === 'eth_getCode' ? answers.code?.[String(params[1])] ?? '0x'
+        : null
+      return { ok: true, status: 200, json: async () => ({ jsonrpc: '2.0', id: 1, result }) }
+    })
+  }
+
+  it('rejects a malformed hash without calling the node', async () => {
+    const fetchMock = rpc({})
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await resolveCreationTransaction('0x1234', ADDRESS)).toMatchObject({ ok: false, code: 'invalid_parameter' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects a hash the chain does not know', async () => {
+    vi.stubGlobal('fetch', rpc({}))
+    const res = await resolveCreationTransaction(`0x${'11'.repeat(32)}`, ADDRESS)
+    expect(res).toMatchObject({ ok: false, code: 'invalid_parameter' })
+    expect(!res.ok && res.message).toMatch(/not found/)
+  })
+
+  it('accepts a direct deployment of the address and hands back its input as the creation input', async () => {
+    vi.stubGlobal('fetch', rpc({
+      tx: { to: null, input: INIT, blockNumber: '0x10' },
+      receipt: { contractAddress: ADDRESS.toUpperCase().replace('0X', '0x'), status: '0x1', blockNumber: '0x10' },
+    }))
+    expect(await resolveCreationTransaction(HASH, ADDRESS)).toEqual({ ok: true, creation: { txHash: HASH, blockNumber: 16, initCode: INIT } })
+  })
+
+  it('rejects a deployment of some other contract', async () => {
+    vi.stubGlobal('fetch', rpc({
+      tx: { to: null, input: INIT, blockNumber: '0x10' },
+      receipt: { contractAddress: '0x5dce5306f247984042c18c0aec99a60e24078bc9', status: '0x1', blockNumber: '0x10' },
+    }))
+    const res = await resolveCreationTransaction(HASH, ADDRESS)
+    expect(res).toMatchObject({ ok: false, code: 'invalid_parameter' })
+    expect(!res.ok && res.message).toContain('0x5dce5306f247984042c18c0aec99a60e24078bc9')
+  })
+
+  it('rejects a reverted transaction', async () => {
+    vi.stubGlobal('fetch', rpc({ tx: { to: null, input: INIT, blockNumber: '0x10' }, receipt: { contractAddress: ADDRESS, status: '0x0' } }))
+    expect(await resolveCreationTransaction(HASH, ADDRESS)).toMatchObject({ ok: false, code: 'invalid_parameter' })
+  })
+
+  it('accepts a factory call in whose block the address gained code, without a creation input', async () => {
+    vi.stubGlobal('fetch', rpc({
+      tx: { to: '0x1d652d8333f412c5e86360d3adc43e3f3c93e603', input: '0x1234', blockNumber: '0x10' },
+      receipt: { contractAddress: null, status: '0x1' },
+      code: { '0xf': '0x', '0x10': '0x6080' },
+    }))
+    expect(await resolveCreationTransaction(HASH, ADDRESS)).toEqual({ ok: true, creation: { txHash: HASH, blockNumber: 16, initCode: null } })
+  })
+
+  it('rejects a call when the address already had code, or still has none', async () => {
+    const call = { to: '0x1d652d8333f412c5e86360d3adc43e3f3c93e603', input: '0x1234', blockNumber: '0x10' }
+    vi.stubGlobal('fetch', rpc({ tx: call, receipt: { status: '0x1' }, code: { '0xf': '0x6080', '0x10': '0x6080' } }))
+    expect(await resolveCreationTransaction(HASH, ADDRESS)).toMatchObject({ ok: false, code: 'invalid_parameter' })
+    vi.stubGlobal('fetch', rpc({ tx: call, receipt: { status: '0x1' }, code: { '0xf': '0x', '0x10': '0x' } }))
+    expect(await resolveCreationTransaction(HASH, ADDRESS)).toMatchObject({ ok: false, code: 'invalid_parameter' })
+  })
+
+  it('reports an unreachable node as an internal error, not as a bad hash', async () => {
+    vi.stubGlobal('fetch', rpc({ fail: 'eth_getTransactionReceipt', tx: { to: null, input: INIT, blockNumber: '0x10' } }))
+    expect(await resolveCreationTransaction(HASH, ADDRESS)).toMatchObject({ ok: false, code: 'internal_error' })
   })
 })
 

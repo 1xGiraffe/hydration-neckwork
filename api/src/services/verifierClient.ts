@@ -73,19 +73,26 @@ export function zeroLibraryCallProtection(bytecode: string, address: string): st
 // A verification failure is HTTP 200 with `status: "FAILURE"` — only transport
 // and request-shape problems are 4xx. Branching on the HTTP code alone would
 // report every bytecode mismatch as a success.
+//
+// `DEPLOYED_BYTECODE` (the default) compares the runtime code from eth_getCode.
+// `CREATION_INPUT` compares a creation transaction's input — init code with the
+// constructor arguments appended — and the verifier hands those arguments back
+// as `constructorArguments`, which is what proves them. A library's creation
+// code carries no address (its constructor writes the call-protection operand
+// at deploy time), so the substitution below applies to runtime code only.
 export async function verifyStandardJson(input: {
   address: string
   bytecode: string
+  bytecodeType?: 'DEPLOYED_BYTECODE' | 'CREATION_INPUT'
   compilerVersion: string
   stdJsonInput: unknown
 }): Promise<VerifyResult> {
+  const bytecodeType = input.bytecodeType ?? 'DEPLOYED_BYTECODE'
   const body = JSON.stringify({
     // Normalised at this boundary rather than at the call site so no future
     // submit path can forget it; a non-library's code comes through untouched.
-    bytecode: zeroLibraryCallProtection(input.bytecode, input.address),
-    // We hold deployed (runtime) bytecode from eth_getCode. CREATION_INPUT would
-    // additionally require the constructor args appended, which we do not have.
-    bytecodeType: 'DEPLOYED_BYTECODE',
+    bytecode: bytecodeType === 'DEPLOYED_BYTECODE' ? zeroLibraryCallProtection(input.bytecode, input.address) : input.bytecode,
+    bytecodeType,
     // Forwarded verbatim: the service accepts the version with or without a
     // leading `v`, so forge's bare `0.8.10+commit.…` needs no normalisation.
     compilerVersion: input.compilerVersion,
@@ -190,6 +197,91 @@ export async function fetchDeployedBytecode(address: string): Promise<string | n
   } finally {
     clearTimeout(timer)
   }
+}
+
+// A submitted `creationTransactionHash`, checked against the chain before the
+// job is accepted: it must be a successful transaction that created `address`.
+// A direct deployment (`to` null) created it iff its receipt's contractAddress
+// is the address, and its input IS the creation input, so creation matching can
+// run. A factory deployment is a call whose execution created the address; this
+// node exposes no call tracer (debug_traceTransaction is not served), so neither
+// the init code nor the creating transaction can be read out of the block. What
+// can be proven is that the address had no code before the transaction's block
+// and has code at its end, so that is the check, and creation matching is
+// skipped (`initCode` null) — at block granularity, a different transaction of
+// the same block that created the address would also pass it.
+export type CreationTransaction = { txHash: string; blockNumber: number; initCode: string | null }
+
+export type CreationTransactionResult =
+  | { ok: true; creation: CreationTransaction }
+  | { ok: false; code: 'invalid_parameter' | 'internal_error'; message: string }
+
+async function ethRpc(method: string, params: unknown[]): Promise<{ ok: true; result: unknown } | { ok: false }> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 8_000)
+  try {
+    const res = await fetch(SUBSTRATE_RPC_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      signal: ctrl.signal,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    })
+    if (!res.ok) return { ok: false }
+    const json = (await res.json()) as { result?: unknown; error?: unknown }
+    if (json.error || !('result' in json)) return { ok: false }
+    return { ok: true, result: json.result }
+  } catch {
+    return { ok: false }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function resolveCreationTransaction(txHash: string, address: string): Promise<CreationTransactionResult> {
+  const hash = txHash.trim().toLowerCase()
+  const addr = address.toLowerCase()
+  if (!/^0x[0-9a-f]{64}$/.test(hash)) {
+    return { ok: false, code: 'invalid_parameter', message: 'creationTransactionHash must be a 32-byte hex string' }
+  }
+  const unavailable = { ok: false as const, code: 'internal_error' as const, message: 'Could not read the creation transaction from the node; try again later' }
+  const [txRes, receiptRes] = await Promise.all([
+    ethRpc('eth_getTransactionByHash', [hash]),
+    ethRpc('eth_getTransactionReceipt', [hash]),
+  ])
+  if (!txRes.ok || !receiptRes.ok) return unavailable
+  const tx = txRes.result as { to?: string | null; input?: string; blockNumber?: string | null } | null
+  const receipt = receiptRes.result as { contractAddress?: string | null; status?: string; blockNumber?: string | null } | null
+  if (!tx || !receipt || !tx.blockNumber) {
+    return { ok: false, code: 'invalid_parameter', message: `Transaction ${hash} was not found in a block on this chain` }
+  }
+  const blockNumber = Number.parseInt(tx.blockNumber, 16)
+  if (receipt.status !== '0x1') {
+    return { ok: false, code: 'invalid_parameter', message: `Transaction ${hash} reverted, so it created no contract` }
+  }
+  if (tx.to == null) {
+    const created = (receipt.contractAddress ?? '').toLowerCase()
+    if (created !== addr) {
+      return { ok: false, code: 'invalid_parameter', message: `Transaction ${hash} created ${created || 'no contract'}, not ${addr}` }
+    }
+    const initCode = typeof tx.input === 'string' && /^0x[0-9a-f]*$/i.test(tx.input) ? tx.input.toLowerCase() : null
+    return { ok: true, creation: { txHash: hash, blockNumber, initCode } }
+  }
+  if (!Number.isInteger(blockNumber) || blockNumber < 1) {
+    return { ok: false, code: 'invalid_parameter', message: `Transaction ${hash} did not create ${addr}` }
+  }
+  const [before, after] = await Promise.all([
+    ethRpc('eth_getCode', [addr, `0x${(blockNumber - 1).toString(16)}`]),
+    ethRpc('eth_getCode', [addr, `0x${blockNumber.toString(16)}`]),
+  ])
+  if (!before.ok || !after.ok || typeof before.result !== 'string' || typeof after.result !== 'string') return unavailable
+  if (!isEmptyCode(before.result) || isEmptyCode(after.result)) {
+    return {
+      ok: false,
+      code: 'invalid_parameter',
+      message: `Transaction ${hash} did not create ${addr}: ${isEmptyCode(before.result) ? `it has no code at block ${blockNumber}` : `it already had code before block ${blockNumber}`}`,
+    }
+  }
+  return { ok: true, creation: { txHash: hash, blockNumber, initCode: null } }
 }
 
 export function isEmptyCode(code: string): boolean {
