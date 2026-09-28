@@ -9,6 +9,7 @@ import {
   readXYKState,
   refreshAccruingPoolFields,
   stableswapAmplificationAt,
+  withStoredStableswapParams,
 } from '../../src/raw/snapshot.ts'
 import type { SnapshotStableswapPoolState } from '../../src/raw/types.ts'
 import * as evmStorage from '../../src/types/evm/storage.ts'
@@ -329,5 +330,34 @@ describe('readStableswapState', () => {
     ])
 
     expect(pool).toMatchObject({ pool_id: 7, fee: 100, amplification: '50' })
+  })
+})
+
+describe('withStoredStableswapParams', () => {
+  it('replaces the cached ramp and fee with storage and keeps the rest of the entry', async () => {
+    // The shape main's RPC fallback passes: the cache's PoolCreated seed (blocks 0, the event's fee).
+    patch(stableswapStorage.pools.v183, {
+      is: () => true,
+      getMany: async (_b: Block, ids: number[]) => ids.map(id => id === 146
+        ? { assets: [46, 222], initialAmplification: 100, finalAmplification: 100, initialBlock: 12_561_497, finalBlock: 12_561_497, fee: 200 }
+        : undefined),
+    })
+
+    const pools = await withStoredStableswapParams({ height: 12_561_600 } as Block, [
+      { poolId: 146, assets: [46, 222], initialAmplification: 100, finalAmplification: 100, initialBlock: 0, finalBlock: 0, fee: 400 },
+      { poolId: 7, assets: [5, 10], initialAmplification: 50, finalAmplification: 50, initialBlock: 1, finalBlock: 1, fee: 100 },
+    ])
+
+    expect(pools).toEqual([
+      { poolId: 146, assets: [46, 222], initialAmplification: 100, finalAmplification: 100, initialBlock: 12_561_497, finalBlock: 12_561_497, fee: 200 },
+      { poolId: 7, assets: [5, 10], initialAmplification: 50, finalAmplification: 50, initialBlock: 1, finalBlock: 1, fee: 100 },
+    ])
+  })
+
+  it('keeps the cached parameters where Stableswap.Pools storage is not decodable', async () => {
+    patch(stableswapStorage.pools.v183, { is: () => false })
+    const cached = [{ poolId: 1, assets: [2, 3], initialAmplification: 9, finalAmplification: 9, initialBlock: 0, finalBlock: 0, fee: 5 }]
+
+    expect(await withStoredStableswapParams({ height: 1 } as Block, cached)).toBe(cached)
   })
 })
