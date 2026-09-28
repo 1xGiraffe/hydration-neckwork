@@ -57,7 +57,9 @@ describe('aToken asset-list holder counts', () => {
       ],
       b0: 8_200_000,
     })
-    expect(request.query).toContain("NOT startsWith(holder, '0x6d6f646c')")
+    // Pallet accounts (the Treasury, the Omnipool) are holders like any other: the
+    // count must agree with the holder page, which lists them.
+    expect(request.query).not.toContain('6d6f646c')
     expect(request.query).toContain('HAVING scaled > 0')
     expect(request.clickhouse_settings).toMatchObject({
       max_threads: 4,
