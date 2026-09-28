@@ -5,12 +5,14 @@ import {
   eventCurrencyId,
   getStableswapPoolAccount,
   poolPalletEventFamily,
+  readStableswapState,
   readXYKState,
   refreshAccruingPoolFields,
   stableswapAmplificationAt,
 } from '../../src/raw/snapshot.ts'
 import type { SnapshotStableswapPoolState } from '../../src/raw/types.ts'
 import * as evmStorage from '../../src/types/evm/storage.ts'
+import * as stableswapStorage from '../../src/types/stableswap/storage.ts'
 import * as systemStorage from '../../src/types/system/storage.ts'
 import * as tokensStorage from '../../src/types/tokens/storage.ts'
 import type { Block } from '../../src/types/support.ts'
@@ -276,5 +278,50 @@ describe('poolPalletEventFamily', () => {
     expect(poolPalletEventFamily({ name: 'Broadcast.Swapped3' })).toBeNull()
     expect(poolPalletEventFamily({ name: 'Omnipool' })).toBeNull()
     expect(poolPalletEventFamily({})).toBeNull()
+  })
+})
+
+describe('readStableswapState', () => {
+  function installStableswap(info: Record<number, unknown>): void {
+    installStorage()
+    patch(tokensStorage.totalIssuance.v108, { is: () => true, getMany: async (_b: Block, ids: number[]) => ids.map(() => 1_000n) })
+    patch(stableswapStorage.pools.v183, { is: () => true, getMany: async (_b: Block, ids: number[]) => ids.map(id => info[id]) })
+    for (const version of [stableswapStorage.poolPegs.v305, stableswapStorage.poolPegs.v323, stableswapStorage.poolPegs.v378]) {
+      patch(version, { is: () => false })
+    }
+  }
+
+  it('publishes the pool parameters Stableswap.Pools stores, not the cached copy', async () => {
+    // Pool 146 at grid height 12,561,600: the cache published the new pool with
+    // initial_block/final_block 0 and a fee of 400; storage holds its creation block and 200.
+    installStableswap({ 146: { assets: [46, 222], initialAmplification: 100, finalAmplification: 100, initialBlock: 12_561_497, finalBlock: 12_561_497, fee: 200 } })
+
+    const [pool] = await readStableswapState({ height: 12_561_600 } as Block, [
+      { poolId: 146, assets: [46, 222], initialAmplification: 100, finalAmplification: 100, initialBlock: 0, finalBlock: 0, fee: 400 },
+    ])
+
+    expect(pool).toMatchObject({ pool_id: 146, initial_block: 12_561_497, final_block: 12_561_497, fee: 200, amplification: '100' })
+  })
+
+  it('computes the amplification from the stored ramp', async () => {
+    // Pool 690 at 8,650,000: the stored ramp 100 -> 1000 over 8,628,000-8,700,000,
+    // while the cache still held the previous 22 -> 100 ramp.
+    installStableswap({ 690: { assets: [5, 1001], initialAmplification: 100, finalAmplification: 1000, initialBlock: 8_628_000, finalBlock: 8_700_000, fee: 200 } })
+
+    const [pool] = await readStableswapState({ height: 8_650_000 } as Block, [
+      { poolId: 690, assets: [5, 1001], initialAmplification: 22, finalAmplification: 100, initialBlock: 7_422_222, finalBlock: 7_441_722, fee: 200 },
+    ])
+
+    expect(pool).toMatchObject({ initial_amplification: 100, final_amplification: 1000, amplification: '375' })
+  })
+
+  it('keeps the cached parameters of a pool storage does not hold', async () => {
+    installStableswap({})
+
+    const [pool] = await readStableswapState({ height: 100 } as Block, [
+      { poolId: 7, assets: [5, 10], initialAmplification: 50, finalAmplification: 50, initialBlock: 1, finalBlock: 1, fee: 100 },
+    ])
+
+    expect(pool).toMatchObject({ pool_id: 7, fee: 100, amplification: '50' })
   })
 })

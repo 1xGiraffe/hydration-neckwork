@@ -346,9 +346,41 @@ export function stableswapAmplificationAt(
 
 let stableswapPegStorageSeen = false
 
+/**
+ * Each pool's parameters as `Stableswap.Pools` stores them at `block`, over the
+ * caller's (event-maintained) copy: the composition cache's copy has published a
+ * new pool's `initial_block`/`final_block` as 0 (PoolCreated carries no block), a
+ * fee its storage never held and a ramp it never applied (measured at grid heights
+ * 3,640,200, 6,990,000, 8,625,600, 12,561,600). A pool with no storage entry keeps
+ * the caller's parameters.
+ */
+async function withStoredStableswapParams<T extends {
+  poolId: number
+  initialAmplification: number
+  finalAmplification: number
+  initialBlock: number
+  finalBlock: number
+  fee: number
+}>(block: Block, pools: T[]): Promise<T[]> {
+  if (pools.length === 0 || !storage.stableswap.pools.v183.is(block)) return pools
+  const infos = await getManyChunked(pools.map(pool => pool.poolId), page => storage.stableswap.pools.v183.getMany(block, page))
+  return pools.map((pool, index) => {
+    const info = infos[index]
+    if (info == null) return pool
+    return {
+      ...pool,
+      initialAmplification: info.initialAmplification,
+      finalAmplification: info.finalAmplification,
+      initialBlock: info.initialBlock,
+      finalBlock: info.finalBlock,
+      fee: info.fee,
+    }
+  })
+}
+
 export async function readStableswapState(
   block: Block,
-  pools: Array<{
+  cachedPools: Array<{
     poolId: number
     assets: number[]
     initialAmplification: number
@@ -361,6 +393,7 @@ export async function readStableswapState(
   if (!storage.tokens.accounts.v108.is(block)) {
     throw new Error(`Unsupported Tokens.Accounts storage for Stableswap pools at block ${block.height}`)
   }
+  const pools = await withStoredStableswapParams(block, cachedPools)
 
   const keys: [string, number][] = []
   const poolOffsets: number[] = []
