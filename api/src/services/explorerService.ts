@@ -38,6 +38,7 @@ import {
   type MultisigOperationState,
 } from './onBehalfActivity.ts'
 import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
+import { currentMmOraclePrices, withMmOraclePrices } from './mmOraclePrices.ts'
 import { deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
 import { XCM_BARRIER_EVENTS, XCM_IN_DEPOSIT_EVENTS, XCM_IN_WALK_EVENTS, XCM_WALK_CROSSABLE_EVENTS } from './xcmWalkEvents.ts'
 import { OMNIPOOL_ACCOUNT, PRICE_LOOKBACK_DAYS, formatUnits, isPoolOwnHubHolding, poolOwnHubHoldingSql, renderUsd, scaledUsd } from './valuation.ts'
@@ -1761,12 +1762,21 @@ async function refreshPrices(): Promise<Map<number, PriceInfo>> {
     // currentPriceOf is the one precedence rule (own entry first) the public API and
     // the Data API apply too. A share token itself is never aliased: unpriced stays
     // unpriced.
-    for (const aToken of Object.keys(PRICE_ALIAS_ID)) {
-      const id = Number(aToken)
-      if (isStableswapShareToken(id)) continue
-      const u = currentPriceOf(m, id)
-      if (u) m.set(id, u)
+    const applyAliases = () => {
+      for (const aToken of Object.keys(PRICE_ALIAS_ID)) {
+        const id = Number(aToken)
+        if (isStableswapShareToken(id) || m.has(id)) continue
+        const u = currentPriceOf(m, id)
+        if (u) m.set(id, u)
+      }
     }
+    applyAliases()
+    // A primary-market reserve no venue prices any more (WBTC) takes the market's
+    // own oracle price, after every feed, share and alias had its turn so it only
+    // ever fills a gap; the aliases then run again for its aToken. A share keeps
+    // the redeemable-value rule and is never filled this way. See mmOraclePrices.ts.
+    const oracle = new Map([...currentMmOraclePrices()].filter(([id]) => !isStableswapShareToken(id)))
+    if (withMmOraclePrices(m, oracle, entry => ({ price: entry.price, priceRaw: entry.priceRaw, change24h: 0 })).length) applyAliases()
     priceMap = m
     priceLoadedAt = Date.now()
   } catch { /* serve stale on error */ }
