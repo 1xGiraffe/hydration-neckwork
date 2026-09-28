@@ -287,10 +287,12 @@ export async function assetCandles(client: ClickHouseClient, assetId: number, bu
 }
 
 // ---------------------------------------------------------------------------
-// Holders: top-N by current balance. Substrate balances come from the
-// asset-first argMax projection (asset_account_latest_balances); an asset with
-// no substrate rows falls back to the ERC-20 wallet snapshot (the aToken-form
-// assets whose balances never touch the substrate table).
+// Holders: top-N by current balance, over both balance pots the explorer's
+// holder page sums: the asset-first Tokens-side projection
+// (asset_account_latest_balances) plus the ERC-20 wallet snapshot
+// (erc20_wallet_balances) for the contract-backed assets — HOLLAR has holders
+// on both sides, uBIL and the Gamma vault share only in the contract. The two
+// pots are separate on-chain balances, so an account's amount is their sum.
 // ---------------------------------------------------------------------------
 
 export interface HolderRow { accountId: string; amount: string; lastBlock: number | null }
@@ -305,40 +307,32 @@ export const HOLDERS_RANK_DEPTH = 100
 export async function assetHolders(client: ClickHouseClient, assetId: number, limit: number): Promise<HoldersResult> {
   const res = await client.query({
     query: `-- data:assets:holders
-        SELECT account_id, total, last_block, count() OVER () AS holder_count
+        SELECT account_id, toString(bal) AS amount, last_block, count() OVER () AS holder_count
         FROM (
-          SELECT account_id, ifNull(argMaxMerge(total_state), '0') AS total, maxMerge(last_block_state) AS last_block
-          FROM price_data.asset_account_latest_balances
-          WHERE asset_id = {assetId:String}
+          SELECT account_id, sum(pot_bal) AS bal, max(pot_block) AS last_block
+          FROM (
+            SELECT account_id, toUInt256OrZero(ifNull(argMaxMerge(total_state), '0')) AS pot_bal, maxMerge(last_block_state) AS pot_block
+            FROM price_data.asset_account_latest_balances
+            WHERE asset_id = {assetId:String}
+            GROUP BY account_id
+            UNION ALL
+            -- The ERC-20-side pot carries no observation block.
+            SELECT account_id, toUInt256OrZero(argMax(total, updated_at)) AS pot_bal, toUInt32(0) AS pot_block
+            FROM price_data.erc20_wallet_balances
+            WHERE asset_id = {assetId:String}
+            GROUP BY account_id
+          )
           GROUP BY account_id
-          HAVING toUInt256OrZero(total) > 0
+          HAVING bal > 0
         )
-        ORDER BY toUInt256OrZero(total) DESC
+        ORDER BY bal DESC, account_id
         LIMIT {limit:UInt32}`,
     query_params: { assetId: String(assetId), limit },
     format: 'JSONEachRow',
   })
-  const rows = await res.json<{ account_id: string; total: string; last_block: number; holder_count: string | number }>()
-  if (rows.length > 0) {
-    return {
-      rows: rows.map(row => ({ accountId: row.account_id, amount: row.total, lastBlock: Number(row.last_block) || null })),
-      holderCount: Number(rows[0].holder_count),
-    }
-  }
-  // ERC-20-form assets (their transfers never hit raw_balance_observations).
-  const erc20 = await client.query({
-    query: `-- data:assets:holders-erc20
-        SELECT account_id, total, count() OVER () AS holder_count
-        FROM price_data.erc20_wallet_balances FINAL
-        WHERE asset_id = {assetId:String} AND toUInt256OrZero(total) > 0
-        ORDER BY toUInt256OrZero(total) DESC
-        LIMIT {limit:UInt32}`,
-    query_params: { assetId: String(assetId), limit },
-    format: 'JSONEachRow',
-  })
-  const erc20Rows = await erc20.json<{ account_id: string; total: string; holder_count: string | number }>()
+  const rows = await res.json<{ account_id: string; amount: string; last_block: number | string; holder_count: string | number }>()
   return {
-    rows: erc20Rows.map(row => ({ accountId: row.account_id, amount: row.total, lastBlock: null })),
-    holderCount: Number(erc20Rows[0]?.holder_count ?? 0),
+    rows: rows.map(row => ({ accountId: row.account_id, amount: row.amount, lastBlock: Number(row.last_block) || null })),
+    holderCount: Number(rows[0]?.holder_count ?? 0),
   }
 }
