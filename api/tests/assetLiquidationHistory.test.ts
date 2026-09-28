@@ -112,8 +112,8 @@ describe('an asset page finds its reserve through every alias', () => {
     expect(functionBody('mmReserveScope')).toContain('mmReserveAddressForAsset(candidate)')
     const ids = functionBody('mmReserveIdsForAsset')
     expect(ids).toContain('ATOKEN_UNDERLYING_ID[assetId] ?? assetId')
-    expect(ids).toContain('UNDERLYING_TO_SHARE_IDS[assetId]')
-    expect(ids).toContain('UNDERLYING_TO_SHARE_IDS[direct]')
+    expect(ids).toContain('supplyFoldedShareIds(assetId)')
+    expect(ids).toContain('supplyFoldedShareIds(direct)')
     // Nothing else may resolve reserve addresses from a token id on its own.
     expect(occurrences(explorerService, 'flatMap(mmReserveAddressForAsset)')).toBe(1)
     expect(functionBody('mmTokenMatchIds')).toContain('tokenIds.flatMap(mmReserveIdsForAsset)')

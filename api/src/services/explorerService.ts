@@ -18,7 +18,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, UNDERLYING_TO_SHARE_IDS, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareFoldsIntoDisplaySupply, supplyFoldedShareIds, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareFoldsIntoDisplaySupply, supplyFoldedShareIds, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT, lbpPools, stableswapPoolAccount } from './tagService.ts'
@@ -128,10 +128,11 @@ export { assetIdFromMmAddress, mmReserveAddressForAsset }
 //   • both at once (atBTC 1006 → tBTC 1000765).
 // One source for the whole app, so a filter and a per-asset read can never disagree
 // about which rows are the asset's.
+// A share counts only where it displays as the asset (displayAssetId): 2-Pool-PRIME
+// holds PRIME and is its own asset, so PRIME's page and filter leave its reserve out.
 export function mmReserveIdsForAsset(assetId: number): number[] {
   const direct = ATOKEN_UNDERLYING_ID[assetId] ?? assetId
-  return [...new Set([assetId, direct,
-    ...(UNDERLYING_TO_SHARE_IDS[assetId] ?? []), ...(UNDERLYING_TO_SHARE_IDS[direct] ?? [])])]
+  return [...new Set([assetId, direct, ...supplyFoldedShareIds(assetId), ...supplyFoldedShareIds(direct)])]
 }
 
 // The reserve addresses a token filter has to match. Asking for GDOT matched only
@@ -160,7 +161,7 @@ export function mmReserveAddressesForTokens(tokenIds: number[]): string[] {
 // away, so a filtered feed found nothing and its walker kept searching until it hit
 // the depth bound — asking for aDOT or GETH answered 503 rather than 0.
 export function mmReserveAliasIds(reserveId: number): number[] {
-  const aliases = [UNDERLYING_TO_ATOKEN_ID[reserveId], SHARE_TOKEN_UNDERLYING_ID[reserveId]]
+  const aliases = [UNDERLYING_TO_ATOKEN_ID[reserveId], displayAssetId(reserveId)]
   return [...new Set(aliases.filter((id): id is number => id != null && id !== reserveId))]
 }
 function mmAssetIdSql(expr: string): string {
@@ -3556,11 +3557,8 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
       const [prices, allRows, supplies] = await Promise.all([ensurePrices(), getATokenHolders(assetId, 1_000_000, viewerFold), getATokenTotalSupplies()])
       const all = markViewerHolderTags(allRows, viewerFold)
       // Value the asset at its reconstructed total supply — the same figure the
-      // assets list shows. Summing the displayed rows instead would shrink the TVL
-      // by whatever pallet accounts hold (35% of aDOT sits in the Omnipool), so the
-      // two surfaces reported different TVLs for one asset and every share was
-      // measured against the reduced denominator. Pallet holders stay out of the
-      // displayed list, so the shares of what IS displayed sum to below 100%.
+      // assets list shows. Pallet accounts are holders too (35% of aDOT sits in the
+      // Omnipool, the Treasury holds BIL), so the rows sum to that supply.
       const supply = supplies.get(assetId)
       const totalUsd = supply != null
         ? usdValue(prices, assetId, supply.toString(), a.decimals) ?? 0
@@ -5528,7 +5526,7 @@ async function getATokenReserves(): Promise<ATokenReserve[]> {
 }
 
 // Scaled balance per holder for ONE token contract (aToken or vDebt): anchor + Σ delta.
-// Module/pallet accounts are included (caller filters them from a displayed list).
+// Module/pallet accounts are included.
 async function reconstructHolderScaled(contract: string, b0: number): Promise<{ holder: string; scaled: bigint }[]> {
   const deltaTable = 'price_data.atoken_scaled_deltas_by_contract'
   const res = await client.query({
@@ -5550,7 +5548,7 @@ async function reconstructHolderScaled(contract: string, b0: number): Promise<{ 
 
 // Current positive holder counts for multiple aToken contracts in one scan.
 // This is the count-only equivalent of reconstructHolderScaled: the same
-// anchor/delta fold and module-account exclusion, without materializing every
+// anchor/delta fold, pallet accounts included, without materializing every
 // holder or enriching account identities for the asset directory.
 export async function reconstructATokenHolderCounts(
   db: ClickHouseClient,
@@ -5578,7 +5576,7 @@ export async function reconstructATokenHolderCounts(
           GROUP BY contract, holder
         )
         GROUP BY contract, holder
-        HAVING scaled > 0 AND NOT startsWith(holder, '0x6d6f646c')
+        HAVING scaled > 0
       ) GROUP BY contract`,
     query_params: { contracts: normalized, b0 },
     format: 'JSONEachRow',
@@ -6640,8 +6638,9 @@ function accountIdFromH160(h160: string): string | null {
 // aTokens (aPRIME 1043, aDOT 1001, …) are Aave scaled-balance receipts held EVM-side;
 // they never hit substrate Tokens.Accounts. Per-holder balances are reconstructed from
 // the anchor + indexed Mint/Burn/BalanceTransfer deltas (reconstructHolderScaled) and
-// scaled by the reserve's current liquidityIndex — no per-request RPC. Module/pallet
-// accounts are excluded from the displayed list. Returns HolderRow[] ranked by balance.
+// scaled by the reserve's current liquidityIndex — no per-request RPC. Pallet accounts
+// are holders like any other, so the rows sum to the reconstructed total supply.
+// Returns HolderRow[] ranked by balance.
 async function getATokenHolders(aTokenAssetId: number, limit: number, viewerFold?: ViewerFold): Promise<HolderRow[]> {
   const underlyingId = ATOKEN_UNDERLYING_ID[aTokenAssetId]
   if (underlyingId == null) return []
@@ -6654,8 +6653,10 @@ async function getATokenHolders(aTokenAssetId: number, limit: number, viewerFold
     const reserve = (await getATokenReserves()).find(entry => entry.assetId === aTokenAssetId)
     if (!reserve) return []
     const scaled = await reconstructHolderScaled(reserve.token.aToken, b0)
+    // Every positive balance is a holder, pallet accounts included (the Treasury's
+    // BIL, the Omnipool's aDOT): the substrate-side holder page keeps them too, and
+    // leaving them out made the rows sum short of the supply the page values.
     return scaled
-      .filter(s => !s.holder.startsWith('0x6d6f646c'))   // exclude module/pallet accounts from the list
       .map(s => ({ h160: s.holder, bal: settledAmount(s.scaled, reserve.liquidityIndex) }))
       .filter(h => h.bal > 0n)
   })

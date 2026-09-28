@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
+  displayAssetId,
   loadExplorerAssets,
   registerStableswapPoolMembers,
   shareFoldsIntoDisplaySupply,
@@ -45,6 +46,17 @@ describe('share holdings in a display asset\'s supply', () => {
     expect(supplyFoldedShareIds(55)).toEqual([])
   })
 
+  it('shows a share under its display asset exactly where it folds into its supply', async () => {
+    await loadExplorerAssets(client)
+    // 2-Pool-BIL is the BIL/HOLLAR pool, not BIL: a wallet's shares keep their own row.
+    expect(displayAssetId(10055)).toBe(10055)
+    expect(displayAssetId(143)).toBe(143)
+    expect(displayAssetId(104)).toBe(104)
+    expect(displayAssetId(690)).toBe(69)
+    expect(displayAssetId(111)).toBe(1111)
+    expect(displayAssetId(55)).toBe(55)
+  })
+
   it('folds a share that a named product wraps', async () => {
     await loadExplorerAssets(client)
     expect(shareFoldsIntoDisplaySupply(690)).toBe(true)
@@ -76,5 +88,18 @@ describe('every supply fold applies the rule', () => {
     expect(body('async function foldedDisplayHolderCounts', '\n}\n')).toContain('if (!shareFoldsIntoDisplaySupply(Number(shareId))) continue')
     expect(body('export async function getHolders(', '\n}\n')).toContain('const foldedShareIds = supplyFoldedShareIds(assetId)')
     expect(body('async function getFoldedDisplayAssetHolders', '\n}\n')).toContain('&& shareFoldsIntoDisplaySupply(id)')
+  })
+
+  it('the money-market reserve aliases of an asset page, filter and row', () => {
+    expect(body('export function mmReserveIdsForAsset', '\n}\n')).toContain('supplyFoldedShareIds(assetId)')
+    expect(body('export function mmReserveAliasIds', '\n}\n')).toContain('displayAssetId(reserveId)')
+  })
+})
+
+// aToken holders are every positive balance, pallet accounts included, so the
+// holder page sums to the supply it is valued at and agrees with the directory count.
+describe('aToken holder pages keep pallet accounts', () => {
+  it('reconstructs holders without a module-account filter', () => {
+    expect(body('async function getATokenHolders', '\n}\n')).not.toContain('6d6f646c')
   })
 })
