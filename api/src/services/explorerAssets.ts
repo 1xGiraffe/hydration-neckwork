@@ -447,7 +447,8 @@ async function injectBonds(client: ClickHouseClient): Promise<void> {
 }
 
 // Stableswap/pool SHARE tokens (2-Pool-GDOT, 2-Pool-HUSDC, …) → the main asset they
-// display as (displayAssetId) and borrow artwork from. For HISTORICAL valuation
+// display as (displayAssetId, where shareFoldsIntoDisplaySupply allows) and borrow
+// artwork from. For HISTORICAL valuation
 // (candles) the share also prices through it — a unit-price proxy, not NAV, since a
 // share has no redeemable-value history. CURRENT valuation never uses this alias: a
 // share's current price is its derived redeemable value (see currentPriceAssetId).
@@ -526,9 +527,11 @@ export function registerStableswapPoolMembers(poolId: number, members: number[] 
 }
 
 /**
- * Whether a share's holdings add to its display asset's SUPPLY — the assets
- * directory's total and holder count, and the asset page's holder list — rather
- * than only borrowing its name and artwork (displayAssetId).
+ * Whether a share IS its display asset: its holdings add to that asset's SUPPLY —
+ * the assets directory's total and holder count, and the asset page's holder list —
+ * and a held share shows under that asset's row (displayAssetId). One rule for
+ * both, so a wallet's balance never says "BIL" for something BIL's supply does
+ * not count.
  *
  * They do when the share IS the display asset's economic substance: GDOT, HUSDT,
  * GETH… are money-market wrappers over the share, so the share count is the
@@ -538,7 +541,9 @@ export function registerStableswapPoolMembers(poolId: number, members: number[] 
  * counts the pool's holding (the pool account is one of its holders), so adding the
  * shares — a claim on that holding plus the pool's other legs — counts the pool's
  * reserve twice and prices its other legs as the display asset: BIL read $3.14M
- * against a $2.52M supply. A pool whose members are not known yet keeps the fold.
+ * against a $2.52M supply. Such a share is a pool position of its own (2-Pool-BIL,
+ * the BIL/HOLLAR pool), not the asset, and keeps its own name and row. A pool whose
+ * members are not known yet keeps the fold.
  */
 export function shareFoldsIntoDisplaySupply(shareId: number): boolean {
   const displayId = SHARE_TOKEN_UNDERLYING_ID[shareId]
@@ -592,14 +597,16 @@ export function currentPriceOf<T>(prices: ReadonlyMap<number, T>, assetId: numbe
 
 // The asset id under which `assetId` should be DISPLAYED in per-account holdings:
 // a held Stableswap pool-share token (2-Pool-GDOT, …) is shown as its underlying
-// main asset (GDOT), mirroring preis-ui which hides "-Pool" tokens. Unlike
+// main asset (GDOT), mirroring preis-ui which hides "-Pool" tokens — only where the
+// share IS that asset (shareFoldsIntoDisplaySupply); 2-Pool-BIL, 2-Pool-PRIME,
+// 2-Pool-apyUSD and 2-Pool-WETH hold it and stay themselves. Unlike
 // priceAssetId this folds ONLY share tokens, never aTokens (aToken / money-market
 // collateral is folded separately via the MM path). Aggregate holder/supply views
 // may fold these only when the hidden share id is removed from presentation and a
 // money-market custody balance is replaced—not added to—its beneficial aToken
 // holders; otherwise the vault would be double-counted.
 export function displayAssetId(assetId: number): number {
-  return SHARE_TOKEN_UNDERLYING_ID[assetId] ?? assetId
+  return shareFoldsIntoDisplaySupply(assetId) ? SHARE_TOKEN_UNDERLYING_ID[assetId] : assetId
 }
 
 // Reverse of ATOKEN_UNDERLYING_ID: underlying reserve asset id → its aToken id.
@@ -734,7 +741,10 @@ export function assetIdsForToken(token?: string): number[] | undefined {
 // 2-Pool-GDOT (690), not GDOT (69) — so a reserve lookup has to be able to reach the
 // share token from the main id. A list, since nothing stops two pools folding into
 // one main asset. Decimals are NOT shared across the pair (2-Pool-PRIME carries 18
-// where PRIME carries 6), so callers must read each id's own descriptor.
+// where PRIME carries 6), so callers must read each id's own descriptor. The static
+// list keeps every hand-kept share; the explorer reads supplyFoldedShareIds, which
+// drops the shares whose pool holds the asset (2-Pool-PRIME is not PRIME), while the
+// public API's frozen money-market event filter keeps this one.
 export const UNDERLYING_TO_SHARE_IDS: Record<number, number[]> = (() => {
   const out: Record<number, number[]> = {}
   for (const [share, underlying] of Object.entries(SHARE_TOKEN_UNDERLYING_ID)) {
