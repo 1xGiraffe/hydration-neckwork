@@ -352,9 +352,10 @@ let stableswapPegStorageSeen = false
  * new pool's `initial_block`/`final_block` as 0 (PoolCreated carries no block), a
  * fee its storage never held and a ramp it never applied (measured at grid heights
  * 3,640,200, 6,990,000, 8,625,600, 12,561,600). A pool with no storage entry keeps
- * the caller's parameters.
+ * the caller's parameters. Both the raw snapshot and main's RPC fallback read
+ * their pools through this.
  */
-async function withStoredStableswapParams<T extends {
+export async function withStoredStableswapParams<T extends {
   poolId: number
   initialAmplification: number
   finalAmplification: number

@@ -1,5 +1,4 @@
 import { processor } from './processor.js'
-import { calculate_amplification } from '@galacticcouncil/math-stableswap'
 import { Database } from './db/database.js'
 import { AssetRegistryTracker } from './registry/tracker.js'
 import { AtokenReserveMap } from './registry/atokenReserves.js'
@@ -30,7 +29,12 @@ import {
 } from './nativeAsset.js'
 import { toClickHouseBlockTime } from './db/timestamp.js'
 import { fetchChainHead } from './rpc/head.js'
-import { detectPoolAffectingSetStorage, readXYKState as readSnapshotXykState } from './raw/snapshot.js'
+import {
+  detectPoolAffectingSetStorage,
+  readXYKState as readSnapshotXykState,
+  stableswapAmplificationAt,
+  withStoredStableswapParams,
+} from './raw/snapshot.js'
 import { createSnapshotRpcClient, loadRuntimeAt } from './scripts/snapshotRuntime.js'
 import { extractRuntimeErrorNames } from './raw/runtimeErrorNames.js'
 import type { RpcClient } from '@subsquid/rpc-client'
@@ -269,15 +273,16 @@ let stableswapPegStorageSeen = false
 /**
  * Read Stableswap pool states from chain storage using cached pool entries
  *
- * Uses cached pool metadata (assets, amplification params, fee) and only reads
- * token reserves from Tokens.Accounts per block.
+ * Takes the pool set and assets from the composition cache; the amplification
+ * ramp and fee come from `Stableswap.Pools` at the block, like the raw snapshot's,
+ * because the cache's event-maintained copy drifts from storage.
  *
  * Reserves are read from the pool's sovereign account via Tokens.Accounts.
  * Each pool's sovereign account is derived from PalletId("stblpool") + pool_id sub-account.
  */
 async function readStableswapState(
   block: Block,
-  pools: Array<{
+  cachedPools: Array<{
     poolId: number
     assets: number[]
     initialAmplification: number
@@ -295,6 +300,8 @@ async function readStableswapState(
   }
 
   try {
+    const pools = await withStoredStableswapParams(block, cachedPools)
+
     // Batch-read all pool reserves across all pools in one call
     const keys: [string, number][] = []
     const poolOffsets: number[] = []  // Track starting index for each pool
@@ -326,33 +333,7 @@ async function readStableswapState(
     for (let i = 0; i < pools.length; i++) {
       const poolEntry = pools[i]
 
-      // Calculate current amplification parameter using the official stableswap math package.
-      // This keeps ramp periods aligned with the protocol implementation.
-      const currentBlock = block.height
-      let amplification: bigint
-      try {
-        amplification = BigInt(calculate_amplification(
-          poolEntry.initialAmplification.toString(),
-          poolEntry.finalAmplification.toString(),
-          poolEntry.initialBlock.toString(),
-          poolEntry.finalBlock.toString(),
-          currentBlock.toString(),
-        ))
-      } catch {
-        if (currentBlock >= poolEntry.finalBlock) {
-          amplification = BigInt(poolEntry.finalAmplification)
-        } else if (currentBlock <= poolEntry.initialBlock) {
-          amplification = BigInt(poolEntry.initialAmplification)
-        } else {
-          const totalBlocks = poolEntry.finalBlock - poolEntry.initialBlock
-          const elapsedBlocks = currentBlock - poolEntry.initialBlock
-          const initialAmp = BigInt(poolEntry.initialAmplification)
-          const finalAmp = BigInt(poolEntry.finalAmplification)
-
-          amplification = initialAmp +
-            ((finalAmp - initialAmp) * BigInt(elapsedBlocks)) / BigInt(totalBlocks)
-        }
-      }
+      const amplification = stableswapAmplificationAt(poolEntry, block.height)
 
       // Extract reserves for this pool using offset.
       // For ERC20 assets (aTokens, HOLLAR), Tokens.Accounts returns null —
