@@ -209,7 +209,7 @@ export const assetsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
       tags: ['assets'],
       summary: 'Top holders by current balance',
       description: [
-        'Top-N only (limit 1-100, no cursor): the list answers "who holds this asset", not "enumerate every holder"; `holderCount` is the exact number of accounts with a nonzero balance. Substrate balances come from the asset-first latest-balance projection; assets whose balances live only in ERC-20 form (some aToken/HOLLAR-family ids) fall back to the ERC-20 wallet snapshot, whose rows carry no observation block (`lastBlock: null`).',
+        'Top-N only (limit 1-100, no cursor): the list answers "who holds this asset", not "enumerate every holder"; `holderCount` is the exact number of accounts with a nonzero balance. An account’s amount is the sum of its two balance pots, the same holder set the Explorer’s holder page counts: the Tokens-side balance from the asset-first latest-balance projection plus, for a contract-backed asset (HOLLAR, uBIL, the Gamma vault share), its ERC-20 wallet snapshot balance. A holder present only in the ERC-20 snapshot carries no observation block (`lastBlock: null`).',
         'Balances are CURRENT holdings in raw integer units; zero balances are excluded.',
       ].join('\n\n'),
       params: z.object({ id: zAssetId }),
