@@ -7,6 +7,7 @@ import { refreshWormholeBacking } from './wormholeNttService.ts'
 import { refreshXcswapSettlements } from './xcswapSettlements.ts'
 import { refreshLmRewards } from './lmRewardService.ts'
 import { refreshMmIncentives } from './mmIncentiveService.ts'
+import { refreshMmOraclePrices } from './mmOraclePrices.ts'
 
 // Coordinated scheduler for the background refreshers that read node-full
 // (chain-state enumeration and EVM eth_call). Previously each ran on its own
@@ -41,6 +42,9 @@ import { refreshMmIncentives } from './mmIncentiveService.ts'
 //                    of ClickHouse (the scaled fold of the 7 aTokens and the
 //                    incentive log sums) and one ~11k-row generation write
 //                                                              → every 5th tick (300s)
+//   mm-oracle-prices ~50ms node-full (3 batched eth_call round trips: pool +
+//                    provider plumbing, getAssetPrice + getSourceOfAsset per
+//                    primary reserve, latestRoundData per source) → every 5th tick (300s)
 // Worst case (every thirtieth minute — the cadences' common multiple — all of
 // them run back to back) ≈ 20–32s of node-full time in that 60s window, ≈ 7s in
 // the other windows — a low duty cycle, comfortably below the one backfill
@@ -120,6 +124,10 @@ const TASKS: RefreshTask[] = [
   // tick: 300s keeps the published figure three cycles inside the 15-minute
   // staleness gate the snapshot readers apply.
   { name: 'mm-incentives', everyTicks: 5, run: refreshMmIncentives },
+  // The primary money market's oracle price per reserve, the fallback current
+  // price of a reserve no venue prices (WBTC): three batched eth_call round trips
+  // (~60 calls). The feeds step every ~1.4% or heartbeat, so 300s is plenty.
+  { name: 'mm-oracle-prices', everyTicks: 5, run: refreshMmOraclePrices },
 ]
 
 // Tasks due on a given 1-based tick number (exported for testing the cadence).
