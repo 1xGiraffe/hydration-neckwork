@@ -23,6 +23,13 @@ const ASSET_ROWS: Row[] = [
   { asset_id: 1111, symbol: 'HUSDT', name: 'Hydrated Tether', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
   { asset_id: 1112, symbol: 'HUSDS', name: 'Hydrated USDS', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
   { asset_id: 1113, symbol: 'HUSDe', name: 'Hydrated USDe', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
+  // Pool shares: 2-Pool-HUSDC is published under its wrapper HUSDC, while
+  // 2-Pool-PRIME (PRIME + HOLLAR) keeps its own series — its wrapper a2-Pool-PRIME
+  // is no product name and PRIME is a LEG of the pool, not the share.
+  { asset_id: 110, symbol: '2-Pool-HUSDC', name: '2-Pool-HUSDC', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
+  { asset_id: 43, symbol: 'PRIME', name: 'PRIME', decimals: 6, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
+  { asset_id: 143, symbol: '2-Pool-PRIME', name: '2-Pool-PRIME', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
+  { asset_id: 1143, symbol: 'a2-Pool-PRIME', name: 'a2-Pool-PRIME', decimals: 18, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null },
 ]
 
 // DOT's own USD candles, as the Decimal strings the views return.
@@ -305,6 +312,38 @@ describe('GET /v1/prices/pair', () => {
       }
     } finally {
       await app2.close()
+    }
+  })
+
+  // The price writer publishes a Hydrated pool share only under its money-market
+  // wrapper (1:1 with it), so reading the share's own id served empty candles for
+  // every 2-Pool-H* pool (live: 110–113, 10044 over their whole history).
+  it('reads a Hydrated pool share from its wrapper\'s series, and any other share from its own', async () => {
+    const { registerShareWrapper } = await import('../../src/services/explorerAssets.ts')
+    registerShareWrapper(110, { aTokenId: 1110, marketKey: 'core' })
+    registerShareWrapper(143, { aTokenId: 1143, marketKey: 'core' })
+    const probe = fakeClient({ candles: { 1110: hydratedCandles(1110) } })
+    const app2 = await freshApp(probe)
+    try {
+      const crossQuote = () => probe.seen.filter(q => q.query.includes('INNER JOIN price_data.prices')).at(-1)?.params
+      const asQuote = await app2.inject(`/v1/prices/pair?assetIn=5&assetOut=110&bucket=1h&${WINDOW}`)
+      expect(asQuote.statusCode).toBe(200)
+      expect(asQuote.json().referenceAsset).toBe('110')
+      expect(crossQuote()).toMatchObject({ base_id: 5, quote_id: 1110 })
+
+      const asBase = await app2.inject(`/v1/prices/pair?assetIn=110&assetOut=10&bucket=1h&${WINDOW}`)
+      expect(asBase.statusCode).toBe(200)
+      expect(asBase.json().items[0].close).toBe('1.02')
+
+      await app2.inject(`/v1/prices/pair?assetIn=5&assetOut=143&bucket=1h&${WINDOW}`)
+      expect(crossQuote()).toMatchObject({ base_id: 5, quote_id: 143 })
+
+      // One series, so the "pair" is an asset in itself.
+      expect((await app2.inject(`/v1/prices/pair?assetIn=110&assetOut=1110&bucket=1h&${WINDOW}`)).statusCode).toBe(400)
+    } finally {
+      await app2.close()
+      registerShareWrapper(110, null)
+      registerShareWrapper(143, null)
     }
   })
 
