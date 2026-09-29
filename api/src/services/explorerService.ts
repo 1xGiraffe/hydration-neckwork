@@ -3044,6 +3044,9 @@ export interface ExtrinsicDetail extends ExtrinsicSummary {
   callArgs: unknown
   error: unknown
   errorReason: FailureReason | null
+  // The extrinsic succeeded but the call a wrapper inside it dispatched did not
+  // (wrappedDispatchError): what failed, decoded like errorReason. Additive.
+  innerErrorReason?: FailureReason
   events: { eventIndex: number; name: string; args: unknown; evmDecoded?: EvmLogDecode }[]
   // Verified-ABI decodes of the EVM calls this extrinsic performs (top-level
   // Ethereum.transact / EVM.call plus EVM.call nodes nested in wrapper call
@@ -3156,6 +3159,8 @@ async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<Extrinsi
   const evmTx = evmTransactionFacts(events)
   const feePayment = feePaymentOf(events, row.signer, row.fee, row.tip)
   const iceSolution = row.call_name === 'ICE.submit_solution' ? await iceSolutionPanel(row.block_height, row.extrinsic_index, row.ts, events) : null
+  const innerError = row.success === 1 ? wrappedDispatchError(events) : null
+  const innerErrorReason = innerError ? dispatchErrorReason(innerError, row.spec_version, resolveModuleError) : null
 
   return {
     blockHeight: row.block_height,
@@ -3176,6 +3181,7 @@ async function hydrateExtrinsicDetail(row: ExtrinsicDetailRow): Promise<Extrinsi
     ...(evmCalls.length ? { evmCalls } : {}),
     ...(evmTx ? { evmTx } : {}),
     ...(iceSolution ? { iceSolution } : {}),
+    ...(innerErrorReason ? { innerErrorReason } : {}),
   }
 }
 
@@ -11457,8 +11463,14 @@ export interface ActivityRow {
     pairMessageId: string | null
   }
   dca?: boolean
-  dcaStatus?: 'failed'
+  // 'failed' = an execution that did not trade; 'scheduled' = the schedule itself,
+  // on the extrinsic that created it (dcaScheduledRow).
+  dcaStatus?: 'failed' | 'scheduled'
   dcaError?: string
+  // Scheduled rows only: blocks between executions, and the whole budget (raw, in
+  // the sold asset) — null for an unbounded schedule.
+  dcaPeriodBlocks?: number
+  dcaTotalAmount?: string | null
   // The owning DCA schedule (links execution rows to the schedule page).
   dcaScheduleId?: number
   // Explicit link target (DCA executions link to the schedule extrinsic).
@@ -19232,6 +19244,23 @@ function dispatchErrorIndex(value: unknown): number | null {
 // A Module error in neither shape reports nothing, because 0 is both a real
 // pallet index (System) and a real error index, so defaulting either would name
 // a triple the row never stated.
+// The error of a call a WRAPPER dispatched — a multisig execution, a proxy call,
+// an interrupted batch — when the wrapper itself succeeded, so the extrinsic reads
+// success while nothing it asked for happened. Wrapper events are emitted
+// innermost-first (a proxied call's ProxyExecuted precedes its multisig's
+// MultisigExecuted), so the first failure is the one that names the cause.
+const RESULT_WRAPPER_EVENTS = new Set(['Multisig.MultisigExecuted', 'Proxy.ProxyExecuted', 'Utility.DispatchedAs', 'Sudo.Sudid', 'Sudo.SudoAsDone'])
+export function wrappedDispatchError(events: readonly { name: string; args: unknown }[]): unknown | null {
+  for (const e of events) {
+    const args = (e.args ?? {}) as { result?: { __kind?: unknown; value?: unknown }; sudoResult?: { __kind?: unknown; value?: unknown }; error?: unknown }
+    if (e.name === 'Utility.BatchInterrupted') return args.error ?? null
+    if (!RESULT_WRAPPER_EVENTS.has(e.name)) continue
+    const result = args.result ?? args.sudoResult
+    if (result?.__kind === 'Err') return result.value ?? null
+  }
+  return null
+}
+
 export function dispatchErrorReason(
   error: unknown,
   specVersion: number,
@@ -19313,6 +19342,31 @@ export function dcaPerTradeLegs(direction: string, amountPer: string): { amountI
   return direction === 'Buy'
     ? { amountIn: null, amountOut: amountPer }
     : { amountIn: amountPer, amountOut: null }
+}
+
+// A DCA-scheduling extrinsic's activity: the SCHEDULE it created, on its own
+// DCA.Scheduled event. The same trade-with-dca-flag shape as an execution, keyed
+// `dcaStatus: 'scheduled'`, carrying the order's fixed per-trade leg (like a failed
+// attempt, the other leg is unknown until a trade runs) and the cadence and budget.
+// Not the first execution: that is its own row on the block that ran it, so showing
+// it here as well would list one trade twice — and a schedule that never traded
+// would show nothing. valueUsd is left to the event-time repricing of that leg.
+export function dcaScheduledRow(
+  at: { block_height: number; ts: string; event_index: number; extrinsic_index: number | null },
+  scheduleId: number, owner: string | null, order: DcaScheduleOrder,
+): ActivityRow {
+  const legs = dcaPerTradeLegs(order.direction, order.amount_per)
+  return {
+    type: 'trade', blockHeight: at.block_height, timestamp: at.ts, eventIndex: at.event_index, extrinsicIndex: at.extrinsic_index,
+    who: owner && ACCOUNT_RE.test(owner) ? accountRef(owner) : null, to: null, asset: null,
+    assetIn: asset(order.asset_in), assetOut: asset(order.asset_out),
+    amount: null, amountIn: legs.amountIn, amountOut: legs.amountOut, valueUsd: null,
+    dca: true, dcaStatus: 'scheduled', dcaScheduleId: scheduleId,
+    dcaPeriodBlocks: order.period || undefined,
+    // '0' is the chain's "unbounded": no budget, not a zero one.
+    dcaTotalAmount: order.total_amount && order.total_amount !== '0' ? order.total_amount : null,
+    linkBlock: at.block_height, linkIndex: at.extrinsic_index,
+  }
 }
 
 // Pure per-execution outcome: a DCA.TradeFailed event has no amounts, so the
@@ -19455,7 +19509,14 @@ interface DcaScheduleOrder {
 
 function dcaOrderFromCallArgs(argsJson: string): DcaScheduleOrder | null {
   const schedule = dcaScheduleFromCallArgs(argsJson)
-  if (!schedule) return null
+  return schedule ? dcaOrderFromSchedule(schedule as Record<string, unknown>) : null
+}
+
+// A schedule's order out of either source that states it: the DCA.schedule call's
+// `schedule` argument, or a router-era DCA.Scheduled event, whose args carry the
+// same period/totalAmount/order fields beside its id and owner. Null when there is
+// no order to read (a pre-router event is only {id, who}).
+export function dcaOrderFromSchedule(schedule: Record<string, unknown>): DcaScheduleOrder | null {
   const order = (schedule as { order?: Record<string, unknown> }).order
   if (!order || typeof order !== 'object') return null
   const num = (v: unknown) => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : null)
@@ -20355,35 +20416,17 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
     // The same rule as every feed's, so the /transfer detail link agrees with them.
     rows.push(...await dropTreasuryFeeLegs(transferLegs))
 
-    // A DCA-scheduling extrinsic performs no trades itself — surface its
-    // schedule's FIRST execution as the one representative row (the schedule
-    // can run for months; the full list lives on the schedule page, one click
-    // away through the execution detail).
+    // A DCA-scheduling extrinsic performs no trades itself: it creates a schedule,
+    // so that schedule is its activity (dcaScheduledRow). A pre-router event names
+    // no order, which the schedule call's own args then supply.
     for (const e of events.filter(ev => ev.event_name === 'DCA.Scheduled')) {
       const sArgs = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
       const scheduleId = Number(sArgs.id)
       if (!Number.isFinite(scheduleId)) continue
-      const order = (sArgs.order ?? {}) as Record<string, unknown>
-      const aIn = asset(Number(order.assetIn ?? 0))
-      const aOut = asset(Number(order.assetOut ?? 0))
+      const order = dcaOrderFromSchedule(sArgs) ?? await recoverDcaScheduleOrder(height, index)
+      if (!order) continue
       const owner = typeof sArgs.who === 'string' ? sArgs.who : signer
-      const exRes = await client.query({
-        query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index,
-                       toString(amount_in) AS amount_in, toString(amount_out) AS amount_out
-                FROM price_data.dca_events FINAL
-                WHERE id = {sid:UInt64} AND event_name = 'DCA.TradeExecuted'
-                ORDER BY block_height ASC, event_index ASC LIMIT 1`,
-        query_params: { sid: scheduleId }, format: 'JSONEachRow',
-      })
-      for (const x of await exRes.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; amount_in: string; amount_out: string }>()) {
-        rows.push({
-          type: 'trade', blockHeight: x.block_height, timestamp: x.ts, eventIndex: x.event_index, extrinsicIndex: x.extrinsic_index,
-          who: owner ? accountRef(owner) : null, to: null, asset: null, assetIn: aIn, assetOut: aOut,
-          amount: null, amountIn: x.amount_in, amountOut: x.amount_out,
-          valueUsd: usdValue(prices, aOut.assetId, x.amount_out, aOut.decimals),
-          dca: true, dcaScheduleId: scheduleId, linkBlock: x.block_height, linkIndex: x.extrinsic_index,
-        })
-      }
+      rows.push(dcaScheduledRow(e, scheduleId, owner, order))
     }
 
     rows.push(...await getRecentRewardClaims(100, undefined, undefined, undefined, undefined, height, index))
@@ -20427,6 +20470,8 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       // add/remove, routing into or out of the pool share is that action's own mechanics
       // rather than a separate trade — the mirror of dropShareRoutedTrades.
       if (!all.some(x => x.type === 'liquidity')) return true
+      // A schedule is a standing order, never the liquidity action's routing.
+      if (r.dcaStatus === 'scheduled') return true
       return !(r.type === 'trade' && ((r.assetIn && isShareAssetId(r.assetIn.assetId)) || (r.assetOut && isShareAssetId(r.assetOut.assetId))))
     }), { keepPot: true })
     await Promise.all([

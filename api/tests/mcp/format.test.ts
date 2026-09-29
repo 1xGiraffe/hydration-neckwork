@@ -1137,6 +1137,18 @@ describe('activityLine over real rows', () => {
   // One case per remaining family. Each pins the label AND the slug, because the
   // two are separate maps in activity.ts and a wrong slug is a link to a page
   // that does not exist — silent, and only visible to whoever clicks it.
+  // The extrinsic that created a DCA schedule shows the schedule, not an execution.
+  it('names a DCA schedule as scheduled and links it to the schedule page', () => {
+    const scheduled = {
+      type: 'trade', blockHeight: 15_176_960, timestamp: '2026-09-29 12:57:36', eventIndex: 9, extrinsicIndex: 2,
+      who: null, to: null, asset: null, assetIn: null, assetOut: null, amount: null,
+      amountIn: '1664301089318880638852', amountOut: null, valueUsd: null,
+      dca: true, dcaStatus: 'scheduled', dcaScheduleId: 38019,
+    } as unknown as Parameters<typeof activityKind>[0]
+    expect(activityKind(scheduled)).toBe('DCA scheduled')
+    expect(activityUrlFor(scheduled, BASE)).toBe(`${BASE}/dca/38019`)
+  })
+
   it('names and links the money-market, staking and bond families', () => {
     expect(activityKind(MM_LIQUIDATION)).toBe('Liquidate')
     expect(activitySlug(MM_LIQUIDATION)).toBe('liquidate')
