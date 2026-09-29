@@ -1543,7 +1543,7 @@ let pushedRawHead = 0
 export function publishIndexedRawHead(head: number): void {
   if (head > pushedRawHead) pushedRawHead = head
 }
-async function indexedRawHead(): Promise<number> {
+export async function indexedRawHead(): Promise<number> {
   const probed = await cached('explorer:raw-head', 1_500, async () => {
     const res = await client.query({
       query: `SELECT max(last_block) AS head FROM price_data.raw_ingestion_state`,
