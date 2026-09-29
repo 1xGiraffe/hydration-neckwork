@@ -3,7 +3,7 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { ATOKEN_UNDERLYING_ID, assetDescriptor } from '../../services/explorerAssets.ts'
+import { assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
 import type { OHLCVInterval } from '../../services/ohlcvService.ts'
 import { queryOHLCV } from '../../services/ohlcvService.ts'
 import { CROSS_SCALE, CrossWindowTooWideError, queryCrossPairCandles, type CrossCandle } from '../../services/crossPair.ts'
@@ -281,6 +281,7 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
         `\`timestamp\` is the bucket's OPEN, on the candle model's own grid: sub-daily buckets and \`1d\` are UTC-aligned, and \`1w\` is the ISO week, starting MONDAY 00:00 UTC. \`from\` and \`to\` are floored onto that grid, so the bucket containing each is the one you get (the sole exception is a \`1w\` bound inside 1970-01-01…04, which moves up to the epoch's first Monday). Only buckets that have fully closed are returned, so the series never ends on a partial candle (AGENTS.md). The window defaults to the most recent ${DEFAULT_CANDLES} buckets.`,
         `At most ${MAX_CANDLES} candles per request — a wider window is a 400, never a silently truncated series. The count is measured on the window actually READ, i.e. after \`to\` is clamped to the last closed bucket: passing a \`to\` far in the future is not a 400, it just reads up to now, and a window lying entirely beyond the last closed bucket reads nothing at all and returns empty \`items\` without reaching the cap.`,
         'A window that lies entirely after the last closed bucket (a future `from`, or a `from`/`to` pinned to the bucket still in progress) is answered with empty `items`, the same as a window before the asset was listed. Only a caller-inverted window is a 400 — and that test is on the timestamps you sent, not on the buckets they fall in, so swapping two same-day bounds is refused rather than silently read as one bucket.',
+        'ALIASES: each leg is read from the series the explorer values that asset\'s history with. A money-market aToken reads its reserve (aUSDC is USDC); a Hydrated pool share reads its money-market wrapper (2-Pool-HUSDC is HUSDC, 2-Pool-GDOT is GDOT), under which the price model records it; a duplicate listing reads the canonical one. Any other pool share (2-Pool-PRIME, 3-Pool, …) is its own NAV series. Two ids that read one series are the same asset for this endpoint. `referenceAsset` still names the id you sent.',
         'There is no minute-level candle model, so `bucket=1m` is rejected rather than rounded up to 5 minutes.',
         'PRECISION: the candle model stores Decimal(38,12), and the database client requests quoted decimals so no value passes through a JSON double. Cross-rate division is integer arithmetic on that exact decimal text.',
       ].join('\n\n'),
@@ -309,13 +310,17 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
     // alternative is a negative DateTime the database rejects.
     const floor = (ms: number) => Math.max(Math.floor((ms / 1000 - anchor) / seconds) * seconds + anchor, anchor)
 
-    const baseId = Number(assetIn)
-    const quoteId = Number(assetOut)
+    const requestedQuoteId = Number(assetOut)
+    // Each leg reads the series the one historical price rule names for it
+    // (priceAssetId): an aToken its reserve, a Hydrated pool share its wrapper.
+    const baseId = priceAssetId(Number(assetIn))
+    const quoteId = priceAssetId(requestedQuoteId)
     // An asset's price in itself is 1 by definition, never a series. Answering it
     // from the model divided the asset's USD OHLC by its own bucket close, which
     // returns the bucket's price DRIFT (measured HDX/HDX at 1d: open 0.9589, high
     // 1.0162) dressed up as a market rate. There is no market, so there is no
-    // answer to give.
+    // answer to give. Two ids reading one series (aUSDC and USDC, 2-Pool-HUSDC and
+    // HUSDC) are the same asset here, so the same.
     if (baseId === quoteId) throw badRequest('assetIn and assetOut must be different assets')
 
     const parsedFrom = request.query.from == null ? null : Date.parse(request.query.from)
@@ -347,7 +352,7 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
     const quoteIsUsd = USD_PEGGED_SYMBOLS.has(assetDescriptor(quoteId).symbol.toUpperCase())
     // The registry id, not the caller's spelling of it: `assetOut=007` must not
     // publish a `referenceAsset` no other endpoint answers to.
-    const referenceAsset = quoteIsUsd ? 'usd' : String(quoteId)
+    const referenceAsset = quoteIsUsd ? 'usd' : String(requestedQuoteId)
     if (fromSeconds > toSeconds) return { referenceAsset, items: [] }
 
     const points = Math.floor((toSeconds - fromSeconds) / seconds) + 1
@@ -355,7 +360,8 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
       throw badRequest(`the requested window is ${points} ${bucket} candles; at most ${MAX_CANDLES} are served per request`)
     }
 
-    const key = `pub:prices-pair:${baseId}:${quoteId}:${bucket}:${fromSeconds}-${toSeconds}`
+    // `referenceAsset` echoes the requested quote, which two ids can share a series under.
+    const key = `pub:prices-pair:${baseId}:${quoteId}:${referenceAsset}:${bucket}:${fromSeconds}-${toSeconds}`
     return cached(key, 5_000, async () => {
       // A cross rate is the per-block ratio aggregated, never the two assets'
       // stored candles divided: min and max do not survive division, so the stored
@@ -399,7 +405,7 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
         'WINDOW: the destination venue serves a fixed recent tail per interval (roughly 720 candles) and takes no start bound, so the series begins where that tail begins — `from` narrows it but cannot extend it. Buckets older than the Hydration asset\'s first candle are dropped rather than scaled by a price that did not exist yet.',
         '`open`/`close` are rates taken from each leg at the ends of the bucket; `high`/`low` are the conservative envelope the two independent series admit — the Hydration leg\'s high over the destination\'s low, and its low over the destination\'s high. Unlike the on-chain pair route, this one cannot do better: the destination trades on another venue with its own bucket grid, so the two legs share no instant to be paired at. Both legs\' ranges enter, so the envelope is an upper bound on realised range, never an underestimate. `volumeUsd` is always `"0"`: the two legs\' volumes are on different venues and summing them would describe no market.',
         'Each Hydration bucket is priced by the close that had already happened at or before it — never a future price (AGENTS.md).',
-        'A money-market aToken `assetIn` is priced through its reserve, which is 1:1 with it and is what carries the candles (aUSDC is USDC). `pricedAsset` reports which asset the base leg was read from, so the substitution is visible rather than silent.',
+        'ALIASES match GET /v1/prices/pair: a money-market aToken `assetIn` is priced through its reserve, which is 1:1 with it and is what carries the candles (aUSDC is USDC), and a Hydrated pool share through its wrapper. `pricedAsset` reports which asset the base leg was read from, so the substitution is visible rather than silent.',
       ].join('\n\n'),
       querystring: z.object({
         assetIn: zAssetId,
@@ -412,7 +418,7 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
         200: z.object({
           referenceAsset: z.string().describe('The 1Click asset id the candles are quoted in.'),
           referenceSource: z.string().describe('The venue the destination leg is priced from.'),
-          pricedAsset: zAssetId.describe('The Hydration asset the base leg was actually priced from. Differs from `assetIn` when it is a money-market aToken, which is 1:1 with its reserve and has no candles of its own.'),
+          pricedAsset: zAssetId.describe('The Hydration asset the base leg was actually priced from. Differs from `assetIn` when it is an alias (a money-market aToken, a Hydrated pool share), which has no candles of its own.'),
           items: z.array(zCandle),
         }),
       },
@@ -425,12 +431,13 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
       throw badRequest(`no reference price for destination asset '${destinationAsset}'; priced destinations are ${Object.keys(ONE_CLICK_PLATFORMS).join(', ')}`)
     }
     const requestedId = Number(assetIn)
-    // A money-market aToken is 1:1 with its reserve and carries no USD candles of
-    // its own, so it is priced through the reserve — which is what the pair
-    // actually is (aUSDC is USDC). Without this the endpoint is empty for exactly
-    // the assets cross-chain swaps are most often paid in: every order placed so
-    // far sold aUSDC. `pricedAsset` reports the substitution rather than hiding it.
-    const baseId = ATOKEN_UNDERLYING_ID[requestedId] ?? requestedId
+    // The one historical price rule (priceAssetId): a money-market aToken is 1:1
+    // with its reserve and carries no USD candles of its own, so it is priced
+    // through the reserve — which is what the pair actually is (aUSDC is USDC).
+    // Without this the endpoint is empty for exactly the assets cross-chain swaps
+    // are most often paid in: every order placed so far sold aUSDC. `pricedAsset`
+    // reports the substitution rather than hiding it.
+    const baseId = priceAssetId(requestedId)
     const baseIsUsd = USD_PEGGED_SYMBOLS.has(assetDescriptor(baseId).symbol.toUpperCase())
 
     const floor = (ms: number) => Math.max(Math.floor((ms / 1000 - anchor) / seconds) * seconds + anchor, anchor)
