@@ -110,6 +110,21 @@ describe('the Intent page — a filled limit order', () => {
   })
 })
 
+describe('the Intent page — a resting order settled block after block', () => {
+  // The API returns at most 200 solution links, newest first; the order behind this
+  // test had 285 fills, one solution each.
+  const base = fixture(SWAP_ID)
+  const solutions = Array.from({ length: 200 }, (_, i) => ({ block: 15151663 - i, extrinsicIndex: 2 }))
+  const html = renderIntent(SWAP_ID, { ...base, fillsTotal: 285, links: { ...base.links, solutions } })
+
+  it('links only the newest three solutions and counts the rest from the fill total', () => {
+    expect(html).toContain('href="/extrinsic/15151663-2"')
+    expect(html).toContain('href="/extrinsic/15151661-2"')
+    expect(html).not.toContain('href="/extrinsic/15151660-2"')
+    expect(html).toContain('+282 earlier · 285 solutions filled it')
+  })
+})
+
 describe('the Intent page — an open DCA intent', () => {
   const html = renderIntent(DCA_ID)
 

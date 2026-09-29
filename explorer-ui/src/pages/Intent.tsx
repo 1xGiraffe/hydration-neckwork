@@ -13,6 +13,10 @@ import { blockSeconds, blockSpanSeconds, fmtDuration, fmtPermill } from '../util
 import type { IntentOrderDetail, IntentOrderStatus } from '../types'
 
 const PAGE = 25
+// A resting order the solver nibbles at re-settles every block — one order here had
+// 285 solutions in 20 minutes — so the header names the newest few and counts the
+// rest; the Fills table below links every one of them.
+const SOLUTION_LINKS_SHOWN = 3
 
 // An open order is live; a filled, completed or partially-filled one has been (or is
 // being) met, so it wears the settled shade; a cancel is the owner's own quiet exit
@@ -260,10 +264,18 @@ export function Intent({ intentId }: { intentId: string }) {
                 <div className="dd mono"><ExtrinsicRef at={data.links.submission} /></div>
                 {data.links.solutions.length > 0 && <>
                   <div className="dt">Settled in</div>
-                  <div className="dd mono">{data.links.solutions.map((s, i) => (
+                  <div className="dd mono">{data.links.solutions.slice(0, SOLUTION_LINKS_SHOWN).map((s, i) => (
                     <Fragment key={`${s.block}-${s.extrinsicIndex ?? 'b'}`}>{i > 0 && <span className="muted"> · </span>}<ExtrinsicRef at={s} /></Fragment>
                   ))}
-                    <span className="muted"> · {data.links.solutions.length === 1 ? 'the solution' : 'the solutions'} that filled it</span>
+                    {/* The API bounds the list, so past that bound the fill count is the
+                        better total: each fill is one solution's resolution of this order. */}
+                    {(() => {
+                      const total = Math.max(data.links.solutions.length, data.fillsTotal)
+                      const rest = total - Math.min(SOLUTION_LINKS_SHOWN, data.links.solutions.length)
+                      return rest > 0
+                        ? <span className="muted"> · +{F.int(rest)} earlier · {F.int(total)} solutions filled it; each fill below links its own</span>
+                        : <span className="muted"> · {total === 1 ? 'the solution' : 'the solutions'} that filled it</span>
+                    })()}
                   </div>
                 </>}
               </div>
