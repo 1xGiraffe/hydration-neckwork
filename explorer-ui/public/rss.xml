@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Easter egg. Deliberately unlinked: no autodiscovery tag, no sitemap entry. -->
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Hydration Explorer</title>
+    <link>https://hydration-explorer.neckwork.net/</link>
+    <atom:link href="https://hydration-explorer.neckwork.net/rss.xml" rel="self" type="application/rss+xml" />
+    <description>Breaking news from the chain.</description>
+    <language>en</language>
+    <lastBuildDate>Sat, 12 Mar 2022 03:36:18 +0000</lastBuildDate>
+    <item>
+      <title>HDX inflation rate: 0%</title>
+      <link>https://hydration-explorer.neckwork.net/block/1</link>
+      <guid isPermaLink="false">0x4764be7684ad55ab619a1e6c83ea1b595681ee3d3393f37930464c98cbcddaa7</guid>
+      <pubDate>Sat, 12 Mar 2022 03:36:18 +0000</pubDate>
+      <description>As of block #1, HDX inflation stands at 0%.</description>
+    </item>
+  </channel>
+</rss>
