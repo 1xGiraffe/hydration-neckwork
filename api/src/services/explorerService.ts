@@ -6,6 +6,7 @@ import { blockClock, heightAtOrBeforeExact, timeUpperBoundOfHeight, type BlockCl
 import { chDateTime, chTimestamp } from './clickhouseTime.ts'
 import { INTERVAL_VIEW_MAP, type OHLCVInterval } from './ohlcvService.ts'
 import { makeBucketing, type Bucketing } from './bucketLadder.ts'
+import { type HistoryGrain } from './historyGrain.ts'
 import { BUCKET_HISTORY_CLOSED_TTL_MS, BUCKET_HISTORY_FINALITY_SEC, BUCKET_HISTORY_SETTLING_TTL_MS, bucketWindowIsClosed, loadFarmRewardHistory, loadLpHistory, loadOmnipoolPrincipalHistory, loadV3PrincipalHistory, loadXykPrincipalHistory, xykLegsByBucket, type FarmRewardHistory, type LpSpan, type LpVenue, type PriceGrain, type OmnipoolPrincipalHistory, type V3PrincipalHistory, type XykBucketLeg } from './lpHistory.ts'
 import { OMNI_FIXED, omnipoolRemoveLiquidity, withStableswapSharePrices, xykReserveAssets, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
 import { currentLmRewardGenerationSql, lmCountedClaimable, lmCountedRewardRowsSql, loadLmRewards, type LmRewardRow } from './lmRewardSnapshot.ts'
@@ -21984,7 +21985,16 @@ export function dayGridBucketOf(days: string[]): (day: string) => number | null 
   return day => byDay.get(day) ?? (first != null && day < first ? 0 : null)
 }
 
-export async function getAtokenSuppliedDailyHistory(h160: string, days: string[]): Promise<AtokenDailyBalanceSeries[]> {
+/**
+ * The same reconstruction on any grain: `keys` is an ascending grid of
+ * `grain.keySql` keys and `endSec` the exclusive end of its last bucket. A key
+ * before the grid folds into bucket 0 (dayGridBucketOf compares keys as strings,
+ * which orders one grain's keys chronologically), so a windowed grid opens at the
+ * balance already standing — and a windowed grain's keySql already folds the
+ * pre-window rows onto the first key.
+ */
+export async function getAtokenSuppliedHistory(h160: string, grain: HistoryGrain, keys: string[], endSec: number): Promise<AtokenDailyBalanceSeries[]> {
+  const days = keys
   const holder = h160.toLowerCase()
   if (!/^0x[0-9a-f]{40}$/.test(holder) || days.length < 2) return []
   const anchorBlock = await aTokenAnchorBlock()
@@ -21993,7 +22003,7 @@ export async function getAtokenSuppliedDailyHistory(h160: string, days: string[]
   const contracts = [...new Set(tokens.map(t => t.aToken.toLowerCase()))]
   if (!contracts.length) return []
   const bucketOf = dayGridBucketOf(days)
-  const endTime = `${days[days.length - 1]} 23:59:59`
+  const end = Math.floor(endSec)
 
   const [anchorRes, deltaRes] = await Promise.all([
     client.query({
@@ -22004,13 +22014,13 @@ export async function getAtokenSuppliedDailyHistory(h160: string, days: string[]
       query_params: { holder, contracts, anchorBlock }, format: 'JSONEachRow',
     }),
     client.query({
-      query: `SELECT contract_address AS contract, toString(toDate(block_timestamp)) AS day,
+      query: `SELECT contract_address AS contract, ${grain.keySql('block_timestamp')} AS day,
                 toString(sum(scaled_delta)) AS delta
               FROM price_data.atoken_scaled_deltas FINAL
               WHERE holder = {holder:String} AND contract_address IN ({contracts:Array(String)})
-                AND block_height > {anchorBlock:UInt32} AND block_timestamp <= {end:DateTime}
+                AND block_height > {anchorBlock:UInt32} AND block_timestamp < toDateTime({end:UInt32})
               GROUP BY contract, day ORDER BY contract, day`,
-      query_params: { holder, contracts, anchorBlock, end: endTime }, format: 'JSONEachRow',
+      query_params: { holder, contracts, anchorBlock, end }, format: 'JSONEachRow',
     }),
   ])
   const anchorByContract = new Map<string, string>()
@@ -22032,16 +22042,16 @@ export async function getAtokenSuppliedDailyHistory(h160: string, days: string[]
   // Index history for the held reserves only. No FINAL, same reason as
   // reserveIndicesNow: the argMax key covers the replacement key and version.
   const indexRes = await client.query({
-    query: `SELECT pool_address AS pool, reserve_address AS reserve, toString(toDate(block_timestamp)) AS day,
+    query: `SELECT pool_address AS pool, reserve_address AS reserve, ${grain.keySql('block_timestamp')} AS day,
               toString(argMax(liquidity_index, tuple(block_height,event_index,ingested_at))) AS liquidity_index
             FROM price_data.money_market_reserve_indices
             WHERE pool_address IN ({pools:Array(String)}) AND reserve_address IN ({reserves:Array(String)})
-              AND block_height > {anchorBlock:UInt32} AND block_timestamp <= {end:DateTime}
+              AND block_height > {anchorBlock:UInt32} AND block_timestamp < toDateTime({end:UInt32})
             GROUP BY pool, reserve, day ORDER BY pool, reserve, day`,
     query_params: {
       pools: [...new Set(held.map(t => t.poolProxy.toLowerCase()))],
       reserves: [...new Set(held.map(t => t.asset.toLowerCase()))],
-      anchorBlock, end: endTime,
+      anchorBlock, end,
     },
     format: 'JSONEachRow',
   })

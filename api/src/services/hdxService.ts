@@ -10,6 +10,9 @@ import { cachedSwr } from './cache.ts'
 import { NOMINAL_RELAY_BLOCK_MS, paraBlockMs } from './blockTime.ts'
 import { allTags, economicModuleAccounts } from './tagService.ts'
 import { accountRef, bindCteSql, boundAccountSql, ensurePrices, cutoffHeightForWindow, getGigaMarketStats, getGigaLiquidationLevels, type AccountRef, type GigaMarketReserveStat, type GigaLiquidations } from './explorerService.ts'
+import { alignToGrid, carryForwardValues, fullChartGrid, MAX_HEIGHT, serveChartWindow, type ChartGrid, type ChartWindowRequest, type ChartWindowResponse } from './chartWindow.ts'
+import { DAILY_GRAIN, grainBucketEndSec, keySeconds, makeGrain, MONTHLY_GRAIN, WEEKLY_MONDAY_GRAIN } from './historyGrain.ts'
+import { MONDAY_ANCHOR_SEC } from './bucketLadder.ts'
 
 export { gigaUnbondingBlocks }
 
@@ -886,30 +889,15 @@ async function loadSupplyCohorts(): Promise<HdxDashboard['supply'] & { cohorts: 
 
 async function loadDailyFlows(): Promise<HdxDailyFlow[]> {
   const head = await loadHead()
-  // Wall-clock 60d window; the volume table has no timestamp, so join blocks for
-  // the real per-block date instead of extrapolating from a fixed block time
-  // (which a fixed block-count offset misses: ~6s today, 2s planned).
+  // The last 60 days by wall clock, from the first block inside them (a fixed
+  // block-count offset misses them: ~6s today, 2s planned) — so the first day is
+  // partial, as it always was — on the day grid up to the indexed head.
   const from = await cutoffHeightForWindow(60 * 24, head.height)
-  const res = await client.query({
-    query: `
-      -- Volume sums the PRINCIPAL side only: an OTC fill books both of its accounts
-      -- (see \`counterparty\` in src/db/schema.ts), and adding the maker's mirrored
-      -- row to the taker's would report the same HDX twice in a day's flow. The
-      -- buyer/seller COUNTS stay over both sides, because an OTC maker whose
-      -- resting order was hit really was a seller that day.
-      SELECT toDate(b.block_timestamp) AS d,
-        toFloat64(sumIf(t.native_volume_buy, t.counterparty = 0)) / 1e12 AS buy,
-        toFloat64(sumIf(t.native_volume_sell, t.counterparty = 0)) / 1e12 AS sell,
-        uniqExactIf(t.account, t.native_volume_buy > 0) AS buyers, uniqExactIf(t.account, t.native_volume_sell > 0) AS sellers
-      FROM price_data.trade_volume_by_account t
-      INNER JOIN price_data.blocks b ON b.block_height = t.block_height
-      WHERE t.asset_id = 0 AND t.block_height >= {from:UInt32} AND NOT startsWith(t.account, '0x6d6f646c')
-      GROUP BY d ORDER BY d`,
-    query_params: { from },
-    format: 'JSONEachRow',
-  })
-  return (await res.json<{ d: string; buy: number; sell: number; buyers: number; sellers: number }>())
-    .map(r => ({ date: r.d, buyHdx: Number(r.buy), sellHdx: Number(r.sell), buyers: Number(r.buyers), sellers: Number(r.sellers) }))
+  const headSec = Math.floor(head.ts / 1000)
+  const days = DAILY_GRAIN.grid(headSec - 60 * 86_400, headSec)
+  const g: ChartGrid = { ...fullChartGrid(DAILY_GRAIN, days), fromHeight: from, toHeight: MAX_HEIGHT }
+  const s = await flowsSeries(g)
+  return days.map((date, i) => ({ date, buyHdx: s.buy[i], sellHdx: s.sell[i], buyers: s.buyers[i], sellers: s.sellers[i] }))
 }
 
 // Active DCA orders touching HDX → realistic NEXT-24H buy/sell volume, not the
@@ -1037,42 +1025,18 @@ async function loadDcaIntentFlows(): Promise<DcaFlowSide[]> {
   return dcaFlowSides(await res.json<DcaFlowRow>())
 }
 
+// The churn chart's weeks start on Sunday (toStartOfWeek's default mode), as
+// they always have.
+const SUNDAY_WEEK_GRAIN = makeGrain(7 * 86_400, undefined, 3 * 86_400)
+
 async function loadChurn(): Promise<HdxDashboard['churn']> {
   return cachedSwr(`explorer:hdx-churn:model`, 1_800_000, 48 * 3_600_000, async () => {
-    const res = await client.query({
-      query: `
-        WITH lifetime AS (
-          SELECT account_id,
-            minMerge(first_nonzero_state) AS first_nonzero,
-            maxMerge(last_nonzero_state) AS last_nonzero
-          FROM price_data.hdx_holder_lifetime
-          GROUP BY account_id
-        ), current_balances AS (
-          SELECT account_id, toUInt256OrZero(argMaxMerge(total_state)) AS current
-          FROM price_data.account_asset_latest_balances
-          WHERE asset_id = '0'
-          GROUP BY account_id
-        )
-        SELECT toStartOfWeek(first_nonzero) AS wk_new, count() AS n, 0 AS is_exit
-        FROM lifetime
-        WHERE first_nonzero >= now() - INTERVAL 12 WEEK
-        GROUP BY wk_new
-        UNION ALL
-        SELECT toStartOfWeek(last_nonzero) AS wk_new, count() AS n, 1 AS is_exit
-        FROM lifetime
-        LEFT JOIN current_balances USING account_id
-        WHERE ifNull(current, toUInt256(0)) = 0
-          AND last_nonzero >= now() - INTERVAL 12 WEEK
-        GROUP BY wk_new`,
-      format: 'JSONEachRow',
-    })
-    const byWeek = new Map<string, { newHolders: number; exitedHolders: number }>()
-    for (const r of await res.json<{ wk_new: string; n: number; is_exit: number }>()) {
-      const e = byWeek.get(r.wk_new) ?? { newHolders: 0, exitedHolders: 0 }
-      if (Number(r.is_exit)) e.exitedHolders += Number(r.n); else e.newHolders += Number(r.n)
-      byWeek.set(r.wk_new, e)
-    }
-    return { weekly: [...byWeek.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([weekStart, v]) => ({ weekStart, ...v })) }
+    // The last 12 weeks, from exactly 12 weeks ago: the first week is partial.
+    const fromSec = nowSec() - 12 * 7 * 86_400
+    const weeks = SUNDAY_WEEK_GRAIN.grid(fromSec, nowSec())
+    const g: ChartGrid = { ...fullChartGrid(SUNDAY_WEEK_GRAIN, weeks), fromSec }
+    const s = await churnSeries(g)
+    return { weekly: weeks.map((weekStart, i) => ({ weekStart, newHolders: s.newHolders[i], exitedHolders: s.exitedHolders[i] })) }
   })
 }
 
@@ -1176,7 +1140,9 @@ export function carryForward(values: (number | null)[]): (number | null)[] {
   return values.map(v => (v != null ? (prev = v) : prev))
 }
 
-export interface HdxAllocationMintRow { week: string; cls: string; hdx: number }
+// `ts` (unix seconds) dates the mint within its week; without it the mint is
+// taken at its week's Monday, which is exact for a weekly grid.
+export interface HdxAllocationMintRow { week: string; cls: string; hdx: number; ts?: number }
 
 // Allocation-realization mints (single Balances.Deposit of ≥ 10M HDX — organic
 // deposits like fee payouts and drips are orders of magnitude smaller) are the
@@ -1192,51 +1158,251 @@ export function backfillAllocationMints(
   weeks: string[],
   mints: HdxAllocationMintRow[],
 ): number {
+  return backfillAllocationMintsAt(ownership, weeks.map(w => keySeconds(w) + 7 * 86_400), mints, weeks[0])
+}
+
+/**
+ * The same on any grid: `ends` are the bucket ends (a bucket states the balance
+ * standing at its end), and a mint counts in every bucket ending at or before
+ * it — the balance there does not hold it yet. Mints in or before the SERIES'
+ * first week (not a zoom window's) are already inside the observed balances.
+ */
+export function backfillAllocationMintsAt(
+  ownership: HdxStructure['ownership'],
+  ends: number[],
+  mints: HdxAllocationMintRow[],
+  seriesStartWeek: string = HDX_BALANCE_SERIES_START,
+): number {
   let total = 0
   for (const m of mints) {
     if (m.cls !== 'treasury' && m.cls !== 'protocol') continue
-    if (!(m.hdx > 0) || m.week <= weeks[0]) continue // already inside the observed balances
+    if (!(m.hdx > 0) || m.week <= seriesStartWeek) continue
     const band = ownership[m.cls]
-    for (let i = 0; i < weeks.length && weeks[i] < m.week; i++) band[i] += m.hdx
+    const at = m.ts ?? keySeconds(m.week)
+    for (let i = 0; i < ends.length && ends[i] <= at; i++) band[i] += m.hdx
     total += m.hdx
   }
   return total
 }
 
-// Weekly closing HDX balance per account, forward-filled onto the full Monday
-// grid (an account keeps its last observed close until the next observation),
-// then aggregated per week into ownership classes, user top-N tranches, HHI
-// and holder-age bands. ~11M dense rows, ~5s — computed once per cache TTL.
-// account_balance_weekly's balance_state argMax picks each week's LAST
-// observation, so a within-week round trip collapses to its closing state.
-// One month's change in the pallet's TotalLocked over staking_activity rows — see
-// the staked series in loadStructure for why exactly these three flows.
-export const GIGAHDX_LOCKED_DELTA_SQL = `sumIf(toFloat64OrZero(JSONExtractString(args_json, 'amount')), event_name IN ('GigaHdx.Staked', 'GigaHdx.YieldRealized'))
-            - sumIf(toFloat64OrZero(JSONExtractString(args_json, 'payout')), event_name = 'GigaHdx.Unstaked')`
-async function loadStructure(): Promise<HdxStructure> {
-  return cachedSwr('explorer:hdx-structure:model:2', 3_600_000, 48 * 3_600_000, async () => {
-    // USER accounts only (no modl, no pool/Kraken custody), balances as sorted
-    // per-account (week, balance) arrays — the base for links and Lorenz.
-    // Consumers must declare `special_accts` in their WITH clause.
-    const userSeqCtes = `
-      obs AS (
-        SELECT account_id, week_start AS w,
-          toFloat64(toUInt256OrZero(argMaxMerge(balance_state))) / 1e12 AS bal
-        FROM price_data.account_balance_weekly
-        WHERE asset_id = '0' AND NOT startsWith(account_id, '0x6d6f646c')
-        GROUP BY account_id, w
-      ),
-      seq AS (
+// ── Holder structure on any grid ─────────────────────────────────────────────
+//
+// ONE builder states the holder structure — ownership classes, user top-N
+// tranches, HHI and holder-age bands — at each bucket END of a ChartGrid. The
+// dashboard runs it over the whole-history Monday-week grid; a chart zoom runs it
+// over the window's ladder grid (chartWindow.ts), down to an hour. The coarse
+// weekly series is therefore the fine series sampled at Mondays, and the two
+// agree wherever their bucket ends coincide.
+//
+// Per account the builder takes the balance standing when the grid opens (the
+// carry-in) and the closing balance of every bucket with an observation after
+// it, carried forward through quiet buckets. Two sources state those closes:
+//   - `weekly`: account_balance_weekly, whose argMax is each Monday week's LAST
+//     observation — exact for any Monday-aligned grid whose step is whole weeks
+//     (the dashboard's, and a zoom resolving to 7 days or more).
+//   - `hourly`: account_balance_hourly for everything else. The opening is the
+//     last weekly close before the window's own Monday, overtaken by any hourly
+//     row between that Monday and the window start; weekly and hourly closes are
+//     the same observation at every Monday (verified: 0 of 103,006 accounts
+//     differ for the week of 2026-09-14).
+//
+// Most accounts do not move inside a zoom window, so they are not expanded onto
+// its grid: an account whose every in-window close equals its opening is
+// STATIC and is aggregated once (class sums, sum of squares, its top-1000 user
+// balances, user HDX per holding-age anchor); only MOVERS are expanded bucket by
+// bucket. mergeHdxStructureRows adds the static part back into every bucket and
+// ranks the top-N over the union — exact, because a static balance is the same
+// in every bucket, so each bucket's top 1,000 is drawn from the static top 1,000
+// and that bucket's mover balances. Balances stay raw integers (UInt256) to the
+// payload; HHI is the one ratio.
+//
+// Holding age is measured at the Monday of the bucket's last instant — the grain
+// the coarse series has always used (its ages are counted at each week's
+// Monday), so an age band changes at a week boundary on every grid.
+
+const WEEK_SEC = 7 * 86_400
+const HDX_SERIES_START_SEC = keySeconds(HDX_BALANCE_SERIES_START)
+// The monthly trend grid starts with the series' first calendar month.
+const HDX_TREND_START_SEC = keySeconds('2022-07-01')
+const nowSec = () => Math.floor(Date.now() / 1000)
+
+export type HdxStructureSource = 'weekly' | 'hourly'
+export type HdxStructureScope = 'all' | 'kraken'
+
+/** Bucket ends of a regular grid, and the Monday each bucket's holding ages are counted at. */
+export function structureRefs(g: ChartGrid): string[] {
+  return g.keys.map(k => WEEKLY_MONDAY_GRAIN.keyOf(grainBucketEndSec(g.grain, k) - 1))
+}
+
+/** A grid the weekly closes state exactly: Monday-aligned, whole weeks per bucket. */
+export function isWeeklyAligned(g: ChartGrid): boolean {
+  return g.grain.stepSec % WEEK_SEC === 0 && (g.fromSec - MONDAY_ANCHOR_SEC) % WEEK_SEC === 0
+}
+
+const kraKenTagSql = KRAKEN_TAG_IDS.map(t => `'${t}'`).join(',')
+
+/**
+ * The structure's rows: `i` = 0 is the static part, `i` = 1…n the movers of
+ * bucket n. Parameters: `from` (the grid's start), `w0` (its Monday), `end`
+ * (exclusive end of its last bucket), `step`, `n`, `refs` (structureRefs) and the
+ * rotation anchors. A `kraken` scope restricts every read to the tagged custody
+ * wallets by primary key — the Kraken band alone, at a sliver of the cost.
+ */
+export function hdxStructureSql(source: HdxStructureSource, scope: HdxStructureScope = 'all'): string {
+  const scoped = scope === 'kraken'
+    ? ` AND account_id IN (SELECT account_id FROM price_data.account_tags FINAL WHERE label_id IN (${kraKenTagSql}) AND deleted = 0)`
+    : ''
+  // A weekly close is the state at `c`, the Monday after its week. Weeks starting
+  // at or after the grid's end state nothing it shows: a first-nonzero week that
+  // late reads as "under 3 months" either way.
+  const weeklyRows = `
+          SELECT account_id, week_start, toDateTime(week_start) + ${WEEK_SEC} AS c, argMaxMerge(balance_state) AS wbal
+          FROM price_data.account_balance_weekly
+          WHERE asset_id = '0' AND week_start < toDate(toDateTime({end:UInt32}))${scoped}
+          GROUP BY account_id, week_start`
+  // bi: 0 = at or before the grid opens (opening candidates), 1…n = the bucket
+  // whose span holds the close, -1 = a weekly close the hourly rows supersede
+  // (kept only for its first-nonzero week).
+  const weeklyBucket = source === 'weekly'
+    ? `if(c <= toDateTime({from:UInt32}), toInt64(0), intDiv(toInt64(toUnixTimestamp(c)) - 1 - {from:UInt32}, {step:UInt32}) + 1)`
+    : `if(c <= toDateTime({w0:UInt32}), toInt64(0), toInt64(-1))`
+  const parts = [`
+        SELECT account_id, ${weeklyBucket} AS bi, max(c) AS cl, argMax(wbal, c) AS bal,
+          minIf(week_start, toUInt256OrZero(wbal) > 0) AS nz, countIf(toUInt256OrZero(wbal) > 0) AS nzn
+        FROM (${weeklyRows})
+        GROUP BY account_id, bi`]
+  if (source === 'hourly') {
+    parts.push(`
         SELECT account_id,
-          arraySort(groupArray(w)) AS ws,
-          arraySort((b, ww) -> ww, groupArray(bal), groupArray(w)) AS bs
-        FROM obs
-        WHERE NOT has(special_accts, account_id)
-        GROUP BY account_id
-      )`
-    // Rotation links resolve BEFORE the main query — the HODL age bands need
-    // the inherited anchors as parameters. A move between own wallets then
-    // counts as continuous holding instead of resetting to "under 3m".
+          if(interval_start < toDateTime({from:UInt32}), toInt64(0), intDiv(toInt64(toUnixTimestamp(interval_start)) - {from:UInt32}, {step:UInt32}) + 1) AS bi,
+          max(interval_start) + 3600 AS cl, argMax(hbal, interval_start) AS bal, toDate('1970-01-01') AS nz, toUInt64(0) AS nzn
+        FROM (
+          SELECT account_id, interval_start, argMaxMerge(balance_state) AS hbal
+          FROM price_data.account_balance_hourly
+          WHERE asset_id = '0' AND interval_start >= toDateTime({w0:UInt32}) AND interval_start < toDateTime({end:UInt32})${scoped}
+          GROUP BY account_id, interval_start)
+        GROUP BY account_id, bi`)
+  }
+  return `
+    WITH
+    ${tagAccountsSql(KRAKEN_TAG_IDS)} AS kraken_accts,
+    ${tagAccountsSql(POOL_TAG_IDS)} AS pool_accts
+    SELECT i,
+      toString(sumIf(bal, cls = 'treasury')) AS treasury,
+      toString(sumIf(bal, cls = 'protocol')) AS protocol,
+      toString(sumIf(bal, cls = 'kraken')) AS kraken,
+      toString(sumIf(bal, cls = 'user')) AS user_total,
+      toString(sumIf(bal * bal, cls = 'user')) AS sq,
+      arrayMap(x -> toString(toInt256(0) - x), groupArraySortedIf(1000)(toInt256(0) - toInt256(bal), cls = 'user')) AS top,
+      -- band edges at week multiples (13/52/104 weeks): anchors and refs are Mondays
+      toString(sumIf(bal, cls = 'user' AND i > 0 AND dateDiff('day', anchor, ref) < 91)) AS a0,
+      toString(sumIf(bal, cls = 'user' AND i > 0 AND dateDiff('day', anchor, ref) >= 91 AND dateDiff('day', anchor, ref) < 364)) AS a1,
+      toString(sumIf(bal, cls = 'user' AND i > 0 AND dateDiff('day', anchor, ref) >= 364 AND dateDiff('day', anchor, ref) < 728)) AS a2,
+      toString(sumIf(bal, cls = 'user' AND i > 0 AND dateDiff('day', anchor, ref) >= 728)) AS a3,
+      sumMapIf([anchor], [bal], cls = 'user' AND i = 0) AS st_age,
+      arrayMap(x -> toString(x), st_age.1) AS st_anchor,
+      arrayMap(x -> toString(x), st_age.2) AS st_sum
+    FROM (
+      SELECT cls, anchor, i, if(i = 0, toDate('1970-01-01'), {refs:Array(Date)}[i]) AS ref, bal
+      FROM (
+        SELECT cls, anchor, seg.1.1 AS lo, seg.2 AS hi, toUInt256(seg.1.2) AS bal
+        FROM (
+          SELECT cls, anchor,
+            arrayExists(p -> p.2 != b0, pts) AS mover,
+            -- a mover's balance holds from each close up to the next one; the
+            -- opening holds from bucket 1 (an in-bucket-1 close overtakes it)
+            if(mover, arrayConcat([(toInt64(1), b0)], pts), [(toInt64(0), b0)]) AS segs,
+            if(mover, arrayPushBack(arrayPopFront(arrayMap(p -> p.1, segs)), toInt64({n:UInt32}) + 1), [toInt64(1)]) AS nexts
+          FROM (
+            SELECT account_id,
+              toUInt256OrZero(argMaxIf(bal, cl, bi = 0)) AS b0,
+              arraySort(p -> p.1, groupArrayIf((bi, toUInt256OrZero(bal)), bi > 0)) AS pts,
+              multiIf(
+                account_id = '${TREASURY_ACCOUNT}', 'treasury',
+                startsWith(account_id, '0x6d6f646c') OR has(pool_accts, account_id), 'protocol',
+                has(kraken_accts, account_id), 'kraken',
+                'user') AS cls,
+              -- holding age from the account's first nonzero weekly close OR its
+              -- rotation chain's root, whichever is older (resolveRotationAnchors)
+              least(if(sum(nzn) = 0, toDate('2100-01-01'), minIf(nz, nzn > 0)),
+                transform(account_id, {rotAccs:Array(String)}, {rotAnchors:Array(Date)}, toDate('2100-01-01'))) AS anchor
+            FROM (${parts.join('\n        UNION ALL')})
+            GROUP BY account_id
+          )
+        )
+        ARRAY JOIN arrayZip(segs, nexts) AS seg
+        WHERE seg.1.2 > 0
+      )
+      ARRAY JOIN range(lo, hi) AS i
+    )
+    GROUP BY i
+    ORDER BY i`
+}
+
+export interface HdxStructureSqlRow {
+  i: number | string
+  treasury: string; protocol: string; kraken: string; user_total: string; sq: string
+  top: string[]
+  a0: string; a1: string; a2: string; a3: string
+  st_anchor: string[]; st_sum: string[]
+}
+
+/** One bucket's structure, raw planck. */
+export interface HdxStructureBucket {
+  treasury: bigint; protocol: bigint; kraken: bigint; user: bigint
+  top10: bigint; top11to100: bigint; top101to1000: bigint
+  sq: bigint
+  /** User HDX held under 3 months, 3–12 months, 1–2 years, over 2 years. */
+  ages: [bigint, bigint, bigint, bigint]
+}
+
+const DAY_SEC = 86_400
+
+/**
+ * Add the static part back into every bucket and rank the user top-N over the
+ * union (see the builder's comment). `refs[i]` is bucket i's age Monday.
+ */
+export function mergeHdxStructureRows(refs: string[], rows: HdxStructureSqlRow[]): HdxStructureBucket[] {
+  const byI = new Map(rows.map(r => [Number(r.i), r]))
+  const st = byI.get(0)
+  const big = (s: string | undefined) => (s ? BigInt(s) : 0n)
+  const stTop = (st?.top ?? []).map(x => BigInt(x))
+  const stAges = (st?.st_anchor ?? []).map((a, j) => ({ day: keySeconds(a) / DAY_SEC, raw: BigInt(st!.st_sum[j]) }))
+  const band = (days: number) => (days < 91 ? 0 : days < 364 ? 1 : days < 728 ? 2 : 3)
+  return refs.map((ref, idx) => {
+    const m = byI.get(idx + 1)
+    // Both lists arrive largest first; merge the heads.
+    const mvTop = (m?.top ?? []).map(x => BigInt(x))
+    const top: bigint[] = []
+    for (let a = 0, b = 0; top.length < 1000 && (a < stTop.length || b < mvTop.length);) {
+      if (b >= mvTop.length || (a < stTop.length && stTop[a] >= mvTop[b])) top.push(stTop[a++])
+      else top.push(mvTop[b++])
+    }
+    const sum = (from: number, to: number) => top.slice(from, to).reduce((s, v) => s + v, 0n)
+    const ages: [bigint, bigint, bigint, bigint] = [big(m?.a0), big(m?.a1), big(m?.a2), big(m?.a3)]
+    const refDay = keySeconds(ref) / DAY_SEC
+    for (const a of stAges) ages[band(refDay - a.day)] += a.raw
+    return {
+      treasury: big(st?.treasury) + big(m?.treasury),
+      protocol: big(st?.protocol) + big(m?.protocol),
+      kraken: big(st?.kraken) + big(m?.kraken),
+      user: big(st?.user_total) + big(m?.user_total),
+      top10: sum(0, 10), top11to100: sum(10, 100), top101to1000: sum(100, 1000),
+      sq: big(st?.sq) + big(m?.sq),
+      ages,
+    }
+  })
+}
+
+// Rotation links resolve BEFORE the structure query — the holding-age bands
+// need the inherited anchors as parameters, so a move between own wallets counts
+// as continuous holding instead of resetting to "under 3m". The link scan reads
+// ~19 GiB, so it runs once per hour for the dashboard and every zoom window
+// alike, never per window.
+async function loadRotationAnchors(): Promise<{ accounts: string[]; anchors: string[] }> {
+  return cachedSwr('explorer:hdx-rotation-anchors', 3_600_000, 48 * 3_600_000, async () => {
+    // USER accounts only (no modl, no pool/Kraken custody), balances as sorted
+    // per-account (week, balance) arrays.
     const linkRes = await client.query({
       query: `
         WITH
@@ -1246,7 +1412,21 @@ async function loadStructure(): Promise<HdxStructure> {
           SELECT DISTINCT from_account FROM price_data.transfer_activity
           WHERE asset_id = 0 AND has(kraken_accts, to_account)
         ),
-        ${userSeqCtes},
+        obs AS (
+          SELECT account_id, week_start AS w,
+            toFloat64(toUInt256OrZero(argMaxMerge(balance_state))) / 1e12 AS bal
+          FROM price_data.account_balance_weekly
+          WHERE asset_id = '0' AND NOT startsWith(account_id, '0x6d6f646c')
+          GROUP BY account_id, w
+        ),
+        seq AS (
+          SELECT account_id,
+            arraySort(groupArray(w)) AS ws,
+            arraySort((b, ww) -> ww, groupArray(bal), groupArray(w)) AS bs
+          FROM obs
+          WHERE NOT has(special_accts, account_id)
+          GROUP BY account_id
+        ),
         births AS (
           SELECT account_id,
             arrayFilter((ww, bb) -> bb > 0, ws, bs)[1] AS nzw,
@@ -1263,21 +1443,36 @@ async function loadStructure(): Promise<HdxStructure> {
         )
         SELECT x.b AS b, x.a AS a, toString(bi2.nzw) AS a_firstnz
         FROM (
-          SELECT b, argMax(a, amt) AS a
+          -- the largest funder; two that sent the same amount (measured: one
+          -- pair, to the planck) are ordered by id so the pick is the same on
+          -- every rebuild rather than whichever thread finished first
+          SELECT b, argMax(a, (amt, a)) AS a
           FROM (
             -- all funding from a within b's birth week, summed: a rotation
             -- often arrives as several transfers, none alone ≥90% of the close
-            SELECT ta.to_account AS b, ta.account AS a,
-              sum(toFloat64OrZero(ta.amount)) / 1e12 AS amt
-            FROM price_data.account_transfer_activity ta
-            INNER JOIN births bi ON bi.account_id = ta.to_account
-            INNER JOIN exits e ON e.account_id = ta.account
-            WHERE ta.asset_id = 0 AND ta.from_account = ta.account AND ta.to_account != ta.account
-              AND toMonday(ta.block_timestamp) BETWEEN bi.nzw - 7 AND bi.nzw
-              AND arrayExists(x -> x >= toMonday(ta.block_timestamp) AND x <= toMonday(ta.block_timestamp) + 14, e.ews)
-              AND ta.to_account NOT IN (SELECT from_account FROM kraken_forwarders)
+            SELECT b, a, sum(amt_row) / 1e12 AS amt, any(first_close) AS first_close
+            FROM (
+              -- account_transfer_activity is a ReplacingMergeTree keyed
+              -- (account, block_height, event_index): a replayed range holds a
+              -- transfer twice until its parts merge, and summed as-is it would
+              -- count double toward the 90% threshold. The rows are folded onto
+              -- that key AFTER the joins — births and exits carry one row per
+              -- account, so the joins multiply nothing and only the transfers
+              -- that survive them are grouped, a sliver of the ~20 GiB scan a
+              -- FINAL or a pre-join fold would have to sort.
+              SELECT ta.to_account AS b, ta.account AS a, ta.block_height AS h, ta.event_index AS ei,
+                any(toFloat64OrZero(ta.amount)) AS amt_row, any(bi.first_close) AS first_close
+              FROM price_data.account_transfer_activity ta
+              INNER JOIN births bi ON bi.account_id = ta.to_account
+              INNER JOIN exits e ON e.account_id = ta.account
+              WHERE ta.asset_id = 0 AND ta.from_account = ta.account AND ta.to_account != ta.account
+                AND toMonday(ta.block_timestamp) BETWEEN bi.nzw - 7 AND bi.nzw
+                AND arrayExists(x -> x >= toMonday(ta.block_timestamp) AND x <= toMonday(ta.block_timestamp) + 14, e.ews)
+                AND ta.to_account NOT IN (SELECT from_account FROM kraken_forwarders)
+              GROUP BY b, a, h, ei
+            )
             GROUP BY b, a
-            HAVING amt >= 0.9 * any(bi.first_close)
+            HAVING amt >= 0.9 * first_close
           )
           GROUP BY b
         ) x
@@ -1288,182 +1483,371 @@ async function loadStructure(): Promise<HdxStructure> {
       .map(r => ({ b: String(r.b), a: String(r.a), aFirstnz: String(r.a_firstnz) }))
     const rot = resolveRotationAnchors(linkRows)
     // transform() needs non-empty constant arrays — a sentinel keeps the shape.
-    const rotAccs = ['0x__none__', ...rot.accounts]
-    const rotAnchors = ['2100-01-01', ...rot.anchors]
-    // The dense-fill query runs ALONE before the lighter two fire in parallel:
-    // a fully concurrent cold burst can brush ClickHouse's 20s execution cap.
-    const structureRes = await client.query({
-      query: `
-        WITH
-        (SELECT toMonday(max(block_timestamp)) FROM price_data.blocks) AS wmax,
-        ${tagAccountsSql(KRAKEN_TAG_IDS)} AS kraken_accts,
-        ${tagAccountsSql(POOL_TAG_IDS)} AS pool_accts,
-        obs AS (
-          SELECT account_id, week_start AS w,
-            toFloat64(toUInt256OrZero(argMaxMerge(balance_state))) / 1e12 AS bal
-          FROM price_data.account_balance_weekly
-          WHERE asset_id = '0'
-          GROUP BY account_id, w
-        ),
-        seq AS (
-          SELECT account_id,
-            arraySort(groupArray(w)) AS ws,
-            arraySort((b, ww) -> ww, groupArray(bal), groupArray(w)) AS bs,
-            arrayFilter((ww, b) -> b > 0, ws, bs) AS nzws
-          FROM obs GROUP BY account_id
-        ),
-        filled AS (
-          SELECT account_id,
-            if(length(nzws) > 0, nzws[1], toDate('2100-01-01')) AS firstnz,
-            arrayMap(j -> ws[1] + 7 * toInt32(j), range(toUInt64((wmax - ws[1]) / 7) + 1)) AS gw,
-            arrayFill(x -> x >= 0,
-              arrayMap(p -> if(p > 0, bs[p], -1.),
-                arrayMap(j -> indexOf(ws, ws[1] + 7 * toInt32(j)), range(toUInt64((wmax - ws[1]) / 7) + 1)))) AS fb
-          FROM seq
-        ),
-        sel AS (
-          SELECT
-            multiIf(
-              account_id = '${TREASURY_ACCOUNT}', 'treasury',
-              startsWith(account_id, '0x6d6f646c') OR has(pool_accts, account_id), 'protocol',
-              has(kraken_accts, account_id), 'kraken',
-              'user') AS cls,
-            t.1 AS week, t.2 AS bal,
-            -- holding age from the account's own first balance OR its rotation
-            -- chain's root (whichever is older) — see resolveRotationAnchors
-            dateDiff('day', least(firstnz,
-              transform(account_id, {rotAccs:Array(String)}, {rotAnchors:Array(Date)}, toDate('2100-01-01'))), t.1) AS age_days
-          FROM filled
-          ARRAY JOIN arrayZip(gw, fb) AS t
-          WHERE t.2 > 0 AND t.1 >= toDate({start:String})
-        )
-        SELECT toString(w.week) AS week,
-          w.treasury, w.protocol, w.kraken, w.user_total,
-          w.top10, w.top100, w.top1000,
-          if(w.user_total > 0, w.hhi_raw / (w.user_total * w.user_total), 0) AS hhi,
-          w.age_0_3m, w.age_3_12m, w.age_1_2y, w.age_2y
-        FROM (
-          SELECT week,
-            sumIf(bal, cls = 'treasury') AS treasury,
-            sumIf(bal, cls = 'protocol') AS protocol,
-            sumIf(bal, cls = 'kraken') AS kraken,
-            sumIf(bal, cls = 'user') AS user_total,
-            arraySort(x -> -x, groupArrayIf(bal, cls = 'user')) AS ub,
-            arraySum(arraySlice(ub, 1, 10)) AS top10,
-            arraySum(arraySlice(ub, 11, 90)) AS top100,
-            arraySum(arraySlice(ub, 101, 900)) AS top1000,
-            arraySum(arrayMap(x -> x * x, ub)) AS hhi_raw,
-            -- band edges at week multiples (13/52/104 weeks): every date here
-            -- is a Monday, so age is always a whole number of weeks
-            sumIf(bal, cls = 'user' AND age_days < 91) AS age_0_3m,
-            sumIf(bal, cls = 'user' AND age_days >= 91 AND age_days < 364) AS age_3_12m,
-            sumIf(bal, cls = 'user' AND age_days >= 364 AND age_days < 728) AS age_1_2y,
-            sumIf(bal, cls = 'user' AND age_days >= 728) AS age_2y
-          FROM sel GROUP BY week
-        ) AS w ORDER BY w.week`,
-      query_params: { start: HDX_BALANCE_SERIES_START, rotAccs, rotAnchors },
+    return { accounts: ['0x__none__', ...rot.accounts], anchors: ['2100-01-01', ...rot.anchors] }
+  })
+}
+
+const NO_ROTATION = { accounts: ['0x__none__'], anchors: ['2100-01-01'] }
+
+/**
+ * The structure over a regular grid (a whole-week grid reads the weekly closes,
+ * anything else the hourly ones). The Kraken scope needs no rotation anchors:
+ * its accounts are never in the user class the ages rank.
+ */
+export async function structureBuckets(g: ChartGrid, scope: HdxStructureScope = 'all'): Promise<HdxStructureBucket[]> {
+  if (g.grain.monthly) throw new RangeError('the holder structure needs a fixed-step grid')
+  const source: HdxStructureSource = isWeeklyAligned(g) ? 'weekly' : 'hourly'
+  // The hourly source reads every hourly HDX row from the grid's Monday to its
+  // end, and a bucket of a week or more is only ever asked for over a span the
+  // row budget cannot hold (HDX_STRUCTURE_HOURLY_ROW_BUDGET): the ~25 GB read a
+  // 45-day step over a year would be. structureWindowFloor moves such a grid
+  // onto whole weeks before it gets here; a grid that still arrives is refused.
+  if (source === 'hourly' && g.grain.stepSec >= WEEK_SEC && scope === 'all') {
+    throw new RangeError(`an hourly-source holder structure cannot bucket by ${g.grain.stepSec / DAY_SEC} days: coarsen the grid to whole weeks first`)
+  }
+  const refs = structureRefs(g)
+  const rot = scope === 'all' ? await loadRotationAnchors() : NO_ROTATION
+  const res = await client.query({
+    query: hdxStructureSql(source, scope),
+    query_params: {
+      from: g.fromSec, w0: keySeconds(WEEKLY_MONDAY_GRAIN.keyOf(g.fromSec)), end: g.endSec,
+      step: g.grain.stepSec, n: g.keys.length, refs, rotAccs: rot.accounts, rotAnchors: rot.anchors,
+    },
+    format: 'JSONEachRow',
+  })
+  return mergeHdxStructureRows(refs, await res.json<HdxStructureSqlRow>())
+}
+
+// A zoom window on the hourly source reads every hourly HDX row from its Monday
+// to its end, and since the balance snapshots began (June 2026) that is a
+// restated row for every account every day, ~100k rows and ~140 MiB a day. Past
+// this many rows a window is served on the weekly closes instead (a 7-day step)
+// rather than run a multi-GiB read; before the snapshots any span fits.
+//
+// Headroom: at the budget the structure query peaks near 2.5 GB against the
+// api's 4 GB per-query cap (API_CLICKHOUSE_SETTINGS.max_memory_usage), so the
+// budget is the memory bound, not a latency taste. Peak memory grows with the
+// rows; re-measure query_log's memory_usage before raising it past ~1.7M, where
+// the extrapolation meets the cap.
+export const HDX_STRUCTURE_HOURLY_ROW_BUDGET = 1_100_000
+
+async function hourlyRowsFor(g: ChartGrid): Promise<number> {
+  const w0 = keySeconds(WEEKLY_MONDAY_GRAIN.keyOf(g.fromSec))
+  return cachedSwr(`explorer:hdx:hourly-rows:${w0}:${g.endSec}`, 600_000, 600_000, async () => {
+    const res = await client.query({
+      query: `SELECT count() AS n FROM price_data.account_balance_hourly
+              WHERE asset_id = '0' AND interval_start >= toDateTime({w0:UInt32}) AND interval_start < toDateTime({end:UInt32})`,
+      query_params: { w0, end: g.endSec },
       format: 'JSONEachRow',
     })
-    // Allocation-realization mints, classified like every other balance (see
-    // backfillAllocationMints). The 10M-HDX floor is a 20-character raw amount.
-    const mintQuery = client.query({
+    return Number((await res.json<{ n: number | string }>())[0]?.n ?? 0)
+  })
+}
+
+/**
+ * The whole-week step at or above `stepSec`: the ladder's own rung where it has
+ * one (10 days → 14), else the next multiple of a week (a 30-day rung → 5 weeks,
+ * 45 → 7, 60 → 9, 90 → 13, 180 → 26). Never fewer buckets' worth of span than
+ * the step asked for, so a window stays inside its point budget.
+ */
+export function wholeWeekStepAtLeast(stepSec: number): number {
+  return Math.ceil(stepSec / WEEK_SEC) * WEEK_SEC
+}
+
+/**
+ * The step a structure window must coarsen to, or null when its grid is
+ * affordable as resolved. A step of a week or more that is not whole weeks (the
+ * 10-day rung over multi-year spans, the 30-day-and-up rungs a small point
+ * budget resolves to) moves to whole weeks, whose buckets the weekly closes
+ * state exactly; every such window is a span the hourly source could not hold
+ * within budget, so it never stays hourly. Below a week the hourly rows are
+ * counted against the budget and a window past it moves to single weeks.
+ */
+async function structureWindowFloor(g: ChartGrid): Promise<number | null> {
+  if (isWeeklyAligned(g)) return null
+  if (g.grain.stepSec >= WEEK_SEC) return wholeWeekStepAtLeast(g.grain.stepSec)
+  return (await hourlyRowsFor(g)) > HDX_STRUCTURE_HOURLY_ROW_BUDGET ? WEEK_SEC : null
+}
+
+// The dashboard's structure grids: Monday weeks from the series start, and
+// calendar months from its first month.
+function hdxWeekGrid(): ChartGrid {
+  return fullChartGrid(WEEKLY_MONDAY_GRAIN, WEEKLY_MONDAY_GRAIN.grid(HDX_SERIES_START_SEC, nowSec()))
+}
+function hdxMonthGrid(): ChartGrid {
+  return fullChartGrid(MONTHLY_GRAIN, MONTHLY_GRAIN.grid(HDX_TREND_START_SEC, nowSec()))
+}
+
+/**
+ * Where each month samples a Monday-week series: the week holding the month's
+ * last day, whose close is that month's balance-derived figure (the grain the
+ * monthly trends were built on), or the newest week for a month still running.
+ */
+export function monthWeekIndex(months: string[], weeks: string[]): number[] {
+  const at = new Map(weeks.map((w, i) => [w, i]))
+  return months.map(m => {
+    const lastDay = grainBucketEndSec(MONTHLY_GRAIN, m) - DAY_SEC
+    return at.get(WEEKLY_MONDAY_GRAIN.keyOf(lastDay)) ?? weeks.length - 1
+  })
+}
+
+const hdxRaw = (s: string | number | bigint | null | undefined): number => hdxNumberFromRaw(BigInt(s ?? 0))
+const wholeHdx = (raw: bigint): number => Math.round(hdxNumberFromRaw(raw))
+const round2 = (v: number) => Math.round(v * 100) / 100
+
+/** Top-100 user wallets' share of user-held supply, %, two decimals — null without user supply. */
+function top100Share(b: HdxStructureBucket): number | null {
+  return b.user > 0n ? round2(Number(b.top10 + b.top11to100) / Number(b.user) * 100) : null
+}
+
+// Allocation-realization mints, classified like every other balance (see
+// backfillAllocationMints). The 10M-HDX floor is a 20-character raw amount. The
+// scan reads raw_events (~61 GiB), so it is cached for the dashboard and every
+// zoom window alike.
+async function loadAllocationMints(): Promise<HdxAllocationMintRow[]> {
+  return cachedSwr('explorer:hdx-allocation-mints', 3_600_000, 48 * 3_600_000, async () => {
+    const res = await client.query({
       query: `
         WITH
         ${tagAccountsSql(KRAKEN_TAG_IDS)} AS kraken_accts,
         ${tagAccountsSql(POOL_TAG_IDS)} AS pool_accts
-        SELECT toString(toMonday(block_timestamp)) AS week,
+        SELECT toString(toMonday(block_timestamp)) AS week, toUnixTimestamp(block_timestamp) AS ts,
           multiIf(
             who = '${TREASURY_ACCOUNT}', 'treasury',
             startsWith(who, '0x6d6f646c') OR has(pool_accts, who), 'protocol',
             has(kraken_accts, who), 'kraken',
             'user') AS cls,
-          sum(toFloat64(JSONExtractString(args_json, 'amount')) / 1e12) AS hdx
+          toFloat64(JSONExtractString(args_json, 'amount')) / 1e12 AS hdx
         FROM price_data.raw_events
         WHERE event_name = 'Balances.Deposit'
           AND length(JSONExtractString(args_json, 'amount')) >= 20
           AND (JSONExtractString(args_json, 'who') AS who) != ''
-        GROUP BY week, cls ORDER BY week`,
+        ORDER BY block_height, event_index`,
       format: 'JSONEachRow',
     })
-    // ── Monthly trend queries (all validated against live data; each < 1s) ──
-    const monthsSql = `arrayMap(i -> toLastDayOfMonth(addMonths(toDate('2022-07-01'), i)),
-      range(toUInt64(dateDiff('month', toDate('2022-07-01'), today()) + 1)))`
-    // Staking sinks, cumulative per month. Classic staking uses its lock; the
-    // GIGAHDX band is the pallet's TotalLocked, which is exactly
-    // Σ Staked.amount + Σ YieldRealized.amount − Σ Unstaked.payout (the flow sum
-    // gigahdx_stake_events documents; equal to storage at the head). A migration
-    // DOUBLE-EMITS GigaHdx.Staked next to MigratedFromLegacy, and so does a
-    // cancelled unstake next to UnstakeCancelled, so only Staked is summed —
-    // counting either twin overcounts — while the matching classic ForceUnstaked
-    // drains the classic side, so the migration reads as a handoff between the
-    // two bands, not new stake. YieldRealized moves the gigahdx! pot's yield into
-    // the staker's lock, and the Unstaked payout later releases it with the rest,
-    // so leaving it out drifts the band low by every realization.
-    const stakedQuery = client.query({
-      query: `
-        SELECT toString(s.m) AS m,
-          round(sum(s.classic_delta) OVER (ORDER BY s.m) / 1e12, 0) AS classic,
-          round(sum(s.giga_delta) OVER (ORDER BY s.m) / 1e12, 0) AS giga
+    return (await res.json<{ week: string; ts: number; cls: string; hdx: number }>())
+      .map(r => ({ week: String(r.week), ts: Number(r.ts), cls: String(r.cls), hdx: Number(r.hdx) }))
+  })
+}
+
+// Staking sinks, cumulative. Classic staking uses its lock; the GIGAHDX band is
+// the pallet's TotalLocked, which is exactly Σ Staked.amount + Σ
+// YieldRealized.amount − Σ Unstaked.payout (the flow sum gigahdx_stake_events
+// documents; equal to storage at the head). A migration DOUBLE-EMITS
+// GigaHdx.Staked next to MigratedFromLegacy, and so does a cancelled unstake next
+// to UnstakeCancelled, so only Staked is summed — counting either twin
+// overcounts — while the matching classic ForceUnstaked drains the classic side,
+// so the migration reads as a handoff between the two bands, not new stake.
+// YieldRealized moves the gigahdx! pot's yield into the staker's lock, and the
+// Unstaked payout later releases it with the rest, so leaving it out drifts the
+// band low by every realization. Integer planck throughout.
+export const GIGAHDX_LOCKED_DELTA_SQL = `sumIf(toInt256OrZero(JSONExtractString(args_json, 'amount')), event_name IN ('GigaHdx.Staked', 'GigaHdx.YieldRealized'))
+            - sumIf(toInt256OrZero(JSONExtractString(args_json, 'payout')), event_name = 'GigaHdx.Unstaked')`
+const CLASSIC_STAKED_DELTA_SQL = `sumIf(toInt256OrZero(JSONExtractString(args_json, 'stake')), event_name IN ('Staking.PositionCreated', 'Staking.StakeAdded'))
+            - sumIf(toInt256OrZero(JSONExtractString(args_json, 'unlockedStake')), event_name = 'Staking.Unstaked')
+            - sumIf(toInt256OrZero(JSONExtractString(args_json, 'stake')), event_name = 'Staking.ForceUnstaked')`
+
+// Rows at or after the grid's end are never read; the block bound only prunes.
+const hdxGridParams = (g: ChartGrid) => ({ from: g.fromSec, end: g.endSec, lo: g.fromHeight, hi: g.toHeight })
+
+/** Staked HDX at each bucket end: a running total, so every earlier row folds into bucket 0. */
+export function hdxStakedSql(g: ChartGrid): string {
+  return `
+    SELECT k, toString(sum(cd) OVER (ORDER BY k)) AS classic, toString(sum(gd) OVER (ORDER BY k)) AS giga
+    FROM (
+      SELECT ${g.grain.keySql('block_timestamp')} AS k,
+        ${CLASSIC_STAKED_DELTA_SQL} AS cd,
+        ${GIGAHDX_LOCKED_DELTA_SQL} AS gd
+      FROM price_data.staking_activity FINAL
+      WHERE block_timestamp < toDateTime({end:UInt32}) AND block_height <= {hi:UInt32}
+      GROUP BY k)
+    ORDER BY k`
+}
+
+async function stakedSeries(g: ChartGrid): Promise<{ classic: (number | null)[]; giga: (number | null)[] }> {
+  const res = await client.query({ query: hdxStakedSql(g), query_params: hdxGridParams(g), format: 'JSONEachRow' })
+  const rows = await res.json<{ k: string; classic: string; giga: string }>()
+  const band = (pick: (r: { classic: string; giga: string }) => string) =>
+    carryForwardValues(alignToGrid(g.keys, rows.map(r => ({ k: r.k, v: wholeHdx(BigInt(pick(r))) }))))
+  return { classic: band(r => r.classic), giga: band(r => r.giga) }
+}
+
+/** HDX's close per bucket: day candles on a day-multiple grain, hour candles below. A flow, so only the grid's own candles. */
+export function hdxPriceSql(g: ChartGrid): string {
+  const table = g.grain.stepSec % DAY_SEC === 0 ? 'ohlc_1d' : 'ohlc_1h'
+  return `
+    SELECT k, toFloat64(argMax(c, t)) AS v
+    FROM (
+      SELECT interval_start AS t, ${g.grain.keySql('interval_start')} AS k, argMaxMerge(close_state) AS c
+      FROM price_data.${table}
+      WHERE asset_id = 0 AND interval_start >= toDateTime({from:UInt32}) AND interval_start < toDateTime({end:UInt32})
+      GROUP BY interval_start)
+    GROUP BY k ORDER BY k`
+}
+
+async function priceSeries(g: ChartGrid): Promise<(number | null)[]> {
+  const res = await client.query({ query: hdxPriceSql(g), query_params: hdxGridParams(g), format: 'JSONEachRow' })
+  return alignToGrid(g.keys, (await res.json<{ k: string; v: number }>()).map(r => ({ k: r.k, v: Number(r.v) })))
+}
+
+/**
+ * Cumulative HDX the treasury bought through its own buy-side DCA schedules
+ * (revenue recycled into HDX — schedule 30104 et al.), at each bucket end.
+ */
+export function hdxBuybackSql(g: ChartGrid): string {
+  return `
+    SELECT k, toString(sum(raw) OVER (ORDER BY k)) AS v
+    FROM (
+      SELECT ${g.grain.keySql('e.block_timestamp')} AS k, sum(toUInt256OrZero(e.amount_out)) AS raw
+      FROM price_data.dca_events e FINAL
+      INNER JOIN (
+        -- FINAL for the same reason the execution side carries it: dca_schedules
+        -- is ReplacingMergeTree(block_height), so an unresolved replacement both
+        -- matches this filter on a superseded row and, being an INNER JOIN key,
+        -- multiplies every execution it pairs with — inflating the cumulative
+        -- buyback series rather than merely duplicating a row.
+        SELECT id FROM price_data.dca_schedules FINAL
+        WHERE who = '${TREASURY_ACCOUNT}' AND asset_out = 0 AND asset_in != 0
+      ) s ON e.id = s.id
+      WHERE e.event_name = 'DCA.TradeExecuted' AND e.block_timestamp < toDateTime({end:UInt32}) AND e.block_height <= {hi:UInt32}
+      GROUP BY k)
+    ORDER BY k`
+}
+
+async function buybackSeries(g: ChartGrid): Promise<(number | null)[]> {
+  const res = await client.query({ query: hdxBuybackSql(g), query_params: hdxGridParams(g), format: 'JSONEachRow' })
+  return carryForwardValues(alignToGrid(g.keys, (await res.json<{ k: string; v: string }>()).map(r => ({ k: r.k, v: wholeHdx(BigInt(r.v)) }))))
+}
+
+/**
+ * Aggregate cost basis (realized price) of user-held HDX at each Monday week's
+ * close. Account-level accounting: balance increases are bought at that week's
+ * close (weeks before the price era at the first observed close), decreases
+ * release cost proportionally; arrayFold carries (cost history, prev balance,
+ * cost). The cost is BOOKED weekly — that is its grain, and a zoom shows it
+ * carried forward between week closes rather than inventing a finer basis.
+ * Summed as per-account deltas at the weeks they changed, then run forward, so
+ * the aggregate needs no per-cut expansion; the balance side is integer planck.
+ */
+export function hdxRealizedWeeklySql(): string {
+  return `
+    WITH
+    ${tagAccountsSql([...KRAKEN_TAG_IDS, ...POOL_TAG_IDS])} AS special_accts,
+    -- Weekly HDX close, FORWARD-FILLED onto the contiguous Monday grid
+    -- through the current week. A ClickHouse map subscript on a missing key
+    -- returns the value type's default, and 0.0 is indistinguishable from a
+    -- real price: an account that increased its balance in a week with no
+    -- asset-0 candle would book that tranche at a $0 cost basis, which
+    -- arrayFold then carries forward for the rest of its history. The
+    -- price_era guard below only covers weeks BEFORE the first candle, not
+    -- a gap inside the era, so the gap has to be closed here.
+    (SELECT mapFromArrays(grid, arrayFill(x -> x > 0., arrayMap(g -> m[g], grid))) FROM (
+      SELECT mapFromArrays(groupArray(w), groupArray(toFloat64(px))) AS m,
+        min(w) AS minw, greatest(max(w), toStartOfWeek(today(), 1)) AS maxw,
+        arrayMap(i -> minw + toIntervalDay(7 * i), range(toUInt32(intDiv(dateDiff('day', minw, maxw), 7)) + 1)) AS grid
+      FROM (
+        SELECT toStartOfWeek(interval_start, 1) AS w, argMaxMerge(close_state) AS px
+        FROM price_data.ohlc_1d WHERE asset_id = 0 GROUP BY w
+      )
+    )) AS pmap,
+    -- assumeNotNull: a Nullable scalar here would poison the arrayFold
+    -- accumulator type (lambda returns Nullable, accumulator is not)
+    assumeNotNull((SELECT min(toStartOfWeek(interval_start, 1)) FROM price_data.ohlc_1d WHERE asset_id = 0)) AS price_era,
+    assumeNotNull((SELECT toFloat64(argMaxMerge(close_state)) FROM price_data.ohlc_1d WHERE asset_id = 0
+      AND toStartOfWeek(interval_start, 1) = (SELECT min(toStartOfWeek(interval_start, 1)) FROM price_data.ohlc_1d WHERE asset_id = 0))) AS seed_px
+    SELECT toString(w) AS w, toString(sum(sum(dbal)) OVER (ORDER BY w)) AS bal, toString(sum(sum(dcost)) OVER (ORDER BY w)) AS cost
+    FROM (
+      SELECT t.1 AS w, t.2 AS dbal, t.3 AS dcost
+      FROM (
+        SELECT ws, bsI,
+          arrayFold((acc, t) -> tuple(
+              arrayPushBack(acc.1,
+                if(t.2 >= acc.2,
+                   acc.3 + ((t.2 - acc.2) / 1e12) * if(t.1 < price_era, seed_px, pmap[t.1]),
+                   acc.3 * if(acc.2 > 0., t.2 / acc.2, 0.))),
+              t.2,
+              if(t.2 >= acc.2,
+                 acc.3 + ((t.2 - acc.2) / 1e12) * if(t.1 < price_era, seed_px, pmap[t.1]),
+                 acc.3 * if(acc.2 > 0., t.2 / acc.2, 0.))
+            ), arrayZip(ws, bsF), tuple(emptyArrayFloat64(), 0., 0.)).1 AS costs
         FROM (
-          SELECT toStartOfMonth(block_timestamp) AS m,
-            sumIf(toFloat64OrZero(JSONExtractString(args_json, 'stake')), event_name IN ('Staking.PositionCreated', 'Staking.StakeAdded'))
-            - sumIf(toFloat64OrZero(JSONExtractString(args_json, 'unlockedStake')), event_name = 'Staking.Unstaked')
-            - sumIf(toFloat64OrZero(JSONExtractString(args_json, 'stake')), event_name = 'Staking.ForceUnstaked') AS classic_delta,
-            ${GIGAHDX_LOCKED_DELTA_SQL} AS giga_delta
-          FROM price_data.staking_activity FINAL
-          GROUP BY m
-        ) AS s ORDER BY s.m`,
-      format: 'JSONEachRow',
-    })
-    // Tagged Kraken custody balance as of each month end.
-    const krakenQuery = client.query({
-      query: `
-        SELECT toString(toStartOfMonth(cut)) AS m, round(sum(bal) / 1e12, 0) AS v
-        FROM (
-          SELECT cut, account_id, argMaxIf(balf, week_start, week_start <= cut) AS bal
+          SELECT account_id,
+            arraySort(groupArray(w)) AS ws,
+            arraySort((b, ww) -> ww, groupArray(balF), groupArray(w)) AS bsF,
+            arraySort((b, ww) -> ww, groupArray(balI), groupArray(w)) AS bsI
           FROM (
-            SELECT account_id, week_start, toFloat64(toUInt256OrZero(argMaxMerge(balance_state))) AS balf
+            SELECT account_id, week_start AS w, argMaxMerge(balance_state) AS b0,
+              toFloat64(toUInt256OrZero(b0)) AS balF, toInt256(toUInt256OrZero(b0)) AS balI
             FROM price_data.account_balance_weekly
-            WHERE asset_id = '0' AND week_start >= toDate({start:String})
-              AND account_id IN (SELECT account_id FROM price_data.account_tags FINAL
-                                 WHERE label_id IN (${KRAKEN_TAG_IDS.map(t => `'${t}'`).join(',')}) AND deleted = 0)
+            WHERE asset_id = '0' AND NOT startsWith(account_id, '0x6d6f646c')
+              AND NOT has(special_accts, account_id)
             GROUP BY account_id, week_start
-          )
-          ARRAY JOIN ${monthsSql} AS cut
-          GROUP BY cut, account_id
-        ) GROUP BY m ORDER BY m`,
-      query_params: { start: HDX_BALANCE_SERIES_START },
-      format: 'JSONEachRow',
-    })
-    // Cumulative HDX the treasury bought through its own buy-side DCA
-    // schedules (revenue recycled into HDX — schedule 30104 et al.).
-    const buybackQuery = client.query({
-      query: `
-        SELECT toString(b.m) AS m, round(sum(b.hdx) OVER (ORDER BY b.m), 0) AS v
-        FROM (
-          SELECT toStartOfMonth(e.block_timestamp) AS m, sum(toFloat64OrZero(e.amount_out)) / 1e12 AS hdx
-          FROM price_data.dca_events e FINAL
-          INNER JOIN (
-            -- FINAL for the same reason the execution side carries it: dca_schedules
-            -- is ReplacingMergeTree(block_height), so an unresolved replacement both
-            -- matches this filter on a superseded row and, being an INNER JOIN key,
-            -- multiplies every execution it pairs with — inflating the cumulative
-            -- buyback series rather than merely duplicating a row.
-            SELECT id FROM price_data.dca_schedules FINAL
-            WHERE who = '${TREASURY_ACCOUNT}' AND asset_out = 0 AND asset_in != 0
-          ) s ON e.id = s.id
-          WHERE e.event_name = 'DCA.TradeExecuted'
-          GROUP BY m
-        ) AS b ORDER BY b.m`,
-      format: 'JSONEachRow',
-    })
-    // Monthly close, USD (ohlc_1d is keyed (asset_id, interval_start)).
-    const priceQuery = client.query({
-      query: `
-        SELECT toString(toStartOfMonth(interval_start)) AS m, toFloat64(argMaxMerge(close_state)) AS v
-        FROM price_data.ohlc_1d WHERE asset_id = 0 GROUP BY m ORDER BY m`,
-      format: 'JSONEachRow',
-    })
+          ) GROUP BY account_id
+        )
+      )
+      -- The cost deltas are taken and summed in Decimal256: a genesis pot recorded
+      -- 1e12x too high carries an ~8e18 USD cost for a few weeks, and a Float64
+      -- delta against it (or a running Float64 sum through it) rounds every
+      -- other account's cost to its 1,024-unit ulp — 0.3% off the aggregate.
+      ARRAY JOIN arrayMap(j -> (ws[j], bsI[j] - if(j = 1, toInt256(0), bsI[j - 1]),
+        toDecimal256(costs[j], 6) - if(j = 1, toDecimal256(0, 6), toDecimal256(costs[j - 1], 6))), arrayEnumerate(ws)) AS t
+    )
+    GROUP BY w ORDER BY w`
+}
+
+/** Realized price at each week close ('YYYY-MM-DD' Monday → USD), 8 decimals. */
+async function loadRealizedWeekly(): Promise<Map<string, number>> {
+  return cachedSwr('explorer:hdx-realized-weekly', 3_600_000, 48 * 3_600_000, async () => {
+    const res = await client.query({ query: hdxRealizedWeeklySql(), format: 'JSONEachRow' })
+    const out = new Map<string, number>()
+    for (const r of await res.json<{ w: string; bal: string; cost: string }>()) {
+      const bal = BigInt(r.bal)
+      if (bal > 0n) out.set(String(r.w), Math.round(Number(r.cost) / hdxNumberFromRaw(bal) * 1e8) / 1e8)
+    }
+    return out
+  })
+}
+
+/**
+ * The realized price at each bucket end, at its booking grain: the value of the
+ * newest week whose close is at or before the end, carried forward.
+ */
+export function realizedAtEnds(weekly: Map<string, number>, ends: number[]): (number | null)[] {
+  const weeks = [...weekly.keys()].sort()
+  const closes = weeks.map(w => keySeconds(w) + WEEK_SEC)
+  let j = -1
+  return ends.map(e => {
+    while (j + 1 < closes.length && closes[j + 1] <= e) j++
+    return j >= 0 ? weekly.get(weeks[j])! : null
+  })
+}
+
+/**
+ * The structure as the dashboard ships it (HDX numbers) from builder buckets.
+ * Allocation mints are counted in their band at every bucket ending at or before
+ * the mint (backfillAllocationMints).
+ */
+function ownershipOf(g: ChartGrid, b: HdxStructureBucket[], mints: HdxAllocationMintRow[]) {
+  const rows: HdxStructureWeekRow[] = b.map((x, i) => ({
+    week: g.keys[i],
+    treasury: hdxRaw(x.treasury), protocol: hdxRaw(x.protocol), kraken: hdxRaw(x.kraken),
+    user_total: hdxRaw(x.user),
+    top10: hdxRaw(x.top10), top100: hdxRaw(x.top11to100), top1000: hdxRaw(x.top101to1000),
+    hhi: x.user > 0n ? Number(x.sq) / (Number(x.user) * Number(x.user)) : 0,
+    age_0_3m: hdxRaw(x.ages[0]), age_3_12m: hdxRaw(x.ages[1]), age_1_2y: hdxRaw(x.ages[2]), age_2y: hdxRaw(x.ages[3]),
+  }))
+  const base = buildHdxStructure(rows)
+  const backfilled = backfillAllocationMintsAt(base.ownership, g.keys.map(k => grainBucketEndSec(g.grain, k)), mints)
+  return { base, backfilled }
+}
+
+async function loadStructure(): Promise<HdxStructure> {
+  return cachedSwr('explorer:hdx-structure:model:2', 3_600_000, 48 * 3_600_000, async () => {
+    const wg = hdxWeekGrid()
+    const mg = hdxMonthGrid()
+    // The structure runs ALONE before the lighter queries fire in parallel: a
+    // fully concurrent cold burst can brush ClickHouse's 20s execution cap.
+    const buckets = await structureBuckets(wg)
     // Unique non-module accounts trading HDX per month.
     const tradersQuery = client.query({
       query: `
@@ -1493,132 +1877,221 @@ async function loadStructure(): Promise<HdxStructure> {
         ) AS g GROUP BY g.q ORDER BY g.q`,
       format: 'JSONEachRow',
     })
-    // Aggregate cost basis (realized price) of user-held HDX, plus user supply
-    // and the top-100 share, as of each month end. Account-level accounting:
-    // balance increases are bought at that week's close (weeks before the
-    // price era at the first observed close), decreases release cost
-    // proportionally. arrayFold carries (cost history, prev balance, cost).
-    const realizedQuery = client.query({
-      query: `
-        WITH
-        ${tagAccountsSql([...KRAKEN_TAG_IDS, ...POOL_TAG_IDS])} AS special_accts,
-        -- Weekly HDX close, FORWARD-FILLED onto the contiguous Monday grid
-        -- through the current week. A ClickHouse map subscript on a missing key
-        -- returns the value type's default, and 0.0 is indistinguishable from a
-        -- real price: an account that increased its balance in a week with no
-        -- asset-0 candle would book that tranche at a $0 cost basis, which
-        -- arrayFold then carries forward for the rest of its history. The
-        -- price_era guard below only covers weeks BEFORE the first candle, not
-        -- a gap inside the era, so the gap has to be closed here.
-        (SELECT mapFromArrays(grid, arrayFill(x -> x > 0., arrayMap(g -> m[g], grid))) FROM (
-          SELECT mapFromArrays(groupArray(w), groupArray(toFloat64(px))) AS m,
-            min(w) AS minw, greatest(max(w), toStartOfWeek(today(), 1)) AS maxw,
-            arrayMap(i -> minw + toIntervalDay(7 * i), range(toUInt32(intDiv(dateDiff('day', minw, maxw), 7)) + 1)) AS grid
-          FROM (
-            SELECT toStartOfWeek(interval_start, 1) AS w, argMaxMerge(close_state) AS px
-            FROM price_data.ohlc_1d WHERE asset_id = 0 GROUP BY w
-          )
-        )) AS pmap,
-        -- assumeNotNull: a Nullable scalar here would poison the arrayFold
-        -- accumulator type (lambda returns Nullable, accumulator is not)
-        assumeNotNull((SELECT min(toStartOfWeek(interval_start, 1)) FROM price_data.ohlc_1d WHERE asset_id = 0)) AS price_era,
-        assumeNotNull((SELECT toFloat64(argMaxMerge(close_state)) FROM price_data.ohlc_1d WHERE asset_id = 0
-          AND toStartOfWeek(interval_start, 1) = (SELECT min(toStartOfWeek(interval_start, 1)) FROM price_data.ohlc_1d WHERE asset_id = 0))) AS seed_px
-        SELECT toString(toStartOfMonth(cut)) AS m,
-          round(sum(bal_asof) / 1e12, 0) AS user_supply,
-          round(sum(cost_asof) / sum(bal_asof / 1e12), 8) AS realized_price,
-          round(arraySum(arraySlice(arrayReverseSort(groupArray(bal_asof)), 1, 100)) / sum(bal_asof) * 100, 2) AS top100_share
-        FROM (
-          SELECT cut,
-            arrayLastIndex(x -> x <= cut, ws) AS idx,
-            if(idx = 0, 0., bsF[idx]) AS bal_asof,
-            if(idx = 0, 0., costs[idx]) AS cost_asof
-          FROM (
-            SELECT account_id, ws, bsF,
-              arrayFold((acc, t) -> tuple(
-                  arrayPushBack(acc.1,
-                    if(t.2 >= acc.2,
-                       acc.3 + ((t.2 - acc.2) / 1e12) * if(t.1 < price_era, seed_px, pmap[t.1]),
-                       acc.3 * if(acc.2 > 0., t.2 / acc.2, 0.))),
-                  t.2,
-                  if(t.2 >= acc.2,
-                     acc.3 + ((t.2 - acc.2) / 1e12) * if(t.1 < price_era, seed_px, pmap[t.1]),
-                     acc.3 * if(acc.2 > 0., t.2 / acc.2, 0.))
-                ), arrayZip(ws, bsF), tuple(emptyArrayFloat64(), 0., 0.)).1 AS costs
-            FROM (
-              SELECT account_id,
-                arraySort(groupArray(w)) AS ws,
-                arraySort((b, ww) -> ww, groupArray(balF), groupArray(w)) AS bsF
-              FROM (
-                SELECT account_id, week_start AS w,
-                  toFloat64(toUInt256OrZero(argMaxMerge(balance_state))) AS balF
-                FROM price_data.account_balance_weekly
-                WHERE asset_id = '0' AND NOT startsWith(account_id, '0x6d6f646c')
-                  AND NOT has(special_accts, account_id)
-                GROUP BY account_id, week_start
-              ) GROUP BY account_id
-            )
-          )
-          ARRAY JOIN ${monthsSql} AS cut
-        )
-        WHERE bal_asof > 0 OR cost_asof > 0
-        GROUP BY m HAVING sum(bal_asof) > 0 ORDER BY m`,
-      format: 'JSONEachRow',
-    })
-    const [mintRes, stakedRes, krakenRes, buybackRes, priceRes, tradersRes, govRes, realizedRes] = await Promise.all([
-      mintQuery, stakedQuery, krakenQuery, buybackQuery, priceQuery, tradersQuery, govQuery, realizedQuery,
+    const [mints, stakedMonthly, stakedWeekly, buybackHdx, marketPrice, realizedWeekly, tradersRes, govRes] = await Promise.all([
+      loadAllocationMints(), stakedSeries(mg), stakedSeries(wg), buybackSeries(mg), priceSeries(mg), loadRealizedWeekly(),
+      tradersQuery, govQuery,
     ])
-    const rows = (await structureRes.json<Record<string, unknown>>()).map(r => {
-      const num = (k: string) => Number(r[k] ?? 0)
-      return {
-        week: String(r.week),
-        treasury: num('treasury'), protocol: num('protocol'), kraken: num('kraken'),
-        user_total: num('user_total'),
-        top10: num('top10'), top100: num('top100'), top1000: num('top1000'),
-        hhi: num('hhi'),
-        age_0_3m: num('age_0_3m'), age_3_12m: num('age_3_12m'), age_1_2y: num('age_1_2y'), age_2y: num('age_2y'),
-      }
-    })
-    const mintRows = (await mintRes.json<{ week: string; cls: string; hdx: number }>())
-      .map(r => ({ week: String(r.week), cls: String(r.cls), hdx: Number(r.hdx) }))
-    const base = buildHdxStructure(rows)
-    const backfilledAllocationHdx = backfillAllocationMints(base.ownership, base.weeks, mintRows)
-
-    // Assemble the monthly trend grid. The grid spans the balance era to the
-    // current month; every series aligns by month key, cumulative series carry
-    // their running total across silent months.
-    const mv = async (res: { json<T>(): Promise<T[]> }) =>
-      (await res.json<{ m: string; v: number }>()).map(r => ({ m: String(r.m), v: Number(r.v) }))
-    const stakedRows = (await stakedRes.json<{ m: string; classic: number; giga: number }>())
-      .map(r => ({ m: String(r.m), classic: Number(r.classic), giga: Number(r.giga) }))
-    const realizedRows = (await realizedRes.json<{ m: string; user_supply: number; realized_price: number; top100_share: number }>())
-      .map(r => ({ m: String(r.m), user_supply: Number(r.user_supply), realized_price: Number(r.realized_price), top100_share: Number(r.top100_share) }))
+    const { base, backfilled: backfilledAllocationHdx } = ownershipOf(wg, buckets, mints)
+    const tradersRows = (await tradersRes.json<{ m: string; v: number }>()).map(r => ({ m: String(r.m), v: Number(r.v) }))
     const govRows = (await govRes.json<{ q: string; capital: number; voters: number }>())
       .map(r => ({ q: String(r.q), capital: Number(r.capital), voters: Number(r.voters) }))
-    const [krakenRows, buybackRows, priceRows, tradersRows] = await Promise.all([mv(krakenRes), mv(buybackRes), mv(priceRes), mv(tradersRes)])
-    const months = realizedRows.map(r => r.m)
-    const stakedClassic = carryForward(alignMonthly(months, stakedRows.map(r => ({ m: r.m, v: r.classic }))))
-    const stakedGiga = carryForward(alignMonthly(months, stakedRows.map(r => ({ m: r.m, v: r.giga }))))
-    const userSupply = alignMonthly(months, realizedRows.map(r => ({ m: r.m, v: r.user_supply })))
+
+    // The monthly trend grid spans the balance era to the current month. Staked,
+    // buyback and price are stated at each month's end; the balance-derived
+    // trends (user supply, top-100 share, Kraken custody, cost basis) at the
+    // close of the week holding the month's last day — the weekly structure
+    // sampled — and the liquid float subtracts the stake standing at that SAME
+    // close, so both of its terms are one instant.
+    const months = mg.keys
+    const at = monthWeekIndex(months, wg.keys)
+    const weekEnds = wg.keys.map(k => grainBucketEndSec(wg.grain, k))
+    const realizedByWeek = realizedAtEnds(realizedWeekly, weekEnds)
     return {
       ...base,
       backfilledAllocationHdx,
       trends: {
         months,
-        stakedClassic,
-        stakedGiga,
-        liquidFloat: months.map((_, i) =>
-          userSupply[i] != null ? userSupply[i]! - (stakedClassic[i] ?? 0) - (stakedGiga[i] ?? 0) : null),
-        realizedPrice: alignMonthly(months, realizedRows.map(r => ({ m: r.m, v: r.realized_price }))),
-        marketPrice: alignMonthly(months, priceRows),
-        top100Share: alignMonthly(months, realizedRows.map(r => ({ m: r.m, v: r.top100_share }))),
-        krakenHdx: alignMonthly(months, krakenRows),
-        buybackHdx: carryForward(alignMonthly(months, buybackRows)),
+        stakedClassic: stakedMonthly.classic,
+        stakedGiga: stakedMonthly.giga,
+        liquidFloat: at.map(i => liquidFloatAt(buckets[i], stakedWeekly.classic[i], stakedWeekly.giga[i])),
+        realizedPrice: at.map(i => realizedByWeek[i]),
+        marketPrice,
+        top100Share: at.map(i => top100Share(buckets[i])),
+        krakenHdx: at.map(i => wholeHdx(buckets[i].kraken)),
+        buybackHdx,
         traders: alignMonthly(months, tradersRows),
         gov: { quarters: govRows.map(r => r.q), capital: govRows.map(r => r.capital), voters: govRows.map(r => r.voters) },
       },
     }
   })
+}
+
+/** User-held supply less the stake standing at the same instant, whole HDX; null without user supply. */
+function liquidFloatAt(b: HdxStructureBucket, classic: number | null, giga: number | null): number | null {
+  return b.user > 0n ? wholeHdx(b.user) - (classic ?? 0) - (giga ?? 0) : null
+}
+
+// ── buys vs sells, holder churn: one builder each ───────────────────────────
+
+/**
+ * HDX bought and sold by non-module accounts per bucket, and how many distinct
+ * accounts did each. Volume sums the PRINCIPAL side only: an OTC fill books both
+ * of its accounts (see `counterparty` in src/db/schema.ts), and adding the
+ * maker's mirrored row to the taker's would report the same HDX twice. The
+ * buyer/seller COUNTS stay over both sides, because an OTC maker whose resting
+ * order was hit really was a seller. The volume table has no timestamp, so the
+ * block's own time dates each row. Read FINAL — one row per (asset, block,
+ * account), replaced on a replayed range — bounded by the grid's block range.
+ */
+export function hdxFlowsSql(g: ChartGrid): string {
+  return `
+    SELECT ${g.grain.keySql('b.block_timestamp')} AS k,
+      toString(sumIf(t.native_volume_buy, t.counterparty = 0)) AS buy,
+      toString(sumIf(t.native_volume_sell, t.counterparty = 0)) AS sell,
+      uniqExactIf(t.account, t.native_volume_buy > 0) AS buyers, uniqExactIf(t.account, t.native_volume_sell > 0) AS sellers
+    FROM price_data.trade_volume_by_account AS t FINAL
+    INNER JOIN price_data.blocks AS b ON b.block_height = t.block_height
+    WHERE t.asset_id = 0 AND t.block_height >= {lo:UInt32} AND t.block_height <= {hi:UInt32}
+      AND NOT startsWith(t.account, '0x6d6f646c')
+      AND b.block_height >= {lo:UInt32} AND b.block_height <= {hi:UInt32}
+      AND b.block_timestamp >= toDateTime({from:UInt32}) AND b.block_timestamp < toDateTime({end:UInt32})
+    GROUP BY k ORDER BY k`
+}
+
+/** A flow: a bucket without trades inside the indexed range is a real zero. */
+async function flowsSeries(g: ChartGrid): Promise<{ buy: number[]; sell: number[]; buyers: number[]; sellers: number[] }> {
+  const res = await client.query({ query: hdxFlowsSql(g), query_params: hdxGridParams(g), format: 'JSONEachRow' })
+  const index = new Map(g.keys.map((k, i) => [k, i]))
+  const zero = () => new Array<number>(g.keys.length).fill(0)
+  const out = { buy: zero(), sell: zero(), buyers: zero(), sellers: zero() }
+  for (const r of await res.json<{ k: string; buy: string; sell: string; buyers: number; sellers: number }>()) {
+    const i = index.get(r.k)
+    if (i == null) continue
+    out.buy[i] = hdxRaw(r.buy)
+    out.sell[i] = hdxRaw(r.sell)
+    out.buyers[i] = Number(r.buyers)
+    out.sellers[i] = Number(r.sellers)
+  }
+  return out
+}
+
+/**
+ * New and exited holders per bucket: an account is new in the bucket of its
+ * first nonzero HDX balance, and exited in the bucket of its last nonzero one if
+ * it holds none today (an account that left and came back is not an exit).
+ */
+export function hdxChurnSql(g: ChartGrid): string {
+  return `
+    WITH lifetime AS (
+      SELECT account_id,
+        minMerge(first_nonzero_state) AS first_nonzero,
+        maxMerge(last_nonzero_state) AS last_nonzero
+      FROM price_data.hdx_holder_lifetime
+      GROUP BY account_id
+    ), current_balances AS (
+      SELECT account_id, toUInt256OrZero(argMaxMerge(total_state)) AS current
+      FROM price_data.account_asset_latest_balances
+      WHERE asset_id = '0'
+      GROUP BY account_id
+    )
+    SELECT ${g.grain.keySql('first_nonzero')} AS k, count() AS n, 0 AS is_exit
+    FROM lifetime
+    WHERE first_nonzero >= toDateTime({from:UInt32}) AND first_nonzero < toDateTime({end:UInt32})
+    GROUP BY k
+    UNION ALL
+    SELECT ${g.grain.keySql('last_nonzero')} AS k, count() AS n, 1 AS is_exit
+    FROM lifetime
+    LEFT JOIN current_balances USING account_id
+    WHERE ifNull(current, toUInt256(0)) = 0
+      AND last_nonzero >= toDateTime({from:UInt32}) AND last_nonzero < toDateTime({end:UInt32})
+    GROUP BY k`
+}
+
+async function churnSeries(g: ChartGrid): Promise<{ newHolders: number[]; exitedHolders: number[] }> {
+  const res = await client.query({ query: hdxChurnSql(g), query_params: hdxGridParams(g), format: 'JSONEachRow' })
+  const index = new Map(g.keys.map((k, i) => [k, i]))
+  const newHolders = new Array<number>(g.keys.length).fill(0)
+  const exitedHolders = new Array<number>(g.keys.length).fill(0)
+  for (const r of await res.json<{ k: string; n: number; is_exit: number }>()) {
+    const i = index.get(r.k)
+    if (i == null) continue
+    if (Number(r.is_exit)) exitedHolders[i] += Number(r.n)
+    else newHolders[i] += Number(r.n)
+  }
+  return { newHolders, exitedHolders }
+}
+
+// ── chart-zoom windows ──────────────────────────────────────────────────────
+
+/** Every zoomable /hdx chart, by the id the window route takes. */
+export const HDX_WINDOW_CHARTS = [
+  'ownership', 'loyalty', 'staked', 'float', 'priceCost', 'buyback', 'top100', 'kraken', 'flows', 'churn',
+] as const
+export type HdxWindowChart = typeof HDX_WINDOW_CHARTS[number]
+
+type WindowSeries = Record<string, (number | null)[]>
+
+/** At most `slots` calls inside at once; the rest wait their turn in order. */
+function concurrencyGate(slots: number): <T>(fn: () => Promise<T>) => Promise<T> {
+  let active = 0
+  const waiting: (() => void)[] = []
+  const release = () => {
+    active--
+    waiting.shift()?.()
+  }
+  return async fn => {
+    if (active >= slots) await new Promise<void>(resolve => waiting.push(resolve))
+    active++
+    try {
+      return await fn()
+    } finally {
+      release()
+    }
+  }
+}
+
+// The structure of one window grid is shared by every structure chart zoomed to
+// it (ownership, loyalty, top-100, float): one query per grid, briefly cached.
+//
+// Distinct grids share nothing, and a full-scope structure window is the
+// explorer's heaviest request-time read (up to ~2.5 GB per query on the hourly
+// source), so at most two run at once; further windows queue in order. The
+// dashboard build (loadStructure, hourly, single-flight) does not take a slot:
+// it is one query an hour and must not wait behind zooms. The Kraken scope is
+// a primary-key read over a handful of wallets and does not take one either.
+const structureWindowSlots = concurrencyGate(2)
+
+function windowStructure(g: ChartGrid, scope: HdxStructureScope = 'all'): Promise<HdxStructureBucket[]> {
+  return cachedSwr(`explorer:hdx:window-structure:${scope}:${g.grain.stepSec}:${g.fromSec}:${g.endSec}`, 60_000, 60_000,
+    () => (scope === 'all' ? structureWindowSlots(() => structureBuckets(g, scope)) : structureBuckets(g, scope)))
+}
+
+const WINDOW_BUILDERS: Record<HdxWindowChart, (g: ChartGrid) => Promise<WindowSeries>> = {
+  ownership: async g => {
+    const [b, mints] = await Promise.all([windowStructure(g), loadAllocationMints()])
+    return { ...ownershipOf(g, b, mints).base.ownership }
+  },
+  loyalty: async g => ({ ...ownershipOf(g, await windowStructure(g), []).base.hodl }),
+  staked: stakedSeries,
+  float: async g => {
+    const [b, staked] = await Promise.all([windowStructure(g), stakedSeries(g)])
+    return { float: b.map((x, i) => liquidFloatAt(x, staked.classic[i], staked.giga[i])) }
+  },
+  priceCost: async g => {
+    const [market, weekly] = await Promise.all([priceSeries(g), loadRealizedWeekly()])
+    return { market, realized: realizedAtEnds(weekly, g.keys.map(k => grainBucketEndSec(g.grain, k))) }
+  },
+  buyback: async g => ({ buyback: await buybackSeries(g) }),
+  top100: async g => ({ top100: (await windowStructure(g)).map(top100Share) }),
+  kraken: async g => ({ kraken: (await windowStructure(g, 'kraken')).map(x => wholeHdx(x.kraken)) }),
+  flows: flowsSeries,
+  churn: churnSeries,
+}
+
+// The charts built on the holder structure: their windows coarsen to whole weeks
+// when the hourly source would be too heavy (HDX_STRUCTURE_HOURLY_ROW_BUDGET).
+const STRUCTURE_CHARTS = new Set<HdxWindowChart>(['ownership', 'loyalty', 'float', 'top100'])
+
+/**
+ * One /hdx chart rebuilt over a zoom window on the finest ladder grain that fits
+ * `points` (never below an hour), by the same builder the dashboard's series uses.
+ */
+export function getHdxChartWindow(chart: HdxWindowChart, req: ChartWindowRequest): Promise<ChartWindowResponse> {
+  const startSec = chart === 'staked' || chart === 'priceCost' || chart === 'buyback' ? HDX_TREND_START_SEC : HDX_SERIES_START_SEC
+  return serveChartWindow(client, 'hdx', chart, req, {
+    startSec,
+    coarsen: STRUCTURE_CHARTS.has(chart) ? structureWindowFloor : undefined,
+  }, WINDOW_BUILDERS[chart])
 }
 
 // Module (modl) accounts are pallet plumbing and stay out of the movers list —

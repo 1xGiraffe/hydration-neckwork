@@ -164,3 +164,21 @@ describe('HDX Upcoming unlocks — claimable-now column', () => {
     expect(html).not.toContain('matured')
   })
 })
+
+// Every history chart on the page zooms, and the zoom refetches its window from
+// /explorer/hdx/window (api hdxService.getHdxChartWindow) — the bar charts too.
+describe('HDX history charts — zoomable, refetch on zoom', () => {
+  it('wires a zoom key on every history chart, bars included', () => {
+    const data = mockData()
+    data.flows.daily = [...data.flows.daily, { date: '2026-07-14', buyHdx: 1e6, sellHdx: 3e6, buyers: 120, sellers: 90 }]
+    data.churn.weekly = [...data.churn.weekly, { weekStart: '2026-07-13', newHolders: 90, exitedHolders: 30 }]
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['hdx-dashboard'], data)
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Hdx /></QueryClientProvider>)
+    for (const key of ['zown', 'zstk', 'zflt', 'zpvc', 'zbb', 'zt100', 'zkr', 'zhodl', 'zflow', 'zchurn']) {
+      expect(html).toContain(`data-zoom-key="${key}"`)
+    }
+    // The page says how far a zoom refines.
+    expect(html.replace(/<[^>]+>/g, '')).toContain('a few days refine to hourly bars')
+  })
+})

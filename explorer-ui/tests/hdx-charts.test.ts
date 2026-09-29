@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { stackHeights, stackedColumnMax, niceAxisMax, fmtHdxTick, readableBarMax, stackSeries, lineRuns, axisTick, seriesGrainSec, tipDate, zoneSpan } from '../src/components/HdxCharts'
+import { stackHeights, stackedColumnMax, niceAxisMax, fmtHdxTick, readableBarMax, stackSeries, lineRuns, axisTick, seriesGrainSec, tipDate, zoneSpan, barFrame, barFrac } from '../src/components/HdxCharts'
 
 describe('stackedColumnMax — high unlock clusters do not flatten the chart', () => {
   it('uses the largest value when the distribution has no separated high tail', () => {
@@ -291,5 +291,44 @@ describe('zoneSpan', () => {
     expect(zoneSpan({ from: 2.0, to: 3.0 }, 1.0, 1.3)).toBeNull()
     expect(zoneSpan({ from: 0.1, to: 0.2 }, 1.0, 1.3)).toBeNull()
     expect(zoneSpan({ from: 1.1, to: 1.2 }, 1.2, 1.2)).toBeNull()
+  })
+})
+
+// Bars on a time axis: a slot per bucket, the axis inset by half a slot so the
+// end bars sit inside the plot. Unzoomed on an evenly stepped series it must be
+// exactly the index layout the charts always drew; zoomed, bars and the zoom
+// selection share one time domain.
+describe('barFrame / barFrac — time bars keep the index layout and zoom on time', () => {
+  const D = 86_400
+  const t0 = 1_756_000_000 - (1_756_000_000 % D)
+  const daily = Array.from({ length: 60 }, (_, i) => t0 + i * D)
+
+  it('lays an evenly stepped series out as n equal slots', () => {
+    const f = barFrame(daily, { from: daily[0], to: daily[59] }, 856)
+    expect(f.slot).toBeCloseTo(856 / 60, 9)
+    for (const i of [0, 1, 30, 59]) expect(f.left(i)).toBeCloseTo(i * (856 / 60), 6)
+  })
+
+  it('places a zoomed window by time, the slot sized by the drawn grain', () => {
+    const hourly = Array.from({ length: 72 }, (_, i) => t0 + i * 3_600)
+    const f = barFrame(hourly, { from: hourly[0], to: hourly[71] }, 856)
+    expect(f.slot).toBeCloseTo(856 / 72, 9)
+    // One coarse bar left in a narrow view still gets its grain's width, not the whole plot.
+    const one = barFrame([t0 + D], { from: t0, to: t0 + 3 * D }, 856, D)
+    expect(one.slot).toBeCloseTo(856 / 4, 9)
+    expect(one.left(0)).toBeCloseTo((1 / 3) * (856 - 856 / 4), 6)
+  })
+
+  it('maps a pointer back onto the same inset axis', () => {
+    const f = barFrame(daily, { from: daily[0], to: daily[59] }, 856)
+    // A bar's centre is its instant's fraction of the view.
+    expect(barFrac(f.left(30) + f.slot / 2, f.slot, 856)).toBeCloseTo(30 / 59, 9)
+    expect(barFrac(-10, f.slot, 856)).toBe(0)
+    expect(barFrac(2000, f.slot, 856)).toBe(1)
+  })
+
+  it('falls back to index slots without a time axis', () => {
+    expect(barFrame([], { from: 0, to: 0 }, 800).slot).toBe(800)
+    expect(barFrame([Number.NaN, 1], { from: 0, to: 10 }, 800).slot).toBe(400)
   })
 })
