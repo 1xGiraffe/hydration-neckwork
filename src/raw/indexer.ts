@@ -711,12 +711,8 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       if (changedAssets.length > 0) await atokenReserves.refresh()
       const atokenEquivalences = registry.getAtokenEquivalences(atokenReserves.underlyings)
       const atokenIds = registry.getAtokenIds(atokenReserves.underlyings)
-      const lpEquivalences = registry.getLpAliases()
-      const aaveTokenIds = new Set(atokenIds)
-      for (const [, displayId] of lpEquivalences) {
-        aaveTokenIds.add(displayId)
-      }
-      updateErc20Registry(registry.getErc20Contracts(), aaveTokenIds, atokenReserves.reserves)
+      const lpEquivalences = registry.getLpAliases(atokenReserves.underlyings)
+      updateErc20Registry(registry.getErc20Contracts(), registry.getReserveAtokenIds(atokenReserves.underlyings), atokenReserves.reserves)
 
       const compositionChanges = compositionCache.processEvents(block.events)
       const refreshFamilies = new Set<PoolFamily>()
