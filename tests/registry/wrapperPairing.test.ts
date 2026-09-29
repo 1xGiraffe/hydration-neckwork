@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { atokenEquivalencesFor, lpAliasesFor } from '../../src/registry/tracker.ts'
+import { atokenEquivalencesFor, lpAliasesFor, reserveAtokenIdsFor } from '../../src/registry/tracker.ts'
 import type { AssetMetadata } from '../../src/registry/types.ts'
 import {
   atokenReserveRefsFromRows,
@@ -101,16 +101,58 @@ describe('aToken equivalences', () => {
 })
 
 describe('LP aliases', () => {
-  it('aliases a pool share to its unambiguous display asset', () => {
-    const assets = [token(69, 'GDOT', 10), token(690, '2-Pool-GDOT', 18)]
-    expect(lpAliasesFor(assets)).toEqual([[690, 69]])
+  const GDOT = '0x34d5ffb83d14d82f87aaf2f13be895a3c814c2ad'
+  const HUSDC = '0x35774c305aaf441a102d47988d35f0f5428471b3'
+  const A2_POOL_PRIME = '0xc2b44f574b8c8440c0d5665f0039b49523139851'
+  const BIL = '0x8184e2f7c477d165772c21f7a2dbbb61a76e7fc4'
+  // The live registry and reserve map for every share that has a wrapper or whose
+  // symbol names a registry asset (2026-09-29). The api pins the same fixture
+  // (api/tests/shareWrapperRule.test.ts): both sides apply one rule.
+  const live = [
+    erc20(69, 'GDOT', GDOT, 18), token(690, '2-Pool-GDOT', 18),
+    erc20(1110, 'HUSDC', HUSDC, 18), token(110, '2-Pool-HUSDC', 18),
+    token(43, 'PRIME', 6), token(143, '2-Pool-PRIME', 18), erc20(1143, 'a2-Pool-PRIME', A2_POOL_PRIME, 18),
+    erc20(55, 'BIL', BIL, 18), token(10055, '2-Pool-BIL', 18),
+  ]
+  const reserves = new Map([[GDOT, 690], [HUSDC, 110], [A2_POOL_PRIME, 143], [BIL, 550]])
+
+  it('aliases a share to the aToken over it that carries its name', () => {
+    expect(lpAliasesFor(live, reserves)).toEqual([[110, 1110], [690, 69]])
   })
 
-  it('leaves an ambiguous display symbol unaliased', () => {
-    const reported: number[] = []
-    const assets = [token(101, '2-Pool', 18), token(102, '2-Pool', 18), token(1010, '2-Pool-2-Pool', 18)]
+  // 2-Pool-PRIME is PRIME + HOLLAR: the symbol names one of the pool's LEGS, not
+  // its wrapper. Aliasing it published PRIME's price as the share's (1.0605 vs a
+  // NAV of 1.019 on 2026-09-29; apyUSD 1.41 vs 1.009) and never wrote the share.
+  it('never aliases a share to a token its symbol names but the reserve map does not', () => {
+    expect(lpAliasesFor(live, reserves).some(([share]) => share === 143 || share === 10055)).toBe(false)
+    // BIL is an aToken, but over uBIL (550), not over 2-Pool-BIL.
+    expect(lpAliasesFor([erc20(55, 'BIL', BIL), token(10055, '2-Pool-BIL', 18)], new Map([[BIL, 550]]))).toEqual([])
+  })
 
-    expect(lpAliasesFor(assets, id => reported.push(id))).toEqual([])
-    expect(reported).toEqual([1010])
+  // a2-Pool-PRIME IS the aToken over 2-Pool-PRIME, but it carries no product name:
+  // it is an ordinary aToken, priced through the share (the aToken pairing).
+  it('never aliases a share to an unnamed aToken over it', () => {
+    expect(lpAliasesFor([token(143, '2-Pool-PRIME', 18), erc20(1143, 'a2-Pool-PRIME', A2_POOL_PRIME)], reserves)).toEqual([])
+  })
+
+  it('knows no wrapper without the reserve map', () => {
+    expect(lpAliasesFor(live, new Map())).toEqual([])
+  })
+
+  it('leaves a wrapper whose symbol another asset also carries unaliased', () => {
+    const reported: number[] = []
+    const assets = [...live, token(9069, 'GDOT', 18)]
+    expect(lpAliasesFor(assets, reserves, id => reported.push(id))).toEqual([[110, 1110]])
+    expect(reported).toEqual([690])
+  })
+})
+
+describe('reserve aTokens', () => {
+  const BIL = '0x8184e2f7c477d165772c21f7a2dbbb61a76e7fc4'
+  // BIL's symbol carries no `a` prefix, so neither pairing rule names it; only the
+  // reserve map does. Unmarked, its pool balance was read from the ERC-20 slot as 0.
+  it('marks every registry ERC-20 the reserve map lists as an aToken', () => {
+    const assets = [erc20(55, 'BIL', BIL), erc20(1003, 'aUSDC', A_USDC), token(43, 'PRIME')]
+    expect(reserveAtokenIdsFor(assets, new Map([[BIL, 550], [A_USDC, 22]]))).toEqual(new Set([55, 1003]))
   })
 })

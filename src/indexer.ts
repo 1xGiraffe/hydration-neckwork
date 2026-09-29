@@ -117,7 +117,6 @@ function getStableswapPoolAccount(poolId: number): string {
 
 function syncRegistryPricingState(
   registry: AssetRegistryTracker,
-  existingLpEquivalences: Map<number, number>,
   atokenUnderlyings: Map<string, number>,
   atokenReserveRefs: Map<string, AtokenReserveRef>,
   uniswapV3Pools: UniswapV3PoolTracker,
@@ -128,19 +127,14 @@ function syncRegistryPricingState(
 } {
   const atokenEquivalences = registry.getAtokenEquivalences(atokenUnderlyings)
   const atokenIds = registry.getAtokenIds(atokenUnderlyings)
-  const lpEquivalences = new Map(existingLpEquivalences)
-  const aaveTokenIds = new Set(atokenIds)
-
-  for (const [lpId, displayId] of registry.getLpAliases()) {
-    if (!lpEquivalences.has(lpId)) {
-      lpEquivalences.set(lpId, displayId)
-      console.log(`[LpAlias] ${lpId} → ${displayId}`)
-    }
-    aaveTokenIds.add(displayId)
-  }
+  // Recomputed whole on every sync, never accumulated: the rule is a pure function
+  // of the registry and the reserve map, and an accumulating map kept a wrong alias
+  // (2-Pool-PRIME → PRIME) alive until the process restarted.
+  const lpEquivalences = new Map(registry.getLpAliases(atokenUnderlyings))
+  console.log(`[LpAlias] ${[...lpEquivalences].map(([lp, w]) => `${lp} → ${w}`).join(', ') || 'none'}`)
 
   const erc20Contracts = registry.getErc20Contracts()
-  updateErc20Registry(erc20Contracts, aaveTokenIds, atokenReserveRefs)
+  updateErc20Registry(erc20Contracts, registry.getReserveAtokenIds(atokenUnderlyings), atokenReserveRefs)
   uniswapV3Pools.setErc20Contracts(erc20Contracts)
 
   return { atokenEquivalences, atokenIds, lpEquivalences }
@@ -684,7 +678,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
           await registry.maybeSnapshot(blockHeight, block.header, { force: true })
           await atokenReserves.refresh()
           ;({ atokenEquivalences, atokenIds, lpEquivalences } =
-            syncRegistryPricingState(registry, lpEquivalences, atokenReserves.underlyings, atokenReserves.reserves, uniswapV3Pools))
+            syncRegistryPricingState(registry, atokenReserves.underlyings, atokenReserves.reserves, uniswapV3Pools))
           historicalRegistryInitialized = true
         }
 
@@ -759,7 +753,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
         if (newAssets.length > 0 || hasAssetRegistryChange) {
           await atokenReserves.refresh()
           ;({ atokenEquivalences, atokenIds, lpEquivalences } =
-            syncRegistryPricingState(registry, lpEquivalences, atokenReserves.underlyings, atokenReserves.reserves, uniswapV3Pools))
+            syncRegistryPricingState(registry, atokenReserves.underlyings, atokenReserves.reserves, uniswapV3Pools))
         }
 
         currentAtokenEquivalences = atokenEquivalences
