@@ -3,7 +3,7 @@ import type {
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
   AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
-  RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, AssetPriceWindow, HollarDashboard, IceDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas, AssetLimitOrderBook, XcDestinationDetail, IntentOrderDetail,
+  RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, AssetPriceWindow, HollarDashboard, HollarWindowChart, HdxWindowChart, ChartWindowPayload, IceDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas, AssetLimitOrderBook, XcDestinationDetail, IntentOrderDetail,
   AssetLiquidity, PoolDetail, UniswapV3PoolDetail, UniswapV3PoolHistory, UniswapV3PoolLiquidity, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
@@ -289,6 +289,10 @@ export const api = {
   // moves only with a runtime upgrade.
   filterNames: (signal?: AbortSignal) => getJson<FilterNames>('/explorer/filter-names', signal),
   hdx: (signal?: AbortSignal) => getJson<HdxDashboard>('/explorer/hdx', signal),
+  // Chart zoom: one /hdx history chart rebuilt over [fromTs, toTs] on the finest
+  // ladder grain that fits `points` (hourly for a few days).
+  hdxWindow: (chart: HdxWindowChart, fromTs: number, toTs: number, points: number, signal?: AbortSignal) =>
+    getJson<ChartWindowPayload>(withQuery('/explorer/hdx/window', { chart, fromTs, toTs, points }), signal),
   revenue: (range: RevenueRange = '30d', signal?: AbortSignal) => getJson<RevenueDashboard>(withQuery('/explorer/revenue', { range }), signal),
   // The staker-distributions section carries its own timeframe, so it reads its
   // own endpoint rather than the dashboard's.
@@ -302,6 +306,10 @@ export const api = {
   // Live feed: the head tag busts the edge micro-cache the moment a block lands.
   revenueFlow: (after?: string | null, signal?: AbortSignal) => getJson<RevenueFlowResponse>(withQuery('/explorer/revenue/flow', { after: after || undefined, h: liveHeadTag() || undefined }), signal),
   hollar: (signal?: AbortSignal) => getJson<HollarDashboard>('/explorer/hollar', signal),
+  // Chart zoom: one /hollar trend chart rebuilt over [fromTs, toTs] on the finest
+  // ladder grain that fits `points` (hourly for a few days).
+  hollarWindow: (chart: HollarWindowChart, fromTs: number, toTs: number, points: number, signal?: AbortSignal) =>
+    getJson<ChartWindowPayload>(withQuery('/explorer/hollar/window', { chart, fromTs, toTs, points }), signal),
   ice: (signal?: AbortSignal) => getJson<IceDashboard>('/explorer/ice', signal),
   security: (signal?: AbortSignal) => getJson<SecurityDashboard>('/explorer/security', signal),
   securityWormhole: (signal?: AbortSignal) => getJson<WormholeBridgeDetail>('/explorer/security/wormhole', signal),

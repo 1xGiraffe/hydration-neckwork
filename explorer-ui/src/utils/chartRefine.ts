@@ -1,5 +1,6 @@
 import { parseUtcTimestamp } from './time'
 import type { RefinedSeries } from '../components/chartZoom'
+import type { AreaSeries, RefinedGrid } from '../components/HdxCharts'
 
 /**
  * Turn a windowed endpoint into an AreaChart `refine` loader.
@@ -50,4 +51,42 @@ export function blockRangeForWindow(
   const fromBlock = blocks[lo]
   const toBlock = blocks[hi]
   return toBlock > fromBlock ? { fromBlock, toBlock } : null
+}
+
+/** A windowed chart endpoint's payload: one bucket grid, every series on it (api chartWindow.ts). */
+export interface WindowPayload { buckets: string[]; series: Record<string, (number | null)[]> }
+
+/**
+ * Turn a chart-window endpoint into a loader of whatever the chart draws: `build`
+ * maps the payload (the window's buckets, every series on them) into the chart's
+ * own refined shape, with the same mapping the page applies to the coarse series
+ * — so a refined chart keeps its bands, labels, colours and tooltips. Null when
+ * the window came back empty or `build` declines it.
+ */
+export function payloadRefine<P extends WindowPayload, T>(
+  fetchWindow: (fromTs: number, toTs: number, points: number) => Promise<P>,
+  build: (payload: P) => T | null,
+): (fromTs: number, toTs: number, points: number) => Promise<T | null> {
+  return async (fromTs, toTs, points) => {
+    if (!(toTs > fromTs)) return null
+    const payload = await fetchWindow(fromTs, toTs, points)
+    return payload.buckets.length >= 2 ? build(payload) : null
+  }
+}
+
+/**
+ * The common case for StackedAreaChart / MultiLineChart / StackedBarChart: the
+ * chart's `bands` (their keys naming the payload's series; `values` ignored)
+ * refilled from the window, each value through `value` — the same transform the
+ * coarse series took. A band the payload lacks refines the whole grid away.
+ */
+export function gridRefine<P extends WindowPayload>(
+  fetchWindow: (fromTs: number, toTs: number, points: number) => Promise<P>,
+  bands: AreaSeries[],
+  value: (v: number | null) => number | null = v => v,
+): (fromTs: number, toTs: number, points: number) => Promise<RefinedGrid | null> {
+  return payloadRefine(fetchWindow, p => {
+    if (!bands.every(b => Array.isArray(p.series[b.key]))) return null
+    return { buckets: p.buckets, series: bands.map(b => ({ ...b, values: p.series[b.key].map(value) })) }
+  })
 }

@@ -26,9 +26,10 @@ import {
   type ScopedListTab,
   type ValueListFilters,
 } from '../services/explorerService.ts'
-import { getHdxDashboard } from '../services/hdxService.ts'
+import { HDX_WINDOW_CHARTS, getHdxChartWindow, getHdxDashboard } from '../services/hdxService.ts'
 import { FLOW_CURSOR_RE, REVENUE_RANGES, getRevenueDashboard, getRevenueFlow, getStakerDistributions } from '../services/revenueService.ts'
-import { getHollarDashboard } from '../services/hollarService.ts'
+import { HOLLAR_WINDOW_CHARTS, getHollarChartWindow, getHollarDashboard } from '../services/hollarService.ts'
+import { DEFAULT_WINDOW_POINTS, windowSchema } from './windowQuery.ts'
 import { getExplorerYields } from '../services/positionYield.ts'
 import {
   getAddressLiquidityRewards, getAddressOrderHistory, getAddressPositionsPresence,
@@ -1089,6 +1090,29 @@ export async function explorerRoutes(fastify: FastifyInstance) {
 
   fastify.get('/explorer/hollar', async () => {
     return getHollarDashboard()
+  })
+
+  // Chart zoom for /hdx, the /hollar contract below: one history chart rebuilt
+  // over [fromTs, toTs] on the finest ladder grain that fits `points`, by the
+  // builder behind its dashboard series. The holder-structure charts read hourly
+  // balances only while the window's rows stay bounded, else whole weeks.
+  fastify.get('/explorer/hdx/window', async (req, reply) => {
+    const q = windowSchema.extend({ chart: z.enum(HDX_WINDOW_CHARTS) }).safeParse(req.query)
+    if (!q.success) return reply.status(400).send({ error: `Invalid window: chart must be one of ${HDX_WINDOW_CHARTS.join(', ')}, fromTs < toTs in unix seconds` })
+    if (q.data.toTs <= q.data.fromTs) return reply.status(400).send({ error: 'Invalid window: fromTs must be before toTs' })
+    return getHdxChartWindow(q.data.chart, { fromSec: q.data.fromTs, toSec: q.data.toTs, points: q.data.points ?? DEFAULT_WINDOW_POINTS })
+  })
+
+  // Chart zoom for /hollar: one trend chart rebuilt over [fromTs, toTs] on the
+  // finest ladder grain that fits `points` (hourly for a few days), by the same
+  // builder as the dashboard's coarse series. `{ stepSec, buckets, series }`,
+  // series keyed like the chart's bands; empty when nothing of the window is
+  // indexed. Cached per resolved grid under the bucketed-history finality rule.
+  fastify.get('/explorer/hollar/window', async (req, reply) => {
+    const q = windowSchema.extend({ chart: z.enum(HOLLAR_WINDOW_CHARTS) }).safeParse(req.query)
+    if (!q.success) return reply.status(400).send({ error: `Invalid window: chart must be one of ${HOLLAR_WINDOW_CHARTS.join(', ')}, fromTs < toTs in unix seconds` })
+    if (q.data.toTs <= q.data.fromTs) return reply.status(400).send({ error: 'Invalid window: fromTs must be before toTs' })
+    return getHollarChartWindow(q.data.chart, { fromSec: q.data.fromTs, toSec: q.data.toTs, points: q.data.points ?? DEFAULT_WINDOW_POINTS })
   })
 
   // Current yield composition of every liquidity venue and money-market reserve

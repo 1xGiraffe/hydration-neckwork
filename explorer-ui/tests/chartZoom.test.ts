@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import {
-  commitSelection, fracOfTime, parseZoomParam, pinchWindow, timeAt,
+  ZoomSelection, commitSelection, fracOfTime, parseZoomParam, pinchWindow, seriesBucketEnd, seriesExtentEnd, timeAt,
   DRAG_MIN_FRAC, MIN_SPAN_SEC,
 } from '../src/components/chartZoom'
 
@@ -62,6 +64,95 @@ describe('commitSelection', () => {
   it('edge-snaps so selecting up to the present needs no pixel-perfect lift', () => {
     const w = commitSelection(view, 0.5, 0.995)!
     expect(w.to).toBe(view.to)
+  })
+
+  // The plot's right edge is the last bucket's END, not the last point: on a
+  // monthly chart the last point sits on the 1st and the whole current month
+  // lies past it. A drag reaching the edge lands there, so the current month
+  // is selectable at all; an interior lift keeps the drawn domain's time.
+  describe('with the right edge standing for the extent\'s end', () => {
+    const end = view.to + 20 * D
+    it('lands a snapped right edge on the extent, not the last point', () => {
+      const w = commitSelection(view, 0.5, 0.995, end)!
+      expect(w.from).toBe(T0 + 15 * D)
+      expect(w.to).toBe(end)
+    })
+    it('keeps an interior lift on the drawn domain', () => {
+      expect(commitSelection(view, 0.5, 0.9, end)).toEqual(commitSelection(view, 0.5, 0.9))
+    })
+    it('a nick at the very edge selects exactly the last bucket', () => {
+      // Both ends snap to 1: from = the last point, to = its bucket's end.
+      const w = commitSelection(view, 0.984, 1, end)!
+      expect(w).toEqual({ from: view.to, to: end })
+    })
+    it('never reaches before the drawn end when the extent is not past it', () => {
+      expect(commitSelection(view, 0.5, 1, view.to - D)!.to).toBe(view.to)
+    })
+    it('still refuses the whole view', () => {
+      expect(commitSelection(view, 0, 1, end)).toBeNull()
+    })
+  })
+
+  it('widens a floor-thin selection away from a snapped edge, keeping the edge in place', () => {
+    // A half-hour-old open bucket: the right edge is the present, and widening
+    // around the midpoint would push the window into the future.
+    const narrow = { from: T0, to: T0 + 4 * H }
+    const atEnd = commitSelection(narrow, 0.9, 1, narrow.to + 1_800)!
+    expect(atEnd.to).toBe(narrow.to + 1_800)
+    expect(atEnd.from).toBe(atEnd.to - MIN_SPAN_SEC)
+    const atStart = commitSelection(narrow, 0, 0.1)!
+    expect(atStart.from).toBe(narrow.from)
+    expect(atStart.to).toBe(narrow.from + MIN_SPAN_SEC)
+  })
+})
+
+// A series' points are bucket STARTS; the zoomable domain must reach the last
+// bucket's end, or the current month/week can never be zoomed into.
+describe('seriesBucketEnd / seriesExtentEnd', () => {
+  const utc = (s: string) => Date.parse(s) / 1000
+  const months = ['2026-06-01', '2026-07-01', '2026-08-01', '2026-09-01'].map(m => utc(`${m}T00:00:00Z`))
+  const mondays = ['2026-09-07', '2026-09-14', '2026-09-21', '2026-09-28'].map(m => utc(`${m}T00:00:00Z`))
+
+  it('ends a monthly series at the next calendar month, not a fixed 30 days', () => {
+    expect(seriesBucketEnd(months)).toBe(utc('2026-10-01T00:00:00Z'))
+    // Across a February the smallest gap is 28 days; still a calendar month.
+    const winter = ['2026-01-01', '2026-02-01', '2026-03-01'].map(m => utc(`${m}T00:00:00Z`))
+    expect(seriesBucketEnd(winter)).toBe(utc('2026-04-01T00:00:00Z'))
+  })
+
+  it('ends a fixed-step series one grain past its last point', () => {
+    expect(seriesBucketEnd(mondays)).toBe(utc('2026-10-05T00:00:00Z'))
+    const hours = [0, 1, 2, 3].map(i => T0 + i * H)
+    expect(seriesBucketEnd(hours)).toBe(T0 + 4 * H)
+  })
+
+  it('does not mistake a weekly series that happens to land on a 1st for months', () => {
+    // 2026-06-01 is a Monday; the grain says weeks.
+    const weeks = ['2026-05-25', '2026-06-01'].map(m => utc(`${m}T00:00:00Z`))
+    expect(seriesBucketEnd(weeks)).toBe(utc('2026-06-08T00:00:00Z'))
+  })
+
+  it('a lone point or no points has nowhere to extend', () => {
+    expect(seriesBucketEnd([T0])).toBe(T0)
+    expect(seriesBucketEnd([])).toBe(0)
+  })
+
+  it('caps an open bucket at the present, and never before the last point', () => {
+    const now = utc('2026-09-28T19:30:00Z')
+    expect(seriesExtentEnd(months, now)).toBe(now)
+    expect(seriesExtentEnd(mondays, now)).toBe(now)
+    // A closed series ends at its bucket end, whatever the clock says.
+    expect(seriesExtentEnd(months, utc('2027-01-01T00:00:00Z'))).toBe(utc('2026-10-01T00:00:00Z'))
+    // A live-pinned last point a few seconds ahead of the client clock stays reachable.
+    expect(seriesExtentEnd([T0, T0 + H], T0 + H - 5)).toBe(T0 + H)
+  })
+})
+
+describe('ZoomSelection', () => {
+  it('clamps a shade past the drawn domain to the plot edge instead of spilling out', () => {
+    const html = renderToStaticMarkup(createElement(ZoomSelection, { aPct: 60, bPct: 130 }))
+    expect(html).toContain('left:60%')
+    expect(html).toContain('width:40%')
   })
 })
 

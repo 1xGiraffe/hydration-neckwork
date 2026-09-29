@@ -1,15 +1,15 @@
-/* eslint-disable react-refresh/only-export-components -- the page plus the pure peg-refine helper its test exercises directly */
-import { useMemo } from 'react'
 import type { ReactNode } from 'react'
+import { api } from '../api/explorer'
 import { useHollarDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useNow } from '../hooks/useNow'
 import { Link, paths } from '../router'
 import { AssetAmount, Num, Usd, Crumbs, F, AssetChip, Ago, ChartSkeleton, TableSkeleton, EmptyRow, compactAmount } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
-import { ChartLegend, ShareBar, MirroredBarChart, StackedAreaChart, MultiLineChart } from '../components/HdxCharts'
-import type { ShareSegment, MirrorBar, AreaSeries, RefinedGrid } from '../components/HdxCharts'
-import type { AssetRef, HollarDashboard, HollarTrends, HollarCollateral, HollarPegPoint, HollarPool } from '../types'
+import { ChartLegend, ShareBar, MirroredBarChart, StackedAreaChart, StackedBarChart, MultiLineChart } from '../components/HdxCharts'
+import type { ShareSegment, MirrorBar, AreaSeries } from '../components/HdxCharts'
+import type { AssetRef, HollarDashboard, HollarTrends, HollarCollateral, HollarPool, HollarWindowChart } from '../types'
+import { gridRefine, payloadRefine } from '../utils/chartRefine'
 import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import { monthDayLabel as mdLabel } from '../utils/dashboardDates'
 
@@ -38,6 +38,16 @@ function fmtFeePct(v: number | null | undefined): string {
   const dec = Math.abs(v) < 0.01 ? 4 : Math.abs(v) < 1 ? 3 : Math.abs(v) < 10 ? 2 : 1
   return v.toFixed(dec).replace(/\.?0+$/, '') + '%'
 }
+
+// Chart zoom: every trend chart refetches its zoomed window from the server at
+// the finest grain the window allows (hourly for a few days), rebuilt by the
+// same definition as the coarse series it replaces.
+const hollarWindow = (chart: HollarWindowChart) => (fromTs: number, toTs: number, points: number) =>
+  api.hollarWindow(chart, fromTs, toTs, points)
+const positive = (v: number | null) => (v != null && v > 0 ? v : null)
+// A bar's date at its bucket's own resolution: the clock only for sub-day buckets.
+const barDate = (key: string, stepSec: number) =>
+  stepSec > 0 && stepSec < 86_400 ? `${mdLabel(key)} ${key.slice(11, 16)}` : mdLabel(key)
 
 // 1. stat ribbon
 function Ribbon({ d }: { d: HollarDashboard }) {
@@ -127,7 +137,8 @@ function ReservesChart({ d }: { d: HollarDashboard }) {
       <SecTitle title="Reserves" subtitle="collateral held by the module, since launch" />
       <div className="pf-card">
         <ChartLegend items={bands.map(b => ({ label: b.label, color: b.color }))} />
-        <StackedAreaChart buckets={days} series={bands} h={200} yFmt={v => fmtAmt(v)} totalLabel="Total reserves" zoomKey="zhsmres" />
+        <StackedAreaChart buckets={days} series={bands} h={200} yFmt={v => fmtAmt(v)} totalLabel="Total reserves" zoomKey="zhsmres"
+          refine={gridRefine(hollarWindow('hsmReserves'), bands)} />
         <div className="hdx-note">
           The module holds <Num v={reservesNow} /> tokens of collateral today, all of it dollar-pegged, so the stack top also
           reads as its reserve value. It takes collateral IN when a user buys HOLLAR from it and spends it OUT when it buys
@@ -139,18 +150,26 @@ function ReservesChart({ d }: { d: HollarDashboard }) {
   )
 }
 
-function ArbitrageChart({ d, now }: { d: HollarDashboard; now: number }) {
-  const daily = d.hsm.arbitrageDaily
-  const bars: MirrorBar[] = daily.map(a => ({
-    key: a.date, up: a.hollarIn, down: a.hollarOut,
+function arbitrageBars(dates: string[], hollarIn: number[], hollarOut: number[], stepSec: number): MirrorBar[] {
+  return dates.map((date, i) => ({
+    key: date, up: hollarIn[i] ?? 0, down: hollarOut[i] ?? 0,
     tip: (
       <>
-        <span className="t-d">{mdLabel(a.date)}</span>
-        <TipRow color="var(--green)" label="Bought back & burned" value={fmtAmt(a.hollarIn) + ' HOLLAR'} />
-        <TipRow color="var(--amber)" label="Minted & sold" value={fmtAmt(a.hollarOut) + ' HOLLAR'} />
+        <span className="t-d">{barDate(date, stepSec)}</span>
+        <TipRow color="var(--green)" label="Bought back & burned" value={fmtAmt(hollarIn[i] ?? 0) + ' HOLLAR'} />
+        <TipRow color="var(--amber)" label="Minted & sold" value={fmtAmt(hollarOut[i] ?? 0) + ' HOLLAR'} />
       </>
     ),
   }))
+}
+const refineArbitrage = payloadRefine(hollarWindow('hsmArbitrage'), p =>
+  p.series.hollarIn && p.series.hollarOut
+    ? arbitrageBars(p.buckets, p.series.hollarIn.map(v => v ?? 0), p.series.hollarOut.map(v => v ?? 0), p.stepSec)
+    : null)
+
+function ArbitrageChart({ d, now }: { d: HollarDashboard; now: number }) {
+  const daily = d.hsm.arbitrageDaily
+  const bars = arbitrageBars(daily.map(a => a.date), daily.map(a => a.hollarIn), daily.map(a => a.hollarOut), 86_400)
   const ticks = daily.map((a, i) => ({ i, label: mdLabel(a.date) })).filter(t => t.i % 10 === 0)
   const lastArb = d.hsm.lastArb
   return (
@@ -158,7 +177,7 @@ function ArbitrageChart({ d, now }: { d: HollarDashboard; now: number }) {
       <SecTitle title="Arbitrage" subtitle="60 days" />
       <div className="pf-card">
         <ChartLegend items={[{ label: 'Bought back & burned', color: 'var(--green)' }, { label: 'Minted & sold', color: 'var(--amber)' }]} />
-        <MirroredBarChart data={bars} xTicks={ticks} upColor="var(--green)" downColor="var(--amber)" />
+        <MirroredBarChart data={bars} xTicks={ticks} upColor="var(--green)" downColor="var(--amber)" zoomKey="zarb" refine={refineArbitrage} />
         <div className="hdx-note">
           {lastArb
             ? <>Last intervention <Ago ts={lastArb.ts} now={now} /></>
@@ -169,25 +188,34 @@ function ArbitrageChart({ d, now }: { d: HollarDashboard; now: number }) {
   )
 }
 
-function TradesChart({ d }: { d: HollarDashboard }) {
-  const daily = d.hsm.tradesDaily
-  const bars: MirrorBar[] = daily.map(t => ({
-    key: t.date, up: t.bought, down: t.sold,
+function tradeBars(dates: string[], bought: number[], sold: number[], stepSec: number): MirrorBar[] {
+  return dates.map((date, i) => ({
+    key: date, up: bought[i] ?? 0, down: sold[i] ?? 0,
     tip: (
       <>
-        <span className="t-d">{mdLabel(t.date)}</span>
-        <TipRow color="var(--green)" label="Bought (minted)" value={fmtAmt(t.bought) + ' HOLLAR'} />
-        <TipRow color="var(--red)" label="Sold (burned)" value={fmtAmt(t.sold) + ' HOLLAR'} />
+        <span className="t-d">{barDate(date, stepSec)}</span>
+        <TipRow color="var(--green)" label="Bought (minted)" value={fmtAmt(bought[i] ?? 0) + ' HOLLAR'} />
+        <TipRow color="var(--red)" label="Sold (burned)" value={fmtAmt(sold[i] ?? 0) + ' HOLLAR'} />
       </>
     ),
   }))
+}
+const refineTrades = payloadRefine(hollarWindow('hsmTrades'), p =>
+  p.series.bought && p.series.sold
+    ? tradeBars(p.buckets, p.series.bought.map(v => v ?? 0), p.series.sold.map(v => v ?? 0), p.stepSec)
+    : null)
+
+function TradesChart({ d }: { d: HollarDashboard }) {
+  const daily = d.hsm.tradesDaily
+  const bars = tradeBars(daily.map(t => t.date), daily.map(t => t.bought), daily.map(t => t.sold), 86_400)
   const ticks = daily.map((t, i) => ({ i, label: mdLabel(t.date) })).filter(x => x.i % 10 === 0)
   return (
     <>
       <SecTitle title="HSM trades" subtitle="60 days" />
       <div className="pf-card">
         <ChartLegend items={[{ label: 'Bought (minted)', color: 'var(--green)' }, { label: 'Sold (burned)', color: 'var(--red)' }]} />
-        <MirroredBarChart data={bars} xTicks={ticks} />
+        <MirroredBarChart data={bars} xTicks={ticks} zoomKey="ztrades" refine={refineTrades} />
+        <div className="hdx-note">Drag across either chart to zoom into a window; a few days refine to hourly bars.</div>
       </div>
     </>
   )
@@ -275,29 +303,11 @@ const lastNum = (a: (number | null)[]): number | null => {
 }
 
 // peg: weekly close inside the intraweek low/high range, in dollars —
-// MultiLineChart's dashed $1.00 reference line IS the peg.
-//
-// One peg chart, not two: zooming into the last 30 days swaps in the hourly
-// closes the payload already carries (hourlyPegRefine), so the recent fine
-// structure is a gesture away instead of a second, near-duplicate section.
+// MultiLineChart's dashed $1.00 reference line IS the peg. Zooming refetches the
+// window's closes and ranges at the finest grain it allows, down to hourly
+// candles, anywhere in the history.
 const PEG_CLOSE_COLOR = 'var(--text-high)'      // the reading itself — neutral ink, not a category hue
 const PEG_RANGE_COLOR = 'var(--neutral-cool)'   // its context — a quiet cool grey envelope
-const HOUR = 3_600
-const tsSec = (ts: string) => Math.floor(Date.parse(`${ts.replace(' ', 'T')}Z`) / 1000)
-
-// Refetch-on-zoom served from the payload: no request, and no partial answers —
-// a window reaching back before the hourly coverage keeps the weekly slice,
-// since refining it would draw one month's detail across a year of plot.
-export function hourlyPegRefine(hourly: HollarPegPoint[]): ((fromSec: number, toSec: number) => Promise<RefinedGrid | null>) | undefined {
-  if (hourly.length < 3) return undefined
-  const first = tsSec(hourly[0].ts)
-  return async (fromSec, toSec) => {
-    if (!(fromSec >= first)) return null
-    const pts = hourly.filter(hp => { const s = tsSec(hp.ts); return s >= fromSec - HOUR && s <= toSec + HOUR })
-    if (pts.length < 3) return null
-    return { buckets: pts.map(p => p.ts), series: [{ key: 'close', label: 'Close', color: PEG_CLOSE_COLOR, values: pts.map(p => p.close) }] }
-  }
-}
 
 function PegSection({ d }: { d: HollarDashboard }) {
   const t = d.trends
@@ -309,15 +319,14 @@ function PegSection({ d }: { d: HollarDashboard }) {
     { key: 'low', label: 'Weekly low', color: PEG_RANGE_COLOR, values: t.peg.low },
     { key: 'close', label: 'Close', color: PEG_CLOSE_COLOR, values: t.peg.close },
   ]
-  const refine = useMemo(() => hourlyPegRefine(p.hourly), [p.hourly])
   const has30d = p.min30d != null && p.max30d != null
   return (
     <>
       <SecTitle title="Peg" subtitle="weekly close inside the intraweek range, since launch" />
       <div className="pf-card">
         <ChartLegend items={[{ label: 'Close', color: PEG_CLOSE_COLOR }, { label: 'Weekly range', color: PEG_RANGE_COLOR }]} />
-        <MultiLineChart buckets={t.weeks} series={lines} band={{ lo: 'low', hi: 'high', label: 'Weekly range' }}
-          h={200} yFmt={v => '$' + v.toFixed(4)} zoomKey="zpegw" refine={refine} />
+        <MultiLineChart buckets={t.weeks} series={lines} band={{ lo: 'low', hi: 'high', label: 'Range' }}
+          h={200} yFmt={v => '$' + v.toFixed(4)} zoomKey="zpegw" refine={gridRefine(hollarWindow('peg'), lines)} />
         {(has30d || st) && (
           <div className="hdx-cards" style={{ marginTop: 14 }}>
             {has30d && (
@@ -348,7 +357,7 @@ function PegSection({ d }: { d: HollarDashboard }) {
             )}
           </div>
         )}
-        <div className="hdx-note">Drag across the chart to zoom into a window; inside the last 30 days it refines to hourly closes.</div>
+        <div className="hdx-note">Drag across the chart to zoom into a window: it refines to the finest candles the window allows — daily for a few months, hourly for a few days — each with its own low–high range.</div>
       </div>
     </>
   )
@@ -365,10 +374,10 @@ const COMPOSITION_BANDS: { key: keyof HollarTrends['composition']; label: string
 function SupplyHoldersSection({ t }: { t: HollarTrends }) {
   const bands: AreaSeries[] = COMPOSITION_BANDS.map(b => ({
     key: b.key, label: b.label, color: b.color,
-    values: t.composition[b.key].map(v => (v > 0 ? v : null)),
+    values: t.composition[b.key].map(positive),
   }))
   const holdersSeries: AreaSeries[] = [
-    { key: 'holders', label: 'Holders', color: 'var(--cat-liquidity)', values: t.holders.map(v => (v && v > 0 ? v : null)) },
+    { key: 'holders', label: 'Holders', color: 'var(--cat-liquidity)', values: t.holders.map(positive) },
   ]
   const supplyNow = COMPOSITION_BANDS.reduce((s2, b) => s2 + (lastNum(t.composition[b.key]) ?? 0), 0)
   const holdersNow = lastNum(t.holders) ?? 0
@@ -379,46 +388,71 @@ function SupplyHoldersSection({ t }: { t: HollarTrends }) {
       <div className="pf-card">
         <div className="sec-title" style={{ marginBottom: 6 }}>Supply composition{trendSub('the stack top is total supply')}</div>
         <ChartLegend items={COMPOSITION_BANDS.map(b => ({ label: b.label, color: b.color }))} />
-        <StackedAreaChart buckets={t.weeks} series={bands} h={200} zoomKey="zsup" />
+        <StackedAreaChart buckets={t.weeks} series={bands} h={200} zoomKey="zsup" refine={gridRefine(hollarWindow('supply'), bands, positive)} />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Holders{trendSub(`accounts holding more than 0.01 HOLLAR — ${F.int(holdersFirst)} at launch, ${F.int(holdersNow)} now`)}</div>
-        <StackedAreaChart buckets={t.weeks} series={holdersSeries} h={150} showShare={false} yFmt={v => F.int(Math.round(v))} zoomKey="zhold" />
+        <StackedAreaChart buckets={t.weeks} series={holdersSeries} h={150} showShare={false} yFmt={v => F.int(Math.round(v))} zoomKey="zhold"
+          refine={gridRefine(hollarWindow('holders'), holdersSeries, positive)} />
         <div className="hdx-note">Total supply is <Num v={supplyNow} /> HOLLAR. "Bridged out" sits on sibling-chain sovereign accounts;
-          "Protocol pots" are pallet accounts (bonds, incentives). Balances come from the ERC-20 ledger — HOLLAR's substrate side holds under 0.3%.</div>
+          "Protocol pots" are pallet accounts (bonds, incentives). Balances come from the ERC-20 ledger — HOLLAR's substrate side holds under 0.3%.
+          Drag across either chart to zoom; a few days refine to hourly.</div>
       </div>
     </>
   )
 }
 
-// borrowing: debt outstanding, borrowers, cumulative interest revenue
+// borrowing: supply by minter, borrowers, cumulative interest revenue
+//
+// HOLLAR is a GHO-style token: every mint moves a facilitator's bucket level, so
+// total supply splits exactly into what the money markets minted against debt
+// (their outstanding borrowed PRINCIPAL) and what everything else minted — the
+// HSM, selling against collateral. Debt itself runs a little higher than the
+// borrowed principal: interest accrues as debt and is never minted, so "supply
+// minus debt" would understate the HSM's share and could even go negative.
+const MINTER_OTHER_COLOR = 'var(--neutral)'
 function BorrowingSection({ t }: { t: HollarTrends }) {
-  // The borrowed series wears HOLLAR's own brand color — the same icon-sampled
+  // The borrowed band wears HOLLAR's own brand color — the same icon-sampled
   // hue its pool segments use (useAssetColors), not the generic borrow gold.
   const colorFor = useAssetColors([HOLLAR_ASSET])
   const hollarColor = colorFor(HOLLAR_ASSET)
-  const debtSeries: AreaSeries[] = [
-    { key: 'debt', label: 'HOLLAR borrowed', color: hollarColor, values: t.debt.map(v => (v && v > 0 ? v : null)) },
-  ]
+  const minted = t.supplyByMinter
+  const minterBands: AreaSeries[] = minted
+    ? [
+        { key: 'borrowed', label: 'Borrowed', color: hollarColor, values: minted.borrowed.map(positive) },
+        { key: 'other', label: 'Minted by the HSM', color: MINTER_OTHER_COLOR, values: minted.other.map(positive) },
+      ]
+    : [{ key: 'debt', label: 'HOLLAR borrowed', color: hollarColor, values: t.debt.map(positive) }]
   const borrowersSeries: AreaSeries[] = [
-    { key: 'borrowers', label: 'Borrowers', color: '#3f88dd', values: t.borrowers.map(v => (v && v > 0 ? v : null)) },
+    { key: 'borrowers', label: 'Borrowers', color: '#3f88dd', values: t.borrowers.map(positive) },
   ]
   const revenueSeries: AreaSeries[] = [
-    { key: 'rev', label: 'Cumulative interest', color: 'var(--green)', values: t.revenueCumUsd.map(v => (v && v > 0 ? v : null)) },
+    { key: 'revenueCumUsd', label: 'Cumulative interest', color: 'var(--green)', values: t.revenueCumUsd.map(positive) },
   ]
   const debtNow = lastNum(t.debt) ?? 0
+  const borrowedNow = minted ? lastNum(minted.borrowed) : null
+  const otherNow = minted ? lastNum(minted.other) : null
   const borrowersNow = lastNum(t.borrowers) ?? 0
   const revNow = lastNum(t.revenueCumUsd) ?? 0
   return (
     <>
       <SecTitle title="Borrowing" subtitle="HOLLAR is minted by borrowing it against collateral" />
       <div className="pf-card">
-        <div className="sec-title" style={{ marginBottom: 6 }}>HOLLAR borrowed{trendSub('all markets — winter deleveraging, then regrowth to an all-time high')}</div>
-        <StackedAreaChart buckets={t.weeks} series={debtSeries} h={180} showShare={false} yFmt={v => fmtAmt(v)} zoomKey="zdebt" />
+        <div className="sec-title" style={{ marginBottom: 6 }}>Supply by minter{trendSub('borrowed from the money markets, or minted by the HSM — the stack top is total supply')}</div>
+        {minted && <ChartLegend items={minterBands.map(b => ({ label: b.label, color: b.color }))} />}
+        <StackedBarChart buckets={t.weeks} series={minterBands} h={180} yFmt={v => fmtAmt(v)} totalLabel="Total supply" zoomKey="zdebt"
+          refine={minted ? gridRefine(hollarWindow('supplyByMinter'), minterBands, positive) : undefined} />
         <div className="hdx-cards" style={{ marginTop: 14 }}>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: hollarColor }} />Borrowed now</div>
             <div className="hv"><Num v={debtNow} /> <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HOLLAR</span></div>
-            <div className="hs">an all-time high</div>
+            <div className="hs">{borrowedNow != null ? <>owed across all markets, interest included — <Num v={borrowedNow} /> of it minted as principal</> : 'an all-time high'}</div>
           </div>
+          {otherNow != null && (
+            <div className="hdx-card">
+              <div className="hk"><i style={{ background: MINTER_OTHER_COLOR }} />Minted by the HSM</div>
+              <div className="hv"><Num v={otherNow} /> <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}>HOLLAR</span></div>
+              <div className="hs">sold against collateral, no debt behind it</div>
+            </div>
+          )}
           <div className="hdx-card">
             <div className="hk"><i style={{ background: '#3f88dd' }} />Borrowers</div>
             <div className="hv">{F.int(borrowersNow)}</div>
@@ -438,10 +472,14 @@ function BorrowingSection({ t }: { t: HollarTrends }) {
           ))}
         </div>
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Borrowers{trendSub('accounts with open HOLLAR debt')}</div>
-        <StackedAreaChart buckets={t.weeks} series={borrowersSeries} h={150} showShare={false} yFmt={v => F.int(Math.round(v))} zoomKey="zbor" />
+        <StackedAreaChart buckets={t.weeks} series={borrowersSeries} h={150} showShare={false} yFmt={v => F.int(Math.round(v))} zoomKey="zbor"
+          refine={gridRefine(hollarWindow('borrowers'), borrowersSeries, positive)} />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Protocol interest revenue{trendSub('cumulative USD booked from HOLLAR borrow interest')}</div>
-        <StackedAreaChart buckets={t.weeks} series={revenueSeries} h={150} showShare={false} yFmt={v => F.usd(v)} zoomKey="zrev" />
-        <div className="hdx-note">The March 2026 rate cut landed at the demand trough — borrowing has grown roughly eightfold since.</div>
+        <StackedAreaChart buckets={t.weeks} series={revenueSeries} h={150} showShare={false} yFmt={v => F.usd(v)} zoomKey="zrev"
+          refine={gridRefine(hollarWindow('revenue'), revenueSeries, positive)} />
+        <div className="hdx-note">The borrowed band is principal the money markets minted and has not been repaid; debt adds the
+          interest accrued on it, which is owed but never minted. The March 2026 rate cut landed at the demand trough — borrowing
+          has grown roughly eightfold since.</div>
       </div>
     </>
   )
@@ -450,11 +488,11 @@ function BorrowingSection({ t }: { t: HollarTrends }) {
 // market: stable-market share + pool depth history
 function MarketSection({ t }: { t: HollarTrends }) {
   const shareLine: AreaSeries[] = [
-    { key: 'share', label: 'HOLLAR share', color: 'var(--accent)', values: t.stableSharePct },
+    { key: 'stableSharePct', label: 'HOLLAR share', color: 'var(--accent)', values: t.stableSharePct },
   ]
   const depthBands: AreaSeries[] = [
-    { key: 'ss', label: 'Stablepools', color: 'var(--sky)', values: t.depth.stableswap.map(v => (v && v > 0 ? v : null)) },
-    { key: 'om', label: 'Omnipool', color: 'var(--sky-deep)', values: t.depth.omnipool.map(v => (v && v > 0 ? v : null)) },
+    { key: 'stableswap', label: 'Stablepools', color: 'var(--sky)', values: t.depth.stableswap.map(positive) },
+    { key: 'omnipool', label: 'Omnipool', color: 'var(--sky-deep)', values: t.depth.omnipool.map(positive) },
   ]
   const shareNow = lastNum(t.stableSharePct)
   return (
@@ -462,10 +500,11 @@ function MarketSection({ t }: { t: HollarTrends }) {
       <SecTitle title="Market" subtitle="HOLLAR's place among Hydration's stablecoins" />
       <div className="pf-card">
         <div className="sec-title" style={{ marginBottom: 6 }}>Share of stablecoin volume{trendSub(`now ${shareNow != null ? shareNow.toFixed(1) : '—'}% of stable-vs-stable trading`)}</div>
-        <MultiLineChart buckets={t.months} series={shareLine} h={170} yFmt={v => `${v.toFixed(1)}%`} floorZero zoomKey="zshare" />
+        <MultiLineChart buckets={t.months} series={shareLine} h={170} yFmt={v => `${v.toFixed(1)}%`} floorZero zoomKey="zshare"
+          refine={gridRefine(hollarWindow('share'), shareLine)} />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>HOLLAR in pools{trendSub('liquidity depth — recovering for two months')}</div>
         <ChartLegend items={depthBands.map(b => ({ label: b.label, color: b.color }))} />
-        <StackedAreaChart buckets={t.weeks} series={depthBands} h={170} zoomKey="zdep" />
+        <StackedAreaChart buckets={t.weeks} series={depthBands} h={170} zoomKey="zdep" refine={gridRefine(hollarWindow('depth'), depthBands, positive)} />
         <div className="hdx-note">Share counts each routed trade once across all pools. Part of the rise is other stables' volume
           shrinking — HOLLAR is winning share of a smaller local stable market.</div>
       </div>

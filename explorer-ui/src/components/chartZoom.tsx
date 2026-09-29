@@ -21,7 +21,19 @@
 // Times are UNIX SECONDS throughout — the unit the windowed endpoints take, and
 // what the URL carries, so a shared link is stable even as the base series
 // re-buckets underneath it.
-import { useCallback, useEffect, useRef, useState } from 'react'
+//
+// THE DOMAIN ENDS AT THE LAST BUCKET'S END, NOT ITS START.
+//
+// A series' point times are bucket STARTS (a monthly chart's last point sits on
+// the 1st), while the bucket itself — the current month, the current week — lies
+// past the last point. The chart draws nothing there (the last point is at its
+// right edge, and it stays there), but the zoom must be able to reach it: the
+// recent period is exactly what a zoom refines to days and hours. So a URL
+// window is checked against the series' EXTENT (`seriesBucketEnd`: the last
+// bucket's end) and a drag reaching the plot's right edge lands there (capped
+// at the present, `extentEndAt`), while the drawn domain of an unzoomed chart
+// stays its points' span.
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { setQuery, useQueryValue } from '../router'
 
@@ -66,28 +78,99 @@ export function timeAt(view: TimeWindow, f: number): number {
 }
 
 /**
+ * The drawn series' own resolution: the smallest gap between consecutive points.
+ * A single point (or a non-time axis) has no grain, hence 0 — "unknown", which
+ * leaves a caller's window-based behaviour unchanged.
+ */
+export function seriesGrainSec(times: number[]): number {
+  let grain = 0
+  for (let i = 1; i < times.length; i++) {
+    const gap = times[i] - times[i - 1]
+    if (gap > 0 && (grain === 0 || gap < grain)) grain = gap
+  }
+  return grain
+}
+
+const DAY_SEC = 86_400
+const isUtcMonthStart = (sec: number): boolean => sec % DAY_SEC === 0 && new Date(sec * 1000).getUTCDate() === 1
+const nextUtcMonthStart = (sec: number): number => {
+  const d = new Date(sec * 1000)
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) / 1000
+}
+
+/**
+ * The exclusive end of a series' last bucket, inferred from the series itself:
+ * point times are bucket STARTS, so the last bucket reaches one grain past the
+ * last point. Months are uneven, so a series keyed on month starts a month apart
+ * ends at the next calendar month (the api's `grainBucketEndSec` rule); every
+ * other grain — the ladder's hours, days and Monday weeks — is a fixed step. A
+ * series without a grain (one point) ends where it stands.
+ */
+export function seriesBucketEnd(times: number[]): number {
+  const n = times.length
+  if (!n) return 0
+  const last = times[n - 1]
+  const grain = seriesGrainSec(times)
+  if (!(grain > 0)) return last
+  const monthly = grain >= 28 * DAY_SEC && grain <= 31 * DAY_SEC && times.every(isUtcMonthStart)
+  return monthly ? nextUtcMonthStart(last) : last + grain
+}
+
+/**
+ * Where a gesture's right edge lands at `nowSec`: the last bucket's end, but
+ * never past the present — an open bucket (this month, this week) has only
+ * happened up to now, and a window into its future would draw blank plot on the
+ * right. Never before the last point either (a live-pinned point can sit a few
+ * seconds ahead of the client clock).
+ */
+export function extentEndAt(lastSec: number, bucketEndSec: number, nowSec: number): number {
+  return Math.max(lastSec, Math.min(bucketEndSec, nowSec))
+}
+
+/** `extentEndAt` over a series: the instant its zoom reaches at `nowSec`. */
+export function seriesExtentEnd(times: number[], nowSec: number): number {
+  const n = times.length
+  if (!n) return 0
+  return extentEndAt(times[n - 1], seriesBucketEnd(times), nowSec)
+}
+
+/**
  * Turn a drag selection (plot fractions of the CURRENT view) into the next
  * window. Null = not a zoom: a click-width drag, or a selection of the whole
  * view, which would change nothing but state.
+ *
+ * `endAt` is the instant the plot's RIGHT EDGE stands for, at or past `view.to`:
+ * an unzoomed chart draws its last point on that edge, but the edge means the
+ * end of the last bucket (the present, on an open one), so a drag that reaches
+ * it — edge-snapped, no pixel-perfect lift needed — commits up to `endAt`. That
+ * is how a monthly chart's current month, which the plot has no room to show,
+ * becomes selectable: drag to the edge, and the zoomed view then lays it out.
+ * Zoomed, the edge is the window's own end and `endAt` equals `view.to`.
  *
  * Also the preview: charts run the in-flight selection through this every render,
  * so the shade shows exactly what a lift commits — and because both are in time,
  * the shade tracks the cursor continuously instead of snapping to points.
  */
-export function commitSelection(view: TimeWindow, a: number, b: number): TimeWindow | null {
+export function commitSelection(view: TimeWindow, a: number, b: number, endAt: number = view.to): TimeWindow | null {
   const [fa, fb] = a <= b ? [a, b] : [b, a]
   if (fb - fa < DRAG_MIN_FRAC) return null
   const sa = snapFrac(clamp(fa, 0, 1))
   const sb = snapFrac(clamp(fb, 0, 1))
   if (sa <= 0 && sb >= 1) return null
   let from = timeAt(view, sa)
-  let to = timeAt(view, sb)
+  let to = sb >= 1 ? Math.max(endAt, view.to) : timeAt(view, sb)
   // Widen a selection thinner than the floor instead of refusing it — the
-  // gesture said "here", so land there at the closest legal width.
+  // gesture said "here", so land there at the closest legal width. An edge that
+  // was snapped is the data's own end, so it stays put and the other end moves;
+  // otherwise the selection grows around its midpoint.
   if (to - from < MIN_SPAN_SEC) {
-    const mid = (from + to) / 2
-    from = mid - MIN_SPAN_SEC / 2
-    to = mid + MIN_SPAN_SEC / 2
+    if (sb >= 1) from = to - MIN_SPAN_SEC
+    else if (sa <= 0) to = from + MIN_SPAN_SEC
+    else {
+      const mid = (from + to) / 2
+      from = mid - MIN_SPAN_SEC / 2
+      to = mid + MIN_SPAN_SEC / 2
+    }
   }
   return { from: Math.round(from), to: Math.round(to) }
 }
@@ -120,8 +203,15 @@ export function pinchWindow(start: TimeWindow, p1: number, p2: number, q1: numbe
 }
 
 export interface ChartZoomApi {
-  /** The view's time domain — the window when zoomed, the data's extent when not. */
+  /** The view's DRAWN time domain — the window when zoomed, the points' span when not. */
   view: TimeWindow
+  /**
+   * The zoomable domain: the first point to the last bucket's end. Unzoomed,
+   * `view.to` is the last point and `extent.to` reaches past it into the open
+   * bucket — the plot's right edge stands for that bucket's end (the present,
+   * while it is still open).
+   */
+  extent: TimeWindow
   /** Inclusive index range of the points inside the view, for slicing. */
   lo: number
   hi: number
@@ -184,14 +274,30 @@ export function useChartZoom(
   const transientRef = useRef<TimeWindow | null>(null)
   const gestureDirty = useRef(false)
 
+  // The points' span is what an unzoomed chart draws (its last point on the right
+  // edge, no blank plot after it); the extent is what a zoom may address — the
+  // last bucket's end, so the current month or week is reachable even though
+  // the plot has no room to show its interior. The bucket end is a property of
+  // the series, memoized on it.
   const full: TimeWindow = times.length > 1
     ? { from: times[0], to: times[times.length - 1] }
     : { from: 0, to: 0 }
+  const bucketEnd = useMemo(() => seriesBucketEnd(times), [times])
+  const extent: TimeWindow = times.length > 1 ? { from: full.from, to: Math.max(full.to, bucketEnd) } : full
   const candidate = urlKey ? (transient ?? urlWin) : rawWin
   // A window that no longer overlaps the data (an account switch, a series that
-  // shrank) is dropped rather than left addressing nothing.
-  const win = candidate && candidate.to > full.from && candidate.from < full.to ? candidate : null
+  // shrank) is dropped rather than left addressing nothing. A window inside the
+  // open last bucket — past the last point, before the bucket's end — is data.
+  const win = candidate && candidate.to > extent.from && candidate.from < extent.to ? candidate : null
   const view = win ?? full
+  // What the plot's right edge means to a drag: the window's own end when zoomed;
+  // unzoomed, the extent's end capped at the present, so a drag into an open
+  // bucket ends now rather than at a month end that has not happened. The clock
+  // is read once per gesture (pointerdown, below) — a render must not read it —
+  // and the preview and the commit share that reading, so the shade's label is
+  // what the lift writes.
+  const [gestureNow, setGestureNow] = useState(() => Math.floor(Date.now() / 1000))
+  const snapEnd = win ? win.to : extentEndAt(full.to, extent.to, gestureNow)
 
   // Indices of the points inside the view. Charts slice with these, so their
   // geometry code is unchanged; the window itself stays continuous.
@@ -227,13 +333,16 @@ export function useChartZoom(
 
   const reset = useCallback(() => apply(null), [apply])
 
-  // Latest-ref for the view: the gesture handlers must commit against the view
-  // that was on screen when the gesture started, and it is a plain value, so a
-  // ref keeps it out of every handler's dependency list.
-  const viewRef = useRef(view)
-  useEffect(() => { viewRef.current = view })
+  // Latest-ref for the view (and what its right edge means): the gesture
+  // handlers must commit against the view that was on screen when the gesture
+  // started, and it is a plain value, so a ref keeps it out of every handler's
+  // dependency list.
+  const viewRef = useRef({ view, snapEnd })
+  useEffect(() => { viewRef.current = { view, snapEnd } })
 
   const onPointerDown = useCallback((e: ReactPointerEvent) => {
+    // The present, as of this gesture: where its right edge lands on an open bucket.
+    setGestureNow(Math.floor(Date.now() / 1000))
     if (e.pointerType === 'mouse') {
       if (e.button !== 0) return
       drag.current = { start: plotFrac(e), active: false }
@@ -249,7 +358,7 @@ export function useChartZoom(
           touchSel.current = null
         }
         const [[id1, p1], [id2, p2]] = [...touches.current]
-        pinch.current = { win: viewRef.current, id1, id2, p1, p2 }
+        pinch.current = { win: viewRef.current.view, id1, id2, p1, p2 }
         setPinching(true)
       } else if (touches.current.size === 1) {
         // Long-press arms a touch selection: hold still past the delay and the
@@ -265,7 +374,7 @@ export function useChartZoom(
         touchSel.current = entry
       }
     }
-  }, [plotFrac, select])
+  }, [plotFrac, select, setGestureNow])
 
   const onPointerMove = useCallback((e: ReactPointerEvent) => {
     if (e.pointerType === 'mouse') {
@@ -301,7 +410,8 @@ export function useChartZoom(
     const cur = selRef.current
     select(null)
     if (cur && !cancelled) {
-      const next = commitSelection(viewRef.current, cur.a, cur.b)
+      const { view: v, snapEnd: end } = viewRef.current
+      const next = commitSelection(v, cur.a, cur.b, end)
       if (next) apply(next)
     }
   }, [apply, select])
@@ -342,13 +452,14 @@ export function useChartZoom(
 
   return {
     view,
+    extent,
     lo,
     hi,
     zoomed: win != null,
     selecting: sel != null,
     pinching,
     sel,
-    preview: sel ? commitSelection(view, sel.a, sel.b) : null,
+    preview: sel ? commitSelection(view, sel.a, sel.b, snapEnd) : null,
     reset,
     onPointerDown,
     onPointerMove,
@@ -436,11 +547,14 @@ export function useZoomRefineValue<T>(
 
 /**
  * The live drag-selection shade, placed by the caller at the window a lift would
- * commit; `label` names that window. `aPct`/`bPct` are WRAPPER percentages.
+ * commit; `label` names that window. `aPct`/`bPct` are WRAPPER percentages,
+ * clamped into the wrapper: a preview reaching the extent's end lies past the
+ * drawn domain of an unzoomed chart, and the shade ends at the plot edge that
+ * stands for it rather than spilling out of the chart.
  */
 export function ZoomSelection({ aPct, bPct, label }: { aPct: number; bPct: number; label?: string }) {
-  const left = Math.min(aPct, bPct)
-  const width = Math.abs(bPct - aPct)
+  const left = clamp(Math.min(aPct, bPct), 0, 100)
+  const width = clamp(Math.max(aPct, bPct), 0, 100) - left
   return (
     <div className="chart-zoom-sel" style={{ left: `${left}%`, width: `${width}%` }} aria-hidden="true">
       {label && <span className="chart-zoom-sel-label">{label}</span>}

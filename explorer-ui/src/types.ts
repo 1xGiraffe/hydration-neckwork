@@ -1614,6 +1614,10 @@ export interface HollarTrends {
   peg: { close: (number | null)[]; low: (number | null)[]; high: (number | null)[] }
   debt: (number | null)[]
   borrowers: (number | null)[]
+  // Total supply by minter: money-market facilitators (borrowed principal still
+  // outstanding) and every other facilitator (HSM, flash minter). Sums to supply.
+  // Optional: absent from a dashboard cached before it existed.
+  supplyByMinter?: { borrowed: (number | null)[]; other: (number | null)[] }
   revenueCumUsd: (number | null)[]
   depth: { stableswap: (number | null)[]; omnipool: (number | null)[] }
   months: string[]
@@ -1621,6 +1625,18 @@ export interface HollarTrends {
   pegStats: { uptime50Pct: number; uptime25Pct: number; maxAbsDevBps: number } | null
   rates: { label: string; pct: number; prevPct: number | null; since: string }[]
 }
+
+// One chart-zoom window of a dashboard trend chart (api chartWindow.ts):
+// the window's buckets on the ladder grain it resolved to, every series on them.
+export interface ChartWindowPayload {
+  stepSec: number
+  buckets: string[]
+  series: Record<string, (number | null)[]>
+}
+export type HdxWindowChart =
+  | 'ownership' | 'loyalty' | 'staked' | 'float' | 'priceCost' | 'buyback' | 'top100' | 'kraken' | 'flows' | 'churn'
+export type HollarWindowChart =
+  | 'peg' | 'supply' | 'holders' | 'hsmReserves' | 'supplyByMinter' | 'borrowers' | 'revenue' | 'share' | 'depth' | 'hsmArbitrage' | 'hsmTrades'
 
 export interface HollarDashboard {
   price: number | null
