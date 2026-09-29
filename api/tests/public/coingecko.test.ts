@@ -97,6 +97,9 @@ let stopAssets: () => void
 beforeAll(async () => {
   const { loadExplorerAssets, stopExplorerAssetsRefresh } = await import('../../src/services/explorerAssets.ts')
   await loadExplorerAssets(fakeClient() as never)
+  // The fake serves no reserve map; record the pairs a live load derives.
+  const { useLiveNamedShareWrappers } = await import('../helpers/namedShareWrappers.ts')
+  useLiveNamedShareWrappers()
   stopAssets = stopExplorerAssetsRefresh
 })
 

@@ -7,7 +7,7 @@
 // whole CH month-partitions in a staging twin and publishes them atomically
 // (REPLACE PARTITION), so re-runs are idempotent and readers never see a gap.
 
-import { allExplorerAssets, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, priceAssetId } from './explorerAssets.ts'
+import { allExplorerAssets, PRICE_ALIAS_ID, priceAssetId } from './explorerAssets.ts'
 import { ICE_POT_ACCOUNT } from './revenueStreams.ts'
 
 // First block emitting Broadcast.Swapped (the unified swap-event era). At/above
@@ -49,10 +49,11 @@ function normFactorSql(expr: string, target: number): string {
   return `toDecimal256(transform(toUInt32(${expr}), [${ids.join(',') || '0'}], [${factors.join(',') || "'1'"}], '${fallback}'), 0)`
 }
 
-// asset id → the id whose ohlc feed prices it (aTokens/bonds → underlying; share
-// tokens stay themselves — they are priced directly by their own feed).
+// asset id → the id whose ohlc feed prices it: the one historical price rule
+// (priceAssetId) — aTokens and bonds through their underlying, a Hydrated pool
+// share through its wrapper, every other share its own NAV series.
 function priceAliasSql(expr: string): string {
-  const from = Object.keys(PRICE_ALIAS_ID).map(Number).filter(k => SHARE_TOKEN_UNDERLYING_ID[k] == null)
+  const from = Object.keys(PRICE_ALIAS_ID).map(Number).filter(k => priceAssetId(k) !== k)
   const to = from.map(k => priceAssetId(k))
   if (!from.length) return `toUInt32(${expr})`
   return `transform(toUInt32(${expr}), [${from.join(',')}], [${to.join(',')}], toUInt32(${expr}))`

@@ -3,7 +3,7 @@ import {
   SHARE_DISPLAY_FACE,
   assetDescriptor,
   displayDescriptor,
-  isProductWrapperSymbol,
+  isNamedShareWrapper,
   loadExplorerAssets,
   registerShareWrapper,
   shareWrapperOf,
@@ -58,12 +58,17 @@ describe('a pool share under its product-named wrapper', () => {
     vi.restoreAllMocks()
   })
 
-  it('tells a product name from the aToken default spelling', () => {
-    expect(isProductWrapperSymbol('GDOT', '2-Pool-GDOT')).toBe(true)
-    expect(isProductWrapperSymbol('HUSDT', '2-Pool-HUSDT')).toBe(true)
-    expect(isProductWrapperSymbol('a3-Pool', '3-Pool')).toBe(false)
-    expect(isProductWrapperSymbol('a2-Pool-PRIME', '2-Pool-PRIME')).toBe(false)
-    expect(isProductWrapperSymbol('A2-POOL-PRIME', '2-Pool-PRIME')).toBe(false)
+  // The one share/wrapper rule (the price writer's too, src/registry/tracker.ts).
+  it('names a share by the aToken over it that carries the share\'s own name', () => {
+    const unique = () => 1
+    expect(isNamedShareWrapper('2-Pool-GDOT', 'GDOT', unique)).toBe(true)
+    expect(isNamedShareWrapper('2-Pool-HUSDT', 'HUSDT', unique)).toBe(true)
+    expect(isNamedShareWrapper('3-Pool', 'a3-Pool', unique)).toBe(false)
+    expect(isNamedShareWrapper('2-Pool-PRIME', 'a2-Pool-PRIME', unique)).toBe(false)
+    expect(isNamedShareWrapper('3-Pool', 'H3POOL', unique)).toBe(false)
+    // A symbol two registry assets carry names neither.
+    expect(isNamedShareWrapper('2-Pool-GDOT', 'GDOT', () => 2)).toBe(false)
+    expect(isNamedShareWrapper(undefined, 'GDOT', unique)).toBe(false)
   })
 
   it('shows the wrapper\'s symbol and artwork with its own id, decimals and on-chain name', async () => {
@@ -87,16 +92,17 @@ describe('a pool share under its product-named wrapper', () => {
   })
 
   it('names a pool wrapped tomorrow with no code change, and forgets a pairing that goes', async () => {
+    const HFOO = '0x00000000000000000000000000000000000f0f0f'
     await loadExplorerAssets(clientWith(
-      [...REGISTRY.filter(a => a.asset_id !== 1008), asset(1008, 'H3POOL', { evmAddress: A3POOL })],
-      RESERVES, POOLS,
+      [...REGISTRY, asset(777, '2-Pool-HFOO'), asset(7777, 'HFOO', { evmAddress: HFOO })],
+      [...RESERVES, reserve(777, HFOO)], [...POOLS, { pool_id: 777, members: [10, 222] }],
     ))
-    // A wrapper with no artwork of its own borrows its reserve's (iconAssetIdFor), and the share draws as the wrapper does.
-    expect(displayDescriptor(103)).toMatchObject({ symbol: 'H3POOL', name: '3-Pool', iconAssetId: 103 })
-    expect(shareWrapperOf(103)?.named).toBe(true)
-    registerShareWrapper(103, null)
-    expect(displayDescriptor(103)).toMatchObject({ symbol: '3-Pool' })
-    expect(SHARE_DISPLAY_FACE[103]).toBeUndefined()
+    // The share draws as the wrapper does.
+    expect(displayDescriptor(777)).toMatchObject({ symbol: 'HFOO', name: '2-Pool-HFOO', iconAssetId: 7777 })
+    expect(shareWrapperOf(777)?.named).toBe(true)
+    registerShareWrapper(777, null)
+    expect(displayDescriptor(777)).toMatchObject({ symbol: '2-Pool-HFOO' })
+    expect(SHARE_DISPLAY_FACE[777]).toBeUndefined()
   })
 
   it('never names through a placeholder: both ends must be registry rows', async () => {

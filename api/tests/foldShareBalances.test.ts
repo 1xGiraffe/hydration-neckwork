@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest'
+import { useLiveNamedShareWrappers } from './helpers/namedShareWrappers.ts'
 import { foldShareBalances } from '../src/services/explorerService.ts'
 import type { AddressBalance } from '../src/services/explorerService.ts'
 import { assetDescriptor } from '../src/services/explorerAssets.ts'
+
+useLiveNamedShareWrappers()
 
 // Per-account display fold: a held Stableswap pool-share token (2-Pool-GDOT id 690,
 // 2-Pool-GETH 4200, 2-Pool-GSOL 90001) is shown as its underlying main asset

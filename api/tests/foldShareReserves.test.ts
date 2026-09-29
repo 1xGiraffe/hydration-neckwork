@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest'
+import { useLiveNamedShareWrappers } from './helpers/namedShareWrappers.ts'
 import { foldShareHistoryReserves, foldShareReserves } from '../src/services/explorerService.ts'
 import type { MmReserve, MoneyMarketHistoryReserveView } from '../src/services/explorerService.ts'
 import { assetDescriptor } from '../src/services/explorerAssets.ts'
+
+useLiveNamedShareWrappers()
 
 // Money-market reserves use the 2-Pool tokens (Hydration's MM reserves); the borrow
 // card folds them to the underlying main asset (2-Pool-GETH→GETH, 2-Pool-GSOL→GSOL,

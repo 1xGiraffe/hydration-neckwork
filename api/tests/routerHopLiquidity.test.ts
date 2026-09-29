@@ -1,6 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { useLiveNamedShareWrappers } from './helpers/namedShareWrappers.ts'
 import { isRouterHopLiquidity } from '../src/services/explorerService.ts'
+
+useLiveNamedShareWrappers()
 
 const ROUTER_EXECUTOR = '0x6d6f646c726f7574657265780000000000000000000000000000000000000000'
 const TRADER = '0xeab1aee04b7618d3dd4ffee6556118a09622d06b52a407aca3447ca446baa933'

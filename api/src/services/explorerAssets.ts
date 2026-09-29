@@ -123,25 +123,41 @@ async function discoverATokenUnderlyings(client: ClickHouseClient, rows: readonl
     console.error('[ExplorerAssets] aToken reserve map unavailable:', err)
     return
   }
+  const symbolOf = new Map(rows.map(r => [r.asset_id, r.symbol]))
+  const holdersOfSymbol = new Map<string, number>()
+  for (const r of rows) holdersOfSymbol.set(r.symbol, (holdersOfSymbol.get(r.symbol) ?? 0) + 1)
+  const pairs: { reserve: typeof reserves[number]; aTokenId: number; underlyingId: number | undefined }[] = []
   for (const reserve of reserves) {
     const aTokenId = byContract.get((reserve.atoken ?? '').toLowerCase())
     if (aTokenId == null) continue
-    const underlyingId = underlyingAssetIdOf(reserve.asset_address, byContract)
-    // A reserve over a pool share is that share's wrapper whatever the alias
-    // direction below decides — the map is the only source of the pairing.
-    if (underlyingId != null && underlyingId !== aTokenId && isStableswapShareToken(underlyingId) && MM_MARKETS.some(m => m.key === reserve.market_key)) {
+    pairs.push({ reserve, aTokenId, underlyingId: underlyingAssetIdOf(reserve.asset_address, byContract) })
+  }
+  // The share/wrapper identity first, since it decides the direction of every alias
+  // below. A reserve over a pool share is that share's wrapper (SHARE_WRAPPER, the
+  // reserve fact); the share IS the wrapper only under the one share/wrapper rule
+  // (isNamedShareWrapper) — then the share prices, displays and folds as it.
+  const named = new Map<number, number>()
+  for (const { reserve, aTokenId, underlyingId } of pairs) {
+    if (underlyingId == null || underlyingId === aTokenId) continue
+    // Exactly the writer's test — no market or share-set condition, which it has no
+    // way to apply either.
+    if (isNamedShareWrapper(symbolOf.get(underlyingId), symbolOf.get(aTokenId), sym => holdersOfSymbol.get(sym) ?? 0)) named.set(underlyingId, aTokenId)
+    if (isStableswapShareToken(underlyingId) && MM_MARKETS.some(m => m.key === reserve.market_key)) {
       SHARE_WRAPPER[underlyingId] = { aTokenId, marketKey: reserve.market_key }
     }
+  }
+  setNamedShareWrappers(named)
+  for (const { aTokenId, underlyingId } of pairs) {
     if (underlyingId == null || underlyingId === aTokenId) continue
     // The receipt fact, recorded before any alias decision below skips the pair.
     if (ATOKEN_RESERVE_ID[aTokenId] == null) ATOKEN_RESERVE_ID[aTokenId] = underlyingId
     // A hand-written pairing wins: it encodes a direction the map cannot.
     if (ATOKEN_UNDERLYING_ID[aTokenId] != null) continue
     // Never invert an alias that already runs the other way. The map calls
-    // 2-Pool-GDOT the reserve of GDOT, while the share table prices the pool share
-    // OFF GDOT; taking both would alias the pair in a cycle, and priceAssetId would
+    // 2-Pool-GDOT the reserve of GDOT, while the share/wrapper rule prices the share
+    // AS GDOT; taking both would alias the pair in a cycle, and priceAssetId would
     // walk it to its hop bound and land on whichever end the parity chose.
-    if (PRICE_ALIAS_ID[underlyingId] === aTokenId) continue
+    if (NAMED_SHARE_WRAPPER[underlyingId] === aTokenId) continue
     ATOKEN_UNDERLYING_ID[aTokenId] = underlyingId
     if (PRICE_ALIAS_ID[aTokenId] == null) PRICE_ALIAS_ID[aTokenId] = underlyingId
     if (UNDERLYING_TO_ATOKEN_ID[underlyingId] == null) UNDERLYING_TO_ATOKEN_ID[underlyingId] = aTokenId
@@ -158,10 +174,7 @@ async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<voi
   const poolMembers = await loadStableswapMembers(client)
   // Additive only: a failed member read must not make a known share token look like
   // an ordinary asset, which would let currentPriceAssetId alias it again.
-  for (const [poolId, members] of poolMembers) {
-    STABLESWAP_SHARE_IDS.add(poolId)
-    STABLESWAP_POOL_MEMBERS.set(poolId, members)
-  }
+  for (const poolId of poolMembers.keys()) STABLESWAP_SHARE_IDS.add(poolId)
   // Before the cache is built: iconAssetIdFor reads the pairing, so a newly
   // discovered aToken must know its reserve to borrow that reserve's artwork.
   await discoverATokenUnderlyings(client, rows)
@@ -446,12 +459,12 @@ async function injectBonds(client: ClickHouseClient): Promise<void> {
   }
 }
 
-// Stableswap/pool SHARE tokens (2-Pool-GDOT, 2-Pool-HUSDC, …) → the main asset they
-// display as (displayAssetId, where shareFoldsIntoDisplaySupply allows) and borrow
-// artwork from. For HISTORICAL valuation
-// (candles) the share also prices through it — a unit-price proxy, not NAV, since a
-// share has no redeemable-value history. CURRENT valuation never uses this alias: a
-// share's current price is its derived redeemable value (see currentPriceAssetId).
+// Stableswap/pool SHARE tokens → the asset whose ARTWORK a share borrows
+// (iconAssetIdFor), seeding the share-id set (STABLESWAP_SHARE_IDS) and the public
+// API's frozen money-market event filter (UNDERLYING_TO_SHARE_IDS). It is NOT an
+// identity: which share IS which asset — for price, display, holdings and supply —
+// is the one share/wrapper rule (NAMED_SHARE_WRAPPER), derived from the registry
+// and the reserve map. 2-Pool-PRIME borrows PRIME's icon; it is not PRIME.
 export const SHARE_TOKEN_UNDERLYING_ID: Record<number, number> = {
   104: 34,     // 2-Pool-WETH   → ETH
   110: 1110,   // 2-Pool-HUSDC  → HUSDC
@@ -486,11 +499,14 @@ const DUPLICATE_PRICE_ALIAS_ID: Record<number, number> = {
   55: 55,        // BIL           → itself (own feed)
   550: 55,       // uBIL          → BIL
 }
-// Every asset that should be priced via another asset (aTokens + pool shares).
-export const PRICE_ALIAS_ID: Record<number, number> = { ...ATOKEN_UNDERLYING_ID, ...SHARE_TOKEN_UNDERLYING_ID, ...DUPLICATE_PRICE_ALIAS_ID }
+// Every asset that should be priced via another asset: aTokens, duplicates, bonds
+// and the pool shares a named wrapper IS (added at registry load, setNamedShareWrappers).
+export const PRICE_ALIAS_ID: Record<number, number> = { ...ATOKEN_UNDERLYING_ID, ...DUPLICATE_PRICE_ALIAS_ID }
 
-// The asset id whose price/value should be used for `assetId`: itself, unless it
-// is an aToken or pool-share token, in which case its priced underlying.
+// The asset id whose HISTORICAL price series values `assetId` — the one rule every
+// historical valuation applies (explorer, Data API, public API, derivations, the
+// pair-candle routes): itself, unless it is an aToken, a duplicate, a bond or a
+// share a named wrapper IS, in which case the id its alias walk ends at.
 export function priceAssetId(assetId: number): number {
   // Aliases can chain (GIGAHDX → stHDX → HDX); resolve transitively with a
   // small bound so a (mis)configured cycle can't loop forever.
@@ -516,48 +532,72 @@ export function registerStableswapShareToken(assetId: number): void {
   STABLESWAP_SHARE_IDS.add(assetId)
 }
 
-// Each stableswap pool's member assets, as of the newest state-history row, kept
-// from the registry load's member read. Additive like STABLESWAP_SHARE_IDS: a
-// failed read keeps the last known members rather than forgetting them.
-const STABLESWAP_POOL_MEMBERS = new Map<number, number[]>()
-/** Test seam: record a pool's members the way a registry load would. */
-export function registerStableswapPoolMembers(poolId: number, members: number[] | null): void {
-  if (members) STABLESWAP_POOL_MEMBERS.set(poolId, members)
-  else STABLESWAP_POOL_MEMBERS.delete(poolId)
+// ─── The share/wrapper rule ───────────────────────────────────────────────────
+// A Hydrated pool share IS its money-market wrapper — the one fact behind a share's
+// historical price, its display face, its holdings row and its supply fold — when
+//
+//   W is the aToken Aave initialized over share S (the reserve map, SHARE_WRAPPER),
+//   W's symbol is S's minus its `N-Pool-` prefix, and no other registry asset
+//   carries that symbol.
+//
+// The same rule decides what the price writer publishes (src/registry/tracker.ts,
+// lpAliasesFor): the wrapper is minted 1:1 over the share, so they carry one price,
+// written under W only. So a share the rule names prices as W, shows as W, and its
+// holdings count toward W's supply: 2-Pool-HUSDC IS HUSDC, 2-Pool-GDOT IS GDOT. A
+// share it does not name is a pool position of its own, priced at its own NAV
+// series: 2-Pool-PRIME holds PRIME + HOLLAR and was once published as PRIME ($1.06
+// against a redeemable $1.019; 2-Pool-apyUSD $1.41 against $1.009); a2-Pool-PRIME
+// over it is an ordinary aToken, priced THROUGH the share. Counting a leg-holding
+// share into its leg's supply also counts the pool's reserve twice: BIL read $3.14M
+// against a $2.52M supply. Recomputed whole at every registry load; a failed
+// reserve-map read keeps the last pairing.
+const NAMED_SHARE_WRAPPER: Record<number, number> = {}
+export function isNamedShareWrapper(
+  shareSymbol: string | undefined,
+  wrapperSymbol: string | undefined,
+  holdersOfSymbol: (symbol: string) => number,
+): boolean {
+  const suffix = shareSymbol?.match(/^\d+-Pool-(.+)$/)?.[1]
+  return suffix != null && suffix === wrapperSymbol && holdersOfSymbol(suffix) === 1
+}
+function setNamedShareWrappers(named: ReadonlyMap<number, number>): void {
+  for (const share of Object.keys(NAMED_SHARE_WRAPPER).map(Number)) {
+    if (named.get(share) === NAMED_SHARE_WRAPPER[share]) continue
+    delete NAMED_SHARE_WRAPPER[share]
+    if (PRICE_ALIAS_ID[share] != null && ATOKEN_UNDERLYING_ID[share] == null) delete PRICE_ALIAS_ID[share]
+  }
+  for (const [share, wrapper] of named) {
+    NAMED_SHARE_WRAPPER[share] = wrapper
+    PRICE_ALIAS_ID[share] = wrapper
+    // A wrapper aliased to its share while it was unnamed (a rename) would now
+    // close a cycle: the share IS the wrapper, so the wrapper prices as itself.
+    if (ATOKEN_UNDERLYING_ID[wrapper] === share) delete ATOKEN_UNDERLYING_ID[wrapper]
+    if (PRICE_ALIAS_ID[wrapper] === share) delete PRICE_ALIAS_ID[wrapper]
+    if (UNDERLYING_TO_ATOKEN_ID[share] === wrapper) delete UNDERLYING_TO_ATOKEN_ID[share]
+  }
+}
+/** Test seam: record the pairs a registry load would derive under the rule. */
+export function registerNamedShareWrappers(pairs: Iterable<readonly [number, number]>): void {
+  setNamedShareWrappers(new Map(pairs))
+}
+/** The wrapper share `shareId` IS under the one share/wrapper rule, if any. */
+export function namedShareWrapperOf(shareId: number): number | undefined {
+  return NAMED_SHARE_WRAPPER[shareId]
 }
 
-/**
- * Whether a share IS its display asset: its holdings add to that asset's SUPPLY —
- * the assets directory's total and holder count, and the asset page's holder list —
- * and a held share shows under that asset's row (displayAssetId). One rule for
- * both, so a wallet's balance never says "BIL" for something BIL's supply does
- * not count.
- *
- * They do when the share IS the display asset's economic substance: GDOT, HUSDT,
- * GETH… are money-market wrappers over the share, so the share count is the
- * product's supply. They do not when the share's pool holds the display asset
- * itself, directly or as an aToken claim on it — 2-Pool-BIL holds BIL, 2-Pool-PRIME
- * holds PRIME, 2-Pool-WETH holds aETH over ETH. That asset's own supply already
- * counts the pool's holding (the pool account is one of its holders), so adding the
- * shares — a claim on that holding plus the pool's other legs — counts the pool's
- * reserve twice and prices its other legs as the display asset: BIL read $3.14M
- * against a $2.52M supply. Such a share is a pool position of its own (2-Pool-BIL,
- * the BIL/HOLLAR pool), not the asset, and keeps its own name and row. A pool whose
- * members are not known yet keeps the fold.
- */
+/** Whether a share IS its display asset: its holdings add to that asset's supply and show under its row (the share/wrapper rule). */
 export function shareFoldsIntoDisplaySupply(shareId: number): boolean {
-  const displayId = SHARE_TOKEN_UNDERLYING_ID[shareId]
-  if (displayId == null) return false
-  const members = STABLESWAP_POOL_MEMBERS.get(shareId)
-  if (!members) return true
-  return !members.some(member => member === displayId || ATOKEN_UNDERLYING_ID[member] === displayId)
+  return NAMED_SHARE_WRAPPER[shareId] != null
 }
 
-/** The share ids whose holdings add to `displayId`'s supply (shareFoldsIntoDisplaySupply). */
+/** The share ids whose holdings add to `displayId`'s supply. */
 export function supplyFoldedShareIds(displayId: number): number[] {
-  return Object.entries(SHARE_TOKEN_UNDERLYING_ID)
-    .filter(([shareId, id]) => id === displayId && shareFoldsIntoDisplaySupply(Number(shareId)))
-    .map(([shareId]) => Number(shareId))
+  return Object.entries(NAMED_SHARE_WRAPPER).filter(([, id]) => id === displayId).map(([shareId]) => Number(shareId))
+}
+
+/** Every share that folds into a display asset, with that asset — the fold's full set. */
+export function foldedShareEntries(): [number, number][] {
+  return Object.entries(NAMED_SHARE_WRAPPER).map(([share, wrapper]) => [Number(share), wrapper])
 }
 
 // The id whose CURRENT price values `assetId` when it has no entry of its own:
@@ -568,8 +608,8 @@ export function supplyFoldedShareIds(displayId: number): number[] {
 // share (a3-Pool → 3-Pool) without a feed of its own values through the share, and
 // the share itself resolves to itself. Look prices up through currentPriceOf, which
 // applies the one precedence rule; this is the alias half of it. priceAssetId keeps
-// the full walk for HISTORICAL (candle) valuation: a share has no redeemable-value
-// history, and its underlying's close stays the documented proxy there.
+// the full walk for HISTORICAL (candle) valuation, where a named share reads its
+// wrapper's series and every other share its own.
 export function currentPriceAssetId(assetId: number): number {
   let id = assetId
   for (let hop = 0; hop < 4; hop++) {
@@ -596,17 +636,16 @@ export function currentPriceOf<T>(prices: ReadonlyMap<number, T>, assetId: numbe
 }
 
 // The asset id under which `assetId` should be DISPLAYED in per-account holdings:
-// a held Stableswap pool-share token (2-Pool-GDOT, …) is shown as its underlying
-// main asset (GDOT), mirroring preis-ui which hides "-Pool" tokens — only where the
-// share IS that asset (shareFoldsIntoDisplaySupply); 2-Pool-BIL, 2-Pool-PRIME,
-// 2-Pool-apyUSD and 2-Pool-WETH hold it and stay themselves. Unlike
+// a held Stableswap pool-share token (2-Pool-GDOT, …) is shown as the wrapper it IS
+// (GDOT; the share/wrapper rule), mirroring preis-ui which hides "-Pool" tokens;
+// 2-Pool-BIL, 2-Pool-PRIME, 2-Pool-apyUSD and 2-Pool-WETH stay themselves. Unlike
 // priceAssetId this folds ONLY share tokens, never aTokens (aToken / money-market
 // collateral is folded separately via the MM path). Aggregate holder/supply views
 // may fold these only when the hidden share id is removed from presentation and a
 // money-market custody balance is replaced—not added to—its beneficial aToken
 // holders; otherwise the vault would be double-counted.
 export function displayAssetId(assetId: number): number {
-  return shareFoldsIntoDisplaySupply(assetId) ? SHARE_TOKEN_UNDERLYING_ID[assetId] : assetId
+  return NAMED_SHARE_WRAPPER[assetId] ?? assetId
 }
 
 // Reverse of ATOKEN_UNDERLYING_ID: underlying reserve asset id → its aToken id.
@@ -624,18 +663,22 @@ export const UNDERLYING_TO_ATOKEN_ID: Record<number, number> = Object.fromEntrie
 // about the reserve, recorded whichever way the price alias runs — which is why
 // UNDERLYING_TO_ATOKEN_ID (the alias direction) cannot serve: the share prices
 // OFF its wrapper there, so the pair is skipped. The wrapper NAMES the pool
-// (`named`) exactly when the share already displays as it (SHARE_TOKEN_UNDERLYING_ID,
-// the balances fold): HUSDT and GDOT, never a3-Pool.
+// (`named`) exactly under the share/wrapper rule: HUSDT and GDOT, never a3-Pool.
 export interface ShareWrapper { aTokenId: number; marketKey: string }
 export const SHARE_WRAPPER: Record<number, ShareWrapper> = {}
 export function shareWrapperOf(shareId: number): (ShareWrapper & { named: boolean }) | undefined {
   const w = SHARE_WRAPPER[shareId]
-  return w ? { ...w, named: SHARE_DISPLAY_FACE[shareId] === w.aTokenId } : undefined
+  return w ? { ...w, named: NAMED_SHARE_WRAPPER[shareId] === w.aTokenId } : undefined
 }
 /** Test seam: pair a share with its wrapper the way a registry load would. */
 export function registerShareWrapper(shareId: number, wrapper: ShareWrapper | null): void {
   if (wrapper) SHARE_WRAPPER[shareId] = wrapper
   else delete SHARE_WRAPPER[shareId]
+  const named = new Map(Object.entries(NAMED_SHARE_WRAPPER).map(([s, w]) => [Number(s), w]))
+  named.delete(shareId)
+  const holders = (symbol: string) => [...cache.values()].filter(a => a.symbol === symbol).length
+  if (wrapper && isNamedShareWrapper(cache.get(shareId)?.symbol, cache.get(wrapper.aTokenId)?.symbol, holders)) named.set(shareId, wrapper.aTokenId)
+  setNamedShareWrappers(named)
   refreshDisplayFace(shareId)
 }
 
@@ -650,34 +693,24 @@ export function registerShareWrapper(shareId: number, wrapper: ShareWrapper | nu
 // tab, on every activity row that moves the share (a money-market supply, an
 // add-liquidity, a trade routed through it) and in the MCP renderer.
 //
-// A wrapper carries a product name when its registry symbol is not the aToken
-// default — `a` + the share's symbol: HUSDT over 2-Pool-HUSDT and GDOT over
-// 2-Pool-GDOT are products, a3-Pool over 3-Pool and a2-Pool-PRIME over
-// 2-Pool-PRIME are not, and those shares keep their own name. Both ends must be
-// registry rows; a placeholder never names anything. Read at registry load from
-// the reserve map (SHARE_WRAPPER), so a Hydrated pool opened tomorrow is named
-// with no code change.
+// The face follows the share/wrapper rule: HUSDT over 2-Pool-HUSDT and GDOT over
+// 2-Pool-GDOT name their shares; a3-Pool over 3-Pool and a2-Pool-PRIME over
+// 2-Pool-PRIME do not, and those shares keep their own name. Both ends must be
+// registry rows; a placeholder never names anything.
 //
 // The face changes the NAME only. The share's on-chain name stays in `name`
 // (2-Pool-GDOT), so an asset or pool page still states which registry entry it
 // is, and `assetDescriptor` still answers the registry's own symbol for the
-// public and Data APIs, whose contracts are frozen. Folding a HOLDING into the
-// wrapper's row (displayAssetId / SHARE_TOKEN_UNDERLYING_ID, which is also the
-// historical price proxy) is a separate, hand-kept rule; this one names, it
-// never merges or prices.
+// public and Data APIs, whose contracts are frozen.
 export const SHARE_DISPLAY_FACE: Record<number, number> = {}
 const displayFaces = new Map<number, ExplorerAsset>()
-/** Whether an aToken's symbol names a product rather than restating its reserve (`a<reserve>`). */
-export function isProductWrapperSymbol(wrapperSymbol: string, reserveSymbol: string): boolean {
-  return wrapperSymbol.trim().toLowerCase() !== `a${reserveSymbol.trim()}`.toLowerCase()
-}
 function refreshDisplayFace(shareId: number): void {
   delete SHARE_DISPLAY_FACE[shareId]
   displayFaces.delete(shareId)
-  const w = SHARE_WRAPPER[shareId]
-  const share = w && cache.get(shareId)
-  const wrapper = w && cache.get(w.aTokenId)
-  if (!share || !wrapper || !isProductWrapperSymbol(wrapper.symbol, share.symbol)) return
+  const wrapperId = NAMED_SHARE_WRAPPER[shareId]
+  const share = wrapperId != null ? cache.get(shareId) : undefined
+  const wrapper = wrapperId != null ? cache.get(wrapperId) : undefined
+  if (!share || !wrapper) return
   SHARE_DISPLAY_FACE[shareId] = wrapper.assetId
   // Own id, decimals and origin; the wrapper's symbol and artwork (both icon
   // fields, so the share draws exactly as the wrapper does); the on-chain name kept.
@@ -691,7 +724,7 @@ function refreshDisplayFace(shareId: number): void {
   })
 }
 function buildDisplayFaces(): void {
-  for (const id of new Set([...Object.keys(SHARE_DISPLAY_FACE), ...Object.keys(SHARE_WRAPPER)].map(Number))) refreshDisplayFace(id)
+  for (const id of new Set([...Object.keys(SHARE_DISPLAY_FACE), ...Object.keys(NAMED_SHARE_WRAPPER)].map(Number))) refreshDisplayFace(id)
 }
 /**
  * The descriptor a reader-facing explorer surface shows for `assetId`: the registry

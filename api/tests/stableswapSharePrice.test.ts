@@ -91,11 +91,15 @@ describe('stableswapSharePrices / withStableswapSharePrices', () => {
 })
 
 describe('currentPriceAssetId', () => {
-  it('stops the alias walk at a share token, where priceAssetId walks on to the underlying', async () => {
+  it('stops the alias walk at a share token, where priceAssetId walks on to a named wrapper only', async () => {
     const assets = await import('../src/services/explorerAssets.ts')
-    // 2-Pool-apyUSD: its own id for current value, apyUSD for candles.
+    assets.registerNamedShareWrappers([[690, 69]])
+    // 2-Pool-apyUSD holds apyUSD and is its own asset: its own id for both.
     expect(assets.currentPriceAssetId(146)).toBe(146)
-    expect(assets.priceAssetId(146)).toBe(46)
+    expect(assets.priceAssetId(146)).toBe(146)
+    // 2-Pool-GDOT IS GDOT: its own derived value now, GDOT's series for candles.
+    expect(assets.currentPriceAssetId(690)).toBe(690)
+    expect(assets.priceAssetId(690)).toBe(69)
     // An aToken over a share token values through the share (a3-Pool → 3-Pool).
     assets.registerStableswapShareToken(103)
     expect(assets.currentPriceAssetId(1008)).toBe(103)
