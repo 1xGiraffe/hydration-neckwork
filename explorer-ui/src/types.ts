@@ -438,6 +438,9 @@ export interface ExtrinsicDetail extends ExtrinsicSummary {
   callArgs: unknown
   error: unknown
   errorReason: FailureReason | null
+  // The extrinsic succeeded but a call a wrapper inside it dispatched (a multisig
+  // execution, a proxy call, a batch) failed: what failed.
+  innerErrorReason?: FailureReason
   events: ExtrinsicEvent[]
   // Verified-ABI decodes of the extrinsic's EVM calls (top-level and nested in
   // wrapper call trees); absent when no target has a verified ABI.
@@ -1007,8 +1010,14 @@ export interface ActivityRow {
   v3TokenId?: string
   v3Vault?: string
   dca?: boolean
-  dcaStatus?: 'failed'
+  // 'failed' = an execution that did not trade; 'scheduled' = the schedule itself,
+  // on the extrinsic that created it.
+  dcaStatus?: 'failed' | 'scheduled'
   dcaError?: string
+  // Scheduled rows only: blocks between executions, and the whole budget (raw, in
+  // the sold asset) — null for an unbounded schedule.
+  dcaPeriodBlocks?: number
+  dcaTotalAmount?: string | null
   linkBlock?: number | null
   linkIndex?: number | null
   otcAction?: 'Place' | 'Pull' | 'Fill'
