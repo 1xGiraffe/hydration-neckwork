@@ -178,6 +178,9 @@ export function activityId(r: ActivityRow, dcaExecutionLink = false): string | n
   // links to its own execution detail (/dca/<block>-e<eventIndex>), which in
   // turn links to the schedule.
   if (!dcaExecutionLink && (r.type === 'dca' || r.dca) && r.dcaScheduleId != null) return String(r.dcaScheduleId)
+  // A scheduled row IS the schedule, not one execution of it, so it links to the
+  // schedule page wherever it is shown.
+  if (r.dcaStatus === 'scheduled' && r.dcaScheduleId != null) return String(r.dcaScheduleId)
   // An intent row follows the same rule: its ORDER page from a feed (the full u128 id,
   // a decimal string), its own event on the block and extrinsic pages. Without an
   // order id it takes the coordinates — /intent-fill/<h>-e<i> resolves like any slug.
@@ -331,6 +334,20 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     const local = r.type === 'xcm' && dest ? <HydrationBadge /> : null
     return <span className="asset-flow">{local}<AssetAmount asset={r.asset} raw={r.amount} />{dest ? <> → {dest}</> : null}</span>
   }
+  if (r.dcaStatus === 'scheduled' && r.assetIn && r.assetOut) {
+    // The schedule's terms: only its fixed per-trade leg is known before a trade
+    // runs (the sold amount of a Sell, the bought amount of a Buy), then how often
+    // it trades and how much it may spend in all.
+    const fixedIn = r.amountIn != null
+    return <span className="asset-flow">
+      {fixedIn ? <AssetAmount asset={r.assetIn} raw={r.amountIn} /> : <AssetChip asset={r.assetIn} />} → {fixedIn ? <AssetChip asset={r.assetOut} /> : <AssetAmount asset={r.assetOut} raw={r.amountOut} />}
+      <span className="muted">
+        per trade{r.dcaPeriodBlocks ? ` · every ${F.int(r.dcaPeriodBlocks)} blocks` : ''} · {r.dcaTotalAmount
+          ? <>budget <Amt raw={r.dcaTotalAmount} dec={r.assetIn.decimals} /> {r.assetIn.symbol}</>
+          : 'no budget limit'}
+      </span>
+    </span>
+  }
   if ((r.type === 'trade' || r.type === 'dca') && r.assetIn && r.assetOut) {
     return <span className="asset-flow"><AssetAmount asset={r.assetIn} raw={r.amountIn} /> → <AssetAmount asset={r.assetOut} raw={r.amountOut} />{r.dcaStatus === 'failed' && <span className="muted">Failed attempt</span>}</span>
   }
@@ -464,7 +481,7 @@ function activityKey(r: ActivityRow): string {
 // `pageSize` sizes the loading skeleton, so a paged feed reserves the height it is
 // about to fill and the pager beneath it does not jump. Unpaged surfaces (a block's
 // or extrinsic's own activity) show whatever the record holds and leave it unset.
-export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pending, error, onRetry, dcaExecutionLinks, pageSize }: { rows: ActivityRow[]; noActor?: boolean; now: number; live?: boolean; anchorRef?: (el: HTMLElement | null) => void; loading?: boolean; pending?: boolean; error?: unknown; onRetry?: () => void; dcaExecutionLinks?: boolean; pageSize?: number }) {
+export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pending, error, onRetry, dcaExecutionLinks, pageSize, emptyText }: { rows: ActivityRow[]; noActor?: boolean; now: number; live?: boolean; anchorRef?: (el: HTMLElement | null) => void; loading?: boolean; pending?: boolean; error?: unknown; onRetry?: () => void; dcaExecutionLinks?: boolean; pageSize?: number; emptyText?: string | null }) {
   // Type · [Account] · Activity · Protocol revenue · Value · Time — the span the
   // skeleton, empty and error rows must cover for the full table width.
   const cols = noActor ? 5 : 6
@@ -483,7 +500,7 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
       <tbody {...pendingRows(pending)}>
         {loading && !rows.length ? <TableSkeleton cols={cols} rows={pageSize} />
           : error && !rows.length ? <ErrorRow cols={cols} title="Couldn’t load activity" error={error} onRetry={onRetry} />
-            : !rows.length ? <EmptyRow cols={cols}>No activity</EmptyRow>
+            : !rows.length ? <EmptyRow cols={cols}>{emptyText || 'No activity'}</EmptyRow>
               : rows.map((r, i) => {
                 const slug = activitySlug(r)
                 const aid = activityId(r, dcaExecutionLinks)

@@ -319,8 +319,9 @@ export interface ActivityRow {
   // trade / DCA
   dca?: boolean
   dcaScheduleId?: number
-  /** `'failed'` or absent; some feeds send an explicit `null` for "not failed". */
-  dcaStatus?: 'failed' | null
+  /** `'failed'`, `'scheduled'` (the schedule itself, on the extrinsic that created
+   * it) or absent; some feeds send an explicit `null` for "not failed". */
+  dcaStatus?: 'failed' | 'scheduled' | null
   dcaError?: string
 
   // xcm

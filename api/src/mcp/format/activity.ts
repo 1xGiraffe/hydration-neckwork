@@ -151,7 +151,10 @@ export function activityKind(r: ActivityRow): string {
     case 'liquidity': return LIQ_LABELS[r.liqAction ?? ''] ?? 'Liquidity'
     case 'trade':
     case 'dca':
-      if (r.type === 'dca' || r.dca) return r.dcaStatus === 'failed' ? 'DCA execution failed' : 'DCA execution'
+      if (r.type === 'dca' || r.dca) {
+        if (r.dcaStatus === 'scheduled') return 'DCA scheduled'
+        return r.dcaStatus === 'failed' ? 'DCA execution failed' : 'DCA execution'
+      }
       return 'Swap'
     // Product copy calls an OTC cancellation a Pull.
     case 'otc': return `OTC ${(r.otcAction ?? 'order').toLowerCase()}`

@@ -995,9 +995,9 @@ export function CallPill({ name }: { name: string }) {
 // A `.dl` row (dt + dd) for a decoded dispatch-error reason. The label and its
 // docs stack in a column wrapper so they share a left edge — the parent `.dd`
 // is a centered flex row, which would otherwise place them side by side.
-export function FailureReasonRow({ reason }: { reason: FailureReason }) {
+export function FailureReasonRow({ reason, label = 'Failure reason' }: { reason: FailureReason; label?: string }) {
   return <>
-    <div className="dt">Failure reason</div>
+    <div className="dt">{label}</div>
     <div className="dd"><div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
       <span className="mono">{reason.label}</span>
       {reason.docs && <span className="muted">{reason.docs}</span>}

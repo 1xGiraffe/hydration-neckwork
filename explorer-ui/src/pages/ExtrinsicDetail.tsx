@@ -9,6 +9,7 @@ import { blockOf } from '../utils/activityIds'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { api } from '../api/explorer'
 import { ActivityTable, PoolChip } from '../components/ActivityTable'
+import { emptyActivityReason } from '../utils/extrinsicActivity'
 import { EvmCallCard, EvmLogView } from '../components/EvmDecoded'
 import { evmTransactionEnvelope } from '../utils/evmDecoded'
 import type { EvmTransactionFacts, IceSolutionPanel } from '../types'
@@ -210,6 +211,10 @@ export function ExtrinsicDetail({ id }: { id: string }) {
                 </div>
               </>}
               {!data.success && data.errorReason && <FailureReasonRow reason={data.errorReason} />}
+              {/* The wrapper succeeded (the fee was paid, the multisig or proxy did
+                  its part), but the call it dispatched failed: say so beside the
+                  green badge rather than let it read as a trade that went through. */}
+              {data.success && data.innerErrorReason && <FailureReasonRow reason={data.innerErrorReason} label="Dispatched call failed" />}
               {data.signer
                 ? <><div className="dt">Signer</div><div className="dd"><AddrPill account={data.signer} /></div>
                   <div className="dt">Fee</div><div className="dd mono"><FeeAmount payment={data.feePayment} hdxRaw={data.fee} /></div>
@@ -231,7 +236,8 @@ export function ExtrinsicDetail({ id }: { id: string }) {
               <button className={tab === 'json' ? 'active' : ''} onClick={() => setTab('json')}>Raw JSON</button>
             </div>
 
-            {tab === 'activity' && <ActivityTable rows={activityRows} now={now} loading={activity.isFetching && !activityRows.length} dcaExecutionLinks />}
+            {tab === 'activity' && <ActivityTable rows={activityRows} now={now} loading={activity.isFetching && !activityRows.length} dcaExecutionLinks
+              emptyText={inPool ? null : emptyActivityReason(data)} />}
 
             {tab === 'params' && (
               <>

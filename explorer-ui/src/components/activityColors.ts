@@ -214,6 +214,7 @@ export function activityBadge(r: ActivityRow): { label: string; col: string } {
   if (r.type === 'trade' || r.type === 'dca') {
     // A failed execution is a failure before it is a trade.
     if (r.type === 'dca' || r.dca) {
+      if (r.dcaStatus === 'scheduled') return { label: 'DCA scheduled', col: CAT.tradeDca }
       return r.dcaStatus === 'failed'
         ? { label: 'DCA failed', col: CAT.bad }
         : { label: 'DCA', col: CAT.tradeDca }
