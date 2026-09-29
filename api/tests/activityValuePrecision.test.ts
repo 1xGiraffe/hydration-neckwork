@@ -11,7 +11,8 @@ import {
   activityRowMatchesFilters,
   voteDetails,
 } from '../src/services/explorerService.ts'
-import { PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, loadExplorerAssets, priceAssetId, stopExplorerAssetsRefresh } from '../src/services/explorerAssets.ts'
+import { PRICE_ALIAS_ID, loadExplorerAssets, priceAssetId, stopExplorerAssetsRefresh } from '../src/services/explorerAssets.ts'
+import { LIVE_NAMED_SHARE_WRAPPERS, useLiveNamedShareWrappers } from './helpers/namedShareWrappers.ts'
 
 describe('value-aware account activity precision', () => {
   it('sums split vote balances without JavaScript number coercion', () => {
@@ -148,22 +149,20 @@ describe('value-aware account activity precision', () => {
   })
 })
 
-// A pool-share token is quoted only while it is its pool's tradeable leg:
-// 2-Pool-GDOT (690) has six hourly closes from April 2025 and none after, because
-// GDOT (69) took over. Excluding share tokens from the historical price alias does
-// NOT leave their flows unpriced — it leaves them matched against that abandoned
-// feed, and since the ASOF join has no lower bound it values a 2026 liquidation at
-// the April-2025 close forever (a ~4x overstatement that survives into every
-// liquidation/supply/withdraw value and the account's liquidation volume). Valuing
-// through the underlying is the near-peg unit-price proxy the current-price path
-// already applies, and it is the only alias with a live feed.
-describe('pool-share flows value through their underlying price feed', () => {
-  it('resolves a share token to its underlying, never to itself', () => {
-    expect(SHARE_TOKEN_UNDERLYING_ID[690]).toBe(69)
+// A Hydrated pool share is published only under its named wrapper: 2-Pool-GDOT (690)
+// has six hourly closes from April 2025 and none after, because the writer records
+// it as GDOT (69). Leaving such a share to value itself does NOT leave its flows
+// unpriced — it matches them against that abandoned feed, and since the ASOF join
+// has no lower bound it valued a 2026 liquidation at the April-2025 close forever
+// (a ~4x overstatement). So a share a named wrapper IS values through the wrapper
+// (the share/wrapper rule); every other share has a NAV series of its own and
+// values at it — 2-Pool-apyUSD walked on to apyUSD read $1.41 against $1.009.
+describe('pool-share flows value through the series the writer publishes them under', () => {
+  useLiveNamedShareWrappers()
+  it('resolves a named share to its wrapper, and any other share to itself', () => {
     expect(historicalPriceAssetId(690)).toBe(69)
-    for (const shareId of Object.keys(SHARE_TOKEN_UNDERLYING_ID).map(Number)) {
-      expect(historicalPriceAssetId(shareId)).not.toBe(shareId)
-    }
+    for (const [share, wrapper] of LIVE_NAMED_SHARE_WRAPPERS) expect(historicalPriceAssetId(share)).toBe(wrapper)
+    for (const share of [104, 143, 146, 10055, 102, 103]) expect(historicalPriceAssetId(share)).toBe(share)
   })
 
   // Chained aliases must land on the terminal priced id (GIGAHDX -> stHDX -> HDX),

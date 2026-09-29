@@ -19,7 +19,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, shareFoldsIntoDisplaySupply, supplyFoldedShareIds, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, supplyFoldedShareIds, foldedShareEntries, namedShareWrapperOf, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT, lbpPools, stableswapPoolAccount } from './tagService.ts'
@@ -1884,13 +1884,11 @@ function priceTransformArrays(prices: Map<number, PriceInfo>): { idsSql: string;
 // Every aliased asset — aTokens, bonds and pool shares alike — values HISTORICALLY
 // through the terminal priced id of priceAssetId's full alias walk. (The current
 // path differs for a share: currentPriceAssetId stops at it, and it is priced at
-// its redeemable value, lpMath.stableswapSharePrices.) Pool shares have no
-// historical NAV series, but their own feed is not a substitute for one: a share
-// token is quoted only while it is the pool's tradeable leg (2-Pool-GDOT was
-// quoted for six hours before GDOT took over), and the ASOF match below has no
-// lower bound, so a share token left to value itself matches that abandoned close
-// forever. The underlying is the near-peg unit-price proxy documented on
-// SHARE_TOKEN_UNDERLYING_ID and the only alias with a live feed.
+// its redeemable value, lpMath.stableswapSharePrices.) A share a named wrapper IS
+// reads the wrapper's series, which is where the price writer publishes it (the
+// share/wrapper rule); every other share reads its own NAV series. The ASOF match
+// below has no lower bound, so a share whose series stopped (its legs lost their
+// prices) is matched to that last close.
 export function historicalPriceAssetId(assetId: number): number {
   return priceAssetId(assetId)
 }
@@ -6743,7 +6741,7 @@ async function getFoldedDisplayAssetHolders(displayAssetId: number, shareAssetId
   // Claims (viewer-independent) are the cached unit; grouping runs per call —
   // same split as getATokenHolders above, for the same per-viewer fold reason.
   const claims = await cached(`explorer:folded-display-claims:${displayAssetId}`, 30000, async (): Promise<HolderBalanceClaim[]> => {
-    const normalizedShareIds = [...new Set(shareAssetIds.filter(id => SHARE_TOKEN_UNDERLYING_ID[id] === displayAssetId && shareFoldsIntoDisplaySupply(id)))]
+    const normalizedShareIds = [...new Set(shareAssetIds.filter(id => namedShareWrapperOf(id) === displayAssetId))]
     if (!normalizedShareIds.length) return []
     // A display asset can itself be an aToken (BIL is the bil market's aToken over
     // uBIL and the display face of 2-Pool-BIL, though that share does not fold into
@@ -9115,10 +9113,8 @@ async function getAssetTotals(): Promise<Map<number, bigint>> {
     // underlying. Move—not duplicate—their held total onto that visible id. The
     // raw total already includes the aToken custody row exactly once. A share whose
     // pool holds the display asset itself stays out: that asset's total already
-    // counts the pool's holding (shareFoldsIntoDisplaySupply).
-    for (const [shareIdText, displayId] of Object.entries(SHARE_TOKEN_UNDERLYING_ID)) {
-      const shareId = Number(shareIdText)
-      if (!shareFoldsIntoDisplaySupply(shareId)) continue
+    // counts the pool's holding (the share/wrapper rule).
+    for (const [shareId, displayId] of foldedShareEntries()) {
       const shareRaw = m.get(shareId) ?? 0n
       if (shareRaw <= 0n) continue
       const normalized = BigInt(rescaleRaw(shareRaw.toString(), asset(shareId).decimals, asset(displayId).decimals))
@@ -9197,10 +9193,9 @@ export async function getAssetHolderCounts(): Promise<Map<number, number>> {
 // its one holder.
 async function foldedDisplayHolderCounts(): Promise<Map<number, number>> {
   const shareIdsByDisplay = new Map<number, number[]>()
-  for (const [shareId, displayId] of Object.entries(SHARE_TOKEN_UNDERLYING_ID)) {
-    if (!shareFoldsIntoDisplaySupply(Number(shareId))) continue
+  for (const [shareId, displayId] of foldedShareEntries()) {
     const ids = shareIdsByDisplay.get(displayId) ?? []
-    ids.push(Number(shareId))
+    ids.push(shareId)
     shareIdsByDisplay.set(displayId, ids)
   }
   const counts = new Map<number, number>()
@@ -23271,7 +23266,7 @@ const STABLESWAP_LIQUIDITY_EVENTS = ['Stableswap.LiquidityAdded', 'Stableswap.Li
 const STABLESWAP_LIQUIDITY_EVENT_SET: ReadonlySet<string> = new Set(STABLESWAP_LIQUIDITY_EVENTS)
 
 function shareTokenFoldSql(assetExpr: string): string {
-  const pairs = Object.entries(SHARE_TOKEN_UNDERLYING_ID)
+  const pairs = foldedShareEntries()
   if (!pairs.length) return assetExpr
   return `transform(${assetExpr}, [${pairs.map(([share]) => share).join(',')}], [${pairs.map(([, main]) => main).join(',')}], ${assetExpr})`
 }

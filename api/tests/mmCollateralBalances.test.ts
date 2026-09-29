@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import { useLiveNamedShareWrappers } from './helpers/namedShareWrappers.ts'
 import { applyMmCollateralToBalances, foldShareBalances, type AddressBalance, type MmReserve } from '../src/services/explorerService.ts'
 import { assetDescriptor } from '../src/services/explorerAssets.ts'
+
+useLiveNamedShareWrappers()
 
 // An aToken's pallet row (Tokens.Accounts) has free 0 — an ERC-20 registry asset's
 // balance lives in contract storage — and carries only what a named reserve holds:

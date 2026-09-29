@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cachedSwr } from '../../services/cache.ts'
-import { ATOKEN_UNDERLYING_ID, SHARE_TOKEN_UNDERLYING_ID, assetDescriptor } from '../../services/explorerAssets.ts'
+import { ATOKEN_UNDERLYING_ID, assetDescriptor, namedShareWrapperOf } from '../../services/explorerAssets.ts'
 import { getPoolsIndex, type PoolListResponse } from '../../services/poolService.ts'
 import { tvlUsdString } from './platformStats.ts'
 import { DECIMAL_STRINGS, amountUnitSql, formatUnits, legsCteSql, readAnchor, scaledDecimal, xykPoolMeta } from '../../services/poolVolumes.ts'
@@ -161,7 +161,9 @@ export function tickerSymbol(assetId: number): string | null {
   // hops, and the bound is what makes a mis-entered cycle terminate.
   for (let hop = 0; hop < 3; hop++) {
     if (SELF_SYMBOL_ASSET_IDS.has(id)) break
-    const next = ATOKEN_UNDERLYING_ID[id] ?? SHARE_TOKEN_UNDERLYING_ID[id]
+    // A pool share wraps nothing unless a named wrapper IS it (the share/wrapper
+    // rule): 2-Pool-GDOT names GDOT, 2-Pool-PRIME names itself.
+    const next = ATOKEN_UNDERLYING_ID[id] ?? namedShareWrapperOf(id)
     if (next == null || next === id) break
     id = next
   }
@@ -227,7 +229,7 @@ const aliasKey = (row: TickerRow, symbol: string): string =>
 export function pooledTickerSymbol(row: TickerRow, assetId: number, owners: Map<string, Set<number>>): string | null {
   const aliased = tickerSymbol(assetId)
   if (aliased == null) return null
-  if (SHARE_TOKEN_UNDERLYING_ID[assetId] == null) return aliased
+  if (namedShareWrapperOf(assetId) == null) return aliased
   const claimed = owners.get(aliasKey(row, aliased))
   return (claimed?.size ?? 1) > 1 ? registrySymbol(assetId) ?? aliased : aliased
 }
