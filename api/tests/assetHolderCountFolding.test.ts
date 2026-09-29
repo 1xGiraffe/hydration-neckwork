@@ -1,6 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { SHARE_TOKEN_UNDERLYING_ID } from '../src/services/explorerAssets.ts'
+import { useLiveNamedShareWrappers } from './helpers/namedShareWrappers.ts'
+import { foldedShareEntries } from '../src/services/explorerAssets.ts'
+
+useLiveNamedShareWrappers()
 
 const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
 
@@ -27,10 +30,10 @@ describe('assets directory holder counts', () => {
     const at = explorerService.indexOf('async function foldedDisplayHolderCounts')
     const fn = explorerService.slice(at, explorerService.indexOf('\n}', at))
 
-    expect(fn).toContain('Object.entries(SHARE_TOKEN_UNDERLYING_ID)')
+    expect(fn).toContain('of foldedShareEntries()')
     expect(fn).toContain('getFoldedDisplayAssetHolders(displayId, shareIds)')
-    // The mapping is non-empty, so the fold covers real assets.
-    expect(Object.keys(SHARE_TOKEN_UNDERLYING_ID).length).toBeGreaterThan(0)
+    // The share/wrapper rule names real pairs, so the fold covers real assets.
+    expect(foldedShareEntries().length).toBeGreaterThan(0)
   })
 })
 

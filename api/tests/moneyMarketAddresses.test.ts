@@ -1,6 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { useLiveNamedShareWrappers } from './helpers/namedShareWrappers.ts'
 import { mmReserveAddressForAsset, mmReserveAddressesForTokens, mmReserveAliasIds, mmReserveIdsForAsset, mmReserveScope, valueSingleUnpricedSupply, type MmReserve } from '../src/services/explorerService.ts'
+
+useLiveNamedShareWrappers()
 
 describe('money-market reserve address mapping', () => {
   it('includes both precompile and deployed-token addresses for HOLLAR', () => {
