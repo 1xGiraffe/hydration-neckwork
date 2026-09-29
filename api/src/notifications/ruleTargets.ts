@@ -1,4 +1,4 @@
-import { mmMarketByKey } from '../services/explorerService.ts'
+import { indexedRawHead, mmMarketByKey } from '../services/explorerService.ts'
 import { getTag as getSystemTag } from '../services/tagService.ts'
 import { canView, getList, tagDisplayIcon } from '../services/userListService.ts'
 import type { AccountActivityTarget, NotificationKind, RuleParams } from './notificationRules.ts'
@@ -86,4 +86,19 @@ export function ruleTargetError(viewer: string, kind: NotificationKind, params: 
   }
   if (!canView(viewer, target.listId)) return 'That list is not one you can see'
   return getList(target.listId)?.tags.has(target.tagId) ? null : 'That list has no such tag'
+}
+
+/**
+ * A block rule must name a height the index has not reached yet: one at or below
+ * the indexed head is history, and the evaluator never fires for history, so it
+ * would sit in the list forever. Async because the head is a (1.5s-cached) read;
+ * an unreadable head (0) refuses nothing — the evaluator would still fire the rule
+ * on its first tick, which is late news rather than none.
+ */
+export async function blockRuleError(kind: NotificationKind, params: unknown): Promise<string | null> {
+  if (kind !== 'block') return null
+  const block = (params as RuleParams['block'] | undefined)?.block
+  if (typeof block !== 'number') return null
+  const head = await indexedRawHead()
+  return head > 0 && block <= head ? `Block ${block.toLocaleString('en-US')} has already been produced — pick a future block` : null
 }

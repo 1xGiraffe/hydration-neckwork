@@ -26,7 +26,7 @@ import {
   getWormholeAlertState, getWormholeSnapshotGeneration, type WormholeAlertState,
 } from '../services/wormholeNttService.ts'
 import {
-  activeRulesByKind, armStateKey, channelsFor, getChannel, getNotificationState, setNotificationState,
+  activeRulesByKind, allRules, armStateKey, channelsFor, expireRule, getChannel, getNotificationState, setNotificationState,
   setNotificationStates, type NotificationChannel, type NotificationRule,
 } from './notificationStore.ts'
 import { resolveActivityTarget } from './ruleTargets.ts'
@@ -307,6 +307,7 @@ export type MatchPayload =
   | { lane: 'event'; row: ChainEventRow }
   | { lane: 'extrinsic'; row: ChainExtrinsicRow }
   | { lane: 'price'; assetId: number; direction: 'above' | 'below'; threshold: number; value: number }
+  | { lane: 'block'; block: number }
   | { lane: 'health-factor'; address: string; account: AccountRef | null; threshold: number; value: number
       /** The isolated market's display label — a health factor means nothing without saying whose. */
       market: string }
@@ -757,6 +758,37 @@ export function evaluateExtrinsics(rows: readonly ChainExtrinsicRow[], rules: re
 export type RowLaneKind =
   | 'account-activity' | 'large-trade' | 'large-transfer' | 'protocol-revenue' | 'liquidation'
   | 'safety' | 'referendum' | 'tc-motion' | 'event' | 'extrinsic'
+/**
+ * Block alerts: a rule fires once its height is at or below `reached` — the
+ * lower of the live pipeline head (which follows the FINALIZED chain) and the
+ * every-block rows watermark, so the block the message links to is already
+ * servable. Not a window lane: no row is matched and no cursor moves, so a
+ * backfill or repair can never fire one (both write below the live head, and a
+ * rule's height is refused at creation unless it is above the indexed head).
+ *
+ * Every reached rule is EXPIRED, muted or not — the height cannot be reached
+ * again, so a rule left behind could only ever sit there. Only an unmuted one
+ * is matched. The identity is the height itself, deterministic, so a tick that
+ * re-matches a rule whose expiry failed delivers nothing twice.
+ */
+export function evaluateBlockRules(rules: readonly NotificationRule[], reached: number): { matches: RuleMatch[]; expired: string[] } {
+  const matches: RuleMatch[] = []
+  const expired: string[] = []
+  for (const rule of rules) {
+    if (rule.kind !== 'block') continue
+    const { block } = rule.params as RuleParams['block']
+    if (!(block <= reached)) continue
+    expired.push(rule.ruleId)
+    if (rule.muted) continue
+    matches.push({
+      ruleId: rule.ruleId, accountId: rule.accountId, kind: 'block',
+      identity: `block:${block}`, blockHeight: block,
+      payload: { lane: 'block', block },
+    })
+  }
+  return { matches, expired }
+}
+
 export const ROW_LANE_KINDS: RowLaneKind[] = ['account-activity', 'large-trade', 'large-transfer', 'protocol-revenue', 'liquidation', 'safety', 'referendum', 'tc-motion', 'event', 'extrinsic']
 
 /* ============ pure snapshot-lane core ============ */
@@ -1125,6 +1157,12 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       if (p.row.signer) body.push([textPart('Signed by'), accountPart(renderAccount(p.row.signer, viewerTag))])
       return { title, body, path: `/extrinsic/${p.row.blockHeight}-${p.row.extrinsicIndex}` }
     }
+    case 'block':
+      return {
+        title: [textPart(`Block #${p.block.toLocaleString('en-US')} reached`)],
+        body: [[textPart('The future block you set an alert on is here. This alert has now removed itself.')]],
+        path: `/block/${p.block}`,
+      }
     case 'price': {
       const symbol = displayDescriptor(p.assetId).symbol
       return {
@@ -1674,7 +1712,12 @@ export async function runEvaluatorTick(): Promise<void> {
     const snapshot = onRhythm || security
       ? await runSnapshotLane({ values: onRhythm, security })
       : { matches: [] as RuleMatch[], commit: async () => {} }
-    const matches = [...lanes.flatMap(l => l.matches), ...snapshot.matches]
+    // Block alerts cost no I/O — a compare against the two heads this tick has
+    // already read — so they run every tick rather than on the snapshot rhythm.
+    const blocks = sourceHead == null
+      ? { matches: [] as RuleMatch[], expired: [] as string[] }
+      : evaluateBlockRules(allRules(), Math.min(head, sourceHead))
+    const matches = [...lanes.flatMap(l => l.matches), ...snapshot.matches, ...blocks.matches]
     // Cursors move, and edge-triggered rules disarm, only once this tick's
     // matches are durably in the inbox: a failed write that had already advanced
     // a cursor or disarmed a crossing would lose them for good.
@@ -1684,6 +1727,8 @@ export async function runEvaluatorTick(): Promise<void> {
         lane.commit?.()
       }
       await snapshot.commit()
+      // One-shot rules leave only once their notification is durably stored.
+      for (const ruleId of blocks.expired) await guard('block-expire', () => expireRule(ruleId))
     }
     await flushCursors(matches.length > 0)
   } catch (err) {

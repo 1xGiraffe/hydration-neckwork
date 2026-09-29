@@ -613,6 +613,13 @@ describe('buildRuleParams — account-activity targets', () => {
     expect(NOTIFICATION_KINDS).toContain('mm-cap')
   })
 
+  // A block alert is one height; the server alone knows whether it is still future.
+  it('builds a block rule from a whole block number', () => {
+    expect(buildRuleParams('block', { block: '15172059' }, sets)).toEqual({ ok: true, params: { block: 15_172_059 } })
+    for (const block of ['', '0', '12.5', '-3', 'abc']) expect(buildRuleParams('block', { block }, sets).ok).toBe(false)
+    expect(KIND_LABELS.block).toBe('Future block')
+  })
+
   // A stored legacy `{ address }` health-factor rule and the fresh target form
   // must compare as the same subscription.
   it('treats the legacy health-factor address form as the same rule as its target form', () => {
@@ -897,7 +904,7 @@ describe('rule-kind registry mirror', () => {
     // missing a label would render a blank option in the picker. The count is
     // spelled out so adding a kind on one side alone fails here rather than
     // shipping a picker entry with no form behind it.
-    expect(NOTIFICATION_KINDS).toHaveLength(13)
+    expect(NOTIFICATION_KINDS).toHaveLength(14)
     for (const kind of NOTIFICATION_KINDS) expect(KIND_LABELS[kind]).toBeTruthy()
   })
 

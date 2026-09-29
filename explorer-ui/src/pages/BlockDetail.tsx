@@ -9,6 +9,7 @@ import { ActivityTable } from '../components/ActivityTable'
 import { EvmLogView } from '../components/EvmDecoded'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds } from '../utils/dca'
+import { NotifyButton } from '../components/NotifyButton'
 
 function FutureBlock({ height, head, headTime, now, blockSec }: { height: number; head: number; headTime?: string; now: number; blockSec?: number }) {
   const remaining = height - head
@@ -32,20 +33,28 @@ function FutureBlock({ height, head, headTime, now, blockSec }: { height: number
     return `${sec}s`
   }
   return (
-    <div className="detail-card">
-      <div className="dl">
-        <div className="dt">Status</div>
-        <div className="dd"><span className="badge pending"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>Future block</span></div>
-        <div className="dt">Target height</div><div className="dd"><span className="num">{F.int(height)}</span></div>
-        <div className="dt">Current head</div><div className="dd"><Link to={paths.block(head)} className="num">{F.int(head)}</Link></div>
-        <div className="dt">Blocks remaining</div><div className="dd num">{F.int(remaining)}</div>
-        <div className="dt">Countdown</div><div className="dd mono" title={`~${secondsUntil}s at ~${paceLabel}/block`}>{fmt(secondsUntil)}</div>
-        <div className="dt">Estimated time</div><div className="dd mono" title={etaFull}>{etaIso ? <>{etaIso} UTC <span className="muted">(est.)</span></> : <Dash />}</div>
+    <>
+      {/* Above the card and right-aligned, the placement every other page's
+          bell has. A one-shot alert: it fires once and then deletes itself. */}
+      <div className="ext-link-row">
+        <NotifyButton variant="link" label="Get notified" rule={{ kind: 'block', params: { block: height } }}
+          title="Get one notification when this block is reached; the alert then deletes itself" />
       </div>
-      <div style={{ padding: '14px 16px 4px', color: 'var(--text-medium)', fontSize: 13 }}>
-        This block has not been produced yet. The estimate runs at the chain's recent pace of ~{paceLabel} per block and updates live.
+      <div className="detail-card">
+        <div className="dl">
+          <div className="dt">Status</div>
+          <div className="dd"><span className="badge pending"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>Future block</span></div>
+          <div className="dt">Target height</div><div className="dd"><span className="num">{F.int(height)}</span></div>
+          <div className="dt">Current head</div><div className="dd"><Link to={paths.block(head)} className="num">{F.int(head)}</Link></div>
+          <div className="dt">Blocks remaining</div><div className="dd num">{F.int(remaining)}</div>
+          <div className="dt">Countdown</div><div className="dd mono" title={`~${secondsUntil}s at ~${paceLabel}/block`}>{fmt(secondsUntil)}</div>
+          <div className="dt">Estimated time</div><div className="dd mono" title={etaFull}>{etaIso ? <>{etaIso} UTC <span className="muted">(est.)</span></> : <Dash />}</div>
+        </div>
+        <div style={{ padding: '14px 16px 4px', color: 'var(--text-medium)', fontSize: 13 }}>
+          This block has not been produced yet. The estimate runs at the chain's recent pace of ~{paceLabel} per block and updates live.
+        </div>
       </div>
-    </div>
+    </>
   )
 }
 

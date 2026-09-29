@@ -13,7 +13,7 @@ import { compactUsd } from './render.ts'
 export const NOTIFICATION_KINDS = [
   'account-activity', 'large-trade', 'large-transfer', 'price', 'health-factor',
   'referendum', 'tc-motion', 'safety', 'extrinsic', 'event',
-  'protocol-revenue', 'liquidation', 'mm-cap',
+  'protocol-revenue', 'liquidation', 'mm-cap', 'block',
 ] as const
 export type NotificationKind = typeof NOTIFICATION_KINDS[number]
 
@@ -97,6 +97,12 @@ export function referendumTrackName(id: number | string): string | null {
   const numeric = Number(id)
   return REFERENDUM_TRACKS.find(t => t.id === numeric)?.name ?? null
 }
+
+// Kinds whose rule is ONE-SHOT: it fires once and then deletes itself, because
+// the moment it describes cannot happen twice. A block height is reached exactly
+// once, so a block alert that stayed behind would only clutter the list.
+export const SELF_DELETING_KINDS: readonly NotificationKind[] = ['block']
+export const isSelfDeletingKind = (kind: NotificationKind): boolean => SELF_DELETING_KINDS.includes(kind)
 
 export function isNotificationKind(value: unknown): value is NotificationKind {
   return typeof value === 'string' && (NOTIFICATION_KINDS as readonly string[]).includes(value)
@@ -279,6 +285,14 @@ export const eventParams = z.object({
   method: palletName.optional(),
 }).strict()
 
+// A future block height: the rule fires once the block is indexed on the live head,
+// then deletes itself (SELF_DELETING_KINDS). "Future" is checked at creation
+// against the indexed head (blockRuleError in ruleTargets.ts) — the schema only
+// knows the shape, and a height already reached could never fire.
+export const blockParams = z.object({
+  block: z.number().int().min(1).max(4_294_967_295),
+}).strict()
+
 export const ruleParamSchemas = {
   'account-activity': accountActivityParams,
   'large-trade': largeTradeParams,
@@ -293,6 +307,7 @@ export const ruleParamSchemas = {
   'protocol-revenue': protocolRevenueParams,
   liquidation: liquidationParams,
   'mm-cap': mmCapParams,
+  block: blockParams,
 } as const satisfies Record<NotificationKind, z.ZodType>
 
 export type RuleParams = {
@@ -309,6 +324,7 @@ export type RuleParams = {
   'protocol-revenue': z.infer<typeof protocolRevenueParams>
   liquidation: z.infer<typeof liquidationParams>
   'mm-cap': z.infer<typeof mmCapParams>
+  block: z.infer<typeof blockParams>
 }
 
 export type ParsedRuleParams<K extends NotificationKind = NotificationKind> = RuleParams[K]
@@ -443,6 +459,10 @@ export function describeRule(
       const p = parsed.params as RuleParams['protocol-revenue']
       return `extrinsics earning the protocol over ${compactUsd(p.minUsd)}`
     }
+    case 'block': {
+      const p = parsed.params as RuleParams['block']
+      return `block #${p.block.toLocaleString('en-US')} being reached`
+    }
     case 'liquidation': {
       const p = parsed.params as RuleParams['liquidation']
       const floor = p.minUsd ? ` over ${compactUsd(p.minUsd)}` : ''
@@ -470,4 +490,5 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   'protocol-revenue': 'Protocol revenue',
   liquidation: 'Liquidation',
   'mm-cap': 'Money market cap',
+  block: 'Future block',
 }

@@ -10,7 +10,7 @@ import { useNotificationsOverview } from '../hooks/useNotifications'
 import {
   ACTIVITY_TYPES, COOLDOWN_CHOICES, HEALTH_FACTOR_DEFAULT, HEALTH_FACTOR_DEFAULT_MARKET, HEALTH_FACTOR_MAX, HEALTH_FACTOR_MIN,
   HEALTH_FACTOR_PRESETS, KIND_HINTS, KIND_LABELS, LARGE_VALUE_MIN_USD, NOTIFICATION_KINDS, PRICE_STEP_PCTS,
-  REFERENDUM_PHASES, REFERENDUM_TRACKS, SAFETY_DEFICIT_DEFAULT_USD, SAFETY_EGRESS_DEFAULT_PCT, SAFETY_FUSE_DEFAULT_PCT, SAFETY_KINDS,
+  REFERENDUM_PHASES, REFERENDUM_TRACKS, SAFETY_DEFICIT_DEFAULT_USD, SELF_DELETING_KINDS, SAFETY_EGRESS_DEFAULT_PCT, SAFETY_FUSE_DEFAULT_PCT, SAFETY_KINDS,
   TC_MOTION_PHASES, USD_FLOOR_PRESETS, isAddressLike,
   isPalletNameLike, priceAtStep, priceStepLabel, readTarget, suggestPriceDirection, targetParams,
 } from '../notificationKinds'
@@ -262,6 +262,13 @@ export function buildRuleParams(
         ...(signer ? { signer } : {}),
       } }
     }
+    // The server refuses a height the index has already reached, and only it
+    // knows the head, so the form only checks the shape.
+    case 'block': {
+      const block = num(v.block ?? '')
+      if (block == null || !Number.isInteger(block) || block < 1) return { ok: false, error: 'Enter a future block number' }
+      return { ok: true, params: { block } }
+    }
     case 'event': {
       const section = (v.section ?? '').trim()
       if (!isPalletNameLike(section)) return { ok: false, error: 'Enter a pallet name, e.g. Referenda' }
@@ -496,6 +503,16 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
                   {NOTIFICATION_KINDS.map(k => <option key={k} value={k}>{KIND_LABELS[k]}</option>)}
                 </select>
                 <div className="muted" style={{ fontSize: 11 }}>{KIND_HINTS[kind]}</div>
+              </div>
+            )}
+
+            {kind === 'block' && (
+              <div className="field">
+                <label htmlFor="alert-block">Block number</label>
+                <input {...noAutofill} id="alert-block" type="number" min={1} step={1} inputMode="numeric"
+                  placeholder="e.g. 15172059"
+                  value={values.block ?? ''} disabled={pending} onChange={e => set('block', e.target.value)} />
+                <div className="muted" style={{ fontSize: 11 }}>Fires once when this block is reached, then the alert deletes itself.</div>
               </div>
             )}
 
@@ -863,12 +880,12 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
               <input {...noAutofill} id="alert-name" placeholder="Optional — how it reads in your list" maxLength={64}
                 value={name} disabled={pending} onChange={e => setName(e.target.value)} />
             </div>
-            <div className="field">
+            {!SELF_DELETING_KINDS.includes(kind) && <div className="field">
               <label htmlFor="alert-cooldown">Frequency</label>
               <select id="alert-cooldown" value={String(cooldownS)} disabled={pending} onChange={e => setCooldownS(Number(e.target.value))}>
                 {COOLDOWN_CHOICES.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
               </select>
-            </div>
+            </div>}
           </div>
           <div className="dialog-foot">
             <button type="button" className="btn primary" onClick={() => void submit()} disabled={pending}>
