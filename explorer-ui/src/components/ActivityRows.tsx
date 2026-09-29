@@ -56,8 +56,11 @@ function MultisigBadge({ origin }: { origin: ExtrinsicOrigin }) {
   const state = origin.state ?? 'executed'
   const col = state === 'cancelled' ? 'var(--red)' : state === 'pending' ? 'var(--amber)' : 'var(--green)'
   const mark = state === 'cancelled' ? '✕' : state === 'pending' ? '⏳' : '✓'
-  const k = state === 'pending' ? origin.approvals : origin.threshold
-  const kn = k && origin.signatories ? `${k}/${origin.signatories} ` : ''
+  // Pending reads as progress toward execution — approvals out of the
+  // threshold, like the multisig's own Pending section; a finished operation
+  // reads as its shape, threshold out of members (3/5 = 3-of-5).
+  const [k, n] = state === 'pending' ? [origin.approvals, origin.threshold] : [origin.threshold, origin.signatories]
+  const kn = k && n ? `${k}/${n} ` : ''
   return (
     <span ref={badgeRef} className="pill-badge" onMouseEnter={show} onMouseLeave={hide}
       style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>
