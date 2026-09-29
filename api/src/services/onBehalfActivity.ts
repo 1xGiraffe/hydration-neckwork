@@ -98,6 +98,20 @@ export interface MultisigCallInfo {
   innerSuccess: number | null
   innerErrorJson: string | null // dispatched child call's error_json, when it failed
   ts: number
+  // The `real` account when the call the wrapper carries is Proxy.proxy /
+  // proxy_announced — a multisig acting through a proxy grant. Read from the
+  // wrapper's args, so it is known before anything dispatches (a pending op).
+  proxyReal?: string | null
+}
+
+// The proxied account an as_multi's carried call acts for, or null when the
+// call is not a proxy call (or only its hash was submitted: approve_as_multi).
+export function proxyRealFromMultisigArgs(argsJson: string): string | null {
+  try {
+    const args = JSON.parse(argsJson) as { call?: { __kind?: string; value?: { real?: unknown } } }
+    const real = args.call?.__kind === 'Proxy' ? args.call.value?.real : null
+    return typeof real === 'string' && ACCOUNT_RE.test(real.toLowerCase()) ? real.toLowerCase() : null
+  } catch { return null }
 }
 
 export type MultisigTimelineAction = 'initiated' | 'approved' | 'executed' | 'cancelled'
@@ -195,36 +209,76 @@ export function buildMultisigOperations(events: MultisigLifecycleEvent[]): Multi
 // the same authoritative pairing refreshMultisigs uses. Anchor extrinsic
 // first so the executing as_multi (which carries the call body) wins.
 export function enrichMultisigOperations(states: MultisigOperationState[], calls: MultisigCallInfo[]): void {
-  const callsByExtrinsic = new Map<string, MultisigCallInfo[]>()
-  for (const c of calls) {
-    const key = `${c.block}:${c.extrinsic}`
-    const list = callsByExtrinsic.get(key) ?? []
-    list.push(c)
-    callsByExtrinsic.set(key, list)
-  }
+  const callsByExtrinsic = groupCallsByExtrinsic(calls)
 
   for (const op of states) {
-    const candidates = [...op.touchpoints].sort((a, b) =>
-      Number(b.block === op.row.anchor_block_height && b.extrinsic === op.row.anchor_extrinsic_index)
-      - Number(a.block === op.row.anchor_block_height && a.extrinsic === op.row.anchor_extrinsic_index))
-    for (const tp of candidates) {
-      const inExtrinsic = callsByExtrinsic.get(`${tp.block}:${tp.extrinsic}`) ?? []
-      const match = inExtrinsic.find(c => {
-        const threshold = c.callName === 'Multisig.as_multi_threshold_1' ? 1 : c.threshold
-        if (!threshold || threshold < 1) return false
-        const signatories = [...new Set([tp.actor, ...c.otherSignatories])].sort()
-        return signatories.length >= threshold && deriveMultisigAccountId(signatories, threshold) === op.row.multisig
-      })
-      if (!match) continue
-      const threshold = match.callName === 'Multisig.as_multi_threshold_1' ? 1 : match.threshold!
-      op.row.threshold = threshold
-      op.row.signatories = new Set([tp.actor, ...match.otherSignatories]).size
-      if (tp.block === op.row.anchor_block_height && tp.extrinsic === op.row.anchor_extrinsic_index && match.innerCallName) {
-        op.row.inner_call_name = match.innerCallName
-      }
-      break
+    const found = matchOperationCall(op, callsByExtrinsic)
+    if (!found) continue
+    const { tp, match } = found
+    const threshold = match.callName === 'Multisig.as_multi_threshold_1' ? 1 : match.threshold!
+    op.row.threshold = threshold
+    op.row.signatories = new Set([tp.actor, ...match.otherSignatories]).size
+    if (tp.block === op.row.anchor_block_height && tp.extrinsic === op.row.anchor_extrinsic_index && match.innerCallName) {
+      op.row.inner_call_name = match.innerCallName
     }
   }
+}
+
+function groupCallsByExtrinsic(calls: MultisigCallInfo[]): Map<string, MultisigCallInfo[]> {
+  const out = new Map<string, MultisigCallInfo[]>()
+  for (const c of calls) {
+    const key = `${c.block}:${c.extrinsic}`
+    const list = out.get(key) ?? []
+    list.push(c)
+    out.set(key, list)
+  }
+  return out
+}
+
+// The wrapper call that belongs to an operation: in one of its touchpoint
+// extrinsics (the anchor first), the call whose signatories — the acting
+// signatory plus its otherSignatories — derive the operation's multisig at the
+// call's threshold. The derive-check is what keeps a batch of as_multi calls
+// for different multisigs in one extrinsic from being confused.
+function matchOperationCall(
+  op: MultisigOperationState, callsByExtrinsic: Map<string, MultisigCallInfo[]>,
+): { tp: MultisigOperationState['touchpoints'][number]; match: MultisigCallInfo } | null {
+  const candidates = [...op.touchpoints].sort((a, b) =>
+    Number(b.block === op.row.anchor_block_height && b.extrinsic === op.row.anchor_extrinsic_index)
+    - Number(a.block === op.row.anchor_block_height && a.extrinsic === op.row.anchor_extrinsic_index))
+  for (const tp of candidates) {
+    const inExtrinsic = callsByExtrinsic.get(`${tp.block}:${tp.extrinsic}`) ?? []
+    const match = inExtrinsic.find(c => {
+      const threshold = c.callName === 'Multisig.as_multi_threshold_1' ? 1 : c.threshold
+      if (!threshold || threshold < 1) return false
+      const signatories = [...new Set([tp.actor, ...c.otherSignatories])].sort()
+      return signatories.length >= threshold && deriveMultisigAccountId(signatories, threshold) === op.row.multisig
+    })
+    if (match) return { tp, match }
+  }
+  return null
+}
+
+/**
+ * The PENDING operations of a proxy multisig that will act for one of
+ * `accounts`: the call they carry is Proxy.proxy(real ∈ accounts). An executed
+ * operation is left out — its dispatched Proxy.proxy is on the account's feed
+ * already (proxy_call_activity), and a cancelled one never acts. Enriches the
+ * kept rows (threshold, member count) like enrichMultisigOperations does.
+ */
+export function pendingOpsProxying(
+  states: MultisigOperationState[], calls: MultisigCallInfo[], accounts: ReadonlySet<string>,
+): MultisigOperationState[] {
+  const callsByExtrinsic = groupCallsByExtrinsic(calls)
+  const kept: MultisigOperationState[] = []
+  for (const op of states) {
+    if (op.row.state !== 'pending') continue
+    const found = matchOperationCall(op, callsByExtrinsic)
+    if (!found?.match.proxyReal || !accounts.has(found.match.proxyReal)) continue
+    kept.push(op)
+  }
+  enrichMultisigOperations(kept, calls)
+  return kept
 }
 
 // as_multi_threshold_1 dispatches immediately and emits no Multisig events —

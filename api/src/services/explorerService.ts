@@ -34,7 +34,7 @@ import { isContractAccount, contractByH160, allContracts, contractsPage, type Co
 import { verifiedContractInfo, verificationDisplay, searchVerifiedNames, allVerifiedContracts, type VerificationDisplay } from './contractVerificationService.ts'
 import { decodeEvmCallSites, attachEvmLogDecodes, decodeEvmLogArgs, decodeEventLog, getContractAbiIndexes, type DecodedEvmCall, type EvmLogDecode } from './contractAbiDecode.ts'
 import {
-  resolveProxyInner, buildMultisigOperations, enrichMultisigOperations, proxyChildAddress,
+  resolveProxyInner, buildMultisigOperations, enrichMultisigOperations, pendingOpsProxying, proxyRealFromMultisigArgs, proxyChildAddress,
   type ExtrinsicCallRow, type ProxyInnerInfo, type MultisigLifecycleEvent, type MultisigCallInfo,
   type MultisigOperationState,
 } from './onBehalfActivity.ts'
@@ -25395,6 +25395,28 @@ async function accountMultisigOps(accounts: string[]): Promise<MultisigOperation
   })
 }
 
+// Pending operations of the multisigs holding a proxy grant FROM these
+// accounts, whose carried call is Proxy.proxy(real ∈ accounts). Until the last
+// approval nothing has dispatched, so neither proxy_call_activity (dispatched
+// calls only) nor the accounts' own multisig ops can name them — without this
+// a proxied account learns of a started operation only once it executes. The
+// delegates come from the proxy refresher's in-memory snapshot; each read after
+// that is account-first. Short-TTL cached like accountMultisigOps, and for the
+// same reason: the feed and its count want it in the same request burst.
+async function proxiedPendingMultisigOps(accounts: string[]): Promise<MultisigOperationState[]> {
+  const own = new Set(accounts.map(a => a.toLowerCase()))
+  const delegates = [...new Set((proxyInfoFor(accounts)?.delegates ?? []).map(d => d.accountId.toLowerCase()))]
+    .filter(d => !own.has(d))
+  if (!delegates.length) return []
+  return cached(`explorer:proxied-ms-ops:${[...own].sort().join(',')}`, 10_000, async () => {
+    const pending = (await accountMultisigOps(delegates)).filter(s => s.row.state === 'pending')
+    if (!pending.length) return []
+    const tuples = new Set<string>()
+    for (const s of pending) for (const tp of s.touchpoints) tuples.add(`${tp.block},${tp.extrinsic}`)
+    return pendingOpsProxying(pending, await loadMultisigCallInfo(tuples), own)
+  })
+}
+
 // Distinct on-behalf extrinsics (proxy targets ∪ multisig operation anchors)
 // for a related-account set, as a (block,extrinsic) tuple set — the shared
 // basis for both the count below and the tab-counts overlap query. Cheap:
@@ -25404,13 +25426,15 @@ async function onBehalfExtrinsicTuples(accounts: string[], cacheKey: string): Pr
   const list = sqlAccountList(accounts)
   if (list === "''") return new Set()
   return cached(`explorer:onbehalf-tuples:${cacheKey}`, 600_000, async () => {
-    const [proxyRes, msStates] = await Promise.all([
+    const [proxyRes, ownMs, proxiedMs] = await Promise.all([
       client.query({
         query: `SELECT DISTINCT block_height, extrinsic_index FROM price_data.proxy_call_activity WHERE real_account IN (${list})`,
         format: 'JSONEachRow',
       }),
       accountMultisigOps(accounts),
+      proxiedPendingMultisigOps(accounts),
     ])
+    const msStates = [...ownMs, ...proxiedMs]
     const keys = new Set<string>()
     for (const t of await proxyRes.json<{ block_height: number; extrinsic_index: number }>()) keys.add(`${t.block_height}:${t.extrinsic_index}`)
     for (const s of msStates) keys.add(`${s.row.anchor_block_height}:${s.row.anchor_extrinsic_index}`)
@@ -25679,10 +25703,12 @@ async function countAccountExtrinsics(accounts: string[], cacheKey: string, filt
     const wantMs = !filters.origin || filters.origin === 'multisig'
     const hasCallFilter = Boolean(filters.call?.trim())
     const hasResultFilter = filters.result === 'success' || filters.result === 'failed'
-    const [proxyRows, msStatesAll] = await Promise.all([
+    const [proxyRows, ownMs, proxiedMs] = await Promise.all([
       wantProxy ? fetchProxyCandidates(list, bound) : Promise.resolve([] as ProxyCandidateRow[]),
       wantMs ? accountMultisigOps(accounts) : Promise.resolve([] as MultisigOperationState[]),
+      wantMs ? proxiedPendingMultisigOps(accounts) : Promise.resolve([] as MultisigOperationState[]),
     ])
+    const msStatesAll = [...ownMs, ...proxiedMs]
     const msWindow = msAnchorWindow(from, to)
     const msStates = msWindow ? msStatesAll.filter(s => msWindow(s.row.anchor_timestamp)) : msStatesAll
     const candidates = [...mergeOnBehalfCandidates(proxyRows, msStates).values()]
@@ -26721,6 +26747,7 @@ async function loadMultisigCallInfo(tupleKeys: Set<string>): Promise<MultisigCal
         innerSuccess: child?.success ?? null,
         innerErrorJson: child?.errorJson ?? null,
         ts: r.ts,
+        proxyReal: proxyRealFromMultisigArgs(r.argsJson),
       })
     }
   }
@@ -26826,8 +26853,9 @@ function dedupeSummaryRows(rows: ExtrinsicSummaryRow[]): ExtrinsicSummaryRow[] {
 }
 
 // The account's extrinsics feed: extrinsics it SIGNED, plus extrinsics
-// executed ON ITS BEHALF — Proxy.proxy calls whose `real` is the account and
-// multisig operations of a multisig it is, reconstructed at request time from
+// executed ON ITS BEHALF — Proxy.proxy calls whose `real` is the account,
+// multisig operations of a multisig it is, and the still-pending operations of
+// a proxy multisig that will act for it (proxiedPendingMultisigOps) — reconstructed at request time from
 // MV-fed sources (see the on-behalf candidate helpers above). Sources are
 // merged, deduplicated per extrinsic (on-behalf wins so the badge survives
 // self-proxy), sorted, then sliced — pagination stays deterministic over the
@@ -26849,10 +26877,12 @@ async function getAccountExtrinsics(accounts: string[], limit = 25, offset = 0, 
     const hasResultFilter = filters.result === 'success' || filters.result === 'failed'
     const enrichAll = hasCallFilter || hasResultFilter
 
-    const [proxyRows, msStatesAll] = await Promise.all([
+    const [proxyRows, ownMs, proxiedMs] = await Promise.all([
       wantProxy ? fetchProxyCandidates(list, bound) : Promise.resolve([] as ProxyCandidateRow[]),
       wantMs ? accountMultisigOps(accounts) : Promise.resolve([] as MultisigOperationState[]),
+      wantMs ? proxiedPendingMultisigOps(accounts) : Promise.resolve([] as MultisigOperationState[]),
     ])
+    const msStatesAll = [...ownMs, ...proxiedMs]
     const msWindow = msAnchorWindow(from, to)
     const msStates = msWindow ? msStatesAll.filter(s => msWindow(s.row.anchor_timestamp)) : msStatesAll
 
