@@ -2030,7 +2030,7 @@ export interface DeviceSession { id: string; label: string; createdVia: string; 
 export type NotificationKind =
   | 'account-activity' | 'large-trade' | 'large-transfer' | 'price' | 'health-factor'
   | 'referendum' | 'tc-motion' | 'safety' | 'extrinsic' | 'event'
-  | 'protocol-revenue' | 'liquidation' | 'mm-cap'
+  | 'protocol-revenue' | 'liquidation' | 'mm-cap' | 'block'
 // One isolated money market a health-factor or cap rule can name, as the
 // deployment configures it. The overview ships the list; the forms offer it.
 export interface NotificationMarket { key: string; label: string; role: 'primary' | 'supplemental' }

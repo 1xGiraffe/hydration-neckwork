@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { UserDataError } from '../services/userProfileService.ts'
 import { isNotificationKind, parseRuleParams, type NotificationKind } from './notificationRules.ts'
-import { ruleTargetError } from './ruleTargets.ts'
+import { blockRuleError, ruleTargetError } from './ruleTargets.ts'
 
 // Notification subscriptions, their channels, and the evaluator's key/value
 // state. Same shape as userListService: the api process is the single writer,
@@ -406,7 +406,7 @@ export async function createRule(accountId: string, input: {
 }): Promise<NotificationRule> {
   const parsed = parseRuleParams(input.kind, input.params)
   if (!parsed.ok) throw new UserDataError(422, parsed.error)
-  const targetError = ruleTargetError(accountId, input.kind, parsed.params)
+  const targetError = ruleTargetError(accountId, input.kind, parsed.params) ?? await blockRuleError(input.kind, parsed.params)
   if (targetError) throw new UserDataError(422, targetError)
   // Before the cap, not after: an account at its limit re-pressing a bell it
   // already owns gets its own rule back rather than a "limited to 100 alerts".
@@ -438,7 +438,7 @@ export async function updateRule(accountId: string, ruleId: string, patch: {
   if (patch.params !== undefined) {
     const parsed = parseRuleParams(rule.kind, patch.params)
     if (!parsed.ok) throw new UserDataError(422, parsed.error)
-    const targetError = ruleTargetError(accountId, rule.kind, parsed.params)
+    const targetError = ruleTargetError(accountId, rule.kind, parsed.params) ?? await blockRuleError(rule.kind, parsed.params)
     if (targetError) throw new UserDataError(422, targetError)
     next.params = parsed.params
   }
@@ -454,6 +454,21 @@ export async function deleteRule(accountId: string, ruleId: string): Promise<voi
   await persistRule(rule, 1)
   // The threshold lanes keep an armed flag per rule; without this the state
   // table keeps a row for every alert ever deleted.
+  await deleteNotificationState(armStateKey(ruleId))
+}
+
+/**
+ * Removes a one-shot rule after it fired (SELF_DELETING_KINDS). The evaluator's
+ * counterpart to deleteRule: no owner check, since the owner is not the caller.
+ * Persisted BEFORE it leaves the index, so a failed write keeps the rule live and
+ * the next tick fires and expires it again — the repeat is collapsed by the
+ * deterministic notification id, so nothing is delivered twice.
+ */
+export async function expireRule(ruleId: string): Promise<void> {
+  const rule = rules.get(ruleId)
+  if (!rule) return
+  await persistRule(rule, 1)
+  unindexRule(rule)
   await deleteNotificationState(armStateKey(ruleId))
 }
 

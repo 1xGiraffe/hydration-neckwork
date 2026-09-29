@@ -12,7 +12,7 @@ import type { NotificationKind, NotificationRule, NotificationTarget } from './t
 export const NOTIFICATION_KINDS: readonly NotificationKind[] = [
   'account-activity', 'large-trade', 'large-transfer', 'price', 'health-factor',
   'referendum', 'tc-motion', 'safety', 'extrinsic', 'event',
-  'protocol-revenue', 'liquidation', 'mm-cap',
+  'protocol-revenue', 'liquidation', 'mm-cap', 'block',
 ]
 
 // Display names for the kind itself (rule picker, rules list, inbox grouping).
@@ -30,6 +30,7 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   'protocol-revenue': 'Protocol Revenue',
   liquidation: 'Liquidation',
   'mm-cap': 'Money market cap',
+  block: 'Future block',
 }
 
 // One line of "what this kind watches", shown under the kind in the picker.
@@ -47,7 +48,12 @@ export const KIND_HINTS: Record<NotificationKind, string> = {
   'protocol-revenue': 'An extrinsic earning the protocol more than a threshold — the protocol share, not the LPs\'.',
   liquidation: 'A money-market position being liquidated, chain-wide or for one account.',
   'mm-cap': 'A money market\'s borrow or supply cap being reached, or opening up again — every reserve, or one token.',
+  block: 'One future block being reached. Fires once, then the alert deletes itself.',
 }
+
+// Kinds whose alert fires once and then deletes itself (SELF_DELETING_KINDS on
+// the server): a block height is only ever reached once.
+export const SELF_DELETING_KINDS: readonly NotificationKind[] = ['block']
 
 // The market a health-factor rule watches when none is named: the server's own
 // default, restated so the form opens on it and a stored rule compares equal to
