@@ -5,6 +5,8 @@ import {
   buildMultisigOperations,
   enrichMultisigOperations,
   threshold1Operations,
+  pendingOpsProxying,
+  proxyRealFromMultisigArgs,
   type ExtrinsicCallRow,
   type MultisigLifecycleEvent,
   type MultisigCallInfo,
@@ -230,5 +232,53 @@ describe('threshold1Operations', () => {
     })
     const [op] = threshold1Operations([t1])
     expect(op.inner_error_json).toBe(errorJson)
+  })
+})
+
+// A multisig that is a PROXY of an account acts on that account through
+// as_multi(Proxy.proxy(real = account, …)). While the operation is pending the
+// inner Proxy.proxy has not dispatched, so the account's feed can only see it
+// through the call carried in the as_multi args.
+describe('pendingOpsProxying', () => {
+  const REAL = `0x${'d4'.repeat(32)}`
+  const OTHER = `0x${'e5'.repeat(32)}`
+
+  it('reads the proxied account out of an as_multi call', () => {
+    const args = (call: unknown) => JSON.stringify({ threshold: 2, otherSignatories: [SIG_B], call })
+    expect(proxyRealFromMultisigArgs(args({ __kind: 'Proxy', value: { __kind: 'proxy', real: REAL.toUpperCase().replace('0X', '0x'), call: {} } }))).toBe(REAL)
+    expect(proxyRealFromMultisigArgs(args({ __kind: 'Proxy', value: { __kind: 'proxy_announced', delegate: SIG_A, real: REAL, call: {} } }))).toBe(REAL)
+    expect(proxyRealFromMultisigArgs(args({ __kind: 'Utility', value: { calls: [] } }))).toBeNull()
+    expect(proxyRealFromMultisigArgs(JSON.stringify({ threshold: 2, callHash: HASH_1 }))).toBeNull()
+    expect(proxyRealFromMultisigArgs('not json')).toBeNull()
+  })
+
+  it('keeps a pending operation whose matched call proxies one of the accounts', () => {
+    const states = buildMultisigOperations([msEvent({})])
+    const kept = pendingOpsProxying(states, [msCall({ innerCallName: null, innerSuccess: null, proxyReal: REAL })], new Set([REAL]))
+    expect(kept).toHaveLength(1)
+    expect(kept[0].row.state).toBe('pending')
+    // The derive-check ran, so the pending row carries its threshold and size.
+    expect(kept[0].row.threshold).toBe(2)
+    expect(kept[0].row.signatories).toBe(3)
+    expect(kept[0].row.approvals).toBe(1)
+  })
+
+  it('drops an operation proxying someone else, or carrying no call', () => {
+    const states = () => buildMultisigOperations([msEvent({})])
+    expect(pendingOpsProxying(states(), [msCall({ proxyReal: OTHER })], new Set([REAL]))).toEqual([])
+    expect(pendingOpsProxying(states(), [msCall({ proxyReal: null })], new Set([REAL]))).toEqual([])
+  })
+
+  it('drops a call whose signatories do not derive the operation\'s multisig', () => {
+    const states = buildMultisigOperations([msEvent({})])
+    expect(pendingOpsProxying(states, [msCall({ threshold: 3, proxyReal: REAL })], new Set([REAL]))).toEqual([])
+  })
+
+  it('drops executed and cancelled operations — their dispatch is on the feed already', () => {
+    const executed = buildMultisigOperations([
+      msEvent({}),
+      msEvent({ kind: 'executed', actor: SIG_B, block: 110, extrinsic: 1, eventIndex: 2, timepointHeight: 100, timepointIndex: 2, ok: true }),
+    ])
+    expect(pendingOpsProxying(executed, [msCall({ proxyReal: REAL })], new Set([REAL]))).toEqual([])
   })
 })
