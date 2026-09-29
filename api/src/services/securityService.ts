@@ -12,7 +12,7 @@ import { MS_PER_DAY, nominalBlockMsMismatch, resolveParaBlockTime, type BlockTim
 import { runtimeCircuitBreakerDefaults } from './runtimeConstants.ts'
 import { accountRef, ensurePrices, mmMarkets, parachainName, type AccountRef, type AssetRef, type PriceInfo } from './explorerService.ts'
 import { usdOfRaw } from './assetValue.ts'
-import { assetDescriptor } from './explorerAssets.ts'
+import { displayDescriptor } from './explorerAssets.ts'
 import { loadCurrentPools, tradableFlags } from './poolService.ts'
 import { resolveModuleError } from './runtimeErrorNames.ts'
 import { getWormholeManagers, getWormholeSummary, type WormholeManagerRef, type WormholeSummary } from './wormholeNttService.ts'
@@ -858,7 +858,10 @@ export interface SecurityDashboard {
   wormhole: WormholeSummary | null
 }
 
-const asset = (id: number): AssetRef => assetDescriptor(id)
+// The explorer's display name (displayDescriptor): a Hydrated pool share reads as
+// the wrapper it IS — its fuse, its liquidation collateral and its timeline rows say
+// GDOT like every other explorer surface, while `name` keeps 2-Pool-GDOT.
+const asset = (id: number): AssetRef => displayDescriptor(id)
 const toHuman = (raw: bigint, decimals: number): number => Number(raw) / 10 ** decimals
 const extrinsicId = (block: number, index: number | null): string | null => (index == null ? null : `${block}-${index}`)
 // Safety actions arrive both as extrinsics and inside block hooks (an XCM message
@@ -2124,7 +2127,7 @@ function buildTimeline(
       continue
     }
     let detail = ''
-    if (e.event_name.endsWith('LimitChanged')) detail = `${assetDescriptor(Number(args.assetId ?? 0)).symbol} → ${rationalText(args.tradeVolumeLimit ?? args.liquidityLimit)}`
+    if (e.event_name.endsWith('LimitChanged')) detail = `${displayDescriptor(Number(args.assetId ?? 0)).symbol} → ${rationalText(args.tradeVolumeLimit ?? args.liquidityLimit)}`
     else if (e.event_name === 'CircuitBreaker.WithdrawLimitConfigUpdated') {
       // The event restates the whole config, so carrying the previous one keeps a
       // tightening readable as the change it was rather than a bare new number.
@@ -2174,8 +2177,8 @@ function buildTimeline(
       kind: locked ? 'lockdown' : 'lockdown-lifted',
       label: locked ? 'Deposit fuse tripped' : 'Deposit lockdown cleared',
       detail: locked
-        ? `${assetDescriptor(assetId).symbol} locked until ${lockUntilLabel(Number(args.until ?? 0), lockTimes.actual, lockTimes.head, lockTimes.paceMs)}`
-        : `${assetDescriptor(assetId).symbol} minting resumed`,
+        ? `${displayDescriptor(assetId).symbol} locked until ${lockUntilLabel(Number(args.until ?? 0), lockTimes.actual, lockTimes.head, lockTimes.paceMs)}`
+        : `${displayDescriptor(assetId).symbol} minting resumed`,
       blockHeight: e.block_height,
       blockTimestamp: e.block_timestamp,
       extrinsicIndex: extrinsicIndexOf(e.extrinsic_index),
@@ -2201,7 +2204,7 @@ function buildTimeline(
     out.push({
       kind: relaxed ? 'unfreeze' : 'freeze',
       label: e.event_name.startsWith('Stableswap') ? 'Stablepool tradability set' : 'Omnipool tradability set',
-      detail: `${where}${assetDescriptor(assetId).symbol} → ${tradabilityStateName(bits)}`
+      detail: `${where}${displayDescriptor(assetId).symbol} → ${tradabilityStateName(bits)}`
         + (prev != null && prev !== bits ? ` (was ${tradabilityStateName(prev)})` : ''),
       blockHeight: e.block_height,
       blockTimestamp: e.block_timestamp,

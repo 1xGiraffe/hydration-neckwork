@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cachedSwr } from './cache.ts'
-import { assetDescriptor, knownExplorerAsset } from './explorerAssets.ts'
+import { displayDescriptor, knownExplorerAsset } from './explorerAssets.ts'
 
 // The money-market cap model, shared by the public `/lending/v1/caps` facade and
 // the explorer's cap alert (notifications/evaluator.ts). One reader for each of
@@ -399,7 +399,9 @@ export function moneyMarketCapStates(client: ClickHouseClient, assetIdOf: (reser
       const assetId = assetIdOf(row.reserve_address)
       // Only a registry-known asset has decimals to scale an Aave cap by; the
       // descriptor's fallback would be a guess, and a guess here is a wrong comparison.
-      const registry = assetId != null && knownExplorerAsset(assetId) ? assetDescriptor(assetId) : null
+      // Named for display (a Hydrated share's reserve is GDOT, as on the Borrow tab);
+      // the face keeps the share's own decimals.
+      const registry = assetId != null && knownExplorerAsset(assetId) ? displayDescriptor(assetId) : null
       return { row, assetId, symbol: registry?.symbol ?? null, decimals: registry?.decimals ?? null }
     })
     const caps = reserveCaps(listed.map(r => ({
