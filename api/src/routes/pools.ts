@@ -5,23 +5,12 @@ import { getAssetActivity, getPoolSwaps, getV3PoolActivity } from '../services/e
 import { DAILY_GRAIN, grainForWindow } from '../services/historyGrain.ts'
 import { DEFAULT_SNAPSHOT_POINTS, MAX_SNAPSHOT_POINTS, SNAPSHOT_RESOLUTIONS, snapshotRequestProblem } from '../services/poolSnapshots.ts'
 import { parseOmnipoolAssetParam } from '../services/omnipoolSnapshots.ts'
+import { DEFAULT_WINDOW_POINTS, windowSchema } from './windowQuery.ts'
 
 // Liquidity-pool endpoints: the asset Liquidity tab, stableswap/XYK pool detail
 // pages (keyed by the share/LP asset id) and the Omnipool page. All models are
 // SWR-cached in poolService; routes stay thin.
 const uint32Schema = z.coerce.number().int().min(0).max(4_294_967_295)
-
-// Chart-zoom refinement, shared by the three history-bearing pool endpoints:
-// with a window the history is rebuilt on the finest ladder grain that fits the
-// point budget (never below an hour) instead of the daily default, so zooming
-// reveals detail the daily series cannot express. `fromTs`/`toTs`, not
-// `from`/`to`: the plugin-wide filter guard reserves those as calendar-day
-// params. Without a window every response is byte-for-byte what it was.
-const windowSchema = z.object({
-  fromTs: z.coerce.number().int().min(0).max(0xffff_ffff),
-  toTs: z.coerce.number().int().min(0).max(0xffff_ffff),
-  points: z.coerce.number().int().min(10).max(400).optional(),
-})
 
 // The snapshot route's window: heights or unix seconds, either end optional (the
 // service defaults a missing end to the pool's life and the newest `limit`
@@ -42,7 +31,7 @@ function historyWindow(query: unknown): { grain: typeof DAILY_GRAIN; win?: { fro
   const q = windowSchema.safeParse(query)
   if (!q.success || q.data.toTs <= q.data.fromTs) return { grain: DAILY_GRAIN }
   const win = { fromSec: q.data.fromTs, toSec: q.data.toTs }
-  return { grain: grainForWindow(win.fromSec, win.toSec, q.data.points ?? 180), win }
+  return { grain: grainForWindow(win.fromSec, win.toSec, q.data.points ?? DEFAULT_WINDOW_POINTS), win }
 }
 
 export async function poolsRoutes(fastify: FastifyInstance) {

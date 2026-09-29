@@ -1,4 +1,5 @@
 import { Fragment, type ReactNode } from 'react'
+import { api } from '../api/explorer'
 import { useHdxDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
@@ -9,7 +10,8 @@ import {
 } from '../components/HdxCharts'
 import { LOCK_ORDER, lockColor } from '../components/lockColors'
 import type { ShareSegment, StackColumn, MirrorBar, AreaSeries } from '../components/HdxCharts'
-import type { HdxDashboard, HdxStructure, HdxLockType, HdxMover } from '../types'
+import type { HdxDashboard, HdxStructure, HdxLockType, HdxMover, HdxWindowChart } from '../types'
+import { gridRefine, payloadRefine } from '../utils/chartRefine'
 import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import { monthDayLabel as mdLabel, monthLabel as monLabel } from '../utils/dashboardDates'
 import { useMediaQuery } from '../hooks/useMediaQuery'
@@ -27,6 +29,17 @@ function near28d(d: HdxDashboard): number {
   return d.unlocks.buckets.slice(0, 4)
     .reduce((s, b) => s + UNLOCK_KEYS.reduce((t, k) => t + (b[k] ?? 0), 0), 0)
 }
+
+// Chart zoom: every history chart refetches its zoomed window from the server at
+// the finest grain the window allows (hourly for a few days), rebuilt by the same
+// definition as the coarse series it replaces.
+const hdxWindow = (chart: HdxWindowChart) => (fromTs: number, toTs: number, points: number) =>
+  api.hdxWindow(chart, fromTs, toTs, points)
+const positive = (v: number | null) => (v != null && v > 0 ? v : null)
+const nonZero = (v: number | null) => (v ? v : null)
+// A bar's date at its bucket's own resolution: the clock only for sub-day buckets.
+const barDate = (key: string, stepSec: number) =>
+  stepSec > 0 && stepSec < 86_400 ? `${mdLabel(key)} ${key.slice(11, 16)}` : mdLabel(key)
 
 // 1. stat ribbon
 function Ribbon({ d }: { d: HdxDashboard }) {
@@ -301,19 +314,28 @@ function UnlocksSection({ d }: { d: HdxDashboard }) {
 }
 
 // 5. trading flow
-function FlowsSection({ d }: { d: HdxDashboard }) {
-  const daily = d.flows.daily
-  const bars: MirrorBar[] = daily.map(f => ({
-    key: f.date, up: f.buyHdx, down: f.sellHdx,
+function flowBars(dates: string[], buy: number[], sell: number[], buyers: number[], sellers: number[], stepSec: number): MirrorBar[] {
+  return dates.map((date, i) => ({
+    key: date, up: buy[i] ?? 0, down: sell[i] ?? 0,
     tip: (
       <>
-        <span className="t-d">{mdLabel(f.date)}</span>
-        <TipRow color="var(--green)" label="Bought" value={compactAmount(f.buyHdx) + ' HDX'} />
-        <TipRow color="var(--red)" label="Sold" value={compactAmount(f.sellHdx) + ' HDX'} />
-        <TipRow label="Buyers / sellers" value={`${F.int(f.buyers)} / ${F.int(f.sellers)}`} />
+        <span className="t-d">{barDate(date, stepSec)}</span>
+        <TipRow color="var(--green)" label="Bought" value={compactAmount(buy[i] ?? 0) + ' HDX'} />
+        <TipRow color="var(--red)" label="Sold" value={compactAmount(sell[i] ?? 0) + ' HDX'} />
+        <TipRow label="Buyers / sellers" value={`${F.int(buyers[i] ?? 0)} / ${F.int(sellers[i] ?? 0)}`} />
       </>
     ),
   }))
+}
+const zeros = (a: (number | null)[] | undefined) => (a ?? []).map(v => v ?? 0)
+const refineFlows = payloadRefine(hdxWindow('flows'), p =>
+  p.series.buy && p.series.sell
+    ? flowBars(p.buckets, zeros(p.series.buy), zeros(p.series.sell), zeros(p.series.buyers), zeros(p.series.sellers), p.stepSec)
+    : null)
+
+function FlowsSection({ d }: { d: HdxDashboard }) {
+  const daily = d.flows.daily
+  const bars = flowBars(daily.map(f => f.date), daily.map(f => f.buyHdx), daily.map(f => f.sellHdx), daily.map(f => f.buyers), daily.map(f => f.sellers), 86_400)
   const ticks = daily.map((f, i) => ({ i, label: mdLabel(f.date) })).filter(t => t.i % 10 === 0)
   const avgBuy = daily.length ? daily.reduce((s, f) => s + f.buyHdx, 0) / daily.length : 0
   const avgSell = daily.length ? daily.reduce((s, f) => s + f.sellHdx, 0) / daily.length : 0
@@ -324,7 +346,7 @@ function FlowsSection({ d }: { d: HdxDashboard }) {
       <div className="hdx-flow-grid">
         <div className="pf-card" style={{ marginBottom: 0 }}>
           <ChartLegend items={[{ label: 'Buys', color: 'var(--green)' }, { label: 'Sells', color: 'var(--red)' }]} />
-          <MirroredBarChart data={bars} h={190} xTicks={ticks} />
+          <MirroredBarChart data={bars} h={190} xTicks={ticks} zoomKey="zflow" refine={refineFlows} />
           <div className="bal-xaxis" style={{ justifyContent: 'center' }}><span>avg buys <Num v={avgBuy} />/day · avg sells <Num v={avgSell} />/day</span></div>
         </div>
         <div className="pf-card hdx-dca" style={{ marginBottom: 0 }}>
@@ -380,7 +402,7 @@ function OwnershipSection({ s }: { s: HdxStructure }) {
   const o = s.ownership
   const series: AreaSeries[] = OWNERSHIP_BANDS.map(b => ({
     key: b.key, label: b.label, color: OWNERSHIP_COLORS[b.key],
-    values: o[b.key].map(v => (v > 0 ? v : null)),
+    values: o[b.key].map(positive),
   }))
   const userTotal = s.weeks.map((_, i) => o.top10[i] + o.top11to100[i] + o.top101to1000[i] + o.rest[i])
   const top10Share = s.weeks.map((_, i) => (userTotal[i] > 0 ? o.top10[i] / userTotal[i] * 100 : null))
@@ -393,7 +415,7 @@ function OwnershipSection({ s }: { s: HdxStructure }) {
       <SecTitle title="Who holds HDX" subtitle="weekly since Jul 2022" />
       <div className="pf-card">
         <ChartLegend items={series.map(b => ({ label: b.label, color: b.color }))} />
-        <StackedAreaChart buckets={s.weeks} series={series} h={240} zoomKey="zown" />
+        <StackedAreaChart buckets={s.weeks} series={series} h={240} zoomKey="zown" refine={gridRefine(hdxWindow('ownership'), series, positive)} />
         <div className="hdx-cards" style={{ marginTop: 14 }}>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: OWNERSHIP_COLORS.top10 }} />Top 10 hold</div>
@@ -419,6 +441,8 @@ function OwnershipSection({ s }: { s: HdxStructure }) {
         <div className="hdx-note">
           Tranches rank user accounts only — the Treasury, module &amp; pool accounts and Kraken's tagged custody wallets are carved out above.
           Kraken and pool accounts carry today's tags across the whole history.
+          Drag across the chart to zoom: a few days refine to hourly balances. Since June 2026 every account is re-observed daily, so a
+          zoom there refines only while its window stays within about a week of hourly rows; longer windows keep the weekly closes.
           {s.backfilledAllocationHdx > 0 && <> Allocations minted later (<Num v={s.backfilledAllocationHdx} /> — growth pots, completed vesting) are counted in their band from the start, so realizing them on-chain doesn't read as new supply.</>}
         </div>
       </div>
@@ -448,8 +472,8 @@ const lastNum = (a: (number | null)[]): number | null => {
 function SupplySinksSection({ s }: { s: HdxStructure }) {
   const t = s.trends
   const staked: AreaSeries[] = [
-    { key: 'classic', label: 'Staking', color: 'var(--cat-stake)', values: t.stakedClassic.map(v => (v ? v : null)) },
-    { key: 'giga', label: 'GIGAHDX', color: lockColor('gigahdx'), values: t.stakedGiga.map(v => (v ? v : null)), hatch: true },
+    { key: 'classic', label: 'Staking', color: 'var(--cat-stake)', values: t.stakedClassic.map(nonZero) },
+    { key: 'giga', label: 'GIGAHDX', color: lockColor('gigahdx'), values: t.stakedGiga.map(nonZero), hatch: true },
   ]
   const float: AreaSeries[] = [
     { key: 'float', label: 'Liquid float', color: 'var(--cat-liquidity)', values: t.liquidFloat },
@@ -463,9 +487,9 @@ function SupplySinksSection({ s }: { s: HdxStructure }) {
       <div className="pf-card">
         <div className="sec-title" style={{ marginBottom: 6 }}>Staked HDX{trendSub('classic staking handed off to GIGAHDX in July 2026')}</div>
         <ChartLegend items={staked.map(x => ({ label: x.label, color: x.color }))} />
-        <StackedAreaChart buckets={t.months} series={staked} h={190} zoomKey="zstk" />
+        <StackedAreaChart buckets={t.months} series={staked} h={190} zoomKey="zstk" refine={gridRefine(hdxWindow('staked'), staked, nonZero)} />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Liquid float{trendSub('user-held HDX not locked in staking')}</div>
-        <StackedAreaChart buckets={t.months} series={float} h={160} showShare={false} zoomKey="zflt" />
+        <StackedAreaChart buckets={t.months} series={float} h={160} showShare={false} zoomKey="zflt" refine={gridRefine(hdxWindow('float'), float)} />
         <div className="hdx-cards" style={{ marginTop: 14 }}>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: 'var(--cat-stake)' }} />Staked</div>
@@ -479,7 +503,8 @@ function SupplySinksSection({ s }: { s: HdxStructure }) {
           </div>
         </div>
         <div className="hdx-note">Staked HDX stays in its owner's wallet under a lock, so both series live inside user-held supply.
-          The float still carries vote and vesting locks — this is the unstaked share, not free-to-sell supply.</div>
+          The float still carries vote and vesting locks — this is the unstaked share, not free-to-sell supply. Monthly points read the
+          float at the close of the week holding the month's last day; drag across either chart to zoom, down to hourly.</div>
       </div>
     </>
   )
@@ -503,7 +528,7 @@ function CostBasisSection({ s }: { s: HdxStructure }) {
     { key: 'top100', label: 'Top-100 share', color: cohortColor('whale'), values: t.top100Share },
   ]
   const kraken: AreaSeries[] = [
-    { key: 'kraken', label: 'Kraken custody', color: OWNERSHIP_COLORS.kraken, values: t.krakenHdx.map(v => (v ? v : null)) },
+    { key: 'kraken', label: 'Kraken custody', color: OWNERSHIP_COLORS.kraken, values: t.krakenHdx.map(nonZero) },
   ]
   const buybackNow = lastNum(t.buybackHdx) ?? 0
   const krakenNow = lastNum(t.krakenHdx) ?? 0
@@ -514,7 +539,8 @@ function CostBasisSection({ s }: { s: HdxStructure }) {
       <div className="pf-card">
         <div className="sec-title" style={{ marginBottom: 6 }}>Price vs cost basis{trendSub('the aggregate price user-held HDX was acquired at')}</div>
         <ChartLegend items={priceLines.map(x => ({ label: x.label, color: x.color }))} />
-        <MultiLineChart buckets={t.months} series={priceLines} h={190} yFmt={v => `$${v.toFixed(4)}`} floorZero zoomKey="zpvc" />
+        <MultiLineChart buckets={t.months} series={priceLines} h={190} yFmt={v => `$${v.toFixed(4)}`} floorZero zoomKey="zpvc"
+          refine={gridRefine(hdxWindow('priceCost'), priceLines)} />
         <div className="hdx-cards" style={{ marginTop: 14 }}>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: 'var(--accent)' }} />Price / cost basis</div>
@@ -533,14 +559,16 @@ function CostBasisSection({ s }: { s: HdxStructure }) {
           </div>
         </div>
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Treasury buyback{trendSub('cumulative HDX the protocol bought with protocol revenue')}</div>
-        <StackedAreaChart buckets={t.months} series={buyback} h={160} showShare={false} zoomKey="zbb" />
+        <StackedAreaChart buckets={t.months} series={buyback} h={160} showShare={false} zoomKey="zbb" refine={gridRefine(hdxWindow('buyback'), buyback)} />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Top-100 share of user supply{trendSub('whales have re-accumulated since the 2025 trough')}</div>
-        <MultiLineChart buckets={t.months} series={whaleLine} h={160} yFmt={v => `${v.toFixed(1)}%`} zoomKey="zt100" />
+        <MultiLineChart buckets={t.months} series={whaleLine} h={160} yFmt={v => `${v.toFixed(1)}%`} zoomKey="zt100" refine={gridRefine(hdxWindow('top100'), whaleLine)} />
         <div className="sec-title" style={{ margin: '18px 0 6px' }}>Kraken custody{trendSub('HDX on the tagged exchange wallets — halved from the 2024 peak')}</div>
-        <StackedAreaChart buckets={t.months} series={kraken} h={160} showShare={false} zoomKey="zkr" />
+        <StackedAreaChart buckets={t.months} series={kraken} h={160} showShare={false} zoomKey="zkr" refine={gridRefine(hdxWindow('kraken'), kraken, nonZero)} />
         <div className="hdx-note">Cost basis is account-level: balance increases are booked at that week's close (pre-price-era holdings at the
           first known close), decreases release cost proportionally — wallet moves therefore re-book at current prices.
-          Kraken custody counts the tagged hot wallets on Hydration, not the exchange's global books.</div>
+          Kraken custody counts the tagged hot wallets on Hydration, not the exchange's global books.
+          Drag across any chart to zoom, down to hourly. The cost basis is booked at each week's close, so a zoom shows it stepping
+          weekly under the finer market price rather than inventing a basis between closes.</div>
       </div>
     </>
   )
@@ -598,41 +626,51 @@ const AGE_BANDS: { key: keyof HdxStructure['hodl']; label: string }[] = [
 function LoyaltySection({ s }: { s: HdxStructure }) {
   const series: AreaSeries[] = AGE_BANDS.map(b => ({
     key: b.key, label: b.label, color: AGE_COLORS[b.key],
-    values: s.hodl[b.key].map(v => (v > 0 ? v : null)),
+    values: s.hodl[b.key].map(positive),
   }))
   return (
     <>
       <SecTitle title="Holder loyalty" subtitle="how long user-held HDX has been held" />
       <div className="pf-card">
         <ChartLegend items={series.map(b => ({ label: b.label, color: b.color }))} />
-        <StackedAreaChart buckets={s.weeks} series={series} h={220} zoomKey="zhodl" />
+        <StackedAreaChart buckets={s.weeks} series={series} h={220} zoomKey="zhodl" refine={gridRefine(hdxWindow('loyalty'), series, positive)} />
         <div className="hdx-note">Age counts from an account's first nonzero HDX balance — an account that exits and returns keeps its
-          original age, and a wallet that empties into a single fresh wallet passes its age on, so moving between own wallets counts as continuous holding.</div>
+          original age, and a wallet that empties into a single fresh wallet passes its age on, so moving between own wallets counts as continuous holding.
+          Ages are counted in whole weeks, so a zoom refines the balances while a band boundary still moves at a Monday.</div>
       </div>
     </>
   )
 }
 
 // 6. holder churn
-function ChurnSection({ d }: { d: HdxDashboard }) {
-  const weeks = d.churn.weekly
-  const bars: MirrorBar[] = weeks.map(w => ({
-    key: w.weekStart, up: w.newHolders, down: w.exitedHolders,
+function churnBars(starts: string[], newHolders: number[], exitedHolders: number[], stepSec: number): MirrorBar[] {
+  return starts.map((start, i) => ({
+    key: start, up: newHolders[i] ?? 0, down: exitedHolders[i] ?? 0,
     tip: (
       <>
-        <span className="t-d">Week of {mdLabel(w.weekStart)}</span>
-        <TipRow color="var(--green)" label="New holders" value={F.int(w.newHolders)} />
-        <TipRow color="var(--red)" label="Exited holders" value={F.int(w.exitedHolders)} />
+        <span className="t-d">{stepSec >= 7 * 86_400 ? `Week of ${mdLabel(start)}` : barDate(start, stepSec)}</span>
+        <TipRow color="var(--green)" label="New holders" value={F.int(newHolders[i] ?? 0)} />
+        <TipRow color="var(--red)" label="Exited holders" value={F.int(exitedHolders[i] ?? 0)} />
       </>
     ),
   }))
+}
+const refineChurn = payloadRefine(hdxWindow('churn'), p =>
+  p.series.newHolders && p.series.exitedHolders
+    ? churnBars(p.buckets, zeros(p.series.newHolders), zeros(p.series.exitedHolders), p.stepSec)
+    : null)
+
+function ChurnSection({ d }: { d: HdxDashboard }) {
+  const weeks = d.churn.weekly
+  const bars = churnBars(weeks.map(w => w.weekStart), weeks.map(w => w.newHolders), weeks.map(w => w.exitedHolders), 7 * 86_400)
   const ticks = weeks.map((w, i) => ({ i, label: mdLabel(w.weekStart) })).filter(t => t.i % 2 === 0)
   return (
     <>
       <SecTitle title="New vs exited holders" subtitle="weekly" />
       <div className="pf-card">
         <ChartLegend items={[{ label: 'New', color: 'var(--green)' }, { label: 'Exited', color: 'var(--red)' }]} />
-        <MirroredBarChart data={bars} h={160} xTicks={ticks} />
+        <MirroredBarChart data={bars} h={160} xTicks={ticks} zoomKey="zchurn" refine={refineChurn} />
+        <div className="hdx-note">Drag across this chart or the buys and sells above to zoom; a few days refine to hourly bars.</div>
       </div>
     </>
   )

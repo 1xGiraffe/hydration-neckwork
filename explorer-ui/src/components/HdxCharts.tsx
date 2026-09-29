@@ -1,9 +1,11 @@
 /* eslint-disable react-refresh/only-export-components -- chart primitives + shared tick-formatter/color-token module (mirrors ui.tsx) */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import { ChartMarkerLayer, ChartTip, compactAmount } from './ui'
 import type { ChartMarker } from './ui'
-import { ZoomReset, ZoomSelection, bracketToView, fracOfTime, useChartZoom, useZoomRefineValue } from './chartZoom'
+import { ZoomReset, ZoomSelection, bracketToView, fracOfTime, seriesGrainSec, useChartZoom, useZoomRefineValue } from './chartZoom'
+import type { TimeWindow } from './chartZoom'
+export { seriesGrainSec }
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { parseUtcTimestamp, utcDay, utcSeconds, utcStamp } from '../utils/time'
 
@@ -337,17 +339,8 @@ export function tipDate(key: string, grainSec: number): string {
   return grainSec > 0 && grainSec < 86_400 ? key.slice(0, 16) : key.slice(0, 10)
 }
 
-// The drawn series' own resolution: the smallest gap between consecutive points.
-// A single point (or a non-time axis) has no grain, hence 0 — "unknown", which
-// leaves the tick formatter's window-based behaviour unchanged.
-export function seriesGrainSec(times: number[]): number {
-  let grain = 0
-  for (let i = 1; i < times.length; i++) {
-    const gap = times[i] - times[i - 1]
-    if (gap > 0 && (grain === 0 || gap < grain)) grain = gap
-  }
-  return grain
-}
+// The drawn series' own resolution (`seriesGrainSec`) lives in chartZoom.tsx,
+// where the zoom's extent is inferred from it; re-exported above.
 // Four evenly spaced x-axis date ticks (first/last + thirds).
 function dateTicks(n: number): number[] {
   if (n < 2) return []
@@ -878,6 +871,90 @@ export function GigaLiquidationChart({ currentPrice, points, h = 190 }: { curren
   )
 }
 
+/* ============ zoomable time bars (shared by the bar charts) ============ */
+// A bar chart on a time axis zooms like the line and area charts: the window is
+// absolute time (chartZoom.tsx), and a zoom can refetch the window at a finer
+// grain. A bar is drawn as a SLOT on that axis: `slot` wide, centred on its
+// bucket's instant, with the axis inset by half a slot at each end so the first
+// and last bars sit inside the plot. Unzoomed on an evenly stepped series this is
+// exactly the old index layout (n equal slots filling the width); zoomed, it puts
+// bars and the selection shade on one time domain.
+
+/**
+ * Bar geometry for `times` (ascending unix seconds) across `view`: the slot width
+ * and each bar's left edge, in plot units from the plot's left edge. `grainSec`
+ * falls back to `fallbackGrainSec` when fewer than two bars are drawn. Without a
+ * usable time domain the bars fill the width by index.
+ */
+export function barFrame(times: number[], view: TimeWindow, plotW: number, fallbackGrainSec = 0): { slot: number; left: (i: number) => number } {
+  const n = times.length
+  const span = view.to - view.from
+  const grain = seriesGrainSec(times) || fallbackGrainSec
+  if (!(span > 0) || !(grain > 0) || !times.every(Number.isFinite)) {
+    const slot = n ? plotW / n : plotW
+    return { slot, left: i => i * slot }
+  }
+  const slot = Math.min(plotW, (grain * plotW) / (span + grain))
+  // A bucket that opens before the view but overlaps it (a zoom narrower than
+  // one coarse bar) is pinned to the plot edge rather than drawn off-canvas.
+  return { slot, left: i => Math.min(plotW - slot, Math.max(0, ((times[i] - view.from) / span) * (plotW - slot))) }
+}
+
+/** The plot fraction of the view a pointer x (plot units) addresses, on barFrame's inset axis. */
+export function barFrac(x: number, slot: number, plotW: number): number {
+  const inner = plotW - slot
+  return inner > 0 ? Math.min(1, Math.max(0, (x - slot / 2) / inner)) : 0
+}
+
+/**
+ * Zoom state for a bar chart whose bars are keyed by bucket keys. Returns the
+ * zoom api (inert unless the keys are a time axis and the chart opted in) and the
+ * refined payload once a window refetch has been accepted. `slotRef` carries the
+ * drawn slot width into the pointer→fraction mapping.
+ */
+function useBarZoom<T>(opts: {
+  keys: string[]
+  enabled: boolean
+  zoomKey?: string
+  refine?: (fromSec: number, toSec: number, points: number) => Promise<T | null>
+  accept: (value: T, span: number) => boolean
+  wrapRef: RefObject<HTMLDivElement | null>
+  W: number
+  padL: number
+  plotW: number
+  onWindowChange: () => void
+}) {
+  const { keys, enabled, zoomKey, refine, accept, wrapRef, W, padL, plotW, onWindowChange } = opts
+  const times = useMemo(() => keys.map(utcSeconds), [keys])
+  const timeAxis = enabled && times.length > 1 && times.every(Number.isFinite)
+  const slotRef = useRef(0)
+  const zoom = useChartZoom(
+    timeAxis ? times : [],
+    e => {
+      const r = (wrapRef.current ?? (e.currentTarget as HTMLElement)).getBoundingClientRect()
+      if (!r.width) return 0
+      return barFrac(((e.clientX - r.left) / r.width) * W - padL, slotRef.current, plotW)
+    },
+    onWindowChange,
+    timeAxis ? zoomKey : undefined,
+  )
+  const refined = useZoomRefineValue(zoom, timeAxis ? refine : undefined, 180, accept)
+  return { zoom, timeAxis, times, refined, slotRef, baseGrain: seriesGrainSec(times) }
+}
+
+/**
+ * Keep the items whose bucket overlaps the view: a bucket keyed by its start
+ * covers [t, t + grain), so a window narrower than one bar still shows the bar
+ * it falls in (like bracketToView for the line charts) instead of "No data"
+ * until a refetch lands. Without a grain, the instant must lie inside.
+ */
+export function overlapView<T>(items: T[], keyOf: (x: T) => string, view: TimeWindow, grainSec: number): T[] {
+  return items.filter(x => {
+    const t = utcSeconds(keyOf(x))
+    return grainSec > 0 ? t <= view.to && t + grainSec > view.from : t >= view.from && t <= view.to
+  })
+}
+
 /* ============ mirrored bar chart (buys/sells, new/exited) ============ */
 export interface MirrorBar { key: string; up: number; down: number; tip: ReactNode }
 
@@ -920,23 +997,61 @@ export function readableBarMax(values: number[], minVisibleRatio = 1 / 16): numb
   return best * 1.05
 }
 
+const acceptBars = (bars: MirrorBar[], span: number) => bars.length > span
+
 // Positive series above the zero line, negative below, 2px gaps between bars,
 // zero axis line, per-bar hover tooltip. Optional sparse x tick labels.
-export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green)', downColor = 'var(--red)' }: {
+//
+// `zoomKey`/`refine` make it zoomable (bar keys must then be bucket keys): drag
+// or pinch a window, and `refine` can hand back that window's bars at a finer
+// grain — the page builds them, tooltips included, from the same mapping as the
+// coarse bars. Zoomed, the ticks follow the drawn window instead of `xTicks`.
+export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green)', downColor = 'var(--red)', zoomKey, refine }: {
   data: MirrorBar[]; h?: number; xTicks?: { i: number; label: string }[]; upColor?: string; downColor?: string
+  /** Query-param name persisting the zoom window (back-navigable, shareable). */
+  zoomKey?: string
+  /** Refetch-on-zoom: the window's bars at a finer grain. */
+  refine?: (fromSec: number, toSec: number, points: number) => Promise<MirrorBar[] | null>
 }) {
   const [hover, setHover] = useState<number | null>(null)
   const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
   // Same phone treatment as DayBarChart: keep the most recent 30 bars so each
-  // stays wide enough to tap-inspect; ticks shift with the dropped prefix.
+  // stays wide enough to tap-inspect; ticks shift with the dropped prefix. The
+  // zoom works inside what the phone shows.
   const narrow = useMediaQuery('(max-width: 720px)')
   const cut = narrow && data.length > 30 ? data.length - 30 : 0
-  const bars = cut ? data.slice(cut) : data
-  const ticks = cut ? xTicks?.filter(t => t.i >= cut).map(t => ({ ...t, i: t.i - cut })) : xTicks
+  const base = cut ? data.slice(cut) : data
+  const baseTicks = cut ? xTicks?.filter(t => t.i >= cut).map(t => ({ ...t, i: t.i - cut })) : xTicks
   const W = 860, padX = 2, padT = 8
-  const padB = ticks?.length ? 18 : 8
+  const plotW = W - 2 * padX
+  const baseKeys = useMemo(() => base.map(d => d.key), [base])
+  const { zoom, timeAxis, refined, slotRef, baseGrain } = useBarZoom({
+    keys: baseKeys, enabled: zoomKey != null || refine != null, zoomKey, refine, accept: acceptBars,
+    wrapRef, W, padL: padX, plotW, onWindowChange: () => setHover(null),
+  })
+  const shown = refined ?? base
+  const bars = zoom.zoomed ? overlapView(shown, d => d.key, zoom.view, seriesGrainSec(shown.map(d => utcSeconds(d.key))) || baseGrain) : base
   const n = bars.length
-  if (!n) return <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, padding: '12px 0' }}>No data.</div>
+  const times = timeAxis ? bars.map(d => utcSeconds(d.key)) : []
+  // Without a time axis the bars fill the width by index: n slots of plotW / n.
+  const frame = timeAxis ? barFrame(times, zoom.view, plotW, baseGrain) : barFrame(bars.map(() => Number.NaN), { from: 0, to: 0 }, plotW)
+  // The pointer mapping reads the drawn slot at event time.
+  useEffect(() => { slotRef.current = frame.slot })
+  const viewSpan = zoom.view.to - zoom.view.from
+  const grainSec = timeAxis ? (seriesGrainSec(times) || baseGrain) : 0
+  const ticks = zoom.zoomed
+    ? dateTicks(n).map(i => ({ i, label: axisTick(bars[i].key, viewSpan, grainSec) }))
+    : baseTicks
+  const padB = ticks?.length ? 18 : 8
+  if (hover != null && hover > n - 1) setHover(null)
+  if (!n) {
+    return (
+      <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, padding: '12px 0', position: 'relative' }}>
+        No data.
+        {zoom.zoomed && <ZoomReset onReset={zoom.reset} />}
+      </div>
+    )
+  }
   const half = (h - padT - padB) / 2
   const zeroY = padT + half
   // Cap the axis where the most bars stay readable (see readableBarMax) so
@@ -944,16 +1059,22 @@ export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green
   // above the cap clamp to full height and carry a break mark; the exact value
   // stays in the hover tooltip.
   const max = readableBarMax(bars.flatMap(d => [d.up, d.down]))
-  const bw = (W - 2 * padX) / n
+  const bw = frame.slot
   const barW = Math.max(0.75, bw - 2)
+  const barX = (i: number) => padX + (timeAxis ? frame.left(i) : i * bw)
   // A non-zero bar always leaves a mark, so "traded a little" still reads
   // differently from "no activity at all" once the cap is set by louder days.
   const minBarH = 1.5
+  const selPct = (f: number) => (padX + bw / 2 + Math.min(1, Math.max(0, f)) * (plotW - bw)) / W * 100
+  const zoomHandlers = timeAxis ? {
+    onPointerDown: zoom.onPointerDown, onPointerMove: zoom.onPointerMove, onPointerUp: zoom.onPointerUp,
+    onPointerCancel: zoom.onPointerCancel, onDoubleClick: zoom.onDoubleClick,
+  } : {}
   return (
-    <div ref={wrapRef} className="hdx-chart-wrap" onMouseLeave={() => setHover(null)}>
+    <div ref={wrapRef} className={`hdx-chart-wrap${timeAxis ? ' apx-wrap' : ''}`} data-zoom-key={zoomKey} onMouseLeave={() => setHover(null)} {...zoomHandlers}>
       <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
         {bars.map((d, i) => {
-          const x = padX + i * bw
+          const x = barX(i)
           const uh = d.up > 0 ? Math.max(minBarH, Math.min(d.up, max) / max * (half - 2)) : 0
           const dh = d.down > 0 ? Math.max(minBarH, Math.min(d.down, max) / max * (half - 2)) : 0
           const upTop = zeroY - 1 - uh, downBot = zeroY + 1 + dh
@@ -969,21 +1090,151 @@ export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green
                 <line x1={x.toFixed(1)} x2={(x + barW).toFixed(1)} y1={(downBot - 5).toFixed(1)} y2={(downBot - 2).toFixed(1)} />
                 <line x1={x.toFixed(1)} x2={(x + barW).toFixed(1)} y1={(downBot - 9).toFixed(1)} y2={(downBot - 6).toFixed(1)} />
               </g>}
-              <rect x={x.toFixed(1)} y={padT} width={bw.toFixed(1)} height={h - padT - padB} fill="transparent" onMouseEnter={() => setHover(i)} />
+              <rect x={x.toFixed(1)} y={padT} width={bw.toFixed(1)} height={h - padT - padB} fill="transparent" onMouseEnter={() => { if (!zoom.selecting) setHover(i) }} />
             </g>
           )
         })}
         <line x1={padX} x2={W - padX} y1={zeroY.toFixed(1)} y2={zeroY.toFixed(1)} stroke="var(--text-low)" strokeOpacity="0.6" strokeWidth="1" />
         {ticks?.map(t => {
           // Anchor edge ticks inward so the first/last labels aren't clipped.
-          const cx = padX + t.i * bw + (bw - 2) / 2
+          const cx = barX(t.i) + (bw - 2) / 2
           const anchor = cx < 30 ? 'start' : cx > W - 30 ? 'end' : 'middle'
           return <text key={t.i} className="hdx-ax" x={cx.toFixed(1)} y={h - 4} textAnchor={anchor}>{t.label}</text>
         })}
       </svg>
-      {hover != null && bars[hover] && (
-        <ChartTip className="hdx-tip" xPct={(padX + hover * bw + bw / 2) / W * 100} top={2}>{bars[hover].tip}</ChartTip>
+      {hover != null && bars[hover] && !zoom.selecting && (
+        <ChartTip className="hdx-tip" xPct={(barX(hover) + bw / 2) / W * 100} top={2}>{bars[hover].tip}</ChartTip>
       )}
+      {zoom.preview && (() => {
+        const pw = zoom.preview
+        return <ZoomSelection aPct={selPct(fracOfTime(zoom.view, pw.from))} bPct={selPct(fracOfTime(zoom.view, pw.to))}
+          label={`${utcDay(pw.from)} – ${utcDay(pw.to)}`} />
+      })()}
+      {zoom.zoomed && !zoom.sel && <ZoomReset onReset={zoom.reset} />}
+    </div>
+  )
+}
+
+/* ============ stacked time bars (a stock split into parts, over time) ============ */
+// The bar twin of StackedAreaChart: the same buckets/series model (and so the
+// same RefinedGrid refine payload), drawn as one stacked column per bucket —
+// for a stock whose parts are the point (supply by minter), where an area's
+// interpolation between weeks would imply a path the data does not state. Bands
+// stack bottom-up in the order given, 2px apart like StackedColumnChart; the
+// tooltip names every band and, with `totalLabel`, the stack top.
+export function StackedBarChart({ buckets, series, h = 200, yFmt = compactAmount, totalLabel, zoomKey, refine }: {
+  buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string
+  /** Adds a summed stack-top row under the bands in the tooltip, under this label. */
+  totalLabel?: string
+  /** Query-param name persisting the zoom window (back-navigable, shareable). */
+  zoomKey?: string
+  /** Refetch-on-zoom: a finer grid for the window. */
+  refine?: (fromSec: number, toSec: number, points: number) => Promise<RefinedGrid | null>
+}) {
+  const [hover, setHover] = useState<number | null>(null)
+  const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
+  const W = AREA_W, padL = AREA_PAD_L, padR = AREA_PAD_R, padT = 12, padB = 18
+  const plotW = W - padL - padR
+  const { zoom, timeAxis, refined, slotRef, baseGrain } = useBarZoom({
+    keys: buckets, enabled: true, zoomKey, refine, accept: acceptGrid,
+    wrapRef, W, padL, plotW, onWindowChange: () => setHover(null),
+  })
+  const src = refined ?? { buckets, series }
+  const srcGrain = seriesGrainSec(src.buckets.map(utcSeconds)) || baseGrain
+  const keep = zoom.zoomed
+    ? overlapView(src.buckets.map((b, i) => ({ b, i })), x => x.b, zoom.view, srcGrain).map(x => x.i)
+    : src.buckets.map((_, i) => i)
+  const vBuckets = keep.map(i => src.buckets[i])
+  const vSeries = src.series.map(s => ({ ...s, values: keep.map(i => s.values[i] ?? null) }))
+  const n = vBuckets.length
+  const { tops, max: rawMax } = stackSeries(vSeries)
+  const times = timeAxis ? vBuckets.map(utcSeconds) : []
+  // Without a time axis the bars fill the width by index: n slots of plotW / n.
+  const frame = timeAxis ? barFrame(times, zoom.view, plotW, baseGrain) : barFrame(vBuckets.map(() => Number.NaN), { from: 0, to: 0 }, plotW)
+  // The pointer mapping reads the drawn slot at event time.
+  useEffect(() => { slotRef.current = frame.slot })
+  if (hover != null && hover > n - 1) setHover(null)
+  if (!n || !vSeries.length || !(rawMax > 0)) {
+    return (
+      <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12, position: 'relative' }}>
+        Not enough history.
+        {zoom.zoomed && <ZoomReset onReset={zoom.reset} />}
+      </div>
+    )
+  }
+  const viewSpan = zoom.view.to - zoom.view.from
+  const grainSec = timeAxis ? (seriesGrainSec(times) || baseGrain) : 0
+  const max = niceAxisMax(rawMax)
+  const plotH = h - padT - padB
+  const sy = (v: number) => padT + (1 - v / max) * plotH
+  const bw = frame.slot
+  const gap = bw > 4 ? 2 : bw > 2 ? 1 : 0
+  const barW = Math.max(0.75, bw - gap)
+  const barX = (i: number) => padL + (timeAxis ? frame.left(i) : i * bw)
+  const selPct = (f: number) => (padL + bw / 2 + Math.min(1, Math.max(0, f)) * (plotW - bw)) / W * 100
+  function onMove(e: React.PointerEvent) {
+    if (zoom.selecting || zoom.pinching) return
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    if (!r.width) return
+    const x = ((e.clientX - r.left) / r.width) * W
+    let best = 0
+    for (let k = 1; k < n; k++) if (Math.abs(barX(k) + bw / 2 - x) < Math.abs(barX(best) + bw / 2 - x)) best = k
+    setHover(best)
+  }
+  const hoverTotal = hover != null ? vSeries.reduce((s, x) => s + (x.values[hover] ?? 0), 0) : 0
+  return (
+    <div ref={wrapRef} className="hdx-chart-wrap apx-wrap" data-zoom-key={zoomKey}
+      onPointerDown={e => { zoom.onPointerDown(e); onMove(e) }}
+      onPointerMove={e => { zoom.onPointerMove(e); onMove(e) }}
+      onPointerUp={zoom.onPointerUp} onPointerCancel={zoom.onPointerCancel} onDoubleClick={zoom.onDoubleClick}
+      onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}>
+      <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
+        {[0, 0.5, 1].map(t => (
+          <g key={t}>
+            <line x1={padL} x2={W - padR} y1={sy(max * t).toFixed(1)} y2={sy(max * t).toFixed(1)} stroke="var(--separator)" strokeWidth="1" />
+            <text className="hdx-ax" x={padL - 8} y={(sy(max * t) + 3).toFixed(1)} textAnchor="end">{yFmt(max * t)}</text>
+          </g>
+        ))}
+        {vBuckets.map((b, i) => {
+          const x = barX(i)
+          return (
+            <g key={b} opacity={hover == null || hover === i ? 1 : 0.7}>
+              {vSeries.map((s, k) => {
+                const v = s.values[i]
+                if (v == null || !(v > 0)) return null
+                const top = sy(tops[k][i])
+                const bottom = sy(k === 0 ? 0 : tops[k - 1][i])
+                const hPix = bottom - top
+                // A band touching the one below leaves a sliver of card between them.
+                const inset = k > 0 && hPix > 2 ? Math.min(1, hPix / 4) : 0
+                return <rect key={s.key} x={x.toFixed(1)} y={top.toFixed(1)} width={barW.toFixed(1)} height={Math.max(0.75, hPix - inset).toFixed(1)} fill={s.color} rx="1.5" />
+              })}
+            </g>
+          )
+        })}
+        {dateTicks(n).map(i => (
+          <text key={i} className="hdx-ax" x={(barX(i) + barW / 2).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{axisTick(vBuckets[i], timeAxis ? viewSpan : 0, grainSec)}</text>
+        ))}
+      </svg>
+      {hover != null && !zoom.selecting && (
+        <ChartTip className="hdx-tip" xPct={(barX(hover) + bw / 2) / W * 100} top={2}>
+          <span className="t-d">{tipDate(vBuckets[hover], grainSec)}</span>
+          {vSeries.map(s => s.values[hover] != null && (
+            <span key={s.key} className="t-row"><i style={{ background: s.color }} />{s.label}
+              <span className="tv">{yFmt(s.values[hover]!)}{hoverTotal > 0 && <span className="muted"> · {(s.values[hover]! / hoverTotal * 100).toFixed(1)}%</span>}</span>
+            </span>
+          ))}
+          {totalLabel && vSeries.length > 1 && hoverTotal > 0 && (
+            <span className="t-row t-total">{totalLabel}<span className="tv">{yFmt(hoverTotal)}</span></span>
+          )}
+        </ChartTip>
+      )}
+      {zoom.preview && (() => {
+        const pw = zoom.preview
+        return <ZoomSelection aPct={selPct(fracOfTime(zoom.view, pw.from))} bPct={selPct(fracOfTime(zoom.view, pw.to))}
+          label={`${utcDay(pw.from)} – ${utcDay(pw.to)}`} />
+      })()}
+      {zoom.zoomed && !zoom.sel && <ZoomReset onReset={zoom.reset} />}
     </div>
   )
 }

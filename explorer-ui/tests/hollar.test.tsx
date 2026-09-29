@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { Hollar, hourlyPegRefine } from '../src/pages/Hollar'
+import { Hollar } from '../src/pages/Hollar'
 import type { HollarDashboard } from '../src/types'
 
 const aUSDC = { assetId: 1003, symbol: 'aUSDC', name: 'Aave USDC', decimals: 6, parachainId: null }
@@ -72,6 +72,7 @@ function mockData(): HollarDashboard {
       holders: [57, 63, 70],
       peg: { close: [0.9985, 0.999, 0.9992], low: [0.997, 0.9982, 0.9985], high: [1.0002, 1.0004, 1.0001] },
       debt: [2.0e6, 2.4e6, 2.9e6],
+      supplyByMinter: { borrowed: [1.9e6, 2.3e6, 2.8e6], other: [6e5, 8e5, 1.9e6] },
       borrowers: [118, 130, 141],
       revenueCumUsd: [1_400, 3_200, 5_400],
       depth: { stableswap: [2.4e6, 2.9e6, 3.1e6], omnipool: [null, null, 4e5] },
@@ -156,29 +157,22 @@ describe('Hollar dashboard page', () => {
   })
 })
 
-// The dashboard already carries 30 days of hourly closes, so zooming inside them
-// refines locally. A window reaching back further must NOT refine: one month of
-// detail drawn across a year of plot would leave most of the chart empty.
-describe('hourlyPegRefine', () => {
-  const at = (iso: string) => Math.floor(Date.parse(iso + 'Z') / 1000)
-  const hourly = Array.from({ length: 48 }, (_, i) => ({
-    ts: new Date(Date.parse('2026-07-08T00:00:00Z') + i * 3_600_000).toISOString().replace('T', ' ').slice(0, 19),
-    close: 1 + i / 100_000,
-  }))
-
-  it('returns an hourly grid for a window inside the coverage', async () => {
-    const refine = hourlyPegRefine(hourly)!
-    const grid = await refine(at('2026-07-08T06:00:00'), at('2026-07-09T06:00:00'))
-    expect(grid?.buckets.length).toBeGreaterThan(20)
-    expect(grid?.series[0].values.length).toBe(grid?.buckets.length)
-  })
-
-  it('refuses a window that starts before the hourly coverage', async () => {
-    const refine = hourlyPegRefine(hourly)!
-    expect(await refine(at('2026-01-01T00:00:00'), at('2026-07-09T00:00:00'))).toBeNull()
-  })
-
-  it('has nothing to offer without hourly points', () => {
-    expect(hourlyPegRefine([])).toBeUndefined()
+describe('Hollar borrowing section', () => {
+  it('stacks supply by minter — borrowed principal under HSM-minted, topping out at total supply', () => {
+    const data = mockData()
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    queryClient.setQueryData(['hollar-dashboard'], data)
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Hollar /></QueryClientProvider>)
+    const text = html.replace(/<[^>]+>/g, '')
+    expect(text).toContain('Supply by minter')
+    expect(text).toContain('the stack top is total supply')
+    expect(text).toContain('Minted by the HSM')
+    // Debt (interest included) and the principal minted against it are both stated.
+    expect(text).toContain('2.9M HOLLAR')
+    expect(text).toContain('2.8M of it minted as principal')
+    expect(html).toContain('data-zoom-key="zdebt"')
+    // The HSM bar charts are zoomable too.
+    expect(html).toContain('data-zoom-key="zarb"')
+    expect(html).toContain('data-zoom-key="ztrades"')
   })
 })
