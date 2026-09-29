@@ -338,24 +338,63 @@ export function atokenEquivalencesFor(
   return equivalences
 }
 
-// Stableswap LP → display token aliases (2-Pool-GDOT → GDOT), with the same
-// duplicate-symbol rule as the aToken pairing.
+// Stableswap share → the money-market WRAPPER it is published under (2-Pool-GDOT →
+// GDOT, 2-Pool-HUSDC → HUSDC). THE share/wrapper rule — the api applies the same
+// one (sharePriceWrapperOf in api/src/services/explorerAssets.ts), so a share is
+// written, priced, displayed and folded under one identity everywhere:
+//
+//   W wraps share S  ⇔  W is the aToken Aave initialized over S (the reserve map),
+//                       W's symbol is S's minus its `N-Pool-` prefix, and no other
+//                       registry asset carries that symbol.
+//
+// The wrapper is minted 1:1 over the share, so they carry one price; the writer
+// publishes it under W only. Every clause is load-bearing. The symbol alone
+// matched pool LEGS: 2-Pool-PRIME is PRIME + HOLLAR, and aliasing it to PRIME
+// published PRIME's price ($1.06, NAV $1.019) as the share's and never wrote the
+// share (2-Pool-apyUSD: $1.41 vs $1.009). The reserve alone matched the unnamed
+// wrappers (a2-Pool-PRIME over 2-Pool-PRIME), which are ordinary aTokens priced
+// THROUGH the share. A wrapper the reserve map does not know is no wrapper.
 export function lpAliasesFor(
   assets: Iterable<[number, AssetMetadata]>,
+  underlyingByAtokenContract: Map<string, number>,
   onAmbiguous?: AmbiguityReporter,
 ): [number, number][] {
   const entries = [...assets]
   const bySymbol = idsBySymbol(entries)
 
   const aliases: [number, number][] = []
-  for (const [assetId, meta] of entries) {
-    const match = meta.symbol.match(/^\d+-Pool-(.+)$/)
-    if (!match) continue
-    const candidates = bySymbol.get(match[1]) ?? []
-    if (candidates.length === 1 && candidates[0] !== assetId) aliases.push([assetId, candidates[0]])
-    else if (candidates.length > 1) onAmbiguous?.(assetId, meta.symbol, candidates)
+  for (const [wrapperId, meta] of entries) {
+    if (meta.assetType !== 'Erc20' || !meta.evmAddress) continue
+    const shareId = underlyingByAtokenContract.get(meta.evmAddress.toLowerCase())
+    if (shareId == null || shareId === wrapperId) continue
+    const share = entries.find(([id]) => id === shareId)?.[1]
+    const suffix = share?.symbol.match(/^\d+-Pool-(.+)$/)?.[1]
+    if (suffix == null || suffix !== meta.symbol) continue
+    const holders = bySymbol.get(suffix) ?? []
+    if (holders.length > 1) {
+      onAmbiguous?.(shareId, share!.symbol, holders)
+      continue
+    }
+    aliases.push([shareId, wrapperId])
   }
-  return aliases
+  return aliases.sort((x, y) => x[0] - y[0])
+}
+
+// Every registry asset whose contract Aave's reserve map lists as an aToken — the
+// ONE aToken set the EVM balance reader uses. An aToken it does not know is read
+// from the plain ERC-20 slot and comes back 0; one without a reserve cannot be
+// accrued anyway. BIL (the aToken over uBIL) carries no `a` prefix and was only
+// ever marked through the old symbol-matched 2-Pool-BIL → BIL alias: dropping
+// that alias zeroed pool 10055's BIL reserve.
+export function reserveAtokenIdsFor(
+  assets: Iterable<[number, AssetMetadata]>,
+  underlyingByAtokenContract: Map<string, number>,
+): Set<number> {
+  const ids = new Set<number>()
+  for (const [assetId, meta] of assets) {
+    if (meta.assetType === 'Erc20' && meta.evmAddress && underlyingByAtokenContract.has(meta.evmAddress.toLowerCase())) ids.add(assetId)
+  }
+  return ids
 }
 
 export class AssetRegistryTracker {
@@ -632,12 +671,13 @@ export class AssetRegistryTracker {
     return new Set(this.getAtokenEquivalences(underlyingByAtokenContract).map(([, aTokenId]) => aTokenId))
   }
 
-  /**
-   * Detect stableswap LP → display token aliases via symbol pattern (e.g. 2-Pool-GDOT → GDOT).
-   * Used to seed LP equivalences at startup; Aave EVM events refine at runtime.
-   */
-  getLpAliases(): [number, number][] {
-    return lpAliasesFor(this.cache, (assetId, symbol, candidates) =>
+  getReserveAtokenIds(underlyingByAtokenContract: Map<string, number>): Set<number> {
+    return reserveAtokenIdsFor(this.cache, underlyingByAtokenContract)
+  }
+
+  /** Share → wrapper aliases under the one share/wrapper rule (lpAliasesFor). */
+  getLpAliases(underlyingByAtokenContract: Map<string, number>): [number, number][] {
+    return lpAliasesFor(this.cache, underlyingByAtokenContract, (assetId, symbol, candidates) =>
       this.logAmbiguousWrapper(assetId, symbol, candidates))
   }
 
