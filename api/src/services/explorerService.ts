@@ -13040,6 +13040,33 @@ export function xcmLegAssets(
   return legAmounts.map(amount => byAmount.get(amount)?.shift() ?? null)
 }
 
+/**
+ * The account a sibling parachain holds on Hydration: `sibl` ‖ the para id as a
+ * little-endian u32, zero-padded to 32 bytes (Interlay, 2032, is 0x7369626cf007…).
+ */
+export function siblingSovereignAccount(paraId: number): string {
+  const le = [0, 8, 16, 24].map(shift => ((paraId >>> shift) & 0xff).toString(16).padStart(2, '0')).join('')
+  return `0x7369626c${le}`.padEnd(66, '0')
+}
+/** One same-extrinsic transfer, as the reserve-leg rule below reads it. */
+export interface XcmTransferLeg { from: string; to: string; assetId: number; amount: string }
+/**
+ * The legs of an outbound send that LEFT as a transfer rather than a withdrawal. An
+ * asset Hydration is the reserve for (HDX, and any other local asset) is not burned
+ * by XTokens: it moves into the destination parachain's sovereign account, so its
+ * only trace is a Currencies.Transferred from the sender to that account. Matching
+ * legs against withdrawals alone found nothing for them — 1,685 sends in history,
+ * among them 4,098,000 HDX to Interlay, never became a row, and the executor fallback
+ * then called the extrinsic's fee withdrawal the send. Only a transfer from the send's
+ * own sender to its own destination's sovereign counts.
+ */
+export function reserveTransferLegs(transfers: readonly XcmTransferLeg[], sender: string, destParachainId: number | null | undefined): XcmWithdrawnLeg[] {
+  if (destParachainId == null) return []
+  const sovereign = siblingSovereignAccount(destParachainId)
+  const from = sender.toLowerCase()
+  return transfers.filter(t => t.from.toLowerCase() === from && t.to.toLowerCase() === sovereign).map(t => ({ assetId: t.assetId, amount: t.amount }))
+}
+
 /** One outbound send event, as both the feed page and the block page read it. */
 interface OutboundXcmSendEvent {
   block_height: number
@@ -13071,8 +13098,10 @@ async function buildOutboundXcmRows(
   type WithdrawalRow = { block_height: number; extrinsic_index: number | null; cid: number; amount: string }
   const withdrawals: WithdrawalRow[] = []
   const legacyPairs: { block_height: number; extrinsic_index: number | null }[] = []
+  type SovereignTransferRow = { block_height: number; extrinsic_index: number | null; cid: number; amount: string; from_account: string; to_account: string }
+  const sovereignTransfers: SovereignTransferRow[] = []
   const blockChunks = await mapChunksConcurrently(blocks, 2_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
-    const [wRes, legacyRes] = await Promise.all([
+    const [wRes, legacyRes, sovereignRes] = await Promise.all([
       client.query({
         query: `SELECT block_height, extrinsic_index,
                   asset_id AS cid,
@@ -13090,15 +13119,35 @@ async function buildOutboundXcmRows(
         query_params: { blocks: chunk },
         format: 'JSONEachRow',
       }),
+      // A local-reserve asset leaves as a transfer into a sibling's sovereign account
+      // (see reserveTransferLegs) — read from the block-keyed, JSON-free projection.
+      client.query({
+        query: `SELECT block_height, extrinsic_index, asset_id AS cid, amount, from_account, to_account
+                FROM price_data.transfer_activity_by_time
+                WHERE block_height IN {blocks:Array(UInt32)} AND event_name = 'Currencies.Transferred'
+                  AND startsWith(to_account, '0x7369626c') AND extrinsic_index IS NOT NULL`,
+        query_params: { blocks: chunk },
+        format: 'JSONEachRow',
+      }),
     ])
     return {
       withdrawals: await wRes.json<WithdrawalRow>(),
       legacy: await legacyRes.json<{ block_height: number; extrinsic_index: number | null }>(),
+      sovereign: await sovereignRes.json<SovereignTransferRow>(),
     }
   })
   for (const chunk of blockChunks) {
     withdrawals.push(...chunk.withdrawals)
     legacyPairs.push(...chunk.legacy)
+    sovereignTransfers.push(...chunk.sovereign)
+  }
+  const sovereignByExtrinsic = new Map<string, XcmTransferLeg[]>()
+  for (const t of sovereignTransfers) {
+    const key = `${t.block_height}:${t.extrinsic_index}`
+    const leg = { from: t.from_account, to: t.to_account, assetId: Number(t.cid), amount: t.amount }
+    const pooled = sovereignByExtrinsic.get(key)
+    if (pooled) pooled.push(leg)
+    else sovereignByExtrinsic.set(key, [leg])
   }
   const withdrawalsByExtrinsic = new Map<string, XcmWithdrawnLeg[]>()
   for (const withdrawal of withdrawals) {
@@ -13118,7 +13167,10 @@ async function buildOutboundXcmRows(
     const parsed = parseOutboundXcm(safeJson(event.args_json))
     if (!parsed) continue
     const extKey = `${event.block_height}:${event.extrinsic_index}`
-    const available = withdrawalsByExtrinsic.get(extKey) ?? []
+    const available = [
+      ...(withdrawalsByExtrinsic.get(extKey) ?? []),
+      ...reserveTransferLegs(sovereignByExtrinsic.get(extKey) ?? [], parsed.sender, parsed.dest.destParachainId),
+    ]
     // A fee leg only NAMES a withdrawal — the single-leg Transact funding case
     // reads its own payload amount as the fee — so it does not spend one.
     const assetOf = (amount: string) => available.find(leg => leg.amount === amount)?.assetId
@@ -19998,8 +20050,12 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
     // Polkadot Treasury's 5,000 USDC + 5,000 USDT payout to AssetHub) into one entry.
     // xcmLegAssets claims them one leg at a time, exactly as the feed does.
     const withdrawnLegs: XcmWithdrawnLeg[] = []
+    const sovereignTransferLegs: XcmTransferLeg[] = []
     for (const e of events) {
       const args = (safeJson(e.args_json) ?? {}) as Record<string, unknown>
+      if (e.event_name === 'Currencies.Transferred' && argStr(args, 'to').toLowerCase().startsWith('0x7369626c')) {
+        sovereignTransferLegs.push({ from: argStr(args, 'from'), to: argStr(args, 'to'), assetId: argInt(args, 'currencyId', 'currency_id', 'assetId', 'asset_id'), amount: argStr(args, 'amount') })
+      }
       if (e.event_name === 'Balances.Transfer' || e.event_name === 'Tokens.Transfer' || e.event_name === 'Currencies.Transferred') {
         transferRows.push({
           block_height: e.block_height,
@@ -20077,11 +20133,12 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
       if (e.event_name === 'PolkadotXcm.Sent' && xcmLegacyExts.has(`${e.block_height}:${e.extrinsic_index}`)) continue
       const parsed = parseOutboundXcm(safeJson(e.args_json))
       if (!parsed) continue
+      const sendLegs = [...withdrawnLegs, ...reserveTransferLegs(sovereignTransferLegs, parsed.sender, parsed.dest.destParachainId)]
       // A fee leg only NAMES a withdrawal, so it does not spend one (same rule, same
       // first-match tie-break as buildOutboundXcmRows); the payload legs claim theirs.
-      const fees = outboundXcmFeeLegs(parsed, amount => withdrawnLegs.find(leg => leg.amount === amount)?.assetId, prices,
+      const fees = outboundXcmFeeLegs(parsed, amount => sendLegs.find(leg => leg.amount === amount)?.assetId, prices,
         parsed.dest.destParachainId != null && (xcmTransactDests.get(`${e.block_height}:${e.extrinsic_index}`)?.has(parsed.dest.destParachainId) ?? false))
-      const legAssets = xcmLegAssets(parsed.amounts, withdrawnLegs)
+      const legAssets = xcmLegAssets(parsed.amounts, sendLegs)
       parsed.amounts.forEach((amount, legIndex) => {
         const cid = legAssets[legIndex]
         if (cid == null) return
@@ -21527,32 +21584,56 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
       const cidExpr = 'w.asset_id'
       const withdrawalAmountExpr = 'w.amount'
       const xcmValueFilter = eventValueFilterSql('{assetId:UInt32}', withdrawalAmountExpr, 'w.block_timestamp', fixedAssetFilters, prices, 'asset_xcm_price')
+      // A local-reserve asset (HDX) leaves as a transfer into the destination's
+      // sovereign account instead (reserveTransferLegs), so its sends are a second
+      // candidate set. One UNION ALL under one LIMIT keeps the page's cut, and so its
+      // saturation rule, exactly as it was for the withdrawals alone.
+      const reserveValueFilter = eventValueFilterSql('{assetId:UInt32}', 't.amount', 't.block_timestamp', fixedAssetFilters, prices, 'asset_xcm_reserve_price')
       const res = await client.query({
         query: `
-          SELECT w.block_height, toString(w.block_timestamp) AS ts, w.extrinsic_index,
-            x.event_index, x.args_json AS x_args, ${withdrawalAmountExpr} AS amount
-          FROM ${xcmEventActivityTable('w')}
-          INNER JOIN ${xcmEventActivityTable('x')}
-            ON x.block_height = w.block_height
-           AND x.extrinsic_index = w.extrinsic_index
-           AND x.event_name IN (${XCM_SENT_EVENTS_SQL})
-          ${xcmValueFilter.joinSql}
-          WHERE ${tw ? tw.replaceAll('block_timestamp', 'w.block_timestamp') : '1'}
-            AND w.event_name = 'Currencies.Withdrawn'
-            AND ${cidExpr} = {assetId:UInt32}
-            AND position(x.args_json, concat('"value":"', ${withdrawalAmountExpr}, '"')) > 0
-            ${xcmValueFilter.predicateSql}
-          ORDER BY w.block_height DESC, x.event_index DESC
+          SELECT * FROM (
+            SELECT w.block_height AS block_height, toString(w.block_timestamp) AS ts, w.extrinsic_index AS extrinsic_index,
+              x.event_index AS event_index, x.args_json AS x_args, ${withdrawalAmountExpr} AS amount, '' AS from_acc, '' AS to_acc
+            FROM ${xcmEventActivityTable('w')}
+            INNER JOIN ${xcmEventActivityTable('x')}
+              ON x.block_height = w.block_height
+             AND x.extrinsic_index = w.extrinsic_index
+             AND x.event_name IN (${XCM_SENT_EVENTS_SQL})
+            ${xcmValueFilter.joinSql}
+            WHERE ${tw ? tw.replaceAll('block_timestamp', 'w.block_timestamp') : '1'}
+              AND w.event_name = 'Currencies.Withdrawn'
+              AND ${cidExpr} = {assetId:UInt32}
+              AND position(x.args_json, concat('"value":"', ${withdrawalAmountExpr}, '"')) > 0
+              ${xcmValueFilter.predicateSql}
+            UNION ALL
+            SELECT t.block_height AS block_height, toString(t.block_timestamp) AS ts, t.extrinsic_index AS extrinsic_index,
+              x.event_index AS event_index, x.args_json AS x_args, t.amount AS amount, t.from_account AS from_acc, t.to_account AS to_acc
+            FROM price_data.transfer_activity AS t
+            INNER JOIN ${xcmEventActivityTable('x')}
+              ON x.block_height = t.block_height
+             AND x.extrinsic_index = t.extrinsic_index
+             AND x.event_name IN (${XCM_SENT_EVENTS_SQL})
+            ${reserveValueFilter.joinSql}
+            WHERE ${tw ? tw.replaceAll('block_timestamp', 't.block_timestamp') : '1'}
+              AND t.event_name = 'Currencies.Transferred'
+              AND t.asset_id = {assetId:UInt32}
+              AND startsWith(t.to_account, '0x7369626c')
+              AND position(x.args_json, concat('"value":"', t.amount, '"')) > 0
+              ${reserveValueFilter.predicateSql}
+          )
+          ORDER BY block_height DESC, event_index DESC
           LIMIT {n:UInt32}`,
         query_params: { n: fetchN, assetId }, format: 'JSONEachRow',
       })
-      const rows = await res.json<{ block_height: number; ts: string; extrinsic_index: number | null; event_index: number; x_args: string; amount: string }>()
+      const rows = await res.json<{ block_height: number; ts: string; extrinsic_index: number | null; event_index: number; x_args: string; amount: string; from_acc: string; to_acc: string }>()
       const a = asset(assetId)
       const seen = new Set<string>()
       const out: ActivityRow[] = []
       for (const r of rows) {
         const parsed = parseOutboundXcm(safeJson(r.x_args))
         if (!parsed || !parsed.amounts.includes(r.amount)) continue
+        // A reserve leg counts only from this send's sender into its own destination's sovereign.
+        if (r.to_acc && !reserveTransferLegs([{ from: r.from_acc, to: r.to_acc, assetId, amount: r.amount }], parsed.sender, parsed.dest.destParachainId).length) continue
         const key = `${r.block_height}:${r.extrinsic_index}:${r.amount}:${parsed.sender}`
         if (seen.has(key)) continue
         seen.add(key)
