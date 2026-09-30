@@ -25932,6 +25932,9 @@ export interface ValueEvent {
   counterparty: AccountRef | null
   // Cross-chain flow direction (inbound credit vs outbound send).
   direction?: 'in' | 'out'
+  // A cross-chain marker's other end, from the activity row it is: the chain and the
+  // account there, and the bridge that carried it. Additive; absent when unknown.
+  remote?: { chain: string | null; address: string | null; url: string | null; bridge: string | null }
   // false when a cross-chain marker's (block,eventIndex) has no matching row in
   // the XCM activity feed (reserved-account credits, non-contiguous walk-backs):
   // the marker still annotates the jump but renders WITHOUT a dead detail link.
@@ -25963,6 +25966,9 @@ const VALUE_EVENT_LIQUIDITY_NAMES = [
 const VALUE_EVENT_XCM_IN_NAMES = ['Currencies.Deposited', 'Tokens.Deposited']
 const VALUE_EVENT_XCM_OUT_NAMES = ['Currencies.Withdrawn', 'Tokens.Withdrawn']
 const VALUE_EVENT_DEFAULT_LIMIT = 12
+// Blocks a value-events read may resolve bridge markers against (one block activity
+// read each) — the chosen markers are at most the limit plus the reserved slots.
+const VALUE_EVENT_BRIDGE_BLOCKS = 24
 // A liquidation is a high-signal event even when a routine transfer moved more
 // value, so guarantee the top few always surface rather than letting a whale's
 // larger transfers crowd every liquidation out of the value-ranked budget.
@@ -26708,6 +26714,40 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
           e.assetOut = asset(Number(s.asset_out))
         }
       }
+    }
+
+    // Bridge resolution for the few chosen markers. The jump attribution scores raw
+    // transfer and withdrawal legs, so a cross-chain send that left as a TRANSFER — a
+    // local-reserve asset into the destination's sovereign account (HDX to Interlay),
+    // or a Wormhole NTT send into the token's manager contract (PRIME to Solana) —
+    // was named a "Transfer out" to that intermediate account. The activity feed has
+    // the one classification of what an extrinsic did; a marker in an extrinsic whose
+    // row is a cross-chain send or receive of the same asset IS that row: its kind,
+    // its event (so the marker links to it) and its other end.
+    const bridgeMarkers = chosen.filter(e => e.extrinsicIndex != null && e.asset != null
+      && (e.kind === 'transfer-out' || e.kind === 'transfer-in' || e.kind === 'cross-chain'))
+    const bridgeBlocks = [...new Set(bridgeMarkers.map(e => e.blockHeight))].slice(0, VALUE_EVENT_BRIDGE_BLOCKS)
+    const blockRows = new Map<number, ActivityRow[]>()
+    await Promise.all(bridgeBlocks.map(async height => {
+      blockRows.set(height, await getBlockActivity(height).catch(() => [] as ActivityRow[]))
+    }))
+    for (const e of bridgeMarkers) {
+      const out = e.kind === 'transfer-out' || (e.kind === 'cross-chain' && e.direction === 'out')
+      const row = (blockRows.get(e.blockHeight) ?? []).find(r => r.type === 'xcm' && r.extrinsicIndex === e.extrinsicIndex
+        && r.asset?.assetId === e.asset!.assetId && r.xcmDir === (out ? 'out' : 'in'))
+      if (!row) continue
+      e.kind = 'cross-chain'
+      e.direction = row.xcmDir
+      e.eventIndex = row.eventIndex ?? e.eventIndex
+      e.linkable = true
+      const account = out ? row.destAccount : row.fromAccount
+      e.remote = {
+        chain: (out ? row.destChain : row.fromChain) ?? null,
+        address: account?.address ?? null,
+        url: account?.subscanUrl ?? null,
+        bridge: row.bridge ?? null,
+      }
+      e.counterparty = null
     }
 
     // Chronological order for rendering.

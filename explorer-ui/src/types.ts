@@ -778,6 +778,8 @@ export interface ValueEvent {
   valueUsd: number
   asset: AssetRef | null
   counterparty: AccountRef | null
+  // A cross-chain marker's other end: the chain, the account there, the bridge.
+  remote?: { chain: string | null; address: string | null; url: string | null; bridge: string | null }
   // Cross-chain flow direction (inbound credit vs outbound send).
   direction?: 'in' | 'out'
   // false when a cross-chain marker has no resolvable detail row → render unlinked.

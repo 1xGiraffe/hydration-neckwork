@@ -90,13 +90,19 @@ function valueEventTip(ev: ValueEvent): ReactNode {
       <span className="t-k" style={{ color: 'var(--mk)' }}>{kindLabel}</span>
       <span className="t-p">{F.usd(ev.valueUsd)}</span>
     </div>
-    {(pair || ev.asset || (dir && ev.counterparty) || (ev.kind === 'dca' && ev.dcaTrades != null)) && (
+    {(pair || ev.asset || (dir && (ev.counterparty || ev.remote)) || (ev.kind === 'dca' && ev.dcaTrades != null)) && (
       <div className="apx-mark-row">
         {pair || (ev.asset && <span className="trade-leg">
           <AssetIcon assetId={ev.asset.assetId} iconAssetId={ev.asset.iconAssetId} iconAssetIds={ev.asset.iconAssetIds} symbol={ev.asset.symbol} size={16} parachainId={ev.asset.parachainId} origin={ev.asset.origin} />
           {' '}<span className="mono">{ev.amount != null ? `${F.amount(ev.amount, ev.asset.decimals)} ` : ''}{ev.asset.symbol}</span>
         </span>)}
-        {dir && ev.counterparty && <><span className="muted">{dir}</span><AddrPill account={ev.counterparty} noCopy /></>}
+        {dir && ev.remote && (ev.remote.chain || ev.remote.address) && <>
+          <span className="muted">{dir}</span>
+          {ev.remote.chain && <span>{ev.remote.chain}</span>}
+          {ev.remote.address && <span className="mono">{F.shortAddr(ev.remote.address)}</span>}
+          {ev.remote.bridge && <span className="muted">via {ev.remote.bridge}</span>}
+        </>}
+        {dir && !ev.remote && ev.counterparty && <><span className="muted">{dir}</span><AddrPill account={ev.counterparty} noCopy /></>}
         {ev.kind === 'dca' && ev.dcaTrades != null && <span className="muted">{F.int(ev.dcaTrades)} trades</span>}
       </div>
     )}
