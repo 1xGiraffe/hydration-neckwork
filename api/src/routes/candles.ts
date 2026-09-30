@@ -8,6 +8,7 @@ import { queryCrossPairCandles } from '../services/crossPair.ts'
 import type { CrossCandle } from '../services/crossPair.ts'
 import { queryTradeVolumeDetails, queryTradeVolumeSummaries } from '../services/tradeVolumeService.ts'
 import type { ApiCandle } from '../types.ts'
+import { PAIR_CHART_INTERVALS, PAIR_CHART_MAX_CANDLES, pairChart } from '../services/pairChartService.ts'
 
 const intervalsArray = Object.keys(INTERVAL_VIEW_MAP) as [OHLCVInterval, ...OHLCVInterval[]]
 const uint32 = z.coerce.number().int().min(0).max(0xffff_ffff)
@@ -79,7 +80,24 @@ function attachOmniwatchSummaries(
   })
 }
 
+const pairChartQuery = z.object({
+  base: uint32,
+  quote: uint32,
+  interval: z.enum(PAIR_CHART_INTERVALS),
+  count: z.coerce.number().int().min(10).max(PAIR_CHART_MAX_CANDLES).default(120),
+})
+
 export async function candlesRoutes(fastify: FastifyInstance, opts: { client: ClickHouseClient }) {
+  // The explorer's pair chart (the intent page draws a limit order against its
+  // market): any registry asset, aliases resolved to the series that prices them.
+  fastify.get('/explorer/pair-chart', async (request, reply) => {
+    const parsed = pairChartQuery.safeParse(request.query)
+    if (!parsed.success) return reply.status(400).send({ error: 'Invalid query parameters', details: parsed.error.issues })
+    const { base, quote, interval, count } = parsed.data
+    if (base === quote) return reply.status(400).send({ error: 'base and quote must be different assets' })
+    return pairChart(opts.client, base, quote, interval, count)
+  })
+
   fastify.get('/candles', async (request, reply) => {
     const parsed = querySchema.safeParse(request.query)
     if (!parsed.success) {

@@ -471,6 +471,12 @@ export interface IntentOrderDetail {
   limitMarketRatio: number | null
   links: { submission: { block: number; extrinsicIndex: number | null }; solutions: { block: number; extrinsicIndex: number | null }[] }
 }
+// One pair's chart candles (quote per base; `t` is the bucket's open, unix seconds).
+// `baseSeries`/`quoteSeries` name the series each leg was read from (aUSDC reads USDC).
+export interface PairChart {
+  baseSeries: number; quoteSeries: number; interval: string
+  candles: { t: number; o: number; h: number; l: number; c: number }[]
+}
 // One `ICE.submit_solution` extrinsic's outcome: the fills it settled, the pot's own
 // trades that routed the unmatched remainder, and the fee it swept.
 export interface IceSolutionPanel { intentsExecuted: number; tradesExecuted: number; score: string; builtAt: number; fills: ActivityRow[]; potTrades: ActivityRow[]; feeSwept: { asset: AssetRef; amount: string; valueUsd: number | null }[]; matchedInUsd: number | null; routedInUsd: number | null }
