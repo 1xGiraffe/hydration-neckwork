@@ -11,6 +11,7 @@ import {
   type RuleMatch, type ThresholdInput, type ViewerTag,
   recheckWindow,
 } from '../src/notifications/evaluator.ts'
+import type { MatchPayload } from '../src/notifications/evaluator.ts'
 import { renderNotification } from '../src/notifications/render.ts'
 import { normalizeAddress } from '../src/services/addressIdentity.ts'
 import type { NotificationRule } from '../src/notifications/notificationStore.ts'
@@ -607,9 +608,23 @@ describe('renderMatch', () => {
     const unknown = cap({ assetId: null, symbol: null })
     expect(unknown.title).toContain('0x531a…0f99a')
     expect(unknown.url).toMatch(/\/security\/money-market$/)
-    // A flip the cap itself caused says so, in the direction it moved.
-    expect(cap({ used: 400_000, cap: 300_000, capChangedFrom: 500_000 }).body).toContain('lowered from 500k to 300k HOLLAR')
-    expect(cap({ full: false, used: 400_000, cap: 600_000, capChangedFrom: 300_000 }).body).toContain('raised from 300k to 600k HOLLAR')
+  })
+
+  it('names a cap change by its direction, and the room it left', () => {
+    const r = rule('mm-cap', { market: 'gigahdx', assetId: 222 })
+    const change = (p: Partial<Extract<MatchPayload, { lane: 'mm-cap-change' }>>) => renderNotification(renderMatch(match({
+      lane: 'mm-cap-change', market: 'GIGAHDX', side: 'borrow', assetId: 222, symbol: 'HOLLAR',
+      reserveAddress: '0x531a654d1696ed52e7275a8cede955e82620f99a', from: 500_000, to: 505_555.5, free: 5_555.5, ...p,
+    } as MatchPayload, 'mm-cap'), r, noViewerTag))
+    const raised = change({})
+    expect(raised.title).toBe('HOLLAR borrow cap raised to 506k · GIGAHDX')
+    expect(raised.body).toContain('500k HOLLAR')
+    expect(raised.body).toContain('5.56k HOLLAR was free to borrow right after')
+    expect(change({ from: 500_000, to: 300_000, free: 0 }).title).toBe('HOLLAR borrow cap lowered to 300k · GIGAHDX')
+    expect(change({ from: 500_000, to: 300_000, free: 0 }).body).toContain('Nothing was free under it right after')
+    expect(change({ from: null, to: 1_000_000, free: null, side: 'supply' }).title).toBe('HOLLAR supply cap set to 1M · GIGAHDX')
+    expect(change({ from: 1_000_000, to: null, free: null, side: 'supply' }).title).toBe('HOLLAR supply cap removed · GIGAHDX')
+    expect(change({ free: null }).body).not.toContain('free')
   })
 
   it('says how an enactment went, not just that it happened', () => {

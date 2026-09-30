@@ -40,9 +40,15 @@ const healthFactors = new Map<string, number | null>()
 // The cap lane's source, replaced whole: the reserve list is the thing under
 // test, and the real reader is a ClickHouse query.
 let capStates: ReserveCapState[] = []
+let capChanges: CapChange[] = []
 vi.mock('../src/services/moneyMarketCaps.ts', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/services/moneyMarketCaps.ts')>()
-  return { ...actual, moneyMarketCapStates: async () => capStates }
+  return {
+    ...actual,
+    moneyMarketCapStates: async () => capStates,
+    // The window is the lane's own; hand back only what falls inside it, as the SQL does.
+    capChangesInWindow: async (_client: unknown, w: { from: number; to: number }) => capChanges.filter(c => c.blockHeight > w.from && c.blockHeight <= w.to),
+  }
 })
 
 import {
@@ -54,7 +60,7 @@ import {
 } from '../src/notifications/notificationStore.ts'
 import { resetDeliveryStateForTests } from '../src/notifications/delivery.ts'
 import { mmMarkets, type ActivityRow } from '../src/services/explorerService.ts'
-import type { ReserveCapState } from '../src/services/moneyMarketCaps.ts'
+import type { CapChange, ReserveCapState } from '../src/services/moneyMarketCaps.ts'
 import { fakeClient, insertedRows, type FakeClient } from './helpers/userFakes.ts'
 
 const OWNER = '0x' + 'aa'.repeat(32)
@@ -92,6 +98,7 @@ beforeEach(async () => {
   healthFactorCalls.length = 0
   healthFactors.clear()
   capStates = []
+  capChanges = []
   tables = { raw_ingestion_state: [{ head: 1_000 }], raw_events: [], raw_extrinsics: [], referendum_lifecycle_events: [] }
   client = fakeClient(tables as unknown as Record<string, Record<string, unknown>[]>)
   initNotifications(client)
@@ -428,15 +435,19 @@ describe('money-market cap lane', () => {
   // A rule's market is matched to reserves by pool address, so the fixtures
   // sit on the configured markets' real pool proxies.
   const poolOf = (market: string) => mmMarkets().find(m => m.key === market)!.poolProxy
-  const hollarOn = (market: string, debt: bigint, borrowCap: bigint | null = 500_000n * E18): ReserveCapState => ({
+  // `level` is the facilitator bucket's level — what a HOLLAR borrow side is held
+  // against. Debt runs above it by the accrued interest the bucket never counts.
+  const hollarOn = (market: string, level: bigint, borrowCap: bigint | null = 500_000n * E18, debt = level + level / 50n): ReserveCapState => ({
     poolAddress: poolOf(market), reserveAddress: HOLLAR,
     assetId: 222, symbol: 'HOLLAR', decimals: 18, supplied: 0n, debt,
-    borrowCap, borrowCapSource: borrowCap == null ? null : 'facilitator', supplyCap: null,
+    borrowUsed: level, borrowCap, borrowCapSource: borrowCap == null ? null : 'facilitator', supplyCap: null,
+    aTokenAddress: '0x116d7bb8e4e2a4c932b4d36c115d4122dc360462',
   })
   const dotOnCore = (supplied: bigint): ReserveCapState => ({
     poolAddress: poolOf('core'), reserveAddress: '0x0000000000000000000000000000000100000005',
-    assetId: 5, symbol: 'DOT', decimals: 10, supplied, debt: 0n,
+    assetId: 5, symbol: 'DOT', decimals: 10, supplied, debt: 0n, borrowUsed: 0n,
     borrowCap: 17_000_000n * 10n ** 10n, borrowCapSource: 'poolConfigurator', supplyCap: 25_000_000n * 10n ** 10n,
+    aTokenAddress: null,
   })
   const snapshotTicks = async () => { for (let i = 0; i < 5; i++) await runEvaluatorTick() }
 
@@ -484,8 +495,8 @@ describe('money-market cap lane', () => {
 
   // The headroom is read against the cap AS IT STANDS: governance lowering a
   // cap under what is already borrowed fills the reserve as surely as borrowing
-  // does, and raising it opens the reserve as surely as a repay — and the
-  // message says which it was.
+  // does, and raising it opens the reserve as surely as a repay. The cap's own
+  // move is reported by the change rows (below), so the flip does not restate it.
   it('announces a cap lowered under current use, and one raised back above it', async () => {
     capStates = [hollarOn('gigahdx', 400_000n * E18, 500_000n * E18)]
     await createRule(OWNER, { kind: 'mm-cap', params: { market: 'gigahdx' } })
@@ -495,19 +506,50 @@ describe('money-market cap lane', () => {
     await snapshotTicks()
     expect(inbox()).toHaveLength(1)
     expect(String(inbox()[0].title)).toBe('HOLLAR borrow cap reached · GIGAHDX')
-    expect(String(inbox()[0].body)).toContain('lowered from 500k')
     capStates = [hollarOn('gigahdx', 400_000n * E18, 600_000n * E18)]
     await snapshotTicks()
     expect(inbox()).toHaveLength(2)
     expect(String(inbox()[1].title)).toBe('HOLLAR can be borrowed again · GIGAHDX')
-    expect(String(inbox()[1].body)).toContain('raised from 300k')
-    // A cap raised in the same breath as a whale filled it did not cause the
-    // fill, so the message does not say it did.
-    capStates = [hollarOn('gigahdx', 699_800n * E18, 700_000n * E18)]
+    expect(String(inbox()[1].body)).not.toMatch(/raised|lowered/)
+  })
+
+  // GIGAHDX on 2026-09-30: 511k of debt against a bucket of exactly 500k minted,
+  // then a raise to 505,555.5. Judged by debt the side never looked open; judged by
+  // the bucket's level it is open the moment the capacity clears it.
+  it('holds a facilitator bucket against its minted level, not its debt', async () => {
+    capStates = [hollarOn('gigahdx', 500_000n * E18, 500_000n * E18, 511_235n * E18)]
+    await createRule(OWNER, { kind: 'mm-cap', params: { market: 'gigahdx', assetId: 222 } })
+    await runEvaluatorTick()
+    setHead(1_030)
+    capStates = [hollarOn('gigahdx', 500_000n * E18, 505_555n * E18, 511_235n * E18)]
     await snapshotTicks()
-    expect(inbox()).toHaveLength(3)
-    expect(String(inbox()[2].title)).toBe('HOLLAR borrow cap reached · GIGAHDX')
-    expect(String(inbox()[2].body)).not.toContain('raised')
+    expect(inbox().map(n => String(n.title))).toContain('HOLLAR can be borrowed again · GIGAHDX')
+  })
+
+  // A cap CHANGE is a row: every one is reported, whatever the state looked like
+  // at the ticks around it — the 18-second opening a 30-second poll never saw.
+  it('reports every cap change in its window once, with the room it left', async () => {
+    capStates = [hollarOn('gigahdx', 500_000n * E18, 505_555n * E18), dotOnCore(20_000_000n * 10n ** 10n)]
+    await createRule(OWNER, { kind: 'mm-cap', params: { market: 'gigahdx', assetId: 222 } })
+    await runEvaluatorTick()                       // seeds the lane's cursor at the head
+    // A change far BELOW the cursor is history (a backfill, a repair): never reported.
+    capChanges = [{ blockHeight: 500, eventIndex: 1, poolAddress: poolOf('gigahdx'), reserveAddress: HOLLAR, side: 'borrow', source: 'facilitator', from: 400_000n * E18, to: 500_000n * E18, usedAfter: 400_000n * E18 }]
+    setHead(1_030)
+    capChanges.push(
+      { blockHeight: 1_010, eventIndex: 6, poolAddress: poolOf('gigahdx'), reserveAddress: HOLLAR, side: 'borrow', source: 'facilitator', from: 500_000n * E18, to: 505_555_500_000_000_000_000_000n, usedAfter: 500_000n * E18 },
+      // Another market's change: outside the rule.
+      { blockHeight: 1_012, eventIndex: 2, poolAddress: poolOf('core'), reserveAddress: '0x0000000000000000000000000000000100000005', side: 'supply', source: 'poolConfigurator', from: 25_000_000n * 10n ** 10n, to: 30_000_000n * 10n ** 10n, usedAfter: null },
+    )
+    await runEvaluatorTick()
+    const changes = inbox().filter(n => String(n.title).includes('cap raised'))
+    expect(changes).toHaveLength(1)
+    expect(String(changes[0].title)).toBe('HOLLAR borrow cap raised to 506k · GIGAHDX')
+    expect(String(changes[0].body)).toContain('500k HOLLAR')
+    expect(String(changes[0].body)).toContain('5.56k HOLLAR')
+    // Re-read by the next window's recheck: its identity drops it.
+    setHead(1_060)
+    await runEvaluatorTick()
+    expect(inbox().filter(n => String(n.title).includes('cap raised'))).toHaveLength(1)
   })
 
   // A facilitator bucket wound down to zero is a cap of zero, not "no cap":
@@ -521,7 +563,7 @@ describe('money-market cap lane', () => {
     await snapshotTicks()
     expect(inbox()).toHaveLength(1)
     expect(String(inbox()[0].title)).toBe('HOLLAR borrow cap reached · BIL')
-    expect(String(inbox()[0].body)).toContain('lowered from 250k to 0 HOLLAR')
+    expect(String(inbox()[0].body)).toContain('of the 0 HOLLAR cap')
   })
 
   // A side that leaves the rule's scope — its cap removed, its reserve

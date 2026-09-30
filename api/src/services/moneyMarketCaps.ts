@@ -27,6 +27,14 @@ import { displayDescriptor, knownExplorerAsset } from './explorerAssets.ts'
 //    incumbent endpoint served. Unlike an Aave cap, a bucket has no zero
 //    exemption (GHO's `level + amount <= capacity`): capacity 0 is a frozen
 //    facilitator, not "no cap".
+//  * WHAT A BUCKET HOLDS is its LEVEL — the HOLLAR the facilitator has minted,
+//    moved only by `FacilitatorBucketLevelUpdated` on a borrow or a repaid
+//    principal, never by interest (repaid interest goes to the treasury). So
+//    `level <= capacity` always holds, while the reserve's DEBT (principal plus
+//    accrued interest) runs past the capacity: GIGAHDX on 2026-09-30 held 511,235
+//    of debt against a 505,555.5 bucket that was exactly full. Judging the bucket
+//    by its debt read it as full for good, through every opening a capacity raise
+//    made, so a facilitator's borrow side is held against its level.
 //  * A FACILITATOR IS A MARKET'S HOLLAR ATOKEN. Verified against
 //    `atoken_reserve_map`: 0x8c0f3b96… is the core market's HOLLAR aToken,
 //    0x116d7bb8… GIGAHDX's and 0xef313c2b… BIL's. That is what attributes a
@@ -102,6 +110,72 @@ SELECT lower(JSONExtractString(decoded_args_json, 'facilitatorAddress')) AS faci
 FROM price_data.raw_money_market_reserves
 WHERE raw_money_market_reserves.event_name IN ('FacilitatorAdded', 'FacilitatorBucketCapacityUpdated')
 GROUP BY facilitator`
+
+/**
+ * The newest bucket level per facilitator at or above a block — read
+ * incrementally (facilitatorLevels): the level events number over a million, and
+ * a full pass (~0.5 s, 770 MiB) on every cap-state refresh is not affordable, while
+ * a pass above the last block seen reads a few rows on the sort key.
+ */
+const FACILITATOR_LEVELS_SQL = `-- mm:caps:facilitator-level
+SELECT lower(JSONExtractString(decoded_args_json, 'facilitatorAddress')) AS facilitator,
+       argMax(JSONExtractString(decoded_args_json, 'newLevel'), tuple(block_height, event_index, ingested_at)) AS level,
+       argMax(block_height, tuple(block_height, event_index, ingested_at)) AS last_block,
+       argMax(event_index, tuple(block_height, event_index, ingested_at)) AS last_index
+FROM price_data.raw_money_market_reserves
+WHERE raw_money_market_reserves.event_name = 'FacilitatorBucketLevelUpdated'
+  AND raw_money_market_reserves.block_height >= {from:UInt32}
+GROUP BY facilitator`
+
+/** Every facilitator capacity change in a block window, collapsed on its replay identity. */
+const FACILITATOR_CAPACITY_CHANGES_SQL = `-- mm:caps:facilitator-changes
+SELECT block_height, event_index,
+       lower(JSONExtractString(args, 'facilitatorAddress')) AS facilitator,
+       JSONExtractString(args, 'oldCapacity') AS old_cap,
+       JSONExtractString(args, 'newCapacity') AS new_cap
+FROM (
+  SELECT block_height, event_index, argMax(decoded_args_json, ingested_at) AS args
+  FROM price_data.raw_money_market_reserves
+  WHERE raw_money_market_reserves.event_name = 'FacilitatorBucketCapacityUpdated'
+    AND raw_money_market_reserves.block_height > {from:UInt32} AND raw_money_market_reserves.block_height <= {to:UInt32}
+  GROUP BY block_height, event_index
+)
+ORDER BY block_height, event_index`
+
+/**
+ * A facilitator's level right after a block's event: the newest level event at or
+ * before it, looked back over a bounded span (a bucket that moved in none of those
+ * blocks is left without one rather than scanned for).
+ */
+const FACILITATOR_LEVEL_AT_SQL = `-- mm:caps:facilitator-level-at
+SELECT argMax(JSONExtractString(decoded_args_json, 'newLevel'), tuple(block_height, event_index, ingested_at)) AS level,
+       count() AS n
+FROM price_data.raw_money_market_reserves
+WHERE raw_money_market_reserves.event_name = 'FacilitatorBucketLevelUpdated'
+  AND raw_money_market_reserves.block_height BETWEEN {from:UInt32} AND {block:UInt32}
+  AND lower(JSONExtractString(decoded_args_json, 'facilitatorAddress')) = {facilitator:String}
+  AND (raw_money_market_reserves.block_height < {block:UInt32} OR raw_money_market_reserves.event_index <= {index:UInt32})`
+const LEVEL_LOOKBACK_BLOCKS = 100_000
+
+/** Every configurator cap change in a block window, old and new cap decoded from the data words. */
+const CAP_CHANGES_SQL = `-- mm:caps:aave-changes
+SELECT block_height, event_index, log_configurator AS configurator,
+       if(log_topic0 = '${SUPPLY_CAP_TOPIC}', 'supply', 'borrow') AS kind,
+       concat('0x', right(log_topics[2], 40)) AS asset,
+       toString(reinterpretAsUInt256(reverse(unhex(substring(right(log_data, 128), 1, 64))))) AS old_cap,
+       toString(reinterpretAsUInt256(reverse(unhex(right(log_data, 64))))) AS new_cap
+FROM (
+  SELECT block_height, event_index,
+         argMax(lower(contract_address), ingested_at) AS log_configurator,
+         argMax(ifNull(topic0, ''), ingested_at) AS log_topic0,
+         argMax(arrayMap(t -> lower(t), topics), ingested_at) AS log_topics,
+         argMax(data, ingested_at) AS log_data
+  FROM price_data.raw_evm_logs
+  WHERE raw_evm_logs.topic0 IN ('${SUPPLY_CAP_TOPIC}', '${BORROW_CAP_TOPIC}')
+    AND raw_evm_logs.block_height > {from:UInt32} AND raw_evm_logs.block_height <= {to:UInt32}
+  GROUP BY block_height, event_index
+)
+ORDER BY block_height, event_index`
 
 /**
  * Current per-reserve state joined to the reserve map that names its market.
@@ -366,10 +440,18 @@ export interface ReserveCapState {
   decimals: number
   supplied: bigint
   debt: bigint
+  /**
+   * What the borrow side holds AGAINST its cap: a facilitator bucket's level (the
+   * HOLLAR minted, without interest), else the debt. Null for a facilitator whose
+   * level is not known — its side is then not judged, rather than judged by debt.
+   */
+  borrowUsed: bigint | null
   borrowCap: bigint | null
   /** Decides what a borrow cap of 0 means: a facilitator bucket of 0 is frozen, an Aave 0 is "no cap". */
   borrowCapSource: ReserveCaps['borrowCapSource']
   supplyCap: bigint | null
+  /** The reserve's aToken — for a HOLLAR reserve, the facilitator its bucket belongs to. */
+  aTokenAddress: string | null
 }
 
 /** A ClickHouse integer column as a bigint; anything that is not a plain integer string reads as 0. */
@@ -392,8 +474,8 @@ export const rawUnits = (value: string | number | null | undefined): bigint => {
  */
 export function moneyMarketCapStates(client: ClickHouseClient, assetIdOf: (reserveAddress: string) => number | null): Promise<ReserveCapState[]> {
   return cachedSwr('mm:cap-states', 60_000, 300_000, async () => {
-    const [rows, capEvents, facilitators] = await Promise.all([
-      readReserveStateRows(client), readCapEvents(client), readFacilitatorCaps(client),
+    const [rows, capEvents, facilitators, levels] = await Promise.all([
+      readReserveStateRows(client), readCapEvents(client), readFacilitatorCaps(client), facilitatorLevels(client),
     ])
     const listed = rows.filter(row => Number(row.listed) === 1).map(row => {
       const assetId = assetIdOf(row.reserve_address)
@@ -409,16 +491,126 @@ export function moneyMarketCapStates(client: ClickHouseClient, assetIdOf: (reser
     })), capEvents, facilitators)
     return listed.map(({ row, assetId, symbol, decimals }): ReserveCapState => {
       const cap = caps.get(reserveKey(row.pool_address, row.reserve_address))
+      const aTokenAddress = row.atoken || null
+      const debt = rawUnits(row.debt)
       return {
         poolAddress: row.pool_address,
         reserveAddress: row.reserve_address,
         assetId, symbol, decimals: decimals ?? 18,
         supplied: rawUnits(row.supplied),
-        debt: rawUnits(row.debt),
+        debt,
+        borrowUsed: cap?.borrowCapSource === 'facilitator' ? (aTokenAddress ? levels.get(aTokenAddress) ?? null : null) : debt,
         borrowCap: cap?.borrowCap ?? null,
         borrowCapSource: cap?.borrowCapSource ?? null,
         supplyCap: cap?.supplyCap ?? null,
+        aTokenAddress,
       }
     })
   })
+}
+
+/* ============ facilitator levels ============ */
+
+// The newest level per facilitator, kept across refreshes and topped up from the
+// last block seen (inclusive, so a row landing late in that block still counts).
+// Process-lifetime: after a restart the first read is the one full pass.
+const levelCache = new Map<string, { level: bigint; block: number; index: number }>()
+let levelWatermark = 0
+
+/** Every facilitator's current bucket level, raw. */
+export async function facilitatorLevels(client: ClickHouseClient): Promise<Map<string, bigint>> {
+  const res = await client.query({ query: FACILITATOR_LEVELS_SQL, query_params: { from: levelWatermark }, format: 'JSONEachRow' })
+  const rows = await res.json<{ facilitator: string; level: string; last_block: number | string; last_index: number | string }>()
+  let watermark = levelWatermark
+  for (const row of rows) {
+    const at = { level: rawUnits(row.level), block: Number(row.last_block), index: Number(row.last_index) }
+    const known = levelCache.get(row.facilitator)
+    if (!known || at.block > known.block || (at.block === known.block && at.index >= known.index)) levelCache.set(row.facilitator, at)
+    watermark = Math.max(watermark, at.block)
+  }
+  levelWatermark = watermark
+  return new Map([...levelCache].map(([facilitator, at]) => [facilitator, at.level]))
+}
+
+/* ============ cap changes ============ */
+
+/** One cap of one reserve side moving, at the block and event that moved it — all amounts raw. */
+export interface CapChange {
+  blockHeight: number
+  eventIndex: number
+  poolAddress: string
+  reserveAddress: string
+  side: 'borrow' | 'supply'
+  source: 'facilitator' | 'poolConfigurator'
+  /** Null for Aave's 0 "no cap" sentinel; a facilitator bucket of 0 is frozen, so it stays 0. */
+  from: bigint | null
+  to: bigint | null
+  /** A facilitator's bucket level right after the change, when it is known; null otherwise. */
+  usedAfter: bigint | null
+}
+
+const configuratorEvents = (client: ClickHouseClient) => cachedSwr('mm:cap-events', 60_000, 300_000, () => readCapEvents(client))
+
+/**
+ * Every cap change in `(from, to]` on a listed reserve of `reserves` — the rows
+ * the cap alert reports a cap moving from, so none is missed between two readings
+ * of the current state (a capacity raise re-borrowed within 18 s never showed as
+ * open to a 30 s poll). A change is attributed to its market the way the current
+ * caps are: a facilitator IS a market's HOLLAR aToken, a configurator is tied to
+ * its market by the reserves it initialized (or by an asset only one market lists).
+ */
+export async function capChangesInWindow(
+  client: ClickHouseClient, window: { from: number; to: number }, reserves: readonly ReserveCapState[],
+): Promise<CapChange[]> {
+  const params = { from: window.from, to: window.to }
+  const [facilitatorRes, configuratorRes, events] = await Promise.all([
+    client.query({ query: FACILITATOR_CAPACITY_CHANGES_SQL, query_params: params, format: 'JSONEachRow' }),
+    client.query({ query: CAP_CHANGES_SQL, query_params: params, format: 'JSONEachRow' }),
+    configuratorEvents(client),
+  ])
+  const byAToken = new Map(reserves.filter(r => r.aTokenAddress).map(r => [r.aTokenAddress as string, r]))
+  const aTokenPool = new Map([...byAToken].map(([aToken, r]) => [aToken, r.poolAddress]))
+  const configuratorPool = configuratorMarkets(events, aTokenPool)
+  const out: CapChange[] = []
+
+  for (const row of await facilitatorRes.json<{ block_height: number | string; event_index: number | string; facilitator: string; old_cap: string; new_cap: string }>()) {
+    const reserve = byAToken.get(row.facilitator)
+    if (!reserve || reserve.borrowCapSource !== 'facilitator') continue
+    const from = rawUnits(row.old_cap), to = rawUnits(row.new_cap)
+    if (from === to) continue
+    const blockHeight = Number(row.block_height), eventIndex = Number(row.event_index)
+    const levelRes = await client.query({
+      query: FACILITATOR_LEVEL_AT_SQL,
+      query_params: { facilitator: row.facilitator, block: blockHeight, index: eventIndex, from: Math.max(0, blockHeight - LEVEL_LOOKBACK_BLOCKS) },
+      format: 'JSONEachRow',
+    })
+    const level = (await levelRes.json<{ level: string; n: number | string }>())[0]
+    out.push({
+      blockHeight, eventIndex, poolAddress: reserve.poolAddress, reserveAddress: reserve.reserveAddress,
+      side: 'borrow', source: 'facilitator', from, to,
+      usedAfter: level && Number(level.n) > 0 ? rawUnits(level.level) : null,
+    })
+  }
+
+  for (const row of await configuratorRes.json<{ block_height: number | string; event_index: number | string; configurator: string; kind: 'supply' | 'borrow'; asset: string; old_cap: string; new_cap: string }>()) {
+    const candidates = reserves.filter(r => r.reserveAddress === row.asset)
+    const pool = configuratorPool.get(row.configurator) ?? (candidates.length === 1 ? candidates[0].poolAddress : null)
+    const reserve = pool ? candidates.find(r => r.poolAddress === pool) : undefined
+    // Aave caps are whole tokens; a reserve whose decimals the registry does not
+    // know has no cap to compare (see reserveCaps), so no change to report either.
+    if (!reserve || reserve.assetId == null || !knownExplorerAsset(reserve.assetId)) continue
+    // A HOLLAR reserve's enforced borrow limit is its facilitator bucket; an Aave
+    // borrow cap set beside it is not what binds, so it is not reported as one.
+    if (row.kind === 'borrow' && reserve.borrowCapSource === 'facilitator') continue
+    const unit = 10n ** BigInt(reserve.decimals)
+    const scaled = (whole: bigint): bigint | null => (whole === 0n ? null : whole * unit)
+    const from = scaled(rawUnits(row.old_cap)), to = scaled(rawUnits(row.new_cap))
+    if (from === to) continue
+    out.push({
+      blockHeight: Number(row.block_height), eventIndex: Number(row.event_index),
+      poolAddress: reserve.poolAddress, reserveAddress: reserve.reserveAddress,
+      side: row.kind, source: 'poolConfigurator', from, to, usedAfter: null,
+    })
+  }
+  return out.sort((a, b) => a.blockHeight - b.blockHeight || a.eventIndex - b.eventIndex)
 }
