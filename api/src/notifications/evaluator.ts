@@ -9,7 +9,7 @@ import {
   mmMarketByKey, mmReserveIdsForAsset,
   type AccountRef, type ActivityRow,
 } from '../services/explorerService.ts'
-import { capIsFull, moneyMarketCapStates, tokenAmount, type ReserveCapState } from '../services/moneyMarketCaps.ts'
+import { capChangesInWindow, capIsFull, moneyMarketCapStates, tokenAmount, type CapChange, type ReserveCapState } from '../services/moneyMarketCaps.ts'
 import { getSecurityDashboard, type SafetyEvent } from '../services/securityService.ts'
 import { isGenericReferendumTitle, referendumTitleFor } from '../services/referendumTitleService.ts'
 import { enactmentOutcomeFrom, referendumEnactmentTaskId } from '../services/governanceService.ts'
@@ -316,9 +316,13 @@ export type MatchPayload =
       full: boolean
       assetId: number | null; symbol: string | null; reserveAddress: string
       /** Whole tokens: what the side holds now, and the cap it is held against. */
-      used: number; cap: number
-      /** Whole tokens: the cap at the previous reading, when the flip was the cap's own doing. */
-      capChangedFrom?: number }
+      used: number; cap: number }
+  | { lane: 'mm-cap-change'; market: string; side: CapSide
+      assetId: number | null; symbol: string | null; reserveAddress: string
+      /** Whole tokens; null = no cap (Aave's 0 sentinel) on that side of the change. */
+      from: number | null; to: number | null
+      /** Whole tokens free under the new cap right after the change; null when unknown. */
+      free: number | null }
   | { lane: 'dca-start'; row: DcaScheduleRow; hourlyUsd: number; perExecutionUsd: number
       /** Budget of the sold asset in USD; null for an unbounded schedule. */
       totalUsd: number | null
@@ -757,7 +761,7 @@ export function evaluateExtrinsics(rows: readonly ChainExtrinsicRow[], rules: re
 // The kinds the row lane runs, in the order one tick visits them.
 export type RowLaneKind =
   | 'account-activity' | 'large-trade' | 'large-transfer' | 'protocol-revenue' | 'liquidation'
-  | 'safety' | 'referendum' | 'tc-motion' | 'event' | 'extrinsic'
+  | 'safety' | 'referendum' | 'tc-motion' | 'event' | 'extrinsic' | 'mm-cap'
 /**
  * Block alerts: a rule fires once its height is at or below `reached` — the
  * lower of the live pipeline head (which follows the FINALIZED chain) and the
@@ -789,7 +793,7 @@ export function evaluateBlockRules(rules: readonly NotificationRule[], reached: 
   return { matches, expired }
 }
 
-export const ROW_LANE_KINDS: RowLaneKind[] = ['account-activity', 'large-trade', 'large-transfer', 'protocol-revenue', 'liquidation', 'safety', 'referendum', 'tc-motion', 'event', 'extrinsic']
+export const ROW_LANE_KINDS: RowLaneKind[] = ['account-activity', 'large-trade', 'large-transfer', 'protocol-revenue', 'liquidation', 'safety', 'referendum', 'tc-motion', 'event', 'extrinsic', 'mm-cap']
 
 /* ============ pure snapshot-lane core ============ */
 
@@ -1286,9 +1290,19 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       const body: (string | RenderPart[])[] = [p.full
         ? [textPart(borrow ? 'Borrowed' : 'Supplied'), amountPart(p.used, name), textPart('of the'), amountPart(p.cap, name), textPart('cap.')]
         : [amountPart(Math.max(0, p.cap - p.used), name), textPart(`of the ${compactAmount(p.cap)} cap is free to ${borrow ? 'borrow' : 'supply'}.`)]]
-      // The cap moving is as much an event as the balance moving; say which it was.
-      if (p.capChangedFrom != null && p.capChangedFrom !== p.cap) {
-        body.push([textPart(`The cap was ${p.capChangedFrom > p.cap ? 'lowered' : 'raised'} from ${compactAmount(p.capChangedFrom)} to`), amountPart(p.cap, name), textPart('.')])
+      return { title: [textPart(title)], body, path: p.assetId != null ? `/asset/${p.assetId}` : '/security/money-market' }
+    }
+    case 'mm-cap-change': {
+      const name = p.symbol ?? (p.assetId != null ? `#${p.assetId}` : shortAddress(p.reserveAddress))
+      const verb = p.to == null ? 'removed' : p.from == null ? 'set' : p.to > p.from ? 'raised' : 'lowered'
+      const title = p.to == null ? `${name} ${p.side} cap removed · ${p.market}` : `${name} ${p.side} cap ${verb} to ${compactAmount(p.to)} · ${p.market}`
+      const body: (string | RenderPart[])[] = [p.from == null
+        ? [textPart(p.to == null ? 'It had no cap before either.' : 'It had no cap before.')]
+        : [textPart(`${verb === 'removed' ? 'It was' : 'From'}`), amountPart(p.from, name), textPart(p.to == null ? 'before.' : '.')]]
+      if (p.free != null && p.to != null) {
+        body.push(p.free > 0
+          ? [amountPart(p.free, name), textPart(`was free to ${p.side === 'borrow' ? 'borrow' : 'supply'} right after.`)]
+          : [textPart('Nothing was free under it right after.')])
       }
       return { title: [textPart(title)], body, path: p.assetId != null ? `/asset/${p.assetId}` : '/security/money-market' }
     }
@@ -1653,7 +1667,6 @@ export function resetEvaluatorForTests(): void {
   lastHead = null
   seenOriginQueued.clear()
   originQueuedMemo.clear()
-  lastCapSeen.clear()
   for (const k of Object.keys(counters) as (keyof typeof counters)[]) counters[k] = 0
 }
 
@@ -1855,6 +1868,13 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
       return { kind, matches: evaluateTcMotion(await queryWindowTcMotions(window), rules, window), window }
     case 'event':
       return { kind, matches: evaluateEvents(await queryWindowEvents(rules, window), rules, window), window }
+    case 'mm-cap':
+      // The cap CHANGES, as rows. The kind's full/open flips are current state
+      // and run on the snapshot rhythm (mmCapMatches); the two never describe the
+      // same thing, so nothing arrives twice. Re-read a little below the cursor:
+      // the log tables are not ordered against the head watermark, and a row seen
+      // twice is dropped by its identity.
+      return { kind, matches: await mmCapChangeMatches(rules, recheckWindow(window)), window }
     default:
       return { kind, matches: evaluateExtrinsics(await queryWindowExtrinsics(rules, window), rules, window), window }
   }
@@ -2895,19 +2915,14 @@ export type CapSide = typeof CAP_SIDES[number]
 // What one side of a reserve holds, against the cap it is held against — and
 // whether a cap of exactly 0 is Aave's "no cap" sentinel (a configurator cap)
 // or a frozen HOLLAR facilitator bucket.
-const capSideOf = (reserve: ReserveCapState, side: CapSide): { used: bigint; cap: bigint | null; zeroIsNoCap: boolean } =>
+// A facilitator's borrow side is held against its bucket LEVEL, never its debt
+// (see moneyMarketCaps): debt carries interest the bucket never counts, and read
+// against it GIGAHDX's HOLLAR stayed "full" through every opening a capacity raise
+// made. A side whose level is unknown is not judged (cap null).
+export const capSideOf = (reserve: ReserveCapState, side: CapSide): { used: bigint; cap: bigint | null; zeroIsNoCap: boolean } =>
   (side === 'borrow'
-    ? { used: reserve.debt, cap: reserve.borrowCap, zeroIsNoCap: reserve.borrowCapSource !== 'facilitator' }
+    ? { used: reserve.borrowUsed ?? 0n, cap: reserve.borrowUsed == null ? null : reserve.borrowCap, zeroIsNoCap: reserve.borrowCapSource !== 'facilitator' }
     : { used: reserve.supplied, cap: reserve.supplyCap, zeroIsNoCap: true })
-
-// The cap each reserve side had at the previous evaluation, so a flip the cap
-// itself caused — governance lowering it under what is borrowed, or raising it
-// back above — can say so. Process-lifetime rather than persisted: after a
-// restart the first flip states the numbers without the cause, which is a
-// smaller loss than persisting a second row per rule for a sentence. Rebuilt
-// from each snapshot whole, so a reserve that leaves it is forgotten.
-let lastCapSeen = new Map<string, bigint>()
-const capMemoKey = (reserve: ReserveCapState, side: CapSide) => `${reserve.poolAddress}:${reserve.reserveAddress}:${side}`
 
 /**
  * The cap kind: per rule, every capped side of every reserve in its market (or
@@ -2954,15 +2969,10 @@ async function mmCapMatches(): Promise<RuleMatch[]> {
     for (const flip of fired) {
       const s = sides.get(flip.key)
       if (!s || s.cap == null) continue
-      // The cap's own move is stated only when it points the way the flip went:
-      // a cap raised in the same window as a fill did not cause the fill.
-      const previousCap = lastCapSeen.get(capMemoKey(s.reserve, s.side))
-      const capMoved = previousCap != null && previousCap !== s.cap && (previousCap > s.cap) === flip.value
       matches.push(stateMatch(rule, `${s.side}:${s.reserve.reserveAddress}:${flip.value ? 'reached' : 'open'}:${flip.epoch}`, {
         lane: 'mm-cap', market: market.label, side: s.side, full: flip.value,
         assetId: s.reserve.assetId, symbol: s.reserve.symbol, reserveAddress: s.reserve.reserveAddress,
         used: tokenAmount(s.used, s.reserve.decimals), cap: tokenAmount(s.cap, s.reserve.decimals),
-        ...(capMoved ? { capChangedFrom: tokenAmount(previousCap, s.reserve.decimals) } : {}),
       }))
     }
     // The row is rebuilt from the sides that HAVE a state this tick (the same
@@ -2980,19 +2990,58 @@ async function mmCapMatches(): Promise<RuleMatch[]> {
     }
   }
 
-  // Remembered AFTER the rules ran, so this tick's flips compared against the
-  // cap the previous tick saw. Unlike the arm state and the bridge queue memo
-  // this is NOT deferred to the commit: it decides only whether a message can say
-  // "lowered from …", so a failed inbox write costs a phrase, never an alert.
-  const seen = new Map<string, bigint>()
-  for (const reserve of reserves) {
-    for (const side of CAP_SIDES) {
-      const { cap } = capSideOf(reserve, side)
-      if (cap != null) seen.set(capMemoKey(reserve, side), cap)
+  return matches
+}
+
+/** The market (by its pool proxy) and token scope one cap rule watches. */
+export function capRuleScope(p: RuleParams['mm-cap']): { poolProxy: string; label: string; wanted: Set<number> | null } | null {
+  const market = mmMarketByKey(p.market)
+  if (!market) return null
+  return { poolProxy: market.poolProxy, label: market.label, wanted: p.assetId == null ? null : new Set(mmReserveIdsForAsset(p.assetId)) }
+}
+
+/**
+ * Cap CHANGES as rows: every change in the window on a reserve of the rule's
+ * market (and token), identified by the event that made it — so a replay, an
+ * overlapping re-read or a restart delivers nothing twice, and a backfill below
+ * the cursor delivers nothing at all.
+ */
+export function evaluateCapChanges(
+  changes: readonly CapChange[], reserves: readonly ReserveCapState[], rules: readonly NotificationRule[], window: BlockWindow,
+): RuleMatch[] {
+  const byKey = new Map(reserves.map(r => [`${r.poolAddress}:${r.reserveAddress}`, r]))
+  const matches: RuleMatch[] = []
+  for (const rule of rules) {
+    if (rule.muted) continue
+    const scope = capRuleScope(rule.params as RuleParams['mm-cap'])
+    if (!scope) continue
+    for (const change of changes) {
+      if (!inWindow(change.blockHeight, window) || change.poolAddress.toLowerCase() !== scope.poolProxy) continue
+      const reserve = byKey.get(`${change.poolAddress}:${change.reserveAddress}`)
+      if (!reserve) continue
+      if (scope.wanted && (reserve.assetId == null || !scope.wanted.has(reserve.assetId))) continue
+      const whole = (raw: bigint | null) => (raw == null ? null : tokenAmount(raw, reserve.decimals))
+      const free = change.to != null && change.usedAfter != null ? whole(change.to > change.usedAfter ? change.to - change.usedAfter : 0n) : null
+      matches.push({
+        ruleId: rule.ruleId, accountId: rule.accountId, kind: 'mm-cap',
+        identity: `cap-change:${change.blockHeight}-e${change.eventIndex}:${change.side}`,
+        blockHeight: change.blockHeight,
+        payload: {
+          lane: 'mm-cap-change', market: scope.label, side: change.side,
+          assetId: reserve.assetId, symbol: reserve.symbol, reserveAddress: reserve.reserveAddress,
+          from: whole(change.from), to: whole(change.to), free,
+        },
+      })
     }
   }
-  lastCapSeen = seen
   return matches
+}
+
+async function mmCapChangeMatches(rules: NotificationRule[], window: BlockWindow): Promise<RuleMatch[]> {
+  if (!client) return []
+  const reserves = await moneyMarketCapStates(client, assetIdFromMmAddress)
+  if (!reserves.length) return []
+  return evaluateCapChanges(await capChangesInWindow(client, window, reserves), reserves, rules, window)
 }
 
 /* ============ safety snapshot lane ============ */
