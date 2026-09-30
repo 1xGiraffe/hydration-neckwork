@@ -77,9 +77,10 @@ describe('the account-scoped XCM readers use the account-first projection', () =
     // barrier reads (whose payload neither sibling carries), the global arm of the
     // remote-pull withdrawal decode, the pre-migration inherent-context family read
     // (the hook-only walk projection cannot hold those rows), the asset surface, and
-    // the NTT arrival candidates' global arm, and the executed-send arm's global
-    // withdrawal decode. One definition + ten call sites — the hook-context inbound
-    // deposit run moved to the block-first projection below.
+    // the NTT arrival candidates' global arm, the executed-send arm's global
+    // withdrawal decode, and the asset surface's reserve-transfer candidates (their
+    // join to the send event). One definition + eleven call sites — the hook-context
+    // inbound deposit run moved to the block-first projection below.
     //
     // The executed-send decode names an event family with no asset, so this table's
     // key cannot reach block_height and it reads more ROWS than raw_events would
@@ -87,7 +88,7 @@ describe('the account-scoped XCM readers use the account-first projection', () =
     // raw_events drags a whole granule of args_json in for every claimed block —
     // 898 MiB against 24.6 MiB for the same rows, and a cold DOT asset feed ran it
     // ~60 times. Rows are not the cost of this read; bytes are.
-    expect(occurrences(explorerService, 'xcmEventActivityTable(')).toBe(15)
+    expect(occurrences(explorerService, 'xcmEventActivityTable(')).toBe(16)
     expect(functionBody('xcmExecutedRowsForBlocks')).toContain('FROM ${xcmEventActivityTable()}')
     expect(functionBody('xcmExecutedRowsForBlocks')).not.toContain('FROM price_data.raw_events')
     expect(functionBody('xcmInRowsForBlocks')).not.toContain('xcmEventActivityByAccountTable')
