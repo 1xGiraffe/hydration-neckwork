@@ -77,17 +77,19 @@ describe('the account-scoped XCM readers use the account-first projection', () =
     // barrier reads (whose payload neither sibling carries), the global arm of the
     // remote-pull withdrawal decode, the pre-migration inherent-context family read
     // (the hook-only walk projection cannot hold those rows), the asset surface, and
-    // the NTT arrival candidates' global arm. One definition + nine call sites — the
-    // hook-context inbound deposit run moved to the block-first projection below.
+    // the NTT arrival candidates' global arm, and the executed-send arm's global
+    // withdrawal decode. One definition + ten call sites — the hook-context inbound
+    // deposit run moved to the block-first projection below.
     //
-    // The executed-send arm's GLOBAL withdrawal half is deliberately not among them.
-    // That read names an event family with no asset, which leaves block_height
-    // unreachable in this table's key, so it scanned every asset range of
-    // Currencies.Withdrawn however few blocks it asked about — 2.00M rows for 46.
-    // raw_events is keyed by block_height and answers the same rows from the
-    // claimed blocks for 81.7k, with the MV's own extraction inlined.
-    expect(occurrences(explorerService, 'xcmEventActivityTable(')).toBe(14)
-    expect(functionBody('xcmExecutedRowsForBlocks')).not.toContain('${xcmEventActivityTable()}')
+    // The executed-send decode names an event family with no asset, so this table's
+    // key cannot reach block_height and it reads more ROWS than raw_events would
+    // (2.1M against 4.5M for a 1,000-block claimed set). It is still the cheap read:
+    // raw_events drags a whole granule of args_json in for every claimed block —
+    // 898 MiB against 24.6 MiB for the same rows, and a cold DOT asset feed ran it
+    // ~60 times. Rows are not the cost of this read; bytes are.
+    expect(occurrences(explorerService, 'xcmEventActivityTable(')).toBe(15)
+    expect(functionBody('xcmExecutedRowsForBlocks')).toContain('FROM ${xcmEventActivityTable()}')
+    expect(functionBody('xcmExecutedRowsForBlocks')).not.toContain('FROM price_data.raw_events')
     expect(functionBody('xcmInRowsForBlocks')).not.toContain('xcmEventActivityByAccountTable')
   })
 

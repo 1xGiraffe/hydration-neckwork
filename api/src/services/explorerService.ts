@@ -13932,21 +13932,18 @@ async function xcmExecutedRowsForBlocks(blocks: number[], prices: Map<number, Pr
               WHERE who IN (${sqlAccountList([...whoIn])}) AND ${withdrawalBound}`,
       format: 'JSONEachRow',
     })
-    // Global arm: read raw_events, not the projection. `xcm_event_activity` is
-    // keyed (event_name, asset_id, block_height, …) and this names an event
-    // family with no asset, so block_height stays unreachable and it scans every
-    // asset range of Currencies.Withdrawn whatever the block set — 2.00M rows
-    // for the same 46. raw_events IS keyed by block_height, so the claimed
-    // blocks prune it to 81.7k. The three extracted columns are the MV's own
-    // expressions for this event, verified byte-identical over the same window;
-    // Currencies.Withdrawn always carries `currencyId`, which is the only branch
-    // of the MV's asset_id multiIf this family can take.
+    // Global arm: the narrow projection, as the sibling arm reads it. Keyed
+    // (event_name, asset_id, block_height, …), it cannot reach block_height
+    // without an asset and so reads more ROWS than raw_events would (2.1M against
+    // 4.5M for a 1,000-block claimed set) — but rows are not the cost here, bytes
+    // are: raw_events drags an 8192-row granule of args_json in for every claimed
+    // block. Measured on a real claimed set: 898 MiB → 24.6 MiB, 130 → 28 ms, and
+    // this read ran ~60 times per cold token-filtered page (a DOT asset feed read
+    // 31 GiB here alone). Byte-identical to the raw read over every block that ever
+    // carried an executor-dispatched send (835,193 rows, same content hash).
     : client.query({
-      query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index,
-                     JSONExtractString(args_json, 'who') AS who,
-                     toUInt32(greatest(0, JSONExtractInt(args_json, 'currencyId'))) AS asset_id,
-                     JSONExtractString(args_json, 'amount') AS amount
-              FROM price_data.raw_events
+      query: `SELECT ${withdrawalColumns}
+              FROM ${xcmEventActivityTable()}
               WHERE ${withdrawalBound}`,
       format: 'JSONEachRow',
     }))
@@ -14022,16 +14019,16 @@ async function executedXcmDestinationOf(height: number, index: number): Promise<
 
 type RouterNetSwap = { assetIn: number; amountIn: string; assetOut: number }
 // The Router net summaries of the signed extrinsics in these blocks, keyed
-// `${block}:${extrinsic}` — a block-keyed primary-key read.
+// `${block}:${extrinsic}` — a block-keyed primary-key read of `swap_activity`, which
+// holds the decoded legs without raw_events' args_json (a claimed block there costs
+// a whole granule of wide JSON). Identical to the raw read over every claimed block
+// in history (177,209 summaries, same content hash).
 async function routerNetSwapsByExtrinsic(blockListSql: string): Promise<Map<string, RouterNetSwap[]>> {
   const out = new Map<string, RouterNetSwap[]>()
   if (!blockListSql) return out
   const res = await client.query({
-    query: `SELECT block_height, extrinsic_index,
-                   toUInt32(greatest(0, JSONExtractInt(args_json,'assetIn'))) AS asset_in,
-                   toUInt32(greatest(0, JSONExtractInt(args_json,'assetOut'))) AS asset_out,
-                   JSONExtractString(args_json,'amountIn') AS amount_in
-            FROM price_data.raw_events
+    query: `SELECT block_height, extrinsic_index, asset_in, asset_out, amount_in
+            FROM price_data.swap_activity
             WHERE block_height IN (${blockListSql}) AND extrinsic_index IS NOT NULL AND event_name IN (${ROUTER_NET_EVENTS_SQL})`,
     format: 'JSONEachRow',
   })
@@ -14067,12 +14064,25 @@ async function getRecentXcmExecuted(limit: number, from?: string, to?: string, a
     // block_height set, and the candidate read then only touches blocks where a message
     // actually left. `pageBound` is pushed into it too — raw_xcm_activity carries both
     // block_height and block_timestamp — so a windowed page never builds the whole set.
+    //
+    // The marker alone is not the arm's set, though: an ordinary XTokens/PolkadotXcm
+    // transfer emits XcmpMessageSent too, and getRecentXcm owns those. The decode
+    // drops them (executedXcmSendExtrinsics), but only after reading them — so a
+    // token-filtered page (an asset feed) walked every one of that token's ordinary
+    // bridge withdrawals to find the few executor-dispatched sends: a cold DOT asset
+    // feed made ~60 decode passes. The same exclusion, stated per extrinsic here, makes
+    // the candidates exactly the extrinsics the decode can claim. It only narrows:
+    // every row the decode emits comes from a withdrawal inside a claimed extrinsic,
+    // which is itself a candidate under this set, and the decode still decides.
+    const executedExtrinsics = (pageBound: string): string =>
+      `SELECT block_height, extrinsic_index FROM price_data.raw_xcm_activity
+       WHERE (${pageBound}) AND source_kind = 'event' AND extrinsic_index IS NOT NULL
+         AND name IN ('${XCM_EXECUTED_SEND_EVENT}', ${XCM_SENT_EVENTS_SQL})
+       GROUP BY block_height, extrinsic_index
+       HAVING countIf(name = '${XCM_EXECUTED_SEND_EVENT}') > 0 AND countIf(name != '${XCM_EXECUTED_SEND_EVENT}') = 0`
     const markerBlocks = (pageBound: string): string =>
-      `block_height IN (
-         SELECT block_height FROM price_data.raw_xcm_activity
-         WHERE (${pageBound}) AND source_kind = 'event' AND extrinsic_index IS NOT NULL
-           AND name = '${XCM_EXECUTED_SEND_EVENT}'
-       )`
+      `block_height IN (SELECT block_height FROM (${executedExtrinsics(pageBound)}))
+       AND (block_height, assumeNotNull(extrinsic_index)) IN (${executedExtrinsics(pageBound)})`
     // Everything below the FROM is identical between the two arms; only the table and the
     // `who` prefilter differ, exactly as in getRecentXcmOutRemote. The reserved-account
     // exclusion is stated on both because admitsExecutedXcmWithdrawal drops those rows in
@@ -15487,11 +15497,20 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
     const want = offset + limit
     const scanLimit = postFilter ? Math.max(want * 8, limit + 250) : limit
     const scanOffset = postFilter ? 0 : offset
-    const selectedNames = action && STAKING_ACTION_EVENTS[action]
-      ? STAKING_ACTION_EVENTS[action]
-      : preferredAssetId === 670
-        ? ['GigaHdx.Staked', 'GigaHdx.Unstaked', 'GigaHdx.UnstakeCancelled', 'GigaHdx.MigratedFromLegacy', 'GigaHdxRewards.RewardsClaimed']
-        : STAKING_EVENT_NAMES
+    // For any other asset, the only staking event stakingAmountAndAsset can build a
+    // row from is a collator payout in that currency (every one so far has paid HDX).
+    // Asking SQL for exactly that stops an asset page walking the whole staking
+    // history in pages to discard every row: a cold USDT feed read 10 pages here.
+    const collatorOnly = assetId != null && assetId !== 0 && assetId !== 670
+    const actionNames = action && STAKING_ACTION_EVENTS[action] ? STAKING_ACTION_EVENTS[action] : null
+    const selectedNames = collatorOnly
+      ? (actionNames ?? ['CollatorRewards.CollatorRewarded']).filter(n => n === 'CollatorRewards.CollatorRewarded')
+      : actionNames
+        ?? (preferredAssetId === 670
+          ? ['GigaHdx.Staked', 'GigaHdx.Unstaked', 'GigaHdx.UnstakeCancelled', 'GigaHdx.MigratedFromLegacy', 'GigaHdxRewards.RewardsClaimed']
+          : STAKING_EVENT_NAMES)
+    if (!selectedNames.length) return []
+    const collatorCurrency = collatorOnly ? `AND JSONExtractInt(args_json, 'currency') = ${assetId}` : ''
     const names = selectedNames.map(n => `'${n}'`).join(',')
     // The companion a reward claim or migration emits beside its own row is dropped
     // in SQL, before every LIMIT below (the account references included), so each
@@ -15516,7 +15535,7 @@ async function getRecentStaking(limit: number, from?: string, to?: string, accou
         query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
                 FROM price_data.staking_activity FINAL
                 ${stakingValueFilter.joinSql}
-                WHERE ${b} ${accountRefsFilter} AND event_name IN (${names}) ${companionFilter} ${accountFilter}
+                WHERE ${b} ${accountRefsFilter} AND event_name IN (${names}) ${collatorCurrency} ${companionFilter} ${accountFilter}
                 ${stakingValueFilter.predicateSql}
                 ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
         query_params: { limit: pageLimit, offset: pageOffset }, format: 'JSONEachRow',
