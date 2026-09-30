@@ -47,7 +47,7 @@ export const KIND_HINTS: Record<NotificationKind, string> = {
   event: 'A specific runtime event, by pallet and method.',
   'protocol-revenue': 'An extrinsic earning the protocol more than a threshold — the protocol share, not the LPs\'.',
   liquidation: 'A money-market position being liquidated, chain-wide or for one account.',
-  'mm-cap': 'A money market\'s borrow or supply cap being reached, or opening up again — every reserve, or one token.',
+  'mm-cap': 'A money market\'s borrow or supply cap being raised, lowered, reached, or opening up again — every reserve, or one token.',
   block: 'One future block being reached. Fires once, then the alert deletes itself.',
 }
 
