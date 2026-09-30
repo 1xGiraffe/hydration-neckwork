@@ -1,4 +1,5 @@
 import type {
+  PairChart,
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
   AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
@@ -156,6 +157,9 @@ export const api = {
   dcaExecution: (height: number, index: number, signal?: AbortSignal) => getJson<DcaExecutionDetail>(`/explorer/dca/exec/${height}/${index}`, signal),
   // The id is the u128 as a decimal string and travels as text end to end.
   intentOrder: (intentId: string, offset = 0, limit = 25, signal?: AbortSignal) => getJson<IntentOrderDetail>(withQuery(`/explorer/intent/${intentId}`, { offset, limit }), signal),
+  // One pair's candles (quote per base), ending with the bucket in progress.
+  pairChart: (base: number, quote: number, interval: string, count: number, signal?: AbortSignal) =>
+    getJson<PairChart>(withQuery('/explorer/pair-chart', { base, quote, interval, count }), signal),
   trade: (height: number, index: number, signal?: AbortSignal) => getJson<TradeDetail>(`/explorer/trade/${height}/${index}`, signal),
   tradeEvent: (height: number, index: number, signal?: AbortSignal) => getJson<TradeDetail>(`/explorer/trade-event/${height}/${index}`, signal),
   events: (limit = 25, from?: string, to?: string, offset = 0, filters?: EventFilters, signal?: AbortSignal) => getJson<EventRow[]>(withQuery('/explorer/events', { limit, offset, from, to, ...filters, h: liveHeadTag() || undefined }), signal),

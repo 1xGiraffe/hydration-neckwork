@@ -7,6 +7,7 @@ import { Link, paths } from '../router'
 import { limitBinding } from '../utils/limitBinding'
 import { Crumbs, Num, Amt, F, AddrPill, AssetChip, AssetAmount, FeeAmount, ProgressRing, SkeletonRows, MomentLink, Pager } from '../components/ui'
 import { ActivityTable } from '../components/ActivityTable'
+import { IntentPriceChart } from '../components/IntentPriceChart'
 import { intentLabel } from '../components/activityColors'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds, blockSpanSeconds, fmtDuration, fmtPermill } from '../utils/dca'
@@ -280,6 +281,13 @@ export function Intent({ intentId }: { intentId: string }) {
                 </>}
               </div>
             </div>
+
+            {/* The order against its market. A limit order and a DCA intent both state
+                a limit; an order with neither has no line to draw against. */}
+            {(data.order.kind === 'swap' || data.order.kind === 'dca') && <>
+              <div className="sec-title" style={{ marginTop: 22 }}>Price</div>
+              <IntentPriceChart data={data} />
+            </>}
 
             <div className="sec-title" style={{ marginTop: 22 }}>Fills <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>· newest first</span></div>
             {/* Each fill is one event, so a row links to its own page — the rule the DCA
