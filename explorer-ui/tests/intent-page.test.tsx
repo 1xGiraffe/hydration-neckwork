@@ -193,7 +193,7 @@ describe('the extrinsic page — ICE solution panel', () => {
     expect(renderExtrinsic({})).not.toContain('ICE solution')
     const html = renderExtrinsic({ callName: 'ICE.submit_solution', iceSolution: mockIceSolution() })
     expect(html).toContain('ICE solution')
-    expect(html).toContain('Pot trades')
+    expect(html).toContain('Routed through the pools')
     expect(html).toContain('Fees swept')
     expect(html).toContain('Matched')
     expect(html).toContain('Routed')
