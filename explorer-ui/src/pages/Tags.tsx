@@ -134,7 +134,8 @@ export function TagsHydration() {
                 <td data-label="Tag">
                   <Link to={paths.tag(g.tagId)} className="addr-pill" onClick={e => e.stopPropagation()}>
                     <TagIcon icon={g.icon} title={g.name} />
-                    <span className="tag" style={{ color: g.color }}>{g.name}</span>
+                    {/* The name is this table's whole content, so it is not clipped like a tag in a busier table. */}
+                    <span className="tag tag-full" style={{ color: g.color }}>{g.name}</span>
                   </Link>
                 </td>
                 <td data-label="Accounts" className="r mono">{g.memberCount}</td>

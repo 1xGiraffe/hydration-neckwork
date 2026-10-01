@@ -749,6 +749,7 @@ svg { display: block; }
 .tbl .ref-link { max-width: 18ch; }
 .tbl tbody td .addr-pill .tag { max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) { .tbl .ref-link, .tbl tbody td .addr-pill .tag { max-width: none; } }
+.tbl tbody td .addr-pill .tag.tag-full { max-width: none; }
 .tbl td.r { text-align: right; }
 .tbl td.mono { font-family: 'GeistMono'; }
 /* Failed list request — deliberately louder than the "No activity" empty cell so
