@@ -476,6 +476,8 @@ export interface IntentOrderDetail {
 export interface PairChart {
   baseSeries: number; quoteSeries: number; interval: string
   candles: { t: number; o: number; h: number; l: number; c: number }[]
+  // The median fee the pair's recent trades paid over the price before fees; null when too few.
+  tradeFee?: { fee: number; trades: number } | null
 }
 // One `ICE.submit_solution` extrinsic's outcome: the fills it settled, the pot's own
 // trades that routed the unmatched remainder, and the fee it swept.
