@@ -4104,3 +4104,4 @@ a.rev-pill-label:hover { color: var(--accent); }
 .ipc-zone rect { fill: var(--amber); opacity: .06; }
 .ipc-zone text { font-size: 10px; fill: var(--amber); opacity: .85; }
 .ipc-key-zone { width: 10px; height: 10px; border: 0; border-radius: 2px; background: var(--amber); opacity: .25; }
+.pool-name-link { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; }

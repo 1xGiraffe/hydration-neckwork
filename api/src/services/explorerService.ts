@@ -53,7 +53,7 @@ import { profileForAccount } from './userProfileService.ts'
 import { currentStableswapSharePools } from './stableswapSharePools.ts'
 import { findMempoolTx, findPendingBlock, findPendingExtrinsic, findPendingExtrinsicByHash, mempoolTxs, pendingBestHeight, pendingBlocksDesc, type MempoolTx, type PendingBlock, type PendingExtrinsicRow } from './pendingHeadService.ts'
 import { buildMempoolActivities, buildPendingActivities, type PendingActivity, type PendingTradeActivity } from './pendingActivity.ts'
-import { ethPrefixedAccountId, feeTierLabel, loadV3Registry, v3ActOnVenue, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3SwapAt, v3UnnamedActExtrinsics, v3VenueSet, v3VenuesInScope, type V3Activity, type V3Registry } from './uniswapV3Service.ts'
+import { ethPrefixedAccountId, feeTierLabel, loadV3Registry, v3ActOnVenue, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3PoolName, v3SwapAt, v3UnnamedActExtrinsics, v3VenueSet, v3VenuesInScope, type V3Activity, type V3Pool, type V3Registry } from './uniswapV3Service.ts'
 import { loadV3AccountPositions, v3AccountPositions } from './uniswapV3Positions.ts'
 import { loadMmIncentiveProgrammeRows, scaledSeriesFromBuckets } from './mmIncentiveHistory.ts'
 import { loadCurrentCollateralFlags, loadMmIncentiveHistory, loadMmReserveMap, loadMoneyMarketHistory, mmHistoryStart, mmMarketCompare, mmObservationOrderSql, type MmHistoryInterest, type MmIncentiveHistory, type MmObservation } from './moneyMarketHistory.ts'
@@ -11337,6 +11337,10 @@ export interface ActivityRow {
   // Concentrated-liquidity (Uniswap v3) rows: the pool contract the act is in, the
   // position NFT it concerns (manager positions), the Gamma vault it went through.
   poolAddress?: string
+  /** The pool's display name (pair and fee tier), when the registry knows it. */
+  poolName?: string
+  /** The pool's two tokens, for its icons. */
+  poolAssets?: AssetRef[]
   v3TokenId?: string
   v3Vault?: string
   mmAction?: string          // money-market: Supply/Borrow/Repay/Withdraw/LiquidationCall
@@ -12012,15 +12016,23 @@ async function routedV3Swappers(acts: readonly V3Activity[]): Promise<Map<string
   return out
 }
 
+// A pool's name and its two tokens as a row carries them; nothing for a pool the
+// registry does not know (or a token it cannot resolve to an asset).
+function v3PoolLabel(pool: V3Pool | undefined): Pick<ActivityRow, 'poolName' | 'poolAssets'> {
+  if (!pool) return {}
+  return { poolName: v3PoolName(pool), ...(pool.asset0 != null && pool.asset1 != null ? { poolAssets: [asset(pool.asset0), asset(pool.asset1)] } : {}) }
+}
+
 async function v3ActivityRows(acts: V3Activity[], prices: Map<number, PriceInfo>, keepRoutedHops = false): Promise<ActivityRow[]> {
   if (!acts.length) return []
   const unsigned = acts.filter(a => a.whoAccountId == null && a.extrinsicIndex != null).map(a => [a.blockHeight, a.extrinsicIndex] as [number, number | null])
-  const [signers, routed, routedSwappers] = await Promise.all([
+  const [signers, routed, routedSwappers, registry] = await Promise.all([
     unsigned.length ? actorsFor(unsigned) : new Map<string, string>(),
     keepRoutedHops ? new Set<string>() : routedV3SwapExtrinsics(acts.filter(a => a.kind === 'swap').map(a => [a.blockHeight, a.extrinsicIndex])),
     // Only the pool page keeps routed hops, and it is the only reading that needs
     // their owner; elsewhere they are suppressed, so the lookup is skipped.
     keepRoutedHops ? routedV3Swappers(acts) : Promise.resolve(new Map<string, string>()),
+    v3Registry(),
   ])
   const out: ActivityRow[] = []
   for (const a of acts) {
@@ -12036,7 +12048,8 @@ async function v3ActivityRows(acts: V3Activity[], prices: Map<number, PriceInfo>
     const common = {
       blockHeight: a.blockHeight, timestamp: a.timestamp, eventIndex: a.eventIndex, extrinsicIndex: a.extrinsicIndex,
       who: who ? accountRef(who) : null, to: null, linkBlock: a.blockHeight, linkIndex: a.extrinsicIndex,
-      ...(a.pool ? { poolAddress: a.pool } : {}), ...(a.tokenId ? { v3TokenId: a.tokenId } : {}), ...(a.vault ? { v3Vault: a.vault } : {}),
+      ...(a.pool ? { poolAddress: a.pool } : {}), ...v3PoolLabel(a.pool ? registry.pools.get(a.pool) : undefined),
+      ...(a.tokenId ? { v3TokenId: a.tokenId } : {}), ...(a.vault ? { v3Vault: a.vault } : {}),
     }
     if (a.kind === 'swap') {
       if (a.assetIn == null || a.assetOut == null || a.amountIn == null || a.amountOut == null) continue

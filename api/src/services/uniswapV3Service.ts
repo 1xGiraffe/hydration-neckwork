@@ -21,7 +21,7 @@
 
 import type { ClickHouseClient } from '../db/client.ts'
 import { cachedSwr } from './cache.ts'
-import { UNDERLYING_TO_ATOKEN_ID } from './explorerAssets.ts'
+import { UNDERLYING_TO_ATOKEN_ID, displayDescriptor } from './explorerAssets.ts'
 import { precompileAssetId, v3VaultTotals } from './uniswapV3Positions.ts'
 import { v3ActiveLiquidityAtTick } from './uniswapV3Ranges.ts'
 
@@ -60,6 +60,13 @@ export function feeTierLabel(fee: number): string {
 const H160_RE = /^0x[0-9a-fA-F]{40}$/
 
 /** The AccountId32 the chain gives an EVM address: `ETH\0` + H160 + zeros. */
+/** A pool as a reader names it: its pair and fee tier ("aDOT / HOLLAR 0.3%"). */
+export function v3PoolName(pool: Pick<V3Pool, 'asset0' | 'asset1' | 'token0' | 'token1' | 'fee'>): string {
+  const a0 = pool.asset0 != null ? displayDescriptor(pool.asset0).symbol : `${pool.token0.slice(0, 8)}…`
+  const a1 = pool.asset1 != null ? displayDescriptor(pool.asset1).symbol : `${pool.token1.slice(0, 8)}…`
+  return `${a0} / ${a1} ${feeTierLabel(pool.fee)}`
+}
+
 export function ethPrefixedAccountId(h160: string): string | null {
   return H160_RE.test(h160) ? '0x45544800' + h160.slice(2).toLowerCase() + '0000000000000000' : null
 }

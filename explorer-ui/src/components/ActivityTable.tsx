@@ -300,6 +300,20 @@ function IntentDeadline({ iso, now }: { iso: string; now: number }) {
   return <span className="muted" title={F.datetime(iso)}>{left > 0 ? `expires in ${fmtDuration(left)}` : 'deadline passed'}</span>
 }
 
+// A Uniswap v3 row's pool: its tokens' icons and its name, linked to the pool page.
+// Nothing when the row names no pool (the registry did not know it).
+export function V3PoolChip({ r }: { r: Pick<ActivityRow, 'poolAddress' | 'poolName' | 'poolAssets'> }) {
+  if (!r.poolAddress || !r.poolName) return null
+  return (
+    <Link to={paths.v3Pool(r.poolAddress)} className="pool-name-link" title={`Uniswap v3 pool ${r.poolAddress}`}>
+      {r.poolAssets?.length ? <span className="icon-stack">{r.poolAssets.map((a, i) => (
+        <AssetIcon key={`${a.assetId}:${i}`} assetId={a.assetId} iconAssetId={a.iconAssetId} iconAssetIds={a.iconAssetIds} symbol={a.symbol} size={18} parachainId={a.parachainId} origin={a.origin} />
+      ))}</span> : null}
+      {r.poolName}
+    </Link>
+  )
+}
+
 // One row's activity, as a phrase. `headed` marks a surface whose page HEADER
 // already states the row's context — the detail pages do, a list row has no header
 // above it — so there the phrase drops the facts the header repeats and keeps only
@@ -437,13 +451,16 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     if (!r.assetIn || !r.assetOut) return <span className="asset-flow"><span className="muted">Order #{r.otcOrderId}</span>{maker}</span>
     return <span className="asset-flow"><AssetAmount asset={r.assetIn} raw={r.amountIn} /> → <AssetAmount asset={r.assetOut} raw={r.amountOut} />{headed ? null : <span className="muted">#{r.otcOrderId}</span>}{maker}</span>
   }
+  // A concentrated-liquidity act leads with the pool it is in, so the legs read as
+  // that pool's (the fees a compound reinvested, the tokens a position added).
+  const pool = r.type === 'liquidity' && r.poolAddress && r.poolName ? <><V3PoolChip r={r} /><span className="muted">·</span></> : null
   if (r.type === 'liquidity' && r.assetIn && r.assetOut) {
     // Pool creation seeds two assets, and a concentrated-liquidity position or vault
     // act moves both tokens — show both legs side by side.
-    return <span className="asset-flow"><AssetAmount asset={r.assetIn} raw={r.amountIn} /> + <AssetAmount asset={r.assetOut} raw={r.amountOut} /></span>
+    return <span className="asset-flow">{pool}<AssetAmount asset={r.assetIn} raw={r.amountIn} /> + <AssetAmount asset={r.assetOut} raw={r.amountOut} /></span>
   }
   if ((r.type === 'mm' || r.type === 'liquidity' || r.type === 'staking' || r.type === 'bond') && r.asset) {
-    return <span className="asset-flow"><AssetAmount asset={r.asset} raw={r.amount} /></span>
+    return <span className="asset-flow">{pool}<AssetAmount asset={r.asset} raw={r.amount} /></span>
   }
   if (r.type === 'vote' && r.asset) {
     const locked = <AssetAmount asset={r.asset} raw={r.amount} />
