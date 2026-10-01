@@ -377,7 +377,7 @@ function qualifiers(r: ActivityRow): string[] {
       if (r.mmMarket) out.push(r.mmMarket)
       break
     case 'liquidity':
-      if (r.poolAddress) out.push(`pool ${shortHash(r.poolAddress)}`)
+      if (r.poolAddress) out.push(`pool ${r.poolName ?? shortHash(r.poolAddress)}`)
       else if (r.asset) out.push(`pool ${assetLabel(r.asset)}`)
       if (r.v3TokenId) out.push(`position #${r.v3TokenId}`)
       break
@@ -486,7 +486,7 @@ export function activityDetail(r: ActivityRow, base: string, opts: ActivityDetai
   const now = opts.now
   const href = activityUrlFor(r, base)
   const pool = r.poolAddress
-    ? explorerLink(shortHash(r.poolAddress), v3PoolUrl(base, r.poolAddress))
+    ? explorerLink(r.poolName ?? shortHash(r.poolAddress), v3PoolUrl(base, r.poolAddress))
     : r.type === 'liquidity' && r.asset && r.asset.assetId > 0
       ? explorerLink(assetLabel(r.asset), poolUrl(base, r.asset.assetId))
       : null
@@ -604,4 +604,24 @@ export function describeActivityFilters(f: ActivityFilters): string {
       : null,
   ].filter(Boolean)
   return `Filtered: ${parts.join(', ')}.${caveats.length ? ` ${caveats.join(' ')}` : ''}`
+}
+
+/** The ICE solver's settlement pot (`modl` + `ice_ice#`). */
+export const ICE_POT_ACCOUNT_ID = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
+
+/**
+ * A block's or extrinsic's rows without the ICE pot's settlement trades — the fold
+ * the explorer applies on every feed and on its own block and extrinsic pages.
+ * Inside a solution the pot's pool trades are how the intents filled, the same value
+ * a second time; listing them beside the fills reads as three trades where one
+ * intent filled. The explorer API keeps them on these two routes (its extrinsic page
+ * shows them as the solution's routing), so the fold happens here. A pot trade in an
+ * extrinsic with no intent row is kept. Returns how many were folded, for the note.
+ */
+export function foldIcePotTrades(rows: readonly ActivityRow[]): { rows: ActivityRow[]; folded: number } {
+  const solved = new Set(rows.filter(r => r.type === 'intent' && r.extrinsicIndex != null).map(r => `${r.blockHeight}:${r.extrinsicIndex}`))
+  if (!solved.size) return { rows: [...rows], folded: 0 }
+  const kept = rows.filter(r => !(r.type === 'trade' && r.extrinsicIndex != null && r.who?.accountId.toLowerCase() === ICE_POT_ACCOUNT_ID
+    && solved.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
+  return { rows: kept, folded: rows.length - kept.length }
 }
