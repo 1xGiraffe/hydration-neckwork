@@ -5,7 +5,7 @@ import {
   stopNotificationEvaluator,
 } from '../src/notifications/evaluator.ts'
 import {
-  createRule, getNotificationState, initNotifications, loadNotifications,
+  createRule, getNotificationState, hasNotification, initNotifications, loadNotifications,
   setNotificationState, updateRule, upsertTelegramChannel,
 } from '../src/notifications/notificationStore.ts'
 import { resetDeliveryStateForTests } from '../src/notifications/delivery.ts'
@@ -305,6 +305,56 @@ describe('evaluator delivery', () => {
     expect(sends).toHaveLength(MAX_OUTBOUND_SENDS)
     expect(sends[0]).toContain('92 × Event matcher')
     for (const one of sends.slice(1)) expect(one).toContain('2 × Event matcher')
+  })
+
+  // "At most daily" is one message per period: the tick that opens it sends one
+  // digest of everything it matched, never one message per block.
+  it('sends a single message per tick for a rule with a cooldown', async () => {
+    await watchOmnipool({ cooldownS: 86_400 })
+    await runEvaluatorTick()
+    setHead(1_003)
+    tables.raw_events = [swapAt(1_001), swapAt(1_002), swapAt(1_003)]
+    await runEvaluatorTick()
+    await flush()
+    expect(inbox()).toHaveLength(3)
+    expect(sends).toHaveLength(1)
+    expect(sends[0]).toContain('3 × Event matcher')
+  })
+
+  // The cooldown clock lived in process memory, so every restart let an
+  // "at most daily" rule message again on its next match.
+  it('keeps the cooldown across a restart', async () => {
+    const rule = await watchOmnipool({ cooldownS: 86_400 })
+    await runEvaluatorTick()
+    setHead(1_001)
+    tables.raw_events = [swapAt(1_001)]
+    await runEvaluatorTick()
+    await flush()
+    expect(sends).toHaveLength(1)
+    expect(Number(getNotificationState(`sent:${rule.ruleId}`))).toBeGreaterThan(0)
+
+    resetEvaluatorForTests()
+    initEvaluator(client)
+    setHead(1_002)
+    tables.raw_events = [swapAt(1_002)]
+    await runEvaluatorTick()
+    await flush()
+    expect(sends).toHaveLength(1)
+    expect(inbox().length).toBeGreaterThanOrEqual(2)
+  })
+
+  // A re-read window (an overlapping tick, a rewound cursor) re-matched rows that
+  // were already delivered: the matches a digest stood for had no id of their own,
+  // so they came back as detail rows or inside a second, differently-keyed digest.
+  it('remembers every match a digest stands for as delivered', async () => {
+    const rule = await watchOmnipool()
+    await runEvaluatorTick()
+    setHead(1_100)
+    tables.raw_events = Array.from({ length: 100 }, (_, i) => swapAt(1_001 + Math.floor(i / 2), i % 2))
+    await runEvaluatorTick()
+    expect(inbox()).toHaveLength(21)
+    // 1_050 is deep inside the digest (the detail rows end at 1_010).
+    expect(hasNotification(notificationIdFor(rule.ruleId, '1050-e0'))).toBe(true)
   })
 
   it('stays silent for a muted rule', async () => {
