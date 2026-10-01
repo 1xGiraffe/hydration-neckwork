@@ -13,7 +13,7 @@ import {
   type PoolSnapshotPoint, type PoolSnapshotsResponse, type SnapshotRequest,
 } from './poolSnapshots.ts'
 import { v3PoolHistory, v3PoolLiquidity, type V3History, type V3HistoryPool, type V3PoolLiquidity } from './uniswapV3History.ts'
-import { ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, sqrtPriceX96ToPrice, tickToPrice, v3ManagerPositions, v3PoolStats, v3PricePoints, v3VaultStats, type V3Pool, type V3Registry } from './uniswapV3Service.ts'
+import { ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, sqrtPriceX96ToPrice, tickToPrice, v3ManagerPositions, v3PoolStats, v3PoolName, v3PricePoints, v3VaultStats, type V3Pool, type V3Registry } from './uniswapV3Service.ts'
 import { H2O_ASSET_ID, isMoneyMarketAToken, assetDescriptor, currentPriceOf, displayDescriptor, priceAssetId } from './explorerAssets.ts'
 import { usdAtPrice } from './assetValue.ts'
 import { xykReserveAssets } from './lpMath.ts'
@@ -1749,12 +1749,6 @@ export interface UniswapV3PoolDetail {
   positions: UniswapV3PositionRow[]
   vault: UniswapV3VaultInfo | null
   priceHistory: { ts: string; blockHeight: number; price: number }[]
-}
-
-function v3PoolName(pool: V3Pool): string {
-  const a0 = pool.asset0 != null ? asset(pool.asset0).symbol : `${pool.token0.slice(0, 8)}…`
-  const a1 = pool.asset1 != null ? asset(pool.asset1).symbol : `${pool.token1.slice(0, 8)}…`
-  return `${a0} / ${a1} ${feeTierLabel(pool.fee)}`
 }
 
 function nonNegative(raw: string): bigint {
