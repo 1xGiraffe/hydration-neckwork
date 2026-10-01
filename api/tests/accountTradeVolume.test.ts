@@ -245,8 +245,8 @@ describe('partition block range', () => {
 // first solutions, every DCA trade of intent #34 booked $190.20 of volume to the pot
 // and nothing to its owner. An owner's trade IS their fill — the Intent event's
 // amounts, or, for the budget-exhausting DcaCompleted that states none, the pot's
-// settlement legs — while the pot keeps its routes, as the fee processor keeps its
-// conversions.
+// settlement legs — and the pot's own routes are left out, being that same trade a
+// second time.
 describe('ICE intent fills as owner trades', () => {
   const sql = buildPartitionInsertSql('202609')
 
@@ -282,8 +282,28 @@ describe('ICE intent fills as owner trades', () => {
     expect(sql).toContain("event_name != 'Intent.DcaCompleted'")
   })
 
-  it('leaves the pot\'s own Broadcast legs on the pot', () => {
+  it('drops the pot\'s own Broadcast legs where a fill books them to an owner, so a trade counts once', () => {
+    // Only where a fill in the same extrinsic names the owner: a solution whose
+    // fills name nobody yet keeps its legs on the pot instead of losing the trade.
+    expect(sql).toContain("if(e.swapper = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000' AND (e.block_height, e.extrinsic_index) IN (SELECT block_height, extrinsic_index FROM intent_fills), '',")
+    // Dropped, not re-attributed: the fill already carries the owner's trade.
     expect(sql).not.toMatch(/if\(JSONExtractString\(args_json,'swapper'\) = '0x6d6f646c6963655f69636523/)
+  })
+})
+
+// An AAVE-filler swap is an aToken mint or redeem. A trade made of nothing else is
+// a 1:1 money-market wrap, not a swap (the Treasury's share→aToken wraps in block
+// 14,672,012 read as $3.27M of trading); an aave hop inside a routed swap is a real
+// hop and stays. The same whole-trade rule the public volume surfaces apply.
+describe('aToken wraps', () => {
+  const sql = buildPartitionInsertSql('202609')
+  it('flags each Broadcast fill by its filler and drops a trade only when every fill is a wrap', () => {
+    expect(sql).toContain("toUInt8(JSONExtractString(args_json,'fillerType','__kind') = 'AAVE') AS is_aave")
+    expect(sql).toContain('min(aave) AS all_aave')
+    expect(sql).toContain('HAVING volume_usd > 0 AND min(all_aave) = 0')
+    // Every non-Broadcast arm states a non-wrap, so a legacy, intent or direct v3
+    // trade is never dropped by it.
+    expect(sql.match(/, toUInt8\(0\)\n  FROM (legacy|intent_trades|v3_direct)/g)).toHaveLength(6)
   })
 })
 
