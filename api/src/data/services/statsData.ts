@@ -52,6 +52,8 @@ export interface VolumeOptions {
   to: number
   venue?: string
   assetId?: number
+  /** Leave out the `aave` venue: aToken mints/redeems, 1:1 wraps rather than swaps. */
+  excludeWraps?: boolean
 }
 
 export async function volumeStats(client: ClickHouseClient, options: VolumeOptions): Promise<VolumeRow[]> {
@@ -67,6 +69,7 @@ export async function volumeStats(client: ClickHouseClient, options: VolumeOptio
   ]
   if (options.venue) { clauses.push('venue = {venue:String}'); params.venue = options.venue }
   if (options.assetId != null) { clauses.push('asset_id = {assetId:UInt32}'); params.assetId = options.assetId }
+  if (options.excludeWraps) clauses.push("venue != 'aave'")
   const res = await client.query({
     // No FINAL/dedup needed: pool_swap_hourly partitions are published whole
     // (staging twin + REPLACE PARTITION), so a partition never holds two
