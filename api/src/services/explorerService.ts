@@ -3906,7 +3906,7 @@ export function stableswapLpPositions(balances: AddressBalance[]): LpPosition[] 
 export interface MoneyMarketPosition {
   marketKey: string                 // 'core', 'gigahdx', … — which isolated market
   market: string                    // display label, e.g. 'GIGAHDX'
-  role: 'primary' | 'supplemental'  // primary owns global summaries + DefiSim
+  role: 'primary' | 'supplemental'  // primary owns global summaries
   defiSimSupported: boolean
   stakingBacked?: boolean           // collateral backed by locked-in-wallet HDX (display-only in net worth)
   blockHeight: number
@@ -6922,8 +6922,8 @@ function memberMoneyMarket(simAccount: string, positions: MoneyMarketPosition[],
     const stated = own.length || unstated.some(u => u.marketKey === pos.marketKey) ? attachMmReserves(pos, own, prices, unstated) : pos
     return {
       ...stated,
-      // Only the primary market is simulable; MoneyMarketPositions reads
-      // defiSimSupported and never offers the link for an isolated one.
+      // DefiSim simulates the primary market, GIGAHDX and BIL, each on its
+      // own; a market it doesn't know (env-configured) never gets the link.
       ...(pos.defiSimSupported ? { simAccount: defiSimTargetForAccountId(simAccount) } : {}),
     }
   }))

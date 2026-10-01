@@ -203,7 +203,7 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile
       const cards = page.locator('.bw-card')
       await expect(cards).toHaveCount(3)
       await expect(page.locator('.bw-card .bw-head .addr-pill')).toHaveCount(3)
-      await expect(page.getByRole('link', { name: /Open in DefiSim/ })).toHaveCount(2)
+      await expect(page.getByRole('link', { name: /Open in DefiSim/ })).toHaveCount(3)
       const foxCard = page.locator(`.bw-card[data-address="${FOX}"]`)
       await expect(foxCard).toHaveCount(1)
       await expect(page.locator('.bw-card [data-chart]')).toHaveCount(0)

@@ -95,7 +95,7 @@ function addressDetail(overrides: Record<string, unknown> = {}) {
         marketKey: 'gigahdx',
         market: 'GIGAHDX',
         role: 'supplemental',
-        defiSimSupported: false,
+        defiSimSupported: true,
         stakingBacked: true,
         blockHeight: 14_745_005,
         timestamp: '2026-09-18 10:54:22',

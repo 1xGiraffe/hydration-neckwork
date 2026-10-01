@@ -1124,7 +1124,7 @@ function buildAddress(accountId: string): AddressDetail {
         { assetId: 5, symbol: 'DOT', decimals: 10, supplied: raw(mm.supply * 0.4 / 4.44, 10), debt: '0', suppliedUsd: mm.supply * 0.4, debtUsd: null, collateral: true },
       ],
     }, ...((a === A.krakenEvm || a === A.fox) ? [{
-      marketKey: 'gigahdx', market: 'GIGAHDX', role: 'supplemental' as const, defiSimSupported: false, stakingBacked: true,
+      marketKey: 'gigahdx', market: 'GIGAHDX', role: 'supplemental' as const, defiSimSupported: true, stakingBacked: true,
       blockHeight: TIP - 4, timestamp: tsAt(TIP - 4),
       totalCollateralBase: '2400000000000', totalDebtBase: '620000000000', availableBorrowsBase: '540000000000',
       liquidationThreshold: '8000', ltv: '6000', healthFactor: '2380000000000000000',
@@ -2723,7 +2723,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
       })
       const portfolioUsd = balances.reduce((s, b) => s + (b.valueUsd ?? 0), 0)
       const built = buildAddress(A.krakenEvm.accountId)
-      const moneyMarket = built.moneyMarket.map(p => p.role === 'primary' ? { ...p, simAccount: A.krakenEvm.address } : p)
+      const moneyMarket = built.moneyMarket.map(p => p.defiSimSupported ? { ...p, simAccount: A.krakenEvm.address } : p)
       return { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', note: 'Exchange — hot + deposit wallets', icon: '/tag-icons/kraken.jpg', members, balances, portfolioUsd, tradingVolumeUsd: portfolioUsd * 24, liquidationVolumeUsd: portfolioUsd * 0.08, moneyMarket, liquidityPositions: built.liquidityPositions ?? [], activeDcas: built.activeDcas ?? [], portfolioSeries: series(77, 52, portfolioUsd), balanceHistory: built.balanceHistory ?? [] } satisfies TagDetail
     },
   },
