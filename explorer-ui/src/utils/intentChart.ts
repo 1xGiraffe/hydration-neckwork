@@ -150,3 +150,43 @@ export function placementRead(
   const quick = firstFillSec != null && firstFillSec - placedSec >= 0 && firstFillSec - placedSec <= 60
   return { marketable: quick, distancePct: null }
 }
+
+/** Above this a measured "fee" is not a fee (a fill against a stale candle, a thin book). */
+const MAX_PLAUSIBLE_FEE = 0.05
+
+/**
+ * The fee an order's fills paid on top of the market, measured from the fills
+ * themselves: each fill's price against the candle it happened in, in the direction
+ * a fee pushes (a buyer pays more, a seller receives less), the median over every
+ * fill the chart covers. The candles are the price before fees; an intent's limit and
+ * its fills are after them, so without this the line sits a fee away from the candles
+ * that actually fill it. Null when no fill falls inside the candles, or the median is
+ * not a plausible fee.
+ */
+export function measuredFee(
+  o: ChartOrientation, fills: readonly FillPoint[],
+  candles: readonly { t: number; c: number }[], stepSec: number,
+): number | null {
+  const sign = o.fillsWhen === 'below' ? 1 : -1
+  const premiums: number[] = []
+  for (const f of fills) {
+    const at = candles.find(c => f.t >= c.t && f.t < c.t + stepSec)
+    if (!at || !(at.c > 0)) continue
+    premiums.push(sign * (f.price / at.c - 1))
+  }
+  if (!premiums.length) return null
+  premiums.sort((a, b) => a - b)
+  const mid = premiums.length / 2
+  const median = premiums.length % 2 ? premiums[Math.floor(mid)] : (premiums[mid - 1] + premiums[mid]) / 2
+  return median > 0 && median < MAX_PLAUSIBLE_FEE ? median : null
+}
+
+/**
+ * Where the market price has to be for the order to fill once the fee is paid: a
+ * buyer paying price × (1 + fee) at most the limit, a seller receiving
+ * price × (1 − fee) at least it.
+ */
+export function feeAdjustedLimit(o: ChartOrientation, fee: number | null): number | null {
+  if (o.limit == null || fee == null) return o.limit
+  return o.fillsWhen === 'below' ? o.limit / (1 + fee) : o.limit / (1 - fee)
+}

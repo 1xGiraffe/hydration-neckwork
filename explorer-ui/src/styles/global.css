@@ -4099,3 +4099,8 @@ a.rev-pill-label:hover { color: var(--accent); }
 .ipc-key-now { border-top: 1px dotted var(--text-low); }
 .ipc-key-fill { width: 8px; height: 8px; border: 0; border-radius: 50%; background: var(--sky, #5fb3f3); }
 @media (max-width: 720px) { .ipc-seg { flex: 1 1 100%; } .ipc-last { margin-left: 0; } }
+.ipc-limit-stated { stroke: var(--amber); stroke-width: 1; opacity: .45; }
+.ipc-key-stated { border-top: 1px solid var(--amber); opacity: .6; }
+.ipc-zone rect { fill: var(--amber); opacity: .06; }
+.ipc-zone text { font-size: 10px; fill: var(--amber); opacity: .85; }
+.ipc-key-zone { width: 10px; height: 10px; border: 0; border-radius: 2px; background: var(--amber); opacity: .25; }

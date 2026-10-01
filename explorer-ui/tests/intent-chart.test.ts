@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { chartOrientation, chartTimeframe, fillPoints, placementRead, priceRange } from '../src/utils/intentChart'
+import { chartOrientation, chartTimeframe, feeAdjustedLimit, fillPoints, measuredFee, placementRead, priceRange } from '../src/utils/intentChart'
 import type { ActivityRow, AssetRef } from '../src/types'
 
 const a = (assetId: number, symbol: string, decimals = 12): AssetRef => ({ assetId, iconAssetId: assetId, symbol, name: null, decimals, parachainId: null })
@@ -78,5 +78,36 @@ describe('placementRead', () => {
   it('falls back to a fill within a minute of placement when the chart does not cover it', () => {
     expect(placementRead(o, candles, 900, 100, 130)).toEqual({ marketable: true, distancePct: null })
     expect(placementRead(o, candles, 900, 100, 900)).toEqual({ marketable: false, distancePct: null })
+  })
+})
+
+describe('the fee-adjusted line', () => {
+  // Intent 33034537680267242151258095616424: buy PRIME with USDT paying at most
+  // 1.06120 USDT per PRIME; every fill executed at 1.06116 against a candle at 1.06061.
+  const PRIME = a(43, 'PRIME', 6)
+  const o = chartOrientation({ assetIn: USDT, assetOut: PRIME, limitPriceOutPerIn: '0.942329', limitPriceInPerOut: '1.06120049367' })
+  const candles = [{ t: 900, c: 1.060607488512 }, { t: 1800, c: 1.0606 }]
+  const fills = [{ t: 1000, price: 1.06116, href: null }, { t: 1100, price: 1.06116, href: null }, { t: 1900, price: 1.06115, href: null }]
+
+  it('measures the fee its fills paid over the candles', () => {
+    expect(o).toMatchObject({ base: PRIME, fillsWhen: 'below' })
+    expect(measuredFee(o, fills, candles, 900)).toBeCloseTo(1.06116 / 1.060607488512 - 1, 9)
+  })
+
+  it('moves the line to where the market must be for the order to fill', () => {
+    const fee = measuredFee(o, fills, candles, 900)!
+    expect(feeAdjustedLimit(o, fee)).toBeCloseTo(1.06120049367 / (1 + fee), 9)
+    // A seller receives less: the line moves UP by the fee.
+    const sell = chartOrientation({ assetIn: DOT, assetOut: USDT, limitPriceOutPerIn: '1.3', limitPriceInPerOut: '0.769' })
+    expect(feeAdjustedLimit(sell, 0.01)).toBeCloseTo(1.3 / 0.99, 9)
+    expect(feeAdjustedLimit(sell, null)).toBe(1.3)
+  })
+
+  it('measures nothing without a fill inside the candles, or when the gap is not a fee', () => {
+    expect(measuredFee(o, [], candles, 900)).toBeNull()
+    expect(measuredFee(o, [{ t: 99_999, price: 1.1, href: null }], candles, 900)).toBeNull()
+    // Fills BELOW the market on a buy are not a fee, and a 20 % "fee" is not one either.
+    expect(measuredFee(o, [{ t: 1000, price: 1.05, href: null }], candles, 900)).toBeNull()
+    expect(measuredFee(o, [{ t: 1000, price: 1.3, href: null }], candles, 900)).toBeNull()
   })
 })

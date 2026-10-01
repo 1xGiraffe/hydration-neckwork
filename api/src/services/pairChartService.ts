@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
-import { priceAssetId } from './explorerAssets.ts'
+import { assetDescriptor, priceAssetId } from './explorerAssets.ts'
 import { getAssetById } from './assetsService.ts'
 import { queryOHLCV, type OHLCVInterval } from './ohlcvService.ts'
 import { queryCrossPairCandles } from './crossPair.ts'
@@ -28,6 +28,12 @@ export interface PairChart {
   quoteSeries: number
   interval: PairChartInterval
   candles: PairChartCandle[]
+  /**
+   * The fee a trade of this pair pays over the price before fees, measured from the
+   * pair's own recent trades (see pairTradeFee) — what a chart needs to draw an
+   * order's limit where the market must be for it to fill. Null when too few trades.
+   */
+  tradeFee: { fee: number; trades: number } | null
 }
 
 const num = (value: string | number): number => (typeof value === 'number' ? value : Number(value))
@@ -49,7 +55,7 @@ export function pairChart(client: ClickHouseClient, baseId: number, quoteId: num
   const currentStart = Math.floor((nowSec - anchor) / seconds) * seconds + anchor
   const fromSec = currentStart - (n - 1) * seconds
   return cached(`explorer:pair-chart:${baseSeries}:${quoteSeries}:${interval}:${n}:${currentStart}`, 30_000, async (): Promise<PairChart> => {
-    if (baseSeries === quoteSeries) return { baseSeries, quoteSeries, interval, candles: [] }
+    if (baseSeries === quoteSeries) return { baseSeries, quoteSeries, interval, candles: [], tradeFee: null }
     const startTime = new Date(fromSec * 1000)
     const endTime = new Date(nowSec * 1000)
     const candles: PairChartCandle[] = getAssetById(quoteSeries)?.isUsdPegged
@@ -57,9 +63,76 @@ export function pairChart(client: ClickHouseClient, baseId: number, quoteId: num
         .map(c => ({ t: Math.floor(Date.parse(`${c.interval_start.replace(' ', 'T')}Z`) / 1000), o: num(c.open), h: num(c.high), l: num(c.low), c: num(c.close) }))
       : (await queryCrossPairCandles(client, { baseId: baseSeries, quoteId: quoteSeries, startTime, endTime, interval: interval as OHLCVInterval }))
         .map(c => ({ t: c.intervalStart, o: num(c.open), h: num(c.high), l: num(c.low), c: num(c.close) }))
+    const tradeFee = await pairTradeFee(client, baseId, quoteId).catch(() => null)
     return {
-      baseSeries, quoteSeries, interval,
+      baseSeries, quoteSeries, interval, tradeFee,
       candles: candles.filter(c => c.t >= fromSec && [c.o, c.h, c.l, c.c].every(v => Number.isFinite(v) && v > 0)).sort((a, b) => a.t - b.t),
     }
+  })
+}
+
+/* ============ the pair's trade fee ============ */
+
+// How far back, and how many, of the pair's own trades measure its fee. A week at
+// ~2 s blocks; the newest trades within it.
+const FEE_LOOKBACK_BLOCKS = 300_000
+const FEE_MAX_TRADES = 300
+const FEE_MIN_TRADES = 5
+const MAX_PLAUSIBLE_FEE = 0.05
+
+/**
+ * The median fee the pair's recent direct trades paid: each trade's execution price
+ * against the price BEFORE it (the block ahead of it, so the trade's own impact is not
+ * counted), in the direction a fee pushes — a buyer of the base paid more, a seller
+ * received less. The same measure the intent chart applies to an order's own fills,
+ * for an order that has none yet. Every venue and route counts (a router summary is
+ * the fee the whole route paid), since a solver fills an intent the same way.
+ */
+export function pairTradeFee(client: ClickHouseClient, baseId: number, quoteId: number): Promise<{ fee: number; trades: number } | null> {
+  const baseSeries = priceAssetId(baseId), quoteSeries = priceAssetId(quoteId)
+  return cached(`explorer:pair-trade-fee:${baseId}:${quoteId}`, 600_000, async () => {
+    const baseIds = [...new Set([baseId, baseSeries])], quoteIds = [...new Set([quoteId, quoteSeries])]
+    const res = await client.query({
+      query: `
+        WITH (SELECT max(block_height) FROM price_data.blocks) AS head
+        SELECT s.block_height AS block_height, s.asset_in AS asset_in, s.amount_in AS amount_in, s.amount_out AS amount_out,
+               toString(pb.usd_price) AS base_usd, toString(pq.usd_price) AS quote_usd
+        FROM (
+          SELECT block_height, asset_in, asset_out, amount_in, amount_out,
+                 toUInt32({baseSeries:UInt32}) AS kb, toUInt32({quoteSeries:UInt32}) AS kq
+          FROM price_data.swap_activity
+          WHERE block_height > head - {lookback:UInt32}
+            AND ((asset_in IN {base:Array(UInt32)} AND asset_out IN {quote:Array(UInt32)})
+              OR (asset_in IN {quote:Array(UInt32)} AND asset_out IN {base:Array(UInt32)}))
+          ORDER BY block_height DESC LIMIT {n:UInt32}
+        ) AS s
+        ASOF INNER JOIN (
+          SELECT toUInt32(asset_id) AS k, block_height, usd_price FROM price_data.prices
+          WHERE asset_id = {baseSeries:UInt32} AND block_height > head - {lookback:UInt32} - 1000
+        ) AS pb ON pb.k = s.kb AND s.block_height > pb.block_height
+        ASOF INNER JOIN (
+          SELECT toUInt32(asset_id) AS k, block_height, usd_price FROM price_data.prices
+          WHERE asset_id = {quoteSeries:UInt32} AND block_height > head - {lookback:UInt32} - 1000
+        ) AS pq ON pq.k = s.kq AND s.block_height > pq.block_height`,
+      query_params: { base: baseIds, quote: quoteIds, baseSeries, quoteSeries, lookback: FEE_LOOKBACK_BLOCKS, n: FEE_MAX_TRADES },
+      format: 'JSONEachRow',
+      clickhouse_settings: { max_threads: 4 },
+    })
+    const rows = await res.json<{ block_height: number; asset_in: number; amount_in: string; amount_out: string; base_usd: string; quote_usd: string }>()
+    const decB = assetDescriptor(baseId).decimals, decQ = assetDescriptor(quoteId).decimals
+    const premiums: number[] = []
+    for (const r of rows) {
+      const mid = Number(r.base_usd) / Number(r.quote_usd)
+      const sellsBase = baseIds.includes(Number(r.asset_in))
+      const inAmt = Number(r.amount_in) / 10 ** (sellsBase ? decB : decQ)
+      const outAmt = Number(r.amount_out) / 10 ** (sellsBase ? decQ : decB)
+      if (!(mid > 0) || !(inAmt > 0) || !(outAmt > 0)) continue
+      premiums.push(sellsBase ? 1 - (outAmt / inAmt) / mid : (inAmt / outAmt) / mid - 1)
+    }
+    if (premiums.length < FEE_MIN_TRADES) return null
+    premiums.sort((a, b) => a - b)
+    const m = premiums.length / 2
+    const median = premiums.length % 2 ? premiums[Math.floor(m)] : (premiums[m - 1] + premiums[m]) / 2
+    return median > 0 && median < MAX_PLAUSIBLE_FEE ? { fee: median, trades: premiums.length } : null
   })
 }

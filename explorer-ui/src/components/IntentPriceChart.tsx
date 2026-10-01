@@ -5,7 +5,7 @@ import { AssetIcon } from './ui'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { limitBinding } from '../utils/limitBinding'
 import {
-  CHART_INTERVALS, INTERVAL_COUNT, INTERVAL_LABEL, INTERVAL_SECONDS, chartOrientation, chartTimeframe, fillPoints, placementRead, priceRange,
+  CHART_INTERVALS, INTERVAL_COUNT, INTERVAL_LABEL, INTERVAL_SECONDS, chartOrientation, chartTimeframe, feeAdjustedLimit, fillPoints, measuredFee, placementRead, priceRange,
   type ChartInterval,
 } from '../utils/intentChart'
 import type { IntentOrderDetail } from '../types'
@@ -54,23 +54,42 @@ export function IntentPriceChart({ data }: { data: IntentOrderDetail }) {
 
   const candles = chart.data?.candles ?? []
   const fills = useMemo(() => fillPoints(data.fills, o), [data.fills, o])
+  // The candles are the price before fees; the limit and the fills are after them. So
+  // the line is drawn where the MARKET must be for the order to fill — the limit less
+  // the fee its own fills paid over the candles — and the stated limit stays a faint
+  // rule beside it (the fills sit on that one).
+  // An order with fills is measured by them; one without by its pair's recent trades
+  // (the same measure, served with the candles).
+  const fillFee = useMemo(() => measuredFee(o, fills, candles, INTERVAL_SECONDS[interval]), [o, fills, candles, interval])
+  const pairFee = chart.data?.tradeFee ?? null
+  const fee = fillFee ?? pairFee?.fee ?? null
+  const feeSource = fillFee != null ? 'its fills paid' : pairFee ? `recent ${o.base.symbol}/${o.quote.symbol} trades paid` : ''
   // A limit the market already met when the order was placed is a minimum received
   // (the app's slippage guard), not a price waiting to be reached. The first fill is
   // only known when every fill is on the page.
   const placement = useMemo(() => {
     const placedSec = Date.parse(`${data.order.timestamp.replace(' ', 'T')}Z`) / 1000
     const firstFill = data.fills.length === data.fillsTotal && fills.length ? Math.min(...fills.map(f => f.t)) : null
-    return placementRead(o, candles, INTERVAL_SECONDS[interval], placedSec, firstFill)
-  }, [o, candles, interval, data.order.timestamp, data.fills.length, data.fillsTotal, fills])
+    // Judged on the limit NET of the fee: a limit a fee's width from market is a
+    // resting order at market, not a minimum received.
+    return placementRead({ ...o, limit: feeAdjustedLimit(o, fee) }, candles, INTERVAL_SECONDS[interval], placedSec, firstFill)
+  }, [o, fee, candles, interval, data.order.timestamp, data.fills.length, data.fillsTotal, fills])
+  // A minimum received (the market already met it at placement) is a guard, not a
+  // price the market must reach — its fills ran at market, so a fee gap to the candles
+  // says nothing and the guard is drawn as stated.
+  const lineFee = placement.marketable ? null : fee
+  const ol = useMemo(() => ({ ...o, limit: feeAdjustedLimit(o, lineFee) }), [o, lineFee])
   const geo = useMemo(() => {
     if (!candles.length) return null
     const step = INTERVAL_SECONDS[interval]
     const t0 = candles[0].t, t1 = candles[candles.length - 1].t + step
     // A minimum received never stretches the scale: the candles keep their detail and
     // a guard outside their range is marked on the plot's edge instead.
-    const range = priceRange(candles.map(c => c.l), candles.map(c => c.h), placement.marketable ? null : o.limit)
-    if (placement.marketable && o.limit != null && (o.limit < range.lo || o.limit > range.hi)) {
-      range.limitOffscale = o.limit > range.hi ? 'above' : 'below'
+    // Fills are real traded prices (fee included), so they belong on the scale too.
+    const fillPrices = fills.filter(f => f.t >= t0 && f.t <= t1).map(f => f.price)
+    const range = priceRange([...candles.map(c => c.l), ...fillPrices], [...candles.map(c => c.h), ...fillPrices], placement.marketable ? null : ol.limit)
+    if (placement.marketable && ol.limit != null && (ol.limit < range.lo || ol.limit > range.hi)) {
+      range.limitOffscale = ol.limit > range.hi ? 'above' : 'below'
     }
     const x = (t: number) => PAD_L + ((t - t0) / (t1 - t0)) * PLOT_W
     const y = (p: number) => PAD_T + (1 - (p - range.lo) / (range.hi - range.lo)) * PLOT_H
@@ -78,10 +97,10 @@ export function IntentPriceChart({ data }: { data: IntentOrderDetail }) {
     const ticks = Array.from({ length: 5 }, (_, i) => range.lo + ((range.hi - range.lo) * (i + 0.5)) / 5)
     const xTicks = X_TICKS.map(f => candles[Math.min(candles.length - 1, Math.floor(f * candles.length))].t)
     return { step, t0, t1, range, x, y, slot, ticks, xTicks }
-  }, [candles, interval, o.limit, placement.marketable, PLOT_W, PLOT_H, PAD_T, X_TICKS])
+  }, [candles, fills, interval, ol.limit, placement.marketable, PLOT_W, PLOT_H, PAD_T, X_TICKS])
 
   const last = candles.at(-1)
-  const distance = o.limit != null && last ? (o.limit / last.c - 1) * 100 : null
+  const distance = ol.limit != null && last ? (ol.limit / last.c - 1) * 100 : null
   const legendCandle = (hover != null ? candles[hover] : null) ?? last ?? null
   const pair = `${o.quote.symbol} per ${o.base.symbol}`
   const fillSide = o.fillsWhen === 'above' ? 'at or above' : 'at or below'
@@ -112,12 +131,14 @@ export function IntentPriceChart({ data }: { data: IntentOrderDetail }) {
         </div>
       </div>
       <div className="ipc-sub muted">
-        {o.limit != null && placement.marketable
-          ? <>{o.fillsWhen === 'above' ? 'Minimum received' : 'Maximum paid'} <span className="mono ipc-limit-v">{fmtPrice(o.limit)}</span> {pair}
+        {ol.limit != null && placement.marketable
+          ? <>{o.fillsWhen === 'above' ? 'Minimum received' : 'Maximum paid'} <span className="mono ipc-limit-v">{fmtPrice(ol.limit)}</span> {pair}
             {placement.distancePct != null && <> · <span className="mono">{Math.abs(placement.distancePct).toFixed(2)}%</span> {placement.distancePct < 0 ? 'under' : 'over'} the price when placed</>}
-            {' · '}{data.fillsTotal > 0 ? 'filled at market' : 'fills at market'}</>
-          : o.limit != null
-          ? <>Fills {fillSide} <span className="mono ipc-limit-v">{fmtPrice(o.limit)}</span> {pair}
+            {' · '}{data.fillsTotal > 0 ? 'filled at market' : 'fills at market'}
+</>
+          : ol.limit != null
+          ? <>Fills {fillSide} <span className="mono ipc-limit-v">{fmtPrice(ol.limit)}</span> {pair}
+            {lineFee != null && o.limit != null && <span> (limit {fmtPrice(o.limit)}, less the <span className="mono">{(lineFee * 100).toFixed(lineFee < 0.001 ? 3 : 2)}%</span> fee {feeSource})</span>}
             {distance != null && <> · <span className="mono">{distance >= 0 ? '+' : ''}{distance.toFixed(Math.abs(distance) < 10 ? 2 : 0)}%</span> from the price</>}
             {binding && <> · <span className={`limit-flag limit-flag-${binding.kind}`} title={binding.title}>{binding.label}</span></>}
             {data.order.kind === 'dca' && !binding && <> · the limit binds each period’s trade</>}</>
@@ -133,7 +154,7 @@ export function IntentPriceChart({ data }: { data: IntentOrderDetail }) {
                   onPointerMove={onMove} onPointerLeave={() => setHover(null)}>
                   {geo.ticks.map(p => {
                     // An axis label the limit's or the price's own tag would sit on is dropped.
-                    const taken = [o.limit != null && !geo.range.limitOffscale ? o.limit : null, last?.c ?? null, geo.range.limitOffscale && placement.marketable ? (geo.range.limitOffscale === 'above' ? geo.range.hi : geo.range.lo) : null]
+                    const taken = [ol.limit != null && !geo.range.limitOffscale ? ol.limit : null, last?.c ?? null, geo.range.limitOffscale && placement.marketable ? (geo.range.limitOffscale === 'above' ? geo.range.hi : geo.range.lo) : null]
                       .some(v => v != null && Math.abs(geo.y(v) - geo.y(p)) < 16)
                     return (
                       <g key={p}>
@@ -142,6 +163,18 @@ export function IntentPriceChart({ data }: { data: IntentOrderDetail }) {
                       </g>
                     )
                   })}
+                  {ol.limit != null && !geo.range.limitOffscale && (() => {
+                    // The side of the line the order fills on, shaded: a buy's maximum paid
+                    // fills anywhere below it, a sale's minimum received anywhere above.
+                    const ly = geo.y(ol.limit), below = o.fillsWhen === 'below'
+                    const y0 = below ? ly : PAD_T, y1 = below ? PAD_T + PLOT_H : ly
+                    return (
+                      <g className="ipc-zone">
+                        {y1 > y0 && <rect x={PAD_L} y={y0} width={PLOT_W} height={y1 - y0} />}
+                        <text x={PAD_L + 4} y={below ? ly + 13 : ly - 6}>{below ? 'fills below ↓' : 'fills above ↑'}</text>
+                      </g>
+                    )
+                  })()}
                   {geo.xTicks.map(t => <text key={t} x={geo.x(t)} y={H - 7} className="ipc-axis">{fmtTime(t, interval)}</text>)}
                   {candles.map((c, i) => {
                     const up = c.c >= c.o
@@ -163,14 +196,19 @@ export function IntentPriceChart({ data }: { data: IntentOrderDetail }) {
                       <title>Fill at {fmtPrice(f.price)} {pair}</title>
                     </circle>
                   ))}
-                  {o.limit != null && !geo.range.limitOffscale && (
+                  {lineFee != null && o.limit != null && o.limit >= geo.range.lo && o.limit <= geo.range.hi && (
+                    <line className="ipc-limit-stated" x1={PAD_L} x2={PAD_L + PLOT_W} y1={geo.y(o.limit)} y2={geo.y(o.limit)}>
+                      <title>Stated limit {fmtPrice(o.limit)} {pair} (fee included)</title>
+                    </line>
+                  )}
+                  {ol.limit != null && !geo.range.limitOffscale && (
                     <g className="ipc-limit">
-                      <line x1={PAD_L} x2={PAD_L + PLOT_W} y1={geo.y(o.limit)} y2={geo.y(o.limit)} />
-                      <rect x={W - PAD_R + 2} y={geo.y(o.limit) - 9} width={PAD_R - 4} height={18} rx={4} />
-                      <text x={W - PAD_R + 6} y={geo.y(o.limit) + 3.5}>{fmtPrice(o.limit)}</text>
+                      <line x1={PAD_L} x2={PAD_L + PLOT_W} y1={geo.y(ol.limit)} y2={geo.y(ol.limit)} />
+                      <rect x={W - PAD_R + 2} y={geo.y(ol.limit) - 9} width={PAD_R - 4} height={18} rx={4} />
+                      <text x={W - PAD_R + 6} y={geo.y(ol.limit) + 3.5}>{fmtPrice(ol.limit)}</text>
                     </g>
                   )}
-                  {o.limit != null && geo.range.limitOffscale && placement.marketable && (() => {
+                  {ol.limit != null && geo.range.limitOffscale && placement.marketable && (() => {
                     // The guard on the plot's edge, on the side it lies: a dashed rule
                     // along the edge and its tag, pointing out to where it sits.
                     const edgeY = geo.range.limitOffscale === 'above' ? PAD_T : PAD_T + PLOT_H
@@ -179,17 +217,17 @@ export function IntentPriceChart({ data }: { data: IntentOrderDetail }) {
                       <g className="ipc-limit ipc-limit-edge">
                         <line x1={PAD_L} x2={PAD_L + PLOT_W} y1={edgeY} y2={edgeY} />
                         <rect x={W - PAD_R + 2} y={edgeY - 9} width={PAD_R - 4} height={18} rx={4} />
-                        <text x={W - PAD_R + 6} y={edgeY + 3.5}>{arrow} {fmtPrice(o.limit!)}</text>
+                        <text x={W - PAD_R + 6} y={edgeY + 3.5}>{arrow} {fmtPrice(ol.limit!)}</text>
                         <text className="ipc-edge-note" x={PAD_L + PLOT_W - 4} y={geo.range.limitOffscale === 'above' ? edgeY + 13 : edgeY - 6} textAnchor="end">
                           {o.fillsWhen === 'above' ? 'minimum received' : 'maximum paid'} {arrow} {geo.range.limitOffscale} this scale
                         </text>
                       </g>
                     )
                   })()}
-                  {o.limit != null && geo.range.limitOffscale && !placement.marketable && (
+                  {ol.limit != null && geo.range.limitOffscale && !placement.marketable && (
                     <g className="ipc-limit ipc-limit-off">
                       <text x={PAD_L + PLOT_W - 4} y={geo.range.limitOffscale === 'above' ? PAD_T + 12 : PAD_T + PLOT_H - 6} textAnchor="end">
-                        {geo.range.limitOffscale === 'above' ? '↑' : '↓'} limit {fmtPrice(o.limit)} — off this scale
+                        {geo.range.limitOffscale === 'above' ? '↑' : '↓'} limit {fmtPrice(ol.limit)} — off this scale
                       </text>
                     </g>
                   )}
@@ -216,7 +254,9 @@ export function IntentPriceChart({ data }: { data: IntentOrderDetail }) {
         )}
       </div>
       <div className="ipc-legend muted">
-        <span><i className="ipc-key ipc-key-limit" />Limit</span>
+        <span><i className="ipc-key ipc-key-limit" />{lineFee != null ? 'Fills at (net of fees)' : placement.marketable ? (o.fillsWhen === 'above' ? 'Minimum received' : 'Maximum paid') : 'Limit'}</span>
+        {ol.limit != null && <span><i className="ipc-key ipc-key-zone" />Fills {o.fillsWhen === 'above' ? 'above' : 'below'} the line</span>}
+        {lineFee != null && <span><i className="ipc-key ipc-key-stated" />Stated limit (fees included)</span>}
         <span><i className="ipc-key ipc-key-now" />Price now</span>
         {fills.length > 0 && <span><i className="ipc-key ipc-key-fill" />Fills</span>}
         {(chart.data?.baseSeries !== o.base.assetId || chart.data?.quoteSeries !== o.quote.assetId) && chart.data && (
