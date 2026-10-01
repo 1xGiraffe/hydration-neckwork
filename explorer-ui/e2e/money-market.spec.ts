@@ -17,9 +17,10 @@ test('dual-market account renders GIGAHDX as a full market card below the primar
   const giga = page.locator('.mm-market-section[data-market-key="gigahdx"]')
   await expect(primary).toBeVisible()
   await expect(giga).toBeVisible()
-  const defiSim = page.getByRole('link', { name: /Open in DefiSim/ })
-  await expect(defiSim).toHaveCount(1)
-  await expect(defiSim).toHaveAttribute('href', /[?&]address=0x[0-9a-f]{40}$/i)
+  // Each isolated market links DefiSim opened on that market.
+  await expect(page.getByRole('link', { name: /Open in DefiSim/ })).toHaveCount(2)
+  await expect(primary.getByRole('link', { name: /Open in DefiSim/ })).toHaveAttribute('href', /[?&]address=0x[0-9a-f]{40}&market=HYDRATION_MAIN$/i)
+  await expect(giga.getByRole('link', { name: /Open in DefiSim/ })).toHaveAttribute('href', /[?&]address=0x[0-9a-f]{40}&market=HYDRATION_GIGAHDX$/i)
 
   const primaryBox = await primary.boundingBox()
   const gigaBox = await giga.boundingBox()
@@ -42,14 +43,14 @@ test('activity uses a compact supplemental-market label', async ({ page }) => {
   await expect(page.locator('.mm-activity-market').first()).toHaveText('GIGAHDX')
 })
 
-test('tag view keeps supplemental debt contextual and DefiSim on the primary market', async ({ page }) => {
+test('tag view keeps supplemental debt contextual and DefiSim on each market', async ({ page }) => {
   await page.goto('/tag/kraken')
   await expect(page.locator('.mm-secondary-debt')).toContainText('GIGAHDX debt')
 
   await page.locator('.detail-tabs button', { hasText: 'Borrow' }).click()
   await expect(page.locator('.mm-market-section[data-market-key="core"]')).toBeVisible()
   await expect(page.locator('.mm-market-section[data-market-key="gigahdx"]')).toBeVisible()
-  await expect(page.getByRole('link', { name: /Open in DefiSim/ })).toHaveCount(1)
+  await expect(page.locator('.mm-market-section[data-market-key="gigahdx"]').getByRole('link', { name: /Open in DefiSim/ })).toHaveAttribute('href', /market=HYDRATION_GIGAHDX$/)
 })
 
 test('GIGAHDX market card remains usable without horizontal overflow on mobile', async ({ page }) => {

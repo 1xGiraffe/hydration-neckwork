@@ -7,7 +7,7 @@ import { Accounts } from '../src/pages/Accounts'
 // /accounts and a tag's member list render the same component.
 import { HealthSimBadge } from '../src/components/AccountsTable'
 import { healthFactorDisplay } from '../src/components/ui'
-import { defisimAccountTarget } from '../src/utils/defisim'
+import { defisimAccountTarget, defisimUrl } from '../src/utils/defisim'
 import type { TopAccountRow } from '../src/types'
 
 // Finds the single anchor wrapping `text`, same helper render-user.test.tsx
@@ -26,13 +26,24 @@ describe('HealthSimBadge — two-sided health factor / DefiSim link', () => {
     expect(html).toContain('1.41')
     expect(html).toContain('hf-warn')
     expect(html).toContain('DefiSim')
-    expect(html).toContain('https://defisim.neckwork.net/?address=0xabc')
+    // The directory's HF is the primary market's, so that market opens.
+    expect(html).toContain('https://defisim.neckwork.net/?address=0xabc&amp;market=HYDRATION_MAIN')
     expect(html.match(/<a /g)).toHaveLength(1)
   })
   it('renders a pure supplier as "No debt" with the link intact', () => {
     const html = renderToStaticMarkup(<HealthSimBadge hf={healthFactorDisplay('inf')} addr="0xdef" />)
     expect(html).toContain('No debt')
     expect(html).toContain('DefiSim')
+  })
+})
+
+describe('DefiSim deep links', () => {
+  it('names the isolated market, and only markets DefiSim knows', () => {
+    expect(defisimUrl('0xabc', 'core')).toBe('https://defisim.neckwork.net/?address=0xabc&market=HYDRATION_MAIN')
+    expect(defisimUrl('0xabc', 'gigahdx')).toBe('https://defisim.neckwork.net/?address=0xabc&market=HYDRATION_GIGAHDX')
+    expect(defisimUrl('0xabc', 'bil')).toBe('https://defisim.neckwork.net/?address=0xabc&market=HYDRATION_BIL')
+    expect(defisimUrl('0xabc', 'market4')).toBe('https://defisim.neckwork.net/?address=0xabc')
+    expect(defisimUrl('0xabc')).toBe('https://defisim.neckwork.net/?address=0xabc')
   })
 })
 

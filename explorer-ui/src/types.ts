@@ -669,7 +669,7 @@ export interface MoneyMarketPosition {
   marketKey: string
   market: string                 // display label, e.g. 'Money Market' or 'GIGAHDX'
   role: 'primary' | 'supplemental'
-  defiSimSupported: boolean      // currently true only for the primary market
+  defiSimSupported: boolean      // DefiSim can simulate this market (core, GIGAHDX, BIL; not env-configured ones)
   stakingBacked?: boolean        // collateral backed by locked-in-wallet HDX (display-only in net worth)
   blockHeight: number
   timestamp: string

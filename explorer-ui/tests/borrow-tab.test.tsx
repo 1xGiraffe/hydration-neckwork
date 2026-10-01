@@ -183,12 +183,14 @@ describe('<BorrowTab>', () => {
     return renderToStaticMarkup(<QueryClientProvider client={qc}><BorrowTab areas={areas} showOwner={showOwner} /></QueryClientProvider>)
   }
 
-  it('renders one card per market, DefiSim on the primary only, and with several cards every one collapsed', () => {
-    const html = render([{ address: FOX, markets: [position(), position({ marketKey: 'gigahdx', market: 'GIGAHDX', role: 'supplemental', defiSimSupported: false, stakingBacked: true })], defisimAddress: '0xabc' }], { [FOX]: mockMoneyMarketHistory(FOX) })
+  it('renders one card per market, DefiSim per simulable market, and with several cards every one collapsed', () => {
+    const html = render([{ address: FOX, markets: [position(), position({ marketKey: 'gigahdx', market: 'GIGAHDX', role: 'supplemental', defiSimSupported: true, stakingBacked: true })], defisimAddress: '0xabc' }], { [FOX]: mockMoneyMarketHistory(FOX) })
     expect(html.match(/data-market-key="core"/g)).toHaveLength(1)
     expect(html.match(/data-market-key="gigahdx"/g)).toHaveLength(1)
-    expect(html.match(/Open in DefiSim/g)).toHaveLength(1)
-    expect(html).toContain('defisim.neckwork.net/?address=0xabc')
+    // Each isolated market links DefiSim opened on that market.
+    expect(html.match(/Open in DefiSim/g)).toHaveLength(2)
+    expect(html).toContain('defisim.neckwork.net/?address=0xabc&amp;market=HYDRATION_MAIN')
+    expect(html).toContain('defisim.neckwork.net/?address=0xabc&amp;market=HYDRATION_GIGAHDX')
     // Collapsed: the summary (HF, LTV bar, KPIs) stays; no reserves table, no charts.
     expect(html.match(/class="bw-rule"[^>]*aria-expanded="false"/g)).toHaveLength(2)
     expect(html).not.toMatch(/class="bw-rule[^"]*"[^>]*aria-expanded="true"/)
@@ -223,6 +225,16 @@ describe('<BorrowTab>', () => {
     expect(html).toContain('getUserAccountData')
     // Both charts share the card's zoom window.
     expect(html.match(/data-zoom-key="zmm-core"/g)).toHaveLength(2)
+  })
+
+  it('offers DefiSim only for markets it can simulate', () => {
+    const html = render([{ address: FOX, markets: [
+      position({ marketKey: 'bil', market: 'BIL', role: 'supplemental', defiSimSupported: true, stakingBacked: false }),
+      // An env-configured market DefiSim has no id for.
+      position({ marketKey: 'market4', market: 'Other', role: 'supplemental', defiSimSupported: false, stakingBacked: false }),
+    ], defisimAddress: '0xabc' }], { [FOX]: mockMoneyMarketHistory(FOX) })
+    expect(html.match(/Open in DefiSim/g)).toHaveLength(1)
+    expect(html).toContain('market=HYDRATION_BIL')
   })
 
   it('renders history-only markets as closed cards, collapsed when there are several', () => {
