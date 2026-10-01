@@ -19,7 +19,7 @@ import { invalidArgument, toolErrorFromUpstream } from '../errors.ts'
 import { budget, h2, joinBlocks, note } from '../format/md.ts'
 import {
   ACTIVITY_ACTIONS, ACTIVITY_ROW_TYPES, ACTIVITY_TYPES, ACTIVITY_TYPE_NOTES,
-  TYPES_WITH_ACTIONS, actionsForType, activityLine, describeActivityFilters, unconfirmedNote,
+  TYPES_WITH_ACTIONS, actionsForType, activityLine, describeActivityFilters, foldIcePotTrades, unconfirmedNote,
 } from '../format/activity.ts'
 import { RE_HASH64, addressNotFound, callHint, failure, output, parseInput, parseCoordinate, resolveAssetToken, settle } from './shared.ts'
 
@@ -295,10 +295,15 @@ export const activityTools: ToolDefinition[] = [{
       })
     }
 
-    const all = rows
     // Block and extrinsic scopes answer with the whole set; paging them is this
-    // tool's job rather than the route's.
+    // tool's job rather than the route's. They also arrive with an ICE solution's
+    // pot trades beside its fills, which every other feed has already folded.
     const unpaged = scope === 'block' || scope === 'extrinsic'
+    const fold = unpaged ? foldIcePotTrades(rows) : { rows, folded: 0 }
+    const all = fold.rows
+    if (fold.folded > 0) {
+      scopeNote = `${scopeNote ?? ''} ICE pot trades folded: ${fold.folded}. They are the pool trades that produced the intent fills listed here, not trades of their own (the extrinsic's explorer page lists them as the solution's routing).`.trim()
+    }
     const page = unpaged ? all.slice(offset, offset + limit) : all.slice(0, limit)
 
     const describe = describeActivityFilters({
