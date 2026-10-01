@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { modlAccountId, stableswapPoolAccount, economicModuleAccounts, truncatedH160Index, mmContractAccountIds, initTagService, loadTags, retireUnknownTagMemberships, SYSTEM_TAG_IDS, DEFAULT_TAGS, INCENTIVES_REWARD_POT, SOVEREIGN_PREFIXES } from '../src/services/tagService.ts'
 import type { Tag } from '../src/services/tagService.ts'
+import { ICE_FEE_ACCOUNT, ICE_POT_ACCOUNT } from '../src/services/explorerService.ts'
+import { INTERNAL_PAYER_TAGS } from '../src/services/revenueStreams.ts'
 import type { ClickHouseClient } from '../src/db/client.ts'
 
 describe('system-account derivations', () => {
@@ -34,6 +36,18 @@ describe('system-account derivations', () => {
     expect(INCENTIVES_REWARD_POT).toBe('0x45544800112c208b900bcfc9ff8131d0f45769cb6c7c7d8d0000000000000000')
     // It is protocol plumbing, not a deliberate actor: keep it out of top movers.
     expect(SYSTEM_TAG_IDS.has('incentive-pot')).toBe(true)
+  })
+
+  // ICE's settlement pot runs every intent's pool trades with no extrinsic of its
+  // own, so it read as an anonymous "ice_ice#" trader. Infrastructure the intents
+  // settle through: a system tag, and never an internal payer, since the fees it
+  // pays are its users' (erasing them would delete real revenue).
+  it('labels the ICE settlement pot and its fee account as system infrastructure', () => {
+    const ice = DEFAULT_TAGS.find(t => t.tagId === 'ice-pot')
+    expect(ice?.name).toBe('ICE Pot')
+    expect(ice?.addresses).toEqual([ICE_POT_ACCOUNT, ICE_FEE_ACCOUNT])
+    expect(SYSTEM_TAG_IDS.has('ice-pot')).toBe(true)
+    expect((INTERNAL_PAYER_TAGS as readonly string[]).includes('ice-pot')).toBe(false)
   })
 
   // A sovereign account is 20 meaningful bytes under one of two markers. Matching

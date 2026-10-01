@@ -9,7 +9,7 @@ import { blockOf } from '../utils/activityIds'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { api } from '../api/explorer'
 import { ActivityTable, PoolChip } from '../components/ActivityTable'
-import { emptyActivityReason } from '../utils/extrinsicActivity'
+import { emptyActivityReason, foldIcePotTrades } from '../utils/extrinsicActivity'
 import { EvmCallCard, EvmLogView } from '../components/EvmDecoded'
 import { evmTransactionEnvelope } from '../utils/evmDecoded'
 import type { EvmTransactionFacts, IceSolutionPanel } from '../types'
@@ -47,14 +47,11 @@ function IceSolutionCard({ panel, now }: { panel: IceSolutionPanel; now: number 
         ))}
       </div>
     </div></div>
-    {/* Each row is one event of this extrinsic, so it links to its own page, as the
-        Activity tab's rows do. */}
-    {panel.fills.length > 0 && <>
-      <div className="sec-title">Fills</div>
-      <ActivityTable rows={panel.fills} now={now} dcaExecutionLinks />
-    </>}
+    {/* The fills are the Activity tab below; this is how the pot produced them —
+        its trades through the pools, which the tab folds behind the fills so one
+        intent does not read as three trades. Each row links to its own page. */}
     {panel.potTrades.length > 0 && <>
-      <div className="sec-title">Pot trades</div>
+      <div className="sec-title">Routed through the pools <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>· the pot’s trades that filled the intents below</span></div>
       <ActivityTable rows={panel.potTrades} now={now} dcaExecutionLinks />
     </>}
   </>
@@ -167,7 +164,8 @@ export function ExtrinsicDetail({ id }: { id: string }) {
   }, [data, id])
 
   const args = (data?.callArgs && typeof data.callArgs === 'object') ? data.callArgs as Record<string, unknown> : {}
-  const activityRows = activity.data ?? []
+  // An ICE solution's pot trades are listed in its panel; the tab shows the fills.
+  const activityRows = foldIcePotTrades(activity.data ?? [])
   const canGoNext = !!data && !!next.data
 
   return (
