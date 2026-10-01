@@ -1,7 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { blake2AsU8a } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
-import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
+import { rpc, substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
 import { storagePrefix, twox64Concat, u32At, u32Le, u128At } from './chainPrimitives.ts'
 import { TREASURY_ACCOUNT } from './revenueStreams.ts'
 import { decodeCompact } from './proxyMultisigService.ts'
@@ -454,10 +454,10 @@ async function loadVoteLocks(): Promise<Map<string, VoteClassState[]> | null> {
  * Above 1 and rising: a receipt is worth more HDX the longer the pool earns.
  * (Quoted the other way round — GIGAHDX per HDX — it reads just under 1.)
  */
-export async function loadGigahdxRate(): Promise<number | null> {
+export async function loadGigahdxRate(at?: string): Promise<number | null> {
   const [staked, pot, issuance] = await substrateStorageBatch([
     GIGA_TOTAL_LOCKED_KEY, GIGA_POT_ACCOUNT_KEY, STHDX_ISSUANCE_KEY,
-  ])
+  ], at)
   if (!staked || !issuance) return null
   const issued = u128At(hexToU8a(issuance), 0)
   if (issued <= 0n) return null
@@ -470,6 +470,52 @@ export async function loadGigahdxRate(): Promise<number | null> {
   // check: the pool has never doubled, so anything past it is a bad decode.
   if (!Number.isFinite(rate) || rate >= 2) return null
   return Math.max(1, rate)
+}
+
+// How far back the staking rate's growth is read. Long enough to smooth the
+// fee share's day-to-day swing, short enough to follow the treasury drip when it
+// steps down (see GIGAHDX_BASE_MIN_DAYS for a young history).
+const GIGAHDX_BASE_WINDOW_DAYS = 30
+const GIGAHDX_BASE_MIN_DAYS = 7
+// GIGAHDX staking launched here (2026-07-01); no rate exists before it.
+const GIGAHDX_LAUNCH_BLOCK = 12_959_351
+
+/**
+ * What holding GIGAHDX (stHDX) earns by itself, before any voting reward: the
+ * growth of its exchange rate (loadGigahdxRate) over the trailing
+ * GIGAHDX_BASE_WINDOW_DAYS, annualised simple — the same reading the token yield
+ * of every other yield-bearing token gets (positionYield's tokenAccrualAprs). The
+ * rate lifts as the gigahdx! pot takes the treasury drip and its trade-fee share,
+ * so this is the realised passive yield; the voting reward (gigarwd!) is paid out
+ * per referendum and depends on how one votes, so it is not part of it.
+ * A fraction per year; null when either end cannot be read (the archive node is
+ * needed for the past one) or the window is too young.
+ */
+export function gigahdxBaseApr(client: ClickHouseClient): Promise<{ apr: number; days: number } | null> {
+  return cachedSwr('explorer:gigahdx-base-apr', 3_600_000, 48 * 3_600_000, async () => {
+    const res = await client.query({
+      query: `WITH (SELECT max(block_height) FROM price_data.blocks) AS head
+              SELECT b1.block_height AS h1, toUnixTimestamp(b1.block_timestamp) AS t1, b0.block_height AS h0, toUnixTimestamp(b0.block_timestamp) AS t0
+              FROM (SELECT block_height, block_timestamp FROM price_data.blocks WHERE block_height = head) AS b1
+              CROSS JOIN (
+                SELECT block_height, block_timestamp FROM price_data.blocks
+                WHERE block_timestamp >= (SELECT block_timestamp FROM price_data.blocks WHERE block_height = head) - INTERVAL {days:UInt32} DAY
+                  AND block_height >= {launch:UInt32}
+                ORDER BY block_height LIMIT 1
+              ) AS b0`,
+      query_params: { days: GIGAHDX_BASE_WINDOW_DAYS, launch: GIGAHDX_LAUNCH_BLOCK },
+      format: 'JSONEachRow',
+    })
+    const [row] = await res.json<{ h1: number; t1: number; h0: number; t0: number }>()
+    if (!row) return null
+    const dt = Number(row.t1) - Number(row.t0)
+    if (dt < GIGAHDX_BASE_MIN_DAYS * 86_400) return null
+    const [hash1, hash0] = await Promise.all([rpc<string>('chain_getBlockHash', [Number(row.h1)]), rpc<string>('chain_getBlockHash', [Number(row.h0)])])
+    if (!hash1 || !hash0) return null
+    const [r1, r0] = await Promise.all([loadGigahdxRate(hash1), loadGigahdxRate(hash0)])
+    if (r1 == null || r0 == null || !(r1 >= r0)) return null
+    return { apr: (r1 / r0 - 1) * (365 * 86_400) / dt, days: dt / 86_400 }
+  })
 }
 
 // ParachainSystem.LastRelayChainBlockNumber: plain u32 — the relay block the
