@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { RAY, SECONDS_PER_YEAR as AAVE_SECONDS_PER_YEAR, rayMul } from './aaveMath.ts'
 import { cachedSwr } from './cache.ts'
 import { externalTokenApys } from './externalTokenApy.ts'
+import { gigahdxBaseApr } from './hdxService.ts'
 import {
   MM_MARKETS, assetDecimalsOrNull, assetDescriptor, assetIdFromMmAddress, currentPriceOf, displayDescriptor, isStableswapShareToken,
   type ExplorerAsset,
@@ -70,8 +71,8 @@ import { loadV3Registry, v3PoolStats } from './uniswapV3Service.ts'
 // else the growth of its stableswap peg multiplier, which is the token's
 // redemption rate when the peg behaves like one (tokenAccrualAprs).
 export type YieldComponentKind = 'omnipool-fee' | 'stablepool-fee' | 'xyk-fee' | 'v3-fee' | 'mm-supply' | 'mm-incentive' | 'token-yield' | 'farm'
-/** Where a token-yield rate comes from: the Hydration UI's external sources, else the on-chain peg growth. */
-export type TokenYieldSource = 'defillama' | 'kamino' | 'on-chain'
+/** Where a token-yield rate comes from: the Hydration UI's external sources, else the on-chain peg growth; stHDX's is its staking exchange rate's (gigahdxBaseApr). */
+export type TokenYieldSource = 'defillama' | 'kamino' | 'on-chain' | 'gigahdx-rate'
 export interface YieldComponent { kind: YieldComponentKind; aprPct: number | null; asset?: ExplorerAsset; weightPct?: number; source?: TokenYieldSource }
 export interface FarmYield { globalFarmId: number; yieldFarmId: number; rewardAsset: ExplorerAsset; aprPct: number | null }
 export interface PoolYield { totalAprPct: number | null; components: YieldComponent[]; farms: FarmYield[] }
@@ -257,6 +258,7 @@ export interface YieldContext {
 }
 
 const MAX_NEST = 4
+const STHDX_ASSET_ID = 670
 
 /**
  * What holding `assetId` earns through the asset itself, weighted by `weight` —
@@ -549,7 +551,7 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
   if (!anchor) return empty
   const anchorSec = BigInt(Math.floor(new Date(iso(anchor.anchor)).getTime() / 1000))
 
-  const [prices, omni, stable, omniFarms, sharePools, xykMeta, xykFees, v3Fees, xykFarmRows, xykFarmedRows, v3Registry, pegRows] = await Promise.all([
+  const [prices, omni, stable, omniFarms, sharePools, xykMeta, xykFees, v3Fees, xykFarmRows, xykFarmedRows, v3Registry, pegRows, gigaBase] = await Promise.all([
     ensurePrices(),
     omnipoolYield(c, '30d'),
     stableswapYield(c, '30d'),
@@ -563,6 +565,7 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
     loadV3Registry(assetIdFromMmAddress),
     c.query({ query: PEG_WINDOW_SQL, query_params: { anchor: Number(anchorSec) }, format: 'JSONEachRow' })
       .then(r => r.json<{ asset_ids: number[]; n0: string[]; d0: string[]; n1: string[]; d1: string[]; t0: number; t1: number; gave_back: number[] }>()),
+    gigahdxBaseApr(c).catch(() => null),
   ])
   const price = priceLookup(prices)
   const reserves = await loadMmReserves(c, anchorSec, price)
@@ -574,6 +577,12 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
     price,
     decimals: assetDecimalsOrNull,
     ...tokenRates(tokenAccrualAprs(pegRows), externalTokenApys()),
+  }
+  // stHDX has no peg to read: its own yield is its staking rate's growth, which
+  // GIGAHDX (its aToken in the gigahdx market) carries through underlyingParts.
+  if (gigaBase) {
+    ctx.accrual.set(STHDX_ASSET_ID, BigInt(Math.round(gigaBase.apr * 100 * Number(PCT_UNIT))))
+    ctx.accrualSource?.set(STHDX_ASSET_ID, 'gigahdx-rate')
   }
 
   // ── money market ──

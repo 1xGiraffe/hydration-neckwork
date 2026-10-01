@@ -31,7 +31,7 @@ export const YIELD_LABELS: Record<YieldComponent['kind'], string> = {
 }
 
 // A token rate's source, as the hover names it.
-const TOKEN_YIELD_SOURCE: Record<string, string> = { defillama: 'DeFiLlama', kamino: 'Kamino', 'on-chain': 'on-chain, 180d' }
+const TOKEN_YIELD_SOURCE: Record<string, string> = { defillama: 'DeFiLlama', kamino: 'Kamino', 'on-chain': 'on-chain, 180d', 'gigahdx-rate': 'staking rate, 30d' }
 
 // A component's line in a hover card. A weighted term (a pool leg's supply APY or
 // token yield) names its asset and its share; a farm row sits under the farm group.
