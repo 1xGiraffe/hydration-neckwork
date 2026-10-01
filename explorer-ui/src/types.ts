@@ -1017,6 +1017,8 @@ export interface ActivityRow {
   liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy' | 'CollectFees' | 'Rebalance' | 'Compound'   // Create = pool creation; Destroy = pool closure; Claim = LM rewards; ClaimReferral = referral rewards; CollectFees / Rebalance / Compound = concentrated-liquidity position fees / vault re-ranging / vault fees collected and reinvested
   // Concentrated-liquidity (Uniswap v3) rows: the pool contract, the position NFT, the Gamma vault.
   poolAddress?: string
+  poolName?: string
+  poolAssets?: AssetRef[]
   v3TokenId?: string
   v3Vault?: string
   dca?: boolean
