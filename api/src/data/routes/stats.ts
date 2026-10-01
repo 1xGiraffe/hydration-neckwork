@@ -51,6 +51,7 @@ export const statsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
         'Sums over the hourly leg pre-aggregate: rows are always PER ASSET AND SIDE (raw integers of different assets cannot be added), and `groupBy` picks the extra dimension — the venue, the asset itself, or `venue:poolKey`. Only in/out legs are summed; fee legs restate value the trade legs already carry and adding them double-counts.',
         'Only CLOSED hours exist in the source by construction, so the current hour is absent and a bucket can gain nothing once its hour has closed — the freshness bound is one derivations cycle (~10 minutes) behind live trades.',
         'Windows: default the last 7 days; at most 30 days for `bucket=hour` and 366 days for `bucket=day`. `venue=`/`asset=` narrow the read.',
+        'The `aave` venue is the money market\'s aToken mints and redeems — a 1:1 wrap of an asset into its aToken (DOT→aDOT, a pool share into its money-market wrapper), executed by the Router like any fill but not a swap: nothing trades at a price. Every DEX-volume figure Hydration publishes leaves them out (/v1 platform stats, DefiLlama, CoinGecko, DexScreener, and the Explorer\'s per-account trading volume). `wraps=exclude` does the same here; the default `include` keeps them, as the legs they are, so `groupBy=venue` shows them as their own `aave` group while `groupBy=asset` adds them into each asset\'s sums.',
         'Freshness: the pre-aggregate holds CLOSED hours and a live month is republished about once a day, so the newest buckets can lag the head by up to ~24 hours (a per-pool series with a raw tail is /v1/pools/{venue}/{poolKey}/volumes). The `uniswapv3` venue is the concentrated-liquidity pools on Hydration\'s EVM; it appears here once its legs are folded.',
       ].join('\n\n'),
       querystring: z.object({
@@ -58,19 +59,20 @@ export const statsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
         bucket: z.enum(['hour', 'day']).default('day'),
         venue: zVenue.optional(),
         asset: zAssetId.optional(),
+        wraps: z.enum(['include', 'exclude']).default('include').describe("`exclude` leaves out the `aave` venue's aToken wraps, which are not swaps; the default `include` keeps every leg."),
         fromTime: zTimeParam.optional(),
         toTime: zTimeParam.optional(),
       }),
       response: { 200: z.object({ items: z.array(zVolumeRow) }), 400: zError },
     },
   }, async request => {
-    const { groupBy, bucket, venue, asset } = request.query
+    const { groupBy, bucket, venue, asset, wraps } = request.query
     const window = resolveWindow(request.query.fromTime, request.query.toTime, 7 * DAY_S, bucket === 'hour' ? 30 * DAY_S : 366 * DAY_S, 'volume')
     // The source holds closed hours only and advances once per derivations
     // cycle, so the TTL is the freshness bound; a head-keyed entry would be
     // recomputed every block and never hit.
-    const key = `data:stats:volume:${groupBy}:${bucket}:${venue ?? ''}:${asset ?? ''}:${window.from}:${window.to}`
-    return { items: await cached(key, 60_000, () => volumeStats(opts.client, { groupBy, bucket, from: window.from, to: window.to, venue, assetId: asset == null ? undefined : Number(asset) })) }
+    const key = `data:stats:volume:${groupBy}:${bucket}:${venue ?? ''}:${asset ?? ''}:${wraps}:${window.from}:${window.to}`
+    return { items: await cached(key, 60_000, () => volumeStats(opts.client, { groupBy, bucket, from: window.from, to: window.to, venue, assetId: asset == null ? undefined : Number(asset), excludeWraps: wraps === 'exclude' })) }
   })
 
   app.get('/v1/stats/revenue', {
