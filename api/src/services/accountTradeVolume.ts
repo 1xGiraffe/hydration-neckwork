@@ -216,10 +216,24 @@ legacy AS (
   // (18 dec), and valuing the bond's integer as DOT booked 10,000,000 DOT —
   // $77.3M of volume for a $1,562 trade. 26 such buys inflated the whole
   // account_trade_volume leaderboard by $815.2M.
-  // ICE intents settle through the solver's pot: the pot runs the AMM routes (its
-  // Broadcast legs, swapper = pot, stay the pot's — the routes it ran, as the fee
-  // processor keeps its conversions) and the owner only pays into and receives out
-  // of it. The owner's trade is the FILL: the Intent event's amounts for a resolve,
+  // A trade whose every fill is an AAVE-filler swap is an aToken mint or redeem — a
+  // 1:1 money-market wrap (DOT→aDOT, a pool share into its money-market wrapper),
+  // not a swap: the public volume surfaces drop it by the same rule
+  // (poolVolumes.ts `all_aave`) and the indexer's per-account volume by asset
+  // identity. Untreated, the Treasury's four share→aToken wraps in block 14,672,012
+  // read as $3.27M of trading. An aave hop INSIDE a routed trade stays: it is a real
+  // hop and already cancels in the per-asset net, so only whole-trade wraps go
+  // (`all_aave`, carried through `legs`/`net` as the minimum over the trade).
+  // ICE intents settle through the solver's pot: the pot runs the AMM routes and the
+  // owner only pays into and receives out of it. The owner's trade is the FILL, and
+  // it is the only booking — the pot's own Broadcast legs (swapper = pot) are left
+  // out wherever a fill in the same extrinsic names its owner (`bcast`), since
+  // they are the same trade a second time: a pot that kept
+  // them read $813k of "trading" by October 2026 on top of the owners' fills, and
+  // any sum across accounts counted intent volume twice. The fill states exact
+  // per-owner amounts, so even a multi-owner solution needs no split of the routes
+  // (the indexer, which has only the routes, re-attributes them instead — see
+  // src/blocks/icePotSettlement.ts). The owner's trade is the FILL: the Intent event's amounts for a resolve,
   // a partial or a DCA trade; for the budget-exhausting DcaCompleted, which states
   // none, the pot's settlement legs for that (solution, owner, asset) less the
   // sibling fills that state theirs — exact for one completion per (owner, asset)
@@ -324,19 +338,28 @@ bcast AS (
          -- src/blocks/otcCounterparty.ts. An unresolvable fill (no sibling event in
          -- this partition, or a taker that is neither account) keeps swapper, which
          -- is how it was booked before.
+         -- The ICE pot's route legs are its fills a second time — but only where a
+         -- fill in the same extrinsic books them to an owner. A solution whose fills
+         -- name no owner yet (its IntentSubmitted not indexed, as in a backward
+         -- backfill, where the swap watermark would never re-mark the partition)
+         -- keeps them on the pot rather than losing the trade. '' fails the account
+         -- shape \`net\` keeps.
+         if(e.swapper = '${ICE_POT_ACCOUNT}' AND (e.block_height, e.extrinsic_index) IN (SELECT block_height, extrinsic_index FROM intent_fills), '',
          multiIf(NOT e.is_otc, e.swapper,
                  t.taker = e.swapper, e.swapper,
                  t.taker = e.filler_acct, e.filler_acct,
-                 e.swapper) AS principal,
+                 e.swapper)) AS principal,
          multiIf(NOT e.is_otc, '',
                  t.taker = e.swapper, e.filler_acct,
                  t.taker = e.filler_acct, e.swapper,
-                 '') AS passive
+                 '') AS passive,
+         e.is_aave AS is_aave
   FROM (
-    SELECT block_height, event_index, block_timestamp, event_name, args_json, ${rid} AS rid,
+    SELECT block_height, extrinsic_index, event_index, block_timestamp, event_name, args_json, ${rid} AS rid,
            JSONExtractString(args_json,'swapper') AS swapper,
            JSONExtractString(args_json,'filler') AS filler_acct,
-           JSONExtractString(args_json,'fillerType','__kind') = 'OTC' AS is_otc
+           JSONExtractString(args_json,'fillerType','__kind') = 'OTC' AS is_otc,
+           toUInt8(JSONExtractString(args_json,'fillerType','__kind') = 'AAVE') AS is_aave
     FROM price_data.raw_events FINAL
     WHERE event_name IN (${BROADCAST_EVENTS}) AND block_height >= ${BROADCAST_MIN_BLOCK} AND ${pf}
   ) e
@@ -349,12 +372,12 @@ bcast AS (
 legs AS (
   SELECT principal AS account, block_height, ${bcastKey} AS trade_key,
          block_time, JSONExtractInt(leg,'asset') AS asset_id,
-         toDecimal256(${outAmount}, 0) AS samt
+         toDecimal256(${outAmount}, 0) AS samt, is_aave AS aave
   FROM bcast
   ARRAY JOIN JSONExtractArrayRaw(args_json,'outputs') AS leg
   UNION ALL
   SELECT principal, block_height, ${bcastKey},
-         block_time, JSONExtractInt(leg,'asset'), -toDecimal256(${inAmount}, 0)
+         block_time, JSONExtractInt(leg,'asset'), -toDecimal256(${inAmount}, 0), is_aave
   FROM bcast
   ARRAY JOIN JSONExtractArrayRaw(args_json,'inputs') AS leg
   UNION ALL
@@ -362,13 +385,13 @@ legs AS (
   -- and received what came IN. Only OTC resolves a passive side, so these two arms
   -- are empty for every pool venue.
   SELECT passive, block_height, ${bcastKey},
-         block_time, JSONExtractInt(leg,'asset'), -toDecimal256(${outAmount}, 0)
+         block_time, JSONExtractInt(leg,'asset'), -toDecimal256(${outAmount}, 0), is_aave
   FROM bcast
   ARRAY JOIN JSONExtractArrayRaw(args_json,'outputs') AS leg
   WHERE passive != ''
   UNION ALL
   SELECT passive, block_height, ${bcastKey},
-         block_time, JSONExtractInt(leg,'asset'), toDecimal256(${inAmount}, 0)
+         block_time, JSONExtractInt(leg,'asset'), toDecimal256(${inAmount}, 0), is_aave
   FROM bcast
   ARRAY JOIN JSONExtractArrayRaw(args_json,'inputs') AS leg
   WHERE passive != ''
@@ -378,7 +401,7 @@ legs AS (
          -toDecimal256(multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted'), JSONExtractString(args_json,'amount'),
                                event_name = 'XYK.BuyExecuted', JSONExtractString(args_json,'buyPrice'),
                                event_name = 'LBP.BuyExecuted', JSONExtractString(args_json,'amount'),
-                               JSONExtractString(args_json,'amountIn')), 0)
+                               JSONExtractString(args_json,'amountIn')), 0), toUInt8(0)
   FROM legacy
   UNION ALL
   SELECT who, block_height, trade_key,
@@ -386,28 +409,28 @@ legs AS (
          toDecimal256(multiIf(event_name IN ('XYK.SellExecuted','LBP.SellExecuted'), JSONExtractString(args_json,'salePrice'),
                               event_name = 'XYK.BuyExecuted', JSONExtractString(args_json,'amount'),
                               event_name = 'LBP.BuyExecuted', JSONExtractString(args_json,'buyPrice'),
-                              JSONExtractString(args_json,'amountOut')), 0)
+                              JSONExtractString(args_json,'amountOut')), 0), toUInt8(0)
   FROM legacy
   UNION ALL
-  SELECT account, block_height, ${anchor} + event_index AS trade_key, block_time, asset_in, -amount_in
+  SELECT account, block_height, ${anchor} + event_index AS trade_key, block_time, asset_in, -amount_in, toUInt8(0)
   FROM intent_trades
   UNION ALL
-  SELECT account, block_height, ${anchor} + event_index, block_time, asset_out, amount_out
+  SELECT account, block_height, ${anchor} + event_index, block_time, asset_out, amount_out, toUInt8(0)
   FROM intent_trades
   UNION ALL
-  SELECT account, block_height, ${anchor} + event_index AS trade_key, block_time, asset_in, -amount_in
+  SELECT account, block_height, ${anchor} + event_index AS trade_key, block_time, asset_in, -amount_in, toUInt8(0)
   FROM v3_direct
   UNION ALL
-  SELECT account, block_height, ${anchor} + event_index, block_time, asset_out, amount_out
+  SELECT account, block_height, ${anchor} + event_index, block_time, asset_out, amount_out, toUInt8(0)
   FROM v3_direct
 ),
 net AS (
-  SELECT account, block_height, trade_key, any(block_time) AS block_time, asset_id, sum(samt) AS net_amt
+  SELECT account, block_height, trade_key, any(block_time) AS block_time, asset_id, sum(samt) AS net_amt, min(aave) AS all_aave
   FROM legs WHERE match(account, '^0x[0-9a-f]{64}$')
   GROUP BY account, block_height, trade_key, asset_id
 ),
 valued AS (
-  SELECT n.account AS account, n.block_height AS block_height, n.trade_key AS trade_key,
+  SELECT n.account AS account, n.block_height AS block_height, n.trade_key AS trade_key, n.all_aave AS all_aave,
          n.net_amt * ${normFactorSql('n.asset_id', md)} * toDecimal256(p.close, 12) / toDecimal256('${usdDivisor}', 0) AS net_usd
   FROM net n
   ASOF LEFT JOIN (
@@ -422,5 +445,5 @@ SELECT account, block_height, trade_key,
        toUInt32(1) AS trade_count, now() AS computed_at
 FROM valued
 GROUP BY account, block_height, trade_key
-HAVING volume_usd > 0`
+HAVING volume_usd > 0 AND min(all_aave) = 0`
 }
