@@ -19,9 +19,11 @@
  * split, so such a solution keeps the pot — the same "leave it as it was rather
  * than guess" rule an unresolvable OTC fill takes (see otcSides).
  *
- * This rule lives here because three paths book this same trade — the live indexer
- * (src/blocks/extractVolume.ts), the repair script (src/scripts/repair-volume.ts)
- * and the `account_trade_volume` SQL mirror (api/src/services/accountTradeVolume.ts).
+ * This rule lives here because two paths book this same trade — the live indexer
+ * (src/blocks/extractVolume.ts) and the repair script (src/scripts/repair-volume.ts).
+ * The explorer's `account_trade_volume` (api/src/services/accountTradeVolume.ts)
+ * reaches the same attribution another way: it books each owner's FILL from the
+ * Intent events and drops the pot's legs, which also covers a multi-owner solution.
  */
 
 /** The ICE solver's holding pot: `modl` + `ice_ice#`. */
