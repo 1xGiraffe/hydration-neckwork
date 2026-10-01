@@ -6,7 +6,7 @@ import {
   foldRateSamples,
   type AllocationRow,
   type RateSample,
-} from '../../src/public/services/gigahdxApr.ts'
+} from '../../src/services/gigahdxApr.ts'
 
 // The GIGAHDX staking APR (Semantics 10). The pinned numbers are computed from
 // the spec's formulas, not from this implementation's output:

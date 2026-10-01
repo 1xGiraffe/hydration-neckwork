@@ -4,7 +4,7 @@ import { z } from 'zod'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import { zIsoTimestamp } from '../schemas/common.ts'
-import { VOTING_WINDOW_DAYS, gigahdxApr } from '../services/gigahdxApr.ts'
+import { VOTING_WINDOW_DAYS, gigahdxApr } from '../../services/gigahdxApr.ts'
 
 // GIGAHDX staking: the APR the staking dashboard displays (spec § Semantics 10).
 // One aggregate resource carrying exactly what the UI renders — the three
