@@ -35,6 +35,18 @@ describe('GET /v1/stats/volume', () => {
     expect(res.headers['cache-control']).toBe('private, max-age=60')
   })
 
+  // aToken mints/redeems run through the Router as `aave` fills but are 1:1 wraps,
+  // not swaps; every published DEX-volume figure leaves them out. Kept by default
+  // (the frozen contract), left out on request.
+  it('keeps aave wrap legs by default and leaves them out with wraps=exclude', async () => {
+    const client = fakeDataClient(query => (query.includes('-- data:stats:volume') ? [] : undefined))
+    app = await freshDataApp(client)
+    expect((await app.inject({ url: '/v1/stats/volume', headers: AUTH })).statusCode).toBe(200)
+    expect(client.seen.find(s => s.query.includes('-- data:stats:volume'))!.query).not.toContain("venue != 'aave'")
+    expect((await app.inject({ url: '/v1/stats/volume?wraps=exclude', headers: AUTH })).statusCode).toBe(200)
+    expect(client.seen.filter(s => s.query.includes('-- data:stats:volume')).at(-1)!.query).toContain("venue != 'aave'")
+  })
+
   it('bounds the window per bucket granularity', async () => {
     app = await freshDataApp(fakeDataClient(query => (query.includes('-- data:stats:volume') ? [] : undefined)))
     const tooWideHourly = await app.inject({
