@@ -255,6 +255,18 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     addresses: [modlAccountId('gigahdx!'), modlAccountId('gigarwd!'), modlAccountId('gigarwd!', Buffer.from('alc', 'latin1').toString('hex'))],
   },
   {
+    // ICE (runtime 443) settles every limit-order and DCA intent through its pot: the
+    // owner's input moves in, the pot trades what was not matched against another
+    // intent through the pools, and the fill moves out — 12k pool trades by October
+    // 2026 with no extrinsic of its own. Untagged it read as an anonymous "ice_ice#"
+    // trading $813k. The matched-volume fee goes to its fee account. System
+    // infrastructure, never an internal payer: the fees it pays are its users'.
+    tagId: 'ice-pot', name: 'ICE Pot', color: 'var(--cat-intent)',
+    note: 'ICE intent settlement (runtime 443): the pot every limit-order and DCA intent fills through — it takes the owner\'s input, trades the unmatched remainder through the pools and pays the fill out — and the fee account the matched-volume fee is swept to',
+    icon: '🧊',
+    addresses: [modlAccountId('ice_ice#'), modlAccountId('ice_fee#')],
+  },
+  {
     tagId: 'pallet-pots', name: 'Pallet Pot', color: '#6a7187', note: 'Assorted pallet accounts: router executor, liquidations, bonds, vesting, OTC settlements, currency reserve', icon: '⚙️',
     addresses: [modlAccountId('routerex'), modlAccountId('lqdation'), modlAccountId('pltbonds'), modlAccountId('py/vstng'), modlAccountId('otcsettl'), modlAccountId('curreser')],
   },
@@ -343,7 +355,7 @@ export function stableswapPoolAccount(poolId: number): string {
 // Tags whose members are protocol PLUMBING (pools, pots, farm sub-accounts) —
 // excluded from "economic actor" surfaces like the HDX top movers, unlike the
 // Treasury/HSM/fee tags which represent deliberate actors.
-export const SYSTEM_TAG_IDS = new Set(['money-market', 'omnipool', 'staking-pot', 'fee-processor', 'gigahdx-pots', 'pallet-pots', 'incentive-pot', 'liquidity-mining', 'xyk-pools', 'stableswap-pools', 'lbp-pools', 'sovereigns', 'moonbeam-wormhole', 'snowbridge'])
+export const SYSTEM_TAG_IDS = new Set(['money-market', 'omnipool', 'staking-pot', 'fee-processor', 'gigahdx-pots', 'pallet-pots', 'ice-pot', 'incentive-pot', 'liquidity-mining', 'xyk-pools', 'stableswap-pools', 'lbp-pools', 'sovereigns', 'moonbeam-wormhole', 'snowbridge'])
 
 // Tagged module (modl) accounts that count as economic actors — the top-movers
 // exception list: module plumbing stays hidden, the Treasury's DCA program shows.

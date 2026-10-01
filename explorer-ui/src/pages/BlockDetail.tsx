@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useBlock, useBlockActivity, useStats } from '../hooks/useExplorerData'
+import { foldIcePotTrades } from '../utils/extrinsicActivity'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate } from '../router'
@@ -70,7 +71,8 @@ export function BlockDetail({ height }: { height: number }) {
   const awaiting = useAwaitingBlock(height, isError || failureReason != null, failureReason)
   const activity = useBlockActivity(data ? height : null)
   const [tab, setTab] = useState<'activity' | 'exts' | 'events'>('activity')
-  const activityRows = activity.data ?? []
+  // An ICE solution reads as its fills, as on every feed; its extrinsic shows the routing.
+  const activityRows = foldIcePotTrades(activity.data ?? [])
   // Older payloads carry no eventsShown; the list length is then the best we know.
   const shownEvents = data?.eventsShown ?? data?.events.length ?? 0
 
