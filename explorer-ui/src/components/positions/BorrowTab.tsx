@@ -7,6 +7,7 @@ import type { AccountRef, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMar
 import { YieldHover } from './YieldHover'
 import { yieldComponentRow, type YieldRow } from './yieldFormat'
 import { BorrowHistoryCharts } from './BorrowHistory'
+import { defisimSupportsMarket, defisimUrl } from '../../utils/defisim'
 import { borrowCards, claimedIncentivesUsd, rawHeld, marketInterest, netApy, reserveBorrowPct, reserveRows, reserveSupplyPct } from './borrowMath'
 import type { BorrowCardSpec, InterestTotals } from './borrowMath'
 
@@ -17,7 +18,7 @@ export interface BorrowArea {
   address: string
   account?: AccountRef
   markets: MoneyMarketPosition[]
-  /** The address DefiSim opens for the primary market. */
+  /** The address DefiSim opens this holder's markets for. */
   defisimAddress?: string
 }
 
@@ -56,14 +57,20 @@ function BorrowAreaCards({ area, cards, yields, yieldsLoading, showOwner, defaul
   showOwner?: boolean
   defaultOpen: boolean
 }) {
-  const primary = area.markets.find(m => m.marketKey === cards[0].marketKey && m.defiSimSupported)
-  const defisim = primary ? (primary.simAccount ?? area.defisimAddress) : undefined
+  // Every market DefiSim knows gets its own link, opened on that market (each
+  // is isolated, so a simulation is always about one). Closed markets (no
+  // current position) have nothing to simulate.
+  const defisimFor = (marketKey: string) => {
+    const pos = area.markets.find(m => m.marketKey === marketKey && m.defiSimSupported)
+    if (!pos || !defisimSupportsMarket(marketKey)) return undefined
+    return pos.simAccount ?? area.defisimAddress
+  }
   return (
     <>
-      {cards.map((c, i) => (
+      {cards.map(c => (
         <BorrowCard key={c.marketKey} spec={c} area={area} yields={yields?.[c.marketKey]} yieldsLoading={yieldsLoading}
           owner={showOwner ? area.account : undefined} defaultOpen={defaultOpen}
-          defisimAddress={i === 0 ? defisim : undefined} />
+          defisimAddress={defisimFor(c.marketKey)} />
       ))}
     </>
   )
@@ -195,7 +202,7 @@ function BorrowCard({ spec, area, yields, yieldsLoading, owner, defaultOpen, def
                 <span className="bw-hf-k">{(mm.memberCount ?? 0) > 1 ? 'Lowest HF' : 'HF'}</span><span className={`hf ${hf.cls}`}>{hf.label}</span>
               </span>
             : <span className="badge bw-closed-badge">closed</span>}
-          {defisimAddress && <a className="ext-link bw-defisim" href={`https://defisim.neckwork.net/?address=${encodeURIComponent(defisimAddress)}`} target="_blank" rel="noopener noreferrer">Open in DefiSim ↗</a>}
+          {defisimAddress && <a className="ext-link bw-defisim" href={defisimUrl(defisimAddress, spec.marketKey)} target="_blank" rel="noopener noreferrer" title={`Simulate this ${spec.label} position in DefiSim`}>Open in DefiSim ↗</a>}
         </span>
       </header>
       <div className="mm-card bw-body">

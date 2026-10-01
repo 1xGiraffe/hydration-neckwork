@@ -810,7 +810,7 @@ export const CORE_MM_MARKET: MmMarket = {
 }
 export const GIGAHDX_MM_MARKET: MmMarket = {
   key: 'gigahdx', label: 'GIGAHDX', poolProxy: '0x2ce2cfff743cdb6637f4b5d351937a541b8c8923',
-  role: 'supplemental', defiSimSupported: false, stakingBacked: true,
+  role: 'supplemental', defiSimSupported: true, stakingBacked: true,
 }
 // Isolated BIL market (Decentral × DUX Group invoice factoring): uBIL + HOLLAR
 // reserves, BIL (asset 55) as the uBIL reserve's aToken. Deposits are ordinary
@@ -818,7 +818,7 @@ export const GIGAHDX_MM_MARKET: MmMarket = {
 // is not staking-backed and its Supply/Withdraw rows are real user acts.
 export const BIL_MM_MARKET: MmMarket = {
   key: 'bil', label: 'BIL', poolProxy: '0x69310fda58c819ad82df7d2cb61841c853337a53',
-  role: 'supplemental', defiSimSupported: false, stakingBacked: false,
+  role: 'supplemental', defiSimSupported: true, stakingBacked: false,
 }
 function envMmMarkets(): MmMarket[] {
   const raw = process.env.EXPLORER_MM_MARKETS?.trim()

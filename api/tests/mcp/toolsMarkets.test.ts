@@ -151,7 +151,7 @@ const ADDRESS_DETAIL = {
       ],
     },
     {
-      marketKey: 'gigahdx', market: 'GIGAHDX', role: 'supplemental', defiSimSupported: false, stakingBacked: true,
+      marketKey: 'gigahdx', market: 'GIGAHDX', role: 'supplemental', defiSimSupported: true, stakingBacked: true,
       blockHeight: 14_745_393, timestamp: '2026-09-18 11:09:23',
       totalCollateralBase: '10800000000',         // 1e8 → $108
       totalSuppliedBase: '10900000000',

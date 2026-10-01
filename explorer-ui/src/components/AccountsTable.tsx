@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { paths } from '../router'
 import { AddrPill, Usd, Num, Dash, EmptyRow, healthFactorDisplay, rowNav, Sparkline, TableSkeleton, TagGroupPill, TokenIconRow, pendingRows } from './ui'
-import { defisimAccountTarget } from '../utils/defisim'
+import { defisimAccountTarget, defisimUrl } from '../utils/defisim'
 import type { TopAccountRow } from '../types'
 
 // The accounts directory table.
@@ -34,7 +34,9 @@ function accountRowKey(r: TopAccountRow, i: number): string {
 export function HealthSimBadge({ hf, addr }: { hf: { label: string; cls: string }; addr: string }) {
   return (
     <a
-      className="hf-badge" href={`https://defisim.neckwork.net/?address=${encodeURIComponent(addr)}`} target="_blank" rel="noopener"
+      // The directory's health factor is the primary market's, so the link
+      // opens that market rather than whichever DefiSim would auto-pick.
+      className="hf-badge" href={defisimUrl(addr, 'core')} target="_blank" rel="noopener"
       title="Money-market health factor · opens DefiSim" onClick={e => e.stopPropagation()}
     >
       <span className={`hfv ${hf.cls}`}>{hf.label}</span>
