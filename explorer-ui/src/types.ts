@@ -2644,7 +2644,7 @@ export type PositionScope =
 export type YieldComponentKind = 'omnipool-fee' | 'stablepool-fee' | 'xyk-fee' | 'v3-fee' | 'mm-supply' | 'mm-incentive' | 'token-yield' | 'farm'
 // Where a token-yield rate comes from: the Hydration UI's external sources (DeFiLlama,
 // Kamino), else the token's on-chain redemption-rate growth over 180 days; stHDX's
-// is its staking exchange rate's growth over 30 days ('gigahdx-rate').
+// is its staking exchange rate's growth, the base APR /v1/staking/gigahdx/apr publishes ('gigahdx-rate').
 export type TokenYieldSource = 'defillama' | 'kamino' | 'on-chain' | 'gigahdx-rate'
 export interface YieldComponent { kind: YieldComponentKind; aprPct: number | null; asset?: AssetRef; weightPct?: number; source?: TokenYieldSource }
 export interface FarmYield { globalFarmId: number; yieldFarmId: number; rewardAsset: AssetRef; aprPct: number | null }
