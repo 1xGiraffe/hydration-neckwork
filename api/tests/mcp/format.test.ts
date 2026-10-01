@@ -20,6 +20,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { ICE_POT_ACCOUNT_ID, foldIcePotTrades } from '../../src/mcp/format/activity.ts'
 // The server-side reference implementation of the shared scale. Importing it is
 // the point: these renderings are deliberately parallel, and a change to one
 // that is not made to the other should fail a test rather than ship.
@@ -1270,5 +1271,23 @@ describe('activityDetail', () => {
     const out = activityDetail(XCM_OUT, BASE, { now: NOW })
     expect(out).toContain('Cross-chain costs')
     expect(out).toContain('delivery fee 0.584 HDX')
+  })
+})
+
+// The explorer folds an ICE solution's pot trades behind its fills on every feed
+// and on its own block/extrinsic pages; MCP's block and extrinsic reads arrive
+// unfolded and apply the same rule.
+describe('ICE pot settlement fold', () => {
+  const pot = { accountId: ICE_POT_ACCOUNT_ID } as ActivityRow['who']
+  const owner = { accountId: '0x45544800400feaa2119f40c540920451b3992027df0b7e290000000000000000' } as ActivityRow['who']
+  const row = (type: string, who: ActivityRow['who'], extrinsicIndex: number | null = 2) =>
+    ({ type, who, extrinsicIndex, blockHeight: 15264500 }) as unknown as ActivityRow
+  it('drops the pot trades of a solution and counts them', () => {
+    const out = foldIcePotTrades([row('trade', pot), row('trade', pot), row('intent', owner)])
+    expect(out.rows.map(r => r.type)).toEqual(['intent'])
+    expect(out.folded).toBe(2)
+  })
+  it('keeps a pot trade outside any solution', () => {
+    expect(foldIcePotTrades([row('trade', pot, 3), row('intent', owner, 2)]).folded).toBe(0)
   })
 })

@@ -366,6 +366,8 @@ export interface ActivityRow {
   // liquidity
   liqAction?: 'Add' | 'Remove' | 'Create' | 'Claim' | 'ClaimReferral' | 'Destroy' | 'CollectFees' | 'Rebalance' | 'Compound'
   poolAddress?: string
+  /** The v3 pool's display name (pair and fee tier), when the registry knows it. */
+  poolName?: string
   v3TokenId?: string
   v3Vault?: string
 

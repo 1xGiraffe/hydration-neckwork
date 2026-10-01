@@ -32,7 +32,7 @@ import {
   formatPercent, formatPercentChange, formatUsd,
 } from '../format/units.ts'
 import { blocksToDuration, formatDuration, formatTime, isUnrecordedTime, relativeAge } from '../format/time.ts'
-import { activityDetail, activityLine } from '../format/activity.ts'
+import { activityDetail, activityLine, foldIcePotTrades } from '../format/activity.ts'
 import type { EntityKind, SearchHitView } from './shared.ts'
 import {
   ENTITY_KINDS, RE_H160, RE_HASH64, RE_NUMERIC,
@@ -414,13 +414,13 @@ async function renderBlock(height: number, ctx: ToolContext, candidates: SearchH
     ]),
     h3('Classified activity'),
     activity.value
-      ? activityBlock(activity.value, base, 15, callHint('get_activity', { block: b.height, limit: 50 }))
+      ? activityBlock(foldIcePotTrades(activity.value).rows, base, 15, callHint('get_activity', { block: b.height, limit: 50 }))
       : '_Could not be read._',
     h3(`Extrinsics${extrinsics.omitted > 0 ? ` (first 10 of ${b.extrinsicCount})` : ''}`),
     table(['Id', 'Call', 'Signer', 'Result'], extrinsicRows),
     alsoLine(candidates),
   )
-  return output(ctx, markdown, { kind: 'block', block: b, activity: activity.value ?? null }, [detail.error, activity.error].filter((e): e is ToolError => e != null))
+  return output(ctx, markdown, { kind: 'block', block: b, activity: activity.value ? foldIcePotTrades(activity.value).rows : null }, [detail.error, activity.error].filter((e): e is ToolError => e != null))
 }
 
 const NOISE_EVENTS = new Set([
@@ -496,12 +496,13 @@ async function renderExtrinsic(target: Resolved, ctx: ToolContext, candidates: S
     ]),
     evm ? `${h3('EVM')}\n${evm}` : null,
     h3('Classified activity'),
-    activity.value ? activityBlock(activity.value, base, 10, null) : '_Could not be read._',
+    // An ICE solution reads as its fills, as on every feed (its pot trades are the routing).
+    activity.value ? activityBlock(foldIcePotTrades(activity.value).rows, base, 10, null) : '_Could not be read._',
     h3('Events'),
     eventSummary,
     alsoLine(candidates),
   )
-  return output(ctx, markdown, { kind: 'extrinsic', extrinsic: x, activity: activity.value ?? null }, [activity.error].filter((e): e is ToolError => e != null))
+  return output(ctx, markdown, { kind: 'extrinsic', extrinsic: x, activity: activity.value ? foldIcePotTrades(activity.value).rows : null }, [activity.error].filter((e): e is ToolError => e != null))
 }
 
 async function renderEvent(height: number, index: number, ctx: ToolContext): Promise<ToolOutput> {
