@@ -452,9 +452,10 @@ export async function deleteRule(accountId: string, ruleId: string): Promise<voi
   if (!rule || rule.accountId !== accountId) throw new UserDataError(404, 'Alert not found')
   unindexRule(rule)
   await persistRule(rule, 1)
-  // The threshold lanes keep an armed flag per rule; without this the state
-  // table keeps a row for every alert ever deleted.
+  // The threshold lanes keep an armed flag per rule and every rule its last send;
+  // without this the state table keeps rows for every alert ever deleted.
   await deleteNotificationState(armStateKey(ruleId))
+  await deleteNotificationState(lastSentStateKey(ruleId))
 }
 
 /**
@@ -470,6 +471,7 @@ export async function expireRule(ruleId: string): Promise<void> {
   await persistRule(rule, 1)
   unindexRule(rule)
   await deleteNotificationState(armStateKey(ruleId))
+  await deleteNotificationState(lastSentStateKey(ruleId))
 }
 
 /* ============ inbox ============ */
@@ -610,6 +612,11 @@ export async function clearInbox(accountId: string): Promise<number> {
 // evaluator because deleting a rule has to delete its state row too, and the
 // key must exist in exactly one place for those two to agree.
 export const armStateKey = (ruleId: string): string => `arm:${ruleId}`
+
+// When a rule last sent an outbound message, epoch ms — what its cooldown is
+// measured from. Persisted, not held in memory alone: a restart that forgot it let
+// an "at most daily" rule message again on the next match, once per restart.
+export const lastSentStateKey = (ruleId: string): string => `sent:${ruleId}`
 
 export function getNotificationState(key: string): string | null { return state.get(key) ?? null }
 

@@ -76,6 +76,13 @@ export interface DeliverableNotification {
   blockHeight?: number
   /** Push notification grouping tag; defaults to the rule id. */
   tag?: string
+  /**
+   * The notification ids of the matches a digest row stands for. They get no row
+   * of their own, so without remembering them a later tick re-reading the same
+   * window took them for new matches and wrote them again — as detail rows, or
+   * inside a second, differently-keyed digest.
+   */
+  covers?: readonly string[]
 }
 
 export type DeliveryOutcome = 'delivered' | 'duplicate' | 'rate-limited'
@@ -97,7 +104,7 @@ export function prepareNotifications(items: readonly DeliverableNotification[]):
   for (const n of items) {
     if (seen.has(n.notificationId) || hasNotification(n.notificationId)) { counters.duplicates++; continue }
     seen.add(n.notificationId)
-    ids.push(n.notificationId)
+    ids.push(n.notificationId, ...(n.covers ?? []))
     rows.push({
       notificationId: n.notificationId, accountId: n.accountId, ruleId: n.ruleId, kind: n.kind,
       title: n.rendered.title, body: n.rendered.body, url: n.rendered.path, blockHeight: n.blockHeight ?? 0,

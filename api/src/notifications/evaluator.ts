@@ -26,8 +26,8 @@ import {
   getWormholeAlertState, getWormholeSnapshotGeneration, type WormholeAlertState,
 } from '../services/wormholeNttService.ts'
 import {
-  activeRulesByKind, allRules, armStateKey, channelsFor, expireRule, getChannel, getNotificationState, setNotificationState,
-  setNotificationStates, type NotificationChannel, type NotificationRule,
+  activeRulesByKind, allRules, armStateKey, channelsFor, expireRule, getChannel, getNotificationState, hasNotification,
+  lastSentStateKey, setNotificationState, setNotificationStates, type NotificationChannel, type NotificationRule,
 } from './notificationStore.ts'
 import { resolveActivityTarget } from './ruleTargets.ts'
 import {
@@ -3351,12 +3351,18 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
       // Oldest first, so a coalesced message reads in chain order and the
       // leading match (the one that carries the outbound message) is stable.
       list.sort((a, b) => a.blockHeight - b.blockHeight || a.identity.localeCompare(b.identity))
+      // Only what has not been delivered yet. A window can be read again (the lanes
+      // overlap ticks, a restart re-reads up to its cursor), and splitting the WHOLE
+      // match list into detail rows and a digest re-keyed the digest on every read:
+      // one block's claims landed in four digests beside their own rows.
+      const fresh = list.filter(m => !hasNotification(notificationIdFor(ruleId, m.identity)))
+      if (!fresh.length) return
 
       // A rule on a busy pallet can match the whole window. The oldest matches
       // keep their own detail row; the rest collapse into one digest row, so the
       // inbox stays a readable ledger and the write stays bounded.
-      const detailed = list.slice(0, INBOX_ROWS_PER_RULE)
-      const overflow = list.slice(INBOX_ROWS_PER_RULE)
+      const detailed = fresh.slice(0, INBOX_ROWS_PER_RULE)
+      const overflow = fresh.slice(INBOX_ROWS_PER_RULE)
       const inputFor = (match: RuleMatch) => renderMatch(match, rule, viewerTag)
       const render = (match: RuleMatch) => renderNotification(inputFor(match))
       const rendered = detailed.map(render)
@@ -3377,13 +3383,14 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
           accountId: rule.accountId, ruleId, kind: rule.kind,
           rendered: renderDigest(rule, overflow.slice(0, COALESCE_LIST).map(inputFor), overflow.length),
           blockHeight: overflow[overflow.length - 1].blockHeight,
+          covers: overflow.map(m => notificationIdFor(ruleId, m.identity)),
         })
       }
 
       // Cooldown suppresses the OUTBOUND message only; the inbox stays complete,
       // so a quiet rule is quiet, never lossy.
       const now = Date.now()
-      const last = lastSendAtMs.get(ruleId) ?? 0
+      const last = lastSendAt(ruleId)
       const muffled = rule.cooldownS > 0 && now - last < rule.cooldownS * 1000
       if (muffled) counters.cooldownSuppressed++
       const channels = muffled ? [] : channelsForRule(rule)
@@ -3394,7 +3401,11 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
       // to separate. Only the entries a digest actually lists get rendered, so a
       // huge collapsed group stays cheap.
       const renderedFor = new Map(detailed.map((match, i) => [match, rendered[i]] as const))
-      for (const group of outboundGroups(list, MAX_OUTBOUND_SENDS)) {
+      // A rule with a cooldown sends at most ONE message per period, so a tick that
+      // opens the period sends one digest of everything it matched rather than one
+      // message per block — "at most daily" arrived as up to five pushes at once.
+      const groups = rule.cooldownS > 0 ? [fresh] : outboundGroups(fresh, MAX_OUTBOUND_SENDS)
+      for (const group of groups) {
         if (group.length > 1) counters.coalesced++
         const shown = group.slice(0, COALESCE_LIST)
         const message = group.length === 1
@@ -3423,6 +3434,7 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
   // cooldown clock either.
   const fresh = new Set(prepared.rows.map(r => r.ruleId))
   const sentAt = Date.now()
+  const sentStates = new Map<string, number>()
   for (const send of sends) {
     if (!fresh.has(send.ruleId)) continue
     // A second rule describing the same event in the same words adds nothing,
@@ -3432,10 +3444,32 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
       counters.outboundDuplicates++
       continue
     }
-    lastSendAtMs.set(send.ruleId, Date.now())
+    const at = Date.now()
+    lastSendAtMs.set(send.ruleId, at)
+    sentStates.set(send.ruleId, at)
     sendOutbound(send.accountId, send.message, send.tag, send.channels)
   }
+  // The cooldown clock outlives the process (lastSentStateKey). Only rules with a
+  // cooldown read it back; a failed write costs at most one early message.
+  const persisted = [...sentStates]
+    .filter(([ruleId]) => (ruleOfId(ruleId)?.cooldownS ?? 0) > 0)
+    .map(([ruleId, at]) => ({ key: lastSentStateKey(ruleId), value: String(at) }))
+  if (persisted.length) await setNotificationStates(persisted).catch(err => console.error('[notifications] cooldown state write failed', err))
   return true
+}
+
+// When a rule last sent, from memory or — after a restart — the persisted state.
+function lastSendAt(ruleId: string): number {
+  const held = lastSendAtMs.get(ruleId)
+  if (held != null) return held
+  const stored = Number(getNotificationState(lastSentStateKey(ruleId)))
+  const at = Number.isFinite(stored) && stored > 0 ? stored : 0
+  lastSendAtMs.set(ruleId, at)
+  return at
+}
+
+function ruleOfId(ruleId: string): NotificationRule | null {
+  return allRules().find(r => r.ruleId === ruleId) ?? null
 }
 
 function ruleOf(match: RuleMatch): NotificationRule | null {
