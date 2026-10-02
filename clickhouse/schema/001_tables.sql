@@ -574,3 +574,29 @@ CREATE TABLE IF NOT EXISTS price_data.referendum_lifecycle_events (`pallet` LowC
 -- granules. args_json is carried undecoded because the outcome shape is open-ended — Ok, a
 -- Module error, or no result field at all on CallUnavailable.
 CREATE TABLE IF NOT EXISTS price_data.scheduler_named_dispatches (`task_id` String, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `args_json` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (task_id, block_height, event_index) SETTINGS index_granularity = 1024;
+
+-- The oracle surface's delivery logs (/oracles, api/src/services/oracleService.ts): every
+-- DIA OracleUpdate, Chainlink-style PriceUpdated, DIA UpdaterAddressChange and AaveOracle
+-- AssetSourceUpdated log, by topic0 and from any contract, undecoded (the service decodes
+-- topics/data; oracleDecode.ts). In raw_evm_logs these ~185k rows lie in nearly every granule
+-- of a 38M-row table, so reading their `data` there cost ~9 GiB; here the whole history is a
+-- few tens of MiB. Keyed block-first because both readers are block ranges: the history in
+-- windows and the tail above a settled floor. (block_height, event_index) is the raw_evm_logs
+-- row identity, so a replayed range replaces rather than adds. Fed by oracle_feed_logs_mv.
+CREATE TABLE IF NOT EXISTS price_data.oracle_feed_logs (`contract_address` String, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `topic0` LowCardinality(String), `topics` Array(String), `data` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (block_height, event_index) SETTINGS index_granularity = 8192;
+
+-- EmaOracle.OracleUpdated, one row per (source, pair, block): the explorer's EMA oracle
+-- view (/oracles, oracleService.ts). The event lands in almost every block, so a raw_events
+-- read of it reads every block's args. The pair is normalised to two ids (the decoder hands
+-- a pair of byte-sized ids over as a hex string, "0x050f", any other as an array), and the
+-- Short and Day ratios (raw asset_a per raw asset_b) are kept as Float64 for charts, for all
+-- history. The exact n/d of every period (`updates`, the event's own JSON) is what the page
+-- shows as a value; it is kept 40 days (column TTL) — the page states exact values only for
+-- the window it lists, and over all history it would be 86% of the table. Keyed pair-first:
+-- every reader asks about a pair, or about every pair over a time window, and a pair's
+-- rows are a sliver of each part, so granules are 1024 rows (8192 read ~10x the pair). The
+-- tail and the window probes ask for a block range across every pair, which the 4th key
+-- column cannot prune; a minmax index on block_height does (granules are block-ordered within
+-- a pair). Fed by
+-- ema_oracle_updates_mv; the key holds the raw_events identity, so a replay replaces.
+CREATE TABLE IF NOT EXISTS price_data.ema_oracle_updates (`source` LowCardinality(String), `asset_a` UInt32, `asset_b` UInt32, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `short_ratio` Float64, `day_ratio` Float64, `updates` String CODEC(ZSTD(6)) TTL block_timestamp + toIntervalDay(40), `ingested_at` DateTime, INDEX idx_ema_block block_height TYPE minmax GRANULARITY 1) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (source, asset_a, asset_b, block_height, event_index) SETTINGS index_granularity = 1024;

@@ -17,6 +17,7 @@ import { explorerRoutes } from './routes/explorer.ts'
 import { contractsRoutes } from './routes/contracts.ts'
 import { poolsRoutes } from './routes/pools.ts'
 import { volumeRoutes } from './routes/volume.ts'
+import { oracleRoutes } from './routes/oracles.ts'
 import { liveRoutes } from './routes/live.ts'
 import { initLiveHeadService, stopLiveHeadService } from './services/liveHeadService.ts'
 import { initPendingHeadService, startPendingHeadService, stopPendingHeadService } from './services/pendingHeadService.ts'
@@ -75,6 +76,7 @@ import { initLpRewardClaims } from './services/lpRewardClaims.ts'
 import { initPositionsPresence } from './services/positionsPresence.ts'
 import { initPoolService } from './services/poolService.ts'
 import { initVolumeHistory } from './services/volumeHistory.ts'
+import { initOracleService } from './services/oracleService.ts'
 import { initSecurityService } from './services/securityService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
 import { initLmRewardService } from './services/lmRewardService.ts'
@@ -171,6 +173,9 @@ const CACHE_CONTROL: [RegExp, number][] = [
   // Volume surfaces read hourly read models that publish about once an hour, and
   // their payloads are cached per published hour server-side.
   [/^\/explorer\/(volume$|asset\/\d+\/volume$|omnipool\/volume$|pool\/[^/]+(\/[^/]+)?\/volume$)/, 120],
+  // Oracle surfaces: served from the oracle-state refresher (every 300s) and the
+  // in-process ledgers (tail read at most every 15s), cached 30s server-side.
+  [/^\/explorer\/(oracles$|oracle\/)/, 30],
   // Pool surfaces: current state refreshes every 30-60s server-side, the heavy
   // history models every 300s — match the shortest internal freshness window.
   [/^\/explorer\/omnipool/, 30],
@@ -231,6 +236,7 @@ await fastify.register(explorerRoutes)
 await fastify.register(contractsRoutes)
 await fastify.register(poolsRoutes)
 await fastify.register(volumeRoutes)
+await fastify.register(oracleRoutes)
 await fastify.register(liveRoutes)
 await fastify.register(tagRoutes)
 await fastify.register(userRoutes)
@@ -291,6 +297,9 @@ async function start() {
     initPositionsPresence(client)
     initPoolService(client)
     initVolumeHistory(client)
+    // Must precede startBackgroundRefresh(): the oracle-state task reads the peg
+    // sources and the feed ledger from ClickHouse before it reads the chain.
+    initOracleService(client)
     initSecurityService(client)
     initLiveHeadService(client)
     // The pending-head follower is always-on (feeds merge its rows whether or

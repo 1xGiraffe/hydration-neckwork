@@ -161,6 +161,7 @@ const HUBS: Record<string, { title: string; description: string }> = {
   '/ice': { title: 'ICE', description: 'ICE intents and solver settlements on Hydration.' },
   '/revenue': { title: 'Protocol Revenue', description: 'Protocol revenue on Hydration by stream — trading fees, the money market, HOLLAR and liquidations.' },
   '/volume': { title: 'Volume', description: 'Trading volume on Hydration — every trade once, and per venue, pool and asset, with top pools, assets and traders.' },
+  '/oracles': { title: 'Oracles', description: 'The prices Hydration reads — money-market oracles, stableswap pegs, DIA and push feeds, the EMA oracle — who delivers them, how fresh they are and how far they sit from the market.' },
   '/security': { title: 'Security', description: 'Hydration\u2019s live safety controls: circuit breakers, cross-chain limits, oracle health, freezes and guardians.' },
   '/mcp': { title: 'MCP server', description: 'Connect an AI assistant to Hydration chain data over the Model Context Protocol.' },
 }
@@ -501,6 +502,28 @@ export function pageMeta(path: string): PageMeta {
         crumbs: [CRUMB_HOME, ['Governance', '/governance']],
       }
     }
+  }
+
+  // /oracle/<feed>: a DIA key (dia:<contract>:<KEY>, its slash arriving as a path
+  // separator), an EMA pair (ema:<source>:<a>-<b>) or a feed contract. Described
+  // from the id and the in-memory registry alone.
+  if (head === 'oracle' && a) {
+    const oracleCrumbs: [string, string][] = [CRUMB_HOME, ['Oracles', '/oracles']]
+    const id = parts.slice(1).join('/')
+    const dia = /^dia:(0x[0-9a-f]{40}):(.{1,64})$/i.exec(id)
+    if (dia) {
+      return { title: `${dia[2]} · DIA oracle`, description: `The DIA ${dia[2]} price feed on Hydration — every update, its cadence and staleness, who pushes it and which markets and pools read it.`, facts: [['DIA key', dia[2]], ['Contract', dia[1].toLowerCase()]], crumbs: oracleCrumbs }
+    }
+    const ema = /^ema:([a-z0-9]{1,8}):(\d{1,10})-(\d{1,10})$/.exec(id)
+    if (ema) {
+      const sym = (n: string) => knownExplorerAsset(Number(n)) ? displayDescriptor(Number(n)).symbol : `#${n}`
+      const pair = `${sym(ema[3])}/${sym(ema[2])}`
+      return { title: `${pair} · EMA oracle`, description: `The ${pair} EMA oracle pair on Hydration (source ${ema[1]}) — its Short and Day averages, its updates and what reads it.`, facts: [['Source', ema[1]], ['Pair', pair]], crumbs: oracleCrumbs }
+    }
+    if (EVM_RE.test(id.toLowerCase())) {
+      return { title: `Oracle ${id.slice(0, 6)}…${id.slice(-4)}`, description: `Hydration oracle feed ${id.toLowerCase()} — its value over time, updates, cadence and the markets and pools that read it.`, facts: [['Contract', id.toLowerCase()]], crumbs: oracleCrumbs }
+    }
+    return missing(oracleCrumbs)
   }
 
   if (head === 'pool' && a) {
