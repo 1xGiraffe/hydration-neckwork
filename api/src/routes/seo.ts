@@ -5,6 +5,7 @@ import { displayDescriptor, knownExplorerAsset, allExplorerAssets, isStableswapS
 import { getTag as getSystemTag, allTags } from '../services/tagService.ts'
 import { publicTagById, publicListSummary } from '../services/userListService.ts'
 import { referendumTitleFor, isGenericReferendumTitle, highestReferendumIndex } from '../services/referendumTitleService.ts'
+import { getPlatformVolume } from '../services/volumeHistory.ts'
 
 // The explorer is a client-rendered SPA: nginx answers every page URL with one
 // static index.html, and the real title only appears once React has run. That is
@@ -21,7 +22,9 @@ import { referendumTitleFor, isGenericReferendumTitle, highestReferendumIndex } 
 // Every lookup below is an in-memory Map read — the asset registry, the system
 // tag index, the resident list model, identities, the referendum titles. None of
 // them touches ClickHouse, which is what makes it safe to put this in the path
-// of every HTML request.
+// of every HTML request. The one figure-bearing page, /volume, reads a resident
+// snapshot of the page's own cached payload (see volumeSnapshot below) — never
+// awaited on the request path.
 
 // The canonical origin every absolute URL here is built on — a sitemap <loc>
 // and an og:url are invalid relative. Compose passes EXPLORER_PUBLIC_URL through
@@ -130,6 +133,11 @@ export interface PageMeta {
   canonicalPath?: string
   // Trail for the BreadcrumbList, page itself excluded — [label, path] pairs.
   crumbs?: [string, string][]
+  // A session-only surface that IS reachable logged out — the notification
+  // centre and the API-token page, which a crawler only ever sees as the
+  // logged-out teaser. Kept out of the index with a robots meta tag rather than
+  // robots.txt, so the tag can be read; never listed in the sitemap.
+  sessionOnly?: boolean
 }
 
 // Hub pages: fixed copy, no lookup. Keyed by the exact path.
@@ -141,20 +149,97 @@ const HUBS: Record<string, { title: string; description: string }> = {
   '/events': { title: 'Events', description: 'Runtime events emitted on Hydration, filterable by pallet and event name.' },
   '/accounts': { title: 'Accounts', description: 'The Hydration accounts directory, ranked by portfolio value, lending, trading volume, protocol revenue and activity.' },
   '/contracts': { title: 'Contracts', description: 'EVM contracts deployed on Hydration, with verified sources where available.' },
-  '/assets': { title: 'Assets', description: 'Every asset in the Hydration registry — price, liquidity, holders and origin chain.' },
+  '/assets': { title: 'Assets', description: 'Every asset in the Hydration registry — price, 24-hour volume, liquidity, holders and origin chain.' },
   '/governance': { title: 'Governance', description: 'Hydration OpenGov and Democracy referenda, technical committee motions and treasury spending.' },
   '/tags': { title: 'Tags', description: 'Named accounts and cohorts on Hydration — exchanges, protocol pots, pools and treasuries.' },
   '/tags/hydration': { title: 'Hydration Tags', description: 'The protocol\u2019s own accounts: Omnipool, treasury, staking, money market and the pallet pots behind them.' },
   '/lists': { title: 'Lists', description: 'Public account lists curated on the Hydration Explorer.' },
-  '/omnipool': { title: 'Omnipool', description: 'Hydration Omnipool composition, asset weights, liquidity and fees.' },
-  '/liquidity': { title: 'Liquidity', description: 'Liquidity across the Omnipool, stableswap and XYK pools on Hydration.' },
+  '/omnipool': { title: 'Omnipool', description: 'Hydration Omnipool composition, asset weights, liquidity, volume and fees.' },
+  '/liquidity': { title: 'Liquidity', description: 'Liquidity across the Omnipool, stableswap and XYK pools on Hydration, with each pool\u2019s TVL and 24-hour volume.' },
   '/hdx': { title: 'HDX', description: 'HDX price, supply, staking, treasury buybacks and Omnipool position.' },
   '/hollar': { title: 'HOLLAR', description: 'HOLLAR supply, the stability module, collateral and peg behaviour.' },
   '/ice': { title: 'ICE', description: 'ICE intents and solver settlements on Hydration.' },
   '/revenue': { title: 'Protocol Revenue', description: 'Protocol revenue on Hydration by stream — trading fees, the money market, HOLLAR and liquidations.' },
+  '/volume': { title: 'Volume', description: 'Trading volume on Hydration — every trade once, and per venue, pool and asset, with top pools, assets and traders.' },
   '/security': { title: 'Security', description: 'Hydration\u2019s live safety controls: circuit breakers, cross-chain limits, oracle health, freezes and guardians.' },
   '/mcp': { title: 'MCP server', description: 'Connect an AI assistant to Hydration chain data over the Model Context Protocol.' },
 }
+
+// Session-only pages a logged-out reader (and so a crawler) can still open.
+// /admin/ and /link-device are closed in robots.txt instead and do not come
+// through here — one mechanism per URL.
+const SESSION_PAGES: Record<string, { title: string; description: string }> = {
+  '/notifications': { title: 'Notifications', description: 'Alerts for Hydration accounts, assets and the protocol, delivered to Telegram, email or the browser.' },
+  '/api-tokens': { title: 'API tokens', description: 'Create and manage tokens for the Hydration Data API.' },
+}
+
+// /volume's figures: the routed volume per window, the 24 hours' trades, and
+// the 7 days' top pools and assets, exactly as the page's cards and tables
+// state them. Copied out of getPlatformVolume's own cached payload — the one
+// the page reads, so this never asks ClickHouse anything the page would not —
+// by a refresh nothing awaits (refreshVolumeSnapshot). Until the first copy
+// lands the page keeps its fixed copy, like every hub.
+interface VolumeSnapshot {
+  asOf: string | null
+  d1: number; d7: number; d30: number
+  trades1: number
+  topPools: [string, number][]
+  topAssets: [string, number][]
+}
+let volumeSnapshot: VolumeSnapshot | null = null
+let volumeSnapshotAt = 0
+const VOLUME_SNAPSHOT_MS = 300_000
+
+export function refreshVolumeSnapshot(now = Date.now()): void {
+  if (now - volumeSnapshotAt < VOLUME_SNAPSHOT_MS) return
+  volumeSnapshotAt = now
+  getPlatformVolume('30d').then(v => {
+    if (!v) return
+    volumeSnapshot = {
+      asOf: v.asOf,
+      d1: v.routed.d1.volumeUsd, d7: v.routed.d7.volumeUsd, d30: v.routed.d30.volumeUsd,
+      trades1: v.routedTrades.d1,
+      topPools: v.topPools.slice(0, 5).map(p => [p.name, p.volume7dUsd]),
+      topAssets: v.topAssets.slice(0, 5).map(a => [a.asset.symbol, a.volume7dUsd]),
+    }
+  }).catch(err => { console.error('[seo] volume snapshot failed:', err) })
+}
+
+// The page's own USD scale ($2.58M, $412k, $950), so a figure reads the same here as on screen.
+function usd(n: number): string {
+  const a = Math.abs(n)
+  const sig = (x: number) => String(parseFloat(x.toPrecision(3)))
+  if (a >= 1e9) return `$${sig(n / 1e9)}B`
+  if (a >= 1e6) return `$${sig(n / 1e6)}M`
+  if (a >= 1e3) return `$${sig(n / 1e3)}k`
+  return `$${Math.round(n)}`
+}
+
+function volumeMeta(): PageMeta {
+  const hub = HUBS['/volume']
+  const s = volumeSnapshot
+  if (!s) return { ...hub, crumbs: [CRUMB_HOME] }
+  const ranked = (rows: [string, number][]) => rows.map(([name, v]) => `${name} ${usd(v)}`).join(', ')
+  return {
+    title: hub.title,
+    description: clamp(`Trading volume on Hydration: ${usd(s.d1)} routed in the last 24 hours, ${usd(s.d7)} over 7 days and ${usd(s.d30)} over 30 days, by venue, pool and asset.`),
+    facts: [
+      ['Routed volume · 24H', usd(s.d1)],
+      ['Routed volume · 7D', usd(s.d7)],
+      ['Routed volume · 30D', usd(s.d30)],
+      ['Trades · 24H', num(s.trades1)],
+      ...(s.topPools.length ? [['Top pools · 7D', ranked(s.topPools)] as [string, string]] : []),
+      ...(s.topAssets.length ? [['Top assets · 7D', ranked(s.topAssets)] as [string, string]] : []),
+      ...(s.asOf ? [['Through', `${s.asOf.slice(0, 13).replace('T', ' ')}:00 UTC`] as [string, string]] : []),
+    ],
+    crumbs: [CRUMB_HOME],
+  }
+}
+
+// Every fixed path this describes. nginx must route each one here — a path
+// left out of its allowlist is served the bare static shell however good its
+// copy is (/volume shipped that way); api/tests/seoHead.test.ts pins the two.
+export const FIXED_PAGE_PATHS = [...Object.keys(HUBS), ...Object.keys(SESSION_PAGES)]
 
 const SECURITY_SECTIONS: Record<string, string> = {
   'cross-chain': 'Cross-chain', wormhole: 'Wormhole', omnipool: 'Omnipool',
@@ -231,6 +316,9 @@ const missing = (crumbs: [string, string][]): PageMeta =>
 
 export function pageMeta(path: string): PageMeta {
   const clean = path.length > 1 ? path.replace(/\/+$/, '') : path
+  if (clean === '/volume') return volumeMeta()
+  const session = SESSION_PAGES[clean]
+  if (session) return { ...session, sessionOnly: true, crumbs: [CRUMB_HOME] }
   const hub = HUBS[clean]
   if (hub) return { ...hub, crumbs: clean === '/' ? [] : [CRUMB_HOME] }
 
@@ -302,8 +390,8 @@ export function pageMeta(path: string): PageMeta {
       description: contract
         ? `${name ?? 'EVM contract'} on Hydration (${shown}) — a deployed contract: its verified source, calls, events, balances and history.`
         : name
-          ? `${name} on Hydration (${shown}) — balances, liquidity, lending, trading history and governance votes.`
-          : `Hydration account ${shown} — balances, liquidity, lending, trading history and governance votes.`,
+          ? `${name} on Hydration (${shown}) — balances, liquidity, lending, trading volume and history, and governance votes.`
+          : `Hydration account ${shown} — balances, liquidity, lending, trading volume and history, and governance votes.`,
       facts: [...(name ? [['Name', name] as [string, string]] : []), ...forms],
       crumbs: [CRUMB_HOME, ['Accounts', '/accounts']],
     }
@@ -349,7 +437,7 @@ export function pageMeta(path: string): PageMeta {
         title: holders ? `${asset.symbol} holders` : `${asset.symbol} — ${asset.name}`,
         description: holders
           ? `Who holds ${asset.symbol} (${asset.name}) on Hydration, largest first.`
-          : `${asset.name} (${asset.symbol}) on Hydration — price, liquidity, holders, pools and recent trades.`,
+          : `${asset.name} (${asset.symbol}) on Hydration — price, volume, liquidity, holders, pools and recent trades.`,
         crumbs: [CRUMB_HOME, ['Assets', '/assets']],
       }
     }
@@ -368,7 +456,7 @@ export function pageMeta(path: string): PageMeta {
       return {
         title: tag.name,
         facts: [['Tag', tag.name], ['Accounts', num(count)], ...(note ? [['Note', note] as [string, string]] : [])],
-        description: clamp(note ?? `${tag.name} on Hydration — ${num(count)} tagged ${count === 1 ? 'account' : 'accounts'}, their combined balances, activity and governance votes.`),
+        description: clamp(note ?? `${tag.name} on Hydration — ${num(count)} tagged ${count === 1 ? 'account' : 'accounts'}, their combined balances, trading volume, activity and governance votes.`),
         crumbs: [CRUMB_HOME, ['Tags', '/tags']],
       }
     }
@@ -483,7 +571,9 @@ export function renderHead(meta: PageMeta, path: string): string {
     `<link rel="canonical" href="${esc(canonical)}" />`,
     // Soft-404 remedy, and only that: the URL spaces robots.txt closes never
     // reach a crawler at all, so they carry no robots tag (see PageMeta).
-    ...(meta.notFound ? ['<meta name="robots" content="noindex" />'] : []),
+    // And for a session-only page a crawler can reach but only ever sees as
+    // the logged-out teaser (see PageMeta.sessionOnly).
+    ...(meta.notFound || meta.sessionOnly ? ['<meta name="robots" content="noindex" />'] : []),
     `<meta property="og:title" content="${esc(title)}" />`,
     `<meta property="og:description" content="${esc(meta.description)}" />`,
     `<meta property="og:url" content="${esc(canonical)}" />`,
@@ -560,12 +650,19 @@ export function renderPage(shellHtml: string, path: string): string {
 }
 
 export async function seoRoutes(fastify: FastifyInstance): Promise<void> {
+  // One copy shortly after boot, once the volume models are readable, so the
+  // first crawler after a restart does not get (and nginx cache) the bare copy.
+  const first = setTimeout(() => refreshVolumeSnapshot(), 60_000)
+  first.unref()
+  fastify.addHook('onClose', async () => { clearTimeout(first) })
   // nginx passes the original page path through; the query string is dropped on
   // purpose — ?tab=, ?page= and ?sort= are views of one page, and the canonical
   // this emits points at the bare path for exactly that reason.
   fastify.get('/seo/page/*', async (req, reply: FastifyReply) => {
     const wildcard = (req.params as { '*'?: string })['*'] ?? ''
     const path = `/${wildcard}`.replace(/\/{2,}/g, '/')
+    // Fire-and-forget: this request renders whatever snapshot is resident.
+    if (path.replace(/\/+$/, '') === '/volume') refreshVolumeSnapshot()
     let shellHtml: string
     try {
       shellHtml = await loadShell()
@@ -585,4 +682,7 @@ export async function seoRoutes(fastify: FastifyInstance): Promise<void> {
   })
 }
 
-export const __testing = { loadShellReset: () => { shell = null; shellInflight = null } }
+export const __testing = {
+  loadShellReset: () => { shell = null; shellInflight = null },
+  setVolumeSnapshot: (s: VolumeSnapshot | null) => { volumeSnapshot = s },
+}

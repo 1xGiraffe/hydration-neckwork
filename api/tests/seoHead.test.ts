@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
-import { pageMeta, renderHead, renderPage, renderBody, PUBLIC_URL, UNBOUNDED_PREFIXES, ACTIVITY_PAGES } from '../src/routes/seo.ts'
+import { pageMeta, renderHead, renderPage, renderBody, PUBLIC_URL, UNBOUNDED_PREFIXES, ACTIVITY_PAGES, FIXED_PAGE_PATHS, __testing } from '../src/routes/seo.ts'
 
 // The real shell this rewrites, not a stand-in: what matters is that the regex
 // finds the tags THIS file actually ships, so the test has to read it.
@@ -131,6 +131,53 @@ describe('pageMeta names the page', () => {
     expect(pageMeta('/block/1').crumbs).toEqual([['Home', '/'], ['Blocks', '/blocks']])
     expect(pageMeta('/referendum/opengov/411').crumbs).toEqual([['Home', '/'], ['Governance', '/governance']])
     expect(pageMeta('/').crumbs).toEqual([])
+  })
+})
+
+describe('fixed pages', () => {
+  // The page-URL locations nginx sends to this renderer, read from the shipped config.
+  const nginx = readFileSync(new URL('../../explorer-ui/nginx.conf', import.meta.url), 'utf8')
+  const routed = [...nginx.matchAll(/location (=|~) (\S+) \{\s*include \/etc\/nginx\/seo_page\.conf;/g)]
+    .map(([, kind, pattern]) => (path: string) => kind === '=' ? path === pattern : new RegExp(pattern).test(path))
+
+  // An exact-match location outranks every regex, whatever it does.
+  const exact = new Map([...nginx.matchAll(/location = (\S+) \{([^}]*)\}/g)].map(([, path, body]) => [path, body.includes('seo_page.conf')]))
+
+  it('is routed by nginx for every path it describes', () => {
+    // /volume had its copy here and was still served the bare shell, and so was
+    // /assets, whose exact-match location (the bundle-directory guard) outranked
+    // the hub regex.
+    for (const path of FIXED_PAGE_PATHS) {
+      expect(exact.has(path) ? exact.get(path) : routed.some(m => m(path)), path).toBe(true)
+    }
+  })
+
+  it('keeps the session-only pages out of the index with a tag a crawler can read', () => {
+    for (const path of ['/notifications', '/api-tokens']) {
+      const meta = pageMeta(path)
+      expect(meta.sessionOnly, path).toBe(true)
+      expect(renderHead(meta, path), path).toContain('<meta name="robots" content="noindex" />')
+    }
+    expect(renderHead(pageMeta('/volume'), '/volume')).not.toContain('name="robots"')
+  })
+
+  it('states /volume\u2019s figures once its snapshot is resident, and its fixed copy before', () => {
+    __testing.setVolumeSnapshot(null)
+    expect(pageMeta('/volume')).toMatchObject({ title: 'Volume', crumbs: [['Home', '/']] })
+    expect(pageMeta('/volume').facts).toBeUndefined()
+    __testing.setVolumeSnapshot({
+      asOf: '2026-10-02T08:00:00.000Z', d1: 2_576_474, d7: 17_300_000, d30: 60_120_000, trades1: 24_310,
+      topPools: [['HUSDT', 7_749_476], ['Omnipool', 4_172_496]], topAssets: [['HOLLAR', 17_384_166]],
+    })
+    const meta = pageMeta('/volume')
+    expect(meta.description).toBe('Trading volume on Hydration: $2.58M routed in the last 24 hours, $17.3M over 7 days and $60.1M over 30 days, by venue, pool and asset.')
+    expect(meta.facts).toEqual([
+      ['Routed volume · 24H', '$2.58M'], ['Routed volume · 7D', '$17.3M'], ['Routed volume · 30D', '$60.1M'],
+      ['Trades · 24H', '24,310'], ['Top pools · 7D', 'HUSDT $7.75M, Omnipool $4.17M'], ['Top assets · 7D', 'HOLLAR $17.4M'],
+      ['Through', '2026-10-02 08:00 UTC'],
+    ])
+    expect(renderBody(meta)).toContain('<dt>Routed volume · 24H</dt><dd>$2.58M</dd>')
+    __testing.setVolumeSnapshot(null)
   })
 })
 
