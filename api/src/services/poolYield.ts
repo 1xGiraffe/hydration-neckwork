@@ -156,8 +156,31 @@ function omnipoolYieldLegsCteSql(): string {
  * serves (7d, 30d) contain no such leg, so the bias is inert here; it would matter
  * if a longer window were ever added.
  */
-const LP_FEE_LEG = `leg_kind = 'fee' AND asset_id != 1 AND fee_dest != 'burned'
+export const LP_FEE_LEG = `leg_kind = 'fee' AND asset_id != 1 AND fee_dest != 'burned'
                       AND (fee_recipient = '${OMNIPOOL_ACCOUNT}' OR fee_recipient = '')`
+
+/**
+ * A fee leg the pool KEEPS for its liquidity providers, on the venues whose fee
+ * never leaves the pool: a stableswap pool's, an XYK pair's (its recipient is the
+ * pair account) and a Uniswap v3 pool's. Everything but a burned leg — the
+ * stableswap yield numerator below.
+ */
+export const POOL_KEPT_FEE_LEG = "leg_kind = 'fee' AND fee_dest != 'burned'"
+
+/**
+ * Whether a fee leg accrues to the liquidity providers of the pool it was paid
+ * in, over a leg set spanning every venue (`venue`, `leg_kind`, `asset_id`,
+ * `fee_dest`, `fee_recipient`): LP_FEE_LEG on the Omnipool (so its H2O protocol
+ * fee and the asset-fee share routed to staking, referrals and the fee processor
+ * are not), POOL_KEPT_FEE_LEG on stableswap, XYK and Uniswap v3. The OTC fee goes
+ * to the protocol and an LBP fee to the pool's fee collector — neither has
+ * liquidity providers — so no fee leg of theirs is an LP fee.
+ */
+export function lpFeeLegSql(): string {
+  return `multiIf(venue = 'omnipool', ${LP_FEE_LEG},
+                 venue IN ('stableswap', 'xyk', 'uniswapv3'), ${POOL_KEPT_FEE_LEG},
+                 0)`
+}
 
 /**
  * Per-asset fee and protocol-fee ratios for the Omnipool, in raw units.
@@ -298,7 +321,7 @@ tvl AS (
 ),
 parts AS (
   SELECT pool_key AS pool_id, toDecimal256(sum(usd), 12) AS fee_usd, toDecimal256(0, 12) AS tvl_sum, toUInt64(0) AS samples
-  FROM priced WHERE leg_kind = 'fee' AND fee_dest != 'burned' GROUP BY pool_key
+  FROM priced WHERE ${POOL_KEPT_FEE_LEG} GROUP BY pool_key
   UNION ALL
   SELECT toString(pool_id), toDecimal256(0, 12), toDecimal256(tvl_sum, 12), toUInt64(samples) FROM tvl
 )

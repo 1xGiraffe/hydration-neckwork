@@ -132,26 +132,6 @@ CREATE TABLE IF NOT EXISTS price_data.otc_order_events (`order_id` UInt32, `even
 -- deduplication is the destination table's replacement key's job.
 CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.pool_swap_legs_mv TO price_data.pool_swap_legs (`venue` LowCardinality(String), `pool_key` String, `block_height` UInt32, `event_index` UInt32, `leg_index` UInt16, `leg_kind` Enum8('in' = 1, 'out' = 2, 'fee' = 3), `asset_id` UInt32, `amount` String, `fee_dest` LowCardinality(String), `fee_recipient` String, `swapper` String, `op_key` String, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `ingested_at` DateTime) AS WITH JSONExtractString(args_json, 'fillerType', '__kind') AS filler_kind, (event_name = 'Broadcast.Swapped' AND JSONExtractString(args_json, 'operation', '__kind') = 'ExactOut' AND JSONExtractString(args_json, 'fillerType', '__kind') IN ('XYK', 'LBP') AND length(JSONExtractArrayRaw(args_json, 'inputs')) = 1 AND length(JSONExtractArrayRaw(args_json, 'outputs')) = 1) AS legacy_exact_out, JSONExtractArrayRaw(args_json, 'inputs') AS in_raw, JSONExtractArrayRaw(args_json, 'outputs') AS out_raw, toUInt64OrZero(extractGroups(args_json, '"__kind":"Router","value":(\\d+)')[1]) AS router_id, arrayMap(x -> tuple(toUInt8(1), toUInt32(JSONExtractUInt(x, 'asset')), if(legacy_exact_out, JSONExtractString(out_raw[1], 'amount'), JSONExtractString(x, 'amount')), '', ''), in_raw) AS in_legs, arrayMap(x -> tuple(toUInt8(2), toUInt32(JSONExtractUInt(x, 'asset')), if(legacy_exact_out, JSONExtractString(in_raw[1], 'amount'), JSONExtractString(x, 'amount')), '', ''), out_raw) AS out_legs, arrayMap(x -> tuple(toUInt8(3), toUInt32(JSONExtractUInt(x, 'asset')), JSONExtractString(x, 'amount'), lower(JSONExtractString(x, 'destination', '__kind')), if(JSONExtractString(x, 'destination', '__kind') = 'Account', JSONExtractString(x, 'destination', 'value'), '')), JSONExtractArrayRaw(args_json, 'fees')) AS fee_legs, arrayConcat(in_legs, out_legs, fee_legs) AS legs SELECT lower(filler_kind) AS venue, multiIf(filler_kind = 'Omnipool', 'omnipool', filler_kind IN ('Stableswap', 'OTC'), toString(JSONExtractUInt(args_json, 'fillerType', 'value')), JSONExtractString(args_json, 'filler')) AS pool_key, block_height, event_index, toUInt16(leg_i - 1) AS leg_index, CAST(legs[leg_i].1 AS Enum8('in' = 1, 'out' = 2, 'fee' = 3)) AS leg_kind, legs[leg_i].2 AS asset_id, legs[leg_i].3 AS amount, legs[leg_i].4 AS fee_dest, legs[leg_i].5 AS fee_recipient, JSONExtractString(args_json, 'swapper') AS swapper, if(router_id > 0, toString(router_id), '') AS op_key, extrinsic_index, block_timestamp, ingested_at FROM price_data.raw_events ARRAY JOIN arrayEnumerate(legs) AS leg_i WHERE event_name IN ('Broadcast.Swapped', 'Broadcast.Swapped2', 'Broadcast.Swapped3') AND block_height >= 6837788 AND filler_kind != 'UniswapV3';
 
--- Staleness watermark for the concentrated-liquidity swaps. account_trade_volume
--- (001_tables.sql) rebuilds a synthetic month-partition when
--- swap_source_partition_watermarks says its raw moved, and until here that index
--- watched raw_events alone (003_materialized_views.sql:
--- swap_source_partition_watermarks_mv). A direct EVM swap in a Uniswap v3 pool
--- emits no Broadcast event — its only trace is the pool's Swap log in
--- raw_evm_logs — so a month whose only new swap was one of those never re-marked
--- stale and the netting's `v3_direct` arm (api/src/services/accountTradeVolume.ts)
--- never landed its rows. This MV watermarks those logs by topic (the pool's
--- Swap(sender, recipient, amount0, amount1, sqrtPriceX96, liquidity, tick)), on the
--- same synthetic block-space partition clock as the raw_events MV — the constant
--- must stay identical to account_trade_volume's PARTITION BY, see the note above
--- that table. max() is idempotent under replay. Same shape, same destination; the
--- job reads max() over both.
---
--- On an existing deployment, create the MV and seed its history once with its
--- exact SELECT (bounded: PREWHERE on topic0, one block range at a time); a fresh
--- database fills it as raw_evm_logs is ingested.
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.swap_source_partition_watermarks_v3_mv TO price_data.swap_source_partition_watermarks (`p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime)) AS SELECT toYYYYMM(toDateTime(block_height * 12)) AS p, max(ingested_at) AS src_ingest, max(block_height) AS src_maxb, max(block_timestamp) AS src_max_ts FROM price_data.raw_evm_logs WHERE topic0 = '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67' GROUP BY p;
-
 -- Legacy-era (pre-Broadcast) fills, one MV per pallet, into the same table and
 -- the same leg identity. Four notes hold for all four:
 --
@@ -311,14 +291,16 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.otc_order_events_mv TO price_d
 --  3. It is not a swept per-entity model: there is no entity, and its definition
 --     is SQL rather than an application-code classification.
 --  4. So it is the remaining case — a global, heavy model none of the above can
---     express — which is what the derivations service exists for. The job is
---     partition-incremental on the ingest-time watermark, the account_trade_volume
---     pattern (api/src/derivations/jobs.ts, runPoolSwapHourly).
+--     express — which is what the derivations service exists for. The job is an
+--     hourly fold (api/src/derivations/jobs.ts, runHourlyFold): each cycle it
+--     recomputes only the hours whose legs were ingested since they were last
+--     folded, found through pool_swap_hour_watermarks below.
 --
 -- Partitioning matches the source exactly: hour is derived from block_timestamp,
 -- so toYYYYMM(hour) = toYYYYMM(block_timestamp) and one derived partition is one
--- source partition. Rebuilds are published with REPLACE PARTITION from the
--- staging twin, so a partition is always exactly one run's output and the
+-- source partition. A month holding recomputed hours is republished whole with
+-- REPLACE PARTITION from the staging twin (its untouched hours copied, its stale
+-- hours recomputed), so a partition is always exactly one publication and the
 -- ReplacingMergeTree key can never hold two versions of a row — readers need no
 -- FINAL and no argMax.
 --
@@ -329,45 +311,120 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.otc_order_events_mv TO price_d
 -- checkable against raw.
 --
 -- The job never writes the hour in progress, so every row present is a CLOSED
--- hour. Readers therefore take closed hours from here and the tail from
--- pool_swap_legs, split at max(hour) + 1 hour (api/src/data/services/poolsData.ts
--- and statsData.ts, and public/services/defillama.ts). An empty or lagging table pushes the
--- cut DOWN, so the raw arm answers more of the range and the split costs time
--- rather than rows — it is not a coverage gate.
+-- hour, and each hour is folded on the first cycle after it closes. The per-pool
+-- volume reader (api/src/data/services/poolsData.ts) takes closed hours from here
+-- and the tail from pool_swap_legs, split at max(hour) + 1 hour; an empty or
+-- lagging table pushes the cut DOWN, so the raw arm answers more of the range and
+-- the split costs time rather than rows — it is not a coverage gate. The
+-- platform readers (data/services/statsData.ts, public/services/defillama.ts) read
+-- the closed hours alone.
 --
--- The one bounded staleness this does NOT cover is raw arriving BELOW the cut,
--- into a month already built: those legs are missing from the aggregate until the
--- ingest-time watermark re-marks that partition and the job republishes it, so a
--- window over it under-reports for at most one derivations poll cycle
--- (DERIVATIONS_POLL_SECONDS, 600 s by default). Replays are never affected — both
--- arms collapse the leg identity before summing, so a re-inserted range cannot
--- double-count on either side of the cut.
+-- The one bounded staleness this does NOT cover is raw arriving BELOW the cut: a
+-- late or backfilled leg is missing from its hour until the watermark re-marks it
+-- and the job refolds it, so a window over it under-reports for at most one
+-- derivations poll cycle (DERIVATIONS_POLL_SECONDS, 600 s by default). Replays are
+-- never affected — both arms collapse the leg identity before summing, so a
+-- re-inserted range cannot double-count on either side of the cut.
 --
--- pool_swap_hour_watermarks is the small MV-fed source index the derivations
--- job uses to decide whether any CLOSED hour needs folding. Querying
--- max(ingested_at) from pool_swap_legs itself looked like a metadata read but
--- measured as a 68 M-row / 522 MiB scan every ten minutes, and the live current
--- month changed on every swap. One max watermark per hour makes that check
--- proportional to hours (~32k for the whole chain), not legs. It is replay-safe:
--- max is idempotent and a replay's newer ingested_at re-marks exactly its hour.
---
--- On an existing deployment, create the table + MV and seed its history once
--- with the MV's exact SELECT before restarting derivations:
---   INSERT INTO price_data.pool_swap_hour_watermarks
---   SELECT toStartOfHour(block_timestamp), max(ingested_at)
---   FROM price_data.pool_swap_legs GROUP BY toStartOfHour(block_timestamp);
--- This is the normal uncommitted rollout backfill for an evolved MV model; a
--- fresh database fills it automatically while pool_swap_legs is ingested.
-CREATE TABLE IF NOT EXISTS price_data.pool_swap_hour_watermarks (`hour` DateTime, `src_ingest` SimpleAggregateFunction(max, DateTime)) ENGINE = AggregatingMergeTree PARTITION BY toYYYYMM(hour) ORDER BY hour SETTINGS index_granularity = 64;
+-- pool_swap_hour_watermarks is the small MV-fed source index the hourly folds
+-- decide their stale hours from: per chain-time hour, the newest leg ingest time
+-- and the set of assets the hour's legs carry (what the valued folds fingerprint
+-- the registry over). One row per hour (~32k for the whole chain) keeps the check
+-- proportional to hours, not legs: max(ingested_at) over pool_swap_legs itself
+-- measured a 68 M-row / 522 MiB scan. It is replay-safe — max and a set union are
+-- idempotent, and a replay's newer ingested_at re-marks exactly its hour.
+CREATE TABLE IF NOT EXISTS price_data.pool_swap_hour_watermarks (`hour` DateTime, `src_ingest` SimpleAggregateFunction(max, DateTime), `assets` SimpleAggregateFunction(groupUniqArrayArray, Array(UInt32))) ENGINE = AggregatingMergeTree PARTITION BY toYYYYMM(hour) ORDER BY hour SETTINGS index_granularity = 64;
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.pool_swap_hour_watermarks_mv TO price_data.pool_swap_hour_watermarks (`hour` DateTime, `src_ingest` SimpleAggregateFunction(max, DateTime)) AS SELECT toStartOfHour(block_timestamp) AS hour, max(ingested_at) AS src_ingest FROM price_data.pool_swap_legs GROUP BY hour;
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.pool_swap_hour_watermarks_mv TO price_data.pool_swap_hour_watermarks (`hour` DateTime, `src_ingest` SimpleAggregateFunction(max, DateTime), `assets` SimpleAggregateFunction(groupUniqArrayArray, Array(UInt32))) AS SELECT toStartOfHour(block_timestamp) AS hour, max(ingested_at) AS src_ingest, groupUniqArray(asset_id) AS assets FROM price_data.pool_swap_legs GROUP BY hour;
 
 CREATE TABLE IF NOT EXISTS price_data.pool_swap_hourly (`venue` LowCardinality(String), `pool_key` String, `asset_id` UInt32, `leg_kind` Enum8('in' = 1, 'out' = 2, 'fee' = 3), `fee_dest` LowCardinality(String), `fee_recipient` String, `hour` DateTime, `amount_sum` String, `leg_count` UInt64, `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(hour) ORDER BY (venue, leg_kind, hour, asset_id, pool_key, fee_dest, fee_recipient) SETTINGS index_granularity = 8192;
 
--- Staging twin for pool_swap_hourly, identical in every respect. A rebuilt
--- month lands here first and is swapped in with ALTER TABLE … REPLACE PARTITION,
--- so readers see the previous month or the new one, never a partial rebuild.
+-- Staging twin for pool_swap_hourly, identical in every respect. A republished
+-- month is assembled here first and swapped in with ALTER TABLE … REPLACE
+-- PARTITION, so readers see the previous month or the new one, never a partial one.
 CREATE TABLE IF NOT EXISTS price_data.pool_swap_hourly_staging (`venue` LowCardinality(String), `pool_key` String, `asset_id` UInt32, `leg_kind` Enum8('in' = 1, 'out' = 2, 'fee' = 3), `fee_dest` LowCardinality(String), `fee_recipient` String, `hour` DateTime, `amount_sum` String, `leg_count` UInt64, `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(hour) ORDER BY (venue, leg_kind, hour, asset_id, pool_key, fee_dest, fee_recipient) SETTINGS index_granularity = 8192;
+
+-- Hourly USD volume read models: pool_swap_legs folded per (venue, pool, hour)
+-- and per (asset, venue, pool, hour), valued at event time. The definitions are
+-- the public volume surfaces' own, composed from the same SQL fragments
+-- (api/src/services/volumeHourly.ts states them; services/poolVolumes.ts owns
+-- them), so a sum of these rows over a window is what /v1/pools/*/volumes
+-- answers for it:
+--
+--   pool_volume_hourly — every FILL counted once in the pool it executed in,
+--     valued by its out side (its in side when the out side is unpriced). The
+--     Omnipool counts a user swap once: the A -> H2O first hop of a hub swap adds
+--     nothing and the H2O -> B fill that completes it carries the swap. A trade
+--     routed through two pools counts in both, so venue volumes sum to more than
+--     routed volume. `fills` counts the fills that carry volume (Omnipool first
+--     hops excluded); `unpriced_fills` those with no priced side, kept at 0 USD.
+--     lp_fee_usd is the fee legs that accrue to the pool's liquidity providers
+--     (the yield endpoints' rule), protocol_fee_usd every other fee leg (the
+--     Omnipool's H2O fee and the asset-fee share routed away from the pool, burned
+--     legs, OTC and LBP fees); together they are every fee leg. A Uniswap v3 fee
+--     leg is the whole swap fee, so its protocol share — 1/n where the pool's
+--     SetFeeProtocol denominator n for the fee's token was on at the swap, the
+--     uniswap_v3_fee revenue stream's accrual rule — moves from lp_fee_usd to
+--     protocol_fee_usd. Fees are never volume.
+--   asset_volume_hourly — the value of an asset's own in/out legs (sold plus
+--     bought) per fill, inheriting the fill's value when those legs are unpriced;
+--     one fill A -> B adds to A and to B. The Omnipool hub asset H2O (id 1) has no
+--     rows: its legs are the venue's plumbing, not asset trades. `legs` counts the
+--     asset's in/out legs, `unpriced_legs` those of a side that ended at 0 USD.
+--
+-- Both exclude venue `aave` (an aToken mint/redeem is a 1:1 wrap, not a swap).
+-- Valuation is the house rule: the 1h candle that had closed by the fill
+-- (interval_start + 1 HOUR <= block_timestamp), the asset aliased through the
+-- one historical price rule, exact Decimal at the 1e-12 USD scale.
+--
+-- Derivations jobs, not materialized views, for pool_swap_hourly's reason above
+-- (the legs must be deduplicated before they are summed) plus a cross-row ASOF
+-- price join and the Omnipool's next-fill window. The same hourly fold as
+-- pool_swap_hourly, on the same watermarks and the same month republication, so
+-- readers need no FINAL. Only hours below the cut are written — the newest leg's
+-- hour is still filling, and an hour past the price pipeline's head (the older of
+-- its newest block and its newest price row) has no whole candle yet — so every
+-- row is a closed, priced hour, each folded on the first cycle after it closes
+-- and is priced, and readers end at the cut (max(hour) + 1 hour); no raw tail. A
+-- late or backfilled leg below the cut is missing until the watermark re-marks its
+-- hour, at most one derivations cycle later. `registry_fp` is the registry's
+-- valuation inputs (decimal unit, price alias, priceability) fingerprinted over
+-- the hour's asset set when the hour was folded; a registry change that moves it
+-- re-folds the hour on the next cycle. A repaired or late candle re-marks nothing,
+-- so a price repair below the cut needs the affected hours' rows dropped by hand.
+--
+-- ORDER BY follows the readers: a pool's or a venue's hours; an asset's hours
+-- across its venues. A platform-wide hour range prunes by month partition.
+-- MEASURED over the whole era (2023-01 to 2026-10): 369,675 pool rows (6.6 MiB)
+-- and 1,142,439 asset rows (15.3 MiB) in 46 months, ~9k and ~27k rows in a recent
+-- month, so every reader shape (one pool, one venue, one asset, everything) reads
+-- at most a few hundred thousand rows in single-digit milliseconds and needs no
+-- projection.
+CREATE TABLE IF NOT EXISTS price_data.pool_volume_hourly (`venue` LowCardinality(String), `pool_key` String, `hour` DateTime, `volume_usd` Decimal(38, 12), `fills` UInt32, `lp_fee_usd` Decimal(38, 12), `protocol_fee_usd` Decimal(38, 12), `unpriced_fills` UInt32, `registry_fp` UInt64, `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(hour) ORDER BY (venue, pool_key, hour) SETTINGS index_granularity = 8192;
+
+-- Staging twin for pool_volume_hourly, identical in every respect (REPLACE PARTITION source).
+CREATE TABLE IF NOT EXISTS price_data.pool_volume_hourly_staging (`venue` LowCardinality(String), `pool_key` String, `hour` DateTime, `volume_usd` Decimal(38, 12), `fills` UInt32, `lp_fee_usd` Decimal(38, 12), `protocol_fee_usd` Decimal(38, 12), `unpriced_fills` UInt32, `registry_fp` UInt64, `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(hour) ORDER BY (venue, pool_key, hour) SETTINGS index_granularity = 8192;
+
+CREATE TABLE IF NOT EXISTS price_data.asset_volume_hourly (`asset_id` UInt32, `venue` LowCardinality(String), `pool_key` String, `hour` DateTime, `volume_usd` Decimal(38, 12), `legs` UInt32, `unpriced_legs` UInt32, `registry_fp` UInt64, `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(hour) ORDER BY (asset_id, hour, venue, pool_key) SETTINGS index_granularity = 8192;
+
+-- Staging twin for asset_volume_hourly, identical in every respect (REPLACE PARTITION source).
+CREATE TABLE IF NOT EXISTS price_data.asset_volume_hourly_staging (`asset_id` UInt32, `venue` LowCardinality(String), `pool_key` String, `hour` DateTime, `volume_usd` Decimal(38, 12), `legs` UInt32, `unpriced_legs` UInt32, `registry_fp` UInt64, `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(hour) ORDER BY (asset_id, hour, venue, pool_key) SETTINGS index_granularity = 8192;
+
+-- Routed (netted) platform volume per hour: every trade counted ONCE, at the
+-- larger of its two boundary sides after the per-asset netting across its route,
+-- whole-trade aToken wraps excluded — the definition of public
+-- /v1/stats/platform totalRoutedUsd and the DefiLlama day series, composed from
+-- the same SQL (api/src/services/poolVolumes.ts routedNettedCteSql +
+-- nettedTradeSidesSql; volumeHourly.ts states the fold), so an hourly sum over a
+-- window is the routed figure for it and a UTC day's sum is DefiLlama's day.
+-- `trades` counts the routed trades with a fill in the hour; `unpriced_trades`
+-- those whose two sides both valued to 0. The pool and asset folds' job shape,
+-- watermarks, cut and registry fingerprint; a request-time fold could not serve it
+-- (one busy month MEASURED 22.8 s / 2.63 GiB against the explorer api's 20 s cap).
+CREATE TABLE IF NOT EXISTS price_data.routed_volume_hourly (`hour` DateTime, `volume_usd` Decimal(38, 12), `trades` UInt32, `unpriced_trades` UInt32, `registry_fp` UInt64, `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(hour) ORDER BY hour SETTINGS index_granularity = 8192;
+
+-- Staging twin for routed_volume_hourly, identical in every respect (REPLACE PARTITION source).
+CREATE TABLE IF NOT EXISTS price_data.routed_volume_hourly_staging (`hour` DateTime, `volume_usd` Decimal(38, 12), `trades` UInt32, `unpriced_trades` UInt32, `registry_fp` UInt64, `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(hour) ORDER BY hour SETTINGS index_granularity = 8192;
 
 -- GIGAHDX voting-reward read models, for GET /v1/staking/gigahdx/voting-apr
 -- (spec § Semantics 10). Two tiny MV-fed projections over raw_events:

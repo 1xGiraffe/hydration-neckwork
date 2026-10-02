@@ -1,21 +1,35 @@
 import { describe, expect, it } from 'vitest'
-import { accountVolumeSource, buildPartitionInsertSql, partitionBlockRange } from '../src/services/accountTradeVolume.ts'
+import {
+  ACCOUNT_TRADE_VOLUME_BUCKET_BLOCKS,
+  accountTradeVolumeInsertSql,
+  accountVolumeSource,
+  bucketBlocksPredicate,
+  bucketPartition,
+} from '../src/services/accountTradeVolume.ts'
 
-// Per-account trading volume always reads the de-duped net-trade model (the
-// legacy per-leg readiness gate was removed once its backfill completed).
+// The first bucket of a synthetic month partition.
+const firstBucket = (partition: string): string =>
+  String(Date.UTC(Number(partition.slice(0, 4)), Number(partition.slice(4, 6)) - 1, 1) / 12_000 / ACCOUNT_TRADE_VOLUME_BUCKET_BLOCKS)
+
+const sqlFor = (partition: string, opts: { target?: string; maxBlockTime?: string } = {}): string =>
+  accountTradeVolumeInsertSql(partition, [{ bucket: firstBucket(partition), fingerprint: '7' }],
+    opts.target ?? 'price_data.account_trade_volume_staging',
+    { computedAt: '2026-10-02 12:00:00', maxBlockTime: opts.maxBlockTime })
+
+// Per-account trading volume reads the de-duped net-trade model.
 describe('accountVolumeSource', () => {
   it('returns the net-trade model table and column', () => {
     expect(accountVolumeSource()).toEqual({ table: 'price_data.account_trade_volume', col: 'volume_usd' })
   })
 })
 
-describe('buildPartitionInsertSql', () => {
+describe('accountTradeVolumeInsertSql', () => {
   it('deduplicates every replayable raw_events read with FINAL', () => {
     // raw_events is ReplacingMergeTree — a replayed range holds duplicate row
     // versions until merges collapse them. All four reads (2× broadcast legs,
     // legacy legs, and the DCA executions the legacy legs are keyed on) must read
     // FINAL or a mid-replay recompute doubles trade legs.
-    const sql = buildPartitionInsertSql('202601')
+    const sql = sqlFor('202601')
     expect(sql.match(/FROM price_data\.raw_events FINAL/g)).toHaveLength(5)
     expect(sql).not.toMatch(/FROM price_data\.raw_events(?! FINAL)/)
   })
@@ -25,10 +39,10 @@ describe('buildPartitionInsertSql', () => {
     // normalization, price multiply, 10^md rescale, per-trade sums — stays
     // decimal; only the final cast narrows to the stored Decimal128(12). The
     // arithmetic runs on the plain decimal OPERATORS, which are vectorised where
-    // multiplyDecimal/divideDecimal are per-row (4.70 → 2.65 CPU-s per partition);
+    // multiplyDecimal/divideDecimal are per-row (4.70 → 2.65 CPU-s per month INSERT);
     // every operand scale here lines up, so it is the same integer arithmetic,
     // proved bit-identical over 2.77 M netted legs including 1.10 M negative ones.
-    const sql = buildPartitionInsertSql('202601')
+    const sql = sqlFor('202601')
     expect(sql).toContain('n.net_amt * toDecimal256(transform(')
     expect(sql).toContain(') * toDecimal256(p.close, 12) / toDecimal256(')
     expect(sql).not.toContain('divideDecimal(')
@@ -37,36 +51,39 @@ describe('buildPartitionInsertSql', () => {
     expect(sql).not.toMatch(/1e\d/)
   })
 
-  it('targets the live table by default and the staging twin when asked', () => {
-    expect(buildPartitionInsertSql('202601'))
-      .toContain('INSERT INTO price_data.account_trade_volume\n')
-    expect(buildPartitionInsertSql('202601', 'price_data.account_trade_volume_staging'))
-      .toContain('INSERT INTO price_data.account_trade_volume_staging\n')
+  it('writes the table it is given, each row stamped with its bucket\'s fingerprint and the cycle\'s read time', () => {
+    const sql = sqlFor('202601')
+    expect(sql).toContain('INSERT INTO price_data.account_trade_volume_staging\n')
+    expect(sql).toContain('(account, block_height, trade_key, volume_usd, net_in_usd, net_out_usd, trade_count, registry_fp, computed_at)')
+    expect(sql.replace(/\s+/g, ' ')).toContain('transform(intDiv(block_height, 1800), [toUInt32(81816)], [toUInt64(7)], toUInt64(0)) AS registry_fp')
+    expect(sql).toContain("toDateTime('2026-10-02 12:00:00') AS computed_at")
+    expect(sql).not.toContain('now()')
   })
 
-  it('filters to the requested month partition', () => {
-    expect(buildPartitionInsertSql('202601')).toContain('toYYYYMM(toDateTime(block_height * 12)) = 202601')
+  it('refuses a computed_at or fingerprint that is not a plain literal', () => {
+    expect(() => accountTradeVolumeInsertSql('202601', [{ bucket: '81816', fingerprint: '1 OR 1' }], 't', { computedAt: '2026-10-02 12:00:00' })).toThrow()
+    expect(() => accountTradeVolumeInsertSql('202601', [{ bucket: '81816', fingerprint: '1' }], 't', { computedAt: "now()) --" })).toThrow()
   })
 })
 
 // The ASOF right side is the whole ohlc_1h feed for every priced asset. Candles
-// that close after the partition's last trade can never win the ASOF match, so
+// that close after the buckets' last trade can never win the ASOF match, so
 // they can be cut — but only from above.
 describe('valuation price window', () => {
-  it('cuts candles that close after the partition, and nothing before it', () => {
-    const sql = buildPartitionInsertSql('197011', 'price_data.account_trade_volume', '2022-09-30 23:59:54')
+  it('cuts candles that close after the buckets, and nothing before it', () => {
+    const sql = sqlFor('197011', { maxBlockTime: '2022-09-30 23:59:54' })
     expect(sql).toContain("interval_start <= (toDateTime('2022-09-30 23:59:54') - toIntervalHour(1))")
-    // No lower bound: an asset with no candle inside the partition is valued at
+    // No lower bound: an asset with no candle inside the buckets is valued at
     // the last candle before it, however far back that is.
     expect(sql).not.toContain('interval_start >=')
   })
 
-  it('values against the whole feed when the partition watermark is unknown', () => {
-    expect(buildPartitionInsertSql('197011')).not.toContain('interval_start <=')
+  it('values against the whole feed when the buckets\' watermark is unknown', () => {
+    expect(sqlFor('197011')).not.toContain('interval_start <=')
   })
 
   it('rejects a watermark that is not a plain ClickHouse datetime', () => {
-    expect(() => buildPartitionInsertSql('197011', 'price_data.account_trade_volume', "2022-01-01') OR 1=1 --"))
+    expect(() => sqlFor('197011', { maxBlockTime: "2022-01-01') OR 1=1 --" }))
       .toThrow()
   })
 })
@@ -88,7 +105,7 @@ describe('legacy swap identity', () => {
   }
 
   it('anchors an unsigned legacy leg on the DCA execution enclosing it', () => {
-    const cte = legacyCte(buildPartitionInsertSql('197109'))
+    const cte = legacyCte(sqlFor('197109'))
     // Nearest FOLLOWING execution for the same (block, owner): every hop of a
     // routed execution precedes its DCA.TradeExecuted, so the inequality has to
     // run forwards. Matching backwards would key hops on the PREVIOUS execution
@@ -103,7 +120,7 @@ describe('legacy swap identity', () => {
     // Pallet/block-hook swaps (treasury and referral distribution) have no
     // enclosing execution at all; their own event is the only identity there is,
     // and the ASOF miss must fall back to it rather than to some later trade.
-    const cte = legacyCte(buildPartitionInsertSql('197109'))
+    const cte = legacyCte(sqlFor('197109'))
     expect(cte).toContain('if(s.extrinsic_index IS NULL,')
     expect(cte).toContain('toUInt64(s.extrinsic_index))')
     expect(cte).toContain('x.exec_index, s.event_index)')
@@ -112,7 +129,7 @@ describe('legacy swap identity', () => {
   it('distinguishes an ASOF miss from an execution at event index 0', () => {
     // ASOF LEFT JOIN zero-fills a miss and 0 is a legal event index, so the match
     // is detected through a +1 marker, never through `exec_index > 0`.
-    const cte = legacyCte(buildPartitionInsertSql('197109'))
+    const cte = legacyCte(sqlFor('197109'))
     expect(cte).toContain('event_index + 1 AS exec_marker')
     expect(cte).not.toContain('x.exec_index > 0')
   })
@@ -121,18 +138,17 @@ describe('legacy swap identity', () => {
     // Each legacy event contributes an assetIn leg and an assetOut leg. Rekeying
     // only one of them would split a hop's own two sides across keys and nothing
     // would net at all, so neither leg may read raw_events directly any more.
-    const sql = buildPartitionInsertSql('197109')
+    const sql = sqlFor('197109')
     expect(sql.match(/\n {2}FROM legacy\n/g)).toHaveLength(2)
     expect(sql).not.toMatch(/FROM price_data\.raw_events FINAL WHERE event_name IN \('Omnipool\.SellExecuted'/)
     expect(sql).not.toContain('if(extrinsic_index IS NULL, 1099511627776 + event_index, toUInt64(extrinsic_index))')
   })
 
-  it('bounds the execution lookup to the partition it keys', () => {
+  it('bounds the execution lookup to the buckets it keys', () => {
     // The lookup is a second raw_events read; unbounded it would scan the whole
-    // table per rebuild, exactly the regression partitionBlockRange exists to stop.
-    const cte = legacyCte(buildPartitionInsertSql('197501'))
-    expect(cte.match(/block_height >= 13147200 AND block_height < 13370400/g)).toHaveLength(2)
-    expect(cte.match(/toYYYYMM\(toDateTime\(block_height \* 12\)\) = 197501/g)).toHaveLength(2)
+    // table per recompute.
+    const cte = legacyCte(sqlFor('197501'))
+    expect(cte.match(/block_height >= 13147200 AND block_height < 13149000/g)).toHaveLength(2)
   })
 })
 
@@ -163,20 +179,20 @@ describe('legacy buy/sell field mapping', () => {
   }
 
   it('reads an LBP buy in its own field order: amount paid, buyPrice received', () => {
-    const sql = buildPartitionInsertSql('197011')
+    const sql = sqlFor('197011')
     expect(legacyField(sql, 'in', 'LBP.BuyExecuted')).toBe('amount')
     expect(legacyField(sql, 'out', 'LBP.BuyExecuted')).toBe('buyPrice')
   })
 
   it('keeps an XYK buy on the opposite order: buyPrice paid, amount received', () => {
-    const sql = buildPartitionInsertSql('197011')
+    const sql = sqlFor('197011')
     expect(legacyField(sql, 'in', 'XYK.BuyExecuted')).toBe('buyPrice')
     expect(legacyField(sql, 'out', 'XYK.BuyExecuted')).toBe('amount')
   })
 
   it('keeps both pallets sells on amount paid, salePrice received', () => {
     // Sells agree across the two pallets, so this branch stays shared.
-    const sql = buildPartitionInsertSql('197011')
+    const sql = sqlFor('197011')
     for (const name of ['XYK.SellExecuted', 'LBP.SellExecuted']) {
       expect(legacyField(sql, 'in', name)).toBe('amount')
       expect(legacyField(sql, 'out', name)).toBe('salePrice')
@@ -184,7 +200,7 @@ describe('legacy buy/sell field mapping', () => {
   })
 
   it('leaves the Omnipool/Stableswap events on their own explicit amounts', () => {
-    const sql = buildPartitionInsertSql('197011')
+    const sql = sqlFor('197011')
     for (const name of ['Omnipool.SellExecuted', 'Omnipool.BuyExecuted', 'Stableswap.BuyExecuted']) {
       expect(legacyField(sql, 'in', name)).toBe('amountIn')
       expect(legacyField(sql, 'out', name)).toBe('amountOut')
@@ -192,51 +208,53 @@ describe('legacy buy/sell field mapping', () => {
   })
 })
 
-// The derived table's partition is a synthetic month over block_height * 12 seconds.
-// ClickHouse cannot invert that expression into a primary-key range, so a rebuild
-// filtered on it alone read every granule of raw_events (596M rows / 119 GiB per
-// partition) instead of the partition's own ~223k blocks.
-describe('partition block range', () => {
-  it('inverts the partition expression the derived table is keyed by', () => {
-    expect(partitionBlockRange('197501')).toEqual({ fromBlock: 13_147_200, toBlock: 13_370_400 })
-    expect(partitionBlockRange('197011')).toEqual({ fromBlock: 2_188_800, toBlock: 2_404_800 })
-  })
+// A bucket is 1800 consecutive blocks. Every source the netting reads is ordered
+// by block_height, so a bucket is a primary-key range on each, and every synthetic
+// month partition begins at a multiple of 1800 blocks, so a bucket never straddles
+// two partitions (a REPLACE PARTITION republishes whole buckets only).
+describe('buckets', () => {
+  const month = (block: number) => {
+    const d = new Date(block * 12_000)
+    return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}`
+  }
 
-  it('rolls a December partition into the next year', () => {
-    const december = partitionBlockRange('197012')
-    expect(december.toBlock).toBe(partitionBlockRange('197101').fromBlock)
-    expect(december.toBlock).toBeGreaterThan(december.fromBlock)
-  })
-
-  it('matches the SQL expression it replaces at both bounds', () => {
-    // toYYYYMM(toDateTime(block_height * 12)) must equal the partition inside the
-    // range and differ immediately outside it.
-    for (const partition of ['197011', '197501']) {
-      const { fromBlock, toBlock } = partitionBlockRange(partition)
-      const month = (block: number) => {
-        const d = new Date(block * 12_000)
-        return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}`
+  it('align with the synthetic month partitions for the whole representable range', () => {
+    for (let year = 1970; year < 2106; year++) {
+      for (let m = 0; m < 12; m++) {
+        const firstBlock = Date.UTC(year, m, 1) / 12_000
+        expect(firstBlock % ACCOUNT_TRADE_VOLUME_BUCKET_BLOCKS).toBe(0)
       }
-      expect(month(fromBlock)).toBe(partition)
-      expect(month(toBlock - 1)).toBe(partition)
-      expect(month(fromBlock - 1)).not.toBe(partition)
-      expect(month(toBlock)).not.toBe(partition)
     }
   })
 
-  it('bounds every source read of the rebuild', () => {
-    const sql = buildPartitionInsertSql('197501')
-    // Four raw_events reads, plus the intent fills and the pot's settlement legs.
-    // 8 = the six Broadcast/legacy/intent bounds + the direct v3 swap read and its
-    // routed-hop exclusion (2026-09-09).
-    expect(sql.match(/block_height >= 13147200 AND block_height < 13370400/g)).toHaveLength(8)
-    // The original expression stays for exactness.
-    expect(sql).toContain('toYYYYMM(toDateTime(block_height * 12)) = 197501')
+  it('map to the partition the table keys their blocks on', () => {
+    for (const b of [0, 1215, 1216, 7303, 7304, 8499]) {
+      expect(bucketPartition(b)).toBe(month(b * ACCOUNT_TRADE_VOLUME_BUCKET_BLOCKS))
+      expect(bucketPartition(b)).toBe(month((b + 1) * ACCOUNT_TRADE_VOLUME_BUCKET_BLOCKS - 1))
+    }
+    expect(bucketPartition(1216)).toBe('197011')
+    expect(bucketPartition(1215)).toBe('197010')
   })
 
-  it('rejects a malformed partition rather than scanning everything', () => {
-    expect(() => partitionBlockRange('nonsense')).toThrow()
-    expect(() => partitionBlockRange('197513')).toThrow()
+  it('read as a primary-key range narrowed to exactly the set', () => {
+    expect(bucketBlocksPredicate('197501', ['7310', '7304']).replace(/\s+/g, ' '))
+      .toBe('block_height >= 13147200 AND block_height < 13159800 AND intDiv(block_height, 1800) IN (7304, 7310)')
+  })
+
+  it('bound every source read of the recompute', () => {
+    const sql = sqlFor('197501')
+    // Four raw_events reads, the intent fills, the pot's settlement legs, the direct
+    // v3 swap read and its routed-hop exclusion.
+    expect(sql.match(/block_height >= 13147200 AND block_height < 13149000/g)).toHaveLength(8)
+    expect(sql.match(/intDiv\(block_height, 1800\) IN \(7304\)/g)).toHaveLength(8)
+  })
+
+  it('reject a bucket of another partition, a malformed one, or none rather than scanning everything', () => {
+    expect(() => bucketBlocksPredicate('197501', ['7303'])).toThrow()
+    expect(() => bucketBlocksPredicate('197501', ['7304 OR 1'])).toThrow()
+    expect(() => bucketBlocksPredicate('197501', [])).toThrow()
+    expect(() => bucketBlocksPredicate('nonsense', ['7304'])).toThrow()
+    expect(() => bucketPartition(-1)).toThrow()
   })
 })
 
@@ -248,9 +266,9 @@ describe('partition block range', () => {
 // settlement legs — and the pot's own routes are left out, being that same trade a
 // second time.
 describe('ICE intent fills as owner trades', () => {
-  const sql = buildPartitionInsertSql('202609')
+  const sql = sqlFor('202609')
 
-  it('reads the partition\'s fills from the intent tables, deduplicated, from runtime 443 on', () => {
+  it('reads the buckets\' fills from the intent tables, deduplicated, from runtime 443 on', () => {
     expect(sql).toMatch(/FROM price_data\.intent_events(\s+AS\s+\w+)?\s+FINAL/)
     expect(sql).toMatch(/FROM price_data\.intent_orders(\s+AS\s+\w+)?\s+FINAL/)
     // The NOT NULL filter has to read the TABLE's column: `assumeNotNull(x) AS x`
@@ -296,7 +314,7 @@ describe('ICE intent fills as owner trades', () => {
 // 14,672,012 read as $3.27M of trading); an aave hop inside a routed swap is a real
 // hop and stays. The same whole-trade rule the public volume surfaces apply.
 describe('aToken wraps', () => {
-  const sql = buildPartitionInsertSql('202609')
+  const sql = sqlFor('202609')
   it('flags each Broadcast fill by its filler and drops a trade only when every fill is a wrap', () => {
     expect(sql).toContain("toUInt8(JSONExtractString(args_json,'fillerType','__kind') = 'AAVE') AS is_aave")
     expect(sql).toContain('min(aave) AS all_aave')
@@ -312,7 +330,7 @@ describe('aToken wraps', () => {
 // the same pool already reaches `legs` through its UniswapV3 Swapped3, so its
 // extrinsic is excluded here — counting both would double the route.
 describe('direct concentrated-liquidity swaps', () => {
-  const sql = buildPartitionInsertSql('202609')
+  const sql = sqlFor('202609')
   it('reads the pool Swap logs, names the recipient in ETH-prefixed form, and yields to routed hops', () => {
     expect(sql).toContain("FROM price_data.uniswap_v3_events FINAL WHERE kind = 'pool' AND event_name = 'Swap'")
     expect(sql).toContain("concat('0x45544800', substring(e.counterparty, 3, 40), '0000000000000000') AS account")
@@ -321,6 +339,7 @@ describe('direct concentrated-liquidity swaps', () => {
   })
   it('resolves tokens through the registry or the precompile rule and drops strangers', () => {
     expect(sql).toContain("FROM price_data.assets WHERE evm_address != ''")
+    expect(sql).toContain('INNER JOIN pools p ON p.pool_address = e.contract_address')
     expect(sql).toContain('asset0 != 4294967295 AND asset1 != 4294967295')
   })
 })

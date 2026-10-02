@@ -72,7 +72,7 @@ import {
 // because it goes blind to blocks backfilled beneath it. That blind spot is the
 // required behavior here: a notification is a statement about something that
 // just happened, and re-indexing 2024 must not page anybody. Read models keep
-// using partition-diff/atomic-replace; this cursor is the one sanctioned
+// using ingest-time bucket diffs/atomic-replace; this cursor is the one sanctioned
 // exception and must stay pinned to the live pipeline.
 //
 // The cursor is PER KIND (`cursor:<kind>`), because the kinds do not all read a

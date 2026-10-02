@@ -148,7 +148,8 @@ export async function revenueStats(client: ClickHouseClient, options: RevenueOpt
   if (options.scope === 'protocol') clauses.push(PROTOCOL_REVENUE_SQL)
   if (options.stream) { clauses.push('stream = {stream:String}'); params.stream = options.stream }
   const res = await client.query({
-    // revenue_events partitions are published whole (008_revenue.sql), so no
+    // revenue_events months are republished whole by REPLACE PARTITION
+    // (008_revenue.sql), so the table never holds two versions of a row and no
     // FINAL/dedup is needed here either.
     query: `-- data:stats:revenue
         SELECT toString(${bucketExpr}) AS bucket, stream, dest,

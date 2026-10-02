@@ -394,16 +394,16 @@ export async function uniswapV3History(client: ClickHouseClient, pool: string, o
 // ---------------------------------------------------------------------------
 // Pool volumes: the pool_swap_hourly fold below its cut, raw legs above it.
 //
-// The fold holds CLOSED hours only and the derivations job republishes a live
-// month only every POOL_SWAP_HOURLY_REFRESH_HOURS (24) — so on its own it runs
-// up to a day behind the head. The reader therefore takes the aggregate at or
-// below its cut (the newest folded hour, one table-wide value: the job folds
-// oldest-first, so coverage is a contiguous prefix of the era) and the pool's
-// deduplicated raw legs ABOVE it, which is a key-prefix read for one
-// (venue, pool_key). A leg is never counted twice: the two arms split at one
-// hour boundary. The one lag this does not cover is raw backfilled BELOW the cut
-// into an already-folded month, which under-reports until the ingest-time
-// watermark re-marks that partition (at most one derivations cycle).
+// The fold holds CLOSED hours only — each folded on the first derivations cycle
+// after it closes — so on its own it runs up to an hour and a cycle behind the
+// head. The reader therefore takes the aggregate at or below its cut (the newest
+// folded hour, one table-wide value: the job folds oldest-first, so coverage is a
+// contiguous prefix of the era) and the pool's deduplicated raw legs ABOVE it,
+// which is a key-prefix read for one (venue, pool_key). A leg is never counted
+// twice: the two arms split at one hour boundary. The one lag this does not cover
+// is raw backfilled BELOW the cut into an already-folded hour, which
+// under-reports until the ingest-time watermark re-marks that hour (at most one
+// derivations cycle).
 // ---------------------------------------------------------------------------
 
 export interface VolumeBucket {

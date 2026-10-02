@@ -338,10 +338,14 @@ WITH months AS (
     GROUP BY month
   ) AS a
   INNER JOIN (
-    -- Exactly the computed_by_partition projection's shape, so this reads it
+    -- Through the computed_by_hour projection's exact shape, so this reads it
     -- rather than every row's timestamp.
-    SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS published
-    FROM price_data.revenue_events
+    SELECT toYYYYMM(hour) AS p, max(hour_published) AS published
+    FROM (
+      SELECT toStartOfHour(block_timestamp) AS hour, max(computed_at) AS hour_published
+      FROM price_data.revenue_events
+      GROUP BY hour
+    )
     GROUP BY p
   ) AS r ON r.p = a.month
   WHERE a.built >= r.published

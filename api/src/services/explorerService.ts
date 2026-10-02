@@ -10008,9 +10008,9 @@ function revenueTailAnchor(): string {
 }
 
 /**
- * How far `revenue_events` has been booked. The model is filled by a
- * partition-incremental derivation, so it trails the chain head (measured ~1000
- * blocks). Readers need the watermark to tell "earned nothing" from "not booked
+ * How far `revenue_events` has been booked. The model is an hourly progressive
+ * derivation that writes closed hours only, so it trails the chain head by up to
+ * an hour plus a derivations cycle. Readers need the watermark to tell "earned nothing" from "not booked
  * yet" — without it a fresh row reads as $0, which is a wrong number rather than
  * a missing one.
  */

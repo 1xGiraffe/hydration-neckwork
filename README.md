@@ -215,10 +215,12 @@ it, so the database is disposable and rebuildable — **there are no migrations*
   values). A **swept per-entity model** (`account_activity_totals`) holds a value whose
   definition lives in application code and cannot be afforded per request; entities are
   recounted one at a time, ordered by staleness, and the read path renders without the
-  ones not yet swept. The **`derivations` service** runs the nine global, heavy models
-  none of the above can express — per-trade netting, the hourly swap pre-aggregate, v3
-  legs, revenue, XCM arrivals, and the stateful LP-history reconstructions — recomputing
-  them continuously and idempotently, partition-incrementally or by atomic full replace.
+  ones not yet swept. The **`derivations` service** runs the twelve global, heavy models
+  none of the above can express — per-trade netting, the hourly swap and volume
+  pre-aggregates, v3 legs, revenue, XCM arrivals, the XYK LP share supply and the
+  stateful LP-history reconstructions — recomputing them continuously and idempotently:
+  only the buckets (hours, block ranges, months, pools) whose raw changed, found by
+  ingest-time watermark, or by atomic full replace.
 - **To change a model, edit the declaration and rebuild the projection** — drop the
   table/MV and let it refill from raw, or reset the derived layer and let it rebuild.
   Never write an in-place migration; there is no version ledger.
