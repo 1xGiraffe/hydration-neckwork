@@ -20,6 +20,7 @@ import {
   liquidityHistory, resolveBucketHistoryWindow,
 } from '../services/lpHistory.ts'
 import { knownMarketKeys, moneyMarketCurrentPositions, moneyMarketHistory } from '../services/moneyMarket.ts'
+import { accountVolume } from '../services/volumeData.ts'
 import { LP_HISTORY_POSITION_CAP, LP_VENUES, type LpVenue } from '../../services/lpHistory.ts'
 import { LIQUIDITY_ACTIONS, type LiquidityAction } from '../services/uniswapV3Liquidity.ts'
 import { UNSEEN_IS_EMPTY, inWindow, requireParsedAddress, zAccountParams } from './accountsShared.ts'
@@ -464,6 +465,60 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
     const venueKey = venues ? [...venues].sort().join('+') : 'all'
     const key = `data:accounts:lp-history:${parsed.accountId}:${bucket}:${window.from}:${window.to}:${venueKey}:${groupBy}`
     return cached(key, closed ? BUCKET_HISTORY_CLOSED_TTL_MS : BUCKET_HISTORY_SETTLING_TTL_MS, () => liquidityHistory(opts.client, parsed, { bucket, window, clock, venues, groupBy }))
+  })
+
+  app.get('/v1/accounts/:address/volume', {
+    schema: {
+      tags: ['accounts'],
+      summary: 'Trading volume per hour, day or week, netted per trade',
+      description: [
+        'The account\'s trading volume on a fixed bucket grid (`points`) and in total — the definition of the Hydration Explorer\'s "Trading" figure: every trade the account made counted ONCE at the larger of its netted in-side and out-side, a routed or DCA trade\'s intermediate hops cancelling (a DOT→USDT→HDX route is one trade, not two fills), valued at event time (the hourly candle closed by the trade). aToken wraps (money-market mints/redeems) and the ICE solver pot\'s own routes are not trading and are excluded. It is NOT /v1/stats/volume/usd\'s pool volume, which counts each fill in each pool it touched.',
+        'An address is ONE holder here: its own AccountId32 plus the ETH-truncated form (`0x45544800…`) its EVM-side swaps are filed under — the same key pair the runtime maps. The Explorer\'s account page sums the account\'s whole RELATED SET (proxies, a bound EVM address, multisigs) and a tag page sums its members, so their figure is larger whenever the account has relatives; this route never adds them. An OTC fill between two accounts is a trade of each.',
+        'Source and freshness: the per-trade model the derivations service keeps current by recomputing, every cycle (about every ten minutes), the block ranges whose trades changed, so it lags the indexed head by up to one derivations cycle; `asOfBlock` names the newest block it holds a trade for (any account). A bucket ending above `asOfBlock` can still gain trades. `totals.allTimeUsd`/`allTimeTrades` are every trade the model holds for the address, independent of the window; `windowUsd`/`windowTrades` sum `points`.',
+        `Window: \`fromTime\`/\`toTime\` select whole buckets (default the newest ${BUCKET_HISTORY_DEFAULT_BUCKETS} ENDED buckets); a bucket still open is never returned, and "ended" is judged by the INDEX (/v1/status \`indexedHeadTime\`), exactly as on /liquidity/history. At most ${BUCKET_HISTORY_MAX_BUCKETS} buckets per request — a longer span is a 400 naming the maximum; the window is the page (no cursor). \`from\`/\`to\` echo the resolved window. A bucket covers the trades in blocks after the last block at or before its start, up to and including \`blockHeight\`, the last block at or before its end; every bucket is listed, zero ones included.`,
+        'A valid address the index has never seen answers 200 with zero-volume points and zero totals (404 is reserved for single resources).',
+      ].join('\n\n'),
+      params: zAccountParams,
+      querystring: z.object({
+        bucket: z.enum(['hour', 'day', 'week']).default('day').describe('`hour`, `day` (UTC days) or `week` (UTC weeks starting Monday, as on /balances/history).'),
+        fromTime: zTimeParam.optional().describe('The first bucket is the first one STARTING at or after this instant (ISO-8601).'),
+        toTime: zTimeParam.optional().describe('The last bucket is the one containing this instant, if it has ended (ISO-8601).'),
+      }),
+      response: {
+        200: z.object({
+          bucket: z.enum(['hour', 'day', 'week']),
+          from: zIsoTimestamp.describe('Start of the first bucket.'),
+          to: zIsoTimestamp.describe('End of the last bucket.'),
+          points: z.array(z.object({
+            bucket: zIsoTimestamp.describe('The bucket\'s start.'),
+            blockHeight: z.number().int().describe('The last block at or before the bucket end — the last block the bucket covers.'),
+            volumeUsd: z.string().describe('Netted trading volume of the trades in the bucket, event-time USD, 2 decimals.'),
+            trades: z.number().int().describe('Trades in the bucket.'),
+          })),
+          totals: z.object({
+            windowUsd: z.string().describe('Sum of points, 2 decimals.'),
+            windowTrades: z.number().int(),
+            allTimeUsd: z.string().describe('Every trade the model holds for the address — the Explorer\'s "Trading" figure for this one holder.'),
+            allTimeTrades: z.number().int(),
+          }),
+          firstTradeBlock: z.number().int().nullable().describe('The block of the address\'s first trade; null when it never traded.'),
+          asOfBlock: z.number().int().nullable().describe('The newest block the model holds a trade for (any account); null on an empty model.'),
+        }),
+        400: zError,
+      },
+    },
+  }, async request => {
+    const parsed = requireParsedAddress(request.params.address)
+    const { bucket, fromTime, toTime } = request.query
+    const { window, clock, headSec } = await resolveBucketHistoryWindow(opts.client, bucket, fromTime, toTime, Date.now(), 'volume')
+    const head = clock.heights.length ? clock.heights[clock.heights.length - 1] : 0
+    // /liquidity/history's cache rule: keyed on the window, never the head. What
+    // can restate an ended bucket is the model's recompute of a changed block range
+    // (each derivations cycle, about every ten minutes), which the finality margin
+    // covers.
+    const closed = bucketWindowIsClosed(window.to, headSec, BUCKET_HISTORY_FINALITY_SEC)
+    const key = `data:accounts:volume:${parsed.accountId}:${bucket}:${window.from}:${window.to}`
+    return cached(key, closed ? BUCKET_HISTORY_CLOSED_TTL_MS : BUCKET_HISTORY_SETTLING_TTL_MS, () => accountVolume(opts.client, parsed, { bucket, window, clock, headBlock: head }))
   })
 
   app.get('/v1/accounts/:address/xcm', {

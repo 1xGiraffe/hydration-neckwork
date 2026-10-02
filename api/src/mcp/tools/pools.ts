@@ -3,8 +3,9 @@ import { formatParam, type ToolContext, type ToolDefinition, type ToolError, typ
 import { invalidArgument, toolErrorFromUpstream } from '../errors.ts'
 import { UpstreamError } from '../upstream.ts'
 import type {
-  AccountRef, ActivityRow, AssetRef, PoolCompositionEntry, PoolDetail, PoolListEntry, PoolsIndex,
+  AccountRef, ActivityRow, AssetRef, PoolCompositionEntry, PoolDetail, PoolListEntry, PoolsIndex, PoolVolume,
 } from '../types.ts'
+import { CUT_NOTE, WINDOW_KEYS, WINDOW_LABEL, changeCell, ratioPct } from '../format/volume.ts'
 import { DASH, formatAmount, formatCount, formatNumber, formatPercent, formatUsd, scaleAmount } from '../format/units.ts'
 import { formatTime, relativeAge } from '../format/time.ts'
 import { accountLabel, accountUrl, assetLabel, assetLabelWithId, assetUrl, contractUrl, explorerLink, poolUrl, shortHash, v3PoolUrl } from '../format/refs.ts'
@@ -175,7 +176,7 @@ const liquidityPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/
 
 const V3_ADDRESS = /^0x[0-9a-fA-F]{40}$/
 const VENUES = ['omnipool', 'stableswap', 'xyk', 'uniswapv3', 'lbp'] as const
-const INCLUDES = ['composition', 'lps', 'activity', 'liquidity', 'history'] as const
+const INCLUDES = ['composition', 'lps', 'activity', 'liquidity', 'history', 'volume'] as const
 type Include = typeof INCLUDES[number]
 
 /**
@@ -226,7 +227,7 @@ With 'pool' set, the identifier decides the route, and the three forms are not i
 - a numeric id — a stableswap or XYK pool addressed by its SHARE-TOKEN asset id (690, 4200, 110...), not by a position in a list. If no pool carries that share token, the id is retried as an OMNIPOOL-LISTED ASSET and the answer becomes that asset's Omnipool liquidity providers.
 - a 0x-prefixed 40-hex address — a Uniswap v3 (concentrated liquidity) pool, addressed by its contract.
 
-'include' adds sections: 'composition' (on by default for one pool), 'lps' (largest liquidity providers; for a v3 pool the open position ranges instead), 'activity' (the pool's recent classified swaps and liquidity events), 'liquidity' (v3 only: the tick table and open ranges by owner), and 'history' (a first/last/min/max summary of the pool's TVL series, never the raw points — for a stableswap or XYK pool's exact reserve/peg/issuance observations with their source blocks, or an Omnipool asset's reserve/hub/fee observations, call get_pool_history).
+'include' adds sections: 'composition' (on by default for one pool), 'lps' (largest liquidity providers; for a v3 pool the open position ranges instead), 'activity' (the pool's recent classified swaps and liquidity events), 'liquidity' (v3 only: the tick table and open ranges by owner), 'history' (a first/last/min/max summary of the pool's TVL series, never the raw points — for a stableswap or XYK pool's exact reserve/peg/issuance observations with their source blocks, or an Omnipool asset's reserve/hub/fee observations, call get_pool_history), and 'volume' (also with 'history'; not v3: 24 h / 7 d / 30 d volume, fills, LP and protocol fees, volume/TVL). Directory rows carry 24 h volume and volume/TVL. Pool volume counts each fill in its own pool, so pools sum to MORE than routed volume (get_protocol_stats 'volume').
 
 Traps worth knowing. An Omnipool asset that has been DELISTED — DOT, asset id 5, is the standing example — returns "Asset not in the Omnipool" rather than an empty pool; this tool says that in words instead of surfacing an error. Omnipool liquidity is owned per LISTED ASSET, not for the pool as a whole, so 'lps' on pool 'omnipool' has no single answer and the tool names the per-asset call instead. Pool history windows are unix SECONDS (fromTs/toTs upstream), not calendar dates. Every amount is scaled by its own asset's decimals and every row carries its explorer URL.`
 
@@ -305,12 +306,14 @@ function renderDirectory(
     ),
     h2(`Largest pools${filters ? ` (${filters})` : ''}`),
     table(
-      ['Pool', 'Venue', 'TVL', 'Share', 'Composition'],
+      ['Pool', 'Venue', 'TVL', 'Share', '24 h volume', '24 h vol/TVL', 'Composition'],
       rows.map(p => [
         explorerLink(p.name, poolEntryUrl(ctx.explorerBaseUrl, p)),
         VENUE_LABEL[p.kind] ?? p.kind,
         formatUsd(p.tvlUsd),
         p.sharePct == null ? DASH : formatPercent(p.sharePct),
+        p.volume24hUsd == null ? DASH : formatUsd(p.volume24hUsd),
+        ratioPct(p.volumeTvl24h),
         compositionCell(p.composition),
       ]),
       filters ? `no pool matches ${filters}` : 'the directory is empty',
@@ -318,8 +321,11 @@ function renderDirectory(
     note(filters
       ? `Showing ${rows.length} of the ${matched} pool${matched === 1 ? '' : 's'} matching ${filters}, out of ${all.length}. Pass a pool id, the literal "omnipool", or a 0x v3 address to open one.`
       : `Showing the ${rows.length} largest of ${all.length} pools. Pass a pool id, the literal "omnipool", or a 0x v3 address to open one.`),
+    index.volumeAsOf !== undefined
+      ? note(`24 h volume is POOL volume (every fill once, in the pool it executed in) over the 24 hours before ${index.volumeAsOf ? formatTime(index.volumeAsOf) : 'the volume models\' cut'}; vol/TVL divides it by the pool's current TVL — a ratio for the day, not annualised. ${DASH} where no volume model keys the pool.`)
+      : null,
   )
-  return { markdown, json: { totalTvlUsd: index.totalTvlUsd, poolCount: all.length, matched, shown: rows } }
+  return { markdown, json: { totalTvlUsd: index.totalTvlUsd, poolCount: all.length, matched, volumeAsOf: index.volumeAsOf ?? null, shown: rows } }
 }
 
 /* ============ history, summarised ============ */
@@ -350,6 +356,34 @@ function historySummary(history: PoolHistory | undefined, label = 'TVL'): string
     ['Change', change == null ? DASH : `${change >= 0 ? '+' : ''}${(change * 100).toFixed(1)}%`],
   ])
 }
+
+/* ============ pool volume ============ */
+
+/**
+ * `/explorer/omnipool/volume` or `/explorer/pool/:id/volume` — the pool page's
+ * "Volume & fees" figures: POOL volume (every fill once in this pool, the
+ * Omnipool counting a user swap once), its fees beside it, never in it.
+ */
+function renderPoolVolume(v: PoolVolume): string {
+  return joinBlocks(
+    h3('Volume & fees'),
+    kv([
+      ['Windows end at', v.asOf ? `${formatTime(v.asOf)} (the volume models' cut)` : 'the volume models are empty'],
+      ['Volume / TVL', `${ratioPct(v.volumeTvl?.d1)} over 24 h (against the current TVL ${formatUsd(v.tvlUsd)}) · ${ratioPct(v.volumeTvl?.d7)} over 7 d (against the 7-day mean TVL ${formatUsd(v.meanTvl7dUsd)})`],
+      ['Fee APR (7 d)', v.feeApr7dPct == null ? null : formatPercent(v.feeApr7dPct)],
+      ['All time', `${formatUsd(v.allTime?.volumeUsd)} volume · ${formatCount(v.allTime?.fills)} fills · ${formatUsd(v.allTime?.lpFeeUsd)} LP fees · ${formatUsd(v.allTime?.protocolFeeUsd)} protocol fees`],
+    ]),
+    table(['Window', 'Volume', 'Change vs prior', 'Fills', 'LP fees', 'Protocol fees'], WINDOW_KEYS.map(k => [
+      WINDOW_LABEL[k], formatUsd(v.kpis?.[k]?.volumeUsd), changeCell(v.kpis?.[k]), formatCount(v.fills?.[k]), formatUsd(v.fees?.[k]?.lpUsd), formatUsd(v.fees?.[k]?.protocolUsd),
+    ])),
+    note(`POOL volume: every fill once, in this pool, valued by its out side${v.venue === 'omnipool' ? '; a user swap through the hub counts once (its A→H2O first hop adds nothing)' : ''}. A trade routed through several pools counts in each, so pools sum to more than the platform's routed volume. Fees ride beside volume, never in it: LP fees accrue to the pool's providers, protocol fees are every other fee leg. Volume/TVL is a ratio for the window, never annualised.`),
+    note(CUT_NOTE),
+  )
+}
+
+const poolVolumeJson = (v: PoolVolume | null) => v
+  ? { asOf: v.asOf, venue: v.venue, poolKey: v.poolKey, kpis: v.kpis, fills: v.fills, fees: v.fees, allTime: v.allTime, tvlUsd: v.tvlUsd, meanTvl7dUsd: v.meanTvl7dUsd, volumeTvl: v.volumeTvl, feeApr7dPct: v.feeApr7dPct }
+  : undefined
 
 /* ============ one pool ============ */
 
@@ -643,15 +677,24 @@ async function handler(input: Record<string, unknown>, ctx: ToolContext): Promis
 
   const includes = new Set<Include>(args.include?.length ? args.include : ['composition'])
   const target = args.pool.trim()
+  // The pool's volume rides on 'history' (its other time series) or asks for itself.
+  const wantsVolume = includes.has('volume') || includes.has('history')
 
   /* --- the Omnipool --- */
   if (target.toLowerCase() === 'omnipool') {
     try {
-      const d = await ctx.upstream.get<OmnipoolResponse>('/explorer/omnipool', undefined, { ttlMs: 30_000 })
-      const markdown = renderOmnipool(d, ctx, includes)
+      const [d, volRes] = await Promise.all([
+        ctx.upstream.get<OmnipoolResponse>('/explorer/omnipool', undefined, { ttlMs: 30_000 }),
+        wantsVolume
+          ? ctx.upstream.get<PoolVolume>('/explorer/omnipool/volume', undefined, { ttlMs: 60_000, timeoutMs: 60_000 }).then(v => ({ v }), (err: unknown) => ({ err }))
+          : Promise.resolve(null),
+      ])
+      if (volRes && 'err' in volRes) errors.push(toolErrorFromUpstream(volRes.err, 'The Omnipool\'s volume'))
+      const volume = volRes && 'v' in volRes ? volRes.v : null
+      const markdown = joinBlocks(renderOmnipool(d, ctx, includes), volume ? renderPoolVolume(volume) : null)
       // The history series is deliberately dropped from the structured record
       // too: it is 1,351 points per asset and no answer needs them raw.
-      return output(ctx, fit(markdown, ctx), { ...d, history: undefined })
+      return output(ctx, fit(markdown, ctx), { ...d, history: undefined, volume: poolVolumeJson(volume) }, errors)
     } catch (err) {
       return failure(toolErrorFromUpstream(err, 'The Omnipool'))
     }
@@ -764,17 +807,21 @@ async function handler(input: Record<string, unknown>, ctx: ToolContext): Promis
 
   const rowSections = (includes.has('lps') ? 1 : 0) + (includes.has('activity') ? 1 : 0)
   const rows = rowsPerSection(ctx, limit, rowSections)
-  const [lpsRes, actRes] = await Promise.allSettled([
+  const [lpsRes, actRes, volRes] = await Promise.allSettled([
     includes.has('lps') ? ctx.upstream.get<PoolLpsResponse>(`/explorer/pool/${poolId}/lps`, { limit: rows }, { ttlMs: 30_000 }) : Promise.resolve(null),
     includes.has('activity') ? ctx.upstream.get<ActivityRow[]>(`/explorer/pool/${poolId}/activity`, { limit: rows }, { ttlMs: 10_000, timeoutMs: 60_000 }) : Promise.resolve(null),
+    wantsVolume ? ctx.upstream.get<PoolVolume>(`/explorer/pool/${poolId}/volume`, undefined, { ttlMs: 60_000, timeoutMs: 60_000 }) : Promise.resolve(null),
   ])
   if (lpsRes.status === 'rejected') errors.push(toolErrorFromUpstream(lpsRes.reason, 'The pool\'s liquidity providers'))
   if (actRes.status === 'rejected') errors.push(toolErrorFromUpstream(actRes.reason, 'The pool\'s activity'))
+  if (volRes.status === 'rejected') errors.push(toolErrorFromUpstream(volRes.reason, 'The pool\'s volume'))
   const lps = lpsRes.status === 'fulfilled' ? lpsRes.value : null
   const activity = actRes.status === 'fulfilled' ? actRes.value : null
+  const volume = volRes.status === 'fulfilled' ? volRes.value : null
 
   const markdown = joinBlocks(
     renderPoolDetail(detail, ctx, includes),
+    volume ? renderPoolVolume(volume) : null,
     lps ? renderPoolLps(lps, ctx) : null,
     activity ? joinBlocks(h3(`Recent activity (${formatCount(activity.length)} newest rows)`), bullets(activity.map(r => activityLine(r, ctx.explorerBaseUrl)))) : null,
     rows < limit
@@ -782,13 +829,13 @@ async function handler(input: Record<string, unknown>, ctx: ToolContext): Promis
       : null,
   )
   return output(ctx, fit(markdown, ctx, 'Drop an `include` section or lower `limit`.'),
-    { pool: { ...detail, history: undefined }, lps, activity }, errors)
+    { pool: { ...detail, history: undefined }, volume: poolVolumeJson(volume), lps, activity }, errors)
 }
 
 const INPUT_SHAPE = {
     pool: z.string().trim().min(1).max(64).optional().describe('One pool. A numeric share-token asset id (690, 4200, 110) for a stableswap or XYK pool; the literal "omnipool" for the Omnipool; a 0x-prefixed 40-hex contract address for a Uniswap v3 pool. A numeric id that matches no pool is retried as an Omnipool-listed asset. Omit for the directory.'),
     venue: z.enum(VENUES).optional().describe('Directory filter: only pools of this venue.'),
-    include: z.array(z.enum(INCLUDES)).optional().describe("Extra sections for a single pool: 'composition' (default), 'lps' (largest providers; v3 shows position ranges), 'activity' (recent classified rows), 'liquidity' (v3 tick table and ranges), 'history' (a summary of the TVL series, never the raw points)."),
+    include: z.array(z.enum(INCLUDES)).optional().describe("Extra sections for a single pool (default ['composition']); each is described in the tool description's 'include' paragraph."),
     minTvlUsd: z.coerce.number().finite().min(0).optional().describe('Directory filter: drop pools below this TVL in USD. Most XYK pools are dead and hold nothing.'),
     limit: z.coerce.number().int().min(1).max(100).optional().describe('Rows per table: directory pools, liquidity providers, activity rows. Default 25.'),
     format: formatParam,
