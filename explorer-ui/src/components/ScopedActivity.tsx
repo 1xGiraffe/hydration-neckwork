@@ -6,6 +6,7 @@ import {
   useAccountListCount,
   useAssetFilterOptions,
   useFilterNames,
+  useMmMarkets,
   useTagActivityCounts,
   useTagEvents,
   useTagExtrinsics,
@@ -16,11 +17,12 @@ import {
   useListTagActivityCounts, useListTagListCount, useListTagActivity, useListTagExtrinsics, useListTagEvents,
 } from '../hooks/useUser'
 import { useNow } from '../hooks/useNow'
+import { usePositionsPresence } from '../hooks/usePositions'
 import { setQuery, useQuery, useQueryValue } from '../router'
 import { FilterZone, useFilters } from './Filters'
 import { EvRow, ExtRow } from './ActivityRows'
 import { ActivityTable } from './ActivityTable'
-import { eventFilterFields, extrinsicFilterFields, activityFilterFields } from './activityFilters'
+import { eventFilterFields, extrinsicFilterFields, activityFilterFields, marketFilterField } from './activityFilters'
 import { EmptyRow, ErrorRow, Pager, ActivityChips, TableSkeleton, normalizeActivityAction, normalizeActivityType, pendingRows, LiveAnchor } from './ui'
 import { PAGE_SIZE, activityListCount, eventListCount, extrinsicListCount, hasNextPage, pageCount } from '../utils/activityPaging'
 import type { ListCountQuery } from '../api/explorer'
@@ -52,10 +54,20 @@ export function ScopedActivity({ scope, tab }: { scope: ActivityScope; tab: 'act
   // `contract` is the account page's contract sub-tab key — reserved so a
   // lingering ?contract=read never reads as a filter value here.
   const filterOptions = { reservedKeys: ['page', 'tab', 'view', 'atab', 'type', 'apage', 'contract'], pageKey: 'apage' }
-  const activityFilters = useFilters({ ...filterOptions, keys: ['action', 'token', 'from', 'to', 'min', 'minRevenue', 'identity'] })
+  // `market` is a filter of the money-market (Borrow) sub-tab alone; on every other
+  // type it is left out of the keys, so a lingering value is neither sent nor shown.
+  const activityFilters = useFilters({ ...filterOptions, keys: ['action', 'token', 'from', 'to', 'min', 'minRevenue', 'identity', ...(activityType === 'mm' ? ['market'] : [])] })
   const extrinsicFilters = useFilters({ ...filterOptions, keys: ['call', 'result', 'origin', 'from', 'to'] })
   const eventFilters = useFilters({ ...filterOptions, keys: ['event', 'from', 'to'] })
   const activityAction = normalizeActivityAction(activityType, activityFilters.values.action ?? '')
+  const activityMarket = activityType === 'mm' ? activityFilters.values.market || undefined : undefined
+  // The selector offers every configured market, narrowed to the ones this
+  // account/tag's money-market feed has rows in (positions-presence, the same
+  // cached probe the Borrow position tab reads), once that list is known.
+  const wantMarkets = activeTab === 'activity' && activityType === 'mm'
+  const markets = useMmMarkets(wantMarkets)
+  const presence = usePositionsPresence(scope, wantMarkets)
+  const marketField = marketFilterField(markets.data, activityMarket, presence.data?.mmActivityMarkets)
   const assets = useAssetFilterOptions()
   const names = useFilterNames()
   const query = useQuery()
@@ -98,6 +110,7 @@ export function ScopedActivity({ scope, tab }: { scope: ActivityScope; tab: 'act
       min: minimumUsd,
       minRevenue: activityFilters.values.minRevenue || undefined,
       identity: activityFilters.values.identity,
+      market: activityMarket,
     },
   ] as const
   const accountActivity = useAccountActivity(activeTab === 'activity' ? accountAddress : null, ...commonActivityArgs)
@@ -160,7 +173,7 @@ export function ScopedActivity({ scope, tab }: { scope: ActivityScope; tab: 'act
   const showSigner = scope.kind === 'tag' || scope.kind === 'list-tag' || showOrigin
   const extrinsicColumns = 6 + (showSigner ? 1 : 0) + (showOrigin ? 1 : 0)
 
-  const setActivityType = (value: string) => setQuery({ type: value === 'all' ? null : value, action: null, apage: null })
+  const setActivityType = (value: string) => setQuery({ type: value === 'all' ? null : value, action: null, market: null, apage: null })
   const setPage = (nextPage: number) => setQuery({ apage: nextPage > 0 ? String(nextPage) : null })
 
   return (
@@ -168,7 +181,7 @@ export function ScopedActivity({ scope, tab }: { scope: ActivityScope; tab: 'act
       {activeTab === 'activity' && <>
         <ActivityChips value={activityType} onChange={setActivityType} />
         <FilterZone
-          fields={activityFilterFields(activityType, assets.data ?? [])}
+          fields={activityFilterFields(activityType, assets.data ?? [], true, marketField)}
           values={{ ...activityFilters.values, action: activityAction }}
           onChange={activityFilters.onChange}
           onClear={activityFilters.onClear}
