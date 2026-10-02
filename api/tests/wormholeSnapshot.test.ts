@@ -1002,11 +1002,17 @@ describe('transfers held by an origin rate limiter', () => {
 // the mint and its log are the same extrinsic.
 const RACE_AMOUNT = 5_977_410_000n
 
+// How far the mocked indexed head trails wall clock. The backing guard grades a
+// shortfall against a head older than INDEX_STALE_AFTER_MS as unverified, so the
+// fixture dates its head relative to now; the stall case raises it.
+let headAgeMs = 30_000
+const chTimestamp = (ms: number): string => new Date(ms).toISOString().slice(0, 19).replace('T', ' ')
+
 function pinnedClient(head: number): ClickHouseClient {
   return {
     query: async ({ query }: { query: string }) => {
       queries.push(query)
-      if (query.includes('raw_blocks')) return { json: async () => [{ block_height: head, block_timestamp: '2026-08-22 09:22:00' }] }
+      if (query.includes('raw_blocks')) return { json: async () => [{ block_height: head, block_timestamp: chTimestamp(Date.now() - headAgeMs) }] }
       if (query.includes('AssetRegistry.LocationSet')) {
         return { json: async () => [USDC].map(a => ({ asset_id: a.assetId, args: locationArgs(a), block: 13_400_000 })) }
       }
@@ -1023,6 +1029,7 @@ function pinnedClient(head: number): ClickHouseClient {
 
 describe('reads pinned to the indexed head', () => {
   beforeEach(() => {
+    headAgeMs = 30_000
     registry = [USDC]
     minters.clear()
     minters.set(USDC.assetId, widen(USDC.manager))
@@ -1203,6 +1210,56 @@ describe('reads pinned to the indexed head', () => {
     // full cycle is still the second agreeing reading — the pre-existing
     // two-cycle path remains the fallback when the fast one cannot read.
     await refreshWormholeBacking()
+    expect((await getWormholeBridgeDetail()).assets.find(a => a.symbol === 'USDC')!.status).toBe('deficit')
+  })
+
+  // 2026-10-02: raw-live stopped and the indexed head froze while custody kept
+  // being read live, so outbound sends already released on the origin still sat
+  // inside the pinned supply. A stalled head must hold the shortfall at
+  // unverified, never confirm it, and never reset a streak it did not refute.
+  it('holds a shortfall read against a stalled index at unverified and never confirms it', async () => {
+    await balancedCycle()
+    issuance = new Map([[USDC.assetId, 227_031_998_904n + RACE_AMOUNT]])
+    headAgeMs = 20 * 60_000
+    await refreshWormholeBacking()
+    let detail = await getWormholeBridgeDetail()
+    let usdc = detail.assets.find(a => a.symbol === 'USDC')!
+    expect(usdc.status).toBe('unverified')
+    expect(usdc.statusDetail).toMatch(/index is 20 min behind/)
+    expect(detail.indexBehind).toBe(true)
+    expect(detail.indexLagSec).toBeGreaterThanOrEqual(1200)
+    expect(detail.indexLagSec).toBeLessThan(1210)
+    expect((await getWormholeSummary())!.indexBehind).toBe(true)
+    expect((await getWormholeSummary())!.deficitUsd).toBe(0)
+
+    // Any number of stalled cycles and confirmation passes publish nothing.
+    await runWormholeBackingConfirmation()
+    await refreshWormholeBacking()
+    await runWormholeBackingConfirmation()
+    expect((await getWormholeBridgeDetail()).assets.find(a => a.symbol === 'USDC')!.status).toBe('unverified')
+
+    // Head fresh again with the shortfall still there: that is a FIRST sighting
+    // (the stall moved nothing), so it waits for its confirming read.
+    headAgeMs = 30_000
+    await refreshWormholeBacking()
+    detail = await getWormholeBridgeDetail()
+    usdc = detail.assets.find(a => a.symbol === 'USDC')!
+    expect(detail.indexBehind).toBe(false)
+    expect(usdc.status).toBe('ok')
+    expect(usdc.statusDetail).toContain('has not been confirmed by a second reading')
+    await runWormholeBackingConfirmation()
+    expect((await getWormholeBridgeDetail()).assets.find(a => a.symbol === 'USDC')!.status).toBe('deficit')
+  })
+
+  it('keeps a half-confirmed shortfall half-confirmed across a stall', async () => {
+    await balancedCycle()
+    issuance = new Map([[USDC.assetId, 227_031_998_904n + RACE_AMOUNT]])
+    await refreshWormholeBacking()                 // first sighting, fresh head
+    headAgeMs = 20 * 60_000
+    await refreshWormholeBacking()                 // stalled: inconclusive
+    expect((await getWormholeBridgeDetail()).assets.find(a => a.symbol === 'USDC')!.status).toBe('unverified')
+    headAgeMs = 30_000
+    await refreshWormholeBacking()                 // the second agreeing reading
     expect((await getWormholeBridgeDetail()).assets.find(a => a.symbol === 'USDC')!.status).toBe('deficit')
   })
 

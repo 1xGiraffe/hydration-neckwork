@@ -362,6 +362,17 @@ describe('get_protocol_stats', () => {
     expect(json.withdraw.egressAccounts).toBeUndefined()
   })
 
+  // An indexer stall freezes issuance at the stale head while custody is read live, so the
+  // explorer grades a shortfall `unverified`; the dashboard has to say why rather than leave
+  // a bare "unverified" next to a deficit figure.
+  it('says the index is behind when the Wormhole summary was read against a stale head', async () => {
+    const stalled = { ...SECURITY_DASH, wormhole: { ...SECURITY_DASH.wormhole, worstStatus: 'unverified', indexBehind: true } }
+    const out = await run(protocol, { dashboard: 'security' }, { '/explorer/security': stalled })
+    expect(out.markdown).toContain('unverified — the Hydration index was behind the chain')
+    const fresh = await run(protocol, { dashboard: 'security' }, { '/explorer/security': SECURITY_DASH })
+    expect(fresh.markdown).not.toContain('index was behind')
+  })
+
   it('renders the liquidity dashboard as venues plus the Omnipool weight caps', async () => {
     const out = await run(protocol, { dashboard: 'liquidity' }, { '/explorer/omnipool': OMNIPOOL, '/explorer/pools': POOLS_INDEX })
     expect(out.markdown).toContain('Stableswap')

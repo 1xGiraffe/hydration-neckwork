@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import {
   backingTolerance,
+  advanceStreak,
   classifyBacking,
+  gradeBacking,
+  INDEX_STALE_AFTER_MS,
   worstStatus,
   type BackingInput,
 } from '../src/services/wormholeNtt.ts'
@@ -26,6 +29,7 @@ const usdc = (over: Partial<BackingInput> = {}): BackingInput => ({
   // confirmed reading taken this cycle; the damping rule and the carried-over
   // custody rule each have their own block below.
   custodyFresh: true,
+  indexLagMs: 45_000,
   downgradeConfirmed: true,
   ...over,
 })
@@ -104,6 +108,7 @@ describe('classifyBacking with in-flight known', () => {
       scanEnabled: true,
       lookbackDays: 14,
       custodyFresh: true,
+      indexLagMs: 45_000,
     downgradeConfirmed: true,
     })
     expect(sui.status).toBe('attention')
@@ -122,6 +127,7 @@ describe('classifyBacking with in-flight known', () => {
       originConfigured: true,
       scanEnabled: true,
       custodyFresh: true,
+      indexLagMs: 45_000,
     downgradeConfirmed: true,
       lookbackDays: 14,
     }).status).toBe('deficit')
@@ -175,6 +181,7 @@ describe('classifyBacking with the origin rate-limiter queue', () => {
       scanEnabled: true,
       lookbackDays: 14,
       custodyFresh: true,
+      indexLagMs: 45_000,
     downgradeConfirmed: true,
       ...over,
     })
@@ -238,6 +245,7 @@ describe('classifyBacking with supply burned at the dead address', () => {
       scanEnabled: true,
       lookbackDays: 14,
       custodyFresh: true,
+      indexLagMs: 45_000,
     downgradeConfirmed: true,
       ...over,
     })
@@ -310,6 +318,72 @@ describe('classifyBacking when custody is a carried-over reading', () => {
     // Both are the safe direction, and a stale balance cannot invent them.
     expect(classifyBacking(usdc({ custodyFresh: false })).status).toBe('ok')
     expect(classifyBacking(usdc({ locked: 227_031_998_904n + 175_000_000n, custodyFresh: false })).status).toBe('surplus')
+  })
+})
+
+describe('classifyBacking when the indexed head is stale', () => {
+  // The 2026-10-02 shape: raw-live stopped, the indexed head froze, and issuance
+  // stayed pinned to it while custody kept being read live. Every outbound send
+  // after the freeze was already released from custody on the origin yet still
+  // inside the pinned supply, so the residual fell by one transfer per send.
+  const short = 227_031_998_904n - 3_532_000_000n
+  const stale = INDEX_STALE_AFTER_MS + 1
+  const twentyMinutes = 20 * 60_000
+
+  it('holds a shortfall against a stale head at unverified and says the index is behind', () => {
+    const verdict = classifyBacking(usdc({ locked: short, indexLagMs: twentyMinutes }))
+    expect(verdict.status).toBe('unverified')
+    expect(verdict.residual).toBe(-3_532_000_000n)
+    expect(verdict.detail).toMatch(/index is 20 min behind/i)
+    expect(verdict.detail).not.toMatch(/not backed/i)
+    expect(classifyBacking(usdc({ locked: short, indexLagMs: stale })).status).toBe('unverified')
+  })
+
+  it('treats an undated head as stale, never as fresh', () => {
+    const verdict = classifyBacking(usdc({ locked: short, indexLagMs: null }))
+    expect(verdict.status).toBe('unverified')
+    expect(verdict.detail).toMatch(/could not be dated/i)
+  })
+
+  it('grades the same shortfall once the head is fresh again', () => {
+    expect(classifyBacking(usdc({ locked: short, indexLagMs: INDEX_STALE_AFTER_MS })).status).toBe('deficit')
+    expect(classifyBacking(usdc({ locked: short, indexLagMs: 0 })).status).toBe('deficit')
+    // A small one still grades as attention on a fresh head.
+    expect(classifyBacking(usdc({ locked: 227_031_998_904n - 50_000_000n, indexLagMs: 0 })).status).toBe('attention')
+    expect(classifyBacking(usdc({ locked: 227_031_998_904n - 50_000_000n, indexLagMs: twentyMinutes })).status).toBe('unverified')
+  })
+
+  it('leaves balanced and surplus readings alone', () => {
+    expect(classifyBacking(usdc({ indexLagMs: twentyMinutes })).status).toBe('ok')
+    expect(classifyBacking(usdc({ indexLagMs: null })).status).toBe('ok')
+    expect(classifyBacking(usdc({ locked: 227_031_998_904n + 175_000_000n, indexLagMs: twentyMinutes })).status).toBe('surplus')
+  })
+
+  it('is inconclusive for the two-reading streak: neither advances nor resets it', () => {
+    const grade = gradeBacking(classifyBacking(usdc({ locked: short, indexLagMs: twentyMinutes, downgradeConfirmed: false })).status)
+    expect(grade).toBe('inconclusive')
+    expect(advanceStreak(0, grade)).toBe(0)
+    expect(advanceStreak(1, grade)).toBe(1)
+    expect(advanceStreak(2, grade)).toBe(2)
+    // …whereas the same shortfall on a fresh head advances it, and a clean
+    // reading resets it.
+    expect(gradeBacking(classifyBacking(usdc({ locked: short, indexLagMs: 0 })).status)).toBe('negative')
+    expect(advanceStreak(1, 'negative')).toBe(2)
+    expect(advanceStreak(1, gradeBacking(classifyBacking(usdc({ indexLagMs: twentyMinutes })).status))).toBe(0)
+  })
+
+  it('never lets a whole stall confirm a first sighting', () => {
+    // Fresh first sighting, then stale readings for the rest of the outage, then
+    // a clean reading after catch-up: the streak never reaches two.
+    let streak = 0
+    streak = advanceStreak(streak, gradeBacking(classifyBacking(usdc({ locked: short, indexLagMs: 50_000 })).status))
+    expect(streak).toBe(1)
+    for (const lag of [65_000, 95_000, 600_000, 1_200_000]) {
+      streak = advanceStreak(streak, gradeBacking(classifyBacking(usdc({ locked: short, indexLagMs: lag })).status))
+    }
+    expect(streak).toBe(1)
+    streak = advanceStreak(streak, gradeBacking(classifyBacking(usdc({ indexLagMs: 45_000 })).status))
+    expect(streak).toBe(0)
   })
 })
 

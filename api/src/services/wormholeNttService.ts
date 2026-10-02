@@ -9,6 +9,9 @@ import {
   base58Encode,
   buildFuse,
   classifyBacking,
+  gradeBacking,
+  advanceStreak,
+  INDEX_STALE_AFTER_MS,
   decideInflight,
   decodeAddress,
   decodeBool,
@@ -247,6 +250,9 @@ interface WormholeSnapshot {
   // because it is subtracted from it. Not `flows.burnedOut` — see BackingInput.
   burnedAtDead: Map<number, bigint>
   issuanceBlock: number | null
+  // How far `issuanceBlock` trailed wall clock when it was pinned; null when the
+  // head could not be dated. Feeds the stale-index guard (INDEX_STALE_AFTER_MS).
+  indexLagMs: number | null
   custody: Map<number, CustodyRead>
   chains: WormholeChainState[]
   timeline: NttLogTimeline
@@ -514,6 +520,23 @@ async function queryIndexedHead(): Promise<number | null> {
   })
   const head = Number((await res.json<{ block_height: number }>())[0]?.block_height ?? 0)
   return Number.isSafeInteger(head) && head > 0 ? head : null
+}
+
+// The same head, with how far it trailed wall clock at the moment it was read.
+// The backing cycle pins issuance to this block, so its age is how far the
+// supply half of the equation lags the live custody half — the input to the
+// stale-index guard in `classifyBacking`. Read in the same query as the height
+// so the two describe one block.
+async function queryIndexedHeadPin(): Promise<{ height: number; lagMs: number | null } | null> {
+  const res = await client.query({
+    query: `SELECT max(block_height) AS block_height, max(block_timestamp) AS block_timestamp FROM price_data.raw_blocks`,
+    format: 'JSONEachRow',
+  })
+  const row = (await res.json<{ block_height: number; block_timestamp: string }>())[0]
+  const height = Number(row?.block_height ?? 0)
+  if (!Number.isSafeInteger(height) || height <= 0) return null
+  const at = row?.block_timestamp ? parseChTimestamp(String(row.block_timestamp)) : 0
+  return { height, lagMs: at > 0 ? Math.max(0, Date.now() - at) : null }
 }
 
 // Every NTT log Hydration wrote up to the pinned head, in two bounded reads: the
@@ -1548,8 +1571,9 @@ async function readBackingCycle(
   // indexing catches up. The mint and the log land in the SAME extrinsic, so
   // reading state at the indexed head makes the two atomically consistent and
   // the race structurally impossible.
-  const indexedHead = await queryIndexedHead()
-  if (indexedHead == null) throw new Error('wormhole snapshot: no indexed head to pin the reads to')
+  const headPin = await queryIndexedHeadPin()
+  if (headPin == null) throw new Error('wormhole snapshot: no indexed head to pin the reads to')
+  const indexedHead = headPin.height
 
   // Static manager facts and the local pause flag, sequentially against the
   // Hydration RPC. A manager that could not be read keeps its previous facts.
@@ -1808,6 +1832,7 @@ async function readBackingCycle(
     issuance,
     burnedAtDead,
     issuanceBlock,
+    indexLagMs: headPin.lagMs,
     custody,
     chains,
     timeline,
@@ -1827,17 +1852,9 @@ async function readBackingCycle(
   return { assets, next }
 }
 
-/**
- * Whether a reading is one the classifier would call a shortfall, and whether it
- * could tell at all. An unverifiable reading (no scan, unconfigured origin) is
- * neither confirmation nor refutation and must move nothing.
- */
-type Grade = 'negative' | 'clean' | 'inconclusive'
-const gradeOf = (status: WormholeStatus): Grade => {
-  if (status === 'deficit' || status === 'attention') return 'negative'
-  if (status === 'ok' || status === 'surplus') return 'clean'
-  return 'inconclusive'
-}
+// Grading lives in the pure layer (`gradeBacking`, `advanceStreak`) so the
+// streak rule is unit-tested alongside the classifier that feeds it.
+const gradeOf = gradeBacking
 
 // Publishing IS bumping the generation: responses are built from the snapshot,
 // so a new one has to be servable immediately rather than after the response
@@ -1868,10 +1885,13 @@ export async function refreshWormholeBacking(): Promise<void> {
     const firstSightings: number[] = []
     for (const asset of assets) {
       const grade = gradeOf(assetBacking(next, asset, prices, true).status)
-      const streak = grade === 'negative' ? (negativeStreak.get(asset.assetId) ?? 0) + 1 : 0
+      // An inconclusive reading (stale custody, a stalled index) holds the
+      // count where it stood: it is neither a second agreeing reading nor a
+      // refutation of the first.
+      const streak = advanceStreak(negativeStreak.get(asset.assetId) ?? 0, grade)
       negativeStreak.set(asset.assetId, streak)
       next.downgradeConfirmed.set(asset.assetId, streak >= DOWNGRADE_CYCLES)
-      if (streak === 1) firstSightings.push(asset.assetId)
+      if (grade === 'negative' && streak === 1) firstSightings.push(asset.assetId)
     }
 
     publishSnapshot(next)
@@ -1986,6 +2006,11 @@ function mergeConfirmation(
     // Unread anywhere; kept as the newest head a read in this snapshot was
     // pinned to.
     issuanceBlock: fresh.issuanceBlock ?? base.issuanceBlock,
+    // Snapshot-wide, and the base's on purpose: the merge only carries assets
+    // the confirming pass graded as a shortfall, which the guard allows only on
+    // a fresh head, and the base cycle that flagged them was fresh too — so
+    // both readings agree on it and the base's describes the other assets.
+    indexLagMs: base.indexLagMs,
     custody: overlay(fresh.custody, base.custody),
     // Fresh contributes only the ops it could attribute to a scoped asset: the
     // scoped pass's manager map holds nothing else, so every other op comes
@@ -2116,6 +2141,7 @@ function assetBacking(
     priceUsd: prices.get(asset.assetId)?.price ?? null,
     originConfigured,
     custodyFresh: custody != null && custody.stale !== true,
+    indexLagMs: snap.indexLagMs,
     scanEnabled,
     lookbackDays: LOOKBACK_DAYS,
     downgradeConfirmed: gradeUndamped || (snap.downgradeConfirmed.get(asset.assetId) ?? false),
@@ -2158,6 +2184,8 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
     hydrationChainId: HYDRATION_WORMHOLE_CHAIN_ID,
     asOf: null,
     indexedThrough: head ? { block: head.block_height, at: head.block_timestamp } : null,
+    indexLagSec: null,
+    indexBehind: false,
   }
   if (!snap) return empty
 
@@ -2371,6 +2399,8 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
     hydrationChainId: snap.hydrationChainId,
     asOf: new Date(snap.takenAt).toISOString(),
     indexedThrough: head ? { block: head.block_height, at: head.block_timestamp } : null,
+    indexLagSec: snap.indexLagMs != null ? Math.round(snap.indexLagMs / 1000) : null,
+    indexBehind: snap.indexLagMs == null || snap.indexLagMs > INDEX_STALE_AFTER_MS,
   }
 }
 
