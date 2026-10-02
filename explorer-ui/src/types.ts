@@ -2735,7 +2735,12 @@ export interface OrderHistoryPage { total: number; offset: number; limit: number
 
 // GET …/positions-presence — whether a holder with nothing open now has history
 // that makes a tab worth showing.
-export interface PositionsPresence { orderHistory: number; liquidityHistory: boolean; moneyMarketHistory: boolean }
+// `mmActivityMarkets`: the market keys the holder's money-market activity feed has
+// rows in, in display order (absent from an older API).
+export interface PositionsPresence { orderHistory: number; liquidityHistory: boolean; moneyMarketHistory: boolean; mmActivityMarkets?: string[] }
+
+// GET /explorer/mm-markets — one configured isolated money market.
+export interface MmMarketOption { key: string; label: string; role: 'primary' | 'supplemental' }
 
 // GET …/liquidity-rewards — liquidity-mining rewards claimed over the whole history.
 export interface LiquidityRewardClaimRow {

@@ -1,4 +1,4 @@
-import type { AssetFilterItem } from '../types'
+import type { AssetFilterItem, MmMarketOption } from '../types'
 import { ACTIVITY_ACTIONS } from './ui'
 import { tokenFilterOptions, type ComboOption, type FilterField } from './Filters'
 
@@ -21,7 +21,24 @@ const IDENTITY_FIELD: FilterField = {
   ],
 }
 
-export function activityFilterFields(type: string, assets: AssetFilterItem[], includeToken = true): FilterField[] {
+// The money-market tab's market selector: the isolated markets the API configures
+// (GET /explorer/mm-markets), narrowed — on an account or tag — to the ones its feed
+// has rows in (`touched`, positions-presence). The market a link selected stays
+// offered even when the narrowing would drop it, so the select never shows a value
+// it has no option for. Null = nothing to choose between, so no field.
+export function marketFilterField(markets: readonly MmMarketOption[] | undefined, selected?: string, touched?: readonly string[]): FilterField | null {
+  if (!markets?.length) return null
+  const offered = touched ? markets.filter(m => touched.includes(m.key) || m.key === selected) : markets
+  if (!offered.length) return null
+  return {
+    kind: 'select',
+    key: 'market',
+    title: 'Money market',
+    options: [{ value: '', label: 'All markets' }, ...offered.map(m => ({ value: m.key, label: m.label }))],
+  }
+}
+
+export function activityFilterFields(type: string, assets: AssetFilterItem[], includeToken = true, market: FilterField | null = null): FilterField[] {
   const actions = ACTIVITY_ACTIONS[type]
   return [
     ...(actions ? [{
@@ -29,6 +46,8 @@ export function activityFilterFields(type: string, assets: AssetFilterItem[], in
       key: 'action',
       options: [{ value: '', label: 'All actions' }, ...actions.map(action => ({ value: action.v, label: action.label }))],
     }] : []),
+    // Money-market tab only: a market belongs to no other family's rows.
+    ...(type === 'mm' && market ? [market] : []),
     ...(includeToken ? [{ kind: 'combo' as const, key: 'token', placeholder: 'All tokens', width: 150, options: tokenFilterOptions(assets) }] : []),
     IDENTITY_FIELD,
     ...DATE_FIELDS,

@@ -1,12 +1,12 @@
 /* eslint-disable react-refresh/only-export-components -- page + its smol-filter helpers */
-import { useActivity, useActivityCount, useDaily, useAssetFilterOptions } from '../hooks/useExplorerData'
+import { useActivity, useActivityCount, useDaily, useAssetFilterOptions, useMmMarkets } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, usePageParam, setPage, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, DayBarChart, Pager, ActivityChips, normalizeActivityType, normalizeActivityAction } from '../components/ui'
 import { ActivityTable } from '../components/ActivityTable'
 import { FilterZone, useFilters } from '../components/Filters'
-import { activityFilterFields } from '../components/activityFilters'
+import { activityFilterFields, marketFilterField } from '../components/activityFilters'
 import { categoryColor } from '../components/activityColors'
 import { NotifyButton } from '../components/NotifyButton'
 import { LARGE_VALUE_MIN_USD } from '../notificationKinds'
@@ -106,16 +106,22 @@ export function Activity() {
   // isPlaceholderData: these rows answer the PREVIOUS filter/tab/page, kept on screen
   // while the new one loads. A high "$ from" here takes tens of seconds, so without
   // marking them the feed reads as ignoring the filter (see pendingRows).
-  const { data, isFetching, isPlaceholderData, error, refetch, anchorRef } = useActivity(PAGE, f.from, f.to, page * PAGE, type, { token: f.token, min: activityMin, minRevenue: f.minRevenue, identity: f.identity }, action || undefined)  // filters applied server-side
+  // The market filter is the money-market tab's alone (the API refuses it on any
+  // other type), so a `market` lingering in a hand-edited URL on another tab is
+  // neither sent nor shown as an active filter.
+  const market = type === 'mm' ? f.market || undefined : undefined
+  const shownFilters = type === 'mm' ? f : Object.fromEntries(Object.entries(f).filter(([k]) => k !== 'market'))
+  const markets = useMmMarkets(type === 'mm')
+  const { data, isFetching, isPlaceholderData, error, refetch, anchorRef } = useActivity(PAGE, f.from, f.to, page * PAGE, type, { token: f.token, min: activityMin, minRevenue: f.minRevenue, identity: f.identity, market }, action || undefined)  // filters applied server-side
   // The pager's two bounds, under exactly the filters above: how many rows the feed
   // holds where the API can count it (the vote feed pages in SQL over one source, so
   // its length is that source's own count), and always how deep the API serves this
   // category. The categories assembled from several sources report no total, so they
   // get no page numbers — but their › arrow still stops at the servable depth
   // instead of walking a reader into a refused request.
-  const { data: count } = useActivityCount(type, f.from, f.to, { token: f.token, min: activityMin, minRevenue: f.minRevenue, identity: f.identity }, action || undefined)
-  // The daily histogram mirrors the active tab + action/token filters.
-  const { data: daily } = useDaily('activity', { type, action: action || undefined, token: f.token || undefined })
+  const { data: count } = useActivityCount(type, f.from, f.to, { token: f.token, min: activityMin, minRevenue: f.minRevenue, identity: f.identity, market }, action || undefined)
+  // The daily histogram mirrors the active tab + action/token/market filters.
+  const { data: daily } = useDaily('activity', { type, action: action || undefined, token: f.token || undefined, market })
   const assets = useAssetFilterOptions()
   const now = useNow()
 
@@ -134,8 +140,8 @@ export function Activity() {
       {/* The histogram wears whatever category is filtered, so the chart and the
           rows under it agree on what you are looking at. */}
       <DayBarChart data={daily ?? []} color={categoryColor(type)} label="Daily activity" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
-      <ActivityChips value={type} onChange={v => setQuery({ tab: v === 'all' ? null : v, action: null, page: null })} />
-      <FilterZone fields={activityFilterFields(type, assets.data ?? [])} values={f} onChange={onChange} onClear={onClear}
+      <ActivityChips value={type} onChange={v => setQuery({ tab: v === 'all' ? null : v, action: null, market: null, page: null })} />
+      <FilterZone fields={activityFilterFields(type, assets.data ?? [], true, marketFilterField(markets.data, market))} values={shownFilters} onChange={onChange} onClear={onClear}
         extra={
           // One wrapper, not two siblings: .filter-head is a space-between
           // flex row, so a third child would push the smol toggle to the middle.

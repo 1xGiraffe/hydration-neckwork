@@ -808,6 +808,14 @@ export interface ValueListFilters {
   // shared cache entry can never carry one viewer's tags to another — the set
   // is part of the cache key through filterKey.
   viewerTagged?: Set<string>
+  // One isolated money market by its key (MM_MARKETS: 'core', 'gigahdx', 'bil', …),
+  // money-market feeds only (the route refuses it on any other type). Pushed into
+  // every mm source read as the pool predicate the row's mmMarketKey is derived
+  // from (mmMarketPoolSql), and re-checked on built rows by activityRowMatchesFilters,
+  // so a page, its exact count and its located ranks select one row set. A reward
+  // claim (ClaimRewards) is the shared RewardsController's act and names no market,
+  // so a market filter selects none.
+  market?: string
 }
 export interface VoteListFilters { referendum?: string; conviction?: string }
 
@@ -5230,6 +5238,14 @@ const MM_MARKET_BY_KEY = new Map<string, ApiMmMarket>(MM_MARKETS.map(m => [m.key
 // no deployment configured — which is how a notification rule naming a market is
 // validated at creation and labelled at render time.
 export function mmMarketByKey(key: string): ApiMmMarket | undefined { return MM_MARKET_BY_KEY.get(key) }
+// The market filter as a predicate on an mm source's pool column — the very column
+// moneyMarketActivityFields derives a row's mmMarketKey from. '' = no market filter;
+// an unconfigured key (the route refuses one) selects nothing rather than everything.
+export function mmMarketPoolSql(market: string | undefined, poolColumn = "ifNull(pool_address, '')"): string {
+  if (!market) return ''
+  const m = MM_MARKET_BY_KEY.get(market)
+  return m ? `AND lower(${poolColumn}) = '${m.poolProxy}'` : 'AND 0'
+}
 const configuredMmPoolsSql = () => MM_MARKETS.map(m => `'${m.poolProxy}'`).join(',')
 const supplementalMmPoolsSql = () => MM_MARKETS.filter(m => m.role === 'supplemental').map(m => `'${m.poolProxy}'`).join(',') || "''"
 const countedMmPoolsSql = () => MM_MARKETS.filter(m => !m.stakingBacked).map(m => `'${m.poolProxy}'`).join(',') || "''"
@@ -11933,6 +11949,10 @@ export function activityRowMatchesFilters(row: ActivityRow, filters: ValueListFi
     const named = accountIsNamed(row.who, filters.viewerTagged)
     if (named !== (filters.identity === 'named')) return false
   }
+  // The market is the row's own mmMarketKey (moneyMarketActivityFields), the same
+  // pool the SQL sources narrow by. A row without one — a reward claim, any non-mm
+  // row — belongs to no market and so never matches one.
+  if (filters.market && row.mmMarketKey !== filters.market) return false
   const tokenIds = assetIdsForToken(filters.token)
   // A cross-chain destination (ZEC, wNEAR) is not a registry asset, so it carries
   // no asset id a row could reference. The row that delivered it names it by its
@@ -15432,6 +15452,7 @@ async function getRecentMoneyMarket(limit: number, from?: string, to?: string, o
                 WHERE ${bound} AND event_name IN (${eventNames.map(n => `'${n}'`).join(',')})
                   AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
                   AND user_address NOT LIKE '0x6d6f646c%'
+                  ${mmMarketPoolSql(filters.market)}
                   ${mmStakingPlumbingExclusionSql()}
                   ${reserveFilter}
                   ${amountFilter.predicateSql}
@@ -19201,7 +19222,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'referral')).filter(r => r.type === 'liquidity' && r.liqAction === action)
         : []),
     ]
-    else if (type === 'mm') rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters, action)).filter(r => !isModuleAcct(r.who)), ...(action === 'ClaimRewards' ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'incentive')).filter(r => r.type === 'mm') : [])]
+    else if (type === 'mm') rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters, action)).filter(r => !isModuleAcct(r.who)), ...(action === 'ClaimRewards' && !filters.market ? (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'incentive')).filter(r => r.type === 'mm') : [])]
     else if (type === 'otc') rows = await getRecentOtc(fetchN, from, to, 0, filters, action)
     else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentXcmExecuted(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
     else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
@@ -19215,7 +19236,9 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
   } else if (type === 'liquidity') {
     rows = [...await getRecentLiquidity(fetchN, from, to, 0, filters), ...await getRecentV3Rows('liquidity', fetchN, from, to, 0, filters), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'referral')).filter(r => r.type === 'liquidity')]
   } else if (type === 'mm') {
-    rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters)).filter(r => !isModuleAcct(r.who)), ...(await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'incentive')).filter(r => r.type === 'mm')]
+    // A reward claim names no market (see ValueListFilters.market), so a market
+    // filter skips the claims read rather than fetching rows it would drop.
+    rows = [...(await getRecentMoneyMarket(fetchN, from, to, 0, filters)).filter(r => !isModuleAcct(r.who)), ...(filters.market ? [] : (await getRecentRewardClaims(fetchN, from, to, undefined, assetIdsForToken(filters.token), undefined, undefined, filters, 'incentive')).filter(r => r.type === 'mm'))]
   } else if (type === 'otc') {
     rows = await getRecentOtc(limit, from, to, offset, filters)
   } else if (type === 'xcm') {
@@ -21924,6 +21947,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
                   AND user_address NOT LIKE '0x6d6f646c%'
                   AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
                   AND lower(ifNull(asset_address, '')) IN ({reserves:Array(String)})
+                  ${mmMarketPoolSql(filters.market)}
                   ${mmStakingPlumbingExclusionSql()}
                   ${mmValueFilter.predicateSql}
                 ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
@@ -23734,7 +23758,7 @@ function accountLiquidityArm(list: string, bound: string, eventNames: readonly s
 // Widening one side alone desynchronises them — a count over rows the page drops, or a
 // page whose rows this arm never counted. The `known` guard keeps an unrecognised
 // address from resolving to asset 0 and being counted under HDX.
-function accountMoneyMarketArm(evmList: string, eventNames: readonly string[], bound: string, tokenIds?: number[]): ActivityCountArm {
+function accountMoneyMarketArm(evmList: string, eventNames: readonly string[], bound: string, tokenIds?: number[], market?: string): ActivityCountArm {
   if (!eventNames.length) return emptyActivityCountArm()
   const tokenFilter = armTokenFilter(tokenIds && mmTokenMatchIds(tokenIds), ids =>
     `(${mmAssetKnownSql('asset_address')} AND ${mmAssetIdSql('asset_address')} IN (${ids}))`)
@@ -23742,9 +23766,33 @@ function accountMoneyMarketArm(evmList: string, eventNames: readonly string[], b
     WHERE ${bound} AND account_id IN (${evmList})
       AND event_name IN (${sqlEventNameList([...eventNames])})
       AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
+      ${mmMarketPoolSql(market)}
       ${mmStakingPlumbingExclusionSql()}
       ${tokenFilter}
     GROUP BY block_height`
+}
+
+// The isolated markets an account set's money-market feed holds rows in, as market
+// keys in MM_MARKETS' display order — what the Borrow activity sub-tab's market
+// selector offers on an account or tag. The predicates are the feed's own (the same
+// account forms, module-account exclusion, event names, configured pools and staking
+// plumbing exclusion as accountMoneyMarketArm), so a market offered here has rows
+// and one left out has none. Account-first: the twin is keyed (account_id, …).
+export async function mmActivityMarketKeys(accounts: string[]): Promise<string[]> {
+  const forms = [...new Set(accounts.map(evmAccountForm).filter((form): form is string => !!form))]
+    .filter(form => !isModuleAcct(accountRef(form)))
+  if (!forms.length) return []
+  const res = await client.query({
+    query: `SELECT DISTINCT lower(ifNull(pool_address, '')) AS pool
+            FROM price_data.account_money_market_activity
+            WHERE account_id IN {forms:Array(String)}
+              AND event_name IN (${sqlEventNameList([...MONEY_MARKET_EVENT_NAMES])})
+              AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
+              ${mmStakingPlumbingExclusionSql()}`,
+    query_params: { forms }, format: 'JSONEachRow',
+  })
+  const pools = new Set((await res.json<{ pool: string }>()).map(r => r.pool))
+  return MM_MARKETS.filter(m => pools.has(m.poolProxy)).map(m => m.key)
 }
 
 // ── The transfer family ───────────────────────────────────────────────────────
@@ -24484,7 +24532,7 @@ async function planExactActivity(
     arms.push(accountLiquidityArm(list, bound, liquidityActionEventNames(action), tokenIds))
   }
   if ((type === 'all' || type === 'mm') && userEvmList) {
-    arms.push(accountMoneyMarketArm(userEvmList, moneyMarketEventNames(action), bound, tokenIds))
+    arms.push(accountMoneyMarketArm(userEvmList, moneyMarketEventNames(action), bound, tokenIds, filters.market))
   }
   const accCond = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => ACCOUNT_RE.test(a))
   if (wantTransfers && accCond.length) {
@@ -25119,6 +25167,10 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     // redefine the column for the predicate too (see getRecentMoneyMarket).
     const mmAmountExpr = `if(event_name='LiquidationCall', liquidated_collateral_amount, amount)`
     const mmValueFilter = eventValueFilterSql(mmAssetExpr, mmAmountExpr, 'block_timestamp', queryFilters, prices, 'account_mm_price')
+    // The market narrows the read only off an exact plan, for the token filter's
+    // reason: under one the rows are the transfer feed's classification context and
+    // the assembled rows are filtered instead (activityRowMatchesFilters).
+    const mmMarketFilter = exact ? '' : mmMarketPoolSql(filters.market)
     const mmTxRes = await client.query({
       query: `SELECT block_height, event_index, toString(block_timestamp) AS ts, event_name, account_id, asset_address, pool_address,
                 ${mmAmountExpr} AS amount_eff
@@ -25126,6 +25178,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
               ${mmValueFilter.joinSql}
               WHERE ${bound} AND account_id IN (${mmList}) AND event_name IN (${mmEventNames.map(n => `'${n}'`).join(',')})
                 AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
+                ${mmMarketFilter}
                 ${mmStakingPlumbingExclusionSql()}
                 ${reserveFilter}
                 ${mmValueFilter.predicateSql}
@@ -30598,7 +30651,8 @@ export async function getListTagValueEvents(listId: string, tagId: string, membe
 // list's own tab + filters (activity type, action, token; vote conviction). The
 // counts are event-level per category — the merged activity's cross-category
 // exclusions and $-value filters aren't replicated here (a coarse histogram).
-export interface DailyFilters { type?: string; action?: string; token?: string }
+// `market` (money-market type only, like the feed's): one isolated market's bars.
+export interface DailyFilters { type?: string; action?: string; token?: string; market?: string }
 const TRANSFER_EVENTS = ['Balances.Transfer', 'Tokens.Transfer', 'Currencies.Transferred']
 // Concentrated-liquidity rows of activity_histogram_events (uniswap_v3_histogram_mv in
 // 010): the pool's own Swap/Mint/Burn/Collect stand for manager positions as well —
@@ -30676,7 +30730,8 @@ const sqlNames = (names: readonly string[]) => names.map(n => `'${n}'`).join(','
 
 export async function getDailyActivity(scope: string, filters: DailyFilters = {}): Promise<{ date: string; value: number }[]> {
   const type = normalizeActivityTypeKey(filters.type ?? 'all')
-  const key = `${scope}:${type}:${filters.action ?? ''}:${filters.token ?? ''}`
+  const market = type === 'mm' ? filters.market : undefined
+  const key = `${scope}:${type}:${filters.action ?? ''}:${filters.token ?? ''}${market ? `:m=${market}` : ''}`
   // Ninety DAILY buckets: the newest one is the only one that can still move, and it
   // moves by a rounding error over a day. Served stale while it revalidates so the
   // reader who happens to arrive after the freshness lapses is not the one who pays
@@ -30811,7 +30866,9 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
           : filters.action === 'Nay' ? ` AND JSONExtractInt(args_json, 'vote', 'vote') < 128 AND JSONExtractString(args_json, 'vote', '__kind') = 'Standard'` : ''
         query = daily('raw_events', `event_name IN (${sqlNames(VOTE_EVENTS)})${side}${sp(voteTok)}`)
       } else if (type === 'mm') {
-        if (filters.action === 'ClaimRewards') {
+        // A reward claim names no market (ValueListFilters.market), as on the feed.
+        if (filters.action === 'ClaimRewards' && market) query = `SELECT '' AS d, toUInt64(0) AS v WHERE 0`
+        else if (filters.action === 'ClaimRewards') {
           // Reward claims already have a replay-safe sparse transfer model. The
           // former histogram reopened 35.8M recent raw events (7.9 GiB) merely
           // to find this one pot's Currencies.Transferred rows.
@@ -30820,7 +30877,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         } else {
           const actionNames = moneyMarketEventNames(filters.action)
           const act = actionNames.length ? ` AND event_name IN (${sqlNames(actionNames)})` : ' AND 0'
-          query = daily('raw_money_market_events', `user_address NOT LIKE '0x6d6f646c%' AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})${act}${sp(mmTok)} ${mmStakingPlumbingExclusionSql()}`)
+          query = daily('raw_money_market_events', `user_address NOT LIKE '0x6d6f646c%' AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})${act}${sp(mmTok)}${sp(mmMarketPoolSql(market))} ${mmStakingPlumbingExclusionSql()}`)
         }
       } else if (type === 'otc') {
         // Asset identity for Cancelled/Filled/PartiallyFilled lives on the order's

@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
-import { historyH160, listTagMembers, moneyMarketIdentities, resolveRelatedAccounts, tagHistoryAccountSet } from './explorerService.ts'
+import { historyH160, listTagMembers, mmActivityMarketKeys, moneyMarketIdentities, resolveRelatedAccounts, tagHistoryAccountSet } from './explorerService.ts'
 import { stableswapPoolIdList, xykLpAssetIdList } from './lpHistory.ts'
 import { accountSetKey, cachedLiquidityRewardsClaimed, type LiquidityRewardsClaimed } from './lpRewardClaims.ts'
 import { mmHistoryStart } from './moneyMarketHistory.ts'
@@ -23,7 +23,10 @@ import { getTag as getTagRecord } from './tagService.ts'
 let client: ClickHouseClient
 export function initPositionsPresence(c: ClickHouseClient): void { client = c }
 
-export interface PositionsPresence { orderHistory: number; liquidityHistory: boolean; moneyMarketHistory: boolean }
+// `mmActivityMarkets`: the market keys (MM_MARKETS order) the scope's money-market
+// ACTIVITY feed holds rows in — the Borrow activity sub-tab's market selector offers
+// exactly these (mmActivityMarketKeys, over the accounts that feed reads).
+export interface PositionsPresence { orderHistory: number; liquidityHistory: boolean; moneyMarketHistory: boolean; mmActivityMarkets: string[] }
 
 interface PositionScope {
   /** Cache scope name (addr:<id>, tag:<id>, list-tag:<list>:<tag>). */
@@ -90,12 +93,14 @@ async function hasLiquidityHistory(accountsIn: readonly string[]): Promise<boole
 async function presenceFor(s: PositionScope): Promise<PositionsPresence> {
   const key = `explorer:positions-presence:${s.scope}:${accountSetKey([...s.orderAccounts, '|', ...s.lpAccounts])}`
   return cached(key, 60_000, async () => {
-    const [orderHistory, liquidityHistory, mmStart] = await Promise.all([
+    const [orderHistory, liquidityHistory, mmStart, mmActivityMarkets] = await Promise.all([
       orderHistoryCount(s.orderAccounts),
       hasLiquidityHistory(s.lpAccounts),
       mmHistoryStart(client, s.mmH160s),
+      // The activity feed's own account set: the related set / the tag's members.
+      mmActivityMarketKeys(s.orderAccounts),
     ])
-    return { orderHistory, liquidityHistory, moneyMarketHistory: mmStart != null }
+    return { orderHistory, liquidityHistory, moneyMarketHistory: mmStart != null, mmActivityMarkets }
   })
 }
 
