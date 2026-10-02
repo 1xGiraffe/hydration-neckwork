@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import { usePools } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { paths, Link } from '../router'
+import { paths, Link, setQuery, useQuery } from '../router'
 import { AssetIcon, Usd, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav, TableSkeleton } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
 import { fmtVolumeTvl } from '../utils/volume'
-import type { PoolCompositionEntry, PoolListEntry } from '../types'
+import type { PoolCompositionEntry, PoolKind, PoolListEntry } from '../types'
 
 // Where the chain's money sits.
 //
@@ -22,6 +22,19 @@ import type { PoolCompositionEntry, PoolListEntry } from '../types'
 // place. Nothing is hidden permanently; the page just does not open on it.
 
 const DUST_USD = 100
+
+// The pool-type filter. The Omnipool is one row, so it needs no filter of its own:
+// it stays in "All" and drops out once a type is picked.
+type PoolTypeFilter = 'all' | Exclude<PoolKind, 'omnipool'>
+const POOL_TYPE_FILTERS: { v: PoolTypeFilter; label: string }[] = [
+  { v: 'all', label: 'All' }, { v: 'stableswap', label: 'Stableswap' }, { v: 'xyk', label: 'XYK' }, { v: 'uniswapv3', label: 'Uniswap v3' },
+]
+export function parsePoolType(value: string | null): PoolTypeFilter {
+  return POOL_TYPE_FILTERS.find(f => f.v === value)?.v ?? 'all'
+}
+export function poolsOfType(pools: PoolListEntry[], type: PoolTypeFilter): PoolListEntry[] {
+  return type === 'all' ? pools : pools.filter(p => p.kind === type)
+}
 
 // A pool's composition as one bar, at row scale: no axes, no tooltip, no
 // hover state — the pool's own page carries the full chart. Segments are the
@@ -83,8 +96,10 @@ export function Liquidity() {
   useDocumentTitle('Liquidity')
   const { data, isLoading } = usePools()
   const [showDust, setShowDust] = useState(false)
+  const type = parsePoolType(useQuery().get('type'))
 
-  const pools = data?.pools ?? []
+  const pools = poolsOfType(data?.pools ?? [], type)
+  const pooledUsd = type === 'all' ? data?.totalTvlUsd : pools.reduce((s, p) => s + (p.tvlUsd ?? 0), 0)
   const held = pools.filter(p => (p.tvlUsd ?? 0) >= DUST_USD)
   const dust = pools.filter(p => (p.tvlUsd ?? 0) < DUST_USD)
   const dustUsd = dust.reduce((s, p) => s + (p.tvlUsd ?? 0), 0)
@@ -95,8 +110,17 @@ export function Liquidity() {
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Liquidity' }]} />
         <div className="page-title">Liquidity <span className="sub">
-          {data ? <><Usd v={data.totalTvlUsd} /> pooled across {held.length} {held.length === 1 ? 'pool' : 'pools'}</> : 'every pool, largest first'}
+          {data ? <><Usd v={pooledUsd} /> pooled across {held.length} {held.length === 1 ? 'pool' : 'pools'}</> : 'every pool, largest first'}
         </span></div>
+      </div>
+
+      <div className="liq-filter">
+        <div className="seg-bar" role="group" aria-label="Pool type">
+          {POOL_TYPE_FILTERS.map(f => (
+            <button key={f.v} type="button" aria-pressed={type === f.v} className={`seg-btn${type === f.v ? ' active' : ''}`}
+              onClick={() => setQuery({ type: f.v === 'all' ? null : f.v })}>{f.label}</button>
+          ))}
+        </div>
       </div>
 
       <div className="panel">
