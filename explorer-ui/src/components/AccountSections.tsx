@@ -1,15 +1,22 @@
 /* eslint-disable react-refresh/only-export-components -- shared account-section components + their count helper */
 import { useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { F, Amt, Usd, Num, AssetIcon, AssetAmount, AreaChart, ChartCardSkeleton, AddrPill, MomentLink, ProgressRing, rowNav, Dash, EmptyRow, Copy } from './ui'
 import type { ChartMarker, DetailTab } from './ui'
 import { Link, paths, setQuery } from '../router'
 import { limitBinding } from '../utils/limitBinding'
 import type { ActivitySlug } from '../router'
-import { performancePoints } from './performance'
+import { performancePoints, WINDOWS_24H_7D_30D_12M, type PerformancePoint } from './performance'
+import { parseUtcTimestamp } from '../utils/time'
+import { UNFILTERED_COLOR } from './activityColors'
+import type { RefinedSeries } from './chartZoom'
+import { useVolumeHistory } from '../hooks/useExplorerData'
+import { api } from '../api/explorer'
+import { blockRangeForWindow } from '../utils/chartRefine'
 import { CAT } from './activityColors'
 import { estimateBlockCountdown } from '../utils/blockCountdown'
 import { blockSeconds, blockSpanSeconds, dcaAmountLeft, dcaCadence, dcaLeftUsd, dcaProgress, dcaRunway, fmtDuration } from '../utils/dca'
-import type { PositionsPresence, MoneyMarketPosition, ActiveDca, OpenLimitOrder, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent, ContractInfo, FarmRewardsSummary, MoneyMarketRewardsSummary, AddressBalance } from '../types'
+import type { PositionsPresence, MoneyMarketPosition, ActiveDca, OpenLimitOrder, AssetBalanceHistory, AccountProxyInfo, MultisigInfo, MultisigMembership, ProxyRelation, ValueEvent, VolumeScope, ContractInfo, FarmRewardsSummary, MoneyMarketRewardsSummary, AddressBalance } from '../types'
 import { UNCOUNTED_REASON } from '../types'
 import type { ListCount } from '../api/explorer'
 import type { ReactNode } from 'react'
@@ -154,8 +161,18 @@ function valueEventMarker(ev: ValueEvent): ChartMarker {
 // lengths line up (else a value-only tooltip). `valueEvents` (scope-agnostic —
 // the parent fetches per account or tag) flag the largest transfers/swaps/
 // liquidations as clickable markers on the chart's time axis.
-export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanceHistory, loading, valueEvents, refine, exHdxSeries, exHdxNetUsd }: {
+//
+// The strip states the 24H / 7D / 30D / 12M changes. A long history's grid is
+// coarse (a bucket every few days), which cannot place a point 24 hours or a week
+// back, so with a `perfKey` (the scope's identity, for the cache) the chart also
+// reads the last RECENT_DAYS through its own `refine` — the zoom's window route,
+// rebuilt on a fine grain — and takes 24H and 7D from that; 30D and 12M stay on
+// the full series.
+const RECENT_DAYS = 9
+export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanceHistory, loading, valueEvents, refine, exHdxSeries, exHdxNetUsd, perfKey }: {
   title: string; netUsd: number; series: number[]; dates?: string[]; balanceHistory?: AssetBalanceHistory[]; loading?: boolean; valueEvents?: ValueEvent[] | null
+  /** The scope's identity (`account:<address>`, `tag:<id>`, …): enables the fine-grained recent read for 24H / 7D. */
+  perfKey?: string
   refine?: (fromSec: number, toSec: number, points: number) => Promise<{ data: number[]; dates: string[]; overlay?: number[] }| null>
   /** The same curve with HDX and HDX LP taken out, for holders whose own token
    *  dominates the balance sheet (the Treasury). Absent everywhere else, so the
@@ -166,11 +183,20 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
   // Stable across renders: Account holds a 1s clock, and AreaChart's marker
   // clustering memoizes on this array's identity.
   const markers = useMemo(() => (valueEvents?.length ? valueEvents.map(valueEventMarker) : undefined), [valueEvents])
+  const lastDate = datesProp && datesProp.length === series?.length ? datesProp[datesProp.length - 1] : undefined
+  const lastSec = lastDate ? Math.floor(parseUtcTimestamp(lastDate) / 1000) : Number.NaN
+  const recent = useQuery({
+    queryKey: ['value-recent', perfKey, lastDate],
+    queryFn: () => refine!(lastSec - RECENT_DAYS * 86_400, lastSec, 240),
+    enabled: !!perfKey && !!refine && Number.isFinite(lastSec) && (series?.length ?? 0) > 1,
+    staleTime: 60_000,
+    retry: false,
+  })
   if (!series || series.length <= 1) {
     return loading ? (
       <>
         <div className="sec-title">{title}</div>
-        {/* Same shape as the loaded card below: value + the 24H/1W/1M/1Y row. */}
+        {/* Same shape as the loaded card below: value + the 24H/7D/30D/12M row. */}
         <ChartCardSkeleton metrics={4} />
       </>
     ) : null
@@ -186,12 +212,14 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
   )
   // Suppress windows whose baseline is dust or that span the account's initial
   // funding (>20× growth) — "+1859057.1%" carries no information.
-  const perfItems = performancePoints(series, dates, [
-    { label: '24H', days: 1 },
-    { label: '1W', days: 7 },
-    { label: '1M', days: 30 },
-    { label: '1Y', days: 365 },
-  ], { minBase: 1, maxRatio: 20 })
+  const guards = { minBase: 1, maxRatio: 20 }
+  const fine = recent.data && recent.data.data.length > 1 && recent.data.dates.length === recent.data.data.length ? recent.data : null
+  const short = WINDOWS_24H_7D_30D_12M.filter(w => w.days <= 7)
+  const fromFine = fine ? performancePoints(fine.data, fine.dates, short, guards) : []
+  const perfItems: PerformancePoint[] = WINDOWS_24H_7D_30D_12M.flatMap(w => {
+    const p = (w.days <= 7 && fine ? fromFine : performancePoints(series, dates, [w], guards)).find(x => x.label === w.label)
+    return p ? [p] : []
+  })
   // The second curve renders only when it covers the same points as the total; a
   // mismatched length means the two came from different reconstructions, and the
   // comparison a reader would draw from them would be wrong.
@@ -208,7 +236,7 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
     <>
       <div className="sec-title">{title}</div>
       <div className="pf-card">
-        <div className="pf-head"><div className="pf-now"><Usd v={netUsd} /></div>{perfItems.length > 0 && <div className="perf-row">{perfItems.map(p => perf(p.label, p.value))}</div>}</div>
+        <div className="pf-head pf-head-volume"><div className="pf-now"><Usd v={netUsd} /></div>{perfItems.length > 0 && <div className="perf-row">{perfItems.map(p => perf(p.label, p.value))}</div>}</div>
         {/* Legend only with two curves: it names them and carries the ex-HDX figure
             beside the headline, so the lower line has a number the reader can
             attach to it without hovering. */}
@@ -219,6 +247,69 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
           </div>
         )}
         <AreaChart data={series} h={180} dates={dates} markers={markers} refine={refine} zoomKey="zv" label="Total" overlay={overlay} />
+      </div>
+    </>
+  )
+}
+
+// The trading volume behind the header's "Trading" figure, per bucket of the value
+// chart's grid: bars (a flow, not a level) drawn and hovered like the Value chart —
+// no axes, a date and a value on hover — sharing its zoom (`zv`) and refining through
+// the volume window route. Headline: the total, which IS the header's figure; the
+// strip beside it the totals of the Value strip's windows, 24H / 7D / 30D / 12M.
+// Absent for a scope that never traded (`tradingVolumeUsd` 0 or missing). The bars
+// wear the neutral ink of /activity's unfiltered daily bars: a flow of everything
+// the scope traded, not one category of it.
+const VOLUME_COLOR = UNFILTERED_COLOR
+export function VolumeSection({ scope, tradingVolumeUsd }: {
+  scope: VolumeScope
+  tradingVolumeUsd?: number
+}) {
+  const traded = (tradingVolumeUsd ?? 0) > 0
+  const q = useVolumeHistory(scope, traded)
+  const h = q.data
+  const data = useMemo(() => (h ? h.buckets.map(b => b.volumeUsd) : []), [h])
+  const dates = useMemo(() => (h ? h.buckets.map(b => b.ts) : []), [h])
+  if (!traded) return null
+  if (!h) {
+    return q.isLoading || q.isFetching ? (
+      <>
+        <div className="sec-title">Volume</div>
+        <ChartCardSkeleton metrics={4} />
+      </>
+    ) : null
+  }
+  if (!h.buckets.length || !(h.totals.all > 0)) return null
+  // The zoom addresses time; the window route takes a block range. The bars' own
+  // (end time, end block) pairs widen a time window outward to whole buckets, and
+  // the first bar opens at block 0 so a window from the start keeps its flow.
+  const edges = [h.buckets[0].ts, ...h.buckets.map(b => b.endTs)]
+  const blocks = [0, ...h.buckets.map(b => b.blockHeight)]
+  const refine = async (fromSec: number, toSec: number): Promise<RefinedSeries | null> => {
+    const range = blockRangeForWindow(edges, blocks, fromSec, toSec)
+    if (!range) return null
+    const w = await api.volumeHistory(scope, range)
+    if (w.buckets.length < 2) return null
+    return { data: w.buckets.map(b => b.volumeUsd), dates: w.buckets.map(b => b.ts) }
+  }
+  const perf = (label: string, v: number) => (
+    <span key={label} className="perf"><span className="pk">{label}</span><span className="pv"><Usd v={v} /></span></span>
+  )
+  const lag = h.asOfBlock != null ? `Trades through block ${F.int(h.asOfBlock)}; the newest can trail the chain head by up to one indexing cycle.` : undefined
+  return (
+    <>
+      <div className="sec-title">Volume</div>
+      <div className="pf-card">
+        <div className="pf-head pf-head-volume">
+          <div className="pf-now" title={lag}><Usd v={h.totals.all} /></div>
+          <div className="perf-row">
+            {perf('24H', h.totals.d1)}
+            {perf('7D', h.totals.d7)}
+            {perf('30D', h.totals.d30)}
+            {perf('12M', h.totals.d365)}
+          </div>
+        </div>
+        <AreaChart bars data={data} dates={dates} h={180} floor={0} color={VOLUME_COLOR} zoomKey="zv" refine={refine} />
       </div>
     </>
   )

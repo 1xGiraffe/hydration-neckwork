@@ -73,6 +73,8 @@ export interface AssetListItem extends AssetRef {
   amountUsd: number | null
   holderCount?: number
   sparkline?: number[]
+  /** Asset volume over the last 24 published hours (its own legs, its aToken folded in); null on a cross-chain destination. */
+  volume24hUsd?: number | null
   // Present ONLY on a cross-chain destination — an asset a swap delivers on
   // another chain, which Hydration never holds. Route and key on this, never on
   // `assetId`, which is a negative sentinel for these rows.
@@ -1229,10 +1231,17 @@ export interface PoolListEntry {
   sharePct: number | null
   composition: PoolCompositionEntry[]
   hasPegs: boolean
+  /** Venue volume (every fill once in this pool) over the last 24 published hours and 7 days; null where no model keys the pool. */
+  volume24hUsd?: number | null
+  volume7dUsd?: number | null
+  /** 24h volume ÷ current TVL. */
+  volumeTvl24h?: number | null
 }
 export interface PoolsIndexResponse {
   totalTvlUsd: number | null
   pools: PoolListEntry[]
+  /** The hour the volume figures run to (the read models' cut). */
+  volumeAsOf?: string | null
 }
 
 export interface AssetLiquiditySource {
@@ -2783,6 +2792,30 @@ export interface LiquidityHistory {
   positions: LiquidityHistoryPosition[]
   positionsOmitted: number
 }
+
+// GET /explorer/address/:a/volume-history, /explorer/tag/:id/volume-history and the
+// list-tag twins (/user/list-tag/:l/:t/volume-history, /explorer/list-tag/:t/volume-history):
+// the header's "Trading" figure (netted per-trade volume) per bucket of the value
+// chart's grid, with an optional fromBlock/toBlock window. A tag sums its members.
+export interface VolumeHistoryBucket {
+  /** Bucket start; the bar covers (ts, endTs]. */
+  ts: string
+  /** Bucket end, dated like the value chart's points. */
+  endTs: string
+  /** The last block the bucket covers. */
+  blockHeight: number
+  volumeUsd: number
+  trades: number
+}
+export interface VolumeHistory {
+  stepSec: number
+  buckets: VolumeHistoryBucket[]
+  /** USD: the last 24 h, 7, 30 and 365 days before the newest indexed block, and all time (= the header figure). */
+  totals: { d1: number; d7: number; d30: number; d365: number; all: number }
+  /** Newest block the trade-volume model holds a trade for; it trails the head by up to one derivations cycle. */
+  asOfBlock: number | null
+}
+export type VolumeScope = PositionScope
 
 // GET /explorer/address/:a/money-market-history (per account; markets isolated).
 export interface MoneyMarketHistoryObservation {

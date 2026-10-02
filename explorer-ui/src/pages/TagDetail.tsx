@@ -12,7 +12,7 @@ import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
-import { moneyMarketDebtUsd, profileTabs, resolveProfileView, ProfileStats, PortfolioChart } from '../components/AccountSections'
+import { moneyMarketDebtUsd, profileTabs, resolveProfileView, ProfileStats, PortfolioChart, VolumeSection } from '../components/AccountSections'
 import { OrdersTab } from '../components/positions/OrdersTab'
 import { LiquidityTab } from '../components/positions/LiquidityTab'
 import { BorrowTab } from '../components/positions/BorrowTab'
@@ -200,7 +200,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
 
               <CloseAccountsSection tagId={tagId} />
 
-              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data}
+              <PortfolioChart title="Value" perfKey={`tag:${tagId}`} netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data}
                 exHdxSeries={data.portfolioSeriesExHdx} exHdxNetUsd={data.portfolioExHdxUsd == null ? undefined : data.portfolioExHdxUsd - debtUsd}
                 refine={tagHistoryBlocks ? async (fromSec, toSec) => {
                   const range = blockRangeForWindow(data.portfolioDates ?? [], tagHistoryBlocks, fromSec, toSec)
@@ -210,6 +210,8 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
                   const overlay = w.portfolioSeriesExHdx?.length === w.portfolioSeries.length ? w.portfolioSeriesExHdx : undefined
                   return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates, overlay } : null
                 } : undefined} />
+
+              <VolumeSection scope={{ kind: 'tag', tagId }} tradingVolumeUsd={data.tradingVolumeUsd} />
               </>)}
 
               {activeView === 'balances' && (

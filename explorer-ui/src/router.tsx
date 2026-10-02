@@ -67,6 +67,7 @@ export type Route =
   | { name: 'hollar' }
   | { name: 'ice' }
   | { name: 'revenue' }
+  | { name: 'volume' }
   | { name: 'asset'; assetId: number }
   | { name: 'xcDestination'; slug: string }
   | { name: 'holders'; assetId: number }
@@ -170,6 +171,7 @@ export function parseRoute(loc: string): Route {
     case 'hollar': return { name: 'hollar' }
     case 'ice': return { name: 'ice' }
     case 'revenue': return { name: 'revenue' }
+    case 'volume': return { name: 'volume' }
     case 'asset':
       // /asset/xc/<slug> — a cross-chain destination. It has no registry id, so
       // it is addressed by a slug under its own prefix rather than by a number.
@@ -342,6 +344,7 @@ export const paths = {
   hollar: () => '/hollar',
   ice: () => '/ice',
   revenue: () => '/revenue',
+  volume: () => '/volume',
   asset: (assetId: number) => `/asset/${assetId}`,
   // A cross-chain swap's destination — not a registry asset, so not an id route.
   xcDestination: (slug: string) => `/asset/xc/${encodeURIComponent(slug)}`,

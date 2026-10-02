@@ -13,7 +13,7 @@ import type {
   NotificationChannel, NotificationRule, NotificationRuleInput, NotificationRulePatch,
   NotificationsOverview, NotificationInboxPage, NotificationTelegramLink, NotificationLinkStatus,
   WebPushSubscriptionInput,
-  PositionScope, ExplorerYields, OrderHistoryKind, OrderHistoryPage, PositionsPresence, LiquidityRewardsClaimed, LiquidityHistory, MoneyMarketHistory,
+  PositionScope, VolumeScope, VolumeHistory, ExplorerYields, OrderHistoryKind, OrderHistoryPage, PositionsPresence, LiquidityRewardsClaimed, LiquidityHistory, MoneyMarketHistory,
 } from '../types'
 import { getSession, setSession } from '../session'
 // Live feeds stamp the pushed head onto their URLs (`h=`): the nginx
@@ -307,6 +307,10 @@ export const api = {
   assetPrices: (assetId: number, from: number, to: number, points: number, signal?: AbortSignal) => getJson<AssetPriceWindow>(withQuery(`/explorer/asset/${assetId}/prices`, { fromTs: from, toTs: to, points }), signal),
   addressHistoryWindow: (address: string, fromBlock: number, toBlock: number, signal?: AbortSignal) => getJson<AccountHistoryResponse>(withQuery(`/explorer/address/${encodeURIComponent(address)}/history`, { fromBlock, toBlock }), signal),
   tagHistoryWindow: (tagId: string, fromBlock: number, toBlock: number, signal?: AbortSignal) => getJson<AccountHistoryResponse>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/history`, { fromBlock, toBlock }), signal),
+  // Trading volume on the value chart's grid; the window (zoom) form takes the same block
+  // range. A list tag reads its own surface (authed, or the public one — see listTagPath).
+  volumeHistory: (scope: VolumeScope, window?: { fromBlock: number; toBlock: number }, signal?: AbortSignal) =>
+    scopedJson<VolumeHistory>(scope, '/volume-history', window ? { fromBlock: window.fromBlock, toBlock: window.toBlock } : {}, signal),
   // Live feed: the head tag busts the edge micro-cache the moment a block lands.
   revenueFlow: (after?: string | null, signal?: AbortSignal) => getJson<RevenueFlowResponse>(withQuery('/explorer/revenue/flow', { after: after || undefined, h: liveHeadTag() || undefined }), signal),
   hollar: (signal?: AbortSignal) => getJson<HollarDashboard>('/explorer/hollar', signal),
@@ -530,3 +534,6 @@ export const positionsApi = {
   moneyMarketHistoryWindow: (address: string, fromBlock: number, toBlock: number, signal?: AbortSignal) =>
     getJson<MoneyMarketHistory>(withQuery(`/explorer/address/${encodeURIComponent(address)}/money-market-history`, { fromBlock, toBlock }), signal),
 }
+
+// The fetch helpers, for the feature modules that keep their own clients (api/volume.ts).
+export { getJson, withQuery }

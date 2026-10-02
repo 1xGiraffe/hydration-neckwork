@@ -9,6 +9,8 @@ import { accountHref, Usd, Amt, AddrPill, Ago, AreaChart, AssetAmount, AssetChip
 import { ChartLegend, MultiLineChart, ShareBar, StackedAreaChart, type ShareSegment } from '../components/HdxCharts'
 import { ActivityTable } from '../components/ActivityTable'
 import { useAssetColors } from '../utils/iconColor'
+import { PoolVolumeRows, PoolVolumeSection, TvlSection, VolumeTvlSection } from '../components/VolumeCharts'
+import { usePoolVolume, volumeApi } from '../api/volume'
 import type { PegSourceInfo, PoolDetail as PoolDetailData } from '../types'
 
 // One stableswap or XYK pool, addressed by its share/LP token id: current
@@ -48,6 +50,7 @@ function PoolBody({ d }: { d: PoolDetailData }) {
   // moves its member assets, so an asset-pinned feed on the share token shows
   // liquidity and share trades while the pool's swaps are invisible.
   const activity = usePoolActivity(d.poolId, 12)
+  const volume = usePoolVolume(d.poolId)
   const activityRows = activity.data ?? []
   const hasPegs = d.assets.some(a => a.peg != null && a.peg.price !== 1)
   const ramping = d.amplification != null && d.amplification.current !== d.amplification.final
@@ -111,6 +114,7 @@ function PoolBody({ d }: { d: PoolDetailData }) {
         <div className="dt">Pool account</div><div className="dd"><AddrPill account={d.account} /></div>
         <div className="dt">TVL</div><div className="dd mono">{d.tvlUsd != null ? <Usd v={d.tvlUsd} /> : <Dash />}</div>
         <div className="dt">Trade fee</div><div className="dd mono">{d.feePermill != null ? fmtPermill(d.feePermill) : <Dash />}</div>
+        <PoolVolumeRows d={volume.data} />
         {d.amplification != null && <>
           <div className="dt">Amplification</div>
           <div className="dd mono">{F.int(d.amplification.current)}
@@ -151,14 +155,11 @@ function PoolBody({ d }: { d: PoolDetailData }) {
         </table></div>
       </div>
 
-      {tvlPoints.length > 1 && (
-        <>
-          <div className="sec-title">TVL</div>
-          <div className="pf-card"><AreaChart data={tvlPoints.map(p => p.v!)} dates={tvlPoints.map(p => p.b)} color="var(--sky-deep)" floor={0} zoomKey="ztvl"
-            refine={windowRefine((f, t, n) => api.poolDetailWindow(d.poolId ?? 0, f, t, n),
-              r => r.history.buckets.map((b, i) => ({ b, v: r.history.tvlUsd[i] })))} /></div>
-        </>
-      )}
+      <TvlSection nowUsd={d.tvlUsd} points={tvlPoints.map(p => ({ b: p.b, v: p.v! }))} ago={volume.data?.tvlAgo}
+        refine={windowRefine((f, t, n) => api.poolDetailWindow(d.poolId ?? 0, f, t, n),
+          r => r.history.buckets.map((b, i) => ({ b, v: r.history.tvlUsd[i] })))} />
+      <PoolVolumeSection poolId={d.poolId} />
+      <VolumeTvlSection d={volume.data} fetchWindow={(f, t, n) => volumeApi.poolWindow(d.poolId, f, t, n)} />
 
       {hasCompUsd && d.history.buckets.length > 1 && (
         <>

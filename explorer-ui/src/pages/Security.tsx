@@ -346,7 +346,7 @@ function FuseTable({ d, headBlock, blockSec }: { d: SecurityDashboard; headBlock
       <table className="tbl sec-tbl">
         <thead>
           <tr>
-            <th>Asset</th><th>Status</th><th className="r">24h limit</th><th className="r">Minted</th>
+            <th>Asset</th><th>Status</th><th className="r">24H limit</th><th className="r">Minted</th>
             <th className="r">Used</th><th className="r">Window</th><th className="r">Trips</th>
           </tr>
         </thead>
@@ -361,7 +361,7 @@ function FuseTable({ d, headBlock, blockSec }: { d: SecurityDashboard; headBlock
                 {/* The dollar meaning sits behind each amount: a WETH fuse and a
                     meme-token fuse differ by orders of magnitude the token
                     numbers alone hide. */}
-                <td data-label="24h limit" className="r">
+                <td data-label="24H limit" className="r">
                   <AssetAmount asset={r.asset} raw={r.limit} link={false} />
                   {r.limitUsd != null && <span className="muted mono sec-usd"><Usd v={r.limitUsd} /></span>}
                 </td>

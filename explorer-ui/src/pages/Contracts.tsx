@@ -55,7 +55,7 @@ function ContractRow({ c, now }: { c: ContractInfo; now: number }) {
       </td>
       <td data-label="Value" className={`r mono${emptyIf(!c.portfolioUsd)}`}>{c.portfolioUsd ? <Usd v={c.portfolioUsd} /> : <Dash />}</td>
       <td data-label="Holdings" className={`holdings-cell${emptyIf(!c.topAssets?.length)}`}>{c.topAssets?.length ? <TokenIconRow assets={c.topAssets} /> : <Dash />}</td>
-      <td data-label="1Y" className={`r${emptyIf(!(c.sparkline && c.sparkline.length > 1))}`}>{c.sparkline && c.sparkline.length > 1 ? <Sparkline data={c.sparkline} w={88} /> : <Dash />}</td>
+      <td data-label="12M" className={`r${emptyIf(!(c.sparkline && c.sparkline.length > 1))}`}>{c.sparkline && c.sparkline.length > 1 ? <Sparkline data={c.sparkline} w={88} /> : <Dash />}</td>
       <td data-label="Trading $" className={`r mono${emptyIf(!c.tradingVolumeUsd)}`}>{c.tradingVolumeUsd ? <Usd v={c.tradingVolumeUsd} /> : <Dash />}</td>
       {/* A partial total is a floor: the feed runs deeper than it could be
           counted, so it reads as "at least this" instead of as exact. */}
@@ -120,7 +120,7 @@ export function Contracts() {
           <thead><tr>
             <th>{sTh('name', 'Contract')}</th><th>Deployer</th>
             <th className="r">{sTh('value', 'Value')}</th>
-            <th>Holdings</th><th className="r">1Y</th>
+            <th>Holdings</th><th className="r">12M</th>
             <th className="r">{sTh('volume', 'Trading $')}</th>
             <th className="r">{sTh('activity', 'Activity')}</th>
             <th className="r">{sTh('txs', 'Txs')}</th>

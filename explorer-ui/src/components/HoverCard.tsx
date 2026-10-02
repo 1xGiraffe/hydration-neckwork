@@ -363,7 +363,7 @@ function AssetHover({ id }: { id: number }) {
         </div>
       </div>
       <div className="hc-row"><span>Price</span><span className="mono">{F.priceUsd(a.price)}</span></div>
-      <div className="hc-row"><span>24h</span><span className="mono" style={{ color: ch == null ? 'var(--text-low)' : ch >= 0 ? 'var(--green)' : 'var(--red)' }}>{F.pct(ch)}</span></div>
+      <div className="hc-row"><span>24H</span><span className="mono" style={{ color: ch == null ? 'var(--text-low)' : ch >= 0 ? 'var(--green)' : 'var(--red)' }}>{F.pct(ch)}</span></div>
       <div className="hc-row"><span>Holders</span><span className="mono">{F.int(data.holderCount)}</span></div>
       <div className="hc-row"><span>Asset ID</span><span className="mono muted">#{a.assetId}</span></div>
     </>

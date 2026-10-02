@@ -4,15 +4,17 @@ import { windowRefine } from '../utils/chartRefine'
 import { useOmnipool } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
-import { AddrPill, Usd, AreaChart, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, F, rowNav } from '../components/ui'
+import { AddrPill, Usd, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, F, rowNav } from '../components/ui'
 import { ChartLegend, ShareBar, StackedAreaChart, type ShareSegment } from '../components/HdxCharts'
 import { useAssetColors } from '../utils/iconColor'
+import { OmnipoolVolumeSection, PoolVolumeRows, TvlSection, VolumeTvlSection } from '../components/VolumeCharts'
+import { useOmnipoolVolume, volumeApi } from '../api/volume'
 import type { AssetRef } from '../types'
 
 // The Omnipool: Hydration's shared-liquidity pool where every listed asset
-// trades against the H2O hub. Current per-asset reserves with weights, caps
-// and tradability, plus the sampled composition history. Asset rows land on
-// each asset's own Liquidity tab.
+// trades against the H2O hub. Current per-asset reserves with each one's weight
+// against its cap, the TVL, volume and turnover over time, and the sampled
+// composition history. Asset rows land on each asset's own Liquidity tab.
 
 // H2O (asset 1) never appears in the composition — it is the hub the pool
 // prices everything against. Minimal ref so the header can render its amount
@@ -20,8 +22,28 @@ import type { AssetRef } from '../types'
 const HUB_ASSET: AssetRef = { assetId: 1, iconAssetId: 1, symbol: 'H2O', name: 'Hub asset', decimals: 12, parachainId: null }
 const OTHER_COLOR = 'var(--text-low)'
 
+/**
+ * How close an asset's weight (its share of the hub reserve) is to its cap: the
+ * track is the cap, the fill the weight — neutral, amber from 80% of the cap, red
+ * from 95%. An uncapped asset (cap 100%, or none set) is weighed against 100%.
+ */
+function WeightCapBar({ weightPct, capPct }: { weightPct: number | null; capPct: number | null }) {
+  if (weightPct == null) return <Dash />
+  const cap = capPct != null && capPct > 0 ? capPct : 100
+  const used = Math.min(1, weightPct / cap)
+  const tone = used >= 0.95 ? 'var(--red)' : used >= 0.8 ? 'var(--amber)' : 'var(--chart-neutral)'
+  const capLabel = `${cap.toLocaleString('en-US', { maximumFractionDigits: 1 })}%`
+  return (
+    <span className="cap-bar" title={`Weight ${F.sharePct(weightPct)} · Cap ${capLabel}`}>
+      <span className="cap-num mono">{F.sharePct(weightPct)} <span className="muted">/ {capLabel}</span></span>
+      <span className="cap-track" aria-hidden="true"><span className="cap-fill" style={{ width: `${(used * 100).toFixed(1)}%`, background: tone }} /></span>
+    </span>
+  )
+}
+
 export function Omnipool() {
   const { data, isLoading, isError } = useOmnipool()
+  const volume = useOmnipoolVolume()
   useDocumentTitle('Omnipool')
   // The pool's mix rotated completely while its TVL swung an order of
   // magnitude, so the share view is the readable default — the TVL chart below
@@ -104,6 +126,7 @@ export function Omnipool() {
           <div className="dd"><AssetAmount asset={HUB_ASSET} raw={data.hubReserveTotal} />{hubUsd != null && <span className="muted mono" style={{ marginLeft: 8 }}><Usd v={hubUsd} /></span>}</div>
           <div className="dt">H2O price</div><div className="dd mono">{data.lrnaPrice != null ? F.priceUsd(data.lrnaPrice) : <Dash />}</div>
           <div className="dt">Pool account</div><div className="dd"><AddrPill account={data.account} /></div>
+          <PoolVolumeRows d={volume.data} />
         </div></div>
 
         <div className="sec-title">Composition</div>
@@ -113,33 +136,26 @@ export function Omnipool() {
             <ShareBar segments={segments} h={30} />
           </>}
           <div className="panel" style={{ marginTop: 14 }}><table className="tbl">
-            <thead><tr><th style={{ width: 40 }}>#</th><th>Asset</th><th className="r">Reserve</th><th className="r">Value</th><th className="r">Weight</th><th className="r">Cap</th><th className="r">Tradability</th></tr></thead>
+            <thead><tr><th style={{ width: 40 }}>#</th><th>Asset</th><th className="r">Value</th><th className="r" title="The asset's share of the hub reserve against its weight cap">Weight / cap</th></tr></thead>
             <tbody>
               {data.assets.map((r, i) => (
                 <tr key={r.asset.assetId} {...rowNav(`${paths.asset(r.asset.assetId)}?tab=liquidity`)}>
                   <td data-label="#" className="mono muted">{i + 1}</td>
-                  <td data-label="Asset"><AssetChip asset={r.asset} /></td>
-                  <td data-label="Reserve" className="r"><AssetAmount asset={r.asset} raw={r.reserve} /></td>
+                  <td data-label="Asset"><span className="omni-asset"><AssetChip asset={r.asset} />
+                    <span className="mono muted omni-reserve" title={`${F.exact(r.reserve, r.asset.decimals)} ${r.asset.symbol} in the pool`}>{F.amount(r.reserve, r.asset.decimals)}</span></span></td>
                   <td data-label="Value" className="r mono">{r.reserveUsd != null ? <Usd v={r.reserveUsd} /> : <Dash />}</td>
-                  <td data-label="Weight" className="r mono muted">{F.sharePct(r.weightPct)}</td>
-                  <td data-label="Cap" className="r mono muted">{r.capPct != null ? `${r.capPct.toLocaleString('en-US', { maximumFractionDigits: 1 })}%` : '—'}</td>
-                  <td data-label="Tradability" className="r mono" style={r.tradable.length === 1 && r.tradable[0] === 'Frozen' ? { color: 'var(--red)' } : undefined}>
-                    {r.tradable.length === 4 ? <span className="muted">Full</span> : r.tradable.join(' · ')}
-                  </td>
+                  <td data-label="Weight / cap" className="r"><WeightCapBar weightPct={r.weightPct} capPct={r.capPct} /></td>
                 </tr>
               ))}
             </tbody>
           </table></div>
         </div>
 
-        {tvlPoints.length > 1 && (
-          <>
-            <div className="sec-title">TVL</div>
-            <div className="pf-card"><AreaChart data={tvlPoints.map(p => p.v!)} dates={tvlPoints.map(p => p.b)} color="var(--sky-deep)" floor={0} zoomKey="ztvl"
-              refine={windowRefine((f, t, n) => api.omnipoolWindow(f, t, n),
-                r => r.history.buckets.map((b, i) => ({ b, v: r.history.tvlUsd[i] })))} /></div>
-          </>
-        )}
+        <TvlSection nowUsd={data.tvlUsd} points={tvlPoints.map(p => ({ b: p.b, v: p.v! }))} ago={volume.data?.tvlAgo}
+          refine={windowRefine((f, t, n) => api.omnipoolWindow(f, t, n),
+            r => r.history.buckets.map((b, i) => ({ b, v: r.history.tvlUsd[i] })))} />
+        <OmnipoolVolumeSection />
+        <VolumeTvlSection d={volume.data} fetchWindow={(f, t, n) => volumeApi.omnipoolWindow(f, t, n)} />
 
         {compSeries.length > 0 && data.history.buckets.length > 1 && (
           <>

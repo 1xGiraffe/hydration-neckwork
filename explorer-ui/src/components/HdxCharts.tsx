@@ -1122,10 +1122,25 @@ export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green
 // interpolation between weeks would imply a path the data does not state. Bands
 // stack bottom-up in the order given, 2px apart like StackedColumnChart; the
 // tooltip names every band and, with `totalLabel`, the stack top.
-export function StackedBarChart({ buckets, series, h = 200, yFmt = compactAmount, totalLabel, zoomKey, refine }: {
+// `bare` draws it like the AreaChart beside it (the volume charts): no axis
+// labels, gridlines or date ticks, the plot stretched to the fixed `.apx-chart`
+// height, a crosshair on the hovered bar, and a tooltip of date, bands and total
+// without shares.
+export function StackedBarChart({ buckets, series, h: hProp, yFmt = compactAmount, totalLabel, zoomKey, refine, bare, tipLabel, fill }: {
   buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string
   /** Adds a summed stack-top row under the bands in the tooltip, under this label. */
   totalLabel?: string
+  /**
+   * One ink for every bar: each is drawn whole, as its stack total, and the bands
+   * appear only as the tooltip's rows (no swatches, since nothing on the plot
+   * wears their colours). For a split worth reading on hover but not worth a
+   * palette on the plot.
+   */
+  fill?: string
+  /** No axes or gridlines, AreaChart's frame and crosshair (see above). */
+  bare?: boolean
+  /** The tooltip's date line for a bucket at the drawn grain (default tipDate). */
+  tipLabel?: (bucket: string, grainSec: number) => string
   /** Query-param name persisting the zoom window (back-navigable, shareable). */
   zoomKey?: string
   /** Refetch-on-zoom: a finer grid for the window. */
@@ -1133,7 +1148,9 @@ export function StackedBarChart({ buckets, series, h = 200, yFmt = compactAmount
 }) {
   const [hover, setHover] = useState<number | null>(null)
   const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
-  const W = AREA_W, padL = AREA_PAD_L, padR = AREA_PAD_R, padT = 12, padB = 18
+  // Bare: AreaChart's frame (190-unit viewBox, 14 above and below the plot, no label gutter).
+  const h = hProp ?? (bare ? 190 : 200)
+  const W = AREA_W, padL = bare ? 0 : AREA_PAD_L, padR = bare ? 0 : AREA_PAD_R, padT = bare ? 14 : 12, padB = bare ? 14 : 18
   const plotW = W - padL - padR
   const { zoom, timeAxis, refined, slotRef, baseGrain } = useBarZoom({
     keys: buckets, enabled: true, zoomKey, refine, accept: acceptGrid,
@@ -1188,8 +1205,8 @@ export function StackedBarChart({ buckets, series, h = 200, yFmt = compactAmount
       onPointerMove={e => { zoom.onPointerMove(e); onMove(e) }}
       onPointerUp={zoom.onPointerUp} onPointerCancel={zoom.onPointerCancel} onDoubleClick={zoom.onDoubleClick}
       onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}>
-      <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
-        {[0, 0.5, 1].map(t => (
+      <svg className={bare ? 'apx-chart' : 'day-chart'} viewBox={`0 0 ${W} ${h}`} preserveAspectRatio={bare ? 'none' : undefined}>
+        {!bare && [0, 0.5, 1].map(t => (
           <g key={t}>
             <line x1={padL} x2={W - padR} y1={sy(max * t).toFixed(1)} y2={sy(max * t).toFixed(1)} stroke="var(--separator)" strokeWidth="1" />
             <text className="hdx-ax" x={padL - 8} y={(sy(max * t) + 3).toFixed(1)} textAnchor="end">{yFmt(max * t)}</text>
@@ -1198,8 +1215,12 @@ export function StackedBarChart({ buckets, series, h = 200, yFmt = compactAmount
         {vBuckets.map((b, i) => {
           const x = barX(i)
           return (
-            <g key={b} opacity={hover == null || hover === i ? 1 : 0.7}>
-              {vSeries.map((s, k) => {
+            <g key={b} opacity={hover == null || hover === i ? 1 : bare ? 0.55 : 0.7}>
+              {fill != null ? (() => {
+                const top = tops.length ? tops[tops.length - 1][i] : 0
+                if (!(top > 0)) return null
+                return <rect x={x.toFixed(1)} y={sy(top).toFixed(1)} width={barW.toFixed(1)} height={Math.max(0.75, sy(0) - sy(top)).toFixed(1)} fill={fill} rx={bare ? undefined : '1.5'} />
+              })() : vSeries.map((s, k) => {
                 const v = s.values[i]
                 if (v == null || !(v > 0)) return null
                 const top = sy(tops[k][i])
@@ -1207,21 +1228,26 @@ export function StackedBarChart({ buckets, series, h = 200, yFmt = compactAmount
                 const hPix = bottom - top
                 // A band touching the one below leaves a sliver of card between them.
                 const inset = k > 0 && hPix > 2 ? Math.min(1, hPix / 4) : 0
-                return <rect key={s.key} x={x.toFixed(1)} y={top.toFixed(1)} width={barW.toFixed(1)} height={Math.max(0.75, hPix - inset).toFixed(1)} fill={s.color} rx="1.5" />
+                // A stretched (bare) plot would turn the corner radius into an ellipse.
+                return <rect key={s.key} x={x.toFixed(1)} y={top.toFixed(1)} width={barW.toFixed(1)} height={Math.max(0.75, hPix - inset).toFixed(1)} fill={s.color} rx={bare ? undefined : '1.5'} />
               })}
             </g>
           )
         })}
-        {dateTicks(n).map(i => (
+        {!bare && dateTicks(n).map(i => (
           <text key={i} className="hdx-ax" x={(barX(i) + barW / 2).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{axisTick(vBuckets[i], timeAxis ? viewSpan : 0, grainSec)}</text>
         ))}
       </svg>
+      {bare && hover != null && !zoom.selecting && (
+        <div className="apx-cross"><div className="apx-vline" style={{ left: `${(barX(hover) + barW / 2) / W * 100}%` }} /></div>
+      )}
       {hover != null && !zoom.selecting && (
-        <ChartTip className="hdx-tip" xPct={(barX(hover) + bw / 2) / W * 100} top={2}>
-          <span className="t-d">{tipDate(vBuckets[hover], grainSec)}</span>
-          {vSeries.map(s => s.values[hover] != null && (
-            <span key={s.key} className="t-row"><i style={{ background: s.color }} />{s.label}
-              <span className="tv">{yFmt(s.values[hover]!)}{hoverTotal > 0 && <span className="muted"> · {(s.values[hover]! / hoverTotal * 100).toFixed(1)}%</span>}</span>
+        <ChartTip className="hdx-tip" xPct={(barX(hover) + bw / 2) / W * 100} top={bare ? 4 : 2}>
+          <span className="t-d">{(tipLabel ?? tipDate)(vBuckets[hover], grainSec)}</span>
+          {/* Bare: a band absent from the hovered bar (0) has no row, like its absent rect. */}
+          {vSeries.map(s => s.values[hover] != null && (!bare || s.values[hover]! > 0) && (
+            <span key={s.key} className="t-row">{fill == null && <i style={{ background: s.color }} />}{s.label}
+              <span className="tv">{yFmt(s.values[hover]!)}{!bare && hoverTotal > 0 && <span className="muted"> · {(s.values[hover]! / hoverTotal * 100).toFixed(1)}%</span>}</span>
             </span>
           ))}
           {totalLabel && vSeries.length > 1 && hoverTotal > 0 && (

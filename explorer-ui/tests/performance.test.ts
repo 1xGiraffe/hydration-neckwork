@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { changeOverDays, performancePoints } from '../src/components/performance'
+import { changeOverDays, performancePoints, WINDOWS_24H_7D_30D_12M } from '../src/components/performance'
 
 // Daily series ending 2026-07-08; index 0 is the oldest point.
 function daily(values: number[]): { series: number[]; dates: string[] } {
@@ -40,7 +40,13 @@ describe('changeOverDays', () => {
 describe('performancePoints', () => {
   it('drops suppressed windows entirely instead of rendering absurd values', () => {
     const { series, dates } = daily([0.07, 0.07, 0.07, 0.07, 0.07, 0.07, 0.07, 1151])
-    const pts = performancePoints(series, dates, [{ label: '1W', days: 7 }], { minBase: 1, maxRatio: 20 })
+    const pts = performancePoints(series, dates, [{ label: '7D', days: 7 }], { minBase: 1, maxRatio: 20 })
     expect(pts).toEqual([])
+  })
+
+  it('spells the trailing windows 24H, 7D, 30D and 12M (365 days)', () => {
+    expect(WINDOWS_24H_7D_30D_12M).toEqual([{ label: '24H', days: 1 }, { label: '7D', days: 7 }, { label: '30D', days: 30 }, { label: '12M', days: 365 }])
+    const { series, dates } = daily(Array.from({ length: 400 }, (_, i) => 100 + i))
+    expect(performancePoints(series, dates).map(p => p.label)).toEqual(['7D', '30D', '12M'])
   })
 })

@@ -7,7 +7,7 @@ import { blockOf } from '../utils/activityIds'
 import { useHeldRows } from './useHeldRows'
 import { getSession } from '../session'
 import { tagMapStatus, hasUserTagMembers, useTagMapVersion } from '../userTags'
-import type { AccountSort, ContractSort, RevenueRange } from '../types'
+import type { AccountSort, ContractSort, RevenueRange, VolumeScope } from '../types'
 
 // List/feed hooks honour the global Live toggle. When live, they poll on LIVE_MS;
 // when paused, no refetch. The API's single-flight cache keeps DB load O(1) in
@@ -497,6 +497,23 @@ export function useAddressValueEvents(address: string | null) {
 }
 export function useTagValueEvents(tagId: string | null) {
   return useQuery({ queryKey: ['tag-value-events', tagId], queryFn: ({ signal }) => api.tagValueEvents(tagId as string, undefined, undefined, signal), enabled: !!tagId, staleTime: 600_000 })
+}
+// The Overview's Volume chart (account or tag); off until the header says the scope traded.
+// A list tag is keyed by its list id too: the same tag id under the authed and the
+// public surface (PUBLIC_LIST_TAG) are two addresses.
+export function volumeHistoryKey(scope: VolumeScope | null): unknown[] {
+  if (!scope) return ['volume-history', undefined, undefined]
+  if (scope.kind === 'account') return ['volume-history', 'account', scope.address]
+  if (scope.kind === 'tag') return ['volume-history', 'tag', scope.tagId]
+  return ['volume-history', 'list-tag', scope.listId, scope.tagId]
+}
+export function useVolumeHistory(scope: VolumeScope | null, enabled = true) {
+  return useQuery({
+    queryKey: volumeHistoryKey(scope),
+    queryFn: ({ signal }) => api.volumeHistory(scope as VolumeScope, undefined, signal),
+    enabled: enabled && !!scope,
+    staleTime: 120_000,
+  })
 }
 export function useTagActivityCounts(tagId: string | null) {
   return useQuery({ queryKey: ['tag-activity-counts', tagId], queryFn: ({ signal }) => api.tagActivityCounts(tagId as string, signal), enabled: !!tagId, staleTime: 600_000 })

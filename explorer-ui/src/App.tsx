@@ -40,6 +40,7 @@ const Omnipool = lazy(() => import('./pages/Omnipool').then(m => ({ default: m.O
 const Liquidity = lazy(() => import('./pages/Liquidity').then(m => ({ default: m.Liquidity })))
 const Hdx = lazy(() => import('./pages/Hdx').then(m => ({ default: m.Hdx })))
 const Revenue = lazy(() => import('./pages/Revenue').then(m => ({ default: m.Revenue })))
+const Volume = lazy(() => import('./pages/Volume').then(m => ({ default: m.Volume })))
 const Hollar = lazy(() => import('./pages/Hollar').then(m => ({ default: m.Hollar })))
 const Ice = lazy(() => import('./pages/Ice').then(m => ({ default: m.Ice })))
 const LinkDevice = lazy(() => import('./pages/LinkDevice').then(m => ({ default: m.LinkDevice })))
@@ -117,6 +118,7 @@ export default function App() {
       case 'assets': return <Assets />
       case 'hdx': return <Hdx />
       case 'revenue': return <Revenue />
+      case 'volume': return <Volume />
       case 'hollar': return <Hollar />
       case 'ice': return <Ice />
       case 'asset': return <AssetDetail assetId={route.assetId} />

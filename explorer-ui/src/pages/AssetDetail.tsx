@@ -8,6 +8,7 @@ import { Crumbs, Usd, Amt, PriceUsd, F, AssetIcon, AssetAmount, AddrPill, AssetD
 import { ActiveDcaTable } from '../components/AccountSections'
 import { AssetOrderBook } from '../components/AssetOrderBook'
 import { AssetLiquidityTab } from '../components/AssetLiquidity'
+import { AssetVolumeSection } from '../components/VolumeCharts'
 import { FilterZone, useFilters } from '../components/Filters'
 import { activityFilterFields } from '../components/activityFilters'
 import { PriceChart, ema7 } from '../components/PriceChart'
@@ -152,6 +153,8 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
                     : undefined)(data.priceDates)} />
               </>
             )}
+
+            <AssetVolumeSection assetId={a.assetId} symbol={a.symbol} />
 
             <div className="tabs">
               <button className={tab === 'activity' ? 'active' : ''} onClick={() => initialTab === 'holders' ? navigate(paths.asset(assetId)) : setQuery({ tab: null, page: null, hpage: null, side: null })}>Activities</button>

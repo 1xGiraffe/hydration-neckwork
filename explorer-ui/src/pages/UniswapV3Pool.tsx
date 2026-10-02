@@ -1,4 +1,6 @@
 import { useNow } from '../hooks/useNow'
+import { useV3PoolVolume } from '../api/volume'
+import { asOfLabel, fmtVolumeTvl } from '../utils/volume'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useV3Pool, useV3PoolActivity, useV3PoolHistory, useV3PoolLiquidity } from '../hooks/useExplorerData'
 import { api } from '../api/explorer'
@@ -8,6 +10,7 @@ import { Link, paths } from '../router'
 import { accountHref, Usd, Amt, AddrPill, Ago, AreaChart, AssetAmount, AssetChip, AssetIcon, ChartSkeleton, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav } from '../components/ui'
 import { ChartLegend, MultiLineChart, ShareBar, StackedColumnChart, type ChartZone, type ShareSegment, type StackColumn } from '../components/HdxCharts'
 import { ActivityTable } from '../components/ActivityTable'
+import { PoolVolumeHead, TvlSection, VOLUME_BAR_COLOR, VolumeTvlSection } from '../components/VolumeCharts'
 import { useAssetColors } from '../utils/iconColor'
 import type { UniswapV3PoolDetail, UniswapV3PoolHistory, UniswapV3PositionRow } from '../types'
 
@@ -125,6 +128,9 @@ function LiquidityDistribution({ d }: { d: UniswapV3PoolDetail }) {
 
 function PoolCharts({ d }: { d: UniswapV3PoolDetail }) {
   const history = useV3PoolHistory(d.address)
+  // The window figures (24H … 12M totals, TVL ago, volume/TVL) from the hourly
+  // volume model every pool page reads; the charts keep this pool's own history.
+  const week = useV3PoolVolume(d.address).data
   const h = history.data
   if (history.isLoading) return <><div className="sec-title">Price</div><div className="pf-card"><ChartSkeleton h={190} /></div></>
   if (!h || h.points.length < 2) return null
@@ -163,10 +169,11 @@ function PoolCharts({ d }: { d: UniswapV3PoolDetail }) {
   const sub = `${grainLabel(h.grain)} · ${swaps} ${swaps === 1 ? 'swap' : 'swaps'} · drag to zoom`
   const volume = usdPoints(p => p.volumeUsd)
   const tvl = usdPoints(p => p.tvlUsd)
+  // Turnover per bucket: the bucket's volume over what the pool held at its end.
+  const turnoverOf = (p: UniswapV3HistoryPointLike) => (p.volumeUsd != null && p.tvlUsd != null && p.tvlUsd > 0 ? p.volumeUsd / p.tvlUsd : null)
+  const turnover = usdPoints(turnoverOf)
   // Fees are the swap fee on exactly this volume, so their curve is this curve
-  // rescaled: the totals belong in the caption, not in a chart of their own.
-  const volumeTotal = volume.reduce((sum, p) => sum + (p.v ?? 0), 0)
-  const feesTotal = h.points.reduce((sum, p) => sum + (p.feesUsd ?? 0), 0)
+  // rescaled: the caption names the fee and the LPs' cut of it, not a chart of its own.
   const lpShare = d.protocolFee.sharePct != null ? 1 - d.protocolFee.sharePct / 100 : 1
   // Active liquidity moved into this caption for the same reason: between rebalances
   // it is one flat line, and the distribution above shows where it sits.
@@ -189,27 +196,28 @@ function PoolCharts({ d }: { d: UniswapV3PoolDetail }) {
           zones={zones} markLast h={220} refine={refineGrid(priceFrom)} />
       </div>
 
+      {tvl.some(p => (p.v ?? 0) > 0) && (
+        <TvlSection zoomKey="zv3" nowUsd={d.tvlUsd} points={tvl.map(p => ({ b: p.b, v: p.v ?? 0 }))} ago={week?.tvlAgo} refine={refineArea(p => p.tvlUsd)}
+          sub={<>what the pool's mints, swaps and collects imply it held, USD at the bucket's prices
+            {lastLiquidity != null && <> · L = {fmtLiquidity(Number(lastLiquidity))} active at the last bucket's tick</>}</>} />
+      )}
+
       {volume.some(p => (p.v ?? 0) > 0) && (
         <>
-          <div className="sec-title">Volume &amp; fees
-            <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · <Usd v={volumeTotal} /> traded in view · its {d.feeTier} swap fee is <Usd v={feesTotal} />
+          <div className="sec-title">Volume
+            <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · {d.feeTier} swap fee
               {d.protocolFee.sharePct != null
-                ? <>, <Usd v={feesTotal * lpShare} /> of it to the LPs after the protocol's {d.protocolFee.sharePct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% cut</>
-                : ' — all of it to the LPs'}</span>
+                ? <>, {F.share(lpShare)} of it to the LPs</>
+                : ', all of it to the LPs'}</span>
           </div>
-          <div className="pf-card"><AreaChart data={volume.map(p => p.v ?? 0)} dates={volume.map(p => p.b)} color="var(--cat-trade)" floor={0} zoomKey="zv3" refine={refineArea(p => p.volumeUsd)} /></div>
+          <div className="pf-card">
+            <PoolVolumeHead allTimeUsd={week?.allTime.volumeUsd ?? d.volume.allUsd ?? 0} kpis={week?.kpis} />
+            <AreaChart bars data={volume.map(p => p.v ?? 0)} dates={volume.map(p => p.b)} h={180} color={VOLUME_BAR_COLOR} floor={0} zoomKey="zv3" refine={refineArea(p => p.volumeUsd)} />
+          </div>
         </>
       )}
 
-      {tvl.some(p => (p.v ?? 0) > 0) && (
-        <>
-          <div className="sec-title">Holdings
-            <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · what the pool's mints, swaps and collects imply it held, USD at the bucket's prices
-              {lastLiquidity != null && <> · L = {fmtLiquidity(Number(lastLiquidity))} active at the last bucket's tick</>}</span>
-          </div>
-          <div className="pf-card"><AreaChart data={tvl.map(p => p.v ?? 0)} dates={tvl.map(p => p.b)} color="var(--sky-deep)" floor={0} zoomKey="zv3" refine={refineArea(p => p.tvlUsd)} /></div>
-        </>
-      )}
+      <VolumeTvlSection zoomKey="zv3" d={week} points={turnover} refine={refineArea(turnoverOf)} />
     </>
   )
 }
@@ -217,6 +225,12 @@ type UniswapV3HistoryPointLike = UniswapV3PoolHistory['points'][number]
 
 function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
   const now = useNow()
+  // The 7-day window and volume/TVL, from the same hourly volume model as every pool page.
+  const week = useV3PoolVolume(d.address).data
+  // One 24h definition per row: the hourly model's windows (ending at its cut,
+  // like every pool page's "through HH:00 UTC"), with the pool history's own
+  // head-anchored 24h only while the model has not answered.
+  const through = asOfLabel(week?.asOf)
   const colorFor = useAssetColors([d.token0, d.token1])
   const activity = useV3PoolActivity(d.address, 12)
   const activityRows = activity.data ?? []
@@ -250,11 +264,23 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
           ? <>{d.protocolFee.sharePct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% <span className="muted">of every swap fee, collected by the factory owner</span></>
           : <span className="muted">off — every swap fee goes to the LPs</span>}</div>
         <div className="dt">Volume</div>
-        <div className="dd mono">{d.volume.dayUsd != null ? <Usd v={d.volume.dayUsd} /> : '—'} <span className="muted">24h</span>
+        <div className="dd mono">{week
+          ? <><Usd v={week.kpis.d1.volumeUsd} /> <span className="muted">24H{through && <> · through {through}</>}</span>
+            <span style={{ marginLeft: 12 }}><Usd v={week.kpis.d7.volumeUsd} /> <span className="muted">7D</span></span></>
+          : <>{d.volume.dayUsd != null ? <Usd v={d.volume.dayUsd} /> : '—'} <span className="muted">24H</span></>}
           <span style={{ marginLeft: 12 }}>{d.volume.allUsd != null ? <Usd v={d.volume.allUsd} /> : '—'} <span className="muted">all time · {F.int(d.swaps)} {d.swaps === 1 ? 'swap' : 'swaps'}</span></span>
         </div>
+        {week && <>
+          <div className="dt">Volume / TVL</div>
+          <div className="dd mono">{fmtVolumeTvl(week.volumeTvl.d1)} <span className="muted">24H</span>
+            <span style={{ marginLeft: 12 }}>{fmtVolumeTvl(week.volumeTvl.d7)} <span className="muted">7D</span></span>
+          </div>
+        </>}
         <div className="dt">Fees to LPs</div>
-        <div className="dd mono">{d.volume.feesDayUsd != null ? <Usd v={d.volume.feesDayUsd} /> : '—'} <span className="muted">24h</span>
+        <div className="dd mono">{week
+          ? <><Usd v={week.fees.d1.lpUsd} /> <span className="muted">24H</span>
+            <span style={{ marginLeft: 12 }}><Usd v={week.fees.d7.lpUsd} /> <span className="muted">7D</span></span></>
+          : <>{d.volume.feesDayUsd != null ? <Usd v={d.volume.feesDayUsd} /> : '—'} <span className="muted">24H</span></>}
           <span style={{ marginLeft: 12 }}>{d.volume.feesAllUsd != null ? <Usd v={d.volume.feesAllUsd} /> : '—'} <span className="muted">all time · {d.feesCollected.usd != null ? <><Usd v={d.feesCollected.usd} /> collected</> : 'nothing collected yet'}</span></span>
         </div>
         {d.lastSwapAt && <>

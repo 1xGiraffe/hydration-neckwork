@@ -84,7 +84,7 @@ for (const [name, viewport] of [['phone', { width: 390, height: 844 }], ['deskto
 // here instead of against numbers this test would have to keep in sync.
 //
 // The placeholder reserves a head of four performance figures, because that is the
-// shape live data almost always takes (24H/1W/1M/1Y). It cannot know in advance
+// shape live data almost always takes (24H/7D/30D/12M). It cannot know in advance
 // that a series is too short or too spiky for `performancePoints` to offer every
 // window — in this fixture the portfolio card resolves to none and the price card
 // to three, and at 390px a three-figure row still fits one line where four wrap.

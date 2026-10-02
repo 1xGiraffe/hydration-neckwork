@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { AddrPill, DayBarChart, F, moduleName } from '../src/components/ui'
 import { PortfolioChart } from '../src/components/AccountSections'
 import { ActivityBadge, ExternalAccountPill } from '../src/components/ActivityTable'
@@ -123,7 +124,7 @@ describe('DayBarChart', () => {
 
 describe('PortfolioChart', () => {
   it('renders a skeleton while history is loading and no series is available', () => {
-    const html = renderToStaticMarkup(<PortfolioChart title="Value" netUsd={0} series={[]} loading />)
+    const html = renderToStaticMarkup(<QueryClientProvider client={new QueryClient()}><PortfolioChart title="Value" netUsd={0} series={[]} loading /></QueryClientProvider>)
     expect(html).toContain('Value')
     expect(html).toContain('chart-card-skeleton')
     // The placeholder must carry the loaded card's own chrome, not a fixed
@@ -134,6 +135,26 @@ describe('PortfolioChart', () => {
     expect(html.match(/class="perf"/g)).toHaveLength(4)
     // No pixel height on the card itself — its height comes from the chrome.
     expect(html).not.toMatch(/chart-card-skeleton"[^>]*style="height/)
+  })
+
+  it('states 24H / 7D / 30D / 12M, the short windows from the fine recent read when the grid is coarse', () => {
+    // A five-day grid over two years: no point lies 24 hours back.
+    const day = (i: number) => new Date(Date.UTC(2024, 9, 1) + i * 86_400_000).toISOString().slice(0, 19).replace('T', ' ')
+    const idx = Array.from({ length: 147 }, (_, i) => i * 5)
+    const dates = [...idx.map(day), '2026-10-02 07:00:00']
+    const series = [...idx.map(i => 100 + i / 10), 200]
+    const queryClient = new QueryClient()
+    // Hourly over the last nine days: 150 a day ago, 125 a week ago, 200 now.
+    const fineDates = Array.from({ length: 217 }, (_, h) => new Date(Date.UTC(2026, 8, 23, 7) + h * 3_600_000).toISOString().slice(0, 19).replace('T', ' '))
+    const fine = fineDates.map((_, h) => (h === 216 ? 200 : h >= 192 ? 150 : 125))
+    queryClient.setQueryData(['value-recent', 'account:x', '2026-10-02 07:00:00'], { data: fine, dates: fineDates })
+    const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}>
+      <PortfolioChart title="Value" perfKey="account:x" netUsd={200} series={series} dates={dates} refine={async () => null} />
+    </QueryClientProvider>)
+    const labels = [...html.matchAll(/<span class="pk">([^<]+)<\/span>/g)].map(m => m[1])
+    expect(labels).toEqual(['24H', '7D', '30D', '12M'])
+    expect(html).toContain('+33.3%')
+    expect(html).toContain('+60.0%')
   })
 })
 
