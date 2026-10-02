@@ -236,6 +236,13 @@ API it is a **versioned frozen contract**; concept: `~/.g/hydraken-api-concept.m
   the explorer card) stay on the settled index, one current definition — so history's last point
   exceeds them by the interest since each reserve's last update. The market set and
   `stakingBacked` are declared once in `explorerAssets.ts` (`MM_MARKETS`).
+- USD volume (`/v1/stats/volume/usd`) reads the three hourly read models (`routed_volume_hourly`,
+  `pool_volume_hourly`, `asset_volume_hourly`; definitions in `services/volumeHourly.ts`) with plain
+  GROUP BYs in `data/services/volumeData.ts` — routed, pool and asset volume are three definitions
+  and the route never mixes them; registry ids, never a display fold; no raw tail,
+  `publishedThrough` states the cut. Account volume (`/v1/accounts/{address}/volume`) is the
+  explorer "Trading" definition (`account_trade_volume`) for ONE holder (the account and its
+  ETH-truncated form), on the bucketed-history window machinery.
 - CURRENT pool state is the newest `raw_block_snapshots` row (`data/services/poolSnapshot.ts`,
   one point read per block, exact at the head); the 600-block state-history tables serve
   history only. Current prices are `asset_price_latest` (009); historical flows are priced
@@ -298,7 +305,11 @@ hydration-mcp.neckwork.net) serves LLM agents a Model Context Protocol surface o
   here instead of reusing an explorer route is the one change this service must never take
   (so `get_account_history` kind `liquidity` reads `/explorer/address/:a/liquidity-history`,
   the explorer's own LP-history route, and kind `money-market` reads
-  `/explorer/address/:a/money-market-history`, rather than anything of their own).
+  `/explorer/address/:a/money-market-history`, rather than anything of their own; kind `volume`
+  reads `/explorer/address/:a/volume-history` or `/explorer/tag/:t/volume-history`,
+  `get_protocol_stats` `volume` reads `/explorer/volume`, `get_asset` `volume` reads
+  `/explorer/asset/:id/volume`, and `get_pools` `volume`/`history` read `/explorer/omnipool/volume`
+  or `/explorer/pool/:id/volume`).
 - `api/src/mcp/**` may import **nothing** outside its own tree — not `db/client`, not `config.ts`,
   not `explorerService`, not `public/**` or `data/**`. `api/tests/mcp/isolation.test.ts` is the
   enforced contract and this sentence must follow it; the allow-list is deliberately empty.

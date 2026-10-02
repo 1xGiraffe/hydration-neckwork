@@ -82,7 +82,7 @@ const MAX_VOLUME_WINDOW_DAYS = 90
 // the numeric pool/order id for stableswap and OTC, the pool's account for
 // XYK and AAVE (0x-64-hex), and '' for the dead LBP pallet — which recorded no
 // per-pool key, so its fills are reached venue-wide under the literal 'lbp'.
-function normalizePoolKey(venue: Venue, raw: string): string {
+export function normalizePoolKey(venue: Venue, raw: string): string {
   if (venue === 'omnipool') {
     if (raw !== 'omnipool') throw badRequest("the omnipool is one pool: its poolKey is literally 'omnipool'")
     return raw

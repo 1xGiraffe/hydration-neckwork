@@ -2,11 +2,12 @@ import { z } from 'zod'
 import { formatParam, type ToolContext, type ToolDefinition, type ToolError, type ToolOutput } from '../toolTypes.ts'
 import { invalidArgument, toolErrorFromUpstream } from '../errors.ts'
 import type {
-  AccountRef, AssetRef, PoolListEntry, PoolsIndex, RevenueDashboard, StakerDistributions,
+  AccountRef, AssetRef, PlatformVolume, PoolListEntry, PoolsIndex, RevenueDashboard, StakerDistributions,
 } from '../types.ts'
+import { CUT_NOTE, WINDOW_KEYS, WINDOW_LABEL, changeCell, ratioPct, venueLabel } from '../format/volume.ts'
 import { DASH, formatAmount, formatCount, formatNumber, formatPercent, formatPercentChange, formatUsd, scaleAmount } from '../format/units.ts'
 import { formatTime, formatUnixSeconds, relativeAge } from '../format/time.ts'
-import { accountLabel, accountUrl, assetLabel, assetLabelWithId, assetUrl, explorerLink, poolUrl } from '../format/refs.ts'
+import { accountLabel, accountUrl, assetLabel, assetLabelWithId, assetUrl, explorerLink, poolUrl, v3PoolUrl } from '../format/refs.ts'
 import { bullets, h2, h3, joinBlocks, kv, note, table } from '../format/md.ts'
 import { HUB_DECIMALS, HUB_SYMBOL, failure, fit, output, parseInput } from './shared.ts'
 // One definition of "is this asset at or over its weight cap", shared with the
@@ -115,7 +116,7 @@ interface OmnipoolResponse { account: AccountRef; tvlUsd: number | null; assetCo
 
 /* ============ constants ============ */
 
-const DASHBOARDS = ['revenue', 'hdx', 'hollar', 'ice', 'security', 'liquidity'] as const
+const DASHBOARDS = ['revenue', 'hdx', 'hollar', 'ice', 'security', 'liquidity', 'volume'] as const
 type Dashboard = typeof DASHBOARDS[number]
 const RANGES = ['30d', '1y', 'all'] as const
 
@@ -125,6 +126,7 @@ const hdx = (n: number | null | undefined): string =>
 
 const omnipoolPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/omnipool`
 const liquidityPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/liquidity`
+const volumePageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/volume`
 
 /* ============ description ============ */
 
@@ -136,6 +138,7 @@ const DESCRIPTION = `The protocol's own dashboards, each rendered as headline fi
 - 'ice' — the intent/solver layer. Solver mode and protocol fee, open limit and DCA orders with the capital they reserve, fills per day, execution quality (time to fill, partial and cancel rates, price against limit in basis points), fee revenue, and the busiest pairs.
 - 'security' — the safety posture. Cross-chain egress usage against its limit, per-asset deposit fuses and how close each is to lockdown, the Omnipool's per-block trade/add/remove allowances and the peak pressure seen against them, circuit-breaker trips by error, what is currently paused or restricted, lending-market solvency, runtime version, the Technical Committee, and the Wormhole backing summary.
 - 'liquidity' — where TVL sits: the venue split across Omnipool, stableswaps, XYK and Uniswap v3, then the Omnipool itself asset by asset with each weight against its CAP.
+- 'volume' — 24 h / 7 d / 30 d volume with the change: ROUTED (every trade once, netted — the DefiLlama figure), then per VENUE (every fill once in its pool; sums to MORE than routed — never mix the two), then 7 d top pools (volume/TVL), assets and traders.
 
 Every one of these payloads is 10-280 KB upstream and carries long raw series (the Omnipool's TVL history alone is 1,351 daily points). None of that is returned: series are collapsed into first/last/high/low with their window, and tables are cut to the top rows. Timestamps inside the revenue payloads are UNIX SECONDS, unlike the ClickHouse timestamps everywhere else on this server; both are rendered as UTC here.
 
@@ -591,6 +594,71 @@ function securityJson(d: SecurityDashboard): unknown {
   }
 }
 
+/* ============ volume ============ */
+
+const MAX_VOLUME_ROWS = 10
+
+function renderVolume(d: PlatformVolume, ctx: ToolContext): string {
+  const base = ctx.explorerBaseUrl
+  const poolHref = (p: PlatformVolume['topPools'][number]): string | null =>
+    p.venue === 'omnipool' ? omnipoolPageUrl(base) : p.poolId != null ? poolUrl(base, p.poolId) : p.address ? v3PoolUrl(base, p.address) : null
+  const venues = [...(d.venues ?? [])].sort((a, b) => (b.kpis?.d7?.volumeUsd ?? 0) - (a.kpis?.d7?.volumeUsd ?? 0))
+  return joinBlocks(
+    h2('Volume'),
+    kv([
+      ['Windows end at', d.asOf ? `${formatTime(d.asOf)} (the volume models' cut: the first hour not yet published)` : 'the volume models are empty'],
+      ['Page', explorerLink('explorer', volumePageUrl(base))],
+    ]),
+    h3('Routed volume — every trade once, netted across its route'),
+    table(['Window', 'Routed volume', 'Change vs prior', 'Trades'], WINDOW_KEYS.map(k => [
+      WINDOW_LABEL[k], formatUsd(d.routed?.[k]?.volumeUsd), changeCell(d.routed?.[k]), formatCount(d.routedTrades?.[k]),
+    ])),
+    h3('Venue volume — every fill once, in the pool it executed in'),
+    table(['Venue', '24 h', '7 d', '7 d change', '30 d'], [
+      ...venues.map(v => [
+        venueLabel(v.venue), formatUsd(v.kpis?.d1?.volumeUsd), formatUsd(v.kpis?.d7?.volumeUsd), changeCell(v.kpis?.d7), formatUsd(v.kpis?.d30?.volumeUsd),
+      ]),
+      ['**All venues**', formatUsd(d.venueTotal?.d1?.volumeUsd), formatUsd(d.venueTotal?.d7?.volumeUsd), changeCell(d.venueTotal?.d7), formatUsd(d.venueTotal?.d30?.volumeUsd)],
+    ]),
+    note('Venue volumes sum to MORE than routed volume: a trade routed through two pools is one routed trade and a fill in each pool. Quote routed volume for "how much traded on Hydration" (it is the DefiLlama figure) and venue/pool volume for "how busy is this pool". The Omnipool counts a user swap once. aToken wraps are in neither.'),
+    h3('Top pools — 7 d'),
+    table(['Pool', 'Venue', '7 d volume', 'TVL', '7 d volume / TVL'], (d.topPools ?? []).slice(0, MAX_VOLUME_ROWS).map(p => {
+      const href = poolHref(p)
+      return [href ? explorerLink(p.name, href) : p.name, venueLabel(p.venue), formatUsd(p.volume7dUsd), formatUsd(p.tvlUsd), ratioPct(p.volumeTvl7d)]
+    }), 'no pool traded in the 7 days'),
+    note('7 d volume / TVL is the window\'s volume over the pool\'s MEAN daily TVL across the same 7 days — a ratio for the window, not annualised.'),
+    h3('Top assets — 7 d'),
+    table(['Asset', '7 d volume', 'Share'], (d.topAssets ?? []).slice(0, MAX_VOLUME_ROWS).map(a => [
+      explorerLink(assetLabelWithId(a.asset), assetUrl(base, a.asset.assetId)), formatUsd(a.volume7dUsd), formatPercent(a.sharePct),
+    ]), 'no asset traded in the 7 days'),
+    note('Asset volume is the value of the asset\'s own legs, sold plus bought, so one swap A→B counts for A and for B; Share is of all assets\' 7 d volume. The Omnipool hub H2O is plumbing and never listed.'),
+    h3('Top traders — 7 d'),
+    table(['Account', '7 d volume', 'Trades'], (d.topTraders ?? []).slice(0, MAX_VOLUME_ROWS).map(t => [
+      explorerLink(accountLabel(t.account), accountUrl(base, t.account.address)), formatUsd(t.volume7dUsd), formatCount(t.trades),
+    ]), 'no trades in the 7 days'),
+    d.tradersWindow
+      ? note(`Traders are per account (not per related set) on the netted per-trade model — the Explorer's account "Trading" figure — over blocks ${formatCount(d.tradersWindow.fromBlock)} → ${formatCount(d.tradersWindow.toBlock)}${d.tradersWindow.asOfBlock != null ? `; the model holds trades through block ${formatCount(d.tradersWindow.asOfBlock)}` : ''}.`)
+      : null,
+    note(CUT_NOTE),
+  )
+}
+
+function volumeJson(d: PlatformVolume): unknown {
+  return {
+    asOf: d.asOf,
+    routed: d.routed,
+    routedTrades: d.routedTrades,
+    venues: d.venues,
+    venueTotal: d.venueTotal,
+    // The chart is a series; its grid is described, never returned raw.
+    chart: d.chart ? { stepSec: d.chart.stepSec, buckets: d.chart.buckets?.length ?? 0, from: d.chart.buckets?.[0] ?? null, to: d.chart.buckets?.[d.chart.buckets.length - 1] ?? null } : null,
+    topPools: (d.topPools ?? []).slice(0, MAX_VOLUME_ROWS),
+    topAssets: (d.topAssets ?? []).slice(0, MAX_VOLUME_ROWS).map(a => ({ asset: { assetId: a.asset.assetId, symbol: a.asset.symbol }, volume7dUsd: a.volume7dUsd, sharePct: a.sharePct })),
+    topTraders: (d.topTraders ?? []).slice(0, MAX_VOLUME_ROWS).map(t => ({ account: { address: t.account.address, tag: t.account.tag?.id ?? null, identity: t.account.identity ?? null }, volume7dUsd: t.volume7dUsd, trades: t.trades })),
+    tradersWindow: d.tradersWindow,
+  }
+}
+
 /* ============ liquidity ============ */
 
 function renderLiquidity(omni: OmnipoolResponse | null, pools: PoolsIndex | null, ctx: ToolContext): string {
@@ -656,7 +724,7 @@ function renderLiquidity(omni: OmnipoolResponse | null, pools: PoolsIndex | null
 }
 
 const INPUT_SHAPE = {
-  dashboard: z.enum(DASHBOARDS).describe("Which dashboard: 'revenue' (what the protocol earns, by stream and by account), 'hdx' (supply, locks, unlocks, flow), 'hollar' (peg, supply, the HSM), 'ice' (intents, solving, fills), 'security' (egress limits, fuses, breaker trips, freezes, solvency), 'liquidity' (TVL by venue and the Omnipool asset by asset)."),
+  dashboard: z.enum(DASHBOARDS).describe('Which dashboard; each is described in the tool description\'s list.'),
   range: z.enum(RANGES).optional().describe("Window for the 'revenue' dashboard only: '30d' (default), '1y' or 'all'. Ignored, with a note, on every other dashboard."),
   format: formatParam,
 }
@@ -722,6 +790,11 @@ async function handler(input: Record<string, unknown>, ctx: ToolContext): Promis
         ...d,
         migration: d.migration ? { migrated: d.migration.migrated, cancelled: d.migration.cancelled, remainingSchedules: d.migration.remainingSchedules } : null,
       })
+    }
+
+    if (dashboard === 'volume') {
+      const d = await ctx.upstream.get<PlatformVolume>('/explorer/volume', undefined, { ttlMs: 60_000, timeoutMs: 60_000 })
+      return output(ctx, fit(joinBlocks(rangeNote, renderVolume(d, ctx)), ctx), volumeJson(d))
     }
 
     if (dashboard === 'security') {

@@ -48,6 +48,7 @@ export const DATA_CACHE_CONTROL: Array<[RegExp, number, Visibility]> = [
   [/^\/v1\/accounts\/[^/]+\/(balances|events|extrinsics|transfers|trades|dca|intents|otc|liquidity|xcm|money-market)$/, 5, 'private'],
   [/^\/v1\/accounts\/[^/]+\/(staking|votes|liquidations)$/, 10, 'private'],
   [/^\/v1\/accounts\/[^/]+\/fees$/, 60, 'private'],
+  [/^\/v1\/accounts\/[^/]+\/volume$/, 60, 'private'],
   [/^\/v1\/accounts\/[^/]+$/, 10, 'private'],
 
   // Assets & prices.
@@ -82,6 +83,7 @@ export const DATA_CACHE_CONTROL: Array<[RegExp, number, Visibility]> = [
 
   // Aggregates: all computed over closed windows or cached heavies.
   [/^\/v1\/stats\/(volume)$/, 60, 'private'],
+  [/^\/v1\/stats\/volume\/usd$/, 60, 'private'],
   [/^\/v1\/stats\/(revenue|active-accounts|tvl)$/, 300, 'private'],
 ]
 

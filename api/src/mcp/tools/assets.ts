@@ -1,7 +1,8 @@
 import { z } from 'zod'
 import { formatParam, type ToolContext, type ToolDefinition, type ToolError, type ToolOutput } from '../toolTypes.ts'
 import { invalidArgument, toolErrorFromUpstream } from '../errors.ts'
-import type { ActiveDca, AssetDetail, AssetListItem, HoldersPage, OpenLimitOrder } from '../types.ts'
+import type { ActiveDca, AssetDetail, AssetListItem, AssetVolume, HoldersPage, OpenLimitOrder } from '../types.ts'
+import { CUT_NOTE, WINDOW_KEYS, WINDOW_LABEL, kpiRows, ratioPct, venueLabel } from '../format/volume.ts'
 import {
   DASH,
   formatAmount,
@@ -14,6 +15,7 @@ import {
 import { formatTime } from '../format/time.ts'
 import {
   accountLabel,
+  assetLabel,
   accountUrl,
   assetPairLabels,
   assetUrl,
@@ -285,7 +287,7 @@ const listAssets: ToolDefinition = {
 
 /* ============ get_asset ============ */
 
-const ASSET_SECTIONS = ['price', 'holders', 'pools', 'dca', 'orders', 'series'] as const
+const ASSET_SECTIONS = ['price', 'holders', 'pools', 'dca', 'orders', 'series', 'volume'] as const
 type AssetSection = typeof ASSET_SECTIONS[number]
 const DEFAULT_ASSET_SECTIONS: AssetSection[] = ['price']
 
@@ -299,9 +301,7 @@ const getAssetInputShape = {
   asset: z.string().min(1).max(64).describe(
     'The asset id (preferred — "22") or a symbol ("DOT"). Symbols are not unique on Hydration: an ambiguous one is answered with the candidates rather than a guess.',
   ),
-  include: z.array(z.enum(ASSET_SECTIONS)).optional().describe(
-    "Extra sections, each one upstream read: 'price' (default — the daily price path already in the record, no extra read), 'holders' (top holders), 'pools' (where its liquidity sits, a large read trimmed hard), 'dca' (ongoing DCA schedules buying or selling it), 'orders' (the open limit-order book), 'series' (a finer price window; see seriesFrom/seriesTo).",
-  ),
+  include: z.array(z.enum(ASSET_SECTIONS)).optional().describe("Extra sections, each one upstream read (default ['price']); each is described in the tool description's `include` paragraph."),
   seriesFrom: z.string().min(4).max(32).optional().describe("Start of the 'series' window: a UNIX timestamp in SECONDS ('1755000000') or a calendar day ('2026-08-01'). Defaults to 30 days before seriesTo."),
   seriesTo: z.string().min(4).max(32).optional().describe("End of the 'series' window: UNIX seconds or a calendar day. Defaults to now."),
   format: formatParam,
@@ -529,6 +529,29 @@ function poolsBlock(liq: AssetLiquidity, base: string): string {
   )
 }
 
+/**
+ * `/explorer/asset/:id/volume` — ASSET volume: the value of the asset's own legs
+ * in fills (sold plus bought) per venue, with its aToken and the pool shares
+ * displayed under it folded in, exactly as the asset page's Volume section.
+ */
+function volumeBlock(v: AssetVolume): string {
+  const counted = (v.assets ?? []).map(a => `${assetLabel(a)} (#${a.assetId})`)
+  const venues = [...(v.byVenue ?? [])].filter(x => x.d30 > 0 || x.d7 > 0 || x.d1 > 0).sort((a, b) => b.d30 - a.d30)
+  return joinBlocks(
+    kv([
+      ['Windows end at', v.asOf ? `${formatTime(v.asOf)} (the volume models' cut)` : 'the volume models are empty'],
+      ...kpiRows(v.kpis, 'Volume'),
+      ['All time', formatUsd(v.allTimeUsd)],
+      ['7 d volume / TVL', v.volumeTvl?.d7 == null ? null : `${ratioPct(v.volumeTvl.d7)} (over a mean ${formatUsd(v.volumeTvl.meanTvl7dUsd)} in pools)`],
+      ['30 d volume / TVL', v.volumeTvl?.d30 == null ? null : `${ratioPct(v.volumeTvl.d30)} (over a mean ${formatUsd(v.volumeTvl.meanTvl30dUsd)} in pools)`],
+      ['Counted', counted.length > 1 ? `${counted.join(' + ')} — the asset's money-market aToken and the pool shares displayed under it trade as it` : null],
+    ]),
+    table(['Venue', ...WINDOW_KEYS.map(k => WINDOW_LABEL[k])], venues.map(x => [venueLabel(x.venue), formatUsd(x.d1), formatUsd(x.d7), formatUsd(x.d30)]), 'it has not traded in the last 30 days'),
+    note('ASSET volume: the USD value of this asset\'s own legs in fills, sold plus bought, so a swap A→B counts for A and for B — it is not the pool volume get_pools states, and not the platform\'s routed volume. Volume/TVL is over the asset\'s mean pooled value across the same window, never annualised.'),
+    note(CUT_NOTE),
+  )
+}
+
 function dcaRows(list: ActiveDca[], base: string): (string | null)[][] {
   return list.slice(0, MAX_DCA_ROWS).map(d => [
     d.intentId ? explorerLink(`#${d.id}`, intentUrl(base, d.intentId)) : explorerLink(String(d.id), dcaScheduleUrl(base, d.id)),
@@ -561,7 +584,7 @@ Answers "what is this token doing?", "who holds most of it?", "which pools hold 
 
 \`asset\` takes an id ("22") or a symbol ("DOT"). PREFER THE ID. Symbols are not unique — four assets call themselves USDC — and an ambiguous symbol is answered with the candidate list and no guess. A few registered assets (pool-share tokens such as 2-Pool or 2-Pool-GDOT) are not in the symbol directory at all; their ids still work.
 
-\`include\` adds sections, each one upstream read: 'price' (the daily price path, already in the base record — the default), 'holders', 'pools' (where the liquidity sits), 'dca' (ongoing schedules trading it chain-wide), 'orders' (the open limit-order book), 'series' (a finer price window). \`seriesFrom\`/\`seriesTo\` take either UNIX SECONDS or a calendar day and are converted for you — the underlying route takes seconds only, and a date handed to it silently reads a window in 1970.
+\`include\` adds sections, each one upstream read: 'price' (the daily price path, already in the base record — the default), 'holders', 'pools' (where the liquidity sits), 'dca' (ongoing schedules trading it chain-wide), 'orders' (the open limit-order book), 'series' (a finer price window), 'volume' (24 h / 7 d / 30 d volume by venue, volume/TVL: the asset's own legs, sold plus bought, its aToken folded in). \`seriesFrom\`/\`seriesTo\` take either UNIX SECONDS or a calendar day and are converted for you — the underlying route takes seconds only, and a date handed to it silently reads a window in 1970.
 
 The trap this tool exists to close: an unknown-but-valid asset id does NOT produce a 404. The Explorer answers a shell of nulls with the id echoed back as its symbol, which renders as a perfectly plausible token with no holders, no price and no liquidity. This tool detects that shell and says no such asset is registered instead. If you get that answer, the id is wrong — do not report the empty record as a finding. The near neighbour of that case is an id that IS held on chain but has no registry entry (1000021 and its kind): the same synthetic descriptor stands in for its symbol, name and decimals, so this tool answers with the real holder and liquidity figures and marks the descriptor as a placeholder — never quote \`#<id>\` as a ticker or its 12 decimals as a precision.
 
@@ -594,7 +617,7 @@ const getAsset: ToolDefinition = {
       }
     }
 
-    const [detailResult, holdersResult, poolsResult, dcaResult, ordersResult, seriesResult] = await Promise.allSettled([
+    const [detailResult, holdersResult, poolsResult, dcaResult, ordersResult, seriesResult, volumeResult] = await Promise.allSettled([
       ctx.upstream.get<AssetDetail>(`/explorer/asset/${assetId}`, undefined, { ttlMs: 15_000 }),
       sections.has('holders') ? ctx.upstream.get<HoldersPage>(`/explorer/holders/${assetId}`, { limit: MAX_HOLDER_ROWS }, { ttlMs: 15_000 }) : Promise.resolve(null),
       sections.has('pools') ? ctx.upstream.get<AssetLiquidity>(`/explorer/asset/${assetId}/liquidity`, undefined, { ttlMs: 60_000, timeoutMs: 90_000 }) : Promise.resolve(null),
@@ -603,6 +626,7 @@ const getAsset: ToolDefinition = {
       sections.has('series') && seriesFrom != null && seriesTo != null
         ? ctx.upstream.get<{ interval: string; priceSeries: number[]; priceDates: string[] }>(`/explorer/asset/${assetId}/prices`, { fromTs: seriesFrom, toTs: seriesTo, points: 120 }, { ttlMs: 30_000 })
         : Promise.resolve(null),
+      sections.has('volume') ? ctx.upstream.get<AssetVolume>(`/explorer/asset/${assetId}/volume`, undefined, { ttlMs: 60_000, timeoutMs: 60_000 }) : Promise.resolve(null),
     ])
 
     if (detailResult.status === 'rejected') {
@@ -630,12 +654,14 @@ const getAsset: ToolDefinition = {
     record(dcaResult, 'dca', 'DCA schedules')
     record(ordersResult, 'orders', 'limit-order book')
     record(seriesResult, 'series', 'price window')
+    record(volumeResult, 'volume', 'trading volume')
 
     const holders = holdersResult.status === 'fulfilled' ? holdersResult.value : null
     const pools = poolsResult.status === 'fulfilled' ? poolsResult.value : null
     const dcas = dcaResult.status === 'fulfilled' ? dcaResult.value : null
     const book = ordersResult.status === 'fulfilled' ? ordersResult.value : null
     const window = seriesResult.status === 'fulfilled' ? seriesResult.value : null
+    const volume = volumeResult.status === 'fulfilled' ? volumeResult.value : null
 
     const a = detail.asset
     // Held on chain, but with no registry entry behind its symbol, name and
@@ -683,6 +709,7 @@ const getAsset: ToolDefinition = {
           ])
         })())
         : '',
+      volume ? section('Volume', volumeBlock(volume)) : '',
       holders ? section('Top holders', holdersBlock(holders, base)) : '',
       pools ? section('Where the liquidity sits', poolsBlock(pools, base)) : '',
       dcas
@@ -708,7 +735,7 @@ const getAsset: ToolDefinition = {
         ? note(`These requested sections are MISSING because their read failed, not because there is nothing there: ${failedSections.join(', ')} (see Errors below). Retrying is reasonable.`)
         : '',
       sections.size === 1 && sections.has('price')
-        ? note('Ask for `include: ["holders","pools","dca","orders","series"]` — any subset — to add the holder list, the venues, the standing orders, or a finer price window.')
+        ? note('Ask for `include: ["holders","pools","dca","orders","series","volume"]` — any subset — to add the holder list, the venues, the standing orders, a finer price window, or its trading volume.')
         : '',
     ), ctx, 'Ask for fewer `include` sections.')
 
@@ -774,6 +801,16 @@ const getAsset: ToolDefinition = {
               })),
             venues: pools.sources?.length ?? 0,
             formerVenues: pools.former?.length ?? 0,
+          }
+          : undefined,
+        volume: volume
+          ? {
+            asOf: volume.asOf,
+            countedAssetIds: volume.assetIds,
+            kpis: volume.kpis,
+            byVenue: volume.byVenue,
+            allTimeUsd: volume.allTimeUsd,
+            volumeTvl: volume.volumeTvl,
           }
           : undefined,
         dca: dcas
