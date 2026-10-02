@@ -179,8 +179,33 @@ export function incentiveAprPctScaled(
 
 /** A period fee over a TVL, annualised: 100 · fee/tvl · 365/days, internal percent. Null without a TVL. */
 export function feeAprPctScaled(feeUsd: bigint, tvlUsd: bigint | null, days: number): bigint | null {
-  if (tvlUsd == null || tvlUsd <= 0n) return null
-  return divHalfUp(feeUsd * 365n * 100n * PCT_UNIT, BigInt(days) * tvlUsd)
+  return feeAprPctScaledSeconds(feeUsd, tvlUsd, BigInt(days) * 86_400n)
+}
+
+/** The same annualisation over a window given in seconds — for a window shorter than whole days. */
+export function feeAprPctScaledSeconds(feeUsd: bigint, tvlUsd: bigint | null, seconds: bigint): bigint | null {
+  if (tvlUsd == null || tvlUsd <= 0n || seconds <= 0n) return null
+  return divHalfUp(feeUsd * 365n * 86_400n * 100n * PCT_UNIT, seconds * tvlUsd)
+}
+
+/** The youngest a concentrated-liquidity pool can be and still have its fees annualised: a few minutes of
+ *  history scaled to a year (×10,000s) is noise, not a rate. */
+export const V3_FEE_APR_MIN_AGE_SECONDS = 3_600n
+const V3_FEE_WINDOW_SECONDS = 7n * 86_400n
+
+/**
+ * The span a concentrated-liquidity pool's 7-day fee window actually covers: the whole window, or the pool's
+ * age at the anchor when it is younger — its fees then come from that age alone, and dividing them by seven
+ * days understated the APR by 7 ÷ age. Null when the pool's creation is unknown or it is younger than
+ * V3_FEE_APR_MIN_AGE_SECONDS. `createdAt` is the registry's ClickHouse UTC timestamp.
+ */
+export function v3FeeWindowSeconds(createdAt: string | null | undefined, anchorSec: bigint): bigint | null {
+  if (!createdAt) return null
+  const created = Date.parse(iso(createdAt))
+  if (!Number.isFinite(created)) return null
+  const age = anchorSec - BigInt(Math.floor(created / 1000))
+  if (age < V3_FEE_APR_MIN_AGE_SECONDS) return null
+  return age < V3_FEE_WINDOW_SECONDS ? age : V3_FEE_WINDOW_SECONDS
 }
 
 /** Each leg's USD share of the pool (WEIGHT_UNIT = all of it); null when any leg is unpriced or the pool is empty. */
@@ -697,7 +722,9 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
       tvl = a == null || b == null ? null : a + b
     }
     const lpFee = stats ? v3LpFee(v3FeeByPool.get(pool.address.toLowerCase()) ?? 0n, stats.feeProtocol0, stats.feeProtocol1) : null
-    uniswapV3[pool.address.toLowerCase()] = assemblePoolYield([{ kind: 'v3-fee', apr: lpFee == null ? null : feeAprPctScaled(lpFee, tvl, WINDOW_DAYS['7d']) }])
+    // The fee window is 7 days back from the anchor, so a pool created inside it is annualised over its own age.
+    const windowSec = v3FeeWindowSeconds(pool.createdAt, anchorSec)
+    uniswapV3[pool.address.toLowerCase()] = assemblePoolYield([{ kind: 'v3-fee', apr: lpFee == null || windowSec == null ? null : feeAprPctScaledSeconds(lpFee, tvl, windowSec) }])
   }))
 
   return { asOf: omni.asOf ?? iso(anchor.anchor), feeWindow: '30d', omnipool, stableswap, xyk, uniswapV3, moneyMarket }
