@@ -379,12 +379,12 @@ function FlowsSection({ d }: { d: HdxDashboard }) {
 // zero-thick band edge — StackedAreaChart treats null as absent.
 const pct1 = (v: number) => `${v.toFixed(1)}%`
 const last = <T,>(a: T[]): T => a[a.length - 1]
-// Value ~52 weekly rows back, for "vs 1y ago" deltas (null when too young).
+// Value ~52 weekly rows back, for "vs 12M ago" deltas (null when too young).
 function yearAgo<T>(a: T[]): T | null { return a.length > 52 ? a[a.length - 53] : null }
 function deltaPp(now: number, then: number | null): string | null {
   if (then == null) return null
   const d = now - then
-  return `${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(1)}pp vs 1y ago`
+  return `${d >= 0 ? '+' : '−'}${Math.abs(d).toFixed(1)}pp vs 12M ago`
 }
 
 const OWNERSHIP_BANDS: { key: keyof HdxStructure['ownership']; label: string }[] = [
@@ -425,7 +425,7 @@ function OwnershipSection({ s }: { s: HdxStructure }) {
           <div className="hdx-card">
             <div className="hk">Effective holders</div>
             <div className="hv">{F.int(effNow)}</div>
-            <div className="hs">equal-size equivalent (1/HHI){effThen != null ? ` · ${effNow >= effThen ? '+' : '−'}${F.int(Math.abs(effNow - effThen))} vs 1y ago` : ''}</div>
+            <div className="hs">equal-size equivalent (1/HHI){effThen != null ? ` · ${effNow >= effThen ? '+' : '−'}${F.int(Math.abs(effNow - effThen))} vs 12M ago` : ''}</div>
           </div>
           <div className="hdx-card">
             <div className="hk"><i style={{ background: OWNERSHIP_COLORS.kraken }} />Kraken custody</div>

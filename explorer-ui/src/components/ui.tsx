@@ -1417,8 +1417,12 @@ export function ChartMarkerLayer({ markers, t0, span, style, onOpenChange }: {
 // `markers` flags notable events on the same time axis (see ChartMarker).
 // The viewBox is fixed and the svg is stretched to its container (height `h`).
 const W = 820, padT = 14, padB = 14
-export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt = F.usd, markers, refine, zoomKey, label, overlay }: {
+export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt = F.usd, markers, refine, zoomKey, label, overlay, bars }: {
   data: number[]; h?: number; target?: number; color?: string; floor?: number
+  /** Draw each point as a bar covering its bucket (up to the next point) instead
+   *  of a line — for a FLOW (volume per bucket) rather than a level. Same hover,
+   *  zoom and refine as the line; the baseline is 0. */
+  bars?: boolean
   dates?: string[]; valueFmt?: (v: number) => string; markers?: ChartMarker[]
   /** Names `data` in the crosshair tooltip; only shown when an overlay makes the
    *  two curves ambiguous. */
@@ -1438,7 +1442,7 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   // The area gradient's element id. Unique per instance, so two charts on one
   // page cannot collide and take each other's fill.
   const gid = `area-${useId()}`
-  const [hover, setHover] = useState<{ xPct: number; yPct: number; val: string; ovVal: string | null; date: string } | null>(null)
+  const [hover, setHover] = useState<{ idx: number; xPct: number; yPct: number; val: string; ovVal: string | null; date: string } | null>(null)
   const [markOpen, setMarkOpen] = useState(false)
   // On phones 1.5% of the chart is a few px — caps would collide, so cluster
   // wider there. Same breakpoint as the stylesheet's table→card switch.
@@ -1536,8 +1540,23 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
     const area = `${line} L ${sx(vData.length - 1).toFixed(1)} ${h - padB} L ${sx(0).toFixed(1)} ${h - padB} Z`
     const overlayLine = ov ? ov.map((v, i) => `${i ? 'L' : 'M'} ${sx(i).toFixed(1)} ${sy(v).toFixed(1)}`).join(' ') : null
     const up = vData[vData.length - 1] >= vData[0]
-    return { xFrac, sy, line, area, overlayLine, ov, col: color ?? (up ? 'var(--green)' : 'var(--red)') }
-  }, [vData, vOverlay, vDates, target, floor, h, color, view])
+    // Bars: each point's bucket runs to the next point (the last one as wide as its
+    // predecessor), with a hairline gap so neighbours stay distinct. The time axis
+    // ends AT the last point, so the bars are laid on it narrowed by the last
+    // bucket's width — otherwise the last bar would spill past the plot's edge.
+    const barRects = bars ? (() => {
+      const n = vData.length
+      const lastW = n > 1 ? sx(n - 1) - sx(n - 2) : W
+      const k = W / (W + Math.max(0, lastW))
+      return vData.map((v, i) => {
+        const x0 = sx(i) * k
+        const x1 = i + 1 < n ? sx(i + 1) * k : W
+        const gap = Math.min(1.5, (x1 - x0) * 0.2)
+        return { x: x0 + gap / 2, w: Math.max(0.5, x1 - x0 - gap), y: sy(v), v }
+      })
+    })() : null
+    return { xFrac, sy, line, area, overlayLine, ov, barRects, col: color ?? (up ? 'var(--green)' : 'var(--red)') }
+  }, [vData, vOverlay, vDates, target, floor, h, color, view, bars])
 
   // Markers key off the EXACT axis the line uses (timeAxisSpan is the same guard
   // as viewFractions): render only when the line is time-proportional, so a flag
@@ -1545,7 +1564,7 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   const markAxis = useMemo(() => (markers?.length ? timeAxisSpan(vData?.length ?? 0, vDates) : null), [markers, vData, vDates])
 
   if (!geom) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
-  const { xFrac, sy, line, area, overlayLine, ov, col } = geom
+  const { xFrac, sy, line, area, overlayLine, ov, barRects, col } = geom
   const ovCol = overlay?.color ?? 'var(--text-low)'
   // Points closer than half a day label with their time, not just the date.
   const viewSpanMs = vDates && vDates.length > 1 ? parseUtcTimestamp(vDates[vDates.length - 1]) - parseUtcTimestamp(vDates[0]) : NaN
@@ -1558,10 +1577,17 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
     const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width))
     // Snap to the point nearest the cursor in x-space (time-aware when dates drive x).
     let i = 0
-    for (let k = 1; k < xFrac.length; k++) if (Math.abs(xFrac[k] - frac) < Math.abs(xFrac[i] - frac)) i = k
+    if (barRects) {
+      // A bar is hovered anywhere across its width: the last bar starting at or before the cursor.
+      for (let k = 1; k < barRects.length; k++) if (barRects[k].x / W <= frac) i = k
+    } else {
+      for (let k = 1; k < xFrac.length; k++) if (Math.abs(xFrac[k] - frac) < Math.abs(xFrac[i] - frac)) i = k
+    }
     const ts = vDates?.[i]
     setHover({
-      xPct: xFrac[i] * 100, yPct: sy(vData[i]) / h * 100, val: valueFmt(vData[i]),
+      idx: i,
+      // A bar's crosshair sits on its middle, not its left edge.
+      xPct: (barRects ? (barRects[i].x + barRects[i].w / 2) / W : xFrac[i]) * 100, yPct: sy(vData[i]) / h * 100, val: valueFmt(vData[i]),
       ovVal: ov ? valueFmt(ov[i]) : null,
       date: ts ? (subDaily ? tsDateTime(ts) : tsDate(ts)) : '',
     })
@@ -1581,9 +1607,11 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
       onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}>
       <svg className="apx-chart" viewBox={`0 0 ${W} ${h}`} preserveAspectRatio="none">
         <defs><linearGradient id={gid} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={col} stopOpacity="0.26" /><stop offset="100%" stopColor={col} stopOpacity="0" /></linearGradient></defs>
-        <path className="chart-area" d={area} fill={`url(#${gid})`} />
+        {barRects
+          ? barRects.map((b, i) => <rect key={i} x={b.x.toFixed(2)} y={b.y.toFixed(1)} width={b.w.toFixed(2)} height={Math.max(0, h - padB - b.y).toFixed(1)} fill={col} opacity={hover && hover.idx !== i ? 0.55 : 1} />)
+          : <path className="chart-area" d={area} fill={`url(#${gid})`} />}
         {target != null && <line x1={0} x2={W} y1={sy(target).toFixed(1)} y2={sy(target).toFixed(1)} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.6" vectorEffect="non-scaling-stroke" />}
-        <path className="chart-line" d={line} fill="none" stroke={col} strokeWidth="2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+        {!barRects && <path className="chart-line" d={line} fill="none" stroke={col} strokeWidth="2" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />}
         {/* The overlay is a bare line above the primary's fill — no area of its own,
             which would muddy both. Thinner and unfilled so the total still reads as
             the headline curve. */}
@@ -1939,7 +1967,7 @@ export function ProfilePageSkeleton() {
       </div>
       <TabsSkeleton tabs={4} />
       <div className="sec-title sec-title-skeleton" aria-hidden="true"><span className="sk-bar" /></div>
-      {/* Matches PortfolioChart: a headline value and the 24H/1W/1M/1Y row. */}
+      {/* Matches PortfolioChart: a headline value and the 24H/7D/30D/12M row. */}
       <ChartCardSkeleton metrics={4} />
     </>
   )

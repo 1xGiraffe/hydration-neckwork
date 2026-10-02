@@ -82,7 +82,7 @@ describe('Contracts directory', () => {
     // Stripped of markup: the amount's reveal-and-copy wrapper sits between the
     // figure and the '+' that marks the total as a floor.
     expect(html.replace(/<[^>]+>/g, '')).toContain('40k+')     // activity floor (partial total)
-    expect(html).toContain('spark')           // 1Y sparkline
+    expect(html).toContain('spark')           // 12M sparkline
     // Verification is one check, not a chip — the match kind is in its title.
     expect(html).toContain('ok-check')
     expect(html).toContain('metadata hash matched exactly')

@@ -12,7 +12,7 @@ import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
-import { moneyMarketDebtUsd, profileTabs, resolveProfileView, ProfileStats, PortfolioChart } from '../components/AccountSections'
+import { moneyMarketDebtUsd, profileTabs, resolveProfileView, ProfileStats, PortfolioChart, VolumeSection } from '../components/AccountSections'
 import { OrdersTab } from '../components/positions/OrdersTab'
 import { LiquidityTab } from '../components/positions/LiquidityTab'
 import { BorrowTab } from '../components/positions/BorrowTab'
@@ -168,13 +168,15 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
                   </tbody>
                 </table></div>}
 
-              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data}
+              <PortfolioChart title="Value" perfKey={`list-tag:${listId}:${tagId}`} netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data}
                 refine={historyBlocks ? async (fromSec, toSec) => {
                   const range = blockRangeForWindow(data.portfolioDates ?? [], historyBlocks, fromSec, toSec)
                   if (!range) return null
                   const w = await userApi.listTagHistoryWindow(listId, tagId, range.fromBlock, range.toBlock)
                   return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates } : null
                 } : undefined} />
+
+              <VolumeSection scope={{ kind: 'list-tag', listId, tagId }} tradingVolumeUsd={data.tradingVolumeUsd} />
               </>)}
 
               {activeView === 'balances' && (

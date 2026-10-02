@@ -44,6 +44,7 @@ const IT = {
   hdx: { to: paths.hdx(), label: 'HDX', match: ['hdx'] } as NavItem,
   hollar: { to: paths.hollar(), label: 'HOLLAR', match: ['hollar'] } as NavItem,
   // /ice (ICE dashboard) is deliberately URL-only until the venue has live activity — no nav entry yet.
+  volume: { to: paths.volume(), label: 'Volume', match: ['volume'] } as NavItem,
   revenue: { to: paths.revenue(), label: 'Revenue', match: ['revenue'] } as NavItem,
   blocks: { to: paths.blocks(), label: 'Blocks', match: ['blocks', 'block'] } as NavItem,
   extrinsics: { to: paths.extrinsics(), label: 'Extrinsics', match: ['extrinsics', 'extrinsic'] } as NavItem,
@@ -65,10 +66,10 @@ const IT = {
   // rather than for the app's name, which means nothing from this side.
   preis: { to: PREIS_URL, label: 'Charts', match: [], external: true } as NavItem,
 }
-// Liquidity lives under Assets at every width; the trigger navigates to Assets
-// so the menu lists only Liquidity. Security leads the Chain menu (it is the
+// Liquidity and Volume live under Assets at every width; the trigger navigates
+// to Assets so the menu lists only the destinations it is not. Security leads the Chain menu (it is the
 // entry a returning operator wants first) while the trigger keeps Blocks.
-const ASSETS_GROUP: NavGroup = { label: 'Assets', items: [IT.assets, IT.liquidity], menuItems: [IT.liquidity, IT.preis] }
+const ASSETS_GROUP: NavGroup = { label: 'Assets', items: [IT.assets, IT.liquidity, IT.volume], menuItems: [IT.liquidity, IT.volume, IT.preis] }
 // Same shape as Assets: the trigger still goes to Accounts (items[0]), and the
 // menu lists only the destination the trigger is not. Tags used to be reachable
 // only from a link on the accounts page itself, which is a place you have to
@@ -87,8 +88,8 @@ const CHAIN_GROUP: NavGroup = {
 const FOLDABLE = new Set(['HDX', 'HOLLAR', 'Revenue'])
 const ASSETS_FOLD_GROUP: NavGroup = {
   label: 'Assets',
-  items: [IT.assets, IT.liquidity, IT.hdx, IT.hollar, IT.revenue],
-  menuItems: [IT.liquidity, IT.hdx, IT.hollar, IT.revenue, IT.preis],
+  items: [IT.assets, IT.liquidity, IT.volume, IT.hdx, IT.hollar, IT.revenue],
+  menuItems: [IT.liquidity, IT.volume, IT.hdx, IT.hollar, IT.revenue, IT.preis],
 }
 // The desktop nav in visual order; the drawer keeps every destination flat.
 const NAV_ENTRIES: Array<{ kind: 'link'; item: NavItem } | { kind: 'group'; group: NavGroup; fold?: 'only' | 'hidden' }> = [
@@ -101,7 +102,7 @@ const NAV_ENTRIES: Array<{ kind: 'link'; item: NavItem } | { kind: 'group'; grou
   { kind: 'group', group: ASSETS_FOLD_GROUP, fold: 'only' },
   { kind: 'group', group: CHAIN_GROUP },
 ]
-const DRAWER_LINKS: NavItem[] = [IT.activity, IT.accounts, IT.tags, IT.assets, IT.liquidity, IT.preis, IT.hdx, IT.hollar, IT.revenue]
+const DRAWER_LINKS: NavItem[] = [IT.activity, IT.accounts, IT.tags, IT.assets, IT.liquidity, IT.volume, IT.preis, IT.hdx, IT.hollar, IT.revenue]
 const DRAWER_GROUPS: NavGroup[] = [CHAIN_GROUP]
 
 function matches(item: NavItem, route: Route): boolean {

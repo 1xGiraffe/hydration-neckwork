@@ -19,12 +19,14 @@ import { setQuery, useQueryValue } from '../router'
 // (stacked history) and "from whom" (breakdown + top payers).
 
 // One grain per range: daily bars for a month, weekly for a year, monthly for
-// the whole era.
-const RANGES: { key: RevenueRange; label: string; caption: string }[] = [
-  { key: '30d', label: '30D', caption: 'last 30 days' },
-  { key: '1y', label: '1Y', caption: 'last year' },
-  { key: 'all', label: 'All', caption: 'all time' },
+// the whole era. The trailing year reads 12M like every other window, and its
+// URL says so (`?range=12m`); the API's own key stays `1y`, which old links carry.
+const RANGES: { key: RevenueRange; label: string; caption: string; param: string | null }[] = [
+  { key: '30d', label: '30D', caption: 'last 30 days', param: null },
+  { key: '1y', label: '12M', caption: 'last 12 months', param: '12m' },
+  { key: 'all', label: 'All', caption: 'all time', param: 'all' },
 ]
+const rangeOfParam = (raw: string): RevenueRange => (raw === '12m' || raw === '1y' ? '1y' : raw === 'all' ? 'all' : '30d')
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 function bucketLabel(range: RevenueRange, t: number): string {
@@ -109,8 +111,7 @@ function stakerColumns(d: StakerDistributions, range: RevenueRange, unit: Staker
 
 export function Revenue() {
   useDocumentTitle('Protocol Revenue')
-  const rawRange = useQueryValue('range', '30d') as RevenueRange
-  const range = RANGES.some(r => r.key === rawRange) ? rawRange : '30d'
+  const range = rangeOfParam(useQueryValue('range', '30d'))
   const { data } = useRevenueDashboard(range)
   // The staker section carries its own timeframe, independent of the page tabs;
   // it opens on the recent month (the all-time tiles still show beside it, and
@@ -148,9 +149,9 @@ export function Revenue() {
         <RevenueFlow />
         <div className="ribbon rev-hero-ribbon">
         {([
-          ['24h', data?.totals.day],
-          ['7 days', data?.totals.week],
-          ['30 days', data?.totals.month],
+          ['24H', data?.totals.day],
+          ['7D', data?.totals.week],
+          ['30D', data?.totals.month],
           ['All time', data?.totals.allTime],
         ] as const).map(([k, v]) => (
           <div className="cell" key={k}>
@@ -170,7 +171,7 @@ export function Revenue() {
               role="tab"
               aria-selected={range === r.key}
               className={range === r.key ? 'tab active' : 'tab'}
-              onClick={() => setQuery({ range: r.key === '30d' ? null : r.key })}
+              onClick={() => setQuery({ range: r.param })}
             >
               {r.label}
             </button>
