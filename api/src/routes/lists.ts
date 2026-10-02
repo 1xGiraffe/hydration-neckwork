@@ -52,7 +52,7 @@ export async function listsRoutes(fastify: FastifyInstance) {
 
   // A public list's tag, by tag id alone — what a shared /tag/<uuid> link
   // resolves to for a viewer who is not logged in, or is logged in but does not
-  // subscribe. Same twelve reads the owner's own /user/list-tag surface serves
+  // subscribe. Same seventeen reads the owner's own /user/list-tag surface serves
   // (one registration, so the two can never drift), with the tag id addressing
   // it because whoever followed the link was never told the list id.
   //

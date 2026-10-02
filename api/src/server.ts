@@ -16,6 +16,7 @@ import { indexerRoutes } from './routes/indexer.ts'
 import { explorerRoutes } from './routes/explorer.ts'
 import { contractsRoutes } from './routes/contracts.ts'
 import { poolsRoutes } from './routes/pools.ts'
+import { volumeRoutes } from './routes/volume.ts'
 import { liveRoutes } from './routes/live.ts'
 import { initLiveHeadService, stopLiveHeadService } from './services/liveHeadService.ts'
 import { initPendingHeadService, startPendingHeadService, stopPendingHeadService } from './services/pendingHeadService.ts'
@@ -73,6 +74,7 @@ import { initOrderHistory } from './services/orderHistory.ts'
 import { initLpRewardClaims } from './services/lpRewardClaims.ts'
 import { initPositionsPresence } from './services/positionsPresence.ts'
 import { initPoolService } from './services/poolService.ts'
+import { initVolumeHistory } from './services/volumeHistory.ts'
 import { initSecurityService } from './services/securityService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
 import { initLmRewardService } from './services/lmRewardService.ts'
@@ -166,6 +168,9 @@ const CACHE_CONTROL: [RegExp, number][] = [
   // list changes only when a runtime upgrade adds or removes a name, and every
   // filter box and alert form on the site reads the same copy.
   [/^\/explorer\/filter-names$/, 3600],
+  // Volume surfaces read hourly read models that publish about once an hour, and
+  // their payloads are cached per published hour server-side.
+  [/^\/explorer\/(volume$|asset\/\d+\/volume$|omnipool\/volume$|pool\/[^/]+(\/[^/]+)?\/volume$)/, 120],
   // Pool surfaces: current state refreshes every 30-60s server-side, the heavy
   // history models every 300s — match the shortest internal freshness window.
   [/^\/explorer\/omnipool/, 30],
@@ -225,6 +230,7 @@ await fastify.register(indexerRoutes, { client })
 await fastify.register(explorerRoutes)
 await fastify.register(contractsRoutes)
 await fastify.register(poolsRoutes)
+await fastify.register(volumeRoutes)
 await fastify.register(liveRoutes)
 await fastify.register(tagRoutes)
 await fastify.register(userRoutes)
@@ -284,6 +290,7 @@ async function start() {
     initLpRewardClaims(client)
     initPositionsPresence(client)
     initPoolService(client)
+    initVolumeHistory(client)
     initSecurityService(client)
     initLiveHeadService(client)
     // The pending-head follower is always-on (feeds merge its rows whether or

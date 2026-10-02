@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import {
   getAccountsForMembers,
-  getListTagDetail, getListTagHistoryWindow, getListTagLiquidityHistory, getListTagActivity, getListTagExtrinsics, getListTagEvents,
+  getListTagDetail, getListTagHistoryWindow, getListTagLiquidityHistory, getListTagVolumeHistory, getListTagActivity, getListTagExtrinsics, getListTagEvents,
   getListTagVotes, getListTagRevenueBreakdown, getListTagVotesByReferendum, getListTagTabCounts,
   getListTagListTotal, getListTagValueEvents,
   type ValueListFilters,
@@ -24,7 +24,7 @@ export interface ResolvedListTag {
   tag: { name: string; color: string; icon: string; note: string; members: string[] }
 }
 
-// The two ways the same sixteen reads are served. A list tag's aggregate view is
+// The two ways the same seventeen reads are served. A list tag's aggregate view is
 // one page, so it must not become two drifting sets of handlers — the surface
 // carries only what genuinely differs between them:
 //
@@ -82,6 +82,19 @@ export function listTagReadRoutes(fastify: FastifyInstance, surface: ListTagRead
     const w = optionalHistoryWindow(query(req))
     if (!w) return reply.status(400).send({ error: 'Invalid block window' })
     const history = await getListTagLiquidityHistory(resolved.listId, resolved.tagId, resolved.tag.members, w.window)
+    if (!history) return reply.status(404).send({ error: 'Tag not found' })
+    return history
+  })
+
+  // Trading volume over the list tag's members (a trade between two members counts
+  // for both) — the same wire shape and optional block window as the address and
+  // system-tag routes; its all-time total is the detail's "Trading" figure.
+  fastify.get(`${base}/volume-history`, async (req, reply) => {
+    const resolved = resolve(req, reply)
+    if (!resolved) return
+    const w = optionalHistoryWindow(query(req))
+    if (!w) return reply.status(400).send({ error: 'Invalid block window' })
+    const history = await getListTagVolumeHistory(resolved.listId, resolved.tagId, resolved.tag.members, w.window)
     if (!history) return reply.status(404).send({ error: 'Tag not found' })
     return history
   })
