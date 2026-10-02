@@ -550,7 +550,31 @@ export function zoneSpan(zone: ChartZone, min: number, max: number): { top: numb
   return { top, bottom, covers: bottom - top > 0.95, loInside: lo > min, hiInside: hi < max }
 }
 
-export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero, band, zones, markLast, markers, zoomKey, refine, syncTime, onSyncTime }: {
+/**
+ * An unlabelled second scale for some of a MultiLineChart's series — a ratio drawn
+ * beside the amounts it is a ratio of (a health factor over supplied and borrowed
+ * USD), on its own vertical scale so neither flattens the other. It draws no axis:
+ * its values are read from the tooltip (`fmt`) and the newest-point dot. `keys`
+ * names its series; everything else stays on the (left) axis. `anchor` is the
+ * value drawn ON the axis's floor line (a health factor's 1 on $0), so the two
+ * share that baseline and a value below it continues the same scale downward into
+ * the `floorZone` (clamped at its floor); without it the scale starts at the
+ * data's padded low. `max` is a ceiling (the scale ends at the data's padded top,
+ * never above `max`, so a capped series runs along the top).
+ */
+export interface SecondaryScale { keys: string[]; fmt: (v: number) => string; anchor?: number; max?: number }
+
+/**
+ * A strip under the axis floor (`frac` of the plot's height), tinted `color`: the
+ * region a second scale's values below its anchor fall into (a liquidation zone
+ * under HF 1), and where the chart's markers sit, named by `label` right-aligned
+ * inside it. The label steps left of any marker or newest-point dot near the
+ * right edge (they win), and wears a halo so a line crossing it stays legible.
+ * The axis itself stays floored at 0 — no axis value is drawn in it.
+ */
+export interface FloorZone { frac: number; color: string; label?: string }
+
+export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero, band, zones, secondary, floorZone, markLast, markers, hideDates, zoomKey, refine }: {
   buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string; floorZero?: boolean
   /**
    * Draw two of the series as one filled low/high envelope: a RANGE reads as an
@@ -566,6 +590,11 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
    * every line inside it. Clipped to the plot, labelled at the right edge.
    */
   zones?: ChartZone[]
+  /**
+   * Opt-in second scale (see SecondaryScale). Without it the chart is one-scale
+   * and draws exactly as it always has.
+   */
+  secondary?: SecondaryScale
   /** Mark the newest point of each drawn line, so "where it stands now" is visible without hovering. */
   markLast?: boolean
   /**
@@ -573,27 +602,30 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
    * a health-factor line). Drawn only on a time axis, inside the plot's gutters.
    */
   markers?: ChartMarker[]
+  /**
+   * Opt-in (see FloorZone): extend the plot below the axis floor by a tinted strip
+   * and put the markers in it instead of as flags over the lines. The axis is then
+   * floored at exactly 0.
+   */
+  floorZone?: FloorZone
+  /**
+   * Opt-in: no date labels under the plot (and no gutter for them) — the hovered
+   * point's date is in the tooltip, as on the value chart.
+   */
+  hideDates?: boolean
   /** Query-param name persisting the zoom window (back-navigable, shareable). */
   zoomKey?: string
   /** Refetch-on-zoom: a finer grid for base-index window [lo, hi]. */
   refine?: (fromSec: number, toSec: number, points: number) => Promise<RefinedGrid | null>
-  /**
-   * Shared hover across sibling charts (unix seconds). A chart reports the time of
-   * the bucket it is hovering through `onSyncTime` (null when the hover ends), and
-   * a chart that is not hovered itself draws a plain vertical line — no tooltip —
-   * at its own bucket nearest `syncTime`, when that falls inside its window. Time,
-   * not index, so each chart keeps its own grid and zoom.
-   */
-  syncTime?: number | null
-  onSyncTime?: (t: number | null) => void
 }) {
-  const [hover, setHoverState] = useState<number | null>(null)
+  const [hover, setHover] = useState<number | null>(null)
   const [markOpen, setMarkOpen] = useState(false)
-  // Every hover change is reported to the siblings; the time comes from the drawn
-  // axis, which only onMove knows, so this reports the clears.
-  const setHover = (i: null) => { setHoverState(i); onSyncTime?.(null) }
+  // Only the floor-zone label's collision estimate reads these (px → viewBox units).
+  const narrowView = useMediaQuery('(max-width: 720px)')
+  const coarse = useMediaQuery('(hover: none)')
   const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
-  const W = LINE_W, padL = LINE_PAD_L, padR = LINE_PAD_R, padT = 12, padB = 18
+  const H = h
+  const W = LINE_W, padL = LINE_PAD_L, padR = LINE_PAD_R, padT = 12, padB = hideDates ? 4 : 18
   const plotW = W - padL - padR
   // Absolute-time window: the hook needs only the buckets' instants.
   const bucketTimes = useMemo(() => bucketSecs(buckets), [buckets])
@@ -631,10 +663,28 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
       </div>
     )
   }
-  const lo = Math.min(...flat), hi = Math.max(...flat)
+  // With a second scale its series leave the axis domain; each scale fits its own.
+  const onSecondary = (key: string) => !!secondary && secondary.keys.includes(key)
+  const leftFlat = secondary ? vSeries.filter(s => !onSecondary(s.key)).flatMap(s => s.values).filter((v): v is number => v != null) : flat
+  const secFlat = secondary ? vSeries.filter(s => onSecondary(s.key)).flatMap(s => s.values).filter((v): v is number => v != null) : []
+  const domainFlat = leftFlat.length ? leftFlat : [0, 1]
+  const lo = Math.min(...domainFlat), hi = Math.max(...domainFlat)
   const pad = Math.max((hi - lo) * 0.08, hi * 0.0005)
-  const min = floorZero ? Math.max(0, lo - pad) : lo - pad, max = hi + pad
-  const plotH = h - padT - padB
+  const min = floorZone ? 0 : floorZero ? Math.max(0, lo - pad) : lo - pad, max = hi + pad
+  // A floor zone is carved out of the bottom of the plot: the axis maps onto the
+  // rest, and `floorY` is its floor line.
+  const zoneH = floorZone ? (H - padT - padB) * floorZone.frac / (1 + floorZone.frac) : 0
+  const plotH = H - padT - padB - zoneH
+  const floorY = padT + plotH
+  let rMin = 0, rMax = 1
+  if (secondary && secFlat.length) {
+    const rLo = Math.min(...secFlat), rHi = Math.max(...secFlat)
+    const rPad = Math.max((rHi - rLo) * 0.08, Math.abs(rHi) * 0.0005)
+    rMin = secondary.anchor ?? rLo - rPad
+    const top = secondary.anchor != null && rHi <= secondary.anchor ? (secondary.max ?? secondary.anchor + 1) : rHi + rPad
+    rMax = secondary.max != null ? Math.min(secondary.max, top) : top
+    if (!(rMax > rMin)) rMax = rMin + 1
+  }
   // Positions come from the view's TIME domain, the same one the zoom window and
   // its selection shade use — index spacing would put the line and the shade on
   // different axes, which is the mismatch this whole model exists to remove. It
@@ -653,6 +703,11 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
   const xf = (i: number) => Math.min(1, Math.max(0, timeAxis ? (vTimes[i] - zoom.view.from) / viewSpan : n > 1 ? i / (n - 1) : 0))
   const sx = (i: number) => padL + xf(i) * plotW
   const sy = (v: number) => padT + (1 - (v - min) / ((max - min) || 1)) * plotH
+  // Below its anchor a second-scale value continues into the floor zone, clamped
+  // at the zone's floor so a very low value cannot stretch it.
+  const syR = (v: number) => Math.min(floorY + zoneH, padT + (1 - (v - rMin) / (rMax - rMin)) * plotH)
+  const syOf = (key: string) => (onSecondary(key) ? syR : sy)
+  const fmtOf = (key: string) => (secondary && onSecondary(key) ? secondary.fmt : yFmt)
   // The band's bounds are ordinary series, so they slice, clip and refine with
   // everything else; only their DRAWING is joined here. Filled per contiguous
   // run where both bounds exist — a gap in either leaves the envelope open
@@ -675,14 +730,7 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
     : []
   // Back/forward can change the window without a gesture; a stale hover index
   // past the new slice must not address it.
-  if (hover != null && hover > n - 1) setHoverState(null)
-  // A sibling's hover, at this chart's nearest bucket — only inside its own window.
-  let syncIdx: number | null = null
-  if (hover == null && syncTime != null && timeAxis && syncTime >= zoom.view.from && syncTime <= zoom.view.to) {
-    let best = 0
-    for (let k = 1; k < n; k++) if (Math.abs(vTimes[k] - syncTime) < Math.abs(vTimes[best] - syncTime)) best = k
-    syncIdx = best
-  }
+  if (hover != null && hover > n - 1) setHover(null)
   function onMove(e: React.PointerEvent) {
     if (zoom.selecting || zoom.pinching) return
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
@@ -696,9 +744,40 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
       for (let k = 1; k < n; k++) if (Math.abs(xf(k) - f) < Math.abs(xf(best) - f)) best = k
       i = best
     }
-    const at = Math.min(n - 1, Math.max(0, i))
-    setHoverState(at)
-    onSyncTime?.(timeAxis ? vTimes[at] : null)
+    setHover(Math.min(n - 1, Math.max(0, i)))
+  }
+  // The floor zone's label, right-aligned inside it, stepped left past whatever
+  // sits there: a marker cap (drawn above the svg) or a newest-point dot inside
+  // the zone. The unit sizes are estimates — the svg scales with its card, ~0.75
+  // units per px on a desktop card and ~2.4 on a phone.
+  let zoneLabel: { right: number } | null = null
+  if (floorZone?.label) {
+    const unitsPerPx = narrowView ? 2.4 : 0.75
+    const textW = floorZone.label.length * (narrowView ? 11 : 6.2)
+    const obstacles: { x: number; half: number }[] = []
+    if (markers && timeAxis) {
+      for (const m of markers) {
+        const f = (utcSeconds(m.ts) - zoom.view.from) / viewSpan
+        if (f >= -0.01 && f <= 1.01) obstacles.push({ x: padL + Math.min(1, Math.max(0, f)) * plotW, half: (coarse ? 10 : 6) * unitsPerPx + 4 })
+      }
+    }
+    if (markLast) {
+      for (const s of vSeries) {
+        if (bandKeys.includes(s.key) || s.dashed) continue
+        for (let i = s.values.length - 1; i >= 0; i--) {
+          if (s.values[i] == null) continue
+          if (syOf(s.key)(s.values[i]!) > floorY) obstacles.push({ x: sx(i), half: 3.5 * 2 + 4 })
+          break
+        }
+      }
+    }
+    let right = W - padR - 8
+    for (let k = 0; k <= obstacles.length; k++) {
+      const hit = obstacles.filter(o => o.x + o.half > right - textW && o.x - o.half < right)
+      if (!hit.length) break
+      right = Math.min(...hit.map(o => o.x - o.half)) - 2
+    }
+    if (right - textW > padL + 4) zoneLabel = { right }
   }
   const selPct = (f: number) => (padL + Math.min(1, Math.max(0, f)) * plotW) / W * 100
   return (
@@ -707,7 +786,7 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
       onPointerMove={e => { zoom.onPointerMove(e); onMove(e) }}
       onPointerUp={zoom.onPointerUp} onPointerCancel={zoom.onPointerCancel} onDoubleClick={zoom.onDoubleClick}
       onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}>
-      <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
+      <svg className="day-chart" viewBox={`0 0 ${W} ${H}`}>
         {[0, 0.5, 1].map(t => {
           const v = min + (max - min) * t
           return (
@@ -735,18 +814,22 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
             </g>
           )
         })}
+        {floorZone && <rect className="mlc-floor-zone" x={padL} y={floorY.toFixed(1)} width={plotW} height={zoneH.toFixed(1)} fill={floorZone.color} fillOpacity={0.1} />}
         {bandAreas.map((d, i) => <path key={`band${i}`} d={d} fill={bHi!.color} fillOpacity={0.2} />)}
-        {min < 1 && max > 1 && <line x1={padL} x2={W - padR} y1={sy(1).toFixed(1)} y2={sy(1).toFixed(1)} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.6" />}
+        {!secondary && min < 1 && max > 1 && <line x1={padL} x2={W - padR} y1={sy(1).toFixed(1)} y2={sy(1).toFixed(1)} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.6" />}
         {vSeries.map(s => {
           // A band bound is the edge of a filled range, so it wears a hairline
           // instead of the full 2px a standalone line gets.
           const edge = bandKeys.includes(s.key)
+          // A second-scale line is thinner, so it reads as the ratio beside the amounts.
+          const ry = onSecondary(s.key)
+          const y = syOf(s.key)
           return (
             <g key={s.key} strokeOpacity={edge ? 0.5 : s.dashed ? 0.7 : 1} data-series={s.key}>
               {lineRuns(s.values).map(([a, b]) => a === b
-                ? <circle key={a} cx={sx(a).toFixed(1)} cy={sy(s.values[a]!).toFixed(1)} r="2.5" fill={s.color} fillOpacity={edge ? 0.5 : s.dashed ? 0.7 : 1} />
-                : <path key={a} d={s.values.slice(a, b + 1).map((v, j) => `${j ? 'L' : 'M'} ${sx(a + j).toFixed(1)} ${sy(v!).toFixed(1)}`).join(' ')}
-                    fill="none" stroke={s.color} strokeWidth={edge ? 1 : s.dashed ? 1.5 : 2} strokeDasharray={s.dashed ? '5 4' : undefined} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />)}
+                ? <circle key={a} cx={sx(a).toFixed(1)} cy={y(s.values[a]!).toFixed(1)} r="2.5" fill={s.color} fillOpacity={edge ? 0.5 : s.dashed ? 0.7 : 1} />
+                : <path key={a} d={s.values.slice(a, b + 1).map((v, j) => `${j ? 'L' : 'M'} ${sx(a + j).toFixed(1)} ${y(v!).toFixed(1)}`).join(' ')}
+                    fill="none" stroke={s.color} strokeWidth={edge ? 1 : s.dashed || ry ? 1.5 : 2} strokeDasharray={s.dashed ? '5 4' : undefined} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />)}
             </g>
           )
         })}
@@ -754,25 +837,30 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
           // The newest drawn point, so "where it stands now" needs no hover.
           for (let i = s.values.length - 1; i >= 0; i--) {
             if (s.values[i] == null) continue
-            return <circle key={`last${s.key}`} cx={sx(i).toFixed(1)} cy={sy(s.values[i]!).toFixed(1)} r="3.5" fill={s.color} stroke="var(--bg-elev)" strokeWidth="1.5" />
+            return <circle key={`last${s.key}`} cx={sx(i).toFixed(1)} cy={syOf(s.key)(s.values[i]!).toFixed(1)} r="3.5" fill={s.color} stroke="var(--bg-elev)" strokeWidth="1.5" />
           }
           return null
         })}
-        {dateTicks(n).map(i => (
-          <text key={i} className="hdx-ax" x={sx(i).toFixed(1)} y={h - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{axisTick(vBuckets[i], timeAxis ? viewSpan : 0, grainSec)}</text>
+        {!hideDates && dateTicks(n).map(i => (
+          <text key={i} className="hdx-ax" x={sx(i).toFixed(1)} y={H - 4} textAnchor={i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}>{axisTick(vBuckets[i], timeAxis ? viewSpan : 0, grainSec)}</text>
         ))}
-        {hover != null && !zoom.selecting && <line x1={sx(hover).toFixed(1)} x2={sx(hover).toFixed(1)} y1={padT} y2={h - padB} stroke="var(--text-medium)" strokeOpacity="0.55" />}
-        {syncIdx != null && !zoom.selecting && <line className="mlc-sync" x1={sx(syncIdx).toFixed(1)} x2={sx(syncIdx).toFixed(1)} y1={padT} y2={h - padB} stroke="var(--text-medium)" strokeOpacity="0.4" strokeDasharray="2 3" />}
+        {hover != null && !zoom.selecting && <line x1={sx(hover).toFixed(1)} x2={sx(hover).toFixed(1)} y1={padT} y2={H - padB} stroke="var(--text-medium)" strokeOpacity="0.55" />}
+        {zoneLabel && <text className="hdx-ax mlc-floor-label" x={zoneLabel.right.toFixed(1)} y={(floorY + zoneH / 2).toFixed(1)} textAnchor="end" dominantBaseline="central" style={{ fill: floorZone!.color }}>{floorZone!.label}</text>}
       </svg>
       {markers && markers.length > 0 && timeAxis && (
         <ChartMarkerLayer key={`${zoom.view.from}:${viewSpan}`} markers={markers} t0={zoom.view.from * 1000} span={viewSpan * 1000}
-          style={{ left: `${(padL / W * 100).toFixed(3)}%`, right: `${(padR / W * 100).toFixed(3)}%` }} onOpenChange={setMarkOpen} />
+          className={floorZone ? 'lane' : undefined}
+          style={{
+            left: `${(padL / W * 100).toFixed(3)}%`, right: `${(padR / W * 100).toFixed(3)}%`,
+            // In the floor zone: from the axis floor line down to the plot's bottom.
+            ...(floorZone ? { top: `${(floorY / H * 100).toFixed(3)}%`, bottom: `${(padB / H * 100).toFixed(3)}%` } : {}),
+          }} onOpenChange={setMarkOpen} />
       )}
       {hover != null && !zoom.selecting && !markOpen && (
         <ChartTip className="hdx-tip" xPct={sx(hover) / W * 100} top={2}>
           <span className="t-d">{tipDate(vBuckets[hover], grainSec)}</span>
           {vSeries.filter(s => !bandKeys.includes(s.key)).map(s => s.values[hover] != null && (
-            <span key={s.key} className="t-row"><i style={{ background: s.color }} />{s.label} <span className="tv">{yFmt(s.values[hover]!)}</span></span>
+            <span key={s.key} className="t-row"><i style={{ background: s.color }} />{s.label} <span className="tv">{fmtOf(s.key)(s.values[hover]!)}</span></span>
           ))}
           {/* One row for the pair: a range is read as an interval, not as two numbers. */}
           {bLo && bHi && bLo.values[hover] != null && bHi.values[hover] != null && (
