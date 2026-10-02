@@ -3,11 +3,13 @@ import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { zAssetId, zError, zIsoTimestamp, zTimeParam } from '../schemas/common.ts'
+import { badRequest, iso, zAssetId, zError, zIsoTimestamp, zTimeParam } from '../schemas/common.ts'
 import {
   ACTIVITY_KINDS, REVENUE_STREAMS, TVL_VENUES, activityCounts, resolveWindow, revenueStats, tvlStats, volumeStats,
 } from '../services/statsData.ts'
 import { zVenue } from './tradesShared.ts'
+import { normalizePoolKey } from './pools.ts'
+import { VOLUME_USD_GROUPS, VOLUME_USD_VENUES, publishedCut, volumeUsdStats } from '../services/volumeData.ts'
 
 const DAY_S = 86_400
 
@@ -73,6 +75,66 @@ export const statsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
     // recomputed every block and never hit.
     const key = `data:stats:volume:${groupBy}:${bucket}:${venue ?? ''}:${asset ?? ''}:${wraps}:${window.from}:${window.to}`
     return { items: await cached(key, 60_000, () => volumeStats(opts.client, { groupBy, bucket, from: window.from, to: window.to, venue, assetId: asset == null ? undefined : Number(asset), excludeWraps: wraps === 'exclude' })) }
+  })
+
+  app.get('/v1/stats/volume/usd', {
+    schema: {
+      tags: ['stats'],
+      summary: 'USD trade volume per hour or day: routed, by venue, pool or asset',
+      description: [
+        '`groupBy` picks one of three definitions; they answer different questions and must not be mixed. `routed` is PLATFORM volume: every trade counted ONCE, netted across its route (a DOT→USDT→HDX route is one trade valued at the larger of what went in and what came out, its intermediate hops cancelling), aToken wraps never counted — the definition of public /v1/stats/platform `totalRoutedUsd` and the DefiLlama daily series. `venue` and `pool` are POOL volume: every FILL counted once in the pool it executed in, valued by its out side (the in side when the out side is unpriced) — the definition of /v1/pools/{venue}/volumes. The Omnipool counts a user swap ONCE: its A→H2O first hop adds nothing and the H2O→B fill that completes it carries the swap. A trade routed through two pools counts in BOTH, so venue and pool volumes sum to MORE than routed volume — that is what pool volume means, not a double count. `asset` is ASSET volume: the USD value of each asset\'s own legs in fills, sold plus bought, so one fill A→B adds to A and to B and the assets sum to about twice the pool volume. The Omnipool hub H2O (asset 1) is pool plumbing and has no asset rows.',
+        'Identities are the registry\'s, never a display fold: `asset` groups by the raw asset id that traded (an aToken such as aDOT 1001 trading in a pool is its own asset; a stableswap share is its own asset), `pool` by `venue:poolKey` with the poolKey /v1/pools/{venue}/{poolKey}/volumes takes (`omnipool`, a stableswap pool id, an XYK pool account, a v3 contract, an OTC order id, the HSM account, and \'\' for the LBP pallet, which recorded no pool key). The `aave` venue (aToken mints and redeems — 1:1 wraps, not swaps) is in none of these figures; /v1/stats/volume\'s raw legs keep it.',
+        'Valuation is event-time: each leg at the hourly candle that had fully CLOSED by the fill (`amount × close`, the asset priced through its underlying where it has no feed of its own), never at today\'s price. A fill (or routed trade, or asset side) with no priced side at all is kept and counted in `unpriced` at 0 USD — never dropped. Fees are never volume: `lpFeeUsd` (fee legs accruing to the pool\'s liquidity providers) and `protocolFeeUsd` (every other fee leg: the Omnipool\'s hub fee and the asset-fee share routed to staking, referrals or burned, OTC and LBP fees) ride beside pool volume and partition the fee a fill paid. A Uniswap v3 fee leg is the whole swap fee; where `setFeeProtocol` is on, its protocol share (1/n, the pool\'s denominator for that token in force at the swap — the `uniswap_v3_fee` revenue stream\'s accrual rule) is in `protocolFeeUsd` and only the rest in `lpFeeUsd`. Legs before 2025-01-25 name no fee recipient, and an Omnipool fee leg without one counts as LP.',
+        'Freshness: the source holds CLOSED hours only, published by the derivations service; each hour is folded on the first cycle after it has closed and the price pipeline\'s head has passed it, so the newest published hour trails the indexed head by up to about an hour plus one derivations cycle. `publishedThrough` names the first hour NOT yet published — a bucket reaching it is partial, and nothing after it exists here (no raw tail is added). Below that cut a bucket is final short of a backfill re-folding its hours.',
+        'Windows: `fromTime`/`toTime` bound the hours read (`hour >= fromTime AND hour < toTime`, so a day bucket cut by the window is partial); default the last 7 days; at most 30 days for `bucket=hour` and 366 days for `bucket=day`. Filters: `venue=` for venue, pool and asset; `poolKey=` (requires `venue`) for pool and asset; `asset=` for asset. `routed` is platform-wide and takes none.',
+      ].join('\n\n'),
+      querystring: z.object({
+        groupBy: z.enum(VOLUME_USD_GROUPS).default('routed').describe('`routed` (default): platform volume, each trade once; `venue`/`pool`: fills per venue or per `venue:poolKey`; `asset`: each asset\'s legs.'),
+        bucket: z.enum(['hour', 'day']).default('day'),
+        venue: z.enum(VOLUME_USD_VENUES).optional(),
+        poolKey: z.string().min(1).max(128).optional().describe('One pool, in the venue\'s own poolKey form (see /v1/pools/{venue}/{poolKey}/volumes); requires `venue`.'),
+        asset: zAssetId.optional().describe('One asset id (groupBy=asset only).'),
+        fromTime: zTimeParam.optional(),
+        toTime: zTimeParam.optional(),
+      }),
+      response: {
+        200: z.object({
+          groupBy: z.enum(VOLUME_USD_GROUPS),
+          bucket: z.enum(['hour', 'day']),
+          from: zIsoTimestamp.describe('The resolved window start.'),
+          to: zIsoTimestamp.describe('The resolved window end (exclusive).'),
+          publishedThrough: zIsoTimestamp.nullable().describe('The first hour the source has NOT published (its newest hour + 1 h); null on an empty source.'),
+          items: z.array(z.object({
+            bucket: zIsoTimestamp.describe('The bucket start (hour or UTC day).'),
+            group: z.string().describe('`routed`; the venue; `venue:poolKey`; or the asset id.'),
+            volumeUsd: z.string().describe('Event-time USD, 2 decimals.'),
+            trades: z.number().int().optional().describe('groupBy=routed: routed trades with a fill in the bucket.'),
+            fills: z.number().int().optional().describe('groupBy=venue|pool: fills carrying volume (an Omnipool hub swap\'s first hop is not counted, matching the volume).'),
+            legs: z.number().int().optional().describe('groupBy=asset: the asset\'s in/out legs.'),
+            unpriced: z.number().int().describe('Trades, fills or legs (per the grouping) whose value ended at 0 because no side was priced; counted, never dropped.'),
+            lpFeeUsd: z.string().optional().describe('groupBy=venue|pool: fee legs to the pool\'s LPs, event-time USD. Not part of volumeUsd.'),
+            protocolFeeUsd: z.string().optional().describe('groupBy=venue|pool: every other fee leg, event-time USD. Not part of volumeUsd.'),
+          })),
+        }),
+        400: zError,
+      },
+    },
+  }, async request => {
+    const { groupBy, bucket, venue, asset } = request.query
+    if (groupBy === 'routed' && (venue || asset || request.query.poolKey)) throw badRequest('groupBy=routed is platform-wide: venue, poolKey and asset do not apply (use groupBy=venue, pool or asset)')
+    if (asset != null && groupBy !== 'asset') throw badRequest('asset= applies to groupBy=asset only')
+    if (request.query.poolKey != null && !venue) throw badRequest('poolKey= requires venue=')
+    if (request.query.poolKey != null && groupBy === 'venue') throw badRequest('poolKey= applies to groupBy=pool or asset')
+    const poolKey = request.query.poolKey != null && venue ? normalizePoolKey(venue, request.query.poolKey) : undefined
+    const window = resolveWindow(request.query.fromTime, request.query.toTime, 7 * DAY_S, bucket === 'hour' ? 30 * DAY_S : 366 * DAY_S, 'volume/usd')
+    // Closed-hour sources that gain an hour about hourly: the window and a plain TTL,
+    // never the live head (a head key on a source that moves once an hour never hits).
+    const key = `data:stats:volume-usd:${groupBy}:${bucket}:${venue ?? ''}:${poolKey ?? ''}:${asset ?? ''}:${window.from}:${window.to}`
+    const [items, cut] = await Promise.all([
+      cached(key, 60_000, () => volumeUsdStats(opts.client, { groupBy, bucket, from: window.from, to: window.to, venue, poolKey, assetId: asset == null ? undefined : Number(asset) })),
+      publishedCut(opts.client, groupBy),
+    ])
+    return { groupBy, bucket, from: iso(window.from * 1000), to: iso(window.to * 1000), publishedThrough: cut, items }
   })
 
   app.get('/v1/stats/revenue', {

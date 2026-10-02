@@ -1069,11 +1069,18 @@ export interface PoolListEntry {
   sharePct: number | null
   composition: PoolCompositionEntry[]
   hasPegs: boolean
+  /** Pool (venue) volume over the last 24 h / 7 d before the volume models' cut; null where no model keys the row. */
+  volume24hUsd?: number | null
+  volume7dUsd?: number | null
+  /** 24 h volume over the row's CURRENT TVL, as a ratio (0.96 = 96%); never annualised. */
+  volumeTvl24h?: number | null
 }
 
 export interface PoolsIndex {
   totalTvlUsd: number | null
   pools: PoolListEntry[]
+  /** The volume models' cut (first unpublished hour, ISO) the rows' volumes end at; null when unavailable. */
+  volumeAsOf?: string | null
 }
 
 export interface PoolDetailAsset {
@@ -1400,6 +1407,78 @@ export interface StakerDistributions {
   series: { pot: 'staking' | 'gigahdx' | 'gigarwd'; points: StakerPoint[] }[]
   totals: { hdx: number; usd: number }
   allTime: { hdx: number; usd: number }
+}
+
+/* ============ trading volume ============ */
+//
+// The explorer's volume routes (api/src/routes/volume.ts, services/volumeHistory.ts
+// and accountVolumeHistory.ts). Three definitions, never mixed: ROUTED volume
+// (every trade once, netted across its route), VENUE/POOL volume (every fill once
+// in its pool — sums to more than routed), ASSET volume (an asset's own legs, sold
+// plus bought), and per-account TRADING volume (the netted per-trade model).
+// Every window ends at `asOf`, the models' cut (first unpublished hour, ISO).
+
+/** One window's figure with the same span immediately before; `changePct` is a PERCENT, null without a prior. */
+export interface VolumeWindowStat { volumeUsd: number; prevUsd: number; changePct: number | null }
+export interface VolumeKpis { d1: VolumeWindowStat; d7: VolumeWindowStat; d30: VolumeWindowStat }
+
+/** `{ stepSec, buckets, series }` — the chart this server never prints raw. */
+export interface VolumeChart { stepSec: number; buckets: string[]; series: Record<string, (number | null)[]> }
+
+/** `/explorer/address/:a/volume-history` and `/explorer/tag/:t/volume-history`. */
+export interface AccountVolumeHistory {
+  stepSec: number
+  buckets: { ts: string; endTs: string; blockHeight: number; volumeUsd: number; trades: number }[]
+  /** Trailing 24 h / 7 d / 30 d before the newest indexed block, and all time — never windowed. */
+  totals: { d1: number; d7: number; d30: number; all: number }
+  asOfBlock: number | null
+}
+
+/** `/explorer/volume`. */
+export interface PlatformVolume {
+  asOf: string | null
+  range: string
+  routed: VolumeKpis
+  routedTrades: { d1: number; d7: number; d30: number }
+  venues: { venue: string; kpis: VolumeKpis }[]
+  venueTotal: VolumeKpis
+  chart: VolumeChart
+  topPools: { venue: string; name: string; poolId: number | null; address: string | null; volume7dUsd: number; tvlUsd: number | null; volumeTvl7d: number | null }[]
+  topAssets: { asset: AssetRef; volume7dUsd: number; sharePct: number }[]
+  topTraders: { account: AccountRef; volume7dUsd: number; trades: number }[]
+  tradersWindow: { fromBlock: number; toBlock: number; asOfBlock: number | null } | null
+}
+
+/** `/explorer/asset/:id/volume`. */
+export interface AssetVolume {
+  assetId: number
+  assetIds: number[]
+  assets: AssetRef[]
+  asOf: string | null
+  kpis: VolumeKpis
+  byVenue: { venue: string; d1: number; d7: number; d30: number }[]
+  allTimeUsd: number
+  /** Ratios (1.14 = 114%) over the mean pooled value of the counted ids. */
+  volumeTvl: { d7: number | null; d30: number | null; meanTvl7dUsd: number | null; meanTvl30dUsd: number | null }
+  chart: VolumeChart
+}
+
+/** `/explorer/omnipool/volume` and `/explorer/pool/:id/volume`. */
+export interface PoolVolume {
+  venue: string
+  poolKey: string
+  asOf: string | null
+  kpis: VolumeKpis
+  fees: Record<'d1' | 'd7' | 'd30', { lpUsd: number; protocolUsd: number }>
+  fills: { d1: number; d7: number; d30: number }
+  allTime: { volumeUsd: number; lpFeeUsd: number; protocolFeeUsd: number; fills: number }
+  tvlUsd: number | null
+  meanTvl7dUsd: number | null
+  /** Ratios: 24 h over CURRENT TVL, 7 d over the 7-day mean TVL. */
+  volumeTvl: { d1: number | null; d7: number | null }
+  feeApr7dPct: number | null
+  chart: VolumeChart
+  stackAssets?: AssetRef[]
 }
 
 /* ============ errors ============ */

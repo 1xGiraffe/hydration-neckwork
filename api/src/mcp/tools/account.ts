@@ -5,6 +5,7 @@ import { UpstreamError } from '../upstream.ts'
 import type {
   AccountRef,
   AccountHistory,
+  AccountVolumeHistory,
   AddressBalance,
   AddressDetail,
   ActiveDca,
@@ -52,6 +53,7 @@ import {
   moduleName,
   shortAddress,
   shortHash,
+  tagUrl,
 } from '../format/refs.ts'
 import { bullets, escapeCell, h3, joinBlocks, kv, note, section, table } from '../format/md.ts'
 import {
@@ -894,15 +896,14 @@ const getAccount: ToolDefinition = {
 
 /* ============ get_account_history ============ */
 
-const HISTORY_KINDS = ['portfolio', 'balances', 'value-events', 'liquidity', 'money-market'] as const
+const HISTORY_KINDS = ['portfolio', 'balances', 'value-events', 'liquidity', 'money-market', 'volume'] as const
 const MAX_SERIES_POINTS = 12
 const MAX_VALUE_EVENT_ROWS = 12
 
 const historyInputShape = {
-  address: addressParam,
-  kind: z.enum(HISTORY_KINDS).optional().describe(
-    "What to read. 'portfolio' (default) is the account's total USD value over time plus its largest value events; 'balances' is the per-asset token-amount reconstruction; 'value-events' is just the events that moved the value line; 'liquidity' is the LP value line and every liquidity position's value and legs over time; 'money-market' is each isolated money market's supplied/borrowed value, its reserves and its observed health factor over time.",
-  ),
+  address: addressParam.optional(),
+  tag: z.string().min(1).max(64).optional().describe("Kind 'volume' only, instead of `address`: a system tag id (e.g. `treasury`)."),
+  kind: z.enum(HISTORY_KINDS).optional().describe("What to read (default 'portfolio'); each kind is described in the tool description's `kind` list."),
   fromBlock: z.coerce.number().int().min(0).max(0xffff_ffff).optional().describe('Start of the window as a BLOCK NUMBER, not a date. Must be given together with toBlock.'),
   toBlock: z.coerce.number().int().min(1).max(0xffff_ffff).optional().describe('End of the window as a BLOCK NUMBER, not a date. Must exceed fromBlock and be given together with it.'),
   limit: z.coerce.number().int().min(1).max(50).optional().describe('How many rows the value-event, per-asset and per-position tables may show (default 12). The sampled series path is always at most 12 points, whatever this says.'),
@@ -1606,6 +1607,101 @@ async function moneyMarketHistoryAnswer(
   })
 }
 
+/* ---- kind 'volume' ---- */
+
+const MAX_VOLUME_BUCKET_ROWS = 5
+
+/**
+ * The 'volume' kind: `/explorer/address/:a/volume-history` or
+ * `/explorer/tag/:t/volume-history` — the account page's "Trading" figure (the
+ * netted per-trade model) on the value chart's grid. It reads nothing else.
+ * The answer is the totals and a bucket summary (first, last, peak and the
+ * busiest few), never the series.
+ */
+async function volumeHistoryAnswer(
+  target: { address: string } | { tag: string },
+  window: { fromBlock: number; toBlock: number } | undefined,
+  limit: number,
+  ctx: ToolContext,
+) {
+  const base = ctx.explorerBaseUrl
+  const isTag = 'tag' in target
+  const path = isTag
+    ? `/explorer/tag/${encodeURIComponent(target.tag)}/volume-history`
+    : `/explorer/address/${encodeURIComponent(target.address)}/volume-history`
+  const subject = isTag ? `tag \`${target.tag}\`` : shortAddress(target.address)
+  const url = isTag ? tagUrl(base, target.tag) : accountUrl(base, target.address)
+  let v: AccountVolumeHistory
+  try {
+    v = await ctx.upstream.get<AccountVolumeHistory>(path, window, { ttlMs: 120_000, timeoutMs: 90_000 })
+  } catch (err) {
+    if (isTag) return failure(toolErrorFromUpstream(err, `The trading volume of tag ${target.tag}`))
+    return failure(addressNotFound(err, target.address, `The trading volume of ${target.address}`))
+  }
+
+  const buckets = v.buckets ?? []
+  const traded = buckets.filter(b => b.trades > 0 || b.volumeUsd > 0)
+  const firstTraded = traded[0] ?? null
+  const lastTraded = traded[traded.length - 1] ?? null
+  const last = buckets[buckets.length - 1] ?? null
+  const busiest = [...traded].sort((a, b) => b.volumeUsd - a.volumeUsd).slice(0, Math.min(limit, MAX_VOLUME_BUCKET_ROWS))
+  const peak = busiest[0] ?? null
+  const inView = buckets.reduce((sum, b) => sum + b.volumeUsd, 0)
+  const tradesInView = buckets.reduce((sum, b) => sum + b.trades, 0)
+  const windowed = window != null
+  const bucketLine = (b: AccountVolumeHistory['buckets'][number] | null): string | null =>
+    b == null ? null : `${formatUsd(b.volumeUsd)} · ${formatCount(b.trades)} trade(s) in ${formatTime(b.ts)} → ${formatTime(b.endTs)} (to block ${formatCount(b.blockHeight)})`
+
+  const markdown = fit(joinBlocks(
+    `## Trading volume — ${subject}`,
+    kv([
+      ['Last 24 h', formatUsd(v.totals?.d1)],
+      ['Last 7 d', formatUsd(v.totals?.d7)],
+      ['Last 30 d', formatUsd(v.totals?.d30)],
+      ['All time', `${formatUsd(v.totals?.all)}${isTag ? '' : ' — the account page\'s "Trading" figure'}`],
+      ['Model holds trades through', v.asOfBlock == null ? 'nothing yet' : `block ${formatCount(v.asOfBlock)}`],
+      ['Window', windowed ? `blocks ${formatCount(window.fromBlock)} → ${formatCount(window.toBlock)}: ${formatUsd(inView)} over ${formatCount(tradesInView)} trade(s)` : null],
+      ['Buckets', buckets.length ? `${formatCount(buckets.length)} of ${formatDuration(v.stepSec)}, ${formatTime(buckets[0].ts)} → ${formatTime(last!.endTs)}; ${formatCount(traded.length)} with trades` : null],
+      ['First bucket with trades', bucketLine(firstTraded)],
+      ['Last bucket with trades', bucketLine(lastTraded)],
+      ['Peak bucket', bucketLine(peak)],
+      [isTag ? 'Tag' : 'Account', url],
+    ]),
+    busiest.length > 1
+      ? section(`Busiest buckets (${busiest.length} of ${formatCount(traded.length)})`, table(
+        ['Bucket', 'Volume', 'Trades'],
+        busiest.map(b => [`${formatTime(b.ts)} → ${formatTime(b.endTs)}`, formatUsd(b.volumeUsd), formatCount(b.trades)]),
+      ))
+      : '',
+    !traded.length ? note(windowed ? 'No trade in the window.' : 'No trade the index has seen.') : '',
+    note('Trading volume counts every trade ONCE at the larger of its netted in-side and out-side — a routed or DCA trade\'s intermediate hops cancel — valued at the hourly candle closed by the trade. aToken wraps and the ICE solver pot\'s routes are not trading and are excluded. It is not pool volume (get_pools), which counts each fill in each pool it touched.'),
+    note(isTag
+      ? 'A tag SUMS its members: an OTC fill between two members counts once for each side, so the figure can exceed what the tag traded with outsiders.'
+      : 'The figure is the account\'s RELATED SET (its substrate account, its bound EVM address and their EVM-side forms) — the same set as the account page — not one address.'),
+    note(`The 24 h / 7 d / 30 d totals trail the newest indexed block and ignore any window; the buckets lie on the value chart's grid (one wall-clock step, ~180 buckets, the last one live and shorter). The model is republished every derivations cycle (about ten minutes), so the newest trades can be missing until then.`),
+  ), ctx, 'Lower `limit`.')
+
+  return output(ctx, markdown, {
+    ...(isTag ? { tag: target.tag } : { address: target.address }),
+    kind: 'volume',
+    measure: 'netted per-trade trading volume (the account page "Trading" figure), event-time USD',
+    window: window ?? null,
+    url,
+    totals: v.totals,
+    asOfBlock: v.asOfBlock,
+    stepSec: v.stepSec,
+    buckets: buckets.length,
+    bucketsWithTrades: traded.length,
+    inView: { volumeUsd: inView, trades: tradesInView },
+    first: buckets[0] ? { ts: buckets[0].ts } : null,
+    last,
+    firstTraded,
+    lastTraded,
+    peak,
+    busiest,
+  })
+}
+
 const GET_ACCOUNT_HISTORY_DESCRIPTION = `How one account's value moved over time — the portfolio line the Explorer's account chart draws, the per-asset balance reconstruction behind it, the events that moved it, its liquidity positions' value and legs, or its money-market positions and health factors.
 
 Answers "did this wallet grow or bleed?", "when did it take its position on?", "what were its biggest inflows and outflows?", "how much of the change was price rather than trading?". Use \`get_account\` for the position as it stands NOW; use this for the path it took. Use \`get_activity\` scoped to the account when you want every action rather than the value line.
@@ -1615,6 +1711,7 @@ Answers "did this wallet grow or bleed?", "when did it take its position on?", "
 - 'balances' — per-asset token amounts over time (first/last/min/max per asset), for "when did it accumulate the DOT?".
 - 'value-events' — only the events that moved the line, largest first.
 - 'liquidity' — the LP value line (every priced liquidity position summed) with its sampled path, and a per-position table — the explorer returns at most the 50 largest by last-held value, and \`limit\` trims further: venue, held from→to, first/last/low/high USD and the legs at its last held point (an Omnipool position's H2O leg reads \`+ x H2O\`), for "how did this LP position do?", "what did this account provide liquidity to, and when?".
+- 'volume' — trading volume (each trade once, netted across its route): 24 h / 7 d / 30 d / all-time totals (all time = the account page's "Trading" figure), the first, last and peak buckets. \`tag\` instead of \`address\` sums a tag's members (a trade between two members counts for both).
 - 'money-market' — per ISOLATED money market (primary \`core\`, \`gigahdx\`, \`bil\`, …): the observed health factor's last and lowest values with the blocks they were read at, supplied/borrowed USD, and the reserves held at the last point (\`limit\` rows per market) — plus the priced supplied and borrowed sums across markets with a sampled path and the settled unclaimed lending incentives — for "how close did this borrower get to liquidation?", "when did it take on the HOLLAR debt?".
 
 \`fromBlock\`/\`toBlock\` are BLOCK NUMBERS, not dates, and must be given together — this route windows in block space because the series carries its end-of-bucket block heights. Leave both out for the account's whole indexed history. For 'value-events' the window is applied to the rows after they are read.
@@ -1635,10 +1732,14 @@ const getAccountHistory: ToolDefinition = {
   async handler(input, ctx) {
     const parsed = parseInput(historyInputShape, input)
     if (!parsed.ok) return failure(parsed.error)
-    const { address } = parsed.value
+    const { tag } = parsed.value
     const kind = parsed.value.kind ?? 'portfolio'
     const limit = parsed.value.limit ?? MAX_VALUE_EVENT_ROWS
     const { fromBlock, toBlock } = parsed.value
+    if (tag != null && parsed.value.address != null) return failure(invalidArgument('Give `address` or `tag`, not both.'))
+    if (tag != null && kind !== 'volume') return failure(invalidArgument(`\`tag\` applies to kind 'volume' only; kind '${kind}' reads one account — pass \`address\`.`))
+    if (tag == null && parsed.value.address == null) return failure(invalidArgument(kind === 'volume' ? 'kind \'volume\' needs `address` (an account) or `tag` (a system tag id).' : '`address` is required.'))
+    const address = parsed.value.address ?? ''
     if ((fromBlock == null) !== (toBlock == null)) {
       return failure(invalidArgument('fromBlock and toBlock must be given together — the history window is a block range, not an open-ended bound. Omit both for the account\'s whole indexed history.'))
     }
@@ -1651,6 +1752,7 @@ const getAccountHistory: ToolDefinition = {
     const window = fromBlock != null && toBlock != null ? { fromBlock, toBlock } : undefined
     if (kind === 'liquidity') return liquidityHistoryAnswer(address, window, limit, ctx)
     if (kind === 'money-market') return moneyMarketHistoryAnswer(address, window, limit, ctx)
+    if (kind === 'volume') return volumeHistoryAnswer(tag != null ? { tag } : { address }, window, limit, ctx)
 
     const wantsSeries = kind !== 'value-events'
     const wantsEvents = kind !== 'balances'
