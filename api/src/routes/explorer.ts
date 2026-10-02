@@ -18,6 +18,8 @@ import {
   getAddressRevenueBreakdown, getTagRevenueBreakdown,
   describeLookupMiss,
   isLocatedActivityRequest,
+  mmMarkets,
+  mmMarketByKey,
   normalizeAccountSort,
   type AccountSort,
   type EventListFilters,
@@ -193,6 +195,9 @@ export function valueFilters(q: Record<string, unknown>): ValueListFilters {
   // named / unnamed: whether the explorer can put a name to the row's actor
   // (see accountIsNamed). Anything else is no filter at all.
   const identity = q.identity === 'named' || q.identity === 'unnamed' ? q.identity : undefined
+  // A configured market key, money-market type only — unusableFilterParam refuses
+  // any other value before a reader gets here.
+  const market = typeof q.market === 'string' && mmMarketByKey(q.market) ? q.market : undefined
   return {
     token: textParam(q, 'token', 64),
     min: numParam(q, 'min'),
@@ -201,6 +206,7 @@ export function valueFilters(q: Record<string, unknown>): ValueListFilters {
     minRevenue: numParam(q, 'minRevenue'),
     unit,
     ...(identity ? { identity } : {}),
+    ...(market ? { market } : {}),
   }
 }
 
@@ -261,6 +267,14 @@ export function unusableFilterParam(query: Record<string, unknown>): { key: stri
     const raw = query[rule.key]
     if (raw == null || raw === '') continue
     if (typeof raw !== 'string' || !rule.accepts(raw)) return { key: rule.key, expected: rule.expected }
+  }
+  // `market` names one isolated money market, so it only means something on the
+  // money-market feed: a configured key (MM_MARKETS) under `type=mm`. A market on
+  // any other type (or none) would be a filter that silently empties or ignores.
+  const market = query.market
+  if (market != null && market !== '') {
+    const expected = `${mmMarkets().map(m => m.key).join(', ')} (with type=mm)`
+    if (typeof market !== 'string' || !mmMarketByKey(market) || query.type !== 'mm') return { key: 'market', expected }
   }
   return null
 }
@@ -354,7 +368,7 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = z.object({ scope: z.enum(['extrinsics', 'events', 'activity']) }).safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid scope' })
     // Optional filters so the chart can mirror the activity page's tab + filters.
-    const q = z.object({ type: z.string().max(20).optional(), action: z.string().max(40).optional(), token: z.string().max(40).optional() }).safeParse(req.query)
+    const q = z.object({ type: z.string().max(20).optional(), action: z.string().max(40).optional(), token: z.string().max(40).optional(), market: z.string().max(40).optional() }).safeParse(req.query)
     return getDailyActivity(params.data.scope, q.success ? dailyActivityFilters(q.data) : {})
   })
 
@@ -636,6 +650,10 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const total = await getGlobalActivityTotal(type, textParam(q, 'action', 32), valueFilters(q), dateParam(q, 'from'), dateParam(q, 'to'))
     return { ...total, maxOffset: maxActivityOffsetFor(type) }
   })
+
+  // The isolated money markets this deployment configures, in display order — the
+  // options of the money-market activity feeds' `market` filter.
+  fastify.get('/explorer/mm-markets', async () => mmMarkets().map(m => ({ key: m.key, label: m.label, role: m.role })))
 
   fastify.get('/explorer/money-market', async (req) => {
     const limit = limitParam(req.query as Record<string, unknown>, 50)

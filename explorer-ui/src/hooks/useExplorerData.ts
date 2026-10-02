@@ -586,6 +586,10 @@ export function useAssetFilterOptions() {
 // The call/event name catalogue behind the name filters and the alert form's
 // pallet/name pickers. Cached an hour by the API and never polled: the list moves
 // only when a runtime upgrade adds or removes a name.
+export function useMmMarkets(enabled = true) {
+  // The deployment's market list moves only with its configuration.
+  return useQuery({ queryKey: ['mm-markets'], queryFn: ({ signal }) => api.mmMarkets(signal), staleTime: 3_600_000, enabled })
+}
 export function useFilterNames() {
   return useQuery({ queryKey: ['filter-names'], queryFn: ({ signal }) => api.filterNames(signal), staleTime: 3_600_000 })
 }
@@ -767,7 +771,7 @@ export function useCompilerVersions(enabled = true) {
     enabled,
   })
 }
-export function useDaily(scope: string, params?: { type?: string; action?: string; token?: string }) {
+export function useDaily(scope: string, params?: { type?: string; action?: string; token?: string; market?: string }) {
   // keepPreviousData: switching the active tab/action changes the query key; without
   // it `data` drops to undefined mid-fetch and the chart collapses to a skeleton
   // (and back), flickering. Holding the previous series lets DayBarChart update the

@@ -1,4 +1,4 @@
-import type {
+import type { MmMarketOption,
   PairChart,
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
@@ -105,7 +105,9 @@ function withQuery(path: string, values: Record<string, QueryValue>): string {
 // `minRevenue` is a floor on what the PROTOCOL earned on the row's extrinsic, which
 // is a different question from `min` (the row's own value) and always in USD — it has
 // no token denomination, so the unit toggle does not apply to it.
-export interface ValueFilters { token?: string; min?: string; minRevenue?: string; identity?: string }
+// `market` is one isolated money market's key (core, gigahdx, …) and is only ever
+// sent on the money-market (`mm`) feed — the API refuses it anywhere else.
+export interface ValueFilters { token?: string; min?: string; minRevenue?: string; identity?: string; market?: string }
 export interface ExtrinsicFilters { call?: string; result?: string; origin?: string }
 export interface EventFilters { event?: string }
 // Which list on an account/tag detail page a total is being asked for, plus the
@@ -170,6 +172,9 @@ export const api = {
   activityCount: (type = 'all', from?: string, to?: string, filters?: ValueFilters, action?: string, signal?: AbortSignal) =>
     getJson<ActivityCount>(withQuery('/explorer/activity/count', { type, action, from, to, ...filters }), signal),
   counts: (signal?: AbortSignal) => getJson<ListCounts>('/explorer/counts', signal),
+  // The isolated money markets the deployment configures, in display order — the
+  // options of the money-market feeds' market filter.
+  mmMarkets: (signal?: AbortSignal) => getJson<MmMarketOption[]>('/explorer/mm-markets', signal),
   asset: (assetId: number, signal?: AbortSignal) => getJson<AssetDetail>(`/explorer/asset/${assetId}`, signal),
   assetDcas: (assetId: number, signal?: AbortSignal) => getJson<AssetDcas>(`/explorer/asset/${assetId}/dcas`, signal),
   assetLimitOrders: (assetId: number, signal?: AbortSignal) => getJson<AssetLimitOrderBook>(`/explorer/asset/${assetId}/limit-orders`, signal),
@@ -350,7 +355,7 @@ export const api = {
   },
   verifyPoll: (verificationId: string, signal?: AbortSignal) => getJson<VerificationJob>(`/v2/verify/${encodeURIComponent(verificationId)}`, signal),
   // The daily histogram can mirror the activity page's tab + filters.
-  daily: (scope: string, params?: { type?: string; action?: string; token?: string }, signal?: AbortSignal) => getJson<DailyPoint[]>(withQuery(`/explorer/daily/${scope}`, { ...params }), signal),
+  daily: (scope: string, params?: { type?: string; action?: string; token?: string; market?: string }, signal?: AbortSignal) => getJson<DailyPoint[]>(withQuery(`/explorer/daily/${scope}`, { ...params }), signal),
   accountsDaily: (signal?: AbortSignal) => getJson<{ date: string; active: number; new: number }[]>('/explorer/accounts-daily', signal),
   tags: (signal?: AbortSignal) => getJson<Tag[]>('/explorer/tags', signal),
   // Public, shared-cacheable tag-list directory — no auth, no per-viewer
