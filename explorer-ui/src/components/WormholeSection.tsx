@@ -753,6 +753,9 @@ function AsOf({ d, now }: { d: WormholeBridgeDetail; now: number }) {
         ? <>Wormholescan {d.scan.ok && d.scan.asOf ? <>read <Ago ts={d.scan.asOf} now={now} /></> : 'did not answer'}.{' '}</>
         : <>Wormholescan is not configured.{' '}</>}
       {d.indexedThrough && <>History indexed through block {F.int(d.indexedThrough.block)}.{' '}</>}
+      {d.indexBehind && <>
+        The index was {d.indexLagSec != null ? <>{F.int(Math.round(d.indexLagSec / 60))} min</> : 'too far'} behind the chain when supply was read, so supply is older than custody and any shortfall is held as unverified until indexing catches up.{' '}
+      </>}
       {unpriced.length > 0 && <>
         {unpriced.join(', ')} {unpriced.length === 1 ? 'has' : 'have'} no current price, so the dollar totals leave {unpriced.length === 1 ? 'it' : 'them'} out.{' '}
       </>}

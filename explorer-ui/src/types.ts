@@ -2425,6 +2425,10 @@ export interface WormholeSummary {
   deficitUsd: number | null
   surplusUsd: number | null
   asOf: string | null
+  // The snapshot's indexed head was over a minute behind wall clock, so any
+  // shortfall row is held at 'unverified' until indexing catches up. Optional
+  // only so an API from before the field reads as "not behind".
+  indexBehind?: boolean
 }
 
 export interface WormholeAssetRow {
@@ -2578,6 +2582,9 @@ export interface WormholeBridgeDetail {
   hydrationChainId: number
   asOf: string | null
   indexedThrough: { block: number; at: string } | null
+  // How far that head trailed wall clock when the snapshot pinned supply to it.
+  indexLagSec?: number | null
+  indexBehind?: boolean
 }
 
 // ---- protocol revenue breakdown (the Protocol Revenue detail tab) ----

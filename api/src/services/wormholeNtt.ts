@@ -184,6 +184,11 @@ export interface WormholeBridgeDetail {
   hydrationChainId: number
   asOf: string | null
   indexedThrough: { block: number; at: string } | null
+  // How far the indexed head trailed wall clock when the snapshot pinned
+  // issuance to it, and whether that exceeded INDEX_STALE_AFTER_MS — the reason
+  // a shortfall row reads `unverified`. Null before the first snapshot.
+  indexLagSec: number | null
+  indexBehind: boolean
 }
 
 export interface WormholeSummary {
@@ -198,6 +203,8 @@ export interface WormholeSummary {
   deficitUsd: number | null
   surplusUsd: number | null
   asOf: string | null
+  /** The snapshot's indexed head was older than INDEX_STALE_AFTER_MS when read. */
+  indexBehind: boolean
 }
 
 // ───────────────────────────── chain identity ─────────────────────────────
@@ -956,6 +963,32 @@ export function backingTolerance(decimals: number, priceUsd: number | null): big
   return tol > 0n ? tol : 1n
 }
 
+// How far behind wall clock the indexed head may be before a shortfall measured
+// against it stops being evidence. Measured on this deployment (2026-10-02):
+//
+// - normal head age is 37–76 s, not seconds — raw-live ingests finalized blocks,
+//   so `now − max(block_timestamp)` sits at p50 ≈ 45 s, p99 ≈ 60 s, 7-day max
+//   76 s outside the 12:58–13:39Z outage;
+// - an outbound send redeems on the origin chain 49–850 s after its Hydration
+//   block (Wormholescan, 50 newest chain-73 operations; typical ~60 s).
+//
+// The two ranges overlap, so no threshold sits cleanly between them. What the
+// guard has to guarantee is narrower: a frozen head must never yield TWO
+// agreeing shortfall readings. The false shortfall cannot appear before the
+// head is at least one redemption old (≥ ~49 s), and the confirming read comes
+// CONFIRM_DELAY (15 s) after the first sighting, so the confirming read always
+// sees a head ≥ ~64 s old. 60 s is therefore the highest value that keeps every
+// stall shortfall from confirming. "A few minutes" would not: a send right
+// after a freeze redeems in about a minute and would confirm long before the
+// head was minutes old — exactly the 2026-10-02 PRIME false page.
+//
+// The cost of sitting inside the normal-lag tail is small and only ever on the
+// quiet side: the ~1% of cycles whose head is a little over a minute old hold a
+// shortfall at 'unverified' (inconclusive — it neither advances nor resets the
+// confirmation streak) instead of grading it; a real shortfall is graded on the
+// next cycle with a normal head. Surplus and ok readings are never affected.
+export const INDEX_STALE_AFTER_MS = 60_000
+
 const MINOR_DEFICIT_USD = 100
 const MINOR_DEFICIT_PERMILLE_OF_ISSUANCE = 1n // 0.1% expressed as 1/1000
 
@@ -989,6 +1022,14 @@ export interface BackingInput {
   // is the right call for the surplus side and not for the shortfall side — see
   // the guard in `classifyBacking`.
   custodyFresh: boolean
+  // How far the indexed head — the block issuance is pinned to — trailed wall
+  // clock when this cycle read it, in ms. Null when unread, which counts as
+  // stale. Custody is read live on the origin, so an indexer that has stopped
+  // advancing puts the two halves of the equation at different moments: every
+  // outbound send after the frozen head is already released from custody but
+  // still inside the pinned issuance, and reads as missing backing. See
+  // INDEX_STALE_AFTER_MS and the guard in `classifyBacking`.
+  indexLagMs: number | null
   scanEnabled: boolean
   lookbackDays: number
   // Whether a shortfall has been read on two consecutive cycles. Every input to
@@ -1012,6 +1053,14 @@ export interface BackingVerdict {
 function humanAmount(raw: bigint, decimals: number): string {
   const value = Number(raw) / 10 ** decimals
   return value.toLocaleString('en-US', { maximumFractionDigits: value >= 1000 ? 0 : value >= 1 ? 2 : 6 })
+}
+
+function humanDuration(ms: number): string {
+  const sec = Math.max(0, Math.round(ms / 1000))
+  if (sec < 120) return `${sec} s`
+  const min = Math.round(sec / 60)
+  if (min < 120) return `${min} min`
+  return `${Math.round(min / 60)} h`
 }
 
 const rawToUsd = (raw: bigint, decimals: number, priceUsd: number | null): number | null => {
@@ -1082,6 +1131,21 @@ export function classifyBacking(input: BackingInput): BackingVerdict {
       detail: `Custody could not be read this cycle, so this shortfall stands against the last balance the origin chain reported rather than a current one.${burnedNote}`,
     }
   }
+  // The same failure from the other half of the equation: issuance is pinned
+  // to the indexed head, custody is live. With the head stalled, every outbound
+  // send since it is already released from custody on the origin yet still
+  // counted in the pinned supply, so the gap grows by one transfer per send
+  // until indexing catches up (2026-10-02: raw-live down, −3,591 PRIME read).
+  if (input.indexLagMs == null || !(input.indexLagMs <= INDEX_STALE_AFTER_MS)) {
+    const behind = input.indexLagMs == null
+      ? 'The Hydration index head could not be dated this cycle'
+      : `The Hydration index is ${humanDuration(input.indexLagMs)} behind the chain`
+    return {
+      status: 'unverified',
+      residual,
+      detail: `${behind}, so supply is read at an older block than custody. Transfers the origin has already released since then still count as supply, so this shortfall is not graded until indexing catches up.${burnedNote}`,
+    }
+  }
   // One cycle is not a finding: hold the row on the safe side of the line and
   // say why, rather than raising a shortfall the next cycle may erase.
   if (!input.downgradeConfirmed) return { status: 'ok', residual, detail: `${unconfirmed}${burnedNote}` }
@@ -1111,6 +1175,31 @@ export function worstStatus(statuses: readonly WormholeStatus[]): WormholeStatus
   let worst: WormholeStatus = 'ok'
   for (const s of statuses) if (STATUS_SEVERITY[s] > STATUS_SEVERITY[worst]) worst = s
   return worst
+}
+
+/**
+ * Whether a reading is one the classifier would call a shortfall, and whether it
+ * could tell at all. An unverifiable reading (no scan, unconfigured origin,
+ * carried-over custody, a stalled index) is neither confirmation nor refutation
+ * and must move nothing.
+ */
+export type BackingGrade = 'negative' | 'clean' | 'inconclusive'
+export function gradeBacking(status: WormholeStatus): BackingGrade {
+  if (status === 'deficit' || status === 'attention') return 'negative'
+  if (status === 'ok' || status === 'surplus') return 'clean'
+  return 'inconclusive'
+}
+
+/**
+ * The consecutive-shortfall count after one more reading: a shortfall advances
+ * it, a clean reading resets it, and an inconclusive one leaves it exactly where
+ * it stood — so a stall can neither confirm a shortfall nor erase one already
+ * half-confirmed.
+ */
+export function advanceStreak(prev: number, grade: BackingGrade): number {
+  if (grade === 'negative') return prev + 1
+  if (grade === 'clean') return 0
+  return prev
 }
 
 // ─────────────────────── Solana NTT config ───────────────────────
@@ -1526,5 +1615,6 @@ export function summarizeWormhole(detail: WormholeBridgeDetail | null): Wormhole
     deficitUsd: detail.totals.deficitUsd,
     surplusUsd: detail.totals.surplusUsd,
     asOf: detail.asOf,
+    indexBehind: detail.indexBehind,
   }
 }

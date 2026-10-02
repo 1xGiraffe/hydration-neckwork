@@ -109,6 +109,9 @@ function WormholeCard({ w }: { w: SecurityDashboard['wormhole'] }) {
   const shortfall = w.deficitUsd != null && w.deficitUsd > 0 ? <Usd v={w.deficitUsd} /> : null
   const value = w.worstStatus === 'deficit' ? (shortfall ? <>{shortfall} backing deficit</> : 'Backing deficit')
     : w.worstStatus === 'attention' ? (shortfall ? <>{shortfall} small shortfall</> : 'Small shortfall')
+      // A shortfall held because Hydration's index stalled is not a custody
+      // problem; saying "custody unread" would send the reader to the wrong chain.
+      : w.worstStatus === 'unverified' && w.indexBehind ? 'Index behind'
       : w.worstStatus === 'unverified' || w.worstStatus === 'unconfigured' ? 'Custody unread'
         : 'Fully backed'
   const tone = w.worstStatus === 'deficit' ? 'var(--red)'
