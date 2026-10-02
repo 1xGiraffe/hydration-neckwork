@@ -5,23 +5,15 @@ import { paths } from '../../router'
 import { positionsApi } from '../../api/explorer'
 import { blockRangeForWindow } from '../../utils/chartRefine'
 import { ChartLegend, MultiLineChart } from '../HdxCharts'
-import type { ChartZone, RefinedGrid } from '../HdxCharts'
+import type { FloorZone, RefinedGrid, SecondaryScale } from '../HdxCharts'
 import type { AssetRef, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMarketLiquidation } from '../../types'
 import { HF_CAP, exposureLines, healthFactorLines, marketSeries, windowedMarketSeries } from './borrowMath'
 import type { BorrowChartColours, BorrowSeries } from './borrowMath'
 
 // Series colours: the supply and the debt side keep one hue each. Tokens live on
 // .bw-card with a light and a dark step each (validated for CVD separation
-// against both surfaces); the status hues (green/amber/red) stay reserved for
-// the health-factor zones.
+// against both surfaces); the HF line stays a neutral grey beside them.
 const COLOURS: BorrowChartColours = { supplied: 'var(--bw-sup)', borrowed: 'var(--bw-debt)', healthFactor: 'var(--text-medium)' }
-
-// Aave's own reading of a health factor: below 1 is liquidatable, and the
-// Hydration UI turns amber under 1.5.
-const HF_ZONES: ChartZone[] = [
-  { from: 0, to: 1, label: 'liquidation', color: 'var(--red)' },
-  { from: 1, to: 1.5, color: 'var(--amber)' },
-]
 
 // The charts draw on an 860-unit viewBox that scales with the card; a phone
 // shrinks it ~2.5×, so the narrow layout asks for a taller box and larger axis
@@ -78,36 +70,51 @@ function liquidationMarker(l: MoneyMarketLiquidation): ChartMarker {
 
 const hfFmt = (v: number) => (v >= HF_CAP - 1e-9 ? `≥${HF_CAP}` : v.toFixed(2))
 
+/**
+ * The health factor on its own unlabelled scale beside the USD axis, with 1 — the
+ * liquidation threshold — ON the $0 line and HF_CAP (or the data's top) at the
+ * plot's top. Read from the tooltip and the newest-point dot.
+ */
+const HF_SCALE: SecondaryScale = { keys: ['hf'], fmt: hfFmt, anchor: 1, max: HF_CAP }
+
+// Under $0: the liquidation zone. An HF below 1 dips into it on the same scale,
+// and the liquidations sit in it rather than over the lines.
+const LIQ_ZONE: FloorZone = { frac: 0.13, color: 'var(--red)', label: 'Liquidation' }
+
 /** How many zoom windows a card keeps fetched series for. */
 const WINDOW_CACHE = 16
 
 /**
- * One market's history inside its card: supplied vs borrowed and the lowest
- * health factor per bucket, with its liquidations flagged — each on the history's
- * own dates, starting where this market's first point does. Before the reserve
- * coverage floor the exposure chart draws the market's own collateral and debt
- * totals as separate dashed lines. Hovering one chart draws a line at the same
- * time on the other, and both share one zoom window (`zoomKey`): a drag, pinch or
- * reset on either lands the other on the same window, which the URL carries.
+ * One market's history inside its card, as ONE chart: supplied and borrowed USD on
+ * the axis and the lowest health factor per bucket on an unlabelled scale of its
+ * own (read from the tooltip) whose 1 sits on the $0 line; under it a red strip is
+ * the liquidation zone, which an HF below 1 dips into and the liquidations sit in
+ * — on the history's own dates (named in the tooltip, not under the plot), starting
+ * where this market's first point does. Before the reserve coverage floor the
+ * chart draws the market's own collateral and debt totals as separate dashed
+ * lines. A position that never owed has no health factor and gets the exposure
+ * lines alone, with no zone. The zoom window (`zoomKey`) rides the URL.
  */
 export function BorrowHistoryCharts({ history, market, address, zoomKey }: { history: MoneyMarketHistory; market: MoneyMarketHistoryMarket; address: string; zoomKey: string }) {
   const s = useMemo(() => marketSeries(history, market), [history, market])
   // Stable identity: the chart's marker clustering memoizes on it.
   const markers = useMemo(() => (market.liquidations ?? []).map(liquidationMarker), [market.liquidations])
-  const [syncTime, setSyncTime] = useState<number | null>(null)
   const narrow = useNarrow()
-  const h = narrow ? 300 : 100
+  const h = narrow ? 420 : 165
   const hasHf = s.hf.some(v => v != null)
   const hasChain = s.collateralChain.some(v => v != null) || s.debtChain.some(v => v != null)
   const from = history.reserveHistoryFrom
   const floorIdx = from ? s.dates.findIndex((_, k) => s.supplied[k] != null) : -1
   const floorText = from ? (from.time ? from.time.slice(0, 10) : `block ${F.int(from.blockHeight)}`) : ''
+  // The line set is decided on the BASE series, so a zoom window's grid carries
+  // the same keys as the view it refines and the legend stays true of both.
+  const lines = (w: BorrowSeries) => [...exposureLines(w, hasChain, COLOURS), ...(hasHf ? healthFactorLines(w, COLOURS) : [])]
   // Chart-zoom refinement: the same history re-bucketed over the window's block
   // span, on the API's ladder — a week-stepped history refines to days, then to
-  // hours, as the window narrows. Both charts share ONE windowed read per window
-  // (each takes its own lines from the same fetched series), so a zoom costs one
-  // request rather than two and the two grids can never disagree. The cache is a
-  // ref touched only from the charts' refine effects, never during render.
+  // hours, as the window narrows. One windowed read per window carries both the
+  // USD and the health-factor lines, so the two can never sit on different grids.
+  // The cache is a ref touched only from the chart's refine effect, never during
+  // render; it keeps a return to a recent window from refetching.
   const windows = useRef(new Map<string, Promise<BorrowSeries | null>>())
   const loadWindow = useCallback((fromSec: number, toSec: number): Promise<BorrowSeries | null> => {
     const cache = windows.current
@@ -124,39 +131,30 @@ export function BorrowHistoryCharts({ history, market, address, zoomKey }: { his
     if (cache.size > WINDOW_CACHE) cache.delete(cache.keys().next().value as string)
     return read
   }, [history, market.marketKey, address])
-  const refineExposure = async (fromSec: number, toSec: number): Promise<RefinedGrid | null> => {
+  const refine = async (fromSec: number, toSec: number): Promise<RefinedGrid | null> => {
     const w = await loadWindow(fromSec, toSec)
-    return w && { buckets: w.dates, series: exposureLines(w, hasChain, COLOURS) }
+    return w && { buckets: w.dates, series: lines(w) }
   }
-  const refineHf = async (fromSec: number, toSec: number): Promise<RefinedGrid | null> => {
-    const w = await loadWindow(fromSec, toSec)
-    return w && { buckets: w.dates, series: healthFactorLines(w, COLOURS) }
-  }
-  const exposure = exposureLines(s, hasChain, COLOURS)
+  const series = lines(s)
+  const notes = [
+    hasHf && `Health factor: lowest in each bucket${s.hfCapped ? `, ≥${HF_CAP} or no debt drawn at ${HF_CAP}` : ''}`,
+    hasHf && markers.length > 0 && `${markers.length} liquidation${markers.length === 1 ? '' : 's'} flagged`,
+    hasChain
+      ? `dashed before ${floorText}: the market's own collateral and debt (getUserAccountData; non-collateral supply excluded)`
+      : floorIdx > 0 && `reserve amounts start ${from?.time ? `on ${floorText}` : `at ${floorText}`}; earlier buckets are unknown, not zero`,
+  ].filter((x): x is string => !!x)
+  const note = notes.join(' · ')
   return (
     <div className="bw-hist">
-      <figure className="bw-chart" data-chart="exposure">
+      <figure className="bw-chart" data-chart="history">
         <figcaption className="bw-chart-head">
-          <span className="bw-chart-title">Supplied vs borrowed</span>
-          <ChartLegend items={exposure.map(x => ({ label: x.label, color: x.color, dashed: x.dashed }))} />
+          <span className="bw-chart-title">{hasHf ? 'Supplied, borrowed & health factor' : 'Supplied vs borrowed'}</span>
+          <ChartLegend items={series.map(x => ({ label: x.label, color: x.color, dashed: x.dashed }))} />
         </figcaption>
-        <MultiLineChart buckets={s.dates} h={h} floorZero yFmt={v => F.usd(v)} markLast markers={markers} series={exposure}
-          zoomKey={zoomKey} refine={refineExposure} syncTime={syncTime} onSyncTime={setSyncTime} />
-        {hasChain
-          ? <p className="bw-chart-note">Before {floorText} the chart shows the market&apos;s own collateral and debt totals (getUserAccountData) as dashed lines; supply not enabled as collateral is not included.</p>
-          : floorIdx > 0 && <p className="bw-chart-note">Reserve amounts start {from?.time ? `on ${floorText}` : `at ${floorText}`}; earlier buckets are unknown, not zero.</p>}
+        <MultiLineChart buckets={s.dates} h={h} floorZero yFmt={v => F.usd(v)} markLast markers={markers} series={series}
+          secondary={hasHf ? HF_SCALE : undefined} floorZone={hasHf ? LIQ_ZONE : undefined} hideDates zoomKey={zoomKey} refine={refine} />
+        {note && <p className="bw-chart-note">{note.charAt(0).toUpperCase() + note.slice(1)}.</p>}
       </figure>
-      {hasHf && (
-        <figure className="bw-chart" data-chart="hf">
-          <figcaption className="bw-chart-head">
-            <span className="bw-chart-title">Health factor</span>
-            <span className="bw-chart-sub">lowest in each bucket{s.hfCapped ? ` · no debt or above ${HF_CAP} drawn at ${HF_CAP}` : ''}{markers.length ? ` · ${markers.length} liquidation${markers.length === 1 ? '' : 's'} flagged` : ''}</span>
-          </figcaption>
-          <MultiLineChart buckets={s.dates} h={h} floorZero yFmt={hfFmt} zones={HF_ZONES} markLast markers={markers}
-            series={healthFactorLines(s, COLOURS)}
-            zoomKey={zoomKey} refine={refineHf} syncTime={syncTime} onSyncTime={setSyncTime} />
-        </figure>
-      )}
     </div>
   )
 }

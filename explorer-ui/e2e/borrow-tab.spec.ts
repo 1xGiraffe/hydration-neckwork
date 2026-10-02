@@ -84,8 +84,8 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile
       await rule.focus()
       await page.keyboard.press('Enter')
       await expect(rule).toHaveAttribute('aria-expanded', 'true')
-      await expect(core.locator('[data-chart="exposure"] svg path')).not.toHaveCount(0)
-      await expect(core.locator('[data-chart="hf"]')).toBeVisible()
+      await expect(core.locator('[data-chart="history"] svg path')).not.toHaveCount(0)
+      await expect(core.locator('[data-chart="history"] [data-series="hf"]')).toHaveCount(1)
       // Expanding reuses the summary's read.
       expect(seen.get(FOX.toLowerCase())).toBe(before)
       await expect(giga.locator('[data-chart]')).toHaveCount(0)
@@ -99,12 +99,18 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile
       await expect(cards).toHaveCount(1)
       const core = cards.first()
       await expect(core.locator('.bw-rule').first()).toHaveAttribute('aria-expanded', 'true')
-      await expect(core.locator('[data-chart]')).toHaveCount(2)
-      // Lowest HF per bucket, and the chain's own totals drawn dashed before the floor.
-      await expect(core.locator('[data-chart="hf"] .bw-chart-sub')).toContainText('lowest in each bucket')
-      await expect(core.locator('[data-chart="exposure"] [data-series="colChain"] path')).toHaveAttribute('stroke-dasharray', '5 4')
-      await expect(core.locator('[data-chart="exposure"] [data-series="debtChain"] path')).toHaveCount(1)
-      await expect(core.locator('[data-chart="exposure"] .bw-chart-note')).toContainText('getUserAccountData')
+      await expect(core.locator('[data-chart]')).toHaveCount(1)
+      // One chart: lowest HF per bucket on its own right axis, and the chain's own
+      // totals drawn dashed before the floor, the sub-notes on one line.
+      const chart = core.locator('[data-chart="history"]')
+      await expect(chart.locator('.bw-chart-title')).toHaveText('Supplied, borrowed & health factor')
+      await expect(chart.locator('.bal-legend')).toContainText('Health factor')
+      // Under $0: the liquidation zone (HF 1 sits on the $0 line).
+      await expect(chart.locator('.mlc-floor-zone')).toHaveCount(1)
+      await expect(chart.locator('.bw-chart-note')).toContainText('lowest in each bucket')
+      await expect(chart.locator('.bw-chart-note')).toContainText('getUserAccountData')
+      await expect(chart.locator('[data-series="colChain"] path')).toHaveAttribute('stroke-dasharray', '5 4')
+      await expect(chart.locator('[data-series="debtChain"] path')).toHaveCount(1)
       // Current reserves only; USDT (closed mid-window) is behind the toggle.
       const rows = core.locator('.bw-tbl tbody tr')
       await expect(rows.filter({ hasText: 'PRIME' })).toHaveCount(1)
@@ -121,56 +127,39 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile
       await expect(rows.filter({ hasText: 'USDT' }).locator('.bw-closed-note')).toBeVisible()
     })
 
-    test('hovering one chart draws a synced line on the other', async ({ page }) => {
+    test('one tooltip lists the USD lines and the health factor', async ({ page }) => {
       await withPrimaryOnly(page)
       await page.goto(`/account/${FOX}?view=borrow`)
-      const core = page.locator('.bw-card').first()
-      const exposure = core.locator('[data-chart="exposure"] .hdx-chart-wrap')
-      const hf = core.locator('[data-chart="hf"] .hdx-chart-wrap')
-      await expect(hf).toBeVisible()
-      const box = (await exposure.boundingBox())!
-      await exposure.hover({ position: { x: box.width * 0.6, y: box.height / 2 } })
-      await expect(hf.locator('line.mlc-sync')).toHaveCount(1)
-      await expect(exposure.locator('line.mlc-sync')).toHaveCount(0)
-      // No tooltip on the sibling, only on the hovered chart.
-      await expect(exposure.locator('.hdx-tip')).toHaveCount(1)
-      await expect(hf.locator('.hdx-tip')).toHaveCount(0)
-      // Same instant on both: the line sits at the same horizontal fraction.
-      const hovered = await exposure.locator('svg > line').last().getAttribute('x1')
-      const synced = await hf.locator('line.mlc-sync').getAttribute('x1')
-      expect(Math.abs(Number(hovered) - Number(synced))).toBeLessThan(1)
-      // And the other way round.
-      const hbox = (await hf.boundingBox())!
-      await hf.hover({ position: { x: hbox.width * 0.3, y: hbox.height / 2 } })
-      await expect(exposure.locator('line.mlc-sync')).toHaveCount(1)
-      await expect(hf.locator('line.mlc-sync')).toHaveCount(0)
+      const chart = page.locator('.bw-card').first().locator('[data-chart="history"] .hdx-chart-wrap')
+      await expect(chart).toBeVisible()
+      const box = (await chart.boundingBox())!
+      await chart.hover({ position: { x: box.width * 0.9, y: box.height / 2 } })
+      const tip = chart.locator('.hdx-tip')
+      await expect(tip).toHaveCount(1)
+      await expect(tip).toContainText('Supplied')
+      await expect(tip).toContainText('$')
+      await expect(tip.locator('.t-row', { hasText: 'Health factor' }).locator('.tv')).toHaveText(/^(≥3|\d\.\d\d)$/)
+      expect(await noOverflow(page)).toBe(true)
     })
 
-    test('zooming one chart zooms the other, and a reset on either clears both', async ({ page }) => {
+    test('a zoom rides the URL and a reset clears it', async ({ page }) => {
       await withPrimaryOnly(page)
       await page.goto(`/account/${FOX}?view=borrow`)
-      const core = page.locator('.bw-card').first()
-      const exposure = core.locator('[data-chart="exposure"] .hdx-chart-wrap')
-      const hf = core.locator('[data-chart="hf"] .hdx-chart-wrap')
-      await expect(hf).toBeVisible()
-      await expect(exposure).toHaveAttribute('data-zoom-key', 'zmm-core')
-      await expect(hf).toHaveAttribute('data-zoom-key', 'zmm-core')
-      await exposure.scrollIntoViewIfNeeded()
-      const box = (await exposure.boundingBox())!
+      const chart = page.locator('.bw-card').first().locator('[data-chart="history"] .hdx-chart-wrap')
+      await expect(chart).toBeVisible()
+      await expect(chart).toHaveAttribute('data-zoom-key', 'zmm-core')
+      await chart.scrollIntoViewIfNeeded()
+      const box = (await chart.boundingBox())!
       const y = box.y + box.height / 2
       await page.mouse.move(box.x + box.width * 0.3, y)
       await page.mouse.down()
       for (const f of [0.45, 0.6, 0.75]) await page.mouse.move(box.x + box.width * f, y, { steps: 4 })
       await page.mouse.up()
-      // One window in the URL, and both charts stand zoomed on it.
       await expect(page).toHaveURL(/zmm-core=\d+-\d+/)
-      await expect(exposure.locator('.chart-zoom-reset')).toHaveCount(1)
-      await expect(hf.locator('.chart-zoom-reset')).toHaveCount(1)
-      // The other chart's reset clears both.
-      await hf.locator('.chart-zoom-reset').click()
+      await expect(chart.locator('.chart-zoom-reset')).toHaveCount(1)
+      await chart.locator('.chart-zoom-reset').click()
       await expect(page).not.toHaveURL(/zmm-core=/)
-      await expect(exposure.locator('.chart-zoom-reset')).toHaveCount(0)
-      await expect(hf.locator('.chart-zoom-reset')).toHaveCount(0)
+      await expect(chart.locator('.chart-zoom-reset')).toHaveCount(0)
     })
 
     test('legacy ?view=positions lands on the Borrow tab', async ({ page }) => {
@@ -182,7 +171,7 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile
       await withPrimaryOnly(page)
       await page.goto(`/account/${FOX}?view=borrow`)
       // Let the open card's history land first: its layout shift would scroll, and a scroll closes the card.
-      await expect(page.locator('.bw-card[data-market-key="core"] [data-chart="hf"]')).toBeVisible()
+      await expect(page.locator('.bw-card[data-market-key="core"] [data-chart="history"] [data-series="hf"]')).toHaveCount(1)
       const row = page.locator('.bw-card[data-market-key="core"] .bw-tbl tbody tr', { hasText: 'PRIME' })
       const trigger = row.locator('td[data-label="Supply APY"] .yh-trigger')
       await expect(trigger).toContainText('5.96%')
@@ -212,7 +201,7 @@ for (const vp of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile
       const before = seen.get(FOX.toLowerCase()) ?? 0
       expect(before).toBeGreaterThan(0)
       await foxCard.locator('.bw-rule').first().click()
-      await expect(foxCard.locator('[data-chart="exposure"]')).toBeVisible()
+      await expect(foxCard.locator('[data-chart="history"]')).toBeVisible()
       // Expanding reuses the summary's read.
       expect(seen.get(FOX.toLowerCase())).toBe(before)
       expect(await noOverflow(page)).toBe(true)
@@ -227,7 +216,7 @@ test('an account with only history gets a closed card derived from it', async ({
   await expect(card).toBeVisible()
   await expect(card.locator('.bw-closed-badge')).toHaveText(/closed/i)
   // The lone card opens; every reserve is a past one, so they all wait behind the toggle.
-  await expect(card.locator('[data-chart="exposure"]')).toBeVisible()
+  await expect(card.locator('[data-chart="history"]')).toBeVisible()
   await expect(card.locator('.bw-tbl')).toHaveCount(0)
   await card.locator('.bw-rule-sub').click()
   await expect(card.locator('.bw-tbl thead')).toContainText('Earned / Paid')

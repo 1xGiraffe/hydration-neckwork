@@ -208,7 +208,7 @@ describe('<BorrowTab>', () => {
   it('opens a lone card with its details and history, closed reserves behind a toggle', () => {
     const html = render([{ address: FOX, markets: [position()] }], { [FOX]: mockMoneyMarketHistory(FOX) })
     expect(html.match(/class="bw-rule"[^>]*aria-expanded="true"/g)).toHaveLength(1)
-    expect(html.match(/data-chart="/g)).toHaveLength(2)
+    expect(html.match(/data-chart="history"/g)).toHaveLength(1)
     expect(html).toContain('Hide details &amp; history')
     // Only current reserves are rows; the ones this position no longer holds (DOT,
     // and USDT, closed mid-window) wait behind the toggle.
@@ -217,14 +217,23 @@ describe('<BorrowTab>', () => {
     expect(html).not.toContain('>DOT<')
     expect(html).toMatch(/class="bw-rule bw-rule-sub"[^>]*aria-expanded="false"/)
     expect(html).toContain('Show 2 closed reserves<')
-    // Lowest HF subtitle and the pre-floor chain series with its note.
+    // One chart: USD on the axis, the lowest HF per bucket on its own unlabelled
+    // scale, the pre-floor chain series — every sub-note on one line; no HF
+    // bands, no date labels (the tooltip names the date).
+    expect(html).toContain('Supplied, borrowed &amp; health factor')
     expect(html).toContain('lowest in each bucket')
+    expect(html.match(/class="bw-chart-note"/g)).toHaveLength(1)
+    expect(html).toContain('data-series="hf"')
+    // The liquidation zone under $0, where HF 1 meets the floor line.
+    expect(html).toContain('class="mlc-floor-zone"')
+    expect(html).not.toContain('liquidation</text>')
+    expect(html).not.toMatch(/>(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) /)
     expect(html).toContain('data-series="colChain"')
     expect(html).toContain('data-series="debtChain"')
     expect(html).toContain('stroke-dasharray="5 4"')
     expect(html).toContain('getUserAccountData')
-    // Both charts share the card's zoom window.
-    expect(html.match(/data-zoom-key="zmm-core"/g)).toHaveLength(2)
+    // The chart carries the card's zoom window.
+    expect(html.match(/data-zoom-key="zmm-core"/g)).toHaveLength(1)
   })
 
   it('offers DefiSim only for markets it can simulate', () => {
@@ -248,7 +257,7 @@ describe('<BorrowTab>', () => {
   it('opens a lone history-only card, with every (closed) reserve behind the toggle', () => {
     const html = render([{ address: '0xdef', markets: [] }], { '0xdef': mockMoneyMarketHistory('0xdef') })
     expect(html.match(/bw-closed-badge/g)).toHaveLength(1)
-    expect(html.match(/data-chart="/g)).toHaveLength(2)
+    expect(html.match(/data-chart="/g)).toHaveLength(1)
     expect(html).not.toContain('bw-tbl')
     expect(html).toContain('Show 4 closed reserves')
   })
@@ -272,15 +281,25 @@ describe('<BorrowTab>', () => {
 // debt-only one by the asset owed (DOT): the join answers to both ids, so a reserve
 // still held never doubles as a "closed" one and its interest lands on its own row.
 describe('borrow history charts', () => {
-  it('gives both charts one zoom window, told apart per member on a tag', () => {
+  it('draws one chart on the card\'s zoom window, told apart per member on a tag', () => {
     const h = mockMoneyMarketHistory(FOX)
     const html = renderToStaticMarkup(<BorrowHistoryCharts history={h} market={h.markets[0]} address={FOX} zoomKey="zmm-core-3cv2zr" />)
-    expect(html.match(/data-zoom-key="zmm-core-3cv2zr"/g)).toHaveLength(2)
+    expect(html.match(/data-zoom-key="zmm-core-3cv2zr"/g)).toHaveLength(1)
     const acc = { accountId: FOX, address: FOX, emoji: '🦊', tag: null }
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     qc.setQueryData(['money-market-history', FOX], h)
     const tag = renderToStaticMarkup(<QueryClientProvider client={qc}><BorrowTab areas={[{ address: FOX, account: acc, markets: [position()] }]} showOwner /></QueryClientProvider>)
-    expect(tag.match(/data-zoom-key="zmm-core-3cv2zr"/g)).toHaveLength(2)
+    expect(tag.match(/data-zoom-key="zmm-core-3cv2zr"/g)).toHaveLength(1)
+  })
+  it('without any health factor draws the exposure lines alone, with no right axis', () => {
+    const h = mockMoneyMarketHistory(FOX)
+    const m = h.markets[0]
+    const noHf = { ...m, points: m.points.map(p => ({ ...p, observation: p.observation && { ...p.observation, lowestHealthFactor: '' } })) }
+    const html = renderToStaticMarkup(<BorrowHistoryCharts history={h} market={noHf} address={FOX} zoomKey="zmm-core" />)
+    expect(html).toContain('Supplied vs borrowed')
+    expect(html).not.toContain('Health factor')
+    expect(html).not.toContain('data-series="hf"')
+    expect(html).not.toContain('mlc-floor')
   })
   it('refines a zoom window to the same lines on the finer grid', () => {
     const h = mockMoneyMarketHistory(FOX)

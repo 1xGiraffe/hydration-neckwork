@@ -210,9 +210,9 @@ export function exposureLines(s: BorrowSeries, chain: boolean, c: BorrowChartCol
   ]
 }
 
-/** The health-factor chart's one line: the lowest the chain observed in each bucket. */
+/** The history chart's health-factor line (right axis): the lowest the chain observed in each bucket. */
 export function healthFactorLines(s: BorrowSeries, c: BorrowChartColours): AreaSeries[] {
-  return [{ key: 'hf', label: 'Lowest health factor', color: c.healthFactor, values: s.hf }]
+  return [{ key: 'hf', label: 'Health factor', color: c.healthFactor, values: s.hf }]
 }
 
 /**
