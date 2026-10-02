@@ -421,25 +421,78 @@ export function enactmentOutcomeFrom(eventName: string, argsJson: string): Refer
 // Every referendum's enactment outcome at once, for the directory: the whole dispatch table
 // (a few hundred rows) matched against the task ids of every index up to `maxIndex`. Named
 // dispatches that are not enactments simply resolve to no index.
-async function loadEnactmentOutcomes(maxIndex: number): Promise<Map<number, ReferendumEnactmentOutcome>> {
+async function loadEnactmentOutcomes(maxIndex: number): Promise<Map<number, { outcome: ReferendumEnactmentOutcome; row: EnactmentRow }>> {
   const res = await client.query({
-    query: `SELECT task_id, event_name, args_json
+    query: `SELECT task_id, event_name, block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, args_json
             FROM price_data.scheduler_named_dispatches FINAL
             ORDER BY block_height, event_index`,
     format: 'JSONEachRow',
   })
-  const dispatches = await res.json<{ task_id: string; event_name: string; args_json: string }>()
+  const dispatches = await res.json<EnactmentRow & { task_id: string }>()
   const indexByTask = new Map<string, number>()
   for (let i = 0; i <= maxIndex; i++) indexByTask.set(referendumEnactmentTaskId(i), i)
-  const out = new Map<number, ReferendumEnactmentOutcome>()
+  const out = new Map<number, { outcome: ReferendumEnactmentOutcome; row: EnactmentRow }>()
   for (const d of dispatches) {
     const index = indexByTask.get(d.task_id)
     const outcome = index == null ? null : enactmentOutcomeFrom(d.event_name, d.args_json)
     // Later rows win: a CallUnavailable that is retried and dispatched next block
     // should read as its dispatch.
-    if (index != null && outcome) out.set(index, outcome)
+    if (index != null && outcome) out.set(index, { outcome, row: { ...d, block_height: Number(d.block_height), event_index: Number(d.event_index) } })
   }
   return out
+}
+
+// ---- a referendum's last activity ----
+
+// What does NOT count as activity on a referendum: returning a deposit is the
+// pallet settling up after the referendum is over, often long after — referendum
+// 33 was decided at 7,050,930 and refunded at 7,262,897 — and one refund batch
+// closes dozens at once, which floated every one of them to the top of a list
+// sorted by last activity. Everything else does, the enactment and the scheduled
+// executions it sets in motion included (referendumLastActivity).
+export const NON_ACTIVITY_EVENTS = ['Referenda.DecisionDepositRefunded', 'Referenda.SubmissionDepositRefunded'] as const
+const NON_ACTIVITY_EVENTS_SQL = NON_ACTIVITY_EVENTS.map(e => `'${e}'`).join(',')
+
+export interface ActivityMoment { blockHeight: number; timestamp: string }
+
+/** The latest of the moments given (by block), or null when there are none. */
+export function latestMoment(moments: readonly (ActivityMoment | null | undefined)[]): ActivityMoment | null {
+  let best: ActivityMoment | null = null
+  for (const m of moments) if (m && m.blockHeight > 0 && (!best || m.blockHeight > best.blockHeight)) best = m
+  return best
+}
+
+// The newest scheduled execution an enactment set in motion that has actually run,
+// for every enactment at once. Most enactments file nothing, so their blocks are
+// read in one batch and only the few that filed a task are walked (loadEnactmentChain);
+// a walk whose tasks have all settled cannot change, so it is kept for the process's
+// life, while one still waiting on a task is walked again with the directory.
+const settledChainActivity = new Map<string, ActivityMoment | null>()
+async function scheduledActivityByReferendum(enactments: Map<number, { row: EnactmentRow }>): Promise<Map<number, ActivityMoment>> {
+  const out = new Map<number, ActivityMoment>()
+  if (!enactments.size) return out
+  const byBlock = new Map<number, SchedulerEventRow[]>()
+  for (const row of await loadSchedulerEvents([...new Set([...enactments.values()].map(e => e.row.block_height))])) {
+    (byBlock.get(row.block_height) ?? byBlock.set(row.block_height, []).get(row.block_height)!).push(row)
+  }
+  const filing = [...enactments].filter(([, e]) => tasksFiledBy(byBlock.get(e.row.block_height) ?? [], e.row.event_index).length > 0)
+  if (!filing.length) return out
+  const head = await indexedHead()
+  await Promise.all(filing.map(async ([index, e]) => {
+    const key = `${index}:${e.row.block_height}:${e.row.event_index}`
+    let moment = settledChainActivity.get(key)
+    if (moment === undefined) {
+      const chain = await loadEnactmentChain(e.row, head)
+      moment = ranMoment(chain.entries)
+      if (!chain.entries.some(x => x.scheduled?.state === 'pending')) settledChainActivity.set(key, moment)
+    }
+    if (moment) out.set(index, moment)
+  }))
+  return out
+}
+
+function ranMoment(entries: ReferendumTimelineEntry[]): ActivityMoment | null {
+  return latestMoment(entries.filter(x => x.scheduled?.state === 'ran' && x.timestamp).map(x => ({ blockHeight: x.blockHeight, timestamp: x.timestamp })))
 }
 
 // The enactment outcome for one OpenGov referendum. A point lookup on the table's ORDER BY
@@ -1647,7 +1700,14 @@ export interface GovernanceTrackRef { id: number; name: string }
 // limit back to back returned two referenda twice and silently dropped two others, and
 // which two varied from one walk to the next.
 export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumListRow[]> {
-  return cached(`explorer:referenda:${limit}:${offset}`, 60_000, async () => {
+  return (await referendumDirectory()).slice(offset, offset + limit)
+}
+
+// The whole directory (~600 rows), sorted by last activity. Built whole because
+// the sort key is not a column: the enactment and the scheduled executions it
+// files live in the scheduler's tables, not the referendum's lifecycle.
+async function referendumDirectory(): Promise<ReferendumListRow[]> {
+  return cached('explorer:referenda:directory', 60_000, async () => {
     const [res, titles] = await Promise.all([
       client.query({
         query: `
@@ -1661,8 +1721,13 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
             -- sorted on the event identity rather than left in group order.
             SELECT pallet, ref_index,
                    arrayMap(e -> tupleElement(e, 3), arraySort(groupArray((block_height, event_index, event_name)))) AS events,
-                   max(block_height) AS last_block,
-                   toString(max(block_timestamp)) AS ts,
+                   -- Last ACTIVITY, not last event: a deposit refund is settlement
+                   -- (NON_ACTIVITY_EVENTS). The plain max stays the fallback for a
+                   -- lifecycle that holds nothing else yet.
+                   if(countIf(event_name NOT IN (${NON_ACTIVITY_EVENTS_SQL})) > 0,
+                      maxIf(block_height, event_name NOT IN (${NON_ACTIVITY_EVENTS_SQL})), max(block_height)) AS last_block,
+                   toString(if(countIf(event_name NOT IN (${NON_ACTIVITY_EVENTS_SQL})) > 0,
+                      maxIf(block_timestamp, event_name NOT IN (${NON_ACTIVITY_EVENTS_SQL})), max(block_timestamp))) AS ts,
                    if(countIf(event_name = 'Referenda.Submitted') > 0,
                       anyIf(JSONExtractInt(args_json, 'track'), event_name = 'Referenda.Submitted'), -1) AS track_id,
                    anyIf(block_height, event_name = 'Referenda.Submitted') AS submit_block,
@@ -1670,9 +1735,8 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
             FROM price_data.referendum_lifecycle_events FINAL
             GROUP BY pallet, ref_index
           )
-          ORDER BY block_height DESC, pallet ASC, ref_index DESC
-          LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-        query_params: { limit, offset }, format: 'JSONEachRow',
+          ORDER BY block_height DESC, pallet ASC, ref_index DESC`,
+        format: 'JSONEachRow',
       }),
       referendumTitles(),
     ])
@@ -1682,7 +1746,8 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
     const submitKeys = raw.filter(r => r.pallet === 'opengov' && Number(r.submit_ext) >= 0)
       .map(r => `(${r.submit_block},${r.submit_ext})`)
     const maxOpengovIndex = raw.reduce((m, r) => (r.pallet === 'opengov' ? Math.max(m, Number(r.ref_index)) : m), -1)
-    const enactments = maxOpengovIndex >= 0 ? await loadEnactmentOutcomes(maxOpengovIndex) : new Map<number, ReferendumEnactmentOutcome>()
+    const enactments = maxOpengovIndex >= 0 ? await loadEnactmentOutcomes(maxOpengovIndex) : new Map<number, { outcome: ReferendumEnactmentOutcome; row: EnactmentRow }>()
+    const scheduled = await scheduledActivityByReferendum(enactments)
     const signerByKey = new Map<string, string>()
     if (submitKeys.length) {
       const signerRes = await client.query({
@@ -1701,7 +1766,16 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
       const track = pallet === 'opengov' && trackId >= 0 ? trackById(trackId) : null
       const who = signerByKey.get(`${row.submit_block}:${row.submit_ext}`)
       const status = referendumStatusFrom(pallet, row.events)
-      const enactment = pallet === 'opengov' ? enactments.get(Number(row.ref_index)) ?? null : null
+      const enacted = pallet === 'opengov' ? enactments.get(Number(row.ref_index)) ?? null : null
+      const enactment = enacted?.outcome ?? null
+      // Last activity: the lifecycle's own (refunds excluded, in SQL), the enactment
+      // and the scheduled executions it set in motion — the timeline's rows, every
+      // one of them, but the two deposit refunds.
+      const activity = latestMoment([
+        { blockHeight: Number(row.block_height), timestamp: row.ts },
+        enacted ? { blockHeight: enacted.row.block_height, timestamp: enacted.row.ts } : null,
+        pallet === 'opengov' ? scheduled.get(Number(row.ref_index)) : null,
+      ]) ?? { blockHeight: Number(row.block_height), timestamp: row.ts }
       return {
         pallet,
         index: Number(row.ref_index),
@@ -1712,12 +1786,12 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
         status: status === 'approved' && (enactment === 'ok' || enactment === 'failed') ? 'executed' : status,
         enactment,
         voters: null,
-        blockHeight: Number(row.block_height),
-        timestamp: row.ts,
+        blockHeight: activity.blockHeight,
+        timestamp: activity.timestamp,
         track: track ? { id: track.id, name: track.name } : trackId >= 0 ? { id: trackId, name: `track ${trackId}` } : null,
         proposer: who ? accountRef(who) : null,
       }
-    })
+    }).sort((a, b) => b.blockHeight - a.blockHeight || a.pallet.localeCompare(b.pallet) || b.index - a.index)
   })
 }
 
