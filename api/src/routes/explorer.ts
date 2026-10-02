@@ -12,7 +12,7 @@ import {
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
   getAddressListTotal, getTagListTotal,
   getAddressValueEvents, getTagValueEvents,
-  getAssetPriceWindow, getAddressHistoryWindow, getAddressLiquidityHistory, getAddressMoneyMarketHistory, getTagHistoryWindow, getTagLiquidityHistory,
+  getAssetPriceWindow, getAddressHistoryWindow, getAddressLiquidityHistory, getAddressMoneyMarketHistory, getTagHistoryWindow, getTagLiquidityHistory, getAddressVolumeHistory, getTagVolumeHistory,
   getTagActivity, getTagExtrinsics, getTagEvents,
   getAddressVotes, getTagVotes, getTagVotesByReferendum,
   getAddressRevenueBreakdown, getTagRevenueBreakdown,
@@ -28,6 +28,7 @@ import {
 } from '../services/explorerService.ts'
 import { HDX_WINDOW_CHARTS, getHdxChartWindow, getHdxDashboard } from '../services/hdxService.ts'
 import { FLOW_CURSOR_RE, REVENUE_RANGES, getRevenueDashboard, getRevenueFlow, getStakerDistributions } from '../services/revenueService.ts'
+import { withAssetVolume24h } from '../services/volumeHistory.ts'
 import { HOLLAR_WINDOW_CHARTS, getHollarChartWindow, getHollarDashboard } from '../services/hollarService.ts'
 import { DEFAULT_WINDOW_POINTS, windowSchema } from './windowQuery.ts'
 import { getExplorerYields } from '../services/positionYield.ts'
@@ -331,8 +332,9 @@ export async function explorerRoutes(fastify: FastifyInstance) {
   // needs; every other value (and an absent one) serves the full directory the
   // Assets page renders. Both shapes are the same ordered option list, so a caller
   // can narrow the payload without changing what it can offer.
+  // The full directory carries each row's 24h asset volume (volumeHistory.ts).
   fastify.get('/explorer/assets', async req =>
-    (req.query as { fields?: string })?.fields === 'filter' ? getAssetFilterOptions() : getAssets())
+    (req.query as { fields?: string })?.fields === 'filter' ? getAssetFilterOptions() : withAssetVolume24h(await getAssets()))
 
   // The call/event names present in the indexed data, so the Extrinsics/Events
   // filter boxes and the alert form can offer them. Shared across every caller
@@ -758,6 +760,18 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return history
   })
 
+  // The tag twin of /explorer/address/:a/volume-history: the members' summed trading
+  // volume (a trade between two members counts for both), same optional window.
+  fastify.get('/explorer/tag/:tagId/volume-history', async (req, reply) => {
+    const params = tagParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag' })
+    const w = optionalHistoryWindow(req.query as Record<string, unknown>)
+    if (!w) return reply.status(400).send({ error: 'Invalid block window' })
+    const history = await getTagVolumeHistory(params.data.tagId, w.window)
+    if (!history) return reply.status(404).send({ error: 'Tag not recognized' })
+    return history
+  })
+
   // The tag twins of the address order-history / positions-presence / liquidity-rewards
   // routes, over the tag's members (see services/positionsPresence.ts).
   fastify.get('/explorer/tag/:tagId/order-history', async (req, reply) => {
@@ -901,6 +915,19 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const w = optionalHistoryWindow(req.query as Record<string, unknown>)
     if (!w) return reply.status(400).send({ error: 'Invalid block window' })
     const history = await getAddressLiquidityHistory(params.data.address, w.window)
+    if (!history) return reply.status(404).send({ error: 'Address not recognized' })
+    return history
+  })
+
+  // The header's "Trading" figure per bucket of the value chart's grid, with 24h/7d/30d
+  // and all-time totals (getAddressVolumeHistory); `fromBlock`+`toBlock` re-bucket it
+  // over that block window, like /history.
+  fastify.get('/explorer/address/:address/volume-history', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const w = optionalHistoryWindow(req.query as Record<string, unknown>)
+    if (!w) return reply.status(400).send({ error: 'Invalid block window' })
+    const history = await getAddressVolumeHistory(params.data.address, w.window)
     if (!history) return reply.status(404).send({ error: 'Address not recognized' })
     return history
   })

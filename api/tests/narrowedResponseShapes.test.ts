@@ -47,7 +47,8 @@ describe('the asset directory narrows only on an explicit fields=filter', () => 
   it('serves the full directory for an absent or unrecognized fields', () => {
     const reads = [...routes.matchAll(/\?\.fields === 'filter'/g)]
     expect(reads).toHaveLength(1)
-    expect(routes).toContain("(req.query as { fields?: string })?.fields === 'filter' ? getAssetFilterOptions() : getAssets()")
+    // The full directory also carries each row's 24h volume (volumeHistory.ts).
+    expect(routes).toContain("(req.query as { fields?: string })?.fields === 'filter' ? getAssetFilterOptions() : withAssetVolume24h(await getAssets())")
   })
 
   it('projects the same cached, same-ordered directory rather than querying again', () => {

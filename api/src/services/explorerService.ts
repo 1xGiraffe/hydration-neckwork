@@ -22,6 +22,7 @@ import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts
 import { weightedFromLabels } from './convictionWeight.ts'
 import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, supplyFoldedShareIds, foldedShareEntries, namedShareWrapperOf, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
+import { firstTradeOf, loadVolumeBuckets, tradingVolumeAsOfBlock, tradingVolumeTotals, volumeCutHeights, type AccountVolumeHistory, type VolumeCutHeights } from './accountVolumeHistory.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT, lbpPools, stableswapPoolAccount } from './tagService.ts'
 import { locateVenuePage, poolVenueForScope, venueKeysUnionSql, venueLiquidityEvents, venueLiquidityKeysSql, venueTradeKeysSql, venueTradeSource, walkVenueRows, type PoolVenue, type VenueKey, type VenueKeyReader, type VenueSourceSql } from './poolVenue.ts'
@@ -4550,9 +4551,9 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // exactly the HDX the account holds and the HDX LP it owns — nothing else.
     const balancesExHdxUsd = balances.reduce((s, b) => s + (b.asset.assetId === HDX_ASSET_ID ? 0 : b.valueUsd ?? 0), 0)
       + unstatedMmUsd
-    const volumeAccounts = [...new Set([...related, ...[...related].map(evmAccountForm).filter(Boolean) as string[]])]
+    const volumeAccounts = tradingVolumeAccountSet([...related])
     const [tradingVolumeUsd, liquidationVolumeUsd, revenueUsd] = await Promise.all([
-      tradingVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
+      tradingVolumeUsdOf(volumeAccounts),
       liquidationVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
       revenueByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
     ])
@@ -5102,6 +5103,97 @@ export async function getTagLiquidityHistory(tagId: string, window?: { fromBlock
   const tag = getTagRecord(tagId)
   if (!tag || !tag.members.length) return null
   return cachedLiquidityHistory(`tag:${tagId}`, tagHistoryAccountSet(tag.members), window)
+}
+
+// ─── Trading-volume history ────────────────────────────────────────────────────
+// The header's "Trading" figure over time (accountVolumeHistory.ts), on the value
+// chart's grid: buckets from accountBucketing over the SAME account set the value
+// chart reconstructs (so the two charts share every bucket boundary and zoom
+// together), summed over the set the header figure sums (tradingVolumeAccountSet),
+// whose all-time total is the header figure itself (tradingVolumeTotals). Every grid
+// bucket is published — at most the ladder's ~180 — rather than the value chart's
+// one point per day, since a flow has no "last point of the day" to keep.
+
+/**
+ * The accounts an account's or tag's trading volume sums: the set (an account's
+ * related set, a tag's members) plus each one's EVM-mapped form, whose swaps the
+ * model files under the 0x45544800… account. The header figure and the Volume chart
+ * both read it, so they sum the same rows.
+ */
+export function tradingVolumeAccountSet(accounts: string[]): string[] {
+  return [...new Set([...accounts, ...accounts.map(evmAccountForm).filter(Boolean) as string[]])]
+}
+
+function tradingVolumeList(accounts: string[]): string {
+  return sqlAccountList([...new Set(accounts.map(a => a.toLowerCase()))])
+}
+
+/** The header's "Trading" figure: all-time volume over the set (tradingVolumeTotals, no windows). */
+async function tradingVolumeUsdOf(volumeAccounts: string[]): Promise<number> {
+  return (await tradingVolumeTotals(client, tradingVolumeList(volumeAccounts))).all
+}
+
+// Chain-wide inputs every volume history shares, each one key for the whole instance.
+const VOLUME_SHARED_TTL_MS = 60_000
+function sharedVolumeCutHeights(): Promise<VolumeCutHeights | null> {
+  return cached('explorer:volume-history:cut-heights', VOLUME_SHARED_TTL_MS, async () => volumeCutHeights(client, await blockClock(client)))
+}
+function sharedVolumeAsOfBlock(): Promise<number | null> {
+  return cached('explorer:volume-history:as-of', VOLUME_SHARED_TTL_MS, async () => {
+    const clock = await blockClock(client)
+    return tradingVolumeAsOfBlock(client, clock.heights.length ? clock.heights[clock.heights.length - 1] : 0)
+  })
+}
+
+export async function buildVolumeHistory(gridAccounts: string[], volumeAccounts: string[], window?: { fromBlock: number; toBlock: number }): Promise<AccountVolumeHistory> {
+  const list = tradingVolumeList(volumeAccounts)
+  const [cuts, asOfBlock] = await Promise.all([sharedVolumeCutHeights(), sharedVolumeAsOfBlock()])
+  const totals = await tradingVolumeTotals(client, list, cuts)
+  if (!(totals.all > 0)) return { stepSec: 0, buckets: [], totals, asOfBlock }
+  // Without a balance history (an account seen only through its EVM form) the grid
+  // opens at the set's first trade instead.
+  const grid = await accountBucketing(gridAccounts.length ? gridAccounts : volumeAccounts, window, { exactHeights: true, fallbackStart: () => firstTradeOf(client, list) })
+  if (!grid) return { stepSec: 0, buckets: [], totals, asOfBlock }
+  const buckets = await loadVolumeBuckets(client, list, grid.bk, window ? { fromBlock: window.fromBlock, toBlock: grid.rng.maxb } : undefined)
+  return { stepSec: grid.bk.step, buckets, totals, asOfBlock }
+}
+
+/**
+ * The cache key of a volume history: scope, window (`all` for the whole range) and
+ * the fingerprint of the summed set, so a related-set or membership change never
+ * reads another set's entry.
+ */
+export function volumeHistoryKey(scope: string, accounts: string[], window?: { fromBlock: number; toBlock: number }): string {
+  return `explorer:volume-history:${scope}:${window ? `w:${window.fromBlock}-${window.toBlock}` : 'all'}:${accountSetFingerprint(accounts)}`
+}
+
+/**
+ * Cached like the LP history: un-windowed stale-while-revalidate (its last bucket is
+ * the head's, its totals trail the head), a chart-zoom window by the bucketed-history
+ * finality rule (windowedHistoryTtlMs) — whose one-hour margin also covers the
+ * derivations cycle the model's newest buckets lag by.
+ */
+async function cachedVolumeHistory(scope: string, gridAccounts: string[], volumeAccounts: string[], window?: { fromBlock: number; toBlock: number }): Promise<AccountVolumeHistory> {
+  const key = volumeHistoryKey(scope, volumeAccounts, window)
+  if (!window) return cachedSwr(key, UNWINDOWED_HISTORY_FRESH_MS, ACCOUNT_HISTORY_TTL_MS, () => buildVolumeHistory(gridAccounts, volumeAccounts))
+  return cached(key, await windowedHistoryTtlMs(window.toBlock), () => buildVolumeHistory(gridAccounts, volumeAccounts, window))
+}
+
+/** An account's trading volume per bucket of its value chart's grid (see buildVolumeHistory). */
+export async function getAddressVolumeHistory(addressInput: string, window?: { fromBlock: number; toBlock: number }): Promise<AccountVolumeHistory | null> {
+  // The related set getAddress sums its header figure over, without building the page.
+  const resolved = await resolveRelatedAccounts(addressInput)
+  if (!resolved) return null
+  const related = [...new Set<string>(resolved.related)]
+  return cachedVolumeHistory(`addr:${resolved.norm.accountId}`, related, tradingVolumeAccountSet(related), window)
+}
+
+/** The tag twin: the members' summed volume — a trade between two members counts for both. */
+export async function getTagVolumeHistory(tagId: string, window?: { fromBlock: number; toBlock: number }): Promise<AccountVolumeHistory | null> {
+  const tag = getTagRecord(tagId)
+  if (!tag || !tag.members.length) return null
+  const accounts = tagHistoryAccountSet(tag.members)
+  return cachedVolumeHistory(`tag:${tagId}`, accounts, tradingVolumeAccountSet(tag.members), window)
 }
 
 /** The tag twin of getAddressHistoryWindow, over the tag's member set + EVM twins. */
@@ -30246,9 +30338,9 @@ async function buildTagDetailForMembers(
     if (portfolioSeries.length) portfolioSeries[portfolioSeries.length - 1] = +(portfolioUsd - debtUsd).toFixed(2)
     const portfolioSeriesExHdx = opts.exHdx ? history.portfolioSeriesExHdx.slice() : []
     if (portfolioSeriesExHdx.length) portfolioSeriesExHdx[portfolioSeriesExHdx.length - 1] = +(portfolioExHdxUsd - debtUsd).toFixed(2)
-    const volumeAccounts = [...new Set([...members, ...members.map(evmAccountForm).filter(Boolean) as string[]])]
+    const volumeAccounts = tradingVolumeAccountSet(members)
     const [tradingVolumeUsd, liquidationVolumeUsd, revenueUsd] = await Promise.all([
-      tradingVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
+      tradingVolumeUsdOf(volumeAccounts),
       liquidationVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
       revenueByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
     ])
@@ -30436,6 +30528,17 @@ export async function getListTagLiquidityHistory(listId: string, tagId: string, 
   const valid = listTagMembers(members)
   if (!valid.length) return null
   return cachedLiquidityHistory(listTagScope(listId, tagId, valid), tagHistoryAccountSet(valid), window)
+}
+
+/**
+ * The list-tag twin of getTagVolumeHistory, on the detail's scope key: the valid
+ * members' summed volume over the same set the detail's "Trading" figure sums
+ * (tradingVolumeAccountSet), so its all-time total is that figure.
+ */
+export async function getListTagVolumeHistory(listId: string, tagId: string, members: string[], window?: { fromBlock: number; toBlock: number }): Promise<AccountVolumeHistory | null> {
+  const valid = listTagMembers(members)
+  if (!valid.length) return null
+  return cachedVolumeHistory(listTagScope(listId, tagId, valid), tagHistoryAccountSet(valid), tradingVolumeAccountSet(valid), window)
 }
 
 export async function getListTagActivity(listId: string, tagId: string, members: string[], type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {

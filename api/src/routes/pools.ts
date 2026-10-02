@@ -5,6 +5,7 @@ import { getAssetActivity, getPoolSwaps, getV3PoolActivity } from '../services/e
 import { DAILY_GRAIN, grainForWindow } from '../services/historyGrain.ts'
 import { DEFAULT_SNAPSHOT_POINTS, MAX_SNAPSHOT_POINTS, SNAPSHOT_RESOLUTIONS, snapshotRequestProblem } from '../services/poolSnapshots.ts'
 import { parseOmnipoolAssetParam } from '../services/omnipoolSnapshots.ts'
+import { withPoolVolumes } from '../services/volumeHistory.ts'
 import { DEFAULT_WINDOW_POINTS, windowSchema } from './windowQuery.ts'
 
 // Liquidity-pool endpoints: the asset Liquidity tab, stableswap/XYK pool detail
@@ -64,8 +65,9 @@ export async function poolsRoutes(fastify: FastifyInstance) {
     return snapshots
   })
 
+  // Each row carries its venue volume (24h, 7d) and 24h volume/TVL (volumeHistory.ts).
   fastify.get('/explorer/pools', async () => {
-    return getPoolsIndex()
+    return withPoolVolumes(await getPoolsIndex())
   })
 
   // A concentrated-liquidity (Uniswap v3) pool, addressed by its contract. Declared

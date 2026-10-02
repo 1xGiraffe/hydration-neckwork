@@ -538,7 +538,7 @@ export async function userRoutes(fastify: FastifyInstance) {
   // mere public visibility): visibleTagMembers returns null for "not visible or
   // missing" and the shared routes answer that with the same 404, so a private
   // list's tag and an unknown one are indistinguishable from outside. A PUBLIC
-  // list's tag is served by the same twelve reads under /explorer/list-tag/
+  // list's tag is served by the same seventeen reads under /explorer/list-tag/
   // (routes/lists.ts) — that surface is the one anonymous direct links land on.
   const listTagParams = z.object({ listId: z.string().min(1).max(64), tagId: z.string().min(1).max(64) })
   listTagReadRoutes(fastify, {
