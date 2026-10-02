@@ -1393,8 +1393,11 @@ function ChartMarkerFlag({ cluster, open, onOpen, onClose }: {
 // gutter); `onOpenChange` lets the chart hide its own crosshair tip while a marker
 // tip is open, since the two would overlap at the top edge. Key it by its domain
 // so a zoom (a new domain) starts with every tip closed.
-export function ChartMarkerLayer({ markers, t0, span, style, onOpenChange }: {
-  markers: ChartMarker[]; t0: number; span: number; style?: CSSProperties; onOpenChange?: (open: boolean) => void
+export function ChartMarkerLayer({ markers, t0, span, style, className, onOpenChange }: {
+  markers: ChartMarker[]; t0: number; span: number; style?: CSSProperties
+  /** Extra class on the layer: `lane` centres the caps in a strip under the plot (MultiLineChart's markerLane). */
+  className?: string
+  onOpenChange?: (open: boolean) => void
 }) {
   const [openMark, setOpenMark] = useState<number | null>(null)
   const narrow = useMediaQuery('(max-width: 720px)')
@@ -1402,7 +1405,7 @@ export function ChartMarkerLayer({ markers, t0, span, style, onOpenChange }: {
   useEffect(() => { onOpenChange?.(openMark != null) }, [openMark, onOpenChange])
   if (!clusters.length) return null
   return (
-    <div className="apx-marks" style={style}>
+    <div className={className ? `apx-marks ${className}` : 'apx-marks'} style={style}>
       {clusters.map((c, i) => (
         <ChartMarkerFlag key={`${c.frac}:${c.items.length}`} cluster={c} open={openMark === i}
           onOpen={() => setOpenMark(i)} onClose={() => setOpenMark(cur => (cur === i ? null : cur))} />

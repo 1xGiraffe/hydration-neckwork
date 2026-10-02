@@ -1770,6 +1770,13 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
 /* Cluster cap: an outlined ×N pill (panel background + kind-colored text reads
    in both themes, unlike text on the raw kind color). */
 .apx-mark-cap.multi { min-width: 0; height: 15px; padding: 0 5px; border-radius: 8px; background: var(--bg-elev); border: 1px solid var(--mk); box-shadow: none; color: var(--mk); }
+/* Markers in a MultiLineChart floorZone: caps centred in the strip under the
+   axis floor, no drop-line over the values, and the tip opens upward. */
+.apx-marks.lane .apx-mark-line { display: none; }
+.apx-marks.lane .apx-mark-cap { top: 50%; transform: translate(-50%, -50%); }
+.apx-marks.lane .apx-mark-cap:hover, .apx-marks.lane .apx-mark-cap:focus-visible { transform: translate(-50%, -50%) scale(1.25); }
+.apx-marks.lane .apx-mark-tip { top: auto; bottom: calc(50% + 10px); }
+.mlc-floor-label { opacity: 0.75; paint-order: stroke; stroke: var(--bg-elev); stroke-width: 3px; stroke-linejoin: round; stroke-opacity: 0.8; }
 .apx-mark-tip {
   position: absolute; top: 18px; left: 0; transform: translateX(-50%); z-index: 6;
   display: flex; flex-direction: column; gap: 4px; padding: 6px 9px;
@@ -4024,6 +4031,8 @@ a.rev-pill-label:hover { color: var(--accent); }
 .bw-chart-title { font-size: 12px; font-weight: 500; color: var(--text-high); }
 .bw-chart-sub { font-family: 'GeistMono'; font-size: 10.5px; color: var(--text-low); }
 .bw-chart-note { margin: 2px 0 0; font-size: 11px; color: var(--text-low); }
+/* The history chart's bottom strip is the liquidation zone, where the markers sit: keep the zoom reset out of it. */
+.bw-hist .chart-zoom-reset { bottom: auto; top: 4px; }
 .bw-card-loading { padding: 16px; font-family: 'GeistMono'; font-size: 12px; }
 @media (prefers-reduced-motion: reduce) { .bw-rule::before, .bw-rule::after, .bw-rule-pill, .bw-rule-chev { transition: none; } }
 @media (max-width: 720px) {
