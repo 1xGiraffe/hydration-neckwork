@@ -596,6 +596,16 @@ export interface MoneyMarketRewardsSummary { asOfBlock: number; totalUsd: number
 // per assetOut), and `amount`/`asset` restate the bound the order placed — a
 // Sell's floor on assetOut, a Buy's cap on assetIn.
 export interface ActiveDcaLimit { price: string; amount: string; asset: 'in' | 'out'; marketRatio: number | null }
+// The wallet balance a set of open-ended DCA orders draws on together.
+export interface DcaFundingPool {
+  balance: string
+  orders: number
+  perDay: string | null
+  perDayUsd: number | null
+  // When the balance is spent at the orders' combined rate — every member's end.
+  runsOutSeconds: number | null
+  siblings: { id: number; intentId?: string; assetOut: AssetRef }[]
+}
 export interface ActiveDca {
   // A schedule id, or a DCA intent's short "#n" handle. The two id spaces
   // overlap, so this is a display handle — `intentId` decides which order a row
@@ -618,6 +628,12 @@ export interface ActiveDca {
   fundingBalance: string | null
   // That balance at current prices — the open-ended stand-in for budgetUsd.
   fundingUsd?: number | null
+  // The open-ended orders selling one asset from one wallet share that balance:
+  // this order's projected slice of it (what it still has to spend) and the pool.
+  // Null on budgeted orders; the share alone is null when the split is unknowable.
+  fundingShare?: string | null
+  fundingShareUsd?: number | null
+  fundingPool?: DcaFundingPool | null
   // Null when the order set no absolute bound (it rides on slippage against the
   // oracle alone) or its placement could not be read.
   limit: ActiveDcaLimit | null
@@ -1769,6 +1785,9 @@ export interface DcaScheduleDetail {
   // Owner's spendable balance of the sold asset, on live open-ended schedules
   // only: what dates an order that has no budget to exhaust.
   fundingBalance: string | null
+  // This order's slice of it and the pool it shares (the Orders tab's own row).
+  fundingShare?: string | null
+  fundingPool?: DcaFundingPool | null
   status: 'active' | 'completed' | 'terminated' | 'cancelled' | 'migrated' | 'migration-cancelled'
   statusAt: string | null
   // Named termination reason for error terminations (e.g. "token frozen").

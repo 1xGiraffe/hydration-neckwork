@@ -135,7 +135,9 @@ describe('replay and alias guards', () => {
   // enriches a schedule's row, so an unresolved replacement lists one order twice.
   // The account page and the asset page must not disagree about that.
   it('reads dca_schedules with FINAL on both the account and the asset side', () => {
-    const at = explorerService.indexOf('async function getActiveDcas')
+    // The account side's read lives in liveDcaRowsFor (getActiveDcas and the
+    // open-ended funding pools both read through it).
+    const at = explorerService.indexOf('async function liveDcaRowsFor')
     expect(at).toBeGreaterThan(-1)
     const body = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
     expect(body).toContain('FROM price_data.dca_schedules FINAL')
