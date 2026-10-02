@@ -4160,3 +4160,60 @@ a.rev-pill-label:hover { color: var(--accent); }
 @media (max-width: 720px) {
   .cap-track { width: 64px; }
 }
+
+/* ============================================================
+   Oracles (/oracles, /oracle/:feed)
+   ============================================================ */
+.orc-tbl td { vertical-align: middle; }
+.orc-kind { padding: 2px 7px; font-size: 9.5px; flex-shrink: 0; }
+.orc-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; vertical-align: middle; }
+.orc-updated { white-space: nowrap; }
+.orc-updated .orc-dot { margin-right: 7px; }
+.orc-asset { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.orc-asset > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+a.orc-asset-link { color: inherit; text-decoration: none; }
+a.orc-asset-link:hover { text-decoration: underline; }
+.orc-src { display: inline-flex; flex-direction: column; gap: 4px; min-width: 0; max-width: 100%; }
+.orc-src-head { display: inline-flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+.orc-src-label { font-size: 12.5px; overflow-wrap: anywhere; }
+.orc-src-comps { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.orc-src-comp { display: inline-flex; align-items: center; gap: 5px; }
+.orc-consumers { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; }
+a.orc-consumer { display: inline-flex; align-items: center; gap: 4px; color: inherit; text-decoration: none; font-size: 12px; }
+a.orc-consumer:hover .orc-asset span:last-child { text-decoration: underline; }
+.orc-consumer .muted { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+.orc-pool { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.orc-feed { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.orc-feed-name { display: inline-flex; flex-direction: column; min-width: 0; }
+.orc-feed-addr { font-size: 10.5px; }
+.orc-caret { width: 12px; color: var(--text-low); }
+.orc-ema-name { font-weight: 500; }
+.orc-bars-cell { width: 140px; }
+.orc-bars { display: inline-block; width: 120px; height: 26px; vertical-align: middle; }
+.orc-bars rect { fill: var(--chart-neutral); }
+.orc-bars rect:hover { fill: var(--text-medium); }
+.orc-pairs-row > td { padding: 0 0 6px 28px !important; background: var(--panel); }
+.orc-pairs-tbl { min-width: 0; }
+.orc-pairs-tbl thead th { padding-top: 8px; padding-bottom: 8px; }
+.orc-pairs-tbl tbody td { padding-top: 8px; padding-bottom: 8px; font-size: 12.5px; }
+.orc-stale td:first-child { box-shadow: inset 2px 0 0 var(--amber); }
+.orc-sub { padding: 8px 2px 0; font-family: 'GeistMono'; font-size: 11px; }
+.orc-foot p { margin: 0 0 8px; }
+.orc-foot { max-width: 86ch; }
+.orc-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.orc-title .sub { display: inline-flex; align-items: center; gap: 6px; }
+.orc-detail { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 14px; }
+.orc-detail-row { display: grid; grid-template-columns: 130px 1fr; gap: 12px; align-items: baseline; font-size: 13px; min-width: 0; }
+.orc-detail-k { color: var(--text-low); font-family: 'GeistMono'; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+.orc-detail-v { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; min-width: 0; overflow-wrap: anywhere; }
+.orc-period { display: inline-flex; align-items: center; gap: 5px; font-family: 'GeistMono'; font-size: 12px; }
+@media (max-width: 720px) {
+  .orc-detail-row { grid-template-columns: 1fr; gap: 3px; }
+  .orc-bars-cell { width: auto; }
+  .orc-pairs-row > td { padding: 0 !important; }
+  .tbl.orc-tbl tbody td[data-label] .orc-src { align-items: flex-end; text-align: right; }
+  .tbl.orc-tbl tbody td[data-label] .orc-src-head, .tbl.orc-tbl tbody td[data-label] .orc-src-comps,
+  .tbl.orc-tbl tbody td[data-label] .orc-consumers, .tbl.orc-tbl tbody td[data-label] .orc-pool { justify-content: flex-end; }
+  .tbl.orc-tbl tbody td[data-label="Feed"], .tbl.orc-tbl tbody td[data-label="Asset"], .tbl.orc-tbl tbody td[data-label="Source"]:first-child { text-align: left; }
+  .tbl.orc-tbl tbody td[data-label="Feed"]::before, .tbl.orc-tbl tbody td[data-label="Asset"]::before { display: none; }
+}
