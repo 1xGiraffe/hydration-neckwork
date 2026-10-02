@@ -108,7 +108,8 @@ interface SecurityDashboard {
   runtime: { specVersion: number; upgrades: number; lastUpgrade: { blockHeight: number; blockTimestamp: string } | null }
   timeline: { kind: string; label: string; detail: string | null; blockHeight: number; blockTimestamp: string; asset: AssetRef | null }[]
   guardians: { techCommittee: { size: number; majority: number; superMajority: number }; outstandingWhitelisted: { callHash: string; blockTimestamp: string }[] }
-  wormhole: { assets: number; lockedUsd: number; issuanceUsd: number; inflightCount: number; queuedCount: number; worstStatus: string; deficitUsd: number; surplusUsd: number; asOf: string } | null
+  /** `indexBehind`: Hydration's index trailed the chain when supply was read, so a shortfall then is `unverified`, not a deficit. */
+  wormhole: { assets: number; lockedUsd: number; issuanceUsd: number; inflightCount: number; queuedCount: number; worstStatus: string; deficitUsd: number; surplusUsd: number; asOf: string; indexBehind?: boolean } | null
 }
 
 interface OmnipoolAsset { asset: AssetRef; reserve: string; reserveUsd: number | null; hubReserve: string; weightPct: number | null; capPct: number | null; tradable: string[] }
@@ -545,7 +546,7 @@ function renderSecurity(d: SecurityDashboard, ctx: ToolContext): string {
       ? joinBlocks(h3('Wormhole backing'), kv([
         ['Assets', formatCount(wh.assets)],
         ['Locked vs issued', `${formatUsd(wh.lockedUsd)} custody against ${formatUsd(wh.issuanceUsd)} issued`],
-        ['Worst status', wh.worstStatus],
+        ['Worst status', wh.indexBehind ? `${wh.worstStatus} — the Hydration index was behind the chain when supply was read, so a shortfall is not graded until indexing catches up` : wh.worstStatus],
         ['Deficit / surplus', `${formatUsd(wh.deficitUsd)} / ${formatUsd(wh.surplusUsd)}`],
         ['In flight / queued', `${formatCount(wh.inflightCount)} / ${formatCount(wh.queuedCount)}`],
         ['Snapshot', wh.asOf ? `${formatTime(wh.asOf)} · ${relativeAge(wh.asOf)}` : null],
