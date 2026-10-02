@@ -640,9 +640,23 @@ export interface ActiveDca {
   budgetUsd: number | null
   fundingBalance: string | null
   fundingUsd?: number | null
+  /** An open-ended order's projected slice of the wallet it shares with the owner's other open-ended orders selling the same asset. */
+  fundingShare?: string | null
+  fundingShareUsd?: number | null
+  fundingPool?: DcaFundingPool | null
   scheduleBlock?: number
   scheduleIndex?: number | null
   who?: AccountRef
+}
+
+/** The wallet balance a set of open-ended DCA orders spends together; they run dry together, at `runsOutSeconds`. */
+export interface DcaFundingPool {
+  balance: string
+  orders: number
+  perDay: string | null
+  perDayUsd: number | null
+  runsOutSeconds: number | null
+  siblings: { id: number; intentId?: string; assetOut: AssetRef }[]
 }
 
 export interface OpenLimitOrder {

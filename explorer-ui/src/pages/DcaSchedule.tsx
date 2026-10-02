@@ -62,9 +62,12 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
   useDocumentTitle(`DCA schedule #${scheduleId}`)
 
   // An open-ended order has no budget to be a fraction of, so its progress and
-  // its end are projected from the wallet still funding it.
+  // its end are projected from the wallet still funding it — from its SHARE of
+  // that wallet when other open-ended orders sell the same asset from it.
+  const funding = data ? data.fundingShare ?? data.fundingBalance : null
+  const sharedPool = data?.fundingPool && data.fundingPool.orders > 1 ? data.fundingPool : null
   const progress = data
-    ? dcaProgress(data.totalAmount, data.executions.totalIn, data.fundingBalance)
+    ? dcaProgress(data.totalAmount, data.executions.totalIn, funding)
     : { pct: null, projected: false }
   const pct = progress.pct
   // How often this order really fires. Measured from its own executions wherever
@@ -84,7 +87,7 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
       direction: data.direction, amountPer: data.amountPer, totalAmount: data.totalAmount,
       filledAmount: data.executions.totalIn, executionsDone: data.executions.count,
       periodSeconds: cadence.seconds, secondsToNext: countdown?.secondsUntil ?? null,
-      fundingBalance: data.fundingBalance,
+      fundingBalance: funding,
     })
     : null
   // Only worth stating where the ring visibly falls short of full — which is the
@@ -172,9 +175,20 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
                     mid-sentence sets its own line height and lifts the words around
                     it out of line. The sold asset is named in the row above. */}
                 <div className="dd">{data.totalAmount === '0'
-                  ? <span className="mono muted">open-ended — runs until stopped or unfunded
-                    {data.fundingBalance != null && <> · funded by <Amt raw={data.fundingBalance} dec={data.assetIn.decimals} /> {data.assetIn.symbol} in the wallet</>}
-                  </span>
+                  ? <>
+                    <span className="mono muted">open-ended — runs until stopped or unfunded
+                      {data.fundingBalance != null && <> · funded by <Amt raw={data.fundingBalance} dec={data.assetIn.decimals} /> {data.assetIn.symbol} in the wallet</>}
+                    </span>
+                    {/* The wallet funds every open-ended order selling this asset, not
+                        this one alone: they spend it together and run dry together. */}
+                    {sharedPool && <div className="muted dca-pool-note">
+                      Shared with {sharedPool.siblings.length} other open-ended {sharedPool.siblings.length === 1 ? 'order' : 'orders'} selling {data.assetIn.symbol}
+                      {' '}({sharedPool.siblings.map((x, i) => <Fragment key={x.intentId ?? x.id}>{i > 0 && ', '}<Link to={x.intentId ? paths.intent(x.intentId) : paths.dcaSchedule(x.id)} className="hash">→ {x.assetOut.symbol}</Link></Fragment>)}).
+                      {sharedPool.perDayUsd != null && <> Together they spend <span className="mono">≈ <UsdValue v={sharedPool.perDayUsd} />/day</span></>}
+                      {sharedPool.runsOutSeconds != null && <>{sharedPool.perDayUsd != null ? ', so' : ''} the balance lasts <span className="mono">~{fmtDuration(sharedPool.runsOutSeconds)}</span> for all of them</>}.
+                      {data.fundingShare != null && <> This order’s share: <span className="mono"><Amt raw={data.fundingShare} dec={data.assetIn.decimals} /> {data.assetIn.symbol}</span>.</>}
+                    </div>}
+                  </>
                   : <><AssetAmount asset={data.assetIn} raw={data.totalAmount} />
                     <Usd value={data.budgetUsd} basis={data.usdBasis} at={data.statusAt ?? data.createdAt.timestamp} />
                     {/* What is still ahead of the order, beside what it started

@@ -438,7 +438,7 @@ function DcaScheduleHover({ id }: { id: string }) {
           {data.budgetUsd != null && <span className="mono muted">· {F.usd(data.budgetUsd)}</span>}
         </span>}</div>
       {(() => {
-        const { pct, projected } = dcaProgress(data.totalAmount, data.executions.totalIn, data.fundingBalance)
+        const { pct, projected } = dcaProgress(data.totalAmount, data.executions.totalIn, data.fundingShare ?? data.fundingBalance)
         return pct != null ? <div className="hc-row"><span>Filled</span><span className="mono">{projected ? '~' : ''}{Math.round(pct)}%</span></div> : null
       })()}
       <div className="hc-row"><span>Executed</span><span className="mono">{F.int(data.executions.count)} trade{data.executions.count === 1 ? '' : 's'}{data.executions.failed > 0 ? ` · ${F.int(data.executions.failed)} failed` : ''}</span></div>

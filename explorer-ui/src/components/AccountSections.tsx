@@ -442,7 +442,7 @@ export interface DcaAggregates {
   pricedOrders: number
   perDayUsd: number        // ≈ combined spend/buy rate, capped by what each order can still fund
   tradesPerDay: number     // combined execution rate (all orders, priced or not), same cap
-  budgetUsd: number        // Σ budget (open-ended: funding balance) in dollars
+  budgetUsd: number        // Σ budget (open-ended: spent so far + its share of the funding balance) in dollars
   leftUsd: number          // Σ still to spend, same basis
   trades: number           // Σ executions done
   nextBlock: number | null // the soonest planned execution across the orders
@@ -455,7 +455,7 @@ export function dcaAggregates(dcas: ActiveDca[], blockSec?: number): DcaAggregat
       const runway = dcaRunway({
         direction: d.direction, amountPer: d.amountPerTrade, totalAmount: d.totalAmount,
         filledAmount: d.filledAmount, executionsDone: d.executionsDone,
-        periodSeconds: cadence.seconds, fundingBalance: d.fundingBalance,
+        periodSeconds: cadence.seconds, fundingBalance: d.fundingShare ?? d.fundingBalance,
       })
       // No runway (a Buy that has never executed, an unreadable owner) leaves
       // the order uncapped — the rate is ≈ either way.
@@ -464,17 +464,27 @@ export function dcaAggregates(dcas: ActiveDca[], blockSec?: number): DcaAggregat
       if (d.valueUsd != null) agg.perDayUsd += d.valueUsd * perDay
     }
     const openEnded = d.totalAmount === '0'
-    const budget = openEnded ? d.fundingUsd : d.budgetUsd
+    // An open-ended order counts its SHARE of the wallet, so orders sharing one
+    // balance sum to it once; the whole balance only where the split is unknowable.
+    const budget = openEnded ? (d.fundingShareUsd ?? d.fundingUsd) : d.budgetUsd
     if (budget != null) {
       agg.pricedOrders += 1
-      agg.budgetUsd += budget
-      // An open-ended order's visible dollar figure IS what is left; a budgeted
-      // one keeps the fraction its raw remainder says. The ratio is display-only,
-      // so Number() precision is the same class as the dollar values themselves.
-      const total = Number(d.totalAmount)
-      const ratio = openEnded ? 1
-        : d.remainingAmount != null && total > 0 ? Math.min(1, Math.max(0, Number(d.remainingAmount) / total)) : 1
-      agg.leftUsd += budget * ratio
+      if (openEnded) {
+        // An open-ended order's visible dollar figure IS what is left; what it has
+        // already spent, at the same price, makes it a plan the Filled share can be
+        // read against — otherwise the combined row said ~0% filled beside orders
+        // that are a seventh of the way through. Display-only, so Number() is fine.
+        const leftRaw = Number(d.fundingShare ?? d.fundingBalance ?? 0)
+        const spent = leftRaw > 0 ? Number(d.filledAmount) * (budget / leftRaw) : 0
+        agg.budgetUsd += budget + (Number.isFinite(spent) ? spent : 0)
+        agg.leftUsd += budget
+      } else {
+        agg.budgetUsd += budget
+        // A budgeted order keeps the fraction its raw remainder says.
+        const total = Number(d.totalAmount)
+        const ratio = d.remainingAmount != null && total > 0 ? Math.min(1, Math.max(0, Number(d.remainingAmount) / total)) : 1
+        agg.leftUsd += budget * ratio
+      }
     }
     agg.trades += d.executionsDone
     if (d.nextExecutionBlock != null) agg.nextBlock = agg.nextBlock == null ? d.nextExecutionBlock : Math.min(agg.nextBlock, d.nextExecutionBlock)
@@ -593,14 +603,17 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
             // unspent share of its budget, an open-ended one's whole funding
             // balance (which is all it has left by definition). An asset with no
             // price feed keeps the figure in the sold asset rather than losing it.
-            const leftUsd = openEnded ? d.fundingUsd : dcaLeftUsd(d.totalAmount, d.filledAmount, d.budgetUsd)
-            const leftRaw = openEnded ? d.fundingBalance : dcaAmountLeft(d.totalAmount, d.filledAmount)
+            // Several open-ended orders selling one asset from one wallet share it, so
+            // each states its own projected slice (fundingShare), never the whole balance.
+            const funding = d.fundingShare ?? d.fundingBalance
+            const leftUsd = openEnded ? (d.fundingShareUsd ?? d.fundingUsd) : dcaLeftUsd(d.totalAmount, d.filledAmount, d.budgetUsd)
+            const leftRaw = openEnded ? funding : dcaAmountLeft(d.totalAmount, d.filledAmount)
             const left = leftUsd != null ? <Usd v={leftUsd} />
               : leftRaw != null ? <><Amt raw={leftRaw} dec={d.assetIn.decimals} /> {d.assetIn.symbol}</>
                 : null
             // Open-ended orders have no budget to be a fraction of: their share and
             // their end come from the balance still funding them (see dcaProgress).
-            const { pct, projected } = dcaProgress(d.totalAmount, d.filledAmount, d.fundingBalance)
+            const { pct, projected } = dcaProgress(d.totalAmount, d.filledAmount, funding)
             const timing = d.nextExecutionBlock != null && headBlock
               ? estimateBlockCountdown(d.nextExecutionBlock, headBlock, headTime, now, blockSeconds(blockSec))
               : null
@@ -611,8 +624,9 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
               direction: d.direction, amountPer: d.amountPerTrade, totalAmount: d.totalAmount,
               filledAmount: d.filledAmount, executionsDone: d.executionsDone,
               periodSeconds: cadence.seconds, secondsToNext: timing?.secondsUntil ?? null,
-              fundingBalance: d.fundingBalance,
+              fundingBalance: funding,
             })
+            const sharedPool = openEnded && d.fundingPool && d.fundingPool.orders > 1 ? d.fundingPool : null
             return (
               // A DCA intent and a pallet-DCA schedule are the same order to a
               // reader, so they share this table — but not an id space (schedule
@@ -646,8 +660,13 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
                 <td data-label="Budget" className="r">
                   {openEnded ? <>
                     <span className="mono muted">open-ended</span>
-                    {left && <span className="dca-sub mono muted" title="Owner’s balance of the sold asset — what the order still has to spend">
+                    {left && <span className="dca-sub mono muted" title={sharedPool
+                      ? `This order’s share of the owner’s ${d.assetIn.symbol} balance, which ${sharedPool.orders} open-ended orders spend together — split by how fast each spends it`
+                      : 'Owner’s balance of the sold asset — what the order still has to spend'}>
                       {left} left
+                    </span>}
+                    {sharedPool && <span className="dca-sub mono muted dca-shared" title={`Shared with ${sharedPool.siblings.map(x => `${d.assetIn.symbol} → ${x.assetOut.symbol}`).join(', ')}`}>
+                      shared · {F.int(sharedPool.orders)} orders
                     </span>}
                   </> : <>
                     <AssetAmount asset={d.assetIn} raw={d.totalAmount} />
@@ -680,7 +699,9 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
                 <td data-label="Runs out" className="r mono">
                   {runway && runway.trades > 0
                     ? <span title={runway.funded
-                      ? 'Projected from the owner’s current balance of the sold asset — a top-up extends it'
+                      ? sharedPool
+                        ? `Projected: the ${F.int(sharedPool.orders)} open-ended orders selling ${d.assetIn.symbol} from this wallet spend its balance together and run out together — a top-up extends it`
+                        : 'Projected from the owner’s current balance of the sold asset — a top-up extends it'
                       : runway.estimated
                         ? 'Estimated from what this order has spent per trade so far — a Buy order fixes what it buys, not what it costs'
                         : 'At this order’s per-trade amount and cadence'}>

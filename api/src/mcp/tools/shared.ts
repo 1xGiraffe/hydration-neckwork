@@ -11,7 +11,7 @@
 
 import { z } from 'zod'
 import type { ZodRawShape } from 'zod'
-import type { AccountRef, AssetRef, ActivityRow, ActivityRevenue, MoneyMarketPosition, SearchResult } from '../types.ts'
+import type { AccountRef, AssetRef, ActivityRow, ActivityRevenue, DcaFundingPool, MoneyMarketPosition, SearchResult } from '../types.ts'
 import type { ToolContext, ToolError, ToolOutput } from '../toolTypes.ts'
 import type { UpstreamClient } from '../upstream.ts'
 import { invalidArgument, toolErrorFromUpstream } from '../errors.ts'
@@ -366,6 +366,8 @@ export interface DcaScheduleDetail {
   route: DcaRouteHop[] | null
   nextExecutionBlock: number | null
   fundingBalance: string | null
+  fundingShare?: string | null
+  fundingPool?: DcaFundingPool | null
   status: string
   statusAt?: { blockHeight: number; timestamp: string } | null
   statusReason?: string | null

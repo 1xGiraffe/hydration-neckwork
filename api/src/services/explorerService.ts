@@ -11,6 +11,7 @@ import { BUCKET_HISTORY_CLOSED_TTL_MS, BUCKET_HISTORY_FINALITY_SEC, BUCKET_HISTO
 import { OMNI_FIXED, omnipoolRemoveLiquidity, withStableswapSharePrices, xykReserveAssets, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
 import { currentLmRewardGenerationSql, lmCountedClaimable, lmCountedRewardRowsSql, loadLmRewards, type LmRewardRow } from './lmRewardSnapshot.ts'
 import { cached, cachedFound, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
+import { allocateFundingPools } from './dcaFunding.ts'
 import { NOMINAL_BLOCKS_PER_HOUR, blocksPerHour, measuredParaBlockMs, newestBlockTimestampsSql, paraBlockMs } from './blockTime.ts'
 import { RareEventLedger } from './rareEventLedger.ts'
 import { referendumTitleFor, referendumTitleKey } from './referendumTitleService.ts'
@@ -7839,6 +7840,20 @@ async function v3RegistryAssetResolver(): Promise<(addr: string) => number | nul
 // amount, totalAmount, period); progress is summed from DCA.TradeExecuted and the
 // next slot from DCA.ExecutionPlanned. totalAmount "0" = open-ended (no remaining).
 export interface ActiveDcaLimit { price: string; amount: string; asset: 'in' | 'out'; marketRatio: number | null }
+// The wallet balance a set of open-ended orders draws on together.
+export interface DcaFundingPool {
+  /** The owner's spendable balance of the sold asset — the whole pool. */
+  balance: string
+  /** Open-ended orders it funds, this one included. */
+  orders: number
+  /** Their combined spend per day, raw sold asset; null when any rate is unknown. */
+  perDay: string | null
+  perDayUsd: number | null
+  /** Seconds until the balance is spent at that combined rate — every member's end. */
+  runsOutSeconds: number | null
+  /** The other orders sharing it. */
+  siblings: { id: number; intentId?: string; assetOut: AssetRef }[]
+}
 export interface ActiveDca {
   // A classic schedule's id, or — for a DCA intent — the low 64 bits of its u128
   // id, the short "#n" handle. The two id spaces overlap (schedule 76 and intent
@@ -7878,6 +7893,14 @@ export interface ActiveDca {
   // That balance at current prices — the open-ended stand-in for budgetUsd, so
   // an order with no budget can still be ranked and read in dollars.
   fundingUsd: number | null
+  // The open-ended orders selling the same asset from the same wallet share that
+  // balance (services/dcaFunding.ts): `fundingShare` is this order's projected
+  // slice of it — what it still has to spend, the figure its "left", progress and
+  // end read from — and `fundingPool` the pool it belongs to. Null on budgeted
+  // orders; the share alone is null when the pool's split is unknowable.
+  fundingShare: string | null
+  fundingShareUsd: number | null
+  fundingPool: DcaFundingPool | null
   scheduleBlock: number; scheduleIndex: number | null
   // The schedule's owner. Redundant on an account's own page; the asset page
   // lists schedules across owners, so each row names whose order it is.
@@ -8084,37 +8107,42 @@ async function getActiveDcas(accounts: string[]): Promise<ActiveDca[]> {
   // exactly when the chain moved, and never otherwise. LIVE_CACHE_MS is the same
   // short TTL every other head-keyed read uses: once the head moves the old key is
   // never read again, so a long one would only squat LRU slots the live keys want.
-  return cached(`explorer:dca-active:${await liveHeadTag()}:${[...accounts].sort().join(',')}`, LIVE_CACHE_MS, async () => {
-    const [schedRes, intentRes] = await Promise.all([
-      client.query({
-        // FINAL for the same reason getAssetDcas uses it: dca_schedules replaces on
-        // id (a later event enriches a schedule's row) and an unresolved replacement
-        // would list the order twice. The table is tiny (~34k rows), so it stays bounded.
-        query: `SELECT id, who, block_height AS sblock, extrinsic_index AS sidx,
-                  asset_in, asset_out, direction, amount_per AS amt_per,
-                  total_amount AS total, period
-                FROM price_data.dca_schedules FINAL
-                WHERE who IN (${list})
-                  AND id NOT IN (
-                    SELECT id FROM price_data.dca_events WHERE event_name IN (${DCA_ENDED_EVENTS_SQL})
-                  )
-                ORDER BY block_height DESC`,
-        format: 'JSONEachRow',
-      }),
-      // intent_orders is ordered by intent_id, so an owner predicate reads the
-      // whole table — which is the point: one row per intent ever submitted, in
-      // the hundreds, and a projection keyed by owner would be a read model for a
-      // scan that costs less than planning it.
-      client.query({
-        query: `SELECT ${ACTIVE_DCA_INTENT_COLUMNS}
-                FROM (SELECT * FROM price_data.intent_orders FINAL WHERE kind = 'dca' AND owner IN (${list}))
-                WHERE ${INTENT_RESTING_SQL}
-                ORDER BY block_height DESC`,
-        format: 'JSONEachRow',
-      }),
-    ])
-    return enrichActiveDcas([...await schedRes.json<ActiveDcaScheduleRow>(), ...await intentRes.json<ActiveDcaScheduleRow>()])
-  })
+  return cached(`explorer:dca-active:${await liveHeadTag()}:${[...accounts].sort().join(',')}`, LIVE_CACHE_MS, async () =>
+    enrichActiveDcas(await liveDcaRowsFor(list)))
+}
+
+// Every live order of the listed owners — pallet schedules and DCA intents, as one
+// row shape. `list` is an sqlAccountList.
+async function liveDcaRowsFor(list: string): Promise<ActiveDcaScheduleRow[]> {
+  const [schedRes, intentRes] = await Promise.all([
+    client.query({
+      // FINAL for the same reason getAssetDcas uses it: dca_schedules replaces on
+      // id (a later event enriches a schedule's row) and an unresolved replacement
+      // would list the order twice. The table is tiny (~34k rows), so it stays bounded.
+      query: `SELECT id, who, block_height AS sblock, extrinsic_index AS sidx,
+                asset_in, asset_out, direction, amount_per AS amt_per,
+                total_amount AS total, period
+              FROM price_data.dca_schedules FINAL
+              WHERE who IN (${list})
+                AND id NOT IN (
+                  SELECT id FROM price_data.dca_events WHERE event_name IN (${DCA_ENDED_EVENTS_SQL})
+                )
+              ORDER BY block_height DESC`,
+      format: 'JSONEachRow',
+    }),
+    // intent_orders is ordered by intent_id, so an owner predicate reads the
+    // whole table — which is the point: one row per intent ever submitted, in
+    // the hundreds, and a projection keyed by owner would be a read model for a
+    // scan that costs less than planning it.
+    client.query({
+      query: `SELECT ${ACTIVE_DCA_INTENT_COLUMNS}
+              FROM (SELECT * FROM price_data.intent_orders FINAL WHERE kind = 'dca' AND owner IN (${list}))
+              WHERE ${INTENT_RESTING_SQL}
+              ORDER BY block_height DESC`,
+      format: 'JSONEachRow',
+    }),
+  ])
+  return [...await schedRes.json<ActiveDcaScheduleRow>(), ...await intentRes.json<ActiveDcaScheduleRow>()]
 }
 
 // What an order has done so far, keyed by the order's own identity (a schedule id
@@ -8283,16 +8311,50 @@ export function activeDcaLimit(s: ActiveDcaScheduleRow, aIn: AssetRef, aOut: Ass
 
 async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveDca[]> {
   if (!scheds.length) return []
-  const [prices, scheduleProgress, intentProgress, bounds] = await Promise.all([
+  // An open-ended order shares its owner's balance with every other open-ended
+  // order selling the same asset from that wallet (dcaFunding.ts), and those need
+  // not be on this page — the asset page lists HUSDC→GSOL but not the same
+  // wallet's HUSDC→GETH. So the owners' other live open-ended orders are read too,
+  // for the pool's rate only; they are not returned.
+  const openOwners = [...new Set(scheds.filter(s => s.total === '0').map(s => s.who))].filter(a => ACCOUNT_RE.test(a))
+  const listed = new Set(scheds.map(dcaOrderKey))
+  const siblings = openOwners.length
+    ? (await liveDcaRowsFor(sqlAccountList(openOwners))).filter(s => s.total === '0' && !listed.has(dcaOrderKey(s)))
+    : []
+  const all = [...scheds, ...siblings]
+  const [prices, scheduleProgress, intentProgress, bounds, blockMs] = await Promise.all([
     ensurePrices(),
-    dcaScheduleProgress(scheds.filter(s => !s.intent_id)),
-    dcaIntentProgress(scheds),
+    dcaScheduleProgress(all.filter(s => !s.intent_id)),
+    dcaIntentProgress(all),
     dcaScheduleBounds(scheds),
+    measuredParaBlockMs(client),
   ])
   // Only open-ended orders need it: a budgeted one already knows where it ends.
-  const funds = await spendableBalances(
-    scheds.filter(x => x.total === '0').map(x => ({ account: x.who, assetId: x.asset_in })),
-  )
+  const openAll = all.filter(x => x.total === '0')
+  const funds = await spendableBalances(openAll.map(x => ({ account: x.who, assetId: x.asset_in })))
+  const poolKeyOf = (s: ActiveDcaScheduleRow) => `${s.who}|${s.asset_in}`
+  const progressOf = (s: ActiveDcaScheduleRow) => (s.intent_id ? intentProgress : scheduleProgress).get(dcaOrderKey(s))
+  const allocations = allocateFundingPools(openAll.map(s => {
+    const progress = progressOf(s)
+    // A Sell order spends its fixed amount per trade; a Buy order's spend moves with
+    // the price, so its average so far stands in — and none at all before it trades.
+    let perTrade: bigint | null = null
+    try {
+      perTrade = s.direction === 'Buy'
+        ? ((progress?.executions ?? 0) > 0 ? BigInt(progress!.filled) / BigInt(progress!.executions) : null)
+        : BigInt(s.amt_per)
+    } catch { perTrade = null }
+    return {
+      key: dcaOrderKey(s), poolKey: poolKeyOf(s), perTrade,
+      periodSeconds: progress?.periodSeconds ?? Number(s.period) * blockMs / 1000,
+    }
+  }), new Map(openAll.map(s => {
+    const raw = funds.get(poolKeyOf(s))
+    let balance: bigint | null = null
+    try { balance = raw != null ? BigInt(raw) : null } catch { balance = null }
+    return [poolKeyOf(s), balance] as const
+  })))
+  const byKey = new Map(all.map(s => [dcaOrderKey(s), s] as const))
   return scheds.map(s => {
     const progress = (s.intent_id ? intentProgress : scheduleProgress).get(dcaOrderKey(s))
     const filled = progress?.filled ?? '0'
@@ -8303,6 +8365,18 @@ async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveD
     // a Sell order it's the INPUT ("sell 85 aDOT"). Value it with the matching asset.
     const perAsset = s.direction === 'Buy' ? aOut : aIn
     const fundingBalance = s.total === '0' ? funds.get(`${s.who}|${s.asset_in}`) ?? null : null
+    const alloc = s.total === '0' ? allocations.get(dcaOrderKey(s)) : undefined
+    const fundingShare = alloc?.share != null ? alloc.share.toString() : null
+    const fundingPool: DcaFundingPool | null = alloc && fundingBalance != null ? {
+      balance: fundingBalance,
+      orders: alloc.members.length,
+      perDay: alloc.poolPerDay != null ? alloc.poolPerDay.toString() : null,
+      perDayUsd: alloc.poolPerDay != null ? usdValue(prices, aIn.assetId, alloc.poolPerDay.toString(), aIn.decimals) : null,
+      runsOutSeconds: alloc.runsOutSeconds,
+      siblings: alloc.members.filter(k => k !== dcaOrderKey(s)).map(k => byKey.get(k)!).filter(Boolean).map(o => ({
+        id: Number(o.id), ...(o.intent_id ? { intentId: o.intent_id } : {}), assetOut: asset(o.asset_out),
+      })),
+    } : null
     return {
       id: Number(s.id), ...(s.intent_id ? { intentId: s.intent_id } : {}),
       assetIn: aIn, assetOut: aOut, direction: s.direction,
@@ -8315,6 +8389,9 @@ async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveD
       budgetUsd: s.total === '0' ? null : usdValue(prices, aIn.assetId, s.total, aIn.decimals),
       fundingBalance,
       fundingUsd: fundingBalance != null ? usdValue(prices, aIn.assetId, fundingBalance, aIn.decimals) : null,
+      fundingShare,
+      fundingShareUsd: fundingShare != null ? usdValue(prices, aIn.assetId, fundingShare, aIn.decimals) : null,
+      fundingPool,
       scheduleBlock: s.sblock, scheduleIndex: s.sidx,
       limit: activeDcaLimit(s, aIn, aOut, bounds.get(String(s.id)), prices),
       who: accountRef(s.who),
@@ -8324,12 +8401,13 @@ async function enrichActiveDcas(scheds: ActiveDcaScheduleRow[]): Promise<ActiveD
 
 // The asset page's ordering: biggest money first. A budgeted order ranks by its
 // whole plan valued today (budgetUsd); an open-ended one has no plan beyond the
-// wallet behind it, so it ranks by that balance (fundingUsd) instead — the same
-// figure its Budget cell displays in each case. Rows with no dollar value at all
+// wallet behind it, so it ranks by its share of that balance (fundingShareUsd,
+// else the whole balance where the share is unknowable) instead — the same figure
+// its Budget cell displays in each case. Rows with no dollar value at all
 // (no price feed, unreadable owner) sink below a knowable $0. Ties keep the
 // incoming order (sort is stable), i.e. schedule recency.
 export function compareDcasByBudgetUsdDesc(x: ActiveDca, y: ActiveDca): number {
-  return (y.budgetUsd ?? y.fundingUsd ?? -1) - (x.budgetUsd ?? x.fundingUsd ?? -1)
+  return (y.budgetUsd ?? y.fundingShareUsd ?? y.fundingUsd ?? -1) - (x.budgetUsd ?? x.fundingShareUsd ?? x.fundingUsd ?? -1)
 }
 
 // The asset page's DCAs tab: every ongoing schedule trading this asset, split by
@@ -19210,6 +19288,12 @@ export interface DcaScheduleDetail {
   // the balance is the one thing that can date their end and give them a share
   // to be "filled" against. Null everywhere else.
   fundingBalance: string | null
+  // This order's slice of that balance and the pool it shares with the owner's
+  // other open-ended orders selling the same asset — the Orders tab's own row for
+  // it (ActiveDca), so the two pages state one projection. Null where
+  // fundingBalance is.
+  fundingShare: string | null
+  fundingPool: DcaFundingPool | null
   status: 'active' | 'completed' | 'terminated' | 'cancelled' | 'migrated' | 'migration-cancelled'
   statusAt: string | null
   // Named DispatchError reason for hook (error) terminations, null when the
@@ -19982,10 +20066,13 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
         usdBasis = 'ended'
       }
     }
-    // Only a live open-ended schedule needs it (see fundingBalance).
-    const fundingBalance = status === 'active' && !budgeted && ACCOUNT_RE.test(sched.who)
-      ? (await spendableBalances([{ account: sched.who, assetId: aIn.assetId }])).get(`${sched.who}|${aIn.assetId}`) ?? null
+    // Only a live open-ended schedule needs it (see fundingBalance). Read from the
+    // owner's live orders, enriched once, so the pool it shares is the same one the
+    // Orders tab shows.
+    const liveRow = status === 'active' && !budgeted && ACCOUNT_RE.test(sched.who)
+      ? (await getActiveDcas([sched.who])).find(d => !d.intentId && d.id === scheduleId) ?? null
       : null
+    const fundingBalance = liveRow?.fundingBalance ?? null
     return {
       scheduleId,
       who: ACCOUNT_RE.test(sched.who) ? accountRef(sched.who) : null,
@@ -20005,6 +20092,8 @@ export async function getDcaSchedule(scheduleId: number, offset = 0, limit = 25)
         pool: leg.pool, poolId: leg.poolId, ...(leg.feeTier != null ? { feeTier: leg.feeTier } : {}), assetIn: asset(leg.assetIn), assetOut: asset(leg.assetOut),
       }))) : null,
       fundingBalance,
+      fundingShare: liveRow?.fundingShare ?? null,
+      fundingPool: liveRow?.fundingPool ?? null,
       nextExecutionBlock: Number((await planRes.json<{ nb: number }>())[0]?.nb ?? 0) || null,
       status,
       statusAt: ended?.ts ?? null,

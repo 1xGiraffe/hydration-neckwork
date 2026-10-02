@@ -459,7 +459,7 @@ function dcaBlock(dcas: ActiveDca[], base: string, nominalBlockSec: number | nul
       period,
       `${formatNumber(d.executionsDone)}`,
       formatAmount(d.filledAmount, d.assetIn.decimals, d.assetIn.symbol),
-      d.remainingAmount == null ? 'open-ended' : formatAmount(d.remainingAmount, d.assetIn.decimals, d.assetIn.symbol),
+      d.remainingAmount == null ? openEndedRemaining(d) : formatAmount(d.remainingAmount, d.assetIn.decimals, d.assetIn.symbol),
       d.nextExecutionBlock == null ? DASH : formatCount(d.nextExecutionBlock),
       d.valueUsd == null ? DASH : formatUsd(d.valueUsd),
     ]
@@ -467,8 +467,19 @@ function dcaBlock(dcas: ActiveDca[], base: string, nominalBlockSec: number | nul
   return joinBlocks(
     table(['Schedule', 'Trade', 'Per trade', 'Period', 'Fills', 'Filled', 'Remaining', 'Next block', 'USD/trade'], rows),
     dcas.length > shown.length ? note(`${dcas.length - shown.length} further schedule(s) not shown.`) : '',
-    note(`\`Period\` is the observed spacing between fills where two fills exist, otherwise the scheduled block period converted at ${nominalBlockSec != null ? `this runtime's nominal ${nominalBlockSec}s slot time` : 'the nominal slot time — which could not be read, so those rows show the raw block count instead'}. \`Remaining\` is "open-ended" for a schedule with no total budget.`),
+    note(`\`Period\` is the observed spacing between fills where two fills exist, otherwise the scheduled block period converted at ${nominalBlockSec != null ? `this runtime's nominal ${nominalBlockSec}s slot time` : 'the nominal slot time — which could not be read, so those rows show the raw block count instead'}. \`Remaining\` for a schedule with no total budget is its projected share of the owner's balance of the sold asset: open-ended schedules selling one asset from one wallet spend it together and run out together, so each states its slice, never the whole balance.`),
   )
+}
+
+// An open-ended schedule's remaining: its slice of the wallet it shares, and when
+// that wallet runs dry at the combined rate of every order spending it.
+function openEndedRemaining(d: ActiveDca): string {
+  const amount = d.fundingShare ?? d.fundingBalance
+  if (amount == null) return 'open-ended'
+  const pool = d.fundingPool
+  const shared = pool && pool.orders > 1 ? `, shared by ${pool.orders} orders` : ''
+  const end = pool?.runsOutSeconds != null ? `, ~${formatDuration(pool.runsOutSeconds)} left` : ''
+  return `open-ended · ~${formatAmount(amount, d.assetIn.decimals, d.assetIn.symbol)}${shared}${end}`
 }
 
 function ordersBlock(orders: OpenLimitOrder[], base: string): string {
@@ -632,6 +643,14 @@ function compactDca(d: ActiveDca, nominalBlockSec: number | null) {
     amountPerTrade: scaleAmount(d.amountPerTrade, d.assetIn.decimals),
     filled: scaleAmount(d.filledAmount, d.assetIn.decimals),
     remaining: d.remainingAmount == null ? null : scaleAmount(d.remainingAmount, d.assetIn.decimals),
+    // Open-ended only: its projected slice of the shared wallet, and the pool.
+    fundingShare: d.fundingShare != null ? scaleAmount(d.fundingShare, d.assetIn.decimals) : null,
+    fundingPool: d.fundingPool ? {
+      balance: scaleAmount(d.fundingPool.balance, d.assetIn.decimals),
+      orders: d.fundingPool.orders,
+      perDayUsd: d.fundingPool.perDayUsd,
+      runsOutSeconds: d.fundingPool.runsOutSeconds,
+    } : null,
     executionsDone: d.executionsDone,
     // Null rather than a guess: the block period is only a duration once the
     // runtime's nominal slot time is known.

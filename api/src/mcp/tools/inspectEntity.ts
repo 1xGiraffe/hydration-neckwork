@@ -996,7 +996,10 @@ async function renderDcaSchedule(scheduleId: string, ctx: ToolContext): Promise<
       ['Budget', d.totalAmount == null || /^0+$/.test(d.totalAmount)
         ? 'open-ended — no total set; it runs until the funding below is spent or it is terminated'
         : `${formatAmount(d.totalAmount, inDec, assetLabel(d.assetIn))}${d.budgetUsd != null ? ` (${formatUsd(d.budgetUsd)}${d.usdBasis === 'ended' ? ', priced at the schedule\'s end' : ''})` : ''}`],
-      ['Funding left', d.fundingBalance != null ? formatAmount(d.fundingBalance, inDec, assetLabel(d.assetIn)) : null],
+      ['Funding left', d.fundingBalance != null ? formatAmount(d.fundingShare ?? d.fundingBalance, inDec, assetLabel(d.assetIn))
+        + (d.fundingPool && d.fundingPool.orders > 1
+          ? ` — this schedule's share of ${formatAmount(d.fundingPool.balance, inDec, assetLabel(d.assetIn))} in the wallet, which ${d.fundingPool.orders} open-ended schedules spend together${d.fundingPool.runsOutSeconds != null ? `; at their combined rate it lasts ~${formatDuration(d.fundingPool.runsOutSeconds)} for all of them` : ''}`
+          : '') : null],
       ['Executions', `${formatCount(d.executions?.count)} filled · ${formatCount(d.executions?.failed)} failed of ${formatCount(d.executions?.attempts)} attempts`],
       ['Filled', d.executions?.totalIn ? `${formatAmount(d.executions.totalIn, inDec, assetLabel(d.assetIn))} → ${formatAmount(d.executions.totalOut, d.assetOut?.decimals ?? 0, assetLabel(d.assetOut))}` : null],
       ['Slippage cap', d.slippagePermill != null ? formatPercent(d.slippagePermill / 10_000) : null],
