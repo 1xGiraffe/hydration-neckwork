@@ -384,7 +384,7 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
       summary: 'One pool\'s volume, bucketed',
       description: [
         'Hourly or daily sums of the pool\'s deduplicated in/out legs, per asset and side: the pre-aggregated hourly fold below its cut, the pool\'s raw legs above it, so the series reaches the indexed head. Amounts are raw integers of each asset — value them with /v1/assets/{id}/price if USD is needed.',
-        'The fold holds CLOSED hours only and a live month is republished about once a day; the raw tail covers that gap, so a leg is counted once and the last buckets are as fresh as the leg model (a direct Uniswap v3 swap reaches it a few minutes behind the head). Legs backfilled BELOW the cut into an already-folded month under-report until the next derivations cycle re-folds that month. Fee legs are excluded: they restate in/out value.',
+        'The fold holds CLOSED hours only, each folded on the first derivations cycle after it closes; the raw tail covers the hours above its cut, so a leg is counted once and the last buckets are as fresh as the leg model (a direct Uniswap v3 swap reaches it a few minutes behind the head). Legs backfilled BELOW the cut into an already-folded hour under-report until the next derivations cycle re-folds that hour. Fee legs are excluded: they restate in/out value.',
       ].join('\n\n'),
       params: z.object({ venue: zVenue, poolKey: z.string().min(1).max(128) }),
       querystring: z.object({

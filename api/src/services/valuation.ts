@@ -223,6 +223,22 @@ function priceIdUniverse(): string {
 }
 
 /**
+ * A fingerprint of everything the registry contributes to valuing a leg of the
+ * asset `assetExpr` (a UInt32 SQL expression): its decimal unit (amountUnitSql),
+ * the id whose feed prices it (priceAliasSql) and whether that id is in the
+ * price join's universe (priceIdUniverse) — the three registry inputs
+ * pricedCteSql bakes into a leg's USD. A read model that stores event-time USD
+ * XORs it over a bucket's asset set, keeps that per row and recomputes a bucket
+ * whose stored value no longer matches, so a registry change re-values exactly
+ * the buckets whose legs it touches. Any new registry input to pricedCteSql
+ * belongs here too.
+ */
+export function valuationRegistryFingerprintSql(assetExpr: string): string {
+  return `cityHash64(${assetExpr}, ${amountUnitSql(assetExpr)}, ${priceAliasSql(assetExpr)},
+           has([${priceIdUniverse()}], ${priceAliasSql(assetExpr)}))`
+}
+
+/**
  * The rolling window every anchored surface reads: the last {hours} before the
  * anchor, half-open at the bottom so consecutive windows cannot both claim a
  * boundary block. The DefiLlama backfill passes an explicit calendar range

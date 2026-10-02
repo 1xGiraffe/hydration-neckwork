@@ -74,9 +74,9 @@ describe('uniswapV3FeePayersSql', () => {
     expect(sql).toContain('{end:DateTime}')
   })
 
-  // pool_swap_legs is a ReplacingMergeTree the uniswap_v3_legs job republishes
-  // whole months into: the live table holds 1,440 rows for 614 real fee legs.
-  // Summing it raw would weight a republished swapper 2.3x.
+  // pool_swap_legs is a ReplacingMergeTree: a corrected v3 leg lands beside the
+  // version it supersedes, and a replayed range duplicates legs until a merge.
+  // Summing it raw would weight a re-written swapper twice.
   it('deduplicates the leg before summing it', () => {
     expect(sql).toContain('argMax')
     expect(sql).toContain('ingested_at')

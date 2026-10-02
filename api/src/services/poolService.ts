@@ -2200,7 +2200,7 @@ async function xykIssuanceAt(lpAssetId: number, observations: Observation[]): Pr
   if (!observations.length) return
   const res = await client.query({
     query: `-- pool-snapshots:xyk-issuance
-            SELECT block_height, total_shares_raw FROM price_data.xyk_lp_total_shares_history FINAL
+            SELECT block_height, total_shares_raw FROM price_data.xyk_lp_total_shares_history
             WHERE lp_asset_id = {id:Int32} AND block_height <= {t:UInt32} ORDER BY block_height`,
     query_params: { id: lpAssetId, t: observations[observations.length - 1].block }, format: 'JSONEachRow',
   })

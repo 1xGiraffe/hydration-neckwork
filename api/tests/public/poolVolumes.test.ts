@@ -267,7 +267,7 @@ describe('volume SQL invariants', () => {
   it('keeps every other priced surface on the vectorised operators too', async () => {
     const { buildStableswapYieldSql, buildOmnipoolYieldSql } = await import('../../src/services/poolYield.ts')
     const { buildTickersSql } = await import('../../src/public/services/coingecko.ts')
-    const { buildPartitionInsertSql } = await import('../../src/services/accountTradeVolume.ts')
+    const { accountTradeVolumeInsertSql } = await import('../../src/services/accountTradeVolume.ts')
     const { REVENUE_STREAMS, buildRevenueEventRowsSql } = await import('../../src/services/revenueStreams.ts')
 
     // `amount × close ÷ 10^decimals` at scale 12 — the reference shape, reached
@@ -275,7 +275,7 @@ describe('volume SQL invariants', () => {
     // revenue_events (8.59 → 5.70) both PERSIST what this computes.
     expect(buildStableswapYieldSql())
       .toContain('toDecimal256(s.reserve_raw, 0) * toDecimal256(p.close, 12) /')
-    expect(buildPartitionInsertSql('202601'))
+    expect(accountTradeVolumeInsertSql('202601', [{ bucket: '81816', fingerprint: '0' }], 'price_data.account_trade_volume_staging', { computedAt: '2026-01-01 00:00:00' }))
       .toContain(') * toDecimal256(p.close, 12) / toDecimal256(')
     for (const stream of REVENUE_STREAMS) {
       if (stream === 'hollar_borrow') continue

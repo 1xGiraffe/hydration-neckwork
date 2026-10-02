@@ -468,7 +468,9 @@ describe('uniswap v3 realization shares in the payer ranking', () => {
     expect(sql).toContain("SELECT account, -sum(amount_usd) AS part")
     expect(sql).toContain("stream = 'uniswap_v3_fee' AND dest = 'accrued'")
     expect(sql).toContain('WHERE a.built >= r.published')
-    expect(sql).toContain('SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS published\n    FROM price_data.revenue_events\n    GROUP BY p')
+    // Read through the per-hour computed_by_hour projection's shape.
+    expect(sql).toContain('SELECT toStartOfHour(block_timestamp) AS hour, max(computed_at) AS hour_published\n      FROM price_data.revenue_events\n      GROUP BY hour')
+    expect(sql).toContain('SELECT toYYYYMM(hour) AS p, max(hour_published) AS published')
     expect(sql).toContain('month >= 202609')
     // A month partly before the range stays out; one starting inside it counts.
     expect(firstMonthInside(Date.UTC(2026, 8, 1) / 1000)).toBe(202609)

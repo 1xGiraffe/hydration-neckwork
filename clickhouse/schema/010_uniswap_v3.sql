@@ -128,3 +128,11 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.uniswap_v3_histogram_mv TO pri
 -- leaves those extrinsics out (v3CompoundPlumbingSql). A ZeroBurn outside any
 -- extrinsic has no act to count and no row.
 CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.uniswap_v3_compound_histogram_mv TO price_data.activity_histogram_events (`day` Date, `block_height` UInt32, `event_index` UInt32, `activity_index` UInt32, `event_name` LowCardinality(String), `asset_refs` Array(UInt32), `ingested_at` DateTime) AS SELECT toDate(block_timestamp) AS day, block_height, event_index, assumeNotNull(extrinsic_index) AS activity_index, 'Gamma.Compound' AS event_name, CAST([], 'Array(UInt32)') AS asset_refs, ingested_at FROM price_data.raw_evm_logs WHERE topic0 = '0x4606b8a47eb284e8e80929101ece6ab5fe8d4f8735acc56bd0c92ca872f2cfe7' AND extrinsic_index IS NOT NULL AND length(data) >= 194 AND lower(contract_address) IN (SELECT vault_address FROM price_data.uniswap_v3_vaults);
+
+-- Per-hour ingest watermark of the `UniswapV3` Broadcast.Swapped3 events (MV-fed
+-- from raw_events): the uniswap_v3_legs job (api/src/derivations/jobs.ts) takes a
+-- routed hop's op_key and swapper from them, so a hop repaired or replayed in
+-- raw_events must re-examine its hour even when the Swap log itself never moved.
+-- max() is idempotent under replay.
+CREATE TABLE IF NOT EXISTS price_data.uniswap_v3_hop_hour_watermarks (`hour` DateTime, `src_ingest` SimpleAggregateFunction(max, DateTime)) ENGINE = AggregatingMergeTree PARTITION BY tuple() ORDER BY hour SETTINGS index_granularity = 64;
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.uniswap_v3_hop_hour_watermarks_mv TO price_data.uniswap_v3_hop_hour_watermarks (`hour` DateTime, `src_ingest` SimpleAggregateFunction(max, DateTime)) AS SELECT toStartOfHour(block_timestamp) AS hour, max(ingested_at) AS src_ingest FROM price_data.raw_events WHERE (event_name = 'Broadcast.Swapped3') AND (JSONExtractString(args_json, 'fillerType', '__kind') = 'UniswapV3') GROUP BY hour;

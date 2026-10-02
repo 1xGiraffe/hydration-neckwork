@@ -34,7 +34,7 @@ import { DECIMAL_STRINGS, scaledUsd } from '../../services/poolVolumes.ts'
 // An empty or lagging table degrades to the raw arm (max() of an empty
 // DateTime column is the epoch), so the split is a performance boundary and
 // never a coverage gate. Backfill below the mark under-reports for at most one
-// derivations cycle — the same freshness contract every partition-incremental
+// derivations cycle — the same freshness contract every bucket-incremental
 // model here carries.
 //
 // WHAT EACH STREAM MEANS is documented on the builders in revenueStreams.ts:
