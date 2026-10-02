@@ -68,6 +68,10 @@ export type Route =
   | { name: 'ice' }
   | { name: 'revenue' }
   | { name: 'volume' }
+  | { name: 'oracles' }
+  // /oracle/<feed>: a feed contract (0x…), a DIA key (dia:<contract>:<KEY>, the key's slash
+  // percent-encoded) or an EMA pair (ema:<source>:<a>-<b>).
+  | { name: 'oracle'; feed: string }
   | { name: 'asset'; assetId: number }
   | { name: 'xcDestination'; slug: string }
   | { name: 'holders'; assetId: number }
@@ -172,6 +176,9 @@ export function parseRoute(loc: string): Route {
     case 'ice': return { name: 'ice' }
     case 'revenue': return { name: 'revenue' }
     case 'volume': return { name: 'volume' }
+    case 'oracles': return { name: 'oracles' }
+    // A DIA key's slash may arrive decoded (/oracle/dia:0x…:DOT/USD): the rest of the path is the id.
+    case 'oracle': return parts[1] ? { name: 'oracle', feed: parts.slice(1).join('/') } : { name: 'oracles' }
     case 'asset':
       // /asset/xc/<slug> — a cross-chain destination. It has no registry id, so
       // it is addressed by a slug under its own prefix rather than by a number.
@@ -345,6 +352,9 @@ export const paths = {
   ice: () => '/ice',
   revenue: () => '/revenue',
   volume: () => '/volume',
+  oracles: () => '/oracles',
+  // Each segment of the id is encoded on its own, so `dia:0x…:DOT/USD` keeps its colons readable.
+  oracle: (feed: string) => `/oracle/${feed.split(':').map(encodeURIComponent).join(':')}`,
   asset: (assetId: number) => `/asset/${assetId}`,
   // A cross-chain swap's destination — not a registry asset, so not an id route.
   xcDestination: (slug: string) => `/asset/xc/${encodeURIComponent(slug)}`,
