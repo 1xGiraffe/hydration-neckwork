@@ -1520,6 +1520,14 @@ export function eventValueAlternativesFilterSql(
 export interface PriceInfo { price: number; change24h: number; priceRaw?: string }
 let priceMap = new Map<number, PriceInfo>()
 let priceLoadedAt = 0
+// The ids the current map took from the money market's own oracle (no venue
+// prices them): a "market price" read for them is the oracle restated, so a
+// surface comparing the two (the oracle page) must not call them a market.
+let priceMapOracleFilled = new Set<number>()
+/** Whether the current price map's entry for `assetId` is the money-market oracle fallback rather than a venue price. */
+export function priceIsOracleFallback(assetId: number): boolean {
+  return priceMapOracleFilled.has(assetId)
+}
 let priceRefreshInflight: Promise<Map<number, PriceInfo>> | null = null
 // Account directory/detail values share one pinned price generation. It advances
 // atomically with the five-minute MM account-value generation, preventing two
@@ -1787,8 +1795,10 @@ async function refreshPrices(): Promise<Map<number, PriceInfo>> {
     // ever fills a gap; the aliases then run again for its aToken. A share keeps
     // the redeemable-value rule and is never filled this way. See mmOraclePrices.ts.
     const oracle = new Map([...currentMmOraclePrices()].filter(([id]) => !isStableswapShareToken(id)))
-    if (withMmOraclePrices(m, oracle, entry => ({ price: entry.price, priceRaw: entry.priceRaw, change24h: 0 })).length) applyAliases()
+    const oracleFilled = withMmOraclePrices(m, oracle, entry => ({ price: entry.price, priceRaw: entry.priceRaw, change24h: 0 }))
+    if (oracleFilled.length) applyAliases()
     priceMap = m
+    priceMapOracleFilled = new Set(oracleFilled)
     priceLoadedAt = Date.now()
   } catch { /* serve stale on error */ }
   return priceMap
