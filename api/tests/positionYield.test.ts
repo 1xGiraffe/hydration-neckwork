@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { assetDescriptor } from '../src/services/explorerAssets.ts'
 import { farmAprByAsset, farmAprPercScaled, renderPerc, xykFarmAprPercScaled, type LiveFarm } from '../src/services/farmApr.ts'
 import {
-  TOKEN_YIELD_MAX_GIVE_BACK, WEIGHT_UNIT, assemblePoolYield, tokenAccrualAprs, farmPartsByReward, feeAprPctScaled, incentiveAprPctScaled, legWeights,
+  TOKEN_YIELD_MAX_GIVE_BACK, WEIGHT_UNIT, assemblePoolYield, tokenAccrualAprs, farmPartsByReward, feeAprPctScaled, feeAprPctScaledSeconds, incentiveAprPctScaled, v3FeeWindowSeconds, V3_FEE_APR_MIN_AGE_SECONDS, legWeights,
   pctFromPerc, pctNumber, rayAprToApyPctScaled, underlyingParts, v3LpFee, type YieldContext,
 } from '../src/services/positionYield.ts'
 
@@ -177,5 +177,39 @@ describe('venue fee APRs', () => {
     expect(v3LpFee(400n, 0, 0)).toBe(400n)
     expect(v3LpFee(400n, 4, 4)).toBe(300n)
     expect(v3LpFee(400n, 4, 5)).toBeNull()
+  })
+})
+
+
+// A concentrated-liquidity pool younger than its 7-day fee window has fees from its own age only, so the
+// annualisation runs over that age (aPAXG/HOLLAR 0x419f… was 1.1 days old and read 27% instead of ~165%).
+describe('v3 fee APR over the pool\'s real age', () => {
+  const USD = 10n ** 12n
+  const anchor = BigInt(Date.parse('2026-10-08T00:00:00Z') / 1000)
+  it('keeps the 7-day window for a pool older than it', () => {
+    const w = v3FeeWindowSeconds('2026-09-08 10:00:00', anchor)!
+    expect(w).toBe(7n * 86_400n)
+    expect(feeAprPctScaledSeconds(7n * USD, 365n * USD, w)).toBe(feeAprPctScaled(7n * USD, 365n * USD, 7))
+  })
+  it('annualises a 1.5-day-old pool over 1.5 days: 7/1.5 × the 7-day figure', () => {
+    const w = v3FeeWindowSeconds('2026-10-06 12:00:00', anchor)!
+    expect(w).toBe(129_600n)
+    const young = feeAprPctScaledSeconds(15n * USD, 1000n * USD, w)!
+    const old = feeAprPctScaled(15n * USD, 1000n * USD, 7)!
+    // 15/1000·365/1.5 = 365% vs 15/1000·365/7 = 78.214…%
+    expect(Number(young) / Number(old)).toBeCloseTo(7 / 1.5, 6)
+  })
+  it('states no APR for an unknown, future or too-young pool', () => {
+    expect(v3FeeWindowSeconds(undefined, anchor)).toBeNull()
+    expect(v3FeeWindowSeconds('2026-10-08 00:00:00', anchor)).toBeNull()
+    expect(v3FeeWindowSeconds('2026-10-09 00:00:00', anchor)).toBeNull()
+    expect(v3FeeWindowSeconds('2026-10-07 23:30:00', anchor)).toBeNull()
+    expect(v3FeeWindowSeconds('2026-10-07 23:00:00', anchor)).toBe(V3_FEE_APR_MIN_AGE_SECONDS)
+  })
+  it('rounds half up exactly like the day-based annualisation', () => {
+    for (const [fee, tvl, days] of [[1n, 3n, 7], [2n, 7n, 30], [5n, 11n, 7], [123456789n, 987654321n, 30]] as const) {
+      expect(feeAprPctScaledSeconds(fee, tvl, BigInt(days) * 86_400n)).toBe(feeAprPctScaled(fee, tvl, days))
+    }
+    expect(feeAprPctScaledSeconds(1n, 1n, 0n)).toBeNull()
   })
 })
