@@ -99,10 +99,19 @@ describe('dcaAggregates — the section totals row', () => {
     const agg = dcaAggregates([budgeted, openEnded], undefined)
     expect(agg.perDayUsd).toBeCloseTo(100 * 2 + 10 * 4)
     expect(agg.tradesPerDay).toBeCloseTo(6)
-    expect(agg.budgetUsd).toBe(1300)          // 1000 budget + 300 funding
+    // 1000 budget + the open-ended order's plan: 300 still funded plus what it has
+    // already spent (2 of the sold asset, at the 300/7 the funding prices it at).
+    expect(agg.budgetUsd).toBeCloseTo(1000 + 300 + 2 * 300 / 7)
     expect(agg.leftUsd).toBeCloseTo(800)      // 1000 × 5/10 remaining + all 300 funding
     expect(agg.trades).toBe(7)
     expect(agg.nextBlock).toBe(500)           // the soonest plan wins
+  })
+  // Open-ended orders selling one asset from one wallet share it: each counts its
+  // own share, so the wallet is in the total once.
+  it('counts a shared funding balance once, through each order\'s share', () => {
+    const a = dca({ valueUsd: 10, budgetUsd: null, totalAmount: '0', filledAmount: '0', fundingBalance: '10', fundingUsd: 100, fundingShare: '4', fundingShareUsd: 40, periodSeconds: 3600 })
+    const b = dca({ valueUsd: 10, budgetUsd: null, totalAmount: '0', filledAmount: '0', fundingBalance: '10', fundingUsd: 100, fundingShare: '6', fundingShareUsd: 60, periodSeconds: 3600 })
+    expect(dcaAggregates([a, b], undefined).leftUsd).toBeCloseTo(100)
   })
   it('keeps unpriced orders in the counts and timing but out of the money', () => {
     const agg = dcaAggregates([budgeted, unpriced], undefined)
