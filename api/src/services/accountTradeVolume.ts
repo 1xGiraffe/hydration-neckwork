@@ -3,12 +3,15 @@
 // hops are not double-counted.
 //
 // The netting is a per-trade cross-row aggregation with a block-time ohlc
-// valuation, so it cannot be a plain per-row MV. The derivations runner rebuilds
-// whole CH month-partitions in a staging twin and publishes them atomically
-// (REPLACE PARTITION), so re-runs are idempotent and readers never see a gap.
+// valuation, so it cannot be a plain per-row MV. Every leg of a trade lies in one
+// block (one extrinsic, or one block hook), so the model is computed per BUCKET of
+// ACCOUNT_TRADE_VOLUME_BUCKET_BLOCKS blocks, each self-contained: the derivations
+// job (runAccountTradeVolume) recomputes only the buckets whose raw, registry
+// inputs or late intent orders moved, and republishes their month partition from
+// its staging twin, so readers never see a gap and need no FINAL.
 
 import { allExplorerAssets, PRICE_ALIAS_ID, priceAssetId } from './explorerAssets.ts'
-import { ICE_POT_ACCOUNT } from './revenueStreams.ts'
+import { ICE_POT_ACCOUNT, V3_POOLS_CTE, V3_TOKEN_ASSETS_CTE, v3TokenAssetSql } from './revenueStreams.ts'
 
 // First block emitting Broadcast.Swapped (the unified swap-event era). At/above
 // this height a swap's hops are Broadcast.Swapped* events (grouped by their
@@ -22,15 +25,14 @@ const BROADCAST_EVENTS = "'Broadcast.Swapped','Broadcast.Swapped2','Broadcast.Sw
 // events that settle an intent — the last of a DCA is DcaCompleted alone, with no
 // amounts of its own — and the solver's holding pot (`modlice_ice#`), through which
 // every fill moves as one Currencies.Transferred in and one out.
-const ICE_MIN_BLOCK = 14_362_830
-const INTENT_FILL_EVENTS = "'Intent.IntentResolved','Intent.IntentResovedPartially','Intent.DcaTradeExecuted','Intent.DcaCompleted'"
+export const ICE_MIN_BLOCK = 14_362_830
+export const INTENT_FILL_EVENTS = "'Intent.IntentResolved','Intent.IntentResovedPartially','Intent.DcaTradeExecuted','Intent.DcaCompleted'"
 // The OTC pallet's fill events, which name a fill's TAKER as `who` — the only
 // thing that resolves an OTC Broadcast fill's two sides (see the `bcast` CTE).
 const OTC_FILL_EVENTS = "'OTC.Filled','OTC.PartiallyFilled'"
 
-// Source for per-account trading volume: the de-duped net-trade model, whose
-// derivations job keeps every partition covered. One summable USD column per
-// account.
+// Source for per-account trading volume: the de-duped net-trade model. One
+// summable USD column per trade row.
 export function accountVolumeSource(): { table: string; col: string } {
   return { table: 'price_data.account_trade_volume', col: 'volume_usd' }
 }
@@ -65,29 +67,86 @@ function priceIdUniverse(): string {
   return [...ids].join(',') || '0'
 }
 
-// The combined swap-row filter: every raw event that could contribute to a netted
-// trade — unified-era Broadcast.Swapped* at/above the cutover, legacy pallet
-// *Executed below it. This is the same row set buildPartitionInsertSql consumes
-// (its two era legs). Single source of truth for the era split: the
-// swap_source_partition_watermarks MV that feeds the incremental staleness check
-// carries this predicate verbatim, and api/src/derivations/jobs.test.ts asserts
-// the declared MV still matches it.
-export function swapEventFilterSql(): string {
-  return `((event_name IN (${BROADCAST_EVENTS}) AND block_height >= ${BROADCAST_MIN_BLOCK})`
-    + ` OR (event_name IN (${LEGACY_EVENTS}) AND block_height < ${BROADCAST_MIN_BLOCK}))`
+// ── Buckets ──
+// A bucket is ACCOUNT_TRADE_VOLUME_BUCKET_BLOCKS consecutive blocks,
+// intDiv(block_height, 1800). Block-aligned rather than hour-aligned because every
+// source the netting reads is ordered by block_height, so a bucket is a plain
+// primary-key range on each of them, and because a trade never leaves its block,
+// so any block-aligned bucket nets exactly as a full build would. 1800 blocks is an
+// hour at today's 2 s blocks (6 h at the early 12 s), which bounds what the
+// still-filling head bucket costs to recompute each cycle. The table's partitions
+// are the synthetic block-space months of `block_height * 12` (see the note above
+// account_trade_volume in clickhouse/schema/001_tables.sql); each begins at a UTC
+// day, 86,400 synthetic seconds = 7,200 blocks, a multiple of 1800, so a bucket
+// never straddles two partitions.
+export const ACCOUNT_TRADE_VOLUME_BUCKET_BLOCKS = 1800
+const BUCKET_BLOCKS = ACCOUNT_TRADE_VOLUME_BUCKET_BLOCKS
+
+/** The month partition (`YYYYMM` of the synthetic block clock) a bucket lies in. */
+export function bucketPartition(bucket: string | number): string {
+  const b = Number(bucket)
+  if (!Number.isInteger(b) || b < 0) throw new Error(`invalid bucket ${JSON.stringify(bucket)}`)
+  const d = new Date(b * BUCKET_BLOCKS * 12 * 1000)
+  return `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}`
 }
 
-// The per-partition netting + valuation INSERT. Groups a partition's swap legs
-// into net trades, values each surviving asset at its block-time ohlc close, and
-// stores volume_usd = max(net_in_usd, net_out_usd). Exported as the single source
-// of truth for the netting SQL (reused by the derivations recompute job, which
-// writes into the staging twin and publishes via REPLACE PARTITION).
+/**
+ * The blocks of a set of buckets of one partition, as a primary-key range on
+ * block_height (the span of the set) narrowed to exactly the set.
+ */
+export function bucketBlocksPredicate(partition: string, buckets: readonly string[], column = 'block_height'): string {
+  if (!/^\d{6}$/.test(partition)) throw new Error(`invalid partition ${JSON.stringify(partition)}`)
+  if (!buckets.length) throw new Error('no buckets to compute')
+  for (const b of buckets) {
+    if (!/^\d+$/.test(b) || bucketPartition(b) !== partition) throw new Error(`invalid bucket ${JSON.stringify(b)} for ${partition}`)
+  }
+  const ids = [...new Set(buckets.map(Number))].sort((a, b) => a - b)
+  return `${column} >= ${ids[0] * BUCKET_BLOCKS} AND ${column} < ${(ids[ids.length - 1] + 1) * BUCKET_BLOCKS}
+      AND intDiv(${column}, ${BUCKET_BLOCKS}) IN (${ids.join(', ')})`
+}
+
+// Every raw_events row the netting reads, directly or through an MV-fed
+// projection of raw_events (intent_events, transfer_activity_by_time): the
+// unified-era Broadcast.Swapped* at/above the cutover, the legacy pallet
+// *Executed below it with the DCA executions that key them, the OTC fill events
+// that resolve a fill's taker, the ICE fills from runtime 443 and the
+// Currencies.Transferred legs through the solver's pot (by the pot account
+// anywhere in the event, a superset of the from/to match the netting applies —
+// a watermark over a superset only re-marks more). The bucket watermark MV
+// (account_trade_volume_watermarks_mv) carries this predicate verbatim, which
+// api/src/derivations/jobs.test.ts asserts.
+export function accountTradeVolumeSourceFilterSql(): string {
+  return `((event_name IN (${BROADCAST_EVENTS}) AND block_height >= ${BROADCAST_MIN_BLOCK})`
+    + ` OR (event_name IN (${LEGACY_EVENTS}, 'DCA.TradeExecuted') AND block_height < ${BROADCAST_MIN_BLOCK})`
+    + ` OR (event_name IN (${OTC_FILL_EVENTS}))`
+    + ` OR (event_name IN (${INTENT_FILL_EVENTS}) AND block_height >= ${ICE_MIN_BLOCK})`
+    + ` OR (event_name = 'Currencies.Transferred' AND block_height >= ${ICE_MIN_BLOCK} AND position(args_json, '${ICE_POT_ACCOUNT}') > 0))`
+}
+
+// The registry assets a source row values, for the bucket's registry fingerprint:
+// a Broadcast fill's input and output assets, a legacy fill's assetIn/assetOut
+// (exactly as the netting reads them) and a pot leg's currency, which also covers
+// every ICE fill's two assets (each fill moves through the pot as one transfer of
+// each). The direct v3 swaps' assets depend on the pool and token maps and are
+// fingerprinted with them (the watermarks' `v3` flag).
+export function accountTradeVolumeSourceAssetsSql(): string {
+  return `multiIf(event_name IN (${BROADCAST_EVENTS}), arrayMap(x -> toUInt32(JSONExtractInt(x, 'asset')), arrayConcat(JSONExtractArrayRaw(args_json, 'inputs'), JSONExtractArrayRaw(args_json, 'outputs'))),`
+    + ` event_name IN (${LEGACY_EVENTS}), [toUInt32(greatest(0, JSONExtractInt(args_json, 'assetIn'))), toUInt32(greatest(0, JSONExtractInt(args_json, 'assetOut')))],`
+    + ` event_name = 'Currencies.Transferred', [toUInt32(JSONExtractInt(args_json, 'currencyId'))], [])`
+}
+
+// The bucket netting + valuation INSERT. Groups the buckets' swap legs into net
+// trades, values each surviving asset at its block-time ohlc close, and stores
+// volume_usd = max(net_in_usd, net_out_usd), one row per (account, block_height,
+// trade_key), each carrying its bucket's registry fingerprint. Exported as the
+// single source of truth for the netting SQL; the derivations job writes it into
+// the staging twin and publishes via REPLACE PARTITION.
 //
 // Replay safety: raw_events is ReplacingMergeTree(ingested_at) keyed on
 // (block_height, event_index), so a replayed range holds duplicate row versions
 // until background merges collapse them. Every raw_events read below uses FINAL
 // so a recompute between replay and merge nets each leg exactly once; the reads
-// stay bounded by the partition filter + event-name set.
+// stay bounded by the bucket range + event-name set.
 //
 // Valuation stays in Decimal end-to-end: prices are Decimal(38,12) at the source
 // (ohlc close states), so converting through Float64 would be the only lossy
@@ -98,66 +157,51 @@ export function swapEventFilterSql(): string {
 // × Decimal256(12) is scale 12 by scale addition, and ÷ Decimal256(0) keeps
 // scale 12 and truncates toward zero), but the adaptive-scale functions are a
 // per-row path where the operators are vectorised — measured 4.70 → 2.65 CPU-s
-// per partition INSERT. `net_amt` is SIGNED, so the truncation direction matters
-// and was proved rather than assumed: 2.77 M rows across seven partitions from
+// per month INSERT. `net_amt` is SIGNED, so the truncation direction matters
+// and was proved rather than assumed: 2.77 M rows across seven months from
 // 2023-01 to the live head (1.10 M of them negative, four below the Broadcast
 // cutover) produced 0 mismatches, identical sums, identical per-row hash and the
-// same Decimal(76,12) type, and the partition's published volume_usd/net_in_usd/
-// net_out_usd folds came out bit-identical.
-// Block bounds of a derived-table partition, i.e. the inverse of the
-// `toYYYYMM(toDateTime(block_height * 12))` expression the partition key uses.
-// A block is 12 synthetic seconds, so the month's first block is its UTC epoch
-// second divided by 12, and the bound is exclusive at the next month's first block.
-// "Synthetic" is load-bearing: 12 is a partitioning constant, decoupled from the
-// chain's real block time (~12-15s until Q3 2025, ~6s until runtime 440, ~2s since), and it must stay identical across all
-// eight sites — see the note above account_trade_volume in
-// clickhouse/schema/001_tables.sql. Do not re-pin it at a block-time change; a
-// faster chain just makes each partition span fewer real days (~15 at 6s, ~5 at 2s,
-// so proportionally more partitions go stale per real day and this job rebuilds
-// more often), which is a cost question, never a correctness one.
-export function partitionBlockRange(partition: string): { fromBlock: number; toBlock: number } {
-  const year = Number(partition.slice(0, 4))
-  const month = Number(partition.slice(4, 6))
-  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
-    throw new Error(`invalid derived partition ${JSON.stringify(partition)}`)
-  }
-  const MS_PER_BLOCK = 12_000
-  return {
-    fromBlock: Math.floor(Date.UTC(year, month - 1, 1) / MS_PER_BLOCK),
-    toBlock: Math.floor(Date.UTC(month === 12 ? year + 1 : year, month === 12 ? 0 : month, 1) / MS_PER_BLOCK),
-  }
-}
+// same Decimal(76,12) type, and the published volume_usd/net_in_usd/net_out_usd
+// folds came out bit-identical.
 
 // The ASOF right side is the whole ohlc_1h feed for every priced asset. A candle
 // matches only where `price_time <= block_time`, so every candle whose hour closes
-// after the partition's last trade is dead weight and can be cut. There is no safe
-// lower bound: an asset with no candle inside the partition is valued at the last
-// candle before it, however far back that lies. `maxBlockTime` is the partition's
-// own last swap block timestamp, carried by the staleness watermark projection;
-// omitting it values against the whole feed.
+// after the buckets' last trade is dead weight and can be cut. There is no safe
+// lower bound: an asset with no candle inside the buckets is valued at the last
+// candle before it, however far back that lies. `maxBlockTime` is the buckets' own
+// newest source block timestamp, carried by the bucket watermarks; omitting it
+// values against the whole feed.
 function priceWindowSql(maxBlockTime: string | undefined): string {
   if (maxBlockTime == null) return ''
-  if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(maxBlockTime)) {
-    throw new Error(`invalid partition price watermark ${JSON.stringify(maxBlockTime)}`)
+  if (!DATETIME_RE.test(maxBlockTime)) {
+    throw new Error(`invalid bucket price watermark ${JSON.stringify(maxBlockTime)}`)
   }
   return ` AND interval_start <= (toDateTime('${maxBlockTime}') - toIntervalHour(1))`
 }
 
-export function buildPartitionInsertSql(
+const DATETIME_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
+
+/** One bucket to compute, with the registry fingerprint its rows carry. */
+export interface TradeVolumeBucket {
+  bucket: string
+  /** The bucket's registry fingerprint, a decimal UInt64. */
+  fingerprint: string
+}
+
+export function accountTradeVolumeInsertSql(
   partition: string,
-  targetTable = 'price_data.account_trade_volume',
-  maxBlockTime?: string,
+  buckets: readonly TradeVolumeBucket[],
+  targetTable: string,
+  opts: { computedAt: string; maxBlockTime?: string },
 ): string {
   const md = maxDecimals()
   const usdDivisor = (10n ** BigInt(md)).toString()
   const anchor = EVENT_ANCHOR_OFFSET.toString()
-  // The derived table's partition is a synthetic month over `block_height * 12`
-  // seconds. ClickHouse cannot invert that function chain into a primary-key range,
-  // so filtering raw_events (ORDER BY block_height, event_index) on the expression
-  // alone read every granule of the table for each rebuild. Hand the sort key the
-  // equivalent explicit range and keep the expression for exactness.
-  const { fromBlock, toBlock } = partitionBlockRange(partition)
-  const pf = `block_height >= ${fromBlock} AND block_height < ${toBlock} AND toYYYYMM(toDateTime(block_height * 12)) = ${partition}`
+  if (!DATETIME_RE.test(opts.computedAt)) throw new Error(`invalid computed_at ${JSON.stringify(opts.computedAt)}`)
+  for (const b of buckets) if (!/^\d+$/.test(b.fingerprint)) throw new Error(`invalid fingerprint ${JSON.stringify(b.fingerprint)}`)
+  const pf = bucketBlocksPredicate(partition, buckets.map(b => b.bucket))
+  const registryFp = `transform(intDiv(block_height, ${BUCKET_BLOCKS}), [${buckets.map(b => `toUInt32(${b.bucket})`).join(', ')}],
+                   [${buckets.map(b => `toUInt64(${b.fingerprint})`).join(', ')}], toUInt64(0))`
   const rid = `toUInt64OrZero(extractGroups(args_json, '"__kind":"Router","value":(\\\\d+)')[1])`
   const bcastKey = `if(rid > 0, rid, ${anchor} + event_index)`
   // A signed legacy swap is identified by its extrinsic. An unsigned one has none, and
@@ -298,25 +342,22 @@ intent_trades AS (
   // ETH-prefixed account form. A Router-routed hop through the pool has a `UniswapV3`
   // Swapped3 in its extrinsic and is already in `legs` through it, so those extrinsics
   // are left out here. Tokens resolve through the registry's contract addresses or the
-  // `0x…01 + id` asset precompile; a swap whose token neither names is dropped rather
-  // than booked as asset 0.
-  const v3Asset = (tokenExpr: string, joined: string) => {
-    const hex = `replaceRegexpOne(lower(${tokenExpr}), '^0x', '')`
-    return `if(${joined} > 0, toUInt32(${joined}), if(length(${hex}) = 40 AND substring(${hex}, 1, 32) = '00000000000000000000000000000001', toUInt32(reinterpretAsUInt32(reverse(unhex(substring(${hex}, 33, 8))))), toUInt32(4294967295)))`
-  }
+  // `0x…01 + id` asset precompile (the pools and token map are the uniswap_v3_legs
+  // job's own CTEs, and the bucket fingerprint covers both); a swap whose token
+  // neither names is dropped rather than booked as asset 0.
   const v3Direct = `
 v3_direct AS (
   SELECT concat('0x45544800', substring(e.counterparty, 3, 40), '0000000000000000') AS account,
          e.block_height AS block_height, e.event_index AS event_index, e.block_timestamp AS block_time,
-         ${v3Asset('p.token0', 't0.asset_id')} AS asset0, ${v3Asset('p.token1', 't1.asset_id')} AS asset1,
+         ${v3TokenAssetSql('t0.asset_id', 'p.token0')} AS asset0, ${v3TokenAssetSql('t1.asset_id', 'p.token1')} AS asset1,
          if(e.amount0 > 0, asset0, asset1) AS asset_in, if(e.amount0 > 0, asset1, asset0) AS asset_out,
          toDecimal256(toString(toUInt256(if(e.amount0 > 0, e.amount0, e.amount1))), 0) AS amount_in,
          toDecimal256(toString(toUInt256(abs(if(e.amount0 > 0, e.amount1, e.amount0)))), 0) AS amount_out
   FROM (SELECT block_height, event_index, extrinsic_index, block_timestamp, contract_address, counterparty, amount0, amount1
         FROM price_data.uniswap_v3_events FINAL WHERE kind = 'pool' AND event_name = 'Swap' AND ${pf}) e
-  INNER JOIN price_data.uniswap_v3_pools p ON p.pool_address = e.contract_address
-  LEFT JOIN (SELECT lower(evm_address) AS addr, any(asset_id) AS asset_id FROM price_data.assets WHERE evm_address != '' GROUP BY addr) t0 ON t0.addr = lower(p.token0)
-  LEFT JOIN (SELECT lower(evm_address) AS addr, any(asset_id) AS asset_id FROM price_data.assets WHERE evm_address != '' GROUP BY addr) t1 ON t1.addr = lower(p.token1)
+  INNER JOIN pools p ON p.pool_address = e.contract_address
+  LEFT JOIN token_assets t0 ON t0.addr = lower(p.token0)
+  LEFT JOIN token_assets t1 ON t1.addr = lower(p.token1)
   WHERE e.counterparty != '' AND asset0 != 4294967295 AND asset1 != 4294967295
     AND (e.block_height, ifNull(e.extrinsic_index, 4294967295)) NOT IN (
       SELECT block_height, ifNull(extrinsic_index, 4294967295) FROM price_data.raw_events FINAL
@@ -324,8 +365,9 @@ v3_direct AS (
 )`
   return `
 INSERT INTO ${targetTable}
-  (account, block_height, trade_key, volume_usd, net_in_usd, net_out_usd, trade_count, computed_at)
-WITH${legacyLegs},${intentFills},${v3Direct},
+  (account, block_height, trade_key, volume_usd, net_in_usd, net_out_usd, trade_count, registry_fp, computed_at)
+WITH ${V3_TOKEN_ASSETS_CTE},
+${V3_POOLS_CTE},${legacyLegs},${intentFills},${v3Direct},
 bcast AS (
   SELECT e.block_height AS block_height, e.event_index AS event_index, e.block_timestamp AS block_time,
          e.event_name AS event_name, e.args_json AS args_json, e.rid AS rid,
@@ -336,14 +378,13 @@ bcast AS (
          -- is always one of {swapper, filler}, so the maker is the other one. Same
          -- rule as the live indexer and the repair script, which share it in
          -- src/blocks/otcCounterparty.ts. An unresolvable fill (no sibling event in
-         -- this partition, or a taker that is neither account) keeps swapper, which
-         -- is how it was booked before.
+         -- its block, or a taker that is neither account) keeps swapper.
          -- The ICE pot's route legs are its fills a second time — but only where a
          -- fill in the same extrinsic books them to an owner. A solution whose fills
          -- name no owner yet (its IntentSubmitted not indexed, as in a backward
-         -- backfill, where the swap watermark would never re-mark the partition)
-         -- keeps them on the pot rather than losing the trade. '' fails the account
-         -- shape \`net\` keeps.
+         -- backfill) keeps them on the pot rather than losing the trade, until the
+         -- order lands and re-marks the fill's bucket. '' fails the account shape
+         -- \`net\` keeps.
          if(e.swapper = '${ICE_POT_ACCOUNT}' AND (e.block_height, e.extrinsic_index) IN (SELECT block_height, extrinsic_index FROM intent_fills), '',
          multiIf(NOT e.is_otc, e.swapper,
                  t.taker = e.swapper, e.swapper,
@@ -435,14 +476,14 @@ valued AS (
   FROM net n
   ASOF LEFT JOIN (
     SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close
-    FROM price_data.ohlc_1h WHERE asset_id IN (${priceIdUniverse()})${priceWindowSql(maxBlockTime)} GROUP BY asset_id, interval_start
+    FROM price_data.ohlc_1h WHERE asset_id IN (${priceIdUniverse()})${priceWindowSql(opts.maxBlockTime)} GROUP BY asset_id, interval_start
   ) p ON p.asset_id = ${priceAliasSql('n.asset_id')} AND p.price_time <= n.block_time
 )
 SELECT account, block_height, trade_key,
        toDecimal128(greatest(sum(greatest(net_usd, toDecimal256(0, 12))), sum(greatest(-net_usd, toDecimal256(0, 12)))), 12) AS volume_usd,
        toDecimal128(sum(greatest(-net_usd, toDecimal256(0, 12))), 12) AS net_in_usd,
        toDecimal128(sum(greatest(net_usd, toDecimal256(0, 12))), 12) AS net_out_usd,
-       toUInt32(1) AS trade_count, now() AS computed_at
+       toUInt32(1) AS trade_count, ${registryFp} AS registry_fp, toDateTime('${opts.computedAt}') AS computed_at
 FROM valued
 GROUP BY account, block_height, trade_key
 HAVING volume_usd > 0 AND min(all_aave) = 0`

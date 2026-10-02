@@ -33,31 +33,29 @@ CREATE TABLE IF NOT EXISTS price_data.account_swap_activity (`account` String, `
 CREATE TABLE IF NOT EXISTS price_data.account_swap_activity_queue (`queued_at` DateTime64(3), `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `asset_in` UInt32, `asset_out` UInt32, `amount_in` String, `amount_out` String, `ingested_at` DateTime) ENGINE = MergeTree PARTITION BY toYYYYMM(queued_at) ORDER BY (queued_at, block_height, event_index, ingested_at) TTL toDateTime(queued_at) + toIntervalDay(7) SETTINGS index_granularity = 1024;
 CREATE TABLE IF NOT EXISTS price_data.account_swap_activity_queue_state (`id` UInt8, `queued_at` DateTime64(3), `block_height` UInt32, `event_index` UInt32, `ingested_at` DateTime, `updated_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(updated_at) ORDER BY id SETTINGS index_granularity = 64;
 CREATE TABLE IF NOT EXISTS price_data.account_tags (`label_id` String, `label_name` String, `color` String DEFAULT '', `note` String DEFAULT '', `icon` String DEFAULT '', `account_id` String, `deleted` UInt8 DEFAULT 0, `created_at` DateTime DEFAULT now(), `updated_at` DateTime64(3) DEFAULT now64(3)) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (label_id, account_id) SETTINGS index_granularity = 8192;
--- `toDateTime(block_height * 12)` — the synthetic block clock, eight sites.
+-- `toDateTime(block_height * 12)` — the synthetic block clock.
 -- ────────────────────────────────────────────────────────────────────────────
 -- The 12 here is NOT the chain's block time — the chain ran at ~12-15s until
 -- Q3 2025, ~6s until runtime 440, ~2s since; the constant matched the early
 -- era by origin but is now decoupled. It is a fixed constant that maps a block height into a
 -- monotonic, evenly spaced pseudo-date, purely so ClickHouse has something to
 -- partition a block-keyed table by without carrying a timestamp column. Nothing
--- reads the resulting date as a wall-clock time: it names a partition, and
--- api/src/derivations/jobs.ts inverts the very same expression to recover the
--- partition's block range.
+-- reads the resulting date as a wall-clock time: it names a partition.
 --
 -- Consequences, all deliberate:
 --   * A "month" partition is 216,000 blocks of block-space, which is ~15 real
 --     days at 6s and ~5 at 2s. The partitions get smaller in wall-clock terms as
 --     the chain speeds up; they do not get wrong.
---   * The eight sites must carry the SAME constant or partitions stop lining up
---     and REPLACE PARTITION publishes into the wrong bucket:
+--   * Every partition starts on a UTC day of the pseudo-date: 86,400 synthetic
+--     seconds, a multiple of 7,200 blocks. account_trade_volume's 1,800-block
+--     buckets therefore never straddle two partitions.
+--   * The sites must carry the SAME constant or partitions stop lining up and
+--     REPLACE PARTITION publishes into the wrong month:
 --       001_tables.sql: account_trade_volume, prices, trade_volume_by_account,
 --                       account_trade_volume_staging (a staging twin's PARTITION BY
 --                       must match its live table byte for byte)
---       003_materialized_views.sql: swap_source_partition_watermarks_mv
---       006_public.sql: swap_source_partition_watermarks_v3_mv (the same index,
---                       fed from raw_evm_logs Swap logs)
---       api/src/services/accountTradeVolume.ts: MS_PER_BLOCK
---       api/src/derivations/jobs.ts: the partition SQL and its intDiv(..., 12) inverse
+--       api/src/services/accountTradeVolume.ts: bucketPartition (bucket → month)
+--       api/src/derivations/jobs.ts: keptTradeRowsSql (the month's kept rows)
 --   * DO NOT "fix" this at a block-time change. Re-pinning it to a new block time
 --     would re-key every partition of these tables, silently orphaning existing
 --     data under partition names no reader computes any more — and it would buy
@@ -65,12 +63,17 @@ CREATE TABLE IF NOT EXISTS price_data.account_tags (`label_id` String, `label_na
 --   * Upper bound: DateTime tops out at 2106-02-07, i.e. block ~358M, roughly 22
 --     years at 2s. Long past that, these tables need a wider partition expression,
 --     which is a schema-rebuild decision and not a cadence one.
--- The derivation's recurring staleness check needs only max(computed_at) per
--- synthetic partition. Keep that read key-sized: without this projection it
--- groups every trade row every ten minutes. `rebuild` is required so a
--- ReplacingMergeTree merge cannot leave an aggregate projection out of sync.
--- Existing deployments materialize the projection once during rollout.
-CREATE TABLE IF NOT EXISTS price_data.account_trade_volume (`account` String, `block_height` UInt32, `trade_key` UInt64, `volume_usd` Decimal(38, 12) DEFAULT 0, `net_in_usd` Decimal(38, 12) DEFAULT 0, `net_out_usd` Decimal(38, 12) DEFAULT 0, `trade_count` UInt32 DEFAULT 1, `computed_at` DateTime DEFAULT now(), PROJECTION computed_by_partition (SELECT toYYYYMM(toDateTime(block_height * 12)) AS p, max(computed_at) AS der_computed GROUP BY p)) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(toDateTime(block_height * 12)) ORDER BY (account, block_height, trade_key) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild';
+-- account_trade_volume is a progressive bucket fold (api/src/derivations/jobs.ts):
+-- one row per netted trade, recomputed per 1,800-block bucket
+-- (intDiv(block_height, 1800)) and republished a month at a time from its staging
+-- twin, so it never holds two versions of a row and readers need no FINAL.
+-- `registry_fp` is the bucket's registry fingerprint at computation, compared
+-- every cycle to re-value a bucket the registry change touches. The staleness
+-- check needs only per-bucket row count, max(computed_at) and fingerprint
+-- range; computed_by_bucket keeps that read key-sized instead of grouping every
+-- trade row each cycle, and `rebuild` is required so a ReplacingMergeTree merge
+-- cannot leave an aggregate projection out of sync.
+CREATE TABLE IF NOT EXISTS price_data.account_trade_volume (`account` String, `block_height` UInt32, `trade_key` UInt64, `volume_usd` Decimal(38, 12) DEFAULT 0, `net_in_usd` Decimal(38, 12) DEFAULT 0, `net_out_usd` Decimal(38, 12) DEFAULT 0, `trade_count` UInt32 DEFAULT 1, `registry_fp` UInt64 DEFAULT 0, `computed_at` DateTime DEFAULT now(), PROJECTION computed_by_bucket (SELECT intDiv(block_height, 1800) AS bucket, count() AS n, max(computed_at) AS der_computed, min(registry_fp) AS fp_min, max(registry_fp) AS fp_max GROUP BY bucket)) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(toDateTime(block_height * 12)) ORDER BY (account, block_height, trade_key) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild';
 CREATE TABLE IF NOT EXISTS price_data.account_transfer_activity (`account` String, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `call_address` Nullable(String), `from_account` String, `to_account` String, `amount` String, `asset_id` UInt32) ENGINE = ReplacingMergeTree PARTITION BY toYYYYMM(block_timestamp) ORDER BY (account, block_height, event_index) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.activity_histogram_events (`day` Date, `block_height` UInt32, `event_index` UInt32, `activity_index` UInt32, `event_name` LowCardinality(String), `asset_refs` Array(UInt32), `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(day) ORDER BY (block_height, event_index) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.asset_swap_activity (`asset_id` UInt32, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `who` String, `asset_in` UInt32, `asset_out` UInt32, `amount_in` String, `amount_out` String) ENGINE = ReplacingMergeTree PARTITION BY toYYYYMM(block_timestamp) ORDER BY (asset_id, block_height, event_index) SETTINGS index_granularity = 8192;
@@ -88,7 +91,7 @@ CREATE TABLE IF NOT EXISTS price_data.atoken_scaled_anchor (`contract_address` S
 -- The scaled deltas, holder-first and contract-first. Unpartitioned, at granularity 1024: every
 -- reader selects by the leading key (one holder, or one contract), which month partitions would
 -- scatter over every month's parts — at least one granule each — and ~15M rows stay a handful of
--- parts. The revenue watermark MV (008) still groups what it reads by month itself.
+-- parts. The revenue watermark MV (008) still groups what it reads by hour itself.
 CREATE TABLE IF NOT EXISTS price_data.atoken_scaled_deltas (`contract_address` String, `holder` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `event_name` LowCardinality(String), `leg_index` UInt8, `scaled_delta` Int256, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (holder, contract_address, block_height, event_index, leg_index) SETTINGS index_granularity = 1024;
 CREATE TABLE IF NOT EXISTS price_data.atoken_scaled_deltas_by_contract (`contract_address` String, `holder` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `event_name` LowCardinality(String), `leg_index` UInt8, `scaled_delta` Int256, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (contract_address, holder, block_height, event_index, leg_index) SETTINGS index_granularity = 1024;
 CREATE TABLE IF NOT EXISTS price_data.blocks (`block_height` UInt32, `block_timestamp` DateTime, `spec_version` UInt32) ENGINE = MergeTree PARTITION BY toYYYYMM(block_timestamp) ORDER BY block_height SETTINGS index_granularity = 8192;
@@ -445,12 +448,18 @@ CREATE TABLE IF NOT EXISTS price_data.xcm_journey_sources (`message_id` String, 
 -- itself once one is learned.
 CREATE TABLE IF NOT EXISTS price_data.xcm_journey_misses (`message_id` String, `attempts` UInt16, `first_seen_ms` UInt64, `last_attempt_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(last_attempt_at) ORDER BY message_id SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.xyk_farm_principal_intervals (`account_id` String, `deposit_id` String, `lp_asset_id` Int32, `principal_shares_raw` String, `valid_from_block` UInt32, `valid_from_extrinsic` Int64, `valid_from_event` UInt32, `valid_from_ts` DateTime, `valid_to_block` UInt32, `valid_to_extrinsic` Int64, `valid_to_event` UInt32, `source_event_kind` LowCardinality(String), `run_id` UInt64, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(run_id) PARTITION BY tuple() ORDER BY (account_id, deposit_id, valid_from_block, valid_from_event) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS price_data.xyk_lp_total_shares_history (`lp_asset_id` Int32, `block_height` UInt32, `total_shares_raw` String, `run_id` UInt64, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(run_id) PARTITION BY tuple() ORDER BY (lp_asset_id, block_height) SETTINGS index_granularity = 8192;
+-- Each XYK pool's LP-share supply as a step function over block height (one row per
+-- block holding an observation of its share token), a progressive bucket fold of
+-- xyk_lp_share_observations whose bucket is the POOL (api/src/derivations/jobs.ts,
+-- runXykTotalShares). A partition is a group of 100 consecutive share-token ids and
+-- is republished whole from the staging twin below, so a recomputed pool equals a
+-- fresh build of it and the table never holds two versions of a row.
+CREATE TABLE IF NOT EXISTS price_data.xyk_lp_total_shares_history (`lp_asset_id` Int32, `block_height` UInt32, `total_shares_raw` String, `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY intDiv(lp_asset_id, 100) ORDER BY (lp_asset_id, block_height) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.xyk_pool_registry (`lp_asset_id` Int32, `pool_account` String, `asset_a` Int32, `asset_b` Int32, `created_block` UInt32, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY lp_asset_id SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.xyk_pool_reserve_history (`pool_account` String, `block_height` UInt32, `block_timestamp` DateTime, `asset_a` Int32, `asset_b` Int32, `reserve_a_raw` String, `reserve_b_raw` String, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (pool_account, block_height) SETTINGS index_granularity = 8192;
 -- Decoded Omnipool/XYK LP lifecycle events (MV-fed from raw_events): the eight
--- JSONExtract calls the two interval reconstructions used to run over all of
--- raw_events, done once at insert time. Replacement key matches raw_events'
+-- JSONExtract calls the two interval reconstructions need, done once at insert
+-- time rather than over all of raw_events on every rebuild. Replacement key matches raw_events'
 -- (block_height, event_index) so a replayed range collapses.
 CREATE TABLE IF NOT EXISTS price_data.lp_lifecycle_events (`block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `event_name` LowCardinality(String), `collection` String, `item` String, `position_id` String, `deposit_id` String, `owner` String, `from_account` String, `to_account` String, `lp_token` Int32, `amount` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (block_height, event_index) SETTINGS index_granularity = 8192;
 -- Balance observations in the asset registry's sequential id range (MV-fed): a
@@ -460,26 +469,35 @@ CREATE TABLE IF NOT EXISTS price_data.lp_lifecycle_events (`block_height` UInt32
 -- already done. Replacement key mirrors raw_balance_observations' own within
 -- asset_kind='substrate'.
 CREATE TABLE IF NOT EXISTS price_data.xyk_lp_share_observations (`asset_id` Int32, `account_id` String, `block_height` UInt32, `observation_id` String, `total` Nullable(String), `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (asset_id, account_id, block_height, observation_id) SETTINGS index_granularity = 8192;
--- Per-derived-partition source watermarks for the account_trade_volume staleness
--- check (MV-fed): newest ingest, highest block and latest block time among the
--- swap rows the netting consumes. Keyed on the derived table's synthetic
--- toYYYYMM(toDateTime(block_height * 12)) partition, which ClickHouse cannot
--- invert into a raw_events block range. max() is idempotent under replay, so
--- re-inserting a range leaves every watermark unchanged.
-CREATE TABLE IF NOT EXISTS price_data.swap_source_partition_watermarks (`p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime)) ENGINE = AggregatingMergeTree PARTITION BY tuple() ORDER BY p SETTINGS index_granularity = 64;
--- Staging twins for the derivations service's atomic full-replace publications
+-- Per-share-token source watermark for xyk_lp_total_shares_history's per-pool fold
+-- (MV-fed: xyk_lp_share_watermarks_mv over the projection above, in
+-- 003_materialized_views.sql): the newest ingest among each token's observations.
+-- max() is idempotent under replay, so re-inserting a range leaves it unchanged.
+CREATE TABLE IF NOT EXISTS price_data.xyk_lp_share_watermarks (`asset_id` Int32, `src_ingest` SimpleAggregateFunction(max, DateTime)) ENGINE = AggregatingMergeTree PARTITION BY tuple() ORDER BY asset_id SETTINGS index_granularity = 64;
+-- Per-bucket source watermarks for account_trade_volume's progressive fold
+-- (MV-fed: account_trade_volume_watermarks_mv over raw_events and
+-- account_trade_volume_watermarks_v3_mv over the v3 pools' Swap logs, both in
+-- 003_materialized_views.sql): per 1,800-block bucket, the newest ingest, highest
+-- block, earliest and latest block time among the source rows the netting reads,
+-- their registry assets, and whether the bucket holds direct v3 swaps. min(),
+-- max() and groupUniqArray are idempotent under replay, so re-inserting a range leaves
+-- every watermark unchanged; a dropped raw row leaves a watermark high, which
+-- re-marks a bucket rather than hiding one.
+CREATE TABLE IF NOT EXISTS price_data.account_trade_volume_watermarks (`bucket` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_min_ts` SimpleAggregateFunction(min, DateTime), `src_max_ts` SimpleAggregateFunction(max, DateTime), `assets` SimpleAggregateFunction(groupUniqArrayArray, Array(UInt32)), `v3` SimpleAggregateFunction(max, UInt8)) ENGINE = AggregatingMergeTree PARTITION BY tuple() ORDER BY bucket SETTINGS index_granularity = 64;
+-- Staging twins for the derivations service's atomic publications
 -- (api/src/derivations/jobs.ts). Each is a byte-identical copy of its live
--- table's DDL: the job writes a complete recompute into the twin and either
--- EXCHANGEs the two tables or REPLACEs one partition, so both sides must share
+-- table's DDL: the job writes a complete recompute, or one partition's kept and
+-- recomputed rows, into the twin and either EXCHANGEs the two tables or
+-- REPLACEs that partition, so both sides must share
 -- engine, ORDER BY and PARTITION BY or the swap would publish the wrong shape.
 -- They are declared here rather than created on demand from the job because
 -- clickhouse/schema is the only place a table is defined; when a parent's DDL
 -- changes, its twin must be regenerated alongside it.
 -- Synthetic block-space partition clock; see the block_height * 12 note above account_trade_volume.
-CREATE TABLE IF NOT EXISTS price_data.account_trade_volume_staging (`account` String, `block_height` UInt32, `trade_key` UInt64, `volume_usd` Decimal(38, 12) DEFAULT 0, `net_in_usd` Decimal(38, 12) DEFAULT 0, `net_out_usd` Decimal(38, 12) DEFAULT 0, `trade_count` UInt32 DEFAULT 1, `computed_at` DateTime DEFAULT now(), PROJECTION computed_by_partition (SELECT toYYYYMM(toDateTime(block_height * 12)) AS p, max(computed_at) AS der_computed GROUP BY p)) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(toDateTime(block_height * 12)) ORDER BY (account, block_height, trade_key) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild';
+CREATE TABLE IF NOT EXISTS price_data.account_trade_volume_staging (`account` String, `block_height` UInt32, `trade_key` UInt64, `volume_usd` Decimal(38, 12) DEFAULT 0, `net_in_usd` Decimal(38, 12) DEFAULT 0, `net_out_usd` Decimal(38, 12) DEFAULT 0, `trade_count` UInt32 DEFAULT 1, `registry_fp` UInt64 DEFAULT 0, `computed_at` DateTime DEFAULT now(), PROJECTION computed_by_bucket (SELECT intDiv(block_height, 1800) AS bucket, count() AS n, max(computed_at) AS der_computed, min(registry_fp) AS fp_min, max(registry_fp) AS fp_max GROUP BY bucket)) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(toDateTime(block_height * 12)) ORDER BY (account, block_height, trade_key) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild';
 CREATE TABLE IF NOT EXISTS price_data.omnipool_position_owner_intervals_staging (`account_id` String, `position_id` String, `ownership_kind` Enum8('bare' = 1, 'farmed' = 2), `deposit_id` String, `valid_from_block` UInt32, `valid_from_extrinsic` Int64, `valid_from_event` UInt32, `valid_from_ts` DateTime, `valid_to_block` UInt32, `valid_to_extrinsic` Int64, `valid_to_event` UInt32, `source_event_kind` LowCardinality(String), `run_id` UInt64, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(run_id) PARTITION BY tuple() ORDER BY (account_id, position_id, valid_from_block, valid_from_event) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.xyk_farm_principal_intervals_staging (`account_id` String, `deposit_id` String, `lp_asset_id` Int32, `principal_shares_raw` String, `valid_from_block` UInt32, `valid_from_extrinsic` Int64, `valid_from_event` UInt32, `valid_from_ts` DateTime, `valid_to_block` UInt32, `valid_to_extrinsic` Int64, `valid_to_event` UInt32, `source_event_kind` LowCardinality(String), `run_id` UInt64, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(run_id) PARTITION BY tuple() ORDER BY (account_id, deposit_id, valid_from_block, valid_from_event) SETTINGS index_granularity = 8192;
-CREATE TABLE IF NOT EXISTS price_data.xyk_lp_total_shares_history_staging (`lp_asset_id` Int32, `block_height` UInt32, `total_shares_raw` String, `run_id` UInt64, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(run_id) PARTITION BY tuple() ORDER BY (lp_asset_id, block_height) SETTINGS index_granularity = 8192;
+CREATE TABLE IF NOT EXISTS price_data.xyk_lp_total_shares_history_staging (`lp_asset_id` Int32, `block_height` UInt32, `total_shares_raw` String, `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY intDiv(lp_asset_id, 100) ORDER BY (lp_asset_id, block_height) SETTINGS index_granularity = 8192;
 -- The exact tuple the dust-cleanup pair is matched on (MV-fed from raw_events),
 -- pre-extracted so no reader touches args_json for it. `event_name` is only a set(200)
 -- skip index, so a Tokens.DustLost predicate prunes no granules and the ~9 KiB average

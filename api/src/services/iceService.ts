@@ -441,8 +441,9 @@ async function loadBpSample(): Promise<BpSampleRow[]> {
 }
 
 // The matched-volume fee as the revenue model books it (stream written by the
-// derivations service, valued at event time there). FINAL: the model replaces on
-// its computed_at version and a sum must not see two generations of a row.
+// derivations service, valued at event time there). Its months are published
+// whole by REPLACE PARTITION, so FINAL collapses nothing; the stream and window
+// filters keep it cheap.
 async function loadFeePerDay(): Promise<Map<string, number>> {
   const res = await client.query({
     query: `

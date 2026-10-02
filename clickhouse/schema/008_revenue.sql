@@ -1,9 +1,14 @@
 -- Protocol revenue read models, filled by the `revenue` derivations jobs
 -- (api/src/derivations/jobs.ts) from the shared per-stream definitions in
 -- api/src/services/revenueStreams.ts. Nothing here is written by an MV except
--- the small watermark index at the bottom; both fact tables publish whole
--- month-partitions atomically (staging twin + REPLACE PARTITION), so re-runs
--- are idempotent and readers never observe a half-built month.
+-- the small watermark index at the bottom. revenue_events is a progressive
+-- hourly fold: each cycle recomputes only the hours whose sources changed and
+-- republishes their month from its staging twin (the month's other hours plus
+-- the recomputed ones, then REPLACE PARTITION); account_revenue rebuilds a month
+-- whenever that month's revenue_events hours were republished. Re-runs are
+-- idempotent, a recomputed hour equals a fresh build of it (rows that vanished
+-- from it included), and readers never observe a half-built month or two
+-- versions of a row.
 --
 -- revenue_events: one row per revenue event, event-time valued.
 --   stream ∈ omnipool_asset_fee | omnipool_protocol_fee | liquidation_penalty |
@@ -17,9 +22,9 @@
 --   (block_height = 0, event_index = hour epoch / 3600, leg_index = reserve
 --   ordinal, block_timestamp = the hour) and asset_reserve rows are the
 --   MintedToTreasury realizations; both carry account = '' — their per-account
---   truth lives in account_revenue only. Identity needs to be unique within a
---   partition build, not stable across runs, because publication replaces the
---   whole partition.
+--   truth lives in account_revenue only. Identity needs to be unique within an
+--   hour's build, not stable across runs, because publication replaces the
+--   whole hour.
 --   `dest` classifies the omnipool fee legs' destination ('protocol' | 'lp' |
 --   'burned'; '' for every other stream). The lp/burned legs exist ONLY for
 --   the public fees API's feeDestination matrix: every explorer revenue
@@ -40,17 +45,24 @@
 --   profit, reserve-level borrow rows, placeholder swapper).
 --   `amount` is the raw integer amount of asset_id; `amount_usd` the
 --   event-time valuation (hourly ASOF close, 1e-12 USD integer semantics).
---   Only CLOSED hours are written (block_timestamp below the newest source
---   watermark's hour), so readers split cold/tail at max published hour + 1h
---   without double counting; the tail comes from raw via the same builders.
--- The projection keeps the derivations staleness check key-sized (see the
--- account_trade_volume note in 001_tables.sql); `rebuild` so a replacing merge
--- cannot leave it out of sync. Existing deployments materialize it once at
--- rollout.
-CREATE TABLE IF NOT EXISTS price_data.revenue_events (`stream` LowCardinality(String), `block_height` UInt32, `block_timestamp` DateTime, `event_index` UInt32, `leg_index` UInt16, `dest` LowCardinality(String), `account` String, `asset_id` UInt32, `amount` String, `internal_payer` UInt8 DEFAULT 0, `amount_usd` Decimal(38, 12), `computed_at` DateTime DEFAULT now(), PROJECTION computed_by_partition (SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS der_computed GROUP BY p)) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index, leg_index, stream) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild';
+--   `registry_fp` is the row's hour's fingerprint at computation (the registry
+--   valuation of the hour's assets, the money market's chain state per reserve
+--   asset, the internal-payer tags and, on hours with v3 sources, the v3
+--   inputs), compared every cycle to re-value exactly the hours a change touches.
+--   Only CLOSED, PRICED, SETTLED hours are written (below the newest source hour
+--   and the price pipeline's head, its sources landed), so readers split cold/tail at each stream's max
+--   block_timestamp without double counting; the tail comes from raw via the
+--   same builders.
+-- The staleness check needs only per-hour row count, max(computed_at) and
+-- fingerprint range; computed_by_hour keeps that read key-sized instead of
+-- grouping every row each cycle (as account_trade_volume's does in
+-- 001_tables.sql), and `rebuild` is required so a replacing merge cannot leave
+-- an aggregate projection out of sync.
+CREATE TABLE IF NOT EXISTS price_data.revenue_events (`stream` LowCardinality(String), `block_height` UInt32, `block_timestamp` DateTime, `event_index` UInt32, `leg_index` UInt16, `dest` LowCardinality(String), `account` String, `asset_id` UInt32, `amount` String, `internal_payer` UInt8 DEFAULT 0, `amount_usd` Decimal(38, 12), `registry_fp` UInt64 DEFAULT 0, `computed_at` DateTime DEFAULT now(), PROJECTION computed_by_hour (SELECT toStartOfHour(block_timestamp) AS hour, count() AS n, max(computed_at) AS der_computed, min(registry_fp) AS fp_min, max(registry_fp) AS fp_max GROUP BY hour)) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index, leg_index, stream) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild';
 
 -- Per-account, per-stream protocol revenue by calendar month (`month` =
--- toYYYYMM of the event time). Eventful streams are a GROUP BY of
+-- toYYYYMM of the event time), rebuilt whole per month — the month is its key —
+-- whenever the month's revenue_events hours were republished. Eventful streams are a GROUP BY of
 -- revenue_events restricted to PROTOCOL_REVENUE_PREDICATE_SQL (dest
 -- IN ('', 'protocol') and internal_payer = 0); the borrow streams
 -- are attributed here from per-account scaled debt × Δ variable_borrow_index
@@ -73,61 +85,68 @@ CREATE TABLE IF NOT EXISTS price_data.account_revenue (`account` String, `stream
 -- to their live tables (see the note above account_trade_volume_staging in
 -- 001_tables.sql: engine, ORDER BY and PARTITION BY must match or the swap
 -- publishes the wrong shape).
-CREATE TABLE IF NOT EXISTS price_data.revenue_events_staging (`stream` LowCardinality(String), `block_height` UInt32, `block_timestamp` DateTime, `event_index` UInt32, `leg_index` UInt16, `dest` LowCardinality(String), `account` String, `asset_id` UInt32, `amount` String, `internal_payer` UInt8 DEFAULT 0, `amount_usd` Decimal(38, 12), `computed_at` DateTime DEFAULT now(), PROJECTION computed_by_partition (SELECT toYYYYMM(block_timestamp) AS p, max(computed_at) AS der_computed GROUP BY p)) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index, leg_index, stream) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild';
+CREATE TABLE IF NOT EXISTS price_data.revenue_events_staging (`stream` LowCardinality(String), `block_height` UInt32, `block_timestamp` DateTime, `event_index` UInt32, `leg_index` UInt16, `dest` LowCardinality(String), `account` String, `asset_id` UInt32, `amount` String, `internal_payer` UInt8 DEFAULT 0, `amount_usd` Decimal(38, 12), `registry_fp` UInt64 DEFAULT 0, `computed_at` DateTime DEFAULT now(), PROJECTION computed_by_hour (SELECT toStartOfHour(block_timestamp) AS hour, count() AS n, max(computed_at) AS der_computed, min(registry_fp) AS fp_min, max(registry_fp) AS fp_max GROUP BY hour)) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index, leg_index, stream) SETTINGS index_granularity = 8192, deduplicate_merge_projection_mode = 'rebuild';
 CREATE TABLE IF NOT EXISTS price_data.account_revenue_staging (`account` String, `stream` LowCardinality(String), `month` UInt32, `revenue_usd` Decimal(38, 12), `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY month ORDER BY (account, stream, month) SETTINGS index_granularity = 8192;
 
--- MV-fed source watermarks for the revenue jobs' staleness diff, keyed by the
--- derived tables' calendar-month partition. Asking the sources directly would
--- re-aggregate raw_events/raw_evm_logs every poll cycle (the same argument as
--- swap_source_partition_watermarks in 001_tables.sql); max() is idempotent
--- under replay, so a re-inserted range leaves every watermark unchanged, and a
--- dropped raw row leaves it high — re-marking a partition stale rather than
--- hiding staleness.
+
+-- Per-hour source watermarks for revenue_events' progressive fold, keyed by
+-- the chain-time hour (toStartOfHour(block_timestamp)) — the fold's bucket. Per
+-- hour and kind: the newest ingest time, the block span (every source read of a
+-- recomputed hour is bounded to it), the assets the hour's rows are valued in
+-- (the registry fingerprint's input) and whether it holds v3 sources. Asking the
+-- sources directly would re-aggregate raw_events/raw_evm_logs every cycle;
+-- max(), min() and groupUniqArray are idempotent under replay, so a re-inserted
+-- range leaves every watermark unchanged, and a dropped raw row leaves one high
+-- — re-marking an hour rather than hiding staleness. The legs (every venue's
+-- fee and HSM legs, the v3 legs) come from pool_swap_hour_watermarks
+-- (006_public.sql), which the hourly folds share.
 --
 -- `kind` splits the staleness semantics:
---   'events' — sources that only affect their own month (fee legs, fee-paid
---              events, liquidation transfers/calls, HSM fills, treasury fee
---              deposits — EVM gas, permit fees and the XCM weight trader's
---              revenue alike, whose barrier events land in the same block
---              insert): partition p is stale when wm(p) > computed_at(p).
---   'debt'   — sources whose rows change OPENING state of every later month
---              (debt-token scaled deltas feed a cumulative balance; reserve
---              index/mint rows feed cross-boundary accrual): partition p is
---              stale when max over p' <= p of wm(p') > computed_at(p), i.e. a
---              backfilled row cascades staleness forward.
+--   'events' — sources that only affect their own hour, because every eventful
+--              stream is block-local: hour h is stale when wm(h) is newer than
+--              h's computation;
+--   'debt'   — sources whose rows change the OPENING state of every later hour
+--              (debt-token scaled deltas feed cumulative balances; reserve
+--              index and mint rows feed the accrual and the inter-mint
+--              windows): hour h is stale when max over h' <= h of wm(h') is,
+--              i.e. a backfilled row cascades staleness forward.
 -- On an existing deployment the MVs only see inserts from creation on; the
 -- rollout seeds history with a one-time ad-hoc INSERT…SELECT mirroring each
--- MV's SELECT (replay-safe: max() aggregation), per the schema-and-derivations
+-- MV's SELECT (replay-safe: min/max aggregation), per the schema-and-derivations
 -- rules — a fresh database populates from genesis automatically.
-CREATE TABLE IF NOT EXISTS price_data.revenue_source_partition_watermarks (`kind` LowCardinality(String), `p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime), `src_min_ts` SimpleAggregateFunction(min, DateTime)) ENGINE = AggregatingMergeTree PARTITION BY tuple() ORDER BY (kind, p) SETTINGS index_granularity = 64;
+CREATE TABLE IF NOT EXISTS price_data.revenue_hour_watermarks (`hour` DateTime, `kind` LowCardinality(String), `src_ingest` SimpleAggregateFunction(max, DateTime), `src_minb` SimpleAggregateFunction(min, UInt32), `src_maxb` SimpleAggregateFunction(max, UInt32), `assets` SimpleAggregateFunction(groupUniqArrayArray, Array(UInt32)), `v3` SimpleAggregateFunction(max, UInt8)) ENGINE = AggregatingMergeTree PARTITION BY toYYYYMM(hour) ORDER BY (hour, kind) SETTINGS index_granularity = 64;
 
--- Trade-fee + HSM leg source (any leg insert can carry a fee or fill row).
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_source_wm_legs_mv TO price_data.revenue_source_partition_watermarks (`kind` LowCardinality(String), `p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime), `src_min_ts` SimpleAggregateFunction(min, DateTime)) AS SELECT 'events' AS kind, toYYYYMM(block_timestamp) AS p, max(ingested_at) AS src_ingest, max(block_height) AS src_maxb, max(block_timestamp) AS src_max_ts, min(block_timestamp) AS src_min_ts FROM price_data.pool_swap_legs GROUP BY p;
+-- Every raw_events row: the builders read a long list of event shapes (the
+-- fee-paid events, the payer's debits, the treasury's deposits and the dust
+-- before them, the EVM execution markers and logs, the XCM barriers and run
+-- events, HSM and liquidation events, the ICE sweep, and the intent and
+-- liquidation projections MV'd from these rows), so the watermark is not a
+-- second list that a builder change could outgrow. The assets are those the
+-- rows are valued in: HDX for the fee-paid events, the treasury deposit's
+-- currency, the ICE sweep's, the liquidated debt asset.
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_hour_watermarks_events_mv TO price_data.revenue_hour_watermarks (`hour` DateTime, `kind` String, `src_ingest` DateTime, `src_minb` UInt32, `src_maxb` UInt32, `assets` Array(UInt32), `v3` UInt8) AS SELECT toStartOfHour(block_timestamp) AS hour, 'events' AS kind, max(ingested_at) AS src_ingest, min(block_height) AS src_minb, max(block_height) AS src_maxb, groupUniqArrayArray(multiIf(event_name = 'TransactionPayment.TransactionFeePaid', [toUInt32(0)], (event_name IN ('Tokens.Deposited', 'Balances.Deposit', 'Currencies.Deposited')) AND (JSONExtractString(args_json, 'who') = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000'), [if(event_name = 'Balances.Deposit', toUInt32(0), toUInt32(JSONExtractUInt(args_json, 'currencyId')))], (event_name = 'Currencies.Transferred') AND (JSONExtractString(args_json, 'from') = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'), [toUInt32(JSONExtractUInt(args_json, 'currencyId'))], event_name = 'Liquidation.Liquidated', [toUInt32(JSONExtractUInt(args_json, 'debtAsset'))], CAST([], 'Array(UInt32)'))) AS assets, toUInt8(0) AS v3 FROM price_data.raw_events GROUP BY hour;
 
--- Substrate events the revenue builders read: fee-paid (network fees), HSM arb
--- markers, PEPL profits, and the treasury deposits (who-filtered so the torrent
--- of unrelated Balances.Deposit rows stays out of the watermark) — the gas and
--- permit fees of network_fee and the XCM weight trader's revenue of
--- xcm_execution_fee alike.
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_source_wm_events_mv TO price_data.revenue_source_partition_watermarks (`kind` LowCardinality(String), `p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime), `src_min_ts` SimpleAggregateFunction(min, DateTime)) AS SELECT 'events' AS kind, toYYYYMM(block_timestamp) AS p, max(ingested_at) AS src_ingest, max(block_height) AS src_maxb, max(block_timestamp) AS src_max_ts, min(block_timestamp) AS src_min_ts FROM price_data.raw_events WHERE (event_name IN ('TransactionPayment.TransactionFeePaid', 'HSM.ArbitrageExecuted', 'Liquidation.Liquidated')) OR ((event_name IN ('Tokens.Deposited', 'Balances.Deposit', 'Currencies.Deposited')) AND (JSONExtractString(args_json, 'who') = '0x6d6f646c70792f74727372790000000000000000000000000000000000000000')) GROUP BY p;
+-- Every raw_extrinsics row: the network-fee and XCM-execution payers, the
+-- extrinsic's own fee and tip, the dispatch_permit scope.
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_hour_watermarks_extrinsics_mv TO price_data.revenue_hour_watermarks (`hour` DateTime, `kind` String, `src_ingest` DateTime, `src_minb` UInt32, `src_maxb` UInt32, `assets` Array(UInt32), `v3` UInt8) AS SELECT toStartOfHour(block_timestamp) AS hour, 'events' AS kind, max(ingested_at) AS src_ingest, min(block_height) AS src_minb, max(block_height) AS src_maxb, CAST([], 'Array(UInt32)') AS assets, toUInt8(0) AS v3 FROM price_data.raw_extrinsics GROUP BY hour;
 
--- Liquidation-penalty transfer source (aToken BalanceTransfer into the
--- money-market collector).
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_source_wm_evm_logs_mv TO price_data.revenue_source_partition_watermarks (`kind` LowCardinality(String), `p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime), `src_min_ts` SimpleAggregateFunction(min, DateTime)) AS SELECT 'events' AS kind, toYYYYMM(block_timestamp) AS p, max(ingested_at) AS src_ingest, max(block_height) AS src_maxb, max(block_timestamp) AS src_max_ts, min(block_timestamp) AS src_min_ts FROM price_data.raw_evm_logs WHERE (event_name = 'BalanceTransfer') AND (lower(JSONExtractString(decoded_args_json, 'to')) = '0xe52567ff06acd6cbe7ba94dc777a3126e180b6d9') GROUP BY p;
+-- The raw_evm_logs the builders read: the liquidation penalty's aToken
+-- transfer into the money-market collector, a Gamma vault's fee share as an
+-- ERC-20 Transfer to the Treasury's EVM address (the builder narrows to known
+-- vaults), and the v3 pools' Swap logs, whose legs the uniswap_v3_legs job
+-- writes. The last two flag the hour `v3`: uniswap_v3_fee also reads the pools,
+-- their SetFeeProtocol history and the vault set, which those hours'
+-- fingerprints carry.
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_hour_watermarks_evm_logs_mv TO price_data.revenue_hour_watermarks (`hour` DateTime, `kind` LowCardinality(String), `src_ingest` SimpleAggregateFunction(max, DateTime), `src_minb` SimpleAggregateFunction(min, UInt32), `src_maxb` SimpleAggregateFunction(max, UInt32), `assets` SimpleAggregateFunction(groupUniqArrayArray, Array(UInt32)), `v3` SimpleAggregateFunction(max, UInt8)) AS SELECT toStartOfHour(block_timestamp) AS hour, 'events' AS kind, max(ingested_at) AS src_ingest, min(block_height) AS src_minb, max(block_height) AS src_maxb, CAST([], 'Array(UInt32)') AS assets, max(toUInt8(ifNull(event_name, '') != 'BalanceTransfer')) AS v3 FROM price_data.raw_evm_logs WHERE ((event_name = 'BalanceTransfer') AND (lower(JSONExtractString(decoded_args_json, 'to')) = '0xe52567ff06acd6cbe7ba94dc777a3126e180b6d9')) OR ((event_name = 'Transfer') AND (lower(JSONExtractString(decoded_args_json, 'to')) = '0x6d6f646c70792f74727372790000000000000000')) OR (topic0 = '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67') GROUP BY hour;
 
--- Concentrated-liquidity revenue source: a Gamma vault's fee share arrives as an
--- ERC-20 Transfer to the Treasury's EVM address (any transfer to that address is
--- watermarked; the builder narrows to known vaults), and a pool's protocol fee as
--- CollectProtocol on the pool contract.
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_source_wm_uniswap_v3_mv TO price_data.revenue_source_partition_watermarks (`kind` LowCardinality(String), `p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime), `src_min_ts` SimpleAggregateFunction(min, DateTime)) AS SELECT 'events' AS kind, toYYYYMM(block_timestamp) AS p, max(ingested_at) AS src_ingest, max(block_height) AS src_maxb, max(block_timestamp) AS src_max_ts, min(block_timestamp) AS src_min_ts FROM price_data.raw_evm_logs WHERE ((event_name = 'Transfer') AND (lower(JSONExtractString(decoded_args_json, 'to')) = '0x6d6f646c70792f74727372790000000000000000')) OR (topic0 = '0x596b573906218d3411850b26a6b437d6c4522fdb43d2d2386263f86d50b8b151') GROUP BY p;
+-- Liquidation calls (the penalty stream's payer attribution), valued in the
+-- collateral reserve's asset.
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_hour_watermarks_mm_events_mv TO price_data.revenue_hour_watermarks (`hour` DateTime, `kind` String, `src_ingest` DateTime, `src_minb` UInt32, `src_maxb` UInt32, `assets` Array(UInt32), `v3` UInt8) AS SELECT toStartOfHour(block_timestamp) AS hour, 'events' AS kind, max(ingested_at) AS src_ingest, min(block_height) AS src_minb, max(block_height) AS src_maxb, groupUniqArray(if(startsWith(lower(JSONExtractString(decoded_args_json, 'collateralAsset')), '0x0000000000000000000000000000000100'), reinterpretAsUInt32(reverse(unhex(right(lower(JSONExtractString(decoded_args_json, 'collateralAsset')), 8)))), transform(lower(JSONExtractString(decoded_args_json, 'collateralAsset')), ['0x531a654d1696ed52e7275a8cede955e82620f99a'], [toUInt32(222)], toUInt32(0)))) AS assets, toUInt8(0) AS v3 FROM price_data.raw_money_market_events WHERE event_name = 'LiquidationCall' GROUP BY hour;
 
--- Liquidation-call source (payer attribution for the penalty stream).
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_source_wm_mm_events_mv TO price_data.revenue_source_partition_watermarks (`kind` LowCardinality(String), `p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime), `src_min_ts` SimpleAggregateFunction(min, DateTime)) AS SELECT 'events' AS kind, toYYYYMM(block_timestamp) AS p, max(ingested_at) AS src_ingest, max(block_height) AS src_maxb, max(block_timestamp) AS src_max_ts, min(block_timestamp) AS src_min_ts FROM price_data.raw_money_market_events WHERE event_name = 'LiquidationCall' GROUP BY p;
+-- Reserve index updates and treasury mints: cumulative-state inputs, so kind
+-- 'debt' (forward-cascading staleness), valued in the reserve's asset.
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_hour_watermarks_mm_reserves_mv TO price_data.revenue_hour_watermarks (`hour` DateTime, `kind` String, `src_ingest` DateTime, `src_minb` UInt32, `src_maxb` UInt32, `assets` Array(UInt32), `v3` UInt8) AS SELECT toStartOfHour(block_timestamp) AS hour, 'debt' AS kind, max(ingested_at) AS src_ingest, min(block_height) AS src_minb, max(block_height) AS src_maxb, groupUniqArray(if(startsWith(ifNull(reserve_address, ''), '0x0000000000000000000000000000000100'), reinterpretAsUInt32(reverse(unhex(right(ifNull(reserve_address, ''), 8)))), transform(ifNull(reserve_address, ''), ['0x531a654d1696ed52e7275a8cede955e82620f99a'], [toUInt32(222)], toUInt32(0)))) AS assets, toUInt8(0) AS v3 FROM price_data.raw_money_market_reserves WHERE event_name IN ('MintedToTreasury', 'ReserveDataUpdated') GROUP BY hour;
 
--- Reserve index updates + treasury mints: cross-boundary accrual inputs, so
--- kind 'debt' (forward-cascading staleness).
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_source_wm_mm_reserves_mv TO price_data.revenue_source_partition_watermarks (`kind` LowCardinality(String), `p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime), `src_min_ts` SimpleAggregateFunction(min, DateTime)) AS SELECT 'debt' AS kind, toYYYYMM(block_timestamp) AS p, max(ingested_at) AS src_ingest, max(block_height) AS src_maxb, max(block_timestamp) AS src_max_ts, min(block_timestamp) AS src_min_ts FROM price_data.raw_money_market_reserves WHERE event_name IN ('MintedToTreasury', 'ReserveDataUpdated') GROUP BY p;
-
--- Debt-token scaled-delta source: feeds cumulative opening balances of every
--- later month, so kind 'debt'.
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_source_wm_debt_deltas_mv TO price_data.revenue_source_partition_watermarks (`kind` LowCardinality(String), `p` UInt32, `src_ingest` SimpleAggregateFunction(max, DateTime), `src_maxb` SimpleAggregateFunction(max, UInt32), `src_max_ts` SimpleAggregateFunction(max, DateTime), `src_min_ts` SimpleAggregateFunction(min, DateTime)) AS SELECT 'debt' AS kind, toYYYYMM(block_timestamp) AS p, max(ingested_at) AS src_ingest, max(block_height) AS src_maxb, max(block_timestamp) AS src_max_ts, min(block_timestamp) AS src_min_ts FROM price_data.atoken_scaled_deltas GROUP BY p;
+-- Debt-token scaled deltas: cumulative opening balances of every later hour,
+-- so kind 'debt'.
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_hour_watermarks_debt_deltas_mv TO price_data.revenue_hour_watermarks (`hour` DateTime, `kind` String, `src_ingest` DateTime, `src_minb` UInt32, `src_maxb` UInt32, `assets` Array(UInt32), `v3` UInt8) AS SELECT toStartOfHour(block_timestamp) AS hour, 'debt' AS kind, max(ingested_at) AS src_ingest, min(block_height) AS src_minb, max(block_height) AS src_maxb, CAST([], 'Array(UInt32)') AS assets, toUInt8(0) AS v3 FROM price_data.atoken_scaled_deltas GROUP BY hour;

@@ -27,6 +27,9 @@ import {
   runAccountTradeVolume,
   runOmnipoolOwnerIntervals,
   runPoolSwapHourly,
+  runPoolVolumeHourly,
+  runAssetVolumeHourly,
+  runRoutedVolumeHourly,
   runUniswapV3Legs,
   runRevenueEvents,
   runXykFarmIntervals,
@@ -57,8 +60,8 @@ export interface DerivationJob {
   run: (client: ClickHouseClient) => Promise<DerivationResult>
   // The job's SQL is BUILT from the asset registry (decimal factors, price
   // aliases). Running it against a stale/failed registry would bake wrong
-  // valuations into computed partitions, so it is skipped for the cycle when
-  // the registry refresh failed rather than run with bad inputs.
+  // valuations into computed buckets, so it is skipped for the cycle when the
+  // registry refresh failed rather than run with bad inputs.
   needsAssets?: boolean
 }
 
@@ -67,22 +70,29 @@ export interface DerivationJob {
 // rows) name the same thing regardless of which path a job took.
 const JOBS: DerivationJob[] = [
   { model: 'account_trade_volume', run: runAccountTradeVolume, needsAssets: true },
+  // Before the hourly folds: a v3 swap's legs land in pool_swap_legs here and
+  // re-mark their hour in the folds' watermark in the same cycle. No
+  // needsAssets: its registry input (the token → asset map) is read in SQL and
+  // fingerprinted by the job itself.
+  { model: 'uniswap_v3_legs', run: runUniswapV3Legs },
   // No needsAssets: pool_swap_hourly stores raw integer leg sums and no
   // valuation, so it has no dependency on the registry's decimals or price
   // aliases and stays correct on a cycle whose registry refresh failed.
-  // Before pool_swap_hourly's turn next cycle: a direct v3 swap's legs land here and
-  // the hourly job's watermark then re-marks their month stale.
-  { model: 'uniswap_v3_legs', run: runUniswapV3Legs },
   { model: 'pool_swap_hourly', run: runPoolSwapHourly },
+  // They bake event-time valuation — and the registry fingerprint it was taken
+  // under — into every row, so they share the registry guard.
+  { model: 'pool_volume_hourly', run: runPoolVolumeHourly, needsAssets: true },
+  { model: 'asset_volume_hourly', run: runAssetVolumeHourly, needsAssets: true },
+  { model: 'routed_volume_hourly', run: runRoutedVolumeHourly, needsAssets: true },
   { model: 'omnipool_owner_intervals', run: runOmnipoolOwnerIntervals },
   { model: 'xyk_farm_intervals', run: runXykFarmIntervals },
   { model: 'xyk_total_shares', run: runXykTotalShares },
   // Valuation is baked into every revenue row, so the job shares
   // account_trade_volume's registry guard.
   { model: 'revenue_events', run: runRevenueEvents, needsAssets: true },
-  // Strictly after revenue_events: its staleness keys on the fresh partition's
-  // computed_at, and its USD comes from the already-valued rows (no registry
-  // dependency of its own).
+  // Strictly after revenue_events: it rebuilds a month whenever that month's
+  // revenue_events hours were republished, and its USD comes from the
+  // already-valued rows (no registry dependency of its own).
   { model: 'account_revenue', run: runAccountRevenue },
   // Attribution of inbound XCM arrivals. No registry dependency: it stores the raw
   // integer amount and the message's own origin, no valuation. Order-independent of
@@ -107,13 +117,14 @@ export async function runCycle({ jobs, loadAssets, makeClient }: RunCycleDeps): 
   const results: DerivationResult[] = []
   const skipped = new Set<string>()
   try {
-    // The ATV job's valuation SQL is built from the asset registry (per-asset
+    // The valued jobs' SQL is built from the asset registry (per-asset
     // decimals + price aliases); refresh it first, every cycle, so a newly-
     // registered asset is picked up without a restart. Guarded on its own: a
     // registry load failure must not stop the registry-independent jobs — but
     // jobs marked needsAssets are SKIPPED for the cycle, because running them
     // against a failed/stale registry would bake wrong valuations into
-    // computed partitions that no later signal re-marks stale.
+    // buckets stamped with that registry's own fingerprint, which nothing
+    // re-marks until the registry itself changes again.
     let assetsOk = true
     try {
       await loadAssets(client)

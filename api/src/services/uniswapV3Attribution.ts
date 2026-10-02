@@ -28,9 +28,14 @@ import { attributablePayerSql, TREASURY_H160 } from './revenueStreams.ts'
  * routinely in an EARLIER month — so the walk covers every realization and only
  * then narrows to the partition being rebuilt. A first-ever realization opens its
  * window at the epoch, which is correct: the pool cannot have accrued anything
- * before its own first swap.
+ * before its own first swap. `revenueTable` is the revenue_events table the
+ * build reads.
+ *
+ * The treasury Transfer logs are read only at the realizations' own (block,
+ * event) keys — a primary-key point read, where the unbounded scan of every
+ * Transfer log the treasury ever received cost ~11 CPU-s per rebuilt month.
  */
-export function uniswapV3RealizationsSql(): string {
+export function uniswapV3RealizationsSql(revenueTable = 'price_data.revenue_events'): string {
   return `-- rev:v3-realizations
 WITH pools AS (
   SELECT pool_address, token0, token1, fee FROM price_data.uniswap_v3_pools FINAL
@@ -56,13 +61,16 @@ sources AS (
   INNER JOIN vault_pools AS vp
     ON vp.vault = lower(JSONExtractString(l.decoded_args_json, 'from'))
   WHERE l.event_name = 'Transfer'
+    AND (l.block_height, l.event_index) IN (
+      SELECT block_height, event_index FROM ${revenueTable} WHERE stream = 'uniswap_v3_fee' AND dest = ''
+    )
     AND lower(JSONExtractString(l.decoded_args_json, 'to')) = '${TREASURY_H160}'
 ),
 realizations AS (
   SELECT r.block_height AS block_height, r.event_index AS event_index, r.leg_index AS leg_index,
          s.pool AS pool, s.kind AS kind, r.asset_id AS asset_id, r.block_timestamp AS ts,
          toString(r.amount_usd) AS usd, toYYYYMM(r.block_timestamp) AS p
-  FROM price_data.revenue_events AS r
+  FROM ${revenueTable} AS r
   INNER JOIN sources AS s ON s.block_height = r.block_height AND s.event_index = r.event_index
   WHERE r.stream = 'uniswap_v3_fee'
 ),
@@ -98,12 +106,13 @@ ORDER BY r.block_height, r.event_index, r.leg_index`
  * The window is half-open on the left (`>` prev, `<=` this) so two consecutive
  * realizations can never both claim the same swap.
  *
- * `pool_swap_legs` is a ReplacingMergeTree whose months the `uniswap_v3_legs` job
- * republishes whole, so the same leg is present several times over: measured live,
- * 1,440 rows for 614 real fee legs. Deduplicating to the newest row per leg
- * identity BEFORE summing is what keeps a republished swapper from being weighted
- * 2.3x — a `FINAL` here would be correct too, but the explicit fold reads as the
- * deliberate choice it is and stays bounded to the pool's own key prefix.
+ * `pool_swap_legs` is a ReplacingMergeTree: a corrected v3 leg is inserted beside
+ * the version it supersedes (the `uniswap_v3_legs` job writes only new or changed
+ * legs), and a replayed range duplicates every venue's legs, so one leg can be
+ * present several times until a merge collapses them. Deduplicating to the newest
+ * row per leg identity BEFORE summing is what keeps a re-written swapper from being
+ * weighted twice — a `FINAL` here would be correct too, but the explicit fold reads
+ * as the deliberate choice it is and stays bounded to the pool's own key prefix.
  */
 export function uniswapV3FeePayersSql(): string {
   return `-- rev:v3-fee-payers

@@ -64,9 +64,9 @@ describe('006_public.sql', () => {
 
   it('every statement parses through the bootstrap splitter and only creates', () => {
     // 5 projections + 9 source MVs + pool_swap_hourly, its staging twin, the
-    // compact hourly source-watermark table, and the raw_evm_logs twin of the
-    // account_trade_volume staleness watermark (the v3 pool Swap logs).
-    expect(statements).toHaveLength(19)
+    // compact hourly source-watermark table and its MV, plus the three hourly
+    // volume models and their staging twins.
+    expect(statements).toHaveLength(24)
     for (const statement of statements) expect(statement.startsWith('CREATE ')).toBe(true)
     // No DROP/ALTER/INSERT: the file is re-applied on every deployment start, and a
     // destructive or additive statement there would wipe or double-count live data.
@@ -135,7 +135,7 @@ describe('006_public.sql', () => {
     const live = noSpace(statementFor('pool_swap_hourly'))
     const staging = noSpace(statementFor('pool_swap_hourly_staging'))
 
-    // The job publishes a rebuilt month with ALTER TABLE … REPLACE PARTITION FROM
+    // The job publishes a reassembled month with ALTER TABLE … REPLACE PARTITION FROM
     // the twin, which ClickHouse refuses unless the two structures and partition
     // keys match exactly. A column added to one and not the other is a rollout
     // failure, so the declarations are compared rather than eyeballed.

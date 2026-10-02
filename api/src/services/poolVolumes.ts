@@ -159,9 +159,33 @@ function warnIfNothingPriced(venue: string, window: string, fills: number, total
  * its deduplication and its ASOF price join a second time. Every query below is
  * therefore one linear chain: each stage is referenced exactly once.
  */
-const NEXT_FILL_WINDOW = 'WINDOW nxt AS (PARTITION BY block_height ORDER BY event_index ASC ROWS BETWEEN 1 FOLLOWING AND 1 FOLLOWING)'
+export const NEXT_FILL_WINDOW = 'WINDOW nxt AS (PARTITION BY block_height ORDER BY event_index ASC ROWS BETWEEN 1 FOLLOWING AND 1 FOLLOWING)'
 /** True when this fill is a hub hop whose partner is the very next fill of the block. */
-const IS_FIRST_HOP = 'out_hub = 1 AND next_in_hub = 1 AND next_event_index = event_index + 1'
+export const IS_FIRST_HOP = 'out_hub = 1 AND next_in_hub = 1 AND next_event_index = event_index + 1'
+/**
+ * IS_FIRST_HOP over a fill set that spans every venue (the window then also
+ * carries `next_venue`): only an Omnipool fill followed by an Omnipool fill can be
+ * a hub hop. Over the Omnipool's own fills it is IS_FIRST_HOP exactly — the
+ * partner must sit at `event_index + 1`, and that event is one fill of one venue.
+ */
+export const IS_OMNIPOOL_FIRST_HOP = `venue = 'omnipool' AND next_venue = 'omnipool' AND ${IS_FIRST_HOP}`
+
+/**
+ * A fill's single value: its OUT side, falling back to its IN side when the out
+ * asset has no price. Over a stage carrying `out_usd` and `in_usd`.
+ */
+export const FILL_USD = 'if(out_usd > 0, out_usd, in_usd)'
+
+/**
+ * One asset's share of a fill: the value of ITS in/out legs, inheriting the
+ * fill's value when those are unpriced, so a fill between a priced and an
+ * unpriced asset is not silently worth nothing on one side. An asset with no
+ * in/out leg in the fill (a fee-only appearance) has no side and no volume.
+ */
+export function assetSideUsdSql(hasSide: string, legsUsd: string, fillUsd: string): string {
+  return `if(${hasSide} = 0, toDecimal256(0, 12),
+                           if(${legsUsd} > 0, ${legsUsd}, ${fillUsd}))`
+}
 
 /**
  * Per-asset Omnipool volume, asset fees and protocol (H2O) fees, plus the venue's
@@ -205,7 +229,7 @@ fill AS (
   SELECT block_height, event_index,
          sum(leg_out_usd) AS out_usd,
          sum(leg_in_usd) AS in_usd,
-         if(out_usd > 0, out_usd, in_usd) AS fill_usd,
+         ${FILL_USD} AS fill_usd,
          maxIf(has_out, asset_id = ${H2O_ASSET_ID}) AS out_hub,
          maxIf(has_in, asset_id = ${H2O_ASSET_ID}) AS in_hub,
          anyIf(toNullable(asset_id), has_in = 1 AND asset_id != ${H2O_ASSET_ID}) AS in_asset,
@@ -227,8 +251,7 @@ emitted AS (
   SELECT arrayJoin(arrayConcat(
     arrayMap(p -> tuple('asset',
                         toNullable(tupleElement(p, 1)),
-                        if(tupleElement(p, 4) = 0, toDecimal256(0, 12),
-                           if(tupleElement(p, 2) > 0, tupleElement(p, 2), fill_usd)),
+                        ${assetSideUsdSql('tupleElement(p, 4)', 'tupleElement(p, 2)', 'fill_usd')},
                         tupleElement(p, 3),
                         toDecimal256(0, 12)), asset_parts),
     [tuple('asset', coalesce(in_asset, out_asset), toDecimal256(0, 12), toDecimal256(0, 12), hub_fee_usd)],
@@ -267,7 +290,7 @@ fill AS (
   SELECT pool_key, block_height, event_index,
          sumIf(usd, leg_kind = 'out') AS out_usd,
          sumIf(usd, leg_kind = 'in') AS in_usd,
-         if(out_usd > 0, out_usd, in_usd) AS fill_usd,
+         ${FILL_USD} AS fill_usd,
          sumIf(usd, leg_kind = 'fee') AS fee_usd
   FROM priced
   GROUP BY pool_key, block_height, event_index
@@ -300,7 +323,10 @@ ORDER BY volume DESC, pool_key`
  * before the sides are taken, so a 3-hop route counts once, at its boundaries.
  *
  * `carryDayAndFees` adds the fill's UTC calendar day and its fee legs split by
- * destination, which ONLY the DefiLlama day series reads. They cost no extra
+ * destination, which the day series read (DefiLlama's, through routedBucketSql;
+ * at `dayBucket = 'hour'` the `day` column carries the fill's UTC hour instead,
+ * which the routed_volume_hourly fold reads — volumeHourly.ts — and a trade lives
+ * inside one block, so it lands in one hour exactly as it lands in one day). They cost no extra
  * rows — a trade lives inside one block, so grouping by (day, trade_key) is
  * grouping by trade_key, and the per-fill fee totals ride on the fill's FIRST
  * net entry rather than on a synthetic row of their own — but they are five
@@ -329,7 +355,7 @@ ORDER BY volume DESC, pool_key`
  * aave leg INSIDE a routed trade is a real hop of a real swap and already
  * cancels in the per-asset net, so only whole-group wraps may be removed.
  */
-export function routedNettedCteSql(timePredicate?: string, priceSource?: string, carryDayAndFees = false): string {
+export function routedNettedCteSql(timePredicate?: string, priceSource?: string, carryDayAndFees = false, dayBucket: RoutedBucket = 'day'): string {
   const zero = 'toDecimal256(0, 12)'
   const fees = ['fee_total', 'fee_account', 'fee_burned', 'fee_unknown', 'fee_hub']
   // Every fee-carrying fragment collapses to nothing when the caller does not
@@ -342,7 +368,8 @@ export function routedNettedCteSql(timePredicate?: string, priceSource?: string,
          sumIf(usd, leg_kind = 'fee' AND fee_dest = '') AS fee_unknown,
          sumIf(usd, leg_kind = 'fee' AND asset_id = ${H2O_ASSET_ID}) AS fee_hub`
     : ''
-  const fillDay = carryDayAndFees ? `\n         toDate(min(block_time), 'UTC') AS day,` : ''
+  const dayExpr = dayBucket === 'hour' ? `toStartOfHour(min(block_time), 'UTC')` : `toDate(min(block_time), 'UTC')`
+  const fillDay = carryDayAndFees ? `\n         ${dayExpr} AS day,` : ''
   const fillFees = carryDayAndFees ? `\n         ${fees.map(fee => `sum(${fee}) AS ${fee}`).join(', ')},` : ''
   const flaggedCarried = carryDayAndFees ? `day, ` : ''
   const flaggedFees = carryDayAndFees ? `\n         ${fees.join(', ')},` : ''
@@ -391,7 +418,7 @@ keyed AS (
   SELECT ${flaggedCarried}venue = 'aave' AS is_aave,
          tuple(block_height, op_key,
                if(op_key != '', toUInt32(0),
-                  toUInt32(if(venue = 'omnipool' AND next_venue = 'omnipool' AND ${IS_FIRST_HOP},
+                  toUInt32(if(${IS_OMNIPOOL_FIRST_HOP},
                               event_index + 1, event_index)))) AS trade_key,
          ${keyedLeg}
   FROM flagged
@@ -437,6 +464,51 @@ export function nettedTradeSidesSql(groupColumns: string[] = [], extraAggregates
   GROUP BY ${prefix}trade_key
   HAVING min(all_aave) = 0`
 }
+
+/** The calendar bucket routedNettedCteSql's `day` column carries: the UTC day, or the UTC hour. */
+export type RoutedBucket = 'day' | 'hour'
+
+/** `[from, to)` over the legs, both bounds `{from:String}` / `{to:String}` UTC instants. */
+const ROUTED_BUCKET_LEG_WINDOW = `block_timestamp >= toDateTime({from:String}, 'UTC')
+      AND block_timestamp < toDateTime({to:String}, 'UTC')`
+
+const ROUTED_BUCKET_PRICE_WINDOW = `interval_start > toDateTime({from:String}, 'UTC') - INTERVAL ${PRICE_LOOKBACK_DAYS} DAY
+        AND interval_start <= toDateTime({to:String}, 'UTC')`
+
+/**
+ * Netted (routed) volume and fees per UTC day over the half-open leg window
+ * `[{from}, {to})`: the DefiLlama day series (public/services/defillama.ts
+ * buildDailySql). Per trade, the larger of its two boundary sides
+ * (`greatest(side_in, side_out)`, the SQL form of nettedTradeScaled) over the
+ * shared per-trade stage, which carries the aToken-wrap exclusion. The explorer's
+ * routed volume reads the same chain at the hour (routed_volume_hourly,
+ * volumeHourly.ts), so the platform's routed figure has one definition at either
+ * grain.
+ */
+export function routedBucketSql(): string {
+  const fees = ['fee_total', 'fee_account', 'fee_burned', 'fee_unknown', 'fee_hub']
+  return `-- pub:dl:daily
+WITH ${routedNettedCteSql(ROUTED_BUCKET_LEG_WINDOW, priceSourceSql(ROUTED_BUCKET_PRICE_WINDOW), true, 'day')}
+SELECT toString(day) AS day,
+       toString(sum(greatest(side_in, side_out))) AS volume_usd,
+       toString(sum(fee_total)) AS fee_total_usd,
+       toString(sum(fee_account)) AS fee_account_usd,
+       toString(sum(fee_burned)) AS fee_burned_usd,
+       toString(sum(fee_unknown)) AS fee_unknown_usd,
+       toString(sum(fee_hub)) AS fee_hub_usd
+FROM (
+  ${nettedTradeSidesSql(['day'], fees.map(fee => `sum(${fee}) AS ${fee}`))}
+)
+GROUP BY day
+ORDER BY day`
+}
+
+/**
+ * The bucket fold's settings. `pool_swap_legs` is sorted by exactly the GROUP BY
+ * that collapses its replacement key, so aggregating in order streams it:
+ * measured over three months, 490 MiB instead of 1.64 GiB for the same result.
+ */
+export const ROUTED_BUCKET_SETTINGS = { ...DECIMAL_STRINGS, optimize_aggregation_in_order: 1 } as const
 
 export function buildRoutedTradesSql(): string {
   return `-- pub:vol:routed

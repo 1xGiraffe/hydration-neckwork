@@ -6,7 +6,7 @@
 // row shape (REVENUE_EVENT_COLUMNS) for the anchored window
 // ({anchor:DateTime}, {hours:UInt32}) — the same window convention the public
 // pool surfaces use — optionally narrowed by an extra predicate (the
-// derivations job injects its month-partition bound and closed-hour cut
+// derivations job injects the stale hours' month, block span and hour runs
 // through it). The hollar_borrow stream is not eventful: interest accrues by
 // index growth, so hollarBorrowHourlyRows() computes exact hourly accrual rows
 // in TypeScript (BigInt, no float on the money path) for the job to insert.
@@ -693,6 +693,65 @@ rows AS (
 ${valuedTailSql('ice_matched_fee')}`
 }
 
+// The Uniswap v3 protocol-fee rule's pieces — one definition, shared by the
+// uniswap_v3_fee stream below and the pool_volume_hourly fold's LP/protocol fee
+// split (services/volumeHourly.ts): which token a fee leg was charged in, and the
+// pool's `SetFeeProtocol` denominator for that side in force at the swap (1/n of
+// the swap fee accrues to the protocol; 0 = off).
+
+/** One ordering key per event, so the feeProtocol in force at a swap is an ASOF match on one column. */
+export function v3EventAtKeySql(alias: string): string {
+  return `toUInt64(${alias}.block_height) * 100000 + ${alias}.event_index`
+}
+
+/** CTE `token_assets`: a registry asset by its lowercase EVM address. */
+export const V3_TOKEN_ASSETS_CTE = `token_assets AS (
+  SELECT lower(evm_address) AS addr, any(asset_id) AS asset_id
+  FROM price_data.assets WHERE evm_address != '' GROUP BY addr
+)`
+
+/**
+ * A v3 pool token's registry asset id (`mapped`, the `token_assets` join), else
+ * the id an asset-precompile address (`0x…01` + id) embeds, else 4294967295
+ * (unresolvable).
+ */
+export function v3TokenAssetSql(mapped: string, token: string): string {
+  const hex = `replaceRegexpOne(lower(${token}), '^0x', '')`
+  return `if(${mapped} > 0, toUInt32(${mapped}),
+     if(length(${hex}) = 40 AND substring(${hex}, 1, 32) = '00000000000000000000000000000001',
+        toUInt32(reinterpretAsUInt32(reverse(unhex(substring(${hex}, 33, 8))))), toUInt32(4294967295)))`
+}
+
+/** CTE `pools`: each v3 pool's two tokens and fee tier. */
+export const V3_POOLS_CTE = `pools AS (
+  SELECT pool_address, any(token0) AS token0, any(token1) AS token1, any(fee) AS fee
+  FROM price_data.uniswap_v3_pools GROUP BY pool_address
+)`
+
+/**
+ * CTE `fee_protocol`: every SetFeeProtocol, by pool and ordering key. Deliberately
+ * NOT windowed: the rate in force at a swap was usually set long before the window
+ * a reader computes.
+ */
+export const V3_FEE_PROTOCOL_CTE = `fee_protocol AS (
+  SELECT lower(contract_address) AS pool, ${v3EventAtKeySql('e')} AS at_key,
+         toUInt256(aux0) AS fp0, toUInt256(aux1) AS fp1
+  FROM price_data.uniswap_v3_events AS e FINAL
+  WHERE kind = 'pool' AND event_name = 'SetFeeProtocol'
+)`
+
+/** The fee side of a leg whose asset is `feeAssetSql`: 1 when it is the pool's token1 (`t1` = token_assets joined on it), else 0. */
+export function v3FeeSideSql(feeAssetSql: string): string {
+  return `toUInt8(if(t1.asset_id = ${feeAssetSql}, 1, 0))`
+}
+
+/** The ASOF right side over `fee_protocol`: one (pool, at_key, side, fp) row per side per SetFeeProtocol. */
+export const V3_FEE_PROTOCOL_SIDES_SQL = `(
+    SELECT pool, at_key, toUInt8(0) AS side, fp0 AS fp FROM fee_protocol
+    UNION ALL
+    SELECT pool, at_key, toUInt8(1) AS side, fp1 AS fp FROM fee_protocol
+  )`
+
 /**
  * Concentrated-liquidity (Uniswap v3) pool fees the protocol keeps. Two arms:
  *   * the Gamma vault's cut — Hypervisor `_zeroBurn`/`rebalance` send
@@ -745,16 +804,10 @@ function uniswapV3FeeRowsSql(extra: string): string {
   // match on a single column. A block/index pair would need a composite ASOF key,
   // which ClickHouse has no form for, and matching on block alone would apply a
   // rate to swaps that ran before it in the same block.
-  const atKey = (alias: string) => `toUInt64(${alias}.block_height) * 100000 + ${alias}.event_index`
+  const atKey = v3EventAtKeySql
   return `-- rev:uniswap_v3_fee
-WITH token_assets AS (
-  SELECT lower(evm_address) AS addr, any(asset_id) AS asset_id
-  FROM price_data.assets WHERE evm_address != '' GROUP BY addr
-),
-pools AS (
-  SELECT pool_address, any(token0) AS token0, any(token1) AS token1, any(fee) AS fee
-  FROM price_data.uniswap_v3_pools GROUP BY pool_address
-),
+WITH ${V3_TOKEN_ASSETS_CTE},
+${V3_POOLS_CTE},
 vault_fees AS (
   SELECT block_height, event_index, min(block_timestamp) AS block_time,
          argMax(lower(contract_address), ingested_at) AS token,
@@ -769,12 +822,7 @@ vault_fees AS (
 ),
 -- Deliberately NOT windowed: the rate in force at a swap was usually set long
 -- before the window the job is recomputing.
-fee_protocol AS (
-  SELECT lower(contract_address) AS pool, ${atKey('e')} AS at_key,
-         toUInt256(aux0) AS fp0, toUInt256(aux1) AS fp1
-  FROM price_data.uniswap_v3_events AS e FINAL
-  WHERE kind = 'pool' AND event_name = 'SetFeeProtocol'
-),
+${V3_FEE_PROTOCOL_CTE},
 -- The swap's own fee leg: one row per swap, already in the fee asset and already
 -- carrying the payer the leg builder resolved.
 swap_fees AS (
@@ -796,7 +844,7 @@ sided_fees AS (
   SELECT f.pool AS pool, f.block_height AS block_height, f.event_index AS event_index,
          f.block_time AS block_time, f.at_key AS at_key, f.fee_asset_id AS fee_asset_id,
          f.swapper AS swapper, f.gross_fee AS gross_fee,
-         toUInt8(if(t1.asset_id = f.fee_asset_id, 1, 0)) AS side
+         ${v3FeeSideSql('f.fee_asset_id')} AS side
   FROM swap_fees AS f
   INNER JOIN pools AS p ON p.pool_address = f.pool
   LEFT JOIN token_assets AS t1 ON t1.addr = lower(p.token1)
@@ -806,11 +854,7 @@ accrued_fees AS (
          f.fee_asset_id AS fee_asset_id, f.swapper AS swapper,
          intDiv(f.gross_fee, fp.fp) AS amount
   FROM sided_fees AS f
-  ASOF INNER JOIN (
-    SELECT pool, at_key, toUInt8(0) AS side, fp0 AS fp FROM fee_protocol
-    UNION ALL
-    SELECT pool, at_key, toUInt8(1) AS side, fp1 AS fp FROM fee_protocol
-  ) AS fp ON fp.pool = f.pool AND fp.side = f.side AND fp.at_key <= f.at_key
+  ASOF INNER JOIN ${V3_FEE_PROTOCOL_SIDES_SQL} AS fp ON fp.pool = f.pool AND fp.side = f.side AND fp.at_key <= f.at_key
   WHERE fp.fp > 0
 ),
 fees AS (
@@ -1279,8 +1323,8 @@ ${valuedTailSql('xcm_execution_fee')}`
 /**
  * The full SELECT for one eventful stream over the anchored window, in the
  * unified revenue_events row shape. `extraPredicate` reaches EVERY source read
- * (the derivations job injects the month-partition bound and the closed-hour
- * cut through it; readers of the live tail pass nothing).
+ * (the derivations job injects the stale hours' month, block span and hour runs
+ * through it; readers of the live tail pass nothing).
  */
 export function buildRevenueEventRowsSql(stream: EventfulRevenueStream, extraPredicate = '1'): string {
   switch (stream) {
@@ -1357,8 +1401,8 @@ export interface HollarHourlyRow {
  * buckets them afterwards, so asking with an hour-aligned end_time returns no
  * bucket for that hour at all unless an event happened to land exactly on the
  * second — the final hour of every window silently absent rather than partial.
- * On the derivations job's month partitions that dropped each month's 23:00
- * accrual: 666.21 HOLLAR over six month-ends, 2025-09 … 2026-07. Callers still
+ * Over the derivations job's month walks that is each month's 23:00 accrual
+ * (measured: 666.21 HOLLAR over six month-ends, 2025-09 … 2026-07). Callers still
  * filter what they EMIT to `toSeconds`, so widening the read only completes the
  * last bucket; it never books an hour past the window.
  *
@@ -1387,10 +1431,10 @@ ORDER BY pool_address, bucket_start`
  * This exists because the view is SPARSE: it emits a row only for an hour the
  * reserve was actually touched, so the observation preceding a window boundary
  * sits 3 to 30 hours back in the measured history, and unboundedly far for a
- * quiet market. A fixed lead-in therefore cannot be right — the one-hour lead-in
- * this replaced silently dropped the first accrual of every window, which on the
- * derivations job's month partitions meant one lost segment per pool per month
- * (13 of them, 2,398.90 HOLLAR / ~$2,394, 2025-09 … 2026-09-17).
+ * quiet market. A fixed lead-in therefore cannot be right — a one-hour lead-in
+ * silently drops the first accrual of every window, which over the derivations
+ * job's month walks is one lost segment per pool per month (measured: 13 of them,
+ * 2,398.90 HOLLAR / ~$2,394, 2025-09 … 2026-09-17).
  *
  * `start_time` is unbounded rather than guessed, and that is free: the view
  * computes a running total from the aToken anchor over everything up to

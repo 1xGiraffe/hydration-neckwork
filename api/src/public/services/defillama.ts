@@ -1,8 +1,8 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cachedSwr } from '../../services/cache.ts'
 import {
-  DECIMAL_STRINGS, PRICE_LOOKBACK_DAYS, nettedTradeSidesSql, priceSourceSql, renderUsd,
-  routedNettedCteSql, routedTradesUsd, scaledUsd,
+  ROUTED_BUCKET_SETTINGS, renderUsd,
+  routedBucketSql, routedTradesUsd, scaledUsd,
 } from '../../services/poolVolumes.ts'
 
 // The DefiLlama facade (spec § Phase 2 → "DefiLlama facade"). Two endpoints,
@@ -257,12 +257,6 @@ export async function backfillChunks(client: ClickHouseClient, from: string, to:
   return months.flatMap(month => splitByLegs(month, legsByDay, MAX_CHUNK_LEGS))
 }
 
-const DAILY_LEG_WINDOW = `block_timestamp >= toDateTime({from:String}, 'UTC')
-      AND block_timestamp < toDateTime({to:String}, 'UTC')`
-
-const DAILY_PRICE_WINDOW = `interval_start > toDateTime({from:String}, 'UTC') - INTERVAL ${PRICE_LOOKBACK_DAYS} DAY
-        AND interval_start <= toDateTime({to:String}, 'UTC')`
-
 /**
  * Netted volume and fees per UTC calendar day over one chunk.
  *
@@ -271,7 +265,10 @@ const DAILY_PRICE_WINDOW = `interval_start > toDateTime({from:String}, 'UTC') - 
  * folds in TS; a multi-month range cannot, so the same rule is applied here as
  * `greatest(side_in, side_out)` over the shared per-trade stage
  * (`nettedTradeSidesSql`, which also carries the aToken-wrap exclusion) and
- * pinned against the TS definition by test.
+ * pinned against the TS definition by test. The query is poolVolumes'
+ * `routedBucketSql`, over the same netted chain (`routedNettedCteSql`) the
+ * explorer's routed_volume_hourly fold reads at the hour grain, so the two cannot
+ * state a day's routed volume two ways.
  *
  * The leg window is half-open, `[from, to)`, unlike the anchored rolling windows
  * — because these bounds are midnights, and block timestamps land exactly on
@@ -279,30 +276,11 @@ const DAILY_PRICE_WINDOW = `interval_start > toDateTime({from:String}, 'UTC') - 
  * request and hand the last one to the following chunk.
  */
 export function buildDailySql(): string {
-  const fees = ['fee_total', 'fee_account', 'fee_burned', 'fee_unknown', 'fee_hub']
-  return `-- pub:dl:daily
-WITH ${routedNettedCteSql(DAILY_LEG_WINDOW, priceSourceSql(DAILY_PRICE_WINDOW), true)}
-SELECT toString(day) AS day,
-       toString(sum(greatest(side_in, side_out))) AS volume_usd,
-       toString(sum(fee_total)) AS fee_total_usd,
-       toString(sum(fee_account)) AS fee_account_usd,
-       toString(sum(fee_burned)) AS fee_burned_usd,
-       toString(sum(fee_unknown)) AS fee_unknown_usd,
-       toString(sum(fee_hub)) AS fee_hub_usd
-FROM (
-  ${nettedTradeSidesSql(['day'], fees.map(fee => `sum(${fee}) AS ${fee}`))}
-)
-GROUP BY day
-ORDER BY day`
+  return routedBucketSql()
 }
 
-/**
- * The per-day fold is the one query on this surface whose leg dedup dominates
- * memory. `pool_swap_legs` is sorted by exactly the GROUP BY that collapses its
- * replacement key, so aggregating in order streams it: measured over three
- * months, 490 MiB instead of 1.64 GiB for the same result.
- */
-const DAILY_SETTINGS = { ...DECIMAL_STRINGS, optimize_aggregation_in_order: 1 } as const
+/** The per-day fold is the one query on this surface whose leg dedup dominates memory (ROUTED_BUCKET_SETTINGS). */
+const DAILY_SETTINGS = ROUTED_BUCKET_SETTINGS
 
 interface DailyRow {
   day: string
