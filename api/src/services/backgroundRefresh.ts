@@ -8,6 +8,7 @@ import { refreshXcswapSettlements } from './xcswapSettlements.ts'
 import { refreshLmRewards } from './lmRewardService.ts'
 import { refreshMmIncentives } from './mmIncentiveService.ts'
 import { refreshMmOraclePrices } from './mmOraclePrices.ts'
+import { refreshOracleState } from './oracleService.ts'
 
 // Coordinated scheduler for the background refreshers that read node-full
 // (chain-state enumeration and EVM eth_call). Previously each ran on its own
@@ -45,6 +46,13 @@ import { refreshMmOraclePrices } from './mmOraclePrices.ts'
 //   mm-oracle-prices ~50ms node-full (3 batched eth_call round trips: pool +
 //                    provider plumbing, getAssetPrice + getSourceOfAsset per
 //                    primary reserve, latestRoundData per source) → every 5th tick (300s)
+//   oracle-state   ~0.5s node-full (one pinned block: every market's oracle
+//                    plumbing and reserve prices, then 12 probes per source —
+//                    rounds, answer, description, decimals, owner and the
+//                    adapters' input getters — for the ~70 sources and their
+//                    inputs, ≈20 batches of 50, plus eth_getCode for the few
+//                    sources with no rounds; codes are kept an hour)
+//                                                              → every 5th tick (300s)
 // Worst case (every thirtieth minute — the cadences' common multiple — all of
 // them run back to back) ≈ 20–32s of node-full time in that 60s window, ≈ 7s in
 // the other windows — a low duty cycle, comfortably below the one backfill
@@ -128,6 +136,10 @@ const TASKS: RefreshTask[] = [
   // price of a reserve no venue prices (WBTC): three batched eth_call round trips
   // (~60 calls). The feeds step every ~1.4% or heartbeat, so 300s is plenty.
   { name: 'mm-oracle-prices', everyTicks: 5, run: refreshMmOraclePrices },
+  // The /oracles page's live read: every market's oracle price and source and
+  // every source's own answer and inputs, at one pinned block. The feeds it
+  // describes step on deviation or a 24H heartbeat, so 300s is enough.
+  { name: 'oracle-state', everyTicks: 5, run: refreshOracleState },
 ]
 
 // Tasks due on a given 1-based tick number (exported for testing the cadence).

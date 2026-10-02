@@ -44,6 +44,14 @@ describe('dueTasks cadence', () => {
   })
 })
 
+describe('oracle-state cadence', () => {
+  it('reads the oracle page’s live state every 5th tick (~300s)', () => {
+    expect(dueTasks(4).map(t => t.name)).not.toContain('oracle-state')
+    expect(dueTasks(5).map(t => t.name)).toContain('oracle-state')
+    expect(dueTasks(10).map(t => t.name)).toContain('oracle-state')
+  })
+})
+
 describe('lm-rewards cadence', () => {
   it('reads the reward snapshot every 2nd tick (~120s)', () => {
     expect(dueTasks(1).map(t => t.name)).not.toContain('lm-rewards')

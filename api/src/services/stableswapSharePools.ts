@@ -8,7 +8,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached } from './cache.ts'
 import { SHARE_POOL_MAX_AGE_SECONDS, type StableswapSharePool } from './lpMath.ts'
-import { parseStableswapPools } from './stableswapSnapshot.ts'
+import { parseStableswapPools, type StableswapPegRational } from './stableswapSnapshot.ts'
 
 // Reserves move every block; held for one block interval, like the other
 // current-state snapshot reads.
@@ -18,7 +18,8 @@ const TTL_MS = 3_000
 export { SHARE_POOL_MAX_AGE_SECONDS }
 
 export interface StableswapShareState {
-  pools: StableswapSharePool[]
+  /** Each pool with its peg multipliers too (null: a pool without pegs), for the readers that show them. */
+  pools: (StableswapSharePool & { pegs: StableswapPegRational[] | null })[]
   /** The snapshot block's timestamp, unix seconds. */
   blockTimestamp: number
 }
@@ -47,7 +48,7 @@ function readState(client: ClickHouseClient): Promise<StableswapShareState | nul
       const blockTimestamp = Number(row.ts)
       if (!Number.isFinite(blockTimestamp) || blockTimestamp <= 0) return lastGood
       lastGood = {
-        pools: parseStableswapPools(section).map(p => ({ poolId: p.poolId, assetIds: p.assetIds, reserves: p.reserves, totalIssuance: p.totalIssuance })),
+        pools: parseStableswapPools(section).map(p => ({ poolId: p.poolId, assetIds: p.assetIds, reserves: p.reserves, totalIssuance: p.totalIssuance, pegs: p.pegs })),
         blockTimestamp,
       }
       return lastGood
