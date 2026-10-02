@@ -154,7 +154,7 @@ export function ApiAdmin() {
             <span className="muted" style={{ fontSize: 12 }}>defaults: {defaults.perMinute}/min · {F.count(defaults.perDay)}/day</span>
           </div>
           <div className="panel"><table className="tbl">
-            <thead><tr><th>Account</th><th>Tokens</th><th className="r">24h</th><th className="r">7d</th><th className="r">30d</th><th>Limits</th><th className="r">Last active</th><th className="r"></th></tr></thead>
+            <thead><tr><th>Account</th><th>Tokens</th><th className="r">24H</th><th className="r">7D</th><th className="r">30D</th><th>Limits</th><th className="r">Last active</th><th className="r"></th></tr></thead>
             <tbody>
               {users.isLoading ? <TableSkeleton cols={8} rows={3} />
                 : !rows.length ? <EmptyRow cols={8}>Nobody holds an active API token yet.</EmptyRow>
@@ -165,9 +165,9 @@ export function ApiAdmin() {
                         {row.tokenCount}
                         {row.labels.length > 0 && <span className="muted" style={{ fontSize: 12 }}> · {row.labels.slice(0, 3).join(', ')}{row.labels.length > 3 ? ', …' : ''}</span>}
                       </td>
-                      <td data-label="24h" className="r mono">{usageCell(row.usage.requests24h, row.usage.rejected24h)}</td>
-                      <td data-label="7d" className="r mono">{F.count(row.usage.requests7d)}</td>
-                      <td data-label="30d" className="r mono">{F.count(row.usage.requests30d)}</td>
+                      <td data-label="24H" className="r mono">{usageCell(row.usage.requests24h, row.usage.rejected24h)}</td>
+                      <td data-label="7D" className="r mono">{F.count(row.usage.requests7d)}</td>
+                      <td data-label="30D" className="r mono">{F.count(row.usage.requests30d)}</td>
                       <td data-label="Limits">
                         {row.limits.perMinute}/min · {F.count(row.limits.perDay)}/day
                         {row.limits.override && <span className="badge pending" style={{ marginLeft: 6 }} title={row.limits.note || undefined}>override</span>}

@@ -71,7 +71,7 @@ export function AccountRow({ r, memberView }: { r: TopAccountRow; memberView?: b
         : r.tag ? <TagGroupPill tag={r.tag} /> : r.account ? <AddrPill account={r.account} /> : <Dash />}</td>
       <td data-label="Value" className="r mono"><Usd v={r.portfolioUsd} /></td>
       <td data-label="Holdings" className={`holdings-cell${emptyIf(!r.topAssets?.length)}`}>{r.topAssets?.length ? <TokenIconRow assets={r.topAssets} others={r.otherAssets ?? 0} /> : <Dash />}</td>
-      <td data-label="1Y" className={`r${emptyIf(!(r.sparkline && r.sparkline.length > 1))}`}>{r.sparkline && r.sparkline.length > 1 ? <Sparkline data={r.sparkline} /> : <Dash />}</td>
+      <td data-label="12M" className={`r${emptyIf(!(r.sparkline && r.sparkline.length > 1))}`}>{r.sparkline && r.sparkline.length > 1 ? <Sparkline data={r.sparkline} /> : <Dash />}</td>
       <td data-label="Lent" className={`r mono${emptyIf(!r.suppliedUsd)}`}>{r.suppliedUsd ? <Usd v={r.suppliedUsd} /> : <Dash />}</td>
       <td data-label="Borrowed" className={`r mono${emptyIf(!r.borrowedUsd)}`}>{r.borrowedUsd ? <Usd v={r.borrowedUsd} /> : <Dash />}</td>
       <td data-label="Health" className={`r${emptyIf(!hf)}`}>{hf && addr
@@ -109,7 +109,7 @@ export function AccountsTable({ rows, loading, pending, sort, onSort, emptyLabel
       <table className="tbl accounts-tbl">
         <thead><tr>
           <th>{th('identity', 'Account')}</th>
-          <th className="r">{th('value', 'Value')}</th><th>Holdings</th><th className="r">1Y</th>
+          <th className="r">{th('value', 'Value')}</th><th>Holdings</th><th className="r">12M</th>
           <th className="r">{th('supplied', 'Lent')}</th><th className="r">{th('borrowed', 'Borrowed')}</th>
           <th className="r">{th('health', 'Health')}</th>
           <th className="r">{th('liquidation', 'Liquidation $')}</th>
@@ -119,7 +119,7 @@ export function AccountsTable({ rows, loading, pending, sort, onSort, emptyLabel
         </tr></thead>
         <tbody {...pendingRows(pending)}>
           {/* A phone card here drops the columns this account has nothing in and
-              gives the 1Y chart a whole line of its own, so its height is not the
+              gives the 12M chart a whole line of its own, so its height is not the
               column count: the directory's rows measure 172px (identity, value,
               holdings, chart) to 324px, averaging seven lines' worth. */}
           {loading && !rows.length ? <TableSkeleton cols={11} mobileCols={7} rows={skeletonRows} />

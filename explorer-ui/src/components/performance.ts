@@ -12,11 +12,16 @@ export interface PerformancePoint {
   value: number
 }
 
-const DEFAULT_PERFORMANCE_WINDOWS: PerformanceWindow[] = [
-  { label: '1W', days: 7 },
-  { label: '1M', days: 30 },
-  { label: '1Y', days: 365 },
+// The explorer's trailing windows, spelled one way everywhere: 24H, 7D, 30D, 12M
+// (12M is the trailing 365 days). The 24H change usually comes from a finer source
+// than a daily series, so callers that have one add it themselves.
+export const WINDOWS_7D_30D_12M: PerformanceWindow[] = [
+  { label: '7D', days: 7 },
+  { label: '30D', days: 30 },
+  { label: '12M', days: 365 },
 ]
+export const WINDOWS_24H_7D_30D_12M: PerformanceWindow[] = [{ label: '24H', days: 1 }, ...WINDOWS_7D_30D_12M]
+const DEFAULT_PERFORMANCE_WINDOWS = WINDOWS_7D_30D_12M
 
 function parsePointTime(value?: string): number | null {
   if (!value) return null

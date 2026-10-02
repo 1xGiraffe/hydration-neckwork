@@ -5,13 +5,14 @@ import { Crumbs, Usd, F, AssetIcon, Sparkline, EmptyRow, TableSkeleton, rowNav, 
 import { PREIS_URL } from '../surfaces'
 import type { AssetListItem } from '../types'
 
-type AssetSort = 'tvl' | 'holders' | '24h' | '7d'
+type AssetSort = 'tvl' | 'holders' | '24h' | '7d' | 'volume'
 type SortDir = 'asc' | 'desc'
-const SORTS: AssetSort[] = ['tvl', 'holders', '24h', '7d']
+const SORTS: AssetSort[] = ['tvl', 'holders', '24h', '7d', 'volume']
 
 function sortValue(a: AssetListItem, sort: AssetSort): number | null | undefined {
   if (sort === 'tvl') return a.amountUsd
   if (sort === 'holders') return a.holderCount
+  if (sort === 'volume') return a.volume24hUsd
   if (sort === '24h') return a.change24h
   return a.change7d
 }
@@ -68,9 +69,9 @@ export function Assets() {
 
       <div className="panel">
         <table className="tbl assets-tbl">
-          <thead><tr><th>Asset</th><th className="r">Price</th><th className="r">{sTh('24h', '24H')}</th><th className="r">{sTh('7d', '7D')}</th><th className="r">{sTh('holders', 'Holders')}</th><th className="r">{sTh('tvl', 'TVL')}</th><th className="r">Last 7 days</th></tr></thead>
+          <thead><tr><th>Asset</th><th className="r">Price</th><th className="r">{sTh('24h', '24H')}</th><th className="r">{sTh('7d', '7D')}</th><th className="r">{sTh('holders', 'Holders')}</th><th className="r">{sTh('volume', '24H volume')}</th><th className="r">{sTh('tvl', 'TVL')}</th><th className="r">Last 7 days</th></tr></thead>
           <tbody>
-            {isLoading ? <TableSkeleton cols={7} /> : !rows.length ? <EmptyRow cols={7}>No assets</EmptyRow> : rows.map(a => (
+            {isLoading ? <TableSkeleton cols={8} /> : !rows.length ? <EmptyRow cols={8}>No assets</EmptyRow> : rows.map(a => (
               // A cross-chain destination is keyed and routed by its slug: its
               // `assetId` is a negative sentinel, not a registry id.
               <tr key={a.xcDestination ? `xc:${a.xcDestination.platform}` : a.assetId}
@@ -90,6 +91,7 @@ export function Assets() {
                 <td data-label="24H" className="r mono" style={{ color: chCol(a.change24h) }}>{a.change24h != null ? F.pct(a.change24h) : <Dash />}</td>
                 <td data-label="7D" className="r mono" style={{ color: chCol(a.change7d) }}>{a.change7d != null ? F.pct(a.change7d) : <Dash />}</td>
                 <td data-label="Holders" className="r mono">{a.holderCount != null ? F.int(a.holderCount) : <Dash />}</td>
+                <td data-label="24H volume" className="r mono" title={a.xcDestination ? undefined : 'The value of this asset bought and sold in the last 24 published hours, its aToken included'}>{a.volume24hUsd != null ? <Usd v={a.volume24hUsd} /> : <Dash />}</td>
                 <td data-label="TVL" className="r mono">{a.amountUsd != null ? <Usd v={a.amountUsd} /> : <Dash />}</td>
                 <td data-label="Last 7 days" className="r spark-cell">{a.sparkline && a.sparkline.length > 1 ? <Sparkline data={a.sparkline} w={110} h={30} change7d={a.change7d ?? null} /> : <Dash />}</td>
               </tr>

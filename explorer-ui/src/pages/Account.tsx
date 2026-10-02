@@ -6,7 +6,7 @@ import { api } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, Copy, ShortAddr, ProfilePageSkeleton, DetailTabs, moduleName, emojiName, TagIcon, AccountEmoji, UserTagPill, rowNav, EmptyRow } from '../components/ui'
-import { PortfolioChart, ProfileStats, moneyMarketDebtUsd, profileTabs, resolveProfileView, ProxyMultisigSection, ContractSection } from '../components/AccountSections'
+import { PortfolioChart, VolumeSection, ProfileStats, moneyMarketDebtUsd, profileTabs, resolveProfileView, ProxyMultisigSection, ContractSection } from '../components/AccountSections'
 import { OrdersTab } from '../components/positions/OrdersTab'
 import { LiquidityTab } from '../components/positions/LiquidityTab'
 import { BorrowTab } from '../components/positions/BorrowTab'
@@ -236,7 +236,7 @@ export function Account({ address }: { address: string }) {
 
               <ListsSection publicLists={libs.data ?? []} ownLists={isOwn ? (me.data?.lists ?? []) : []} isOwn={isOwn} />
 
-              <PortfolioChart title="Value" netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data}
+              <PortfolioChart title="Value" perfKey={`account:${canonicalAddress ?? address}`} netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data}
                 exHdxSeries={history.data?.portfolioSeriesExHdx ?? data.portfolioSeriesExHdx} exHdxNetUsd={data.portfolioExHdxUsd == null ? undefined : data.portfolioExHdxUsd - debtUsd}
                 refine={historyBlocks ? async (fromSec, toSec) => {
                   const range = blockRangeForWindow(history.data?.portfolioDates ?? data.portfolioDates ?? [], historyBlocks, fromSec, toSec)
@@ -248,6 +248,8 @@ export function Account({ address }: { address: string }) {
                   const overlay = w.portfolioSeriesExHdx?.length === w.portfolioSeries.length ? w.portfolioSeriesExHdx : undefined
                   return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates, overlay } : null
                 } : undefined} />
+
+              <VolumeSection scope={{ kind: 'account', address: canonicalAddress ?? address }} tradingVolumeUsd={data.tradingVolumeUsd} />
               </>)}
 
               {activeView === 'balances' && (

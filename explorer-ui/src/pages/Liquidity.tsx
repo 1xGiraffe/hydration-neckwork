@@ -4,6 +4,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, Link } from '../router'
 import { AssetIcon, Usd, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav, TableSkeleton } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
+import { fmtVolumeTvl } from '../utils/volume'
 import type { PoolCompositionEntry, PoolListEntry } from '../types'
 
 // Where the chain's money sits.
@@ -71,6 +72,8 @@ function PoolRow({ p }: { p: PoolListEntry }) {
       </td>
       <td data-label="Composition" className="comp-cell"><CompositionBar composition={p.composition} colors={colors} /></td>
       <td data-label="TVL" className="r mono liq-tvl">{p.tvlUsd != null ? <Usd v={p.tvlUsd} /> : <Dash />}</td>
+      <td data-label="24H volume" className="r mono">{p.volume24hUsd != null ? <Usd v={p.volume24hUsd} /> : <Dash />}</td>
+      <td data-label="Volume/TVL" className="r mono muted" title="24H volume over the pool's current TVL">{p.volumeTvl24h != null ? fmtVolumeTvl(p.volumeTvl24h) : <Dash />}</td>
       <td data-label="Share" className="r mono muted">{p.sharePct == null ? <Dash /> : p.sharePct < 0.1 ? '<0.1%' : F.sharePct(p.sharePct)}</td>
     </tr>
   )
@@ -98,10 +101,10 @@ export function Liquidity() {
 
       <div className="panel">
         <table className="tbl liq-tbl">
-          <thead><tr><th>Pool</th><th>Composition</th><th className="r">TVL</th><th className="r">Share</th></tr></thead>
+          <thead><tr><th>Pool</th><th>Composition</th><th className="r">TVL</th><th className="r">24H volume</th><th className="r">Volume/TVL</th><th className="r">Share</th></tr></thead>
           <tbody>
-            {isLoading ? <TableSkeleton cols={4} rows={12} />
-              : !rows.length ? <EmptyRow cols={4}>No pools</EmptyRow>
+            {isLoading ? <TableSkeleton cols={6} rows={12} />
+              : !rows.length ? <EmptyRow cols={6}>No pools</EmptyRow>
                 : rows.map(p => <PoolRow key={`${p.kind}:${p.address ?? p.poolId ?? 'omnipool'}`} p={p} />)}
           </tbody>
         </table>
@@ -121,7 +124,8 @@ export function Liquidity() {
 
       <div className="liq-foot muted">
         Reserves come from the newest chain snapshot. A pool whose legs have no price shows no TVL —
-        it still holds tokens, they just have nothing to be worth. <Link to={paths.omnipool()} className="hash">Open the Omnipool →</Link>
+        it still holds tokens, they just have nothing to be worth. 24h volume counts every swap that executed in the
+        pool once (a route through two pools counts in both); Volume/TVL is that over the pool's current TVL. <Link to={paths.omnipool()} className="hash">Open the Omnipool →</Link>
       </div>
     </div>
   )
