@@ -65,7 +65,7 @@ describe('a narrowed request is cached exactly as long, and apart', () => {
   it('picks the max-age from the path, so the query parameter cannot lose the TTL', () => {
     expect([...server.matchAll(/req\.url\.split\('\?'\)\[0\]/g)]).toHaveLength(1)
     expect(server).toContain('[/^\\/explorer\\/address\\/[^/]+\\/history/, 120],')
-    expect(server).toContain('[/^\\/explorer\\/assets/, 30],')
+    expect(server).toContain('[/^\\/explorer\\/assets$/, 3],')
   })
 
   it('keys the shared proxy cache on the full request URI, so the shapes never mix', () => {

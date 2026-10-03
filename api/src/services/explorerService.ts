@@ -10,6 +10,7 @@ import { type HistoryGrain } from './historyGrain.ts'
 import { BUCKET_HISTORY_CLOSED_TTL_MS, BUCKET_HISTORY_FINALITY_SEC, BUCKET_HISTORY_SETTLING_TTL_MS, bucketWindowIsClosed, loadFarmRewardHistory, loadLpHistory, loadOmnipoolPrincipalHistory, loadV3PrincipalHistory, loadXykPrincipalHistory, xykLegsByBucket, type FarmRewardHistory, type LpSpan, type LpVenue, type PriceGrain, type OmnipoolPrincipalHistory, type V3PrincipalHistory, type XykBucketLeg } from './lpHistory.ts'
 import { OMNI_FIXED, omnipoolRemoveLiquidity, withStableswapSharePrices, xykReserveAssets, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
 import { currentLmRewardGenerationSql, lmCountedClaimable, lmCountedRewardRowsSql, loadLmRewards, type LmRewardRow } from './lmRewardSnapshot.ts'
+import { headSingleFlight } from './headSingleFlight.ts'
 import { cached, cachedFound, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
 import { allocateFundingPools } from './dcaFunding.ts'
 import { NOMINAL_BLOCKS_PER_HOUR, blocksPerHour, measuredParaBlockMs, newestBlockTimestampsSql, paraBlockMs } from './blockTime.ts'
@@ -50,6 +51,7 @@ import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent
 import { canSkipRepublish } from './snapshotRepublish.ts'
 import { FAST_RELAY_FILLED_TOPIC, FastRelayIndexStore, fastRelayFeeRaw, fastRelayLegExclusionSql, isFastRelayLeg, type FastRelayDeposit, type FastRelayFill, type FastRelayIndex, type FastRelayLeg } from './wormholeFastRelay.ts'
 import { createHash } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { resolveModuleError } from './runtimeErrorNames.ts'
 import { profileForAccount } from './userProfileService.ts'
 import { currentStableswapSharePools } from './stableswapSharePools.ts'
@@ -1515,37 +1517,74 @@ export function eventValueAlternativesFilterSql(
 }
 
 // USD price map
-// Latest + 24h-ago USD price per asset from the bounded recent window (avoids a
-// full scan of the 485M-row prices table). Cached 30s in memory.
+// One immutable map per PRICE GENERATION, recomposed whenever the price head
+// moves. Each asset's current price is read from `asset_price_latest` (the
+// per-asset argMax twin of `prices`, ~190 merged rows, ~2 ms); the 24h change
+// comes from a bounded scan of the last day of `prices` (the expensive part,
+// tens of MiB), which refreshes on its own 30 s timer. `gen` advances only when
+// the composed map actually differs, so a cache keyed on it turns over when a
+// price moves rather than on every block, and it starts from the wall clock so a
+// generation number is never reused across a restart (it rides in URLs the
+// nginx micro-cache keys on).
 export interface PriceInfo { price: number; change24h: number; priceRaw?: string }
-let priceMap = new Map<number, PriceInfo>()
-let priceLoadedAt = 0
-// The ids the current map took from the money market's own oracle (no venue
-// prices them): a "market price" read for them is the oracle restated, so a
-// surface comparing the two (the oracle page) must not call them a market.
-let priceMapOracleFilled = new Set<number>()
-/** Whether the current price map's entry for `assetId` is the money-market oracle fallback rather than a venue price. */
-export function priceIsOracleFallback(assetId: number): boolean {
-  return priceMapOracleFilled.has(assetId)
+export interface PriceState {
+  map: Map<number, PriceInfo>
+  // The ids this map took from the money market's own oracle (no venue prices
+  // them): a "market price" read for them is the oracle restated, so a surface
+  // comparing the two (the oracle page) must not call them a market.
+  oracleFilled: ReadonlySet<number>
+  gen: number
+  /** The price head (newest block whose prices are written) the map was read at. */
+  head: number
+  /** The 24h-change scan the map was composed with. */
+  base: PriceBase | null
 }
-let priceRefreshInflight: Promise<Map<number, PriceInfo>> | null = null
-// Account directory/detail values share one pinned price generation. It advances
-// atomically with the five-minute MM account-value generation, preventing two
-// adjacent page requests from straddling the general 30-second price refresh.
-let accountValuePriceMap = new Map<number, PriceInfo>()
+interface PriceBaseEntry { priceRaw: string; priceThenRaw: string; latestBlock: number }
+interface PriceBase { entries: Map<number, PriceBaseEntry>; dayStart: number; loadedAt: number }
+const PRICE_CHANGE_REFRESH_MS = 30_000
+let priceState: PriceState = { map: new Map(), oracleFilled: new Set(), gen: 0, head: 0, base: null }
+let priceGenSeq = Date.now()
+let priceBase: PriceBase | null = null
+let priceBaseInflight: Promise<PriceBase | null> | null = null
+/** Whether the current price map's entry for `assetId` is the money-market oracle fallback rather than a venue price. */
+export function priceIsOracleFallback(assetId: number, state: PriceState = priceState): boolean {
+  return state.oracleFilled.has(assetId)
+}
+// Account values (the account page, its MM reserves, the directory and tag
+// builds) are valued at ONE price generation per request: `withAccountValuePrices`
+// pins the state the request started from, and every `ensureAccountValuePrices`
+// beneath it reads that pin, so a request can never straddle two generations
+// even when the head moves mid-build. Detail caches key on the pinned `gen`;
+// the directory and tag builds key on `accountValueGenerationEpoch`, which
+// advances with each published MM/Omnipool claim generation and — independent of
+// whether those refreshers succeed — at most every ACCOUNT_PRICE_EPOCH_MS once a
+// price moved, so their values can never sit on old prices unbounded.
+const accountPriceScope = new AsyncLocalStorage<PriceState>()
 let accountValueGenerationEpoch = 0
+const ACCOUNT_PRICE_EPOCH_MS = 5 * 60_000
+let lastPriceEpochBumpAt = Date.now()
 
-// `prices` contains one row per asset per block, so asking it for max(block_height)
-// scans the entire table. The much smaller `blocks` table advances atomically with
-// the price rows and provides the same head for bounded price reads.
+// `prices` contains one row per asset per priced block, so asking it for
+// max(block_height) scans the entire table. The much smaller `blocks` table is
+// written AFTER a block's price rows (src/store/clickhouseStore.ts flushAll),
+// so its newest height is the newest block whose prices are all readable.
+//
+// The SSE broadcaster publishes each `main` head it reads (the same query) as a
+// floor, so a refetch racing its push never builds against this probe's older
+// cached value.
+let pushedPriceHead = 0
+export function publishPriceHead(head: number): void {
+  if (head > pushedPriceHead) pushedPriceHead = head
+}
 async function latestPriceBlock(): Promise<number> {
-  return cached('explorer:price-head', 5_000, async () => {
+  const probed = await cached('explorer:price-head', 1_000, async () => {
     const res = await client.query({
       query: `SELECT max(block_height) AS head FROM price_data.blocks`,
       format: 'JSONEachRow',
     })
     return Number((await res.json<{ head: number | null }>())[0]?.head ?? 0)
   })
+  return Math.max(probed, pushedPriceHead)
 }
 
 // The newest FULLY ingested raw block: the live pipeline's checkpoint, which is
@@ -1577,7 +1616,8 @@ export async function indexedRawHead(): Promise<number> {
  *
  * `raw-live` follows the FINALIZED head, so every detail page linked from a
  * wallet right after the action it describes is asked for a block that exists
- * on chain and not yet in ClickHouse — 35-65s of finality, measured. A bare 404
+ * on chain and not yet in ClickHouse — ~46s of finality plus under a second of
+ * indexing (measured 2026-10-03; finality lands in bursts every ~8s). A bare 404
  * cannot tell that apart from a mistyped id, so the miss says whether the BLOCK
  * is in the index at all: the client keeps waiting while it is not, and fails
  * fast once it is (the block is there and holds no such row).
@@ -1681,127 +1721,231 @@ export async function cutoffHeightForWindow(hours: number, head: number): Promis
 }
 
 export async function ensurePrices(): Promise<Map<number, PriceInfo>> {
-  if (priceMap.size && Date.now() - priceLoadedAt < 30_000) return priceMap
-  // Single-flight: ensurePrices is on the hot path of nearly every endpoint, so
-  // when the TTL lapses under load, concurrent requests share one in-flight
-  // refresh rather than each firing its own and stampeding ClickHouse. The
-  // stale map is served meanwhile (only a cold start ever waits).
-  priceRefreshInflight ??= refreshPrices().finally(() => { priceRefreshInflight = null })
-  return priceMap.size ? priceMap : priceRefreshInflight
+  return (await ensurePriceState()).map
 }
 
-async function loadFreshPrices(): Promise<Map<number, PriceInfo>> {
-  priceRefreshInflight ??= refreshPrices().finally(() => { priceRefreshInflight = null })
-  return priceRefreshInflight
-}
-
-async function ensureAccountValuePrices(): Promise<Map<number, PriceInfo>> {
-  if (!accountValuePriceMap.size) accountValuePriceMap = new Map(await loadFreshPrices())
-  return accountValuePriceMap
-}
-async function refreshPrices(): Promise<Map<number, PriceInfo>> {
+// The current price generation, recomposed once per price head. Single-flight:
+// this is on the hot path of nearly every endpoint, so concurrent requests that
+// see a new head share one recompose (one ~2 ms read plus in-memory work). A
+// failed recompose serves the previous generation; only a cold start waits.
+export async function ensurePriceState(): Promise<PriceState> {
+  let head: number
+  let base: PriceBase | null
   try {
-    const head = await latestPriceBlock()
-    if (!head) return priceMap
-    // Timestamp-derived cutoffs so "24h"/"7d" track wall-clock as block time
-    // moves (~6s today, 2s planned; measured where it matters). Resolved once
-    // per refresh, not per asset.
-    const [dayStart, weekStart, cut72] = await Promise.all([
-      cutoffHeightForWindow(24, head),
-      cutoffHeightForWindow(168, head),
-      cutoffHeightForWindow(72, head),
-    ])
-    // The fallback "price then" window is a block SPAN relative to each asset's
-    // own latest tick (the ~24h→72h band before it), so express both edges as
-    // the real block count spanning those windows at the current rate.
-    const span24h = Math.max(1, head - dayStart)
-    const span72h = Math.max(1, head - cut72)
-    const res = await client.query({
+    [head, base] = await Promise.all([latestPriceBlock(), currentPriceBase()])
+  } catch {
+    return priceState
+  }
+  const st = priceState
+  if (!head || !base) return st
+  if (st.map.size && st.head >= head && st.base === base) return st
+  // Shared per head: a recompose for an older head is never joined (headSingleFlight).
+  try {
+    return await recomposeAt(head, base)
+  } catch {
+    return priceState
+  }
+}
+
+// The recompose reads the base a caller passed; concurrent callers at one head see
+// the same base (it is refreshed on its own timer), so the newest caller's wins.
+let recomposeBase: PriceBase | null = null
+const recomposeShared = headSingleFlight((head: number) => recomposePriceState(head, recomposeBase!))
+function recomposeAt(head: number, base: PriceBase): Promise<PriceState> {
+  recomposeBase = base
+  return recomposeShared(head)
+}
+
+
+
+// The 24h-change scan, refreshed on its own timer: the previous scan is served
+// while the next loads, so only a cold start waits on it.
+async function currentPriceBase(): Promise<PriceBase | null> {
+  const base = priceBase
+  if (base && Date.now() - base.loadedAt < PRICE_CHANGE_REFRESH_MS) return base
+  priceBaseInflight ??= loadPriceBase()
+    .then(next => { if (next) priceBase = next; return priceBase })
+    .catch(() => priceBase)
+    .finally(() => { priceBaseInflight = null })
+  return base ?? priceBaseInflight
+}
+
+// Latest + 24h-ago USD price per asset from the bounded recent window (avoids a
+// full scan of the prices table), with each asset's newest priced block so the
+// per-head read can tell a newer tick from the one this scan already holds.
+async function loadPriceBase(): Promise<PriceBase | null> {
+  const head = await latestPriceBlock()
+  if (!head) return null
+  // Timestamp-derived cutoffs so "24h"/"7d" track wall-clock as block time
+  // moves (~6s today, 2s planned; measured where it matters). Resolved once
+  // per refresh, not per asset.
+  const [dayStart, weekStart, cut72] = await Promise.all([
+    cutoffHeightForWindow(24, head),
+    cutoffHeightForWindow(168, head),
+    cutoffHeightForWindow(72, head),
+  ])
+  // The fallback "price then" window is a block SPAN relative to each asset's
+  // own latest tick (the ~24h→72h band before it), so express both edges as
+  // the real block count spanning those windows at the current rate.
+  const span24h = Math.max(1, head - dayStart)
+  const span72h = Math.max(1, head - cut72)
+  const loadedAt = Date.now()
+  const res = await client.query({
+    query: `
+      SELECT asset_id, max(block_height) AS latest_block,
+        toString(argMax(usd_price, block_height)) AS price_raw,
+        toString(argMin(usd_price, block_height)) AS price_then_raw
+      FROM price_data.prices
+      WHERE block_height > {dayStart:UInt32} AND usd_price > 0
+      GROUP BY asset_id`,
+    query_params: { dayStart },
+    format: 'JSONEachRow',
+  })
+  const entries = new Map<number, PriceBaseEntry>()
+  const keep = (r: { asset_id: number; latest_block?: number; price_raw: string; price_then_raw: string }) => {
+    const price = Number(r.price_raw)
+    if (Number.isFinite(price) && price > 0) {
+      entries.set(Number(r.asset_id), { priceRaw: r.price_raw, priceThenRaw: r.price_then_raw, latestBlock: Number(r.latest_block) || 0 })
+    }
+  }
+  for (const r of await res.json<{ asset_id: number; latest_block: number; price_raw: string; price_then_raw: string }>()) keep(r)
+  // Some low-activity assets (e.g. PEN) have a valid recent price history, but
+  // their latest tick can sit outside the narrow live-price window above. Fill
+  // only missing registry assets from a bounded 7d window, computing the change
+  // against roughly 24h before that asset's own latest tick.
+  const missing = allExplorerAssets().map(a => a.assetId).filter(id => !entries.has(id))
+  if (missing.length) {
+    // Both scan legs are bounded by (asset_id IN …, block_height > head − 7d),
+    // allowing the (asset_id, block_height) primary key to prune the scan.
+    const fbRes = await client.query({
       query: `
-        SELECT asset_id,
-          toString(argMax(usd_price, block_height)) AS price_raw,
-          toString(argMin(usd_price, block_height)) AS price_then_raw
-        FROM price_data.prices
-        WHERE block_height > {dayStart:UInt32} AND usd_price > 0
-        GROUP BY asset_id`,
-      query_params: { dayStart },
-      format: 'JSONEachRow',
+        WITH latest AS (
+          SELECT asset_id, max(block_height) AS latest_block,
+            argMax(usd_price, block_height) AS price
+          FROM price_data.prices
+          WHERE block_height > {weekStart:UInt32}
+            AND usd_price > 0 AND asset_id IN ({ids:Array(UInt32)})
+          GROUP BY asset_id
+        )
+        SELECT p.asset_id AS asset_id, any(l.latest_block) AS latest_block,
+          toString(any(l.price)) AS price_raw,
+          toString(argMaxIf(p.usd_price, p.block_height,
+            p.block_height <= l.latest_block - {span24h:UInt32} AND p.block_height > l.latest_block - {span72h:UInt32})) AS price_then_raw
+        FROM price_data.prices p
+        INNER JOIN latest l ON l.asset_id = p.asset_id
+        WHERE p.asset_id IN ({ids:Array(UInt32)}) AND p.block_height > {weekStart:UInt32} AND p.usd_price > 0
+        GROUP BY p.asset_id`,
+      query_params: { ids: missing, weekStart, span24h, span72h }, format: 'JSONEachRow',
     })
-    const rows = await res.json<{ asset_id: number; price_raw: string; price_then_raw: string }>()
-    const m = new Map<number, PriceInfo>()
-    for (const r of rows) {
-      const price = Number(r.price_raw)
-      const priceThen = Number(r.price_then_raw)
-      const change = priceThen > 0 ? (price - priceThen) / priceThen : 0
-      if (Number.isFinite(price) && price > 0) m.set(r.asset_id, { price, priceRaw: r.price_raw, change24h: change })
+    for (const r of await fbRes.json<{ asset_id: number; latest_block: number; price_raw: string; price_then_raw: string }>()) keep(r)
+  }
+  return { entries, dayStart, loadedAt }
+}
+
+/**
+ * The current USD price map: the 24h scan's entries, each brought forward to
+ * the asset's newest tick from `asset_price_latest`. Exactly what one fresh
+ * scan at this head would produce: a newer positive tick replaces the scan's
+ * price and keeps its 24h-ago price; a non-positive tick is never a price (the
+ * scan's `usd_price > 0` rule — the last positive one stands); an asset the
+ * scan held only through the 7d fallback whose new tick enters the 24h window,
+ * or one the scan did not hold at all, has that tick as its only in-window
+ * price, so its change is 0 until the next scan. Pure, for the tests.
+ */
+export function composeCurrentPrices(
+  base: ReadonlyMap<number, PriceBaseEntry>,
+  latest: readonly { asset_id: number | string; price_raw: string; latest_block: number | string }[],
+  dayStart: number,
+): Map<number, PriceInfo> {
+  const m = new Map<number, PriceInfo>()
+  const put = (id: number, priceRaw: string, thenRaw: string) => {
+    const price = Number(priceRaw)
+    const priceThen = Number(thenRaw)
+    const change = priceThen > 0 ? (price - priceThen) / priceThen : 0
+    if (Number.isFinite(price) && price > 0) m.set(id, { price, priceRaw, change24h: change })
+  }
+  for (const [id, e] of base) put(id, e.priceRaw, e.priceThenRaw)
+  for (const r of latest) {
+    const id = Number(r.asset_id)
+    const block = Number(r.latest_block) || 0
+    if (!(Number(r.price_raw) > 0)) continue
+    const e = base.get(id)
+    if (e && block <= e.latestBlock) continue
+    if (e && e.latestBlock > dayStart) put(id, r.price_raw, e.priceThenRaw)
+    else if (block > dayStart) put(id, r.price_raw, r.price_raw)
+  }
+  return m
+}
+
+async function recomposePriceState(head: number, base: PriceBase): Promise<PriceState> {
+  const res = await client.query({
+    query: `-- explorer:current-prices
+      SELECT asset_id, toString(argMaxMerge(price_state)) AS price_raw, maxMerge(block_state) AS latest_block
+      FROM price_data.asset_price_latest
+      GROUP BY asset_id`,
+    format: 'JSONEachRow',
+  })
+  const m = composeCurrentPrices(base.entries, await res.json<{ asset_id: number; price_raw: string; latest_block: number }>(), base.dayStart)
+  // Pool-SHARE tokens are priced at what one share redeems for, never at a feed
+  // or an underlying (withExplorerSharePrices), BEFORE the alias loop so an aToken
+  // over a share without a feed of its own (a3-Pool → 3-Pool) borrows the share's
+  // redeemable value.
+  await withExplorerSharePrices(m)
+  // An aliased asset (aToken, duplicate) with no entry of its own takes its
+  // alias's — resolved TRANSITIVELY: GIGAHDX → stHDX → HDX, and stopped at a share
+  // token — so every value/volume computation that reads this map values it 1:1.
+  // currentPriceOf is the one precedence rule (own entry first) the public API and
+  // the Data API apply too. A share token itself is never aliased: unpriced stays
+  // unpriced.
+  const applyAliases = () => {
+    for (const aToken of Object.keys(PRICE_ALIAS_ID)) {
+      const id = Number(aToken)
+      if (isStableswapShareToken(id) || m.has(id)) continue
+      const u = currentPriceOf(m, id)
+      if (u) m.set(id, u)
     }
-    // Some low-activity assets (e.g. PEN) have a valid recent price history, but
-    // their latest tick can sit outside the narrow live-price window above. Fill
-    // only missing registry assets from a bounded 7d window, computing the change
-    // against roughly 24h before that asset's own latest tick.
-    const missing = allExplorerAssets().map(a => a.assetId).filter(id => !m.has(id))
-    if (missing.length) {
-      // Both scan legs are bounded by (asset_id IN …, block_height > head − 7d),
-      // allowing the (asset_id, block_height) primary key to prune the scan.
-      const fbRes = await client.query({
-        query: `
-          WITH latest AS (
-            SELECT asset_id, max(block_height) AS latest_block,
-              argMax(usd_price, block_height) AS price
-            FROM price_data.prices
-            WHERE block_height > {weekStart:UInt32}
-              AND usd_price > 0 AND asset_id IN ({ids:Array(UInt32)})
-            GROUP BY asset_id
-          )
-          SELECT p.asset_id AS asset_id, any(l.latest_block) AS latest_block,
-            toString(any(l.price)) AS price_raw,
-            toString(argMaxIf(p.usd_price, p.block_height,
-              p.block_height <= l.latest_block - {span24h:UInt32} AND p.block_height > l.latest_block - {span72h:UInt32})) AS price_then_raw
-          FROM price_data.prices p
-          INNER JOIN latest l ON l.asset_id = p.asset_id
-          WHERE p.asset_id IN ({ids:Array(UInt32)}) AND p.block_height > {weekStart:UInt32} AND p.usd_price > 0
-          GROUP BY p.asset_id`,
-        query_params: { ids: missing, weekStart, span24h, span72h }, format: 'JSONEachRow',
-      })
-      for (const r of await fbRes.json<{ asset_id: number; price_raw: string; price_then_raw: string }>()) {
-        const price = Number(r.price_raw)
-        const priceThen = Number(r.price_then_raw)
-        const change = priceThen > 0 ? (price - priceThen) / priceThen : 0
-        if (Number.isFinite(price) && price > 0) m.set(r.asset_id, { price, priceRaw: r.price_raw, change24h: change })
-      }
-    }
-    // Pool-SHARE tokens are priced at what one share redeems for, never at a feed
-    // or an underlying (withExplorerSharePrices), BEFORE the alias loop so an aToken
-    // over a share without a feed of its own (a3-Pool → 3-Pool) borrows the share's
-    // redeemable value.
-    await withExplorerSharePrices(m)
-    // An aliased asset (aToken, duplicate) with no entry of its own takes its
-    // alias's — resolved TRANSITIVELY: GIGAHDX → stHDX → HDX, and stopped at a share
-    // token — so every value/volume computation that reads this map values it 1:1.
-    // currentPriceOf is the one precedence rule (own entry first) the public API and
-    // the Data API apply too. A share token itself is never aliased: unpriced stays
-    // unpriced.
-    const applyAliases = () => {
-      for (const aToken of Object.keys(PRICE_ALIAS_ID)) {
-        const id = Number(aToken)
-        if (isStableswapShareToken(id) || m.has(id)) continue
-        const u = currentPriceOf(m, id)
-        if (u) m.set(id, u)
-      }
-    }
-    applyAliases()
-    // A primary-market reserve no venue prices any more (WBTC) takes the market's
-    // own oracle price, after every feed, share and alias had its turn so it only
-    // ever fills a gap; the aliases then run again for its aToken. A share keeps
-    // the redeemable-value rule and is never filled this way. See mmOraclePrices.ts.
-    const oracle = new Map([...currentMmOraclePrices()].filter(([id]) => !isStableswapShareToken(id)))
-    const oracleFilled = withMmOraclePrices(m, oracle, entry => ({ price: entry.price, priceRaw: entry.priceRaw, change24h: 0 }))
-    if (oracleFilled.length) applyAliases()
-    priceMap = m
-    priceMapOracleFilled = new Set(oracleFilled)
-    priceLoadedAt = Date.now()
-  } catch { /* serve stale on error */ }
-  return priceMap
+  }
+  applyAliases()
+  // A primary-market reserve no venue prices any more (WBTC) takes the market's
+  // own oracle price, after every feed, share and alias had its turn so it only
+  // ever fills a gap; the aliases then run again for its aToken. A share keeps
+  // the redeemable-value rule and is never filled this way. See mmOraclePrices.ts.
+  const oracle = new Map([...currentMmOraclePrices()].filter(([id]) => !isStableswapShareToken(id)))
+  const oracleFilled = new Set(withMmOraclePrices(m, oracle, entry => ({ price: entry.price, priceRaw: entry.priceRaw, change24h: 0 })))
+  if (oracleFilled.size) applyAliases()
+
+  const prev = priceState
+  // A slower recompose never replaces a newer one.
+  if (prev.head > head && prev.base === base) return prev
+  const unchanged = prev.map.size > 0 && samePriceGeneration(prev.map, m)
+    && prev.oracleFilled.size === oracleFilled.size && [...oracleFilled].every(id => prev.oracleFilled.has(id))
+  if (unchanged) {
+    priceState = { ...prev, head: Math.max(prev.head, head), base }
+    return priceState
+  }
+  priceState = { map: m, oracleFilled, gen: ++priceGenSeq, head, base }
+  // The directory and tag builds key on the account-value epoch rather than on
+  // every generation (each is a whole-directory rebuild); a moved price turns
+  // them over at most this often, whatever the claim refreshers are doing.
+  if (prev.map.size && Date.now() - lastPriceEpochBumpAt >= ACCOUNT_PRICE_EPOCH_MS) {
+    lastPriceEpochBumpAt = Date.now()
+    accountValueGenerationEpoch++
+  }
+  return priceState
+}
+
+// The price generation account values are read at: the request's pin when one
+// is open, else the current one.
+async function accountValuePriceState(): Promise<PriceState> {
+  return accountPriceScope.getStore() ?? await ensurePriceState()
+}
+async function ensureAccountValuePrices(): Promise<Map<number, PriceInfo>> {
+  return (await accountValuePriceState()).map
+}
+/** Run `fn` with every account-value read beneath it pinned to one price generation. */
+export async function withAccountValuePrices<T>(fn: (state: PriceState) => Promise<T>): Promise<T> {
+  const state = await accountValuePriceState()
+  return accountPriceScope.run(state, () => fn(state))
 }
 // The shared valuation leaf (assetValue.ts) under the name this file's ~30 call
 // sites and iceService already use. PriceInfo satisfies its structural
@@ -3560,11 +3704,36 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
   const pageKey = viewerFold
     ? `user-holders:${viewerFold.fingerprint}:${assetId}:${limit}:${offset}`
     : `explorer:holders:${assetId}:${limit}:${offset}`
-  const enrichShare = (rows: HolderRow[], prices: Map<number, PriceInfo>, totalUsd: number): HolderRow[] => rows.map(h => {
-    const valueUsd = usdValue(prices, assetId, h.balance, a.decimals)
+  // The page is cached UNVALUED (its rows and the amount its total is valued
+  // from) and valued per call at the current price generation: the holder set
+  // is a 30 s read, but a price moves the whole page and must show at once.
+  const [prices, page] = await Promise.all([ensurePrices(), holdersPageUnvalued(assetId, limit, offset, a, pageKey, viewerFold)])
+  return valueHoldersPage(assetId, a.decimals, page, prices)
+}
+
+interface UnvaluedHoldersPage {
+  asset: AssetRef
+  rows: HolderRow[]
+  total: number
+  holderCount: number
+  // What the page's total USD is the value of: one raw amount, or (an aToken
+  // without a reconstructed supply) the sum of every holder's own value.
+  totalBasis: { amount: string | null } | { each: string[] }
+}
+
+export function valueHoldersPage(assetId: number, decimals: number, page: UnvaluedHoldersPage, prices: Map<number, PriceInfo>): HoldersPage {
+  const basis = page.totalBasis
+  const totalUsd = 'each' in basis
+    ? basis.each.reduce((sum, balance) => sum + (usdValue(prices, assetId, balance, decimals) ?? 0), 0)
+    : basis.amount != null ? usdValue(prices, assetId, basis.amount, decimals) ?? 0 : 0
+  const holders = page.rows.map(h => {
+    const valueUsd = usdValue(prices, assetId, h.balance, decimals)
     return { ...h, valueUsd, share: totalUsd > 0 ? (valueUsd ?? 0) / totalUsd : 0 }
   })
+  return { asset: page.asset, holders, total: page.total, totalUsd, holderCount: page.holderCount }
+}
 
+async function holdersPageUnvalued(assetId: number, limit: number, offset: number, a: AssetRef, pageKey: string, viewerFold?: ViewerFold): Promise<UnvaluedHoldersPage> {
   // Giga/display assets are backed by hidden stableswap-share ids (GDOT←690,
   // GETH←4200, …). Their economic holder list combines direct display/share
   // balances and replaces each money-market aToken custody row with its actual
@@ -3574,13 +3743,11 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
   const foldedShareIds = supplyFoldedShareIds(assetId)
   if (foldedShareIds.length) {
     return cached(pageKey, 30000, async () => {
-      const prices = await ensurePrices()
       const all = markViewerHolderTags(await getFoldedDisplayAssetHolders(assetId, foldedShareIds, viewerFold), viewerFold)
       const totalRaw = all.reduce((sum, row) => sum + BigInt(row.balance), 0n)
-      const totalUsd = usdValue(prices, assetId, totalRaw.toString(), a.decimals) ?? 0
       const page = all.slice(offset, limit > 0 ? offset + limit : all.length)
         .map((holder, index) => ({ ...holder, rank: offset + index + 1 }))
-      return { asset: a, holders: enrichShare(page, prices, totalUsd), total: all.length, totalUsd, holderCount: holderAccountCount(all) }
+      return { asset: a, rows: page, total: all.length, holderCount: holderAccountCount(all), totalBasis: { amount: totalRaw.toString() } }
     })
   }
 
@@ -3589,22 +3756,19 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
   // sets are small, so fetch all and page in memory.
   if (ATOKEN_UNDERLYING_ID[assetId] != null) {
     return cached(pageKey, 30000, async () => {
-      const [prices, allRows, supplies] = await Promise.all([ensurePrices(), getATokenHolders(assetId, 1_000_000, viewerFold), getATokenTotalSupplies()])
+      const [allRows, supplies] = await Promise.all([getATokenHolders(assetId, 1_000_000, viewerFold), getATokenTotalSupplies()])
       const all = markViewerHolderTags(allRows, viewerFold)
       // Value the asset at its reconstructed total supply — the same figure the
       // assets list shows. Pallet accounts are holders too (35% of aDOT sits in the
       // Omnipool, the Treasury holds BIL), so the rows sum to that supply.
       const supply = supplies.get(assetId)
-      const totalUsd = supply != null
-        ? usdValue(prices, assetId, supply.toString(), a.decimals) ?? 0
-        : all.reduce((sum, h) => sum + (usdValue(prices, assetId, h.balance, a.decimals) ?? 0), 0)
       const page = all.slice(offset, limit > 0 ? offset + limit : all.length)
         .map((h, i) => ({ ...h, rank: offset + i + 1 }))
-      return { asset: a, holders: enrichShare(page, prices, totalUsd), total: all.length, totalUsd, holderCount: holderAccountCount(all) }
+      const totalBasis = supply != null ? { amount: supply.toString() } : { each: all.map(h => h.balance) }
+      return { asset: a, rows: page, total: all.length, holderCount: holderAccountCount(all), totalBasis }
     })
   }
   return cached(pageKey, 30000, async () => {
-    const prices = await ensurePrices()
     // Same two splices as accountsPage's gkeySql/labelIdSql (see its comments
     // for the full rationale, including why label_id must be neutralized
     // alongside the group key): a viewer's fold overrides the grouping for
@@ -3697,14 +3861,12 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
     const rows = await res.json<{ group_key: string; label_id: string; label_name: string; color: string; icon: string; member_count: string; balance: string; last_block: number; sample_account: string; total: string; total_bal: string; holder_count: string }>()
     const total = rows.length ? Number(rows[0].total) : 0
     const holderCount = rows.length ? Number(rows[0].holder_count) : 0
-    const totalUsd = rows.length ? (usdValue(prices, assetId, rows[0].total_bal, a.decimals) ?? 0) : 0
     const holders: HolderRow[] = rows.map((r, i) => {
       // A viewer's own tag wins the row over a system one — directoryFoldFor
       // guarantees they never compete for the same account, so a hit here
       // means label_id was neutralized to '' by labelIdSql above.
       const userGroup = viewerFold ? viewerFold.groups.get(r.group_key) : undefined
       const isTag = r.label_id !== '' || !!userGroup
-      const valueUsd = usdValue(prices, assetId, r.balance, a.decimals)
       return {
         rank: offset + i + 1,
         account: isTag ? null : accountRef(r.sample_account),
@@ -3713,11 +3875,9 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
           : (isTag ? { tagId: r.label_id, name: r.label_name, color: r.color, icon: tagIcon(r.label_id, r.icon), memberCount: Number(r.member_count) } : null),
         balance: r.balance,
         lastBlock: r.last_block,
-        valueUsd,
-        share: totalUsd > 0 ? (valueUsd ?? 0) / totalUsd : 0,
       }
     })
-    return { asset: a, holders, total, totalUsd, holderCount }
+    return { asset: a, rows: holders, total, holderCount, totalBasis: { amount: rows.length ? rows[0].total_bal : null } }
   })
 }
 
@@ -4461,7 +4621,9 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
   // the expensive extras it never renders (LP positions, DCA, proxy/multisig live
   // reads) so the preview loads fast; the detail page still requests the full object.
   const summary = opts.summary === true
-  return cached(`explorer:address:${accountValueGenerationEpoch}:${norm.accountId}${summary ? ':summary' : ''}`, 8000, async () => {
+  // Valued at one price generation (see withAccountValuePrices), and cached per
+  // generation, so a moved price is a new page while a quiet one is shared.
+  return withAccountValuePrices(pricing => cached(`explorer:address:${accountValueGenerationEpoch}:p${pricing.gen}:${norm.accountId}${summary ? ':summary' : ''}`, 8000, async () => {
     // 1. Aliases — discover all account_ids belonging to the same entity.
     const related = new Set<string>(resolved.related)
     const list = sqlAccountList([...related])
@@ -4668,7 +4830,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
       multisigMemberships,
       contract,
     }
-  })
+  }))
 }
 
 // `seriesOnly` drops the per-asset balance history, which is 98-99% of this
@@ -6047,7 +6209,7 @@ const NO_RESERVE_READ: MoneyMarketReserveRead = { reserves: [], unstated: [] }
 
 async function loadMoneyMarketReserveRead(h160: string): Promise<MoneyMarketReserveRead> {
   if (!/^0x[0-9a-fA-F]{40}$/.test(h160)) return NO_RESERVE_READ
-  return cached(`explorer:mm-reserves:${accountValueGenerationEpoch}:${h160.toLowerCase()}`, 15000, async () => {
+  return withAccountValuePrices(pricing => cached(`explorer:mm-reserves:${accountValueGenerationEpoch}:p${pricing.gen}:${h160.toLowerCase()}`, 15000, async () => {
     const b0 = await aTokenAnchorBlock()
     // Without an anchor the fold holds nothing for anyone; the collateral flags
     // still name every reserve it therefore leaves unstated.
@@ -6065,7 +6227,7 @@ async function loadMoneyMarketReserveRead(h160: string): Promise<MoneyMarketRese
     }
     reserves.sort((a, b) => (b.suppliedUsd ?? b.debtUsd ?? 0) - (a.suppliedUsd ?? a.debtUsd ?? 0))
     return { reserves, unstated: mmUnstatedReserves(tokens, byContract, indices, prices, holderFlags) }
-  })
+  }))
 }
 
 export interface MmUnstatedReserve {
@@ -6495,9 +6657,9 @@ export async function moneyMarketAccountValueSnapshotReady(): Promise<boolean> {
 export const moneyMarketClaimChecksumFields = (claim: MoneyMarketAccountValueClaim): string =>
   `${claim.accountId}|${claim.poolAddress}|${moneyMarketClaimReservePresent(claim)}|${claim.assetId}|${claim.supplied}|${claim.debt}|${claim.totalCollateralBase}|${claim.totalDebtBase}|${claim.availableBorrowsBase}|${claim.liquidationThreshold}|${claim.ltv}|${claim.healthFactor}|${claim.blockHeight}|${claim.blockTimestamp}\n`
 
-// Two price maps are the same account-value generation only if every asset
-// carries the same price and 24h change: the pinned map values the whole
-// directory, so a moved price is a changed generation even when no claim did.
+// Two price maps are the same price generation only if every asset carries the
+// same price and 24h change: caches keyed on the generation hold values computed
+// against the whole map, so any moved figure is a changed generation.
 export function samePriceGeneration(a: Map<number, PriceInfo>, b: Map<number, PriceInfo>): boolean {
   if (a.size !== b.size) return false
   for (const [assetId, price] of a) {
@@ -6532,18 +6694,6 @@ async function refreshMoneyMarketAccountValuesUncached(): Promise<'republished' 
   for (const claim of ordered) checksum.update(moneyMarketClaimChecksumFields(claim))
   const digest = checksum.digest('hex')
 
-  // Prices and the raw principal below publish as one account-value generation.
-  // The map is reloaded every cycle even when the principal did not move: it is
-  // what the directory's Value column is computed against, and freezing it
-  // would leave a stale value beside a live price everywhere else.
-  const nextAccountValuePrices = new Map(await loadFreshPrices())
-  const pricesMoved = !samePriceGeneration(accountValuePriceMap, nextAccountValuePrices)
-  const pinPrices = (): void => {
-    if (!pricesMoved) return
-    accountValuePriceMap = nextAccountValuePrices
-    accountValueGenerationEpoch++
-  }
-
   if (await canSkipRepublish(client, {
     dataTable: 'money_market_account_value_snapshots', stateTable: 'money_market_account_value_snapshot_state',
     rowCountColumn: 'claim_count', checksum: digest, rowCount: claims.length,
@@ -6552,7 +6702,6 @@ async function refreshMoneyMarketAccountValuesUncached(): Promise<'republished' 
     // current: the readiness flag it justified stays set, and every consumer
     // keyed on the pointer's `computed_at` keeps its still-correct entry.
     setMoneyMarketAccountValuesReady()
-    pinPrices()
     return 'unchanged'
   }
   const batchSize = 1_000
@@ -6592,11 +6741,9 @@ async function refreshMoneyMarketAccountValuesUncached(): Promise<'republished' 
     }],
     format: 'JSONEachRow',
   })
-  // A republished principal is a new account-value generation whether or not
-  // prices moved with it, so the pinned map and the epoch advance together with
-  // it. General Explorer prices may keep refreshing every 30 seconds; account
-  // list and detail stay pinned to this generation.
-  accountValuePriceMap = nextAccountValuePrices
+  // A republished principal is a new account-value generation, so the epoch the
+  // directory and tag builds key on advances with it. Prices are not pinned
+  // here: account values follow the price generation (withAccountValuePrices).
   accountValueGenerationEpoch++
   if (!(await moneyMarketAccountValueSnapshotReady())) throw new Error('published money-market account value generation failed parity check')
   setMoneyMarketAccountValuesReady()
@@ -9500,32 +9647,57 @@ async function getWeeklyPriceSamples(): Promise<Map<number, number[]>> {
 // value is a directory rather than a feed: it carries no head in its key and is
 // already up to 30 s old by construction, so serving the previous build for a few
 // seconds longer costs a reader nothing that the TTL was not already costing them.
+//
+// Only the price-independent aggregations are SWR-cached; the prices, 24h
+// changes and USD held are applied per price generation (memoized on it), so
+// the directory's prices follow the price head rather than the build's age.
 export async function getAssets(): Promise<AssetListItem[]> {
+  const [state, base] = await Promise.all([ensurePriceState(), assetsDirectoryBase()])
+  const memo = assetsDirectoryMemo
+  if (memo && memo.base === base && memo.gen === state.gen) return memo.rows
+  const rows = pricedAssetsDirectory(base, state.map)
+  assetsDirectoryMemo = { base, gen: state.gen, rows }
+  return rows
+}
+
+interface AssetsDirectoryBase {
+  totals: Awaited<ReturnType<typeof getAssetTotals>>
+  holderCounts: Awaited<ReturnType<typeof getAssetHolderCounts>>
+  samples: Awaited<ReturnType<typeof getWeeklyPriceSamples>>
+  xcDestinations: AssetListItem[]
+}
+let assetsDirectoryMemo: { base: AssetsDirectoryBase; gen: number; rows: AssetListItem[] } | null = null
+
+function assetsDirectoryBase(): Promise<AssetsDirectoryBase> {
   return cachedSwr('explorer:assets-list', 30_000, 5 * 60_000, async () => {
-    const [prices, totals, holderCounts, samples] = await Promise.all([ensurePrices(), getAssetTotals(), getAssetHolderCounts(), getWeeklyPriceSamples()])
-    // Pool shares stay out of the directory whatever they display as (a Hydrated
-    // pool's share goes by its wrapper's name, which the wrapper already lists).
-    const listed = allExplorerAssets()
-      .filter(a => !isStableswapShareToken(a.assetId) && !a.symbol.includes('-Pool') && !a.symbol.startsWith('Asset') && a.symbol.trim() !== '')
-      .map(a => {
-        // Derivatives (bonds, aTokens) carry no price feed of their own — fall back
-        // to the asset they're priced through (a bond redeems 1:1 for its underlying).
-        const p = currentPriceOf(prices, a.assetId)
-        const type = explorerAssetType(a)
-        const raw = totals.get(a.assetId) ?? 0n
-        const amountUsd = p ? (Number(raw) / 10 ** a.decimals) * p.price : null
-        const holderCount = holderCounts.get(a.assetId)
-        const spark = samples.get(a.assetId)
-        const change7d = spark && spark.length >= 2 && spark[0] > 0 ? (spark[spark.length - 1] - spark[0]) / spark[0] : null
-        return { ...a, price: p?.price ?? null, change24h: p?.change24h ?? null, change7d, type, amountUsd, holderCount, sparkline: spark }
-      })
-      // Default ordering: total value held on Hydration, descending.
-      .sort((x, y) => (y.amountUsd ?? 0) - (x.amountUsd ?? 0) || (y.price ?? 0) - (x.price ?? 0))
-    // Cross-chain destinations sit AFTER every registry asset, whatever their
-    // price: the list is ordered by value held on Hydration, and none of it is.
-    // They are listed at all because that is where a reader looks for them.
-    return [...listed, ...xcDestinationListItems(await xcDestinationSpotPrices())]
+    const [totals, holderCounts, samples, xcPrices] = await Promise.all([getAssetTotals(), getAssetHolderCounts(), getWeeklyPriceSamples(), xcDestinationSpotPrices()])
+    return { totals, holderCounts, samples, xcDestinations: xcDestinationListItems(xcPrices) }
   })
+}
+
+function pricedAssetsDirectory({ totals, holderCounts, samples, xcDestinations }: AssetsDirectoryBase, prices: Map<number, PriceInfo>): AssetListItem[] {
+  // Pool shares stay out of the directory whatever they display as (a Hydrated
+  // pool's share goes by its wrapper's name, which the wrapper already lists).
+  const listed = allExplorerAssets()
+    .filter(a => !isStableswapShareToken(a.assetId) && !a.symbol.includes('-Pool') && !a.symbol.startsWith('Asset') && a.symbol.trim() !== '')
+    .map(a => {
+      // Derivatives (bonds, aTokens) carry no price feed of their own — fall back
+      // to the asset they're priced through (a bond redeems 1:1 for its underlying).
+      const p = currentPriceOf(prices, a.assetId)
+      const type = explorerAssetType(a)
+      const raw = totals.get(a.assetId) ?? 0n
+      const amountUsd = p ? (Number(raw) / 10 ** a.decimals) * p.price : null
+      const holderCount = holderCounts.get(a.assetId)
+      const spark = samples.get(a.assetId)
+      const change7d = spark && spark.length >= 2 && spark[0] > 0 ? (spark[spark.length - 1] - spark[0]) / spark[0] : null
+      return { ...a, price: p?.price ?? null, change24h: p?.change24h ?? null, change7d, type, amountUsd, holderCount, sparkline: spark }
+    })
+    // Default ordering: total value held on Hydration, descending.
+    .sort((x, y) => (y.amountUsd ?? 0) - (x.amountUsd ?? 0) || (y.price ?? 0) - (x.price ?? 0))
+  // Cross-chain destinations sit AFTER every registry asset, whatever their
+  // price: the list is ordered by value held on Hydration, and none of it is.
+  // They are listed at all because that is where a reader looks for them.
+  return [...listed, ...xcDestinations]
 }
 
 /**
@@ -27651,20 +27823,28 @@ function totalAssetLiquidations(days: AssetLiquidationDay[]): AssetLiquidationTo
   }
 }
 export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
-  return cached(`explorer:asset:${assetId}`, 30000, async () => {
-    const prices = await ensurePrices()
-    const a = asset(assetId)
-    const p = prices.get(assetId)
-    const type = explorerAssetType(a)
+  // The price-independent body is a 30 s build; the price, its 24h change and
+  // the USD held are overlaid per call at the current price generation, so the
+  // headline follows the price head instead of the build's age.
+  //
+  // The full holder list is paginated via /explorer/holders; here we only need
+  // the holder count (`holderCount`, the account count — see HoldersPage) and
+  // total held USD (a one-row page carries both via the window aggregates), so
+  // the asset-detail payload stays small.
+  const [base, prices, hsummary] = await Promise.all([assetDetailBase(assetId), ensurePrices(), getHolders(assetId, 1, 0)])
+  const p = prices.get(assetId)
+  // `amountUsd` is the total USD held of this asset — the same value the asset
+  // list surfaces — so reuse the holder summary's total here.
+  const assetItem: AssetListItem = { ...base.asset, price: p?.price ?? null, change24h: p?.change24h ?? null, amountUsd: hsummary.totalUsd }
+  return { ...base, asset: assetItem, holderCount: hsummary.holderCount, totalUsd: hsummary.totalUsd }
+}
 
-    // The full holder list is paginated via /explorer/holders; here we only need
-    // the holder count (`holderCount`, the account count — see HoldersPage) and
-    // total held USD (a one-row page carries both via the window aggregates), so
-    // the asset-detail payload stays small.
-    const hsummary = await getHolders(assetId, 1, 0)
-    // `amountUsd` is the total USD held of this asset — the same value the asset
-    // list surfaces — so reuse the holder summary's total here.
-    const assetItem: AssetListItem = { ...a, price: p?.price ?? null, change24h: p?.change24h ?? null, type, amountUsd: hsummary.totalUsd }
+async function assetDetailBase(assetId: number): Promise<AssetDetail> {
+  return cached(`explorer:asset:${assetId}`, 30000, async () => {
+    const a = asset(assetId)
+    const type = explorerAssetType(a)
+    // Priced per call by getAssetDetail; the keys stay here so the payload's shape is the build's.
+    const assetItem: AssetListItem = { ...a, price: null, change24h: null, type, amountUsd: null }
 
     // Full available daily closes from the proven OHLC view. The UI receives the
     // dates too so performance chips can be shown only when the relevant window
@@ -27698,7 +27878,7 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
       ? { decimals: scope.decimals, days, total: totalAssetLiquidations(days) }
       : null
 
-    return { asset: assetItem, holderCount: hsummary.holderCount, dcaCount, limitOrderCount, totalUsd: hsummary.totalUsd, priceSeries, priceDates, liquidations }
+    return { asset: assetItem, holderCount: 0, dcaCount, limitOrderCount, totalUsd: 0, priceSeries, priceDates, liquidations }
   })
 }
 
@@ -30335,7 +30515,8 @@ async function buildTagDetailForMembers(
 ): Promise<TagDetail> {
   const summary = opts.summary === true
   const refresh = opts.refresh === true
-  const detail = await cached(opts.cacheKey, opts.ttlMs ?? 30_000, async () => {
+  // One price generation for the whole build (see withAccountValuePrices).
+  const detail = await cached(opts.cacheKey, opts.ttlMs ?? 30_000, () => withAccountValuePrices(async () => {
     if (opts.snapshot && !summary && !refresh) {
       const snapshot = await loadTagDetailSnapshot(opts.snapshot.tagId, opts.snapshot.membershipKey).catch(() => null)
       if (snapshot) return withTagPresentation(snapshot, presentation)
@@ -30431,7 +30612,7 @@ async function buildTagDetailForMembers(
     if (opts.snapshot && !summary) await persistTagDetailSnapshot(opts.snapshot.tagId, opts.snapshot.membershipKey, detail)
       .catch(error => console.error('[tag-detail] snapshot persist failed', error))
     return detail
-  })
+  }))
   // The resting orders are overlaid on the cached blob rather than living inside
   // it. Everything else here — balances, the money market, the portfolio walk —
   // is a 4.1 s rebuild reading GiB, which is what the 30 s TTL exists to protect;

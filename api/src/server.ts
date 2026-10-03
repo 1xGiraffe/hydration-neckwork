@@ -164,12 +164,20 @@ const CACHE_CONTROL: [RegExp, number][] = [
   // right under them too) rather than falling through to the generic 8s
   // address bucket below.
   [/^\/explorer\/address\/[^/]+\/(lists|tagged-in)/, 30],
+  // An account's detail is valued at the current price generation (see the
+  // price-bearing rules below).
+  [/^\/explorer\/address\/[^/]+$/, 3],
   [/^\/explorer\/(address|tag)\//, 8],
   [/^\/explorer\/search/, 10],
-  // `assets` (no trailing slash) is the asset directory — 30s in-process TTL, so
-  // let clients reuse it just as long. Without this it fell through to the 2s
-  // catch-all and browsers re-fetched the biggest list payload constantly.
-  [/^\/explorer\/assets/, 30],
+  // Price-bearing surfaces follow the price generation server-side (the asset
+  // directory and an asset's detail and holders, an account's detail, the oracle
+  // overview's market prices), and the explorer stamps the generation on their
+  // URLs (`pg=`), so a pushed price never waits out a cache. 3s only bounds the
+  // un-stamped readers (polling fallback, the hover card) and still collapses a
+  // crowd to one upstream request per window at the micro-cache.
+  [/^\/explorer\/assets$/, 3],
+  // The token-picker projection (`fields=filter`) shares the path and so the 3s;
+  // it is a tiny in-memory read.
   // The call/event name catalogue: an hour, matching its in-process TTL. The
   // list changes only when a runtime upgrade adds or removes a name, and every
   // filter box and alert form on the site reads the same copy.
@@ -179,12 +187,17 @@ const CACHE_CONTROL: [RegExp, number][] = [
   [/^\/explorer\/(volume$|asset\/\d+\/volume$|omnipool\/volume$|pool\/[^/]+(\/[^/]+)?\/volume$)/, 120],
   // Oracle surfaces: served from the oracle-state refresher (every 300s) and the
   // in-process ledgers (tail read at most every 15s), cached 30s server-side.
-  [/^\/explorer\/(oracles$|oracle\/)/, 30],
+  [/^\/explorer\/oracles$/, 3],
+  // The pair chart (an intent's market) is keyed on the price head server-side and
+  // refetched on the pushed price generation (`pg=`); 3s bounds the un-stamped reader.
+  [/^\/explorer\/pair-chart$/, 3],
+  [/^\/explorer\/oracle\//, 30],
   // Pool surfaces: current state refreshes every 30-60s server-side, the heavy
   // history models every 300s — match the shortest internal freshness window.
   [/^\/explorer\/omnipool/, 30],
   [/^\/explorer\/pool\//, 30],
   [/^\/explorer\/asset\/\d+\/liquidity/, 60],
+  [/^\/explorer\/(holders\/\d+|asset\/\d+)$/, 3],
   [/^\/explorer\/(holders|asset)\//, 15],
   // Directory ranking is SWR-cached with a 60s freshness window server-side;
   // matching client reuse cuts request volume without adding staleness.

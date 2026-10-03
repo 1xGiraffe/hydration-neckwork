@@ -390,7 +390,8 @@ export async function explorerRoutes(fastify: FastifyInstance) {
   // whether the BLOCK is in the index yet (describeLookupMiss), because a
   // client cannot otherwise tell the two misses apart: raw-live follows the
   // FINALIZED head, so a page linked from a wallet the moment it acted is
-  // asking about a block that is 35-65s from being readable, while a mistyped
+  // asking about a block that is ~46s of finality (plus <1s of indexing) from
+  // being readable, while a mistyped
   // or stale id is asking about a block that is already there. The first is
   // worth waiting for and the second must fail fast — see
   // explorer-ui/src/queryRetry.ts for the other half of this contract.

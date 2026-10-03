@@ -186,9 +186,9 @@ describe('the directory wiring keeps the generation out of its keys', () => {
     // change. The five that remain are 8-15s detail reads whose whole payload IS
     // valued at the pinned map.
     expect(generationKeys).toEqual([
-      'explorer:address:${accountValueGenerationEpoch}:${norm.accountId}${summary ? \':summary\' : \'\'}',
+      'explorer:address:${accountValueGenerationEpoch}:p${pricing.gen}:${norm.accountId}${summary ? \':summary\' : \'\'}',
       'explorer:mm-positions:${accountValueGenerationEpoch}:${h160.toLowerCase()}',
-      'explorer:mm-reserves:${accountValueGenerationEpoch}:${h160.toLowerCase()}',
+      'explorer:mm-reserves:${accountValueGenerationEpoch}:p${pricing.gen}:${h160.toLowerCase()}',
       'explorer:lp-recon:${accountValueGenerationEpoch}:${accs.sort().join(\',\')}',
       'explorer:accounts-total:${accountValueGenerationEpoch}:${modelVersion}',
       'explorer:tag:${accountValueGenerationEpoch}:${tagId}${summary ? \':summary\' : refresh ? \':refresh\' : \'\'}',
