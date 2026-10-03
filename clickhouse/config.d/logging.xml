@@ -53,8 +53,10 @@
         <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
     </asynchronous_metric_log>
 
+    <!-- 7 days: at 2026-10 traffic 14 days of query_log was 132 GiB, a third of
+         the deployment's disk; a week still covers the profiling windows. -->
     <query_log>
-        <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
     </query_log>
     <query_views_log>
         <ttl>event_date + INTERVAL 14 DAY DELETE</ttl>
