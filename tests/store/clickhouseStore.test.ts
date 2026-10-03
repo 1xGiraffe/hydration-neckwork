@@ -157,6 +157,32 @@ describe('ClickHouseStore retry idempotency', () => {
     ])
   })
 
+  // `blocks` is the price head every reader trusts (the explorer's price map, the
+  // SSE `main` head, the derivations' priced head), so it must become visible
+  // only after the rows of the block it names.
+  it('writes blocks after every other table of the flush', async () => {
+    const fake = new FakeClickHouseClient()
+    const store = new ClickHouseStore(fake as any, 10_000)
+
+    store.addBlocks([{ block_height: 30, block_timestamp: '2026-06-21 00:01:00', spec_version: 1 }])
+    store.addPrices([{ asset_id: 1, block_height: 30, block_timestamp: '2026-06-21 00:01:00', usd_price: '1.000000000000' }])
+    store.addTradeVolumes([{ asset_id: 1, block_height: 30, account: 'account-a', trade_count: 1 }])
+    await store.flushAll()
+
+    const tables = fake.inserts.map(insert => insert.table)
+    expect(tables.at(-1)).toBe('price_data.blocks')
+    expect(tables.indexOf('price_data.prices')).toBeLessThan(tables.indexOf('price_data.blocks'))
+    expect(tables.indexOf('price_data.trade_volume_by_account')).toBeLessThan(tables.indexOf('price_data.blocks'))
+
+    const deferred = new FakeClickHouseClient()
+    const historical = new ClickHouseStore(deferred as any, 10_000, 'main-backfill-30-31', { deferPublication: true })
+    historical.addBlocks([{ block_height: 30, block_timestamp: '2026-06-21 00:01:00', spec_version: 1 }])
+    historical.addPrices([{ asset_id: 1, block_height: 30, block_timestamp: '2026-06-21 00:01:00', usd_price: '1.000000000000' }])
+    await historical.flushAll()
+    await historical.publishDeferred()
+    expect(deferred.inserts.map(insert => insert.table).at(-1)).toBe('price_data.blocks')
+  })
+
   // `assets` has no pre-insert key probe on purpose: it is a ReplacingMergeTree on
   // asset_id, so every refreshed row must reach ClickHouse for the newest one to win.
   it('re-sends changed asset rows so the replacement key keeps the latest', async () => {
