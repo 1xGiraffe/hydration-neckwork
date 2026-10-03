@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 import { shouldRetryQuery } from './queryRetry'
-import { LIVE_PUSH_KEYS, POOL_PUSH_KEYS, subscribeHead } from './live'
+import { LIVE_PUSH_KEYS, POOL_PUSH_KEYS, PRICE_PUSH_KEYS, subscribeHead } from './live'
 import './styles/global.css'
 import { initTabsInk } from './tabsInk'
 
@@ -23,9 +23,14 @@ const queryClient = new QueryClient({
 // catches up on the deferred head when it becomes visible again.
 // A pool-only push means no new block — only the feeds that merge
 // transaction-pool rows have anything to fetch, and those pushes arrive far
-// more often than blocks do.
-subscribeHead(({ poolOnly }) => {
-  for (const key of poolOnly ? POOL_PUSH_KEYS : LIVE_PUSH_KEYS) {
+// more often than blocks do. A moved price generation refetches the
+// price-bearing reads (PRICE_PUSH_KEYS) — alone when nothing else moved.
+subscribeHead(({ poolOnly, prices, pricesOnly }) => {
+  const keys: readonly string[] = [
+    ...(pricesOnly ? [] : poolOnly ? POOL_PUSH_KEYS : LIVE_PUSH_KEYS),
+    ...(prices ? PRICE_PUSH_KEYS : []),
+  ]
+  for (const key of keys) {
     void queryClient.invalidateQueries({ queryKey: [key], refetchType: 'active' })
   }
 })

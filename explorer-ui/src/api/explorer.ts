@@ -22,7 +22,7 @@ import { getSession, setSession } from '../session'
 // polling paused while streaming, that staleness would last until the NEXT
 // block. Per-head URIs keep the shared cache (same head → same entry) while
 // making a new head a guaranteed cache MISS. 0 (not streaming) omits the tag.
-import { liveHeadTag } from '../live'
+import { liveHeadTag, priceHeadTag } from '../live'
 
 // A failed request carries the API's own explanation (Fastify puts it in
 // `message`, hand-written rejections in `error`). Keeping it on the error lets a
@@ -161,7 +161,7 @@ export const api = {
   intentOrder: (intentId: string, offset = 0, limit = 25, signal?: AbortSignal) => getJson<IntentOrderDetail>(withQuery(`/explorer/intent/${intentId}`, { offset, limit }), signal),
   // One pair's candles (quote per base), ending with the bucket in progress.
   pairChart: (base: number, quote: number, interval: string, count: number, signal?: AbortSignal) =>
-    getJson<PairChart>(withQuery('/explorer/pair-chart', { base, quote, interval, count }), signal),
+    getJson<PairChart>(withQuery('/explorer/pair-chart', { base, quote, interval, count, pg: priceHeadTag() || undefined }), signal),
   trade: (height: number, index: number, signal?: AbortSignal) => getJson<TradeDetail>(`/explorer/trade/${height}/${index}`, signal),
   tradeEvent: (height: number, index: number, signal?: AbortSignal) => getJson<TradeDetail>(`/explorer/trade-event/${height}/${index}`, signal),
   events: (limit = 25, from?: string, to?: string, offset = 0, filters?: EventFilters, signal?: AbortSignal) => getJson<EventRow[]>(withQuery('/explorer/events', { limit, offset, from, to, ...filters, h: liveHeadTag() || undefined }), signal),
@@ -175,7 +175,8 @@ export const api = {
   // The isolated money markets the deployment configures, in display order — the
   // options of the money-market feeds' market filter.
   mmMarkets: (signal?: AbortSignal) => getJson<MmMarketOption[]>('/explorer/mm-markets', signal),
-  asset: (assetId: number, signal?: AbortSignal) => getJson<AssetDetail>(`/explorer/asset/${assetId}`, signal),
+  // `pg` — the pushed price generation (priceHeadTag), on every price-bearing read.
+  asset: (assetId: number, signal?: AbortSignal) => getJson<AssetDetail>(withQuery(`/explorer/asset/${assetId}`, { pg: priceHeadTag() || undefined }), signal),
   assetDcas: (assetId: number, signal?: AbortSignal) => getJson<AssetDcas>(`/explorer/asset/${assetId}/dcas`, signal),
   assetLimitOrders: (assetId: number, signal?: AbortSignal) => getJson<AssetLimitOrderBook>(`/explorer/asset/${assetId}/limit-orders`, signal),
   xcDestination: (slug: string, signal?: AbortSignal) => getJson<XcDestinationDetail>(`/explorer/xc-destination/${encodeURIComponent(slug)}`, signal),
@@ -217,8 +218,8 @@ export const api = {
     getJson<PoolLpsResponse>(withQuery(`/explorer/pool/${poolId}/lps`, { offset, limit }), signal),
   omnipoolLps: (assetId: number, offset = 0, limit = 10, signal?: AbortSignal) =>
     getJson<OmnipoolAssetLpsResponse>(withQuery(`/explorer/omnipool/${assetId}/lps`, { offset, limit }), signal),
-  holders: (assetId: number, offset = 0, limit = 100, signal?: AbortSignal) => getJson<HoldersResponse>(withQuery(`/explorer/holders/${assetId}`, { offset, limit }), signal),
-  address: (address: string, signal?: AbortSignal) => getJson<AddressDetail>(`/explorer/address/${encodeURIComponent(address)}`, signal),
+  holders: (assetId: number, offset = 0, limit = 100, signal?: AbortSignal) => getJson<HoldersResponse>(withQuery(`/explorer/holders/${assetId}`, { offset, limit, pg: priceHeadTag() || undefined }), signal),
+  address: (address: string, signal?: AbortSignal) => getJson<AddressDetail>(withQuery(`/explorer/address/${encodeURIComponent(address)}`, { pg: priceHeadTag() || undefined }), signal),
   // Lightweight variant for the hover card: the API skips LP/DCA/proxy/multisig so
   // the preview loads fast (the card only shows name, value, holdings, volumes).
   addressSummary: (address: string, signal?: AbortSignal) => getJson<AddressDetail>(withQuery(`/explorer/address/${encodeURIComponent(address)}`, { summary: '1' }), signal),
@@ -289,7 +290,7 @@ export const api = {
   tagListCount: (tagId: string, query: ListCountQuery, signal?: AbortSignal) =>
     getJson<ListCount>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/list-count`, { ...query }), signal),
   search: (query: string, signal?: AbortSignal) => getJson<SearchResult[]>(withQuery('/explorer/search', { q: query }), signal),
-  assets: (signal?: AbortSignal) => getJson<AssetListItem[]>('/explorer/assets', signal),
+  assets: (signal?: AbortSignal) => getJson<AssetListItem[]>(withQuery('/explorer/assets', { pg: priceHeadTag() || undefined }), signal),
   // Token-filter variant: the same ordered directory without prices, totals or
   // sparklines — 74 kB down to 5.8 kB, since the combo reads ids and symbols only.
   assetFilterOptions: (signal?: AbortSignal) => getJson<AssetFilterItem[]>(withQuery('/explorer/assets', { fields: 'filter' }), signal),
