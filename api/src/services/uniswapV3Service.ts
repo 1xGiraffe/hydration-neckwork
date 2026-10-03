@@ -21,7 +21,7 @@
 
 import type { ClickHouseClient } from '../db/client.ts'
 import { cachedSwr } from './cache.ts'
-import { UNDERLYING_TO_ATOKEN_ID, displayDescriptor } from './explorerAssets.ts'
+import { UNDERLYING_TO_ATOKEN_ID, displayDescriptor, namedShareWrapperOf } from './explorerAssets.ts'
 import { precompileAssetId, v3VaultTotals } from './uniswapV3Positions.ts'
 import { v3ActiveLiquidityAtTick } from './uniswapV3Ranges.ts'
 
@@ -89,7 +89,12 @@ export function resolveV3TokenAsset(
   const reserve = aTokenReserve.get(a)
   if (reserve) {
     const reserveId = precompileAssetId(reserve) ?? contractAsset(reserve)
-    if (reserveId != null) return UNDERLYING_TO_ATOKEN_ID[reserveId] ?? reserveId
+    // A reserve over a named pool share (2-Pool-GSOL 90001 under GSOL 9001, 2-Pool-GETH
+    // 4200 under GETH 420) has no UNDERLYING_TO_ATOKEN_ID entry — the share/wrapper
+    // rule removes it, because the share IS the wrapper — so the wrapper is found
+    // through that rule. Without it the pool held "90001", which no asset page asks
+    // for, while pool_swap_legs (keyed from assets.evm_address) books 9001.
+    if (reserveId != null) return UNDERLYING_TO_ATOKEN_ID[reserveId] ?? namedShareWrapperOf(reserveId) ?? reserveId
   }
   return contractAsset(a)
 }
