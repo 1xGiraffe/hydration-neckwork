@@ -379,12 +379,11 @@ export function priceFor(prices: PriceMap, assetId: number): bigint {
 
 // Registry assets whose wallet balance lives in EVM contract storage rather than
 // the Tokens pallet, so `account_asset_latest_balances` reads them as zero and
-// `erc20_wallet_balances` is the authoritative pot. The shared list lives in
-// services/erc20WalletService.ts, which is outside the public API's import
-// allow-list, so it is restated here — and pinned against it by
-// api/tests/erc20WalletAssets.test.ts, because a list that diverges makes this
-// surface report a holder of the missing asset as holding nothing.
-const ERC20_WALLET_ASSET_IDS = [222, 1001354, 550] // HOLLAR, aDOT-HOLLAR, uBIL
+// `erc20_wallet_balances` is the authoritative pot. The set is the derived
+// `erc20_wallet_contracts` table (see services/erc20WalletService.ts, outside this
+// tree's import allow-list), read in SQL so it never needs restating here: a newly
+// registered contract-backed asset appears on this surface with no code change.
+const ERC20_WALLET_ASSET_IDS_SQL = 'SELECT toString(asset_id) FROM price_data.erc20_wallet_contracts FINAL WHERE active = 1'
 
 /**
  * How stale a persisted current-state snapshot may be before it is ignored.
@@ -966,10 +965,10 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
       query: `
           SELECT account_id, asset_id, toString(argMax(toUInt256OrZero(total), updated_at)) AS total
           FROM price_data.erc20_wallet_balances
-          WHERE asset_id IN ({assets:Array(String)}) AND account_id IN ({accounts:Array(String)})
+          WHERE asset_id IN (${ERC20_WALLET_ASSET_IDS_SQL}) AND account_id IN ({accounts:Array(String)})
           GROUP BY account_id, asset_id
         `,
-      query_params: { assets: ERC20_WALLET_ASSET_IDS.map(String), accounts: forms },
+      query_params: { accounts: forms },
       format: 'JSONEachRow',
     }),
     currentPrices(client),
