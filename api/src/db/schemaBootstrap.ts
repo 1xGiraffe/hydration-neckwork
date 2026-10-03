@@ -89,6 +89,35 @@ export function selectSchemaFiles(fileNames: string[]): string[] {
     .map(entry => entry.fileName)
 }
 
+/**
+ * Materialized views whose definition changed in a way `CREATE … IF NOT EXISTS`
+ * cannot carry to an existing deployment. Each names a marker its current
+ * definition contains; a live view without it is dropped and recreated from the
+ * schema file (the one idempotent upgrade step — a view already current is left
+ * alone, so re-running the bootstrap changes nothing). `backfill` says how the rows
+ * the swap window missed come back; a view listed here must have one.
+ *
+ *   erc20_transfer_deltas_mv — from a hand-kept contract list to the derived
+ *   erc20_wallet_contracts set. The swap window's Transfer legs are refilled by the
+ *   ERC-20 wallet refresher's catch-up (erc20WalletService.syncTransferDeltas: it
+ *   compares every contract's indexed Transfer logs with the table on its first
+ *   cycle after a restart and inserts exactly the missing (block, event) keys from
+ *   this view's own SELECT), so the upgrade needs no separate backfill script.
+ */
+export const MV_UPGRADES: ReadonlyArray<{ name: string; marker: string; backfill: string }> = [
+  { name: 'price_data.erc20_transfer_deltas_mv', marker: 'erc20_wallet_contracts', backfill: 'erc20WalletService.syncTransferDeltas catch-up (restart api)' },
+]
+
+/** The views to recreate: listed upgrades whose live definition (system.tables create_table_query) lacks the marker. */
+export function mvUpgradePlan(live: ReadonlyMap<string, string>): string[] {
+  return MV_UPGRADES.filter(u => live.has(u.name) && !live.get(u.name)!.includes(u.marker)).map(u => u.name)
+}
+
+/** The CREATE statement of a view in the schema's statements, by its qualified name. */
+export function createStatementFor(statements: readonly string[], name: string): string | undefined {
+  return statements.find(st => new RegExp(`^(--[^\\n]*\\n\\s*)*CREATE MATERIALIZED VIEW IF NOT EXISTS ${name.replace('.', '\\.')} `).test(st))
+}
+
 interface ApplySchemaOptions {
   schemaDir?: string
   onFile?: (fileName: string) => void
@@ -101,13 +130,31 @@ export async function applySchema(
   const { schemaDir = DEFAULT_SCHEMA_DIRECTORY, onFile } = options
   const files = selectSchemaFiles(await readdir(schemaDir))
   let statements = 0
+  const all: string[] = []
   for (const fileName of files) {
     onFile?.(fileName)
     const sql = await readFile(join(schemaDir, fileName), 'utf8')
     for (const query of splitSqlStatements(sql)) {
       await client.command({ query })
+      all.push(query)
       statements++
     }
+  }
+  // Upgrades of existing deployments (MV_UPGRADES): after every file, so a view
+  // recreated here reads tables the files just created.
+  const res = await client.query({
+    query: `SELECT concat(database, '.', name) AS name, create_table_query AS q FROM system.tables WHERE concat(database, '.', name) IN {names:Array(String)}`,
+    query_params: { names: MV_UPGRADES.map(u => u.name) },
+    format: 'JSONEachRow',
+  })
+  const live = new Map((await res.json<{ name: string; q: string }>()).map(r => [r.name, r.q]))
+  for (const name of mvUpgradePlan(live)) {
+    const create = createStatementFor(all, name)
+    if (!create) throw new Error(`[schema-bootstrap] no CREATE statement for ${name} in the schema files`)
+    console.log(`[schema-bootstrap] upgrading ${name}: live definition predates the schema (backfill: ${MV_UPGRADES.find(u => u.name === name)!.backfill})`)
+    await client.command({ query: `DROP VIEW IF EXISTS ${name}` })
+    await client.command({ query: create })
+    statements += 2
   }
   return { files, statements }
 }

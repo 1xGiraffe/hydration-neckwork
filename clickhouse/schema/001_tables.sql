@@ -112,6 +112,13 @@ CREATE TABLE IF NOT EXISTS price_data.dca_events (`id` UInt64, `event_name` LowC
 CREATE TABLE IF NOT EXISTS price_data.dca_schedules (`id` UInt64, `block_height` UInt32, `block_timestamp` DateTime, `extrinsic_index` Nullable(UInt32), `who` String, `asset_in` UInt32, `asset_out` UInt32, `direction` LowCardinality(String), `amount_per` String, `total_amount` String, `period` UInt32, `max_retries` UInt32) ENGINE = ReplacingMergeTree(block_height) ORDER BY id SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.erc20_transfer_deltas (`contract_address` String, `holder` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `leg_index` UInt8, `balance_delta` Int256, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (holder, contract_address, block_height, event_index, leg_index) SETTINGS index_granularity = 4096;
 CREATE TABLE IF NOT EXISTS price_data.erc20_wallet_balances (`account_id` String, `asset_id` String, `total` String, `updated_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (asset_id, account_id) SETTINGS index_granularity = 8192;
+-- The contracts erc20_transfer_deltas_mv captures and erc20_wallet_balances is kept
+-- for: every registry asset with a local contract (assets.evm_address) that is not a
+-- money-market aToken (aTokens are reconstructed from atoken_scaled_deltas). Derived,
+-- never listed by hand: the api's ERC-20 wallet refresher (erc20WalletService.ts)
+-- re-derives it each cycle and writes only changes; an asset leaving the set gets
+-- active = 0, never a delete. Tiny (one row per contract), so readers use FINAL.
+CREATE TABLE IF NOT EXISTS price_data.erc20_wallet_contracts (`contract` String, `asset_id` UInt32, `active` UInt8, `updated_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(updated_at) ORDER BY contract SETTINGS index_granularity = 64;
 -- The three wide integer columns had no codec and sat at ratio 1.7-1.8 for ~1.5 GiB
 -- combined: a UInt32 block height or event index has no byte-level redundancy for
 -- LZ4 to find, but its high bits are always zero, which is exactly what T64

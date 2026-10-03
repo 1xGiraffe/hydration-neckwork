@@ -40,7 +40,7 @@ import {
   type ExtrinsicCallRow, type ProxyInnerInfo, type MultisigLifecycleEvent, type MultisigCallInfo,
   type MultisigOperationState,
 } from './onBehalfActivity.ts'
-import { ERC20_WALLET_ASSETS, ERC20_WALLET_ASSET_IDS } from './erc20WalletService.ts'
+import { ensureErc20WalletAssets } from './erc20WalletService.ts'
 import { currentMmOraclePrices, withMmOraclePrices } from './mmOraclePrices.ts'
 import { deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
 import { XCM_BARRIER_EVENTS, XCM_IN_DEPOSIT_EVENTS, XCM_IN_WALK_EVENTS, XCM_WALK_CROSSABLE_EVENTS } from './xcmWalkEvents.ts'
@@ -3617,6 +3617,7 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
     const labelIdSql = viewerFold
       ? `if(${foldKey} != '', '', t.label_id)`
       : `t.label_id`
+    const isErc20WalletAsset = (await ensureErc20WalletAssets()).some(a => a.assetId === assetId)
     const res = await client.query({
       query: `
         WITH
@@ -3645,7 +3646,7 @@ export async function getHolders(assetId: number, limit: number, offset = 0, vie
             SELECT
               ${boundAccountSql('l')} AS account_id,
               sum(l.bal) AS bal, max(l.last_block) AS last_block FROM (
-              ${ERC20_WALLET_ASSET_IDS.includes(assetId) ? `
+              ${isErc20WalletAsset ? `
               -- ERC-20-backed asset: the plain latest Tokens-side balance plus
               -- the separate authoritative ERC-20-side wallet pot.
               SELECT account_id, latest_bal AS bal, latest_block AS last_block FROM latest_raw
@@ -5329,7 +5330,7 @@ async function erc20WalletHoldingsForAccounts(h160s: string[]): Promise<{ asset:
                 OR substring(lower(account_id), 3, 40) IN {bodies:Array(String)})
             GROUP BY asset_id`,
     query_params: {
-      assets: ERC20_WALLET_ASSET_IDS.map(String),
+      assets: (await ensureErc20WalletAssets()).map(a => String(a.assetId)),
       accounts: exactAccounts,
       bodies,
     },
@@ -5365,7 +5366,7 @@ async function erc20WalletHoldingsByAccount(h160s: string[]): Promise<Map<string
               AND (lower(account_id) IN {accounts:Array(String)}
                 OR substring(lower(account_id), 3, 40) IN {bodies:Array(String)})
             GROUP BY account_id, asset_id`,
-    query_params: { assets: ERC20_WALLET_ASSET_IDS.map(String), accounts: exactAccounts, bodies },
+    query_params: { assets: (await ensureErc20WalletAssets()).map(a => String(a.assetId)), accounts: exactAccounts, bodies },
     format: 'JSONEachRow',
   })
   for (const r of await res.json<{ account_id: string; asset_id: string; total: string }>()) {
@@ -22654,7 +22655,7 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // Reconstruct per-account cumulative bucket balances from the indexed Transfer
   // logs (verified to reproduce balanceOf exactly) and feed them through the same
   // fold/price/forward-fill pipeline as observed balances.
-  for (const ea of ERC20_WALLET_ASSETS) {
+  for (const ea of await ensureErc20WalletAssets()) {
     const h160For = new Map<string, string>()
     for (const a of accounts) {
       const h160 = historyH160(a)
@@ -29605,7 +29606,8 @@ async function enrichAccountRows(
   // unconditionally so their weekly closes are available for the HOLLAR history
   // contribution below (their balances live off-ledger, so they're never in the
   // observation/latest-balance rows).
-  const assetIds = [...new Set([...obsRows, ...baseRows].map(r => r.asset_id).concat(moduleBalanceRows.map(r => r.asset_id)).concat(ERC20_WALLET_ASSET_IDS.map(String)))]
+  const erc20WalletAssets = await ensureErc20WalletAssets()
+  const assetIds = [...new Set([...obsRows, ...baseRows].map(r => r.asset_id).concat(moduleBalanceRows.map(r => r.asset_id)).concat(erc20WalletAssets.map(a => String(a.assetId))))]
   const priceIdFor = new Map(assetIds.map(id => [id, String(priceAssetId(Number(id)))]))
   const priceIds = sqlUIntList([...priceIdFor.values()])
   const pricesByPriceId = new Map<string, Map<number, number>>()
@@ -29654,7 +29656,7 @@ async function enrichAccountRows(
       ;(accountsByH160.get(h) ?? accountsByH160.set(h, []).get(h)!).push(acc)
     }
     const h160s = [...accountsByH160.keys()]
-    for (const ea of h160s.length ? ERC20_WALLET_ASSETS : []) {
+    for (const ea of h160s.length ? erc20WalletAssets : []) {
       const dec = asset(ea.assetId).decimals
       const pxMap = pricesByAsset[String(ea.assetId)] ?? new Map<number, number>()
       let earliest = 0

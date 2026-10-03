@@ -56,3 +56,20 @@ describe('resolveSchemaDirArg', () => {
     expect(resolveSchemaDirArg()).toBe('/padded/arg')
   })
 })
+
+describe('materialized-view upgrades', () => {
+  it('recreates a listed view only while its live definition lacks the marker', async () => {
+    const { mvUpgradePlan, createStatementFor, MV_UPGRADES } = await import('./schemaBootstrap.ts')
+    const name = 'price_data.erc20_transfer_deltas_mv'
+    expect(MV_UPGRADES.every(u => u.backfill.length > 0)).toBe(true)
+    expect(mvUpgradePlan(new Map([[name, "... WHERE contract_address IN ('0x531a…') ..."]]))).toEqual([name])
+    expect(mvUpgradePlan(new Map([[name, '... IN (SELECT contract FROM price_data.erc20_wallet_contracts FINAL WHERE active = 1) ...']]))).toEqual([])
+    // A view not created yet is the files' job, not an upgrade.
+    expect(mvUpgradePlan(new Map())).toEqual([])
+    const { readFileSync } = await import('node:fs')
+    const sql = readFileSync(new URL('../../../clickhouse/schema/003_materialized_views.sql', import.meta.url), 'utf8')
+    const create = createStatementFor(splitSqlStatements(sql), name)
+    expect(create).toContain('erc20_wallet_contracts')
+    expect(create).toContain(`CREATE MATERIALIZED VIEW IF NOT EXISTS ${name} `)
+  })
+})
