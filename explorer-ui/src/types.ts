@@ -2682,7 +2682,11 @@ export type YieldComponentKind = 'omnipool-fee' | 'stablepool-fee' | 'xyk-fee' |
 // is its staking exchange rate's growth, the base APR /v1/staking/gigahdx/apr publishes ('gigahdx-rate').
 export type TokenYieldSource = 'defillama' | 'kamino' | 'on-chain' | 'gigahdx-rate'
 export interface YieldComponent { kind: YieldComponentKind; aprPct: number | null; asset?: AssetRef; weightPct?: number; source?: TokenYieldSource }
-export interface FarmYield { globalFarmId: number; yieldFarmId: number; rewardAsset: AssetRef; aprPct: number | null }
+// A farm's state: `active` inside its planned schedule (the pallet's rate);
+// `past-end` past it, still paying from its pot (the rate it paid over 30 days);
+// `ended` its pot is empty, 0 % until a top-up. Absent from older APIs.
+export type FarmRateState = 'active' | 'past-end' | 'ended'
+export interface FarmYield { globalFarmId: number; yieldFarmId: number; rewardAsset: AssetRef; aprPct: number | null; state?: FarmRateState }
 export interface PoolYield { totalAprPct: number | null; components: YieldComponent[]; farms: FarmYield[] }
 export interface ReserveIncentiveYield { rewardAsset: AssetRef; aprPct: number | null }
 export interface ReserveYield {
@@ -2701,6 +2705,8 @@ export interface ExplorerYields {
   xyk: Record<string, PoolYield>
   uniswapV3: Record<string, PoolYield>
   moneyMarket: Record<string, Record<string, ReserveYield>>
+  /** Stableswap share id → the aToken minted over it (GDOT over 2-Pool-GDOT): a pool surface rates such a pool as that aToken's supply yield. Absent from older APIs. */
+  shareWrappers?: Record<string, LpShareWrapper>
 }
 
 // GET …/order-history — finished DCA schedules, DCA intents and limit orders.

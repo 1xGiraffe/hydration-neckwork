@@ -1,4 +1,4 @@
-import type { AssetRef, YieldComponent } from '../../types'
+import type { AssetRef, FarmRateState, YieldComponent } from '../../types'
 
 // Percent in the shared rough scale: ~3 significant digits, "<0.01%" for a
 // positive rate too small to print, "—" for an unknown one (never 0%).
@@ -30,17 +30,33 @@ export const YIELD_LABELS: Record<YieldComponent['kind'], string> = {
   farm: 'Farm rewards',
 }
 
-// A token rate's source, as the hover names it.
-const TOKEN_YIELD_SOURCE: Record<string, string> = { defillama: 'DeFiLlama', kamino: 'Kamino', 'on-chain': 'on-chain, 180d', 'gigahdx-rate': 'staking rate, 7–28d' }
+// A token rate's source, as the hover names it. The Hydration app knows only the
+// external sources, so an on-chain rate is one its figure leaves out.
+const TOKEN_YIELD_SOURCE: Record<string, string> = { defillama: 'DeFiLlama', kamino: 'Kamino', 'on-chain': 'on-chain, 180d · not in the Hydration app', 'gigahdx-rate': 'staking rate, 7–28d' }
+
+const FARM_STATE_NOTE: Record<FarmRateState, string> = { active: 'full loyalty', 'past-end': 'past planned end · paid, 30D', ended: 'ended · pot empty' }
+
+/**
+ * What a breakdown line needs to know about the pool it belongs to, to name the
+ * parts the Hydration app states differently: HDX's own Omnipool fee (the app shows
+ * 0 % for HDX) and an Omnipool aToken's own supply APY (aDOT; the app shows the fee
+ * only). `farmStates` carries each reward asset's farm state.
+ */
+export interface YieldRowContext { omnipoolAsset?: { assetId: number; symbol: string }; ownSupply?: boolean; farmStates?: Map<number, FarmRateState> }
 
 // A component's line in a hover card. A weighted term (a pool leg's supply APY or
 // token yield) names its asset and its share; a farm row sits under the farm group.
-export function yieldComponentRow(c: YieldComponent, i: number): YieldRow {
-  if (c.kind === 'farm') return { key: `farm-${c.asset?.assetId ?? i}-${i}`, label: c.asset?.symbol ?? 'Farm', asset: c.asset, pct: c.aprPct, group: 'Farm rewards', note: 'full loyalty' }
+export function yieldComponentRow(c: YieldComponent, i: number, ctx: YieldRowContext = {}): YieldRow {
+  if (c.kind === 'farm') {
+    const state = c.asset ? ctx.farmStates?.get(c.asset.assetId) : undefined
+    return { key: `farm-${c.asset?.assetId ?? i}-${i}`, label: c.asset?.symbol ?? 'Farm', asset: c.asset, pct: c.aprPct, group: 'Farm rewards', note: FARM_STATE_NOTE[state ?? 'active'] }
+  }
   const weighted = c.kind === 'mm-supply' || c.kind === 'token-yield'
   const share = weighted && c.weightPct != null && Math.round(c.weightPct) < 100 ? `${Math.round(c.weightPct)}% of pool` : undefined
   const source = c.kind === 'token-yield' && c.source ? TOKEN_YIELD_SOURCE[c.source] : undefined
-  const note = [share, source].filter(Boolean).join(' · ') || undefined
+  const hdxOwn = c.kind === 'omnipool-fee' && ctx.omnipoolAsset?.assetId === 0 ? 'HDX\'s own fees · the Hydration app shows 0%' : undefined
+  const ownSupply = c.kind === 'mm-supply' && ctx.ownSupply && ctx.omnipoolAsset && !share ? `${ctx.omnipoolAsset.symbol}'s own lending yield · not in the Hydration app` : undefined
+  const note = [share, source, hdxOwn, ownSupply].filter(Boolean).join(' · ') || undefined
   const label = weighted || c.kind === 'mm-incentive'
     ? `${YIELD_LABELS[c.kind]}${c.asset ? ` · ${c.asset.symbol}` : ''}`
     : YIELD_LABELS[c.kind]

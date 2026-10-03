@@ -2777,6 +2777,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .tbl tbody tr:hover .comp-seg { filter: brightness(1.12); }
 .comp-none { font-size: 11px; }
 .liq-tvl { color: var(--text-high); }
+.liq-apr-omni { display: block; margin-top: 4px; font-size: 11px; }
 
 /* The folded tail, and the page's closing note: both are asides, so they sit
    outside the panel and stay quiet. */

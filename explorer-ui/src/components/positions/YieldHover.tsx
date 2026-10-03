@@ -14,7 +14,7 @@ import { aprText, type YieldRow } from './yieldFormat'
 // scroll container never clips it. It stays keyboard reachable (the trigger is
 // a button), closes on Escape, blur and pointer-leave, and a click (a tap on a
 // phone, which also focuses and hovers) opens it rather than toggling it shut;
-// a click inside a clickable row does not navigate the row.
+// a click inside a clickable row or a card link does not navigate it.
 export function YieldHover({ total, rows, icons, note, title, emptyText = '—' }: {
   total: number | null
   rows: YieldRow[]
@@ -58,7 +58,7 @@ export function YieldHover({ total, rows, icons, note, title, emptyText = '—' 
   return (
     <span className="yh" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
       <button ref={btn} type="button" className="yh-trigger" aria-describedby={open ? id : undefined} aria-expanded={open}
-        onClick={e => { e.stopPropagation(); setOpen(true) }} onFocus={() => setOpen(true)} onBlur={() => setOpen(false)}>
+        onClick={e => { e.preventDefault(); e.stopPropagation(); setOpen(true) }} onFocus={() => setOpen(true)} onBlur={() => setOpen(false)}>
         {icons && icons.length > 0 && <span className="yh-icons">{icons.slice(0, 4).map(a => <AssetIcon key={a.assetId} assetId={a.assetId} iconAssetId={a.iconAssetId} iconAssetIds={a.iconAssetIds} symbol={a.symbol} size={14} parachainId={a.parachainId} origin={a.origin} />)}</span>}
         <span className="mono">{aprText(total)}</span>
       </button>
