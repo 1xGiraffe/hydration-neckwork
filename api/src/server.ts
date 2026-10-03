@@ -151,7 +151,11 @@ const CACHE_CONTROL: [RegExp, number][] = [
   [/^\/explorer\/ice/, 300],
   [/^\/explorer\/address\/[^/]+\/close-accounts/, 900],
   [/^\/explorer\/address\/[^/]+\/history/, 120],
-  [/^\/explorer\/(address|tag)\/[^/]+\/counts/, 600],
+  // An account's badges are keyed server-side by its own activity height, so a
+  // long edge cache would be the only thing keeping a fresh extrinsic at 0. A
+  // tag's come from a snapshot the prewarmer refreshes every ten minutes.
+  [/^\/explorer\/address\/[^/]+\/counts/, 15],
+  [/^\/explorer\/tag\/[^/]+\/counts/, 600],
   [/^\/explorer\/(daily|accounts-daily)/, 300],
   [/^\/explorer\/list/, 30],                          // /lists directory + /list/:id detail
   // /lists (owned) + /tagged-in (member) — both summarize a public list's
