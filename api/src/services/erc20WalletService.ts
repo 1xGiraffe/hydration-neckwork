@@ -12,27 +12,241 @@ import { erc20Precompile } from './chainPrimitives.ts'
 // An `Erc20`-kind registry asset (`AssetType::Erc20`, bound to a contract through
 // its `AccountKey20` location) never touches orml_tokens: pallet_currencies routes
 // its transfers straight at the contract, so `account_asset_latest_balances` reads
-// every holder as zero. Each one therefore has to be listed here — and its contract
-// in the `erc20_transfer_deltas_mv` filter, which supplies the holder set this
-// refresh reads. GIGAHDX is excluded because the underlying staked HDX remains in
-// the holder's wallet; aTokens are supplied by money-market reserve reconstruction.
-// A money-market underlying listed here (uBIL under the BIL market's aToken) shows
-// the aToken contract as a holder of its custody, exactly as a Tokens-side reserve
-// (DOT under aDOT) does: that row is the contract's own balance, while the aToken
-// holders' claims are valued as the aToken — two assets, not one counted twice.
+// every holder as zero. A money-market underlying in the set (uBIL under the BIL
+// market's aToken) shows the aToken contract as a holder of its custody, exactly as
+// a Tokens-side reserve (DOT under aDOT) does: that row is the contract's own
+// balance, while the aToken holders' claims are valued as the aToken — two assets,
+// not one counted twice.
 //
-// This list is the source of truth, and two restatements must agree with it — the
-// MV's contract filter (`clickhouse/schema/003_materialized_views.sql`, a declarative
-// schema that cannot import TypeScript) and the asset-id list in
-// `public/services/accountBalances.ts`, which is outside the public API's import
-// allow-list. `api/tests/erc20WalletAssets.test.ts` pins both against this array, so
-// registering another `Erc20` asset is one edit here plus the two the test names.
-export const ERC20_WALLET_ASSETS: { assetId: number; contract: string }[] = [
-  { assetId: 222, contract: '0x531a654d1696ed52e7275a8cede955e82620f99a' }, // HOLLAR
-  { assetId: 1001354, contract: '0xa206d0959813f17c17c87147271c49065438648a' }, // aDOT-HOLLAR, the Gamma vault share
-  { assetId: 550, contract: '0x6a21891db0940491603f3cca0a9f4dba4c6e810c' }, // uBIL, the BIL market's reserve (ERC-4626/7540 vault share)
-]
-export const ERC20_WALLET_ASSET_IDS = ERC20_WALLET_ASSETS.map(a => a.assetId)
+// THE SET IS DERIVED, never listed: every registry asset with a local contract
+// (`assets.evm_address`, which the registry tracker sets for exactly the `Erc20`
+// assets whose location is a local AccountKey20) that is not a money-market aToken.
+// aTokens (GIGAHDX included — its staked HDX stays in the holder's wallet) are
+// reconstructed from `atoken_scaled_deltas` instead; one is recognised two
+// independent ways — Aave's reserve map names it, or its contract emitted the
+// AToken `Initialized` event, which every aToken emits once at initialisation —
+// so a reserve added since the last reserve-map snapshot is still kept out.
+// Each refresh re-derives the set into `erc20_wallet_contracts` (changes only);
+// `erc20_transfer_deltas_mv` reads that table at insert time, and
+// `syncTransferDeltas` fills what the MV could not see: a contract's transfers
+// from before it entered the set (a Gamma vault takes deposits before its share is
+// registered; a fresh database ingests raw before the set exists). Registering
+// another contract-backed asset therefore needs no code or schema change.
+export interface Erc20WalletAsset { assetId: number; contract: string }
+
+export const ATOKEN_INITIALIZED_TOPIC = '0xb19e051f8af41150ccccb3fc2c2d8d15f4a4cf434f32a559ba75fe73d6eea20b'
+export const ERC20_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+
+// The registry side of the rule, in one read. The Initialized probe reads only the
+// contracts not already in the set (none, in a steady state — 9 ms, 338 rows): a
+// contract that was not an aToken when it entered stays one that is not, and the
+// reserve-map exclusion is applied to every contract on every cycle. Probing every
+// candidate instead read HOLLAR's 5.5M log rows plus every aToken's — 28M rows /
+// 1.8 GiB per cycle — to re-learn the same answer.
+export const DESIRED_WALLET_CONTRACTS_SQL = `-- erc20:wallet-contracts:desired
+WITH candidates AS (
+  SELECT asset_id, lower(evm_address) AS contract FROM price_data.assets FINAL
+  WHERE evm_address != '' AND lower(evm_address) NOT IN (SELECT lower(atoken) FROM price_data.atoken_reserve_map)
+), listed AS (
+  SELECT contract FROM price_data.erc20_wallet_contracts FINAL WHERE active = 1
+)
+SELECT asset_id, contract FROM candidates
+WHERE contract IN (SELECT contract FROM listed)
+   OR contract NOT IN (
+     SELECT contract_address FROM price_data.evm_logs_by_contract
+     WHERE topic0 = '${ATOKEN_INITIALIZED_TOPIC}'
+       AND contract_address IN (SELECT contract FROM candidates WHERE contract NOT IN (SELECT contract FROM listed)))
+ORDER BY asset_id`
+
+// Without a reserve map the rule above would only have the Initialized probe to keep
+// aTokens out, and on a database whose raw has not reached an aToken's
+// initialisation block it would sweep the aToken in — its Transfer history into the
+// deltas and a balanceOf pot beside its money-market supply. No map, no change.
+export const RESERVE_MAP_SIZE_SQL = `-- erc20:wallet-contracts:reserve-map
+SELECT count() AS n FROM price_data.atoken_reserve_map`
+
+export const WALLET_CONTRACTS_SQL = `-- erc20:wallet-contracts:current
+SELECT contract, asset_id, active FROM price_data.erc20_wallet_contracts FINAL`
+
+// The rows that move `current` to `desired`: a new or re-pointed contract goes
+// active, a contract that left the set goes inactive (never deleted). A contract
+// named by two assets keeps the lower id — deterministic, and reported.
+export function walletContractChanges(
+  desired: { asset_id: number | string; contract: string }[],
+  current: { contract: string; asset_id: number | string; active: number | string }[],
+): { contract: string; asset_id: number; active: number }[] {
+  const want = new Map<string, number>()
+  for (const d of desired) {
+    const contract = d.contract.toLowerCase()
+    if (!/^0x[0-9a-f]{40}$/.test(contract)) continue
+    const id = Number(d.asset_id)
+    const prev = want.get(contract)
+    if (prev != null && prev !== id) console.warn(`[erc20-wallet] contract ${contract} is registered by assets ${prev} and ${id}; keeping ${Math.min(prev, id)}`)
+    want.set(contract, prev == null ? id : Math.min(prev, id))
+  }
+  const have = new Map(current.map(c => [c.contract.toLowerCase(), { assetId: Number(c.asset_id), active: Number(c.active) === 1 }]))
+  const out: { contract: string; asset_id: number; active: number }[] = []
+  for (const [contract, asset_id] of want) {
+    const h = have.get(contract)
+    if (!h || !h.active || h.assetId !== asset_id) out.push({ contract, asset_id, active: 1 })
+  }
+  for (const [contract, h] of have) {
+    if (h.active && !want.has(contract)) out.push({ contract, asset_id: h.assetId, active: 0 })
+  }
+  return out
+}
+
+// The MV's projection and row filter, shared verbatim with the catch-up insert so
+// the two can never decode a Transfer differently (api/tests/erc20WalletAssets.test.ts
+// pins the MV in 003_materialized_views.sql to exactly these strings).
+export const TRANSFER_DELTAS_PROJECTION = "WITH decoded_args_json AS ar, [lower(JSONExtractString(ar, 'to')), lower(JSONExtractString(ar, 'from'))] AS holders, [toInt256OrZero(JSONExtractString(ar, 'value')), -toInt256OrZero(JSONExtractString(ar, 'value'))] AS deltas, arrayJoin(arrayZip(holders, deltas, arrayEnumerate(holders))) AS leg SELECT lower(contract_address) AS contract_address, tupleElement(leg, 1) AS holder, block_height, event_index, block_timestamp, toUInt8(tupleElement(leg, 3)) AS leg_index, tupleElement(leg, 2) AS balance_delta, ingested_at FROM price_data.raw_evm_logs"
+export const TRANSFER_DELTAS_MV_CONTRACT_FILTER = '(lower(contract_address) IN (SELECT contract FROM price_data.erc20_wallet_contracts FINAL WHERE active = 1))'
+export const TRANSFER_DELTAS_ROW_FILTER = "(event_name = 'Transfer') AND (tupleElement(leg, 1) != '')"
+
+export const CATCHUP_BUCKET_BLOCKS = 100_000
+// Bounds one refresh cycle's catch-up work; a backlog (a fresh database's HOLLAR
+// history is ~60 buckets) continues on the next cycle.
+export const CATCHUP_MAX_BUCKETS_PER_CYCLE = 12
+// A complete set is re-verified this often (and whenever the set changes, and once
+// per process): the MV keeps it complete in between, so the check exists for the
+// windows it cannot see — an MV recreate, a raw range ingested before the set had
+// its contract.
+export const CATCHUP_RECHECK_MS = 6 * 3600_000
+
+// Contracts (and then 100k-block buckets) whose indexed Transfer logs outnumber the
+// transfers in erc20_transfer_deltas. One delta row per Transfer carries leg 1 (the
+// recipient); a not-yet-merged replay duplicate can only overstate the deltas side,
+// so it hides a gap until it merges, never invents one. A Transfer log the raw
+// decoder left undecoded is counted on the raw side and can never be filled — its
+// bucket is re-probed by every check and inserts nothing.
+export const CATCHUP_TOTALS_SQL = `-- erc20:catchup:totals
+SELECT r.c AS contract, r.n AS raw_n, d.n AS delta_n
+FROM (SELECT contract_address AS c, count() AS n FROM price_data.evm_logs_by_contract
+      WHERE contract_address IN {cs:Array(String)} AND topic0 = '${ERC20_TRANSFER_TOPIC}' GROUP BY c) AS r
+LEFT JOIN (SELECT contract_address AS c, countIf(leg_index = 1) AS n FROM price_data.erc20_transfer_deltas
+      WHERE contract_address IN {cs:Array(String)} GROUP BY c) AS d USING (c)
+WHERE r.n > d.n`
+
+export const CATCHUP_BUCKETS_SQL = `-- erc20:catchup:buckets
+SELECT r.b AS bucket, r.n AS raw_n, d.n AS delta_n
+FROM (SELECT intDiv(block_height, {size:UInt32}) AS b, count() AS n FROM price_data.evm_logs_by_contract
+      WHERE contract_address = {c:String} AND topic0 = '${ERC20_TRANSFER_TOPIC}' GROUP BY b) AS r
+LEFT JOIN (SELECT intDiv(block_height, {size:UInt32}) AS b, countIf(leg_index = 1) AS n FROM price_data.erc20_transfer_deltas
+      WHERE contract_address = {c:String} GROUP BY b) AS d USING (b)
+WHERE r.n > d.n
+ORDER BY bucket`
+
+// Inserts exactly the Transfer logs of one contract in [lo, hi] that the table does
+// not hold yet: the key set comes from the contract-keyed log index (so raw is read
+// by its (block_height, event_index) key, not scanned), minus every key already
+// present. Only missing keys are written, so a re-run adds nothing and the
+// ReplacingMergeTree never holds a backfill duplicate for its readers to see.
+export const CATCHUP_INSERT_SQL = `INSERT INTO price_data.erc20_transfer_deltas ${TRANSFER_DELTAS_PROJECTION}
+WHERE block_height BETWEEN {lo:UInt32} AND {hi:UInt32}
+  AND (block_height, event_index) IN (
+    SELECT block_height, event_index FROM price_data.evm_logs_by_contract
+    WHERE contract_address = {c:String} AND topic0 = '${ERC20_TRANSFER_TOPIC}' AND block_height BETWEEN {lo:UInt32} AND {hi:UInt32})
+  AND (block_height, event_index) NOT IN (
+    SELECT block_height, event_index FROM price_data.erc20_transfer_deltas
+    WHERE contract_address = {c:String} AND block_height BETWEEN {lo:UInt32} AND {hi:UInt32})
+  AND lower(contract_address) = {c:String} AND ${TRANSFER_DELTAS_ROW_FILTER}`
+
+// The buckets one cycle fills, oldest first, under the per-cycle cap.
+export function catchUpPlan(
+  gaps: { contract: string; buckets: number[] }[],
+  maxBuckets = CATCHUP_MAX_BUCKETS_PER_CYCLE,
+  size = CATCHUP_BUCKET_BLOCKS,
+): { plan: { contract: string; lo: number; hi: number }[]; truncated: boolean } {
+  const all = gaps.flatMap(g => g.buckets.map(b => ({ contract: g.contract, lo: b * size, hi: b * size + size - 1 })))
+  return { plan: all.slice(0, maxBuckets), truncated: all.length > maxBuckets }
+}
+
+let walletAssets: Erc20WalletAsset[] | null = null
+let walletAssetsAt = 0
+let walletAssetsInflight: Promise<Erc20WalletAsset[]> | null = null
+const WALLET_ASSETS_TTL_MS = 60_000
+
+async function loadWalletAssets(): Promise<Erc20WalletAsset[]> {
+  const res = await client.query({ query: WALLET_CONTRACTS_SQL, format: 'JSONEachRow' })
+  const rows = await res.json<{ contract: string; asset_id: number | string; active: number | string }>()
+  const list = rows
+    .filter(r => Number(r.active) === 1 && /^0x[0-9a-f]{40}$/.test(r.contract))
+    .map(r => ({ assetId: Number(r.asset_id), contract: r.contract }))
+    .sort((a, b) => a.assetId - b.assetId)
+  walletAssets = list
+  walletAssetsAt = Date.now()
+  return list
+}
+
+// The current set, as erc20_wallet_contracts holds it (a minute-fresh in-memory
+// copy). A failed reload serves the last list it read; with none read yet the
+// error propagates, so a caller never mistakes "not loaded" for "no such assets".
+export function ensureErc20WalletAssets(): Promise<Erc20WalletAsset[]> {
+  if (walletAssets && Date.now() - walletAssetsAt < WALLET_ASSETS_TTL_MS) return Promise.resolve(walletAssets)
+  if (!walletAssetsInflight) {
+    walletAssetsInflight = loadWalletAssets()
+      .catch(err => { if (walletAssets) return walletAssets; throw err })
+      .finally(() => { walletAssetsInflight = null })
+  }
+  return walletAssetsInflight
+}
+
+// Re-derive the set and write what changed. Returns the active list afterwards.
+export async function syncWalletContracts(): Promise<Erc20WalletAsset[]> {
+  const mapRes = await client.query({ query: RESERVE_MAP_SIZE_SQL, format: 'JSONEachRow' })
+  const [{ n } = { n: 0 }] = await mapRes.json<{ n: number | string }>()
+  const [desiredRes, currentRes] = await Promise.all([
+    client.query({ query: DESIRED_WALLET_CONTRACTS_SQL, format: 'JSONEachRow' }),
+    client.query({ query: WALLET_CONTRACTS_SQL, format: 'JSONEachRow' }),
+  ])
+  const desired = await desiredRes.json<{ asset_id: number | string; contract: string }>()
+  const current = await currentRes.json<{ contract: string; asset_id: number | string; active: number | string }>()
+  if (Number(n) === 0 || desired.length === 0) {
+    console.warn(`[erc20-wallet] wallet-contract set not re-derived (reserve map rows: ${n}, candidates: ${desired.length}); keeping ${current.length} rows`)
+  } else {
+    const changes = walletContractChanges(desired, current)
+    if (changes.length) {
+      await client.insert({ table: 'price_data.erc20_wallet_contracts', values: changes, format: 'JSONEachRow' })
+      console.log(`[erc20-wallet] wallet-contract set changed: ${changes.map(c => `${c.asset_id}=${c.contract}${c.active ? '' : ' (inactive)'}`).join(', ')}`)
+    }
+  }
+  return loadWalletAssets()
+}
+
+let catchUpCheckedAt = 0
+let catchUpSetKey = ''
+let catchUpPending = false
+
+// Fill erc20_transfer_deltas wherever the indexed logs show Transfers it lacks.
+export async function syncTransferDeltas(assets: Erc20WalletAsset[]): Promise<void> {
+  const setKey = assets.map(a => a.contract).sort().join(',')
+  if (!assets.length) return
+  if (!catchUpPending && setKey === catchUpSetKey && Date.now() - catchUpCheckedAt < CATCHUP_RECHECK_MS) return
+  const totalsRes = await client.query({
+    query: CATCHUP_TOTALS_SQL, query_params: { cs: assets.map(a => a.contract) }, format: 'JSONEachRow',
+  })
+  const short = await totalsRes.json<{ contract: string; raw_n: string | number; delta_n: string | number }>()
+  const gaps: { contract: string; buckets: number[] }[] = []
+  for (const s of short) {
+    const bucketRes = await client.query({
+      query: CATCHUP_BUCKETS_SQL, query_params: { c: s.contract, size: CATCHUP_BUCKET_BLOCKS }, format: 'JSONEachRow',
+    })
+    gaps.push({ contract: s.contract, buckets: (await bucketRes.json<{ bucket: number | string }>()).map(r => Number(r.bucket)) })
+  }
+  const { plan, truncated } = catchUpPlan(gaps)
+  for (const p of plan) {
+    const before = Date.now()
+    await client.command({
+      query: CATCHUP_INSERT_SQL,
+      query_params: { c: p.contract, lo: p.lo, hi: p.hi },
+      clickhouse_settings: { max_threads: 4 },
+    })
+    console.log(`[erc20-wallet] transfer-deltas catch-up ${p.contract} blocks ${p.lo}-${p.hi} in ${Date.now() - before} ms`)
+  }
+  catchUpPending = truncated
+  catchUpSetKey = setKey
+  catchUpCheckedAt = Date.now()
+}
 
 const ERC20_BALANCE_OF = '70a08231' // keccak256("balanceOf(address)")[:4]
 
@@ -83,14 +297,18 @@ export function walletBalanceRows(
   // DEFAULT those rows would SHARE — so two rows under one key keep whichever
   // the merge picks and silently drop the other balance. Summing first makes the
   // emitted set key-unique by construction.
+  // An anchor is published only when EVERY H160 folding into it was read this
+  // cycle: a sum over the ones that answered would shrink a shared anchor's balance
+  // by its unread members, so a partly read anchor keeps its previous row.
   const totals = new Map<string, bigint>()
+  const unread = new Set<string>()
   for (const h of h160s) {
-    const balance = balances.get(h)
-    if (balance == null) continue
     const account_id = anchorOf(h)
+    const balance = balances.get(h)
+    if (balance == null) { unread.add(account_id); continue }
     totals.set(account_id, (totals.get(account_id) ?? 0n) + balance)
   }
-  const rows = [...totals].map(([account_id, total]) => ({ account_id, asset_id, total: total.toString() }))
+  const rows = [...totals].filter(([account_id]) => !unread.has(account_id)).map(([account_id, total]) => ({ account_id, asset_id, total: total.toString() }))
   const current = new Set(h160s.map(anchorOf))
   for (const account_id of previousNonZeroAccounts) {
     if (!current.has(account_id)) rows.push({ account_id, asset_id, total: '0' })
@@ -123,7 +341,18 @@ export const TRUNCATED_SUBSTRATE_ACCOUNTS_SQL = `SELECT DISTINCT concat('0x', su
 // whose deltas have not been captured yet yields no candidates and is skipped,
 // so it keeps whatever rows it already has rather than being zeroed.
 async function refresh(): Promise<void> {
-  for (const a of ERC20_WALLET_ASSETS) {
+  // A failed derivation keeps the last set (the table is untouched); a failed
+  // catch-up is retried on the next check. Neither stops the balance refresh.
+  const assets = await syncWalletContracts().catch(err => {
+    console.error('[erc20-wallet] wallet-contract sync failed', err)
+    return ensureErc20WalletAssets()
+  })
+  await syncTransferDeltas(assets).catch(err => {
+    catchUpPending = true
+    console.error('[erc20-wallet] transfer-deltas catch-up failed', err)
+  })
+  await zeroInactiveAssetBalances(assets).catch(err => console.error('[erc20-wallet] inactive-asset reconcile failed', err))
+  for (const a of assets) {
     const holderRes = await client.query({
       query: `SELECT DISTINCT holder AS h FROM price_data.erc20_transfer_deltas
            WHERE contract_address = {c:String} AND holder != '0x0000000000000000000000000000000000000000'`,
@@ -179,6 +408,31 @@ async function refresh(): Promise<void> {
       format: 'JSONEachRow',
     })
   }
+}
+
+// Balance rows of asset ids that are no longer in the active set (a contract that
+// left it, or an asset re-pointed to another contract id): every reader takes
+// erc20_wallet_balances as the wallet pot of a contract-backed asset, so a row the
+// refresher stopped maintaining would be counted for good. Tombstoned to zero
+// (rows replace on (asset_id, account_id)).
+export const STALE_ASSET_BALANCES_SQL = `-- erc20:wallet-balances:stale-assets
+SELECT account_id, asset_id FROM price_data.erc20_wallet_balances
+WHERE asset_id NOT IN {active:Array(String)}
+GROUP BY account_id, asset_id HAVING toUInt256OrZero(argMax(total, updated_at)) > 0`
+
+export function staleAssetZeroRows(rows: ReadonlyArray<{ account_id: string; asset_id: string }>, activeIds: ReadonlySet<string>): { account_id: string; asset_id: string; total: string }[] {
+  return rows.filter(r => !activeIds.has(String(r.asset_id))).map(r => ({ account_id: r.account_id, asset_id: String(r.asset_id), total: '0' }))
+}
+
+async function zeroInactiveAssetBalances(assets: Erc20WalletAsset[]): Promise<void> {
+  // An empty active set is never trusted as "no assets": it zeroes nothing.
+  if (!assets.length) return
+  const active = new Set(assets.map(a => String(a.assetId)))
+  const res = await client.query({ query: STALE_ASSET_BALANCES_SQL, query_params: { active: [...active] }, format: 'JSONEachRow' })
+  const zero = staleAssetZeroRows(await res.json<{ account_id: string; asset_id: string }>(), active)
+  if (!zero.length) return
+  await client.insert({ table: 'price_data.erc20_wallet_balances', values: zero, format: 'JSONEachRow' })
+  console.log(`[erc20-wallet] zeroed ${zero.length} balance row(s) of asset(s) no longer contract-backed: ${[...new Set(zero.map(z => z.asset_id))].join(', ')}`)
 }
 
 let refreshInflight: Promise<void> | null = null

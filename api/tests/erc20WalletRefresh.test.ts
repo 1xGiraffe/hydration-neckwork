@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { TRUNCATED_SUBSTRATE_ACCOUNTS_SQL, walletBalanceRows } from '../src/services/erc20WalletService.ts'
+import { STALE_ASSET_BALANCES_SQL, staleAssetZeroRows, TRUNCATED_SUBSTRATE_ACCOUNTS_SQL, walletBalanceRows } from '../src/services/erc20WalletService.ts'
 
 // The refresh reads ~1.2k HOLLAR holders in batched eth_calls. A batch that times
 // out or comes back as an error leaves its addresses unread, and the published
@@ -25,6 +25,22 @@ describe('erc20 wallet refresh rows', () => {
     const rows = walletBalanceRows(222, [h(1)], new Map([[h(1), 0n]]), anchorOf, [])
 
     expect(rows).toEqual([{ account_id: anchorOf(h(1)), asset_id: '222', total: '0' }])
+  })
+
+  it('keeps the previous row of an anchor whose H160s were read only in part', () => {
+    // Two EVM addresses fold into one substrate account; one of them is unread.
+    const shared = '0xaaaa'
+    const anchor = (evm: string) => (evm === h(1) || evm === h(2) ? shared : anchorOf(evm))
+    const rows = walletBalanceRows(222, [h(1), h(2), h(3)], new Map([[h(1), 5n], [h(3), 7n]]), anchor, [shared])
+    expect(rows).toEqual([{ account_id: anchorOf(h(3)), asset_id: '222', total: '7' }])
+    // Read in full, the anchor is the sum.
+    expect(walletBalanceRows(222, [h(1), h(2)], new Map([[h(1), 5n], [h(2), 6n]]), anchor, [])).toEqual([{ account_id: shared, asset_id: '222', total: '11' }])
+  })
+
+  it('tombstones the balances of an asset that left the contract-backed set', () => {
+    const rows = staleAssetZeroRows([{ account_id: 'a', asset_id: '7' }, { account_id: 'b', asset_id: '222' }], new Set(['222']))
+    expect(rows).toEqual([{ account_id: 'a', asset_id: '7', total: '0' }])
+    expect(STALE_ASSET_BALANCES_SQL).toContain('asset_id NOT IN {active:Array(String)}')
   })
 
   it('does not zero an unread holder that already has a balance', () => {
@@ -75,14 +91,14 @@ describe('erc20 wallet refresh rows', () => {
   })
 
   it('does not let an unread sibling address drag the shared row down', () => {
-    // h(2) could not be read this cycle — unknown, not zero — so only h(1)'s
-    // balance is published, and the row is still one row.
+    // h(2) could not be read this cycle — unknown, not zero — so the shared row is
+    // not republished at all: h(1)'s balance alone would shrink it by h(2)'s.
     const substrate = '0x' + 'ab'.repeat(32)
     const sameOwner = () => substrate
 
-    const rows = walletBalanceRows(222, [h(1), h(2)], new Map([[h(1), 5n]]), sameOwner, [])
+    const rows = walletBalanceRows(222, [h(1), h(2)], new Map([[h(1), 5n]]), sameOwner, [substrate])
 
-    expect(rows).toEqual([{ account_id: substrate, asset_id: '222', total: '5' }])
+    expect(rows).toEqual([])
   })
 })
 
