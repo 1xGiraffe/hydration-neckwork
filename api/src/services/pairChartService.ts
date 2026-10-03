@@ -3,7 +3,9 @@ import { cached } from './cache.ts'
 import { assetDescriptor, priceAssetId } from './explorerAssets.ts'
 import { getAssetById } from './assetsService.ts'
 import { queryOHLCV, type OHLCVInterval } from './ohlcvService.ts'
-import { queryCrossPairCandles } from './crossPair.ts'
+import { queryPairCandles } from './crossPair.ts'
+import { overlayRouteCandles, pairPriceSource, queryRouteCandles, type CandlePriceSource, type PairPriceSource } from './pairPriceSource.ts'
+import { AMOUNT_SCALE, queryPairVolume, scaledText } from './pairVolume.ts'
 
 // Candles for one pair on an explorer chart — the intent page draws a limit order
 // against its market with them. The same two leaves the preis chart route and the
@@ -21,7 +23,11 @@ const INTERVAL_ANCHOR: Record<PairChartInterval, number> = { '15min': 0, '1h': 0
 export const PAIR_CHART_MAX_CANDLES = 500
 
 /** One candle as the chart draws it: the bucket's open time (unix seconds) and its prices. */
-export interface PairChartCandle { t: number; o: number; h: number; l: number; c: number }
+export interface PairChartCandle {
+  t: number; o: number; h: number; l: number; c: number; priceSource?: CandlePriceSource
+  /** The pair's own volume (trades between the two assets, services/pairVolume.ts): USD, and whole units of base and quote. */
+  v?: number; vb?: number; vq?: number
+}
 export interface PairChart {
   /** The series each leg was read from — differs from the id asked for when it is an alias. */
   baseSeries: number
@@ -31,7 +37,9 @@ export interface PairChart {
   /**
    * The fee a trade of this pair pays over the price before fees, measured from the
    * pair's own recent trades (see pairTradeFee) — what a chart needs to draw an
-   * order's limit where the market must be for it to fill. Null when too few trades.
+   * order's limit where the market must be for it to fill. Null when too few trades,
+   * and while the chart draws route-priced candles (the fee is measured against the
+   * USD ratio, which those candles are not).
    */
   tradeFee: { fee: number; trades: number } | null
 }
@@ -44,26 +52,57 @@ const num = (value: string | number): number => (typeof value === 'number' ? val
  * drawing a resting order against it. Two ids reading one series (aUSDC and USDC)
  * have no pair to draw and answer empty.
  */
-export function pairChart(client: ClickHouseClient, baseId: number, quoteId: number, interval: PairChartInterval, count: number, nowSec = Math.floor(Date.now() / 1000)): Promise<PairChart> {
+export function pairChart(client: ClickHouseClient, baseId: number, quoteId: number, interval: PairChartInterval, count: number, nowSec = Math.floor(Date.now() / 1000), source: PairPriceSource = pairPriceSource(), priceHead = 0): Promise<PairChart> {
   const baseSeries = priceAssetId(baseId)
   const quoteSeries = priceAssetId(quoteId)
   const seconds = INTERVAL_SECONDS[interval]
   const anchor = INTERVAL_ANCHOR[interval]
   const n = Math.max(1, Math.min(PAIR_CHART_MAX_CANDLES, Math.floor(count)))
-  // Floored onto the grid so every request inside one bucket shares a key; the short
-  // TTL is what moves the bucket in progress.
+  // Floored onto the grid so every request inside one bucket shares a key, and keyed
+  // on the price pipeline's head (`priceHead`, the block the explorer's price
+  // generation was composed at): the bucket in progress moves exactly when a new
+  // block is priced, so a chart refetched on a pushed price generation is rebuilt
+  // for it, and every request at one head shares one build. The TTL only bounds
+  // memory (and a caller without a head).
   const currentStart = Math.floor((nowSec - anchor) / seconds) * seconds + anchor
   const fromSec = currentStart - (n - 1) * seconds
-  return cached(`explorer:pair-chart:${baseSeries}:${quoteSeries}:${interval}:${n}:${currentStart}`, 30_000, async (): Promise<PairChart> => {
+  return cached(`explorer:pair-chart:${baseSeries}:${quoteSeries}:${interval}:${n}:${currentStart}:h${priceHead}${source === 'route' ? ':route' : ''}`, 30_000, async (): Promise<PairChart> => {
     if (baseSeries === quoteSeries) return { baseSeries, quoteSeries, interval, candles: [], tradeFee: null }
     const startTime = new Date(fromSec * 1000)
     const endTime = new Date(nowSec * 1000)
-    const candles: PairChartCandle[] = getAssetById(quoteSeries)?.isUsdPegged
+    const window = { baseId: baseSeries, quoteId: quoteSeries, startTime, endTime, interval: interval as OHLCVInterval, headFloor: priceHead }
+    let candles: PairChartCandle[] = getAssetById(quoteSeries)?.isUsdPegged
       ? (await queryOHLCV(client, { assetId: baseSeries, startTime, endTime, interval: interval as OHLCVInterval }))
         .map(c => ({ t: Math.floor(Date.parse(`${c.interval_start.replace(' ', 'T')}Z`) / 1000), o: num(c.open), h: num(c.high), l: num(c.low), c: num(c.close) }))
-      : (await queryCrossPairCandles(client, { baseId: baseSeries, quoteId: quoteSeries, startTime, endTime, interval: interval as OHLCVInterval }))
-        .map(c => ({ t: c.intervalStart, o: num(c.open), h: num(c.high), l: num(c.low), c: num(c.close) }))
-    const tradeFee = await pairTradeFee(client, baseId, quoteId).catch(() => null)
+      : (await queryPairCandles(client, window, source))
+        .map(c => {
+          const candle: PairChartCandle = { t: c.intervalStart, o: num(c.open), h: num(c.high), l: num(c.low), c: num(c.close) }
+          if (c.priceSource) candle.priceSource = c.priceSource
+          return candle
+        })
+    // Route mode prices a USD-pegged quote as the token itself wherever the pair's
+    // route does, like every other quote.
+    if (source === 'route' && getAssetById(quoteSeries)?.isUsdPegged) {
+      const route = await queryRouteCandles(client, window)
+      candles = overlayRouteCandles(candles, route, c => c.t, rc => ({ t: rc.intervalStart, o: num(rc.open), h: num(rc.high), l: num(rc.low), c: num(rc.close) }))
+    }
+    // The pair's own volume per bucket, the bucket in progress built to the head.
+    const volume = await queryPairVolume(client, {
+      baseId: baseSeries, quoteId: quoteSeries, interval, fromSec, toSec: currentStart,
+      // The tail is shared per head block; the legs it reads are written with the
+      // prices, so reading them to the wall clock stops at that head anyway.
+      ...(priceHead > 0 ? { head: { block: priceHead, time: nowSec } } : {}),
+    })
+    candles = candles.map(c => {
+      const pv = volume.get(c.t)
+      return { ...c, v: pv ? Number(scaledText(pv.usd, 12)) : 0, vb: pv ? Number(scaledText(pv.base, AMOUNT_SCALE)) : 0, vq: pv ? Number(scaledText(pv.quote, AMOUNT_SCALE)) : 0 }
+    })
+    // The fee is measured against the USD ratio at each trade's prior block. Where
+    // the chart draws route prices that is not the price the candles show, and the
+    // route price at an arbitrary block is not stored (only per 5-minute candle), so
+    // the fee is left unset rather than measured against the wrong price.
+    const routed = source === 'route' && candles.some(c => c.priceSource === 'route')
+    const tradeFee = routed ? null : await pairTradeFee(client, baseId, quoteId).catch(() => null)
     return {
       baseSeries, quoteSeries, interval, tradeFee,
       candles: candles.filter(c => c.t >= fromSec && [c.o, c.h, c.l, c.c].every(v => Number.isFinite(v) && v > 0)).sort((a, b) => a.t - b.t),

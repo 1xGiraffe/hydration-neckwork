@@ -32,6 +32,8 @@ function fakeClient(byMarker: Record<string, Row[]> = {}, registry: { vaults?: R
       seen.push({ query, params: query_params ?? {} })
       if (query.includes('FROM price_data.assets FINAL')) return result(ASSET_ROWS)
       if (query.includes('Bonds.TokenCreated')) return result([])
+      // The price pipeline's finalized head, which closes the buckets: as fresh as the clock.
+      if (query.includes('AS b, toUnixTimestamp(block_timestamp) AS t')) return result([{ b: 15_000_000, t: Math.floor(Date.now() / 1000) }])
       // The v3 registry the pool lookup reads.
       if (query.includes('FROM price_data.uniswap_v3_pools FINAL')) return result([{ pool_address: POOL, factory: '0x776c4fd6a6170165a91ba45dec40a14bcc8ec354', token0: ADOT, token1: HOLLAR, fee: 3000, tick_spacing: 60, block_height: 14359646, ts: '2026-09-01 10:37:24', extrinsic_index: 2 }])
       if (query.includes('FROM price_data.uniswap_v3_vaults FINAL')) return result(registry.vaults ?? [])

@@ -111,11 +111,11 @@ describe('GET /candles price path for a Hydrated quote', () => {
   beforeEach(async () => { app = null })
   afterEach(async () => { await app?.close() })
 
-  async function pathFor(quoteId: number): Promise<'usd' | 'cross'> {
+  async function pathFor(quoteId: number, extra = ''): Promise<'usd' | 'cross'> {
     const made = await makeApp()
     app = made.app
     const res = await made.app.inject({
-      url: `/candles?baseId=5&quoteId=${quoteId}&interval=1h&from=1754870400&to=1754956800`,
+      url: `/candles?baseId=5&quoteId=${quoteId}&interval=1h&from=1754870400&to=1754956800${extra}`,
     })
     expect(res.statusCode).toBe(200)
     // The cross path joins the two assets' per-block prices and aggregates the
@@ -137,5 +137,33 @@ describe('GET /candles price path for a Hydrated quote', () => {
   it('still substitutes the dollar for a genuine peg', async () => {
     expect(await pathFor(10)).toBe('usd')
     expect(await pathFor(22)).toBe('usd')
+  })
+
+  // The preis app's stablecoin-quoted pairs (PRIME/USDC as the token, not the
+  // dollar) exist only while pairs are route-priced: `quoteAsset=1` is ignored
+  // under usd-ratio, so every URL answers as it always did.
+  it('ignores quoteAsset=1 under usd-ratio, and prices the token itself under route', async () => {
+    expect(await pathFor(22, '&quoteAsset=1')).toBe('usd')
+    vi.stubEnv('PAIR_PRICE_SOURCE', 'route')
+    try {
+      expect(await pathFor(22)).toBe('usd')
+      expect(await pathFor(22, '&quoteAsset=1')).toBe('cross')
+    } finally {
+      vi.unstubAllEnvs()
+    }
+    // The explorer-only override compares the two sources without switching.
+    expect(await pathFor(22, '&quoteAsset=1&source=route')).toBe('cross')
+  })
+
+  it('states the deployment\'s pair price source', async () => {
+    const made = await makeApp()
+    app = made.app
+    expect((await made.app.inject({ url: '/candles/price-source' })).json()).toEqual({ priceSource: 'usd-ratio' })
+    vi.stubEnv('PAIR_PRICE_SOURCE', 'route')
+    try {
+      expect((await made.app.inject({ url: '/candles/price-source' })).json()).toEqual({ priceSource: 'route' })
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })
