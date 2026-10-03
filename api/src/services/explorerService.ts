@@ -25884,11 +25884,16 @@ export interface TabCounts { extrinsics: number; extrinsicsOnBehalf: number; eve
 async function getAccountTabCounts(accounts: string[], cacheKey: string): Promise<TabCounts> {
   const list = sqlAccountList(accounts)
   if (list === "''") return { extrinsics: 0, extrinsicsOnBehalf: 0, events: 0, votes: 0 }
-  return cached(`explorer:tab-counts:${cacheKey}`, 600_000, async () => {
+  // Keyed by the account's own activity height, like the lists behind the tabs:
+  // a badge computed before the account acted would otherwise read 0 for ten
+  // minutes beside a list that already shows the new extrinsic.
+  const mark = await accountActivityWatermark(accounts)
+  const keyed = `${cacheKey}@${mark}`
+  return cached(`explorer:tab-counts:${keyed}`, 600_000, async () => {
     const [extrinsics, onBehalf, events, votes] = await Promise.all([
-      countAccountExtrinsics(accounts, cacheKey, {}),
-      onBehalfExtrinsicCount(accounts, cacheKey),
-      countAccountEvents(accounts, cacheKey, {}),
+      countAccountExtrinsics(accounts, keyed, {}),
+      onBehalfExtrinsicCount(accounts, keyed),
+      countAccountEvents(accounts, keyed, {}),
       // Conviction/democracy plus the collective votes the activity index does
       // not carry (its own 10-min cache is shared with the tag snapshot path).
       countScopedVotes(accounts, cacheKey),
