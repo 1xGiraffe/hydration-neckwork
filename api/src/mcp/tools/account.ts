@@ -57,7 +57,7 @@ import {
 } from '../format/refs.ts'
 import { bullets, escapeCell, h3, joinBlocks, kv, note, section, table } from '../format/md.ts'
 import {
-  addressNotFound, compactAsset, failure, fit, HUB_SYMBOL, output,
+  addressNotFound, compactAsset, failure, fit, HUB_SYMBOL, output, PRICE_BEARING_TTL_MS,
   parseInput, portfolioValue, tagIcon, valueReconciliation,
 } from './shared.ts'
 
@@ -775,7 +775,7 @@ const getAccount: ToolDefinition = {
     const encoded = encodeURIComponent(address)
 
     const [detailResult, countsResult, revenueResult, statsResult] = await Promise.allSettled([
-      ctx.upstream.get<AddressDetail>(`/explorer/address/${encoded}`, summarized ? { summary: 1 } : undefined, { ttlMs: 8_000 }),
+      ctx.upstream.get<AddressDetail>(`/explorer/address/${encoded}`, summarized ? { summary: 1 } : undefined, { ttlMs: PRICE_BEARING_TTL_MS }),
       sections.has('counts') ? ctx.upstream.get<TabCounts>(`/explorer/address/${encoded}/counts`, undefined, { ttlMs: 60_000 }) : Promise.resolve(null),
       sections.has('revenue') ? ctx.upstream.get<RevenueBreakdown>(`/explorer/address/${encoded}/revenue-breakdown`, undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
       // The runtime's nominal slot time, for the DCA block periods. Cheap, and

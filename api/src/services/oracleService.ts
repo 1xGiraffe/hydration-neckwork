@@ -1,7 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { cached, cachedSwr } from './cache.ts'
 import { MM_MARKETS, assetIdFromMmAddress, currentPriceAssetId, currentPriceOf, displayDescriptor, type ExplorerAsset } from './explorerAssets.ts'
-import { accountRef, cutoffHeightForWindow, ensurePrices, indexedRawHead, priceIsOracleFallback, type AccountRef } from './explorerService.ts'
+import { accountRef, cutoffHeightForWindow, ensurePriceState, indexedRawHead, priceIsOracleFallback, type AccountRef, type PriceState } from './explorerService.ts'
 import { iso } from './isoTimestamp.ts'
 
 /** A unix-seconds instant on the wire (isoS() takes milliseconds). */
@@ -1343,7 +1343,46 @@ function attachConsumers(ctx: Ctx, consumersByFeed: Map<string, OracleConsumer[]
   }
 }
 
+// The explorer's market price beside a reserve's oracle price, at one price
+// generation: the venue price, unless the explorer itself values the asset at
+// this very oracle (then there is no market to compare with).
+function reserveMarketFields(assetId: number | null, oraclePrice: string | null, prices: PriceState): Pick<OracleReserveRow, 'marketPrice' | 'marketNote' | 'deviationPct'> {
+  const fallback = assetId != null && priceIsOracleFallback(assetId, prices)
+  const market = assetId != null && !fallback ? currentPriceOf(prices.map, assetId)?.price ?? null : null
+  const op = oraclePrice != null ? Number(oraclePrice) : null
+  return {
+    marketPrice: market,
+    marketNote: fallback ? 'No venue prices it; the explorer values it at this oracle.' : market == null ? 'No market price.' : null,
+    deviationPct: op != null && market != null && market > 0 ? ((op - market) / market) * 100 : null,
+  }
+}
+
+function largestDeviation(markets: OracleMarket[]): OraclesOverview['kpis']['largestDeviation'] {
+  const deviations = markets.flatMap(m => m.reserves.filter(r => r.deviationPct != null).map(r => ({ asset: r.asset, market: m.key, deviationPct: r.deviationPct! })))
+  return deviations.reduce<typeof deviations[number] | null>((best, d) => (!best || Math.abs(d.deviationPct) > Math.abs(best.deviationPct) ? d : best), null)
+}
+
+// Each reserve row's registry id (null: the reserve maps to none), which its
+// display descriptor cannot give back.
+const reserveRowAssetIds = new WeakMap<OracleReserveRow, number | null>()
+let overviewPriced: { base: OraclesOverview; gen: number; value: OraclesOverview } | null = null
+
 export async function getOraclesOverview(): Promise<OraclesOverview> {
+  const [base, prices] = await Promise.all([oraclesOverviewBase(), ensurePriceState()])
+  // The heavy overview is rebuilt on its own SWR cadence; only the market-price
+  // overlay follows the price head, re-stated once per (build, price generation).
+  const memo = overviewPriced
+  if (memo && memo.base === base && memo.gen === prices.gen) return memo.value
+  const markets = base.markets.map(m => ({
+    ...m,
+    reserves: m.reserves.map(r => ({ ...r, ...reserveMarketFields(reserveRowAssetIds.get(r) ?? null, r.oraclePrice, prices) })),
+  }))
+  const value: OraclesOverview = { ...base, kpis: { ...base.kpis, largestDeviation: largestDeviation(markets) }, markets }
+  overviewPriced = { base, gen: prices.gen, value }
+  return value
+}
+
+function oraclesOverviewBase(): Promise<OraclesOverview> {
   // Fresh 30 s, then served stale while one rebuild replaces it: every input is
   // in memory, so a rebuild is ~0.5 s of CPU a reader never waits on.
   // Keyed on whether a live read exists, so a copy built before the refresher's
@@ -1351,7 +1390,7 @@ export async function getOraclesOverview(): Promise<OraclesOverview> {
   return cachedSwr(`explorer:oracles:overview:${currentOracleSnapshot() ? 'live' : 'none'}`, 30_000, 600_000, async () => {
     const nowSec = Math.floor(Date.now() / 1000)
     const [ctx, prices, pegSources, pegsNow, head] = await Promise.all([
-      buildContext(nowSec), ensurePrices(), currentPegSources().catch(() => [] as PegSourceNow[]), currentPoolPegs().catch(() => new Map()), indexedRawHead(),
+      buildContext(nowSec), ensurePriceState(), currentPegSources().catch(() => [] as PegSourceNow[]), currentPoolPegs().catch(() => new Map()), indexedRawHead(),
     ])
     const consumersByFeed = new Map<string, OracleConsumer[]>()
     const addConsumer = (id: string, c: OracleConsumer) => {
@@ -1370,16 +1409,13 @@ export async function getOraclesOverview(): Promise<OraclesOverview> {
         const asset = displayDescriptor(r.assetId ?? 0)
         const src = r.source ? sourceRef(r.source, ctx) : { address: '', kind: 'unknown' as const, label: '—', feedId: null, provider: null, value: null, updatedAt: null, ageSec: null, status: 'unknown' as const, note: 'No source set.' }
         const oraclePrice = usd && r.price != null ? unitsDecimal(BigInt(r.price), 8) : null
-        const fallback = r.assetId != null && priceIsOracleFallback(r.assetId)
-        const market = r.assetId != null && !fallback ? currentPriceOf(prices, r.assetId)?.price ?? null : null
-        const op = oraclePrice != null ? Number(oraclePrice) : null
         for (const { feedId, via, depth } of feedIdsOf(src)) addConsumer(feedId, { kind: 'reserve', market: m.key, marketLabel: m.label, asset, via, depth })
-        return {
-          asset, reserve: r.address, oraclePrice, marketPrice: market,
-          marketNote: fallback ? 'No venue prices it; the explorer values it at this oracle.' : market == null ? 'No market price.' : null,
-          deviationPct: op != null && market != null && market > 0 ? ((op - market) / market) * 100 : null,
+        const row: OracleReserveRow = {
+          asset, reserve: r.address, oraclePrice, ...reserveMarketFields(r.assetId ?? null, oraclePrice, prices),
           source: src,
         }
+        reserveRowAssetIds.set(row, r.assetId ?? null)
+        return row
       })
       return { key: m.key, label: m.label, oracle: m.oracle, fallbackOracle: m.fallbackOracle, reserves }
     })
@@ -1464,8 +1500,7 @@ export async function getOraclesOverview(): Promise<OraclesOverview> {
 
     const delivery = feeds.filter(f => f.status === 'live' || f.status === 'stale')
     const stale = feeds.filter(f => f.status === 'stale')
-    const deviations = markets.flatMap(m => m.reserves.filter(r => r.deviationPct != null).map(r => ({ asset: r.asset, market: m.key, deviationPct: r.deviationPct! })))
-    const largest = deviations.reduce<typeof deviations[number] | null>((best, d) => (!best || Math.abs(d.deviationPct) > Math.abs(best.deviationPct) ? d : best), null)
+    const largest = largestDeviation(markets)
     return {
       asOf: { liveReadAt: ctx.snap ? isoS(Math.floor(ctx.snap.readAtMs / 1000)) : null, liveBlock: ctx.snap?.block ?? null, indexedHead: head, now: isoS(nowSec) },
       history: { logsComplete: ctx.view.historyComplete, emaComplete: ema.complete, emaCoveredFrom: ema.coveredFromSec ? isoS(ema.coveredFromSec) : null, logsThroughBlock: ledger.loadedUpTo, emaThroughBlock: ema.readUpTo },

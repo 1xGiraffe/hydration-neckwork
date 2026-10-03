@@ -111,8 +111,10 @@ export async function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>
  * Every lookup addressed by block coordinates or an extrinsic hash can be asked
  * for something that exists on chain but has not reached ClickHouse yet:
  * `raw-live` follows the FINALIZED head (see `src/raw/flushPolicy.ts`), so a
- * just-made action is 35-65s from being readable. Caching that miss makes the
- * 404 outlive the wait — measured on `/explorer/trade`, the rows landed 6s into
+ * just-made action is ~46s of finality plus under a second of indexing from
+ * being readable (measured 2026-10-03; finality lands in bursts every ~8s).
+ * Caching that miss makes the 404 outlive the wait — measured on
+ * `/explorer/trade`, the rows landed 6s into
  * a probe and the endpoint kept answering 404 for the remaining 54s of its 60s
  * TTL, i.e. the cache, not finality, was most of what the user waited for.
  * A miss here is one primary-key point read, so re-running it beats serving a

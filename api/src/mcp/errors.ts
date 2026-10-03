@@ -36,9 +36,10 @@ export function internalError(message: string): ToolError {
 const BLOCK_SECONDS = 2
 // How far above the index head a block may be and still be explained by
 // finality alone. raw-live follows the FINALIZED head, which trails the chain
-// head by 35-65 seconds — 17 to 32 blocks at this cadence — so the window has
-// to clear the top of that range rather than sit inside it, or a genuine early
-// read 25 blocks out is told it is a wrong identifier.
+// head by ~46 seconds and advances in bursts (every ~8 s, p90 12.5 s; measured
+// 2026-10-03) — ~23 to ~30 blocks at this cadence — so the window has to clear
+// the top of that range rather than sit inside it, or a genuine early read 25
+// blocks out is told it is a wrong identifier.
 const FINALITY_WINDOW_BLOCKS = Math.ceil(90 / BLOCK_SECONDS)
 // And how far above it a height can still plausibly be a real block at all.
 // `headBound` is the larger of the indexed head and the mempool's best height,
@@ -131,7 +132,7 @@ export interface UpstreamErrorContext {
  * The explorer answers a coordinate miss with `blockIndexed`/`headBound`
  * (describeLookupMiss), because a client cannot otherwise tell the two misses
  * apart. `blockIndexed: false` alone is not enough advice though: a block a few
- * heights above the index head is 35-65 seconds of finality away and worth
+ * heights above the index head is ~46 seconds of finality away and worth
  * waiting for, while one thousands of heights above it is a wrong identifier —
  * telling an agent to "retry shortly" for a block days in the future sends it
  * into a loop that can never succeed.

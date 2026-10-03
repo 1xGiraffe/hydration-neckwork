@@ -24,6 +24,14 @@ import { formatUsd, scaleBase1e8 } from '../format/units.ts'
 import { budget } from '../format/md.ts'
 import { fitJson } from '../format/json.ts'
 
+/**
+ * Upstream cache lifetime for a read that carries CURRENT PRICES (an asset's
+ * detail and holders, the asset directory, an account's detail). The explorer
+ * re-values these per price generation, which follows the finalized head within
+ * a couple of seconds; a longer per-URL cache here would be the staleness.
+ */
+export const PRICE_BEARING_TTL_MS = 3_000
+
 /* ============ the identifier grammar ============ */
 
 /**

@@ -21,13 +21,14 @@ function fakeClient(): { res: ServerResponse; written: string[]; ended: boolean 
 afterEach(() => stopLiveHeadService())
 
 describe('sseHeadFrame', () => {
-  it('emits a named event carrying all four watermarks as JSON', () => {
+  it('emits a named event carrying all five watermarks as JSON', () => {
     // `head` is the raw-ingestion checkpoint (explorer feeds), `main` the
     // price indexer's newest block (preis candles / indexer status), `best`
     // the newest unfinalized block the pending layer can show, `pool` the
-    // transaction-pool generation (mempool rows change between blocks).
-    expect(sseHeadFrame(13487500, 13487498, 13487507, 42)).toBe('event: head\ndata: {"head":13487500,"main":13487498,"best":13487507,"pool":42}\n\n')
-    expect(sseHeadFrame(13487500, 13487498)).toBe('event: head\ndata: {"head":13487500,"main":13487498,"best":0,"pool":0}\n\n')
+    // transaction-pool generation (mempool rows change between blocks),
+    // `price` the explorer's price generation (price-bearing pages).
+    expect(sseHeadFrame(13487500, 13487498, 13487507, 42, 1759500000123)).toBe('event: head\ndata: {"head":13487500,"main":13487498,"best":13487507,"pool":42,"price":1759500000123}\n\n')
+    expect(sseHeadFrame(13487500, 13487498)).toBe('event: head\ndata: {"head":13487500,"main":13487498,"best":0,"pool":0,"price":0}\n\n')
   })
 })
 
