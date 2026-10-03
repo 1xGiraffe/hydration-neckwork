@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { assetDescriptor } from '../src/services/explorerAssets.ts'
-import { farmAprByAsset, farmAprPercScaled, renderPerc, xykFarmAprPercScaled, type LiveFarm } from '../src/services/farmApr.ts'
+import { assetDescriptor, registerShareWrapper } from '../src/services/explorerAssets.ts'
+import {
+  PERC_DECIMALS, decideFarmRate, farmAprByAsset, farmAprPercScaled, foldFarmPayouts, payoutAprPercScaled, renderPerc, xykFarmAprPercScaled, type LiveFarm,
+} from '../src/services/farmApr.ts'
 import {
   TOKEN_YIELD_MAX_GIVE_BACK, WEIGHT_UNIT, assemblePoolYield, tokenAccrualAprs, farmPartsByReward, feeAprPctScaled, feeAprPctScaledSeconds, incentiveAprPctScaled, v3FeeWindowSeconds, V3_FEE_APR_MIN_AGE_SECONDS, legWeights,
-  pctFromPerc, pctNumber, rayAprToApyPctScaled, underlyingParts, v3LpFee, type YieldContext,
+  pctFromPerc, pctNumber, rayAprToApyPctScaled, shareWrapperRefs, timeWeightedTvlUsd, underlyingParts, v3LpFee, type YieldContext,
 } from '../src/services/positionYield.ts'
 
 const RAY = 10n ** 27n
@@ -211,5 +213,67 @@ describe('v3 fee APR over the pool\'s real age', () => {
       expect(feeAprPctScaledSeconds(fee, tvl, BigInt(days) * 86_400n)).toBe(feeAprPctScaled(fee, tvl, days))
     }
     expect(feeAprPctScaledSeconds(1n, 1n, 0n)).toBeNull()
+  })
+})
+
+describe('share wrappers on the yields wire', () => {
+  it('names each wrapped share\'s aToken and market, and skips an unwrapped share', () => {
+    registerShareWrapper(9690, { aTokenId: 969, marketKey: 'core' })
+    try {
+      const out = shareWrapperRefs([9690, 9691])
+      expect(Object.keys(out)).toEqual(['9690'])
+      expect(out['9690']).toMatchObject({ marketKey: 'core', named: false, asset: { assetId: 969 } })
+    } finally {
+      registerShareWrapper(9690, null)
+    }
+  })
+})
+
+describe('farm pot state (past the planned schedule)', () => {
+  const ONE = 10n ** 18n
+  const sync = (block: number, t: number, acc: bigint, z: bigint, g = 5) =>
+    ({ global_farm_id: g, block_height: block, event_index: 2, t, drained: 0, acc: String(acc), z: String(z) })
+  const drained = (block: number, t: number, g = 5) =>
+    ({ global_farm_id: g, block_height: block, event_index: 1, t, drained: 1, acc: '', z: '' })
+
+  it('reads an empty pot from the newest sync, whatever paid before', () => {
+    const p = foldFarmPayouts([sync(10, 0, 5n * ONE, 100n), sync(20, 86_400 * 3, 6n * ONE, 100n), drained(20, 86_400 * 3)])
+    expect(p.get(5)).toEqual({ state: 'drained', rewardRaw: 0n, seconds: 0n })
+  })
+
+  it('sums each sync\'s reward as the rpz growth times the Z it was spread over, once per replayed row', () => {
+    const rows = [sync(10, 0, 1n * ONE, 100n), sync(20, 86_400, 3n * ONE, 50n), sync(30, 2 * 86_400, 3n * ONE, 50n), drained(15, 100)]
+    const p = foldFarmPayouts([...rows, ...rows])
+    expect(p.get(5)).toEqual({ state: 'paying', rewardRaw: 100n, seconds: 2n * 86_400n })
+  })
+
+  it('calls a pot quiet when its syncs span less than a day', () => {
+    expect(foldFarmPayouts([sync(10, 0, ONE, 1n), sync(11, 60, 2n * ONE, 1n)]).get(5)?.state).toBe('quiet')
+  })
+
+  it('rates an empty pot 0 % ended, a past-plan pot by its payout, and falls back to the pallet rule', () => {
+    const paid = () => 42n
+    expect(decideFarmRate(false, 7n, { state: 'drained', rewardRaw: 0n, seconds: 0n }, paid)).toEqual({ aprScaled: 0n, state: 'ended' })
+    expect(decideFarmRate(false, 7n, { state: 'paying', rewardRaw: 1n, seconds: 1n }, paid)).toEqual({ aprScaled: 7n, state: 'active' })
+    expect(decideFarmRate(true, 7n, { state: 'paying', rewardRaw: 1n, seconds: 1n }, paid)).toEqual({ aprScaled: 42n, state: 'past-end' })
+    expect(decideFarmRate(true, 7n, undefined, paid)).toEqual({ aprScaled: 7n, state: 'past-end' })
+  })
+
+  it('annualises a payout over the stake at the reward\'s price', () => {
+    // 1 token (12 decimals) at $1 paid over a year on a $100 stake = 1 %.
+    const year = 31_556_952n
+    expect(payoutAprPercScaled(10n ** 12n, year, 12, USD, 100n * USD)).toBe(1n * 10n ** BigInt(PERC_DECIMALS))
+    expect(payoutAprPercScaled(1n, year, 12, null, USD)).toBeNull()
+    expect(payoutAprPercScaled(1n, year, 12, USD, 0n)).toBeNull()
+  })
+})
+
+describe('v3 time-weighted TVL', () => {
+  it('averages the priced hours and refuses a window mostly unpriced', () => {
+    expect(timeWeightedTvlUsd([{ tvlUsd: 100 }, { tvlUsd: 300 }])).toBe(200)
+    const nineOfTen = [...Array.from({ length: 9 }, () => ({ tvlUsd: 10 })), { tvlUsd: null }]
+    expect(timeWeightedTvlUsd(nineOfTen)).toBe(10)
+    expect(timeWeightedTvlUsd([{ tvlUsd: 10 }, { tvlUsd: null }])).toBeNull()
+    expect(timeWeightedTvlUsd([])).toBeNull()
   })
 })

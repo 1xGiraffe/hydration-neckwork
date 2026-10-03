@@ -67,12 +67,15 @@ import { DECIMAL_STRINGS, PRICE_LOOKBACK_DAYS, scaledDecimal, scaledUsd } from '
 //    and climbs to the full rate with age (25 % for every live farm today), so the
 //    published number is the rate a matured deposit earns — the maximum the UI
 //    shows as the top of its range.
-//  * Farms past their planned schedule. `plannedYieldingPeriods` periods after
-//    creation the budget is spent, and what a farm pays after that depends on
-//    whether its pot was topped up — pot balances are not readable from the indexed
-//    balances for the ERC20-backed reward assets these farms use. Such a farm keeps
-//    its entry with a null rate and its reward assets still listed, so a consumer can
-//    tell "a farm exists, its rate is unknown" from "no farm here" (see AssetFarmApr).
+//  * Farms past their planned schedule, on the public per-asset surface. The pallet
+//    never stops at `planned_yielding_periods`: `sync_global_farm` pays the same
+//    `min(...)` every period, capped only by what the global farm's account still
+//    holds (`left_to_distribute`), and emits `AllRewardsDistributed` when that cap
+//    is zero. So past the plan a farm pays exactly while its pot lasts — or again
+//    after a top-up. `omnipoolFarmAprByAsset` keeps such a farm with a null rate;
+//    the explorer's yields read its pot from the warehouse sync events instead
+//    (`readFarmPayouts` / `decideFarmRate`): 0 % "ended" when the last sync paid
+//    nothing, the paid-out rate over the trailing window when it is still paying.
 
 /** Decimals kept on a percentage, matching the wire convention ("1.7353" = 1.7353 %). */
 export const PERC_DECIMALS = 4
@@ -164,7 +167,17 @@ export type FarmRateTerms = Pick<LiveFarm, 'rewardAssetId' | 'multiplier' | 'yie
 export interface FarmAprEntry<F = LiveFarm> {
   farm: F
   aprScaled: bigint | null
+  /** Where the rate comes from, when the caller asked for pot state (see FarmRateState). */
+  state?: FarmRateState
 }
+
+/**
+ * How a farm's rate was decided. `active`: inside its planned schedule, the pallet's
+ * rule. `past-end`: past the plan with budget left — the rate its pot actually paid
+ * over the trailing window, else (no syncs to measure) the pallet's rule. `ended`:
+ * its last sync paid nothing because the pot is empty — 0 % until a top-up.
+ */
+export type FarmRateState = 'active' | 'past-end' | 'ended'
 
 /**
  * The APR of the farms on one Omnipool asset, and which assets pay for them.
@@ -564,17 +577,143 @@ function isFarmedModelEmpty(rows: FarmTvlRow[]): boolean {
   return rows.length > 0 && rows.every(row => Number(row.positions) === 0)
 }
 
+// ── pot state from the warehouse sync events ──
+
+/** The trailing window a past-plan farm's paid-out rate is measured over. */
+export const FARM_PAYOUT_WINDOW_DAYS = 30
+/** Shortest span of syncs a paid-out rate is read from; anything shorter is noise. */
+const MIN_PAYOUT_SECONDS = 86_400n
+
+export type WarehouseLm = 'OmnipoolWarehouseLM' | 'XYKWarehouseLM'
+export interface FarmSyncRow {
+  global_farm_id: number | string
+  block_height: number | string
+  event_index: number | string
+  t: number | string
+  drained: number | string
+  acc: string
+  z: string
+}
+/**
+ * What a global farm's pot did over the window. `drained`: its newest sync paid
+ * nothing (the pallet's `AllRewardsDistributed`, emitted in the same sync).
+ * `paying`: syncs spanning at least a day, with `rewardRaw` paid between the first
+ * and the last of them. `quiet`: too few syncs to measure, newest one not drained.
+ */
+export interface FarmPayout { state: 'drained' | 'paying' | 'quiet'; rewardRaw: bigint; seconds: bigint }
+
+/**
+ * Every global-farm sync of one warehouse instance in the window, with the
+ * `AllRewardsDistributed` beside it. The two arrive from the same `sync_global_farm`
+ * call, the drained marker first. A replayed range repeats rows, so the fold keys
+ * them by (block, event index).
+ */
+export function buildFarmSyncSql(lm: WarehouseLm): string {
+  return `
+SELECT
+  toUInt32OrZero(JSONExtractString(args_json, 'globalFarmId')) AS global_farm_id,
+  block_height,
+  event_index,
+  toUnixTimestamp(block_timestamp) AS t,
+  event_name = '${lm}.AllRewardsDistributed' AS drained,
+  JSONExtractString(args_json, 'accumulatedRpz') AS acc,
+  JSONExtractString(args_json, 'totalSharesZ') AS z
+FROM price_data.raw_events
+WHERE event_name IN ('${lm}.GlobalFarmAccRPZUpdated', '${lm}.AllRewardsDistributed')
+  AND block_timestamp > toDateTime({anchor:UInt32}) - INTERVAL {windowDays:UInt32} DAY
+  AND block_timestamp <= toDateTime({anchor:UInt32})`
+}
+
+/**
+ * Per global farm: was its newest sync empty, and what did its syncs pay. Each
+ * sync's reward is the growth of `accumulated_rpz` (FixedU128) times the
+ * `total_shares_z` it was spread over — the pallet's own
+ * `calculate_accumulated_rps(acc, z, reward) = acc + reward / z`, inverted.
+ */
+export function foldFarmPayouts(rows: ReadonlyArray<FarmSyncRow>): Map<number, FarmPayout> {
+  const seen = new Set<string>()
+  const byFarm = new Map<number, Array<{ block: number; idx: number; t: bigint; drained: boolean; acc: bigint; z: bigint }>>()
+  for (const r of rows) {
+    const key = `${r.block_height}:${r.event_index}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const g = Number(r.global_farm_id)
+    const drained = Number(r.drained) === 1
+    const list = byFarm.get(g) ?? []
+    list.push({ block: Number(r.block_height), idx: Number(r.event_index), t: BigInt(r.t), drained, acc: drained ? 0n : BigInt(r.acc || '0'), z: drained ? 0n : BigInt(r.z || '0') })
+    byFarm.set(g, list)
+  }
+  const out = new Map<number, FarmPayout>()
+  for (const [g, list] of byFarm) {
+    list.sort((a, b) => a.block - b.block || a.idx - b.idx)
+    const syncs = list.filter(e => !e.drained)
+    const last = syncs[syncs.length - 1]
+    if (!last) continue
+    const drainedAt = new Set(list.filter(e => e.drained).map(e => e.block))
+    if (drainedAt.has(last.block)) { out.set(g, { state: 'drained', rewardRaw: 0n, seconds: 0n }); continue }
+    let rewardRaw = 0n
+    for (let i = 1; i < syncs.length; i++) {
+      const grew = syncs[i].acc - syncs[i - 1].acc
+      if (grew > 0n) rewardRaw += grew * syncs[i].z / FIXED_ONE
+    }
+    const seconds = last.t - syncs[0].t
+    out.set(g, seconds >= MIN_PAYOUT_SECONDS ? { state: 'paying', rewardRaw, seconds } : { state: 'quiet', rewardRaw: 0n, seconds })
+  }
+  return out
+}
+
+/** The sync-derived pot state of every global farm of one warehouse instance, at `anchorSec`. */
+export async function readFarmPayouts(client: ClickHouseClient, lm: WarehouseLm, anchorSec: number): Promise<Map<number, FarmPayout>> {
+  const res = await client.query({
+    query: buildFarmSyncSql(lm),
+    query_params: { anchor: anchorSec, windowDays: FARM_PAYOUT_WINDOW_DAYS },
+    format: 'JSONEachRow',
+  })
+  return foldFarmPayouts(await res.json<FarmSyncRow>())
+}
+
+/**
+ * A paid-out reward as an APR on the stake (10^-PERC_DECIMALS percent): what the pot
+ * actually paid per second, annualised, at the reward's current price over the
+ * stake's current value. Null without a price or a stake.
+ */
+export function payoutAprPercScaled(rewardRaw: bigint, seconds: bigint, rewardDecimals: number, rewardPriceUsd: bigint | null, stakeUsd: bigint | null): bigint | null {
+  if (rewardPriceUsd == null || stakeUsd == null || stakeUsd <= 0n || seconds <= 0n) return null
+  return divRoundHalfUp(
+    rewardRaw * rewardPriceUsd * SECONDS_PER_YEAR * 100n * PERC_UNIT,
+    10n ** BigInt(rewardDecimals) * seconds * stakeUsd,
+  )
+}
+
+/**
+ * One farm's rate under its pot state. An empty pot is 0 % ("ended") whatever the
+ * schedule says; inside the plan the pallet's rule (`scheduled`) holds; past it the
+ * rate is what the pot paid over the window, or — with nothing to measure and no
+ * sign the pot ran dry — the pallet's rule, which is what it pays while budget lasts.
+ */
+export function decideFarmRate(
+  pastEnd: boolean, scheduled: bigint | null, payout: FarmPayout | undefined, paid: () => bigint | null,
+): { aprScaled: bigint | null; state: FarmRateState } {
+  if (payout?.state === 'drained') return { aprScaled: 0n, state: 'ended' }
+  if (!pastEnd) return { aprScaled: scheduled, state: 'active' }
+  if (payout?.state === 'paying') return { aprScaled: paid(), state: 'past-end' }
+  return { aprScaled: scheduled, state: 'past-end' }
+}
+
 /**
  * Farm APR per live Omnipool yield farm, at the yield surface's anchor — the per-farm
  * terms `omnipoolFarmAprByAsset` sums, exposed so the explorer can state each farm
  * (and each reward asset) of a pool on its own.
  */
-export async function omnipoolFarmAprs(client: ClickHouseClient, anchor: string): Promise<FarmAprEntry[]> {
+export async function omnipoolFarmAprs(client: ClickHouseClient, anchor: string, opts: { potState?: boolean } = {}): Promise<FarmAprEntry[]> {
   const configRes = await client.query({ query: buildFarmConfigSql(), format: 'JSONEachRow' })
   const farms = foldLiveFarms(await configRes.json<FarmConfigRow>())
   if (!farms.length) return []
 
   const at = new Date(iso(anchor))
+  // With pot state, a farm past its plan is rated too (decideFarmRate); without it
+  // (the public per-asset surface) it stays null as documented in the header.
+  const payouts = opts.potState ? await readFarmPayouts(client, 'OmnipoolWarehouseLM', Math.floor(at.getTime() / 1000)) : null
   const split = splitAcrossYieldFarms(farms)
   if (split.size) {
     console.warn(`[pool-yield] farm APR: global farm(s) ${[...split].join(', ')} run more than one live yield farm — `
@@ -583,7 +722,7 @@ export async function omnipoolFarmAprs(client: ClickHouseClient, anchor: string)
   // A farm past its planned schedule or under a split global farm still appears in
   // the result (with a null rate and its reward assets), but nothing needs to be
   // read for it.
-  const rateable = farms.filter(farm => farm.endsAt > at && !split.has(farm.globalFarmId))
+  const rateable = farms.filter(farm => (payouts || farm.endsAt > at) && !split.has(farm.globalFarmId))
 
   const assets = [...new Set(rateable.map(f => f.assetId))].sort((a, b) => a - b)
   const priceAssets = [...new Set([...assets, ...rateable.map(f => f.rewardAssetId)].map(priceAssetId))].sort((a, b) => a - b)
@@ -602,10 +741,15 @@ export async function omnipoolFarmAprs(client: ClickHouseClient, anchor: string)
   return farms.map(farm => {
     const row = staked.get(farm.assetId)
     const value = outage || !row ? null : farmedValueUsd(row, prices.get(priceAssetId(farm.assetId)))
-    const aprScaled = farm.endsAt > at && !split.has(farm.globalFarmId)
-      ? farmAprPercScaled(farm, value, prices.get(priceAssetId(farm.rewardAssetId)) ?? null)
-      : null
-    return { farm, aprScaled }
+    const rewardPrice = prices.get(priceAssetId(farm.rewardAssetId)) ?? null
+    if (split.has(farm.globalFarmId)) return { farm, aprScaled: null }
+    if (!payouts) return { farm, aprScaled: farm.endsAt > at ? farmAprPercScaled(farm, value, rewardPrice) : null }
+    const payout = payouts.get(farm.globalFarmId)
+    return {
+      farm,
+      ...decideFarmRate(farm.endsAt <= at, farmAprPercScaled(farm, value, rewardPrice), payout,
+        () => payoutAprPercScaled(payout?.rewardRaw ?? 0n, payout?.seconds ?? 0n, assetDescriptor(farm.rewardAssetId).decimals, rewardPrice, value)),
+    }
   })
 }
 
