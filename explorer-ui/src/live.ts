@@ -34,9 +34,17 @@ export const LIVE_PUSH_KEYS = ['stats', 'blocks', 'extrinsics', 'events', 'activ
 // pool that churns several times a second would be most of a refetch storm for
 // data that did not change.
 export const POOL_PUSH_KEYS = ['extrinsics', 'events', 'activity'] as const
+// The price-bearing reads: an asset's detail and holders, the asset directory,
+// an account's detail, the oracle overview and the pair chart (an intent's
+// market, keyed on the price head server-side). The api re-values them per PRICE
+// GENERATION (the frame's `price`), which advances only when a current price
+// actually moved — so they refetch on that, not on every block, and stamp it on
+// their URLs (`priceHeadTag`) to get past the micro-cache's previous entry.
+export const PRICE_PUSH_KEYS = ['asset', 'assets', 'holders', 'address', 'oracles', 'pair-chart'] as const
 
 // `poolOnly` — the frame carried a transaction-pool change and no new block.
-export interface HeadPush { head: number; poolOnly: boolean }
+// `prices` — the price generation moved; `pricesOnly` — and nothing else did.
+export interface HeadPush { head: number; poolOnly: boolean; prices?: boolean; pricesOnly?: boolean }
 type HeadListener = (push: HeadPush) => void
 const headListeners = new Set<HeadListener>()
 let source: EventSource | null = null
@@ -50,6 +58,9 @@ let lastBest = 0
 // blocks. A counter, not a height — compared for difference, not order (an api
 // restart resets it).
 let lastPool = 0
+// The api's price generation: an opaque id (compared for difference, never
+// order), 0 until the stream has carried one.
+let lastPrice = 0
 // Pool-only frames arrive many times per block — every mempool entry that
 // appears, drops or is judged bumps the generation — and the generation rides
 // in `liveHeadTag`, so each one is a DIFFERENT cache key and therefore a full
@@ -115,6 +126,9 @@ let pendingHiddenHead = 0
 // ...and whether everything deferred so far was pool-only. One real block among
 // them makes the catch-up a full refetch.
 let pendingHiddenPoolOnly = true
+// …and whether any of them moved the price generation, and whether ONLY that.
+let pendingHiddenPrices = false
+let pendingHiddenPricesOnly = true
 
 // The newest pushed heads while the stream is healthy, or ''. The api client
 // stamps this onto live-feed URLs (`h=`): the nginx micro-cache keys on the
@@ -127,23 +141,40 @@ export function liveHeadTag(): string {
   const heads = lastBest > lastHead ? `${lastHead}-${lastBest}` : `${lastHead}`
   return lastPool > 0 ? `${heads}.p${lastPool}` : heads
 }
+// The pushed price generation while the stream is healthy, or ''. Stamped on the
+// price-bearing URLs (`pg=`) for the same reason `liveHeadTag` is on the feeds:
+// a pushed refetch must miss the micro-cache entry built for the previous one.
+export function priceHeadTag(): string {
+  return streamHealthy && lastPrice > 0 ? String(lastPrice) : ''
+}
 
-function dispatchHead(head: number, poolOnly: boolean): void {
+function dispatchHead(head: number, poolOnly: boolean, prices = false, pricesOnly = false): void {
   if (typeof document !== 'undefined' && document.hidden) {
     pendingHiddenHead = head
-    pendingHiddenPoolOnly = pendingHiddenPoolOnly && poolOnly
+    pendingHiddenPoolOnly = pendingHiddenPoolOnly && (poolOnly || pricesOnly)
+    pendingHiddenPrices = pendingHiddenPrices || prices
+    pendingHiddenPricesOnly = pendingHiddenPricesOnly && pricesOnly
     return
   }
   pendingHiddenHead = 0
   pendingHiddenPoolOnly = true
-  headListeners.forEach(l => l({ head, poolOnly }))
+  pendingHiddenPrices = false
+  pendingHiddenPricesOnly = true
+  headListeners.forEach(l => l({ head, poolOnly, prices, pricesOnly }))
 }
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden || pendingHiddenHead === 0) return
-    const push = { head: pendingHiddenHead, poolOnly: pendingHiddenPoolOnly }
+    const push = {
+      head: pendingHiddenHead,
+      poolOnly: pendingHiddenPoolOnly && !pendingHiddenPricesOnly,
+      prices: pendingHiddenPrices,
+      pricesOnly: pendingHiddenPricesOnly,
+    }
     pendingHiddenHead = 0
     pendingHiddenPoolOnly = true
+    pendingHiddenPrices = false
+    pendingHiddenPricesOnly = true
     headListeners.forEach(l => l(push))
   })
 }
@@ -175,16 +206,18 @@ export function useHeadStream(): boolean {
 // current frame, which must not trigger a redundant refetch storm. `head` is
 // the finalized-ingested checkpoint, `best` the newest unfinalized block; both
 // only ever advance. `pool` is the transaction-pool generation and merely
-// CHANGES (an api restart resets it), so it compares for difference.
-export interface HeadFrame { head: number; best: number; pool: number }
+// CHANGES (an api restart resets it), so it compares for difference; so does
+// `price`, the price generation (absent from an older api).
+export interface HeadFrame { head: number; best: number; pool: number; price?: number }
 export function parseHeadEvent(data: string, prev: HeadFrame): HeadFrame | null {
   try {
-    const raw = JSON.parse(data) as { head?: unknown; best?: unknown; pool?: unknown }
+    const raw = JSON.parse(data) as { head?: unknown; best?: unknown; pool?: unknown; price?: unknown }
     const head = Number.isSafeInteger(Number(raw.head)) ? Number(raw.head) : 0
     const best = Number.isSafeInteger(Number(raw.best)) ? Number(raw.best) : 0
     const pool = Number.isSafeInteger(Number(raw.pool)) ? Number(raw.pool) : prev.pool
-    if (head <= prev.head && best <= prev.best && pool === prev.pool) return null
-    return { head: Math.max(head, prev.head), best: Math.max(best, prev.best), pool }
+    const price = raw.price != null && Number.isSafeInteger(Number(raw.price)) && Number(raw.price) > 0 ? Number(raw.price) : prev.price
+    if (head <= prev.head && best <= prev.best && pool === prev.pool && price === prev.price) return null
+    return { head: Math.max(head, prev.head), best: Math.max(best, prev.best), pool, price }
   } catch { return null }
 }
 
@@ -193,20 +226,28 @@ function connectHead(): void {
   source = new EventSource('/api/explorer/live')
   source.addEventListener('open', () => setStreamHealthy(true))
   source.addEventListener('head', e => {
-    const frame = parseHeadEvent((e as MessageEvent<string>).data, { head: lastHead, best: lastBest, pool: lastPool })
+    const frame = parseHeadEvent((e as MessageEvent<string>).data, { head: lastHead, best: lastBest, pool: lastPool, price: lastPrice || undefined })
     if (frame == null) return
-    const poolOnly = frame.head === lastHead && frame.best === lastBest
+    const blockMoved = frame.head !== lastHead || frame.best !== lastBest
+    const poolMoved = frame.pool !== lastPool
+    const priceMoved = frame.price != null && frame.price !== lastPrice
     lastHead = frame.head
     lastBest = frame.best
     // Always current, even for a throttled frame: whenever a dispatch does go
     // out it must carry the newest generation, or the refetch it triggers would
     // be keyed to a pool state already superseded.
     lastPool = frame.pool
+    if (frame.price != null) lastPrice = frame.price
     const head = Math.max(frame.head, frame.best)
-    if (poolOnly) { poolThrottle.push(head); return }
+    if (!blockMoved) {
+      if (poolMoved) poolThrottle.push(head)
+      // A price push is never throttled: it moves at most once per block.
+      if (priceMoved) dispatchHead(head, false, true, true)
+      return
+    }
     // A block refetch already subsumes any pool change collapsed behind it.
     poolThrottle.reset()
-    dispatchHead(head, false)
+    dispatchHead(head, false, priceMoved)
   })
   // Network drops auto-reconnect (server sends `retry:`); a non-200 response
   // (e.g. the mocked test API) closes the source for good. Either way the
