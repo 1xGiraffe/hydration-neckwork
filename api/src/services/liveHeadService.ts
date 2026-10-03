@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import type { ServerResponse } from 'node:http'
 import { ensurePriceState, publishIndexedRawHead, publishPriceHead } from './explorerService.ts'
 import { mempoolGeneration, pendingBestHeight } from './pendingHeadService.ts'
+import { publishRouteTailHead } from './pairPriceSource.ts'
 
 // Server-sent head events: one shared ClickHouse poller fans two watermarks
 // out to every connected tab, so live surfaces refetch the moment their data
@@ -98,6 +99,9 @@ async function pollOnce(): Promise<void> {
       lastPool = pool
       lastPrice = price
       publishIndexedRawHead(lastHead)
+      // …and into the route-priced pair tail's head, so the candle refetch this
+      // push triggers folds the tail up to the pushed block.
+      publishRouteTailHead(lastHead)
       const frame = sseHeadFrame(lastHead, lastMain, lastBest, lastPool, lastPrice)
       for (const c of clients) c.write(frame)
     }

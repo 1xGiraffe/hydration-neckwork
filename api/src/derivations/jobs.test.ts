@@ -1392,7 +1392,9 @@ describe('xcm_arrivals', () => {
   it('derives arrivals from the feed walk, not from its own SQL', () => {
     const src = readFileSync(
       fileURLToPath(new URL('./jobs.ts', import.meta.url)), 'utf8')
-    const section = src.slice(src.indexOf('xcm_arrivals ──'))
+    const start = src.indexOf('xcm_arrivals ──')
+    const next = src.indexOf('// ─────────────────────────', start)
+    const section = src.slice(start, next < 0 ? undefined : next)
     expect(section).toContain('xcmInboundCreditsForBlocks')
     // No second copy of the classification: these are the constants the SQL version
     // carried, and their absence is what keeps the two from diverging again.

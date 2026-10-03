@@ -23,6 +23,15 @@ const ALLOWED_SHARED = new Set([
   // disagrees with itself — which is exactly what the two implementations it
   // replaced did (an envelope over stored candles vs the per-block ratio).
   'services/crossPair.ts',
+  // The pair price-source switch (PAIR_PRICE_SOURCE) and the route-priced candle
+  // read behind it: /v1/prices/pair and the explorer's pair readers take the same
+  // switch and the same route candles, so a pair cannot be route-priced on one
+  // surface and USD-ratio-priced on another.
+  'services/pairPriceSource.ts',
+  // The pair volume (trades between the two assets, per 5-minute bucket): the
+  // public pair route's additive pairVolumeUsd/volumeBase/volumeQuote and the
+  // explorer's pair readers (preis /candles, the pair chart) read one definition.
+  'services/pairVolume.ts',
   'services/poolService.ts',
   'services/volumeService.ts',
   // Venue-neutral valuation/money helpers, moved out of poolVolumes.ts so the

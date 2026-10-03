@@ -61,6 +61,15 @@ export interface ApiCandle {
   volumeSell: number
   volumeTotal: number
   omniwatch?: OmniwatchCandleSummary
+  /**
+   * Asset pairs only (a quote that is an asset, not the dollar): the volume of the
+   * trades BETWEEN base and quote (services/pairVolume.ts) — in USD, and in whole
+   * units of the base and of the quote. The volume* fields above stay the base
+   * asset's own volume against anything.
+   */
+  pairVolumeUsd?: number
+  pairVolumeBase?: number
+  pairVolumeQuote?: number
 }
 
 /**

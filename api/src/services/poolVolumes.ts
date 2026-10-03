@@ -355,12 +355,20 @@ ORDER BY volume DESC, pool_key`
  * aave leg INSIDE a routed trade is a real hop of a real swap and already
  * cancels in the per-asset net, so only whole-group wraps may be removed.
  */
-export function routedNettedCteSql(timePredicate?: string, priceSource?: string, carryDayAndFees = false, dayBucket: RoutedBucket = 'day'): string {
+export function routedNettedCteSql(
+  timePredicate?: string,
+  priceSource?: string,
+  carryDayAndFees = false,
+  dayBucket: RoutedBucket = 'day',
+  options: RoutedNettedOptions = {},
+): string {
+  const carryFees = options.fees ?? carryDayAndFees
+  const carryAmounts = options.amounts ?? false
   const zero = 'toDecimal256(0, 12)'
   const fees = ['fee_total', 'fee_account', 'fee_burned', 'fee_unknown', 'fee_hub']
   // Every fee-carrying fragment collapses to nothing when the caller does not
   // read the fees, so the two shapes stay one chain rather than two.
-  const legFees = carryDayAndFees
+  const legFees = carryFees
     ? `,
          sumIf(usd, leg_kind = 'fee') AS fee_total,
          sumIf(usd, leg_kind = 'fee' AND fee_dest = 'account') AS fee_account,
@@ -368,24 +376,42 @@ export function routedNettedCteSql(timePredicate?: string, priceSource?: string,
          sumIf(usd, leg_kind = 'fee' AND fee_dest = '') AS fee_unknown,
          sumIf(usd, leg_kind = 'fee' AND asset_id = ${H2O_ASSET_ID}) AS fee_hub`
     : ''
-  const dayExpr = dayBucket === 'hour' ? `toStartOfHour(min(block_time), 'UTC')` : `toDate(min(block_time), 'UTC')`
+  const dayExpr = dayBucket === 'hour'
+    ? `toStartOfHour(min(block_time), 'UTC')`
+    : dayBucket === '5min' ? `toStartOfFiveMinutes(min(block_time), 'UTC')` : `toDate(min(block_time), 'UTC')`
   const fillDay = carryDayAndFees ? `\n         ${dayExpr} AS day,` : ''
-  const fillFees = carryDayAndFees ? `\n         ${fees.map(fee => `sum(${fee}) AS ${fee}`).join(', ')},` : ''
+  const fillFees = carryFees ? `\n         ${fees.map(fee => `sum(${fee}) AS ${fee}`).join(', ')},` : ''
   const flaggedCarried = carryDayAndFees ? `day, ` : ''
-  const flaggedFees = carryDayAndFees ? `\n         ${fees.join(', ')},` : ''
+  const flaggedFees = carryFees ? `\n         ${fees.join(', ')},` : ''
   // The fee totals belong to the FILL, so they ride on its first net entry;
   // without them a net entry is just the (asset, net) pair the array holds.
-  const keyedLeg = carryDayAndFees
-    ? `arrayJoin(arrayMap((n, i) -> tuple(tupleElement(n, 1), tupleElement(n, 2),
+  // With `amounts` a net entry carries the raw net amount as its third element,
+  // so the fee totals start one position later.
+  const feeAt = carryAmounts ? 4 : 3
+  const keyedLeg = carryFees
+    ? `arrayJoin(arrayMap((n, i) -> tuple(tupleElement(n, 1), tupleElement(n, 2),${carryAmounts ? ' tupleElement(n, 3),' : ''}
                                             ${fees.map(fee => `if(i = 1, ${fee}, ${zero})`).join(',\n                                            ')}),
                             nets, arrayEnumerate(nets))) AS leg`
     : 'arrayJoin(nets) AS leg'
-  const nettedFees = carryDayAndFees
-    ? `,\n         ${fees.map((fee, i) => `sum(tupleElement(leg, ${i + 3})) AS ${fee}`).join(',\n         ')}`
+  const nettedFees = carryFees
+    ? `,\n         ${fees.map((fee, i) => `sum(tupleElement(leg, ${i + feeAt})) AS ${fee}`).join(',\n         ')}`
     : ''
+  // The raw net amount per (fill, asset) and then per (trade, asset): an asset
+  // with no price still has a sign, so a caller can tell a trade's endpoints
+  // apart from the intermediates that cancelled, priced or not.
+  const legAmount = carryAmounts
+    ? `,\n         sum(multiIf(leg_kind = 'out', toInt256(amount), leg_kind = 'in', -toInt256(amount), toInt256(0))) AS net_amt`
+    : ''
+  const netEntry = carryAmounts ? 'tuple(asset_id, net_usd, net_amt)' : 'tuple(asset_id, net_usd)'
+  const nettedAmount = carryAmounts ? ',\n         sum(tupleElement(leg, 3)) AS net_amt' : ''
   // `fee_dest` classifies a fee leg and `block_time` dates the fill: both exist
   // for the day/fee columns alone, so they are not carried when those are off.
-  const pricedExtras = carryDayAndFees ? ['op_key', 'venue', 'fee_dest', 'block_time'] : ['op_key', 'venue']
+  const pricedExtras = [
+    'op_key', 'venue',
+    ...(carryFees ? ['fee_dest'] : []),
+    ...(carryDayAndFees ? ['block_time'] : []),
+    ...(carryAmounts ? ['amount'] : []),
+  ]
   const fillAssetTime = carryDayAndFees ? ' min(block_time) AS block_time,' : ''
   return `${legsCteSql('1', timePredicate)},
 ${pricedCteSql(pricedExtras, priceSource)},
@@ -394,7 +420,7 @@ fill_asset AS (
          any(op_key) AS op_key, any(venue) AS venue,${fillAssetTime}
          maxIf(1, leg_kind = 'in') AS has_in,
          maxIf(1, leg_kind = 'out') AS has_out,
-         sum(multiIf(leg_kind = 'out', usd, leg_kind = 'in', -usd, ${zero})) AS net_usd${legFees}
+         sum(multiIf(leg_kind = 'out', usd, leg_kind = 'in', -usd, ${zero})) AS net_usd${legAmount}${legFees}
   FROM priced
   GROUP BY block_height, event_index, asset_id
 ),
@@ -402,7 +428,7 @@ fill AS (
   SELECT block_height, event_index, any(op_key) AS op_key, any(venue) AS venue,${fillDay}
          maxIf(has_out, asset_id = ${H2O_ASSET_ID}) AS out_hub,
          maxIf(has_in, asset_id = ${H2O_ASSET_ID}) AS in_hub,${fillFees}
-         groupArray(tuple(asset_id, net_usd)) AS nets
+         groupArray(${netEntry}) AS nets
   FROM fill_asset
   GROUP BY block_height, event_index
 ),
@@ -426,7 +452,7 @@ keyed AS (
 netted AS (
   SELECT ${flaggedCarried}trade_key, tupleElement(leg, 1) AS asset_id,
          min(is_aave) AS all_aave,
-         sum(tupleElement(leg, 2)) AS net_usd${nettedFees}
+         sum(tupleElement(leg, 2)) AS net_usd${nettedAmount}${nettedFees}
   FROM keyed
   GROUP BY ${flaggedCarried}trade_key, asset_id
 )`
@@ -465,8 +491,19 @@ export function nettedTradeSidesSql(groupColumns: string[] = [], extraAggregates
   HAVING min(all_aave) = 0`
 }
 
-/** The calendar bucket routedNettedCteSql's `day` column carries: the UTC day, or the UTC hour. */
-export type RoutedBucket = 'day' | 'hour'
+/** The calendar bucket routedNettedCteSql's `day` column carries: the UTC day, the UTC hour, or the 5-minute bucket. */
+export type RoutedBucket = 'day' | 'hour' | '5min'
+
+/**
+ * routedNettedCteSql's optional carries. `fees` (default: `carryDayAndFees`)
+ * carries the per-fill fee split; `amounts` adds `net_amt`, the raw (unscaled)
+ * net amount per (trade, asset), out positive and in negative — the pair-volume
+ * fold reads its sign to find a trade's endpoints whether or not they are priced.
+ */
+export interface RoutedNettedOptions {
+  fees?: boolean
+  amounts?: boolean
+}
 
 /** `[from, to)` over the legs, both bounds `{from:String}` / `{to:String}` UTC instants. */
 const ROUTED_BUCKET_LEG_WINDOW = `block_timestamp >= toDateTime({from:String}, 'UTC')

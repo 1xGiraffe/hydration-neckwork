@@ -30,10 +30,12 @@ import {
   runPoolVolumeHourly,
   runAssetVolumeHourly,
   runRoutedVolumeHourly,
+  runPairVolume5min,
   runUniswapV3Legs,
   runRevenueEvents,
   runXykFarmIntervals,
   runXykTotalShares,
+  runPairRouteOhlc,
   type DerivationResult,
 } from './jobs.ts'
 
@@ -84,6 +86,9 @@ const JOBS: DerivationJob[] = [
   { model: 'pool_volume_hourly', run: runPoolVolumeHourly, needsAssets: true },
   { model: 'asset_volume_hourly', run: runAssetVolumeHourly, needsAssets: true },
   { model: 'routed_volume_hourly', run: runRoutedVolumeHourly, needsAssets: true },
+  // The pair candles' volume: the routed fold's netting, per pair and 5 minutes,
+  // on the same watermarks and registry guard.
+  { model: 'pair_volume_5min', run: runPairVolume5min, needsAssets: true },
   { model: 'omnipool_owner_intervals', run: runOmnipoolOwnerIntervals },
   { model: 'xyk_farm_intervals', run: runXykFarmIntervals },
   { model: 'xyk_total_shares', run: runXykTotalShares },
@@ -98,6 +103,11 @@ const JOBS: DerivationJob[] = [
   // integer amount and the message's own origin, no valuation. Order-independent of
   // the jobs above — it reads raw_events/raw_xcm_activity, which none of them write.
   { model: 'xcm_arrivals', run: runXcmArrivals },
+  // Route-priced pair candles. Order-independent of every job above (it reads
+  // raw_block_snapshots, the v3 pools' logs, the Omnipool fee legs and ohlc_1h,
+  // none of which they write); its route search reads registry decimals, so it
+  // shares the registry guard.
+  { model: 'pair_route_ohlc', run: runPairRouteOhlc, needsAssets: true },
 ]
 
 export interface RunCycleDeps {
