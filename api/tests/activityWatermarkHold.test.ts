@@ -213,6 +213,7 @@ describe('every scoped activity total is counted through the one path', () => {
   // against the 1.68 CPU-seconds of the count it spares.
   it('reads the watermark once per scope per burst', () => {
     expect(body('async function accountActivityWatermark')).toContain("cached(`explorer:acct-watermark:${accounts.join(',')}`, 2_000")
-    expect(sites(/accountActivityWatermark\(/g)).toBe(5)
+    // Five list/total sites plus the account tab badges (getAccountTabCounts).
+    expect(sites(/accountActivityWatermark\(/g)).toBe(6)
   })
 })
