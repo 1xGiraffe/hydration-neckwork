@@ -8,6 +8,7 @@ import { omnipoolYield, stableswapYield } from '../../services/poolYield.ts'
 import { getUniswapV3PoolLiquidity, uniswapV3HistoryPool, uniswapV3PoolMeta } from '../../services/poolService.ts'
 import { ensurePoolService } from '../services/poolWiring.ts'
 import { fixedV3Grain, v3PoolHistory } from '../../services/uniswapV3History.ts'
+import { pricePipelineHead } from '../../services/pairPriceSource.ts'
 
 // Pool volumes and fee yield. See spec sections "Pools: volumes and yield" and
 // "Semantics" rules 1, 3, 4, 5, 6 and 9 — every number here is defined there.
@@ -301,7 +302,7 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
       description: [
         'One row per closed bucket for a pool on Hydration\'s EVM, keyed by the pool CONTRACT address: the price the swaps left the pool at (open/high/low/close, token1 per token0 in whole tokens), the swaps\' volume and gross fees, the active liquidity after the last swap, and the holdings the pool\'s own logs imply. The same builder serves the explorer\'s pool page, so the two cannot disagree on a bucket.',
         'A bucket without a swap carries the previous close forward (its `swaps` is 0) rather than leaving a hole — a concentrated pool\'s price only moves when it trades. Holdings are a running sum from the pool\'s creation, so the first bucket of a window carries the balance already standing in. An aToken side (aDOT) is valued through its reserve\'s candles, like every other USD figure here.',
-        `\`timestamp\` is the bucket's OPEN on a UTC-aligned grid; \`from\`/\`to\` are floored onto it, the bucket still in progress is never returned, and the window defaults to the most recent ${V3_HISTORY_DEFAULT_BUCKETS} buckets. The window never opens before the pool's first event: a year asked of a week-old pool returns the week, not a year of nulls. At most ${V3_HISTORY_MAX_BUCKETS} buckets per request — a wider window is a 400, never a silently truncated series.`,
+        `\`timestamp\` is the bucket's OPEN on a UTC-aligned grid; \`from\`/\`to\` are floored onto it, the bucket still in progress is never returned (a bucket is closed once the newest indexed block — the chain's FINALIZED head — is past its end, so a returned bucket is never revised), and the window defaults to the most recent ${V3_HISTORY_DEFAULT_BUCKETS} buckets. The window never opens before the pool's first event: a year asked of a week-old pool returns the week, not a year of nulls. At most ${V3_HISTORY_MAX_BUCKETS} buckets per request — a wider window is a 400, never a silently truncated series.`,
         `\`period\` is the chart switch (24h / 7d / 30d / 1y) as one parameter: the window is the period ending at the last closed bucket, on the bucket a ~180-point chart wants — 24h and 7d hourly, 30d in 4-hour buckets, 1y daily — unless \`bucket\` names another. \`period\` and \`from\` together are a 400. Active liquidity is the pool's open ranges (mints net of burns) straddling the tick at the bucket's end, i.e. what the pool's \`liquidity()\` returns at that moment — a range minted or burnt between two swaps moves it at once; the Swap logs' own liquidity field only reports it at swaps. GET /v1/pools/uniswapv3/{pool}/liquidity serves the same ranges as a distribution over ticks.`,
         VALUATION,
       ].join('\n\n'),
@@ -329,7 +330,12 @@ export const poolsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
     if (!pool) throw Object.assign(new Error('unknown pool: no concentrated-liquidity pool at this address'), { statusCode: 404 })
     const { period, from, to } = request.query
     const bucket: V3HistoryBucket = request.query.bucket ?? (period ? V3_PERIOD_BUCKET[period] : '1d')
-    const nowSec = Math.floor(Date.now() / 1000)
+    // "Now" for the closed-bucket rule is the price pipeline's finalized head, not
+    // wall clock: a bucket's last blocks finalize ~46 s after it ends, so a
+    // wall-clock clamp published buckets still missing them and revised them later.
+    // The pool's logs (raw pipeline) and the candles that value them (price
+    // pipeline) are both indexed at or past this head.
+    const nowSec = (await pricePipelineHead(opts.client)).time
     const win = v3HistoryWindow(bucket, from, to, nowSec, period)
     if ('error' in win) throw Object.assign(new Error(win.error), { statusCode: 400 })
     const history = await v3PoolHistory(opts.client, pool, { fromSec: win.fromSec, toSec: win.toSec, grain: fixedV3Grain(V3_HISTORY_BUCKETS[bucket], win.fromSec), closedOnly: true }, nowSec)

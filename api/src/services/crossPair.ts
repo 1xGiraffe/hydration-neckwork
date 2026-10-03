@@ -1,6 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import type { OHLCVInterval } from './ohlcvService.ts'
 import { toClickHouseDateTime } from './ohlcvService.ts'
+import { overlayRouteCandles, pairPriceSource, queryRouteCandles, type PairPriceSource, type Sourced } from './pairPriceSource.ts'
 
 /**
  * Cross-pair OHLC, computed from the per-block ratio.
@@ -234,5 +235,33 @@ export async function queryCrossPairCandles(
     volumeBuy: r.volume_buy,
     volumeSell: r.volume_sell,
     volumeTotal: r.volume_total,
+  }))
+}
+
+/**
+ * A pair's candles under the configured price source (services/pairPriceSource.ts):
+ * the per-block cross rate above, with — in 'route' mode — every bucket the
+ * route-priced fold covers taking the route's price. Volumes stay the cross
+ * candle's (the base asset's USD volume; '0' for a bucket only the route covers).
+ * In 'usd-ratio' mode this IS queryCrossPairCandles, candle for candle.
+ */
+export async function queryPairCandles(
+  client: ClickHouseClient,
+  // `headFloor`: a price-pipeline block the caller already clamped to; the route
+  // tail is folded at least that far (see queryRouteCandles).
+  options: { baseId: number; quoteId: number; startTime: Date; endTime: Date; interval: OHLCVInterval; headFloor?: number },
+  source: PairPriceSource = pairPriceSource(),
+): Promise<Array<Sourced<CrossCandle>>> {
+  if (source !== 'route') return queryCrossPairCandles(client, options)
+  const [cross, route] = await Promise.all([queryCrossPairCandles(client, options), queryRouteCandles(client, options)])
+  return overlayRouteCandles(cross, route, c => c.intervalStart, (rc, existing) => ({
+    intervalStart: rc.intervalStart,
+    open: rc.open,
+    high: rc.high,
+    low: rc.low,
+    close: rc.close,
+    volumeBuy: existing?.volumeBuy ?? '0',
+    volumeSell: existing?.volumeSell ?? '0',
+    volumeTotal: existing?.volumeTotal ?? '0',
   }))
 }

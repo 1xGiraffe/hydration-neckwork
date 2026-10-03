@@ -511,6 +511,9 @@ services:
       # One-off catch-up knob: how far behind the head a notification tick may look
       # (default 600). Wide only for a deliberate replay after a lane lost a stretch.
       - NOTIFICATIONS_MAX_WINDOW_BLOCKS=${NOTIFICATIONS_MAX_WINDOW_BLOCKS:-}
+      # Pair candles' price source (services/pairPriceSource.ts): usd-ratio (default)
+      # or route. Set the same value on api-public; switching recreates both.
+      - PAIR_PRICE_SOURCE=${PAIR_PRICE_SOURCE:-usd-ratio}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       # Live money-market reads use a Hydration RPC reachable from the container.
@@ -639,6 +642,8 @@ services:
       # alongside in public-nginx/nginx.conf). 32 kB carries ~485 ids. Set only for
       # this service: the explorer API takes no such list.
       - NODE_OPTIONS=--max-http-header-size=32768
+      # Pair candles' price source, the same value as api's (services/pairPriceSource.ts).
+      - PAIR_PRICE_SOURCE=${PAIR_PRICE_SOURCE:-usd-ratio}
       - CLICKHOUSE_HOST=http://clickhouse:8123
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       # Published by /rest/service/metadata. Set to "false" on a host that serves

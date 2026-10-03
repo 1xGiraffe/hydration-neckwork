@@ -15,6 +15,7 @@
 //   - revenue_events                     hourly fold, priced-head cut, registry and chain-state fingerprint
 //   - account_revenue                    month rebuild following revenue_events' publication
 //   - xcm_arrivals                       month rebuild by ingest-time watermark, over the feed's own walk
+//   - pair_route_ohlc                    hourly fold over per-block pool snapshots, per-hour replacement inserts, bounded slice per cycle
 //
 // Every publication into a model this module owns goes through its
 // `<table>_staging` twin and is atomic, so a reader never sees a gap or a
@@ -22,7 +23,9 @@
 // (atomicFullReplace), or a partition swapped in by REPLACE PARTITION — a month
 // rebuilt whole (publishPartitions, account_revenue), or a month or pool group
 // reassembled from its untouched buckets plus its recomputed ones (the progressive
-// bucket folds, republishBuckets). Two jobs write without a twin: xcm_arrivals
+// bucket folds, republishBuckets). Three jobs write without a twin: pair_route_ohlc
+// publishes a recomputed hour as one replacement-keyed insert (with is_deleted rows
+// for the keys it no longer holds), xcm_arrivals
 // inserts arrivals keyed for replacement per (block_height, event_index), and
 // uniswap_v3_legs inserts replacement-keyed legs into the shared pool_swap_legs,
 // a table it does not own. Every live table and every staging twin is declared in
@@ -56,8 +59,22 @@ import {
 } from '../services/volumeHourly.ts'
 import { V3_POOLS_CTE, V3_TOKEN_ASSETS_CTE, v3TokenAssetSql } from '../services/revenueStreams.ts'
 import { valuationRegistryFingerprintSql } from '../services/valuation.ts'
-import { allExplorerAssets } from '../services/explorerAssets.ts'
+import { allExplorerAssets, assetDescriptor } from '../services/explorerAssets.ts'
 import { chTimestamp } from '../services/clickhouseTime.ts'
+import {
+  PAIR_ROUTE_RESERVE_PAIRS_SQL,
+  PAIR_ROUTE_TABLES,
+  PAIR_ROUTE_WATERMARKS_TABLE,
+  foldHour,
+  loadFoldHourInputs,
+  pairRouteBlocksSql,
+  pairRouteDailyRowsSql,
+  pairRouteLatestSql,
+  pairRoutePricedSql,
+  type PairRouteRow,
+} from '../services/pairRouteFold.ts'
+import { ROUTE_RULE_BASE, ROUTE_RULE_OMNI_SLIP, ROUTE_RULE_V3 } from '../services/pairRoutes.ts'
+import { PAIR_VOLUME_5MIN_TABLE, pairVolume5minInsertSql } from '../services/pairVolume.ts'
 // The feed's own inbound-XCM walk. Imported, not reimplemented: see the xcm_arrivals
 // section below for the four ways a SQL restatement of it drifted.
 import { xcmInboundCreditsForBlocks, type XcmInboundCredit } from '../services/explorerService.ts'
@@ -291,6 +308,13 @@ export interface StaleBucketsSpec {
   /** A UInt64 expression XOR-ed into a bucket's fingerprint: inputs outside its asset set. */
   fingerprintExtra?: string
   /**
+   * For an unvalued fold: a UInt64 expression over `src` (no asset set) that is the
+   * bucket's whole fingerprint — the rule and inputs it is computed under. `derived`
+   * then also returns the stored `fp_min`/`fp_max`, and a bucket whose stored value
+   * differs is stale.
+   */
+  bucketFingerprint?: string
+  /**
    * A CTE of `with` holding (a, fp): per-asset inputs outside the registry (chain
    * state an asset's rows read) XOR-ed into that asset's fingerprint, so they
    * re-mark exactly the buckets holding the asset.
@@ -324,9 +348,9 @@ export function staleBucketsSql(spec: StaleBucketsSpec): string {
       GROUP BY s.bucket
     )`
     : `,
-    bucket_fp AS (SELECT bucket, toUInt64(0) AS fp FROM src)`
+    bucket_fp AS (SELECT bucket, toUInt64(${spec.bucketFingerprint ?? '0'}) AS fp FROM src)`
   const current = spec.fingerprintExtra ? `bitXor(fp.fp, ${spec.fingerprintExtra})` : 'fp.fp'
-  const fingerprintMoved = spec.valued ? `\n         OR der.fp_min != ${current} OR der.fp_max != ${current}` : ''
+  const fingerprintMoved = spec.valued || spec.bucketFingerprint ? `\n         OR der.fp_min != ${current} OR der.fp_max != ${current}` : ''
   return `
     WITH ${spec.with}${fingerprint}
     SELECT toString(src.bucket) AS bucket, toString(src.src_ingest) AS src_ingest, toString(${current}) AS fingerprint,
@@ -469,6 +493,12 @@ export interface HourlyFold {
   /** Valued at event time: priced cut, candle window, registry fingerprint per row. */
   valued: boolean
   insert: (partition: string, hours: readonly FoldHour[], target: string) => string
+  /**
+   * The rows the staleness check reads a held hour from, when not every row: a
+   * fold that writes a marker row per hour (pair_volume_5min) names it, so the
+   * check reads one row per hour off the key prefix instead of the whole table.
+   */
+  heldRows?: string
 }
 
 /** The first hour a fold does not write: the newest leg's (still filling), or for a valued fold the price head's if older. */
@@ -515,7 +545,8 @@ export function hourlyFoldStaleHoursSql(fold: HourlyFold): string {
       GROUP BY hour
     )`,
     derived: `SELECT hour AS bucket, count() AS n, max(computed_at) AS der_computed${fold.valued ? ', min(registry_fp) AS fp_min, max(registry_fp) AS fp_max' : ''}
-      FROM ${fold.table}
+      FROM ${fold.table}${fold.heldRows ? `
+      WHERE ${fold.heldRows}` : ''}
       GROUP BY hour`,
     valued: fold.valued,
     gate: fold.valued ? 'src.bucket < cut AND src.bucket >= floor' : 'src.bucket < cut',
@@ -638,7 +669,17 @@ export const ROUTED_VOLUME_HOURLY_FOLD: HourlyFold = {
   valued: true, insert: routedVolumeHourlyInsertSql,
 }
 
+// pair_volume_5min: the trades between two assets per 5-minute bucket (the pair
+// candles' volume; services/pairVolume.ts). The routed fold's netting with the
+// endpoint amounts carried, so it costs what that fold costs; one marker row per
+// folded hour is what the staleness check reads.
+export const PAIR_VOLUME_5MIN_FOLD: HourlyFold = {
+  model: 'pair_volume_5min', table: PAIR_VOLUME_5MIN_TABLE, watermarks: POOL_SWAP_HOUR_WATERMARKS_TABLE,
+  valued: true, insert: pairVolume5minInsertSql, heldRows: 'asset_lo = 0 AND asset_hi = 0',
+}
+
 export const runPoolSwapHourly = (client: ClickHouseClient) => runHourlyFold(client, POOL_SWAP_HOURLY_FOLD)
+export const runPairVolume5min = (client: ClickHouseClient) => runHourlyFold(client, PAIR_VOLUME_5MIN_FOLD)
 export const runPoolVolumeHourly = (client: ClickHouseClient) => runHourlyFold(client, POOL_VOLUME_HOURLY_FOLD)
 export const runAssetVolumeHourly = (client: ClickHouseClient) => runHourlyFold(client, ASSET_VOLUME_HOURLY_FOLD)
 export const runRoutedVolumeHourly = (client: ClickHouseClient) => runHourlyFold(client, ROUTED_VOLUME_HOURLY_FOLD)
@@ -2442,4 +2483,332 @@ async function insertXcmArrivals(client: ClickHouseClient, credits: XcmInboundCr
        message_event_index, barriers_in_context, attribution, from_chain, from_parachain_id, computed_at)
       VALUES ${values}`,
   })
+}
+
+// ───────────────────────── pair_route_ohlc ─────────────────────────
+// Route-priced pair candles (services/pairRouteFold.ts; the tables' declaration in
+// clickhouse/schema/014_pair_routes.sql carries the model). A progressive bucket
+// fold whose bucket is a chain-time hour of raw_block_snapshots:
+//
+//  * The watermarks. pair_route_hour_watermarks holds both sides of the staleness
+//    test per hour: the source side MV-fed from raw_block_snapshots' three narrow
+//    key columns (newest snapshot ingest, block span), the derived side written by
+//    this job once it has published the hour (when it computed it, how far into it
+//    it got). The v3 pools' logs have a watermark of their own (below); the
+//    Omnipool fee legs the fee estimates read (raw_events → pool_swap_legs) land
+//    with the same raw ranges as the snapshots.
+//  * The cut. The head hour is folded while it fills (recomputed every cycle until
+//    its newest snapshot has settled), so the stored model trails the chain by
+//    about one cycle — the readers fold the rest on request; an hour is folded only
+//    once the price pipeline has reached it (its priced asset set and USD
+//    notionals come from ohlc_1h) and never below the price pipeline's floor.
+//  * Publication. A recomputed hour is ONE insert per table of its rows plus an
+//    is_deleted row for each key the hour held and no longer does, into
+//    ReplacingMergeTree(computed_at, is_deleted): a recomputed hour equals a fresh
+//    build of it, the insert is atomic (one part), and a cycle writes exactly the
+//    hours it recomputed. A day touched is then re-aggregated from its hourly rows
+//    the same way. Readers read FINAL on one pair's primary-key prefix.
+//  * A cycle folds at most PAIR_ROUTE_HOURS_PER_CYCLE stale hours, newest first:
+//    the head stays fresh while a history refold proceeds a slice per cycle.
+//  * The v3 pools. A pool's state at an hour replays every log of it before the
+//    hour, so a v3 log's ingest (v3_ingest, MV-fed by topic from raw_evm_logs)
+//    re-marks its own hour and every later one: the stale test reads the running
+//    max of v3_ingest. A new pool, a backfilled or repaired log refolds from its
+//    hour on; a live log lands in the head hour.
+//  * The rule. Each hour is fingerprinted on the route rule now in force for it
+//    (pairRoutes ROUTE_RULE_BASE for every hour, ROUTE_RULE_V3 for an hour at or
+//    after the first v3 pool's creation, ROUTE_RULE_OMNI_SLIP at or after the first
+//    Omnipool.SlipFeeSet) XOR the inputs of each part the hour can see (the v3 pools
+//    created at or below its last block with their tokens' registry mapping, fee
+//    and tick spacing; every SlipFeeSet at or below it); the fold stores the
+//    fingerprint it computed under (der_rule), and a differing one is stale.
+//    Changing the rule — a new slip fee, a pool's token gaining its registry
+//    entry — re-marks exactly the hours it can touch, with no marker.
+//  * Prices and the registry. An hour's priced set and USD notionals are its own
+//    candles: a price row written for the hour (price_ingest, MV-fed from
+//    price_data.prices) re-marks it. Each asset's decimals are in the hour's
+//    fingerprint from the first hour the asset was priced, so a decimals
+//    correction re-marks exactly the hours it can change.
+//  * Hour boundaries. An hour starts on the routes the previous hour closed on (its
+//    1h rows' `route`); refolding an hour whose closing routes change re-marks the
+//    next one, which stops at the first hour whose closing routes come out alike.
+
+export const PAIR_ROUTE_HOURS_PER_CYCLE = 72
+
+/** The route-rule fingerprint of an hour whose last block is `maxb` (UInt64 SQL; reads the WITH scalars of pairRouteStaleHoursSql). */
+function pairRouteRuleFingerprintSql(maxb: string, hour: string): string {
+  const part = (name: string, version: number) => (version ? `cityHash64('pair-route:${name}', toUInt64(${version}))` : 'toUInt64(0)')
+  // Each part: its rule version, XOR the inputs of it the hour can see.
+  // Each input list is ONE array of (from, hash) pairs: two separate groupArray
+  // scalars over one CTE need not list its rows in the same order (parallel
+  // aggregation), which paired hashes with the wrong blocks and made the
+  // fingerprint differ between evaluations of the same inputs.
+  const scoped = (from: string, name: string, version: number, pairs: string) => `if(${maxb} >= ${from},
+         bitXor(${part(name, version)},
+                arrayReduce('groupBitXor', arrayMap(p -> if(tupleElement(p, 1) <= ${maxb}, tupleElement(p, 2), toUInt64(0)), ${pairs}))),
+         toUInt64(0))`
+  return `bitXor(bitXor(bitXor(${part('base', ROUTE_RULE_BASE)},
+      ${scoped('v3_from', 'v3', ROUTE_RULE_V3, 'v3_pairs')}),
+      ${scoped('slip_from', 'omni-slip', ROUTE_RULE_OMNI_SLIP, 'slip_pairs')}),
+      arrayReduce('groupBitXor', arrayMap(p -> if(tupleElement(p, 1) <= toUnixTimestamp(${hour}), tupleElement(p, 2), toUInt64(0)), dec_pairs)))`
+}
+
+export function pairRouteStaleHoursSql(): string {
+  return staleBucketsSql({
+    with: `least((SELECT max(hour) FROM ${PAIR_ROUTE_WATERMARKS_TABLE}),
+      toStartOfHour((SELECT max(block_timestamp) FROM price_data.blocks)),
+      (SELECT max(interval_start) FROM price_data.ohlc_1h)) AS cut,
+    ${PRICED_FLOOR_SQL} AS floor,
+    ${V3_TOKEN_ASSETS_CTE},
+    v3_pools AS (
+      SELECT min(p.block_height) AS created,
+             cityHash64(lower(p.pool_address), any(p.fee), any(p.tick_spacing),
+                        any(${v3TokenAssetSql('t0.asset_id', 'p.token0')}), any(${v3TokenAssetSql('t1.asset_id', 'p.token1')})) AS h
+      FROM price_data.uniswap_v3_pools AS p
+      LEFT JOIN token_assets AS t0 ON t0.addr = lower(p.token0)
+      LEFT JOIN token_assets AS t1 ON t1.addr = lower(p.token1)
+      GROUP BY lower(p.pool_address)
+    ),
+    (SELECT if(count() = 0, toUInt32(4294967295), toUInt32(min(created))) FROM v3_pools) AS v3_from,
+    (SELECT groupArray((created, h)) FROM v3_pools) AS v3_pairs,
+    slip_sets AS (
+      SELECT block_height AS b, cityHash64(block_height, event_index, JSONExtractUInt(argMax(args_json, ingested_at), 'slipFee', 'maxSlipFee')) AS h
+      FROM price_data.raw_events
+      WHERE event_name = 'Omnipool.SlipFeeSet'
+      GROUP BY block_height, event_index
+    ),
+    (SELECT if(count() = 0, toUInt32(4294967295), toUInt32(min(b))) FROM slip_sets) AS slip_from,
+    (SELECT groupArray((b, h)) FROM slip_sets) AS slip_pairs,
+    -- Each asset's decimals from the first hour it was priced (an unpriced asset is
+    -- in no pair yet, so a registration re-marks nothing, a decimals correction
+    -- every hour the asset was priced in).
+    dec_assets AS (
+      SELECT o.asset_id AS a, toUnixTimestamp(min(o.interval_start)) AS first_t, cityHash64(o.asset_id, any(r.decimals)) AS h
+      FROM (SELECT DISTINCT asset_id, interval_start FROM price_data.ohlc_1h) AS o
+      INNER JOIN (SELECT asset_id, argMax(decimals, observed_block) AS decimals FROM price_data.assets GROUP BY asset_id) AS r ON r.asset_id = o.asset_id
+      GROUP BY o.asset_id
+    ),
+    (SELECT groupArray((first_t, h)) FROM dec_assets) AS dec_pairs,
+    src AS (
+      SELECT bucket, greatest(snap_ingest, v3_cum, price_ing) AS src_ingest, minb, maxb
+      FROM (
+        SELECT hour AS bucket, max(src_ingest) AS snap_ingest, min(minb) AS minb, max(maxb) AS maxb, max(price_ingest) AS price_ing,
+               max(max(v3_ingest)) OVER (ORDER BY hour ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS v3_cum
+        FROM ${PAIR_ROUTE_WATERMARKS_TABLE}
+        GROUP BY hour
+      )
+      WHERE maxb > 0
+    )`,
+    // The alias reuses the column's name, so n reads the alias (the aggregate)
+    // rather than nesting max() in max().
+    derived: `SELECT hour AS bucket, max(der_computed) AS der_computed, toUInt64(der_computed > toDateTime(0)) AS n,
+        tupleElement(max(der_rule), 2) AS fp_min, fp_min AS fp_max
+      FROM ${PAIR_ROUTE_WATERMARKS_TABLE}
+      GROUP BY hour`,
+    valued: false,
+    bucketFingerprint: pairRouteRuleFingerprintSql('maxb', 'bucket'),
+    gate: 'src.bucket <= cut AND src.bucket >= floor',
+    columns: 'toString(src.minb) AS minb, toString(src.maxb) AS maxb',
+  })
+}
+
+export interface PairRouteStaleHour extends StaleBucket { minb: string; maxb: string }
+
+/** What every hour of one fold run shares: the reserve map, decimals, the priced sets and notionals. */
+async function pairRouteShared(client: ClickHouseClient, hours: readonly string[]): Promise<{
+  reservePairs: Set<string>
+  priced: Map<string, { ids: number[]; usd: Map<number, number> }>
+  v3From: number
+}> {
+  const [rp, pr, v3] = await Promise.all([
+    client.query({ query: PAIR_ROUTE_RESERVE_PAIRS_SQL, format: 'JSONEachRow' }),
+    client.query({ query: pairRoutePricedSql(), query_params: { hours: [...hours] }, format: 'JSONEachRow' }),
+    client.query({ query: `SELECT min(block_height) AS b FROM price_data.uniswap_v3_events WHERE kind = 'pool'`, format: 'JSONEachRow' }),
+  ])
+  const reservePairs = new Set((await rp.json<{ u: number; a: number }>()).map(r => `${r.u}:${r.a}`))
+  const priced = new Map<string, { ids: number[]; usd: Map<number, number> }>()
+  for (const r of await pr.json<{ hour: string; ids: number[]; opens: number[] }>()) {
+    const ids = r.ids.map(Number)
+    priced.set(r.hour, { ids, usd: new Map(ids.map((id, i) => [id, Number(r.opens[i])])) })
+  }
+  const v3From = Number((await v3.json<{ b: number | string }>())[0]?.b ?? 0) || Number.MAX_SAFE_INTEGER
+  return { reservePairs, priced, v3From }
+}
+
+/**
+ * Folds one day partition's stale hours into the staging twin: each hour's rows
+ * from pairRouteFold.foldHour, then the day's rows from the twin's hourly rows.
+ * Exported for the history refold, which runs day partitions in parallel through
+ * this same function.
+ */
+type StoredInterval = keyof typeof PAIR_ROUTE_TABLES
+
+/** The keys a table holds in [from, to) (their newest versions), as `lo:hi:unix` → the key's stored route. */
+/**
+ * The keys a window of one table holds (newest version, not deleted), with the
+ * hourly and daily rows' `route` — the 1h route is the next hour's seed. The
+ * 5-minute table's projection carries the keys only, so its route reads ''.
+ */
+export function pairRouteHeldSql(iv: StoredInterval): string {
+  return `-- pair-route:held
+      SELECT asset_lo, asset_hi, toUnixTimestamp(t_start) AS t, ${iv === '5min' ? "'' AS v_route" : 'v_route'}
+      FROM (${pairRouteLatestSql(PAIR_ROUTE_TABLES[iv], iv === '5min' ? [] : ['route'])})`
+}
+
+async function heldKeys(client: ClickHouseClient, iv: StoredInterval, from: number, to: number): Promise<Map<string, string>> {
+  const res = await client.query({
+    query: pairRouteHeldSql(iv),
+    query_params: { from: chTimestamp(from), to: chTimestamp(to) },
+    format: 'JSONEachRow',
+  })
+  return new Map((await res.json<{ asset_lo: number; asset_hi: number; t: number; v_route: string }>()).map(r => [`${r.asset_lo}:${r.asset_hi}:${r.t}`, r.v_route]))
+}
+
+/** Per `lo:hi`, the route in force at the close of the hour starting at `hour` (its stored 1h rows). */
+async function closingRoutes(client: ClickHouseClient, hour: number): Promise<Map<string, string>> {
+  const held = await heldKeys(client, '1h', hour, hour + 3_600)
+  return new Map([...held].map(([k, route]) => [k.split(':').slice(0, 2).join(':'), route]))
+}
+
+const rowKey = (r: { asset_lo: number; asset_hi: number; interval_start: string }) =>
+  `${r.asset_lo}:${r.asset_hi}:${chTimestampSeconds(r.interval_start)}`
+
+/**
+ * Publishes one window of one table: its recomputed rows and an is_deleted row for
+ * every key the window held that the recomputation no longer has — one insert.
+ */
+async function publishWindow(
+  client: ClickHouseClient, iv: StoredInterval, from: number, to: number, rows: readonly PairRouteRow[], computedAt: string,
+): Promise<number> {
+  const held = await heldKeys(client, iv, from, to)
+  const now = new Set(rows.map(rowKey))
+  const values: Array<Record<string, unknown>> = rows.map(({ iv: _iv, ...r }) => ({ ...r, is_deleted: 0 }))
+  for (const k of held.keys()) {
+    if (now.has(k)) continue
+    const [lo, hi, t] = k.split(':').map(Number) as [number, number, number]
+    values.push({
+      asset_lo: lo, asset_hi: hi, interval_start: chTimestamp(t), open: '0', high: '0', low: '0', close: '0', route: '', routes: 0,
+      fee_ppm: 0, buckets: 0, complete: 0, first_block: 0, last_block: 0, computed_at: computedAt, is_deleted: 1,
+    })
+  }
+  if (!values.length) return 0
+  await client.insert({ table: PAIR_ROUTE_TABLES[iv], values, format: 'JSONEachRow' })
+  return values.length
+}
+
+/**
+ * Folds stale hours and publishes them (each hour, then each day it touched, then
+ * the hour's derived watermark). Exported for the history refold, which runs hours
+ * in parallel through this same function.
+ */
+export async function foldPairRouteHours(client: ClickHouseClient, hours: readonly PairRouteStaleHour[], computedAtSec = Math.floor(Date.now() / 1000)): Promise<number> {
+  if (!hours.length) return 0
+  const computedAt = chTimestamp(computedAtSec)
+  const shared = await pairRouteShared(client, hours.map(h => h.bucket))
+  const decimals = (id: number) => assetDescriptor(id).decimals
+  const days = new Set<number>()
+  const inRun = new Set(hours.map(h => chTimestampSeconds(h.bucket)))
+  let written = 0
+  for (const h of hours) {
+    const hour = chTimestampSeconds(h.bucket)
+    const pricedHour = shared.priced.get(h.bucket)
+    let rows: PairRouteRow[] = []
+    let lastBlock = 0, lastTs = 0
+    if (pricedHour?.ids.length) {
+      const inputs = await loadFoldHourInputs(client, { hour, minb: Number(h.minb), maxb: Number(h.maxb) }, {
+        priced: pricedHour.ids, usd: pricedHour.usd, decimals, reservePairs: shared.reservePairs, computedAt,
+        v3: Number(h.maxb) >= shared.v3From,
+      })
+      // The hour starts on the routes the previous hour closed on, so a route held
+      // by the switch margin carries across the hour boundary as it does across buckets.
+      const out = foldHour({ ...inputs, seed: await closingRoutes(client, hour - 3_600) })
+      rows = out.rows
+      lastBlock = out.lastBlock
+      lastTs = out.lastTs
+    } else {
+      // No candle that hour: nothing to route, but the hour is still folded.
+      const res = await client.query({ query: pairRouteBlocksSql(), query_params: { b0: Number(h.minb), b1: Number(h.maxb) }, format: 'JSONEachRow' })
+      const blocks = await res.json<{ b: number; t: number }>()
+      const last = blocks[blocks.length - 1]
+      lastBlock = Number(last?.b ?? 0)
+      lastTs = Number(last?.t ?? 0)
+    }
+    written += await publishWindow(client, '5min', hour, hour + 3_600, rows.filter(r => r.iv === '5min'), computedAt)
+    const before = await closingRoutes(client, hour)
+    written += await publishWindow(client, '1h', hour, hour + 3_600, rows.filter(r => r.iv === '1h'), computedAt)
+    // The next hour started on this hour's closing routes: when they changed, it is
+    // stale (unless this run folds it next). The cascade stops at the first hour
+    // whose closing routes come out the same.
+    const after = new Map(rows.filter(r => r.iv === '1h').map(r => [`${r.asset_lo}:${r.asset_hi}`, r.route]))
+    if (!inRun.has(hour + 3_600) && !sameRoutes(before, after)) await markPairRouteHourStale(client, hour + 3_600)
+    await client.insert({
+      table: PAIR_ROUTE_WATERMARKS_TABLE,
+      values: [{
+        hour: h.bucket, src_ingest: chTimestamp(0), minb: 4_294_967_295, maxb: 0, v3_ingest: chTimestamp(0),
+        der_computed: computedAt, der_last_block: lastBlock, der_last_ts: chTimestamp(lastTs), der_rule: [computedAt, h.fingerprint],
+      }],
+      format: 'JSONEachRow',
+    })
+    days.add(Math.floor(hour / 86_400) * 86_400)
+  }
+  for (const day of days) {
+    const hoursRes = await client.query({
+      query: `SELECT uniqExact(hour) AS n FROM ${PAIR_ROUTE_WATERMARKS_TABLE} WHERE hour >= {day:DateTime} AND hour < {day:DateTime} + INTERVAL 1 DAY AND maxb > 0`,
+      query_params: { day: chTimestamp(day) },
+      format: 'JSONEachRow',
+    })
+    const dayHours = Number((await hoursRes.json<{ n: string }>())[0]?.n ?? 0)
+    const res = await client.query({ query: pairRouteDailyRowsSql(), query_params: { from: chTimestamp(day), to: chTimestamp(day + 86_400), hours: dayHours }, format: 'JSONEachRow' })
+    const daily = (await res.json<Record<string, string | number>>()).map(r => ({
+      iv: '1d' as const, asset_lo: Number(r.asset_lo), asset_hi: Number(r.asset_hi), interval_start: String(r.d_start),
+      open: String(r.d_open), high: String(r.d_high), low: String(r.d_low), close: String(r.d_close),
+      route: String(r.d_route), routes: Number(r.d_routes), fee_ppm: Number(r.d_fee), buckets: Number(r.d_buckets),
+      complete: Number(r.d_complete), first_block: Number(r.d_first), last_block: Number(r.d_last), computed_at: computedAt,
+    }))
+    written += await publishWindow(client, '1d', day, day + 86_400, daily, computedAt)
+  }
+  return written
+}
+
+const sameRoutes = (a: ReadonlyMap<string, string>, b: ReadonlyMap<string, string>): boolean =>
+  a.size === b.size && [...a].every(([k, v]) => b.get(k) === v)
+
+/** Re-marks an already folded hour (its seed changed): a newer derived rule stamp with fingerprint 0. */
+async function markPairRouteHourStale(client: ClickHouseClient, hour: number): Promise<void> {
+  const res = await client.query({
+    query: `SELECT max(der_computed) > toDateTime(0) AS folded FROM ${PAIR_ROUTE_WATERMARKS_TABLE} WHERE hour = {hour:DateTime}`,
+    query_params: { hour: chTimestamp(hour) },
+    format: 'JSONEachRow',
+  })
+  if (!Number((await res.json<{ folded: number }>())[0]?.folded ?? 0)) return
+  pairRouteCascadeMarks++
+  await client.insert({
+    table: PAIR_ROUTE_WATERMARKS_TABLE,
+    values: [{ hour: chTimestamp(hour), src_ingest: chTimestamp(0), minb: 4_294_967_295, maxb: 0, v3_ingest: chTimestamp(0), der_rule: [chTimestamp(Math.floor(Date.now() / 1000)), '0'] }],
+    format: 'JSONEachRow',
+  })
+}
+
+/** Hours re-marked by a changed seed since the process started (a diagnostic the cycle logs). */
+export let pairRouteCascadeMarks = 0
+
+export async function runPairRouteOhlc(client: ClickHouseClient, hoursPerCycle = PAIR_ROUTE_HOURS_PER_CYCLE): Promise<DerivationResult> {
+  const model = 'pair_route_ohlc'
+  if (!allExplorerAssets().length) {
+    console.log(`[derivations] ${model} skipped: asset registry empty`)
+    return { model, rows: 0 }
+  }
+  // computed_at is the instant the cycle read the watermarks, so a snapshot
+  // ingested while the cycle runs re-marks its hour.
+  const computedAtSec = Math.floor(Date.now() / 1000)
+  const res = await client.query({ query: pairRouteStaleHoursSql(), format: 'JSONEachRow' })
+  const stale = await res.json<PairRouteStaleHour>()
+  if (!stale.length) return { model, rows: 0 }
+  const slice = [...stale].sort((a, b) => b.bucket.localeCompare(a.bucket)).slice(0, hoursPerCycle)
+  // Oldest first within the slice, so a day's hours are folded before it is re-aggregated.
+  slice.sort((a, b) => a.bucket.localeCompare(b.bucket))
+  const marksBefore = pairRouteCascadeMarks
+  const rows = await foldPairRouteHours(client, slice, computedAtSec)
+  if (pairRouteCascadeMarks > marksBefore) console.log(`[derivations] ${model}: ${pairRouteCascadeMarks - marksBefore} next hour(s) re-marked by a changed closing route`)
+  return { model, rows }
 }
