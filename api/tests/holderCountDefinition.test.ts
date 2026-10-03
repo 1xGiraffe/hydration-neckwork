@@ -33,7 +33,7 @@ describe('holder list account count', () => {
     // Substrate path: the sum of holding members over every row, from the same
     // window pass that sizes the pager.
     expect(body).toContain('toUInt64(sum(member_count) OVER ()) AS holder_count')
-    expect(body).toContain('return { asset: a, holders, total, totalUsd, holderCount }')
+    expect(body).toContain('return { asset: a, rows: holders, total, holderCount,')
     // aToken and folded display-asset paths: the in-memory rows' members.
     expect((body.match(/holderCount: holderAccountCount\(all\)/g) ?? []).length).toBe(2)
   })

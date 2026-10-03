@@ -9,7 +9,7 @@ const HEAD = 1_000_000
 vi.mock('../src/services/explorerService.ts', () => ({
   accountRef: (id: string) => ({ accountId: id, address: id }),
   cutoffHeightForWindow: async () => 0,
-  ensurePrices: async () => new Map(),
+  ensurePriceState: async () => ({ map: new Map(), oracleFilled: new Set(), gen: 1, head: HEAD, base: null }),
   indexedRawHead: async () => HEAD,
   priceIsOracleFallback: () => false,
 }))

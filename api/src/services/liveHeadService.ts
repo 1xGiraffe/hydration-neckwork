@@ -1,6 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import type { ServerResponse } from 'node:http'
-import { publishIndexedRawHead } from './explorerService.ts'
+import { ensurePriceState, publishIndexedRawHead, publishPriceHead } from './explorerService.ts'
 import { mempoolGeneration, pendingBestHeight } from './pendingHeadService.ts'
 
 // Server-sent head events: one shared ClickHouse poller fans two watermarks
@@ -10,7 +10,11 @@ import { mempoolGeneration, pendingBestHeight } from './pendingHeadService.ts'
 //   main — the price indexer's newest block (what preis candles and the
 //          indexer-status chip depend on; it trails `head` by its own
 //          processing, so pushing raw alone would fire candle refetches
-//          before the candles exist).
+//          before the candles exist);
+//   price — the explorer's current price GENERATION, recomposed when `main`
+//          moves and advanced only when a price actually changed, so the
+//          price-bearing pages refetch exactly when there is a new price to
+//          show (and stamp it on their URLs past the micro-cache).
 // The poller runs only while at least one client is connected (at most one
 // trivial read per second, shared by all viewers), and publishes each raw
 // head into the feed caches' head probe BEFORE broadcasting, so a refetch
@@ -41,6 +45,7 @@ export function initLiveHeadService(c: ClickHouseClient): void { client = c }
 const clients = new Set<ServerResponse>()
 let lastHead = 0
 let lastMain = 0
+let lastPrice = 0
 let lastBest = 0
 let lastPool = -1
 let lastPoolPushMs = 0
@@ -49,13 +54,15 @@ let poolTimer: NodeJS.Timeout | null = null
 let keepaliveTimer: NodeJS.Timeout | null = null
 let polling = false
 
-export function sseHeadFrame(head: number, main: number, best = 0, pool = 0): string {
+export function sseHeadFrame(head: number, main: number, best = 0, pool = 0, price = 0): string {
   // best — the newest UNFINALIZED block the pending layer can show; clients
   //        refetch feeds on its advance so incoming blocks appear pre-finality.
   // pool — the transaction-pool generation counter; it bumps whenever a pool
   //        entry appears, drops or gets judged, so mempool rows surface and
   //        update between blocks.
-  return `event: head\ndata: {"head":${head},"main":${main},"best":${best},"pool":${pool}}\n\n`
+  // price — the explorer's price generation: an opaque id compared for
+  //         difference, never order.
+  return `event: head\ndata: {"head":${head},"main":${main},"best":${best},"pool":${pool},"price":${price}}\n\n`
 }
 
 async function pollOnce(): Promise<void> {
@@ -73,14 +80,25 @@ async function pollOnce(): Promise<void> {
     const main = Number(row?.main ?? 0)
     const best = pendingBestHeight()
     const pool = mempoolGeneration()
-    if (head > lastHead || main > lastMain || best > lastBest || pool !== lastPool) {
+    // A moved price head recomposes the price map before anything is pushed
+    // (one ~2 ms read; requests at this head then hit it), so the frame
+    // carries the generation the refetch it triggers will be served.
+    // The price generation is compared on EVERY tick, not only when the price head
+    // moves: a recompose that finished after the tick that saw its head (or one that
+    // joined an older head's) changes the generation with no new head to trigger
+    // it. At an unchanged head this is the cached generation (no read beyond the
+    // 1 s head probe).
+    if (main > lastMain) publishPriceHead(main)
+    const price = (await ensurePriceState().catch(() => null))?.gen || lastPrice
+    if (head > lastHead || main > lastMain || best > lastBest || pool !== lastPool || price !== lastPrice) {
       if (pool !== lastPool) lastPoolPushMs = Date.now()
       lastHead = Math.max(lastHead, head)
       lastMain = Math.max(lastMain, main)
       lastBest = Math.max(lastBest, best)
       lastPool = pool
+      lastPrice = price
       publishIndexedRawHead(lastHead)
-      const frame = sseHeadFrame(lastHead, lastMain, lastBest, lastPool)
+      const frame = sseHeadFrame(lastHead, lastMain, lastBest, lastPool, lastPrice)
       for (const c of clients) c.write(frame)
     }
   } catch { /* transient read failure — the next tick retries */ } finally {
@@ -113,7 +131,7 @@ function pushMemoryWatermarks(): void {
   if (poolMoved) lastPoolPushMs = Date.now()
   lastPool = pool
   lastBest = Math.max(lastBest, best)
-  for (const c of clients) c.write(sseHeadFrame(lastHead, lastMain, lastBest, lastPool))
+  for (const c of clients) c.write(sseHeadFrame(lastHead, lastMain, lastBest, lastPool, lastPrice))
 }
 
 function ensureTimers(): void {
@@ -132,7 +150,7 @@ export function addLiveHeadClient(res: ServerResponse): void {
   clients.add(res)
   // Replay the last known heads immediately, so a (re)connecting tab
   // resynchronizes without waiting for the next block.
-  if (lastHead > 0 || lastMain > 0) res.write(sseHeadFrame(lastHead, lastMain, lastBest, Math.max(0, lastPool)))
+  if (lastHead > 0 || lastMain > 0) res.write(sseHeadFrame(lastHead, lastMain, lastBest, Math.max(0, lastPool), lastPrice))
   ensureTimers()
 }
 

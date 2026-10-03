@@ -43,9 +43,9 @@ describe('assets directory holder counts', () => {
 // every holder share was measured against the reduced denominator.
 describe('aToken totals', () => {
   it('values the holder page at the reconstructed total supply', () => {
-    const at = explorerService.indexOf('const [prices, allRows, supplies] = await Promise.all([ensurePrices(), getATokenHolders(')
+    const at = explorerService.indexOf('const [allRows, supplies] = await Promise.all([getATokenHolders(')
     expect(at).toBeGreaterThan(-1)
-    const branch = explorerService.slice(at, explorerService.indexOf('return { asset: a, holders: enrichShare(page, prices, totalUsd)', at))
+    const branch = explorerService.slice(at, explorerService.indexOf('return { asset: a, rows: page, total: all.length', at))
 
     expect(branch).toContain('getATokenTotalSupplies()')
     expect(branch).toContain('const supply = supplies.get(assetId)')

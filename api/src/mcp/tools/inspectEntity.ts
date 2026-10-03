@@ -35,7 +35,7 @@ import { blocksToDuration, formatDuration, formatTime, isUnrecordedTime, relativ
 import { activityDetail, activityLine, foldIcePotTrades } from '../format/activity.ts'
 import type { EntityKind, SearchHitView } from './shared.ts'
 import {
-  ENTITY_KINDS, RE_H160, RE_HASH64, RE_NUMERIC,
+  ENTITY_KINDS, PRICE_BEARING_TTL_MS, RE_H160, RE_HASH64, RE_NUMERIC,
   addressNotFound, callHint, capped, failure, identifierShape, output, parseInput, parseCoordinate,
   parseReferendumRef, portfolioValue, preferredHit, runSearch, settle, valueReconciliation,
   viewSearchHit, viewSearchHits,
@@ -139,7 +139,7 @@ async function resolveNumeric(id: string, ctx: ToolContext): Promise<Resolved | 
   if (id.length > 10 || Number(id) > MAX_BLOCK_HEIGHT) return await resolveOversizedNumeric(id, ctx)
   const [search, asset] = await Promise.all([
     settle(runSearch(ctx.upstream, id), `search for ${id}`),
-    settle(ctx.upstream.get<AssetDetail>(`/explorer/asset/${id}`, undefined, { ttlMs: 15_000 }), `asset ${id}`),
+    settle(ctx.upstream.get<AssetDetail>(`/explorer/asset/${id}`, undefined, { ttlMs: PRICE_BEARING_TTL_MS }), `asset ${id}`),
   ])
   const hits = search.value ?? []
   const assetIsReal = isRealAsset(asset.value)
@@ -648,7 +648,7 @@ async function renderAccount(address: string, ctx: ToolContext, opts: { contract
   const query = opts.contract ? undefined : { summary: 1 }
   let a: AddressDetail & { contract?: ContractInfo | null }
   try {
-    a = await ctx.upstream.get<AddressDetail & { contract?: ContractInfo | null }>(`/explorer/address/${encodeURIComponent(address)}`, query)
+    a = await ctx.upstream.get<AddressDetail & { contract?: ContractInfo | null }>(`/explorer/address/${encodeURIComponent(address)}`, query, { ttlMs: PRICE_BEARING_TTL_MS })
   } catch (err) {
     // A 404 here is about the STRING, not about the account: an address that
     // has never transacted still resolves. get_account says exactly this, and
@@ -731,7 +731,7 @@ async function renderAccount(address: string, ctx: ToolContext, opts: { contract
 
 async function renderAsset(assetId: string, ctx: ToolContext, candidates: SearchHitView[]): Promise<ToolOutput> {
   const base = ctx.explorerBaseUrl
-  const detail = await settle(ctx.upstream.get<AssetDetail>(`/explorer/asset/${assetId}`, undefined, { ttlMs: 15_000 }), `asset ${assetId}`)
+  const detail = await settle(ctx.upstream.get<AssetDetail>(`/explorer/asset/${assetId}`, undefined, { ttlMs: PRICE_BEARING_TTL_MS }), `asset ${assetId}`)
   if (!detail.value) return failure(detail.error!)
   const d = detail.value
   if (!isRealAsset(d)) {

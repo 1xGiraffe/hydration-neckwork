@@ -8,7 +8,7 @@ import {
 import { formatTime, relativeAge } from '../format/time.ts'
 import { accountLabel, accountUrl, assetLabelWithId, assetUrl, explorerLink } from '../format/refs.ts'
 import { bullets, h2, h3, joinBlocks, kv, note, table } from '../format/md.ts'
-import { failure, fit, output, parseInput } from './shared.ts'
+import { PRICE_BEARING_TTL_MS, failure, fit, output, parseInput } from './shared.ts'
 
 /* ============ shapes this surface carries that types.ts does not mirror ============ */
 
@@ -192,7 +192,7 @@ async function handler(input: Record<string, unknown>, ctx: ToolContext): Promis
     ctx.upstream.get<MoneyMarketDashboard>('/explorer/money-market', { limit: 50 }, { ttlMs: 10_000 }),
     ctx.upstream.get<SecurityRisk>('/explorer/security', undefined, { ttlMs: 30_000 }),
     wantsGiga ? ctx.upstream.get<HdxGigaMarket>('/explorer/hdx', undefined, { ttlMs: 60_000 }) : Promise.resolve(null),
-    account ? ctx.upstream.get<AddressDetail>(`/explorer/address/${encodeURIComponent(account)}`, undefined, { ttlMs: 10_000, timeoutMs: 60_000 }) : Promise.resolve(null),
+    account ? ctx.upstream.get<AddressDetail>(`/explorer/address/${encodeURIComponent(account)}`, undefined, { ttlMs: PRICE_BEARING_TTL_MS, timeoutMs: 60_000 }) : Promise.resolve(null),
   ])
 
   if (mmRes.status === 'rejected') errors.push(toolErrorFromUpstream(mmRes.reason, 'The money-market totals'))

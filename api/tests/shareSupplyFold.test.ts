@@ -99,7 +99,7 @@ describe('every supply fold applies the rule', () => {
   it('the directory total, holder count, holder page and folded holder read', () => {
     expect(body('async function getAssetTotals', '\n}\n')).toContain('of foldedShareEntries()')
     expect(body('async function foldedDisplayHolderCounts', '\n}\n')).toContain('of foldedShareEntries()')
-    expect(body('export async function getHolders(', '\n}\n')).toContain('const foldedShareIds = supplyFoldedShareIds(assetId)')
+    expect(body('async function holdersPageUnvalued(', '\n}\n')).toContain('const foldedShareIds = supplyFoldedShareIds(assetId)')
     expect(body('async function getFoldedDisplayAssetHolders', '\n}\n')).toContain('namedShareWrapperOf(id) === displayAssetId')
   })
 

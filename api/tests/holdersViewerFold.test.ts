@@ -132,7 +132,8 @@ describe('the holders viewer fold cannot drift the anonymous path', () => {
   function getHoldersBody(): string {
     const at = explorerService.indexOf('export async function getHolders(')
     expect(at).toBeGreaterThan(-1)
-    return explorerService.slice(at, explorerService.indexOf('\n}\n', at))
+    // getHolders values the page; holdersPageUnvalued (just below it) reads it.
+    return explorerService.slice(at, explorerService.indexOf('\n// address detail', at))
   }
 
   it('getHolders takes viewerFold as an additive, optional 4th parameter', () => {

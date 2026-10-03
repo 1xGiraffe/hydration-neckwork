@@ -29,11 +29,11 @@ import {
   xcDestinationUrl,
 } from '../format/refs.ts'
 import { escapeCell, h3, joinBlocks, kv, note, section, table } from '../format/md.ts'
-import { compactAsset, failure, fit, output, parseInput, tagIcon } from './shared.ts'
+import { PRICE_BEARING_TTL_MS, compactAsset, failure, fit, output, parseInput, tagIcon } from './shared.ts'
 
 /* ============ shared ============ */
 
-/** The asset directory: one 80 KB read, cached 30 s upstream and here. */
+/** The asset directory: one 80 KB read. Its listing is price-bearing (PRICE_BEARING_TTL_MS); the symbol resolver only needs ids and names and keeps 30 s. */
 const ASSETS_PATH = '/explorer/assets'
 const ASSETS_TTL_MS = 30_000
 
@@ -180,7 +180,7 @@ const listAssets: ToolDefinition = {
     const base = ctx.explorerBaseUrl
 
     const [assetsResult, statsResult] = await Promise.allSettled([
-      ctx.upstream.get<AssetListItem[]>(ASSETS_PATH, undefined, { ttlMs: ASSETS_TTL_MS }),
+      ctx.upstream.get<AssetListItem[]>(ASSETS_PATH, undefined, { ttlMs: PRICE_BEARING_TTL_MS }),
       sort === 'volume'
         // The Preis surface is the only place a per-asset 24 h volume lives; it
         // is read only when the caller sorts on it, never on the default path.
@@ -618,8 +618,8 @@ const getAsset: ToolDefinition = {
     }
 
     const [detailResult, holdersResult, poolsResult, dcaResult, ordersResult, seriesResult, volumeResult] = await Promise.allSettled([
-      ctx.upstream.get<AssetDetail>(`/explorer/asset/${assetId}`, undefined, { ttlMs: 15_000 }),
-      sections.has('holders') ? ctx.upstream.get<HoldersPage>(`/explorer/holders/${assetId}`, { limit: MAX_HOLDER_ROWS }, { ttlMs: 15_000 }) : Promise.resolve(null),
+      ctx.upstream.get<AssetDetail>(`/explorer/asset/${assetId}`, undefined, { ttlMs: PRICE_BEARING_TTL_MS }),
+      sections.has('holders') ? ctx.upstream.get<HoldersPage>(`/explorer/holders/${assetId}`, { limit: MAX_HOLDER_ROWS }, { ttlMs: PRICE_BEARING_TTL_MS }) : Promise.resolve(null),
       sections.has('pools') ? ctx.upstream.get<AssetLiquidity>(`/explorer/asset/${assetId}/liquidity`, undefined, { ttlMs: 60_000, timeoutMs: 90_000 }) : Promise.resolve(null),
       sections.has('dca') ? ctx.upstream.get<{ buys: ActiveDca[]; sells: ActiveDca[] }>(`/explorer/asset/${assetId}/dcas`, undefined, { ttlMs: 15_000 }) : Promise.resolve(null),
       sections.has('orders') ? ctx.upstream.get<{ bids: OpenLimitOrder[]; asks: OpenLimitOrder[] }>(`/explorer/asset/${assetId}/limit-orders`, undefined, { ttlMs: 15_000 }) : Promise.resolve(null),

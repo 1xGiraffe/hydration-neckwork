@@ -11,8 +11,8 @@ import { poolSnapshot, type PoolSnapshot } from './poolSnapshot.ts'
 // Asset registry + price reads for /v1/assets*. The registry itself is the
 // shared in-memory snapshot (explorerAssets, refreshed every 5 minutes); prices
 // come from price_data.prices, asset-first keyed, so a per-asset read is a
-// reverse key read and the all-assets fold is one grouped scan behind a 5-min
-// cache.
+// reverse key read, and the all-assets fold is asset_price_latest's ~190 merged
+// rows (~2 ms) read once per indexed head.
 
 export interface AssetItem {
   assetId: string
@@ -38,7 +38,12 @@ const PRICE_STALE_BLOCKS = 450_000
 const EPOCH = '1970-01-01 00:00:00'
 
 export async function currentPrices(client: ClickHouseClient): Promise<Map<number, PriceEntry>> {
-  return cached('data:assets:current-prices', 300_000, async () => {
+  // Keyed on the indexed head (head.ts, itself held 1.5 s) and held no longer
+  // than that probe, so a current price is never older than the block it is
+  // served beside: the routes advertise max-age=5, and a price-indexer row that
+  // lands just after its raw block is picked up within the TTL.
+  const { indexedHead } = await dataStatus(client)
+  return cached(`data:assets:current-prices:h${indexedHead}`, 1_500, async () => {
     // asset_price_latest (009_data.sql) is the argMax twin of prices keyed by
     // asset: the whole "newest price of every asset" is ~120 merged rows.
     const res = await client.query({
