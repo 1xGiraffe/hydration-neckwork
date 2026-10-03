@@ -353,9 +353,7 @@ export class ClickHouseStore {
   async publishDeferred(): Promise<void> {
     this.stageCurrentBatches()
 
-    for (const rows of chunkRows(this.deferredBlocks, this.publicationChunkSize)) {
-      await this.insertBlockRows(rows)
-    }
+    // Blocks last, as in flushAll: a visible block height means its rows are.
     for (const rows of chunkRows(this.deferredPrices, this.publicationChunkSize)) {
       await this.insertPriceRows(rows)
     }
@@ -371,6 +369,9 @@ export class ClickHouseStore {
     for (const rows of chunkRows(this.deferredRuntimeErrorNames, this.publicationChunkSize)) {
       await this.insertRuntimeErrorNameRows(rows)
     }
+    for (const rows of chunkRows(this.deferredBlocks, this.publicationChunkSize)) {
+      await this.insertBlockRows(rows)
+    }
 
     this.deferredBlocks.length = 0
     this.deferredPrices.length = 0
@@ -380,21 +381,28 @@ export class ClickHouseStore {
     this.deferredRuntimeErrorNames.length = 0
   }
 
-  // Keep blocks and prices visible in block order. Price rows now contain their
-  // own timestamps, but publishing the block first preserves the public API's
-  // expectation that every visible price has corresponding block metadata.
+  // `blocks` is written LAST, so its newest height is a watermark every reader
+  // can trust: once block N is visible, N's prices, trade volumes, registry and
+  // runtime rows already are. The explorer's price head, the SSE `main` head and
+  // the derivations' priced head (`max(block_height)` over blocks) all read it,
+  // and with blocks first a reader landing between the two inserts cached the
+  // previous block's prices under the new head until the next one. The reverse
+  // window — a price row visible a moment before its block row — needs no
+  // metadata: price rows carry their own timestamps, and the one reader that
+  // dates a price head through `blocks` falls back when the row is missing
+  // (public accountBalances.ts).
   async flushAll(): Promise<void> {
     if (this.deferPublication) {
       this.stageCurrentBatches()
       return
     }
 
-    await this.flushBlocks()
     await this.flushPrices()
     await this.flushTradeVolumes()
     await this.flushAssets()
     await this.flushRuntimeUpgrades()
     await this.flushRuntimeErrorNames()
+    await this.flushBlocks()
   }
 
   async saveCheckpoint(blockHeight: number): Promise<void> {
