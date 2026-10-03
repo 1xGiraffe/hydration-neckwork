@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { LIVE_MS, LIVE_PUSH_KEYS, POOL_PUSH_KEYS, POOL_PUSH_THROTTLE_MS, createPoolThrottle, parseHeadEvent } from '../src/live'
+import { LIVE_MS, LIVE_PUSH_KEYS, POOL_PUSH_KEYS, POOL_PUSH_THROTTLE_MS, PRICE_PUSH_KEYS, createPoolThrottle, parseHeadEvent } from '../src/live'
 import { pendingRefetchMs } from '../src/hooks/useExplorerData'
 
 describe('parseHeadEvent', () => {
@@ -22,6 +22,20 @@ describe('parseHeadEvent', () => {
   it('ignores a replayed or regressed frame — reconnects must not refetch-storm', () => {
     expect(parseHeadEvent('{"head":13487500,"best":13487507,"pool":3}', { head: 13487500, best: 13487507, pool: 3 })).toBeNull()
     expect(parseHeadEvent('{"head":13487499,"best":13487506,"pool":3}', { head: 13487500, best: 13487507, pool: 3 })).toBeNull()
+  })
+
+  // The price generation is an opaque id: a change either way is a new frame,
+  // a frame from an older api without it keeps the previous one.
+  it('accepts a frame when only the price generation changes, and keeps it across frames without one', () => {
+    expect(parseHeadEvent('{"head":13487500,"best":13487507,"pool":3,"price":1759500000124}', { head: 13487500, best: 13487507, pool: 3, price: 1759500000123 }))
+      .toEqual({ head: 13487500, best: 13487507, pool: 3, price: 1759500000124 })
+    expect(parseHeadEvent('{"head":13487500,"best":13487507,"pool":3,"price":1759500000123}', { head: 13487500, best: 13487507, pool: 3, price: 1759500000123 }))
+      .toBeNull()
+    expect(parseHeadEvent('{"head":13487501,"best":13487507,"pool":3}', { head: 13487500, best: 13487507, pool: 3, price: 1759500000123 }))
+      .toEqual({ head: 13487501, best: 13487507, pool: 3, price: 1759500000123 })
+    // 0 is "no generation yet", never a generation.
+    expect(parseHeadEvent('{"head":13487500,"best":13487507,"pool":3,"price":0}', { head: 13487500, best: 13487507, pool: 3 }))
+      .toBeNull()
   })
 
   it('tolerates frames without best/pool (older api) and malformed data', () => {
@@ -67,6 +81,16 @@ describe('LIVE_PUSH_KEYS', () => {
   // Pool-only frames arrive many times per block, so they must refetch only the
   // feeds that merge transaction-pool rows — and each of those must still be a
   // real query key, or that feed silently stops following the pool.
+  // Price pushes refetch the price-bearing reads, each of which must be a real
+  // query key prefix, or that page silently stops following the price.
+  it('price pushes cover the price-bearing reads, and each is a real query key', () => {
+    expect([...PRICE_PUSH_KEYS]).toEqual(['asset', 'assets', 'holders', 'address', 'oracles', 'pair-chart'])
+    const hooks = readFileSync(new URL('../src/hooks/useExplorerData.ts', import.meta.url), 'utf8')
+      + readFileSync(new URL('../src/api/oracles.ts', import.meta.url), 'utf8')
+      + readFileSync(new URL('../src/components/IntentPriceChart.tsx', import.meta.url), 'utf8')
+    for (const key of PRICE_PUSH_KEYS) expect(hooks, `queryKey prefix '${key}' missing`).toMatch(new RegExp(`\\['${key}'[,\\]]`))
+  })
+
   it('pool pushes cover exactly the pool-carrying feeds, and each is a live key', () => {
     expect([...POOL_PUSH_KEYS]).toEqual(['extrinsics', 'events', 'activity'])
     for (const key of POOL_PUSH_KEYS) expect([...LIVE_PUSH_KEYS]).toContain(key)

@@ -11,7 +11,8 @@ export function shouldRetryQuery(failureCount: number, error: unknown): boolean 
 // One 4xx is not always the server's final verdict: a detail page addressed by
 // block coordinates can be opened — from a wallet, a notification, a shared
 // link — before the block reaches the index at all. `raw-live` follows the
-// FINALIZED head, so that window is 35-65s wide, and settling on the first 404
+// FINALIZED head, so that window is ~46s wide (finality, measured 2026-10-03;
+// indexing adds under a second), and settling on the first 404
 // leaves the page permanently wrong until the reader reloads by hand.
 //
 // The API says which miss it is: a coordinate 404 carries `blockIndexed` and

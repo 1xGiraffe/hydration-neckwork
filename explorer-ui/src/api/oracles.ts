@@ -1,5 +1,6 @@
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { getJson, withQuery } from './explorer'
+import { priceHeadTag } from '../live'
 import type { AccountRef, AssetRef } from '../types'
 
 // The oracle surface (api routes/oracles.ts, services/oracleService.ts). Prices
@@ -144,7 +145,8 @@ export interface OracleFeedDetail {
 const feedPath = (feed: string) => `/explorer/oracle/${encodeURIComponent(feed)}`
 
 export const oraclesApi = {
-  overview: (signal?: AbortSignal) => getJson<OraclesOverview>('/explorer/oracles', signal),
+  // `pg` — the pushed price generation: the market-price column follows it.
+  overview: (signal?: AbortSignal) => getJson<OraclesOverview>(withQuery('/explorer/oracles', { pg: priceHeadTag() || undefined }), signal),
   feed: (feed: string, range: FeedRange, page: number, signal?: AbortSignal) =>
     getJson<OracleFeedDetail>(withQuery(feedPath(feed), { range, page: page > 0 ? page : undefined }), signal),
 }
