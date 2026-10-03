@@ -4,12 +4,13 @@ import { cached, cachedSwr } from './cache.ts'
 import { externalTokenApys } from './externalTokenApy.ts'
 import { gigahdxApr } from './gigahdxApr.ts'
 import {
-  MM_MARKETS, assetDecimalsOrNull, assetDescriptor, assetIdFromMmAddress, currentPriceOf, displayDescriptor, isStableswapShareToken,
-  type ExplorerAsset,
+  MM_MARKETS, SHARE_WRAPPER, assetDecimalsOrNull, assetDescriptor, assetIdFromMmAddress, currentPriceOf, displayDescriptor, isStableswapShareToken,
+  shareWrapperOf, type ExplorerAsset,
 } from './explorerAssets.ts'
 import { ensurePrices, loadXykCurrentState, scaledFromPriceInfo, type PriceInfo, type XykCurrentPool } from './explorerService.ts'
 import {
-  PERC_DECIMALS, buildFarmConfigSql, foldLiveXykFarms, omnipoolFarmAprs, splitAcrossYieldFarms, xykFarmAprPercScaled,
+  PERC_DECIMALS, buildFarmConfigSql, decideFarmRate, foldLiveXykFarms, omnipoolFarmAprs, payoutAprPercScaled, readFarmPayouts, splitAcrossYieldFarms, xykFarmAprPercScaled,
+  type FarmRateState,
   type FarmAprEntry, type FarmConfigRow, type LiveXykFarm,
 } from './farmApr.ts'
 import { iso } from './isoTimestamp.ts'
@@ -18,6 +19,7 @@ import { readReserveStateRows } from './moneyMarketCaps.ts'
 import { WINDOW_DAYS, poolVolumes, readAnchor, scaledUsd, xykPoolMeta } from './poolVolumes.ts'
 import { omnipoolYield, stableswapYield } from './poolYield.ts'
 import { currentStableswapSharePools } from './stableswapSharePools.ts'
+import { fixedV3Grain, v3PoolHistory } from './uniswapV3History.ts'
 import { loadV3Registry, v3PoolStats } from './uniswapV3Service.ts'
 
 // GET /explorer/yields — the current yield of every liquidity venue and money-market
@@ -30,7 +32,9 @@ import { loadV3Registry, v3PoolStats } from './uniswapV3Service.ts'
 //    cache shape `/v1/pools/{omnipool,stableswap}/yield` serves, so the explorer's
 //    number is the public API's digit for digit.
 //  * Omnipool farm APR: `farmApr.ts`'s per-farm terms (`omnipoolFarmAprs`), the
-//    terms the public per-asset `farmAprPerc` sums.
+//    terms the public per-asset `farmAprPerc` sums — here with the pot state read
+//    from the warehouse syncs, so a farm past its plan is rated as its pot pays
+//    (0 % "ended" once empty) rather than left unknown (decideFarmRate).
 //  * XYK farm APR: the same pallet rule (`xykFarmAprPercScaled`, uncapped branch
 //    halved — see there), on the XYK farmed principal valued at pool NAV and current
 //    prices, exactly as the account page values an XYK Farm row (getXykPositions).
@@ -40,9 +44,14 @@ import { loadV3Registry, v3PoolStats } from './uniswapV3Service.ts'
 //    the reserve history, and the fee itself is the only window quantity here.
 //    A pool that did not trade has a measured 0 %, not a missing one.
 //  * Uniswap v3 fee APR: pool-level 7-day LP fees (uniswap_v3_legs, amount_in × fee
-//    tier) over the pool's current balances at current prices, ×365/7, net of the
-//    protocol's 1/n share when SetFeeProtocol turned one on (null when the two sides
-//    differ, since the fee total is not split per side here).
+//    tier, valued at event time) over the pool's TIME-WEIGHTED value across the same
+//    window — the hourly event-implied balances at each hour's closed price
+//    (uniswapV3History), averaged — annualised over the window (a pool younger than
+//    it over its own age), net of the protocol's 1/n share when SetFeeProtocol turned
+//    one on (null when the two sides differ, since the fee total is not split per
+//    side here). The Hydration UI states 24 hours of fees over today's balances; a
+//    week over the week's mean value does not swing with one day's flow or with the
+//    liquidity that arrived or left after the fees were earned.
 //  * Money-market reserve APYs: the reserve's newest ReserveDataUpdated rates (RAY
 //    APRs) compounded per second over Aave's 365-day year, (1 + r/Y)^Y − 1, in RAY
 //    fixed point (`rayAprToApyPctScaled`) — the convention Aave's own UI applies.
@@ -74,7 +83,14 @@ export type YieldComponentKind = 'omnipool-fee' | 'stablepool-fee' | 'xyk-fee' |
 /** Where a token-yield rate comes from: the Hydration UI's external sources, else the on-chain peg growth; stHDX's is its staking exchange rate's (gigahdxApr's base APR). */
 export type TokenYieldSource = 'defillama' | 'kamino' | 'on-chain' | 'gigahdx-rate'
 export interface YieldComponent { kind: YieldComponentKind; aprPct: number | null; asset?: ExplorerAsset; weightPct?: number; source?: TokenYieldSource }
-export interface FarmYield { globalFarmId: number; yieldFarmId: number; rewardAsset: ExplorerAsset; aprPct: number | null }
+export interface FarmYield {
+  globalFarmId: number
+  yieldFarmId: number
+  rewardAsset: ExplorerAsset
+  aprPct: number | null
+  /** `active` inside the planned schedule; `past-end` past it, still paying from its pot; `ended` its pot is empty (0 %). */
+  state?: FarmRateState
+}
 export interface PoolYield { totalAprPct: number | null; components: YieldComponent[]; farms: FarmYield[] }
 export interface ReserveYield {
   supplyApyPct: number | null
@@ -98,6 +114,25 @@ export interface ExplorerYields {
   uniswapV3: Record<string, PoolYield>
   /** marketKey → reserve yield, keyed by the underlying asset id and, for a reserve with a registered aToken, also by that aToken id. */
   moneyMarket: Record<string, Record<string, ReserveYield>>
+  /**
+   * Stableswap share id → the money-market aToken minted over it (the Hydration
+   * app's "Hydrated" pools: GDOT over 2-Pool-GDOT, HUSDT over 2-Pool-HUSDT). The
+   * app rates such a pool as what that aToken earns — `moneyMarket[marketKey][asset]`'s
+   * supply — and a pool surface reads its headline from there. The same wrapper
+   * an account's Stablepool row carries (LpPosition.wrapper).
+   */
+  shareWrappers: Record<string, ShareWrapperRef>
+}
+export interface ShareWrapperRef { asset: ExplorerAsset; marketKey: string; named: boolean }
+
+/** Every registered share → its wrapper, keyed by share id, in the wire's shape. */
+export function shareWrapperRefs(shareIds: Iterable<number>): Record<string, ShareWrapperRef> {
+  const out: Record<string, ShareWrapperRef> = {}
+  for (const id of [...shareIds].sort((a, b) => a - b)) {
+    const w = shareWrapperOf(id)
+    if (w) out[String(id)] = { asset: displayDescriptor(w.aTokenId), marketKey: w.marketKey, named: w.named }
+  }
+  return out
 }
 
 let client: ClickHouseClient | null = null
@@ -206,6 +241,20 @@ export function v3FeeWindowSeconds(createdAt: string | null | undefined, anchorS
   const age = anchorSec - BigInt(Math.floor(created / 1000))
   if (age < V3_FEE_APR_MIN_AGE_SECONDS) return null
   return age < V3_FEE_WINDOW_SECONDS ? age : V3_FEE_WINDOW_SECONDS
+}
+
+/** Least share of a window's hours that must be priced for its time-weighted value to stand. */
+export const V3_TWA_MIN_COVERAGE = 0.9
+
+/**
+ * A pool's time-weighted value over a window from its equal-length buckets: the
+ * mean of the priced buckets' values, or null when fewer than V3_TWA_MIN_COVERAGE of
+ * them are priced (an unpriced hour is missing, not worth zero) or none is.
+ */
+export function timeWeightedTvlUsd(points: ReadonlyArray<{ tvlUsd: number | null }>): number | null {
+  const priced = points.map(p => p.tvlUsd).filter((v): v is number => v != null && Number.isFinite(v))
+  if (!priced.length || priced.length < points.length * V3_TWA_MIN_COVERAGE) return null
+  return priced.reduce((a, b) => a + b, 0) / priced.length
 }
 
 /** Each leg's USD share of the pool (WEIGHT_UNIT = all of it); null when any leg is unpriced or the pool is empty. */
@@ -572,15 +621,15 @@ export function v3LpFee(feeUsd: bigint, feeProtocol0: number, feeProtocol1: numb
 
 async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields> {
   const anchor = await readAnchor(c)
-  const empty: ExplorerYields = { asOf: iso(Date.now()), feeWindow: '30d', omnipool: {}, stableswap: {}, xyk: {}, uniswapV3: {}, moneyMarket: {} }
+  const empty: ExplorerYields = { asOf: iso(Date.now()), feeWindow: '30d', omnipool: {}, stableswap: {}, xyk: {}, uniswapV3: {}, moneyMarket: {}, shareWrappers: shareWrapperRefs(Object.keys(SHARE_WRAPPER).map(Number)) }
   if (!anchor) return empty
   const anchorSec = BigInt(Math.floor(new Date(iso(anchor.anchor)).getTime() / 1000))
 
-  const [prices, omni, stable, omniFarms, sharePools, xykMeta, xykFees, v3Fees, xykFarmRows, xykFarmedRows, v3Registry, pegRows, gigaApr] = await Promise.all([
+  const [prices, omni, stable, omniFarms, sharePools, xykMeta, xykFees, v3Fees, xykFarmRows, xykFarmedRows, v3Registry, pegRows, gigaApr, xykPayouts] = await Promise.all([
     ensurePrices(),
     omnipoolYield(c, '30d'),
     stableswapYield(c, '30d'),
-    omnipoolFarmAprs(c, anchor.anchor),
+    omnipoolFarmAprs(c, anchor.anchor, { potState: true }),
     currentStableswapSharePools(c),
     xykPoolMeta(c),
     poolVolumes(c, 'xyk', '30d'),
@@ -591,6 +640,7 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
     c.query({ query: PEG_WINDOW_SQL, query_params: { anchor: Number(anchorSec) }, format: 'JSONEachRow' })
       .then(r => r.json<{ asset_ids: number[]; n0: string[]; d0: string[]; n1: string[]; d1: string[]; t0: number; t1: number; gave_back: number[] }>()),
     cached('explorer:gigahdx-apr', 600_000, () => gigahdxApr(c)).catch(() => null),
+    readFarmPayouts(c, 'XYKWarehouseLM', Number(anchorSec)),
   ])
   const price = priceLookup(prices)
   const reserves = await loadMmReserves(c, anchorSec, price)
@@ -652,10 +702,10 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
   const omniIds = new Set<number>([...omni.items.map(i => Number(i.assetId)), ...farmsByAsset.keys()])
   const omniFee = new Map(omni.items.map(i => [Number(i.assetId), i.feeAprPerc]))
   for (const id of [...omniIds].sort((a, b) => a - b)) {
-    const farms = (farmsByAsset.get(id) ?? []).map(e => ({ rewardAssetId: e.farm.rewardAssetId, apr: pctFromFarmScaled(e.aprScaled), g: e.farm.globalFarmId, y: e.farm.yieldFarmId }))
+    const farms = (farmsByAsset.get(id) ?? []).map(e => ({ rewardAssetId: e.farm.rewardAssetId, apr: pctFromFarmScaled(e.aprScaled), g: e.farm.globalFarmId, y: e.farm.yieldFarmId, state: e.state }))
     omnipool[String(id)] = assemblePoolYield(
       [{ kind: 'omnipool-fee', apr: pctFromPerc(omniFee.get(id)) }, ...underlyingParts(id, WEIGHT_UNIT, ctx), ...farmPartsByReward(farms)],
-      farms.map(f => ({ globalFarmId: f.g, yieldFarmId: f.y, rewardAsset: displayDescriptor(f.rewardAssetId), aprPct: pctNumber(f.apr) })),
+      farms.map(f => ({ globalFarmId: f.g, yieldFarmId: f.y, rewardAsset: displayDescriptor(f.rewardAssetId), aprPct: pctNumber(f.apr), ...(f.state ? { state: f.state } : {}) })),
     )
   }
 
@@ -679,18 +729,20 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
   const farmed = new Map(xykFarmedRows.map(r => [Number(r.lp_asset_id), BigInt(r.shares || '0')]))
   const split = splitAcrossYieldFarms(xykFarms)
   const at = new Date(iso(anchor.anchor))
-  const xykFarmsByLp = new Map<number, Array<{ farm: LiveXykFarm; apr: bigint | null }>>()
+  const xykFarmsByLp = new Map<number, Array<{ farm: LiveXykFarm; apr: bigint | null; state?: FarmRateState }>>()
   for (const farm of xykFarms) {
     const lp = shareOfPair.get(`${farm.assetPair[0]}:${farm.assetPair[1]}`)
     if (lp == null) continue
     const st = xykState.get(lp)
-    // Same unknowns as the Omnipool farms: past the planned schedule, a split global
-    // farm, no current pool state or an unpriced leg/reward is null.
+    // Same rules as the Omnipool farms: a split global farm, no current pool state
+    // or an unpriced leg/reward is null; the pot decides an empty or past-plan farm.
     const stake = st ? xykPositionUsd(farmed.get(lp) ?? 0n, st, price) : null
-    const apr = farm.endsAt > at && !split.has(farm.globalFarmId)
-      ? pctFromFarmScaled(xykFarmAprPercScaled(farm, stake, price(farm.rewardAssetId)))
-      : null
-    xykFarmsByLp.set(lp, [...xykFarmsByLp.get(lp) ?? [], { farm, apr }])
+    if (split.has(farm.globalFarmId)) { xykFarmsByLp.set(lp, [...xykFarmsByLp.get(lp) ?? [], { farm, apr: null }]); continue }
+    const rewardPrice = price(farm.rewardAssetId)
+    const payout = xykPayouts.get(farm.globalFarmId)
+    const d = decideFarmRate(farm.endsAt <= at, xykFarmAprPercScaled(farm, stake, rewardPrice), payout,
+      () => payoutAprPercScaled(payout?.rewardRaw ?? 0n, payout?.seconds ?? 0n, assetDecimalsOrNull(farm.rewardAssetId) ?? 12, rewardPrice, stake))
+    xykFarmsByLp.set(lp, [...xykFarmsByLp.get(lp) ?? [], { farm, apr: pctFromFarmScaled(d.aprScaled), state: d.state }])
   }
   const feeByLp = new Map<number, bigint>()
   for (const item of xykFees.items) {
@@ -706,7 +758,7 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
         { kind: 'xyk-fee', apr: feeAprPctScaled(feeByLp.get(lp) ?? 0n, xykTvlUsd(st, price), WINDOW_DAYS['30d']) },
         ...farmPartsByReward(farms.map(f => ({ rewardAssetId: f.farm.rewardAssetId, apr: f.apr }))),
       ],
-      farms.map(f => ({ globalFarmId: f.farm.globalFarmId, yieldFarmId: f.farm.yieldFarmId, rewardAsset: displayDescriptor(f.farm.rewardAssetId), aprPct: pctNumber(f.apr) })),
+      farms.map(f => ({ globalFarmId: f.farm.globalFarmId, yieldFarmId: f.farm.yieldFarmId, rewardAsset: displayDescriptor(f.farm.rewardAssetId), aprPct: pctNumber(f.apr), ...(f.state ? { state: f.state } : {}) })),
     )
   }
 
@@ -714,20 +766,26 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
   const v3FeeByPool = new Map(v3Fees.items.map(i => [i.poolKey.toLowerCase(), scaledUsd(i.feeUsd)]))
   const uniswapV3: ExplorerYields['uniswapV3'] = {}
   await Promise.all([...v3Registry.pools.values()].map(async pool => {
-    const stats = await v3PoolStats(pool.address)
-    let tvl: bigint | null = null
-    if (stats && pool.asset0 != null && pool.asset1 != null) {
-      const a = usdOf(BigInt(stats.balance0), pool.asset0, price)
-      const b = usdOf(BigInt(stats.balance1), pool.asset1, price)
-      tvl = a == null || b == null ? null : a + b
-    }
-    const lpFee = stats ? v3LpFee(v3FeeByPool.get(pool.address.toLowerCase()) ?? 0n, stats.feeProtocol0, stats.feeProtocol1) : null
     // The fee window is 7 days back from the anchor, so a pool created inside it is annualised over its own age.
     const windowSec = v3FeeWindowSeconds(pool.createdAt, anchorSec)
+    const [stats, twa] = await Promise.all([
+      v3PoolStats(pool.address),
+      windowSec == null || pool.asset0 == null || pool.asset1 == null ? null : v3PoolHistory(c, {
+        address: pool.address, asset0: pool.asset0, asset1: pool.asset1,
+        decimals0: assetDescriptor(pool.asset0).decimals, decimals1: assetDescriptor(pool.asset1).decimals, fee: pool.fee,
+      }, { fromSec: Number(anchorSec - windowSec), toSec: Number(anchorSec) - 1, grain: fixedV3Grain(3_600) }, Number(anchorSec))
+        .then(h => timeWeightedTvlUsd(h.points))
+        .catch(err => { console.warn(`[pool-yield] v3 time-weighted TVL for ${pool.address} failed: ${String(err)}`); return null }),
+    ])
+    const tvl = twa == null ? null : BigInt(Math.round(twa * 1e6)) * 1_000_000n
+    const lpFee = stats ? v3LpFee(v3FeeByPool.get(pool.address.toLowerCase()) ?? 0n, stats.feeProtocol0, stats.feeProtocol1) : null
     uniswapV3[pool.address.toLowerCase()] = assemblePoolYield([{ kind: 'v3-fee', apr: lpFee == null || windowSec == null ? null : feeAprPctScaledSeconds(lpFee, tvl, windowSec) }])
   }))
 
-  return { asOf: omni.asOf ?? iso(anchor.anchor), feeWindow: '30d', omnipool, stableswap, xyk, uniswapV3, moneyMarket }
+  return {
+    asOf: omni.asOf ?? iso(anchor.anchor), feeWindow: '30d', omnipool, stableswap, xyk, uniswapV3, moneyMarket,
+    shareWrappers: shareWrapperRefs(Object.keys(SHARE_WRAPPER).map(Number)),
+  }
 }
 
 /** GET /explorer/yields: global and current; ten minutes fresh, served stale for half an hour while one rebuild runs. */
