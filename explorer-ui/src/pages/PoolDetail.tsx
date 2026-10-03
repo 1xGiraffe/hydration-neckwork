@@ -12,6 +12,9 @@ import { useAssetColors } from '../utils/iconColor'
 import { PoolVolumeRows, PoolVolumeSection, TvlSection, VolumeTvlSection } from '../components/VolumeCharts'
 import { usePoolVolume, volumeApi } from '../api/volume'
 import type { PegSourceInfo, PoolDetail as PoolDetailData } from '../types'
+import { useYields } from '../hooks/usePositions'
+import { PoolApr, PoolAprHover } from '../components/positions/PoolApr'
+import { omnipoolListingOf } from '../components/positions/liquidityModel'
 
 // One stableswap or XYK pool, addressed by its share/LP token id: current
 // composition (with drifting pegs and their oracle sources where the pool has
@@ -54,6 +57,13 @@ function PoolBody({ d }: { d: PoolDetailData }) {
   const activityRows = activity.data ?? []
   const hasPegs = d.assets.some(a => a.peg != null && a.peg.price !== 1)
   const ramping = d.amplification != null && d.amplification.current !== d.amplification.final
+  // The pool's rate, and where the pool's share (or its money-market wrapper:
+  // GETH over the GETH pool) is itself an Omnipool asset, what providing it
+  // there earns — the Hydration app lists such a pool by that Omnipool row.
+  const yields = useYields()
+  const wrapper = d.kind === 'stableswap' ? yields.data?.shareWrappers?.[String(d.poolId)] : undefined
+  const omniId = d.kind === 'stableswap' ? omnipoolListingOf(yields.data, d.poolId) : null
+  const omniListing = [wrapper?.asset, d.shareToken].find(a => a != null && a.assetId === omniId)
 
   const shareSegments: ShareSegment[] = d.tvlUsd != null
     ? d.assets.map((a, i) => ({
@@ -114,6 +124,13 @@ function PoolBody({ d }: { d: PoolDetailData }) {
         <div className="dt">Pool account</div><div className="dd"><AddrPill account={d.account} /></div>
         <div className="dt">TVL</div><div className="dd mono">{d.tvlUsd != null ? <Usd v={d.tvlUsd} /> : <Dash />}</div>
         <div className="dt">Trade fee</div><div className="dd mono">{d.feePermill != null ? fmtPermill(d.feePermill) : <Dash />}</div>
+        <div className="dt">APR</div>
+        <div className="dd"><PoolApr family={d.kind} poolKey={String(d.poolId)} label={d.name} /> <span className="muted">· {wrapper ? `what ${wrapper.asset.symbol} earns · ` : ''}30D fees at current TVL{d.kind === 'xyk' ? ', farms at full loyalty' : ''}</span></div>
+        {omniListing && <>
+          <div className="dt">APR in Omnipool</div>
+          <div className="dd"><PoolAprHover y={yields.data?.omnipool[String(omniListing.assetId)] ?? null} label={`${omniListing.symbol} in the Omnipool`} omnipoolAsset={omniListing} />{' '}
+            <span className="muted">· {omniListing.symbol} as an Omnipool asset, farms at full loyalty · <Link to={`${paths.asset(omniListing.assetId)}?tab=liquidity`} className="hash">Omnipool liquidity</Link></span></div>
+        </>}
         <PoolVolumeRows d={volume.data} />
         {d.amplification != null && <>
           <div className="dt">Amplification</div>

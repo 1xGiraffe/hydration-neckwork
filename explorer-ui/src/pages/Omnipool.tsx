@@ -10,6 +10,7 @@ import { useAssetColors } from '../utils/iconColor'
 import { OmnipoolVolumeSection, PoolVolumeRows, TvlSection, VolumeTvlSection } from '../components/VolumeCharts'
 import { useOmnipoolVolume, volumeApi } from '../api/volume'
 import type { AssetRef } from '../types'
+import { PoolApr } from '../components/positions/PoolApr'
 
 // The Omnipool: Hydration's shared-liquidity pool where every listed asset
 // trades against the H2O hub. Current per-asset reserves with each one's weight
@@ -136,7 +137,7 @@ export function Omnipool() {
             <ShareBar segments={segments} h={30} />
           </>}
           <div className="panel" style={{ marginTop: 14 }}><table className="tbl">
-            <thead><tr><th style={{ width: 40 }}>#</th><th>Asset</th><th className="r">Value</th><th className="r" title="The asset's share of the hub reserve against its weight cap">Weight / cap</th></tr></thead>
+            <thead><tr><th style={{ width: 40 }}>#</th><th>Asset</th><th className="r">Value</th><th className="r" title="The asset's share of the hub reserve against its weight cap">Weight / cap</th><th className="r" title="Estimated APR of providing the asset: 30D fees at current TVL, the asset's own yield and live farm rewards at full loyalty">APR</th></tr></thead>
             <tbody>
               {data.assets.map((r, i) => (
                 <tr key={r.asset.assetId} {...rowNav(`${paths.asset(r.asset.assetId)}?tab=liquidity`)}>
@@ -145,6 +146,7 @@ export function Omnipool() {
                     <span className="mono muted omni-reserve" title={`${F.exact(r.reserve, r.asset.decimals)} ${r.asset.symbol} in the pool`}>{F.amount(r.reserve, r.asset.decimals)}</span></span></td>
                   <td data-label="Value" className="r mono">{r.reserveUsd != null ? <Usd v={r.reserveUsd} /> : <Dash />}</td>
                   <td data-label="Weight / cap" className="r"><WeightCapBar weightPct={r.weightPct} capPct={r.capPct} /></td>
+                  <td data-label="APR" className="r"><PoolApr family="omnipool" poolKey={String(r.asset.assetId)} symbol={r.asset.symbol} label={`${r.asset.symbol} in the Omnipool`} /></td>
                 </tr>
               ))}
             </tbody>

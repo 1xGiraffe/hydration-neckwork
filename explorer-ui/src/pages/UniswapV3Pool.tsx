@@ -12,6 +12,8 @@ import { ChartLegend, MultiLineChart, ShareBar, StackedColumnChart, type ChartZo
 import { ActivityTable } from '../components/ActivityTable'
 import { PoolVolumeHead, TvlSection, VOLUME_BAR_COLOR, VolumeTvlSection } from '../components/VolumeCharts'
 import { useAssetColors } from '../utils/iconColor'
+import { useYields } from '../hooks/usePositions'
+import { PoolApr } from '../components/positions/PoolApr'
 import type { UniswapV3PoolDetail, UniswapV3PoolHistory, UniswapV3PositionRow } from '../types'
 
 // One concentrated-liquidity (Uniswap v3) pool, addressed by its contract. Unlike
@@ -242,6 +244,13 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
     : []
   const p10 = d.price.token1PerToken0
   const v = d.vault
+  // The pool APR the positions' Liquidity tab shows (7D fees to LPs over the 7D time-weighted TVL,
+  // annualised over the pool's age while it is younger than a week) — one source.
+  const apr = useYields().data?.uniswapV3?.[d.address.toLowerCase()]?.totalAprPct ?? null
+  // A vault depositor earns the LP fee less the vault's own cut, compounded by the
+  // vault (hundreds of times so far), so its yield is an APY: daily compounding is
+  // within a rounding of the vault's actual cadence.
+  const vaultApy = apr != null && v?.feeDivisor ? (Math.pow(1 + apr / 100 * (1 - 1 / v.feeDivisor) / 365, 365) - 1) * 100 : null
 
   return (
     <>
@@ -276,6 +285,8 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
             <span style={{ marginLeft: 12 }}>{fmtVolumeTvl(week.volumeTvl.d7)} <span className="muted">7D</span></span>
           </div>
         </>}
+        <div className="dt">APR</div>
+        <div className="dd"><PoolApr family="uniswapV3" poolKey={d.address} label={d.name} /> <span className="muted">· 7D fees to LPs over the 7D time-weighted TVL, annualised</span></div>
         <div className="dt">Fees to LPs</div>
         <div className="dd mono">{week
           ? <><Usd v={week.fees.d1.lpUsd} /> <span className="muted">24H</span>
@@ -328,8 +339,12 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
             <div className="dt">Fees earned</div>
             <div className="dd"><span className="asset-flow"><span className="trade-leg"><AssetAmount asset={d.token0} raw={v.fees0} link={false} /></span> + <span className="trade-leg"><AssetAmount asset={d.token1} raw={v.fees1} link={false} /></span></span>
               <span className="mono muted" style={{ marginLeft: 8 }}>{v.feesUsd != null ? <Usd v={v.feesUsd} /> : ''}</span></div>
-            <div className="dt">Protocol cut</div>
-            <div className="dd mono">{v.feeSharePct != null ? `${v.feeSharePct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% of earned fees` : <Dash />} <span className="muted">· paid to the Treasury on every compound</span></div>
+            {vaultApy != null && <>
+              <div className="dt">Depositor APY</div>
+              <div className="dd mono">{vaultApy.toFixed(1)}% <span className="muted">· the pool APR less the vault fee, compounded</span></div>
+            </>}
+            <div className="dt">Vault fee</div>
+            <div className="dd mono">{v.feeSharePct != null ? <>{v.feeDivisor ? `1/${v.feeDivisor} · ` : ''}{v.feeSharePct.toLocaleString('en-US', { maximumFractionDigits: 2 })}% of earned fees</> : <Dash />} <span className="muted">· the vault's own cut, paid to the Treasury on every compound — separate from the pool's protocol fee</span></div>
             <div className="dt">Rebalances</div>
             <div className="dd mono">{F.int(v.rebalances)}{v.lastRebalanceAt && v.lastRebalanceBlock != null && <span className="muted" style={{ marginLeft: 8 }}>· last <Link to={paths.block(v.lastRebalanceBlock)} className="hash"><Ago ts={v.lastRebalanceAt} now={now} /></Link></span>}</div>
             {v.compounds != null && <>

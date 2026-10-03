@@ -6,6 +6,10 @@ import { AssetIcon, Usd, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav, TableSkel
 import { useAssetColors } from '../utils/iconColor'
 import { fmtVolumeTvl } from '../utils/volume'
 import type { PoolCompositionEntry, PoolKind, PoolListEntry } from '../types'
+import { useYields } from '../hooks/usePositions'
+import { PoolApr } from '../components/positions/PoolApr'
+import { omnipoolAprSpan, omnipoolListingOf } from '../components/positions/liquidityModel'
+import { aprText } from '../components/positions/yieldFormat'
 
 // Where the chain's money sits.
 //
@@ -88,7 +92,34 @@ function PoolRow({ p }: { p: PoolListEntry }) {
       <td data-label="24H volume" className="r mono">{p.volume24hUsd != null ? <Usd v={p.volume24hUsd} /> : <Dash />}</td>
       <td data-label="Volume/TVL" className="r mono muted" title="24H volume over the pool's current TVL">{p.volumeTvl24h != null ? fmtVolumeTvl(p.volumeTvl24h) : <Dash />}</td>
       <td data-label="Share" className="r mono muted">{p.sharePct == null ? <Dash /> : p.sharePct < 0.1 ? '<0.1%' : F.sharePct(p.sharePct)}</td>
+      <td data-label="APR" className="r"><PoolRowApr p={p} /></td>
     </tr>
+  )
+}
+
+// The row's pool APR, as the pool page states it. The Omnipool has no single
+// rate — each asset is its own pool (fees, farms) — so its row states the span
+// of its assets' rates and the Omnipool page lists each one.
+function PoolRowApr({ p }: { p: PoolListEntry }) {
+  const yields = useYields()
+  if (p.kind === 'omnipool') {
+    const span = omnipoolAprSpan(yields.data)
+    return span
+      ? <span className="mono muted" title="Each Omnipool asset earns its own APR (fees and farms) — see the Omnipool page">{aprText(span[0])}–{aprText(span[1])}</span>
+      : <span className="mono muted">{yields.isPending ? '…' : 'per asset'}</span>
+  }
+  const family = p.kind === 'uniswapv3' ? 'uniswapV3' : p.kind
+  const key = p.kind === 'uniswapv3' ? p.address : p.poolId != null ? String(p.poolId) : undefined
+  if (!key) return <Dash />
+  // A pool whose share (or its money-market wrapper) is also an Omnipool asset
+  // keeps its own rate here, with what providing it to the Omnipool earns beneath.
+  const omniId = p.kind === 'stableswap' && p.poolId != null ? omnipoolListingOf(yields.data, p.poolId) : null
+  const omni = omniId != null ? yields.data?.omnipool[String(omniId)]?.totalAprPct : null
+  return (
+    <>
+      <PoolApr family={family} poolKey={key} label={p.name} />
+      {omni != null && <span className="liq-apr-omni muted mono" title="What providing this pool's token to the Omnipool earns (fees, its own yield and farms)">{aprText(omni)} in Omnipool</span>}
+    </>
   )
 }
 
@@ -125,10 +156,10 @@ export function Liquidity() {
 
       <div className="panel">
         <table className="tbl liq-tbl">
-          <thead><tr><th>Pool</th><th>Composition</th><th className="r">TVL</th><th className="r">24H volume</th><th className="r">Volume/TVL</th><th className="r">Share</th></tr></thead>
+          <thead><tr><th>Pool</th><th>Composition</th><th className="r">TVL</th><th className="r">24H volume</th><th className="r">Volume/TVL</th><th className="r">Share</th><th className="r" title="Estimated APR: 30D fees at current TVL (concentrated liquidity: 7D), the legs' lending and own yield, and live farm rewards at full loyalty">APR</th></tr></thead>
           <tbody>
-            {isLoading ? <TableSkeleton cols={6} rows={12} />
-              : !rows.length ? <EmptyRow cols={6}>No pools</EmptyRow>
+            {isLoading ? <TableSkeleton cols={7} rows={12} />
+              : !rows.length ? <EmptyRow cols={7}>No pools</EmptyRow>
                 : rows.map(p => <PoolRow key={`${p.kind}:${p.address ?? p.poolId ?? 'omnipool'}`} p={p} />)}
           </tbody>
         </table>
@@ -149,7 +180,9 @@ export function Liquidity() {
       <div className="liq-foot muted">
         Reserves come from the newest chain snapshot. A pool whose legs have no price shows no TVL —
         it still holds tokens, they just have nothing to be worth. 24h volume counts every swap that executed in the
-        pool once (a route through two pools counts in both); Volume/TVL is that over the pool's current TVL. <Link to={paths.omnipool()} className="hash">Open the Omnipool →</Link>
+        pool once (a route through two pools counts in both); Volume/TVL is that over the pool's current TVL. APR is
+        the pool's estimated rate — 30D fees at current TVL (concentrated liquidity: 7D), the legs' own and lending yield and
+        live farms at full loyalty; hover it for the breakdown. The Omnipool row spans its assets' rates. <Link to={paths.omnipool()} className="hash">Open the Omnipool →</Link>
       </div>
     </div>
   )

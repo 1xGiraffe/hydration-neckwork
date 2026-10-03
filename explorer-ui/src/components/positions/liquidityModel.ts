@@ -1,9 +1,9 @@
 import type {
   AssetRef, ExplorerYields, FarmRewardEntry, FarmRewardsSummary, LiquidityHistoryPosition, LiquidityRewardsClaimed,
-  LpPosition, LpShareWrapper, LpUnclaimedReward, PoolYield,
+  FarmRateState, LpPosition, LpShareWrapper, LpUnclaimedReward, PoolYield,
 } from '../../types'
 import { paths } from '../../router'
-import { sumPct, yieldComponentRow, type YieldRow } from './yieldFormat'
+import { sumPct, yieldComponentRow, type YieldRow, type YieldRowContext } from './yieldFormat'
 
 // The Liquidity tab's arithmetic, pure and unit-tested: which pool a position
 // belongs to, the holder's rate on it, and the tab's sums. USD figures arrive
@@ -61,6 +61,53 @@ export function wrapperYieldOf(yields: ExplorerYields | null | undefined, wrappe
   return yields.moneyMarket?.[wrapper.marketKey]?.[String(wrapper.asset.assetId)]?.supply ?? null
 }
 
+export const POOL_APR_NOTE = 'Estimated APR of the pool: the last 30 days of fees at current TVL (concentrated liquidity: 7 days over the week\'s time-weighted value, range-wide), live farm rewards at full loyalty (a farm past its planned end at what its pot paid over 30 days, an emptied one at 0%), the lending yield of money-market legs and the own yield of yield-bearing legs (vDOT, wstETH, PRIME… at the current APY the Hydration UI shows, else their on-chain rate). Every part counts, including the ones the Hydration app leaves out on some pools (HDX\'s own Omnipool fee, a listed aToken\'s own supply APY, an on-chain token yield). Impermanent loss is not considered.'
+// A pool whose share is a money-market reserve (HUSDT over 2-Pool-HUSDT, GDOT over
+// 2-Pool-GDOT): the Hydration app's add-liquidity flow supplies the share and
+// hands the holder the aToken, so the app rates the pool as that aToken earns.
+export const wrappedPoolAprNote = (symbol: string) => `Estimated APR of the pool as the Hydration app states it: what ${symbol}, the pool share supplied to the money market, earns — the last 30 days of fees at current TVL, the lending yield and own yield of the pool's legs, the reserve's supply APY and its incentive programmes. Shares held unwrapped earn the fee and legs only. Impermanent loss is not considered.`
+
+/** A pool's headline rate as every pool surface states it, and the wrapper it is rated through. */
+export interface PoolHeadline { yield: PoolYield | null; wrapper?: LpShareWrapper }
+
+/**
+ * The rate a pool surface (pool page, Omnipool table, liquidity list, asset
+ * Liquidity tab) heads with — the same figure the positions' Liquidity tab gives
+ * the pool: its own yield, or for a stableswap pool whose share is a money-market
+ * reserve (GDOT over 2-Pool-GDOT) what that aToken earns, as the Hydration app
+ * rates a "Hydrated" pool. A wrapper whose reserve yield is missing reads as
+ * unknown, never as the pool's own (smaller) figure.
+ */
+export function poolHeadline(yields: ExplorerYields | null | undefined, id: PoolIdentity | null): PoolHeadline {
+  if (!yields || !id) return { yield: null }
+  const wrapper = id.family === 'stableswap' ? yields.shareWrappers?.[id.key] : undefined
+  if (wrapper) return { yield: wrapperYieldOf(yields, wrapper), wrapper }
+  return { yield: poolYieldOf(yields, id) }
+}
+
+/**
+ * Where a stableswap pool's share — or the money-market token wrapping it (GETH
+ * over the GETH pool) — is itself an Omnipool asset: that asset's id, the wrapper
+ * first, since it is what the Hydration app lists the pool by. Null when neither is.
+ */
+export function omnipoolListingOf(yields: ExplorerYields | null | undefined, shareId: number): number | null {
+  if (!yields) return null
+  const wrapper = yields.shareWrappers?.[String(shareId)]?.asset.assetId
+  return [wrapper, shareId].find((id): id is number => id != null && yields.omnipool[String(id)] != null) ?? null
+}
+
+/** The lowest and highest known APR across the Omnipool's assets (each its own pool); null when none is known. */
+export function omnipoolAprSpan(yields: ExplorerYields | null | undefined): [number, number] | null {
+  const known = Object.values(yields?.omnipool ?? {}).map(y => y.totalAprPct).filter((v): v is number => v != null && Number.isFinite(v))
+  return known.length ? [Math.min(...known), Math.max(...known)] : null
+}
+
+/** Reward assets shown beside a pool's rate, like the Hydration UI's icons: every farm's, then each lending incentive's — once each. */
+export function rewardIcons(y: PoolYield | null): AssetRef[] {
+  const all = [...(y?.farms.map(f => f.rewardAsset) ?? []), ...(y?.components ?? []).flatMap(c => (c.kind === 'mm-incentive' && c.asset ? [c.asset] : []))]
+  return all.filter((a, i) => all.findIndex(b => b.assetId === a.assetId) === i)
+}
+
 /**
  * The rate a wrapped pool's unwrapped shares miss, named in the position's hover.
  * The share goes by the wrapper's name (the API's display face), so the note
@@ -81,9 +128,32 @@ export function farmEntriesOf(p: LpPosition, items: FarmItem[] | undefined): Far
   return items.filter(i => i.positionId === p.positionId && (i.venue == null || i.venue === p.venue))
 }
 
-/** The pool-level rate (the Hydration UI's: fees plus every live farm at full loyalty). */
-export function poolAprRows(y: PoolYield | null): YieldRow[] {
-  return y ? y.components.map(yieldComponentRow) : []
+/**
+ * The pool-level rate (the Hydration UI's: fees plus every live farm at full
+ * loyalty), each farm named with its state. `omnipoolAsset` names an Omnipool
+ * asset's parts the Hydration app states differently (see YieldRowContext): an
+ * aToken listed directly (aDOT — no stablepool beneath it) earns its own supply APY.
+ */
+export function poolAprRows(y: PoolYield | null, omnipoolAsset?: { assetId: number; symbol: string }): YieldRow[] {
+  if (!y) return []
+  const ctx: YieldRowContext = {
+    omnipoolAsset,
+    ownSupply: !!omnipoolAsset && !y.components.some(c => c.kind === 'stablepool-fee'),
+    farmStates: farmStatesByReward(y),
+  }
+  return y.components.map((c, i) => yieldComponentRow(c, i, ctx))
+}
+
+/** Each reward asset's farm state; mixed states across its farms read as the most active one. */
+function farmStatesByReward(y: PoolYield): Map<number, FarmRateState> {
+  const rank: Record<FarmRateState, number> = { active: 0, 'past-end': 1, ended: 2 }
+  const out = new Map<number, FarmRateState>()
+  for (const f of y.farms) {
+    const s = f.state ?? 'active'
+    const prev = out.get(f.rewardAsset.assetId)
+    if (prev == null || rank[s] < rank[prev]) out.set(f.rewardAsset.assetId, s)
+  }
+  return out
 }
 
 export interface PositionApr { total: number | null; rows: YieldRow[]; note?: string }
@@ -101,7 +171,8 @@ export interface PositionApr { total: number | null; rows: YieldRow[]; note?: st
  */
 export function positionApr(p: LpPosition, y: PoolYield | null, entries: FarmItem[]): PositionApr {
   if (!y) return { total: null, rows: [] }
-  const rows = y.components.map(yieldComponentRow).filter(r => r.group !== 'Farm rewards')
+  const omni = p.venue === 'Omnipool' || p.venue === 'Omnipool Farm' ? { assetId: p.asset.assetId, symbol: p.asset.symbol } : undefined
+  const rows = poolAprRows(y, omni).filter(r => r.group !== 'Farm rewards')
   const terms: (number | null)[] = y.components.filter(c => c.kind !== 'farm').map(c => c.aprPct)
   let note: string | undefined = p.wrapper ? unwrappedNote(p.wrapper, p.asset) : undefined
   if (isFarmVenue(p.venue)) {
@@ -130,7 +201,7 @@ export function positionApr(p: LpPosition, y: PoolYield | null, entries: FarmIte
         asset: farm?.rewardAsset ?? list[0].asset,
         pct,
         group: 'Farm rewards',
-        note: !farm ? 'farm not listed' : !known ? 'loyalty unknown' : uniform ? `${fmtPct(lo)} loyalty` : `loyalty ${fmtPct(lo)}–${fmtPct(hi)}`,
+        note: !farm ? 'farm not listed' : farm.state === 'ended' ? 'ended · pot empty' : !known ? 'loyalty unknown' : uniform ? `${fmtPct(lo)} loyalty` : `loyalty ${fmtPct(lo)}–${fmtPct(hi)}`,
       })
     }
   }

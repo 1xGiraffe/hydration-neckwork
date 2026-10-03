@@ -7,6 +7,7 @@ import { Link, paths } from '../router'
 import { accountHref, Usd, Amt, AddrPill, AssetAmount, Ago, ChartSkeleton, Dash, EmptyRow, F, Pager, pendingRows, PoolBadge, rowNav, TableSkeleton } from './ui'
 import { ChartLegend, ShareBar, StackedAreaChart, type ShareSegment } from './HdxCharts'
 import { useAssetColors } from '../utils/iconColor'
+import { PoolApr } from './positions/PoolApr'
 
 // The asset detail's Liquidity tab: every pool currently holding the asset
 // (cards with composition bars, largest holding first), the asset's pooled
@@ -21,6 +22,14 @@ const KIND_LABEL: Record<AssetLiquiditySource['kind'], string> = { omnipool: 'Om
 // always wears the neutral).
 const SERIES_COLORS = ['var(--sky-deep)', 'var(--lavender-deep)', 'var(--green)', 'var(--amber)', 'var(--sky)', 'var(--lavender)']
 const OTHER_COLOR = 'var(--text-low)'
+
+// The source's pool rate, keyed the way GET /explorer/yields keys it: the
+// Omnipool by this asset (each Omnipool asset is its own pool), the rest by pool.
+function SourceApr({ s, asset }: { s: AssetLiquiditySource; asset: AssetRef }) {
+  if (s.kind === 'omnipool') return <PoolApr family="omnipool" poolKey={String(asset.assetId)} symbol={asset.symbol} label={`${asset.symbol} in the Omnipool`} />
+  const key = s.kind === 'uniswapv3' ? s.address : s.poolId != null ? String(s.poolId) : undefined
+  return key ? <PoolApr family={s.kind === 'uniswapv3' ? 'uniswapV3' : s.kind} poolKey={key} label={s.name} /> : <Dash />
+}
 
 function poolPath(s: { kind: AssetLiquiditySource['kind']; poolId: number | null; address?: string }): string | null {
   if (s.kind === 'omnipool') return paths.omnipool()
@@ -56,6 +65,7 @@ function SourceCard({ s, asset }: { s: AssetLiquiditySource; asset: AssetRef }) 
       {segments.length > 0 && <ShareBar segments={segments} h={26} />}
       <div className="hv"><AssetAmount asset={asset} raw={s.assetAmount} link={false} /></div>
       <div className="hs"><Usd v={s.assetUsd} />{s.assetSharePct != null && <span className="muted"> · {F.sharePct(s.assetSharePct)} of pool</span>}</div>
+      <div className="hs"><span className="muted">APR</span> <SourceApr s={s} asset={asset} /></div>
     </>
   )
   return to
@@ -176,7 +186,7 @@ export function AssetLiquidityTab({ asset }: { asset: AssetRef }) {
           </div>
           {rest.length > 0 && (
             <div className="panel" style={{ marginTop: 14 }}><table className="tbl">
-              <thead><tr><th>Pool</th><th>Venue</th><th className="r">TVL</th><th className="r">{asset.symbol} pooled</th><th className="r">Value</th></tr></thead>
+              <thead><tr><th>Pool</th><th>Venue</th><th className="r">TVL</th><th className="r">{asset.symbol} pooled</th><th className="r">Value</th><th className="r">APR</th></tr></thead>
               <tbody>
                 {rest.map((s, i) => {
                   const to = poolPath(s)
@@ -187,6 +197,7 @@ export function AssetLiquidityTab({ asset }: { asset: AssetRef }) {
                       <td data-label="TVL" className="r mono">{s.tvlUsd != null ? <Usd v={s.tvlUsd} /> : <Dash />}</td>
                       <td data-label={`${asset.symbol} pooled`} className="r"><AssetAmount asset={asset} raw={s.assetAmount} /></td>
                       <td data-label="Value" className="r mono">{s.assetUsd != null ? <Usd v={s.assetUsd} /> : <Dash />}</td>
+                      <td data-label="APR" className="r"><SourceApr s={s} asset={asset} /></td>
                     </tr>
                   )
                 })}
