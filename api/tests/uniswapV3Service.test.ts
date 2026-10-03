@@ -56,6 +56,15 @@ describe('resolveV3TokenAsset', () => {
   it('is case-insensitive about the address', () => {
     expect(resolveV3TokenAsset(ADOT_CONTRACT.toUpperCase().replace('0X', '0x'), aTokenReserve, contractAsset)).toBe(1001)
   })
+  it('maps the wrapper over a named pool share to the wrapper, never the share', async () => {
+    // GSOL (9001) is the aToken over 2-Pool-GSOL (90001), which the share/wrapper rule
+    // says IS GSOL: the 2026-10-01 HOLLAR/GSOL pool must hold 9001, as its legs do.
+    const { registerNamedShareWrappers } = await import('../src/services/explorerAssets.ts')
+    registerNamedShareWrappers([[90001, 9001]])
+    const GSOL = '0xf5f744a4d14a5f49ce173e39b8361733a6e55152'
+    const reserves = new Map([[GSOL, '0x0000000000000000000000000000000100015f91']])
+    expect(resolveV3TokenAsset(GSOL, reserves, contractAsset)).toBe(9001)
+  })
 })
 
 describe('ethPrefixedAccountId', () => {
