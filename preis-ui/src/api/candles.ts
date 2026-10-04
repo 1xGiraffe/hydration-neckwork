@@ -6,6 +6,8 @@ interface FetchCandlesParams {
   interval: OHLCVInterval
   from: number
   to: number
+  // Price against the USD-pegged quote asset itself instead of reading it as USD.
+  quoteAsset?: boolean
 }
 
 export async function fetchCandles(params: FetchCandlesParams, signal?: AbortSignal): Promise<ApiCandle[]> {
@@ -16,6 +18,7 @@ export async function fetchCandles(params: FetchCandlesParams, signal?: AbortSig
     from: String(params.from),
     to: String(params.to),
   })
+  if (params.quoteAsset) qs.set('quoteAsset', '1')
   const res = await fetch(`/api/candles?${qs}`, { signal })
   if (!res.ok) {
     throw new Error(`Failed to fetch candles: ${res.status}`)

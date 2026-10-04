@@ -31,6 +31,8 @@ import {
   tokenAmountFromRaw,
 } from '../utils/format'
 import { withAlpha } from '../utils/color'
+import { candleVolume, formatVolumeAxis, formatVolumeReadout } from '../utils/volume'
+import { pairKeyString } from '../utils/pairs'
 import { candleEndTimestamp, previousCandleRange, recentCandleRange } from '../utils/candleTime'
 import { headStreamHealthy, subscribeHead } from '../live'
 import { useModalShell } from '../hooks/useModalShell'
@@ -59,6 +61,8 @@ const VOLUME_DETAILS_PAGE_SIZE = 200
 interface ChartProps {
   baseId: number
   quoteId: number
+  // Priced against the USD-pegged quote asset itself (`?quote=asset`).
+  quoteAsset?: boolean
   interval: OHLCVInterval
   base: string
   // Decimals of the base asset, used to scale the raw-unit trade amounts the
@@ -80,7 +84,21 @@ interface Legend {
   high: number
   low: number
   close: number
-  volume: number
+  // The candle the volume readout states (both its token amount and its dollars).
+  candle: ApiCandle | null
+}
+
+/** The loaded candle opening at `time` (the history is sorted by time). */
+function candleAt(data: readonly ApiCandle[], time: number): ApiCandle | null {
+  let lo = 0, hi = data.length - 1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    const t = data[mid]!.intervalStart
+    if (t === time) return data[mid]!
+    if (t < time) lo = mid + 1
+    else hi = mid - 1
+  }
+  return null
 }
 
 interface OmniwatchMarker {
@@ -147,16 +165,16 @@ function createLegendStore(): LegendStore {
 }
 
 /** O/H/L/C/V for the hovered candle, falling back to the newest one. */
-const ChartLegend = memo(function ChartLegend({ store, tail, base, showVolumeSource, upColor }: {
+const ChartLegend = memo(function ChartLegend({ store, tail, base, pairVolume, upColor }: {
   store: LegendStore
   tail: ApiCandle | null
   base: string
-  showVolumeSource: boolean
+  pairVolume: boolean
   upColor: string
 }) {
   const hovered = useSyncExternalStore(store.subscribe, store.get, store.get)
   const legend: Legend | null = hovered ?? (tail
-    ? { open: tail.open, high: tail.high, low: tail.low, close: tail.close, volume: tail.volumeTotal }
+    ? { open: tail.open, high: tail.high, low: tail.low, close: tail.close, candle: tail }
     : null)
   if (!legend) return null
   return (
@@ -167,7 +185,7 @@ const ChartLegend = memo(function ChartLegend({ store, tail, base, showVolumeSou
       <span style={{ color: legend.close >= legend.open ? upColor : 'var(--red)' }}>
         <span className="k">C</span>{formatPrice(legend.close, false)}
       </span>
-      <span><span className="k">V</span>{formatUsd(legend.volume)}{showVolumeSource ? ` (${base})` : ''}</span>
+      <span><span className="k">V</span>{legend.candle ? formatVolumeReadout(legend.candle, pairVolume, base) : '—'}</span>
     </div>
   )
 })
@@ -295,12 +313,20 @@ function volumeBarColors(): { up: string; down: string } {
 }
 
 export default function Chart({
-  baseId, quoteId, interval, base, baseDecimals = null, showVolumeSource = false,
+  baseId, quoteId, quoteAsset = false, interval, base, baseDecimals = null, showVolumeSource = false,
   onVisibleRangeReady, onDataChange,
   inspectionTime = null, onInspectionTimeChange, theme, toolsEnabled = true,
   logScale = false, onLogScaleChange,
 }: ChartProps) {
-  const dataScopeKey = `${baseId}:${quoteId}:${interval}`
+  // An asset pair (a token quote, or a stablecoin read as the token): its bars
+  // are the pair's own volume. A dollar pair keeps the base asset's.
+  const pairVolume = quoteAsset || showVolumeSource
+  // The volume axis formatter lives on the chart, which is created once.
+  const baseRef = useRef(base)
+  useEffect(() => { baseRef.current = base }, [base])
+  const pairVolumeRef = useRef(pairVolume)
+  useEffect(() => { pairVolumeRef.current = pairVolume }, [pairVolume])
+  const dataScopeKey = `${baseId}:${quoteId}:${quoteAsset ? 'asset:' : ''}${interval}`
   const containerRef = useRef<HTMLDivElement>(null)
   const chartAreaRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -331,8 +357,10 @@ export default function Chart({
   // chart instance; the pair key is mirrored into a ref so the chart-creation
   // effect does not need baseId/quoteId deps (App remounts this per pair).
   const toolsRef = useRef<ToolController | null>(null)
-  const pairKeyRef = useRef(`${baseId}-${quoteId}`)
-  useEffect(() => { pairKeyRef.current = `${baseId}-${quoteId}` }, [baseId, quoteId])
+  // Drawings belong to one chart, so a stablecoin-quoted pair keeps its own.
+  const pairKey = pairKeyString({ baseId, quoteId, quoteAsset })
+  const pairKeyRef = useRef(pairKey)
+  useEffect(() => { pairKeyRef.current = pairKey }, [pairKey])
   const [toolState, setToolState] = useState<ToolState>({ tool: 'cursor', hasSelection: false })
   // Hiding the toolbar (menu toggle) must never strand a drawing tool.
   useEffect(() => {
@@ -405,8 +433,8 @@ export default function Chart({
   }, [abortCandleRequests, dataScopeKey])
 
   const fetchData = useCallback(async (from: number, to: number, signal?: AbortSignal) => {
-    return fetchCandles({ baseId, quoteId, interval, from, to }, signal)
-  }, [baseId, quoteId, interval])
+    return fetchCandles({ baseId, quoteId, interval, from, to, quoteAsset }, signal)
+  }, [baseId, quoteId, quoteAsset, interval])
 
   // Both axes are canvas-drawn inside the chart, so only the chart can measure
   // them; mirror the two measurements DOM overlays need into CSS variables.
@@ -707,7 +735,7 @@ export default function Chart({
     }))
     const volumeData: HistogramData[] = data.map(c => ({
       time: c.intervalStart as UTCTimestamp,
-      value: c.volumeTotal,
+      value: candleVolume(c, pairVolume),
       color: c.close >= c.open ? volColors.up : volColors.down,
     }))
 
@@ -716,7 +744,7 @@ export default function Chart({
     volumeSeries.setData(volumeData)
     onDataChange?.(data)
     scheduleOverlaySync()
-  }, [onDataChange, scheduleOverlaySync])
+  }, [onDataChange, scheduleOverlaySync, pairVolume])
 
   const replaceAllData = useCallback((data: ApiCandle[]) => {
     const normalized = normalizeCandles(data)
@@ -759,7 +787,7 @@ export default function Chart({
       })
       volumeSeries.update({
         time: candle.intervalStart as UTCTimestamp,
-        value: candle.volumeTotal,
+        value: candleVolume(candle, pairVolume),
         color: candle.close >= candle.open ? volColors.up : volColors.down,
       })
     }
@@ -771,7 +799,7 @@ export default function Chart({
     onDataChange?.(next)
     scheduleOverlaySync()
     return true
-  }, [onDataChange, scheduleOverlaySync])
+  }, [onDataChange, scheduleOverlaySync, pairVolume])
 
   const showLatestCandles = useCallback(() => {
     const ts = chartRef.current?.timeScale()
@@ -837,7 +865,7 @@ export default function Chart({
 
     const volumeSeries = chart.addSeries(HistogramSeries, {
       color: txtLow,
-      priceFormat: { type: 'custom', minMove: 0.01, formatter: formatUsd },
+      priceFormat: { type: 'custom', minMove: 0.01, formatter: (v: number) => formatVolumeAxis(v, pairVolumeRef.current, baseRef.current) },
       priceScaleId: 'volume',
       lastValueVisible: false,
       priceLineVisible: false,
@@ -873,9 +901,11 @@ export default function Chart({
     const crosshairHandler = (param: MouseEventParams) => {
       if (!param.time) { legendStore.set(null); return }
       const candle = param.seriesData.get(candleSeries) as CandlestickData | undefined
-      const volume = param.seriesData.get(volumeSeries) as HistogramData | undefined
       if (candle) {
-        legendStore.set({ open: candle.open, high: candle.high, low: candle.low, close: candle.close, volume: volume?.value ?? 0 })
+        legendStore.set({
+          open: candle.open, high: candle.high, low: candle.low, close: candle.close,
+          candle: candleAt(allDataRef.current, Number(param.time)),
+        })
       }
     }
     chart.subscribeCrosshairMove(crosshairHandler)
@@ -1555,7 +1585,7 @@ export default function Chart({
           store={legendStore}
           tail={tail}
           base={base}
-          showVolumeSource={showVolumeSource}
+          pairVolume={pairVolume}
           upColor={upColor}
         />
       </div>
@@ -1578,7 +1608,10 @@ export default function Chart({
               <div className="omniwatch-stat"><span className="k">Close</span><span className={`v ${modalCandle.close >= modalCandle.open ? 'up' : 'down'}`}>{formatPrice(modalCandle.close, false)}</span></div>
               <div className="omniwatch-stat"><span className="k">Change</span><span className={`v ${modalChange >= 0 ? 'up' : 'down'}`}>{formatChange(modalChange)}</span></div>
               <div className="omniwatch-stat">
-                <span className="k">Volume</span>
+                {/* The traders below are everyone who traded the base, against
+                    anything, so on an asset pair this is the base's volume — not
+                    the pair's, which the bars and the legend show. */}
+                <span className="k">{pairVolume ? `${base} volume` : 'Volume'}</span>
                 <span className="v">{formatUsd(modalCandle.volumeTotal)}</span>
                 {modalVolumeToken && <span className="sub">{modalVolumeToken}</span>}
               </div>

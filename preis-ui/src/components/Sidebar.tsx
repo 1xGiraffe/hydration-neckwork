@@ -4,20 +4,18 @@ import PairIcons from './PairIcons'
 import { formatPrice, formatChange } from '../utils/format'
 import { changeForPeriod, changeTone, crossChange } from '../utils/change'
 import { useStatsById } from '../hooks/useStatsById'
-import { displayLabel, pairDisplay } from '../utils/pairs'
+import { displayLabel, pairDisplay, pairKeyString, presentedQuote, samePair, type PairKey } from '../utils/pairs'
+import type { FavoritePair } from '../hooks/useFavorites'
 import FavoriteStar from './FavoriteStar'
 
 const TOP_N = 8
 const MIN_MOVER_VOLUME_USD = 1_000
 
-interface FavoritePair { baseId: number; quoteId: number }
-
 interface SidebarProps {
   assets: Asset[]
   marketStats: AssetMarketStats[] | undefined
-  currentBaseId: number
-  currentQuoteId: number
-  onSelect: (baseId: number, quoteId: number) => void
+  current: PairKey
+  onSelect: (pair: PairKey) => void
   blockHeight: number | null
   indexerLive: boolean
   period: Period
@@ -38,15 +36,14 @@ function activateOnKeyboard(event: KeyboardEvent<HTMLElement>, activate: () => v
   activate()
 }
 
-function RankedMarketsSection({ title, rows, quote, currentBaseId, currentQuoteId, period, onCyclePeriod, onSelect }: {
+function RankedMarketsSection({ title, rows, quote, current, period, onCyclePeriod, onSelect }: {
   title: string
   rows: Row[]
   quote: Asset | undefined
-  currentBaseId: number
-  currentQuoteId: number
+  current: PairKey
   period: Period
   onCyclePeriod: () => void
-  onSelect: (baseId: number, quoteId: number) => void
+  onSelect: (pair: PairKey) => void
 }) {
   return (
     <div className="sb-section scroll">
@@ -64,10 +61,10 @@ function RankedMarketsSection({ title, rows, quote, currentBaseId, currentQuoteI
       <div>
         {rows.length === 0 && <div style={{ fontFamily: "'GeistMono', monospace", fontSize: 11, color: 'var(--text-low)' }}>—</div>}
         {rows.map(({ asset, stats }) => {
-          const isActive = asset.assetId === currentBaseId && quote != null && currentQuoteId === quote.assetId
+          const isActive = quote != null && samePair(current, { baseId: asset.assetId, quoteId: quote.assetId, quoteAsset: false })
           const label = displayLabel(quote ? pairDisplay(asset, quote) : asset.symbol)
           const change = changeForPeriod(stats, period)
-          const select = () => { if (quote) onSelect(asset.assetId, quote.assetId) }
+          const select = () => { if (quote) onSelect({ baseId: asset.assetId, quoteId: quote.assetId, quoteAsset: false }) }
           return (
             <div
               key={asset.assetId}
@@ -93,8 +90,7 @@ function RankedMarketsSection({ title, rows, quote, currentBaseId, currentQuoteI
 export default function Sidebar({
   assets,
   marketStats,
-  currentBaseId,
-  currentQuoteId,
+  current,
   onSelect,
   blockHeight,
   indexerLive,
@@ -135,7 +131,7 @@ export default function Sidebar({
   // entries whose assets are no longer in the registry.
   const favoriteRows = useMemo(() => {
     const result: Array<{
-      pair: FavoritePair
+      pair: PairKey
       base: Asset
       quote: Asset
       price: number | null
@@ -143,8 +139,12 @@ export default function Sidebar({
     }> = []
     for (const f of favorites) {
       const base = assetsById.get(f.baseId)
-      const quote = assetsById.get(f.quoteId)
-      if (!base || !quote) continue
+      const quoteAsset = assetsById.get(f.quoteId)
+      if (!base || !quoteAsset) continue
+      // A stablecoin-quoted favorite presents its quote by name, so the row
+      // below reads it as the cross pair it is.
+      const pair: PairKey = { baseId: f.baseId, quoteId: f.quoteId, quoteAsset: f.quoteAsset === true }
+      const quote = presentedQuote(quoteAsset, pair.quoteAsset)
       const bs = statsById.get(base.assetId)
       const qs = statsById.get(quote.assetId)
       // A stablecoin quote is not automatically a dollar one: EURC tracks the
@@ -157,7 +157,7 @@ export default function Sidebar({
       // A pair's change is the change of its ratio, derived from both legs'
       // USD change; the base's change alone is not the pair's change.
       const change = crossChange(bs, qs, period, isUsdPair)
-      result.push({ pair: f, base, quote, price, change })
+      result.push({ pair, base, quote, price, change })
     }
     // Alphabetical by displayed label (e.g. "DOT" < "HDXDOT" < "vDOT") so
     // adding/removing favorites doesn't reorder the list.
@@ -231,18 +231,18 @@ export default function Sidebar({
           ) : (
             <div>
               {favoriteRows.map(({ pair, base, quote, price, change }) => {
-                const isActive = base.assetId === currentBaseId && quote.assetId === currentQuoteId
+                const isActive = samePair(current, pair)
                 const isUsdPair = quote.isUsdPegged ?? false
                 const label = displayLabel(pairDisplay(base, quote))
                 return (
                   <div
-                    key={`${pair.baseId}-${pair.quoteId}`}
+                    key={pairKeyString(pair)}
                     role="button"
                     tabIndex={0}
                     aria-label={`Select ${label}`}
                     className={'market-row' + (isActive ? ' active' : '')}
-                    onClick={() => onSelect(base.assetId, quote.assetId)}
-                    onKeyDown={event => activateOnKeyboard(event, () => onSelect(base.assetId, quote.assetId))}
+                    onClick={() => onSelect(pair)}
+                    onKeyDown={event => activateOnKeyboard(event, () => onSelect(pair))}
                   >
                     <PairIcons base={base} quote={quote} isUsdPair={isUsdPair} size={22} />
                     <div className="m-sym">
@@ -257,8 +257,8 @@ export default function Sidebar({
           )}
         </div>
 
-        <RankedMarketsSection title="Top markets" rows={topMarkets} quote={usdt} currentBaseId={currentBaseId} currentQuoteId={currentQuoteId} period={period} onCyclePeriod={onCyclePeriod} onSelect={onSelect} />
-        <RankedMarketsSection title="Top movers" rows={topMovers} quote={usdt} currentBaseId={currentBaseId} currentQuoteId={currentQuoteId} period={period} onCyclePeriod={onCyclePeriod} onSelect={onSelect} />
+        <RankedMarketsSection title="Top markets" rows={topMarkets} quote={usdt} current={current} period={period} onCyclePeriod={onCyclePeriod} onSelect={onSelect} />
+        <RankedMarketsSection title="Top movers" rows={topMovers} quote={usdt} current={current} period={period} onCyclePeriod={onCyclePeriod} onSelect={onSelect} />
 
         {!hideIndexer && (
           <div className="sb-section sb-indexer">
