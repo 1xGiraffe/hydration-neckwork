@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Topbar from './components/Topbar'
 import ChartHeader from './components/ChartHeader'
 import Sidebar from './components/Sidebar'
@@ -10,13 +10,13 @@ import { useTheme } from './hooks/useTheme'
 import { useMediaQuery } from './hooks/useMediaQuery'
 import { useModalShell } from './hooks/useModalShell'
 import { useFavorites } from './hooks/useFavorites'
+import { usePriceSource } from './hooks/usePriceSource'
 import { INTERVALS, INTERVAL_LABELS, PERIODS } from './types'
 import type { Asset, OHLCVInterval, Period } from './types'
-import { parseUrlPair, pairDisplay } from './utils/pairs'
-import type { PairResult } from './utils/pairs'
+import { buildPairUrl, INSPECTION_QUERY_PARAM, normalizeQuoteAsset, pairDisplay, pairDocumentTitle, parseUrlPair, presentedQuote, readQuoteAsset } from './utils/pairs'
+import type { PairKey, PairResult } from './utils/pairs'
 import { exportFilename, exportVisibleCSV } from './utils/export'
 import { drawBrandWatermark } from './utils/brandWatermark'
-import { formatPrice } from './utils/format'
 import { usePersistedState } from './hooks/usePersistedState'
 import { CameraIcon, CloseIcon, DownloadIcon, MoonIcon, SunIcon, TrendlineIcon } from './components/icons'
 
@@ -24,7 +24,6 @@ const DEFAULT_BASE_ID = 0   // HDX
 const DEFAULT_QUOTE_ID = 10  // USDT
 const EMPTY_ASSETS: Asset[] = []
 const DESKTOP_SIDEBAR_STORAGE_KEY = 'preis-desktop-sidebar-open'
-const INSPECTION_QUERY_PARAM = 'inspect'
 
 // Codecs for the persisted preferences. Module-level so their identity is
 // stable — `usePersistedState` writes whenever `encode` changes.
@@ -51,13 +50,8 @@ function parseIntervalSlug(slug: string | undefined): OHLCVInterval {
   return INTERVALS.includes(slug as OHLCVInterval) ? (slug as OHLCVInterval) : '1h'
 }
 
-function buildPath(baseId: number, quoteId: number, interval: OHLCVInterval) {
-  return `/${baseId}-${quoteId}/${interval}`
-}
-
-function buildUrl(baseId: number, quoteId: number, interval: OHLCVInterval, inspectionTime: number | null) {
-  const path = buildPath(baseId, quoteId, interval)
-  return inspectionTime == null ? path : `${path}?${INSPECTION_QUERY_PARAM}=${inspectionTime}`
+function buildUrl(baseId: number, quoteId: number, quoteAsset: boolean, interval: OHLCVInterval, inspectionTime: number | null) {
+  return buildPairUrl({ baseId, quoteId, quoteAsset }, interval, inspectionTime)
 }
 
 function currentUrl() {
@@ -74,7 +68,7 @@ function readInspectionTime(): number | null {
 
 function readInitialRoute() {
   if (typeof window === 'undefined') {
-    return { baseId: DEFAULT_BASE_ID, quoteId: DEFAULT_QUOTE_ID, interval: '1h' as OHLCVInterval }
+    return { baseId: DEFAULT_BASE_ID, quoteId: DEFAULT_QUOTE_ID, quoteAsset: false, interval: '1h' as OHLCVInterval }
   }
 
   const [, pairSlug, intervalSlug] = window.location.pathname.split('/')
@@ -82,6 +76,8 @@ function readInitialRoute() {
   return {
     baseId: parsed?.baseId ?? DEFAULT_BASE_ID,
     quoteId: parsed?.quoteId ?? DEFAULT_QUOTE_ID,
+    // Provisional until the registry says whether the quote is USD-pegged.
+    quoteAsset: parsed != null && readQuoteAsset(window.location.search),
     interval: parseIntervalSlug(intervalSlug),
   }
 }
@@ -93,6 +89,7 @@ export default function App() {
 
   const [baseId, setBaseId] = useState(() => readInitialRoute().baseId)
   const [quoteId, setQuoteId] = useState(() => readInitialRoute().quoteId)
+  const [quoteIsAsset, setQuoteIsAsset] = useState(() => readInitialRoute().quoteAsset)
   const [interval, setInterval] = useState<OHLCVInterval>(() => readInitialRoute().interval)
   const [inspectionTime, setInspectionTime] = useState<number | null>(() => readInspectionTime())
   const [modalOpen, setModalOpen] = useState(false)
@@ -112,6 +109,9 @@ export default function App() {
   const marketStatsQuery = useMarketStats({ refetchInterval: 60_000 })
   const indexerQuery = useIndexerStatus()
   const favorites = useFavorites()
+  // Stablecoin-quoted pairs are offered only while the API prices them apart
+  // from USD. Their URLs open in either mode; only the picker rows are gated.
+  const priceSource = usePriceSource()
 
   const [toast, setToast] = useState<string | null>(null)
   const toastTimerRef = useRef<number | null>(null)
@@ -134,7 +134,11 @@ export default function App() {
   }, [])
 
   const baseAsset = assets.find(a => a.assetId === baseId)
-  const quoteAsset = assets.find(a => a.assetId === quoteId)
+  const registryQuote = assets.find(a => a.assetId === quoteId)
+  // The quote as this pair presents it: a stablecoin-quoted pair names its
+  // stablecoin, so every label, icon and price below reads it as a cross pair.
+  const quoteAsset = registryQuote ? presentedQuote(registryQuote, quoteIsAsset) : undefined
+  const currentPair = useMemo<PairKey>(() => ({ baseId, quoteId, quoteAsset: quoteIsAsset }), [baseId, quoteId, quoteIsAsset])
 
   const display = baseAsset && quoteAsset ? pairDisplay(baseAsset, quoteAsset) : 'HDXUSD'
   const mobileDrawerOpen = isMobile && drawerOpen
@@ -158,9 +162,7 @@ export default function App() {
   useModalShell(mobileDrawerOpen, mobileDrawerRef, mobileDrawerCloseRef, closeDrawer)
 
   useEffect(() => {
-    document.title = chartData.length > 0
-      ? `${display} ${formatPrice(chartData[chartData.length - 1].close, false)}`
-      : display
+    document.title = pairDocumentTitle(display, chartData.length > 0 ? chartData[chartData.length - 1].close : null)
   }, [display, chartData])
 
   const [orientationKey, setOrientationKey] = useState(0)
@@ -176,16 +178,24 @@ export default function App() {
     const parsed = pairSlug ? parseUrlPair(pairSlug) : null
     const nextInterval = parseIntervalSlug(intervalSlug)
     const nextInspectionTime = readInspectionTime()
-    if (parsed && assets.some(a => a.assetId === parsed.baseId) && assets.some(a => a.assetId === parsed.quoteId)) {
-      const cleanUrl = buildUrl(parsed.baseId, parsed.quoteId, nextInterval, nextInspectionTime)
+    const parsedQuote = parsed ? assets.find(a => a.assetId === parsed.quoteId) : undefined
+    if (parsed && parsedQuote && assets.some(a => a.assetId === parsed.baseId)) {
+      // `?quote=asset` survives only on a USD-pegged quote, the one place it
+      // changes anything.
+      const nextQuoteIsAsset = normalizeQuoteAsset(parsedQuote, readQuoteAsset(window.location.search))
+      const cleanUrl = buildUrl(parsed.baseId, parsed.quoteId, nextQuoteIsAsset, nextInterval, nextInspectionTime)
       if (currentUrl() !== cleanUrl) window.history.replaceState(null, '', cleanUrl)
-      queueMicrotask(() => setInspectionTime(nextInspectionTime))
+      queueMicrotask(() => {
+        setQuoteIsAsset(nextQuoteIsAsset)
+        setInspectionTime(nextInspectionTime)
+      })
     } else {
-      const defaultPath = buildPath(DEFAULT_BASE_ID, DEFAULT_QUOTE_ID, '1h')
+      const defaultPath = buildUrl(DEFAULT_BASE_ID, DEFAULT_QUOTE_ID, false, '1h', null)
       if (window.location.pathname !== defaultPath) window.history.replaceState(null, '', defaultPath)
       queueMicrotask(() => {
         setBaseId(DEFAULT_BASE_ID)
         setQuoteId(DEFAULT_QUOTE_ID)
+        setQuoteIsAsset(false)
         setInterval('1h')
         setInspectionTime(null)
       })
@@ -196,37 +206,40 @@ export default function App() {
   useEffect(() => {
     if (!urlParsedRef.current) return
     if (suppressRoutePushRef.current) { suppressRoutePushRef.current = false; return }
-    const newUrl = buildUrl(baseId, quoteId, interval, null)
+    const newUrl = buildUrl(baseId, quoteId, quoteIsAsset, interval, null)
     if (currentUrl() !== newUrl) {
       window.history.pushState(null, '', newUrl)
     }
     queueMicrotask(() => setInspectionTime(current => current == null ? current : null))
-  }, [baseId, quoteId, interval])
+  }, [baseId, quoteId, quoteIsAsset, interval])
 
   useEffect(() => {
     if (assets.length === 0) return
     const handler = () => {
       const [, pairSlug, intervalSlug] = window.location.pathname.split('/')
       const parsed = pairSlug ? parseUrlPair(pairSlug) : null
-      const validPair = parsed && assets.some(a => a.assetId === parsed.baseId) && assets.some(a => a.assetId === parsed.quoteId)
+      const parsedQuote = parsed ? assets.find(a => a.assetId === parsed.quoteId) : undefined
+      const validPair = parsed && parsedQuote && assets.some(a => a.assetId === parsed.baseId)
       const nextBaseId = validPair ? parsed.baseId : DEFAULT_BASE_ID
       const nextQuoteId = validPair ? parsed.quoteId : DEFAULT_QUOTE_ID
+      const nextQuoteIsAsset = validPair ? normalizeQuoteAsset(parsedQuote, readQuoteAsset(window.location.search)) : false
       const nextInterval = parseIntervalSlug(intervalSlug)
-      if (nextBaseId !== baseId || nextQuoteId !== quoteId || nextInterval !== interval) {
+      if (nextBaseId !== baseId || nextQuoteId !== quoteId || nextQuoteIsAsset !== quoteIsAsset || nextInterval !== interval) {
         suppressRoutePushRef.current = true
       }
       setBaseId(nextBaseId)
       setQuoteId(nextQuoteId)
+      setQuoteIsAsset(nextQuoteIsAsset)
       setInterval(nextInterval)
       setInspectionTime(readInspectionTime())
     }
     window.addEventListener('popstate', handler)
     return () => window.removeEventListener('popstate', handler)
-  }, [assets, baseId, interval, quoteId])
+  }, [assets, baseId, interval, quoteId, quoteIsAsset])
 
   const handleInspectionTimeChange = useCallback((nextInspectionTime: number | null) => {
     setInspectionTime(nextInspectionTime)
-    const nextUrl = buildUrl(baseId, quoteId, interval, nextInspectionTime)
+    const nextUrl = buildUrl(baseId, quoteId, quoteIsAsset, interval, nextInspectionTime)
     if (currentUrl() === nextUrl) return
 
     if (nextInspectionTime == null) {
@@ -234,7 +247,7 @@ export default function App() {
     } else {
       window.history.pushState(null, '', nextUrl)
     }
-  }, [baseId, quoteId, interval])
+  }, [baseId, quoteId, quoteIsAsset, interval])
 
   const keyBuffer = useRef('')
   useEffect(() => {
@@ -264,9 +277,13 @@ export default function App() {
     return () => window.removeEventListener('keydown', handler)
   }, [modalOpen])
 
+  const selectPair = useCallback((pair: PairKey) => {
+    setBaseId(pair.baseId)
+    setQuoteId(pair.quoteId)
+    setQuoteIsAsset(pair.quoteAsset)
+  }, [])
   const handleSelect = (pair: PairResult) => {
-    setBaseId(pair.base.assetId)
-    setQuoteId(pair.quote.assetId)
+    selectPair({ baseId: pair.base.assetId, quoteId: pair.quote.assetId, quoteAsset: pair.quoteAsset ?? false })
   }
 
   const baseSymbol = baseAsset?.symbol ?? 'HDX'
@@ -425,8 +442,8 @@ export default function App() {
         onToggleDesktopSidebar={() => setDesktopSidebarOpen(open => !open)}
         showMobileSidebarButton={isMobile}
         onOpenMobileSidebar={() => setDrawerOpen(true)}
-        isFavorite={favorites.isFavorite(baseId, quoteId)}
-        onToggleFavorite={() => favorites.toggle(baseId, quoteId)}
+        isFavorite={favorites.isFavorite(currentPair)}
+        onToggleFavorite={() => favorites.toggle(currentPair)}
       />
       <section className={'main' + (!isMobile && !desktopSidebarOpen ? ' sidebar-collapsed' : '')}>
         <div className="chart-col">
@@ -438,15 +455,16 @@ export default function App() {
             marketStats={marketStatsQuery.data}
             period={period}
             onCyclePeriod={cyclePeriod}
-            isFavorite={favorites.isFavorite(baseId, quoteId)}
-            onToggleFavorite={() => favorites.toggle(baseId, quoteId)}
+            isFavorite={favorites.isFavorite(currentPair)}
+            onToggleFavorite={() => favorites.toggle(currentPair)}
           />
           <div ref={chartContainerRef} className="chart-wrap">
             <Suspense fallback={<div className="chart-boot">Loading…</div>}>
               <Chart
-                key={`${baseId}-${quoteId}-${orientationKey}`}
+                key={`${baseId}-${quoteId}-${quoteIsAsset ? 'asset-' : ''}${orientationKey}`}
                 baseId={baseId}
                 quoteId={quoteId}
+                quoteAsset={quoteIsAsset}
                 interval={interval}
                 base={baseSymbol}
                 baseDecimals={baseAsset?.decimals ?? null}
@@ -468,9 +486,8 @@ export default function App() {
             <Sidebar
               assets={assets}
               marketStats={marketStatsQuery.data}
-              currentBaseId={baseId}
-              currentQuoteId={quoteId}
-              onSelect={(b, q) => { setBaseId(b); setQuoteId(q) }}
+              current={currentPair}
+              onSelect={selectPair}
               blockHeight={indexerQuery.data?.blockHeight ?? null}
               indexerLive={indexerLiveDot(indexerQuery.data)}
               period={period}
@@ -511,9 +528,8 @@ export default function App() {
             <Sidebar
               assets={assets}
               marketStats={marketStatsQuery.data}
-              currentBaseId={baseId}
-              currentQuoteId={quoteId}
-              onSelect={(b, q) => { setBaseId(b); setQuoteId(q); setDrawerOpen(false) }}
+              current={currentPair}
+              onSelect={pair => { selectPair(pair); setDrawerOpen(false) }}
               blockHeight={indexerQuery.data?.blockHeight ?? null}
               indexerLive={indexerLiveDot(indexerQuery.data)}
               period={period}
@@ -576,10 +592,10 @@ export default function App() {
           onClose={() => setModalOpen(false)}
           onSelect={handleSelect}
           assets={assets}
-          currentBaseId={baseId}
-          currentQuoteId={quoteId}
+          current={currentPair}
           keyBufferRef={keyBuffer}
           marketStats={marketStatsQuery.data}
+          stableQuotes={priceSource === 'route'}
         />}
       </Suspense>
       {toast && (
