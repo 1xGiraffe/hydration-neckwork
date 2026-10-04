@@ -56,6 +56,12 @@ export interface ApiCandle {
   volumeSell: number
   volumeTotal: number
   omniwatch?: OmniwatchCandleSummary
+  // Asset pairs only (the quote is a token, not the dollar): the volume of the
+  // trades BETWEEN base and quote — in USD, and in whole units of each asset.
+  // The volume* fields above are the base asset's own volume against anything.
+  pairVolumeUsd?: number
+  pairVolumeBase?: number
+  pairVolumeQuote?: number
 }
 
 export const INTERVALS = ['5min', '15min', '30min', '1h', '4h', '1d', '1w', '1M'] as const

@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useId, useMemo, type MutableRefObject } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import type { Asset, AssetMarketStats } from '../types'
-import { getDefaultPairs, searchPairs, displayLabel } from '../utils/pairs'
-import type { PairResult } from '../utils/pairs'
+import { getDefaultPairs, searchPairs, displayLabel, pairKeyString, samePair } from '../utils/pairs'
+import type { PairKey, PairResult } from '../utils/pairs'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import PairIcons from './PairIcons'
 import Sparkline from './Sparkline'
@@ -16,10 +16,11 @@ interface AssetPickerDialogProps {
   onClose: () => void
   onSelect: (pair: PairResult) => void
   assets: Asset[]
-  currentBaseId: number
-  currentQuoteId: number
+  current: PairKey
   keyBufferRef: MutableRefObject<string>
   marketStats: AssetMarketStats[] | undefined
+  // Offer stablecoin-quoted pairs (PRIMEUSDT, PRIMEUSDC) in search results.
+  stableQuotes: boolean
 }
 
 interface ResolvedRow {
@@ -32,11 +33,14 @@ interface ResolvedRow {
   sparkline: number[]
 }
 
+function rowKey(p: PairResult): PairKey {
+  return { baseId: p.base.assetId, quoteId: p.quote.assetId, quoteAsset: p.quoteAsset ?? false }
+}
+
 function buildRows(
   pairs: PairResult[],
   statsById: Map<number, AssetMarketStats>,
-  currentBaseId: number,
-  currentQuoteId: number
+  current: PairKey
 ): ResolvedRow[] {
   return pairs.map(p => {
     // A stablecoin quote is not automatically a dollar one: EURC tracks the
@@ -75,7 +79,7 @@ function buildRows(
 
     return {
       pairResult: p,
-      isCurrent: p.base.assetId === currentBaseId && p.quote.assetId === currentQuoteId,
+      isCurrent: samePair(current, rowKey(p)),
       price,
       change1h,
       change24h,
@@ -102,10 +106,10 @@ export default function AssetPickerDialog({
   onClose,
   onSelect,
   assets,
-  currentBaseId,
-  currentQuoteId,
+  current,
   keyBufferRef,
   marketStats,
+  stableQuotes,
 }: AssetPickerDialogProps) {
   const isMobile = useMediaQuery('(max-width: 768px)')
   const [query, setQuery] = useState('')
@@ -149,12 +153,12 @@ export default function AssetPickerDialog({
 
   const pairs = useMemo(() => {
     if (settledQuery.trim() === '') return getDefaultPairs(assets, volumeUsd24h)
-    return searchPairs(settledQuery, assets)
-  }, [settledQuery, assets, volumeUsd24h])
+    return searchPairs(settledQuery, assets, { stableQuotes })
+  }, [settledQuery, assets, volumeUsd24h, stableQuotes])
 
   const rows = useMemo(
-    () => buildRows(pairs, statsById, currentBaseId, currentQuoteId),
-    [pairs, statsById, currentBaseId, currentQuoteId]
+    () => buildRows(pairs, statsById, current),
+    [pairs, statsById, current]
   )
 
   const suggestedActiveIndex = useMemo(() => suggestedIndexFor(pairs, settledQuery), [pairs, settledQuery])
@@ -345,7 +349,7 @@ export default function AssetPickerDialog({
               const className = 'picker-row' + (r.isCurrent ? ' current' : (i === effectiveActiveIndex ? ' active' : ''))
               return (
                 <div
-                  key={`${r.pairResult.base.assetId}-${r.pairResult.quote.assetId}`}
+                  key={pairKeyString(rowKey(r.pairResult))}
                   id={`${listboxId}-option-${i}`}
                   role="option"
                   aria-selected={r.isCurrent}
