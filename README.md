@@ -1,6 +1,6 @@
 # Hydration Neckwork
 
-Hydration Neckwork is a ClickHouse-backed data platform containing two applications: the Explorer and Preis. It combines a block-level USD price indexer, a raw on-chain data lake, a shared API, a live block explorer, and market charts, plus three machine-facing read surfaces over the same dataset.
+Hydration Neckwork is a ClickHouse-backed data platform containing two applications: the Explorer and Preis. It combines a block-level USD price indexer, a raw on-chain data lake, a shared API, a live block explorer and market charts, plus three machine-facing read surfaces over the same dataset.
 
 ## Product surfaces
 
@@ -8,7 +8,7 @@ Hydration Neckwork is a ClickHouse-backed data platform containing two applicati
 - **Activity:** transfers, swaps, DCA schedules, OTC orders, cross-chain activity, liquidity, money markets, staking, and governance votes.
 - **Protocol dashboards:** HDX supply, locks, flows, and unlocks; HOLLAR peg, Stability Module, and liquidity; protocol revenue by stream; governance referenda.
 - **Security:** circuit-breaker limits and their consumption, deposit lockdowns, paused calls, tradability freezes, money-market solvency, and the origins that can lift each control.
-- **Alerts:** per-account notification rules delivered to web push or Telegram, evaluated forward from the live ingestion head.
+- **Alerts:** notification rules for accounts, assets, positions and the protocol, delivered as browser push or on Telegram, evaluated forward from the live ingestion head.
 - **Preis charts:** block-level USD prices and OHLCV candles for Hydration assets.
 - **API:** Fastify endpoints for explorer data, prices, candles, volume, and indexer status — plus three separate, independently contracted processes over the same read models: the versioned **public REST API** for the Hydration UI and external feeds, the token-authenticated **Data API** for external developers, and an **MCP server** that serves LLM agents the interpreted dataset.
 

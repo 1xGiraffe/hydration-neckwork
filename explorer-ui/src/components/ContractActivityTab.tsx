@@ -41,7 +41,7 @@ function TxRow({ tx, now }: { tx: ContractTxRow; now: number }) {
           ? <Link to={paths.extrinsic(extId)} className="hash">{extId}</Link>
           : <span title={tx.txHash}>{F.shortHash(tx.txHash)}</span>}
       </td>
-      <td data-label="Method"><MethodChip method={tx.method} /></td>
+      <td data-label="Call"><MethodChip method={tx.method} /></td>
       <td data-label="From">{tx.from ? <AddrPill account={tx.from} noCopy /> : <Dash />}</td>
       <td data-label="Result" className="r"><StatusBadge ok={tx.success} compact /></td>
       <td data-label="Time" className="r mono muted"><Ago ts={tx.timestamp} now={now} /></td>
@@ -58,7 +58,7 @@ export function ContractTransactionsView({ address }: { address: string }) {
   return (
     <div className="panel" style={{ marginTop: 12 }}>
       <table className="tbl">
-        <thead><tr><th>Extrinsic</th><th>Method</th><th>From</th><th className="r">Result</th><th className="r">Time</th></tr></thead>
+        <thead><tr><th>Extrinsic</th><th>Call</th><th>From</th><th className="r">Result</th><th className="r">Time</th></tr></thead>
         <tbody {...pendingRows(isPlaceholderData)}>
           {isLoading && !data ? <TableSkeleton cols={5} mobileCols={4} rows={10} />
             : !rows.length ? <EmptyRow cols={5}>No transactions</EmptyRow>

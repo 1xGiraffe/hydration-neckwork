@@ -35,7 +35,7 @@ export function LinkDevice() {
       // the confirmation; a success interstitial would just be one more tap.
       navigate(paths.dashboard())
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not log in with this code')
+      setError(e instanceof Error ? e.message : 'Couldn’t log in with this code')
       setBusy(false)
     }
   }
@@ -47,7 +47,7 @@ export function LinkDevice() {
         {!code ? (
           <>
             <p>This link is missing its login code. Codes are single-use and short-lived — open the QR code on your logged-in device and scan it again.</p>
-            <Link className="hash" to={paths.dashboard()}>← Back to start</Link>
+            <Link className="hash" to={paths.dashboard()}>← Back to search</Link>
           </>
         ) : (
           <>

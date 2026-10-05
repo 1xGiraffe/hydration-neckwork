@@ -43,8 +43,8 @@ describe('pageMeta names the page', () => {
     expect(pageMeta('/dca/15027912-e35').description).toContain('one execution of a DCA schedule')
     expect(pageMeta('/dca/15027912-35').title).toBe('DCA 15027912-35')
     expect(pageMeta('/dca/15027912-35').description).toContain('extrinsic 15027912-35')
-    expect(pageMeta('/otc-fill/14940263-e14').title).toBe('OTC fill 14940263-e14')
-    expect(pageMeta('/otc-pull/1-e2').title).toBe('OTC pull 1-e2')
+    expect(pageMeta('/otc-fill/14940263-e14').title).toBe('OTC order filled 14940263-e14')
+    expect(pageMeta('/otc-pull/1-e2').title).toBe('OTC order pulled 1-e2')
     expect(pageMeta('/intent-place/1-e2').title).toBe('Limit order placed 1-e2')
     expect(pageMeta('/intent-dca-trade/1-e2').title).toBe('DCA intent trade 1-e2')
     expect(pageMeta('/cross-chain/1-e2').title).toBe('Cross-chain transfer 1-e2')
@@ -275,8 +275,8 @@ describe('renderPage rewrites the shell rather than appending to it', () => {
   })
 
   it('drops the shell’s generic copy for the page’s own', () => {
-    expect(shell).toContain('Live block explorer for the Hydration network')
-    expect(out).not.toContain('Live block explorer for the Hydration network')
+    expect(shell).toContain('Explore Hydration: accounts, assets, pools, governance and cross-chain activity, block by block.')
+    expect(out).not.toContain('Explore Hydration: accounts, assets, pools, governance and cross-chain activity, block by block.')
     expect(out).toContain('<title>Block #14,871,261 · Hydration Explorer</title>')
   })
 

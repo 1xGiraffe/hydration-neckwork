@@ -298,7 +298,7 @@ export function Governance() {
   const counts = overview.data?.counts
   const tabs = useMemo(() => [
     { key: 'opengov', label: 'OpenGov', ...(counts ? { count: counts.opengov } : {}) },
-    { key: 'tc', label: 'Tech Committee', ...(counts ? { count: counts.tcMotions } : {}) },
+    { key: 'tc', label: 'Technical committee', ...(counts ? { count: counts.tcMotions } : {}) },
     { key: 'archive', label: 'Archive' },
   ], [counts])
   // Democracy folded into the archive; an old ?view=democracy link lands there.
@@ -327,7 +327,7 @@ export function Governance() {
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Governance' }]} />
         <div className="page-title">
           Governance
-          <span className="sub">OpenGov referenda · technical committee · the pre-OpenGov archive</span>
+          <span className="sub">OpenGov referenda · technical committee motions · the pre-OpenGov archive</span>
         </div>
       </div>
 

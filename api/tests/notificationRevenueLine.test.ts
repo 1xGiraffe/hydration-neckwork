@@ -29,7 +29,7 @@ describe('the protocol revenue line in a message', () => {
   it('reports what the protocol earned when the row carries it', () => {
     const rendered = renderNotification(renderMatch(match({ protocolUsd: 458.4, lpUsd: 321.39, streams: [] }), rule, noTags))
 
-    expect(rendered.body).toContain('Protocol revenue')
+    expect(rendered.body).toContain('Protocol Revenue')
     expect(rendered.body).toMatch(/\$458/)
   })
 
@@ -39,12 +39,12 @@ describe('the protocol revenue line in a message', () => {
   it('is left out entirely when the row carries no revenue', () => {
     const rendered = renderNotification(renderMatch(match(undefined), rule, noTags))
 
-    expect(rendered.body).not.toContain('Protocol revenue')
+    expect(rendered.body).not.toContain('Protocol Revenue')
   })
 
   it('still reports a genuine zero, which is a computed answer', () => {
     const rendered = renderNotification(renderMatch(match({ protocolUsd: 0, lpUsd: 0, streams: [] }), rule, noTags))
 
-    expect(rendered.body).toContain('Protocol revenue')
+    expect(rendered.body).toContain('Protocol Revenue')
   })
 })

@@ -28,10 +28,10 @@ type Stage = 'wallets' | 'accounts' | 'signing' | 'scan'
 
 function describeStage(stage: Stage, busy: boolean, hasError: boolean): string {
   if (stage === 'wallets') return 'Sign a message with your wallet to prove you own the address — no transaction, no fee.'
-  if (stage === 'accounts') return 'Choose the account to sign in with.'
+  if (stage === 'accounts') return 'Choose the account to log in with.'
   if (stage === 'scan') return busy ? 'Logging you in…' : 'Point the camera at the QR code shown on your logged-in device.'
-  if (hasError) return 'Sign-in failed.'
-  return busy ? 'Waiting for a signature in your wallet…' : 'Signing you in…'
+  if (hasError) return 'Couldn’t log you in.'
+  return busy ? 'Waiting for a signature in your wallet…' : 'Logging you in…'
 }
 
 // Wallet connect + sign-in: pick a wallet, pick an account (skipped when the
@@ -140,7 +140,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
     } catch (e) {
       if (stale()) return
       setBusy(false)
-      setError(e instanceof Error ? e.message : 'Sign-in failed')
+      setError(e instanceof Error ? e.message : 'Couldn’t log you in')
     }
   }
 
@@ -160,7 +160,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
         setStage('accounts')
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not connect wallet')
+      setError(e instanceof Error ? e.message : 'Couldn’t connect the wallet')
     }
   }
 
@@ -180,7 +180,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
         setStage('accounts')
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not connect wallet')
+      setError(e instanceof Error ? e.message : 'Couldn’t connect the wallet')
     }
   }
 
@@ -227,7 +227,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
       if (attemptRef.current !== attempt) return
       claimingRef.current = false
       setBusy(false)
-      setError(e instanceof Error ? e.message : 'Could not log in with this code')
+      setError(e instanceof Error ? e.message : 'Couldn’t log in with this code')
     }
   }
 
@@ -340,7 +340,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
           {stage === 'signing' && error && (
             <div className="dialog-foot">
               <button type="button" className="btn" onClick={backToWallets}>Choose a different wallet</button>
-              <button type="button" className="btn primary" onClick={retry}>Retry</button>
+              <button type="button" className="btn primary" onClick={retry}>Try again</button>
             </div>
           )}
         </Dialog.Content>

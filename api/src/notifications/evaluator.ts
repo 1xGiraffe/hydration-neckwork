@@ -1028,6 +1028,10 @@ const INTENT_VERB: Record<string, string> = {
   Place: 'placed', Fill: 'filled', PartialFill: 'partially filled', DcaTrade: 'trade', Cancel: 'cancelled', Expire: 'expired',
 }
 
+// An OTC order's and a bond's acts read as their lifecycle, as the explorer's badges do.
+const OTC_HEADLINE: Record<string, string> = { Place: 'OTC order placed', Pull: 'OTC order pulled', Fill: 'OTC order filled' }
+const BOND_HEADLINE: Record<string, string> = { Issue: 'Bond issued', Redeem: 'Bond redeemed' }
+
 const ACTIVITY_LABEL: Record<ActivityRow['type'], string> = {
   transfer: 'Transfer', trade: 'Swap', xcm: 'Cross-chain', liquidity: 'Liquidity',
   mm: 'Money market', dca: 'DCA', staking: 'Staking', vote: 'Vote', otc: 'OTC', bond: 'Bond', intent: 'Intent',
@@ -1041,8 +1045,8 @@ function activityHeadline(row: ActivityRow): string {
   if (row.type === 'liquidity' && row.liqAction === 'Compound') return 'Compound'
   if (row.type === 'liquidity' && row.liqAction) return `${row.liqAction} liquidity`
   if (row.type === 'mm' && row.mmAction) return row.mmAction
-  if (row.type === 'otc' && row.otcAction) return `OTC ${row.otcAction.toLowerCase()}`
-  if (row.type === 'bond' && row.bondAction) return `Bond ${row.bondAction.toLowerCase()}`
+  if (row.type === 'otc' && row.otcAction) return OTC_HEADLINE[row.otcAction] ?? 'OTC order'
+  if (row.type === 'bond' && row.bondAction) return BOND_HEADLINE[row.bondAction] ?? 'Bond'
   if (row.type === 'intent' && row.intentAction) {
     const noun = row.intentKind === 'dca' ? 'DCA intent' : row.intentKind === 'swap' ? 'Limit order' : 'Intent'
     return `${noun} ${INTENT_VERB[row.intentAction] ?? row.intentAction.toLowerCase()}`
@@ -1111,7 +1115,7 @@ export function renderMatch(match: RuleMatch, _rule: NotificationRule, viewerTag
       // the rule's kind. Absent means nobody computed it (a lane that opted out, or a
       // block whose events are not queryable yet), which is not the same as $0.00.
       if (row.revenue) {
-        body.push([textPart('Protocol revenue'), usdPart(row.revenue.protocolUsd)])
+        body.push([textPart('Protocol Revenue'), usdPart(row.revenue.protocolUsd)])
       }
       return { title, body, path: activityPath(row) }
     }

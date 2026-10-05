@@ -211,7 +211,7 @@ export function HoverCards() {
 // loading; a failed one says so, because a 500 or a permission denial never
 // resolves and would otherwise leave the card claiming to load forever.
 function HoverPending({ isError, what }: { isError: boolean; what: string }) {
-  return <div className="hc-sub mono">{isError ? `Could not load ${what}` : 'Loading…'}</div>
+  return <div className="hc-sub mono">{isError ? `Couldn’t load ${what}` : 'Loading…'}</div>
 }
 
 // Referendum card: what the vote was and where it stands. Asks for limit=1 because

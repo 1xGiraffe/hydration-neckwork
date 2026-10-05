@@ -59,7 +59,7 @@ export function ListFormDialog({ open, onOpenChange, title, hint, initial, submi
   async function submit() {
     setError(null)
     try { await onSubmit({ name: name.trim(), note: note.trim(), visibility }) }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not save the list') }
+    catch (e) { setError(e instanceof Error ? e.message : 'Couldn’t save the list') }
   }
 
   return (

@@ -70,9 +70,9 @@ async function handler(_input: Record<string, unknown>, ctx: ToolContext): Promi
     // Each figure says what it counts: none of the three is the activity feed's
     // classified count, and "transfers" here are raw events, plumbing included.
     throughput = kv([
-      ['Extrinsics (24 h)', `${formatCount(stats.extrinsics24h)} signed extrinsics`],
-      ['Transfers (24 h)', `${formatCount(stats.transfers24h)} raw transfer events, one per movement (Erc20 registry assets such as HOLLAR included) — the internal legs of swaps, pool deposits and fees included, so far more than the Transfer rows get_activity classifies`],
-      ['Active accounts (24 h)', `${formatCount(stats.activeAccounts24h)} distinct accounts that signed an extrinsic (the Accounts page's daily-active definition); receiving a transfer does not count`],
+      ['Extrinsics (24H)', `${formatCount(stats.extrinsics24h)} signed extrinsics`],
+      ['Transfers (24H)', `${formatCount(stats.transfers24h)} raw transfer events, one per movement (Erc20 registry assets such as HOLLAR included) — the internal legs of swaps, pool deposits and fees included, so far more than the Transfer rows get_activity classifies`],
+      ['Active accounts (24H)', `${formatCount(stats.activeAccounts24h)} distinct accounts that signed an extrinsic (the Accounts page's daily-active definition); receiving a transfer does not count`],
     ])
   }
 
@@ -81,7 +81,7 @@ async function handler(_input: Record<string, unknown>, ctx: ToolContext): Promi
       ['Blocks', formatCount(counts.blocks)],
       ['Extrinsics', formatCount(counts.extrinsics)],
       ['Events', formatCount(counts.events)],
-      ['Transfers', `${formatCount(counts.transfers)} raw transfer events (the 24 h figure's definition)`],
+      ['Transfers', `${formatCount(counts.transfers)} raw transfer events (the 24H figure's definition)`],
       ['Contracts', formatCount(counts.contracts)],
       ['Max list offset', `${formatCount(counts.maxOffset)} (paged lists refuse a deeper offset)`],
     ])

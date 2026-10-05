@@ -616,7 +616,7 @@ async function renderTrade(height: number, index: number, ctx: ToolContext): Pro
     tradeRouteTable(trade),
     row ? `${h3('Classified activity')}\n${activityDetail(row, base, { extrinsicRows: activity.value ?? undefined })}` : null,
     !row && trade.revenue
-      ? `${h3('Revenue')}\n${kv([['Protocol', formatUsd(trade.revenue.protocolUsd)], ['LPs', formatUsd(trade.revenue.lpUsd)]])}`
+      ? `${h3('Protocol Revenue')}\n${kv([['Protocol Revenue', formatUsd(trade.revenue.protocolUsd)], ['LP revenue', formatUsd(trade.revenue.lpUsd)]])}`
       : null,
   )
   return output(ctx, markdown, { kind: 'trade', trade, activity: row }, [activity.error].filter((e): e is ToolError => e != null))
@@ -750,7 +750,7 @@ async function renderAsset(assetId: string, ctx: ToolContext, candidates: Search
       ['Type', a.type],
       ['Decimals', String(a.decimals)],
       ['Price', a.price != null ? formatUsd(a.price) : null],
-      ['24 h change', a.change24h != null ? formatPercentChange(a.change24h) : null],
+      ['24H change', a.change24h != null ? formatPercentChange(a.change24h) : null],
       ['Value held on chain', d.totalUsd != null ? formatUsd(d.totalUsd) : null],
       ['Holders', d.holderCount != null ? `${formatCount(d.holderCount)} · ${explorerLink('holders', holdersUrl(base, a.assetId))}` : null],
       ['Active DCA schedules', d.dcaCount != null ? formatCount(d.dcaCount) : null],
@@ -792,8 +792,8 @@ async function renderPool(target: string, ctx: ToolContext, candidates: SearchHi
         ['TVL', p.tvlUsd != null ? formatUsd(p.tvlUsd) : null],
         ['Price', price],
         ['Swaps', p.swaps != null ? formatCount(p.swaps) : null],
-        ['Volume (24 h / all)', p.volume ? `${formatUsd(p.volume.dayUsd ?? null)} / ${formatUsd(p.volume.allUsd ?? null)}` : null],
-        ['Fees (24 h / all)', p.volume ? `${formatUsd(p.volume.feesDayUsd ?? null)} / ${formatUsd(p.volume.feesAllUsd ?? null)}` : null],
+        ['Volume (24H / all)', p.volume ? `${formatUsd(p.volume.dayUsd ?? null)} / ${formatUsd(p.volume.allUsd ?? null)}` : null],
+        ['Fees (24H / all)', p.volume ? `${formatUsd(p.volume.feesDayUsd ?? null)} / ${formatUsd(p.volume.feesAllUsd ?? null)}` : null],
         ['Positions', p.positions ? formatCount(p.positions.length) : null],
         ['Gamma vault', p.vault ? `${p.vault.address}${p.vault.tvlUsd != null ? ` · TVL ${formatUsd(p.vault.tvlUsd)}` : ''}` : null],
         ['Created', p.createdBlock != null ? `block ${formatCount(p.createdBlock)} · ${formatTime(p.createdAt)}` : null],
@@ -1030,7 +1030,7 @@ async function renderDcaExecution(height: number, index: number, ctx: ToolContex
       ['Value', d.valueUsd != null ? formatUsd(d.valueUsd) : null],
       ['Execution price', d.executionPrice != null ? `${formatNumber(d.executionPrice)} ${assetLabel(d.assetOut)} per ${assetLabel(d.assetIn)}` : null],
       ['Block', `${formatCount(d.blockHeight)} · ${timeLine(d.timestamp)}`],
-      ['Revenue', d.revenue ? `protocol ${formatUsd(d.revenue.protocolUsd)} · LPs ${formatUsd(d.revenue.lpUsd)}` : null],
+      ['Protocol Revenue', d.revenue ? `${formatUsd(d.revenue.protocolUsd)} (LP revenue ${formatUsd(d.revenue.lpUsd)})` : null],
       ['Explorer', dcaExecutionUrl(base, d.blockHeight, d.eventIndex)],
       ['Schedule', dcaScheduleUrl(base, d.scheduleId)],
     ]),

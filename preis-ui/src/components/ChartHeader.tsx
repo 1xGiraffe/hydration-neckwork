@@ -170,7 +170,7 @@ export default function ChartHeader({ baseAsset, quoteAsset, candles, interval, 
             className={`change-chip ${changeCls} ${changeFlash}`}
             onClick={onCyclePeriod}
             aria-label={`Toggle change period (current: ${period})`}
-            title="Click to cycle 1h / 24h / 7d"
+            title="Click to switch: 1H · 24H · 7D"
           >
             {formatChange(changeForPeriod)} / {period.toUpperCase()}
           </button>

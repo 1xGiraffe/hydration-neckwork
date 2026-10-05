@@ -183,7 +183,7 @@ describe('supplemental market hints', () => {
 
 // Claimable lending incentives are already inside the account's Value; the
 // profile states their share, counting unpriced ones aloud, never adding them to
-// Lent. The per-market line is the Borrow tab's (borrow-tab.test.tsx).
+// Supplied. The per-market line is the Borrow tab's (borrow-tab.test.tsx).
 describe('unclaimed lending incentives', () => {
   const gdot = { assetId: 69, symbol: 'GDOT', name: null, decimals: 18, parachainId: null }
   const text = (html: string) => html.replace(/<[^>]+>/g, '')

@@ -18,7 +18,7 @@ function HydrationTagsHero({ tagCount }: { tagCount: number }) {
   return (
     <Link to={paths.tagsHydration()} className="acct-head" style={{ textDecoration: 'none', color: 'inherit' }}>
       <div className="acct-meta">
-        <div className="tag">Hydration Tags</div>
+        <div className="tag">Hydration tags</div>
         <div className="full"><span className="muted">{tagCount} tag{tagCount === 1 ? '' : 's'} · the built-in directory</span></div>
       </div>
       <span className="muted" aria-hidden="true" style={{ marginLeft: 'auto', fontSize: 22 }}>→</span>
@@ -109,7 +109,7 @@ export function Tags() {
 // (now the discovery hub above) to its own route so a direct link to "the
 // tag table" still works.
 export function TagsHydration() {
-  useDocumentTitle('Hydration Tags')
+  useDocumentTitle('Hydration tags')
   const { data, isLoading } = useTags()
   const tags = data ?? []
 
@@ -117,7 +117,7 @@ export function TagsHydration() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Tags', to: paths.tags() }, { label: 'Hydration' }]} />
-        <div className="page-title">Hydration Tags <span className="sub">{tags.length} tags</span></div>
+        <div className="page-title">Hydration tags <span className="sub">{tags.length} tags</span></div>
       </div>
 
       <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, marginBottom: 16 }}>

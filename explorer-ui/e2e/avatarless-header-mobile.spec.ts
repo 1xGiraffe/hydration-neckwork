@@ -4,7 +4,7 @@ import { expect, seedSession, test } from './fixtures/test'
 // The phone header inlines a 28px avatar in front of the name and pulls every
 // meta row after it back by that avatar's 38px indent, so the address/note
 // rows sit on the card's own left edge. Two headers render no avatar at all —
-// a list's and the Hydration Tags hero — and the pull-back has nothing to
+// a list's and the Hydration tags hero — and the pull-back has nothing to
 // undo there: unscoped, it dragged every row but the title 38px OUTSIDE the
 // card. Measured against the header's content box, which is where a meta row
 // belongs on every one of these surfaces.
@@ -48,9 +48,9 @@ test('a list header keeps every meta row inside the card', async ({ page, userMo
   for (const left of rows) expect(left).toBeGreaterThanOrEqual(contentLeft - 0.5)
 })
 
-test('the Hydration Tags hero keeps its subtitle inside the card', async ({ page }) => {
+test('the Hydration tags hero keeps its subtitle inside the card', async ({ page }) => {
   await page.goto('/tags')
-  const hero = page.locator('.acct-head', { hasText: 'Hydration Tags' })
+  const hero = page.locator('.acct-head', { hasText: 'Hydration tags' })
   await expect(hero).toBeVisible()
   await expect(hero.locator('.acct-avatar')).toHaveCount(0)
 

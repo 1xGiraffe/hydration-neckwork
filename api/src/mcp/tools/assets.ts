@@ -145,13 +145,13 @@ const listAssetsInputShape = {
     'Case-insensitive filter on symbol, name or exact asset id. "usd" finds every USD token; "22" finds asset 22.',
   ),
   sort: z.enum(ASSET_SORTS).optional().describe(
-    "Ordering: 'tvl' (default, total USD held on Hydration), 'volume' (24 h traded USD — costs one extra read of the price surface, which covers only the traded assets), 'holders' (holder count), 'symbol' (alphabetical).",
+    "Ordering: 'tvl' (default, total USD held on Hydration), 'volume' (24H traded USD — costs one extra read of the price surface, which covers only the traded assets), 'holders' (holder count), 'symbol' (alphabetical).",
   ),
   limit: z.coerce.number().int().min(1).max(100).optional().describe('Rows to return (default 25).'),
   format: formatParam,
 }
 
-const LIST_ASSETS_DESCRIPTION = `The token registry as Hydration sees it: every asset that trades, is held, or is reachable here, with its id, decimals, price, 24 h move, total value held and holder count.
+const LIST_ASSETS_DESCRIPTION = `The asset registry as Hydration sees it: every asset that trades, is held, or is reachable here, with its id, decimals, price, 24H move, total value held and holder count.
 
 Answers "what tokens exist on Hydration?", "what is the id and decimal precision of USDC?", "which assets hold the most value?", "what is DOT doing today?". This is the tool to reach for BEFORE any call that takes an asset id, because symbols are NOT unique here — four different assets call themselves USDC, three call themselves USDT, and picking the wrong one silently answers about the wrong token. Use \`get_asset\` for one token in depth (holders, venues, DCA, order book, price window); use \`get_pools\` for where liquidity sits.
 
@@ -159,16 +159,16 @@ Answers "what tokens exist on Hydration?", "what is the id and decimal precision
 
 Reading the answer:
 - Decimals differ per asset and every raw on-chain amount must be scaled by the asset's OWN decimals: HOLLAR 18, USDC 6, DOT 10, HDX 12 all appear in one list. This tool already scales what it prints.
-- The 24 h column is a signed price move, not a volume.
+- The 24H column is a signed price move, not a volume.
 - TVL here is the total USD value held on Hydration (\`amountUsd\`), which is not the same as pool liquidity; a token can have holders and no venue.
-- 'volume' sorting reads the price surface, which covers only the ~54 traded assets; everything else has no 24 h volume and sorts last. That is missing coverage, not zero volume.
+- 'volume' sorting reads the price surface, which covers only the ~54 traded assets; everything else has no 24H volume and sorts last. That is missing coverage, not zero volume.
 - A row whose id reads \`xc/<platform>\` is a CROSS-CHAIN DESTINATION, not a registry asset: it is a token you can sell into over NEAR Intents, it has no Hydration asset id, and its internal id is a negative sentinel that routes nowhere. Address it by its platform slug.
 - The holder column here counts ADDRESSES with a positive balance. \`get_asset\` and the asset page report a different, smaller figure: they fold each system tag into one holder and re-anchor bound EVM addresses onto their substrate owner. Neither is wrong, but they are not the same fact — quote \`get_asset\`'s when asked how many holders an asset has.
 - The count of assets shown versus registered is stated; nothing is silently dropped.`
 
 const listAssets: ToolDefinition = {
   name: 'list_assets',
-  title: 'Token registry',
+  title: 'Asset registry',
   description: LIST_ASSETS_DESCRIPTION,
   inputSchema: listAssetsInputShape,
   async handler(input, ctx) {
@@ -182,7 +182,7 @@ const listAssets: ToolDefinition = {
     const [assetsResult, statsResult] = await Promise.allSettled([
       ctx.upstream.get<AssetListItem[]>(ASSETS_PATH, undefined, { ttlMs: PRICE_BEARING_TTL_MS }),
       sort === 'volume'
-        // The Preis surface is the only place a per-asset 24 h volume lives; it
+        // The Preis surface is the only place a per-asset 24H volume lives; it
         // is read only when the caller sorts on it, never on the default path.
         ? ctx.upstream.get<MarketStatRow[]>('/market-stats', undefined, { ttlMs: ASSETS_TTL_MS })
         : Promise.resolve(null),
@@ -191,7 +191,7 @@ const listAssets: ToolDefinition = {
     if (assetsResult.status === 'rejected') return failure(toolErrorFromUpstream(assetsResult.reason, 'The asset registry'))
     const all = assetsResult.value ?? []
     const errs: ToolError[] = []
-    if (statsResult.status === 'rejected') errs.push(toolErrorFromUpstream(statsResult.reason, 'The 24 h volume figures'))
+    if (statsResult.status === 'rejected') errs.push(toolErrorFromUpstream(statsResult.reason, 'The 24H volume figures'))
     const volumeById = new Map<number, number | null>()
     if (statsResult.status === 'fulfilled' && statsResult.value) {
       for (const row of statsResult.value) volumeById.set(row.assetId, row.volumeUsd24h)
@@ -215,7 +215,7 @@ const listAssets: ToolDefinition = {
     })
     const shown = sorted.slice(0, limit)
 
-    const headers = ['Id', 'Symbol', 'Name', 'Dec', 'Price', '24 h', 'Value held', ...(sort === 'volume' ? ['Volume 24 h'] : []), 'Holder rows', 'Origin']
+    const headers = ['Id', 'Symbol', 'Name', 'Dec', 'Price', '24H', 'Value held', ...(sort === 'volume' ? ['Volume 24H'] : []), 'Holder rows', 'Origin']
     const rows = shown.map(a => [
       assetIdCell(a),
       explorerLink(a.symbol ?? `#${a.assetId}`, assetHref(base, a)),
@@ -230,7 +230,7 @@ const listAssets: ToolDefinition = {
     ])
 
     const markdown = fit(joinBlocks(
-      `## Hydration assets — ${sort === 'tvl' ? 'by value held' : sort === 'volume' ? 'by 24 h volume' : sort === 'holders' ? 'by holder count' : 'alphabetical'}`,
+      `## Hydration assets — ${sort === 'tvl' ? 'by value held' : sort === 'volume' ? 'by 24H volume' : sort === 'holders' ? 'by holder count' : 'alphabetical'}`,
       kv([
         ['Showing', `${formatCount(shown.length)} of ${formatCount(filtered.length)} matching, out of ${formatCount(all.length)} registered`],
         ['Filter', query ? `symbol, name or id containing ${JSON.stringify(parsed.value.query)}` : null],
@@ -240,7 +240,7 @@ const listAssets: ToolDefinition = {
         ? note(`${formatCount(filtered.length - shown.length)} further matching asset(s) not shown. Raise \`limit\` (max 100) or narrow \`query\`.`)
         : '',
       sort === 'volume'
-        ? note('24 h volume comes from the price surface, which covers only the traded assets; an asset with no figure is not covered there, which is not the same as zero volume.')
+        ? note('24H volume comes from the price surface, which covers only the traded assets; an asset with no figure is not covered there, which is not the same as zero volume.')
         : '',
       shown.some(a => isCrossChainDestination(a))
         ? note('A row with an `xc/…` id is a cross-chain destination reachable by selling into it, not a registry asset — it has no Hydration asset id and its internal id is a negative sentinel that routes nowhere.')
@@ -542,8 +542,8 @@ function volumeBlock(v: AssetVolume): string {
       ['Windows end at', v.asOf ? `${formatTime(v.asOf)} (the volume models' cut)` : 'the volume models are empty'],
       ...kpiRows(v.kpis, 'Volume'),
       ['All time', formatUsd(v.allTimeUsd)],
-      ['7 d volume / TVL', v.volumeTvl?.d7 == null ? null : `${ratioPct(v.volumeTvl.d7)} (over a mean ${formatUsd(v.volumeTvl.meanTvl7dUsd)} in pools)`],
-      ['30 d volume / TVL', v.volumeTvl?.d30 == null ? null : `${ratioPct(v.volumeTvl.d30)} (over a mean ${formatUsd(v.volumeTvl.meanTvl30dUsd)} in pools)`],
+      ['7D volume / TVL', v.volumeTvl?.d7 == null ? null : `${ratioPct(v.volumeTvl.d7)} (over a mean ${formatUsd(v.volumeTvl.meanTvl7dUsd)} in pools)`],
+      ['30D volume / TVL', v.volumeTvl?.d30 == null ? null : `${ratioPct(v.volumeTvl.d30)} (over a mean ${formatUsd(v.volumeTvl.meanTvl30dUsd)} in pools)`],
       ['Counted', counted.length > 1 ? `${counted.join(' + ')} — the asset's money-market aToken and the pool shares displayed under it trade as it` : null],
     ]),
     table(['Venue', ...WINDOW_KEYS.map(k => WINDOW_LABEL[k])], venues.map(x => [venueLabel(x.venue), formatUsd(x.d1), formatUsd(x.d7), formatUsd(x.d30)]), 'it has not traded in the last 30 days'),
@@ -584,7 +584,7 @@ Answers "what is this token doing?", "who holds most of it?", "which pools hold 
 
 \`asset\` takes an id ("22") or a symbol ("DOT"). PREFER THE ID. Symbols are not unique — four assets call themselves USDC — and an ambiguous symbol is answered with the candidate list and no guess. A few registered assets (pool-share tokens such as 2-Pool or 2-Pool-GDOT) are not in the symbol directory at all; their ids still work.
 
-\`include\` adds sections, each one upstream read: 'price' (the daily price path, already in the base record — the default), 'holders', 'pools' (where the liquidity sits), 'dca' (ongoing schedules trading it chain-wide), 'orders' (the open limit-order book), 'series' (a finer price window), 'volume' (24 h / 7 d / 30 d volume by venue, volume/TVL: the asset's own legs, sold plus bought, its aToken folded in). \`seriesFrom\`/\`seriesTo\` take either UNIX SECONDS or a calendar day and are converted for you — the underlying route takes seconds only, and a date handed to it silently reads a window in 1970.
+\`include\` adds sections, each one upstream read: 'price' (the daily price path, already in the base record — the default), 'holders', 'pools' (where the liquidity sits), 'dca' (ongoing schedules trading it chain-wide), 'orders' (the open limit-order book), 'series' (a finer price window), 'volume' (24H / 7D / 30D volume by venue, volume/TVL: the asset's own legs, sold plus bought, its aToken folded in). \`seriesFrom\`/\`seriesTo\` take either UNIX SECONDS or a calendar day and are converted for you — the underlying route takes seconds only, and a date handed to it silently reads a window in 1970.
 
 The trap this tool exists to close: an unknown-but-valid asset id does NOT produce a 404. The Explorer answers a shell of nulls with the id echoed back as its symbol, which renders as a perfectly plausible token with no holders, no price and no liquidity. This tool detects that shell and says no such asset is registered instead. If you get that answer, the id is wrong — do not report the empty record as a finding. The near neighbour of that case is an id that IS held on chain but has no registry entry (1000021 and its kind): the same synthetic descriptor stands in for its symbol, name and decimals, so this tool answers with the real holder and liquidity figures and marks the descriptor as a placeholder — never quote \`#<id>\` as a ticker or its 12 decimals as a precision.
 
@@ -592,7 +592,7 @@ Other things to carry over correctly: amounts are scaled by this asset's own dec
 
 const getAsset: ToolDefinition = {
   name: 'get_asset',
-  title: 'Token detail',
+  title: 'Asset detail',
   description: GET_ASSET_DESCRIPTION,
   inputSchema: getAssetInputShape,
   async handler(input, ctx) {
@@ -675,8 +675,8 @@ const getAsset: ToolDefinition = {
       kv([
         ['Resolved from', from === 'symbol' ? `the symbol ${JSON.stringify(parsed.value.asset)}` : null],
         ['Price', a.price == null ? 'not priced by the index' : formatUsd(a.price)],
-        ['24 h', formatPercentChange(a.change24h)],
-        ['7 d', a.change7d == null ? null : formatPercentChange(a.change7d)],
+        ['24H', formatPercentChange(a.change24h)],
+        ['7D', a.change7d == null ? null : formatPercentChange(a.change7d)],
         ['Decimals', synthetic
           ? `unknown — the ${a.decimals} the Explorer reports for this id is its fallback default, not this token's own precision. Do not scale a raw amount of it.`
           : `${a.decimals} — scale every raw amount of this asset by 10^${a.decimals}`],

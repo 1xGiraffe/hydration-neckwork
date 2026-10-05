@@ -41,7 +41,7 @@ export const KIND_HINTS: Record<NotificationKind, string> = {
   price: 'A token crossing a price, in either direction.',
   'health-factor': 'A position in one money market falling toward liquidation.',
   referendum: 'Governance referenda entering the phases you care about.',
-  'tc-motion': 'Technical Committee motions — proposals, member votes and outcomes.',
+  'tc-motion': 'Technical committee motions — proposals, member votes and outcomes.',
   safety: 'Circuit breakers, pauses, freezes, lockdowns, the chain-wide withdraw limit filling up, and the Wormhole bridge losing its backing or filling a rate limit.',
   extrinsic: 'A specific call, by pallet and method.',
   event: 'A specific runtime event, by pallet and method.',

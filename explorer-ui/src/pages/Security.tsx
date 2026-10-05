@@ -603,11 +603,11 @@ function TripsSection({ d, now }: { d: SecurityDashboard; now: number }) {
       </div>
       <div className="panel">
         <table className="tbl sec-tbl">
-          <thead><tr><th>Time</th><th>Call</th><th>Rejected by</th><th>Account</th></tr></thead>
+          <thead><tr><th>When</th><th>Call</th><th>Rejected by</th><th>Account</th></tr></thead>
           <tbody>
             {!t.recent.length ? <EmptyRow cols={4}>No circuit-breaker rejections on record</EmptyRow> : t.recent.map(r => (
               <tr key={r.extrinsicId}>
-                <td data-label="Time"><Link className="hash" to={paths.extrinsic(r.extrinsicId)}><Ago ts={r.blockTimestamp} now={now} /></Link></td>
+                <td data-label="When"><Link className="hash" to={paths.extrinsic(r.extrinsicId)}><Ago ts={r.blockTimestamp} now={now} /></Link></td>
                 <td data-label="Call" className="mono sec-wrap">{r.callName}</td>
                 <td data-label="Rejected by" className="mono" style={{ color: 'var(--red)' }}>{r.errorName}</td>
                 <td data-label="Account" className={r.account ? undefined : 'cell-empty'}>{r.account ? <AddrPill account={r.account} /> : <Dash />}</td>

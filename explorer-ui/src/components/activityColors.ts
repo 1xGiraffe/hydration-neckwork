@@ -14,7 +14,7 @@ import type { ActivityRow } from '../types'
 //
 // A family is a RAMP with one shade per action, not one hue with a light and a
 // dark variant. Two variants could not carry it — a family has up to five actions
-// (Borrow / Withdraw / Lend / Repay / Claim) and any pair sharing a variant reads
+// (Borrow / Withdraw / Supply / Repay / Claim) and any pair sharing a variant reads
 // as the same badge. The shades move in lightness AND chroma; a pure lightness
 // ramp inside a single hue leaves neighbouring steps indistinguishable at 10px.
 export const CAT = {
@@ -89,8 +89,8 @@ export function categoryColor(type: string): string {
 // and a liquidity-mining payout — and they meet in the merged feed, so each names
 // the position it pays out on rather than leaving a reader to guess which is which.
 export const MM_LABELS: Record<string, string> = {
-  Supply: 'Lend',
-  ClaimRewards: 'Claim Lend Rewards',
+  Supply: 'Supply',
+  ClaimRewards: 'Claim supply rewards',
   LiquidationCall: 'Liquidate',
   Liquidate: 'Liquidate',
 }
@@ -145,14 +145,14 @@ const LIQ_COLORS: Record<string, string> = {
   CollectFees: CAT.liquidityClaim, Rebalance: CAT.liquidityCreate, Compound: CAT.liquidityClaim,
 }
 export const LIQ_LABELS: Record<string, string> = {
-  Add: 'Add liquidity', Remove: 'Remove liquidity', Create: 'Create pool', Destroy: 'Destroy pool', Claim: 'Claim LP Rewards', ClaimReferral: 'Claim Referral Rewards',
+  Add: 'Add liquidity', Remove: 'Remove liquidity', Create: 'Create pool', Destroy: 'Destroy pool', Claim: 'Claim LP rewards', ClaimReferral: 'Claim referral rewards',
   CollectFees: 'Collect fees', Rebalance: 'Rebalance vault', Compound: 'Compound',
 }
 // A bond's two acts are its lifecycle bookends — the issue that mints it against the
 // underlying, the redemption that burns it for the underlying — so each gets its own
 // shade of the family's teal.
 export const BOND_LABELS: Record<string, string> = {
-  Issue: 'Bond issue', Redeem: 'Bond redeem',
+  Issue: 'Bond issued', Redeem: 'Bond redeemed',
 }
 const BOND_COLORS: Record<string, string> = {
   Issue: CAT.bond, Redeem: CAT.bondRedeem,
@@ -175,6 +175,11 @@ const OTC_COLORS: Record<string, string> = {
   // Placing and pulling an offer both only move an offer around — neither moves
   // value — so they share a shade; their labels differ.
   Fill: CAT.tradeFill, Place: CAT.tradePlace, Pull: CAT.tradePlace,
+}
+// An OTC order's acts read as its lifecycle, the way an intent's do; a cancellation
+// is a Pull in product copy.
+export const OTC_LABELS: Record<string, string> = {
+  Place: 'OTC order placed', Pull: 'OTC order pulled', Fill: 'OTC order filled',
 }
 
 // Label + color for one activity row. Labels are the badges the rest of the app
@@ -223,7 +228,7 @@ export function activityBadge(r: ActivityRow): { label: string; col: string } {
   }
   if (r.type === 'otc') {
     const a = r.otcAction
-    return { label: 'OTC ' + (a ?? 'order').toLowerCase(), col: OTC_COLORS[a ?? ''] ?? CAT.tradePlace }
+    return { label: OTC_LABELS[a ?? ''] ?? 'OTC order', col: OTC_COLORS[a ?? ''] ?? CAT.tradePlace }
   }
   if (r.type === 'transfer') return { label: 'Transfer', col: CAT.transfer }
   // A cross-chain row that knows its bridge names it — "Wormhole" or "Snowbridge"

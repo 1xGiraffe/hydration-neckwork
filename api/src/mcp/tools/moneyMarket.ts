@@ -379,7 +379,7 @@ async function handler(input: Record<string, unknown>, ctx: ToolContext): Promis
 
 export const moneyMarketTools: ToolDefinition[] = [{
   name: 'get_money_market',
-  title: 'Lending markets, isolated',
+  title: 'Money markets, isolated',
   description: DESCRIPTION,
   inputSchema: INPUT_SHAPE,
   handler,

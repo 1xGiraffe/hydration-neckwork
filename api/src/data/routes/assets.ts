@@ -66,7 +66,7 @@ export const assetsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
   app.get('/v1/assets', {
     schema: {
       tags: ['assets'],
-      summary: 'The full asset registry with current prices',
+      summary: 'Asset registry with current prices',
       description: 'Every registered asset (native, bridged, aToken forms), with decimals and symbols — the lookup table for every `assetId` and raw amount on this surface. The registry is an in-memory snapshot refreshed every 5 minutes; prices refresh every 5 minutes. The Omnipool hub asset (id 1) is named H2O. A stableswap share token (a pool\'s id is its share token\'s id: 2-Pool-GDOT = 690, …) is priced at what one share REDEEMS for — its pro-rata slice of every reserve of its pool in the newest per-block pool snapshot, each leg at its current price (the valuation `/v1/accounts/{address}/balances` applies) — never at its own price feed or at its underlying asset\'s price, and its timestamp is that snapshot\'s. A share with a leg without a current price, no outstanding issuance, no pool in the snapshot, or a snapshot older than 1 h is unpriced (null).',
       response: { 200: z.object({ items: z.array(zAssetItem) }) },
     },

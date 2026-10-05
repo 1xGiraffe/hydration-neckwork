@@ -66,7 +66,7 @@ test('/hdx shows the GIGAHDX money-market stats', async ({ page }) => {
   await page.goto('/hdx')
   // The stHDX reserve surfaces under its user-facing GIGAHDX branding.
   const section = page.locator('.pf-card', { has: page.locator('.hdx-card', { hasText: 'GIGAHDX supplied' }) })
-  await expect(page.getByText('GIGAHDX Money Market')).toBeVisible()
+  await expect(page.getByText('GIGAHDX money market')).toBeVisible()
   await expect(section.locator('.hdx-card', { hasText: 'GIGAHDX supplied' })).toContainText('48.2M')
   await expect(section.locator('.hdx-card', { hasText: 'HOLLAR borrowed' })).toContainText('187 borrowers')
 })

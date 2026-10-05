@@ -103,7 +103,7 @@ function OrderHistory({ scope, showOwner, now }: { scope: PositionScope; showOwn
         </tr></thead>
         <tbody>
           {q.isLoading ? <TableSkeleton cols={cols} rows={HISTORY_PAGE} />
-            : q.isError && !q.data ? <ErrorRow cols={cols} title="Could not load the order history" error={q.error} onRetry={() => void q.refetch()} />
+            : q.isError && !q.data ? <ErrorRow cols={cols} title="Couldn’t load the order history" error={q.error} onRetry={() => void q.refetch()} />
               : !q.data?.rows.length ? <EmptyRow cols={cols}>{EMPTY_TEXT[kind]}</EmptyRow>
                 : q.data.rows.map(row => <OrderHistoryTr key={`${row.kind}/${row.id}`} row={row} showOwner={showOwner} now={now} />)}
         </tbody>

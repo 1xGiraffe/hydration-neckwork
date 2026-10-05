@@ -49,7 +49,7 @@ export async function fetchVolumeDetails(
   if (params.offset != null) qs.set('offset', String(params.offset))
   const res = await fetch(`/api/candles/volume-details?${qs}`, { signal })
   if (!res.ok) {
-    throw new Error(`Failed to fetch volume details: ${res.status}`)
+    throw new Error(`Couldn’t load the volume details (HTTP ${res.status})`)
   }
   return res.json()
 }

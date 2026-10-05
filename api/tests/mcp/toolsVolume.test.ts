@@ -83,7 +83,7 @@ describe("get_protocol_stats dashboard 'volume'", () => {
     expect(out.markdown).toContain('## Volume')
     expect(out.markdown).toContain('Routed volume — every trade once')
     // changePct is a percent upstream: -3.83%, not -383%.
-    expect(out.markdown).toMatch(/\| 24 h \| \$2\.53M \| -3\.83% \| 23,517 \|/)
+    expect(out.markdown).toMatch(/\| 24H \| \$2\.53M \| -3\.83% \| 23,517 \|/)
     expect(out.markdown).toContain('| Omnipool | $905k | $4.05M | +19.45% | $14.2M |')
     expect(out.markdown).toContain('**All venues**')
     expect(out.markdown).toContain('sum to MORE than routed volume')
@@ -122,8 +122,8 @@ describe("get_asset include 'volume'", () => {
     })
     expect(out.calls).toEqual(['/explorer/asset/5', '/explorer/asset/5/volume'])
     expect(out.markdown).toContain('## Volume')
-    expect(out.markdown).toContain('**Volume 24 h:** $696k (+24.71% vs the prior 24 h)')
-    expect(out.markdown).toContain('**7 d volume / TVL:** 114% (over a mean $3.98M in pools)')
+    expect(out.markdown).toContain('**Volume 24H:** $696k (+24.71% vs the prior 24H)')
+    expect(out.markdown).toContain('**7D volume / TVL:** 114% (over a mean $3.98M in pools)')
     expect(out.markdown).toContain('DOT (#5) + aDOT (#1001)')
     expect(out.markdown).toContain('| Omnipool | $418k | $2.46M | $8.71M |')
     // A venue with nothing in 30 days is left out.
@@ -160,9 +160,9 @@ describe("get_pools volume", () => {
     })
     expect(out.calls).toContain('/explorer/pool/111/volume')
     expect(out.markdown).toContain('### Volume & fees')
-    expect(out.markdown).toContain('96.4% over 24 h (against the current TVL $1.39M) · 394% over 7 d')
-    expect(out.markdown).toContain('| 7 d | $7.65M | +53.44% | 32,835 | $1.38k | $0 |')
-    expect(out.markdown).toContain('**Fee APR (7 d):** 3.69%')
+    expect(out.markdown).toContain('96.4% over 24H (against the current TVL $1.39M) · 394% over 7D')
+    expect(out.markdown).toContain('| 7D | $7.65M | +53.44% | 32,835 | $1.38k | $0 |')
+    expect(out.markdown).toContain('**Fee APR (7D):** 3.69%')
     expect((out.json as { volume: { fills: { d7: number } } }).volume.fills.d7).toBe(32_835)
   })
 
@@ -182,15 +182,15 @@ describe("get_pools volume", () => {
     expect(out.errors?.[0]?.message).toContain("The pool's volume")
   })
 
-  it('shows 24 h volume and volume/TVL on directory rows', async () => {
+  it('shows 24H volume and volume/TVL on directory rows', async () => {
     const index = {
       totalTvlUsd: 2_000_000, volumeAsOf: '2026-10-02T03:00:00.000Z',
       pools: [{ kind: 'stableswap', poolId: 111, name: 'HUSDT', tvlUsd: 1_393_392.84, sharePct: 70, composition: [], hasPegs: false, volume24hUsd: 1_343_831.86, volume7dUsd: 7_654_981.04, volumeTvl24h: 0.9644 }],
     }
     const out = await run(tool(poolTools, 'get_pools'), {}, { '/explorer/pools': index })
-    expect(out.markdown).toContain('| 24 h volume | 24 h vol/TVL |')
+    expect(out.markdown).toContain('| 24H volume | 24H vol/TVL |')
     expect(out.markdown).toContain('$1.34M | 96.4%')
-    expect(out.markdown).toContain('24 h volume is POOL volume')
+    expect(out.markdown).toContain('24H volume is POOL volume')
   })
 })
 
@@ -215,7 +215,7 @@ describe("get_account_history kind 'volume'", () => {
     expect(out.calls).toEqual([`/explorer/address/${ADDRESS}/volume-history`])
     expect(out.markdown).toContain('## Trading volume — ')
     expect(out.markdown).toContain('**All time:** $3.36M — the account page\'s "Trading" figure')
-    expect(out.markdown).toContain('**Last 7 d:** $66.3k')
+    expect(out.markdown).toContain('**Last 7D:** $66.3k')
     expect(out.markdown).toContain('**Peak bucket:** $79.5k · 551 trade(s)')
     expect(out.markdown).toContain('**First bucket with trades:** $1.5k · 12 trade(s)')
     expect(out.markdown).toContain('3 with trades')

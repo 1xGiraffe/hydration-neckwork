@@ -155,7 +155,7 @@ function withSubmitTimeout(submission: Promise<unknown>, ms: number): Promise<un
     timer = setTimeout(() => {
       // Drop the subscription if it ever does arrive — nothing is watching it.
       void submission.then(unsub => { if (typeof unsub === 'function') (unsub as () => void)() }).catch(() => {})
-      reject(new Error('Could not reach the chain to dispatch the permit — the signature is still valid, so retrying costs nothing'))
+      reject(new Error('Couldn’t reach the chain to dispatch the permit — the signature is still valid, so retrying costs nothing'))
     }, ms)
   })
   return Promise.race([submission, timeout]).finally(() => clearTimeout(timer))

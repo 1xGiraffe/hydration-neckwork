@@ -96,7 +96,7 @@ export function ShareBar({ segments, h = 44 }: { segments: ShareSegment[]; h?: n
   const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
   const segs = segments.filter(s => s.value > 0)
   const total = segs.reduce((s, x) => s + x.value, 0)
-  if (!segs.length || total <= 0) return <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, padding: '12px 0' }}>No data.</div>
+  if (!segs.length || total <= 0) return <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, padding: '12px 0' }}>Nothing to show yet</div>
   const offsets: number[] = []
   for (let i = 0, run = 0; i < segs.length; i++) { offsets.push(run); run += segs[i].value }
   const rects = segs.map((s, i) => ({ ...s, x0: offsets[i] / total * 100, w: s.value / total * 100 }))
@@ -1135,7 +1135,7 @@ export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green
   if (!n) {
     return (
       <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, padding: '12px 0', position: 'relative' }}>
-        No data.
+        {zoom.zoomed ? 'Nothing in this range' : 'Nothing to show yet'}
         {zoom.zoomed && <ZoomReset onReset={zoom.reset} />}
       </div>
     )

@@ -118,10 +118,12 @@ const LIQ_LABELS: Record<string, string> = {
   CollectFees: 'Collect fees', Rebalance: 'Rebalance vault', Compound: 'Compound',
 }
 const MM_LABELS: Record<string, string> = {
-  Supply: 'Lend', ClaimRewards: 'Claim lend rewards',
+  Supply: 'Supply', ClaimRewards: 'Claim supply rewards',
   LiquidationCall: 'Liquidate', Liquidate: 'Liquidate',
 }
-const BOND_LABELS: Record<string, string> = { Issue: 'Bond issue', Redeem: 'Bond redeem' }
+const BOND_LABELS: Record<string, string> = { Issue: 'Bond issued', Redeem: 'Bond redeemed' }
+// An OTC order's acts read as its lifecycle, the way an intent's do.
+const OTC_LABELS: Record<string, string> = { Place: 'OTC order placed', Pull: 'OTC order pulled', Fill: 'OTC order filled' }
 const INTENT_KIND_WORD: Record<string, string> = { swap: 'Limit order', dca: 'DCA intent' }
 const INTENT_ACTION_WORD: Record<string, string> = {
   Place: 'placed', Fill: 'filled', PartialFill: 'partially filled',
@@ -157,7 +159,7 @@ export function activityKind(r: ActivityRow): string {
       }
       return 'Swap'
     // Product copy calls an OTC cancellation a Pull.
-    case 'otc': return `OTC ${(r.otcAction ?? 'order').toLowerCase()}`
+    case 'otc': return OTC_LABELS[r.otcAction ?? ''] ?? 'OTC order'
     case 'transfer': return 'Transfer'
     case 'xcm': return r.bridge ?? 'Cross-chain'
     default: return 'Activity'
@@ -423,7 +425,7 @@ function revenueLines(r: ActivityRow): string | null {
     ? r.revenue.streams.map(s => `${s.stream} ${formatUsd(s.usd)}`).join(', ')
     : null
   return kv([
-    ['Protocol revenue', formatUsd(r.revenue.protocolUsd)],
+    ['Protocol Revenue', formatUsd(r.revenue.protocolUsd)],
     ['LP revenue', formatUsd(r.revenue.lpUsd)],
     ['Streams', streams],
   ])
@@ -464,17 +466,17 @@ function sameExtrinsic(a: ActivityRow, b: ActivityRow): boolean {
  */
 function revenueSection(r: ActivityRow, opts: ActivityDetailOptions): string {
   const own = revenueLines(r)
-  if (own) return `**Revenue**\n${own}`
+  if (own) return `**Protocol Revenue**\n${own}`
   const siblings = opts.extrinsicRows
   if (siblings?.length) {
     const owner = siblings.find(other => other !== r && sameExtrinsic(other, r) && other.revenue != null)
     if (owner) {
       const where = owner.eventIndex != null ? ` (event ${owner.eventIndex}, the ${activityKind(owner)} row)` : ''
-      return note(`Revenue: booked on ANOTHER row of extrinsic ${r.blockHeight}-${r.extrinsicIndex}${where}, not on this one. The explorer attributes an extrinsic's revenue to a single row — its earliest — so this row carrying none is attribution, not absence, and adding the two would double-count.`)
+      return note(`Protocol Revenue: booked on ANOTHER row of extrinsic ${r.blockHeight}-${r.extrinsicIndex}${where}, not on this one. The explorer attributes an extrinsic's revenue to a single row — its earliest — so this row carrying none is attribution, not absence, and adding the two would double-count.`)
     }
-    return note('Revenue: not booked for this block yet — the revenue model trails the head, and no row of this extrinsic carries an attribution. This is not a claim that the extrinsic earned nothing.')
+    return note('Protocol Revenue: not booked for this block yet — the revenue model trails the head, and no row of this extrinsic carries an attribution. This is not a claim that the extrinsic earned nothing.')
   }
-  return note(`Revenue: not shown. It is either unbooked (the revenue model trails the head) or booked on another row of this extrinsic — the explorer attributes an extrinsic's revenue to exactly one row. This reading did not load the extrinsic's other rows, so it cannot say which.`)
+  return note(`Protocol Revenue: not shown. It is either unbooked (the revenue model trails the head) or booked on another row of this extrinsic — the explorer attributes an extrinsic's revenue to exactly one row. This reading did not load the extrinsic's other rows, so it cannot say which.`)
 }
 
 /**

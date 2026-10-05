@@ -166,14 +166,14 @@ describe('activity category coding', () => {
     }
   })
 
-  // The runtime emits "Supply"; this app calls it Lend. The value has to stay the
-  // chain's (it is the filter and the indexed field), so only the words change —
-  // and no surface may leak the chain's word to a reader.
-  it('calls the money-market inflow Lend while filtering on the chain\'s Supply', () => {
-    expect(activityBadge(row({ type: 'mm', mmAction: 'Supply' })).label).toBe('Lend')
-    expect(activityBadge(row({ type: 'mm' })).label).toBe('Lend')   // defaulted rows too
-    expect(ACTIVITY_ACTIONS.mm).toContainEqual({ v: 'Supply', label: 'Lend' })
-    for (const a of ACTIVITY_ACTIONS.mm) expect(a.label).not.toBe('Supply')
+  // A money-market deposit reads Supply everywhere a reader sees it — the badge,
+  // the filter, the Borrow tab and the aToken names ("Supplied X") — while the
+  // slug stays `lend`, so existing URLs keep resolving.
+  it('calls the money-market inflow Supply on the badge and the filter alike', () => {
+    expect(activityBadge(row({ type: 'mm', mmAction: 'Supply' })).label).toBe('Supply')
+    expect(activityBadge(row({ type: 'mm' })).label).toBe('Supply')   // defaulted rows too
+    expect(ACTIVITY_ACTIONS.mm).toContainEqual({ v: 'Supply', label: 'Supply' })
+    for (const a of ACTIVITY_ACTIONS.mm) expect(a.label).not.toBe('Lend')
   })
 
   it('maps a category to one color for the chips and the histogram, and never colors "all"', () => {

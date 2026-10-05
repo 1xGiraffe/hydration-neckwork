@@ -227,7 +227,7 @@ With 'pool' set, the identifier decides the route, and the three forms are not i
 - a numeric id — a stableswap or XYK pool addressed by its SHARE-TOKEN asset id (690, 4200, 110...), not by a position in a list. If no pool carries that share token, the id is retried as an OMNIPOOL-LISTED ASSET and the answer becomes that asset's Omnipool liquidity providers.
 - a 0x-prefixed 40-hex address — a Uniswap v3 (concentrated liquidity) pool, addressed by its contract.
 
-'include' adds sections: 'composition' (on by default for one pool), 'lps' (largest liquidity providers; for a v3 pool the open position ranges instead), 'activity' (the pool's recent classified swaps and liquidity events), 'liquidity' (v3 only: the tick table and open ranges by owner), 'history' (a first/last/min/max summary of the pool's TVL series, never the raw points — for a stableswap or XYK pool's exact reserve/peg/issuance observations with their source blocks, or an Omnipool asset's reserve/hub/fee observations, call get_pool_history), and 'volume' (also with 'history'; not v3: 24 h / 7 d / 30 d volume, fills, LP and protocol fees, volume/TVL). Directory rows carry 24 h volume and volume/TVL. Pool volume counts each fill in its own pool, so pools sum to MORE than routed volume (get_protocol_stats 'volume').
+'include' adds sections: 'composition' (on by default for one pool), 'lps' (largest liquidity providers; for a v3 pool the open position ranges instead), 'activity' (the pool's recent classified swaps and liquidity events), 'liquidity' (v3 only: the tick table and open ranges by owner), 'history' (a first/last/min/max summary of the pool's TVL series, never the raw points — for a stableswap or XYK pool's exact reserve/peg/issuance observations with their source blocks, or an Omnipool asset's reserve/hub/fee observations, call get_pool_history), and 'volume' (also with 'history'; not v3: 24H / 7D / 30D volume, fills, LP and protocol fees, volume/TVL). Directory rows carry 24H volume and volume/TVL. Pool volume counts each fill in its own pool, so pools sum to MORE than routed volume (get_protocol_stats 'volume').
 
 Traps worth knowing. An Omnipool asset that has been DELISTED — DOT, asset id 5, is the standing example — returns "Asset not in the Omnipool" rather than an empty pool; this tool says that in words instead of surfacing an error. Omnipool liquidity is owned per LISTED ASSET, not for the pool as a whole, so 'lps' on pool 'omnipool' has no single answer and the tool names the per-asset call instead. Pool history windows are unix SECONDS (fromTs/toTs upstream), not calendar dates. Every amount is scaled by its own asset's decimals and every row carries its explorer URL.`
 
@@ -306,7 +306,7 @@ function renderDirectory(
     ),
     h2(`Largest pools${filters ? ` (${filters})` : ''}`),
     table(
-      ['Pool', 'Venue', 'TVL', 'Share', '24 h volume', '24 h vol/TVL', 'Composition'],
+      ['Pool', 'Venue', 'TVL', 'Share', '24H volume', '24H vol/TVL', 'Composition'],
       rows.map(p => [
         explorerLink(p.name, poolEntryUrl(ctx.explorerBaseUrl, p)),
         VENUE_LABEL[p.kind] ?? p.kind,
@@ -322,7 +322,7 @@ function renderDirectory(
       ? `Showing ${rows.length} of the ${matched} pool${matched === 1 ? '' : 's'} matching ${filters}, out of ${all.length}. Pass a pool id, the literal "omnipool", or a 0x v3 address to open one.`
       : `Showing the ${rows.length} largest of ${all.length} pools. Pass a pool id, the literal "omnipool", or a 0x v3 address to open one.`),
     index.volumeAsOf !== undefined
-      ? note(`24 h volume is POOL volume (every fill once, in the pool it executed in) over the 24 hours before ${index.volumeAsOf ? formatTime(index.volumeAsOf) : 'the volume models\' cut'}; vol/TVL divides it by the pool's current TVL — a ratio for the day, not annualised. ${DASH} where no volume model keys the pool.`)
+      ? note(`24H volume is POOL volume (every fill once, in the pool it executed in) over the 24 hours before ${index.volumeAsOf ? formatTime(index.volumeAsOf) : 'the volume models\' cut'}; vol/TVL divides it by the pool's current TVL — a ratio for the day, not annualised. ${DASH} where no volume model keys the pool.`)
       : null,
   )
   return { markdown, json: { totalTvlUsd: index.totalTvlUsd, poolCount: all.length, matched, volumeAsOf: index.volumeAsOf ?? null, shown: rows } }
@@ -369,8 +369,8 @@ function renderPoolVolume(v: PoolVolume): string {
     h3('Volume & fees'),
     kv([
       ['Windows end at', v.asOf ? `${formatTime(v.asOf)} (the volume models' cut)` : 'the volume models are empty'],
-      ['Volume / TVL', `${ratioPct(v.volumeTvl?.d1)} over 24 h (against the current TVL ${formatUsd(v.tvlUsd)}) · ${ratioPct(v.volumeTvl?.d7)} over 7 d (against the 7-day mean TVL ${formatUsd(v.meanTvl7dUsd)})`],
-      ['Fee APR (7 d)', v.feeApr7dPct == null ? null : formatPercent(v.feeApr7dPct)],
+      ['Volume / TVL', `${ratioPct(v.volumeTvl?.d1)} over 24H (against the current TVL ${formatUsd(v.tvlUsd)}) · ${ratioPct(v.volumeTvl?.d7)} over 7D (against the 7-day mean TVL ${formatUsd(v.meanTvl7dUsd)})`],
+      ['Fee APR (7D)', v.feeApr7dPct == null ? null : formatPercent(v.feeApr7dPct)],
       ['All time', `${formatUsd(v.allTime?.volumeUsd)} volume · ${formatCount(v.allTime?.fills)} fills · ${formatUsd(v.allTime?.lpFeeUsd)} LP fees · ${formatUsd(v.allTime?.protocolFeeUsd)} protocol fees`],
     ]),
     table(['Window', 'Volume', 'Change vs prior', 'Fills', 'LP fees', 'Protocol fees'], WINDOW_KEYS.map(k => [
@@ -488,11 +488,11 @@ function renderV3Detail(d: UniswapV3PoolDetail, ctx: ToolContext, includes: Set<
     ['Price', d.price?.token1PerToken0 == null ? DASH : `${formatNumber(d.price.token1PerToken0)} ${assetLabel(d.token1)} per ${assetLabel(d.token0)} (tick ${formatCount(d.price.tick)})`],
     ['Active liquidity', d.liquidity === '0' ? '0 — nothing is in range at the current tick' : `${liquidityL(d.liquidity)} (L, a sqrt-price liquidity unit, not a token amount)`],
     ['Swaps', `${formatCount(d.swaps)}${d.lastSwapAt ? ` · last ${relativeAge(d.lastSwapAt)}` : ''}`],
-    ['Volume', d.volume ? `${formatUsd(d.volume.allUsd)} all time · ${formatUsd(d.volume.dayUsd)} in 24 h` : null],
+    ['Volume', d.volume ? `${formatUsd(d.volume.allUsd)} all time · ${formatUsd(d.volume.dayUsd)} in 24H` : null],
     // `feesAllUsd` is `volume × feeRate × lpShare` (poolService.ts) — the LPs'
     // share AFTER the protocol cut, which is what the explorer's own pool page
     // calls "Fees to LPs". "Swap fees" would read as the gross fee.
-    ['Fees to LPs', d.volume ? `${formatUsd(d.volume.feesAllUsd)} all time · ${formatUsd(d.volume.feesDayUsd)} in 24 h (the LPs' share, after the protocol cut below)` : null],
+    ['Fees to LPs', d.volume ? `${formatUsd(d.volume.feesAllUsd)} all time · ${formatUsd(d.volume.feesDayUsd)} in 24H (the LPs' share, after the protocol cut below)` : null],
     ['Protocol fee share', d.protocolFee?.sharePct == null ? null : `${formatPercent(d.protocolFee.sharePct, 0)} of the swap fee, accruing inside the pool until governance collects it`],
     ['Created', d.createdAt ? `${formatTime(d.createdAt)} (block ${formatCount(d.createdBlock)})` : null],
     ['Factory', d.factory],

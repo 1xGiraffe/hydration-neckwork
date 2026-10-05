@@ -18,7 +18,7 @@ export const statusRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
   app.get('/v1/status', {
     schema: {
       tags: ['status'],
-      summary: 'Indexer head and ingestion lag',
+      summary: 'Indexed head and ingestion lag',
       description: 'The only unauthenticated data endpoint: what the index currently covers. Every 404 for a chain resource carries these same fields in its error context, so a consumer can tell "does not exist" from "not yet ingested". The contract serves finalized, indexed state only.',
       security: [],
       response: { 200: zStatus },

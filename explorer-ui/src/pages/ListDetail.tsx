@@ -79,7 +79,7 @@ function NewTagDialog({ open, onOpenChange, listId, onCreated }: { open: boolean
       onCreated(created.tagId)
       onOpenChange(false)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not create the tag')
+      setError(e instanceof Error ? e.message : 'Couldn’t create the tag')
     }
   }
 
@@ -176,7 +176,7 @@ function TagPanel({ listId, tag, isOwner }: { listId: string; tag: ListTagDetail
       await orderMutation.mutateAsync([listId, tag.tagId, next])
     } catch (e) {
       setOrder(prev)
-      setError(e instanceof Error ? e.message : 'Could not save the new order')
+      setError(e instanceof Error ? e.message : 'Couldn’t save the new order')
     }
   }
   function moveBy(accountId: string, delta: number) {
@@ -216,7 +216,7 @@ function TagPanel({ listId, tag, isOwner }: { listId: string; tag: ListTagDetail
       await updateTagMutation.mutateAsync([listId, tag.tagId, { name: name.trim(), color, icon }])
       setEditing(false)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not save the tag')
+      setError(e instanceof Error ? e.message : 'Couldn’t save the tag')
     }
   }
   // Same confirm chrome as the delete-list dialog above: it names the tag, holds
@@ -228,13 +228,13 @@ function TagPanel({ listId, tag, isOwner }: { listId: string; tag: ListTagDetail
       await deleteTagMutation.mutateAsync([listId, tag.tagId])
       setDeleting(false)
     } catch (e) {
-      setDeleteError(e instanceof Error ? e.message : 'Could not delete the tag')
+      setDeleteError(e instanceof Error ? e.message : 'Couldn’t delete the tag')
     }
   }
   async function removeMember(address: string) {
     setError(null)
     try { await membersMutation.mutateAsync([listId, tag.tagId, { remove: [address] }]) }
-    catch (e) { setError(e instanceof Error ? e.message : 'Could not remove that account') }
+    catch (e) { setError(e instanceof Error ? e.message : 'Couldn’t remove that account') }
   }
   // Submitted one address at a time — `setTagMembers` validates a whole `add`
   // array atomically, so batching a multi-token paste into one call would let
@@ -458,7 +458,7 @@ export function ListDetail({ listId }: { listId: string }) {
   async function revokeOne(address: string) {
     setShareError(null)
     try { await revokeMutation.mutateAsync([listId, address]) }
-    catch (e) { setShareError(e instanceof Error ? e.message : 'Could not revoke that account') }
+    catch (e) { setShareError(e instanceof Error ? e.message : 'Couldn’t revoke that account') }
   }
   async function confirmDelete() {
     setDeleteError(null)
@@ -469,7 +469,7 @@ export function ListDetail({ listId }: { listId: string }) {
     } catch (e) {
       // Surfaced inline via DeleteListDialog's `error` prop; the dialog stays
       // open (closing on a failed delete would hide the only sign it failed).
-      setDeleteError(e instanceof Error ? e.message : 'Could not delete the list')
+      setDeleteError(e instanceof Error ? e.message : 'Couldn’t delete the list')
     }
   }
   // Clearing on close (Cancel/Escape/overlay-click, not just the Cancel button)

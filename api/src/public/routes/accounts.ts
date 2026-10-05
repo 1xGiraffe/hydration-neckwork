@@ -14,7 +14,7 @@ import {
 import { MM_EVENT_NAMES, mmEventName, queryMoneyMarketEvents } from '../services/moneyMarketEvents.ts'
 
 // Accounts endpoints: current valued balances for a batch of accounts, a bucketed
-// net-worth series, and a paged money-market event feed. The route descriptions
+// portfolio-value series, and a paged money-market event feed. The route descriptions
 // below are the normative definitions.
 
 // One request may value at most this many accounts. The bound is both a cost
@@ -121,7 +121,7 @@ export const accountsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = 
   app.get('/v1/accounts/:account/balance-history', {
     schema: {
       tags: ['accounts'],
-      summary: 'Bucketed net-worth series for one account',
+      summary: 'Bucketed portfolio value for one account',
       description: [
         'Per-asset forward-fill of the hourly balance model, valued at each bucket\'s closed candle — never a future or current price (AGENTS.md). `timestamp` is the bucket CLOSE, and only fully closed buckets are emitted, so the series never ends on a partial figure.',
         'SCOPE — this series is NARROWER than GET /v1/accounts/balances and the two are not comparable. `transferableUsd` covers pallet-side balances only. Money-market supplied balances and the ERC-20-backed wallet pot are BOTH absent, because each exists only as a current-state snapshot with no per-bucket history; applying today\'s position to a past bucket would be the future-price mistake this endpoint otherwise avoids, so they are omitted rather than faked.',

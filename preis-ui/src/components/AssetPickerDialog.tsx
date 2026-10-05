@@ -311,7 +311,7 @@ export default function AssetPickerDialog({
                 aria-expanded="true"
                 aria-activedescendant={effectiveActiveIndex >= 0 ? `${listboxId}-option-${effectiveActiveIndex}` : undefined}
               />
-              <span className="esc">ESC to close</span>
+              <span className="esc">Esc to close</span>
               <button
                 type="button"
                 className="picker-close-btn"

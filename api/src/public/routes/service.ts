@@ -79,7 +79,7 @@ export const serviceRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = a
   app.get('/v1/status', {
     schema: {
       tags: ['service'],
-      summary: 'Indexed head and lag',
+      summary: 'Indexed head and ingestion lag',
       description: '`chainBlockHeight` is the raw ingestion checkpoint, so `blocksBehindHead` measures distance from raw ingestion rather than from the chain head — this service performs no RPC.',
       response: { 200: zStatus },
     },

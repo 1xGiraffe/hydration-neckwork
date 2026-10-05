@@ -574,7 +574,7 @@ export default function Chart({
                 details: offset === 0 ? null : current.details,
                 loading: false,
                 loadingMore: false,
-                error: error instanceof Error ? error.message : 'Failed to load volume details',
+                error: error instanceof Error ? error.message : 'Couldn’t load the volume details',
             }
             : current
         ))
@@ -1082,7 +1082,7 @@ export default function Chart({
       setLoading(false)
     }).catch(error => {
       if (isAbortError(error) || controller.signal.aborted || activeDataScopeRef.current !== requestScope) return
-      setLoadError('Unable to load candles. Retrying…')
+      setLoadError('Couldn’t load the candles. Retrying…')
       setLoading(false)
     }).finally(() => {
       if (initialLoadAbortRef.current === controller) {
@@ -1140,7 +1140,7 @@ export default function Chart({
         }
       } catch (error) {
         if (!isAbortError(error) && activeDataScopeRef.current === requestScope && allDataRef.current.length === 0) {
-          setLoadError('Unable to load candles. Retrying…')
+          setLoadError('Couldn’t load the candles. Retrying…')
         }
         // Keep the current chart data if a live poll fails.
       } finally {
@@ -1621,7 +1621,7 @@ export default function Chart({
               <span className={`price-change ${modalPriceChange >= 0 ? 'up' : 'down'}`}>
                 Price {formatSignedPrice(modalPriceChange)} ({formatChange(modalChange)})
               </span>
-              {volumeModal.loading && <span>Loading accounts</span>}
+              {volumeModal.loading && <span>Loading accounts…</span>}
               {volumeModal.error && <span>{volumeModal.error}</span>}
               {modalDetails && (
                 <>
@@ -1692,13 +1692,13 @@ export default function Chart({
                   )
                 })}
                 {volumeModal.loadingMore && (
-                  <div className="omniwatch-more">Loading more accounts</div>
+                  <div className="omniwatch-more">Loading more accounts…</div>
                 )}
               </div>
             )}
 
             {modalDetails && modalDetails.accounts.length === 0 && (
-              <div className="omniwatch-empty">No account-level volume for this candle.</div>
+              <div className="omniwatch-empty">No account-level volume for this candle</div>
             )}
           </div>
         </div>

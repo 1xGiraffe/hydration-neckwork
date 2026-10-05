@@ -442,7 +442,7 @@ export function Mcp() {
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'MCP' }]} />
         <h1 className="page-title">
           MCP server
-          <span className="sub">live chain data for coding agents</span>
+          <span className="sub">live Hydration data for AI agents</span>
         </h1>
       </div>
 
@@ -650,7 +650,7 @@ export function Mcp() {
         </p>
       </Example>
 
-      <h2 className="sec-title">Which surface do you want</h2>
+      <h2 className="sec-title">Which surface do you want?</h2>
       <p className="mcp-note">
         Three doors onto the same index, one for each kind of reader: an agent, a program, a person. They differ by
         how much interpretation is done before the data reaches you.

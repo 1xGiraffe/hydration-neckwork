@@ -322,7 +322,7 @@ describe('list_assets', () => {
     const { upstream } = fakeUpstream({ '/explorer/assets': REGISTRY })
     const out = await tool('list_assets').handler({ limit: 3 }, ctxWith(upstream))
     expect(out.markdown).toContain('3 of 6 matching, out of 6 registered')
-    expect(out.markdown).toContain('| Id | Symbol | Name | Dec | Price | 24 h | Value held | Holder rows | Origin |')
+    expect(out.markdown).toContain('| Id | Symbol | Name | Dec | Price | 24H | Value held | Holder rows | Origin |')
     expect(out.markdown).toContain('3 further matching asset(s) not shown')
     // change24h is a FRACTION upstream: 0.055 is +5.50%, not +0.06%.
     expect(out.markdown).toContain('+5.50%')
@@ -355,7 +355,7 @@ describe('list_assets', () => {
     })
     const volume = await tool('list_assets').handler({ sort: 'volume', limit: 3 }, ctxWith(byVolume.upstream))
     expect(byVolume.calls.map(c => c.path).sort()).toEqual(['/explorer/assets', '/market-stats'])
-    expect(volume.markdown).toContain('Volume 24 h')
+    expect(volume.markdown).toContain('Volume 24H')
     orderedBefore(volume.markdown, 'HOLLAR', 'HDX')
     expect(volume.markdown).toMatch(/covers only the traded assets/)
   })

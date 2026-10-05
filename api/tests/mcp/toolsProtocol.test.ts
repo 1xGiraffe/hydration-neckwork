@@ -330,7 +330,7 @@ describe('get_protocol_stats', () => {
 
   it('returns revenue without its optional companions when they fail', async () => {
     const out = await run(protocol, { dashboard: 'revenue' }, { '/explorer/revenue': REVENUE })
-    expect(out.markdown).toContain('Protocol revenue')
+    expect(out.markdown).toContain('Protocol Revenue')
     expect(out.errors?.map(e => e.code)).toContain('NOT_FOUND')
     expect(out.markdown).not.toContain('Staker distributions')
   })
