@@ -20,8 +20,8 @@ import type { RiverLegendItem } from './RevenueFlow'
 //    surface — the same interest from the payer's side, under the same name. HSM revenue is the HSM's own venue green (--vol-hsm), a deep shade of
 //    the HOLLAR green. Network fees wear the brand primary (--accent).
 //  * Sign is not a colour. A user COST (exit fees, borrow interest, staking
-//    forfeits) is a deep shade of its source's family, and the river draws
-//    every outflow hollow (a ring, a dashed pill) whatever its stream.
+//    forfeits) is a deep shade of its source's family, and a marker that
+//    stands for a cost is drawn hollow (a ring) whatever its stream.
 //  * A stream with no counterpart has a hue nothing else uses: XCM in the
 //    cross-chain neutral of its activity badge, ICE in the intent violet, the
 //    liquidation pair in vermilion and brick (clear of the brand pink), farms
@@ -179,30 +179,20 @@ export const userRevenueColor = (stream: string): string =>
 
 /**
  * The legend names every stream that can flow this hour — the drips are exactly what
- * the scheduler emits from — one entry per display stream, so a HOLLAR loan's interest
- * is "HOLLAR interest" in HOLLAR's colour, as on the breakdowns. Its marker follows the
- * stream's particles: filled for a stream that only earns, hollow for one that only
- * costs, and both markers for a stream whose drips flow both ways this hour (its
- * particles are drawn both ways too). Incomes first, then mixed, then costs, each in
+ * the scheduler emits from, all of them earnings — one entry per display stream, in
  * the palette's order.
  */
 export function userRevenueLegendItems(drips: UserRevenueFlowResponse['drips']): RiverLegendItem[] {
-  const seen = new Map<string, RiverLegendItem & { rank: number; earns: boolean; costs: boolean }>()
+  const seen = new Map<string, RiverLegendItem & { rank: number }>()
   for (const d of drips) {
-    if (!Number.isFinite(d.usdPerBlock) || d.usdPerBlock === 0) continue
-    const item = seen.get(d.stream) ?? seen.set(d.stream, {
+    if (!Number.isFinite(d.usdPerBlock) || d.usdPerBlock <= 0 || seen.has(d.stream)) continue
+    seen.set(d.stream, {
       key: d.stream,
       label: USER_REVENUE_STREAM_LABEL[d.stream] ?? d.label.split(' · ')[0],
       color: userRevenueColor(d.stream),
       rank: userRevenueStreamRank(d.stream),
-      earns: false,
-      costs: false,
-    }).get(d.stream)!
-    if (d.usdPerBlock > 0) item.earns = true
-    else item.costs = true
+    })
   }
-  const order = (it: { earns: boolean; costs: boolean }) => (it.earns ? (it.costs ? 1 : 0) : 2)
-  return [...seen.values()]
-    .sort((a, b) => order(a) - order(b) || a.rank - b.rank)
-    .map(({ key, label, color, earns, costs }) => ({ key, label, color, ...(costs ? (earns ? { both: true } : { out: true }) : {}) }))
+  return [...seen.values()].sort((a, b) => a.rank - b.rank).map(({ key, label, color }) => ({ key, label, color }))
 }
+

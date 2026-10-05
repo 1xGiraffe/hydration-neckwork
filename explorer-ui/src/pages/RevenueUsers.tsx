@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { signedColumns } from '../components/userRevenueColumns'
+import { earnedColumns } from '../components/userRevenueColumns'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useRevenueHollarColor } from '../hooks/useRevenueHollarColor'
 import { useUserRevenueDashboard } from '../hooks/useExplorerData'
@@ -13,8 +13,8 @@ import { paths, setQuery, useQueryValue } from '../router'
 
 // /revenue/users — what users EARN on Hydration, net, booked as it accrues:
 // the headline windows (closed hours), and over the chosen range the history
-// (incomes up, costs in their own chart), the per-stream breakdown with earned /
-// paid / net, what the fold booked but no user holds (protocol accounts and
+// of what was earned (costs are stated in the breakdown, never charted), the
+// per-stream breakdown with earned / paid / net, what the fold booked but no user holds (protocol accounts and
 // named unattributed causes), and the top earners (net). Every figure
 // reads the published folds only: "through" the end of the newest closed hour.
 
@@ -46,15 +46,13 @@ export function RevenueUsers() {
   // Referrer commissions are a stream like any other here (booked at claim time,
   // not per trade), always counted.
   const shown = useMemo(() => data?.breakdown ?? [], [data])
-  // Every shown stream feeds both charts; each bucket lands by its own sign (a
-  // signed stream's negative bucket is a cost, never dropped).
+  // Every shown stream feeds the chart with what it earned (a signed stream's
+  // costs are the breakdown's Paid column, never netted into its columns).
   const shownStreams = useMemo(() => new Set(shown.map(b => b.stream)), [shown])
-  const incomeCols = useMemo(() => (data ? signedColumns(data, range, 1, shownStreams) : []), [data, range, shownStreams])
-  const costCols = useMemo(() => (data ? signedColumns(data, range, -1, shownStreams) : []), [data, range, shownStreams])
-  // Legends in the charts' stack order (the palette's validated order).
+  const incomeCols = useMemo(() => (data ? earnedColumns(data, range, shownStreams) : []), [data, range, shownStreams])
+  // The legend in the chart's stack order (the palette's validated order).
   const ranked = useMemo(() => [...shown].sort((a, b) => userRevenueStreamRank(a.stream) - userRevenueStreamRank(b.stream)), [shown])
   const legend = useMemo(() => ranked.filter(b => b.earned > 0).map(b => ({ label: b.label, color: userRevenueColor(b.stream) })), [ranked])
-  const costLegend = useMemo(() => ranked.filter(b => b.paid < 0).map(b => ({ label: b.label, color: userRevenueColor(b.stream) })), [ranked])
   // The total row is the api's exact sum over every stream, snapped once — a sum of the
   // rows' snapped figures would drop each stream's sub-cent remainder. (An older api
   // without it: the rows' sum.)
@@ -112,18 +110,6 @@ export function RevenueUsers() {
           <>
             <StackedColumnChart columns={incomeCols} h={230} yFmt={v => F.usd(v)} />
             <ChartLegend items={legend} />
-          </>
-        )}
-      </div>
-
-      <SecTitle title="Paid" subtitle="borrow interest, exit fees, forfeits and other costs" />
-      <div className="pf-card">
-        {!data && !isError && <ChartSkeleton />}
-        {data && costCols.length === 0 && <div className="rev-empty">No costs published in this range.</div>}
-        {data && costCols.length > 0 && (
-          <>
-            <StackedColumnChart columns={costCols} h={150} yFmt={v => F.usd(-v)} />
-            <ChartLegend items={costLegend} />
           </>
         )}
       </div>

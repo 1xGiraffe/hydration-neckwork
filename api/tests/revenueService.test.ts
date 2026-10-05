@@ -607,8 +607,8 @@ describe('getUserRevenueDashboard — top earners and payers in one pass', () =>
   })
 })
 
-describe('User Revenue display streams — HOLLAR interest apart', () => {
-  it('streams a HOLLAR loan\'s borrow interest as its own drip, every other loan\'s as borrow interest', async () => {
+describe('getUserRevenueFlow — earnings only', () => {
+  it('streams only what users earn: borrow interest, HOLLAR\'s included, and a stream netting to a cost are no drip', async () => {
     vi.setSystemTime(NOW + 9_300_000)
     const { initRevenueService, getUserRevenueFlow } = await service()
     const hour = Math.floor(Date.parse('2026-08-14T13:00:00Z') / 1000)
@@ -618,16 +618,20 @@ describe('User Revenue display streams — HOLLAR interest apart', () => {
       '-- rev:user-flow\n': [
         { stream: 'mm_borrow_interest', asset_id: '222', last: '-9.000000000000', trailing: '-200.000000000000' },
         { stream: 'mm_borrow_interest', asset_id: '0', last: '-1.000000000000', trailing: '-24.000000000000' },
+        { stream: 'mm_supply_interest', asset_id: '5', last: '-2.000000000000', trailing: '-2.000000000000' },
+        { stream: 'lp_fee_omnipool', asset_id: '5', last: '1.000000000000', trailing: '1.000000000000' },
+        { stream: 'mm_supply_interest', asset_id: '0', last: '4.000000000000', trailing: '4.000000000000' },
       ],
     })
     initRevenueService(client)
     const flow = await getUserRevenueFlow()
-    expect(flow.drips.map(d => [d.key, d.stream, d.label])).toEqual([
-      ['mm_borrow_interest_hollar:222', 'mm_borrow_interest_hollar', 'HOLLAR interest · HOLLAR'],
-      ['mm_borrow_interest:0', 'mm_borrow_interest', 'Borrow interest · HDX'],
-    ])
+    // Largest first; every drip positive.
+    expect(flow.drips.map(d => d.key)).toEqual(['mm_supply_interest:0', 'lp_fee_omnipool:5'])
+    expect(flow.drips.every(d => d.usdPerBlock > 0)).toBe(true)
   })
+})
 
+describe('User Revenue display streams — HOLLAR interest apart', () => {
   it('reads the dashboard\'s series and breakdown under the display streams, HOLLAR interest before the rest', async () => {
     vi.setSystemTime(NOW + 11_100_000) // past the previous dashboard's stale window
     const { initRevenueService, getUserRevenueDashboard } = await service()

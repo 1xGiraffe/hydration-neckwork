@@ -6,36 +6,27 @@ import { userRevenueLegendItems } from '../src/components/revenueColors'
 
 const drip = (stream: string, usdPerBlock: number, key = `${stream}:${usdPerBlock}`) => ({ key, stream, label: stream, assetId: 0, usdPerBlock })
 
-// The legend's marker follows the particles: a stream whose drips flow both ways this
-// hour draws filled AND hollow particles, so its legend shows both markers rather than
-// only the income one.
+// The user river carries only what users earn: its legend names each earning
+// stream once, filled, in the palette's order, and never a cost.
 describe('the user river legend', () => {
-  it('marks income, cost and mixed streams as their particles are drawn, incomes first', () => {
+  it('names each earning stream once, in the palette order, and no cost', () => {
     const items = userRevenueLegendItems([
       drip('staking_forfeit', -0.2),
       drip('token_accrual', 0.1, 'a'),
-      drip('token_accrual', -0.05, 'b'),
+      drip('token_accrual', 0.05, 'b'),
       drip('lp_fee_omnipool', 0.3),
       drip('farm_rewards', 0),
     ])
-    expect(items.map(({ key, out, both }) => ({ key, out, both }))).toEqual([
-      { key: 'lp_fee_omnipool', out: undefined, both: undefined },
-      { key: 'token_accrual', out: undefined, both: true },
-      { key: 'staking_forfeit', out: true, both: undefined },
-    ])
+    expect(items.map(i => i.key)).toEqual(['lp_fee_omnipool', 'token_accrual'])
   })
 
-  it('renders both markers for a mixed stream and one for the others', () => {
+  it('renders one filled marker per stream', () => {
     const html = renderToStaticMarkup(<RiverLegend label="x" items={[
-      { key: 'in', label: 'In', color: 'red' },
-      { key: 'mix', label: 'Mix', color: 'blue', both: true },
-      { key: 'out', label: 'Out', color: 'green', out: true },
+      { key: 'a', label: 'A', color: 'red' },
+      { key: 'b', label: 'B', color: 'blue' },
     ]} />)
-    const item = (label: string) => html.slice(html.lastIndexOf('<span class="rev-legend-item"', html.indexOf(`>${label}<`)), html.indexOf(`>${label}<`))
-    const dots = (s: string) => ({ filled: (s.match(/class="rev-dot"/g) ?? []).length, hollow: (s.match(/rev-dot rev-dot-out/g) ?? []).length })
-    expect(dots(item('In'))).toEqual({ filled: 1, hollow: 0 })
-    expect(dots(item('Mix'))).toEqual({ filled: 1, hollow: 1 })
-    expect(dots(item('Out'))).toEqual({ filled: 0, hollow: 1 })
+    expect((html.match(/class="rev-dot"/g) ?? []).length).toBe(2)
+    expect(html).not.toContain('rev-dot-out')
   })
 })
 

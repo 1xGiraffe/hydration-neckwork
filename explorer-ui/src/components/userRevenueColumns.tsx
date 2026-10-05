@@ -1,5 +1,6 @@
-// The /revenue/users charts' columns: what accounts EARNED and what they PAID,
-// per stream and bucket, from the account-day facts (never a bucket's net).
+// The /revenue/users chart's columns: what accounts EARNED per stream and
+// bucket, from the account-day facts (never a bucket's net). What they paid is
+// stated in the page's breakdown, not charted.
 import type { StackColumn } from './HdxCharts'
 import { ChartTooltipRow as TipRow } from './DashboardPrimitives'
 import { F } from './ui'
@@ -14,20 +15,20 @@ function bucketLabel(range: RevenueRange, t: number): string {
   return monthDayLabel(d.toISOString())
 }
 /**
- * Stacked columns of one side: what accounts EARNED (Σ positive account-day
- * facts) or PAID (Σ negative, drawn as magnitudes) per stream and bucket — never
- * the bucket's net, which would hide a signed stream's two sides in each other.
+ * Stacked columns of what accounts EARNED (Σ positive account-day facts) per
+ * stream and bucket — never the bucket's net, which would let a signed stream's
+ * costs eat into its earnings.
  */
-export function signedColumns(d: UserRevenueDashboard, range: RevenueRange, sign: 1 | -1, streams: Set<string>): StackColumn[] {
+export function earnedColumns(d: UserRevenueDashboard, range: RevenueRange, streams: Set<string>): StackColumn[] {
   const label = new Map(d.breakdown.map(b => [b.stream, b.label]))
   // Stacked in the palette's validated order (revenueColors.ts), never the payload's.
   const series = d.history.series.filter(s => streams.has(s.stream)).sort((a, b) => userRevenueStreamRank(a.stream) - userRevenueStreamRank(b.stream))
   const ts = [...new Set(series.flatMap(s => s.points.map(p => p.t)))].sort((a, b) => a - b)
-  const by = new Map(series.map(s => [s.stream, new Map(s.points.map(p => [p.t, sign > 0 ? p.earned : p.paid]))]))
+  const by = new Map(series.map(s => [s.stream, new Map(s.points.map(p => [p.t, p.earned]))]))
   const labelEvery = Math.max(1, Math.ceil(ts.length / 12))
   return ts.map((t, i) => {
     const parts = series
-      .map(s => ({ stream: s.stream, usd: (by.get(s.stream)?.get(t) ?? 0) * sign }))
+      .map(s => ({ stream: s.stream, usd: by.get(s.stream)?.get(t) ?? 0 }))
       .filter(p => p.usd > 0)
     const total = parts.reduce((a, p) => a + p.usd, 0)
     const l = bucketLabel(range, t)
@@ -38,8 +39,8 @@ export function signedColumns(d: UserRevenueDashboard, range: RevenueRange, sign
       tip: (
         <>
           <strong>{l}</strong>
-          {[...parts].reverse().map(p => <TipRow key={p.stream} color={userRevenueColor(p.stream)} label={label.get(p.stream) ?? p.stream} value={F.usd(p.usd * sign)} />)}
-          <TipRow label={sign > 0 ? 'Earned' : 'Paid'} value={F.usd(total * sign)} />
+          {[...parts].reverse().map(p => <TipRow key={p.stream} color={userRevenueColor(p.stream)} label={label.get(p.stream) ?? p.stream} value={F.usd(p.usd)} />)}
+          <TipRow label="Earned" value={F.usd(total)} />
         </>
       ),
     }

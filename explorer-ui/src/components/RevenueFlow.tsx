@@ -125,10 +125,6 @@ export interface RiverLegendItem {
   key: string
   label: string
   color: string
-  /** A cost: drawn hollow, as its particles are. */
-  out?: boolean
-  /** A stream flowing both ways: both markers, filled and hollow, as its particles are drawn. */
-  both?: boolean
 }
 
 /** A river's legend, under its stage: every stream that can flow in it, in the palette's validated order. */
@@ -137,9 +133,8 @@ export function RiverLegend({ items, label }: { items: RiverLegendItem[]; label:
   return (
     <div className="rev-legend" role="list" aria-label={label}>
       {items.map(it => (
-        <span className="rev-legend-item" role="listitem" key={it.key} title={it.both ? `${it.label}: earned and paid` : undefined}>
-          {(it.both || !it.out) && <span className="rev-dot" style={{ background: it.color }} />}
-          {(it.both || it.out) && <span className="rev-dot rev-dot-out" style={{ '--tint': it.color } as React.CSSProperties} />}
+        <span className="rev-legend-item" role="listitem" key={it.key}>
+          <span className="rev-dot" style={{ background: it.color }} />
           {it.label}
         </span>
       ))}

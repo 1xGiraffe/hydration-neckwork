@@ -937,18 +937,20 @@ export interface UserRevenueFlowResponse {
   publishedThrough: string | null
   blockSeconds: number
   head: number
-  /** Signed: negative drips (borrow interest, exit fees, forfeits) flow OUT. */
+  /** Earnings only: every drip is positive (costs are the dashboard breakdown's Paid column, never streamed). */
   drips: { key: string; stream: string; label: string; assetId: number; usdPerBlock: number }[]
 }
 
 /**
  * The user river's feed. User Revenue accrues continuously and is booked per
- * closed hour, so the river streams the NEWEST folded hour's net rate per
+ * closed hour, so the river streams the NEWEST folded hour's rate per
  * (stream, asset), one block at a time — the same measured-not-modelled rule as
  * the protocol river's borrow drip — and says which hour it is streaming. A
  * REVISABLE stream's newest hours are not decided yet (a token's pending peg, a
  * farm's next sync, a voter's record), so it streams its mean over the trailing
  * 24 closed hours instead of an hour that can read negative before it is restated.
+ * The river shows only what users EARN: a (stream, asset) whose rate nets to a
+ * cost (borrow interest, exit fees, forfeits) is no drip.
  */
 export async function getUserRevenueFlow(): Promise<UserRevenueFlowResponse> {
   const [head, blockMs, flow] = await Promise.all([
@@ -995,15 +997,14 @@ GROUP BY stream, asset_id`,
     blockSeconds,
     head,
     drips: flow.rows
-      .map(r => ({ r, usd: r.usd }))
-      .filter(({ usd }) => usd >= USD_DUST || usd <= -USD_DUST)
-      .map(({ r, usd }) => ({
+      .filter(r => r.usd >= USD_DUST)
+      .map(r => ({
         key: `${r.stream}:${r.asset_id}`,
         stream: r.stream,
         label: `${labels.get(r.stream) ?? r.stream} · ${displayDescriptor(Number(r.asset_id)).symbol}`,
         assetId: Number(r.asset_id),
-        usdPerBlock: (Number(usd) / USD_UNIT) * (blockSeconds / 3_600),
+        usdPerBlock: (Number(r.usd) / USD_UNIT) * (blockSeconds / 3_600),
       }))
-      .sort((a, b) => Math.abs(b.usdPerBlock) - Math.abs(a.usdPerBlock)),
+      .sort((a, b) => b.usdPerBlock - a.usdPerBlock),
   }
 }

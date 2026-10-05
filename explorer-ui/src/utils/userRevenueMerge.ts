@@ -80,5 +80,5 @@ export function mergeFlowCatchup(f: UserRevenueFlowResponse): UserRevenueFlowRes
     const q = out.get(key)
     out.set(key, q ? { ...q, usdPerBlock: q.usdPerBlock + d.usdPerBlock } : { ...d, key, stream, label })
   }
-  return { ...f, drips: [...out.values()].sort((a, b) => Math.abs(b.usdPerBlock) - Math.abs(a.usdPerBlock)) }
+  return { ...f, drips: [...out.values()].sort((a, b) => b.usdPerBlock - a.usdPerBlock) }
 }
