@@ -15,12 +15,14 @@ vi.mock('../src/services/securityService.ts', () => ({
 interface ActivityCall { kind: 'address' | 'recent'; address?: string; type?: string; action?: string; filters?: Record<string, unknown>; opts?: Record<string, unknown> }
 const activityCalls: ActivityCall[] = []
 let activityRows: Record<string, unknown>[] = []
+let failAddress: string | null = null
 vi.mock('../src/services/explorerService.ts', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/services/explorerService.ts')>()
   return {
     ...actual,
     getAddressActivity: async (address: string, type: string, _limit: number, _offset: number, action?: string, filters?: Record<string, unknown>) => {
       activityCalls.push({ kind: 'address', address, type, action, filters })
+      if (failAddress != null && address === failAddress) throw new Error('Field value too long')
       return activityRows
     },
     getRecentActivity: async (_limit: number, _from?: string, _to?: string, _offset = 0, type = 'all', filters: Record<string, unknown> = {}, _action?: string, opts: Record<string, unknown> = {}) => {
@@ -282,6 +284,34 @@ describe('activity source fan-out', () => {
     // and the five the rotation has not come back to at 1010 — so the lane
     // stands at 1010, the oldest block any of its groups is vouched for.
     expect(evaluatorCursors()['account-activity']).toBe(1_010)
+  })
+
+  // One target's source failing (a list past the server's parameter ceiling)
+  // used to abort the whole tick, so no group of the kind delivered and the
+  // cursor never moved. Now only that group stays unvisited.
+  it('isolates a failing group: the others are read, the failed one holds the cursor', async () => {
+    const [a, b] = ['0x' + '01'.repeat(20), '0x' + '02'.repeat(20)]
+    for (const address of [a, b]) await createRule(OWNER, { kind: 'account-activity', params: { address } })
+    await runEvaluatorTick()                       // seeds at 1000
+    setHead(1_010)
+    activityCalls.length = 0
+    try {
+      await runEvaluatorTick()
+      const called = activityCalls.map(c => String(c.address))
+      expect(called).toHaveLength(2)
+      failAddress = called[0]
+      activityCalls.length = 0
+      setHead(1_020)
+      await runEvaluatorTick()
+      expect(activityCalls).toHaveLength(2)
+      expect(evaluatorCounters().failedGroups).toBe(1)
+      // The healthy group read to 1020, the failed one is vouched only to 1010.
+      expect(evaluatorCursors()['account-activity']).toBe(1_010)
+      failAddress = null
+      setHead(1_030)
+      await runEvaluatorTick()
+      expect(evaluatorCursors()['account-activity']).toBe(1_030)
+    } finally { failAddress = null }
   })
 
   // Measured live 2026-09-16 to 2026-09-25: 32 watched targets against a cap of
