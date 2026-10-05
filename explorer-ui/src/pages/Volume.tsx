@@ -1,7 +1,7 @@
 import { useMemo, type ReactNode } from 'react'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths, setQuery, useQueryValue } from '../router'
-import { accountHref, AddrPill, AssetChip, AssetIcon, ChartSkeleton, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav, TableSkeleton, Usd } from '../components/ui'
+import { accountHref, AddrPill, AssetChip, AssetIcon, ChartSkeleton, Crumbs, Dash, EmptyRow, F, LoadError, PoolBadge, rowNav, TableSkeleton, Usd } from '../components/ui'
 import { ChartLegend, ShareBar, StackedBarChart, type AreaSeries, type ShareSegment } from '../components/HdxCharts'
 import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import { usePlatformVolume, volumeApi, type PlatformVolume, type VolumeRange, type WindowStat } from '../api/volume'
@@ -88,7 +88,7 @@ function venueRank(v: string): number {
 export function Volume() {
   useDocumentTitle('Volume')
   const range = rangeOfParam(useQueryValue('range', '30d'))
-  const { data: d, isError } = usePlatformVolume(range)
+  const { data: d, isError, refetch } = usePlatformVolume(range)
   const bands = useMemo<AreaSeries[]>(() => (d ? venueBands(d.chart) : []), [d])
   const refine = useMemo(() => gridRefine((f, t, n) => volumeApi.platformWindow(f, t, n), bands), [bands])
   // The share bar, its legend and the table follow the charts' fixed venue order (VENUE_ORDER), not the payload's.
@@ -108,7 +108,7 @@ export function Volume() {
         <div className="page-title">Volume <span className="sub">{through ? `trading on Hydration, through ${through}` : 'trading on Hydration'}</span></div>
       </div>
 
-      {isError && <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load volume</div>}
+      {isError && <LoadError title="Couldn’t load volume" onRetry={() => { void refetch() }} />}
 
       <div className="hdx-cards" style={{ marginTop: 0 }}>
         {d ? <>

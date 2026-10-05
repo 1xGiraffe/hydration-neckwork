@@ -4,7 +4,7 @@ import { useNow } from '../hooks/useNow'
 import { api } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, useQuery, useQueryValue, setQuery } from '../router'
-import { Crumbs, Usd, Amt, PriceUsd, F, AssetIcon, AssetAmount, AddrPill, AssetDetailSkeleton, TableSkeleton, EmptyRow, rowNav, accountHref, TagGroupPill, ActivityChips, Pager, normalizeActivityType, normalizeActivityAction, Dash, pendingRows } from '../components/ui'
+import { Crumbs, Usd, Amt, PriceUsd, F, AssetIcon, AssetAmount, AddrPill, AssetDetailSkeleton, TableSkeleton, EmptyRow, rowNav, accountHref, TagGroupPill, ActivityChips, Pager, normalizeActivityType, normalizeActivityAction, Dash, LoadError, pendingRows } from '../components/ui'
 import { ActiveDcaTable } from '../components/AccountSections'
 import { AssetOrderBook } from '../components/AssetOrderBook'
 import { AssetLiquidityTab } from '../components/AssetLiquidity'
@@ -204,7 +204,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
               dcas.isLoading && !dcas.data
                 ? <div className="panel"><table className="tbl"><tbody><TableSkeleton cols={8} rows={6} /></tbody></table></div>
                 : dcas.isError
-                  ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load the DCA orders</div>
+                  ? <LoadError title="Couldn’t load the DCA orders" onRetry={() => { void dcas.refetch() }} />
                   : <>
                     {/* scrollMarginTop keeps a scrolled-to section title clear of
                         the 61px sticky topbar. */}
@@ -228,7 +228,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
               book.isLoading && !book.data
                 ? <div className="panel"><table className="tbl"><tbody><TableSkeleton cols={4} rows={6} /></tbody></table></div>
                 : book.isError
-                  ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load the limit orders</div>
+                  ? <LoadError title="Couldn’t load the limit orders" onRetry={() => { void book.refetch() }} />
                   : <AssetOrderBook book={book.data ?? { bids: [], asks: [] }} asset={a} />
             )}
           </>

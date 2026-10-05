@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { useIceDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
-import { AssetAmount, Usd, AssetChip, ChartSkeleton, Crumbs, EmptyRow, F, TableSkeleton } from '../components/ui'
+import { AssetAmount, Usd, AssetChip, ChartSkeleton, Crumbs, EmptyRow, F, LoadError, TableSkeleton } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
 import { ChartLegend, MultiLineChart, ShareBar, StackedColumnChart } from '../components/HdxCharts'
 import type { AreaSeries, ShareSegment, StackColumn } from '../components/HdxCharts'
@@ -353,7 +353,7 @@ function IceSkeleton() {
 }
 
 export function Ice() {
-  const { data, isError } = useIceDashboard()
+  const { data, isError, refetch } = useIceDashboard()
   useDocumentTitle('ICE')
   return (
     <div className="wrap">
@@ -362,7 +362,7 @@ export function Ice() {
         <div className="page-title">ICE <span className="sub">intent solver · limit orders, DCA intents & the matched-volume fee</span></div>
       </div>
       {isError
-        ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load the ICE dashboard.</div>
+        ? <LoadError title="Couldn’t load the ICE dashboard" onRetry={() => { void refetch() }} />
         : !data ? <IceSkeleton /> : (
           <>
             <Ribbon d={data} />

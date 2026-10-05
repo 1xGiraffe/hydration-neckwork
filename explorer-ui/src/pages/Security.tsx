@@ -5,7 +5,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useNow } from '../hooks/useNow'
 import { Link, paths, SECURITY_SECTIONS } from '../router'
 import type { SecuritySection } from '../router'
-import { AddrPill, Usd, Ago, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, EmptyRow, F, MomentLink, TableSkeleton } from '../components/ui'
+import { AddrPill, Usd, Ago, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, EmptyRow, F, LoadError, MomentLink, TableSkeleton } from '../components/ui'
 import { DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import { NotifyButton } from '../components/NotifyButton'
 import { FuseGrid, LoadMeter, YearBars } from '../components/SecurityPanels'
@@ -1034,7 +1034,7 @@ function SecuritySkeleton() {
 }
 
 export function Security({ section }: { section: SecuritySection | null }) {
-  const { data, isError } = useSecurityDashboard()
+  const { data, isError, refetch } = useSecurityDashboard()
   const now = useNow()
   // Every window on this page is a block count in the pallet and a duration to
   // the reader, and the two are not converted at the same rate. A LIVE delta —
@@ -1090,7 +1090,7 @@ export function Security({ section }: { section: SecuritySection | null }) {
         </div>
       </div>
       {isError
-        ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load the security dashboard.</div>
+        ? <LoadError title="Couldn’t load the security dashboard" onRetry={() => { void refetch() }} />
         : !data ? <SecuritySkeleton /> : (
           <>
             {section == null && <Ribbon d={data} now={now} />}

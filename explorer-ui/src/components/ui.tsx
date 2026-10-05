@@ -2046,6 +2046,17 @@ export function ErrorRow({ cols, title, error, onRetry }: { cols: number; title:
     </td></tr>
   )
 }
+// The card-sized twin of ErrorRow, for a section or page whose query failed
+// before it had anything to draw: the headline names what did not load, and a
+// Try again button refetches it where the caller can.
+export function LoadError({ title, onRetry, card = 'detail-card' }: { title: string; onRetry?: () => void; card?: string }) {
+  return (
+    <div className={`${card} load-error`} role="alert">
+      <strong>{title}</strong>
+      {onRetry && <button type="button" onClick={onRetry}>Try again</button>}
+    </div>
+  )
+}
 // Deep-linkable pager. Lists are newest-first, so higher pages go further back
 // toward the very first block. With `totalPages` it numbers real pages and offers
 // a Last jump; without one it numbers only up to the current page and lets
