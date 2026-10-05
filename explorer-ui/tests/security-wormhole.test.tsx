@@ -3,9 +3,11 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Security } from '../src/pages/Security'
-import { WORMHOLE_STATUS, wormholeExplorerLink } from '../src/utils/security'
+import { WORMHOLE_STATUS, peerFuseLeg, wormholeExplorerLink } from '../src/utils/security'
 import type { SecuritySection } from '../src/router'
-import { buildSecurityWormhole, mockSync } from './fixtures/mockApi'
+import { buildSecurityWormhole, buildSecurityWormholeMultiPeer, mockSync } from './fixtures/mockApi'
+import { BridgeRow } from '../src/pages/AssetDetail'
+import { RemoteTokenRow } from '../src/pages/ActivityDetail'
 import type { SecurityDashboard, WormholeBridgeDetail, WormholeStatus } from '../src/types'
 
 const dashboard = () => mockSync<SecurityDashboard>('/explorer/security')!
@@ -268,7 +270,7 @@ describe('Wormhole section', () => {
     expect(html).toContain('Wormhole rate limits')
     // The fixture's sUSDS manager is paused, so the count says so instead of
     // calling a locked leg "load".
-    expect(html).toMatch(/showing the \d+ of \d+ origin fuses carrying load or locked/)
+    expect(html).toMatch(/showing the \d+ of \d+ fuses carrying load or locked/)
     expect(html).toContain('See the Wormhole detail →')
     expect(html).toContain('href="/security/wormhole"')
     // Mixed directions share one grid, so the plate names the leg.
@@ -370,9 +372,9 @@ describe('Wormhole rate limits', () => {
     // sUSDS's origin manager is paused in the fixture: both its legs read full,
     // red and numberless — a verdict, not a utilization.
     const block = fuseBlock(render('wormhole', buildSecurityWormhole()))
-    expect(block).toContain('rate limit, origin manager paused')
+    expect(block).toContain('sUSDS exit rate limit to Ethereum, Ethereum manager paused')
     expect(block).toContain('class="fuse locked"')
-    expect(block).toContain('The origin manager is paused — every transfer is refused until it resumes')
+    expect(block).toContain('The Ethereum manager is paused — every transfer is refused until it resumes')
     expect(block).not.toContain('class="fuse-pct on-fill">100</span>')
   })
 
@@ -407,8 +409,8 @@ describe('Wormhole rate limits', () => {
     // Solana is unconfigured in the fixture: one dormant tile per board.
     expect((block.match(/class="fuse dormant"/g) ?? []).length).toBe(2)
     expect(block).toContain('A limit nobody could read is not a limit of zero.')
-    expect(block).toContain('SOL entry rate limit, not configured')
-    expect(block).not.toContain('SOL entry rate limit, 0% consumed')
+    expect(block).toContain('SOL entry rate limit from Solana, not configured')
+    expect(block).not.toContain('SOL entry rate limit from Solana, 0% consumed')
   })
 
   it('carries the exact limit and what a full bucket means in the tooltip', () => {
@@ -425,7 +427,7 @@ describe('Wormhole rate limits', () => {
 
   it('names the window and the hottest leg from the data', () => {
     const html = render('wormhole', buildSecurityWormhole())
-    expect(html).toContain('origin-chain fuses · 24 h rolling window · sUSDS exit fuse at 80%')
+    expect(html).toContain('per asset and chain · 24 h rolling window · sUSDS exit fuse at 80%')
 
     // A half-hour window, or nothing consumed at all, and the subtitle says so.
     const quiet = buildSecurityWormhole()
@@ -438,27 +440,34 @@ describe('Wormhole rate limits', () => {
       },
     })
     const html2 = render('wormhole', quiet)
-    expect(html2).toContain('origin-chain fuses · 30 min rolling window')
+    expect(html2).toContain('per asset and chain · 30 min rolling window')
     expect(html2).not.toContain('fuse at')
   })
 
-  it('says from the local limits that only the origin side can bind', () => {
+  it('says from the local limits that only the far side can bind', () => {
     const html = render('wormhole', buildSecurityWormhole())
-    // 184,467,440,737 tokens against a 100k origin limit — stated as the ratio
-    // on the shared rough scale (an exact eleven-digit integer would swallow
-    // the sentence) and the smallest local allowance, both read off the rows.
-    expect(html).toContain('1.84M× above the origin limit on the same asset')
-    expect(html).toContain('184B')
-    expect(html).toContain('so the origin chain&#x27;s limiter is the only fuse that can bind')
+    // Every Hydration leg in this fixture sits at the 184,467,440,737-token
+    // ceiling, which the note reads off the rows as "uncapped".
+    expect(html).toContain('Hydration&#x27;s own managers are uncapped, so the far chains&#x27; limiters are the only fuses that can bind.')
     // And what a transfer that does not fit actually does.
     expect(html).toContain('is held for 24 h rather than lost: inbound always, and outbound when the sender asked to be queued')
+  })
+
+  // A leg is cleared by BOTH limiters; with one unread, the other's headroom
+  // is not the leg's.
+  it('reads a leg as unread while either of its two limiters is', () => {
+    const fuse = { limit: '100', capacity: '40', utilizationPct: 60, durationSec: 86_400, lastConsumedAt: null }
+    expect(peerFuseLeg({ limits: { peerOut: fuse, hydrationIn: null, peerIn: null, hydrationOut: null } }, 'in').binding).toBeNull()
+    expect(peerFuseLeg({ limits: { peerOut: null, hydrationIn: fuse, peerIn: null, hydrationOut: null } }, 'in').binding).toBeNull()
+    expect(peerFuseLeg({ limits: { peerOut: fuse, hydrationIn: { ...fuse, capacity: '10' }, peerIn: null, hydrationOut: null } }, 'in'))
+      .toMatchObject({ bindingSide: 'hydration', binding: { capacity: '10' } })
   })
 
   it('says nothing could be read rather than drawing empty gauges', () => {
     const d = buildSecurityWormhole()
     d.assets = d.assets.map(a => ({ ...a, limits: null }))
     const html = render('wormhole', d)
-    expect(html).toContain('No origin chain&#x27;s rate limiter could be read')
+    expect(html).toContain('No peer chain&#x27;s rate limiter could be read')
     expect(html).not.toContain('fuse-grid')
     expect(html).not.toContain('rolling window')
   })
@@ -482,5 +491,111 @@ describe('Wormhole status table', () => {
     // An unknown chain, or a peer that was never read, links nowhere rather than guessing.
     expect(wormholeExplorerLink(999, '0xabc')).toBeNull()
     expect(wormholeExplorerLink(2, null)).toBeNull()
+  })
+})
+
+// An asset backed by more than one lockbox, and one Hydration locks rather
+// than mints: the board has to say every chain, and the rate limits per chain.
+describe('Wormhole multi-peer assets', () => {
+  const text = (html: string) => html.replace(/<[^>]+>/g, '')
+
+  it('names every lockbox in the assets table, Hydration included where it locks', () => {
+    const html = render('wormhole', buildSecurityWormholeMultiPeer())
+    const table = html.slice(html.indexOf('sec-title">Assets'), html.indexOf('sec-title">Lockboxes &amp; peers'))
+    expect(table).toContain('<th>Lockboxes</th>')
+    expect(text(table)).toContain('Ethereumcustody ↗Robinhoodcustody ↗')
+    expect(table).toContain('title="2 lockboxes: Ethereum + Robinhood"')
+    // HDX: Hydration holds the custody, Robinhood mints against it.
+    expect(text(table)).toContain('Hydrationminted on Robinhood')
+    expect(table).toContain('https://robinscan.io/address/')
+  })
+
+  it('lists each peer with its own token, role, limits, payout and when it was added', () => {
+    const html = render('wormhole', buildSecurityWormholeMultiPeer())
+    const block = html.slice(html.indexOf('sec-title">Lockboxes &amp; peers'), html.indexOf('sec-title">Rate limits'))
+    // Robinhood's own WETH, not Ethereum's.
+    expect(block).toContain('https://robinscan.io/address/0x0bd7d308f8e1639fab988df18a8011f41eacad73')
+    expect(block).toContain('https://etherscan.io/address/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2')
+    expect(text(block)).toContain('lockbox')
+    expect(text(block)).toContain('mints')
+    expect(block).toContain('TC motion #387')
+    // A chain that is not an L1 is marked, its risk in the tooltip and the footnote.
+    expect(block).toMatch(/class="wh-tag warn" title="Robinhood is an Ethereum L2[^"]*">L2</)
+    expect(text(block)).toContain('an exit toward a small lockbox can wait for deposits there')
+    // Robinhood holds 8.96 WETH while its limit lets 69 a day through.
+    expect(text(block)).toContain('of up to 69 sendable')
+    // Hydration's own HDX custody is a row of its own.
+    expect(text(block)).toContain('backs every spoke')
+    expect((block.match(/<tr /g) ?? []).length + (block.match(/<tr>/g) ?? []).length).toBeGreaterThanOrEqual(4)
+  })
+
+  it('draws a fuse per chain: Ethereum’s 10,000 and Robinhood’s 69 side by side', () => {
+    const html = render('wormhole', buildSecurityWormholeMultiPeer())
+    const block = html.slice(html.indexOf('sec-title">Rate limits'), html.indexOf('sec-title">In flight'))
+    // WETH has two peers, so its plates name the chain; HDX has one and does not.
+    expect(block).toContain('class="fuse-plate">WETH ETH</span>')
+    expect(block).toContain('class="fuse-plate">WETH RH</span>')
+    expect(block).toContain('class="fuse-plate">HDX</span>')
+    expect(block).toContain('Limit 10,000 WETH per 24 h')
+    expect(block).toContain('Limit 69.0000 WETH per 24 h')
+    expect(block).toContain('WETH entry rate limit from Robinhood, 25% consumed')
+    // Hydration's own inbound limit from Robinhood is a real cap now, and said.
+    expect(text(block)).toContain('Hydration&#x27;s own manager caps WETH from Robinhood at 69 per 24 h')
+  })
+
+  it('states each lockbox in the beam tooltip and the far token on transfer rows', () => {
+    const html = render('wormhole', buildSecurityWormholeMultiPeer())
+    expect(html).toContain('Locked on Robinhood  8.9559')
+    expect(html).toContain('Locked on Hydration  106.0000')
+    expect(html).toContain('Minted on Robinhood  106.0000')
+    const transfers = html.slice(html.indexOf('sec-title">Recent transfers'))
+    expect(transfers).toContain('WETH 0x0bd7')
+    expect(transfers).toContain('https://robinscan.io/address/0x0bd7d308f8e1639fab988df18a8011f41eacad73')
+  })
+
+  it('counts lockboxes on the overview card', () => {
+    const d = dashboard()
+    const html = render(null, null, { ...d, wormhole: { ...d.wormhole!, lockboxCount: 3, lockboxAttention: 1 } })
+    expect(text(html)).toContain('6 assets · 3 lockboxes · $7.26M locked · 1 lockbox needs attention · 2 in flight · 2 queued')
+  })
+})
+
+describe('Wormhole on the asset page and activity detail', () => {
+  const bridge = {
+    assetId: 20, hydrationRole: 'spoke' as const, primaryChainId: 2, primaryChainName: 'Ethereum', manager: '0xb5ce',
+    peers: [
+      { chainId: 2, chainName: 'Ethereum', address: '0xc02a', name: 'Wrapped Ether', symbol: 'WETH', decimals: 18, role: 'lockbox' as const, explorerUrl: null, layer: 'l1' as const, riskNote: null, primary: true },
+      { chainId: 72, chainName: 'Robinhood', address: '0x0bd7d308f8e1639fab988df18a8011f41eacad73', name: 'WETH', symbol: 'WETH', decimals: 18, role: 'lockbox' as const, explorerUrl: 'https://robinscan.io/address/0x0bd7d308f8e1639fab988df18a8011f41eacad73', layer: 'l2' as const, riskNote: 'Robinhood is an Ethereum L2 (Arbitrum Orbit): custody there also rests on its sequencer and its bridge to Ethereum', primary: false },
+    ],
+  }
+  const markup = (node: React.ReactElement) => renderToStaticMarkup(node).replace(/<[^>]+>/g, '')
+
+  it('says the origin as the lockbox chains, with the bridge risk of a non-L1 peer', () => {
+    const t = markup(<BridgeRow bridge={bridge} />)
+    expect(t).toContain('Ethereum + Robinhood (2 lockboxes)')
+    expect(t).toContain('via Wormhole NTT')
+    expect(t).toContain('Robinhood is an Ethereum L2')
+    // A native asset Hydration locks reads as such.
+    const hdx = markup(<BridgeRow bridge={{ ...bridge, hydrationRole: 'lockbox', primaryChainId: 73, primaryChainName: 'Hydration', peers: [{ ...bridge.peers[1], role: 'spoke' }] }} />)
+    expect(hdx).toContain('Native — locked on Hydration')
+    expect(hdx).toContain('minted on Robinhood')
+    // An L1-only asset carries no risk line.
+    expect(markup(<BridgeRow bridge={{ ...bridge, peers: [bridge.peers[0]] }} />)).not.toContain('L2')
+  })
+
+  it('counts a lockbox whose token is unread, and names a peer whose role is', () => {
+    const unreadToken = { ...bridge.peers[1], address: null, name: null, symbol: null, explorerUrl: null }
+    expect(markup(<BridgeRow bridge={{ ...bridge, peers: [bridge.peers[0], unreadToken] }} />)).toContain('Ethereum + Robinhood (2 lockboxes)')
+    const unreadRole = markup(<BridgeRow bridge={{ ...bridge, peers: [bridge.peers[0], { ...unreadToken, role: null }] }} />)
+    expect(unreadRole).toContain('also peered with Robinhood (not read yet)')
+  })
+
+  it('names the far chain’s own token on a cross-chain row', () => {
+    const html = renderToStaticMarkup(<RemoteTokenRow row={{ xcmDir: 'in', remoteToken: bridge.peers[1] }} />)
+    expect(html).toContain('Source token')
+    expect(html).toContain('href="https://robinscan.io/address/0x0bd7d308f8e1639fab988df18a8011f41eacad73"')
+    expect(html.replace(/<[^>]+>/g, '')).toContain('locked there')
+    expect(renderToStaticMarkup(<RemoteTokenRow row={{ xcmDir: 'out', remoteToken: bridge.peers[0] }} />)).toContain('Destination token')
+    expect(renderToStaticMarkup(<RemoteTokenRow row={{ xcmDir: 'in', remoteToken: null }} />)).toBe('')
   })
 })

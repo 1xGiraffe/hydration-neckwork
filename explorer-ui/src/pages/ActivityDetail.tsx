@@ -9,6 +9,7 @@ import { RevenueRow } from '../components/RevenueRow'
 import { PoolBadge, Usd, Amt, ExactAmt, Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, hasGas, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { convictionLabel, voteSideLabel, voteSubjectLabel } from '../utils/voteRows'
+import type { ActivityRow } from '../types'
 
 export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: string }) {
   const label = activityLabel(slug)
@@ -119,6 +120,10 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {row.type === 'xcm' && row.destTxUrl && <><div className="dt">Destination transaction</div><div className="dd"><a className="ext-link" href={row.destTxUrl} target="_blank" rel="noopener">{explorerSiteName(row.destTxUrl)} ↗</a></div></>}
             {row.type === 'xcm' && row.messageId && <><div className="dt">Message ID</div><div className="dd mono" style={{ overflowWrap: 'anywhere' }}>{row.messageId}</div></>}
             {row.type === 'xcm' && row.bridge && <><div className="dt">Bridge</div><div className="dd">{row.bridge}</div></>}
+            {/* The token on the far side of a Wormhole NTT transfer, as that chain's own
+                contract: an arrival from Robinhood left Robinhood's WETH,
+                not Ethereum's. */}
+            {row.type === 'xcm' && row.remoteToken && <RemoteTokenRow row={row} />}
             {/* A Wormhole Relay transfer is two halves: the pool pays the delivery out of
                 inventory, and the NTT transfer mints the gross amount into the pool —
                 usually later, though it can land first. Each half names the other, so
@@ -225,3 +230,25 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
     </div>
   )
 }
+
+// The token on the far side of a Wormhole NTT transfer, as that chain's own
+// contract: an arrival from Robinhood left Robinhood's WETH, not
+// Ethereum's. Read from the backing monitor's peer map, so it names the token
+// the bridge actually moved rather than the asset's registry origin.
+export function RemoteTokenRow({ row }: { row: Pick<ActivityRow, 'xcmDir' | 'remoteToken'> }) {
+  const t = row.remoteToken
+  if (!t) return null
+  return <>
+    <div className="dt">{row.xcmDir === 'in' ? 'Source token' : 'Destination token'}</div>
+    <div className="dd">
+      <ChainBadge chain={t.chainName} />{' '}
+      <span>{t.symbol ?? 'token'}</span>
+      {t.name && t.name !== t.symbol && <span className="muted"> · {t.name}</span>}{' '}
+      {t.explorerUrl
+        ? <a className="ext-link mono" href={t.explorerUrl} target="_blank" rel="noopener" title={t.address}>{F.shortAddr(t.address)} ↗</a>
+        : <span className="mono muted" title={t.address}>{F.shortAddr(t.address)}</span>}
+      {t.role && <span className="muted"> · {t.role === 'lockbox' ? 'locked there' : 'minted there'}</span>}
+    </div>
+  </>
+}
+

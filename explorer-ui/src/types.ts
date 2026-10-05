@@ -1003,6 +1003,9 @@ export interface ActivityRow {
   xcmFees?: XcmFeeLeg[]      // xcm outbound: the send's costs beyond its payload
   fromChain?: string         // xcm inbound: origin chain name
   fromParachainId?: number | null
+  // A Wormhole NTT transfer: the token on the far chain — where an arrival
+  // came from or a send is going — as that chain's own contract.
+  remoteToken?: WormholeRemoteToken | null
   // Source account of an inbound transfer (best-effort — resolved server-side
   // from the Ocelloids crosschain index; absent for old rows or on API outage).
   fromAccount?: ActivityRow['destAccount']
@@ -1227,6 +1230,39 @@ export interface AssetDetail {
   liquidations?: AssetLiquidations | null
   // Number of pools currently holding this asset (the Liquidity tab badge).
   liquiditySourceCount?: number
+  // A Wormhole NTT asset's chains, from the backing monitor's last snapshot:
+  // every peer, which of them hold custody, and the token on each. Absent for
+  // an asset that does not cross Wormhole.
+  bridge?: WormholeAssetBridge | null
+}
+
+// The token an NTT asset is on one of its peer chains.
+export interface WormholeRemoteToken {
+  chainId: number
+  chainName: string
+  address: string
+  name: string | null
+  symbol: string | null
+  decimals: number | null
+  role: 'lockbox' | 'spoke' | null
+  explorerUrl: string | null
+  layer: WormholeChainLayer | null
+  riskNote: string | null
+  primary: boolean
+}
+
+// A peer chain on the asset page: listed as soon as it is registered, with the
+// token (address, name, symbol, link) null until it has been read.
+export type WormholeBridgePeer = Omit<WormholeRemoteToken, 'address'> & { address: string | null }
+
+export interface WormholeAssetBridge {
+  assetId: number
+  // Hydration's own side: `lockbox` when its manager locks the token, `spoke` when it mints.
+  hydrationRole: 'lockbox' | 'spoke' | null
+  primaryChainId: number
+  primaryChainName: string
+  manager: string
+  peers: WormholeBridgePeer[]
 }
 
 // liquidity pools (asset Liquidity tab, pool detail, Omnipool page)
@@ -2522,6 +2558,10 @@ export interface WormholeSummary {
   // shortfall row is held at 'unverified' until indexing catches up. Optional
   // only so an API from before the field reads as "not behind".
   indexBehind?: boolean
+  // Custodies across every asset (Hydration's own included) and how many of
+  // them read `attention` on their payout check. Optional for older APIs.
+  lockboxCount?: number
+  lockboxAttention?: number
 }
 
 export interface WormholeAssetRow {
@@ -2565,6 +2605,94 @@ export interface WormholeAssetRow {
   status: WormholeStatus
   statusDetail: string
   transfers14d: { out: number; in: number }
+  // ── multi-peer model ──
+  // `origin*`/`peer`/`limits` above are the PRIMARY origin (the registry's
+  // `wh` location, or derived from the peers). `locked` is the SUM over every
+  // lockbox and `issuance` the SUM over every spoke; each chain is one entry of
+  // `peers`. Optional so an API from before the model renders as one origin.
+  hydrationRole?: 'lockbox' | 'spoke' | null
+  hydrationLocked?: string | null
+  hydrationToken?: string | null
+  peers?: WormholePeerRow[]
+  lockboxCount?: number
+}
+
+export type WormholeChainLayer = 'l1' | 'l2' | 'other'
+
+export interface WormholeTokenRef {
+  address: string
+  name: string | null
+  symbol: string | null
+  decimals: number | null
+}
+
+// The four limiter legs between Hydration and ONE peer chain: the peer
+// manager's own two, and Hydration's inbound leg for that chain plus its
+// outbound leg (one limit for every destination).
+export interface WormholePeerLimits {
+  peerOut: WormholeFuse | null
+  peerIn: WormholeFuse | null
+  hydrationIn: WormholeFuse | null
+  hydrationOut: WormholeFuse | null
+}
+
+export type WormholeChangeOrigin =
+  | { kind: 'technical-committee'; proposalHash: string; motionIndex: number | null }
+  | { kind: 'account'; account: string }
+  | { kind: 'scheduled' }
+  | { kind: 'unknown' }
+
+// One chain an asset's Hydration manager has a peer on. A `lockbox` holds the
+// real token in custody; a `spoke` mints a representation of it. Amounts are
+// raw integers at the ASSET's decimals.
+export interface WormholePeerRow {
+  chainId: number
+  chainName: string
+  family: 'evm' | 'solana' | 'sui'
+  layer: WormholeChainLayer | null
+  riskNote: string | null
+  primary: boolean
+  manager: string
+  mode: 'locking' | 'burning' | null
+  role: 'lockbox' | 'spoke' | null
+  token: WormholeTokenRef | null
+  balance: string | null
+  balanceUsd: number | null
+  burned: string | null
+  paused: boolean | null
+  configured: boolean
+  fresh: boolean
+  asOf: string | null
+  limits: WormholePeerLimits | null
+  inflightIn: string | null
+  inflightOut: string | null
+  inflightCount: number | null
+  queued: string | null
+  queuedHydration: string | null
+  flows: { received: string | null; sent: string; net: string | null; transfersIn: number; transfersOut: number }
+  payout: { capacity: string | null; potential: string | null; coversPotential: boolean | null; baseline: string | null } | null
+  status: 'ok' | 'attention' | 'unverified' | 'unconfigured'
+  statusDetail: string
+  evidence: 'confirmed' | 'index-only' | 'live-only' | 'mismatch' | null
+  since: { blockHeight: number; timestamp: string; extrinsicIndex: number | null; origin: WormholeChangeOrigin } | null
+  changes: number
+  transceiverPeer: string | null
+  alsoPeers: number[]
+}
+
+export interface WormholeLockboxRow {
+  assetId: string
+  symbol: string
+  decimals: number
+  chainId: number
+  chainName: string
+  layer: WormholeChainLayer | null
+  token: WormholeTokenRef | null
+  balance: string | null
+  balanceUsd: number | null
+  capacity: string | null
+  status: 'ok' | 'attention' | 'unverified' | 'unconfigured'
+  statusDetail: string
 }
 
 // One NTT rate limiter, read live. Raw amounts are integers at the ASSET's own
@@ -2626,6 +2754,11 @@ export interface WormholeQueuedRelease {
   queuedAt: string | null
   releasableAt: string | null
   releasable: boolean
+  // `out`: a Hydration exit held by the peer's limiter (`chainId` is the peer).
+  // `in`: an arrival held by Hydration's own limiter (`chainId` is Hydration,
+  // `fromChainId` the source). Optional for older APIs, which only held exits.
+  direction?: 'in' | 'out'
+  fromChainId?: number
 }
 
 export interface WormholeTransferRow {
@@ -2644,6 +2777,8 @@ export interface WormholeTransferRow {
   extrinsicIndex: number | null
   timestamp: string
   sequence: string | null
+  // The token on the counterparty chain (Robinhood's own WETH, say).
+  counterpartyToken?: WormholeTokenRef | null
 }
 
 // One origin chain's custody reader. `configured` is whether the deployment has
@@ -2655,6 +2790,7 @@ export interface WormholeChainState {
   configured: boolean
   ok: boolean
   asOf: string | null
+  layer?: WormholeChainLayer | null
 }
 
 export interface WormholeBridgeDetail {
@@ -2671,6 +2807,8 @@ export interface WormholeBridgeDetail {
     surplusUsd: number | null
   }
   chains: WormholeChainState[]
+  // Every custody across every asset, Hydration's own included.
+  lockboxes?: WormholeLockboxRow[]
   scan: { configured: boolean; ok: boolean; asOf: string | null }
   hydrationChainId: number
   asOf: string | null
