@@ -13,7 +13,7 @@ import { AssetVolumeSection } from '../components/VolumeCharts'
 import { FilterZone, useFilters } from '../components/Filters'
 import { activityFilterFields } from '../components/activityFilters'
 import { PriceChart, ema7 } from '../components/PriceChart'
-import { ActivityTable } from '../components/ActivityTable'
+import { ActivityTable, ChainBadge, HydrationBadge } from '../components/ActivityTable'
 import { BellIcon } from '../components/NotifyButton'
 import type { AlertPreset } from '../components/NewAlertDialog'
 import { ASSET_ALERT_MIN_USD, assetRuleCount } from '../notificationKinds'
@@ -23,7 +23,7 @@ import { useSession } from '../session'
 import { requestConnect } from '../connectDialog'
 import { stashPendingNotification } from '../pendingNotification'
 import { offeredPages } from '../utils/activityPaging'
-import type { AssetListItem, NotificationKind, NotificationRuleInput } from '../types'
+import type { AssetListItem, NotificationKind, NotificationRuleInput, WormholeAssetBridge } from '../types'
 
 // The alert dialog is only reached by clicking one of the header's buttons, so it
 // costs this page nothing until then — the same lazy mount the notifications page
@@ -124,6 +124,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
               <div className="dt">Price</div><div className="dd mono"><PriceUsd v={a.price} /> <span style={{ color: chCol(a.change24h), marginLeft: 8 }}>{F.pct(a.change24h)}</span>{emaNow != null && <span className="mono ema-tag">EMA7 <PriceUsd v={emaNow} /></span>}</div>
               <div className="dt">Holders</div><div className="dd num">{F.int(data.holderCount)}</div>
               <div className="dt">TVL</div><div className="dd mono"><Usd v={data.totalUsd} /></div>
+              {data.bridge && <BridgeRow bridge={data.bridge} />}
               {/* Collateral seized from borrowers in the money market, over the
                   asset's full history. Present for every asset the market holds or
                   has held — a reserve that has never been liquidated reads $0. */}
@@ -362,3 +363,40 @@ function AssetAlertActions({ asset }: { asset: AssetListItem }) {
     </div>
   )
 }
+
+// A Wormhole NTT asset's origin, said as the chains that hold its custody —
+// "Ethereum + Robinhood (2 lockboxes)" — rather than as the one chain the
+// registry location names: every lockbox backs the supply, and a holder exiting
+// to a chain is paid out of that chain's lockbox alone. A peer that is not an
+// L1 carries its own risk, which is said in one line under it. A peer whose
+// role has not been read yet is named as such rather than left out.
+export function BridgeRow({ bridge }: { bridge: WormholeAssetBridge }) {
+  const lockboxes = bridge.peers.filter(p => p.role === 'lockbox')
+  const spokes = bridge.peers.filter(p => p.role === 'spoke')
+  const unread = bridge.peers.filter(p => p.role == null)
+  const native = bridge.hydrationRole === 'lockbox'
+  const boxes = native ? 1 + lockboxes.length : lockboxes.length
+  const notes = [...new Set(bridge.peers.map(p => p.riskNote).filter((n): n is string => !!n))]
+  return <>
+    <div className="dt">Origin</div>
+    <div className="dd asset-bridge">
+      <span className="asset-bridge-chains">
+        {native && <HydrationBadge />}
+        {lockboxes.map(p => <ChainBadge key={p.chainId} chain={p.chainName} />)}
+        <span>
+          {native
+            ? <>Native — locked on {['Hydration', ...lockboxes.map(p => p.chainName)].join(' + ')}</>
+            : lockboxes.length ? lockboxes.map(p => p.chainName).join(' + ') : bridge.primaryChainName}
+          {boxes > 1 && <span className="muted"> ({boxes} lockboxes)</span>}
+        </span>
+      </span>
+      <span className="muted asset-bridge-sub">
+        via Wormhole NTT{spokes.length > 0 && <> · minted on {spokes.map(p => p.chainName).join(' + ')}</>}
+        {unread.length > 0 && <> · also peered with {unread.map(p => p.chainName).join(' + ')} (not read yet)</>}
+        {' · '}<Link className="sec-inline-link" to={paths.security('wormhole')}>backing →</Link>
+      </span>
+      {notes.length > 0 && <span className="asset-bridge-risk">{notes.join('. ')}.</span>}
+    </div>
+  </>
+}
+

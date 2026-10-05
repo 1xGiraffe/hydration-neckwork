@@ -1,4 +1,4 @@
-import type { WormholeStatus } from '../types'
+import type { WormholeAssetRow, WormholeChangeOrigin, WormholeFuse, WormholePeerRow, WormholeStatus } from '../types'
 
 // Security-page pure helpers and the static reference tables the page renders
 // beside its live data. Kept out of the component module so the load scale and
@@ -125,6 +125,7 @@ const WORMHOLE_EXPLORERS: Record<number, { base: string; kind: string }> = {
   2: { base: 'https://etherscan.io/address/', kind: 'Etherscan' },
   21: { base: 'https://suivision.xyz/object/', kind: 'SuiVision' },
   30: { base: 'https://basescan.org/address/', kind: 'BaseScan' },
+  47: { base: 'https://hyperevmscan.io/address/', kind: 'HyperEVMScan' },
   72: { base: 'https://robinscan.io/address/', kind: 'Robinscan' },
 }
 export function wormholeExplorerLink(chainId: number, handle: string | null): { href: string; kind: string } | null {
@@ -143,3 +144,74 @@ export const SECURITY_LINKS = {
   bounty: 'https://immunefi.com/bug-bounty/hydration/',
   docs: 'https://docs.hydration.net/security/intro',
 }
+
+// ---- Wormhole multi-peer helpers ----
+
+// A peer's status, as its own chip. A lockbox's `ok` says it covers what the
+// transfers through Hydration put into it; a spoke's that its supply was read.
+export const WORMHOLE_PEER_STATUS: Record<WormholePeerRow['status'], { label: string; badge: string }> = {
+  ok: { label: 'OK', badge: 'ok' },
+  attention: { label: 'Attention', badge: 'pending' },
+  unverified: { label: 'Unverified', badge: 'pending' },
+  unconfigured: { label: 'No endpoint', badge: 'wh-quiet' },
+}
+
+// A chain on a fuse plate, where only a few characters fit.
+const CHAIN_SHORT: Record<number, string> = { 1: 'SOL', 2: 'ETH', 21: 'SUI', 30: 'BASE', 47: 'HL', 72: 'RH', 73: 'HDX' }
+export function chainShort(chainId: number, name: string): string {
+  return CHAIN_SHORT[chainId] ?? name.replace(/[^A-Za-z]/g, '').slice(0, 4).toUpperCase()
+}
+
+// Every chain of an asset that holds custody, Hydration first when it is one.
+// An API from before the multi-peer model has no `peers`: its single origin is
+// then the one lockbox, exactly as the row always meant.
+export function lockboxChains(row: WormholeAssetRow, hydrationChainId: number): { chainId: number; name: string }[] {
+  const peers = row.peers ?? []
+  if (!peers.length) return row.hydrationRole === 'lockbox' ? [{ chainId: hydrationChainId, name: 'Hydration' }] : [{ chainId: row.originChainId, name: row.originChainName }]
+  const out = peers.filter(p => p.role === 'lockbox').map(p => ({ chainId: p.chainId, name: p.chainName }))
+  return row.hydrationRole === 'lockbox' ? [{ chainId: hydrationChainId, name: 'Hydration' }, ...out] : out
+}
+
+// "Ethereum + Robinhood" — the backing, said as the chains that hold it.
+export function joinChains(names: readonly string[]): string {
+  return names.length ? names.join(' + ') : '—'
+}
+
+// Who made a peer change, in a few words.
+export function changeOriginLabel(origin: WormholeChangeOrigin): string {
+  if (origin.kind === 'technical-committee') return origin.motionIndex != null ? `TC motion #${origin.motionIndex}` : 'Technical Committee'
+  if (origin.kind === 'account') return `${origin.account.slice(0, 6)}…${origin.account.slice(-4)}`
+  if (origin.kind === 'scheduled') return 'scheduled dispatch'
+  return 'unknown origin'
+}
+
+/**
+ * One direction of the traffic between Hydration and a peer, as the two
+ * limiters it has to clear: entering Hydration it leaves the peer (the peer's
+ * OUTBOUND leg) and arrives here (Hydration's INBOUND leg for that chain);
+ * leaving, the reverse. The tile draws whichever has less left — the one that
+ * binds — and the tooltip states both.
+ */
+export interface PeerFuseLeg {
+  dir: 'in' | 'out'
+  peerSide: WormholeFuse | null
+  hydrationSide: WormholeFuse | null
+  binding: WormholeFuse | null
+  bindingSide: 'peer' | 'hydration' | null
+}
+export function peerFuseLeg(peer: Pick<WormholePeerRow, 'limits'>, dir: 'in' | 'out'): PeerFuseLeg {
+  const peerSide = (dir === 'in' ? peer.limits?.peerOut : peer.limits?.peerIn) ?? null
+  const hydrationSide = (dir === 'in' ? peer.limits?.hydrationIn : peer.limits?.hydrationOut) ?? null
+  // Less headroom binds; on a tie the peer's leg is named, since that is the
+  // one a transfer meets first entering Hydration and last leaving it.
+  const left = (f: WormholeFuse) => BigInt(f.capacity)
+  // Either side unread leaves the whole leg unread: the side that was read
+  // alone would claim a headroom the other may not allow.
+  const binding = peerSide == null || hydrationSide == null ? null
+    : left(hydrationSide) < left(peerSide) ? hydrationSide : peerSide
+  return { dir, peerSide, hydrationSide, binding, bindingSide: binding == null ? null : binding === peerSide ? 'peer' : 'hydration' }
+}
+
+// Hydration's own legs used to be uncapped everywhere (the u64 trimmed
+// ceiling, 184,467,440,737 tokens). A leg below this is a real limit someone set.
+export const HYDRATION_UNCAPPED_TOKENS = 1e11

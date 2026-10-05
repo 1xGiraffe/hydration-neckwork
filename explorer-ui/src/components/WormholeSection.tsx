@@ -1,20 +1,28 @@
 import type { ReactNode } from 'react'
 import { Link, paths } from '../router'
-import { AddrPill, Usd, Amt, Ago, AssetChip, ChartSkeleton, Copy, Dash, EmptyRow, F, MomentLink, TableSkeleton, assetBrandColor, compactAmount } from './ui'
+import { AddrPill, Usd, Amt, Ago, AssetChip, ChartSkeleton, Copy, Dash, EmptyRow, F, LoadError, MomentLink, TableSkeleton, assetBrandColor } from './ui'
 import { DashboardSectionTitle as SecTitle } from './DashboardPrimitives'
 import { useWormholeBridge } from '../hooks/useExplorerData'
-import { WORMHOLE_STATUS, fmtDuration, fmtPct, loadColor, wormholeExplorerLink, wormholescanLink } from '../utils/security'
+import {
+  HYDRATION_UNCAPPED_TOKENS, WORMHOLE_PEER_STATUS, WORMHOLE_STATUS, changeOriginLabel, chainShort, fmtDuration, fmtPct,
+  joinChains, loadColor, lockboxChains, peerFuseLeg, wormholeExplorerLink, wormholescanLink, type PeerFuseLeg,
+} from '../utils/security'
 import { parseUtcTimestamp } from '../utils/time'
+import { ChainBadge, HydrationBadge } from './ActivityTable'
 import type {
-  AssetRef, WormholeAssetRow, WormholeBridgeDetail, WormholeFuse, WormholeInflightOp, WormholeQueuedRelease,
+  AssetRef, WormholeAssetRow, WormholeBridgeDetail, WormholeFuse, WormholeInflightOp, WormholePeerRow, WormholeQueuedRelease,
   WormholeTransferRow,
 } from '../types'
 
-// Security → Wormhole: does every Wormhole token minted on Hydration still have
-// custody behind it on its origin chain?
+// Security → Wormhole: does every Wormhole token still have custody behind it?
 //
-// One equation per asset, in raw units at the asset's own decimals:
-//   locked = issuance + inflightIn + inflightOut + queued + residual
+// An NTT asset is one token over several chains. Each chain's manager either
+// LOCKS the real token (a lockbox) or MINTS a representation (a spoke), and
+// Hydration is one of those chains — WETH is minted here against lockboxes on
+// Ethereum and Robinhood, HDX is locked here against a Robinhood
+// spoke. One equation per asset, in raw units at the asset's own decimals:
+//   Σ lockbox custody (`locked`) = Σ spoke supply (`issuance`) + inflightIn
+//                                  + inflightOut + queued + residual
 // A positive residual is spare custody — the state the migration that seeded
 // the origin managers left behind, and harmless. A negative residual is supply
 // without backing, which is the whole reason this page exists.
@@ -110,12 +118,23 @@ function BackingBeam({ row }: { row: WormholeAssetRow }) {
   const beam = beamOf(row)
   const meta = WORMHOLE_STATUS[row.status]
   const amt = (raw: string | null) => raw == null ? '—' : F.exact(raw, row.decimals)
+  const peers = row.peers ?? []
+  // Every chain of the asset, on the side of the equation it sits: Hydration's
+  // own leg first, then each peer.
+  const sideLines = peers.length
+    ? [
+      row.hydrationRole === 'lockbox'
+        ? `Locked on Hydration  ${amt(row.hydrationLocked ?? null)}`
+        : `Minted on Hydration  ${amt(row.hydrationRole === 'spoke' ? (BigInt(row.issuance ?? '0') - peers.filter(p => p.role === 'spoke').reduce((t, p) => t + BigInt(p.balance ?? '0'), 0n)).toString() : row.issuance)}`,
+      ...peers.map(p => `${p.role === 'spoke' ? 'Minted' : 'Locked'} on ${p.chainName}  ${p.configured ? amt(p.balance) : 'no endpoint'}`),
+    ]
+    : [`Minted on Hydration  ${amt(row.issuance)}`, `Locked on ${row.originChainName}  ${amt(row.locked)}`]
   // The exact numbers live in the tooltip; the beam itself carries the shape.
   const title = [
     `${row.symbol} · asset ${row.assetId}`,
-    `Minted on Hydration  ${amt(row.issuance)}`,
+    ...sideLines,
     row.burned == null || row.burned === '0' ? '' : `Burned at the dead address  ${amt(row.burned)} (needs no custody)`,
-    `Locked on ${row.originChainName}  ${amt(row.locked)}`,
+    peers.length > 1 || row.hydrationRole === 'lockbox' ? `Locked in total  ${amt(row.locked)} · minted in total  ${amt(row.issuance)}` : '',
     row.inflightCount == null
       ? 'In flight  unchecked'
       : `In flight  ${amt(row.inflightIn)} in · ${amt(row.inflightOut)} out`,
@@ -231,9 +250,9 @@ function BeamBoard({ d }: { d: WormholeBridgeDetail }) {
         <span><i className="wh-key spare" />spare custody</span>
       </div>
       <div className="hdx-note" style={{ marginTop: 12 }}>
-        Each beam compares one asset against itself: the bar is what Hydration has minted plus what is
-        still moving, and the tick is what its origin chain holds in custody. A tick at the end of the
-        bar means every token is backed; a tick short of it is the state this page exists to catch.
+        Each beam compares one asset against itself: the bar is the supply minted on every chain plus what
+        is still moving, and the tick is what every lockbox holds in custody together. A tick at the end
+        of the bar means every token is backed; a tick short of it is the state this page exists to catch.
       </div>
     </div>
   )
@@ -247,10 +266,11 @@ function BeamBoard({ d }: { d: WormholeBridgeDetail }) {
 // refused. So the legs are drawn with the Security page's own fuse tiles — a
 // reader who has learned one board has already learned this one.
 //
-// The two boards below are the origin chain's legs, because those are where the
-// real limits live: Hydration's own managers are configured so high that they
-// can never be the binding constraint, which the note under the grids states
-// from the numbers rather than as a claim.
+// One tile per asset, per PEER CHAIN, per direction: WETH crosses to Ethereum
+// and to Robinhood through different limiters (10,000 vs 69 a day), so a
+// single per-asset tile could only ever state one of them. Each direction has
+// to clear two limiters — the peer manager's and Hydration's own for that
+// chain — and the tile draws whichever binds; the tooltip states both.
 
 type FuseDirection = 'in' | 'out'
 const FUSE_DIR: Record<FuseDirection, { title: string; noun: string }> = {
@@ -258,21 +278,76 @@ const FUSE_DIR: Record<FuseDirection, { title: string; noun: string }> = {
   out: { title: 'Out of Hydration — release leg', noun: 'exit' },
 }
 
-// Everything about one leg, in the tooltip: the two exact figures, what the
-// percentage means, and what actually happens to a transfer that does not fit.
-function fuseTitle(row: WormholeAssetRow, fuse: WormholeFuse | null, dir: FuseDirection, now: number): string {
-  const head = `${row.symbol} · ${FUSE_DIR[dir].noun} fuse on ${row.originChainName}`
-  if (!fuse) {
-    return [head, `${row.originChainName} is not configured on this deployment, so its rate limiter could not be read`,
+// One tile's subject: an asset, one of its peer chains, one direction.
+interface FuseLegView {
+  row: WormholeAssetRow
+  chainId: number
+  chainName: string
+  /** Whether the plate must name the chain (the asset has more than one peer). */
+  multi: boolean
+  paused: boolean
+  leg: PeerFuseLeg
+}
+
+// Every tile of the board, from the per-peer limits. An API from before the
+// multi-peer model carries only the primary origin's block, which is read as
+// that one chain's legs.
+function fuseLegs(rows: readonly WormholeAssetRow[], dir: FuseDirection): FuseLegView[] {
+  const out: FuseLegView[] = []
+  for (const row of rows) {
+    const peers = row.peers ?? []
+    if (!peers.length) {
+      const l = row.limits
+      const peerSide = (dir === 'in' ? l?.in : l?.out) ?? null
+      out.push({
+        row, chainId: row.originChainId, chainName: row.originChainName, multi: false, paused: row.pausedOrigin === true,
+        leg: { dir, peerSide, hydrationSide: (dir === 'in' ? l?.localIn : l?.localOut) ?? null, binding: peerSide, bindingSide: peerSide ? 'peer' : null },
+      })
+      continue
+    }
+    for (const peer of peers) {
+      out.push({
+        row, chainId: peer.chainId, chainName: peer.chainName, multi: peers.length > 1, paused: peer.paused === true,
+        leg: peerFuseLeg(peer, dir),
+      })
+    }
+  }
+  return out
+}
+
+const legKey = (l: FuseLegView) => `${l.row.assetId}:${l.chainId}:${l.leg.dir}`
+
+// Everything about one leg, in the tooltip: both limiters' exact figures, what
+// the percentage means, and what actually happens to a transfer that does not fit.
+function fuseTitle(view: FuseLegView, now: number): string {
+  const { row, leg, chainName } = view
+  const head = `${row.symbol} · ${FUSE_DIR[leg.dir].noun} fuse ${leg.dir === 'in' ? `from ${chainName}` : `to ${chainName}`}`
+  if (!leg.binding) {
+    const unread = leg.peerSide != null ? 'Hydration\'s own rate limiter for this leg' : `${chainName}'s rate limiter`
+    return [head, `${unread} could not be read on this deployment`,
       'A limit nobody could read is not a limit of zero.'].join('\n')
   }
+  const describe = (fuse: WormholeFuse | null, who: string) => {
+    if (!fuse) return `${who}: unread`
+    const span = fmtDuration(fuse.durationSec * 1000)
+    const uncapped = F.num(fuse.limit, row.decimals) >= HYDRATION_UNCAPPED_TOKENS
+    return uncapped
+      ? `${who}: uncapped`
+      : `${who}: ${F.exact(fuse.capacity, row.decimals)} of ${F.exact(fuse.limit, row.decimals)} ${row.symbol} per ${span} left · ${fmtPct(fuse.utilizationPct)} consumed`
+  }
+  const fuse = leg.binding
   const span = fmtDuration(fuse.durationSec * 1000)
   const ago = fuse.lastConsumedAt == null ? null : now - parseUtcTimestamp(fuse.lastConsumedAt)
+  const peerWho = `${chainName} manager (${leg.dir === 'in' ? 'outbound' : 'inbound'})`
+  const hydrationWho = `Hydration manager (${leg.dir === 'in' ? `inbound from ${chainName}` : 'outbound, every chain'})`
+  const other = leg.bindingSide === 'hydration' ? describe(leg.peerSide, peerWho) : describe(leg.hydrationSide, hydrationWho)
   return [
     head,
-    row.pausedOrigin === true ? 'The origin manager is paused — every transfer is refused until it resumes' : '',
+    view.paused ? `The ${chainName} manager is paused — every transfer is refused until it resumes` : '',
     `Limit ${F.exact(fuse.limit, row.decimals)} ${row.symbol} per ${span}`,
     `Available now ${F.exact(fuse.capacity, row.decimals)} ${row.symbol} · ${fmtPct(fuse.utilizationPct)} consumed`,
+    `Binding: the ${leg.bindingSide === 'hydration' ? hydrationWho : peerWho} leg`,
+    `Other side — ${other}`,
     `Refills fully over ${span}`,
     `A transfer beyond the available headroom is held for ${span}, not lost`,
     ago == null ? 'Never consumed' : ago > 0 ? `Last consumed ${fmtDuration(ago)} ago` : 'Last consumed just now',
@@ -281,32 +356,38 @@ function fuseTitle(row: WormholeAssetRow, fuse: WormholeFuse | null, dir: FuseDi
 
 // One leg's gauge, in the Security page's own tile: the body fills from the
 // bottom with the share of the window's allowance already spent, and the plate
-// underneath names the asset. An unread origin renders dormant — never at 0%,
-// which would read as a limiter nothing has touched.
-function FuseTile({ row, fuse, dir, now, plateDir }: {
-  row: WormholeAssetRow; fuse: WormholeFuse | null; dir: FuseDirection; now: number
+// underneath names the asset (and the chain, where the asset has several). An
+// unread leg renders dormant — never at 0%, which would read as a limiter
+// nothing has touched.
+function FuseTile({ view, now, plateDir }: {
+  view: FuseLegView; now: number
   // On the Security overview the two directions share one grid, so the plate
   // names the leg; the detail page's grids are split by direction and don't.
   plateDir?: boolean
 }) {
-  // A paused origin manager is this board's "locked": the limiter's headroom is
+  const { row, leg } = view
+  const fuse = leg.binding
+  // A paused peer manager is this board's "locked": the limiter's headroom is
   // moot while every transfer is refused, so the tile reads full and red, the
   // same way a locked deposit fuse does.
-  const locked = fuse != null && row.pausedOrigin === true
+  const locked = fuse != null && view.paused
   const pct = locked ? 100 : fuse == null ? 0 : Math.min(100, Math.max(0, fuse.utilizationPct))
   // Below ~2% a proportional fill is a sub-pixel sliver, so any real usage keeps
   // a visible floor; the tooltip stays exact either way.
   const fillPct = pct > 0 ? Math.max(pct, 3) : 0
+  const chain = view.multi ? chainShort(view.chainId, view.chainName) : null
+  const plate = [row.symbol, chain, plateDir ? leg.dir : null].filter(Boolean).join(' ')
+  const subject = `${row.symbol} ${FUSE_DIR[leg.dir].noun} rate limit ${leg.dir === 'in' ? 'from' : 'to'} ${view.chainName}`
   return (
     <Link
       to={paths.asset(Number(row.assetId))}
       className={`fuse${fuse == null ? ' dormant' : ''}${locked ? ' locked' : ''}`}
-      title={fuseTitle(row, fuse, dir, now)}
+      title={fuseTitle(view, now)}
       ariaLabel={fuse == null
-        ? `${row.symbol} ${FUSE_DIR[dir].noun} rate limit, not configured`
+        ? `${subject}, not configured`
         : locked
-          ? `${row.symbol} ${FUSE_DIR[dir].noun} rate limit, origin manager paused`
-          : `${row.symbol} ${FUSE_DIR[dir].noun} rate limit, ${fmtPct(fuse.utilizationPct)} consumed`}
+          ? `${subject}, ${view.chainName} manager paused`
+          : `${subject}, ${fmtPct(fuse.utilizationPct)} consumed`}
     >
       <span className="fuse-body" style={{ color: locked ? 'var(--red)' : loadColor(pct) }}>
         <span className="fuse-fill" style={{ height: `${fillPct}%` }} />
@@ -315,49 +396,39 @@ function FuseTile({ row, fuse, dir, now, plateDir }: {
             no number — its 100 is a verdict, not a utilization. */}
         {!locked && pct >= 4 && <span className={`fuse-pct${fillPct >= 70 ? ' on-fill' : ''}`}>{Math.round(pct)}</span>}
       </span>
-      <span className="fuse-plate">{plateDir ? `${row.symbol} ${dir}` : row.symbol}</span>
+      <span className="fuse-plate">{plate}</span>
     </Link>
   )
 }
 
-// The Security overview's Wormhole strip: only the origin fuses currently
-// carrying load, in the same instrument language as the deposit-fuse board
-// above it. A quiet bridge renders nothing — the overview stays an exception
-// report, and the full boards live on the detail page.
+// The Security overview's Wormhole strip: only the legs currently carrying
+// load, in the same instrument language as the deposit-fuse board above it. A
+// quiet bridge renders nothing — the overview stays an exception report, and
+// the full boards live on the detail page.
 export function WormholeFuseStrip({ now }: { now: number }) {
   const { data: d } = useWormholeBridge()
   if (!d) return null
-  const legs: { row: WormholeAssetRow; fuse: WormholeFuse; dir: FuseDirection }[] = []
-  let readable = 0
-  for (const row of d.assets) {
-    for (const dir of ['in', 'out'] as const) {
-      const fuse = fuseOf(row, dir)
-      if (!fuse) continue
-      readable += 1
-      // A paused origin manager belongs on the strip even at 0% — its fuse is
-      // locked, which is the loudest state the board has.
-      if (fuse.utilizationPct > 0 || row.pausedOrigin === true) legs.push({ row, fuse, dir })
-    }
-  }
+  const all = [...fuseLegs(d.assets, 'in'), ...fuseLegs(d.assets, 'out')].filter(l => l.leg.binding != null)
+  // A paused manager belongs on the strip even at 0% — its fuse is locked,
+  // which is the loudest state the board has.
+  const legs = all.filter(l => (l.leg.binding?.utilizationPct ?? 0) > 0 || l.paused)
   if (!legs.length) return null
-  const rank = (l: typeof legs[number]) => l.row.pausedOrigin === true ? 101 : l.fuse.utilizationPct
+  const rank = (l: FuseLegView) => l.paused ? 101 : l.leg.binding?.utilizationPct ?? 0
   legs.sort((a, b) => rank(b) - rank(a))
-  const span = fmtDuration(legs[0].fuse.durationSec * 1000)
+  const span = fmtDuration((legs[0].leg.binding?.durationSec ?? 0) * 1000)
   return (
     <>
       <SecTitle title="Wormhole rate limits"
-        subtitle={legs.some(l => l.row.pausedOrigin === true)
-          ? `showing the ${legs.length} of ${readable} origin fuses carrying load or locked · ${span} rolling window`
-          : `showing the ${legs.length} carrying load of ${readable} origin fuses · ${span} rolling window`} />
+        subtitle={legs.some(l => l.paused)
+          ? `showing the ${legs.length} of ${all.length} fuses carrying load or locked · ${span} rolling window`
+          : `showing the ${legs.length} carrying load of ${all.length} fuses · ${span} rolling window`} />
       <div className="pf-card">
         <div className="fuse-grid">
-          {legs.map(l => (
-            <FuseTile key={`${l.row.assetId}:${l.dir}`} row={l.row} fuse={l.fuse} dir={l.dir} now={now} plateDir />
-          ))}
+          {legs.map(l => <FuseTile key={legKey(l)} view={l} now={now} plateDir />)}
         </div>
         <div className="hdx-note" style={{ marginTop: 12 }}>
-          Each bridged asset's origin chain caps how fast value can enter or leave, and a transfer
-          beyond the headroom is held for {span}, not lost.{' '}
+          Every chain a bridged asset reaches caps how fast value can enter or leave Hydration through it, and a
+          transfer beyond the headroom is held for {span}, not lost.{' '}
           <Link className="sec-inline-link" to={paths.security('wormhole')}>See the Wormhole detail →</Link>
         </div>
       </div>
@@ -365,51 +436,37 @@ export function WormholeFuseStrip({ now }: { now: number }) {
   )
 }
 
-function fuseOf(row: WormholeAssetRow, dir: FuseDirection): WormholeFuse | null {
-  const limits = row.limits ?? null
-  if (!limits) return null
-  return (dir === 'in' ? limits.in : limits.out) ?? null
-}
-
 // What the grids can say about themselves, read off the rows rather than
 // assumed: the window every limiter shares, the hottest leg on the board, and
-// how much higher Hydration's own legs are set than the origin's.
+// which legs Hydration's own manager caps (it used to cap none).
 interface FuseFacts {
   readable: boolean
   windowSec: number
-  hottest: { symbol: string; dir: FuseDirection; pct: number } | null
-  // The smallest allowance Hydration's own managers hold, and the least any of
-  // them exceeds the origin limit on the SAME asset by.
-  localFloor: { row: WormholeAssetRow; fuse: WormholeFuse } | null
-  localRatio: number | null
+  hottest: { view: FuseLegView; pct: number } | null
+  // Legs where Hydration's own limit is finite — one list entry per asset and chain.
+  hydrationCaps: { row: WormholeAssetRow; chainName: string; fuse: WormholeFuse; dir: FuseDirection }[]
 }
 function fuseFacts(rows: WormholeAssetRow[]): FuseFacts {
-  const origin: { row: WormholeAssetRow; fuse: WormholeFuse; dir: FuseDirection }[] = []
-  const local: { row: WormholeAssetRow; fuse: WormholeFuse }[] = []
-  for (const row of rows) {
-    for (const dir of ['in', 'out'] as const) {
-      const fuse = fuseOf(row, dir)
-      if (fuse) origin.push({ row, fuse, dir })
-    }
-    for (const fuse of [row.limits?.localOut, row.limits?.localIn]) if (fuse) local.push({ row, fuse })
-  }
-  const hottest = origin.filter(f => f.fuse.utilizationPct > 0)
-    .sort((a, b) => b.fuse.utilizationPct - a.fuse.utilizationPct)[0]
-  const tokens = (row: WormholeAssetRow, fuse: WormholeFuse) => F.num(fuse.limit, row.decimals)
-  const localFloor = local.slice().sort((a, b) => tokens(a.row, a.fuse) - tokens(b.row, b.fuse))[0] ?? null
-  // Per asset, because the comparison only means anything between two limits on
-  // the same token: how many times over the local leg covers the origin's.
-  const ratios: number[] = []
-  for (const { row, fuse } of local) {
-    const peer = origin.filter(o => o.row.assetId === row.assetId).map(o => tokens(o.row, o.fuse)).filter(v => v > 0)
-    if (peer.length) ratios.push(tokens(row, fuse) / Math.max(...peer))
+  const views = [...fuseLegs(rows, 'in'), ...fuseLegs(rows, 'out')]
+  const read = views.filter(v => v.leg.binding != null)
+  const hottest = read.filter(v => (v.leg.binding?.utilizationPct ?? 0) > 0)
+    .sort((a, b) => (b.leg.binding!.utilizationPct) - (a.leg.binding!.utilizationPct))[0]
+  const caps: FuseFacts['hydrationCaps'] = []
+  const seen = new Set<string>()
+  for (const v of views) {
+    const fuse = v.leg.hydrationSide
+    if (!fuse || F.num(fuse.limit, v.row.decimals) >= HYDRATION_UNCAPPED_TOKENS) continue
+    // Hydration's outbound leg is one limit for every chain: said once.
+    const key = v.leg.dir === 'out' ? `${v.row.assetId}:out` : `${v.row.assetId}:${v.chainId}:in`
+    if (seen.has(key)) continue
+    seen.add(key)
+    caps.push({ row: v.row, chainName: v.chainName, fuse, dir: v.leg.dir })
   }
   return {
-    readable: origin.length > 0,
-    windowSec: origin[0]?.fuse.durationSec ?? local[0]?.fuse.durationSec ?? 0,
-    hottest: hottest ? { symbol: hottest.row.symbol, dir: hottest.dir, pct: hottest.fuse.utilizationPct } : null,
-    localFloor,
-    localRatio: ratios.length ? Math.min(...ratios) : null,
+    readable: read.length > 0,
+    windowSec: read[0]?.leg.binding?.durationSec ?? 0,
+    hottest: hottest ? { view: hottest, pct: hottest.leg.binding!.utilizationPct } : null,
+    hydrationCaps: caps,
   }
 }
 
@@ -417,7 +474,9 @@ function fuseFacts(rows: WormholeAssetRow[]): FuseFacts {
 // whether any limiter on the board is doing anything at all.
 function hottestFuseText(facts: Pick<FuseFacts, 'hottest'>): string | null {
   const h = facts.hottest
-  return h ? `${h.symbol} ${FUSE_DIR[h.dir].noun} fuse at ${fmtPct(h.pct, 1)}` : null
+  if (!h) return null
+  const chain = h.view.multi ? ` ${h.view.leg.dir === 'in' ? 'from' : 'to'} ${h.view.chainName}` : ''
+  return `${h.view.row.symbol}${chain} ${FUSE_DIR[h.view.leg.dir].noun} fuse at ${fmtPct(h.pct, 1)}`
 }
 
 function RateLimits({ d, facts, now }: { d: WormholeBridgeDetail; facts: FuseFacts; now: number }) {
@@ -428,24 +487,184 @@ function RateLimits({ d, facts, now }: { d: WormholeBridgeDetail; facts: FuseFac
         <div key={dir}>
           <div className="sec-sub">{FUSE_DIR[dir].title}</div>
           <div className="fuse-grid">
-            {d.assets.map(row => <FuseTile key={row.assetId} row={row} fuse={fuseOf(row, dir)} dir={dir} now={now} />)}
+            {fuseLegs(d.assets, dir).map(view => <FuseTile key={legKey(view)} view={view} now={now} />)}
           </div>
         </div>
       ))}
       {/* No legend: the deposit-fuse board above already teaches the colour
           scale, and these tiles speak it identically (locked = paused manager). */}
       <div className="hdx-note" style={{ marginTop: 12 }}>
-        {facts.localFloor && facts.localRatio != null && (
-          <>
-            Hydration's own managers are set at least {compactAmount(facts.localRatio)}× above the origin limit on the
-            same asset — the smallest of them still allows <Amt raw={facts.localFloor.fuse.limit} dec={facts.localFloor.row.decimals} />
-            {' '}{facts.localFloor.row.symbol} per {span} — so the origin chain's limiter is the only fuse that can bind.{' '}
-          </>
-        )}
+        Each tile is one asset on one chain; where an asset reaches several chains the plate names the chain.
+        A transfer has to clear the far chain's limiter and Hydration's own for that chain, and the tile draws whichever has less left.{' '}
+        {facts.hydrationCaps.length
+          ? <>Hydration's own manager caps {facts.hydrationCaps.map((c, i) => (
+            <span key={`${c.row.assetId}:${c.chainName}:${c.dir}`}>
+              {i > 0 && (i === facts.hydrationCaps.length - 1 ? ' and ' : ', ')}
+              {c.row.symbol} {c.dir === 'in' ? `from ${c.chainName}` : 'out'} at <Amt raw={c.fuse.limit} dec={c.row.decimals} /> per {fmtDuration(c.fuse.durationSec * 1000)}
+            </span>
+          ))}; every other Hydration leg is uncapped.{' '}</>
+          : <>Hydration's own managers are uncapped, so the far chains' limiters are the only fuses that can bind.{' '}</>}
         A transfer larger than the headroom left is held for {span} rather than lost: inbound always, and outbound when the
         sender asked to be queued instead of reverted.
       </div>
     </div>
+  )
+}
+
+/* ---------- lockboxes & peers ---------- */
+
+// Who holds what, chain by chain. A lockbox is custody — what a holder can
+// still be paid out of on that chain — and a spoke is supply minted against
+// custody elsewhere. The payout figure is a lockbox's own balance less the
+// exits already burned toward it; where the far chain's limiter lets more
+// through per window than the lockbox holds, the column says so plainly: a
+// small lockbox is a fact about where the backing sits, not a fault.
+
+function PeerChain({ peer }: { peer: WormholePeerRow }) {
+  const custody = wormholeExplorerLink(peer.chainId, peer.manager)
+  return (
+    <span className="wh-peer-chain">
+      <ChainBadge chain={peer.chainName} />
+      <span className={`wh-role ${peer.role ?? 'unknown'}`} title={peer.mode ? `${peer.chainName} manager mode: ${peer.mode}` : 'mode unread'}>
+        {peer.role === 'lockbox' ? 'lockbox' : peer.role === 'spoke' ? 'mints' : '—'}
+      </span>
+      {peer.primary && <span className="wh-tag" title="The asset's registered origin">origin</span>}
+      {peer.layer && peer.layer !== 'l1' && peer.riskNote && <span className="wh-tag warn" title={peer.riskNote}>{peer.layer === 'l2' ? 'L2' : 'own chain'}</span>}
+      {custody && <a className="wh-out mono" href={custody.href} target="_blank" rel="noreferrer noopener" title={`${peer.chainName} NTT manager ${peer.manager} on ${custody.kind}`}>manager ↗</a>}
+    </span>
+  )
+}
+
+function PeerToken({ peer }: { peer: WormholePeerRow }) {
+  const t = peer.token
+  if (!t) return <Dash />
+  const link = peer.family === 'evm' ? wormholeExplorerLink(peer.chainId, t.address) : null
+  return (
+    <span className="wh-token" title={`${t.name ?? t.symbol ?? 'token'} on ${peer.chainName}\n${t.address}`}>
+      {t.symbol && <span className="wh-token-sym">{t.symbol}</span>}
+      {link
+        ? <a className="hash mono wh-mgr" href={link.href} target="_blank" rel="noreferrer noopener">{F.shortAddr(t.address)} ↗</a>
+        : <span className="mono muted wh-mgr">{F.shortAddr(t.address)}</span>}
+    </span>
+  )
+}
+
+// The two limits that bind each direction, short; every leg in the tooltip.
+function PeerLimits({ row, peer }: { row: WormholeAssetRow; peer: WormholePeerRow }) {
+  if (!peer.limits) return <Dash />
+  const both = (['in', 'out'] as const).map(dir => ({ dir, leg: peerFuseLeg(peer, dir) }))
+  const said = (fuse: WormholeFuse | null) => fuse == null ? 'unread'
+    : F.num(fuse.limit, row.decimals) >= HYDRATION_UNCAPPED_TOKENS ? 'uncapped'
+      : `${F.exact(fuse.capacity, row.decimals)} of ${F.exact(fuse.limit, row.decimals)} left`
+  const title = [
+    `${row.symbol} between Hydration and ${peer.chainName}, per ${fmtDuration((both[0].leg.binding?.durationSec ?? 86_400) * 1000)}`,
+    `${peer.chainName} outbound (into Hydration): ${said(peer.limits.peerOut)}`,
+    `Hydration inbound from ${peer.chainName}: ${said(peer.limits.hydrationIn)}`,
+    `Hydration outbound (every chain): ${said(peer.limits.hydrationOut)}`,
+    `${peer.chainName} inbound from Hydration (release leg): ${said(peer.limits.peerIn)}`,
+  ].join('\n')
+  return (
+    <span className="wh-limits" title={title}>
+      {both.map(({ dir, leg }) => (
+        <span key={dir} className="wh-limit">
+          <span className="muted">{dir}</span>{' '}
+          {leg.binding == null ? <Dash />
+            : F.num(leg.binding.limit, row.decimals) >= HYDRATION_UNCAPPED_TOKENS ? <span className="muted">uncapped</span>
+              : <span className="mono"><Amt raw={leg.binding.limit} dec={row.decimals} /></span>}
+        </span>
+      ))}
+    </span>
+  )
+}
+
+function PeersTable({ d, now }: { d: WormholeBridgeDetail; now: number }) {
+  const rows = d.assets.flatMap(row => (row.peers ?? []).map(peer => ({ row, peer })))
+  // Hydration's own custody, where Hydration is the lockbox, is a row too: it
+  // is the only thing backing the supply minted on its peers.
+  const hydrationLockboxes = d.assets.filter(r => r.hydrationRole === 'lockbox')
+  const riskNotes = [...new Map(rows.filter(r => r.peer.riskNote).map(r => [r.peer.chainId, r.peer])).values()]
+  return (
+    <>
+      <div className="panel">
+        <table className="tbl sec-tbl wh-peers">
+          <thead>
+            <tr>
+              <th>Asset</th><th>Chain</th><th>Token there</th><th className="r">Holds</th>
+              <th className="r">Limits / 24 h</th><th className="r">Can pay out</th><th>Peer since</th><th className="r">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {!rows.length && !hydrationLockboxes.length ? <EmptyRow cols={8}>No peer chain could be read</EmptyRow> : <>
+              {hydrationLockboxes.map(r => (
+                <tr key={`${r.assetId}:hydration`}>
+                  <td data-label="Asset"><AssetChip asset={assetRef(r)} /></td>
+                  <td data-label="Chain"><span className="wh-peer-chain"><HydrationBadge /><span className="wh-role lockbox">lockbox</span><span className="wh-tag" title="The token is native to Hydration">origin</span></span></td>
+                  <td data-label="Token there">
+                    <span className="wh-token"><span className="wh-token-sym">{r.symbol}</span>
+                      {r.hydrationToken && <Link className="hash mono wh-mgr" to={paths.account(r.manager)} title={`Locked by Hydration's NTT manager ${r.manager}`}>{F.shortAddr(r.manager)}</Link>}
+                    </span>
+                  </td>
+                  <td data-label="Holds" className={`r${r.hydrationLocked == null ? ' cell-empty' : ''}`}>
+                    {r.hydrationLocked == null ? <Dash /> : <span className="mono"><Amt raw={r.hydrationLocked} dec={r.decimals} /></span>}
+                  </td>
+                  <td data-label="Limits / 24 h" className="r"><Dash /></td>
+                  <td data-label="Can pay out" className="r muted">backs every spoke</td>
+                  <td data-label="Peer since"><Dash /></td>
+                  <td data-label="Status" className="r"><span className={`badge ${WORMHOLE_STATUS[r.status].badge}`} title={r.statusDetail}>{WORMHOLE_STATUS[r.status].label}</span></td>
+                </tr>
+              ))}
+              {rows.map(({ row, peer }) => {
+                const meta = WORMHOLE_PEER_STATUS[peer.status]
+                const payout = peer.payout
+                return (
+                  <tr key={`${row.assetId}:${peer.chainId}`} className={peer.status === 'unconfigured' ? 'dim' : undefined}>
+                    <td data-label="Asset"><AssetChip asset={assetRef(row)} /></td>
+                    <td data-label="Chain"><PeerChain peer={peer} /></td>
+                    <td data-label="Token there"><PeerToken peer={peer} /></td>
+                    <td data-label="Holds" className={`r${peer.balance == null ? ' cell-empty' : ''}`}>
+                      {peer.balance == null ? <Dash /> : <>
+                        <span className="mono"><Amt raw={peer.balance} dec={row.decimals} /></span>
+                        <span className="muted mono sec-usd">{peer.role === 'spoke' ? 'minted' : peer.balanceUsd != null ? <Usd v={peer.balanceUsd} /> : 'locked'}</span>
+                      </>}
+                    </td>
+                    <td data-label="Limits / 24 h" className="r"><PeerLimits row={row} peer={peer} /></td>
+                    <td data-label="Can pay out" className={`r${payout?.capacity == null ? ' cell-empty' : ''}`}
+                        title={payout?.baseline != null && BigInt(payout.baseline) !== 0n
+                          ? `${F.exact(payout.baseline, row.decimals)} ${row.symbol} of it was funded outside Wormhole (custody the transfers through Hydration do not explain)`
+                          : undefined}>
+                      {payout?.capacity == null ? <Dash /> : <>
+                        <span className="mono"><Amt raw={payout.capacity} dec={row.decimals} /></span>
+                        {payout.coversPotential === false && payout.potential != null && (
+                          <span className="muted mono sec-usd">of up to <Amt raw={payout.potential} dec={row.decimals} /> sendable</span>
+                        )}
+                      </>}
+                    </td>
+                    <td data-label="Peer since" className={peer.since ? undefined : 'cell-empty'}>
+                      {peer.since ? (
+                        <span className="wh-since">
+                          <MomentLink at={{ blockHeight: peer.since.blockHeight, extrinsicIndex: peer.since.extrinsicIndex, timestamp: peer.since.timestamp }} now={now} />
+                          <span className="muted wh-origin-by" title={peer.since.origin.kind === 'technical-committee' ? `Proposal ${peer.since.origin.proposalHash}` : undefined}>{changeOriginLabel(peer.since.origin)}</span>
+                        </span>
+                      ) : <Dash />}
+                    </td>
+                    <td data-label="Status" className="r">
+                      <span className={`badge ${meta.badge}`} title={peer.statusDetail}>{meta.label}</span>
+                    </td>
+                  </tr>
+                )
+              })}
+            </>}
+          </tbody>
+        </table>
+      </div>
+      {riskNotes.length > 0 && (
+        <div className="hdx-note wh-risk">
+          {riskNotes.map(p => <span key={p.chainId}>{p.riskNote}. </span>)}
+          A lockbox holds only what was deposited on its own chain, so an exit toward a small lockbox can wait for
+          deposits there even while the asset as a whole is fully backed.
+        </div>
+      )}
+    </>
   )
 }
 
@@ -461,15 +680,18 @@ function AssetsTable({ d }: { d: WormholeBridgeDetail }) {
       <table className="tbl sec-tbl">
         <thead>
           <tr>
-            <th>Asset</th><th>Origin</th><th className="r">Locked</th><th className="r">Minted</th>
+            <th>Asset</th><th>Lockboxes</th><th className="r">Locked</th><th className="r">Minted</th>
             <th className="r">In flight</th><th className="r">Difference</th><th className="r">Status</th>
           </tr>
         </thead>
         <tbody>
           {!d.assets.length ? <EmptyRow cols={7}>No Wormhole asset is registered on this chain</EmptyRow> : d.assets.map(r => {
             const meta = WORMHOLE_STATUS[r.status]
-            const custody = wormholeExplorerLink(r.originChainId, r.peer)
             const paused = r.pausedLocal === true || r.pausedOrigin === true
+            // Every chain holding custody, Hydration included where it locks.
+            const boxes = lockboxChains(r, d.hydrationChainId)
+            const spokes = (r.peers ?? []).filter(p => p.role === 'spoke')
+            const custody = (r.peers ?? []).length ? null : wormholeExplorerLink(r.originChainId, r.peer)
             // One figure for everything that has not landed: transfers still
             // moving between the chains, plus transfers the origin rate limiter
             // is holding back. They belong together because they explain the
@@ -497,14 +719,23 @@ function AssetsTable({ d }: { d: WormholeBridgeDetail }) {
                     </Link>
                   </span>
                 </td>
-                <td data-label="Origin">
-                  <span className="wh-origin">
-                    <span className="wh-chain">{r.originChainName}</span>
-                    {custody && (
-                      <a className="wh-out mono" href={custody.href} target="_blank" rel="noreferrer noopener"
-                         title={`Custody ${r.peer} on ${custody.kind}`}>custody ↗</a>
-                    )}
-                    {paused && <span className="badge pending" title={r.pausedOrigin === true ? 'The origin manager is paused' : 'The Hydration manager is paused'}>Paused</span>}
+                <td data-label="Lockboxes">
+                  <span className="wh-origin" title={boxes.length > 1 ? `${boxes.length} lockboxes: ${joinChains(boxes.map(b => b.name))}` : undefined}>
+                    {boxes.map(b => {
+                      const peer = (r.peers ?? []).find(p => p.chainId === b.chainId)
+                      const link = peer ? wormholeExplorerLink(peer.chainId, peer.manager) : custody
+                      return (
+                        <span key={b.chainId} className="wh-box">
+                          <span className="wh-chain">{b.name}</span>
+                          {link && (
+                            <a className="wh-out mono" href={link.href} target="_blank" rel="noreferrer noopener"
+                               title={`Custody ${peer?.manager ?? r.peer} on ${link.kind}`}>custody ↗</a>
+                          )}
+                        </span>
+                      )
+                    })}
+                    {spokes.length > 0 && <span className="muted wh-spokes">minted on {joinChains(spokes.map(p => p.chainName))}</span>}
+                    {paused && <span className="badge pending" title={r.pausedOrigin === true ? 'A peer manager is paused' : 'The Hydration manager is paused'}>Paused</span>}
                   </span>
                 </td>
                 <td data-label="Locked" className={`r${r.locked == null ? ' cell-empty' : ''}`}>
@@ -620,11 +851,16 @@ function InflightPanel({ d, queued, now, name }: {
               ))}
               {queued.map(q => {
                 const dec = decimals.get(q.assetId) ?? 0
+                const arrival = q.direction === 'in'
                 return (
                   <tr key={q.digest} className="wh-queued-row">
                     <td data-label="Route" className="wh-route">
-                      <span className="wh-hop" title="Burned on Hydration, redeemed on the origin chain, and held by its inbound rate limiter">
-                        {name(d.hydrationChainId)} <span className="wh-arrow">→</span> {name(q.chainId)}
+                      <span className="wh-hop" title={arrival
+                        ? `Sent from ${name(q.fromChainId ?? q.chainId)}, received on Hydration, and held by Hydration's own inbound rate limiter for that chain`
+                        : 'Sent from Hydration, redeemed on the far chain, and held by its inbound rate limiter'}>
+                        {arrival
+                          ? <>{name(q.fromChainId ?? q.chainId)} <span className="wh-arrow">→</span> {name(d.hydrationChainId)}</>
+                          : <>{name(d.hydrationChainId)} <span className="wh-arrow">→</span> {name(q.chainId)}</>}
                       </span>
                     </td>
                     <td data-label="Asset"><AssetChip asset={assetRef({ assetId: q.assetId, symbol: q.symbol, decimals: dec })} /></td>
@@ -653,7 +889,12 @@ function InflightPanel({ d, queued, now, name }: {
 
 function TransfersTable({ d, now, name }: { d: WormholeBridgeDetail; now: number; name: (id: number) => string }) {
   const decimals = new Map(d.assets.map(a => [a.assetId, a.decimals]))
+  const locking = new Set(d.assets.filter(a => a.hydrationRole === 'lockbox').map(a => a.assetId))
   const dec = (row: WormholeTransferRow) => decimals.get(row.assetId) ?? 0
+  // A locking manager releases and locks; a minting one mints and burns.
+  const verb = (row: WormholeTransferRow) => locking.has(row.assetId)
+    ? row.direction === 'in' ? 'released in' : 'locked out'
+    : row.direction === 'in' ? 'minted in' : 'burned out'
   return (
     <div className="panel">
       <table className="tbl sec-tbl">
@@ -667,7 +908,7 @@ function TransfersTable({ d, now, name }: { d: WormholeBridgeDetail; now: number
                 <MomentLink at={{ blockHeight: r.blockHeight, extrinsicIndex: r.extrinsicIndex, timestamp: r.timestamp }} now={now} />
               </td>
               <td data-label="Direction" className="mono" style={{ color: r.direction === 'in' ? 'var(--green)' : 'var(--sky)' }}>
-                {r.direction === 'in' ? 'minted in' : 'burned out'}
+                {verb(r)}
               </td>
               <td data-label="Asset"><AssetChip asset={assetRef({ assetId: r.assetId, symbol: r.symbol, decimals: dec(r) })} /></td>
               <td data-label="Amount" className="r">
@@ -677,7 +918,19 @@ function TransfersTable({ d, now, name }: { d: WormholeBridgeDetail; now: number
               <td data-label="Account" className={r.accountRef ? undefined : 'cell-empty'}>
                 {r.accountRef ? <AddrPill account={r.accountRef} /> : <Dash />}
               </td>
-              <td data-label="Counterparty" className="mono muted">{name(r.counterpartyChainId)}</td>
+              <td data-label="Counterparty">
+                <span className="wh-counterparty">
+                  <span className="mono muted">{name(r.counterpartyChainId)}</span>
+                  {/* The far chain's own token — Robinhood's WETH is not Ethereum's. */}
+                  {r.counterpartyToken && (() => {
+                    const link = wormholeExplorerLink(r.counterpartyChainId, r.counterpartyToken.address)
+                    const label = `${r.counterpartyToken.symbol ?? 'token'} ${F.shortAddr(r.counterpartyToken.address)}`
+                    return link
+                      ? <a className="hash mono wh-mgr" href={link.href} target="_blank" rel="noreferrer noopener" title={`${r.counterpartyToken.name ?? r.counterpartyToken.symbol ?? 'Token'} on ${name(r.counterpartyChainId)}: ${r.counterpartyToken.address}`}>{label} ↗</a>
+                      : <span className="mono muted wh-mgr" title={r.counterpartyToken.address}>{label}</span>
+                  })()}
+                </span>
+              </td>
               <td data-label="Sequence" className={`r mono muted${r.sequence == null ? ' cell-empty' : ''}`}>{r.sequence ?? <Dash />}</td>
             </tr>
           ))}
@@ -710,12 +963,15 @@ function Headline({ d }: { d: WormholeBridgeDetail }) {
   const unpricedShortfall = graded && !(deficit != null && deficit > 0)
   const inflightUnchecked = !d.scan.configured || !d.scan.ok
   const chainsRead = d.chains.filter(c => c.configured && c.ok).length
+  const lockboxes = d.lockboxes ?? null
   return (
     <div className="hdx-cards">
-      <Card label="Locked on origin chains" value={t.lockedUsd == null ? <Dash /> : <Usd v={t.lockedUsd} />}
-        sub={`custody across ${F.int(chainsRead)} of ${F.int(d.chains.length)} chains`} />
-      <Card label="Minted on Hydration" value={t.issuanceUsd == null ? <Dash /> : <Usd v={t.issuanceUsd} />}
-        sub={`${F.int(d.assets.length)} bridged assets`} />
+      <Card label="Locked in lockboxes" value={t.lockedUsd == null ? <Dash /> : <Usd v={t.lockedUsd} />}
+        sub={lockboxes
+          ? `${F.int(lockboxes.length)} lockboxes · ${F.int(chainsRead)} of ${F.int(d.chains.length)} chains read`
+          : `custody across ${F.int(chainsRead)} of ${F.int(d.chains.length)} chains`} />
+      <Card label="Bridged supply" value={t.issuanceUsd == null ? <Dash /> : <Usd v={t.issuanceUsd} />}
+        sub={`minted against it · ${F.int(d.assets.length)} assets`} />
       <Card label="In flight"
         value={inflightUnchecked ? <Dash /> : F.int(d.inflight.length)}
         sub={inflightUnchecked
@@ -772,6 +1028,8 @@ function WormholeSkeleton() {
       <ChartSkeleton h={260} />
       <SecTitle title="Assets" />
       <div className="panel"><table className="tbl sec-tbl"><tbody><TableSkeleton cols={7} rows={6} /></tbody></table></div>
+      <SecTitle title="Lockboxes & peers" />
+      <div className="panel"><table className="tbl sec-tbl"><tbody><TableSkeleton cols={8} rows={6} /></tbody></table></div>
       <SecTitle title="Rate limits" />
       <ChartSkeleton h={190} />
       <SecTitle title="In flight" />
@@ -781,12 +1039,12 @@ function WormholeSkeleton() {
 }
 
 export function WormholeSection({ now }: { now: number }) {
-  const { data: d, isError } = useWormholeBridge()
+  const { data: d, isError, refetch } = useWormholeBridge()
   if (isError) {
     return (
       <>
         <SecTitle title="Wormhole backing" />
-        <div className="pf-card"><div className="hdx-note">Failed to load the Wormhole backing snapshot.</div></div>
+        <LoadError card="pf-card" title="Couldn’t load the Wormhole backing snapshot" onRetry={() => { void refetch() }} />
       </>
     )
   }
@@ -828,18 +1086,24 @@ export function WormholeSection({ now }: { now: number }) {
       <SecTitle title="Assets" subtitle={`${F.int(d.assets.length)} bridged through Wormhole`} />
       <AssetsTable d={d} />
 
+      {/* Every chain of every asset: which hold custody, which mint, the token
+          on each, the limits on both sides and what each lockbox can pay out. */}
+      <SecTitle title="Lockboxes & peers"
+        subtitle={`${F.int((d.lockboxes ?? []).length)} lockboxes · ${F.int(d.assets.reduce((n, a) => n + (a.peers?.length ?? 0), 0))} peer chains`} />
+      <PeersTable d={d} now={now} />
+
       {/* The window comes from the limiters themselves, so the subtitle never
           promises a period the chain has stopped using. */}
       <SecTitle title="Rate limits"
         subtitle={[
-          'origin-chain fuses',
+          'per asset and chain',
           fuses.windowSec > 0 ? `${fmtDuration(fuses.windowSec * 1000)} rolling window` : null,
           hottestFuseText(fuses),
         ].filter(Boolean).join(' · ')} />
       {fuses.readable
         ? <RateLimits d={d} facts={fuses} now={now} />
         : <div className="pf-card"><div className="hdx-note">
-          No origin chain's rate limiter could be read, so how much of each transfer allowance is left is unknown.
+          No peer chain's rate limiter could be read, so how much of each transfer allowance is left is unknown.
         </div></div>}
 
       <SecTitle title="In flight" subtitle={notSettled} />

@@ -9,7 +9,7 @@ import type {
   AssetLiquidity, AssetLiquiditySource, PoolDetail, OmnipoolDetail, PoolCompositionEntry,
   HollarDashboard, HollarCollateral, HollarArbDay, HollarTradeDay, HollarPool, HollarPegPoint,
   SecurityDashboard, SecurityFuse, SecurityPerBlockRow, SecurityLiquidityMove,
-  WormholeAssetRow, WormholeBridgeDetail, WormholeFuse, WormholeInflightOp, WormholeQueuedRelease, WormholeSummary,
+  WormholeAssetRow, WormholeBridgeDetail, WormholeFuse, WormholeInflightOp, WormholePeerRow, WormholeQueuedRelease, WormholeSummary,
   WormholeTransferRow,
   TradeDetail as TradeDetailResponse,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse,
@@ -1851,6 +1851,101 @@ export function buildSecurityWormhole(): WormholeBridgeDetail {
     asOf: WH_ASOF,
     indexedThrough: { block: TIP, at: tsAt(TIP) },
   }
+}
+
+/* The multi-peer shapes, on top of the single-origin board above: WETH backed
+   by TWO lockboxes (Ethereum, and Robinhood added by TC motion 387 with
+   Hydration's inbound limit from it set to 69 WETH/day), and HDX locked on
+   Hydration against a Robinhood spoke. The sums the WETH row carries are
+   the sums of its peers, so the row and its peers cannot disagree. */
+const WH_ROBINHOOD = 72
+function whPeer(row: WormholeAssetRow, over: Partial<WormholePeerRow> & Pick<WormholePeerRow, 'chainId' | 'chainName' | 'role'>): WormholePeerRow {
+  return {
+    family: 'evm', layer: 'l1', riskNote: null, primary: false,
+    manager: hx(row.decimals * 1000 + over.chainId, 40), mode: over.role === 'spoke' ? 'burning' : 'locking',
+    token: null, balance: null, balanceUsd: null, burned: null, paused: false, configured: true, fresh: true,
+    asOf: WH_ASOF, limits: null, inflightIn: '0', inflightOut: '0', inflightCount: 0, queued: '0', queuedHydration: '0',
+    flows: { received: '0', sent: '0', net: '0', transfersIn: 0, transfersOut: 0 },
+    payout: null, status: 'ok', statusDetail: 'Covers the net brought in through it.', evidence: 'confirmed',
+    since: null, changes: 1, transceiverPeer: null, alsoPeers: [],
+    ...over,
+  }
+}
+
+export function buildSecurityWormholeMultiPeer(): WormholeBridgeDetail {
+  const d = buildSecurityWormhole()
+  const wethAt = d.assets.findIndex(a => a.symbol === 'WETH')
+  const weth = d.assets[wethAt]
+  const spec = WH_SPECS.find(s => s.symbol === 'WETH')!
+  const rhLocked = BigInt(raw(8.95591664, 18))
+  const ethLocked = BigInt(weth.locked!) - rhLocked
+  const price = spec.price
+  const usd = (v: bigint, dec: number, p: number) => (Number(v) / 10 ** dec) * p
+  const local = whFuse(spec, [WH_LOCAL_LIMIT, WH_LOCAL_LIMIT, null], true)
+  const fuse = (limit: number, left: number, ago: number | null) => whFuse(spec, [limit, left, ago])
+  const since = (blockHeight: number, origin: WormholePeerRow['since'] extends infer T ? T extends { origin: infer O } ? O : never : never) =>
+    ({ blockHeight, timestamp: tsAt(Math.min(blockHeight, TIP)), extrinsicIndex: 2, origin })
+  d.assets[wethAt] = {
+    ...weth,
+    hydrationRole: 'spoke', hydrationLocked: null, hydrationToken: hx(20, 40), lockboxCount: 2,
+    peers: [
+      whPeer(weth, {
+        chainId: WH_ETHEREUM, chainName: 'Ethereum', role: 'lockbox', primary: true,
+        token: { address: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2', name: 'Wrapped Ether', symbol: 'WETH', decimals: 18 },
+        balance: ethLocked.toString(), balanceUsd: usd(ethLocked, 18, price),
+        limits: { peerOut: weth.limits!.in, peerIn: weth.limits!.out, hydrationIn: local, hydrationOut: local },
+        payout: { capacity: ethLocked.toString(), potential: (BigInt(weth.issuance!)).toString(), coversPotential: false, baseline: raw(600, 18) },
+        since: since(TIP - 900_000, { kind: 'account', account: '0x71feb8b2849101a6e62e3369eaafdc6154cd0bc0' }),
+      }),
+      whPeer(weth, {
+        chainId: WH_ROBINHOOD, chainName: 'Robinhood', role: 'lockbox', layer: 'l2',
+        riskNote: 'Robinhood is an Ethereum L2 (Arbitrum Orbit): custody there also rests on its sequencer and its bridge to Ethereum',
+        token: { address: '0x0bd7d308f8e1639fab988df18a8011f41eacad73', name: 'WETH', symbol: 'WETH', decimals: 18 },
+        balance: rhLocked.toString(), balanceUsd: usd(rhLocked, 18, price),
+        // 69 WETH a day on both sides of the Robinhood route.
+        limits: { peerOut: fuse(69, 51.75, 3), peerIn: fuse(69, 69, null), hydrationIn: fuse(69, 51.75, 3), hydrationOut: local },
+        payout: { capacity: rhLocked.toString(), potential: raw(69, 18), coversPotential: false, baseline: '0' },
+        since: since(TIP - 120_000, { kind: 'technical-committee', proposalHash: hx(387, 64), motionIndex: 387 }),
+      }),
+    ],
+  }
+  // HDX: Hydration is the lockbox, Robinhood mints.
+  const hdxLocked = BigInt(raw(106, 12))
+  const hdxPrice = 0.0125
+  const hdx: WormholeAssetRow = {
+    assetId: '0', symbol: 'HDX', decimals: 12, originChainId: WH_HYDRATION_CHAIN, originChainName: 'Hydration', originToken: null,
+    manager: '0x16ac5b8d9078ed4cf5a522f907fd9ddb6c8841f1', mode: 'locking', pausedLocal: false, pausedOrigin: false, peer: null,
+    limits: null, issuance: hdxLocked.toString(), burned: '0', locked: hdxLocked.toString(),
+    inflightIn: '0', inflightOut: '0', inflightCount: 0, queued: '0', queuedCount: 0, residual: '0',
+    flows: { mintedIn: raw(100, 12), burnedOut: raw(206, 12), nonNtt: null },
+    issuanceUsd: usd(hdxLocked, 12, hdxPrice), lockedUsd: usd(hdxLocked, 12, hdxPrice), residualUsd: 0,
+    status: 'ok', statusDetail: 'Custody covers the minted supply and every transfer still in flight.',
+    transfers14d: { out: 4, in: 1 },
+    hydrationRole: 'lockbox', hydrationLocked: hdxLocked.toString(), hydrationToken: '0x0000000000000000000000000000000100000000', lockboxCount: 1,
+    peers: [],
+  }
+  const hdxFuse = (limit: number) => ({ ...local, limit: raw(limit, 12), capacity: raw(limit, 12), utilizationPct: 0, lastConsumedAt: null })
+  hdx.peers = [whPeer(hdx, {
+    chainId: WH_ROBINHOOD, chainName: 'Robinhood', role: 'spoke', layer: 'l2',
+    riskNote: 'Robinhood is an Ethereum L2 (Arbitrum Orbit): custody there also rests on its sequencer and its bridge to Ethereum',
+    token: { address: '0xb423c0b59c615793b0903668dc414e4fa3a64a33', name: 'Hdx', symbol: 'HDX', decimals: 12 },
+    balance: hdxLocked.toString(), balanceUsd: usd(hdxLocked, 12, hdxPrice), burned: '0',
+    limits: { peerOut: hdxFuse(10_000_000), peerIn: hdxFuse(10_000_000), hydrationIn: hdxFuse(10_000_000), hydrationOut: hdxFuse(10_000_000) },
+    statusDetail: 'Supply minted on this chain against custody elsewhere; counted on the supply side of the equation.',
+    since: since(TIP - 200_000, { kind: 'account', account: '0x71feb8b2849101a6e62e3369eaafdc6154cd0bc0' }),
+  })]
+  d.assets.push(hdx)
+  d.chains.push({ chainId: WH_ROBINHOOD, name: 'Robinhood', family: 'evm', configured: true, ok: true, asOf: WH_ASOF, layer: 'l2' })
+  d.lockboxes = [
+    { assetId: '0', symbol: 'HDX', decimals: 12, chainId: WH_HYDRATION_CHAIN, chainName: 'Hydration', layer: 'other', token: null, balance: hdxLocked.toString(), balanceUsd: usd(hdxLocked, 12, hdxPrice), capacity: hdxLocked.toString(), status: 'ok', statusDetail: 'Hydration locks HDX.' },
+    ...d.assets[wethAt].peers!.map(p => ({ assetId: '20', symbol: 'WETH', decimals: 18, chainId: p.chainId, chainName: p.chainName, layer: p.layer, token: p.token, balance: p.balance, balanceUsd: p.balanceUsd, capacity: p.payout?.capacity ?? null, status: p.status, statusDetail: p.statusDetail })),
+  ]
+  d.recent = [{
+    ...d.recent[0],
+    direction: 'in', assetId: '20', symbol: 'WETH', counterpartyChainId: WH_ROBINHOOD,
+    counterpartyToken: { address: '0x0bd7d308f8e1639fab988df18a8011f41eacad73', name: 'WETH', symbol: 'WETH', decimals: 18 },
+  }, ...d.recent.slice(1)]
+  return d
 }
 
 // The dashboard's summary block is folded out of the same snapshot, so the

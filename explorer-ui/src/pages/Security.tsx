@@ -119,7 +119,11 @@ function WormholeCard({ w }: { w: SecurityDashboard['wormhole'] }) {
       : w.worstStatus === 'unverified' || w.worstStatus === 'unconfigured' ? 'var(--text-low)'
         : 'var(--green)'
   const parts = [`${F.int(w.assets)} assets`]
+  // Custody sits in more lockboxes than there are origin chains (WETH alone has
+  // two), so the count is the lockboxes', not the chains'.
+  if (w.lockboxCount) parts.push(`${F.int(w.lockboxCount)} lockboxes`)
   if (w.lockedUsd != null) parts.push(`${F.usd(w.lockedUsd)} locked`)
+  if (w.lockboxAttention) parts.push(`${F.int(w.lockboxAttention)} ${w.lockboxAttention === 1 ? 'lockbox needs' : 'lockboxes need'} attention`)
   if (w.inflightCount != null) parts.push(`${F.int(w.inflightCount)} in flight`)
   // An empty release queue is the normal state and says nothing worth a clause.
   if (w.queuedCount) parts.push(`${F.int(w.queuedCount)} queued`)

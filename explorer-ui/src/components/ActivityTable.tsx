@@ -29,6 +29,10 @@ const CHAIN_COLORS: Record<string, [string, string]> = {
   Bifrost: ['#5a25f0', '#3a10b0'],
   Interlay: ['#f19135', '#d4731a'],
   Ethereum: ['#627EEA', '#3c54b8'],
+  Base: ['#0052ff', '#0036a8'],
+  Sui: ['#4da2ff', '#2367b8'],
+  'Robinhood': ['#1a9e3a', '#0b5e20'],
+  HyperEVM: ['#16857a', '#0b4c45'],
   Acala: ['#e40c5b', '#a80943'],
   Solana: ['#9945FF', '#5c1fd1'],
   Centrifuge: ['#1253fa', '#0b36ad'],
@@ -38,10 +42,14 @@ const CHAIN_COLORS: Record<string, [string, string]> = {
   NEAR: ['#00c586', '#00875c'],
   Zcash: ['#b8860b', '#7a5a08'],
 }
-export function ChainBadge({ chain }: { chain: string }) {
+export function ChainBadge({ chain, title }: { chain: string; title?: string }) {
   const c = CHAIN_COLORS[chain] ?? ['#666', '#444']
-  return <span className="chain-badge" style={{ background: `linear-gradient(135deg,${c[0]},${c[1]})` }} title={chain}>{chain || '?'}</span>
+  return <span className="chain-badge" style={{ background: `linear-gradient(135deg,${c[0]},${c[1]})` }} title={title ?? chain}>{chain || '?'}</span>
 }
+// A Wormhole NTT hop's far token, for the chain badge's tooltip: Robinhood
+// Chain's WETH is its own contract, not Ethereum's.
+const remoteTokenTitle = (r: Pick<ActivityRow, 'remoteToken'>, chain: string): string | undefined =>
+  r.remoteToken ? `${chain} · ${r.remoteToken.symbol ?? 'token'} ${r.remoteToken.address}` : undefined
 // The local end of a cross-chain hop. Every hop has Hydration at one end, and
 // naming it is what makes the arrow's direction readable — a row saying only
 // "AssetHub → USDC 55" leaves the reader to work out which side the asset landed
@@ -329,14 +337,14 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
   if (r.type === 'xcm' && r.xcmDir === 'in' && r.asset) {
     // Inbound: origin chain (+ source account when the crosschain index resolved
     // it), then the arrow, then the chain it landed on with the asset it credited.
-    const origin = <><ChainBadge chain={r.fromChain ?? ''} />{r.fromAccount && <ExternalAccountPill account={r.fromAccount} />}</>
+    const origin = <><ChainBadge chain={r.fromChain ?? ''} title={remoteTokenTitle(r, r.fromChain ?? '')} />{r.fromAccount && <ExternalAccountPill account={r.fromAccount} />}</>
     return <span className="asset-flow">{origin} → <HydrationBadge /><AssetAmount asset={r.asset} raw={r.amount} /></span>
   }
   if ((r.type === 'transfer' || r.type === 'xcm') && r.asset) {
     // Asset first, then the arrow, then the destination chain and account. A
     // Wormhole NTT send is type 'xcm' like every other outbound hop — its burn
     // leg never reaches this branch as a transfer.
-    const destChain = r.type === 'xcm' && r.destChain ? <ChainBadge chain={r.destChain} /> : null
+    const destChain = r.type === 'xcm' && r.destChain ? <ChainBadge chain={r.destChain} title={remoteTokenTitle(r, r.destChain)} /> : null
     const destAccount = r.type === 'xcm'
       ? (r.destAccount ? <ExternalAccountPill account={r.destAccount} /> : null)
       : (r.to ? <AddrPill account={r.to} noCopy /> : null)

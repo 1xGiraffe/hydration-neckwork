@@ -3539,13 +3539,46 @@ tr.row-muted td { opacity: .55; }
    not a centered caption. */
 .sec-asof.sec-wh-asof { text-align: left; }
 
+/* Lockboxes column: one chain per custody, its custody link beside it; the
+   chains that only mint are said after them, quieter. */
+.wh-box { display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.wh-box + .wh-box::before { content: '+'; color: var(--text-lowest); margin-right: 3px; }
+.wh-spokes { font-size: 11.5px; }
+
+/* Lockboxes & peers: a chain chip, its role in the bridge, and quiet tags for
+   the registered origin and for a chain that is not an L1. */
+.wh-peer-chain { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.wh-role { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-medium); }
+.wh-role.lockbox { color: var(--text-high); }
+.wh-tag { font-family: 'GeistMono'; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 6px; border-radius: 9999px; background: var(--panel); color: var(--text-low); }
+.wh-tag.warn { background: var(--amber-soft); color: var(--amber); cursor: help; }
+.wh-token { display: inline-flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.wh-token-sym { color: var(--text-high); }
+.wh-limits { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; cursor: help; white-space: nowrap; }
+.wh-limit .muted { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+.wh-since { display: inline-flex; flex-direction: column; gap: 2px; }
+.wh-origin-by { font-size: 11px; }
+.wh-counterparty { display: inline-flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
+.wh-risk { margin-top: 10px; }
+
+/* Asset page — a Wormhole asset's origin as its lockbox chains. */
+.dl .dd.asset-bridge { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 4px; text-align: left; }
+.asset-bridge-chains { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.asset-bridge-sub { font-size: 12px; }
+.asset-bridge-risk { font-size: 12px; color: var(--text-medium); max-width: 62ch; }
+
 @media (max-width: 720px) {
   .wh-beams { gap: 18px; }
   .wh-beam { height: 18px; }
   .wh-beam-foot .wh-delta { margin-left: 0; }
   /* Both cells hold two parts that would otherwise be crushed against the
      label; they stack under it instead. */
-  .sec-tbl tbody td[data-label="Origin"] .wh-origin { justify-content: flex-end; }
+  .sec-tbl tbody td[data-label="Origin"] .wh-origin,
+  .sec-tbl tbody td[data-label="Lockboxes"] .wh-origin,
+  .sec-tbl tbody td[data-label="Chain"] .wh-peer-chain,
+  .sec-tbl tbody td[data-label="Token there"] .wh-token,
+  .sec-tbl tbody td[data-label="Counterparty"] .wh-counterparty { justify-content: flex-end; }
+  .sec-tbl tbody td[data-label="Peer since"] .wh-since { align-items: flex-end; }
 }
 
 /* ── /revenue — the revenue river ─────────────────────────────────────────────
