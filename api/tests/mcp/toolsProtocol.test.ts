@@ -275,7 +275,15 @@ describe('get_network_status', () => {
 /* ============ get_protocol_stats ============ */
 
 const protocol = tool(protocolTools, 'get_protocol_stats')
-const REVENUE_ROUTES = { '/explorer/revenue': REVENUE, '/explorer/revenue/stakers': STAKERS, '/explorer/revenue/flow': FLOW }
+const USER_REVENUE = {
+  totals: { day: 3174.88, week: 94155.92, month: null, allTime: 22_658_571.18 },
+  publishedThrough: '2026-10-04T04:00:00.000Z',
+  firstHour: '2022-03-12T12:00:00.000Z',
+  complete: true,
+  unpricedCells: 12,
+  unmeasured: [{ id: 'apyusd-accrual', label: 'apyUSD token accrual', reason: 'its on-chain peg never moved' }],
+}
+const REVENUE_ROUTES = { '/explorer/revenue': REVENUE, '/explorer/revenue/stakers': STAKERS, '/explorer/revenue/flow': FLOW, '/explorer/revenue/users/summary': USER_REVENUE }
 
 describe('get_protocol_stats', () => {
   it('refuses a dashboard that does not exist, naming the ones that do', async () => {
@@ -290,6 +298,17 @@ describe('get_protocol_stats', () => {
     expect(upstream.calls).toContain('/explorer/revenue?range=30d')
     expect(upstream.calls).toContain('/explorer/revenue/stakers?range=30d')
     expect(upstream.calls).toContain('/explorer/revenue/flow')
+    expect(upstream.calls).toContain('/explorer/revenue/users/summary')
+  })
+
+  it('appends user revenue through its closed hour, never as a plausible 0, and never summed with protocol revenue', async () => {
+    const out = await run(protocol, { dashboard: 'revenue' }, REVENUE_ROUTES)
+    expect(out.markdown).toContain('## User Revenue')
+    expect(out.markdown).toContain('through 04:00 UTC 2026-10-04')
+    expect(out.markdown).toMatch(/Last 30D[^\n]*not fully published/)
+    expect(out.markdown).toContain('apyUSD token accrual')
+    expect(out.markdown).toContain('NOT additive with Protocol Revenue')
+    expect((out.json as { userRevenue: { totals: { month: number | null } } }).userRevenue.totals.month).toBeNull()
   })
 
   it('reads revenue timestamps as UNIX SECONDS, not as ClickHouse strings', async () => {

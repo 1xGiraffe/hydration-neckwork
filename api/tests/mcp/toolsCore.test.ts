@@ -350,9 +350,12 @@ describe('inspect_entity detection', () => {
     // The support definition is not the intuitive one and must travel with it.
     expect(referendum.markdown).toContain('AYE PLUS ABSTAIN')
 
-    const asTag = fake({ '/explorer/tag/treasury': { tagId: 'treasury', name: 'Treasury', color: '', note: '', icon: '', members: [], balances: [], topAssets: [], portfolioUsd: 1, moneyMarket: [] } })
-    await call(inspect, { identifier: 'treasury', kind: 'tag' }, asTag)
+    const asTag = fake({ '/explorer/tag/treasury': { tagId: 'treasury', name: 'Treasury', color: '', note: '', icon: '', members: [], balances: [], topAssets: [], portfolioUsd: 1, moneyMarket: [], revenueUsd: 50, userRevenueUsd: 1234 } })
+    const tagOut = await call(inspect, { identifier: 'treasury', kind: 'tag' }, asTag)
     expect(asTag.calls[0].query).toEqual({ summary: 1 })
+    expect(tagOut.markdown).toContain('Protocol Revenue')
+    expect(tagOut.markdown).toMatch(/User Revenue \(net\)[^\n]*\$1\.23k/)
+    expect((tagOut.json as { tag: { userRevenueUsd: number | null } }).tag.userRevenueUsd).toBe(1234)
   })
 
   it('reads an intent, a DCA schedule and one DCA execution', async () => {

@@ -1291,3 +1291,13 @@ describe('ICE pot settlement fold', () => {
     expect(foldIcePotTrades([row('trade', pot, 3), row('intent', owner, 2)]).folded).toBe(0)
   })
 })
+
+describe('formatUserRevenue holder class', () => {
+  it('says a non-user page is not a user account, never $0', async () => {
+    const { formatUserRevenue } = await import('../../src/mcp/format/units.ts')
+    expect(formatUserRevenue(0, 'protocol')).toBe('not a user account (protocol)')
+    expect(formatUserRevenue(null, 'unattributed')).toBe('not a user account (unattributed)')
+    expect(formatUserRevenue(0, 'user')).toBe('$0')
+    expect(formatUserRevenue(null)).toBe('not yet published')
+  })
+})

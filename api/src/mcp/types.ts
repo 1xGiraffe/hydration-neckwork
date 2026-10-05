@@ -729,7 +729,12 @@ export interface AddressDetail {
   portfolioExHdxUsd?: number
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
+  /** Protocol revenue the account GENERATED (fees it paid, penalties, interest) — not its income. */
   revenueUsd?: number
+  /** User Revenue: what the account EARNED, net (borrow interest and fees paid subtracted), all time. null = not yet published, never 0; may be 0 or negative once published. */
+  userRevenueUsd?: number | null
+  /** The User Revenue holder class (user | protocol | unattributed); a non-user page carries no figure. */
+  holderClass?: string
   moneyMarket: MoneyMarketPosition[]
   liquidityPositions?: LpPosition[]
   farmRewards?: FarmRewards
@@ -950,7 +955,12 @@ export interface TagDetail {
   portfolioExHdxUsd?: number
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
+  /** Protocol revenue the account GENERATED (fees it paid, penalties, interest) — not its income. */
   revenueUsd?: number
+  /** User Revenue: what the account EARNED, net (borrow interest and fees paid subtracted), all time. null = not yet published, never 0; may be 0 or negative once published. */
+  userRevenueUsd?: number | null
+  /** The User Revenue holder class (user | protocol | unattributed); a non-user page carries no figure. */
+  holderClass?: string
   moneyMarket: MoneyMarketPosition[]
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
@@ -1380,6 +1390,21 @@ export interface ReferendumDetail {
 }
 
 /* ============ revenue ============ */
+
+/**
+ * `/explorer/revenue/users/summary`: net User Revenue (what users earn) over the
+ * last 24 / 168 / 720 CLOSED hours through `publishedThrough`, and all time. A
+ * window not fully folded is null, never 0. Not additive with protocol revenue.
+ */
+export interface UserRevenueSummary {
+  totals: { day: number | null; week: number | null; month: number | null; allTime: number | null }
+  /** ISO end of the newest folded hour. */
+  publishedThrough: string | null
+  firstHour: string | null
+  complete: boolean
+  unpricedCells: number
+  unmeasured: { id: string; label: string; reason: string }[]
+}
 
 /** `t` is UNIX SECONDS, not a ClickHouse timestamp. */
 export interface RevenuePoint { t: number; usd: number }

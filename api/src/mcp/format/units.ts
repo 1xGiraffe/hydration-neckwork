@@ -263,3 +263,17 @@ export function formatHealthFactor(value: string | null | undefined): string {
   if (ratio == null) return DASH
   return ratio.toFixed(Math.abs(ratio) < 10 ? 4 : 2)
 }
+
+/**
+ * User Revenue (net) as an account/tag record states it: an upstream that does
+ * not carry the field yet renders no line (null here), an unpublished figure
+ * says so — never "$0", which would read as "earned nothing" — and a published
+ * one may be 0 or negative (borrow interest outweighing income).
+ */
+export function formatUserRevenue(v: number | null | undefined, holderClass?: string): string | null {
+  // A page User Revenue does not describe (a pool, the Treasury, a sovereign): say so, never "$0".
+  if (holderClass != null && holderClass !== 'user') return `not a user account (${holderClass})`
+  if (v === undefined) return null
+  if (v === null || !Number.isFinite(v)) return 'not yet published'
+  return formatUsd(v)
+}
