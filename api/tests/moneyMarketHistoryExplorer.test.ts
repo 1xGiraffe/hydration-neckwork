@@ -114,7 +114,7 @@ describe('un-windowed history caching', async () => {
     expect(src).toContain('if (!window) return cachedSwr(key, UNWINDOWED_HISTORY_FRESH_MS, ACCOUNT_HISTORY_TTL_MS, () => buildMoneyMarketHistory(accounts, undefined, owner))')
     // A chart-zoom window takes the bucketed-history finality rule instead.
     expect(src).toContain('return cached(key, await windowedHistoryTtlMs(window.toBlock), () => buildLiquidityHistory(accounts, window))')
-    expect(src).toContain('return cached(key, ACCOUNT_HISTORY_TTL_MS, () => getAccountHistory(accounts))')
+    expect(src).toContain('return cached(accountHistorySharedKey(accounts, scopeKey), jitteredAccountHistoryTtlMs(), () => getAccountHistory(accounts))')
   })
 })
 

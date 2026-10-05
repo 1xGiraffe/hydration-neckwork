@@ -70,12 +70,16 @@ describe('the chunked reads are not serial', () => {
   // been deleted, renamed or re-chunked to a size it does not look for.
   it('routes every one of them through the one bounded helper', () => {
     const sites = explorerService.match(/mapChunksConcurrently\(/g) ?? []
+    // The byte-bounded variant (db/queryParams.ts) chunks a bound Array parameter
+    // under the server's field ceiling; it takes the same shared bound.
+    const paramSites = explorerService.match(/mapParamChunks\(/g) ?? []
     const bound = explorerService.match(/CHUNK_QUERY_CONCURRENCY/g) ?? []
 
     expect(sites).toHaveLength(32)
+    expect(paramSites).toHaveLength(17)
     // The shared bound, plus its own declaration. Every site takes it: a site with
     // a hand-rolled concurrency is the thing this count exists to catch.
-    expect(bound).toHaveLength(sites.length + 1)
+    expect(bound).toHaveLength(sites.length + paramSites.length + 1)
     expect(explorerService).toMatch(/const CHUNK_QUERY_CONCURRENCY = 4$/m)
   })
 

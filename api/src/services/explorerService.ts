@@ -1086,9 +1086,14 @@ const MM_ETH_FORM_SQL = (expr: string): string => `if(
                 lower(${expr}),
                 concat('0x45544800', substring(lower(${expr}), 3, 40), '0000000000000000'))`
 
+// The tagged truncation pairs ride as two array LITERALS zipped together, not a
+// values(...) list: each values() tuple is its own AST node (~900 pairs, so
+// thousands of nodes) that the analyzer walks again at every reference of the
+// CTE, which cost the accounts directory query ~0.5 s of PLANNING alone —
+// about half its wall time. An array literal is one node however long it is.
 export function bindCteSql(): string {
   const pairs = taggedTruncationPairs()
-    .map(([h160, owner]) => `('0x45544800${h160.slice(2).toLowerCase()}0000000000000000', '${owner.toLowerCase()}')`)
+    .map(([h160, owner]) => [`'0x45544800${h160.slice(2).toLowerCase()}0000000000000000'`, `'${owner.toLowerCase()}'`])
   return `SELECT eth_id, owner FROM (
               SELECT DISTINCT concat('0x45544800', substring(evm_address, 3, 40), '0000000000000000') AS eth_id,
                      account_id AS owner
@@ -1096,7 +1101,8 @@ export function bindCteSql(): string {
               WHERE relationship = 'explicit_binding' AND alias_type = 'substrate_account_id'
                 AND account_id != '' AND evm_address != ''${pairs.length ? `
               UNION DISTINCT
-              SELECT eth_id, owner FROM values('eth_id String, owner String', ${pairs.join(', ')})` : ''}
+              SELECT tupleElement(p, 1) AS eth_id, tupleElement(p, 2) AS owner
+              FROM (SELECT arrayJoin(arrayZip([${pairs.map(([e]) => e).join(',')}], [${pairs.map(([, o]) => o).join(',')}])) AS p)` : ''}
             ) ORDER BY eth_id LIMIT 1 BY eth_id`
 }
 
@@ -23523,9 +23529,21 @@ async function getAccountHistoryWindowed(accounts: string[], scopeKey: string, f
   return cached(key, await windowedHistoryTtlMs(toBlock), () => getAccountHistory(accounts, { fromBlock, toBlock }))
 }
 
+const accountHistorySharedKey = (accounts: string[], scopeKey: string): string =>
+  `explorer:account-history:${scopeKey}:${accountSetFingerprint(accounts)}`
+
+// Each entry lives ACCOUNT_HISTORY_TTL_MS plus up to half again, drawn per entry.
+// A directory prewarm fills a whole page's rows within seconds; on one fixed TTL
+// they all expired in the same instant and the next pass rebuilt every one of
+// them at once. Jitter only lengthens, so the TTL's floor still spans the
+// prewarm passes it is sized against.
+export const ACCOUNT_HISTORY_TTL_JITTER = 0.5
+export function jitteredAccountHistoryTtlMs(random: () => number = Math.random): number {
+  return Math.round(ACCOUNT_HISTORY_TTL_MS * (1 + ACCOUNT_HISTORY_TTL_JITTER * random()))
+}
+
 function getAccountHistoryShared(accounts: string[], scopeKey: string): Promise<Awaited<ReturnType<typeof getAccountHistory>>> {
-  const key = `explorer:account-history:${scopeKey}:${accountSetFingerprint(accounts)}`
-  return cached(key, ACCOUNT_HISTORY_TTL_MS, () => getAccountHistory(accounts))
+  return cached(accountHistorySharedKey(accounts, scopeKey), jitteredAccountHistoryTtlMs(), () => getAccountHistory(accounts))
 }
 
 // Per-asset analogue of downsampleDaily: one balance point per calendar day (the
@@ -30336,48 +30354,61 @@ async function enrichAccountRows(
   // the background ranking, never a count of balance observations, which is a
   // different unit (see The activity ordering).
   let rowObs: { row: number; asset_id: string; b: number; bal: string }[] = []
+  let sparkUnavailable = false
   if (all.length) {
-    // The (account, row) relation is inlined (ACCOUNT_RE-validated hex): a page's
-    // few thousand ids exceed a query parameter's size, not the SQL text's.
-    const rowsOf = rowAccounts.flatMap((accs, i) => accs.map(a => `('${a}',${i})`)).join(',')
-    const obsRes = await client.query({
-      query: `WITH rows_of AS (SELECT account_id, row FROM VALUES('account_id String, row UInt32', ${rowsOf}))
-            SELECT row, asset_id, tupleElement(c, 1) AS b, toString(tupleElement(c, 2)) AS bal
-            FROM (
-              SELECT row, asset_id,
-                     arraySort(x -> tupleElement(x, 1), groupArray((wk, held_sum))) AS series,
-                     arrayFilter((x, i) -> tupleElement(x, 2) != if(i = 1, toUInt256(0), tupleElement(series[i - 1], 2)), series, arrayEnumerate(series)) AS changes
+    // The sparkline source alone: a failure leaves the rows without one and the
+    // other columns below still fill.
+    try {
+      // The (account, row) relation is inlined (ACCOUNT_RE-validated hex): a page's
+      // few thousand ids exceed a query parameter's size, not the SQL text's.
+      // Two array literals zipped, not a VALUES list: a literal is one AST node
+      // however long, where every VALUES tuple is one the analyzer walks again
+      // at each of rows_of's two references (see bindCteSql).
+      const pairs = rowAccounts.flatMap((accs, i) => accs.map(a => [a, i] as const))
+      const rowsOfIds = pairs.map(([a]) => `'${a}'`).join(','), rowsOfRows = pairs.map(([, i]) => i).join(',')
+      const obsRes = await client.query({
+        query: `WITH rows_of AS (SELECT tupleElement(p, 1) AS account_id, toUInt32(tupleElement(p, 2)) AS row
+                                 FROM (SELECT arrayJoin(arrayZip([${rowsOfIds}], [${rowsOfRows}])) AS p))
+              SELECT row, asset_id, tupleElement(c, 1) AS b, toString(tupleElement(c, 2)) AS bal
               FROM (
-                SELECT m.row AS row, s.asset_id AS asset_id, s.wk AS wk, sum(s.held) AS held_sum
+                SELECT row, asset_id,
+                       arraySort(x -> tupleElement(x, 1), groupArray((wk, held_sum))) AS series,
+                       arrayFilter((x, i) -> tupleElement(x, 2) != if(i = 1, toUInt256(0), tupleElement(series[i - 1], 2)), series, arrayEnumerate(series)) AS changes
                 FROM (
-                  SELECT account_id, asset_id, tupleElement(p, 1) AS wk, tupleElement(p, 2) AS held
+                  SELECT m.row AS row, s.asset_id AS asset_id, s.wk AS wk, sum(s.held) AS held_sum
                   FROM (
-                    SELECT account_id, asset_id,
-                           arraySort(x -> tupleElement(x, 1), groupArray((wk0, bal0))) AS states,
-                           arrayMap(w -> (toInt32(w), tupleElement(arrayLast(x -> tupleElement(x, 1) <= w, states), 2)), range(-1, ${SPARK_WEEKS})) AS filled
+                    SELECT account_id, asset_id, tupleElement(p, 1) AS wk, tupleElement(p, 2) AS held
                     FROM (
                       SELECT account_id, asset_id,
-                             toInt32(greatest(dateDiff('week', {ws:Date}, week_start), -1)) AS wk0,
-                             toUInt256OrZero(argMaxMerge(balance_state)) AS bal0
-                      FROM price_data.account_balance_weekly
-                      WHERE account_id IN (SELECT account_id FROM rows_of)
-                        AND week_start < addWeeks({ws:Date}, ${SPARK_WEEKS})
-                      GROUP BY account_id, asset_id, wk0
+                             arraySort(x -> tupleElement(x, 1), groupArray((wk0, bal0))) AS states,
+                             arrayMap(w -> (toInt32(w), tupleElement(arrayLast(x -> tupleElement(x, 1) <= w, states), 2)), range(-1, ${SPARK_WEEKS})) AS filled
+                      FROM (
+                        SELECT account_id, asset_id,
+                               toInt32(greatest(dateDiff('week', {ws:Date}, week_start), -1)) AS wk0,
+                               toUInt256OrZero(argMaxMerge(balance_state)) AS bal0
+                        FROM price_data.account_balance_weekly
+                        WHERE account_id IN (SELECT account_id FROM rows_of)
+                          AND week_start < addWeeks({ws:Date}, ${SPARK_WEEKS})
+                        GROUP BY account_id, asset_id, wk0
+                      )
+                      GROUP BY account_id, asset_id
                     )
-                    GROUP BY account_id, asset_id
-                  )
-                  ARRAY JOIN filled AS p
-                ) AS s
-                INNER JOIN rows_of AS m ON m.account_id = s.account_id
-                GROUP BY m.row, s.asset_id, s.wk
+                    ARRAY JOIN filled AS p
+                  ) AS s
+                  INNER JOIN rows_of AS m ON m.account_id = s.account_id
+                  GROUP BY m.row, s.asset_id, s.wk
+                )
+                GROUP BY row, asset_id
               )
-              GROUP BY row, asset_id
-            )
-            ARRAY JOIN changes AS c`,
-      query_params: { ws: winStart },
-      format: 'JSONEachRow',
-    })
-    rowObs = await obsRes.json<{ row: number; asset_id: string; b: number; bal: string }>()
+              ARRAY JOIN changes AS c`,
+        query_params: { ws: winStart },
+        format: 'JSONEachRow',
+      })
+      rowObs = await obsRes.json<{ row: number; asset_id: string; b: number; bal: string }>()
+    } catch (error) {
+      console.warn('[accounts] sparkline balance enrichment unavailable:', error instanceof Error ? error.message : error)
+      sparkUnavailable = true
+    }
   }
   // The row index is buildValueSparkline's account key from here on.
   const obsRows = rowObs.filter(r => r.asset_id !== '' && r.b >= 0).map(r => ({ account_id: String(r.row), asset_id: r.asset_id, b: Number(r.b), bal: r.bal }))
@@ -30465,23 +30496,42 @@ async function enrichAccountRows(
       ;(accountsByH160.get(h) ?? accountsByH160.set(h, []).get(h)!).push(acc)
     }
     const h160s = [...accountsByH160.keys()]
-    for (const ea of h160s.length ? erc20WalletAssets : []) {
+    // Every asset's deltas in ONE read (contract IN …): the table is holder-first
+    // and month-partitioned, so each holder costs a granule per partition however
+    // many contracts are asked about, and one read per contract paid that once per
+    // contract. The holder list goes in byte-bounded chunks (db/queryParams.ts): a
+    // large tag's page passes the parameter ceiling, and a refused read here only
+    // ever showed as a missing ERC-20 history.
+    const allDeltas = h160s.length && erc20WalletAssets.length
+      ? await mapParamChunks(h160s, async ws2 => (await client.query({
+          query: `SELECT contract_address AS c, holder AS w,
+                  toInt32(greatest(least(dateDiff('week', {ws:Date}, toDate(block_timestamp)), ${SPARK_WEEKS - 1}), -1)) AS b,
+                  toString(sum(balance_delta)) AS net
+                FROM price_data.erc20_transfer_deltas FINAL
+                WHERE contract_address IN ({cs:Array(String)}) AND holder IN ({ws2:Array(String)})
+                GROUP BY c, w, b ORDER BY c, w, b`,
+          query_params: { cs: erc20WalletAssets.map(ea => ea.contract), ws: winStart, ws2 }, format: 'JSONEachRow',
+        })).json<{ c: string; w: string; b: number; net: string }>(), { concurrency: CHUNK_QUERY_CONCURRENCY }).then(parts => parts.flat()).catch(error => {
+          // One read covers every wallet contract, so a failure loses all of their
+          // history at once: no sparkline at all (sparkUnavailable, like a failed
+          // balance read) rather than a curve short of its ERC-20 holdings.
+          console.warn('[accounts] sparkline ERC-20 history unavailable:', error instanceof Error ? error.message : error)
+          sparkUnavailable = true
+          return null
+        })
+      : []
+    const deltasByContract = new Map<string, { w: string; b: number; net: string }[]>()
+    for (const r of allDeltas ?? []) (deltasByContract.get(r.c) ?? deltasByContract.set(r.c, []).get(r.c)!).push(r)
+    const deltasByAsset = (h160s.length ? erc20WalletAssets : []).map(ea => (allDeltas ? deltasByContract.get(ea.contract) ?? [] : null))
+    for (const [assetIndex, ea] of (h160s.length ? erc20WalletAssets : []).entries()) {
       const dec = asset(ea.assetId).decimals
       const pxMap = pricesByAsset[String(ea.assetId)] ?? new Map<number, number>()
       let earliest = 0
       for (let b = 0; b < SPARK_WEEKS; b++) { const p = pxMap.get(b); if (p != null) { earliest = p; break } }
-      const logRes = await client.query({
-        query: `SELECT holder AS w,
-                toInt32(greatest(least(dateDiff('week', {ws:Date}, toDate(block_timestamp)), ${SPARK_WEEKS - 1}), -1)) AS b,
-                toString(sum(balance_delta)) AS net
-              FROM price_data.erc20_transfer_deltas FINAL
-              WHERE contract_address = {c:String} AND holder IN ({ws2:Array(String)})
-              GROUP BY w, b ORDER BY w, b`,
-        query_params: { c: ea.contract, ws: winStart, ws2: h160s }, format: 'JSONEachRow',
-      }).catch(() => null)
-      if (!logRes) continue
+      const deltas = deltasByAsset[assetIndex]
+      if (!deltas) continue
       const netByH160 = new Map<string, Map<number, bigint>>()
-      for (const r of await logRes.json<{ w: string; b: number; net: string }>()) {
+      for (const r of deltas) {
         if (!netByH160.has(r.w)) netByH160.set(r.w, new Map())
         const m = netByH160.get(r.w)!
         m.set(r.b, (m.get(r.b) ?? 0n) + BigInt(r.net))
@@ -30523,7 +30573,7 @@ async function enrichAccountRows(
     const obs = obsByRow.get(String(i)) ?? []
     const baseline = new Map<string, string>()
     for (const b of baseByRow.get(String(i)) ?? []) baseline.set(`${i}|${b.asset_id}`, b.bal)
-    let spark = accs.length ? buildValueSparkline(obs, baseline, pricesByAsset, decimalsById) : null
+    let spark = accs.length && !sparkUnavailable ? buildValueSparkline(obs, baseline, pricesByAsset, decimalsById) : null
     const moduleBalances = moduleAccs.flatMap(a => moduleBalancesByAccount.get(a) ?? [])
     // Module/sovereign accounts can have millions of observations. Their current
     // balance is not a historical balance series, so omit the sparkline unless a
