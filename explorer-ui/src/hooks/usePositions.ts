@@ -82,6 +82,15 @@ const moneyMarketHistoryQuery = (address: string | null, enabled: boolean) => ({
 export function useMoneyMarketHistory(address: string | null, enabled = true) {
   return useQuery(moneyMarketHistoryQuery(address, enabled))
 }
+/** The Borrow cards' Earned / Interest paid: one read per account serves all its market cards. */
+export function useMoneyMarketEarned(address: string | null) {
+  return useQuery({
+    queryKey: ['money-market-earned', address],
+    queryFn: ({ signal }) => positionsApi.moneyMarketEarned(address as string, signal),
+    enabled: !!address,
+    staleTime: 5 * 60_000,
+  })
+}
 /** The same read for several accounts at once (one cache entry each), `null` skipping one. */
 export function useMoneyMarketHistories(addresses: (string | null)[]) {
   return useQueries({ queries: addresses.map(a => moneyMarketHistoryQuery(a, a != null)) })

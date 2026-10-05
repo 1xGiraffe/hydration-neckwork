@@ -17,7 +17,16 @@ export function aprText(v: number | null | undefined): string {
 // One line of a yield breakdown: what it is, the asset it pays in or comes
 // from, and its rate. `group` starts a titled block (farm rewards) the way the
 // Hydration UI heads its farm rows.
-export interface YieldRow { key: string; label: string; asset?: AssetRef; pct: number | null; note?: string; group?: string }
+export interface YieldRow {
+  key: string
+  label: string
+  asset?: AssetRef
+  pct: number | null
+  note?: string
+  group?: string
+  /** A revenue stream's colour marker (revenueColors.ts), drawn hollow for a cost as the rivers draw outflows. */
+  dot?: { color: string; hollow?: boolean }
+}
 
 export const YIELD_LABELS: Record<YieldComponent['kind'], string> = {
   'omnipool-fee': 'Omnipool fee',

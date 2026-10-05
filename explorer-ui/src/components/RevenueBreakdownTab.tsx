@@ -6,6 +6,7 @@ import { ShareBar } from './HdxCharts'
 import type { ShareSegment } from './HdxCharts'
 import { ChartTooltipRow as TipRow } from './DashboardPrimitives'
 import { REVENUE_STREAM_COLOR, REVENUE_STREAM_LABEL } from './revenueColors'
+import { useRevenueHollarColor } from '../hooks/useRevenueHollarColor'
 import type { RevenueBreakdown, RevenueBreakdownStream, RevenueStream } from '../types'
 
 type RevenueScope =
@@ -22,6 +23,7 @@ const streamColor = (stream: string) => REVENUE_STREAM_COLOR[stream as RevenueSt
 // into its per-asset composition (the assets whose trades, liquidations or
 // fees produced it), the tail folded into one line.
 export function RevenueBreakdownTab({ scope }: { scope: RevenueScope }) {
+  useRevenueHollarColor()
   const account = useAccountRevenueBreakdown(scope.kind === 'account' ? scope.address : null)
   const tag = useTagRevenueBreakdown(scope.kind === 'tag' ? scope.tagId : null)
   const listTag = useListTagRevenueBreakdown(
@@ -82,8 +84,8 @@ export function RevenueBreakdownTab({ scope }: { scope: RevenueScope }) {
       </div>
       <p className="rev-note">
         What the protocol earned from this {scope.kind === 'account' ? 'account’s' : 'tag’s'} usage — trade fees,
-        liquidations, borrow interest and network fees — valued at event time, broken down by the asset each
-        fee was collected in. Same figures as the <a href="/revenue">Protocol Revenue</a> page, at the account grain.
+        liquidations, the reserve factor’s share of borrow interest (all of HOLLAR’s) and network fees — valued at event time, broken down by the asset each
+        fee was collected in. Same figures as the <a href="/revenue/protocol">Protocol Revenue</a> page, at the account grain.
       </p>
     </>
   )

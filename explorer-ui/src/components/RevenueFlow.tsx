@@ -1,14 +1,16 @@
 /* eslint-disable react-refresh/only-export-components -- river component + the pure advanceStage helper its tests exercise */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AddrPill, Usd, F } from './ui'
 import { useMediaQuery } from '../hooks/useMediaQuery'
+import { subscribeFrame } from '../hooks/flowLoop'
 import {
   createFlowScheduler,
   useRevenueFlowStream,
   type FlowEmission,
   type FlowScheduler,
 } from '../hooks/useRevenueFlowStream'
-import { REVENUE_STREAM_COLOR, REVENUE_STREAM_LABEL } from './revenueColors'
+import { REVENUE_STREAM_COLOR, REVENUE_STREAM_LABEL, REVENUE_STREAMS_ORDERED } from './revenueColors'
+import { useRevenueHollarColor } from '../hooks/useRevenueHollarColor'
 import type { RevenueStream } from '../types'
 
 /** The per-event fee streams: frequent, each worth a fraction of a cent. */
@@ -28,6 +30,10 @@ const TINY_FEE_STREAMS: ReadonlySet<RevenueStream> = new Set<RevenueStream>(['ne
 // the counter instead of arriving visibly (see advanceStage). The river
 // pauses while the tab is hidden, and `prefers-reduced-motion` swaps the
 // whole animation for a calm live ledger of the same items.
+//
+// Full screen belongs to the page, not the river: /revenue opens ONE view
+// holding both rivers from either river's button (useRiverFullscreen.ts), and
+// passes `fullscreen` down so the river slows its drift and enlarges its type.
 
 interface Particle extends FlowEmission {
   /** Visual params, derived deterministically from the emission id. */
@@ -102,13 +108,62 @@ const nowMs = () => Date.now()
 
 const DESKTOP_MAX_ACTIVE = 90
 const MOBILE_MAX_ACTIVE = 40
-const FULLSCREEN_MAX_ACTIVE = 160
 /** Below this an income is a mote; at or above, a readable pill. */
 const PILL_THRESHOLD_USD = 0.05
 
-export function RevenueFlow() {
+/** The river's full-screen control; the page owns what it opens. */
+export function RiverFullscreenButton({ fullscreen, onToggle }: { fullscreen: boolean; onToggle: () => void }) {
+  const label = fullscreen ? 'Exit full screen' : 'Watch both rivers full screen'
+  return (
+    <button type="button" className="rev-fs-btn" onClick={onToggle} aria-label={label} title={label} aria-pressed={fullscreen}>
+      {fullscreen ? '✕' : '⛶'}
+    </button>
+  )
+}
+
+export interface RiverLegendItem {
+  key: string
+  label: string
+  color: string
+  /** A cost: drawn hollow, as its particles are. */
+  out?: boolean
+  /** A stream flowing both ways: both markers, filled and hollow, as its particles are drawn. */
+  both?: boolean
+}
+
+/** A river's legend, under its stage: every stream that can flow in it, in the palette's validated order. */
+export function RiverLegend({ items, label }: { items: RiverLegendItem[]; label: string }) {
+  if (!items.length) return null
+  return (
+    <div className="rev-legend" role="list" aria-label={label}>
+      {items.map(it => (
+        <span className="rev-legend-item" role="listitem" key={it.key} title={it.both ? `${it.label}: earned and paid` : undefined}>
+          {(it.both || !it.out) && <span className="rev-dot" style={{ background: it.color }} />}
+          {(it.both || it.out) && <span className="rev-dot rev-dot-out" style={{ '--tint': it.color } as React.CSSProperties} />}
+          {it.label}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+const PROTOCOL_LEGEND: RiverLegendItem[] = REVENUE_STREAMS_ORDERED.map(s => ({ key: s, label: REVENUE_STREAM_LABEL[s], color: REVENUE_STREAM_COLOR[s] }))
+
+export interface RiverProps {
+  /**
+   * Overrides the particle caps when the river shares the page with another
+   * one (the /revenue overview splits ONE combined budget between them, and
+   * raises it for the larger full-screen canvas).
+   */
+  maxActive?: { desktop: number; mobile: number }
+  fullscreen?: boolean
+  onToggleFullscreen?: () => void
+}
+
+export function RevenueFlow({ maxActive, fullscreen = false, onToggleFullscreen }: RiverProps = {}) {
   const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
-  const vertical = useMediaQuery('(max-width: 720px)')
+  // Full screen always runs left to right: its cells are wider than tall even stacked on a phone.
+  const vertical = useMediaQuery('(max-width: 720px)') && !fullscreen
 
   // One scheduler per mounted river (lazy state init, never recreated): its
   // session total is the number the counter shows.
@@ -119,14 +174,14 @@ export function RevenueFlow() {
     now: nowMs,
   }))
   useRevenueFlowStream(scheduler)
+  useRevenueHollarColor()
 
-  const [fullscreen, setFullscreen] = useState(false)
   const [hidden, setHidden] = useState(typeof document !== 'undefined' && document.hidden)
   const panelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    scheduler.setMaxActive(fullscreen ? FULLSCREEN_MAX_ACTIVE : vertical ? MOBILE_MAX_ACTIVE : DESKTOP_MAX_ACTIVE)
-  }, [scheduler, fullscreen, vertical])
+    scheduler.setMaxActive(vertical ? (maxActive?.mobile ?? MOBILE_MAX_ACTIVE) : (maxActive?.desktop ?? DESKTOP_MAX_ACTIVE))
+  }, [scheduler, vertical, maxActive?.mobile, maxActive?.desktop])
 
   useEffect(() => {
     const onVisibility = () => setHidden(document.hidden)
@@ -142,17 +197,6 @@ export function RevenueFlow() {
     }
   }, [])
 
-  useEffect(() => {
-    const onChange = () => setFullscreen(Boolean(document.fullscreenElement))
-    document.addEventListener('fullscreenchange', onChange)
-    return () => document.removeEventListener('fullscreenchange', onChange)
-  }, [])
-
-  function toggleFullscreen(): void {
-    if (document.fullscreenElement) void document.exitFullscreen()
-    else if (panelRef.current?.requestFullscreen) void panelRef.current.requestFullscreen()
-  }
-
   // Arrived money: the counter the river pours into. Ticks on particle arrival
   // (ledger rows count immediately — nothing visibly flows there).
   const [arrivedUsd, setArrivedUsd] = useState(0)
@@ -163,21 +207,32 @@ export function RevenueFlow() {
   // value is a side effect an updater is not allowed to have.
   const particlesRef = useRef<Particle[]>([])
   const [ledger, setLedger] = useState<FlowEmission[]>([])
+  // The layout the particles in flight were measured for (see settleOnLayout).
+  const layoutRef = useRef(`${fullscreen}:${vertical}`)
 
   useEffect(() => {
-    // The loop is ALWAYS registered: browsers already suspend rAF while the
-    // page is hidden, so backgrounding pauses it for free — and gating it on
-    // the `hidden` state instead proved fragile (a restore that skipped
-    // visibilitychange left the state stuck and the river frozen). A frame
-    // firing IS proof of visibility, so it also self-heals a stale flag.
-    let frame = 0
-    const loop = () => {
-      if (document.hidden) {
-        frame = window.requestAnimationFrame(loop)
-        return
-      }
+    // The frame callback is ALWAYS registered on the shared loop (flowLoop.ts):
+    // browsers already suspend rAF while the page is hidden, so backgrounding
+    // pauses it for free — and gating it on the `hidden` state instead proved
+    // fragile (a restore that skipped visibilitychange left the state stuck and
+    // the river frozen). A frame firing IS proof of visibility, so it also
+    // self-heals a stale flag.
+    const onFrame = (now: number) => {
       setHidden(prev => (prev ? false : prev))
-      const now = Date.now()
+      // A particle's travel is measured at spawn, so one in flight when the
+      // stage changes size (entering or leaving full screen, a rotation past
+      // the vertical breakpoint) would stop short or overshoot: it settles
+      // instead — its value credited to the counter, the stage cleared.
+      const layout = `${fullscreen}:${vertical}`
+      if (layoutRef.current !== layout) {
+        layoutRef.current = layout
+        const flown = particlesRef.current
+        if (flown.length) {
+          particlesRef.current = []
+          setParticles([])
+          setArrivedUsd(prev => prev + flown.reduce((s, p) => s + p.usd, 0))
+        }
+      }
       const due = scheduler.drain(now)
       if (due.length) {
         if (reducedMotion) {
@@ -202,10 +257,8 @@ export function RevenueFlow() {
           if (droppedUsd > 0) setArrivedUsd(prev => prev + droppedUsd)
         }
       }
-      frame = window.requestAnimationFrame(loop)
     }
-    frame = window.requestAnimationFrame(loop)
-    return () => window.cancelAnimationFrame(frame)
+    return subscribeFrame(onFrame)
   }, [scheduler, reducedMotion, vertical, fullscreen])
 
   function arrive(particle: Particle): void {
@@ -215,11 +268,13 @@ export function RevenueFlow() {
     setPulse(p => p + 1)
   }
 
-  const streams = useMemo(() => Object.entries(REVENUE_STREAM_LABEL) as [keyof typeof REVENUE_STREAM_LABEL, string][], [])
+  const legend = <RiverLegend items={PROTOCOL_LEGEND} label="Protocol Revenue streams" />
 
   if (reducedMotion) {
     return (
-      <div className="rev-river rev-ledger-mode">
+      <>
+      <div className={`rev-river rev-ledger-mode${fullscreen ? ' rev-fullscreen' : ''}`}>
+        {onToggleFullscreen && <RiverFullscreenButton fullscreen={fullscreen} onToggle={onToggleFullscreen} />}
         <div className="rev-counter" aria-live="off">
           <div className="rev-counter-num mono"><Usd v={arrivedUsd} /></div>
           <div className="rev-counter-sub">collected while watching</div>
@@ -239,10 +294,13 @@ export function RevenueFlow() {
           ))}
         </div>
       </div>
+      {legend}
+      </>
     )
   }
 
   return (
+    <>
     <div
       ref={panelRef}
       className={`rev-river${vertical ? ' rev-vertical' : ''}${hidden ? ' rev-paused' : ''}${fullscreen ? ' rev-fullscreen' : ''}`}
@@ -252,15 +310,7 @@ export function RevenueFlow() {
         <div className="rev-counter-num mono"><Usd v={arrivedUsd} /></div>
         <div className="rev-counter-sub">collected while watching</div>
       </div>
-      <button
-        type="button"
-        className="rev-fs-btn"
-        onClick={toggleFullscreen}
-        aria-label={fullscreen ? 'Exit full screen' : 'Watch full screen'}
-        title={fullscreen ? 'Exit full screen' : 'Watch full screen'}
-      >
-        {fullscreen ? '✕' : '⛶'}
-      </button>
+      {onToggleFullscreen && <RiverFullscreenButton fullscreen={fullscreen} onToggle={onToggleFullscreen} />}
       <div className="rev-stage" aria-hidden={particles.length === 0 ? undefined : true}>
         {particles.map(p => (
           p.kind === 'pill' && p.item ? (
@@ -297,16 +347,8 @@ export function RevenueFlow() {
           )
         ))}
       </div>
-      <div className="rev-river-foot">
-        <span className="rev-legend">
-          {streams.map(([key, label]) => (
-            <span className="rev-legend-item" key={key}>
-              <span className="rev-dot" style={{ background: REVENUE_STREAM_COLOR[key] }} />
-              {label}
-            </span>
-          ))}
-        </span>
-      </div>
     </div>
+    {legend}
+    </>
   )
 }

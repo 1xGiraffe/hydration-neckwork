@@ -1,8 +1,11 @@
 import type { ReactNode } from 'react'
+import { useDirectoryActivityCounts } from '../hooks/useExplorerData'
 import { paths } from '../router'
 import { AddrPill, Usd, Num, Dash, EmptyRow, healthFactorDisplay, rowNav, Sparkline, TableSkeleton, TagGroupPill, TokenIconRow, pendingRows } from './ui'
 import { defisimAccountTarget, defisimUrl } from '../utils/defisim'
-import type { TopAccountRow } from '../types'
+import type { DirectoryActivityCounts, TopAccountRow } from '../types'
+import { activityCountKey } from '../utils/directoryActivity'
+import { PROTOCOL_REVENUE, PROTOCOL_REVENUE_HINT, PROTOCOL_REVENUE_SHORT, USER_REVENUE, USER_REVENUE_HINT, USER_REVENUE_SHORT } from '../utils/revenueNames'
 
 // The accounts directory table.
 //
@@ -17,7 +20,7 @@ import type { TopAccountRow } from '../types'
 // short member list arrives already ranked. So the header renders sort buttons
 // only when a handler is passed, and reads as plain labels otherwise.
 
-export type AccountSortKey = 'value' | 'health' | 'identity' | 'supplied' | 'borrowed' | 'activity' | 'volume' | 'liquidation' | 'revenue'
+export type AccountSortKey = 'value' | 'health' | 'identity' | 'supplied' | 'borrowed' | 'activity' | 'volume' | 'liquidation' | 'revenue' | 'user-revenue'
 
 // Below 720px every row becomes a card, where a line reading "BORROWED —"
 // carries nothing: cells with no value are marked so the card can drop them.
@@ -45,14 +48,47 @@ export function HealthSimBadge({ hf, addr }: { hf: { label: string; cls: string 
   )
 }
 
-export function AccountRow({ r, memberView }: { r: TopAccountRow; memberView?: boolean }) {
+// A row's User Revenue cell. Three different "no number" states, told apart by
+// their hover: a row User Revenue does not describe (protocol accounts, pools and
+// other custodies — their 0 is no user's zero), an unpublished figure, and a
+// real user's published zero, which reads "$0".
+function UserRevenueCell({ r }: { r: TopAccountRow }) {
+  const notUser = r.holderClass != null && r.holderClass !== 'user'
+  const v = r.userRevenueUsd
+  // A published zero is a real figure, so a user's card keeps its "$0" line;
+  // only the two "no number" states drop out of the card.
+  const empty = notUser || v == null
+  return (
+    <td data-label={USER_REVENUE} className={`r mono ur-cell${emptyIf(empty)}${!notUser && (v ?? 0) < 0 ? ' ur-neg' : ''}`}>
+      {notUser
+        ? <span className="mono muted" title={`Not a user account — ${r.holderClass === 'protocol' ? "the protocol's own" : "a pool, contract or another chain's account, whose income belongs to others"}; User Revenue counts what users earn`}>—</span>
+        : v == null ? <span className="mono muted" title="User Revenue not yet published for this account">—</span>
+          : v === 0 ? <span className="muted">$0</span> : <Usd v={v} />}
+    </td>
+  )
+}
+
+export function AccountRow({ r, memberView, lazyActivity, activityPending, activityUnavailable, onActivityRetry }: {
+  r: TopAccountRow
+  memberView?: boolean
+  // A total counted on demand for a row the swept ranking has not reached (see
+  // useDirectoryActivityCounts): null = it cannot be counted.
+  lazyActivity?: DirectoryActivityCounts['counts'][string]
+  activityPending?: boolean
+  // The count failed, or polling gave up on it: say so and offer a retry.
+  activityUnavailable?: boolean
+  onActivityRetry?: () => void
+}) {
   // Badge only for actual borrowers — pure suppliers ('inf') show nothing.
   // Tag rows link DefiSim to the member holding the worst position.
   const hf = r.healthFactor && r.healthFactor !== 'inf' ? healthFactorDisplay(r.healthFactor) : null
   const addr = defisimAccountTarget(r.account, r.simAccount)
   // Module accounts touch balances on every trade, so the column shows the
   // explorer-wide rough scale (2.25M · 505k · 4.87k) rather than a full count.
-  const count = (n?: number) => n != null ? <span className="mono muted"><Num v={n} /></span> : <Dash />
+  const count = (n?: number | null) => n != null ? <span className="mono muted"><Num v={n} /></span> : <Dash />
+  // The swept total when there is one; otherwise the one counted for this view.
+  const activityCount = r.activityCount ?? lazyActivity?.total ?? undefined
+  const activityComplete = r.activityCount != null ? r.activityCountComplete : lazyActivity?.complete
   // The whole row opens what it names, like every other directory here — a
   // tag's combined view or the account's page. rowNav defers to nested links,
   // so the pill, the health badge and the sparkline keep their own targets, and
@@ -70,19 +106,30 @@ export function AccountRow({ r, memberView }: { r: TopAccountRow; memberView?: b
         ? <AddrPill account={r.account} noTag />
         : r.tag ? <TagGroupPill tag={r.tag} /> : r.account ? <AddrPill account={r.account} /> : <Dash />}</td>
       <td data-label="Value" className="r mono"><Usd v={r.portfolioUsd} /></td>
+      {/* User Revenue, signed, right after what the account holds: the figure a
+          reader scans the directory for. */}
+      <UserRevenueCell r={r} />
       <td data-label="Holdings" className={`holdings-cell${emptyIf(!r.topAssets?.length)}`}>{r.topAssets?.length ? <TokenIconRow assets={r.topAssets} others={r.otherAssets ?? 0} /> : <Dash />}</td>
-      <td data-label="12M" className={`r${emptyIf(!(r.sparkline && r.sparkline.length > 1))}`}>{r.sparkline && r.sparkline.length > 1 ? <Sparkline data={r.sparkline} /> : <Dash />}</td>
-      <td data-label="Lent" className={`r mono${emptyIf(!r.suppliedUsd)}`}>{r.suppliedUsd ? <Usd v={r.suppliedUsd} /> : <Dash />}</td>
+      <td data-label="12M" className={`r spark-cell${emptyIf(!(r.sparkline && r.sparkline.length > 1))}`}>{r.sparkline && r.sparkline.length > 1 ? <Sparkline data={r.sparkline} w={80} h={26} /> : <Dash />}</td>
+      <td data-label="Supplied" className={`r mono${emptyIf(!r.suppliedUsd)}`}>{r.suppliedUsd ? <Usd v={r.suppliedUsd} /> : <Dash />}</td>
       <td data-label="Borrowed" className={`r mono${emptyIf(!r.borrowedUsd)}`}>{r.borrowedUsd ? <Usd v={r.borrowedUsd} /> : <Dash />}</td>
       <td data-label="Health" className={`r${emptyIf(!hf)}`}>{hf && addr
         ? <HealthSimBadge hf={hf} addr={addr} />
         : hf ? <span className={`hf ${hf.cls}`}>{hf.label}</span> : <Dash />}</td>
+      <td data-label={PROTOCOL_REVENUE} className={`r mono${emptyIf(!r.revenueUsd)}`}>{r.revenueUsd ? <Usd v={r.revenueUsd} /> : <Dash />}</td>
       <td data-label="Liquidation $" className={`r mono${emptyIf(!r.liquidationVolumeUsd)}`}>{r.liquidationVolumeUsd ? <Usd v={r.liquidationVolumeUsd} /> : <Dash />}</td>
       <td data-label="Trading $" className={`r mono${emptyIf(!r.tradingVolumeUsd)}`}>{r.tradingVolumeUsd ? <Usd v={r.tradingVolumeUsd} /> : <Dash />}</td>
-      <td data-label="Protocol Revenue" className={`r mono${emptyIf(!r.revenueUsd)}`}>{r.revenueUsd ? <Usd v={r.revenueUsd} /> : <Dash />}</td>
       {/* A partial total is a floor: the feed runs deeper than it could be
-          counted, so it reads as "at least this" instead of as exact. */}
-      <td data-label="Activity" className={`r${emptyIf(r.activityCount == null)}`}>{count(r.activityCount)}{r.activityCount != null && r.activityCountComplete === false ? '+' : ''}</td>
+          counted, so it reads as "at least this" instead of as exact. A row
+          still being counted on demand reads as such rather than as absent. */}
+      <td data-label="Activity" className={`r${emptyIf(activityCount == null)}`}>
+        {activityCount == null && activityPending
+          ? <span className="mono muted activity-counting" title="Counting this row's activity…">…</span>
+          : activityCount == null && activityUnavailable
+            ? <button type="button" className="mono muted activity-retry" title="Count unavailable — retry" aria-label="Activity count unavailable — retry"
+              onClick={e => { e.stopPropagation(); onActivityRetry?.() }}>retry</button>
+            : count(activityCount)}{activityCount != null && activityComplete === false ? '+' : ''}
+      </td>
     </tr>
   )
 }
@@ -104,27 +151,48 @@ export function AccountsTable({ rows, loading, pending, sort, onSort, emptyLabel
   const th = (key: AccountSortKey, label: string) => onSort
     ? <button type="button" className={`th-sort${sort === key ? ' on' : ''}`} onClick={() => onSort(key)}>{label}{sort === key ? ' ▼' : ''}</button>
     : label
+  // Activity totals for the rendered rows the swept ranking has not counted —
+  // only once the rows are this view's own (not a previous page held while the
+  // next loads).
+  const missing = loading || pending ? [] : rows.flatMap(r => {
+    const key = r.activityCount == null ? activityCountKey(r, memberView) : null
+    return key ? [key] : []
+  })
+  const lazy = useDirectoryActivityCounts(missing)
+  const pendingKeys = new Set(lazy.data?.pending ?? (lazy.isFetching ? missing : []))
+  const unavailableKeys = new Set(lazy.data?.unavailable ?? [])
+  const retryActivity = lazy.retry
   return (
     <div className="panel">
       <table className="tbl accounts-tbl">
+        {/* Short headers carry their long form on hover, so twelve columns fit a
+            1280px window without the panel scrolling sideways. */}
         <thead><tr>
           <th>{th('identity', 'Account')}</th>
-          <th className="r">{th('value', 'Value')}</th><th>Holdings</th><th className="r">12M</th>
-          <th className="r">{th('supplied', 'Lent')}</th><th className="r">{th('borrowed', 'Borrowed')}</th>
-          <th className="r">{th('health', 'Health')}</th>
-          <th className="r">{th('liquidation', 'Liquidation $')}</th>
-          <th className="r">{th('volume', 'Trading $')}</th>
-          <th className="r" title="Protocol revenue the account's activity generated">{th('revenue', 'P. Revenue')}</th>
-          <th className="r">{th('activity', 'Activity')}</th>
+          <th className="r">{th('value', 'Value')}</th>
+          <th className="r" title={USER_REVENUE_HINT}>{th('user-revenue', USER_REVENUE_SHORT)}</th>
+          <th>Holdings</th>
+          <th className="r" title="Portfolio value over the last 12 months">12M</th>
+          <th className="r">{th('supplied', 'Supplied')}</th><th className="r">{th('borrowed', 'Borrowed')}</th>
+          <th className="r" title="Money-market health factor · opens DefiSim">{th('health', 'Health')}</th>
+          <th className="r" title={PROTOCOL_REVENUE_HINT}>{th('revenue', PROTOCOL_REVENUE_SHORT)}</th>
+          <th className="r" title="Liquidation $ — USD volume liquidated">{th('liquidation', 'Liq. $')}</th>
+          <th className="r" title="Trading $ — lifetime trading volume in USD">{th('volume', 'Trading $')}</th>
+          <th className="r" title="Activity — the account's activity feed total, as its own page counts it">{th('activity', 'Activity')}</th>
         </tr></thead>
         <tbody {...pendingRows(pending)}>
           {/* A phone card here drops the columns this account has nothing in and
               gives the 12M chart a whole line of its own, so its height is not the
               column count: the directory's rows measure 172px (identity, value,
               holdings, chart) to 324px, averaging seven lines' worth. */}
-          {loading && !rows.length ? <TableSkeleton cols={11} mobileCols={7} rows={skeletonRows} />
-            : !rows.length ? <EmptyRow cols={11}>{emptyLabel}</EmptyRow>
-              : rows.map((r, i) => <AccountRow key={accountRowKey(r, i)} r={r} memberView={memberView} />)}
+          {loading && !rows.length ? <TableSkeleton cols={12} mobileCols={7} rows={skeletonRows} />
+            : !rows.length ? <EmptyRow cols={12}>{emptyLabel}</EmptyRow>
+              : rows.map((r, i) => {
+                const key = r.activityCount == null ? activityCountKey(r, memberView) : null
+                return <AccountRow key={accountRowKey(r, i)} r={r} memberView={memberView}
+                  lazyActivity={key ? lazy.data?.counts[key] : undefined} activityPending={key ? pendingKeys.has(key) : false}
+                  activityUnavailable={key ? unavailableKeys.has(key) : false} onActivityRetry={retryActivity} />
+              })}
         </tbody>
       </table>
       {footer}
@@ -138,14 +206,15 @@ export function AccountsSortSelect({ id, sort, onSort }: { id: string; sort: Acc
     <div className="mobile-sort">
       <label htmlFor={id}>Sort by</label>
       <select id={id} value={sort} onChange={e => onSort(e.target.value as AccountSortKey)}>
+        <option value="user-revenue">{USER_REVENUE}</option>
         <option value="value">Value</option>
         <option value="identity">Account</option>
-        <option value="supplied">Lent</option>
+        <option value="supplied">Supplied</option>
         <option value="borrowed">Borrowed</option>
         <option value="health">Health</option>
+        <option value="revenue">{PROTOCOL_REVENUE}</option>
         <option value="liquidation">Liquidation $</option>
         <option value="volume">Trading $</option>
-        <option value="revenue">Protocol Revenue</option>
         <option value="activity">Activity</option>
       </select>
     </div>

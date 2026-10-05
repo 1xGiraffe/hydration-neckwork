@@ -20,6 +20,7 @@ import type { PositionsPresence, MoneyMarketPosition, ActiveDca, OpenLimitOrder,
 import { UNCOUNTED_REASON } from '../types'
 import type { ListCount } from '../api/explorer'
 import type { ReactNode } from 'react'
+import { PROTOCOL_REVENUE, PROTOCOL_REVENUE_HINT, PROTOCOL_REVENUE_SHORT, USER_REVENUE, USER_REVENUE_HINT, USER_REVENUE_SHORT } from '../utils/revenueNames'
 
 // Render helpers shared by the Account and Tag detail pages so both surface the
 // same on-chain data (balances, DCA orders, LP positions, portfolio chart,
@@ -363,6 +364,10 @@ export function profileTabs(
   // Header-stat revenue total; the Protocol Revenue tab exists exactly when
   // the stat does, so the two can never disagree about whether there is any.
   revenueUsd?: number,
+  // User Revenue (net, all time; null = not yet published, or not a user
+  // account): the User Revenue tab exists exactly when its stat does — any
+  // published figure, $0 included (the directory's rule).
+  userRevenueUsd?: number | null,
 ): DetailTab[] {
   const p = positions.presence
   // A tab with nothing open still shows when its history exists; its badge then
@@ -385,6 +390,7 @@ export function profileTabs(
     { key: 'events', label: 'Events', ...(eventsCount == null ? {} : { count: eventsCount }) },
     ...(votesCount && votesCount > 0 ? [{ key: 'votes', label: 'Votes', count: votesCount }] : []),
     ...(revenueUsd && revenueUsd > 0 ? [{ key: 'revenue', label: 'Protocol Revenue' }] : []),
+    ...(userRevenueUsd != null ? [{ key: 'user-revenue', label: 'User Revenue' }] : []),
   ]
 }
 
@@ -436,11 +442,14 @@ const unpayableCount = (entries: { amount: string; payable?: boolean }[]): numbe
 
 const UNCOUNTED_TITLE = 'A balance the value leaves out on purpose. The Omnipool prices H2O off the assets it pools, so its own hub reserve valued at that price would restate the pooled assets Value already counts. Shown as a balance, counted in no value.'
 
-export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, valueUsd, exHdxValueUsd, moneyMarket, farmRewards, moneyMarketRewards, balances }: {
+export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, userRevenueUsd, valueUsd, exHdxValueUsd, moneyMarket, farmRewards, moneyMarketRewards, balances }: {
   tradingVolumeUsd?: number | null
   liquidationVolumeUsd?: number | null
   // Protocol revenue earned from this account (fees paid, penalties, interest).
   revenueUsd?: number | null
+  // User Revenue: what the account EARNED, net (signed). null / absent = not
+  // yet published, and then no tile — never a $0 standing in for it.
+  userRevenueUsd?: number | null
   valueUsd: number
   // `valueUsd` with HDX and HDX LP taken out. Shipped only for holders whose own
   // token dominates the balance sheet (the Treasury), so — like revenueUsd — the
@@ -483,11 +492,15 @@ export function ProfileStats({ tradingVolumeUsd, liquidationVolumeUsd, revenueUs
         <div className="lab">Liquidation</div>
         <div className="amt"><Usd v={liquidation} /></div>
       </div>}
-      {revenue > 0 && <div className="acct-bal subtle">
-        {/* "Protocol Revenue" where the row has room; the narrow swap keeps the
-            four stat tiles on one line on phones. */}
-        <div className="lab"><span className="lab-wide">Protocol Revenue</span><span className="lab-narrow" title="Protocol Revenue">P. Revenue</span></div>
+      {revenue > 0 && <div className="acct-bal subtle" title={PROTOCOL_REVENUE_HINT}>
+        {/* The long form where the row has room; the narrow swap keeps the stat
+            tiles on one line on phones. */}
+        <div className="lab"><span className="lab-wide">{PROTOCOL_REVENUE}</span><span className="lab-narrow" title={PROTOCOL_REVENUE_HINT}>{PROTOCOL_REVENUE_SHORT}</span></div>
         <div className="amt"><Usd v={revenue} /></div>
+      </div>}
+      {userRevenueUsd != null && <div className="acct-bal subtle" title={USER_REVENUE_HINT}>
+        <div className="lab"><span className="lab-wide">{USER_REVENUE}</span><span className="lab-narrow" title={USER_REVENUE_HINT}>{USER_REVENUE_SHORT}</span></div>
+        <div className={`amt${userRevenueUsd < 0 ? ' ur-neg' : ''}`}><Usd v={userRevenueUsd} /></div>
       </div>}
       {exHdxValueUsd != null && <div className="acct-bal subtle">
         {/* Same wide/narrow pair as Protocol Revenue — "Ex-HDX value" where the row

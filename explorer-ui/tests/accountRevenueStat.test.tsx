@@ -24,5 +24,9 @@ describe('accounts revenue sort', () => {
     const html = renderToStaticMarkup(<AccountsSortSelect id="s" sort="revenue" onSort={() => {}} />)
     expect(html).toContain('value="revenue"')
     expect(html).toContain('>Protocol Revenue<')
+    expect(html).not.toContain('generated')
+    // User Revenue leads the phone sort control, as its column leads the table.
+    expect(html.indexOf('value="user-revenue"')).toBeGreaterThan(-1)
+    expect(html.indexOf('value="user-revenue"')).toBeLessThan(html.indexOf('value="value"'))
   })
 })

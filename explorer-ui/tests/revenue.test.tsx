@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { Revenue } from '../src/pages/Revenue'
+import { RevenueProtocol } from '../src/pages/RevenueProtocol'
 import { REVENUE_STREAMS_ORDERED, REVENUE_STREAM_COLOR, REVENUE_STREAM_LABEL, STAKER_POT_COLOR } from '../src/components/revenueColors'
 import type { RevenueDashboard, StakerDistributions } from '../src/types'
 
@@ -64,16 +64,16 @@ function render(data?: RevenueDashboard, stakers: StakerDistributions | undefine
   }
   return renderToStaticMarkup(
     <QueryClientProvider client={client}>
-      <Revenue />
+      <RevenueProtocol />
     </QueryClientProvider>,
   )
 }
 
-describe('Revenue page', () => {
-  it('renders the river, the ribbon totals, breakdown and top payers from one payload', () => {
+describe('Protocol Revenue page (/revenue/protocol)', () => {
+  it('renders the ribbon totals, breakdown and top payers from one payload (the river lives on the overview)', () => {
     const html = render(fixture())
-    expect(html).toContain('rev-river')
-    expect(html).toContain('collected while watching')
+    expect(html).not.toContain('rev-river')
+    expect(html).toContain('href="/revenue"')
     // Ribbon totals in the shared compact USD format.
     expect(html).toContain('$512')
     expect(html).toContain('$431k')
@@ -126,21 +126,11 @@ describe('Revenue page', () => {
     expect(new Set(colors).size).toBe(colors.length)
   })
 
-  it('stacks the ICE matched fee right after HSM revenue, with its own color and label', () => {
-    // The API's stream list appends ice_matched_fee after hsm_revenue; the UI's
-    // legend/stack order follows it so the two surfaces agree on adjacency.
-    expect(REVENUE_STREAMS_ORDERED.indexOf('ice_matched_fee')).toBe(REVENUE_STREAMS_ORDERED.indexOf('hsm_revenue') + 1)
+  it('stacks every stream exactly once, labels the newer ones, and keeps the cross-chain hue', () => {
+    expect([...REVENUE_STREAMS_ORDERED].sort()).toEqual(Object.keys(REVENUE_STREAM_LABEL).sort())
     expect(REVENUE_STREAM_LABEL.ice_matched_fee).toBe('ICE matched fee')
     expect(REVENUE_STREAM_COLOR.ice_matched_fee).toBe('var(--cat-intent)')
-    // uniswap_v3_fee follows ice_matched_fee in the API's list too (2026-09-09).
-    expect(REVENUE_STREAMS_ORDERED.indexOf('uniswap_v3_fee')).toBe(REVENUE_STREAMS_ORDERED.indexOf('ice_matched_fee') + 1)
     expect(REVENUE_STREAM_LABEL.uniswap_v3_fee).toBe('Uniswap v3 pool fees')
-  })
-
-  it('stacks the XCM execution fee beside the network fee, in the cross-chain hue', () => {
-    // Both are per-event treasury fees, a fraction of a cent each; the river
-    // floors their motes together and the stack keeps them adjacent.
-    expect(REVENUE_STREAMS_ORDERED.indexOf('xcm_execution_fee')).toBe(REVENUE_STREAMS_ORDERED.indexOf('network_fee') + 1)
     expect(REVENUE_STREAM_LABEL.xcm_execution_fee).toBe('XCM execution fees')
     expect(REVENUE_STREAM_COLOR.xcm_execution_fee).toBe('var(--cat-xcm)')
   })

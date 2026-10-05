@@ -1,4 +1,5 @@
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
+import { mergeBreakdownCatchup, mergeDashboardCatchup } from '../utils/userRevenueMerge'
 import { api, userApi } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import { useHeadStream, BLOCK_STALE_MS, LIVE_MS } from '../live'
@@ -598,6 +599,19 @@ export function useHdxDashboard() {
 }
 export function useRevenueDashboard(range: RevenueRange) {
   return useQuery({ queryKey: ['revenue-dashboard', range], queryFn: ({ signal }) => api.revenue(range, signal), staleTime: 60_000 })
+}
+// User Revenue: the folds publish about hourly, so a minute's staleness is free.
+export function useUserRevenueSummary() {
+  return useQuery({ queryKey: ['user-revenue-summary'], queryFn: ({ signal }) => api.userRevenueSummary(signal), staleTime: 60_000, refetchInterval: 300_000 })
+}
+export function useUserRevenueDashboard(range: RevenueRange) {
+  return useQuery({ queryKey: ['user-revenue-dashboard', range], queryFn: ({ signal }) => api.userRevenue(range, signal), select: mergeDashboardCatchup, staleTime: 120_000 })
+}
+export function useAccountUserRevenue(address: string | null, range: RevenueRange) {
+  return useQuery({ queryKey: ['account-user-revenue', address, range], queryFn: ({ signal }) => api.accountUserRevenue(address as string, range, signal), select: mergeBreakdownCatchup, enabled: !!address, staleTime: 300_000 })
+}
+export function useTagUserRevenue(tagId: string | null, range: RevenueRange) {
+  return useQuery({ queryKey: ['tag-user-revenue', tagId, range], queryFn: ({ signal }) => api.tagUserRevenue(tagId as string, range, signal), select: mergeBreakdownCatchup, enabled: !!tagId, staleTime: 300_000 })
 }
 export function useStakerDistributions(range: RevenueRange) {
   return useQuery({ queryKey: ['revenue-stakers', range], queryFn: ({ signal }) => api.revenueStakers(range, signal), staleTime: 60_000 })

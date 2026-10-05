@@ -1,7 +1,9 @@
 import { useEffect } from 'react'
+import { mergeBreakdownCatchup } from '../utils/userRevenueMerge'
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import { api, userApi, PUBLIC_LIST_TAG } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
+import type { RevenueRange } from '../types'
 import { useSession, setSession } from '../session'
 import { setTagMap, setTagMapError } from '../userTags'
 import { BLOCK_STALE_MS } from '../live'
@@ -179,6 +181,16 @@ export function useListTagEvents(listId: string | null, tagId: string | null, of
     staleTime: BLOCK_STALE_MS,
     placeholderData: keepPreviousData,
   }), key, offset === 0)
+}
+export function useListTagUserRevenue(listId: string | null, tagId: string | null, range: RevenueRange) {
+  const session = useSession()
+  return useQuery({
+    queryKey: ['list-tag-user-revenue', listId, tagId, range],
+    queryFn: ({ signal }) => userApi.listTagUserRevenue(listId as string, tagId as string, range, signal),
+    select: mergeBreakdownCatchup,
+    enabled: listTagReadable(session, listId) && !!tagId,
+    staleTime: 300_000,
+  })
 }
 export function useListTagRevenueBreakdown(listId: string | null, tagId: string | null) {
   const session = useSession()

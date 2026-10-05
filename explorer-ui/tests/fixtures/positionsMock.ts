@@ -2,7 +2,7 @@
 // mockApi's ROUTES ahead of the address/tag catch-alls. Each tab keeps its own
 // section; row identities (ids, blocks, pools) match the account/tag fixtures
 // they sit beside, so a row links to the same order/pool everywhere.
-import type { AccountRef, AssetRef, ExplorerYields, LiquidityHistory, LiquidityRewardsClaimed, MoneyMarketHistory, OrderHistoryPage, OrderHistoryRow, PositionsPresence } from '../../src/types'
+import type { AccountRef, AssetRef, ExplorerYields, LiquidityHistory, LiquidityRewardsClaimed, MoneyMarketEarned, MoneyMarketHistory, OrderHistoryPage, OrderHistoryRow, PositionsPresence } from '../../src/types'
 
 type MockRoute = { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => unknown }
 
@@ -404,6 +404,37 @@ export function mockMoneyMarketYields(): ExplorerYields['moneyMarket'] {
   }
 }
 
+// The Borrow cards' Earned / Interest paid (per-market slice of the User Revenue facts).
+export function mockMoneyMarketEarned(): MoneyMarketEarned {
+  return {
+    complete: true, asOf: '2026-09-25T10:00:00.000Z', fromBlock: 8_200_000, holderClass: 'user',
+    markets: [
+      {
+        marketKey: 'core', earnedUsd: 1_874.25, lendingUsd: 512.4, tokenYieldUsd: 1_290.1, poolFeesUsd: 71.75, otherUsd: 0, paidUsd: 903.6, unpriced: 0,
+        reserves: [
+          { reserveAssetId: 43, aTokenAssetId: null, earnedUsd: 1_802.5, paidUsd: 0 },
+          { reserveAssetId: 5, aTokenAssetId: null, earnedUsd: 71.75, paidUsd: 0 },
+          { reserveAssetId: 1000, aTokenAssetId: null, earnedUsd: 0, paidUsd: 903.6 },
+        ],
+        items: [
+          { category: 'token', stream: 'token_accrual', label: 'PRIME yield', asset: MM_PRIME, via: null, usd: 1_290.1, unpriced: 0 },
+          { category: 'paid', stream: 'mm_borrow_interest', label: 'HOLLAR borrow interest', asset: MM_HOLLAR, via: null, usd: 903.6, unpriced: 0 },
+          { category: 'lending', stream: 'mm_supply_interest', label: 'PRIME lending interest', asset: MM_PRIME, via: null, usd: 512.4, unpriced: 0 },
+          { category: 'poolFees', stream: 'lp_fee_stableswap', label: 'DOT pool fees', asset: MM_DOT, via: MM_DOT, usd: 71.75, unpriced: 0 },
+        ],
+      },
+      {
+        marketKey: 'gigahdx', earnedUsd: 64.2, lendingUsd: 0, tokenYieldUsd: 64.2, poolFeesUsd: 0, otherUsd: 0, paidUsd: 12.5, unpriced: 0,
+        reserves: [{ reserveAssetId: 670, aTokenAssetId: 67, earnedUsd: 64.2, paidUsd: 0 }, { reserveAssetId: 1000, aTokenAssetId: null, earnedUsd: 0, paidUsd: 12.5 }],
+        items: [
+          { category: 'token', stream: 'gigahdx_yield', label: 'GIGAHDX yield', asset: MM_STHDX, via: null, usd: 64.2, unpriced: 0 },
+          { category: 'paid', stream: 'mm_borrow_interest', label: 'HOLLAR borrow interest', asset: MM_HOLLAR, via: null, usd: 12.5, unpriced: 0 },
+        ],
+      },
+    ],
+  }
+}
+
 const SCOPES = String.raw`(?:address|tag|list-tag)\/(.+)`
 export const POSITIONS_ROUTES: MockRoute[] = [
   { re: /^\/explorer\/yields$/, fn: () => mockYields() },
@@ -412,4 +443,5 @@ export const POSITIONS_ROUTES: MockRoute[] = [
   { re: new RegExp(String.raw`^\/explorer\/${SCOPES}\/liquidity-rewards$`), fn: () => mockLiquidityRewards() },
   { re: new RegExp(String.raw`^\/explorer\/${SCOPES}\/liquidity-history$`), fn: () => mockLiquidityHistory() },
   { re: /^\/explorer\/address\/(.+)\/money-market-history$/, fn: m => mockMoneyMarketHistory(decodeURIComponent(m[1])) },
+  { re: /^\/explorer\/address\/(.+)\/money-market-earned$/, fn: () => mockMoneyMarketEarned() },
 ]

@@ -67,6 +67,8 @@ export type Route =
   | { name: 'hollar' }
   | { name: 'ice' }
   | { name: 'revenue' }
+  | { name: 'revenueUsers' }
+  | { name: 'revenueProtocol' }
   | { name: 'volume' }
   | { name: 'oracles' }
   // /oracle/<feed>: a feed contract (0x…), a DIA key (dia:<contract>:<KEY>, the key's slash
@@ -174,7 +176,11 @@ export function parseRoute(loc: string): Route {
     case 'hdx': return { name: 'hdx' }
     case 'hollar': return { name: 'hollar' }
     case 'ice': return { name: 'ice' }
-    case 'revenue': return { name: 'revenue' }
+    // /revenue is the overview of both rivers; each has its own breakdown page.
+    case 'revenue':
+      if (parts[1] === 'users') return { name: 'revenueUsers' }
+      if (parts[1] === 'protocol') return { name: 'revenueProtocol' }
+      return { name: 'revenue' }
     case 'volume': return { name: 'volume' }
     case 'oracles': return { name: 'oracles' }
     // A DIA key's slash may arrive decoded (/oracle/dia:0x…:DOT/USD): the rest of the path is the id.
@@ -351,6 +357,8 @@ export const paths = {
   hollar: () => '/hollar',
   ice: () => '/ice',
   revenue: () => '/revenue',
+  revenueUsers: () => '/revenue/users',
+  revenueProtocol: () => '/revenue/protocol',
   volume: () => '/volume',
   oracles: () => '/oracles',
   // Each segment of the id is encoded on its own, so `dia:0x…:DOT/USD` keeps its colons readable.

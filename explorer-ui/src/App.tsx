@@ -42,6 +42,8 @@ const Omnipool = lazyWithReload(() => import('./pages/Omnipool').then(m => ({ de
 const Liquidity = lazyWithReload(() => import('./pages/Liquidity').then(m => ({ default: m.Liquidity })))
 const Hdx = lazyWithReload(() => import('./pages/Hdx').then(m => ({ default: m.Hdx })))
 const Revenue = lazyWithReload(() => import('./pages/Revenue').then(m => ({ default: m.Revenue })))
+const RevenueUsers = lazyWithReload(() => import('./pages/RevenueUsers').then(m => ({ default: m.RevenueUsers })))
+const RevenueProtocol = lazyWithReload(() => import('./pages/RevenueProtocol').then(m => ({ default: m.RevenueProtocol })))
 const Volume = lazyWithReload(() => import('./pages/Volume').then(m => ({ default: m.Volume })))
 const Oracles = lazyWithReload(() => import('./pages/Oracles').then(m => ({ default: m.Oracles })))
 const OracleFeed = lazyWithReload(() => import('./pages/OracleFeed').then(m => ({ default: m.OracleFeed })))
@@ -122,6 +124,8 @@ export default function App() {
       case 'assets': return <Assets />
       case 'hdx': return <Hdx />
       case 'revenue': return <Revenue />
+      case 'revenueUsers': return <RevenueUsers />
+      case 'revenueProtocol': return <RevenueProtocol />
       case 'volume': return <Volume />
       case 'oracles': return <Oracles />
       case 'oracle': return <OracleFeed feed={route.feed} />
