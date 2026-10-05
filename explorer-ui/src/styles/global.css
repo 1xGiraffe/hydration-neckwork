@@ -774,12 +774,27 @@ svg { display: block; }
 .tbl td.mono .hash { white-space: nowrap; }
 /* Fee ("1.295 HDX") and Time ("5d 18h ago") must stay on one line in their narrow columns. */
 .tbl td[data-label="Fee"], .tbl td[data-label="Time"] { white-space: nowrap; }
-.accounts-tbl { min-width: 1180px; }
+/* The directory has twelve columns and the page container offers 1230px from a
+   1280px window up (1150px at 1200). With the shared 16px cell padding the table
+   measured 1336px — 384px of it padding — so the panel scrolled sideways and the
+   Activity column sat off the right edge. Desktop cells here get 7px sides (the
+   row's outer edges keep 16px), headers are short forms with the long form on
+   hover, and the 12M chart is 80px; the table now settles below the 1150px a
+   1200px window leaves. Below the min-width the panel scrolls, and below 720px
+   the rows become cards. */
+.accounts-tbl { min-width: 1060px; }
+@media (min-width: 721px) {
+  .accounts-tbl thead th, .accounts-tbl tbody td { padding-left: 7px; padding-right: 7px; }
+  .accounts-tbl thead th:first-child, .accounts-tbl tbody td:first-child { padding-left: 16px; }
+  .accounts-tbl thead th:last-child, .accounts-tbl tbody td:last-child { padding-right: 16px; }
+  .accounts-tbl thead th { letter-spacing: 0.06em; }
+  .accounts-tbl tbody td.mono, .accounts-tbl tbody td[data-label="Activity"] { white-space: nowrap; }
+}
 /* Cap the Account column so a long on-chain identity or tag name can't widen the
-   10-column table past its min-width and force the whole panel to scroll
-   horizontally. The label then truncates via the shared .addr-pill ellipsis
-   rules (the full value stays in the pill's title + on the detail page). */
-.accounts-tbl td[data-label="Account"] { max-width: 232px; }
+   table past its min-width and force the whole panel to scroll horizontally. The
+   label then truncates via the shared .addr-pill ellipsis rules (the full value
+   stays in the pill's title + on the detail page). */
+.accounts-tbl td[data-label="Account"] { max-width: 216px; }
 /* Eleven columns: the accounts directory's holdings set (Value/Holdings/12M/
    Trading $/Activity) beside the contract-specific ones (Deployer/Txs/Logs/
    Created/Last active), with verification folded into the Contract cell as one
@@ -2064,16 +2079,37 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    widths put both tables' columns on the same vertical lines so the eye runs
    straight down from one into the other. Desktop only — the ≤720px stacked-card
    view has no column tracks to align. */
+/* The order tables (active DCA, open limit, order history) get the accounts
+   directory's desktop density: 7px cell sides with 16px at the row's outer
+   edges. At the shared 16px the owner variant's nine columns measured 1302px
+   against the 1230px panel (1150px at a 1200px window) and scrolled sideways. */
 @media (min-width: 721px) {
-  .dca-tbl-aligned { table-layout: fixed; }
-  .dca-tbl-aligned th:nth-child(1) { width: 15%; }
-  .dca-tbl-aligned th:nth-child(2) { width: 17%; }
-  .dca-tbl-aligned th:nth-child(3) { width: 13%; }
-  .dca-tbl-aligned th:nth-child(4) { width: 13%; }
+  .dca-tbl thead th, .dca-tbl tbody td { padding-left: 7px; padding-right: 7px; }
+  .dca-tbl thead th:first-child, .dca-tbl tbody td:first-child { padding-left: 16px; }
+  .dca-tbl thead th:last-child, .dca-tbl tbody td:last-child { padding-right: 16px; }
+  .dca-tbl thead th { letter-spacing: 0.06em; }
+  /* A countdown ("in 17m 54s") and a runway are one reading each; a break inside
+     them reads as two figures. */
+  .dca-tbl td[data-label="Next trade"], .dca-tbl td[data-label="Runs out"] { white-space: nowrap; }
+  /* The owner variant is always the nine-column one (Owner first). The widths
+     once listed only eight tracks summing to 100%, so the ninth — Runs out — got
+     0px and its content spilled past the panel's right edge. Every track is
+     sized here, sized to its content at the narrowest desktop panel (1150px);
+     below the min-width the panel scrolls rather than squeezing a column. */
+  .dca-tbl-aligned { table-layout: fixed; min-width: 1100px; }
+  .dca-tbl-aligned th:nth-child(1) { width: 12%; }
+  .dca-tbl-aligned th:nth-child(2) { width: 16%; }
+  .dca-tbl-aligned th:nth-child(3) { width: 12%; }
+  .dca-tbl-aligned th:nth-child(4) { width: 11%; }
   .dca-tbl-aligned th:nth-child(5) { width: 12%; }
   .dca-tbl-aligned th:nth-child(6) { width: 10%; }
-  .dca-tbl-aligned th:nth-child(7) { width: 11%; }
+  .dca-tbl-aligned th:nth-child(7) { width: 9%; }
   .dca-tbl-aligned th:nth-child(8) { width: 9%; }
+  .dca-tbl-aligned th:nth-child(9) { width: 9%; }
+  /* Fixed tracks do not grow for their content, so what can be long wraps or
+     truncates inside its own cell instead of painting over the next one. */
+  .dca-tbl-aligned tbody td { overflow-wrap: break-word; }
+  .dca-tbl-aligned tbody td[data-label="Owner"] { overflow: hidden; }
 }
 @media (max-width: 720px) {
   /* In a phone card each cell is one right-aligned row, so the second line sits

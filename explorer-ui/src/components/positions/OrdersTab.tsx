@@ -98,8 +98,8 @@ function OrderHistory({ scope, showOwner, now }: { scope: PositionScope; showOwn
       <div className="panel"><table className="tbl dca-tbl ord-tbl">
         <thead><tr>
           <th>Order</th>{showOwner && <th>Owner</th>}<th>Status</th>
-          <th className="r">Sold</th><th className="r">Received</th><th className="r">Avg price</th>
-          <th className="r">Trades</th><th className="r">Opened</th><th className="r">Ended</th>
+          <th className="r">Sold</th><th className="r">Received</th><th className="r" title="Average price — received per unit sold, across the order’s trades">Avg price</th>
+          <th className="r" title="Trades the order made, and attempts that failed">Trades</th><th className="r">Opened</th><th className="r">Ended</th>
         </tr></thead>
         <tbody>
           {q.isLoading ? <TableSkeleton cols={cols} rows={HISTORY_PAGE} />
