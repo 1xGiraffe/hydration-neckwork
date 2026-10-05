@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, createHmac, randomBytes } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { normalizeAddress } from '../services/addressIdentity.ts'
 import { assetDescriptor, displayDescriptor, idsDisplayedAs } from '../services/explorerAssets.ts'
@@ -97,6 +97,25 @@ export const cursorKey = (kind: RowLaneKind): string => `cursor:${kind}`
 // was missed. Put it back afterwards — a permanently wide window would turn a
 // restart into an alert flood.
 const MAX_WINDOW_BLOCKS = Math.max(1, Number(process.env.NOTIFICATIONS_MAX_WINDOW_BLOCKS) || 600)
+
+/**
+ * The lane alarm: an operator signal that a lane is about to lose rows (it can
+ * only observe — it never moves, widens or replays a cursor).
+ *
+ * A lane is ALARMED when it has failed `LANE_ALARM_FAILURES` ticks in a row, or
+ * its cursor stands more than `LANE_ALARM_BEHIND_BLOCKS` behind the head it is
+ * anchored on. The block threshold is half the window clamp: a cursor that falls
+ * MAX_WINDOW_BLOCKS behind has its oldest blocks written off by `resolveWindow`
+ * for good, so the alarm has to sound with half the clamp still in hand (~30
+ * minutes at 6 s blocks by default). Five failures is 30 s of 6 s ticks — past a
+ * single ClickHouse hiccup or a merge stall, far before the clamp is in reach.
+ * It clears with hysteresis (no failure this tick AND back within half the block
+ * threshold), so a cursor hovering at the line is one raise and one clear, not a
+ * log line per tick.
+ */
+export const LANE_ALARM_FAILURES = 5
+export const LANE_ALARM_BEHIND_BLOCKS = Math.max(1, Math.floor(MAX_WINDOW_BLOCKS / 2))
+const LANE_ALARM_CLEAR_BLOCKS = Math.floor(LANE_ALARM_BEHIND_BLOCKS / 2)
 
 /**
  * Blocks BELOW the cursor a page-backed lane re-reads on every tick.
@@ -1456,7 +1475,7 @@ export function renderDigest(rule: NotificationRule, entries: readonly RenderInp
 const counters = {
   ticks: 0, errors: 0, seeded: 0, skippedBlocks: 0, truncatedPages: 0,
   matches: 0, delivered: 0, coalesced: 0, cooldownSuppressed: 0,
-  deferredGroups: 0, sourceFetches: 0, digested: 0, outboundDuplicates: 0,
+  deferredGroups: 0, failedGroups: 0, sourceFetches: 0, digested: 0, outboundDuplicates: 0,
 }
 export function evaluatorCounters(): Readonly<typeof counters> { return { ...counters } }
 // When the last tick STARTED and the live head it read — the stall signals the
@@ -1464,6 +1483,122 @@ export function evaluatorCounters(): Readonly<typeof counters> { return { ...cou
 // whose cursor stops moving shows as a growing gap to `lastHead`.
 let lastTickAtMs = 0
 let lastHead: number | null = null
+
+/* ============ privacy-safe failure logging ============ */
+
+// An exception's MESSAGE is never logged here: a ClickHouse error quotes the
+// query, and the evaluator's queries carry rule parameters (watched addresses,
+// assets, floors) as values, as does any message a source builds from its input.
+// What is logged is the error's class and its machine code(s), which identify the
+// failure mode without carrying a value.
+const SAFE_CLASS = /^[A-Za-z_$][\w$]{0,63}$/
+// ClickHouse's numeric `code`, its UPPER_SNAKE `type`, a Node `code` (ECONNRESET,
+// ERR_…). An all-caps token longer than 12 must contain an underscore, which no
+// hex identifier does — so a code field that somehow held a key cannot pass.
+function safeCode(v: unknown): string | null {
+  if (typeof v === 'number') return Number.isInteger(v) && Math.abs(v) < 1e6 ? String(v) : null
+  if (typeof v !== 'string') return null
+  if (/^\d{1,6}$/.test(v)) return v
+  if (/^[A-Z][A-Z0-9_]{0,47}$/.test(v) && (v.length <= 12 || v.includes('_'))) return v
+  return null
+}
+
+/** `ClassName code=… type=…` for an error — never its message. Exported for tests. */
+export function describeError(err: unknown): string {
+  if (err == null || typeof err !== 'object') return typeof err
+  const name = (err as object).constructor?.name
+  const parts = [typeof name === 'string' && SAFE_CLASS.test(name) ? name : 'Object']
+  for (const field of ['code', 'type'] as const) {
+    const code = safeCode((err as Record<string, unknown>)[field])
+    if (code != null) parts.push(`${field}=${code}`)
+  }
+  return parts.join(' ')
+}
+
+/**
+ * The key a logged group digest is an HMAC under. A source-group key is a rule
+ * parameter (a watched account, an asset), drawn from a small public set, so an
+ * UNKEYED hash of it is reversible by hashing every candidate: the digest is keyed.
+ * NOTIFICATIONS_LOG_DIGEST_KEY (env, like every other credential) makes digests
+ * comparable across restarts; without it each process draws its own random key, so
+ * a digest still ties a failure line to the debug line of the same process and
+ * means nothing to anyone holding the log alone.
+ */
+let logDigestKey: Buffer | null = null
+function digestKey(): Buffer {
+  if (!logDigestKey) {
+    const configured = process.env.NOTIFICATIONS_LOG_DIGEST_KEY?.trim()
+    logDigestKey = configured ? Buffer.from(configured, 'utf8') : randomBytes(32)
+  }
+  return logDigestKey
+}
+
+/** A short digest of a source-group key, keyed (digestKey) — the key itself is a rule parameter. */
+export function groupDigest(kind: string, key: string): string {
+  return createHmac('sha256', digestKey()).update(`${kind}:${key}`).digest('hex').slice(0, 12)
+}
+
+/* ============ lane alarm state ============ */
+
+interface LaneHealth {
+  /** Consecutive ticks this lane failed (threw, a source group failed, or its rows could not be stored). */
+  failures: number
+  /** Cursor's distance behind the head the lane is anchored on, after the last tick. */
+  behind: number | null
+  /** When the alarm was raised, null while the lane is healthy. */
+  alarmSinceMs: number | null
+}
+const laneHealth = new Map<RowLaneKind, LaneHealth>()
+// Lanes that failed during the tick in flight; read and cleared by observeLaneHealth.
+const failedLanesThisTick = new Set<RowLaneKind>()
+// The safety lane is anchored on the security timeline's newest action, not the
+// head (see safetyLane), so its distance is measured against that.
+let lastSafetyNewest: number | null = null
+
+function markLaneFailed(kind: string): void {
+  if ((ROW_LANE_KINDS as string[]).includes(kind)) failedLanesThisTick.add(kind as RowLaneKind)
+}
+
+/**
+ * Folds one tick into each lane's health and raises/clears the alarm, logging
+ * exactly once on each transition. `allFailed` is a tick that never reached its
+ * lanes (unreadable head, a throw out of the loop): every active lane held its
+ * cursor, so every active lane failed. A lane with no active rules is idle — it
+ * holds its cursor by design — and is not watched. Observation only: no cursor is
+ * read from anywhere but memory/state and none is written.
+ */
+function observeLaneHealth(allFailed: boolean, nowMs: number): void {
+  for (const kind of ROW_LANE_KINDS) {
+    const prior = laneHealth.get(kind)
+    if (!activeRulesByKind(kind).length) {
+      if (prior?.alarmSinceMs != null) {
+        console.error(`[notifications] lane alarm cleared: ${cursorKey(kind)} has no active rules (alarmed ${Math.round((nowMs - prior.alarmSinceMs) / 1000)}s)`)
+      }
+      laneHealth.delete(kind)
+      continue
+    }
+    const failed = allFailed || failedLanesThisTick.has(kind)
+    const cursor = cursors.get(kind) ?? null
+    const anchor = kind === 'safety' ? lastSafetyNewest : lastHead
+    const state: LaneHealth = {
+      failures: failed ? (prior?.failures ?? 0) + 1 : 0,
+      behind: cursor != null && anchor != null ? Math.max(0, anchor - cursor) : null,
+      alarmSinceMs: prior?.alarmSinceMs ?? null,
+    }
+    const behindText = state.behind == null ? 'unknown' : String(state.behind)
+    if (state.alarmSinceMs == null) {
+      if (state.failures >= LANE_ALARM_FAILURES || (state.behind != null && state.behind > LANE_ALARM_BEHIND_BLOCKS)) {
+        state.alarmSinceMs = nowMs
+        console.error(`[notifications] lane alarm raised: ${cursorKey(kind)} consecutiveFailures=${state.failures} behind=${behindText} (thresholds: ${LANE_ALARM_FAILURES} failures, ${LANE_ALARM_BEHIND_BLOCKS} blocks)`)
+      }
+    } else if (state.failures === 0 && (state.behind == null || state.behind <= LANE_ALARM_CLEAR_BLOCKS)) {
+      console.error(`[notifications] lane alarm cleared: ${cursorKey(kind)} consecutiveFailures=0 behind=${behindText} (alarmed ${Math.round((nowMs - state.alarmSinceMs) / 1000)}s)`)
+      state.alarmSinceMs = null
+    }
+    laneHealth.set(kind, state)
+  }
+  failedLanesThisTick.clear()
+}
 
 let client: ClickHouseClient | null = null
 let timer: ReturnType<typeof setInterval> | null = null
@@ -1598,6 +1733,33 @@ export interface EvaluatorStatus {
   liveHead: number | null
   counters: Readonly<typeof counters>
   lanes: EvaluatorLaneStatus[]
+  laneAlarm: EvaluatorLaneAlarmStatus
+}
+/** One alarmed lane: its name, failure streak, distance and since-time — nothing else. */
+export interface EvaluatorLaneAlarm {
+  /** The lane's cursor key, `cursor:<kind>`. */
+  lane: string
+  consecutiveFailures: number
+  /** Blocks behind the lane's anchor (the live head; the newest security action for `safety`). */
+  behind: number | null
+  since: string
+}
+export interface EvaluatorLaneAlarmStatus {
+  /** True while any lane is alarmed. */
+  active: boolean
+  failureThreshold: number
+  behindThresholdBlocks: number
+  lanes: EvaluatorLaneAlarm[]
+}
+
+/** The lane alarm alone — the alarmed lanes, with the thresholds that raised them. */
+export function laneAlarmStatus(): EvaluatorLaneAlarmStatus {
+  const lanes: EvaluatorLaneAlarm[] = []
+  for (const [kind, h] of laneHealth) {
+    if (h.alarmSinceMs == null) continue
+    lanes.push({ lane: cursorKey(kind), consecutiveFailures: h.failures, behind: h.behind, since: new Date(h.alarmSinceMs).toISOString() })
+  }
+  return { active: lanes.length > 0, failureThreshold: LANE_ALARM_FAILURES, behindThresholdBlocks: LANE_ALARM_BEHIND_BLOCKS, lanes }
 }
 
 /**
@@ -1623,6 +1785,7 @@ export function evaluatorStatus(): EvaluatorStatus {
         behind: cursor != null && lastHead != null ? Math.max(0, lastHead - cursor) : null,
       }
     }),
+    laneAlarm: laneAlarmStatus(),
   }
 }
 
@@ -1667,6 +1830,9 @@ export function resetEvaluatorForTests(): void {
   lastHead = null
   seenOriginQueued.clear()
   originQueuedMemo.clear()
+  laneHealth.clear()
+  failedLanesThisTick.clear()
+  lastSafetyNewest = null
   for (const k of Object.keys(counters) as (keyof typeof counters)[]) counters[k] = 0
 }
 
@@ -1691,6 +1857,11 @@ async function queryLiveHead(): Promise<number | null> {
 export async function runEvaluatorTick(): Promise<void> {
   if (inFlight) return
   inFlight = true
+  // False until the lanes' outcome is settled (cursors advanced, or held because
+  // the inbox write failed). A tick that leaves before that — unreadable head, a
+  // throw — never let any lane advance, so every active lane counts as failed.
+  let lanesSettled = false
+  failedLanesThisTick.clear()
   try {
     counters.ticks++
     tick++
@@ -1742,12 +1913,17 @@ export async function runEvaluatorTick(): Promise<void> {
       await snapshot.commit()
       // One-shot rules leave only once their notification is durably stored.
       for (const ruleId of blocks.expired) await guard('block-expire', () => expireRule(ruleId))
+    } else {
+      // The rows could not be stored, so every lane that matched holds its cursor.
+      for (const lane of lanes) markLaneFailed(lane.kind)
     }
+    lanesSettled = true
     await flushCursors(matches.length > 0)
   } catch (err) {
     counters.errors++
-    console.error('[notifications] evaluator tick failed', err)
+    console.error(`[notifications] evaluator tick failed: ${describeError(err)}`)
   } finally {
+    try { observeLaneHealth(!lanesSettled, Date.now()) } catch { /* observation never breaks the loop */ }
     inFlight = false
   }
 }
@@ -1755,7 +1931,8 @@ export async function runEvaluatorTick(): Promise<void> {
 async function guard(what: string, run: () => Promise<void>): Promise<void> {
   try { await run() } catch (err) {
     counters.errors++
-    console.error(`[notifications] ${what} lane failed`, err)
+    markLaneFailed(what)
+    console.error(`[notifications] ${what} lane failed: ${describeError(err)}`)
   }
 }
 
@@ -1897,6 +2074,7 @@ async function runKindLane(kind: RowLaneKind, rules: NotificationRule[], head: n
 async function safetyLane(rules: NotificationRule[], cursor: number | null, head: number): Promise<LaneOutcome | null> {
   const timeline = (await getSecurityDashboard()).timeline
   const newest = timeline.reduce((max, e) => Math.max(max, e.blockHeight), 0)
+  lastSafetyNewest = newest > 0 ? newest : null
   if (cursor == null) {
     // Seed at the newest action the timeline knows about, not at the head: the
     // head is normally far above it and everything in between is history.
@@ -2017,18 +2195,28 @@ async function accountActivityMatches(rules: NotificationRule[], window: BlockWi
     const matches = evaluateAccountActivity(rows, group, window)
     // NOTIFICATIONS_DEBUG=1 prints what a group's page actually contained for the
     // window it was matched against — the one thing no unit test can show, because
-    // the page is only as fresh as the moment the lane asked for it. Target and
-    // rule ids only; a rule's params are private.
+    // the page is only as fresh as the moment the lane asked for it. The watched
+    // target is a rule parameter, so only its kind and the group's digest (the
+    // same one a failure line carries) are printed — and COUNTS only: a block height
+    // of the watched account's activity (the window's, a row's) narrows the account
+    // down to a handful of candidates, so no height is logged.
     if (process.env.NOTIFICATIONS_DEBUG === '1') {
-      const blocks = rows.map(r => r.blockHeight)
       const inWin = rows.filter(r => r.blockHeight > window.from && r.blockHeight <= window.to)
+      const groupKey = activitySourceKey(group[0])
+      const inWindowTypes: Record<string, number> = {}
+      for (const r of inWin) {
+        const t = `${r.type}${(r as { otcAction?: string }).otcAction ? ':' + (r as { otcAction?: string }).otcAction : ''}`
+        inWindowTypes[t] = (inWindowTypes[t] ?? 0) + 1
+      }
       console.log('[notifications:debug] account-activity group', JSON.stringify({
-        target: params[0].target.kind === 'address' ? `address:${(params[0].target as { address: string }).address.slice(0, 10)}` : params[0].target.kind,
-        window, rows: rows.length,
-        newest: blocks.length ? Math.max(...blocks) : null,
-        oldest: blocks.length ? Math.min(...blocks) : null,
+        target: params[0].target.kind,
+        group: groupKey == null ? null : groupDigest('account-activity', groupKey),
+        windowBlocks: window.to - window.from,
+        rows: rows.length,
+        aboveWindow: rows.filter(r => r.blockHeight > window.to).length,
+        belowWindow: rows.filter(r => r.blockHeight <= window.from).length,
         inWindow: inWin.length,
-        inWindowTypes: inWin.map(r => `${r.type}${(r as { otcAction?: string }).otcAction ? ':' + (r as { otcAction?: string }).otcAction : ''}@${r.blockHeight}`),
+        inWindowTypes,
         matches: matches.length,
       }))
     }
@@ -2130,12 +2318,33 @@ async function visitGroups(
   const take = Math.min(keys.length, Math.max(budget.left, 0))
   const matches: RuleMatch[] = []
   const visited: string[] = []
+  let failed = 0
+  let firstError: unknown = null
+  let firstFailedKey = ''
   for (let i = 0; i < take; i++) {
     const key = keys[(start + i) % keys.length]
     budget.left--
     counters.sourceFetches++
-    visited.push(key)
-    matches.push(...await run(groups.get(key)!))
+    // One group's source failing must not abort the tick for every other group.
+    // A failed group is left out of `visited`, so — exactly like a deferred one —
+    // it holds the kind's cursor at its last successful read (the window clamp
+    // bounds how long) while the groups that did read deliver now.
+    try {
+      matches.push(...await run(groups.get(key)!))
+      visited.push(key)
+    } catch (err) {
+      failed++
+      if (firstError == null) { firstError = err; firstFailedKey = key }
+    }
+  }
+  if (failed) {
+    counters.failedGroups += failed
+    counters.errors += failed
+    markLaneFailed(kind)
+    // The group key is a watched target — rule parameters are private — so only
+    // a short digest of it is logged, and of the error only its class and code:
+    // its message can quote the query, and the query carries the target.
+    console.error(`[notifications] ${kind}: ${failed} of ${take} source groups failed this tick and stay unvisited (first group #${groupDigest(kind, firstFailedKey)}): ${describeError(firstError)}`)
   }
   rotation.set(kind, (start + take) % keys.length)
   counters.deferredGroups += keys.length - take
@@ -3425,7 +3634,9 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
     await commitNotifications(prepared)
   } catch (err) {
     counters.errors++
-    console.error('[notifications] inbox write failed; cursors held for the next tick', err)
+    // Class and code only: a failed insert's message can quote the rows — inbox
+    // messages and their recipients.
+    console.error(`[notifications] inbox write failed; cursors held for the next tick: ${describeError(err)}`)
     return false
   }
   counters.delivered += prepared.rows.length
@@ -3454,7 +3665,12 @@ async function dispatch(matches: RuleMatch[]): Promise<boolean> {
   const persisted = [...sentStates]
     .filter(([ruleId]) => (ruleOfId(ruleId)?.cooldownS ?? 0) > 0)
     .map(([ruleId, at]) => ({ key: lastSentStateKey(ruleId), value: String(at) }))
-  if (persisted.length) await setNotificationStates(persisted).catch(err => console.error('[notifications] cooldown state write failed', err))
+  if (persisted.length) {
+    await setNotificationStates(persisted).catch(err => {
+      counters.errors++
+      console.error(`[notifications] cooldown state write failed: ${describeError(err)}`)
+    })
+  }
   return true
 }
 

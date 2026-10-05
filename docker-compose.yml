@@ -508,6 +508,10 @@ services:
     environment:
       # Per-group page/window logging for the notification lanes; off unless set.
       - NOTIFICATIONS_DEBUG=${NOTIFICATIONS_DEBUG:-}
+      # HMAC key for the group digests the notification evaluator logs (evaluator.ts
+      # digestKey): set, digests compare across restarts; unset, each process draws
+      # its own random key. A credential — inject from .env, never commit a value.
+      - NOTIFICATIONS_LOG_DIGEST_KEY=${NOTIFICATIONS_LOG_DIGEST_KEY:-}
       # One-off catch-up knob: how far behind the head a notification tick may look
       # (default 600). Wide only for a deliberate replay after a lane lost a stretch.
       - NOTIFICATIONS_MAX_WINDOW_BLOCKS=${NOTIFICATIONS_MAX_WINDOW_BLOCKS:-}
