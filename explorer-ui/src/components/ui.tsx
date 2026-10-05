@@ -563,6 +563,13 @@ function originAssetIconUrl(origin: AssetOrigin, ext: 'svg' | 'png'): string | n
 export function originChainIconUrl(origin: AssetOrigin): string {
   return `${METADATA_CDN}/${origin.ecosystem}/${origin.chainId}/icon.svg`
 }
+// jsDelivr can fail a single file it has not mirrored (Acala's chain icon answered
+// "Failed to fetch … from GitHub" while every other chain's loaded), so the badge
+// falls back to the same file straight from the repository.
+const METADATA_RAW = 'https://raw.githubusercontent.com/galacticcouncil/intergalactic-asset-metadata/master/v2'
+function originChainIconUrls(origin: AssetOrigin): string[] {
+  return [originChainIconUrl(origin), `${METADATA_RAW}/${origin.ecosystem}/${origin.chainId}/icon.svg`]
+}
 
 // Hollar-wrapped stablecoins (HUSDC, HUSDT, …) have no icon of their own. preis-ui
 // renders them as a composite half-icon: left = HOLLAR (222), right = the wrapped
@@ -585,8 +592,11 @@ const PNG_ICON_IDS = new Set([
 // share tokens are NOT here any more: one with a single dominant asset borrows its
 // icon (the API's iconAssetId), and a multi-asset one draws as a cluster of its
 // members (iconAssetIds) — neither asks the CDN for the share id itself.
+// stHDX (670) left the set when the CDN gained its icon — the GIGAHDX artwork, byte
+// for byte the same file as 67's (checked 2026-10-05: 670 svg 200; every id below
+// still 404 on svg and png).
 const NO_CDN_ICON_IDS = new Set([
-  29, 37, 45, 670, 1112, 1000198, 1000444, 1000746, 1000766, 1000767, 1001034, 1001168,
+  29, 37, 45, 1112, 1000198, 1000444, 1000746, 1000766, 1000767, 1001034, 1001168,
 ])
 function initialIconMode(srcId: number): 'svg' | 'png' | 'fail' {
   if (NO_CDN_ICON_IDS.has(srcId)) return 'fail'
@@ -666,8 +676,9 @@ export function AssetIcon({ assetId, iconAssetId, iconAssetIds, symbol, size = 2
   const composite = COMPOSITE_ICONS[srcId] ?? COMPOSITE_ICONS[assetId]
   const chainOrigin = origin ?? (parachainId != null ? { ecosystem: 'polkadot', chainId: String(parachainId), assetId: null } : null)
   const badgeKey = chainOrigin ? `${chainOrigin.ecosystem}:${chainOrigin.chainId}` : ''
-  const [badgeFailure, setBadgeFailure] = useState<{ key: string; failed: boolean }>({ key: badgeKey, failed: false })
-  const badgeFailed = badgeFailure.key === badgeKey && badgeFailure.failed
+  const [badgeFailure, setBadgeFailure] = useState<{ key: string; failures: number }>({ key: badgeKey, failures: 0 })
+  const badgeUrls = chainOrigin ? originChainIconUrls(chainOrigin) : []
+  const badgeSrc = badgeUrls[badgeFailure.key === badgeKey ? badgeFailure.failures : 0]
   const memberSize = Math.round(size * (members?.length === 3 ? 0.58 : 0.68))
   const body = members ? (
       <span className="asset-logo icon-stack" style={{ display: 'inline-flex', height: size, alignItems: 'center', ['--stack-overlap' as string]: `${-Math.round(memberSize * 0.34)}px` }}>
@@ -684,9 +695,9 @@ export function AssetIcon({ assetId, iconAssetId, iconAssetIds, symbol, size = 2
   // icon's width are 8px each and tell nothing apart.
   return <span style={{ position: 'relative', width: members ? undefined : size, height: size, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', verticalAlign: 'middle', lineHeight: 0 }}>
     {body}
-    {chainOrigin && !badgeFailed && <img
-      src={originChainIconUrl(chainOrigin)} alt="" aria-hidden="true"
-      onError={() => setBadgeFailure({ key: badgeKey, failed: true })}
+    {badgeSrc && <img
+      src={badgeSrc} alt="" aria-hidden="true"
+      onError={() => setBadgeFailure(current => ({ key: badgeKey, failures: (current.key === badgeKey ? current.failures : 0) + 1 }))}
       style={{ position: 'absolute', right: -2, bottom: -2, width: Math.max(10, Math.round(size * 0.42)), height: Math.max(10, Math.round(size * 0.42)), borderRadius: '50%', border: '1px solid var(--bg)', background: 'var(--bg)', objectFit: 'cover' }}
     />}
   </span>
