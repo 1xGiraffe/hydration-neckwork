@@ -151,6 +151,66 @@ WHERE block_height BETWEEN {lo:UInt32} AND {hi:UInt32}
     WHERE contract_address = {c:String} AND block_height BETWEEN {lo:UInt32} AND {hi:UInt32})
   AND lower(contract_address) = {c:String} AND ${TRANSFER_DELTAS_ROW_FILTER}`
 
+// Inserts one contract's missing Transfer legs in [lo, hi] (CATCHUP_INSERT_SQL: only
+// keys the table lacks, so a re-run writes nothing). The one write path of both the
+// refresher's whole-history catch-up and an MV swap's window catch-up.
+async function insertMissingTransferDeltas(c: ClickHouseClient, p: { contract: string; lo: number; hi: number }, why: string): Promise<void> {
+  const before = Date.now()
+  await c.command({
+    query: CATCHUP_INSERT_SQL,
+    query_params: { c: p.contract, lo: p.lo, hi: p.hi },
+    clickhouse_settings: { max_threads: 4 },
+  })
+  console.log(`[erc20-wallet] transfer-deltas ${why} ${p.contract} blocks ${p.lo}-${p.hi} in ${Date.now() - before} ms`)
+}
+
+// How far either side of a swap window the window catch-up reaches, in server-clock
+// seconds: ingested_at is the raw row's insert time (DEFAULT now()), and an async
+// insert can flush a little after the statement that queued it.
+export const CATCHUP_WINDOW_MARGIN_SECONDS = 300
+
+// The 100k-block buckets holding a contract's Transfer logs INSERTED (ingested_at, not
+// block time — a backfill inserts old blocks) inside a window. The contract-keyed log
+// index carries ingested_at, so this reads the set's own rows (~8M rows, ~15 ms), never
+// raw. A row replayed after the window carries a later ingested_at, but its replay
+// fired the view again, so it never needed the window.
+export const CATCHUP_WINDOW_BUCKETS_SQL = `-- erc20:catchup:window-buckets
+SELECT contract_address AS contract, intDiv(block_height, {size:UInt32}) AS bucket
+FROM price_data.evm_logs_by_contract
+WHERE contract_address IN {cs:Array(String)} AND topic0 = '${ERC20_TRANSFER_TOPIC}'
+  AND ingested_at BETWEEN {from:DateTime} - INTERVAL {margin:UInt32} SECOND AND {to:DateTime} + INTERVAL {margin:UInt32} SECOND
+GROUP BY contract, bucket
+ORDER BY contract, bucket`
+
+/**
+ * The catch-up of an erc20_transfer_deltas_mv swap (schemaBootstrap MV_UPGRADES): the
+ * Transfer logs of the active wallet-contract set inserted while the view was being
+ * replaced — server clock [from − margin, to + margin] — reached no view, so every
+ * bucket holding one is filled with exactly its missing keys, by the same insert the
+ * refresher's whole-history catch-up runs. Idempotent: a re-run over the same window
+ * inserts nothing. Every bucket is filled (no per-cycle cap): the window is minutes.
+ */
+export async function catchUpTransferDeltasWindow(
+  c: ClickHouseClient,
+  window: { from: string; to: string },
+  marginSeconds = CATCHUP_WINDOW_MARGIN_SECONDS,
+): Promise<string> {
+  const setRes = await c.query({ query: WALLET_CONTRACTS_SQL, format: 'JSONEachRow' })
+  const contracts = (await setRes.json<{ contract: string; active: number | string }>())
+    .filter(r => Number(r.active) === 1 && /^0x[0-9a-f]{40}$/.test(r.contract)).map(r => r.contract)
+  if (!contracts.length) return `no active wallet contracts; nothing to fill for ${window.from}..${window.to}`
+  const bucketRes = await c.query({
+    query: CATCHUP_WINDOW_BUCKETS_SQL,
+    query_params: { cs: contracts, size: CATCHUP_BUCKET_BLOCKS, from: window.from, to: window.to, margin: marginSeconds },
+    format: 'JSONEachRow',
+  })
+  const plan = (await bucketRes.json<{ contract: string; bucket: number | string }>()).map(r => ({
+    contract: r.contract, lo: Number(r.bucket) * CATCHUP_BUCKET_BLOCKS, hi: Number(r.bucket) * CATCHUP_BUCKET_BLOCKS + CATCHUP_BUCKET_BLOCKS - 1,
+  }))
+  for (const p of plan) await insertMissingTransferDeltas(c, p, `swap-window catch-up (${window.from}..${window.to} ±${marginSeconds}s)`)
+  return `${plan.length} bucket(s) of ${contracts.length} contract(s) filled with their missing keys for rows ingested ${window.from}..${window.to} ±${marginSeconds}s`
+}
+
 // The buckets one cycle fills, oldest first, under the per-cycle cap.
 export function catchUpPlan(
   gaps: { contract: string; buckets: number[] }[],
@@ -234,15 +294,7 @@ export async function syncTransferDeltas(assets: Erc20WalletAsset[]): Promise<vo
     gaps.push({ contract: s.contract, buckets: (await bucketRes.json<{ bucket: number | string }>()).map(r => Number(r.bucket)) })
   }
   const { plan, truncated } = catchUpPlan(gaps)
-  for (const p of plan) {
-    const before = Date.now()
-    await client.command({
-      query: CATCHUP_INSERT_SQL,
-      query_params: { c: p.contract, lo: p.lo, hi: p.hi },
-      clickhouse_settings: { max_threads: 4 },
-    })
-    console.log(`[erc20-wallet] transfer-deltas catch-up ${p.contract} blocks ${p.lo}-${p.hi} in ${Date.now() - before} ms`)
-  }
+  for (const p of plan) await insertMissingTransferDeltas(client, p, 'catch-up')
   catchUpPending = truncated
   catchUpSetKey = setKey
   catchUpCheckedAt = Date.now()
