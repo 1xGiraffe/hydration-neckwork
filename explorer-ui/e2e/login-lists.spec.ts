@@ -850,14 +850,13 @@ function seedOneTagList(userMock: { state: UserMockState }): void {
   })
 }
 
-// New user request: a tag created mid-session stays pinned at the BOTTOM of
-// the list, in creation order, even once its name would sort ahead of an
-// existing tag — the server's alphabetical order (listDetailResponse) is
-// still correct on a fresh load, so re-fetching the page (reload, or leaving
-// and reopening) must show it there instead. Both new tags sort before the
-// seeded 'Watch', which is exactly what would otherwise pull them up the
-// list mid-session.
-test('a newly created tag stays at the bottom until the page reloads', async ({ page, userMock }) => {
+// A tag created mid-session is pinned at the TOP of the list, newest first —
+// directly under the "+ New tag" control that made it (orderTagPanels) — even
+// where its name would sort elsewhere. The server's alphabetical order
+// (listDetailResponse) is still correct on a fresh load, so re-fetching the
+// page (reload, or leaving and reopening) must show it there instead. Both new
+// tags sort before the seeded 'Watch', so the two orders differ visibly.
+test('a newly created tag stays at the top until the page reloads', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   seedOneTagList(userMock)
 
@@ -876,12 +875,11 @@ test('a newly created tag stays at the bottom until the page reloads', async ({ 
   await createTag('Bumblebee')
 
   // Alphabetical would read Aardvark, Bumblebee, Watch — but mid-session the
-  // two just-created tags stay below the pre-existing one, in the order they
-  // were created.
+  // two just-created tags lead, newest first, ahead of the pre-existing one.
   await expect(panels).toHaveCount(3)
-  await expect(panels.nth(0)).toContainText('Watch')
+  await expect(panels.nth(0)).toContainText('Bumblebee')
   await expect(panels.nth(1)).toContainText('Aardvark')
-  await expect(panels.nth(2)).toContainText('Bumblebee')
+  await expect(panels.nth(2)).toContainText('Watch')
 
   await page.reload()
 
