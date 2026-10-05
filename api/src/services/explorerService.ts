@@ -1,3 +1,4 @@
+import { wormholeAssetBridge, wormholeRemoteToken, type WormholeAssetBridge, type WormholeRemoteToken } from './wormholeRemoteTokens.ts'
 import type { ClickHouseClient } from '../db/client.ts'
 import { inChunkedSql, mapParamChunks } from '../db/queryParams.ts'
 import { settledAmount } from './aaveMath.ts'
@@ -11865,6 +11866,11 @@ export interface ActivityRow {
   xcmFees?: XcmFeeLeg[]
   fromChain?: string         // xcm inbound: origin chain name
   fromParachainId?: number | null
+  // A Wormhole NTT transfer: the token on the FAR chain — where an arrival came
+  // from, or where a send is going — as that chain's own contract (Robinhood
+  // Chain's WETH is not Ethereum's). Read from the backing monitor's peer map
+  // (wormholeRemoteTokens.ts); absent when the chain is not a known peer.
+  remoteToken?: WormholeRemoteToken | null
   // Source account of an inbound transfer, resolved from the Ocelloids
   // crosschain index (best-effort — absent for old rows or when the API is
   // unavailable). Same shape/semantics as destAccount.
@@ -14774,7 +14780,9 @@ const EVM_CHAIN_META: Record<string, { name: string; explorer: string }> = {
   // chain's Blockscout: both answer /tx/ and /address/, and this is the one the
   // chain is read on. Checked against a real transaction, and against a fabricated
   // hash that it does NOT render — a 200 alone proves nothing on a single-page app.
-  4663: { name: 'Robinhood Chain', explorer: 'https://robinscan.io' },
+  4663: { name: 'Robinhood', explorer: 'https://robinscan.io' },
+  // HyperEVM, Hyperliquid's own EVM chain (Wormhole 47; HYPE crosses it by NTT).
+  999: { name: 'HyperEVM', explorer: 'https://hyperevmscan.io' },
 }
 // A consensus system's own chain id is not always a number — Sui names itself by a
 // hex digest — so the id stays a string and only the polkadot branch reads it as one.
@@ -15034,6 +15042,8 @@ export const WORMHOLE_CHAIN_URNS: Record<number, string> = {
   // chainId() at 0x141fBa8AD5D61bdaB45A047cF60b5Ad9784987FB answers 0x48. It sits
   // directly below Hydration's own 73, so the two are easy to transpose.
   72: 'urn:ocn:ethereum:4663',
+  // HyperEVM: its EVM chain id is 999 (eth_chainId 0x3e7), its Wormhole id 47.
+  47: 'urn:ocn:ethereum:999',
 }
 
 export interface NttTransferSent { recipient: string; amount: string; recipientChain: number }
@@ -15325,6 +15335,8 @@ async function getRecentNttOut(limit: number, from?: string, to?: string, accoun
             row.destParachainId = ref.paraId
             row.destAccount = ref.account
           }
+          const remote = wormholeRemoteToken(leg.asset_id, match.sent.recipientChain)
+          if (remote) row.remoteToken = remote
         }
         // The Executor payment is claimed once per extrinsic, by the first send built
         // from it (a batch of several sends and one request is not a shape the SDK builds).
@@ -15414,6 +15426,7 @@ async function getRecentNttRedeems(limit: number, from?: string, to?: string, ac
           amount: c.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, c.amount, a.decimals),
           xcmDir: 'in', bridge: 'Wormhole', ...(origin ?? {}), linkBlock: c.block_height, linkIndex: c.extrinsic_index,
           ...(journeys.length === 1 ? { messageId: journeys[0] } : {}),
+          ...(chains.length === 1 && wormholeRemoteToken(c.asset_id, chains[0]) ? { remoteToken: wormholeRemoteToken(c.asset_id, chains[0]) } : {}),
         })
       }
       annotateFastRelaySettlements(out, await fastRelayIndex())
@@ -20751,6 +20764,8 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
             row.destParachainId = ref.paraId
             row.destAccount = ref.account
           }
+          const remote = wormholeRemoteToken(t.asset_id, match.sent.recipientChain)
+          if (remote) row.remoteToken = remote
         }
         // Same claim-once rule as getRecentNttOut: the Executor payment belongs to the
         // first send built from this extrinsic.
@@ -20779,6 +20794,7 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
           amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
           xcmDir: 'in', bridge: 'Wormhole', ...(origin ?? {}), linkBlock: e.block_height, linkIndex: e.extrinsic_index,
           ...(journeys.length === 1 ? { messageId: journeys[0] } : {}),
+          ...(chains.length === 1 && wormholeRemoteToken(cid, chains[0]) ? { remoteToken: wormholeRemoteToken(cid, chains[0]) } : {}),
         })
       }
     }
@@ -27894,6 +27910,10 @@ export interface AssetDetail {
   // Null for an asset that has never been a primary-market reserve — the surface
   // omits the figure rather than claiming a zero for an asset the market never held.
   liquidations: AssetLiquidations | null
+  // A Wormhole NTT asset's chains: every peer, which of them hold custody, and
+  // the token on each — from the backing monitor's last snapshot. Absent for an
+  // asset that does not cross Wormhole (and before the first snapshot).
+  bridge?: WormholeAssetBridge | null
 }
 // The market whose liquidations an asset page reports. Env-configured markets are
 // always supplemental, so this is the core market; isolated markets are never
@@ -28009,7 +28029,7 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
   // `amountUsd` is the total USD held of this asset — the same value the asset
   // list surfaces — so reuse the holder summary's total here.
   const assetItem: AssetListItem = { ...base.asset, price: p?.price ?? null, change24h: p?.change24h ?? null, amountUsd: hsummary.totalUsd }
-  return { ...base, asset: assetItem, holderCount: hsummary.holderCount, totalUsd: hsummary.totalUsd }
+  return { ...base, asset: assetItem, holderCount: hsummary.holderCount, totalUsd: hsummary.totalUsd, bridge: wormholeAssetBridge(assetId) }
 }
 
 async function assetDetailBase(assetId: number): Promise<AssetDetail> {

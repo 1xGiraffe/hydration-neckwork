@@ -3,16 +3,29 @@ import { SUBSTRATE_RPC_URL, substrateStorageBatch } from './substrateRpc.ts'
 import { cachedSwr } from './cache.ts'
 import { accountRef, ensurePrices, nttMinterAccounts, nttMinterH160, ocnChainName, WORMHOLE_CHAIN_URNS, type PriceInfo } from './explorerService.ts'
 import { usdOfRaw } from './assetValue.ts'
-import { erc20Precompile } from './chainPrimitives.ts'
+import { assetIdFromPrecompile, erc20Precompile } from './chainPrimitives.ts'
+import { setWormholeBridges, type WormholeAssetBridge, type WormholeBridgePeer } from './wormholeRemoteTokens.ts'
 import { assetDescriptor } from './explorerAssets.ts'
 import {
   base58Encode,
   buildFuse,
-  classifyBacking,
+  buildPeerHistories,
+  changeOriginFromEvents,
+  classifyLegs,
+  backingTolerance,
+  lockboxPayout,
+  messageForDigest,
+  parsePeerEvent,
+  peerEvidence,
+  resolveOriginRpcUrls,
+  transceiverMessagesIn,
+  WORMHOLE_CHAINS,
+  wormholeChainName,
   gradeBacking,
   advanceStreak,
   INDEX_STALE_AFTER_MS,
   decideInflight,
+  decodeAbiString,
   decodeAddress,
   decodeBool,
   decodeGetPeer,
@@ -39,6 +52,7 @@ import {
   normalizeScanOperations,
   nttDigest,
   parseLogMessagePublished,
+  parseNttQueuedTransfer,
   parseNttRateLimitState,
   parseNttTransceiverMessage,
   parseOriginRpcUrls,
@@ -51,6 +65,7 @@ import {
   parseWormholeLocation,
   RATE_LIMIT_REFILL_SEC,
   rescaleAmount,
+  wormholeExplorerUrl,
   SOLANA_INBOX_RATE_LIMIT_DISCRIMINATOR,
   SOLANA_INBOX_RATE_LIMIT_LENGTH,
   SOLANA_NTT_CONFIG_DISCRIMINATOR,
@@ -66,7 +81,14 @@ import {
   trimmedDecimalsFor,
   vaaKey,
   wormholeChainFamily,
+  type BackingLeg,
   type DepositCandidate,
+  type PeerChange,
+  type PeerEvidence,
+  type PeerHistory,
+  type WormholeLockboxRow,
+  type WormholePeerLimits,
+  type WormholePeerRow,
   type ManagerFacts,
   type NormalizedScanOp,
   type NttRateLimitState,
@@ -81,6 +103,7 @@ import {
   type WormholeQueuedRelease,
   type WormholeStatus,
   type WormholeSummary,
+  type WormholeTokenRef,
   type WormholeTransferRow,
 } from './wormholeNtt.ts'
 
@@ -101,7 +124,11 @@ let client: ClickHouseClient
 export function initWormholeNttService(c: ClickHouseClient): void { client = c }
 
 const SCAN_URL = process.env.WORMHOLE_SCAN_URL?.trim() ?? 'https://api.wormholescan.io'
-const ORIGIN_RPC_URLS = parseOriginRpcUrls(process.env.WORMHOLE_ORIGIN_RPC_URLS)
+// One endpoint per Wormhole chain: the chain table's public endpoints, with the
+// deployment's WORMHOLE_ORIGIN_RPC_URLS map layered over them (see
+// `WORMHOLE_CHAINS`). A peer on a chain absent from both is still listed, as
+// unverified, never skipped.
+const ORIGIN_RPC_URLS = resolveOriginRpcUrls(parseOriginRpcUrls(process.env.WORMHOLE_ORIGIN_RPC_URLS))
 
 // Transfers are followed for this long in both directions. Anything older is
 // invisible on both sides, and both blind directions raise the residual, so an
@@ -144,14 +171,23 @@ interface DiscoveredAsset {
   decimals: number
   manager: string          // hydration manager h160, lowercase
   minterAccount: string    // the manager's widened ETH\0 account id
+  /**
+   * The PRIMARY origin: the registry `wh` location's chain where the asset has
+   * one; otherwise derived from the manager's peers (`derivePrimaryOrigin`) —
+   * Hydration itself for an asset Hydration locks, else its first lockbox.
+   */
   originChainId: number
-  originToken: string      // 32-byte hex as registered
+  originToken: string | null  // 32-byte hex as registered; null without a `wh` location
+  /** The token Hydration's manager answers for: an ERC-20 precompile or an Erc20 asset's contract. */
+  hydrationToken: string | null
 }
 
 interface ManagerPeer {
   chainId: number
   peer: string
   decimals: number | null
+  /** How the live answer and the indexed PeerUpdated history agree. */
+  evidence: PeerEvidence | null
 }
 
 interface ManagerStaticFacts {
@@ -169,13 +205,23 @@ interface ManagerStaticFacts {
    * registry origin understates backing by whatever the others hold.
    */
   peers: ManagerPeer[]
+  /** The indexed registrations these peers were read against (`indexedPeerSignature`). */
+  indexedPeers: string
 }
 
 interface CustodyRead {
-  locked: bigint | null       // in ORIGIN token decimals
+  /**
+   * In the PEER token's decimals. For a lockbox (the default) the custody its
+   * manager holds; for a spoke (`role: 'spoke'`) the gross supply minted there.
+   */
+  locked: bigint | null
   decimals: number | null
   paused: boolean | null
   at: number
+  /** What the reading is. Absent on readers that only ever see lockboxes. */
+  role?: 'lockbox' | 'spoke'
+  /** A spoke's supply at the dead address, in the same decimals. */
+  burned?: bigint | null
   /**
    * Set on a reading carried over from an earlier cycle because the origin
    * chain did not answer this one. The figure is still the best available and
@@ -220,10 +266,37 @@ interface NttReceiveRow {
   managers: string[]         // managers that logged TransferRedeemed in the same extrinsic
 }
 
+/**
+ * One inbound transfer as Hydration's manager EXECUTED it — minted (or, for a
+ * locking manager, released) on the spot, or queued by Hydration's own inbound
+ * limiter. The amount is the payload's, read out of the call that delivered
+ * the VAA and matched to the manager's own digest, so it is exact whatever the
+ * manager's mode and whichever way the tokens move on this side.
+ */
+interface NttInboundExec {
+  blockHeight: number
+  extrinsicIndex: number | null
+  eventIndex: number
+  timestampMs: number
+  manager: string
+  assetId: number | null
+  sourceChain: number
+  digest: string
+  /** At asset decimals; null when the payload could not be found in the call. */
+  amount: bigint | null
+  recipient: string | null
+  /** InboundTransferQueued rather than TransferRedeemed: held by Hydration's limiter. */
+  queued: boolean
+}
+
 interface NttLogTimeline {
   sends: NttSendRow[]
   receives: NttReceiveRow[]
   redeemedKeys: Set<string>
+  /** Every inbound execution by a discovered manager, with its amount. */
+  inbound: NttInboundExec[]
+  /** Digests a manager has completed (TransferRedeemed), across all history. */
+  redeemedDigests: Set<string>
 }
 
 // A queued release as the snapshot holds it: raw integers at the Hydration
@@ -237,6 +310,10 @@ interface QueuedEntry {
   queuedAtSec: number | null
   releasableAtSec: number | null
   sendKey: string | null   // vaaKey of our own send, so it is not also in flight
+  /** `out`: an exit held by the peer (`chainId` = peer). `in`: an arrival held by Hydration (`chainId` = Hydration). */
+  direction: 'in' | 'out'
+  /** Where the held transfer came from: Hydration for an exit, the source chain for an arrival. */
+  fromChainId: number
 }
 
 interface WormholeSnapshot {
@@ -266,11 +343,24 @@ interface WormholeSnapshot {
   // held.
   queuedByAsset: Map<number, bigint>
   queuedCount: Map<number, number>
-  // Rate-limiter fuses, per asset and per side. The origin map is what decides
-  // whether the row carries limits at all: Hydration's own legs are uncapped, so
-  // showing them alone would suggest a headroom nothing measured.
-  originFuses: Map<number, FusePair>
-  localFuses: Map<number, FusePair>
+  // Rate-limiter fuses, keyed `assetId:chainId` on both sides: each peer
+  // manager's own pair, and Hydration's manager's outbound leg with its inbound
+  // leg FOR THAT chain. The origin map is what decides whether a row carries
+  // limits at all — showing only Hydration's legs would suggest a headroom
+  // nothing measured on the far side.
+  originFuses: Map<string, FusePair>
+  localFuses: Map<string, FusePair>
+  // ── per peer (keyed `assetId:chainId`) ──
+  /** The peers each asset's Hydration manager has, as this cycle used them. */
+  peers: Map<number, ManagerPeer[]>
+  /** Each peer's reading — custody for a lockbox, supply for a spoke — fresh or carried over (`stale`). */
+  peerReads: Map<string, CustodyRead>
+  /** Each peer manager's deployment facts on its own chain (mode, token, other peers). */
+  peerStatics: Map<string, PeerStatic>
+  /** Held by a limiter, per (asset, chain): the peer's for an exit, Hydration's for an arrival. */
+  queuedByPeer: Map<string, { peer: bigint; hydration: bigint; peerKnown: boolean }>
+  /** Hydration's own custody for every asset its manager locks, at the pinned block. */
+  hydrationLocked: Map<number, bigint>
   // Per asset: whether a shortfall has now been read on two consecutive cycles
   // and may therefore be published as one.
   downgradeConfirmed: Map<number, boolean>
@@ -314,8 +404,10 @@ const settledDigests = new Set<string>()
 // keeps being subtracted instead of silently turning into custody surplus.
 const knownQueuedDigests = new Set<string>()
 // rateLimitDuration() per origin manager, in seconds. Governance can change it,
-// so it rides the same hourly refresh as the other static facts.
-const rateLimitDurations = new Map<number, { seconds: bigint; at: number }>()
+// so it rides the same hourly refresh as the other static facts. Keyed
+// `assetId:chainId`: one asset's managers on two chains keep two windows, and
+// keying by asset alone let the last chain read overwrite the others'.
+const rateLimitDurations = new Map<string, { seconds: bigint; at: number }>()
 // token() per origin manager: which ERC-20 it answers for, lowercased. A manager
 // cannot change it without being redeployed, so it rides the same hourly refresh
 // — and the check it feeds (a manager whose token disagrees with the registry is
@@ -323,13 +415,16 @@ const rateLimitDurations = new Map<number, { seconds: bigint; at: number }>()
 // Keyed `assetId:chainId` — one asset's custody managers on different chains
 // each lock their own local token.
 const managerTokens = new Map<string, { address: string; at: number }>()
-// The last queue read per asset, so one failed poll of one chain does not blank
-// a queue the previous cycle measured.
-const lastQueued = new Map<number, QueuedEntry[]>()
+// The last queue read per (asset, chain), so one failed poll of one chain does
+// not blank a queue the previous cycle measured — nor stand in for another
+// chain's.
+const lastQueued = new Map<string, QueuedEntry[]>()
 // Same survival rule for the fuses: a chain that fails on one poll keeps the
 // headroom it last reported rather than reading as an unlimited (or spent) one.
-const lastOriginFuses = new Map<number, FusePair>()
-const lastLocalFuses = new Map<number, FusePair>()
+// Keyed `assetId:chainId` on both sides: Hydration's inbound limit is per
+// source chain, and every peer manager has its own pair.
+const lastOriginFuses = new Map<string, FusePair>()
+const lastLocalFuses = new Map<string, FusePair>()
 // Outbound digests a peer chain has confirmed it executed. Execution is
 // permanent, so this only grows and a steady-state cycle asks about nothing.
 const executedDigests = new Set<string>()
@@ -357,7 +452,11 @@ const executedDigests = new Set<string>()
 const negativeStreak = new Map<number, number>()
 // The Sui peers table lives inside the manager's state object, so its id is
 // discovered from that object and memoized with the other static facts.
-const suiPeersTable = new Map<number, string>()
+const suiPeersTable = new Map<string, string>()
+// The Solana program's mint and mode per (asset, chain), and the Sui manager's
+// mode — the non-EVM halves of a peer's identity, read with its custody.
+const solanaMints = new Map<string, { mint: string; mode: number }>()
+const suiModes = new Map<string, string | null>()
 // Every manager the discovery pass has seen, kept outside the snapshot so the
 // Security timeline can name them before the first refresh completes.
 const discoveredManagers = new Map<number, WormholeManagerRef>()
@@ -385,8 +484,6 @@ export function getWormholeManagers(): WormholeManagerRef[] {
 
 // ───────────────────────────── discovery ─────────────────────────────
 
-interface LocationRow { asset_id: number; args: string; symbol: string | null; decimals: number | null; min_block: number }
-
 // Discovery re-derived the `wh` location map from raw_events on every cycle, and
 // that read prunes on nothing: `event_name` is not in the sort key and the
 // filter is a LIKE over args_json, so it scanned 18.8M rows — 88 times an hour —
@@ -405,14 +502,153 @@ let nttMinterMinBlock = 0
 
 /** Discovery's incremental state. The registry is append-only on chain, so
  *  production never needs this; a test that shrinks its fake registry does. */
+/** Every per-process memo of deployment facts (manager peers, peer statics). Tests only. */
+export function resetWormholeStaticFactsForTests(): void {
+  staticFacts.clear()
+  peerStatics.clear()
+  managerTokens.clear()
+  rateLimitDurations.clear()
+  lastCustody.clear()
+  lastOriginFuses.clear()
+  lastLocalFuses.clear()
+  lastQueued.clear()
+  negativeStreak.clear()
+}
+
 export function resetWormholeDiscoveryForTests(): void {
   whLocationCache = null
   nttMinterMinBlock = 0
+  peerEventCache = null
+  peerHistories = new Map()
+  managerTokenMemo.clear()
+  hydrationTokenMeta.clear()
+  solanaLayouts.clear()
+  solanaLayoutRejected.clear()
+  solanaInboxCache.clear()
+  solanaLastLocked.clear()
 }
+
+// ─────────────────────── peer registrations, from the index ───────────────────────
+
+// Every PeerUpdated / SetWormholePeer log Hydration has written, read
+// incrementally on the same reorg-margin rule as the `wh` locations: the part
+// at or below the settled floor is kept, only newer blocks are re-read. The set
+// is a few dozen rows ever; the first read of a process is the only full one.
+const PEER_EVENT_REORG_MARGIN_BLOCKS = 600
+let peerEventCache: { upTo: number; changes: PeerChange[] } | null = null
+// TC proposal hash → motion index. A proposal's index never changes.
+const motionIndexByHash = new Map<string, number>()
+// The peer history the last discovery built: contract → chain → history.
+let peerHistories = new Map<string, Map<number, PeerHistory>>()
+// A non-minter manager's token(), memoized with the other static facts.
+const managerTokenMemo = new Map<string, { token: string | null; at: number }>()
+// Hydration-side token metadata for assets the price registry does not carry.
+const hydrationTokenMeta = new Map<string, { symbol: string | null; name: string | null; decimals: number | null; at: number }>()
+// Transceiver → the manager it serves (`nttManager()`), a deployment fact.
+const transceiverManager = new Map<string, { manager: string | null; at: number }>()
+
+interface PeerLogRow { block_height: number; event_index: number; extrinsic_index: number | null; block_timestamp: string; contract: string; topics: string[]; data: string }
+
+async function loadPeerChanges(head: number | null): Promise<PeerChange[]> {
+  const from = peerEventCache?.upTo ?? -1
+  const res = await client.query({
+    query: `SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS block_timestamp,
+                   lower(contract_address) AS contract, topics, data
+            FROM price_data.raw_evm_logs
+            WHERE topic0 IN ('${TOPIC.peerUpdated}','${TOPIC.wormholePeerSet}')
+              AND block_height > {from:Int64}
+            ORDER BY block_height, event_index
+            LIMIT 1 BY block_height, event_index`,
+    query_params: { from }, format: 'JSONEachRow',
+  })
+  const rows = (await res.json<PeerLogRow>()) ?? []
+  const parsed = rows.flatMap(row => {
+    const event = parsePeerEvent(row.topics ?? [], row.data ?? '')
+    return event ? [{ row, event }] : []
+  })
+  // Who made each change: the events of the extrinsic that carried it.
+  const pairs = [...new Set(parsed.filter(p => p.row.extrinsic_index != null).map(p => `${p.row.block_height}:${p.row.extrinsic_index}`))]
+  const eventsByPair = new Map<string, { eventName: string; args: unknown }[]>()
+  if (pairs.length) {
+    const tuples = pairs.map(pair => { const [b, x] = pair.split(':'); return `(${Number(b)},${Number(x)})` }).join(',')
+    const evRes = await client.query({
+      query: `SELECT block_height, extrinsic_index, event_name, args_json
+              FROM price_data.raw_events
+              WHERE (block_height, extrinsic_index) IN (${tuples})
+                AND event_name IN ('TechnicalCommittee.Executed', 'Ethereum.Executed')
+              LIMIT 1 BY block_height, event_index`,
+      format: 'JSONEachRow',
+    })
+    for (const r of (await evRes.json<{ block_height: number; extrinsic_index: number; event_name: string; args_json: string }>()) ?? []) {
+      const key = `${r.block_height}:${r.extrinsic_index}`
+      let args: unknown = null
+      try { args = JSON.parse(r.args_json) } catch { args = null }
+      eventsByPair.set(key, [...(eventsByPair.get(key) ?? []), { eventName: r.event_name, args }])
+    }
+    const hashes = [...new Set([...eventsByPair.values()].flat()
+      .filter(e => e.eventName === 'TechnicalCommittee.Executed')
+      .map(e => String((e.args as { proposalHash?: unknown } | null)?.proposalHash ?? '').toLowerCase())
+      .filter(h => /^0x[0-9a-f]{64}$/.test(h) && !motionIndexByHash.has(h)))]
+    if (hashes.length) {
+      const motionRes = await client.query({
+        query: `SELECT lower(JSONExtractString(args_json, 'proposalHash')) AS hash,
+                       toUInt32(JSONExtractInt(args_json, 'proposalIndex')) AS motion
+                FROM price_data.raw_events
+                WHERE event_name = 'TechnicalCommittee.Proposed'
+                  AND lower(JSONExtractString(args_json, 'proposalHash')) IN (${sqlList(hashes)})`,
+        format: 'JSONEachRow',
+      })
+      for (const r of (await motionRes.json<{ hash: string; motion: number }>()) ?? []) motionIndexByHash.set(r.hash, Number(r.motion))
+    }
+  }
+  const fresh: PeerChange[] = parsed.map(({ row, event }) => ({
+    contract: row.contract,
+    blockHeight: Number(row.block_height),
+    eventIndex: Number(row.event_index),
+    extrinsicIndex: row.extrinsic_index == null ? null : Number(row.extrinsic_index),
+    timestampMs: parseChTimestamp(row.block_timestamp),
+    event,
+    origin: changeOriginFromEvents(
+      row.extrinsic_index == null ? null : Number(row.extrinsic_index),
+      eventsByPair.get(`${row.block_height}:${row.extrinsic_index}`) ?? [],
+      motionIndexByHash,
+    ),
+  }))
+  const all = [...(peerEventCache?.changes ?? []), ...fresh]
+  const floor = head == null ? from : Math.max(from, head - PEER_EVENT_REORG_MARGIN_BLOCKS)
+  peerEventCache = { upTo: floor, changes: all.filter(c => c.blockHeight <= floor) }
+  return all
+}
+
+/** The token a manager answers for, memoized for the static-facts window. */
+async function managerToken(manager: string): Promise<string | null> {
+  const memo = managerTokenMemo.get(manager)
+  if (memo && Date.now() - memo.at < STATIC_FACTS_TTL_MS) return memo.token
+  const token = decodeAddress(await hydrationEthCall(manager, EVM_SELECTOR.token))?.toLowerCase() ?? null
+  if (token != null || !memo) managerTokenMemo.set(manager, { token: token ?? memo?.token ?? null, at: Date.now() })
+  return token ?? memo?.token ?? null
+}
+
+/** symbol()/name()/decimals() of a Hydration-side token, memoized. */
+async function readHydrationTokenMeta(token: string): Promise<{ symbol: string | null; name: string | null; decimals: number | null }> {
+  const memo = hydrationTokenMeta.get(token)
+  if (memo && Date.now() - memo.at < STATIC_FACTS_TTL_MS) return memo
+  const [symbolRaw, nameRaw, decimalsRaw] = await hydrationEthCallBatch([
+    { to: token, data: EVM_SELECTOR.symbol },
+    { to: token, data: EVM_SELECTOR.name },
+    { to: token, data: EVM_SELECTOR.decimals },
+  ])
+  const decimals = decodeUint(decimalsRaw)
+  const meta = { symbol: decodeAbiString(symbolRaw), name: decodeAbiString(nameRaw), decimals: decimals == null ? null : Number(decimals), at: Date.now() }
+  hydrationTokenMeta.set(token, meta)
+  return meta
+}
+
+/** The ETH\0-widened account a Hydration manager burns from (as NttMinterSet stores it). */
+const widenManager = (h160: string): string => '0x45544800' + h160.replace(/^0x/, '').toLowerCase() + '0'.repeat(16)
 
 async function discoverAssets(): Promise<{ assets: DiscoveredAsset[]; minBlock: number }> {
   const minters = await nttMinterAccounts()
-  if (!minters.size) return { assets: [], minBlock: 0 }
   const from = whLocationCache?.upTo ?? -1
   const [locRes, headRow] = await Promise.all([
     client.query({
@@ -440,47 +676,101 @@ async function discoverAssets(): Promise<{ assets: DiscoveredAsset[]; minBlock: 
   // Only entries settled at or below the floor may be kept: one above it has to
   // be re-read, or a reorg that moved a location would never be seen again.
   whLocationCache = { upTo: floor, byAsset: new Map([...byAsset].filter(([, v]) => v.block <= floor)) }
-  if (!nttMinterMinBlock) {
+  if (!nttMinterMinBlock && minters.size) {
     const minRes = await client.query({
       query: `SELECT min(block_height) AS min_block FROM price_data.raw_events WHERE event_name = 'EVMAccounts.NttMinterSet'`,
       format: 'JSONEachRow',
     })
     nttMinterMinBlock = Number((await minRes.json<{ min_block: number }>())[0]?.min_block ?? 0) || 0
   }
-  const ids = [...byAsset.keys()]
+
+  // The manager set is the UNION of two on-chain statements: the runtime's
+  // minter registry (EVMAccounts.NttMinterSet — every Hydration manager that
+  // mints) and every contract that registered an NTT peer here (PeerUpdated —
+  // which is also how a LOCKING manager, which never needs minting rights,
+  // shows up: HDX and HOLLAR are locked on Hydration, not minted). A contract
+  // whose token() is not a registry asset is not bridging one (the NTTUSD test
+  // deployment), and where two managers claim one asset the minter registry's
+  // wins — the other is a superseded deployment.
+  const changes = await loadPeerChanges(headRow)
+  peerHistories = buildPeerHistories(changes)
+  const managerContracts = new Set(changes.filter(c => c.event.kind === 'manager').map(c => c.contract.toLowerCase()))
+  const minterByAsset = new Map([...minters].map(([assetId, account]) => [assetId, nttMinterH160(account).toLowerCase()]))
+  const minterManagers = new Set(minterByAsset.values())
+  const managerByAsset = new Map<number, { manager: string; minterAccount: string; token: string | null; lastEvent: number }>()
+  for (const [assetId, manager] of minterByAsset) {
+    managerByAsset.set(assetId, { manager, minterAccount: minters.get(assetId)!, token: null, lastEvent: Number.MAX_SAFE_INTEGER })
+  }
+  const nonMinters = [...managerContracts].filter(m => !minterManagers.has(m)).sort()
+  const tokenByManager = new Map<string, string | null>()
+  for (const manager of nonMinters) tokenByManager.set(manager, await managerToken(manager))
+  const erc20Tokens = [...tokenByManager.values()].filter((t): t is string => t != null && assetIdFromPrecompile(t) == null)
+  const assetByErc20 = new Map<string, number>()
+  if (erc20Tokens.length) {
+    const res = await client.query({
+      query: `SELECT asset_id, lower(evm_address) AS evm_address FROM price_data.assets FINAL WHERE lower(evm_address) IN (${sqlList(erc20Tokens)})`,
+      format: 'JSONEachRow',
+    })
+    for (const r of (await res.json<{ asset_id: number; evm_address: string }>()) ?? []) {
+      if (r.evm_address) assetByErc20.set(r.evm_address, Number(r.asset_id))
+    }
+  }
+  for (const manager of nonMinters) {
+    const token = tokenByManager.get(manager) ?? null
+    if (token == null) continue
+    const assetId = assetIdFromPrecompile(token) ?? assetByErc20.get(token) ?? null
+    if (assetId == null) continue
+    const lastEvent = Math.max(...[...(peerHistories.get(manager)?.values() ?? [])].map(h => h.changes.at(-1)?.blockHeight ?? 0), 0)
+    const prev = managerByAsset.get(assetId)
+    if (prev && prev.lastEvent >= lastEvent) continue
+    managerByAsset.set(assetId, { manager, minterAccount: widenManager(manager), token, lastEvent })
+  }
+  if (!managerByAsset.size) return { assets: [], minBlock: 0 }
+
+  const ids = [...managerByAsset.keys()]
   const metaRes = await client.query({
     query: `SELECT asset_id, symbol, decimals FROM price_data.assets FINAL WHERE asset_id IN (${ids.join(',') || '0'})`,
     format: 'JSONEachRow',
   })
   const meta = new Map((await metaRes.json<{ asset_id: number; symbol: string | null; decimals: number | null }>())
     .map(m => [Number(m.asset_id), m]))
-  const rows: LocationRow[] = [...byAsset].map(([asset_id, v]) => ({
-    asset_id,
-    args: v.args,
-    symbol: meta.get(asset_id)?.symbol ?? null,
-    decimals: meta.get(asset_id)?.decimals ?? null,
-    min_block: nttMinterMinBlock,
-  }))
   const assets: DiscoveredAsset[] = []
-  let minBlock = 0
-  for (const row of rows) {
-    minBlock = Math.max(minBlock, Number(row.min_block) || 0)
-    const minterAccount = minters.get(Number(row.asset_id))
-    if (!minterAccount) continue
-    const location = parseWormholeLocation(row.args)
-    if (!location) continue
-    const fallback = assetDescriptor(Number(row.asset_id))
+  let minBlock = nttMinterMinBlock
+  for (const [assetId, entry] of [...managerByAsset].sort((a, b) => a[0] - b[0])) {
+    const loc = byAsset.get(assetId)
+    const location = loc ? parseWormholeLocation(loc.args) : null
+    // A minter-registered asset was always required to carry a `wh` location;
+    // that stays the rule, so a stray minter registration does not invent an
+    // asset. A manager found through its peers needs none.
+    if (minterManagers.has(entry.manager) && !location) continue
+    const history = peerHistories.get(entry.manager)
+    const firstEvent = Math.min(...[...(history?.values() ?? [])].map(h => h.first.blockHeight))
+    if (Number.isFinite(firstEvent) && firstEvent > 0) minBlock = minBlock ? Math.min(minBlock, firstEvent) : firstEvent
+    const hydrationToken = entry.token ?? erc20Precompile(assetId)
+    let symbol = meta.get(assetId)?.symbol ?? null
+    let decimals = meta.get(assetId)?.decimals ?? null
+    if (symbol == null || decimals == null) {
+      // Not in the price registry (yet): the token answers for itself.
+      const own = await readHydrationTokenMeta(hydrationToken)
+      symbol = symbol ?? own.symbol
+      decimals = decimals ?? own.decimals
+    }
+    const fallback = assetDescriptor(assetId)
+    // Provisional primary origin for an asset without a `wh` location: its
+    // first registered peer. `derivePrimaryOrigin` settles it once the
+    // manager's own mode has been read.
+    const firstPeer = [...(history?.values() ?? [])].sort((a, b) => a.first.blockHeight - b.first.blockHeight)[0]?.chainId
     assets.push({
-      assetId: Number(row.asset_id),
-      symbol: row.symbol || fallback.symbol,
-      decimals: row.decimals != null ? Number(row.decimals) : fallback.decimals,
-      manager: nttMinterH160(minterAccount),
-      minterAccount,
-      originChainId: location.originChainId,
-      originToken: location.originToken,
+      assetId,
+      symbol: symbol || fallback.symbol,
+      decimals: decimals != null ? Number(decimals) : fallback.decimals,
+      manager: entry.manager,
+      minterAccount: entry.minterAccount,
+      originChainId: location?.originChainId ?? firstPeer ?? HYDRATION_WORMHOLE_CHAIN_ID,
+      originToken: location?.originToken ?? null,
+      hydrationToken,
     })
   }
-  assets.sort((a, b) => a.assetId - b.assetId)
   for (const a of assets) {
     discoveredManagers.set(a.assetId, {
       assetId: a.assetId,
@@ -548,7 +838,7 @@ async function queryIndexedHeadPin(): Promise<{ height: number; lagMs: number | 
 // The upper bound is explicit rather than incidental: it is what makes this set
 // and the issuance read describe the same block.
 async function loadNttTimeline(assets: readonly DiscoveredAsset[], minBlock: number, maxBlock: number, hydrationChainId: number): Promise<NttLogTimeline> {
-  const empty: NttLogTimeline = { sends: [], receives: [], redeemedKeys: new Set() }
+  const empty: NttLogTimeline = { sends: [], receives: [], redeemedKeys: new Set(), inbound: [], redeemedDigests: new Set() }
   if (!assets.length) return empty
   const managers = assets.map(a => a.manager)
   const assetByManager = new Map(assets.map(a => [a.manager, a]))
@@ -558,14 +848,14 @@ async function loadNttTimeline(assets: readonly DiscoveredAsset[], minBlock: num
               FROM price_data.raw_evm_logs
               WHERE block_height >= ${Math.max(0, minBlock)} AND block_height <= ${Math.max(0, maxBlock)}
                 AND lower(contract_address) IN (${sqlList(managers)})
-                AND topic0 IN ('${TOPIC.transferSent}','${TOPIC.transferRedeemed}')
+                AND topic0 IN ('${TOPIC.transferSent}','${TOPIC.transferRedeemed}','${TOPIC.inboundTransferQueued}')
             )
             SELECT block_height, event_index, extrinsic_index, block_timestamp,
                    lower(contract_address) AS contract, topics, data
             FROM price_data.raw_evm_logs
             WHERE (block_height, extrinsic_index) IN (SELECT block_height, extrinsic_index FROM xs)
               AND block_height <= ${Math.max(0, maxBlock)}
-              AND topic0 IN ('${TOPIC.logMessagePublished}','${TOPIC.receivedMessage}','${TOPIC.transferRedeemed}')
+              AND topic0 IN ('${TOPIC.logMessagePublished}','${TOPIC.receivedMessage}','${TOPIC.transferRedeemed}','${TOPIC.inboundTransferQueued}')
             ORDER BY block_height, event_index
             LIMIT 1 BY block_height, event_index`,
     format: 'JSONEachRow',
@@ -573,17 +863,31 @@ async function loadNttTimeline(assets: readonly DiscoveredAsset[], minBlock: num
   const rows = await res.json<LogRow>()
 
   const redeemedManagersByExtrinsic = new Map<string, string[]>()
+  // Per extrinsic, every inbound execution a discovered manager logged: the
+  // NTT digest it completed or queued.
+  const executionsByExtrinsic = new Map<string, { row: LogRow; digest: string; queued: boolean }[]>()
+  const redeemedDigests = new Set<string>()
   for (const row of rows) {
-    if (row.topics[0]?.toLowerCase() !== TOPIC.transferRedeemed) continue
+    const topic = row.topics[0]?.toLowerCase()
     const key = `${row.block_height}:${row.extrinsic_index}`
-    const list = redeemedManagersByExtrinsic.get(key) ?? []
-    if (!list.includes(row.contract)) list.push(row.contract)
-    redeemedManagersByExtrinsic.set(key, list)
+    if (topic === TOPIC.transferRedeemed) {
+      const list = redeemedManagersByExtrinsic.get(key) ?? []
+      if (!list.includes(row.contract)) list.push(row.contract)
+      redeemedManagersByExtrinsic.set(key, list)
+    }
+    if (!assetByManager.has(row.contract)) continue
+    const digest = topic === TOPIC.transferRedeemed
+      ? (row.topics[1] ?? '').toLowerCase()
+      : topic === TOPIC.inboundTransferQueued ? parseNttQueuedTransfer(row.topics, row.data)?.digest?.toLowerCase() ?? '' : ''
+    if (!/^0x[0-9a-f]{64}$/.test(digest)) continue
+    if (topic === TOPIC.transferRedeemed) redeemedDigests.add(digest)
+    executionsByExtrinsic.set(key, [...(executionsByExtrinsic.get(key) ?? []), { row, digest, queued: topic === TOPIC.inboundTransferQueued }])
   }
 
   const sends: NttSendRow[] = []
   const receives: NttReceiveRow[] = []
   const redeemedKeys = new Set<string>()
+  const sourceChainsByExtrinsic = new Map<string, number[]>()
   for (const row of rows) {
     const timestampMs = parseChTimestamp(row.block_timestamp)
     const published = parseLogMessagePublished(row.topics, row.data)
@@ -614,6 +918,8 @@ async function loadNttTimeline(assets: readonly DiscoveredAsset[], minBlock: num
     const received = parseReceivedMessage(row.topics, row.data)
     if (!received) continue
     redeemedKeys.add(vaaKey(received.emitterChainId, received.emitterAddress, received.sequence))
+    const key = `${row.block_height}:${row.extrinsic_index}`
+    sourceChainsByExtrinsic.set(key, [...new Set([...(sourceChainsByExtrinsic.get(key) ?? []), received.emitterChainId])])
     receives.push({
       blockHeight: row.block_height,
       eventIndex: row.event_index,
@@ -622,10 +928,79 @@ async function loadNttTimeline(assets: readonly DiscoveredAsset[], minBlock: num
       emitterChainId: received.emitterChainId,
       emitterAddress: received.emitterAddress,
       sequence: received.sequence.toString(),
-      managers: redeemedManagersByExtrinsic.get(`${row.block_height}:${row.extrinsic_index}`) ?? [],
+      managers: redeemedManagersByExtrinsic.get(key) ?? [],
     })
   }
-  return { sends, receives, redeemedKeys }
+
+  // The amount of every inbound execution, from the payload in its own call.
+  const inbound: NttInboundExec[] = []
+  const callArgs = await callArgsFor([...executionsByExtrinsic.keys()], maxBlock)
+  for (const [key, executions] of executionsByExtrinsic) {
+    const messages = transceiverMessagesIn(callArgs.get(key) ?? '')
+    const chains = sourceChainsByExtrinsic.get(key) ?? []
+    for (const { row, digest, queued } of executions) {
+      const asset = assetByManager.get(row.contract) ?? null
+      // A completion of an earlier queued transfer carries no new message; it
+      // is already counted at the queueing, so it is not a second arrival.
+      if (!chains.length) continue
+      let found: { message: ReturnType<typeof messageForDigest>; chain: number } | null = null
+      for (const chain of chains) {
+        const message = messageForDigest(messages, chain, digest)
+        if (message) { found = { message, chain }; break }
+      }
+      inbound.push({
+        blockHeight: row.block_height,
+        extrinsicIndex: row.extrinsic_index,
+        eventIndex: row.event_index,
+        timestampMs: parseChTimestamp(row.block_timestamp),
+        manager: row.contract,
+        assetId: asset?.assetId ?? null,
+        // With a single source chain in the extrinsic the chain is known even
+        // when the payload is not; with several it needs the payload to say.
+        sourceChain: found?.chain ?? (chains.length === 1 ? chains[0] : 0),
+        digest,
+        amount: found?.message && asset
+          ? deTrim(found.message.transfer.trimmedAmount, found.message.transfer.trimmedDecimals, asset.decimals)
+          : null,
+        recipient: found?.message?.transfer.recipient ?? null,
+        queued,
+      })
+    }
+  }
+  return { sends, receives, redeemedKeys, inbound, redeemedDigests }
+}
+
+// The call arguments of `block:extrinsic` pairs — where an inbound VAA's payload
+// (and so its amount) lives. Immutable chain history, so pairs safely below the
+// head are memoized for the life of the process; near-head pairs are re-read.
+const CALL_ARGS_FINALITY_MARGIN_BLOCKS = 600
+const callArgsMemo = new Map<string, string>()
+async function callArgsFor(pairs: readonly string[], head: number): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const missing: string[] = []
+  for (const key of pairs) {
+    if (key.endsWith(':null')) continue
+    const hit = callArgsMemo.get(key)
+    if (hit !== undefined) out.set(key, hit)
+    else missing.push(key)
+  }
+  for (let start = 0; start < missing.length; start += 2_000) {
+    const chunk = missing.slice(start, start + 2_000)
+    const tuples = chunk.map(key => { const [b, x] = key.split(':'); return `(${Number(b)},${Number(x)})` }).join(',')
+    const res = await client.query({
+      query: `SELECT block_height, extrinsic_index, call_args_json
+              FROM price_data.raw_extrinsics
+              WHERE (block_height, extrinsic_index) IN (${tuples})
+              LIMIT 1 BY block_height, extrinsic_index`,
+      format: 'JSONEachRow',
+    })
+    for (const r of (await res.json<{ block_height: number; extrinsic_index: number; call_args_json: string }>()) ?? []) {
+      const key = `${r.block_height}:${r.extrinsic_index}`
+      out.set(key, r.call_args_json ?? '')
+      if (Number(r.block_height) <= head - CALL_ARGS_FINALITY_MARGIN_BLOCKS) callArgsMemo.set(key, r.call_args_json ?? '')
+    }
+  }
+  return out
 }
 
 // ───────────────────────────── Hydration RPC ─────────────────────────────
@@ -711,19 +1086,36 @@ async function hydrationBlockHash(blockNumber: number): Promise<string | null> {
 /**
  * The chains worth asking a manager whether it has a peer there.
  *
- * The asset's own registry origin, plus every chain this deployment has an
- * endpoint for — a peer we cannot read custody from tells us nothing, and asking
- * about arbitrary ids would be an unbounded sweep of Wormhole's number space.
- * Adding a chain to WORMHOLE_ORIGIN_RPC_URLS is therefore all it takes for its
- * custody to start counting; nothing here is per-chain code.
+ * Every chain the manager's own PeerUpdated history names — the authoritative
+ * statement of what it was ever pointed at — plus the asset's registry origin
+ * and every chain this deployment has an endpoint for, so a peer whose event
+ * the index somehow lacks still surfaces (as `live-only` evidence) rather than
+ * vanishing. Asking about arbitrary ids beyond those would be an unbounded
+ * sweep of Wormhole's number space.
  */
 function peerCandidateChains(asset: DiscoveredAsset): number[] {
-  return [...new Set([asset.originChainId, ...ORIGIN_RPC_URLS.keys()])].sort((a, b) => a - b)
+  const indexed = [...(peerHistories.get(asset.manager)?.keys() ?? [])]
+  return [...new Set([asset.originChainId, ...indexed, ...ORIGIN_RPC_URLS.keys()])]
+    .filter(c => c !== HYDRATION_WORMHOLE_CHAIN_ID)
+    .sort((a, b) => a - b)
+}
+
+// The manager's registrations as the index states them this cycle. Discovery
+// re-reads the peer events every cycle (the confirmation pass included), so a
+// peer registered since the facts were cached changes this and forces a fresh
+// read — a new lockbox's custody is counted from the cycle its event is indexed,
+// not up to an hour later.
+function indexedPeerSignature(manager: string): string {
+  return [...(peerHistories.get(manager)?.values() ?? [])]
+    .map(h => `${h.chainId}:${h.current?.event.peer ?? ''}`)
+    .sort()
+    .join(',')
 }
 
 async function readManagerFacts(asset: DiscoveredAsset): Promise<ManagerStaticFacts> {
   const cached = staticFacts.get(asset.assetId)
-  if (cached && Date.now() - cached.at < STATIC_FACTS_TTL_MS && cached.peer != null) return cached
+  const indexedPeers = indexedPeerSignature(asset.manager)
+  if (cached && Date.now() - cached.at < STATIC_FACTS_TTL_MS && cached.peers.length && cached.indexedPeers === indexedPeers) return cached
   const candidates = peerCandidateChains(asset)
   const [tokenRaw, modeRaw, chainIdRaw, ...peerRaws] = [
     await hydrationEthCall(asset.manager, EVM_SELECTOR.token),
@@ -731,10 +1123,19 @@ async function readManagerFacts(asset: DiscoveredAsset): Promise<ManagerStaticFa
     await hydrationEthCall(asset.manager, EVM_SELECTOR.chainId),
     ...await Promise.all(candidates.map(c => hydrationEthCall(asset.manager, encodeGetPeer(c)))),
   ]
+  const history = peerHistories.get(asset.manager)
   const peers: ManagerPeer[] = []
   candidates.forEach((chainId, i) => {
     const decoded = decodeGetPeer(peerRaws[i] ?? null)
-    if (decoded?.address) peers.push({ chainId, peer: decoded.address, decimals: decoded.decimals })
+    const indexed = history?.get(chainId)?.current ?? null
+    const evidence = peerEvidence(indexed?.event.peer ?? null, decoded?.address ?? null)
+    // The live answer is what is in force; an indexed peer the chain did not
+    // confirm this cycle (it failed to answer) is still a peer — the index
+    // never invents one — so it is carried, marked by its evidence.
+    if (decoded?.address) peers.push({ chainId, peer: decoded.address, decimals: decoded.decimals, evidence })
+    else if (indexed?.event.peer && peerRaws[i] == null) {
+      peers.push({ chainId, peer: indexed.event.peer, decimals: indexed.event.decimals, evidence })
+    }
   })
   const origin = peers.find(p => p.chainId === asset.originChainId)
   const mode = decodeUint(modeRaw)
@@ -742,14 +1143,27 @@ async function readManagerFacts(asset: DiscoveredAsset): Promise<ManagerStaticFa
   const facts: ManagerStaticFacts = {
     at: Date.now(),
     token: decodeAddress(tokenRaw),
-    mode: mode == null ? null : Number(mode),
+    mode: mode == null ? cached?.mode ?? null : Number(mode),
     chainId: chainId == null ? null : Number(chainId),
     peer: origin?.peer ?? cached?.peer ?? null,
     peerDecimals: origin?.decimals ?? cached?.peerDecimals ?? null,
     peers: peers.length ? peers : cached?.peers ?? [],
+    indexedPeers,
   }
-  if (facts.peer != null) staticFacts.set(asset.assetId, facts)
+  if (facts.peers.length) staticFacts.set(asset.assetId, facts)
   return facts
+}
+
+/**
+ * The primary origin of an asset with no registry `wh` location, once the
+ * manager's mode is known: Hydration itself when Hydration LOCKS the token (its
+ * native home — HDX, HOLLAR), otherwise the asset's first registered peer.
+ * An asset with a `wh` location keeps the registry's answer.
+ */
+function derivePrimaryOrigin(asset: DiscoveredAsset, facts: ManagerStaticFacts | undefined, hydrationChainId: number): number {
+  if (asset.originToken != null) return asset.originChainId
+  if (facts?.mode === 0) return hydrationChainId
+  return asset.originChainId
 }
 
 // ───────────────────────────── origin chains ─────────────────────────────
@@ -847,7 +1261,35 @@ interface EvmOriginRead {
   // Digests this chain's manager reports it has consumed, or null when the read
   // did not answer — in which case redemption falls back to Wormholescan.
   executed: Set<string> | null
+  /** Per asset: what this chain's manager is and holds, beyond the balance. */
+  peers: Map<number, PeerStatic>
 }
+
+/**
+ * A peer manager's deployment facts on its own chain: its mode, the token it
+ * answers for and that token's identity, and which OTHER chains it has peers
+ * on. A manager changes none of these without governance acting on it, so they
+ * ride the hourly memo; a spoke's supply and a lockbox's balance are read every
+ * cycle.
+ */
+interface PeerStatic {
+  mode: number | null
+  token: string | null
+  name: string | null
+  symbol: string | null
+  decimals: number | null
+  /** Other Wormhole chains (known to the chain table) the peer manager has a peer on. */
+  alsoPeers: number[] | null
+  at: number
+}
+
+// Keyed `assetId:chainId` — one asset's managers on different chains are
+// different deployments.
+const peerStatics = new Map<string, PeerStatic>()
+
+/** Chains a peer manager is asked about for peers of its own, besides Hydration. */
+const otherKnownChains = (self: number, hydrationChainId: number): number[] =>
+  Object.keys(WORMHOLE_CHAINS).map(Number).filter(c => c !== self && c !== hydrationChainId)
 
 // One batched JSON-RPC pass per EVM origin chain: the custody balance the origin
 // manager holds of the registered token, whether that manager is paused, both of
@@ -859,21 +1301,32 @@ interface EvmOriginRead {
 // flight subtracts the same amount twice and reads as a deficit that never
 // existed. Asking the manager that holds the custody closes that window.
 //
+// The peer's MODE decides what its balance means. A LOCKING peer is a lockbox:
+// its custody is `token.balanceOf(manager)`. A BURNING peer is a spoke: the
+// supply minted there is `token.totalSupply()`, less what sits at the dead
+// address. Both are read on every pass; the mode picks one.
+//
 // A manager whose own `token()` disagrees with the registry is not answering for
 // the asset we are checking, so its custody is treated as unread.
 async function readEvmCustody(
   url: string, targets: readonly OriginTarget[], hydrationChainId: number, pending: readonly PendingDigest[],
 ): Promise<EvmOriginRead> {
-  const out: EvmOriginRead = { custody: new Map(), fuses: new Map(), executed: null }
+  const out: EvmOriginRead = { custody: new Map(), fuses: new Map(), executed: null, peers: new Map() }
   const calls: EvmCall[] = []
   interface CustodySlot {
     target: OriginTarget
+    /** Token-bound reads; -1 until the token is known. */
     balance: number
+    supply: number
+    dead: number
     paused: number
-    // A manager's token() and its rate-limit window are deployment facts, so
-    // they are asked for only when their hourly memo has run out; on every
-    // other cycle the slot carries no id and the memo answers.
+    // A manager's token(), mode, peers and its rate-limit window are deployment
+    // facts, so they are asked for only when their hourly memo has run out; on
+    // every other cycle the slot carries no id and the memo answers.
     token: number | null
+    mode: number | null
+    meta: number | null
+    alsoPeers: { chainId: number; id: number }[] | null
     fuse: number
     duration: number | null
   }
@@ -882,10 +1335,17 @@ async function readEvmCustody(
   const byAsset = new Map(targets.map(t => [t.asset.assetId, t]))
   const now = Date.now()
   const memoLive = (memo: { at: number } | undefined): boolean => !!memo && now - memo.at < STATIC_FACTS_TTL_MS
+  const tokenReads = (token: string, manager: string) => ({
+    balance: push({ to: token, data: encodeBalanceOf(manager) }),
+    supply: push({ to: token, data: EVM_SELECTOR.totalSupply }),
+    dead: push({ to: token, data: encodeBalanceOf(DEAD_ADDRESS) }),
+  })
   for (const target of targets) {
     const assetId = target.asset.assetId
     const memoKey = `${assetId}:${target.chainId}`
     const managerAddress = displayChainAddress('evm', target.peer)
+    const memo = peerStatics.get(memoKey)
+    const live = memoLive(memo)
     // Which token holds this peer's custody. On the registry origin the registry
     // says so; on any other chain only the peer manager does, so until its
     // `token()` has been read there is no address to ask for a balance and the
@@ -893,17 +1353,23 @@ async function readEvmCustody(
     const tokenAddress = target.expectedToken != null
       ? displayChainAddress('evm', target.expectedToken)
       : managerTokens.get(memoKey)?.address ?? null
-    const balance = tokenAddress == null ? -1 : push({ to: tokenAddress, data: encodeBalanceOf(managerAddress) })
+    const reads = tokenAddress == null ? { balance: -1, supply: -1, dead: -1 } : tokenReads(tokenAddress, managerAddress)
     const paused = push({ to: managerAddress, data: EVM_SELECTOR.isPaused })
     const token = tokenAddress != null && memoLive(managerTokens.get(memoKey))
       ? null
       : push({ to: managerAddress, data: EVM_SELECTOR.token })
+    const mode = live ? null : push({ to: managerAddress, data: EVM_SELECTOR.mode })
+    const meta = live || tokenAddress == null ? null : push({ to: tokenAddress, data: EVM_SELECTOR.name })
+    if (meta != null) { push({ to: tokenAddress!, data: EVM_SELECTOR.symbol }); push({ to: tokenAddress!, data: EVM_SELECTOR.decimals }) }
+    const alsoPeers = live ? null : otherKnownChains(target.chainId, hydrationChainId).map(chainId => ({
+      chainId, id: push({ to: managerAddress, data: encodeGetPeer(chainId) }),
+    }))
     const fuse = calls.length
     for (const call of fuseCalls(managerAddress, hydrationChainId)) push(call)
-    const duration = memoLive(rateLimitDurations.get(assetId))
+    const duration = memoLive(rateLimitDurations.get(memoKey))
       ? null
       : push({ to: managerAddress, data: EVM_SELECTOR.rateLimitDuration })
-    index.set(assetId, { target, balance, paused, token, fuse, duration })
+    index.set(assetId, { target, ...reads, paused, token, mode, meta, alsoPeers, fuse, duration })
   }
   const executedIds = new Map<string, number>()
   for (const item of pending) {
@@ -918,6 +1384,23 @@ async function readEvmCustody(
 
   const at = Date.now()
   const deferred: { assetId: number; slot: CustodySlot; token: string }[] = []
+  const settle = (assetId: number, slot: CustodySlot, values: { balance: string | null | undefined; supply: string | null | undefined; dead: string | null | undefined }, peer: PeerStatic) => {
+    // BURNING (1) makes this chain a spoke; anything else — LOCKING (0), or a
+    // mode that could not be read — is read as custody, the way every peer was
+    // read before modes were asked for.
+    const spoke = peer.mode === 1
+    const amount = decodeUint(spoke ? values.supply : values.balance)
+    if (amount == null) return
+    const burned = spoke ? decodeUint(values.dead) : null
+    out.custody.set(assetId, {
+      locked: amount,
+      decimals: slot.target.peerDecimals ?? peer.decimals,
+      paused: decodeBool(byId.get(slot.paused)),
+      at,
+      role: spoke ? 'spoke' : 'lockbox',
+      burned: spoke ? burned : null,
+    })
+  }
   for (const [assetId, slot] of index) {
     const memoKey = `${assetId}:${slot.target.chainId}`
     // Fresh when this cycle asked, otherwise the memo's — a manager only ever
@@ -934,43 +1417,81 @@ async function readEvmCustody(
       if (reported != null && reported !== registered) continue
     }
     if (slot.token != null && reported != null) managerTokens.set(memoKey, { address: reported, at })
+    const prevStatic = peerStatics.get(memoKey)
+    const modeRead = slot.mode == null ? prevStatic?.mode ?? null : decodeUint(byId.get(slot.mode))
+    const decimalsRead = slot.meta == null ? prevStatic?.decimals ?? null : decodeUint(byId.get(slot.meta + 2))
+    const peer: PeerStatic = {
+      mode: modeRead == null ? prevStatic?.mode ?? null : Number(modeRead),
+      token: reported ?? prevStatic?.token ?? null,
+      name: slot.meta == null ? prevStatic?.name ?? null : decodeAbiString(byId.get(slot.meta)) ?? prevStatic?.name ?? null,
+      symbol: slot.meta == null ? prevStatic?.symbol ?? null : decodeAbiString(byId.get(slot.meta + 1)) ?? prevStatic?.symbol ?? null,
+      decimals: decimalsRead == null ? prevStatic?.decimals ?? null : Number(decimalsRead),
+      alsoPeers: slot.alsoPeers == null
+        ? prevStatic?.alsoPeers ?? null
+        : slot.alsoPeers.every(p => byId.has(p.id))
+          ? slot.alsoPeers.filter(p => decodeGetPeer(byId.get(p.id) ?? null) != null).map(p => p.chainId)
+          : prevStatic?.alsoPeers ?? null,
+      // A pass that asked nothing static keeps the memo's age, so it expires on
+      // schedule; one that asked restarts it — but only once the mode answered.
+      at: slot.mode == null ? prevStatic?.at ?? at : byId.has(slot.mode) ? at : 0,
+    }
+    peerStatics.set(memoKey, peer)
+    out.peers.set(assetId, peer)
     // A peer whose token was unknown when the batch was built has no balance in
     // it; now that its manager has named the token, ask in the follow-up pass so
     // a newly discovered custody counts from its first cycle rather than reading
     // as zero until the next one.
     if (slot.balance < 0) {
       if (reported != null) deferred.push({ assetId, slot, token: reported })
-      continue
+    } else {
+      settle(assetId, slot, { balance: byId.get(slot.balance), supply: byId.get(slot.supply), dead: byId.get(slot.dead) }, peer)
     }
-    const locked = decodeUint(byId.get(slot.balance))
-    if (locked == null) continue
-    out.custody.set(assetId, { locked, decimals: slot.target.peerDecimals, paused: decodeBool(byId.get(slot.paused)), at })
     // The window rides this pass only when its memo has expired; the queue pass
     // reads the same memo rather than asking a second time.
     const duration = slot.duration == null
-      ? rateLimitDurations.get(assetId)?.seconds ?? null
+      ? rateLimitDurations.get(memoKey)?.seconds ?? null
       : decodeUint(byId.get(slot.duration))
     if (duration == null || duration <= 0n) continue
-    rateLimitDurations.set(assetId, { seconds: duration, at: slot.duration == null ? rateLimitDurations.get(assetId)!.at : at })
-    const tokenDecimals = slot.target.peerDecimals ?? slot.target.asset.decimals
+    rateLimitDurations.set(memoKey, { seconds: duration, at: slot.duration == null ? rateLimitDurations.get(memoKey)!.at : at })
+    const tokenDecimals = slot.target.peerDecimals ?? peer.decimals ?? slot.target.asset.decimals
     out.fuses.set(assetId, {
       outbound: evmFuse(byId.get(slot.fuse) ?? null, byId.get(slot.fuse + 1) ?? null, tokenDecimals, slot.target.asset.decimals, Number(duration)),
       inbound: evmFuse(byId.get(slot.fuse + 2) ?? null, byId.get(slot.fuse + 3) ?? null, tokenDecimals, slot.target.asset.decimals, Number(duration)),
     })
   }
 
-  // The balances that could not be asked for until their token was named.
+  // The balances (and token identity) that could not be asked for until their
+  // token was named.
   if (deferred.length) {
-    const followUp = await postMulticall(url, deferred.map(d => ({
-      to: d.token, data: encodeBalanceOf(displayChainAddress('evm', d.slot.target.peer)),
-    })))
-    deferred.forEach((d, i) => {
-      const locked = decodeUint(followUp.get(i))
-      if (locked == null) return
-      out.custody.set(d.assetId, {
-        locked, decimals: d.slot.target.peerDecimals, paused: decodeBool(byId.get(d.slot.paused)), at,
-      })
+    const followCalls: EvmCall[] = []
+    const slots = deferred.map(d => {
+      const manager = displayChainAddress('evm', d.slot.target.peer)
+      const base = followCalls.length
+      followCalls.push(
+        { to: d.token, data: encodeBalanceOf(manager) },
+        { to: d.token, data: EVM_SELECTOR.totalSupply },
+        { to: d.token, data: encodeBalanceOf(DEAD_ADDRESS) },
+        { to: d.token, data: EVM_SELECTOR.name },
+        { to: d.token, data: EVM_SELECTOR.symbol },
+        { to: d.token, data: EVM_SELECTOR.decimals },
+      )
+      return { ...d, base }
     })
+    const followUp = await postMulticall(url, followCalls)
+    for (const d of slots) {
+      const memoKey = `${d.assetId}:${d.slot.target.chainId}`
+      const peer = peerStatics.get(memoKey)!
+      const decimals = decodeUint(followUp.get(d.base + 5))
+      const named: PeerStatic = {
+        ...peer,
+        name: decodeAbiString(followUp.get(d.base + 3)) ?? peer.name,
+        symbol: decodeAbiString(followUp.get(d.base + 4)) ?? peer.symbol,
+        decimals: decimals == null ? peer.decimals : Number(decimals),
+      }
+      peerStatics.set(memoKey, named)
+      out.peers.set(d.assetId, named)
+      settle(d.assetId, d.slot, { balance: followUp.get(d.base), supply: followUp.get(d.base + 1), dead: followUp.get(d.base + 2) }, named)
+    }
   }
 
   // An unreadable answer is not "not executed", but it also cannot be trusted as
@@ -986,39 +1507,188 @@ async function readEvmCustody(
   return out
 }
 
-// The manager program's two rate-limit accounts, found by the account types'
-// Anchor discriminators — no PDA derivation, so a program upgrade cannot break
-// the lookup. Each holds only the capacity as of its last transfer, so the live
-// headroom is recomputed here; Solana states the window nowhere on chain, and
-// every leg on every chain uses the same 24-hour refill.
-async function readSolanaFuses(url: string, targets: readonly OriginTarget[]): Promise<Map<number, FusePair>> {
-  const out = new Map<number, FusePair>()
-  const nowSec = Math.floor(Date.now() / 1000)
-  const read = async (programId: string, discriminator: string, dataSize: number, offset: number): Promise<NttRateLimitState | null> => {
-    const accounts = await postJson(url, {
-      jsonrpc: '2.0', id: 1, method: 'getProgramAccounts',
-      params: [programId, { encoding: 'base64', filters: [{ dataSize }, { memcmp: { offset: 0, bytes: base58Encode(hexToBytes(discriminator)) } }] }],
-    }, ORIGIN_RPC_TIMEOUT_MS) as { result?: { account?: { data?: unknown } }[] } | null
-    // A manager registers exactly one peer, so exactly one account of each type
-    // exists; anything else is not the record this reads.
-    if (!Array.isArray(accounts?.result) || accounts.result.length !== 1) return null
-    const encoded = (accounts.result[0]?.account?.data as unknown[] | undefined)?.[0]
-    if (typeof encoded !== 'string') return null
-    return parseNttRateLimitState(Buffer.from(encoded, 'base64'), offset)
+// ───── Solana: discover once an hour, read every cycle in one call ─────
+//
+// Every account the backing check needs is found by its Anchor discriminator
+// (no PDA derivation, so a program upgrade cannot break the lookup) — and that
+// lookup is `getProgramAccounts`, a scan of the whole program and the dearest
+// call an RPC provider meters. None of the addresses it finds ever move: a
+// manager has one config account and one rate-limit account per direction. So
+// they are discovered on the static-facts clock, and each cycle reads all of
+// them, for every Solana asset at once, in ONE `getMultipleAccounts` — the config
+// (paused flag), the mint (decimals; a spoke's supply), the custody token account
+// and both limiters. Run every minute for three assets, the per-cycle scans had
+// used up a metered key's monthly allowance; this is ~1 call a minute.
+//
+// The rate-limit accounts hold only the capacity as of their last transfer, so
+// the live headroom is recomputed here; Solana states the window nowhere on
+// chain, and every leg on every chain uses the same 24-hour refill.
+
+interface SolanaLayout {
+  config: string
+  mint: string
+  mode: number
+  custody: string
+  outboxRateLimit: string | null
+  inboxRateLimit: string | null
+  at: number
+}
+const solanaLayouts = new Map<string, SolanaLayout>()
+// The last custody (lockbox) or supply (spoke) each program answered, per `assetId:chainId`.
+const solanaLastLocked = new Map<string, bigint>()
+
+// SPL Token (and Token-2022, whose base layout is the same): a mint's supply is a
+// u64 at 36 and its decimals the byte at 44; a token account's amount a u64 at 64.
+const SPL_MINT_SUPPLY_OFFSET = 36
+const SPL_MINT_DECIMALS_OFFSET = 44
+const SPL_ACCOUNT_AMOUNT_OFFSET = 64
+// A layout whose limiter lookup went unanswered is retried this soon rather than
+// running without that limiter for the whole static-facts hour.
+const SOLANA_LAYOUT_RETRY_MS = 5 * 60_000
+
+const hasDiscriminator = (bytes: Buffer | null | undefined, discriminatorHex: string): bytes is Buffer =>
+  bytes != null && bytes.length >= 8 && bytes.subarray(0, 8).toString('hex') === discriminatorHex
+
+/**
+ * The one account of a type a program holds. Null when the node did not answer;
+ * `{ account: null }` when it answered with none or with several — a final
+ * answer, not one worth asking again within the hour.
+ */
+async function findProgramAccount(url: string, programId: string, discriminatorHex: string, dataSize: number): Promise<{ account: { pubkey: string; data: Buffer } | null } | null> {
+  const accounts = await postJson(url, {
+    jsonrpc: '2.0', id: 1, method: 'getProgramAccounts',
+    params: [programId, { encoding: 'base64', filters: [{ dataSize }, { memcmp: { offset: 0, bytes: base58Encode(hexToBytes(discriminatorHex)) } }] }],
+  }, ORIGIN_RPC_TIMEOUT_MS) as { result?: { pubkey?: unknown; account?: { data?: unknown } }[] } | null
+  if (!Array.isArray(accounts?.result)) return null
+  // A manager registers exactly one peer, so exactly one account of each of these
+  // types exists; anything else is not the record this looks for.
+  if (accounts.result.length !== 1) return { account: null }
+  const only = accounts.result[0]
+  const encoded = (only?.account?.data as unknown[] | undefined)?.[0]
+  if (typeof only?.pubkey !== 'string' || typeof encoded !== 'string') return { account: null }
+  return { account: { pubkey: only.pubkey, data: Buffer.from(encoded, 'base64') } }
+}
+
+// A program that answered but is not the deployment the registry names (no
+// single config, or a config for another mint) is remembered as such for the
+// static-facts hour rather than rescanned every cycle.
+const solanaLayoutRejected = new Map<string, number>()
+
+async function solanaLayout(url: string, target: OriginTarget): Promise<SolanaLayout | null> {
+  const key = `${target.asset.assetId}:${target.chainId}`
+  const known = solanaLayouts.get(key)
+  if (known && Date.now() - known.at < STATIC_FACTS_TTL_MS) return known
+  const rejectedAt = solanaLayoutRejected.get(key)
+  if (rejectedAt != null && Date.now() - rejectedAt < STATIC_FACTS_TTL_MS) return null
+  const programId = displayChainAddress('solana', target.peer)
+  const found = await findProgramAccount(url, programId, SOLANA_NTT_CONFIG_DISCRIMINATOR, SOLANA_NTT_CONFIG_LENGTH)
+  // An unanswered rediscovery keeps the layout it already has rather than going blind.
+  if (!found) return known ?? null
+  const config = found.account ? parseSolanaNttConfig(found.account.data) : null
+  if (!found.account || !config
+    || (target.expectedToken != null && config.mint !== displayChainAddress('solana', target.expectedToken))) {
+    solanaLayoutRejected.set(key, Date.now())
+    return null
   }
+  const outbox = await findProgramAccount(url, programId, SOLANA_OUTBOX_RATE_LIMIT_DISCRIMINATOR, SOLANA_OUTBOX_RATE_LIMIT_LENGTH)
+  const inbox = await findProgramAccount(url, programId, SOLANA_INBOX_RATE_LIMIT_DISCRIMINATOR, SOLANA_INBOX_RATE_LIMIT_LENGTH)
+  // Only an unanswered limiter lookup is retried early; one that answered without
+  // a single account runs without that limiter for the hour.
+  const complete = outbox != null && inbox != null
+  const layout: SolanaLayout = {
+    config: found.account.pubkey, mint: config.mint, mode: config.mode, custody: config.custody,
+    outboxRateLimit: outbox ? outbox.account?.pubkey ?? null : known?.outboxRateLimit ?? null,
+    inboxRateLimit: inbox ? inbox.account?.pubkey ?? null : known?.inboxRateLimit ?? null,
+    at: complete ? Date.now() : Date.now() - STATIC_FACTS_TTL_MS + SOLANA_LAYOUT_RETRY_MS,
+  }
+  solanaLayoutRejected.delete(key)
+  solanaLayouts.set(key, layout)
+  solanaMints.set(key, { mint: config.mint, mode: config.mode })
+  return layout
+}
+
+/** Raw account data per address; null when the node did not answer, so the caller keeps its last reading. */
+async function readSolanaAccounts(url: string, keys: readonly string[]): Promise<Map<string, Buffer | null> | null> {
+  const out = new Map<string, Buffer | null>()
+  for (let i = 0; i < keys.length; i += 100) {
+    const chunk = keys.slice(i, i + 100)
+    const res = await postJson(url, {
+      jsonrpc: '2.0', id: 1, method: 'getMultipleAccounts', params: [chunk, { encoding: 'base64' }],
+    }, ORIGIN_RPC_TIMEOUT_MS) as { result?: { value?: ({ data?: unknown } | null)[] } } | null
+    const values = res?.result?.value
+    if (!Array.isArray(values) || values.length !== chunk.length) return null
+    chunk.forEach((address, j) => {
+      const encoded = (values[j]?.data as unknown[] | undefined)?.[0]
+      out.set(address, typeof encoded === 'string' ? Buffer.from(encoded, 'base64') : null)
+    })
+  }
+  return out
+}
+
+async function readSolanaState(url: string, targets: readonly OriginTarget[]): Promise<{ custody: Map<number, CustodyRead>; fuses: Map<number, FusePair> }> {
+  const custody = new Map<number, CustodyRead>()
+  const fuses = new Map<number, FusePair>()
+  const layouts: [OriginTarget, SolanaLayout][] = []
   for (const target of targets) {
-    const programId = displayChainAddress('solana', target.peer)
-    const outbound = await read(programId, SOLANA_OUTBOX_RATE_LIMIT_DISCRIMINATOR, SOLANA_OUTBOX_RATE_LIMIT_LENGTH, 8)
-    const inbound = await read(programId, SOLANA_INBOX_RATE_LIMIT_DISCRIMINATOR, SOLANA_INBOX_RATE_LIMIT_LENGTH, 9)
+    const layout = await solanaLayout(url, target)
+    if (layout) layouts.push([target, layout])
+  }
+  if (!layouts.length) return { custody, fuses }
+  const keys = [...new Set(layouts.flatMap(([, l]) => [
+    l.config, l.mint, ...(l.mode === 1 ? [] : [l.custody]),
+    ...(l.outboxRateLimit ? [l.outboxRateLimit] : []), ...(l.inboxRateLimit ? [l.inboxRateLimit] : []),
+  ]))]
+  const accounts = await readSolanaAccounts(url, keys)
+  if (!accounts) return { custody, fuses }
+  const nowSec = Math.floor(Date.now() / 1000)
+  for (const [target, layout] of layouts) {
+    const key = `${target.asset.assetId}:${target.chainId}`
+    const configBytes = accounts.get(layout.config)
+    const config = hasDiscriminator(configBytes, SOLANA_NTT_CONFIG_DISCRIMINATOR) ? parseSolanaNttConfig(configBytes) : null
+    // A config that no longer names what was discovered means the layout is stale:
+    // say nothing this cycle and rediscover on the next.
+    if (!config || config.mint !== layout.mint || config.custody !== layout.custody || config.mode !== layout.mode) {
+      solanaLayouts.delete(key)
+      continue
+    }
+    // A BURNING program (mode 1) is a spoke: what it answers for is the mint's
+    // whole supply, not a custody account's balance.
+    const spoke = layout.mode === 1
+    const mint = accounts.get(layout.mint)
+    const source = spoke ? mint : accounts.get(layout.custody)
+    const amountOffset = spoke ? SPL_MINT_SUPPLY_OFFSET : SPL_ACCOUNT_AMOUNT_OFFSET
+    if (mint && mint.length > SPL_MINT_DECIMALS_OFFSET && source && source.length >= amountOffset + 8) {
+      const locked = source.readBigUInt64LE(amountOffset)
+      // A redemption moves this reading — a lockbox releases (custody falls), a
+      // spoke mints (supply rises) — so the inbox scan that would still count it
+      // queued or in flight is dropped and taken again in this same cycle.
+      const previous = solanaLastLocked.get(key)
+      if (previous != null && (spoke ? locked > previous : locked < previous)) {
+        solanaInboxCache.delete(displayChainAddress('solana', target.peer))
+      }
+      solanaLastLocked.set(key, locked)
+      custody.set(target.asset.assetId, {
+        locked,
+        decimals: mint[SPL_MINT_DECIMALS_OFFSET],
+        paused: config.paused,
+        at: Date.now(),
+        role: spoke ? 'spoke' : 'lockbox',
+        burned: null,
+      })
+    }
+    const outBytes = layout.outboxRateLimit ? accounts.get(layout.outboxRateLimit) : null
+    const inBytes = layout.inboxRateLimit ? accounts.get(layout.inboxRateLimit) : null
+    const outbound = hasDiscriminator(outBytes, SOLANA_OUTBOX_RATE_LIMIT_DISCRIMINATOR) ? parseNttRateLimitState(outBytes, 8) : null
+    const inbound = hasDiscriminator(inBytes, SOLANA_INBOX_RATE_LIMIT_DISCRIMINATOR) ? parseNttRateLimitState(inBytes, 9) : null
     if (!outbound && !inbound) continue
     // The accounts count in the ORIGIN mint's units.
     const dec = target.peerDecimals ?? target.asset.decimals
-    out.set(target.asset.assetId, {
+    fuses.set(target.asset.assetId, {
       outbound: computedFuse(outbound, dec, target.asset.decimals, RATE_LIMIT_REFILL_SEC, nowSec),
       inbound: computedFuse(inbound, dec, target.asset.decimals, RATE_LIMIT_REFILL_SEC, nowSec),
     })
   }
-  return out
+  return { custody, fuses }
 }
 
 // Sui splits the two legs: the outbound limiter sits inline on the manager's
@@ -1040,39 +1710,6 @@ async function readSuiFuses(
     outbound: computedFuse(outboundState, dec, target.asset.decimals, RATE_LIMIT_REFILL_SEC, nowSec),
     inbound: computedFuse(peer?.inboundRateLimit ?? null, dec, target.asset.decimals, RATE_LIMIT_REFILL_SEC, nowSec),
   }
-}
-
-// Fully generic from the manager program id: the program's single config account
-// is found by its Anchor discriminator, and the custody token account is a fixed
-// field inside it — no PDA derivation, so a program upgrade cannot break it.
-async function readSolanaCustody(url: string, targets: readonly OriginTarget[]): Promise<Map<number, CustodyRead>> {
-  const out = new Map<number, CustodyRead>()
-  const discriminator = base58Encode(hexToBytes(SOLANA_NTT_CONFIG_DISCRIMINATOR))
-  for (const target of targets) {
-    const programId = displayChainAddress('solana', target.peer)
-    const accounts = await postJson(url, {
-      jsonrpc: '2.0', id: 1, method: 'getProgramAccounts',
-      params: [programId, { encoding: 'base64', filters: [{ dataSize: SOLANA_NTT_CONFIG_LENGTH }, { memcmp: { offset: 0, bytes: discriminator } }] }],
-    }, ORIGIN_RPC_TIMEOUT_MS) as { result?: { account?: { data?: unknown } }[] } | null
-    const encoded = Array.isArray(accounts?.result) && accounts.result.length === 1
-      ? (accounts.result[0]?.account?.data as unknown[] | undefined)?.[0]
-      : undefined
-    if (typeof encoded !== 'string') continue
-    const config = parseSolanaNttConfig(Buffer.from(encoded, 'base64'))
-    if (!config) continue
-    if (config.mint !== displayChainAddress('solana', target.asset.originToken)) continue
-    const balance = await postJson(url, { jsonrpc: '2.0', id: 1, method: 'getTokenAccountBalance', params: [config.custody] }, ORIGIN_RPC_TIMEOUT_MS) as
-      { result?: { value?: { amount?: unknown; decimals?: unknown } } } | null
-    const amount = balance?.result?.value?.amount
-    if (typeof amount !== 'string') continue
-    out.set(target.asset.assetId, {
-      locked: BigInt(amount),
-      decimals: Number.isSafeInteger(Number(balance?.result?.value?.decimals)) ? Number(balance?.result?.value?.decimals) : target.peerDecimals,
-      paused: config.paused,
-      at: Date.now(),
-    })
-  }
-  return out
 }
 
 interface SuiCustody {
@@ -1139,15 +1776,22 @@ async function readSuiCustody(
     }, ORIGIN_RPC_TIMEOUT_MS) as { data?: { object?: { asMoveObject?: { contents?: { json?: unknown } } } } } | null
     const state = parseSuiNttState(json?.data?.object?.asMoveObject?.contents?.json)
     if (!state) continue
-    custody.set(target.asset.assetId, { locked: state.balance, decimals: target.peerDecimals, paused: state.paused, at: Date.now() })
+    // Only a LOCKING Sui manager holds a balance that is custody; a burning one
+    // would answer for a treasury's supply, which this reader does not take, so
+    // it stays unread (and its asset unverified) rather than misread.
+    if (state.mode == null || /^lock/i.test(state.mode)) {
+      custody.set(target.asset.assetId, { locked: state.balance, decimals: target.peerDecimals, paused: state.paused, at: Date.now(), role: 'lockbox', burned: null })
+    }
+    suiModes.set(`${target.asset.assetId}:${target.chainId}`, state.mode)
     if (state.inboxSize != null) inboxSize.set(target.asset.assetId, state.inboxSize)
     if (state.inboxTableId != null) {
       const accepted = await readSuiExecuted(url, state.inboxTableId, sends, hydrationChainId)
       if (accepted) { executedOk = true; for (const digest of accepted) executed.add(digest) }
     }
-    const peersTableId = state.peersTableId ?? suiPeersTable.get(target.asset.assetId) ?? null
+    const peersKey = `${target.asset.assetId}:${target.chainId}`
+    const peersTableId = state.peersTableId ?? suiPeersTable.get(peersKey) ?? null
     if (peersTableId == null) continue
-    suiPeersTable.set(target.asset.assetId, peersTableId)
+    suiPeersTable.set(peersKey, peersTableId)
     const pair = await readSuiFuses(url, target, peersTableId, state.outboundRateLimit, hydrationChainId)
     if (pair) fuses.set(target.asset.assetId, pair)
   }
@@ -1204,29 +1848,72 @@ function computedFuse(
   })
 }
 
-// Hydration's own managers, in one batched round trip. These legs are
-// deliberately uncapped (the u64 trimmed ceiling), so they exist to be SHOWN as
-// uncapped rather than to be watched — the origin side carries every real fuse.
-async function readLocalFuses(assets: readonly DiscoveredAsset[]): Promise<Map<number, FusePair>> {
-  const out = new Map<number, FusePair>()
+// Hydration's own managers, in one batched round trip: each manager's single
+// outbound leg and window, plus its inbound leg for EVERY peer chain — the
+// inbound limit is per source chain (TC motion 387 set WETH's from Robinhood
+// Chain to 69/day while Ethereum's stayed uncapped), so reading only the
+// primary origin's would state one chain's limit for all of them.
+// Keyed `assetId:chainId`; the outbound leg repeats on every chain of an asset.
+async function readLocalFuses(assets: readonly DiscoveredAsset[], peerChains: ReadonlyMap<number, readonly number[]>): Promise<Map<string, FusePair>> {
+  const out = new Map<string, FusePair>()
   const calls: EvmCall[] = []
-  const slots: { asset: DiscoveredAsset; at: number }[] = []
+  const slots: { asset: DiscoveredAsset; at: number; chains: number[]; duration: number | null }[] = []
+  const now = Date.now()
   for (const asset of assets) {
-    slots.push({ asset, at: calls.length })
-    calls.push(...fuseCalls(asset.manager, asset.originChainId))
+    const chains = [...new Set(peerChains.get(asset.assetId) ?? [asset.originChainId])]
+    const memo = rateLimitDurations.get(`${asset.assetId}:local`)
+    const at = calls.length
+    calls.push(
+      { to: asset.manager, data: EVM_SELECTOR.getOutboundLimitParams },
+      { to: asset.manager, data: EVM_SELECTOR.getCurrentOutboundCapacity },
+    )
+    // The window is a deployment fact: asked for only when its memo has run out.
+    const duration = memo && now - memo.at < STATIC_FACTS_TTL_MS ? null : calls.push({ to: asset.manager, data: EVM_SELECTOR.rateLimitDuration }) - 1
+    slots.push({ asset, at, chains, duration })
+    for (const chainId of chains) {
+      calls.push(
+        { to: asset.manager, data: encodeGetInboundLimitParams(chainId) },
+        { to: asset.manager, data: encodeGetCurrentInboundCapacity(chainId) },
+      )
+    }
   }
   const results = await hydrationEthCallBatch(calls)
   for (const slot of slots) {
-    const [outParams, outCap, inParams, inCap, durationRaw] = results.slice(slot.at, slot.at + 5)
-    const duration = decodeUint(durationRaw)
+    const [outParams, outCap] = results.slice(slot.at, slot.at + 2)
+    const memoKey = `${slot.asset.assetId}:local`
+    const asked = slot.duration == null ? null : decodeUint(results[slot.duration])
+    if (asked != null && asked > 0n) rateLimitDurations.set(memoKey, { seconds: asked, at: now })
+    const duration = asked ?? rateLimitDurations.get(memoKey)?.seconds ?? null
     if (duration == null || duration <= 0n) continue
     const seconds = Number(duration)
     const dec = slot.asset.decimals
-    out.set(slot.asset.assetId, {
-      outbound: evmFuse(outParams, outCap, dec, dec, seconds),
-      inbound: evmFuse(inParams, inCap, dec, dec, seconds),
+    const outbound = evmFuse(outParams, outCap, dec, dec, seconds)
+    const legsAt = slot.at + (slot.duration == null ? 2 : 3)
+    slot.chains.forEach((chainId, i) => {
+      const at = legsAt + i * 2
+      out.set(`${slot.asset.assetId}:${chainId}`, { outbound, inbound: evmFuse(results[at], results[at + 1], dec, dec, seconds) })
     })
   }
+  return out
+}
+
+/**
+ * Hydration's own custody for every asset whose Hydration manager LOCKS: the
+ * token's balance held by the manager, read AT THE PINNED BLOCK — the same
+ * consistency domain as the indexed sends and receives it is compared with.
+ * An unread asset is simply absent (its row reads unverified), never zero.
+ */
+async function readHydrationLocked(assets: readonly DiscoveredAsset[], atBlock: number): Promise<Map<number, bigint>> {
+  const out = new Map<number, bigint>()
+  if (!assets.length) return out
+  const results = await hydrationEthCallBatch(assets.map(asset => ({
+    to: asset.hydrationToken ?? erc20Precompile(asset.assetId),
+    data: encodeBalanceOf(asset.manager),
+  })), '0x' + atBlock.toString(16))
+  assets.forEach((asset, i) => {
+    const value = decodeUint(results[i])
+    if (value != null) out.set(asset.assetId, value)
+  })
   return out
 }
 
@@ -1333,6 +2020,8 @@ const queuedEntryFromSend = (
   queuedAtSec,
   releasableAtSec,
   sendKey: vaaKey(ctx.hydrationChainId, send.emitter, send.sequence),
+  direction: 'out',
+  fromChainId: ctx.hydrationChainId,
 })
 
 // One aggregate3 per EVM origin chain: getInboundQueuedTransfer for every
@@ -1355,7 +2044,7 @@ async function readEvmQueued(
 
   for (const target of targets) {
     const manager = displayChainAddress('evm', target.peer)
-    const memo = rateLimitDurations.get(target.asset.assetId)
+    const memo = rateLimitDurations.get(`${target.asset.assetId}:${ctx.chainId}`)
     if (!memo || Date.now() - memo.at >= STATIC_FACTS_TTL_MS) {
       durationIds.set(target.asset.assetId, calls.push({ to: manager, data: EVM_SELECTOR.rateLimitDuration }) - 1)
     }
@@ -1377,7 +2066,7 @@ async function readEvmQueued(
 
   for (const [assetId, id] of durationIds) {
     const seconds = decodeUint(byId.get(id))
-    if (seconds != null) rateLimitDurations.set(assetId, { seconds, at: Date.now() })
+    if (seconds != null) rateLimitDurations.set(`${assetId}:${ctx.chainId}`, { seconds, at: Date.now() })
   }
 
   for (const assetId of answered) out.set(assetId, [])
@@ -1391,7 +2080,7 @@ async function readEvmQueued(
       continue
     }
     knownQueuedDigests.add(slot.send.digest)
-    const duration = rateLimitDurations.get(slot.target.asset.assetId)?.seconds ?? null
+    const duration = rateLimitDurations.get(`${slot.target.asset.assetId}:${ctx.chainId}`)?.seconds ?? null
     const releasableAtSec = duration != null ? queued.txTimestampSec + Number(duration) : null
     out.get(slot.target.asset.assetId)?.push(queuedEntryFromSend(
       slot.send,
@@ -1412,11 +2101,42 @@ async function readEvmQueued(
 // exactly one peer, Hydration, so every item is one of our sends; an item no
 // indexed send matches is left out, which under-reports the queue and therefore
 // only widens a surplus.
+// The inbox is the one Solana read that still has to enumerate: an InboxItem is
+// created per redeemed message, so its address set grows with every arrival.
+// Nothing about it is urgent while no send toward Solana is waiting — a
+// redemption only ever moves a send from in flight to settled — so the scan runs
+// every SOLANA_INBOX_TTL_MS, and every SOLANA_INBOX_PENDING_TTL_MS while a send is
+// held in the inbox by the rate limiter or one from the last day is not there yet
+// (an older one that never arrived is stuck, not about to land, and does not keep
+// the fast clock running). A redemption the slow clock would miss still moves the
+// program's custody, which drops the cached scan (`readSolanaState`), and the
+// confirmation pass always scans afresh: a shortfall is never confirmed against
+// an inbox read before the custody it is compared with.
+const SOLANA_INBOX_TTL_MS = 10 * 60_000
+const SOLANA_INBOX_PENDING_TTL_MS = 60_000
+const SOLANA_INBOX_PENDING_WINDOW_MS = 86_400_000
+const solanaInboxCache = new Map<string, { at: number; accounts: { account?: { data?: unknown } }[]; released: Set<string>; held: Set<string> }>()
+
+async function solanaInboxAccounts(url: string, programId: string, ttlMs: number): Promise<{ account?: { data?: unknown } }[] | null> {
+  const cached = solanaInboxCache.get(programId)
+  if (cached && Date.now() - cached.at < ttlMs) return cached.accounts
+  const res = await postJson(url, {
+    jsonrpc: '2.0', id: 1, method: 'getProgramAccounts',
+    params: [programId, { encoding: 'base64', filters: [{ dataSize: SOLANA_NTT_INBOX_ITEM_LENGTH }, { memcmp: { offset: 0, bytes: base58Encode(hexToBytes(SOLANA_NTT_INBOX_ITEM_DISCRIMINATOR)) } }] }],
+  }, ORIGIN_RPC_TIMEOUT_MS) as { result?: { account?: { data?: unknown } }[] } | null
+  // An unanswered scan serves the last one it has; a redemption it missed only
+  // keeps a send counted as in flight a little longer.
+  if (!Array.isArray(res?.result)) return cached?.accounts ?? null
+  solanaInboxCache.set(programId, { at: Date.now(), accounts: res.result, released: cached?.released ?? new Set(), held: cached?.held ?? new Set() })
+  return res.result
+}
+
 async function readSolanaQueued(
   url: string,
   targets: readonly OriginTarget[],
   sends: readonly NttSendRow[],
   ctx: { chainId: number; hydrationChainId: number },
+  fresh: boolean,
 ): Promise<{ queued: Map<number, QueuedEntry[]>; executed: Set<string> | null }> {
   const out = new Map<number, QueuedEntry[]>()
   // An InboxItem exists only for a message the program has accepted, so the set
@@ -1424,24 +2144,28 @@ async function readSolanaQueued(
   // as its custody, which is what keeps the two from disagreeing.
   const executed = new Set<string>()
   let answered = false
-  const discriminator = base58Encode(hexToBytes(SOLANA_NTT_INBOX_ITEM_DISCRIMINATOR))
   for (const target of targets) {
     const programId = displayChainAddress('solana', target.peer)
-    const accounts = await postJson(url, {
-      jsonrpc: '2.0', id: 1, method: 'getProgramAccounts',
-      params: [programId, { encoding: 'base64', filters: [{ dataSize: SOLANA_NTT_INBOX_ITEM_LENGTH }, { memcmp: { offset: 0, bytes: discriminator } }] }],
-    }, ORIGIN_RPC_TIMEOUT_MS) as { result?: { account?: { data?: unknown } }[] } | null
-    if (!Array.isArray(accounts?.result)) continue
-    answered = true
-
     // Sends are matched oldest first so repeated (recipient, amount) pairs pair
     // up in order rather than all colliding on the same send.
     const candidates = sends
       .filter(s => s.assetId === target.asset.assetId && s.toChain === ctx.chainId && s.digest !== '')
       .sort((a, b) => a.timestampMs - b.timestampMs)
+    const last = solanaInboxCache.get(programId)
+    const inFlight = (last?.held.size ?? 0) > 0
+      || candidates.some(s => Date.now() - s.timestampMs < SOLANA_INBOX_PENDING_WINDOW_MS && !last?.released.has(s.digest) && !last?.held.has(s.digest))
+    const accounts = await solanaInboxAccounts(url, programId, fresh ? 0 : inFlight ? SOLANA_INBOX_PENDING_TTL_MS : SOLANA_INBOX_TTL_MS)
+    if (!accounts) continue
+    answered = true
+
     const claimed = new Set<string>()
+    // Only a RELEASED item is settled: one still held in the inbox is a transfer
+    // in flight however old it is, and keeps the scan on its fast clock until it
+    // goes out.
+    const released = new Set<string>()
+    const held = new Set<string>()
     const entries: QueuedEntry[] = []
-    for (const account of accounts.result) {
+    for (const account of accounts) {
       const encoded = (account?.account?.data as unknown[] | undefined)?.[0]
       if (typeof encoded !== 'string') continue
       const item = parseSolanaInboxItem(Buffer.from(encoded, 'base64'))
@@ -1454,19 +2178,26 @@ async function readSolanaQueued(
       if (!send || send.amount == null) continue
       claimed.add(send.digest)
       executed.add(send.digest)
-      if (item.status === SOLANA_RELEASE_STATUS.released) continue
+      if (item.status === SOLANA_RELEASE_STATUS.released) { released.add(send.digest); continue }
+      held.add(send.digest)
       entries.push(queuedEntryFromSend(send, ctx, send.amount, item.recipient, null, item.releaseAfterSec))
     }
-    // Solana enumerates the whole inbox every cycle rather than probing digest
-    // by digest, so it neither reads nor fills the settled-digest cache.
+    // Solana enumerates the whole inbox rather than probing digest by digest, so
+    // it neither reads nor fills the settled-digest cache.
+    const cachedInbox = solanaInboxCache.get(programId)
+    if (cachedInbox) { cachedInbox.released = released; cachedInbox.held = held }
     out.set(target.asset.assetId, entries)
   }
   return { queued: out, executed: answered ? executed : null }
 }
 
+// The chain table names the chains it knows; the explorer's URN map names the
+// rest, so a chain the bridge reaches but the table does not list still gets a
+// name rather than a number.
 const chainName = (chainId: number): string => {
+  if (WORMHOLE_CHAINS[chainId]) return wormholeChainName(chainId)
   const urn = WORMHOLE_CHAIN_URNS[chainId]
-  return (urn ? ocnChainName(urn) : null) ?? `Wormhole chain ${chainId}`
+  return (urn ? ocnChainName(urn) : null) ?? wormholeChainName(chainId)
 }
 
 // ───────────────────────────── Wormholescan ─────────────────────────────
@@ -1559,7 +2290,7 @@ async function readBackingCycle(
   if (!client) throw new Error('wormhole snapshot: ClickHouse client not initialised')
   const discovered = await discoverAssets()
   const minBlock = discovered.minBlock
-  const assets = scope ? discovered.assets.filter(a => scope.has(a.assetId)) : discovered.assets
+  const scoped = scope ? discovered.assets.filter(a => scope.has(a.assetId)) : discovered.assets
 
   // The block every side of the equation is stated at.
   //
@@ -1580,7 +2311,7 @@ async function readBackingCycle(
   // These come first because a send's digest is taken over our own chain id.
   const facts = new Map<number, ManagerStaticFacts>()
   const pausedLocal = new Map<number, boolean>()
-  for (const asset of assets) {
+  for (const asset of scoped) {
     const read = await readManagerFacts(asset)
     facts.set(asset.assetId, read)
     const paused = decodeBool(await hydrationEthCall(asset.manager, EVM_SELECTOR.isPaused))
@@ -1588,17 +2319,42 @@ async function readBackingCycle(
   }
 
   const hydrationChainId = [...facts.values()].map(f => f.chainId).find(id => id != null && id > 0) ?? HYDRATION_WORMHOLE_CHAIN_ID
+  // The primary origin, settled now that each manager's mode is known.
+  const assets = scoped.map(asset => {
+    const originChainId = derivePrimaryOrigin(asset, facts.get(asset.assetId), hydrationChainId)
+    if (originChainId !== asset.originChainId) {
+      const ref = discoveredManagers.get(asset.assetId)
+      if (ref) discoveredManagers.set(asset.assetId, { ...ref, originChainId, originChainName: chainName(originChainId) })
+    }
+    return originChainId === asset.originChainId ? asset : { ...asset, originChainId }
+  })
   const timeline = await loadNttTimeline(assets, minBlock, indexedHead, hydrationChainId)
+  await resolveTransceivers()
 
-  // Hydration's own rate-limiter legs, in one batched round trip. An asset the
-  // batch did not answer for keeps its previous reading.
-  const localFresh = await readLocalFuses(assets)
-  const localFuses = new Map<number, FusePair>()
+  // Every peer of every asset, as the Hydration manager reports them (with the
+  // indexed history as evidence). This — not the registry's single origin — is
+  // the set every read below walks.
+  const peers = new Map<number, ManagerPeer[]>()
   for (const asset of assets) {
-    const fresh = localFresh.get(asset.assetId)
-    if (fresh) lastLocalFuses.set(asset.assetId, fresh)
-    const pair = fresh ?? lastLocalFuses.get(asset.assetId)
-    if (pair) localFuses.set(asset.assetId, pair)
+    const fact = facts.get(asset.assetId)
+    const list = fact?.peers.length
+      ? fact.peers
+      : fact?.peer ? [{ chainId: asset.originChainId, peer: fact.peer, decimals: fact.peerDecimals, evidence: null }] : []
+    peers.set(asset.assetId, list)
+  }
+
+  // Hydration's own rate-limiter legs, in one batched round trip, per peer
+  // chain. A leg the batch did not answer for keeps its previous reading.
+  const localFresh = await readLocalFuses(assets, new Map(assets.map(a => [a.assetId, (peers.get(a.assetId) ?? []).map(p => p.chainId)])))
+  const localFuses = new Map<string, FusePair>()
+  for (const asset of assets) {
+    for (const chainId of new Set([asset.originChainId, ...(peers.get(asset.assetId) ?? []).map(p => p.chainId)])) {
+      const key = `${asset.assetId}:${chainId}`
+      const fresh = localFresh.get(key)
+      if (fresh) lastLocalFuses.set(key, fresh)
+      const pair = fresh ?? lastLocalFuses.get(key)
+      if (pair) localFuses.set(key, pair)
+    }
   }
 
   // Issuance, read AT the indexed head rather than at the chain's. A pinned
@@ -1611,50 +2367,72 @@ async function readBackingCycle(
   // read at the SAME pinned block — a head-read here would put the two sides of
   // one subtraction in different chain states.
   const burnedAtDead = new Map<number, bigint>()
+  // Hydration's own custody, for the assets Hydration locks rather than mints.
+  const hydrationLocked = new Map<number, bigint>()
   if (assets.length) {
     const blockHash = await hydrationBlockHash(indexedHead)
     if (blockHash == null) throw new Error(`wormhole snapshot: no block hash for indexed head ${indexedHead}`)
     const storage = await substrateStorageBatch(assets.map(a => tokensTotalIssuanceKey(a.assetId)), blockHash)
     // A transport failure nulls a whole chunk, so an all-null answer is the
-    // signature of a failed read rather than of assets without supply.
-    if (storage.every(value => value == null)) throw new Error('wormhole snapshot: issuance read at the indexed head returned nothing')
+    // signature of a failed read rather than of assets without supply. (A
+    // locking asset — HDX's issuance lives in Balances, HOLLAR's in its ERC-20 —
+    // legitimately reads null here; its custody is read below instead.)
+    const minting = assets.filter(a => facts.get(a.assetId)?.mode !== 0)
+    if (minting.length && minting.every(a => storage[assets.indexOf(a)] == null)) {
+      throw new Error('wormhole snapshot: issuance read at the indexed head returned nothing')
+    }
     assets.forEach((asset, i) => {
       const value = decodeU128Le(storage[i])
       if (value != null) issuance.set(asset.assetId, value)
     })
+    // A storage read cannot tell a key that is ABSENT (an asset whose supply is
+    // still zero — nothing minted yet) from one that went unanswered. The
+    // token's own totalSupply() — byte-for-byte the same figure — can, so a
+    // minting asset left without issuance asks it, at the same pinned block.
+    const unanswered = minting.filter(a => !issuance.has(a.assetId))
+    if (unanswered.length) {
+      const supplies = await hydrationEthCallBatch(unanswered.map(a => ({
+        to: a.hydrationToken ?? erc20Precompile(a.assetId), data: EVM_SELECTOR.totalSupply,
+      })), '0x' + indexedHead.toString(16))
+      unanswered.forEach((asset, i) => {
+        const value = decodeUint(supplies[i])
+        if (value != null) issuance.set(asset.assetId, value)
+      })
+    }
     for (const [assetId, value] of await readBurnedAtDead(assets, indexedHead)) burnedAtDead.set(assetId, value)
+    const locking = assets.filter(a => facts.get(a.assetId)?.mode === 0)
+    for (const [assetId, value] of await readHydrationLocked(locking, indexedHead)) hydrationLocked.set(assetId, value)
   }
 
-  // Origin custody, grouped by chain so one endpoint answers for all its
-  // assets. An unconfigured or failing chain keeps whatever it last reported,
-  // with its own timestamp, rather than being blanked.
-  // One entry per (asset, peer chain): an asset backed by custody on two chains
-  // is read on both and its backing is their SUM. Reading only the registry
-  // origin reported WETH short by whatever Robinhood Chain held.
+  // Peer reads, grouped by chain so one endpoint answers for all its assets.
+  // One entry per (asset, peer chain): WETH is read on Ethereum AND Robinhood
+  // Chain, HDX on Robinhood, each by its own manager there. An
+  // unconfigured or failing chain keeps whatever it last reported, with its own
+  // timestamp, rather than being blanked.
   const byChain = new Map<number, OriginTarget[]>()
   for (const asset of assets) {
-    const fact = facts.get(asset.assetId)
-    if (!fact?.peer) continue
-    const peers = fact.peers.length ? fact.peers : [{ chainId: asset.originChainId, peer: fact.peer, decimals: fact.peerDecimals }]
-    for (const p of peers) {
+    for (const p of peers.get(asset.assetId) ?? []) {
       const list = byChain.get(p.chainId) ?? []
       list.push({
         asset,
         peer: p.peer,
         peerDecimals: p.decimals,
         chainId: p.chainId,
-        expectedToken: p.chainId === asset.originChainId ? asset.originToken : null,
+        expectedToken: p.chainId === asset.originChainId && asset.originToken != null ? asset.originToken : null,
       })
       byChain.set(p.chainId, list)
     }
   }
   const custody = new Map<number, CustodyRead>()
+  const peerReads = new Map<string, CustodyRead>()
+  const peerStaticsNow = new Map<string, PeerStatic>()
   const suiInbox = new Map<number, number>()
   const chains: WormholeChainState[] = []
   const queuedByAsset = new Map<number, bigint>()
   const queuedCount = new Map<number, number>()
+  const queuedByPeer = new Map<string, { peer: bigint; hydration: bigint; peerKnown: boolean }>()
   const queued: QueuedEntry[] = []
-  const originFuses = new Map<number, FusePair>()
+  const originFuses = new Map<string, FusePair>()
   const executedOutboundByChain = new Map<number, ReadonlySet<string>>()
   const queueCutoffMs = Date.now() - LOOKBACK_MS
   for (const [chainId, targets] of [...byChain.entries()].sort((a, b) => a[0] - b[0])) {
@@ -1667,9 +2445,10 @@ async function readBackingCycle(
     const queueCtx = { chainId, hydrationChainId }
     if (url) {
       if (family === 'solana') {
-        read = await readSolanaCustody(url, targets)
-        fuseRead = await readSolanaFuses(url, targets)
-        const solana = await readSolanaQueued(url, targets, timeline.sends, queueCtx)
+        const state = await readSolanaState(url, targets)
+        read = state.custody
+        fuseRead = state.fuses
+        const solana = await readSolanaQueued(url, targets, timeline.sends, queueCtx, scope != null)
         queueRead = solana.queued
         executed = solana.executed
       } else if (family === 'sui') {
@@ -1686,7 +2465,24 @@ async function readBackingCycle(
         read = evm.custody
         fuseRead = evm.fuses
         executed = evm.executed
+        for (const [assetId, peer] of evm.peers) peerStaticsNow.set(`${assetId}:${chainId}`, peer)
         queueRead = await readEvmQueued(url, targets, timeline.sends, queueCtx, queueCutoffMs)
+      }
+    }
+    for (const target of targets) {
+      const key = `${target.asset.assetId}:${chainId}`
+      if (!peerStaticsNow.has(key)) {
+        const memo = peerStatics.get(key)
+        if (memo) peerStaticsNow.set(key, memo)
+        else if (family !== 'evm') {
+          const sol = solanaMints.get(key)
+          const suiMode = suiModes.get(key)
+          peerStaticsNow.set(key, {
+            mode: sol ? sol.mode : suiMode == null ? null : /^burn/i.test(suiMode) ? 1 : 0,
+            token: sol?.mint ?? (target.expectedToken ? displayChainAddress(family, target.expectedToken) : null),
+            name: null, symbol: null, decimals: target.peerDecimals, alsoPeers: null, at: Date.now(),
+          })
+        }
       }
     }
     // An execution is permanent, so what this cycle learned joins the persistent
@@ -1698,44 +2494,87 @@ async function readBackingCycle(
       executedOutboundByChain.set(chainId, executed)
     }
     for (const target of targets) {
+      const key = `${target.asset.assetId}:${chainId}`
       const fresh = fuseRead.get(target.asset.assetId)
-      if (fresh) lastOriginFuses.set(target.asset.assetId, fresh)
-      const pair = fresh ?? lastOriginFuses.get(target.asset.assetId)
-      if (pair) originFuses.set(target.asset.assetId, pair)
+      if (fresh) lastOriginFuses.set(key, fresh)
+      const pair = fresh ?? lastOriginFuses.get(key)
+      if (pair) originFuses.set(key, pair)
     }
     for (const target of targets) {
+      const key = `${target.asset.assetId}:${chainId}`
       const fresh = queueRead.get(target.asset.assetId)
-      if (fresh) lastQueued.set(target.asset.assetId, fresh)
-      const entries = fresh ?? lastQueued.get(target.asset.assetId)
+      if (fresh) lastQueued.set(key, fresh)
+      const entries = fresh ?? lastQueued.get(key)
       if (!entries) continue
       queued.push(...entries)
-      queuedByAsset.set(target.asset.assetId, entries.reduce((sum, e) => sum + e.amount, 0n))
-      queuedCount.set(target.asset.assetId, entries.length)
+      const sum = entries.reduce((total, e) => total + e.amount, 0n)
+      // Summed over chains: one asset can have exits held on two of them.
+      queuedByAsset.set(target.asset.assetId, (queuedByAsset.get(target.asset.assetId) ?? 0n) + sum)
+      queuedCount.set(target.asset.assetId, (queuedCount.get(target.asset.assetId) ?? 0) + entries.length)
+      queuedByPeer.set(key, { peer: sum, hydration: 0n, peerKnown: true })
     }
     let newest: number | null = null
+    let readCount = 0
     for (const target of targets) {
       const fresh = read.get(target.asset.assetId)
       // Remembered per (asset, chain): two custodies for one asset must not
       // overwrite each other's last-known reading.
       const memoKey = `${target.asset.assetId}:${chainId}`
-      if (fresh) lastCustody.set(memoKey, fresh)
+      if (fresh) { lastCustody.set(memoKey, fresh); readCount += 1 }
       // A carried-over reading is marked as one on its way out, so the verdict
       // can tell "custody is this" from "custody was this when we last got an
       // answer". The remembered entry itself stays unmarked.
       const remembered = lastCustody.get(memoKey)
       const value = fresh ?? (remembered ? { ...remembered, stale: true } : undefined)
       if (!value) continue
-      custody.set(target.asset.assetId, addCustody(custody.get(target.asset.assetId), value, target.asset.decimals))
+      peerReads.set(memoKey, value)
       newest = newest == null ? value.at : Math.max(newest, value.at)
+      // The per-asset custody total keeps its old meaning — custody across the
+      // PEER lockboxes — for the fields that read it (the pause flag, alerts).
+      if (value.role === 'spoke') continue
+      custody.set(target.asset.assetId, addCustody(custody.get(target.asset.assetId), value, target.asset.decimals))
     }
     chains.push({
       chainId,
       name: chainName(chainId),
       family,
       configured: url != null,
-      ok: url != null && read.size === targets.length,
+      ok: url != null && readCount === targets.length,
       asOf: newest != null ? new Date(newest).toISOString() : null,
+      layer: WORMHOLE_CHAINS[chainId]?.layer ?? null,
     })
+  }
+
+  // Arrivals Hydration's OWN inbound limiter is holding: executed (and queued)
+  // here, not yet minted or released. The tokens are locked on the source
+  // chain and not yet supply here, so they join the queued term exactly as an
+  // exit held by a peer does.
+  const durationSec = (assetId: number, chainId: number) => {
+    const fuse = localFuses.get(`${assetId}:${chainId}`)?.inbound
+    return fuse?.durationSec ?? null
+  }
+  for (const exec of timeline.inbound) {
+    if (!exec.queued || exec.assetId == null || timeline.redeemedDigests.has(exec.digest) || exec.amount == null) continue
+    if (!assets.some(a => a.assetId === exec.assetId)) continue
+    const key = `${exec.assetId}:${exec.sourceChain}`
+    const queuedAtSec = Math.floor(exec.timestampMs / 1000)
+    const window = durationSec(exec.assetId, exec.sourceChain)
+    queued.push({
+      digest: exec.digest,
+      assetId: exec.assetId,
+      chainId: hydrationChainId,
+      fromChainId: exec.sourceChain,
+      direction: 'in',
+      amount: exec.amount,
+      recipient: exec.recipient,
+      queuedAtSec,
+      releasableAtSec: window != null ? queuedAtSec + window : null,
+      sendKey: null,
+    })
+    queuedByAsset.set(exec.assetId, (queuedByAsset.get(exec.assetId) ?? 0n) + exec.amount)
+    queuedCount.set(exec.assetId, (queuedCount.get(exec.assetId) ?? 0) + 1)
+    const prev = queuedByPeer.get(key) ?? { peer: 0n, hydration: 0n, peerKnown: false }
+    queuedByPeer.set(key, { ...prev, hydration: prev.hydration + exec.amount })
   }
 
   // In-flight transfers. Inbound redemption is decided by OUR own
@@ -1756,7 +2595,12 @@ async function readBackingCycle(
       peerDecimals: fact?.peerDecimals ?? null,
     }
     assetByManager.set('0x' + asset.manager.replace(/^0x/, '').padStart(64, '0'), entry)
-    if (fact?.peer) assetByManager.set('0x' + fact.peer.replace(/^0x/, '').padStart(64, '0'), entry)
+    // Every peer manager names this asset, so an operation resolves whichever
+    // end Wormholescan names — a Robinhood WETH transfer as readily as an
+    // Ethereum one.
+    for (const p of peers.get(asset.assetId) ?? []) {
+      assetByManager.set('0x' + p.peer.replace(/^0x/, '').padStart(64, '0'), { ...entry, peerDecimals: p.decimals ?? entry.peerDecimals })
+    }
   }
 
   const nowMs = Date.now()
@@ -1784,10 +2628,10 @@ async function readBackingCycle(
     if (wormholeChainFamily(chainId) !== 'sui') continue
     let pending = 0
     for (const asset of assets) {
-      if (asset.originChainId !== chainId) continue
+      if (!(peers.get(asset.assetId) ?? []).some(p => p.chainId === chainId)) continue
       const inbox = suiInbox.get(asset.assetId)
       if (inbox == null) continue
-      const sent = outboundSends.filter(s => s.assetId === asset.assetId).length
+      const sent = outboundSends.filter(s => s.assetId === asset.assetId && s.toChain === chainId).length
       pending += Math.max(0, sent - inbox)
     }
     unresolvedOutboundByChain.set(chainId, pending)
@@ -1845,6 +2689,11 @@ async function readBackingCycle(
     queuedCount,
     originFuses,
     localFuses,
+    peers,
+    peerReads,
+    peerStatics: peerStaticsNow,
+    queuedByPeer,
+    hydrationLocked,
     // Filled by the caller, once this cycle's own readings have been graded.
     downgradeConfirmed: new Map(),
     scan: { configured: Boolean(SCAN_URL), ok: scanOk, asOf: scanOk ? new Date().toISOString() : null },
@@ -1862,6 +2711,7 @@ const gradeOf = gradeBacking
 function publishSnapshot(next: WormholeSnapshot): void {
   snapshot = next
   wormholeSnapshotGeneration += 1
+  publishRemoteTokens(next)
 }
 
 export async function refreshWormholeBacking(): Promise<void> {
@@ -1995,6 +2845,13 @@ function mergeConfirmation(
     }
     return out
   }
+  // The same, for maps keyed `assetId:chainId`: every chain of a re-read asset
+  // moves together, so a chain the pass no longer reports is dropped with it.
+  const overlayKeyed = <V>(from: Map<string, V>, onto: Map<string, V>): Map<string, V> => {
+    const out = new Map([...onto].filter(([key]) => !ids.has(Number(key.slice(0, key.indexOf(':'))))))
+    for (const [key, value] of from) if (ids.has(Number(key.slice(0, key.indexOf(':'))))) out.set(key, value)
+    return out
+  }
   const downgradeConfirmed = new Map(base.downgradeConfirmed)
   for (const id of confirmed) downgradeConfirmed.set(id, true)
   return {
@@ -2026,8 +2883,13 @@ function mergeConfirmation(
     queued: [...base.queued.filter(q => !ids.has(q.assetId)), ...fresh.queued],
     queuedByAsset: overlay(fresh.queuedByAsset, base.queuedByAsset),
     queuedCount: overlay(fresh.queuedCount, base.queuedCount),
-    originFuses: overlay(fresh.originFuses, base.originFuses),
-    localFuses: overlay(fresh.localFuses, base.localFuses),
+    originFuses: overlayKeyed(fresh.originFuses, base.originFuses),
+    localFuses: overlayKeyed(fresh.localFuses, base.localFuses),
+    peers: overlay(fresh.peers, base.peers),
+    peerReads: overlayKeyed(fresh.peerReads, base.peerReads),
+    peerStatics: overlayKeyed(fresh.peerStatics, base.peerStatics),
+    queuedByPeer: overlayKeyed(fresh.queuedByPeer, base.queuedByPeer),
+    hydrationLocked: overlay(fresh.hydrationLocked, base.hydrationLocked),
     downgradeConfirmed,
     // The scoped pass reached Wormholescan too; a successful read is the newer
     // and strictly better statement, a failed one says nothing about the whole.
@@ -2099,8 +2961,9 @@ const addUsd = (total: number | null, value: number | null): number | null => (v
 // notification lane both read it, so a subscriber can never be told a number the
 // page they are sent to disagrees with.
 interface AssetBacking {
+  /** Σ custody over every lockbox, at asset decimals. */
   locked: bigint | null
-  /** GROSS supply, as the chain reports it. */
+  /** Σ GROSS supply over every spoke (Hydration's TotalIssuance when it mints). */
   issuance: bigint | null
   /** The part of it burned at the dead address, which the equation subtracts. */
   burned: bigint | null
@@ -2113,6 +2976,53 @@ interface AssetBacking {
   statusDetail: string
   residual: bigint | null
   residualUsd: number | null
+  legs: BackingLeg[]
+}
+
+const peerKey = (assetId: number, chainId: number): string => `${assetId}:${chainId}`
+
+/** Hydration's own role for an asset: its manager LOCKS (mode 0) or mints. */
+const hydrationRoleOf = (snap: WormholeSnapshot, assetId: number): 'lockbox' | 'spoke' | null => {
+  const mode = snap.facts.get(assetId)?.mode
+  return mode === 0 ? 'lockbox' : mode === 1 ? 'spoke' : null
+}
+
+/**
+ * Every chain of one asset as a leg of the backing equation, at the asset's
+ * decimals: Hydration's own side (its custody when it locks, its pinned
+ * issuance when it mints) and each peer (custody for a lockbox, supply for a
+ * spoke). An unknown Hydration mode is read as minting, the shape every asset
+ * had before modes were asked for.
+ */
+function backingLegs(snap: WormholeSnapshot, asset: DiscoveredAsset): BackingLeg[] {
+  const legs: BackingLeg[] = []
+  if (hydrationRoleOf(snap, asset.assetId) === 'lockbox') {
+    legs.push({ chainId: snap.hydrationChainId, role: 'lockbox', amount: snap.hydrationLocked.get(asset.assetId) ?? null, burned: null, fresh: true, readable: true })
+  } else {
+    legs.push({
+      chainId: snap.hydrationChainId, role: 'spoke',
+      amount: snap.issuance.get(asset.assetId) ?? null,
+      burned: snap.burnedAtDead.get(asset.assetId) ?? null,
+      burnedExpected: true,
+      fresh: true, readable: true,
+    })
+  }
+  for (const p of snap.peers.get(asset.assetId) ?? []) {
+    const read = snap.peerReads.get(peerKey(asset.assetId, p.chainId)) ?? null
+    const statics = snap.peerStatics.get(peerKey(asset.assetId, p.chainId)) ?? null
+    const role: 'lockbox' | 'spoke' = read?.role ?? (statics?.mode === 1 ? 'spoke' : 'lockbox')
+    const from = read?.decimals ?? asset.decimals
+    legs.push({
+      chainId: p.chainId,
+      role,
+      amount: read?.locked != null ? rescaleAmount(read.locked, from, asset.decimals) : null,
+      burned: read?.burned != null ? rescaleAmount(read.burned, from, asset.decimals) : null,
+      burnedExpected: wormholeChainFamily(p.chainId) === 'evm',
+      fresh: read != null && read.stale !== true,
+      readable: snap.chains.find(c => c.chainId === p.chainId)?.configured ?? ORIGIN_RPC_URLS.has(p.chainId),
+    })
+  }
+  return legs
 }
 
 function assetBacking(
@@ -2121,53 +3031,314 @@ function assetBacking(
   // streak it feeds has been counted.
   gradeUndamped = false,
 ): AssetBacking {
-  const custody = snap.custody.get(asset.assetId) ?? null
-  const originConfigured = snap.chains.find(c => c.chainId === asset.originChainId)?.configured ?? false
-  // Custody is read at the ORIGIN token's precision; the parity equation is
-  // stated at the Hydration asset's.
-  const locked = custody?.locked != null
-    ? rescaleAmount(custody.locked, custody.decimals ?? asset.decimals, asset.decimals)
-    : null
-  const issuance = snap.issuance.get(asset.assetId) ?? null
-  const burned = snap.burnedAtDead.get(asset.assetId) ?? null
+  const legs = backingLegs(snap, asset)
   const scanEnabled = snap.scan.configured && snap.scan.ok
   const inflightIn = scanEnabled ? snap.inflightIn.get(asset.assetId) ?? 0n : null
   const inflightOut = scanEnabled ? snap.inflightOut.get(asset.assetId) ?? 0n : null
   const queued = snap.queuedByAsset.get(asset.assetId) ?? null
-  const verdict = classifyBacking({
-    locked, issuance, burned, inflightIn, inflightOut, queued,
+  const verdict = classifyLegs({
+    inflightIn, inflightOut, queued,
     decimals: asset.decimals,
     symbol: asset.symbol,
     priceUsd: prices.get(asset.assetId)?.price ?? null,
-    originConfigured,
-    custodyFresh: custody != null && custody.stale !== true,
     indexLagMs: snap.indexLagMs,
     scanEnabled,
     lookbackDays: LOOKBACK_DAYS,
     downgradeConfirmed: gradeUndamped || (snap.downgradeConfirmed.get(asset.assetId) ?? false),
-  })
+  }, legs, chainName)
   return {
-    locked, issuance, burned, inflightIn, inflightOut, queued, originConfigured, scanEnabled,
+    locked: verdict.sums.locked,
+    issuance: verdict.sums.issuance,
+    burned: verdict.sums.burned,
+    inflightIn, inflightOut, queued,
+    originConfigured: legs.some(l => l.readable && l.role === 'lockbox'),
+    scanEnabled,
     status: verdict.status,
     statusDetail: verdict.detail,
     residual: verdict.residual,
     residualUsd: usdOf(prices, asset.assetId, verdict.residual, asset.decimals),
+    legs,
   }
 }
 
-// The Hydration-centric fuse block for one asset, or null where the origin's
-// limiters went unread — showing only the local (uncapped) legs would suggest a
-// headroom nothing measured.
-function assetLimits(snap: WormholeSnapshot, assetId: number): WormholeAssetLimits | null {
-  const origin = snap.originFuses.get(assetId)
+// The Hydration-centric fuse block for one asset's PRIMARY origin, or null
+// where that origin's limiters went unread — showing only the local (uncapped)
+// legs would suggest a headroom nothing measured. Read per chain: an asset
+// with two peers keeps two blocks (see `peerLimits`), and this one is the
+// primary's, never whichever chain happened to be read last.
+function assetLimits(snap: WormholeSnapshot, asset: Pick<DiscoveredAsset, 'assetId' | 'originChainId'>): WormholeAssetLimits | null {
+  const origin = snap.originFuses.get(peerKey(asset.assetId, asset.originChainId))
   if (!origin) return null
-  const local = snap.localFuses.get(assetId) ?? null
+  const local = snap.localFuses.get(peerKey(asset.assetId, asset.originChainId)) ?? null
   return {
     in: origin.outbound,
     out: origin.inbound,
     localOut: local?.outbound ?? null,
     localIn: local?.inbound ?? null,
   }
+}
+
+/** Both sides' legs between Hydration and one peer chain. */
+function peerLimits(snap: WormholeSnapshot, assetId: number, chainId: number): WormholePeerLimits | null {
+  const peer = snap.originFuses.get(peerKey(assetId, chainId)) ?? null
+  const local = snap.localFuses.get(peerKey(assetId, chainId)) ?? null
+  if (!peer && !local) return null
+  return {
+    peerOut: peer?.outbound ?? null,
+    peerIn: peer?.inbound ?? null,
+    hydrationIn: local?.inbound ?? null,
+    hydrationOut: local?.outbound ?? null,
+  }
+}
+
+interface PeerFlow { received: bigint | null; sent: bigint; transfersIn: number; transfersOut: number }
+
+/**
+ * Every indexed transfer between Hydration and each peer chain, per asset:
+ * sends by their payload amount, arrivals by the amount their own VAA carried
+ * (matched to the manager's digest). One arrival whose payload could not be
+ * found leaves that chain's received total unknown rather than short.
+ */
+function peerFlows(snap: WormholeSnapshot): Map<string, PeerFlow> {
+  const out = new Map<string, PeerFlow>()
+  const at = (key: string) => out.get(key) ?? { received: 0n, sent: 0n, transfersIn: 0, transfersOut: 0 }
+  for (const send of snap.timeline.sends) {
+    if (send.assetId == null || send.amount == null) continue
+    const key = peerKey(send.assetId, send.toChain)
+    const flow = at(key)
+    out.set(key, { ...flow, sent: flow.sent + send.amount, transfersOut: flow.transfersOut + 1 })
+  }
+  for (const exec of snap.timeline.inbound) {
+    if (exec.assetId == null) continue
+    const key = peerKey(exec.assetId, exec.sourceChain)
+    const flow = at(key)
+    out.set(key, {
+      ...flow,
+      received: flow.received == null || exec.amount == null ? null : flow.received + exec.amount,
+      transfersIn: flow.transfersIn + 1,
+    })
+  }
+  return out
+}
+
+const tokenRef = (statics: PeerStatic | null | undefined, fallbackAddress: string | null, fallbackDecimals: number | null): WormholeTokenRef | null => {
+  const address = statics?.token ?? fallbackAddress
+  if (!address) return null
+  return { address, name: statics?.name ?? null, symbol: statics?.symbol ?? null, decimals: statics?.decimals ?? fallbackDecimals }
+}
+
+/**
+ * Every peer of one asset as a response row, plus Hydration's own custody when
+ * Hydration is the lockbox. Pure over the snapshot: no chain or ClickHouse read.
+ */
+function peerRows(
+  snap: WormholeSnapshot, asset: DiscoveredAsset, backing: AssetBacking, prices: Map<number, PriceInfo>, flows: Map<string, PeerFlow>,
+): WormholePeerRow[] {
+  const tol = backingTolerance(asset.decimals, prices.get(asset.assetId)?.price ?? null)
+  const hydrationIsLockbox = hydrationRoleOf(snap, asset.assetId) === 'lockbox'
+  const circulating = !hydrationIsLockbox && backing.legs[0]?.amount != null
+    ? backing.legs[0].amount - (backing.legs[0].burned ?? 0n)
+    : null
+  const history = peerHistories.get(asset.manager)
+  const transceiverPeers = transceiverPeersFor(asset.manager)
+  const scanEnabled = backing.scanEnabled
+  const rows: WormholePeerRow[] = []
+  for (const p of snap.peers.get(asset.assetId) ?? []) {
+    const key = peerKey(asset.assetId, p.chainId)
+    const family = wormholeChainFamily(p.chainId)
+    const info = WORMHOLE_CHAINS[p.chainId] ?? null
+    const leg = backing.legs.find(l => l.chainId === p.chainId) ?? null
+    const read = snap.peerReads.get(key) ?? null
+    const statics = snap.peerStatics.get(key) ?? null
+    const chain = snap.chains.find(c => c.chainId === p.chainId)
+    const configured = chain?.configured ?? ORIGIN_RPC_URLS.has(p.chainId)
+    const mode = statics?.mode == null ? null : statics.mode === 1 ? 'burning' : 'locking'
+    const role = leg?.role ?? null
+    const ops = snap.inflight.filter(op => op.assetId === String(asset.assetId))
+    const pendingInOps = ops.filter(op => op.direction === 'in' && op.fromChainId === p.chainId)
+    const pendingOutOps = ops.filter(op => op.direction === 'out' && op.toChainId === p.chainId)
+    const sumOps = (list: WormholeInflightOp[]) => list.reduce((total, op) => total + (op.amount != null ? BigInt(op.amount) : 0n), 0n)
+    const inflightIn = scanEnabled ? sumOps(pendingInOps) : null
+    const inflightOut = scanEnabled ? sumOps(pendingOutOps) : null
+    const held = snap.queuedByPeer.get(key) ?? null
+    const flow = flows.get(key) ?? { received: 0n, sent: 0n, transfersIn: 0, transfersOut: 0 }
+    const fuses = peerLimits(snap, asset.assetId, p.chainId)
+    let status: WormholePeerRow['status']
+    let statusDetail: string
+    let payout: WormholePeerRow['payout'] = null
+    if (!configured) {
+      status = 'unconfigured'
+      statusDetail = `${chainName(p.chainId)} has no read endpoint on this deployment, so this ${role === 'spoke' ? 'supply' : 'lockbox'} is not counted and the asset reads unverified.`
+    } else if (role === 'spoke') {
+      status = leg?.amount == null || !leg.fresh ? 'unverified' : 'ok'
+      statusDetail = leg?.amount == null
+        ? 'The supply minted on this chain could not be read this cycle.'
+        : leg.fresh ? 'Supply minted on this chain against custody elsewhere; counted on the supply side of the equation.'
+          : 'Supply carried over from an earlier read.'
+    } else {
+      const result = lockboxPayout({
+        balance: leg?.amount ?? null,
+        received: flow.received,
+        sent: flow.sent,
+        pendingIn: inflightIn ?? 0n,
+        pendingOut: (inflightOut ?? 0n) + (held?.peer ?? 0n),
+        inboundCapacity: fuses?.peerIn ? BigInt(fuses.peerIn.capacity) : null,
+        circulating,
+        tolerance: tol,
+        fresh: leg?.fresh ?? false,
+        sharedWith: statics?.alsoPeers ?? [],
+        symbol: asset.symbol,
+        decimals: asset.decimals,
+      })
+      status = result.status
+      statusDetail = result.detail
+      payout = {
+        capacity: result.capacity?.toString() ?? null,
+        potential: result.potential?.toString() ?? null,
+        coversPotential: result.coversPotential,
+        baseline: result.baseline?.toString() ?? null,
+      }
+    }
+    const indexed = history?.get(p.chainId) ?? null
+    const balance = leg?.amount ?? null
+    rows.push({
+      chainId: p.chainId,
+      chainName: chainName(p.chainId),
+      family,
+      layer: info?.layer ?? null,
+      riskNote: info?.riskNote ?? null,
+      primary: p.chainId === asset.originChainId,
+      manager: displayChainAddress(family, p.peer),
+      mode,
+      role,
+      token: tokenRef(statics, p.chainId === asset.originChainId && asset.originToken ? displayChainAddress(family, asset.originToken) : null, p.decimals),
+      balance: balance?.toString() ?? null,
+      balanceUsd: usdOf(prices, asset.assetId, balance, asset.decimals),
+      burned: role === 'spoke' ? leg?.burned?.toString() ?? null : null,
+      paused: read?.paused ?? null,
+      configured,
+      fresh: leg?.fresh ?? false,
+      asOf: read ? new Date(read.at).toISOString() : null,
+      limits: fuses,
+      inflightIn: inflightIn?.toString() ?? null,
+      inflightOut: inflightOut?.toString() ?? null,
+      inflightCount: scanEnabled ? pendingInOps.length + pendingOutOps.length : null,
+      queued: held?.peerKnown ? held.peer.toString() : null,
+      queuedHydration: (held?.hydration ?? 0n).toString(),
+      flows: {
+        received: flow.received?.toString() ?? null,
+        sent: flow.sent.toString(),
+        net: flow.received != null ? (flow.received - flow.sent).toString() : null,
+        transfersIn: flow.transfersIn,
+        transfersOut: flow.transfersOut,
+      },
+      payout,
+      status,
+      statusDetail,
+      evidence: p.evidence,
+      since: indexed ? {
+        blockHeight: indexed.first.blockHeight,
+        timestamp: new Date(indexed.first.timestampMs).toISOString(),
+        extrinsicIndex: indexed.first.extrinsicIndex,
+        origin: indexed.first.origin,
+      } : null,
+      changes: indexed?.changes.length ?? 0,
+      transceiverPeer: transceiverPeers.get(p.chainId) ? displayChainAddress(family, transceiverPeers.get(p.chainId)!) : null,
+      alsoPeers: statics?.alsoPeers ?? [],
+    })
+  }
+  // Primary first, then by when the peer was added.
+  return rows.sort((a, b) => Number(b.primary) - Number(a.primary) || (a.since?.blockHeight ?? 0) - (b.since?.blockHeight ?? 0) || a.chainId - b.chainId)
+}
+
+/** chain → the remote transceiver Hydration's transceiver for `manager` registered. */
+function transceiverPeersFor(manager: string): Map<number, string> {
+  const out = new Map<number, string>()
+  for (const [contract, byChain] of peerHistories) {
+    if (transceiverManager.get(contract)?.manager !== manager) continue
+    for (const [chainId, h] of byChain) if (h.current?.event.kind === 'transceiver' && h.current.event.peer) out.set(chainId, h.current.event.peer)
+  }
+  return out
+}
+
+/** Map every transceiver that registered a peer to the manager it serves (hourly memo). */
+async function resolveTransceivers(): Promise<void> {
+  const now = Date.now()
+  for (const [contract, byChain] of peerHistories) {
+    if (![...byChain.values()].some(h => h.changes.some(c => c.event.kind === 'transceiver'))) continue
+    const memo = transceiverManager.get(contract)
+    if (memo && now - memo.at < STATIC_FACTS_TTL_MS) continue
+    const manager = decodeAddress(await hydrationEthCall(contract, EVM_SELECTOR.nttManager))?.toLowerCase() ?? null
+    transceiverManager.set(contract, { manager: manager ?? memo?.manager ?? null, at: manager ? now : memo?.at ?? 0 })
+  }
+}
+
+/** The lockboxes of one asset, flattened: each peer lockbox, and Hydration's own where it locks. */
+function lockboxRows(snap: WormholeSnapshot, asset: DiscoveredAsset, backing: AssetBacking, peers: readonly WormholePeerRow[], prices: Map<number, PriceInfo>): WormholeLockboxRow[] {
+  const out: WormholeLockboxRow[] = []
+  if (hydrationRoleOf(snap, asset.assetId) === 'lockbox') {
+    const balance = snap.hydrationLocked.get(asset.assetId) ?? null
+    const graded = backing.status === 'deficit' || backing.status === 'attention' ? 'attention'
+      : backing.status === 'ok' || backing.status === 'surplus' ? 'ok' : 'unverified'
+    out.push({
+      assetId: String(asset.assetId), symbol: asset.symbol, decimals: asset.decimals,
+      chainId: snap.hydrationChainId, chainName: chainName(snap.hydrationChainId), layer: WORMHOLE_CHAINS[snap.hydrationChainId]?.layer ?? null,
+      token: asset.hydrationToken ? { address: asset.hydrationToken, name: null, symbol: asset.symbol, decimals: asset.decimals } : null,
+      balance: balance?.toString() ?? null,
+      balanceUsd: usdOf(prices, asset.assetId, balance, asset.decimals),
+      capacity: balance != null ? (balance - (backing.inflightOut ?? 0n)).toString() : null,
+      status: graded,
+      statusDetail: `Hydration's own manager locks ${asset.symbol}; what it holds backs the supply minted on its peers. ${backing.statusDetail}`,
+    })
+  }
+  for (const p of peers) {
+    if (p.role !== 'lockbox') continue
+    out.push({
+      assetId: String(asset.assetId), symbol: asset.symbol, decimals: asset.decimals,
+      chainId: p.chainId, chainName: p.chainName, layer: p.layer, token: p.token,
+      balance: p.balance, balanceUsd: p.balanceUsd,
+      capacity: p.payout?.capacity ?? null,
+      status: p.status, statusDetail: p.statusDetail,
+    })
+  }
+  return out
+}
+
+/** Publish each asset's chains for the activity rows and asset page (see wormholeRemoteTokens.ts). */
+function publishRemoteTokens(snap: WormholeSnapshot): void {
+  const out: WormholeAssetBridge[] = []
+  for (const asset of snap.assets) {
+    const list: WormholeBridgePeer[] = []
+    const peersOrdered = [...(snap.peers.get(asset.assetId) ?? [])]
+      .sort((a, b) => Number(b.chainId === asset.originChainId) - Number(a.chainId === asset.originChainId))
+    for (const p of peersOrdered) {
+      const key = peerKey(asset.assetId, p.chainId)
+      const family = wormholeChainFamily(p.chainId)
+      const statics = snap.peerStatics.get(key) ?? null
+      // A peer whose token is not read yet is still a registered chain of the
+      // asset: it is listed with the token unread rather than left out.
+      const ref = tokenRef(statics, p.chainId === asset.originChainId && asset.originToken ? displayChainAddress(family, asset.originToken) : null, p.decimals)
+      const role = snap.peerReads.get(key)?.role ?? (statics?.mode === 1 ? 'spoke' : statics?.mode === 0 ? 'lockbox' : null)
+      const info = WORMHOLE_CHAINS[p.chainId] ?? null
+      list.push({
+        chainId: p.chainId, chainName: chainName(p.chainId), address: ref?.address ?? null, name: ref?.name ?? null, symbol: ref?.symbol ?? null,
+        decimals: ref?.decimals ?? p.decimals, role,
+        explorerUrl: family === 'evm' && ref ? wormholeExplorerUrl(p.chainId, ref.address) : null,
+        layer: info?.layer ?? null,
+        riskNote: info?.riskNote ?? null,
+        primary: p.chainId === asset.originChainId,
+      })
+    }
+    out.push({
+      assetId: asset.assetId,
+      hydrationRole: hydrationRoleOf(snap, asset.assetId),
+      primaryChainId: asset.originChainId,
+      primaryChainName: chainName(asset.originChainId),
+      manager: asset.manager,
+      peers: list,
+    })
+  }
+  setWormholeBridges(out)
 }
 
 async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
@@ -2180,6 +3351,7 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
     recent: [],
     totals: { lockedUsd: null, issuanceUsd: null, inflightUsd: null, deficitUsd: null, surplusUsd: null },
     chains: [],
+    lockboxes: [],
     scan: { configured: Boolean(SCAN_URL), ok: false, asOf: null },
     hydrationChainId: HYDRATION_WORMHOLE_CHAIN_ID,
     asOf: null,
@@ -2206,6 +3378,14 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
   const assetByManager = new Map(snap.assets.map(a => [a.manager, a]))
   const nowMs = Date.now()
   const windowStart = nowMs - LOOKBACK_MS
+  const remoteToken = (assetId: number, chainId: number): WormholeTokenRef | null => {
+    const asset = assetById.get(assetId)
+    if (!asset) return null
+    const p = (snap.peers.get(assetId) ?? []).find(x => x.chainId === chainId)
+    if (!p) return null
+    const family = wormholeChainFamily(chainId)
+    return tokenRef(snap.peerStatics.get(peerKey(assetId, chainId)), chainId === asset.originChainId && asset.originToken ? displayChainAddress(family, asset.originToken) : null, p.decimals)
+  }
 
   const mintedIn = new Map<number, bigint>()
   const burnedOut = new Map<number, bigint>()
@@ -2245,9 +3425,16 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
       extrinsicIndex: send.extrinsicIndex,
       timestamp: new Date(send.timestampMs).toISOString(),
       sequence: send.sequence,
+      counterpartyToken: remoteToken(asset.assetId, send.toChain),
     })
   }
 
+  // The exact amount of each arrival, keyed by where its manager logged it.
+  const execByExtrinsic = new Map<string, NttInboundExec[]>()
+  for (const exec of snap.timeline.inbound) {
+    const key = `${exec.blockHeight}:${exec.extrinsicIndex}`
+    execByExtrinsic.set(key, [...(execByExtrinsic.get(key) ?? []), exec])
+  }
   for (const receive of snap.timeline.receives) {
     const asset = receive.managers.map(m => assetByManager.get(m)).find(a => a != null) ?? null
     if (!asset || receive.extrinsicIndex == null) continue
@@ -2257,37 +3444,47 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
       .map(l => ({ eventIndex: l.event_index, assetId: l.currency_id, who: l.who, amount: BigInt(l.amount || '0') }))
     const trimmed = trimmedDecimalsFor(asset.decimals, snap.facts.get(asset.assetId)?.peerDecimals ?? null)
     const mint = matchInboundDeposit(candidates, asset.assetId, asset.decimals, trimmed)
-    if (!mint) continue
-    mintedIn.set(asset.assetId, (mintedIn.get(asset.assetId) ?? 0n) + mint.amount)
+    // A locking manager releases rather than mints, so no deposit marks the
+    // arrival; its own VAA payload states the amount and recipient instead.
+    const exec = mint ? null : (execByExtrinsic.get(`${receive.blockHeight}:${receive.extrinsicIndex}`) ?? [])
+      .find(e => e.assetId === asset.assetId && e.sourceChain === receive.emitterChainId && e.amount != null && !e.queued) ?? null
+    const amount = mint?.amount ?? exec?.amount ?? null
+    if (amount == null) continue
+    const who = mint?.who || (exec?.recipient ? recipientAccount(exec.recipient) : null)
+    mintedIn.set(asset.assetId, (mintedIn.get(asset.assetId) ?? 0n) + amount)
     if (receive.timestampMs >= windowStart) transfers14d.get(asset.assetId)!.in += 1
     rows.push({
       direction: 'in',
       assetId: String(asset.assetId),
       symbol: asset.symbol,
-      amount: mint.amount.toString(),
-      amountUsd: usdOf(prices, asset.assetId, mint.amount, asset.decimals),
-      account: mint.who || null,
-      accountRef: mint.who ? accountRef(mint.who) : null,
+      amount: amount.toString(),
+      amountUsd: usdOf(prices, asset.assetId, amount, asset.decimals),
+      account: who || null,
+      accountRef: who ? accountRef(who) : null,
       counterpartyChainId: receive.emitterChainId,
       blockHeight: receive.blockHeight,
       eventIndex: receive.eventIndex,
       extrinsicIndex: receive.extrinsicIndex,
       timestamp: new Date(receive.timestampMs).toISOString(),
       sequence: receive.sequence,
+      counterpartyToken: remoteToken(asset.assetId, receive.emitterChainId),
     })
   }
 
   rows.sort((a, b) => b.blockHeight - a.blockHeight || b.eventIndex - a.eventIndex)
 
+  const flows = peerFlows(snap)
   let lockedUsd: number | null = null
   let issuanceUsd: number | null = null
   let deficitUsd: number | null = null
   let surplusUsd: number | null = null
+  const lockboxes: WormholeLockboxRow[] = []
   const assetRows: WormholeAssetRow[] = snap.assets.map(asset => {
     const fact = snap.facts.get(asset.assetId) ?? null
     const custody = snap.custody.get(asset.assetId) ?? null
     const family = wormholeChainFamily(asset.originChainId)
     const backing = assetBacking(snap, asset, prices)
+    const hydrationRole = hydrationRoleOf(snap, asset.assetId)
     const minted = mintedIn.get(asset.assetId) ?? 0n
     // Supply burned by an OUTBOUND bridge transfer — not the dead-address term
     // (`backing.burned`), which is what the parity equation subtracts.
@@ -2297,19 +3494,24 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
     issuanceUsd = addUsd(issuanceUsd, usdOf(prices, asset.assetId, issuance, asset.decimals))
     if (residualUsd != null && (backing.status === 'deficit' || backing.status === 'attention')) deficitUsd = (deficitUsd ?? 0) + Math.abs(residualUsd)
     if (residualUsd != null && backing.status === 'surplus') surplusUsd = (surplusUsd ?? 0) + residualUsd
+    const peers = peerRows(snap, asset, backing, prices, flows)
+    const assetLockboxes = lockboxRows(snap, asset, backing, peers, prices)
+    lockboxes.push(...assetLockboxes)
+    const primaryPeer = (snap.peers.get(asset.assetId) ?? []).find(p => p.chainId === asset.originChainId) ?? null
+    const hydrationIssuance = snap.issuance.get(asset.assetId) ?? null
     return {
       assetId: String(asset.assetId),
       symbol: asset.symbol,
       decimals: asset.decimals,
       originChainId: asset.originChainId,
       originChainName: chainName(asset.originChainId),
-      originToken: displayChainAddress(family, asset.originToken),
+      originToken: asset.originToken ? displayChainAddress(family, asset.originToken) : null,
       manager: asset.manager,
       mode: fact?.mode == null ? null : fact.mode === 1 ? 'burning' : 'locking',
       pausedLocal: snap.pausedLocal.get(asset.assetId) ?? null,
-      pausedOrigin: custody?.paused ?? null,
-      peer: fact?.peer ? displayChainAddress(family, fact.peer) : null,
-      limits: assetLimits(snap, asset.assetId),
+      pausedOrigin: custody?.paused ?? (peers.some(p => p.paused === true) ? true : peers.some(p => p.paused === false) ? false : null),
+      peer: primaryPeer ? displayChainAddress(family, primaryPeer.peer) : null,
+      limits: assetLimits(snap, asset),
       issuance: issuance?.toString() ?? null,
       burned: backing.burned?.toString() ?? null,
       locked: locked?.toString() ?? null,
@@ -2332,7 +3534,11 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
         // TransferRedeemed), so `mintedIn` already counts it. Netting it out of
         // issuance while it stays inside `mintedIn` would drop nonNtt by the same
         // amount and read as a supply path disappearing.
-        nonNtt: issuance != null ? (issuance - minted + burnedOutOf).toString() : null,
+        //
+        // Only where Hydration MINTS: a locking manager's flows are releases
+        // and locks of a token whose supply NTT never touches, so there is no
+        // remainder to state.
+        nonNtt: hydrationRole !== 'lockbox' && hydrationIssuance != null ? (hydrationIssuance - minted + burnedOutOf).toString() : null,
       },
       issuanceUsd: usdOf(prices, asset.assetId, issuance, asset.decimals),
       lockedUsd: usdOf(prices, asset.assetId, locked, asset.decimals),
@@ -2340,6 +3546,11 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
       status: backing.status,
       statusDetail: backing.statusDetail,
       transfers14d: transfers14d.get(asset.assetId) ?? { out: 0, in: 0 },
+      hydrationRole,
+      hydrationLocked: hydrationRole === 'lockbox' ? snap.hydrationLocked.get(asset.assetId)?.toString() ?? null : null,
+      hydrationToken: asset.hydrationToken,
+      peers,
+      lockboxCount: assetLockboxes.length,
     }
   })
 
@@ -2381,6 +3592,8 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
       // An unknown release time is reported as not yet releasable rather than
       // as an invitation to call a release that may revert.
       releasable: entry.releasableAtSec != null && nowSec >= entry.releasableAtSec,
+      direction: entry.direction,
+      fromChainId: entry.fromChainId,
     }]
   })
 
@@ -2395,6 +3608,7 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
       surplusUsd: measuredAny ? surplusUsd ?? 0 : null,
     },
     chains: snap.chains,
+    lockboxes,
     scan: snap.scan,
     hydrationChainId: snap.hydrationChainId,
     asOf: new Date(snap.takenAt).toISOString(),
@@ -2402,6 +3616,16 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
     indexLagSec: snap.indexLagMs != null ? Math.round(snap.indexLagMs / 1000) : null,
     indexBehind: snap.indexLagMs == null || snap.indexLagMs > INDEX_STALE_AFTER_MS,
   }
+}
+
+/**
+ * The Hydration account an NTT recipient names. Hydration-bound transfers carry
+ * an EVM recipient (20 bytes, left-padded), which is the ETH\0-widened account
+ * on this side; a full 32-byte value is an account id as it stands.
+ */
+function recipientAccount(recipient: string): string {
+  const body = recipient.replace(/^0x/, '').toLowerCase().padStart(64, '0')
+  return /^0{24}/.test(body) ? '0x45544800' + body.slice(24) + '0'.repeat(16) : '0x' + body
 }
 
 // The additive block the Security dashboard carries. Null until the first
@@ -2485,7 +3709,7 @@ export async function getWormholeAlertState(): Promise<WormholeAlertState | null
     const backing = assetBacking(snap, asset, prices)
     // The same fuse block the page renders (`assetLimits`), so an alert and
     // /security/wormhole state one utilization rather than two.
-    const limits = assetLimits(snap, asset.assetId)
+    const limits = assetLimits(snap, asset)
     return {
       assetId: asset.assetId,
       symbol: asset.symbol,
