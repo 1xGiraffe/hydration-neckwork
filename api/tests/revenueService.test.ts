@@ -521,3 +521,143 @@ describe('top payer sums over many accounts', () => {
     expect(calls.flatMap(c => c.params.accounts as string[]).sort()).toEqual(borrowers.map(b => b.account).sort())
   })
 })
+
+describe('getUserRevenueFlow', () => {
+  it('states the newest folded hour from its MARKER even when that hour holds no user fact', async () => {
+    vi.setSystemTime(NOW + 9_000_000)
+    const { initRevenueService, getUserRevenueFlow } = await service()
+    const hour = Math.floor(Date.parse('2026-08-14T13:00:00Z') / 1000)
+    const { client } = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_000 }],
+      '-- rev:user-flow-hour': [{ h: String(hour), n: '1' }],
+      '-- rev:user-flow\n': [],
+    })
+    initRevenueService(client)
+    const flow = await getUserRevenueFlow()
+    expect(flow.hour).toBe('2026-08-14T13:00:00.000Z')
+    expect(flow.publishedThrough).toBe('2026-08-14T14:00:00.000Z')
+    expect(flow.drips).toEqual([])
+  })
+})
+
+describe('getUserRevenueFlow — revisable streams', () => {
+  it('streams a revisable stream at its trailing-24h mean and a decided one at its newest hour', async () => {
+    vi.setSystemTime(NOW + 9_100_000)
+    const { initRevenueService, getUserRevenueFlow } = await service()
+    const hour = Math.floor(Date.parse('2026-08-14T13:00:00Z') / 1000)
+    const { client } = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_000 }],
+      '-- rev:user-flow-hour': [{ h: String(hour), n: '1' }],
+      '-- rev:user-flow\n': [
+        { stream: 'token_accrual', asset_id: '43', last: '-5.000000000000', trailing: '48.000000000000' },
+        { stream: 'lp_fee_omnipool', asset_id: '5', last: '3.000000000000', trailing: '72.000000000000' },
+      ],
+    })
+    initRevenueService(client)
+    const flow = await getUserRevenueFlow()
+    expect(flow.revisableMeanHours).toBe(24)
+    const per = new Map(flow.drips.map(d => [d.stream, d.usdPerBlock / (flow.blockSeconds / 3_600)]))
+    expect(per.get('token_accrual')).toBeCloseTo(2, 9) // 48 / 24, never the undecided −5
+    expect(per.get('lp_fee_omnipool')).toBeCloseTo(3, 9)
+  })
+})
+
+describe('getUserRevenueFlow — token accrual drips', () => {
+  it('keys and labels a token\'s accrual by the token its pot names, not the asset it is valued in', async () => {
+    vi.setSystemTime(NOW + 9_165_000)
+    const { initRevenueService, getUserRevenueFlow } = await service()
+    const hour = Math.floor(Date.parse('2026-08-14T13:00:00Z') / 1000)
+    const { seen, client } = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_000 }],
+      '-- rev:user-flow-hour': [{ h: String(hour), n: '1' }],
+      '-- rev:user-flow\n': [{ stream: 'token_accrual', asset_id: '0', last: '0', trailing: '48.000000000000' }],
+    })
+    initRevenueService(client)
+    const flow = await getUserRevenueFlow()
+    const sql = seen.find(x => x.query.includes('-- rev:user-flow\n'))!.query
+    expect(sql).toContain("if(startsWith(stream, 'token_accrual') AND startsWith(pot, 'token:'), toUInt32OrZero(substring(pot, 7)), asset_id) AS asset_id")
+    expect(sql).toContain('GROUP BY stream, asset_id')
+    expect(flow.drips[0]).toMatchObject({ key: 'token_accrual:0', assetId: 0 })
+    expect(flow.drips[0].label).toBe('Yield-bearing token accrual · HDX')
+  })
+})
+
+describe('getUserRevenueDashboard — top earners and payers in one pass', () => {
+  it('reads one ranking (whole months by partition, the first month by day) and splits it by sign', async () => {
+    vi.setSystemTime(NOW + 9_200_000)
+    const { initRevenueService, getUserRevenueDashboard } = await service()
+    const through = Math.floor(Date.parse('2026-08-14T13:00:00Z') / 1000)
+    const { seen, client } = fakeClient({
+      '-- ur:account-coverage': [{ m: '202608', computed: String(through), through: String(through), expected_first: '202608' }],
+      '-- rev:user:top': [
+        { account: ACCOUNT_B, usd: '120.000000000000' },
+        { account: `0x${'ee'.repeat(32)}`, usd: '-40.000000000000' },
+      ],
+    })
+    initRevenueService(client)
+    const dash = await getUserRevenueDashboard('30d')
+    expect(dash.accountComplete).toBe(true)
+    expect(dash.topEarners.map(r => r.usd)).toEqual([120])
+    expect(dash.topPayers.map(r => r.usd)).toEqual([-40])
+    const top = seen.filter(s => s.query.includes('-- rev:user:top'))
+    expect(top).toHaveLength(1)
+    expect(top[0].query).toContain('_partition_id > {fromMonth:String}')
+    expect(top[0].query).toContain('LIMIT 10 BY sign(s)')
+    expect(top[0].params.fromMonth).toBe(String(top[0].params.from).slice(0, 7).replace('-', ''))
+  })
+})
+
+describe('User Revenue display streams — HOLLAR interest apart', () => {
+  it('streams a HOLLAR loan\'s borrow interest as its own drip, every other loan\'s as borrow interest', async () => {
+    vi.setSystemTime(NOW + 9_300_000)
+    const { initRevenueService, getUserRevenueFlow } = await service()
+    const hour = Math.floor(Date.parse('2026-08-14T13:00:00Z') / 1000)
+    const { client } = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_000 }],
+      '-- rev:user-flow-hour': [{ h: String(hour), n: '1' }],
+      '-- rev:user-flow\n': [
+        { stream: 'mm_borrow_interest', asset_id: '222', last: '-9.000000000000', trailing: '-200.000000000000' },
+        { stream: 'mm_borrow_interest', asset_id: '0', last: '-1.000000000000', trailing: '-24.000000000000' },
+      ],
+    })
+    initRevenueService(client)
+    const flow = await getUserRevenueFlow()
+    expect(flow.drips.map(d => [d.key, d.stream, d.label])).toEqual([
+      ['mm_borrow_interest_hollar:222', 'mm_borrow_interest_hollar', 'HOLLAR interest · HOLLAR'],
+      ['mm_borrow_interest:0', 'mm_borrow_interest', 'Borrow interest · HDX'],
+    ])
+  })
+
+  it('reads the dashboard\'s series and breakdown under the display streams, HOLLAR interest before the rest', async () => {
+    vi.setSystemTime(NOW + 11_100_000) // past the previous dashboard's stale window
+    const { initRevenueService, getUserRevenueDashboard } = await service()
+    const through = Math.floor(Date.parse('2026-08-14T13:00:00Z') / 1000)
+    const day = Math.floor(Date.parse('2026-08-13T00:00:00Z') / 1000)
+    // A newer build than the previous test's (its publication generation), so the sections are read afresh.
+    const { seen, client } = fakeClient({
+      '-- ur:account-coverage': [{ m: '202608', computed: String(through + 60), through: String(through), expected_first: '202608' }],
+      '-- ur:day-buckets': [
+        { t: String(day), ds: 'mm_borrow_interest', holder_class: 'user', earned: '0', paid: '-0.671', net: '-0.671', unpriced: '0' },
+        { t: String(day), ds: 'mm_borrow_interest_hollar', holder_class: 'user', earned: '0', paid: '-9.003', net: '-9.003', unpriced: '0' },
+      ],
+      '-- ur:stream-totals': [
+        { ds: 'mm_borrow_interest', holder_class: 'user', earned: '0', paid: '-0.671', net: '-0.671', unpriced: '0' },
+        { ds: 'mm_borrow_interest_hollar', holder_class: 'user', earned: '0', paid: '-9.003', net: '-9.003', unpriced: '0' },
+      ],
+    })
+    initRevenueService(client)
+    const dash = await getUserRevenueDashboard('30d')
+    expect(dash.breakdown.map(b => [b.stream, b.label, b.paid])).toEqual([
+      ['mm_borrow_interest_hollar', 'HOLLAR interest', -9.003],
+      ['mm_borrow_interest', 'Borrow interest', -0.671],
+    ])
+    expect(dash.history.series.map(s => s.stream)).toEqual(['mm_borrow_interest_hollar', 'mm_borrow_interest'])
+    // The total is the exact sum over both lines: the split moves no cent.
+    expect(dash.breakdownTotal?.paid).toBeCloseTo(-9.674, 9)
+    for (const marker of ['-- ur:day-buckets', '-- ur:stream-totals']) {
+      const q = seen.find(s => s.query.includes(marker))!.query
+      expect(q).toContain("if((stream = 'mm_borrow_interest' AND asset_id = 222), 'mm_borrow_interest_hollar', stream) AS ds")
+      expect(q).toMatch(/GROUP BY (t, )?ds, holder_class/)
+    }
+  })
+})

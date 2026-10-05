@@ -15,7 +15,7 @@ import {
   getAssetPriceWindow, getAddressHistoryWindow, getAddressLiquidityHistory, getAddressMoneyMarketHistory, getTagHistoryWindow, getTagLiquidityHistory, getAddressVolumeHistory, getTagVolumeHistory,
   getTagActivity, getTagExtrinsics, getTagEvents,
   getAddressVotes, getTagVotes, getTagVotesByReferendum,
-  getAddressRevenueBreakdown, getTagRevenueBreakdown,
+  getAddressRevenueBreakdown, getTagRevenueBreakdown, getAddressUserRevenue, getTagUserRevenue, USER_REVENUE_RANGES, getAddressMoneyMarketEarned,
   describeLookupMiss,
   isLocatedActivityRequest,
   mmMarkets,
@@ -29,7 +29,7 @@ import {
   type ValueListFilters,
 } from '../services/explorerService.ts'
 import { HDX_WINDOW_CHARTS, getHdxChartWindow, getHdxDashboard } from '../services/hdxService.ts'
-import { FLOW_CURSOR_RE, REVENUE_RANGES, getRevenueDashboard, getRevenueFlow, getStakerDistributions } from '../services/revenueService.ts'
+import { FLOW_CURSOR_RE, REVENUE_RANGES, getRevenueDashboard, getRevenueFlow, getStakerDistributions, getUserRevenueDashboard, getUserRevenueFlow, getUserRevenueSummary } from '../services/revenueService.ts'
 import { withAssetVolume24h } from '../services/volumeHistory.ts'
 import { HOLLAR_WINDOW_CHARTS, getHollarChartWindow, getHollarDashboard } from '../services/hollarService.ts'
 import { DEFAULT_WINDOW_POINTS, windowSchema } from './windowQuery.ts'
@@ -59,7 +59,10 @@ export const uint32Param = z.coerce.number().int().min(0).max(0xffff_ffff)
 const limitSchema = z.coerce.number().int().min(1).max(250).optional()
 // `updates` is an accepted alias for this sort, from when the column was
 // labelled for the balance-observation count, so an old link still resolves.
-const accountSortSchema = z.enum(['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'updates', 'volume', 'liquidation', 'revenue'])
+const accountSortSchema = z.enum(['value', 'supplied', 'borrowed', 'health', 'identity', 'activity', 'updates', 'volume', 'liquidation', 'revenue', 'user-revenue'])
+// The User Revenue tabs' range (account, tag and list-tag routes share it).
+export const userRevenueRangeQuery = z.object({ range: z.enum(USER_REVENUE_RANGES).default('all') })
+
 // Exported so the viewer-fold accounts route (routes/user.ts) validates `sort` the
 // exact same way the public directory does — same precedent as offsetParam/limitParam.
 export function accountSortParam(q: Record<string, unknown>): AccountSort {
@@ -879,6 +882,17 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return breakdown
   })
 
+  // The User Revenue tab over the tag's members.
+  fastify.get('/explorer/tag/:tagId/user-revenue', async (req, reply) => {
+    const params = tagParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid tag id' })
+    const q = userRevenueRangeQuery.safeParse(req.query)
+    if (!q.success) return reply.status(400).send({ error: 'Invalid range' })
+    const breakdown = await getTagUserRevenue(params.data.tagId, q.data.range)
+    if (!breakdown) return reply.status(404).send({ error: 'Tag not found' })
+    return breakdown
+  })
+
   // The Votes tab's grouped mode: one row per referendum the tag's members
   // voted on, members' latest votes combined.
   fastify.get('/explorer/tag/:tagId/votes-by-referendum', async (req, reply) => {
@@ -991,6 +1005,17 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return history
   })
 
+  // The Borrow tab card's Earned / Interest paid per market: a per-market slice of
+  // the User Revenue facts (getAddressMoneyMarketEarned, services/mmEarned.ts).
+  // Per account only, like the history — a tag's cards read each member's.
+  fastify.get('/explorer/address/:address/money-market-earned', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const earned = await getAddressMoneyMarketEarned(params.data.address)
+    if (!earned) return reply.status(404).send({ error: 'Address not recognized' })
+    return earned
+  })
+
   fastify.get('/explorer/address/:address/activity', async (req, reply) => {
     const params = addressParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
@@ -1043,6 +1068,18 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const params = addressParam.safeParse(req.params)
     if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
     const breakdown = await getAddressRevenueBreakdown(params.data.address)
+    if (!breakdown) return reply.status(404).send({ error: 'Address not recognized' })
+    return breakdown
+  })
+
+  // The User Revenue tab: what this account earned, per stream / pot / asset,
+  // earned, paid and net, with the range's chart.
+  fastify.get('/explorer/address/:address/user-revenue', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const q = userRevenueRangeQuery.safeParse(req.query)
+    if (!q.success) return reply.status(400).send({ error: 'Invalid range' })
+    const breakdown = await getAddressUserRevenue(params.data.address, q.data.range)
     if (!breakdown) return reply.status(404).send({ error: 'Address not recognized' })
     return breakdown
   })
@@ -1125,6 +1162,17 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     if (!q.success) return reply.status(400).send({ error: 'Invalid cursor' })
     return getRevenueFlow(q.data.after ?? null)
   })
+
+  // User Revenue (what users earn; services/userRevenueRead.ts): the headline
+  // windows the /revenue overview's user river shows, the /revenue/users
+  // dashboard, and the river's feed (the newest folded hour's rate per block).
+  fastify.get('/explorer/revenue/users/summary', async () => getUserRevenueSummary())
+  fastify.get('/explorer/revenue/users', async (req, reply) => {
+    const q = z.object({ range: z.enum(REVENUE_RANGES).default('30d') }).safeParse(req.query)
+    if (!q.success) return reply.status(400).send({ error: 'Invalid range' })
+    return getUserRevenueDashboard(q.data.range)
+  })
+  fastify.get('/explorer/revenue/user-flow', async () => getUserRevenueFlow())
 
   // The staker-distributions section carries its own timeframe (defaults to the
   // full history), so it reads its own endpoint rather than the dashboard's.

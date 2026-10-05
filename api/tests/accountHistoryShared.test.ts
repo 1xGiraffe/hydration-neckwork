@@ -58,7 +58,10 @@ describe('the shared reconstruction outlives an account-value generation', () =>
   // count: a fifth consumer that forgot to would serve a stale headline value.
   it('leaves every consumer to supply the live final point', () => {
     const sites = [...explorerService.matchAll(/(?<!function )getAccountHistoryShared\(/g)]
-    expect(sites).toHaveLength(4)
+    // Five call sites: the directory sparkline calls it twice — directly, and as the
+    // background lane's fill on a deferred (cold) page build, whose result is read
+    // back through the same pinned path on the rebuild.
+    expect(sites).toHaveLength(5)
 
     // The two detail charts overwrite the last point with the displayed net worth.
     // getTag's own call moved into buildTagDetailForMembers when the list-tag

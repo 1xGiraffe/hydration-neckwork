@@ -30,8 +30,9 @@ describe('tag membership keys', () => {
     // `-r5`: the account value carries the COUNTED claimable farm rewards and
     // money-market incentives (`-r3`), leaves a pool account's own hub reserve out
     // (`-r4`) and values money-market collateral by the folded reserves, the
-    // market's aggregate standing in only where a reserve is unstated.
-    expect(key.slice(0, key.indexOf('|'))).toMatch(/^v[123]-r5$/)
+    // market's aggregate standing in only where a reserve is unstated; `-r6`
+    // carries each row's User Revenue.
+    expect(key.slice(0, key.indexOf('|'))).toMatch(/^v[123]-r6$/)
     expect(key).not.toBe(list)
   })
 

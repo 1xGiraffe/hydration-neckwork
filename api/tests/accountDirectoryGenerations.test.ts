@@ -177,9 +177,8 @@ describe('the directory wiring keeps the generation out of its keys', () => {
   it('leaves the generation only in the keys that want invalidation', () => {
     // Eight keys once carried it. The two whole-directory pages that are SERVED —
     // `explorer:accounts` — dropped it, because they want the previous generation
-    // served while the next computes. `explorer:accounts-total` keeps it: it is
-    // embedded in a page payload rather than served on its own, and it is only ever
-    // computed inside a rebuild that is already running in the background.
+    // served while the next computes. The row total has no key of its own any more:
+    // it is the shared ranking's length.
     // `explorer:account-history` dropped it too (accountHistoryShared.test.ts owns
     // that): the reconstruction is valued at closed historical candles and never
     // reads the pinned price map, so the generation invalidated work it could not
@@ -190,7 +189,6 @@ describe('the directory wiring keeps the generation out of its keys', () => {
       'explorer:mm-positions:${accountValueGenerationEpoch}:${h160.toLowerCase()}',
       'explorer:mm-reserves:${accountValueGenerationEpoch}:p${pricing.gen}:${h160.toLowerCase()}',
       'explorer:lp-recon:${accountValueGenerationEpoch}:${accs.sort().join(\',\')}',
-      'explorer:accounts-total:${accountValueGenerationEpoch}:${modelVersion}',
       'explorer:tag:${accountValueGenerationEpoch}:${tagId}${summary ? \':summary\' : refresh ? \':refresh\' : \'\'}',
     ])
     expect(generationKeys.filter(key => key.startsWith('explorer:accounts:'))).toHaveLength(0)

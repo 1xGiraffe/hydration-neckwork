@@ -46,6 +46,12 @@ import {
   type RevenueTailRow,
 } from './revenueStreams.ts'
 import { modlAccountId } from './tagService.ts'
+import { displayDescriptor } from './explorerAssets.ts'
+import {
+  USER_REVENUE_DAILY_TABLE, USER_REVENUE_DUST_1E12 as USD_DUST, USER_REVENUE_HOURLY_TABLE, accountFoldCoverage, snapUserRevenueDust, publicationGeneration, userRevenueDayBuckets, userRevenueStreamTotals, userRevenueViaTotals,
+  userRevenueOwnerKeySql, userRevenueWindows, windowFirstDay, type AccountFoldCoverage,
+} from './userRevenueRead.ts'
+import { USER_REVENUE_DISPLAY_STREAMS, userRevenueDisplayStream, type UserRevenueUnmeasured } from './userRevenueStreams.ts'
 import { DECIMAL_STRINGS, OMNIPOOL_ACCOUNT, scaledUsd } from './valuation.ts'
 
 let client: ClickHouseClient
@@ -731,5 +737,273 @@ export async function getRevenueFlow(after: string | null): Promise<RevenueFlowR
     cursor: last ? `${last.block}-${last.eventIndex}-${last.legIndex}` : (after ?? `${head}-0-0`),
     head,
     blockSeconds,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// User Revenue — what users EARN on Hydration (the second river)
+// ---------------------------------------------------------------------------
+//
+// Read from the published folds only (services/userRevenueRead.ts): closed
+// hours through `publishedThrough`, never a raw tail. Protocol Revenue above and
+// User Revenue here are NOT additive — the LP-retained part of an Omnipool fee is
+// user revenue, the protocol's part protocol revenue, and the HDX sub-pool's POL
+// is both — so no surface adds them.
+
+export interface UserRevenueSummary {
+  totals: { day: number | null; week: number | null; month: number | null; allTime: number | null }
+  /** End of the newest folded hour (ISO): every total is "through" it. */
+  publishedThrough: string | null
+  firstHour: string | null
+  complete: boolean
+  unpricedCells: number
+  unmeasured: readonly UserRevenueUnmeasured[]
+}
+
+const isoOf = (s: number | null): string | null => (s == null ? null : new Date(s * 1000).toISOString())
+const usdNum = (v: bigint | null): number | null => (v == null ? null : Number(v) / USD_UNIT)
+
+export async function getUserRevenueSummary(): Promise<UserRevenueSummary> {
+  const w = await userRevenueWindows(client)
+  return {
+    totals: { day: usdNum(w.day), week: usdNum(w.week), month: usdNum(w.month), allTime: usdNum(w.allTime) },
+    publishedThrough: isoOf(w.coverage.publishedThrough),
+    firstHour: isoOf(w.coverage.firstHour),
+    complete: w.coverage.complete,
+    unpricedCells: w.unpricedCells,
+    unmeasured: w.coverage.unmeasured,
+  }
+}
+
+export interface UserRevenueStreamSummary {
+  stream: string
+  label: string
+  sign: 'earned' | 'paid' | 'both'
+  revisable: boolean
+  toggle: boolean
+  coverage: string
+  earned: number
+  paid: number
+  net: number
+  unpriced: number
+}
+
+/** A history bucket: net, and the earned (Σ positive) and paid (Σ negative) account-day facts it nets. */
+export interface UserRevenuePoint { t: number; usd: number; earned: number; paid: number }
+
+export interface UserRevenueDashboard extends UserRevenueSummary {
+  range: RevenueRange
+  bucketSeconds: number
+  /**
+   * The account fold's cut (ISO): the history, breakdown, not-user and ranking
+   * sections are account-grain facts "through" it; the headline totals are the
+   * hourly fold's, through `publishedThrough`. Both are closed-hour cuts; the
+   * account one trails by up to about an hour.
+   */
+  accountPublishedThrough: string | null
+  /**
+   * The ACCOUNT fold's completeness (every month since its first published,
+   * reaching back to the price floor) — what the history, breakdown, not-user and
+   * ranking sections stand on; `complete` above is the hourly fold's, for the
+   * headline totals only.
+   */
+  accountComplete: boolean
+  /** First UTC day of the range's day window (the breakdown, history and rankings), ending at the account cut. */
+  fromDay: string | null
+  history: { series: { stream: string; points: UserRevenuePoint[] }[] }
+  /** Holder class `user`, per stream: earned / paid / net at the account-day grain. */
+  breakdown: UserRevenueStreamSummary[]
+  /** The breakdown's totals, summed exactly over every user stream's facts and snapped once (never a sum of the snapped rows). */
+  breakdownTotal?: { earned: number; paid: number; net: number }
+  /** What the fold booked but no user holds — named, never folded into User Revenue. */
+  notUser: { holderClass: 'protocol' | 'unattributed'; net: number; causes: { via: string; net: number }[] }[]
+  topEarners: { account: AccountRef; usd: number }[]
+  topPayers: { account: AccountRef; usd: number }[]
+}
+
+const USER_RANGE_DAYS: Record<RevenueRange, number | null> = { '30d': 30, '1y': 365, all: null }
+const USER_RANGE_GRAIN: Record<RevenueRange, 'day' | 'week' | 'month'> = { '30d': 'day', '1y': 'week', all: 'month' }
+
+/** The sections below the headline: account-grain facts only. */
+type UserRevenueDashboardSections = Omit<UserRevenueDashboard, keyof UserRevenueSummary>
+
+/**
+ * The /revenue/users dashboard over a day window ending at the fold's cut. The
+ * HEADLINE is the summary itself, read per request from the same cache /revenue
+ * reads (getUserRevenueSummary), so the two pages never disagree; the sections
+ * below it are cached apart, as the generation of the account facts they read
+ * (the account cut and the newest month build): a rebuild — at a new cut or the
+ * same one — revalidates them, served stale meanwhile with the account cut they
+ * were built at.
+ */
+export async function getUserRevenueDashboard(range: RevenueRange): Promise<UserRevenueDashboard> {
+  const [summary, account] = await Promise.all([getUserRevenueSummary(), accountFoldCoverage(client)])
+  const sections = await cachedSwr(`revenue:user-dashboard:${range}`, 120_000, 1_800_000, () => userRevenueDashboardSections(range, account), publicationGeneration(account))
+  return { ...summary, ...sections }
+}
+
+async function userRevenueDashboardSections(range: RevenueRange, account: AccountFoldCoverage): Promise<UserRevenueDashboardSections> {
+  // Every section below the headline reads the ACCOUNT facts, so its window ends at the account fold's cut.
+  const through = account.publishedThrough
+  const days = USER_RANGE_DAYS[range]
+  const fromDay = through == null ? null
+    : days == null ? (account.firstMonth != null ? `${Math.floor(account.firstMonth / 100)}-${String(account.firstMonth % 100).padStart(2, '0')}-01` : null)
+    : windowFirstDay(through, days)
+  const empty: UserRevenueDashboardSections = {
+    range, bucketSeconds: RANGE_BUCKET_SECONDS[range], accountPublishedThrough: isoOf(through), accountComplete: account.complete, fromDay,
+    history: { series: [] }, breakdown: [], notUser: [], topEarners: [], topPayers: [],
+  }
+  if (through == null || fromDay == null) return empty
+  // The top earners and payers in ONE pass: whole months from the by_account_month projection (selected by
+  // `_partition_id`, the form the projection's planner accepts — a `toYYYYMM(day)` range is not), the window's
+  // first partial month from day rows; ten per sign.
+  // Ranked by identity under the directory's rule (userRevenueTwinOwners): a twin a substrate account owns is
+  // that account's, so the top earners name the accounts the directory ranks.
+  const rankSql = `-- rev:user:top
+SELECT who AS account, toString(s) AS usd FROM (
+SELECT ${userRevenueOwnerKeySql('account')} AS who, sum(s) AS s FROM (
+  SELECT account, sum(amount_usd) AS s FROM ${USER_REVENUE_DAILY_TABLE}
+  WHERE _partition_id > {fromMonth:String} AND stream != '' AND holder_class = 'user' AND account != ''
+  GROUP BY account
+  UNION ALL
+  SELECT account, sum(amount_usd) AS s FROM ${USER_REVENUE_DAILY_TABLE}
+  WHERE _partition_id = {fromMonth:String} AND day >= toDate({from:String}) AND stream != '' AND holder_class = 'user' AND account != ''
+  GROUP BY account)
+GROUP BY who)
+WHERE abs(s) >= 0.005
+ORDER BY sign(s) DESC, abs(s) DESC, who
+LIMIT 10 BY sign(s)`
+  const [buckets, totals, vias, rankedRes] = await Promise.all([
+    // Under the DISPLAY streams (userRevenueStreams.ts): HOLLAR's borrow interest is its own line.
+    userRevenueDayBuckets(client, { grain: USER_RANGE_GRAIN[range], fromDay, holderClass: 'user', display: true }),
+    userRevenueStreamTotals(client, { fromDay, display: true }),
+    userRevenueViaTotals(client, { fromDay }),
+    client.query({ query: rankSql, query_params: { from: fromDay, fromMonth: fromDay.slice(0, 7).replace('-', '') }, format: 'JSONEachRow' }),
+  ])
+  // The read rows are EXACT (userRevenueRead): every sum below is taken on them, and only a
+  // figure the page states is snapped (shown) — so a class net or the page's total keeps
+  // the sub-cent facts its rows carry.
+  const shown = (v: bigint): number => Number(snapUserRevenueDust(v)) / USD_UNIT
+  const series = new Map<string, UserRevenuePoint[]>()
+  for (const b of buckets) {
+    (series.get(b.stream) ?? series.set(b.stream, []).get(b.stream)!)
+      .push({ t: b.t, usd: shown(b.net), earned: shown(b.earned), paid: shown(b.paid) })
+  }
+  // A stream whose every figure is dust (and nothing unpriced) is no row at all: "— — $0.00" states nothing.
+  const userTotals = totals.filter(t => t.holderClass === 'user')
+  const byStream = new Map(userTotals
+    .filter(t => t.unpriced > 0 || [t.earned, t.paid, t.net].some(v => snapUserRevenueDust(v) !== 0n))
+    .map(t => [t.stream, t]))
+  const notUser = (['protocol', 'unattributed'] as const).map(holderClass => {
+    const causes = vias.filter(v => v.holderClass === holderClass)
+    return {
+      holderClass,
+      net: shown(causes.reduce((a, v) => a + v.net, 0n)),
+      causes: causes.filter(v => snapUserRevenueDust(v.net) !== 0n).sort((a, b) => (b.net > a.net ? 1 : b.net < a.net ? -1 : 0))
+        .map(v => ({ via: v.via || 'direct', net: shown(v.net) })),
+    }
+  }).filter(c => c.causes.length > 0)
+  // The breakdown's own total row, summed exactly over EVERY user stream (dust rows included) and snapped once.
+  const sumOf = (pick: (t: (typeof userTotals)[number]) => bigint) => userTotals.reduce((a, t) => a + pick(t), 0n)
+  const rankedRows = (await rankedRes.json<{ account: string; usd: string }>())
+    .map(r => ({ account: accountRef(r.account), usd: Number(scaledUsd(r.usd)) / USD_UNIT }))
+  return {
+    ...empty,
+    history: {
+      series: USER_REVENUE_DISPLAY_STREAMS.filter(d => series.has(d.id)).map(d => ({ stream: d.id, points: series.get(d.id)! })),
+    },
+    breakdown: USER_REVENUE_DISPLAY_STREAMS.filter(d => byStream.has(d.id)).map(d => {
+      const t = byStream.get(d.id)!
+      return {
+        stream: d.id, label: d.label, sign: d.sign, revisable: d.revisable, toggle: d.toggle ?? false, coverage: d.coverage,
+        earned: shown(t.earned), paid: shown(t.paid), net: shown(t.net), unpriced: t.unpriced,
+      }
+    }),
+    breakdownTotal: { earned: shown(sumOf(t => t.earned)), paid: shown(sumOf(t => t.paid)), net: shown(sumOf(t => t.net)) },
+    notUser,
+    topEarners: rankedRows.filter(r => r.usd > 0),
+    topPayers: rankedRows.filter(r => r.usd < 0),
+  }
+}
+
+/** Revisable streams (a later event still moves their recent hours) stream their mean over this many closed hours. */
+export const USER_FLOW_REVISABLE_MEAN_HOURS = 24
+
+export interface UserRevenueFlowResponse {
+  /** Start of the newest folded hour (ISO) whose rate the river streams (revisable streams: the mean of the 24 hours ending with it). */
+  hour: string | null
+  /** The trailing window revisable streams are averaged over (hours, ending with `hour`). */
+  revisableMeanHours: number
+  publishedThrough: string | null
+  blockSeconds: number
+  head: number
+  /** Signed: negative drips (borrow interest, exit fees, forfeits) flow OUT. */
+  drips: { key: string; stream: string; label: string; assetId: number; usdPerBlock: number }[]
+}
+
+/**
+ * The user river's feed. User Revenue accrues continuously and is booked per
+ * closed hour, so the river streams the NEWEST folded hour's net rate per
+ * (stream, asset), one block at a time — the same measured-not-modelled rule as
+ * the protocol river's borrow drip — and says which hour it is streaming. A
+ * REVISABLE stream's newest hours are not decided yet (a token's pending peg, a
+ * farm's next sync, a voter's record), so it streams its mean over the trailing
+ * 24 closed hours instead of an hour that can read negative before it is restated.
+ */
+export async function getUserRevenueFlow(): Promise<UserRevenueFlowResponse> {
+  const [head, blockMs, flow] = await Promise.all([
+    indexedHead(),
+    measuredParaBlockMs(client),
+    cached('revenue:user-flow', 60_000, async () => {
+      // The newest folded hour comes from its MARKER, read on its own: an hour with no user fact is still published.
+      const markerRes = await client.query({
+        query: `-- rev:user-flow-hour
+SELECT toUnixTimestamp(max(hour)) AS h, count() AS n FROM ${USER_REVENUE_HOURLY_TABLE} WHERE stream = ''`,
+        format: 'JSONEachRow',
+      })
+      const marker = (await markerRes.json<{ h: string; n: string }>())[0]
+      const newest = marker && Number(marker.n) > 0 ? Number(marker.h) : null
+      if (newest == null) return { hour: null, rows: [] }
+      // A token's accrual is valued in its UNDERLYING (PRIME and uBIL in HOLLAR): its drip is keyed and labelled by
+      // the token its pot names (token:<id>), never by the asset it is valued in.
+      const res = await client.query({
+        query: `-- rev:user-flow
+SELECT stream, if(startsWith(stream, 'token_accrual') AND startsWith(pot, 'token:'), toUInt32OrZero(substring(pot, 7)), asset_id) AS asset_id,
+       toString(sumIf(amount_usd, hour = toDateTime({h:UInt32}))) AS last, toString(sum(amount_usd)) AS trailing
+FROM ${USER_REVENUE_HOURLY_TABLE}
+WHERE hour > toDateTime({h:UInt32}) - INTERVAL ${USER_FLOW_REVISABLE_MEAN_HOURS} HOUR AND hour <= toDateTime({h:UInt32})
+  AND stream != '' AND holder_class = 'user' AND NOT startsWith(via, 'unmeasured:')
+GROUP BY stream, asset_id`,
+        query_params: { h: newest },
+        format: 'JSONEachRow',
+      })
+      const revisable = new Set(USER_REVENUE_DISPLAY_STREAMS.filter(d => d.revisable).map(d => d.id))
+      // Each drip under its DISPLAY stream: a HOLLAR loan's interest is "HOLLAR interest".
+      const rows = (await res.json<{ stream: string; asset_id: string; last: string; trailing: string }>())
+        .map(r => ({ ...r, stream: userRevenueDisplayStream(r.stream, Number(r.asset_id)) }))
+        .map(r => ({ stream: r.stream, asset_id: r.asset_id, usd: revisable.has(r.stream) ? scaledUsd(r.trailing) / BigInt(USER_FLOW_REVISABLE_MEAN_HOURS) : scaledUsd(r.last) }))
+      return { hour: newest, rows }
+    }),
+  ])
+  const blockSeconds = blockMs / 1_000
+  const labels = new Map(USER_REVENUE_DISPLAY_STREAMS.map(d => [d.id, d.label]))
+  const hour = flow.hour
+  return {
+    hour: isoOf(hour),
+    revisableMeanHours: USER_FLOW_REVISABLE_MEAN_HOURS,
+    publishedThrough: isoOf(hour == null ? null : hour + 3_600),
+    blockSeconds,
+    head,
+    drips: flow.rows
+      .map(r => ({ r, usd: r.usd }))
+      .filter(({ usd }) => usd >= USD_DUST || usd <= -USD_DUST)
+      .map(({ r, usd }) => ({
+        key: `${r.stream}:${r.asset_id}`,
+        stream: r.stream,
+        label: `${labels.get(r.stream) ?? r.stream} · ${displayDescriptor(Number(r.asset_id)).symbol}`,
+        assetId: Number(r.asset_id),
+        usdPerBlock: (Number(usd) / USD_UNIT) * (blockSeconds / 3_600),
+      }))
+      .sort((a, b) => Math.abs(b.usdPerBlock) - Math.abs(a.usdPerBlock)),
   }
 }
