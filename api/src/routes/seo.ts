@@ -36,18 +36,47 @@ const DEFAULT_DESCRIPTION = 'Explore Hydration: accounts, assets, pools, governa
 
 // The shell is read from the UI container rather than the filesystem: the api
 // image does not carry the built bundle, and the bundle's asset hashes change on
-// every UI deploy. Re-read on a short TTL so a UI deploy cannot leave this
-// serving a shell that references a bundle nginx has already replaced.
+// every UI deploy.
+//
+// Bundle-identity handshake: the UI image writes its entry chunk's hash into an
+// nginx include at build time ($bundle_id, explorer-ui/Dockerfile), and every
+// page request nginx proxies here carries it as X-Bundle-Id (seo_page.conf, which
+// also keys its cache on it). A cached shell is served only while it references
+// /assets/index-<id>.js — the bundle the nginx that asked is serving. A mismatch
+// (a UI deploy since the shell was read) refetches at once, single-flight; if the
+// container still answers with a different bundle (the old one during the swap),
+// loadShell throws and the route answers 502, which nginx turns into its own
+// static index.html (@spa) — never a shell whose chunks that nginx does not have.
+// A matching shell is re-read in the background once it is a minute old (index.html
+// can change under one entry id), and a mismatch is remembered for 1.5 s so a burst
+// during the swap costs one fetch. Without the header (a direct request) the shell
+// is re-read on the same short TTL.
 const SHELL_URL = process.env.EXPLORER_SHELL_URL ?? 'http://hydration-neckwork-explorer-ui:80/index.html'
 const SHELL_TTL_MS = 60_000
+// A mismatch is remembered this long per bundle id, so a burst arriving while the
+// UI container still serves the other bundle (the seconds of a swap) costs one
+// fetch, not one per wave of requests.
+const SHELL_MISMATCH_TTL_MS = 1_500
 let shell: { html: string; at: number } | null = null
 let shellInflight: Promise<string> | null = null
+let mismatch: { bundleId: string; until: number } | null = null
 
-async function loadShell(): Promise<string> {
-  const now = Date.now()
-  if (shell && now - shell.at < SHELL_TTL_MS) return shell.html
-  // One fetch at a time: a burst of page loads past the TTL must not become a
-  // burst of requests at the UI container.
+// The id nginx sends is the hash part of the entry chunk name (Vite's
+// `index-<hash>.js`); anything else is ignored rather than spliced into a match.
+const BUNDLE_ID_RE = /^[A-Za-z0-9_-]{4,64}$/
+export function bundleIdFromHeader(value: unknown): string | null {
+  const v = Array.isArray(value) ? value[0] : value
+  return typeof v === 'string' && BUNDLE_ID_RE.test(v.trim()) ? v.trim() : null
+}
+export function shellMatchesBundle(html: string, bundleId: string): boolean {
+  return html.includes(`/assets/index-${bundleId}.js`)
+}
+
+export class ShellBundleMismatch extends Error {}
+
+function fetchShell(): Promise<string> {
+  // One fetch at a time: a burst of page loads past the TTL (or right after a UI
+  // deploy) must not become a burst of requests at the UI container.
   shellInflight ??= (async () => {
     try {
       const res = await fetch(SHELL_URL, { signal: AbortSignal.timeout(2_000) })
@@ -60,18 +89,42 @@ async function loadShell(): Promise<string> {
       shellInflight = null
     }
   })()
+  return shellInflight
+}
+
+export async function loadShell(bundleId: string | null = null): Promise<string> {
+  const now = Date.now()
+  const fresh = shell != null && now - shell.at < SHELL_TTL_MS
+  if (shell && bundleId && shellMatchesBundle(shell.html, bundleId)) {
+    // The entry id matches, but index.html can still change under the same id (its
+    // head, meta or a non-entry chunk): past the TTL it is re-read in the background,
+    // single-flight, while the matching copy is served.
+    if (!fresh) fetchShell().catch(err => console.error('[seo] background shell refresh failed:', err))
+    return shell.html
+  }
+  if (shell && !bundleId && fresh) return shell.html
+  if (bundleId && mismatch && mismatch.bundleId === bundleId && now < mismatch.until) {
+    throw new ShellBundleMismatch(`shell does not reference /assets/index-${bundleId}.js (checked ${now - (mismatch.until - SHELL_MISMATCH_TTL_MS)} ms ago)`)
+  }
+  let html: string
   try {
-    return await shellInflight
+    html = await fetchShell()
   } catch (err) {
     // A stale shell still renders the app correctly for the seconds it takes the
-    // UI container to come back; only a cold start has nothing to serve, and the
-    // route answers 502 there so nginx falls through to the static file.
-    if (shell) {
+    // UI container to come back — but only if it is the bundle the asking nginx
+    // serves. Otherwise (and on a cold start) the route answers 502 and nginx
+    // serves its own static file.
+    if (shell && (!bundleId || shellMatchesBundle(shell.html, bundleId))) {
       console.error('[seo] shell refresh failed, serving the last good copy:', err)
       return shell.html
     }
     throw err
   }
+  if (bundleId && !shellMatchesBundle(html, bundleId)) {
+    mismatch = { bundleId, until: Date.now() + SHELL_MISMATCH_TTL_MS }
+    throw new ShellBundleMismatch(`shell does not reference /assets/index-${bundleId}.js`)
+  }
+  return html
 }
 
 // Injected values are page data — a tag's name, an account's identity, a
@@ -691,24 +744,28 @@ export async function seoRoutes(fastify: FastifyInstance): Promise<void> {
     if (path.replace(/\/+$/, '') === '/volume') refreshVolumeSnapshot()
     let shellHtml: string
     try {
-      shellHtml = await loadShell()
+      shellHtml = await loadShell(bundleIdFromHeader(req.headers['x-bundle-id']))
     } catch (err) {
       // nginx turns this into the static shell (error_page … = @spa), so a
       // reader still gets the app; only the metadata is lost.
-      console.error('[seo] no shell available:', err)
+      if (err instanceof ShellBundleMismatch) console.warn('[seo] shell bundle mismatch, deferring to the static shell:', err.message)
+      else console.error('[seo] no shell available:', err)
       return reply.status(502).send({ error: 'Shell unavailable' })
     }
     return reply
       .type('text/html; charset=utf-8')
-      // Short, like the shell nginx serves today (`expires -1` on index.html),
-      // because a tag can be renamed and an identity can change. The server-wide
-      // cache-control hook only stamps replies that carry none, so this wins.
-      .header('cache-control', 'public, max-age=60')
+      // The page HTML is revalidated on every load, like nginx's own index.html
+      // (`expires -1`): it names the entry chunk, and a browser holding an old
+      // copy after a UI deploy would ask for chunks that no longer exist. The
+      // hashed /assets/ stay immutable. nginx keeps its own short, bundle-keyed
+      // copy regardless (seo_page.conf ignores this header for its cache). The
+      // server-wide cache-control hook only stamps replies that carry none.
+      .header('cache-control', 'no-cache, must-revalidate')
       .send(renderPage(shellHtml, path))
   })
 }
 
 export const __testing = {
-  loadShellReset: () => { shell = null; shellInflight = null },
+  loadShellReset: () => { shell = null; shellInflight = null; mismatch = null },
   setVolumeSnapshot: (s: VolumeSnapshot | null) => { volumeSnapshot = s },
 }
