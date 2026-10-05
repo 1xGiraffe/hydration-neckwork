@@ -139,7 +139,7 @@ The `api-public` service (`api/src/public/`, same image as `api`, own process be
 - `api/src/public/**` may import only the allow-list pinned by
   `api/tests/public/isolation.test.ts` — that test is the enforced contract, and this
   sentence must follow it: today `db/client`, `config`, `types`, the
-  `cache`/`explorerAssets`/`ohlcvService`/`crossPair`/`pairPriceSource`/`poolService`/`volumeService`/`valuation`/
+  `cache`/`explorerAssets`/`ohlcvService`/`crossPair`/`pairPriceSource`/`pairVolume`/`poolService`/`volumeService`/`valuation`/
   `revenueStreams`/`moneyMarketCaps`/`foreignCandles`/`uniswapV3History`/`uniswapV3Positions`/`intentLimitPrice`/
   `lmRewardSnapshot`/`mmIncentiveSnapshot`/`lpMath`/`stableswapSharePools`/`poolVolumes`/`farmApr`/`poolYield`/
   `gigahdxApr`/`isoTimestamp`/`userRevenueStreams`/`userRevenueRead` services, and the
