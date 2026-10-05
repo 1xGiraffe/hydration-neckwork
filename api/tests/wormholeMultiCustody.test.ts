@@ -3,7 +3,7 @@ import { addCustody, type CustodyRead } from '../src/services/wormholeNttService
 
 // A burning manager on Hydration can register a peer on more than one chain, and
 // each of those peers can be a LOCKING manager holding its own custody. WETH is
-// the live case: 71.210163720 held on Ethereum and 0.005639660 on Robinhood Chain
+// the live case: 71.210163720 held on Ethereum and 0.005639660 on Robinhood
 // (wormhole id 72), both backing one Hydration supply.
 //
 // Reading only the registry origin understated backing by the second custody, and
