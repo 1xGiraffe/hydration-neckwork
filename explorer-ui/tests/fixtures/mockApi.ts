@@ -15,6 +15,7 @@ import type {
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse,
   NotificationChannel, NotificationRule, NotificationInboxRow, NotificationsOverview,
   FilterNames, IntentOrderDetail, IceSolutionPanel, IceDashboard,
+  ValueEvent, VolumeHistory, VotesByReferendumPage,
 } from '../../src/types'
 
 /* ---------- deterministic helpers ---------- */
@@ -2548,14 +2549,11 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
     },
   },
   { re: /^\/explorer\/address\/(.+)\/counts$/, fn: () => ({ extrinsics: 1451, extrinsicsOnBehalf: 0, events: 26787, votes: 0 }) },
-  // Per-account balance/portfolio history. Must sit before the generic address
-  // route below, whose greedy `(.+)` would otherwise swallow this sub-path and
-  // fall back to the default account — leaking one account's history onto another.
+  // Per-account balance/portfolio history, keyed by the account it names.
   // `series=1` is the Overview's shape: the value series without the per-asset
   // history the Balances treemap reads (98-99% of the real payload).
   { re: /^\/explorer\/address\/(.+)\/history$/, fn: (m, qs) => { const built = buildAddress(decodeURIComponent(m[1])); return { portfolioSeries: built.portfolioSeries ?? [], portfolioDates: built.portfolioDates ?? [], balanceHistory: qs.get('series') === '1' ? [] : built.balanceHistory ?? [] } } },
-  // Public lists that list this address as owner or tagged member — must
-  // also sit before the generic address route's greedy `(.+)`.
+  // Public lists that list this address as owner or tagged member.
   { re: /^\/explorer\/address\/(.+)\/lists$/, fn: (m) => addressLists(m[1]) },
   { re: /^\/explorer\/address\/(.+)\/tagged-in$/, fn: (m) => addressTaggedIn(m[1]) },
   {
@@ -2654,7 +2652,13 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   // An ICE intent's order page. Any decimal id answers; the low 64 bits are its #seq
   // and an odd seq is a DCA intent, so both kinds have a page under the mock.
   { re: /^\/explorer\/intent\/(\d+)$/, fn: (m, qs) => mockIntentOrder(m[1], Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 25)) },
-  { re: /^\/explorer\/address\/(.+)$/, fn: (m) => buildAddress(decodeURIComponent(m[1])) },
+  // Sub-resources the address page reads beside its detail. Each answers in its
+  // own shape: the catch-all below takes one path segment only, so an unmocked
+  // sub-resource 404s instead of reading the detail object.
+  { re: /^\/explorer\/address\/([^/]+)\/volume-history$/, fn: (m, qs) => { const a = decodeURIComponent(m[1]); return mockVolumeHistory(buildAddress(a).tradingVolumeUsd, a, qs) } },
+  { re: /^\/explorer\/address\/([^/]+)\/value-events$/, fn: () => [] as ValueEvent[] },
+  { re: /^\/explorer\/address\/([^/]+)\/votes$/, fn: () => [] },
+  { re: /^\/explorer\/address\/([^/]+)$/, fn: (m) => buildAddress(decodeURIComponent(m[1])) },
   { re: /^\/explorer\/tag\/(.+)\/counts$/, fn: () => ({ extrinsics: 1451, extrinsicsOnBehalf: 0, events: 26787, votes: 0 }) },
   {
     re: /^\/explorer\/tag\/(.+)\/close-accounts$/, fn: () => ({
@@ -2709,24 +2713,13 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
     const members = rows.filter(r => r.account).slice(0, 3).map(r => ({ ...r, tag: null }))
     return { rows: members, total: members.length }
   } },
-  {
-    re: /^\/explorer\/tag\/(.+)$/, fn: () => {
-      const members = [A.krakenEvm, A.krakenSub]
-      const balances = ASSETS.slice(0, 5).map((as, i) => {
-        const bal = (i + 2) * 40000 / as.price
-        // The tag's HDX row carries the members' summed lock breakdown so the
-        // tag balances view exercises the same panel as accounts.
-        if (as.assetId === 0) {
-          return { asset: aref(as), total: raw(bal, as.decimals), free: raw(bal * 0.92, as.decimals), reserved: raw(bal * 0.08, as.decimals), lastBlock: TIP - i * 80, valueUsd: bal * as.price, ...hdxBreakdown(bal, as.decimals) }
-        }
-        return { asset: aref(as), total: raw(bal, as.decimals), free: raw(bal, as.decimals), reserved: '0', lastBlock: TIP - i * 80, valueUsd: bal * as.price }
-      })
-      const portfolioUsd = balances.reduce((s, b) => s + (b.valueUsd ?? 0), 0)
-      const built = buildAddress(A.krakenEvm.accountId)
-      const moneyMarket = built.moneyMarket.map(p => p.defiSimSupported ? { ...p, simAccount: A.krakenEvm.address } : p)
-      return { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', note: 'Exchange — hot + deposit wallets', icon: '/tag-icons/kraken.jpg', members, balances, portfolioUsd, tradingVolumeUsd: portfolioUsd * 24, liquidationVolumeUsd: portfolioUsd * 0.08, moneyMarket, liquidityPositions: built.liquidityPositions ?? [], activeDcas: built.activeDcas ?? [], portfolioSeries: series(77, 52, portfolioUsd), balanceHistory: built.balanceHistory ?? [] } satisfies TagDetail
-    },
-  },
+  { re: /^\/explorer\/tag\/([^/]+)\/volume-history$/, fn: (m, qs) => mockVolumeHistory(buildTagDetail().tradingVolumeUsd, decodeURIComponent(m[1]), qs) },
+  { re: /^\/explorer\/tag\/([^/]+)\/history$/, fn: () => { const d = buildTagDetail(); return { portfolioSeries: d.portfolioSeries ?? [], portfolioDates: d.portfolioDates ?? [], balanceHistory: d.balanceHistory ?? [] } } },
+  { re: /^\/explorer\/tag\/([^/]+)\/value-events$/, fn: () => [] as ValueEvent[] },
+  { re: /^\/explorer\/tag\/([^/]+)\/votes$/, fn: () => [] },
+  { re: /^\/explorer\/tag\/([^/]+)\/votes-by-referendum$/, fn: () => ({ rows: [], total: 0, complete: true }) satisfies VotesByReferendumPage },
+  // One path segment only, like the address catch-all above.
+  { re: /^\/explorer\/tag\/([^/]+)$/, fn: () => buildTagDetail() },
   {
     re: /^\/explorer\/search$/, fn: (_m, qs) => {
       const q = (qs.get('q') ?? '').trim(); const out: SearchResult[] = []
@@ -2799,6 +2792,9 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/events$/, fn: () => [] as EventRow[] },
   { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/votes$/, fn: () => [] },
   { re: /^\/user\/list-tag\/[^/]+\/[^/]+\/value-events$/, fn: () => [] as ValueEvent[] },
+  // The list tag's volume follows its detail (none traded: an empty history).
+  { re: /^\/user\/list-tag\/[^/]+\/([^/]+)\/volume-history$/, fn: (m, qs) => decodeURIComponent(m[1]) === MOCK_LIST_TAG_DETAIL.tagId ? mockVolumeHistory(MOCK_LIST_TAG_DETAIL.tradingVolumeUsd, MOCK_LIST_TAG_DETAIL.tagId, qs) : undefined },
+  { re: /^\/explorer\/list-tag\/([^/]+)\/volume-history$/, fn: (m, qs) => decodeURIComponent(m[1]) === MOCK_LIST_TAG_DETAIL.tagId ? mockVolumeHistory(MOCK_LIST_TAG_DETAIL.tradingVolumeUsd, MOCK_LIST_TAG_DETAIL.tagId, qs) : undefined },
   { re: /^\/user\/list-tag\/([^/]+)\/([^/]+)$/, fn: (m) => decodeURIComponent(m[2]) === MOCK_LIST_TAG_DETAIL.tagId ? MOCK_LIST_TAG_DETAIL : undefined },
 ]
 
@@ -2893,6 +2889,52 @@ export function mockIceSolution(): IceSolutionPanel {
     feeSwept: [{ asset: usdt, amount: raw(2.26, 6), valueUsd: 2.26 }],
     matchedInUsd: 4525 - 666, routedInUsd: 666,
   }
+}
+
+/* ---------- tag detail + volume history ---------- */
+// The system tag page's detail ('kraken' answers for any tag id).
+function buildTagDetail(): TagDetail {
+  const members = [A.krakenEvm, A.krakenSub]
+  const balances = ASSETS.slice(0, 5).map((as, i) => {
+    const bal = (i + 2) * 40000 / as.price
+    // The tag's HDX row carries the members' summed lock breakdown so the
+    // tag balances view exercises the same panel as accounts.
+    if (as.assetId === 0) {
+      return { asset: aref(as), total: raw(bal, as.decimals), free: raw(bal * 0.92, as.decimals), reserved: raw(bal * 0.08, as.decimals), lastBlock: TIP - i * 80, valueUsd: bal * as.price, ...hdxBreakdown(bal, as.decimals) }
+    }
+    return { asset: aref(as), total: raw(bal, as.decimals), free: raw(bal, as.decimals), reserved: '0', lastBlock: TIP - i * 80, valueUsd: bal * as.price }
+  })
+  const portfolioUsd = balances.reduce((s, b) => s + (b.valueUsd ?? 0), 0)
+  const built = buildAddress(A.krakenEvm.accountId)
+  const moneyMarket = built.moneyMarket.map(p => p.defiSimSupported ? { ...p, simAccount: A.krakenEvm.address } : p)
+  return { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', note: 'Exchange — hot + deposit wallets', icon: '/tag-icons/kraken.jpg', members, balances, portfolioUsd, tradingVolumeUsd: portfolioUsd * 24, liquidationVolumeUsd: portfolioUsd * 0.08, moneyMarket, liquidityPositions: built.liquidityPositions ?? [], activeDcas: built.activeDcas ?? [], portfolioSeries: series(77, 52, portfolioUsd), balanceHistory: built.balanceHistory ?? [] } satisfies TagDetail
+}
+
+// A scope's trading volume on weekly buckets ending at the tip. The buckets sum
+// to `totalUsd` exactly — the detail's tradingVolumeUsd, so the Volume headline
+// and the header's Trading figure agree — and the last 52 of 60 make the 12M
+// window. `seed` varies the bar shape per scope; a block window keeps the
+// buckets whose end falls inside it.
+const VOLUME_STEP_SEC = 7 * 86_400
+const VOLUME_BUCKETS = 60
+export function mockVolumeHistory(totalUsd: number | undefined, seed: string, qs?: URLSearchParams): VolumeHistory {
+  const total = totalUsd ?? 0
+  if (!(total > 0)) return { stepSec: VOLUME_STEP_SEC, buckets: [], totals: { d1: 0, d7: 0, d30: 0, d365: 0, all: 0 }, asOfBlock: null }
+  const salt = [...seed].reduce((n, c) => (n * 31 + c.charCodeAt(0)) % 9973, 7)
+  const weights = Array.from({ length: VOLUME_BUCKETS }, (_, i) => 1 + ((salt + i * 17) % 13) / 4)
+  const wSum = weights.reduce((a, b) => a + b, 0)
+  const vols = weights.map(w => total * w / wSum)
+  vols[vols.length - 1] = total - vols.slice(0, -1).reduce((a, b) => a + b, 0)
+  const stepBlocks = VOLUME_STEP_SEC / 6
+  const buckets = vols.map((volumeUsd, i) => {
+    const endBlock = TIP - (VOLUME_BUCKETS - 1 - i) * stepBlocks
+    return { ts: tsAt(endBlock - stepBlocks), endTs: tsAt(endBlock), blockHeight: endBlock, volumeUsd, trades: 3 + ((salt + i * 7) % 40) }
+  })
+  const sumLast = (n: number) => vols.slice(-n).reduce((a, b) => a + b, 0)
+  const totals = { d1: vols[vols.length - 1] / 7, d7: sumLast(1), d30: sumLast(4) + vols[vols.length - 5] * 2 / 7, d365: sumLast(52), all: total }
+  const from = Number(qs?.get('fromBlock') ?? NaN), to = Number(qs?.get('toBlock') ?? NaN)
+  const windowed = Number.isFinite(from) && Number.isFinite(to) ? buckets.filter(b => b.blockHeight > from && b.blockHeight <= to) : buckets
+  return { stepSec: VOLUME_STEP_SEC, buckets: windowed, totals, asOfBlock: TIP - 3 }
 }
 
 const mockTags: Tag[] = [

@@ -267,7 +267,8 @@ export function VolumeSection({ scope, tradingVolumeUsd }: {
 }) {
   const traded = (tradingVolumeUsd ?? 0) > 0
   const q = useVolumeHistory(scope, traded)
-  const h = q.data
+  // A payload without a bucket array is no volume history at all: drawn as none.
+  const h = q.data && Array.isArray(q.data.buckets) ? q.data : undefined
   const data = useMemo(() => (h ? h.buckets.map(b => b.volumeUsd) : []), [h])
   const dates = useMemo(() => (h ? h.buckets.map(b => b.ts) : []), [h])
   if (!traded) return null
@@ -279,7 +280,7 @@ export function VolumeSection({ scope, tradingVolumeUsd }: {
       </>
     ) : null
   }
-  if (!h.buckets.length || !(h.totals.all > 0)) return null
+  if (!h.buckets.length || !(h.totals?.all > 0)) return null
   // The zoom addresses time; the window route takes a block range. The bars' own
   // (end time, end block) pairs widen a time window outward to whole buckets, and
   // the first bar opens at block 0 so a window from the start keeps its flow.

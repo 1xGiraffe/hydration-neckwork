@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { lazyWithReload } from '../lazyWithReload'
 import * as Dialog from '@radix-ui/react-dialog'
 import { api, userApi } from '../api/explorer'
 import { setSession } from '../session'
@@ -14,7 +15,7 @@ import type { AccountRef } from '../types'
 
 // The jsQR decoder only loads when someone actually picks "Scan QR code" —
 // wallet sign-ins never pay for it.
-const QrScanner = lazy(() => import('./QrScanner').then(m => ({ default: m.QrScanner })))
+const QrScanner = lazyWithReload(() => import('./QrScanner').then(m => ({ default: m.QrScanner })))
 
 // The extension handle or EVM provider a chosen address will sign with, kept
 // around from the connect step so the account picker and a signing retry both

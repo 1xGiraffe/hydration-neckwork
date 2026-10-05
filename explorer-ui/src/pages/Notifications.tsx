@@ -1,5 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- the page plus the pure tab helpers its tests exercise directly */
-import { Suspense, lazy, useEffect, useRef, useState } from 'react'
+import { Suspense, useEffect, useRef, useState } from 'react'
+import { lazyWithReload } from '../lazyWithReload'
 import { useQueryClient } from '@tanstack/react-query'
 import { userApi } from '../api/explorer'
 import { useSession } from '../session'
@@ -24,7 +25,7 @@ import type { NotificationChannel, NotificationInboxRow, NotificationRule, Notif
 // alerts are FOR, not merely that they exist — and carries no tabs at all,
 // since none of the three has anything to show without a session.
 
-const NewAlertDialog = lazy(() => import('../components/NewAlertDialog').then(m => ({ default: m.NewAlertDialog })))
+const NewAlertDialog = lazyWithReload(() => import('../components/NewAlertDialog').then(m => ({ default: m.NewAlertDialog })))
 
 const INBOX_PAGE = 50
 

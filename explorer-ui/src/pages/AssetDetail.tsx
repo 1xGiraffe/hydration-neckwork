@@ -1,4 +1,5 @@
-import { Suspense, lazy, useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
+import { lazyWithReload } from '../lazyWithReload'
 import { useActivityCount, useAsset, useAssetActivity, useAssetDcas, useAssetLimitOrders, useHolders, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { api } from '../api/explorer'
@@ -27,7 +28,7 @@ import type { AssetListItem, NotificationKind, NotificationRuleInput } from '../
 // The alert dialog is only reached by clicking one of the header's buttons, so it
 // costs this page nothing until then — the same lazy mount the notifications page
 // gives it.
-const NewAlertDialog = lazy(() => import('../components/NewAlertDialog').then(m => ({ default: m.NewAlertDialog })))
+const NewAlertDialog = lazyWithReload(() => import('../components/NewAlertDialog').then(m => ({ default: m.NewAlertDialog })))
 
 const PREIS_URL = (import.meta.env.VITE_PREIS_URL as string | undefined) || 'http://localhost:5173'
 const PREIS_DEFAULT_QUOTE_ID = 10

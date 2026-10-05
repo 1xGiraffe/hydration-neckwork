@@ -1,55 +1,57 @@
-import { lazy, Suspense, useEffect } from 'react'
+import { Suspense, useEffect } from 'react'
+import { isChunkLoadError, lazyWithReload } from './lazyWithReload'
 import { useNoindex } from './hooks/useDocumentTitle'
 import { useRoute, Link, paths, redirect } from './router'
 import { Topbar } from './components/Topbar'
 import { HoverCards } from './components/HoverCard'
+import { SectionBoundary } from './components/SectionBoundary'
 
 // Route-level chunks keep account analytics, HDX charts, and detail views out of
 // the landing-page bundle. Each page still exposes a named export for tests.
-const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })))
-const Activity = lazy(() => import('./pages/Activity').then(m => ({ default: m.Activity })))
-const Blocks = lazy(() => import('./pages/Blocks').then(m => ({ default: m.Blocks })))
-const BlockDetail = lazy(() => import('./pages/BlockDetail').then(m => ({ default: m.BlockDetail })))
-const Extrinsics = lazy(() => import('./pages/Extrinsics').then(m => ({ default: m.Extrinsics })))
-const ExtrinsicDetail = lazy(() => import('./pages/ExtrinsicDetail').then(m => ({ default: m.ExtrinsicDetail })))
-const TradeDetailPage = lazy(() => import('./pages/TradeDetail').then(m => ({ default: m.TradeDetailPage })))
-const DcaSchedule = lazy(() => import('./pages/DcaSchedule').then(m => ({ default: m.DcaSchedule })))
-const Intent = lazy(() => import('./pages/Intent').then(m => ({ default: m.Intent })))
-const Referendum = lazy(() => import('./pages/Referendum').then(m => ({ default: m.Referendum })))
-const Governance = lazy(() => import('./pages/Governance').then(m => ({ default: m.Governance })))
-const DcaResolve = lazy(() => import('./pages/DcaSchedule').then(m => ({ default: m.DcaResolve })))
-const DcaExecution = lazy(() => import('./pages/DcaExecution').then(m => ({ default: m.DcaExecution })))
-const ActivityDetailPage = lazy(() => import('./pages/ActivityDetail').then(m => ({ default: m.ActivityDetailPage })))
-const Events = lazy(() => import('./pages/Events').then(m => ({ default: m.Events })))
-const EventDetail = lazy(() => import('./pages/EventDetail').then(m => ({ default: m.EventDetail })))
-const Accounts = lazy(() => import('./pages/Accounts').then(m => ({ default: m.Accounts })))
-const Account = lazy(() => import('./pages/Account').then(m => ({ default: m.Account })))
-const Contracts = lazy(() => import('./pages/Contracts').then(m => ({ default: m.Contracts })))
-const Security = lazy(() => import('./pages/Security').then(m => ({ default: m.Security })))
-const Tags = lazy(() => import('./pages/Tags').then(m => ({ default: m.Tags })))
-const TagsHydration = lazy(() => import('./pages/Tags').then(m => ({ default: m.TagsHydration })))
-const TagDetail = lazy(() => import('./pages/TagDetail').then(m => ({ default: m.TagDetail })))
-const Lists = lazy(() => import('./pages/Lists').then(m => ({ default: m.Lists })))
-const ListDetail = lazy(() => import('./pages/ListDetail').then(m => ({ default: m.ListDetail })))
-const Assets = lazy(() => import('./pages/Assets').then(m => ({ default: m.Assets })))
-const AssetDetail = lazy(() => import('./pages/AssetDetail').then(m => ({ default: m.AssetDetail })))
-const PoolDetail = lazy(() => import('./pages/PoolDetail').then(m => ({ default: m.PoolDetail })))
-const XcDestination = lazy(() => import('./pages/XcDestination').then(m => ({ default: m.XcDestination })))
-const UniswapV3Pool = lazy(() => import('./pages/UniswapV3Pool').then(m => ({ default: m.UniswapV3Pool })))
-const Omnipool = lazy(() => import('./pages/Omnipool').then(m => ({ default: m.Omnipool })))
-const Liquidity = lazy(() => import('./pages/Liquidity').then(m => ({ default: m.Liquidity })))
-const Hdx = lazy(() => import('./pages/Hdx').then(m => ({ default: m.Hdx })))
-const Revenue = lazy(() => import('./pages/Revenue').then(m => ({ default: m.Revenue })))
-const Volume = lazy(() => import('./pages/Volume').then(m => ({ default: m.Volume })))
-const Oracles = lazy(() => import('./pages/Oracles').then(m => ({ default: m.Oracles })))
-const OracleFeed = lazy(() => import('./pages/OracleFeed').then(m => ({ default: m.OracleFeed })))
-const Hollar = lazy(() => import('./pages/Hollar').then(m => ({ default: m.Hollar })))
-const Ice = lazy(() => import('./pages/Ice').then(m => ({ default: m.Ice })))
-const LinkDevice = lazy(() => import('./pages/LinkDevice').then(m => ({ default: m.LinkDevice })))
-const Notifications = lazy(() => import('./pages/Notifications').then(m => ({ default: m.Notifications })))
-const ApiTokens = lazy(() => import('./pages/ApiTokens').then(m => ({ default: m.ApiTokens })))
-const ApiAdmin = lazy(() => import('./pages/ApiAdmin').then(m => ({ default: m.ApiAdmin })))
-const Mcp = lazy(() => import('./pages/Mcp').then(m => ({ default: m.Mcp })))
+const Dashboard = lazyWithReload(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })))
+const Activity = lazyWithReload(() => import('./pages/Activity').then(m => ({ default: m.Activity })))
+const Blocks = lazyWithReload(() => import('./pages/Blocks').then(m => ({ default: m.Blocks })))
+const BlockDetail = lazyWithReload(() => import('./pages/BlockDetail').then(m => ({ default: m.BlockDetail })))
+const Extrinsics = lazyWithReload(() => import('./pages/Extrinsics').then(m => ({ default: m.Extrinsics })))
+const ExtrinsicDetail = lazyWithReload(() => import('./pages/ExtrinsicDetail').then(m => ({ default: m.ExtrinsicDetail })))
+const TradeDetailPage = lazyWithReload(() => import('./pages/TradeDetail').then(m => ({ default: m.TradeDetailPage })))
+const DcaSchedule = lazyWithReload(() => import('./pages/DcaSchedule').then(m => ({ default: m.DcaSchedule })))
+const Intent = lazyWithReload(() => import('./pages/Intent').then(m => ({ default: m.Intent })))
+const Referendum = lazyWithReload(() => import('./pages/Referendum').then(m => ({ default: m.Referendum })))
+const Governance = lazyWithReload(() => import('./pages/Governance').then(m => ({ default: m.Governance })))
+const DcaResolve = lazyWithReload(() => import('./pages/DcaSchedule').then(m => ({ default: m.DcaResolve })))
+const DcaExecution = lazyWithReload(() => import('./pages/DcaExecution').then(m => ({ default: m.DcaExecution })))
+const ActivityDetailPage = lazyWithReload(() => import('./pages/ActivityDetail').then(m => ({ default: m.ActivityDetailPage })))
+const Events = lazyWithReload(() => import('./pages/Events').then(m => ({ default: m.Events })))
+const EventDetail = lazyWithReload(() => import('./pages/EventDetail').then(m => ({ default: m.EventDetail })))
+const Accounts = lazyWithReload(() => import('./pages/Accounts').then(m => ({ default: m.Accounts })))
+const Account = lazyWithReload(() => import('./pages/Account').then(m => ({ default: m.Account })))
+const Contracts = lazyWithReload(() => import('./pages/Contracts').then(m => ({ default: m.Contracts })))
+const Security = lazyWithReload(() => import('./pages/Security').then(m => ({ default: m.Security })))
+const Tags = lazyWithReload(() => import('./pages/Tags').then(m => ({ default: m.Tags })))
+const TagsHydration = lazyWithReload(() => import('./pages/Tags').then(m => ({ default: m.TagsHydration })))
+const TagDetail = lazyWithReload(() => import('./pages/TagDetail').then(m => ({ default: m.TagDetail })))
+const Lists = lazyWithReload(() => import('./pages/Lists').then(m => ({ default: m.Lists })))
+const ListDetail = lazyWithReload(() => import('./pages/ListDetail').then(m => ({ default: m.ListDetail })))
+const Assets = lazyWithReload(() => import('./pages/Assets').then(m => ({ default: m.Assets })))
+const AssetDetail = lazyWithReload(() => import('./pages/AssetDetail').then(m => ({ default: m.AssetDetail })))
+const PoolDetail = lazyWithReload(() => import('./pages/PoolDetail').then(m => ({ default: m.PoolDetail })))
+const XcDestination = lazyWithReload(() => import('./pages/XcDestination').then(m => ({ default: m.XcDestination })))
+const UniswapV3Pool = lazyWithReload(() => import('./pages/UniswapV3Pool').then(m => ({ default: m.UniswapV3Pool })))
+const Omnipool = lazyWithReload(() => import('./pages/Omnipool').then(m => ({ default: m.Omnipool })))
+const Liquidity = lazyWithReload(() => import('./pages/Liquidity').then(m => ({ default: m.Liquidity })))
+const Hdx = lazyWithReload(() => import('./pages/Hdx').then(m => ({ default: m.Hdx })))
+const Revenue = lazyWithReload(() => import('./pages/Revenue').then(m => ({ default: m.Revenue })))
+const Volume = lazyWithReload(() => import('./pages/Volume').then(m => ({ default: m.Volume })))
+const Oracles = lazyWithReload(() => import('./pages/Oracles').then(m => ({ default: m.Oracles })))
+const OracleFeed = lazyWithReload(() => import('./pages/OracleFeed').then(m => ({ default: m.OracleFeed })))
+const Hollar = lazyWithReload(() => import('./pages/Hollar').then(m => ({ default: m.Hollar })))
+const Ice = lazyWithReload(() => import('./pages/Ice').then(m => ({ default: m.Ice })))
+const LinkDevice = lazyWithReload(() => import('./pages/LinkDevice').then(m => ({ default: m.LinkDevice })))
+const Notifications = lazyWithReload(() => import('./pages/Notifications').then(m => ({ default: m.Notifications })))
+const ApiTokens = lazyWithReload(() => import('./pages/ApiTokens').then(m => ({ default: m.ApiTokens })))
+const ApiAdmin = lazyWithReload(() => import('./pages/ApiAdmin').then(m => ({ default: m.ApiAdmin })))
+const Mcp = lazyWithReload(() => import('./pages/Mcp').then(m => ({ default: m.Mcp })))
 
 // Consolidated top-level URLs are replaced with the matching Activity tab.
 function LegacyRedirect({ to }: { to: string }) {
@@ -145,9 +147,13 @@ export default function App() {
     <>
       <Topbar route={route} />
       <main id="view">
-        <Suspense fallback={<div className="wrap"><div className="skeleton" style={{ height: 160, marginTop: 32 }} /></div>}>
-          {renderPage()}
-        </Suspense>
+        {/* A page that throws replaces only itself (the nav stays usable), and leaving it clears
+            the error; a chunk-load failure still reaches the root's "new version" card. */}
+        <SectionBoundary label="This page" resetKey={window.location.pathname} passThrough={isChunkLoadError}>
+          <Suspense fallback={<div className="wrap"><div className="skeleton" style={{ height: 160, marginTop: 32 }} /></div>}>
+            {renderPage()}
+          </Suspense>
+        </SectionBoundary>
       </main>
       <HoverCards />
     </>
