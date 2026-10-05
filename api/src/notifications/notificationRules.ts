@@ -487,7 +487,7 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   safety: 'Security',
   extrinsic: 'Extrinsic matcher',
   event: 'Event matcher',
-  'protocol-revenue': 'Protocol revenue',
+  'protocol-revenue': 'Protocol Revenue',
   liquidation: 'Liquidation',
   'mm-cap': 'Money market cap',
   block: 'Future block',

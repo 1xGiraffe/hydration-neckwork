@@ -67,10 +67,10 @@ function LegacyRedirect({ to }: { to: string }) {
 function NotFound({ path }: { path: string }) {
   useNoindex(true)
   return (
-    <div className="wrap"><div className="page-head"><div className="page-title">Not found</div></div>
+    <div className="wrap"><div className="page-head"><div className="page-title">Page not found</div></div>
       <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>
-        No page matching <span className="mono" style={{ color: 'var(--text-high)' }}>{path}</span>.
-        <div style={{ marginTop: 16 }}><Link className="hash" to={paths.dashboard()}>← Back to start</Link></div>
+        There is no page at <span className="mono" style={{ color: 'var(--text-high)' }}>{path}</span>.
+        <div style={{ marginTop: 16 }}><Link className="hash" to={paths.dashboard()}>← Back to search</Link></div>
       </div></div>
   )
 }

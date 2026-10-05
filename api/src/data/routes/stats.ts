@@ -140,7 +140,7 @@ export const statsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
   app.get('/v1/stats/revenue', {
     schema: {
       tags: ['stats'],
-      summary: 'Protocol revenue per stream, event-time valued',
+      summary: 'Protocol Revenue per stream, event-time valued',
       description: [
         `Buckets the protocol's derived revenue facts (\`revenue_events\`). Streams: ${REVENUE_STREAMS.join(', ')}.`,
         'Default `scope=protocol` applies the canonical protocol-revenue rule: the omnipool fee legs the pool keeps for its LPs are excluded, the routed-out / burned / protocol-owned-liquidity legs count, and every other stream counts in full. `scope=all` returns every leg with its `dest`, which is the destination matrix the fee dashboards use.',

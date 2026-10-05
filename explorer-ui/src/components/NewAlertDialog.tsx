@@ -452,7 +452,7 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
         })
       if (result?.existing) setExistingNote(true)
     } catch (e) {
-      setError(e instanceof Error ? e.message : editRule ? 'Could not save the alert' : 'Could not create the alert')
+      setError(e instanceof Error ? e.message : editRule ? 'Couldn’t save the alert' : 'Couldn’t create the alert')
     }
   }
 

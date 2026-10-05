@@ -740,8 +740,8 @@ function revenueBlock(revenue: RevenueBreakdown): string {
     s.assets.slice(0, MAX_REVENUE_ASSETS).map(a => `${assetLabel(a.asset)} ${formatUsd(a.usd)}`).join(' · ') + (s.otherCount ? ` · +${s.otherCount} more ${formatUsd(s.otherUsd ?? 0)}` : ''),
   ])
   return joinBlocks(
-    kv([['Total revenue earned', formatUsd(revenue.totalUsd)]]),
-    table(['Stream', 'USD', 'Top assets'], rows, 'this account has earned no protocol revenue'),
+    kv([['Total Protocol Revenue', formatUsd(revenue.totalUsd)]]),
+    table(['Stream', 'USD', 'Top assets'], rows, 'this account has generated no protocol revenue'),
     revenue.streams.length > streams.length ? note(`${revenue.streams.length - streams.length} smaller stream(s) not shown.`) : '',
   )
 }
@@ -752,7 +752,7 @@ Answers "what does this address hold and owe?", "is this a wallet, a pallet pot,
 
 \`address\` takes any form: SS58 of any prefix (Hydration 63, Polkadot 0, Kusama 2, generic 42 all decode to the same account), a raw AccountId32 (0x + 64 hex), or an EVM H160 (0x + 40 hex, re-anchored to its bound substrate owner). The answer echoes every form.
 
-\`include\` selects sections; the default is balances, positions, moneymarket, dca, orders, related. Narrow it to spend fewer tokens on a big account. 'counts' (lifetime extrinsic/event/vote counts) and 'revenue' (protocol revenue earned, by stream) each add one upstream read and are off by default.
+\`include\` selects sections; the default is balances, positions, moneymarket, dca, orders, related. Narrow it to spend fewer tokens on a big account. 'counts' (lifetime extrinsic/event/vote counts) and 'revenue' (Protocol Revenue from it, by stream) each add one upstream read and are off by default.
 
 Two figures, and quoting the wrong one contradicts the page this answer links to. **Value** is holdings minus money-market debt: it is what the Explorer account page prints, what \`get_account_history\`'s series ends on, and what the account directory ranks by — quote it for "what is this account worth". **Holdings** is the gross total of every balance, LP position, claimable farm reward (unclaimed liquidity-mining rewards — what claiming now would pay, never the full-loyalty maximum; stated on their own line and beside each farmed position, never inside a position's USD) and claimable lending incentive (the money market's own getAllUserRewards now — an amount below the reward asset's existential deposit is still owed and counted, though a claim including it reverts until the account holds that deposit; stated on its own line and per market, never inside collateral); assets pledged as money-market collateral are inside it, because an aToken is an ordinary balance, so never subtract the collateral from it a second time. For a leveraged account the two differ by more than half.
 
@@ -818,7 +818,7 @@ const getAccount: ToolDefinition = {
       sections.has('orders') ? section('Open limit orders', ordersBlock(detail.openLimitOrders ?? [], base)) : '',
       sections.has('related') ? section('Related accounts', relationshipsBlock(detail, base, summarized)) : '',
       counts ? section('Lifetime counts', countsBlock(counts)) : '',
-      revenue ? section('Revenue earned', revenueBlock(revenue)) : '',
+      revenue ? section('Protocol Revenue', revenueBlock(revenue)) : '',
       // A section that failed is simply missing, which an agent could read as
       // "there is none". Name it instead.
       failedSections.length
@@ -1659,9 +1659,9 @@ async function volumeHistoryAnswer(
   const markdown = fit(joinBlocks(
     `## Trading volume — ${subject}`,
     kv([
-      ['Last 24 h', formatUsd(v.totals?.d1)],
-      ['Last 7 d', formatUsd(v.totals?.d7)],
-      ['Last 30 d', formatUsd(v.totals?.d30)],
+      ['Last 24H', formatUsd(v.totals?.d1)],
+      ['Last 7D', formatUsd(v.totals?.d7)],
+      ['Last 30D', formatUsd(v.totals?.d30)],
       ['All time', `${formatUsd(v.totals?.all)}${isTag ? '' : ' — the account page\'s "Trading" figure'}`],
       ['Model holds trades through', v.asOfBlock == null ? 'nothing yet' : `block ${formatCount(v.asOfBlock)}`],
       ['Window', windowed ? `blocks ${formatCount(window.fromBlock)} → ${formatCount(window.toBlock)}: ${formatUsd(inView)} over ${formatCount(tradesInView)} trade(s)` : null],
@@ -1682,7 +1682,7 @@ async function volumeHistoryAnswer(
     note(isTag
       ? 'A tag SUMS its members: an OTC fill between two members counts once for each side, so the figure can exceed what the tag traded with outsiders.'
       : 'The figure is the account\'s RELATED SET (its substrate account, its bound EVM address and their EVM-side forms) — the same set as the account page — not one address.'),
-    note(`The 24 h / 7 d / 30 d totals trail the newest indexed block and ignore any window; the buckets lie on the value chart's grid (one wall-clock step, ~180 buckets, the last one live and shorter). The model is republished every derivations cycle (about ten minutes), so the newest trades can be missing until then.`),
+    note(`The 24H / 7D / 30D totals trail the newest indexed block and ignore any window; the buckets lie on the value chart's grid (one wall-clock step, ~180 buckets, the last one live and shorter). The model is republished every derivations cycle (about ten minutes), so the newest trades can be missing until then.`),
   ), ctx, 'Lower `limit`.')
 
   return output(ctx, markdown, {
@@ -1714,19 +1714,19 @@ Answers "did this wallet grow or bleed?", "when did it take its position on?", "
 - 'portfolio' (default) — total USD over time, plus the largest value events in the window.
 - 'balances' — per-asset token amounts over time (first/last/min/max per asset), for "when did it accumulate the DOT?".
 - 'value-events' — only the events that moved the line, largest first.
-- 'liquidity' — the LP value line (every priced liquidity position summed) with its sampled path, and a per-position table — the explorer returns at most the 50 largest by last-held value, and \`limit\` trims further: venue, held from→to, first/last/low/high USD and the legs at its last held point (an Omnipool position's H2O leg reads \`+ x H2O\`), for "how did this LP position do?", "what did this account provide liquidity to, and when?".
-- 'volume' — trading volume (each trade once, netted across its route): 24 h / 7 d / 30 d / all-time totals (all time = the account page's "Trading" figure), the first, last and peak buckets. \`tag\` instead of \`address\` sums a tag's members (a trade between two members counts for both).
-- 'money-market' — per ISOLATED money market (primary \`core\`, \`gigahdx\`, \`bil\`, …): the observed health factor's last and lowest values with the blocks they were read at, supplied/borrowed USD, and the reserves held at the last point (\`limit\` rows per market) — plus the priced supplied and borrowed sums across markets with a sampled path and the settled unclaimed lending incentives — for "how close did this borrower get to liquidation?", "when did it take on the HOLLAR debt?".
+- 'liquidity' — the LP value line (every priced liquidity position summed) with its sampled path, and a per-position table — the explorer returns at most the 50 largest by last-held value, and \`limit\` trims further: venue, held from→to, first/last/low/high USD and the legs at its last held point (an Omnipool position's H2O leg reads \`+ x H2O\`).
+- 'volume' — trading volume (each trade once, netted across its route): 24H / 7D / 30D / all-time totals (all time = the account page's "Trading" figure), the first, last and peak buckets. \`tag\` instead of \`address\` sums a tag's members (a trade between two members counts for both).
+- 'money-market' — per ISOLATED money market (primary \`core\`, \`gigahdx\`, \`bil\`, …): the observed health factor's last and lowest values with the blocks they were read at, supplied/borrowed USD, and the reserves held at the last point (\`limit\` rows per market) — plus the priced supplied and borrowed sums across markets with a sampled path and the settled unclaimed lending incentives.
 
-\`fromBlock\`/\`toBlock\` are BLOCK NUMBERS, not dates, and must be given together — this route windows in block space because the series carries its end-of-bucket block heights. Leave both out for the account's whole indexed history. For 'value-events' the window is applied to the rows after they are read.
+\`fromBlock\`/\`toBlock\` are BLOCK NUMBERS, not dates, and must be given together; leave both out for the account's whole indexed history. For 'value-events' the window is applied to the rows after they are read.
 
-What you get back is deliberately NOT the raw series: a chart of a hundred-odd points spends a context window and tells a model nothing an aggregate does not. The answer is first/last/min/max with their dates, the change, and a sampled path of at most 12 points whose sampling stride is stated. If you need every point, ask the Explorer page the answer links to.
+The answer is NOT the raw series: first/last/min/max with their dates, the change, and a sampled path of at most 12 points (its stride stated); every point is on the Explorer page it links to.
 
-Notes: the series measures VALUE — holdings (balances, LP positions, claimable unclaimed farm rewards and lending incentives) net of money-market debt — which is the line the Explorer account page draws and exactly what \`get_account\` reports as Value, so the last point of this series equals that figure rather than the gross holdings total. The series is the account's RELATED SET (substrate account plus its bound EVM address), same as \`get_account\`. Buckets are one wall-clock step wide, picked off a round-unit ladder (an hour up to months) so the whole span fits in about 180 points — hours on a short history, days on a multi-year one — and the final point is the live one, so the last interval is shorter than the rest. A 'price' value event is not a transfer — it is the portion of a move that price change alone explains, and its USD is signed.
+Notes: the series is VALUE — holdings (balances, LP positions, unclaimed farm rewards and lending incentives) net of money-market debt — the Explorer account line and \`get_account\`'s Value, so its last point equals that figure, not gross holdings. It covers the account's RELATED SET (substrate account plus its bound EVM address), as \`get_account\` does. Buckets are one round wall-clock step (an hour up to months) sized so the span fits ~180 points; the final point is the live one, so the last interval is shorter. A 'price' value event is not a transfer — it is the portion of a move that price change alone explains, and its USD is signed.
 
 'liquidity' traps: its points are valued at the candle fully CLOSED by each bucket end on the sampled pool state and never back-filled, so its last point is NOT \`get_account\`'s current Value or LP USD — do not quote one as the other. It is LP principal only: Uniswap v3/Gamma uncollected fees are excluded, and unclaimed farm rewards are stated beside the line (settled) rather than in it. A position that could not be priced at a point is COUNTED there and left out of the line, never valued at zero, and Low/High range over fully priced points only. The line's Change includes deposits and withdrawals — it is not a return. Un-windowed on a sub-day step, the points are one per day (the last bucket of each day). In a window, "held at window end" means held at the window's last point, not now. A farmed and a bare stretch of one position are one row.
 
-'money-market' traps: markets are ISOLATED — a health factor belongs to its market alone, so never average, blend or sum two, and the cross-market supplied/borrowed sums carry no health factor. A health factor is the chain's getUserAccountData AS OBSERVED at the block it names (carried between reads, never recomputed or interpolated; Aave-oracle prices, not the candles the amounts use). Reserve amounts are balanceOf at each point's block, valued at the candle fully CLOSED by the bucket end and never back-filled; points before the reserve coverage floor (\`Reserve amounts from\`) state no amounts at all — not zero — and an unpriced leg is counted, never valued at zero. So the last point is NOT \`get_account\`'s current money-market figures. Unclaimed lending incentives ride beside the amounts, SETTLED at each programme's last on-chain index update (never inside supplied USD); one the index cannot state is counted, never valued.`
+'money-market' traps: markets are ISOLATED — a health factor belongs to its market alone, so never average, blend or sum two, and the cross-market supplied/borrowed sums carry no health factor. A health factor is getUserAccountData AS OBSERVED at the block it names (carried between reads, never recomputed or interpolated; Aave-oracle prices, not the amounts' candles). Reserve amounts are balanceOf at each point's block, valued at the candle fully CLOSED by the bucket end and never back-filled; points before the reserve coverage floor (\`Reserve amounts from\`) state no amounts at all — not zero — and an unpriced leg is counted, never valued at zero. So the last point is NOT \`get_account\`'s current money-market figures. Unclaimed lending incentives ride beside the amounts, SETTLED at each programme's last on-chain index update (never inside supplied USD); one the index cannot state is counted, never valued.`
 
 const getAccountHistory: ToolDefinition = {
   name: 'get_account_history',
@@ -1954,7 +1954,7 @@ const SORT_FIELD: Record<string, (r: TopAccountRow) => unknown> = {
 
 const listAccountsInputShape = {
   sort: z.enum(ACCOUNT_SORTS).optional().describe(
-    "Ordering, all descending except 'health' and 'identity': 'value' (portfolio USD, the default), 'supplied'/'borrowed' (primary money market), 'health' (riskiest first — a health factor of 0 is an account with debt and no collateral left), 'identity' (alphabetical by on-chain identity, so it lists named accounts), 'activity' (swept activity count), 'volume' (lifetime trading volume), 'liquidation' (volume liquidated), 'revenue' (protocol revenue earned).",
+    "Ordering, all descending except 'health' and 'identity': 'value' (portfolio USD, the default), 'supplied'/'borrowed' (primary money market), 'health' (riskiest first — a health factor of 0 is an account with debt and no collateral left), 'identity' (alphabetical by on-chain identity, so it lists named accounts), 'activity' (swept activity count), 'volume' (lifetime trading volume), 'liquidation' (volume liquidated), 'revenue' (Protocol Revenue from it).",
   ),
   tag: z.string().min(1).max(64).optional().describe(
     "Restrict to the members of one system tag (e.g. 'treasury', 'kraken', 'sovereigns', 'money-market', 'omnipool', 'pallet-pots'). Tags are a fixed code-defined set; `search` or the tag directory names them. With a tag the upstream returns the whole member list at once, so `limit`/`offset` are applied here rather than by the server.",

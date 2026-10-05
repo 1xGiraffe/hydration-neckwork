@@ -139,7 +139,7 @@ const DESCRIPTION = `The protocol's own dashboards, each rendered as headline fi
 - 'ice' — the intent/solver layer. Solver mode and protocol fee, open limit and DCA orders with the capital they reserve, fills per day, execution quality (time to fill, partial and cancel rates, price against limit in basis points), fee revenue, and the busiest pairs.
 - 'security' — the safety posture. Cross-chain egress usage against its limit, per-asset deposit fuses and how close each is to lockdown, the Omnipool's per-block trade/add/remove allowances and the peak pressure seen against them, circuit-breaker trips by error, what is currently paused or restricted, lending-market solvency, runtime version, the Technical Committee, and the Wormhole backing summary.
 - 'liquidity' — where TVL sits: the venue split across Omnipool, stableswaps, XYK and Uniswap v3, then the Omnipool itself asset by asset with each weight against its CAP.
-- 'volume' — 24 h / 7 d / 30 d volume with the change: ROUTED (every trade once, netted — the DefiLlama figure), then per VENUE (every fill once in its pool; sums to MORE than routed — never mix the two), then 7 d top pools (volume/TVL), assets and traders.
+- 'volume' — 24H / 7D / 30D volume with the change: ROUTED (every trade once, netted — the DefiLlama figure), then per VENUE (every fill once in its pool; sums to MORE than routed — never mix the two), then 7D top pools (volume/TVL), assets and traders.
 
 Every one of these payloads is 10-280 KB upstream and carries long raw series (the Omnipool's TVL history alone is 1,351 daily points). None of that is returned: series are collapsed into first/last/high/low with their window, and tables are cut to the top rows. Timestamps inside the revenue payloads are UNIX SECONDS, unlike the ClickHouse timestamps everywhere else on this server; both are rendered as UTC here.
 
@@ -239,19 +239,19 @@ function renderRevenue(d: RevenueDashboard, stakers: StakerDistributions | null,
     : null
 
   return joinBlocks(
-    h2('Protocol revenue'),
+    h2('Protocol Revenue'),
     kv([
-      ['Last 24 h', formatUsd(d.totals?.day)],
-      ['Last 7 days', formatUsd(d.totals?.week)],
-      ['Last 30 days', formatUsd(d.totals?.month)],
+      ['Last 24H', formatUsd(d.totals?.day)],
+      ['Last 7D', formatUsd(d.totals?.week)],
+      ['Last 30D', formatUsd(d.totals?.month)],
       ['All time', formatUsd(d.totals?.allTime)],
       ['As of', formatTime(d.asOf)],
     ]),
     h3(`By stream (${history?.range ?? 'window'})`),
     table(['Stream', 'USD', 'Share'], streamRows),
     window ? note(`History window: ${window}. The per-bucket points are not returned.`) : null,
-    h3('Top earning accounts'),
-    table(['Account', 'Revenue'], accountRows),
+    h3('Accounts that generated the most'),
+    table(['Account', 'Protocol Revenue'], accountRows),
     stakerBlock,
     flowBlock,
   )
@@ -277,7 +277,7 @@ function renderHdx(d: HdxDashboard, ctx: ToolContext): string {
   return joinBlocks(
     h2('HDX'),
     kv([
-      ['Price', `${formatUsd(d.price)} (${formatPercentChange(d.change24h)} in 24 h)`],
+      ['Price', `${formatUsd(d.price)} (${formatPercentChange(d.change24h)} in 24H)`],
       ['Total supply', hdx(s?.totalHdx)],
       ['Protocol-held', s ? `${hdx(s.protocolHdx)} (${formatPercent((s.protocolHdx / s.totalHdx) * 100)} of supply)` : null],
       ['User-held', hdx(s?.userHdx)],
@@ -387,10 +387,10 @@ function renderHollar(d: HollarDashboard, ctx: ToolContext): string {
   return joinBlocks(
     h2('HOLLAR'),
     kv([
-      ['Price', `${formatUsd(d.price)} (${formatPercentChange(d.change24h)} in 24 h)`],
+      ['Price', `${formatUsd(d.price)} (${formatPercentChange(d.change24h)} in 24H)`],
       ['Peg deviation', d.pegDeviationBps == null ? DASH : `${d.pegDeviationBps >= 0 ? '+' : ''}${d.pegDeviationBps.toFixed(1)} bps from $1.00`],
-      ['Within 25 bps (30 d)', d.peg ? formatPercent(d.peg.within25bpsPct) : null],
-      ['Worst deviation (30 d)', d.peg ? `${d.peg.maxDevBps.toFixed(1)} bps · range ${formatUsd(d.peg.min30d)} – ${formatUsd(d.peg.max30d)}` : null],
+      ['Within 25 bps (30D)', d.peg ? formatPercent(d.peg.within25bpsPct) : null],
+      ['Worst deviation (30D)', d.peg ? `${d.peg.maxDevBps.toFixed(1)} bps · range ${formatUsd(d.peg.min30d)} – ${formatUsd(d.peg.max30d)}` : null],
     ]),
     h3('Supply'),
     kv([
@@ -445,7 +445,7 @@ function renderIce(d: IceDashboard, ctx: ToolContext): string {
     h3(`Fills (${formatCount(days.length)} days)`),
     kv([
       ['Fills in window', `${formatCount(fills30)} · ${formatUsd(usd30)}`],
-      ['Fee revenue in window', formatUsd(fees30)],
+      ['Protocol Revenue from ICE fees in window', formatUsd(fees30)],
     ]),
     table(['Day', 'Fills', 'Solutions', 'USD', 'Matched', 'Routed'], recent.map(r => [
       r.day, formatCount(r.fills), formatCount(r.solutions), formatUsd(r.usd), formatUsd(r.matchedUsd), formatUsd(r.routedUsd),
@@ -642,26 +642,26 @@ function renderVolume(d: PlatformVolume, ctx: ToolContext): string {
       WINDOW_LABEL[k], formatUsd(d.routed?.[k]?.volumeUsd), changeCell(d.routed?.[k]), formatCount(d.routedTrades?.[k]),
     ])),
     h3('Venue volume — every fill once, in the pool it executed in'),
-    table(['Venue', '24 h', '7 d', '7 d change', '30 d'], [
+    table(['Venue', '24H', '7D', '7D change', '30D'], [
       ...venues.map(v => [
         venueLabel(v.venue), formatUsd(v.kpis?.d1?.volumeUsd), formatUsd(v.kpis?.d7?.volumeUsd), changeCell(v.kpis?.d7), formatUsd(v.kpis?.d30?.volumeUsd),
       ]),
       ['**All venues**', formatUsd(d.venueTotal?.d1?.volumeUsd), formatUsd(d.venueTotal?.d7?.volumeUsd), changeCell(d.venueTotal?.d7), formatUsd(d.venueTotal?.d30?.volumeUsd)],
     ]),
     note('Venue volumes sum to MORE than routed volume: a trade routed through two pools is one routed trade and a fill in each pool. Quote routed volume for "how much traded on Hydration" (it is the DefiLlama figure) and venue/pool volume for "how busy is this pool". The Omnipool counts a user swap once. aToken wraps are in neither.'),
-    h3('Top pools — 7 d'),
-    table(['Pool', 'Venue', '7 d volume', 'TVL', '7 d volume / TVL'], (d.topPools ?? []).slice(0, MAX_VOLUME_ROWS).map(p => {
+    h3('Top pools — 7D'),
+    table(['Pool', 'Venue', '7D volume', 'TVL', '7D volume / TVL'], (d.topPools ?? []).slice(0, MAX_VOLUME_ROWS).map(p => {
       const href = poolHref(p)
       return [href ? explorerLink(p.name, href) : p.name, venueLabel(p.venue), formatUsd(p.volume7dUsd), formatUsd(p.tvlUsd), ratioPct(p.volumeTvl7d)]
     }), 'no pool traded in the 7 days'),
-    note('7 d volume / TVL is the window\'s volume over the pool\'s MEAN daily TVL across the same 7 days — a ratio for the window, not annualised.'),
-    h3('Top assets — 7 d'),
-    table(['Asset', '7 d volume', 'Share'], (d.topAssets ?? []).slice(0, MAX_VOLUME_ROWS).map(a => [
+    note('7D volume / TVL is the window\'s volume over the pool\'s MEAN daily TVL across the same 7 days — a ratio for the window, not annualised.'),
+    h3('Top assets — 7D'),
+    table(['Asset', '7D volume', 'Share'], (d.topAssets ?? []).slice(0, MAX_VOLUME_ROWS).map(a => [
       explorerLink(assetLabelWithId(a.asset), assetUrl(base, a.asset.assetId)), formatUsd(a.volume7dUsd), formatPercent(a.sharePct),
     ]), 'no asset traded in the 7 days'),
-    note('Asset volume is the value of the asset\'s own legs, sold plus bought, so one swap A→B counts for A and for B; Share is of all assets\' 7 d volume. The Omnipool hub H2O is plumbing and never listed.'),
-    h3('Top traders — 7 d'),
-    table(['Account', '7 d volume', 'Trades'], (d.topTraders ?? []).slice(0, MAX_VOLUME_ROWS).map(t => [
+    note('Asset volume is the value of the asset\'s own legs, sold plus bought, so one swap A→B counts for A and for B; Share is of all assets\' 7D volume. The Omnipool hub H2O is plumbing and never listed.'),
+    h3('Top traders — 7D'),
+    table(['Account', '7D volume', 'Trades'], (d.topTraders ?? []).slice(0, MAX_VOLUME_ROWS).map(t => [
       explorerLink(accountLabel(t.account), accountUrl(base, t.account.address)), formatUsd(t.volume7dUsd), formatCount(t.trades),
     ]), 'no trades in the 7 days'),
     d.tradersWindow

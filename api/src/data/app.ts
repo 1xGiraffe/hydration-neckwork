@@ -153,7 +153,7 @@ const DOCS_HTML_ROUTE = '/docs/'
 const GETTING_STARTED = [
   'REST access to the full public Hydration on-chain dataset: chain core (blocks, extrinsics, events), accounts (balances, history, transfers, trades, DeFi positions), assets and prices, pools and trades, governance, staking, XCM and EVM, plus aggregate stats. Everything answers from purpose-built ClickHouse projections; typical reads are tens of milliseconds.',
   '## Getting started',
-  '1. **Get a token**: sign in to the [Hydration Explorer](' + dataConfig.createTokenUrl.replace(/\/api-tokens$/, '') + ') with your wallet and create an API token under **API tokens** (' + dataConfig.createTokenUrl + '). The `hdd_…` secret is shown exactly once.',
+  '1. **Get a token**: log in to the [Hydration Explorer](' + dataConfig.createTokenUrl.replace(/\/api-tokens$/, '') + ') with your wallet and create an API token under **API tokens** (' + dataConfig.createTokenUrl + '). The `hdd_…` secret is shown exactly once.',
   '2. **Send it as a Bearer header** on every request: `Authorization: Bearer hdd_…`. Only `/v1/status`, `/openapi.json`, `/llms.txt` and `/docs` work without one.',
   '3. **Watch the rate-limit headers**: every response carries `X-RateLimit-Limit-Minute`, `X-RateLimit-Remaining-Minute`, `X-RateLimit-Limit-Day`, `X-RateLimit-Remaining-Day`. All tokens of one account share the account\'s budget. A 429 carries `Retry-After` and the current usage in the error context; higher limits are granted per account — ask.',
   '## Conventions',

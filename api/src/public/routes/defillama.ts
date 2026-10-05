@@ -46,7 +46,7 @@ export const defillamaRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> =
   app.get('/defillama/v1/volume', {
     schema: {
       tags: ['defillama'],
-      summary: '24h netted trading volume',
+      summary: '24H netted trading volume',
       description: VOLUME_DESCRIPTION,
       response: { 200: z.array(zVolume) },
     },

@@ -207,7 +207,7 @@ function VerifyPanel({ address }: { address: string }) {
     setFileName(null)
     setStdJson(null)
     const text = await file.text().catch(() => null)
-    const checked = text == null ? { ok: false as const, error: 'Could not read the file' } : validateStandardJson(text)
+    const checked = text == null ? { ok: false as const, error: 'Couldn’t read the file' } : validateStandardJson(text)
     if (!checked.ok) {
       setError(checked.error)
       return

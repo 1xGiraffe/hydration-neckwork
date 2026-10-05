@@ -241,7 +241,7 @@ export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
         onKeyDown={onKey}
         onFocus={() => { window.clearTimeout(blurTimeout.current); if (currentResults.length) setOpen(true) }}
         onBlur={() => { blurTimeout.current = window.setTimeout(() => setOpen(false), 160) }}
-        placeholder="Account, Asset, Hash, Block, Tag"
+        placeholder={variant === 'hero' ? 'Search by account, asset, block, hash or tag' : 'Account, asset, block, hash, tag'}
         aria-label="Search explorer"
         role="combobox"
         aria-autocomplete="list"
@@ -259,7 +259,7 @@ export function SearchBar({ variant }: { variant: 'hero' | 'topbar' }) {
             <span className="sr-type">{TYPE_LABEL[r.type]}</span>
             <SearchResultBody r={r} />
           </a>
-        )) : <div className="sr-empty" role="status">{searched ? `No match for “${value.trim()}”` : 'Searching…'}</div>}
+        )) : <div className="sr-empty" role="status">{searched ? `No match for “${value.trim()}”. Try an address, symbol, block number or hash.` : 'Searching…'}</div>}
       </div>
     </div>
   )

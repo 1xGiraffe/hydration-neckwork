@@ -174,7 +174,7 @@ function ArbitrageChart({ d, now }: { d: HollarDashboard; now: number }) {
   const lastArb = d.hsm.lastArb
   return (
     <>
-      <SecTitle title="Arbitrage" subtitle="60 days" />
+      <SecTitle title="Arbitrage" subtitle="last 60 days" />
       <div className="pf-card">
         <ChartLegend items={[{ label: 'Bought back & burned', color: 'var(--green)' }, { label: 'Minted & sold', color: 'var(--amber)' }]} />
         <MirroredBarChart data={bars} xTicks={ticks} upColor="var(--green)" downColor="var(--amber)" zoomKey="zarb" refine={refineArbitrage} />
@@ -211,7 +211,7 @@ function TradesChart({ d }: { d: HollarDashboard }) {
   const ticks = daily.map((t, i) => ({ i, label: mdLabel(t.date) })).filter(x => x.i % 10 === 0)
   return (
     <>
-      <SecTitle title="HSM trades" subtitle="60 days" />
+      <SecTitle title="HSM trades" subtitle="last 60 days" />
       <div className="pf-card">
         <ChartLegend items={[{ label: 'Bought (minted)', color: 'var(--green)' }, { label: 'Sold (burned)', color: 'var(--red)' }]} />
         <MirroredBarChart data={bars} xTicks={ticks} zoomKey="ztrades" refine={refineTrades} />
@@ -517,7 +517,7 @@ function HollarSkeleton() {
   return (
     <>
       <ChartSkeleton h={78} />
-      <SecTitle title="Peg" subtitle="since launch · weekly close inside the intraweek range" /><ChartSkeleton h={340} />
+      <SecTitle title="Peg" subtitle="weekly close inside the intraweek range, since launch" /><ChartSkeleton h={340} />
       <SecTitle title="Supply & holders" subtitle="where minted HOLLAR sits, and who holds it" /><ChartSkeleton h={430} />
       <SecTitle title="Stability Module" subtitle="HSM" />
       <div className="panel"><table className="tbl"><tbody><TableSkeleton cols={8} rows={4} /></tbody></table></div>

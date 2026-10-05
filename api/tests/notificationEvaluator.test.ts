@@ -780,7 +780,7 @@ describe('OTC fills on the maker side', () => {
     const r = rule('account-activity', { target: { kind: 'address', address: WHALE }, type: 'trade' })
     const [hit] = evaluateAccountActivity([otcFill()], [r], W)
     const out = renderNotification(renderMatch(hit, r, noViewerTag))
-    expect(out.title).toContain('OTC fill by')
+    expect(out.title).toContain('OTC order filled by')
     expect(out.body).toContain('to')
     expect(out.url).toMatch(/\/otc-fill\/1050-e7$/)
   })

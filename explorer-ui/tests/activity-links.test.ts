@@ -168,8 +168,8 @@ describe('SLUG_TYPES', () => {
   it('maps both bond slugs to the bond type and labels them like the badges', () => {
     expect(SLUG_TYPES['bond-issue']).toEqual(['bond'])
     expect(SLUG_TYPES['bond-redeem']).toEqual(['bond'])
-    expect(activityLabel('bond-issue')).toBe('Bond issue')
-    expect(activityLabel('bond-redeem')).toBe('Bond redeem')
+    expect(activityLabel('bond-issue')).toBe('Bond issued')
+    expect(activityLabel('bond-redeem')).toBe('Bond redeemed')
   })
   it('maps the five intent slugs to the intent type and labels them in the product\'s words', () => {
     for (const slug of ['intent-place', 'intent-fill', 'intent-cancel', 'intent-expire', 'intent-dca-trade'] as const) {

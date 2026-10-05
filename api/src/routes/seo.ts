@@ -205,7 +205,7 @@ const HUBS: Record<string, { title: string; description: string }> = {
   '/assets': { title: 'Assets', description: 'Every asset in the Hydration registry — price, 24-hour volume, liquidity, holders and origin chain.' },
   '/governance': { title: 'Governance', description: 'Hydration OpenGov and Democracy referenda, technical committee motions and treasury spending.' },
   '/tags': { title: 'Tags', description: 'Named accounts and cohorts on Hydration — exchanges, protocol pots, pools and treasuries.' },
-  '/tags/hydration': { title: 'Hydration Tags', description: 'The protocol\u2019s own accounts: Omnipool, treasury, staking, money market and the pallet pots behind them.' },
+  '/tags/hydration': { title: 'Hydration tags', description: 'The protocol\u2019s own accounts: Omnipool, treasury, staking, money market and the pallet pots behind them.' },
   '/lists': { title: 'Lists', description: 'Public account lists curated on the Hydration Explorer.' },
   '/omnipool': { title: 'Omnipool', description: 'Hydration Omnipool composition, asset weights, liquidity, volume and fees.' },
   '/liquidity': { title: 'Liquidity', description: 'Liquidity across the Omnipool, stableswap and XYK pools on Hydration, with each pool\u2019s TVL and 24-hour volume.' },
@@ -218,14 +218,14 @@ const HUBS: Record<string, { title: string; description: string }> = {
   '/volume': { title: 'Volume', description: 'Trading volume on Hydration — every trade once, and per venue, pool and asset, with top pools, assets and traders.' },
   '/oracles': { title: 'Oracles', description: 'The prices Hydration reads — money-market oracles, stableswap pegs, DIA and push feeds, the EMA oracle — who delivers them, how fresh they are and how far they sit from the market.' },
   '/security': { title: 'Security', description: 'Hydration\u2019s live safety controls: circuit breakers, cross-chain limits, oracle health, freezes and guardians.' },
-  '/mcp': { title: 'MCP server', description: 'Connect an AI assistant to Hydration chain data over the Model Context Protocol.' },
+  '/mcp': { title: 'MCP server', description: 'Connect an AI agent to live Hydration data over the Model Context Protocol.' },
 }
 
 // Session-only pages a logged-out reader (and so a crawler) can still open.
 // /admin/ and /link-device are closed in robots.txt instead and do not come
 // through here — one mechanism per URL.
 const SESSION_PAGES: Record<string, { title: string; description: string }> = {
-  '/notifications': { title: 'Notifications', description: 'Alerts for Hydration accounts, assets and the protocol, delivered to Telegram, email or the browser.' },
+  '/notifications': { title: 'Notifications', description: 'Alerts for Hydration accounts, assets and the protocol, delivered as browser push or on Telegram.' },
   '/api-tokens': { title: 'API tokens', description: 'Create and manage tokens for the Hydration Data API.' },
 }
 
@@ -337,18 +337,18 @@ export const ACTIVITY_PAGES: Record<string, { label: string; about: string }> = 
   'collect-fees': { label: 'Collect fees', about: 'the fees collected from a liquidity position and who received them' },
   rebalance: { label: 'Rebalance vault', about: 'the vault rebalanced and the liquidity it moved' },
   compound: { label: 'Compound', about: 'the vault whose positions\' fees were collected and reinvested, and the fees' },
-  lend: { label: 'Lend', about: 'the money-market reserve supplied, the amount and the account' },
+  lend: { label: 'Supply', about: 'the money-market reserve supplied, the amount and the account' },
   withdraw: { label: 'Withdraw', about: 'the money-market reserve withdrawn from, the amount and the account' },
   borrow: { label: 'Borrow', about: 'the money-market reserve borrowed from, the amount and the account' },
   repay: { label: 'Repay', about: 'the money-market debt repaid, the amount and the account' },
   liquidate: { label: 'Liquidate', about: 'the position liquidated, the collateral taken, the debt covered and the liquidator' },
   staking: { label: 'Staking', about: 'the staking action, the amount of HDX and the account' },
   vote: { label: 'Vote', about: 'the referendum, the side, the conviction and the voter' },
-  'otc-place': { label: 'OTC place', about: 'the OTC order placed, its assets, amounts and price' },
-  'otc-pull': { label: 'OTC pull', about: 'the OTC order pulled and what it returned to its owner' },
-  'otc-fill': { label: 'OTC fill', about: 'the OTC order filled, the amounts exchanged and who filled it' },
-  'bond-issue': { label: 'Bond issue', about: 'the bond issued, the amount and the account' },
-  'bond-redeem': { label: 'Bond redeem', about: 'the bond redeemed, the amount and the account' },
+  'otc-place': { label: 'OTC order placed', about: 'the OTC order placed, its assets, amounts and price' },
+  'otc-pull': { label: 'OTC order pulled', about: 'the OTC order pulled and what it returned to its owner' },
+  'otc-fill': { label: 'OTC order filled', about: 'the OTC order filled, the amounts exchanged and who filled it' },
+  'bond-issue': { label: 'Bond issued', about: 'the bond issued, the amount and the account' },
+  'bond-redeem': { label: 'Bond redeemed', about: 'the bond redeemed, the amount and the account' },
   'intent-place': { label: 'Limit order placed', about: 'the ICE intent placed, its assets, amounts and owner' },
   'intent-fill': { label: 'Limit order filled', about: 'the ICE intent filled, the amounts settled and the solver that filled it' },
   'intent-cancel': { label: 'Limit order cancelled', about: 'the ICE intent cancelled and what it returned to its owner' },

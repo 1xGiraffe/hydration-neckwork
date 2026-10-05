@@ -20,7 +20,7 @@ export const stakingRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = a
   app.get('/v1/staking/events', {
     schema: {
       tags: ['staking'],
-      summary: 'The global staking event stream, newest first',
+      summary: 'All staking events, newest first',
       description: [
         `Every event of the three staking-family pallets — classic HDX staking (Staking.*), GIGAHDX (GigaHdx.* / GigaHdxRewards.*) and collator rewards (CollatorRewards.CollatorRewarded) — from a staking-only projection, so a \`type=\` filter needs no bounded window. Vocabulary: ${STAKING_EVENT_NAMES.join(', ')}.`,
         'The two markets are separate systems: classic Staking positions and GIGAHDX stakes never blend. Per-account staking history lives under /v1/accounts/{address}/staking.',

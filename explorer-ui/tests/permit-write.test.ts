@@ -195,7 +195,7 @@ describe('runPermitWrite', () => {
       submitTimeoutMs: 10,
     })
     expect(final.phase).toBe('failed')
-    expect((final as { error: string }).error).toMatch(/Could not reach the chain/)
+    expect((final as { error: string }).error).toMatch(/Couldn’t reach the chain/)
     expect(stages.map(s => s.phase)).toEqual(['preparing', 'wallet-pending', 'failed'])
   })
 

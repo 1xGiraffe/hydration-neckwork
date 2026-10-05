@@ -76,7 +76,7 @@ function GigaMarketSection({ d }: { d: HdxDashboard }) {
   if (!rows?.length) return null
   return (
     <>
-      <SecTitle title="GIGAHDX Money Market" subtitle="lend & borrow against staked HDX" />
+      <SecTitle title="GIGAHDX money market" subtitle="lend & borrow against staked HDX" />
       <div className="pf-card">
         <div className="hdx-cards">
           {rows.map(r => {
@@ -343,7 +343,7 @@ function FlowsSection({ d }: { d: HdxDashboard }) {
   const { buy, sell } = d.flows.dca
   return (
     <>
-      <SecTitle title="Buys vs sells" subtitle="60 days" />
+      <SecTitle title="Buys vs sells" subtitle="last 60 days" />
       <div className="hdx-flow-grid">
         <div className="pf-card" style={{ marginBottom: 0 }}>
           <ChartLegend items={[{ label: 'Buys', color: 'var(--green)' }, { label: 'Sells', color: 'var(--red)' }]} />
@@ -685,7 +685,7 @@ function MoversPanel({ title, rows }: { title: string; rows: HdxMover[] }) {
       <table className="tbl">
         <thead><tr><th>Account</th><th className="r">Balance</th><th className="r">Bought</th><th className="r">Sold</th><th className="r">Net</th></tr></thead>
         <tbody>
-          {!rows.length ? <EmptyRow cols={5}>No movers</EmptyRow> : rows.map(m => (
+          {!rows.length ? <EmptyRow cols={5}>No large HDX moves in this window</EmptyRow> : rows.map(m => (
             <tr key={m.account.accountId}>
               <td data-label="Account"><AddrPill account={m.account} noCopy /></td>
               <td data-label="Balance" className="r mono muted"><Num v={m.balanceHdx} /></td>
@@ -704,7 +704,7 @@ function MoversPanel({ title, rows }: { title: string; rows: HdxMover[] }) {
 function MoversSection({ d }: { d: HdxDashboard }) {
   return (
     <>
-      <SecTitle title="Top movers" subtitle="7 days" />
+      <SecTitle title="Top movers" subtitle="last 7 days" />
       <div className="cols hdx-movers">
         <MoversPanel title="Accumulators" rows={d.topMovers.accumulators} />
         <MoversPanel title="Distributors" rows={d.topMovers.distributors} />
@@ -723,12 +723,12 @@ function HdxSkeleton() {
       <SecTitle title="Supply sinks" subtitle="staked HDX and the liquid float it leaves" /><ChartSkeleton h={430} />
       <SecTitle title="Locks" /><ChartSkeleton h={230} />
       <SecTitle title="Upcoming unlocks" /><ChartSkeleton h={280} />
-      <SecTitle title="Buys vs sells" subtitle="60 days" /><ChartSkeleton h={250} />
+      <SecTitle title="Buys vs sells" subtitle="last 60 days" /><ChartSkeleton h={250} />
       <SecTitle title="New vs exited holders" subtitle="weekly" /><ChartSkeleton h={210} />
       <SecTitle title="Holder loyalty" subtitle="how long user-held HDX has been held" /><ChartSkeleton h={280} />
       <SecTitle title="Cost basis & accumulation" subtitle="what holders paid, and who is soaking up supply" /><ChartSkeleton h={640} />
       <SecTitle title="Participation" subtitle="who shows up — capital in governance, wallets on the market" /><ChartSkeleton h={400} />
-      <SecTitle title="Top movers" subtitle="7 days" /><ChartSkeleton h={240} />
+      <SecTitle title="Top movers" subtitle="last 7 days" /><ChartSkeleton h={240} />
     </>
   )
 }

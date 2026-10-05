@@ -1092,7 +1092,7 @@ test('editing a tag whose icon fell back to its first member seeds the raw icon,
   await tagPanel.locator('input[aria-label="Tag name"]').fill('Watchers')
   await tagPanel.getByRole('button', { name: 'Save' }).click()
 
-  await expect(tagPanel).not.toContainText('Could not save the tag')
+  await expect(tagPanel).not.toContainText('Couldn’t save the tag')
   await expect(tagPanel).toContainText('Watchers')
   // Unfrozen: still shows the derived icon after the rename, not whatever
   // would have been written had the edit form resubmitted the derived value.

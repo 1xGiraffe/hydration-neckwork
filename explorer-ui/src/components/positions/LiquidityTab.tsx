@@ -164,7 +164,7 @@ function PoolsTable({ groups, showOwner, yieldsFailed }: { groups: PoolGroup[]; 
         <span className="sec-title lpt-title">Pools · {groups.length}<span className="lpt-sub-title">{total} position{total === 1 ? '' : 's'}</span></span>
         {groups.length > 0 && <button type="button" className="lpt-toggle-all" onClick={() => setAll(!allOpen)} aria-expanded={allOpen}>{allOpen ? 'Collapse all' : 'Expand all'}</button>}
       </div>
-      {yieldsFailed && <div className="lpt-warn muted">Rates are unavailable right now; APR columns read —.</div>}
+      {yieldsFailed && <div className="lpt-warn muted">Couldn’t load the rates; APR columns read —.</div>}
       <div className="panel"><table className="tbl assets-tbl lpt-tbl">
         <thead><tr>
           <th>Pool</th>{showOwner && <th>Owner</th>}<th className="r">Positions</th><th className="r">Amounts</th><th className="r">Value</th><th className="r">APR</th><th className="r">Unclaimed</th>
@@ -286,7 +286,7 @@ function RewardsEarnedTable({ rows, loading, failed }: { rows: ReturnType<typeof
   return (
     <>
       <div className="sec-title lpt-subsec">Rewards earned<span className="lpt-sub-title">claimed at the time of each claim · unclaimed at current prices</span></div>
-      {failed && <div className="lpt-warn muted">Claimed rewards could not be loaded; only what is claimable now is shown.</div>}
+      {failed && <div className="lpt-warn muted">Couldn’t load the claimed rewards; only what is claimable now is shown.</div>}
       <div className="panel"><table className="tbl assets-tbl lpt-tbl lpt-earned">
         <thead><tr><th>Pool</th><th>Reward</th><th className="r">Claimed</th><th className="r">Unclaimed now</th><th className="r">Total earned</th></tr></thead>
         <tbody>

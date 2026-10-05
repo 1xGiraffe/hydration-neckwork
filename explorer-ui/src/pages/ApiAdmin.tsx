@@ -42,7 +42,7 @@ function LimitsDialog({ row, defaults, onOpenChange }: {
     onOpenChange(false)
     void qc.invalidateQueries({ queryKey: ['user', 'api-users'] })
   }
-  const fail = (e: unknown) => setError(e instanceof ApiError ? e.message : 'Could not save the limits')
+  const fail = (e: unknown) => setError(e instanceof ApiError ? e.message : 'Couldn’t save the limits')
   const save = useMutation({
     mutationFn: () => userApi.setApiUserLimits(row!.account.accountId, { perMinute: Number(perMinute), perDay: Number(perDay), note }),
     onSuccess: done,

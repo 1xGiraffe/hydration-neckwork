@@ -73,7 +73,7 @@ function LinkView({ onBack, onLinked, onNewCode }: { onBack: () => void; onLinke
     let cancelled = false
     userApi.createDeviceLink()
       .then(l => { if (!cancelled) setLink(l) })
-      .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : 'Could not create a code') })
+      .catch(e => { if (!cancelled) setError(e instanceof Error ? e.message : 'Couldn’t create a code') })
     return () => { cancelled = true }
   }, [])
 

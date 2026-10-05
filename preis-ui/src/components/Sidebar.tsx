@@ -52,8 +52,8 @@ function RankedMarketsSection({ title, rows, quote, current, period, onCyclePeri
           type="button"
           className="sb-title"
           onClick={onCyclePeriod}
-          title="Click to cycle 1h / 24h / 7d"
-          aria-label={`${title} period: ${period}. Click to cycle.`}
+          title="Click to switch: 1H · 24H · 7D"
+          aria-label={`${title} period: ${period}. Click to switch.`}
         >
           {title} · <span className="period-tag">{period}</span>
         </button>
@@ -216,8 +216,8 @@ export default function Sidebar({
               type="button"
               className="sb-title"
               onClick={onCyclePeriod}
-              title="Click to cycle 1h / 24h / 7d"
-              aria-label={`Favorites period: ${period}. Click to cycle.`}
+              title="Click to switch: 1H · 24H · 7D"
+              aria-label={`Favorites period: ${period}. Click to switch.`}
             >
               Favorites · <span className="period-tag">{period}</span>
             </button>

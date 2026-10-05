@@ -147,7 +147,7 @@ export function IntentPriceChart({ data }: { data: IntentOrderDetail }) {
       </div>
       <div className="ipc-plot">
         {chart.isLoading ? <div className="ipc-empty muted">Loading candles…</div>
-          : chart.isError ? <div className="ipc-empty muted">Candles are unavailable right now.</div>
+          : chart.isError ? <div className="ipc-empty muted">Couldn’t load the candles</div>
             : !geo ? <div className="ipc-empty muted">No price history for {o.base.symbol} in {o.quote.symbol} over this span.</div>
               : (
                 <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="ipc-svg" role="img"

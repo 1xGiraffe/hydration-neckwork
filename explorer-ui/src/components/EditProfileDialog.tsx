@@ -25,7 +25,7 @@ async function fileToAvatar(file: File): Promise<{ base64: string; dataUrl: stri
   ctx.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, 128, 128)
   const blob = await new Promise<Blob | null>(r => canvas.toBlob(r, 'image/webp', 0.8))
     ?? await new Promise<Blob | null>(r => canvas.toBlob(r, 'image/jpeg', 0.85))
-  if (!blob) throw new Error('Could not encode the image')
+  if (!blob) throw new Error('Couldn’t encode the image')
   if (blob.size > 64 * 1024) throw new Error('Image is too large after resize')
   const bytes = new Uint8Array(await blob.arrayBuffer())
   let bin = ''
@@ -73,7 +73,7 @@ export function EditProfileDialog({ open, onOpenChange, account, profile }: {
       await nameMutation.mutateAsync([name.trim()])
       onOpenChange(false)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not save the name')
+      setError(e instanceof Error ? e.message : 'Couldn’t save the name')
     }
   }
 
@@ -88,7 +88,7 @@ export function EditProfileDialog({ open, onOpenChange, account, profile }: {
       setPreview(dataUrl)
     } catch (err) {
       setPreview(null)
-      setError(err instanceof Error ? err.message : 'Could not update the picture')
+      setError(err instanceof Error ? err.message : 'Couldn’t update the picture')
     }
   }
 
@@ -98,7 +98,7 @@ export function EditProfileDialog({ open, onOpenChange, account, profile }: {
       await clearMutation.mutateAsync([])
       setPreview(null)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not remove the picture')
+      setError(err instanceof Error ? err.message : 'Couldn’t remove the picture')
     }
   }
 

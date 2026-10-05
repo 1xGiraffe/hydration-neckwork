@@ -95,7 +95,7 @@ export const accountsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = 
   app.get('/v1/accounts/:address/balances', {
     schema: {
       tags: ['accounts'],
-      summary: 'Current balances: substrate, ERC-20, and money-market positions',
+      summary: 'Current balances: Substrate tokens, ERC-20 tokens and money-market positions',
       description: [
         'Three composed sources, deliberately separate kinds: substrate pallet balances, EVM wallet (ERC-20) balances, and money-market positions reconstructed from the scaled-balance anchor plus indexed deltas times the live reserve index (integer arithmetic end to end). A supplied asset does NOT appear as a substrate balance — it appears as its `atoken` row; variable debt appears as `vdebt`.',
         'USD values are at the current price (the same freshness rule as /v1/assets: a feed older than 30 days prices nothing), and `totals` sums the priced items exactly — except an item flagged `uncounted`: the Omnipool pallet account\'s own H2O reserve, which H2O is priced off, so counting it would state the pool\'s TVL a second time. ' + UNSEEN_IS_EMPTY,

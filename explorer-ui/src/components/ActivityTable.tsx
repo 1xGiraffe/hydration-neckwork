@@ -4,7 +4,7 @@ import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
 import { F, Amt, Usd, AddrPill, AssetChip, AssetAmount, AssetIcon, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
-import { LIQ_LABELS, activityBadge, BOND_LABELS, intentLabel } from './activityColors'
+import { LIQ_LABELS, MM_LABELS, OTC_LABELS, activityBadge, BOND_LABELS, intentLabel } from './activityColors'
 import { parseUtcTimestamp } from '../utils/time'
 import { fmtDuration } from '../utils/dca'
 import { resolveTag, useTagMapVersion } from '../userTags'
@@ -215,9 +215,9 @@ const SLUG_LABEL: Record<ActivitySlug, string> = {
   swap: 'Swap', dca: 'DCA', transfer: 'Transfer', 'cross-chain': 'Cross-chain',
   'add-liquidity': 'Add liquidity', 'remove-liquidity': 'Remove liquidity', 'create-pool': 'Create pool', 'destroy-pool': 'Destroy pool', 'claim-rewards': 'Claim rewards', 'claim-referral-rewards': 'Claim referral rewards',
   'collect-fees': LIQ_LABELS.CollectFees, rebalance: LIQ_LABELS.Rebalance, compound: LIQ_LABELS.Compound,
-  lend: 'Lend', withdraw: 'Withdraw', borrow: 'Borrow', repay: 'Repay',
+  lend: MM_LABELS.Supply, withdraw: 'Withdraw', borrow: 'Borrow', repay: 'Repay',
   liquidate: 'Liquidate', staking: 'Staking', vote: 'Vote',
-  'otc-place': 'OTC place', 'otc-pull': 'OTC pull', 'otc-fill': 'OTC fill',
+  'otc-place': OTC_LABELS.Place, 'otc-pull': OTC_LABELS.Pull, 'otc-fill': OTC_LABELS.Fill,
   'bond-issue': BOND_LABELS.Issue, 'bond-redeem': BOND_LABELS.Redeem,
   'intent-place': intentLabel('swap', 'Place'), 'intent-fill': intentLabel('swap', 'Fill'), 'intent-cancel': intentLabel('swap', 'Cancel'), 'intent-expire': intentLabel('swap', 'Expire'),
   'intent-dca-trade': intentLabel('dca', 'DcaTrade'),
@@ -521,7 +521,7 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
   const fresh = useNewRows(keys, !!live)
   return (
     <div className="panel"><LiveAnchor anchorRef={anchorRef} /><table className="tbl">
-      <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r" title="Protocol revenue this extrinsic generated">P. Revenue</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
+      <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r" title="Protocol Revenue — what this extrinsic paid to the protocol">P. Revenue</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
       <tbody {...pendingRows(pending)}>
         {loading && !rows.length ? <TableSkeleton cols={cols} rows={pageSize} />
           : error && !rows.length ? <ErrorRow cols={cols} title="Couldn’t load activity" error={error} onRetry={onRetry} />

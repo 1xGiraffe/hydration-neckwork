@@ -719,7 +719,7 @@ export interface MoneyMarketPosition {
   memberCount?: number
   reserves?: MmReserve[]
   // Reserves whose collateral the explorer cannot state per reserve (an aToken
-  // that reached the holder Substrate-side, or one without a price); Lent and
+  // that reached the holder Substrate-side, or one without a price); Supplied and
   // the Value then take the market's own collateral figure.
   unstatedCollateral?: AssetRef[]
   // Claimable incentives accruing on this market's aTokens (display only: the

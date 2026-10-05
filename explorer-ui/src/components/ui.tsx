@@ -7,7 +7,7 @@ import type { AccountRef, AssetOrigin, AssetRef, FailureReason, FeePayment } fro
 import { parseUtcTimestamp, tsDate, tsDateTime, utcDay } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { voteSideLabel } from '../utils/voteRows'
-import { BOND_LABELS, CAT, LIQ_LABELS, MM_LABELS, intentLabel } from './activityColors'
+import { BOND_LABELS, CAT, LIQ_LABELS, MM_LABELS, OTC_LABELS, intentLabel } from './activityColors'
 import { ZoomReset, ZoomSelection, bracketToView, fracOfTime, useChartZoom, useZoomRefine } from './chartZoom'
 import type { RefinedSeries } from './chartZoom'
 import { resolveTag, useTagMapVersion } from '../userTags'
@@ -847,7 +847,7 @@ export function TagGroupPill({ tag }: { tag: { tagId: string; name: string; colo
   // tight cell truncates its name span (see the .addr-pill ellipsis rules), and
   // the count — like the ·xyz member suffix — must outlive that truncation.
   return (
-    <Link to={paths.tag(tag.tagId)} className="addr-pill" title="Tagged group — open combined view">
+    <Link to={paths.tag(tag.tagId)} className="addr-pill" title={`${tag.name} — tagged group, open combined view`}>
       <TagIcon icon={tag.icon} title={tag.name} />
       <span className="tag" style={{ color: tag.color }}>{tag.name}</span>
       {tag.memberCount > 1 ? <span className="tag-member-suffix mono">·{tag.memberCount}</span> : null}
@@ -887,7 +887,7 @@ export function tagMemberSuffix(tag: Pick<ResolvedTag, 'memberCount'>, address: 
 export function UserTagPill({ tag, address, noCopy, noMemberSuffix, noFocus, to, isContract }: { tag: ResolvedTag; address: string; noCopy?: boolean; noMemberSuffix?: boolean; noFocus?: boolean; to?: string; isContract?: boolean }) {
   return (
     <span className="addr-wrap">
-      <Link to={to ?? paths.tag(tag.id)} tabIndex={noFocus ? -1 : undefined} className="addr-pill" title={to ? `${tag.name} — open account ${address}` : tag.kind === 'user' ? `${tag.name} — your list “${tag.listName}”` : 'Tagged group — open combined view'}>
+      <Link to={to ?? paths.tag(tag.id)} tabIndex={noFocus ? -1 : undefined} className="addr-pill" title={to ? `${tag.name} — open account ${address}` : tag.kind === 'user' ? `${tag.name} — your list “${tag.listName}”` : `${tag.name} — tagged group, open combined view`}>
         <TagIcon icon={tag.icon} title={tag.name} />
         <span className="tag" style={tag.color ? { color: tag.color } : undefined}>{tag.name}</span>
         {!noMemberSuffix && tagMemberSuffix(tag, address)}
@@ -1995,7 +1995,7 @@ function ActivityPanelSkeleton({ rows = 6, noActor = false }: { rows?: number; n
   return (
     <div className="panel">
       <table className="tbl">
-        <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r" title="Protocol revenue this extrinsic generated">P. Revenue</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
+        <thead><tr><th>Type</th>{!noActor && <th>Account</th>}<th>Activity</th><th className="r" title="Protocol Revenue — what this extrinsic paid to the protocol">P. Revenue</th><th className="r">Value</th><th className="r">Time</th></tr></thead>
         <tbody><TableSkeleton cols={cols} rows={rows} /></tbody>
       </table>
     </div>
@@ -2159,7 +2159,7 @@ export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = 
   // slugs (intent-fill covers partial fills too); their labels are the badge's own.
   trade: [
     { v: 'swap', label: 'Swap' }, { v: 'dca', label: 'DCA' }, { v: 'dca-failed', label: 'Failed DCA' },
-    { v: 'otc-place', label: 'OTC place' }, { v: 'otc-pull', label: 'OTC pull' }, { v: 'otc-fill', label: 'OTC fill' },
+    { v: 'otc-place', label: OTC_LABELS.Place }, { v: 'otc-pull', label: OTC_LABELS.Pull }, { v: 'otc-fill', label: OTC_LABELS.Fill },
     { v: 'intent-place', label: intentLabel('swap', 'Place') }, { v: 'intent-fill', label: intentLabel('swap', 'Fill') }, { v: 'intent-cancel', label: intentLabel('swap', 'Cancel') }, { v: 'intent-expire', label: intentLabel('swap', 'Expire') },
     { v: 'intent-dca-trade', label: intentLabel('dca', 'DcaTrade') },
     // Swapping OUT of Hydration to another chain. An action under Trade rather

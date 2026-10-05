@@ -89,7 +89,7 @@ export function ContractWalletDialog({ open, onOpenChange }: { open: boolean; on
       })
       onOpenChange(false)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not derive the account\'s EVM address')
+      setError(e instanceof Error ? e.message : 'Couldn’t derive the account\'s EVM address')
     } finally {
       setBusy(false)
     }
@@ -114,7 +114,7 @@ export function ContractWalletDialog({ open, onOpenChange }: { open: boolean; on
       if (!addrs.length) throw new Error('No accounts — check the wallet allows this site')
       offerAccounts({ kind: 'evm', key: detail.info.rdns, walletName: detail.info.name, detail }, addrs.map(a => ({ address: a })))
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not connect wallet')
+      setError(e instanceof Error ? e.message : 'Couldn’t connect the wallet')
     } finally {
       setBusy(false)
     }
@@ -127,7 +127,7 @@ export function ContractWalletDialog({ open, onOpenChange }: { open: boolean; on
       const { accounts: found, ext } = await connectSubstrate(injectedKey)
       offerAccounts({ kind: 'substrate', key: injectedKey, walletName, ext }, found)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not connect wallet')
+      setError(e instanceof Error ? e.message : 'Couldn’t connect the wallet')
     } finally {
       setBusy(false)
     }

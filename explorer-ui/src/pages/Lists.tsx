@@ -109,7 +109,7 @@ function YourLists({ me }: { me: MeResponse }) {
       await orderMutation.mutateAsync([next])
     } catch (e) {
       setOrder(prev)
-      setOrderError(e instanceof Error ? e.message : 'Could not save the new order')
+      setOrderError(e instanceof Error ? e.message : 'Couldn’t save the new order')
     }
   }
   function move(id: string, dir: -1 | 1) {

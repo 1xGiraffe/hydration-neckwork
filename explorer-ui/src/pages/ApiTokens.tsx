@@ -28,7 +28,7 @@ function CreateTokenDialog({ open, onOpenChange, onCreated }: {
   const create = useMutation({
     mutationFn: (name: string) => userApi.createApiToken(name),
     onSuccess: token => { setCreated(token); setError(null); onCreated() },
-    onError: e => setError(e instanceof ApiError ? e.message : 'Could not create the token'),
+    onError: e => setError(e instanceof ApiError ? e.message : 'Couldn’t create the token'),
   })
 
   // Reset on every open (prop-change-reset, the DevicesDialog pattern) so a
@@ -130,7 +130,7 @@ export function ApiTokens() {
       setConfirmError(null)
       void qc.invalidateQueries({ queryKey: ['user', 'api-tokens'] })
     },
-    onError: e => setConfirmError(e instanceof ApiError ? e.message : 'Could not revoke the token'),
+    onError: e => setConfirmError(e instanceof ApiError ? e.message : 'Couldn’t revoke the token'),
   })
   const invalidate = () => void qc.invalidateQueries({ queryKey: ['user', 'api-tokens'] })
 

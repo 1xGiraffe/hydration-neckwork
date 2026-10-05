@@ -67,7 +67,7 @@ export function NotifyButton({ rule, label = 'Get notified', title, variant = 'b
             return
           }
           create.mutateAsync([{ kind: rule.kind, params: rule.params, ...(rule.name ? { name: rule.name } : {}) }])
-            .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Could not create the alert'))
+            .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Couldn’t create the alert'))
         }}
       >
         <BellIcon /> {existing ? subscribedLabel(label) : label}
@@ -89,7 +89,7 @@ export function NotifyButton({ rule, label = 'Get notified', title, variant = 'b
             setError(null)
             remove.mutateAsync([existing.id])
               .then(() => setConfirming(false))
-              .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Could not remove the alert'))
+              .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Couldn’t remove the alert'))
           }}
         />
       )}

@@ -12,10 +12,10 @@ export const VOLUME_VENUE_LABEL: Record<string, string> = {
 
 export const venueLabel = (venue: string): string => VOLUME_VENUE_LABEL[venue] ?? venue
 
-export const WINDOW_LABEL = { d1: '24 h', d7: '7 d', d30: '30 d' } as const
+export const WINDOW_LABEL = { d1: '24H', d7: '7D', d30: '30D' } as const
 export const WINDOW_KEYS = ['d1', 'd7', 'd30'] as const
 
-/** `$1.2M (+5.40% vs the prior 7 d)` — the explorer's `changePct` is a PERCENT. */
+/** `$1.2M (+5.40% vs the prior 7D)` — the explorer's `changePct` is a PERCENT. */
 export function statWithChange(s: VolumeWindowStat | null | undefined, window: string): string {
   if (!s) return DASH
   const change = s.changePct == null ? 'no prior-period volume to compare' : `${formatPercentChange(s.changePct / 100)} vs the prior ${window}`

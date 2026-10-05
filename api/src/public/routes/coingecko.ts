@@ -50,7 +50,7 @@ export const coingeckoRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> =
   app.get('/coingecko/v1/tickers', {
     schema: {
       tags: ['coingecko'],
-      summary: '24h DEX tickers per pool and pair',
+      summary: '24H DEX tickers per pool and pair',
       description: TICKERS_DESCRIPTION,
       response: { 200: z.array(zTicker) },
     },

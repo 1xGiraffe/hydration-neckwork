@@ -125,7 +125,7 @@ export const governanceRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> 
   app.get('/v1/governance/referenda/:pallet/:index/votes', {
     schema: {
       tags: ['governance'],
-      summary: 'One referendum’s raw vote-call history',
+      summary: 'One referendum\'s raw vote-call history',
       description: VOTES_DESCRIPTION,
       params: z.object({ pallet: zPallet, index: zRefIndex }),
       querystring: zWindowedFeedQuery,
@@ -151,7 +151,7 @@ export const governanceRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> 
   app.get('/v1/governance/votes', {
     schema: {
       tags: ['governance'],
-      summary: 'One voter’s raw vote-call history across all referenda',
+      summary: 'One voter\'s raw vote-call history across all referenda',
       description: `${VOTES_DESCRIPTION}\n\nServed from a voter-first projection, so any voter's full history is one key-range read. \`voter\` is required; an account that never voted answers 200 with empty items. The same feed is addressable as /v1/accounts/{address}/votes.`,
       querystring: zFeedQuery.extend({
         voter: z.string().min(3).max(128).describe('The voter, as SS58 (any prefix), H160, or 0x-prefixed public-key hex.'),

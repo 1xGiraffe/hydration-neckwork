@@ -247,7 +247,7 @@ function PushChannels({ channels, vapidPublicKey, loading, onChanged }: {
       await enablePush(vapidPublicKey)
       onChanged()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not enable push on this browser')
+      setError(e instanceof Error ? e.message : 'Couldn’t enable push on this browser')
     } finally {
       setBusy(false)
     }
@@ -338,7 +338,7 @@ function TelegramLinkPanel({ onCancel, onLinked }: { onCancel: () => void; onLin
     let cancelled = false
     userApi.createTelegramLink()
       .then(l => { if (!cancelled) setLink(l) })
-      .catch((e: unknown) => { if (!cancelled) setError(e instanceof Error ? e.message : 'Could not create a link code') })
+      .catch((e: unknown) => { if (!cancelled) setError(e instanceof Error ? e.message : 'Couldn’t create a link code') })
     return () => { cancelled = true }
   }, [])
 
@@ -386,7 +386,7 @@ function ChannelRow({ channel, onChanged }: { channel: NotificationChannel; onCh
   async function test() {
     setBusy(true); setNote(null)
     try { await userApi.testNotificationChannel(channel.id); setNote('Test sent') }
-    catch (e) { setNote(e instanceof Error ? e.message : 'Could not send a test') }
+    catch (e) { setNote(e instanceof Error ? e.message : 'Couldn’t send a test') }
     finally { setBusy(false) }
   }
   async function remove() {
@@ -397,7 +397,7 @@ function ChannelRow({ channel, onChanged }: { channel: NotificationChannel; onCh
       setConfirming(false)
       onChanged()
     } catch (e) {
-      setConfirmError(e instanceof Error ? e.message : 'Could not remove the channel')
+      setConfirmError(e instanceof Error ? e.message : 'Couldn’t remove the channel')
       setBusy(false)
     }
   }
@@ -533,7 +533,7 @@ export function RulesSection({ rules, channels, loading, onNew, onEdit }: {
             setConfirmError(null)
             remove.mutateAsync([confirmRule.id])
               .then(() => setConfirmRule(null))
-              .catch((e: unknown) => setConfirmError(e instanceof Error ? e.message : 'Could not delete the alert'))
+              .catch((e: unknown) => setConfirmError(e instanceof Error ? e.message : 'Couldn’t delete the alert'))
           }}
         />
       )}
@@ -643,7 +643,7 @@ export function InboxSection({ rows, total, unread, loading, now }: {
           setClearError(null)
           clear.mutateAsync([])
             .then(() => setConfirming(false))
-            .catch((e: unknown) => setClearError(e instanceof Error ? e.message : 'Could not clear the inbox'))
+            .catch((e: unknown) => setClearError(e instanceof Error ? e.message : 'Couldn’t clear the inbox'))
         }}
       />
     </>

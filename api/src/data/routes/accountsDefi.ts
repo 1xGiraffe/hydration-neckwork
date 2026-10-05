@@ -213,7 +213,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
   app.get('/v1/accounts/:address/dca', {
     schema: {
       tags: ['accounts'],
-      summary: 'The account\'s DCA schedules and execution events',
+      summary: 'DCA schedules and execution events of the account',
       description: [
         `The account's newest schedules (the same objects /v1/dca/schedules lists; at most ${ACCOUNT_SCHEDULES_CAP} — \`hasMoreSchedules\` says when the account has more, and /v1/dca/schedules?owner= pages the full set), plus a cursor feed of its DCA events (executions, failures, completions, terminations). Execution history per schedule is also addressable as /v1/dca/schedules/{id}/executions.`,
         PRE_ROUTER_NOTE,
@@ -251,7 +251,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
   app.get('/v1/accounts/:address/intents', {
     schema: {
       tags: ['accounts'],
-      summary: 'The account\'s ICE intents (limit orders and DCA intents)',
+      summary: 'ICE intents of the account (limit orders and DCA intents)',
       description: [
         INTENT_NOTE,
         'A cursor feed of the account\'s own submissions, read from the owner-first projection, newest first. These are the orders AS SUBMITTED — fold one order\'s status and fill totals from /v1/intents/{id}, and walk its life through /v1/intents/{id}/events.',
@@ -277,7 +277,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
   app.get('/v1/accounts/:address/otc', {
     schema: {
       tags: ['accounts'],
-      summary: 'The account\'s signed OTC calls',
+      summary: 'OTC calls signed by the account',
       description: [
         'The cursor feed of the account\'s signed OTC.* extrinsics (placements, fills, cancels — "Pull" in product copy). The fills this account executed as the taker are the /otc/fills feed beside this one.',
         'Order MAKER attribution is deliberately not offered: OTC.Placed does not name the maker on chain, and the indexed models do not restate it here. Resolve an order\'s lifecycle via /v1/otc/orders/{id}.',
@@ -739,7 +739,7 @@ export const accountsDefiRoutes: FastifyPluginAsync<{ client: ClickHouseClient }
   app.get('/v1/accounts/:address/fees', {
     schema: {
       tags: ['accounts'],
-      summary: 'Protocol revenue the account generated, by stream and month',
+      summary: 'Protocol Revenue the account generated, by stream and month',
       description: [
         'Monthly protocol-revenue attribution (trade fees, network fees, borrow interest, liquidation penalties, …) with the account as PAYER, in USD at event time. Rows under the account\'s native and ETH-mapped identities are combined.',
         'This is the protocol\'s revenue FROM the account — not the account\'s income. ' + UNSEEN_IS_EMPTY,

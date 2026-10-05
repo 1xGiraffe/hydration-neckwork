@@ -1156,8 +1156,8 @@ describe('activityLine over real rows', () => {
     expect(activityUrlFor(MM_LIQUIDATION, BASE)).toBe(`${BASE}/liquidate/14742100-e31`)
     expect(activityLine(MM_LIQUIDATION, BASE, NOW)).toContain('250 USDT')
 
-    // 'Supply' is called Lend in product copy, and its slug differs from its label.
-    expect(activityKind({ ...MM_LIQUIDATION, mmAction: 'Supply' })).toBe('Lend')
+    // 'Supply' keeps its chain word as the label, and its slug (lend) differs from it.
+    expect(activityKind({ ...MM_LIQUIDATION, mmAction: 'Supply' })).toBe('Supply')
     expect(activitySlug({ ...MM_LIQUIDATION, mmAction: 'Supply' })).toBe('lend')
     // An action the maps do not know is reported as itself, never as a default.
     expect(activityKind({ ...MM_LIQUIDATION, mmAction: 'Borrow' })).toBe('Borrow')
@@ -1167,9 +1167,9 @@ describe('activityLine over real rows', () => {
     expect(activitySlug(STAKING_CLAIM)).toBe('staking')
     expect(activityLine(STAKING_CLAIM, BASE, NOW)).toContain('51.6k HDX')
 
-    expect(activityKind(BOND_REDEEM)).toBe('Bond redeem')
+    expect(activityKind(BOND_REDEEM)).toBe('Bond redeemed')
     expect(activitySlug(BOND_REDEEM)).toBe('bond-redeem')
-    expect(activityKind({ ...BOND_REDEEM, bondAction: 'Issue' })).toBe('Bond issue')
+    expect(activityKind({ ...BOND_REDEEM, bondAction: 'Issue' })).toBe('Bond issued')
     expect(activitySlug({ ...BOND_REDEEM, bondAction: 'Issue' })).toBe('bond-issue')
   })
 
@@ -1183,7 +1183,7 @@ describe('activityLine over real rows', () => {
     expect(activityLine(INTENT_PARTIAL_FILL, BASE, NOW)).toContain('60.2 USDT → 51.5 DOT')
 
     // Product copy calls an OTC cancellation a Pull, and the slug follows it.
-    expect(activityKind(OTC_PULL)).toBe('OTC pull')
+    expect(activityKind(OTC_PULL)).toBe('OTC order pulled')
     expect(activitySlug(OTC_PULL)).toBe('otc-pull')
     expect(activitySlug({ ...OTC_PULL, otcAction: 'Fill' })).toBe('otc-fill')
     expect(activitySlug({ ...OTC_PULL, otcAction: 'Place' })).toBe('otc-place')
@@ -1234,7 +1234,7 @@ describe('activityDetail', () => {
     expect(out).toContain('**Time:** 2026-09-18 10:07:42 UTC')
     expect(out).toContain('**Block:** 14,743,749')
     expect(out).toContain('**Amounts:** 60.2 USDT → 5.06 LINK')
-    expect(out).toContain('**Protocol revenue:** $0.142')
+    expect(out).toContain('**Protocol Revenue:** $0.142')
     expect(out).toContain('omnipool_asset_fee')
   })
 

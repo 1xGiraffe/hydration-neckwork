@@ -243,7 +243,7 @@ export async function resolveCreationTransaction(txHash: string, address: string
   if (!/^0x[0-9a-f]{64}$/.test(hash)) {
     return { ok: false, code: 'invalid_parameter', message: 'creationTransactionHash must be a 32-byte hex string' }
   }
-  const unavailable = { ok: false as const, code: 'internal_error' as const, message: 'Could not read the creation transaction from the node; try again later' }
+  const unavailable = { ok: false as const, code: 'internal_error' as const, message: 'Couldn’t read the creation transaction from the node; try again later' }
   const [txRes, receiptRes] = await Promise.all([
     ethRpc('eth_getTransactionByHash', [hash]),
     ethRpc('eth_getTransactionReceipt', [hash]),

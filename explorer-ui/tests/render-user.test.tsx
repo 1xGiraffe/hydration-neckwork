@@ -231,15 +231,15 @@ describe('TaggedInHint — logged-out "tagged in a public list" nudge', () => {
 // and by the e2e suite, matching how Account.tsx/TagDetail.tsx have no
 // full-page render test here either.
 describe('Tags hub — smoke render (logged out)', () => {
-  it('renders the Hydration Tags hero and at least one (unclickable) public-list row', () => {
+  it('renders the Hydration tags hero and at least one (unclickable) public-list row', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     queryClient.setQueryData(['lists'], MOCK_LISTS)
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Tags /></QueryClientProvider>)
     expect(html).toContain('Tags')
     // The one clickable "list" row: the built-in directory, promoted above
     // every user-made list.
-    expect(html).toContain('Hydration Tags')
-    expect(hrefOf(html, 'Hydration Tags')).toBe('/tags/hydration')
+    expect(html).toContain('Hydration tags')
+    expect(hrefOf(html, 'Hydration tags')).toBe('/tags/hydration')
     expect(html).toContain('DeFi desks')
     // User-confirmed: a public list row is clickable only when the VIEWER
     // owns it — logged out (this harness's every render, see the comment

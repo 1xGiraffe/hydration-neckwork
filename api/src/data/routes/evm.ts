@@ -132,7 +132,7 @@ export const evmRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = async
   app.get('/v1/evm/contracts/:address/logs', {
     schema: {
       tags: ['evm'],
-      summary: 'One contract’s logs, newest first',
+      summary: 'One contract\'s logs, newest first',
       description: 'Cursor-paginated over a contract-first log index; each page is then enriched with topics, data and the decoded form (when the indexer knows the ABI) by a primary-key read — so a deep page costs the same as the first. `topic0=` filters by event signature hash and requires a bounded window (see the parameter note).',
       params: z.object({ address: zH160 }),
       querystring: zFeedQuery.extend({
@@ -157,7 +157,7 @@ export const evmRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = async
   app.get('/v1/evm/contracts/:address/abi', {
     schema: {
       tags: ['evm'],
-      summary: 'A verified contract’s ABI and source files',
+      summary: 'A verified contract\'s ABI and source files',
       description: 'The verified ABI plus every source file of the newest verification. Verification artifacts are public by design — anyone may verify a contract and everyone may read the result. 404 for a contract with no ABI on record.',
       params: z.object({ address: zH160 }),
       response: { 200: zAbiDetail, 400: zError, 404: zError },
