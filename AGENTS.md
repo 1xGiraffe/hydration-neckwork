@@ -141,7 +141,7 @@ The `api-public` service (`api/src/public/`, same image as `api`, own process be
   `cache`/`explorerAssets`/`ohlcvService`/`crossPair`/`pairPriceSource`/`poolService`/`volumeService`/`valuation`/
   `revenueStreams`/`moneyMarketCaps`/`foreignCandles`/`uniswapV3History`/`uniswapV3Positions`/`intentLimitPrice`/
   `lmRewardSnapshot`/`mmIncentiveSnapshot`/`lpMath`/`stableswapSharePools`/`poolVolumes`/`farmApr`/`poolYield`/
-  `gigahdxApr`/`isoTimestamp` services, and the
+  `gigahdxApr`/`isoTimestamp`/`userRevenueStreams`/`userRevenueRead` services, and the
   api package manifest (`../package.json`, for the version string
   `/rest/service/metadata` publishes). Never `explorerService`. The one sanctioned transitive coupling —
   `initPoolService` wiring an explorerService client when none is set — is documented at the
@@ -196,8 +196,8 @@ API it is a **versioned frozen contract**; concept: `~/.g/hydraken-api-concept.m
   `api/tests/data/isolation.test.ts` — that test is the enforced contract, and this
   sentence must follow it: today `db/client`, `config`, `types`, and the
   `cache`/`explorerAssets`/`ohlcvService`/`valuation`/`lpMath`/`liquidityLegs`/`lpHistory`/`bucketLadder`/`blockClock`/
-  `uniswapV3Positions`/`uniswapV3Ranges`/`intentLimitPrice`/`lmRewardSnapshot`/`moneyMarketHistory`/`aaveMath`/`mmIncentiveSnapshot`
-  services. Never `explorerService`, never
+  `uniswapV3Positions`/`uniswapV3Ranges`/`intentLimitPrice`/`lmRewardSnapshot`/`moneyMarketHistory`/`aaveMath`/`mmIncentiveSnapshot`/
+  `userRevenueStreams`/`userRevenueRead` services. Never `explorerService`, never
   `userAuthService`, never `public/**`; nothing outside `src/data/` imports from it.
   Address parsing/rendering is self-contained in `data/services/address.ts`. Pure domain
   arithmetic both surfaces need (the LP position math) lives in a leaf module under

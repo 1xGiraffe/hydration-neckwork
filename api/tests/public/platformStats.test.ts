@@ -105,6 +105,14 @@ const REVENUE_SOURCES: Record<string, Answer> = {
     { stream: 'network_fee', block_height: 9123500, block_timestamp: chTs(Math.floor(Date.now() / 1000) - 3_600), event_index: 3, leg_index: 0, dest: 'protocol', account: '', asset_id: 0, amount: '1', internal_payer: 0, amount_usd: '0.5' },
     { stream: 'network_fee', block_height: 9123501, block_timestamp: chTs(Math.floor(Date.now() / 1000) - 3_600), event_index: 4, leg_index: 0, dest: 'protocol', account: '', asset_id: 0, amount: '1', internal_payer: 1, amount_usd: '1000' },
   ],
+  // The User Revenue fold's windows: 40 000 folded hours with no gap, every window full.
+  '-- ur:windows': [{
+    expected_first: '1647086400', first_hour: '1647086400', last_hour: '1791082800', folded: '40000',
+    folded_day: '24', folded_week: '168', folded_month: '720',
+    day: '3174.883433063266', week: '94155.921823712175', month: '-0.004999999999', all_time: '22658571.178936620859', unpriced: '7',
+  }],
+  // The fold's own unmeasured markers: apyUSD's peg never moved, over the whole window.
+  '-- ur:unmeasured': [{ asset_id: '46', reason: 'peg-never-moved', hours: '720', last_hour: '1791082800' }],
   // HOLLAR's ERC-20 wallet balances, summed: 12,818,562.2052… HOLLAR.
   '-- pub:cg:supply:erc20': [{ holders: '392', total: '12818562205222144421754300' }],
 }
@@ -203,6 +211,12 @@ describe('GET /v1/stats/platform', () => {
         // the tail's 0.5 = 2.005 → 2.01, where rounding each stream first would
         // give 2.00. The internal payer's $1,000 is in none of them.
         protocolRevenue: { last24hUsd: '2.01', last7dUsd: '10.75', last30dUsd: '45.50', allTimeUsd: '12446.17' },
+        // Net, so a window can be negative; rounded once, a tiny net loss reads -0.00 → '0.00'.
+        userRevenue: {
+          last24hUsd: '3174.88', last7dUsd: '94155.92', last30dUsd: '0.00', allTimeUsd: '22658571.18',
+          publishedThrough: '2026-10-04T04:00:00.000Z',
+          coverage: { from: '2022-03-12T12:00:00.000Z', complete: true, unmeasured: expect.arrayContaining(['Omnipool LP fees before 2023-08-04', expect.stringContaining('accrual: its on-chain rate never moved')]) },
+        },
       })
       expect(res.headers['cache-control']).toBe('public, max-age=60')
     } finally { await app.close(); stop() }
@@ -226,6 +240,37 @@ describe('GET /v1/stats/platform', () => {
       const res = await app.inject('/v1/stats/platform')
       expect(res.json().tvl.moneyMarketSupplyUsd).toBeNull()
     } finally { await app.close(); stop() }
+  })
+
+  it('reports a user-revenue window the fold has not fully covered as null, never as zero', async () => {
+    // A gap of one hour inside the last week: the 24h window is whole, the 7d,
+    // 30d and all-time windows are not.
+    const client = fakeClient({ ...fullSources(), '-- ur:windows': [{
+      first_hour: '1647086400', last_hour: '1791082800', folded: '39999',
+      folded_day: '24', folded_week: '167', folded_month: '719',
+      day: '1.5', week: '2', month: '3', all_time: '4', unpriced: '0',
+    }] })
+    const { app, stop } = await freshApp(client)
+    try {
+      const res = await app.inject('/v1/stats/platform')
+      expect(res.statusCode).toBe(200)
+      const ur = res.json().userRevenue
+      expect([ur.last24hUsd, ur.last7dUsd, ur.last30dUsd, ur.allTimeUsd]).toEqual(['1.50', null, null, null])
+      expect(ur.coverage.complete).toBe(false)
+    } finally { await app.close(); stop() }
+  })
+
+  it('keeps serving the platform figures when the user-revenue read fails', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const sources = fullSources()
+    delete sources['-- ur:windows']
+    const client = fakeClient(sources)
+    const { app, stop } = await freshApp(client)
+    try {
+      const res = await app.inject('/v1/stats/platform')
+      expect(res.statusCode).toBe(200)
+      expect(res.json().userRevenue).toMatchObject({ last24hUsd: null, allTimeUsd: null, publishedThrough: null, coverage: { from: null, complete: false } })
+    } finally { await app.close(); stop(); err.mockRestore() }
   })
 
   it('reports an unreadable HOLLAR supply as null, never as zero', async () => {

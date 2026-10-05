@@ -4,6 +4,7 @@ import { isMoneyMarketAToken } from '../../services/explorerAssets.ts'
 import { getPoolsIndex } from '../../services/poolService.ts'
 import { protocolRevenueWindows, revenueColdMarks, revenueTailHours, revenueTailRows } from '../../services/revenueStreams.ts'
 import { renderUsd } from '../../services/valuation.ts'
+import { UNMEASURED_ERAS, unmeasuredText, userRevenueWindows } from '../../services/userRevenueRead.ts'
 import { decimalToScaled, formatUsd } from './accountBalances.ts'
 import { type MmReserveState, type MoneyMarketSupply, moneyMarketSupply } from './moneyMarketReserves.ts'
 import { omnipoolVolumes, poolVolumes, routedTradesUsd } from '../../services/poolVolumes.ts'
@@ -65,6 +66,11 @@ import { SupplyUnresolvableError, totalSupplyRaw } from './coingecko.ts'
 //    cold/tail composition in services/revenueStreams.ts (protocolRevenueWindows):
 //    event-time USD, protocol share only, the protocol's own accounts' payments
 //    to itself excluded.
+//  * `userRevenue` — what USERS earned (net, accrual basis, holder class `user`),
+//    from the shared read of the User Revenue fold (services/userRevenueRead.ts,
+//    the totals the explorer's /revenue page shows). Closed hours only, cut at
+//    `publishedThrough`; a window the fold has not fully covered is null, never 0.
+//    Not additive with `protocolRevenue`.
 
 /** The window the headline reports. */
 const VOLUME_WINDOW = '24h' as const
@@ -117,6 +123,49 @@ export interface PlatformStats {
     last7dUsd: string
     last30dUsd: string
     allTimeUsd: string
+  }
+  userRevenue: PlatformUserRevenue
+}
+
+export interface PlatformUserRevenue {
+  /** Net USD over the last 24 / 168 / 720 closed hours and all time; null while the window is not fully folded. */
+  last24hUsd: string | null
+  last7dUsd: string | null
+  last30dUsd: string | null
+  allTimeUsd: string | null
+  /** End of the newest folded hour (ISO); every amount is "through" it. */
+  publishedThrough: string | null
+  coverage: {
+    /** Start of the first folded hour (ISO). */
+    from: string | null
+    /** No unfolded hour between the first and the newest folded one. */
+    complete: boolean
+    /** What User Revenue does not measure: era gaps, and token gaps with their reason (userRevenueRead.unmeasuredText). */
+    unmeasured: string[]
+  }
+}
+
+const isoOf = (seconds: number | null): string | null => (seconds == null ? null : new Date(seconds * 1000).toISOString())
+
+/** The User Revenue headline; a failed read is all-null (incomplete), never a failed platform response. */
+async function userRevenueTotals(client: ClickHouseClient): Promise<PlatformUserRevenue> {
+  try {
+    const w = await userRevenueWindows(client)
+    const usd = (v: bigint | null): string | null => (v == null ? null : renderUsd(v))
+    return {
+      last24hUsd: usd(w.day),
+      last7dUsd: usd(w.week),
+      last30dUsd: usd(w.month),
+      allTimeUsd: usd(w.allTime),
+      publishedThrough: isoOf(w.coverage.publishedThrough),
+      coverage: { from: isoOf(w.coverage.firstHour), complete: w.coverage.complete, unmeasured: w.coverage.unmeasured.map(unmeasuredText) },
+    }
+  } catch (err) {
+    console.error('[public-api] platform stats: user revenue unreadable', err instanceof Error ? err.message : err)
+    return {
+      last24hUsd: null, last7dUsd: null, last30dUsd: null, allTimeUsd: null, publishedThrough: null,
+      coverage: { from: null, complete: false, unmeasured: UNMEASURED_ERAS.map(unmeasuredText) },
+    }
   }
 }
 
@@ -346,7 +395,7 @@ export function foldedPlatformTvl(components: TvlComponents): bigint | null {
 export async function platformStats(client: ClickHouseClient): Promise<PlatformStats> {
   return cachedSwr('pub:stats:platform', 60_000, 300_000, async () => {
     ensurePoolService(client)
-    const [index, omniVolume, stableVolume, xykVolume, v3Volume, routed, moneyMarket, hollarSupply, revenue] = await Promise.all([
+    const [index, omniVolume, stableVolume, xykVolume, v3Volume, routed, moneyMarket, hollarSupply, revenue, userRevenue] = await Promise.all([
       getPoolsIndex(),
       omnipoolVolumes(client, VOLUME_WINDOW),
       poolVolumes(client, 'stableswap', VOLUME_WINDOW),
@@ -356,6 +405,7 @@ export async function platformStats(client: ClickHouseClient): Promise<PlatformS
       moneyMarketSupply(client),
       hollarTotalSupply(client),
       protocolRevenueTotals(client),
+      userRevenueTotals(client),
     ])
 
     // The pool index already carries the Omnipool's TVL, computed by the same
@@ -377,6 +427,7 @@ export async function platformStats(client: ClickHouseClient): Promise<PlatformS
       },
       hollar: { totalSupply: hollarSupply },
       protocolRevenue: revenue,
+      userRevenue,
     }
   })
 }

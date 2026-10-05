@@ -88,6 +88,11 @@ const ALLOWED_SHARED = new Set([
   'services/farmApr.ts',
   'services/poolYield.ts',
   'services/isoTimestamp.ts',
+  // User Revenue: the stream/class/coverage definitions and the one read of the
+  // fold's published facts — /v1/stats/platform's userRevenue and the explorer's
+  // /revenue rivers state the same windows from the same query.
+  'services/userRevenueStreams.ts',
+  'services/userRevenueRead.ts',
 ])
 
 // Not a shared source module: the api package manifest, imported for the

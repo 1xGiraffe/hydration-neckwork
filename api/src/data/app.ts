@@ -30,6 +30,7 @@ import { stakingRoutes } from './routes/staking.ts'
 import { xcmRoutes } from './routes/xcm.ts'
 import { evmRoutes } from './routes/evm.ts'
 import { statsRoutes } from './routes/stats.ts'
+import { userRevenueRoutes } from './routes/userRevenue.ts'
 
 // Every data route plugin, registered in order — the public app's idiom: a new
 // endpoint group is added here and nowhere else.
@@ -51,6 +52,7 @@ export const DATA_ROUTE_PLUGINS: Array<FastifyPluginAsync<{ client: ClickHouseCl
   xcmRoutes,
   evmRoutes,
   statsRoutes,
+  userRevenueRoutes,
 ]
 
 export interface DataRouteInfo {
