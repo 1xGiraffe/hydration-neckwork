@@ -1059,6 +1059,10 @@ svg { display: block; }
 }
 .activity-action:hover, .activity-action:focus { border-color: var(--sky); color: var(--text-high); }
 
+/* An on-demand activity count that failed or was given up on: a quiet retry. */
+.activity-retry { font-size: 11px; text-decoration: underline dotted; text-underline-offset: 2px; }
+.activity-retry:hover, .activity-retry:focus-visible { color: var(--text-high); }
+
 .th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
 .th-sort:hover { color: var(--text-high); }
 .th-sort.on { color: var(--accent); }

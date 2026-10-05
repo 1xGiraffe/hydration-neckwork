@@ -24,7 +24,15 @@ export function Accounts() {
   // accounts, far too large to sort in the browser).
   const rows = data?.rows ?? []
   const total = data?.total ?? 0
-  const pages = offeredPages({ page, rowsOnPage: rows.length, rowCount: data ? Math.max(total, 1) : undefined, pageSize: PAGE })
+  const offered = offeredPages({ page, rowsOnPage: rows.length, rowCount: data ? Math.max(total, 1) : undefined, pageSize: PAGE })
+  // The activity ordering is PROVABLE only for the leaderboard's leading run
+  // (rankedDepth); past it rows are still every counted total in order, but an
+  // uncounted account could belong among them. A page reaching past that depth
+  // says so rather than passing for a complete ranking.
+  const rankedDepth = sort === 'activity' ? data?.rankedDepth : undefined
+  const pages = rankedDepth != null && rankedDepth < total && (page + 1) * PAGE > rankedDepth
+    ? { ...offered, note: `activity order is exact for the first ${F.int(rankedDepth)} accounts, indicative past that` }
+    : offered
   // Sorting is server-side and lives in the URL, so it survives a reload and a
   // shared link; 'value' is the default and stays out of the query string.
   const onSort = (key: AccountSortKey) => setQuery({ sort: key === 'value' ? null : key, page: null })
