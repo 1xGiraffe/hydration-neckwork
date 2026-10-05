@@ -9171,6 +9171,60 @@ async function xcswapRowsAt(height: number, extrinsicIndex?: number): Promise<Ac
 }
 
 /**
+ * The NTT send a cross-chain swap leaves through is owned by the IntentEmitter, so a
+ * feed that loads it WITHOUT the swap's own row — the Cross-chain filter, the WETH
+ * page, the emitter's account page — showed the swap as a bare Wormhole send from a
+ * proxy contract. Stand the swap's row in for any such leg, in its place; the leg is
+ * then folded by `suppressXcswapPlumbingRows` exactly as on the extrinsic page. The
+ * swap is a member of both the Trade and the Cross-chain families
+ * (`activityTypeMatchesFamily`), so it survives either filter applied afterwards.
+ *
+ * An asset-scoped feed (`assetId`) adopts only a swap that sold that asset — the
+ * one asset the row shows. On any other asset's page, the WETH page in practice,
+ * the leg is the route's plumbing (see `getRecentXcswaps`) and is dropped instead.
+ *
+ * One read, bounded on `block_height` (the table's leading key), only when a feed
+ * holds an orphaned leg.
+ */
+export async function adoptOrphanXcswapLegs<T extends ActivityRow>(rows: T[], opts: { assetId?: number } = {}): Promise<T[]> {
+  const present = new Set(rows.filter(r => r.type === 'xcswap' && r.extrinsicIndex != null).map(r => `${r.blockHeight}:${r.extrinsicIndex}`))
+  const orphanKey = (r: ActivityRow) => r.type === 'xcm' && r.xcmDir === 'out' && r.extrinsicIndex != null
+    && r.who?.accountId.toLowerCase() === XCSWAP_EMITTER_ACCOUNT && !present.has(`${r.blockHeight}:${r.extrinsicIndex}`)
+    ? `${r.blockHeight}:${r.extrinsicIndex}` : null
+  const orphans = new Set(rows.map(orphanKey).filter((k): k is string => k != null))
+  if (!orphans.size) return rows
+  const heights = [...new Set([...orphans].map(k => Number(k.split(':')[0])))]
+  const res = await client.query({
+    query: `SELECT ${XCSWAP_COLUMNS_SQL} FROM price_data.xcswap_orders FINAL
+            WHERE block_height IN {h:Array(UInt32)}
+            ORDER BY block_height ASC, event_index ASC`,
+    query_params: { h: heights },
+    format: 'JSONEachRow',
+  })
+  const orders = (await res.json<RawXcswapOrderRow>()).filter(o => orphans.has(`${o.block_height}:${o.extrinsic_index}`))
+  if (!orders.length) return rows
+  // Every extrinsic an order was placed in; only these legs are swap plumbing.
+  const placed = new Set(orders.map(o => `${o.block_height}:${o.extrinsic_index}`))
+  const adoptable = opts.assetId == null ? orders : orders.filter(o => Number(o.asset_in) === opts.assetId)
+  const prices = adoptable.length ? await ensurePrices() : null
+  const settlements = xcswapSettlementsFor(adoptable.map(o => o.deposit_address))
+  const swaps = new Map<string, ActivityRow[]>()
+  for (const o of adoptable) {
+    const key = `${o.block_height}:${o.extrinsic_index}`
+    swaps.set(key, [...(swaps.get(key) ?? []), xcswapRowFromOrder(o, prices!, settlements.get(o.deposit_address.toLowerCase()) ?? null)])
+  }
+  const adopted = new Set<string>()
+  return rows.flatMap(r => {
+    const key = orphanKey(r)
+    if (!key || !placed.has(key)) return [r]
+    const swap = swaps.get(key)
+    if (!swap || adopted.has(key)) return []
+    adopted.add(key)
+    return swap as T[]
+  })
+}
+
+/**
  * A cross-chain destination's page.
  *
  * Deliberately NOT an asset page's shape. Hydration has no holders of ZEC, no
@@ -18054,8 +18108,9 @@ export function suppressIcePotSettlementTrades<T extends ActivityRow>(rows: T[],
   return rows.filter(r => !(r.type === 'trade' && r.who?.accountId.toLowerCase() === ICE_POT_ACCOUNT && r.extrinsicIndex != null && intentKeys.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
 }
 
-async function suppressActivityPlumbing<T extends ActivityRow>(rows: T[], opts: { keepPot?: boolean } = {}): Promise<T[]> {
-  const out = await suppressDustTransferRows(suppressXcswapPlumbingRows(suppressIcePotSettlementTrades(suppressSubordinateActivityRows(rows), opts.keepPot)))
+// `assetId` names the asset an asset-scoped feed is about (adoptOrphanXcswapLegs).
+async function suppressActivityPlumbing<T extends ActivityRow>(rows: T[], opts: { keepPot?: boolean; assetId?: number } = {}): Promise<T[]> {
+  const out = await suppressDustTransferRows(suppressXcswapPlumbingRows(await adoptOrphanXcswapLegs(suppressIcePotSettlementTrades(suppressSubordinateActivityRows(rows), opts.keepPot), { assetId: opts.assetId })))
   await applyXcmFeeUsd(out)
   return out
 }
@@ -18543,8 +18598,13 @@ function normalizeActivityTypeKey(type: string): string { return type === 'dca' 
 // they keep their own badges/slugs/detail pages, only the categorization/filter
 // changes). `type=otc` / `type=intent` still select only their own rows (kept
 // working as an API nicety; the UI never sends them).
+// A cross-chain swap is the one row in TWO families: a swap (Trade) that leaves
+// the chain (Cross-chain). Nothing sums the families into `all` — `all` applies no
+// family filter — so the overlap counts it once there and once in each chip.
 export function activityTypeMatchesFamily(rowType: ActivityRow['type'], type: string): boolean {
-  return rowType === type || (type === 'trade' && (rowType === 'otc' || rowType === 'intent' || rowType === 'xcswap'))
+  return rowType === type
+    || (type === 'trade' && (rowType === 'otc' || rowType === 'intent' || rowType === 'xcswap'))
+    || (type === 'xcm' && rowType === 'xcswap')
 }
 // Per-category action filter (the sub-type select next to the chips).
 export function activityRowMatchesAction(r: ActivityRow, action?: string): boolean {
@@ -21817,8 +21877,9 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     // intent folds under the trade chip/type like otc — fetched whenever trade is,
     // plus its own `type=intent` request and the Trade tab's intent actions.
     const wantIntents = !xcswapOnly && (type === 'all' || type === 'intent' || wantTrades || intentOnly)
-    // A cross-chain swap is a swap, so it joins the trade family like intents do.
-    const wantXcswaps = xcswapOnly || type === 'all' || type === 'xcswap' || wantTrades
+    // A cross-chain swap is a swap, so it joins the trade family like intents do —
+    // and it leaves the chain, so it is a Cross-chain row too.
+    const wantXcswaps = xcswapOnly || type === 'all' || type === 'xcswap' || type === 'xcm' || wantTrades
     const wantVotes = (type === 'all' || type === 'vote' || wantTransfers) && assetId === 0
 
     const transfersP: Promise<ActivityRow[]> = wantTransfers ? (async () => {
@@ -22266,7 +22327,7 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     const feeSwapKeys = await feePurchaseSwapKeys(trades)
     const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liquidity))
     const userMm = mm.filter(r => !isModuleAcct(r.who))
-    let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc, ...intents, ...xcswaps, ...userV3Trades, ...v3Liquidity]))
+    let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc, ...intents, ...xcswaps, ...userV3Trades, ...v3Liquidity], { assetId }))
       .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
     if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
     rows = rows.filter(r => activityRowMatchesAction(r, action))
@@ -24491,10 +24552,10 @@ function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolea
     bonds: type === 'all' || type === 'bond' || wantTransfers,
     // Intents fold under the trade family like otc.
     intents: type === 'all' || type === 'intent' || type === 'trade' || wantTransfers,
-    // Cross-chain swaps fold under trade too, and own the Router sell and the NTT
-    // send in their extrinsic — so `transfer` needs them as suppression context
-    // exactly as it needs the others.
-    xcswaps: type === 'all' || type === 'xcswap' || type === 'trade' || wantTransfers,
+    // Cross-chain swaps fold under trade and under xcm, and own the Router sell and
+    // the NTT send in their extrinsic — so `transfer` needs them as suppression
+    // context exactly as it needs the others.
+    xcswaps: type === 'all' || type === 'xcswap' || type === 'trade' || type === 'xcm' || wantTransfers,
     votes: type === 'all' || type === 'vote' || wantTransfers,
     xcm: type === 'all' || type === 'xcm' || wantTransfers,
     ntt: type === 'all' || type === 'xcm' || wantTransfers,
@@ -24659,8 +24720,9 @@ async function enumeratedActivityRowsUncached(
 // `xcm` is enumerated end to end too, at its own higher cap; `transfer` is the one
 // family whose arm has to state another family's decisions, because subordination only
 // ever removes transfer rows; and `all` is simply every arm and every enumerated source
-// at once, which is sound because the families are disjoint — a row belongs to exactly
-// one of them.
+// at once, which is sound because `all` applies no family filter: each enumerated row is
+// counted once, the cross-chain swap included although it belongs to both `trade` and
+// `xcm`.
 const EXACTLY_COUNTABLE_ACTIVITY_TYPES = new Set([
   'all', 'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'bond', 'intent', 'otc',
 ])
@@ -25005,8 +25067,9 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   // plus its own `type=intent` request and the Trade tab's intent actions. Owner
   // scope comes from intent_orders.
   const wantIntents = !xcswapOnly && (type === 'all' || type === 'intent' || wantTrades || intentOnly)
-  // A cross-chain swap is a swap, so it joins the trade family like intents do.
-  const wantXcswaps = xcswapOnly || type === 'all' || type === 'xcswap' || wantTrades
+  // A cross-chain swap is a swap, so it joins the trade family like intents do —
+  // and it leaves the chain, so it is a Cross-chain row too.
+  const wantXcswaps = xcswapOnly || type === 'all' || type === 'xcswap' || type === 'xcm' || wantTrades
   const wantVotes = type === 'all' || type === 'vote' || wantTransfers
   // 1. The account's signed swaps. Signer scope and value predicates are joined
   // before LIMIT so a rare token/value match cannot sit beyond a signer window.

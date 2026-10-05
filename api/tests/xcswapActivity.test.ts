@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import type { ClickHouseClient } from '../src/db/client.ts'
 import {
-  suppressXcswapPlumbingRows, xcswapRowFromOrder,
+  activityTypeMatchesFamily, adoptOrphanXcswapLegs, initExplorerService, suppressXcswapPlumbingRows, xcswapRowFromOrder,
   XCSWAP_EMITTER_ACCOUNT, type ActivityRow,
 } from '../src/services/explorerService.ts'
 
@@ -27,7 +28,7 @@ const swap = row({ type: 'xcswap', assetIn: aUSDC, amountIn: '2000000', xcswapDe
 // The Router sell the emitter dispatched: same extrinsic, same asset in, same amount in.
 const routerLeg = row({ type: 'trade', assetIn: aUSDC, amountIn: '2000000', assetOut: WETH, amountOut: '808316798348126' })
 // The NTT settlement, whose actor is the emitter contract.
-const bridgeLeg = row({ type: 'xcm', who: { accountId: XCSWAP_EMITTER_ACCOUNT } as NonNullable<ActivityRow['who']>, asset: WETH, amount: '808310000000000' })
+const bridgeLeg = row({ type: 'xcm', who: { accountId: XCSWAP_EMITTER_ACCOUNT } as NonNullable<ActivityRow['who']>, xcmDir: 'out', asset: WETH, amount: '808310000000000' })
 
 describe('suppressXcswapPlumbingRows', () => {
   it('folds the Router sell and the NTT settlement behind the swap', () => {
@@ -44,7 +45,7 @@ describe('suppressXcswapPlumbingRows', () => {
     expect(suppressXcswapPlumbingRows([swap, routerLeg, bridgeLeg]).map(r => r.type)).toEqual(['xcswap'])
     expect(suppressXcswapPlumbingRows.length, 'a keepPot-style escape hatch came back').toBe(1)
     const fold = explorerService.slice(explorerService.indexOf('async function suppressActivityPlumbing'))
-    expect(fold.slice(0, 600)).toContain('suppressXcswapPlumbingRows(suppressIcePotSettlementTrades(')
+    expect(fold.slice(0, 600)).toContain('suppressXcswapPlumbingRows(await adoptOrphanXcswapLegs(suppressIcePotSettlementTrades(')
     // The ICE pot keeps its switch; only the xcswap call lost one.
     expect(fold.slice(0, 600)).toContain('suppressSubordinateActivityRows(rows), opts.keepPot)')
   })
@@ -123,6 +124,60 @@ describe('suppressXcswapPlumbingRows', () => {
 // that produces it is already folded away as plumbing — and it lands on neither
 // the chain the caller started on nor the one the swap is going to. A row that
 // names it invites the reader to think the swap delivered WETH to NEAR.
+// A feed that loads the NTT leg but not the swap — the Cross-chain filter, the WETH
+// page, the emitter's own account page — showed /extrinsic/14865831-2 as a Wormhole
+// send by a proxy contract. The swap's row now stands in for the orphaned leg.
+describe('adoptOrphanXcswapLegs', () => {
+  const order = {
+    block_height: 100, event_index: 7, extrinsic_index: 2, ts: '2026-09-10 12:04:36',
+    transfer_sequence: '96', deposit_address: '0xe591373ec7f98038d13356415285e7aa8b48c0b1', caller: '0xb3bab5257a26eb6444f85706133bb2e06f422d2f',
+    caller_account_id: '0x45544800b3bab5257a26eb6444f85706133bb2e06f422d2f0000000000000000', asset_in: 1003, amount_in: '2000000', eth_out: '808310000000000', max_relay_fee: '1',
+  }
+  const fakeClient = (queries: string[]) => ({
+    query: async ({ query }: { query: string }) => {
+      queries.push(query)
+      return { json: async () => (query.includes('xcswap_orders') ? [order] : []) }
+    },
+  }) as unknown as ClickHouseClient
+
+  it('stands the swap in for a leg loaded without it, and the fold then drops the leg', async () => {
+    const queries: string[] = []
+    initExplorerService(fakeClient(queries))
+    const other = row({ type: 'transfer', blockHeight: 99, extrinsicIndex: 1 })
+    const out = suppressXcswapPlumbingRows(await adoptOrphanXcswapLegs([bridgeLeg, other]))
+    expect(out.map(r => r.type)).toEqual(['xcswap', 'transfer'])
+    expect(out[0].who?.accountId).toBe(order.caller_account_id)
+  })
+
+  // The Cross-chain filter is where the leg is loaded without the swap, and it is
+  // applied after the plumbing pass: an adopted swap the filter then dropped left
+  // the swap missing from that feed altogether.
+  it('keeps the adopted swap through the Cross-chain and the Trade filters alike', async () => {
+    initExplorerService(fakeClient([]))
+    const folded = suppressXcswapPlumbingRows(await adoptOrphanXcswapLegs([bridgeLeg]))
+    expect(folded.filter(r => activityTypeMatchesFamily(r.type, 'xcm')).map(r => r.type)).toEqual(['xcswap'])
+    expect(folded.filter(r => activityTypeMatchesFamily(r.type, 'trade')).map(r => r.type)).toEqual(['xcswap'])
+    expect(folded.filter(r => activityTypeMatchesFamily(r.type, 'transfer'))).toEqual([])
+  })
+
+  // On an asset page the row shows only the asset sold, so a swap that sold
+  // something else does not belong there; its WETH leg is the route's plumbing.
+  it('adopts on an asset page only a swap that sold that asset, and drops the leg elsewhere', async () => {
+    initExplorerService(fakeClient([]))
+    const other = row({ type: 'transfer', blockHeight: 99, extrinsicIndex: 1 })
+    expect((await adoptOrphanXcswapLegs([bridgeLeg, other], { assetId: WETH.assetId })).map(r => r.type)).toEqual(['transfer'])
+    expect((await adoptOrphanXcswapLegs([bridgeLeg], { assetId: aUSDC.assetId })).map(r => r.type)).toEqual(['xcswap'])
+  })
+
+  it('reads nothing when the swap is already in the page or no leg is', async () => {
+    const queries: string[] = []
+    initExplorerService(fakeClient(queries))
+    expect(await adoptOrphanXcswapLegs([swap, bridgeLeg])).toEqual([swap, bridgeLeg])
+    expect(await adoptOrphanXcswapLegs([routerLeg])).toEqual([routerLeg])
+    expect(queries.filter(q => q.includes('xcswap_orders'))).toEqual([])
+  })
+})
+
 describe('xcswapRowFromOrder', () => {
   const order = {
     block_height: 14802880, event_index: 105, extrinsic_index: 2, ts: '2026-09-19 21:48:42',
