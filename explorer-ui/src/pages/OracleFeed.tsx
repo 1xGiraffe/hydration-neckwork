@@ -4,8 +4,10 @@ import { useNow } from '../hooks/useNow'
 import { Link, paths, setPage, setQuery, usePageParam, useQueryValue } from '../router'
 import { AddrPill, ChartSkeleton, Crumbs, EmptyRow, F, MomentLink, Pager, TableSkeleton } from '../components/ui'
 import { ChartLegend, MultiLineChart, type AreaSeries } from '../components/HdxCharts'
+import { chartSeries, fmtChangePct } from './oracleFeedModel'
 import { DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
-import { Age, AssetMini, ConsumerList, Dur, FeedValue, fmtRatio, isUsdPair, KindBadge, SourceCell, STATUS_LABEL, StatusDot, ageNow } from '../components/OracleParts'
+import { Age, AssetMini, ConsumerList, Dur, FeedValue, KindBadge, SourceCell, StatusDot } from '../components/OracleParts'
+import { ageNow, fmtRatio, isUsdPair, STATUS_LABEL } from '../components/oracleFormat'
 import { useOracleFeed, type EmaUpdateRow, type FeedRange, type FeedUpdateRow, type OracleFeedDetail } from '../api/oracles'
 
 // /oracle/:feed — one feed's delivery: what it is, who pushes it, who reads it,
@@ -13,12 +15,6 @@ import { useOracleFeed, type EmaUpdateRow, type FeedRange, type FeedUpdateRow, t
 // beside it, and every update. An EMA pair shows its Short and Day averages and
 // the last updates the explorer holds; an adapter with no history of its own (a
 // composite, a constant) shows what it is made of.
-
-/** A move between updates: two decimals, more when it is under a hundredth of a percent (a 6-hourly rate step). */
-export function fmtChangePct(pct: number): string {
-  const a = Math.abs(pct)
-  return (pct >= 0 ? '+' : '') + pct.toFixed(a > 0 && a < 0.01 ? 4 : 2) + '%'
-}
 
 const RANGES: { key: FeedRange; label: string }[] = [
   { key: '7d', label: '7D' }, { key: '30d', label: '30D' }, { key: '12m', label: '12M' }, { key: 'all', label: 'All' },
@@ -30,15 +26,6 @@ function Card({ k, v, s }: { k: string; v: ReactNode; s?: ReactNode }) {
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return <div className="orc-detail-row"><span className="orc-detail-k">{label}</span><span className="orc-detail-v">{children}</span></div>
-}
-
-const SERIES_COLOR: Record<string, string> = { value: 'var(--accent)', market: 'var(--sky)', short: 'var(--accent)', day: 'var(--sky)' }
-
-/** The drawn lines: a series with no point in the window is neither drawn nor named in the legend. */
-export function chartSeries(chart: OracleFeedDetail['chart']): AreaSeries[] {
-  return (chart?.series ?? []).filter(s => s.values.some(v => v != null)).map(s => ({
-    key: s.key, label: s.label, color: SERIES_COLOR[s.key] ?? 'var(--accent)', values: s.values, dashed: s.key === 'market' || s.key === 'day',
-  }))
 }
 
 function FeedChartCard({ d, range }: { d: OracleFeedDetail; range: FeedRange }) {
