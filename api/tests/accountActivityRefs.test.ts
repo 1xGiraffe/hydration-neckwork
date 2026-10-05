@@ -96,7 +96,7 @@ describe('account-activity reference reads limit per account, then merge', () =>
     const helperEnd = explorerService.indexOf('function accountActivityRefsSql', helperStart)
     expect(helperStart).toBeGreaterThan(-1)
 
-    expect(occurrences(explorerService, 'FROM price_data.account_activity_v3\n')).toBe(6)
+    expect(occurrences(explorerService, 'FROM price_data.account_activity_v3\n')).toBe(7) // + the FINAL source-watermark read (activitySourceRefs)
     for (let at = explorerService.indexOf('FROM price_data.account_activity_v3\n'); at > -1;
       at = explorerService.indexOf('FROM price_data.account_activity_v3\n', at + 1)) {
       if (at > helperStart && at < helperEnd) continue
@@ -135,8 +135,12 @@ describe('the account activity index has exactly one table behind it', () => {
     // only max(block_height) for the account — it is what keeps an idle
     // account's page from rebuilding every few seconds.
     // 9: the account watermark reads its max block from account_activity_bounds,
-    // the max-state twin, rather than aggregating the v3 prefix.
-    expect(occurrences(explorerService, 'price_data.account_activity_v3')).toBe(9)
+    // the max-state twin, rather than aggregating the v3 prefix. 10: the
+    // leaderboard's per-tag reference sums (activityLeaderboardTagRefs), the bound
+    // an uncounted tag row is held to. 11: the activity totals' source watermark
+    // (activitySourceRefs: rows at or below a count's head, so backward ingestion
+    // re-queues the entity).
+    expect(occurrences(explorerService, 'price_data.account_activity_v3')).toBe(11)
     expect(occurrences(affinityService, 'price_data.account_activity_v3')).toBe(2)
   })
 
@@ -148,14 +152,19 @@ describe('the account activity index has exactly one table behind it', () => {
     expect(occurrences(materializedViews, 'price_data.account_activity_v3_mv TO price_data.account_activity_v3 ')).toBe(1)
   })
 
-  // The repointed reads are deliberately non-FINAL: `account` leads the sort key, so
+  // The repointed reads are deliberately non-FINAL (the one FINAL read, the activity
+  // totals' source watermark, counts deduplicated identities on purpose and is pinned in
+  // accountDirectoryActivity.test.ts): `account` leads the sort key, so
   // a pinned account prunes to its own granules, while FINAL would force a merging
   // read across the partition set. Un-merged ReplacingMergeTree duplicates are
   // collapsed by the callers' own GROUP BY / groupBitmap instead.
   it('keeps every repointed read off FINAL', () => {
     const reads = explorerService.split('FROM price_data.account_activity_v3\n').slice(1)
-    expect(reads).toHaveLength(6)
+    expect(reads).toHaveLength(7)
     for (const read of reads) expect(read.slice(0, 400)).not.toContain('FINAL')
+    // The source watermark's FINAL read names its table through ACTIVITY_SOURCE_TABLES.
+    expect(occurrences(explorerService, 'FROM price_data.account_activity_v3 FINAL\n')).toBe(0)
+    expect(explorerService).toContain(`activity: { table: 'price_data.account_activity_v3', column: 'account'`)
 
     const affinityReads = affinityService.split('FROM price_data.account_activity_v3\n').slice(1)
     expect(affinityReads).toHaveLength(2)

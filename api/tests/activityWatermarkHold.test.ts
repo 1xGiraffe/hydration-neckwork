@@ -33,7 +33,12 @@ const constant = (name: string): number => {
 describe('a count is held for as long as the scope has not acted', () => {
   it('keys the exact recount on the watermark and holds only a complete, current count', () => {
     const held = body('async function heldActivityTotal')
-    expect(held).toContain('cachedFound(`${key}:count:w${mark}`, ACTIVITY_WATERMARK_HOLD_MS')
+    expect(held).toContain('cachedFound(heldActivityTotalKey(key, mark), ACTIVITY_WATERMARK_HOLD_MS')
+    expect(body('function heldActivityTotalKey')).toContain('return `${key}:count:w${mark}`')
+    // The sweep's fresh recount installs under the same key and the same hold condition.
+    const install = body('export function installActivityListTotal')
+    expect(install).toContain('if (counted.complete && builtAtWatermark(counted.generation, mark))')
+    expect(install).toContain('cacheInstall(heldActivityTotalKey(key, mark), counted, ACTIVITY_WATERMARK_HOLD_MS)')
     // Complete, because a partial total is counted to a frontier that moves with the head
     // rather than with the scope; current, because a count made while a superseded
     // snapshot was still being served predates the act that moved the watermark.
@@ -184,7 +189,9 @@ describe('every scoped activity total is counted through the one path', () => {
   })
 
   it('counts and locates in exactly one place each, behind the hold', () => {
-    expect(sites(/countAccountActivity\(/g)).toBe(2)        // definition + heldActivityTotal
+    // definition + heldActivityTotal + the activity sweep's fresh recount (ACTIVITY_RECOUNT_DEPS,
+    // which bypasses the hold on purpose and hands its count back to it)
+    expect(sites(/countAccountActivity\(/g)).toBe(3)
     expect(body('async function heldActivityTotal')).toContain('countAccountActivity(accounts, query.type')
     expect(sites(/heldActivityTotal\(/g)).toBe(2)
     expect(sites(/locatedAccountActivityPage\(/g)).toBe(2)  // definition + heldLocatedActivityPage
@@ -198,9 +205,13 @@ describe('every scoped activity total is counted through the one path', () => {
   })
 
   it('sweeps the directories through the very endpoints the detail pages call', () => {
-    const leaderboard = body('async function activityLeaderboardTotal')
-    expect(leaderboard).toContain('getTagListTotal(tag.tagId, query)')
-    expect(leaderboard).toContain('getAddressListTotal(account, query)')
+    // The activity ranking resolves the detail pages' own scopes and cache key, and
+    // counts through their counting function fresh (a backfill below the scope's head
+    // moves neither cache key), installing the count back under that key.
+    const leaderboard = body('async function activityLeaderboardScope')
+    expect(leaderboard).toContain('tagListScope(tag.tagId)')
+    expect(leaderboard).toContain('await addressListScope(account)')
+    expect(body('export async function recountActivityLeaderboardMember')).toContain('installActivityListTotal(scope.key, mark, counted)')
     expect(body('async function refreshContractActivityCounts'))
       .toContain("getAddressListTotal(address, { tab: 'activity', type: 'all' })")
     expect(body('async function sweepOneFoldGroup'))

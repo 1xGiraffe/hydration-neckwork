@@ -9,6 +9,13 @@ interface Entry<T> { value: T; expiresAt: number; freshUntil?: number; lastAcces
 
 const store = new Map<string, Entry<unknown>>()
 const inflight = new Map<string, Promise<unknown>>()
+// Per-key write epochs (cacheInstall). Every load takes the sequence's value when it
+// starts; an install raises its key's epoch past every load already running, so a load
+// that started before the install and resolves after it is returned to its caller but
+// never written over the installed value. Recorded only while a load is in flight on the
+// key (no other load can predate the install), and dropped when that load settles.
+let writeSequence = 0
+const installEpochs = new Map<string, number>()
 let accessSequence = 0
 const maxEntries = (() => {
   const parsed = Number(process.env.API_CACHE_MAX_ENTRIES?.trim() || '5000')
@@ -59,11 +66,14 @@ function prune(now: number): void {
 }
 
 function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: number, fn: () => Promise<T>, generation?: number, keepIf?: (value: T) => boolean): Promise<T> {
+  const startEpoch = writeSequence
   const pending = (async () => {
     try {
       const value = await fn()
       const resolvedAt = Date.now()
-      if (keepIf == null || keepIf(value)) {
+      // An install landed while this load ran: its value is the newer one (see installEpochs).
+      const superseded = (installEpochs.get(key) ?? -1) > startEpoch
+      if (!superseded && (keepIf == null || keepIf(value))) {
         store.set(key, {
           value,
           ...(freshMs == null ? {} : { freshUntil: resolvedAt + freshMs }),
@@ -75,7 +85,10 @@ function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: numb
       }
       return value
     } finally {
+      // At most one load per key is in flight (every caller checks first), so this
+      // load's end is also the end of the epoch it alone could have violated.
       inflight.delete(key)
+      installEpochs.delete(key)
     }
   })()
   inflight.set(key, pending)
@@ -86,6 +99,8 @@ function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: numb
 export function resetCacheForTests(): void {
   store.clear()
   inflight.clear()
+  installEpochs.clear()
+  writeSequence = 0
   lastSweepAt = 0
 }
 
@@ -196,6 +211,34 @@ export function cacheRefresh<T>(key: string, freshMs: number, staleMs: number, f
   return loadAndCache(key, freshMs, staleMs, fn, generation)
 }
 
+// Install a value a background pass has just computed itself, replacing whatever the
+// key held. For an owner that must bypass the cache to get a FRESH answer (a sweep
+// recount that a key-stable entry would otherwise satisfy with the value it exists to
+// replace) and then hand that answer to the readers of the same key. `freshMs` omitted
+// stores a plain TTL entry (cached/cachedFound); given, a cachedSwr entry fresh for
+// that long, carrying `generation`. A reader's load already in flight on the key keeps
+// its single flight and still answers its own callers, but it started before this install
+// and must not overwrite it when it resolves (installEpochs): it may have read the very
+// state the installed value was computed to replace.
+export function cacheInstall<T>(key: string, value: T, staleMs: number, freshMs?: number, generation?: number): void {
+  assertDuration('staleMs', staleMs)
+  if (freshMs != null) {
+    assertDuration('freshMs', freshMs)
+    if (staleMs < freshMs) throw new RangeError('staleMs must be greater than or equal to freshMs')
+  }
+  if (inflight.has(key)) installEpochs.set(key, ++writeSequence)
+  const at = Date.now()
+  store.delete(key)
+  store.set(key, {
+    value,
+    ...(freshMs == null ? {} : { freshUntil: at + freshMs }),
+    ...(generation == null ? {} : { generation }),
+    expiresAt: at + staleMs,
+    lastAccessedAt: nextAccess(),
+  })
+  prune(at)
+}
+
 // Adopt an already-computed value — a page persisted to ClickHouse by an earlier
 // process — as a key's STALE value. It is never treated as fresh, so the first
 // reader serves it immediately and starts the refresh that replaces it, instead
@@ -234,4 +277,14 @@ function occupied(key: string, now: number): boolean {
   if (inflight.has(key)) return true
   const hit = store.get(key)
   return hit != null && hit.expiresAt > now
+}
+
+/**
+ * The value a key holds right now (fresh or stale, not yet expired), without
+ * loading, touching or refreshing it. For a page builder that reuses an
+ * expensive per-row value only when someone already computed it.
+ */
+export function peekCached<T>(key: string): T | undefined {
+  const hit = store.get(key) as Entry<T> | undefined
+  return hit != null && hit.expiresAt > Date.now() ? hit.value : undefined
 }

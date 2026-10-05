@@ -171,3 +171,64 @@ describe('cachedSwr generation', () => {
     expect(built).toBe(2)
   })
 })
+
+// A sweep installs a value it computed fresh while a reader's load of the same key is
+// still running. That load began before the install — it may have read the very state the
+// installed value replaces — so when it resolves it answers its own caller but must not
+// overwrite the installed value.
+describe('cacheInstall vs an in-flight load', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(r => { resolve = r })
+    return { promise, resolve }
+  }
+
+  it('discards a load that started before the install and finished after it', async () => {
+    const { cachedSwr, cacheInstall, peekCached } = await import('../src/services/cache.ts')
+    const gate = deferred<string>()
+    const reader = cachedSwr('k', 60_000, 600_000, () => gate.promise, 1)
+    cacheInstall('k', 'installed', 600_000, 60_000, 1)
+    gate.resolve('old-read')
+    // The reader still gets its own answer …
+    await expect(reader).resolves.toBe('old-read')
+    // … but the key keeps the installed value.
+    expect(peekCached('k')).toBe('installed')
+  })
+
+  it('does the same for a plain cached() load and a held cachedFound() load', async () => {
+    const { cached, cachedFound, cacheInstall, peekCached } = await import('../src/services/cache.ts')
+    const a = deferred<number>()
+    const b = deferred<number>()
+    const p1 = cached('a', 60_000, () => a.promise)
+    const p2 = cachedFound('b', 60_000, () => b.promise)
+    cacheInstall('a', 2, 60_000)
+    cacheInstall('b', 2, 60_000)
+    a.resolve(1)
+    b.resolve(1)
+    expect(await p1).toBe(1)
+    expect(await p2).toBe(1)
+    expect(peekCached('a')).toBe(2)
+    expect(peekCached('b')).toBe(2)
+  })
+
+  it('writes a load that started after the install, and one with no install at all', async () => {
+    const { cacheInstall, cacheRefresh, peekCached } = await import('../src/services/cache.ts')
+    const first = deferred<string>()
+    const before = cacheRefresh('k', 60_000, 600_000, () => first.promise)
+    cacheInstall('k', 'installed', 600_000, 60_000)
+    first.resolve('stale')
+    await before
+    expect(peekCached('k')).toBe('installed')
+    // The epoch does not outlive the load it guarded against: a later refresh lands.
+    await cacheRefresh('k', 60_000, 600_000, async () => 'newer')
+    expect(peekCached('k')).toBe('newer')
+    // An install with nothing in flight leaves the next load free to land too.
+    cacheInstall('j', 'installed', 600_000, 60_000)
+    await cacheRefresh('j', 60_000, 600_000, async () => 'later')
+    expect(peekCached('j')).toBe('later')
+  })
+})
