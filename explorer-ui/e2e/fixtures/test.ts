@@ -1,6 +1,6 @@
 import type { Page, Route } from '@playwright/test'
 import { expect, test as base } from '@playwright/test'
-import { mockSync, buildAccountsForViewer } from '../../tests/fixtures/mockApi'
+import { mockSync, mockVolumeHistory, buildAccountsForViewer } from '../../tests/fixtures/mockApi'
 import type { ActivityRow } from '../../src/types'
 import type {
   AccountRef, ListDetailResponse, ListTagDetail, ListSummaryRef, MeResponse, Tag, TagMapResponse, TagDetail,
@@ -734,6 +734,12 @@ async function handleUserApi(state: UserMockState, route: Route): Promise<void> 
   }
   if (method === 'GET' && (m = path.match(/^\/user\/list-tag\/([^/]+)\/([^/]+)\/(?:activity|extrinsics|events|votes|value-events)$/))) {
     await fulfillJson(route, 200, [])
+    return
+  }
+  if (method === 'GET' && (m = path.match(/^\/user\/list-tag\/([^/]+)\/([^/]+)\/volume-history$/))) {
+    const detail = buildListTagDetail(state, decodeURIComponent(m[1]), decodeURIComponent(m[2]))
+    if (!detail) { await fulfillJson(route, 404, { error: 'not found' }); return }
+    await fulfillJson(route, 200, mockVolumeHistory(detail.tradingVolumeUsd, detail.tagId, url.searchParams))
     return
   }
   if (method === 'GET' && (m = path.match(/^\/user\/list-tag\/([^/]+)\/([^/]+)$/))) {

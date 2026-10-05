@@ -1,5 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- the page plus the pure tag-order helper its tests exercise directly */
-import { lazy, Suspense, useState } from 'react'
+import { Suspense, useState } from 'react'
+import { lazyWithReload } from '../lazyWithReload'
 import * as Dialog from '@radix-ui/react-dialog'
 import { userApi } from '../api/explorer'
 import { AccountPicker } from '../components/AccountPicker'
@@ -12,7 +13,7 @@ import { AddrPill, Crumbs, DetailTabs, ProfilePageSkeleton, TagIcon, noAutofill 
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import type { AccountRef, ListSummaryRef, ListTagDetail } from '../types'
 
-const ListFormDialog = lazy(() => import('../components/ListFormDialog').then(m => ({ default: m.ListFormDialog })))
+const ListFormDialog = lazyWithReload(() => import('../components/ListFormDialog').then(m => ({ default: m.ListFormDialog })))
 
 // Duplicated (in full) from Lists.tsx rather than imported: both pages are
 // separate route chunks, and importing across them would drag the whole

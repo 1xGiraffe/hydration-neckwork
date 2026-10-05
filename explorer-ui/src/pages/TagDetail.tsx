@@ -1,4 +1,5 @@
-import { lazy, Suspense, useState } from 'react'
+import { Suspense, useState } from 'react'
+import { lazyWithReload } from '../lazyWithReload'
 import { blockRangeForWindow } from '../utils/chartRefine'
 import { useTag, useTagActivityCounts, useTagListCount, useTagMembers, useTagValueEvents, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
@@ -13,6 +14,7 @@ import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
 import { moneyMarketDebtUsd, profileTabs, resolveProfileView, ProfileStats, PortfolioChart, VolumeSection } from '../components/AccountSections'
+import { SectionBoundary } from '../components/SectionBoundary'
 import { OrdersTab } from '../components/positions/OrdersTab'
 import { LiquidityTab } from '../components/positions/LiquidityTab'
 import { BorrowTab } from '../components/positions/BorrowTab'
@@ -24,7 +26,7 @@ import { listForTag, looksLikeUserTagId, tagMapStatus, useTagMapVersion } from '
 import { ListTagDetail } from './ListTagDetail'
 import { usePublicListTagList } from '../hooks/useUser'
 
-const ConnectDialog = lazy(() => import('../components/ConnectDialog').then(m => ({ default: m.ConnectDialog })))
+const ConnectDialog = lazyWithReload(() => import('../components/ConnectDialog').then(m => ({ default: m.ConnectDialog })))
 
 // While a session exists but /user/tag-map hasn't answered yet, a UUID-shaped
 // id might still turn out to be a user tag — showing the plain page skeleton
@@ -178,69 +180,79 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
                   not a bare list of addresses. Falls back to the plain member
                   pills while the rows load — the names are already known. */}
               <div className="sec-title">Accounts · {members.length}</div>
-              {memberRows.data?.rows.length
-                ? <AccountsTable rows={memberRows.data.rows} skeletonRows={Math.min(members.length, 12)} memberView />
-                : <div className="panel"><table className="tbl">
-                  <thead><tr><th>Account</th></tr></thead>
-                  <tbody>
-                    {memberRows.isLoading
-                      ? <TableSkeleton cols={1} rows={Math.min(members.length, 8)} />
-                      : members.map(m => (
-                        <tr key={m.accountId} {...rowNav(accountHref(m))}>
-                          <td>
-                            <span className="row gap6" style={{ alignItems: 'center' }}>
-                              <AddrPill account={m} noCopy noTag />
-                              <Copy text={m.address} />
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table></div>}
+              <SectionBoundary label="Accounts" resetKey={tagId}>
+                {memberRows.data?.rows.length
+                  ? <AccountsTable rows={memberRows.data.rows} skeletonRows={Math.min(members.length, 12)} memberView />
+                  : <div className="panel"><table className="tbl">
+                    <thead><tr><th>Account</th></tr></thead>
+                    <tbody>
+                      {memberRows.isLoading
+                        ? <TableSkeleton cols={1} rows={Math.min(members.length, 8)} />
+                        : members.map(m => (
+                          <tr key={m.accountId} {...rowNav(accountHref(m))}>
+                            <td>
+                              <span className="row gap6" style={{ alignItems: 'center' }}>
+                                <AddrPill account={m} noCopy noTag />
+                                <Copy text={m.address} />
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table></div>}
+              </SectionBoundary>
 
-              <CloseAccountsSection tagId={tagId} />
+              <SectionBoundary label="Close accounts" resetKey={tagId}>
+                <CloseAccountsSection tagId={tagId} />
+              </SectionBoundary>
 
-              <PortfolioChart title="Value" perfKey={`tag:${tagId}`} netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data}
-                exHdxSeries={data.portfolioSeriesExHdx} exHdxNetUsd={data.portfolioExHdxUsd == null ? undefined : data.portfolioExHdxUsd - debtUsd}
-                refine={tagHistoryBlocks ? async (fromSec, toSec) => {
-                  const range = blockRangeForWindow(data.portfolioDates ?? [], tagHistoryBlocks, fromSec, toSec)
-                  if (!range) return null
-                  const w = await api.tagHistoryWindow(tagId, range.fromBlock, range.toBlock)
-                  // See the account page: both curves refine together or neither does.
-                  const overlay = w.portfolioSeriesExHdx?.length === w.portfolioSeries.length ? w.portfolioSeriesExHdx : undefined
-                  return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates, overlay } : null
-                } : undefined} />
+              <SectionBoundary label="Value" resetKey={tagId}>
+                <PortfolioChart title="Value" perfKey={`tag:${tagId}`} netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data}
+                  exHdxSeries={data.portfolioSeriesExHdx} exHdxNetUsd={data.portfolioExHdxUsd == null ? undefined : data.portfolioExHdxUsd - debtUsd}
+                  refine={tagHistoryBlocks ? async (fromSec, toSec) => {
+                    const range = blockRangeForWindow(data.portfolioDates ?? [], tagHistoryBlocks, fromSec, toSec)
+                    if (!range) return null
+                    const w = await api.tagHistoryWindow(tagId, range.fromBlock, range.toBlock)
+                    // See the account page: both curves refine together or neither does.
+                    const overlay = w.portfolioSeriesExHdx?.length === w.portfolioSeries.length ? w.portfolioSeriesExHdx : undefined
+                    return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates, overlay } : null
+                  } : undefined} />
+              </SectionBoundary>
 
-              <VolumeSection scope={{ kind: 'tag', tagId }} tradingVolumeUsd={data.tradingVolumeUsd} />
+              <SectionBoundary label="Volume" resetKey={tagId}>
+                <VolumeSection scope={{ kind: 'tag', tagId }} tradingVolumeUsd={data.tradingVolumeUsd} />
+              </SectionBoundary>
               </>)}
 
-              {activeView === 'balances' && (
-              <BalancesTreemap balances={balances} balanceHistory={balanceHistory}
-                refineWindow={(fromBlock, toBlock) => api.tagHistoryWindow(tagId, fromBlock, toBlock)} />
-              )}
+              <SectionBoundary label="This tab" resetKey={`${tagId}:${activeView}`}>
+                {activeView === 'balances' && (
+                <BalancesTreemap balances={balances} balanceHistory={balanceHistory}
+                  refineWindow={(fromBlock, toBlock) => api.tagHistoryWindow(tagId, fromBlock, toBlock)} />
+                )}
 
-              {activeView === 'orders' && (
-                <OrdersTab scope={{ kind: 'tag', tagId }} activeDcas={activeDcas} openLimitOrders={limitOrders} showOwner
-                  headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />
-              )}
+                {activeView === 'orders' && (
+                  <OrdersTab scope={{ kind: 'tag', tagId }} activeDcas={activeDcas} openLimitOrders={limitOrders} showOwner
+                    headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />
+                )}
 
-              {activeView === 'liquidity' && (
-                <LiquidityTab scope={{ kind: 'tag', tagId }} positions={liquidityPositions} farmRewards={data.farmRewards ?? null} showOwner />
-              )}
+                {activeView === 'liquidity' && (
+                  <LiquidityTab scope={{ kind: 'tag', tagId }} positions={liquidityPositions} farmRewards={data.farmRewards ?? null} showOwner />
+                )}
 
-              {/* Per member, not summed: liquidation happens per account and
-                  DefiSim simulates one account at a time. */}
-              {activeView === 'borrow' && <BorrowTab areas={borrowAreas} showOwner />}
+                {/* Per member, not summed: liquidation happens per account and
+                    DefiSim simulates one account at a time. */}
+                {activeView === 'borrow' && <BorrowTab areas={borrowAreas} showOwner />}
 
-              {activeView === 'activity' && <ScopedActivity scope={{ kind: 'tag', tagId }} tab="activity" />}
+                {activeView === 'activity' && <ScopedActivity scope={{ kind: 'tag', tagId }} tab="activity" />}
 
-              {activeView === 'extrinsics' && <ScopedActivity scope={{ kind: 'tag', tagId }} tab="extrinsics" />}
+                {activeView === 'extrinsics' && <ScopedActivity scope={{ kind: 'tag', tagId }} tab="extrinsics" />}
 
-              {activeView === 'events' && <ScopedActivity scope={{ kind: 'tag', tagId }} tab="events" />}
+                {activeView === 'events' && <ScopedActivity scope={{ kind: 'tag', tagId }} tab="events" />}
 
-              {activeView === 'votes' && <VotesTab scope={{ kind: 'tag', tagId }} />}
+                {activeView === 'votes' && <VotesTab scope={{ kind: 'tag', tagId }} />}
 
-              {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'tag', tagId }} />}
+                {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'tag', tagId }} />}
+              </SectionBoundary>
             </>
           )
         })()}

@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
+import { RootErrorBoundary } from './components/RootErrorBoundary'
 import { shouldRetryQuery } from './queryRetry'
 import { LIVE_PUSH_KEYS, POOL_PUSH_KEYS, PRICE_PUSH_KEYS, subscribeHead } from './live'
 import './styles/global.css'
@@ -37,9 +38,11 @@ subscribeHead(({ poolOnly, prices, pricesOnly }) => {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <App />
-    </QueryClientProvider>
+    <RootErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>
+    </RootErrorBoundary>
   </StrictMode>,
 )
 

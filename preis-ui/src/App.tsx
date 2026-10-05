@@ -1,4 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazyWithReload } from './lazyWithReload'
 import Topbar from './components/Topbar'
 import ChartHeader from './components/ChartHeader'
 import Sidebar from './components/Sidebar'
@@ -37,14 +38,14 @@ const encodeLogScale = (logarithmic: boolean) => (logarithmic ? 'log' : 'linear'
 const decodeSidebarOpen = (raw: string | null) => raw !== 'false'
 const encodeSidebarOpen = (open: boolean) => (open ? 'true' : 'false')
 
-const AssetPickerDialog = lazy(() => import('./components/AssetPickerDialog'))
+const AssetPickerDialog = lazyWithReload(() => import('./components/AssetPickerDialog'))
 
 // `Chart` pulls in lightweight-charts and the whole chart-tools layer, none of
 // which the shell needs to paint: the topbar, header and sidebar render from
 // /assets and /market-stats, while the chart cannot draw until /candles answers.
 // Splitting it keeps that code out of the entry chunk. `.chart-wrap` already has
 // its height from CSS, so the Suspense fallback swaps for the canvas in place.
-const Chart = lazy(() => import('./components/Chart'))
+const Chart = lazyWithReload(() => import('./components/Chart'))
 
 function parseIntervalSlug(slug: string | undefined): OHLCVInterval {
   return INTERVALS.includes(slug as OHLCVInterval) ? (slug as OHLCVInterval) : '1h'

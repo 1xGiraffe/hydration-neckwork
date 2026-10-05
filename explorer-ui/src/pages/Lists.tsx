@@ -1,4 +1,5 @@
-import { lazy, Suspense, useState } from 'react'
+import { Suspense, useState } from 'react'
+import { lazyWithReload } from '../lazyWithReload'
 import { userApi } from '../api/explorer'
 import { useSession } from '../session'
 import { useLists, useMe, useUserMutation } from '../hooks/useUser'
@@ -9,7 +10,7 @@ import { Crumbs } from '../components/ui'
 import { PublicListsPanel } from '../components/PublicListsPanel'
 import type { ListSummaryRef, MeResponse } from '../types'
 
-const ListFormDialog = lazy(() => import('../components/ListFormDialog').then(m => ({ default: m.ListFormDialog })))
+const ListFormDialog = lazyWithReload(() => import('../components/ListFormDialog').then(m => ({ default: m.ListFormDialog })))
 
 // Always public/private — `isPersonal` (auto-created, not deletable) is a
 // backend/ownership fact, not a visibility state; a "personal" chip read as

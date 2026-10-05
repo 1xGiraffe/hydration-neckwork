@@ -1,4 +1,5 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
+import { lazyWithReload } from '../lazyWithReload'
 import { blockRangeForWindow } from '../utils/chartRefine'
 import { useAddress, useAddressHistory, useAddressValueEvents, useAccountActivityCounts, useAccountListCount, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
@@ -7,6 +8,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, useQueryValue, setQuery } from '../router'
 import { Crumbs, F, Copy, ShortAddr, ProfilePageSkeleton, DetailTabs, moduleName, emojiName, TagIcon, AccountEmoji, UserTagPill, rowNav, EmptyRow } from '../components/ui'
 import { PortfolioChart, VolumeSection, ProfileStats, moneyMarketDebtUsd, profileTabs, resolveProfileView, ProxyMultisigSection, ContractSection } from '../components/AccountSections'
+import { SectionBoundary } from '../components/SectionBoundary'
 import { OrdersTab } from '../components/positions/OrdersTab'
 import { LiquidityTab } from '../components/positions/LiquidityTab'
 import { BorrowTab } from '../components/positions/BorrowTab'
@@ -27,12 +29,12 @@ import type { ListSummaryRef } from '../types'
 // Radix + the dialog are only needed once the account owner actually opens the
 // editor, so it's a route-chunk-style lazy import (matching ConnectDialog from
 // the Topbar) rather than a static one carried by every visitor's entry chunk.
-const EditProfileDialog = lazy(() => import('../components/EditProfileDialog').then(m => ({ default: m.EditProfileDialog })))
+const EditProfileDialog = lazyWithReload(() => import('../components/EditProfileDialog').then(m => ({ default: m.EditProfileDialog })))
 
 // The contract tab (source viewer, verify form, read panel) is only relevant on
 // the few hundred contract accounts — a lazy chunk keeps it (and, one dynamic
 // import deeper, the viem ABI codec) out of every other account page load.
-const ContractTab = lazy(() => import('../components/ContractTab').then(m => ({ default: m.ContractTab })))
+const ContractTab = lazyWithReload(() => import('../components/ContractTab').then(m => ({ default: m.ContractTab })))
 
 // Hydration opens any route with the account preselected, so the app shows this
 // account's balances and positions. Deep-link to the swap page: it is the app's
@@ -228,63 +230,77 @@ export function Account({ address }: { address: string }) {
                 )
               })()}
 
-              <ContractSection contract={data.contract} now={now} />
+              <SectionBoundary label="Contract" resetKey={address}>
+                <ContractSection contract={data.contract} now={now} />
+              </SectionBoundary>
 
-              <ProxyMultisigSection proxy={data.proxy} multisig={data.multisig} memberships={data.multisigMemberships} now={now} blockSec={stats?.avgBlockSec} />
+              <SectionBoundary label="Proxy and multisig" resetKey={address}>
+                <ProxyMultisigSection proxy={data.proxy} multisig={data.multisig} memberships={data.multisigMemberships} now={now} blockSec={stats?.avgBlockSec} />
+              </SectionBoundary>
 
-              <CloseAccountsSection address={canonicalAddress ?? address} />
+              <SectionBoundary label="Close accounts" resetKey={address}>
+                <CloseAccountsSection address={canonicalAddress ?? address} />
+              </SectionBoundary>
 
-              <ListsSection publicLists={libs.data ?? []} ownLists={isOwn ? (me.data?.lists ?? []) : []} isOwn={isOwn} />
+              <SectionBoundary label="Lists" resetKey={address}>
+                <ListsSection publicLists={libs.data ?? []} ownLists={isOwn ? (me.data?.lists ?? []) : []} isOwn={isOwn} />
+              </SectionBoundary>
 
-              <PortfolioChart title="Value" perfKey={`account:${canonicalAddress ?? address}`} netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data}
-                exHdxSeries={history.data?.portfolioSeriesExHdx ?? data.portfolioSeriesExHdx} exHdxNetUsd={data.portfolioExHdxUsd == null ? undefined : data.portfolioExHdxUsd - debtUsd}
-                refine={historyBlocks ? async (fromSec, toSec) => {
-                  const range = blockRangeForWindow(history.data?.portfolioDates ?? data.portfolioDates ?? [], historyBlocks, fromSec, toSec)
-                  if (!range) return null
-                  const w = await api.addressHistoryWindow(canonicalAddress ?? address, range.fromBlock, range.toBlock)
-                  // The refined window carries the ex-HDX curve only when it covers
-                  // the same points; useZoomRefine drops a half-refined payload, so
-                  // handing over a mismatched pair would lose the zoom entirely.
-                  const overlay = w.portfolioSeriesExHdx?.length === w.portfolioSeries.length ? w.portfolioSeriesExHdx : undefined
-                  return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates, overlay } : null
-                } : undefined} />
+              <SectionBoundary label="Value" resetKey={address}>
+                <PortfolioChart title="Value" perfKey={`account:${canonicalAddress ?? address}`} netUsd={data.portfolioUsd - debtUsd} series={history.data?.portfolioSeries ?? data.portfolioSeries ?? []} dates={history.data?.portfolioDates ?? data.portfolioDates} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory} loading={history.isLoading || (history.isFetching && !history.data)} valueEvents={valueEvents.data}
+                  exHdxSeries={history.data?.portfolioSeriesExHdx ?? data.portfolioSeriesExHdx} exHdxNetUsd={data.portfolioExHdxUsd == null ? undefined : data.portfolioExHdxUsd - debtUsd}
+                  refine={historyBlocks ? async (fromSec, toSec) => {
+                    const range = blockRangeForWindow(history.data?.portfolioDates ?? data.portfolioDates ?? [], historyBlocks, fromSec, toSec)
+                    if (!range) return null
+                    const w = await api.addressHistoryWindow(canonicalAddress ?? address, range.fromBlock, range.toBlock)
+                    // The refined window carries the ex-HDX curve only when it covers
+                    // the same points; useZoomRefine drops a half-refined payload, so
+                    // handing over a mismatched pair would lose the zoom entirely.
+                    const overlay = w.portfolioSeriesExHdx?.length === w.portfolioSeries.length ? w.portfolioSeriesExHdx : undefined
+                    return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates, overlay } : null
+                  } : undefined} />
+              </SectionBoundary>
 
-              <VolumeSection scope={{ kind: 'account', address: canonicalAddress ?? address }} tradingVolumeUsd={data.tradingVolumeUsd} />
+              <SectionBoundary label="Volume" resetKey={address}>
+                <VolumeSection scope={{ kind: 'account', address: canonicalAddress ?? address }} tradingVolumeUsd={data.tradingVolumeUsd} />
+              </SectionBoundary>
               </>)}
 
-              {activeView === 'balances' && (
-              <BalancesTreemap balances={data.balances} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory}
-                refineWindow={(fromBlock, toBlock) => api.addressHistoryWindow(canonicalAddress ?? address, fromBlock, toBlock)} />
-              )}
+              <SectionBoundary label="This tab" resetKey={`${address}:${activeView}`}>
+                {activeView === 'balances' && (
+                <BalancesTreemap balances={data.balances} balanceHistory={history.data?.balanceHistory ?? data.balanceHistory}
+                  refineWindow={(fromBlock, toBlock) => api.addressHistoryWindow(canonicalAddress ?? address, fromBlock, toBlock)} />
+                )}
 
-              {activeView === 'orders' && (
-                <OrdersTab scope={{ kind: 'account', address: canonicalAddress ?? address }} activeDcas={data.activeDcas ?? []} openLimitOrders={data.openLimitOrders ?? []}
-                  headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />
-              )}
+                {activeView === 'orders' && (
+                  <OrdersTab scope={{ kind: 'account', address: canonicalAddress ?? address }} activeDcas={data.activeDcas ?? []} openLimitOrders={data.openLimitOrders ?? []}
+                    headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />
+                )}
 
-              {activeView === 'liquidity' && (
-                <LiquidityTab scope={{ kind: 'account', address: canonicalAddress ?? address }} positions={data.liquidityPositions ?? []} farmRewards={data.farmRewards ?? null} />
-              )}
+                {activeView === 'liquidity' && (
+                  <LiquidityTab scope={{ kind: 'account', address: canonicalAddress ?? address }} positions={data.liquidityPositions ?? []} farmRewards={data.farmRewards ?? null} />
+                )}
 
-              {activeView === 'borrow' && (
-                <BorrowTab areas={[{ address: canonicalAddress ?? address, markets: mmList, defisimAddress: data.evmAddress ?? explicitEvmBinding ?? data.accountId }]} />
-              )}
+                {activeView === 'borrow' && (
+                  <BorrowTab areas={[{ address: canonicalAddress ?? address, markets: mmList, defisimAddress: data.evmAddress ?? explicitEvmBinding ?? data.accountId }]} />
+                )}
 
-              {activeView === 'contract' && data.contract && (
-                <Suspense fallback={null}>
-                  <ContractTab address={data.evmAddress ?? data.contract.address} contract={data.contract} />
-                </Suspense>
-              )}
+                {activeView === 'contract' && data.contract && (
+                  <Suspense fallback={null}>
+                    <ContractTab address={data.evmAddress ?? data.contract.address} contract={data.contract} />
+                  </Suspense>
+                )}
 
-              {activeView === 'activity' && <ScopedActivity scope={{ kind: 'account', address }} tab="activity" />}
+                {activeView === 'activity' && <ScopedActivity scope={{ kind: 'account', address }} tab="activity" />}
 
-              {activeView === 'extrinsics' && <ScopedActivity scope={{ kind: 'account', address }} tab="extrinsics" />}
+                {activeView === 'extrinsics' && <ScopedActivity scope={{ kind: 'account', address }} tab="extrinsics" />}
 
-              {activeView === 'events' && <ScopedActivity scope={{ kind: 'account', address }} tab="events" />}
+                {activeView === 'events' && <ScopedActivity scope={{ kind: 'account', address }} tab="events" />}
 
-              {activeView === 'votes' && <VotesTab scope={{ kind: 'account', address }} />}
+                {activeView === 'votes' && <VotesTab scope={{ kind: 'account', address }} />}
 
-              {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'account', address }} />}
+                {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'account', address }} />}
+              </SectionBoundary>
             </>
           )
         })()}

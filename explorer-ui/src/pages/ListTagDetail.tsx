@@ -13,6 +13,7 @@ import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
 import { moneyMarketDebtUsd, profileTabs, resolveProfileView, ProfileStats, PortfolioChart, VolumeSection } from '../components/AccountSections'
+import { SectionBoundary } from '../components/SectionBoundary'
 import { OrdersTab } from '../components/positions/OrdersTab'
 import { LiquidityTab } from '../components/positions/LiquidityTab'
 import { BorrowTab } from '../components/positions/BorrowTab'
@@ -148,64 +149,72 @@ export function ListTagDetail({ listId, tagId }: { listId: string; tagId: string
                   reader was just looking at. The member pills stand in while
                   the rows load; their names are already known. */}
               <div className="sec-title">Accounts · {members.length}</div>
-              {memberRows.data?.rows.length
-                ? <AccountsTable rows={memberRows.data.rows} skeletonRows={Math.min(members.length, 12)} memberView />
-                : <div className="panel"><table className="tbl">
-                  <thead><tr><th>Account</th></tr></thead>
-                  <tbody>
-                    {memberRows.isLoading
-                      ? <TableSkeleton cols={1} rows={Math.min(members.length, 8)} />
-                      : members.map(m => (
-                        <tr key={m.accountId} {...rowNav(accountHref(m))}>
-                          <td>
-                            <span className="row gap6" style={{ alignItems: 'center' }}>
-                              <AddrPill account={m} noCopy noTag />
-                              <Copy text={m.address} />
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table></div>}
+              <SectionBoundary label="Accounts" resetKey={`${listId}:${tagId}`}>
+                {memberRows.data?.rows.length
+                  ? <AccountsTable rows={memberRows.data.rows} skeletonRows={Math.min(members.length, 12)} memberView />
+                  : <div className="panel"><table className="tbl">
+                    <thead><tr><th>Account</th></tr></thead>
+                    <tbody>
+                      {memberRows.isLoading
+                        ? <TableSkeleton cols={1} rows={Math.min(members.length, 8)} />
+                        : members.map(m => (
+                          <tr key={m.accountId} {...rowNav(accountHref(m))}>
+                            <td>
+                              <span className="row gap6" style={{ alignItems: 'center' }}>
+                                <AddrPill account={m} noCopy noTag />
+                                <Copy text={m.address} />
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table></div>}
+              </SectionBoundary>
 
-              <PortfolioChart title="Value" perfKey={`list-tag:${listId}:${tagId}`} netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data}
-                refine={historyBlocks ? async (fromSec, toSec) => {
-                  const range = blockRangeForWindow(data.portfolioDates ?? [], historyBlocks, fromSec, toSec)
-                  if (!range) return null
-                  const w = await userApi.listTagHistoryWindow(listId, tagId, range.fromBlock, range.toBlock)
-                  return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates } : null
-                } : undefined} />
+              <SectionBoundary label="Value" resetKey={`${listId}:${tagId}`}>
+                <PortfolioChart title="Value" perfKey={`list-tag:${listId}:${tagId}`} netUsd={data.portfolioUsd - debtUsd} series={portfolioSeries} dates={data.portfolioDates} balanceHistory={balanceHistory} valueEvents={valueEvents.data}
+                  refine={historyBlocks ? async (fromSec, toSec) => {
+                    const range = blockRangeForWindow(data.portfolioDates ?? [], historyBlocks, fromSec, toSec)
+                    if (!range) return null
+                    const w = await userApi.listTagHistoryWindow(listId, tagId, range.fromBlock, range.toBlock)
+                    return w.portfolioSeries.length > 1 ? { data: w.portfolioSeries, dates: w.portfolioDates } : null
+                  } : undefined} />
+              </SectionBoundary>
 
-              <VolumeSection scope={{ kind: 'list-tag', listId, tagId }} tradingVolumeUsd={data.tradingVolumeUsd} />
+              <SectionBoundary label="Volume" resetKey={`${listId}:${tagId}`}>
+                <VolumeSection scope={{ kind: 'list-tag', listId, tagId }} tradingVolumeUsd={data.tradingVolumeUsd} />
+              </SectionBoundary>
               </>)}
 
-              {activeView === 'balances' && (
-              <BalancesTreemap balances={balances} balanceHistory={balanceHistory}
-                refineWindow={(fromBlock, toBlock) => userApi.listTagHistoryWindow(listId, tagId, fromBlock, toBlock)} />
-              )}
+              <SectionBoundary label="This tab" resetKey={`${listId}:${tagId}:${activeView}`}>
+                {activeView === 'balances' && (
+                <BalancesTreemap balances={balances} balanceHistory={balanceHistory}
+                  refineWindow={(fromBlock, toBlock) => userApi.listTagHistoryWindow(listId, tagId, fromBlock, toBlock)} />
+                )}
 
-              {activeView === 'orders' && (
-                <OrdersTab scope={{ kind: 'list-tag', listId, tagId }} activeDcas={activeDcas} openLimitOrders={limitOrders} showOwner
-                  headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />
-              )}
+                {activeView === 'orders' && (
+                  <OrdersTab scope={{ kind: 'list-tag', listId, tagId }} activeDcas={activeDcas} openLimitOrders={limitOrders} showOwner
+                    headBlock={headBlock} headTime={stats?.headTime} now={now} blockSec={stats?.avgBlockSec} />
+                )}
 
-              {activeView === 'liquidity' && (
-                <LiquidityTab scope={{ kind: 'list-tag', listId, tagId }} positions={liquidityPositions} farmRewards={data.farmRewards ?? null} showOwner />
-              )}
+                {activeView === 'liquidity' && (
+                  <LiquidityTab scope={{ kind: 'list-tag', listId, tagId }} positions={liquidityPositions} farmRewards={data.farmRewards ?? null} showOwner />
+                )}
 
-              {/* Per member, not summed: liquidation happens per account and
-                  DefiSim simulates one account at a time. */}
-              {activeView === 'borrow' && <BorrowTab areas={borrowAreas} showOwner />}
+                {/* Per member, not summed: liquidation happens per account and
+                    DefiSim simulates one account at a time. */}
+                {activeView === 'borrow' && <BorrowTab areas={borrowAreas} showOwner />}
 
-              {activeView === 'activity' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} tab="activity" />}
+                {activeView === 'activity' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} tab="activity" />}
 
-              {activeView === 'extrinsics' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} tab="extrinsics" />}
+                {activeView === 'extrinsics' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} tab="extrinsics" />}
 
-              {activeView === 'events' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} tab="events" />}
+                {activeView === 'events' && <ScopedActivity scope={{ kind: 'list-tag', listId, tagId }} tab="events" />}
 
-              {activeView === 'votes' && <VotesTab scope={{ kind: 'list-tag', listId, tagId }} />}
+                {activeView === 'votes' && <VotesTab scope={{ kind: 'list-tag', listId, tagId }} />}
 
-              {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'list-tag', listId, tagId }} />}
+                {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'list-tag', listId, tagId }} />}
+              </SectionBoundary>
             </>
           )
         })()}
