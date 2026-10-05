@@ -7,15 +7,16 @@ import type { UserRevenueFlowResponse } from '../types'
 // The user river's engine. User Revenue accrues continuously — interest every
 // block, LP fees with every trade — but is BOOKED per closed hour, so there is no
 // per-event feed to stream. The river therefore streams the newest folded hour's
-// measured net rate per (stream, asset), one chain block at a time: the same
+// measured EARNING rate per (stream, asset), one chain block at a time: the same
 // "measured, not modelled" rule the protocol river's borrow drip follows. The
 // response names the hour it streams, and the page says so.
 //
 // createRateScheduler is PURE and deterministic (tests/userRevenueFlow.test.ts):
 // each drip accrues `usdPerBlock × blocks` into its own accumulator and emits a
-// particle once the accumulated amount is worth one (|acc| ≥ emitUsd), carrying
-// the WHOLE accumulated amount and its SIGN — an income flows in, a cost
-// (borrow interest, exit fees, forfeits) flows out. Value is never dropped:
+// particle once the accumulated amount is worth one (acc ≥ emitUsd), carrying
+// the WHOLE accumulated amount into the counter. Only earnings flow: the api
+// serves no cost drip, and a drip that is not positive is skipped here too.
+// Value is never dropped:
 // when the river already has `maxActive` particles in flight, the amount is
 // credited straight to the counter instead (`credit` from drain), exactly as
 // the protocol river sheds a particle.
@@ -27,18 +28,18 @@ export interface RateEmission {
   kind: 'pill' | 'mote'
   stream: string
   label: string
-  /** The drip's asset, when it names one: a HOLLAR borrow cost wears HOLLAR's colour (revenueColors.ts). */
+  /** The drip's asset, when it names one. */
   assetId?: number
-  /** Signed: < 0 flows out of the counter. */
+  /** Earned, always > 0. */
   usd: number
   /** Scheduled spawn time (ms, same clock as opts.now). */
   at: number
 }
 
 export interface RateSchedulerOptions {
-  /** An accumulator emits once its magnitude reaches this. */
+  /** An accumulator emits once it reaches this. */
   emitUsd: number
-  /** At or above this magnitude an emission is a readable pill. */
+  /** At or above this an emission is a readable pill. */
   pillUsd: number
   maxActive: number
   now: () => number
@@ -48,8 +49,8 @@ export interface RateScheduler {
   tick(drips: RateDrip[], blocks: number, spreadMs: number): void
   /** Due emissions plus the value that could not fly (credit it to the counter). */
   drain(now: number): { due: RateEmission[]; credit: number }
-  /** Net of everything accrued into the scheduler so far (emitted or credited or still accumulating). */
-  sessionNetUsd(): number
+  /** Everything earned into the scheduler so far (emitted or credited or still accumulating). */
+  sessionUsd(): number
   setMaxActive(n: number): void
   /** Particles currently scheduled or in flight, as the caller reports them. */
   setInFlight(n: number): void
@@ -77,11 +78,11 @@ export function createRateScheduler(opts: RateSchedulerOptions): RateScheduler {
       if (!(blocks > 0)) return
       const base = opts.now()
       for (const d of drips) {
-        if (!Number.isFinite(d.usdPerBlock) || d.usdPerBlock === 0) continue
+        if (!Number.isFinite(d.usdPerBlock) || d.usdPerBlock <= 0) continue
         const add = d.usdPerBlock * blocks
         session += add
         const v = (acc.get(d.key) ?? 0) + add
-        if (Math.abs(v) < opts.emitUsd) {
+        if (v < opts.emitUsd) {
           acc.set(d.key, v)
           continue
         }
@@ -94,7 +95,7 @@ export function createRateScheduler(opts: RateSchedulerOptions): RateScheduler {
         const id = `ur-${d.key}-${seq}`
         pending.push({
           id,
-          kind: Math.abs(v) >= opts.pillUsd ? 'pill' : 'mote',
+          kind: v >= opts.pillUsd ? 'pill' : 'mote',
           stream: d.stream,
           label: d.label,
           assetId: d.assetId,
@@ -115,7 +116,7 @@ export function createRateScheduler(opts: RateSchedulerOptions): RateScheduler {
       credit = 0
       return out
     },
-    sessionNetUsd: () => session,
+    sessionUsd: () => session,
     setMaxActive(n) {
       if (Number.isFinite(n) && n >= 1) maxActive = Math.floor(n)
     },

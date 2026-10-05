@@ -1660,6 +1660,7 @@ export interface UserRevenueFlowResponse {
   publishedThrough: string | null
   blockSeconds: number
   head: number
+  /** Earnings only: every drip is positive. */
   drips: { key: string; stream: string; label: string; assetId: number; usdPerBlock: number }[]
 }
 export interface UserRevenueItem { pot: string; potLabel: string; via: string; asset: AssetRef; earned: number; paid: number; net: number; unpriced: number }

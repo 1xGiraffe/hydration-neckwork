@@ -177,20 +177,25 @@ describe('/revenue/users', () => {
     expect(html).not.toContain('Net payers')
     expect(html.indexOf('Top earners')).toBeLessThan(html.indexOf('Not User Revenue'))
   })
-  it('charts a signed stream on BOTH sides (earned up, paid down), never its netted bucket', async () => {
-    const { signedColumns } = await import('../src/components/userRevenueColumns')
+  it('charts what a signed stream earned, never its netted bucket, and no cost', async () => {
+    const { earnedColumns } = await import('../src/components/userRevenueColumns')
     const d = dashboard()
-    const streams = new Set(['lp_fee_omnipool', 'mm_borrow_interest', 'mm_supply_interest'])
-    const income = signedColumns(d, '30d', 1, streams)
-    const cost = signedColumns(d, '30d', -1, streams)
-    const seg = (cols: typeof income, t: number, stream: string) => cols.find(c => c.key === String(t))?.segments.find(x => x.key === stream)?.value
-    expect(seg(income, T0, 'mm_supply_interest')).toBe(10)
-    expect(seg(cost, T0, 'mm_supply_interest')).toBe(4)
-    expect(seg(cost, T0, 'mm_borrow_interest')).toBe(1_600)
-    expect(seg(income, T0, 'mm_borrow_interest')).toBeUndefined()
+    const income = earnedColumns(d, '30d', new Set(['lp_fee_omnipool', 'mm_borrow_interest', 'mm_supply_interest']))
+    const seg = (t: number, stream: string) => income.find(c => c.key === String(t))?.segments.find(x => x.key === stream)?.value
+    expect(seg(T0, 'mm_supply_interest')).toBe(10)
+    expect(seg(T0, 'lp_fee_omnipool')).toBe(320)
+    expect(seg(T0, 'mm_borrow_interest')).toBeUndefined()
   })
-  it('shows HOLLAR interest as its own cost line in HOLLAR\'s colour, beside the rest of borrow interest', async () => {
-    const { signedColumns } = await import('../src/components/userRevenueColumns')
+  it('charts only Earned; Paid stays a breakdown column', () => {
+    const html = render()
+    const titles = [...html.matchAll(/class="sec-title"[^>]*>([^<]+)</g)].map(m => m[1])
+    expect(titles).toContain('Earned')
+    expect(titles).not.toContain('Paid')
+    expect(html).not.toContain('No costs published')
+    expect(html).toContain('<th class="num">Paid</th>')
+    expect(html).toContain('data-label="Paid"')
+  })
+  it('shows HOLLAR interest as its own cost line in HOLLAR\'s colour, beside the rest of borrow interest', () => {
     const d = dashboard()
     const hollar = { stream: 'mm_borrow_interest_hollar', label: 'HOLLAR interest', sign: 'paid' as const, revisable: false, toggle: false, coverage: 'B0', earned: 0, paid: -45_000, net: -45_000, unpriced: 0 }
     const withHollar: UserRevenueDashboard = {
@@ -207,9 +212,8 @@ describe('/revenue/users', () => {
     expect(USER_REVENUE_STREAM_COLOR.mm_borrow_interest_hollar).toBe('var(--rv-hollar)')
     // The page total is unchanged by the split: 9,637 + 40,795 − 45,000 − 4,465 + 1,018 = 1,985.
     expect(html).toContain('$1.99k')
-    // The cost chart stacks HOLLAR interest before the borrow gold, in the fixed order.
-    const cost = signedColumns(withHollar, '30d', -1, new Set(['mm_borrow_interest', 'mm_borrow_interest_hollar']))
-    expect(cost.find(c => c.key === String(T0))?.segments.map(x => x.key)).toEqual(['mm_borrow_interest_hollar', 'mm_borrow_interest'])
+    // The breakdown lists HOLLAR interest before the borrow gold, as the api orders it.
+    expect(html.indexOf('>HOLLAR interest<')).toBeLessThan(html.indexOf('>Borrow interest<'))
   })
   it('states the cut once, on the headline, and keeps the section subtitles short', () => {
     const html = render()
@@ -310,13 +314,18 @@ describe('User Revenue tab and stat', () => {
 
 describe('user river scheduler', () => {
   const make = (maxActive = 10) => createRateScheduler({ emitUsd: 0.01, pillUsd: 0.05, maxActive, now: () => 1_000 })
-  it('accrues per drip and emits signed particles carrying the whole accumulated amount', () => {
+  it('accrues per drip and emits earned particles carrying the whole accumulated amount, never a cost', () => {
     const s = make()
-    s.tick([{ key: 'a', stream: 'lp_fee_omnipool', label: 'A', usdPerBlock: 0.004 }, { key: 'b', stream: 'mm_borrow_interest', label: 'B', usdPerBlock: -0.03 }], 3, 0)
+    s.tick([
+      { key: 'a', stream: 'lp_fee_omnipool', label: 'A', usdPerBlock: 0.004 },
+      { key: 'c', stream: 'mm_supply_interest', label: 'C', usdPerBlock: 0.03 },
+      { key: 'b', stream: 'mm_borrow_interest', label: 'B', usdPerBlock: -0.03 },
+    ], 3, 0)
     const { due, credit } = s.drain(2_000)
     expect(credit).toBe(0)
-    expect(due.map(e => [e.stream, +e.usd.toFixed(3), e.kind])).toEqual(expect.arrayContaining([['lp_fee_omnipool', 0.012, 'mote'], ['mm_borrow_interest', -0.09, 'pill']]))
-    expect(+s.sessionNetUsd().toFixed(3)).toBe(-0.078)
+    expect(due.map(e => [e.stream, +e.usd.toFixed(3), e.kind])).toEqual(expect.arrayContaining([['lp_fee_omnipool', 0.012, 'mote'], ['mm_supply_interest', 0.09, 'pill']]))
+    expect(due.some(e => e.stream === 'mm_borrow_interest')).toBe(false)
+    expect(+s.sessionUsd().toFixed(3)).toBe(0.102)
   })
   it('never drops value: past the cap the amount is credited to the counter', () => {
     const s = make(1)

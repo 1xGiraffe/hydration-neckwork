@@ -3706,26 +3706,11 @@ a.rev-pill-label:hover { color: var(--accent); }
 .rev-legend-item .rev-dot { width: 7px; height: 7px; }
 /* A cost is drawn HOLLOW in its own stream's colour — sign is a treatment, not a hue. */
 .rev-dot.rev-dot-out { background: transparent; box-shadow: inset 0 0 0 2px var(--tint); }
-.rev-legend-item .rev-dot.rev-dot-out { box-shadow: inset 0 0 0 1.5px var(--tint); }
 @media (max-width: 720px) {
   .rev-river { height: 420px; }
   .rev-river-foot { justify-content: center; }
 }
 
-/* The user river (UserRevenueFlow.tsx) is SIGNED: incomes drift in like the
-   protocol river's, costs leave the counter (.rev-out) and drift to the "paid"
-   sink on the right (top on phones) — each in its own stream's colour, drawn hollow. */
-.ur-river .rev-particle.rev-out { left: 172px; }
-.rev-mote.rev-out { width: max(var(--size), 8px); height: max(var(--size), 8px); background: transparent; opacity: 1;
-  box-shadow: inset 0 0 0 2px var(--tint), 0 0 8px color-mix(in srgb, var(--tint) 45%, transparent); }
-.rev-pill.rev-out { border: 1px dashed var(--tint); background: color-mix(in srgb, var(--bg-elev2) 70%, transparent); }
-.rev-vertical.ur-river .rev-particle.rev-out { top: auto; bottom: 150px; left: var(--lane); }
-.ur-sink { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); z-index: 4; text-align: right;
-  padding: 8px 12px; border-radius: 12px; border: 1px dashed var(--text-lowest);
-  background: color-mix(in srgb, var(--bg-elev2) 60%, transparent); }
-.ur-sink-k { display: block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-low); }
-.ur-sink-v { font-size: 14px; font-weight: 600; color: var(--red); }
-.rev-vertical .ur-sink { top: 12px; right: 50%; transform: translateX(50%); text-align: center; }
 .ur-neg, .acct-bal.subtle .amt.ur-neg { color: var(--red); }
 .ur-foot-note { color: var(--text-low); }
 
@@ -4371,7 +4356,6 @@ html.rev-fs-lock #view .wrap { animation: none; }
 @keyframes revPulseFsB { 30% { transform: scale(1.045); } }
 .rev-duo-fs .rev-fullscreen .rev-counter-num { font-size: 20px; }
 .rev-duo-fs .rev-counter-sub { font-size: 10px; }
-.rev-duo-fs .ur-sink { padding: 5px 9px; }
 .rev-duo-fs .rev-ledger-mode { overflow-y: auto; padding-top: 30px; }
 .rev-duo-fs .rev-ledger-mode .rev-counter { position: static; }
 /* /revenue/users and the User Revenue tab. */
