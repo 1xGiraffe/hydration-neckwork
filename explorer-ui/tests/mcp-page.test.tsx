@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Mcp } from '../src/pages/Mcp'
+import { classifyProbe } from '../src/mcpProbe'
 import { parseRoute, paths } from '../src/router'
 
 // The /mcp page is the ONE copy of the getting-started documentation: the MCP
@@ -16,9 +17,9 @@ import { parseRoute, paths } from '../src/router'
 const MCP_URL = 'https://hydration-mcp.neckwork.net'
 const MCP_ENDPOINT = `${MCP_URL}/mcp`
 
-// A bare GET to the endpoint is answered 405 — POST-only and stateless. That is
-// the one status that means "reachable and healthy".
-const READY = { state: 'ready', status: 405, ms: 7 }
+// The probe POSTs a JSON-RPC ping; a 200 carrying the ping's empty result is the
+// one answer that means "reachable and healthy".
+const READY = { state: 'ready', status: 200, ms: 7 }
 const GATED = { state: 'key', status: 401, ms: 7 }
 
 const TOOLS = [
@@ -155,8 +156,20 @@ describe('setup snippets', () => {
 })
 
 describe('the live probe', () => {
-  it('calls only the documented 405 healthy', () => {
+  it('calls only the ping answer healthy', () => {
     expect(render({ probe: READY })).toContain('Ready')
+    expect(classifyProbe(200, { jsonrpc: '2.0', id: 'explorer-probe', result: {} })).toBe('ready')
+  })
+
+  // A placeholder page also answers 200, and a GET answers 405: neither is a
+  // ping reply, so neither may read as Ready.
+  it('classifies every other answer as a finding', () => {
+    expect(classifyProbe(200, null)).toBe('unexpected')
+    expect(classifyProbe(200, { jsonrpc: '2.0', id: 'explorer-probe', error: { code: -32601 } })).toBe('unexpected')
+    expect(classifyProbe(405, null)).toBe('unexpected')
+    expect(classifyProbe(404, null)).toBe('unexpected')
+    expect(classifyProbe(401, null)).toBe('key')
+    expect(classifyProbe(502, null)).toBe('down')
   })
 
   // A misrouted vhost answers 404, a placeholder answers 200, a banned client
@@ -175,10 +188,10 @@ describe('the live probe', () => {
     expect(html).not.toContain('>Ready')
   })
 
-  // The timing measures a GET the endpoint refuses by design. Naming the status
-  // beside it is what keeps it from reading as a handshake.
+  // The timing measures one sessionless ping. Naming the status beside it is
+  // what keeps it from reading as a handshake.
   it('labels the latency with the status it measured', () => {
-    expect(render({ probe: READY })).toContain('HTTP 405 in 7 ms')
+    expect(render({ probe: READY })).toContain('HTTP 200 in 7 ms')
   })
 })
 
