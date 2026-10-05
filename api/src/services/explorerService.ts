@@ -1,4 +1,5 @@
 import type { ClickHouseClient } from '../db/client.ts'
+import { inChunkedSql, mapParamChunks } from '../db/queryParams.ts'
 import { settledAmount } from './aaveMath.ts'
 import { onBehalfActorsFor } from './onBehalfActors.ts'
 import { usdOfRaw } from './assetValue.ts'
@@ -2479,11 +2480,14 @@ async function preTradeSpots(pairs: { priceId: number; block: number }[], window
 async function blockUnixTimes(heights: number[]): Promise<Map<number, number>> {
   const out = new Map<number, number>()
   if (!heights.length) return out
-  const res = await client.query({
-    query: `SELECT block_height, toUnixTimestamp(block_timestamp) AS ts FROM price_data.blocks WHERE block_height IN ({hs:Array(UInt32)})`,
-    query_params: { hs: heights }, format: 'JSONEachRow',
-  })
-  for (const r of await res.json<{ block_height: number; ts: number }>()) out.set(Number(r.block_height), Number(r.ts))
+  const chunks = await mapParamChunks(heights, async hs => {
+    const res = await client.query({
+      query: `SELECT block_height, toUnixTimestamp(block_timestamp) AS ts FROM price_data.blocks WHERE block_height IN ({hs:Array(UInt32)})`,
+      query_params: { hs }, format: 'JSONEachRow',
+    })
+    return res.json<{ block_height: number; ts: number }>()
+  }, { concurrency: CHUNK_QUERY_CONCURRENCY })
+  for (const r of chunks.flat()) out.set(Number(r.block_height), Number(r.ts))
   return out
 }
 
@@ -5475,35 +5479,46 @@ async function erc20WalletHoldings(h160: string): Promise<{ asset: AssetRef; raw
 // Tag pages use this instead of issuing one query per member; exact ETH-prefixed
 // and reserved forms plus the native AccountId→H160 truncation mirror the account
 // detail lookup above.
-async function erc20WalletHoldingsForAccounts(h160s: string[]): Promise<{ asset: AssetRef; raw: bigint }[]> {
+export async function erc20WalletHoldingsForAccounts(h160s: string[]): Promise<{ asset: AssetRef; raw: bigint }[]> {
+  const byAsset = new Map<string, bigint>()
+  for (const r of await erc20WalletHoldingRows(h160s)) byAsset.set(r.asset_id, (byAsset.get(r.asset_id) ?? 0n) + BigInt(r.total || '0'))
+  const out: { asset: AssetRef; raw: bigint }[] = []
+  for (const [assetId, raw] of byAsset) if (raw > 0n) out.push({ asset: asset(Number(assetId)), raw })
+  return out
+}
+
+// The snapshot rows (account_id, asset_id, total) behind the two reads around it,
+// for every storage form of the given H160s. A tag's or a page's H160s run past
+// one bound parameter's ceiling (each body brings two 66-byte account forms), so
+// the bodies are read in chunks; a row is kept once per (account, asset), so a
+// storage form two chunks both match is still counted once.
+const ERC20_HOLDING_BODIES_PER_CHUNK = 400
+async function erc20WalletHoldingRows(h160s: string[]): Promise<{ account_id: string; asset_id: string; total: string }[]> {
   const bodies = [...new Set(h160s
     .filter(h => /^0x[0-9a-fA-F]{40}$/.test(h))
     .map(h => h.slice(2).toLowerCase()))]
   if (!bodies.length) return []
-  const exactAccounts = [...new Set(bodies.flatMap(body => [
-    '0x45544800' + body + '0000000000000000',
-    reservedH160AccountId(body),
-  ]).filter((account): account is string => account != null))]
-  const res = await client.query({
-    query: `SELECT asset_id, toString(sum(toUInt256(total))) AS total
-            FROM price_data.erc20_wallet_balances FINAL
-            WHERE asset_id IN {assets:Array(String)}
-              AND (lower(account_id) IN {accounts:Array(String)}
-                OR substring(lower(account_id), 3, 40) IN {bodies:Array(String)})
-            GROUP BY asset_id`,
-    query_params: {
-      assets: (await ensureErc20WalletAssets()).map(a => String(a.assetId)),
-      accounts: exactAccounts,
-      bodies,
-    },
-    format: 'JSONEachRow',
-  })
-  const out: { asset: AssetRef; raw: bigint }[] = []
-  for (const r of await res.json<{ asset_id: string; total: string }>()) {
-    const raw = BigInt(r.total || '0')
-    if (raw > 0n) out.push({ asset: asset(Number(r.asset_id)), raw })
-  }
-  return out
+  const assets = (await ensureErc20WalletAssets()).map(a => String(a.assetId))
+  const parts = await mapParamChunks(bodies, async chunk => {
+    const exactAccounts = [...new Set(chunk.flatMap(body => [
+      '0x45544800' + body + '0000000000000000',
+      reservedH160AccountId(body),
+    ]).filter((account): account is string => account != null))]
+    const res = await client.query({
+      query: `SELECT account_id, asset_id, toString(sum(toUInt256(total))) AS total
+              FROM price_data.erc20_wallet_balances FINAL
+              WHERE asset_id IN {assets:Array(String)}
+                AND (lower(account_id) IN {accounts:Array(String)}
+                  OR substring(lower(account_id), 3, 40) IN {bodies:Array(String)})
+              GROUP BY account_id, asset_id`,
+      query_params: { assets, accounts: exactAccounts, bodies: chunk },
+      format: 'JSONEachRow',
+    })
+    return res.json<{ account_id: string; asset_id: string; total: string }>()
+  }, { maxItems: ERC20_HOLDING_BODIES_PER_CHUNK, concurrency: CHUNK_QUERY_CONCURRENCY })
+  const seen = new Map<string, { account_id: string; asset_id: string; total: string }>()
+  for (const r of parts.flat()) seen.set(`${r.account_id}\u0000${r.asset_id}`, r)
+  return [...seen.values()]
 }
 
 // Per-holder form of the read above: the same bounded snapshot, grouped by the
@@ -5512,26 +5527,8 @@ async function erc20WalletHoldingsForAccounts(h160s: string[]): Promise<{ asset:
 // DCA orders) must not see one owner's pot land on another's.
 async function erc20WalletHoldingsByAccount(h160s: string[]): Promise<Map<string, { asset: AssetRef; raw: bigint }[]>> {
   const out = new Map<string, { asset: AssetRef; raw: bigint }[]>()
-  const bodies = [...new Set(h160s
-    .filter(h => /^0x[0-9a-fA-F]{40}$/.test(h))
-    .map(h => h.slice(2).toLowerCase()))]
-  if (!bodies.length) return out
-  const wanted = new Set(bodies)
-  const exactAccounts = [...new Set(bodies.flatMap(body => [
-    '0x45544800' + body + '0000000000000000',
-    reservedH160AccountId(body),
-  ]).filter((account): account is string => account != null))]
-  const res = await client.query({
-    query: `SELECT account_id, asset_id, toString(sum(toUInt256(total))) AS total
-            FROM price_data.erc20_wallet_balances FINAL
-            WHERE asset_id IN {assets:Array(String)}
-              AND (lower(account_id) IN {accounts:Array(String)}
-                OR substring(lower(account_id), 3, 40) IN {bodies:Array(String)})
-            GROUP BY account_id, asset_id`,
-    query_params: { assets: (await ensureErc20WalletAssets()).map(a => String(a.assetId)), accounts: exactAccounts, bodies },
-    format: 'JSONEachRow',
-  })
-  for (const r of await res.json<{ account_id: string; asset_id: string; total: string }>()) {
+  const wanted = new Set(h160s.filter(h => /^0x[0-9a-fA-F]{40}$/.test(h)).map(h => h.slice(2).toLowerCase()))
+  for (const r of await erc20WalletHoldingRows(h160s)) {
     const id = r.account_id.toLowerCase()
     // Undo the three storage forms the WHERE matched, back to the h160 that asked.
     const h160 = evmFromAccountId(id) ?? '0x' + id.slice(2, 42)
@@ -8504,31 +8501,35 @@ async function dcaScheduleBounds(scheds: ActiveDcaScheduleRow[]): Promise<Map<st
   const out = new Map<string, DcaOrderTerms>()
   const rows = scheds.filter(x => !x.intent_id)
   if (!rows.length) return out
-  const blocks = [...new Set(rows.map(r => r.sblock))]
-  const withExt = rows.filter(r => r.sidx != null)
-  const [eventRes, callRes] = await Promise.all([
-    client.query({
-      query: `SELECT toString(toUInt64(JSONExtractInt(args_json, 'id'))) AS sid, args_json
-              FROM price_data.raw_events
-              WHERE block_height IN {blocks:Array(UInt32)} AND event_name = 'DCA.Scheduled'`,
-      query_params: { blocks }, format: 'JSONEachRow',
-    }),
-    withExt.length ? client.query({
-      query: `SELECT block_height, extrinsic_index, args_json
-              FROM price_data.raw_calls
-              WHERE block_height IN {blocks:Array(UInt32)} AND call_address = 'root'
-                AND extrinsic_index IN {idxs:Array(UInt32)}`,
-      query_params: { blocks, idxs: [...new Set(withExt.map(r => r.sidx as number))] }, format: 'JSONEachRow',
-    }) : null,
-  ])
+  // Bound in byte-bounded block chunks (see db/queryParams.ts): the list is
+  // live orders today, but nothing caps how many there can be.
   const byId = new Map<string, string>()
-  for (const r of await eventRes.json<{ sid: string; args_json: string }>()) byId.set(r.sid, r.args_json)
   const byExtrinsic = new Map<string, string>()
-  if (callRes) {
-    for (const r of await callRes.json<{ block_height: number; extrinsic_index: number; args_json: string }>()) {
-      byExtrinsic.set(`${r.block_height}|${r.extrinsic_index}`, r.args_json)
+  await mapParamChunks([...new Set(rows.map(r => r.sblock))], async blocks => {
+    const inChunk = new Set(blocks)
+    const idxs = [...new Set(rows.filter(r => r.sidx != null && inChunk.has(r.sblock)).map(r => r.sidx as number))]
+    const [eventRes, callRes] = await Promise.all([
+      client.query({
+        query: `SELECT toString(toUInt64(JSONExtractInt(args_json, 'id'))) AS sid, args_json
+                FROM price_data.raw_events
+                WHERE block_height IN {blocks:Array(UInt32)} AND event_name = 'DCA.Scheduled'`,
+        query_params: { blocks }, format: 'JSONEachRow',
+      }),
+      idxs.length ? client.query({
+        query: `SELECT block_height, extrinsic_index, args_json
+                FROM price_data.raw_calls
+                WHERE block_height IN {blocks:Array(UInt32)} AND call_address = 'root'
+                  AND extrinsic_index IN {idxs:Array(UInt32)}`,
+        query_params: { blocks, idxs }, format: 'JSONEachRow',
+      }) : null,
+    ])
+    for (const r of await eventRes.json<{ sid: string; args_json: string }>()) byId.set(r.sid, r.args_json)
+    if (callRes) {
+      for (const r of await callRes.json<{ block_height: number; extrinsic_index: number; args_json: string }>()) {
+        byExtrinsic.set(`${r.block_height}|${r.extrinsic_index}`, r.args_json)
+      }
     }
-  }
+  }, { concurrency: CHUNK_QUERY_CONCURRENCY })
   for (const r of rows) {
     const eventArgs = byId.get(String(r.id))
     const callArgs = r.sidx == null ? undefined : byExtrinsic.get(`${r.sblock}|${r.sidx}`)
@@ -10230,7 +10231,9 @@ export async function revenueByExtrinsic(
   const blocks = [...new Set(keys.map(k => k.blockHeight).filter(b => Number.isFinite(b) && b > 0))]
   const out = new Map<string, ActivityRevenue>()
   if (!blocks.length) return out
-  const res = await client.query({
+  // Grouped by block, so byte-bounded block chunks (see db/queryParams.ts) never
+  // split one extrinsic's sums.
+  const chunks = await mapParamChunks(blocks, async blocks => { const res = await client.query({
     query: `
       SELECT r.block_height AS block_height, e.extrinsic_index AS extrinsic_index, r.stream AS stream,
              toFloat64(sumIf(r.amount_usd, ${PROTOCOL_REVENUE_PREDICATE_SQL})) AS protocol_usd,
@@ -10246,7 +10249,8 @@ export async function revenueByExtrinsic(
     query_params: { blocks },
     format: 'JSONEachRow',
   })
-  collectRevenueRows(out, await res.json())
+  return res.json<RevenueSumRow>() }, { concurrency: CHUNK_QUERY_CONCURRENCY })
+  collectRevenueRows(out, chunks.flat())
   return out
 }
 
@@ -10285,12 +10289,15 @@ function collectRevenueRows(out: Map<string, ActivityRevenue>, rows: readonly Re
 // pruned and exact.
 async function visibleEventHeadWithin(blocks: readonly number[]): Promise<number> {
   if (!blocks.length) return 0
-  const res = await client.query({
-    query: 'SELECT max(block_height) AS head FROM price_data.raw_events WHERE block_height IN ({blocks:Array(UInt32)})',
-    query_params: { blocks: [...blocks] },
-    format: 'JSONEachRow',
-  })
-  return Number((await res.json<{ head: number | null }>())[0]?.head ?? 0)
+  const heads = await mapParamChunks(blocks, async chunk => {
+    const res = await client.query({
+      query: 'SELECT max(block_height) AS head FROM price_data.raw_events WHERE block_height IN ({blocks:Array(UInt32)})',
+      query_params: { blocks: chunk },
+      format: 'JSONEachRow',
+    })
+    return Number((await res.json<{ head: number | null }>())[0]?.head ?? 0)
+  }, { concurrency: CHUNK_QUERY_CONCURRENCY })
+  return Math.max(0, ...heads)
 }
 
 // ClickHouse DateTime literal (UTC) for the tail window's upper bound.
@@ -12371,18 +12378,24 @@ function v3PoolsForAssets(registry: V3Registry, assetIds: number[]): string[] {
 async function routedV3Swappers(acts: readonly V3Activity[]): Promise<Map<string, string>> {
   const swaps = acts.filter(a => a.kind === 'swap' && a.amountIn != null)
   if (!swaps.length) return new Map()
+  // Every distinct swap block of the pool's history: a busy pool passes the
+  // server's bound-parameter ceiling (see db/queryParams.ts), so the list is
+  // bound in byte-bounded chunks.
   const blocks = [...new Set(swaps.map(a => a.blockHeight))]
-  const res = await client.query({
-    query: `SELECT block_height, extrinsic_index,
-                   JSONExtractString(args_json, 'swapper') AS swapper,
-                   JSONExtractString(JSONExtractArrayRaw(args_json, 'inputs')[1], 'amount') AS amount_in
-            FROM price_data.raw_events
-            WHERE block_height IN {blocks:Array(UInt32)} AND event_name = 'Broadcast.Swapped3'
-              AND JSONExtractString(args_json, 'fillerType', '__kind') = 'UniswapV3'`,
-    query_params: { blocks }, format: 'JSONEachRow',
-  })
+  const chunks = await mapParamChunks(blocks, async chunk => {
+    const res = await client.query({
+      query: `SELECT block_height, extrinsic_index,
+                     JSONExtractString(args_json, 'swapper') AS swapper,
+                     JSONExtractString(JSONExtractArrayRaw(args_json, 'inputs')[1], 'amount') AS amount_in
+              FROM price_data.raw_events
+              WHERE block_height IN {blocks:Array(UInt32)} AND event_name = 'Broadcast.Swapped3'
+                AND JSONExtractString(args_json, 'fillerType', '__kind') = 'UniswapV3'`,
+      query_params: { blocks: chunk }, format: 'JSONEachRow',
+    })
+    return res.json<{ block_height: number; extrinsic_index: number | null; swapper: string; amount_in: string }>()
+  }, { concurrency: CHUNK_QUERY_CONCURRENCY })
   const out = new Map<string, string>()
-  for (const r of await res.json<{ block_height: number; extrinsic_index: number | null; swapper: string; amount_in: string }>()) {
+  for (const r of chunks.flat()) {
     if (!r.swapper || !r.amount_in) continue
     out.set(`${v3RoutedKey(r.block_height, r.extrinsic_index)}:${r.amount_in}`, r.swapper)
   }
@@ -16877,7 +16890,8 @@ export function iceSettlementAmounts(fills: readonly IceSettlementFill[], orders
 export async function iceSettlementsFor(events: readonly RawIntentEvent[], orders: Map<string, IntentOrder>): Promise<Map<string, IceSettlementAmounts>> {
   const blocks = [...new Set(events.filter(e => e.event_name === INTENT_DCA_COMPLETED && e.extrinsic_index != null).map(e => e.block_height))]
   if (!blocks.length) return new Map()
-  const [legRes, fillRes] = await Promise.all([
+  // Completion blocks of a whole intent history: byte-bounded chunks (see db/queryParams.ts).
+  const chunked = await mapParamChunks(blocks, blocks => Promise.all([
     client.query({
       query: `SELECT block_height, event_index, extrinsic_index, from_account, to_account, asset_id, amount
               FROM price_data.transfer_activity_by_time
@@ -16891,18 +16905,21 @@ export async function iceSettlementsFor(events: readonly RawIntentEvent[], order
               WHERE block_height IN ({blocks:Array(UInt32)}) AND extrinsic_index IS NOT NULL AND event_name IN (${sqlEventNameList(INTENT_FILL_EVENTS)})`,
       query_params: { blocks }, format: 'JSONEachRow',
     }),
-  ])
+  ]).then(([legRes, fillRes]) => Promise.all([
+    legRes.json<{ block_height: number; event_index: number; extrinsic_index: number; from_account: string; to_account: string; asset_id: number; amount: string }>(),
+    fillRes.json<{ intent_id: string; block_height: number; event_index: number; extrinsic_index: number; event_name: string; amount_in: string; amount_out: string }>(),
+  ])), { concurrency: CHUNK_QUERY_CONCURRENCY })
   // The projection replaces without a version column, so a replayed range can hold a
   // leg twice until it merges: one leg per event.
   const seen = new Set<string>()
   const legs: IceSettlementLeg[] = []
-  for (const l of await legRes.json<{ block_height: number; event_index: number; extrinsic_index: number; from_account: string; to_account: string; asset_id: number; amount: string }>()) {
+  for (const l of chunked.flatMap(([legRows]) => legRows)) {
     const key = `${l.block_height}:${l.event_index}`
     if (seen.has(key)) continue
     seen.add(key)
     legs.push({ blockHeight: Number(l.block_height), extrinsicIndex: Number(l.extrinsic_index), from: l.from_account, to: l.to_account, assetId: Number(l.asset_id), amount: l.amount })
   }
-  const fills: IceSettlementFill[] = (await fillRes.json<{ intent_id: string; block_height: number; event_index: number; extrinsic_index: number; event_name: string; amount_in: string; amount_out: string }>())
+  const fills: IceSettlementFill[] = chunked.flatMap(([, fillRows]) => fillRows)
     .map(f => ({ blockHeight: Number(f.block_height), extrinsicIndex: Number(f.extrinsic_index), eventIndex: Number(f.event_index), eventName: f.event_name, intentId: f.intent_id, amountIn: f.amount_in || null, amountOut: f.amount_out || null }))
   for (const [id, order] of await getIntentOrders(fills.map(f => f.intentId).filter(id => !orders.has(id)))) orders.set(id, order)
   return iceSettlementAmounts(fills, orders, legs)
@@ -18676,7 +18693,9 @@ async function revenueCandidateExtrinsics(
   blocks: readonly number[], minUsd: number,
 ): Promise<{ blockHeight: number; extrinsicIndex: number | null }[]> {
   if (!blocks.length) return []
-  const res = await client.query({
+  // Grouped per block, so byte-bounded block chunks (see db/queryParams.ts) are
+  // exact; the order is restored after concatenation.
+  const chunks = await mapParamChunks(blocks, async blocks => { const res = await client.query({
     query: `SELECT e.block_height AS b, e.extrinsic_index AS xi
             FROM price_data.revenue_events r
             INNER JOIN (
@@ -18686,11 +18705,13 @@ async function revenueCandidateExtrinsics(
             WHERE r.block_height IN ({blocks:Array(UInt32)}) AND ${PROTOCOL_REVENUE_PREDICATE_SQL}
             GROUP BY b, xi HAVING sum(r.amount_usd) >= {min:Float64}
             ORDER BY b DESC, xi DESC`,
-    query_params: { blocks: [...blocks], min: minUsd },
+    query_params: { blocks, min: minUsd },
     format: 'JSONEachRow',
   })
-  return (await res.json<{ b: number; xi: number | null }>())
+  return res.json<{ b: number; xi: number | null }>() }, { concurrency: CHUNK_QUERY_CONCURRENCY })
+  return chunks.flat()
     .map(r => ({ blockHeight: Number(r.b), extrinsicIndex: r.xi == null ? null : Number(r.xi) }))
+    .sort((a, b) => b.blockHeight - a.blockHeight || (b.extrinsicIndex ?? -1) - (a.extrinsicIndex ?? -1))
 }
 
 // Build only the candidates' own rows. An extrinsic-backed candidate comes from
@@ -22346,10 +22367,37 @@ export interface AccountScaledRead {
   byHeight: Map<string, Map<number, bigint>>
 }
 
-async function loadAccountScaledRead(holders: string[], contracts: string[], anchorBlock: number, maxBlock: number, bk: Bucketing): Promise<AccountScaledRead> {
+export async function loadAccountScaledRead(holders: string[], contracts: string[], anchorBlock: number, maxBlock: number, bk: Bucketing): Promise<AccountScaledRead> {
   const read: AccountScaledRead = { anchorBlock, anchors: new Map(), byTs: new Map(), byHeight: new Map() }
   if (!holders.length || !contracts.length) return read
   const endN = bk.endHeight(bk.N)
+  // A tag's history asks for every member's H160 (a list tag: 2,000 members), past
+  // one bound parameter's ceiling, so the holders are read in chunks. Every row is
+  // keyed by its holder, so the chunks are disjoint and simply concatenate.
+  const parts = await mapParamChunks(holders, chunk => loadAccountScaledReadChunk(chunk, contracts, anchorBlock, maxBlock, endN, bk), { concurrency: CHUNK_QUERY_CONCURRENCY })
+  for (const [anchorRows, deltaRows] of parts) {
+    for (const row of anchorRows) {
+      const key = `${row.holder}|${row.contract}`
+      read.anchors.set(key, (read.anchors.get(key) ?? 0n) + BigInt(row.scaled || '0'))
+    }
+    for (const row of deltaRows) {
+      const key = `${row.holder.toLowerCase()}|${row.contract.toLowerCase()}`
+      const v = BigInt(row.delta || '0')
+      if (Number(row.bts) !== -2) addScaledBucket(read.byTs, key, Number(row.bts), v)
+      if (Number(row.bh) !== -2) addScaledBucket(read.byHeight, key, Number(row.bh), v)
+    }
+  }
+  return read
+}
+
+function addScaledBucket(m: Map<string, Map<number, bigint>>, key: string, b: number, v: bigint): void {
+  const per = m.get(key) ?? m.set(key, new Map()).get(key)!
+  per.set(b, (per.get(b) ?? 0n) + v)
+}
+
+async function loadAccountScaledReadChunk(
+  holders: string[], contracts: string[], anchorBlock: number, maxBlock: number, endN: number, bk: Bucketing,
+): Promise<[{ holder: string; contract: string; scaled: string }[], { holder: string; contract: string; bts: number; bh: number; delta: string }[]]> {
   const [anchorRes, deltaRes] = await Promise.all([
     client.query({
       query: `-- explorer:history-scaled-anchor
@@ -22376,21 +22424,10 @@ async function loadAccountScaledRead(holders: string[], contracts: string[], anc
       query_params: { holders, contracts, anchorBlock, maxBlock, endN, hi: Math.max(maxBlock, endN) }, format: 'JSONEachRow',
     }),
   ])
-  for (const row of await anchorRes.json<{ holder: string; contract: string; scaled: string }>()) {
-    const key = `${row.holder}|${row.contract}`
-    read.anchors.set(key, (read.anchors.get(key) ?? 0n) + BigInt(row.scaled || '0'))
-  }
-  const add = (m: Map<string, Map<number, bigint>>, key: string, b: number, v: bigint) => {
-    const per = m.get(key) ?? m.set(key, new Map()).get(key)!
-    per.set(b, (per.get(b) ?? 0n) + v)
-  }
-  for (const row of await deltaRes.json<{ holder: string; contract: string; bts: number; bh: number; delta: string }>()) {
-    const key = `${row.holder.toLowerCase()}|${row.contract.toLowerCase()}`
-    const v = BigInt(row.delta || '0')
-    if (Number(row.bts) !== -2) add(read.byTs, key, Number(row.bts), v)
-    if (Number(row.bh) !== -2) add(read.byHeight, key, Number(row.bh), v)
-  }
-  return read
+  return [
+    await anchorRes.json<{ holder: string; contract: string; scaled: string }>(),
+    await deltaRes.json<{ holder: string; contract: string; bts: number; bh: number; delta: string }>(),
+  ]
 }
 
 /** The incentive history's per-holder scaled series from the shared read (scaledSeriesFromBuckets per aToken). */
@@ -22827,27 +22864,44 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // Reconstruct per-account cumulative bucket balances from the indexed Transfer
   // logs (verified to reproduce balanceOf exactly) and feed them through the same
   // fold/price/forward-fill pipeline as observed balances.
-  for (const ea of await ensureErc20WalletAssets()) {
-    const h160For = new Map<string, string>()
-    for (const a of accounts) {
-      const h160 = historyH160(a)
-      if (h160) h160For.set(h160, a)
-    }
-    const logRes = await client.query({
-      query: `
-        SELECT holder AS w,
-          ${bucketOfTs('block_timestamp')} AS b,
-          toString(sum(balance_delta)) AS net
-        FROM price_data.erc20_transfer_deltas FINAL
-        WHERE contract_address = {c:String} AND holder IN ({ws:Array(String)})
-          AND block_height <= {maxb:UInt32}
-        GROUP BY w, b ORDER BY w, b`,
-      query_params: { c: ea.contract, ws: [...h160For.keys()], maxb: rng.maxb }, format: 'JSONEachRow',
-    }).catch(() => null)
-    if (!logRes) continue
+  //
+  // ONE read for every wallet contract (contract IN …, grouped by contract): the
+  // table is holder-first and partitioned by month, so each holder costs a granule
+  // per partition however many contracts are asked about. Read one contract at a
+  // time, every history rebuild paid that seven times over (384,801 queries /
+  // 4.07 TiB on 2026-10-04, the instance's largest reader). The holders are bound
+  // in byte-bounded chunks, which partition the rows (each row has one holder).
+  const walletAssets = await ensureErc20WalletAssets()
+  const h160For = new Map<string, string>()
+  for (const a of accounts) {
+    const h160 = historyH160(a)
+    if (h160) h160For.set(h160, a)
+  }
+  const deltaRows = walletAssets.length && h160For.size
+    ? await mapParamChunks([...h160For.keys()], async ws => (await client.query({
+        query: `-- explorer:history-erc20-deltas
+          SELECT contract_address AS c, holder AS w,
+            ${bucketOfTs('block_timestamp')} AS b,
+            toString(sum(balance_delta)) AS net
+          FROM price_data.erc20_transfer_deltas FINAL
+          WHERE contract_address IN ({cs:Array(String)}) AND holder IN ({ws:Array(String)})
+            AND block_height <= {maxb:UInt32}
+          GROUP BY c, w, b ORDER BY c, w, b`,
+        query_params: { cs: walletAssets.map(ea => ea.contract), ws, maxb: rng.maxb }, format: 'JSONEachRow',
+      })).json<{ c: string; w: string; b: number; net: string }>(), { concurrency: CHUNK_QUERY_CONCURRENCY }).then(parts => parts.flat())
+    : []
+  // No catch: one read covers EVERY wallet contract, so a failed chunk would erase all
+  // of them at once and leave a curve short of its ERC-20 holdings. The error fails
+  // the build instead — `cached` never stores a rejection — and the next ask rebuilds.
+  const deltasByContract = new Map<string, { w: string; b: number; net: string }[]>()
+  for (const r of deltaRows) (deltasByContract.get(r.c) ?? deltasByContract.set(r.c, []).get(r.c)!).push(r)
+  // Contracts in the registry's order (the order the series are first seen in);
+  // within one, rows arrive ordered (w, b) and a holder's run never spans two
+  // chunks, so the running sum restarts exactly at each new holder.
+  for (const ea of walletAssets) {
     let cumBy = ''
     let cum = 0n
-    for (const r of await logRes.json<{ w: string; b: number; net: string }>()) {
+    for (const r of deltasByContract.get(ea.contract) ?? []) {
       if (r.w !== cumBy) { cumBy = r.w; cum = 0n }
       cum += BigInt(r.net)
       const accountId = h160For.get(r.w)
@@ -25750,16 +25804,24 @@ async function accountActivityWatermark(accounts: string[]): Promise<number> {
   // agree on the height they were built for.
   return cached(`explorer:acct-watermark:${accounts.join(',')}`, 2_000, async () => {
     try {
-      const res = await client.query({
-        query: `WITH (SELECT maxMerge(last_block_state) FROM price_data.account_activity_bounds WHERE account IN {accounts:Array(String)}) AS indexed
-                SELECT greatest(
-                  indexed,
-                  (SELECT max(block_height) FROM price_data.dca_events_by_account
-                   WHERE who IN {accounts:Array(String)} AND block_height > indexed)
-                ) AS w`,
-        query_params: { accounts }, format: 'JSONEachRow',
-      })
-      return Number((await res.json<{ w: number | null }>())[0]?.w ?? 0)
+      // A large tag's member list passes the parameter ceiling, so it is asked
+      // in byte-bounded chunks (see db/queryParams.ts). The max over chunks is
+      // exact: a DCA height a chunk keeps only because it beats that chunk's
+      // indexed height either beats the overall indexed height too or is
+      // dominated by it.
+      const marks = await mapParamChunks(accounts, async chunk => {
+        const res = await client.query({
+          query: `WITH (SELECT maxMerge(last_block_state) FROM price_data.account_activity_bounds WHERE account IN {accounts:Array(String)}) AS indexed
+                  SELECT greatest(
+                    indexed,
+                    (SELECT max(block_height) FROM price_data.dca_events_by_account
+                     WHERE who IN {accounts:Array(String)} AND block_height > indexed)
+                  ) AS w`,
+          query_params: { accounts: chunk }, format: 'JSONEachRow',
+        })
+        return Number((await res.json<{ w: number | null }>())[0]?.w ?? 0)
+      }, { concurrency: CHUNK_QUERY_CONCURRENCY })
+      return Math.max(0, ...marks)
     } catch {
       // A failed watermark must not serve a stale page: fall back to a value
       // that changes every block, which restores the old rebuild-always
@@ -26742,12 +26804,14 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
     const dcaCandidateBlocks = [...new Set(windowRows
       .filter(r => r.extrinsic_index == null && SWAP_EVENTS.includes(r.event_name))
       .map(r => Number(r.block_height)))]
-    const dcaWindowRows = dcaCandidateBlocks.length ? await (await client.query({
+    // Byte-bounded block chunks (see db/queryParams.ts): many windows times
+    // VALUE_JUMP_WINDOW_ROWS candidates each can pass the parameter ceiling.
+    const dcaWindowRows = (await mapParamChunks(dcaCandidateBlocks, async blocks => (await client.query({
       query: `SELECT block_height, event_index, toUInt32(id) AS schedule_id FROM price_data.dca_events_by_account
               WHERE event_name = 'DCA.TradeExecuted' AND who IN (${list}) AND block_height IN {blocks:Array(UInt32)}
               GROUP BY block_height, event_index, schedule_id`,
-      query_params: { blocks: dcaCandidateBlocks }, format: 'JSONEachRow',
-    })).json<{ block_height: number; event_index: number; schedule_id: number }>() : []
+      query_params: { blocks }, format: 'JSONEachRow',
+    })).json<{ block_height: number; event_index: number; schedule_id: number }>(), { concurrency: CHUNK_QUERY_CONCURRENCY })).flat()
 
     // Transfer direction + counterparty from the transfer read model (the v3
     // index carries no from/to): a bounded point lookup for at most `fetch`
@@ -30192,7 +30256,10 @@ async function refreshContractMetricsUncached(): Promise<void> {
   // pot, valued at current prices — the `grouped.usd` half of the accounts
   // directory's own value, restricted to these ids. Money-market collateral and
   // debt are folded in below from the same published snapshot the directory reads.
-  const valueRes = await client.query({
+  // Both reads are keyed by account, so the contract set (472 in October 2026,
+  // growing with every deployment) is read in byte-bounded chunks that simply
+  // concatenate, never as one parameter that outgrows the server's ceiling.
+  const valueRows = (await mapParamChunks(accounts, async accounts => (await client.query({
     query: `
       SELECT account_id, toFloat64(sum(usd)) AS usd
       FROM (
@@ -30208,16 +30275,16 @@ async function refreshContractMetricsUncached(): Promise<void> {
       )
       GROUP BY account_id`,
     query_params: { accounts }, format: 'JSONEachRow',
-  })
+  })).json<{ account_id: string; usd: number }>(), { concurrency: CHUNK_QUERY_CONCURRENCY })).flat()
   const walletUsd = new Map<string, number>()
-  for (const r of await valueRes.json<{ account_id: string; usd: number }>()) walletUsd.set(r.account_id, r.usd)
+  for (const r of valueRows) walletUsd.set(r.account_id, r.usd)
 
   // Money-market contribution, from the published per-account generation the
   // accounts directory ranks on and with its exact per-pool value expression:
   // counted-market collateral, and all debt regardless of market. Staking-backed
   // collateral is excluded from the value (it is already-counted locked HDX) but
   // its debt still nets out, mirroring mm_acct.value_delta.
-  const mmRes = moneyMarketAccountValuesReady ? await client.query({
+  const mmRows = moneyMarketAccountValuesReady ? await mapParamChunks(accounts, async accounts => (await client.query({
     query: `
       SELECT account_id,
              sum(if(pool_address IN (${countedMmPoolsSql()}), col, 0.)) / 1e8 AS collateral,
@@ -30237,13 +30304,9 @@ async function refreshContractMetricsUncached(): Promise<void> {
       )
       GROUP BY account_id`,
     query_params: { accounts }, format: 'JSONEachRow',
-  }).catch(() => null) : null
+  })).json<{ account_id: string; collateral: number; debt: number }>(), { concurrency: CHUNK_QUERY_CONCURRENCY }).then(parts => parts.flat()).catch(() => null) : null
   const mmDelta = new Map<string, { collateral: number; debt: number }>()
-  if (mmRes) {
-    for (const r of await mmRes.json<{ account_id: string; collateral: number; debt: number }>()) {
-      mmDelta.set(r.account_id, { collateral: r.collateral, debt: r.debt })
-    }
-  }
+  for (const r of mmRows ?? []) mmDelta.set(r.account_id, { collateral: r.collateral, debt: r.debt })
 
   // Synthetic directory rows: one untagged account each, so rowMemberAccounts
   // resolves to exactly that contract and the shared passes behave as they do

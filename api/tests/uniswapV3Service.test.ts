@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { blockExtrinsicTupleList, v3ActReadLimit, v3RowsInScope, v3UnnamedBlocksFor } from '../src/services/explorerService.ts'
 import {
-  classifyV3Events, ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, resolveV3TokenAsset, sqrtPriceX96ToPrice, tickToPrice, v3ActOnVenue, v3AnchorScan, v3FeedActivities, v3PoolForHop, v3VenuesInScope,
+  classifyV3Events, ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, resolveV3TokenAsset, sqrtPriceX96ToPrice, tickToPrice, v3ActOnVenue, v3AnchorScan, v3FeedActivities, chunkUnnamedBlocks, mergeAnchorReads, V3_UNNAMED_BLOCKS_PER_QUERY, v3PoolForHop, v3VenuesInScope,
   type V3ClassifyContext, type V3EventRow, type V3Pool, type V3Registry,
 } from '../src/services/uniswapV3Service.ts'
 
@@ -280,8 +280,9 @@ describe('v3FeedActivities account scope', () => {
       },
     } as never)
     const acts = await v3FeedActivities(registry, { kind: 'liquidity', accountsH160: [OPERATOR], unnamedActBlocks: [14991345], limit: 10 })
-    expect(seen[0].query).toContain("(kind = 'vault' AND event_name IN ('Rebalance', 'ZeroBurn') AND block_height IN {unnamedBlocks:Array(UInt32)})")
-    expect(seen[0].params.unnamedBlocks).toEqual([14991345])
+    // Inlined, not bound: the list outgrows the server's bound-parameter ceiling.
+    expect(seen[0].query).toContain("(kind = 'vault' AND event_name IN ('Rebalance', 'ZeroBurn') AND block_height IN (14991345))")
+    expect(seen[0].params).not.toHaveProperty('unnamedBlocks')
     expect(acts).toMatchObject([{ kind: 'liquidity', action: 'Rebalance', whoAccountId: null, vault: VAULT, blockHeight: 14991345 }])
   })
 
@@ -295,6 +296,40 @@ describe('v3FeedActivities account scope', () => {
     await v3FeedActivities(registry, { kind: 'liquidity', accountsH160: [USER], unnamedActBlocks: [], limit: 10 })
     expect(seen[0]).not.toContain('unnamedBlocks')
     expect(seen[0]).not.toContain("event_name IN ('Rebalance', 'ZeroBurn')")
+  })
+})
+
+// The unnamed-block list is inlined (it outgrows a bound parameter) and grows ~30
+// blocks a day, so it is split across anchor reads to stay under max_query_size.
+describe('v3FeedActivities unnamed-block chunking', () => {
+  const OPERATOR = '0x0b0be14c1158ba09b720812e70f819366614cb96'
+  const registry = {
+    pools: new Map([[POOL, { address: POOL }]]), vaults: new Map([[VAULT, { address: VAULT, pool: POOL }]]),
+    managers: new Set([MANAGER]), byAsset: new Map(), ctx,
+  } as unknown as V3Registry
+
+  it('chunks newest first, de-duplicated and integer-only', () => {
+    expect(chunkUnnamedBlocks([3, 1, 2, 2, 1.7, -1, Number.NaN], 2)).toEqual([['3', '2'], ['1']])
+    expect(chunkUnnamedBlocks([])).toEqual([])
+  })
+
+  it('merges per-chunk tops into the newest scan, each event once', () => {
+    const a = [{ block_height: 9, event_index: 1 }, { block_height: 5, event_index: 0 }]
+    const b = [{ block_height: 9, event_index: 1 }, { block_height: 7, event_index: 3 }, { block_height: 2, event_index: 0 }]
+    expect(mergeAnchorReads([a, b], 3)).toEqual([{ block_height: 9, event_index: 1 }, { block_height: 7, event_index: 3 }, { block_height: 5, event_index: 0 }])
+  })
+
+  it('splits a long list into bounded reads, each under max_query_size', async () => {
+    const seen: string[] = []
+    initUniswapV3Service({
+      query: async ({ query }: { query: string }) => { seen.push(query); return { json: async () => [] } },
+    } as never)
+    const blocks = Array.from({ length: 12_000 }, (_, i) => 14_000_000 + i)
+    await v3FeedActivities(registry, { kind: 'liquidity', accountsH160: [OPERATOR], unnamedActBlocks: blocks, limit: 10 })
+    expect(seen).toHaveLength(Math.ceil(12_000 / V3_UNNAMED_BLOCKS_PER_QUERY))
+    for (const q of seen) expect(Buffer.byteLength(q)).toBeLessThan(256 * 1024 / 2)
+    const inlined = seen.flatMap(q => [...q.matchAll(/block_height IN \(([0-9,]+)\)/g)].flatMap(m => m[1].split(',')))
+    expect(new Set(inlined).size).toBe(12_000)
   })
 })
 

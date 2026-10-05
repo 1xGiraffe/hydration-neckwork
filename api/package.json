@@ -11,7 +11,8 @@
     "check": "npm run typecheck && npm test"
   },
   "dependencies": {
-    "@clickhouse/client": "^1.18.2",
+    "@clickhouse/client": "1.18.2",
+    "@clickhouse/client-common": "1.18.2",
     "@fastify/compress": "^9.0.0",
     "@fastify/cors": "^11.2.0",
     "@fastify/etag": "^6.2.0",

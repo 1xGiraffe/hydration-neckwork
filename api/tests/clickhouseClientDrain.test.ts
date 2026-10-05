@@ -46,3 +46,15 @@ describe('drainQueryResponses', () => {
     expect(await result.text()).toBe(body)
   })
 })
+
+describe('the param byte guard on commands', () => {
+  it('refuses an oversized bound parameter before a command is sent, naming it', async () => {
+    const sent: unknown[] = []
+    const client = drainQueryResponses({ query: async () => null, command: async (p: unknown) => { sent.push(p); return {} } } as unknown as ClickHouseClient)
+    const gkeys = Array.from({ length: 3_000 }, (_, i) => '0x' + i.toString(16).padStart(64, '0'))
+    await expect(client.command({ query: 'DELETE FROM t WHERE gkey IN {gkeys:Array(String)}', query_params: { gkeys } })).rejects.toThrow(/"gkeys"/)
+    expect(sent).toEqual([])
+    await client.command({ query: 'DELETE FROM t WHERE gkey IN {gkeys:Array(String)}', query_params: { gkeys: gkeys.slice(0, 10) } })
+    expect(sent).toHaveLength(1)
+  })
+})

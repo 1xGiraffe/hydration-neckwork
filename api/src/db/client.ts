@@ -1,6 +1,8 @@
 import { Readable } from 'node:stream'
 import { createClient, ResultSet, type ClickHouseClient } from '@clickhouse/client'
 import { config } from '../config.ts'
+import { assertQueryParamsFit } from './queryParams.ts'
+import { queryTag } from '../services/queryTag.ts'
 
 // The per-query settings every API read runs under. Exported so a test can pin
 // the limits the request paths depend on.
@@ -84,10 +86,22 @@ export function createDefaultDatabaseClickHouseClient() {
 // that buffer, so .json()/.text() — including the exception-at-end-of-body
 // detection — behave exactly as before. Every read in this codebase is JSONEachRow
 // through .json() and nothing calls .stream(), so no consumer needs the live stream.
+// ClickHouse logs a parameterised statement in its formatted form, comments
+// stripped, so a read's leading `-- tag` comment never reaches system.query_log.
+// Every parameterised read carries it as `log_comment` instead, unless the caller
+// named one itself.
+export function withLogComment<P extends { query: string; query_params?: unknown; clickhouse_settings?: object }>(params: P): P {
+  if (params.query_params == null) return params
+  if ((params.clickhouse_settings as { log_comment?: string } | undefined)?.log_comment) return params
+  const tag = queryTag(params.query)
+  return tag ? { ...params, clickhouse_settings: { ...params.clickhouse_settings, log_comment: tag } } : params
+}
+
 export function drainQueryResponses(client: ClickHouseClient): ClickHouseClient {
   const query = client.query.bind(client)
   client.query = (async (params: Parameters<ClickHouseClient['query']>[0]) => {
-    const live = await query(params)
+    assertQueryParamsFit(params.query_params)
+    const live = await query(withLogComment(params))
     const text = await live.text()
     return ResultSet.instance({
       stream: Readable.from([Buffer.from(text, 'utf8')]),
@@ -97,6 +111,15 @@ export function drainQueryResponses(client: ClickHouseClient): ClickHouseClient 
       log_error: error => console.error('[clickhouse] result set error', error.message),
     })
   }) as ClickHouseClient['query']
+  // Commands bind parameters the same way (a DELETE … IN {gkeys:Array(String)}, an
+  // INSERT … SELECT over a block range), so they get the same named, pre-send guard.
+  if (typeof client.command === 'function') {
+    const command = client.command.bind(client)
+    client.command = (async (params: Parameters<ClickHouseClient['command']>[0]) => {
+      assertQueryParamsFit(params.query_params)
+      return command(params)
+    }) as ClickHouseClient['command']
+  }
   return client
 }
 

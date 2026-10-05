@@ -29,7 +29,7 @@ describe('value-event jump windows resolve DCA executions at the candidate block
   it('takes the candidates from the window rows — hook-context swap legs only — after they are read', () => {
     expect(body).toContain('.filter(r => r.extrinsic_index == null && SWAP_EVENTS.includes(r.event_name))')
     expect(body.indexOf('const windowRows = ')).toBeLessThan(body.indexOf('const dcaCandidateBlocks = '))
-    expect(body).toContain('const dcaWindowRows = dcaCandidateBlocks.length ? await')
+    expect(body).toContain('const dcaWindowRows = (await mapParamChunks(dcaCandidateBlocks,')
   })
 
   it('resolves each leg through dcaScheduleOfHookSwap', () => {
