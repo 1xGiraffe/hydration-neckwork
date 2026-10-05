@@ -108,6 +108,117 @@ export interface WormholeAssetRow {
   status: WormholeStatus
   statusDetail: string
   transfers14d: { out: number; in: number }
+  // ── multi-peer model (additive) ──
+  //
+  // `originChainId`/`originToken`/`peer` above stay the PRIMARY origin — the
+  // registry's `wh` location, or (for an asset with none) the chain derived from
+  // its peers — and `limits` that origin's legs. They are no longer the whole
+  // backing: `locked` is the SUM over every lockbox (custody on each locking
+  // peer, plus Hydration's own custody when Hydration is the locking side), and
+  // `issuance` the SUM over every spoke (Hydration's TotalIssuance when Hydration
+  // mints, plus each burning peer's supply). Every chain is one entry of `peers`.
+  /** Hydration's own side: `spoke` when its manager mints/burns, `lockbox` when it locks. */
+  hydrationRole: 'lockbox' | 'spoke' | null
+  /** Hydration's own custody, at asset decimals, when it is the lockbox; else null. */
+  hydrationLocked: string | null
+  /** The token Hydration's manager answers for (ERC-20 precompile or Erc20 contract). */
+  hydrationToken: string | null
+  /** Every chain the Hydration manager has a peer on, primary first. */
+  peers: WormholePeerRow[]
+  /** How many of the asset's chains hold custody, Hydration included. */
+  lockboxCount: number
+}
+
+export interface WormholeTokenRef {
+  /** In its chain's own notation (EVM address, Solana mint, Sui coin type). */
+  address: string
+  name: string | null
+  symbol: string | null
+  decimals: number | null
+}
+
+/**
+ * The four rate-limiter legs between Hydration and ONE peer chain. The two
+ * peer legs are the peer manager's own; the two Hydration legs are Hydration's
+ * manager's — its inbound limit is per source chain, its outbound limit one for
+ * every destination.
+ */
+export interface WormholePeerLimits {
+  /** The peer's OUTBOUND limiter — value leaving the peer chain (toward Hydration). */
+  peerOut: WormholeFuse | null
+  /** The peer's INBOUND limiter for Hydration — the release leg of a Hydration exit there. */
+  peerIn: WormholeFuse | null
+  /** Hydration's INBOUND limiter for this chain. */
+  hydrationIn: WormholeFuse | null
+  /** Hydration's OUTBOUND limiter, shared by every destination. */
+  hydrationOut: WormholeFuse | null
+}
+
+export interface WormholePeerRow {
+  chainId: number
+  chainName: string
+  family: WormholeChainFamily
+  layer: WormholeChainLayer | null
+  /** What custody on this chain additionally rests on; null for an L1. */
+  riskNote: string | null
+  /** The registry origin (or the derived primary origin). */
+  primary: boolean
+  /** The peer manager, in its chain's notation. */
+  manager: string
+  mode: 'locking' | 'burning' | null
+  role: 'lockbox' | 'spoke' | null
+  token: WormholeTokenRef | null
+  /** At asset decimals: custody for a lockbox, gross supply for a spoke. Null when unread. */
+  balance: string | null
+  balanceUsd: number | null
+  /** A spoke's supply at the dead address; null when unread or a lockbox. */
+  burned: string | null
+  paused: boolean | null
+  /** The chain has a read endpoint. */
+  configured: boolean
+  /** Read on this cycle rather than carried over. */
+  fresh: boolean
+  asOf: string | null
+  limits: WormholePeerLimits | null
+  inflightIn: string | null
+  inflightOut: string | null
+  inflightCount: number | null
+  /** Held by the PEER's inbound limiter (a Hydration exit toward it). */
+  queued: string | null
+  /** Held by HYDRATION's inbound limiter (an arrival from it). */
+  queuedHydration: string | null
+  /** Every indexed transfer between Hydration and this chain, at asset decimals. */
+  flows: { received: string | null; sent: string; net: string | null; transfersIn: number; transfersOut: number }
+  /** Lockboxes only: what it can release now, against the flows through Hydration. */
+  payout: { capacity: string | null; potential: string | null; coversPotential: boolean | null; baseline: string | null } | null
+  status: 'ok' | 'attention' | 'unverified' | 'unconfigured'
+  statusDetail: string
+  /** Index vs live `getPeer`: confirmed, index-only, live-only, mismatch. */
+  evidence: PeerEvidence | null
+  /** The first registration of this peer, from the Hydration manager's PeerUpdated log. */
+  since: { blockHeight: number; timestamp: string; extrinsicIndex: number | null; origin: NttChangeOrigin } | null
+  /** Registrations on this chain so far (a re-pointed peer has more than one). */
+  changes: number
+  /** The peer's own transceiver, as Hydration's transceiver registered it. */
+  transceiverPeer: string | null
+  /** Other chains the PEER manager has peers on — custody shared beyond Hydration. */
+  alsoPeers: number[]
+}
+
+/** One custody, flattened across assets — the Security page's lockbox list. */
+export interface WormholeLockboxRow {
+  assetId: string
+  symbol: string
+  decimals: number
+  chainId: number
+  chainName: string
+  layer: WormholeChainLayer | null
+  token: WormholeTokenRef | null
+  balance: string | null
+  balanceUsd: number | null
+  capacity: string | null
+  status: 'ok' | 'attention' | 'unverified' | 'unconfigured'
+  statusDetail: string
 }
 
 export interface WormholeInflightOp {
@@ -140,6 +251,8 @@ export interface WormholeTransferRow {
   extrinsicIndex: number | null
   timestamp: string
   sequence: string | null
+  /** The token on the counterparty chain (e.g. Robinhood's own WETH), from the peer it travelled through. */
+  counterpartyToken: WormholeTokenRef | null
 }
 
 // A transfer the origin chain has redeemed but its rate limiter still holds.
@@ -156,6 +269,9 @@ export interface WormholeQueuedRelease {
   queuedAt: string | null
   releasableAt: string | null
   releasable: boolean
+  /** `out`: a Hydration exit held by the peer's limiter (`chainId` is the peer). `in`: an arrival held by Hydration's own limiter (`chainId` is Hydration, `fromChainId` the source). */
+  direction: 'in' | 'out'
+  fromChainId: number
 }
 
 export interface WormholeChainState {
@@ -165,6 +281,8 @@ export interface WormholeChainState {
   configured: boolean
   ok: boolean
   asOf: string | null
+  /** From the chain table; null for a chain it does not know. */
+  layer?: WormholeChainLayer | null
 }
 
 export interface WormholeBridgeDetail {
@@ -180,6 +298,8 @@ export interface WormholeBridgeDetail {
     surplusUsd: number | null
   }
   chains: WormholeChainState[]
+  /** Every custody across every asset (additive): each peer lockbox, and Hydration's own where it locks. */
+  lockboxes: WormholeLockboxRow[]
   scan: { configured: boolean; ok: boolean; asOf: string | null }
   hydrationChainId: number
   asOf: string | null
@@ -205,6 +325,10 @@ export interface WormholeSummary {
   asOf: string | null
   /** The snapshot's indexed head was older than INDEX_STALE_AFTER_MS when read. */
   indexBehind: boolean
+  /** Custodies across all assets, Hydration's own included. */
+  lockboxCount: number
+  /** Lockboxes whose payout check reads `attention`. */
+  lockboxAttention: number
 }
 
 // ───────────────────────────── chain identity ─────────────────────────────
@@ -222,6 +346,90 @@ export function wormholeChainFamily(chainId: number): WormholeChainFamily {
   if (chainId === 1) return 'solana'
   if (chainId === 21) return 'sui'
   return 'evm'
+}
+
+/**
+ * How a chain secures what is locked on it, as far as a reader of the backing
+ * needs to know: an L1 answers for its own state, an L2 also leans on its
+ * sequencer and its settlement bridge, and `other` is a chain with its own
+ * validator set that is neither.
+ */
+export type WormholeChainLayer = 'l1' | 'l2' | 'other'
+
+export interface WormholeChainInfo {
+  name: string
+  family: WormholeChainFamily
+  /** The chain's own EVM chain id, where it has one. */
+  evmChainId: number | null
+  layer: WormholeChainLayer
+  /**
+   * A keyless public endpoint good enough for a once-a-minute multicall. Chains
+   * without one are read only when the deployment supplies an endpoint in
+   * WORMHOLE_ORIGIN_RPC_URLS (Ethereum/Solana/Sui/Base: their public endpoints
+   * refuse or throttle the reads this monitor makes).
+   */
+  publicRpc: string | null
+  /** One clause on what custody on this chain additionally depends on; null for an L1. */
+  riskNote: string | null
+  /** Address-page URL prefix on the chain's own explorer; null where there is none to link. */
+  explorer: string | null
+}
+
+/**
+ * Every Wormhole chain the monitor knows by name, and the ONE place a chain's
+ * read endpoint is configured. A peer on a chain missing here is still found
+ * (peers are discovered from the managers' own events) and still listed — it
+ * is named by its number and marked unverified until it has an endpoint.
+ *
+ * Robinhood is 72 (its core bridge answers `chainId() = 0x48`), directly
+ * below Hydration's own 73, so the two are easy to transpose. HyperEVM is 47.
+ */
+export const WORMHOLE_CHAINS: Readonly<Record<number, WormholeChainInfo>> = {
+  1: { name: 'Solana', family: 'solana', evmChainId: null, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://orbmarkets.io/address/' },
+  2: { name: 'Ethereum', family: 'evm', evmChainId: 1, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://etherscan.io/address/' },
+  21: { name: 'Sui', family: 'sui', evmChainId: null, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://suivision.xyz/object/' },
+  30: {
+    name: 'Base', family: 'evm', evmChainId: 8453, layer: 'l2', publicRpc: null,
+    riskNote: 'Base is an Ethereum L2 (OP Stack): custody there also rests on its sequencer and its bridge to Ethereum',
+    explorer: 'https://basescan.org/address/',
+  },
+  47: {
+    name: 'HyperEVM', family: 'evm', evmChainId: 999, layer: 'other', publicRpc: 'https://rpc.hyperliquid.xyz/evm',
+    riskNote: "HyperEVM is Hyperliquid's own chain: custody there is secured by Hyperliquid's validator set, not by Ethereum",
+    explorer: 'https://hyperevmscan.io/address/',
+  },
+  72: {
+    name: 'Robinhood', family: 'evm', evmChainId: 4663, layer: 'l2', publicRpc: 'https://rpc.mainnet.chain.robinhood.com',
+    riskNote: 'Robinhood is an Ethereum L2 (Arbitrum Orbit): custody there also rests on its sequencer and its bridge to Ethereum',
+    explorer: 'https://robinscan.io/address/',
+  },
+  73: { name: 'Hydration', family: 'evm', evmChainId: 222222, layer: 'other', publicRpc: null, riskNote: null, explorer: null },
+}
+
+/** A chain's explorer page for an address/object on it, or null. */
+export function wormholeExplorerUrl(chainId: number, address: string | null | undefined): string | null {
+  const base = WORMHOLE_CHAINS[chainId]?.explorer
+  return base && address ? base + encodeURIComponent(address) : null
+}
+
+/** A chain's display name from the table, or its number when it is not in it. */
+export function wormholeChainName(chainId: number): string {
+  return WORMHOLE_CHAINS[chainId]?.name ?? `Wormhole chain ${chainId}`
+}
+
+/**
+ * The read endpoint per Wormhole chain: the table's public endpoint where it has
+ * one, overridden (or extended) by the deployment's WORMHOLE_ORIGIN_RPC_URLS
+ * map. The deployment's value always wins, so a keyed endpoint can replace a
+ * throttled public one without a code change.
+ */
+export function resolveOriginRpcUrls(configured: ReadonlyMap<number, string>): Map<number, string> {
+  const out = new Map<number, string>()
+  for (const [id, info] of Object.entries(WORMHOLE_CHAINS)) {
+    if (info.publicRpc && Number(id) !== HYDRATION_WORMHOLE_CHAIN_ID) out.set(Number(id), info.publicRpc)
+  }
+  for (const [id, url] of configured) out.set(id, url)
+  return out
 }
 
 // ───────────────────────────── hex helpers ─────────────────────────────
@@ -303,7 +511,37 @@ export const EVM_SELECTOR = {
   getOutboundLimitParams: '0x86e11ffa',
   getCurrentInboundCapacity: '0x02717250',
   getInboundLimitParams: '0xd788c147',
+  // Plain ERC-20 views, for a peer token's identity and a spoke's supply.
+  name: '0x06fdde03',
+  symbol: '0x95d89b41',
+  decimals: '0x313ce567',
+  totalSupply: '0x18160ddd',
+  // WormholeTransceiver.nttManager() — which manager a transceiver serves.
+  nttManager: '0x24fb21db',
 } as const
+
+/**
+ * An ABI `string` return value. Null for anything that is not one — a token
+ * answering with a bytes32 symbol (the old MKR style) is read as the
+ * NUL-trimmed ASCII of that word instead.
+ */
+export function decodeAbiString(result: string | null | undefined): string | null {
+  if (typeof result !== 'string') return null
+  const body = stripHex(result)
+  if (/[^0-9a-f]/.test(body)) return null
+  if (body.length === 64) {
+    const text = Buffer.from(body, 'hex').toString('utf8').replace(/\0+$/, '')
+    return /^[\x20-\x7e]+$/.test(text) ? text : null
+  }
+  if (body.length < 128) return null
+  const offset = Number(BigInt('0x' + body.slice(0, 64)))
+  if (!Number.isSafeInteger(offset) || offset * 2 + 64 > body.length) return null
+  const length = Number(BigInt('0x' + body.slice(offset * 2, offset * 2 + 64)))
+  const start = offset * 2 + 64
+  if (!Number.isSafeInteger(length) || start + length * 2 > body.length) return null
+  const text = Buffer.from(body.slice(start, start + length * 2), 'hex').toString('utf8')
+  return text.length ? text : null
+}
 
 export function encodeGetPeer(chainId: number): string {
   return EVM_SELECTOR.getPeer + chainId.toString(16).padStart(64, '0')
@@ -516,6 +754,14 @@ export const TOPIC = {
   // InboundTransferLimitUpdated(uint16 indexed chainId, uint256 oldLimit,
   // uint256 newLimit) — the peer chain is topic1, the limits are in data.
   inboundLimitUpdated: '0x739ed886fd81a3ddc9f4b327ab69152e513cd45b26fda0c73660eaca8e119301',
+  // NttManager.PeerUpdated(uint16 indexed chainId, bytes32 oldPeerContract,
+  // uint8 oldPeerDecimals, bytes32 peerContract, uint8 peerDecimals) — the event
+  // that registers (or replaces) the manager a Hydration manager talks to on
+  // one chain. Every peer an asset has ever had is one of these.
+  peerUpdated: '0x1456404e7f41f35c3daac941bb50bad417a66275c3040061b4287d787719599d',
+  // WormholeTransceiver.SetWormholePeer(uint16 chainId, bytes32 peerContract) —
+  // the transceiver-level equivalent, both fields in data.
+  wormholePeerSet: '0xa559263ee060c7a2560843b3a064ff0376c9753ae3e2449b595a3b615d326466',
   // A transfer the manager's own rate limiter is holding for the refill window.
   // OutboundTransferQueued(uint64 queueSequence) names the manager's outbound
   // queue slot; InboundTransferQueued(bytes32 digest) names the message. Neither
@@ -923,6 +1169,151 @@ export function parseNttQueuedTransfer(topics: readonly string[], data: string):
     : { direction: 'inbound', sequence: null, digest: '0x' + word }
 }
 
+// ─────────────────────── peer registration ───────────────────────
+
+/** One peer registration, from either the manager's or the transceiver's log. */
+export interface NttPeerEvent {
+  kind: 'manager' | 'transceiver'
+  chainId: number
+  /** The registered peer as bytes32; null when the event cleared it. */
+  peer: string | null
+  /** The peer token's decimals, on the manager event only. */
+  decimals: number | null
+}
+
+const zeroWord = (hex: string): boolean => /^0x0*$/.test(hex)
+
+export function parsePeerEvent(topics: readonly string[], data: string): NttPeerEvent | null {
+  const topic = topics[0]?.toLowerCase()
+  const body = stripHex(data)
+  if (topic === TOPIC.peerUpdated) {
+    // The chain is topic1; data is (oldPeer, oldDecimals, peer, peerDecimals).
+    const chain = decodeUint(topics[1])
+    if (chain == null || body.length < 256 || /[^0-9a-f]/.test(body.slice(0, 256))) return null
+    const peer = '0x' + body.slice(128, 192)
+    return {
+      kind: 'manager',
+      chainId: Number(chain),
+      peer: zeroWord(peer) ? null : peer,
+      decimals: Number(BigInt('0x' + body.slice(192, 256))),
+    }
+  }
+  if (topic === TOPIC.wormholePeerSet) {
+    if (body.length < 128 || /[^0-9a-f]/.test(body.slice(0, 128))) return null
+    const peer = '0x' + body.slice(64, 128)
+    return { kind: 'transceiver', chainId: Number(BigInt('0x' + body.slice(0, 64))), peer: zeroWord(peer) ? null : peer, decimals: null }
+  }
+  return null
+}
+
+/**
+ * Who made a change, read off the events of the extrinsic that carried it. A
+ * Technical Committee motion names its proposal (and, once looked up, its
+ * index); a plain EVM transaction names the account that sent it; a change
+ * dispatched outside any extrinsic (the scheduler — a referendum's
+ * enactment) is `scheduled`. Nothing is guessed: an extrinsic none of these fit
+ * is `unknown`.
+ */
+export type NttChangeOrigin =
+  | { kind: 'technical-committee'; proposalHash: string; motionIndex: number | null }
+  | { kind: 'account'; account: string }
+  | { kind: 'scheduled' }
+  | { kind: 'unknown' }
+
+export function changeOriginFromEvents(
+  extrinsicIndex: number | null,
+  events: readonly { eventName: string; args: unknown }[],
+  motionIndexByHash: ReadonlyMap<string, number> = new Map(),
+): NttChangeOrigin {
+  if (extrinsicIndex == null) return { kind: 'scheduled' }
+  for (const event of events) {
+    if (event.eventName !== 'TechnicalCommittee.Executed') continue
+    const hash = (event.args as { proposalHash?: unknown } | null)?.proposalHash
+    if (typeof hash === 'string') {
+      const proposalHash = hash.toLowerCase()
+      return { kind: 'technical-committee', proposalHash, motionIndex: motionIndexByHash.get(proposalHash) ?? null }
+    }
+  }
+  for (const event of events) {
+    if (event.eventName !== 'Ethereum.Executed') continue
+    const from = (event.args as { from?: unknown } | null)?.from
+    if (typeof from === 'string' && /^0x[0-9a-fA-F]{40}$/.test(from)) return { kind: 'account', account: from.toLowerCase() }
+  }
+  return { kind: 'unknown' }
+}
+
+/** A located peer registration: the event plus where on chain it sits. */
+export interface PeerChange {
+  contract: string
+  blockHeight: number
+  eventIndex: number
+  extrinsicIndex: number | null
+  timestampMs: number
+  event: NttPeerEvent
+  origin: NttChangeOrigin
+}
+
+export interface PeerHistory {
+  chainId: number
+  /** The registration in force at the newest event; null when it was cleared. */
+  current: PeerChange | null
+  /** The first registration on this chain — when the asset gained the peer. */
+  first: PeerChange
+  /** Every registration on this chain, oldest first. */
+  changes: PeerChange[]
+}
+
+/**
+ * The peer set of each contract over time, from its own registration events:
+ * contract → chain → history. Events are ordered by their on-chain position, so
+ * a replayed or out-of-order input yields the same answer; identical positions
+ * collapse to one.
+ */
+export function buildPeerHistories(changes: readonly PeerChange[]): Map<string, Map<number, PeerHistory>> {
+  const seen = new Set<string>()
+  const ordered = [...changes]
+    .sort((a, b) => a.blockHeight - b.blockHeight || a.eventIndex - b.eventIndex)
+    .filter(c => {
+      const key = `${c.contract.toLowerCase()}:${c.blockHeight}:${c.eventIndex}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  const out = new Map<string, Map<number, PeerHistory>>()
+  for (const change of ordered) {
+    const contract = change.contract.toLowerCase()
+    const byChain = out.get(contract) ?? new Map<number, PeerHistory>()
+    const prev = byChain.get(change.event.chainId)
+    byChain.set(change.event.chainId, {
+      chainId: change.event.chainId,
+      current: change.event.peer ? change : null,
+      first: prev?.first ?? change,
+      changes: [...(prev?.changes ?? []), change],
+    })
+    out.set(contract, byChain)
+  }
+  return out
+}
+
+/**
+ * Whether the live answer agrees with the indexed history, per chain:
+ * `confirmed` (both name the same peer), `index-only` (the index has a peer the
+ * manager no longer reports — or could not be asked about), `live-only` (the
+ * manager reports a peer no indexed event explains), `mismatch` (both answer,
+ * differently). The peer used is always the LIVE one where there is one: the
+ * index states history, the chain states what is in force.
+ */
+export type PeerEvidence = 'confirmed' | 'index-only' | 'live-only' | 'mismatch'
+
+export function peerEvidence(indexed: string | null, live: string | null | undefined): PeerEvidence | null {
+  const norm = (v: string | null | undefined) => (v ? '0x' + stripHex(v).padStart(64, '0') : null)
+  const a = norm(indexed), b = norm(live)
+  if (a && b) return a === b ? 'confirmed' : 'mismatch'
+  if (a) return 'index-only'
+  if (b) return 'live-only'
+  return null
+}
+
 // ─────────────────────── de-trim arithmetic ───────────────────────
 
 const pow10 = (n: number): bigint => 10n ** BigInt(n)
@@ -1200,6 +1591,234 @@ export function advanceStreak(prev: number, grade: BackingGrade): number {
   if (grade === 'negative') return prev + 1
   if (grade === 'clean') return 0
   return prev
+}
+
+// ─────────────────────── multi-peer backing ───────────────────────
+
+// An NTT asset is one token spread over several chains. Each chain's manager
+// either LOCKS the real token (a lockbox: custody) or BURNS/MINTS a
+// representation (a spoke: supply). Hydration is one of those chains and may be
+// either — WETH is minted here against Ethereum and Robinhood lockboxes,
+// HDX is locked here against a Robinhood spoke. The invariant is the same
+// for every arrangement:
+//
+//   Σ lockbox custody == Σ spoke supply (net of the dead address)
+//                        + in flight + queued + residual
+//
+// so the one classifier above decides every asset, fed by these sums.
+
+export interface BackingLeg {
+  chainId: number
+  role: 'lockbox' | 'spoke'
+  /** At the Hydration asset's decimals: custody for a lockbox, gross supply for a spoke. */
+  amount: bigint | null
+  /** Supply at the dead address on a spoke; null when unread, ignored on a lockbox. */
+  burned: bigint | null
+  /**
+   * The chain has a dead-address balance to read for this spoke (Hydration and
+   * EVM peers do; Solana and Sui burn for real). A null `burned` is then a read
+   * that failed, not a zero.
+   */
+  burnedExpected?: boolean
+  /** Read on this cycle (not carried over from an earlier one). */
+  fresh: boolean
+  /** The chain has a read endpoint at all. */
+  readable: boolean
+}
+
+export interface LegSums {
+  locked: bigint | null
+  issuance: bigint | null
+  burned: bigint | null
+  /** Every leg that contributed was read this cycle. */
+  fresh: boolean
+  /** Chains with no endpoint: their leg is not in the sums. */
+  unreadable: number[]
+  /** Chains with an endpoint whose leg could not be read: not in the sums either. */
+  unread: number[]
+  /** Spokes whose supply is in the sums but whose dead-address balance went unread. */
+  burnUnread: number[]
+  lockboxes: number
+  spokes: number
+}
+
+export function sumBackingLegs(legs: readonly BackingLeg[]): LegSums {
+  let locked: bigint | null = null
+  let issuance: bigint | null = null
+  let burned: bigint | null = null
+  let fresh = true
+  const unreadable: number[] = []
+  const unread: number[] = []
+  const burnUnread: number[] = []
+  for (const leg of legs) {
+    if (!leg.readable) { unreadable.push(leg.chainId); continue }
+    if (leg.amount == null) { unread.push(leg.chainId); continue }
+    if (!leg.fresh) fresh = false
+    if (leg.role === 'lockbox') locked = (locked ?? 0n) + leg.amount
+    else {
+      issuance = (issuance ?? 0n) + leg.amount
+      if (leg.burned != null) burned = (burned ?? 0n) + leg.burned
+      else if (leg.burnedExpected) burnUnread.push(leg.chainId)
+    }
+  }
+  return {
+    locked, issuance, burned, fresh, unreadable, unread, burnUnread,
+    lockboxes: legs.filter(l => l.role === 'lockbox').length,
+    spokes: legs.filter(l => l.role === 'spoke').length,
+  }
+}
+
+/**
+ * The backing verdict over every leg. A leg left out of the sums — a chain with
+ * no endpoint, or one that did not answer — makes the result `unverified` with
+ * that chain named: a missing lockbox understates custody and a missing spoke
+ * understates supply, so neither a shortfall nor a balance measured without it
+ * is a finding. So does a spoke whose dead-address balance went unread: counting
+ * it as zero would state every token retired there as unbacked supply.
+ * (`unverified` grades inconclusive, so it can never page.)
+ */
+export function classifyLegs(
+  input: Omit<BackingInput, 'locked' | 'issuance' | 'burned' | 'custodyFresh' | 'originConfigured'>,
+  legs: readonly BackingLeg[],
+  chainName: (chainId: number) => string = wormholeChainName,
+): BackingVerdict & { sums: LegSums } {
+  const sums = sumBackingLegs(legs)
+  const verdict = classifyBacking({
+    ...input,
+    locked: sums.locked,
+    issuance: sums.issuance,
+    burned: sums.burned,
+    custodyFresh: sums.fresh,
+    // The custody side decides "configured": with no readable lockbox there is
+    // nothing to measure supply against, whichever side Hydration is on.
+    originConfigured: legs.some(l => l.readable && l.role === 'lockbox'),
+  })
+  const missing = [...sums.unreadable, ...sums.unread]
+  if ((!missing.length && !sums.burnUnread.length) || verdict.status === 'unconfigured') return { ...verdict, sums }
+  const roleOf = (chainId: number) => legs.find(l => l.chainId === chainId)?.role === 'spoke' ? 'minted supply' : 'lockbox'
+  const said = missing.map(c => `${chainName(c)} (${roleOf(c)}, ${sums.unreadable.includes(c) ? 'no endpoint configured' : 'did not answer'})`)
+  const parts = [
+    ...(missing.length ? [`Not every chain of this asset could be read: ${said.join(', ')} ${missing.length === 1 ? 'is' : 'are'} left out of the sums, so the figure covers only the chains that answered.`] : []),
+    ...(sums.burnUnread.length ? [`The supply at the dead address on ${sums.burnUnread.map(chainName).join(', ')} could not be read, so supply retired there is still counted as circulating.`] : []),
+  ]
+  return { status: 'unverified', residual: verdict.residual, detail: parts.join(' '), sums }
+}
+
+/** What one lockbox can pay out, measured against the flows through Hydration. */
+export interface LockboxPayoutInput {
+  /** Custody on the lockbox's chain, at the Hydration asset's decimals. Null when unread. */
+  balance: bigint | null
+  /** Minted (or released) on Hydration from this chain, over every indexed transfer. Null when an amount was unreadable. */
+  received: bigint | null
+  /** Sent from Hydration to this chain, over every indexed transfer. */
+  sent: bigint
+  /** Locked on this chain but not yet minted on Hydration. */
+  pendingIn: bigint
+  /** Burned on Hydration toward this chain but not yet released from it (in flight + queued). */
+  pendingOut: bigint
+  /** How much this lockbox's inbound limiter would let through from Hydration right now. */
+  inboundCapacity: bigint | null
+  /** Hydration-side supply that could be sent here. */
+  circulating: bigint | null
+  tolerance: bigint
+  /** The balance was read on this cycle. */
+  fresh: boolean
+  /** Other chains this lockbox's manager also has peers on. */
+  sharedWith: readonly number[]
+  symbol: string
+  decimals: number
+}
+
+export interface LockboxPayout {
+  status: 'ok' | 'attention' | 'unverified'
+  detail: string
+  /** received − sent: what Hydration holders have, net, brought in through this lockbox. */
+  netFlow: bigint | null
+  /**
+   * balance − netFlow − pendingIn − pendingOut: custody the flows through
+   * Hydration do not explain — the seed a lockbox was funded with outside NTT
+   * (the 2026-07 legacy migration), ≈0 for one born with NTT. It should hold
+   * still; below zero, the lockbox has released more than it ever took in.
+   */
+  baseline: bigint | null
+  /** balance − pendingOut: what it can release right now. */
+  capacity: bigint | null
+  /** The most that could be sent toward it before its limiter refills. */
+  potential: bigint | null
+  /** Whether `capacity` covers `potential`. Informational: a lockbox smaller than its own limit is a fact, not a fault. */
+  coversPotential: boolean | null
+}
+
+export function lockboxPayout(input: LockboxPayoutInput): LockboxPayout {
+  const { balance, received, sent, pendingIn, pendingOut, tolerance: tol } = input
+  const netFlow = received == null ? null : received - sent
+  const capacity = balance == null ? null : balance - pendingOut
+  const caps = [input.circulating, input.inboundCapacity].filter((v): v is bigint => v != null)
+  const potential = caps.length ? caps.reduce((a, b) => (a < b ? a : b)) : null
+  const coversPotential = capacity != null && potential != null ? capacity + tol >= potential : null
+  const baseline = balance != null && netFlow != null ? balance - netFlow - pendingIn - pendingOut : null
+  const amt = (v: bigint) => `${humanAmount(v < 0n ? -v : v, input.decimals)} ${input.symbol}`
+  const limitNote = coversPotential === false && capacity != null && potential != null
+    ? ` It can release ${amt(capacity > 0n ? capacity : 0n)} now while up to ${amt(potential)} could be sent toward it before its limit refills; an exit larger than its custody waits until deposits refill it.`
+    : ''
+  const out = { netFlow, baseline, capacity, potential, coversPotential }
+  if (balance == null) return { ...out, status: 'unverified', detail: 'The lockbox could not be read this cycle.' }
+  if (input.sharedWith.length) {
+    return { ...out, status: 'unverified', detail: `This lockbox also has peers on chain ${input.sharedWith.join(', ')}, so its custody backs supply there too and the flows through Hydration alone cannot account for it.${limitNote}` }
+  }
+  if (netFlow == null || baseline == null) {
+    return { ...out, status: 'unverified', detail: `Not every transfer through this lockbox could be measured, so what it owes cannot be stated.${limitNote}` }
+  }
+  const shortRelease = capacity != null && capacity < -tol
+  const shortFlows = baseline < -tol
+  if ((shortRelease || shortFlows) && !input.fresh) {
+    return { ...out, status: 'unverified', detail: `A shortfall stands against a balance carried over from an earlier read, so it is not graded.${limitNote}` }
+  }
+  if (shortRelease) {
+    return { ...out, status: 'attention', detail: `Transfers already burned on Hydration toward this lockbox (${amt(pendingOut)}) exceed what it holds (${amt(balance)}).${limitNote}` }
+  }
+  if (shortFlows) {
+    return { ...out, status: 'attention', detail: `This lockbox holds ${amt(balance)} but the transfers through Hydration put ${amt(netFlow + pendingIn + pendingOut)} net into it: it has released ${amt(baseline)} more than it took in, so it cannot cover what holders could send back to it.${limitNote}` }
+  }
+  const funded = baseline > tol ? `${amt(baseline)} it was funded with outside Wormhole` : null
+  const flowText = netFlow > tol
+    ? `Covers the net ${amt(netFlow)} Hydration holders brought in through it${funded ? `, plus ${funded}` : ''}.`
+    : netFlow < -tol
+      ? `Holders have sent ${amt(netFlow)} more back through it than came in, paid out of ${funded ?? 'its seed'}; it still holds ${amt(balance)}.`
+      : `In and out of it through Hydration balance${funded ? `; it holds ${funded}` : ''}.`
+  return { ...out, status: 'ok', detail: `${flowText}${limitNote}` }
+}
+
+// ─────────────────────── inbound amounts from calldata ───────────────────────
+
+/**
+ * Every NTT TransceiverMessage inside an extrinsic's call arguments, wherever
+ * it sits — a bare `receiveMessage(bytes vaa)`, a relayer's
+ * `receiveWormholeMessages`, a batch. The amount of an inbound transfer is in
+ * no log, only in this payload, and only the manager's own TransferRedeemed /
+ * InboundTransferQueued digest says WHICH payload in the call was executed, so
+ * the caller matches on that digest.
+ */
+export function transceiverMessagesIn(callArgs: string): NttTransceiverMessage[] {
+  const out: NttTransceiverMessage[] = []
+  for (const match of callArgs.matchAll(/0x([0-9a-fA-F]+)/g)) {
+    const body = match[1].toLowerCase()
+    let at = body.indexOf(TRANSCEIVER_PREFIX)
+    while (at >= 0) {
+      if (at % 2 === 0) {
+        const parsed = parseNttTransceiverMessage('0x' + body.slice(at))
+        if (parsed) out.push(parsed)
+      }
+      at = body.indexOf(TRANSCEIVER_PREFIX, at + 1)
+    }
+  }
+  return out
+}
+
+/** The executed transfer among `messages` whose NTT digest is `digest`, from `sourceChainId`. */
+export function messageForDigest(messages: readonly NttTransceiverMessage[], sourceChainId: number, digest: string): NttTransceiverMessage | null {
+  const want = digest.toLowerCase()
+  return messages.find(m => nttDigest(sourceChainId, m.managerMessage).toLowerCase() === want) ?? null
 }
 
 // ─────────────────────── Solana NTT config ───────────────────────
@@ -1616,5 +2235,7 @@ export function summarizeWormhole(detail: WormholeBridgeDetail | null): Wormhole
     surplusUsd: detail.totals.surplusUsd,
     asOf: detail.asOf,
     indexBehind: detail.indexBehind,
+    lockboxCount: detail.lockboxes?.length ?? 0,
+    lockboxAttention: (detail.lockboxes ?? []).filter(l => l.status === 'attention').length,
   }
 }

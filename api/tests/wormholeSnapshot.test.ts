@@ -8,6 +8,8 @@ import {
   parseLogMessagePublished,
   parseNttTransceiverMessage,
   SOLANA_INBOX_RATE_LIMIT_DISCRIMINATOR,
+  SOLANA_INBOX_RATE_LIMIT_LENGTH,
+  SOLANA_OUTBOX_RATE_LIMIT_LENGTH,
   SOLANA_OUTBOX_RATE_LIMIT_DISCRIMINATOR,
   SOLANA_NTT_CONFIG_DISCRIMINATOR,
   SOLANA_NTT_CONFIG_LENGTH,
@@ -146,6 +148,10 @@ let evmRateLimitSeconds = 86_400n
 // Solana program id (base58) → the raw InboxItem accounts it holds.
 const solanaInbox = new Map<string, string[]>()
 const solanaCustody = new Map<number, bigint>()
+// How many InboxRateLimit accounts a program's scan answers with, and a mint its
+// config names in place of the registry's.
+let solanaInboxLimiters = 1
+let solanaConfigMint: string | null = null
 // Digests the EVM origin manager reports it has already executed.
 const evmExecuted = new Set<string>()
 // The live figures the fuse block is pinned on: Ethereum caps USDC at 100,000
@@ -197,6 +203,39 @@ function solanaConfigAccount(tokenHex: string, assetId: number): string {
   new DataView(custody.buffer).setUint32(28, assetId)
   bytes.set(custody, 128)
   return Buffer.from(bytes).toString('base64')
+}
+
+// What getMultipleAccounts answers for one address: the config account and the two
+// limiters under the pubkeys their scans reported, the asset's mint (6 decimals),
+// and the custody token account carrying the asset id in its last four bytes.
+function solanaAccountData(address: string): Uint8Array | null {
+  const [programId, kind] = address.split(':')
+  if (kind) {
+    const asset = ALL_ASSETS.find(a => ORIGIN_PEER[a.assetId] === '0x' + programIdHex(programId))
+    if (!asset) return null
+    if (kind === 'cfg') return Buffer.from(solanaConfigAccount(asset.token, asset.assetId), 'base64')
+    const size = kind === 'out' ? SOLANA_OUTBOX_RATE_LIMIT_LENGTH : SOLANA_INBOX_RATE_LIMIT_LENGTH
+    const bytes = new Uint8Array(size)
+    bytes.set(hexToBytes(kind === 'out' ? SOLANA_OUTBOX_RATE_LIMIT_DISCRIMINATOR : SOLANA_INBOX_RATE_LIMIT_DISCRIMINATOR), 0)
+    const offset = kind === 'out' ? 8 : 9
+    const view = new DataView(bytes.buffer)
+    view.setBigUint64(offset, SOLANA_LIMIT_NATIVE, true)
+    view.setBigUint64(offset + 8, SOLANA_CAPACITY_NATIVE, true)
+    view.setBigInt64(offset + 16, LAST_TX_SEC, true)
+    return bytes
+  }
+  const raw = base58Decode(address)
+  if (!raw) return null
+  if (ALL_ASSETS.some(a => programIdHex(address) === a.token.replace(/^0x/, '').toLowerCase())) {
+    const mint = new Uint8Array(82)
+    mint[44] = 6
+    return mint
+  }
+  const amount = solanaCustody.get(new DataView(raw.buffer, raw.byteOffset, raw.byteLength).getUint32(28))
+  if (amount == null) return null
+  const account = new Uint8Array(165)
+  new DataView(account.buffer).setBigUint64(64, amount, true)
+  return account
 }
 
 // An InboxItem holding `amount` for `recipient`, either queued until
@@ -392,7 +431,8 @@ const fetchImpl = vi.fn(async (input: string | URL, init?: { body?: string }) =>
         view.setBigUint64(offset, SOLANA_LIMIT_NATIVE, true)
         view.setBigUint64(offset + 8, SOLANA_CAPACITY_NATIVE, true)
         view.setBigInt64(offset + 16, LAST_TX_SEC, true)
-        return { ok: true, json: async () => ({ result: [{ account: { data: [Buffer.from(bytes).toString('base64'), 'base64'] } }] }) }
+        const account = { pubkey: `${programId}:${size === 32 ? 'out' : 'in'}`, account: { data: [Buffer.from(bytes).toString('base64'), 'base64'] } }
+        return { ok: true, json: async () => ({ result: size === 33 ? Array(solanaInboxLimiters).fill(account) : [account] }) }
       }
       if (size === 75) {
         const accounts = (solanaInbox.get(programId) ?? []).map(hex => ({ account: { data: [Buffer.from(hex.replace(/^0x/, ''), 'hex').toString('base64'), 'base64'] } }))
@@ -400,14 +440,16 @@ const fetchImpl = vi.fn(async (input: string | URL, init?: { body?: string }) =>
       }
       const asset = ALL_ASSETS.find(a => ORIGIN_PEER[a.assetId] === '0x' + programIdHex(programId))
       if (!asset) return { ok: true, json: async () => ({ result: [] }) }
-      return { ok: true, json: async () => ({ result: [{ account: { data: [solanaConfigAccount(asset.token, asset.assetId), 'base64'] } }] }) }
+      return { ok: true, json: async () => ({ result: [{ pubkey: `${programId}:cfg`, account: { data: [solanaConfigAccount(solanaConfigMint ?? asset.token, asset.assetId), 'base64'] } }] }) }
     }
-    if (call.method === 'getTokenAccountBalance') {
-      const bytes = base58Decode(call.params[0] as string)!
-      const assetId = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(28)
-      const amount = solanaCustody.get(assetId)
-      if (amount == null) return { ok: true, json: async () => ({}) }
-      return { ok: true, json: async () => ({ result: { value: { amount: amount.toString(), decimals: 6 } } }) }
+    // The per-cycle read: every discovered address in one call, answered as a node
+    // would — the account's raw data, or null for an address holding nothing.
+    if (call.method === 'getMultipleAccounts') {
+      const value = (call.params[0] as string[]).map(address => {
+        const data = solanaAccountData(address)
+        return data ? { data: [Buffer.from(data).toString('base64'), 'base64'] } : null
+      })
+      return { ok: true, json: async () => ({ result: { value } }) }
     }
     return { ok: false, json: async () => ({}) }
   }
@@ -429,6 +471,8 @@ beforeEach(() => {
   scanOps = []
   vi.stubGlobal('fetch', fetchStub)
   blockHashResolves = true
+  solanaInboxLimiters = 1
+  solanaConfigMint = null
   deadReadResolves = true
   deadBalances.clear()
   evmExecuted.clear()
@@ -487,7 +531,7 @@ describe('the Wormhole backing snapshot', () => {
 
     // The EVM-log scan is bounded below by the first NttMinterSet block rather
     // than sweeping all of history.
-    expect(queries.find(q => q.includes('raw_evm_logs'))).toContain('block_height >= 13378659')
+    expect(queries.find(q => q.includes('raw_evm_logs') && q.includes('WITH xs'))).toContain('block_height >= 13378659')
   })
 
   // The origin endpoints are metered per METHOD, not per HTTP request, so a
@@ -967,13 +1011,103 @@ describe('transfers held by an origin rate limiter', () => {
     expect(summary!.queuedUsd).toBeCloseTo(79_998.96642431 * 1.09 + 2, 2)
   })
 
+  // A release takes the tokens out of the Solana custody AND the item out of the
+  // queue; custody is read every cycle, the inbox only on its clock. Reading the
+  // first fresh against the second cached counted the released transfer twice —
+  // once gone from custody, once still queued — as a shortfall of its amount.
+  it('rescans the Solana inbox in the same cycle a release moves its custody', async () => {
+    solanaCustody.set(PRIME.assetId, PRIME_LOCKED - PRIME_QUEUED_RAW)
+    solanaInbox.set(programIdBase58(ORIGIN_PEER[PRIME.assetId]), [
+      solanaInboxItem(PRIME_QUEUED_RAW, PRIME_RECIPIENT, SOLANA_RELEASE_STATUS.released, PRIME_RELEASE_AT),
+    ])
+    // Inside the held item's one-minute clock, so only the custody move can force the scan.
+    vi.setSystemTime(Date.parse('2026-08-21T00:00:30Z'))
+    await refreshWormholeBacking()
+    const prime = (await getWormholeBridgeDetail()).assets.find(a => a.symbol === 'PRIME')!
+    expect(prime.queued).toBe('0')
+    expect(prime.residual).toBe('0')
+  })
+
+  it('confirms a Solana shortfall only against an inbox scanned by the confirming pass itself', async () => {
+    // The node answered the custody read after the release and the inbox scan
+    // before it: a first sighting of a shortfall that is not real.
+    solanaCustody.set(PRIME.assetId, PRIME_LOCKED - PRIME_QUEUED_RAW)
+    vi.setSystemTime(Date.parse('2026-08-21T00:00:30Z'))
+    await refreshWormholeBacking()
+    expect((await getWormholeBridgeDetail()).assets.find(a => a.symbol === 'PRIME')!.residual).toBe((-PRIME_QUEUED_RAW).toString())
+
+    solanaInbox.set(programIdBase58(ORIGIN_PEER[PRIME.assetId]), [
+      solanaInboxItem(PRIME_QUEUED_RAW, PRIME_RECIPIENT, SOLANA_RELEASE_STATUS.released, PRIME_RELEASE_AT),
+    ])
+    vi.setSystemTime(Date.parse('2026-08-21T00:00:45Z'))
+    await runWormholeBackingConfirmation()
+    expect((await getWormholeBridgeDetail()).assets.find(a => a.symbol === 'PRIME')!.status).toBe('ok')
+  })
+
+  // The getProgramAccounts scans Solana was asked for since `since`, by account size.
+  const solanaScanSizes = (since: number) => fetchImpl.mock.calls.slice(since)
+    .filter(([url]) => String(url) === SOL_RPC)
+    .map(([, init]) => JSON.parse(String(init?.body)) as RpcCall)
+    .filter(call => call.method === 'getProgramAccounts')
+    .map(call => ((call.params[1] as { filters: { dataSize?: number }[] }).filters.find(f => f.dataSize != null)!.dataSize!))
+
+  it('does not rediscover a program whose config names another mint every cycle', async () => {
+    resetWormholeDiscoveryForTests()
+    solanaConfigMint = SUSDS.token
+    vi.setSystemTime(Date.parse('2026-08-21T00:01:00Z'))
+    await refreshWormholeBacking()
+    const before = fetchStubCalls()
+    vi.setSystemTime(Date.parse('2026-08-21T00:07:00Z'))
+    await refreshWormholeBacking()
+    expect(solanaScanSizes(before)).not.toContain(SOLANA_NTT_CONFIG_LENGTH)
+  })
+
+  it('takes a program holding two inbound limiters as having none, not as a lookup to retry', async () => {
+    resetWormholeDiscoveryForTests()
+    solanaInboxLimiters = 2
+    vi.setSystemTime(Date.parse('2026-08-21T00:01:00Z'))
+    await refreshWormholeBacking()
+    const before = fetchStubCalls()
+    // Past the five-minute retry an unanswered limiter lookup gets.
+    vi.setSystemTime(Date.parse('2026-08-21T00:07:00Z'))
+    await refreshWormholeBacking()
+    const sizes = solanaScanSizes(before)
+    expect(sizes).not.toContain(SOLANA_NTT_CONFIG_LENGTH)
+    expect(sizes).not.toContain(SOLANA_INBOX_RATE_LIMIT_LENGTH)
+    expect(sizes).not.toContain(SOLANA_OUTBOX_RATE_LIMIT_LENGTH)
+  })
+
   // Last, because a settled digest is cached for the life of the process and
   // that is exactly what the second half asserts.
+  // The per-minute cycle used to scan the program five times per Solana asset
+  // (config, both limiters, the inbox, plus a balance read) and that alone spent
+  // a metered key's monthly allowance. Once the addresses are known and nothing
+  // is in flight, a cycle is one getMultipleAccounts for every asset together.
+  it('reads Solana with one call a cycle once nothing is in flight', async () => {
+    solanaInbox.set(programIdBase58(ORIGIN_PEER[PRIME.assetId]), [
+      solanaInboxItem(PRIME_QUEUED_RAW, PRIME_RECIPIENT, SOLANA_RELEASE_STATUS.released, PRIME_RELEASE_AT),
+    ])
+    // A minute on, the held item keeps the inbox on its fast clock and the release is seen.
+    vi.setSystemTime(Date.parse('2026-08-21T00:01:01Z'))
+    await refreshWormholeBacking()
+    const before = fetchStubCalls()
+    vi.setSystemTime(Date.parse('2026-08-21T00:02:02Z'))
+    await refreshWormholeBacking()
+    const solanaMethods = fetchImpl.mock.calls.slice(before)
+      .filter(([url]) => String(url) === SOL_RPC)
+      .map(([, init]) => (JSON.parse(String(init?.body)) as { method: string }).method)
+    expect(solanaMethods).toEqual(['getMultipleAccounts'])
+    expect((await getWormholeBridgeDetail()).assets.find(a => a.symbol === 'PRIME')!.queued).toBe('0')
+  })
+
   it('drops an item the origin has released, and never probes its digest again', async () => {
     solanaInbox.set(programIdBase58(ORIGIN_PEER[PRIME.assetId]), [
       solanaInboxItem(PRIME_QUEUED_RAW, PRIME_RECIPIENT, SOLANA_RELEASE_STATUS.released, PRIME_RELEASE_AT),
     ])
     evmQueue.set(SUSDS_DIGEST, '0x' + '0'.repeat(192))
+    // The next cycle, a minute on: a held transfer keeps the Solana inbox scan on
+    // its one-minute clock, so the release is seen there.
+    vi.setSystemTime(Date.parse('2026-08-21T00:01:01Z'))
     await refreshWormholeBacking()
     const detail = await getWormholeBridgeDetail()
     expect(detail.queued).toEqual([])
@@ -1058,7 +1192,7 @@ describe('reads pinned to the indexed head', () => {
     expect(keys).toHaveLength(1)
     // The log window is bounded by the same block, so the redemption set and the
     // issuance read describe one chain state rather than two.
-    expect(queries.find(q => q.includes('raw_evm_logs'))).toContain('block_height <= 13730752')
+    expect(queries.find(q => q.includes('raw_evm_logs') && q.includes('WITH xs'))).toContain('block_height <= 13730752')
   })
 
   // Supply burned at the dead address must be read in the SAME chain state as
