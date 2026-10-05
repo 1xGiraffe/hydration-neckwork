@@ -60,6 +60,7 @@ const EXPECTED_PATHS = [
   '/v1/accounts/{address}/liquidations',
   '/v1/accounts/{address}/fees',
   '/v1/accounts/{address}/volume',
+  '/v1/accounts/{address}/earnings',
   '/v1/assets',
   '/v1/assets/{id}',
   '/v1/assets/{id}/price',
@@ -98,6 +99,7 @@ const EXPECTED_PATHS = [
   '/v1/stats/volume',
   '/v1/stats/volume/usd',
   '/v1/stats/revenue',
+  '/v1/stats/user-revenue',
   '/v1/stats/active-accounts',
   '/v1/stats/tvl',
 ].sort()

@@ -58,6 +58,12 @@ const ALLOWED_SHARED = new Set([
   // holder), so the explorer's account value and /money-market/positions state one
   // reward one way. A leaf: the client type only.
   'services/mmIncentiveSnapshot.ts',
+  // User Revenue: the stream/class/coverage definitions and the one read of the
+  // fold's published facts, which the explorer's /revenue page and the public
+  // platform headline read too — so /v1/stats/user-revenue and /earnings state
+  // the same totals. Leaves: the client type, cache and valuation only.
+  'services/userRevenueStreams.ts',
+  'services/userRevenueRead.ts',
 ])
 
 function walk(dir: string, prefix = ''): string[] {

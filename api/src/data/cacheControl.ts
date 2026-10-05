@@ -49,6 +49,8 @@ export const DATA_CACHE_CONTROL: Array<[RegExp, number, Visibility]> = [
   [/^\/v1\/accounts\/[^/]+\/(staking|votes|liquidations)$/, 10, 'private'],
   [/^\/v1\/accounts\/[^/]+\/fees$/, 60, 'private'],
   [/^\/v1\/accounts\/[^/]+\/volume$/, 60, 'private'],
+  // User Revenue's account facts are rebuilt about hourly.
+  [/^\/v1\/accounts\/[^/]+\/earnings$/, 300, 'private'],
   [/^\/v1\/accounts\/[^/]+$/, 10, 'private'],
 
   // Assets & prices.
@@ -85,6 +87,8 @@ export const DATA_CACHE_CONTROL: Array<[RegExp, number, Visibility]> = [
   [/^\/v1\/stats\/(volume)$/, 60, 'private'],
   [/^\/v1\/stats\/volume\/usd$/, 60, 'private'],
   [/^\/v1\/stats\/(revenue|active-accounts|tvl)$/, 300, 'private'],
+  // The User Revenue fold publishes closed hours about hourly.
+  [/^\/v1\/stats\/user-revenue$/, 300, 'private'],
 ]
 
 const CACHEABLE_STATUS = new Set([200, 304])
