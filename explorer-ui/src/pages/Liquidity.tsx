@@ -5,7 +5,8 @@ import { paths, Link, setQuery, useQuery } from '../router'
 import { AssetIcon, Usd, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav, TableSkeleton } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
 import { fmtVolumeTvl } from '../utils/volume'
-import type { PoolCompositionEntry, PoolKind, PoolListEntry } from '../types'
+import type { PoolCompositionEntry, PoolListEntry } from '../types'
+import { parsePoolType, POOL_TYPE_FILTERS, poolsOfType } from './liquidityFilter'
 import { useYields } from '../hooks/usePositions'
 import { PoolApr } from '../components/positions/PoolApr'
 import { omnipoolAprSpan, omnipoolListingOf } from '../components/positions/liquidityModel'
@@ -26,19 +27,6 @@ import { aprText } from '../components/positions/yieldFormat'
 // place. Nothing is hidden permanently; the page just does not open on it.
 
 const DUST_USD = 100
-
-// The pool-type filter. The Omnipool is one row, so it needs no filter of its own:
-// it stays in "All" and drops out once a type is picked.
-type PoolTypeFilter = 'all' | Exclude<PoolKind, 'omnipool'>
-const POOL_TYPE_FILTERS: { v: PoolTypeFilter; label: string }[] = [
-  { v: 'all', label: 'All' }, { v: 'stableswap', label: 'Stableswap' }, { v: 'xyk', label: 'XYK' }, { v: 'uniswapv3', label: 'Uniswap v3' },
-]
-export function parsePoolType(value: string | null): PoolTypeFilter {
-  return POOL_TYPE_FILTERS.find(f => f.v === value)?.v ?? 'all'
-}
-export function poolsOfType(pools: PoolListEntry[], type: PoolTypeFilter): PoolListEntry[] {
-  return type === 'all' ? pools : pools.filter(p => p.kind === type)
-}
 
 // A pool's composition as one bar, at row scale: no axes, no tooltip, no
 // hover state — the pool's own page carries the full chart. Segments are the

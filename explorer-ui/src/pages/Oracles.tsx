@@ -4,11 +4,11 @@ import { useNow } from '../hooks/useNow'
 import { Link, paths, setQuery, useQueryValue } from '../router'
 import { AddrPill, ChartSkeleton, Crumbs, EmptyRow, F, LoadError, Pager, rowNav, TableSkeleton } from '../components/ui'
 import { DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
-import {
-  Age, AssetMini, ConsumerList, DeviationCell, Dur, FeedValue, isUsdPair, KIND_LABEL, MiniBars, SourceCell, sourceHref, StatusDot, ageNow,
-} from '../components/OracleParts'
+import { Age, AssetMini, ConsumerList, DeviationCell, Dur, FeedValue, MiniBars, SourceCell, StatusDot } from '../components/OracleParts'
+import { ageNow, isUsdPair, KIND_LABEL, sourceHref } from '../components/oracleFormat'
 import { useOraclesOverview, type EmaSourceRow, type OracleChange, type OracleFeedRow, type OraclesOverview } from '../api/oracles'
 import { fmtDuration } from '../utils/dca'
+import { splitFeeds } from './oraclesModel'
 
 // /oracles — which prices Hydration takes from outside or from its own oracles,
 // who delivers them, whether they are fresh, and whether they agree with the
@@ -28,13 +28,6 @@ function Card({ k, v, s }: { k: string; v: ReactNode; s?: ReactNode }) {
       {s && <div className="hs">{s}</div>}
     </div>
   )
-}
-
-/** The feed list shows what is live or read by something; the rest folds behind one line. */
-export function splitFeeds(feeds: OracleFeedRow[]): { shown: OracleFeedRow[]; folded: OracleFeedRow[] } {
-  const shown: OracleFeedRow[] = [], folded: OracleFeedRow[] = []
-  for (const f of feeds) (f.status === 'live' || (f.status === 'stale' && f.consumers.length > 0) ? shown : folded).push(f)
-  return { shown, folded }
 }
 
 function MarketsSection({ d, now }: { d: OraclesOverview; now: number }) {

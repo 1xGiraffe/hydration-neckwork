@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { Liquidity, parsePoolType, poolsOfType } from '../src/pages/Liquidity'
+import { Liquidity } from '../src/pages/Liquidity'
+import { parsePoolType, poolsOfType } from '../src/pages/liquidityFilter'
 import type { PoolListEntry, PoolsIndexResponse } from '../src/types'
 
 const pool = (kind: PoolListEntry['kind'], name: string, tvlUsd: number): PoolListEntry =>
