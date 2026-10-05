@@ -2238,6 +2238,12 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/explorer\/security$/, fn: () => buildSecurity() },
   { re: /^\/explorer\/security\/wormhole$/, fn: () => buildSecurityWormhole() },
   { re: /^\/explorer\/accounts$/, fn: (_m, qs) => buildAccounts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'value') },
+  // On-demand activity totals for rows the swept ranking has not counted: every key
+  // is answered at once with a total derived from the key, so a row keeps its number.
+  { re: /^\/explorer\/accounts\/activity-counts$/, fn: (_m, qs) => ({
+    counts: Object.fromEntries((qs.get('keys') ?? '').split(',').filter(Boolean).map(key => [key, { total: 10 + [...key].reduce((s, c) => s + c.charCodeAt(0), 0) % 900, complete: true }])),
+    pending: [],
+  }) },
   { re: /^\/explorer\/contracts$/, fn: (_m, qs) => buildContracts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'created') },
   { re: /^\/explorer\/contract\/compiler-versions$/, fn: () => ({ versions: ['v0.8.19+commit.7dd6d404', 'v0.8.10+commit.fc410830'] }) },
   // Artifacts exist only for the verified contract; anything else falls through

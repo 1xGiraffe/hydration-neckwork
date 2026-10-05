@@ -135,6 +135,9 @@ export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identi
 export interface AccountsPage {
   rows: TopAccountRow[]
   total: number
+  // Sort=activity only: how many leading rows the activity ordering is provably
+  // established for (the leaderboard's counted prefix); the pager notes where it ends.
+  rankedDepth?: number
 }
 
 // A registry contract, as the /contracts directory and AddressDetail.contract
@@ -2919,4 +2922,16 @@ export interface MoneyMarketHistory {
   unclaimedRewardsUsd: (number | null)[]
   rewardsIncomplete: number[]
   markets: MoneyMarketHistoryMarket[]
+}
+
+// /explorer/accounts/activity-counts: totals for rows the swept ranking has not
+// counted. A key maps to its total, or null when it cannot be counted; `pending`
+// keys are still counting and are asked for again.
+export interface DirectoryActivityCounts {
+  counts: Record<string, { total: number | null; complete: boolean } | null>
+  pending: string[]
+  /** Keys whose count failed recently (an error, unlike a null "cannot be counted"). */
+  failed?: string[]
+  /** Client-side: the table stopped polling with these keys still uncounted. */
+  unavailable?: string[]
 }

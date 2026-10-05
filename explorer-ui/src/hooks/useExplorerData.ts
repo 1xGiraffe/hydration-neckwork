@@ -7,7 +7,7 @@ import { blockOf } from '../utils/activityIds'
 import { useHeldRows } from './useHeldRows'
 import { getSession } from '../session'
 import { tagMapStatus, hasUserTagMembers, useTagMapVersion } from '../userTags'
-import type { AccountSort, ContractSort, RevenueRange, VolumeScope } from '../types'
+import type { AccountSort, ContractSort, DirectoryActivityCounts, RevenueRange, VolumeScope } from '../types'
 
 // List/feed hooks honour the global Live toggle. When live, they poll on LIVE_MS;
 // when paused, no refetch. The API's single-flight cache keeps DB load O(1) in
@@ -778,6 +778,90 @@ export function useDaily(scope: string, params?: { type?: string; action?: strin
   // bars in place — same frame, same height — while the new tab loads.
   return useQuery({ queryKey: ['daily', scope, params ?? null], queryFn: ({ signal }) => api.daily(scope, params, signal), staleTime: 300_000, placeholderData: keepPreviousData })
 }
+// Activity totals for directory rows the swept ranking has not counted (the
+// API counts them a few at a time through the row's own page total; see
+// /explorer/accounts/activity-counts). Asked for exactly the rows on screen,
+// polled while any are still counting, and remembered here so paging back and
+// forth never asks twice inside the server's own freshness window.
+const DIRECTORY_ACTIVITY_TTL_MS = 30 * 60_000
+const DIRECTORY_ACTIVITY_KEYS_MAX = 60
+const DIRECTORY_ACTIVITY_POLLS_MAX = 40
+// The remembered answers: expired ones are dropped and the map is capped (oldest
+// first), so a long session paging through the directory cannot grow it without end.
+const DIRECTORY_ACTIVITY_KNOWN_MAX = 2_000
+const directoryActivityKnown = new Map<string, { value: DirectoryActivityCounts['counts'][string]; at: number }>()
+// Asks made per row set (the query key), so polling can give up — and the cell say
+// so — after DIRECTORY_ACTIVITY_POLLS_MAX; a retry restarts the budget. Capped at
+// 200 row sets, least recently asked dropped first.
+const directoryActivityPolls = new Map<string, number>()
+const DIRECTORY_ACTIVITY_POLL_SETS_MAX = 200
+/** Count one ask for a row set and return the asks made so far. Exported for tests. */
+export function countDirectoryActivityPoll(pollKey: string): number {
+  // Read before the delete: the delete only moves the key to the newest end of
+  // the map so the cap drops the least recently asked row set.
+  const asks = (directoryActivityPolls.get(pollKey) ?? 0) + 1
+  directoryActivityPolls.delete(pollKey)
+  directoryActivityPolls.set(pollKey, asks)
+  while (directoryActivityPolls.size > DIRECTORY_ACTIVITY_POLL_SETS_MAX) directoryActivityPolls.delete(directoryActivityPolls.keys().next().value as string)
+  return asks
+}
+/** Whether polling for a row set has spent its budget. Exported for tests. */
+export function directoryActivityPollsSpent(pollKey: string): boolean {
+  return (directoryActivityPolls.get(pollKey) ?? 0) >= DIRECTORY_ACTIVITY_POLLS_MAX
+}
+/** Restart a row set's polling budget (a retry). Exported for tests. */
+export function resetDirectoryActivityPolls(pollKey: string): void {
+  directoryActivityPolls.delete(pollKey)
+}
+function rememberDirectoryActivity(key: string, value: DirectoryActivityCounts['counts'][string]): void {
+  const now = Date.now()
+  directoryActivityKnown.delete(key)
+  directoryActivityKnown.set(key, { value, at: now })
+  for (const [k, hit] of directoryActivityKnown) {
+    if (directoryActivityKnown.size <= DIRECTORY_ACTIVITY_KNOWN_MAX && now - hit.at <= DIRECTORY_ACTIVITY_TTL_MS) break
+    directoryActivityKnown.delete(k)
+  }
+}
+export function useDirectoryActivityCounts(keys: string[]) {
+  const sorted = [...new Set(keys)].sort().slice(0, DIRECTORY_ACTIVITY_KEYS_MAX)
+  const query = useQuery({
+    queryKey: ['directory-activity-counts', sorted],
+    enabled: sorted.length > 0,
+    staleTime: 60_000,
+    queryFn: async ({ signal }): Promise<DirectoryActivityCounts> => {
+      countDirectoryActivityPoll(sorted.join(','))
+      const known = (key: string) => {
+        const hit = directoryActivityKnown.get(key)
+        return hit && Date.now() - hit.at <= DIRECTORY_ACTIVITY_TTL_MS ? hit : null
+      }
+      const ask = sorted.filter(key => !known(key))
+      let pending: string[] = []
+      let failed: string[] = []
+      if (ask.length) {
+        const answer = await api.directoryActivityCounts(ask, signal)
+        for (const [key, value] of Object.entries(answer.counts)) rememberDirectoryActivity(key, value)
+        pending = answer.pending
+        failed = answer.failed ?? []
+      }
+      const counts: DirectoryActivityCounts['counts'] = {}
+      for (const key of sorted) { const hit = known(key); if (hit) counts[key] = hit.value }
+      return { counts, pending, failed }
+    },
+    // The server waits ~2.5 s per ask, so this paces to roughly one ask every
+    // 4 s while anything is still counting, and gives up after a few minutes.
+    refetchInterval: q => (q.state.data?.pending.length && !directoryActivityPollsSpent(sorted.join(',')) ? 1_500 : false),
+  })
+  // Once polling has given up, what is still pending is no longer "counting": it
+  // is unavailable, like a failed count, and the cell offers a retry instead.
+  const gaveUp = query.dataUpdatedAt > 0 && !query.isFetching && directoryActivityPollsSpent(sorted.join(','))
+  const data = query.data
+    ? { ...query.data, unavailable: [...(query.data.failed ?? []), ...(gaveUp ? query.data.pending : [])], pending: gaveUp ? [] : query.data.pending }
+    : undefined
+  // A retry restarts the polling budget for this row set, not just one more ask.
+  const retry = () => { resetDirectoryActivityPolls(sorted.join(',')); void query.refetch() }
+  return { ...query, data, retry }
+}
+
 export function useAccountsDaily() {
   return useQuery({ queryKey: ['accounts-daily'], queryFn: ({ signal }) => api.accountsDaily(signal), staleTime: 300_000 })
 }

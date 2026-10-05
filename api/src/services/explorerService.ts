@@ -35,6 +35,7 @@ import { holderIsUserSql, loadHolderClassifier, rowHolderClass } from './userRev
 import { foldMmEarned, mmCustodyIndex, type MmCustodyIndex, type MmEarnedCategory } from './mmEarned.ts'
 import { GIGAHDX_ATOKEN, loadMmContracts } from './userRevenueMm.ts'
 import { MM_COVERAGE_FROM_BLOCK } from './userRevenueStreams.ts'
+import { createActivityCountLane, type LaneAnswer } from './activityCountLane.ts'
 import { USER_REVENUE_DISPLAY_STREAMS, userRevenueDisplayStream, type HolderClass } from './userRevenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT, lbpPools, stableswapPoolAccount } from './tagService.ts'
 import { locateVenuePage, poolVenueForScope, venueKeysUnionSql, venueLiquidityEvents, venueLiquidityKeysSql, venueTradeKeysSql, venueTradeSource, walkVenueRows, type PoolVenue, type VenueKey, type VenueKeyReader, type VenueSourceSql } from './poolVenue.ts'
@@ -29478,6 +29479,69 @@ async function ensureActivityLeaderboard(): Promise<ActivityLeaderboard | null> 
   if (activityLeaderboard) return activityLeaderboard
   activityLeaderboard = await loadActivityLeaderboard().catch(() => null)
   return activityLeaderboard
+}
+
+// ─── Activity totals for the rows a reader is looking at ──────────────────────
+//
+// The sweep above covers the ~650 rows the directory leads with; a row past them
+// (a later page, a rarer sort, a tag's member list) had no number at all. The
+// table asks for exactly the rows it renders without a total, and this lane counts
+// them through the same function the row's own page calls — a system tag through
+// its tag feed, an account through its account feed — a few at a time, answering
+// with whatever finished inside a short wait (see activityCountLane.ts). The
+// directory response is untouched and the activity ordering stays the sweep's.
+//
+// Sized against measured cold counts: an ordinary account is 0.7–1.9 s, and three
+// at once fill a 40-row page in ~20 s while leaving the instance to live requests
+// (the structural pots that take 5–11 s are all in the sweep already).
+export const DIRECTORY_ACTIVITY_KEYS_MAX = 60
+const directoryActivityLane = createActivityCountLane({
+  count: async key => {
+    const query: ScopedListQuery = { tab: 'activity', type: 'all' }
+    const total = ACCOUNT_RE.test(key) ? await getAddressListTotal(key, query) : await getTagListTotal(key, query)
+    return total && total.total != null ? { total: total.total, complete: total.complete } : null
+  },
+  concurrency: 3,
+  queueMax: 150,
+  perRequestMax: 20,
+  freshMs: 30 * 60_000,
+  maxAgeMs: ACTIVITY_LEADERBOARD_ENTRY_TTL_MS,
+  failMs: 60_000,
+  entriesMax: 5_000,
+  onError: (key, error) => console.warn('[explorer] directory activity total failed', key, error),
+})
+
+// Keys are the directory's row keys: a group key of the published ranking (an
+// account, or a system tag id), or a member of a system tag (a tag's member list
+// shows its members as rows). Anything else — an arbitrary well-formed 64-hex id,
+// a viewer's own `u:` group (which has its own lane), an unknown tag — is dropped
+// and simply never reported, so the lane's whole-history counts are spent only on
+// rows the directory can actually render.
+// Every group key the shared directory ranks (the value ranking lists every
+// group whatever the sort), as a set memoized per ranking. Read through the
+// ranking's own stale-while-revalidate cache, so it costs nothing while warm.
+const directoryKnownKeySets = new WeakMap<string[], Set<string>>()
+async function directoryKnownKeys(): Promise<Set<string>> {
+  await accountsPage(0, 0, 'value', false, undefined, undefined, { rankOnly: true })
+  const ranked = peekCached<string[]>(`accounts-rank:${accountDirectoryModelVersion()}:value`) ?? []
+  let set = directoryKnownKeySets.get(ranked)
+  if (!set) directoryKnownKeySets.set(ranked, set = new Set(ranked))
+  return set
+}
+
+export async function getDirectoryActivityCounts(keys: string[], waitMs = 2_500): Promise<LaneAnswer> {
+  // Without a readable ranking the old shape check stands in, rather than the
+  // lane refusing every key.
+  const known = await directoryKnownKeys().catch(error => {
+    console.warn('[explorer] directory ranking unavailable for activity-count keys:', error instanceof Error ? error.message : error)
+    return null
+  })
+  const valid = [...new Set(keys)]
+    .filter(key => known
+      ? known.has(key) || (ACCOUNT_RE.test(key) && tagForAccount(key) != null)
+      : ACCOUNT_RE.test(key) || tagMembers(key) != null)
+    .slice(0, DIRECTORY_ACTIVITY_KEYS_MAX)
+  return directoryActivityLane.request(valid, waitMs)
 }
 const ACCOUNT_DIRECTORY_SNAPSHOT_MAX_AGE_SECONDS = 10 * 60
 

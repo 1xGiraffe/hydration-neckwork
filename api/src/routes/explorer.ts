@@ -10,7 +10,7 @@ import {
   getIntentOrder,
   getRecentEvents, getEventAt, getTradeDetail, getTradeDetailByEvent, getRecentActivity, getGlobalActivityTotal, getMoneyMarket, getAssetDetail, getAssetDcas, getAssetLimitOrders, getXcDestination, getAssetActivity, getDailyActivity, getDailyAccounts, getListCounts, getTag, getTagMemberAccounts,
   getAddressActivity, getAddressExtrinsics, getAddressEvents, getAddressTabCounts, getTagTabCounts,
-  getAddressListTotal, getTagListTotal,
+  getAddressListTotal, getTagListTotal, getDirectoryActivityCounts, DIRECTORY_ACTIVITY_KEYS_MAX,
   getAddressValueEvents, getTagValueEvents,
   getAssetPriceWindow, getAddressHistoryWindow, getAddressLiquidityHistory, getAddressMoneyMarketHistory, getTagHistoryWindow, getTagLiquidityHistory, getAddressVolumeHistory, getTagVolumeHistory,
   getTagActivity, getTagExtrinsics, getTagEvents,
@@ -365,6 +365,20 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     const offset = offsetParam(q)
     if (offset == null) return badOffset(reply)
     return getAccounts(offset, limit, accountSortParam(q))
+  })
+
+  // Activity totals for directory rows the swept ranking has not counted, asked
+  // for by the table for exactly the rows it renders (see getDirectoryActivityCounts).
+  // `keys` is a comma list of row keys (account ids / system tag ids). Never cached
+  // by the browser: the answer changes as the lane finishes, and the table polls
+  // with the keys still pending.
+  fastify.get('/explorer/accounts/activity-counts', async (req, reply) => {
+    const raw = (req.query as { keys?: unknown }).keys
+    if (typeof raw !== 'string' || raw.length > 6_000) return reply.status(400).send({ error: 'Invalid keys' })
+    const keys = raw.split(',').map(k => k.trim().toLowerCase()).filter(Boolean)
+    if (!keys.length || keys.length > DIRECTORY_ACTIVITY_KEYS_MAX) return reply.status(400).send({ error: `keys must list 1–${DIRECTORY_ACTIVITY_KEYS_MAX} row keys` })
+    reply.header('cache-control', 'no-store')
+    return getDirectoryActivityCounts(keys)
   })
 
   fastify.get('/explorer/daily/:scope', async (req, reply) => {

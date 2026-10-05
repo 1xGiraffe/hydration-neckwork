@@ -2,7 +2,7 @@ import type { MmMarketOption,
   PairChart,
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
-  AccountsPage, AccountSort, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
+  AccountsPage, AccountSort, DirectoryActivityCounts, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
   RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, AssetPriceWindow, HollarDashboard, HollarWindowChart, HdxWindowChart, ChartWindowPayload, IceDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas, AssetLimitOrderBook, XcDestinationDetail, IntentOrderDetail,
   AssetLiquidity, PoolDetail, UniswapV3PoolDetail, UniswapV3PoolHistory, UniswapV3PoolLiquidity, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
@@ -357,6 +357,7 @@ export const api = {
   verifyPoll: (verificationId: string, signal?: AbortSignal) => getJson<VerificationJob>(`/v2/verify/${encodeURIComponent(verificationId)}`, signal),
   // The daily histogram can mirror the activity page's tab + filters.
   daily: (scope: string, params?: { type?: string; action?: string; token?: string; market?: string }, signal?: AbortSignal) => getJson<DailyPoint[]>(withQuery(`/explorer/daily/${scope}`, { ...params }), signal),
+  directoryActivityCounts: (keys: string[], signal?: AbortSignal) => getJson<DirectoryActivityCounts>(withQuery('/explorer/accounts/activity-counts', { keys: keys.join(',') }), signal),
   accountsDaily: (signal?: AbortSignal) => getJson<{ date: string; active: number; new: number }[]>('/explorer/accounts-daily', signal),
   tags: (signal?: AbortSignal) => getJson<Tag[]>('/explorer/tags', signal),
   // Public, shared-cacheable tag-list directory — no auth, no per-viewer
