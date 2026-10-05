@@ -692,9 +692,17 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
           vertical lines (see .dca-tbl-aligned). */}
       <div className="panel"><table className={'tbl dca-tbl' + (showOwner ? ' dca-tbl-aligned' : '')}>
         <thead><tr>
+          {/* Short headers carry their long form on hover, so the owner variant's
+              nine columns fit a 1200px window without the panel scrolling. */}
           {showOwner && <th>Owner</th>}
-          <th>Selling → Buying</th><th className="r">Per trade</th><th className="r">Limit</th><th className="r">Budget</th>
-          <th className="r">Filled</th><th className="r">Every</th><th className="r">Next trade</th><th className="r">Runs out</th>
+          <th title="Selling → Buying">Sell → Buy</th>
+          <th className="r" title="Amount per trade, with today’s dollar value">Per trade</th>
+          <th className="r" title="Price limit — the most the order pays per unit of what it buys">Limit</th>
+          <th className="r" title="Total budget, and what is left of it">Budget</th>
+          <th className="r" title="Share of the budget spent, and trades so far">Filled</th>
+          <th className="r" title="Time between trades">Every</th>
+          <th className="r" title="Next trade — countdown and block">Next</th>
+          <th className="r" title="Runs out — when the budget or funding balance is spent">Runs out</th>
         </tr></thead>
         <tbody>
           {/* A sum of one order would just repeat the order. */}
@@ -851,8 +859,12 @@ export function LimitOrdersTable({ orders, now, title, showOwner, emptyText }: {
       <div className="panel"><table className="tbl dca-tbl">
         <thead><tr>
           {showOwner && <th>Owner</th>}
-          <th>Selling → Buying</th><th className="r">Selling</th><th className="r">For at least</th>
-          <th className="r">Limit price</th><th className="r">Filled</th><th className="r">Placed</th>
+          <th title="Selling → Buying">Sell → Buy</th>
+          <th className="r" title="Selling — what is still resting, with today’s dollar value">Selling</th>
+          <th className="r" title="For at least — the least it accepts for what is still resting">Min. out</th>
+          <th className="r" title="Limit price — what one unit sold must fetch">Limit</th>
+          <th className="r" title="Share of the order filled, and fills so far">Filled</th>
+          <th className="r" title="When the order was placed">Placed</th>
         </tr></thead>
         <tbody>
           {!orders.length ? <EmptyRow cols={showOwner ? 7 : 6}>{emptyText}</EmptyRow> : orders.map(o => {
