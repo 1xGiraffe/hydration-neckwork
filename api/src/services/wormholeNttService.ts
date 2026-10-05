@@ -201,7 +201,7 @@ interface ManagerStaticFacts {
   /**
    * EVERY chain this manager has registered a peer on, not just the registry
    * origin. A burning manager can be backed by more than one locking custody —
-   * WETH is held on both Ethereum and Robinhood Chain — and reading only the
+   * WETH is held on both Ethereum and Robinhood — and reading only the
    * registry origin understates backing by whatever the others hold.
    */
   peers: ManagerPeer[]
