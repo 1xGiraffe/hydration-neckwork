@@ -16,6 +16,8 @@
 //   - account_revenue                    month rebuild following revenue_events' publication
 //   - xcm_arrivals                       month rebuild by ingest-time watermark, over the feed's own walk
 //   - pair_route_ohlc                    hourly fold over per-block pool snapshots, per-hour replacement inserts, bounded slice per cycle
+//   - account_user_revenue               month rebuild from the month's exposure anchor, the next anchor published last, budgeted
+//   - user_revenue_hourly                hourly fold of the head's stale hours from the month's anchor, budgeted
 //
 // Every publication into a model this module owns goes through its
 // `<table>_staging` twin and is atomic, so a reader never sees a gap or a
@@ -2811,4 +2813,733 @@ export async function runPairRouteOhlc(client: ClickHouseClient, hoursPerCycle =
   const rows = await foldPairRouteHours(client, slice, computedAtSec)
   if (pairRouteCascadeMarks > marksBefore) console.log(`[derivations] ${model}: ${pairRouteCascadeMarks - marksBefore} next hour(s) re-marked by a changed closing route`)
   return { model, rows }
+}
+
+// ─────────────────────────── user revenue ───────────────────────────
+// What users EARN on Hydration, net, booked when it accrues (services/
+// userRevenueStreams.ts for the semantics, services/userRevenueFold.ts and
+// userRevenueWindow.ts for the computation, clickhouse/schema/016_user_revenue.sql
+// for the tables). Two jobs over ONE computation (computeUserRevenueWindow):
+//
+//  * account_user_revenue — the MONTH is the bucket. A stale month is rebuilt
+//    whole from its opening exposure anchor (anchor(m), what every pot's holders
+//    held at the month's start) and published in this order: the next month's
+//    anchor into the anchor's staging twin, then the month's day-grain facts
+//    (account_user_revenue_daily) and the same build's hourly facts
+//    (user_revenue_hourly) by REPLACE PARTITION, then anchor(m+1) by REPLACE
+//    PARTITION LAST. Every daily row carries the fingerprint of the anchor it
+//    opened from (opening_fp) and of the anchor it wrote (closing_fp), so a
+//    changed anchor re-queues the month that read it — the cascade stops at the
+//    first month whose anchor content is unchanged — and a crash between the
+//    facts and the anchor leaves the live anchor's fingerprint different from the
+//    month's closing_fp, which re-queues the month. The month still filling is
+//    rebuilt over its closed hours at most once an hour (closing_fp 0, no anchor).
+//  * user_revenue_hourly — the HOUR is the bucket, for the head's freshness: the
+//    newest stale closed hours of the current and the previous month (a month
+//    whose anchor exists) are recomputed from that anchor (advanced to the hours
+//    by the month's own sources) and republished into the month's hourly
+//    partition, its other hours kept. Restating older months is the account
+//    fold's: its month build republishes the hourly partition as well.
+// Because both publish sums of the same per-(account, hour) cells, a month's
+//   Σ daily == Σ hourly   per (stream, holder_class)
+// holds whenever both last folded it from the same inputs (the account fold's
+// month build writes both).
+//
+// Staleness, from ingest-time watermarks (never a forward cursor):
+//   * own-hour sources, which re-mark only the hours they name — the venues' fee
+//     legs (pool_swap_hour_watermarks), the price rows
+//     (pair_route_hour_watermarks.price_ingest: the hour and the next, whose
+//     events are valued at its candle), the 600-block pool state grids
+//     (user_revenue_hour_watermarks 'pool_state', the hour and the next: a grid
+//     interval spans the boundary), a farm sync (every hour from the farm's
+//     previous sync to it — the interpolation it decides) and a voter's reward
+//     record (its referendum's allocation hour, where E3 books it);
+//   * cumulative sources, whose rows move every LATER hour's opening exposure —
+//     every raw event and extrinsic (staking and position events, claims), the
+//     money market's scaled deltas and indices ('events'/'debt' in
+//     revenue_hour_watermarks), balance observations and ERC-20 deltas
+//     ('state'), incentive indices, v3 rows, farm configuration, and the
+//     block-bucketed liquidity-mining and XYK-share rows
+//     (user_revenue_block_watermarks, mapped to hours through blocks): an hour
+//     is stale when the running max of these up to it is newer than its
+//     computation (minus INGEST_SETTLE_SECONDS);
+//   * definitions — a bucket's registry_fp is the registry valuation
+//     fingerprint XOR-ed over the assets its cells were valued in, XOR the rule
+//     version and the protocol-holder set (ruleFingerprint), XOR the identities
+//     of the token-rate segments it overlaps (a later peg move decides how
+//     earlier hours accrued: userRevenueTokens.pegBucketFingerprints), so a
+//     registry, rule, tag or decided-segment change re-values exactly what it
+//     touches; a month holding an ETH-mapped account a substrate account has
+//     since bound is rebuilt under the owner's key ('binding').
+// Every staleness read maps only source rows ingested after the oldest stored
+// computation (`since`) to hours; older rows cannot make anything stale.
+// Only CLOSED, PRICED, SETTLED hours are folded (below the revenue fold's cut,
+// at or after the price floor, sources older than INGEST_SETTLE_SECONDS).
+//
+// The bounded catch-up lane: each job spends at most USER_REVENUE_CYCLE_BUDGET_S
+// per cycle — head first (the live month, the newest stale hours), then the
+// OLDEST unbuilt history — and yields between buckets, never inside one; every
+// query runs under USER_REVENUE_QUERY_SETTINGS (max_threads 4, 6 GB). History
+// completes over a few days of cycles while every other job keeps its cadence;
+// the surfaces state the coverage meanwhile.
+
+import { computeUserRevenueWindow, lastBlockBefore, ruleFingerprint, type AnchorIn, type AnchorRow } from '../services/userRevenueWindow.ts'
+import type { HolderMembers } from '../services/userRevenueFold.ts'
+import { HOUR as UR_HOUR, PRICE_CARRY_SECONDS as UR_PRICE_CARRY_SECONDS, loadFoldWindow, monthBoundsOf, monthOf, nextMonth } from '../services/userRevenueFold.ts'
+import { EVM_BINDINGS_SQL } from '../services/userRevenueMm.ts'
+import { loadPegGrid, pegBucketFingerprints, tokenSegments } from '../services/userRevenueTokens.ts'
+
+export interface UserRevenueTables { hourly: string; daily: string; anchor: string }
+export const USER_REVENUE_TABLES: UserRevenueTables = {
+  hourly: 'price_data.user_revenue_hourly',
+  daily: 'price_data.account_user_revenue_daily',
+  anchor: 'price_data.user_revenue_exposure_anchor',
+}
+export const USER_REVENUE_HOUR_WATERMARKS_TABLE = 'price_data.user_revenue_hour_watermarks'
+export const USER_REVENUE_BLOCK_WATERMARKS_TABLE = 'price_data.user_revenue_block_watermarks'
+
+/** Per-cycle time budget of each user-revenue job, seconds (USER_REVENUE_CYCLE_BUDGET_S, default 180: a month build takes up to ~2 min). */
+export function userRevenueBudgetSeconds(raw = process.env.USER_REVENUE_CYCLE_BUDGET_S): number {
+  const n = Number(raw?.trim())
+  return Number.isFinite(n) && n > 0 ? n : 180
+}
+
+/** The live month is rebuilt at most this often. */
+export const USER_REVENUE_LIVE_MONTH_INTERVAL_S = 3_600
+/** At most this many hours per hourly-fold window. */
+export const USER_REVENUE_MAX_WINDOW_HOURS = 168
+/** How far a candle is carried forward (userRevenueFold.PRICE_CARRY_SECONDS), in hours. */
+const PRICE_CARRY_HOURS = UR_PRICE_CARRY_SECONDS / 3_600
+
+/**
+ * Per hour: the newest ingest of every source that moves it (own-hour and the
+ * running max of the cumulative ones), and whether it may be folded at all.
+ *
+ * `{since:DateTime}` bounds the expensive branches: a source row ingested at or
+ * before it cannot make any bucket stale (every stored bucket was computed after
+ * since + INGEST_SETTLE_SECONDS), so only newer rows are mapped to hours — the
+ * farm syncs, the voting records and the block-bucketed rows, whose block → hour
+ * mapping reads price_data.blocks only for the blocks those rows name. The
+ * watermark tables themselves are small and always read whole (they enumerate
+ * the foldable hours).
+ *
+ * Own-hour marks (re-mark the hours they name, no forward cascade):
+ *   pool_state (the hour and the next — a grid interval spans the boundary),
+ *   the fee legs, the price rows (the hour, valued at its own candle, and the
+ *   next, whose events are valued at it), a farm sync (every hour from the
+ *   farm's PREVIOUS sync to it: the interpolation between them), a voting record
+ *   (its referendum's allocation hour, where E3 books it).
+ * Cumulative marks (a row moves every later hour's opening exposure):
+ *   revenue 'events'/'debt', user 'state'/'mm_inc'/'v3'/'lm_config', and the
+ *   block-bucketed 'lm'/'xyk_shares' rows.
+ */
+export function userRevenueSourceHoursSql(): string {
+  return `
+    WITH ${hourlyFoldCutSql({ watermarks: REVENUE_HOUR_WATERMARKS_TABLE, valued: true })} AS cut,
+    ${PRICED_FLOOR_SQL} AS floor,
+    recent_buckets AS (
+      SELECT bucket, max(src_ingest) AS ing FROM ${USER_REVENUE_BLOCK_WATERMARKS_TABLE}
+      WHERE src_ingest > {since:DateTime} GROUP BY bucket
+    ),
+    -- A bucket's rows are CUMULATIVE marks: its EARLIEST hour is the one to re-mark (the running max carries it to
+    -- every later hour); a bucket spanning an hour boundary must not skip its first hour.
+    bucket_hours AS (
+      SELECT intDiv(block_height, 600) AS bucket, toStartOfHour(min(block_timestamp)) AS hour
+      FROM price_data.blocks
+      WHERE block_height >= ifNull((SELECT minOrNull(bucket) FROM recent_buckets), 4294967295) * 600
+        AND intDiv(block_height, 600) IN (SELECT bucket FROM recent_buckets)
+      GROUP BY bucket
+    ),
+    -- The farms' syncs DEDUPLICATED to one row per identity first (the table is replayable: a re-inserted copy is
+    -- its own neighbour and would hide the real previous sync), then each recent one's neighbours: an inserted sync
+    -- changes the interpolation from the previous sync up to the NEXT one.
+    recent_syncs AS (
+      SELECT sb AS b, prev, next, ing FROM (
+        SELECT block_height AS sb, ing,
+               lagInFrame(block_height, 1, block_height) OVER (PARTITION BY pallet, yield_farm_id
+                 ORDER BY block_height, event_index ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS prev,
+               leadInFrame(block_height, 1, block_height) OVER (PARTITION BY pallet, yield_farm_id
+                 ORDER BY block_height, event_index ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS next
+        FROM (
+          SELECT pallet, yield_farm_id, block_height, event_index, max(ingested_at) AS ing
+          FROM price_data.lm_yield_farm_events
+          WHERE event_kind = 'sync' AND (pallet, yield_farm_id) IN (
+            SELECT pallet, yield_farm_id FROM price_data.lm_yield_farm_events WHERE event_kind = 'sync' AND ingested_at > {since:DateTime})
+          GROUP BY pallet, yield_farm_id, block_height, event_index))
+      WHERE ing > {since:DateTime}
+    ),
+    sync_block_hours AS (
+      SELECT block_height AS b, toStartOfHour(block_timestamp) AS hour FROM price_data.blocks
+      WHERE block_height IN (SELECT b FROM recent_syncs UNION ALL SELECT prev FROM recent_syncs UNION ALL SELECT next FROM recent_syncs)
+    ),
+    per_hour AS (
+      SELECT hour, max(own) AS own, max(cum) AS cum, min(minb) AS minb, max(maxb) AS maxb
+      FROM (
+        SELECT hour, toDateTime(0) AS own, max(src_ingest) AS cum, min(src_minb) AS minb, max(src_maxb) AS maxb
+        FROM ${REVENUE_HOUR_WATERMARKS_TABLE} GROUP BY hour
+        UNION ALL
+        SELECT hour, maxIf(src_ingest, kind = 'pool_state') AS own, maxIf(src_ingest, kind != 'pool_state') AS cum,
+               min(src_minb) AS minb, max(src_maxb) AS maxb
+        FROM ${USER_REVENUE_HOUR_WATERMARKS_TABLE} GROUP BY hour
+        UNION ALL
+        -- A grid interval spans the hour boundary: a pool-state row re-marks the next hour too.
+        SELECT hour + INTERVAL 1 HOUR AS hour, max(src_ingest) AS own, toDateTime(0) AS cum, toUInt32(4294967295) AS minb, toUInt32(0) AS maxb
+        FROM ${USER_REVENUE_HOUR_WATERMARKS_TABLE} WHERE kind = 'pool_state' GROUP BY hour
+        UNION ALL
+        SELECT hour, max(src_ingest) AS own, toDateTime(0) AS cum, toUInt32(4294967295) AS minb, toUInt32(0) AS maxb
+        FROM ${POOL_SWAP_HOUR_WATERMARKS_TABLE} GROUP BY hour
+        UNION ALL
+        -- A price row values its own hour's accruals and the NEXT hour's events (the candle closed before them),
+        -- and a later hour without a candle of its own CARRIES it (HourPricer.closeAt, up to PRICE_CARRY_SECONDS):
+        -- a newly ingested hour re-marks itself and every hour the carry can reach. The watermark is per hour, not
+        -- per asset, so the bound is the carry limit (late price rows are rare: 0 hours ingested > 3 h late).
+        SELECT arrayJoin(arrayMap(i -> hour + toIntervalHour(i), range(0, ${PRICE_CARRY_HOURS} + 2))) AS hour, max(price_ingest) AS own,
+               toDateTime(0) AS cum, toUInt32(4294967295) AS minb, toUInt32(0) AS maxb
+        FROM price_data.pair_route_hour_watermarks WHERE price_ingest > {since:DateTime} GROUP BY hour
+        UNION ALL
+        SELECT bh.hour AS hour, toDateTime(0) AS own, max(r.ing) AS cum, toUInt32(4294967295) AS minb, toUInt32(0) AS maxb
+        FROM recent_buckets AS r INNER JOIN bucket_hours AS bh ON bh.bucket = r.bucket
+        GROUP BY bh.hour
+        UNION ALL
+        -- A farm sync decides the interpolation from the farm's PREVIOUS sync to its NEXT one (an inserted sync splits
+        -- that gap): it re-marks those hours, no later one.
+        SELECT toDateTime(arrayJoin(range(toUInt32(hp.hour), toUInt32(hn.hour) + 1, 3600))) AS hour, max(s.ing) AS own,
+               toDateTime(0) AS cum, toUInt32(4294967295) AS minb, toUInt32(0) AS maxb
+        FROM recent_syncs AS s
+        INNER JOIN sync_block_hours AS hp ON hp.b = s.prev
+        INNER JOIN sync_block_hours AS hn ON hn.b = s.next
+        GROUP BY hour
+        UNION ALL
+        -- A voter's reward record is booked at its referendum's ALLOCATION: it re-marks that hour only.
+        SELECT toStartOfHour(a.ts) AS hour, max(r.ing) AS own, toDateTime(0) AS cum, toUInt32(4294967295) AS minb, toUInt32(0) AS maxb
+        FROM (SELECT ref_index AS ref, min(block_timestamp) AS ts FROM price_data.gigahdx_reward_allocations GROUP BY ref) AS a
+        INNER JOIN (SELECT ref_index AS ref, max(ingested_at) AS ing FROM price_data.gigahdx_reward_records
+                    WHERE ingested_at > {since:DateTime} GROUP BY ref) AS r ON r.ref = a.ref
+        GROUP BY hour
+      )
+      GROUP BY hour
+    )
+    SELECT hour, greatest(own, max(cum) OVER (ORDER BY hour ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS src_ingest,
+           minb, maxb, hour < cut AND hour >= floor AND src_ingest <= now() - INTERVAL ${INGEST_SETTLE_SECONDS} SECOND AS foldable
+    FROM per_hour`
+}
+
+/** The registry valuation fingerprint per asset, for the assets a build valued cells in. */
+async function registryFingerprints(client: ClickHouseClient, assets: readonly number[]): Promise<Map<number, bigint>> {
+  if (!assets.length) return new Map()
+  const res = await client.query({
+    query: `SELECT a, toString(${valuationRegistryFingerprintSql('a')}) AS fp FROM (SELECT arrayJoin({assets:Array(UInt32)}) AS a)`,
+    query_params: { assets: [...assets] },
+    format: 'JSONEachRow',
+  })
+  return new Map((await res.json<{ a: number; fp: string }>()).map(r => [Number(r.a), BigInt(r.fp)]))
+}
+
+const xorFp = (fps: ReadonlyMap<number, bigint>, assets: Iterable<number>, base: string): string => {
+  let h = BigInt(base)
+  for (const a of assets) h ^= fps.get(a) ?? 0n
+  return h.toString()
+}
+
+/**
+ * The current registry fingerprint per stored bucket, over the asset set its
+ * cells were valued in — read from the HOURLY table for both folds (a month's
+ * daily cells are the same cells, so its asset set is its hours' union): the
+ * distinct (bucket, asset) pairs first, the fingerprint per pair after.
+ */
+function storedBucketFpSql(hourly: string, bucketExpr: string, ruleFp: string, where = ''): string {
+  // GROUP BY, not DISTINCT: the month form is then answered by the hourly table's assets_by_month projection
+  // (a few thousand rows instead of the table).
+  return `SELECT bucket, bitXor(toUInt64(${ruleFp}), groupBitXor(${valuationRegistryFingerprintSql('a')})) AS cur_fp
+    FROM (SELECT ${bucketExpr} AS bucket, asset_id AS a FROM ${hourly} WHERE stream != ''${where ? ` AND ${where}` : ''} GROUP BY bucket, a)
+    GROUP BY bucket`
+}
+
+/**
+ * The token-rate segments' identities per bucket (userRevenueTokens.pegBucketFingerprints),
+ * as query parameters: a later peg move decides how earlier hours accrued, so the
+ * segments a bucket overlaps join its expected fingerprint — a decided segment
+ * re-marks exactly the buckets it spans. Buckets whose value is 0 are omitted.
+ */
+const PEG_FP_SQL = 'mapFromArrays({tfk:Array(UInt32)}, {tfv:Array(UInt64)})'
+async function pegFingerprintParams(client: ClickHouseClient, buckets: ReadonlyArray<readonly [number, number]>, keys: readonly number[]): Promise<{ tfk: number[]; tfv: bigint[] }> {
+  const fps = pegBucketFingerprints(tokenSegments(await loadPegGrid(client)), buckets)
+  const tfk: number[] = []
+  const tfv: bigint[] = []
+  fps.forEach((fp, i) => { if (fp !== 0n) { tfk.push(keys[i]); tfv.push(fp) } })
+  return { tfk, tfv }
+}
+
+/** The lower bound on what can still make a stored bucket stale: the oldest stored computation, less the settle and an hour (unix seconds). */
+async function userRevenueSince(client: ClickHouseClient, query: string): Promise<string> {
+  const res = await client.query({ query, format: 'JSONEachRow' })
+  const t = Number((await res.json<{ t: string }>())[0]?.t ?? 0)
+  return chTimestamp(Math.max(0, t - INGEST_SETTLE_SECONDS - 3_600))
+}
+
+export interface UserRevenueStaleHour { hour: string; src_ingest: string; minb: string; maxb: string }
+
+/**
+ * The stale hours of the hourly fold (the section note's rules) from
+ * `{fromHour:UInt32}` on (the hourly fold folds the head months only), oldest first.
+ * Params: since, fromHour, tfk/tfv (pegFingerprintParams over those hours).
+ */
+export function userRevenueStaleHoursSql(tables: UserRevenueTables, ruleFp: string): string {
+  const expected = `bitXor(if(cur.bucket = toDateTime(0), toUInt64(${ruleFp}), cur.cur_fp), ${PEG_FP_SQL}[toUInt32(s.hour)])`
+  return `
+    SELECT toString(s.hour) AS hour, toString(s.src_ingest) AS src_ingest, toString(s.minb) AS minb, toString(s.maxb) AS maxb
+    FROM (${userRevenueSourceHoursSql()}) AS s
+    LEFT JOIN (
+      SELECT hour, count() AS n, max(computed_at) AS der_computed, min(registry_fp) AS fp_min, max(registry_fp) AS fp_max
+      FROM ${tables.hourly} WHERE hour >= toDateTime({fromHour:UInt32}) GROUP BY hour
+    ) AS der ON der.hour = s.hour
+    LEFT JOIN (${storedBucketFpSql(tables.hourly, 'hour', ruleFp, 'hour >= toDateTime({fromHour:UInt32})')}) AS cur ON cur.bucket = s.hour
+    WHERE s.foldable AND s.hour >= toDateTime({fromHour:UInt32})
+      AND (der.n = 0
+        OR s.src_ingest > der.der_computed - INTERVAL ${INGEST_SETTLE_SECONDS} SECOND
+        OR der.fp_max != ${expected}
+        OR der.fp_min != ${expected})
+    ORDER BY s.hour`
+}
+
+export interface UserRevenueStaleMonth { p: string; src_ingest: string; reason: string; live: number }
+
+/**
+ * The months the account fold must rebuild (the section note's rules), oldest
+ * first. The live month (still filling) is rebuilt at most once an hour,
+ * whatever moved: the head's freshness is the hourly fold's. A month holding an
+ * ETH-mapped account whose H160 a substrate account has since bound is rebuilt
+ * ('binding'): its facts move to the owner's key. Params: since, tfk/tfv
+ * (pegFingerprintParams over the months), rebound (userRevenueReboundMonths). A
+ * quiet cycle reads the watermark tables, the marker rows and two projections.
+ */
+/**
+ * The months holding an ETH-mapped account whose H160 a substrate account has
+ * bound (EVM_BINDINGS_SQL): their facts move to the owner's key ('binding'). A
+ * read of the account projection over every month (~46 MiB), so the job runs it
+ * only when the binding set changed (userRevenueReboundMonths).
+ */
+export function userRevenueReboundMonthsSql(tables: UserRevenueTables): string {
+  return `SELECT toYYYYMM(day) AS p FROM ${tables.daily}
+      WHERE startsWith(account, '0x45544800') AND account IN (
+        SELECT concat('0x45544800', substring(h, 3, 40), '0000000000000000') FROM (${EVM_BINDINGS_SQL}))
+      GROUP BY p ORDER BY p`
+}
+/** The binding set's identity (a 3 MiB read): the rebound months can change only when it does, or by a rebuild. */
+export const USER_REVENUE_BINDINGS_FP_SQL = `SELECT toString(groupBitXor(cityHash64(h, owner))) AS fp FROM (${EVM_BINDINGS_SQL})`
+
+/**
+ * The rebound months, recomputed only when the binding set changed. Otherwise
+ * the last answer stands, less the months rebuilt since (`forget`): a build
+ * books every bound key under its owner with the binding set it read, so a
+ * rebuilt month holds no rebound key while that set is unchanged — and a set
+ * that changed between the read and the build changes the fingerprint the next
+ * cycle compares. Per process; a restart recomputes once.
+ */
+const reboundCache = new Map<string, { fp: string; months: Set<number> }>()
+export async function userRevenueReboundMonths(client: ClickHouseClient, tables: UserRevenueTables): Promise<{ months: number[]; recomputed: boolean }> {
+  const fpRes = await client.query({ query: `-- ur:bindings-fp\n${USER_REVENUE_BINDINGS_FP_SQL}`, format: 'JSONEachRow', clickhouse_settings: { log_comment: 'ur:bindings-fp' } })
+  const fp = (await fpRes.json<{ fp: string }>())[0]?.fp ?? '0'
+  const cached = reboundCache.get(tables.daily)
+  if (cached && cached.fp === fp) return { months: [...cached.months].sort((a, b) => a - b), recomputed: false }
+  const res = await client.query({ query: `-- ur:rebound\n${userRevenueReboundMonthsSql(tables)}`, format: 'JSONEachRow', clickhouse_settings: { log_comment: 'ur:rebound' } })
+  const months = (await res.json<{ p: string | number }>()).map(r => Number(r.p))
+  reboundCache.set(tables.daily, { fp, months: new Set(months) })
+  return { months, recomputed: true }
+}
+/** A rebuilt month left the rebound set (see userRevenueReboundMonths). */
+export function userRevenueReboundForget(tables: UserRevenueTables, month: number): void {
+  reboundCache.get(tables.daily)?.months.delete(month)
+}
+
+/**
+ * A month's holder-set fingerprint: per (month, account) with a fact in the month's daily partition and a tag-driven
+ * holder class, cityHash64(account, class) XOR-ed — the members are the query parameters {hk}/{hc}
+ * (HolderMembers). Only accounts the month booked are read (the daily table is account-first), so a tag change
+ * re-marks exactly the months holding a fact of an account whose class changed; at build time the same hash is taken
+ * over the build's own accounts (userRevenueHolderFp).
+ */
+export function userRevenueHolderMonthFpSql(daily: string): string {
+  return `SELECT x.p AS p, groupBitXor(cityHash64(x.account, m.cls)) AS hfp
+    FROM (SELECT toYYYYMM(day) AS p, account FROM ${daily} WHERE account IN {hk:Array(String)} AND stream != '' GROUP BY p, account) AS x
+    INNER JOIN (SELECT tupleElement(t, 1) AS account, tupleElement(t, 2) AS cls FROM (SELECT arrayJoin(arrayZip({hk:Array(String)}, {hc:Array(String)})) AS t)) AS m
+      ON m.account = x.account
+    GROUP BY x.p`
+}
+
+/** The build-time twin of userRevenueHolderMonthFpSql: the same hash over the given (account, class) pairs. */
+export async function userRevenueHolderFp(client: ClickHouseClient, accounts: Iterable<string>, members: HolderMembers): Promise<bigint> {
+  const cls = new Map(members.accounts.map((a, i) => [a, members.classes[i]]))
+  const hk: string[] = []
+  const hc: string[] = []
+  for (const a of new Set(accounts)) { const c = cls.get(a); if (c) { hk.push(a); hc.push(c) } }
+  if (!hk.length) return 0n
+  const res = await client.query({
+    query: `SELECT toString(groupBitXor(cityHash64(tupleElement(t, 1), tupleElement(t, 2)))) AS fp FROM (SELECT arrayJoin(arrayZip({hk:Array(String)}, {hc:Array(String)})) AS t)`,
+    query_params: { hk, hc }, format: 'JSONEachRow', clickhouse_settings: { log_comment: 'ur:holder-fp' },
+  })
+  return BigInt((await res.json<{ fp: string }>())[0]?.fp ?? '0')
+}
+
+export function accountUserRevenueStaleMonthsSql(tables: UserRevenueTables, ruleFp: string): string {
+  // `ruleFp` here is the RULE alone (ruleFingerprint('0')); the holder set joins per month (holders.hfp).
+  const expected = `bitXor(bitXor(if(cur.bucket = 0, toUInt64(${ruleFp}), cur.cur_fp), ${PEG_FP_SQL}[toUInt32(src.p)]), holders.hfp)`
+  const sources = `src.src_ingest > der.der_computed - INTERVAL ${INGEST_SETTLE_SECONDS} SECOND`
+  const registry = `(der.fp_max != ${expected} OR der.fp_min != ${expected})`
+  const closing = `(src.p < (SELECT p FROM last_month) AND der.closing_fp != a_next.fp)`
+  const isLive = 'src.p = (SELECT p FROM last_month)'
+  const buildMismatch = '(hb.h_min < der.der_computed)'
+  // A cascade that changed the live month's opening anchor (the previous month rebuilt) is not throttled: the live
+  // month's facts were built on an anchor that no longer exists.
+  const liveOpeningMoved = `(${isLive} AND der.opening_fp != a_open.fp)`
+  // Nor is a live month whose HOURS the hourly fold republished after the month's build (a token restatement — a
+  // peg move deciding earlier hours): the hourly totals already state the new figures, and an hourly throttle would
+  // leave the account totals disagreeing with them for up to an hour.
+  const liveHoursRestated = `(${isLive} AND hr.r_max > der.der_computed)`
+  return `
+    WITH src AS (
+      SELECT toYYYYMM(hour) AS p, max(src_ingest) AS src_ingest, max(hour) AS last_foldable, min(hour) AS first_hour
+      FROM (${userRevenueSourceHoursSql()}) WHERE foldable GROUP BY p
+    ),
+    der AS (
+      -- Each published month's MARKER row (account '' — the key prefix — stream '') carries its build's stamps.
+      SELECT toYYYYMM(day) AS p, max(computed_at) AS der_computed, any(opening_fp) AS opening_fp, max(closing_fp) AS closing_fp,
+             min(registry_fp) AS fp_min, max(registry_fp) AS fp_max, count() AS n, max(folded_through) AS folded_through
+      FROM ${tables.daily} WHERE account = '' AND stream = '' GROUP BY p
+    ),
+    anchors AS (
+      -- Answered by the anchor table's fp_by_month projection (one row per month part).
+      SELECT month AS p, groupBitXor(cityHash64(pot, holder, exposure_id, toString(units), aux)) AS fp
+      FROM ${tables.anchor} GROUP BY month
+    ),
+    cur AS (${storedBucketFpSql(tables.hourly, 'toYYYYMM(hour)', ruleFp)}),
+    holders AS (${userRevenueHolderMonthFpSql(tables.daily)}),
+    last_month AS (SELECT max(p) AS p FROM src),
+    -- The month build publishes the daily partition, then the hourly one, both stamped with ONE computed_at (the
+    -- build's identity; the hourly fold only ever restates hours with a later one). A month whose hours' newest
+    -- computation is older than the daily marker's build is a build that crashed between the two swaps: rebuild
+    -- it. Per hour max(computed_at) is the computed_by_hour projection's (a 2 MiB read, not the table's).
+    hourly_build AS (
+      SELECT toYYYYMM(hour) AS p, min(dc) AS h_min FROM (SELECT hour, max(computed_at) AS dc FROM ${tables.hourly} GROUP BY hour) GROUP BY p
+    ),
+    -- Per month, the newest computation of an hour the month's build already covered — an hour that starts before
+    -- the marker's folded_through, the end of the last hour the build folded (never a guess from the build's own
+    -- clock: an hour that closed before the build but was not yet settled or priced is NOT covered, and its first
+    -- fold is new data, not a restatement) — when it is NEWER than the build: the hourly fold restated it since.
+    -- Same computed_by_hour projection read as hourly_build.
+    hourly_restated AS (
+      SELECT h.p AS p, max(h.dc) AS r_max
+      FROM (SELECT toYYYYMM(hour) AS p, hour, max(computed_at) AS dc FROM ${tables.hourly} GROUP BY hour) AS h
+      INNER JOIN der ON der.p = h.p
+      WHERE h.hour < der.folded_through AND h.dc > der.der_computed
+      GROUP BY h.p
+    ),
+    -- userRevenueReboundMonths: recomputed only when the binding set changed.
+    rebound AS (SELECT arrayJoin({rebound:Array(UInt32)}) AS p)
+    SELECT toString(src.p) AS p, toString(src.src_ingest) AS src_ingest,
+           multiIf(der.n = 0, 'unbuilt',
+                   ${buildMismatch}, 'build-mismatch',
+                   ${sources}, 'sources',
+                   der.opening_fp != a_open.fp, 'opening-anchor',
+                   ${closing}, 'closing-anchor',
+                   ${registry}, 'registry',
+                   src.p IN (SELECT p FROM rebound), 'binding',
+                   ${liveHoursRestated}, 'hours-restated',
+                   'live-month') AS reason,
+           ${isLive} AS live
+    FROM src
+    LEFT JOIN der ON der.p = src.p
+    LEFT JOIN anchors AS a_open ON a_open.p = src.p
+    LEFT JOIN anchors AS a_next ON a_next.p = if(src.p % 100 = 12, src.p + 89, src.p + 1)
+    LEFT JOIN cur ON cur.bucket = src.p
+    LEFT JOIN hourly_build AS hb ON hb.p = src.p
+    LEFT JOIN holders ON holders.p = src.p
+    LEFT JOIN hourly_restated AS hr ON hr.p = src.p
+    WHERE der.n = 0
+       OR ${buildMismatch}
+       OR ${liveOpeningMoved}
+       OR ${liveHoursRestated}
+       OR ((NOT ${isLive} OR der.der_computed < now() - INTERVAL ${USER_REVENUE_LIVE_MONTH_INTERVAL_S} SECOND)
+           AND (${sources}
+             OR der.opening_fp != a_open.fp
+             OR ${closing}
+             OR ${registry}
+             OR src.p IN (SELECT p FROM rebound)
+             OR (${isLive} AND src.last_foldable >= toStartOfHour(der.der_computed))))
+    ORDER BY src.p`
+}
+
+/** Month m's anchor rows, the block they hold at, and their content fingerprint (0 when absent). */
+async function readAnchor(client: ClickHouseClient, tables: UserRevenueTables, month: number): Promise<{ anchor: AnchorIn | null; fp: string }> {
+  const res = await client.query({
+    query: `SELECT pot, holder, exposure_id, toString(units) AS units, aux FROM ${tables.anchor} WHERE month = {m:UInt32}`,
+    query_params: { m: month }, format: 'JSONEachRow',
+  })
+  const rowsIn = await res.json<{ pot: string; holder: string; exposure_id: string; units: string; aux: string }>()
+  const fpRes = await client.query({
+    query: `SELECT toString(groupBitXor(cityHash64(pot, holder, exposure_id, toString(units), aux))) AS fp FROM ${tables.anchor} WHERE month = {m:UInt32}`,
+    query_params: { m: month }, format: 'JSONEachRow',
+  })
+  const fp = (await fpRes.json<{ fp: string }>())[0]?.fp ?? '0'
+  if (!rowsIn.length) return { anchor: null, fp: '0' }
+  const block = await lastBlockBefore(client, monthBoundsOf(month).start)
+  return { anchor: { rows: rowsIn.map(r => ({ ...r, units: BigInt(r.units) })), block }, fp }
+}
+
+async function insertRows(client: ClickHouseClient, table: string, values: Record<string, unknown>[]): Promise<void> {
+  for (let i = 0; i < values.length; i += 50_000) {
+    await client.insert({ table, values: values.slice(i, i + 50_000), format: 'JSONEachRow' })
+  }
+}
+
+const anchorValues = (month: number, anchorRows: readonly AnchorRow[], computedAt: string) =>
+  anchorRows.map(r => ({ month, pot: r.pot, holder: r.holder, exposure_id: r.exposure_id, units: r.units.toString(), aux: r.aux, computed_at: computedAt }))
+
+/** The first instant the fold may value (the price floor) and the cut (the first hour it may not fold), as unix seconds. */
+export async function userRevenueBounds(client: ClickHouseClient): Promise<{ floor: number; cut: number }> {
+  const res = await client.query({
+    query: `SELECT toUnixTimestamp(${PRICED_FLOOR_SQL}) AS floor, toUnixTimestamp(${hourlyFoldCutSql({ watermarks: REVENUE_HOUR_WATERMARKS_TABLE, valued: true })}) AS cut`,
+    format: 'JSONEachRow',
+  })
+  const r = (await res.json<{ floor: string; cut: string }>())[0]
+  return { floor: Number(r?.floor ?? 0), cut: Number(r?.cut ?? 0) }
+}
+
+export interface UserRevenueBuild { month: number; hours: number; dailyRows: number; hourlyRows: number; anchorRows: number; ms: number; complete: boolean }
+
+/**
+ * Builds month `month` whole and publishes it (the section note's order). The
+ * window is the month's FOLDABLE hours (from the price floor, below the cut);
+ * the next month's anchor is written only when the month is complete.
+ */
+export async function buildUserRevenueMonth(
+  client: ClickHouseClient, month: number, tables: UserRevenueTables = USER_REVENUE_TABLES,
+  bounds?: { floor: number; cut: number },
+): Promise<UserRevenueBuild | null> {
+  const t0 = Date.now()
+  const { start, end } = monthBoundsOf(month)
+  const { floor, cut } = bounds ?? await userRevenueBounds(client)
+  const from = Math.max(start, Math.ceil(floor / UR_HOUR) * UR_HOUR)
+  const to = Math.min(end, Math.floor(cut / UR_HOUR) * UR_HOUR)
+  if (to <= from) return null
+  const complete = to === end
+  const nowRes = await client.query({ query: 'SELECT toString(now()) AS t', format: 'JSONEachRow' })
+  const computedAt = (await nowRes.json<{ t: string }>())[0].t
+  const { anchor, fp: openingFp } = await readAnchor(client, tables, month)
+  const w = await loadFoldWindow(client, month, from, to)
+  // A window that opens past the month's start (the price floor's month) has no anchor block of its own.
+  const result = await computeUserRevenueWindow(client, w, from === start ? anchor : null)
+  const ruleFp = ruleFingerprint(result.protocolFp)
+  const fps = await registryFingerprints(client, result.sink.assets())
+  // The token-rate segments the build booked by join each bucket's fingerprint (accountUserRevenueStaleMonthsSql);
+  // the month carries the rule alone and the holder set narrowed to the accounts it booked.
+  const [pegMonthFp] = pegBucketFingerprints(result.pegSegments, [[start, end]])
+  const holderFp = await userRevenueHolderFp(client, result.sink.accounts(), result.holderMembers)
+  const monthFp = (BigInt(xorFp(fps, result.sink.assets(), ruleFingerprint('0'))) ^ pegMonthFp ^ holderFp).toString()
+  const hourAssets = result.sink.hourAssets()
+  const pegHourFps = pegBucketFingerprints(result.pegSegments, Array.from({ length: w.hours }, (_, h) => [w.fromHour + h * UR_HOUR, w.fromHour + (h + 1) * UR_HOUR] as const))
+  const hourFp = (hourStart: number) => {
+    const h = (hourStart - w.fromHour) / UR_HOUR
+    return (BigInt(xorFp(fps, hourAssets.get(h) ?? [], ruleFp)) ^ (pegHourFps[h] ?? 0n)).toString()
+  }
+
+  const stagingDaily = `${tables.daily}_staging`
+  const stagingHourly = `${tables.hourly}_staging`
+  const stagingAnchor = `${tables.anchor}_staging`
+  for (const st of [stagingDaily, stagingHourly, stagingAnchor]) {
+    if (await stagingBusy(client, st)) throw new Error(`user revenue ${month}: ${st} busy in another process`)
+  }
+  // 1. The next month's anchor into its staging twin, and its fingerprint (the month's closing_fp).
+  const next = nextMonth(month)
+  let closingFp = '0'
+  await client.command({ query: `ALTER TABLE ${stagingAnchor} DROP PARTITION ${next}` })
+  if (complete) {
+    await insertRows(client, stagingAnchor, anchorValues(next, result.anchorOut, computedAt))
+    const fpRes = await client.query({
+      query: `SELECT toString(groupBitXor(cityHash64(pot, holder, exposure_id, toString(units), aux))) AS fp FROM ${stagingAnchor} WHERE month = {m:UInt32}`,
+      query_params: { m: next }, format: 'JSONEachRow',
+    })
+    closingFp = (await fpRes.json<{ fp: string }>())[0]?.fp ?? '0'
+  }
+  // 2. The month's facts, daily and hourly, each swapped in whole.
+  const daily = result.sink.dailyRows(openingFp, closingFp, monthFp, computedAt)
+  const hourly = result.sink.hourlyRows(hourFp, computedAt)
+  for (const [staging, live, values] of [[stagingDaily, tables.daily, daily], [stagingHourly, tables.hourly, hourly]] as const) {
+    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${month}` })
+    await insertRows(client, staging, values as Record<string, unknown>[])
+    await client.command({ query: `ALTER TABLE ${live} REPLACE PARTITION ${month} FROM ${staging}` })
+    await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${month}` })
+  }
+  // 3. The next month's anchor LAST.
+  if (complete) {
+    await client.command({ query: `ALTER TABLE ${tables.anchor} REPLACE PARTITION ${next} FROM ${stagingAnchor}` })
+    await client.command({ query: `ALTER TABLE ${stagingAnchor} DROP PARTITION ${next}` })
+  }
+  const ms = Date.now() - t0
+  console.log(`[derivations] user revenue ${month}: ${w.hours} h, ${daily.length} daily / ${hourly.length} hourly / ${complete ? result.anchorOut.length : 0} anchor rows in ${ms} ms; ${userRevenueStatsLine(result.stats)} (${JSON.stringify(result.stats.ms)})`)
+  return { month, hours: w.hours, dailyRows: daily.length, hourlyRows: hourly.length, anchorRows: complete ? result.anchorOut.length : 0, ms, complete }
+}
+
+/** The month whose anchor a window needs, present? (The first foldable month needs none.) */
+async function anchorPresent(client: ClickHouseClient, tables: UserRevenueTables, month: number, firstMonth: number): Promise<boolean> {
+  if (month <= firstMonth) return true
+  const res = await client.query({ query: `SELECT count() AS n FROM ${tables.anchor} WHERE month = {m:UInt32}`, query_params: { m: month }, format: 'JSONEachRow' })
+  return Number((await res.json<{ n: string }>())[0]?.n ?? 0) > 0
+}
+
+async function protocolRuleFp(client: ClickHouseClient): Promise<string> {
+  const { loadProtocolHolders } = await import('../services/userRevenueFold.ts')
+  return ruleFingerprint((await loadProtocolHolders(client)).fp)
+}
+
+/** The account fold's stale months (accountUserRevenueStaleMonthsSql with its parameters); `members` overrides the tag-driven holder set. */
+export async function userRevenueStaleMonths(
+  client: ClickHouseClient, tables: UserRevenueTables, bounds: { floor: number; cut: number }, members?: HolderMembers,
+): Promise<UserRevenueStaleMonth[]> {
+  const { loadProtocolHolders } = await import('../services/userRevenueFold.ts')
+  const holders = members ?? (await loadProtocolHolders(client)).members
+  const months: number[] = []
+  for (let m = monthOf(bounds.floor); bounds.cut > bounds.floor && m <= monthOf(bounds.cut - 1); m = nextMonth(m)) months.push(m)
+  const since = await userRevenueSince(client, `SELECT toUnixTimestamp(min(computed_at)) AS t FROM ${tables.daily} WHERE account = '' AND stream = ''`)
+  const peg = await pegFingerprintParams(client, months.map(m => { const b = monthBoundsOf(m); return [b.start, b.end] as const }), months)
+  const rebound = await userRevenueReboundMonths(client, tables)
+  const res = await client.query({
+    query: `-- ur:stale-months\n${accountUserRevenueStaleMonthsSql(tables, ruleFingerprint('0'))}`, format: 'JSONEachRow',
+    query_params: { since, rebound: rebound.months, ...peg, hk: holders.accounts, hc: holders.classes }, clickhouse_settings: { log_comment: 'ur:stale-months' },
+  })
+  return res.json<UserRevenueStaleMonth>()
+}
+
+/** account_user_revenue: the live month first (at most hourly), then the oldest stale months, within the budget. */
+export async function runAccountUserRevenue(
+  client: ClickHouseClient, tables: UserRevenueTables = USER_REVENUE_TABLES, budgetSeconds = userRevenueBudgetSeconds(),
+): Promise<DerivationResult> {
+  const model = 'account_user_revenue'
+  if (!allExplorerAssets().length) return { model, rows: 0 }
+  const deadline = Date.now() + budgetSeconds * 1000
+  const bounds = await userRevenueBounds(client)
+  const stale = await userRevenueStaleMonths(client, tables, bounds)
+  if (!stale.length) return { model, rows: 0 }
+  const live = stale.filter(s => Number(s.live))
+  const order = [...live, ...stale.filter(s => !Number(s.live))]
+  let rows = 0
+  for (const [i, s] of order.entries()) {
+    // The head always gets its turn; history only while the budget lasts.
+    if (i > 0 && Date.now() >= deadline) break
+    const built = await buildUserRevenueMonth(client, Number(s.p), tables, bounds)
+    if (built) { userRevenueReboundForget(tables, Number(s.p)); rows += built.dailyRows }
+  }
+  return { model, rows }
+}
+
+/** user_revenue_hourly: the newest stale hours first (contiguous runs inside one month whose anchor exists), within the budget. */
+export async function runUserRevenueHourly(
+  client: ClickHouseClient, tables: UserRevenueTables = USER_REVENUE_TABLES, budgetSeconds = userRevenueBudgetSeconds(),
+): Promise<DerivationResult> {
+  const model = 'user_revenue_hourly'
+  if (!allExplorerAssets().length) return { model, rows: 0 }
+  const deadline = Date.now() + budgetSeconds * 1000
+  const ruleFp = await protocolRuleFp(client)
+  const { floor, cut } = await userRevenueBounds(client)
+  if (cut <= floor) return { model, rows: 0 }
+  const firstMonth = monthOf(floor)
+  // The hourly fold is the HEAD's freshness: the month the cut is in and the one before it. A restatement
+  // further back is the account fold's (its month build republishes the month's hours too).
+  const headMonth = monthOf(cut - 1)
+  const prevMonth = monthOf(monthBoundsOf(headMonth).start - 1)
+  const fromHour = monthBoundsOf(prevMonth).start
+  const hourKeys: number[] = []
+  for (let h = fromHour; h < cut; h += UR_HOUR) hourKeys.push(h)
+  const since = await userRevenueSince(client, `SELECT toUnixTimestamp(min(computed_at)) AS t FROM ${tables.hourly} WHERE stream = '' AND hour >= toDateTime(${fromHour})`)
+  const peg = await pegFingerprintParams(client, hourKeys.map(h => [h, h + UR_HOUR] as const), hourKeys)
+  const res = await client.query({
+    query: `-- ur:stale-hours\n${userRevenueStaleHoursSql(tables, ruleFp)}`, format: 'JSONEachRow',
+    query_params: { since, fromHour, ...peg }, clickhouse_settings: { log_comment: 'ur:stale-hours' },
+  })
+  const stale = (await res.json<UserRevenueStaleHour>()).map(h => Math.floor(Date.parse(`${h.hour.replace(' ', 'T')}Z`) / 1000))
+  if (!stale.length) return { model, rows: 0 }
+  // Runs of consecutive stale hours within one month, newest first.
+  const runs: Array<{ month: number; from: number; to: number }> = []
+  for (const h of [...stale].sort((a, b) => b - a)) {
+    if (monthOf(h) !== headMonth && monthOf(h) !== prevMonth) continue
+    const m = monthOf(h)
+    const last = runs.at(-1)
+    if (last && last.month === m && last.from === h + UR_HOUR && last.to - h <= USER_REVENUE_MAX_WINDOW_HOURS * UR_HOUR) last.from = h
+    else runs.push({ month: m, from: h, to: h + UR_HOUR })
+  }
+  let rows = 0
+  let headFolded = false
+  for (const [i, run] of runs.entries()) {
+    if (i > 0 && Date.now() >= deadline) break
+    if (!await anchorPresent(client, tables, run.month, firstMonth)) continue
+    rows += await foldUserRevenueHours(client, run.month, run.from, run.to, tables)
+    if (run.month === headMonth) headFolded = true
+  }
+  // Same-cycle re-check (the account fold ran BEFORE this job): hours this fold just restated in the live month
+  // (hours-restated) would otherwise leave the account totals disagreeing with the hourly ones until the next cycle.
+  // The stale-month read is ~0.6 s (ur:stale-months, 2 days of query_log: avg 592 ms, max 1.5 s) and runs only
+  // when the head month was folded; a live month it names again — for a reason the hourly throttle does not hold
+  // back (hours-restated, a moved opening anchor), or because that throttle lapsed between the two jobs, a rebuild
+  // the next cycle's account fold would run anyway — is rebuilt now (~7-8 s for the live month).
+  if (headFolded) rows += await rebuildLiveMonthIfRestated(client, tables, { floor, cut })
+  return { model, rows }
+}
+
+/** Rebuilds the live month when the stale-month read names it (see runUserRevenueHourly); the daily rows written. */
+export async function rebuildLiveMonthIfRestated(client: ClickHouseClient, tables: UserRevenueTables, bounds: { floor: number; cut: number }): Promise<number> {
+  const live = (await userRevenueStaleMonths(client, tables, bounds)).find(s => Number(s.live))
+  if (!live) return 0
+  const built = await buildUserRevenueMonth(client, Number(live.p), tables, bounds)
+  if (!built) return 0
+  userRevenueReboundForget(tables, Number(live.p))
+  console.log(`[derivations] user revenue ${live.p}: live month rebuilt in the hourly fold's cycle (${live.reason})`)
+  return built.dailyRows
+}
+
+/** Recomputes [from, to) of `month` from the month's anchor and republishes the month's hourly partition (its other hours kept). */
+export async function foldUserRevenueHours(client: ClickHouseClient, month: number, from: number, to: number, tables: UserRevenueTables = USER_REVENUE_TABLES): Promise<number> {
+  const nowRes = await client.query({ query: 'SELECT toString(now()) AS t', format: 'JSONEachRow' })
+  const computedAt = (await nowRes.json<{ t: string }>())[0].t
+  const { start } = monthBoundsOf(month)
+  const { anchor } = await readAnchor(client, tables, month)
+  const w = await loadFoldWindow(client, month, from, to)
+  const result = await computeUserRevenueWindow(client, w, anchor && from >= start ? anchor : null)
+  const ruleFp = ruleFingerprint(result.protocolFp)
+  const fps = await registryFingerprints(client, result.sink.assets())
+  const hourAssets = result.sink.hourAssets()
+  const pegHourFps = pegBucketFingerprints(result.pegSegments, Array.from({ length: w.hours }, (_, h) => [w.fromHour + h * UR_HOUR, w.fromHour + (h + 1) * UR_HOUR] as const))
+  const hourly = result.sink.hourlyRows(hourStart => {
+    const h = (hourStart - w.fromHour) / UR_HOUR
+    return (BigInt(xorFp(fps, hourAssets.get(h) ?? [], ruleFp)) ^ (pegHourFps[h] ?? 0n)).toString()
+  }, computedAt)
+  const staging = `${tables.hourly}_staging`
+  if (await stagingBusy(client, staging)) throw new Error(`user revenue hours ${month}: ${staging} busy in another process`)
+  await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${month}` })
+  await client.command({
+    query: `INSERT INTO ${staging} SELECT * FROM ${tables.hourly}
+            WHERE toYYYYMM(hour) = ${month} AND NOT (hour >= toDateTime({from:DateTime}) AND hour < toDateTime({to:DateTime}))`,
+    query_params: { from: chTimestamp(from), to: chTimestamp(to) },
+  })
+  await insertRows(client, staging, hourly)
+  await client.command({ query: `ALTER TABLE ${tables.hourly} REPLACE PARTITION ${month} FROM ${staging}` })
+  await client.command({ query: `ALTER TABLE ${staging} DROP PARTITION ${month}` })
+  console.log(`[derivations] user revenue hours ${month} ${chTimestamp(from)} → ${chTimestamp(to)}: ${hourly.length} rows; ${userRevenueStatsLine(result.stats)}`)
+  return hourly.length
+}
+
+/**
+ * The fold's own incompleteness counters for a build's log line: what it could not state (Omnipool inflows on an
+ * unstated sub-pool, farm entries/hours with no claimable, dry farm gaps, unresolved index updates) and the v3
+ * replay's checks — so a regression is visible in the log, not only in the facts.
+ */
+export function userRevenueStatsLine(stats: { omnipoolUnstated: number; farmUnstated: number; farmUnmeasuredHours?: number; farmDryGaps: number; unresolvedIndexUpdates?: number; v3?: { swaps: number; swapStateMismatch: number; dustNegative: number; collects: number; collectsExact: number } }): string {
+  const v3 = stats.v3
+  return [
+    `omnipoolUnstated=${stats.omnipoolUnstated}`,
+    `farmUnstated=${stats.farmUnstated}`,
+    `farmUnmeasuredHours=${stats.farmUnmeasuredHours ?? 0}`,
+    `farmDryGaps=${stats.farmDryGaps}`,
+    `unresolvedIndexUpdates=${stats.unresolvedIndexUpdates ?? 0}`,
+    v3 ? `v3 swaps=${v3.swaps} stateMismatch=${v3.swapStateMismatch} dustNegative=${v3.dustNegative} collects=${v3.collectsExact}/${v3.collects}` : 'v3 -',
+  ].join(' ')
 }
