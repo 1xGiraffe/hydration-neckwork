@@ -27,6 +27,15 @@ import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNu
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { firstTradeOf, loadVolumeBuckets, tradingVolumeAsOfBlock, tradingVolumeTotals, volumeCutHeights, type AccountVolumeHistory, type VolumeCutHeights } from './accountVolumeHistory.ts'
 import { PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
+import {
+  accountFoldCoverage, accountUserRevenueDetail, publicationGeneration, snapUserRevenueDust, userRevenueNetByAccount, userRevenueOwnerKeySql, userRevenueRowAccounts,
+  userRevenueTwinOwners, userRevenueUsdOf, windowFirstDay,
+} from './userRevenueRead.ts'
+import { holderIsUserSql, loadHolderClassifier, rowHolderClass } from './userRevenueHolders.ts'
+import { foldMmEarned, mmCustodyIndex, type MmCustodyIndex, type MmEarnedCategory } from './mmEarned.ts'
+import { GIGAHDX_ATOKEN, loadMmContracts } from './userRevenueMm.ts'
+import { MM_COVERAGE_FROM_BLOCK } from './userRevenueStreams.ts'
+import { USER_REVENUE_DISPLAY_STREAMS, userRevenueDisplayStream, type HolderClass } from './userRevenueStreams.ts'
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT, lbpPools, stableswapPoolAccount } from './tagService.ts'
 import { locateVenuePage, poolVenueForScope, venueKeysUnionSql, venueLiquidityEvents, venueLiquidityKeysSql, venueTradeKeysSql, venueTradeSource, walkVenueRows, type PoolVenue, type VenueKey, type VenueKeyReader, type VenueSourceSql } from './poolVenue.ts'
 import { identityForAccount, searchIdentitiesByDisplay, type AccountIdentity } from './identityService.ts'
@@ -4477,8 +4486,17 @@ export interface AddressDetail {
   portfolioExHdxUsd?: number
   tradingVolumeUsd: number
   liquidationVolumeUsd: number
-  // Protocol revenue earned from this account (absent when zero).
+  // Protocol Revenue earned from this account (absent when zero) — what the
+  // protocol earned FROM it.
   revenueUsd?: number
+  // User Revenue: what this account EARNED on Hydration, net, all time (holder
+  // class `user`, services/userRevenueRead.ts). Null while the account fold has
+  // not published every month (never a plausible 0), and null on an account
+  // User Revenue does not describe (holderClass protocol / unattributed); 0 or
+  // negative are real.
+  userRevenueUsd: number | null
+  // The User Revenue holder class of the account (userRevenueHolders.ts); absent when it could not be read.
+  holderClass?: HolderClass
   moneyMarket: MoneyMarketPosition[]          // one entry per isolated market the account has a position in
   liquidityPositions?: LpPosition[]
   // Unclaimed liquidity-mining rewards of the account's farm deposits, from the
@@ -4744,10 +4762,11 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     const balancesExHdxUsd = balances.reduce((s, b) => s + (b.asset.assetId === HDX_ASSET_ID ? 0 : b.valueUsd ?? 0), 0)
       + unstatedMmUsd
     const volumeAccounts = tradingVolumeAccountSet([...related])
-    const [tradingVolumeUsd, liquidationVolumeUsd, revenueUsd] = await Promise.all([
+    const [tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, userRevenueStat] = await Promise.all([
       tradingVolumeUsdOf(volumeAccounts),
       liquidationVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
       revenueByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
+      userRevenueStatOf(volumeAccounts, [norm.accountId]),
     ])
 
     const tag = tagForAccount(norm.accountId)
@@ -4830,6 +4849,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
       tradingVolumeUsd,
       liquidationVolumeUsd,
       ...(revenueUsd > 0 ? { revenueUsd } : {}),
+      ...userRevenueStat,
       moneyMarket,
       liquidityPositions: [...lpShown, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)),
       ...(farmRewards ? { farmRewards } : {}),
@@ -10261,6 +10281,34 @@ async function revenueByAccount(accounts: string[]): Promise<Map<string, number>
   return positiveAccountVolumes(await res.json<{ account_id: string; volume_usd: number }>())
 }
 
+// User Revenue an account set EARNED (net, holder class `user`, all time) —
+// price_data.account_user_revenue_daily over the same set the protocol-revenue
+// stat sums (the related accounts plus their ETH-mapped twins, where the money
+// market's holders are booked). Null while the account fold's coverage is
+// incomplete: an account the facts never name reads 0 only once every month is
+// published.
+async function userRevenueTotalOf(accounts: string[]): Promise<number | null> {
+  const { complete, byAccount } = await userRevenueNetByAccount(client, accounts)
+  if (!complete) return null
+  // Summed exactly over the set, dust snapped once (the tab's total is the same sum).
+  return userRevenueUsdOf(byAccount, accounts)
+}
+
+/**
+ * The header stat with its holder class (userRevenueHolders.ts, over the OWN
+ * members, as the directory rows): a page User Revenue does not describe — a
+ * pool, the Treasury, a sovereign — carries `holderClass` and no figure (null),
+ * never a "$0 earned". A failed class read leaves the class out and the figure as is.
+ */
+async function userRevenueStatOf(accounts: string[], members: string[]): Promise<{ userRevenueUsd: number | null; holderClass?: HolderClass }> {
+  const [usd, classifier] = await Promise.all([
+    userRevenueTotalOf(accounts),
+    loadHolderClassifier(client).catch(() => null),
+  ])
+  const holderClass = classifier ? rowHolderClass(members, classifier) : undefined
+  return { userRevenueUsd: holderClass == null || holderClass === 'user' ? usd : null, ...(holderClass ? { holderClass } : {}) }
+}
+
 /**
  * Protocol revenue attributed to an activity. The unit is the EXTRINSIC: fees,
  * penalties and liquidator profit for one user action land on several event
@@ -10680,6 +10728,316 @@ export async function getListTagRevenueBreakdown(listId: string, tagId: string, 
   if (!valid.length) return { totalUsd: 0, streams: [] }
   const accounts = [...valid, ...valid.map(evmAccountForm).filter((a): a is string => a != null)]
   return scopedRevenueBreakdown(accounts, `list-tag-revbd:${listTagScope(listId, tagId, valid)}`)
+}
+
+// ─── User Revenue tab ──────────────────────────────────────────────────────────
+// What an account (or tag) EARNED on Hydration, net, booked as it accrued
+// (services/userRevenueStreams.ts for the semantics, userRevenueRead.ts for the
+// read): per stream earned / paid / net, each stream opened by the pot it came
+// from (the pool, farm, market or token) and the asset it was paid in, and a
+// bucketed chart. Same account set as the header stat (userRevenueTotalOf), so
+// the tab's total over All equals it. A fact the fold classed `protocol` or
+// `unattributed` on these accounts is stated beside the user figures, never
+// inside them.
+
+export type UserRevenueRange = '30d' | '1y' | 'all'
+export const USER_REVENUE_RANGES: readonly UserRevenueRange[] = ['30d', '1y', 'all']
+const USER_REVENUE_RANGE_DAYS: Record<UserRevenueRange, number | null> = { '30d': 30, '1y': 365, all: null }
+const USER_REVENUE_RANGE_GRAIN: Record<UserRevenueRange, 'day' | 'week' | 'month'> = { '30d': 'day', '1y': 'week', all: 'month' }
+const USER_REVENUE_ITEMS_SHOWN = 10
+const UR_UNIT = 1e12
+
+export interface UserRevenueItem { pot: string; potLabel: string; via: string; asset: AssetRef; earned: number; paid: number; net: number; unpriced: number }
+export interface UserRevenueStreamRow {
+  stream: string
+  label: string
+  revisable: boolean
+  /** A separate, toggle-able line (referrer commissions). */
+  toggle: boolean
+  earned: number
+  paid: number
+  net: number
+  unpriced: number
+  items: UserRevenueItem[]
+  otherCount: number
+  otherNet: number
+}
+export interface UserRevenueChartPoint { t: number; earned: number; paid: number; net: number; streams: { stream: string; net: number }[] }
+export interface UserRevenueBreakdown {
+  range: UserRevenueRange
+  grain: 'day' | 'week' | 'month'
+  /** First UTC day of the range (null = all time). */
+  fromDay: string | null
+  /** Every month of the account fold is published; false = the figures are partial. */
+  complete: boolean
+  /** When the newest month was computed (ISO): the figures are as of then. */
+  asOf: string | null
+  totals: { earned: number; paid: number; net: number; unpriced: number }
+  streams: UserRevenueStreamRow[]
+  points: UserRevenueChartPoint[]
+  /** Facts on these accounts the fold classed protocol / unattributed: not User Revenue, stated. */
+  otherClasses: { holderClass: HolderClass; net: number }[]
+}
+
+// Every figure the tab shows is the exact sum of its facts, dust snapped once here (an item, a stream line, the totals).
+const usdOf = (v: bigint): number => Number(snapUserRevenueDust(v)) / UR_UNIT
+
+/** A pot id as a reader names it: the pool, farm, market or token the income came from. */
+export function userRevenuePotLabel(pot: string): string {
+  const [kind, a, b] = pot.split(':')
+  const sym = (id: string | undefined) => (id != null && /^\d+$/.test(id) ? asset(id).symbol : id ?? '')
+  const market = (key: string) => MM_MARKET_LIST.find(m => m.key === key)?.label ?? key
+  switch (kind) {
+    case 'omnipool': return `Omnipool · ${sym(a)}`
+    case 'stableswap': return /pool/i.test(sym(a)) ? sym(a) : `${sym(a)} pool`
+    case 'xyk': return `XYK pool ${sym(a)}`
+    case 'v3': return a ? `Uniswap v3 ${a.slice(0, 6)}…${a.slice(-4)}` : 'Uniswap v3'
+    case 'farm': return `${a === 'xyk' ? 'XYK' : 'Omnipool'} farm ${b ?? ''}`.trim()
+    case 'gigahdx-voting': return `Referendum ${a}`
+    case 'gigahdx': return a ? `${market('gigahdx')} · ${sym(a)}` : 'GIGAHDX'
+    case 'core': case 'bil': return b ? `${market(kind)} · ${sym(a)} → ${sym(b)}` : `${market(kind)} · ${sym(a)}`
+    case 'token': return sym(a)
+    case 'staking': return 'HDX staking'
+    case 'referrals': return 'Referrals'
+    default: return MM_MARKET_LIST.some(m => m.key === kind) ? `${market(kind)} · ${sym(a)}` : pot
+  }
+}
+
+function bucketStartOf(grain: 'day' | 'week' | 'month', day: string): number {
+  const t = Date.parse(`${day}T00:00:00Z`) / 1000
+  if (grain === 'day') return t
+  const d = new Date(t * 1000)
+  if (grain === 'week') return t - ((d.getUTCDay() + 6) % 7) * 86_400
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / 1000
+}
+
+/** Pure: the account facts → the tab payload (exported for tests). */
+export function foldUserRevenueBreakdown(
+  range: UserRevenueRange, fromDay: string | null, coverage: { complete: boolean; computedAt: number | null; publishedThrough?: number | null },
+  rows: Awaited<ReturnType<typeof accountUserRevenueDetail>>['rows'],
+  days: Awaited<ReturnType<typeof accountUserRevenueDetail>>['days'],
+): UserRevenueBreakdown {
+  const grain = USER_REVENUE_RANGE_GRAIN[range]
+  // The DISPLAY streams (userRevenueStreams.ts): the reader maps HOLLAR's borrow interest to its own line.
+  const defs = new Map(USER_REVENUE_DISPLAY_STREAMS.map(d => [d.id, d]))
+  const order = new Map(USER_REVENUE_DISPLAY_STREAMS.map((d, i) => [d.id, i]))
+  // A token's late rate catch-up is the same yield as its regular accrual, only dated
+  // back to the weeks it accrued — one line for the reader, the split stays in the data.
+  const displayStream = (stream: string) => stream === 'token_accrual_catchup' ? 'token_accrual' : stream
+  // An item every shown figure of which is 0 (dust either way, no unpriced fact) is no item; its exact amounts still
+  // count in the stream and total sums.
+  const shownItem = (r: (typeof rows)[number]) => snapUserRevenueDust(r.earned) !== 0n || snapUserRevenueDust(r.paid) !== 0n || snapUserRevenueDust(r.net) !== 0n || r.unpriced > 0
+  const user = rows.filter(r => r.holderClass === 'user')
+  const byStream = new Map<string, typeof user>()
+  for (const r of user) { const k = displayStream(r.stream); (byStream.get(k) ?? byStream.set(k, []).get(k)!).push(r) }
+  const streams: UserRevenueStreamRow[] = [...byStream].map(([stream, list]) => {
+    const sum = (pick: (r: (typeof list)[number]) => bigint) => list.reduce((a, r) => a + pick(r), 0n)
+    const sorted = list.filter(shownItem).sort((x, y) => {
+      const ax = x.net < 0n ? -x.net : x.net, ay = y.net < 0n ? -y.net : y.net
+      return ay > ax ? 1 : ay < ax ? -1 : 0
+    })
+    const shown = sorted.slice(0, USER_REVENUE_ITEMS_SHOWN)
+    const tail = sorted.slice(USER_REVENUE_ITEMS_SHOWN)
+    const def = defs.get(stream)
+    return {
+      stream,
+      label: def?.label ?? stream,
+      revisable: def?.revisable ?? false,
+      toggle: def?.toggle ?? false,
+      earned: usdOf(sum(r => r.earned)),
+      paid: usdOf(sum(r => r.paid)),
+      net: usdOf(sum(r => r.net)),
+      unpriced: list.reduce((a, r) => a + r.unpriced, 0),
+      // A token's accrual shows the token that earned it, not the asset its rate is
+      // quoted in (PRIME's rate is stated in HOLLAR).
+      items: shown.map(r => ({ pot: r.pot, potLabel: userRevenuePotLabel(r.pot), via: r.via, asset: asset(r.pot.startsWith('token:') ? r.pot.slice(6) : r.assetId), earned: usdOf(r.earned), paid: usdOf(r.paid), net: usdOf(r.net), unpriced: r.unpriced })),
+      otherCount: tail.length,
+      otherNet: usdOf(tail.reduce((a, r) => a + r.net, 0n)),
+    }
+  }).sort((a, b) => (order.get(a.stream) ?? 99) - (order.get(b.stream) ?? 99))
+  const buckets = new Map<number, { earned: bigint; paid: bigint; net: bigint; streams: Map<string, bigint> }>()
+  for (const d of days) {
+    if (d.holderClass !== 'user') continue
+    const t = bucketStartOf(grain, d.day)
+    const b = buckets.get(t) ?? buckets.set(t, { earned: 0n, paid: 0n, net: 0n, streams: new Map() }).get(t)!
+    b.earned += d.earned; b.paid += d.paid; b.net += d.net
+    b.streams.set(displayStream(d.stream), (b.streams.get(displayStream(d.stream)) ?? 0n) + d.net)
+  }
+  const points = [...buckets].sort(([a], [b]) => a - b).map(([t, b]) => ({
+    t, earned: usdOf(b.earned), paid: usdOf(b.paid), net: usdOf(b.net),
+    streams: [...b.streams].filter(([, v]) => v !== 0n).map(([stream, v]) => ({ stream, net: usdOf(v) }))
+      .sort((x, y) => (order.get(x.stream) ?? 99) - (order.get(y.stream) ?? 99)),
+  }))
+  const otherByClass = new Map<HolderClass, bigint>()
+  for (const r of rows) if (r.holderClass !== 'user') otherByClass.set(r.holderClass, (otherByClass.get(r.holderClass) ?? 0n) + r.net)
+  const tot = (pick: (r: (typeof user)[number]) => bigint) => usdOf(user.reduce((a, r) => a + pick(r), 0n))
+  return {
+    range, grain, fromDay,
+    complete: coverage.complete,
+    // The account fold's CUT (the end of the last hour it folded), never its computation time.
+    asOf: coverage.publishedThrough != null ? new Date(coverage.publishedThrough * 1000).toISOString() : null,
+    totals: { earned: tot(r => r.earned), paid: tot(r => r.paid), net: tot(r => r.net), unpriced: user.reduce((a, r) => a + r.unpriced, 0) },
+    streams,
+    points,
+    otherClasses: [...otherByClass].filter(([, v]) => v !== 0n).map(([holderClass, v]) => ({ holderClass, net: usdOf(v) })),
+  }
+}
+
+async function scopedUserRevenueBreakdown(accounts: string[], cacheKey: string, range: UserRevenueRange): Promise<UserRevenueBreakdown> {
+  const coverage = await accountFoldCoverage(client)
+  const days = USER_REVENUE_RANGE_DAYS[range]
+  // Day windows end on the day holding the account fold's own cut, so a
+  // 30-day range is the 30 UTC days through it.
+  const through = coverage.publishedThrough ?? coverage.computedAt ?? Math.floor(Date.now() / 1000)
+  const fromDay = days == null ? null : windowFirstDay(through, days)
+  // Keyed like the Borrow earned read (getAddressMoneyMarketEarned): the cut and the
+  // publication generation of the months the window reads, so a republished month
+  // or an advanced cut is never served from the previous publication for the TTL,
+  // and the account set (a related account or twin joining changes the facts read).
+  const key = `explorer:${cacheKey}:${range}:${through}:${publicationGeneration(coverage, fromDay)}:${accountSetFingerprint(accounts)}`
+  return cached(key, 5 * 60_000, async () => {
+    const detail = await accountUserRevenueDetail(client, accounts, fromDay ?? '1970-01-01', { display: true })
+    return foldUserRevenueBreakdown(range, fromDay, coverage, detail.rows, detail.days)
+  })
+}
+
+const withEthTwins = (accounts: string[]): string[] => [...accounts, ...accounts.map(evmAccountForm).filter((a): a is string => a != null)]
+
+export async function getAddressUserRevenue(addressInput: string, range: UserRevenueRange): Promise<UserRevenueBreakdown | null> {
+  const resolved = await resolveRelatedAccounts(addressInput)
+  if (!resolved) return null
+  return scopedUserRevenueBreakdown(withEthTwins([...resolved.related]), `account-urev:${resolved.norm.accountId}`, range)
+}
+
+export async function getTagUserRevenue(tagId: string, range: UserRevenueRange): Promise<UserRevenueBreakdown | null> {
+  const members = tagMembers(tagId)
+  if (!members) return null
+  return scopedUserRevenueBreakdown(withEthTwins(members), `tag-urev:${tagId}`, range)
+}
+
+export async function getListTagUserRevenue(listId: string, tagId: string, members: string[], range: UserRevenueRange): Promise<UserRevenueBreakdown> {
+  const valid = listTagMembers(members)
+  return scopedUserRevenueBreakdown(withEthTwins(valid), `list-tag-urev:${listTagScope(listId, tagId, valid)}`, range)
+}
+
+// ─── Borrow tab: per-market Earned / Interest paid ─────────────────────────────
+// Each Money Market card's "Earned" and "Interest paid" are a per-market slice of
+// the SAME User Revenue facts the User Revenue tab and the header stat sum (one
+// reader, accountUserRevenueDetail, over the same account set as
+// getAddressUserRevenue), sliced by the one rule in services/mmEarned.ts: a fact
+// is market M's when the account's own holding (the last custody segment of its
+// via) is an aToken of M, or when it is M's direct lending/borrow interest (or
+// GIGAHDX yield). So no fact is in two cards and every card fact is in the tab.
+
+export interface MoneyMarketEarnedItem {
+  category: MmEarnedCategory | 'paid'
+  stream: string
+  /** What earned it: the reserve lent, the token that accrued, the pool whose fees. */
+  label: string
+  asset: AssetRef
+  /** The supplied aToken it reached the account through; null for a direct fact on the reserve itself. */
+  via: AssetRef | null
+  usd: number
+  unpriced: number
+}
+export interface MoneyMarketEarnedReserve { reserveAssetId: number; aTokenAssetId: number | null; earnedUsd: number; paidUsd: number }
+export interface MoneyMarketEarnedMarket {
+  marketKey: string
+  /** lendingUsd + tokenYieldUsd + poolFeesUsd + otherUsd (each snapped once; the total is the exact sum, snapped). */
+  earnedUsd: number
+  lendingUsd: number
+  tokenYieldUsd: number
+  poolFeesUsd: number
+  otherUsd: number
+  /** Borrow interest booked on this market's debt, as a positive cost. */
+  paidUsd: number
+  unpriced: number
+  reserves: MoneyMarketEarnedReserve[]
+  items: MoneyMarketEarnedItem[]
+}
+export interface MoneyMarketEarned {
+  /** Every month of the account fold is published; false = the figures are partial. */
+  complete: boolean
+  /** The account fold's cut (ISO): every figure is "through" this instant. */
+  asOf: string | null
+  /** The money market's coverage floor (B0): no card fact predates it. */
+  fromBlock: number
+  /** The class whose facts these are: `user`, unless the account is the protocol's or an unattributed custody. */
+  holderClass: HolderClass
+  markets: MoneyMarketEarnedMarket[]
+}
+
+async function mmCustodyIndexCached(): Promise<MmCustodyIndex> {
+  return cached('explorer:mm-custody-index', 10 * 60_000, async () => mmCustodyIndex(await loadMmContracts(client), GIGAHDX_ATOKEN))
+}
+
+const MM_EARNED_LABEL: Record<MmEarnedCategory, string> = { lending: 'lending interest', token: 'yield', poolFees: 'fees', other: '' }
+
+/** Pure: the sliced sums → the wire shape (exported for tests). */
+export function moneyMarketEarnedMarkets(sums: ReturnType<typeof foldMmEarned>): MoneyMarketEarnedMarket[] {
+  const streamLabel = new Map(USER_REVENUE_DISPLAY_STREAMS.map(d => [d.id, d.label]))
+  const order = new Map(MM_MARKET_LIST.map((m, i) => [m.key, i]))
+  const potAsset = (pot: string, fallback: number): number => {
+    const [kind, a] = pot.split(':')
+    if (kind === 'gigahdx' && !a) return 67
+    return a != null && /^\d+$/.test(a) ? Number(a) : fallback
+  }
+  return [...sums.values()].sort((a, b) => (order.get(a.market) ?? 99) - (order.get(b.market) ?? 99)).map(m => {
+    const items: MoneyMarketEarnedItem[] = [...m.items.values()]
+      .filter(i => snapUserRevenueDust(i.net) !== 0n || i.unpriced > 0)
+      .sort((x, y) => { const ax = x.net < 0n ? -x.net : x.net, ay = y.net < 0n ? -y.net : y.net; return ay > ax ? 1 : ay < ax ? -1 : 0 })
+      .map(i => {
+        // The pot names what earned it (the reserve lent, the token, the pool); the card's reserve is the holding's.
+        const assetId = potAsset(i.pot, i.reserve.reserveAsset)
+        const a = asset(assetId)
+        const holdingId = i.holding.startsWith('atoken:') && /^\d+$/.test(i.holding.slice(7)) ? Number(i.holding.slice(7)) : null
+        // A fact on the holding itself (vDOT accruing inside avDOT is still "in avDOT"; GIGAHDX's own yield is not).
+        const via = holdingId != null && holdingId !== assetId ? asset(holdingId) : null
+        // A HOLLAR loan's interest is named as every User Revenue surface names it (its display stream).
+        const stream = userRevenueDisplayStream(i.stream, assetId)
+        const what = i.side === 'paid' ? (stream === i.stream ? `${a.symbol} borrow interest` : streamLabel.get(stream) ?? stream)
+          : i.category === 'other' ? `${userRevenuePotLabel(i.pot)} · ${streamLabel.get(i.stream) ?? i.stream}`
+            : i.category === 'poolFees' ? `${userRevenuePotLabel(i.pot)} ${MM_EARNED_LABEL.poolFees}`
+              : `${a.symbol} ${MM_EARNED_LABEL[i.category]}`
+        return { category: i.side === 'paid' ? 'paid' as const : i.category, stream, label: what, asset: a, via, usd: usdOf(i.side === 'paid' ? -i.net : i.net), unpriced: i.unpriced }
+      })
+    return {
+      marketKey: m.market,
+      earnedUsd: usdOf(m.earned),
+      lendingUsd: usdOf(m.byCategory.lending),
+      tokenYieldUsd: usdOf(m.byCategory.token),
+      poolFeesUsd: usdOf(m.byCategory.poolFees),
+      otherUsd: usdOf(m.byCategory.other),
+      paidUsd: usdOf(-m.paid),
+      unpriced: m.unpriced,
+      reserves: [...m.reserves.values()].map(r => ({ reserveAssetId: r.reserve.reserveAsset, aTokenAssetId: r.reserve.aTokenAsset, earnedUsd: usdOf(r.earned), paidUsd: usdOf(-r.paid) })),
+      items,
+    }
+  })
+}
+
+export async function getAddressMoneyMarketEarned(addressInput: string): Promise<MoneyMarketEarned | null> {
+  const resolved = await resolveRelatedAccounts(addressInput)
+  if (!resolved) return null
+  const accounts = withEthTwins([...resolved.related])
+  const coverage = await accountFoldCoverage(client)
+  return cached(`explorer:account-mm-earned:${resolved.norm.accountId}:${publicationGeneration(coverage)}:${accountSetFingerprint(accounts)}`, 5 * 60_000, async () => {
+    const [idx, detail, classifier] = await Promise.all([
+      mmCustodyIndexCached(),
+      accountUserRevenueDetail(client, accounts, '1970-01-01', { days: false }),
+      loadHolderClassifier(client).catch(() => null),
+    ])
+    // The header's class rule: a page User Revenue does not describe (the Treasury,
+    // a pool, a sovereign) states its own class's facts, labelled — never a $0.
+    const holderClass: HolderClass = (classifier ? rowHolderClass([resolved.norm.accountId], classifier) : undefined) ?? 'user'
+    return {
+      complete: coverage.complete,
+      asOf: coverage.publishedThrough != null ? new Date(coverage.publishedThrough * 1000).toISOString() : null,
+      fromBlock: MM_COVERAGE_FROM_BLOCK,
+      holderClass,
+      markets: moneyMarketEarnedMarkets(foldMmEarned(detail.rows, idx, holderClass)),
+    }
+  })
 }
 
 // One trade per extrinsic (or per event for pallet-internal swaps), summarizing
@@ -28168,6 +28526,14 @@ export interface TopAccountRow {
   liquidationVolumeUsd?: number
   // Protocol revenue earned from this account/group (see revenueByAccount).
   revenueUsd?: number
+  // User Revenue the account/group earned, net, all time (see userRevenueTotalOf):
+  // null = not yet published, never 0 standing in for it.
+  userRevenueUsd?: number | null
+  // The User Revenue holder class of the row's accounts (userRevenueHolders.ts):
+  // 'user' as soon as one account is a user; 'protocol' / 'unattributed' for a
+  // row User Revenue does not describe (Treasury, pots, pools, money-market
+  // contracts, sovereigns), whose 0 is not a user's zero. Absent when unknown.
+  holderClass?: 'user' | 'protocol' | 'unattributed'
   // Up to 4 largest holdings (> $10, highest USD first) for the icon cluster
   // shown after the row's value. Tag rows aggregate holdings across members.
   topAssets?: { asset: AssetRef; valueUsd: number }[]
@@ -28229,7 +28595,7 @@ export function buildValueSparkline(
   }
   return series.map(v => +v.toFixed(2))
 }
-export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation' | 'revenue'
+export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation' | 'revenue' | 'user-revenue'
 // `updates` is an accepted alias for the activity sort; both name the same column.
 export function normalizeAccountSort(sort: string): string {
   return sort === 'updates' ? 'activity' : sort
@@ -29173,8 +29539,8 @@ async function loadAccountDirectorySnapshot(
 // tag-detail key, so a payload persisted under an earlier value definition is
 // never served as this one.
 function accountDirectoryModelVersion(): string {
-  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3-r5'
-  return omnipoolAccountClaimsReady ? 'v2-r5' : 'v1-r5'
+  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3-r6'
+  return omnipoolAccountClaimsReady ? 'v2-r6' : 'v1-r6'
 }
 
 // The snapshot's counted collateral for one (account, pool) group, base-8 USD:
@@ -29220,42 +29586,27 @@ const ACCOUNT_SORT_SQL: Record<AccountSort, string> = {
   volume: 'trading_volume_usd DESC, usd_total DESC',
   liquidation: 'if(liquidation_volume_usd <= 0, 1, 0) ASC, liquidation_volume_usd DESC, usd_total DESC',
   revenue: 'if(revenue_usd <= 0, 1, 0) ASC, revenue_usd DESC, usd_total DESC',
+  // Earners first, then the published zeros, then net payers (a borrower whose
+  // interest outran its income), then whatever is not yet published — never an
+  // ifNull(v, 0) that would rank "unknown" among the zeros. The group key breaks
+  // exact ties so consecutive pages neither overlap nor skip.
+  // A row User Revenue does not describe (no user member: a pool, the Treasury, a sovereign) ranks after the
+  // payers; |net| under half a cent is a zero (the readers' dust rule).
+  'user-revenue': 'multiIf(user_revenue_usd IS NULL, 4, ur_has_user = 0, 3, user_revenue_usd >= 0.005, 0, user_revenue_usd > -0.005, 1, 2) ASC, user_revenue_usd DESC NULLS LAST, usd_total DESC, g.gkey ASC',
 }
 
-// Total number of account rows (single accounts + tagged groups, tag members
-// collapsed into one). Offset-independent, so it's cached on its own key and
-// reused across pages.
+// Total number of account rows: the length of the shared ranking itself, so the
+// pager's last page is exactly the ranking's last row. Counted any other way it
+// drifts — a separate uniqExact over raw balance ids once claimed ~3,600 rows the
+// ranking never had, because the ranking folds bound H160s and module truncations
+// onto their owner (boundAccountSql) and adds the ERC-20-side holders, and every
+// page past the ranking's end rendered empty.
 //
-// Unlike the pages themselves this keeps the account-value generation in its
-// KEY, so a generation change makes it absent rather than stale. The total is
-// not served on its own — it is embedded in a page payload, and a page must be
-// one generation throughout — and it is only ever computed inside a page
-// rebuild that is already running in the background, so invalidating it costs
-// no request any latency.
+// A viewer's fold reports this same shared total (see getAccountsForViewerFold),
+// so it is read from the 'value' ranking, which the prewarm keeps warm; a ranked
+// page of the shared directory takes its own ranking's length directly.
 async function getAccountsTotal(): Promise<number> {
-  const modelVersion = accountDirectoryModelVersion()
-  return cachedSwr(`explorer:accounts-total:${accountValueGenerationEpoch}:${modelVersion}`, 60_000, 30 * 60_000, async () => {
-    const res = await client.query({
-      query: `
-        WITH tags AS (SELECT account_id, any(label_id) AS lid
-                        FROM price_data.account_tags FINAL WHERE deleted = 0 GROUP BY account_id)
-        SELECT uniqExact(if(t.lid = '', o.account_id, t.lid)) AS total
-        FROM (
-          SELECT account_id FROM price_data.account_asset_latest_balances GROUP BY account_id
-          ${omnipoolAccountClaimsReady ? `UNION ALL
-          SELECT account_id FROM price_data.omnipool_account_claim_snapshots
-          WHERE snapshot_id = (
-            SELECT argMax(snapshot_id, computed_at)
-            FROM price_data.omnipool_account_claim_snapshot_state
-            WHERE snapshot_key = 'current'
-          ) GROUP BY account_id` : ''}
-        ) o
-        LEFT JOIN tags t ON t.account_id = o.account_id`,
-      format: 'JSONEachRow',
-    })
-    const rows = await res.json<{ total: string }>()
-    return Number(rows[0]?.total ?? 0)
-  })
+  return (await accountsPage(0, 0, 'value', false, undefined, undefined, { rankOnly: true })).total
 }
 
 const ACCOUNTS_FRESH_MS = 60_000
@@ -29604,7 +29955,7 @@ export function stopFoldActivitySweep(): void {
   foldSweepTimer = null
 }
 
-async function accountsPage(offset: number, limit: number, sort: AccountSort, refresh: boolean, viewerFold?: ViewerFold, members?: string[]): Promise<AccountsPage> {
+async function accountsPage(offset: number, limit: number, sort: AccountSort, refresh: boolean, viewerFold?: ViewerFold, members?: string[], { rankOnly = false }: { rankOnly?: boolean } = {}): Promise<AccountsPage> {
   // Whole-directory ranking: every rebuild re-aggregates all balances (+ MM
   // positions, and full-history volume CTEs for some sorts) just to render one
   // page — seconds of ClickHouse time. Serve stale-while-revalidating so no
@@ -29619,14 +29970,27 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
   // fraction of the whole-directory ranking and needs none of its
   // stale-while-revalidate machinery — an ordinary cache is enough.
   const memberKey = members ? `:m${members.length}:${members.join(',')}` : ''
-  const build = async (): Promise<AccountsPage> => {
+  const build = async (blocking?: boolean): Promise<AccountsPage> => {
+    // A cold build of a shared page (nothing cached under its key: the first
+    // reader of a later page) defers the two per-row reconstructions — the
+    // full-portfolio sparkline and the exact top holdings, ~2,000 queries per
+    // page — to a background lane, serves rows with the batched wallet-only
+    // sparkline and the SQL top-asset approximation meanwhile, and rebuilds the
+    // page once the lane has filled them. Every other build (the prewarm, a
+    // stale page's background revalidation, that follow-up rebuild) waits for
+    // them as before, so a page that is persisted is always the complete one.
+    const deferRows = blocking !== true && !refresh && !viewerFold && !members && peekCached(key) === undefined
+    const deferred: Promise<void>[] | null = deferRows ? [] : null
+    const stageAt = Date.now()
+    const stages: Record<string, number> = {}
+    const stage = (name: string, since: number): number => { const now = Date.now(); stages[name] = now - since; return now }
     // The persisted snapshot was computed under the SHARED system-tag
     // grouping; a viewer's fold must never adopt it — see the anonymous path
     // above it, unmodified, for what every non-fold request still gets.
     // The persisted snapshot ranks the WHOLE directory under the shared
     // system-tag grouping. A viewer's fold must not adopt it, and neither may a
     // page scoped to one tag's members — it is a different row set entirely.
-    if (!viewerFold && !members) {
+    if (!viewerFold && !members && !rankOnly) {
       const current = await loadAccountDirectorySnapshot(snapshotKey, true).catch(() => null)
       if (current) return current.page
     }
@@ -29637,6 +30001,13 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     const includeVolumeSort = sort === 'volume'
     const includeLiquidationSort = sort === 'liquidation'
     const includeRevenueSort = sort === 'revenue'
+    const includeUserRevenueSort = sort === 'user-revenue'
+    // Published means every month of the account fold is: then an account the
+    // facts never name is a real 0; before that every row is "not yet published".
+    const userRevenuePublished = includeUserRevenueSort ? (await accountFoldCoverage(client)).complete : false
+    // Whether User Revenue describes a row at all (userRevenueHolders' rule in SQL): a row with no user member
+    // ranks after the payers, never among the published zeros.
+    const urUser = includeUserRevenueSort ? await holderIsUserSql(client, 'latest.account_id') : null
     // Every CTE below groups by this SAME `gkey` — a system tag's label_id when
     // the account has one, else the account itself. A viewer's fold overrides
     // that per-account, before any of them run: `fold_ids`/`fold_keys` name
@@ -29655,7 +30026,10 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     // Applied to the REMAPPED account id, so a member's module truncation or
     // bound H160 pot folds into the member rather than being dropped — the same
     // identity the ungrouped rows below are keyed by.
-    const memberFilter = members ? `WHERE ${boundAccountSql('l')} IN {members:Array(String)}` : ''
+    // Chunked (inChunkedSql): a list tag's members reach 2,000, past one bound
+    // parameter's ceiling as a single Array(String).
+    const memberIn = members ? inChunkedSql(boundAccountSql('l'), 'members', members) : null
+    const memberFilter = memberIn ? `WHERE ${memberIn.sql}` : ''
     const gkeySql = (idExpr: string): string => {
       // Scoped to one tag's members: the tag is the page, so grouping by it
       // would collapse every member into the single row the reader just came
@@ -29767,6 +30141,39 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             )` : ''
     const revenueJoin = includeRevenueSort ? 'LEFT JOIN account_revenue_grouped rv ON rv.gkey = g.gkey' : ''
     const revenueSelect = includeRevenueSort ? 'ifNull(rv.volume_usd, 0.)' : '0.'
+    // User Revenue (holder class `user`, net, signed), grouped like the revenue
+    // splice above. Only its own sort reads it; every page's rows get the figure
+    // from the enrichment pass (userRevenueNetByAccount), the same read the
+    // detail pages sum.
+    // One identity rule with the rows' display (userRevenueTwinOwners): a twin a substrate account owns is folded
+    // into the owner's key BEFORE grouping, from the substrate side, so a row ranks by the figure it prints.
+    // The twin → owner relation is computed inside the statement (userRevenueOwnerKeySql), never bound as parameters.
+    const userRevenueCte = includeUserRevenueSort && userRevenuePublished ? `,
+            user_revenue_raw AS (
+              SELECT ${userRevenueOwnerKeySql('fact_account')} AS account_id, sum(usd) AS volume_usd
+              FROM (
+                SELECT account AS fact_account, toFloat64(sum(amount_usd)) AS usd
+                FROM price_data.account_user_revenue_daily
+                WHERE holder_class = 'user' AND stream != '' AND match(account, '^0x[0-9a-f]{64}$')
+                GROUP BY fact_account
+              )
+              GROUP BY account_id
+            ),
+            user_revenue_grouped AS (
+              SELECT ${gkeySql('v.account_id')} AS gkey, sum(v.volume_usd) AS volume_usd
+              FROM (
+                SELECT
+                  ${boundAccountSql('vr')} AS account_id,
+                  sum(vr.volume_usd) AS volume_usd
+                FROM user_revenue_raw vr
+                LEFT JOIN bind b ON b.eth_id = vr.account_id
+                GROUP BY account_id
+              ) v
+              LEFT JOIN tags t ON t.account_id = v.account_id
+              GROUP BY gkey
+            )` : ''
+    const userRevenueJoin = userRevenueCte ? 'LEFT JOIN user_revenue_grouped urv ON urv.gkey = g.gkey' : ''
+    const userRevenueSelect = userRevenueCte ? 'toNullable(ifNull(urv.volume_usd, 0.))' : 'CAST(NULL AS Nullable(Float64))'
     const lpClaimsCte = omnipoolAccountClaimsReady ? `,
             lp_claims AS (
               SELECT s.account_id, s.asset_id, s.amount, s.hub_amount
@@ -29857,7 +30264,15 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
     // whichever member SQL happened to sample — exactly like a system tag's own
     // name already does via `g.lname`. Every piece here is '' absent a fold, so
     // the SELECT list is character-for-character what it always was.
-    const gkeySelect = viewerFold ? 'g.gkey AS gkey,\n            ' : ''
+    // The shared directory pages through ONE ranking per (model, sort): the whole
+    // ordering is computed once (rank mode: group keys only), and a page then
+    // aggregates only its own rows (keys mode: the grouping restricted to the
+    // page's group keys before the heavy per-group folds run). Re-ranking the
+    // whole directory for every (sort, offset) cost ~1.7 s / ~1 GiB per cold
+    // page. A viewer's fold and a tag's member list keep the direct
+    // ORDER BY/LIMIT read: they are their own row sets and never share a ranking.
+    const rankedPaging = !viewerFold && !members
+    const gkeySelect = viewerFold || rankedPaging ? 'g.gkey AS gkey,\n            ' : ''
     const groupNameExpr = viewerFold ? `transform(g.gkey, fold_group_keys, fold_group_names, '')` : ''
     const hasIdentitySql = viewerFold
       ? `if(${groupNameExpr} != '' OR g.label_id != '' OR ident.account_id != '', 1, 0) AS has_identity`
@@ -29866,9 +30281,9 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
       ? `multiIf(${groupNameExpr} != '', ${groupNameExpr}, g.label_id != '', g.lname, ident.display != '', ident.display, '') AS disp_name`
       : `multiIf(g.label_id != '', g.lname, ident.display != '', ident.display, '') AS disp_name`
 
-    const [res, total] = await Promise.all([
-      client.query({
-        query: `
+    const directoryQuery = (mode: 'legacy' | 'rank' | 'keys', pageKeys: readonly string[] = []) => {
+      const pageKeysFilterSql = mode === 'keys' ? `WHERE ${gkeySql('latest.account_id')} IN {pageKeys:Array(String)}` : ''
+      const text = `
           WITH
             ${viewerFoldWithSql(viewerFold)}tags AS (SELECT account_id, any(label_id) AS lid, any(label_name) AS lname, any(color) AS c, any(icon) AS ic
                        FROM price_data.account_tags FINAL WHERE deleted = 0 GROUP BY account_id),
@@ -29958,6 +30373,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
                 ${gkeySql('latest.account_id')} AS gkey,
                 ${labelIdSql('latest.account_id')} AS label_id, any(t.lname) AS lname, any(t.c) AS color, any(t.ic) AS icon,
                 uniqExact(latest.account_id) AS members, any(latest.account_id) AS sample, max(latest.lb) AS last_block,
+                ${urUser ? `max(${urUser.sql})` : 'toUInt8(1)'} AS ur_has_user,
                 -- A pool account's own hub reserve (the Omnipool's H2O) is a balance
                 -- and no value, here as on the account page (AddressBalance.uncounted),
                 -- stated in SQL by poolOwnHubHoldingSql so the row ranks by the value
@@ -29991,12 +30407,14 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
               LEFT JOIN lm_acct lm ON lm.account_id = latest.account_id
               LEFT JOIN mmr_acct mmr ON mmr.account_id = ${MM_ETH_FORM_SQL('latest.account_id')}
               LEFT JOIN mm_acct mma ON mma.holder = ${MM_ETH_FORM_SQL('latest.account_id')}
+              ${pageKeysFilterSql}
               GROUP BY gkey, label_id
             )
             ${lpGroupedCte}
             ${volumeCte}
             ${liquidationCte}
             ${revenueCte}
+            ${userRevenueCte}
           SELECT
             -- Alias the wallet value explicitly: the lp_grouped join (v3) also exposes a
             -- usd column, so a bare g.usd serialises as the qualified name g.usd in
@@ -30022,6 +30440,8 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
             ${volumeSelect} AS trading_volume_usd,
             ${liquidationSelect} AS liquidation_volume_usd,
             ${revenueSelect} AS revenue_usd,
+            ${userRevenueSelect} AS user_revenue_usd,
+            g.ur_has_user AS ur_has_user,
             -- (asset_id, usd) for the 4 largest holdings, highest first: worth > $10
             -- AND ≥ 10% of the group's total held value (arraySum of the map).
             arraySlice(
@@ -30045,15 +30465,40 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
           ${volumeJoin}
           ${liquidationJoin}
           ${revenueJoin}
-          ORDER BY ${orderBy}
-          LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-        query_params: {
-          limit, offset,
-          ...(members ? { members } : {}),
-        },
-        clickhouse_settings: viewerFoldSettings(viewerFold),
+          ${userRevenueJoin}
+          ${mode === 'legacy' ? `ORDER BY ${orderBy}
+          LIMIT {limit:UInt32} OFFSET {offset:UInt32}` : ''}`
+      return client.query({
+        // Rank mode orders the group keys alone; the group key breaks every tie, so
+        // consecutive pages of one ranking neither overlap nor skip.
+        query: mode === 'rank' ? `-- explorer:accounts-rank
+          SELECT gkey FROM (${text}) ORDER BY ${orderBy.replaceAll('g.gkey', 'gkey')}, gkey` : text,
+        query_params: { ...(urUser?.params ?? {}), ...(mode === 'legacy' ? { limit, offset, ...(memberIn?.params ?? {}) } : mode === 'keys' ? { pageKeys: [...pageKeys] } : {}) },
+        // The ranking returns every group key (~115k), past the client's default row cap.
+        clickhouse_settings: mode === 'rank' ? { ...viewerFoldSettings(viewerFold), max_result_rows: '2000000' } : viewerFoldSettings(viewerFold),
         format: 'JSONEachRow',
-      }),
+      })
+    }
+    let pageKeys: string[] | null = null
+    let rankedTotal: number | null = null
+    if (rankedPaging) {
+      // The user-revenue ranking also turns over with the account fold's publication generation (a month rebuilt
+      // at the same cut re-ranks; its rows' figures come from the same publication).
+      const rankGeneration = sort === 'user-revenue'
+        ? accountValueGenerationEpoch * 1e10 + publicationGeneration(await accountFoldCoverage(client))
+        : accountValueGenerationEpoch
+      const ranked = await cachedSwr(`accounts-rank:${modelVersion}:${sort}`, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, async () => {
+        const res = await directoryQuery('rank')
+        return (await res.json<{ gkey: string }>()).map(r => r.gkey)
+      }, rankGeneration)
+      // The ranking alone (see directoryKnownKeys): no page is read or cached.
+      if (rankOnly) return { rows: [], total: ranked.length }
+      pageKeys = ranked.slice(offset, offset + limit)
+      rankedTotal = ranked.length
+    }
+    let stageMark = stage('rank', stageAt)
+    const [res, total] = await Promise.all([
+      pageKeys ? (pageKeys.length ? directoryQuery('keys', pageKeys) : null) : directoryQuery('legacy'),
       // Unaffected by a viewer's fold: the row TOTAL stays the shared,
       // system-tag-grouped count (see getAccountsForViewerFold's comment) — a
       // folded page can render fewer distinct rows than this number implies,
@@ -30062,18 +30507,25 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
       // though: its total is the tag's own membership, and reporting the
       // chain-wide 114k there would have a seven-member tag claim to be the
       // first page of something vastly larger.
-      members ? Promise.resolve(members.length) : getAccountsTotal(),
+      members ? Promise.resolve(members.length) : rankedTotal != null ? Promise.resolve(rankedTotal) : getAccountsTotal(),
     ])
 
-    const raw = await res.json<{
+    type DirectoryRaw = {
       label_id: string; lname: string; color: string; icon: string; members: string; sample: string
       last_block: number; usd: number; usd_total: number; mm_col: number; mm_debt: number; mm_present: number; mm_hf: string; mm_worst_acct: string | null
       supplemental_present: number; supplemental_debt: number; supplemental_hf: string
       has_identity: number; activity_count: number; activity_count_complete: number; trading_volume_usd: number; liquidation_volume_usd: number; revenue_usd: number
+      user_revenue_usd: number | null
       top_assets: [string, number][]
       other_assets: number
-      gkey?: string   // present only when viewerFold spliced `g.gkey AS gkey` in above
-    }>()
+      gkey?: string   // present when viewerFold or ranked paging spliced `g.gkey AS gkey` in above
+    }
+    let raw = res ? await res.json<DirectoryRaw>() : []
+    // Keys mode reads the page's rows unordered: put them back in ranking order.
+    if (pageKeys) {
+      const at = new Map(pageKeys.map((key, i) => [key, i]))
+      raw = raw.filter(r => r.gkey != null && at.has(r.gkey)).sort((a, b) => at.get(a.gkey!)! - at.get(b.gkey!)!)
+    }
 
     const rows: TopAccountRow[] = raw.map(r => {
       // A viewer's own tag wins the row over a system one — directoryFoldFor
@@ -30113,6 +30565,9 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
         tradingVolumeUsd: r.trading_volume_usd > 0 ? Number(r.trading_volume_usd) : undefined,
         liquidationVolumeUsd: r.liquidation_volume_usd > 0 ? Number(r.liquidation_volume_usd) : undefined,
         revenueUsd: r.revenue_usd > 0 ? Number(r.revenue_usd) : undefined,
+        // The sort's own figure (null unless sorting by it); the enrichment pass
+        // below states it for every row of every sort.
+        userRevenueUsd: r.user_revenue_usd == null ? null : Number(r.user_revenue_usd),
         topAssets: r.top_assets?.length ? r.top_assets.map(([id, valueUsd]) => ({ asset: asset(id), valueUsd })) : undefined,
         otherAssets: r.other_assets > 0 ? Number(r.other_assets) : undefined,
       }
@@ -30138,36 +30593,55 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
 
     // Sparkline + counter enrichment is best-effort — a failure (RPC down, table
     // missing) must never take the directory itself down.
+    stageMark = stage('directory', stageMark)
     try {
       await enrichAccountRows(raw, rows, foldMembersByKey)
     } catch (err) {
       console.error('[accounts] row enrichment failed:', err)
     }
+    stageMark = stage('rows', stageMark)
 
     // Overwrite the wallet-only sparkline with the full-portfolio series the detail
     // page shows (parity). Best-effort — on failure the wallet-only fallback stands.
     try {
-      await enrichAccountSparklines(raw, rows, foldMembersByKey)
+      await enrichAccountSparklines(raw, rows, foldMembersByKey, deferred)
     } catch (err) {
       console.error('[accounts] sparkline parity enrichment failed:', err)
     }
+    stageMark = stage('sparklines', stageMark)
 
     // Top-holding icons: refine the fast SQL wallet approximation into the exact set
     // the hover card shows, folding in money-market collateral (aTokens) and EVM-side
     // ERC-20 via the same assembly the detail pages use. Best-effort — on failure the
     // SQL approximation from the main query stands.
     try {
-      await enrichTopAssets(raw, rows, prices, foldMembersByKey)
+      await enrichTopAssets(raw, rows, prices, foldMembersByKey, deferred)
     } catch (err) {
       console.error('[accounts] top-asset enrichment failed:', err)
     }
+    stage('topAssets', stageMark)
+    // A slow build names its slow stage (no account ids): the directory's cold
+    // path has regressed before without saying where.
+    if (Date.now() - stageAt > 1_500) console.info('[accounts] slow page build', { sort, offset, limit, deferred: deferred?.length ?? null, ms: Date.now() - stageAt, ...stages })
 
-    // The activity ordering is only established for the leaderboard's ranked prefix, so
-    // the page publishes that depth and the pager offers nothing past it. Only the
-    // activity ORDERING is bounded that way — every other sort ranks the whole
-    // directory and must keep its full pager even though it now shows the same
-    // leaderboard's counts.
+    // The activity ordering is only PROVABLE for the leaderboard's ranked prefix, so the
+    // page publishes that depth: the explorer's pager notes where it ends and the MCP
+    // tool says the same in text. Pages past it stay offered — they are still every
+    // counted total in order (see the leaderboard's comment for why that imprecision is
+    // one-directional). Every other sort ranks the whole directory and publishes none.
     const page: AccountsPage = { rows, total, ...(includeActivitySort && leaderboard ? { rankedDepth: leaderboard.rankedDepth } : {}) }
+    if (deferred?.length) {
+      // Partial: never persisted, and replaced by a complete rebuild once the
+      // lane has filled what this build skipped (the fills are cached, so the
+      // rebuild finds them). A fill the full queue refused is a wait for the queue
+      // to drain (deferRowFill), so the rebuild computes it rather than the page
+      // passing for complete.
+      const generationAtBuild = accountValueGenerationEpoch
+      void Promise.allSettled(deferred).then(() =>
+        cacheRefresh(key, ACCOUNTS_FRESH_MS, ACCOUNTS_STALE_MS, () => build(true), generationAtBuild))
+        .catch(err => console.error('[accounts] deferred page rebuild failed:', err))
+      return page
+    }
     // Never persisted for a viewer's fold — see the load-side skip above.
     if (!viewerFold) await persistAccountDirectorySnapshot(snapshotKey, page).catch(err => console.error('[accounts] snapshot persist failed:', err))
     return page
@@ -30203,6 +30677,7 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
   // A tag's own members: a small, bounded row set read from those accounts'
   // balances alone, so the seconds-long whole-directory machinery above does
   // not apply. Same freshness as the directory it mirrors.
+  if (rankOnly) return build(true)
   if (members) return cachedSwr(`tag-accounts:${modelVersion}:${sort}${memberKey}`, ACCOUNTS_FRESH_MS, ACCOUNTS_VIEWER_STALE_MS, build, generation)
   if (viewerFold) {
     const viewerKey = `user-accounts:${modelVersion}:${viewerFold.fingerprint}:${sort}:${offset}:${limit}`
@@ -30246,6 +30721,7 @@ async function enrichTopAssets(
   rows: TopAccountRow[],
   prices: Map<number, PriceInfo>,
   foldMembersByKey: Map<string, string[]> | null = null,
+  deferred: Promise<void>[] | null = null,
 ): Promise<void> {
   // Account set per row (tag → members, else the single sample) plus each account's
   // ETH-prefixed twin, where its EVM-side wallet balances live.
@@ -30265,50 +30741,126 @@ async function enrichTopAssets(
   // position (aTokens exist only for configured MM pools). Each holder means a
   // full raw_evm_logs scan, so scanning only real MM holders keeps this ~3× faster
   // than scanning the whole page; non-MM rows keep the SQL wallet approximation.
-  const mmHolders = new Set<string>()
-  rows.forEach((row, i) => {
-    if (row.suppliedUsd != null || row.borrowedUsd != null) for (const h of rowH160s[i]) mmHolders.add(h)
+  const hasMmRow = (i: number): boolean => rows[i].suppliedUsd != null || rows[i].borrowedUsd != null
+  // Deferred (a cold page build): rows whose exact set is cached take it, the rest
+  // keep the SQL approximation while the background lane computes them one by one
+  // (each with its own money-market reconstruction) and the page is rebuilt.
+  const todo: number[] = []
+  rows.forEach((_row, i) => {
+    if (!rowAccounts[i].length) return
+    if (!deferred) { todo.push(i); return }
+    const key = topAssetsRowKey(rowAccounts[i], hasMmRow(i))
+    const hit = peekCached<TopAssetEntry[]>(key)
+    if (hit) { rows[i].topAssets = hit.length ? hit : undefined; return }
+    const accounts = rowAccounts[i], h160s = rowH160s[i], mm = hasMmRow(i)
+    deferRowFill(directoryRowFills, deferred, key, () => cached(key, TOP_ASSETS_ROW_TTL_MS, async () =>
+      exactRowTopAssets(accounts, h160s, prices, mm ? await mmReservesByHolder(h160s) : new Map())))
   })
+  if (!todo.length) return
+  const mmHolders = new Set<string>()
+  for (const i of todo) if (hasMmRow(i)) for (const h of rowH160s[i]) mmHolders.add(h)
   const reservesByHolder = await mmReservesByHolder([...mmHolders])
 
   const CONCURRENCY = 8
   let next = 0
   const worker = async (): Promise<void> => {
-    while (next < rows.length) {
-      const i = next++
-      const accounts = rowAccounts[i]
-      if (!accounts.length) continue
+    while (next < todo.length) {
+      const i = todo[next++]
       try {
-        const [walletRows, erc20] = await Promise.all([
-          queryAggregatedBalances(sqlAccountList(accounts)),
-          erc20WalletHoldingsForAccounts(rowH160s[i]),
-        ])
-        let balances = foldShareBalances(valueAccountBalances(walletRows, prices))
-        // Merge the row's holders' supplied collateral, summing a reserve shared by a
-        // tag's members; staking-backed markets (GIGAHDX) are excluded — their
-        // collateral is already-counted locked HDX (mirrors getAddress).
-        const merged = new Map<number, MmReserve>()
-        for (const h of rowH160s[i]) {
-          for (const rsv of reservesByHolder.get(h) ?? []) {
-            if ((rsv.marketKey ?? 'core') === GIGAHDX_MM_MARKET.key || rsv.supplied === '0') continue
-            const cur = merged.get(rsv.assetId)
-            if (cur) cur.supplied = (BigInt(cur.supplied) + BigInt(rsv.supplied)).toString()
-            else merged.set(rsv.assetId, { ...rsv })
-          }
-        }
-        if (merged.size) {
-          applyMmCollateralToBalances(balances, { reserves: [...merged.values()], blockHeight: 0 } as MoneyMarketPosition, prices)
-          balances = foldShareBalances(balances)
-        }
-        balances = mergeErc20Balances(balances, erc20, prices)
+        const key = topAssetsRowKey(rowAccounts[i], hasMmRow(i))
+        const top = await exactRowTopAssets(rowAccounts[i], rowH160s[i], prices, reservesByHolder)
+        // Shared with the next cold build of any page this row appears on.
+        await cached(key, TOP_ASSETS_ROW_TTL_MS, async () => top)
         // Authoritative set overwrites the SQL approximation; empty clears it (no
         // holding ≥ 10% of value).
-        const top = topHeldTokens(balances)
         rows[i].topAssets = top.length ? top : undefined
       } catch { /* keep the SQL approximation for this row */ }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, rows.length) }, worker))
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, todo.length) }, worker))
+}
+
+type TopAssetEntry = ReturnType<typeof topHeldTokens>[number]
+// A row's exact top holdings live this long between page builds: the set moves
+// only with balances and prices, and the SQL approximation is the fallback.
+const TOP_ASSETS_ROW_TTL_MS = 10 * 60_000
+const topAssetsRowKey = (accounts: string[], hasMm: boolean): string => `accounts:top-assets:${hasMm ? 'mm' : 'w'}:${accountSetFingerprint(accounts)}`
+
+// One row's exact top holdings: the detail path's own assembly (see enrichTopAssets).
+async function exactRowTopAssets(
+  accounts: string[], h160s: string[], prices: Map<number, PriceInfo>, reservesByHolder: Map<string, MmReserve[]>,
+): Promise<TopAssetEntry[]> {
+  const [walletRows, erc20] = await Promise.all([
+    queryAggregatedBalances(sqlAccountList(accounts)),
+    erc20WalletHoldingsForAccounts(h160s),
+  ])
+  let balances = foldShareBalances(valueAccountBalances(walletRows, prices))
+  // Merge the row's holders' supplied collateral, summing a reserve shared by a
+  // tag's members; staking-backed markets (GIGAHDX) are excluded — their
+  // collateral is already-counted locked HDX (mirrors getAddress).
+  const merged = new Map<number, MmReserve>()
+  for (const h of h160s) {
+    for (const rsv of reservesByHolder.get(h) ?? []) {
+      if ((rsv.marketKey ?? 'core') === GIGAHDX_MM_MARKET.key || rsv.supplied === '0') continue
+      const cur = merged.get(rsv.assetId)
+      if (cur) cur.supplied = (BigInt(cur.supplied) + BigInt(rsv.supplied)).toString()
+      else merged.set(rsv.assetId, { ...rsv })
+    }
+  }
+  if (merged.size) {
+    applyMmCollateralToBalances(balances, { reserves: [...merged.values()], blockHeight: 0 } as MoneyMarketPosition, prices)
+    balances = foldShareBalances(balances)
+  }
+  balances = mergeErc20Balances(balances, erc20, prices)
+  return topHeldTokens(balances)
+}
+
+// Background fills for directory rows a cold page build found uncached (their
+// full-portfolio sparkline, their exact top holdings): two at a time, each key
+// once, a bounded queue. The page that asked is rebuilt once its fills settle.
+const directoryRowFills = createBackgroundLane(2, 400)
+
+// Queues one deferred fill for a cold page build. A fill the lane REFUSES (its
+// queue is full) is tracked as a wait for the queue to drain rather than dropped:
+// dropped, a build whose every fill was refused deferred nothing, read as complete
+// and was persisted with the wallet-only sparklines and SQL top assets standing in
+// for the rows' real values. Tracked, the page stays partial (served, never
+// persisted) and is rebuilt once the lane has room, which computes what was refused.
+export function deferRowFill(lane: BackgroundLane, deferred: Promise<void>[], key: string, fn: () => Promise<unknown>): void {
+  deferred.push(lane.offer(key, fn) ?? lane.drained())
+}
+
+export type BackgroundLane = ReturnType<typeof createBackgroundLane>
+export function createBackgroundLane(concurrency: number, queueMax: number) {
+  const inflight = new Map<string, Promise<void>>()
+  const queue: (() => void)[] = []
+  const drainWaiters: (() => void)[] = []
+  let running = 0
+  const pump = (): void => {
+    while (running < concurrency && queue.length) { running++; queue.shift()!() }
+    if (!queue.length) while (drainWaiters.length) drainWaiters.shift()!()
+  }
+  return {
+    // Resolves once nothing is waiting in the queue (fills may still be running).
+    drained(): Promise<void> {
+      return queue.length ? new Promise<void>(resolve => { drainWaiters.push(resolve) }) : Promise.resolve()
+    },
+    offer(key: string, fn: () => Promise<unknown>): Promise<void> | null {
+      const held = inflight.get(key)
+      if (held) return held
+      if (queue.length >= queueMax) return null
+      const done = new Promise<void>(resolve => {
+        queue.push(() => {
+          fn().catch(error => console.warn('[accounts] background row fill failed:', error instanceof Error ? error.message : error))
+            .finally(() => { running--; inflight.delete(key); resolve(); pump() })
+        })
+      })
+      inflight.set(key, done)
+      pump()
+      return done
+    },
+    stats: () => ({ running, queued: queue.length }),
+  }
 }
 
 // Per-row enrichment for the accounts directory: the 1Y value sparkline and the
@@ -30336,6 +30888,26 @@ async function enrichAccountRows(
   const all = [...new Set(rowAccounts.flat())]
   const moduleAccounts = [...new Set(rowModuleAccounts.flat())]
   if (!all.length && !moduleAccounts.length) return
+  // User Revenue reads EVERY member (a foreign treasury's sovereign is a `user`; the module exclusion above is the
+  // observation scan's alone) and their twins, under the one identity rule the user-revenue sort ranks by.
+  const userRevenueCandidates = [...new Set(rowMembers.flatMap(members => [...members, ...members.map(m => evmAccountForm(m)).filter((t): t is string => t != null)]))]
+
+  // The per-column reads depend only on the account set, so they start now and
+  // run beside the sparkline reads below rather than after them. Each is
+  // independent: one failing blanks only its own cells (volume, revenue: absent;
+  // User Revenue: null = not published; class: none), never the other columns or
+  // the sparklines.
+  const optionalSource = <T,>(label: string, read: Promise<T>, fallback: T): Promise<T> =>
+    read.catch(error => { console.warn(`[accounts] ${label} enrichment unavailable:`, error instanceof Error ? error.message : error); return fallback })
+  const columnSources = Promise.all([
+    optionalSource('trading volume', tradingVolumeByAccount(all), new Map<string, number>()),
+    optionalSource('liquidation volume', liquidationVolumeByAccount(all), new Map<string, number>()),
+    optionalSource('revenue', revenueByAccount(all), new Map<string, number>()),
+    optionalSource('user revenue', userRevenueNetByAccount(client, userRevenueCandidates), { complete: false, byAccount: new Map<string, bigint>() }),
+    optionalSource('user revenue identities', userRevenueTwinOwners(client), new Map<string, string>()),
+    // Without it a row simply carries no class and renders as before.
+    optionalSource('holder class', loadHolderClassifier(client), null),
+  ])
 
   const winStart = sparklineCalendarWindowStart().toISOString().slice(0, 10)
 
@@ -30561,11 +31133,7 @@ async function enrichAccountRows(
   for (const r of baseRows) (baseByRow.get(r.account_id) ?? baseByRow.set(r.account_id, []).get(r.account_id)!).push(r)
   const moduleBalancesByAccount = new Map<string, { account_id: string; asset_id: string; bal: string }[]>()
   for (const r of moduleBalanceRows) (moduleBalancesByAccount.get(r.account_id) ?? moduleBalancesByAccount.set(r.account_id, []).get(r.account_id)!).push(r)
-  const [volumeByAccount, liquidationByAccount, revenueByAccountAll] = await Promise.all([
-    tradingVolumeByAccount(all),
-    liquidationVolumeByAccount(all),
-    revenueByAccount(all),
-  ])
+  const [volumeByAccount, liquidationByAccount, revenueByAccountAll, userRevenueAll, userRevenueOwners, holderClasses] = await columnSources
 
   rows.forEach((row, i) => {
     const accs = rowAccounts[i]
@@ -30604,6 +31172,17 @@ async function enrichAccountRows(
       const revenue = accs.reduce((s, a) => s + (revenueByAccountAll.get(a) ?? 0), 0)
       if (revenue > 0) row.revenueUsd = revenue
     }
+    // Every row's User Revenue, or null while unpublished (a module-only row —
+    // pallet and sovereign accounts are never holder class `user` — reads 0).
+    // Whether User Revenue describes this row at all: over the row's OWN accounts
+    // (members, pallet and sovereign forms included), never their ETH twins, which
+    // share the substrate account's class. A row it does not describe has no
+    // User Revenue figure (null), never a "$0 earned".
+    const holderClass = holderClasses ? rowHolderClass(rowMembers[i], holderClasses) : undefined
+    if (holderClass) row.holderClass = holderClass
+    row.userRevenueUsd = userRevenueAll.complete && (holderClass == null || holderClass === 'user')
+      ? userRevenueUsdOf(userRevenueAll.byAccount, userRevenueRowAccounts(rowMembers[i], userRevenueOwners))
+      : null
   })
 }
 
@@ -30658,6 +31237,7 @@ async function enrichAccountSparklines(
   raw: { label_id: string; sample: string; usd_total: number; gkey?: string }[],
   rows: TopAccountRow[],
   foldMembersByKey: Map<string, string[]> | null = null,
+  deferred: Promise<void>[] | null = null,
 ): Promise<void> {
   // Row account set = the row's members + their EVM twins, i.e. exactly the
   // relatedAccountIds the detail page feeds getAccountHistory.
@@ -30699,7 +31279,19 @@ async function enrichAccountSparklines(
         const scopeKey = gkey && foldMembersByKey?.has(gkey)
           ? `user-tag:${gkey}`
           : (raw[i].label_id !== '' ? `tag:${raw[i].label_id}` : `addr:${raw[i].sample}`)
-        const { portfolioSeries, portfolioDates } = await getAccountHistoryShared(accounts, scopeKey)
+        // Deferred (a cold page build): only a reconstruction someone already made is
+        // used; the rest is computed by the background lane and the page rebuilt.
+        let history: Awaited<ReturnType<typeof getAccountHistory>> | undefined
+        if (deferred) {
+          history = peekCached(accountHistorySharedKey(accounts, scopeKey))
+          if (!history) {
+            deferRowFill(directoryRowFills, deferred, accountHistorySharedKey(accounts, scopeKey), () => getAccountHistoryShared(accounts, scopeKey))
+            continue
+          }
+        } else {
+          history = await getAccountHistoryShared(accounts, scopeKey)
+        }
+        const { portfolioSeries, portfolioDates } = history
         if (portfolioSeries.length > 1) {
           // Resample the full-history series onto the fixed trailing-year grid: every
           // row's sparkline spans the same 1Y window, left-padded with 0 for younger
@@ -31005,6 +31597,9 @@ export interface TagDetail {
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
   revenueUsd?: number
+  // See AddressDetail.userRevenueUsd — summed over the members; holderClass over the members (a user as soon as one is).
+  userRevenueUsd: number | null
+  holderClass?: HolderClass
   moneyMarket: MoneyMarketPosition[]
   // The same positions unaggregated, one entry per member that holds one. The
   // header summarises; the Positions tab lists, because a health factor is an
@@ -31263,10 +31858,11 @@ async function buildTagDetailForMembers(
     const portfolioSeriesExHdx = opts.exHdx ? history.portfolioSeriesExHdx.slice() : []
     if (portfolioSeriesExHdx.length) portfolioSeriesExHdx[portfolioSeriesExHdx.length - 1] = +(portfolioExHdxUsd - debtUsd).toFixed(2)
     const volumeAccounts = tradingVolumeAccountSet(members)
-    const [tradingVolumeUsd, liquidationVolumeUsd, revenueUsd] = await Promise.all([
+    const [tradingVolumeUsd, liquidationVolumeUsd, revenueUsd, userRevenueStat] = await Promise.all([
       tradingVolumeUsdOf(volumeAccounts),
       liquidationVolumeByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
       revenueByAccount(volumeAccounts).then(m => [...m.values()].reduce((s, v) => s + v, 0)),
+      userRevenueStatOf(volumeAccounts, members),
     ])
     const detail: TagDetail = {
       tagId: presentation.tagId, name: presentation.name, color: presentation.color, note: presentation.note, icon: presentation.icon,
@@ -31275,6 +31871,7 @@ async function buildTagDetailForMembers(
       ...(tradingVolumeUsd > 0 ? { tradingVolumeUsd } : {}),
       ...(liquidationVolumeUsd > 0 ? { liquidationVolumeUsd } : {}),
       ...(revenueUsd > 0 ? { revenueUsd } : {}),
+      ...userRevenueStat,
       moneyMarket, moneyMarketByAccount: mmAll.byAccount,
       liquidityPositions: [...lpPositions, ...stableLp].sort((x, y) => (y.valueUsd ?? 0) - (x.valueUsd ?? 0)), activeDcas, openLimitOrders,
       portfolioSeries, portfolioSeriesExHdx, portfolioDates: history.portfolioDates, portfolioBlocks: history.portfolioBlocks,

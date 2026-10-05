@@ -23,7 +23,7 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
     // Both extras are optional and trailing, so every existing caller — and the
     // anonymous path these tests guard — is unchanged.
     expect(explorerService).toContain(
-      'async function accountsPage(offset: number, limit: number, sort: AccountSort, refresh: boolean, viewerFold?: ViewerFold, members?: string[]): Promise<AccountsPage> {',
+      'async function accountsPage(offset: number, limit: number, sort: AccountSort, refresh: boolean, viewerFold?: ViewerFold, members?: string[], { rankOnly = false }: { rankOnly?: boolean } = {}): Promise<AccountsPage> {',
     )
   })
 
@@ -45,7 +45,7 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
   it('every gkey site in the query routes through gkeySql, and none still inlines the old expression', () => {
     const body = accountsPageBody()
     const calls = [...body.matchAll(/\$\{gkeySql\('([a-zA-Z_.]+)'\)\} AS gkey/g)].map(m => m[1])
-    expect(calls.sort()).toEqual(['latest.account_id', 'p.account_id', 'v.account_id', 'v.account_id', 'v.account_id'].sort())
+    expect(calls.sort()).toEqual(['latest.account_id', 'p.account_id', 'v.account_id', 'v.account_id', 'v.account_id', 'v.account_id'].sort())
     expect(body).not.toContain("if(t.lid = '', v.account_id, t.lid) AS gkey")
     expect(body).not.toContain("if(t.lid = '', p.account_id, t.lid) AS gkey")
     expect(body).not.toContain("if(t.lid = '', latest.account_id, t.lid) AS gkey")
@@ -79,7 +79,9 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
   // original text, not merely something that happens to evaluate the same.
   it('the extra gkey column and the disp_name/has_identity overrides are empty-string splices absent a fold', () => {
     const body = accountsPageBody()
-    expect(body).toContain("const gkeySelect = viewerFold ? 'g.gkey AS gkey,\\n            ' : ''")
+    // Also spliced for the shared directory's ranked paging (keys/rank modes), which
+    // reorders a page by it; still absent from a fold-less legacy read's grouping.
+    expect(body).toContain("const gkeySelect = viewerFold || rankedPaging ? 'g.gkey AS gkey,\\n            ' : ''")
     expect(body).toContain(
       "? \`if(\${groupNameExpr} != '' OR g.label_id != '' OR ident.account_id != '', 1, 0) AS has_identity\`\n      : \`if(g.label_id != '' OR ident.account_id != '', 1, 0) AS has_identity\`",
     )
@@ -99,15 +101,15 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
   // max_query_size raised per call. query_params carries only the small scalars.
   it('sends the fold in the query text, never as query_params', () => {
     const body = accountsPageBody()
-    const at = body.indexOf('query_params: {')
+    const at = body.indexOf('query_params: {', body.indexOf('const directoryQuery = '))
     const params = body.slice(at, body.indexOf('format:', at))
-    expect(params).toContain('limit, offset,')
+    expect(params).toContain('{ limit, offset,')
     expect(params).not.toContain('fold_ids')
     expect(params).not.toContain('fold_group_keys')
     // The arrays are named once, as WITH aliases prepended to the query's own WITH.
     expect(body).toContain('${viewerFoldWithSql(viewerFold)}tags AS (')
     // And the setting that lets a body past the 256 KiB default reach the parser.
-    expect(body).toContain('clickhouse_settings: viewerFoldSettings(viewerFold),')
+    expect(body).toContain(': viewerFoldSettings(viewerFold),')
   })
 
   // One alias per array, however many expressions reference it: gkeySql and
@@ -129,7 +131,7 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
     // The whole-directory snapshot is skipped for a member-scoped page too: it
     // ranks every account under the shared grouping, which is a different row
     // set entirely, not a page of this one.
-    expect(body).toContain("if (!viewerFold && !members) {\n      const current = await loadAccountDirectorySnapshot(snapshotKey, true).catch(() => null)\n      if (current) return current.page\n    }")
+    expect(body).toContain("if (!viewerFold && !members && !rankOnly) {\n      const current = await loadAccountDirectorySnapshot(snapshotKey, true).catch(() => null)\n      if (current) return current.page\n    }")
     expect(body).toContain('if (!viewerFold) await persistAccountDirectorySnapshot(snapshotKey, page).catch(err => console.error(\'[accounts] snapshot persist failed:\', err))')
   })
 
@@ -191,8 +193,8 @@ describe('the accounts-directory viewer fold cannot drift the anonymous path', (
     }
     const body = accountsPageBody()
     expect(body).toContain('await enrichAccountRows(raw, rows, foldMembersByKey)')
-    expect(body).toContain('await enrichAccountSparklines(raw, rows, foldMembersByKey)')
-    expect(body).toContain('await enrichTopAssets(raw, rows, prices, foldMembersByKey)')
+    expect(body).toContain('await enrichAccountSparklines(raw, rows, foldMembersByKey, deferred)')
+    expect(body).toContain('await enrichTopAssets(raw, rows, prices, foldMembersByKey, deferred)')
   })
 
   // getAccountsForViewerFold falls back to the plain shared path — not a

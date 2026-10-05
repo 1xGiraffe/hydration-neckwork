@@ -38,8 +38,12 @@ describe('bound-account directory key', () => {
     // feed total replaced. The directory's farm-reward sum (lm_acct) keys its
     // owners the same way, so a bound H160's rewards fold into the substrate
     // row its balances do. (The HDX and HOLLAR dashboards import the helper for
-    // their holder counts; they live outside this file.)
+    // their holder counts; they live outside this file.) The User Revenue sort
+    // folds its ETH-mapped holders through the same helper. The member filter
+    // hands the helper's expression to inChunkedSql (a list tag's members are
+    // bound in chunks), so it is counted on its own.
     expect((explorerService.match(/\$\{boundAccountSql\('\w+'\)\}/g) ?? []).length).toBe(8)
+    expect(explorerService).toContain("inChunkedSql(boundAccountSql('l'), 'members', members)")
     expect((explorerService.match(/substring\(\$\{account\}, 11, 8\) IN \('6d6f646c', '7369626c', '70617261'\)/g) ?? []).length).toBe(1)
   })
 

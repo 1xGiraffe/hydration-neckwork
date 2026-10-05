@@ -236,6 +236,28 @@ describe('renderHead', () => {
   })
 })
 
+describe('the Revenue overview and its two subpages', () => {
+  it('names each page by its metric, under the overview in the trail', () => {
+    expect(pageMeta('/revenue')).toMatchObject({ title: 'Revenue', crumbs: [['Home', '/']] })
+    expect(pageMeta('/revenue').description).toMatch(/User Revenue.*Protocol Revenue/)
+    expect(pageMeta('/revenue/users')).toMatchObject({ title: 'User Revenue', crumbs: [['Home', '/'], ['Revenue', '/revenue']] })
+    expect(pageMeta('/revenue/users').description).toMatch(/net/)
+    expect(pageMeta('/revenue/protocol')).toMatchObject({ title: 'Protocol Revenue', crumbs: [['Home', '/'], ['Revenue', '/revenue']] })
+  })
+
+  // What a hard navigation (a crawler, a chat preview, a reload) is served:
+  // the real shell with THIS page's head, not the overview's or the generic one.
+  it('serves each subpage its own title and description on a hard navigation', () => {
+    for (const path of ['/revenue/users', '/revenue/protocol']) {
+      const meta = pageMeta(path)
+      const html = renderPage(shell, path)
+      expect(html.match(/<title>[^<]*<\/title>/g), path).toEqual([`<title>${meta.title} · Hydration Explorer</title>`])
+      expect(html, path).toContain(`<meta name="description" content="${meta.description.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" />`)
+      expect(html, path).toContain(`<link rel="canonical" href="${PUBLIC_URL}${path}" />`)
+    }
+  })
+})
+
 describe('renderPage rewrites the shell rather than appending to it', () => {
   const out = renderPage(shell, '/block/14871261')
 

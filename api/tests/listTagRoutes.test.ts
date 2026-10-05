@@ -25,7 +25,7 @@ vi.mock('../src/services/explorerService.ts', async importOriginal => {
       if (!members.length) return null
       return {
         tagId: presentation.tagId, name: presentation.name, color: presentation.color, note: presentation.note, icon: presentation.icon,
-        members: members.map(stubRef), balances: [], topAssets: [], portfolioUsd: 0, portfolioExHdxUsd: 0,
+        members: members.map(stubRef), balances: [], topAssets: [], portfolioUsd: 0, portfolioExHdxUsd: 0, userRevenueUsd: null,
         moneyMarket: [], liquidityPositions: [], activeDcas: [], portfolioSeries: [], portfolioSeriesExHdx: [], portfolioDates: [], portfolioBlocks: [], balanceHistory: [],
       } satisfies TagDetail
     }),

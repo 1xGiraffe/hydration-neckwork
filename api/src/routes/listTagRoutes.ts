@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import {
   getAccountsForMembers,
   getListTagDetail, getListTagHistoryWindow, getListTagLiquidityHistory, getListTagVolumeHistory, getListTagActivity, getListTagExtrinsics, getListTagEvents,
-  getListTagVotes, getListTagRevenueBreakdown, getListTagVotesByReferendum, getListTagTabCounts,
+  getListTagVotes, getListTagRevenueBreakdown, getListTagUserRevenue, USER_REVENUE_RANGES, getListTagVotesByReferendum, getListTagTabCounts,
   getListTagListTotal, getListTagValueEvents,
   type ValueListFilters,
 } from '../services/explorerService.ts'
@@ -180,6 +180,15 @@ export function listTagReadRoutes(fastify: FastifyInstance, surface: ListTagRead
     const resolved = resolve(req, reply)
     if (!resolved) return
     return getListTagRevenueBreakdown(resolved.listId, resolved.tagId, resolved.tag.members)
+  })
+
+  // The User Revenue tab over the list tag's members.
+  fastify.get(`${base}/user-revenue`, async (req, reply) => {
+    const resolved = resolve(req, reply)
+    if (!resolved) return
+    const range = (query(req) as Record<string, unknown>).range ?? 'all'
+    if (!(USER_REVENUE_RANGES as readonly unknown[]).includes(range)) return reply.status(400).send({ error: 'Invalid range' })
+    return getListTagUserRevenue(resolved.listId, resolved.tagId, resolved.tag.members, range as (typeof USER_REVENUE_RANGES)[number])
   })
 
   // Grouped-mode counterpart of the votes route above — one row per referendum.

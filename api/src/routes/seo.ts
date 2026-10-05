@@ -158,8 +158,10 @@ const HUBS: Record<string, { title: string; description: string }> = {
   '/liquidity': { title: 'Liquidity', description: 'Liquidity across the Omnipool, stableswap and XYK pools on Hydration, with each pool\u2019s TVL and 24-hour volume.' },
   '/hdx': { title: 'HDX', description: 'HDX price, supply, staking, treasury buybacks and Omnipool position.' },
   '/hollar': { title: 'HOLLAR', description: 'HOLLAR supply, the stability module, collateral and peg behaviour.' },
-  '/ice': { title: 'ICE', description: 'ICE intents and solver settlements on Hydration.' },
-  '/revenue': { title: 'Protocol Revenue', description: 'Protocol revenue on Hydration by stream — trading fees, the money market, HOLLAR and liquidations.' },
+  '/ice': { title: 'ICE', description: 'ICE, Hydration\u2019s intent solver: limit orders, DCA intents, their fills and the matched-volume fee.' },
+  '/revenue': { title: 'Revenue', description: 'Revenue on Hydration, live: User Revenue — what users earn, net — and Protocol Revenue — what the protocol earns — over 24 hours, 7 days, 30 days and all time.' },
+  '/revenue/users': { title: 'User Revenue', description: 'What users earn on Hydration, net: LP fees, lending interest and incentives, farm rewards, token accrual and staking yield, less borrow interest and fees paid — by stream and top earners, through the last closed hour.' },
+  '/revenue/protocol': { title: 'Protocol Revenue', description: 'Protocol Revenue on Hydration by stream — trading fees, the money market, HOLLAR and liquidations — with its top payers and the staker distributions.' },
   '/volume': { title: 'Volume', description: 'Trading volume on Hydration — every trade once, and per venue, pool and asset, with top pools, assets and traders.' },
   '/oracles': { title: 'Oracles', description: 'The prices Hydration reads — money-market oracles, stableswap pegs, DIA and push feeds, the EMA oracle — who delivers them, how fresh they are and how far they sit from the market.' },
   '/security': { title: 'Security', description: 'Hydration\u2019s live safety controls: circuit breakers, cross-chain limits, oracle health, freezes and guardians.' },
@@ -321,7 +323,8 @@ export function pageMeta(path: string): PageMeta {
   const session = SESSION_PAGES[clean]
   if (session) return { ...session, sessionOnly: true, crumbs: [CRUMB_HOME] }
   const hub = HUBS[clean]
-  if (hub) return { ...hub, crumbs: clean === '/' ? [] : [CRUMB_HOME] }
+  // The Revenue overview's two subpages sit under it in the trail.
+  if (hub) return { ...hub, crumbs: clean === '/' ? [] : clean.startsWith('/revenue/') ? [CRUMB_HOME, ['Revenue', '/revenue']] : [CRUMB_HOME] }
 
   const parts = clean.replace(/^\//, '').split('/').filter(Boolean)
   const [head, a, b] = parts

@@ -112,7 +112,7 @@ function paginate(section: Section, urls: SitemapUrl[]): Map<string, string> {
 const CORE_PATHS = [
   '/', '/activity', '/blocks', '/extrinsics', '/events', '/accounts', '/contracts', '/assets',
   '/governance', '/tags', '/tags/hydration', '/lists', '/omnipool', '/liquidity',
-  '/hdx', '/hollar', '/ice', '/revenue', '/volume', '/oracles', '/security', '/mcp',
+  '/hdx', '/hollar', '/ice', '/revenue', '/revenue/users', '/revenue/protocol', '/volume', '/oracles', '/security', '/mcp',
 ]
 
 async function buildSections(): Promise<Map<string, string>> {
