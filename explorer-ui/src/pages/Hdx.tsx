@@ -81,8 +81,9 @@ function GigaMarketSection({ d }: { d: HdxDashboard }) {
         <div className="hdx-cards">
           {rows.map(r => {
             // The GIGAHDX money market's collateral is stHDX (the internal vehicle);
-            // users know it 1:1 as GIGAHDX, so surface the branded name and icon
-            // (GIGAHDX is asset 67; stHDX/670 has no icon of its own).
+            // users know it 1:1 as GIGAHDX, so surface the branded name. The icon is
+            // GIGAHDX's (asset 67) — the CDN's stHDX/670 icon is the same artwork, so
+            // every other surface drawing 670 directly shows it too.
             const isStHdx = r.asset.symbol === 'stHDX'
             const sym = isStHdx ? 'GIGAHDX' : r.asset.symbol
             const iconId = isStHdx ? 67 : r.asset.iconAssetId
