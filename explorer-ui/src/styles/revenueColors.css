@@ -1,0 +1,58 @@
+/* The revenue colour system's own steps (components/revenueColors.ts holds the
+   mapping and its rationale). One step per theme, validated with the dataviz
+   palette validator against each theme's surface in the stack orders there.
+   --rv-hollar is HOLLAR's app-wide resolved asset colour: useRevenueHollarColor
+   publishes it on <html> at runtime; the value here is that colour's fallback
+   (the curated HOLLAR brand colour the resolver also starts from). */
+:root, :root[data-theme="dark"] {
+  --rv-hollar: #b3cf92;
+  --rv-omnipool-hub: #a9cdfa;
+  --rv-lp-cost: #0a5d9d;
+  --rv-uniswap: #fe77f5;
+  --rv-liquidation: #ff7a45;
+  --rv-liquidator: #c2410c;
+  --rv-farm: #4fb2de;
+  --rv-mm-cost: #936419;
+  --rv-mm-incentive: #b29986;
+  --rv-accrual: #95caff;
+  --rv-accrual-dated: #d4e9ff;
+  --rv-staking: #aa86f5;
+  --rv-staking-cost: #774e83;
+  --rv-gigahdx: #000000;
+  --rv-gigahdx-ring: rgba(255, 255, 255, 0.7);
+  --rv-voting: #f1b0d7;
+  --rv-referral: #6f7a8f;
+}
+:root[data-theme="light"] {
+  --rv-hollar: #b3cf92;
+  --rv-omnipool-hub: #0c2f86;
+  --rv-lp-cost: #0d3297;
+  --rv-uniswap: #93158e;
+  --rv-liquidation: #e0700f;
+  --rv-liquidator: #7c1d0f;
+  --rv-farm: #16929a;
+  --rv-mm-cost: #402804;
+  --rv-mm-incentive: #d19f72;
+  --rv-accrual: #45a4f6;
+  --rv-accrual-dated: #8bb3bd;
+  --rv-staking: #5e3fc0;
+  --rv-staking-cost: #541e63;
+  --rv-gigahdx: #000000;
+  --rv-voting: #d992fe;
+  --rv-referral: #6b6f7a;
+}
+
+/* GIGAHDX yield is black (#000) in BOTH themes. On the dark ground (--bg #030816)
+   black alone is invisible, so there — and only there — every mark drawn in it
+   carries a thin light ring instead of a different fill: dots, legend and tooltip
+   swatches and river motes (an inline background or --tint naming the token) get a
+   1px outer ring, which also replaces the mote's glow (a black glow is no glow);
+   SVG chart marks filled with it get a 1px light stroke. The pill itself is not
+   ringed: its own dot is. */
+:root:not([data-theme="light"]) [style*="var(--rv-gigahdx)"]:not(.rev-pill):not(.rev-dot-out) {
+  box-shadow: 0 0 0 1px var(--rv-gigahdx-ring);
+}
+:root:not([data-theme="light"]) [fill="var(--rv-gigahdx)"] {
+  stroke: var(--rv-gigahdx-ring);
+  stroke-width: 1px;
+}

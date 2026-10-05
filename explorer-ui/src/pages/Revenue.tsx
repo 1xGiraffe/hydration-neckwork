@@ -1,317 +1,152 @@
-import { useMemo, useState } from 'react'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { useRevenueDashboard, useStakerDistributions } from '../hooks/useExplorerData'
-import { AddrPill, Num, Usd, ChartSkeleton, F, compactAmount } from '../components/ui'
-import { ChartLegend, ShareBar, StackedColumnChart } from '../components/HdxCharts'
-import type { ShareSegment, StackColumn } from '../components/HdxCharts'
-import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
+import { useRevenueDashboard, useUserRevenueSummary } from '../hooks/useExplorerData'
+import { Usd } from '../components/ui'
+import { DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import { RevenueFlow } from '../components/RevenueFlow'
-import {
-  REVENUE_STREAMS_ORDERED, REVENUE_STREAM_COLOR, REVENUE_STREAM_LABEL,
-  STAKER_POTS_ORDERED, STAKER_POT_COLOR, STAKER_POT_LABEL,
-} from '../components/revenueColors'
-import { monthDayLabel } from '../utils/dashboardDates'
-import type { RevenueDashboard, RevenueRange, RevenueStream, StakerDistributions, StakerPoint, StakerPot } from '../types'
-import { setQuery, useQueryValue } from '../router'
+import { UserRevenueFlow } from '../components/UserRevenueFlow'
+import { userRevenueLagNote } from '../components/userRevenueLabels'
+import { useMediaQuery } from '../hooks/useMediaQuery'
+import { useRiverFullscreen, type RiverFullscreenMode } from '../hooks/useRiverFullscreen'
+import { paths } from '../router'
+import { useRef, type ReactNode, type Ref } from 'react'
+import type { RevenueDashboard, UserRevenueSummary } from '../types'
 
-// /revenue — the protocol's income, watchable live. The river up top streams
-// every income as it lands; the body answers "how much" (ribbon), "when"
-// (stacked history) and "from whom" (breakdown + top payers).
+// /revenue — the overview: two rivers, watchable live, each with its headline
+// windows and a link to its own breakdown page.
+//
+//  * User Revenue — what users EARN on Hydration, net (LP fees, lending
+//    interest, farm and staking rewards, token accrual, less borrow interest
+//    and other costs), booked per closed hour: its windows are "the last N
+//    closed hours through HH:00 UTC", never a raw tail.
+//  * Protocol Revenue — what the protocol earns from usage, current to the
+//    indexed head.
+//
+// The two are NOT additive (an Omnipool fee's LP-retained part is user revenue,
+// its protocol part protocol revenue, and the HDX sub-pool's POL is both), so
+// the page never shows a combined total. One shared frame loop drives both
+// rivers, and they split one particle budget: 90 + 90 on desktop, 40 in total
+// on phones.
+//
+// Full screen: either river's button opens ONE view holding both rivers, User
+// Revenue above Protocol Revenue (the page's order) as two equal bands at every
+// aspect ratio, still never summed. It is all animation: the titles, legends,
+// window figures and as-of lines stay on the page (hidden by the stylesheet);
+// each band keeps only a one-word label, its live counter and the exit
+// control, overlaid. The budget grows with the canvas (a full-width half-screen
+// band each; the protocol river alone used to get 160), and a phone or a short
+// landscape screen keeps a phone-sized budget.
 
-// One grain per range: daily bars for a month, weekly for a year, monthly for
-// the whole era. The trailing year reads 12M like every other window, and its
-// URL says so (`?range=12m`); the API's own key stays `1y`, which old links carry.
-const RANGES: { key: RevenueRange; label: string; caption: string; param: string | null }[] = [
-  { key: '30d', label: '30D', caption: 'last 30 days', param: null },
-  { key: '1y', label: '12M', caption: 'last 12 months', param: '12m' },
-  { key: 'all', label: 'All', caption: 'all time', param: 'all' },
-]
-const rangeOfParam = (raw: string): RevenueRange => (raw === '12m' || raw === '1y' ? '1y' : raw === 'all' ? 'all' : '30d')
+const BUDGET = { desktop: 90, mobile: 20 } as const
+const FULLSCREEN_BUDGET = { desktop: 140, mobile: 40 } as const
+const FULLSCREEN_COMPACT_BUDGET = { desktop: 36, mobile: 36 } as const
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-function bucketLabel(range: RevenueRange, t: number): string {
-  const d = new Date(t * 1000)
-  if (range === 'all') return `${MONTHS[d.getUTCMonth()]} ${String(d.getUTCFullYear()).slice(2)}`
-  return monthDayLabel(d.toISOString())
+const fmtThrough = (iso: string): string => `${iso.slice(11, 16)} UTC ${iso.slice(0, 10)}`
+
+function Ribbon({ cells }: { cells: { k: string; v: number | null | undefined; title?: string }[] }) {
+  return (
+    <div className="ribbon rev-hero-ribbon">
+      {cells.map(c => (
+        <div className="cell" key={c.k} title={c.title}>
+          <div className="k">{c.k}</div>
+          <div className="v">{c.v != null ? <Usd v={c.v} /> : '—'}</div>
+        </div>
+      ))}
+    </div>
+  )
 }
 
-function historyColumns(d: RevenueDashboard, range: RevenueRange): StackColumn[] {
-  const byStream = new Map<RevenueStream, Map<number, number>>()
-  for (const s of d.history.series) byStream.set(s.stream, new Map(s.points.map(p => [p.t, p.usd])))
-  const ts = [...new Set(d.history.series.flatMap(s => s.points.map(p => p.t)))].sort((a, b) => a - b)
-  // The chart draws every column's label; at 90 day-columns they collide, so
-  // thin the AXIS labels to ~12 while each tooltip keeps its full date.
-  const labelEvery = Math.max(1, Math.ceil(ts.length / 12))
-  return ts.map((t, i) => {
-    const parts = REVENUE_STREAMS_ORDERED
-      .map(stream => ({ stream, usd: byStream.get(stream)?.get(t) ?? 0 }))
-      .filter(p => p.usd > 0)
-    const total = parts.reduce((sum, p) => sum + p.usd, 0)
-    const label = bucketLabel(range, t)
-    return {
-      key: String(t),
-      label: i % labelEvery === 0 ? label : '',
-      segments: parts.map(p => ({
-        key: p.stream,
-        label: REVENUE_STREAM_LABEL[p.stream],
-        color: REVENUE_STREAM_COLOR[p.stream],
-        value: p.usd,
-      })),
-      tip: (
-        <>
-          <strong>{label}</strong>
-          {[...parts].reverse().map(p => (
-            <TipRow key={p.stream} color={REVENUE_STREAM_COLOR[p.stream]} label={REVENUE_STREAM_LABEL[p.stream]} value={F.usd(p.usd)} />
-          ))}
-          <TipRow label="Total" value={F.usd(total)} />
-        </>
-      ),
-    }
-  })
+function RiverHead({ title, subtitle, to, linkLabel }: { title: string; subtitle: ReactNode; to: string; linkLabel: string }) {
+  return (
+    <div className="sec-title-row rev-river-head">
+      <SecTitle title={title} subtitle={subtitle} />
+      <a className="rev-more" href={to}>{linkLabel} →</a>
+    </div>
+  )
 }
 
-type StakerUnit = 'usd' | 'hdx'
+/**
+ * Both river sections. Exported for tests: the page owns the full-screen state
+ * and passes it in, so the markup of either mode is renderable without a DOM.
+ */
+export function RevenueRivers({ user, protocol, mode, onToggleFullscreen, compact = false, viewRef }: {
+  user: UserRevenueSummary | undefined
+  protocol: RevenueDashboard | undefined
+  mode: RiverFullscreenMode
+  onToggleFullscreen: () => void
+  /** A phone-sized screen (narrow, or a short landscape one): phone budget in full screen. */
+  compact?: boolean
+  viewRef?: Ref<HTMLDivElement>
+}) {
+  const fullscreen = mode !== 'off'
+  const budget = !fullscreen ? BUDGET : compact ? FULLSCREEN_COMPACT_BUDGET : FULLSCREEN_BUDGET
+  const incomplete = 'Not every hour of this window is published yet'
+  const userAsOf = user?.publishedThrough
+    ? `closed hours through ${fmtThrough(user.publishedThrough)}${userRevenueLagNote(user.publishedThrough)} · recent hours may be restated`
+    : user ? 'not published yet' : 'loading'
 
-const hdxAmount = (v: number): string => `${compactAmount(v)} HDX`
+  return (
+    <div
+      ref={viewRef}
+      className={`rev-duo${fullscreen ? ' rev-duo-fs' : ''}${mode === 'css' ? ' rev-duo-pseudo' : ''}`}
+      aria-label={fullscreen ? 'User Revenue and Protocol Revenue, full screen' : undefined}
+    >
+      <section className="rev-duo-cell">
+        <RiverHead title="User Revenue" subtitle="what users earn on Hydration, net" to={paths.revenueUsers()} linkLabel="User Revenue breakdown" />
+        <div className="panel rev-hero">
+          <span className="rev-band-label" aria-hidden={!fullscreen}>User Revenue</span>
+          <UserRevenueFlow maxActive={budget} fullscreen={fullscreen} onToggleFullscreen={onToggleFullscreen} />
+          <Ribbon cells={[
+            { k: '24H', v: user?.totals.day, title: user?.totals.day == null ? incomplete : 'The last 24 closed hours' },
+            { k: '7D', v: user?.totals.week, title: user?.totals.week == null ? incomplete : 'The last 168 closed hours' },
+            { k: '30D', v: user?.totals.month, title: user?.totals.month == null ? incomplete : 'The last 720 closed hours' },
+            { k: 'All time', v: user?.totals.allTime, title: user?.totals.allTime == null ? incomplete : undefined },
+          ]} />
+          <div className="rev-asof">{userAsOf}</div>
+        </div>
+      </section>
 
-function stakerColumns(d: StakerDistributions, range: RevenueRange, unit: StakerUnit): StackColumn[] {
-  const byPot = new Map<StakerPot, Map<number, StakerPoint>>()
-  for (const s of d.series) byPot.set(s.pot, new Map(s.points.map(p => [p.t, p])))
-  const ts = [...new Set(d.series.flatMap(s => s.points.map(p => p.t)))].sort((a, b) => a - b)
-  const labelEvery = Math.max(1, Math.ceil(ts.length / 12))
-  const fmt = unit === 'usd' ? F.usd : hdxAmount
-  return ts.map((t, i) => {
-    const parts = STAKER_POTS_ORDERED
-      .map(pot => ({ pot, point: byPot.get(pot)?.get(t) }))
-      .filter((p): p is { pot: StakerPot; point: StakerPoint } => (p.point?.[unit] ?? 0) > 0)
-    const totalUsd = parts.reduce((sum, p) => sum + p.point.usd, 0)
-    const totalHdx = parts.reduce((sum, p) => sum + p.point.hdx, 0)
-    const label = bucketLabel(range, t)
-    return {
-      key: String(t),
-      label: i % labelEvery === 0 ? label : '',
-      segments: parts.map(p => ({
-        key: p.pot,
-        label: STAKER_POT_LABEL[p.pot],
-        color: STAKER_POT_COLOR[p.pot],
-        value: p.point[unit],
-      })),
-      tip: (
-        <>
-          <strong>{label}</strong>
-          {[...parts].reverse().map(p => (
-            <TipRow key={p.pot} color={STAKER_POT_COLOR[p.pot]} label={STAKER_POT_LABEL[p.pot]} value={fmt(p.point[unit])} />
-          ))}
-          <TipRow label="Total" value={`${hdxAmount(totalHdx)} · ${F.usd(totalUsd)}`} />
-        </>
-      ),
-    }
-  })
+      <section className="rev-duo-cell">
+        <RiverHead title="Protocol Revenue" subtitle="what the protocol earns from usage" to={paths.revenueProtocol()} linkLabel="Protocol Revenue breakdown" />
+        <div className="panel rev-hero">
+          <span className="rev-band-label" aria-hidden={!fullscreen}>Protocol Revenue</span>
+          {/* Full screen stacks both rivers in one view: ONE exit control, the top river's (top-right of the screen). */}
+          <RevenueFlow maxActive={budget} fullscreen={fullscreen} onToggleFullscreen={fullscreen ? undefined : onToggleFullscreen} />
+          <Ribbon cells={[
+            { k: '24H', v: protocol?.totals.day },
+            { k: '7D', v: protocol?.totals.week },
+            { k: '30D', v: protocol?.totals.month },
+            { k: 'All time', v: protocol?.totals.allTime },
+          ]} />
+          <div className="rev-asof">{protocol ? `current to the indexed head, as of ${fmtThrough(protocol.asOf)}; HOLLAR interest lags up to about two hours` : 'loading'}</div>
+        </div>
+      </section>
+    </div>
+  )
 }
 
 export function Revenue() {
-  useDocumentTitle('Protocol Revenue')
-  const range = rangeOfParam(useQueryValue('range', '30d'))
-  const { data } = useRevenueDashboard(range)
-  // The staker section carries its own timeframe, independent of the page tabs;
-  // it opens on the recent month (the all-time tiles still show beside it, and
-  // the full history is one tap away on All).
-  const [stakerRange, setStakerRange] = useState<RevenueRange>('30d')
-  const [stakerUnit, setStakerUnit] = useState<StakerUnit>('hdx')
-  const { data: stakers } = useStakerDistributions(stakerRange)
-
-  const columns = useMemo(() => (data ? historyColumns(data, range) : []), [data, range])
-  const stakerCols = useMemo(() => (stakers ? stakerColumns(stakers, stakerRange, stakerUnit) : []), [stakers, stakerRange, stakerUnit])
-  const stakerLegend = useMemo(() => STAKER_POTS_ORDERED
-    .filter(pot => stakers?.series.some(s => s.pot === pot && s.points.length))
-    .map(pot => ({ label: STAKER_POT_LABEL[pot], color: STAKER_POT_COLOR[pot] })), [stakers])
-  const shareSegments: ShareSegment[] = useMemo(() => (data?.breakdown ?? []).map(b => ({
-    key: b.stream,
-    label: REVENUE_STREAM_LABEL[b.stream],
-    color: REVENUE_STREAM_COLOR[b.stream],
-    value: b.usd,
-    tip: <TipRow color={REVENUE_STREAM_COLOR[b.stream]} label={REVENUE_STREAM_LABEL[b.stream]} value={`${F.usd(b.usd)} · ${(b.share * 100).toFixed(1)}%`} />,
-  })), [data])
-  const legendItems = useMemo(() => REVENUE_STREAMS_ORDERED
-    .filter(s => data?.history.series.some(x => x.stream === s && x.points.length))
-    .map(s => ({ label: REVENUE_STREAM_LABEL[s], color: REVENUE_STREAM_COLOR[s] })), [data])
-
-  const rangeCaption = RANGES.find(r => r.key === range)?.caption ?? range
-  const stakerRangeCaption = RANGES.find(r => r.key === stakerRange)?.caption ?? stakerRange
+  useDocumentTitle('Revenue')
+  const { data: user } = useUserRevenueSummary()
+  const { data: protocol } = useRevenueDashboard('30d')
+  const viewRef = useRef<HTMLDivElement>(null)
+  const { mode, toggle } = useRiverFullscreen(viewRef)
+  const compact = useMediaQuery('(max-width: 720px), (max-height: 500px)')
 
   return (
     <div className="wrap">
       <div className="page-head">
-        <h1 className="page-title">Protocol Revenue</h1>
+        <h1 className="page-title">Revenue</h1>
       </div>
 
-      <div className="panel rev-hero">
-        <RevenueFlow />
-        <div className="ribbon rev-hero-ribbon">
-        {([
-          ['24H', data?.totals.day],
-          ['7D', data?.totals.week],
-          ['30D', data?.totals.month],
-          ['All time', data?.totals.allTime],
-        ] as const).map(([k, v]) => (
-          <div className="cell" key={k}>
-            <div className="k">{k}</div>
-            <div className="v">{v != null ? <Usd v={v} /> : '—'}</div>
-          </div>
-        ))}
-        </div>
-      </div>
-
-      {/* One timeframe for everything below it: history bars, breakdown, top payers. */}
-      <div className="rev-controls">
-        <div className="tabs" role="tablist" aria-label="Timeframe">
-          {RANGES.map(r => (
-            <button
-              key={r.key}
-              role="tab"
-              aria-selected={range === r.key}
-              className={range === r.key ? 'tab active' : 'tab'}
-              onClick={() => setQuery({ range: r.param })}
-            >
-              {r.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <SecTitle title="History" subtitle="protocol revenue by stream" />
-      <div className="pf-card">
-        {!data && <ChartSkeleton />}
-        {data && columns.length === 0 && <div className="rev-empty">No protocol revenue recorded in this range yet.</div>}
-        {data && columns.length > 0 && (
-          <>
-            <StackedColumnChart columns={columns} h={230} yFmt={v => F.usd(v)} />
-            <ChartLegend items={legendItems} />
-          </>
-        )}
-      </div>
-
-      <div className="rev-grid">
-        <div>
-          <SecTitle title="Breakdown" subtitle={rangeCaption} />
-          <div className="pf-card">
-            {!data && <ChartSkeleton />}
-            {data && shareSegments.length === 0 && <div className="rev-empty">No protocol revenue recorded in this range yet.</div>}
-            {data && shareSegments.length > 0 && (
-              <>
-                <ShareBar segments={shareSegments} />
-                <table className="tbl rev-breakdown-tbl">
-                  <thead>
-                    <tr><th>Stream</th><th className="num">Protocol Revenue</th><th className="num">Share</th></tr>
-                  </thead>
-                  <tbody>
-                    {data.breakdown.map(b => (
-                      <tr key={b.stream}>
-                        <td data-label="Stream">
-                          <span className="rev-dot" style={{ background: REVENUE_STREAM_COLOR[b.stream], marginRight: 8 }} />
-                          {REVENUE_STREAM_LABEL[b.stream]}
-                        </td>
-                        <td className="num mono" data-label="Protocol Revenue"><Usd v={b.usd} /></td>
-                        <td className="num mono" data-label="Share">{(b.share * 100).toFixed(1)}%</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </>
-            )}
-          </div>
-        </div>
-        <div>
-          <SecTitle title="Top payers" subtitle={`accounts the protocol earned the most from, ${rangeCaption}`} />
-          <div className="panel">
-            {!data && <ChartSkeleton />}
-            {data && data.topAccounts.length === 0 && <div className="rev-empty">No attributable payers in this range yet.</div>}
-            {data && data.topAccounts.length > 0 && (
-              <table className="tbl">
-                <thead>
-                  <tr><th>Account</th><th className="num">Protocol Revenue paid</th></tr>
-                </thead>
-                <tbody>
-                  {data.topAccounts.map(row => (
-                    <tr key={row.account.accountId}>
-                      <td data-label="Account"><AddrPill account={row.account} noCopy /></td>
-                      <td className="num mono" data-label="Protocol Revenue paid"><Usd v={row.usd} /></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Own timeframe on purpose: the full history is this section's story. */}
-      <div className="sec-title-row">
-        <SecTitle title="Staker distributions" subtitle={`trade-fee HDX routed to the staking pots, ${stakerRangeCaption}`} />
-        <div className="tabs" role="tablist" aria-label="Staker timeframe">
-          {RANGES.map(r => (
-            <button
-              key={r.key}
-              role="tab"
-              aria-selected={stakerRange === r.key}
-              className={stakerRange === r.key ? 'tab active' : 'tab'}
-              onClick={() => setStakerRange(r.key)}
-            >
-              {r.label}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="pf-card">
-        {!stakers && <ChartSkeleton />}
-        {stakers && stakerCols.length === 0 && <div className="rev-empty">No staker distributions in this range yet.</div>}
-        {stakers && stakerCols.length > 0 && (
-          <>
-            <div className="rev-stakers-head">
-              <div className="ribbon rev-stakers-ribbon">
-                {(stakerRange === 'all'
-                  ? ([
-                      ['all time', <Num v={stakers.allTime.hdx} suffix=" HDX" />],
-                      ['value at distribution', <Usd v={stakers.allTime.usd} />],
-                    ] as const)
-                  : ([
-                      [stakerRangeCaption, <Num v={stakers.totals.hdx} suffix=" HDX" />],
-                      ['value at distribution', <Usd v={stakers.totals.usd} />],
-                      ['all time', <Num v={stakers.allTime.hdx} suffix=" HDX" />],
-                      ['all-time value', <Usd v={stakers.allTime.usd} />],
-                    ] as const)
-                ).map(([k, v]) => (
-                  <div className="cell" key={k}>
-                    <div className="k">{k}</div>
-                    <div className="v">{v}</div>
-                  </div>
-                ))}
-              </div>
-              <span className="liq-toggle">
-                <button className={stakerUnit === 'hdx' ? 'active' : ''} onClick={() => setStakerUnit('hdx')}>HDX</button>
-                <button className={stakerUnit === 'usd' ? 'active' : ''} onClick={() => setStakerUnit('usd')}>USD</button>
-              </span>
-            </div>
-            <StackedColumnChart columns={stakerCols} h={200} yFmt={stakerUnit === 'usd' ? v => F.usd(v) : v => compactAmount(v)} />
-            <ChartLegend items={stakerLegend} />
-          </>
-        )}
-      </div>
-      <p className="rev-note">
-        Half of every Omnipool trade fee leaves the pool; the fee processor converts
-        it to HDX — the buyback — and hands 15% of the fee to the GIGAHDX yield pot,
-        25% to the voting-rewards pot and 5% to legacy staking (referrers take the
-        remaining 5%). Before 22 Jun 2026 the referrals converter and direct in-HDX
-        fee legs played the same role. Treasury incentive programmes paying into the
-        same pots are excluded — only fee-derived flows count. These amounts are the
-        stakers' share of the trade-fee stream above, not additional protocol revenue.
-      </p>
+      <RevenueRivers user={user} protocol={protocol} mode={mode} onToggleFullscreen={toggle} compact={compact} viewRef={viewRef} />
 
       <p className="rev-note">
-        Protocol revenue counts what the protocol earns from usage: trade fees, liquidations,
-        borrow interest, network fees and XCM execution fees. Returns on the treasury's own investments —
-        for example looped PRIME or BIL allocations — are not income from users and
-        are not included here.
+        User Revenue is what accounts earn — liquidity-provider fees, lending interest and incentives, farm
+        and staking rewards, yield-bearing token accrual and referrer commissions — net of what they pay
+        (borrow interest, exit fees, forfeited staking rewards), booked as it accrues. Protocol Revenue is
+        what the protocol earns from that same usage. The two are not additive: part of one trade fee is
+        user revenue and part protocol revenue, and protocol-owned liquidity counts on both sides, so they
+        are never summed here.
       </p>
     </div>
   )

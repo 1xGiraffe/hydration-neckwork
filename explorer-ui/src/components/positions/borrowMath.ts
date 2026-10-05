@@ -1,6 +1,7 @@
-import type { AssetRef, MmReserve, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMarketHistoryReserve, MoneyMarketPosition, ReserveYield } from '../../types'
+import type { AssetRef, MmReserve, MoneyMarketEarned, MoneyMarketEarnedCategory, MoneyMarketEarnedMarket, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMarketPosition, ReserveYield } from '../../types'
 import type { AreaSeries } from '../HdxCharts'
-import { sumPct } from './yieldFormat'
+import { sumPct, type YieldRow } from './yieldFormat'
+import { userRevenueColor } from '../revenueColors'
 
 // Pure arithmetic behind the Borrow tab — rates, health factors and history
 // series — kept apart from the markup so it is unit-testable. Display only:
@@ -237,22 +238,64 @@ export function claimedIncentivesUsd(market: MoneyMarketHistoryMarket | undefine
   return { usd, unpriced }
 }
 
-export interface InterestTotals { earnedUsd: number | null; paidUsd: number | null; earnedRaw?: string; paidRaw?: string; incomplete: boolean; unpriced: number }
+/** A reserve's (or market's) Earned and Interest paid, USD; null = not stated. */
+export interface InterestTotals { earnedUsd: number | null; paidUsd: number | null }
 
-/** A market's cumulative interest at the grid's end (the market's own totals). */
-export function marketInterest(market: MoneyMarketHistoryMarket | undefined): InterestTotals | null {
-  if (!market) return null
-  return { earnedUsd: market.interestEarnedUsd, paidUsd: market.interestPaidUsd, incomplete: false, unpriced: market.interestUnpriced }
+/**
+ * One market's slice of the account's earned read: undefined while unread, null
+ * when the read states nothing for this market (no fact — a real $0 once read).
+ */
+export function marketEarned(earned: MoneyMarketEarned | undefined, marketKey: string): MoneyMarketEarnedMarket | null | undefined {
+  if (!earned) return undefined
+  return earned.markets.find(m => m.marketKey === marketKey) ?? null
 }
 
 /**
- * One reserve's cumulative interest: the totals at the grid's last bucket, which
- * include what a closed reserve accrued after its last point.
+ * A market's per-reserve Earned / paid, answerable by either id a row names a
+ * reserve with — the aToken held (avDOT, GDOT) or the asset owed (DOT).
  */
-export function reserveInterest(reserve: MoneyMarketHistoryReserve | undefined): InterestTotals | null {
-  if (!reserve) return null
-  const t = reserve.interest
-  return { earnedUsd: t.interestEarnedUsd, paidUsd: t.interestPaidUsd, earnedRaw: t.interestEarned, paidRaw: t.interestPaid, incomplete: t.interestIncomplete, unpriced: 0 }
+export function reserveEarnedIndex(market: MoneyMarketEarnedMarket | null | undefined): Map<number, InterestTotals> {
+  const out = new Map<number, InterestTotals>()
+  for (const r of market?.reserves ?? []) {
+    const t = { earnedUsd: r.earnedUsd, paidUsd: r.paidUsd }
+    out.set(r.reserveAssetId, t)
+    if (r.aTokenAssetId != null) out.set(r.aTokenAssetId, t)
+  }
+  return out
+}
+
+export const EARNED_GROUPS: { key: Exclude<MoneyMarketEarnedCategory, 'paid'>; label: string; field: 'lendingUsd' | 'tokenYieldUsd' | 'poolFeesUsd' | 'otherUsd' }[] = [
+  { key: 'lending', label: 'Lending interest', field: 'lendingUsd' },
+  { key: 'token', label: 'Token yield', field: 'tokenYieldUsd' },
+  { key: 'poolFees', label: 'Pool fees', field: 'poolFeesUsd' },
+  { key: 'other', label: 'Other', field: 'otherUsd' },
+]
+
+/**
+ * The Earned hover's lines: the market's items grouped lending → token yield →
+ * pool fees → other, each group headed by its subtotal (`groupLabel`), each line
+ * naming the aToken it reached the account through. Values are USD in `pct`
+ * (the hover's value slot; the caller formats it as USD).
+ */
+export function earnedRows(market: MoneyMarketEarnedMarket, groupLabel: (label: string, usd: number) => string): YieldRow[] {
+  const rows: YieldRow[] = []
+  for (const g of EARNED_GROUPS) {
+    const items = market.items.filter(i => i.category === g.key)
+    if (!items.length) continue
+    const group = groupLabel(g.label, market[g.field])
+    items.forEach((i, n) => rows.push({ key: `${g.key}-${n}`, label: i.label, asset: i.asset, pct: i.usd, group, ...(i.via ? { note: `in ${i.via.symbol}` } : {}) }))
+  }
+  return rows
+}
+
+/**
+ * The Interest paid hover's lines: borrow interest per reserve owed, each marked in its
+ * User Revenue stream's colour — HOLLAR interest in HOLLAR's own, as on every User
+ * Revenue surface — drawn hollow, a cost.
+ */
+export function paidRows(market: MoneyMarketEarnedMarket): YieldRow[] {
+  return market.items.filter(i => i.category === 'paid')
+    .map((i, n) => ({ key: `paid-${n}`, label: i.label, asset: i.asset, pct: i.usd, dot: { color: userRevenueColor(i.stream), hollow: true } }))
 }
 
 export interface ReserveRowModel {
@@ -262,6 +305,7 @@ export interface ReserveRowModel {
   suppliedUsd: number | null
   debtUsd: number | null
   collateral: boolean
+  /** Earned / paid on this reserve (the earned read's per-reserve slice); null while unread. */
   interest: InterestTotals | null
   /** Held only in the past: its interest remains, its balance is gone. */
   closed: boolean
@@ -271,7 +315,12 @@ export interface ReserveRowModel {
 // one by the asset owed (DOT), while the history files a reserve under its
 // underlying and carries the aToken beside it — so a history reserve answers to
 // both ids, and a reserve is "closed" only when no current row claimed it.
-export function reserveRows(spec: BorrowCardSpec, market: MoneyMarketHistoryMarket | undefined): ReserveRowModel[] {
+export function reserveRows(spec: BorrowCardSpec, market: MoneyMarketHistoryMarket | undefined, earned?: Map<number, InterestTotals>): ReserveRowModel[] {
+  const interestOf = (ids: (number | undefined)[]): InterestTotals | null => {
+    if (!earned) return null
+    for (const id of ids) { const t = id != null ? earned.get(id) : undefined; if (t) return t }
+    return { earnedUsd: 0, paidUsd: 0 }
+  }
   type HistoryReserve = MoneyMarketHistoryMarket['reserves'][number]
   const byAsset = new Map<number, HistoryReserve>()
   for (const h of market?.reserves ?? []) {
@@ -285,12 +334,12 @@ export function reserveRows(spec: BorrowCardSpec, market: MoneyMarketHistoryMark
     return {
       asset: { assetId: r.assetId, iconAssetId: r.iconAssetId, iconAssetIds: r.iconAssetIds, symbol: r.symbol, name: null, decimals: r.decimals, parachainId: r.parachainId ?? null, origin: r.origin },
       supplied: r.supplied, debt: r.debt, suppliedUsd: r.suppliedUsd, debtUsd: r.debtUsd, collateral: r.collateral,
-      interest: reserveInterest(h), closed: false,
+      interest: interestOf([r.assetId, h?.asset.assetId, h?.aToken?.assetId]), closed: false,
     }
   })
   for (const h of market?.reserves ?? []) {
     if (claimed.has(h)) continue
-    rows.push({ asset: h.asset, supplied: '0', debt: '0', suppliedUsd: null, debtUsd: null, collateral: false, interest: reserveInterest(h), closed: true })
+    rows.push({ asset: h.asset, supplied: '0', debt: '0', suppliedUsd: null, debtUsd: null, collateral: false, interest: interestOf([h.asset.assetId, h.aToken?.assetId]), closed: true })
   }
   return rows
 }

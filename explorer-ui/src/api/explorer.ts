@@ -4,7 +4,7 @@ import type { MmMarketOption,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
   AccountsPage, AccountSort, DirectoryActivityCounts, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
-  RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, AssetPriceWindow, HollarDashboard, HollarWindowChart, HdxWindowChart, ChartWindowPayload, IceDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas, AssetLimitOrderBook, XcDestinationDetail, IntentOrderDetail,
+  RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, UserRevenueBreakdown, UserRevenueDashboard, UserRevenueFlowResponse, UserRevenueSummary, AssetPriceWindow, HollarDashboard, HollarWindowChart, HdxWindowChart, ChartWindowPayload, IceDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas, AssetLimitOrderBook, XcDestinationDetail, IntentOrderDetail,
   AssetLiquidity, PoolDetail, UniswapV3PoolDetail, UniswapV3PoolHistory, UniswapV3PoolLiquidity, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
@@ -13,7 +13,7 @@ import type { MmMarketOption,
   NotificationChannel, NotificationRule, NotificationRuleInput, NotificationRulePatch,
   NotificationsOverview, NotificationInboxPage, NotificationTelegramLink, NotificationLinkStatus,
   WebPushSubscriptionInput,
-  PositionScope, VolumeScope, VolumeHistory, ExplorerYields, OrderHistoryKind, OrderHistoryPage, PositionsPresence, LiquidityRewardsClaimed, LiquidityHistory, MoneyMarketHistory,
+  PositionScope, VolumeScope, VolumeHistory, ExplorerYields, OrderHistoryKind, OrderHistoryPage, PositionsPresence, LiquidityRewardsClaimed, LiquidityHistory, MoneyMarketHistory, MoneyMarketEarned,
 } from '../types'
 import { getSession, setSession } from '../session'
 // Live feeds stamp the pushed head onto their URLs (`h=`): the nginx
@@ -281,6 +281,11 @@ export const api = {
     getJson<CollectiveMotionsPage>(withQuery('/explorer/governance/motions', { body, offset, limit }), signal),
   governanceTips: (offset = 0, limit = 25, signal?: AbortSignal) =>
     getJson<TreasuryTipsPage>(withQuery('/explorer/governance/tips', { offset, limit }), signal),
+  // What this account / tag EARNED (User Revenue), per stream / pot / asset.
+  accountUserRevenue: (address: string, range: RevenueRange, signal?: AbortSignal) =>
+    getJson<UserRevenueBreakdown>(withQuery(`/explorer/address/${encodeURIComponent(address)}/user-revenue`, { range }), signal),
+  tagUserRevenue: (tagId: string, range: RevenueRange, signal?: AbortSignal) =>
+    getJson<UserRevenueBreakdown>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/user-revenue`, { range }), signal),
   tagRevenueBreakdown: (tagId: string, signal?: AbortSignal) =>
     getJson<RevenueBreakdown>(`/explorer/tag/${encodeURIComponent(tagId)}/revenue-breakdown`, signal),
   // Grouped mode of the votes tab: one row per referendum, members combined.
@@ -304,6 +309,9 @@ export const api = {
   hdxWindow: (chart: HdxWindowChart, fromTs: number, toTs: number, points: number, signal?: AbortSignal) =>
     getJson<ChartWindowPayload>(withQuery('/explorer/hdx/window', { chart, fromTs, toTs, points }), signal),
   revenue: (range: RevenueRange = '30d', signal?: AbortSignal) => getJson<RevenueDashboard>(withQuery('/explorer/revenue', { range }), signal),
+  userRevenueSummary: (signal?: AbortSignal) => getJson<UserRevenueSummary>('/explorer/revenue/users/summary', signal),
+  userRevenue: (range: RevenueRange = '30d', signal?: AbortSignal) => getJson<UserRevenueDashboard>(withQuery('/explorer/revenue/users', { range }), signal),
+  userRevenueFlow: (signal?: AbortSignal) => getJson<UserRevenueFlowResponse>('/explorer/revenue/user-flow', signal),
   // The staker-distributions section carries its own timeframe, so it reads its
   // own endpoint rather than the dashboard's.
   revenueStakers: (range: RevenueRange = 'all', signal?: AbortSignal) => getJson<StakerDistributions>(withQuery('/explorer/revenue/stakers', { range }), signal),
@@ -450,6 +458,8 @@ export const userApi = {
     authedJson<ExtrinsicSummary[]>('GET', withQuery(listTagPath(listId, tagId, '/extrinsics'), { offset, limit, from, to, ...filters }), undefined, signal),
   listTagEvents: (listId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, filters?: EventFilters, signal?: AbortSignal) =>
     authedJson<EventRow[]>('GET', withQuery(listTagPath(listId, tagId, '/events'), { offset, limit, from, to, ...filters }), undefined, signal),
+  listTagUserRevenue: (listId: string, tagId: string, range: RevenueRange, signal?: AbortSignal) =>
+    authedJson<UserRevenueBreakdown>('GET', withQuery(listTagPath(listId, tagId, '/user-revenue'), { range }), undefined, signal),
   listTagRevenueBreakdown: (listId: string, tagId: string, signal?: AbortSignal) =>
     authedJson<RevenueBreakdown>('GET', listTagPath(listId, tagId, '/revenue-breakdown'), undefined, signal),
   listTagVotes: (listId: string, tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
@@ -538,6 +548,8 @@ export const positionsApi = {
   // members are never blended, so a tag reads each member's own.
   moneyMarketHistory: (address: string, signal?: AbortSignal) =>
     getJson<MoneyMarketHistory>(`/explorer/address/${encodeURIComponent(address)}/money-market-history`, signal),
+  moneyMarketEarned: (address: string, signal?: AbortSignal) =>
+    getJson<MoneyMarketEarned>(`/explorer/address/${encodeURIComponent(address)}/money-market-earned`, signal),
   moneyMarketHistoryWindow: (address: string, fromBlock: number, toBlock: number, signal?: AbortSignal) =>
     getJson<MoneyMarketHistory>(withQuery(`/explorer/address/${encodeURIComponent(address)}/money-market-history`, { fromBlock, toBlock }), signal),
 }

@@ -2923,6 +2923,11 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
   /* Value sits on that same line, weighted like the card's headline figure. */
   .accounts-tbl tbody td[data-label="Value"] { order: 2; grid-column: 2; padding-top: 4px; padding-left: 0; font-size: 15px; font-weight: 600; color: var(--text-high); }
   .accounts-tbl tbody td[data-label="Value"]::before { display: none; }
+  /* User Revenue leads the card's facts, right under who and how much: the one
+     figure the directory is scanned for. Weighted between the headline value and
+     the plain lines; DOM order puts it ahead of the 12M chart sharing its order. */
+  .accounts-tbl tbody td[data-label="User Revenue"] { order: 3; padding-top: 6px; font-size: 14px; font-weight: 600; color: var(--text-high); }
+  .accounts-tbl tbody td[data-label="User Revenue"].ur-neg { color: var(--red); }
   /* Full-bleed chart under the two of them, its label a caption above it. */
   .accounts-tbl tbody td[data-label="12M"] { order: 3; text-align: left; padding: 8px 14px 2px; }
   .accounts-tbl tbody td[data-label="12M"]::before { float: none; display: block; margin: 0 0 4px; line-height: 1.2; }
@@ -3556,7 +3561,6 @@ tr.row-muted td { opacity: .55; }
 .rev-hero-ribbon { display: flex; justify-content: flex-start; margin: 0; padding: 14px 8px; border-top: 1px solid var(--separator); }
 .rev-hero-ribbon .cell { align-items: flex-start; }
 .rev-river { position: relative; height: 300px; padding: 0; }
-.rev-river.rev-fullscreen, .rev-river:fullscreen { height: 100vh; border-radius: 0; border: 0; background: var(--bg-elev); }
 .rev-current { position: absolute; inset: 0; pointer-events: none;
   background:
     radial-gradient(120% 90% at 12% 50%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 55%),
@@ -3626,14 +3630,35 @@ a.rev-pill-label:hover { color: var(--accent); }
 .rev-river-foot { position: absolute; left: 0; right: 0; bottom: 0; z-index: 3; display: flex; gap: 14px;
   align-items: center; justify-content: space-between; padding: 8px 14px; font-size: 11px; color: var(--text-low);
   background: linear-gradient(180deg, transparent, color-mix(in srgb, var(--bg-elev) 82%, transparent) 55%); }
-.rev-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: flex-start; }
+/* Each river's legend: a strip under its stage (RiverLegend), on every width. */
+.rev-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; justify-content: flex-start; padding: 8px 14px;
+  font-size: 11px; color: var(--text-low); border-top: 1px solid var(--separator); }
 .rev-legend-item { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-.rev-legend-item .rev-dot { width: 6px; height: 6px; }
+.rev-legend-item .rev-dot { width: 7px; height: 7px; }
+/* A cost is drawn HOLLOW in its own stream's colour — sign is a treatment, not a hue. */
+.rev-dot.rev-dot-out { background: transparent; box-shadow: inset 0 0 0 2px var(--tint); }
+.rev-legend-item .rev-dot.rev-dot-out { box-shadow: inset 0 0 0 1.5px var(--tint); }
 @media (max-width: 720px) {
   .rev-river { height: 420px; }
-  .rev-legend { display: none; }
   .rev-river-foot { justify-content: center; }
 }
+
+/* The user river (UserRevenueFlow.tsx) is SIGNED: incomes drift in like the
+   protocol river's, costs leave the counter (.rev-out) and drift to the "paid"
+   sink on the right (top on phones) — each in its own stream's colour, drawn hollow. */
+.ur-river .rev-particle.rev-out { left: 172px; }
+.rev-mote.rev-out { width: max(var(--size), 8px); height: max(var(--size), 8px); background: transparent; opacity: 1;
+  box-shadow: inset 0 0 0 2px var(--tint), 0 0 8px color-mix(in srgb, var(--tint) 45%, transparent); }
+.rev-pill.rev-out { border: 1px dashed var(--tint); background: color-mix(in srgb, var(--bg-elev2) 70%, transparent); }
+.rev-vertical.ur-river .rev-particle.rev-out { top: auto; bottom: 150px; left: var(--lane); }
+.ur-sink { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); z-index: 4; text-align: right;
+  padding: 8px 12px; border-radius: 12px; border: 1px dashed var(--text-lowest);
+  background: color-mix(in srgb, var(--bg-elev2) 60%, transparent); }
+.ur-sink-k { display: block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-low); }
+.ur-sink-v { font-size: 14px; font-weight: 600; color: var(--red); }
+.rev-vertical .ur-sink { top: 12px; right: 50%; transform: translateX(50%); text-align: center; }
+.ur-neg, .acct-bal.subtle .amt.ur-neg { color: var(--red); }
+.ur-foot-note { color: var(--text-low); }
 
 /* Reduced-motion ledger: the same incomes as calm rows. */
 .rev-ledger-mode { display: flex; flex-direction: column; height: auto; min-height: 220px; }
@@ -3652,6 +3677,8 @@ a.rev-pill-label:hover { color: var(--accent); }
    half-width tracks and must fit them instead of sliding under each other. */
 .rev-grid .tbl { min-width: 0; }
 @media (max-width: 920px) { .rev-grid { grid-template-columns: 1fr; } }
+/* /revenue/users: the four-column breakdown takes the wider track beside the two-column top earners. */
+@media (min-width: 921px) { .rev-grid.ur-breakdown-grid { grid-template-columns: 3fr 2fr; } }
 /* Page-level timeframe row: governs history, breakdown and top payers alike. */
 .rev-controls { display: flex; justify-content: flex-end; margin: 4px 0 -30px; position: relative; z-index: 1; }
 @media (max-width: 720px) {
@@ -3661,6 +3688,12 @@ a.rev-pill-label:hover { color: var(--accent); }
      button; exempt these selectors from it (.sec-title-row hosts the staker
      section's timeframe tabs). */
   .rev-controls .tabs, .sec-title-row .tabs { -webkit-mask-image: none; mask-image: none; }
+}
+/* The sections' own window (UTC days of the account facts), beside the tabs that pick it. */
+.rev-range-note { order: -1; align-self: center; margin-right: 10px; font-size: 11px; color: var(--text-low); white-space: nowrap; }
+@media (max-width: 720px) {
+  .rev-controls { flex-wrap: wrap; row-gap: 4px; }
+  .rev-range-note { order: 1; flex-basis: 100%; margin: 0; white-space: normal; }
 }
 .rev-breakdown-tbl { margin-top: 12px; }
 
@@ -4229,4 +4262,70 @@ a.orc-consumer:hover .orc-asset span:last-child { text-decoration: underline; }
   .tbl.orc-tbl tbody td[data-label] .orc-consumers, .tbl.orc-tbl tbody td[data-label] .orc-pool { justify-content: flex-end; }
   .tbl.orc-tbl tbody td[data-label="Feed"], .tbl.orc-tbl tbody td[data-label="Asset"], .tbl.orc-tbl tbody td[data-label="Source"]:first-child { text-align: left; }
   .tbl.orc-tbl tbody td[data-label="Feed"]::before, .tbl.orc-tbl tbody td[data-label="Asset"]::before { display: none; }
+}
+/* /revenue/protocol: the ribbon stands alone (the river lives on the overview). */
+.rev-hero-ribbon.rev-hero-ribbon-solo { border-top: 0; }
+/* /revenue overview: one section per river — a title row with the link to its
+   breakdown page, the river + ribbon panel, and the river's own as-of line. */
+.rev-river-head { align-items: baseline; }
+.rev-more { margin-left: auto; font-size: 12px; color: var(--text-low); white-space: nowrap; }
+.rev-more:hover { color: var(--accent); }
+.rev-asof { padding: 0 16px 12px; font-size: 11.5px; color: var(--text-low); }
+/* /revenue full screen (Revenue.tsx RevenueRivers, useRiverFullscreen.ts): ONE
+   view, the two rivers stacked as two equal bands at every aspect ratio, and
+   nothing but the animation — no titles, legends, window figures or as-of
+   lines. What stays is overlaid: a one-word band label, the live counter
+   (small, top-left) and the exit control. Native element fullscreen sizes the
+   view; where the browser has none (iPhone) .rev-duo-pseudo is a fixed layer. */
+.rev-duo-fs { box-sizing: border-box; width: 100%; height: 100%; display: grid; overflow: hidden;
+  grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+  background: var(--bg-elev); color: var(--text-high); }
+.rev-duo-pseudo { position: fixed; inset: 0; z-index: 1000; height: 100dvh; }
+html.rev-fs-lock, html.rev-fs-lock body { overflow: hidden; }
+/* The page-in animation's retained transform would make .wrap the fixed layer's containing block. */
+html.rev-fs-lock #view .wrap { animation: none; }
+.rev-band-label { display: none; }
+.rev-duo-fs .rev-duo-cell { display: flex; min-width: 0; min-height: 0; }
+.rev-duo-fs .rev-duo-cell + .rev-duo-cell { border-top: 1px solid var(--separator); }
+.rev-duo-fs .rev-river-head, .rev-duo-fs .rev-hero-ribbon, .rev-duo-fs .rev-asof,
+.rev-duo-fs .rev-legend, .rev-duo-fs .rev-river-foot { display: none; }
+.rev-duo-fs .rev-hero { position: relative; flex: 1; min-height: 0; margin: 0; display: flex; flex-direction: column;
+  border: 0; border-radius: 0; background: transparent; }
+.rev-duo-fs .rev-river { flex: 1; min-height: 0; height: auto; }
+.rev-duo-fs .rev-band-label { display: block; position: absolute; top: 12px; left: 16px; z-index: 5; pointer-events: none;
+  font-family: 'GeistMono'; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.rev-duo-fs .rev-counter { top: 34px; left: 14px; transform: none; padding: 6px 10px; border-radius: 10px; }
+.rev-duo-fs .rev-counter.pulse-a { animation: revPulseFs 520ms var(--ease-out-soft); }
+.rev-duo-fs .rev-counter.pulse-b { animation: revPulseFsB 520ms var(--ease-out-soft); }
+@keyframes revPulseFs  { 30% { transform: scale(1.045); } }
+@keyframes revPulseFsB { 30% { transform: scale(1.045); } }
+.rev-duo-fs .rev-fullscreen .rev-counter-num { font-size: 20px; }
+.rev-duo-fs .rev-counter-sub { font-size: 10px; }
+.rev-duo-fs .ur-sink { padding: 5px 9px; }
+.rev-duo-fs .rev-ledger-mode { overflow-y: auto; padding-top: 30px; }
+.rev-duo-fs .rev-ledger-mode .rev-counter { position: static; }
+/* /revenue/users and the User Revenue tab. */
+.ur-tag { display: inline-block; margin-left: 8px; padding: 0 6px; border-radius: 6px; font-size: 10.5px; line-height: 17px;
+  color: var(--text-medium); background: color-mix(in srgb, var(--text-low) 12%, transparent); vertical-align: 1px; }
+.ur-tag-muted { color: var(--text-low); }
+.ur-neg-cell { color: var(--text-medium); }
+.ur-total-row td { font-weight: 600; border-top: 1px solid var(--separator); }
+.ur-class-row td { font-weight: 600; }
+.ur-unmeasured { margin: 0; padding: 0 0 0 18px; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--text-medium); line-height: 1.5; }
+.ur-unmeasured strong { color: var(--text-high); font-weight: 600; }
+.ur-table-card .tbl { min-width: 0; }
+.ur-via { display: block; font-size: 11px; color: var(--text-low); margin-top: 2px; }
+.ur-tab-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.ur-tab-head .tabs { margin: 0 0 0 auto; }
+.ur-kpis { display: flex; flex-wrap: wrap; gap: 6px 28px; }
+.ur-kpis .cell .k { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-low); }
+.ur-kpis .cell .v { font-size: 16px; font-weight: 600; }
+@media (max-width: 720px) {
+  .ur-tab-head .tabs { margin: 0; -webkit-mask-image: none; mask-image: none; }
+}
+/* Phone cards: a stream row drops its empty earned/paid line, a pot row keeps its net only. */
+@media (max-width: 720px) {
+  .ur-breakdown-tbl td.ur-empty, .ur-breakdown-tbl td.ur-sub { display: none; }
+  .ur-breakdown-tbl .revbd-other td:empty { display: none; }
 }

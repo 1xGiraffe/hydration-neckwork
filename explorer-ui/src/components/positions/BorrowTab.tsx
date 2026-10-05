@@ -2,14 +2,15 @@ import { useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { F, Amt, Usd, AssetIcon, AddrPill, healthFactorDisplay } from '../ui'
 import { Link, paths } from '../../router'
-import { useMoneyMarketHistories, useMoneyMarketHistory, useYields } from '../../hooks/usePositions'
-import type { AccountRef, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMarketPosition, ReserveYield } from '../../types'
+import { useMoneyMarketEarned, useMoneyMarketHistories, useMoneyMarketHistory, useYields } from '../../hooks/usePositions'
+import type { AccountRef, MoneyMarketEarned, MoneyMarketEarnedMarket, MoneyMarketHistory, MoneyMarketHistoryMarket, MoneyMarketPosition, ReserveYield } from '../../types'
 import { YieldHover } from './YieldHover'
+import { useRevenueHollarColor } from '../../hooks/useRevenueHollarColor'
 import { yieldComponentRow, type YieldRow } from './yieldFormat'
 import { BorrowHistoryCharts } from './BorrowHistory'
 import { defisimSupportsMarket, defisimUrl } from '../../utils/defisim'
-import { borrowCards, claimedIncentivesUsd, rawHeld, marketInterest, netApy, reserveBorrowPct, reserveRows, reserveSupplyPct } from './borrowMath'
-import type { BorrowCardSpec, InterestTotals } from './borrowMath'
+import { borrowCards, claimedIncentivesUsd, earnedRows, marketEarned, netApy, paidRows, rawHeld, reserveBorrowPct, reserveEarnedIndex, reserveRows, reserveSupplyPct } from './borrowMath'
+import type { BorrowCardSpec } from './borrowMath'
 
 // One holder's money-market footprint: the address its history is read by, the
 // account pill a tag names it with, and its current per-market positions (empty
@@ -30,6 +31,8 @@ export interface BorrowArea {
 // read per account and only for an open card — except an area with no current
 // market, whose cards come from its history and so read it up front.
 export function BorrowTab({ areas, showOwner }: { areas: BorrowArea[]; showOwner?: boolean }) {
+  // The Interest paid hover marks HOLLAR interest in HOLLAR's resolved colour (paidRows).
+  useRevenueHollarColor()
   const yields = useYields(areas.length > 0)
   const historyOnly = areas.map(a => !a.markets.length && !!a.address)
   const derived = useMoneyMarketHistories(areas.map((a, i) => (historyOnly[i] ? a.address : null)))
@@ -108,15 +111,29 @@ function DisclosureRule({ open, onToggle, controls, meta, sub, children }: {
 // market is named after).
 const MARKET_ICON_ASSET: Record<string, number> = { gigahdx: 67, bil: 55 }
 
-const INTEREST_TITLE = 'Cumulative interest valued at each bucket\'s own closing price. Principal is taken as held through each bucket, so a supply, borrow or repay inside a bucket starts accruing from the next one.'
+// Earned and Interest paid are the User Revenue facts of this market (the tab's
+// and the header stat's own, sliced per market): what reached the account
+// through an aToken it supplied here, plus the market's direct interest.
+const EARNED_TITLE = 'Everything the positions supplied to this market earned, as User Revenue books it: the market\'s own lending interest, the yield of the supplied tokens themselves (the vDOT inside avDOT; the vDOT, aDOT interest and pool fees inside GDOT) and the fees of supplied pool shares. Net: a rate\'s give-back, and the accrual a borrowed yield-bearing token owes, count against it. Incentives are stated apart.'
+const PAID_TITLE = 'Borrow interest on this market\'s debt, accrued hour by hour on each reserve\'s own index — the User Revenue tab\'s "HOLLAR interest" and "Borrow interest" for this market.'
+
+function earnedBasis(e: MoneyMarketEarned | undefined, h: MoneyMarketHistory | undefined): string {
+  if (!e) return ''
+  const from = h?.reserveHistoryFrom?.time ? ` (${h.reserveHistoryFrom.time.slice(0, 10)})` : ''
+  const asOf = e.asOf ? ` through ${e.asOf.slice(0, 16).replace('T', ' ')} UTC` : ''
+  // The header's holder-class rule (userRevenueHolders.ts): User Revenue counts USER accounts only, so a
+  // protocol or custody account's card states its own class's facts and says which class and why.
+  const cls = e.holderClass === 'protocol'
+    ? ' This is a protocol account (the protocol\'s own balance sheet: the Treasury, its pots, pallet accounts), so these figures are its own protocol-class facts — User Revenue counts only what user accounts earn.'
+    : e.holderClass === 'unattributed'
+      ? ' This is a custody account (a pool, contract, bridge or another chain\'s sovereign) whose income belongs to the users behind it, so these figures are unattributed-class facts — User Revenue counts them on those users where they can be resolved, never here.'
+      : ''
+  const partial = e.complete ? '' : ' Partial: not every month is published yet.'
+  return ` All time since the money market's coverage start, block ${F.int(e.fromBlock)}${from},${asOf}; each hour at its own closing price.${cls}${partial}`
+}
+
 const UNCLAIMED_TITLE = 'Unclaimed: what claiming this market\'s lending incentives now would pay (the money market\'s own getAllUserRewards), at current prices. Already counted in the account value, never in Supplied.'
 const CLAIMED_TITLE = 'Claimed: every RewardsClaimed of this market\'s incentive programmes, each valued at its own event-time price.'
-
-function sinceText(h: MoneyMarketHistory | undefined): string {
-  const f = h?.reserveHistoryFrom
-  if (!f) return ''
-  return f.time ? ` Since ${f.time.slice(0, 10)}.` : ` Since block ${F.int(f.blockHeight)}.`
-}
 
 function currentLtvPct(mm: MoneyMarketPosition): number {
   const collateral = Number(mm.totalCollateralBase)
@@ -150,6 +167,7 @@ function Stat({ k, title, children, className }: { k: string; title?: string; ch
 }
 
 type HistState = { data: MoneyMarketHistory | undefined; market: MoneyMarketHistoryMarket | undefined; loading: boolean; requested: boolean; error: boolean }
+type EarnedState = { data: MoneyMarketEarned | undefined; market: MoneyMarketEarnedMarket | null | undefined; loading: boolean; requested: boolean; error: boolean }
 
 // A history-backed figure before its history is read: a dash that says why,
 // or an ellipsis while it loads.
@@ -177,6 +195,11 @@ function BorrowCard({ spec, area, yields, yieldsLoading, owner, defaultOpen, def
     data: q.data, market: q.data?.markets.find(m => m.marketKey === spec.marketKey),
     loading: q.isLoading && q.fetchStatus !== 'idle', requested: !!area.address, error: q.isError,
   }
+  const eq = useMoneyMarketEarned(area.address || null)
+  const earned: EarnedState = {
+    data: eq.data, market: marketEarned(eq.data, spec.marketKey),
+    loading: eq.isLoading && eq.fetchStatus !== 'idle', requested: !!area.address, error: eq.isError,
+  }
   const mm = spec.current
   const isPrimary = spec.role === 'primary'
   const iconAsset = MARKET_ICON_ASSET[spec.marketKey]
@@ -195,7 +218,7 @@ function BorrowCard({ spec, area, yields, yieldsLoading, owner, defaultOpen, def
           {isPrimary ? 'primary' : <>{iconAsset != null && <AssetIcon assetId={iconAsset} symbol={spec.label} size={14} />} {spec.label}</>} · lend &amp; borrow
         </span>
         {spec.stakingBacked && <span className="mm-title-note bw-staking" title="Collateral is staked HDX — counted once, in the wallet balance">staked-HDX collateral</span>}
-        {!!mm?.unstatedCollateral?.length && <span className="mm-title-note bw-unstated" title="The explorer reconstructs supplied reserves from the money market's own logs. This collateral is not in that reconstruction yet (it reached the account before the explorer's anchor block, outside its log coverage) or has no price here, so Lent and the Value take the market's own collateral figure for it.">{mm.unstatedCollateral.map(a => a.symbol).join(', ')} collateral not stated per reserve</span>}
+        {!!mm?.unstatedCollateral?.length && <span className="mm-title-note bw-unstated" title="The explorer reconstructs supplied reserves from the money market's own logs. This collateral is not in that reconstruction yet (it reached the account before the explorer's anchor block, outside its log coverage) or has no price here, so Supplied and the Value take the market's own collateral figure for it.">{mm.unstatedCollateral.map(a => a.symbol).join(', ')} collateral not stated per reserve</span>}
         <span className="bw-head-end">
           {mm && hf
             ? <span className="bw-hf" title={(mm.memberCount ?? 0) > 1 ? 'Lowest member health factor' : 'Health factor (the chain\'s own figure)'}>
@@ -207,13 +230,13 @@ function BorrowCard({ spec, area, yields, yieldsLoading, owner, defaultOpen, def
       </header>
       <div className="mm-card bw-body">
         {mm && <BorrowRiskBar mm={mm} />}
-        <BorrowKpis mm={mm} yields={yields} yieldsLoading={yieldsLoading} hist={hist} />
+        <BorrowKpis mm={mm} yields={yields} yieldsLoading={yieldsLoading} hist={hist} earned={earned} />
         <DisclosureRule open={open} onToggle={() => setOpen(o => !o)} controls={detailsId} meta={open ? undefined : detailsMeta(spec, hist)}>
           {open ? 'Hide' : 'Show'} {area.address ? 'details & history' : 'reserves'}
         </DisclosureRule>
         {open && (
           <div id={detailsId} className="bw-details">
-            <BorrowReserves spec={spec} yields={yields} yieldsLoading={yieldsLoading} hist={hist} />
+            <BorrowReserves spec={spec} yields={yields} yieldsLoading={yieldsLoading} hist={hist} earned={earned} />
             {area.address && (
               <div className="bw-hist-body">
                 {hist.loading ? <div className="bw-hist-loading muted" aria-busy="true">Loading history…</div>
@@ -243,19 +266,56 @@ function detailsMeta(spec: BorrowCardSpec, hist: HistState): string {
   return parts.join(' · ')
 }
 
-function usdOrPending(h: HistState, v: number | null | undefined, unpriced = 0): ReactNode {
-  const p = pending(h)
-  if (p) return p
-  return <><Usd v={v} />{unpriced > 0 && <span className="bw-unpriced" title={`${unpriced} reserve${unpriced === 1 ? '' : 's'} without a price left out`}> +{unpriced}?</span>}</>
+// An earned-read figure before it is read: an ellipsis while it loads, a dash
+// that says why otherwise (no account behind the card, or a failed read).
+function earnedPending(e: EarnedState): ReactNode | null {
+  if (e.loading) return <span className="muted">…</span>
+  if (!e.requested) return <span className="muted" title="No account to read">—</span>
+  if (e.error || !e.data) return <span className="muted" title="Could not be read">—</span>
+  return null
 }
 
-function BorrowKpis({ mm, yields, yieldsLoading, hist }: { mm: MoneyMarketPosition | null; yields: Record<string, ReserveYield> | undefined; yieldsLoading: boolean; hist: HistState }) {
-  const interest: InterestTotals | null = marketInterest(hist.market)
+// Unpriced hourly amounts are counted per side: the borrow lines' own on Interest paid, the rest on Earned.
+function earnedMarks(e: EarnedState, side: 'earned' | 'paid'): ReactNode {
+  const paidUnpriced = (e.market?.items ?? []).filter(i => i.category === 'paid').reduce((n, i) => n + i.unpriced, 0)
+  const unpriced = side === 'paid' ? paidUnpriced : (e.market?.unpriced ?? 0) - paidUnpriced
+  return <>
+    {!e.data?.complete && <span className="bw-unpriced" title="Partial: not every month of the account facts is published yet">*</span>}
+    {unpriced > 0 && <span className="bw-unpriced" title={`${unpriced} hourly amount${unpriced === 1 ? '' : 's'} without a price left out, as on the User Revenue tab`}> +{unpriced}?</span>}
+  </>
+}
+
+/** Earned with its breakdown on hover: lending interest, token yield, pool fees, other — each line by what earned it. */
+function EarnedValue({ e }: { e: EarnedState }) {
+  const p = earnedPending(e)
+  if (p) return p
+  const m = e.market
+  if (!m) return <Usd v={0} />
+  const rows = earnedRows(m, (label, usd) => `${label} · ${F.usd(usd)}`)
+  return <>
+    <YieldHover total={m.earnedUsd} rows={rows} format={F.usd} title="Earned in this market"
+      note="Net, from the User Revenue facts: each line is what earned it, “in” the supplied aToken it reached the account through." />
+    {earnedMarks(e, 'earned')}
+  </>
+}
+
+function PaidValue({ e }: { e: EarnedState }) {
+  const p = earnedPending(e)
+  if (p) return p
+  const m = e.market
+  if (!m) return <Usd v={0} />
+  const rows = paidRows(m)
+  return <>{rows.length > 1
+    ? <YieldHover total={m.paidUsd} rows={rows} format={F.usd} title="Interest paid in this market" />
+    : <Usd v={m.paidUsd} />}{earnedMarks(e, 'paid')}</>
+}
+
+function BorrowKpis({ mm, yields, yieldsLoading, hist, earned }: { mm: MoneyMarketPosition | null; yields: Record<string, ReserveYield> | undefined; yieldsLoading: boolean; hist: HistState; earned: EarnedState }) {
   const claimed = claimedIncentivesUsd(hist.market)
   const rewards = (mm?.unclaimedRewards ?? []).filter(r => rawHeld(r.claimable))
   const pricedRewards = rewards.filter(r => r.claimableUsd != null)
   const unclaimedUsd = pricedRewards.reduce((s, r) => s + (r.claimableUsd ?? 0), 0)
-  const since = sinceText(hist.data)
+  const basis = earnedBasis(earned.data, hist.data)
   const supplyUsd = mm ? Number(mm.totalSuppliedBase ?? mm.totalCollateralBase) / 1e8 : null
   const debtUsd = mm ? Number(mm.totalDebtBase) / 1e8 : null
   const apy = mm ? netApy(mm.reserves ?? [], yields) : null
@@ -278,8 +338,8 @@ function BorrowKpis({ mm, yields, yieldsLoading, hist }: { mm: MoneyMarketPositi
                 note="Each part is weighted by the reserve's current USD and divided by net (supplied − borrowed)." />}
         </Stat>
       </>}
-      <Stat k="Interest earned" title={INTEREST_TITLE + since} className="bw-kpi-earned">{usdOrPending(hist, interest?.earnedUsd, interest?.unpriced)}</Stat>
-      <Stat k="Interest paid" title={INTEREST_TITLE + since} className="bw-kpi-paid">{usdOrPending(hist, interest?.paidUsd)}</Stat>
+      <Stat k="Earned" title={EARNED_TITLE + basis} className="bw-kpi-earned"><EarnedValue e={earned} /></Stat>
+      <Stat k="Interest paid" title={PAID_TITLE + basis} className="bw-kpi-paid"><PaidValue e={earned} /></Stat>
       <Stat k="Incentives" title={`${CLAIMED_TITLE} ${UNCLAIMED_TITLE}`} className="bw-kpi-inc">
         <span className="bw-inc">
           <span className="bw-inc-part"><span className="bw-inc-k">claimed</span>{pending(hist) ?? (claimed ? <><Usd v={claimed.usd} />{claimed.unpriced > 0 && <span className="bw-unpriced" title={`${claimed.unpriced} claim${claimed.unpriced === 1 ? '' : 's'} without a price left out`}> +{claimed.unpriced}?</span>}</> : '—')}</span>
@@ -323,10 +383,10 @@ function RateCell({ y, side, loading }: { y: ReserveYield | undefined; side: 'su
 
 // Current reserves first; the ones held only in the past wait behind a toggle
 // that always starts closed.
-function BorrowReserves({ spec, yields, yieldsLoading, hist }: { spec: BorrowCardSpec; yields: Record<string, ReserveYield> | undefined; yieldsLoading: boolean; hist: HistState }) {
+function BorrowReserves({ spec, yields, yieldsLoading, hist, earned }: { spec: BorrowCardSpec; yields: Record<string, ReserveYield> | undefined; yieldsLoading: boolean; hist: HistState; earned: EarnedState }) {
   const [showClosed, setShowClosed] = useState(false)
   const closedId = useId()
-  const all = reserveRows(spec, hist.market)
+  const all = reserveRows(spec, hist.market, earned.data ? reserveEarnedIndex(earned.market) : undefined)
   if (!all.length) return null
   const closedCount = all.filter(r => r.closed).length
   const rows = all.filter(r => !r.closed || showClosed)
@@ -343,7 +403,7 @@ function BorrowReserves({ spec, yields, yieldsLoading, hist }: { spec: BorrowCar
               <th>Asset</th>
               {anySupply && <><th className="r">Supplied</th><th className="r">Supply APY</th><th>Collateral</th></>}
               {anyDebt && <><th className="r">Borrowed</th><th className="r">Borrow APY</th></>}
-              {anyInterest && <th className="r" title={INTEREST_TITLE + sinceText(hist.data)}>Earned / Paid</th>}
+              {anyInterest && <th className="r" title={`Per reserve: ${EARNED_TITLE}${earnedBasis(earned.data, hist.data)} Paid: borrow interest on the reserve's debt.`}>Earned / Paid</th>}
             </tr>
           </thead>
           <tbody>
@@ -370,12 +430,11 @@ function BorrowReserves({ spec, yields, yieldsLoading, hist }: { spec: BorrowCar
                   </>}
                   {anyInterest && (
                     <td data-label="Earned / Paid" className="r mono bw-interest"
-                      title={r.interest ? `Earned ${F.exact(r.interest.earnedRaw ?? null, r.asset.decimals)} ${r.asset.symbol} · paid ${F.exact(r.interest.paidRaw ?? null, r.asset.decimals)} ${r.asset.symbol}${r.interest.incomplete ? ' — some buckets could not be stated; a lower bound' : ''}` : undefined}>
+                      title={r.interest ? `Earned ${F.usd(r.interest.earnedUsd)} · paid ${F.usd(r.interest.paidUsd)}` : undefined}>
                       {r.interest ? <>
                         <span className={r.interest.earnedUsd ? 'bw-earned' : 'muted'}><Usd v={r.interest.earnedUsd} /></span>
                         <span className="muted"> / </span>
                         <span className={r.interest.paidUsd ? 'bw-paid' : 'muted'}><Usd v={r.interest.paidUsd} /></span>
-                        {r.interest.incomplete && <span className="bw-unpriced">*</span>}
                       </> : '—'}
                     </td>
                   )}

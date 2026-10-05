@@ -13,6 +13,7 @@ import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
+import { UserRevenueTab } from '../components/UserRevenueTab'
 import { moneyMarketDebtUsd, profileTabs, resolveProfileView, ProfileStats, PortfolioChart, VolumeSection } from '../components/AccountSections'
 import { SectionBoundary } from '../components/SectionBoundary'
 import { OrdersTab } from '../components/positions/OrdersTab'
@@ -147,7 +148,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
           const tagHistoryBlocks = data.portfolioBlocks && data.portfolioBlocks.length === portfolioSeries.length ? data.portfolioBlocks : undefined
           const debtUsd = moneyMarketDebtUsd(mmList)
           const borrowAreas = tagBorrowAreas(data.moneyMarketByAccount, mmList)
-          const tabs = profileTabs(balances.length, { orders: activeDcas.length + limitOrders.length, liquidity: liquidityPositions.length, borrow: borrowAreas.reduce((n, a) => n + a.markets.length, 0), presence: presence.data, presenceLoading: presence.isLoading, requestedView: view }, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
+          const tabs = profileTabs(balances.length, { orders: activeDcas.length + limitOrders.length, liquidity: liquidityPositions.length, borrow: borrowAreas.reduce((n, a) => n + a.markets.length, 0), presence: presence.data, presenceLoading: presence.isLoading, requestedView: view }, activityTotal.data, votesTotal.data?.total ?? undefined, undefined, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd, data.userRevenueUsd)
           const activeView = resolveProfileView(view, tabs)
           return (
             <>
@@ -168,7 +169,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
                   <div className="tag">{data.name} <span className="em" style={{ color: data.color }}>· tag</span></div>
                   <div className="full"><span className="muted">{members.length} accounts</span></div>
                 </div>
-                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} valueUsd={data.portfolioUsd - debtUsd} exHdxValueUsd={data.portfolioExHdxUsd == null ? null : data.portfolioExHdxUsd - debtUsd} moneyMarket={mmList} farmRewards={data.farmRewards ?? null} moneyMarketRewards={data.moneyMarketRewards ?? null} balances={balances} />
+                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} userRevenueUsd={data.userRevenueUsd} valueUsd={data.portfolioUsd - debtUsd} exHdxValueUsd={data.portfolioExHdxUsd == null ? null : data.portfolioExHdxUsd - debtUsd} moneyMarket={mmList} farmRewards={data.farmRewards ?? null} moneyMarketRewards={data.moneyMarketRewards ?? null} balances={balances} />
               </div>
 
               <DetailTabs tabs={tabs} active={activeView} onChange={k => setQuery({ view: k === 'overview' ? null : k })} />
@@ -252,6 +253,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
                 {activeView === 'votes' && <VotesTab scope={{ kind: 'tag', tagId }} />}
 
                 {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'tag', tagId }} />}
+                {activeView === 'user-revenue' && <UserRevenueTab scope={{ kind: 'tag', tagId }} />}
               </SectionBoundary>
             </>
           )

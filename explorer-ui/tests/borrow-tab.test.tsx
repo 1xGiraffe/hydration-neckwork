@@ -3,8 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BorrowTab } from '../src/components/positions/BorrowTab'
 import { BorrowHistoryCharts } from '../src/components/positions/BorrowHistory'
-import { HF_CAP, borrowCards, exposureLines, healthFactorLines, marketInterest, marketSeries, netApy, parseHealthFactor, reserveBorrowPct, reserveInterest, reserveRows, reserveSupplyPct, windowedMarketSeries } from '../src/components/positions/borrowMath'
-import { MM_DIP, mockMoneyMarketHistory, mockMoneyMarketYields } from './fixtures/positionsMock'
+import { HF_CAP, borrowCards, earnedRows, exposureLines, healthFactorLines, marketEarned, marketSeries, netApy, paidRows, parseHealthFactor, reserveBorrowPct, reserveEarnedIndex, reserveRows, reserveSupplyPct, windowedMarketSeries } from '../src/components/positions/borrowMath'
+import { MM_DIP, mockMoneyMarketEarned, mockMoneyMarketHistory, mockMoneyMarketYields } from './fixtures/positionsMock'
 import type { MmReserve, MoneyMarketHistoryMarket, MoneyMarketHistoryReserve, MoneyMarketPosition, ReserveYield } from '../src/types'
 
 const HDX = { assetId: 0, symbol: 'HDX', name: 'Hydration', decimals: 12, parachainId: null }
@@ -98,18 +98,31 @@ describe('parseHealthFactor', () => {
   })
 })
 
-describe('cumulative interest', () => {
-  it('reads the grid-end totals of a market and of a (closed) reserve', () => {
-    const h = mockMoneyMarketHistory()
-    const core = h.markets[0]
-    expect(marketInterest(core)).toEqual({ earnedUsd: core.interestEarnedUsd, paidUsd: core.interestPaidUsd, incomplete: false, unpriced: 0 })
-    expect(marketInterest(undefined)).toBeNull()
-    const usdt = core.reserves.find(r => r.asset.symbol === 'USDT')!
-    // Closed at bucket 30: its last point predates the grid end, the totals do not.
-    expect(usdt.points[usdt.points.length - 1].i).toBeLessThan(h.dates.length - 1)
-    expect(reserveInterest(usdt)?.earnedUsd).toBe(usdt.interest.interestEarnedUsd)
-    expect(reserveInterest(usdt)?.earnedUsd).toBeGreaterThan(usdt.points[usdt.points.length - 1].interestEarnedUsd!)
-    expect(reserveInterest(undefined)).toBeNull()
+describe('earned per market (the User Revenue facts\' per-market slice)', () => {
+  it('finds a market\'s slice: unread is undefined, read without facts is null (a real $0)', () => {
+    const e = mockMoneyMarketEarned()
+    expect(marketEarned(undefined, 'core')).toBeUndefined()
+    expect(marketEarned(e, 'core')?.earnedUsd).toBe(1_874.25)
+    expect(marketEarned(e, 'bil')).toBeNull()
+  })
+  it('groups the hover lending → token yield → pool fees under their subtotals, borrow interest apart', () => {
+    const core = marketEarned(mockMoneyMarketEarned(), 'core')!
+    const rows = earnedRows(core, (label, usd) => `${label} · ${usd}`)
+    expect(rows.map(r => [r.group, r.label, r.pct, r.note ?? null])).toEqual([
+      ['Lending interest · 512.4', 'PRIME lending interest', 512.4, null],
+      ['Token yield · 1290.1', 'PRIME yield', 1_290.1, null],
+      ['Pool fees · 71.75', 'DOT pool fees', 71.75, 'in DOT'],
+    ])
+    // The category subtotals add up to Earned.
+    expect(core.lendingUsd + core.tokenYieldUsd + core.poolFeesUsd + core.otherUsd).toBeCloseTo(core.earnedUsd, 9)
+    expect(paidRows(core).map(r => [r.label, r.pct])).toEqual([['HOLLAR borrow interest', 903.6]])
+  })
+  it('answers a reserve by either id it is named with — the aToken held or the reserve asset', () => {
+    const idx = reserveEarnedIndex(marketEarned(mockMoneyMarketEarned(), 'gigahdx'))
+    expect(idx.get(67)).toEqual({ earnedUsd: 64.2, paidUsd: 0 })
+    expect(idx.get(670)).toBe(idx.get(67))
+    expect(idx.get(1000)).toEqual({ earnedUsd: 0, paidUsd: 12.5 })
+    expect(reserveEarnedIndex(null).size).toBe(0)
   })
 })
 
@@ -179,7 +192,10 @@ describe('<BorrowTab>', () => {
   function render(areas: Parameters<typeof BorrowTab>[0]['areas'], seed: Record<string, unknown>, showOwner = false) {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     qc.setQueryData(['explorer-yields'], { asOf: '', feeWindow: '30d', omnipool: {}, stableswap: {}, xyk: {}, uniswapV3: {}, moneyMarket: mockMoneyMarketYields() })
-    for (const [addr, data] of Object.entries(seed)) qc.setQueryData(['money-market-history', addr], data)
+    for (const [addr, data] of Object.entries(seed)) {
+      qc.setQueryData(['money-market-history', addr], data)
+      qc.setQueryData(['money-market-earned', addr], mockMoneyMarketEarned())
+    }
     return renderToStaticMarkup(<QueryClientProvider client={qc}><BorrowTab areas={areas} showOwner={showOwner} /></QueryClientProvider>)
   }
 
@@ -198,7 +214,13 @@ describe('<BorrowTab>', () => {
     expect(html).not.toContain('bw-tbl')
     expect(html.match(/class="bw-risk"/g)).toHaveLength(2)
     expect(html.match(/class="bw-hf"/g)).toHaveLength(2)
-    expect(html).toContain('Interest earned')
+    // Earned is the market's slice of the User Revenue facts, its breakdown on hover; paid beside it.
+    expect(html).toContain('<span class="k">Earned</span>')
+    expect(html).not.toContain('Interest earned')
+    expect(html).toContain('$1.87k')
+    expect(html).toContain('$64.2')
+    expect(html).toContain('<span class="k">Interest paid</span><span class="v">')
+    expect(html).toContain('$904')
     expect(html).toContain('Show details &amp; history')
     // The collapsed rule names what is inside: reserve count and the history span.
     expect(html).toContain('2 reserves · since ' + mockMoneyMarketHistory(FOX).dates[4].slice(0, 10))
@@ -272,7 +294,8 @@ describe('<BorrowTab>', () => {
     expect(html).toContain('data-address="0xdef"')
     expect(html).not.toContain('data-chart="')
     // The KPI row's history-backed figures are loading, never a dash that reads as "none".
-    expect(html).toContain('<span class="k">Interest earned</span><span class="v"><span class="muted">…</span>')
+    expect(html).toContain('<span class="k">Earned</span><span class="v"><span class="muted">…</span>')
+    expect(html).toContain('<span class="k">Interest paid</span><span class="v"><span class="muted">…</span>')
   })
 })
 
@@ -332,9 +355,13 @@ describe('reserveRows', () => {
   ] }) }
 
   it('matches a supplied reserve shown as its aToken to the history filed under the underlying, and closes only what no current row claimed', () => {
-    const rows = reserveRows(spec, market)
+    // Earned / paid come from the earned read, keyed by the reserve asset or the aToken; a reserve it names nothing for reads $0.
+    const earned = new Map([[5, { earnedUsd: 94, paidUsd: 0 }], [1001, { earnedUsd: 94, paidUsd: 0 }], [1000, { earnedUsd: 0, paidUsd: 12 }]])
+    const rows = reserveRows(spec, market, earned)
     expect(rows.map(r => [r.asset.symbol, r.closed, r.interest?.earnedUsd ?? null, r.interest?.paidUsd ?? null]))
-      .toEqual([['aDOT', false, 94, 0], ['HOLLAR', false, 0, 12], ['GETH', true, 3, 0]])
+      .toEqual([['aDOT', false, 94, 0], ['HOLLAR', false, 0, 12], ['GETH', true, 0, 0]])
+    // Unread: no figure, never a $0.
+    expect(reserveRows(spec, market).every(r => r.interest === null)).toBe(true)
   })
   it('lists every history reserve as closed when nothing is held now', () => {
     const rows = reserveRows({ ...spec, current: null }, market)

@@ -125,13 +125,20 @@ export interface TopAccountRow {
   liquidationVolumeUsd?: number
   // Protocol revenue earned from this account/group.
   revenueUsd?: number
+  // User Revenue the account/group earned, net, all time. null = not yet
+  // published (never a 0 standing in); 0 and negative values are real.
+  userRevenueUsd?: number | null
+  // The User Revenue holder class of the row's accounts: 'protocol' /
+  // 'unattributed' rows (Treasury, pots, pools, money-market contracts,
+  // sovereigns) are not users, so their 0 is no user's zero. Absent = unknown.
+  holderClass?: 'user' | 'protocol' | 'unattributed'
   // Up to 4 largest holdings (> $10, highest USD first) → icon cluster after value.
   topAssets?: { asset: AssetRef; valueUsd: number }[]
   // Further holdings over $10 the four icons leave out.
   otherAssets?: number
 }
 
-export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation' | 'revenue'
+export type AccountSort = 'value' | 'supplied' | 'borrowed' | 'health' | 'identity' | 'activity' | 'volume' | 'liquidation' | 'revenue' | 'user-revenue'
 export interface AccountsPage {
   rows: TopAccountRow[]
   total: number
@@ -764,6 +771,9 @@ export interface AddressDetail {
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
   revenueUsd?: number
+  // User Revenue (net, all time); null = not yet published. Absent from an
+  // older API build — read as not published.
+  userRevenueUsd?: number | null
   moneyMarket: MoneyMarketPosition[]
   liquidityPositions?: LpPosition[]
   activeDcas?: ActiveDca[]
@@ -1564,6 +1574,85 @@ export interface RevenueFlowResponse {
   blockSeconds: number
 }
 
+// ---- User Revenue (what users earn; api services/userRevenueRead.ts) ----
+// Every figure is booked per CLOSED chain hour: "through" publishedThrough, the
+// end of the newest folded hour. A window that is not fully folded is null —
+// never a plausible 0. Not additive with Protocol Revenue.
+export interface UserRevenueUnmeasured { id: string; label: string; reason: string }
+export interface UserRevenueSummary {
+  totals: { day: number | null; week: number | null; month: number | null; allTime: number | null }
+  publishedThrough: string | null
+  firstHour: string | null
+  complete: boolean
+  unpricedCells: number
+  unmeasured: UserRevenueUnmeasured[]
+}
+export interface UserRevenueStreamSummary {
+  stream: string
+  label: string
+  sign: 'earned' | 'paid' | 'both'
+  revisable: boolean
+  toggle: boolean
+  coverage: string
+  earned: number
+  paid: number
+  net: number
+  unpriced: number
+}
+/** A history bucket: net, and the earned (Σ positive) and paid (Σ negative, ≤ 0) account-day facts it nets. */
+export interface UserRevenuePoint { t: number; usd: number; earned: number; paid: number }
+export interface UserRevenueDashboard extends UserRevenueSummary {
+  range: RevenueRange
+  bucketSeconds: number
+  /** The account fold's cut: history, breakdown, not-user and rankings are through it; the headline through publishedThrough. */
+  accountPublishedThrough: string | null
+  /** The account fold's completeness — the sections stand on it; `complete` is the headline's (hourly fold). */
+  accountComplete?: boolean
+  fromDay: string | null
+  history: { series: { stream: string; points: UserRevenuePoint[] }[] }
+  breakdown: UserRevenueStreamSummary[]
+  /** The breakdown's totals, summed exactly server-side over every user stream and snapped once (absent from an older api). */
+  breakdownTotal?: { earned: number; paid: number; net: number }
+  notUser: { holderClass: 'protocol' | 'unattributed'; net: number; causes: { via: string; net: number }[] }[]
+  topEarners: { account: AccountRef; usd: number }[]
+  topPayers: { account: AccountRef; usd: number }[]
+}
+export interface UserRevenueFlowResponse {
+  hour: string | null
+  /** Revisable streams stream their mean over this many closed hours ending with `hour`. */
+  revisableMeanHours?: number
+  publishedThrough: string | null
+  blockSeconds: number
+  head: number
+  drips: { key: string; stream: string; label: string; assetId: number; usdPerBlock: number }[]
+}
+export interface UserRevenueItem { pot: string; potLabel: string; via: string; asset: AssetRef; earned: number; paid: number; net: number; unpriced: number }
+export interface UserRevenueStreamRow {
+  stream: string
+  label: string
+  revisable: boolean
+  toggle: boolean
+  earned: number
+  paid: number
+  net: number
+  unpriced: number
+  items: UserRevenueItem[]
+  otherCount: number
+  otherNet: number
+}
+export interface UserRevenueChartPoint { t: number; earned: number; paid: number; net: number; streams: { stream: string; net: number }[] }
+export interface UserRevenueBreakdown {
+  range: RevenueRange
+  grain: 'day' | 'week' | 'month'
+  fromDay: string | null
+  complete: boolean
+  asOf: string | null
+  totals: { earned: number; paid: number; net: number; unpriced: number }
+  streams: UserRevenueStreamRow[]
+  points: UserRevenueChartPoint[]
+  otherClasses: { holderClass: 'user' | 'protocol' | 'unattributed'; net: number }[]
+}
+
 // Full-era weekly holder-structure series (see api hdxService.HdxStructure).
 // Treasury, protocol plumbing and Kraken custody are carved out of the user
 // class; tranches and HODL bands describe user accounts only.
@@ -1734,6 +1823,7 @@ export interface TagDetail {
   tradingVolumeUsd?: number
   liquidationVolumeUsd?: number
   revenueUsd?: number
+  userRevenueUsd?: number | null
   moneyMarket: MoneyMarketPosition[]
   // The same positions unaggregated, one entry per member holding one: the header
   // summarises the tag, the Positions tab lists the accounts.
@@ -2922,6 +3012,41 @@ export interface MoneyMarketHistory {
   unclaimedRewardsUsd: (number | null)[]
   rewardsIncomplete: number[]
   markets: MoneyMarketHistoryMarket[]
+}
+
+// /explorer/address/:a/money-market-earned: the Borrow card's Earned and Interest
+// paid per market — a per-market slice of the User Revenue facts (the tab's and
+// the header stat's), all time from the money market's coverage start (B0).
+export type MoneyMarketEarnedCategory = 'lending' | 'token' | 'poolFees' | 'other' | 'paid'
+export interface MoneyMarketEarnedItem {
+  category: MoneyMarketEarnedCategory
+  stream: string
+  label: string
+  asset: AssetRef
+  /** The supplied aToken it reached the account through; null for a direct fact on the reserve itself. */
+  via: AssetRef | null
+  usd: number
+  unpriced: number
+}
+export interface MoneyMarketEarnedMarket {
+  marketKey: string
+  earnedUsd: number
+  lendingUsd: number
+  tokenYieldUsd: number
+  poolFeesUsd: number
+  otherUsd: number
+  /** Borrow interest, as a positive cost. */
+  paidUsd: number
+  unpriced: number
+  reserves: { reserveAssetId: number; aTokenAssetId: number | null; earnedUsd: number; paidUsd: number }[]
+  items: MoneyMarketEarnedItem[]
+}
+export interface MoneyMarketEarned {
+  complete: boolean
+  asOf: string | null
+  fromBlock: number
+  holderClass: 'user' | 'protocol' | 'unattributed'
+  markets: MoneyMarketEarnedMarket[]
 }
 
 // /explorer/accounts/activity-counts: totals for rows the swept ranking has not

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { AssetIcon } from '../ui'
 import type { AssetRef } from '../../types'
@@ -15,7 +15,7 @@ import { aprText, type YieldRow } from './yieldFormat'
 // a button), closes on Escape, blur and pointer-leave, and a click (a tap on a
 // phone, which also focuses and hovers) opens it rather than toggling it shut;
 // a click inside a clickable row or a card link does not navigate it.
-export function YieldHover({ total, rows, icons, note, title, emptyText = '—' }: {
+export function YieldHover({ total, rows, icons, note, title, emptyText = '—', format = aprText, totalLabel = 'Total' }: {
   total: number | null
   rows: YieldRow[]
   /** Reward assets shown beside the total, like the Hydration UI's incentive icons. */
@@ -23,6 +23,9 @@ export function YieldHover({ total, rows, icons, note, title, emptyText = '—' 
   note?: ReactNode
   title?: string
   emptyText?: string
+  /** How the total and each row's value read: a rate by default; the Borrow card's Earned passes USD. */
+  format?: (v: number | null | undefined) => string
+  totalLabel?: string
 }) {
   const [open, setOpen] = useState(false)
   const [pos, setPos] = useState<{ left: number; top: number; above: boolean } | null>(null)
@@ -54,13 +57,13 @@ export function YieldHover({ total, rows, icons, note, title, emptyText = '—' 
     window.addEventListener('scroll', onScroll, true)
     return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('scroll', onScroll, true) }
   }, [open, place])
-  if (!rows.length) return <span className="mono muted">{total == null ? emptyText : aprText(total)}</span>
+  if (!rows.length) return <span className="mono muted">{total == null ? emptyText : format(total)}</span>
   return (
     <span className="yh" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
       <button ref={btn} type="button" className="yh-trigger" aria-describedby={open ? id : undefined} aria-expanded={open}
         onClick={e => { e.preventDefault(); e.stopPropagation(); setOpen(true) }} onFocus={() => setOpen(true)} onBlur={() => setOpen(false)}>
         {icons && icons.length > 0 && <span className="yh-icons">{icons.slice(0, 4).map(a => <AssetIcon key={a.assetId} assetId={a.assetId} iconAssetId={a.iconAssetId} iconAssetIds={a.iconAssetIds} symbol={a.symbol} size={14} parachainId={a.parachainId} origin={a.origin} />)}</span>}
-        <span className="mono">{aprText(total)}</span>
+        <span className="mono">{format(total)}</span>
       </button>
       {/* Portalled to <body>: an animated ancestor keeps a transform (the page's
           fade-in fill), which would make `position: fixed` relative to it and
@@ -76,16 +79,17 @@ export function YieldHover({ total, rows, icons, note, title, emptyText = '—' 
                 {head}
                 <span className="yh-row">
                   <span className="yh-lab">
+                    {r.dot && <span className={`rev-dot${r.dot.hollow ? ' rev-dot-out' : ''}`} style={(r.dot.hollow ? { '--tint': r.dot.color } : { background: r.dot.color }) as CSSProperties} aria-hidden="true" />}
                     {r.asset && <AssetIcon assetId={r.asset.assetId} iconAssetId={r.asset.iconAssetId} iconAssetIds={r.asset.iconAssetIds} symbol={r.asset.symbol} size={14} parachainId={r.asset.parachainId} origin={r.asset.origin} />}
                     <span>{r.label}</span>
                     {r.note && <span className="yh-note">{r.note}</span>}
                   </span>
-                  <span className="mono">{aprText(r.pct)}</span>
+                  <span className="mono">{format(r.pct)}</span>
                 </span>
               </span>
             )
           })}
-          <span className="yh-row yh-total"><span>Total</span><span className="mono">{aprText(total)}</span></span>
+          <span className="yh-row yh-total"><span>{totalLabel}</span><span className="mono">{format(total)}</span></span>
           {note && <span className="yh-foot">{note}</span>}
         </span>,
         document.body,

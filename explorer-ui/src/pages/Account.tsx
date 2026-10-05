@@ -20,6 +20,7 @@ import { NotifyButton } from '../components/NotifyButton'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
 import { VotesTab } from '../components/VotesTab'
 import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
+import { UserRevenueTab } from '../components/UserRevenueTab'
 import { useSession } from '../session'
 import { requestConnect } from '../connectDialog'
 import { useAddressLists, useAddressTaggedIn, useMe } from '../hooks/useUser'
@@ -122,7 +123,7 @@ export function Account({ address }: { address: string }) {
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
           // Debt counts from every market and is netted out of the portfolio Value.
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(data.balances.length, { orders: (data.activeDcas?.length ?? 0) + (data.openLimitOrders?.length ?? 0), liquidity: data.liquidityPositions?.length ?? 0, borrow: mmList.length, presence: presence.data, presenceLoading: presence.isLoading, requestedView: view }, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd)
+          const tabs = profileTabs(data.balances.length, { orders: (data.activeDcas?.length ?? 0) + (data.openLimitOrders?.length ?? 0), liquidity: data.liquidityPositions?.length ?? 0, borrow: mmList.length, presence: presence.data, presenceLoading: presence.isLoading, requestedView: view }, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd, data.userRevenueUsd)
           const activeView = resolveProfileView(view, tabs)
           return (
             <>
@@ -181,7 +182,7 @@ export function Account({ address }: { address: string }) {
                       no list on purpose (the contents stay behind the login). */}
                   <TaggedInHint taggedIn={taggedIn.data ?? []} session={session} />
                 </div>
-                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} valueUsd={data.portfolioUsd - debtUsd} exHdxValueUsd={data.portfolioExHdxUsd == null ? null : data.portfolioExHdxUsd - debtUsd} moneyMarket={mmList} farmRewards={data.farmRewards ?? null} moneyMarketRewards={data.moneyMarketRewards ?? null} balances={data.balances} />
+                <ProfileStats tradingVolumeUsd={data.tradingVolumeUsd} liquidationVolumeUsd={data.liquidationVolumeUsd} revenueUsd={data.revenueUsd} userRevenueUsd={data.userRevenueUsd} valueUsd={data.portfolioUsd - debtUsd} exHdxValueUsd={data.portfolioExHdxUsd == null ? null : data.portfolioExHdxUsd - debtUsd} moneyMarket={mmList} farmRewards={data.farmRewards ?? null} moneyMarketRewards={data.moneyMarketRewards ?? null} balances={data.balances} />
               </div>
 
               <DetailTabs tabs={tabs} active={activeView} onChange={k => setQuery({ view: k === 'overview' ? null : k })} />
@@ -300,6 +301,7 @@ export function Account({ address }: { address: string }) {
                 {activeView === 'votes' && <VotesTab scope={{ kind: 'account', address }} />}
 
                 {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'account', address }} />}
+                {activeView === 'user-revenue' && <UserRevenueTab scope={{ kind: 'account', address }} />}
               </SectionBoundary>
             </>
           )

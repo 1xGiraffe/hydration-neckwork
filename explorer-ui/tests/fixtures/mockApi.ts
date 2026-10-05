@@ -759,6 +759,16 @@ function sortAccountRows(rows: TopAccountRow[], sort: string): TopAccountRow[] {
         || b.portfolioUsd - a.portfolioUsd
     }
     if (sort === 'volume') return (b.tradingVolumeUsd ?? -1) - (a.tradingVolumeUsd ?? -1) || b.portfolioUsd - a.portfolioUsd
+    // Mirrors the server: positive > zero > negative > rows User Revenue does not
+    // describe (no user member) > unpublished, by amount within each, then by value.
+    if (sort === 'user-revenue') {
+      const rank = (r: TopAccountRow) => {
+        const v = r.userRevenueUsd
+        if (r.holderClass != null && r.holderClass !== 'user') return 3
+        return v == null ? 4 : v > 0 ? 0 : v === 0 ? 1 : 2
+      }
+      return rank(a) - rank(b) || (b.userRevenueUsd ?? 0) - (a.userRevenueUsd ?? 0) || b.portfolioUsd - a.portfolioUsd
+    }
     if (sort === 'liquidation') return (b.liquidationVolumeUsd ?? -1) - (a.liquidationVolumeUsd ?? -1) || b.portfolioUsd - a.portfolioUsd
     if (sort === 'identity') {
       // Named rows first, alphabetically; unnamed by value (mirrors the server).
@@ -772,7 +782,7 @@ function buildAccounts(offset: number, limit: number, sort: string): AccountsPag
   const rows: TopAccountRow[] = []
   // Kraken tag (2 members) as one row
   // 53 weekly points = the real API's 1Y padded sparkline shape.
-  rows.push({ account: null, tag: { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', icon: '/tag-icons/kraken.jpg', memberCount: 2 }, portfolioUsd: 5_240_000, lastBlock: TIP - 12, healthFactor: '1410000000000000000', identity: 'Kraken', suppliedUsd: null, borrowedUsd: null, supplementalMarket: { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 6_200, healthFactor: '2380000000000000000' }, sparkline: series(99, 53, 5_240_000), activityCount: 2143, activityCountComplete: true, tradingVolumeUsd: 82_400_000, liquidationVolumeUsd: 740_000 })
+  rows.push({ account: null, tag: { tagId: 'kraken', name: 'Kraken', color: '#7b6cf6', icon: '/tag-icons/kraken.jpg', memberCount: 2 }, holderClass: 'user', userRevenueUsd: 48_200, portfolioUsd: 5_240_000, lastBlock: TIP - 12, healthFactor: '1410000000000000000', identity: 'Kraken', suppliedUsd: null, borrowedUsd: null, supplementalMarket: { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 6_200, healthFactor: '2380000000000000000' }, sparkline: series(99, 53, 5_240_000), activityCount: 2143, activityCountComplete: true, tradingVolumeUsd: 82_400_000, liquidationVolumeUsd: 740_000 })
   const seeds: [AccountRef, number][] = [[A.binance, 3_900_000], [A.fox, 1_240_000], [A.treasury, 980_000], [A.owl, 410_000], [A.swan, 96_000]]
   // Holdings: the four largest as an icon stack, plus how many further holdings
   // clear $10 without making the four. The shapes that matter are all here — a
@@ -786,10 +796,21 @@ function buildAccounts(offset: number, limit: number, sort: string): AccountsPag
       ...(i === 0 ? { otherAssets: 17 } : i === 2 ? { otherAssets: 3 } : {}),
     }
   }
+  // User Revenue, one of each shape the column and its sort tell apart: earned,
+  // a real zero, a net loss, unpublished (null), and a protocol account, which
+  // the server returns with no figure (null) because User Revenue does not
+  // describe it.
+  const userRevenue = new Map<AccountRef, Pick<TopAccountRow, 'userRevenueUsd' | 'holderClass'>>([
+    [A.binance, { userRevenueUsd: 31_500, holderClass: 'user' }],
+    [A.fox, { userRevenueUsd: -120, holderClass: 'user' }],
+    [A.treasury, { userRevenueUsd: null, holderClass: 'protocol' }],
+    [A.owl, { userRevenueUsd: null, holderClass: 'user' }],
+    [A.swan, { userRevenueUsd: 0, holderClass: 'user' }],
+  ])
   for (const [i, [a, usd]] of seeds.entries()) {
     const mm = mmFor(a.accountId.length * 7)
     const floor = a === ACTIVITY_FLOOR_ACCOUNT
-    rows.push({ account: a, tag: null, portfolioUsd: usd, lastBlock: TIP - Math.floor(usd % 900), healthFactor: mm.debt > 0 ? BigInt(Math.round(mm.hf * 1e18)).toString() : 'inf', identity: a === A.binance ? 'Binance' : null, suppliedUsd: mm.supply > 0 ? mm.supply : null, borrowedUsd: mm.debt > 0 ? mm.debt : null, supplementalMarket: a === A.fox ? { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 4_800, healthFactor: '2500000000000000000' } : null, sparkline: series(a.accountId.length * 31, 53, usd), activityCount: floor ? ACTIVITY_FLOOR_COUNT : 100 + (usd % 4000), activityCountComplete: !floor, tradingVolumeUsd: usd * (12 + (a.accountId.charCodeAt(4) % 9)), liquidationVolumeUsd: mm.debt > 0 ? usd * (0.08 + (a.accountId.charCodeAt(6) % 5) / 100) : undefined, ...holdings(i) })
+    rows.push({ account: a, tag: null, portfolioUsd: usd, lastBlock: TIP - Math.floor(usd % 900), healthFactor: mm.debt > 0 ? BigInt(Math.round(mm.hf * 1e18)).toString() : 'inf', identity: a === A.binance ? 'Binance' : null, suppliedUsd: mm.supply > 0 ? mm.supply : null, borrowedUsd: mm.debt > 0 ? mm.debt : null, supplementalMarket: a === A.fox ? { marketKey: 'gigahdx', market: 'GIGAHDX', borrowedUsd: 4_800, healthFactor: '2500000000000000000' } : null, sparkline: series(a.accountId.length * 31, 53, usd), activityCount: floor ? ACTIVITY_FLOOR_COUNT : 100 + (usd % 4000), activityCountComplete: !floor, ...userRevenue.get(a), tradingVolumeUsd: usd * (12 + (a.accountId.charCodeAt(4) % 9)), liquidationVolumeUsd: mm.debt > 0 ? usd * (0.08 + (a.accountId.charCodeAt(6) % 5) / 100) : undefined, ...holdings(i) })
   }
   const sorted = sortAccountRows(rows, sort)
   return { rows: sorted.slice(offset, offset + limit), total: sorted.length }
