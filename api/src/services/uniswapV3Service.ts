@@ -587,6 +587,32 @@ export function v3AnchorScan(want: number): number {
   return Math.max(want * 4, 100)
 }
 
+// Unnamed vault-act blocks inlined per anchor read: 5,000 × ≤9 bytes ≈ 45 KiB of
+// query text, far under max_query_size (256 KiB) beside the rest of the statement.
+export const V3_UNNAMED_BLOCKS_PER_QUERY = 5_000
+const UNNAMED_SLOT = '/*unnamed*/'
+/** Integer-sanitized, de-duplicated, newest-first chunks of the unnamed blocks. */
+export function chunkUnnamedBlocks(blocks: readonly number[], size = V3_UNNAMED_BLOCKS_PER_QUERY): string[][] {
+  const clean = [...new Set(blocks.map(b => Math.trunc(Number(b))).filter(b => Number.isFinite(b) && b >= 0))].sort((a, b) => b - a)
+  const chunks: string[][] = []
+  for (let i = 0; i < clean.length; i += size) chunks.push(clean.slice(i, i + size).map(String))
+  return chunks
+}
+/** The newest `scan` anchors of several newest-first reads, each event once. */
+export function mergeAnchorReads<T extends { block_height: number; event_index: number }>(reads: readonly T[][], scan: number): T[] {
+  if (reads.length === 1) return reads[0]
+  const seen = new Set<string>()
+  const out: T[] = []
+  for (const r of reads.flat().sort((a, b) => Number(b.block_height) - Number(a.block_height) || Number(b.event_index) - Number(a.event_index))) {
+    const key = `${r.block_height}:${r.event_index}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(r)
+    if (out.length >= scan) break
+  }
+  return out
+}
+
 /**
  * Newest-first acts for a feed page. Anchors are paged in SQL; then every log of
  * the anchors' extrinsics is read so the classifier sees whole groups (a
@@ -596,6 +622,7 @@ export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions
   if (!client || !registry.pools.size) return []
   const bound = opts.bound ?? '1'
   const where: string[] = [bound]
+  let unnamedChunks: string[][] = []
   const anchor = opts.kind === 'all' ? `(${ANCHOR_EVENTS.swap} OR ${ANCHOR_EVENTS.liquidity})` : ANCHOR_EVENTS[opts.kind]
   where.push(anchor)
   // A pool Mint/Burn/Collect owned by a manager or a vault is that contract's plumbing
@@ -627,11 +654,14 @@ export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions
       ...(venues.pools.length ? [poolRowsSql(registry, venues.pools, bound)] : []),
       ...(venues.vaults.length || venues.managers.length ? [`contract_address IN (${sqlList([...venues.vaults, ...venues.managers])})`] : []),
     ]
-    const unnamed = opts.unnamedActBlocks?.length
-      ? `
-      OR (kind = 'vault' AND event_name IN ('Rebalance', 'ZeroBurn') AND block_height IN {unnamedBlocks:Array(UInt32)})`
-      : ''
-    where.push(`(actor IN (${list}) OR counterparty IN (${list}) OR owner IN (${list})${unnamed}
+    // Inlined rather than bound: a keeper's or a vault's compounds run dozens a day
+    // (~30 blocks/day measured 2026-10), so the list outgrows the server's
+    // bound-parameter ceiling (db/queryParams.ts) within months, while integers
+    // interpolate safely. Inlined, it is bounded instead by max_query_size
+    // (256 KiB ≈ 28k blocks), so it is split into chunks of
+    // V3_UNNAMED_BLOCKS_PER_QUERY, one anchor read per chunk, merged below.
+    unnamedChunks = chunkUnnamedBlocks(opts.unnamedActBlocks ?? [])
+    where.push(`(actor IN (${list}) OR counterparty IN (${list}) OR owner IN (${list})${UNNAMED_SLOT}
       OR (kind = 'manager' AND (contract_address, token_id) IN (
         SELECT contract_address, token_id FROM price_data.uniswap_v3_events
         WHERE kind = 'manager' AND event_name = 'Transfer' AND counterparty IN (${list})))${venueRows.map(sql => `
@@ -639,12 +669,18 @@ export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions
   }
   const want = (opts.offset ?? 0) + opts.limit
   const scan = v3AnchorScan(want)
-  const anchors = await queryRows<{ block_height: number; extrinsic_index: number | null }>({
-    query: `SELECT block_height, extrinsic_index FROM price_data.uniswap_v3_events FINAL
-            WHERE ${where.join(' AND ')}
+  const whereSql = where.join(' AND ')
+  // One read per unnamed-block chunk (one read when there are none or few). Each is
+  // the full predicate with its chunk; the newest `scan` rows of their union are the
+  // newest `scan` of the merged per-chunk tops, deduplicated by the event's key.
+  const reads = (unnamedChunks.length ? unnamedChunks : [null]).map(chunk => queryRows<{ block_height: number; extrinsic_index: number | null; event_index: number }>({
+    query: `SELECT block_height, extrinsic_index, event_index FROM price_data.uniswap_v3_events FINAL
+            WHERE ${whereSql.replace(UNNAMED_SLOT, chunk ? `
+      OR (kind = 'vault' AND event_name IN ('Rebalance', 'ZeroBurn') AND block_height IN (${chunk.join(',')}))` : '')}
             ORDER BY block_height DESC, event_index DESC LIMIT {scan:UInt32}`,
-    query_params: { scan, ...(opts.accountsH160 && opts.unnamedActBlocks?.length ? { unnamedBlocks: [...opts.unnamedActBlocks] } : {}) }, format: 'JSONEachRow',
-  })
+    query_params: { scan }, format: 'JSONEachRow',
+  }))
+  const anchors = mergeAnchorReads(await Promise.all(reads), scan)
   if (!anchors.length) return []
   const rows = await eventsOfExtrinsics(anchors.map(a => [a.block_height, a.extrinsic_index]))
   let acts = classifyV3Events(rows, registry.ctx).reverse()

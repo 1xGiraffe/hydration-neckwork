@@ -17,7 +17,9 @@ const body = (name: string): string => {
 
 describe('the shared scaled read of a history rebuild', () => {
   it('reads atoken_scaled_deltas once, grouped by both bucket keys, and hands it to both consumers', () => {
-    const read = body('loadAccountScaledRead')
+    // The holders are bound in chunks; each chunk runs the one read.
+    expect(body('loadAccountScaledRead')).toContain('mapParamChunks(holders, chunk => loadAccountScaledReadChunk(')
+    const read = body('loadAccountScaledReadChunk')
     expect(read.match(/FROM price_data\.atoken_scaled_deltas FINAL/g)).toHaveLength(1)
     expect(read).toContain("if(block_height <= {maxBlock:UInt32}, toInt32(${bk.ofTs('block_timestamp')}), toInt32(-2)) AS bts")
     expect(read).toContain("if(block_height <= {endN:UInt32}, ${bk.ofHeightCarry('block_height')}, toInt32(-2)) AS bh")
