@@ -38,6 +38,7 @@ import {
   formatUsd,
   scaleAmount,
   scaleBase1e8,
+  formatUserRevenue,
 } from '../format/units.ts'
 import { blocksToDuration, formatDuration, formatTime, relativeAge } from '../format/time.ts'
 import {
@@ -223,7 +224,8 @@ function portfolioBlock(d: AddressDetail, value: ReturnType<typeof portfolioValu
     ['Top holdings (share of holdings)', top.length ? top.join(' · ') : null],
     ['Trading volume (lifetime)', d.tradingVolumeUsd != null ? formatUsd(d.tradingVolumeUsd) : null],
     ['Liquidation volume', d.liquidationVolumeUsd ? formatUsd(d.liquidationVolumeUsd) : null],
-    ['Protocol revenue earned', d.revenueUsd != null ? formatUsd(d.revenueUsd) : null],
+    ['Protocol Revenue', d.revenueUsd != null ? formatUsd(d.revenueUsd) : null],
+    ['User Revenue (net)', formatUserRevenue(d.userRevenueUsd, d.holderClass)],
   ])
 }
 
@@ -861,6 +863,8 @@ const getAccount: ToolDefinition = {
         tradingVolumeUsd: detail.tradingVolumeUsd ?? null,
         liquidationVolumeUsd: detail.liquidationVolumeUsd ?? null,
         revenueUsd: detail.revenueUsd ?? null,
+        // Net User Revenue; null = not yet published (never 0 then).
+        userRevenueUsd: detail.userRevenueUsd ?? null,
         summaryBuild: summarized,
         balances: sections.has('balances')
           ? [...(detail.balances ?? [])].sort((a, b) => balanceValue(b) - balanceValue(a)).slice(0, MAX_BALANCE_ROWS).map(compactBalance)
@@ -1992,7 +1996,7 @@ const LIST_ACCOUNTS_DESCRIPTION = `The account directory: who holds the most, tr
 
 Answers "who are the biggest holders?", "which accounts are most active?", "who is nearest liquidation?", "which accounts earn protocol revenue?". Use this to FIND accounts; use \`get_account\` to read one, and \`get_activity\` for what they did. \`search\` is the tool for a name you already know.
 
-\`sort\` accepts exactly what the directory implements — value, supplied, borrowed, health, identity, activity, volume, liquidation, revenue — and nothing else; a value outside that list is rejected here rather than silently falling back to 'value' as the upstream would. 'health' ascends (riskiest first); everything else descends.
+\`sort\` is one of value, supplied, borrowed, health, identity, activity, volume, liquidation, revenue (every directory sort except user-revenue); anything else is rejected here rather than silently falling back to 'value' as the upstream would. 'health' ascends (riskiest first) and 'identity' is alphabetical; every other sort descends.
 
 \`tag\` narrows to one system tag's members ('treasury', 'kraken', 'sovereigns', 'money-market', 'pallet-pots', …). Tags are a fixed, code-defined set — there are no user tags on this surface.
 

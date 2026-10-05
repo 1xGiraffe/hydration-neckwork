@@ -140,6 +140,23 @@ function addressDetail(overrides: Record<string, unknown> = {}) {
 }
 
 describe('get_account', () => {
+  // User Revenue is what the account EARNED, net; protocol revenue is what it
+  // GENERATED for the protocol. Two meanings, two labels — and an unpublished
+  // figure says so rather than reading as "$0, earned nothing".
+  it('states protocol revenue generated and user revenue (net) apart, never an unpublished 0', async () => {
+    const published = fakeUpstream({ [DETAIL_PATH]: addressDetail({ userRevenueUsd: -12.5 }) })
+    const out = await tool('get_account').handler({ address: ADDRESS }, ctxWith(published.upstream))
+    expect(out.markdown).toContain('Protocol Revenue')
+    expect(out.markdown).not.toContain('Protocol revenue earned')
+    expect(out.markdown).toMatch(/User Revenue \(net\)[^\n]*-\$12\.5/)
+    expect((out.json as { userRevenueUsd: number | null }).userRevenueUsd).toBe(-12.5)
+
+    const pending = fakeUpstream({ [DETAIL_PATH]: addressDetail({ userRevenueUsd: null }) })
+    const out2 = await tool('get_account').handler({ address: ADDRESS }, ctxWith(pending.upstream))
+    expect(out2.markdown).toMatch(/User Revenue \(net\)[^\n]*not yet published/)
+    expect((out2.json as { userRevenueUsd: number | null }).userRevenueUsd).toBeNull()
+  })
+
   it('leads with the Value the Explorer page shows, not the gross holdings', async () => {
     // The page's headline is `portfolioUsd - Σ totalDebtBase/1e8` across every
     // market (PortfolioChart's netUsd in explorer-ui/src/pages/Account.tsx), and

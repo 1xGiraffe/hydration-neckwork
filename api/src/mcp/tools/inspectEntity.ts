@@ -29,7 +29,7 @@ import {
 } from '../format/refs.ts'
 import {
   DASH, formatAmount, formatBase1e8, formatCount, formatDecimalString, formatHealthFactor, formatNumber,
-  formatPercent, formatPercentChange, formatUsd,
+  formatPercent, formatPercentChange, formatUsd, formatUserRevenue,
 } from '../format/units.ts'
 import { blocksToDuration, formatDuration, formatTime, isUnrecordedTime, relativeAge } from '../format/time.ts'
 import { activityDetail, activityLine, foldIcePotTrades } from '../format/activity.ts'
@@ -859,7 +859,8 @@ async function renderTag(tagId: string, ctx: ToolContext, candidates: SearchHitV
       ['Money-market debt', tagValue.moneyMarketDebtUsd > 0 ? formatUsd(tagValue.moneyMarketDebtUsd) : null],
       ['Holdings ex-HDX', t.portfolioExHdxUsd != null ? formatUsd(t.portfolioExHdxUsd) : null],
       ['Trading volume', t.tradingVolumeUsd != null ? formatUsd(t.tradingVolumeUsd) : null],
-      ['Revenue', t.revenueUsd != null ? formatUsd(t.revenueUsd) : null],
+      ['Protocol Revenue', t.revenueUsd != null ? formatUsd(t.revenueUsd) : null],
+      ['User Revenue (net)', formatUserRevenue(t.userRevenueUsd, t.holderClass)],
       ['Money market', t.moneyMarket?.length ? `${t.moneyMarket.length} isolated market position${t.moneyMarket.length === 1 ? '' : 's'}` : null],
       ['Explorer', tagUrl(base, t.tagId)],
     ]),
@@ -869,7 +870,7 @@ async function renderTag(tagId: string, ctx: ToolContext, candidates: SearchHitV
     `Every figure above aggregates the whole tag. For what its members did, call ${callHint('get_activity', { tag: t.tagId, limit: 25 })}.`,
     alsoLine(candidates),
   )
-  return output(ctx, markdown, { kind: 'tag', tag: { ...t, balances: undefined, portfolioSeries: undefined, portfolioDates: undefined, balanceHistory: undefined } }, [])
+  return output(ctx, markdown, { kind: 'tag', tag: { ...t, userRevenueUsd: t.userRevenueUsd ?? null, balances: undefined, portfolioSeries: undefined, portfolioDates: undefined, balanceHistory: undefined } }, [])
 }
 
 async function renderReferendum(pallet: 'opengov' | 'democracy', index: number, ctx: ToolContext, candidates: SearchHitView[]): Promise<ToolOutput> {

@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { formatParam, type ToolContext, type ToolDefinition, type ToolError, type ToolOutput } from '../toolTypes.ts'
 import { invalidArgument, toolErrorFromUpstream } from '../errors.ts'
 import type {
-  AccountRef, AssetRef, PlatformVolume, PoolListEntry, PoolsIndex, RevenueDashboard, StakerDistributions,
+  AccountRef, AssetRef, PlatformVolume, PoolListEntry, PoolsIndex, RevenueDashboard, StakerDistributions, UserRevenueSummary,
 } from '../types.ts'
 import { CUT_NOTE, WINDOW_KEYS, WINDOW_LABEL, changeCell, ratioPct, venueLabel } from '../format/volume.ts'
 import { DASH, formatAmount, formatCount, formatNumber, formatPercent, formatPercentChange, formatUsd, scaleAmount } from '../format/units.ts'
@@ -146,6 +146,33 @@ Every one of these payloads is 10-280 KB upstream and carries long raw series (t
 Prefer get_network_status for liveness, get_money_market for per-account lending risk ('security' sizes the markets, never an account), get_pools for one pool, and get_asset for one token.`
 
 /* ============ revenue ============ */
+
+/** The published-through instant as the surfaces word it: "through 04:00 UTC 4 Oct 2026". */
+function throughLabel(iso: string | null): string | null {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (!Number.isFinite(d.getTime())) return null
+  const hh = String(d.getUTCHours()).padStart(2, '0')
+  return `through ${hh}:00 UTC ${d.toISOString().slice(0, 10)}`
+}
+
+function renderUserRevenue(u: UserRevenueSummary): string {
+  const amount = (v: number | null) => (v == null ? 'not fully published' : formatUsd(v))
+  return joinBlocks(
+    h2('User Revenue'),
+    kv([
+      ['Last 24H (closed hours)', amount(u.totals?.day)],
+      ['Last 7D', amount(u.totals?.week)],
+      ['Last 30D', amount(u.totals?.month)],
+      ['All time', amount(u.totals?.allTime)],
+      ['Published', throughLabel(u.publishedThrough) ?? 'nothing yet'],
+      ['Unpriced facts, all time (counted, not valued)', u.unpricedCells > 0 ? formatCount(u.unpricedCells) : null],
+    ]),
+    (u.unmeasured ?? []).length ? `${h3('Not measured')}\n${bullets(u.unmeasured.map(x => `${x.label} — ${x.reason}`))}` : null,
+    note('What users EARN on Hydration, net: LP fees, lending interest and incentives, farm rewards, token accrual, staking and GIGAHDX yield, referrer commissions, less borrow interest (HOLLAR interest on HOLLAR loans in every market, and borrow interest on every other asset), exit fees and forfeits — booked when owed, per closed hour. NOT additive with Protocol Revenue: the two overlap (protocol-owned liquidity earns LP fees too), so never sum them.'),
+    note('HDX staking is booked GROSS as it accrues: the payable share depends on governance action points no event states, so the unpaid part is booked as a forfeit (negative) at the claim or exit — a window can hold staking income whose forfeit lands later.'),
+  )
+}
 
 function renderRevenue(d: RevenueDashboard, stakers: StakerDistributions | null, flow: RevenueFlow | null, ctx: ToolContext): string {
   const streamRows = (d.breakdown ?? []).map(b => [
@@ -750,21 +777,26 @@ async function handler(input: Record<string, unknown>, ctx: ToolContext): Promis
 
   try {
     if (dashboard === 'revenue') {
-      const [revRes, stakersRes, flowRes] = await Promise.allSettled([
+      const [revRes, stakersRes, flowRes, userRes] = await Promise.allSettled([
         ctx.upstream.get<RevenueDashboard>('/explorer/revenue', { range }, { ttlMs: 60_000, timeoutMs: 60_000 }),
         ctx.upstream.get<StakerDistributions>('/explorer/revenue/stakers', { range }, { ttlMs: 60_000, timeoutMs: 60_000 }),
         ctx.upstream.get<RevenueFlow>('/explorer/revenue/flow', undefined, { ttlMs: 5_000 }),
+        ctx.upstream.get<UserRevenueSummary>('/explorer/revenue/users/summary', undefined, { ttlMs: 60_000 }),
       ])
       if (revRes.status === 'rejected') return failure(toolErrorFromUpstream(revRes.reason, 'The revenue dashboard'))
       if (stakersRes.status === 'rejected') errors.push(toolErrorFromUpstream(stakersRes.reason, 'Staker distributions'))
       if (flowRes.status === 'rejected') errors.push(toolErrorFromUpstream(flowRes.reason, 'The live revenue flow'))
       const stakers = stakersRes.status === 'fulfilled' ? stakersRes.value : null
       const flow = flowRes.status === 'fulfilled' ? flowRes.value : null
-      const markdown = renderRevenue(revRes.value, stakers, flow, ctx)
+      if (userRes.status === 'rejected') errors.push(toolErrorFromUpstream(userRes.reason, 'User Revenue totals'))
+      const userRevenue = userRes.status === 'fulfilled' ? userRes.value : null
+      const markdown = joinBlocks(renderRevenue(revRes.value, stakers, flow, ctx), userRevenue ? renderUserRevenue(userRevenue) : null)
       return output(ctx, fit(markdown, ctx), {
         revenue: { ...revRes.value, history: revRes.value.history ? { range: revRes.value.history.range, bucketSeconds: revRes.value.history.bucketSeconds } : null },
         stakers: stakers ? { ...stakers, series: (stakers.series ?? []).map(s => ({ pot: s.pot, points: s.points?.length ?? 0 })) } : null,
         flow,
+        // Net User Revenue; a null window is not fully published (never 0). Not additive with `revenue`.
+        userRevenue,
       }, errors)
     }
 
