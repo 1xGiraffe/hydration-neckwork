@@ -23,6 +23,8 @@ import { loadExplorerAssets } from '../services/explorerAssets.ts'
 import { initExplorerService } from '../services/explorerService.ts'
 import {
   runAccountRevenue,
+  runAccountUserRevenue,
+  runUserRevenueHourly,
   runXcmArrivals,
   runAccountTradeVolume,
   runOmnipoolOwnerIntervals,
@@ -108,6 +110,14 @@ const JOBS: DerivationJob[] = [
   // none of which they write); its route search reads registry decimals, so it
   // shares the registry guard.
   { model: 'pair_route_ohlc', run: runPairRouteOhlc, needsAssets: true },
+  // User revenue, LAST: the slowest jobs (a month build is ~1-2 min; each job
+  // spends at most USER_REVENUE_CYCLE_BUDGET_S per cycle, head first, history in
+  // the bounded catch-up lane), so they never delay the jobs above. It reads the
+  // revenue fold's cut (revenue_events' watermarks) and values at ohlc_1h, so it
+  // follows revenue_events; the account fold runs first because the hourly fold
+  // folds a month's hours from the exposure anchor the account fold writes.
+  { model: 'account_user_revenue', run: runAccountUserRevenue, needsAssets: true },
+  { model: 'user_revenue_hourly', run: runUserRevenueHourly, needsAssets: true },
 ]
 
 export interface RunCycleDeps {
