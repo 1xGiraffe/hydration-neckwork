@@ -19,8 +19,10 @@ describe('a sweep records every attempt, answered or not', () => {
   it('records the activity leaderboards unanswerable members and its failed reads', () => {
     const sweep = body('async function refreshActivityLeaderboardUncached')
 
-    // Both arms: the null-total answer and the thrown read.
-    expect(sweep.match(/total: null, complete: false, countedAt/g)?.length).toBe(2)
+    // Both arms — the null-total answer and the thrown read — record through
+    // failedRecountEntry, which writes a null attempt for a member with no total yet.
+    expect(sweep.match(/failedRecountEntry\(byGkey\.get\(gkey\), gkey, /g)?.length).toBe(2)
+    expect(body('export function failedRecountEntry')).toContain('total: null, complete: false, countedAt')
     // And neither arm skips the member without writing one.
     expect(sweep).not.toContain('if (!result || result.total.total == null) continue')
   })
@@ -38,8 +40,7 @@ describe('a sweep records every attempt, answered or not', () => {
     const persist = body('async function persistActivityTotals')
     expect(persist).toContain('entry.total != null')
 
-    const rank = explorerService.slice(explorerService.indexOf('let rankedDepth = 0'))
-    expect(rank.slice(0, 300)).toContain('entry.total == null')
+    expect(body('export function activityRankedDepth')).toContain('entry.total == null')
   })
 
   // The queue is the observable half of the rule, and it is pure.

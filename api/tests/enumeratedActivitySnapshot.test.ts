@@ -179,7 +179,7 @@ describe('the prewarm is bounded by demand as well as by time', () => {
   it('records only what a feed endpoint was asked for', () => {
     expect(sites(/noteHotActivityScope\(/g)).toBe(2)   // definition + one call
     expect(body('async function getScopedAccountActivity')).toContain('noteHotActivityScope(cacheScope, accounts)')
-    for (const name of ['async function scopedListTotal', 'async function activityLeaderboardTotal',
+    for (const name of ['async function scopedListTotal', 'async function activityLeaderboardScope', 'export async function recountActivityLeaderboardMember',
       'export async function getAddressListTotal', 'export async function getTagListTotal']) {
       expect(body(name), name).not.toContain('noteHotActivityScope')
     }

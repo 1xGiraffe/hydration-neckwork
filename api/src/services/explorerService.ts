@@ -12,7 +12,7 @@ import { BUCKET_HISTORY_CLOSED_TTL_MS, BUCKET_HISTORY_FINALITY_SEC, BUCKET_HISTO
 import { OMNI_FIXED, omnipoolRemoveLiquidity, withStableswapSharePrices, xykReserveAssets, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
 import { currentLmRewardGenerationSql, lmCountedClaimable, lmCountedRewardRowsSql, loadLmRewards, type LmRewardRow } from './lmRewardSnapshot.ts'
 import { headSingleFlight } from './headSingleFlight.ts'
-import { cached, cachedFound, cachedSwr, cacheExpiry, cacheRefresh, seedStale } from './cache.ts'
+import { cached, cachedFound, cachedSwr, cacheExpiry, cacheInstall, cacheRefresh, peekCached, seedStale } from './cache.ts'
 import { allocateFundingPools } from './dcaFunding.ts'
 import { NOMINAL_BLOCKS_PER_HOUR, blocksPerHour, measuredParaBlockMs, newestBlockTimestampsSql, paraBlockMs } from './blockTime.ts'
 import { RareEventLedger } from './rareEventLedger.ts'
@@ -24339,10 +24339,20 @@ const EXACT_ACTIVITY_QUERY_SETTINGS = { max_query_size: '33554432' }
 const EXACT_TOTAL_LOG_COMMENT = 'activity:exact-total'
 const EXACT_LOCATE_LOG_COMMENT = 'activity:exact-locate'
 
+// The total runs at 4 threads, not the client's 8: its peak memory is per-thread
+// aggregation state over the deepest feeds, and on 2026-10-04/05 two entities reached
+// 3.2–3.69 GiB twice daily and one count failed at 3.65 GiB (MEMORY_LIMIT_EXCEEDED).
+// Replayed on the captured plans (2026-10-05): liquidity-mining 2.89 → 2.44 GiB
+// (7.9 → 9.6 s), fee-processor 2.87 → 2.44 GiB (6.4 → 7.3 s), 0x7279…d24b 1.22 →
+// 1.21 GiB (2.6 → 3.2 s), every total identical; 2 threads only reached 2.1 GiB at
+// twice the time, so ~2 GiB is the plan's own floor (its sets), not threads. The
+// locate query keeps 8: it serves a page, the total mostly the background sweep.
+const EXACT_TOTAL_MAX_THREADS = 4
+
 async function countExactActivity(plan: ExactActivityPlan): Promise<number> {
   const res = await client.query({
     query: `${perBlockSql(plan)} SELECT toString(sum(rows)) AS total FROM per_block`,
-    clickhouse_settings: { ...EXACT_ACTIVITY_QUERY_SETTINGS, log_comment: EXACT_TOTAL_LOG_COMMENT }, format: 'JSONEachRow',
+    clickhouse_settings: { ...EXACT_ACTIVITY_QUERY_SETTINGS, max_threads: EXACT_TOTAL_MAX_THREADS, log_comment: EXACT_TOTAL_LOG_COMMENT }, format: 'JSONEachRow',
   })
   return Number((await res.json<{ total: string }>())[0]?.total ?? 0)
 }
@@ -26304,24 +26314,60 @@ async function scopedListTotal(accounts: string[], scope: string, query: ScopedL
 // until the hold lapsed. A count that is not held is simply made again on the next
 // refresh, which is what every count was before this existed.
 async function heldActivityTotal(accounts: string[], key: string, mark: number, query: ScopedListQuery): Promise<ScopedListTotal> {
-  const counted = await cachedFound(`${key}:count:w${mark}`, ACTIVITY_WATERMARK_HOLD_MS,
+  const counted = await cachedFound(heldActivityTotalKey(key, mark), ACTIVITY_WATERMARK_HOLD_MS,
     () => countAccountActivity(accounts, query.type ?? 'all', query.action, query.value ?? {}, query.from, query.to),
     counted => counted.complete && builtAtWatermark(counted.generation, mark))
   return { total: counted.total, complete: counted.complete }
 }
 
+// The held recount's key under a scope's watermark (heldActivityTotal).
+function heldActivityTotalKey(key: string, mark: number): string {
+  return `${key}:count:w${mark}`
+}
+
+// Hand a count made OUTSIDE scopedListTotal (the activity sweep's fresh recount) to the
+// two caches a live activity list total is read through, under exactly the keys,
+// lifetimes, generation and hold condition scopedListTotal/heldActivityTotal would have
+// stored it with — so the detail page serves the number the directory just persisted.
+// Both caches are keyed by the scope's newest block, which a backfill BELOW it does not
+// move, so without this the page would keep serving the pre-backfill total for as long
+// as the entries live.
+export function installActivityListTotal(key: string, mark: number, counted: CountedActivityTotal): ScopedListTotal {
+  const total: ScopedListTotal = { total: counted.total, complete: counted.complete }
+  if (counted.complete && builtAtWatermark(counted.generation, mark)) {
+    cacheInstall(heldActivityTotalKey(key, mark), counted, ACTIVITY_WATERMARK_HOLD_MS)
+  }
+  if (!counted.complete) partialTotalLists.set(key, Date.now() + LIST_TOTAL_PARTIAL_STALE_MS)
+  const partial = partialTotalLists.has(key)
+  cacheInstall(key, total,
+    partial ? LIST_TOTAL_PARTIAL_STALE_MS : LIST_TOTAL_STALE_MS,
+    partial ? LIST_TOTAL_PARTIAL_FRESH_MS : LIST_TOTAL_FRESH_MS,
+    partial ? undefined : mark)
+  return total
+}
+
 // undefined = unknown account/tag (404). `total: null` = not even the narrowest
 // candidate window could be assembled, so the list has no countable prefix at all.
 export async function getAddressListTotal(addressInput: string, query: ScopedListQuery): Promise<ScopedListTotal | undefined> {
-  const resolved = await resolveRelatedAccounts(addressInput)
-  if (!resolved) return undefined
-  return scopedListTotal(resolved.related, `addr:${resolved.norm.accountId}`, query)
+  const scope = await addressListScope(addressInput)
+  return scope && scopedListTotal(scope.accounts, scope.scope, query)
 }
 
 export async function getTagListTotal(tagId: string, query: ScopedListQuery): Promise<ScopedListTotal | undefined> {
+  const scope = tagListScope(tagId)
+  return scope && scopedListTotal(scope.accounts, scope.scope, query)
+}
+
+// The accounts and cache scope of an account's / a tag's list totals — shared with the
+// activity sweep (activityLeaderboardScope), which must count the same accounts and
+// refresh the same keys.
+async function addressListScope(addressInput: string): Promise<{ accounts: string[]; scope: string } | undefined> {
+  const resolved = await resolveRelatedAccounts(addressInput)
+  return resolved ? { accounts: resolved.related, scope: `addr:${resolved.norm.accountId}` } : undefined
+}
+function tagListScope(tagId: string): { accounts: string[]; scope: string } | undefined {
   const members = tagMembers(tagId)
-  if (!members) return undefined
-  return scopedListTotal(members, `tag:${tagId}`, query)
+  return members ? { accounts: members, scope: `tag:${tagId}` } : undefined
 }
 
 // How many rows the extrinsics list holds: extrinsics the account SIGNED ∪
@@ -28185,6 +28231,8 @@ const ACTIVITY_LEADERBOARD_POOL_TTL_MS = 6 * 3_600_000
 // and the table, and renders no number rather than an old one (measured: a row last
 // counted 31 days earlier read 146 against a live 226).
 const ACTIVITY_LEADERBOARD_CARRIED_MAX_AGE_MS = 36 * 3_600_000
+// How far under the ingestion head a count's source watermark is taken (~1 min of blocks).
+const ACTIVITY_SOURCE_HEAD_MARGIN_BLOCKS = 10
 
 interface ActivityLeaderboardEntry {
   // The directory's grouping key: a tag id for a tagged member, else the account id.
@@ -28203,6 +28251,43 @@ interface ActivityLeaderboardEntry {
   // When this total was established. Drives which members a cycle recounts: the pass
   // revisits the oldest first and leaves everything inside its TTL alone.
   countedAt?: string
+  // Set when the latest recount of an entry that HAS a valid total failed (a thrown
+  // read, or a member that suddenly answered no total). The previous total stays — it
+  // is still the swept table's row and still what the directory shows, under its own
+  // `countedAt` — instead of being replaced by a null, and this stamp is the visible
+  // state saying the recount did not land. It also moves the entry to the back of the
+  // due queue (activityLeaderboardEntryAge), like a recorded null attempt.
+  recountFailedAt?: string
+  // The entity's SOURCE watermark at counting time: the indexed raw head the count was
+  // taken at, and how many DISTINCT account_activity_v3 identities (account,
+  // block_height, event_index) of its accounts (a tag's members) lay at or below it,
+  // read just BEFORE the count. A later cycle finding more identities at or below that
+  // head knows raw was ingested backward under the count (a backfill or a repair) and
+  // re-queues the entity at once instead of leaving the total wrong until its TTL
+  // (activityBackfilledGkeys). Rows above the head are forward growth, which the TTL
+  // already covers, so a busy account is not re-queued by its own live activity.
+  // Identities, never physical rows: the table is a ReplacingMergeTree, so a merge
+  // collapsing replayed duplicates LOWERS count() (611k duplicates across the swept set
+  // on 2026-10-05) and would offset — hide — a backfill of the same size. `rawKeys`
+  // replaced the physical `rawRefs`, so an entry counted under the old measure carries
+  // no comparable watermark and waits its TTL instead of being compared across measures.
+  rawHead?: number
+  rawKeys?: number
+  // The money-market source's identities at or below the same head (ActivitySourceMarks):
+  // the count also reads account_money_market_activity, which is fed from its own raw
+  // ingestion, so a repair of it alone re-queues the entity too. Absent on an entry
+  // counted before this source was watermarked; compared once a recount sets it.
+  rawMmKeys?: number
+  // The sources' change marks over the same rows (ActivitySourceMarks: activityChange,
+  // mmChange), read with the identities: a row replaced under its key moves them while
+  // the identity counts stand still. Absent on an entry counted before they were
+  // watermarked; compared once a recount sets them.
+  rawChange?: string
+  rawMmChange?: string
+  // The money-market source's content fingerprint (ActivitySourceMarks.mmFp): catches a
+  // correction landing in the same second as the row it replaces, which max(ingested_at)
+  // — second resolution — cannot see. Absent on an entry counted before it existed.
+  rawMmFp?: string
 }
 
 interface ActivityLeaderboardPoolMember { account: string; refs: number }
@@ -28216,6 +28301,14 @@ interface ActivityLeaderboard {
   pool?: ActivityLeaderboardPoolMember[]
   refsOutside?: number
   poolAt?: string
+  // Per system tag, the sum of its members' reference counts — the upper bound of the
+  // tag row's feed total (every feed row mentions a member; an event naming several is
+  // counted once per member, so the sum only over-counts). A tag row none of whose
+  // members is in the pool is otherwise unbounded by `refsOutside`, which bounds ONE
+  // account, while a tag's feed is many accounts' together.
+  tagRefs?: Record<string, number>
+  // The bound `rankedDepth` was established against (activityLeaderboardBound).
+  bound?: number
 }
 
 let activityLeaderboard: ActivityLeaderboard | null = null
@@ -28223,10 +28316,12 @@ let activityLeaderboard: ActivityLeaderboard | null = null
 // The pool, largest reference counts first, plus the largest count left outside it — the
 // bound `rankedDepth` is established against. Re-derived only when the published one has
 // aged out; every cycle in between reuses it.
-async function activityLeaderboardPool(published: ActivityLeaderboard | null): Promise<{ pool: ActivityLeaderboardPoolMember[]; refsOutside: number; poolAt: string }> {
-  const fresh = published?.pool?.length && published.poolAt
+async function activityLeaderboardPool(published: ActivityLeaderboard | null): Promise<{ pool: ActivityLeaderboardPoolMember[]; refsOutside: number; poolAt: string; tagRefs: Record<string, number> }> {
+  // A published pool without tag sums predates them, so it is re-derived rather than
+  // reused with an unbounded tag row.
+  const fresh = published?.pool?.length && published.poolAt && published.tagRefs
     && Date.now() - Date.parse(published.poolAt) < ACTIVITY_LEADERBOARD_POOL_TTL_MS
-  if (fresh) return { pool: published.pool as ActivityLeaderboardPoolMember[], refsOutside: published.refsOutside ?? 0, poolAt: published.poolAt as string }
+  if (fresh) return { pool: published.pool as ActivityLeaderboardPoolMember[], refsOutside: published.refsOutside ?? 0, poolAt: published.poolAt as string, tagRefs: published.tagRefs as Record<string, number> }
   const res = await client.query({
     query: `SELECT account, toString(count()) AS refs FROM price_data.account_activity_v3
             GROUP BY account
@@ -28238,10 +28333,81 @@ async function activityLeaderboardPool(published: ActivityLeaderboard | null): P
     .map(r => ({ account: r.account, refs: Number(r.refs) }))
   return {
     pool: rows.slice(0, ACTIVITY_LEADERBOARD_POOL),
-    // Nothing outside the pool can hold more feed rows than this.
+    // No single account outside the pool can hold more feed rows than this.
     refsOutside: rows[ACTIVITY_LEADERBOARD_POOL]?.refs ?? 0,
     poolAt: new Date().toISOString(),
+    tagRefs: await activityLeaderboardTagRefs(),
   }
+}
+
+// Every system tag's summed member reference counts (see ActivityLeaderboard.tagRefs).
+// ~1,300 members over 28 tags, read on account_activity_v3's leading key: ~1.8 s on the
+// pool's own six-hour schedule. A failure throws, so no board is published claiming a
+// bound it did not establish.
+async function activityLeaderboardTagRefs(): Promise<Record<string, number>> {
+  const tags = allTags().map(tag => ({ tagId: tag.tagId, members: [...new Set(tag.members.filter(m => ACCOUNT_RE.test(m)))] }))
+  const accounts = [...new Set(tags.flatMap(t => t.members))]
+  const refs = new Map<string, number>()
+  await mapParamChunks(accounts, async chunk => {
+    const res = await client.query({
+      query: `SELECT account, toString(count()) AS refs FROM price_data.account_activity_v3
+              WHERE account IN {accounts:Array(String)} GROUP BY account`,
+      query_params: { accounts: chunk }, format: 'JSONEachRow',
+      clickhouse_settings: { max_threads: 4 },
+    })
+    for (const r of await res.json<{ account: string; refs: string }>()) refs.set(r.account, Number(r.refs))
+  }, { concurrency: CHUNK_QUERY_CONCURRENCY })
+  const out: Record<string, number> = {}
+  for (const tag of tags) out[tag.tagId] = tag.members.reduce((sum, m) => sum + (refs.get(m) ?? 0), 0)
+  return out
+}
+
+/**
+ * The largest feed total any directory row WITHOUT an established total could have —
+ * what a ranked entry must clear to be provably in order. A single account outside
+ * the pool is bounded by `refsOutside`; a pooled member, or a tag row, that has no
+ * total (never counted, or uncountable) by its own references (a tag's summed over
+ * its members, `tagRefs`). Partial totals are floors that rank below every exact one
+ * by construction (they never establish a rank), so they are not part of this bound.
+ */
+export function activityLeaderboardBound(
+  refsOutside: number,
+  pool: readonly ActivityLeaderboardPoolMember[],
+  tagRefs: Readonly<Record<string, number>>,
+  entries: ReadonlyMap<string, ActivityLeaderboardEntry>,
+  gkeyOf: (account: string) => string,
+): number {
+  let bound = refsOutside
+  const uncounted = (gkey: string) => entries.get(gkey)?.total == null
+  for (const member of pool) {
+    const gkey = gkeyOf(member.account)
+    if (uncounted(gkey)) bound = Math.max(bound, tagRefs[gkey] ?? member.refs)
+  }
+  for (const [tagId, refs] of Object.entries(tagRefs)) {
+    if (uncounted(tagId)) bound = Math.max(bound, refs)
+  }
+  return bound
+}
+
+/** The leading run of exact totals that clear `bound`: the provably ordered ranks. */
+export function activityRankedDepth(entries: readonly ActivityLeaderboardEntry[], bound: number): number {
+  let rankedDepth = 0
+  for (const entry of entries) {
+    // A partial total is a floor, so it can never establish a rank.
+    if (!entry.complete || entry.total == null || entry.total < bound) break
+    rankedDepth++
+  }
+  return rankedDepth
+}
+
+/**
+ * The entry a recount that did not land leaves behind. A member with a valid total
+ * keeps it (still the swept table's row), stamped `recountFailedAt`; one without
+ * records the attempt as a null total, so it moves to the back of the due queue.
+ */
+export function failedRecountEntry(prior: ActivityLeaderboardEntry | undefined, gkey: string, now: string): ActivityLeaderboardEntry {
+  if (prior?.total != null) return { ...prior, recountFailedAt: now }
+  return { gkey, total: null, complete: false, countedAt: now }
 }
 
 // The directory row a pool member's total belongs to: its tag when it has one, because the
@@ -28271,7 +28437,7 @@ let directoryPoolGkeys: string[] = []
 
 // Pool members for those gkeys: an account each cycle can count FROM, since a total is
 // established through an account (a tagged one resolves to its tag's own feed — see
-// activityLeaderboardTotal). Reference-pool members are skipped, being counted already.
+// recountActivityLeaderboardMember). Reference-pool members are skipped, being counted already.
 // `refs: 0` places these after the reference pool in the due order, so the busiest
 // accounts on the chain keep priority over whatever currently leads a directory page.
 export function demandPoolMembers(
@@ -28292,23 +28458,276 @@ export function demandPoolMembers(
   return out
 }
 
-// Count one pool member through the very endpoints the detail pages read, so the
-// directory cannot describe an account differently from its own page — and so the count
-// lands in the same cache that page will hit.
-async function activityLeaderboardTotal(account: string): Promise<{ gkey: string; total: ScopedListTotal } | null> {
-  const tag = tagForAccount(account)
-  const query: ScopedListQuery = { tab: 'activity', type: 'all' }
-  if (tag) {
-    const total = await getTagListTotal(tag.tagId, query)
-    return total ? { gkey: tag.tagId, total } : null
+// The accounts whose activity rows an entity's feed is built over: a tag's members,
+// else the account itself.
+function activitySourceAccounts(gkey: string): string[] {
+  if (ACCOUNT_RE.test(gkey)) return [gkey]
+  return [...new Set((tagMembers(gkey) ?? []).filter(m => ACCOUNT_RE.test(m)))]
+}
+
+/**
+ * An entity's source watermark: per INDEPENDENTLY INDEXED source its exact count reads,
+ * the DISTINCT identities of its accounts at or below one head, plus a CHANGE MARK over
+ * the same rows. Two sources, because the count reads two account-first tables fed from
+ * different raw ingestion:
+ *   - `activity`: account_activity_v3 (from raw_events) — identity (account, block_height,
+ *     event_index), the sort key. Every other counted arm (swaps, DCA, liquidity,
+ *     transfers, the enumerated families) is derived from the same raw_events rows, so a
+ *     backfill under any of them raises this one too.
+ *   - `mm`: account_money_market_activity (from raw_money_market_events, the EVM log
+ *     decode, ingested and repaired on its own) under the accounts' truncated-H160 forms
+ *     — identity (account_id, block_height, event_index, event_name), its sort key. Every
+ *     form, module accounts included: the count's transfer suppression reads them all.
+ * Each is compared on its own (activityBackfilledGkeys), so growth in one can never be
+ * offset by the other.
+ *
+ * An identity count does not move when a row is REPLACED under the same key (a repair
+ * re-decoding a money-market log with a corrected pool_address, a re-decoded event), and
+ * FINAL then reads only the replacement — so each source also carries a change mark over
+ * the same deduplicated rows, which does:
+ *   - `mmFp` (account_money_market_activity): a content fingerprint — groupBitXor of
+ *     cityHash64 over every column of the deduplicated row, key and ingested_at included,
+ *     as a decimal UInt64. A replacement that changes any column moves it, including one
+ *     ingested in the SAME SECOND as the row it replaces (ingested_at is a DateTime, so
+ *     max(ingested_at) stands still for it). An identical replay moves it too (its
+ *     ingested_at differs), which costs one spare recount. Measured 2026-10-05 on the
+ *     three largest money-market ids (router, 0x…090a, Omnipool: 9.45M of the table's
+ *     12.97M rows): 0.35–0.45 s / 1.64 GiB / 1.3–1.5 CPU-s against 0.11 s / 712 MiB /
+ *     0.4 CPU-s for identities + max(ingested_at) alone; the router alone (6.66M rows)
+ *     0.29 s against 0.08–0.12 s.
+ *   - `mmChange` (account_money_market_activity): max(ingested_at), the table's version
+ *     column. Subsumed by `mmFp`, but kept so an entry stored before the fingerprint
+ *     existed is still compared on something until its next recount sets `rawMmFp`.
+ *   - `activityChange` (account_activity_v3): the table carries no ingest time, so its
+ *     mark is a content fingerprint of the same shape over every column, key included
+ *     (so two accounts' rows for the same event cannot cancel). A replacement that
+ *     changes any column moves it; an identical replay does not. Measured on the
+ *     Omnipool account (78.2M identities, 2026-10-05): 1.96 s / 9.2 GiB uncompressed
+ *     against 0.99 s / 5.7 GiB for the bare identity count.
+ * A Nullable column enters a fingerprint as isNull(c) plus ifNull(c, default): a NULL
+ * argument makes cityHash64 NULL, and groupBitXor skips a NULL — the row would drop out
+ * of the mark entirely, and a correction to it would never move it.
+ * A mark is compared for any movement, not growth: it has no order to grow in.
+ */
+export interface ActivitySourceMarks { activity: number; mm: number; activityChange: string; mmChange: string; mmFp: string }
+type ActivitySource = 'activity' | 'mm'
+
+interface ActivitySourceTable {
+  table: string
+  column: string
+  // The ids this source files an entity's accounts under.
+  idsOf: (accounts: string[]) => string[]
+  // The change mark's aggregate over one id's deduplicated rows (as a String), and how
+  // the per-id marks of an entity's ids combine ('' = the entity has no rows).
+  change: string
+  combine: (a: string, b: string) => string
+  // An optional second mark, a content fingerprint combined by XOR ('' when absent).
+  fingerprint?: string
+}
+// XOR of decimal UInt64 fingerprints; '' is the identity.
+function xorFingerprints(a: string, b: string): string {
+  if (!a) return b
+  if (!b) return a
+  return (BigInt(a) ^ BigInt(b)).toString()
+}
+// The later of two 'YYYY-MM-DD hh:mm:ss' stamps (they order as text).
+function laterStamp(a: string, b: string): string {
+  return a > b ? a : b
+}
+const ACTIVITY_SOURCE_TABLES: Record<ActivitySource, ActivitySourceTable> = {
+  activity: { table: 'price_data.account_activity_v3', column: 'account', idsOf: accounts => accounts,
+    change: 'toString(groupBitXor(cityHash64(account, block_height, event_index, isNull(extrinsic_index), ifNull(extrinsic_index, 0), event_name, block_timestamp, is_module_transfer, asset_id, amount, has_amount)))',
+    combine: xorFingerprints,
+  },
+  mm: {
+    table: 'price_data.account_money_market_activity', column: 'account_id',
+    idsOf: accounts => [...new Set(accounts.map(evmAccountForm).filter((form): form is string => !!form))],
+    change: 'toString(max(ingested_at))',
+    combine: laterStamp,
+    fingerprint: "toString(groupBitXor(cityHash64(account_id, block_height, event_index, event_name, block_timestamp, asset_address, isNull(pool_address), ifNull(pool_address, ''), isNull(amount), ifNull(amount, ''), liquidated_collateral_amount, ingested_at)))",
+  },
+}
+
+/**
+ * Each entity's source watermark (ActivitySourceMarks) at its own head, summed over its
+ * source accounts (accounts are disjoint, so the sum is exact). Heads are per CYCLE
+ * (every count of one cycle shares the head read at its start), so the entities group
+ * into a few heads, and each group is one query per source per param chunk on the
+ * table's leading key (account, block_height) with a constant bound. FINAL deduplicates
+ * by the sort key — exactly the identity — and stays per partition
+ * (do_not_merge_across_partitions_select_final: both tables partition by the block's
+ * month, so no identity spans two partitions). Measured over the 477 swept entities'
+ * accounts (150.9M identities, 2026-10-05): 3.1 s / 547 MiB against 1.4 s / 23 MiB for
+ * the physical count() it replaced, which read 611k replayed duplicates as rows;
+ * uniqExact or groupBitmap over the identity cost 9.9–11 s / 4.6 s on the Omnipool
+ * account alone against FINAL's 1.35 s.
+ */
+async function activitySourceRefs(heads: ReadonlyMap<string, number>): Promise<Map<string, ActivitySourceMarks>> {
+  const sources = Object.keys(ACTIVITY_SOURCE_TABLES) as ActivitySource[]
+  const idsOf = new Map<string, Record<ActivitySource, string[]>>()
+  for (const gkey of heads.keys()) {
+    const accounts = activitySourceAccounts(gkey)
+    idsOf.set(gkey, { activity: ACTIVITY_SOURCE_TABLES.activity.idsOf(accounts), mm: ACTIVITY_SOURCE_TABLES.mm.idsOf(accounts) })
   }
-  const total = await getAddressListTotal(account, query)
-  return total ? { gkey: account, total } : null
+  const refs = new Map<string, { refs: number; change: string; fp: string }>() // `${source}|${head}|${id}` → identities, change mark, fingerprint
+  for (const source of sources) {
+    const { table, column, change, fingerprint } = ACTIVITY_SOURCE_TABLES[source]
+    const byHead = new Map<number, Set<string>>()
+    for (const [gkey, head] of heads) {
+      let group = byHead.get(head)
+      if (!group) byHead.set(head, (group = new Set()))
+      for (const id of idsOf.get(gkey)![source]) group.add(id)
+    }
+    for (const [head, ids] of byHead) {
+      if (!ids.size) continue
+      await mapParamChunks([...ids], async chunk => {
+        const res = await client.query({
+          query: `SELECT ${column} AS id, toString(count()) AS refs, ${change} AS change, ${fingerprint ?? "''"} AS fp FROM ${table} FINAL
+                  WHERE ${column} IN {ids:Array(String)} AND block_height <= {head:UInt32}
+                  GROUP BY ${column}`,
+          query_params: { ids: chunk, head }, format: 'JSONEachRow',
+          clickhouse_settings: { max_threads: 4, do_not_merge_across_partitions_select_final: 1 },
+        })
+        for (const r of await res.json<{ id: string; refs: string; change: string; fp: string }>()) refs.set(`${source}|${head}|${r.id}`, { refs: Number(r.refs), change: r.change, fp: r.fp })
+      }, { concurrency: CHUNK_QUERY_CONCURRENCY })
+    }
+  }
+  const out = new Map<string, ActivitySourceMarks>()
+  for (const [gkey, head] of heads) {
+    const ids = idsOf.get(gkey)!
+    const sum = (source: ActivitySource) => ids[source].reduce((n, id) => n + (refs.get(`${source}|${head}|${id}`)?.refs ?? 0), 0)
+    const mark = (source: ActivitySource) => ids[source].reduce((m, id) => ACTIVITY_SOURCE_TABLES[source].combine(m, refs.get(`${source}|${head}|${id}`)?.change ?? ''), '')
+    const fp = (source: ActivitySource) => ids[source].reduce((m, id) => xorFingerprints(m, refs.get(`${source}|${head}|${id}`)?.fp ?? ''), '')
+    out.set(gkey, { activity: sum('activity'), mm: sum('mm'), activityChange: mark('activity'), mmChange: mark('mm'), mmFp: fp('mm') })
+  }
+  return out
+}
+
+/**
+ * The entities whose sources gained identities at or below the head their stored count
+ * was taken at (backward ingestion), or whose change mark over those rows moved (a row
+ * replaced under the same key) — any one source is enough. An entry stored before a
+ * source or a mark was watermarked (no `rawMmKeys` / `rawChange` / `rawMmChange` / `rawMmFp`) is
+ * compared on what it has, and gains the rest at its next recount.
+ */
+export function activityBackfilledGkeys(entries: Iterable<ActivityLeaderboardEntry>, currentRefs: ReadonlyMap<string, ActivitySourceMarks>): Set<string> {
+  const out = new Set<string>()
+  for (const e of entries) {
+    if (e.total == null || e.rawKeys == null) continue
+    const now = currentRefs.get(e.gkey)
+    if (!now) continue
+    if (now.activity > e.rawKeys || (e.rawMmKeys != null && now.mm > e.rawMmKeys)
+      || (e.rawChange != null && now.activityChange !== e.rawChange)
+      || (e.rawMmChange != null && now.mmChange !== e.rawMmChange)
+      || (e.rawMmFp != null && now.mmFp !== e.rawMmFp)) out.add(e.gkey)
+  }
+  return out
+}
+
+// The scope a directory row's activity total is the detail page's list total for, and
+// the cache key that page's total lives under — resolved exactly as getAddressListTotal
+// and getTagListTotal resolve it (addressListScope / tagListScope).
+export interface ActivityListScope { gkey: string; accounts: string[]; key: string }
+const ACTIVITY_LEADERBOARD_QUERY: ScopedListQuery = { tab: 'activity', type: 'all' }
+
+async function activityLeaderboardScope(account: string): Promise<ActivityListScope | null> {
+  const tag = tagForAccount(account)
+  const scope = tag ? tagListScope(tag.tagId) : await addressListScope(account)
+  if (!scope) return null
+  return { gkey: tag ? tag.tagId : account, accounts: scope.accounts, key: scopedListTotalKey(scope.scope, ACTIVITY_LEADERBOARD_QUERY) }
+}
+
+export interface ActivityRecountDeps {
+  sourceMarks: (gkey: string, head: number) => Promise<ActivitySourceMarks>
+  scope: (account: string) => Promise<ActivityListScope | null>
+  watermark: (accounts: string[]) => Promise<number>
+  count: (accounts: string[]) => Promise<CountedActivityTotal>
+  // Re-read the enumerated snapshot the count is built from, at the scope's current
+  // watermark, so the next count is not answered by a superseded one.
+  refreshSnapshot: (accounts: string[]) => Promise<void>
+}
+const ACTIVITY_RECOUNT_DEPS: ActivityRecountDeps = {
+  sourceMarks: async (gkey, head) => (await activitySourceRefs(new Map([[gkey, head]]))).get(gkey) ?? { activity: 0, mm: 0, activityChange: '', mmChange: '', mmFp: '' },
+  scope: activityLeaderboardScope,
+  watermark: accountActivityWatermark,
+  // The detail page's own counting function, with the page's query (ACTIVITY_LEADERBOARD_QUERY).
+  count: accounts => countAccountActivity(accounts, ACTIVITY_LEADERBOARD_QUERY.type!, undefined, {}),
+  // The key the count's exact plan reads (enumeratedActivityKey(accounts, 'all')).
+  refreshSnapshot: async accounts => { await refreshEnumeratedActivitySnapshot(accounts) },
+}
+// How many times a recount whose count came from a superseded snapshot re-reads the
+// snapshot and counts again before it gives up for the cycle.
+const ACTIVITY_RECOUNT_STALE_RETRIES = 2
+
+export interface ActivityRecountSource { rawHead: number; rawKeys: number; rawMmKeys: number; rawChange: string; rawMmChange: string; rawMmFp: string }
+export type ActivityRecountResult =
+  | { gkey: string; total: ScopedListTotal; source?: ActivityRecountSource; stale?: undefined }
+  // The count was built from an enumerated snapshot older than the scope's watermark even
+  // after the bounded re-reads: nothing was installed, and nothing may be persisted.
+  | { gkey: string; stale: { generation: number | undefined; mark: number }; total?: undefined; source?: undefined }
+
+/**
+ * One sweep recount: the entity's source watermark, then a FRESH count through the
+ * detail page's counting function, then that count handed to the page's caches.
+ *
+ * Fresh, never through scopedListTotal: both caches a list total is read through are
+ * keyed by the scope's newest block (the SWR entry's generation and the held exact
+ * count's key), which a backfill BELOW it does not move. A recount the source watermark
+ * re-queued would otherwise be answered by the very total it exists to replace — and
+ * stored beside the NEW watermark, which would then never re-queue it again. So the
+ * watermark is stored only with a count made after it was read, and the caches are
+ * refreshed with that count (installActivityListTotal), so page and directory agree.
+ *
+ * The watermark is read BEFORE the count: a row backfilled after that read raises the
+ * refs a later check sees, so it is never missed (one backfilled in between is counted
+ * already, and costs at most one spare recount). It is returned only when the count
+ * landed under the gkey it was read for.
+ *
+ * "Fresh" includes the snapshot the exact count is built from. cachedSwr serves a
+ * superseded enumerated snapshot while its refresh runs, so a count can carry a
+ * generation BELOW the scope's watermark — rows that predate the act that moved it.
+ * Installed, that count would stand under the current watermark's keys; persisted, it
+ * would sit beside the new source watermark, which would never re-queue it. So only a
+ * count built at the watermark (builtAtWatermark: generation >= mark — a newer one was
+ * read after a later act, never before this one) is installed or returned for
+ * persisting. A stale one re-reads the snapshot and counts again, at most
+ * ACTIVITY_RECOUNT_STALE_RETRIES times; past that the result is `stale` and the caller
+ * leaves the member due, unpersisted.
+ */
+export async function recountActivityLeaderboardMember(
+  gkey: string, account: string, head: number, deps: ActivityRecountDeps = ACTIVITY_RECOUNT_DEPS,
+  staleRetries = ACTIVITY_RECOUNT_STALE_RETRIES,
+): Promise<ActivityRecountResult | null> {
+  const marks = await deps.sourceMarks(gkey, head)
+  const scope = await deps.scope(account)
+  if (!scope) return null
+  // The watermark the page's caches are keyed by, read before the count like the page's
+  // own scopedListTotal reads it before counting.
+  const mark = await deps.watermark(scope.accounts)
+  let counted = await deps.count(scope.accounts)
+  for (let retry = 0; !builtAtWatermark(counted.generation, mark); retry++) {
+    if (retry >= staleRetries) return { gkey: scope.gkey, stale: { generation: counted.generation, mark } }
+    await deps.refreshSnapshot(scope.accounts)
+    counted = await deps.count(scope.accounts)
+  }
+  const total = installActivityListTotal(scope.key, mark, counted)
+  return {
+    gkey: scope.gkey, total,
+    ...(scope.gkey === gkey ? { source: { rawHead: head, rawKeys: marks.activity, rawMmKeys: marks.mm, rawChange: marks.activityChange, rawMmChange: marks.mmChange, rawMmFp: marks.mmFp } } : {}),
+  }
 }
 
 // How long ago a stored total was established. A never-counted member is infinitely due,
 // which is what puts a cold board's members ahead of a warm board's oldest entry.
+// A failed recount (recountFailedAt) counts as an attempt, so the member waits its TTL
+// like any other instead of holding the front of the queue.
 function activityLeaderboardEntryAge(entry: ActivityLeaderboardEntry | undefined): number {
+  const at = Math.max(...[entry?.countedAt, entry?.recountFailedAt].map(t => (t ? Date.parse(t) : NaN)).filter(Number.isFinite))
+  return Number.isFinite(at) ? Date.now() - at : Infinity
+}
+// How old the stored TOTAL is, attempts aside — what the carried entries' max age is
+// judged by, so a recount that keeps failing cannot keep an old number alive.
+function activityLeaderboardCountAge(entry: ActivityLeaderboardEntry | undefined): number {
   if (!entry?.countedAt) return Infinity
   const at = Date.parse(entry.countedAt)
   return Number.isFinite(at) ? Date.now() - at : Infinity
@@ -28332,6 +28751,7 @@ export function activityLeaderboardSchedule(
   memberOfTag: (tagId: string) => string | null,
   ageOf: (entry: ActivityLeaderboardEntry | undefined) => number = activityLeaderboardEntryAge,
   perCycle = ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE,
+  countAgeOf: (entry: ActivityLeaderboardEntry | undefined) => number = ageOf,
 ): { due: Array<[string, ActivityLeaderboardPoolMember]>; dropped: string[] } {
   const byAge = ([a]: [string, unknown], [b]: [string, unknown]) => ageOf(entries.get(b)) - ageOf(entries.get(a))
   const pooled = new Set<string>()
@@ -28355,15 +28775,15 @@ export function activityLeaderboardSchedule(
   const carriedTaken = carriedDue.sort(byAge).slice(0, Math.max(0, perCycle - poolFirst.length))
   const taken = new Set(carriedTaken.map(([gkey]) => gkey))
   for (const [gkey] of carriedDue) {
-    if (!taken.has(gkey) && ageOf(entries.get(gkey)) > ACTIVITY_LEADERBOARD_CARRIED_MAX_AGE_MS) dropped.push(gkey)
+    if (!taken.has(gkey) && countAgeOf(entries.get(gkey)) > ACTIVITY_LEADERBOARD_CARRIED_MAX_AGE_MS) dropped.push(gkey)
   }
   return { due: [...poolFirst, ...carriedTaken], dropped }
 }
 
 // Recount the few members whose stored total has aged out, then publish. Ordering is by
 // (exact before partial, then total), and `rankedDepth` stops at the first rank the
-// reference bound no longer covers — so every page the directory offers is one this pass
-// can stand behind.
+// reference bound no longer covers — the depth the directory's pages then state as the
+// end of the provable ordering.
 async function refreshActivityLeaderboardUncached(): Promise<void> {
   // Start from what is already published — including on a cold process, where that means
   // the persisted ranking. Without this a restart would throw away every count and begin
@@ -28376,7 +28796,7 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
     await persistActivityTotals(published.entries)
     activityTotalsSeeded = true
   }
-  const { pool, refsOutside, poolAt } = await activityLeaderboardPool(published)
+  const { pool, refsOutside, poolAt, tagRefs } = await activityLeaderboardPool(published)
   const byGkey = new Map<string, ActivityLeaderboardEntry>()
   // Carry those entries so a throttled pass deepens the ranking instead of restarting it;
   // a re-counted member simply overwrites its own entry.
@@ -28398,8 +28818,25 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
   // Pool members past ACTIVITY_LEADERBOARD_ENTRY_TTL_MS first, then carried entries from
   // the budget left over (see activityLeaderboardSchedule), at most
   // ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE in all.
+  // An entity whose source gained rows BELOW the head its count was taken at is due now,
+  // whatever its age (AGENTS.md, Swept models: the ingest watermark re-queues it). Only
+  // entries still inside their TTL need the check; a failed check re-queues nothing.
+  const watched = new Map<string, number>()
+  for (const e of byGkey.values()) {
+    if (e.rawHead != null && e.rawKeys != null && e.total != null && activityLeaderboardEntryAge(e) <= ACTIVITY_LEADERBOARD_ENTRY_TTL_MS) watched.set(e.gkey, e.rawHead)
+  }
+  let backfilled = new Set<string>()
+  if (watched.size) {
+    try {
+      backfilled = activityBackfilledGkeys(byGkey.values(), await activitySourceRefs(watched))
+    } catch (error) {
+      console.warn('[explorer] activity totals source-watermark check failed', error)
+    }
+  }
   const { due, dropped } = activityLeaderboardSchedule(
     members, byGkey, activityLeaderboardGkey, tagId => tagMembers(tagId)?.[0] ?? null,
+    e => (e && backfilled.has(e.gkey) ? Infinity : activityLeaderboardEntryAge(e)),
+    ACTIVITY_LEADERBOARD_COUNTS_PER_CYCLE, activityLeaderboardCountAge,
   )
   // Dropped from the table BEFORE the ranking stops carrying them: a failed delete keeps
   // the entry, so the next cycle retries rather than leaving an orphaned stale row that
@@ -28408,7 +28845,12 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
     for (const gkey of dropped) byGkey.delete(gkey)
   }
   let counted = 0
+  let failed = 0
   const countedNow = new Set<string>()
+  // One source head for the whole cycle (see activitySourceRefs), a few blocks under the
+  // ingestion head: the state row can name a block before its rows land, and a row that
+  // landed under the head after the refs read would read as backward ingestion.
+  const cycleHead = due.length ? Math.max(0, (await indexedRawHead()) - ACTIVITY_SOURCE_HEAD_MARGIN_BLOCKS) : 0
   for (const [, member] of due) {
     // Idle between counts so the pass leaves the instance to live ingestion and requests
     // rather than occupying it back to back.
@@ -28418,23 +28860,36 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
     // established (countAccountActivity returns null for the structural pots) or whose
     // read failed would otherwise keep age = Infinity, sort to the front of `due` on
     // EVERY cycle and burn one of the cycle's counts forever — which silently drops the
-    // sweep below the coverage its rate is sized for.
+    // sweep below the coverage its rate is sized for. A member that already HAS a
+    // valid total keeps it through a failed recount (failedRecountEntry).
     try {
-      const result = await activityLeaderboardTotal(member.account)
+      // A fresh count with its source watermark (recountActivityLeaderboardMember).
+      const result = await recountActivityLeaderboardMember(gkey, member.account, cycleHead)
+      // Counted only from a superseded snapshot: neither installed nor persisted, and the
+      // entry is left as it was, so the member stays due for the next cycle.
+      if (result?.stale) {
+        console.warn('[explorer] activity leaderboard member left due: count built below the watermark', member.account, result.stale)
+        counted++
+        continue
+      }
       if (!result || result.total.total == null) {
-        byGkey.set(gkey, { gkey, total: null, complete: false, countedAt: new Date().toISOString() })
+        const entry = failedRecountEntry(byGkey.get(gkey), gkey, new Date().toISOString())
+        if (entry.recountFailedAt) failed++
+        byGkey.set(gkey, entry)
         counted++
         continue
       }
       byGkey.set(result.gkey, {
         gkey: result.gkey, total: result.total.total, complete: result.total.complete,
         countedAt: new Date().toISOString(),
+        ...(result.source ?? {}),
       })
       countedNow.add(result.gkey)
       counted++
     } catch (error) {
       console.warn('[explorer] activity leaderboard member failed', member.account, error)
-      byGkey.set(gkey, { gkey, total: null, complete: false, countedAt: new Date().toISOString() })
+      byGkey.set(gkey, failedRecountEntry(byGkey.get(gkey), gkey, new Date().toISOString()))
+      failed++
       counted++
     }
   }
@@ -28446,19 +28901,20 @@ async function refreshActivityLeaderboardUncached(): Promise<void> {
   // Exact totals first, then partials, then the members that could not be counted at
   // all (total null) — those rank last and render nothing.
   const entries = [...byGkey.values()].sort((a, b) => Number(b.complete) - Number(a.complete) || (b.total ?? -1) - (a.total ?? -1))
-  // Only what this cycle recounted; the seed above covers a cold start.
+  // Only what this cycle recounted; the seed above covers a cold start. A write that
+  // still fails after its retries throws BEFORE the board is published: a board must
+  // never rank by totals the table the directory reads does not hold. The cycle's
+  // counts are then simply due again next cycle.
   await persistActivityTotals(entries.filter(e => countedNow.has(e.gkey)))
   activityTotalsSeeded = true
-  // Only the leading run whose totals clear everything outside the pool is provably in
-  // order. A partial total is a floor, so it can never establish a rank.
-  let rankedDepth = 0
-  for (const entry of entries) {
-    if (!entry.complete || entry.total == null || entry.total < refsOutside) break
-    rankedDepth++
-  }
-  activityLeaderboard = { entries, rankedDepth, computedAt: new Date().toISOString(), pool, refsOutside, poolAt }
+  // Only the leading run whose totals clear every row without a total — a single
+  // account outside the pool, an uncounted pooled member, an uncounted tag row
+  // (activityLeaderboardBound) — is provably in order.
+  const bound = activityLeaderboardBound(refsOutside, pool, tagRefs, byGkey, activityLeaderboardGkey)
+  const rankedDepth = activityRankedDepth(entries, bound)
+  activityLeaderboard = { entries, rankedDepth, computedAt: new Date().toISOString(), pool, refsOutside, poolAt, tagRefs, bound }
   await persistActivityLeaderboard(activityLeaderboard)
-  console.info('[explorer] activity leaderboard', { entries: entries.length, members: members.length, due: due.length, counted, dropped: dropped.length, rankedDepth, refsOutside })
+  console.info('[explorer] activity leaderboard', { entries: entries.length, members: members.length, due: due.length, counted, failed, dropped: dropped.length, rankedDepth, refsOutside, bound })
 }
 
 // The sweep's write side. One row per directory grouping key; ReplacingMergeTree keyed
@@ -28471,17 +28927,38 @@ async function persistActivityTotals(entries: ActivityLeaderboardEntry[]): Promi
   // keeps it out of the front of the due queue.
   const counted = entries.filter((entry): entry is ActivityLeaderboardEntry & { total: number } => entry.total != null)
   if (!counted.length) return
-  await client.insert({
-    table: 'price_data.account_activity_totals',
-    values: counted.map(entry => ({
-      gkey: entry.gkey,
-      total: entry.total,
-      complete: entry.complete ? 1 : 0,
-      counted_at: (entry.countedAt || new Date().toISOString()).replace('T', ' ').replace(/\.\d{3}Z$/, ''),
-    })),
-    format: 'JSONEachRow',
-  }).catch(error => console.warn('[explorer] activity totals persist failed', error))
+  const stamp = (iso: string) => iso.replace('T', ' ').replace(/\.\d{3}Z$/, '')
+  const values = counted.map(entry => ({
+    gkey: entry.gkey,
+    total: entry.total,
+    complete: entry.complete ? 1 : 0,
+    // The count's source watermark, exactly what the requeue compares (rawHead/rawKeys/rawMmKeys/rawChange/rawMmChange,
+    // activityBackfilledGkeys) and when it was read — the count reflects raw as ingested
+    // by then. Zeros for a total carried without a comparable watermark.
+    raw_head: entry.rawHead != null && entry.rawKeys != null ? entry.rawHead : 0,
+    raw_keys: entry.rawHead != null && entry.rawKeys != null ? entry.rawKeys : 0,
+    raw_mm_keys: entry.rawHead != null && entry.rawKeys != null ? entry.rawMmKeys ?? 0 : 0,
+    // The change marks (rawChange/rawMmChange/rawMmFp); 0 / the epoch where none was taken.
+    raw_change: entry.rawHead != null && entry.rawKeys != null && entry.rawChange ? entry.rawChange : '0',
+    raw_mm_change: entry.rawHead != null && entry.rawKeys != null && entry.rawMmChange ? entry.rawMmChange : '1970-01-01 00:00:00',
+    raw_mm_fp: entry.rawHead != null && entry.rawKeys != null && entry.rawMmFp ? entry.rawMmFp : '0',
+    raw_watermark: entry.rawHead != null && entry.rawKeys != null && entry.countedAt ? stamp(entry.countedAt) : '1970-01-01 00:00:00',
+    counted_at: stamp(entry.countedAt || new Date().toISOString()),
+  }))
+  // Replacement per gkey makes a retried insert idempotent. After the last attempt the
+  // error propagates: the caller publishes no board over a table that lacks its totals.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await client.insert({ table: 'price_data.account_activity_totals', values, format: 'JSONEachRow' })
+      return
+    } catch (error) {
+      if (attempt >= ACTIVITY_TOTALS_PERSIST_ATTEMPTS) throw error
+      console.warn(`[explorer] activity totals persist failed (attempt ${attempt}/${ACTIVITY_TOTALS_PERSIST_ATTEMPTS}), retrying`, error)
+      await new Promise(resolve => setTimeout(resolve, 2_000 * attempt))
+    }
+  }
 }
+const ACTIVITY_TOTALS_PERSIST_ATTEMPTS = 3
 
 // The sweep's drop side: a carried entry the schedule gave up on leaves the table, so the
 // directory renders no number for it (see ACTIVITY_LEADERBOARD_CARRIED_MAX_AGE_MS). The

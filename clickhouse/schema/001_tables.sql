@@ -15,11 +15,32 @@ CREATE TABLE IF NOT EXISTS price_data.account_directory_snapshots (`snapshot_key
 -- produced by calling the same scoped-total function the entity's own page calls, so
 -- the directory and that page can never state different numbers; it is NOT derivable
 -- in SQL (the feed's count is dominated by classification the arms apply per account).
--- Reproducible from raw: drop it and the sweep refills it. `raw_watermark` is the
--- entity's ingest high-water at counting time, so backward backfill re-queues it
--- instead of leaving a stale total until its TTL expires. `complete = 0` marks a floor
--- (a feed too deep for an exact prefix), which readers render as "N+".
-CREATE TABLE IF NOT EXISTS price_data.account_activity_totals (`gkey` String, `total` UInt64, `complete` UInt8 DEFAULT 1, `raw_watermark` DateTime DEFAULT toDateTime(0), `counted_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(counted_at) ORDER BY gkey SETTINGS index_granularity = 8192;
+-- Reproducible from raw: drop it and the sweep refills it. The source watermark the
+-- sweep's backfill requeue compares is stored with the total: `raw_head` is the indexed
+-- block the count was taken at and `raw_keys` how many DISTINCT account_activity_v3
+-- identities (account, block_height, event_index) of the entity's accounts lay at or
+-- below it, and `raw_mm_keys` the same for account_money_market_activity identities
+-- (account_id, block_height, event_index, event_name) under the accounts' H160 forms —
+-- the count's other independently indexed source — read just before the count (never a
+-- physical count(), which a merge of replayed duplicates lowers); a later read finding more keys at or below `raw_head`
+-- means raw was ingested backward under the count, so the entity is recounted at once
+-- instead of waiting out its TTL. Identity counts stand still when a row is REPLACED
+-- under its key, so each source also has a change mark over the same deduplicated rows:
+-- `raw_change`, the XOR of cityHash64 over every account_activity_v3 column (the table has
+-- no ingest time), `raw_mm_fp`, the same content fingerprint over the money-market rows
+-- (ingested_at included, so it moves for a correction landing in the same second as the
+-- row it replaces), and `raw_mm_change`, max(ingested_at) of the money-market rows (their
+-- version column, second resolution — kept for totals stored before `raw_mm_fp`); any
+-- one moving recounts the entity too. `raw_watermark` is when
+-- that watermark was read; all seven are zero for a total carried without one. `complete = 0` marks a floor (a feed
+-- too deep for an exact prefix), which readers render as "N+".
+CREATE TABLE IF NOT EXISTS price_data.account_activity_totals (`gkey` String, `total` UInt64, `complete` UInt8 DEFAULT 1, `raw_watermark` DateTime DEFAULT toDateTime(0), `raw_head` UInt32 DEFAULT 0, `raw_keys` UInt64 DEFAULT 0, `raw_mm_keys` UInt64 DEFAULT 0, `raw_change` UInt64 DEFAULT 0, `raw_mm_change` DateTime DEFAULT toDateTime(0), `raw_mm_fp` UInt64 DEFAULT 0, `counted_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(counted_at) ORDER BY gkey SETTINGS index_granularity = 8192;
+ALTER TABLE price_data.account_activity_totals ADD COLUMN IF NOT EXISTS `raw_head` UInt32 DEFAULT 0 AFTER `raw_watermark`;
+ALTER TABLE price_data.account_activity_totals ADD COLUMN IF NOT EXISTS `raw_keys` UInt64 DEFAULT 0 AFTER `raw_head`;
+ALTER TABLE price_data.account_activity_totals ADD COLUMN IF NOT EXISTS `raw_mm_keys` UInt64 DEFAULT 0 AFTER `raw_keys`;
+ALTER TABLE price_data.account_activity_totals ADD COLUMN IF NOT EXISTS `raw_change` UInt64 DEFAULT 0 AFTER `raw_mm_keys`;
+ALTER TABLE price_data.account_activity_totals ADD COLUMN IF NOT EXISTS `raw_mm_change` DateTime DEFAULT toDateTime(0) AFTER `raw_change`;
+ALTER TABLE price_data.account_activity_totals ADD COLUMN IF NOT EXISTS `raw_mm_fp` UInt64 DEFAULT 0 AFTER `raw_mm_change`;
 CREATE TABLE IF NOT EXISTS price_data.account_identities (`chain` LowCardinality(String) DEFAULT 'hydration', `account_id` String, `display` String DEFAULT '', `verified` UInt8 DEFAULT 0, `email` String DEFAULT '', `web` String DEFAULT '', `twitter` String DEFAULT '', `priority` UInt8 DEFAULT 0, `updated_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (chain, account_id) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.account_lock_snapshot_state (`snapshot_key` LowCardinality(String), `snapshot_id` String, `row_count` UInt32, `block_height` UInt32, `relay_height` UInt32, `source_checksum` String, `computed_at` DateTime) ENGINE = ReplacingMergeTree(computed_at) ORDER BY snapshot_key SETTINGS index_granularity = 64;
 CREATE TABLE IF NOT EXISTS price_data.account_lock_snapshots (`snapshot_id` String, `account_id` String, `asset_id` UInt32, `kind` LowCardinality(String), `source` LowCardinality(String), `amount` UInt256, `claimable` UInt256, `detail` String DEFAULT '', `computed_at` DateTime) ENGINE = ReplacingMergeTree(computed_at) PARTITION BY snapshot_id ORDER BY (snapshot_id, account_id, asset_id, kind, source) SETTINGS index_granularity = 1024;
