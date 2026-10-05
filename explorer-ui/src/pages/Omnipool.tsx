@@ -4,7 +4,7 @@ import { windowRefine } from '../utils/chartRefine'
 import { useOmnipool } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { paths } from '../router'
-import { AddrPill, Usd, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, F, rowNav } from '../components/ui'
+import { AddrPill, Usd, AssetAmount, AssetChip, ChartSkeleton, Crumbs, Dash, F, LoadError, rowNav } from '../components/ui'
 import { ChartLegend, ShareBar, StackedAreaChart, type ShareSegment } from '../components/HdxCharts'
 import { useAssetColors } from '../utils/iconColor'
 import { OmnipoolVolumeSection, PoolVolumeRows, TvlSection, VolumeTvlSection } from '../components/VolumeCharts'
@@ -43,7 +43,7 @@ function WeightCapBar({ weightPct, capPct }: { weightPct: number | null; capPct:
 }
 
 export function Omnipool() {
-  const { data, isLoading, isError } = useOmnipool()
+  const { data, isLoading, isError, refetch } = useOmnipool()
   const volume = useOmnipoolVolume()
   useDocumentTitle('Omnipool')
   // The pool's mix rotated completely while its TVL swung an order of
@@ -187,7 +187,7 @@ export function Omnipool() {
         </div>
       </div>
       {isError
-        ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load the Omnipool</div>
+        ? <LoadError title="Couldn’t load the Omnipool" onRetry={() => { void refetch() }} />
         : isLoading || !data
           ? <><div className="detail-card"><ChartSkeleton h={120} /></div><div className="pf-card" style={{ marginTop: 14 }}><ChartSkeleton h={220} /></div></>
           : body()}

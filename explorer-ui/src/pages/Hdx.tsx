@@ -3,7 +3,7 @@ import { api } from '../api/explorer'
 import { useHdxDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths } from '../router'
-import { Crumbs, Usd, Num, F, AddrPill, AssetIcon, ChartSkeleton, EmptyRow, compactAmount } from '../components/ui'
+import { Crumbs, Usd, Num, F, AddrPill, AssetIcon, ChartSkeleton, EmptyRow, LoadError, compactAmount } from '../components/ui'
 import {
   fmtLiqPrice, cohortColor, OWNERSHIP_COLORS, AGE_COLORS,
   ChartLegend, ShareBar, StackedColumnChart, MirroredBarChart, StackedAreaChart, MultiLineChart, GigaLiquidationChart,
@@ -733,7 +733,7 @@ function HdxSkeleton() {
 }
 
 export function Hdx() {
-  const { data, isError } = useHdxDashboard()
+  const { data, isError, refetch } = useHdxDashboard()
   useDocumentTitle(data && data.price != null ? `HDX ${F.priceUsd(data.price)}` : 'HDX')
   return (
     <div className="wrap">
@@ -742,7 +742,7 @@ export function Hdx() {
         <div className="page-title">HDX <span className="sub">native token · supply, locks, unlocks & flow</span></div>
       </div>
       {isError
-        ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load the HDX dashboard.</div>
+        ? <LoadError title="Couldn’t load the HDX dashboard" onRetry={() => { void refetch() }} />
         : !data ? <HdxSkeleton /> : (
           <>
             <Ribbon d={data} />

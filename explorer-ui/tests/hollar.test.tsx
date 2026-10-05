@@ -153,7 +153,7 @@ describe('Hollar dashboard page', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     const html = renderToStaticMarkup(<QueryClientProvider client={queryClient}><Hollar /></QueryClientProvider>)
     expect(html).toContain('chart-skeleton')
-    expect(html).not.toContain('Failed to load')
+    expect(html).not.toContain('Couldn’t load')
   })
 })
 

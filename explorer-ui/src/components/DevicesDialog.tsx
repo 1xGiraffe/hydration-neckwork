@@ -167,7 +167,7 @@ export function DevicesDialog({ open, onOpenChange }: { open: boolean; onOpenCha
             ) : (
               <>
                 <Dialog.Description className="dialog-hint">Every login of this account. Revoking one logs that device out immediately.</Dialog.Description>
-                {sessions.isError && <div className="dialog-error">Could not load the device list.</div>}
+                {sessions.isError && <div className="dialog-error">Couldn’t load the device list <button type="button" className="btn sm" onClick={() => { void sessions.refetch() }}>Try again</button></div>}
                 <div className="device-list">
                   {(sessions.data?.sessions ?? []).map(s => (
                     <DeviceRow key={s.id} s={s} now={now} onRevoked={invalidate} onClose={() => onOpenChange(false)} />

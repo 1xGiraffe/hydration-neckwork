@@ -2,7 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useNow } from '../hooks/useNow'
 import { Link, paths, setQuery, useQueryValue } from '../router'
-import { AddrPill, ChartSkeleton, Crumbs, EmptyRow, F, Pager, rowNav, TableSkeleton } from '../components/ui'
+import { AddrPill, ChartSkeleton, Crumbs, EmptyRow, F, LoadError, Pager, rowNav, TableSkeleton } from '../components/ui'
 import { DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
 import {
   Age, AssetMini, ConsumerList, DeviationCell, Dur, FeedValue, isUsdPair, KIND_LABEL, MiniBars, SourceCell, sourceHref, StatusDot, ageNow,
@@ -277,7 +277,7 @@ function ChangesSection({ d, now }: { d: OraclesOverview; now: number }) {
 
 export function Oracles() {
   useDocumentTitle('Oracles')
-  const { data: d, isError } = useOraclesOverview()
+  const { data: d, isError, refetch } = useOraclesOverview()
   const now = useNow(15_000)
   const k = d?.kpis
   const staleNames = k?.stale.filter(s => s.consumed).map(s => s.pair) ?? []
@@ -293,7 +293,7 @@ export function Oracles() {
         </span></div>
       </div>
 
-      {isError && <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load oracles</div>}
+      {isError && <LoadError title="Couldn’t load the oracles" onRetry={() => { void refetch() }} />}
 
       <div className="hdx-cards" style={{ marginTop: 0 }}>
         {d && k ? <>

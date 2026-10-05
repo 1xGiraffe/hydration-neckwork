@@ -4,7 +4,7 @@ import { useHollarDashboard } from '../hooks/useExplorerData'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { useNow } from '../hooks/useNow'
 import { Link, paths } from '../router'
-import { AssetAmount, Num, Usd, Crumbs, F, AssetChip, Ago, ChartSkeleton, TableSkeleton, EmptyRow, compactAmount } from '../components/ui'
+import { AssetAmount, Num, Usd, Crumbs, F, AssetChip, Ago, ChartSkeleton, TableSkeleton, EmptyRow, LoadError, compactAmount } from '../components/ui'
 import { useAssetColors } from '../utils/iconColor'
 import { ChartLegend, ShareBar, MirroredBarChart, StackedAreaChart, StackedBarChart, MultiLineChart } from '../components/HdxCharts'
 import type { ShareSegment, MirrorBar, AreaSeries } from '../components/HdxCharts'
@@ -532,7 +532,7 @@ function HollarSkeleton() {
 }
 
 export function Hollar() {
-  const { data, isError } = useHollarDashboard()
+  const { data, isError, refetch } = useHollarDashboard()
   useDocumentTitle(data && data.price != null ? `HOLLAR ${F.priceUsd(data.price)}` : 'HOLLAR')
   return (
     <div className="wrap">
@@ -541,7 +541,7 @@ export function Hollar() {
         <div className="page-title">HOLLAR <span className="sub">GHO-fork stablecoin · peg, HSM & liquidity</span></div>
       </div>
       {isError
-        ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load the HOLLAR dashboard.</div>
+        ? <LoadError title="Couldn’t load the HOLLAR dashboard" onRetry={() => { void refetch() }} />
         : !data ? <HollarSkeleton /> : (
           <>
             <Ribbon d={data} />

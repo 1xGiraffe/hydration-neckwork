@@ -70,7 +70,7 @@ describe('the ICE dashboard before any intent exists', () => {
   })
   it('says so honestly instead of drawing empty charts', () => {
     expect(html).toContain('No intents yet — the ICE venue went live at block 14362830.')
-    expect(html).not.toContain('Failed to load')
+    expect(html).not.toContain('Couldn’t load')
   })
   it('keeps every section on the page with its own empty line', () => {
     for (const title of ['Open orders', 'Fills', 'Execution quality', 'Protocol fee revenue', 'DCA migration', 'Top pairs']) expect(html).toContain(title)

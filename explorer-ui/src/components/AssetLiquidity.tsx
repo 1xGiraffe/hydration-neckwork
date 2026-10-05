@@ -4,7 +4,7 @@ import type { AssetLiquidity, AssetLiquiditySource, AssetRef } from '../types'
 import { useAssetLiquidity, useOmnipoolLps } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { Link, paths } from '../router'
-import { accountHref, Usd, Amt, AddrPill, AssetAmount, Ago, ChartSkeleton, Dash, EmptyRow, F, Pager, pendingRows, PoolBadge, rowNav, TableSkeleton } from './ui'
+import { accountHref, Usd, Amt, AddrPill, AssetAmount, Ago, ChartSkeleton, Dash, EmptyRow, F, LoadError, Pager, pendingRows, PoolBadge, rowNav, TableSkeleton } from './ui'
 import { ChartLegend, ShareBar, StackedAreaChart, type ShareSegment } from './HdxCharts'
 import { useAssetColors } from '../utils/iconColor'
 import { PoolApr } from './positions/PoolApr'
@@ -96,7 +96,7 @@ function OmnipoolLpsSection({ asset }: { asset: AssetRef }) {
       </div>
       {open && (
         lps.isError
-          ? <div className="detail-card" style={{ padding: 24, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load the liquidity providers</div>
+          ? <LoadError title="Couldn’t load the liquidity providers" onRetry={() => { void lps.refetch() }} />
           : <div className="panel"><table className="tbl">
               <thead><tr><th style={{ width: 50 }}>#</th><th>Provider</th><th className="r">Positions</th><th className="r">Amount</th><th className="r">Share</th><th className="r">Value</th></tr></thead>
               <tbody {...pendingRows(lps.isPlaceholderData)}>
@@ -130,11 +130,11 @@ function OmnipoolLpsSection({ asset }: { asset: AssetRef }) {
 }
 
 export function AssetLiquidityTab({ asset }: { asset: AssetRef }) {
-  const { data, isLoading, isError } = useAssetLiquidity(asset.assetId, true)
+  const { data, isLoading, isError, refetch } = useAssetLiquidity(asset.assetId, true)
   const now = useNow()
   const [unit, setUnit] = useState<'amount' | 'usd'>('amount')
 
-  if (isError) return <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Failed to load the liquidity data</div>
+  if (isError) return <LoadError title="Couldn’t load liquidity" onRetry={() => { void refetch() }} />
   if (isLoading || !data) {
     return (
       <>
