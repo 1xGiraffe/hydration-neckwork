@@ -5,6 +5,7 @@ import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, navigate, paths, redirect, useQueryValue } from '../router'
 import { Copy, CopyTextButton, Crumbs, F } from '../components/ui'
 import { DATA_API_URL, PREIS_URL } from '../surfaces'
+import { PROBE_BODY, classifyProbe, type Probe } from '../mcpProbe'
 
 // /mcp — getting started with the Hydration MCP server, and the map of which
 // developer surface answers which question.
@@ -67,31 +68,21 @@ function useMcpTools() {
   })
 }
 
-// A bare GET to /mcp answers 405: the endpoint is stateless and POST-only, so
-// there is no stream for a GET to open. That makes 405 the one healthy answer
-// and every other status a finding — a 404 from a misrouted vhost, a 200 from a
-// placeholder page and a 403 from the edge all mean no agent can connect, and
-// reading them as "not a server error, therefore fine" would show Ready over a
-// dead endpoint. 401 is the gated deployment: MCP_ACCESS_KEYS is set, so the
-// open snippets below would be rejected and each switches to its authorized
-// form.
-const HEALTHY_PROBE_STATUS = 405
-
-type ProbeState = 'ready' | 'key' | 'unexpected' | 'down'
-interface Probe { state: ProbeState; status: number; ms: number }
-
+// See mcpProbe.ts for why the probe is a JSON-RPC ping and what each answer means.
 function useMcpProbe() {
   return useQuery({
     queryKey: ['mcp-probe', MCP_ENDPOINT],
     queryFn: async ({ signal }): Promise<Probe> => {
       const started = performance.now()
-      const res = await fetch(MCP_ENDPOINT, { method: 'GET', signal })
+      const res = await fetch(MCP_ENDPOINT, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+        body: PROBE_BODY,
+        signal,
+      })
       const ms = Math.max(0, Math.round(performance.now() - started))
-      const state: ProbeState = res.status === HEALTHY_PROBE_STATUS ? 'ready'
-        : res.status === 401 ? 'key'
-          : res.status >= 500 ? 'down'
-            : 'unexpected'
-      return { state, status: res.status, ms }
+      const body: unknown = res.status === 200 ? await res.json().catch(() => null) : null
+      return { state: classifyProbe(res.status, body), status: res.status, ms }
     },
     staleTime: 30_000,
     // Every answer above is a resolved fetch, so a retry could only ever repeat
@@ -326,7 +317,7 @@ function StatusValue({ probe, error }: { probe?: Probe; error: boolean }) {
   if (error) return <><span className="mcp-dot down" aria-hidden="true" />Unavailable<span className="muted mono mcp-dim">no answer from the endpoint</span></>
   if (!probe) return <span className="muted">Checking&hellip;</span>
   // The status code is the fact; naming it says what the timing measured, which
-  // is a refused GET rather than a session handshake.
+  // is one sessionless `ping` round trip rather than a session handshake.
   const timing = <span className="muted mono mcp-dim">HTTP {probe.status} in {F.int(probe.ms)} ms</span>
   if (probe.state === 'key') return <><span className="mcp-dot warn" aria-hidden="true" />Access key required{timing}</>
   if (probe.state === 'down') return <><span className="mcp-dot down" aria-hidden="true" />Unavailable{timing}</>
@@ -529,8 +520,8 @@ export function Mcp() {
       </div>
       {probe.data?.state === 'unexpected' && (
         <p className="mcp-note mcp-warn">
-          A <code className="mono">GET</code> here answers <code className="mono">405</code> when the MCP endpoint is the
-          thing on the other end. <code className="mono">HTTP {probe.data.status}</code> means something else is
+          A JSON-RPC <code className="mono">ping</code> here answers <code className="mono">200</code> with an empty
+          result when the MCP endpoint is the thing on the other end. <code className="mono">HTTP {probe.data.status}</code> means something else is
           answering at this address &mdash; check it before configuring a client, because a client will fail the same way.
         </p>
       )}
