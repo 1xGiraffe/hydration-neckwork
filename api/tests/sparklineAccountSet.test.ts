@@ -59,7 +59,9 @@ describe('sparkline account sets', () => {
     expect(body).toContain('arrayLast(x -> tupleElement(x, 1) <= w, states)')
     expect(body).toContain('range(-1, ${SPARK_WEEKS})')
     // … summed per row …
-    expect(body).toContain("WITH rows_of AS (SELECT account_id, row FROM VALUES('account_id String, row UInt32', ${rowsOf}))")
+    // The relation rides as two zipped array literals (one AST node each), not VALUES.
+    expect(body).toContain('WITH rows_of AS (SELECT tupleElement(p, 1) AS account_id, toUInt32(tupleElement(p, 2)) AS row')
+    expect(body).toContain('FROM (SELECT arrayJoin(arrayZip([${rowsOfIds}], [${rowsOfRows}])) AS p))')
     expect(body).toContain('WHERE account_id IN (SELECT account_id FROM rows_of)')
     expect(body).toContain('INNER JOIN rows_of AS m ON m.account_id = s.account_id')
     expect(body).toContain('GROUP BY m.row, s.asset_id, s.wk')
@@ -80,5 +82,26 @@ describe('sparkline account sets', () => {
   // enrichAccountRows already produced rather than rendering an empty series.
   it('leaves rows with no account set alone', () => {
     expect(fn('enrichAccountSparklines')).toContain('if (!accounts.length) continue')
+  })
+})
+
+// One read covers every ERC-20 wallet contract, so a failed chunk erases ALL of
+// them at once. The history build must fail (cached() stores no rejection) and the
+// sparkline must go unavailable — never a curve short of its ERC-20 holdings.
+describe('ERC-20 history reads never shorten a curve', () => {
+  it('fails the history build on a failed combined read', () => {
+    const body = fn('getAccountHistory')
+    const at = body.indexOf('-- explorer:history-erc20-deltas')
+    expect(at).toBeGreaterThan(-1)
+    const read = body.slice(at, body.indexOf('const deltasByContract', at))
+    expect(read).not.toContain('.catch(')
+  })
+
+  it('marks the sparkline unavailable on a failed combined read', () => {
+    const body = fn('enrichAccountRows')
+    const at = body.indexOf('const allDeltas')
+    const read = body.slice(at, body.indexOf('const deltasByContract', at))
+    expect(read).not.toContain('.catch(() => null)')
+    expect(read).toContain('sparkUnavailable = true')
   })
 })

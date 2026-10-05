@@ -212,3 +212,14 @@ describe('alignBalanceHistoryDailyPoints', () => {
     expect(out[1].points.map(p => p.balance)).toEqual([0, 3])
   })
 })
+
+describe('the shared history entry\'s lifetime', () => {
+  it('is jittered upward only, so a page of rows filled together does not expire together', async () => {
+    const { jitteredAccountHistoryTtlMs, ACCOUNT_HISTORY_TTL_JITTER } = await import('../src/services/explorerService.ts')
+    const base = jitteredAccountHistoryTtlMs(() => 0)
+    expect(base).toBe(30 * 60_000)
+    expect(jitteredAccountHistoryTtlMs(() => 0.999999)).toBeLessThanOrEqual(Math.round(base * (1 + ACCOUNT_HISTORY_TTL_JITTER)))
+    const spread = new Set(Array.from({ length: 50 }, (_, i) => jitteredAccountHistoryTtlMs(() => i / 50)))
+    expect(spread.size).toBe(50)
+  })
+})
