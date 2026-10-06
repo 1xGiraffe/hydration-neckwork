@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BorrowTab } from '../src/components/positions/BorrowTab'
 import { BorrowHistoryCharts } from '../src/components/positions/BorrowHistory'
-import { HF_CAP, borrowCards, earnedRows, exposureLines, healthFactorLines, marketEarned, marketSeries, netApy, paidRows, parseHealthFactor, reserveBorrowPct, reserveEarnedIndex, reserveRows, reserveSupplyPct, windowedMarketSeries } from '../src/components/positions/borrowMath'
+import { HF_CAP, borrowCards, earnedRows, exposureLines, healthFactorLines, marketEarned, marketSeries, netApy, netEarnedRows, netEarnedUsd, paidRows, parseHealthFactor, reserveBorrowPct, reserveEarnedIndex, reserveRows, reserveSupplyPct, windowedMarketSeries } from '../src/components/positions/borrowMath'
 import { MM_DIP, mockMoneyMarketEarned, mockMoneyMarketHistory, mockMoneyMarketYields } from './fixtures/positionsMock'
 import type { MmReserve, MoneyMarketHistoryMarket, MoneyMarketHistoryReserve, MoneyMarketPosition, ReserveYield } from '../src/types'
 
@@ -117,6 +117,25 @@ describe('earned per market (the User Revenue facts\' per-market slice)', () => 
     expect(core.lendingUsd + core.tokenYieldUsd + core.poolFeesUsd + core.otherUsd).toBeCloseTo(core.earnedUsd, 9)
     expect(paidRows(core).map(r => [r.label, r.pct])).toEqual([['HOLLAR borrow interest', 903.6]])
   })
+  it('heads the card with Net earned = earned − interest paid, both sides and their parts on hover', () => {
+    const core = marketEarned(mockMoneyMarketEarned(), 'core')!
+    // Derived from an api without the field; the api's own figure wins when present.
+    expect(netEarnedUsd(core)).toBeCloseTo(1_874.25 - 903.6, 9)
+    expect(netEarnedUsd({ ...core, netEarnedUsd: 970.66 })).toBe(970.66)
+    const rows = netEarnedRows(core, (label, usd) => `${label} · ${usd}`)
+    expect(rows.map(r => [r.group, r.label, r.pct])).toEqual([
+      ['Net earned = earned − interest paid', 'Earned', 1_874.25],
+      ['Net earned = earned − interest paid', 'Interest paid', -903.6],
+      ['Lending interest · 512.4', 'PRIME lending interest', 512.4],
+      ['Token yield · 1290.1', 'PRIME yield', 1_290.1],
+      ['Pool fees · 71.75', 'DOT pool fees', 71.75],
+      ['Interest paid · -903.6', 'HOLLAR borrow interest', -903.6],
+    ])
+    // A market with nothing borrowed states a zero cost, never a negative zero.
+    const noDebt = { ...core, paidUsd: 0, items: core.items.filter(i => i.category !== 'paid') }
+    expect(netEarnedRows(noDebt, l => l).find(r => r.key === 'net-paid')?.pct).toBe(0)
+    expect(netEarnedRows(noDebt, l => l).some(r => r.label === 'HOLLAR borrow interest')).toBe(false)
+  })
   it('answers a reserve by either id it is named with — the aToken held or the reserve asset', () => {
     const idx = reserveEarnedIndex(marketEarned(mockMoneyMarketEarned(), 'gigahdx'))
     expect(idx.get(67)).toEqual({ earnedUsd: 64.2, paidUsd: 0 })
@@ -214,11 +233,14 @@ describe('<BorrowTab>', () => {
     expect(html).not.toContain('bw-tbl')
     expect(html.match(/class="bw-risk"/g)).toHaveLength(2)
     expect(html.match(/class="bw-hf"/g)).toHaveLength(2)
-    // Earned is the market's slice of the User Revenue facts, its breakdown on hover; paid beside it.
-    expect(html).toContain('<span class="k">Earned</span>')
+    // Net earned (earned − interest paid) is the market's slice of the User Revenue
+    // facts, its breakdown on hover; paid beside it.
+    expect(html).toContain('<span class="k">Net earned</span>')
+    expect(html).not.toContain('<span class="k">Earned</span>')
     expect(html).not.toContain('Interest earned')
-    expect(html).toContain('$1.87k')
-    expect(html).toContain('$64.2')
+    expect(html).toContain('$971') // core: 1,874.25 − 903.60
+    expect(html).toContain('$51.70') // gigahdx: 64.20 − 12.50
+    expect(html).not.toContain('$1.87k')
     expect(html).toContain('<span class="k">Interest paid</span><span class="v">')
     expect(html).toContain('$904')
     expect(html).toContain('Show details &amp; history')
@@ -294,7 +316,7 @@ describe('<BorrowTab>', () => {
     expect(html).toContain('data-address="0xdef"')
     expect(html).not.toContain('data-chart="')
     // The KPI row's history-backed figures are loading, never a dash that reads as "none".
-    expect(html).toContain('<span class="k">Earned</span><span class="v"><span class="muted">…</span>')
+    expect(html).toContain('<span class="k">Net earned</span><span class="v"><span class="muted">…</span>')
     expect(html).toContain('<span class="k">Interest paid</span><span class="v"><span class="muted">…</span>')
   })
 })

@@ -288,6 +288,28 @@ export function earnedRows(market: MoneyMarketEarnedMarket, groupLabel: (label: 
   return rows
 }
 
+/** The card's headline: what the market earned less the interest its debt paid. */
+export function netEarnedUsd(market: MoneyMarketEarnedMarket): number {
+  return market.netEarnedUsd ?? market.earnedUsd - market.paidUsd
+}
+
+/**
+ * The Net earned hover's lines: first the equation itself — Earned, less Interest
+ * paid (negative) — then what each side is made of: the earned groups
+ * (earnedRows) and the borrow interest per reserve owed, as a cost (negative).
+ * The hover's total row is the net.
+ */
+export function netEarnedRows(market: MoneyMarketEarnedMarket, groupLabel: (label: string, usd: number) => string): YieldRow[] {
+  const sum = 'Net earned = earned − interest paid'
+  const paid = paidRows(market)
+  return [
+    { key: 'net-earned', label: 'Earned', pct: market.earnedUsd, group: sum },
+    { key: 'net-paid', label: 'Interest paid', pct: market.paidUsd ? -market.paidUsd : 0, group: sum },
+    ...earnedRows(market, groupLabel),
+    ...(paid.length ? paid.map(r => ({ ...r, pct: r.pct == null ? null : -r.pct, group: groupLabel('Interest paid', -market.paidUsd) })) : []),
+  ]
+}
+
 /**
  * The Interest paid hover's lines: borrow interest per reserve owed, each marked in its
  * User Revenue stream's colour — HOLLAR interest in HOLLAR's own, as on every User
