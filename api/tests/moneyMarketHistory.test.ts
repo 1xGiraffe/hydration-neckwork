@@ -3,10 +3,10 @@ import { RAY, normalizedDebt, normalizedIncome, rayMul } from '../src/services/a
 import { resetCacheForTests } from '../src/services/cache.ts'
 import type { BucketPricer } from '../src/services/lpHistory.ts'
 import {
-  CARRY_LOOKBACK_BLOCKS, assembleMoneyMarketHistory, chooseObservationHolders, loadCollateralFlagHistory, loadCurrentCollateralFlags, loadCurrentEmode,
-  loadEmodeHistory, loadObservationHistory, loadReserveIndexHistory, loadScaledHistoryByHolder, mmEthAccountForm,
+  CARRY_LOOKBACK_BLOCKS, FLOW_STATE_WINDOW_BLOCKS, assembleMoneyMarketHistory, chooseObservationHolders, loadCollateralFlagHistory, loadCurrentCollateralFlags, loadCurrentEmode,
+  loadEmodeHistory, loadObservationHistory, loadReserveIndexHistory, loadScaledFlows, loadScaledHistoryByHolder, mmEthAccountForm,
   mmHistoryStart, mmMarketCompare, reserveAmountsAt, reserveInterestSide, reserveKey, selectMoneyMarketBuckets, sumScaledByContract,
-  type MmHistoryParts, type MmObservation, type ReserveIndexState,
+  type MmHistoryParts, type MmObservation, type MmScaledFlow, type ReserveIndexState,
 } from '../src/services/moneyMarketHistory.ts'
 import { heightAtOrBeforeExact, type BlockClock } from '../src/services/blockClock.ts'
 import { makeBucketing } from '../src/services/bucketLadder.ts'
@@ -576,6 +576,128 @@ describe('reserveInterestSide', () => {
     expect(side.raw).toEqual([0n, 10n, 20n])
     expect(side.usd).toEqual([0n, null, null])
     expect(side.incomplete).toEqual([false, false, false])
+  })
+})
+
+// Regression (account 0x84d42a3f…, BIL market, HOLLAR debt): borrowed 2026-09-26 inside
+// a 10-day bucket of the explorer's un-windowed grid, the debt accrued nothing until the
+// next bucket, so interestPaid read 21.02 HOLLAR where the debt had grown 76.31 over
+// the 30,784.03 borrowed. A principal move now accrues from the move on (flows).
+describe('reserveInterestSide with principal moves inside a bucket', () => {
+  const rate = 100_000_000_000_000_000_000_000_000n // 10% APR in ray
+  const debtAt = (vbi: bigint, tLast: bigint): ReserveIndexState => ({ liquidityIndex: RAY, variableBorrowIndex: vbi, liquidityRate: 0n, variableBorrowRate: rate, tLast, block: 1, initPhase: false })
+  const always = () => true
+  const oneDollar = (amount: bigint) => amount
+  const DAY = 86_400
+  const I = (t: number) => normalizedDebt(RAY, rate, 0n, BigInt(t))
+  const idx = [debtAt(RAY, 0n), debtAt(RAY, 0n), debtAt(RAY, 0n)]
+  const times = [0, 10 * DAY, 20 * DAY]
+  const move = (b: number, delta: bigint, at: bigint, over: Partial<MmScaledFlow> = {}): MmScaledFlow =>
+    ({ b, delta, principal: delta < 0n ? -rayMul(-delta, at) : rayMul(delta, at), moves: 1, unstated: 0, ...over })
+
+  it('a borrow inside a bucket accrues from the borrow, so paid = debt now − net borrowed', () => {
+    // Borrow 30,000 (scaled at the day-2 index) inside bucket 1, held through bucket 2.
+    const amount = 30_000n * E12
+    const scaled = (amount * RAY + I(2 * DAY) / 2n) / I(2 * DAY)
+    const series = [0n, scaled, scaled]
+    const side = reserveInterestSide(series, idx, times, 'debt', always, 2, oneDollar, [move(1, scaled, I(2 * DAY))])
+    const debtNow = rayMul(scaled, I(20 * DAY))
+    const borrowed = rayMul(scaled, I(2 * DAY))
+    expect(side.raw[2]).toBe(debtNow - borrowed)
+    expect(side.raw[1]).toBe(rayMul(scaled, I(10 * DAY)) - borrowed)
+    expect(side.raw[1]).toBeGreaterThan(0n)
+    expect(side.incomplete).toEqual([false, false, false])
+    // Without the moves the first eight days were lost (the reported bug's shape).
+    const before = reserveInterestSide(series, idx, times, 'debt', always, 2, oneDollar)
+    expect(before.raw[1]).toBe(0n)
+    expect(before.raw[2]).toBeLessThan(side.raw[2])
+  })
+
+  it('a repay inside a bucket stops accruing at the repay; moves of one bucket sum', () => {
+    const s = 1_000n * E12
+    const repaid = 400n * E12
+    const side = reserveInterestSide([s, s - repaid], idx, times, 'debt', always, 1, oneDollar, [move(1, -repaid, I(4 * DAY))])
+    const held = rayMul(s, I(10 * DAY)) - rayMul(s, I(0))
+    expect(side.raw[1]).toBe(held - (rayMul(repaid, I(10 * DAY)) - rayMul(repaid, I(4 * DAY))))
+    expect(side.raw[1]).toBeLessThan(held)
+    // A supply and a withdraw in the same bucket, each at its own index (finding: never collapsed).
+    const both = reserveInterestSide([0n, 0n], idx, times, 'debt', always, 1, oneDollar, [{
+      b: 1, delta: 0n, principal: rayMul(repaid, I(2 * DAY)) - rayMul(repaid, I(6 * DAY)), moves: 2, unstated: 0,
+    }])
+    expect(both.raw[1]).toBe(rayMul(repaid, I(6 * DAY)) - rayMul(repaid, I(2 * DAY)))
+  })
+
+  it('a bucket with an unstatable move is incomplete; the first stated bucket counts no move', () => {
+    const series = [0n, 5n * E12]
+    expect(reserveInterestSide(series, idx, times, 'debt', always, 1, oneDollar, [move(1, 5n * E12, I(DAY), { unstated: 1 })]).incomplete[1]).toBe(true)
+    // Moves disagreeing with the principal far beyond rounding: unstatable, never a negative accrual.
+    expect(reserveInterestSide(series, idx, times, 'debt', always, 1, oneDollar, [move(1, 5n * E12, I(11 * DAY))]).incomplete[1]).toBe(true)
+    const first = reserveInterestSide([undefined, 5n * E12], idx, times, 'debt', b => b >= 1, 1, oneDollar, [move(1, 5n * E12, I(DAY))])
+    expect(first.raw[1]).toBe(0n)
+    expect(first.incomplete[1]).toBe(false)
+  })
+})
+
+describe('loadScaledFlows', () => {
+  const VDEBT = `0x${'d5'.repeat(20)}`
+  const ATOKEN = `0x${'a5'.repeat(20)}`
+  const reserves = [{ assetAddress: DOT, atoken: ATOKEN, vdebt: VDEBT, poolProxy: CORE, marketKey: 'core' }]
+  const row = (contract: string, b: number, over: Record<string, unknown> = {}) =>
+    ({ contract, b, delta: '0', principal: '0', moves: 0, unstated: 0, nostate: 0, nlo: 0, nhi: 0, nrids: [], ...over })
+
+  it('aggregates in ClickHouse per (contract, bucket): moves per log, deduplicated index rows, own-block states first', async () => {
+    const client = fakeClient((q, p) => {
+      if (tagged('mm:scaled-flows')(q)) {
+        expect(p.lo).toBe(999) // bucket 0's end block
+        // One move per (contract, block, event index), never per block (finding 2).
+        expect(q).toContain('GROUP BY contract_address, block_height, event_index')
+        // The index slice is deduplicated on its replacement key (finding 1) and read at the moves' blocks.
+        expect(q).toMatch(/money_market_reserve_indices FINAL/)
+        expect(q).toContain('block_height IN (SELECT block_height FROM price_data.atoken_scaled_deltas')
+        return [row(VDEBT, 1, { delta: '500', principal: '550', moves: 1 }), row(ATOKEN, 2, { delta: '-200', principal: '0', moves: 0, nostate: 1, nlo: 2_500, nhi: 2_500, nrids: [1] })]
+      }
+      if (tagged('mm:scaled-flows-carry')(q)) {
+        expect(q).toMatch(/money_market_reserve_rates FINAL/)
+        expect(p.nrids).toEqual([1])
+        expect(p.nlo).toBe(2_500)
+        // The windowed read: each remaining move's own window of blocks.
+        expect(q).toContain(`range(toUInt32(greatest(block_height, ${FLOW_STATE_WINDOW_BLOCKS})`)
+        return [row(ATOKEN, 2, { delta: '0', principal: '-210', moves: 1 })]
+      }
+      return []
+    })
+    const flows = await loadScaledFlows(client as never, [H], reserves, 500, testBucketing(0, 1_000, 3))
+    expect(flows.get(VDEBT)).toEqual([{ b: 1, delta: 500n, principal: 550n, moves: 1, unstated: 0 }])
+    expect(flows.get(ATOKEN)).toEqual([{ b: 2, delta: -200n, principal: -210n, moves: 1, unstated: 0 }])
+  })
+
+  it('reads a quiet reserve\'s slice for a move its window missed, and from block 0 when even that had no state', async () => {
+    const carry: Array<{ q: string; p: Record<string, unknown> }> = []
+    const client = fakeClient((q, p) => {
+      if (tagged('mm:scaled-flows')(q)) return [row(ATOKEN, 2, { delta: '-200', nostate: 1, nlo: 250_000, nhi: 250_000, nrids: [1] })]
+      if (tagged('mm:scaled-flows-carry')(q)) {
+        carry.push({ q, p })
+        if (carry.length === 1) return [row(ATOKEN, 2, { nostate: 1, nlo: 250_000, nhi: 250_000, nrids: [1] })]
+        if (carry.length === 2) return [row(ATOKEN, 2, { nostate: 1, nlo: 250_000, nhi: 250_000, nrids: [1] })]
+        return [row(ATOKEN, 2, { nostate: 1 })]
+      }
+      return []
+    })
+    const flows = await loadScaledFlows(client as never, [H], reserves, 500, testBucketing(0, 100_000, 3))
+    expect(carry).toHaveLength(3)
+    // 2: the missed moves only (their state lies below the window), from CARRY_LOOKBACK_BLOCKS below.
+    expect(carry[1].q).toContain(`intDiv(i.k, 1000000) + ${FLOW_STATE_WINDOW_BLOCKS} < m.blk`)
+    expect(carry[1].p.from).toBe(250_000 - CARRY_LOOKBACK_BLOCKS)
+    expect(carry[2].p.from).toBe(0)
+    expect(carry[2].q).toContain(`intDiv(i.k, 1000000) + ${FLOW_STATE_WINDOW_BLOCKS} < m.blk`)
+    // A move with no state at all is unstated, so its bucket is incomplete.
+    expect(flows.get(ATOKEN)).toEqual([{ b: 2, delta: -200n, principal: 0n, moves: 1, unstated: 1 }])
+  })
+
+  it('reads nothing without an anchor or holders', async () => {
+    const client = fakeClient(() => { throw new Error('no read expected') })
+    expect((await loadScaledFlows(client as never, [], reserves, 500, testBucketing(0, 1_000, 3))).size).toBe(0)
+    expect((await loadScaledFlows(client as never, [H], reserves, 0, testBucketing(0, 1_000, 3))).size).toBe(0)
   })
 })
 
