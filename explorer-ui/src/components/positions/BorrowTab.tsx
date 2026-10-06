@@ -9,7 +9,7 @@ import { useRevenueHollarColor } from '../../hooks/useRevenueHollarColor'
 import { yieldComponentRow, type YieldRow } from './yieldFormat'
 import { BorrowHistoryCharts } from './BorrowHistory'
 import { defisimSupportsMarket, defisimUrl } from '../../utils/defisim'
-import { borrowCards, claimedIncentivesUsd, earnedRows, marketEarned, netApy, paidRows, rawHeld, reserveBorrowPct, reserveEarnedIndex, reserveRows, reserveSupplyPct } from './borrowMath'
+import { borrowCards, claimedIncentivesUsd, marketEarned, netApy, netEarnedRows, netEarnedUsd, paidRows, rawHeld, reserveBorrowPct, reserveEarnedIndex, reserveRows, reserveSupplyPct } from './borrowMath'
 import type { BorrowCardSpec } from './borrowMath'
 
 // One holder's money-market footprint: the address its history is read by, the
@@ -111,10 +111,13 @@ function DisclosureRule({ open, onToggle, controls, meta, sub, children }: {
 // market is named after).
 const MARKET_ICON_ASSET: Record<string, number> = { gigahdx: 67, bil: 55 }
 
-// Earned and Interest paid are the User Revenue facts of this market (the tab's
-// and the header stat's own, sliced per market): what reached the account
-// through an aToken it supplied here, plus the market's direct interest.
-const EARNED_TITLE = 'Everything the positions supplied to this market earned, as User Revenue books it: the market\'s own lending interest, the yield of the supplied tokens themselves (the vDOT inside avDOT; the vDOT, aDOT interest and pool fees inside GDOT) and the fees of supplied pool shares. Net: a rate\'s give-back, and the accrual a borrowed yield-bearing token owes, count against it. Incentives are stated apart.'
+// Net earned and Interest paid are the User Revenue facts of this market (the
+// tab's and the header stat's own, sliced per market): what reached the account
+// through an aToken it supplied here, plus the market's direct interest — the
+// headline nets the borrow interest off, its hover keeps both sides.
+const EARNED_TITLE = 'Net earned = earned − interest paid. Earned is everything the positions supplied to this market earned, as User Revenue books it: the market\'s own lending interest, the yield of the supplied tokens themselves (the vDOT inside avDOT; the vDOT, aDOT interest and pool fees inside GDOT) and the fees of supplied pool shares; a rate\'s give-back, and the accrual a borrowed yield-bearing token owes, count against it. Interest paid is the borrow interest on this market\'s debt. Incentives are stated apart.'
+// The hover's plain-words footnote: how a token's yield lands in time and price.
+const NET_EARNED_NOTE = 'When a token\'s rate rises, the rise counts as earned evenly over the time leading up to it (since its previous rise), each hour valued at the price when it accrued. Interest paid accrues hour by hour on the debt. Incentives are not included.'
 const PAID_TITLE = 'Borrow interest on this market\'s debt, accrued hour by hour on each reserve\'s own index — the User Revenue tab\'s "HOLLAR interest" and "Borrow interest" for this market.'
 
 function earnedBasis(e: MoneyMarketEarned | undefined, h: MoneyMarketHistory | undefined): string {
@@ -275,27 +278,31 @@ function earnedPending(e: EarnedState): ReactNode | null {
   return null
 }
 
-// Unpriced hourly amounts are counted per side: the borrow lines' own on Interest paid, the rest on Earned.
-function earnedMarks(e: EarnedState, side: 'earned' | 'paid'): ReactNode {
+// Unpriced hourly amounts are counted per figure: the borrow lines' own on Interest paid, every one on Net earned.
+function earnedMarks(e: EarnedState, side: 'net' | 'paid'): ReactNode {
   const paidUnpriced = (e.market?.items ?? []).filter(i => i.category === 'paid').reduce((n, i) => n + i.unpriced, 0)
-  const unpriced = side === 'paid' ? paidUnpriced : (e.market?.unpriced ?? 0) - paidUnpriced
+  const unpriced = side === 'paid' ? paidUnpriced : (e.market?.unpriced ?? 0)
   return <>
     {!e.data?.complete && <span className="bw-unpriced" title="Partial: not every month of the account facts is published yet">*</span>}
     {unpriced > 0 && <span className="bw-unpriced" title={`${unpriced} hourly amount${unpriced === 1 ? '' : 's'} without a price left out, as on the User Revenue tab`}> +{unpriced}?</span>}
   </>
 }
 
-/** Earned with its breakdown on hover: lending interest, token yield, pool fees, other — each line by what earned it. */
-function EarnedValue({ e }: { e: EarnedState }) {
+/**
+ * Net earned (earned − interest paid) with both sides on hover: Earned and
+ * Interest paid, then what each is made of — lending interest, token yield, pool
+ * fees, other, each line by what earned it, and the borrow interest per reserve.
+ */
+function NetEarnedValue({ e }: { e: EarnedState }) {
   const p = earnedPending(e)
   if (p) return p
   const m = e.market
   if (!m) return <Usd v={0} />
-  const rows = earnedRows(m, (label, usd) => `${label} · ${F.usd(usd)}`)
+  const rows = netEarnedRows(m, (label, usd) => `${label} · ${F.usd(usd)}`)
   return <>
-    <YieldHover total={m.earnedUsd} rows={rows} format={F.usd} title="Earned in this market"
-      note="Net, from the User Revenue facts: each line is what earned it, “in” the supplied aToken it reached the account through." />
-    {earnedMarks(e, 'earned')}
+    <YieldHover total={netEarnedUsd(m)} rows={rows} format={F.usd} title="Net earned in this market" totalLabel="Net earned"
+      note={<>{NET_EARNED_NOTE} Each earned line is what earned it, “in” the supplied aToken it reached the account through.</>} />
+    {earnedMarks(e, 'net')}
   </>
 }
 
@@ -338,7 +345,7 @@ function BorrowKpis({ mm, yields, yieldsLoading, hist, earned }: { mm: MoneyMark
                 note="Each part is weighted by the reserve's current USD and divided by net (supplied − borrowed)." />}
         </Stat>
       </>}
-      <Stat k="Earned" title={EARNED_TITLE + basis} className="bw-kpi-earned"><EarnedValue e={earned} /></Stat>
+      <Stat k="Net earned" title={EARNED_TITLE + basis} className="bw-kpi-earned"><NetEarnedValue e={earned} /></Stat>
       <Stat k="Interest paid" title={PAID_TITLE + basis} className="bw-kpi-paid"><PaidValue e={earned} /></Stat>
       <Stat k="Incentives" title={`${CLAIMED_TITLE} ${UNCLAIMED_TITLE}`} className="bw-kpi-inc">
         <span className="bw-inc">

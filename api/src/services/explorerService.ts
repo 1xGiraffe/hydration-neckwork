@@ -10953,6 +10953,8 @@ export interface MoneyMarketEarnedMarket {
   otherUsd: number
   /** Borrow interest booked on this market's debt, as a positive cost. */
   paidUsd: number
+  /** earned − interest paid (the exact signed sum, snapped once): the card's headline "Net earned". May be negative. */
+  netEarnedUsd: number
   unpriced: number
   reserves: MoneyMarketEarnedReserve[]
   items: MoneyMarketEarnedItem[]
@@ -11011,6 +11013,7 @@ export function moneyMarketEarnedMarkets(sums: ReturnType<typeof foldMmEarned>):
       poolFeesUsd: usdOf(m.byCategory.poolFees),
       otherUsd: usdOf(m.byCategory.other),
       paidUsd: usdOf(-m.paid),
+      netEarnedUsd: usdOf(m.earned + m.paid),
       unpriced: m.unpriced,
       reserves: [...m.reserves.values()].map(r => ({ reserveAssetId: r.reserve.reserveAsset, aTokenAssetId: r.reserve.aTokenAsset, earnedUsd: usdOf(r.earned), paidUsd: usdOf(-r.paid) })),
       items,

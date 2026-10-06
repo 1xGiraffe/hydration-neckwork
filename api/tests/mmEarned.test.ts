@@ -159,6 +159,10 @@ describe('foldMmEarned — the cards are a slice of the facts', () => {
     expect(core.paidUsd).toBeCloseTo(14549.65 + 99.24, 6)
     expect(gigahdx.tokenYieldUsd).toBeCloseTo(3859.02, 6)
     expect(gigahdx.paidUsd).toBeCloseTo(816.6, 6)
+    // The headline is Net earned: earned less interest paid, additive beside both.
+    expect(core.netEarnedUsd).toBeCloseTo(core.earnedUsd - core.paidUsd, 6)
+    expect(core.netEarnedUsd).toBeLessThan(core.earnedUsd)
+    expect(gigahdx.netEarnedUsd).toBeCloseTo(3859.02 - 816.6, 6)
     // Largest first; the borrow lines are 'paid' with a positive amount.
     expect(core.items[0]).toMatchObject({ category: 'paid', stream: 'mm_borrow_interest' })
     expect(core.items[0].usd).toBeCloseTo(14549.65, 6)

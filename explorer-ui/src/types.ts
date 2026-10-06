@@ -3197,6 +3197,8 @@ export interface MoneyMarketEarnedMarket {
   otherUsd: number
   /** Borrow interest, as a positive cost. */
   paidUsd: number
+  /** earnedUsd − paidUsd, the card's "Net earned" (may be negative); absent from an older api — derive it then. */
+  netEarnedUsd?: number
   unpriced: number
   reserves: { reserveAssetId: number; aTokenAssetId: number | null; earnedUsd: number; paidUsd: number }[]
   items: MoneyMarketEarnedItem[]
