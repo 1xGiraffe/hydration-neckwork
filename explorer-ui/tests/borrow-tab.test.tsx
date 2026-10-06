@@ -241,8 +241,8 @@ describe('<BorrowTab>', () => {
     expect(html).toContain('$971') // core: 1,874.25 − 903.60
     expect(html).toContain('$51.70') // gigahdx: 64.20 − 12.50
     expect(html).not.toContain('$1.87k')
-    expect(html).toContain('<span class="k">Interest paid</span><span class="v">')
-    expect(html).toContain('$904')
+    // Net earned already nets the borrow interest off: no separate Interest paid figure.
+    expect(html).not.toContain('<span class="k">Interest paid</span>')
     expect(html).toContain('Show details &amp; history')
     // The collapsed rule names what is inside: reserve count and the history span.
     expect(html).toContain('2 reserves · since ' + mockMoneyMarketHistory(FOX).dates[4].slice(0, 10))
@@ -317,7 +317,6 @@ describe('<BorrowTab>', () => {
     expect(html).not.toContain('data-chart="')
     // The KPI row's history-backed figures are loading, never a dash that reads as "none".
     expect(html).toContain('<span class="k">Net earned</span><span class="v"><span class="muted">…</span>')
-    expect(html).toContain('<span class="k">Interest paid</span><span class="v"><span class="muted">…</span>')
   })
 })
 
