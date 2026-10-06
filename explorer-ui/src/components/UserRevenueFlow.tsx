@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Usd, F } from './ui'
+import { AddrPill, Usd, F } from './ui'
 import { RiverFullscreenButton, RiverLegend, type RiverProps } from './RevenueFlow'
 import { useRevenueHollarColor } from '../hooks/useRevenueHollarColor'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { subscribeFrame } from '../hooks/flowLoop'
-import { createRateScheduler, useUserRevenueFlowStream, type RateEmission, type RateScheduler } from '../hooks/useUserRevenueFlowStream'
+import { createRateScheduler, userRiverModeLabel, useUserRevenueFlowStream, type RateEmission, type RateScheduler } from '../hooks/useUserRevenueFlowStream'
 import { userRevenueColor, userRevenueLegendItems } from './revenueColors'
 import type { UserRevenueFlowResponse } from '../types'
 
@@ -12,11 +12,15 @@ import type { UserRevenueFlowResponse } from '../types'
 // users EARN drifts in from the right (from below on phones) into the counter,
 // each stream in its own colour (revenueColors.ts). Costs users pay are not
 // part of it (the /revenue/users breakdown states them); the counter is the
-// gross amount earned while watching. It streams the newest folded hour's
-// measured rate per block (see useUserRevenueFlowStream.ts) and says which hour
-// that is. Both rivers draw on the one shared frame loop (flowLoop.ts) and split
-// one particle budget; with prefers-reduced-motion there are no particles at
-// all — the counter and a static ledger of the hour's earning rows. Full screen
+// gross amount earned while watching. It is LIVE wherever a per-block source
+// exists — LP fees, GIGAHDX inflows and referrer commissions as events, lending
+// as per-block drips — and runs the revisable streams (token accrual, farms,
+// voting) and legacy staking at their 24h mean (see useUserRevenueFlowStream.ts),
+// and says so. Sub-cent residuals reach the counter after a short wait, so it
+// settles on everything earned. Both rivers draw on the one shared frame loop (flowLoop.ts) and
+// split one particle budget; with prefers-reduced-motion there are no particles
+// at all — the counter, a ledger of the newest live earnings and the drip
+// rates. Full screen
 // is the page's (one view, both rivers): the river only renders the button and
 // adapts to `fullscreen`.
 
@@ -47,7 +51,9 @@ const nowMs = () => Date.now()
 const EMIT_USD = 0.01
 const PILL_USD = 0.05
 const STRAY_MS = 90_000
-const fmtHourUtc = (iso: string): string => `${iso.slice(11, 16)} UTC ${iso.slice(0, 10)}`
+/** Rows the reduced-motion ledger keeps of the newest live earnings. */
+const LEDGER_RECENT = 8
+
 
 export function UserRevenueFlow({ maxActive = { desktop: 90, mobile: 20 }, fullscreen = false, onToggleFullscreen }: RiverProps) {
   const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
@@ -68,6 +74,7 @@ export function UserRevenueFlow({ maxActive = { desktop: 90, mobile: 20 }, fulls
   const [particles, setParticles] = useState<Particle[]>([])
   const [earnedUsd, setEarnedUsd] = useState(0)
   const [pulse, setPulse] = useState(0)
+  const [recent, setRecent] = useState<RateEmission[]>([])
   // The layout the particles in flight were measured for.
   const layoutRef = useRef(`${fullscreen}:${vertical}`)
 
@@ -107,6 +114,7 @@ export function UserRevenueFlow({ maxActive = { desktop: 90, mobile: 20 }, fulls
       }
       if (reducedMotion) {
         for (const e of due) earnedDelta += e.usd
+        if (due.length) setRecent(prev => [...[...due].reverse(), ...prev].slice(0, LEDGER_RECENT))
       } else if (due.length) {
         const stage = stageRef.current
         const w = stage ? stage.clientWidth : 1200
@@ -143,12 +151,10 @@ export function UserRevenueFlow({ maxActive = { desktop: 90, mobile: 20 }, fulls
   }
 
   const ledger = useMemo(() => (rates?.drips ?? []).slice(0, 12), [rates])
-  const legendItems = useMemo(() => userRevenueLegendItems(rates?.drips ?? []), [rates])
+  const legendItems = useMemo(() => userRevenueLegendItems(rates?.drips ?? [], rates?.liveStreams ?? []), [rates])
   const legend = <RiverLegend items={legendItems} label="User Revenue streams" />
-  // Revisable streams (token accrual, farms, voting) stream their trailing-24h mean: their newest hours are not decided yet.
-  const hourLabel = rates?.hour
-    ? `streaming the hour from ${fmtHourUtc(rates.hour)}${rates.revisableMeanHours ? `; token, farm and voting streams at their ${rates.revisableMeanHours}h mean` : ''}`
-    : 'waiting for the newest published hour'
+  // Live per block wherever a source exists; the revisable streams and legacy staking at their trailing mean.
+  const modeLabel = userRiverModeLabel(rates)
 
   if (reducedMotion) {
     return (
@@ -157,14 +163,21 @@ export function UserRevenueFlow({ maxActive = { desktop: 90, mobile: 20 }, fulls
         {onToggleFullscreen && <RiverFullscreenButton fullscreen={fullscreen} onToggle={onToggleFullscreen} />}
         <div className="rev-counter" aria-live="off">
           <div className="rev-counter-num mono"><Usd v={earnedUsd} /></div>
-          <div className="rev-counter-sub">earned by users while watching · {hourLabel}</div>
+          <div className="rev-counter-sub">earned by users while watching · {modeLabel}</div>
         </div>
         <div className="rev-ledger">
-          {ledger.length === 0 && <div className="rev-empty">No published hour yet.</div>}
+          {recent.length === 0 && ledger.length === 0 && <div className="rev-empty">Waiting for the next earnings…</div>}
+          {recent.map(e => (
+            <div className="rev-ledger-row" key={e.id}>
+              <span className="rev-dot" style={{ background: userRevenueColor(e.stream) }} />
+              <span className="rev-ledger-label">{e.account ? <AddrPill account={e.account} noCopy /> : e.label}</span>
+              <span className="mono"><Usd v={e.usd} /></span>
+            </div>
+          ))}
           {ledger.map(d => (
             <div className="rev-ledger-row" key={d.key}>
               <span className="rev-dot" style={{ background: userRevenueColor(d.stream) }} />
-              <span className="rev-ledger-label">{d.label}</span>
+              <span className="rev-ledger-label">{d.label}{d.mode === 'mean' ? ` · ${rates?.revisableMeanHours ?? 24}h mean` : ''}</span>
               <span className="mono">{F.usd(rates ? d.usdPerBlock * (3_600 / rates.blockSeconds) : 0)}/h</span>
             </div>
           ))}
@@ -191,7 +204,10 @@ export function UserRevenueFlow({ maxActive = { desktop: 90, mobile: 20 }, fulls
           return p.kind === 'pill' ? (
             <div key={p.id} className="rev-particle rev-pill" style={style} onAnimationEnd={() => arrive(p)}>
               <span className="rev-dot" style={{ background: tint }} />
-              <span className="rev-pill-label">{p.label}</span>
+              {p.account
+                // noFocus: the stage is aria-hidden, so a tab stop here would land focus on content assistive tech cannot see.
+                ? <AddrPill account={p.account} noCopy noFocus />
+                : <span className="rev-pill-label">{p.label}</span>}
               <span className="rev-pill-usd mono">{F.usd(p.usd)}</span>
             </div>
           ) : (
@@ -206,7 +222,7 @@ export function UserRevenueFlow({ maxActive = { desktop: 90, mobile: 20 }, fulls
         })}
       </div>
       <div className="rev-river-foot">
-        <span className="ur-foot-note">{hourLabel}</span>
+        <span className="ur-foot-note">{modeLabel}</span>
       </div>
     </div>
     {legend}

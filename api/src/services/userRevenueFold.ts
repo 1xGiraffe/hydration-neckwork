@@ -189,6 +189,17 @@ export const PRICE_CARRY_SECONDS = 30 * DAY
  */
 export const PRICE_SERIES_FILL: ReadonlyMap<number, number> = new Map([[34, 20]])
 
+/**
+ * PRICE_SERIES_FILL as SQL over a (price-aliased) asset id expression: the fill
+ * series' id, else 4294967295 (no series). A SQL reader valuing like the fold
+ * joins both series and takes the newer close, its own on a tie.
+ */
+export function priceSeriesFillSql(expr: string): string {
+  const from = [...PRICE_SERIES_FILL.keys()]
+  if (!from.length) return 'toUInt32(4294967295)'
+  return `transform(toUInt32(${expr}), [${from.join(',')}], [${from.map(id => PRICE_SERIES_FILL.get(id)).join(',')}], toUInt32(4294967295))`
+}
+
 /** Half a cent at 1e-12 USD: the bound under which every surface shows 0 (userRevenueRead.USER_REVENUE_DUST_1E12). */
 export const USER_REVENUE_CELL_DUST_1E12 = 5_000_000_000n
 

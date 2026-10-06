@@ -537,28 +537,41 @@ describe('getUserRevenueFlow', () => {
     expect(flow.hour).toBe('2026-08-14T13:00:00.000Z')
     expect(flow.publishedThrough).toBe('2026-08-14T14:00:00.000Z')
     expect(flow.drips).toEqual([])
+    expect(flow.items).toEqual([])
+    // Both positions just before the head block, so a head-block row at event 0 still streams.
+    expect(flow.cursor).toBe('u1.13599999-4294967295-65535.13599999-4294967295-65535')
   })
 })
 
 describe('getUserRevenueFlow — revisable streams', () => {
-  it('streams a revisable stream at its trailing-24h mean and a decided one at its newest hour', async () => {
+  it('streams the revisable streams and legacy staking at their trailing-24h mean and the lending pots of the newest money-market hour', async () => {
     vi.setSystemTime(NOW + 9_100_000)
     const { initRevenueService, getUserRevenueFlow } = await service()
     const hour = Math.floor(Date.parse('2026-08-14T13:00:00Z') / 1000)
-    const { client } = fakeClient({
+    const { seen, client } = fakeClient({
       raw_ingestion_state: [{ head: 13_600_000 }],
       '-- rev:user-flow-hour': [{ h: String(hour), n: '1' }],
       '-- rev:user-flow\n': [
-        { stream: 'token_accrual', asset_id: '43', last: '-5.000000000000', trailing: '48.000000000000' },
-        { stream: 'lp_fee_omnipool', asset_id: '5', last: '3.000000000000', trailing: '72.000000000000' },
+        { mode: 'mean', stream: 'token_accrual', asset_id: '43', usd: '48.000000000000' },
+        { mode: 'mean', stream: 'farm_rewards', asset_id: '0', usd: '24.000000000000' },
+        { mode: 'live', stream: 'mm_supply_interest', asset_id: '5', usd: '3.000000000000' },
       ],
     })
     initRevenueService(client)
     const flow = await getUserRevenueFlow()
     expect(flow.revisableMeanHours).toBe(24)
     const per = new Map(flow.drips.map(d => [d.stream, d.usdPerBlock / (flow.blockSeconds / 3_600)]))
-    expect(per.get('token_accrual')).toBeCloseTo(2, 9) // 48 / 24, never the undecided −5
-    expect(per.get('lp_fee_omnipool')).toBeCloseTo(3, 9)
+    expect(per.get('token_accrual')).toBeCloseTo(2, 9) // 48 / 24
+    expect(per.get('farm_rewards')).toBeCloseTo(1, 9)
+    expect(per.get('mm_supply_interest')).toBeCloseTo(3, 9) // an hourly amount, never divided
+    expect(new Map(flow.drips.map(d => [d.stream, d.mode]))).toEqual(new Map([['token_accrual', 'mean'], ['farm_rewards', 'mean'], ['mm_supply_interest', 'live']]))
+    // The mean arm is the revisable streams exactly; the rate arm the lending streams; no stream replays an hour.
+    const call = seen.find(x => x.query.includes('-- rev:user-flow\n'))!
+    expect([...(call.params.mean as string[])].sort()).toEqual(['farm_rewards', 'gigahdx_voting', 'staking_legacy', 'token_accrual', 'token_accrual_catchup'])
+    expect(call.params.rate).toEqual(['mm_supply_interest', 'mm_incentives'])
+    // Only the pots of the newest hour holding any measured money-market fact: no per-pot carry-forward.
+    expect(call.query).toContain("startsWith(stream, 'mm_') AND NOT startsWith(via, 'unmeasured:'))")
+    expect(call.query).not.toContain('LIMIT 1 BY')
   })
 })
 
@@ -570,7 +583,7 @@ describe('getUserRevenueFlow — token accrual drips', () => {
     const { seen, client } = fakeClient({
       raw_ingestion_state: [{ head: 13_600_000 }],
       '-- rev:user-flow-hour': [{ h: String(hour), n: '1' }],
-      '-- rev:user-flow\n': [{ stream: 'token_accrual', asset_id: '0', last: '0', trailing: '48.000000000000' }],
+      '-- rev:user-flow\n': [{ mode: 'mean', stream: 'token_accrual', asset_id: '0', usd: '48.000000000000' }],
     })
     initRevenueService(client)
     const flow = await getUserRevenueFlow()
@@ -608,7 +621,7 @@ describe('getUserRevenueDashboard — top earners and payers in one pass', () =>
 })
 
 describe('getUserRevenueFlow — earnings only', () => {
-  it('streams only what users earn: borrow interest, HOLLAR\'s included, and a stream netting to a cost are no drip', async () => {
+  it('drips only what users earn: a pot whose user side netted to a cost is no drip and never offsets another pot', async () => {
     vi.setSystemTime(NOW + 9_300_000)
     const { initRevenueService, getUserRevenueFlow } = await service()
     const hour = Math.floor(Date.parse('2026-08-14T13:00:00Z') / 1000)
@@ -616,17 +629,17 @@ describe('getUserRevenueFlow — earnings only', () => {
       raw_ingestion_state: [{ head: 13_600_000 }],
       '-- rev:user-flow-hour': [{ h: String(hour), n: '1' }],
       '-- rev:user-flow\n': [
-        { stream: 'mm_borrow_interest', asset_id: '222', last: '-9.000000000000', trailing: '-200.000000000000' },
-        { stream: 'mm_borrow_interest', asset_id: '0', last: '-1.000000000000', trailing: '-24.000000000000' },
-        { stream: 'mm_supply_interest', asset_id: '5', last: '-2.000000000000', trailing: '-2.000000000000' },
-        { stream: 'lp_fee_omnipool', asset_id: '5', last: '1.000000000000', trailing: '1.000000000000' },
-        { stream: 'mm_supply_interest', asset_id: '0', last: '4.000000000000', trailing: '4.000000000000' },
+        { mode: 'live', stream: 'mm_incentives', asset_id: '5', usd: '-2.000000000000' },
+        { mode: 'live', stream: 'mm_incentives', asset_id: '5', usd: '1.000000000000' },
+        { mode: 'mean', stream: 'farm_rewards', asset_id: '9', usd: '-24.000000000000' },
+        { mode: 'live', stream: 'mm_supply_interest', asset_id: '0', usd: '4.000000000000' },
       ],
     })
     initRevenueService(client)
     const flow = await getUserRevenueFlow()
     // Largest first; every drip positive.
-    expect(flow.drips.map(d => d.key)).toEqual(['mm_supply_interest:0', 'lp_fee_omnipool:5'])
+    expect(flow.drips.map(d => d.key)).toEqual(['mm_supply_interest:0', 'mm_incentives:5'])
+    expect(flow.drips[1].usdPerBlock / (flow.blockSeconds / 3_600)).toBeCloseTo(1, 9)
     expect(flow.drips.every(d => d.usdPerBlock > 0)).toBe(true)
   })
 })
@@ -663,6 +676,188 @@ describe('User Revenue display streams — HOLLAR interest apart', () => {
       expect(q).toContain("if((stream = 'mm_borrow_interest' AND asset_id = 222), 'mm_borrow_interest_hollar', stream) AS ds")
       expect(q).toMatch(/GROUP BY (t, )?ds, holder_class/)
     }
+  })
+})
+
+// ── the user river's live items ──────────────────────────────────────────────
+
+function userTailRow(over: Partial<Row>): Row {
+  return {
+    stream: 'lp_fee_omnipool', pot: 'omnipool:5', block_height: 13_600_000, block_timestamp: '2026-08-14 15:30:30',
+    event_index: 1, leg_index: 0, earner: '', asset_id: 5, amount_usd: '1.000000000000',
+    ...over,
+  }
+}
+
+describe('getUserRevenueFlow — live items', () => {
+  const hour = Math.floor(Date.parse('2026-08-14T14:00:00Z') / 1000)
+  const shares = [
+    { stream: 'lp_fee_omnipool', pot: 'omnipool:5', h: String(hour), user_usd: '1.000000000000', total_usd: '4.000000000000' },
+    // The HDX sub-pool: protocol-held, so its user side is 0.
+    { stream: 'lp_fee_omnipool', pot: 'omnipool:0', h: String(hour), user_usd: '0', total_usd: '3.000000000000' },
+  ]
+  const PALLET = `0x6d6f646c${'00'.repeat(28)}`
+
+  it('streams each event\'s user share of its pot, a referral claim by its earner\'s class, and seeds from the tail\'s newest minute', async () => {
+    // The wall clock is 55 s past the newest row (rows land most of a minute after their block):
+    // a wall-clock seed minute would hold almost nothing.
+    vi.setSystemTime(Date.parse('2026-08-14T15:31:25Z'))
+    const { initRevenueService, getUserRevenueFlow } = await service()
+    const { seen, client } = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_010 }],
+      '-- rev:user-flow-hour': [{ h: String(hour), n: '1' }],
+      '-- rev:user-flow-shares': shares,
+      '-- rev:user-flow-tail': [
+        userTailRow({ block_height: 13_599_000, block_timestamp: '2026-08-14 15:00:00' }), // older than the seed minute
+        userTailRow({ block_height: 13_600_001, amount_usd: '2.000000000000' }),
+        userTailRow({ block_height: 13_600_002, pot: 'omnipool:0', asset_id: 0 }), // protocol-held: nothing
+        userTailRow({ block_height: 13_600_003, stream: 'lp_fee_xyk', pot: 'xyk:1000001' }), // no known share: skipped
+        // A referral claim is its earner's: a user streams the whole claim, a pallet account nothing.
+        userTailRow({ block_height: 13_600_004, stream: 'referral_commissions', pot: 'referrals', earner: ACCOUNT_A, asset_id: 0, amount_usd: '0.300000000000' }),
+        userTailRow({ block_height: 13_600_005, stream: 'referral_commissions', pot: 'referrals', earner: PALLET, asset_id: 0, amount_usd: '0.700000000000' }),
+      ],
+    })
+    initRevenueService(client)
+    const flow = await getUserRevenueFlow()
+    expect(flow.items.map(i => [i.stream, i.block, i.usd])).toEqual([
+      ['lp_fee_omnipool', 13_600_001, 0.5], // 2 × 1 / 4
+      ['referral_commissions', 13_600_004, 0.3],
+    ])
+    expect(flow.items[1].account?.accountId).toBe(ACCOUNT_A)
+    expect(flow.items[0].account).toBeNull()
+    expect(flow.items.every(i => i.usd > 0)).toBe(true)
+    expect(flow.cursor).toBe('u1.13600004-1-0.13600000-4294967295-65535')
+    expect(flow.liveStreams).toContain('lp_fee_uniswap_v3')
+    expect(flow.liveStreams).not.toContain('staking_legacy')
+    // Shares are read for the pot streams only (a referral claim is classed by its earner), as of the newest folded hour.
+    const call = seen.find(x => x.query.includes('-- rev:user-flow-shares'))!
+    expect(call.params.h).toBe(hour)
+    expect(call.params.streams).not.toContain('referral_commissions')
+    expect(call.query).toContain('LIMIT 1 BY stream, pot')
+    expect(call.query).toContain('HAVING t > 0')
+  })
+
+  it('pages strictly after the cursor, with no overlap and no gap; an older plain cursor re-seeds instead of failing', async () => {
+    vi.setSystemTime(Date.parse('2026-08-14T15:31:00Z') + 400_000)
+    const { initRevenueService, getUserRevenueFlow } = await service()
+    const tail = [
+      userTailRow({ block_height: 13_600_100, event_index: 3, leg_index: 0 }),
+      userTailRow({ block_height: 13_600_100, event_index: 3, leg_index: 1 }),
+      userTailRow({ block_height: 13_600_100, event_index: 4, leg_index: 0 }),
+      userTailRow({ block_height: 13_600_101, event_index: 0, leg_index: 0 }),
+    ]
+    const { client } = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_120 }],
+      '-- rev:user-flow-hour': [{ h: String(hour), n: '1' }],
+      '-- rev:user-flow-shares': shares,
+      '-- rev:user-flow-tail': tail,
+    })
+    initRevenueService(client)
+    const first = await getUserRevenueFlow('u1.13600100-3-0.13600100-3-0')
+    expect(first.items.map(i => `${i.block}-${i.eventIndex}-${i.legIndex}`)).toEqual(['13600100-3-1', '13600100-4-0', '13600101-0-0'])
+    expect(first.cursor).toBe('u1.13600101-0-0.13600100-3-0')
+    const next = await getUserRevenueFlow(first.cursor)
+    expect(next.items).toEqual([])
+    // An empty page keeps the caller's cursor.
+    expect(next.cursor).toBe(first.cursor)
+    // An older client's cursor is not an error: it seeds afresh (the whole tail is inside the newest minute here).
+    const old = await getUserRevenueFlow('13600100-3-0')
+    expect(old.items).toHaveLength(4)
+  })
+
+  it('holds a Uniswap v3 leg until every resolvable v3 swap at or below it has its leg, then streams it once', async () => {
+    const t0 = Date.parse('2026-08-14T15:45:00Z')
+    vi.setSystemTime(t0)
+    const { initRevenueService, getUserRevenueFlow } = await service()
+    // Another folded hour than the tests above, so its shares are read afresh rather than from their cache.
+    const h2 = hour + 3_600
+    const v3Shares = [...shares, { stream: 'lp_fee_uniswap_v3', pot: 'v3:0xpool', h: String(h2), user_usd: '1.000000000000', total_usd: '1.000000000000' }]
+    const omni = userTailRow({ block_height: 13_600_300, event_index: 2 })
+    const v3 = userTailRow({ stream: 'lp_fee_uniswap_v3', pot: 'v3:0xpool', block_height: 13_600_250, event_index: 9, asset_id: 5, amount_usd: '0.400000000000' })
+    const v3b = userTailRow({ stream: 'lp_fee_uniswap_v3', pot: 'v3:0xpool', block_height: 13_600_280, event_index: 4, asset_id: 5, amount_usd: '0.100000000000' })
+    // Pull 1: the v3 legs are not written yet; the at-ingest source runs ahead.
+    let fake = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_301 }],
+      '-- rev:user-flow-hour': [{ h: String(h2), n: '1' }],
+      '-- rev:user-flow-shares': v3Shares,
+      '-- rev:user-flow-tail': [omni],
+      '-- rev:user-flow-v3-ready': [{ pending: '13600250' }],
+    })
+    initRevenueService(fake.client)
+    const p1 = await getUserRevenueFlow('u1.13600200-0-0.13600200-0-0')
+    expect(p1.items.map(i => i.block)).toEqual([13_600_300])
+    // Pull 2 (a later head): the first leg landed, the second swap's has not — only the first streams.
+    vi.setSystemTime(t0 + 3_000)
+    fake = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_302 }],
+      '-- rev:user-flow-hour': [{ h: String(h2), n: '1' }],
+      '-- rev:user-flow-shares': v3Shares,
+      '-- rev:user-flow-tail': [v3, omni],
+      '-- rev:user-flow-v3-ready': [{ pending: '13600280' }],
+    })
+    initRevenueService(fake.client)
+    const p2 = await getUserRevenueFlow(p1.cursor)
+    expect(p2.items.map(i => [i.stream, i.block])).toEqual([['lp_fee_uniswap_v3', 13_600_250]])
+    // Pull 3: everything written — the second leg streams, nothing repeats.
+    vi.setSystemTime(t0 + 6_000)
+    fake = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_303 }],
+      '-- rev:user-flow-hour': [{ h: String(h2), n: '1' }],
+      '-- rev:user-flow-shares': v3Shares,
+      '-- rev:user-flow-tail': [v3, v3b, omni],
+    })
+    initRevenueService(fake.client)
+    const p3 = await getUserRevenueFlow(p2.cursor)
+    expect(p3.items.map(i => [i.stream, i.block])).toEqual([['lp_fee_uniswap_v3', 13_600_280]])
+    const p4 = await getUserRevenueFlow(p3.cursor)
+    expect(p4.items).toEqual([])
+  })
+})
+
+describe('user river SQL', () => {
+  it('reads every venue\'s RETAINED fee legs, the v3 leg net of the protocol fee, and the pots\' inflows', async () => {
+    const { userFlowTailSql } = await import('../src/services/userRevenueLive.ts')
+    const sql = userFlowTailSql()
+    expect(sql).toContain("venue IN ('omnipool', 'stableswap', 'xyk', 'uniswapv3') AND leg_kind = 'fee'")
+    expect(sql).toContain("l.recipient = '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000'")
+    expect(sql).toContain('l.gross - intDiv(l.gross, f.fp)')
+    expect(sql).toContain("concat('omnipool:', toString(if(l.leg_asset = 1, 0, l.leg_asset)))")
+    expect(sql).toContain("event_name = 'Referrals.Claimed'")
+    expect(sql).toContain("to_account = account AND asset_id = 0")
+    // Bounded: every arm reads the anchored window.
+    expect(sql.match(/block_timestamp > \{anchor:DateTime\} - INTERVAL \{hours:UInt32\} HOUR/g)?.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('keeps a stableswap leg only when it names that pool\'s own account (the fold\'s rule)', async () => {
+    const { userFlowTailSql } = await import('../src/services/userRevenueLive.ts')
+    const sql = userFlowTailSql()
+    expect(sql).toContain("l.venue = 'stableswap', l.recipient = '' OR has({ssPoolAccounts:Array(String)}, concat(l.pool_key, ':', l.recipient))")
+    expect(sql).not.toContain("l.recipient != ''")
+  })
+
+  it('values an asset with a fill series at the newer of its own close and the fill\'s (the fold\'s ETH ← WETH rule)', async () => {
+    const { userFlowTailSql } = await import('../src/services/userRevenueLive.ts')
+    const sql = userFlowTailSql()
+    expect(sql).toMatch(/AS pf\s+ON pf\.asset_id = transform\(toUInt32\(.*\), \[34\], \[20\], toUInt32\(4294967295\)\)/)
+    expect(sql).toContain('if(pf.close > 0 AND (p.close <= 0 OR pf.price_time > p.price_time), pf.close, p.close) AS px')
+  })
+
+  it('streams legacy staking at its mean, never from the staking pot\'s inflows', async () => {
+    const { userFlowTailSql, USER_FLOW_MEAN_STREAMS, USER_FLOW_EVENT_STREAMS } = await import('../src/services/userRevenueLive.ts')
+    const { STAKING_POT } = await import('../src/services/userRevenueLp.ts')
+    expect(userFlowTailSql()).not.toContain(STAKING_POT)
+    expect(USER_FLOW_MEAN_STREAMS).toContain('staking_legacy')
+    expect(USER_FLOW_EVENT_STREAMS).not.toContain('staking_legacy' as never)
+  })
+
+  it('finds the oldest resolvable v3 swap whose fee leg is not written yet, inside the window', async () => {
+    const { userFlowV3ReadySql } = await import('../src/services/userRevenueLive.ts')
+    const sql = userFlowV3ReadySql()
+    expect(sql).toContain('minOrNull(s.block_height) AS pending')
+    expect(sql).toContain("kind = 'pool' AND event_name = 'Swap'")
+    expect(sql).toContain("venue = 'uniswapv3' AND leg_kind = 'fee'")
+    expect(sql).toContain('!= 4294967295')
+    expect(sql.match(/block_timestamp > \{anchor:DateTime\} - INTERVAL \{hours:UInt32\} HOUR/g)?.length).toBe(2)
   })
 })
 

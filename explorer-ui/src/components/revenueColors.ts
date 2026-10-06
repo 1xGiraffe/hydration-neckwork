@@ -178,21 +178,19 @@ export const userRevenueColor = (stream: string): string =>
   USER_REVENUE_STREAM_COLOR[stream] ?? 'var(--chart-neutral)'
 
 /**
- * The legend names every stream that can flow this hour — the drips are exactly what
- * the scheduler emits from, all of them earnings — one entry per display stream, in
- * the palette's order.
+ * The legend names every stream that can flow — the drips the scheduler ticks
+ * and the event streams that arrive live as items, all of them earnings — one
+ * entry per display stream, in the palette's order.
  */
-export function userRevenueLegendItems(drips: UserRevenueFlowResponse['drips']): RiverLegendItem[] {
+export function userRevenueLegendItems(drips: UserRevenueFlowResponse['drips'], liveStreams: readonly string[] = []): RiverLegendItem[] {
   const seen = new Map<string, RiverLegendItem & { rank: number }>()
-  for (const d of drips) {
-    if (!Number.isFinite(d.usdPerBlock) || d.usdPerBlock <= 0 || seen.has(d.stream)) continue
-    seen.set(d.stream, {
-      key: d.stream,
-      label: USER_REVENUE_STREAM_LABEL[d.stream] ?? d.label.split(' · ')[0],
-      color: userRevenueColor(d.stream),
-      rank: userRevenueStreamRank(d.stream),
-    })
+  const add = (stream: string, fallback: string) => {
+    if (seen.has(stream)) return
+    seen.set(stream, { key: stream, label: USER_REVENUE_STREAM_LABEL[stream] ?? fallback, color: userRevenueColor(stream), rank: userRevenueStreamRank(stream) })
   }
+  for (const d of drips) {
+    if (Number.isFinite(d.usdPerBlock) && d.usdPerBlock > 0) add(d.stream, d.label.split(' · ')[0])
+  }
+  for (const stream of liveStreams) add(stream, stream)
   return [...seen.values()].sort((a, b) => a.rank - b.rank).map(({ key, label, color }) => ({ key, label, color }))
 }
-

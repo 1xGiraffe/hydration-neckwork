@@ -10,10 +10,10 @@ import { UserRevenueTab } from '../src/components/UserRevenueTab'
 import { ProfileStats, profileTabs } from '../src/components/AccountSections'
 import { AccountRow } from '../src/components/AccountsTable'
 import { activityCountKey } from '../src/utils/directoryActivity'
-import { createRateScheduler } from '../src/hooks/useUserRevenueFlowStream'
-import { USER_REVENUE_STREAM_COLOR } from '../src/components/revenueColors'
+import { MAX_BLOCKS_AFTER_RESUME, createRateScheduler, feedUserFlow, initialUserFlowFeed, userRiverModeLabel } from '../src/hooks/useUserRevenueFlowStream'
+import { USER_REVENUE_STREAM_COLOR, userRevenueLegendItems } from '../src/components/revenueColors'
 import { userRevenueCauseLabel, userRevenueViaLabel } from '../src/components/userRevenueLabels'
-import type { RevenueDashboard, TopAccountRow, UserRevenueBreakdown, UserRevenueDashboard, UserRevenueSummary } from '../src/types'
+import type { RevenueDashboard, TopAccountRow, UserRevenueBreakdown, UserRevenueDashboard, UserRevenueFlowItem, UserRevenueFlowResponse, UserRevenueSummary } from '../src/types'
 
 const DAY = 86_400
 const T0 = Math.floor(Date.parse('2026-09-06T00:00:00Z') / 1000)
@@ -102,6 +102,9 @@ describe('/revenue full screen', () => {
     const html = rivers('off')
     expect(html.split('aria-label="Watch both rivers full screen"').length - 1).toBe(2)
     expect(html).not.toContain('rev-duo-fs')
+    // The user river's mode line: live, never a replayed hour.
+    expect(text(html)).toContain('waiting for the live feed')
+    expect(text(html)).not.toContain('streaming the hour')
   })
 
   it('opens one view holding both rivers, each labelled and with its counter, never summed', () => {
@@ -346,5 +349,112 @@ describe('user river scheduler', () => {
     expect(userRevenueViaLabel('external-rate:hastra-nav')).toBe("issuer's NAV (Hastra, Solana) before Hydration's first rate")
     expect(userRevenueCauseLabel('external-rate:hastra-nav')).toContain('Hastra')
     expect(userRevenueViaLabel('external-rate:other-src>atoken:1043')).toBe("external rate (other src) before Hydration's first rate › aToken #1043")
+  })
+})
+
+describe('user river live feed', () => {
+  const make = (maxActive = 50) => createRateScheduler({ emitUsd: 0.01, pillUsd: 0.05, maxActive, now: () => 1_000 })
+  const item = (over: Partial<UserRevenueFlowItem>): UserRevenueFlowItem => ({
+    stream: 'lp_fee_omnipool', label: 'Omnipool LP fees · DOT', block: 100, t: 0, eventIndex: 1, legIndex: 0, account: null, assetId: 5, usd: 0.2, ...over,
+  })
+  const response = (over: Partial<UserRevenueFlowResponse>): UserRevenueFlowResponse => ({
+    hour: '2026-10-05T21:00:00.000Z', revisableMeanHours: 24, publishedThrough: '2026-10-05T22:00:00.000Z', blockSeconds: 6, head: 1_000,
+    drips: [], items: [], cursor: '1000-0-0', liveStreams: ['lp_fee_omnipool', 'referral_commissions'], ...over,
+  })
+
+  it('flies an item worth a particle on its own (naming its earner), accrues the small ones, and skips anything not earned', () => {
+    const s = make()
+    s.ingest([
+      item({ usd: 0.2, stream: 'referral_commissions', label: 'Referrer commissions · HDX', account: ACC, block: 101 }),
+      item({ usd: 0.004, block: 102 }),
+      item({ usd: 0.004, block: 103 }),
+      item({ usd: 0.004, block: 104 }), // the third tiny one tips the stream's accumulator over a cent
+      item({ usd: -1, block: 105 }),
+      item({ usd: 0, block: 106 }),
+    ], 0)
+    const { due, credit } = s.drain(2_000)
+    expect(credit).toBe(0)
+    expect(due.map(e => [e.stream, +e.usd.toFixed(3), e.kind])).toEqual(expect.arrayContaining([
+      ['referral_commissions', 0.2, 'pill'],
+      ['lp_fee_omnipool', 0.012, 'mote'],
+    ]))
+    expect(due).toHaveLength(2)
+    expect(due.find(e => e.stream === 'referral_commissions')?.account).toEqual(ACC)
+    expect(+s.sessionUsd().toFixed(3)).toBe(0.212)
+  })
+
+  it('credits an item past the cap instead of dropping it', () => {
+    const s = make(1)
+    s.setInFlight(1)
+    s.ingest([item({ usd: 0.3 })], 0)
+    expect(s.drain(2_000)).toEqual({ due: [], credit: 0.3 })
+  })
+
+  it('consumes items and drips together: items every pull, drips once per block the head advanced, the cursor kept', () => {
+    const s = make()
+    const drips = [{ key: 'mm_supply_interest:5', stream: 'mm_supply_interest', label: 'Lending interest · DOT', assetId: 5, usdPerBlock: 0.01, mode: 'live' as const }]
+    let feed = feedUserFlow(s, initialUserFlowFeed(), response({ drips, items: [item({ usd: 0.2 })], cursor: '1000-1-0' }), 10_000)
+    // First pull: the item plus three opening blocks of the drip.
+    expect(+s.sessionUsd().toFixed(3)).toBe(0.23)
+    expect(feed).toMatchObject({ cursor: '1000-1-0', lastHead: 1_000, lastBatchAt: 10_000 })
+    feed = feedUserFlow(s, feed, response({ head: 1_002, drips, items: [item({ usd: 0.1, block: 1_001 })], cursor: '1001-1-0' }), 22_000)
+    expect(+s.sessionUsd().toFixed(3)).toBe(0.35) // + 0.1 item + 2 blocks × 0.01
+    expect(feed.cursor).toBe('1001-1-0')
+    // A pull with nothing new and the same head adds nothing and keeps the cursor.
+    feed = feedUserFlow(s, feed, response({ head: 1_002, drips, items: [], cursor: undefined }), 25_000)
+    expect(+s.sessionUsd().toFixed(3)).toBe(0.35)
+    expect(feed.cursor).toBe('1001-1-0')
+  })
+
+  it('says it is live and that only the revisable streams run at their mean — never "the hour from"', () => {
+    const label = userRiverModeLabel(response({}))
+    expect(label).toBe('live per block; token, farm, voting and legacy staking streams at their 24h mean')
+    expect(label).not.toContain('hour from')
+    expect(userRiverModeLabel(null)).toBe('waiting for the live feed')
+  })
+
+  it('accrues every block a visible tab\'s slow pull missed; caps only the first pull after a hidden tab returns', () => {
+    const drips = [{ key: 'mm_supply_interest:5', stream: 'mm_supply_interest', label: 'Lending interest · DOT', assetId: 5, usdPerBlock: 0.01, mode: 'live' as const }]
+    const s = make()
+    let feed = feedUserFlow(s, initialUserFlowFeed(), response({ head: 1_000, drips }), 10_000)
+    const opened = s.sessionUsd()
+    // A visible tab whose pull took 20 blocks: all 20 accrue.
+    feed = feedUserFlow(s, feed, response({ head: 1_020, drips }), 130_000)
+    expect(s.sessionUsd() - opened).toBeCloseTo(0.2, 9)
+    // Back from a hidden tab 100 blocks later: capped once, then uncapped again.
+    feed = feedUserFlow(s, { ...feed, resumed: true }, response({ head: 1_120, drips }), 800_000)
+    expect(s.sessionUsd() - opened).toBeCloseTo(0.2 + MAX_BLOCKS_AFTER_RESUME * 0.01, 9)
+    expect(feed.resumed).toBe(false)
+    feed = feedUserFlow(s, feed, response({ head: 1_140, drips }), 920_000)
+    expect(s.sessionUsd() - opened).toBeCloseTo(0.4 + MAX_BLOCKS_AFTER_RESUME * 0.01, 9)
+  })
+
+  it('credits a sub-cent residual to the counter once it has waited, so the counter settles on sessionUsd()', () => {
+    let t = 1_000
+    const s = createRateScheduler({ emitUsd: 0.01, pillUsd: 0.05, maxActive: 50, now: () => t, flushMs: 20_000 })
+    s.tick([{ key: 'a', stream: 'mm_incentives', label: 'A', usdPerBlock: 0.002 }], 2, 0)
+    s.ingest([item({ usd: 0.003 })], 0)
+    let counter = 0
+    const run = (now: number) => {
+      const { due, credit } = s.drain(now)
+      counter += credit + due.reduce((x, e) => x + e.usd, 0)
+    }
+    run(5_000)
+    expect(counter).toBe(0) // still filling
+    t = 10_000
+    s.tick([{ key: 'a', stream: 'mm_incentives', label: 'A', usdPerBlock: 0.002 }], 1, 0)
+    run(21_000) // 20 s after both accumulators started filling
+    expect(counter).toBeCloseTo(s.sessionUsd(), 12)
+    expect(counter).toBeCloseTo(0.009, 12)
+    // flush() credits whatever is still accumulating at once.
+    s.tick([{ key: 'a', stream: 'mm_incentives', label: 'A', usdPerBlock: 0.002 }], 1, 0)
+    s.flush()
+    run(21_001)
+    expect(counter).toBeCloseTo(s.sessionUsd(), 12)
+  })
+
+  it('names the live event streams in the legend before any of them has arrived', () => {
+    const items = userRevenueLegendItems([{ key: 'farm_rewards:0', stream: 'farm_rewards', label: 'x', assetId: 0, usdPerBlock: 0.01 }], ['referral_commissions', 'lp_fee_omnipool'])
+    expect(items.map(i => i.key)).toEqual(['lp_fee_omnipool', 'referral_commissions', 'farm_rewards'])
   })
 })

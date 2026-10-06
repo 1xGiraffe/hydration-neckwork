@@ -52,6 +52,14 @@ import {
   userRevenueOwnerKeySql, userRevenueWindows, windowFirstDay, type AccountFoldCoverage,
 } from './userRevenueRead.ts'
 import { USER_REVENUE_DISPLAY_STREAMS, userRevenueDisplayStream, type UserRevenueUnmeasured } from './userRevenueStreams.ts'
+import {
+  USER_FLOW_EVENT_STREAMS, USER_FLOW_MEAN_HOURS, USER_FLOW_MEAN_STREAMS, USER_FLOW_RATE_STREAMS, USER_FLOW_TAIL_HOURS,
+  attributeUserShares, formatUserFlowCursor, pageUserFlow, parseUserFlowCursor, userFlowDripsSql, userFlowSharesSql, userFlowTailSql,
+  userFlowV3ReadySql, userShareKey, type UserFlowTailRow, type UserShare,
+} from './userRevenueLive.ts'
+import { loadProtocolHolders } from './userRevenueFold.ts'
+import { loadStableswapPools } from './userRevenueLp.ts'
+import type { HolderSets } from './userRevenueStreams.ts'
 import { DECIMAL_STRINGS, OMNIPOOL_ACCOUNT, scaledUsd } from './valuation.ts'
 
 let client: ClickHouseClient
@@ -934,84 +942,210 @@ LIMIT 10 BY sign(s)`
 }
 
 /** Revisable streams (a later event still moves their recent hours) stream their mean over this many closed hours. */
-export const USER_FLOW_REVISABLE_MEAN_HOURS = 24
+export const USER_FLOW_REVISABLE_MEAN_HOURS = USER_FLOW_MEAN_HOURS
+
+/** One live earning event in the user river: its USER part only (the pot's user share of the holder-side amount). */
+export interface UserRevenueFlowItem {
+  stream: string
+  /** "<stream label> · <asset>", what a pill reads when it names no account. */
+  label: string
+  block: number
+  t: number
+  eventIndex: number
+  legIndex: number
+  /** The earner the event names (a referral claim's referrer), else null: an LP fee is shared by the pool's holders. */
+  account: AccountRef | null
+  assetId: number
+  usd: number
+}
 
 export interface UserRevenueFlowResponse {
-  /** Start of the newest folded hour (ISO) whose rate the river streams (revisable streams: the mean of the 24 hours ending with it). */
+  /** Start of the newest folded hour (ISO): the mean drips' trailing window ends with it; the shares and rates are its or carried forward. */
   hour: string | null
   /** The trailing window revisable streams are averaged over (hours, ending with `hour`). */
   revisableMeanHours: number
   publishedThrough: string | null
   blockSeconds: number
   head: number
-  /** Earnings only: every drip is positive (costs are the dashboard breakdown's Paid column, never streamed). */
-  drips: { key: string; stream: string; label: string; assetId: number; usdPerBlock: number }[]
+  /**
+   * Earnings only, every drip positive. `live`: interest accruing every block (lending interest and
+   * incentives) at its user accrual in the newest folded money-market hour; `mean`: a revisable
+   * stream, or legacy staking, at its trailing mean.
+   */
+  drips: { key: string; stream: string; label: string; assetId: number; usdPerBlock: number; mode: 'live' | 'mean' }[]
+  /** Live earning events after `after` (or the tail's newest minute on a cursorless call), oldest first, each positive; at most a page. */
+  items: UserRevenueFlowItem[]
+  /** The cursor to pass as `after` next: opaque (it keeps a separate position for the late-written Uniswap v3 legs). */
+  cursor: string
+  /** The event streams that stream live as items. */
+  liveStreams: readonly string[]
+}
+
+interface UserFlowRates { hour: number | null; rows: { mode: 'live' | 'mean'; stream: string; assetId: number; usd: bigint }[] }
+
+/**
+ * The drips: the revisable streams at their trailing-24h mean and the rate streams at each pot's latest
+ * measured hour (userRevenueLive.ts), per (display stream, asset). Cached a minute: the fold publishes hourly.
+ */
+async function userFlowRates(): Promise<UserFlowRates> {
+  return cached('revenue:user-flow', 60_000, async () => {
+    const hour = await newestFoldedHour()
+    if (hour == null) return { hour: null, rows: [] }
+    const res = await client.query({
+      query: userFlowDripsSql(USER_REVENUE_HOURLY_TABLE),
+      query_params: { h: hour, mean: USER_FLOW_MEAN_STREAMS, rate: USER_FLOW_RATE_STREAMS },
+      format: 'JSONEachRow',
+    })
+    const byKey = new Map<string, UserFlowRates['rows'][number]>()
+    for (const r of await res.json<{ mode: 'live' | 'mean'; stream: string; asset_id: string; usd: string }>()) {
+      // Each drip under its DISPLAY stream; a pot's newest hour is an hourly amount, a mean arm the trailing sum.
+      const stream = userRevenueDisplayStream(r.stream, Number(r.asset_id))
+      const usd = r.mode === 'mean' ? scaledUsd(r.usd) / BigInt(USER_FLOW_MEAN_HOURS) : scaledUsd(r.usd)
+      // A pot whose user side netted to a cost in its newest hour adds nothing (earnings only); it never offsets another pot.
+      if (usd <= 0n) continue
+      const key = `${stream}:${r.asset_id}`
+      const seen = byKey.get(key)
+      if (seen) seen.usd += usd
+      else byKey.set(key, { mode: r.mode, stream, assetId: Number(r.asset_id), usd })
+    }
+    return { hour, rows: [...byKey.values()] }
+  })
+}
+
+/** The newest folded hour, from its MARKER: an hour with no user fact is still published. */
+async function newestFoldedHour(): Promise<number | null> {
+  return cached('revenue:user-flow-hour', 60_000, async () => {
+    const markerRes = await client.query({
+      query: `-- rev:user-flow-hour
+SELECT toUnixTimestamp(max(hour)) AS h, count() AS n FROM ${USER_REVENUE_HOURLY_TABLE} WHERE stream = ''`,
+      format: 'JSONEachRow',
+    })
+    const marker = (await markerRes.json<{ h: string; n: string }>())[0]
+    return marker && Number(marker.n) > 0 ? Number(marker.h) : null
+  })
+}
+
+/** Each event pot's user share as of the newest folded hour (carried forward); held five minutes per hour. */
+async function userFlowShares(hour: number | null): Promise<Map<string, UserShare>> {
+  if (hour == null) return new Map()
+  return cached(`revenue:user-flow-shares:${hour}`, 300_000, async () => {
+    const res = await client.query({
+      query: userFlowSharesSql(USER_REVENUE_HOURLY_TABLE),
+      // A referral claim names its earner and is classed directly; every other event stream reads its pot's share.
+      query_params: { h: hour, streams: USER_FLOW_EVENT_STREAMS.filter(s => s !== 'referral_commissions') },
+      format: 'JSONEachRow',
+    })
+    const out = new Map<string, UserShare>()
+    for (const r of await res.json<{ stream: string; pot: string; h: string; user_usd: string; total_usd: string }>()) {
+      out.set(userShareKey(r.stream, r.pot), { user: scaledUsd(r.user_usd), total: scaledUsd(r.total_usd), hour: Number(r.h) })
+    }
+    return out
+  })
+}
+
+/** The fold's tag-driven holder sets (holderClassOf's input), for classing a referral claim's earner. Tags move rarely. */
+async function userFlowHolders(): Promise<HolderSets> {
+  return cachedSwr('revenue:user-flow-holders', 30 * 60_000, 6 * 3_600_000, async () => {
+    const { set, user, custody } = await loadProtocolHolders(client)
+    return { protocol: set, user, custody }
+  })
+}
+
+/** Each stableswap pool's own account as "<pool>:<account>" (the fold's retained-leg rule); pools move with pool creation. */
+async function stableswapPoolAccounts(): Promise<string[]> {
+  return cachedSwr('revenue:user-flow-ss-pools', 30 * 60_000, 6 * 3_600_000, async () =>
+    (await loadStableswapPools(client)).map(p => `${p.poolId}:${p.account}`))
+}
+
+const rowSeconds = (row: UserFlowTailRow): number => Math.floor(Date.parse(`${row.block_timestamp.replace(' ', 'T')}Z`) / 1000)
+
+/**
+ * The raw event tail (the last hour), and the block up to which its Uniswap v3
+ * legs are final (userFlowV3ReadySql: just below the oldest resolvable Swap whose
+ * leg the derivation has not written yet; the head when none is pending), shared
+ * by every reader of one indexed head.
+ */
+async function userFlowTail(head: number): Promise<{ rows: UserFlowTailRow[]; v3Ready: number }> {
+  const ssPools = await stableswapPoolAccounts()
+  return cached(`revenue:user-flow-tail:${head}`, 2_000, async () => {
+    const params = { anchor: chTimestamp(Math.floor(Date.now() / 1000)), hours: USER_FLOW_TAIL_HOURS }
+    const [res, readyRes] = await Promise.all([
+      client.query({
+        query: userFlowTailSql(),
+        query_params: { ...params, ssPoolAccounts: ssPools },
+        format: 'JSONEachRow',
+        clickhouse_settings: DECIMAL_STRINGS,
+      }),
+      client.query({ query: userFlowV3ReadySql(), query_params: params, format: 'JSONEachRow' }),
+    ])
+    const rows = (await res.json<UserFlowTailRow>()).map(r => ({
+      ...r, block_height: Number(r.block_height), event_index: Number(r.event_index), leg_index: Number(r.leg_index), asset_id: Number(r.asset_id),
+    }))
+    rows.sort((a, b) => a.block_height - b.block_height || a.event_index - b.event_index || a.leg_index - b.leg_index)
+    const pending = (await readyRes.json<{ pending: string | number | null }>())[0]?.pending
+    return { rows, v3Ready: pending == null ? head : Number(pending) - 1 }
+  })
 }
 
 /**
- * The user river's feed. User Revenue accrues continuously and is booked per
- * closed hour, so the river streams the NEWEST folded hour's rate per
- * (stream, asset), one block at a time — the same measured-not-modelled rule as
- * the protocol river's borrow drip — and says which hour it is streaming. A
- * REVISABLE stream's newest hours are not decided yet (a token's pending peg, a
- * farm's next sync, a voter's record), so it streams its mean over the trailing
- * 24 closed hours instead of an hour that can read negative before it is restated.
- * The river shows only what users EARN: a (stream, asset) whose rate nets to a
- * cost (borrow interest, exit fees, forfeits) is no drip.
+ * The user river's feed, in two modes (userRevenueLive.ts). LIVE: every earning
+ * stream with a per-block source — each venue's LP fees, the GIGAHDX pot's
+ * inflows and referrer commissions as cursor-paged ITEMS, each the user share of
+ * its pot as the fold last booked it (a pot with no known share streams nothing;
+ * a referral claim its earner's when the earner is a user), and lending interest
+ * and incentives as per-block drips at the newest folded money-market hour's user
+ * accrual. MEAN: the revisable streams (token accrual, farm rewards, GIGAHDX
+ * voting) and legacy staking at their trailing-24h mean. Earnings only: no cost
+ * streams, nothing negative.
+ *
+ * `after` is the opaque cursor a previous page returned; anything else (none, or
+ * an older client's plain cursor) seeds the river afresh from the newest minute.
  */
-export async function getUserRevenueFlow(): Promise<UserRevenueFlowResponse> {
-  const [head, blockMs, flow] = await Promise.all([
-    indexedHead(),
-    measuredParaBlockMs(client),
-    cached('revenue:user-flow', 60_000, async () => {
-      // The newest folded hour comes from its MARKER, read on its own: an hour with no user fact is still published.
-      const markerRes = await client.query({
-        query: `-- rev:user-flow-hour
-SELECT toUnixTimestamp(max(hour)) AS h, count() AS n FROM ${USER_REVENUE_HOURLY_TABLE} WHERE stream = ''`,
-        format: 'JSONEachRow',
-      })
-      const marker = (await markerRes.json<{ h: string; n: string }>())[0]
-      const newest = marker && Number(marker.n) > 0 ? Number(marker.h) : null
-      if (newest == null) return { hour: null, rows: [] }
-      // A token's accrual is valued in its UNDERLYING (PRIME and uBIL in HOLLAR): its drip is keyed and labelled by
-      // the token its pot names (token:<id>), never by the asset it is valued in.
-      const res = await client.query({
-        query: `-- rev:user-flow
-SELECT stream, if(startsWith(stream, 'token_accrual') AND startsWith(pot, 'token:'), toUInt32OrZero(substring(pot, 7)), asset_id) AS asset_id,
-       toString(sumIf(amount_usd, hour = toDateTime({h:UInt32}))) AS last, toString(sum(amount_usd)) AS trailing
-FROM ${USER_REVENUE_HOURLY_TABLE}
-WHERE hour > toDateTime({h:UInt32}) - INTERVAL ${USER_FLOW_REVISABLE_MEAN_HOURS} HOUR AND hour <= toDateTime({h:UInt32})
-  AND stream != '' AND holder_class = 'user' AND NOT startsWith(via, 'unmeasured:')
-GROUP BY stream, asset_id`,
-        query_params: { h: newest },
-        format: 'JSONEachRow',
-      })
-      const revisable = new Set(USER_REVENUE_DISPLAY_STREAMS.filter(d => d.revisable).map(d => d.id))
-      // Each drip under its DISPLAY stream: a HOLLAR loan's interest is "HOLLAR interest".
-      const rows = (await res.json<{ stream: string; asset_id: string; last: string; trailing: string }>())
-        .map(r => ({ ...r, stream: userRevenueDisplayStream(r.stream, Number(r.asset_id)) }))
-        .map(r => ({ stream: r.stream, asset_id: r.asset_id, usd: revisable.has(r.stream) ? scaledUsd(r.trailing) / BigInt(USER_FLOW_REVISABLE_MEAN_HOURS) : scaledUsd(r.last) }))
-      return { hour: newest, rows }
-    }),
-  ])
+export async function getUserRevenueFlow(after: string | null = null): Promise<UserRevenueFlowResponse> {
+  const [head, blockMs, rates, holders] = await Promise.all([indexedHead(), measuredParaBlockMs(client), userFlowRates(), userFlowHolders()])
+  const [shares, tail] = await Promise.all([userFlowShares(rates.hour), userFlowTail(head)])
   const blockSeconds = blockMs / 1_000
   const labels = new Map(USER_REVENUE_DISPLAY_STREAMS.map(d => [d.id, d.label]))
-  const hour = flow.hour
+  const labelOf = (stream: string, assetId: number) => `${labels.get(stream) ?? stream} · ${displayDescriptor(assetId).symbol}`
+  const newest = tail.rows.length ? rowSeconds(tail.rows[tail.rows.length - 1]) : null
+  const page = pageUserFlow({
+    rows: attributeUserShares(tail.rows, shares, holders),
+    newestSeconds: newest,
+    cursor: parseUserFlowCursor(after),
+    head,
+    v3Ready: tail.v3Ready,
+  })
+  const items = page.rows.map(row => ({
+    stream: row.stream,
+    label: labelOf(row.stream, row.asset_id),
+    block: row.block_height,
+    t: rowSeconds(row),
+    eventIndex: row.event_index,
+    legIndex: row.leg_index,
+    account: row.earner ? accountRef(row.earner) : null,
+    assetId: row.asset_id,
+    usd: Number(row.userUsd1e12) / USD_UNIT,
+  }))
+  const hour = rates.hour
   return {
     hour: isoOf(hour),
-    revisableMeanHours: USER_FLOW_REVISABLE_MEAN_HOURS,
+    revisableMeanHours: USER_FLOW_MEAN_HOURS,
     publishedThrough: isoOf(hour == null ? null : hour + 3_600),
     blockSeconds,
     head,
-    drips: flow.rows
+    drips: rates.rows
       .filter(r => r.usd >= USD_DUST)
       .map(r => ({
-        key: `${r.stream}:${r.asset_id}`,
+        key: `${r.stream}:${r.assetId}`,
         stream: r.stream,
-        label: `${labels.get(r.stream) ?? r.stream} · ${displayDescriptor(Number(r.asset_id)).symbol}`,
-        assetId: Number(r.asset_id),
+        label: labelOf(r.stream, r.assetId),
+        assetId: r.assetId,
         usdPerBlock: (Number(r.usd) / USD_UNIT) * (blockSeconds / 3_600),
+        mode: r.mode,
       }))
       .sort((a, b) => b.usdPerBlock - a.usdPerBlock),
+    items,
+    cursor: formatUserFlowCursor(page.cursor),
+    liveStreams: USER_FLOW_EVENT_STREAMS,
   }
 }

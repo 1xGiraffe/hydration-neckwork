@@ -1179,14 +1179,20 @@ export async function explorerRoutes(fastify: FastifyInstance) {
 
   // User Revenue (what users earn; services/userRevenueRead.ts): the headline
   // windows the /revenue overview's user river shows, the /revenue/users
-  // dashboard, and the river's feed (the newest folded hour's rate per block).
+  // dashboard, and the river's feed (live events after `after` with the user share
+  // of their pot, live lending drips, revisable streams at their 24h mean).
   fastify.get('/explorer/revenue/users/summary', async () => getUserRevenueSummary())
   fastify.get('/explorer/revenue/users', async (req, reply) => {
     const q = z.object({ range: z.enum(REVENUE_RANGES).default('30d') }).safeParse(req.query)
     if (!q.success) return reply.status(400).send({ error: 'Invalid range' })
     return getUserRevenueDashboard(q.data.range)
   })
-  fastify.get('/explorer/revenue/user-flow', async () => getUserRevenueFlow())
+  // The cursor is opaque: one the service cannot parse (none, an older client's plain
+  // "<block>-<event>-<leg>", or garbage) re-seeds the river rather than failing the pull.
+  fastify.get('/explorer/revenue/user-flow', async req => {
+    const after = (req.query as { after?: unknown } | undefined)?.after
+    return getUserRevenueFlow(typeof after === 'string' && after.length <= 80 ? after : null)
+  })
 
   // The staker-distributions section carries its own timeframe (defaults to the
   // full history), so it reads its own endpoint rather than the dashboard's.
