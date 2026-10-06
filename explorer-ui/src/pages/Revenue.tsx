@@ -80,9 +80,6 @@ export function RevenueRivers({ user, protocol, mode, onToggleFullscreen, compac
   const fullscreen = mode !== 'off'
   const budget = !fullscreen ? BUDGET : compact ? FULLSCREEN_COMPACT_BUDGET : FULLSCREEN_BUDGET
   const incomplete = 'Not every hour of this window is published yet'
-  const userAsOf = user?.publishedThrough
-    ? `closed hours through ${fmtThrough(user.publishedThrough)}${userRevenueLagNote(user.publishedThrough)} · recent hours may be restated`
-    : user ? 'not published yet' : 'loading'
 
   return (
     <div
@@ -101,7 +98,6 @@ export function RevenueRivers({ user, protocol, mode, onToggleFullscreen, compac
             { k: '30D', v: user?.totals.month, title: user?.totals.month == null ? incomplete : 'The last 720 closed hours' },
             { k: 'All time', v: user?.totals.allTime, title: user?.totals.allTime == null ? incomplete : undefined },
           ]} />
-          <div className="rev-asof">{userAsOf}</div>
         </div>
       </section>
 
@@ -117,10 +113,23 @@ export function RevenueRivers({ user, protocol, mode, onToggleFullscreen, compac
             { k: '30D', v: protocol?.totals.month },
             { k: 'All time', v: protocol?.totals.allTime },
           ]} />
-          <div className="rev-asof">{protocol ? `current to the indexed head, as of ${fmtThrough(protocol.asOf)}; HOLLAR interest lags up to about two hours` : 'loading'}</div>
         </div>
       </section>
     </div>
+  )
+}
+
+// How current each river's figures are, stated once under the page rather than
+// under each ribbon: User Revenue counts completed hours (the newest can still be
+// restated), Protocol Revenue runs to the indexed head with HOLLAR interest a
+// little behind.
+function FreshnessNote({ user, protocol }: { user: UserRevenueSummary | undefined; protocol: RevenueDashboard | undefined }) {
+  if (!user?.publishedThrough && !protocol) return null
+  return (
+    <p className="rev-note">
+      {user?.publishedThrough && <>User Revenue covers completed hours through {fmtThrough(user.publishedThrough)}{userRevenueLagNote(user.publishedThrough)}; the newest can still change. </>}
+      {protocol && <>Protocol Revenue is current as of {fmtThrough(protocol.asOf)}, with HOLLAR interest up to two hours behind.</>}
+    </p>
   )
 }
 
@@ -148,6 +157,7 @@ export function Revenue() {
         user revenue and part protocol revenue, and protocol-owned liquidity counts on both sides, so they
         are never summed here.
       </p>
+      <FreshnessNote user={user} protocol={protocol} />
     </div>
   )
 }
