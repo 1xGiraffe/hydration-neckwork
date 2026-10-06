@@ -781,6 +781,232 @@ export async function loadCurrentEmode(client: ClickHouseClient, h160s: readonly
 }
 
 // ---------------------------------------------------------------------------
+// Principal moves inside a bucket
+// ---------------------------------------------------------------------------
+
+/**
+ * The principal moves of one token contract inside bucket `b`, aggregated per bucket
+ * (loadScaledFlows): `delta` the scaled deltas summed over the scope's holders (a
+ * supply/borrow positive, a withdraw/repay/transfer out negative), `principal`
+ * Σ rayMul(Δ_k, I_k) — each move's scaled delta at the reserve's normalized index
+ * at that move (normalizedIncome for an aToken, normalizedDebt for a variable-debt
+ * token), i.e. the amount supplied/borrowed/repaid in the reserve's units —
+ * `moves` how many there were and `unstated` how many had no statable index.
+ */
+export interface MmScaledFlow { b: number; delta: bigint; principal: bigint; moves: number; unstated: number }
+
+/** How far below a transfer-like move its reserve's last update is looked for first (~30–60 min of blocks). */
+export const FLOW_STATE_WINDOW_BLOCKS = 300
+/** Above this many moves on the gap reserves, an account reads their slice instead of per-move windows. */
+export const FLOW_WINDOWED_MAX_MOVES = 10_000
+
+const RAY_SQL = `toUInt256('1000000000000000000000000000')`
+const HALF_RAY_SQL = `toUInt256('500000000000000000000000000')`
+const YEAR_SQL = 'toUInt256(31536000)'
+/** SQL rayMul(a, b) for UInt256 operands, Aave's half-up rounding (aaveMath.rayMul). */
+const rayMulSql = (a: string, b: string) => `toUInt256(intDiv(toUInt256(${a}) * toUInt256(${b}) + ${HALF_RAY_SQL}, ${RAY_SQL}))`
+
+/**
+ * Every principal move of the scope's holders in buckets 1..N after B0, aggregated
+ * per (token contract, bucket) INSIDE ClickHouse — reserveInterestSide's `flows`, so
+ * interest is stated from each move on rather than from the next bucket. Bucket 0
+ * never accrues (its predecessor is not on the grid), so only blocks after bucket
+ * 0's end are read, holder-first like the scaled deltas. One row per (contract,
+ * bucket) comes back however many moves an account made (a protocol account makes
+ * millions), so the result never scales with the moves.
+ *
+ * A move is one (contract, block, event index) — the account's holders and legs of
+ * one log summed, so a supply and a borrow, or two phases, in one block each keep
+ * their own position. Its index is the reserve's state at or before the END of the
+ * move's block (ASOF on (block, event index) over a deduplicated slice of
+ * money_market_reserve_indices — FINAL on the replacement key, so a replayed or
+ * corrected row never stands in for the newest), with its rates row:
+ *   - an update in the move's own block (a Mint/Burn's own transaction always emits
+ *     one) is the index Aave scaled the move by — stored, no compounding;
+ *   - otherwise (an aToken BalanceTransfer, which updates no state) the last earlier
+ *     update compounded to the move's block timestamp with Aave's integer
+ *     MathUtils (aaveMath.ts), in SQL.
+ * APPROXIMATION, bounded by one block's interest on the moved amount: the
+ * Initialization phase is not read per move (a log in on_initialize ran under the
+ * PARENT block's timestamp), so a move in a block whose updates ran in a different
+ * phase than the move, or compounded from an Initialization-phase update, is off by
+ * the interest of ~one block interval (6–12 s) on that move.
+ *
+ * Reads (pass 1, then pass 2 only for moves pass 1 could not state): pass 1 reads the
+ * index rows at the moves' own blocks (a primary-key set); pass 2 the window of
+ * FLOW_STATE_WINDOW_BLOCKS below each remaining move, then the slice of only the
+ * reserves still unstated (quiet ones, whose slices are short) — or, past
+ * FLOW_WINDOWED_MAX_MOVES moves, the gap reserves' slice over the moves' span.
+ * Measured 2026-10-06, all money-market queries of one un-windowed history: an
+ * account with 2 debt reserves +1.2M rows (13.2M total), a 12-reserve borrower
+ * +9.2M rows / 373 MiB peak (27.0M), the Treasury's 1.7M moves +11.4M rows /
+ * ~1 GiB peak (26.9M). The remaining cost is the index slice; an account-first
+ * projection carrying each Mint/Burn/BalanceTransfer log's own `index` would remove it.
+ */
+export async function loadScaledFlows(
+  client: ClickHouseClient,
+  h160s: readonly string[],
+  reserves: readonly MmReserveRef[],
+  anchorBlock: number,
+  bk: Bucketing,
+): Promise<Map<string, MmScaledFlow[]>> {
+  const out = new Map<string, MmScaledFlow[]>()
+  const hs = normH160s(h160s)
+  const lo = Math.max(anchorBlock, bk.endHeight(0))
+  const maxb = bk.endHeight(bk.N)
+  if (!hs.length || !anchorBlock || !reserves.length || maxb <= lo) return out
+  // Reserves as small ids (the join keys stay narrow), contracts → (reserve id, side).
+  const rkeys: string[] = []
+  const contracts: string[] = [], crid: number[] = [], cside: number[] = []
+  for (const r of reserves) {
+    const key = `${r.poolProxy.toLowerCase()}:${r.assetAddress.toLowerCase()}`
+    let rid = rkeys.indexOf(key) + 1
+    if (!rid) { rkeys.push(key); rid = rkeys.length }
+    contracts.push(r.atoken.toLowerCase()); crid.push(rid); cside.push(1)
+    if (r.vdebt) { contracts.push(r.vdebt.toLowerCase()); crid.push(rid); cside.push(2) }
+  }
+  const pools = [...new Set(reserves.map(r => r.poolProxy.toLowerCase()))]
+  const reserveAddrs = [...new Set(reserves.map(r => r.assetAddress.toLowerCase()))]
+  const ridSql = `transform(concat(pool_address, ':', reserve_address), {rkeys:Array(String)}, {rids:Array(UInt16)}, toUInt16(0))`
+  // A deduplicated slice of a reserve-first MV table: the newest version of each
+  // (reserve, block, event) — FINAL on the replacement key, bounded by the primary-key
+  // predicate (a replayed or corrected row never stands in for the newest). FINAL,
+  // not GROUP BY argMax: it streams, where aggregation states for a protocol
+  // account's slice held ~1 GiB.
+  const slice = (table: string, cols: string, extra = '') => `
+                SELECT ${ridSql} AS rid, toUInt64(block_height) * 1000000 + event_index AS k, ${cols}
+                FROM price_data.${table} FINAL
+                WHERE pool_address IN {pools:Array(String)} AND reserve_address IN {reserves:Array(String)}
+                  AND block_height >= {from:UInt32} AND block_height <= {to:UInt32} AND rid != 0${extra}`
+  const dt = `toUInt256(greatest(toInt64(m.ts) - toInt64(i.ts), 0))`
+  const income = `if(${dt} = 0, toUInt256(i.liq), ${rayMulSql(`(${RAY_SQL} + intDiv(r.lr * ${dt}, ${YEAR_SQL}))`, 'i.liq')})`
+  const b2 = `toUInt256(intDiv(${rayMulSql('r.vr', 'r.vr')}, ${YEAR_SQL} * ${YEAR_SQL}))`
+  const b3 = `toUInt256(intDiv(${rayMulSql(b2, 'r.vr')}, ${YEAR_SQL}))`
+  const dm1 = `toUInt256(greatest(${dt}, toUInt256(1)) - 1)`
+  const dm2 = `toUInt256(greatest(${dt}, toUInt256(2)) - 2)`
+  const compounded = `toUInt256(${RAY_SQL} + intDiv(r.vr * ${dt}, ${YEAR_SQL}) + intDiv(${dt} * ${dm1} * ${b2}, toUInt256(2)) + intDiv(${dt} * ${dm1} * ${dm2} * ${b3}, toUInt256(6)))`
+  const debt = `if(${dt} = 0, toUInt256(i.vbi), ${rayMulSql(compounded, 'i.vbi')})`
+  // No state, or a compounded index whose rates row is missing: not statable.
+  const unstated = `i.k = 0 OR (${dt} > 0 AND r.k = 0)`
+  const index = `if(m.side = 1, ${income}, ${debt})`
+  const absDelta = 'toUInt256(abs(m.delta))'
+  const flow = `if(${unstated}, toInt256(0), if(m.delta < 0, -1, 1) * toInt256(${rayMulSql(absDelta, index)}))`
+  const movesSql = (extra: string) => `
+                SELECT contract_address AS contract, block_height AS blk, transform(contract_address, {contracts:Array(String)}, {crid:Array(UInt16)}, toUInt16(0)) AS rid,
+                  transform(contract_address, {contracts:Array(String)}, {cside:Array(UInt8)}, toUInt8(0)) AS side,
+                  toUInt64(block_height) * 1000000 + 999999 AS kend, any(block_timestamp) AS ts, ${bk.ofTsCarry('any(block_timestamp)')} AS b,
+                  sum(scaled_delta) AS delta
+                FROM price_data.atoken_scaled_deltas FINAL
+                WHERE holder IN {hs:Array(String)} AND contract_address IN {contracts:Array(String)}
+                  AND block_height > {lo:UInt32} AND block_height <= {maxb:UInt32}${extra}
+                GROUP BY contract_address, block_height, event_index
+                HAVING delta != 0 AND b >= 1`
+  const indexCols = `block_timestamp AS ts, liquidity_index AS liq, variable_borrow_index AS vbi`
+  const baseParams = { hs, contracts, crid, cside, lo, maxb, pools, reserves: reserveAddrs, rkeys, rids: rkeys.map((_, i) => i + 1) }
+  // The move's own block holds an update of its reserve (the last one there is the state).
+  const sameBlock = 'intDiv(i.k, 1000000) = m.blk'
+  type Row = { contract: string; b: number; delta: string; principal: string; moves: number; unstated: number; nostate: number }
+  type Gap = { nlo: number; nhi: number; nrids: number[] }
+
+  // Pass 1 — every move whose block updated its reserve (each Mint/Burn's own
+  // transaction does): the index is that update's, read by primary key at the
+  // moves' blocks only. Also states the full Σ delta of every move.
+  const blockSet = `
+                  AND block_height IN (SELECT block_height FROM price_data.atoken_scaled_deltas
+                    WHERE holder IN {hs:Array(String)} AND contract_address IN {contracts:Array(String)}
+                      AND block_height > {lo:UInt32} AND block_height <= {maxb:UInt32})`
+  const pass1 = await (await client.query(tagged({
+    query: `-- mm:scaled-flows
+            SELECT m.contract AS contract, m.b AS b, toString(sum(m.delta)) AS delta,
+              toString(sumIf(if(m.delta < 0, -1, 1) * toInt256(${rayMulSql(absDelta, 'if(m.side = 1, i.liq, i.vbi)')}), ${sameBlock})) AS principal,
+              countIf(${sameBlock}) AS moves, 0 AS unstated, countIf(NOT (${sameBlock})) AS nostate,
+              minIf(m.blk, NOT (${sameBlock})) AS nlo, maxIf(m.blk, NOT (${sameBlock})) AS nhi, groupUniqArrayIf(m.rid, NOT (${sameBlock})) AS nrids
+            FROM (${movesSql('')}) AS m
+            ASOF LEFT JOIN (${slice('money_market_reserve_indices', indexCols, blockSet)}) AS i ON m.rid = i.rid AND m.kend >= i.k
+            GROUP BY contract, b ORDER BY contract, b`,
+    query_params: { ...baseParams, from: lo + 1, to: maxb }, format: 'JSONEachRow',
+  }))).json<Row & Gap>()
+
+  // Pass 2 — only the moves whose block updated nothing of their reserve (an aToken
+  // BalanceTransfer): the last earlier update, compounded, over only those moves'
+  // reserves and span. A modest account reads just FLOW_STATE_WINDOW_BLOCKS below each
+  // of its moves (a primary-key set); a move whose last update lies further back —
+  // a quiet reserve — and an account with more moves than FLOW_WINDOWED_MAX_MOVES
+  // read the reserve's slice from CARRY_LOOKBACK_BLOCKS below the span (from block 0
+  // when even that held no state).
+  let pass2: Row[] = []
+  const gaps = pass1.filter(r => Number(r.nostate) > 0)
+  if (gaps.length) {
+    const nlo = Math.min(...gaps.map(r => Number(r.nlo)))
+    const nhi = Math.max(...gaps.map(r => Number(r.nhi)))
+    const nrids = [...new Set(gaps.flatMap(r => r.nrids.map(Number)))]
+    // The window set holds every move's window in the span: size it by all the moves.
+    const ridMoves = pass1.reduce((n, r) => n + Number(r.moves) + Number(r.nostate), 0)
+    const W = FLOW_STATE_WINDOW_BLOCKS
+    const windowSet = `
+                  AND block_height IN (SELECT arrayJoin(range(toUInt32(greatest(block_height, ${W}) - ${W}), block_height + 1)) FROM price_data.atoken_scaled_deltas
+                    WHERE holder IN {hs:Array(String)} AND contract_address IN {contracts:Array(String)}
+                      AND block_height >= {nlo:UInt32} AND block_height <= {nhi:UInt32})`
+    // 'window': a state below the move's own window may be another move's window's
+    // stale row, so it does not count there — that move is read by 'missed', which
+    // takes exactly the moves whose true last update lies below their window. 'all':
+    // the slice for every gap move (the heavy accounts).
+    type Mode = 'window' | 'missed' | 'all'
+    const found = (mode: Mode) => `i.k != 0${mode === 'window' ? ` AND intDiv(i.k, 1000000) + ${W} >= m.blk` : ''}`
+    const read = async (from: number, mode: Mode, lo2: number, hi2: number, rids = nrids) => (await client.query(tagged({
+      query: `-- mm:scaled-flows-carry
+              SELECT m.contract AS contract, m.b AS b, '0' AS delta,
+                toString(sumIf(${flow}, ${found(mode)})) AS principal,
+                countIf(${found(mode)}) AS moves, countIf(${found(mode)} AND (${unstated})) AS unstated, countIf(NOT (${found(mode)})) AS nostate,
+                minIf(m.blk, NOT (${found(mode)})) AS nlo, maxIf(m.blk, NOT (${found(mode)})) AS nhi, groupUniqArrayIf(m.rid, NOT (${found(mode)})) AS nrids
+              FROM (${movesSql(' AND block_height >= {nlo:UInt32} AND block_height <= {nhi:UInt32}')}) AS m
+              ASOF LEFT JOIN (${slice('money_market_reserve_indices', indexCols, ` AND rid IN {nrids:Array(UInt16)}${mode === 'window' ? windowSet : ''}`)}) AS i ON m.rid = i.rid AND m.kend >= i.k
+              LEFT JOIN (${slice('money_market_reserve_rates', `liquidity_rate AS lr, variable_borrow_rate AS vr`, ` AND rid IN {nrids:Array(UInt16)}${mode === 'window' ? windowSet : ''}`)}) AS r
+                ON r.rid = i.rid AND r.k = i.k
+              WHERE m.rid IN {nrids:Array(UInt16)} AND (i.k = 0 OR NOT (${sameBlock}))${mode === 'missed' ? ` AND (i.k = 0 OR intDiv(i.k, 1000000) + ${W} < m.blk)` : ''}
+              GROUP BY contract, b ORDER BY contract, b`,
+      query_params: { ...baseParams, nlo: lo2, nhi: hi2, nrids: rids, from, to: hi2 }, format: 'JSONEachRow',
+    }))).json<Row & Gap>()
+    // From CARRY_LOOKBACK_BLOCKS below the span, then from block 0 if a move found no state.
+    const sliceRead = async (mode: Mode, lo2: number, hi2: number, rids = nrids): Promise<Row[]> => {
+      const floor = Math.max(0, lo2 - CARRY_LOOKBACK_BLOCKS)
+      const rows = await read(floor, mode, lo2, hi2, rids)
+      const final = floor > 0 && rows.some(r => Number(r.nostate) > 0) ? await read(0, mode, lo2, hi2, rids) : rows
+      // A move with no state even from block 0 is a move whose index is not statable.
+      return final.map(r => ({ ...r, moves: Number(r.moves) + Number(r.nostate), unstated: Number(r.unstated) + Number(r.nostate), nostate: 0 }))
+    }
+    if (ridMoves <= FLOW_WINDOWED_MAX_MOVES) {
+      const windowed = await read(Math.max(0, nlo - W), 'window', nlo, nhi)
+      pass2 = windowed.map(r => ({ ...r, nostate: 0 }))
+      const missed = windowed.filter(r => Number(r.nostate) > 0)
+      // Misses are quiet reserves (no update within the window): their slices are short.
+      if (missed.length) {
+        pass2.push(...await sliceRead('missed', Math.min(...missed.map(r => Number(r.nlo))), Math.max(...missed.map(r => Number(r.nhi))),
+          [...new Set(missed.flatMap(r => r.nrids.map(Number)))]))
+      }
+    } else {
+      pass2 = await sliceRead('all', nlo, nhi)
+    }
+  }
+
+  const byKey = new Map<string, MmScaledFlow & { contract: string }>()
+  for (const r of [...pass1, ...pass2]) {
+    const contract = r.contract.toLowerCase()
+    const key = `${contract}|${Number(r.b)}`
+    const f = byKey.get(key) ?? { contract, b: Number(r.b), delta: 0n, principal: 0n, moves: 0, unstated: 0 }
+    f.delta += big(r.delta); f.principal += big(r.principal); f.moves += Number(r.moves); f.unstated += Number(r.unstated)
+    byKey.set(key, f)
+  }
+  for (const { contract, ...f } of byKey.values()) {
+    const list = out.get(contract) ?? []
+    list.push(f)
+    out.set(contract, list)
+  }
+  for (const list of out.values()) list.sort((x, y) => x.b - y.b)
+  return out
+}
+
+// ---------------------------------------------------------------------------
 // Assembly
 // ---------------------------------------------------------------------------
 
@@ -814,10 +1040,17 @@ export interface InterestSide {
  * index state in force at that bucket end to the end block's timestamp — the
  * reserve points' own balanceOf arithmetic, so it is scaled × ΔI / RAY in Aave's
  * half-up rounding and, for a principal held unchanged, the cumulative equals the
- * balance's growth exactly. APPROXIMATION: the principal of bucket b−1's end is taken
- * as held through all of bucket b; a supply, withdrawal, borrow or repay inside a
- * bucket starts (or stops) accruing only from the next bucket, so a bucket's accrual
- * is off by the delta's interest over the part of the bucket it was (not) held.
+ * balance's growth exactly. A principal move inside the bucket (`flows`, loadScaledFlows:
+ * a supply, withdrawal, borrow, repay or transfer, as the scaled delta Δ and the index
+ * I_k Aave scaled it by) accrues from the move on:
+ *
+ *   accrual_b += rayMul(ΣΔ, I(t_b)) − Σ rayMul(Δ_k, I_k)     (signed: a repay stops accruing)
+ *
+ * so the bucket's accrual is the balance's growth less the principal moved — the
+ * debt's interest is debt_end − debt_start − (borrowed − repaid), however coarse the
+ * grid. Without `flows` a move would start (or stop) accruing only at the next bucket,
+ * which on a 10-day grid lost most of a fresh borrow's interest. A move whose index is
+ * not statable makes the bucket unstatable like a missing state.
  *
  * Cumulative from the first stated bucket (the coverage floor B0 or the grid's first
  * bucket, whichever is later): the first stated bucket itself accrues nothing, since
@@ -834,8 +1067,12 @@ export function reserveInterestSide(
   stated: (b: number) => boolean,
   N: number,
   price: (amount: bigint, b: number) => bigint | null,
+  flows?: readonly MmScaledFlow[],
 ): InterestSide {
   const out: InterestSide = { raw: new Array(N + 1), usd: new Array(N + 1), incomplete: new Array(N + 1) }
+  const flowsIn = new Map<number, MmScaledFlow[]>()
+  for (const f of flows ?? []) { const l = flowsIn.get(f.b); if (l) l.push(f); else flowsIn.set(f.b, [f]) }
+  const signedRayMul = (a: bigint, i: bigint) => (a < 0n ? -rayMul(-a, i) : rayMul(a, i))
   const indexAt = (idx: ReserveIndexState, t: number): bigint => side === 'supply'
     ? normalizedIncome(idx.liquidityIndex, idx.liquidityRate, idx.tLast, BigInt(t))
     : normalizedDebt(idx.variableBorrowIndex, idx.variableBorrowRate, idx.tLast, BigInt(t))
@@ -843,12 +1080,28 @@ export function reserveInterestSide(
   let usd: bigint | null = 0n
   let incomplete = false
   for (let b = 0; b <= N; b++) {
-    const s = b > 0 && stated(b) && stated(b - 1) ? (scaled?.[b - 1] ?? 0n) : 0n
-    if (s > 0n) {
+    const open = b > 0 && stated(b) && stated(b - 1)
+    const s = open ? (scaled?.[b - 1] ?? 0n) : 0n
+    const moves = open ? (flowsIn.get(b) ?? []) : []
+    if (s > 0n || moves.length) {
       const i0 = indices?.[b - 1], i1 = indices?.[b], t0 = endTimes[b - 1], t1 = endTimes[b]
-      const accrual = i0 && i1 && t0 != null && t1 != null ? rayMul(s, indexAt(i1, t1)) - rayMul(s, indexAt(i0, t0)) : null
-      // An index never decreases; a negative difference is an unstatable pair of states.
-      if (accrual == null || accrual < 0n) { incomplete = true; usd = null } else if (accrual > 0n) {
+      const I1 = i1 && t1 != null ? indexAt(i1, t1) : null
+      let accrual: bigint | null = null
+      if (I1 != null) {
+        // An index never decreases; a negative difference is an unstatable pair of states.
+        const held = s > 0n ? (i0 && t0 != null ? rayMul(s, I1) - rayMul(s, indexAt(i0, t0)) : null) : 0n
+        accrual = held == null || held < 0n ? null : held
+        let count = 0
+        for (const m of moves) {
+          count += m.moves
+          if (accrual == null) break
+          accrual = m.unstated > 0 ? null : accrual + signedRayMul(m.delta, I1) - m.principal
+        }
+        // A withdrawal can only stop accrual the principal made; below zero beyond the
+        // per-move half-up rounding the moves disagree with the principal.
+        if (accrual != null && accrual < 0n) accrual = accrual >= -BigInt(count + 1) ? 0n : null
+      }
+      if (accrual == null) { incomplete = true; usd = null } else if (accrual > 0n) {
         raw += accrual
         if (usd != null) { const v = price(accrual, b); usd = v == null ? null : usd + v }
       }
@@ -874,6 +1127,8 @@ export interface MmHistoryParts {
   markets?: ReadonlySet<string>
   /** The accounts' settled unclaimed incentives per bucket; null/absent = not asked for. */
   rewards?: MmIncentiveHistory | null
+  /** Principal moves inside buckets per token contract (loadScaledFlows); absent: a move accrues from the next bucket. */
+  flows?: Map<string, MmScaledFlow[]>
 }
 
 export interface MmHistoryReservePoint {
@@ -1013,8 +1268,8 @@ export function assembleMoneyMarketHistory(parts: MmHistoryParts, pricer: Bucket
     const assetId = assetIdFromMmAddress(r.assetAddress)
     // Interest on the FULL grid, before any bucket selection (reserveInterestSide).
     const price = (amount: bigint, b: number) => (assetId == null ? null : pricer.usd(assetId, amount, b))
-    const earned = reserveInterestSide(aSeries, idxSeries, parts.endTimes, 'supply', stated, N, price)
-    const paid = reserveInterestSide(dSeries, idxSeries, parts.endTimes, 'debt', stated, N, price)
+    const earned = reserveInterestSide(aSeries, idxSeries, parts.endTimes, 'supply', stated, N, price, parts.flows?.get(r.atoken.toLowerCase()))
+    const paid = reserveInterestSide(dSeries, idxSeries, parts.endTimes, 'debt', stated, N, price, r.vdebt ? parts.flows?.get(r.vdebt.toLowerCase()) : undefined)
     const interestAt = (b: number): MmHistoryInterest => ({
       interestEarned: earned.raw[b], interestPaid: paid.raw[b], interestEarnedUsd: earned.usd[b], interestPaidUsd: paid.usd[b],
       interestIncomplete: earned.incomplete[b] || paid.incomplete[b],
@@ -1211,20 +1466,21 @@ export async function loadMoneyMarketHistory(
   const want = (key: string) => !opts.markets || opts.markets.has(key)
   const touched = reserveMap.reserves.filter(r => want(r.marketKey) && (scaled.has(r.atoken) || (r.vdebt && scaled.has(r.vdebt))))
   const endHeights = Array.from({ length: bk.N + 1 }, (_, b) => bk.endHeight(b))
-  const [indices, endTimeByHeight, rewards] = await Promise.all([
+  const [indices, endTimeByHeight, rewards, flows] = await Promise.all([
     loadReserveIndexHistory(client, touched.map(r => ({ pool: r.poolProxy, reserve: r.assetAddress })), bk,
       reserveMap.reserves.map(r => ({ pool: r.poolProxy, reserve: r.assetAddress }))),
     loadBlockTimes(client, [...endHeights, ...(reserveMap.anchorBlock ? [reserveMap.anchorBlock] : [])]),
     // The incentive arithmetic reads the same per-holder scaled series (its
     // programme aTokens), so the deltas are read once for both.
     opts.rewards === false ? Promise.resolve(null) : loadMmIncentiveHistory(client, scope.h160s, bk, reserveMap.reserves, { scaled: scaledByHolder, scaledAnchorBlock: reserveMap.anchorBlock }),
+    loadScaledFlows(client, scope.h160s, touched, reserveMap.anchorBlock, bk),
   ])
   const priceIds = new Set<number>()
   for (const r of touched) { const id = assetIdFromMmAddress(r.assetAddress); if (id != null) priceIds.add(id) }
   for (const id of rewards?.rewardAssetIds ?? []) priceIds.add(id)
   const pricer = await bucketClosePrices(client, priceIds, bk, opts.grain)
   const assembled = assembleMoneyMarketHistory({
-    reserveMap, scaled, indices, observations, collateral, emode, markets: opts.markets, rewards,
+    reserveMap, scaled, indices, observations, collateral, emode, markets: opts.markets, rewards, flows,
     endTimes: endHeights.map(h => endTimeByHeight.get(h) ?? null),
   }, pricer, bk)
   const history = opts.buckets ? selectMoneyMarketBuckets(assembled, opts.buckets) : assembled

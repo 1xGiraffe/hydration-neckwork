@@ -5117,7 +5117,8 @@ export interface MoneyMarketHistoryReserveView {
 /**
  * Interest on one reserve, cumulative from the first stated bucket (moneyMarketHistory.ts
  * reserveInterestSide: the principal held at the previous bucket end accrues through the
- * bucket, so an intra-bucket change starts accruing the next one). Raw units of the
+ * bucket and a principal move inside it accrues from the move on, so a debt's paid
+ * figure is its balance growth less the net amount borrowed). Raw units of the
  * reserve's asset; USD sums each bucket's accrual at that bucket's closed candle and is
  * null once an accrual was unpriced or unstatable. interestIncomplete: some accrual
  * could not be stated, so the raw figures are lower bounds.

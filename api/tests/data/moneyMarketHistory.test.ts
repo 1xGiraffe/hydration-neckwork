@@ -62,6 +62,8 @@ function mmClient(overrides: { anchorBlock?: number } = {}) {
         ] : []
       : undefined),
     query => (query.includes('-- mm:scaled-deltas') ? [] : undefined),
+    // No principal move inside a bucket (reserveInterestSide's flows).
+    query => (query.includes('-- mm:scaled-flows') ? [] : undefined),
     (query, params) => (query.includes('-- mm:observations\n')
       ? ((params.accs as string[]).includes(mmEthAccountForm(H160))
           ? [{ pool: CORE, b: -1, obs_block: 950_000, coll: '2000000000', debt: '800000000', avail: '100', lt: '8000', max_ltv: '7500', hf: '2000000000000000000' }]
