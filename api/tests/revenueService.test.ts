@@ -665,3 +665,36 @@ describe('User Revenue display streams — HOLLAR interest apart', () => {
     }
   })
 })
+
+// Last in the file: the clock only moves forward past every cache above.
+describe('getRevenueFlow — seed and boundary', () => {
+  it('anchors the cursorless seed on the tail\'s newest row, not the wall clock', async () => {
+    vi.setSystemTime(NOW + 30_000_000)
+    const { initRevenueService, getRevenueFlow } = await service()
+    const nowSec = Math.floor((NOW + 30_000_000) / 1000)
+    const at = (s: number) => new Date(s * 1000).toISOString().slice(0, 19).replace('T', ' ')
+    const { client } = fakeClient({
+      raw_ingestion_state: [{ head: 13_600_000 }],
+      '-- rev:network_fee': [
+        tailRow({ block_height: 300, event_index: 1, block_timestamp: at(nowSec - 200) }),
+        // Landed ~50 s after their blocks: outside a wall-clock minute, inside the newest row's.
+        tailRow({ block_height: 310, event_index: 1, block_timestamp: at(nowSec - 95) }),
+        tailRow({ block_height: 311, event_index: 1, block_timestamp: at(nowSec - 50) }),
+      ],
+    })
+    initRevenueService(client)
+    const flow = await getRevenueFlow(null)
+    expect(flow.items.map(i => i.block)).toEqual([310, 311])
+  })
+
+  it('an empty cursorless page sets the cursor just before the head block, so its event 0 still streams', async () => {
+    vi.setSystemTime(NOW + 30_120_000)
+    const { initRevenueService, getRevenueFlow } = await service()
+    const { client } = fakeClient({ raw_ingestion_state: [{ head: 13_600_000 }], '-- rev:network_fee': [] })
+    initRevenueService(client)
+    const flow = await getRevenueFlow(null)
+    expect(flow.cursor).toBe('13599999-4294967295-65535')
+    const { FLOW_CURSOR_RE } = await service()
+    expect(FLOW_CURSOR_RE.test(flow.cursor)).toBe(true)
+  })
+})
