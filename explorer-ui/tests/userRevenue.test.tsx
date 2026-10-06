@@ -66,7 +66,7 @@ const text = (html: string) => html.replace(/<[^>]+>/g, '')
 
 describe('/revenue overview', () => {
   const protocol = { totals: { day: 512.34, week: 3_804.5, month: 16_420.11, allTime: 431_207.9 }, history: { range: '30d', bucketSeconds: DAY, series: [] }, breakdown: [], topAccounts: [], asOf: '2026-10-04T05:12:00.000Z' } as RevenueDashboard
-  it('shows two rivers, each with 24H/7D/30D/All time and its own as-of, and never a combined total', () => {
+  it('shows two rivers, each with 24H/7D/30D/All time, their freshness in the footnote, and never a combined total', () => {
     const html = withClient(c => {
       c.setQueryData(['user-revenue-summary'], summary())
       c.setQueryData(['revenue-dashboard', '30d'], protocol)
@@ -78,7 +78,8 @@ describe('/revenue overview', () => {
     expect(html).toContain('$3.17k')
     expect(html).toContain('$22.7M')
     expect(html).toContain('$431k')
-    expect(html).toContain('closed hours through 04:00 UTC 2026-10-04')
+    expect(text(html)).toContain('User Revenue covers completed hours through 04:00 UTC 2026-10-04')
+    expect(html).not.toContain('rev-asof')
     expect(html).toContain('href="/revenue/users"')
     expect(html).toContain('href="/revenue/protocol"')
     // Not additive: no figure equals the sum of the two all-time totals.
