@@ -607,13 +607,20 @@ function cursorTuple(cursor: string | null): [number, number, number] {
   return [block, event, leg]
 }
 
-function afterCursor(row: TailRow, [block, event, leg]: [number, number, number]): boolean {
+function afterCursor(row: Pick<TailRow, 'block_height' | 'event_index' | 'leg_index'>, [block, event, leg]: [number, number, number]): boolean {
   if (row.block_height !== block) return row.block_height > block
   if (row.event_index !== event) return row.event_index > event
   return row.leg_index > leg
 }
 
-/** On a cursorless first call, only the most recent minute seeds the river. */
+/** The cursor just before the head block: an empty first page must not skip the head block's event 0. */
+const cursorBeforeHead = (head: number): string => `${Math.max(0, head - 1)}-4294967295-65535`
+
+/**
+ * On a cursorless first call, only the most recent minute seeds the river — the
+ * minute ending at the tail's NEWEST row, not at the wall clock: rows land most
+ * of a minute after their block, so a wall-clock minute is mostly empty.
+ */
 const FLOW_SEED_SECONDS = 60
 const FLOW_MAX_ITEMS = 400
 
@@ -705,9 +712,9 @@ export async function getRevenueFlow(after: string | null): Promise<RevenueFlowR
   ])
   const blockSeconds = blockMs / 1_000
   const cursor = cursorTuple(after)
-  const nowSeconds = Math.floor(Date.now() / 1000)
-  const items = rows
-    .filter(row => isProtocolRevenue(row.stream, row.dest, row.internal_payer))
+  const streamed = rows.filter(row => isProtocolRevenue(row.stream, row.dest, row.internal_payer))
+  const seedFrom = streamed.reduce((m, row) => (row.block_timestamp ? Math.max(m, tailSeconds(row)) : m), 0) - FLOW_SEED_SECONDS
+  const items = streamed
     // asset_reserve (MintedToTreasury) rides along as ITEMS: there is no
     // reserve-factor drip because that accrual is not observable from events at
     // all — it accumulates in each reserve's on-chain `accruedToTreasury` and
@@ -718,7 +725,7 @@ export async function getRevenueFlow(after: string | null): Promise<RevenueFlowR
     // drips, and its hourly reserve rows never reach the flow (they are not
     // eventful-stream rows).
     .filter(row => scaledUsd(row.amount_usd) > 0n)
-    .filter(row => (after ? afterCursor(row, cursor) : tailSeconds(row) > nowSeconds - FLOW_SEED_SECONDS))
+    .filter(row => (after ? afterCursor(row, cursor) : tailSeconds(row) > seedFrom))
     .slice(-FLOW_MAX_ITEMS)
     .map(row => ({
       stream: row.stream,
@@ -734,7 +741,7 @@ export async function getRevenueFlow(after: string | null): Promise<RevenueFlowR
   return {
     items,
     drips: await borrowDrips(blockSeconds),
-    cursor: last ? `${last.block}-${last.eventIndex}-${last.legIndex}` : (after ?? `${head}-0-0`),
+    cursor: last ? `${last.block}-${last.eventIndex}-${last.legIndex}` : (after ?? cursorBeforeHead(head)),
     head,
     blockSeconds,
   }
