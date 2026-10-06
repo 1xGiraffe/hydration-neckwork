@@ -42,7 +42,7 @@ const zCandle = z.object({
   time: zIsoTimestamp,
   open: z.string(), high: z.string(), low: z.string(), close: z.string(),
   volumeBuy: z.string(), volumeSell: z.string(), volumeTotal: z.string(),
-}).describe('All values are USD decimal strings at full precision.')
+}).describe('All values are USD decimal strings at full precision. `open` is the previous candle\'s close (the price in force when the bucket began; prices are recorded only when they change), and `high`/`low` include it.')
 
 const zHolder = z.object({
   account: zAccountRef,

@@ -5,8 +5,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // otherwise — after resolving each leg to the series that prices it.
 const ohlcv = vi.fn()
 const cross = vi.fn()
-vi.mock('../src/services/ohlcvService.ts', () => ({ queryOHLCV: (...a: unknown[]) => ohlcv(...a) }))
-vi.mock('../src/services/crossPair.ts', () => ({ queryPairCandles: (...a: unknown[]) => cross(...a) }))
+vi.mock('../src/services/ohlcvService.ts', async () => ({
+  ...(await vi.importActual<typeof import('../src/services/ohlcvService.ts')>('../src/services/ohlcvService.ts')),
+  queryOHLCV: (...a: unknown[]) => ohlcv(...a),
+}))
+// The USD-quoted route series is the real shared reader (over the mocked legs), so
+// the carry rule it applies across route and USD candles is exercised here too.
+vi.mock('../src/services/crossPair.ts', async () => ({
+  ...(await vi.importActual<typeof import('../src/services/crossPair.ts')>('../src/services/crossPair.ts')),
+  queryPairCandles: (...a: unknown[]) => cross(...a),
+}))
 const route = vi.fn()
 vi.mock('../src/services/pairPriceSource.ts', async () => ({
   ...(await vi.importActual<typeof import('../src/services/pairPriceSource.ts')>('../src/services/pairPriceSource.ts')),
@@ -71,7 +79,8 @@ describe('pairChart', () => {
     const chart = await pairChart(withTrades as never, 5, 10, '1h', 24, NOW + 1, 'route')
     expect(chart.candles).toEqual([
       { t: HOUR - 3600, o: 4.52, h: 4.62, l: 4.41, c: 4.56, priceSource: 'route', ...NO_VOLUME },
-      { t: HOUR, o: 4.55, h: 4.6, l: 4.5, c: 4.58, priceSource: 'usd-ratio', ...NO_VOLUME },
+      // One series: the USD candle after a route candle opens at the route close.
+      { t: HOUR, o: 4.56, h: 4.6, l: 4.5, c: 4.58, priceSource: 'usd-ratio', ...NO_VOLUME },
     ])
     // The trade fee is measured against the USD ratio: not served beside route candles.
     expect(chart.tradeFee).toBeNull()
