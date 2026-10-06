@@ -311,7 +311,7 @@ export const api = {
   revenue: (range: RevenueRange = '30d', signal?: AbortSignal) => getJson<RevenueDashboard>(withQuery('/explorer/revenue', { range }), signal),
   userRevenueSummary: (signal?: AbortSignal) => getJson<UserRevenueSummary>('/explorer/revenue/users/summary', signal),
   userRevenue: (range: RevenueRange = '30d', signal?: AbortSignal) => getJson<UserRevenueDashboard>(withQuery('/explorer/revenue/users', { range }), signal),
-  userRevenueFlow: (signal?: AbortSignal) => getJson<UserRevenueFlowResponse>('/explorer/revenue/user-flow', signal),
+  userRevenueFlow: (after: string | null, signal?: AbortSignal) => getJson<UserRevenueFlowResponse>(withQuery('/explorer/revenue/user-flow', { after: after || undefined, h: liveHeadTag() || undefined }), signal),
   // The staker-distributions section carries its own timeframe, so it reads its
   // own endpoint rather than the dashboard's.
   revenueStakers: (range: RevenueRange = 'all', signal?: AbortSignal) => getJson<StakerDistributions>(withQuery('/explorer/revenue/stakers', { range }), signal),

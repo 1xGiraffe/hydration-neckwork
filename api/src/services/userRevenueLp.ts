@@ -44,7 +44,7 @@ export const HUB_FEE_TO_HDX_SUBPOOL_BLOCK = 11_394_695
 /** Before the Broadcast cutover an Omnipool asset-fee leg is the WHOLE fee (legacy MVs, fee_recipient ''). */
 export const LEGACY_FEE_LEG_END_BLOCK = 6_837_788
 const REFERRAL_POT = '0x6d6f646c726566657272616c0000000000000000000000000000000000000000'
-const STAKING_POT = '0x6d6f646c7374616b696e67230000000000000000000000000000000000000000'
+export const STAKING_POT = '0x6d6f646c7374616b696e67230000000000000000000000000000000000000000'
 
 const zeros = (n: number): bigint[] => new Array<bigint>(n).fill(0n)
 

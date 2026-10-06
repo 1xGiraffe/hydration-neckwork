@@ -1653,15 +1653,36 @@ export interface UserRevenueDashboard extends UserRevenueSummary {
   topEarners: { account: AccountRef; usd: number }[]
   topPayers: { account: AccountRef; usd: number }[]
 }
+/** One live earning event in the user river: its USER part only (the pot's user share of the holder-side amount). */
+export interface UserRevenueFlowItem {
+  stream: string
+  /** "<stream label> · <asset>". */
+  label: string
+  block: number
+  t: number
+  eventIndex: number
+  legIndex: number
+  /** The earner the event names (a referral claim's referrer), else null. */
+  account: AccountRef | null
+  assetId: number
+  usd: number
+}
 export interface UserRevenueFlowResponse {
+  /** The newest folded hour: the mean drips' window ends with it. */
   hour: string | null
-  /** Revisable streams stream their mean over this many closed hours ending with `hour`. */
+  /** Revisable streams stream their mean over this many folded hours ending with `hour`. */
   revisableMeanHours?: number
   publishedThrough: string | null
   blockSeconds: number
   head: number
-  /** Earnings only: every drip is positive. */
-  drips: { key: string; stream: string; label: string; assetId: number; usdPerBlock: number }[]
+  /** Earnings only: every drip is positive. `live`: accrues every block (lending); `mean`: a revisable stream or legacy staking at its trailing mean. */
+  drips: { key: string; stream: string; label: string; assetId: number; usdPerBlock: number; mode?: 'live' | 'mean' }[]
+  /** Live earning events after the cursor passed, oldest first (absent from an older api). */
+  items?: UserRevenueFlowItem[]
+  /** The cursor for the next pull: opaque, passed back as is. */
+  cursor?: string
+  /** The event streams that stream live as items. */
+  liveStreams?: string[]
 }
 export interface UserRevenueItem { pot: string; potLabel: string; via: string; asset: AssetRef; earned: number; paid: number; net: number; unpriced: number }
 export interface UserRevenueStreamRow {
