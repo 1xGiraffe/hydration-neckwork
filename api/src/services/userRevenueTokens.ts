@@ -7,8 +7,9 @@
 // every account's wallet balance of the token at the hour's start; the custodies
 // pass it on — a stableswap pool's balance to its share holders, the Omnipool's
 // by the A1 capture rule, an aToken contract's (avDOT holds vDOT, BIL's aToken
-// holds uBIL) by the claims rule (suppliers +, borrowers −) — so a supplied or
-// pooled token is counted once, at its leaf. aTokens are never here (their
+// holds uBIL) by the claims rule (suppliers +, borrowers −), a token contract's
+// own units under redemption requests to the requesters (REDEMPTION_ESCROWS) —
+// so a supplied, pooled or queued token is counted once, at its leaf. aTokens are never here (their
 // interest is C1).
 //
 // Before a token's first peg row the issuer's own published rate can stand in
@@ -55,6 +56,13 @@ export interface AccruingToken {
   /** Further registry assets of the same token earning the same rate (native sUSDS beside the Wormhole one). */
   alsoHeld?: readonly number[]
   erc20?: string
+  /**
+   * The token's own booking-rule version (absent: 0). It joins the identity of each of the token's rate segments
+   * (pegBucketFingerprints), so bumping it refolds exactly the buckets the token's rate spans — never the whole
+   * history, as USER_REVENUE_RULE_VERSION would. Bump it when a rule that only this token's accrual reads changes
+   * (uBIL: its redemption escrow, REDEMPTION_ESCROWS).
+   */
+  ruleVersion?: number
 }
 
 /** The redemption-rate tokens and the pool pegging each against its underlying (the design's measured table). */
@@ -65,7 +73,7 @@ export const ACCRUING_TOKENS: readonly AccruingToken[] = [
   { token: 43, pool: 143, underlying: 222, underlyingLeg: 222 },         // PRIME / HOLLAR
   { token: 1000745, pool: 112, underlying: 222, underlyingLeg: 222, alsoHeld: [1000626] }, // sUSDS (Wormhole; native 1000626) / HOLLAR
   { token: 1000625, pool: 113, underlying: 222, underlyingLeg: 222 },    // sUSDe / HOLLAR
-  { token: 550, pool: 10055, underlying: 222, underlyingLeg: 222, pegLeg: 55, erc20: '0x6a21891db0940491603f3cca0a9f4dba4c6e810c' }, // uBIL (BIL's reserve; pegged as BIL) / HOLLAR
+  { token: 550, pool: 10055, underlying: 222, underlyingLeg: 222, pegLeg: 55, erc20: '0x6a21891db0940491603f3cca0a9f4dba4c6e810c', ruleVersion: 1 }, // uBIL (BIL's reserve; pegged as BIL) / HOLLAR
   { token: 46, pool: 146, underlying: 222, underlyingLeg: 222 },         // apyUSD / HOLLAR (frozen peg: unmeasured)
 ]
 
@@ -287,9 +295,10 @@ export function tokenSegments(grid: ReadonlyMap<number, readonly PegPoint[]>, ex
  */
 export function pegBucketFingerprints(segments: ReadonlyMap<number, readonly PegSegment[]>, buckets: ReadonlyArray<readonly [number, number]>): bigint[] {
   const out = buckets.map(() => 0n)
+  const ruleOf = new Map(ACCRUING_TOKENS.map(t => [t.token, t.ruleVersion ?? 0]))
   for (const [token, segs] of segments) {
     for (const seg of segs) {
-      const h = pegSegmentHash(token, seg)
+      const h = pegSegmentHash(token, seg, ruleOf.get(token) ?? 0)
       for (let i = 0; i < buckets.length; i++) {
         const [from, to] = buckets[i]
         if (seg.startTs < to && seg.endTs > from) out[i] ^= h
@@ -421,4 +430,128 @@ export function erc20Closing(book: BalanceBook, asset: number): Map<string, bigi
   const c = book.cursor(asset)
   c.advanceTo(Number.MAX_SAFE_INTEGER)
   return new Map([...c.balances].filter(([, v]) => v !== 0n))
+}
+
+// ── redemption escrow ──────────────────────────────────────────────────────────
+
+/**
+ * A token contract that is also its own asynchronous-redemption escrow (ERC-7540 style): a redeem REQUEST moves the
+ * requester's units into the contract's own balance, where they wait for the issuer. While a request is OPEN the
+ * units are still the requester's claim — they are paid at the rate in force when the request is fulfilled, so the
+ * accrual meanwhile is theirs. A request ends (fully or in part) at:
+ *   cancellation — the units go back to the requester (a Transfer out of the contract, same transaction);
+ *   fulfilment   — the payout is fixed (the event's `assets`; the later ERC-4626 Withdraw pays exactly that), so
+ *                  the units stop earning for the requester although they stay in the contract until claimed.
+ * The contract's held units therefore split per hour into the open requests' shares (each to its controller) and a
+ * remainder — fulfilled units awaiting their claim, or anything sent to the contract outside a request — which no
+ * one claims: unattributed, via REDEMPTION_ESCROW_REMAINDER_VIA (redemptionEscrowCustody, userRevenueWindow.ts).
+ *
+ * Kept explicit per contract: only the request event is ERC-7540's own; the cancel and fulfil events are this
+ * issuer's. Decoded from the indexed logs (raw_evm_logs; its `topics` array starts with topic0):
+ *   RedeemRequest(address indexed controller, address indexed owner, uint256 indexed requestId, address sender, uint256 shares)
+ *   RedemptionCancelled(uint256 indexed requestId, uint256 shares)           — the whole open amount, units returned
+ *   fulfil, partial (0x9270c1fc…) / final (0x3a371cdd…): (uint256 indexed requestId, address indexed user; uint256 assets, uint256 shares)
+ *     — a request's partial fulfilments and its final one sum to its shares exactly (requests 6 and 14, Oct 2026).
+ * The issuer's other events (the 0x021bd3ce… records, NAV and role events) and the Withdraw claim move no open request.
+ */
+export interface RedemptionEscrow {
+  /** The accruing token (ACCRUING_TOKENS) whose contract this is. */
+  token: number
+  contract: string
+  topics: { request: string; cancel: string; fulfilPartial: string; fulfil: string }
+}
+
+export const REDEMPTION_ESCROWS: readonly RedemptionEscrow[] = [{
+  token: 550,
+  contract: '0x6a21891db0940491603f3cca0a9f4dba4c6e810c', // uBIL
+  topics: {
+    request: '0x1fdc681a13d8c5da54e301c7ce6542dcde4581e4725043fdab2db12ddc574506',
+    cancel: '0x429a07ce530fc7ce775a386bf2799667fc99df434cbef3c39dc263ad03f31c1a',
+    fulfilPartial: '0x9270c1fc51d6d3b190380df88519255073460ed60bc47c56f0cb37c3776a3dd0',
+    fulfil: '0x3a371cdd24458d5e2b7d414f2f40571376e0cfb7bd07effac6736e28558a189d',
+  },
+}]
+
+/** The unattributed cause of an escrow's held units no open request claims. */
+export const REDEMPTION_ESCROW_REMAINDER_VIA = 'custody:redemption-escrow-remainder'
+/** The anchor pot carrying an escrow's open requests at the anchor block (holder = controller H160, exposure_id = request id). */
+export const escrowCheckpointPot = (contract: string): string => `escrow:${contract}`
+/** The anchor marker row's exposure_id stating the escrow checkpoints are in it (pot CHECKPOINT_POT). */
+export const ESCROW_CHECKPOINT_MARK = 'escrow'
+
+/** One open request: its controller (H160, lowercase) and the shares still waiting. */
+export interface EscrowRequest { id: string; controller: string; shares: bigint }
+
+/** A change to the open-request book: a request opening, or shares leaving it (cancelled or fulfilled). */
+export interface EscrowEvent { block: number; index: number; id: string; controller?: string; delta: bigint }
+
+const word = (data: string, i: number): bigint => {
+  const hex = data.startsWith('0x') ? data.slice(2) : data
+  const w = hex.slice(64 * i, 64 * (i + 1))
+  return w.length === 64 ? BigInt(`0x${w}`) : 0n
+}
+
+/** The pure decode of an escrow's logs (`topics` includes topic0 first), in (block, index) order. Unknown topics are skipped. */
+export function escrowEventsFromLogs(
+  escrow: RedemptionEscrow, logs: ReadonlyArray<{ block: number; index: number; topic0: string; topics: readonly string[]; data: string }>,
+): EscrowEvent[] {
+  const out: EscrowEvent[] = []
+  const t = escrow.topics
+  for (const l of logs) {
+    const topic0 = l.topic0.toLowerCase()
+    if (topic0 === t.request) {
+      if (l.topics.length < 4) continue
+      out.push({ block: l.block, index: l.index, id: BigInt(l.topics[3]).toString(), controller: `0x${l.topics[1].toLowerCase().slice(-40)}`, delta: word(l.data, 1) })
+    } else if (topic0 === t.cancel) {
+      if (l.topics.length < 2) continue
+      out.push({ block: l.block, index: l.index, id: BigInt(l.topics[1]).toString(), delta: -word(l.data, 0) })
+    } else if (topic0 === t.fulfil || topic0 === t.fulfilPartial) {
+      if (l.topics.length < 2) continue
+      out.push({ block: l.block, index: l.index, id: BigInt(l.topics[1]).toString(), delta: -word(l.data, 1) })
+    }
+  }
+  return out.sort((a, b) => a.block - b.block || a.index - b.index)
+}
+
+/**
+ * An escrow's open-request book over a window: the requests open at its opening checkpoint (or none) and every
+ * change after it. `openAt(block)` is the book after every event at or before `block`; calls must not go backwards.
+ */
+export class RedemptionEscrowBook {
+  private readonly open = new Map<string, EscrowRequest>()
+  private next = 0
+  constructor(opening: Iterable<EscrowRequest>, private readonly events: readonly EscrowEvent[]) {
+    for (const r of opening) if (r.shares > 0n) this.open.set(r.id, { ...r })
+  }
+
+  private apply(e: EscrowEvent): void {
+    const cur = this.open.get(e.id)
+    const controller = e.controller ?? cur?.controller
+    if (!controller) return // shares leaving a request the book never saw open: nothing of it was open here
+    const shares = (cur?.shares ?? 0n) + e.delta
+    if (shares > 0n) this.open.set(e.id, { id: e.id, controller, shares })
+    else this.open.delete(e.id)
+  }
+
+  /** The open requests after every event at or before `block`, by request id (numeric). */
+  openAt(block: number): EscrowRequest[] {
+    while (this.next < this.events.length && this.events[this.next].block <= block) this.apply(this.events[this.next++])
+    return [...this.open.values()].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0))
+  }
+}
+
+/**
+ * An escrow's events after the checkpoint `ckpt` (the month anchor's block; without one, from the contract's first
+ * log) through the window's last block, deduplicated by log identity (raw_evm_logs is replayable).
+ */
+export async function loadEscrowEvents(client: ClickHouseClient, w: FoldWindow, escrow: RedemptionEscrow, ckpt: { block: number; monthStart: number } | null): Promise<EscrowEvent[]> {
+  const t = escrow.topics
+  const got = await rows<{ b: string; i: string; t: string; tp: string[]; d: string }>(client, `
+    SELECT block_height AS b, event_index AS i, argMax(topic0, ingested_at) AS t, argMax(topics, ingested_at) AS tp, argMax(data, ingested_at) AS d
+    FROM price_data.raw_evm_logs
+    WHERE contract_address = {c:String} AND topic0 IN {topics:Array(String)}
+      AND block_height <= {hi:UInt32} AND block_height > {lo:UInt32} AND block_timestamp >= {fromTs:DateTime}
+    GROUP BY b, i ORDER BY b, i`,
+  { c: escrow.contract, topics: [t.request, t.cancel, t.fulfilPartial, t.fulfil], hi: w.lastBlock, lo: ckpt?.block ?? 0, fromTs: chTimestamp(ckpt ? ckpt.monthStart - HOUR : 0) }, 'ur:token-escrow')
+  return escrowEventsFromLogs(escrow, got.map(r => ({ block: Number(r.b), index: Number(r.i), topic0: r.t ?? '', topics: r.tp, data: r.d })))
 }
