@@ -3,8 +3,8 @@ import { cached } from './cache.ts'
 import { assetDescriptor, priceAssetId } from './explorerAssets.ts'
 import { getAssetById } from './assetsService.ts'
 import { queryOHLCV, type OHLCVInterval } from './ohlcvService.ts'
-import { queryPairCandles } from './crossPair.ts'
-import { overlayRouteCandles, pairPriceSource, queryRouteCandles, type CandlePriceSource, type PairPriceSource } from './pairPriceSource.ts'
+import { queryPairCandles, queryUsdQuotedRouteCandles, type CrossCandle } from './crossPair.ts'
+import { pairPriceSource, type CandlePriceSource, type PairPriceSource, type Sourced } from './pairPriceSource.ts'
 import { AMOUNT_SCALE, queryPairVolume, scaledText } from './pairVolume.ts'
 
 // Candles for one pair on an explorer chart — the intent page draws a limit order
@@ -71,21 +71,22 @@ export function pairChart(client: ClickHouseClient, baseId: number, quoteId: num
     const startTime = new Date(fromSec * 1000)
     const endTime = new Date(nowSec * 1000)
     const window = { baseId: baseSeries, quoteId: quoteSeries, startTime, endTime, interval: interval as OHLCVInterval, headFloor: priceHead }
-    let candles: PairChartCandle[] = getAssetById(quoteSeries)?.isUsdPegged
+    const toChart = (c: Sourced<CrossCandle>): PairChartCandle => {
+      const candle: PairChartCandle = { t: c.intervalStart, o: num(c.open), h: num(c.high), l: num(c.low), c: num(c.close) }
+      if (c.priceSource) candle.priceSource = c.priceSource
+      return candle
+    }
+    const usdQuoted = getAssetById(quoteSeries)?.isUsdPegged
+    // Every series opens each candle at the close before it (the carry rule, applied
+    // in the shared readers). Route mode prices a USD-pegged quote as the token itself
+    // wherever the pair's route does, like every other quote — one mixed series; the
+    // window's end is the instant `nowSec`, inclusive, as the USD view reads it.
+    let candles: PairChartCandle[] = usdQuoted && source !== 'route'
       ? (await queryOHLCV(client, { assetId: baseSeries, startTime, endTime, interval: interval as OHLCVInterval }))
         .map(c => ({ t: Math.floor(Date.parse(`${c.interval_start.replace(' ', 'T')}Z`) / 1000), o: num(c.open), h: num(c.high), l: num(c.low), c: num(c.close) }))
-      : (await queryPairCandles(client, window, source))
-        .map(c => {
-          const candle: PairChartCandle = { t: c.intervalStart, o: num(c.open), h: num(c.high), l: num(c.low), c: num(c.close) }
-          if (c.priceSource) candle.priceSource = c.priceSource
-          return candle
-        })
-    // Route mode prices a USD-pegged quote as the token itself wherever the pair's
-    // route does, like every other quote.
-    if (source === 'route' && getAssetById(quoteSeries)?.isUsdPegged) {
-      const route = await queryRouteCandles(client, window)
-      candles = overlayRouteCandles(candles, route, c => c.t, rc => ({ t: rc.intervalStart, o: num(rc.open), h: num(rc.high), l: num(rc.low), c: num(rc.close) }))
-    }
+      : usdQuoted
+        ? (await queryUsdQuotedRouteCandles(client, { ...window, endTime: new Date((nowSec + 1) * 1000) })).map(toChart)
+        : (await queryPairCandles(client, window, source)).map(toChart)
     // The pair's own volume per bucket, the bucket in progress built to the head.
     const volume = await queryPairVolume(client, {
       baseId: baseSeries, quoteId: quoteSeries, interval, fromSec, toSec: currentStart,

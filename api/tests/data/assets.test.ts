@@ -124,6 +124,25 @@ describe('GET /v1/assets/:id/candles', () => {
     expect(missing.statusCode).toBe(400)
   })
 
+  // The carry rule (ohlcvService.carryCandleOpens): each candle opens at the close
+  // before it — the first one at the close before the window — high/low widened.
+  it('opens every candle at the close before it, the first at the pre-window close', async () => {
+    app = await freshDataApp(marketsClient([
+      query => (query.includes('-- data:assets:candles')
+        ? [
+            { interval_start: '2026-08-01 00:00:00', open: '3.1', high: '3.5', low: '3.1', close: '3.4', volume_buy: '0', volume_sell: '0', volume_total: '0', prior_close: '3.0' },
+            { interval_start: '2026-08-01 03:00:00', open: '3.6', high: '3.7', low: '3.6', close: '3.65', volume_buy: '0', volume_sell: '0', volume_total: '0', prior_close: '3.0' },
+          ]
+        : undefined),
+    ]))
+    const res = await app.inject({ url: '/v1/assets/5/candles?bucket=1h&fromTime=2026-08-01T00:00:00Z&toTime=2026-08-02T00:00:00Z', headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().items.map((c: { open: string; high: string; low: string }) => [c.open, c.high, c.low])).toEqual([
+      ['3.0', '3.5', '3.0'],
+      ['3.4', '3.7', '3.4'],
+    ])
+  })
+
   it('knows no 1-minute bucket', async () => {
     app = await freshDataApp(marketsClient())
     const res = await app.inject({ url: '/v1/assets/5/candles?bucket=1m&fromTime=2026-08-01T00:00:00Z&toTime=2026-08-02T00:00:00Z', headers: AUTH })

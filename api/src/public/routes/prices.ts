@@ -7,8 +7,8 @@ import { assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
 import { AMOUNT_SCALE, queryPairVolume, reachesPairVolumeTail, scaledText, type PairVolumeBucket } from '../../services/pairVolume.ts'
 import type { OHLCVInterval } from '../../services/ohlcvService.ts'
 import { queryOHLCV } from '../../services/ohlcvService.ts'
-import { CROSS_SCALE, CrossWindowTooWideError, queryPairCandles, type CrossCandle } from '../../services/crossPair.ts'
-import { lastClosedBucketStart, overlayRouteCandles, pairPriceSource, pricePipelineHead, queryRouteCandles, type CandlePriceSource, type Sourced } from '../../services/pairPriceSource.ts'
+import { CROSS_SCALE, CrossWindowTooWideError, queryPairCandles, queryUsdQuotedRouteCandles, type CrossCandle } from '../../services/crossPair.ts'
+import { lastClosedBucketStart, pairPriceSource, pricePipelineHead, type CandlePriceSource, type Sourced } from '../../services/pairPriceSource.ts'
 import type { OHLCVCandle } from '../../types.ts'
 import { iso, zAssetId, zBucket, zIsoTimestamp } from '../schemas/common.ts'
 import { KRAKEN_PAIRS, ONE_CLICK_PLATFORMS, loadForeignCandles, platformForOneClickAsset, type ForeignCandle } from '../../services/foreignCandles.ts'
@@ -321,12 +321,13 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
         ...(pairPriceSource() === 'route' ? [ROUTE_PRICING_DESCRIPTION] : []),
         'ORIENTATION: the price is `assetIn` quoted in `assetOut` — how much assetOut one assetIn buys — matching the UI\'s pair orientation. `assetIn` and `assetOut` must differ: an asset\'s price in itself is 1, not a series, and the endpoint answers markets.',
         '`referenceAsset` is `usd` when assetOut is a USD-pegged token (USDT, USDC) and every candle is a USD candle, because the candle model is USD-denominated and that IS the pair (under ROUTE PRICING above, route-priced candles make it the token\'s id instead). **USD-quoted pairs are the asset\'s own candles, unmodified — everything in the next paragraph is about cross pairs only.** Otherwise `referenceAsset` is assetOut\'s registry id and the candles are the cross rate, the ratio of the two assets\' USD prices taken per block and then aggregated — see CROSS-PAIR ACCURACY below. Only a quote that holds par tightly enough for the substitution to sit below the series\' own noise qualifies: HOLLAR floats on its own stablepools (0.9983 on 2026-09-17, so quoting it as a dollar read 0.172 % low), DAI is an outside peg, and the interest-bearing `Hydrated *` wrappers (HUSDT, HUSDC, HUSDS, HUSDe) accrue about 2 %/yr away from par — all of them quote through the cross path like any other asset. A bucket in which the two legs are never priced at the same block is omitted rather than carried at an older rate, so a cross series starts no earlier than the first block both assets had a price at.',
-        'CROSS-PAIR ACCURACY: every field is the pair\'s OWN rate. `open`, `high`, `low` and `close` are the first, largest, smallest and last value of the ratio taken per BLOCK, with both legs read at the same block — so `high` and `low` are rates that were really quoted, and `high - low` is the realised range rather than a bound on it. Composing them from the two assets\' stored candles instead cannot do this: those aggregate each asset separately, so `max(base)/min(quote)` pairs observations from different moments and only ever widens the candle — by an unbounded factor on a pair whose ratio is near-constant (BIL quoted in HOLLAR measured a 0.0134 % hourly wick against a true range of zero). `volumeUsd` stays the base asset\'s dollar volume, not a pair figure.',
+        'CROSS-PAIR ACCURACY: every field is the pair\'s OWN rate. `high`, `low` and `close` are the largest, smallest and last value of the ratio taken per BLOCK, with both legs read at the same block — so `high` and `low` are rates that were really quoted, and `high - low` is the realised range rather than a bound on it. Composing them from the two assets\' stored candles instead cannot do this: those aggregate each asset separately, so `max(base)/min(quote)` pairs observations from different moments and only ever widens the candle — by an unbounded factor on a pair whose ratio is near-constant (BIL quoted in HOLLAR measured a 0.0134 % hourly wick against a true range of zero). `volumeUsd` stays the base asset\'s dollar volume, not a pair figure.',
         `\`timestamp\` is the bucket's OPEN, on the candle model's own grid: sub-daily buckets and \`1d\` are UTC-aligned, and \`1w\` is the ISO week, starting MONDAY 00:00 UTC. \`from\` and \`to\` are floored onto that grid, so the bucket containing each is the one you get (the sole exception is a \`1w\` bound inside 1970-01-01…04, which moves up to the epoch's first Monday). A bucket is CLOSED once the newest indexed block — the chain's FINALIZED head as this deployment has priced it — is at or past the bucket's end: a closed candle already holds every block it ever will and is never revised, and carries \`closed: true\`. The series continues to the head: the bucket the head falls in is returned too, built from every block up to the head, with \`closed: false\` — it may still change, and will, until it closes (blocks finalize some 45 s after they are produced, so a bucket closes about that long after it ends). The open bucket's \`timestamp\` is its exact bucket start like any other, so a client that paints its own live candle can replace it in place. The window defaults to the most recent ${DEFAULT_CANDLES} buckets ending with the open one.`,
         `At most ${MAX_CANDLES} candles per request — a wider window is a 400, never a silently truncated series. The count is measured on the window actually READ, i.e. after \`to\` is clamped to the open bucket: a \`to\` at or after the open bucket's start (or none) includes it, a \`to\` in an earlier bucket ends the series there with closed buckets only — so a past, bucket-rounded \`to\` answers exactly as before. Passing a \`to\` far in the future is not a 400, it just reads up to the open bucket, and a window lying entirely beyond it reads nothing at all and returns empty \`items\` without reaching the cap.`,
         'A window that lies entirely after the open bucket (a future `from`) is answered with empty `items`, the same as a window before the asset was listed. Only a caller-inverted window is a 400 — and that test is on the timestamps you sent, not on the buckets they fall in, so swapping two same-day bounds is refused rather than silently read as one bucket. A response holding the open bucket is shared for at most 2 s (`Cache-Control: public, max-age=2`), one of closed buckets only for 300 s: those never change.',
         'ALIASES: each leg is read from the series the explorer values that asset\'s history with. A money-market aToken reads its reserve (aUSDC is USDC); a Hydrated pool share reads its money-market wrapper (2-Pool-HUSDC is HUSDC, 2-Pool-GDOT is GDOT), under which the price model records it; a duplicate listing reads the canonical one. Any other pool share (2-Pool-PRIME, 3-Pool, …) is its own NAV series. Two ids that read one series are the same asset for this endpoint. `referenceAsset` still names the id you sent.',
         'VOLUME: `volumeUsd` is assetIn\'s own dollar volume — every trade it took part in, against any asset — as it always was. The PAIR\'s volume rides alongside, additively: `pairVolumeUsd` is the dollar value of the trades between the two assets only, either direction, and `volumeBase` / `volumeQuote` are those trades\' amounts of assetIn and assetOut in whole token units. A trade is one Router operation (or one direct swap) netted across its route, so a DOT → H2O → USDT route is one DOT/USDT trade counted once at its endpoints and never a trade of the hub; it belongs to the pair of its two net endpoints (a route\'s wei-scale remainders are ignored, a trade genuinely split across several assets belongs to no pair), each endpoint read through the same aliases as the price (an aToken is its reserve). The dollar value is the volume models\' rule — the larger of the two sides, at the newest closed hourly price before the trade — and the token amounts are exact and need no price. All three are identical in both orientations except that `volumeBase` and `volumeQuote` swap places. The open bucket\'s pair volume is built to the head like its price.',
+        'OPEN: every candle opens at the close of the candle before it in the same series — the price in force when the bucket began — on USD and cross pairs alike, and across buckets in which nothing traded. Prices are recorded only in blocks where they change, so a bucket\'s own first observation can come well after its start; the price did not jump at the boundary. `high` and `low` include that open. Only a series\' first candle (no earlier price; for a cross pair, none within a bounded lookback before the window) opens at its own first observation.',
         'There is no minute-level candle model, so `bucket=1m` is rejected rather than rounded up to 5 minutes.',
         'PRECISION: the candle model stores Decimal(38,12), and the database client requests quoted decimals so no value passes through a JSON double. Cross-rate division is integer arithmetic on that exact decimal text.',
       ].join('\n\n'),
@@ -448,27 +449,22 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
         })
         return { referenceAsset, items: flag(rows.map(crossToPairCandle).filter(c => Date.parse(c.timestamp) / 1000 <= toSeconds)) }
       }
-      const base = await queryOHLCV(opts.client, {
-        assetId: baseId, startTime: new Date(fromSeconds * 1000), endTime: new Date(toSeconds * 1000), interval,
-      })
-      // The view's window is inclusive of `end_time`; a bucket past the open one
-      // (a replayed head ahead of the price head) is dropped, so the series ends at
-      // the head it is flagged against.
-      const closed = base.filter(candle => Date.parse(`${candle.interval_start.replace(' ', 'T')}Z`) / 1000 <= toSeconds)
-      if (source !== 'route') return { referenceAsset, items: flag(usdCandles(closed)) }
+      if (source !== 'route') {
+        const base = await queryOHLCV(opts.client, {
+          assetId: baseId, startTime: new Date(fromSeconds * 1000), endTime: new Date(toSeconds * 1000), interval,
+        })
+        // The view's window is inclusive of `end_time`; a bucket past the open one
+        // (a replayed head ahead of the price head) is dropped, so the series ends at
+        // the head it is flagged against.
+        const closed = base.filter(candle => Date.parse(`${candle.interval_start.replace(' ', 'T')}Z`) / 1000 <= toSeconds)
+        return { referenceAsset, items: flag(usdCandles(closed)) }
+      }
       // Route mode: a bucket the pair's route prices is the price against THIS
-      // token along that route, not the dollar; the rest stay the USD candles.
-      const route = await queryRouteCandles(opts.client, {
+      // token along that route, not the dollar; the rest stay the USD candles — one
+      // series, each candle opening at the close before it, whichever priced it.
+      const items = (await queryUsdQuotedRouteCandles(opts.client, {
         baseId, quoteId, interval, startTime: new Date(fromSeconds * 1000), endTime: new Date((toSeconds + seconds) * 1000), headFloor: head.block,
-      })
-      const items = overlayRouteCandles(usdCandles(closed), route, c => Date.parse(c.timestamp) / 1000, (rc, existing) => ({
-        timestamp: new Date(rc.intervalStart * 1000).toISOString(),
-        open: trimDecimal(rc.open),
-        high: trimDecimal(rc.high),
-        low: trimDecimal(rc.low),
-        close: trimDecimal(rc.close),
-        volumeUsd: existing?.volumeUsd ?? '0',
-      }))
+      })).map(crossToPairCandle)
       // A route-priced candle is the price against this token, not the dollar: the
       // series names the token whenever any of its candles is (each candle says
       // which by its priceSource), and `usd` only while all of them are USD candles.

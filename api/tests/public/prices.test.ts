@@ -624,7 +624,9 @@ describe('GET /v1/prices/pair under PAIR_PRICE_SOURCE', () => {
       const res = await app2.inject(`/v1/prices/pair?assetIn=5&assetOut=10&bucket=1h&${WINDOW}`)
       expect(res.json().items).toEqual([
         { timestamp: '2026-06-24T00:00:00.000Z', open: '8', high: '10', low: '5', close: '9', volumeUsd: '150', priceSource: 'route', closed: true, ...NO_PAIR_VOLUME },
-        { timestamp: '2026-06-24T01:00:00.000Z', open: '4.5', high: '4.8', low: '4.4', close: '4.6', volumeUsd: '30', priceSource: 'usd-ratio', closed: true, ...NO_PAIR_VOLUME },
+        // One series: the USD candle after a route candle opens at the route close,
+        // its high widened to that open (the carry rule).
+        { timestamp: '2026-06-24T01:00:00.000Z', open: '9', high: '9', low: '4.4', close: '4.6', volumeUsd: '30', priceSource: 'usd-ratio', closed: true, ...NO_PAIR_VOLUME },
       ])
       // A route-priced candle is quoted in the token, so the series names it.
       expect(res.json().referenceAsset).toBe('10')
