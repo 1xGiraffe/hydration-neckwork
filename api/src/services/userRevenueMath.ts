@@ -547,10 +547,11 @@ export function segmentRiseIn(seg: PegSegment, from: number, to: number): bigint
 }
 
 /** A segment's identity for the staleness fingerprints (FNV-1a 64 over its fields). */
-export function pegSegmentHash(token: number, seg: PegSegment): bigint {
+export function pegSegmentHash(token: number, seg: PegSegment, rule = 0): bigint {
   // An open segment is identified by where it starts only: moves joining an undecided episode re-mark nothing.
   // The peg source the segment belongs to is part of it: a source change re-marks the buckets its segments span.
-  const src = (seg.source ? `|src:${seg.source}` : '') + (seg.via ? `|via:${seg.via}` : '')
+  // So is the token's own booking-rule version (AccruingToken.ruleVersion; 0 leaves the identity as it was).
+  const src = (seg.source ? `|src:${seg.source}` : '') + (seg.via ? `|via:${seg.via}` : '') + (rule ? `|rule:${rule}` : '')
   const s = seg.endTs === PEG_OPEN_END ? `${token}|pending|${seg.startTs}${src}` : `${token}|${seg.kind}|${seg.startTs}|${seg.endTs}|${seg.rise}${src}`
   let h = 0xcbf29ce484222325n
   for (let i = 0; i < s.length; i++) { h ^= BigInt(s.charCodeAt(i)); h = (h * 0x100000001b3n) & 0xffffffffffffffffn }

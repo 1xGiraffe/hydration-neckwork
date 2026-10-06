@@ -51,7 +51,11 @@ import {
 import { buildGigahdxVoting, buildLegacyStaking, buildReferralCommissions } from './userRevenueStaking.ts'
 import { buildFarmRewards } from './userRevenueFarms.ts'
 import { buildV3LpFees, loadVaultCustodies } from './userRevenueV3.ts'
-import { ACCRUING_TOKENS, ERC20_CHECKPOINT_MARK, TOKEN_BALANCE_ASSETS, buildTokenAccrual, erc20CheckpointPot, erc20Closing, loadErc20Book, loadPegGrid, tokenSegments } from './userRevenueTokens.ts'
+import {
+  ACCRUING_TOKENS, ERC20_CHECKPOINT_MARK, ESCROW_CHECKPOINT_MARK, REDEMPTION_ESCROWS, REDEMPTION_ESCROW_REMAINDER_VIA, RedemptionEscrowBook, TOKEN_BALANCE_ASSETS,
+  buildTokenAccrual, erc20CheckpointPot, erc20Closing, escrowCheckpointPot, loadErc20Book, loadEscrowEvents, loadPegGrid, tokenSegments,
+  type EscrowRequest, type RedemptionEscrow,
+} from './userRevenueTokens.ts'
 import type { PegSegment } from './userRevenueMath.ts'
 import { MM_COVERAGE_FROM_BLOCK, UNATTRIBUTED_VIA, USER_REVENUE_RULE_VERSION, ethMappedAccount, h160Of } from './userRevenueStreams.ts'
 
@@ -169,6 +173,58 @@ export function aTokenClaimsCustody(
 }
 
 /**
+ * The redemption-escrow rule for a token contract holding its own units under redemption requests
+ * (userRevenueTokens.REDEMPTION_ESCROWS): per hour, of the U units the contract holds at the hour's start (the
+ * ledger's units), each OPEN request's shares s earn I × s / U for its controller (mapped like any holder H160:
+ * bound owner, else its ETH-mapped account, then classed by the normal rule); the units no open request claims —
+ * fulfilled units awaiting their claim, anything sent outside a request — earn the rest, booked unattributed via
+ * REDEMPTION_ESCROW_REMAINDER_VIA. Open shares exceeding U (never on chain) split I between the requests alone.
+ * `openAt(h)` is the book at hour h's start block.
+ */
+export function redemptionEscrowCustody(
+  escrow: RedemptionEscrow, openAt: (h: number) => readonly EscrowRequest[], accountOf: (h160: string) => string,
+): CustodyResolver {
+  const kind = `redemption-escrow:${escrow.token}`
+  return {
+    kind,
+    async resolve(ledger: Ledger): Promise<CustodyResolution> {
+      const H = ledger.amounts.length
+      const parts = new Map<string, Ledger>()
+      const remainder = new Array<bigint>(H).fill(0n)
+      const rounding = new Array<bigint>(H).fill(0n)
+      for (let h = 0; h < H; h++) {
+        const I = ledger.amounts[h]
+        if (I === 0n) continue
+        const open = openAt(h)
+        const S = open.reduce((a, r) => a + r.shares, 0n)
+        const held = ledger.units?.[h] ?? 0n
+        const U = held > S ? held : S
+        if (U <= 0n) { remainder[h] += I; continue }
+        // The part no open request claims, then each request's share; the split's own floor dust is 'rounding'.
+        const unclaimed = (I * (U - S)) / U
+        remainder[h] += unclaimed
+        let given = 0n
+        for (const r of open) {
+          const part = (I * r.shares) / U
+          if (part === 0n) continue
+          const account = accountOf(r.controller)
+          let l = parts.get(account)
+          if (!l) {
+            l = { holder: account, stream: ledger.stream, pot: ledger.pot, via: joinVia(ledger.via, kind), asset: ledger.asset, held: escrow.token, price: ledger.price, amounts: new Array<bigint>(H).fill(0n), units: new Array<bigint>(H).fill(0n) }
+            parts.set(account, l)
+          }
+          l.amounts[h] += part
+          l.units![h] += r.shares
+          given += part
+        }
+        rounding[h] += I - unclaimed - given
+      }
+      return { parts: [...parts.values()], remainder, remainderVia: REDEMPTION_ESCROW_REMAINDER_VIA, more: [{ via: UNATTRIBUTED_VIA.rounding, amounts: rounding }] }
+    },
+  }
+}
+
+/**
  * The whole window: builders, custody pass-through, classification, valuation.
  * `anchor` is month m's anchor (null: the window opens from scratch — each
  * builder reconstructs its opening from raw). The returned anchorOut is the
@@ -232,6 +288,19 @@ export async function computeUserRevenueWindow(client: ClickHouseClient, w: Fold
     const ckpt = erc20Ckpt ? { block: erc20Ckpt.block, monthStart: w.monthStart, balances: new Map(erc20Ckpt.rows.filter(r => r.pot === pot).map(r => [r.holder, r.units] as const)) } : null
     erc20Books.set(t.erc20, await timed('token-balances', () => loadErc20Book(client, w, t.erc20!, t.token, ckpt)))
   }
+  // Each redemption escrow's open requests: per window hour at its start block, and at the window's end (the next
+  // anchor's checkpoint). The month anchor's escrow checkpoint opens the book; without its mark, the contract's
+  // whole log history does.
+  const escrowCkpt = anchor && anchor.rows.some(r => r.pot === CHECKPOINT_POT && r.exposure_id === ESCROW_CHECKPOINT_MARK) ? anchor : null
+  const escrows: Array<{ escrow: RedemptionEscrow; hours: EscrowRequest[][]; closing: EscrowRequest[] }> = []
+  for (const escrow of REDEMPTION_ESCROWS) {
+    const pot = escrowCheckpointPot(escrow.contract)
+    const opening: EscrowRequest[] = escrowCkpt ? escrowCkpt.rows.filter(r => r.pot === pot).map(r => ({ id: r.exposure_id, controller: r.holder, shares: r.units })) : []
+    const events = await timed('token-escrow', () => loadEscrowEvents(client, w, escrow, escrowCkpt ? { block: escrowCkpt.block, monthStart: w.monthStart } : null))
+    const book = new RedemptionEscrowBook(opening, events)
+    const hours = Array.from({ length: w.hours }, (_, h) => book.openAt(h === 0 ? w.openBlock : w.hourBlocks[h - 1].last))
+    escrows.push({ escrow, hours, closing: book.openAt(Number.MAX_SAFE_INTEGER) })
+  }
 
   const mm = await timed('mm', () => buildMmInterest(client, w, contracts, opening, accountOf))
   const incentives = await timed('mm-incentives', () => buildMmIncentives(client, w, contracts, opening, mm, accountOf, assetDecimalsOrNull))
@@ -281,9 +350,14 @@ export async function computeUserRevenueWindow(client: ClickHouseClient, w: Fold
     unresolved.delete(account)
   }
   for (const { a } of lbp) unresolved.set(a, 'custody:lbp')
+  // A redemption escrow passes on only what its own held units earn (the token's accrual); anything else it held
+  // would be classed like any account.
+  const escrowResolvers = new Map(escrows.map(e => [accountOf(e.escrow.contract).toLowerCase(), { token: e.escrow.token, resolver: redemptionEscrowCustody(e.escrow, h => e.hours[h] ?? [], accountOf) }]))
   const custody: CustodyRegistry = {
     resolverFor(holder: string, ledger: Ledger): CustodyResolver | null {
       if (holder === OMNIPOOL_ACCOUNT) return omniResolver
+      const escrow = escrowResolvers.get(holder)
+      if (escrow && ledger.held === escrow.token) return escrow.resolver
       // The XYK LM account passes on only what its farmed XYK shares earn; its own balances (reward pots) are the protocol's.
       if (holder === XYK_LM_ACCOUNT) return ledger.held != null && xykLpAssets.has(ledger.held) ? xykFarm : null
       return resolvers.get(holder) ?? null
@@ -312,6 +386,8 @@ export async function computeUserRevenueWindow(client: ClickHouseClient, w: Fold
   }
   anchorOut.push({ pot: CHECKPOINT_POT, holder: '', exposure_id: 'farm|v3|vault', units: 1n, aux: '' })
   anchorOut.push({ pot: CHECKPOINT_POT, holder: '', exposure_id: ERC20_CHECKPOINT_MARK, units: 1n, aux: '' })
+  for (const e of escrows) for (const r of e.closing) anchorOut.push({ pot: escrowCheckpointPot(e.escrow.contract), holder: r.controller, exposure_id: r.id, units: r.shares, aux: '' })
+  anchorOut.push({ pot: CHECKPOINT_POT, holder: '', exposure_id: ESCROW_CHECKPOINT_MARK, units: 1n, aux: '' })
   anchorOut.sort((a, b) => (a.pot + a.holder + a.exposure_id < b.pot + b.holder + b.exposure_id ? -1 : 1))
 
   return {

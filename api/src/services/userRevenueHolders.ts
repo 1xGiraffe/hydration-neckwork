@@ -11,7 +11,9 @@
 // accounts). The custodies are what its registry passes through or books as
 // unattributed — the Omnipool, stableswap and XYK pool accounts, the
 // money market's contracts (aTokens pass their income to suppliers; debt tokens
-// and pool proxies hold none), Uniswap v3 pools and vaults, and LBP pools. A
+// and pool proxies hold none), Uniswap v3 pools and vaults, LBP pools and the
+// redemption escrows (a token contract holding its units under redemption
+// requests passes their accrual to the requesters). A
 // custody is classed `unattributed`: what it earns belongs to its claimants, and
 // whatever it keeps is booked unattributed under a named `via`.
 //
@@ -25,6 +27,7 @@ import { cachedSwr } from './cache.ts'
 import { loadProtocolHolders, userRevenueRows as rows } from './userRevenueFold.ts'
 import { loadStableswapPools, loadXykPools, OMNIPOOL_ACCOUNT } from './userRevenueLp.ts'
 import { loadMmContracts } from './userRevenueMm.ts'
+import { REDEMPTION_ESCROWS } from './userRevenueTokens.ts'
 import {
   MODL_ETH_MAPPED_PREFIX, MODL_PREFIX, PARA_SOVEREIGN_PREFIX, PARENT_SOVEREIGN_ACCOUNT, PROTOCOL_FIXED_ACCOUNTS, SIBLING_SOVEREIGN_PREFIX,
   ethMappedAccount, holderClassOf, type HolderClass, type HolderSets,
@@ -128,6 +131,7 @@ async function loadHolderClassInputs(client: ClickHouseClient): Promise<HolderCl
     for (const { a } of v3Pools) custody.add(ethMappedAccount(a))
     for (const { a } of v3Vaults) custody.add(ethMappedAccount(a))
     for (const { a } of lbp) custody.add(a)
+    for (const e of REDEMPTION_ESCROWS) custody.add(ethMappedAccount(e.contract))
     return { sets: { protocol: protocol.set, user: protocol.user, custody: protocol.custody }, custody }
   })
 }
