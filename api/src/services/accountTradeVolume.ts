@@ -281,19 +281,44 @@ legacy AS (
   // a partial or a DCA trade; for the budget-exhausting DcaCompleted, which states
   // none, the pot's settlement legs for that (solution, owner, asset) less the
   // sibling fills that state theirs — exact for one completion per (owner, asset)
-  // in a solution, and nothing rather than a split guess for two. Keyed on the
-  // Intent event, in the event-anchored space clear of router ids.
+  // in a solution, and nothing rather than a split guess for two — with the input
+  // side falling back to what the final trade spends where no owner->pot transfer
+  // measures it (completion_fallback; services/iceSettlement.ts is the one rule).
+  // Keyed on the Intent event, in the event-anchored space clear of router ids.
   const intentFills = `
 intent_fills AS (
   SELECT e.block_height AS block_height, e.extrinsic_index AS extrinsic_index, e.event_index AS event_index,
          e.block_timestamp AS block_time, e.event_name AS event_name,
          lower(o.owner) AS account, o.asset_in AS asset_in, o.asset_out AS asset_out,
          toDecimal256(if(e.amount_in = '', '0', e.amount_in), 0) AS stated_in,
-         toDecimal256(if(e.amount_out = '', '0', e.amount_out), 0) AS stated_out
+         toDecimal256(if(e.amount_out = '', '0', e.amount_out), 0) AS stated_out,
+         e.intent_id AS intent_id, o.amount_in AS order_in, o.budget AS order_budget
   FROM (SELECT intent_id, block_height, assumeNotNull(ie.extrinsic_index) AS extrinsic_index, event_index, block_timestamp, event_name, amount_in, amount_out
         FROM price_data.intent_events AS ie FINAL
         WHERE event_name IN (${INTENT_FILL_EVENTS}) AND ie.extrinsic_index IS NOT NULL AND block_height >= ${ICE_MIN_BLOCK} AND ${pf}) e
-  INNER JOIN (SELECT intent_id, owner, asset_in, asset_out FROM price_data.intent_orders FINAL) o ON o.intent_id = e.intent_id
+  INNER JOIN (SELECT intent_id, owner, asset_in, asset_out, amount_in, budget FROM price_data.intent_orders FINAL) o ON o.intent_id = e.intent_id
+),
+-- The completion's input when no owner->pot transfer measures it (since ~block
+-- 15,140,000 the pallet repatriates the reserved budget instead, and an Erc20
+-- asset_in leaves no leg at all): what the final trade spends, min(the order's
+-- per-trade amount, the budget left before it) — the newest DcaTradeExecuted's
+-- remaining budget, else the order's budget (services/iceSettlement.ts, which
+-- matches the measured leg on every completion that has one). intent_events is
+-- small and the completing intents' earlier trades lie outside the bucket.
+completion_prior AS (
+  SELECT intent_id, argMax(remaining_budget, toUInt64(block_height) * 4294967296 + event_index) AS rb
+  FROM price_data.intent_events FINAL
+  WHERE event_name = 'Intent.DcaTradeExecuted' AND block_height >= ${ICE_MIN_BLOCK}
+    AND intent_id IN (SELECT intent_id FROM intent_fills WHERE event_name = 'Intent.DcaCompleted')
+  GROUP BY intent_id
+),
+completion_fallback AS (
+  SELECT f.block_height AS block_height, f.event_index AS event_index,
+         least(toDecimal256(if(f.order_in = '', '0', f.order_in), 0),
+               toDecimal256(if(p.rb != '', p.rb, if(f.order_budget = '', f.order_in, f.order_budget)), 0)) AS amount
+  FROM intent_fills f
+  LEFT JOIN completion_prior p ON p.intent_id = f.intent_id
+  WHERE f.event_name = 'Intent.DcaCompleted'
 ),
 pot_legs AS (
   SELECT block_height, assumeNotNull(t.extrinsic_index) AS extrinsic_index,
@@ -331,11 +356,12 @@ completion AS (
 intent_trades AS (
   SELECT f.block_height AS block_height, f.event_index AS event_index, f.block_time AS block_time, f.account AS account,
          f.asset_in AS asset_in, f.asset_out AS asset_out,
-         if(f.event_name = 'Intent.DcaCompleted', ci.amount, f.stated_in) AS amount_in,
+         if(f.event_name = 'Intent.DcaCompleted', if(ci.amount > 0, ci.amount, cf.amount), f.stated_in) AS amount_in,
          if(f.event_name = 'Intent.DcaCompleted', co.amount, f.stated_out) AS amount_out
   FROM intent_fills f
   LEFT JOIN completion ci ON ci.block_height = f.block_height AND ci.extrinsic_index = f.extrinsic_index AND ci.account = f.account AND ci.asset_id = f.asset_in AND ci.dir = 'in'
   LEFT JOIN completion co ON co.block_height = f.block_height AND co.extrinsic_index = f.extrinsic_index AND co.account = f.account AND co.asset_id = f.asset_out AND co.dir = 'out'
+  LEFT JOIN completion_fallback cf ON cf.block_height = f.block_height AND cf.event_index = f.event_index
 )`
   // Direct EVM swaps in the concentrated-liquidity (Uniswap v3) pools emit no Broadcast,
   // so the pool's own Swap log is the trade; the trader is the log's recipient in its

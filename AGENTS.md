@@ -140,7 +140,7 @@ The `api-public` service (`api/src/public/`, same image as `api`, own process be
   `api/tests/public/isolation.test.ts` — that test is the enforced contract, and this
   sentence must follow it: today `db/client`, `config`, `types`, the
   `cache`/`explorerAssets`/`ohlcvService`/`crossPair`/`pairPriceSource`/`pairVolume`/`poolService`/`volumeService`/`valuation`/
-  `revenueStreams`/`moneyMarketCaps`/`foreignCandles`/`uniswapV3History`/`uniswapV3Positions`/`intentLimitPrice`/
+  `revenueStreams`/`moneyMarketCaps`/`foreignCandles`/`uniswapV3History`/`uniswapV3Positions`/`intentLimitPrice`/`iceSettlement`/
   `lmRewardSnapshot`/`mmIncentiveSnapshot`/`lpMath`/`stableswapSharePools`/`poolVolumes`/`farmApr`/`poolYield`/
   `gigahdxApr`/`isoTimestamp`/`userRevenueStreams`/`userRevenueRead` services, and the
   api package manifest (`../package.json`, for the version string
@@ -197,7 +197,7 @@ API it is a **versioned frozen contract**; concept: `~/.g/hydraken-api-concept.m
   `api/tests/data/isolation.test.ts` — that test is the enforced contract, and this
   sentence must follow it: today `db/client`, `config`, `types`, and the
   `cache`/`explorerAssets`/`ohlcvService`/`valuation`/`lpMath`/`liquidityLegs`/`lpHistory`/`bucketLadder`/`blockClock`/
-  `uniswapV3Positions`/`uniswapV3Ranges`/`intentLimitPrice`/`lmRewardSnapshot`/`moneyMarketHistory`/`aaveMath`/`mmIncentiveSnapshot`/
+  `uniswapV3Positions`/`uniswapV3Ranges`/`intentLimitPrice`/`iceSettlement`/`lmRewardSnapshot`/`moneyMarketHistory`/`aaveMath`/`mmIncentiveSnapshot`/
   `userRevenueStreams`/`userRevenueRead` services. Never `explorerService`, never
   `userAuthService`, never `public/**`; nothing outside `src/data/` imports from it.
   Address parsing/rendering is self-contained in `data/services/address.ts`. Pure domain

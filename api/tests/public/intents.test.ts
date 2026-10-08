@@ -194,7 +194,7 @@ const DCA_AGGREGATE: Row = {
  * shape — a fixture that dispatched on the table name alone could not tell the
  * event PAGE from the fold over the same table.
  */
-function detailClient(overrides: { orders?: Row[]; events?: Row[]; aggregates?: Row[] } = {}) {
+function detailClient(overrides: { orders?: Row[]; events?: Row[]; aggregates?: Row[]; settlement?: Record<string, Row[]> } = {}) {
   const seen: Seen[] = []
   const events = overrides.events ?? DCA_EVENTS
   const client = {
@@ -203,6 +203,9 @@ function detailClient(overrides: { orders?: Row[]; events?: Row[]; aggregates?: 
       const params = query_params ?? {}
       seen.push({ query, params })
       if (query.includes('price_data.account_alias_directory')) return queryResult([])
+      // The shared settlement leaf's reads (services/iceSettlement.ts), by tag.
+      const ice = /-- (ice:settlement-[a-z-]+)/.exec(query)?.[1]
+      if (ice) return queryResult(ice === 'ice:settlement-orders' ? (overrides.orders ?? [dcaOrder()]) : overrides.settlement?.[ice] ?? [])
       if (query.includes('pub:intents:events-count')) return queryResult([{ total: String(events.length) }])
       if (query.includes('pub:intents:events')) {
         const offset = Number(params.offset ?? 0)
@@ -345,14 +348,21 @@ describe('queryIntentEvents', () => {
     const { queryIntentEvents } = await import('../../src/public/services/intentOrders.ts')
     const client = detailClient({
       events: [
-        // The trade that exhausts a budget states its amounts only in the
-        // solution's settlement transfers, so the event itself carries none.
+        // The trade that exhausts a budget states no amounts of its own: they are
+        // read from the solution's settlement (here only the pot->owner leg, so the
+        // input falls back to the per-period amount the final trade spends).
         { event_name: 'Intent.DcaCompleted', block_height: 14523400, event_index: 2, extrinsic_index: 1, ts: '2026-09-13 13:00:00', amount_in: '', amount_out: '', remaining_budget: '' },
         { event_name: 'Intent.IntentResovedPartially', block_height: 14523000, event_index: 4, extrinsic_index: 1, ts: '2026-09-13 12:00:00', amount_in: '10', amount_out: '20', remaining_budget: '' },
       ],
+      settlement: {
+        'ice:settlement-legs': [{ block_height: 14523400, event_index: 1, extrinsic_index: 1, from_account: '0x6d6f646c6963655f696365230000000000000000000000000000000000000000', to_account: OWNER, asset_id: 0, amount: '290000000000000' }],
+        'ice:settlement-fills': [{ intent_id: DCA_ID, block_height: 14523400, event_index: 2, extrinsic_index: 1, event_name: 'Intent.DcaCompleted', amount_in: '', amount_out: '' }],
+        'ice:settlement-prior-budget': [{ intent_id: DCA_ID, rb: '495833333333333333334' }],
+      },
     })
     const page = (await queryIntentEvents(client as never, DCA_ID, { limit: 20, offset: 0 }))!
     expect(page.items[0]!.remainingBudget).toBe('0')
+    expect([page.items[0]!.amountIn, page.items[0]!.amountOut]).toEqual(['2083333333333333333', '290000000000000'])
     // A partial resolution is a fill, not a budget event.
     expect(page.items[1]!.kind).toBe('partially_resolved')
     expect(page.items[1]!.remainingBudget).toBeNull()

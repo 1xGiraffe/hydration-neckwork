@@ -194,16 +194,21 @@ describe('iceSettlementAmounts', () => {
     ]
     expect(iceSettlementAmounts([doneFill, sibling], new Map([...orders, ['other', otherOrder]]), legs).get('14402317:73')).toEqual({ amountIn: '190218680', amountOut: '189907076' })
   })
+  // The legs cannot tell two completions of one owner in one asset apart, so neither
+  // side is split from them; the input still has a per-intent answer — what the final
+  // trade spends, min(per-period amount, budget left before it) — and takes it.
   it('refuses to split two completions of one owner in the same asset', () => {
     const twin: IceSettlementFill = { ...doneFill, eventIndex: 90, intentId: 'twin' }
-    const twinOrder: IntentOrder = { ...dcaOrderRow, intentId: 'twin', seq: 36 }
-    const out = iceSettlementAmounts([doneFill, twin], new Map([...orders, ['twin', twinOrder]]), doneLegs)
-    expect(out.get('14402317:73')).toEqual({ amountIn: null, amountOut: null })
-    expect(out.get('14402317:90')).toEqual({ amountIn: null, amountOut: null })
+    const twinOrder: IntentOrder = { ...dcaOrderRow, intentId: 'twin', seq: 36, amountIn: '1000' }
+    const out = iceSettlementAmounts([doneFill, twin], new Map([...orders, ['twin', twinOrder]]), doneLegs, new Map([[DCA_ID, '190218681'], ['twin', '400']]))
+    expect(out.get('14402317:73')).toEqual({ amountIn: '190218680', amountOut: null })
+    expect(out.get('14402317:90')).toEqual({ amountIn: '400', amountOut: null })
   })
   it('keys legs by solution: a leg of another extrinsic or block is not this fill', () => {
     const elsewhere = doneLegs.map(l => ({ ...l, extrinsicIndex: 3 }))
-    expect(iceSettlementAmounts([doneFill], orders, elsewhere).get('14402317:73')).toEqual({ amountIn: null, amountOut: null })
+    // No leg of this solution: the input falls back (no earlier trade known here,
+    // so the order's own budget caps it), the output stays unknown.
+    expect(iceSettlementAmounts([doneFill], orders, elsewhere).get('14402317:73')).toEqual({ amountIn: '190218680', amountOut: null })
   })
   it('has nothing for an unknown order and skips a hook row', () => {
     expect(iceSettlementAmounts([doneFill], new Map(), doneLegs).get('14402317:73')).toEqual({ amountIn: null, amountOut: null })

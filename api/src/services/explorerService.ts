@@ -61,6 +61,7 @@ import { OMNIPOOL_ACCOUNT, PRICE_LOOKBACK_DAYS, formatUnits, isPoolOwnHubHolding
 import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
+import { ICE_POT_ACCOUNT as ICE_SETTLEMENT_POT, readIceSettlements, type IceSettlementAmounts } from './iceSettlement.ts'
 import { FAST_RELAY_FILLED_TOPIC, FastRelayIndexStore, fastRelayFeeRaw, fastRelayLegExclusionSql, isFastRelayLeg, type FastRelayDeposit, type FastRelayFill, type FastRelayIndex, type FastRelayLeg } from './wormholeFastRelay.ts'
 import { createHash } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -935,7 +936,8 @@ function currencyIdSql(args = 'args_json'): string {
 // The ICE solver's pot. Every intent's funds pass through it — the owner's input
 // on the way in, the fill on the way out — so it is named here, above the
 // plumbing-pot list that has to reference it, rather than in the ICE section.
-export const ICE_POT_ACCOUNT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
+// One definition, in the settlement leaf the public and Data APIs share.
+export const ICE_POT_ACCOUNT = ICE_SETTLEMENT_POT
 export const ICE_FEE_ACCOUNT = '0x6d6f646c6963655f666565230000000000000000000000000000000000000000'
 
 // Module pots whose transfer legs are pure swap/fee plumbing on every transfer
@@ -17260,105 +17262,28 @@ export function intentOrderStatus(kind: 'swap' | 'dca', events: string[]): Inten
 }
 
 // ---------------------------------------------------------------------------
-// The DCA's final trade. pallet_ice moves every fill through the pot — one
-// Currencies.Transferred owner→pot in the order's asset_in (what the owner paid),
-// one pot→owner in its asset_out (what they received, net) — and for the trade that
-// exhausts a DCA's budget pallet_intent emits DcaCompleted { id } with no amounts.
-// The legs state them: on the DcaTradeExecuted rows the event and the legs agree
-// transfer for transfer (14402274/2: 190218680 aUSDC in, 189916449 USDC out), so a
-// completion is read the same way. Legs are summed per (solution, owner, asset) and
-// the sibling fills that state their own amounts are subtracted; one completion per
-// (owner, asset) in a solution is then exact, while two completions of one owner in
-// the same asset cannot be told apart and both stay amountless rather than split a
-// guess. Integer arithmetic throughout.
+// The DCA's final trade (Intent.DcaCompleted states no amounts): read from the
+// solution's settlement by the shared leaf (services/iceSettlement.ts), which the
+// public API and the Data API use too, so every surface states the same trade.
 // ---------------------------------------------------------------------------
-export interface IceSettlementLeg { blockHeight: number; extrinsicIndex: number; from: string; to: string; assetId: number; amount: string }
-export interface IceSettlementFill { blockHeight: number; extrinsicIndex: number | null; eventIndex: number; eventName: string; intentId: string; amountIn: string | null; amountOut: string | null }
-export interface IceSettlementAmounts { amountIn: string | null; amountOut: string | null }
-export function iceSettlementAmounts(fills: readonly IceSettlementFill[], orders: ReadonlyMap<string, IntentOrder>, legs: readonly IceSettlementLeg[]): Map<string, IceSettlementAmounts> {
-  const out = new Map<string, IceSettlementAmounts>()
-  const big = (v: string | null | undefined): bigint | null => v != null && /^\d+$/.test(v) ? BigInt(v) : null
-  const add = (map: Map<string, bigint>, key: string, v: bigint) => map.set(key, (map.get(key) ?? 0n) + v)
-  const legKey = (b: number, x: number, owner: string, asset: number, dir: 'in' | 'out') => `${b}:${x}:${owner.toLowerCase()}:${asset}:${dir}`
-  const moved = new Map<string, bigint>()
-  for (const leg of legs) {
-    const amount = big(leg.amount)
-    if (amount == null) continue
-    if (leg.to.toLowerCase() === ICE_POT_ACCOUNT) add(moved, legKey(leg.blockHeight, leg.extrinsicIndex, leg.from, leg.assetId, 'in'), amount)
-    else if (leg.from.toLowerCase() === ICE_POT_ACCOUNT) add(moved, legKey(leg.blockHeight, leg.extrinsicIndex, leg.to, leg.assetId, 'out'), amount)
-  }
-  const stated = new Map<string, bigint>()
-  const claimants = new Map<string, number>()
-  const completions: { fill: IceSettlementFill; inKey: string; outKey: string }[] = []
-  for (const fill of fills) {
-    if (fill.extrinsicIndex == null) continue
-    const order = orders.get(fill.intentId)
-    if (!order) {
-      if (fill.eventName === INTENT_DCA_COMPLETED) out.set(`${fill.blockHeight}:${fill.eventIndex}`, { amountIn: null, amountOut: null })
-      continue
-    }
-    const inKey = legKey(fill.blockHeight, fill.extrinsicIndex, order.owner, order.assetIn, 'in')
-    const outKey = legKey(fill.blockHeight, fill.extrinsicIndex, order.owner, order.assetOut, 'out')
-    if (fill.eventName === INTENT_DCA_COMPLETED) {
-      completions.push({ fill, inKey, outKey })
-      claimants.set(inKey, (claimants.get(inKey) ?? 0) + 1)
-      claimants.set(outKey, (claimants.get(outKey) ?? 0) + 1)
-      continue
-    }
-    const ai = big(fill.amountIn), ao = big(fill.amountOut)
-    if (ai != null) add(stated, inKey, ai)
-    if (ao != null) add(stated, outKey, ao)
-  }
-  const rest = (key: string): string | null => {
-    if (claimants.get(key) !== 1) return null
-    const total = moved.get(key)
-    if (total == null) return null
-    const left = total - (stated.get(key) ?? 0n)
-    return left >= 0n ? left.toString() : null
-  }
-  for (const c of completions) out.set(`${c.fill.blockHeight}:${c.fill.eventIndex}`, { amountIn: rest(c.inKey), amountOut: rest(c.outKey) })
-  return out
-}
-// The legs and sibling fills of every solution that holds a DcaCompleted among
-// `events`, from the block-keyed transfer projection and intent_events — both
-// primary-key reads on the handful of blocks involved. Empty when no completion is
-// present, which is every page today but a DCA's last.
+export { iceSettlementAmounts, dcaFinalTradeIn, type IceSettlementLeg, type IceSettlementFill, type IceSettlementAmounts } from './iceSettlement.ts'
+// The amounts of every DcaCompleted among `events`, keyed `${block}:${eventIndex}`.
+// `orders` gains any order the solutions' sibling fills name (getIntentOrders' memo).
 export async function iceSettlementsFor(events: readonly RawIntentEvent[], orders: Map<string, IntentOrder>): Promise<Map<string, IceSettlementAmounts>> {
-  const blocks = [...new Set(events.filter(e => e.event_name === INTENT_DCA_COMPLETED && e.extrinsic_index != null).map(e => e.block_height))]
-  if (!blocks.length) return new Map()
+  const refs = events.map(e => ({ blockHeight: Number(e.block_height), eventIndex: Number(e.event_index), extrinsicIndex: e.extrinsic_index == null ? null : Number(e.extrinsic_index), eventName: e.event_name, intentId: intentIdOfEvent(e) }))
+    .filter((r): r is typeof r & { intentId: string } => r.intentId != null)
+  return readIceSettlements(client, refs, orders, async ids => {
+    const loaded = await getIntentOrders(ids)
+    for (const [id, o] of loaded) orders.set(id, o)
+    return loaded
   // Completion blocks of a whole intent history: byte-bounded chunks (see db/queryParams.ts).
-  const chunked = await mapParamChunks(blocks, blocks => Promise.all([
-    client.query({
-      query: `SELECT block_height, event_index, extrinsic_index, from_account, to_account, asset_id, amount
-              FROM price_data.transfer_activity_by_time
-              WHERE block_height IN ({blocks:Array(UInt32)}) AND event_name = 'Currencies.Transferred' AND extrinsic_index IS NOT NULL
-                AND (from_account = {pot:String} OR to_account = {pot:String})`,
-      query_params: { blocks, pot: ICE_POT_ACCOUNT }, format: 'JSONEachRow',
-    }),
-    client.query({
-      query: `SELECT toString(intent_id) AS intent_id, block_height, event_index, extrinsic_index, event_name, amount_in, amount_out
-              FROM price_data.intent_events FINAL
-              WHERE block_height IN ({blocks:Array(UInt32)}) AND extrinsic_index IS NOT NULL AND event_name IN (${sqlEventNameList(INTENT_FILL_EVENTS)})`,
-      query_params: { blocks }, format: 'JSONEachRow',
-    }),
-  ]).then(([legRes, fillRes]) => Promise.all([
-    legRes.json<{ block_height: number; event_index: number; extrinsic_index: number; from_account: string; to_account: string; asset_id: number; amount: string }>(),
-    fillRes.json<{ intent_id: string; block_height: number; event_index: number; extrinsic_index: number; event_name: string; amount_in: string; amount_out: string }>(),
-  ])), { concurrency: CHUNK_QUERY_CONCURRENCY })
-  // The projection replaces without a version column, so a replayed range can hold a
-  // leg twice until it merges: one leg per event.
-  const seen = new Set<string>()
-  const legs: IceSettlementLeg[] = []
-  for (const l of chunked.flatMap(([legRows]) => legRows)) {
-    const key = `${l.block_height}:${l.event_index}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    legs.push({ blockHeight: Number(l.block_height), extrinsicIndex: Number(l.extrinsic_index), from: l.from_account, to: l.to_account, assetId: Number(l.asset_id), amount: l.amount })
-  }
-  const fills: IceSettlementFill[] = chunked.flatMap(([, fillRows]) => fillRows)
-    .map(f => ({ blockHeight: Number(f.block_height), extrinsicIndex: Number(f.extrinsic_index), eventIndex: Number(f.event_index), eventName: f.event_name, intentId: f.intent_id, amountIn: f.amount_in || null, amountOut: f.amount_out || null }))
-  for (const [id, order] of await getIntentOrders(fills.map(f => f.intentId).filter(id => !orders.has(id)))) orders.set(id, order)
-  return iceSettlementAmounts(fills, orders, legs)
+  }, (items, run) => mapParamChunks(items, run, { concurrency: CHUNK_QUERY_CONCURRENCY }))
+}
+// The intent a raw event names: the row's own intent_id column when the read
+// selected it, else the event's `id` argument.
+function intentIdOfEvent(e: RawIntentEvent & { intent_id?: string }): string | null {
+  if (typeof e.intent_id === 'string' && /^\d+$/.test(e.intent_id)) return e.intent_id
+  return intentNum(((safeJson(e.args_json) ?? {}) as Record<string, unknown>).id)
 }
 // The order's price limit, both ways round. Defined once in a leaf so the public
 // API and the Data API state the same limit without importing this module.

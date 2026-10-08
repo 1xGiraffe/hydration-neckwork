@@ -27,6 +27,10 @@ const ALLOWED_SHARED = new Set([
   // amounts. A leaf (no imports at all); shared so the explorer, this surface and
   // the other API cannot quote one order's limit two ways.
   'services/intentLimitPrice.ts',
+  // The amounts of a dca intent's final trade (Intent.DcaCompleted states none),
+  // read from the solution's settlement. Shared so the explorer, this surface and
+  // the public API cannot report one completed order's fills three ways.
+  'services/iceSettlement.ts',
   // The candle reader, so which view answers a bucket — and the decimal quoting
   // that keeps a Decimal(38,12) out of a double — is stated once for every surface
   // that serves candles. A local copy is how `1M` (monthly) and the `*min` family
