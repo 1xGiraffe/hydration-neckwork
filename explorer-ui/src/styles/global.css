@@ -4094,9 +4094,10 @@ a.rev-pill-label:hover { color: var(--accent); }
 .bw-tbl thead th { padding: 8px 8px; }
 .bw-tbl tbody td { padding: 6px 8px; font-size: 12px; white-space: nowrap; }
 .bw-tbl .r { text-align: right; }
-.bw-asset { display: inline-flex; align-items: center; gap: 6px; }
+/* Middle, not baseline: an inline-flex box led by its icon would otherwise sit above the text beside it. */
+.bw-asset { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; }
 .bw-usd { font-size: 11px; }
-.bw-closed-note { margin-left: 8px; font-family: 'GeistMono'; font-size: 10px; }
+.bw-closed-note { margin-left: 8px; font-family: 'GeistMono'; font-size: 10px; vertical-align: middle; }
 .bw-row-closed td { color: var(--text-medium); }
 .bw-earned { color: var(--bw-sup); }
 .bw-paid { color: var(--bw-debt); }
