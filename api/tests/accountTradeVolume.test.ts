@@ -300,6 +300,20 @@ describe('ICE intent fills as owner trades', () => {
     expect(sql).toContain("event_name != 'Intent.DcaCompleted'")
   })
 
+  // Since ~block 15.14M the completion's input is a reserve repatriation (or, for an
+  // Erc20 asset_in, no leg at all), so no transfer measures it: 15555475/2 booked
+  // net_in_usd 0 for its 500 USDC. The input then falls back to what the final trade
+  // spends — min(per-trade amount, the budget left before it) — the rule
+  // services/iceSettlement.ts applies (verified against the measured leg on every
+  // completion that has one; simulated on live rows: 15555475 → 500.03 USD in).
+  it('falls back to the final trade\'s spend when no transfer measures a completion\'s input', () => {
+    expect(sql).toContain("argMax(remaining_budget, toUInt64(block_height) * 4294967296 + event_index) AS rb")
+    expect(sql).toContain("least(toDecimal256(if(f.order_in = '', '0', f.order_in), 0),")
+    expect(sql).toContain("toDecimal256(if(p.rb != '', p.rb, if(f.order_budget = '', f.order_in, f.order_budget)), 0)) AS amount")
+    expect(sql).toContain("if(f.event_name = 'Intent.DcaCompleted', if(ci.amount > 0, ci.amount, cf.amount), f.stated_in) AS amount_in")
+    expect(sql).toContain('LEFT JOIN completion_fallback cf ON cf.block_height = f.block_height AND cf.event_index = f.event_index')
+  })
+
   it('drops the pot\'s own Broadcast legs where a fill books them to an owner, so a trade counts once', () => {
     // Only where a fill in the same extrinsic names the owner: a solution whose
     // fills name nobody yet keeps its legs on the pot instead of losing the trade.

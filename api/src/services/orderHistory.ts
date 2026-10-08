@@ -315,7 +315,7 @@ async function enrichDca(entries: OrderHistoryEntry[], accs: string[]): Promise<
 const INTENT_FILL_NAMES = [...INTENT_ACTION_EVENTS.Fill, ...INTENT_ACTION_EVENTS.PartialFill, ...INTENT_ACTION_EVENTS.DcaTrade]
 const INTENT_COMPLETION = 'Intent.DcaCompleted'
 
-async function enrichIntents(entries: OrderHistoryEntry[]): Promise<Map<string, OrderHistoryRow>> {
+export async function enrichIntents(entries: OrderHistoryEntry[]): Promise<Map<string, OrderHistoryRow>> {
   const out = new Map<string, OrderHistoryRow>()
   if (!entries.length) return out
   const orders = await getIntentOrders(entries.map(e => e.id))

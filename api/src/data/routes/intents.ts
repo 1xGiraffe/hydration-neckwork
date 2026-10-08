@@ -81,7 +81,7 @@ export const intentsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = a
       summary: 'One intent\'s lifecycle events, newest first',
       description: [
         'Every event of the order\'s life: its submission, each full or partial resolution, each dca trade, its completion, cancellation or expiry, and a failed forward callback.',
-        'Only the submission names the owner and the pair — every later event carries the id alone — so amounts here are the trade\'s, not the order\'s. Intent.DcaCompleted is the exception that carries neither: the trade that exhausts a dca budget states its amounts only in the solution\'s settlement transfers.',
+        'Only the submission names the owner and the pair — every later event carries the id alone — so amounts here are the trade\'s, not the order\'s. Intent.DcaCompleted, the trade that exhausts a dca budget, states no amounts of its own: they are read from the solution\'s settlement (null only when it cannot attribute them).',
       ].join('\n\n'),
       params: z.object({ id: zIntentId }),
       querystring: zWindowedFeedQuery,

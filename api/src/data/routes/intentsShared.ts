@@ -39,7 +39,7 @@ export const zIntent = z.object({
 
 export const zIntentDetail = zIntent.extend({
   status: zIntentStatus,
-  filledAmountIn: z.string().describe('Exact integer sum of amountIn over every fill.'),
+  filledAmountIn: z.string().describe('Exact integer sum of amountIn over every fill, the dca\'s final (Intent.DcaCompleted) trade included.'),
   filledAmountOut: z.string(),
   fillCount: z.number().int(),
   remainingBudget: z.string().nullable().describe('A dca intent\'s budget after its newest trade, as the pallet reported it; "0" once completed. Null on a swap intent.'),
@@ -54,7 +54,7 @@ export const zIntentEvent = z.object({
   eventIndex: z.number().int(),
   extrinsicIndex: z.number().int().nullable().describe('Fills happen inside the UNSIGNED ICE.submit_solution, so a fill names an extrinsic but never a signer.'),
   timestamp: zIsoTimestamp,
-  amountIn: z.string().nullable().describe('Traded amounts on fill rows. A submission, cancellation or expiry traded nothing, so both are null — and Intent.DcaCompleted carries none either, the amounts of that final trade living in the solution\'s settlement transfers.'),
+  amountIn: z.string().nullable().describe('Traded amounts on fill rows. A submission, cancellation or expiry traded nothing, so both are null. Intent.DcaCompleted, the final dca trade, states none on chain: its amounts are read from the solution\'s settlement, null only when it cannot attribute them.'),
   amountOut: z.string().nullable(),
   remainingBudget: z.string().nullable().describe('Budget left after a dca trade; "0" on the completion, which by definition spent the rest.'),
 })

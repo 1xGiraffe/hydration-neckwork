@@ -3,6 +3,7 @@ import { iso } from '../schemas/common.ts'
 import { resolveSingleAccountForms } from './accountBalances.ts'
 import { assetDecimalsOrNull } from '../../services/explorerAssets.ts'
 import { intentLimitPrice } from '../../services/intentLimitPrice.ts'
+import { readIceSettlements, type IceCompletionRef } from '../../services/iceSettlement.ts'
 
 // ICE intents for /v1/intents. Runtime 443 (block 14,362,830) added the Intent
 // pallet: a SWAP intent is the product's limit order, a DCA intent is the new
@@ -161,6 +162,10 @@ interface AggregateSqlRow {
   fill_out: string
   last_ts: string
   last_rb: string
+  // The completion's position (0 when none): its amounts are not in the event.
+  done_block: string | number
+  done_index: string | number
+  done_extrinsic: string | number | null
 }
 
 const positive = (v: string | number | undefined): boolean => Number(v ?? 0) > 0
@@ -196,7 +201,7 @@ async function intentEventAggregates(client: ClickHouseClient, ids: string[], fr
     // alias and would compare a string to a u128. Hence the outer cast.
     query: `
         SELECT toString(intent_id) AS intent_id, cancelled, expired, resolved, partial,
-               dca_completed, fills, fill_in, fill_out, last_ts, last_rb
+               dca_completed, fills, fill_in, fill_out, last_ts, last_rb, done_block, done_index, done_extrinsic
         FROM (
           SELECT intent_id,
                  countIf(event_name = '${CANCELLED_EVENT}') AS cancelled,
@@ -208,7 +213,10 @@ async function intentEventAggregates(client: ClickHouseClient, ids: string[], fr
                  toString(sumIf(toUInt256OrZero(amount_in), event_name IN (${fillList}))) AS fill_in,
                  toString(sumIf(toUInt256OrZero(amount_out), event_name IN (${fillList}))) AS fill_out,
                  toString(max(block_timestamp)) AS last_ts,
-                 argMaxIf(remaining_budget, toUInt64(block_height) * 4294967296 + event_index, event_name = '${DCA_TRADE_EVENT}') AS last_rb
+                 argMaxIf(remaining_budget, toUInt64(block_height) * 4294967296 + event_index, event_name = '${DCA_TRADE_EVENT}') AS last_rb,
+                 maxIf(block_height, event_name = '${DCA_COMPLETED_EVENT}') AS done_block,
+                 argMaxIf(event_index, toUInt64(block_height) * 4294967296 + event_index, event_name = '${DCA_COMPLETED_EVENT}') AS done_index,
+                 argMaxIf(extrinsic_index, toUInt64(block_height) * 4294967296 + event_index, event_name = '${DCA_COMPLETED_EVENT}') AS done_extrinsic
           FROM price_data.intent_events FINAL
           WHERE block_height >= {from:UInt32}
             AND intent_id IN (SELECT toUInt128(arrayJoin({ids:Array(String)})))
@@ -218,7 +226,38 @@ async function intentEventAggregates(client: ClickHouseClient, ids: string[], fr
     format: 'JSONEachRow',
   })
   for (const row of await res.json<AggregateSqlRow>()) out.set(row.intent_id, row)
+  await foldCompletionAmounts(client, out)
   return out
+}
+
+// Integer sum of two raw amounts; a missing addend adds nothing.
+function plusAmount(total: string | undefined, extra: string | null | undefined): string {
+  return (BigInt(amount(total) ?? '0') + BigInt(amount(extra ?? undefined) ?? '0')).toString()
+}
+
+// Intent.DcaCompleted is the trade that spent the last of a dca budget, and it
+// states no amounts: they are read from the solution's settlement by the leaf the
+// explorer and the Data API share (services/iceSettlement.ts) and added to the
+// fold's fill totals, so a completed DCA reports everything it traded.
+async function foldCompletionAmounts(client: ClickHouseClient, aggregates: Map<string, AggregateSqlRow>): Promise<void> {
+  const refs: IceCompletionRef[] = []
+  for (const a of aggregates.values()) {
+    if (!positive(a.dca_completed) || !(Number(a.done_block) > 0)) continue
+    refs.push({
+      blockHeight: Number(a.done_block), eventIndex: Number(a.done_index),
+      extrinsicIndex: a.done_extrinsic == null ? null : Number(a.done_extrinsic),
+      eventName: DCA_COMPLETED_EVENT, intentId: a.intent_id,
+    })
+  }
+  if (!refs.length) return
+  const settled = await readIceSettlements(client, refs)
+  for (const ref of refs) {
+    const s = settled.get(`${ref.blockHeight}:${ref.eventIndex}`)
+    const a = aggregates.get(ref.intentId)
+    if (!s || !a) continue
+    a.fill_in = plusAmount(a.fill_in, s.amountIn)
+    a.fill_out = plusAmount(a.fill_out, s.amountOut)
+  }
 }
 
 /**
@@ -464,7 +503,8 @@ function intentEventRow(row: EventSqlRow): IntentEventRow {
     amountOut: amount(row.amount_out),
     // Only a dca trade carries a budget figure. The completion carries none —
     // the trade that exhausts a budget states its amounts in the solution's
-    // settlement transfers — so the fold states the zero its name asserts.
+    // settlement (filled in by queryIntentEvents) — so the fold states the zero
+    // its name asserts.
     remainingBudget: kind === 'dca_trade' ? amount(row.remaining_budget)
       : kind === 'dca_completed' ? '0'
         : null,
@@ -511,8 +551,19 @@ export async function queryIntentEvents(
     }),
   ])
   const [totals] = await totalRes.json<{ total: string }>()
+  const page = await pageRes.json<EventSqlRow>()
+  // The completion's amounts live in the solution's settlement, not the event.
+  const settled = await readIceSettlements(client, page.map(r => ({
+    blockHeight: Number(r.block_height), eventIndex: Number(r.event_index),
+    extrinsicIndex: r.extrinsic_index == null ? null : Number(r.extrinsic_index),
+    eventName: r.event_name, intentId,
+  })))
   return {
-    items: (await pageRes.json<EventSqlRow>()).map(intentEventRow),
+    items: page.map(r => {
+      const row = intentEventRow(r)
+      const s = r.event_name === DCA_COMPLETED_EVENT ? settled.get(`${r.block_height}:${r.event_index}`) : undefined
+      return s ? { ...row, amountIn: s.amountIn, amountOut: s.amountOut } : row
+    }),
     totalCount: Number(totals?.total ?? 0),
     assetIn: String(order.asset_in),
     assetOut: String(order.asset_out),

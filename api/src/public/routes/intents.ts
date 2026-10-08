@@ -177,7 +177,7 @@ export const intentsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = a
       summary: 'Lifecycle events of one intent, newest first',
       description: [
         'Every event of the order\'s life, newest first: its submission, each dca trade, each full or partial resolution, its completion, cancellation or expiry, and a failed forward callback. A DCA fill table is the `dca_trade` rows; a swap intent\'s fills are `resolved` and `partially_resolved`.',
-        'Amounts are the EVENT\'s, not the order\'s, and an event that traded nothing reports them as null rather than 0 — a submission, a cancellation, an expiry, and `Intent.DcaCompleted`, whose final trade states its amounts only in the solution\'s settlement transfers. `remainingBudget` is the pallet\'s own figure after a dca trade, and "0" on the completion, which by definition spent the rest.',
+        'Amounts are the EVENT\'s, not the order\'s, and an event that traded nothing reports them as null rather than 0 — a submission, a cancellation, and an expiry. `Intent.DcaCompleted` is the dca\'s final trade, whose event states no amounts: its `amountIn`/`amountOut` are read from the solution\'s settlement (the owner\'s input paid into the solver pot, else what the final trade spends — the per-period amount capped by the budget left — and the asset_out paid back), and are null only when the settlement cannot attribute them. `remainingBudget` is the pallet\'s own figure after a dca trade, and "0" on the completion, which by definition spent the rest.',
         'Only the submission names the pair, so `assetIn`/`assetOut` sit on the envelope: they label every amount in the page. An unknown id is a 404.',
       ].join('\n\n'),
       params: z.object({ id: zIntentId }),

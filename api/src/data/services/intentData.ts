@@ -3,6 +3,7 @@ import { iso } from '../schemas/common.ts'
 import { accountRefFor, type AccountRef } from './address.ts'
 import { assetDecimalsOrNull } from '../../services/explorerAssets.ts'
 import { intentLimitPrice } from '../../services/intentLimitPrice.ts'
+import { DCA_COMPLETED_EVENT, readIceSettlements } from '../../services/iceSettlement.ts'
 import { DEDUP_SLACK, dedupPage, orderSql, positionCursorSql, windowSql, type Order, type PositionCursor, type WindowFilters } from './feed.ts'
 
 // ICE intents for /v1/intents/*. Runtime 443 (block 14,362,830) added the Intent
@@ -221,7 +222,8 @@ function eventItem(row: EventRow): IntentEventItem | null {
     amountIn: amount(row.amount_in),
     amountOut: amount(row.amount_out),
     // Only a DCA trade carries one; a completion spent the last of the budget,
-    // and the event that says so carries no amounts at all.
+    // and the event that says so carries no amounts (intentEvents fills them in
+    // from the solution's settlement).
     remainingBudget: kind === 'dca_trade' ? amount(row.remaining_budget) : kind === 'dca_completed' ? '0' : null,
   }
 }
@@ -305,6 +307,9 @@ interface AggregateRow {
   last_block: string | number
   last_ts: string
   last_rb: string
+  done_block: string | number
+  done_index: string | number
+  done_extrinsic: string | number | null
 }
 
 // One fold over the order's own stretch of intent_events: which event names it
@@ -321,7 +326,10 @@ async function intentAggregates(client: ClickHouseClient, intentId: string, from
                countIf(event_name IN (${fillList})) AS fills,
                max(block_height) AS last_block,
                toString(max(block_timestamp)) AS last_ts,
-               argMaxIf(remaining_budget, toUInt64(block_height) * 4294967296 + event_index, event_name = 'Intent.DcaTradeExecuted') AS last_rb
+               argMaxIf(remaining_budget, toUInt64(block_height) * 4294967296 + event_index, event_name = 'Intent.DcaTradeExecuted') AS last_rb,
+               maxIf(block_height, event_name = '${DCA_COMPLETED_EVENT}') AS done_block,
+               argMaxIf(event_index, toUInt64(block_height) * 4294967296 + event_index, event_name = '${DCA_COMPLETED_EVENT}') AS done_index,
+               argMaxIf(extrinsic_index, toUInt64(block_height) * 4294967296 + event_index, event_name = '${DCA_COMPLETED_EVENT}') AS done_extrinsic
         FROM price_data.intent_events FINAL
         WHERE block_height >= {from:UInt32} AND intent_id = toUInt128({id:String})`,
     query_params: { id: intentId, from: fromBlock },
@@ -330,10 +338,26 @@ async function intentAggregates(client: ClickHouseClient, intentId: string, from
   const [row] = await res.json<AggregateRow>()
   const names = row?.names ?? []
   const lastBlock = Number(row?.last_block ?? 0)
+  // Intent.DcaCompleted — the trade that spent the last of a dca budget — states
+  // no amounts; the shared settlement leaf (services/iceSettlement.ts, the
+  // explorer's and the public API's too) reads them from the solution.
+  let doneIn: string | null = null, doneOut: string | null = null
+  if (row && Number(row.done_block) > 0) {
+    const ref = {
+      blockHeight: Number(row.done_block), eventIndex: Number(row.done_index),
+      extrinsicIndex: row.done_extrinsic == null ? null : Number(row.done_extrinsic),
+      eventName: DCA_COMPLETED_EVENT, intentId,
+    }
+    const s = (await readIceSettlements(client, [ref])).get(`${ref.blockHeight}:${ref.eventIndex}`)
+    doneIn = s?.amountIn ?? null
+    doneOut = s?.amountOut ?? null
+  }
+  const plus = (total: string | undefined, extra: string | null): string =>
+    (BigInt(amount(total ?? '') ?? '0') + BigInt(extra != null ? amount(extra) ?? '0' : '0')).toString()
   return {
     status: foldIntentStatus(kind, names),
-    filledAmountIn: row?.fill_in ?? '0',
-    filledAmountOut: row?.fill_out ?? '0',
+    filledAmountIn: plus(row?.fill_in, doneIn),
+    filledAmountOut: plus(row?.fill_out, doneOut),
     fillCount: Number(row?.fills ?? 0),
     // A completed DCA spent its budget to the last unit; the event that ends it
     // carries no figure, so the fold states the zero its name asserts.
@@ -372,10 +396,18 @@ export async function intentEvents(client: ClickHouseClient, intentId: string, f
     row => `${row.block_height}:${row.event_index}`,
     options.limit,
   )
+  // The completion's amounts live in the solution's settlement, not the event.
+  const settled = await readIceSettlements(client, page.map(r => ({
+    blockHeight: Number(r.block_height), eventIndex: Number(r.event_index),
+    extrinsicIndex: r.extrinsic_index == null ? null : Number(r.extrinsic_index),
+    eventName: r.event_name, intentId,
+  })))
   const items: IntentEventItem[] = []
   for (const row of page) {
     const item = eventItem(row)
-    if (item) items.push(item)
+    if (!item) continue
+    const s = row.event_name === DCA_COMPLETED_EVENT ? settled.get(`${row.block_height}:${row.event_index}`) : undefined
+    items.push(s ? { ...item, amountIn: s.amountIn, amountOut: s.amountOut } : item)
   }
   return { items, hasMore }
 }

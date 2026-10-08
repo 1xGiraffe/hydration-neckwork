@@ -45,6 +45,9 @@ const ALLOWED_SHARED = new Set([
   // amounts. A leaf (no imports at all); shared so the explorer, this surface and
   // the other API cannot quote one order's limit two ways.
   'services/intentLimitPrice.ts',
+  // The amounts of a dca intent's final trade (Intent.DcaCompleted states none),
+  // read from the solution's settlement — the explorer's and the Data API's reader.
+  'services/iceSettlement.ts',
   // The canonical per-stream revenue definitions — feesCharts reads the same
   // builders the derivations jobs and the explorer revenue surfaces use, so
   // the public series and the explorer can never drift apart.
