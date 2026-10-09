@@ -75,13 +75,21 @@ const EXPLORER_SITES: [string, string][] = [
   ['bscscan.com', 'BscScan'],
   ['polygonscan.com', 'Polygonscan'],
   ['suiscan.xyz', 'Suiscan'],
+  ['suivision.xyz', 'SuiVision'],
+  ['hyperevmscan.io', 'HyperEVMScan'],
 ]
+// Only a subscan.io host is called Subscan; any other host the list does not
+// know is named by its own domain rather than borrowing a label it is not.
 export function explorerSiteName(url: string): string {
+  let host: string
   try {
-    const host = new URL(url).hostname
-    for (const [suffix, name] of EXPLORER_SITES) if (host.endsWith(suffix)) return name
-  } catch { /* fall through */ }
-  return 'Subscan'
+    host = new URL(url).hostname
+  } catch {
+    return 'explorer'
+  }
+  for (const [suffix, name] of EXPLORER_SITES) if (host.endsWith(suffix)) return name
+  if (host === 'subscan.io' || host.endsWith('.subscan.io')) return 'Subscan'
+  return host.replace(/^www\./, '')
 }
 export function ExternalAccountPill({ account }: { account: NonNullable<ActivityRow['destAccount']> }) {
   useTagMapVersion()   // re-render when the viewer's tag map changes
