@@ -371,9 +371,6 @@ export function currentOracleSnapshot(nowMs = Date.now()): OracleSnapshot | null
   return snapshot && nowMs - snapshot.readAtMs <= SNAPSHOT_MAX_AGE_MS ? snapshot : null
 }
 
-/** Test seam. */
-export function setOracleSnapshotForTest(s: OracleSnapshot | null): void { snapshot = s }
-
 // ── log ledger (ClickHouse) ──────────────────────────────────────────────────
 
 interface LogRow {

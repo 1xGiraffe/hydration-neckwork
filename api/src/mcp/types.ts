@@ -409,13 +409,6 @@ export interface ActivityRow {
   xcswapRefundReason?: string | null
 }
 
-/** What `/explorer/activity/count` answers. `total` is non-null only for `type=vote`. */
-export interface ActivityCount {
-  total: number | null
-  complete: boolean
-  maxOffset: number
-}
-
 /* ============ search ============ */
 
 export interface SearchResult {
@@ -790,9 +783,6 @@ export interface TabCounts {
   votes: number
 }
 
-/** `complete: false` = exact for the newest rows only; the list runs deeper. */
-export interface ScopedListTotal { total: number | null; complete: boolean }
-
 export interface AccountHistory {
   portfolioSeries: number[]
   portfolioSeriesExHdx?: number[]
@@ -927,15 +917,6 @@ export interface RevenueBreakdown {
 }
 
 /* ============ tags ============ */
-
-export interface TagListRow {
-  tagId: string
-  name: string
-  color: string
-  note: string
-  icon: string
-  memberCount: number
-}
 
 /**
  * A tag's aggregate. `/explorer/tag/treasury` is the largest payload on the
@@ -1233,15 +1214,6 @@ export interface OmnipoolSnapshots {
   points: OmnipoolSnapshotPoint[]
 }
 
-export interface PoolLpRow {
-  account: AccountRef | null
-  shares: string
-  sharePct: number | null
-  valueUsd: number | null
-  /** Per-asset shape varies by venue; not mirrored field by field. */
-  assets?: unknown
-}
-
 /* ============ money market ============ */
 
 export interface MoneyMarketAccountRow {
@@ -1504,16 +1476,4 @@ export interface PoolVolume {
   feeApr7dPct: number | null
   chart: VolumeChart
   stackAssets?: AssetRef[]
-}
-
-/* ============ errors ============ */
-
-/**
- * Every non-2xx body. On a block-addressed miss the two extra fields split
- * "not indexed yet" (retry) from "never existed" (fail fast).
- */
-export interface ExplorerError {
-  error: string
-  blockIndexed?: boolean
-  headBound?: number
 }

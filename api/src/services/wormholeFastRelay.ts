@@ -230,8 +230,6 @@ export function buildFastRelayIndex(rows: FastRelayRows, inputs: Map<string, str
   return { pairs, fillKeys: new Set(pairMap.keys()), fillBlocksByPool, legs, deliveryOf, settlementOf, deliveryLegOf, settlementKeyOf }
 }
 
-export const EMPTY_FAST_RELAY_INDEX: FastRelayIndex = buildFastRelayIndex({ fills: [], legs: [], deposits: [] }, new Map())
-
 // The transfer family's half of the membership rule, for every transfer read — the way
 // nttMinterLegExclusionSql is shared, so the rows a page renders and the rows its total
 // counts can never be a different set. One `from IN (pool) AND block IN (its fill

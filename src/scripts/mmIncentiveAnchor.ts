@@ -121,11 +121,6 @@ export async function readIncentiveAnchorKeys(keys: readonly IncentiveAnchorKey[
   return rows
 }
 
-/** A full capture: every anchor key of every user and programme, read at `anchorBlock`. */
-export async function readIncentiveAnchor(users: string[], programmes: Programme[], anchorBlock: number, ethCall: EthCall, controller = REWARDS_CONTROLLER): Promise<IncentiveAnchorRow[]> {
-  return readIncentiveAnchorKeys(incentiveKeysToRead(users, programmes, NOTHING_ANCHORED, 'full'), anchorBlock, ethCall, controller)
-}
-
 export interface IncentiveVerifyResult {
   checked: number
   matched: number

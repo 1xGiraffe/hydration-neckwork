@@ -196,25 +196,3 @@ async function revertAtBlock(opts: WatchOptions, blockHeight: number): Promise<s
     return typeof data === 'string' ? opts.decodeRevert(data) : null
   }
 }
-
-export interface EvmWriteRpc {
-  getTransactionReceipt(hash: string): Promise<{ status: string; blockNumber: string; transactionHash: string } | null>
-  call(tx: { from?: string; to: string; data: string; value?: string }, block: string): Promise<string>
-}
-
-export interface EvmWriteOptions {
-  provider: Eip1193Provider
-  from: string
-  to: string
-  data: string
-  valueWei: bigint
-  explorerOrigin: string
-  rpc: EvmWriteRpc
-  decodeRevert: (data: string) => string | null
-  onStage: (stage: WriteStage) => void
-  pollMs?: number
-  maxPolls?: number
-  /** Stops the receipt poll (and any further onStage) when the caller goes away. */
-  signal?: AbortSignal
-}
-

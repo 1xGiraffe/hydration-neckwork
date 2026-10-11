@@ -4,9 +4,7 @@ import {
   calculateUsdVolume,
   extractTradeVolumeFromSwaps,
   extractVolumeFromSwaps,
-  swapToVolumeRows,
   mergePriceAndVolumeRows,
-  type DecodedSwap
 } from '../../src/blocks/extractVolume.ts';
 import type { PriceMap, AssetDecimals } from '../../src/price/types.ts';
 import type { PriceRow } from '../../src/db/schema.ts';
@@ -107,83 +105,6 @@ describe('calculateUsdVolume', () => {
 
     const result = calculateUsdVolume(1000000000000n, 5, prices, decimals);
     expect(result).toBe('0.000000000000');
-  });
-});
-
-describe('swapToVolumeRows', () => {
-  it('generates exactly 2 PriceRow entries for a swap', () => {
-    const swap: DecodedSwap = {
-      assetIn: 5,
-      assetOut: 10,
-      amountIn: 1000n,
-      amountOut: 2000n,
-    };
-    const prices: PriceMap = new Map([[5, '2.000000000000'], [10, '1.500000000000']]);
-    const decimals: AssetDecimals = new Map([[5, 12], [10, 12]]);
-
-    const rows = swapToVolumeRows(swap, 100, prices, decimals);
-
-    expect(rows).toHaveLength(2);
-  });
-
-  it('creates sell volume row for assetIn', () => {
-    const swap: DecodedSwap = {
-      assetIn: 5,
-      assetOut: 10,
-      amountIn: 1000000000000n, // 1 token (12 decimals)
-      amountOut: 2000000000000n,
-    };
-    const prices: PriceMap = new Map([[5, '2.000000000000'], [10, '1.500000000000']]);
-    const decimals: AssetDecimals = new Map([[5, 12], [10, 12]]);
-
-    const rows = swapToVolumeRows(swap, 100, prices, decimals);
-    const sellRow = rows[0];
-
-    expect(sellRow.asset_id).toBe(5);
-    expect(sellRow.block_height).toBe(100);
-    expect(sellRow.usd_price).toBe('0');
-    expect(sellRow.native_volume_sell).toBe('1000000000000');
-    expect(sellRow.usd_volume_sell).toBe('2.000000000000'); // 1 * 2.0
-    expect(sellRow.native_volume_buy).toBe('0');
-    expect(sellRow.usd_volume_buy).toBe('0.000000000000');
-  });
-
-  it('creates buy volume row for assetOut', () => {
-    const swap: DecodedSwap = {
-      assetIn: 5,
-      assetOut: 10,
-      amountIn: 1000000000000n,
-      amountOut: 2000000000000n, // 2 tokens (12 decimals)
-    };
-    const prices: PriceMap = new Map([[5, '2.000000000000'], [10, '1.500000000000']]);
-    const decimals: AssetDecimals = new Map([[5, 12], [10, 12]]);
-
-    const rows = swapToVolumeRows(swap, 100, prices, decimals);
-    const buyRow = rows[1];
-
-    expect(buyRow.asset_id).toBe(10);
-    expect(buyRow.block_height).toBe(100);
-    expect(buyRow.usd_price).toBe('0');
-    expect(buyRow.native_volume_buy).toBe('2000000000000');
-    expect(buyRow.usd_volume_buy).toBe('3.000000000000'); // 2 * 1.5
-    expect(buyRow.native_volume_sell).toBe('0');
-    expect(buyRow.usd_volume_sell).toBe('0.000000000000');
-  });
-
-  it('handles missing prices gracefully', () => {
-    const swap: DecodedSwap = {
-      assetIn: 5,
-      assetOut: 10,
-      amountIn: 1000n,
-      amountOut: 2000n,
-    };
-    const prices: PriceMap = new Map(); // No prices available
-    const decimals: AssetDecimals = new Map([[5, 12], [10, 12]]);
-
-    const rows = swapToVolumeRows(swap, 100, prices, decimals);
-
-    expect(rows[0].usd_volume_sell).toBe('0.000000000000');
-    expect(rows[1].usd_volume_buy).toBe('0.000000000000');
   });
 });
 

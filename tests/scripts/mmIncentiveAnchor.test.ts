@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CONTROLLER_LOGS_FROM, NOTHING_ANCHORED, anchorCall, anchorKeys, anchorValue, incentiveKeysToRead, readIncentiveAnchor, readIncentiveAnchorKeys, verifyIncentiveAnchor, INCENTIVE_SEL } from '../../src/scripts/mmIncentiveAnchor.ts'
+import { CONTROLLER_LOGS_FROM, NOTHING_ANCHORED, anchorCall, anchorKeys, anchorValue, incentiveKeysToRead, readIncentiveAnchorKeys, verifyIncentiveAnchor, INCENTIVE_SEL } from '../../src/scripts/mmIncentiveAnchor.ts'
 import type { EthCall, EthCallRequest } from '../../src/scripts/atokenAnchor.ts'
 
 // The incentive anchor is the RewardsController's own state at B0, read — never
@@ -51,14 +51,15 @@ describe('anchor reads', () => {
   })
 })
 
-describe('readIncentiveAnchor', () => {
+describe('the full capture', () => {
   it('stores what the chain returned at B0, skipping zeros', async () => {
     const chain = fakeChain({
       [`0xb022418c${pad(USER)}${pad(GDOT)}`]: 20_399_441_641_438n,
       [`0x533f542a${pad(USER)}${pad(A690)}${pad(GDOT)}`]: 83_166_183_608_968n,
       [`0x7eff4ba8${pad(A690)}${pad(GDOT)}`]: 5_930_700_500_023_340n,
     })
-    const rows = await readIncentiveAnchor([USER.toUpperCase().replace('0X', '0x'), USER, 'bogus'], [{ asset: A690, reward: GDOT }], B0, chain.ethCall)
+    const keys = incentiveKeysToRead([USER.toUpperCase().replace('0X', '0x'), USER, 'bogus'], [{ asset: A690, reward: GDOT }], NOTHING_ANCHORED, 'full')
+    const rows = await readIncentiveAnchorKeys(keys, B0, chain.ethCall)
     expect(chain.seen[0].block).toBe('0x7d1f40')
     expect(rows).toEqual([
       { user_address: '', asset_address: A690, reward_address: GDOT, value: '5930700500023340', anchor_block: B0 },
@@ -70,7 +71,7 @@ describe('readIncentiveAnchor', () => {
   // A programme passed in existed at B0, so an empty answer is a failed read.
   it('refuses an empty return rather than storing a zero', async () => {
     const ethCall: EthCall = async calls => calls.map(() => '0x')
-    await expect(readIncentiveAnchor([USER], [{ asset: A690, reward: GDOT }], B0, ethCall)).rejects.toThrow('empty return')
+    await expect(readIncentiveAnchorKeys(incentiveKeysToRead([USER], [{ asset: A690, reward: GDOT }], NOTHING_ANCHORED, 'full'), B0, ethCall)).rejects.toThrow('empty return')
   })
 
   it('verifies every stored row against the chain at its block', async () => {

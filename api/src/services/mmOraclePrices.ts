@@ -212,9 +212,3 @@ export function withMmOraclePrices<P extends { price: number; change24h: number;
   }
   return filled
 }
-
-/** Test seam: install a snapshot directly. */
-export function setMmOraclePricesForTest(entries: Map<number, MmOraclePrice>, atMs = Date.now()): void {
-  snapshot = entries
-  snapshotAt = atMs
-}

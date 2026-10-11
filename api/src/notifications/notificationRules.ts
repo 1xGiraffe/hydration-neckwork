@@ -327,8 +327,6 @@ export type RuleParams = {
   block: z.infer<typeof blockParams>
 }
 
-export type ParsedRuleParams<K extends NotificationKind = NotificationKind> = RuleParams[K]
-
 // Parse without throwing: the route turns a failure into a 422 carrying the
 // message, and the store re-parses persisted params on load so a row written
 // by an older kind definition is dropped rather than fed to the evaluator.

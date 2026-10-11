@@ -50,7 +50,6 @@ import { CATCHUP_VIA, isExternalRateVia } from './userRevenueTokens.ts'
 import type { HolderClass } from './userRevenueStreams.ts'
 
 export type MmEarnedCategory = 'lending' | 'token' | 'poolFees' | 'other'
-export const MM_EARNED_CATEGORIES: readonly MmEarnedCategory[] = ['lending', 'token', 'poolFees', 'other']
 
 /** The aToken custody kinds and reserves of every market (from the fold's own contract list). */
 export interface MmCustodyIndex {

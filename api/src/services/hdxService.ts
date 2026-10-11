@@ -1154,14 +1154,6 @@ export function alignMonthly(months: string[], rows: { m: string; v: number }[])
   return months.map(m => byM.get(m) ?? null)
 }
 
-// Forward-fill a CUMULATIVE series' gaps: a month with no activity emits no
-// row, but the running total still stands. Leading nulls stay null (the
-// series hasn't started).
-export function carryForward(values: (number | null)[]): (number | null)[] {
-  let prev: number | null = null
-  return values.map(v => (v != null ? (prev = v) : prev))
-}
-
 // `ts` (unix seconds) dates the mint within its week; without it the mint is
 // taken at its week's Monday, which is exact for a weekly grid.
 export interface HdxAllocationMintRow { week: string; cls: string; hdx: number; ts?: number }

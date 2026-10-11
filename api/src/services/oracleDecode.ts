@@ -112,44 +112,7 @@ export function sourceAscii(hex: string): string {
   return out
 }
 
-/**
- * EmaOracle's `assets` pair. The decoder hands a pair of ids that both fit in a
- * byte over as a hex byte string ("0x050f" = [5, 15]) and any other pair as a
- * JSON array; both forms name the same (asset_a, asset_b).
- */
-export function parseEmaAssets(raw: unknown): [number, number] | null {
-  if (Array.isArray(raw) && raw.length === 2) {
-    const a = Number(raw[0]), b = Number(raw[1])
-    return Number.isSafeInteger(a) && Number.isSafeInteger(b) && a >= 0 && b >= 0 ? [a, b] : null
-  }
-  if (typeof raw === 'string' && /^0x[0-9a-fA-F]{4}$/.test(raw)) {
-    return [parseInt(raw.slice(2, 4), 16), parseInt(raw.slice(4, 6), 16)]
-  }
-  return null
-}
-
 export interface EmaRatio { n: bigint; d: bigint }
-export interface EmaUpdate {
-  source: string
-  assetA: number
-  assetB: number
-  /** n/d per period: raw units of asset A per raw unit of asset B. */
-  prices: Partial<Record<EmaPeriod, EmaRatio>>
-}
-
-/** `EmaOracle.OracleUpdated { source, assets, updates: [[{__kind: period}, {n, d}], …] }`. */
-export function decodeEmaOracleUpdated(args: unknown): EmaUpdate | null {
-  let a = args
-  if (typeof a === 'string') {
-    try { a = JSON.parse(a) } catch { return null }
-  }
-  const o = (a ?? {}) as { source?: unknown; assets?: unknown; updates?: unknown }
-  if (typeof o.source !== 'string') return null
-  const pair = parseEmaAssets(o.assets)
-  if (!pair) return null
-  return { source: sourceAscii(o.source), assetA: pair[0], assetB: pair[1], prices: decodeEmaPeriods(o.updates) }
-}
-
 /** The event's `updates` — `[[{__kind: period}, {n, d}], …]`, as JSON text or parsed — as n/d per period; a malformed entry is left out. */
 export function decodeEmaPeriods(raw: unknown): Partial<Record<EmaPeriod, EmaRatio>> {
   let list = raw

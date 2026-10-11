@@ -77,7 +77,6 @@ export const USER_REVENUE_STREAMS: readonly UserRevenueStreamDef[] = [
   { id: 'referral_commissions', label: 'Referrer commissions', sign: 'earned', revisable: false, toggle: true, coverage: 'booked at claim (no per-trade event)' },
 ] as const
 
-export type UserRevenueStream = (typeof USER_REVENUE_STREAMS)[number]['id']
 export const USER_REVENUE_STREAM_IDS: readonly string[] = USER_REVENUE_STREAMS.map(s => s.id)
 
 // ── display streams ─────────────────────────────────────────────────────────────
