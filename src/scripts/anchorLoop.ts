@@ -36,6 +36,12 @@
 //     an OPEN warning, plus every block the full check finds without its rows
 //     (reconcileLmEntries, lmEntryCapture.ts), against the service's archive node.
 //
+//   account-state reconcile (raw_account_state_observations): every cycle, when the
+//     port is given. The raw indexer reads the locks, vesting, conviction votes and
+//     proxies of the accounts a block names and leaves a raw_parser_warnings row
+//     for a (kind, account) it could not read; this re-reads every open one at its
+//     block (reconcileAccountState, accountStateCapture.ts).
+//
 // The collateral seed runs first and the aToken anchor second: the aToken anchor's
 // candidates include the users with a collateral bit set, and the incentive
 // candidate set includes the aToken anchor's holders, so on a fresh database a
@@ -43,6 +49,7 @@
 // skips another — they are independent, and each retries next cycle.
 
 import type { LmReconcileResult } from './lmEntryCapture.js'
+import type { AccountStateReconcileResult } from './accountStateCapture.js'
 import type { AnchorMode } from './atokenAnchor.js'
 
 type AnchorSkip = { capture: false; reason: string; detail?: Record<string, unknown> }
@@ -76,6 +83,10 @@ export interface IncentiveAnchorPort {
 
 export interface LmEntryReconcilePort {
   reconcile(): Promise<LmReconcileResult>
+}
+
+export interface AccountStateReconcilePort {
+  reconcile(): Promise<AccountStateReconcileResult>
 }
 
 // The gate is decided before the table is counted, so a gap skips a top-up too;
@@ -113,6 +124,13 @@ export interface AnchorCycleResult {
   atoken: AnchorOutcome
   incentive: AnchorOutcome
   lmEntries: ReconcileOutcome
+  /** Present when the account-state port was given. */
+  accountState?: ReconcileOutcome
+}
+
+export function accountStateReconcileOutcome(r: AccountStateReconcileResult): ReconcileOutcome {
+  if (!r.blocks && !r.truncated) return 'clean'
+  return !r.failed.length && !r.truncated && r.openAfter === 0 ? 'repaired' : 'open'
 }
 
 export function reconcileOutcome(r: LmReconcileResult): ReconcileOutcome {
@@ -122,7 +140,7 @@ export function reconcileOutcome(r: LmReconcileResult): ReconcileOutcome {
 }
 
 export async function runAnchorCycle(
-  ports: { collateral: CollateralAnchorPort; atoken: AtokenAnchorPort; incentive: IncentiveAnchorPort; lmEntries: LmEntryReconcilePort },
+  ports: { collateral: CollateralAnchorPort; atoken: AtokenAnchorPort; incentive: IncentiveAnchorPort; lmEntries: LmEntryReconcilePort; accountState?: AccountStateReconcilePort },
   opts: { forceCollateral: boolean; forceAtoken: boolean; forceIncentive: boolean; atokenLogsFrom: number; incentiveLogsFrom: number; anchorBlock: number },
   log: (record: Record<string, unknown>) => void,
 ): Promise<AnchorCycleResult> {
@@ -175,6 +193,21 @@ export async function runAnchorCycle(
     })
   } catch (error) {
     log({ type: 'lm_entries_reconcile_error', reason: error instanceof Error ? error.message : String(error) })
+  }
+
+  if (ports.accountState != null) {
+    result.accountState = 'failed'
+    try {
+      const r = await ports.accountState.reconcile()
+      result.accountState = accountStateReconcileOutcome(r)
+      log({
+        type: 'account_state_reconcile', outcome: result.accountState,
+        open_before: r.openBefore, truncated: r.truncated, blocks: r.blocks, rows: r.rows,
+        failed_blocks: r.failed.length, first_failures: r.failed.slice(0, 5), open_after: r.openAfter,
+      })
+    } catch (error) {
+      log({ type: 'account_state_reconcile_error', reason: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   return result

@@ -1061,8 +1061,11 @@ export async function extractBalanceObservations(
   events: RawEvent[],
   calls: RawCall[],
   ingestSource: string,
+  // Native observations other phases ask for (the account-state hook: a lock that
+  // moved with no Balances event, accountState.ts), read with the block's own.
+  extraCandidates: BalanceCandidate[] = [],
 ): Promise<BalanceExtractionResult> {
-  const candidates: BalanceCandidate[] = []
+  const candidates: BalanceCandidate[] = [...extraCandidates]
   const warnings: RawParserWarningRow[] = []
 
   candidates.push(...await genesisBootstrapCandidates(block))

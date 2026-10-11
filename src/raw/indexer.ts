@@ -40,6 +40,7 @@ import { openPositionKey, trackOpenPositions } from './moneyMarketSnapshot.js'
 import { priceStepThresholdFromEnvironment } from './moneyMarketPrices.js'
 import { cadenceFromEnvironment, loadExactHolderSeed, loadSupersetHolderSeed, MoneyMarketTriggerPhase, readPairs, type TriggerBlock } from './moneyMarketTriggerPhase.js'
 import { captureLmFarmEntries, entryEventsFromRawEvents } from './lmFarmEntries.js'
+import { accountStateBalanceCandidates, accountStateTargets, captureAccountState, type AccountStateRuntime } from './accountState.js'
 import { synthesizeNestedCallRows, type EvmExecution, type RuntimeCallDecoder } from './nestedCalls.js'
 import { createClickHouseClient } from '../db/client.js'
 import { minutesFromEnvironment } from '../util/env.js'
@@ -247,6 +248,12 @@ async function loadOpenPositions(): Promise<Set<string>> {
 // of every user whose bit a block can have moved. On by default.
 function mmTriggersEnabled(): boolean {
   return (process.env.RAW_MM_TRIGGERS_ENABLED ?? 'true') !== 'false'
+}
+
+// The account-state hook (accountState.ts): locks, vesting, conviction votes and
+// proxies of the accounts a block's events/calls name. On by default.
+function accountStateEnabled(): boolean {
+  return (process.env.RAW_ACCOUNT_STATE_ENABLED ?? 'true') !== 'false'
 }
 
 // The reserve holder index the trigger phase reads from. raw-live (unbounded) folds
@@ -483,6 +490,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       }
     }
   }
+  const accountStateOn = accountStateEnabled()
 
   let currentState: SnapshotState | null = null
   let previousBlockHash: string | null = null
@@ -505,6 +513,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
   let moneyMarketRowsPersisted = 0
   let xcmRowsPersisted = 0
   let lmEntryRowsPersisted = 0
+  let accountStateRowsPersisted = 0
   let mmTriggerRowsPersisted = 0
   let parserWarningsPersisted = 0
   let snapshotsRefreshed = 0
@@ -664,12 +673,30 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       }
       const mmObservation = mmTriggers?.observe(triggerBlock, evmLogRows)
 
+      // Account state (raw_account_state_observations): the accounts this block's
+      // governance/vesting/staking/lock/proxy events and calls name, read at the
+      // block's end with the runtime that EXECUTED it (as the LM entries above).
+      // Each also gets a System.Account observation through the balance phase.
+      const accountState = accountStateOn
+        ? accountStateTargets(eventRows, [...callRows, ...synthetic.rows])
+        : { targets: [], sources: [] }
+      const accountStateCapture = accountState.targets.length > 0
+        ? tracePhase(blockHeight, 'account_state', () => captureAccountState(
+          { height: blockHeight, hash: block.header.hash, parentHash: block.header.parentHash, timestamp: blockTimestamp },
+          accountState.targets,
+          // The parent-state runtime (not header.specVersion's): see lmFarmEntries.ts.
+          block.header._runtime as unknown as AccountStateRuntime,
+          ingestSource,
+        ))
+        : null
+
       const balances = await tracePhase(blockHeight, 'balances', () => extractBalanceObservations(
           block.header,
           blockTimestamp,
           block.events,
           block.calls,
           ingestSource,
+          accountStateBalanceCandidates(accountState.sources),
         ))
       const moneyMarket = await tracePhase(blockHeight, 'money_market', () => extractMoneyMarketRows(evmLogRows, ingestSource))
       const xcmActivityRows = extractXcmActivityRows(block.events, block.calls, blockTimestamp, ingestSource)
@@ -689,6 +716,17 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       parserWarningsPersisted += balances.warnings.length + moneyMarket.warnings.length + synthetic.warnings.length + evmLogRows.filter(row => row.warning != null).length
       moneyMarketRowsPersisted += moneyMarket.events.length + moneyMarket.positions.length + moneyMarket.reserves.length
       xcmRowsPersisted += xcmActivityRows.length
+
+      if (accountStateCapture != null) {
+        const captured = await accountStateCapture
+        ctx.store.addAccountStateObservations(captured.rows)
+        ctx.store.addParserWarnings(captured.warnings)
+        accountStateRowsPersisted += captured.rows.length
+        parserWarningsPersisted += captured.warnings.length
+        if (captured.warnings.length > 0) {
+          console.warn(`[Raw][AccountState] Block ${blockHeight}: ${captured.warnings.length} account-state read(s) failed (${captured.warnings[0].warning}); recorded as raw_parser_warnings`)
+        }
+      }
 
       // Pairs this block's own events read already: the trigger phase reads each
       // (block, pool, user) at most once.
@@ -885,6 +923,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
           `${moneyMarketRowsPersisted} money market rows | ` +
           `${xcmRowsPersisted} xcm rows | ` +
           `${lmEntryRowsPersisted} lm entry rows | ` +
+          `${accountStateRowsPersisted} account state rows | ` +
           `${mmTriggerRowsPersisted} mm trigger rows | ` +
           `${parserWarningsPersisted} warnings | ` +
           `${snapshotsRefreshed} refreshed | ` +
@@ -902,6 +941,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
         moneyMarketRowsPersisted = 0
         xcmRowsPersisted = 0
         lmEntryRowsPersisted = 0
+        accountStateRowsPersisted = 0
         mmTriggerRowsPersisted = 0
         parserWarningsPersisted = 0
         snapshotsRefreshed = 0
