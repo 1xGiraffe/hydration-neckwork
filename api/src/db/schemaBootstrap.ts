@@ -167,6 +167,8 @@ export function createStatementFor(statements: readonly string[], name: string):
  *   (017_narrow_event_tables.sql); the first is at block 13,155,273.
  *   referendum_preimage_events — the referendum/preimage hash events the proposal
  *   decoder reads (017_narrow_event_tables.sql); the first is at block 783,359.
+ *   hdx_balance_hours — per (account, hour) the last non-zero and last zero HDX
+ *   observation blocks the churn chart dates exits by (017_narrow_event_tables.sql).
  */
 /**
  * The identity coverage is judged on: a raw row's key (`raw`, a SELECT list over
@@ -213,6 +215,23 @@ export const DATA_UPGRADES: ReadonlyArray<DataUpgrade> = [
     where: "raw_events.event_name IN ('Preimage.Noted', 'Referenda.Submitted', 'Democracy.PreimageNoted', 'Democracy.PreimageUsed')",
     fromBlock: 700_000,
     select: "block_height, event_index, extrinsic_index, event_name, lower(multiIf(raw_events.event_name = 'Preimage.Noted', JSONExtractString(args_json, 'hash'), raw_events.event_name = 'Referenda.Submitted', JSONExtractString(args_json, 'proposal', 'hash'), JSONExtractString(args_json, 'proposalHash'))) AS hash, ingested_at",
+  },
+  {
+    table: 'price_data.hdx_balance_hours',
+    source: 'raw_balance_observations',
+    // An (account, hour) row aggregates every observation in it, so its identity is
+    // the pair; the table side is bounded to the chunk's hours. An hour straddling
+    // two chunks is present once either chunk landed — a failed chunk still shows
+    // its other hours missing, and a replay is harmless (max is idempotent).
+    key: {
+      raw: 'account_id, toStartOfHour(block_timestamp) AS interval_start',
+      columns: 'account_id, interval_start',
+      tableWhere: `interval_start >= (SELECT toStartOfHour(min(block_timestamp)) FROM price_data.raw_balance_observations WHERE block_height >= {lo:UInt32} AND block_height < {hi:UInt32})
+         AND interval_start <= (SELECT max(block_timestamp) FROM price_data.raw_balance_observations WHERE block_height >= {lo:UInt32} AND block_height < {hi:UInt32})`,
+    },
+    where: "raw_balance_observations.asset_id = '0' AND raw_balance_observations.account_id != '' AND raw_balance_observations.source_kind != 'snapshot_bootstrap' AND isNotNull(toUInt256OrNull(raw_balance_observations.total))",
+    fromBlock: 0,
+    select: "account_id, toStartOfHour(block_timestamp) AS interval_start, if(toUInt256OrZero(ifNull(raw_balance_observations.total, '')) > 0, block_height, toUInt32(0)) AS last_nonzero_block, if(toUInt256OrZero(ifNull(raw_balance_observations.total, '')) = 0, block_height, toUInt32(0)) AS last_zero_block",
   },
 ]
 export const DATA_UPGRADE_CHUNK_BLOCKS = 100_000

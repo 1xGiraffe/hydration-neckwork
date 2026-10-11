@@ -1989,33 +1989,45 @@ async function flowsSeries(g: ChartGrid): Promise<{ buy: number[]; sell: number[
 
 /**
  * New and exited holders per bucket: an account is new in the bucket of its
- * first nonzero HDX balance, and exited in the bucket of its last nonzero one if
- * it holds none today (an account that left and came back is not an exit).
+ * first nonzero HDX balance (hdx_holder_lifetime), and exited in the bucket of its
+ * EXIT — the first per-block observation of a zero balance after its last nonzero
+ * one — if it holds none since (an account that left and came back is not an exit).
+ *
+ * The exit is read from hdx_balance_hours (017_narrow_event_tables.sql): every
+ * observation after the last nonzero block is zero, so the exit is the first hour
+ * whose newest zero block passes the account's newest nonzero block, compared as
+ * blocks (consecutive blocks can share a timestamp). An exit is dated to the start
+ * of its hour. That table leaves out the full-state sweep's restatements, so the
+ * date never depends on the sweep's cadence — dating an exit by the last nonzero
+ * observation did: a daily sweep restating a dormant holder put its exit at the
+ * previous day's sweep, and with no sweep at the holder's last move, months early.
  */
 export function hdxChurnSql(g: ChartGrid): string {
   return `
     WITH lifetime AS (
-      SELECT account_id,
-        minMerge(first_nonzero_state) AS first_nonzero,
-        maxMerge(last_nonzero_state) AS last_nonzero
+      SELECT account_id, minMerge(first_nonzero_state) AS first_nonzero
       FROM price_data.hdx_holder_lifetime
       GROUP BY account_id
-    ), current_balances AS (
-      SELECT account_id, toUInt256OrZero(argMaxMerge(total_state)) AS current
-      FROM price_data.account_asset_latest_balances
-      WHERE asset_id = '0'
+    ), exits AS (
+      SELECT account_id,
+        max(nz) AS last_nonzero_block,
+        arrayFilter((h, z) -> z > last_nonzero_block, groupArray(interval_start), groupArray(z)) AS zero_hours,
+        arrayMin(zero_hours) AS exited
+      FROM (
+        SELECT account_id, interval_start, max(last_nonzero_block) AS nz, max(last_zero_block) AS z
+        FROM price_data.hdx_balance_hours
+        GROUP BY account_id, interval_start)
       GROUP BY account_id
+      HAVING last_nonzero_block > 0 AND notEmpty(zero_hours)
     )
     SELECT ${g.grain.keySql('first_nonzero')} AS k, count() AS n, 0 AS is_exit
     FROM lifetime
     WHERE first_nonzero >= toDateTime({from:UInt32}) AND first_nonzero < toDateTime({end:UInt32})
     GROUP BY k
     UNION ALL
-    SELECT ${g.grain.keySql('last_nonzero')} AS k, count() AS n, 1 AS is_exit
-    FROM lifetime
-    LEFT JOIN current_balances USING account_id
-    WHERE ifNull(current, toUInt256(0)) = 0
-      AND last_nonzero >= toDateTime({from:UInt32}) AND last_nonzero < toDateTime({end:UInt32})
+    SELECT ${g.grain.keySql('exited')} AS k, count() AS n, 1 AS is_exit
+    FROM exits
+    WHERE exited >= toDateTime({from:UInt32}) AND exited < toDateTime({end:UInt32})
     GROUP BY k`
 }
 
