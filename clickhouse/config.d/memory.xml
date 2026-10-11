@@ -18,5 +18,22 @@
       requires every ad-hoc pass over raw history to carry its own PREWHERE,
       max_memory_usage and max_threads, and to run in block-range chunks.
     -->
-    <max_server_memory_usage_to_ram_ratio>0.6</max_server_memory_usage_to_ram_ratio>
+    <!--
+      2026-10-09: 0.6 (~74 GiB) did not protect the host either. An unbounded join
+      reached ~60 GiB, below the ceiling, while the node (35 GiB) and the rest of the
+      box needed the remainder: the host swapped dry, stalled six minutes, and the
+      global OOM killer took ClickHouse. Normal resident memory is 8-16 GiB, so the
+      server is now capped at an absolute 40 GiB, and every query at 20 GiB
+      (users.d/profile-limits.xml).
+
+      The ratio goes back to 0.9 on purpose: the container now runs under a 48 GiB
+      cgroup limit (docker-compose.yml mem_limit), and ClickHouse applies the ratio
+      to the cgroup limit, not to the host's RAM. 0.6 of 48 GiB would silently pull
+      the server down to ~29 GiB; 0.9 of 48 GiB (43 GiB) leaves 40 GiB the binding
+      value whether or not the cgroup limit is set. 8 GiB between 40 and 48 covers
+      what the server's tracker does not count, so the cgroup OOM (which kills only
+      ClickHouse, never the host) is the last resort, not the first.
+    -->
+    <max_server_memory_usage>42949672960</max_server_memory_usage>
+    <max_server_memory_usage_to_ram_ratio>0.9</max_server_memory_usage_to_ram_ratio>
 </clickhouse>

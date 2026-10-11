@@ -60,11 +60,35 @@
         <default>
             <max_execution_time>600</max_execution_time>
             <timeout_overflow_mode>throw</timeout_overflow_mode>
+            <!--
+              Per-query memory ceiling, 20 GiB (stock: 0 = unlimited).
+
+              2026-10-09 00:36 an ad-hoc clickhouse-client query JOINed evm_transactions
+              to the whole of raw_extrinsics (37M rows, ~488 GiB uncompressed, its
+              call_args_json included) with the filter only on the left side, so the
+              hash join built the right side in RAM. It reached ~60 GiB anon RSS; the
+              host swapped dry and stalled for six minutes (the local Hydration node
+              stopped importing, every network client on the box timed out) until the
+              kernel's global OOM killer took ClickHouse at 00:42:35. max_execution_time
+              (300 s on that statement) never got the chance to fire.
+
+              Set from system.query_log (14 days to 2026-10-09): the services peak at
+              3.7 GiB, the largest legitimate ad-hoc statement at 11.1 GiB. 20 GiB
+              changes nothing that ran; an unbounded join now fails alone with
+              MEMORY_LIMIT_EXCEEDED. A statement that needs more says so
+              (`SETTINGS max_memory_usage = …`) up to the 32 GiB constraint, which also
+              refuses 0 (unlimited), the same way max_execution_time's does.
+            -->
+            <max_memory_usage>21474836480</max_memory_usage>
             <constraints>
                 <max_execution_time>
                     <min>1</min>
                     <max>14400</max>
                 </max_execution_time>
+                <max_memory_usage>
+                    <min>1</min>
+                    <max>34359738368</max>
+                </max_memory_usage>
             </constraints>
         </default>
     </profiles>

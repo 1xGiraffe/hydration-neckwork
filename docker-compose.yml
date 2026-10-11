@@ -49,6 +49,11 @@ services:
       context: ./clickhouse
       dockerfile: Dockerfile
     container_name: hydration-neckwork-clickhouse
+    # 2026-10-09: a cgroup ceiling, so a runaway query OOM-kills ClickHouse alone
+    # instead of swapping the host dry (see clickhouse/config.d/memory.xml).
+    # memswap_limit = mem_limit: no swap for this container.
+    mem_limit: 48g
+    memswap_limit: 48g
     ports:
       - "127.0.0.1:18123:8123"
       - "127.0.0.1:19000:9000"
