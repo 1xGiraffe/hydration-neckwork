@@ -122,7 +122,7 @@ function fakeClient(): ClickHouseClient {
       if (query.includes('price_data.assets')) {
         return { json: async () => registry.map(a => ({ asset_id: a.assetId, symbol: a.symbol, decimals: a.decimals })) }
       }
-      if (query.includes('raw_evm_logs')) return { json: async () => [] }
+      if (query.includes('wormhole_ntt_logs')) return { json: async () => [] }
       if (query.includes('Tokens.Withdrawn')) return { json: async () => [] }
       return { json: async () => [] }
     },
@@ -531,7 +531,7 @@ describe('the Wormhole backing snapshot', () => {
 
     // The EVM-log scan is bounded below by the first NttMinterSet block rather
     // than sweeping all of history.
-    expect(queries.find(q => q.includes('raw_evm_logs') && q.includes('WITH xs'))).toContain('block_height >= 13378659')
+    expect(queries.find(q => q.includes('wormhole_ntt_logs') && q.includes('WITH xs'))).toContain('block_height >= 13378659')
   })
 
   // The origin endpoints are metered per METHOD, not per HTTP request, so a
@@ -737,7 +737,7 @@ function historyClient(): ClickHouseClient {
       if (query.includes('price_data.assets')) {
         return { json: async () => [USDC, SUI].map(a => ({ asset_id: a.assetId, symbol: a.symbol, decimals: a.decimals })) }
       }
-      if (query.includes('raw_evm_logs')) return { json: async () => [SUI_SEND_LOG, USDC_RECEIVE_LOG, USDC_REDEEMED_LOG] }
+      if (query.includes('wormhole_ntt_logs')) return { json: async () => [SUI_SEND_LOG, USDC_RECEIVE_LOG, USDC_REDEEMED_LOG] }
       if (query.includes('Tokens.Withdrawn')) return { json: async () => TOKEN_LEGS }
       return { json: async () => [] }
     },
@@ -918,7 +918,7 @@ function queueClient(): ClickHouseClient {
       if (query.includes('price_data.assets')) {
         return { json: async () => [SUSDS, PRIME].map(a => ({ asset_id: a.assetId, symbol: a.symbol, decimals: a.decimals })) }
       }
-      if (query.includes('raw_evm_logs')) return { json: async () => [SUSDS_SEND_LOG, PRIME_SEND_LOG] }
+      if (query.includes('wormhole_ntt_logs')) return { json: async () => [SUSDS_SEND_LOG, PRIME_SEND_LOG] }
       return { json: async () => [] }
     },
     insert: async () => {},
@@ -1192,7 +1192,7 @@ describe('reads pinned to the indexed head', () => {
     expect(keys).toHaveLength(1)
     // The log window is bounded by the same block, so the redemption set and the
     // issuance read describe one chain state rather than two.
-    expect(queries.find(q => q.includes('raw_evm_logs') && q.includes('WITH xs'))).toContain('block_height <= 13730752')
+    expect(queries.find(q => q.includes('wormhole_ntt_logs') && q.includes('WITH xs'))).toContain('block_height <= 13730752')
   })
 
   // Supply burned at the dead address must be read in the SAME chain state as
@@ -1466,7 +1466,7 @@ function outboundClient(): ClickHouseClient {
       if (query.includes('price_data.assets')) {
         return { json: async () => [USDC].map(a => ({ asset_id: a.assetId, symbol: a.symbol, decimals: a.decimals })) }
       }
-      if (query.includes('raw_evm_logs')) return { json: async () => [OUTBOUND_SEND_LOG] }
+      if (query.includes('wormhole_ntt_logs')) return { json: async () => [OUTBOUND_SEND_LOG] }
       return { json: async () => [] }
     },
     insert: async () => {},

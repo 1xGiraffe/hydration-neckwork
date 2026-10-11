@@ -218,7 +218,9 @@ services:
   # Referendum proposal calls. A referendum names its proposal by hash and the call
   # itself lives in a preimage as SCALE bytes, which only runtime metadata can read —
   # hence an indexer-side decoder rather than API-side. A hash IS its content, so a
-  # decoded proposal is never revisited and this goes quiet once caught up.
+  # decoded proposal is never revisited and this goes quiet once caught up. A cycle
+  # reads the narrow referendum_preimage_events table, so it runs every 2 minutes;
+  # a failed decode is retried every 30.
   referendum-proposals:
     <<: *service
     image: hydration-neckwork-indexer:latest
@@ -238,7 +240,7 @@ services:
       - RPC_RATE_LIMIT=${REFERENDUM_PROPOSAL_RPC_RATE_LIMIT:-20}
       - RPC_CAPACITY=${REFERENDUM_PROPOSAL_RPC_CAPACITY:-4}
     command: ["src/scripts/decode-referendum-proposals.ts", "--loop",
-      "--cycle-minutes=${REFERENDUM_PROPOSAL_CYCLE_MINUTES:-30}",
+      "--cycle-minutes=${REFERENDUM_PROPOSAL_CYCLE_MINUTES:-2}",
       "--max=${REFERENDUM_PROPOSAL_MAX:-200}"]
 
   # Referendum titles from SubSquare. The chain has no human title for a

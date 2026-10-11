@@ -153,31 +153,66 @@ export function createStatementFor(statements: readonly string[], name: string):
  *   - idempotent: only incomplete chunks are replayed, and the table's
  *     ReplacingMergeTree key makes a replayed chunk harmless; a re-run (every
  *     deploy) costs one bounded anti-join per chunk;
- *   - bounded (AGENTS.md, Schema and derivations): raw_events is ordered by
- *     (block_height, event_index), so each chunk is ONE PREWHERE on a 100k-block
- *     range AND the event name (never an explicit PREWHERE paired with a separate
- *     WHERE: on CH 26.3 that form silently returns a fraction of the rows), with the
- *     event_name skip index pruning the rest, at max_threads 4 and a 3 GB memory cap;
- *     ~25 chunks of a few milliseconds each cover the pallet's history.
+ *   - bounded (AGENTS.md, Schema and derivations): raw_events and raw_evm_logs are
+ *     ordered by (block_height, event_index), so each chunk is ONE PREWHERE on a
+ *     100k-block range AND the MV's own predicate (never an explicit PREWHERE paired
+ *     with a separate WHERE: on CH 26.3 that form silently returns a fraction of the
+ *     rows), at max_threads 4 and a 3 GB memory cap; a chunk costs a few milliseconds.
  *
  *   gigahdx_reward_records — GigaHdxRewards.UserRewardRecorded, the per-voter GIGAHDX
  *   reward records (016_user_revenue.sql). `fromBlock` sits below the pallet's first
  *   event (block 12,959,351; its first UserRewardRecorded is 12,971,080), and the
  *   search for raw's first record starts there.
+ *   wormhole_ntt_logs — the Wormhole NTT logs the backing monitor reads
+ *   (017_narrow_event_tables.sql); the first is at block 13,155,273.
+ *   referendum_preimage_events — the referendum/preimage hash events the proposal
+ *   decoder reads (017_narrow_event_tables.sql); the first is at block 783,359.
  */
+/**
+ * The identity coverage is judged on: a raw row's key (`raw`, a SELECT list over
+ * the source) and the same key in the table (`columns`), with `tableWhere` bounding
+ * the table side of a chunk's anti-join ({lo:UInt32}/{hi:UInt32} are the chunk's
+ * blocks). Default: the raw row's own (block_height, event_index).
+ */
+export interface DataUpgradeKey { raw: string; columns: string; tableWhere: string }
+export const RAW_ROW_KEY: DataUpgradeKey = {
+  raw: 'block_height, event_index',
+  columns: 'block_height, event_index',
+  tableWhere: 'block_height >= {lo:UInt32} AND block_height < {hi:UInt32}',
+}
 export interface DataUpgrade {
   table: string
-  eventName: string
+  /** The raw table the MV reads; all three are ordered by block_height first. */
+  source: 'raw_events' | 'raw_evm_logs' | 'raw_balance_observations'
+  /** Coverage identity, when the table does not carry the raw row's (block_height, event_index). */
+  key?: DataUpgradeKey
+  /** The MV's WHERE over the source, verbatim (columns qualified by the source's name). */
+  where: string
   fromBlock: number
-  /** The MV's SELECT list over raw_events, verbatim. */
+  /** The MV's SELECT list over the source, verbatim. */
   select: string
 }
 export const DATA_UPGRADES: ReadonlyArray<DataUpgrade> = [
   {
     table: 'price_data.gigahdx_reward_records',
-    eventName: 'GigaHdxRewards.UserRewardRecorded',
+    source: 'raw_events',
+    where: "raw_events.event_name = 'GigaHdxRewards.UserRewardRecorded'",
     fromBlock: 12_900_000,
     select: "JSONExtractUInt(args_json, 'refIndex') AS ref_index, lower(JSONExtractString(args_json, 'who')) AS who, JSONExtractString(args_json, 'rewardAmount') AS reward, block_height, event_index, block_timestamp, ingested_at",
+  },
+  {
+    table: 'price_data.wormhole_ntt_logs',
+    source: 'raw_evm_logs',
+    where: "raw_evm_logs.topic0 IN ('0x6eb224fb001ed210e379b335e35efe88672a8ce935d981a6896b27ffdf52a3b2', '0xf6fc529540981400dc64edf649eb5e2e0eb5812a27f8c81bac2c1d317e71a5f0', '0x504e6efe18ab9eed10dc6501a417f5b12a2f7f2b1593aed9b89f9bce3cf29a91', '0xe54e51e42099622516fa3b48e9733581c9dbdcb771cafb093f745a0532a35982', '0x7f63c9251d82a933210c2b6d0b0f116252c3c116788120e64e8e8215df6f3162', '0x1456404e7f41f35c3daac941bb50bad417a66275c3040061b4287d787719599d', '0xa559263ee060c7a2560843b3a064ff0376c9753ae3e2449b595a3b615d326466')",
+    fromBlock: 13_100_000,
+    select: "block_height, event_index, extrinsic_index, block_timestamp, lower(raw_evm_logs.contract_address) AS contract_address, ifNull(raw_evm_logs.topic0, '') AS topic0, topics, data, ingested_at",
+  },
+  {
+    table: 'price_data.referendum_preimage_events',
+    source: 'raw_events',
+    where: "raw_events.event_name IN ('Preimage.Noted', 'Referenda.Submitted', 'Democracy.PreimageNoted', 'Democracy.PreimageUsed')",
+    fromBlock: 700_000,
+    select: "block_height, event_index, extrinsic_index, event_name, lower(multiIf(raw_events.event_name = 'Preimage.Noted', JSONExtractString(args_json, 'hash'), raw_events.event_name = 'Referenda.Submitted', JSONExtractString(args_json, 'proposal', 'hash'), JSONExtractString(args_json, 'proposalHash'))) AS hash, ingested_at",
   },
 ]
 export const DATA_UPGRADE_CHUNK_BLOCKS = 100_000
@@ -212,9 +247,9 @@ async function scalar(client: ClickHouseClient, query: string, params: Record<st
 async function rawFirstRecord(client: ClickHouseClient, u: DataUpgrade, head: number): Promise<number | null> {
   for (let lo = u.fromBlock; lo <= head; lo += DATA_UPGRADE_CHUNK_BLOCKS) {
     const first = await scalar(client,
-      `SELECT if(count() = 0, NULL, min(block_height)) AS v FROM price_data.raw_events
-       PREWHERE block_height >= {lo:UInt32} AND block_height < {hi:UInt32} AND event_name = {ev:String}`,
-      { lo, hi: lo + DATA_UPGRADE_CHUNK_BLOCKS, ev: u.eventName })
+      `SELECT if(count() = 0, NULL, min(block_height)) AS v FROM price_data.${u.source}
+       PREWHERE block_height >= {lo:UInt32} AND block_height < {hi:UInt32} AND (${u.where})`,
+      { lo, hi: lo + DATA_UPGRADE_CHUNK_BLOCKS })
     if (first != null) return first
   }
   return null
@@ -222,14 +257,15 @@ async function rawFirstRecord(client: ClickHouseClient, u: DataUpgrade, head: nu
 
 /** How many of raw's event keys in [from, to) the table lacks (0 = the chunk is complete). */
 async function chunkMissingKeys(client: ClickHouseClient, u: DataUpgrade, from: number, to: number): Promise<number> {
+  const key = u.key ?? RAW_ROW_KEY
   return (await scalar(client,
     `SELECT count() AS v FROM (
-       SELECT DISTINCT block_height, event_index FROM price_data.raw_events
-       PREWHERE block_height >= {lo:UInt32} AND block_height < {hi:UInt32} AND event_name = {ev:String}
-     ) WHERE (block_height, event_index) NOT IN (
-       SELECT block_height, event_index FROM ${u.table} WHERE block_height >= {lo:UInt32} AND block_height < {hi:UInt32}
+       SELECT DISTINCT ${key.raw} FROM price_data.${u.source}
+       PREWHERE block_height >= {lo:UInt32} AND block_height < {hi:UInt32} AND (${u.where})
+     ) WHERE (${key.columns}) NOT IN (
+       SELECT ${key.columns} FROM ${u.table} WHERE ${key.tableWhere}
      )`,
-    { lo: from, hi: to, ev: u.eventName })) ?? 0
+    { lo: from, hi: to })) ?? 0
 }
 
 /** Each data upgrade's incomplete chunks (empty `incomplete` = complete) and `missing`, the same merged into ranges. */
@@ -255,9 +291,9 @@ export async function applyDataUpgrades(client: ClickHouseClient): Promise<numbe
     console.log(`[schema-bootstrap] backfilling ${table} from raw: ${incomplete.length} incomplete chunk(s), blocks ${missing.map(r => `${r.from}..${r.to - 1}`).join(', ')}`)
     for (const { from, to } of incomplete) {
       await client.command({
-        query: `INSERT INTO ${table} SELECT ${u.select} FROM price_data.raw_events
-                PREWHERE block_height >= {lo:UInt32} AND block_height < {hi:UInt32} AND raw_events.event_name = {ev:String}`,
-        query_params: { lo: from, hi: to, ev: u.eventName },
+        query: `INSERT INTO ${table} SELECT ${u.select} FROM price_data.${u.source}
+                PREWHERE block_height >= {lo:UInt32} AND block_height < {hi:UInt32} AND (${u.where})`,
+        query_params: { lo: from, hi: to },
         clickhouse_settings: DATA_UPGRADE_SETTINGS,
       })
       statements++

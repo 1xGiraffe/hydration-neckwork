@@ -553,8 +553,8 @@ async function loadPeerChanges(head: number | null): Promise<PeerChange[]> {
   const from = peerEventCache?.upTo ?? -1
   const res = await client.query({
     query: `SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS block_timestamp,
-                   lower(contract_address) AS contract, topics, data
-            FROM price_data.raw_evm_logs
+                   contract_address AS contract, topics, data
+            FROM price_data.wormhole_ntt_logs
             WHERE topic0 IN ('${TOPIC.peerUpdated}','${TOPIC.wormholePeerSet}')
               AND block_height > {from:Int64}
             ORDER BY block_height, event_index
@@ -829,11 +829,12 @@ async function queryIndexedHeadPin(): Promise<{ height: number; lagMs: number | 
   return { height, lagMs: at > 0 ? Math.max(0, Date.now() - at) : null }
 }
 
-// Every NTT log Hydration wrote up to the pinned head, in two bounded reads: the
-// managers' own rows locate the extrinsics (the bloom index on contract_address
-// makes that selective), and the core bridge's LogMessagePublished plus the
-// transceivers' ReceivedMessage are then a primary-key read inside those
-// extrinsics. Replays collapse under LIMIT 1 BY the event identity.
+// Every NTT log Hydration wrote up to the pinned head, from wormhole_ntt_logs (the
+// MV-fed copy of exactly these topics, 017_narrow_event_tables.sql — a few thousand
+// rows, where the same reads over raw_evm_logs scanned ~1.9 GiB each refresh): the
+// managers' own rows locate the extrinsics, and the core bridge's
+// LogMessagePublished plus the transceivers' ReceivedMessage are then read inside
+// those extrinsics. Replays collapse under LIMIT 1 BY the event identity.
 //
 // The upper bound is explicit rather than incidental: it is what makes this set
 // and the issuance read describe the same block.
@@ -845,14 +846,14 @@ async function loadNttTimeline(assets: readonly DiscoveredAsset[], minBlock: num
   const res = await client.query({
     query: `WITH xs AS (
               SELECT DISTINCT block_height, extrinsic_index
-              FROM price_data.raw_evm_logs
+              FROM price_data.wormhole_ntt_logs
               WHERE block_height >= ${Math.max(0, minBlock)} AND block_height <= ${Math.max(0, maxBlock)}
-                AND lower(contract_address) IN (${sqlList(managers)})
+                AND contract_address IN (${sqlList(managers)})
                 AND topic0 IN ('${TOPIC.transferSent}','${TOPIC.transferRedeemed}','${TOPIC.inboundTransferQueued}')
             )
             SELECT block_height, event_index, extrinsic_index, block_timestamp,
-                   lower(contract_address) AS contract, topics, data
-            FROM price_data.raw_evm_logs
+                   contract_address AS contract, topics, data
+            FROM price_data.wormhole_ntt_logs
             WHERE (block_height, extrinsic_index) IN (SELECT block_height, extrinsic_index FROM xs)
               AND block_height <= ${Math.max(0, maxBlock)}
               AND topic0 IN ('${TOPIC.logMessagePublished}','${TOPIC.receivedMessage}','${TOPIC.transferRedeemed}','${TOPIC.inboundTransferQueued}')

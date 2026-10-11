@@ -1,6 +1,6 @@
 import { blake2AsHex } from '@polkadot/util-crypto'
 import { describe, expect, it } from 'vitest'
-import { preimageBytesFromCall, selectPreimageBytes } from '../../src/governance/proposalCalls.js'
+import { preimageBytesFromCall, proposalsNeedingDecode, selectPreimageBytes, skipHeldForRetry } from '../../src/governance/proposalCalls.js'
 
 const digest = (bytes: string): string => blake2AsHex(bytes, 256)
 
@@ -87,5 +87,17 @@ describe('choosing the preimage that belongs to a hash', () => {
       '0x2e46861ebd71490ac6215e7a97a05922251d67af233e6acd8f25ee1c2a425fae',
       digest,
     )).toBe(bytes)
+  })
+})
+
+describe('skipHeldForRetry', () => {
+  it('skips a failed hash until its hold expires, then forgets it', () => {
+    const held = new Map([['0xa', 2_000], ['0xb', 500]])
+    const skip = skipHeldForRetry(new Set(['0xc']), held, 1_000)
+    expect([...skip].sort()).toEqual(['0xa', '0xc'])
+    expect([...held.keys()]).toEqual(['0xa'])
+    expect(proposalsNeedingDecode([
+      { hash: '0xa', notedBlock: 3 }, { hash: '0xb', notedBlock: 2 }, { hash: '0xc', notedBlock: 1 },
+    ], skip, 10).map(p => p.hash)).toEqual(['0xb'])
   })
 })
