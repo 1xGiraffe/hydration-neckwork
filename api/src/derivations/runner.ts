@@ -41,12 +41,18 @@ import {
   type DerivationResult,
 } from './jobs.ts'
 
-const DEFAULT_POLL_SECONDS = 600
+// The pause between cycles (a cycle's own work runs first, so the period is this
+// plus the cycle). 120 s: a quiet cycle is ~75 statements, ~4.5 s wall and ~6.5
+// CPU-s of ClickHouse (measured 2026-10-10 from system.query_log), and the hourly
+// folds' heavy work is per closed hour, not per cycle, so a shorter pause buys a
+// fresher head bucket and a faster first fold of each closed hour for ~5× the quiet
+// floor. DERIVATIONS_POLL_SECONDS overrides it; this is the one default.
+export const DEFAULT_POLL_SECONDS = 120
 
 // Malformed/non-finite env values (unset, empty, non-numeric, "NaN", "Infinity")
 // must fall back to the default rather than propagate a NaN poll interval,
 // which would turn `setTimeout(resolve, NaN * 1000)` into an immediate-fire
-// busy loop instead of a 10-minute wait.
+// busy loop instead of the default wait.
 export function parsePollSeconds(raw: string | undefined): number {
   const parsed = Number(raw?.trim())
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_POLL_SECONDS

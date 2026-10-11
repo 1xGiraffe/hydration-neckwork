@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ClickHouseClient } from '../db/client.ts'
-import { parsePollSeconds, runCycle, type DerivationJob } from './runner.ts'
+import { DEFAULT_POLL_SECONDS, parsePollSeconds, runCycle, type DerivationJob } from './runner.ts'
 
 // A fake client only needs `close()` — the fake jobs below never touch the
 // client argument, so no other ClickHouseClient method is exercised.
@@ -108,15 +108,19 @@ describe('runCycle', () => {
 })
 
 describe('parsePollSeconds', () => {
-  it('falls back to 600 for unset, empty, or malformed values', () => {
-    expect(parsePollSeconds(undefined)).toBe(600)
-    expect(parsePollSeconds('')).toBe(600)
-    expect(parsePollSeconds('   ')).toBe(600)
-    expect(parsePollSeconds('not-a-number')).toBe(600)
-    expect(parsePollSeconds('NaN')).toBe(600)
-    expect(parsePollSeconds('Infinity')).toBe(600)
-    expect(parsePollSeconds('-5')).toBe(600)
-    expect(parsePollSeconds('0')).toBe(600)
+  it('defaults to a 120 s pause between cycles', () => {
+    expect(DEFAULT_POLL_SECONDS).toBe(120)
+  })
+
+  it('falls back to the default for unset, empty, or malformed values', () => {
+    expect(parsePollSeconds(undefined)).toBe(DEFAULT_POLL_SECONDS)
+    expect(parsePollSeconds('')).toBe(DEFAULT_POLL_SECONDS)
+    expect(parsePollSeconds('   ')).toBe(DEFAULT_POLL_SECONDS)
+    expect(parsePollSeconds('not-a-number')).toBe(DEFAULT_POLL_SECONDS)
+    expect(parsePollSeconds('NaN')).toBe(DEFAULT_POLL_SECONDS)
+    expect(parsePollSeconds('Infinity')).toBe(DEFAULT_POLL_SECONDS)
+    expect(parsePollSeconds('-5')).toBe(DEFAULT_POLL_SECONDS)
+    expect(parsePollSeconds('0')).toBe(DEFAULT_POLL_SECONDS)
   })
 
   it('uses the parsed value for well-formed positive input', () => {
