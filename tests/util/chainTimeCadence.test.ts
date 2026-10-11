@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   crossedChainTimeBoundary,
-  minutesForLegacyBlockInterval,
   MS_PER_MINUTE,
   shouldRunOnElapsedChainTime,
 } from '../../src/util/chainTimeCadence.ts'
@@ -141,17 +140,5 @@ describe('absolute chain-time boundary (money-market re-snapshot)', () => {
   it('does not fire on a backward replay', () => {
     const boundary = Date.UTC(2026, 0, 1, 12, 0, 0)
     expect(crossedChainTimeBoundary(boundary + 6_000, boundary - 6_000, TWELVE_HOURS)).toBe(false)
-  })
-})
-
-describe('legacy block-count intervals', () => {
-  it('reads the deployed block counts as the durations they stood for at 6s', () => {
-    expect(minutesForLegacyBlockInterval(7_200)).toBe(720) // 12h money-market snapshot
-    expect(minutesForLegacyBlockInterval(1_000)).toBe(100) // asset registry, live
-    expect(minutesForLegacyBlockInterval(10_000)).toBe(1_000) // asset registry, backfill
-  })
-
-  it('never collapses a positive interval to zero', () => {
-    expect(minutesForLegacyBlockInterval(1)).toBe(1)
   })
 })

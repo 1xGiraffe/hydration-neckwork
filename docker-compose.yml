@@ -33,10 +33,8 @@ x-raw-env: &raw-env
   RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS: "${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}"
   RAW_MONEY_MARKET_POSITION_CONCURRENCY: "${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}"
   RAW_MONEY_MARKET_BATCH_SIZE: "${RAW_MONEY_MARKET_BATCH_SIZE:-50}"
-  # Chain time between asset-registry scans. 100 = what the old
-  # RAW_ASSET_SNAPSHOT_INTERVAL of 1000 blocks meant at 6s.
+  # Chain time between asset-registry scans (default 100).
   RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES: "${RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES:-}"
-  RAW_ASSET_SNAPSHOT_INTERVAL: "${RAW_ASSET_SNAPSHOT_INTERVAL:-}"
   # One raw_block_snapshots row per N blocks. 1 = today's per-block behaviour.
   # The table is the largest in the database and 36% of all growth, so N is the
   # one pure-config disk lever; N must divide the 600-block pool-history MV grid
@@ -114,11 +112,9 @@ services:
       - RPC_RATE_LIMIT=${INDEXER_RPC_RATE_LIMIT:-100}
       - RPC_CAPACITY=${INDEXER_RPC_CAPACITY:-20}
       # Empty means "use the code default". Passing the knobs through is what
-      # makes the 2s migration values and the deprecated-name warnings usable by
-      # supervisor-created main-live workers.
+      # makes them usable by supervisor-created main-live workers.
       - RPC_HEAD_POLL_MS=${RPC_HEAD_POLL_MS:-}
       - SNAPSHOT_INTERVAL_MINUTES=${SNAPSHOT_INTERVAL_MINUTES:-}
-      - SNAPSHOT_INTERVAL=${SNAPSHOT_INTERVAL:-}
       - BATCH_SIZE=${INDEXER_BATCH_SIZE:-10000}
       - GRAPH_MIN_PATH_LIQUIDITY_USD=${GRAPH_MIN_PATH_LIQUIDITY_USD:-}
 
@@ -378,7 +374,6 @@ services:
       - INDEXER_BATCH_SIZE=${INDEXER_BATCH_SIZE:-}
       - RPC_HEAD_POLL_MS=${RPC_HEAD_POLL_MS:-}
       - SNAPSHOT_INTERVAL_MINUTES=${SNAPSHOT_INTERVAL_MINUTES:-}
-      - SNAPSHOT_INTERVAL=${SNAPSHOT_INTERVAL:-}
       - GRAPH_MIN_PATH_LIQUIDITY_USD=${GRAPH_MIN_PATH_LIQUIDITY_USD:-}
       - RAW_BATCH_SIZE=${RAW_BATCH_SIZE:-}
     volumes:

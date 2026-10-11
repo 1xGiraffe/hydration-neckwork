@@ -52,7 +52,6 @@ Environment Variables:
   RAW_MONEY_MARKET_POSITION_CONCURRENCY Concurrent Money Market position eth_call reads (default: 8)
   RAW_MONEY_MARKET_BATCH_SIZE   Money Market eth_call batch size (default: 50)
   RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES Chain time between asset registry scans (default: 100)
-                                    Deprecated: RAW_ASSET_SNAPSHOT_INTERVAL, read at 6s/block
   RAW_SNAPSHOT_EVERY_N_BLOCKS   Keep one raw_block_snapshots row per N blocks (default: 1)
                                     Must divide 600 (the pool-history MV grid); checked at startup
 `)

@@ -203,9 +203,7 @@ function serializeSnapshot(
 // Chain time between asset-registry scans, not a block count: the interval is a
 // duration, and a block count only expresses one at a fixed block time.
 function rawAssetSnapshotIntervalMinutes(): number {
-  return minutesFromEnvironment('RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES', config.SNAPSHOT_INTERVAL_MINUTES, {
-    name: 'RAW_ASSET_SNAPSHOT_INTERVAL',
-  })
+  return minutesFromEnvironment('RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES', config.SNAPSHOT_INTERVAL_MINUTES)
 }
 
 function snapshotTraceEnabled(): boolean {

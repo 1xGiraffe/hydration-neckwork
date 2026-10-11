@@ -89,10 +89,8 @@ export const config: Config = {
   BATCH_SIZE: integerFromEnvironment('BATCH_SIZE', 50_000), // rows per ClickHouse insert (tunable based on performance)
   // Chain time between full asset registry scans in live mode. Measured in the
   // blocks' own timestamps rather than a block count, so the scan rate is fixed
-  // through a block-time change (100 min is what the previous SNAPSHOT_INTERVAL
-  // of 1,000 blocks meant at 6 s; at 2 s that same count would have scanned every
-  // ~33 min). The deprecated SNAPSHOT_INTERVAL is still read, at 6 s per block.
-  SNAPSHOT_INTERVAL_MINUTES: minutesFromEnvironment('SNAPSHOT_INTERVAL_MINUTES', 100, { name: 'SNAPSHOT_INTERVAL' }),
+  // through a block-time change.
+  SNAPSHOT_INTERVAL_MINUTES: minutesFromEnvironment('SNAPSHOT_INTERVAL_MINUTES', 100),
   // Raw flush accumulation while behind chain head — see src/raw/flushPolicy.ts.
   // At head every batch still flushes immediately, so these only shape catch-up
   // and backfill, where the small-part churn actually accumulates.

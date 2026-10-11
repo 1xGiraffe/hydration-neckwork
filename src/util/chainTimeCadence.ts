@@ -28,17 +28,6 @@
 
 export const MS_PER_MINUTE = 60_000
 
-/** The 6 s cadence every legacy block-count interval in this repo was written against. */
-export const LEGACY_NOMINAL_BLOCK_SECONDS = 6
-
-/** Minutes a legacy block-count interval stood for at the cadence it was configured under. */
-export function minutesForLegacyBlockInterval(
-  blocks: number,
-  nominalBlockSeconds: number = LEGACY_NOMINAL_BLOCK_SECONDS,
-): number {
-  return Math.max(1, Math.round((blocks * nominalBlockSeconds) / 60))
-}
-
 /**
  * Elapsed-chain-time stopwatch. Runs when the interval has passed since the last
  * run, and always on the first evaluation (mirroring the `lastSnapshotBlock = -1`
