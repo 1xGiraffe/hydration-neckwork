@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { blake2AsU8a } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
+import { loadPinnedSubstrateBlock } from './pinnedBlock.ts'
 import { storagePrefix, twox64Concat, u32At, u32Le, u128At } from './chainPrimitives.ts'
 import { TREASURY_ACCOUNT } from './revenueStreams.ts'
 import { decodeCompact } from './proxyMultisigService.ts'
@@ -88,6 +89,7 @@ export interface VoteLockAccount { hdx: number; maxUnlockBlock: number; hasActiv
 
 interface HdxChainSnapshot {
   at: number
+  block: number                      // the pinned block every read of the cycle was taken at
   relayHeight: number                // relay block at snapshot time (vesting runs on relay blocks)
   lockTypes: LockTypeTotal[]
   lockAccounts: Map<string, LockAccount>
@@ -209,10 +211,10 @@ export function unlockSeriesFromTimelines(
 
 // Balances.Locks value: Vec<{id: [u8;8], amount: u128, reasons: u8}>. Keeps the
 // raw per-account rows too — they feed the per-account breakdown snapshot.
-async function loadLocks(): Promise<{ lockTypes: LockTypeTotal[]; lockAccounts: Map<string, LockAccount>; voteLockByAccount: Map<string, number>; rows: LockRow[] } | null> {
-  const keys = await substrateAllKeys(LOCKS_PREFIX)
+async function loadLocks(at: string): Promise<{ lockTypes: LockTypeTotal[]; lockAccounts: Map<string, LockAccount>; voteLockByAccount: Map<string, number>; rows: LockRow[] } | null> {
+  const keys = await substrateAllKeys(LOCKS_PREFIX, undefined, undefined, at)
   if (!keys.length) return null
-  const values = await substrateStorageBatch(keys)
+  const values = await substrateStorageBatch(keys, at)
   if (!values.some(Boolean)) return null
   const byId = new Map<string, { accounts: number; total: bigint }>()
   const voteLockByAccount = new Map<string, number>()
@@ -300,8 +302,8 @@ export function withCooldownExpiries(
 
 // `parameters.twoSecBlocksSince` — the block the 6s → 2s switch landed on.
 // Unset reads as the u32::MAX sentinel, which cooldownExpiresAt handles.
-async function loadTwoSecSwitchBlock(): Promise<number | null> {
-  const [raw] = await substrateStorageBatch([TWO_SEC_SWITCH_KEY])
+async function loadTwoSecSwitchBlock(at: string): Promise<number | null> {
+  const [raw] = await substrateStorageBatch([TWO_SEC_SWITCH_KEY], at)
   if (!raw) return 0xFFFFFFFF // storage empty ⇒ the pallet's own default
   return u32At(hexToU8a(raw), 0)
 }
@@ -309,9 +311,9 @@ async function loadTwoSecSwitchBlock(): Promise<number | null> {
 // GigaHdx.PendingUnstakes: double map Blake2_128Concat(account) →
 // Twox64Concat(positionId u32) → payout u128. The position id is the unstake's
 // parachain start block.
-async function loadPendingUnstakes(switchBlock: number): Promise<PendingUnstake[] | null> {
-  const keys = await substrateAllKeys(PENDING_UNSTAKES_PREFIX)
-  const values = await substrateStorageBatch(keys)
+async function loadPendingUnstakes(switchBlock: number, at: string): Promise<PendingUnstake[] | null> {
+  const keys = await substrateAllKeys(PENDING_UNSTAKES_PREFIX, undefined, undefined, at)
+  const values = await substrateStorageBatch(keys, at)
   const out: PendingUnstake[] = []
   for (let i = 0; i < keys.length; i++) {
     const raw = values[i]
@@ -332,10 +334,10 @@ async function loadPendingUnstakes(switchBlock: number): Promise<PendingUnstake[
 // perPeriod Compact<u128>}> (orml-vesting). start/period count RELAY CHAIN
 // blocks, not parachain blocks: Hydration configures the pallet with the relay
 // block provider, so schedule progress must use the indexed relay height.
-async function loadVesting(): Promise<VestingScheduleAgg[] | null> {
-  const keys = await substrateAllKeys(VESTING_PREFIX)
+async function loadVesting(at: string): Promise<VestingScheduleAgg[] | null> {
+  const keys = await substrateAllKeys(VESTING_PREFIX, undefined, undefined, at)
   if (!keys.length) return null
-  const values = await substrateStorageBatch(keys)
+  const values = await substrateStorageBatch(keys, at)
   if (!values.some(Boolean)) return null
   const schedules: VestingScheduleAgg[] = []
   for (let ki = 0; ki < keys.length; ki++) {
@@ -397,10 +399,10 @@ export function correctVestingLocks(
 // per-account breakdown decomposes the pyconvot lock into duration tranches
 // from the same data (see voteLockTranches).
 export interface VoteClassState { activeAmount: bigint; hasActiveVotes: boolean; priorUnlock: number; priorBalance: bigint }
-async function loadVoteLocks(): Promise<Map<string, VoteClassState[]> | null> {
-  const keys = await substrateAllKeys(VOTING_FOR_PREFIX)
+async function loadVoteLocks(at: string): Promise<Map<string, VoteClassState[]> | null> {
+  const keys = await substrateAllKeys(VOTING_FOR_PREFIX, undefined, undefined, at)
   if (!keys.length) return null
-  const values = await substrateStorageBatch(keys)
+  const values = await substrateStorageBatch(keys, at)
   if (!values.some(Boolean)) return null
   const byAccount = new Map<string, VoteClassState[]>()
   for (let ki = 0; ki < keys.length; ki++) {
@@ -454,10 +456,10 @@ async function loadVoteLocks(): Promise<Map<string, VoteClassState[]> | null> {
  * Above 1 and rising: a receipt is worth more HDX the longer the pool earns.
  * (Quoted the other way round — GIGAHDX per HDX — it reads just under 1.)
  */
-export async function loadGigahdxRate(): Promise<number | null> {
+export async function loadGigahdxRate(at?: string | null): Promise<number | null> {
   const [staked, pot, issuance] = await substrateStorageBatch([
     GIGA_TOTAL_LOCKED_KEY, GIGA_POT_ACCOUNT_KEY, STHDX_ISSUANCE_KEY,
-  ])
+  ], at)
   if (!staked || !issuance) return null
   const issued = u128At(hexToU8a(issuance), 0)
   if (issued <= 0n) return null
@@ -474,18 +476,24 @@ export async function loadGigahdxRate(): Promise<number | null> {
 
 // ParachainSystem.LastRelayChainBlockNumber: plain u32 — the relay block the
 // current parachain head was built against.
-async function loadRelayHeight(): Promise<number | null> {
-  const [raw] = await substrateStorageBatch([RELAY_HEIGHT_KEY])
+async function loadRelayHeight(at: string): Promise<number | null> {
+  const [raw] = await substrateStorageBatch([RELAY_HEIGHT_KEY], at)
   if (!raw) return null
   return u32At(hexToU8a(raw), 0)
 }
 
+// One cycle reads every map and value at ONE block (pinnedBlock.ts: min(indexed
+// head, finalized head)), so the locks, vesting schedules, votes, pending unstakes,
+// relay height and GIGAHDX rate describe one chain state, and the breakdown
+// generation is stamped with that block and its timestamp — not the indexed head.
 async function refresh(): Promise<void> {
-  const switchBlock = await loadTwoSecSwitchBlock()
+  const pin = await loadPinnedSubstrateBlock(client, undefined, 'hdx:locks-pin')
+  const at = pin.blockHash
+  const switchBlock = await loadTwoSecSwitchBlock(at)
   const [locks, pending, vesting, votes, relayHeight, gigahdxRate] = await Promise.all([
-    loadLocks(),
-    switchBlock == null ? Promise.resolve(null) : loadPendingUnstakes(switchBlock),
-    loadVesting(), loadVoteLocks(), loadRelayHeight(), loadGigahdxRate(),
+    loadLocks(at),
+    switchBlock == null ? Promise.resolve(null) : loadPendingUnstakes(switchBlock, at),
+    loadVesting(at), loadVoteLocks(at), loadRelayHeight(at), loadGigahdxRate(at),
   ])
   if (!locks || !pending || !vesting || !votes || relayHeight == null || gigahdxRate == null) {
     if (!snapshot) console.error('[hdx] chain snapshot incomplete, retrying next cycle')
@@ -511,7 +519,7 @@ async function refresh(): Promise<void> {
   // than reporting no unlocks at all.
   let timelines: TimelineSliceJson[][] = []
   try {
-    const [head, paraMs] = await Promise.all([loadHead(), paraBlockMs(client)])
+    const [head, paraMs] = await Promise.all([loadBlockHead(pin.block), paraBlockMs(client)])
     const rows = await collectLockBreakdownRows({
       nativeLockRows: locks.rows,
       vestingSchedules: vesting,
@@ -520,6 +528,7 @@ async function refresh(): Promise<void> {
       pendingUnstakes: pending.map(p => ({ accountId: p.accountId, expiryBlock: p.expiryBlock, payoutRaw: p.payoutRaw })),
       headBlock: head.height,
       headTsMs: head.ts,
+      blockHash: at,
       paraBlockMs: paraMs,
     })
     timelines = rows
@@ -533,6 +542,7 @@ async function refresh(): Promise<void> {
   }
   snapshot = {
     at: Date.now(),
+    block: pin.block,
     relayHeight,
     lockTypes: locks.lockTypes,
     lockAccounts: locks.lockAccounts,
@@ -826,6 +836,18 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
       gigaLiquidations,
     }
   })
+}
+
+// The pinned block's own height and timestamp (the cycle's stamp). Throws when the
+// indexed blocks do not hold it, so the breakdown keeps its previous generation.
+async function loadBlockHead(block: number): Promise<{ height: number; ts: number }> {
+  const res = await client.query({
+    query: `SELECT toUnixTimestamp(any(block_timestamp)) AS t, count() AS n FROM price_data.blocks WHERE block_height = {b:UInt32}`,
+    query_params: { b: block }, format: 'JSONEachRow',
+  })
+  const row = (await res.json<{ t: number | string; n: number | string }>())[0]
+  if (!row || Number(row.n) === 0) throw new Error(`[hdx] pinned block ${block} is not in price_data.blocks`)
+  return { height: block, ts: Number(row.t) * 1000 }
 }
 
 async function loadHead(): Promise<{ height: number; ts: number }> {

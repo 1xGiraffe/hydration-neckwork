@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { xxhashAsU8a, createKeyMulti } from '@polkadot/util-crypto'
 import { u8aToHex, hexToU8a, u8aConcat } from '@polkadot/util'
 import { substrateStorageBatch, substrateAllKeys } from './substrateRpc.ts'
+import { loadPinnedSubstrateBlock } from './pinnedBlock.ts'
 import { RareEventLedger, type RareEventRow } from './rareEventLedger.ts'
 import { threshold1Operations, proxyChildAddress, type MultisigCallInfo, type MultisigOperationRow } from './onBehalfActivity.ts'
 import { signedOrigin } from './explorerService.ts'
@@ -49,7 +50,11 @@ const state = {
   multisigByAccount: new Map<string, MultisigComposition>(),
   membershipsByAccount: new Map<string, string[]>(),          // member → multisig account ids
   threshold1Ops: new Map<string, MultisigOperationRow[]>(),   // multisig → as_multi_threshold_1 ops
+  proxiesBlock: 0,                                             // the pinned block Proxy.Proxies was read at
 }
+
+/** The block the published proxy relations were read at (0 before the first read). */
+export function proxyStateBlock(): number { return state.proxiesBlock }
 
 // SCALE compact<u32> — enough for vec lengths seen here.
 export function decodeCompact(v: Uint8Array, off: number): [number, number] {
@@ -105,10 +110,14 @@ export function deriveMultisigAccountId(signatories: string[], threshold: number
   return u8aToHex(createKeyMulti(signatories.map(s => hexToU8a(s)), threshold))
 }
 
+// The enumeration and its values are read at ONE block (pinnedBlock.ts: min(indexed
+// head, finalized head)) and the relations are stamped with it, so a proxy added or
+// removed mid-enumeration cannot leave the map half old, half new.
 async function refreshProxies(): Promise<void> {
-  const keys = await substrateAllKeys(PROXIES_PREFIX)
+  const pin = await loadPinnedSubstrateBlock(client, undefined, 'proxy:proxies-pin')
+  const keys = await substrateAllKeys(PROXIES_PREFIX, undefined, undefined, pin.blockHash)
   if (!keys.length) return // RPC hiccup — keep last good state
-  const values = await substrateStorageBatch(keys)
+  const values = await substrateStorageBatch(keys, pin.blockHash)
   if (!values.some(Boolean)) return // storage reads failed wholesale — keep last good state
   const byDelegator = new Map<string, ProxyRelation[]>()
   const byDelegate = new Map<string, ProxyRelation[]>()
@@ -124,6 +133,7 @@ async function refreshProxies(): Promise<void> {
   }
   state.delegatesByDelegator = byDelegator
   state.delegatorsByDelegate = byDelegate
+  state.proxiesBlock = pin.block
 }
 
 // The three fields this reads are extracted in SQL. `Proxy.PureCreated` also

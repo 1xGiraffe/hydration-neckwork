@@ -8,10 +8,14 @@ import type { ClickHouseClient } from '../src/db/client.ts'
 // keeping its stale destroyed flag.
 const allKeys = vi.fn<(prefix: string) => Promise<string[]>>()
 const storageBatch = vi.fn<(keys: string[]) => Promise<(string | null)[]>>()
+// Every read of a cycle must name the cycle's ONE pinned block hash.
+const readsAt: (string | null | undefined)[] = []
 vi.mock('../src/services/substrateRpc.ts', () => ({
-  substrateAllKeys: (prefix: string) => allKeys(prefix),
-  substrateStorageBatch: (keys: string[]) => storageBatch(keys),
+  substrateAllKeys: (prefix: string, _pages?: number, _size?: number, at?: string | null) => { readsAt.push(at); return allKeys(prefix) },
+  substrateStorageBatch: (keys: string[], at?: string | null) => { readsAt.push(at); return storageBatch(keys) },
 }))
+const PIN = { block: 15_600_000, blockHash: '0x' + 'ab'.repeat(32), indexedHead: 15_600_002, finalizedHead: 15_600_000 }
+vi.mock('../src/services/pinnedBlock.ts', () => ({ loadPinnedSubstrateBlock: async () => PIN }))
 
 const { refreshContractCode, initContractRegistryService } = await import('../src/services/contractRegistryService.ts')
 
@@ -50,6 +54,7 @@ const snapshotRows = (client: { inserts: { table: string; values: Record<string,
 beforeEach(() => {
   allKeys.mockReset()
   storageBatch.mockReset()
+  readsAt.length = 0
 })
 
 describe('refreshContractCode', () => {
@@ -79,6 +84,18 @@ describe('refreshContractCode', () => {
     })
     expect(byAddr.get(ASSET_PRECOMPILE)).toMatchObject({ kind: 'asset-erc20', code_size: 1 })
     expect(byAddr.get(PLANTED)).toMatchObject({ kind: 'planted-unknown', code_size: 1 })
+  })
+
+  it('reads the enumeration and every code value at one pinned block and stamps each row with it', async () => {
+    const client = fakeClient([{ address: ATOKEN, kind: 'contract', code_hash: '0xbb', code_size: 9, destroyed: 0 }])
+    initContractRegistryService(client)
+    allKeys.mockResolvedValueOnce([storageKey(HOLLAR)])
+    storageBatch.mockResolvedValueOnce(['0x0c600080'])
+    await refreshContractCode()
+    expect(readsAt).toEqual([PIN.blockHash, PIN.blockHash])
+    const rows = snapshotRows(client)
+    expect(rows).toHaveLength(2) // HOLLAR new, ATOKEN tombstoned
+    for (const r of rows) expect(r.snapshot_block).toBe(PIN.block)
   })
 
   it('does not refetch code for addresses already snapshotted, and skips new ones whose read failed', async () => {

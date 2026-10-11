@@ -9,6 +9,7 @@ import { pendingNodeApi } from './pendingHeadService.ts'
 import { queryTag } from './queryTag.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
 import { SUBSTRATE_RPC_URL, rpc } from './substrateRpc.ts'
+import { loadIndexedHead as loadIndexedHeadShared, loadPinnedBlock as loadPinnedBlockShared, type PinnedBlock, type RpcFn } from './pinnedBlock.ts'
 
 // Current claimable money-market (lending) incentives: the Aave v3
 // RewardsController's own getAllUserRewards per candidate holder at one pinned
@@ -280,53 +281,12 @@ async function select<T>(ch: ClickHouseClient, query: string, params: Record<str
 
 const big = (v: unknown): bigint => (/^-?\d+$/.test(String(v ?? '')) ? BigInt(String(v)) : 0n)
 
-/** The indexed head, clamped to the newest block raw_events holds (raw-live's pointer can lead its rows). */
-export async function loadIndexedHead(ch: ClickHouseClient): Promise<number> {
-  const [state] = await select<{ b: number }>(ch, `-- mm:incentives-head
-    SELECT argMax(last_block, updated_at) AS b FROM price_data.raw_ingestion_state WHERE pipeline_id = 'raw-live'`)
-  const head = Number(state?.b ?? 0)
-  if (!head) throw new Error('no raw-live head')
-  const [rows] = await select<{ b: number }>(ch, `-- mm:incentives-rows-head
-    SELECT max(block_height) AS b FROM price_data.raw_events WHERE block_height > {lo:UInt32} AND block_height <= {hi:UInt32}`, { lo: Math.max(0, head - 2_000), hi: head })
-  const b = Number(rows?.b ?? 0)
-  if (!b) throw new Error('raw_events holds no block near the raw-live head')
-  return b
-}
-
-export type RpcFn = <T>(method: string, params: unknown[]) => Promise<T | null>
-
-/** The node's finalized head number (chain_getFinalizedHead → chain_getHeader). */
-export async function loadFinalizedHead(rpcFn: RpcFn = rpc): Promise<number> {
-  const hash = await rpcFn<string>('chain_getFinalizedHead', [])
-  if (!hash) throw new Error('chain_getFinalizedHead failed')
-  const header = await rpcFn<{ number: string }>('chain_getHeader', [hash])
-  const n = header?.number != null ? Number(BigInt(header.number)) : 0
-  if (!n) throw new Error(`chain_getHeader(${hash}) failed`)
-  return n
-}
-
-/**
- * The block a cycle reads: min(indexed head, finalized head) with its Substrate
- * hash (for the existential-deposit storage read) and its Ethereum block hash (for
- * every eth_call, EIP-1898). The Ethereum hash is confirmed by eth_getBlockByHash
- * to name the pinned number, because an eth_call naming an unknown hash silently
- * answers at the node's latest state.
- */
-export async function loadPinnedBlock(ch: ClickHouseClient, rpcFn: RpcFn = rpc): Promise<{ block: number; blockHash: string; ethBlockHash: string; indexedHead: number; finalizedHead: number }> {
-  const [indexedHead, finalizedHead] = await Promise.all([loadIndexedHead(ch), loadFinalizedHead(rpcFn)])
-  const block = Math.min(indexedHead, finalizedHead)
-  const tag = `0x${block.toString(16)}`
-  const [blockHash, ethBlock] = await Promise.all([
-    rpcFn<string>('chain_getBlockHash', [block]),
-    rpcFn<{ hash?: string; number?: string }>('eth_getBlockByNumber', [tag, false]),
-  ])
-  if (!blockHash) throw new Error(`chain_getBlockHash(${block}) failed`)
-  const ethBlockHash = ethBlock?.hash
-  if (!ethBlockHash || ethBlock?.number == null || Number(BigInt(ethBlock.number)) !== block) throw new Error(`eth_getBlockByNumber(${block}) failed`)
-  const confirm = await rpcFn<{ number?: string }>('eth_getBlockByHash', [ethBlockHash, false])
-  if (confirm?.number == null || Number(BigInt(confirm.number)) !== block) throw new Error(`eth_getBlockByHash(${ethBlockHash}) does not name block ${block}`)
-  return { block, blockHash, ethBlockHash, indexedHead, finalizedHead }
-}
+// The pinned-block rule (min(indexed head, finalized head), Substrate + confirmed
+// Ethereum hash) lives in pinnedBlock.ts, shared with the node-full refreshers.
+export type { RpcFn } from './pinnedBlock.ts'
+export { loadFinalizedHead } from './pinnedBlock.ts'
+export const loadIndexedHead = (ch: ClickHouseClient): Promise<number> => loadIndexedHeadShared(ch, 'mm:incentives')
+export const loadPinnedBlock = (ch: ClickHouseClient, rpcFn: RpcFn = rpc): Promise<PinnedBlock> => loadPinnedBlockShared(ch, rpcFn, 'mm:incentives')
 
 export async function loadProgrammes(ch: ClickHouseClient, block: number): Promise<Programme[]> {
   return (await select<Programme>(ch, `-- mm:incentives-programmes

@@ -518,10 +518,12 @@ interface StorageEntry { key: string; value: Uint8Array }
 
 // Enumeration failures propagate: collectLockBreakdownRows' caller keeps the
 // previously published generation, which is what a partial read must not replace.
-async function loadEntries(storagePrefix: string, maxPages?: number): Promise<StorageEntry[]> {
-  const keys = maxPages == null ? await substrateAllKeys(storagePrefix) : await substrateAllKeys(storagePrefix, maxPages)
+// Every map of one generation is read at the cycle's pinned block hash `at`, the
+// same block the caller's locks, vesting and votes were read at.
+async function loadEntries(storagePrefix: string, at: string): Promise<StorageEntry[]> {
+  const keys = await substrateAllKeys(storagePrefix, undefined, undefined, at)
   if (!keys.length) return []
-  const values = await substrateStorageBatch(keys)
+  const values = await substrateStorageBatch(keys, at)
   const out: StorageEntry[] = []
   for (let i = 0; i < keys.length; i++) {
     const raw = values[i]
@@ -543,8 +545,11 @@ export interface CollectLockBreakdownInput {
   relayHeight: number
   voteStates: Map<string, VoteClassState[]>
   pendingUnstakes: { accountId: string; expiryBlock: number; payoutRaw: bigint }[]
+  // The pinned block every input was read at (its height, timestamp and hash):
+  // the maps read here name the same hash, and the generation is stamped with it.
   headBlock: number
   headTsMs: number
+  blockHash: string
   // The parachain slot time to project para heights at (blockTime.ts's
   // paraBlockMs). Relay heights are projected at NOMINAL_RELAY_BLOCK_MS and are
   // deliberately not affected by it.
@@ -555,17 +560,17 @@ export interface CollectLockBreakdownInput {
 // this module's own (small) storage enumerations.
 export async function collectLockBreakdownRows(input: CollectLockBreakdownInput): Promise<BreakdownRow[]> {
   const [reserves, holds, tokenLocks, tokenReserves, identities, subs, proxies, announcements, multisigs, referenda, preimages] = await Promise.all([
-    loadEntries(RESERVES_PREFIX),
-    loadEntries(HOLDS_PREFIX),
-    loadEntries(TOKEN_LOCKS_PREFIX),
-    loadEntries(TOKEN_RESERVES_PREFIX),
-    loadEntries(IDENTITY_OF_PREFIX),
-    loadEntries(SUBS_OF_PREFIX),
-    loadEntries(PROXIES_PREFIX),
-    loadEntries(ANNOUNCEMENTS_PREFIX),
-    loadEntries(MULTISIGS_PREFIX),
-    loadEntries(REFERENDUM_INFO_PREFIX),
-    loadEntries(PREIMAGE_STATUS_PREFIX),
+    loadEntries(RESERVES_PREFIX, input.blockHash),
+    loadEntries(HOLDS_PREFIX, input.blockHash),
+    loadEntries(TOKEN_LOCKS_PREFIX, input.blockHash),
+    loadEntries(TOKEN_RESERVES_PREFIX, input.blockHash),
+    loadEntries(IDENTITY_OF_PREFIX, input.blockHash),
+    loadEntries(SUBS_OF_PREFIX, input.blockHash),
+    loadEntries(PROXIES_PREFIX, input.blockHash),
+    loadEntries(ANNOUNCEMENTS_PREFIX, input.blockHash),
+    loadEntries(MULTISIGS_PREFIX, input.blockHash),
+    loadEntries(REFERENDUM_INFO_PREFIX, input.blockHash),
+    loadEntries(PREIMAGE_STATUS_PREFIX, input.blockHash),
   ])
 
   // Merge duplicate (account, asset, kind, source) contributions additively —
