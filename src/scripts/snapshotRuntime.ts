@@ -2,6 +2,7 @@ import { RpcClient } from '@subsquid/rpc-client'
 import { Runtime } from '@subsquid/substrate-runtime'
 import { config } from '../config.js'
 import { toClickHouseDateTime } from '../raw/json.js'
+import type { ClickHouseClient } from '../db/client.js'
 
 interface RuntimeVersion {
   specName: string
@@ -33,6 +34,37 @@ export async function resolveSnapshotAnchor(rpc: RpcClient, blockOverride: numbe
   const hash = await rpc.call<string>('chain_getFinalizedHead', [])
   const header = await rpc.call<BlockHeader>('chain_getHeader', [hash])
   return { hash, height: Number.parseInt(header.number, 16) }
+}
+
+// The indexed head: raw-live's checkpoint clamped to the newest block raw_events
+// actually holds (the pointer can lead its rows). The same rule as the api's
+// pinned refresh block (api/src/services/pinnedBlock.ts).
+export async function loadIndexedHead(client: ClickHouseClient): Promise<number> {
+  const state = await client.query({
+    query: `SELECT argMax(last_block, updated_at) AS b FROM price_data.raw_ingestion_state WHERE pipeline_id = 'raw-live'`,
+    format: 'JSONEachRow',
+  })
+  const head = Number((await state.json<{ b: number | string }>())[0]?.b ?? 0)
+  if (!head) throw new Error('no raw-live head')
+  const rows = await client.query({
+    query: `SELECT max(block_height) AS b FROM price_data.raw_events WHERE block_height > {lo:UInt32} AND block_height <= {hi:UInt32}`,
+    query_params: { lo: Math.max(0, head - 2_000), hi: head },
+    format: 'JSONEachRow',
+  })
+  const b = Number((await rows.json<{ b: number | string }>())[0]?.b ?? 0)
+  if (!b) throw new Error('raw_events holds no block near the raw-live head')
+  return b
+}
+
+// A block every per-block observation up to which is indexed AND that can no
+// longer be reorganised away: min(indexed head, finalized head). A comparison of
+// storage at this block against the indexed projection is like for like.
+export async function resolveIndexedSnapshotAnchor(rpc: RpcClient, client: ClickHouseClient): Promise<{ hash: string; height: number; indexedHead: number; finalizedHead: number }> {
+  const [indexedHead, finalized] = await Promise.all([loadIndexedHead(client), resolveSnapshotAnchor(rpc, null)])
+  const height = Math.min(indexedHead, finalized.height)
+  const hash = height === finalized.height ? finalized.hash : await rpc.call<string>('chain_getBlockHash', [height])
+  if (!hash || !/^0x[0-9a-f]{64}$/i.test(hash)) throw new Error(`chain_getBlockHash(${height}) failed`)
+  return { hash, height, indexedHead, finalizedHead: finalized.height }
 }
 
 export async function loadRuntimeAt(rpc: RpcClient, hash: string): Promise<Runtime> {

@@ -269,7 +269,11 @@ services:
       "--delay-ms=${REFERENDUM_TITLE_DELAY_MS:-1500}"]
 
   # Seed current balances for every account, including dormant accounts with no
-  # events in the indexed range, and refresh them on an interval.
+  # events in the indexed range (a database never seeded gets the full write), then
+  # reconcile weekly: compare every System.Account/Tokens.Accounts entry at
+  # min(indexed head, finalized head) with the per-block projection and write only
+  # the differences (snapshot_reconcile rows; any diff is logged as
+  # balance_reconcile_drift). The raw indexer observes every changed balance.
   balance-snapshot:
     <<: *service
     image: hydration-neckwork-indexer:latest
@@ -286,7 +290,7 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
       - RPC_RATE_LIMIT=${BALANCES_SNAPSHOT_RPC_RATE_LIMIT:-20}
       - RPC_CAPACITY=${BALANCES_SNAPSHOT_RPC_CAPACITY:-5}
-    command: ["src/scripts/snapshot-balances.ts", "--loop", "--refresh-hours=${BALANCES_REFRESH_HOURS:-24}"]
+    command: ["src/scripts/snapshot-balances.ts", "--loop", "--reconcile", "--refresh-hours=${BALANCES_REFRESH_HOURS:-168}"]
 
   # Money-market sweep: after the balance snapshot has seeded all accounts, calls
   # getUserAccountData for every account in the primary pool and for the bounded

@@ -858,6 +858,10 @@ export interface BalanceSnapshotOptions {
   includeNative?: boolean
   includeTokens?: boolean
   ingestSource?: string
+  // The rows' source_kind: 'snapshot_bootstrap' for a full seed (every entry
+  // written), 'snapshot_reconcile' for the rows a diff-only reconcile writes
+  // because the per-block projection disagreed with storage (snapshot-balances.ts).
+  sourceKind?: SnapshotSourceKind
   // Count keys only via getKeysPaged — no value reads, no decode, no row
   // emission. Use it to cheaply measure account volume before a full snapshot.
   countOnly?: boolean
@@ -873,6 +877,8 @@ interface NativeStorageAccessor {
   fallback: unknown
 }
 
+export type SnapshotSourceKind = 'snapshot_bootstrap' | 'snapshot_reconcile'
+
 function snapshotRow(
   block: StorageBlock,
   blockTimestamp: string,
@@ -881,18 +887,70 @@ function snapshotRow(
   assetId: string,
   sourceName: 'System.Account' | 'Tokens.Accounts',
   balance: BalanceReadResult,
+  sourceKind: SnapshotSourceKind = 'snapshot_bootstrap',
 ): RawBalanceObservationRow {
   const candidate: BalanceCandidate = {
     accountId,
     assetId,
     assetKind: 'substrate',
-    sourceKind: 'snapshot_bootstrap',
+    sourceKind,
     sourceName,
     sourceEventIndex: null,
     sourceCallAddress: null,
-    evidence: { storage_item: sourceName, reason: 'full-state snapshot', anchor_block: block.height },
+    evidence: {
+      storage_item: sourceName,
+      reason: sourceKind === 'snapshot_reconcile' ? 'reconcile: projection differed from storage' : 'full-state snapshot',
+      anchor_block: block.height,
+    },
   }
   return observationRow(block, blockTimestamp, ingestSource, observationId(candidate), candidate, balance)
+}
+
+function nativeStorageAccessor(block: StorageBlock): NativeStorageAccessor | null {
+  return systemStorage.account.v205.is(block)
+    ? {
+        decode: nativeV205Balance,
+        keysPaged: (size, b) => systemStorage.account.v205.getKeysPaged(size, b),
+        pairsPaged: (size, b) => systemStorage.account.v205.getPairsPaged(size, b),
+        fallback: systemStorage.account.v205.getDefault(block),
+      }
+    : systemStorage.account.v100.is(block)
+      ? {
+          decode: nativeV100Balance,
+          keysPaged: (size, b) => systemStorage.account.v100.getKeysPaged(size, b),
+          pairsPaged: (size, b) => systemStorage.account.v100.getPairsPaged(size, b),
+          fallback: systemStorage.account.v100.getDefault(block),
+        }
+      : null
+}
+
+// Rows for (account, asset) pairs storage no longer holds at the anchor block: the
+// storage default decoded exactly as a per-block read of a missing entry decodes
+// it (a reaped System.Account, a removed Tokens.Accounts entry), so the row equals
+// what the event pipeline would have written had it seen the removal.
+export function snapshotAbsentRows(
+  block: StorageBlock,
+  blockTimestamp: string,
+  ingestSource: string,
+  sourceKind: SnapshotSourceKind,
+  pairs: ReadonlyArray<{ accountId: string; assetId: string }>,
+): RawBalanceObservationRow[] {
+  if (pairs.length === 0) return []
+  const native = pairs.some(p => p.assetId === NATIVE_ASSET_ID) ? nativeStorageAccessor(block) : null
+  const tokenFallback = pairs.some(p => p.assetId !== NATIVE_ASSET_ID) && tokensStorage.accounts.v108.is(block)
+    ? tokenBalance(tokensStorage.accounts.v108.getDefault(block))
+    : null
+  const rows: RawBalanceObservationRow[] = []
+  for (const { accountId, assetId } of pairs) {
+    if (assetId === NATIVE_ASSET_ID) {
+      if (native == null) throw new Error('No supported System.Account storage type at snapshot block')
+      rows.push(snapshotRow(block, blockTimestamp, ingestSource, accountId, assetId, 'System.Account', native.decode(native.fallback), sourceKind))
+    } else {
+      if (tokenFallback == null) throw new Error('No supported Tokens.Accounts storage type at snapshot block')
+      rows.push(snapshotRow(block, blockTimestamp, ingestSource, accountId, assetId, 'Tokens.Accounts', tokenFallback, sourceKind))
+    }
+  }
+  return rows
 }
 
 // Full-state balance snapshot at an arbitrary anchor block. This is
@@ -915,6 +973,7 @@ export async function streamBalanceSnapshot(
   const includeNative = options.includeNative ?? true
   const includeTokens = options.includeTokens ?? true
   const countOnly = options.countOnly ?? false
+  const sourceKind = options.sourceKind ?? 'snapshot_bootstrap'
   const counts: BalanceSnapshotCounts = { nativeAccounts: 0, tokenEntries: 0 }
 
   const emit = async (rows: RawBalanceObservationRow[]): Promise<void> => {
@@ -922,21 +981,7 @@ export async function streamBalanceSnapshot(
   }
 
   if (includeNative) {
-    const native: NativeStorageAccessor | null = systemStorage.account.v205.is(block)
-      ? {
-          decode: nativeV205Balance,
-          keysPaged: (size, b) => systemStorage.account.v205.getKeysPaged(size, b),
-          pairsPaged: (size, b) => systemStorage.account.v205.getPairsPaged(size, b),
-          fallback: systemStorage.account.v205.getDefault(block),
-        }
-      : systemStorage.account.v100.is(block)
-        ? {
-            decode: nativeV100Balance,
-            keysPaged: (size, b) => systemStorage.account.v100.getKeysPaged(size, b),
-            pairsPaged: (size, b) => systemStorage.account.v100.getPairsPaged(size, b),
-            fallback: systemStorage.account.v100.getDefault(block),
-          }
-        : null
+    const native = nativeStorageAccessor(block)
     if (native == null) throw new Error('No supported System.Account storage type at snapshot block')
 
     if (countOnly) {
@@ -950,7 +995,7 @@ export async function streamBalanceSnapshot(
         for (const [account, info] of page) {
           const accountId = normalizeAccountId(account)
           if (accountId == null) continue
-          rows.push(snapshotRow(block, blockTimestamp, ingestSource, accountId, NATIVE_ASSET_ID, 'System.Account', native.decode(info ?? native.fallback)))
+          rows.push(snapshotRow(block, blockTimestamp, ingestSource, accountId, NATIVE_ASSET_ID, 'System.Account', native.decode(info ?? native.fallback), sourceKind))
         }
         counts.nativeAccounts += rows.length
         await emit(rows)
@@ -975,7 +1020,7 @@ export async function streamBalanceSnapshot(
         for (const [[account, assetId], value] of page) {
           const accountId = normalizeAccountId(account)
           if (accountId == null) continue
-          rows.push(snapshotRow(block, blockTimestamp, ingestSource, accountId, assetId.toString(), 'Tokens.Accounts', tokenBalance(value ?? fallback)))
+          rows.push(snapshotRow(block, blockTimestamp, ingestSource, accountId, assetId.toString(), 'Tokens.Accounts', tokenBalance(value ?? fallback), sourceKind))
         }
         counts.tokenEntries += rows.length
         await emit(rows)
