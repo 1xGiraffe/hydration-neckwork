@@ -110,7 +110,12 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             <div className="dt">Activity</div><div className="dd"><ActivityDesc r={row} headed now={now} /></div>
             <div className="dt">Value</div><div className="dd mono"><Usd v={row.valueUsd} /></div>
             <RevenueRow revenue={row.revenue} />
-            {row.who && <><div className="dt">Account</div><div className="dd"><AddrPill account={row.who} /></div></>}
+            {/* A Wormhole Relay settlement lands in the relay's pool; where the transfer
+                went is the account the pool's fast delivery paid, so that leads. */}
+            {row.type === 'xcm' && row.fastRelay?.role === 'settlement' && row.fastRelay.recipient && <>
+              <div className="dt">Delivered to</div><div className="dd"><AddrPill account={row.fastRelay.recipient} /></div>
+            </>}
+            {row.who && <><div className="dt">{row.type === 'xcm' && row.fastRelay?.role === 'settlement' ? 'Refilled pool' : 'Account'}</div><div className="dd"><AddrPill account={row.who} /></div></>}
             {row.type === 'transfer' && row.to && <><div className="dt">To</div><div className="dd"><AddrPill account={row.to} /></div></>}
             {row.type === 'xcm' && row.xcmDir === 'in' && row.fromTxUrl && <><div className="dt">Origin transaction</div><div className="dd"><a className="ext-link" href={row.fromTxUrl} target="_blank" rel="noopener">{explorerSiteName(row.fromTxUrl)} ↗</a></div></>}
             {row.type === 'xcm' && row.xcmDir !== 'in' && row.destChain && <>
@@ -139,7 +144,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             </>}
             {row.type === 'xcm' && row.fastRelay?.role === 'settlement' && row.fastRelay.pair && <>
               <div className="dt">Settles</div>
-              <div className="dd"><Link to={paths.activityDetail('cross-chain', `${row.fastRelay.pair.blockHeight}-e${row.fastRelay.pair.eventIndex}`)} className="hash mono">{row.fastRelay.pair.blockHeight}-e{row.fastRelay.pair.eventIndex}</Link> <span className="muted">the fast delivery this settles — the user was paid there</span></div>
+              <div className="dd"><Link to={paths.activityDetail('cross-chain', `${row.fastRelay.pair.blockHeight}-e${row.fastRelay.pair.eventIndex}`)} className="hash mono">{row.fastRelay.pair.blockHeight}-e{row.fastRelay.pair.eventIndex}</Link> <span className="muted">the fast delivery this settles — the pool paid the recipient there</span></div>
             </>}
             {/* What the send cost beyond its payload. A swap batched in to buy the fee
                 asset is not a trade the sender made, so it is not a row of its own: it

@@ -133,3 +133,26 @@ describe('ActivityDesc — OTC', () => {
     expect(renderToStaticMarkup(<ActivityDesc now={0} r={legless} headed />)).toContain('Order #91')
   })
 })
+
+// A Wormhole Relay settlement mints into the relay's pool, which is its `who`; the row
+// must name where the transfer actually went — the account the pool's fast delivery paid.
+describe('ActivityDesc — fast relay settlement', () => {
+  const recipient = { accountId: '0x45544800a140d8a37f5d94c70a071e08cda9613f17ed23e80000000000000000', address: '0xa140d8a37f5d94c70a071e08cda9613f17ed23e8', emoji: '🦒', tag: null, identity: null }
+  const pool = { accountId: '0x4554480070e9b12c3b19cb5f0e59984a5866278ab69df9760000000000000000', address: '0x70e9b12c3b19cb5f0e59984a5866278ab69df976', emoji: '🐚', tag: null, identity: null }
+  const settlement: ActivityRow = {
+    ...base, type: 'xcm', xcmDir: 'in', asset: usdt, amount: '8918733855', fromChain: 'Ethereum', bridge: 'Wormhole',
+    who: pool as ActivityRow['who'],
+    fastRelay: { role: 'settlement', pool: pool as ActivityRow['who'], pair: { blockHeight: 15675563, eventIndex: 28 }, pairMessageId: null, recipient: recipient as ActivityRow['who'] },
+  } as ActivityRow
+
+  it('names the recipient the pool paid, not the pool', () => {
+    const html = renderToStaticMarkup(<ActivityDesc now={0} r={settlement} />)
+    expect(html).toContain('0xa140')
+    expect(html).not.toContain('0x70e9')
+  })
+
+  it('names no recipient on an ordinary arrival', () => {
+    const plain = { ...settlement, fastRelay: undefined } as ActivityRow
+    expect(renderToStaticMarkup(<ActivityDesc now={0} r={plain} />)).not.toContain('0xa140')
+  })
+})

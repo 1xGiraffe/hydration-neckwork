@@ -346,7 +346,10 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     // Inbound: origin chain (+ source account when the crosschain index resolved
     // it), then the arrow, then the chain it landed on with the asset it credited.
     const origin = <><ChainBadge chain={r.fromChain ?? ''} title={remoteTokenTitle(r, r.fromChain ?? '')} />{r.fromAccount && <ExternalAccountPill account={r.fromAccount} />}</>
-    return <span className="asset-flow">{origin} → <HydrationBadge /><AssetAmount asset={r.asset} raw={r.amount} /></span>
+    // A Wormhole Relay settlement mints into the relay's pool (its `who`); the transfer
+    // went to the account the pool's fast delivery paid, so that is the one named here.
+    const recipient = r.fastRelay?.role === 'settlement' && r.fastRelay.recipient ? <AddrPill account={r.fastRelay.recipient} noCopy /> : null
+    return <span className="asset-flow">{origin} → <HydrationBadge />{recipient}<AssetAmount asset={r.asset} raw={r.amount} /></span>
   }
   if ((r.type === 'transfer' || r.type === 'xcm') && r.asset) {
     // Asset first, then the arrow, then the destination chain and account. A

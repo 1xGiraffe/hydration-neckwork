@@ -194,7 +194,11 @@ describe('the fast-relay membership rule', () => {
     const other = nttRow(14_700_000, 2)
     const out = { ...nttRow(14_980_973, 4), xcmDir: 'out' } as ActivityRow
     annotateFastRelaySettlements([settlement, other, out], index)
-    expect(settlement.fastRelay).toEqual({ role: 'settlement', pool: null, pair: { blockHeight: 14_980_518, eventIndex: 7 }, pairMessageId: null })
+    expect(settlement.fastRelay).toEqual({
+      role: 'settlement', pool: null, pair: { blockHeight: 14_980_518, eventIndex: 7 }, pairMessageId: null,
+      // Where the transfer went: the account the pool's delivery paid, not the pool.
+      recipient: expect.objectContaining({ accountId: USER }),
+    })
     expect(other.fastRelay).toBeUndefined()
     expect(out.fastRelay).toBeUndefined()
   })
