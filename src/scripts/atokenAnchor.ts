@@ -20,7 +20,7 @@
  * from 6,382,902 and the pool's first ReserveDataUpdated is at 6,468,408). The
  * candidate sources — the contracts' own logs, the scaled-delta model fed by them,
  * the RewardsController's Accrued (from 7,346,897, inside this window), the
- * collateral sweep's users and the Substrate legs of the registry assets over the
+ * collateral anchor's users and the Substrate legs of the registry assets over the
  * aTokens — are read from raw indexed in this window, so a capture on a partial
  * backfill would anchor too few holders; later cycles top the table up with the
  * candidates the sources name since (anchorKeysToRead), but the full capture is
@@ -205,9 +205,9 @@ export async function verifyAnchors(rows: AnchorRow[], ethCall: EthCall): Promis
  * so a holder who received the aToken inside a gap and did nothing afterwards
  * appears in no Transfer at all; the RewardsController's Accrued/anchor rows name
  * such a holder when it was incentivized (a claim or any balance change re-emits
- * Accrued for it), the collateral sweep names it once the money market reads its
- * position, and a Substrate transfer or swap of the registry asset over the aToken
- * (GDOT over aGDOT) names it from the substrate side. Measured at block 15,047,000:
+ * Accrued for it), the collateral anchor names it once its bitmap is read, and a
+ * Substrate transfer or swap of the registry asset over the aToken (GDOT over
+ * aGDOT) names it from the substrate side. Measured at block 15,047,000:
  * 79 holders (77 aGDOT, one aUSDT, one atBTC) held their whole balance since
  * before B0, were in none of the log-fed sources, and summed exactly to each
  * contract's total-minus-holders gap. A candidate costs one scaledBalanceOf, and a

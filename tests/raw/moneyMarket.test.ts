@@ -47,6 +47,8 @@ function supplyLog(contractAddress = '0x1b02e051683b5cfac5929c25e84adb26ecf87b38
   }
 }
 
+const TRIGGER = { evidenceFor: () => ({ trigger: 'cadence' }), warningSourceKind: 'trigger_snapshot' }
+
 describe('raw Money Market rows', () => {
   afterEach(() => {
     delete process.env.RPC_URL
@@ -170,7 +172,7 @@ describe('raw Money Market rows', () => {
       13_000_000,
       '2026-07-01 00:00:00',
       'test',
-      { marketKeys: ['gigahdx'] },
+      { marketKeys: ['gigahdx'], ...TRIGGER },
     )
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -178,35 +180,6 @@ describe('raw Money Market rows', () => {
     expect(body.params[0].to).toBe(GIGAHDX_POOL_PROXY)
     expect(result.positions).toHaveLength(1)
     expect(result.positions[0].pool_address).toBe(GIGAHDX_POOL_PROXY)
-  })
-
-  it('writes zero tombstones only when a sparse supplemental sweep requests them', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
-      ok: true,
-      status: 200,
-      statusText: 'OK',
-      json: async () => ({ result: `0x${'0'.repeat(64 * 6)}` }),
-    } as unknown as Response)
-
-    const args = [
-      [USER],
-      13_000_000,
-      '2026-07-01 00:00:00',
-      'test',
-    ] as const
-    const defaultResult = await snapshotMoneyMarketPositions(...args, { marketKeys: ['gigahdx'] })
-    const tombstoneResult = await snapshotMoneyMarketPositions(...args, {
-      marketKeys: ['gigahdx'],
-      includeZeroPositions: true,
-    })
-
-    expect(defaultResult.positions).toHaveLength(0)
-    expect(tombstoneResult.positions).toHaveLength(1)
-    expect(tombstoneResult.positions[0]).toMatchObject({
-      pool_address: GIGAHDX_POOL_PROXY,
-      total_collateral_base: '0',
-      total_debt_base: '0',
-    })
   })
 
   it('writes a zero for a holder the projection shows open, in that market only', async () => {
@@ -223,13 +196,14 @@ describe('raw Money Market rows', () => {
       '2026-07-01 00:00:00',
       'test',
     ] as const
-    // The exhaustive sweep never writes a zero for an account that was never a user…
-    const inactive = await snapshotMoneyMarketPositions(...args, { marketKeys: ['core'] })
+    // A zero is never written for an account that was never a user…
+    const inactive = await snapshotMoneyMarketPositions(...args, { marketKeys: ['core'], ...TRIGGER })
     expect(inactive.positions).toHaveLength(0)
     // …but a zero read for a holder whose latest aggregate is non-zero is the exit,
     // and the only observation of it a natively transferred aToken ever produces.
     const exit = await snapshotMoneyMarketPositions(...args, {
       marketKeys: ['core'],
+      ...TRIGGER,
       tombstoneFor: new Set([openPositionKey(CORE_POOL_PROXY, USER)]),
     })
     expect(exit.positions).toHaveLength(1)
@@ -244,6 +218,7 @@ describe('raw Money Market rows', () => {
     // the same holder in another, so the set is keyed per (market, holder).
     const otherMarket = await snapshotMoneyMarketPositions(...args, {
       marketKeys: ['core'],
+      ...TRIGGER,
       tombstoneFor: new Set([openPositionKey(GIGAHDX_POOL_PROXY, USER)]),
     })
     expect(otherMarket.positions).toHaveLength(0)
@@ -370,6 +345,9 @@ describe('raw Money Market rows', () => {
     const owners = rows.positions.map(p => p.user_address)
     expect(owners).toContain(DEPOSITOR)
     expect(owners).not.toContain(VAULT)
+    // Every pair the event named for a read, the failed one included: the trigger
+    // phase reads each one's collateral bitmap (and a failure there is a warning).
+    expect(rows.positionReads).toEqual(new Set([openPositionKey(BIL_POOL_PROXY, VAULT), openPositionKey(BIL_POOL_PROXY, DEPOSITOR)]))
   })
 
   // Withdraw and Repay carry no onBehalfOf: there `user` IS the position owner, and

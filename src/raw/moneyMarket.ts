@@ -234,6 +234,8 @@ export interface MoneyMarketExtractionResult {
   positions: RawMoneyMarketPositionRow[]
   reserves: RawMoneyMarketReserveRow[]
   warnings: RawParserWarningRow[]
+  /** Every (pool, user) pair (openPositionKey) the logs name for a position read, read or failed. */
+  positionReads: Set<string>
 }
 
 function parseDecodedArgs(row: RawEvmLogRow): Record<string, unknown> {
@@ -286,9 +288,10 @@ function positionObservationId(row: RawEvmLogRow, userAddress: string): string {
   return `money-market:${row.block_height}:${row.event_index}:${userAddress}`
 }
 
-// Periodic-snapshot id. The core market keeps its original key (so existing rows
-// dedupe and forward-fill continuity is preserved); extra markets get a market-key
-// suffix so the same borrower's per-market snapshots don't collide.
+// Trigger-read id (named after the periodic sweep it began as). The core market
+// keeps its original key (so existing rows dedupe and forward-fill continuity is
+// preserved); extra markets get a market-key suffix so the same holder's
+// per-market reads don't collide.
 function periodicObservationId(blockHeight: number, userAddress: string, market: MoneyMarketDef): string {
   return market.key === CORE_MARKET.key
     ? `money-market-periodic:${blockHeight}:${userAddress}`
@@ -499,49 +502,88 @@ function periodicPositionWarning(
   rpcUrl: string,
   ingestSource: string,
   error: unknown,
+  market: MoneyMarketDef,
+  sourceKind: string,
 ): RawParserWarningRow {
   return {
     block_height: blockHeight,
     block_timestamp: blockTimestamp,
     parser: 'raw_money_market',
-    source_kind: 'periodic_snapshot',
+    source_kind: sourceKind,
     source_name: 'getUserAccountData',
-    source_index: userAddress,
+    // A read is one per (block, pool, user), so the warning names the pool too — a
+    // user failing in two markets at one block is two warnings, not one replaced row.
+    source_index: `${market.poolProxy}:${userAddress}`,
     warning_code: 'periodic_position_eth_call_failed',
     warning: error instanceof Error ? error.message : 'Money Market periodic eth_call failed',
     evidence_json: toJsonString({
       user_address: userAddress,
+      pool: market.poolProxy,
       rpc_origins: [rpcOriginForEvidence(rpcUrl)],
     }),
     ingest_source: ingestSource,
   }
 }
 
-// Re-snapshot a set of borrowers' aggregate positions at an arbitrary block via
-// getUserAccountData — independent of whether they emitted an MM event at that
-// block. This is the periodic re-aggregation the explorer's portfolio history
-// relies on: between a borrower's own MM actions their collateral/debt still
-// drifts (interest accrual + oracle price moves), so event-only snapshots leave
-// the curve frozen until the next user action. Mirrors hydration-data-lake's
-// per-oracle-update position aggregation (handleAllAccountsMmPositionDataUpdate).
-// Zero positions are skipped by default: a zero for an account that was never a
-// user is just an inactive account and would bloat the table. Two exceptions
-// record a zero, and both are how an exit reaches the projection:
-//   - `tombstoneFor` names the (market, holder) pairs (`openPositionKey`) whose
-//     latest observation is non-zero. A zero read for one of them IS the exit —
-//     the event-driven snapshots only re-read a holder the pool emitted an event
-//     for, and an aToken moved natively (a registry-asset aToken sold or sent)
-//     empties a position with no pool event at all. Skipping that zero leaves the
-//     holder's stale aggregate as the current one for good.
-//   - `includeZeroPositions` writes every zero: what the bounded supplemental
-//     sweeps request over their small candidate set, since a still-running older
-//     raw worker does not emit their exit snapshots either.
+/** One eth_call of a batch: target and calldata. */
+export interface EthCall {
+  to: string
+  data: string
+}
+
+/** A batch of eth_calls at one block: each call's result, or null where that call failed. */
+export type EthCallBatch = (calls: EthCall[], blockHeight: number) => Promise<Array<string | null>>
+
+/**
+ * eth_call a batch at one block in one JSON-RPC request against RPC_URL (the
+ * position reads' endpoint and timeout). A call the node answers with an error —
+ * a revert, an unknown contract — is null in its slot; only a transport failure
+ * (timeout, HTTP error) throws, and then for the whole batch.
+ */
+export const moneyMarketEthCallBatch: EthCallBatch = async (calls, blockHeight) => {
+  if (calls.length === 0) return []
+  const tag = `0x${blockHeight.toString(16)}`
+  const requests = calls.map((call, index) => ({
+    jsonrpc: '2.0' as const, id: index, method: 'eth_call' as const, params: [{ to: call.to, data: call.data }, tag],
+  }))
+  const raw = await fetchMoneyMarketRpc(evmRpcUrl(), requests)
+  const responses = Array.isArray(raw) ? raw : [raw]
+  const out: Array<string | null> = calls.map(() => null)
+  for (const response of responses) {
+    if (response == null || typeof response !== 'object') continue
+    const record = response as { id?: unknown; result?: unknown }
+    if (typeof record.id === 'number' && record.id >= 0 && record.id < calls.length && typeof record.result === 'string') {
+      out[record.id] = record.result
+    }
+  }
+  return out
+}
+
+// Read a set of holders' aggregate positions at one block via getUserAccountData,
+// independent of whether they emitted a money-market event there — the raw
+// indexer's trigger reads (moneyMarketTriggerPhase.ts: price steps, configuration
+// changes, the chain-time cadence). Between a holder's own actions its collateral
+// and debt still drift (interest accrual, oracle moves), so event-only reads would
+// leave the curve frozen until the next action.
+// A zero position is skipped (an account that was never a user would only bloat
+// the table) EXCEPT for a pair in `tombstoneFor` — the (market, holder) pairs
+// (`openPositionKey`) whose latest observation is non-zero. A zero read for one of
+// them IS the exit: an aToken moved natively (a registry-asset aToken sold or sent)
+// empties a position with no pool event at all, and skipping that zero would leave
+// the holder's stale aggregate current for good.
 export async function snapshotMoneyMarketPositions(
   userAddresses: Iterable<string>,
   blockHeight: number,
   blockTimestamp: string,
   ingestSource: string,
-  options: { marketKeys?: Iterable<string>; includeZeroPositions?: boolean; tombstoneFor?: ReadonlySet<string> } = {},
+  options: {
+    marketKeys?: Iterable<string>
+    tombstoneFor?: ReadonlySet<string>
+    /** Why the (market, user) pair was read (evidence_json; the read's own RPC evidence is merged in after it). */
+    evidenceFor: (poolProxy: string, userAddress: string) => Record<string, unknown>
+    /** raw_parser_warnings.source_kind for a failed read. */
+    warningSourceKind: string
+  },
 ): Promise<{ positions: RawMoneyMarketPositionRow[]; warnings: RawParserWarningRow[] }> {
   const positions: RawMoneyMarketPositionRow[] = []
   const warnings: RawParserWarningRow[] = []
@@ -549,6 +591,7 @@ export async function snapshotMoneyMarketPositions(
   if (addresses.length === 0) return { positions, warnings }
 
   const rpcUrl = evmRpcUrl()
+  const { warningSourceKind } = options
   const batches = chunk(addresses, moneyMarketBatchSize())
   const requestedMarkets = options.marketKeys == null ? null : new Set(options.marketKeys)
   const selectedMarkets = requestedMarkets == null
@@ -569,7 +612,7 @@ export async function snapshotMoneyMarketPositions(
       positionsByUser = await readUserPositions(batch, blockHeight, rpcUrl, market.poolProxy)
     } catch (error) {
       for (const userAddress of batch) {
-        warnings.push(periodicPositionWarning(userAddress, blockHeight, blockTimestamp, rpcUrl, ingestSource, error))
+        warnings.push(periodicPositionWarning(userAddress, blockHeight, blockTimestamp, rpcUrl, ingestSource, error, market, warningSourceKind))
       }
       return
     }
@@ -577,12 +620,10 @@ export async function snapshotMoneyMarketPositions(
     for (const userAddress of batch) {
       const position = positionsByUser.get(userAddress)
       if (position == null) {
-        warnings.push(periodicPositionWarning(userAddress, blockHeight, blockTimestamp, rpcUrl, ingestSource, new Error('eth_call returned no position')))
+        warnings.push(periodicPositionWarning(userAddress, blockHeight, blockTimestamp, rpcUrl, ingestSource, new Error('eth_call returned no position'), market, warningSourceKind))
         continue
       }
-      if (isZeroPosition(position.metrics)
-        && !options.includeZeroPositions
-        && !options.tombstoneFor?.has(openPositionKey(market.poolProxy, userAddress))) continue
+      if (isZeroPosition(position.metrics) && !options.tombstoneFor?.has(openPositionKey(market.poolProxy, userAddress))) continue
       positions.push({
         block_height: blockHeight,
         block_timestamp: blockTimestamp,
@@ -591,7 +632,7 @@ export async function snapshotMoneyMarketPositions(
         account_id: deriveTruncatedAccountId(userAddress),
         pool_address: market.poolProxy,
         ...position.metrics,
-        evidence_json: toJsonString({ trigger: 'periodic_snapshot', ...position.evidence }),
+        evidence_json: toJsonString({ ...options.evidenceFor(market.poolProxy, userAddress), ...position.evidence }),
         ingest_source: ingestSource,
       })
     }
@@ -607,18 +648,15 @@ export async function snapshotMoneyMarketPositions(
 const RESERVES_LIST_SELECTOR = '0xd1946dbc'
 const USER_CONFIG_SELECTOR = '0x4417a583'
 
-async function readReservesList(poolProxy: string, blockHeight: number, rpcUrl: string): Promise<string[]> {
-  const raw = await fetchMoneyMarketRpc(rpcUrl, {
-    jsonrpc: '2.0', id: 'mm-reserves-list', method: 'eth_call',
-    params: [{ to: poolProxy, data: RESERVES_LIST_SELECTOR }, `0x${blockHeight.toString(16)}`],
-  }) as { result?: unknown }
-  if (typeof raw?.result !== 'string' || raw.result === '0x') return []
-  const body = raw.result.slice(2)
+function decodeReservesList(result: string | null): string[] | null {
+  if (result == null || !result.startsWith('0x') || result === '0x') return null
+  const body = result.slice(2)
   const count = Number.parseInt(body.slice(64, 128) || '0', 16)
+  if (!Number.isSafeInteger(count) || count <= 0 || count > 256) return null
   const reserves: string[] = []
-  for (let i = 0; i < count && i < 256; i++) {
+  for (let i = 0; i < count; i++) {
     const word = body.slice(128 + i * 64, 128 + (i + 1) * 64)
-    if (word.length !== 64) return []
+    if (word.length !== 64) return null
     reserves.push(`0x${word.slice(24)}`.toLowerCase())
   }
   return reserves
@@ -626,68 +664,72 @@ async function readReservesList(poolProxy: string, blockHeight: number, rpcUrl: 
 
 /**
  * Every reserve's usage-as-collateral bit for a set of users, read back from the
- * pool at `blockHeight`.
+ * pool at `blockHeight` (money_market_collateral_anchor rows).
  *
  * This is the ANCHOR half of the collateral model. The Enabled/Disabled events are
  * exact when they exist, but this chain does not always emit them: EVM-log coverage
  * before the aToken anchor block is partial, and an aToken that is also a registry
  * asset (GDOT) is transferred through the substrate side, where the runtime sets the
  * receiver's bit with no Aave event. Reading the word back is the only statement of
- * the bit that cannot drift from the chain.
+ * the bit that cannot drift from the chain. The raw indexer reads it at every block
+ * that could move a user's bit (moneyMarketTriggerPhase.ts); the anchors loop seeds
+ * the users no block has read (collateralAnchor.ts).
  *
- * A row is emitted for EVERY reserve of the pool, disabled ones included — a sweep
- * that wrote only the enabled ones could never retract an earlier enable.
+ * A row is emitted for EVERY reserve of the pool, disabled ones included — a read
+ * that wrote only the enabled ones could never retract an earlier enable. A user
+ * whose word could not be read is returned in `failedUsers` and gets no rows: an
+ * unread bitmap is unknown, and a silent zero would strip a live borrower's
+ * collateral badge.
  */
 export async function snapshotMoneyMarketCollateralFlags(
   userAddresses: Iterable<string>,
   blockHeight: number,
   poolProxy: string,
+  call: EthCallBatch = moneyMarketEthCallBatch,
 ): Promise<{ flags: RawMoneyMarketCollateralFlagRow[]; failedUsers: string[] }> {
   const flags: RawMoneyMarketCollateralFlagRow[] = []
   const failedUsers: string[] = []
   const addresses = uniqueAddresses(userAddresses)
   if (addresses.length === 0) return { flags, failedUsers }
 
-  const rpcUrl = evmRpcUrl()
-  const reserves = await readReservesList(poolProxy, blockHeight, rpcUrl)
-  if (reserves.length === 0) throw new Error(`Money Market pool ${poolProxy} returned no reserve list at block ${blockHeight}`)
+  const pool = poolProxy.toLowerCase()
   const observed_at = toClickHouseDateTime(Date.now())
+  const batches = chunk(addresses, moneyMarketBatchSize())
+  const words = new Map<string, string | null>()
+  const [[reservesRaw]] = await Promise.all([
+    call([{ to: pool, data: RESERVES_LIST_SELECTOR }], blockHeight),
+    forEachConcurrent(batches, moneyMarketPositionConcurrency(), async batch => {
+      let results: Array<string | null>
+      try {
+        results = await call(batch.map(user => ({ to: pool, data: `${USER_CONFIG_SELECTOR}${user.slice(2).padStart(64, '0')}` })), blockHeight)
+      } catch {
+        results = batch.map(() => null)
+      }
+      batch.forEach((user, index) => words.set(user, results[index] ?? null))
+    }),
+  ])
+  const reserves = decodeReservesList(reservesRaw ?? null)
+  if (reserves == null) throw new Error(`Money Market pool ${pool} returned no reserve list at block ${blockHeight}`)
 
-  await forEachConcurrent(chunk(addresses, moneyMarketBatchSize()), moneyMarketPositionConcurrency(), async batch => {
-    const requests = batch.map(userAddress => ({
-      jsonrpc: '2.0' as const, id: `mm-user-config-${userAddress}`, method: 'eth_call' as const,
-      params: [{ to: poolProxy, data: `${USER_CONFIG_SELECTOR}${userAddress.slice(2).padStart(64, '0')}` }, `0x${blockHeight.toString(16)}`],
-    }))
-    let responses: { id?: unknown; result?: unknown }[]
+  for (const user of addresses) {
+    const result = words.get(user)
+    let bitmap: bigint
     try {
-      const raw = await fetchMoneyMarketRpc(rpcUrl, requests.length === 1 ? requests[0] : requests)
-      responses = Array.isArray(raw) ? raw : [raw]
+      if (result == null || result === '0x') throw new Error('unread')
+      bitmap = BigInt(result)
     } catch {
-      failedUsers.push(...batch)
-      return
+      failedUsers.push(user)
+      continue
     }
-    const byId = new Map<string, { result?: unknown }>()
-    for (const response of responses) {
-      if (response != null && typeof response === 'object' && typeof response.id === 'string') byId.set(response.id, response)
-    }
-    for (const userAddress of batch) {
-      const result = byId.get(`mm-user-config-${userAddress}`)?.result
-      // A user the node could not answer for keeps its previous anchor row rather
-      // than being written as "nothing is collateral": an unread bitmap is unknown,
-      // and a silent zero here would strip a live borrower's collateral badge.
-      if (typeof result !== 'string' || result === '0x') { failedUsers.push(userAddress); continue }
-      let bitmap: bigint
-      try { bitmap = BigInt(result) } catch { failedUsers.push(userAddress); continue }
-      reserves.forEach((reserve_address, index) => {
-        flags.push({
-          user_address: userAddress, pool_address: poolProxy, reserve_address,
-          block_height: blockHeight,
-          enabled: (bitmap >> BigInt(index * 2 + 1)) & 1n ? 1 : 0,
-          observed_at,
-        })
+    reserves.forEach((reserve_address, index) => {
+      flags.push({
+        user_address: user, pool_address: pool, reserve_address,
+        block_height: blockHeight,
+        enabled: (bitmap >> BigInt(index * 2 + 1)) & 1n ? 1 : 0,
+        observed_at,
       })
-    }
-  })
+    })
+  }
   return { flags, failedUsers }
 }
 
@@ -742,6 +784,7 @@ export async function extractMoneyMarketRows(
     entries: Array<{ row: RawEvmLogRow; id: string }>
   }>()
   const positionSeen = new Set<string>()
+  const positionReads = new Set<string>()
 
   for (const row of evmLogs) {
     if (!isCurrentMoneyMarketLog(row) || row.event_name == null) continue
@@ -834,6 +877,7 @@ export async function extractMoneyMarketRows(
       // Key by market too: a borrower active in two isolated markets at the same
       // block needs a separate getUserAccountData read against each pool.
       const readKey = `${row.block_height}:${market.poolProxy}:${participant}`
+      positionReads.add(openPositionKey(market.poolProxy, participant))
       const task = positionTasks.get(readKey)
       if (task == null) {
         positionTasks.set(readKey, {
@@ -922,5 +966,5 @@ export async function extractMoneyMarketRows(
     left.observation_id.localeCompare(right.observation_id)
   )
 
-  return { events, positions, reserves, warnings }
+  return { events, positions, reserves, warnings, positionReads }
 }

@@ -1,8 +1,13 @@
 // One cycle of the anchors loop (snapshot-atoken-anchors.ts --loop, the
 // `atoken-anchor` service), kept free of any connection so its decisions can be
-// exercised with fakes. Two B0 anchors and one repair share it, each keeping its
-// own gate:
+// exercised with fakes. A collateral seed, two B0 anchors and the repairs share it,
+// each keeping its own gate:
 //
+//   collateral seed (money_market_collateral_anchor): every cycle, no gate. Each
+//     candidate (user, pool) with no anchor row at or above B0 is read at one pinned
+//     block (collateralAnchor.ts); the raw indexer keeps a pair current from its
+//     first read on (moneyMarketTriggerPhase.ts). An empty table makes it the full
+//     enumeration; a dry run reads every candidate.
 //   aToken scaled-balance anchor (atoken_scaled_anchor): the reserve map is
 //     refreshed every cycle; once raw ingestion has completed every block from
 //     MM_LOGS_FROM to B0, the anchor is captured whole when its table is empty (or
@@ -10,7 +15,7 @@
 //     the sources name that has no row yet is read at B0 (atokenAnchor.ts,
 //     anchorKeysToRead). The candidates come from the money market's own logs and
 //     the models fed by them, whose coverage before B0 is partial, plus the
-//     collateral sweep and the Substrate legs of the registry assets over the
+//     collateral anchor and the Substrate legs of the registry assets over the
 //     aTokens, which fill in over time — so a holder no source named at the first
 //     capture is anchored by the cycle after a source names it, rather than never.
 //     The coverage gate holds under --force too.
@@ -31,10 +36,11 @@
 //     an OPEN warning, plus every block the full check finds without its rows
 //     (reconcileLmEntries, lmEntryCapture.ts), against the service's archive node.
 //
-// The aToken anchor runs first: the incentive candidate set includes the aToken
-// anchor's holders, so on a fresh database a cycle that establishes both reads the
-// fuller set. A failure in one never skips another — they are independent, and
-// each retries next cycle.
+// The collateral seed runs first and the aToken anchor second: the aToken anchor's
+// candidates include the users with a collateral bit set, and the incentive
+// candidate set includes the aToken anchor's holders, so on a fresh database a
+// cycle that establishes them all reads the fuller sets. A failure in one never
+// skips another — they are independent, and each retries next cycle.
 
 import type { LmReconcileResult } from './lmEntryCapture.js'
 import type { AnchorMode } from './atokenAnchor.js'
@@ -52,6 +58,11 @@ export interface AtokenAnchorPort {
   /** The gaps in completed raw ingestion over MM_LOGS_FROM..B0. */
   logGaps(): Promise<RawGap[]>
   /** 'full': every candidate; 'top-up': only the candidates without a row. */
+  capture(mode: AnchorMode): Promise<void>
+}
+
+export interface CollateralAnchorPort {
+  /** 'full': every candidate; 'top-up': only the candidates with no row at or above B0. */
   capture(mode: AnchorMode): Promise<void>
 }
 
@@ -98,6 +109,7 @@ export type AnchorOutcome = 'captured' | 'topped-up' | 'skipped' | 'failed'
 export type ReconcileOutcome = 'clean' | 'repaired' | 'open' | 'failed'
 
 export interface AnchorCycleResult {
+  collateral: AnchorOutcome
   atoken: AnchorOutcome
   incentive: AnchorOutcome
   lmEntries: ReconcileOutcome
@@ -110,11 +122,19 @@ export function reconcileOutcome(r: LmReconcileResult): ReconcileOutcome {
 }
 
 export async function runAnchorCycle(
-  ports: { atoken: AtokenAnchorPort; incentive: IncentiveAnchorPort; lmEntries: LmEntryReconcilePort },
-  opts: { forceAtoken: boolean; forceIncentive: boolean; atokenLogsFrom: number; incentiveLogsFrom: number; anchorBlock: number },
+  ports: { collateral: CollateralAnchorPort; atoken: AtokenAnchorPort; incentive: IncentiveAnchorPort; lmEntries: LmEntryReconcilePort },
+  opts: { forceCollateral: boolean; forceAtoken: boolean; forceIncentive: boolean; atokenLogsFrom: number; incentiveLogsFrom: number; anchorBlock: number },
   log: (record: Record<string, unknown>) => void,
 ): Promise<AnchorCycleResult> {
-  const result: AnchorCycleResult = { atoken: 'failed', incentive: 'failed', lmEntries: 'failed' }
+  const result: AnchorCycleResult = { collateral: 'failed', atoken: 'failed', incentive: 'failed', lmEntries: 'failed' }
+
+  try {
+    const mode: AnchorMode = opts.forceCollateral ? 'full' : 'top-up'
+    await ports.collateral.capture(mode)
+    result.collateral = mode === 'full' ? 'captured' : 'topped-up'
+  } catch (error) {
+    log({ type: 'mm_collateral_anchor_error', reason: error instanceof Error ? error.message : String(error) })
+  }
 
   try {
     await ports.atoken.refreshReserveMap()

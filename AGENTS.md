@@ -234,7 +234,11 @@ API it is a **versioned frozen contract**; concept: `~/.g/hydraken-api-concept.m
   extrinsic column); an unresolved one leaves its reserve unstated and counted, never guessed. Buckets ending before B0 (`reserveHistoryFrom`) carry no
   reserve figures: null, never zero. Health factors and the base-currency aggregates are the
   chain's getUserAccountData AS OBSERVED at its own block at or before the end, per isolated
-  market, never recomputed, interpolated or blended — an account with several EVM identities (the explorer's
+  market, never recomputed, interpolated or blended (the raw indexer observes a holder at its
+  own events and, in `src/raw/moneyMarketTriggerPhase.ts`, at every oracle price step ≥
+  `RAW_MM_PRICE_STEP_BP` against block b − 1 on a reserve it supplies or borrows, every
+  PoolConfigurator/provider log of its market and a chain-time cadence — hourly, GIGAHDX every
+  5 min; one read per (block, pool, user)) — an account with several EVM identities (the explorer's
   related set) sums every identity's legs and incentives but takes each market's observation from ONE identity,
   its primary H160 wherever it has one there (`chooseObservationHolders`); the account line sums priced legs ACROSS
   markets and carries no health factor. Unclaimed lending incentives ride beside the legs

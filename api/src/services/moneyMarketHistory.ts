@@ -674,8 +674,9 @@ export async function mmHistoryStart(client: ClickHouseClient, h160s: readonly s
 
 // The usage-as-collateral bit has two observers: the pool's Enabled/Disabled events
 // (exact, but the chain does not emit one for every way the bit moves) and the
-// swept bitmap read (money_market_collateral_anchor, complete but only as of its
-// sweep block). Whichever observed it LAST wins, the sweep taking a tie because it
+// bitmap read (money_market_collateral_anchor: getUserConfiguration at every block
+// that can move the user's bit, plus the anchors loop's seed of the users no block
+// has read). Whichever observed it LAST wins, the read taking a tie because it
 // reads the state after that block's events. Replayed rows repeat their values, so
 // the argMax is idempotent without FINAL; an older, unmerged sweep row is a valid
 // observation at its own block.
