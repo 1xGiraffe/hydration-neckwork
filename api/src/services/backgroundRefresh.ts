@@ -84,6 +84,15 @@ import { refreshOracleState } from './oracleService.ts'
 // wormholeNttService); it is rare by construction, since a clean bridge never
 // schedules one.
 //
+// Every chain read of a cycle names ONE block (pinnedBlock.ts: min(indexed head,
+// finalized head), Substrate storage by its hash, eth_call by its confirmed
+// Ethereum hash) and the cycle's output is stamped with it: hdx-locks,
+// proxy-multisig, contract-code, security-state, erc20-wallets (its delta sums and
+// audit) and mm-oracle-prices, as mm-incentives already did (lm-rewards pins the
+// finalized head; oracle-state and wormhole-backing pin a block of their own —
+// the node's head and the indexed head). Resolving it costs each cycle two small ClickHouse reads and three
+// to five RPC round trips.
+//
 // ClickHouse-only refreshers (money-market / Omnipool value snapshots, the
 // account-directory prewarm, tag syncs, asset/identity caches) are intentionally
 // NOT routed through here: they never touch node-full, are already well spaced,

@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../db/client.ts'
 import { xxhashAsU8a, keccakAsHex } from '@polkadot/util-crypto'
 import { u8aToHex, u8aConcat, hexToU8a } from '@polkadot/util'
 import { substrateAllKeys, substrateStorageBatch } from './substrateRpc.ts'
+import { loadPinnedSubstrateBlock } from './pinnedBlock.ts'
 import { RareEventLedger, type RareEventRow } from './rareEventLedger.ts'
 
 // EVM smart-contract registry.
@@ -444,9 +445,14 @@ function isPlantedSnapshotRow(row: SnapshotRow): boolean {
 }
 
 async function refreshCodeUncached(): Promise<void> {
+  // The enumeration and every code read are pinned to ONE block (pinnedBlock.ts:
+  // min(indexed head, finalized head)), and each row is stamped with it
+  // (snapshot_block), so a contract created or destroyed mid-cycle cannot be half
+  // in one snapshot.
+  const pin = await loadPinnedSubstrateBlock(client, undefined, 'contracts:code-pin')
   // Throws on truncation — a half-read enumeration must never publish (it would
   // mass-flag destruction). Callers keep the previous snapshot.
-  const keys = await substrateAllKeys(ACCOUNT_CODES_PREFIX)
+  const keys = await substrateAllKeys(ACCOUNT_CODES_PREFIX, undefined, undefined, pin.blockHash)
   if (!keys.length) return // an empty AccountCodes map is not a real chain state — keep previous
   const keyByAddress = new Map<string, string>()
   for (const key of keys) {
@@ -463,7 +469,7 @@ async function refreshCodeUncached(): Promise<void> {
   const toFetch = [...keyByAddress.keys()].filter(a => { const p = prev.get(a); return !p || !!p.destroyed })
   const codeByAddress = new Map<string, Uint8Array>()
   if (toFetch.length) {
-    const values = await substrateStorageBatch(toFetch.map(a => keyByAddress.get(a)!))
+    const values = await substrateStorageBatch(toFetch.map(a => keyByAddress.get(a)!), pin.blockHash)
     toFetch.forEach((address, i) => {
       const raw = values[i]
       if (!raw) return // transient read failure — retried next pass
@@ -484,17 +490,17 @@ async function refreshCodeUncached(): Promise<void> {
       // reclassifies on the next pass) but keep the stored code identity.
       const patternKind = classifyEvmAddress(address)
       const kind = patternKind !== 'contract' ? patternKind : isPlantedSnapshotRow(p) ? 'planted-unknown' : 'contract'
-      out.push({ address, kind, code_hash: p.code_hash, code_size: numeric(p.code_size), destroyed: 0 })
+      out.push({ address, kind, code_hash: p.code_hash, code_size: numeric(p.code_size), destroyed: 0, snapshot_block: pin.block })
     } else if (codeByAddress.has(address)) {
       const code = codeByAddress.get(address)!
-      out.push({ address, kind: classifyEvmAddress(address, code), code_hash: keccakAsHex(code), code_size: code.length, destroyed: 0 })
+      out.push({ address, kind: classifyEvmAddress(address, code), code_hash: keccakAsHex(code), code_size: code.length, destroyed: 0, snapshot_block: pin.block })
     }
     // else: new (or redeployed) address whose value read failed — no row this pass.
   }
   // Absent from a fully successful enumeration ⇒ destroyed (identity preserved).
   for (const [address, p] of prev) {
     if (!p.destroyed && !keyByAddress.has(address)) {
-      out.push({ address, kind: p.kind, code_hash: p.code_hash, code_size: numeric(p.code_size), destroyed: 1 })
+      out.push({ address, kind: p.kind, code_hash: p.code_hash, code_size: numeric(p.code_size), destroyed: 1, snapshot_block: pin.block })
     }
   }
   if (!out.length) return

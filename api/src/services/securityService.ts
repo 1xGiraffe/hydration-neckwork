@@ -6,6 +6,7 @@ import { storagePrefix, twox64Concat, u32At, u32Le, u64At, u128At } from './chai
 // have one; its id comes from the module that owns the Omnipool's own math.
 import { HUB_ASSET_ID } from './lpMath.ts'
 import { substrateStorageBatch, substrateAllKeys, SUBSTRATE_RPC_URL } from './substrateRpc.ts'
+import { loadPinnedBlock } from './pinnedBlock.ts'
 import { cachedSwr } from './cache.ts'
 import { RareEventLedger, type RareEventRow } from './rareEventLedger.ts'
 import { MS_PER_DAY, nominalBlockMsMismatch, resolveParaBlockTime, type BlockTimeSource, type ResolvedBlockTime } from './blockTime.ts'
@@ -418,7 +419,7 @@ export function registryLimitsFromEvents(rows: readonly RegistryEventRow[]): Map
 }
 
 interface NearRow { pool: string; user_address: string; debt_usd: number }
-async function loadNearNonEmode(): Promise<Map<string, { count: number; debtUsd: number }>> {
+async function loadNearNonEmode(at: EthBlockAt): Promise<Map<string, { count: number; debtUsd: number }>> {
   const debt = `tupleElement(pos, 'total_debt_base')`
   const hf = `tupleElement(pos, 'health_factor')`
   const res = await client.query({
@@ -446,9 +447,9 @@ async function loadNearNonEmode(): Promise<Map<string, { count: number; debtUsd:
   for (const [pool, list] of byPool) {
     const users = list.map(r => r.user_address)
     const [emode, userConfig, isolationReserve] = await Promise.all([
-      ethCallPerUser(pool, USER_EMODE_SELECTOR, users, word => (word === 0n ? null : true)),
-      ethCallPerUser(pool, USER_CONFIG_SELECTOR, users, word => word),
-      readIsolationReserves(pool),
+      ethCallPerUser(pool, USER_EMODE_SELECTOR, users, word => (word === 0n ? null : true), at),
+      ethCallPerUser(pool, USER_CONFIG_SELECTOR, users, word => word, at),
+      readIsolationReserves(pool, at),
     ])
     const directional = list.filter(r => {
       const key = r.user_address.toLowerCase()
@@ -469,13 +470,15 @@ async function loadNearNonEmode(): Promise<Map<string, { count: number; debtUsd:
 // enumeration per refresh is a handful of RPC calls.
 // One batched eth_call per chunk, same shape as the ERC-20 balance refresher.
 // `decode` turns a raw word into a value, or null to skip the entry.
-async function ethCallPerUser<T>(pool: string, selector: string, users: string[], decode: (word: bigint) => T | null): Promise<Map<string, T>> {
+// Every eth_call names the cycle's pinned block by its Ethereum hash (EIP-1898).
+type EthBlockAt = { blockHash: string }
+async function ethCallPerUser<T>(pool: string, selector: string, users: string[], decode: (word: bigint) => T | null, at: EthBlockAt): Promise<Map<string, T>> {
   const out = new Map<string, T>()
   for (let start = 0; start < users.length; start += EMODE_BATCH) {
     const chunk = users.slice(start, start + EMODE_BATCH)
     const body = chunk.map((user, id) => ({
       jsonrpc: '2.0', id, method: 'eth_call',
-      params: [{ to: pool, data: `${selector}${'0'.repeat(24)}${user.slice(2).toLowerCase()}` }, 'latest'],
+      params: [{ to: pool, data: `${selector}${'0'.repeat(24)}${user.slice(2).toLowerCase()}` }, at],
     }))
     const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 8000)
     try {
@@ -493,11 +496,11 @@ async function ethCallPerUser<T>(pool: string, selector: string, users: string[]
 
 // Which reserves of this pool carry a debt ceiling, by their index in the reserve
 // list — the index the user configuration bitmap is keyed on.
-async function readIsolationReserves(pool: string): Promise<boolean[]> {
+async function readIsolationReserves(pool: string, at: EthBlockAt): Promise<boolean[]> {
   const call = async (data: string) => {
     const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 8000)
     try {
-      const res = await fetch(SUBSTRATE_RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctrl.signal, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: pool, data }, 'latest'] }) })
+      const res = await fetch(SUBSTRATE_RPC_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctrl.signal, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params: [{ to: pool, data }, at] }) })
       const json = await res.json() as { result?: unknown }
       if (typeof json.result !== 'string') throw new Error(`eth_call ${data.slice(0, 10)} returned no result`)
       return json.result
@@ -523,11 +526,11 @@ export function isolationModeCollateral(bitmap: bigint, isolationReserve: boolea
   return only !== null && isolationReserve[only]
 }
 
-async function readAssetMap<T>(prefixHex: string, decode: (hex: string) => T | null | undefined): Promise<Map<number, T>> {
-  const keys = await substrateAllKeys(prefixHex)
+async function readAssetMap<T>(prefixHex: string, decode: (hex: string) => T | null | undefined, at: string): Promise<Map<number, T>> {
+  const keys = await substrateAllKeys(prefixHex, undefined, undefined, at)
   const out = new Map<number, T>()
   if (!keys.length) return out
-  const values = await substrateStorageBatch(keys)
+  const values = await substrateStorageBatch(keys, at)
   for (let i = 0; i < keys.length; i++) {
     const assetId = assetIdFromBlakeKey(keys[i])
     const raw = values[i]
@@ -541,10 +544,16 @@ async function readAssetMap<T>(prefixHex: string, decode: (hex: string) => T | n
 // Refreshes the in-memory chain snapshot. Runs on the coordinated background
 // refresher alongside the other node-full readers; a failure leaves the previous
 // snapshot in place and the response marks it with its own timestamp.
+// Every storage read and eth_call of a cycle names ONE block (pinnedBlock.ts:
+// min(indexed head, finalized head)) — the fuses, issuances and accumulators are
+// compared against each other, so they must describe one chain state — and the
+// snapshot's headBlock is that block (System.Number read at it, checked).
 export async function refreshSecurityChainState(): Promise<void> {
   if (refreshInFlight) return refreshInFlight
   refreshInFlight = (async () => {
-    const [limits, nearNonEmode] = await Promise.all([loadRegistryLimits(), loadNearNonEmode()])
+    const pin = await loadPinnedBlock(client, undefined, 'security:state-pin')
+    const at = pin.blockHash
+    const [limits, nearNonEmode] = await Promise.all([loadRegistryLimits(), loadNearNonEmode({ blockHash: pin.ethBlockHash })])
     const limitedAssets = [...limits.keys()].sort((a, b) => a - b)
 
     const plainKeys = [
@@ -563,19 +572,20 @@ export async function refreshSecurityChainState(): Promise<void> {
       .map(id => issuancePrefix + u8aToHex(twox64Concat(u32Le(id))).slice(2))
 
     const [plain, issuanceRaw, lockdowns, tradeLimits, addLimits, removeLimits, egressKeys, categories, pausedKeys] = await Promise.all([
-      substrateStorageBatch(plainKeys),
-      substrateStorageBatch(issuanceKeys),
-      readAssetMap(CB('AssetLockdownState'), decodeLockdownState),
-      readAssetMap(CB('TradeVolumeLimitPerAsset'), decodeRational),
-      readAssetMap<Rational | null>(CB('LiquidityAddLimitPerAsset'), decodeOptionalRational),
-      readAssetMap<Rational | null>(CB('LiquidityRemoveLimitPerAsset'), decodeOptionalRational),
-      substrateAllKeys(CB('EgressAccounts')),
-      readAssetMap(CB('GlobalAssetOverrides'), hex => { const b = hexToU8a(hex); return b.length ? (b[0] === 1 ? 'local' : 'external') : null }),
-      substrateAllKeys(storagePrefix('TransactionPause', 'PausedTransactions')),
+      substrateStorageBatch(plainKeys, at),
+      substrateStorageBatch(issuanceKeys, at),
+      readAssetMap(CB('AssetLockdownState'), decodeLockdownState, at),
+      readAssetMap(CB('TradeVolumeLimitPerAsset'), decodeRational, at),
+      readAssetMap<Rational | null>(CB('LiquidityAddLimitPerAsset'), decodeOptionalRational, at),
+      readAssetMap<Rational | null>(CB('LiquidityRemoveLimitPerAsset'), decodeOptionalRational, at),
+      substrateAllKeys(CB('EgressAccounts'), undefined, undefined, at),
+      readAssetMap(CB('GlobalAssetOverrides'), hex => { const b = hexToU8a(hex); return b.length ? (b[0] === 1 ? 'local' : 'external') : null }, at),
+      substrateAllKeys(storagePrefix('TransactionPause', 'PausedTransactions'), undefined, undefined, at),
     ])
 
     const headBlock = plain[0] ? u32At(hexToU8a(plain[0]), 0) : 0
     if (!headBlock) throw new Error('security snapshot: System.Number unreadable')
+    if (headBlock !== pin.block) throw new Error(`security snapshot: System.Number ${headBlock} at the pinned hash is not block ${pin.block}`)
     const nowMs = plain[1] ? Number(u64At(hexToU8a(plain[1]), 0)) : Date.now()
     const config = plain[2] ? decodeWithdrawConfig(plain[2]) : null
     const accumulator = plain[3] ? decodeWithdrawAccumulator(plain[3]) : { valueRaw: 0n, lastUpdateMs: 0 }

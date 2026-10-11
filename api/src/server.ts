@@ -79,6 +79,7 @@ import { initVolumeHistory } from './services/volumeHistory.ts'
 import { initOracleService } from './services/oracleService.ts'
 import { initSecurityService } from './services/securityService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
+import { initMmOraclePrices } from './services/mmOraclePrices.ts'
 import { initLmRewardService } from './services/lmRewardService.ts'
 import { initMmIncentiveService } from './services/mmIncentiveService.ts'
 import { initWormholeNttService } from './services/wormholeNttService.ts'
@@ -325,6 +326,9 @@ async function start() {
     initPendingHeadService(client)
     startPendingHeadService()
     initErc20WalletService(client)
+    // Must precede startBackgroundRefresh(): the mm-oracle-prices task pins its
+    // eth_calls to the indexed head it reads from ClickHouse.
+    initMmOraclePrices(client)
     // Must precede startBackgroundRefresh(): the lm-rewards cycle reads deposit
     // owners from ClickHouse and publishes its generation there.
     initLmRewardService(client)

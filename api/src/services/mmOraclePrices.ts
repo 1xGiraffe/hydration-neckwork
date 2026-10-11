@@ -1,4 +1,6 @@
+import type { ClickHouseClient } from '../db/client.ts'
 import { SUBSTRATE_RPC_URL } from './substrateRpc.ts'
+import { loadPinnedBlock } from './pinnedBlock.ts'
 import { CORE_MM_MARKET, assetIdFromMmAddress } from './explorerAssets.ts'
 
 // The primary money market's OWN oracle price for its reserves, as the fallback
@@ -18,7 +20,10 @@ import { CORE_MM_MARKET, assetIdFromMmAddress } from './explorerAssets.ts'
 // and unknown stays unpriced.
 //
 // Read by the coordinated background refresher (backgroundRefresh.ts) into
-// memory — never on a request path. Three batched round trips per cycle.
+// memory — never on a request path. Three batched round trips per cycle, every
+// eth_call naming ONE block by its Ethereum hash (pinnedBlock.ts: min(indexed head,
+// finalized head)), so the reserve list, the oracle, its prices and the sources'
+// rounds describe one chain state; the snapshot is stamped with that block.
 
 /** Oldest `updatedAt` accepted. The WBTC feed's longest gap over 2026-09-22..28 was ~17.6 h. */
 export const MM_ORACLE_MAX_AGE_SEC = 36 * 3600
@@ -48,7 +53,14 @@ type Call = { to: string; data: string }
 /** Batched eth_call; a call that reverts or goes unanswered is null, never zero. */
 export type TolerantEthCall = (calls: Call[]) => Promise<(string | null)[]>
 
-async function tolerantEthCall(calls: Call[]): Promise<(string | null)[]> {
+/** A block number tag or an EIP-1898 block-hash selector. */
+export type EthBlockAt = string | { blockHash: string }
+
+export function makeTolerantEthCall(at: EthBlockAt): TolerantEthCall {
+  return calls => tolerantEthCall(calls, at)
+}
+
+async function tolerantEthCall(calls: Call[], at: EthBlockAt): Promise<(string | null)[]> {
   const out: (string | null)[] = calls.map(() => null)
   for (let start = 0; start < calls.length; start += 50) {
     const chunk = calls.slice(start, start + 50)
@@ -57,7 +69,7 @@ async function tolerantEthCall(calls: Call[]): Promise<(string | null)[]> {
     try {
       const res = await fetch(SUBSTRATE_RPC_URL, {
         method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctrl.signal,
-        body: JSON.stringify(chunk.map((c, id) => ({ jsonrpc: '2.0', id, method: 'eth_call', params: [{ to: c.to, data: c.data }, 'latest'] }))),
+        body: JSON.stringify(chunk.map((c, id) => ({ jsonrpc: '2.0', id, method: 'eth_call', params: [{ to: c.to, data: c.data }, at] }))),
       })
       if (!res.ok) continue
       const json = await res.json() as unknown
@@ -126,7 +138,7 @@ export function acceptedOraclePrices(
  * when the market's plumbing cannot be read or its oracle is not quoted in USD
  * at 1e8 (then no reserve has a price we can state).
  */
-export async function readMmOraclePrices(ethCall: TolerantEthCall = tolerantEthCall, nowSec = Math.floor(Date.now() / 1000)): Promise<Map<number, MmOraclePrice> | null> {
+export async function readMmOraclePrices(ethCall: TolerantEthCall, nowSec = Math.floor(Date.now() / 1000)): Promise<Map<number, MmOraclePrice> | null> {
   const pool = CORE_MM_MARKET.poolProxy
   const [providerHex, reservesHex] = await ethCall([{ to: pool, data: SEL.addressesProvider }, { to: pool, data: SEL.getReservesList }])
   const provider = addressWord(providerHex)
@@ -157,15 +169,26 @@ export async function readMmOraclePrices(ethCall: TolerantEthCall = tolerantEthC
 
 let snapshot = new Map<number, MmOraclePrice>()
 let snapshotAt = 0
+let snapshotBlock = 0
 /** Refresher-held entries are dropped once the refresher stops renewing them. */
 const SNAPSHOT_MAX_AGE_MS = 20 * 60_000
 
+let client: ClickHouseClient | null = null
+export function initMmOraclePrices(c: ClickHouseClient): void { client = c }
+
 export async function refreshMmOraclePrices(): Promise<void> {
-  const next = await readMmOraclePrices()
+  // The pin needs the indexed head; without a client there is no block to read at.
+  if (!client) return
+  const pin = await loadPinnedBlock(client, undefined, 'mm:oracle-pin')
+  const next = await readMmOraclePrices(makeTolerantEthCall({ blockHash: pin.ethBlockHash }))
   if (!next) return
   snapshot = next
   snapshotAt = Date.now()
+  snapshotBlock = pin.block
 }
+
+/** The block the current snapshot was read at (0 before the first read). */
+export function currentMmOraclePricesBlock(): number { return snapshotBlock }
 
 export function currentMmOraclePrices(nowMs = Date.now()): ReadonlyMap<number, MmOraclePrice> {
   return nowMs - snapshotAt <= SNAPSHOT_MAX_AGE_MS ? snapshot : new Map()
