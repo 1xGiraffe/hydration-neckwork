@@ -13,6 +13,8 @@ import { CONTROLLER_LOGS_FROM } from './mmIncentiveAnchor.js'
 import { createIncentiveAnchorJob } from './mmIncentiveAnchorJob.js'
 import { reconcileLmEntries } from './lmEntryCapture.js'
 import { createLmCaptureChain, createLmCaptureSink, createLmCaptureSource, createLmReconcileSource } from './lmEntryPorts.js'
+import { reconcileAccountState } from './accountStateCapture.js'
+import { createAccountStateChain, createAccountStateReconcileSource, createAccountStateSink } from './accountStatePorts.js'
 import { createSnapshotRpcClient, resolveIndexedSnapshotAnchor } from './snapshotRuntime.js'
 import { createCollateralAnchorJob } from './collateralAnchor.js'
 
@@ -70,7 +72,11 @@ import { createCollateralAnchorJob } from './collateralAnchor.js'
 // raw_parser_warnings row of parser raw_lm_farm_entries, and each block the full
 // check finds without its entry rows, is re-read from the archive node and its
 // missing rows inserted (reconcileLmEntries; the manual tool is
-// snapshot-lm-entries.ts). RPC_URL must be an ARCHIVE node for that port: it reads
+// snapshot-lm-entries.ts). Then the account-state capture
+// (raw_account_state_observations): each (block, kind, account) with an open
+// raw_parser_warnings row of parser raw_account_state is re-read at its block with
+// the runtime that executed it (reconcileAccountState, accountStateCapture.ts).
+// RPC_URL must be an ARCHIVE node for these ports: it reads
 // state at historical hashes (compose: node-full, run with --state-pruning archive).
 // Without --loop this script is the aToken anchor alone, on the same gates.
 //
@@ -351,7 +357,10 @@ async function runOnce(): Promise<void> {
 const LM_RECONCILE_LIMIT = 2_000
 // Created on first use and kept: the chain port caches one runtime per spec.
 let lmChain: ReturnType<typeof createLmCaptureChain> | null = null
+let accountStateChain: ReturnType<typeof createAccountStateChain> | null = null
 let snapshotRpc: ReturnType<typeof createSnapshotRpcClient> | null = null
+// Open account-state warnings re-read per cycle.
+const ACCOUNT_STATE_RECONCILE_LIMIT = 2_000
 
 async function runLoopCycle(): Promise<void> {
   const startedAt = Date.now()
@@ -387,6 +396,15 @@ async function runLoopCycle(): Promise<void> {
           chain: lmChain,
           sink: createLmCaptureSink(client),
         }, { dryRun, concurrency: 4, limit: LM_RECONCILE_LIMIT })
+      },
+    },
+    accountState: {
+      reconcile: () => {
+        accountStateChain ??= createAccountStateChain(createSnapshotRpcClient(RPC_URL))
+        return reconcileAccountState(createAccountStateReconcileSource(client), {
+          chain: accountStateChain,
+          sink: createAccountStateSink(client),
+        }, { dryRun, limit: ACCOUNT_STATE_RECONCILE_LIMIT })
       },
     },
   }, {

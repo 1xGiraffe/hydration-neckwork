@@ -341,6 +341,22 @@ CREATE TABLE IF NOT EXISTS price_data.otc_activity (`block_height` UInt32, `even
 CREATE TABLE IF NOT EXISTS price_data.prices (`asset_id` UInt32, `block_height` UInt32 CODEC(T64, LZ4), `block_timestamp` DateTime DEFAULT toDateTime(0), `usd_price` Decimal(38, 12), `native_volume_buy` Decimal(38, 0) DEFAULT 0, `native_volume_sell` Decimal(38, 0) DEFAULT 0, `usd_volume_buy` Decimal(38, 12) DEFAULT 0, `usd_volume_sell` Decimal(38, 12) DEFAULT 0, `hops` UInt8 DEFAULT 0) ENGINE = ReplacingMergeTree(block_height) PARTITION BY toYYYYMM(toDateTime(block_height * 12)) ORDER BY (asset_id, block_height) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.proxy_call_activity (`real_account` String, `block_height` UInt32, `extrinsic_index` UInt32, `call_address` String, `block_timestamp` DateTime, `proxy_call_name` LowCardinality(String), `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY tuple() ORDER BY (real_account, block_height, extrinsic_index, call_address) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.raw_account_aliases (`block_height` UInt32, `block_timestamp` DateTime, `event_index` Nullable(UInt32), `extrinsic_index` Nullable(UInt32), `account_id` Nullable(String), `alias_type` LowCardinality(String), `alias_value` String, `evm_address` Nullable(String), `primary_profile` String, `relationship` LowCardinality(String), `evidence_json` String CODEC(ZSTD(6)), `confidence` Float32, `ingest_source` LowCardinality(String) DEFAULT 'sqd', `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, primary_profile, alias_type, alias_value) SETTINGS index_granularity = 8192;
+-- Account state as chain STORAGE held it at the end of a block: Balances.Locks
+-- (kind balances_locks), Vesting.VestingSchedules (vesting_schedules),
+-- ConvictionVoting.VotingFor (conviction_voting — every class of the account, {class: voting})
+-- and Proxy.Proxies (proxies), captured raw by the raw indexer itself (src/raw/accountState.ts,
+-- every raw pipeline) for every account a block's ConvictionVoting/Democracy, Vesting, Staking,
+-- GigaHdx, Balances lock and Proxy events — or a Proxy.remove_proxies / vote-removal / unlock call,
+-- which emit none — name, decoded with the runtime that EXECUTED the block. `value_json` is the
+-- item's whole value for the account (canonical JSON, the storage default when it holds nothing),
+-- so argMax(value_json, block_height) over block_height <= B per (kind, account_id) is the
+-- account's state at B for any B at or after its first row. `triggers` names the events/calls
+-- (or 'seed': the one pinned full read at the hook's start block, src/scripts/snapshot-account-state.ts).
+-- A (kind, account) it cannot read is a raw_parser_warnings row (parser raw_account_state),
+-- re-read each cycle by the anchors loop (atoken-anchor). `sub_key` is reserved for an item
+-- stored per key below the account ('' for every kind today). Chain state at fixed blocks, so a
+-- re-run rewrites identical rows; not reproducible from raw (AGENTS.md, chain-state exception).
+CREATE TABLE IF NOT EXISTS price_data.raw_account_state_observations (`block_height` UInt32, `block_timestamp` DateTime, `kind` LowCardinality(String), `account_id` String, `sub_key` String, `value_json` String CODEC(ZSTD(6)), `triggers` Array(LowCardinality(String)), `block_hash` String, `spec_version` UInt32, `ingest_source` LowCardinality(String) DEFAULT 'sqd', `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, kind, account_id, sub_key) SETTINGS index_granularity = 8192;
 -- observation_id: same composite key as account_balance_history, but this table's
 -- block-first ORDER BY groups it far less tightly, so it cost 3.18 GiB under LZ4.
 -- ZSTD(6) halves it. No request-time query reads this column (it exists to make the

@@ -24,6 +24,7 @@ import type {
   RawXcmActivityRow,
 } from './types.js'
 import type { LmFarmEntryRow } from './lmFarmEntries.js'
+import type { AccountStateRow } from './accountState.js'
 import type { MoneyMarketOraclePriceRow } from './moneyMarketPrices.js'
 
 function chunkSizeForBalanceObservations(): number {
@@ -53,6 +54,7 @@ export class RawClickHouseStore {
   private readonly moneyMarketReservesBatch: BatchAccumulator<RawMoneyMarketReserveRow>
   private readonly xcmActivityBatch: BatchAccumulator<RawXcmActivityRow>
   private readonly lmFarmEntriesBatch: BatchAccumulator<LmFarmEntryRow>
+  private readonly accountStateBatch: BatchAccumulator<AccountStateRow>
   private readonly moneyMarketOraclePricesBatch: BatchAccumulator<MoneyMarketOraclePriceRow>
   private readonly moneyMarketCollateralAnchorsBatch: BatchAccumulator<RawMoneyMarketCollateralFlagRow>
   private readonly parserWarningsBatch: BatchAccumulator<RawParserWarningRow>
@@ -72,6 +74,7 @@ export class RawClickHouseStore {
     this.moneyMarketReservesBatch = new BatchAccumulator<RawMoneyMarketReserveRow>(flushThreshold)
     this.xcmActivityBatch = new BatchAccumulator<RawXcmActivityRow>(flushThreshold)
     this.lmFarmEntriesBatch = new BatchAccumulator<LmFarmEntryRow>(flushThreshold)
+    this.accountStateBatch = new BatchAccumulator<AccountStateRow>(flushThreshold)
     this.moneyMarketOraclePricesBatch = new BatchAccumulator<MoneyMarketOraclePriceRow>(flushThreshold)
     this.moneyMarketCollateralAnchorsBatch = new BatchAccumulator<RawMoneyMarketCollateralFlagRow>(flushThreshold)
     this.parserWarningsBatch = new BatchAccumulator<RawParserWarningRow>(flushThreshold)
@@ -127,6 +130,10 @@ export class RawClickHouseStore {
 
   addLmFarmEntries(rows: LmFarmEntryRow[]): void {
     this.lmFarmEntriesBatch.add(rows)
+  }
+
+  addAccountStateObservations(rows: AccountStateRow[]): void {
+    this.accountStateBatch.add(rows)
   }
 
   addMoneyMarketOraclePrices(rows: MoneyMarketOraclePriceRow[]): void {
@@ -246,6 +253,10 @@ export class RawClickHouseStore {
     await this.flushBatch(this.lmFarmEntriesBatch, 'price_data.raw_lm_farm_entries')
   }
 
+  async flushAccountStateObservations(): Promise<void> {
+    await this.flushBatch(this.accountStateBatch, 'price_data.raw_account_state_observations')
+  }
+
   async flushMoneyMarketOraclePrices(): Promise<void> {
     await this.flushBatch(this.moneyMarketOraclePricesBatch, 'price_data.raw_money_market_oracle_prices')
   }
@@ -281,6 +292,7 @@ export class RawClickHouseStore {
       this.moneyMarketReservesBatch.size,
       this.xcmActivityBatch.size,
       this.lmFarmEntriesBatch.size,
+      this.accountStateBatch.size,
       this.moneyMarketOraclePricesBatch.size,
       this.moneyMarketCollateralAnchorsBatch.size,
       this.parserWarningsBatch.size,
@@ -301,6 +313,7 @@ export class RawClickHouseStore {
     await this.flushMoneyMarketReserves()
     await this.flushXcmActivity()
     await this.flushLmFarmEntries()
+    await this.flushAccountStateObservations()
     await this.flushMoneyMarketOraclePrices()
     await this.flushMoneyMarketCollateralAnchors()
     await this.flushParserWarnings()

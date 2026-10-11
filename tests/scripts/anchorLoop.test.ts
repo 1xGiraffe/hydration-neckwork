@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { atokenAnchorDecision, incentiveAnchorDecision, reconcileOutcome, runAnchorCycle, type AtokenAnchorPort, type CollateralAnchorPort, type IncentiveAnchorPort, type LmEntryReconcilePort } from '../../src/scripts/anchorLoop.ts'
+import { accountStateReconcileOutcome, atokenAnchorDecision, incentiveAnchorDecision, reconcileOutcome, runAnchorCycle, type AtokenAnchorPort, type CollateralAnchorPort, type IncentiveAnchorPort, type LmEntryReconcilePort } from '../../src/scripts/anchorLoop.ts'
 import type { LmReconcileResult } from '../../src/scripts/lmEntryCapture.ts'
 
 // The anchors loop (snapshot-atoken-anchors.ts --loop, the atoken-anchor service):
@@ -178,5 +178,29 @@ describe('the service wiring', () => {
     expect(atoken).toContain('reconcileLmEntries(createLmReconcileSource(client)')
     const compose = readFileSync(new URL('../../docker-compose.yml', import.meta.url), 'utf8')
     expect(compose).toContain('"src/scripts/snapshot-atoken-anchors.ts", "--loop"')
+  })
+})
+
+describe('the account-state reconcile port', () => {
+  const RESULT = { openBefore: 0, truncated: false, blocks: 0, rows: 0, failed: [], openAfter: 0 }
+
+  it('runs last, when given, and logs its outcome', async () => {
+    const f = fakes({ atokenRows: 900, incentiveRows: 70 })
+    const calls = f.calls
+    const result = await runAnchorCycle({ ...f.ports, accountState: { reconcile: async () => { calls.push('account.reconcile'); return { ...RESULT, openBefore: 3, blocks: 2, rows: 6, openAfter: 0 } } } }, opts, f.log)
+    expect(result).toEqual({ collateral: 'topped-up', atoken: 'topped-up', incentive: 'topped-up', lmEntries: 'clean', accountState: 'repaired' })
+    expect(calls.at(-1)).toBe('account.reconcile')
+    expect(f.logs.at(-1)).toMatchObject({ type: 'account_state_reconcile', outcome: 'repaired', open_before: 3, blocks: 2, rows: 6, open_after: 0 })
+  })
+
+  it('is open while a block still fails, and a throw neither stops the other ports nor escapes', async () => {
+    expect(accountStateReconcileOutcome({ ...RESULT })).toBe('clean')
+    expect(accountStateReconcileOutcome({ ...RESULT, blocks: 1, failed: [{ block: 1, reason: 'pruned' }], openAfter: 1 })).toBe('open')
+    expect(accountStateReconcileOutcome({ ...RESULT, truncated: true })).toBe('open')
+    const f = fakes({ atokenRows: 900, incentiveRows: 70 })
+    const result = await runAnchorCycle({ ...f.ports, accountState: { reconcile: async () => { throw new Error('clickhouse down') } } }, opts, f.log)
+    expect(result.accountState).toBe('failed')
+    expect(result.lmEntries).toBe('clean')
+    expect(f.logs.at(-1)).toEqual({ type: 'account_state_reconcile_error', reason: 'clickhouse down' })
   })
 })
