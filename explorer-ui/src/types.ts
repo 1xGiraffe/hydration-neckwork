@@ -1030,6 +1030,8 @@ export interface ActivityRow {
     pool: AccountRef | null
     pair: { blockHeight: number; eventIndex: number } | null
     pairMessageId: string | null
+    // Settlement only: the account the pool's fast delivery paid — where the transfer went.
+    recipient?: AccountRef | null
   }
   mmAction?: string
   mmMarketKey?: string

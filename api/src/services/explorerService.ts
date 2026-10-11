@@ -12272,6 +12272,10 @@ export interface ActivityRow {
     pool: AccountRef | null
     pair: { blockHeight: number; eventIndex: number } | null
     pairMessageId: string | null
+    // On a settlement: who the pool's fast delivery paid — where the transfer actually
+    // went (the settlement itself only refills the pool). Absent on a delivery, whose
+    // own `who` is that recipient.
+    recipient?: AccountRef | null
   }
   dca?: boolean
   // 'failed' = an execution that did not trade; 'scheduled' = the schedule itself,
@@ -15979,8 +15983,8 @@ export function fastRelayDeliveryRow(leg: FastRelayLeg, index: FastRelayIndex, p
 }
 
 // A settlement's NTT row, marked as such and pointed at the delivery it settled. Its
-// recipient is the pool, which is exactly what it shows; the user's arrival is the
-// delivery row this links to.
+// on-chain recipient is the pool, which `who` keeps; the transfer's real destination is
+// the account the delivery paid, carried as `recipient` so the row can say where it went.
 export function annotateFastRelaySettlements(rows: ActivityRow[], index: FastRelayIndex): void {
   if (!index.settlementKeyOf.size) return
   for (const r of rows) {
@@ -15988,7 +15992,7 @@ export function annotateFastRelaySettlements(rows: ActivityRow[], index: FastRel
     const key = index.settlementKeyOf.get(`${r.blockHeight}:${r.eventIndex}`)
     const leg = key ? index.deliveryLegOf.get(key) : undefined
     if (!leg) continue
-    r.fastRelay = { role: 'settlement', pool: r.who, pair: { blockHeight: leg.block_height, eventIndex: leg.event_index }, pairMessageId: null }
+    r.fastRelay = { role: 'settlement', pool: r.who, pair: { blockHeight: leg.block_height, eventIndex: leg.event_index }, pairMessageId: null, recipient: accountRef(leg.to_acc) }
   }
 }
 
