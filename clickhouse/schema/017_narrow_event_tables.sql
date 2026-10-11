@@ -21,3 +21,16 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.wormhole_ntt_logs_mv TO price_
 -- them each cycle; from raw_events that was a ~1 GiB scan for ~1.9k rows.
 CREATE TABLE IF NOT EXISTS price_data.referendum_preimage_events (`block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `event_name` LowCardinality(String), `hash` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (block_height, event_index) SETTINGS index_granularity = 8192;
 CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.referendum_preimage_events_mv TO price_data.referendum_preimage_events (`block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `event_name` LowCardinality(String), `hash` String, `ingested_at` DateTime) AS SELECT block_height, event_index, extrinsic_index, event_name, lower(multiIf(raw_events.event_name = 'Preimage.Noted', JSONExtractString(args_json, 'hash'), raw_events.event_name = 'Referenda.Submitted', JSONExtractString(args_json, 'proposal', 'hash'), JSONExtractString(args_json, 'proposalHash'))) AS hash, ingested_at FROM price_data.raw_events WHERE raw_events.event_name IN ('Preimage.Noted', 'Referenda.Submitted', 'Democracy.PreimageNoted', 'Democracy.PreimageUsed');
+
+-- HDX balance hours: per (account, chain-time hour) the newest block that observed
+-- the account's HDX (asset 0) balance non-zero, and the newest that observed it
+-- zero. A holder's EXIT is the first per-block observation of zero after its last
+-- non-zero one; since every observation after the last non-zero block is zero, that
+-- is the first hour whose last_zero_block passes the account's max last_nonzero_block
+-- (hdxChurnSql, api/src/services/hdxService.ts). Blocks, not timestamps: consecutive
+-- blocks can share a timestamp. The full-state sweep's restatements
+-- (snapshot_bootstrap) are excluded, so the exit never depends on the sweep's
+-- cadence; a reconcile repair (snapshot_reconcile) is a real observation and counts.
+-- max is idempotent, so a replayed raw range changes nothing.
+CREATE TABLE IF NOT EXISTS price_data.hdx_balance_hours (`account_id` String, `interval_start` DateTime, `last_nonzero_block` SimpleAggregateFunction(max, UInt32), `last_zero_block` SimpleAggregateFunction(max, UInt32)) ENGINE = AggregatingMergeTree ORDER BY (account_id, interval_start) SETTINGS index_granularity = 8192;
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.hdx_balance_hours_mv TO price_data.hdx_balance_hours (`account_id` String, `interval_start` DateTime, `last_nonzero_block` UInt32, `last_zero_block` UInt32) AS SELECT account_id, toStartOfHour(block_timestamp) AS interval_start, if(toUInt256OrZero(ifNull(raw_balance_observations.total, '')) > 0, block_height, toUInt32(0)) AS last_nonzero_block, if(toUInt256OrZero(ifNull(raw_balance_observations.total, '')) = 0, block_height, toUInt32(0)) AS last_zero_block FROM price_data.raw_balance_observations WHERE raw_balance_observations.asset_id = '0' AND raw_balance_observations.account_id != '' AND raw_balance_observations.source_kind != 'snapshot_bootstrap' AND isNotNull(toUInt256OrNull(raw_balance_observations.total));

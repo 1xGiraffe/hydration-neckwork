@@ -143,6 +143,17 @@ describe('trend builders over a zoom window', () => {
     expect(sql).toContain('< toDateTime({end:UInt32})')
   })
 
+  // An exit is the first zero observation after the last nonzero one, compared by
+  // block on the sweep-free hdx_balance_hours — never the last nonzero
+  // observation's time, which a periodic full-state sweep moves.
+  it('dates churn exits by the zero crossing, not the last nonzero observation', () => {
+    const sql = hdxChurnSql(g)
+    expect(sql).toContain('FROM price_data.hdx_balance_hours')
+    expect(sql).toContain('z > last_nonzero_block')
+    expect(sql).not.toContain('last_nonzero_state')
+    expect(sql).not.toContain('account_asset_latest_balances')
+  })
+
   it('reads prices from hour candles below a day, day candles at a day or more', () => {
     expect(hdxPriceSql(g)).toContain('price_data.ohlc_1h')
     expect(hdxPriceSql(fullChartGrid(MONTHLY_GRAIN, ['2026-08-01']))).toContain('price_data.ohlc_1d')
