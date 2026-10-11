@@ -340,6 +340,12 @@ export interface ActivityRow {
   destTxUrl?: string | null
   /** 'Snowbridge' | 'Wormhole' | 'Basejump' — how it crossed, when not plain XCM. */
   bridge?: string | null
+  /**
+   * A Wormhole Relay fast transfer is two rows: the relay pool's `delivery` (pays the
+   * user out of its inventory) and the NTT `settlement` (mints into the pool).
+   * `recipient` (settlement only) is the account the delivery paid — where it went.
+   */
+  fastRelay?: { role: 'delivery' | 'settlement'; recipient?: AccountRef | null }
 
   // money market
   mmAction?: string

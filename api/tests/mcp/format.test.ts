@@ -1301,3 +1301,29 @@ describe('formatUserRevenue holder class', () => {
     expect(formatUserRevenue(null)).toBe('not yet published')
   })
 })
+
+// A Wormhole Relay settlement mints into the relay pool (its `who`). The line must end
+// its arrow at the account the pool's fast delivery paid — where the transfer went —
+// and say what the row is, so an agent never reads the pool as the destination.
+describe('activityLine — Wormhole Relay fast transfer', () => {
+  const pool = { accountId: '0x4554480070e9b12c3b19cb5f0e59984a5866278ab69df9760000000000000000', address: '0x70e9b12c3b19cb5f0e59984a5866278ab69df976', tag: { id: 'moonbeam-wormhole', name: 'Wormhole Relay' } }
+  const user = { accountId: '0x45544800a140d8a37f5d94c70a071e08cda9613f17ed23e80000000000000000', address: '0xa140d8a37f5d94c70a071e08cda9613f17ed23e8' }
+  const settlement = {
+    type: 'xcm', blockHeight: 15675946, timestamp: '2026-10-11 17:58:42', eventIndex: 5, extrinsicIndex: 2,
+    who: pool, to: null, asset: { assetId: 21, symbol: 'USDC', decimals: 6 }, assetIn: null, assetOut: null,
+    amount: '8918733855', amountIn: null, amountOut: null, valueUsd: 8921.5,
+    xcmDir: 'in', bridge: 'Wormhole', fromChain: 'Ethereum', fromAccount: { ...user, kind: 'AccountKey20', raw: user.address },
+    fastRelay: { role: 'settlement', recipient: user },
+  } as unknown as ActivityRow
+
+  it('ends the arrow at the recipient, not the pool, and names the settlement', () => {
+    const line = activityLine(settlement, BASE, NOW)
+    expect(line).toContain('relay settlement')
+    expect(line).not.toMatch(/→ [^|]*Wormhole Relay/)
+  })
+
+  it('marks the pool payout as the fast delivery', () => {
+    const delivery = { ...settlement, who: user, fastRelay: { role: 'delivery' } } as unknown as ActivityRow
+    expect(activityLine(delivery, BASE, NOW)).toContain('fast delivery from the relay pool')
+  })
+})

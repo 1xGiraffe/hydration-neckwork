@@ -311,8 +311,11 @@ const actors = (r: ActivityRow): string | null => {
   if (r.type === 'xcm') {
     const far = r.xcmDir === 'in' ? r.fromAccount : r.destAccount
     const farLabel = far ? accountLabel(far) : null
-    if (!who && !farLabel) return null
-    return r.xcmDir === 'in' ? `${farLabel ?? DASH} → ${who ?? DASH}` : `${who ?? DASH} → ${farLabel ?? DASH}`
+    // A relay settlement mints into the pool (its `who`); the transfer went to the
+    // account the pool's fast delivery paid, so that is the arrow's end.
+    const local = r.fastRelay?.role === 'settlement' && r.fastRelay.recipient ? accountLabel(r.fastRelay.recipient) : who
+    if (!local && !farLabel) return null
+    return r.xcmDir === 'in' ? `${farLabel ?? DASH} → ${local ?? DASH}` : `${who ?? DASH} → ${farLabel ?? DASH}`
   }
   if (r.type === 'xcswap' && r.xcswapRecipient) {
     return `${who ?? DASH} → ${shortForeignAddress(r.xcswapRecipient)}`
@@ -347,6 +350,8 @@ function qualifiers(r: ActivityRow): string[] {
       const chain = r.xcmDir === 'in' ? r.fromChain : r.destChain
       out.push(`${r.xcmDir === 'in' ? 'in from' : 'out to'} ${chain ?? 'unknown chain'}`)
       if (r.xcmExecuted === false) out.push('not executed at destination')
+      if (r.fastRelay?.role === 'settlement') out.push('relay settlement: refills the relay pool, which already paid the recipient')
+      if (r.fastRelay?.role === 'delivery') out.push('fast delivery from the relay pool')
       break
     }
     case 'xcswap':
