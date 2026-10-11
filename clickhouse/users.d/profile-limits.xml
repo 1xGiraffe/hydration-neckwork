@@ -60,11 +60,28 @@
         <default>
             <max_execution_time>600</max_execution_time>
             <timeout_overflow_mode>throw</timeout_overflow_mode>
+            <!--
+              Per-query memory ceiling, 20 GiB (stock: 0 = unlimited).
+
+              An ad-hoc query that joins a table to the whole of raw_extrinsics with the filter only on the left side builds the right side in RAM; unbounded, it can exhaust the host's memory before max_execution_time fires.
+
+              Set from 14 days of system.query_log: the services peak at
+              3.7 GiB, the largest legitimate ad-hoc statement at 11.1 GiB. 20 GiB
+              changes nothing that ran; an unbounded join now fails alone with
+              MEMORY_LIMIT_EXCEEDED. A statement that needs more says so
+              (`SETTINGS max_memory_usage = …`) up to the 32 GiB constraint, which also
+              refuses 0 (unlimited), the same way max_execution_time's does.
+            -->
+            <max_memory_usage>21474836480</max_memory_usage>
             <constraints>
                 <max_execution_time>
                     <min>1</min>
                     <max>14400</max>
                 </max_execution_time>
+                <max_memory_usage>
+                    <min>1</min>
+                    <max>34359738368</max>
+                </max_memory_usage>
             </constraints>
         </default>
     </profiles>
