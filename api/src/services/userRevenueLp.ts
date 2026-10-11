@@ -345,11 +345,6 @@ async function stableswapAddFees(client: ClickHouseClient, w: FoldWindow): Promi
   return out
 }
 
-export interface PoolBuild {
-  ledgers: Ledger[]
-  balances: BalanceBook
-}
-
 /** A2: stableswap fee legs and remove fees, shared pro rata by the pool's share holders; the remover's remove fee as lp_exit_fee. */
 export async function buildStableswap(client: ClickHouseClient, w: FoldWindow, pools: readonly StableswapPool[], balances: BalanceBook): Promise<Ledger[]> {
   const out = new LedgerMap(w.hours)

@@ -21,7 +21,7 @@ import { cachedSwr } from './cache.ts'
 import { assetDescriptor } from './explorerAssets.ts'
 import { scaledUsd } from './valuation.ts'
 import {
-  HOLDER_CLASSES, USER_REVENUE_STREAMS, USER_REVENUE_UNMEASURED, hollarInterestFactSql, userRevenueDisplayStream, userRevenueDisplayStreamSql,
+  USER_REVENUE_UNMEASURED, hollarInterestFactSql, userRevenueDisplayStream, userRevenueDisplayStreamSql,
   type HolderClass, type UserRevenueUnmeasured,
 } from './userRevenueStreams.ts'
 
@@ -253,55 +253,6 @@ export function unmeasuredList(rows: UnmeasuredTokenRow[]): UserRevenueUnmeasure
       }
     }),
   ]
-}
-
-// ---------------------------------------------------------------------------
-// Bucketed series (global, from the hourly facts)
-// ---------------------------------------------------------------------------
-
-export type UserRevenueGrain = 'hour' | 'day' | 'week' | 'month'
-
-const GRAIN_SQL: Record<UserRevenueGrain, string> = {
-  hour: 'hour',
-  day: 'toStartOfDay(hour)',
-  week: 'toStartOfWeek(hour, 1)',
-  month: 'toStartOfMonth(hour)',
-}
-
-export interface UserRevenueBucketRow {
-  /** Bucket start, unix s (UTC; weeks Monday-anchored). */
-  t: number
-  stream: string
-  holderClass: HolderClass
-  /** Net, 1e-12 USD. */
-  usd: bigint
-  unpriced: number
-}
-
-/**
- * NET USD per (bucket, stream, holder class) over `[from, to)` (unix s, hour
- * starts), from the hourly facts — a cell there already nets every account's
- * facts of the hour, so it cannot be split by sign: a chart that shows earned and
- * paid apart reads userRevenueDayBuckets.
- */
-export async function userRevenueBuckets(client: ClickHouseClient, opts: {
-  grain: UserRevenueGrain; from: number; to: number; stream?: string; holderClass?: HolderClass
-}): Promise<UserRevenueBucketRow[]> {
-  const res = await client.query({
-    query: `-- ur:buckets
-SELECT toUnixTimestamp(${GRAIN_SQL[opts.grain]}) AS t, stream, holder_class,
-       toString(sum(amount_usd)) AS usd, sum(unpriced) AS unpriced
-FROM ${USER_REVENUE_HOURLY_TABLE}
-WHERE hour >= toDateTime({from:UInt32}) AND hour < toDateTime({to:UInt32}) AND ${FACT_SQL}
-  ${opts.stream ? 'AND stream = {stream:String}' : ''}
-  ${opts.holderClass ? 'AND holder_class = {cls:String}' : ''}
-GROUP BY t, stream, holder_class
-ORDER BY t, stream, holder_class`,
-    query_params: { from: opts.from, to: opts.to, stream: opts.stream ?? '', cls: opts.holderClass ?? '' },
-    format: 'JSONEachRow',
-  })
-  return (await res.json<{ t: string; stream: string; holder_class: HolderClass; usd: string; unpriced: string }>())
-    .map(r => ({ t: Number(r.t), stream: r.stream, holderClass: r.holder_class, usd: readUsd(r.usd), unpriced: Number(r.unpriced) }))
 }
 
 /** Earned / paid / net per (bucket, stream, holder class) from the ACCOUNT facts. */
@@ -816,7 +767,3 @@ export function windowFirstDay(throughSeconds: number, days: number): string {
   const lastDayStart = Math.floor((throughSeconds - 1) / DAY_S) * DAY_S
   return utcDay(lastDayStart - (days - 1) * DAY_S)
 }
-
-/** Stream ids in the shared order, and the class list — re-exported so surfaces import one module. */
-export const USER_REVENUE_STREAM_ORDER: readonly string[] = USER_REVENUE_STREAMS.map(s => s.id)
-export { HOLDER_CLASSES }

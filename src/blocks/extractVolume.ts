@@ -39,7 +39,7 @@ import {
 /**
  * Unified swap event structure across all pool types
  */
-export interface DecodedSwap {
+interface DecodedSwap {
   assetIn: number;
   assetOut: number;
   amountIn: bigint;
@@ -322,36 +322,6 @@ export function calculateUsdVolume(
   const fractionalStr = fractionalPart.toString().padStart(12, '0');
 
   return `${integerPart}.${fractionalStr}`;
-}
-
-/**
- * Convert a decoded swap to two PriceRow entries (sell + buy volumes)
- *
- * Each swap generates exactly 2 rows:
- * 1. assetIn: native_volume_sell + usd_volume_sell (buy volumes = 0)
- * 2. assetOut: native_volume_buy + usd_volume_buy (sell volumes = 0)
- *
- * @param swap - Decoded swap event
- * @param blockHeight - Block height for the rows
- * @param prices - Map of asset ID to USD price
- * @param decimals - Map of asset ID to decimal places
- * @returns Array of exactly 2 PriceRow entries
- */
-export function swapToVolumeRows(
-  swap: DecodedSwap,
-  blockHeight: number,
-  prices: PriceMap,
-  decimals: AssetDecimals
-): PriceRow[] {
-  return tradeToVolumeRows(
-    {
-      inputs: [{ assetId: swap.assetIn, amount: swap.amountIn }],
-      outputs: [{ assetId: swap.assetOut, amount: swap.amountOut }],
-    },
-    blockHeight,
-    prices,
-    decimals
-  );
 }
 
 function tradeToVolumeRows(

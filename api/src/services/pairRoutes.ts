@@ -532,17 +532,6 @@ export function hopRoundTrip(state: RouteState, hop: Hop, refUsd: number, price:
   return f != null && b != null && f * b > 0 && Number.isFinite(f * b) ? f * b : null
 }
 
-/** A route's round-trip factor at one state (the product of its hops'); 0 when a hop cannot carry the notional. */
-export function routeRoundTrip(state: RouteState, hops: readonly Hop[], refUsd: number, usd: ReadonlyMap<number, number>, decimals: Decimals, fees: FeeModel): number {
-  let r = 1
-  for (const h of hops) {
-    const v = hopRoundTrip(state, h, refUsd, usd.get(h.from), decimals, fees)
-    if (v == null) return 0
-    r *= v
-  }
-  return r
-}
-
 export function buildRouteGraph(state: RouteState, decimals: Decimals, fees: FeeModel, selection?: RouteSelection, era: RouteEra = CURRENT_ROUTE_ERA): RouteGraph {
   const trusted = new Map<number, Edge[]>()
   const xyk = new Map<number, Edge[]>()
@@ -776,16 +765,6 @@ function trustedReach(graph: RouteGraph, source: number, maxHops: number): Map<n
   return reach
 }
 
-/** Best trusted-only route from `source` to every reachable asset (see Reach for how routes compete). */
-export function bestTrustedFrom(graph: RouteGraph, source: number, maxHops = MAX_ROUTE_HOPS): Map<number, RouteChoice> {
-  const out = new Map<number, RouteChoice>()
-  for (const [to, r] of trustedReach(graph, source, maxHops)) {
-    const c = pick(r)
-    if (c) out.set(to, c)
-  }
-  return out
-}
-
 const pairKey = (lo: number, hi: number) => `${lo}:${hi}`
 
 /**
@@ -894,16 +873,6 @@ export function routeFinder(graph: RouteGraph, maxHops = MAX_ROUTE_HOPS): RouteF
   })
 }
 
-/**
- * The best route for every unordered pair of `assets` (keyed `lo:hi`, the route
- * selling lo for hi). Pairs with no route are absent.
- */
-export function bestRoutes(graph: RouteGraph, assets: readonly number[], maxHops = MAX_ROUTE_HOPS): Map<string, RouteChoice> {
-  const out = new Map<string, RouteChoice>()
-  for (const [key, list] of routeCandidates(graph, assets, maxHops)) out.set(key, list[0]!)
-  return out
-}
-
 /** The best few routes for every unordered pair of `assets` (keyed `lo:hi`, selling lo for hi), best first. */
 export function routeCandidates(graph: RouteGraph, assets: readonly number[], maxHops = MAX_ROUTE_HOPS): Map<string, RouteChoice[]> {
   const out = new Map<string, RouteChoice[]>()
@@ -920,26 +889,6 @@ export function routeCandidates(graph: RouteGraph, assets: readonly number[], ma
 
 /** A route that is nothing but one Omnipool crossing — priced exactly by the USD ratio already. */
 export const isPureOmnipool = (hops: readonly Hop[]): boolean => hops.length === 1 && hops[0]!.kind === 'omni'
-
-/** The route's spot before fees at ROUTE_PRICE_SCALE digits, as an integer; null if a hop cannot trade. */
-export function routeSpot(state: RouteState, hops: readonly Hop[], decimals: Decimals, hopCache?: Map<string, Ratio | null>): bigint | null {
-  let num = 1n
-  let den = 1n
-  for (const hop of hops) {
-    const key = `${hop.pool}|${hop.from}|${hop.to}`
-    let r = hopCache?.get(key)
-    if (r === undefined) {
-      r = hopSpot(state, hop, decimals)
-      hopCache?.set(key, r)
-    }
-    if (!r) return null
-    num *= r.num
-    den *= r.den
-  }
-  if (den === 0n) return null
-  const v = (num * SCALE) / den
-  return v > 0n ? v : null
-}
 
 /** The hops of a route label (routeLabel's inverse); null for text that is not one. */
 export function parseRouteLabel(label: string): Hop[] | null {

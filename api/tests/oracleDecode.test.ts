@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   CADENCE_SPAN_SEC, DAY_SEC, FALLBACK_HEARTBEAT_SEC, ORACLE_TOPICS,
-  bytecodeIsConstant, cadenceStats, countSince, decodeAssetSourceUpdated, decodeEmaOracleUpdated, decodeOracleAdapterAddress,
-  decodeEmaPeriods, decodeOracleUpdate, decodePriceUpdated, decodeUpdaterAddressChange, emaPriceDecimal, feedStatus, parseEmaAssets,
+  bytecodeIsConstant, cadenceStats, countSince, decodeAssetSourceUpdated, decodeOracleAdapterAddress,
+  decodeEmaPeriods, decodeOracleUpdate, decodePriceUpdated, decodeUpdaterAddressChange, emaPriceDecimal, feedStatus,
   ratioDecimal, sourceAscii, staleAfterSec, unitsDecimal,
 } from '../src/services/oracleDecode.ts'
 
@@ -56,20 +56,11 @@ describe('AaveOracle AssetSourceUpdated and DIA UpdaterAddressChange', () => {
 })
 
 describe('EmaOracle.OracleUpdated', () => {
-  it('reads the hex-byte asset pair and the JSON-array pair alike', () => {
-    expect(parseEmaAssets('0x050f')).toEqual([5, 15])
-    expect(parseEmaAssets('0x01de')).toEqual([1, 222])
-    expect(parseEmaAssets([15, 690])).toEqual([15, 690])
-    expect(parseEmaAssets('0x05')).toBeNull()
-    expect(parseEmaAssets([1])).toBeNull()
-  })
-  it('decodes source, pair and every period ratio', () => {
-    const u = decodeEmaOracleUpdated('{"source":"0x626966726f73746f","assets":"0x050f","updates":[[{"__kind":"LastBlock"},{"n":"82033684351695483","d":"49342770835127231"}],[{"__kind":"Short"},{"n":"185644649971847417027078541729883763845","d":"111664147389217578486305266190497405641"}],[{"__kind":"TenMinutes"},{"n":"185644649971847417007243500984272962256","d":"111664147389217578486305266190497405641"}],[{"__kind":"Day"},{"n":"243672483790155150980275367257619047429","d":"146571958346016116905825019814923101766"}]]}')!
-    expect(u.source).toBe('bifrosto')
-    expect([u.assetA, u.assetB]).toEqual([5, 15])
-    expect(Object.keys(u.prices)).toEqual(['LastBlock', 'Short', 'TenMinutes', 'Day'])
+  it('decodes every period ratio', () => {
+    const p = decodeEmaPeriods('[[{"__kind":"LastBlock"},{"n":"82033684351695483","d":"49342770835127231"}],[{"__kind":"Short"},{"n":"185644649971847417027078541729883763845","d":"111664147389217578486305266190497405641"}],[{"__kind":"TenMinutes"},{"n":"185644649971847417007243500984272962256","d":"111664147389217578486305266190497405641"}],[{"__kind":"Day"},{"n":"243672483790155150980275367257619047429","d":"146571958346016116905825019814923101766"}]]')
+    expect(Object.keys(p)).toEqual(['LastBlock', 'Short', 'TenMinutes', 'Day'])
     // 1 vDOT (B, 10 dec) = n/d DOT (A, 10 dec): the 0xaafd MMOracle answers 1.66252691.
-    expect(emaPriceDecimal(u.prices.LastBlock!, 10, 10, 8)).toBe('1.66252691')
+    expect(emaPriceDecimal(p.LastBlock!, 10, 10, 8)).toBe('1.66252691')
   })
   it('applies the decimals difference: n/d is raw A per raw B', () => {
     // Omnipool [1 H2O (12 dec), 222 HOLLAR (18 dec)]: 1 HOLLAR ≈ 0.1666 H2O.
@@ -79,9 +70,7 @@ describe('EmaOracle.OracleUpdated', () => {
     expect(emaPriceDecimal({ n: 3n, d: 1n }, 12, 10, 4)).toBe('0.03')
   })
   it('skips a period it does not know or a ratio with a zero denominator', () => {
-    const u = decodeEmaOracleUpdated({ source: '0x6f6d6e69706f6f6c', assets: [0, 1], updates: [[{ __kind: 'Fortnight' }, { n: '1', d: '1' }], [{ __kind: 'Short' }, { n: '1', d: '0' }]] })!
-    expect(u.source).toBe('omnipool')
-    expect(u.prices).toEqual({})
+    expect(decodeEmaPeriods([[{ __kind: 'Fortnight' }, { n: '1', d: '1' }], [{ __kind: 'Short' }, { n: '1', d: '0' }]])).toEqual({})
   })
   it('reads the table’s stored updates JSON alone, the Feb-2026 three-period form included', () => {
     const p = decodeEmaPeriods('[[{"__kind":"LastBlock"},{"n":"3","d":"2"}],[{"__kind":"Short"},{"n":"5","d":"4"}],[{"__kind":"TenMinutes"},{"n":"7","d":"8"}]]')

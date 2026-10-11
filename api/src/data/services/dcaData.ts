@@ -227,5 +227,3 @@ export async function dcaScheduleAggregates(client: ClickHouseClient, ownerAccou
     lastEventAt: count > 0 ? iso(row.last_ts) : null,
   }
 }
-
-export interface DcaScheduleDetail extends DcaScheduleItem, DcaScheduleAggregates {}

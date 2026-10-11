@@ -61,7 +61,6 @@ export function initVolumeHistory(c: ClickHouseClient): void { client = c }
 
 /** The venues the models hold, in a fixed order (the explorer UI orders its own stacks and legends by VENUE_ORDER, volumeColors.ts). */
 export const VOLUME_VENUES = ['omnipool', 'stableswap', 'xyk', 'uniswapv3', 'otc', 'hsm', 'lbp'] as const
-export type VolumeVenue = typeof VOLUME_VENUES[number]
 
 export const VOLUME_RANGES = ['30d', '1y', 'all'] as const
 export type VolumeRange = typeof VOLUME_RANGES[number]

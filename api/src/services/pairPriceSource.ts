@@ -42,7 +42,6 @@ export type PairPriceSource = 'usd-ratio' | 'route'
  * route lost a hop mid-bucket. Explicit, never silent (AGENTS.md).
  */
 export type CandlePriceSource = PairPriceSource | 'usd-ratio-fallback'
-export const CANDLE_PRICE_SOURCES: readonly CandlePriceSource[] = ['route', 'usd-ratio', 'usd-ratio-fallback']
 export const PAIR_PRICE_SOURCES: readonly PairPriceSource[] = ['usd-ratio', 'route']
 
 /** The configured source; anything but 'route' is today's 'usd-ratio'. */

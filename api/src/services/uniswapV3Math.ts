@@ -194,14 +194,6 @@ export function getAmount1Delta(sqrtA: bigint, sqrtB: bigint, liquidity: bigint,
   return roundUp ? mulDivRoundingUp(liquidity, sqrtB - sqrtA, Q96) : mulDiv(liquidity, sqrtB - sqrtA, Q96)
 }
 
-/** The signed form a mint/burn settles with: rounded up for liquidity added, down for removed. */
-export function getAmount0DeltaSigned(sqrtA: bigint, sqrtB: bigint, liquidity: bigint): bigint {
-  return liquidity < 0n ? -getAmount0Delta(sqrtA, sqrtB, -liquidity, false) : getAmount0Delta(sqrtA, sqrtB, liquidity, true)
-}
-export function getAmount1DeltaSigned(sqrtA: bigint, sqrtB: bigint, liquidity: bigint): bigint {
-  return liquidity < 0n ? -getAmount1Delta(sqrtA, sqrtB, -liquidity, false) : getAmount1Delta(sqrtA, sqrtB, liquidity, true)
-}
-
 /* ───────────── SwapMath ───────────── */
 
 export interface SwapStep { sqrtRatioNextX96: bigint; amountIn: bigint; amountOut: bigint; feeAmount: bigint }

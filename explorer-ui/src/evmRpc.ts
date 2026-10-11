@@ -52,8 +52,6 @@ export function ethGetStorageAt(address: string, slot: string): Promise<string> 
 // A tx object as eth_estimateGas / eth_call take it. `value` is hex wei.
 export interface EthTx { from?: string; to: string; data: string; value?: string }
 
-export interface EthReceipt { status: string; blockNumber: string; transactionHash: string }
-
 // Replay a full tx (with from/value) at a specific block — recovers the revert
 // data of a mined-but-failed write from its receipt's block.
 export function ethCallAt(tx: EthTx, block: string): Promise<string> {

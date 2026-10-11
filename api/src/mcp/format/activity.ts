@@ -36,7 +36,6 @@ export const ACTIVITY_TYPES = [
   'all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm',
   'stake', 'vote', 'otc', 'bond', 'intent', 'xcswap',
 ] as const
-export type ActivityType = typeof ACTIVITY_TYPES[number]
 
 /**
  * The 12 values a ROW's own `type` can carry. Note it is not the same list:

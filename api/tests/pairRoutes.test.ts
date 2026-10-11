@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  bestRoutes,
   buildRouteGraph,
   emptyRouteState,
   FLOOR_FEES,
@@ -8,6 +7,7 @@ import {
   isPureOmnipool,
   parseAtokenValue,
   parseStableValue,
+  routeCandidates,
   routeFinder,
   routeLabel,
   routeEraAt,
@@ -187,10 +187,10 @@ describe('route search', () => {
     st.xyk.set('acct1', { a: 7002, b: 7000, ra: 1_000n * ONE, rb: 1_000n * ONE })
     // A far better XYK price between the two trusted assets must not be used.
     st.xyk.set('acct2', { a: 7000, b: 7001, ra: 1n * ONE, rb: 100n * ONE })
-    const routes = bestRoutes(buildRouteGraph(st, dec, FLOOR_FEES), [7000, 7001, 7002])
-    expect(routeLabel(routes.get('7000:7001')!.hops)).toBe('omni:7000>7001')
-    expect(routeLabel(routes.get('7001:7002')!.hops)).toBe('omni:7001>7000|xyk:acct1:7000>7002')
-    expect(routeLabel(routes.get('7000:7002')!.hops)).toBe('xyk:acct1:7000>7002')
+    const routes = routeCandidates(buildRouteGraph(st, dec, FLOOR_FEES), [7000, 7001, 7002])
+    expect(routeLabel(routes.get('7000:7001')![0]!.hops)).toBe('omni:7000>7001')
+    expect(routeLabel(routes.get('7001:7002')![0]!.hops)).toBe('omni:7001>7000|xyk:acct1:7000>7002')
+    expect(routeLabel(routes.get('7000:7002')![0]!.hops)).toBe('xyk:acct1:7000>7002')
   })
 
   it('routes through stableswap and money-market wraps only in the eras the router could', () => {

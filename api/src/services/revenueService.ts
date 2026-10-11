@@ -941,9 +941,6 @@ LIMIT 10 BY sign(s)`
   }
 }
 
-/** Revisable streams (a later event still moves their recent hours) stream their mean over this many closed hours. */
-export const USER_FLOW_REVISABLE_MEAN_HOURS = USER_FLOW_MEAN_HOURS
-
 /** One live earning event in the user river: its USER part only (the pot's user share of the holder-side amount). */
 export interface UserRevenueFlowItem {
   stream: string

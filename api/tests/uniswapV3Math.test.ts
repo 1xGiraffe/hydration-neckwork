@@ -3,9 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   computeSwapStep,
   getAmount0Delta,
-  getAmount0DeltaSigned,
   getAmount1Delta,
-  getAmount1DeltaSigned,
   getNextSqrtPriceFromInput,
   getNextSqrtPriceFromOutput,
   getSqrtRatioAtTick,
@@ -255,12 +253,12 @@ describe('UniswapV3Pool.swap: the published swap snapshot', () => {
       for (const p of c.positions) {
         const L = BigInt(p.liquidity)
         const lo = getSqrtRatioAtTick(p.tickLower), hi = getSqrtRatioAtTick(p.tickUpper)
-        if (tick < p.tickLower) amount0 += getAmount0DeltaSigned(lo, hi, L)
+        if (tick < p.tickLower) amount0 += getAmount0Delta(lo, hi, L, true)
         else if (tick < p.tickUpper) {
-          amount0 += getAmount0DeltaSigned(sqrtP, hi, L)
-          amount1 += getAmount1DeltaSigned(lo, sqrtP, L)
+          amount0 += getAmount0Delta(sqrtP, hi, L, true)
+          amount1 += getAmount1Delta(lo, sqrtP, L, true)
           liquidity += L
-        } else amount1 += getAmount1DeltaSigned(lo, hi, L)
+        } else amount1 += getAmount1Delta(lo, hi, L, true)
       }
       expect(tick).toBe(c.expect.tickBefore)
       expect(amount0.toString()).toBe(c.expect.amount0Before)

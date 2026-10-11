@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { unvestedByAccountRaw } from '../src/services/lockBreakdownService.ts'
-import { GIGAHDX_LOCKED_DELTA_SQL, alignMonthly, backfillAllocationMints, buildHdxStructure, carryForward, correctVestingLocks, decodeCompactBig, gigaUnbondingBlocks, moverAccountFilterSql, nonNegativeUIntDifferenceSql, resolveRotationAnchors, cooldownExpiresAt, unlockKeyForCause, unlockSeriesFromTimelines, withCooldownExpiries, type HdxStructureWeekRow } from '../src/services/hdxService.ts'
+import { GIGAHDX_LOCKED_DELTA_SQL, alignMonthly, backfillAllocationMints, buildHdxStructure, correctVestingLocks, decodeCompactBig, gigaUnbondingBlocks, moverAccountFilterSql, nonNegativeUIntDifferenceSql, resolveRotationAnchors, cooldownExpiresAt, unlockKeyForCause, unlockSeriesFromTimelines, withCooldownExpiries, type HdxStructureWeekRow } from '../src/services/hdxService.ts'
 import { hexToU8a } from '@polkadot/util'
 
 describe('decodeCompactBig', () => {
@@ -232,19 +232,13 @@ describe('resolveRotationAnchors — serial rotations keep the original age', ()
 })
 
 // Trend-grid assembly: series align by month key with nulls where a series
-// hasn't started, and cumulative series carry their running total across
-// months that emitted no rows (no activity ≠ back to zero).
-describe('trend grid helpers — alignMonthly / carryForward', () => {
+// hasn't started.
+describe('trend grid helpers — alignMonthly', () => {
   const months = ['2024-01-01', '2024-02-01', '2024-03-01', '2024-04-01']
 
   it('aligns by month key and leaves absent months null', () => {
     expect(alignMonthly(months, [{ m: '2024-02-01', v: 5 }, { m: '2024-04-01', v: 7 }]))
       .toEqual([null, 5, null, 7])
-  })
-
-  it('carries a cumulative total across silent months but not before the series starts', () => {
-    expect(carryForward([null, 10, null, null])).toEqual([null, 10, 10, 10])
-    expect(carryForward([null, null, 3, 4])).toEqual([null, null, 3, 4])
   })
 })
 

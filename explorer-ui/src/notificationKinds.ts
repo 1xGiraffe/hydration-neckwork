@@ -63,19 +63,16 @@ export const HEALTH_FACTOR_DEFAULT_MARKET = 'core'
 // The activity-type union the explorer feed routes accept. A rule naming a type
 // the feed cannot filter would silently never match.
 export const ACTIVITY_TYPES = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc', 'bond', 'intent', 'xcswap'] as const
-export type NotificationActivityType = typeof ACTIVITY_TYPES[number]
 
 // Referenda lifecycle phases the evaluator watches. `confirming` (entering the
 // confirmation period) and `confirmed` (surviving it) are two different moments,
 // and `confirm-aborted` is the fall back out of the former.
 export const REFERENDUM_PHASES = ['submitted', 'deciding', 'confirming', 'confirm-aborted', 'confirmed', 'executed', 'rejected', 'cancelled', 'timed-out', 'killed'] as const
-export type ReferendumPhase = typeof REFERENDUM_PHASES[number]
 
 // Technical Committee motion phases the evaluator watches. Its own kind, never a
 // phase of `referendum`: committee business is not what somebody subscribing to
 // public referenda asked for, so nobody receives it without choosing it here.
 export const TC_MOTION_PHASES = ['proposed', 'voted', 'approved', 'disapproved', 'executed', 'closed'] as const
-export type TcMotionPhase = typeof TC_MOTION_PHASES[number]
 
 // Everything the one security kind can alert on: the safety-timeline actions
 // the security service emits from indexed rows, and the Wormhole bridge states
@@ -88,7 +85,6 @@ export const SAFETY_KINDS = [
   'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze',
   'deficit', 'queued', 'released', 'fuse', 'egress',
 ] as const
-export type SafetyKind = typeof SAFETY_KINDS[number]
 // The three numeric floors, restated from the server's own schema defaults so the
 // form shows the values an omitted parameter would get: how much bridged supply
 // may go unbacked before `deficit` fires, how spent a rate limit has to be
