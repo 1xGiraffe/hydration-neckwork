@@ -6,7 +6,6 @@ const ENV_KEYS = [
   'RPC_RATE_LIMIT',
   'RPC_CAPACITY',
   'BATCH_SIZE',
-  'SNAPSHOT_INTERVAL',
   'SNAPSHOT_INTERVAL_MINUTES',
   'RPC_HEAD_POLL_MS',
   'GRAPH_MIN_PATH_LIQUIDITY_USD',
@@ -36,22 +35,7 @@ describe('indexer numeric configuration', () => {
     expect(config.SNAPSHOT_INTERVAL_MINUTES).toBe(100)
   })
 
-  // The registry scan interval is a duration. Its old block-count spelling meant
-  // 100 minutes only while a block was 6s, so the deprecated variable is read at
-  // that cadence — never reinterpreted at whatever the chain's block time becomes.
-  it('reads the deprecated block-count snapshot interval at the cadence it was written for', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    process.env.SNAPSHOT_INTERVAL = '1000'
-
-    const { config } = await import('../src/config.ts')
-
-    expect(config.SNAPSHOT_INTERVAL_MINUTES).toBe(100)
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('SNAPSHOT_INTERVAL is deprecated'))
-    warn.mockRestore()
-  })
-
-  it('prefers the minutes variable over the deprecated block count', async () => {
-    process.env.SNAPSHOT_INTERVAL = '1000'
+  it('reads the registry scan interval in minutes of chain time', async () => {
     process.env.SNAPSHOT_INTERVAL_MINUTES = '240'
 
     const { config } = await import('../src/config.ts')
