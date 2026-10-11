@@ -294,12 +294,14 @@ CREATE TABLE IF NOT EXISTS price_data.money_market_latest_positions (`user_addre
 -- reserve 690) moves through Currencies.Transferred, where the runtime sets the
 -- user's bit WITHOUT emitting the Aave event — measured, 16 of 280 rendered reserve
 -- rows were collateral on chain with no event to say so. So the bitmap is read back
--- per swept user and the events carry it forward between sweeps, exactly as
--- atoken_scaled_anchor + atoken_scaled_deltas carry a balance.
+-- at every block that can move a user's bit — the raw indexer's trigger phase
+-- (src/raw/moneyMarketTriggerPhase.ts: the user's own money-market events, a leg of
+-- one of the pool's reserve tokens, a configuration change) — and the anchors loop
+-- seeds, at one pinned block, every user with a live position or any collateral
+-- event that no read at or above B0 covers (src/scripts/collateralAnchor.ts).
 --
 -- Reproducible rather than raw: re-reading the bitmap at a pinned block is
--- deterministic archive state. Written by snapshot-money-market.ts for every user
--- with a live position or any collateral event, with a row per reserve of the pool
+-- deterministic archive state. Every read writes a row per reserve of the pool
 -- (enabled AND disabled) — omitting the disabled ones would leave a stale enable
 -- standing forever.
 CREATE TABLE IF NOT EXISTS price_data.money_market_collateral_anchor (`user_address` String, `pool_address` String, `reserve_address` String, `block_height` UInt32, `enabled` UInt8, `observed_at` DateTime) ENGINE = ReplacingMergeTree(block_height) ORDER BY (user_address, pool_address, reserve_address) SETTINGS index_granularity = 4096;
@@ -388,6 +390,15 @@ CREATE TABLE IF NOT EXISTS price_data.raw_ingestion_state (`pipeline_id` String,
 -- blocks, so a re-run rewrites identical rows.
 CREATE TABLE IF NOT EXISTS price_data.raw_lm_farm_entries (`pallet` LowCardinality(String), `deposit_id` String, `yield_farm_id` UInt32, `global_farm_id` UInt32, `valued_shares` UInt128, `rpvs_entry` UInt128, `claimed_raw` UInt128, `entered_at_period` UInt32, `updated_at_period` UInt32, `stopped_at_creation` UInt32, `deposit_shares` UInt128, `amm_pool_id` String, `is_event_entry` UInt8, `block_height` UInt32, `event_index` UInt32, `event_name` LowCardinality(String), `block_hash` String, `spec_version` UInt32, `capture_status` LowCardinality(String), `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (pallet, deposit_id, yield_farm_id, block_height, event_index) SETTINGS index_granularity = 1024;
 CREATE TABLE IF NOT EXISTS price_data.raw_money_market_events (`block_height` UInt32, `block_timestamp` DateTime, `event_index` UInt32, `contract_address` String, `pool_address` Nullable(String), `event_name` LowCardinality(String), `user_address` Nullable(String), `account_id` Nullable(String), `asset_address` Nullable(String), `amount` Nullable(String), `participants` Array(String), `decoded_args_json` String CODEC(ZSTD(6)), `position_observation_id` Nullable(String), `evidence_json` String CODEC(ZSTD(6)), `ingest_source` LowCardinality(String) DEFAULT 'sqd', `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index, event_name) SETTINGS index_granularity = 8192;
+-- Money-market oracle prices as each market's AaveOracle answered getAssetsPrices at the end of a
+-- block (src/raw/moneyMarketPrices.ts, read by the raw indexer's money-market trigger phase in
+-- every raw pipeline): a row for every reserve whose price differs from block b - 1's
+-- (is_change 1) and a baseline of every reserve (is_change 0 where unmoved) at a market's first
+-- resolve in a worker, at a configuration change and on the hourly cadence block, so the latest
+-- price at or before any B is within one cadence interval. `price` is the oracle's base-currency
+-- integer (8 decimals on these markets). Chain state at fixed blocks: a replay rewrites identical
+-- rows; not reproducible from raw (AGENTS.md, chain-state exception).
+CREATE TABLE IF NOT EXISTS price_data.raw_money_market_oracle_prices (`block_height` UInt32, `block_timestamp` DateTime, `pool_address` LowCardinality(String), `reserve_address` LowCardinality(String), `oracle_address` LowCardinality(String), `price` UInt256, `is_change` UInt8, `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (pool_address, reserve_address, block_height) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.raw_money_market_positions (`block_height` UInt32, `block_timestamp` DateTime, `observation_id` String, `user_address` String, `account_id` Nullable(String), `pool_address` String, `total_collateral_base` String, `total_debt_base` String, `available_borrows_base` String, `current_liquidation_threshold` String, `ltv` String, `health_factor` String, `evidence_json` String CODEC(ZSTD(6)), `ingest_source` LowCardinality(String) DEFAULT 'sqd', `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, user_address, pool_address, observation_id) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.raw_money_market_reserves (`block_height` UInt32, `block_timestamp` DateTime, `event_index` UInt32, `contract_address` String, `pool_address` String DEFAULT '', `event_name` LowCardinality(String), `reserve_address` Nullable(String), `asset_address` Nullable(String), `metrics_json` String CODEC(ZSTD(6)), `decoded_args_json` String CODEC(ZSTD(6)), `evidence_json` String CODEC(ZSTD(6)), `ingest_source` LowCardinality(String) DEFAULT 'sqd', `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index, event_name) SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.raw_parser_warnings (`block_height` UInt32, `block_timestamp` DateTime, `parser` LowCardinality(String), `source_kind` LowCardinality(String), `source_name` LowCardinality(String), `source_index` String, `warning_code` LowCardinality(String), `warning` String, `evidence_json` String CODEC(ZSTD(6)), `ingest_source` LowCardinality(String) DEFAULT 'sqd', `ingested_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, parser, source_kind, source_index, warning_code) SETTINGS index_granularity = 8192;

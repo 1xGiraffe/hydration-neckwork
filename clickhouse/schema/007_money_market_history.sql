@@ -97,7 +97,7 @@
 -- holders the anchor's candidate sources have not named yet — a holder who
 -- received before B0 inside a gap of the pre-B0 log coverage and never moved.
 -- The anchors loop tops the table up every cycle from sources beyond the money
--- market's own logs (the collateral sweep, the pool's decoded events, the
+-- market's own logs (the collateral anchor, the pool's decoded events, the
 -- Substrate legs of the registry asset over the aToken), so the gap closes as
 -- those name a holder: measured at block 15,047,000, 79 such holders (77 aGDOT,
 -- one aUSDT, one atBTC) were the whole gap of their contracts — 1.04e22 (aGDOT),

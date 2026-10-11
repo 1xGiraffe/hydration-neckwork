@@ -39,7 +39,7 @@ Every port binds to `127.0.0.1`: the services are reached through a reverse prox
 the Docker network, so publishing them on all interfaces would only offer a way past
 its caching, rate limiting and logging.
 
-The remaining sixteen services run without a port of their own: the raw/live ingestion
+The remaining fourteen services run without a port of their own: the raw/live ingestion
 and snapshot tier, `schema-bootstrap`, `derivations`, `smart-contract-verifier` (which
 compiles and matches submitted contract sources), and `user-backup`/`contract-backup`,
 which export the two api-authored datasets no projection rebuild can regenerate.

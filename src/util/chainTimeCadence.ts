@@ -4,7 +4,7 @@
 // A block count is a block-time-dependent encoding of a duration. "every 7,200
 // blocks" means 12 h only while a block is 6 s; at 2 s the same constant fires
 // three times as often and triples whatever the job costs (for the money-market
-// re-snapshot, an eth_call per known borrower). Reading the elapsed time off the
+// cadence reads, an eth_call per open position). Reading the elapsed time off the
 // blocks themselves keeps the cadence fixed through any future cadence change,
 // and works identically during backfill — a historical block carries the chain
 // time it was authored at, so replaying 2022 produces the same boundaries a live

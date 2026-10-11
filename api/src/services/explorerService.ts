@@ -5428,7 +5428,7 @@ export async function getTagHistoryWindow(tagId: string, fromBlock: number, toBl
 }
 
 // indexed Money Market positions
-// Event observations plus the periodic snapshot service keep current aggregate
+// The raw indexer's event-driven and trigger reads keep current aggregate
 // positions in ClickHouse; account requests perform no per-user RPC reads.
 // The markets (isolated pools, per-market health factors, `stakingBacked`) are
 // declared once in explorerAssets.ts, so the Data API's money-market routes and
@@ -5595,8 +5595,8 @@ export function mergeErc20Balances(balances: AddressBalance[], holdings: { asset
 }
 
 // Per-market positions (collateral/debt/health-factor), one row per isolated pool,
-// from the indexed positions the periodic sweep service and event indexing maintain
-// in raw_money_market_positions. Explorer requests never call getUserAccountData
+// from the indexed positions the raw indexer's event-driven and trigger reads
+// maintain in raw_money_market_positions. Explorer requests never call getUserAccountData
 // directly.
 //
 // Reads money_market_latest_positions, NOT the published account-value snapshot
@@ -6134,9 +6134,9 @@ async function reconstructAccountScaled(h160: string, b0: number): Promise<Map<s
 // Usage-as-collateral flags per holder, keyed `${pool}:${reserve}` to match the
 // reserve-index map. The flag is Aave's user-configuration bit, and it has two
 // observers: the pool's Enabled/Disabled events, exact and immediate but not
-// emitted for every way the bit moves on this chain, and the swept bitmap read
-// (money_market_collateral_anchor), complete but only as fresh as the last sweep.
-// Whichever observed the bit LAST wins, with the sweep taking a tie because it
+// emitted for every way the bit moves on this chain, and the bitmap read
+// (money_market_collateral_anchor), read at every block that can move the bit.
+// Whichever observed the bit LAST wins, with the read taking a tie because it
 // reads the state after that block's events. A reserve neither observed was never
 // collateralised and reads false. Both tables are user-first, so this is a
 // key-prefix read on each; replayed rows repeat their values, so the argMax is
@@ -6278,7 +6278,7 @@ export interface MmUnstatedReserve {
 //    received BEFORE B0 inside a gap of the pre-B0 log coverage and never moved,
 //    whom the anchor's log-fed candidate sources never named — 77 aGDOT holders
 //    on live data, plus one aUSDT and one atBTC. The anchors loop now tops the
-//    anchor up every cycle from the collateral sweep, the pool's events and the
+//    anchor up every cycle from the collateral anchor, the pool's events and the
 //    Substrate legs of the registry asset over the aToken, so such a holder is
 //    stated per reserve one cycle after a source names it; until then this is
 //    the honest reading of the bit.

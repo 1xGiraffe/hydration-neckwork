@@ -35,13 +35,14 @@ import {
   toClickHouseDateTime,
   toJsonString,
 } from './json.js'
-import { assertMoneyMarketPositionConfig, extractMoneyMarketRows, snapshotMoneyMarketPositions } from './moneyMarket.js'
+import { assertMoneyMarketPositionConfig, extractMoneyMarketRows, moneyMarketDefinitions, moneyMarketEthCallBatch, snapshotMoneyMarketCollateralFlags, snapshotMoneyMarketPositions } from './moneyMarket.js'
 import { openPositionKey, trackOpenPositions } from './moneyMarketSnapshot.js'
+import { priceStepThresholdFromEnvironment } from './moneyMarketPrices.js'
+import { cadenceFromEnvironment, loadExactHolderSeed, loadSupersetHolderSeed, MoneyMarketTriggerPhase, readPairs, type TriggerBlock } from './moneyMarketTriggerPhase.js'
 import { captureLmFarmEntries, entryEventsFromRawEvents } from './lmFarmEntries.js'
 import { synthesizeNestedCallRows, type EvmExecution, type RuntimeCallDecoder } from './nestedCalls.js'
 import { createClickHouseClient } from '../db/client.js'
 import { minutesFromEnvironment } from '../util/env.js'
-import { MS_PER_MINUTE, crossedChainTimeBoundary } from '../util/chainTimeCadence.js'
 import { isMvSnapshotGridHeight, retainsSnapshotAtHeight, snapshotEveryNBlocksFromEnvironment } from './snapshotCadence.js'
 import { fetchChainHead, fetchFinalizedHead } from '../rpc/head.js'
 import type {
@@ -210,57 +211,13 @@ function snapshotTraceEnabled(): boolean {
   return process.env.RAW_SNAPSHOT_TRACE === 'true'
 }
 
-// Periodic Money Market position re-aggregation: on every 12h chain-time boundary,
-// re-read every known borrower's getUserAccountData so the explorer's portfolio
-// history reflects interest accrual + oracle price drift between a borrower's own
-// MM actions (event-only snapshots otherwise freeze an untouched position). 12h is
-// ~1 sample per explorer history bucket over a multi-week window.
-function mmPeriodicSnapshotEnabled(): boolean {
-  return (process.env.RAW_MM_PERIODIC_SNAPSHOT_ENABLED ?? 'true') !== 'false'
-}
-
-// 12h of chain time, not 7,200 blocks. The cost of this job is an eth_call per
-// known borrower (3,216 positions read from 5,598 borrowers at the last measured
-// run), so the block-count form would have tripled its RPC fan-out at a 2s block
-// time purely as an artefact of how the interval was written down.
-function mmSnapshotIntervalMinutes(): number {
-  return minutesFromEnvironment('RAW_MM_SNAPSHOT_INTERVAL_MINUTES', 720, {
-    name: 'RAW_MM_SNAPSHOT_INTERVAL_BLOCKS',
-  })
-}
-
-// Seed the borrower set from positions already in ClickHouse so a freshly started
-// worker re-snapshots accounts opened before its range (a fresh wipe just yields an
-// empty map, which then grows from event-driven positions as blocks are processed).
-// Each borrower carries the earliest block it is known at, so a worker below the
-// money market's deployment — or below an individual account's first position —
-// does not read positions that cannot exist yet.
-async function loadKnownBorrowers(): Promise<Map<string, number>> {
-  const borrowers = new Map<string, number>()
-  const client = createClickHouseClient()
-  try {
-    const res = await client.query({
-      query: `SELECT user_address, min(block_height) AS first_block
-              FROM price_data.raw_money_market_positions
-              WHERE user_address != ''
-              GROUP BY user_address`,
-      format: 'JSONEachRow',
-    })
-    for (const row of await res.json<{ user_address: string; first_block: number | string }>()) {
-      if (row.user_address) borrowers.set(row.user_address, Number(row.first_block))
-    }
-  } finally {
-    await client.close()
-  }
-  return borrowers
-}
-
 // The (market, holder) pairs whose projected aggregate is non-zero, seeded from
 // the projection and then kept current from every observation this worker writes.
-// The periodic re-snapshot records a zero only for one of these: it is the exit
-// of a position no pool event announced (a native aToken transfer), and skipping
-// it would leave the stale aggregate current for good. A fresh database yields an
-// empty set that fills from the event-driven positions as blocks are processed.
+// The trigger phase records a zero only for one of these: it is the exit of a
+// position no pool event announced (a native aToken transfer), and skipping it
+// would leave the stale aggregate current for good. They are also the raw-live
+// cadence cohort. A fresh database yields an empty set that fills from the
+// event-driven positions as blocks are processed.
 async function loadOpenPositions(): Promise<Set<string>> {
   const open = new Set<string>()
   const client = createClickHouseClient()
@@ -285,15 +242,50 @@ async function loadOpenPositions(): Promise<Set<string>> {
   return open
 }
 
-// Borrowers whose first known position is at or below the snapshot height. Reading
-// the rest would ask the pool contract for accounts that do not exist yet, which
-// answers with a decode failure per borrower rather than a position.
-export function borrowersAtHeight(borrowers: Map<string, number>, blockHeight: number): string[] {
-  const at: string[] = []
-  for (const [address, firstBlock] of borrowers) {
-    if (firstBlock <= blockHeight) at.push(address)
+// The money-market trigger phase (moneyMarketTriggerPhase.ts): price-step, config
+// and chain-time cadence re-reads of getUserAccountData, and the collateral bitmap
+// of every user whose bit a block can have moved. On by default.
+function mmTriggersEnabled(): boolean {
+  return (process.env.RAW_MM_TRIGGERS_ENABLED ?? 'true') !== 'false'
+}
+
+// The reserve holder index the trigger phase reads from. raw-live (unbounded) folds
+// EXACT balances from a seed at its first block; a bounded range worker — whose
+// history below its range may not be indexed yet — reads the SUPERSET of every
+// account ever known to hold a reserve. An exact seed that cannot be built (a start
+// at or below B0, ClickHouse unavailable) falls back to the superset.
+async function createMoneyMarketTriggerPhase(startBlock: number, bounded: boolean): Promise<MoneyMarketTriggerPhase> {
+  const markets = moneyMarketDefinitions().map(m => ({ key: m.key, pool: m.poolProxy }))
+  const make = (mode: 'exact' | 'superset') => new MoneyMarketTriggerPhase({
+    markets,
+    mode,
+    thresholdBp100: priceStepThresholdFromEnvironment(),
+    cadence: cadenceFromEnvironment(),
+    ethCall: moneyMarketEthCallBatch,
+    readPositions: (users, blockHeight, blockTimestamp, ingestSource, options) =>
+      snapshotMoneyMarketPositions(users, blockHeight, blockTimestamp, ingestSource, options),
+    readCollateral: (users, blockHeight, poolProxy) => snapshotMoneyMarketCollateralFlags(users, blockHeight, poolProxy),
+  })
+  const client = createClickHouseClient()
+  try {
+    if (!bounded) {
+      try {
+        const seed = await loadExactHolderSeed(client, startBlock)
+        const phase = make('exact')
+        phase.index.seedBalances(seed)
+        console.log(`[Raw][MM] Trigger phase: exact holder index seeded below block ${startBlock} (${seed.length} token balances)`)
+        return phase
+      } catch (error) {
+        console.warn('[Raw][MM] Exact holder seed unavailable; using the holder superset', error)
+      }
+    }
+    const phase = make('superset')
+    phase.index.seedHolders(await loadSupersetHolderSeed(client))
+    console.log('[Raw][MM] Trigger phase: holder superset seeded')
+    return phase
+  } finally {
+    await client.close()
   }
-  return at
 }
 
 function phaseTraceEnabled(): boolean {
@@ -467,21 +459,28 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
     )
   }
 
-  const mmSnapshotEnabled = mmPeriodicSnapshotEnabled()
-  const mmSnapshotIntervalMs = mmSnapshotIntervalMinutes() * MS_PER_MINUTE
   // Authoritative wrapper↔base relation for the snapshot payload the price
   // pipeline replays; reloaded when the asset registry changes.
   const atokenReserves = new AtokenReserveMap()
   await atokenReserves.refresh()
-  let knownBorrowers = new Map<string, number>()
+
+  let mmTriggers: MoneyMarketTriggerPhase | null = null
   let openPositions = new Set<string>()
-  if (mmSnapshotEnabled) {
+  if (mmTriggersEnabled()) {
     try {
-      knownBorrowers = await loadKnownBorrowers()
-      openPositions = await loadOpenPositions()
-      console.log(`[Raw] Money Market periodic snapshot enabled (every ${mmSnapshotIntervalMs / MS_PER_MINUTE} minutes of chain time); seeded ${knownBorrowers.size} borrowers, ${openPositions.size} open positions`)
+      mmTriggers = await createMoneyMarketTriggerPhase(startBlock, boundedRange != null)
     } catch (error) {
-      console.warn('[Raw] Failed to seed Money Market borrower set; will accumulate from events', error)
+      // Without a holder index a price step cannot name its holders: run without
+      // the phase rather than guess, and say so.
+      console.error('[Raw][MM] Trigger phase disabled: holder index could not be seeded', error)
+    }
+    if (mmTriggers != null) {
+      try {
+        openPositions = await loadOpenPositions()
+        console.log(`[Raw][MM] Trigger phase: seeded ${openPositions.size} open positions`)
+      } catch (error) {
+        console.warn('[Raw][MM] Failed to seed the open money-market positions; will accumulate from events', error)
+      }
     }
   }
 
@@ -506,6 +505,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
   let moneyMarketRowsPersisted = 0
   let xcmRowsPersisted = 0
   let lmEntryRowsPersisted = 0
+  let mmTriggerRowsPersisted = 0
   let parserWarningsPersisted = 0
   let snapshotsRefreshed = 0
   let snapshotsReused = 0
@@ -640,6 +640,30 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       }
       const accountAliasRows = dedupeAliasRows(candidateAliasRows)
 
+      // The money-market prices of this block against b − 1 start now, so the RPC
+      // round trip overlaps the balance and position reads below; the trigger phase
+      // awaits it after the block's own event-driven reads.
+      const triggerBlock: TriggerBlock = {
+        height: blockHeight,
+        timestamp: blockTimestamp,
+        timestampMs: block.header.timestamp,
+        previousTimestampMs: priorBlockTimestampMs,
+        ingestSource,
+      }
+      if (mmTriggers != null && triggerBlock.previousTimestampMs == null && blockHeight > 0) {
+        // A worker's first block (or the first after a restart of the batch): b − 1's
+        // timestamp from the parent state, so the cadence grid fires here exactly as
+        // it would for a worker that processed b − 1 itself.
+        try {
+          const parentNow = await block.header._runtime.getStorage(block.header.parentHash, 'Timestamp.Now')
+          const ms = Number(parentNow)
+          if (Number.isFinite(ms) && ms > 0) triggerBlock.previousTimestampMs = ms
+        } catch (error) {
+          console.warn(`[Raw][MM] Block ${blockHeight}: parent timestamp unreadable; cadence cannot fire on this block`, error)
+        }
+      }
+      const mmObservation = mmTriggers?.observe(triggerBlock, evmLogRows)
+
       const balances = await tracePhase(blockHeight, 'balances', () => extractBalanceObservations(
           block.header,
           blockTimestamp,
@@ -666,39 +690,34 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
       moneyMarketRowsPersisted += moneyMarket.events.length + moneyMarket.positions.length + moneyMarket.reserves.length
       xcmRowsPersisted += xcmActivityRows.length
 
-      // Track every borrower seen via event-driven positions, then re-snapshot the
-      // whole set on chain-time boundaries — the first block past each 12h mark on
-      // the absolute UTC grid. Deterministic like the absolute-height boundary it
-      // replaces (it depends only on the two adjacent block timestamps, not on where
-      // a worker started), so each boundary is covered exactly once across the
-      // parallel range workers and a replay writes the same heights. The one case it
-      // cannot see is a boundary falling on a worker's very first block, where there
-      // is no previous block to compare with; that boundary is skipped rather than
-      // guessed at, which costs one sample and keeps replays reproducible.
-      // eth_call failures degrade to parser warnings, never abort the block.
-      // A borrower the projection shows open who now reads zero is written as a
-      // zero (`tombstoneFor`): the exit of a position no pool event announced.
-      if (mmSnapshotEnabled) {
-        for (const position of moneyMarket.positions) {
-          if (!position.user_address) continue
-          const firstBlock = knownBorrowers.get(position.user_address)
-          if (firstBlock == null || blockHeight < firstBlock) knownBorrowers.set(position.user_address, blockHeight)
-        }
+      // Pairs this block's own events read already: the trigger phase reads each
+      // (block, pool, user) at most once.
+      const mmReadThisBlock = readPairs(moneyMarket.positions)
+
+      // Money-market trigger phase (moneyMarketTriggerPhase.ts): price steps against
+      // b − 1, configuration logs and the chain-time cadence re-read the holders whose
+      // health factor moved with no event of their own — getUserAccountData AS
+      // OBSERVED at this block, one read per (pool, user), never a computed value —
+      // and the collateral bitmap of every user whose bit the block can have moved.
+      if (mmTriggers != null && mmObservation != null) {
+        const phase = mmTriggers
         trackOpenPositions(openPositions, moneyMarket.positions)
-        if (crossedChainTimeBoundary(priorBlockTimestampMs, block.header.timestamp, mmSnapshotIntervalMs)) {
-          const borrowers = borrowersAtHeight(knownBorrowers, blockHeight)
-          if (borrowers.length > 0) {
-            const mmSnapshot = await tracePhase(blockHeight, 'mm_periodic_snapshot', () =>
-              snapshotMoneyMarketPositions(borrowers, blockHeight, blockTimestamp, ingestSource, { tombstoneFor: openPositions }))
-            trackOpenPositions(openPositions, mmSnapshot.positions)
-            ctx.store.addMoneyMarketPositions(mmSnapshot.positions)
-            ctx.store.addParserWarnings(mmSnapshot.warnings)
-            moneyMarketRowsPersisted += mmSnapshot.positions.length
-            parserWarningsPersisted += mmSnapshot.warnings.length
-            if (mmSnapshot.positions.length > 0 || mmSnapshot.warnings.length > 0) {
-              console.log(`[Raw][MM] Periodic snapshot @${blockHeight}: ${mmSnapshot.positions.length} positions, ${mmSnapshot.warnings.length} warnings (${borrowers.length} borrowers)`)
-            }
-          }
+        const observation = await mmObservation
+        const triggered = await tracePhase(blockHeight, 'mm_triggers', () => phase.run(triggerBlock, evmLogRows, observation, {
+          alreadyRead: mmReadThisBlock,
+          eventReads: moneyMarket.positionReads,
+          openPositions,
+        }))
+        trackOpenPositions(openPositions, triggered.positions)
+        ctx.store.addMoneyMarketPositions(triggered.positions)
+        ctx.store.addMoneyMarketOraclePrices(triggered.oraclePrices)
+        ctx.store.addMoneyMarketCollateralAnchors(triggered.collateral)
+        ctx.store.addParserWarnings(triggered.warnings)
+        mmTriggerRowsPersisted += triggered.positions.length
+        moneyMarketRowsPersisted += triggered.positions.length + triggered.collateral.length
+        parserWarningsPersisted += triggered.warnings.length
+        if (triggered.stats.steppedReserves > 0 || triggered.stats.configPools > 0 || triggered.stats.cadencePools > 0) {
+          console.log(`[Raw][MM] Triggers @${blockHeight}: ${triggered.stats.steppedReserves} stepped reserve(s), ${triggered.stats.configPools} config, ${triggered.stats.cadencePools} cadence market(s) → ${triggered.stats.planned} read(s), ${triggered.positions.length} positions, ${triggered.stats.collateralReads} collateral read(s), ${triggered.warnings.length} warnings`)
         }
       }
 
@@ -866,6 +885,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
           `${moneyMarketRowsPersisted} money market rows | ` +
           `${xcmRowsPersisted} xcm rows | ` +
           `${lmEntryRowsPersisted} lm entry rows | ` +
+          `${mmTriggerRowsPersisted} mm trigger rows | ` +
           `${parserWarningsPersisted} warnings | ` +
           `${snapshotsRefreshed} refreshed | ` +
           `${snapshotsReused} reused`,
@@ -882,6 +902,7 @@ export async function runRaw(options: RawRunOptions = {}): Promise<void> {
         moneyMarketRowsPersisted = 0
         xcmRowsPersisted = 0
         lmEntryRowsPersisted = 0
+        mmTriggerRowsPersisted = 0
         parserWarningsPersisted = 0
         snapshotsRefreshed = 0
         snapshotsReused = 0

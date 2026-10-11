@@ -33,14 +33,6 @@ x-raw-env: &raw-env
   RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS: "${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}"
   RAW_MONEY_MARKET_POSITION_CONCURRENCY: "${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}"
   RAW_MONEY_MARKET_BATCH_SIZE: "${RAW_MONEY_MARKET_BATCH_SIZE:-50}"
-  RAW_MM_PERIODIC_SNAPSHOT_ENABLED: "${RAW_MM_PERIODIC_SNAPSHOT_ENABLED:-true}"
-  # Chain time, not a block count: the money-market re-snapshot costs an
-  # eth_call per known borrower, so a block-count interval would have
-  # tripled its RPC fan-out at a 2s block time. 720 = 12h.
-  RAW_MM_SNAPSHOT_INTERVAL_MINUTES: "${RAW_MM_SNAPSHOT_INTERVAL_MINUTES:-}"
-  # Deprecated block-count form, passed through empty so a deployment that still
-  # sets it gets the startup warning naming the replacement instead of silence.
-  RAW_MM_SNAPSHOT_INTERVAL_BLOCKS: "${RAW_MM_SNAPSHOT_INTERVAL_BLOCKS:-}"
   # Chain time between asset-registry scans. 100 = what the old
   # RAW_ASSET_SNAPSHOT_INTERVAL of 1000 blocks meant at 6s.
   RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES: "${RAW_ASSET_SNAPSHOT_INTERVAL_MINUTES:-}"
@@ -292,57 +284,12 @@ services:
       - RPC_CAPACITY=${BALANCES_SNAPSHOT_RPC_CAPACITY:-5}
     command: ["src/scripts/snapshot-balances.ts", "--loop", "--reconcile", "--refresh-hours=${BALANCES_REFRESH_HOURS:-168}"]
 
-  # Money-market sweep: after the balance snapshot has seeded all accounts, calls
-  # getUserAccountData for every account in the primary pool and for the bounded
-  # observed participant set in supplemental pools. This keeps core coverage
-  # exhaustive without multiplying the RPC workload for sparse isolated markets.
-  mm-snapshot:
-    <<: *service
-    image: hydration-neckwork-indexer:latest
-    build: .
-    container_name: hydration-neckwork-mm-snapshot
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-      schema-bootstrap:
-        condition: service_completed_successfully
-    environment:
-      - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
-      - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
-      - RPC_RATE_LIMIT=${MM_SNAPSHOT_RPC_RATE_LIMIT:-20}
-      - RPC_CAPACITY=${MM_SNAPSHOT_RPC_CAPACITY:-5}
-      - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
-      - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
-      - RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS=${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}
-    command: ["src/scripts/snapshot-money-market.ts", "--market=core", "--loop", "--refresh-hours=${MM_SNAPSHOT_REFRESH_HOURS:-6}"]
-
-  # Refresh sparse supplemental-market (GIGAHDX, BIL) positions more often than
-  # the exhaustive primary sweep.
-  mm-supplemental-snapshot:
-    <<: *service
-    image: hydration-neckwork-indexer:latest
-    build: .
-    container_name: hydration-neckwork-mm-supplemental-snapshot
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-      schema-bootstrap:
-        condition: service_completed_successfully
-    environment:
-      - RPC_URL=${RPC_URL:-https://hydration-rpc.neckwork.net}
-      - CLICKHOUSE_HOST=http://clickhouse:8123
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-dev}
-      - RAW_MONEY_MARKET_POSITION_CONCURRENCY=${RAW_MONEY_MARKET_POSITION_CONCURRENCY:-8}
-      - RAW_MONEY_MARKET_BATCH_SIZE=${RAW_MONEY_MARKET_BATCH_SIZE:-50}
-      - RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS=${RAW_MONEY_MARKET_ETH_CALL_TIMEOUT_MS:-20000}
-    command:
-      - src/scripts/snapshot-money-market.ts
-      - --market=gigahdx,bil
-      - --loop
-      - --refresh-minutes=${MM_SUPPLEMENTAL_SNAPSHOT_MINUTES:-15}
-
-  # The B0 anchors loop (see src/scripts/anchorLoop.ts). aToken / variable-debt
+  # The B0 anchors loop (see src/scripts/anchorLoop.ts). Money-market collateral
+  # seed (price_data.money_market_collateral_anchor; src/scripts/collateralAnchor.ts):
+  # every user with a live position or a collateral event that no read at or above
+  # B0 covers yet gets its getUserConfiguration read at min(indexed head, finalized
+  # head); from then on the raw indexer reads it at every block that can move a bit.
+  # aToken / variable-debt
   # scaled-balance anchor (clickhouse/schema/007_money_market_history.sql): refreshes
   # the reserve map each cycle and self-re-establishes the scaledBalanceOf@B0 anchor
   # whenever its table is empty (e.g. after a wipe & reindex). Money-market incentive

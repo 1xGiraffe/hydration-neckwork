@@ -13,7 +13,8 @@ import { CONTROLLER_LOGS_FROM } from './mmIncentiveAnchor.js'
 import { createIncentiveAnchorJob } from './mmIncentiveAnchorJob.js'
 import { reconcileLmEntries } from './lmEntryCapture.js'
 import { createLmCaptureChain, createLmCaptureSink, createLmCaptureSource, createLmReconcileSource } from './lmEntryPorts.js'
-import { createSnapshotRpcClient } from './snapshotRuntime.js'
+import { createSnapshotRpcClient, resolveIndexedSnapshotAnchor } from './snapshotRuntime.js'
+import { createCollateralAnchorJob } from './collateralAnchor.js'
 
 // aToken / variable-debt scaled-balance ANCHOR snapshot.
 //
@@ -41,7 +42,7 @@ import { createSnapshotRpcClient } from './snapshotRuntime.js'
 // gap of the pre-B0 log coverage, and never moved since: 79 such holders (77 aGDOT,
 // one aUSDT, one atBTC) summed exactly to each contract's total-minus-holders gap.
 // So the anchor is captured whole once and then TOPPED UP every cycle: a candidate
-// any source has named since — the collateral sweep, a Substrate leg of the
+// any source has named since — the collateral anchor, a Substrate leg of the
 // registry asset over the aToken, a later-indexed log — that has no row yet is
 // read at B0 and anchored (anchorKeysToRead), so a missed holder waits one cycle
 // after a source names it, never for a re-capture.
@@ -51,7 +52,10 @@ import { createSnapshotRpcClient } from './snapshotRuntime.js'
 //   npx tsx src/scripts/snapshot-atoken-anchors.ts --loop [--refresh-hours=6] [--force] [--force-incentive]
 //   npx tsx src/scripts/snapshot-atoken-anchors.ts --verify [--verify-sample=200]
 //
-// --loop (service mode, the `atoken-anchor` service) runs BOTH B0 anchors, each on
+// --loop (service mode, the `atoken-anchor` service) first seeds the money-market
+// collateral anchor (money_market_collateral_anchor, collateralAnchor.ts): every
+// candidate user no read at or above B0 covers yet is read at the pinned block
+// min(indexed head, finalized head). Then it runs BOTH B0 anchors, each on
 // its own gate (anchorLoop.ts): each cycle refreshes the reserve map (cheap; catches
 // newly added reserves) and, once raw ingestion has completed every block from
 // MM_LOGS_FROM to B0 (the candidate holders are read from that raw; --force does
@@ -117,12 +121,13 @@ async function readReserveMap(): Promise<{ reserve: string; atoken: string; vdeb
 // a user the pool names on reserve R is a possible holder of aR / vdebtR, and a
 // non-holder reads 0 at the cost of one call. (Keyed per pool instead they would
 // name every swept user for every contract: 290k reads a cycle, against ~16k.)
-//   collateral — every user whose swept usage-as-collateral bitmap has the bit set
-//                on the reserve (money_market_collateral_anchor: written by the
-//                api's snapshot-money-market refresher for every user with a live
-//                position or any collateral event, so a fresh database fills it
-//                within that refresher's cadence; the bit means a balance, so it
-//                names the aToken's holder — a variable-debt token has no bit);
+//   collateral — every user whose read usage-as-collateral bitmap has the bit set
+//                on the reserve (money_market_collateral_anchor: read by the raw
+//                indexer at every block that can move a user's bit, and seeded by
+//                this loop's collateral port — which runs before this anchor — for
+//                every user with a live position or any collateral event; the bit
+//                means a balance, so it names the aToken's holder — a
+//                variable-debt token has no bit);
 //   events     — every user a decoded money-market event names on the reserve
 //                (raw_money_market_events.asset_address: Supply, Borrow, Repay, a
 //                liquidation, the collateral events) or through the contract's own
@@ -346,13 +351,23 @@ async function runOnce(): Promise<void> {
 const LM_RECONCILE_LIMIT = 2_000
 // Created on first use and kept: the chain port caches one runtime per spec.
 let lmChain: ReturnType<typeof createLmCaptureChain> | null = null
+let snapshotRpc: ReturnType<typeof createSnapshotRpcClient> | null = null
 
 async function runLoopCycle(): Promise<void> {
   const startedAt = Date.now()
   console.log(JSON.stringify({ type: 'atoken_anchor_start', dry_run: dryRun, anchor_block: B0, rpc_url: RPC_URL }))
   let reserveMap: ReserveMap = []
   const incentive = createIncentiveAnchorJob({ client, ethCall: incentiveEthCall, anchorBlock: B0, rpcUrl: RPC_URL })
+  const collateral = createCollateralAnchorJob({
+    client,
+    anchorBlock: B0,
+    pools: moneyMarketPools().map(market => market.poolProxy),
+    pinnedBlock: async () => (await resolveIndexedSnapshotAnchor(snapshotRpc ??= createSnapshotRpcClient(RPC_URL), client)).height,
+  })
   await runAnchorCycle({
+    collateral: {
+      capture: mode => collateral.capture({ dryRun, mode }),
+    },
     atoken: {
       refreshReserveMap: async () => { reserveMap = await refreshReserveMap() },
       anchorRowCount,
@@ -376,6 +391,7 @@ async function runLoopCycle(): Promise<void> {
     },
   }, {
     // A dry run writes nothing, so what the table holds cannot skip it (as runOnce).
+    forceCollateral: dryRun,
     forceAtoken: force || dryRun,
     forceIncentive: forceIncentive || dryRun,
     atokenLogsFrom: MM_LOGS_FROM,

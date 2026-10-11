@@ -206,7 +206,7 @@ describe('the capture gate', () => {
     expect(script).not.toMatch(/hasFlag\('(recapture|add-missing)'\)/)
     expect(script).toMatch(/anchorKeysToRead\(candidates\.holders, anchored\.get\(contract\)/)
     // The sources beyond the money market's own logs, which the pre-B0 log gaps
-    // leave partial: the collateral sweep, every decoded pool event, and the
+    // leave partial: the collateral anchor, every decoded pool event, and the
     // Substrate legs of the registry asset over the aToken (first 20 bytes of the
     // AccountId32, the runtime's address mapping).
     expect(script).toContain('FROM price_data.money_market_collateral_anchor')
