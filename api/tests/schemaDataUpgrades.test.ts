@@ -18,8 +18,41 @@ describe('schema data upgrades', () => {
     for (const u of DATA_UPGRADES) {
       const mv = statements.find(st => new RegExp(`CREATE MATERIALIZED VIEW IF NOT EXISTS \\S+ TO ${u.table.replace('.', '\\.')} `).test(st))
       expect(mv, u.table).toBeDefined()
-      expect(mv).toContain(`AS SELECT ${u.select} FROM price_data.raw_events WHERE raw_events.event_name = '${u.eventName}'`)
+      expect(mv).toContain(`AS SELECT ${u.select} FROM price_data.${u.source} WHERE ${u.where}`)
     }
+  })
+
+  // Coverage is judged on the raw row's identity, so the table must carry it and
+  // replace on it: a replayed chunk then collapses instead of duplicating.
+  it('keys every upgraded table on the raw row identity, replay-safe', () => {
+    for (const u of DATA_UPGRADES) {
+      const create = statements.find(st => st.includes(`CREATE TABLE IF NOT EXISTS ${u.table} (`))
+      expect(create, u.table).toBeDefined()
+      expect(u.where.startsWith(`${u.source}.`), u.table).toBe(true)
+      if (u.key == null) {
+        expect(create).toContain('`block_height` UInt32')
+        expect(create).toContain('`event_index` UInt32')
+        expect(create).toMatch(/ENGINE = ReplacingMergeTree\(ingested_at\)/)
+      } else {
+        // An aggregated table: its key columns exist and every state is idempotent
+        // under replay (max/min), never an additive sum or count.
+        for (const col of u.key.columns.split(',').map(c => c.trim())) expect(create).toContain(`\`${col}\``)
+        expect(create).toMatch(/ENGINE = AggregatingMergeTree/)
+        expect(create).not.toMatch(/AggregateFunction\((sum|count|uniq)/)
+        expect(u.key.raw.split(',').length).toBe(u.key.columns.split(',').length)
+      }
+    }
+  })
+
+  // A NULL into an ordinary column fails the SOURCE insert (raw ingestion stalls):
+  // every Nullable raw column an upgraded MV reads is guarded or lands in a Nullable column.
+  it('guards the Nullable raw columns it reads', () => {
+    const evm = DATA_UPGRADES.find(u => u.table === 'price_data.wormhole_ntt_logs')!
+    expect(evm.select).toContain("ifNull(raw_evm_logs.topic0, '') AS topic0")
+    const create = statements.find(st => st.includes('CREATE TABLE IF NOT EXISTS price_data.wormhole_ntt_logs ('))!
+    expect(create).toContain('`extrinsic_index` Nullable(UInt32)')
+    const pre = statements.find(st => st.includes('CREATE TABLE IF NOT EXISTS price_data.referendum_preimage_events ('))!
+    expect(pre).toContain('`extrinsic_index` Nullable(UInt32)')
   })
 
   it('covers raw\'s first record through its head in chunks', () => {
@@ -61,9 +94,11 @@ function fakeUpgradeDb(rawBlocks: number[], opts: { failInsertFrom?: number } = 
     async query({ query, query_params = {} }: { query: string; query_params?: Record<string, unknown> }) {
       queries.push(query)
       let v: number | null
+      // Raw holds rows of the first upgrade's predicate only; the others find none.
+      const mine = query.includes(u.where)
       if (/SELECT max\(block_height\) AS v FROM price_data\.raw_events/.test(query)) v = Math.max(...rawBlocks)
-      else if (/NOT IN/.test(query)) v = rawBlocks.filter(b => inRange(b, query_params) && !table.has(b)).length
-      else if (/min\(block_height\)/.test(query)) { const m = rawBlocks.filter(b => inRange(b, query_params)); v = m.length ? Math.min(...m) : null }
+      else if (/NOT IN/.test(query)) v = mine ? rawBlocks.filter(b => inRange(b, query_params) && !table.has(b)).length : 0
+      else if (/min\(block_height\)/.test(query)) { const m = mine ? rawBlocks.filter(b => inRange(b, query_params)) : []; v = m.length ? Math.min(...m) : null }
       else throw new Error('unexpected query ' + query)
       return { json: async () => [{ v }] }
     },

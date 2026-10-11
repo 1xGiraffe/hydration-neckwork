@@ -136,3 +136,16 @@ export function proposalsNeedingDecode(
   }
   return out
 }
+
+// A hash whose decode failed (no bytes indexed yet, or bytes the runtime rejects) is
+// retried, but not every cycle: the decoder loops every few minutes and most such
+// failures are permanent (a call the metadata cannot express). `heldUntil` maps a
+// failed hash to the time it may be tried again; held hashes count as done.
+export function skipHeldForRetry(decoded: ReadonlySet<string>, heldUntil: Map<string, number>, now: number): Set<string> {
+  const skip = new Set(decoded)
+  for (const [hash, until] of heldUntil) {
+    if (until > now) skip.add(hash)
+    else heldUntil.delete(hash)
+  }
+  return skip
+}

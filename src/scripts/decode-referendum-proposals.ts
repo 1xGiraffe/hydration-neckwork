@@ -8,6 +8,7 @@ import {
   preimageBytesFromCall,
   proposalsNeedingDecode,
   selectPreimageBytes,
+  skipHeldForRetry,
 } from '../governance/proposalCalls.js'
 
 // Referendum proposal calls.
@@ -25,12 +26,19 @@ import {
 //
 // Usage:
 //   npx tsx src/scripts/decode-referendum-proposals.ts [--loop] [--dry-run]
-//     [--max=200] [--cycle-minutes=30]
+//     [--max=200] [--cycle-minutes=2] [--retry-minutes=30]
+//
+// A cycle reads only referendum_preimage_events and the decoded set (both a few
+// thousand rows), plus raw_calls by primary key for a hash still to decode, so a
+// new referendum's proposal shows within minutes.
 
 const dryRun = hasFlag('dry-run')
 const loop = hasFlag('loop')
 const max = integerOption('max', 200, { min: 1, max: 2_000, clamp: true })
-const cycleMinutes = integerOption('cycle-minutes', 30, { min: 1, max: 1_440, clamp: true })
+const cycleMinutes = integerOption('cycle-minutes', 2, { min: 1, max: 1_440, clamp: true })
+// A failed hash waits this long before its next attempt (skipHeldForRetry).
+const retryMinutes = integerOption('retry-minutes', 30, { min: 1, max: 10_080, clamp: true })
+const heldUntil = new Map<string, number>()
 
 const client = createClickHouseClient()
 const rpc = createSnapshotRpcClient()
@@ -58,28 +66,30 @@ interface ProposalRow {
 // Democracy.PreimageUsed; the API pairs each back to its referendum by the
 // Democracy.Executed event in the same block. Either way the bytes sit on the extrinsic
 // that noted the preimage.
-async function loadWanted(): Promise<{ hash: string; notedBlock: number }[]> {
-  const res = await client.query({
-    query: `
+//
+// All four events are read from referendum_preimage_events (an MV-fed copy holding each
+// one's hash, clickhouse/schema/017_narrow_event_tables.sql): ~2k rows, where the same
+// pairing over raw_events scanned ~1 GiB a cycle.
+const WANTED_SQL = `
       SELECT hash, max(noted_block) AS noted_block FROM (
-        SELECT lower(JSONExtractString(n.args_json, 'hash')) AS hash, n.block_height AS noted_block
-        FROM price_data.raw_events n
-        WHERE n.event_name = 'Preimage.Noted'
-          AND lower(JSONExtractString(n.args_json, 'hash')) IN (
-            SELECT DISTINCT lower(JSONExtractString(args_json, 'proposal', 'hash'))
-            FROM price_data.raw_events
-            WHERE event_name = 'Referenda.Submitted' AND JSONHas(args_json, 'proposal'))
+        SELECT hash, block_height AS noted_block
+        FROM price_data.referendum_preimage_events
+        WHERE event_name = 'Preimage.Noted'
+          AND hash IN (
+            SELECT hash FROM price_data.referendum_preimage_events
+            WHERE event_name = 'Referenda.Submitted' AND hash != '')
         UNION ALL
-        SELECT lower(JSONExtractString(n.args_json, 'proposalHash')) AS hash, n.block_height AS noted_block
-        FROM price_data.raw_events n
-        WHERE n.event_name = 'Democracy.PreimageNoted'
-          AND lower(JSONExtractString(n.args_json, 'proposalHash')) IN (
-            SELECT DISTINCT lower(JSONExtractString(args_json, 'proposalHash'))
-            FROM price_data.raw_events WHERE event_name = 'Democracy.PreimageUsed')
+        SELECT hash, block_height AS noted_block
+        FROM price_data.referendum_preimage_events
+        WHERE event_name = 'Democracy.PreimageNoted'
+          AND hash IN (
+            SELECT hash FROM price_data.referendum_preimage_events
+            WHERE event_name = 'Democracy.PreimageUsed' AND hash != '')
       )
-      GROUP BY hash`,
-    format: 'JSONEachRow',
-  })
+      GROUP BY hash`
+
+async function loadWanted(): Promise<{ hash: string; notedBlock: number }[]> {
+  const res = await client.query({ query: WANTED_SQL, format: 'JSONEachRow' })
   return (await res.json<{ hash: string; noted_block: number }>())
     .filter(row => /^0x[0-9a-f]{64}$/.test(row.hash))
     .map(row => ({ hash: row.hash, notedBlock: Number(row.noted_block) }))
@@ -113,15 +123,14 @@ interface ExtrinsicCallRow { block: number; call_name: string; args_json: string
 async function loadPreimageBytes(hash: string): Promise<{ bytes: string; block: number } | null> {
   const res = await client.query({
     query: `
+      WITH noted AS (
+        SELECT DISTINCT block_height, extrinsic_index FROM price_data.referendum_preimage_events
+        WHERE event_name IN ('Preimage.Noted', 'Democracy.PreimageNoted')
+          AND hash = {hash:String} AND extrinsic_index IS NOT NULL)
       SELECT c.block_height AS block, c.call_name AS call_name, c.args_json AS args_json
       FROM price_data.raw_calls c
-      WHERE (c.block_height, c.extrinsic_index) IN (
-          SELECT block_height, extrinsic_index FROM price_data.raw_events
-          WHERE event_name IN ('Preimage.Noted', 'Democracy.PreimageNoted')
-            AND lower(if(event_name = 'Preimage.Noted',
-                         JSONExtractString(args_json, 'hash'),
-                         JSONExtractString(args_json, 'proposalHash'))) = {hash:String}
-            AND extrinsic_index IS NOT NULL)
+      WHERE c.block_height IN (SELECT block_height FROM noted)
+        AND (c.block_height, c.extrinsic_index) IN (SELECT block_height, extrinsic_index FROM noted)
       ORDER BY c.block_height, c.extrinsic_index, c.call_address`,
     query_params: { hash }, format: 'JSONEachRow',
   })
@@ -188,14 +197,16 @@ async function decodeOne(hash: string): Promise<ProposalRow | null> {
 
 async function runCycle(): Promise<void> {
   const [wanted, decoded] = await Promise.all([loadWanted(), loadDecoded()])
-  const todo = proposalsNeedingDecode(wanted, decoded, max)
-  console.log(`[proposals] ${wanted.length} referendum preimages known, ${decoded.size} decoded; decoding ${todo.length} this cycle`)
+  const todo = proposalsNeedingDecode(wanted, skipHeldForRetry(decoded, heldUntil, Date.now()), max)
   if (!todo.length) return
+  console.log(`[proposals] ${wanted.length} referendum preimages known, ${decoded.size} decoded; decoding ${todo.length} this cycle`)
+  const hold = (hash: string) => heldUntil.set(hash, Date.now() + retryMinutes * 60_000)
 
   const rows: ProposalRow[] = []
   for (const target of todo) {
     const row = await decodeOne(target.hash)
-    if (!row) { console.warn(`[proposals] ${target.hash}: no preimage bytes indexed`); continue }
+    if (!row) { hold(target.hash); console.warn(`[proposals] ${target.hash}: no preimage bytes indexed`); continue }
+    if (row.decode_error) hold(target.hash)
     rows.push(row)
     console.log(row.decode_error
       ? `[proposals] ${target.hash}: ${row.decode_error}`
