@@ -1,5 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { SUBSTRATE_RPC_URL } from './substrateRpc.ts'
+import { loadPinnedSubstrateBlock, withEthBlockHash } from './pinnedBlock.ts'
 import { reservedH160AccountId } from './addressIdentity.ts'
 import { erc20Precompile } from './chainPrimitives.ts'
 
@@ -221,6 +222,12 @@ export function catchUpPlan(
   return { plan: all.slice(0, maxBuckets), truncated: all.length > maxBuckets }
 }
 
+// The contracts with a gap bucket the plan does not reach this cycle.
+export function unfilledContracts(gaps: { contract: string; buckets: number[] }[], plan: { contract: string; lo: number }[], size = CATCHUP_BUCKET_BLOCKS): string[] {
+  const planned = new Set(plan.map(p => `${p.contract}:${p.lo}`))
+  return gaps.filter(g => g.buckets.some(b => !planned.has(`${g.contract}:${b * size}`))).map(g => g.contract)
+}
+
 let walletAssets: Erc20WalletAsset[] | null = null
 let walletAssetsAt = 0
 let walletAssetsInflight: Promise<Erc20WalletAsset[]> | null = null
@@ -276,6 +283,10 @@ export async function syncWalletContracts(): Promise<Erc20WalletAsset[]> {
 let catchUpCheckedAt = 0
 let catchUpSetKey = ''
 let catchUpPending = false
+// Contracts the last catch-up check left with gap buckets it did not reach (the
+// per-cycle cap): their deltas are known incomplete, so their balances are not
+// republished from them until a later cycle has filled the rest.
+let unfilledGapContracts = new Set<string>()
 
 // Fill erc20_transfer_deltas wherever the indexed logs show Transfers it lacks.
 export async function syncTransferDeltas(assets: Erc20WalletAsset[]): Promise<void> {
@@ -294,6 +305,7 @@ export async function syncTransferDeltas(assets: Erc20WalletAsset[]): Promise<vo
     gaps.push({ contract: s.contract, buckets: (await bucketRes.json<{ bucket: number | string }>()).map(r => Number(r.bucket)) })
   }
   const { plan, truncated } = catchUpPlan(gaps)
+  unfilledGapContracts = new Set(unfilledContracts(gaps, plan))
   for (const p of plan) await insertMissingTransferDeltas(client, p, 'catch-up')
   catchUpPending = truncated
   catchUpSetKey = setKey
@@ -301,18 +313,20 @@ export async function syncTransferDeltas(assets: Erc20WalletAsset[]): Promise<vo
 }
 
 const ERC20_BALANCE_OF = '70a08231' // keccak256("balanceOf(address)")[:4]
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 
 let client: ClickHouseClient
 
-// Balances for the addresses the node actually answered for. A dropped batch or
-// an unparseable item leaves its addresses out of the map — the caller must treat
-// them as unknown, never as zero.
-async function ethCallBalances(assetId: number, h160s: string[]): Promise<Map<string, bigint>> {
+// Balances for the addresses the node actually answered for, every call at the
+// pinned block `at` (EIP-1898 `{ blockHash }`). A dropped batch or an unparseable
+// item leaves its addresses out of the map — the caller must treat them as
+// unknown, never as zero.
+async function ethCallBalances(assetId: number, h160s: string[], at: { blockHash: string }): Promise<Map<string, bigint>> {
   const out = new Map<string, bigint>()
   const to = erc20Precompile(assetId)
   for (let start = 0; start < h160s.length; start += 80) {
     const chunk = h160s.slice(start, start + 80)
-    const calls = chunk.map((h, id) => ({ jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data: `0x${ERC20_BALANCE_OF}${'0'.repeat(24)}${h.slice(2).toLowerCase()}` }, 'latest'] }))
+    const calls = chunk.map((h, id) => ({ jsonrpc: '2.0', id, method: 'eth_call', params: [{ to, data: `0x${ERC20_BALANCE_OF}${'0'.repeat(24)}${h.slice(2).toLowerCase()}` }, at] }))
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), 8000)
     try {
@@ -326,15 +340,17 @@ async function ethCallBalances(assetId: number, h160s: string[]): Promise<Map<st
         if (typeof result !== 'string' || !/^0x[0-9a-f]+$/i.test(result)) continue
         out.set(chunk[id as number], BigInt(result))
       }
-    } catch { /* chunk skipped; next refresh retries */ } finally { clearTimeout(timer) }
+    } catch { /* chunk skipped; counted unread by the audit */ } finally { clearTimeout(timer) }
   }
   return out
 }
 
-// Rows for one refresh cycle. A holder missing from `balances` could not be read
-// this cycle — that is unknown, not zero — so it gets no row and keeps its last
-// published one. Every holder's anchor still counts as current, so the stale-key
-// pass only zeroes keys that no longer belong to any holder.
+// Rows for one publication. A holder missing from `balances` is unknown, not
+// zero — so it gets no row and keeps its last published one. Every holder's
+// anchor still counts as current, so the stale-key pass only zeroes keys that no
+// longer belong to any holder. (The delta producer states every holder, so its
+// publications are always whole; the partial-read rule is kept for any caller
+// that is not.)
 export function walletBalanceRows(
   assetId: number,
   h160s: string[],
@@ -349,9 +365,9 @@ export function walletBalanceRows(
   // DEFAULT those rows would SHARE — so two rows under one key keep whichever
   // the merge picks and silently drop the other balance. Summing first makes the
   // emitted set key-unique by construction.
-  // An anchor is published only when EVERY H160 folding into it was read this
-  // cycle: a sum over the ones that answered would shrink a shared anchor's balance
-  // by its unread members, so a partly read anchor keeps its previous row.
+  // An anchor is published only when EVERY H160 folding into it was read: a sum
+  // over the ones that answered would shrink a shared anchor's balance by its
+  // unread members, so a partly read anchor keeps its previous row.
   const totals = new Map<string, bigint>()
   const unread = new Set<string>()
   for (const h of h160s) {
@@ -386,13 +402,238 @@ export const TRUNCATED_SUBSTRATE_ACCOUNTS_SQL = `SELECT DISTINCT concat('0x', su
                   AND substring(b.account_id, 1, 42) IN {evms:Array(String)}
                   AND substring(b.account_id, 3, 8) != '45544800'`
 
-// Refresh candidates are every address that ever appeared in a Transfer log of
-// the backing contract (~1.2k for HOLLAR); each H160 is anchored to its
-// substrate account id via the alias table (falling back to the ETH-prefixed
-// AccountId32 form) so rows group with the account's other balances. An asset
-// whose deltas have not been captured yet yields no candidates and is skipped,
-// so it keeps whatever rows it already has rather than being zeroed.
-async function refresh(): Promise<void> {
+// ── balances from the transfer deltas ─────────────────────────────────────────
+//
+// A contract-backed balance IS the sum of its holder's Transfer legs: every mint,
+// burn and move of these contracts emits a Transfer, and erc20_transfer_deltas
+// holds one signed leg per side of each (verified 2026-10-10: equal to balanceOf
+// for every holder of all 7 contracts). So the producer sums the deltas (FINAL — a
+// replayed log is one row, never two, and a duplicate shares its block's month
+// partition, so FINAL is exact under do_not_merge_across_partitions_select_final),
+// at or below the cycle's pinned block, instead of one eth_call per holder.
+// NOT an additive MV: a replayed raw range would be summed twice.
+//
+// A contract is recomputed only when its delta WATERMARK moves — its row count,
+// newest ingest and newest block at or below the pin. The count is what catches a
+// catch-up insert (the refresher's own, or an MV swap's `catchUpTransferDeltasWindow`):
+// it carries raw's original `ingested_at`, so max(ingested_at) may stand still,
+// but the row count cannot. A merge that drops a replay duplicate moves the count
+// too, which costs one harmless recompute. The anchors are re-read every cycle
+// (cheap, one pair of reads for every holder at once), so an alias linked since
+// the last publication re-keys the balance on the next cycle, transfers or not.
+//
+// eth_call stays as an hourly AUDIT: every holder's balanceOf at the pinned block,
+// compared with the delta sum at that same block; a mismatch is logged and counted
+// (`erc20BalanceAuditStats`), never published.
+
+export const DELTA_WATERMARKS_SQL = `-- erc20:balances:watermarks
+SELECT contract_address AS contract, count() AS n, toString(max(ingested_at)) AS ingested, max(block_height) AS top
+FROM price_data.erc20_transfer_deltas
+WHERE contract_address IN {cs:Array(String)} AND block_height <= {b:UInt32}
+GROUP BY contract`
+
+export const DELTA_BALANCES_SQL = `-- erc20:balances:sum
+SELECT contract_address AS contract, holder, toString(sum(balance_delta)) AS balance
+FROM price_data.erc20_transfer_deltas FINAL
+WHERE contract_address IN {cs:Array(String)} AND block_height <= {b:UInt32}
+  AND holder != '${ZERO_ADDRESS}'
+GROUP BY contract, holder`
+
+export const ALIAS_ANCHORS_SQL = `SELECT DISTINCT evm_address AS evm, account_id FROM price_data.account_alias_directory
+                WHERE evm_address IN ({evms:Array(String)}) AND account_id != ''`
+
+export const ERC20_AUDIT_INTERVAL_MS = 3600_000
+
+export function deltaWatermarkKey(r: { n: number | string; ingested: string; top: number | string }): string {
+  return `${Number(r.n)}|${r.ingested}|${Number(r.top)}`
+}
+
+/**
+ * Per contract, each holder's balance from its delta-sum rows. A negative sum is a
+ * holder whose received legs are missing — the contract's deltas are incomplete,
+ * so it is reported (and the contract not published) rather than clamped.
+ */
+export function balancesFromDeltaRows(rows: ReadonlyArray<{ contract: string; holder: string; balance: string }>): {
+  balances: Map<string, Map<string, bigint>>
+  negative: Map<string, string[]>
+} {
+  const balances = new Map<string, Map<string, bigint>>()
+  const negative = new Map<string, string[]>()
+  for (const r of rows) {
+    const contract = r.contract.toLowerCase()
+    const holder = r.holder.toLowerCase()
+    if (!/^0x[0-9a-f]{40}$/.test(holder) || holder === ZERO_ADDRESS) continue
+    const v = BigInt(r.balance)
+    if (v < 0n) negative.set(contract, [...(negative.get(contract) ?? []), holder])
+    let m = balances.get(contract)
+    if (!m) balances.set(contract, (m = new Map()))
+    m.set(holder, v)
+  }
+  return { balances, negative }
+}
+
+/** The anchor of an H160: a module/sovereign truncation, else an alias/truncation anchor, else the ETH-prefixed form. */
+export function makeAnchorOf(anchor: ReadonlyMap<string, string>): (h: string) => string {
+  return (h: string) => reservedH160AccountId(h.slice(2)) ?? anchor.get(h) ?? `0x45544800${h.slice(2)}0000000000000000`
+}
+
+/** One contract's holder → anchor map as a stable string, so a re-keyed holder is noticed. */
+export function anchorFingerprint(h160s: readonly string[], anchorOf: (h: string) => string): string {
+  return [...h160s].sort().map(h => `${h}=${anchorOf(h)}`).join(',')
+}
+
+export interface AuditMismatch { holder: string; deltas: string; chain: string }
+/** Every holder the chain answered for whose balanceOf differs from its delta sum. */
+export function auditMismatches(deltas: ReadonlyMap<string, bigint>, chain: ReadonlyMap<string, bigint>): { checked: number; unread: number; mismatches: AuditMismatch[] } {
+  let checked = 0
+  let unread = 0
+  const mismatches: AuditMismatch[] = []
+  for (const [holder, d] of deltas) {
+    const c = chain.get(holder)
+    if (c == null) { unread++; continue }
+    checked++
+    if (c !== d) mismatches.push({ holder, deltas: d.toString(), chain: c.toString() })
+  }
+  return { checked, unread, mismatches }
+}
+
+interface PublishedContract { watermark: string; anchors: string; block: number; balances: Map<string, bigint> }
+const published = new Map<string, PublishedContract>()
+let lastAuditAt = 0
+
+export interface Erc20BalanceAuditStats {
+  runs: number
+  lastAt: string | null
+  lastBlock: number
+  lastChecked: number
+  lastUnread: number
+  lastMismatches: number
+  /** Mismatching (contract, holder) pairs summed over every audit since the process started. */
+  totalMismatches: number
+}
+const auditStats: Erc20BalanceAuditStats = { runs: 0, lastAt: null, lastBlock: 0, lastChecked: 0, lastUnread: 0, lastMismatches: 0, totalMismatches: 0 }
+export function erc20BalanceAuditStats(): Erc20BalanceAuditStats { return { ...auditStats } }
+
+async function json<T>(query: string, query_params: Record<string, unknown>): Promise<T[]> {
+  const res = await client.query({ query, query_params, format: 'JSONEachRow' })
+  return res.json<T>()
+}
+
+async function loadDeltaBalances(contracts: string[], block: number) {
+  return balancesFromDeltaRows(await json<{ contract: string; holder: string; balance: string }>(DELTA_BALANCES_SQL, { cs: contracts, b: block }))
+}
+
+// Prefer the full substrate account so the balance lands on the profile the rest
+// of the explorer groups by: (1) an alias-linked substrate account, (2) a known
+// balance-holding substrate account whose truncated first 20 bytes ARE the H160
+// (aliases only exist once substrate-side activity was observed), (3) the
+// ETH-prefixed AccountId32 form (genuine EVM accounts).
+async function loadAnchors(h160s: string[]): Promise<Map<string, string>> {
+  const anchor = new Map<string, string>()
+  if (!h160s.length) return anchor
+  // account_alias_directory holds one row per distinct alias identity, not
+  // raw_account_aliases' one row per observation.
+  const [alias, trunc] = await Promise.all([
+    json<{ evm: string; account_id: string }>(ALIAS_ANCHORS_SQL, { evms: h160s }),
+    json<{ evm: string; account_id: string }>(TRUNCATED_SUBSTRATE_ACCOUNTS_SQL, { evms: h160s }),
+  ])
+  for (const r of trunc) anchor.set(r.evm, r.account_id)
+  for (const r of alias) {
+    const isEthPrefixed = r.account_id.startsWith('0x45544800') && r.account_id.endsWith('0000000000000000')
+    if (!isEthPrefixed) anchor.set(r.evm, r.account_id.toLowerCase())
+  }
+  return anchor
+}
+
+async function publishContract(a: Erc20WalletAsset, balances: Map<string, bigint>, anchorOf: (h: string) => string): Promise<void> {
+  // Zero keys that no longer belong to the current account anchor so stale rows
+  // cannot double count a wallet balance.
+  const previous = (await json<{ account_id: string }>(
+    `SELECT account_id FROM price_data.erc20_wallet_balances WHERE asset_id = {a:String}
+     GROUP BY account_id HAVING toUInt256OrZero(argMax(total, updated_at)) > 0`, { a: String(a.assetId) },
+  )).map(r => r.account_id)
+  const rows = walletBalanceRows(a.assetId, [...balances.keys()], balances, anchorOf, previous)
+  if (rows.length) await client.insert({ table: 'price_data.erc20_wallet_balances', values: rows, format: 'JSONEachRow' })
+}
+
+/**
+ * One cycle of the delta producer at `pin.block`. Returns the contracts it
+ * (re)published. A contract whose deltas are known short (an unreached catch-up
+ * gap) or whose sums go negative keeps its previous rows; an asset with no
+ * deltas yet yields no holders and keeps whatever rows it already has.
+ */
+export async function publishDeltaBalances(assets: Erc20WalletAsset[], pin: { block: number }): Promise<string[]> {
+  if (!assets.length) return []
+  const contracts = assets.map(a => a.contract)
+  const marks = new Map((await json<{ contract: string; n: number | string; ingested: string; top: number | string }>(
+    DELTA_WATERMARKS_SQL, { cs: contracts, b: pin.block },
+  )).map(r => [r.contract.toLowerCase(), deltaWatermarkKey(r)]))
+  const moved = contracts.filter(c => marks.has(c) && published.get(c)?.watermark !== marks.get(c))
+  const fresh = moved.length ? await loadDeltaBalances(moved, pin.block) : { balances: new Map<string, Map<string, bigint>>(), negative: new Map<string, string[]>() }
+  // Current holders per contract: freshly summed where the watermark moved, the
+  // last publication's otherwise.
+  const holdersOf = (c: string): Map<string, bigint> | undefined => fresh.balances.get(c) ?? published.get(c)?.balances
+  const allHolders = [...new Set(contracts.flatMap(c => [...(holdersOf(c)?.keys() ?? [])]))]
+  const anchorOf = makeAnchorOf(await loadAnchors(allHolders))
+  const out: string[] = []
+  for (const a of assets) {
+    const c = a.contract
+    const mark = marks.get(c)
+    const balances = holdersOf(c)
+    if (!mark || !balances?.size) continue
+    if (unfilledGapContracts.has(c)) {
+      console.warn(`[erc20-wallet] asset ${a.assetId} (${c}): transfer deltas have an unfilled catch-up gap; keeping its previous balances`)
+      continue
+    }
+    const neg = fresh.negative.get(c)
+    if (neg?.length) {
+      console.warn(`[erc20-wallet] asset ${a.assetId} (${c}): ${neg.length} holder(s) sum negative at block ${pin.block} (${neg.slice(0, 5).join(', ')}) — deltas incomplete; keeping its previous balances`)
+      continue
+    }
+    const anchors = anchorFingerprint([...balances.keys()], anchorOf)
+    const prev = published.get(c)
+    if (prev && prev.watermark === mark && prev.anchors === anchors) continue
+    await publishContract(a, balances, anchorOf)
+    published.set(c, { watermark: mark, anchors, block: pin.block, balances })
+    out.push(c)
+  }
+  if (out.length) console.log(`[erc20-wallet] balances published from transfer deltas at block ${pin.block}: ${out.map(c => assets.find(a => a.contract === c)?.assetId).join(', ')}`)
+  return out
+}
+
+/**
+ * The hourly audit: every holder's balanceOf at the pinned block (by its Ethereum
+ * hash), against the delta sum at the same block. Logs each mismatching
+ * (contract, holder) and counts them; publishes nothing.
+ */
+export async function auditDeltaBalances(assets: Erc20WalletAsset[], pin: { block: number; ethBlockHash: string }): Promise<Erc20BalanceAuditStats> {
+  const { balances } = await loadDeltaBalances(assets.map(a => a.contract), pin.block)
+  let checked = 0, unread = 0, mismatchCount = 0
+  for (const a of assets) {
+    const deltas = balances.get(a.contract)
+    if (!deltas?.size) continue
+    const chain = await ethCallBalances(a.assetId, [...deltas.keys()], { blockHash: pin.ethBlockHash })
+    const r = auditMismatches(deltas, chain)
+    checked += r.checked
+    unread += r.unread
+    mismatchCount += r.mismatches.length
+    for (const m of r.mismatches.slice(0, 20)) {
+      console.warn(`[erc20-wallet] AUDIT MISMATCH asset ${a.assetId} (${a.contract}) holder ${m.holder} at block ${pin.block}: deltas ${m.deltas}, balanceOf ${m.chain}`)
+    }
+    if (r.mismatches.length > 20) console.warn(`[erc20-wallet] AUDIT MISMATCH asset ${a.assetId}: ${r.mismatches.length - 20} more`)
+  }
+  auditStats.runs++
+  auditStats.lastAt = new Date().toISOString()
+  auditStats.lastBlock = pin.block
+  auditStats.lastChecked = checked
+  auditStats.lastUnread = unread
+  auditStats.lastMismatches = mismatchCount
+  auditStats.totalMismatches += mismatchCount
+  console.log(`[erc20-wallet] balance audit at block ${pin.block}: ${checked} holder(s) checked, ${mismatchCount} mismatch(es), ${unread} unread`)
+  return erc20BalanceAuditStats()
+}
+
+async function refresh(nowMs = Date.now()): Promise<void> {
   // A failed derivation keeps the last set (the table is untouched); a failed
   // catch-up is retried on the next check. Neither stops the balance refresh.
   const assets = await syncWalletContracts().catch(err => {
@@ -404,62 +645,29 @@ async function refresh(): Promise<void> {
     console.error('[erc20-wallet] transfer-deltas catch-up failed', err)
   })
   await zeroInactiveAssetBalances(assets).catch(err => console.error('[erc20-wallet] inactive-asset reconcile failed', err))
-  for (const a of assets) {
-    const holderRes = await client.query({
-      query: `SELECT DISTINCT holder AS h FROM price_data.erc20_transfer_deltas
-           WHERE contract_address = {c:String} AND holder != '0x0000000000000000000000000000000000000000'`,
-      query_params: { c: a.contract }, format: 'JSONEachRow',
-    })
-    const h160s = (await holderRes.json<{ h: string }>())
-      .map(r => r.h.toLowerCase())
-      .filter(h => /^0x[0-9a-f]{40}$/.test(h))
-    if (!h160s.length) continue
-    // Prefer the full substrate account so the balance lands on the profile the
-    // rest of the explorer groups by: (1) an alias-linked substrate account,
-    // (2) a known balance-holding substrate account whose truncated first 20
-    // bytes ARE the H160 (aliases only exist once substrate-side activity was
-    // observed), (3) the ETH-prefixed AccountId32 form (genuine EVM accounts).
-    const [aliasRes, truncRes] = await Promise.all([
-      client.query({
-        // account_alias_directory holds one row per distinct alias identity (19,867)
-        // instead of raw_account_aliases' one row per observation (16.2M).
-        query: `SELECT DISTINCT evm_address AS evm, account_id FROM price_data.account_alias_directory
-                WHERE evm_address IN ({evms:Array(String)}) AND account_id != ''`,
-        query_params: { evms: h160s }, format: 'JSONEachRow',
-      }),
-      client.query({
-        query: TRUNCATED_SUBSTRATE_ACCOUNTS_SQL,
-        query_params: { evms: h160s }, format: 'JSONEachRow',
-      }),
-    ])
-    const anchor = new Map<string, string>()
-    for (const r of await truncRes.json<{ evm: string; account_id: string }>()) anchor.set(r.evm, r.account_id)
-    for (const r of await aliasRes.json<{ evm: string; account_id: string }>()) {
-      const isEthPrefixed = r.account_id.startsWith('0x45544800') && r.account_id.endsWith('0000000000000000')
-      if (!isEthPrefixed) anchor.set(r.evm, r.account_id.toLowerCase())
-    }
-    const balances = await ethCallBalances(a.assetId, h160s)
-    if (!balances.size) continue // RPC down — keep previous rows
-    if (balances.size < h160s.length) {
-      console.warn(`[erc20-wallet] partial refresh for asset ${a.assetId}: ${balances.size}/${h160s.length} balances read; unread holders keep their previous rows`)
-    }
-    // Module/sovereign truncations resolve deterministically; then alias/
-    // truncation anchors; genuine EVM accounts keep the ETH-prefixed form.
-    const anchorOf = (h: string) => reservedH160AccountId(h.slice(2)) ?? anchor.get(h) ?? `0x45544800${h.slice(2)}0000000000000000`
-    // Zero keys that no longer belong to the current account anchor so stale
-    // rows cannot double count a wallet balance.
-    const prevRes = await client.query({
-      query: `SELECT account_id FROM price_data.erc20_wallet_balances WHERE asset_id = {a:String}
-              GROUP BY account_id HAVING toUInt256OrZero(argMax(total, updated_at)) > 0`,
-      query_params: { a: String(a.assetId) }, format: 'JSONEachRow',
-    })
-    const previous = (await prevRes.json<{ account_id: string }>()).map(r => r.account_id)
-    await client.insert({
-      table: 'price_data.erc20_wallet_balances',
-      values: walletBalanceRows(a.assetId, h160s, balances, anchorOf, previous),
-      format: 'JSONEachRow',
-    })
+  // ONE block per cycle (pinnedBlock.ts: min(indexed head, finalized head)): the
+  // deltas are summed up to it, and the audit's eth_calls name it by its hash.
+  const pin = await loadPinnedSubstrateBlock(client, undefined, 'erc20:balances-pin')
+  await publishDeltaBalances(assets, pin)
+  // A failed audit (the node could not confirm the block's Ethereum hash, a read
+  // threw) is retried on the next cycle rather than an hour later.
+  if (nowMs - lastAuditAt >= ERC20_AUDIT_INTERVAL_MS) {
+    await withEthBlockHash(pin)
+      .then(p => auditDeltaBalances(assets, p))
+      .then(() => { lastAuditAt = nowMs })
+      .catch(err => console.error('[erc20-wallet] balance audit failed', err))
   }
+}
+
+/** Test seam: forget the published watermarks, the audit clock and the catch-up state. */
+export function resetErc20BalanceStateForTest(): void {
+  published.clear()
+  lastAuditAt = 0
+  unfilledGapContracts = new Set()
+  catchUpCheckedAt = 0
+  catchUpSetKey = ''
+  catchUpPending = false
+  Object.assign(auditStats, { runs: 0, lastAt: null, lastBlock: 0, lastChecked: 0, lastUnread: 0, lastMismatches: 0, totalMismatches: 0 })
 }
 
 // Balance rows of asset ids that are no longer in the active set (a contract that

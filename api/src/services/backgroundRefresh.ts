@@ -21,7 +21,10 @@ import { refreshOracleState } from './oracleService.ts'
 // Measured per-cycle cost against node-full (same-host RPC):
 //   hdx-locks      ~2.2s enumeration + ~0.8s ClickHouse write   → every tick (60s)
 //   proxy-multisig ~15ms enumeration + ~30ms reconstruction     → every tick (60s)
-//   erc20-wallets  ~1s eth_call (HOLLAR holders, 80/batch)       → every 3rd tick (180s)
+//   erc20-wallets  ClickHouse only: one delta-watermark read (~60ms), the
+//                    FINAL delta sums (~0.3s) only for a contract whose
+//                    watermark moved, two anchor reads; plus an HOURLY audit
+//                    of ~1s eth_call (every holder, 80/batch)   → every 3rd tick (180s)
 //   security-state ~90ms (≈140 storage reads, 2 batches)         → every tick (60s)
 //   wormhole-backing ~2.7s node-full (≈23 throttled eth_call, one batched
 //                    array of 4 fuse reads per manager, 1 pinned storage
