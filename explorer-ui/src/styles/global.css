@@ -1402,6 +1402,12 @@ svg { display: block; }
 .acct-stats .acct-bal { display: contents; }
 .acct-stats .acct-bal .lab { grid-row: 1; align-self: end; }
 .acct-stats .acct-bal .amt { grid-row: 2; align-self: start; }
+/* Desktop: room for the longest label ("Protocol revenue") on one line — at the
+   base 520px the five equal columns are ~82px and it wrapped onto two. */
+@media (min-width: 1000px) {
+  .acct-stats { width: min(660px, 60%); }
+  .acct-stats .acct-bal .lab { white-space: nowrap; }
+}
 /* The value's money-market breakdown: a full-width flex row of its own below
    the stats, right-aligned — free to run left under trading/liquidation
    rather than wrapping inside the value's one narrow column. */
