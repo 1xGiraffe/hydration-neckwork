@@ -231,7 +231,7 @@ export function buildFastRelayIndex(rows: FastRelayRows, inputs: Map<string, str
 }
 
 // The transfer family's half of the membership rule, for every transfer read — the way
-// nttMinterLegExclusionSql is shared, so the rows a page renders and the rows its total
+// nttLegExclusionSql is shared, so the rows a page renders and the rows its total
 // counts can never be a different set. One `from IN (pool) AND block IN (its fill
 // blocks)` group per pool, so the predicate is exactly the (block, pool) set even with
 // several pools. `fromExpr` is compared as given: the read models' `from_account` is
