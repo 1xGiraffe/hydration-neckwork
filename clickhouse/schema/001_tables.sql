@@ -133,6 +133,18 @@ CREATE TABLE IF NOT EXISTS price_data.dca_events (`id` UInt64, `event_name` LowC
 CREATE TABLE IF NOT EXISTS price_data.dca_schedules (`id` UInt64, `block_height` UInt32, `block_timestamp` DateTime, `extrinsic_index` Nullable(UInt32), `who` String, `asset_in` UInt32, `asset_out` UInt32, `direction` LowCardinality(String), `amount_per` String, `total_amount` String, `period` UInt32, `max_retries` UInt32) ENGINE = ReplacingMergeTree(block_height) ORDER BY id SETTINGS index_granularity = 8192;
 CREATE TABLE IF NOT EXISTS price_data.erc20_transfer_deltas (`contract_address` String, `holder` String, `block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `leg_index` UInt8, `balance_delta` Int256, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (holder, contract_address, block_height, event_index, leg_index) SETTINGS index_granularity = 4096;
 CREATE TABLE IF NOT EXISTS price_data.erc20_wallet_balances (`account_id` String, `asset_id` String, `total` String, `updated_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (asset_id, account_id) SETTINGS index_granularity = 8192;
+-- The wallet-contract ERC-20 Transfer logs between two parties that can each be an
+-- ordinary account, block-first and one row per log: the chain-wide feed walks recent
+-- block ranges for the EVM-only sends the account pages show (explorerService.ts,
+-- erc20GlobalCandidateSql), which the holder-first erc20_transfer_deltas answers only by
+-- a full scan. A log with a party that is never one (mint/burn and holding addresses, the
+-- pallet EVM caller, a pallet or sovereign account's truncated H160) is never a feed
+-- candidate and is not kept: that is 99.8% of them (5.88M logs to 13.2k over the whole
+-- history; a week of HOLLAR-class traffic is ~150k logs and ~400 rows here). Fed from raw
+-- by erc20_party_transfers_mv, back-filled from raw by schemaBootstrap's DATA_UPGRADES,
+-- and topped up by the wallet refresher's catch-up for a contract that joined the set late
+-- (erc20WalletService.ts).
+CREATE TABLE IF NOT EXISTS price_data.erc20_party_transfers (`contract_address` LowCardinality(String), `from_address` String, `to_address` String, `amount` UInt256, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index) SETTINGS index_granularity = 8192;
 -- The contracts erc20_transfer_deltas_mv captures and erc20_wallet_balances is kept
 -- for: every registry asset with a local contract (assets.evm_address) that is not a
 -- money-market aToken (aTokens are reconstructed from atoken_scaled_deltas). Derived,

@@ -146,14 +146,15 @@ describe('transfer-deltas catch-up', () => {
       mod.initErc20WalletService(client as never)
       const log = vi.spyOn(console, 'log').mockImplementation(() => {})
       await mod.syncTransferDeltas([{ assetId: 1001359, contract: '0xv' }])
-      expect(commands).toEqual([{ c: '0xv', lo: 15_200_000, hi: 15_299_999 }])
+      // One fill, into the deltas and their block-first twin.
+      expect(commands).toEqual([{ c: '0xv', lo: 15_200_000, hi: 15_299_999 }, { c: '0xv', lo: 15_200_000, hi: 15_299_999 }])
       // Within the recheck window nothing is re-read; past it the check runs and
       // inserts nothing, because the gap is closed.
       await mod.syncTransferDeltas([{ assetId: 1001359, contract: '0xv' }])
       vi.useFakeTimers({ now: Date.now() + mod.CATCHUP_RECHECK_MS + 1 })
       await mod.syncTransferDeltas([{ assetId: 1001359, contract: '0xv' }])
       vi.useRealTimers()
-      expect(commands).toHaveLength(1)
+      expect(commands).toHaveLength(2)
       log.mockRestore()
     })
 
@@ -164,7 +165,7 @@ describe('transfer-deltas catch-up', () => {
       const log = vi.spyOn(console, 'log').mockImplementation(() => {})
       await mod.syncTransferDeltas([{ assetId: 1, contract: '0xv' }])
       await mod.syncTransferDeltas([{ assetId: 1, contract: '0xv' }, { assetId: 2, contract: '0xw' }])
-      expect(commands).toHaveLength(1) // the second pass ran its totals read and found the gap closed
+      expect(commands).toHaveLength(2) // one fill (deltas + twin); the second pass found the gap closed
       log.mockRestore()
     })
   })

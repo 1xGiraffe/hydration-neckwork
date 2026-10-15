@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createDefaultDatabaseClickHouseClient, type ClickHouseClient } from './client.ts'
-import { catchUpTransferDeltasWindow } from '../services/erc20WalletService.ts'
+import { PARTY_TRANSFERS_SELECT, PARTY_TRANSFERS_WHERE, catchUpTransferDeltasWindow } from '../services/erc20WalletService.ts'
 
 const DEFAULT_SCHEMA_DIRECTORY = fileURLToPath(new URL('../../../clickhouse/schema/', import.meta.url))
 
@@ -215,6 +215,17 @@ export const DATA_UPGRADES: ReadonlyArray<DataUpgrade> = [
     where: "raw_events.event_name IN ('Preimage.Noted', 'Referenda.Submitted', 'Democracy.PreimageNoted', 'Democracy.PreimageUsed')",
     fromBlock: 700_000,
     select: "block_height, event_index, extrinsic_index, event_name, lower(multiIf(raw_events.event_name = 'Preimage.Noted', JSONExtractString(args_json, 'hash'), raw_events.event_name = 'Referenda.Submitted', JSONExtractString(args_json, 'proposal', 'hash'), JSONExtractString(args_json, 'proposalHash'))) AS hash, ingested_at",
+  },
+  {
+    // The chain-wide feed's ERC-20 party transfers (001_tables.sql); the first
+    // wallet-contract Transfer is HOLLAR's at block 9,333,143. A contract that joins the
+    // set later is filled by the wallet refresher's catch-up, and the next deploy's
+    // coverage check finds anything that reached neither.
+    table: 'price_data.erc20_party_transfers',
+    source: 'raw_evm_logs',
+    where: PARTY_TRANSFERS_WHERE,
+    fromBlock: 9_300_000,
+    select: PARTY_TRANSFERS_SELECT,
   },
   {
     table: 'price_data.hdx_balance_hours',
