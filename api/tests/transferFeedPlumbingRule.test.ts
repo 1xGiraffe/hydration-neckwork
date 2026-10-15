@@ -103,7 +103,7 @@ describe('the chain-wide transfer reads apply the block page\'s non-plumbing rul
     // page's hook arm each resolve through the one helper.
     expect(explorerService).toContain('transfers = await dropTreasuryFeeLegs(transfers)')
     expect(explorerService).toContain(': await dropTreasuryFeeLegs(transfers)')
-    expect(explorerService).toContain('const userTransfers = (await dropTreasuryFeeLegs(transfers)).filter(t =>')
+    expect(explorerService).toContain('const [treasuryKept, feeSwapKeys] = await Promise.all([dropTreasuryFeeLegs(transfers), feePurchaseSwapKeys(trades)])')
     expect(explorerService).toContain('rows.push(...await dropTreasuryFeeLegs(transferLegs))')
     expect(explorerService).toContain('rows.push(...await dropTreasuryFeeLegs(hookTransfers))')
   })

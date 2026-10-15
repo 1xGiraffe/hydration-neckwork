@@ -313,7 +313,7 @@ describe('carried-forward activity totals', () => {
   // identities (FINAL on the sort key, per partition), never physical rows — for every
   // independently indexed source the count reads.
   it('compares deduplicated identities of every independently indexed source', () => {
-    const at = explorerService.indexOf('async function activitySourceRefs')
+    const at = explorerService.indexOf('async function activitySourceMarksOf')
     const body = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
     expect(body).toContain('FROM ${table} FINAL\n')
     expect(body).toContain('do_not_merge_across_partitions_select_final: 1')
@@ -391,7 +391,7 @@ describe('carried-forward activity totals', () => {
     // The money-market fingerprint: every column, key and ingested_at included, Nullable
     // ones as isNull + ifNull (a NULL would drop the row out of groupBitXor).
     expect(tablesBody).toContain("groupBitXor(cityHash64(account_id, block_height, event_index, event_name, block_timestamp, asset_address, isNull(pool_address), ifNull(pool_address, ''), isNull(amount), ifNull(amount, ''), liquidated_collateral_amount, ingested_at))")
-    const at = explorerService.indexOf('async function activitySourceRefs')
+    const at = explorerService.indexOf('async function activitySourceMarksOf')
     const body = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
     expect(body).toContain('toString(count()) AS refs, ${change} AS change, ${fingerprint ?? "\'\'"} AS fp FROM ${table} FINAL')
   })

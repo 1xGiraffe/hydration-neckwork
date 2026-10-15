@@ -68,8 +68,9 @@ describe('the account-scoped XCM readers use the account-first projection', () =
     // withdrawal decode — that arm's candidate IS a Currencies.Withdrawn row, so it is
     // account-first for exactly the reason the others are), and the swap count arm's
     // fee-asset resolution, which names the account's own withdrawals — plus the
-    // Wormhole Relay index's settlement candidates, the NTT mints into its pool.
-    expect(occurrences(explorerService, 'xcmEventActivityByAccountTable(')).toBe(9)
+    // Wormhole Relay index's settlement candidates, the NTT mints into its pool — and the
+    // executed-send arm's marker set, held to the blocks of the account's own withdrawals.
+    expect(occurrences(explorerService, 'xcmEventActivityByAccountTable(')).toBe(10)
     for (const site of ['getRecentXcmIn', 'getRecentXcmOutRemote', 'xcmOutRemoteRowsForBlocks', 'getRecentNttRedeems', 'loadFastRelayIndex', 'getRecentXcmExecuted', 'xcmExecutedRowsForBlocks', 'accountSwapTradeArm']) {
       expect(functionBody(site), site).toContain('${xcmEventActivityByAccountTable()}')
     }

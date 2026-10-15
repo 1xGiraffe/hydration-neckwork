@@ -93,7 +93,7 @@ describe('every DCA row builder keys on the execution event', () => {
   })
 
   it('the asset feed', () => {
-    const asset = body('assetActivityPage')
+    const asset = body('assetActivityRows')
     expect(asset).toContain('eventIndex: dcaHit ? dcaHit.event_index : rep.event_index')
     expect(asset).toContain('dcaScheduleId: dcaHit ? Number(dcaHit.id) || undefined : undefined')
   })

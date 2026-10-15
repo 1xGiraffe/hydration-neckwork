@@ -49,14 +49,16 @@ describe('money-market position history ordering', () => {
     expect(bucketQuery).not.toContain('lower(pool_address)')
   })
 
-  // block_height < minb prunes almost perfectly against a block-first key (203,717 rows
-  // / 5.6 ms); account-first the same carry-in degrades to 1,738,112 rows / 470 ms.
-  it('leaves the carry-in query on the block-first raw table', () => {
+  // On the block-first raw table `block_height < minb` prunes by block alone, so a late
+  // window read every account's rows below it; account-first a call reads its own.
+  it('reads the carry-in from the account-first twin too, on its bare key columns', () => {
     const carry = explorerService.slice(explorerService.indexOf('const carryRes = await client.query({')).slice(0, 900)
 
-    expect(carry).toContain('FROM price_data.raw_money_market_positions')
+    expect(carry).toContain('FROM price_data.account_money_market_position_history')
     expect(carry).toContain('block_height < ${rng.minb}')
-    expect(carry).not.toContain('FROM price_data.account_money_market_position_history')
+    expect(carry).toContain('AND pool_address IN (')
+    expect(carry).not.toContain('lower(pool_address)')
+    expect(carry).not.toContain('FROM price_data.raw_money_market_positions')
   })
 })
 
