@@ -2122,18 +2122,32 @@ function activitySourceKey(rule: NotificationRule): string | null {
 // The scoped feed behind one group's target. The visibility check is repeated
 // HERE rather than trusted from creation time: a list unshared between two ticks
 // must stop contributing rows immediately, without the rule being touched.
+//
+// `since` opens the read at the window's first day (windowDayBounds), as the
+// large-value lanes bound theirs. Undated, every tick asked the target's whole
+// history for its newest page, and a target whose rows are mostly suppressed — a
+// pool tag, whose transfer legs are all plumbing, or a value floor few rows
+// clear — walked all of it to fill the page: 2 GB a read, every ~20 s. The
+// window's rows are the same either way: the page is the scope's newest rows and
+// the window ends at the head. It is a lower bound ONLY, never a `to`: a window
+// with no end is never closed (datedWindowIsClosed), so the scoped feed keys it
+// on the scope's own activity watermark exactly as it keys the undated read
+// (getScopedAccountActivity), where a `to` naming yesterday would earn a
+// head-less key a few seconds after midnight while that day's last blocks are
+// still landing. A null `since` (boundary block not indexed yet) reads undated.
 async function fetchTargetActivity(
   target: RuleParams['account-activity']['target'], viewer: string,
   limit: number, filters: { min?: number; unit?: 'usd' }, type = 'all',
   opts: { revenue?: boolean } = { revenue: false },
+  since?: string,
 ): Promise<ActivityRow[] | null> {
   switch (target.kind) {
-    case 'address': return getAddressActivity(target.address, type, limit, 0, undefined, filters, undefined, undefined, opts)
-    case 'tag': return getTagActivity(target.tagId, type, limit, 0, undefined, filters, undefined, undefined, opts)
+    case 'address': return getAddressActivity(target.address, type, limit, 0, undefined, filters, since, undefined, opts)
+    case 'tag': return getTagActivity(target.tagId, type, limit, 0, undefined, filters, since, undefined, opts)
     default: {
       const resolved = resolveActivityTarget(viewer, target)
       if (!resolved) return []
-      return getListTagActivity(target.listId, target.tagId, resolved.members, type, limit, 0, undefined, filters, undefined, undefined, opts)
+      return getListTagActivity(target.listId, target.tagId, resolved.members, type, limit, 0, undefined, filters, since, undefined, opts)
     }
   }
 }
@@ -2171,7 +2185,7 @@ async function liquidationMatches(
   return visitGroups('liquidation', groups, budget, async group => {
     const target = (group[0].params as RuleParams['liquidation']).target
     const rows = await fetchActivityPage(limit => target
-      ? fetchTargetActivity(target, group[0].accountId, limit, {}, 'mm', { revenue: true })
+      ? fetchTargetActivity(target, group[0].accountId, limit, {}, 'mm', { revenue: true }, bounds?.from)
       : getRecentActivity(limit, bounds?.from, bounds?.to, 0, 'mm', {}, undefined, FORWARD_ONLY_REVENUE_PAGE),
       window)
     return evaluateLiquidations(rows, group, window)
@@ -2179,6 +2193,7 @@ async function liquidationMatches(
 }
 
 async function accountActivityMatches(rules: NotificationRule[], window: BlockWindow, budget: FetchBudget): Promise<{ matches: RuleMatch[]; groups: GroupVisit }> {
+  const bounds = await windowDayBounds(window)
   const groups = new Map<string, NotificationRule[]>()
   for (const rule of rules) {
     const key = activitySourceKey(rule)
@@ -2195,7 +2210,7 @@ async function accountActivityMatches(rules: NotificationRule[], window: BlockWi
     const floors = params.map(p => p.minUsd)
     const min = floors.every(f => f != null) ? Math.min(...floors as number[]) : null
     const filters = min == null ? {} : { min, unit: 'usd' as const }
-    const rows = await fetchActivityPage(limit => fetchTargetActivity(params[0].target, group[0].accountId, limit, filters), window)
+    const rows = await fetchActivityPage(limit => fetchTargetActivity(params[0].target, group[0].accountId, limit, filters, 'all', { revenue: false }, bounds?.from), window)
     const matches = evaluateAccountActivity(rows, group, window)
     // NOTIFICATIONS_DEBUG=1 prints what a group's page actually contained for the
     // window it was matched against — the one thing no unit test can show, because

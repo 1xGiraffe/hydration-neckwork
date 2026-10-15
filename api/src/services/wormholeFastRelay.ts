@@ -297,6 +297,12 @@ export class FastRelayIndexStore {
     this.now = opts.now ?? Date.now
   }
 
+  // The newest index any read has built, without reading: what a served page restates
+  // its relay annotations from (a head or two old at most while feeds are being read).
+  latest(): FastRelayIndex | null {
+    return this.lastGood
+  }
+
   async index(head: number, source: FastRelayRowSource): Promise<FastRelayIndex> {
     try {
       const index = await this.load(head, source)

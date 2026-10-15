@@ -327,7 +327,7 @@ describe('isIntentOnlyTradeRequest', () => {
     expect(intentOnly).toBeGreaterThan(dcaFailed)
     // The same SQL-paged read `type=intent` takes without an action, with the action pushed in.
     expect(window).toContain('getRecentIntents(limit, from, to, undefined, offset, filters, undefined, action)')
-    expect(body('async function assetActivityPage(')).toContain('const intentOnly = isIntentOnlyTradeRequest(type, action)')
+    expect(body('async function assetActivityRows(')).toContain('const intentOnly = isIntentOnlyTradeRequest(type, action)')
     expect(body('async function collectAccountActivity(')).toContain('const intentOnly = isIntentOnlyTradeRequest(type, action)')
   })
 })

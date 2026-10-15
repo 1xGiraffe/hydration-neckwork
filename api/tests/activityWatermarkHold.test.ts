@@ -33,7 +33,8 @@ const constant = (name: string): number => {
 describe('a count is held for as long as the scope has not acted', () => {
   it('keys the exact recount on the watermark and holds only a complete, current count', () => {
     const held = body('async function heldActivityTotal')
-    expect(held).toContain('cachedFound(heldActivityTotalKey(key, mark), ACTIVITY_WATERMARK_HOLD_MS')
+    expect(held).toContain('const heldKey = heldActivityTotalKey(key, mark)')
+    expect(held).toContain('cachedFound(heldKey, ACTIVITY_WATERMARK_HOLD_MS')
     expect(body('function heldActivityTotalKey')).toContain('return `${key}:count:w${mark}`')
     // The sweep's fresh recount installs under the same key and the same hold condition.
     const install = body('export function installActivityListTotal')
@@ -42,7 +43,7 @@ describe('a count is held for as long as the scope has not acted', () => {
     // Complete, because a partial total is counted to a frontier that moves with the head
     // rather than with the scope; current, because a count made while a superseded
     // snapshot was still being served predates the act that moved the watermark.
-    expect(held).toContain('counted => counted.complete && builtAtWatermark(counted.generation, mark))')
+    expect(held).toContain('const keep = (counted: CountedActivityTotal) => counted.complete && builtAtWatermark(counted.generation, mark)')
     // The total the caller sees is the list-total shape, not the counted one: the
     // provenance exists to decide the hold and never reaches the wire.
     expect(held).toContain('return { total: counted.total, complete: counted.complete }')
@@ -55,7 +56,7 @@ describe('a count is held for as long as the scope has not acted', () => {
     // `located != null` is the condition cachedFound's default would get wrong twice over:
     // an empty page is a real answer worth holding, and a refusal (null) is not, because
     // the windowed path answers it and a refusal can be transient.
-    expect(held).toContain('located => located != null && builtAtWatermark(located.generation, mark))')
+    expect(held).toContain('const keep = (located: LocatedActivityPage | null) => located != null && builtAtWatermark(located.generation, mark)')
   })
 
   // Every value keyed by the watermark is trusted no longer than the page it appears on
@@ -224,7 +225,8 @@ describe('every scoped activity total is counted through the one path', () => {
   // against the 1.68 CPU-seconds of the count it spares.
   it('reads the watermark once per scope per burst', () => {
     expect(body('async function accountActivityWatermark')).toContain("cached(`explorer:acct-watermark:${accounts.join(',')}`, 2_000")
-    // Five list/total sites plus the account tab badges (getAccountTabCounts).
-    expect(sites(/accountActivityWatermark\(/g)).toBe(6)
+    // Five list/total sites plus the account tab badges (getAccountTabCounts), and the
+    // key of the count's held ERC-20 candidates (erc20CandidateRows).
+    expect(sites(/accountActivityWatermark\(/g)).toBe(7)
   })
 })

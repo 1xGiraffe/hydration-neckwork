@@ -78,7 +78,7 @@ import { loadCurrentCollateralFlags, loadMmIncentiveHistory, loadMmReserveMap, l
 import { loadMmIncentiveClaims } from './mmIncentiveClaims.ts'
 import { loadMmLiquidations } from './mmLiquidations.ts'
 import { currentMmIncentiveGenerationSql, loadMmIncentives, mmCountedIncentiveRowsSql, type MmIncentiveSnapshotView } from './mmIncentiveSnapshot.ts'
-import { xcswapSettlementsFor, type XcswapSettlement, type XcswapStatus } from './xcswapSettlements.ts'
+import { isTerminalXcswapStatus, xcswapSettlementsFor, type XcswapSettlement, type XcswapStatus } from './xcswapSettlements.ts'
 import { loadForeignCandles } from './foreignCandles.ts'
 import { intentLimitPrice } from './intentLimitPrice.ts'
 import { TREASURY_POT, XYK_PAIR_EVENTS, isAmountlessLiquidityEvent, liquidityLegAssetIds, matchLiquidityAmounts, missingLiquidityAmounts, type LiquidityAmountCandidate, type LiquidityTransferLeg } from './liquidityLegs.ts'
@@ -1449,16 +1449,28 @@ export function exactHistoricalValuePredicateSql(
  * when the valued asset is a constant (HDX votes, referral claims) — it is 1 for
  * every row and leaves the price match unchanged.
  */
-function historicalClosesRelationSql(options: { priceIds?: string; narrowTo?: string; joinKey?: boolean } = {}): string {
+function historicalClosesRelationSql(options: { priceIds?: string; narrowTo?: string; joinKey?: boolean; since?: string } = {}): string {
   const priceIds = options.priceIds
     ?? [...new Set(allExplorerAssets().flatMap(a => [a.assetId, historicalPriceAssetId(a.assetId)]))].join(',')
-  return `(SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close${options.joinKey ? `,
-                  toUInt8(1) AS asof_join_key` : ''}
-           FROM price_data.ohlc_1h
-           WHERE asset_id IN (${priceIds || '0'})${options.narrowTo ? `
-             AND asset_id IN (${options.narrowTo})` : ''}
+  const assets = `asset_id IN (${priceIds || '0'})${options.narrowTo ? ` AND asset_id IN (${options.narrowTo})` : ''}`
+  const select = `SELECT asset_id, interval_start + INTERVAL 1 HOUR AS price_time, argMaxMerge(close_state) AS close${options.joinKey ? ', toUInt8(1) AS asof_join_key' : ''} FROM price_data.ohlc_1h`
+  if (!options.since) return `(${select} WHERE ${assets} GROUP BY asset_id, interval_start)`
+  // A caller whose rows all lie at or after `since` needs only the closes from the
+  // hour before it on, plus each asset's newest close older than that — the one an
+  // ASOF match of an early row in a quiet asset still lands on (the match has no
+  // staleness bound, so that close must stay reachable). The rest of the 2.4M-row
+  // hourly history can never be matched, and folding it was the whole cost.
+  const boundary = `toStartOfHour(${options.since}) - INTERVAL 1 HOUR`
+  return `(${select} WHERE ${assets} AND interval_start >= ${boundary} GROUP BY asset_id, interval_start
+           UNION ALL
+           ${select} WHERE ${assets} AND interval_start < ${boundary}
+             AND (asset_id, interval_start) IN (SELECT asset_id, max(interval_start) FROM price_data.ohlc_1h WHERE ${assets} AND interval_start < ${boundary} GROUP BY asset_id)
            GROUP BY asset_id, interval_start)`
 }
+
+// The lower bound a dated window puts on its rows' timestamps, as a SQL
+// DateTime, for historicalClosesRelationSql's `since`.
+const timeWindowSinceSql = (from?: string): string | undefined => from && DATE_RE.test(from) ? `toDateTime('${from} 00:00:00')` : undefined
 
 export interface EventValueFilterSql { joinSql: string; predicateSql: string }
 
@@ -1469,7 +1481,9 @@ export function eventValueFilterSql(
   filters: ValueListFilters | undefined,
   prices: Map<number, PriceInfo>,
   alias: string,
-  options: { amountIsUInt256?: boolean; hasAmountExpr?: string } = {},
+  // `since`: a SQL DateTime every row's timestamp is at or after (the source's own
+  // dated WHERE), which lets the closes relation skip the history no row can match.
+  options: { amountIsUInt256?: boolean; hasAmountExpr?: string; since?: string } = {},
 ): EventValueFilterSql {
   if (filters?.min == null) return { joinSql: '', predicateSql: '' }
   if (filters.unit === 'token') {
@@ -1478,15 +1492,15 @@ export function eventValueFilterSql(
   }
   const { thresholds, denominator } = historicalValueThresholds(filters.min)
   return {
-    joinSql: historicalCloseJoinSql(assetExpr, timestampExpr, alias),
+    joinSql: historicalCloseJoinSql(assetExpr, timestampExpr, alias, options.since),
     predicateSql: `AND ${exactHistoricalValuePredicateSql(assetExpr, rawAmountExpr, `${alias}.close`, thresholds, denominator, options)}`,
   }
 }
 
 // The ASOF join that labels a row with `alias`.close — the last hourly close of
 // its leg's price feed completed at or before the row's own time.
-function historicalCloseJoinSql(assetExpr: string, timestampExpr: string, alias: string): string {
-  return `ASOF LEFT JOIN ${historicalClosesRelationSql({ joinKey: true })} ${alias}
+function historicalCloseJoinSql(assetExpr: string, timestampExpr: string, alias: string, since?: string): string {
+  return `ASOF LEFT JOIN ${historicalClosesRelationSql({ joinKey: true, since })} ${alias}
               ON ${alias}.asof_join_key = toUInt8(isNotNull(${timestampExpr}))
              AND ${alias}.asset_id = ${priceAliasIdSql(assetExpr)}
              AND ${alias}.price_time <= ${timestampExpr}`
@@ -1520,6 +1534,7 @@ export function eventValueAlternativesFilterSql(
   legs: EventValueFilterLeg[],
   timestampExpr: string,
   filters: ValueListFilters | undefined,
+  options: { since?: string } = {},
 ): EventValueFilterSql {
   if (filters?.min == null || filters.unit === 'token' || !legs.length) return { joinSql: '', predicateSql: '' }
   const { thresholds, denominator } = historicalValueThresholds(filters.min)
@@ -1532,7 +1547,7 @@ export function eventValueAlternativesFilterSql(
     ]
   })
   return {
-    joinSql: legs.map(leg => historicalCloseJoinSql(leg.assetExpr, timestampExpr, leg.alias)).join('\n'),
+    joinSql: legs.map(leg => historicalCloseJoinSql(leg.assetExpr, timestampExpr, leg.alias, options.since)).join('\n'),
     predicateSql: `AND multiIf(${branches.join(', ')}, 0)`,
   }
 }
@@ -7634,29 +7649,59 @@ async function reconstructOmnipoolPositions(accounts: string[]): Promise<Decoded
   const accs = [...new Set(accounts.map(a => a.toLowerCase()))].filter(a => /^0x[0-9a-f]{64}$/.test(a))
   if (!accs.length) return []
   return cached(`explorer:lp-recon:${accountValueGenerationEpoch}:${accs.sort().join(',')}`, 15000, async () => {
-    // Fast lookup on the maintained aggregate tables (schema 042): nft_owner_latest
-    // (current NFT owner), omnipool_position_latest (latest position state),
-    // farm_deposit_latest (deposit → position). Empty '' owner = burned/withdrawn.
-    const res = await client.query({
+    // The maintained aggregate tables (nft_owner_latest: current NFT owner;
+    // farm_deposit_latest: deposit → position; omnipool_position_latest: latest
+    // position state; an empty '' owner is burned/withdrawn) are keyed by item,
+    // not owner, so folding them whole and filtering the owner afterwards cost
+    // ~0.3 CPU-s and ~70 MB per account page. The account's candidate NFTs come
+    // from the account-first nft_owner_events_by_account instead — every current
+    // owner was named by the Issued/Transferred event that made it one, so the set
+    // is complete — and each candidate is re-checked against its CURRENT owner,
+    // so a transferred or burned NFT drops out. Three short primary-key reads
+    // rather than one statement: in a single statement ClickHouse re-evaluates the
+    // owner fold per reference and plans the joins over whole tables.
+    const owned = await (await client.query({
       query: `
-        WITH
-        own AS (SELECT collection, item, argMaxMerge(owner) AS owner FROM price_data.nft_owner_latest GROUP BY collection, item),
-        posn AS (SELECT position_id, argMaxMerge(asset_id) AS asset_id, argMaxMerge(shares) AS shares, argMaxMerge(amount) AS amount, argMaxMerge(price) AS price FROM price_data.omnipool_position_latest GROUP BY position_id),
-        dep AS (SELECT deposit_id, argMaxMerge(position_id) AS position_id FROM price_data.farm_deposit_latest GROUP BY deposit_id)
-        SELECT 'Omnipool' AS venue, own.item AS positionId, posn.asset_id AS assetId, posn.shares AS shares, posn.amount AS amount, posn.price AS price, own.owner AS owner
-        FROM own INNER JOIN posn ON own.item = posn.position_id
-        WHERE own.collection = '1337' AND own.owner IN {accs:Array(String)}
-        UNION ALL
-        SELECT 'Omnipool Farm' AS venue, dep.position_id AS positionId, posn.asset_id, posn.shares, posn.amount, posn.price, own.owner
-        FROM own INNER JOIN dep ON own.item = dep.deposit_id INNER JOIN posn ON dep.position_id = posn.position_id
-        WHERE own.collection = '2584' AND own.owner IN {accs:Array(String)}`,
+        SELECT collection, item, argMaxMerge(owner) AS owner
+        FROM price_data.nft_owner_latest
+        WHERE (collection, item) IN (
+          SELECT collection, item FROM price_data.nft_owner_events_by_account
+          WHERE account IN {accs:Array(String)} AND collection IN ('1337', '2584'))
+        GROUP BY collection, item
+        HAVING owner IN {accs:Array(String)}`,
       query_params: { accs }, format: 'JSONEachRow',
+    })).json<{ collection: string; item: string; owner: string }>()
+    const depositIds = owned.filter(o => o.collection === '2584').map(o => o.item)
+    const depositPosition = new Map<string, string>()
+    if (depositIds.length) {
+      const deps = await (await client.query({
+        query: `SELECT deposit_id, argMaxMerge(position_id) AS position_id FROM price_data.farm_deposit_latest
+                WHERE deposit_id IN {ids:Array(String)} GROUP BY deposit_id`,
+        query_params: { ids: depositIds }, format: 'JSONEachRow',
+      })).json<{ deposit_id: string; position_id: string }>()
+      for (const d of deps) depositPosition.set(d.deposit_id, d.position_id)
+    }
+    const held: { venue: 'Omnipool' | 'Omnipool Farm'; positionId: string; owner: string }[] = []
+    for (const o of owned) {
+      if (o.collection === '1337') held.push({ venue: 'Omnipool', positionId: o.item, owner: o.owner })
+      else if (depositPosition.has(o.item)) held.push({ venue: 'Omnipool Farm', positionId: depositPosition.get(o.item)!, owner: o.owner })
+    }
+    if (!held.length) return []
+    const states = await (await client.query({
+      query: `SELECT position_id, argMaxMerge(asset_id) AS asset_id, argMaxMerge(shares) AS shares, argMaxMerge(amount) AS amount, argMaxMerge(price) AS price
+              FROM price_data.omnipool_position_latest WHERE position_id IN {ids:Array(String)} GROUP BY position_id`,
+      query_params: { ids: [...new Set(held.map(h => h.positionId))] }, format: 'JSONEachRow',
+    })).json<{ position_id: string; asset_id: number; shares: string; amount: string; price: string }>()
+    const stateOf = new Map(states.map(s => [s.position_id, s]))
+    // A position with no state row has no PositionCreated indexed yet; it is
+    // left out, as the inner join it replaces left it out.
+    return held.flatMap(h => {
+      const s = stateOf.get(h.positionId)
+      return s ? [{
+        positionId: h.positionId, venue: h.venue, owner: h.owner,
+        dec: { assetId: s.asset_id, amount: BigInt(s.amount || '0'), shares: BigInt(s.shares || '0'), priceNum: BigInt(s.price || '0'), priceDen: OMNI_FIXED } as DecodedPosition,
+      }] : []
     })
-    const rows = await res.json<{ venue: 'Omnipool' | 'Omnipool Farm'; positionId: string; assetId: number; shares: string; amount: string; price: string; owner: string }>()
-    return rows.map(r => ({
-      positionId: r.positionId, venue: r.venue, owner: r.owner,
-      dec: { assetId: r.assetId, amount: BigInt(r.amount || '0'), shares: BigInt(r.shares || '0'), priceNum: BigInt(r.price || '0'), priceDen: OMNI_FIXED } as DecodedPosition,
-    }))
   })
 }
 
@@ -9172,9 +9217,6 @@ export function xcswapRowFromOrder(
   settlement: XcswapSettlement | null,
 ): ActivityRow {
   const aIn = asset(r.asset_in)
-  const dest = settlement?.destinationAsset
-    ? XC_DESTINATIONS.find(d => d.oneClickId === settlement.destinationAsset) ?? null
-    : null
   return {
     type: 'xcswap',
     blockHeight: Number(r.block_height), timestamp: r.ts,
@@ -9191,6 +9233,19 @@ export function xcswapRowFromOrder(
     xcswapSequence: Number(r.transfer_sequence),
     xcswapEthOut: r.eth_out,
     xcswapMaxRelayFee: r.max_relay_fee,
+    ...xcswapSettlementFields(settlement),
+    linkBlock: Number(r.block_height), linkIndex: r.extrinsic_index,
+  }
+}
+
+// The half of a cross-chain swap row the 1Click settlement states, in the row's own
+// field order. Settles after the order's block, so a served page restates it from the
+// current snapshot (refreshSettlingAnnotations) as well as the build stating it once.
+function xcswapSettlementFields(settlement: XcswapSettlement | null): Partial<ActivityRow> {
+  const dest = settlement?.destinationAsset
+    ? XC_DESTINATIONS.find(d => d.oneClickId === settlement.destinationAsset) ?? null
+    : null
+  return {
     xcswapStatus: settlement?.status ?? null,
     xcswapDestAsset: settlement?.destinationAsset ?? null,
     // Where the destination's artwork lives, so a row renders its icon through the
@@ -9216,7 +9271,6 @@ export function xcswapRowFromOrder(
     xcswapRecipient: settlement?.recipient ?? null,
     xcswapDestTxHash: settlement?.destinationTxHash ?? null,
     xcswapRefundReason: settlement?.refundReason ?? null,
-    linkBlock: Number(r.block_height), linkIndex: r.extrinsic_index,
   }
 }
 
@@ -15289,10 +15343,19 @@ async function getRecentXcmExecuted(limit: number, from?: string, to?: string, a
     // the candidates exactly the extrinsics the decode can claim. It only narrows:
     // every row the decode emits comes from a withdrawal inside a claimed extrinsic,
     // which is itself a candidate under this set, and the decode still decides.
+    //
+    // An account-scoped page's candidates are its own withdrawals, so the marker set is
+    // read only in the blocks holding one (raw_xcm_activity is block-first): the whole
+    // history's set cost ~100 MB a read, twice per statement, for the few blocks the
+    // account's withdrawals can ever meet.
+    const accountWithdrawalBlocks = (pageBound: string): string => acctList
+      ? ` AND block_height IN (SELECT block_height FROM ${xcmEventActivityByAccountTable()}
+           WHERE (${pageBound}) AND who IN (${acctList}) AND event_name = 'Currencies.Withdrawn' AND extrinsic_index IS NOT NULL)`
+      : ''
     const executedExtrinsics = (pageBound: string): string =>
       `SELECT block_height, extrinsic_index FROM price_data.raw_xcm_activity
        WHERE (${pageBound}) AND source_kind = 'event' AND extrinsic_index IS NOT NULL
-         AND name IN ('${XCM_EXECUTED_SEND_EVENT}', ${XCM_SENT_EVENTS_SQL})
+         AND name IN ('${XCM_EXECUTED_SEND_EVENT}', ${XCM_SENT_EVENTS_SQL})${accountWithdrawalBlocks(pageBound)}
        GROUP BY block_height, extrinsic_index
        HAVING countIf(name = '${XCM_EXECUTED_SEND_EVENT}') > 0 AND countIf(name != '${XCM_EXECUTED_SEND_EVENT}') = 0`
     const markerBlocks = (pageBound: string): string =>
@@ -15709,6 +15772,7 @@ async function applyXcmOutDests(rows: ActivityRow[]): Promise<void> {
 // Remote-side enrichment of a final PAGE of activity rows — at most a page worth
 // of lookups per request; both passes share the journey cache.
 async function applyXcmJourneys(rows: ActivityRow[]): Promise<void> {
+  await refreshSettlingAnnotations(rows)
   await applyFastRelaySources(rows)
   await applyXcmInSources(rows)
   await applyXcmOutRemoteSources(rows)
@@ -16598,6 +16662,52 @@ async function getRecentFastRelayIn(limit: number, from?: string, to?: string, a
     await applyHistoricalUsd(rows, activityHistPick)
     return rows.filter(r => activityRowMatchesFilters(r, filters)).slice(offset, offset + limit)
   })
+}
+
+// What a row states from something that settles AFTER its block — a cross-chain swap's
+// 1Click settlement, a fast-relay delivery's pairing with the NTT mint that settled it,
+// an NTT arrival recognised as such a settlement — restated whenever a page is served,
+// from the current settlement snapshot and relay index. A page is held past its build
+// (a located account page, a held asset page, any cached feed page) and its block's own
+// rows do not move when these land: the settlement mints into the pool, the swap settles
+// off-chain. Only what can still change is touched (an unpaired delivery, an unmarked
+// arrival, any swap), each in the row's own field order, so a page whose annotations
+// stand is served exactly as built. The rows are a served page's own copies, so nested
+// annotations are replaced rather than written through to a held row.
+async function refreshSettlingAnnotations(rows: ActivityRow[]): Promise<void> {
+  const swaps = rows.filter(r => r.type === 'xcswap' && r.xcswapDepositAddress)
+  if (swaps.length) {
+    const settlements = xcswapSettlementsFor(swaps.map(r => r.xcswapDepositAddress!))
+    for (const r of swaps) Object.assign(r, xcswapSettlementFields(settlements.get(r.xcswapDepositAddress!.toLowerCase()) ?? null))
+  }
+  // The relay index the feeds last built, read without waiting: a serve is not a reason
+  // to rebuild it, and a page served alongside its other enrichment must not be held
+  // up (and reordered) by a load. Before any feed has built one there is nothing newer
+  // than the build's own annotations.
+  const index = fastRelayStore.latest()
+  if (!index) return
+  annotateFastRelaySettlements(rows.filter(r => r.type === 'xcm' && r.xcmDir === 'in' && !r.fastRelay), index)
+  const paired: { row: ActivityRow; leg: FastRelayLeg; fee: string }[] = []
+  for (const r of rows) {
+    if (r.fastRelay?.role !== 'delivery' || r.fastRelay.pair != null || !r.messageId) continue
+    const delivery = index.deliveryOf.get(`${r.blockHeight}:${r.eventIndex}`)
+    const settlement = delivery ? index.settlementOf.get(delivery.pairKey) : undefined
+    const leg = settlement ? index.legs.find(l => l.block_height === r.blockHeight && l.event_index === r.eventIndex) : undefined
+    if (!settlement || !leg) continue
+    r.fastRelay = { ...r.fastRelay, pair: { blockHeight: settlement.blockHeight, eventIndex: settlement.eventIndex }, pairMessageId: settlement.journeyId ?? null }
+    const fee = fastRelayFeeRaw(leg, settlement)
+    if (fee) paired.push({ row: r, leg, fee })
+  }
+  if (!paired.length) return
+  const prices = await ensurePrices()
+  for (const { row, leg, fee } of paired) row.xcmFees = [xcmFeeLeg('relayer', leg.asset_id, fee, prices, 'destination')]
+}
+// Whether a row still waits on such a settlement (see refreshSettlingAnnotations): a
+// swap without a terminal 1Click state, or a delivery whose fast message names a pair
+// the index has not seen settle. A result holding one is not kept past its own hold.
+function awaitsSettlement(row: ActivityRow): boolean {
+  if (row.type === 'xcswap') return row.xcswapStatus == null || !isTerminalXcswapStatus(row.xcswapStatus)
+  return row.fastRelay?.role === 'delivery' && row.fastRelay.pair == null && !!row.messageId
 }
 
 // A delivery's sender and origin transaction are the settlement's: the fast message does
@@ -17752,7 +17862,7 @@ export async function getRecentIntents(limit: number, from?: string, to?: string
     const tokenIds = assetIdsForToken(filters.token)
     const pushValue = filters.min != null && filters.unit !== 'token'
     const valueFilter = pushValue
-      ? eventValueAlternativesFilterSql(INTENT_VALUE_LEGS, 'block_timestamp', filters)
+      ? eventValueAlternativesFilterSql(INTENT_VALUE_LEGS, 'block_timestamp', filters, { since: timeWindowSinceSql(from) })
       : { joinSql: '', predicateSql: '' }
     const rowFilter = [
       acctList ? `AND owner != '' AND owner IN (${acctList})` : '',
@@ -22809,568 +22919,733 @@ export async function getAssetActivity(assetId: number, type = 'all', limit = 40
 
 async function assetActivityPage(assetId: number, type = 'all', limit = 40, offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
-  return cached(`explorer:asset-activity:${assetId}:${type}:${limit}:${offset}:${action ?? ''}:${filterKey(filters)}:${from ?? ''}:${to ?? ''}`, tw ? 30000 : 8000, async () => {
-    const prices = await ensurePrices()
-    const bound = tw ?? '1'
-    const want = offset + limit
-    // Sources either push value predicates below LIMIT or cursor-walk enriched
-    // rows. This count is therefore pagination/classification capacity, never
-    // probabilistic headroom for a post-filter.
-    const fetchN = Math.max(want * 5, 1000)
-    // Event-time USD filters are exact post-filters over bounded, asset-indexed
-    // candidates. Pushing the ASOF price join below each source LIMIT makes a
-    // cold asset page value its complete source history before it can stop.
-    // Token-unit thresholds remain safe and selective in the source query.
-    const queryFilters = filters.min != null && filters.unit !== 'token'
-      ? { ...filters, min: undefined, unit: undefined }
-      : filters
-    const fixedAssetFilters: ValueListFilters = { ...queryFilters, token: undefined }
+  const key = `explorer:asset-activity:${assetId}:${type}:${limit}:${offset}:${action ?? ''}:${filterKey(filters)}:${from ?? ''}:${to ?? ''}`
+  if (!tw && assetPageHoldable(filters)) {
+    if (offset === 0) return heldAssetFirstPage(key, limit, above => assetActivityRows(assetId, type, limit, action, filters, from, to, above))
+    // A later page is built whole at the current head, and that build's own first rows
+    // become the held first page of the same size — so the page a reader steps from and
+    // the page it steps to come from one build and meet without overlap or gap, whatever
+    // the held page had been carrying (heldAssetFirstPage).
+    const head = await indexedRawHead()
+    const firstKey = `explorer:asset-activity:${assetId}:${type}:${limit}:0:${action ?? ''}:${filterKey(filters)}:${from ?? ''}:${to ?? ''}`
+    return cached(`${key}:h${head}`, 8000, async () => {
+      const rows = await assetActivityRows(assetId, type, offset + limit, action, filters, from, to)
+      holdAssetFirstPage(firstKey, { head, fullAt: Date.now(), rows: rows.slice(0, limit), short: rows.length < limit })
+      return enrichAssetActivityPage(rows.slice(offset, offset + limit))
+    })
+  }
+  return cached(key, tw ? 30000 : 8000, async () =>
+    enrichAssetActivityPage((await assetActivityRows(assetId, type, offset + limit, action, filters, from, to)).slice(offset, offset + limit)))
+}
 
-    // Transfers: filter by asset and drop the pure-plumbing legs in SQL before
-    // limiting (nonPlumbingTransferLegSql — the global feed's and the block page's
-    // rule), otherwise pool and router activity fills a page and hides real
-    // transfers. A pallet pot's other legs are candidates, resolved where the page
-    // classifies its transfers (the semantic extrinsic sets, dropTreasuryFeeLegs,
-    // suppressActivityPlumbing) — after the saturation rule has judged the source's
-    // own row count.
-    type = normalizeActivityTypeKey(type)
-    // An intent action on the Trade tab reads the intent source alone (see
-    // isIntentOnlyTradeRequest): the swap, failed-DCA and OTC sources — and the
-    // liquidity context that exists to classify swaps — contribute nothing to it,
-    // and a busy asset's swaps filling their window read as this page being too broad.
-    const intentOnly = isIntentOnlyTradeRequest(type, action)
-    const xcswapOnly = isXcswapOnlyTradeRequest(type, action)
-    const wantTransfers = type === 'all' || type === 'transfer'
-    // Classification context: the Transfers view must exclude trade/staking/MM
-    // legs, and Trades must yield share-routed legs to Liquidity — so those
-    // categories are fetched whenever their exclusion sets are needed.
-    const wantTrades = !intentOnly && !xcswapOnly && (type === 'all' || type === 'trade' || wantTransfers)
-    const wantLiquidity = type === 'all' || type === 'liquidity' || wantTrades
-    const wantXcm = type === 'all' || type === 'xcm' || wantTransfers
-    const wantMm = type === 'all' || type === 'mm' || wantTransfers
-    // otc folds under the trade chip/type — fetch it whenever trade is (wantTrades
-    // already implies wantTransfers), plus its own `type=otc` request.
-    const wantOtc = type === 'all' || type === 'otc' || wantTrades
-    const wantStaking = type === 'all' || type === 'staking' || wantTransfers
-    const wantBonds = type === 'all' || type === 'bond' || wantTransfers
-    // intent folds under the trade chip/type like otc — fetched whenever trade is,
-    // plus its own `type=intent` request and the Trade tab's intent actions.
-    const wantIntents = !xcswapOnly && (type === 'all' || type === 'intent' || wantTrades || intentOnly)
-    // A cross-chain swap is a swap, so it joins the trade family like intents do —
-    // and it leaves the chain, so it is a Cross-chain row too.
-    const wantXcswaps = xcswapOnly || type === 'all' || type === 'xcswap' || type === 'xcm' || wantTrades
-    const wantVotes = (type === 'all' || type === 'vote' || wantTransfers) && assetId === 0
+// The asset feed's classified, filtered rows, newest first — at least the newest
+// `want` of them when the feed holds that many. With `above`, only the rows in blocks
+// above `above.block` (heldAssetFirstPage's incremental read): every source is read
+// over that range alone and must hold all of its rows there, or the read throws
+// AssetPageAboveSaturated and the caller builds the page whole.
+async function assetActivityRows(assetId: number, type: string, want: number, action: string | undefined, filters: ValueListFilters, from?: string, to?: string, above?: AssetPageAbove): Promise<ActivityRow[]> {
+  const tw = timeWindow(from, to)
+  const prices = await ensurePrices()
+  const aboveBound = above ? `block_height > ${above.block}` : null
+  const bound = aboveBound ?? tw ?? '1'
+  // The sources that take a day window rather than a block bound read from the day
+  // `above.block` falls in, and keep only its rows above that block (aboveRows).
+  const sourceFrom = above ? above.day : from
+  const sourceTo = above ? undefined : to
+  // Sources either push value predicates below LIMIT or cursor-walk enriched
+  // rows. This count is therefore pagination/classification capacity, never
+  // probabilistic headroom for a post-filter.
+  const fetchN = Math.max(want * 5, 1000)
+  // Event-time USD filters are exact post-filters over bounded, asset-indexed
+  // candidates. Pushing the ASOF price join below each source LIMIT makes a
+  // cold asset page value its complete source history before it can stop.
+  // Token-unit thresholds remain safe and selective in the source query.
+  const queryFilters = filters.min != null && filters.unit !== 'token'
+    ? { ...filters, min: undefined, unit: undefined }
+    : filters
+  const fixedAssetFilters: ValueListFilters = { ...queryFilters, token: undefined }
+  // A source's newest `fetchN` candidates under the page's bound. `bound(alias)` states
+  // it on the source's own (aliased) table. Above a block (heldAssetFirstPage) the read
+  // must hold all of the range's rows: one that fills `fetchN` may have been cut.
+  const newestCandidates = <T>(run: (bound: (alias?: string) => string, limit: number) => Promise<T[]>): Promise<T[]> =>
+    above
+      ? run(alias => `${alias ? `${alias}.` : ''}block_height > ${above.block}`, fetchN).then(rows => {
+        if (rows.length >= fetchN) throw new AssetPageAboveSaturated()
+        return rows
+      })
+      : run(alias => tw ? (alias ? tw.replaceAll('block_timestamp', `${alias}.block_timestamp`) : tw) : '1', fetchN)
+  // A day-windowed source's rows above `above.block`: complete only if the source was
+  // not cut off above it (fewer than `fetchN` rows, or its oldest at or below it).
+  const aboveRows = (rows: ActivityRow[]): ActivityRow[] => {
+    if (!above) return rows
+    if (rows.length >= fetchN && Math.min(...rows.map(r => r.blockHeight)) > above.block) throw new AssetPageAboveSaturated()
+    return rows.filter(r => r.blockHeight > above.block)
+  }
 
-    const transfersP: Promise<ActivityRow[]> = wantTransfers ? (async () => {
-      const transferValueFilter = eventValueFilterSql('{assetId:UInt32}', 'amount', 'block_timestamp', queryFilters, prices, 'asset_transfer_price')
-      // The asset's Wormhole sends and locking releases are its cross-chain rows
-      // (nttInP/nttOutP), not its transfers — same predicate both sides, so a leg is
-      // exactly one of the two.
-      const nttExclusion = nttLegExclusionSql(await nttManagers(), '{assetId:UInt32}')
-        + ' ' + fastRelayLegExclusionSql(await fastRelayIndex())
-      const transferPlumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
-      const transferPlumbingList = transferPlumbing.length ? transferPlumbing.map(a => `'${a}'`).join(',') : "''"
-      const legFilters = `${nonPlumbingTransferLegSql('from_account', 'to_account', transferPlumbingList)}
-            ${nttExclusion}
-            ${transferValueFilter.predicateSql}`
-      type AssetTransferRaw = { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; from_acc: string; to_acc: string; amount: string }
-      const palletP = client.query({
+  // Transfers: filter by asset and drop the pure-plumbing legs in SQL before
+  // limiting (nonPlumbingTransferLegSql — the global feed's and the block page's
+  // rule), otherwise pool and router activity fills a page and hides real
+  // transfers. A pallet pot's other legs are candidates, resolved where the page
+  // classifies its transfers (the semantic extrinsic sets, dropTreasuryFeeLegs,
+  // suppressActivityPlumbing) — after the saturation rule has judged the source's
+  // own row count.
+  type = normalizeActivityTypeKey(type)
+  // An intent action on the Trade tab reads the intent source alone (see
+  // isIntentOnlyTradeRequest): the swap, failed-DCA and OTC sources — and the
+  // liquidity context that exists to classify swaps — contribute nothing to it,
+  // and a busy asset's swaps filling their window read as this page being too broad.
+  const intentOnly = isIntentOnlyTradeRequest(type, action)
+  const xcswapOnly = isXcswapOnlyTradeRequest(type, action)
+  const wantTransfers = type === 'all' || type === 'transfer'
+  // Classification context: the Transfers view must exclude trade/staking/MM
+  // legs, and Trades must yield share-routed legs to Liquidity — so those
+  // categories are fetched whenever their exclusion sets are needed.
+  const wantTrades = !intentOnly && !xcswapOnly && (type === 'all' || type === 'trade' || wantTransfers)
+  const wantLiquidity = type === 'all' || type === 'liquidity' || wantTrades
+  const wantXcm = type === 'all' || type === 'xcm' || wantTransfers
+  const wantMm = type === 'all' || type === 'mm' || wantTransfers
+  // otc folds under the trade chip/type — fetch it whenever trade is (wantTrades
+  // already implies wantTransfers), plus its own `type=otc` request.
+  const wantOtc = type === 'all' || type === 'otc' || wantTrades
+  const wantStaking = type === 'all' || type === 'staking' || wantTransfers
+  const wantBonds = type === 'all' || type === 'bond' || wantTransfers
+  // intent folds under the trade chip/type like otc — fetched whenever trade is,
+  // plus its own `type=intent` request and the Trade tab's intent actions.
+  const wantIntents = !xcswapOnly && (type === 'all' || type === 'intent' || wantTrades || intentOnly)
+  // A cross-chain swap is a swap, so it joins the trade family like intents do —
+  // and it leaves the chain, so it is a Cross-chain row too.
+  const wantXcswaps = xcswapOnly || type === 'all' || type === 'xcswap' || type === 'xcm' || wantTrades
+  const wantVotes = (type === 'all' || type === 'vote' || wantTransfers) && assetId === 0
+
+  const transfersP: Promise<ActivityRow[]> = wantTransfers ? (async () => {
+    const transferValueFilter = eventValueFilterSql('{assetId:UInt32}', 'amount', 'block_timestamp', queryFilters, prices, 'asset_transfer_price')
+    // The asset's Wormhole sends and locking releases are its cross-chain rows
+    // (nttInP/nttOutP), not its transfers — same predicate both sides, so a leg is
+    // exactly one of the two.
+    const nttExclusion = nttLegExclusionSql(await nttManagers(), '{assetId:UInt32}')
+      + ' ' + fastRelayLegExclusionSql(await fastRelayIndex())
+    const transferPlumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
+    const transferPlumbingList = transferPlumbing.length ? transferPlumbing.map(a => `'${a}'`).join(',') : "''"
+    const legFilters = `${nonPlumbingTransferLegSql('from_account', 'to_account', transferPlumbingList)}
+          ${nttExclusion}
+          ${transferValueFilter.predicateSql}`
+    type AssetTransferRaw = { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; from_acc: string; to_acc: string; amount: string }
+    const pallet = (rangeBound: string, limit: number) => client.query({
+      query: `
+        SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+          from_account AS from_acc, to_account AS to_acc, amount
+        FROM price_data.transfer_activity
+        ${transferValueFilter.joinSql}
+        WHERE ${rangeBound} AND asset_id = {assetId:UInt32}
+          ${legFilters}
+        ORDER BY block_height DESC, event_index DESC
+        LIMIT {n:UInt32}`,
+      query_params: { n: limit, assetId }, format: 'JSONEachRow',
+    }).then(res => res.json<AssetTransferRaw>())
+    // An Erc20 registry asset's EVM-only Transfer logs (erc20GlobalCandidateSql, held to
+    // this asset), under the same filters and limit, merged into one newest-first source
+    // of `fetchN` so the saturation rule judges the two as one.
+    const erc20Scope = erc20GlobalScope()
+    erc20Scope.catch(() => {})
+    const erc20 = async (rangeBound: string, limit: number): Promise<AssetTransferRaw[]> => {
+      const scope = await erc20Scope
+      if (!scope || !erc20GlobalScopeHasAsset(scope, assetId)) return []
+      const res = await client.query({
         query: `
-          SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+          SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, 'EVM.Log' AS event_name,
             from_account AS from_acc, to_account AS to_acc, amount
-          FROM price_data.transfer_activity
+          FROM (${erc20GlobalCandidateSql(scope, rangeBound, [assetId])})
           ${transferValueFilter.joinSql}
-          WHERE ${bound} AND asset_id = {assetId:UInt32}
-            ${legFilters}
+          WHERE 1 ${legFilters}
           ORDER BY block_height DESC, event_index DESC
           LIMIT {n:UInt32}`,
-        query_params: { n: fetchN, assetId }, format: 'JSONEachRow',
-      }).then(res => res.json<AssetTransferRaw>())
-      // An Erc20 registry asset's EVM-only Transfer logs (erc20GlobalCandidateSql, held to
-      // this asset), under the same filters and limit, merged into one newest-first source
-      // of `fetchN` so the saturation rule judges the two as one.
-      const erc20P = (async (): Promise<AssetTransferRaw[]> => {
-        const scope = await erc20GlobalScope()
-        if (!scope || !erc20GlobalScopeHasAsset(scope, assetId)) return []
-        const res = await client.query({
-          query: `
-            SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, 'EVM.Log' AS event_name,
-              from_account AS from_acc, to_account AS to_acc, amount
-            FROM (${erc20GlobalCandidateSql(scope, bound, [assetId])})
-            ${transferValueFilter.joinSql}
-            WHERE 1 ${legFilters}
-            ORDER BY block_height DESC, event_index DESC
-            LIMIT {n:UInt32}`,
-          query_params: { n: fetchN, assetId }, format: 'JSONEachRow',
-        })
-        return res.json<AssetTransferRaw>()
-      })()
-      const [pallet, erc20] = await Promise.all([palletP, erc20P])
-      const merged = erc20.length
-        ? [...pallet, ...erc20].sort((x, y) => y.block_height - x.block_height || y.event_index - x.event_index).slice(0, fetchN)
-        : pallet
-      const rows = dedupeTransferEvents(merged.map(r => ({ ...r, asset_id: assetId })))
-      const party = await erc20PartyNamer(rows.filter(r => r.event_name === 'EVM.Log'))
-      const a = asset(assetId)
+        query_params: { n: limit, assetId }, format: 'JSONEachRow',
+      })
+      return res.json<AssetTransferRaw>()
+    }
+    const merged = await newestCandidates(async (rangeBound, limit) => {
+      const [palletRows, erc20Rows] = await Promise.all([pallet(rangeBound(), limit), erc20(rangeBound(), limit)])
+      return erc20Rows.length
+        ? [...palletRows, ...erc20Rows].sort((x, y) => y.block_height - x.block_height || y.event_index - x.event_index).slice(0, limit)
+        : palletRows
+    })
+    const rows = dedupeTransferEvents(merged.map(r => ({ ...r, asset_id: assetId })))
+    const party = await erc20PartyNamer(rows.filter(r => r.event_name === 'EVM.Log'))
+    const a = asset(assetId)
+    const seen = new Set<string>()
+    const out: ActivityRow[] = []
+    for (const r of rows) {
+      const key = `${r.block_height}:${r.event_index}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      const isErc20 = r.event_name === 'EVM.Log'
+      out.push({
+        type: 'transfer', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
+        who: accountRef(isErc20 ? party(r.from_acc, r) : r.from_acc), to: accountRef(isErc20 ? party(r.to_acc, r) : r.to_acc), asset: a, assetIn: null, assetOut: null,
+        amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+        linkBlock: r.block_height, linkIndex: r.extrinsic_index,
+        ...(isErc20 ? { erc20Log: true as const, erc20Send: true as const } : {}),
+      })
+    }
+    return out
+  })() : Promise.resolve([])
+
+  const dcaFailuresP = wantTrades
+    ? getRecentDcaFailures(fetchN, sourceFrom, sourceTo, undefined, [assetId]).then(aboveRows)
+    : Promise.resolve([])
+
+  // Trades: swaps where the asset is either leg. Grouped per ROUTE, preferring the
+  // Router.Executed net summary that touches this asset. Nothing may collapse the
+  // rows per extrinsic before `swapRouteReps` splits them, or a batch dispatching
+  // two routes over this asset would show only one of them.
+  const tradesP: Promise<ActivityRow[]> = wantTrades ? (async () => {
+    const tradeValueFilter = eventValueFilterSql('asset_out', 'amount_out', 'block_timestamp', fixedAssetFilters, prices, 'asset_trade_price')
+    const rows = await newestCandidates(async (rangeBound, limit) => (await client.query({
+      query: `
+        SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+          who, asset_in, asset_out, amount_in, amount_out
+        FROM price_data.asset_swap_activity
+        ${tradeValueFilter.joinSql}
+        WHERE ${rangeBound()} AND asset_id = {assetId:UInt32}
+          AND who != '${ROUTER_PALLET_ACCT}'
+          AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%') ${NOT_LEGACY_DCA_HOP}
+          ${tradeValueFilter.predicateSql}
+        ORDER BY block_height DESC, extrinsic_index DESC, event_name IN (${ROUTER_NET_EVENTS_SQL}) DESC, event_index DESC
+        LIMIT {n:UInt32}`,
+      query_params: { n: limit, assetId }, format: 'JSONEachRow',
+    })).json<RawSwapEventRow>())
+    if (!rows.length) return []
+    // DCA owner attribution (executions are unsigned block hooks). Every
+    // candidate is kept and claimed by adjacency, as the trade feed does: one
+    // per-trade amount recurs across schedules in a block, and the claim also
+    // hands the row its identity — the DCA.TradeExecuted event's index.
+    const dcaRes = await client.query({
+      query: `SELECT block_height, event_index, who, toString(id) AS id, amount_in
+              FROM price_data.dca_events
+              WHERE event_name='DCA.TradeExecuted' AND block_height IN (${[...new Set(rows.map(r => r.block_height))].join(',') || '0'})`,
+      format: 'JSONEachRow',
+    })
+    const dcaExecutions = adjacencyClaimIndex(
+      (await dcaRes.json<{ block_height: number; event_index: number; who: string; id: string; amount_in: string }>())
+        .map(d => ({ ...d, event_index: Number(d.event_index) })),
+      d => `${d.block_height}:${d.amount_in}`,
+      d => d.event_index,
+    )
+    const pairs = rows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null])
+    const [signers, liqExt] = await Promise.all([actorsFor(pairs), liquidationExtrinsics(pairs)])
+    const out: ActivityRow[] = []
+    // Prefer each route's Router.Executed net summary, but only if it touches the
+    // asset (a multi-hop route's net legs may not include it even when a hop does).
+    for (const rep of swapRouteReps(rows, r => r.asset_in === assetId || r.asset_out === assetId)) {
+      // Drop DCA keeper-fee legs (SQL already excludes them; defensive net so a
+      // fee leg never surfaces as a phantom "Swap" next to its "DCA" row).
+      if (isDcaFeeLegSwap(rep.extrinsic_index, rep.who)) continue
+      // Skip a liquidation's internal swap — it's surfaced as the mm row instead.
+      if (rep.extrinsic_index != null && liqExt.has(`${rep.block_height}:${rep.extrinsic_index}`)) continue
+      const signer = rep.extrinsic_index != null ? signers.get(`${rep.block_height}:${rep.extrinsic_index}`) : undefined
+      const dcaHit = rep.extrinsic_index == null ? dcaExecutions.claimAfter(`${rep.block_height}:${rep.amount_in}`, rep.event_index) : undefined
+      const actor = signer ?? dcaHit?.who ?? (rep.who && ACCOUNT_RE.test(rep.who) ? rep.who : null)
+      const aOut = asset(rep.asset_out)
+      out.push({
+        type: 'trade', blockHeight: rep.block_height, timestamp: rep.ts, eventIndex: dcaHit ? dcaHit.event_index : rep.event_index, extrinsicIndex: rep.extrinsic_index,
+        who: actor ? accountRef(actor) : null, to: null, asset: null, assetIn: asset(rep.asset_in), assetOut: aOut,
+        amount: null, amountIn: rep.amount_in, amountOut: rep.amount_out,
+        valueUsd: usdValue(prices, aOut.assetId, rep.amount_out, aOut.decimals),
+        dca: !!dcaHit, dcaScheduleId: dcaHit ? Number(dcaHit.id) || undefined : undefined,
+        linkBlock: rep.extrinsic_index != null ? rep.block_height : null, linkIndex: rep.extrinsic_index,
+      })
+    }
+    await attachHookSwapActors(out)
+    return out
+  })() : Promise.resolve([])
+
+  // Liquidity: add/remove where the provided/pool asset matches.
+  const liquidityP: Promise<ActivityRow[]> = wantLiquidity ? (async () => {
+    type RawAssetLiquidityRow = { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; amount_b?: string; asset_b: number; pool_acc: string }
+    const readPage = async (pageBound: string, pageLimit: number): Promise<RawAssetLiquidityRow[]> => {
+      const routerHop = routerHopLiquiditySql(pageBound, 'asset_id',
+        { sourceSql: 'price_data.liquidity_activity', whereSql: 'has(asset_refs, {assetId:UInt32})' })
+      const res = await client.query({
+        query: `
+        SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
+          who AS who,
+          asset_id AS asset_id,
+          amount AS amount,
+          asset_b AS asset_b,
+          pool_account AS pool_acc
+        FROM price_data.liquidity_activity
+        ${routerHop.joinSql}
+        WHERE ${pageBound}
+          AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
+          ${liquidityWhoExclusionSql()}
+          ${routerHop.predicateSql}
+          AND has(asset_refs, {assetId:UInt32})
+        ORDER BY block_height DESC, event_index DESC
+        LIMIT {n:UInt32}`,
+        query_params: { n: pageLimit, assetId }, format: 'JSONEachRow',
+      })
+      return res.json<RawAssetLiquidityRow>()
+    }
+    const buildPage = async (raw: RawAssetLiquidityRow[]): Promise<ActivityRow[]> => {
+      // The row displays the page's asset — except an XYK add or remove, which
+      // renders both legs of its pair in the pair's own order on either asset's
+      // page (xykPairLegs): pinning it would collapse both legs into one asset.
+      const rows = raw.map(r => ({ ...r, asset_id: XYK_PAIR_EVENTS.has(r.event_name) ? r.asset_id : assetId }))
+      await fillMissingLiquidityAmounts(rows)
       const seen = new Set<string>()
       const out: ActivityRow[] = []
+      const createCands: { row: ActivityRow; pool: string; assetB: number }[] = []
       for (const r of rows) {
         const key = `${r.block_height}:${r.event_index}`
         if (seen.has(key)) continue
         seen.add(key)
-        const isErc20 = r.event_name === 'EVM.Log'
-        out.push({
-          type: 'transfer', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
-          who: accountRef(isErc20 ? party(r.from_acc, r) : r.from_acc), to: accountRef(isErc20 ? party(r.to_acc, r) : r.to_acc), asset: a, assetIn: null, assetOut: null,
-          amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+        const a = asset(r.asset_id)
+        const row: ActivityRow = {
+          type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
+          who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
+          ...liquidityRowAmount(r.event_name, prices, a.assetId, r.amount, a.decimals), amountIn: null, amountOut: null,
+          liqAction: liqActionFor(r.event_name),
           linkBlock: r.block_height, linkIndex: r.extrinsic_index,
-          ...(isErc20 ? { erc20Log: true as const, erc20Send: true as const } : {}),
-        })
+        }
+        xykPairLegs(row, r)
+        // Enrich only from the assetA side — this builder pins asset_id to the
+        // page's asset, so on the assetB page both legs would collapse into B.
+        if (r.event_name === 'XYK.PoolCreated' && r.asset_b !== assetId) createCands.push({ row, pool: r.pool_acc, assetB: r.asset_b })
+        out.push(row)
       }
+      await enrichPoolCreations(createCands)
+      await applyHistoricalUsd(out, activityHistPick)
       return out
-    })() : Promise.resolve([])
+    }
+    if (fixedAssetFilters.min != null) {
+      return fetchFilteredDeep(aboveBound ?? tw, want, async (pageBound, pageLimit) => buildPage(await readPage(pageBound, pageLimit)),
+        row => activityRowMatchesFilters(row, fixedAssetFilters),
+        row => row.blockHeight, row => row.eventIndex ?? -1,
+        row => `${row.blockHeight}:${row.eventIndex}`)
+    }
+    return buildPage(await newestCandidates((rangeBound, limit) => readPage(rangeBound(), limit)))
+  })() : Promise.resolve([])
 
-    const dcaFailuresP = wantTrades
-      ? getRecentDcaFailures(fetchN, from, to, undefined, [assetId])
-      : Promise.resolve([])
-
-    // Trades: swaps where the asset is either leg. Grouped per ROUTE, preferring the
-    // Router.Executed net summary that touches this asset. Nothing may collapse the
-    // rows per extrinsic before `swapRouteReps` splits them, or a batch dispatching
-    // two routes over this asset would show only one of them.
-    const tradesP: Promise<ActivityRow[]> = wantTrades ? (async () => {
-      const tradeValueFilter = eventValueFilterSql('asset_out', 'amount_out', 'block_timestamp', fixedAssetFilters, prices, 'asset_trade_price')
-      const res = await client.query({
-        query: `
-          SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-            who, asset_in, asset_out, amount_in, amount_out
-          FROM price_data.asset_swap_activity
-          ${tradeValueFilter.joinSql}
-          WHERE ${bound} AND asset_id = {assetId:UInt32}
-            AND who != '${ROUTER_PALLET_ACCT}'
-            AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%') ${NOT_LEGACY_DCA_HOP}
-            ${tradeValueFilter.predicateSql}
-          ORDER BY block_height DESC, extrinsic_index DESC, event_name IN (${ROUTER_NET_EVENTS_SQL}) DESC, event_index DESC
-          LIMIT {n:UInt32}`,
-        query_params: { n: fetchN, assetId }, format: 'JSONEachRow',
+  // XCM outbound: transfers whose recovered substrate currencyId matches the asset.
+  // Start from the asset's matching withdrawals, then decode the same-extrinsic
+  // outbound event (either shape) so low-volume assets page through their full
+  // XCM history. An extrinsic emitting both events joins twice but collapses in
+  // the block:ext:amount:sender dedup below.
+  const xcmP: Promise<ActivityRow[]> = wantXcm ? (async () => {
+    const cidExpr = 'w.asset_id'
+    const withdrawalAmountExpr = 'w.amount'
+    const xcmValueFilter = eventValueFilterSql('{assetId:UInt32}', withdrawalAmountExpr, 'w.block_timestamp', fixedAssetFilters, prices, 'asset_xcm_price')
+    // A local-reserve asset (HDX) leaves as a transfer into the destination's
+    // sovereign account instead (reserveTransferLegs), so its sends are a second
+    // candidate set. One UNION ALL under one LIMIT keeps the page's cut, and so its
+    // saturation rule, exactly as it was for the withdrawals alone.
+    const reserveValueFilter = eventValueFilterSql('{assetId:UInt32}', 't.amount', 't.block_timestamp', fixedAssetFilters, prices, 'asset_xcm_reserve_price')
+    type RawAssetXcmOutRow = { block_height: number; ts: string; extrinsic_index: number | null; event_index: number; x_args: string; amount: string; from_acc: string; to_acc: string }
+    const rows = await newestCandidates(async (rangeBound, limit) => (await client.query({
+      query: `
+        SELECT * FROM (
+          SELECT w.block_height AS block_height, toString(w.block_timestamp) AS ts, w.extrinsic_index AS extrinsic_index,
+            x.event_index AS event_index, x.args_json AS x_args, ${withdrawalAmountExpr} AS amount, '' AS from_acc, '' AS to_acc
+          FROM ${xcmEventActivityTable('w')}
+          INNER JOIN ${xcmEventActivityTable('x')}
+            ON x.block_height = w.block_height
+           AND x.extrinsic_index = w.extrinsic_index
+           AND x.event_name IN (${XCM_SENT_EVENTS_SQL})
+          ${xcmValueFilter.joinSql}
+          WHERE ${rangeBound('w')}
+            AND w.event_name = 'Currencies.Withdrawn'
+            AND ${cidExpr} = {assetId:UInt32}
+            AND position(x.args_json, concat('"value":"', ${withdrawalAmountExpr}, '"')) > 0
+            ${xcmValueFilter.predicateSql}
+          UNION ALL
+          SELECT t.block_height AS block_height, toString(t.block_timestamp) AS ts, t.extrinsic_index AS extrinsic_index,
+            x.event_index AS event_index, x.args_json AS x_args, t.amount AS amount, t.from_account AS from_acc, t.to_account AS to_acc
+          FROM price_data.transfer_activity AS t
+          INNER JOIN ${xcmEventActivityTable('x')}
+            ON x.block_height = t.block_height
+           AND x.extrinsic_index = t.extrinsic_index
+           AND x.event_name IN (${XCM_SENT_EVENTS_SQL})
+          ${reserveValueFilter.joinSql}
+          WHERE ${rangeBound('t')}
+            AND t.event_name = 'Currencies.Transferred'
+            AND t.asset_id = {assetId:UInt32}
+            AND startsWith(t.to_account, '0x7369626c')
+            AND position(x.args_json, concat('"value":"', t.amount, '"')) > 0
+            ${reserveValueFilter.predicateSql}
+        )
+        ORDER BY block_height DESC, event_index DESC
+        LIMIT {n:UInt32}`,
+      query_params: { n: limit, assetId }, format: 'JSONEachRow',
+    })).json<RawAssetXcmOutRow>())
+    const a = asset(assetId)
+    const seen = new Set<string>()
+    const out: ActivityRow[] = []
+    for (const r of rows) {
+      const parsed = parseOutboundXcm(safeJson(r.x_args))
+      if (!parsed || !parsed.amounts.includes(r.amount)) continue
+      // A reserve leg counts only from this send's sender into its own destination's sovereign.
+      if (r.to_acc && !reserveTransferLegs([{ from: r.from_acc, to: r.to_acc, assetId, amount: r.amount }], parsed.sender, parsed.dest.destParachainId).length) continue
+      const key = `${r.block_height}:${r.extrinsic_index}:${r.amount}:${parsed.sender}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({
+        type: 'xcm', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
+        who: accountRef(parsed.sender), to: null, asset: a, assetIn: null, assetOut: null,
+        amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+        xcmDir: 'out', messageId: parsed.messageId, ...parsed.dest, linkBlock: r.block_height, linkIndex: r.extrinsic_index,
       })
-      const rows = await res.json<RawSwapEventRow>()
-      if (!rows.length) return []
-      // DCA owner attribution (executions are unsigned block hooks). Every
-      // candidate is kept and claimed by adjacency, as the trade feed does: one
-      // per-trade amount recurs across schedules in a block, and the claim also
-      // hands the row its identity — the DCA.TradeExecuted event's index.
-      const dcaRes = await client.query({
-        query: `SELECT block_height, event_index, who, toString(id) AS id, amount_in
-                FROM price_data.dca_events
-                WHERE event_name='DCA.TradeExecuted' AND block_height IN (${[...new Set(rows.map(r => r.block_height))].join(',') || '0'})`,
-        format: 'JSONEachRow',
-      })
-      const dcaExecutions = adjacencyClaimIndex(
-        (await dcaRes.json<{ block_height: number; event_index: number; who: string; id: string; amount_in: string }>())
-          .map(d => ({ ...d, event_index: Number(d.event_index) })),
-        d => `${d.block_height}:${d.amount_in}`,
-        d => d.event_index,
-      )
-      const pairs = rows.map(r => [r.block_height, r.extrinsic_index] as [number, number | null])
-      const [signers, liqExt] = await Promise.all([actorsFor(pairs), liquidationExtrinsics(pairs)])
-      const out: ActivityRow[] = []
-      // Prefer each route's Router.Executed net summary, but only if it touches the
-      // asset (a multi-hop route's net legs may not include it even when a hop does).
-      for (const rep of swapRouteReps(rows, r => r.asset_in === assetId || r.asset_out === assetId)) {
-        // Drop DCA keeper-fee legs (SQL already excludes them; defensive net so a
-        // fee leg never surfaces as a phantom "Swap" next to its "DCA" row).
-        if (isDcaFeeLegSwap(rep.extrinsic_index, rep.who)) continue
-        // Skip a liquidation's internal swap — it's surfaced as the mm row instead.
-        if (rep.extrinsic_index != null && liqExt.has(`${rep.block_height}:${rep.extrinsic_index}`)) continue
-        const signer = rep.extrinsic_index != null ? signers.get(`${rep.block_height}:${rep.extrinsic_index}`) : undefined
-        const dcaHit = rep.extrinsic_index == null ? dcaExecutions.claimAfter(`${rep.block_height}:${rep.amount_in}`, rep.event_index) : undefined
-        const actor = signer ?? dcaHit?.who ?? (rep.who && ACCOUNT_RE.test(rep.who) ? rep.who : null)
-        const aOut = asset(rep.asset_out)
-        out.push({
-          type: 'trade', blockHeight: rep.block_height, timestamp: rep.ts, eventIndex: dcaHit ? dcaHit.event_index : rep.event_index, extrinsicIndex: rep.extrinsic_index,
-          who: actor ? accountRef(actor) : null, to: null, asset: null, assetIn: asset(rep.asset_in), assetOut: aOut,
-          amount: null, amountIn: rep.amount_in, amountOut: rep.amount_out,
-          valueUsd: usdValue(prices, aOut.assetId, rep.amount_out, aOut.decimals),
-          dca: !!dcaHit, dcaScheduleId: dcaHit ? Number(dcaHit.id) || undefined : undefined,
-          linkBlock: rep.extrinsic_index != null ? rep.block_height : null, linkIndex: rep.extrinsic_index,
-        })
-      }
-      await attachHookSwapActors(out)
-      return out
-    })() : Promise.resolve([])
+    }
+    return out
+  })() : Promise.resolve([])
 
-    // Liquidity: add/remove where the provided/pool asset matches.
-    const liquidityP: Promise<ActivityRow[]> = wantLiquidity ? (async () => {
-      const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
-        const routerHop = routerHopLiquiditySql(pageBound, 'asset_id',
-          { sourceSql: 'price_data.liquidity_activity', whereSql: 'has(asset_refs, {assetId:UInt32})' })
+  // XCM inbound: hook-context deposits of this asset seed the candidate blocks;
+  // the barrier walk-back keeps only genuine inbound-message credits.
+  const xcmInP: Promise<ActivityRow[]> = wantXcm ? (async () => {
+    const depositAmountExpr = 'amount'
+    const xcmInValueFilter = eventValueFilterSql('{assetId:UInt32}', depositAmountExpr, 'block_timestamp', fixedAssetFilters, prices, 'asset_xcm_in_price')
+    return fetchDecodedXcmDeep(
+      bound,
+      fetchN,
+      async (pageBound, pageLimit) => {
         const res = await client.query({
-          query: `
-          SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
-            who AS who,
-            asset_id AS asset_id,
-            amount AS amount,
-            asset_b AS asset_b,
-            pool_account AS pool_acc
-          FROM price_data.liquidity_activity
-          ${routerHop.joinSql}
-          WHERE ${pageBound}
-            AND event_name IN (${sqlEventNameList(LIQUIDITY_EVENTS)})
-            ${liquidityWhoExclusionSql()}
-            ${routerHop.predicateSql}
-            AND has(asset_refs, {assetId:UInt32})
-          ORDER BY block_height DESC, event_index DESC
-          LIMIT {n:UInt32}`,
+          query: `SELECT DISTINCT block_height FROM ${xcmEventActivityTable()}
+                  ${xcmInValueFilter.joinSql}
+                  WHERE ${pageBound}
+                    AND event_name IN ('Currencies.Deposited','Tokens.Deposited') AND extrinsic_index IS NULL
+                    AND asset_id = {assetId:UInt32}
+                    AND NOT match(who, '${RESERVED_ACCOUNT_RE.source}')
+                    ${xcmInValueFilter.predicateSql}
+                  ORDER BY block_height DESC LIMIT {n:UInt32}`,
           query_params: { n: pageLimit, assetId }, format: 'JSONEachRow',
         })
-        // The row displays the page's asset — except an XYK add or remove, which
-        // renders both legs of its pair in the pair's own order on either asset's
-        // page (xykPairLegs): pinning it would collapse both legs into one asset.
-        const rows = (await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; who: string; asset_id: number; amount: string; amount_b?: string; asset_b: number; pool_acc: string }>())
-          .map(r => ({ ...r, asset_id: XYK_PAIR_EVENTS.has(r.event_name) ? r.asset_id : assetId }))
-        await fillMissingLiquidityAmounts(rows)
-        const seen = new Set<string>()
-        const out: ActivityRow[] = []
-        const createCands: { row: ActivityRow; pool: string; assetB: number }[] = []
-        for (const r of rows) {
-          const key = `${r.block_height}:${r.event_index}`
-          if (seen.has(key)) continue
-          seen.add(key)
-          const a = asset(r.asset_id)
-          const row: ActivityRow = {
-            type: 'liquidity', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
-            who: r.who ? accountRef(r.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
-            ...liquidityRowAmount(r.event_name, prices, a.assetId, r.amount, a.decimals), amountIn: null, amountOut: null,
-            liqAction: liqActionFor(r.event_name),
-            linkBlock: r.block_height, linkIndex: r.extrinsic_index,
-          }
-          xykPairLegs(row, r)
-          // Enrich only from the assetA side — this builder pins asset_id to the
-          // page's asset, so on the assetB page both legs would collapse into B.
-          if (r.event_name === 'XYK.PoolCreated' && r.asset_b !== assetId) createCands.push({ row, pool: r.pool_acc, assetB: r.asset_b })
-          out.push(row)
-        }
-        await enrichPoolCreations(createCands)
-        await applyHistoricalUsd(out, activityHistPick)
-        return out
-      }
-      if (fixedAssetFilters.min != null) {
-        return fetchFilteredDeep(tw, want, fetchPage,
-          row => activityRowMatchesFilters(row, fixedAssetFilters),
-          row => row.blockHeight, row => row.eventIndex ?? -1,
-          row => `${row.blockHeight}:${row.eventIndex}`)
-      }
-      return fetchPage(bound, fetchN)
-    })() : Promise.resolve([])
+        return res.json<{ block_height: number }>()
+      },
+      async blocks => (await xcmInRowsForBlocks(blocks, prices)).filter(row => row.asset?.assetId === assetId),
+      row => activityRowMatchesFilters(row, fixedAssetFilters),
+      `asset-xcmin:${assetId}:${filterKey(fixedAssetFilters)}`,
+    ).then(rows => {
+      if (above && rows.length >= fetchN) throw new AssetPageAboveSaturated()
+      return rows
+    })
+  })() : Promise.resolve([])
 
-    // XCM outbound: transfers whose recovered substrate currencyId matches the asset.
-    // Start from the asset's matching withdrawals, then decode the same-extrinsic
-    // outbound event (either shape) so low-volume assets page through their full
-    // XCM history. An extrinsic emitting both events joins twice but collapses in
-    // the block:ext:amount:sender dedup below.
-    const xcmP: Promise<ActivityRow[]> = wantXcm ? (async () => {
-      const cidExpr = 'w.asset_id'
-      const withdrawalAmountExpr = 'w.amount'
-      const xcmValueFilter = eventValueFilterSql('{assetId:UInt32}', withdrawalAmountExpr, 'w.block_timestamp', fixedAssetFilters, prices, 'asset_xcm_price')
-      // A local-reserve asset (HDX) leaves as a transfer into the destination's
-      // sovereign account instead (reserveTransferLegs), so its sends are a second
-      // candidate set. One UNION ALL under one LIMIT keeps the page's cut, and so its
-      // saturation rule, exactly as it was for the withdrawals alone.
-      const reserveValueFilter = eventValueFilterSql('{assetId:UInt32}', 't.amount', 't.block_timestamp', fixedAssetFilters, prices, 'asset_xcm_reserve_price')
-      const res = await client.query({
-        query: `
-          SELECT * FROM (
-            SELECT w.block_height AS block_height, toString(w.block_timestamp) AS ts, w.extrinsic_index AS extrinsic_index,
-              x.event_index AS event_index, x.args_json AS x_args, ${withdrawalAmountExpr} AS amount, '' AS from_acc, '' AS to_acc
-            FROM ${xcmEventActivityTable('w')}
-            INNER JOIN ${xcmEventActivityTable('x')}
-              ON x.block_height = w.block_height
-             AND x.extrinsic_index = w.extrinsic_index
-             AND x.event_name IN (${XCM_SENT_EVENTS_SQL})
-            ${xcmValueFilter.joinSql}
-            WHERE ${tw ? tw.replaceAll('block_timestamp', 'w.block_timestamp') : '1'}
-              AND w.event_name = 'Currencies.Withdrawn'
-              AND ${cidExpr} = {assetId:UInt32}
-              AND position(x.args_json, concat('"value":"', ${withdrawalAmountExpr}, '"')) > 0
-              ${xcmValueFilter.predicateSql}
-            UNION ALL
-            SELECT t.block_height AS block_height, toString(t.block_timestamp) AS ts, t.extrinsic_index AS extrinsic_index,
-              x.event_index AS event_index, x.args_json AS x_args, t.amount AS amount, t.from_account AS from_acc, t.to_account AS to_acc
-            FROM price_data.transfer_activity AS t
-            INNER JOIN ${xcmEventActivityTable('x')}
-              ON x.block_height = t.block_height
-             AND x.extrinsic_index = t.extrinsic_index
-             AND x.event_name IN (${XCM_SENT_EVENTS_SQL})
-            ${reserveValueFilter.joinSql}
-            WHERE ${tw ? tw.replaceAll('block_timestamp', 't.block_timestamp') : '1'}
-              AND t.event_name = 'Currencies.Transferred'
-              AND t.asset_id = {assetId:UInt32}
-              AND startsWith(t.to_account, '0x7369626c')
-              AND position(x.args_json, concat('"value":"', t.amount, '"')) > 0
-              ${reserveValueFilter.predicateSql}
-          )
-          ORDER BY block_height DESC, event_index DESC
-          LIMIT {n:UInt32}`,
-        query_params: { n: fetchN, assetId }, format: 'JSONEachRow',
+  // Remote-origin messages can withdraw assets from Hydration without a local
+  // extrinsic. Include the same decoded rows used by global, block and account
+  // activity so an economic action does not disappear on the asset surface.
+  const xcmOutRemoteP: Promise<ActivityRow[]> = wantXcm
+    ? getRecentXcmOutRemote(fetchN, sourceFrom, sourceTo, undefined, 0, { ...fixedAssetFilters, token: String(assetId) })
+      .then(rows => aboveRows(rows).filter(row => row.asset?.assetId === assetId))
+    : Promise.resolve([])
+
+  // Executor-dispatched sends of this asset — the bridge legs that leave with no
+  // PolkadotXcm.Sent/XTokens event at all, so no other arm on this surface can see them.
+  const xcmExecutedP: Promise<ActivityRow[]> = wantXcm
+    ? getRecentXcmExecuted(fetchN, sourceFrom, sourceTo, undefined, 0, { ...fixedAssetFilters, token: String(assetId) })
+      .then(rows => aboveRows(rows).filter(row => row.asset?.assetId === assetId))
+    : Promise.resolve([])
+
+  // Wormhole NTT sends and arrivals of this asset — the same builders every other
+  // surface uses, scoped by the token filter they already push into SQL.
+  const nttOutP: Promise<ActivityRow[]> = wantXcm
+    ? getRecentNttOut(fetchN, sourceFrom, sourceTo, undefined, 0, { ...fixedAssetFilters, token: String(assetId) })
+      .then(rows => aboveRows(rows).filter(row => row.asset?.assetId === assetId))
+    : Promise.resolve([])
+  const nttInP: Promise<ActivityRow[]> = wantXcm
+    ? getRecentNttIn(fetchN, sourceFrom, sourceTo, undefined, 0, { ...fixedAssetFilters, token: String(assetId) })
+      .then(rows => aboveRows(rows).filter(row => row.asset?.assetId === assetId))
+    : Promise.resolve([])
+
+  // Money market: supply/borrow/repay/withdraw/liquidation on the asset's reserve.
+  // The reserve is often not the queried id. For an aToken (aPRIME 1043) it is the
+  // UNDERLYING asset (PRIME 43) — the MM activity for the aToken IS the
+  // supply/withdraw flow on that reserve. For a main asset whose collateral is a
+  // pool share it is the SHARE token: GDOT 69's reserve is 2-Pool-GDOT 690, so
+  // resolving only the direct id left GDOT, GETH and the HUSD* pages with no
+  // money-market rows at all.
+  // Filter by the reserve's ERC20 address in SQL so low-volume reserves aren't
+  // starved by a global recency window.
+  // A row displays the queried asset and carries one raw amount, so a reserve only
+  // qualifies while its units ARE the queried asset's: 2-Pool-PRIME carries 18
+  // decimals where PRIME carries 6, and no single row can hold both bases.
+  const mmP: Promise<ActivityRow[]> = wantMm ? (async () => {
+    const reserveAddrs = [...mmReserveScope(assetId).byAddress]
+      .filter(([, decimals]) => decimals === asset(assetId).decimals)
+      .map(([address]) => address)
+    // Aliased to `amount_eff` below, for the reason getRecentMoneyMarket states: this
+    // predicate re-embeds the expression, which reads the `amount` column.
+    const mmValueFilter = eventValueFilterSql('{assetId:UInt32}', `if(event_name='LiquidationCall', JSONExtractString(decoded_args_json,'liquidatedCollateralAmount'), amount)`, 'block_timestamp', fixedAssetFilters, prices, 'asset_mm_price')
+    type RawAssetMmRow = { block_height: number; event_index: number; ts: string; event_name: string; account_id: string | null; asset_address: string; pool_address: string | null; amount_eff: string }
+    const mmEv = await newestCandidates(async (rangeBound, limit) => (await client.query({
+      query: `SELECT block_height, event_index, toString(block_timestamp) AS ts, event_name, account_id, asset_address, pool_address,
+                if(event_name='LiquidationCall', JSONExtractString(decoded_args_json,'liquidatedCollateralAmount'), amount) AS amount_eff
+              FROM price_data.raw_money_market_events
+              ${mmValueFilter.joinSql}
+              WHERE ${rangeBound()}
+                AND event_name IN ('Supply','Borrow','Repay','Withdraw','LiquidationCall')
+                AND user_address NOT LIKE '0x6d6f646c%'
+                AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
+                AND lower(ifNull(asset_address, '')) IN ({reserves:Array(String)})
+                ${mmMarketPoolSql(filters.market)}
+                ${mmStakingPlumbingExclusionSql()}
+                ${mmValueFilter.predicateSql}
+              ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
+      query_params: { n: limit, assetId, reserves: reserveAddrs }, format: 'JSONEachRow',
+    })).json<RawAssetMmRow>())
+    const mmExt = await extrinsicIndexFor(mmEv.map(r => [r.block_height, r.event_index] as [number, number | null]))
+    const out: ActivityRow[] = []
+    // Display the queried asset (the aToken itself, or the plain reserve asset).
+    const a = asset(assetId)
+    for (const r of mmEv) {
+      const xi = mmExt.get(`${r.block_height}:${r.event_index}`) ?? null
+      out.push({
+        type: 'mm', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: xi,
+        who: r.account_id ? accountRef(r.account_id) : null, to: null, asset: a, assetIn: null, assetOut: null,
+        amount: r.amount_eff, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount_eff, a.decimals),
+        mmAction: r.event_name, ...moneyMarketActivityFields(r.pool_address), linkBlock: r.block_height, linkIndex: xi,
       })
-      const rows = await res.json<{ block_height: number; ts: string; extrinsic_index: number | null; event_index: number; x_args: string; amount: string; from_acc: string; to_acc: string }>()
-      const a = asset(assetId)
-      const seen = new Set<string>()
+    }
+    return out
+  })() : Promise.resolve([])
+
+  // OTC lifecycle rows inherit their legs from Placed. Restrict all event
+  // kinds by the matching order ids in SQL, then cursor-walk for thresholds
+  // that can only be decided after the order enrichment.
+  const otcP: Promise<ActivityRow[]> = wantOtc ? (async () => {
+    const readPage = async (pageBound: string, pageLimit: number): Promise<RawOtcActivityEvent[]> => {
+      const res = await client.query({
+        query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
+                FROM ${otcActivityTable()}
+                WHERE ${pageBound}
+                  AND event_name IN (${sqlEventNameList(OTC_EVENT_NAMES)})
+                  AND JSONExtractUInt(args_json,'orderId') IN (
+                    SELECT JSONExtractUInt(args_json,'orderId')
+                    FROM ${otcActivityTable()}
+                    WHERE event_name = 'OTC.Placed'
+                      AND (JSONExtractInt(args_json,'assetIn') = {assetId:UInt32}
+                        OR JSONExtractInt(args_json,'assetOut') = {assetId:UInt32})
+                  )
+                ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
+        query_params: { assetId, n: pageLimit }, format: 'JSONEachRow',
+      })
+      return res.json<RawOtcActivityEvent>()
+    }
+    const buildPage = async (rows: RawOtcActivityEvent[]): Promise<ActivityRow[]> => {
+      const orderIds = rows.map(r => argInt((safeJson(r.args_json) ?? {}) as Record<string, unknown>, 'orderId'))
+      const [placedById, signers] = await Promise.all([
+        getOtcPlacedLegsByOrderId(orderIds),
+        actorsFor(rows.filter(r => r.event_name === 'OTC.Placed' || r.event_name === 'OTC.Cancelled').map(r => [r.block_height, r.extrinsic_index] as [number, number | null])),
+      ])
       const out: ActivityRow[] = []
       for (const r of rows) {
-        const parsed = parseOutboundXcm(safeJson(r.x_args))
-        if (!parsed || !parsed.amounts.includes(r.amount)) continue
-        // A reserve leg counts only from this send's sender into its own destination's sovereign.
-        if (r.to_acc && !reserveTransferLegs([{ from: r.from_acc, to: r.to_acc, assetId, amount: r.amount }], parsed.sender, parsed.dest.destParachainId).length) continue
-        const key = `${r.block_height}:${r.extrinsic_index}:${r.amount}:${parsed.sender}`
-        if (seen.has(key)) continue
-        seen.add(key)
-        out.push({
-          type: 'xcm', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
-          who: accountRef(parsed.sender), to: null, asset: a, assetIn: null, assetOut: null,
-          amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
-          xcmDir: 'out', messageId: parsed.messageId, ...parsed.dest, linkBlock: r.block_height, linkIndex: r.extrinsic_index,
-        })
+        const signer = r.extrinsic_index != null ? signers.get(`${r.block_height}:${r.extrinsic_index}`) ?? null : null
+        const row = otcRowFromEvent(r, prices, placedById, { signerFallback: signer })
+        if (row) out.push(row)
       }
+      await applyHistoricalUsd(out, activityHistPick)
       return out
-    })() : Promise.resolve([])
-
-    // XCM inbound: hook-context deposits of this asset seed the candidate blocks;
-    // the barrier walk-back keeps only genuine inbound-message credits.
-    const xcmInP: Promise<ActivityRow[]> = wantXcm ? (async () => {
-      const depositAmountExpr = 'amount'
-      const xcmInValueFilter = eventValueFilterSql('{assetId:UInt32}', depositAmountExpr, 'block_timestamp', fixedAssetFilters, prices, 'asset_xcm_in_price')
-      return fetchDecodedXcmDeep(
-        bound,
-        fetchN,
-        async (pageBound, pageLimit) => {
-          const res = await client.query({
-            query: `SELECT DISTINCT block_height FROM ${xcmEventActivityTable()}
-                    ${xcmInValueFilter.joinSql}
-                    WHERE ${pageBound}
-                      AND event_name IN ('Currencies.Deposited','Tokens.Deposited') AND extrinsic_index IS NULL
-                      AND asset_id = {assetId:UInt32}
-                      AND NOT match(who, '${RESERVED_ACCOUNT_RE.source}')
-                      ${xcmInValueFilter.predicateSql}
-                    ORDER BY block_height DESC LIMIT {n:UInt32}`,
-            query_params: { n: pageLimit, assetId }, format: 'JSONEachRow',
-          })
-          return res.json<{ block_height: number }>()
-        },
-        async blocks => (await xcmInRowsForBlocks(blocks, prices)).filter(row => row.asset?.assetId === assetId),
+    }
+    if (fixedAssetFilters.min != null) {
+      return fetchFilteredDeep(aboveBound ?? tw, want, async (pageBound, pageLimit) => buildPage(await readPage(pageBound, pageLimit)),
         row => activityRowMatchesFilters(row, fixedAssetFilters),
-        `asset-xcmin:${assetId}:${filterKey(fixedAssetFilters)}`,
-      )
-    })() : Promise.resolve([])
+        row => row.blockHeight, row => row.eventIndex ?? -1,
+        row => `${row.blockHeight}:${row.eventIndex}`)
+    }
+    return buildPage(await newestCandidates((rangeBound, limit) => readPage(rangeBound(), limit)))
+  })() : Promise.resolve([])
 
-    // Remote-origin messages can withdraw assets from Hydration without a local
-    // extrinsic. Include the same decoded rows used by global, block and account
-    // activity so an economic action does not disappear on the asset surface.
-    const xcmOutRemoteP: Promise<ActivityRow[]> = wantXcm
-      ? getRecentXcmOutRemote(fetchN, from, to, undefined, 0, { ...fixedAssetFilters, token: String(assetId) })
-        .then(rows => rows.filter(row => row.asset?.assetId === assetId))
-      : Promise.resolve([])
+  const stakingP: Promise<ActivityRow[]> = wantStaking ? getRecentStaking(fetchN, sourceFrom, sourceTo, undefined, 0, queryFilters, assetId).then(aboveRows) : Promise.resolve([])
+  // A bond row is reached from the bond's own page and from its underlying's
+  // (getRecentBonds admits either id).
+  const bondsP: Promise<ActivityRow[]> = wantBonds ? getRecentBonds(fetchN, sourceFrom, sourceTo, undefined, 0, queryFilters, assetId).then(aboveRows) : Promise.resolve([])
+  // An intent row is reached from either side of its order's pair (getRecentIntents
+  // admits the asset as assetIn or assetOut). An intent-only request pushes its
+  // action into the read, so the one source it has cannot saturate on rows the
+  // action then drops.
+  const intentsP: Promise<ActivityRow[]> = wantIntents ? getRecentIntents(fetchN, sourceFrom, sourceTo, undefined, 0, queryFilters, assetId, intentOnly ? action : undefined).then(aboveRows) : Promise.resolve([])
+  // A cross-chain swap SELLS a registry asset, so it belongs on that asset's
+  // feed; the destination it delivers is not a registry asset and has no feed.
+  const xcswapsP: Promise<ActivityRow[]> = wantXcswaps ? getRecentXcswaps(fetchN, sourceFrom, sourceTo, undefined, 0, assetId).then(aboveRows) : Promise.resolve([])
+  // Concentrated-liquidity pools holding the asset: swaps join the trade family, position
+  // and vault acts the liquidity family.
+  const v3TradesP: Promise<ActivityRow[]> = wantTrades ? getRecentV3Rows('swap', fetchN, sourceFrom, sourceTo, 0, queryFilters, { assetId }).then(aboveRows) : Promise.resolve([])
+  // Direct HSM trades with the asset on either side.
+  const hsmTradesP: Promise<ActivityRow[]> = wantTrades ? getRecentHsmTrades(fetchN, sourceFrom, sourceTo, 0, queryFilters, { assetId }).then(aboveRows) : Promise.resolve([])
+  const v3LiquidityP: Promise<ActivityRow[]> = wantLiquidity ? getRecentV3Rows('liquidity', fetchN, sourceFrom, sourceTo, 0, queryFilters, { assetId, action: type === 'liquidity' ? action : undefined }).then(aboveRows) : Promise.resolve([])
+  const rewardsP: Promise<ActivityRow[]> = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
+    ? getRecentRewardClaims(fetchN, sourceFrom, sourceTo, undefined, [assetId], undefined, undefined, fixedAssetFilters).then(aboveRows)
+    : Promise.resolve([])
+  // Votes reach an asset feed only for HDX (`wantVotes` requires assetId 0),
+  // which is what governance capital is denominated in. Both vote sources join
+  // it, through the same builder every other feed uses, so the HDX page and the
+  // chain-wide vote tab classify a collective vote identically.
+  const votesP: Promise<ActivityRow[]> = wantVotes
+    ? getVoteFeedRows(fetchN, sourceFrom, sourceTo, 0, queryFilters, collectiveVotesAdmitted(queryFilters)).then(rows => aboveRows(rows.map(voteActivityRow)))
+    : Promise.resolve([])
 
-    // Executor-dispatched sends of this asset — the bridge legs that leave with no
-    // PolkadotXcm.Sent/XTokens event at all, so no other arm on this surface can see them.
-    const xcmExecutedP: Promise<ActivityRow[]> = wantXcm
-      ? getRecentXcmExecuted(fetchN, from, to, undefined, 0, { ...fixedAssetFilters, token: String(assetId) })
-        .then(rows => rows.filter(row => row.asset?.assetId === assetId))
-      : Promise.resolve([])
+  const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, bonds, intents, xcswaps, votes, v3Trades, v3Liquidity, hsmTrades] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, bondsP, intentsP, xcswapsP, votesP, v3TradesP, v3LiquidityP, hsmTradesP])
+  // Drop transfer legs of the asset's own trades (hops/fee legs share the extrinsic).
+  const tradeExtrinsics = new Set([...trades, ...hsmTrades].filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
+  const userV3Trades = v3Trades.filter(r => !(r.extrinsicIndex != null && tradeExtrinsics.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
+  const stakingExtrinsics = activityExtrinsicSet(staking)
+  const bondExtrinsics = activityExtrinsicSet(bonds)
+  const intentExtrinsics = activityExtrinsicSet(intents)
+  const mmExtrinsics = activityExtrinsicSet(mm.filter(isMoneyMarketActionRow))
+  const otcExtrinsics = activityExtrinsicSet(otc)
+  // The fee-leg and fee-purchase reads are independent of each other, so they run together.
+  // The asset page sees the fee purchase (an HDX or GLMR page) without the send it
+  // funded (a sUSDS page), so the fold is asked of SQL here (see feePurchaseSwapSelectSql).
+  const [treasuryKept, feeSwapKeys] = await Promise.all([dropTreasuryFeeLegs(transfers), feePurchaseSwapKeys(trades)])
+  const userTransfers = treasuryKept.filter(t => t.erc20Send || (
+    !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+    !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+    !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+    !(t.extrinsicIndex != null && intentExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+    // A money-market action owns only some of its extrinsic's legs (isMoneyMarketActionRow).
+    !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`) && moneyMarketOwnsTransfer(t.who, t.to, t.erc20Log)) &&
+    !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`))))
+  const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liquidity))
+  const userMm = mm.filter(r => !isModuleAcct(r.who))
+  let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc, ...intents, ...xcswaps, ...userV3Trades, ...v3Liquidity, ...hsmTrades], { assetId }))
+    .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
+  if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
+  rows = rows.filter(r => activityRowMatchesAction(r, action))
+  // The token key is meaningless here (the asset IS fixed); min applies the
+  // same way the account/global feeds filter by row value.
+  if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
+  rows = rows.filter(r => activityRowMatchesFilters(r, { ...filters, token: undefined }))
+  rows.sort(compareActivityRowsNewestFirst)
+  const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, bonds, intents, xcswaps, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, v3Trades, v3Liquidity, hsmTrades]
+    : type === 'transfer' ? [transfers]
+      : type === 'trade' ? [trades, dcaFailures, otc, intents, v3Trades, hsmTrades]
+        : type === 'liquidity' ? [liquidity, rewards, v3Liquidity]
+          : type === 'mm' ? [mm, rewards]
+            : type === 'otc' ? [otc]
+              : type === 'xcm' ? [xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn]
+                : type === 'staking' ? [staking]
+                  : type === 'bond' ? [bonds]
+                    : type === 'intent' ? [intents]
+                      : [votes]
+  // Above a block every source was read whole (or the read threw), so a short
+  // result there is the range's real content, never a cut.
+  if (!above && rows.length < want && saturationSources.some(source => source.length >= fetchN)) throw activityQueryTooBroad()
+  return rows
+}
 
-    // Wormhole NTT sends and arrivals of this asset — the same builders every other
-    // surface uses, scoped by the token filter they already push into SQL.
-    const nttOutP: Promise<ActivityRow[]> = wantXcm
-      ? getRecentNttOut(fetchN, from, to, undefined, 0, { ...fixedAssetFilters, token: String(assetId) })
-        .then(rows => rows.filter(row => row.asset?.assetId === assetId))
-      : Promise.resolve([])
-    const nttInP: Promise<ActivityRow[]> = wantXcm
-      ? getRecentNttIn(fetchN, from, to, undefined, 0, { ...fixedAssetFilters, token: String(assetId) })
-        .then(rows => rows.filter(row => row.asset?.assetId === assetId))
-      : Promise.resolve([])
+// One page of asset feed rows as served. Copied before enriching: the rows are the
+// objects held in the cached source arrays (and in a held first page), and the
+// enrichment writes to them.
+async function enrichAssetActivityPage(rows: ActivityRow[]): Promise<ActivityRow[]> {
+  const page = rows.map(row => ({ ...row }))
+  // Value the page at block time, as the global feed and the account feed do.
+  // The arms above build with current prices as a placeholder and only some of
+  // them (the XCM walkers, staking, bonds, OTC, intents, money market) correct
+  // it themselves, so without this the asset page showed its own trades,
+  // transfers, liquidity and reward claims at today's price — the same row the
+  // block page valued at the event's. Runs on the page, not the window: the
+  // filter pass above already valued the rows a USD floor had to judge.
+  await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
+  return page
+}
 
-    // Money market: supply/borrow/repay/withdraw/liquidation on the asset's reserve.
-    // The reserve is often not the queried id. For an aToken (aPRIME 1043) it is the
-    // UNDERLYING asset (PRIME 43) — the MM activity for the aToken IS the
-    // supply/withdraw flow on that reserve. For a main asset whose collateral is a
-    // pool share it is the SHARE token: GDOT 69's reserve is 2-Pool-GDOT 690, so
-    // resolving only the direct id left GDOT, GETH and the HUSD* pages with no
-    // money-market rows at all.
-    // Filter by the reserve's ERC20 address in SQL so low-volume reserves aren't
-    // starved by a global recency window.
-    // A row displays the queried asset and carries one raw amount, so a reserve only
-    // qualifies while its units ARE the queried asset's: 2-Pool-PRIME carries 18
-    // decimals where PRIME carries 6, and no single row can hold both bases.
-    const mmP: Promise<ActivityRow[]> = wantMm ? (async () => {
-      const reserveAddrs = [...mmReserveScope(assetId).byAddress]
-        .filter(([, decimals]) => decimals === asset(assetId).decimals)
-        .map(([address]) => address)
-      // Aliased to `amount_eff` below, for the reason getRecentMoneyMarket states: this
-      // predicate re-embeds the expression, which reads the `amount` column.
-      const mmValueFilter = eventValueFilterSql('{assetId:UInt32}', `if(event_name='LiquidationCall', JSONExtractString(decoded_args_json,'liquidatedCollateralAmount'), amount)`, 'block_timestamp', fixedAssetFilters, prices, 'asset_mm_price')
-      const res = await client.query({
-        query: `SELECT block_height, event_index, toString(block_timestamp) AS ts, event_name, account_id, asset_address, pool_address,
-                  if(event_name='LiquidationCall', JSONExtractString(decoded_args_json,'liquidatedCollateralAmount'), amount) AS amount_eff
-                FROM price_data.raw_money_market_events
-                ${mmValueFilter.joinSql}
-                WHERE ${bound}
-                  AND event_name IN ('Supply','Borrow','Repay','Withdraw','LiquidationCall')
-                  AND user_address NOT LIKE '0x6d6f646c%'
-                  AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
-                  AND lower(ifNull(asset_address, '')) IN ({reserves:Array(String)})
-                  ${mmMarketPoolSql(filters.market)}
-                  ${mmStakingPlumbingExclusionSql()}
-                  ${mmValueFilter.predicateSql}
-                ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
-        query_params: { n: fetchN, assetId, reserves: reserveAddrs }, format: 'JSONEachRow',
-      })
-      const mmEv = await res.json<{ block_height: number; event_index: number; ts: string; event_name: string; account_id: string | null; asset_address: string; pool_address: string | null; amount_eff: string }>()
-      const mmExt = await extrinsicIndexFor(mmEv.map(r => [r.block_height, r.event_index] as [number, number | null]))
-      const out: ActivityRow[] = []
-      // Display the queried asset (the aToken itself, or the plain reserve asset).
-      const a = asset(assetId)
-      for (const r of mmEv) {
-        const xi = mmExt.get(`${r.block_height}:${r.event_index}`) ?? null
-        out.push({
-          type: 'mm', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: xi,
-          who: r.account_id ? accountRef(r.account_id) : null, to: null, asset: a, assetIn: null, assetOut: null,
-          amount: r.amount_eff, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount_eff, a.decimals),
-          mmAction: r.event_name, ...moneyMarketActivityFields(r.pool_address), linkBlock: r.block_height, linkIndex: xi,
-        })
+// ── The asset feed's first page, held per head ───────────────────────────────
+//
+// An asset's undated first page is polled (bots ask the same few every minute or
+// two), and each build reads every source's newest thousand candidates — ~5 CPU-s
+// for DOT's trades. Classification is block-local (a leg is owned by its own
+// extrinsic, a hook row by its own block), so the page at a new head is the rows of
+// the blocks since the last build, classified alone, over the held page's rows below
+// them. The held rows are re-read from ASSET_PAGE_MARGIN_BLOCKS under the last head,
+// so a row a derived table writes a little after its block still arrives, and the
+// page is rebuilt whole every ASSET_PAGE_FULL_MS, which bounds how long a row landing
+// later than that, below the margin, can be missing. Enrichment (block-time value,
+// XCM journeys, and the settlements refreshSettlingAnnotations restates) runs on every
+// serve; a held row still waiting on a settlement is re-read rather than carried. A
+// source that cannot show all of its rows above the cut, a merged page shorter than the
+// held one could prove, or a filter decided on the built row's value or actor
+// (assetPageHoldable) builds whole. A later page's whole build replaces the held first
+// page, so consecutive pages always come from one build.
+interface AssetPageAbove { block: number; day: string }
+class AssetPageAboveSaturated extends Error {}
+interface HeldAssetPage { head: number; fullAt: number; rows: ActivityRow[]; short: boolean }
+const ASSET_PAGE_MARGIN_BLOCKS = 50
+const ASSET_PAGE_FULL_MS = 600_000
+// A step wider than this reads like a cold build anyway; it builds whole.
+const ASSET_PAGE_MAX_STEP_BLOCKS = 600
+const HELD_ASSET_PAGES = 64
+const heldAssetPages = new Map<string, HeldAssetPage>()
+const heldAssetPageFlights = new Map<string, Promise<ActivityRow[]>>()
+
+export function assetPageHoldable(filters: ValueListFilters): boolean {
+  return filters.min == null && filters.minRevenue == null && filters.identity == null && !filters.viewerTagged?.size
+}
+
+async function heldAssetFirstPage(key: string, limit: number, build: (above?: AssetPageAbove) => Promise<ActivityRow[]>): Promise<ActivityRow[]> {
+  const head = await indexedRawHead()
+  const flightKey = `${key}:${head}`
+  let flight = heldAssetPageFlights.get(flightKey)
+  if (!flight) {
+    flight = heldAssetPageRows(key, limit, head, build).finally(() => heldAssetPageFlights.delete(flightKey))
+    heldAssetPageFlights.set(flightKey, flight)
+  }
+  return enrichAssetActivityPage((await flight).slice(0, limit))
+}
+
+async function heldAssetPageRows(key: string, limit: number, head: number, build: (above?: AssetPageAbove) => Promise<ActivityRow[]>): Promise<ActivityRow[]> {
+  const held = heldAssetPages.get(key)
+  // A head no newer than the held page's (a request that read the head just before
+  // a build for a later one landed) is answered by the held page.
+  if (held && head <= held.head) return held.rows
+  const now = Date.now()
+  let next: HeldAssetPage | null = null
+  // A held row still waiting on a settlement is never carried: the cut drops below the
+  // oldest one, so the incremental read rebuilds it with everything after it. (Its
+  // annotations are restated at every serve too; this keeps anything the settlement
+  // decides at build — the row set around it — as a whole build would have it.)
+  const pending = held ? held.rows.filter(awaitsSettlement).map(row => row.blockHeight) : []
+  const cut = held ? Math.max(0, Math.min(held.head - ASSET_PAGE_MARGIN_BLOCKS, ...pending.map(block => block - 1))) : 0
+  if (held && head - cut <= ASSET_PAGE_MAX_STEP_BLOCKS && now - held.fullAt < ASSET_PAGE_FULL_MS) {
+    const day = await blockDay(cut)
+    if (day) {
+      try {
+        const fresh = await build({ block: cut, day })
+        const merged = [...fresh, ...held.rows.filter(row => row.blockHeight <= cut)].sort(compareActivityRowsNewestFirst).slice(0, limit)
+        // The held rows below the cut are the newest of their range only as deep as the
+        // held page reached; a merge short of a page needs the range's next rows, which
+        // only a whole build has — unless the held page was the whole feed.
+        if (merged.length >= limit || held.short) next = { head, fullAt: held.fullAt, rows: merged, short: merged.length < limit }
+      } catch (error) {
+        if (!(error instanceof AssetPageAboveSaturated)) throw error
       }
-      return out
-    })() : Promise.resolve([])
+    }
+  }
+  if (!next) {
+    const rows = (await build()).slice(0, limit)
+    next = { head, fullAt: now, rows, short: rows.length < limit }
+  }
+  holdAssetFirstPage(key, next)
+  return next.rows
+}
 
-    // OTC lifecycle rows inherit their legs from Placed. Restrict all event
-    // kinds by the matching order ids in SQL, then cursor-walk for thresholds
-    // that can only be decided after the order enrichment.
-    const otcP: Promise<ActivityRow[]> = wantOtc ? (async () => {
-      const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
-        const res = await client.query({
-          query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
-                  FROM ${otcActivityTable()}
-                  WHERE ${pageBound}
-                    AND event_name IN (${sqlEventNameList(OTC_EVENT_NAMES)})
-                    AND JSONExtractUInt(args_json,'orderId') IN (
-                      SELECT JSONExtractUInt(args_json,'orderId')
-                      FROM ${otcActivityTable()}
-                      WHERE event_name = 'OTC.Placed'
-                        AND (JSONExtractInt(args_json,'assetIn') = {assetId:UInt32}
-                          OR JSONExtractInt(args_json,'assetOut') = {assetId:UInt32})
-                    )
-                  ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
-          query_params: { assetId, n: pageLimit }, format: 'JSONEachRow',
-        })
-        const rows = await res.json<RawOtcActivityEvent>()
-        const orderIds = rows.map(r => argInt((safeJson(r.args_json) ?? {}) as Record<string, unknown>, 'orderId'))
-        const [placedById, signers] = await Promise.all([
-          getOtcPlacedLegsByOrderId(orderIds),
-          actorsFor(rows.filter(r => r.event_name === 'OTC.Placed' || r.event_name === 'OTC.Cancelled').map(r => [r.block_height, r.extrinsic_index] as [number, number | null])),
-        ])
-        const out: ActivityRow[] = []
-        for (const r of rows) {
-          const signer = r.extrinsic_index != null ? signers.get(`${r.block_height}:${r.extrinsic_index}`) ?? null : null
-          const row = otcRowFromEvent(r, prices, placedById, { signerFallback: signer })
-          if (row) out.push(row)
-        }
-        await applyHistoricalUsd(out, activityHistPick)
-        return out
-      }
-      if (fixedAssetFilters.min != null) {
-        return fetchFilteredDeep(tw, want, fetchPage,
-          row => activityRowMatchesFilters(row, fixedAssetFilters),
-          row => row.blockHeight, row => row.eventIndex ?? -1,
-          row => `${row.blockHeight}:${row.eventIndex}`)
-      }
-      return fetchPage(bound, fetchN)
-    })() : Promise.resolve([])
+// Install a first page, unless a newer one is held: a build for an older head that
+// finishes last must not replace it.
+function holdAssetFirstPage(key: string, next: HeldAssetPage): void {
+  const current = heldAssetPages.get(key)
+  if (current && current.head > next.head) return
+  heldAssetPages.delete(key)
+  heldAssetPages.set(key, next)
+  for (const stale of heldAssetPages.keys()) {
+    if (heldAssetPages.size <= HELD_ASSET_PAGES) break
+    heldAssetPages.delete(stale)
+  }
+}
 
-    const stakingP: Promise<ActivityRow[]> = wantStaking ? getRecentStaking(fetchN, from, to, undefined, 0, queryFilters, assetId) : Promise.resolve([])
-    // A bond row is reached from the bond's own page and from its underlying's
-    // (getRecentBonds admits either id).
-    const bondsP: Promise<ActivityRow[]> = wantBonds ? getRecentBonds(fetchN, from, to, undefined, 0, queryFilters, assetId) : Promise.resolve([])
-    // An intent row is reached from either side of its order's pair (getRecentIntents
-    // admits the asset as assetIn or assetOut). An intent-only request pushes its
-    // action into the read, so the one source it has cannot saturate on rows the
-    // action then drops.
-    const intentsP: Promise<ActivityRow[]> = wantIntents ? getRecentIntents(fetchN, from, to, undefined, 0, queryFilters, assetId, intentOnly ? action : undefined) : Promise.resolve([])
-    // A cross-chain swap SELLS a registry asset, so it belongs on that asset's
-    // feed; the destination it delivers is not a registry asset and has no feed.
-    const xcswapsP: Promise<ActivityRow[]> = wantXcswaps ? getRecentXcswaps(fetchN, from, to, undefined, 0, assetId) : Promise.resolve([])
-    // Concentrated-liquidity pools holding the asset: swaps join the trade family, position
-    // and vault acts the liquidity family.
-    const v3TradesP: Promise<ActivityRow[]> = wantTrades ? getRecentV3Rows('swap', fetchN, from, to, 0, queryFilters, { assetId }) : Promise.resolve([])
-    // Direct HSM trades with the asset on either side.
-    const hsmTradesP: Promise<ActivityRow[]> = wantTrades ? getRecentHsmTrades(fetchN, from, to, 0, queryFilters, { assetId }) : Promise.resolve([])
-    const v3LiquidityP: Promise<ActivityRow[]> = wantLiquidity ? getRecentV3Rows('liquidity', fetchN, from, to, 0, queryFilters, { assetId, action: type === 'liquidity' ? action : undefined }) : Promise.resolve([])
-    const rewardsP: Promise<ActivityRow[]> = (type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm')
-      ? getRecentRewardClaims(fetchN, from, to, undefined, [assetId], undefined, undefined, fixedAssetFilters)
-      : Promise.resolve([])
-    // Votes reach an asset feed only for HDX (`wantVotes` requires assetId 0),
-    // which is what governance capital is denominated in. Both vote sources join
-    // it, through the same builder every other feed uses, so the HDX page and the
-    // chain-wide vote tab classify a collective vote identically.
-    const votesP: Promise<ActivityRow[]> = wantVotes
-      ? getVoteFeedRows(fetchN, from, to, 0, queryFilters, collectiveVotesAdmitted(queryFilters)).then(rows => rows.map(voteActivityRow))
-      : Promise.resolve([])
-
-    const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, bonds, intents, xcswaps, votes, v3Trades, v3Liquidity, hsmTrades] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, bondsP, intentsP, xcswapsP, votesP, v3TradesP, v3LiquidityP, hsmTradesP])
-    // Drop transfer legs of the asset's own trades (hops/fee legs share the extrinsic).
-    const tradeExtrinsics = new Set([...trades, ...hsmTrades].filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
-    const userV3Trades = v3Trades.filter(r => !(r.extrinsicIndex != null && tradeExtrinsics.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
-    const stakingExtrinsics = activityExtrinsicSet(staking)
-    const bondExtrinsics = activityExtrinsicSet(bonds)
-    const intentExtrinsics = activityExtrinsicSet(intents)
-    const mmExtrinsics = activityExtrinsicSet(mm.filter(isMoneyMarketActionRow))
-    const otcExtrinsics = activityExtrinsicSet(otc)
-    const userTransfers = (await dropTreasuryFeeLegs(transfers)).filter(t => t.erc20Send || (
-      !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
-      !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
-      !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
-      !(t.extrinsicIndex != null && intentExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
-      // A money-market action owns only some of its extrinsic's legs (isMoneyMarketActionRow).
-      !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`) && moneyMarketOwnsTransfer(t.who, t.to, t.erc20Log)) &&
-      !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`))))
-    // The asset page sees the fee purchase (an HDX or GLMR page) without the send it
-    // funded (a sUSDS page), so the fold is asked of SQL here (see feePurchaseSwapSelectSql).
-    const feeSwapKeys = await feePurchaseSwapKeys(trades)
-    const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liquidity))
-    const userMm = mm.filter(r => !isModuleAcct(r.who))
-    let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc, ...intents, ...xcswaps, ...userV3Trades, ...v3Liquidity, ...hsmTrades], { assetId }))
-      .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
-    if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
-    rows = rows.filter(r => activityRowMatchesAction(r, action))
-    // The token key is meaningless here (the asset IS fixed); min applies the
-    // same way the account/global feeds filter by row value.
-    if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
-    rows = rows.filter(r => activityRowMatchesFilters(r, { ...filters, token: undefined }))
-    rows.sort(compareActivityRowsNewestFirst)
-    const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, bonds, intents, xcswaps, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, v3Trades, v3Liquidity, hsmTrades]
-      : type === 'transfer' ? [transfers]
-        : type === 'trade' ? [trades, dcaFailures, otc, intents, v3Trades, hsmTrades]
-          : type === 'liquidity' ? [liquidity, rewards, v3Liquidity]
-            : type === 'mm' ? [mm, rewards]
-              : type === 'otc' ? [otc]
-                : type === 'xcm' ? [xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn]
-                  : type === 'staking' ? [staking]
-                    : type === 'bond' ? [bonds]
-                      : type === 'intent' ? [intents]
-                        : [votes]
-    if (rows.length < want && saturationSources.some(source => source.length >= fetchN)) throw activityQueryTooBroad()
-    // Copy before enriching: these rows are the objects held in the cached source
-    // arrays, and the enrichment below writes to them.
-    const page = rows.slice(offset, offset + limit).map(row => ({ ...row }))
-    // Value the page at block time, as the global feed and the account feed do.
-    // The arms above build with current prices as a placeholder and only some of
-    // them (the XCM walkers, staking, bonds, OTC, intents, money market) correct
-    // it themselves, so without this the asset page showed its own trades,
-    // transfers, liquidity and reward claims at today's price — the same row the
-    // block page valued at the event's. Runs on the page, not the window: the
-    // filter pass above already valued the rows a USD floor had to judge.
-    await Promise.all([applyHistoricalUsd(page, activityHistPick), applyXcmJourneys(page)])
-    return page
+// The UTC day a block was produced in, from the blocks table (null when it has no row).
+async function blockDay(height: number): Promise<string | null> {
+  const res = await client.query({
+    query: `SELECT toString(toDate(block_timestamp)) AS d FROM price_data.blocks WHERE block_height = {h:UInt32}`,
+    query_params: { h: height }, format: 'JSONEachRow',
   })
+  return (await res.json<{ d: string }>())[0]?.d ?? null
 }
 
 // Account balance + portfolio history. Balances and prices are bucketed by the
@@ -24221,9 +24496,13 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
   // largest reader in the instance. Account-first the same call reads 40,960 rows /
   // 6.57 MiB / 8 ms / 3.54 MiB, byte-identical output.
   //
-  // The carry-in query below deliberately stays on the raw table: `block_height <
-  // minb` prunes almost perfectly against a block-first key (203,717 rows / 5.6 ms),
-  // and account-first it degrades to 1,738,112 rows / 470 ms.
+  // The carry-in below reads the account-first twin too. On the raw table `block_height
+  // < minb` prunes only by block, so a window opening late reads every account's rows
+  // below it: ~74 ms CPU and 172 MB a call averaged over a day (33k calls), up to 29.5M
+  // rows / 6.2 GB for the router pot at a recent `minb`. Account-first a call reads its
+  // own accounts' rows: measured on 60 logged calls 0.79 against 8.98 CPU-s and 0.23
+  // against 15.8 GB, and on the router 7.6M against 29.5M rows; identical output (the
+  // twin stores pool_address lowercased, so the key column is compared bare).
   const mmRes = await client.query({
     query: `SELECT account_id, pool_address AS pool,
               ${bk.ofHeight('block_height')} AS b,
@@ -24245,12 +24524,12 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
     }
     // Carry-in per account: last position established before the window opens.
     const carryRes = await client.query({
-      query: `SELECT account_id, lower(pool_address) AS pool,
+      query: `SELECT account_id, pool_address AS pool,
                 argMax(toFloat64(total_collateral_base), ${moneyMarketPositionOrderSql()}) / 1e8 AS collat,
                 argMax(toFloat64(total_debt_base), ${moneyMarketPositionOrderSql()}) / 1e8 AS debt
-              FROM price_data.raw_money_market_positions
+              FROM price_data.account_money_market_position_history
               WHERE account_id IN (${list}) AND block_height < ${rng.minb}
-                AND lower(pool_address) IN (${configuredMmPoolsSql()})
+                AND pool_address IN (${configuredMmPoolsSql()})
               GROUP BY account_id, pool`,
       format: 'JSONEachRow',
     })
@@ -25545,7 +25824,12 @@ async function erc20CandidateScopeUncached(accCond: string[]): Promise<Erc20Cand
 // balance, and an address page resolves to the widened id. GDOT into the incentive pot
 // (block 9,333,149) is reported to 0x112c208b…000000 while the pot's page is
 // 0x45544800112c208b…: read under the viewed accounts alone, its twin was missed and the
-// pallet's own transfer surfaced a second time as an EVM-only one. A key-prefix read.
+// pallet's own transfer surfaced a second time as an EVM-only one. The same for the
+// wallet contracts: a HOLLAR Currencies.transfer between two substrate accounts logs a
+// Transfer between their truncated H160s, and under the viewed accounts alone the H160's
+// page (its widened id, a different account) listed it as an EVM-only send — 1,751 legs
+// (986 logs) on 294 H160 pages, every one with its twin under the substrate account the
+// H160 truncates, whose own page shows it as the pallet transfer. A key-prefix read.
 export function evmTwinAccountSql(scope: Pick<Erc20CandidateScope, 'accounts' | 'holders'>): string {
   const ids = [...new Set([...scope.accounts, ...scope.holders.map(h => '0x45544800' + h.slice(2) + '0'.repeat(16))])]
   return `(account IN (${ids.map(a => `'${a}'`).join(',')}) OR ${scope.holders.map(h => `startsWith(account, '${h}')`).join(' OR ')})`
@@ -27346,11 +27630,13 @@ async function heldLocatedActivityPage(
   action: string | undefined, filters: ValueListFilters, from?: string, to?: string,
 ): Promise<ActivityRow[] | null> {
   const mark = datedWindowIsClosed(to) ? 0 : await accountActivityWatermark(accounts)
-  const located = await cachedFound(
-    `explorer:located-page:${[...accounts].sort().join(',')}:w${mark}:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`,
-    ACTIVITY_WATERMARK_HOLD_MS,
-    () => locatedAccountActivityPage(accounts, type, limit, offset, action, filters, from, to),
-    located => located != null && builtAtWatermark(located.generation, mark))
+  const key = `explorer:located-page:${[...accounts].sort().join(',')}:w${mark}:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`
+  const keep = (located: LocatedActivityPage | null) => located != null && builtAtWatermark(located.generation, mark)
+  // Past the hold, kept while the scope's source marks stand (markRevalidated).
+  const located = await cachedFound(key, ACTIVITY_WATERMARK_HOLD_MS,
+    () => markRevalidated(key, accounts, mark, () => locatedAccountActivityPage(accounts, type, limit, offset, action, filters, from, to),
+      located => keep(located) && !located!.rows.some(awaitsSettlement)),
+    keep)
   return located?.rows ?? null
 }
 
@@ -28032,10 +28318,98 @@ async function scopedListTotal(accounts: string[], scope: string, query: ScopedL
 // until the hold lapsed. A count that is not held is simply made again on the next
 // refresh, which is what every count was before this existed.
 async function heldActivityTotal(accounts: string[], key: string, mark: number, query: ScopedListQuery): Promise<ScopedListTotal> {
-  const counted = await cachedFound(heldActivityTotalKey(key, mark), ACTIVITY_WATERMARK_HOLD_MS,
-    () => countAccountActivity(accounts, query.type ?? 'all', query.action, query.value ?? {}, query.from, query.to),
-    counted => counted.complete && builtAtWatermark(counted.generation, mark))
+  const keep = (counted: CountedActivityTotal) => counted.complete && builtAtWatermark(counted.generation, mark)
+  const heldKey = heldActivityTotalKey(key, mark)
+  const counted = await cachedFound(heldKey, ACTIVITY_WATERMARK_HOLD_MS,
+    () => markRevalidated(heldKey, accounts, mark,
+      () => countAccountActivity(accounts, query.type ?? 'all', query.action, query.value ?? {}, query.from, query.to), keep),
+    keep)
   return { total: counted.total, complete: counted.complete }
+}
+
+// ── Exact results kept past their hold while the scope's source marks stand ──────
+//
+// A located page and a held total are rebuilt whenever their hold lapses
+// (ACTIVITY_WATERMARK_HOLD_MS), and a polled idle scope keeps asking: measured, ~95
+// locates a day for each such scope, each 1–2.5 s and 1–2 GB, every one answering
+// what the last did. Whether a scope's rows at or below its watermark moved is what
+// the swept totals' source marks decide (activitySourceMarksOf: identities and
+// content fingerprints of every source the count reads, the sealed months folded
+// once), and re-reading them costs the watermark's month alone. So a lapsed hold
+// re-reads the marks at the watermark first and, when they stand, re-installs the
+// result instead of building it again.
+//
+// A result is kept this way only when nothing it shows can still move under marks that
+// stand:
+//   - the watermark is SETTLED: MARKED_HOLD_SETTLED_BLOCKS under the head, and the
+//     account-swap queue — the one source written after its block that the marks do
+//     not read — holds no undrained row at or below it when the result is built
+//     (swapQueueDrainedTo; its lag is a minute at p99 but has run to half an hour
+//     around restarts, so the block distance alone is no proof);
+//   - it holds no row still waiting on an off-chain or later-block settlement
+//     (`keepable`, awaitsSettlement for pages): those are restated at every serve
+//     (refreshSettlingAnnotations), but a page holding one is rebuilt on its own hold
+//     rather than carried;
+//   - it is younger than MARKED_HOLD_MAX_MS, which bounds a change no mark covers (the
+//     registry, the venue lists). Thirty minutes: a live list total can already be
+//     served that long after its count (the 15-minute hold, then LIST_TOTAL_STALE_MS of
+//     stale-while-revalidate), so no surface shows anything older than it could before.
+// A one-off scope never pays for the marks: the baseline is taken at its first lapse,
+// before that rebuild.
+interface MarkedHold { marks: ActivitySourceMarks; value: unknown; at: number }
+const MARKED_HOLD_SETTLED_BLOCKS = 100
+const MARKED_HOLD_MAX_MS = 30 * 60_000
+const MARKED_HOLDS = 2_000
+const MARKED_HOLD_SEEN = 20_000
+const markedHolds = new Map<string, MarkedHold>()
+const markedHoldSeen = new Set<string>()
+function sameSourceMarks(a: ActivitySourceMarks, b: ActivitySourceMarks): boolean {
+  return a.activity === b.activity && a.mm === b.mm && a.activityChange === b.activityChange && a.mmChange === b.mmChange && a.mmFp === b.mmFp
+}
+async function markRevalidated<T>(key: string, accounts: string[], mark: number, build: () => Promise<T>, keepable: (value: T) => boolean): Promise<T> {
+  if (mark <= 0 || (await indexedRawHead()) - mark < MARKED_HOLD_SETTLED_BLOCKS) return build()
+  if (!markedHolds.has(key) && !markedHoldSeen.has(key)) {
+    markedHoldSeen.add(key)
+    if (markedHoldSeen.size > MARKED_HOLD_SEEN) markedHoldSeen.delete(markedHoldSeen.values().next().value!)
+    return build()
+  }
+  let marks: ActivitySourceMarks | undefined
+  try {
+    marks = (await activitySourceMarksOf(new Map([[key, { accounts, head: mark }]]))).get(key)
+  } catch (error) {
+    console.warn('[explorer] held activity result: source marks unavailable, rebuilding', (error as Error).message)
+    return build()
+  }
+  const prior = markedHolds.get(key)
+  if (marks && prior && Date.now() - prior.at < MARKED_HOLD_MAX_MS && sameSourceMarks(marks, prior.marks)) return prior.value as T
+  markedHolds.delete(key)
+  // Read before the build, so every queued swap the result could show is in the table
+  // the build reads (the drain inserts the rows before it moves its cursor).
+  const drained = marks ? await swapQueueDrainedTo(mark).catch(() => false) : false
+  const at = Date.now()
+  const value = await build()
+  if (marks && drained && keepable(value)) {
+    markedHolds.delete(key)
+    markedHolds.set(key, { marks, value, at })
+    if (markedHolds.size > MARKED_HOLDS) markedHolds.delete(markedHolds.keys().next().value!)
+  }
+  return value
+}
+
+// Whether the account-swap queue has drained every row it holds at or below `height`:
+// no queued row past the drain's cursor (its sort key, account_swap_activity_queue_state)
+// sits at or below it. The queue is ordered by its stamp, so the read is its newest tail.
+async function swapQueueDrainedTo(height: number): Promise<boolean> {
+  const res = await client.query({
+    query: `SELECT count() AS n FROM price_data.account_swap_activity_queue
+            WHERE queued_at >= (SELECT queued_at FROM price_data.account_swap_activity_queue_state FINAL WHERE id = 1 LIMIT 1)
+              AND block_height <= {h:UInt32}
+              AND (queued_at, block_height, event_index, ingested_at) > (
+                SELECT tuple(queued_at, block_height, event_index, ingested_at)
+                FROM price_data.account_swap_activity_queue_state FINAL WHERE id = 1 LIMIT 1)`,
+    query_params: { h: height }, format: 'JSONEachRow',
+  })
+  return Number((await res.json<{ n: string | number }>())[0]?.n ?? 1) === 0
 }
 
 // The held recount's key under a scope's watermark (heldActivityTotal).
@@ -28055,6 +28429,9 @@ export function installActivityListTotal(key: string, mark: number, counted: Cou
   if (counted.complete && builtAtWatermark(counted.generation, mark)) {
     cacheInstall(heldActivityTotalKey(key, mark), counted, ACTIVITY_WATERMARK_HOLD_MS)
   }
+  // The recount supersedes whatever the lapsed hold would re-install (markRevalidated):
+  // its next lapse takes a new baseline rather than restoring the older count.
+  markedHolds.delete(heldActivityTotalKey(key, mark))
   if (!counted.complete) partialTotalLists.set(key, Date.now() + LIST_TOTAL_PARTIAL_STALE_MS)
   const partial = partialTotalLists.has(key)
   cacheInstall(key, total,
@@ -30314,34 +30691,91 @@ const ACTIVITY_SOURCE_TABLES: Record<ActivitySource, ActivitySourceTable> = {
  * account alone against FINAL's 1.35 s.
  */
 async function activitySourceRefs(heads: ReadonlyMap<string, number>): Promise<Map<string, ActivitySourceMarks>> {
+  return activitySourceMarksOf(new Map([...heads].map(([gkey, head]) => [gkey, { accounts: activitySourceAccounts(gkey), head }])))
+}
+// The same marks for any keyed account sets, each at its own head.
+async function activitySourceMarksOf(scopes: ReadonlyMap<string, { accounts: string[]; head: number }>): Promise<Map<string, ActivitySourceMarks>> {
   const sources = Object.keys(ACTIVITY_SOURCE_TABLES) as ActivitySource[]
   const idsOf = new Map<string, Record<ActivitySource, string[]>>()
-  for (const gkey of heads.keys()) {
-    const accounts = activitySourceAccounts(gkey)
+  const heads = new Map<string, number>()
+  for (const [gkey, { accounts, head }] of scopes) {
+    heads.set(gkey, head)
     idsOf.set(gkey, { activity: ACTIVITY_SOURCE_TABLES.activity.idsOf(accounts), mm: ACTIVITY_SOURCE_TABLES.mm.idsOf(accounts), erc20: ACTIVITY_SOURCE_TABLES.erc20.idsOf(accounts), atoken: ACTIVITY_SOURCE_TABLES.atoken.idsOf(accounts) })
   }
-  const refs = new Map<string, { refs: number; change: string; fp: string }>() // `${source}|${head}|${id}` → identities, change mark, fingerprint
+  const headMonths = await blockMonths([...new Set(heads.values())])
+  const refs = new Map<string, SourceMark>() // `${source}|${head}|${id}` → identities, change mark, fingerprint
   for (const source of sources) {
-    const { table, column, change, fingerprint, where } = ACTIVITY_SOURCE_TABLES[source]
+    const { table, column, change, fingerprint, where, combine } = ACTIVITY_SOURCE_TABLES[source]
     const byHead = new Map<number, Set<string>>()
     for (const [gkey, head] of heads) {
       let group = byHead.get(head)
       if (!group) byHead.set(head, (group = new Set()))
       for (const id of idsOf.get(gkey)![source]) group.add(id)
     }
+    const partitions = await sealedPartitionSignatures(table)
+    // One statement shape for both halves: the sealed months, per month (no head bound —
+    // every row in them is below it), or the rest at or below a head.
+    const read = (chunk: string[], months: string[], scope: 'sealed' | 'live', head = 0) => client.query({
+      query: `SELECT ${column} AS id, ${scope === 'sealed' ? '_partition_id' : "''"} AS p, toString(count()) AS refs, ${change} AS change, ${fingerprint ?? "''"} AS fp FROM ${table} FINAL
+              WHERE ${column} IN {ids:Array(String)} AND ${scope === 'sealed' ? '_partition_id IN {months:Array(String)}' : '_partition_id NOT IN {months:Array(String)} AND block_height <= {head:UInt32}'}${where ? ` AND ${where}` : ''}
+              GROUP BY ${column}${scope === 'sealed' ? ', _partition_id' : ''}`,
+      query_params: { ids: chunk, head, months }, format: 'JSONEachRow',
+      clickhouse_settings: { max_threads: 4, do_not_merge_across_partitions_select_final: 1 },
+    }).then(res => res.json<{ id: string; p: string; refs: string; change: string; fp: string }>())
+    // Every head of this call seals a prefix of the months below the newest head's, so
+    // the ids are brought up to that set once and each head sums its own prefix.
+    const newestMonth = Math.max(...[...byHead.keys()].map(head => headMonths.get(head) ?? 0))
+    const covering = sealedPartitionsBelow(partitions, newestMonth > 0 ? newestMonth : undefined)
+    const folds = sealedMonthFoldsOf(table)
+    // Grouped by the signature set the ids were last read under (shared by the ids read
+    // together) and the months they lack, so ids read together are read together again.
+    const due = new Map<ReadonlyMap<string, string> | undefined, Map<string, Set<string>>>()
+    for (const ids of byHead.values()) {
+      for (const id of ids) {
+        const fold = folds.get(id)
+        const stale = covering.filter(month => fold?.sigs.get(month) !== partitions.get(month))
+        if (!stale.length) continue
+        const byStale = due.get(fold?.sigs) ?? due.set(fold?.sigs, new Map()).get(fold?.sigs)!
+        const staleKey = stale.join(',')
+        ;(byStale.get(staleKey) ?? byStale.set(staleKey, new Set()).get(staleKey)!).add(id)
+      }
+    }
+    for (const [prior, byStale] of due) {
+      for (const [staleKey, group] of byStale) {
+        const stale = staleKey.split(',')
+        // The months the prior fold read whose parts still stand, plus the ones read now,
+        // each under the part signature it was read at (the one read above, before the fold).
+        const sigs = new Map([...(prior ? [...prior].filter(([month, sig]) => partitions.get(month) === sig) : []), ...stale.map(month => [month, partitions.get(month)!] as [string, string])])
+        const fresh = new Map<string, Map<string, SourceMark>>()
+        await mapParamChunks([...group], async chunk => {
+          for (const r of await read(chunk, stale, 'sealed')) {
+            const months = fresh.get(r.id) ?? fresh.set(r.id, new Map()).get(r.id)!
+            months.set(r.p, { refs: Number(r.refs), change: r.change, fp: r.fp })
+          }
+        }, { concurrency: CHUNK_QUERY_CONCURRENCY })
+        for (const id of group) {
+          const months = new Map([...(folds.get(id)?.months ?? [])].filter(([month]) => sigs.has(month) && !stale.includes(month)))
+          for (const [month, mark] of fresh.get(id) ?? []) months.set(month, mark)
+          folds.set(id, { sigs, months })
+        }
+      }
+    }
     for (const [head, ids] of byHead) {
       if (!ids.size) continue
+      const sealed = sealedPartitionsBelow(partitions, headMonths.get(head))
+      const live = new Map<string, SourceMark>()
       await mapParamChunks([...ids], async chunk => {
-        const res = await client.query({
-          query: `SELECT ${column} AS id, toString(count()) AS refs, ${change} AS change, ${fingerprint ?? "''"} AS fp FROM ${table} FINAL
-                  WHERE ${column} IN {ids:Array(String)} AND block_height <= {head:UInt32}${where ? ` AND ${where}` : ''}
-                  GROUP BY ${column}`,
-          query_params: { ids: chunk, head }, format: 'JSONEachRow',
-          clickhouse_settings: { max_threads: 4, do_not_merge_across_partitions_select_final: 1 },
-        })
-        for (const r of await res.json<{ id: string; refs: string; change: string; fp: string }>()) refs.set(`${source}|${head}|${r.id}`, { refs: Number(r.refs), change: r.change, fp: r.fp })
+        for (const r of await read(chunk, sealed, 'live', head)) live.set(r.id, { refs: Number(r.refs), change: r.change, fp: r.fp })
       }, { concurrency: CHUNK_QUERY_CONCURRENCY })
+      for (const id of ids) {
+        const fold = folds.get(id)
+        if (fold) { folds.delete(id); folds.set(id, fold) }
+        let merged = live.get(id) ?? null
+        for (const month of sealed) merged = combineSourceMarks(fold?.months.get(month) ?? null, merged, combine)
+        if (merged) refs.set(`${source}|${head}|${id}`, merged)
+      }
     }
+    trimSealedMonthFolds(folds)
   }
   const out = new Map<string, ActivitySourceMarks>()
   for (const [gkey, head] of heads) {
@@ -30352,6 +30786,82 @@ async function activitySourceRefs(heads: ReadonlyMap<string, number>): Promise<M
     out.set(gkey, { activity: sum('activity') + sum('erc20') + sum('atoken'), mm: sum('mm'), activityChange: xorFingerprints(xorFingerprints(mark('activity'), mark('erc20')), mark('atoken')), mmChange: mark('mm'), mmFp: fp('mm') })
   }
   return out
+}
+
+// ── Sealed months of the source watermark ────────────────────────────────────
+//
+// The watermark is read at each entry's own head over the entity's whole history,
+// FINAL — every 15 minutes, for every watched entity, ~2 GB a read and ~10k CPU-s a
+// day, though only the newest month ever moves. Every source table partitions by
+// the block's month and FINAL is per partition (no identity spans two months), so
+// each mark is a fold of per-month marks: identities add, an XOR fingerprint XORs,
+// a max-stamp takes the later. A month that ended before the head's own month holds
+// only rows below the head, so its part is the same at every head of that month and
+// depends on nothing but the month's content — which the set of its active parts
+// names exactly: an insert, a merge, a mutation or a REPLACE PARTITION each leave a
+// part under a new name, and a name is never reused. So those months are folded once
+// and kept; only the months from the
+// head's on are read each time, at the head. Folds are kept per (table, id, month)
+// under that month's part signature, so heads in different months — the sweep's stored
+// heads across a month's turn, a held result's watermark months back — share them
+// rather than evicting each other. A backfill or a correction landing in an old month
+// changes that month's parts, so that month is read again — the re-queue still fires.
+// The signature is read BEFORE the fold: a part landing in between is then in the fold
+// but not under its signature, which can never be asked again.
+interface SourceMark { refs: number; change: string; fp: string }
+function combineSourceMarks(a: SourceMark | null, b: SourceMark | null, combine: (x: string, y: string) => string): SourceMark | null {
+  if (!a) return b
+  if (!b) return a
+  return { refs: a.refs + b.refs, change: combine(a.change, b.change), fp: xorFingerprints(a.fp, b.fp) }
+}
+// Each block's month (YYYYMM), from the blocks table; a head it has no row for gets
+// none, and its marks are read whole.
+async function blockMonths(heights: number[]): Promise<Map<number, number>> {
+  if (!heights.length) return new Map()
+  const res = await client.query({
+    query: `SELECT block_height AS h, toYYYYMM(block_timestamp) AS m FROM price_data.blocks WHERE block_height IN {hs:Array(UInt32)}`,
+    query_params: { hs: heights }, format: 'JSONEachRow',
+  })
+  return new Map((await res.json<{ h: number; m: number }>()).map(r => [Number(r.h), Number(r.m)]))
+}
+// Every month partition of a table with the signature of its active parts.
+// Held a few seconds: one cycle's or one burst's mark reads share it, and a part set
+// read a few seconds early only names a superseded fold, never a wrong one.
+async function sealedPartitionSignatures(table: string): Promise<Map<string, string>> {
+  return cached(`explorer:source-partitions:${table}`, 5_000, () => readPartitionSignatures(table))
+}
+async function readPartitionSignatures(table: string): Promise<Map<string, string>> {
+  const [database, name] = table.split('.')
+  const res = await client.query({
+    query: `SELECT partition_id AS p, toString(cityHash64(arraySort(groupArray(name)))) AS sig FROM system.parts
+            WHERE database = {database:String} AND table = {name:String} AND active GROUP BY partition_id`,
+    query_params: { database, name }, format: 'JSONEachRow',
+  })
+  return new Map((await res.json<{ p: string; sig: string }>()).map(r => [r.p, r.sig]))
+}
+// The month partitions that ended before `headMonth` (a table not partitioned by
+// month has none), oldest first.
+export function sealedPartitionsBelow(partitions: ReadonlyMap<string, string>, headMonth: number | undefined): string[] {
+  if (headMonth == null) return []
+  return [...partitions.keys()].filter(p => /^\d{6}$/.test(p) && Number(p) < headMonth).sort()
+}
+// One id's sealed months: the part signature each month was read at (shared by the ids
+// read together) and its mark in the months it has rows in. A month whose parts moved
+// is read again alone; one this fold never read is read when a head first seals it.
+interface IdMonthFold { sigs: ReadonlyMap<string, string>; months: Map<string, SourceMark> }
+const sealedMonthFolds = new Map<string, Map<string, IdMonthFold>>()
+// Per table, least recently used first: the sweep's watched set is a few thousand ids,
+// and the held exact results add the scopes being read; the cap keeps the directory's
+// ~114k ids out of reach of a single burst.
+const SEALED_MONTH_FOLD_IDS = 50_000
+function sealedMonthFoldsOf(table: string): Map<string, IdMonthFold> {
+  return sealedMonthFolds.get(table) ?? sealedMonthFolds.set(table, new Map()).get(table)!
+}
+function trimSealedMonthFolds(folds: Map<string, IdMonthFold>): void {
+  for (const id of folds.keys()) {
+    if (folds.size <= SEALED_MONTH_FOLD_IDS) break
+    folds.delete(id)
+  }
 }
 
 /**

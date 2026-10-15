@@ -130,11 +130,11 @@ describe('money-market current-state readers', () => {
     expect(explorerService.match(/FROM price_data\.money_market_latest_positions/g)).toHaveLength(1)
   })
 
-  // Exactly two raw reads survive, both by necessity: the account-detail
-  // fallback picks ONE winner across a whole alias group (not per holder), and
-  // the history carry-in prunes on `block_height <` against a block-first key.
-  it('leaves only the two reads a per-key projection cannot serve', () => {
-    expect(explorerService.match(/FROM price_data\.raw_money_market_positions/g)).toHaveLength(2)
+  // Exactly one raw read survives, by necessity: the account-detail fallback picks
+  // ONE winner across a whole alias group (not per holder). The history carry-in reads
+  // the account-first twin like the history buckets do.
+  it('leaves only the read a per-key projection cannot serve', () => {
+    expect(explorerService.match(/FROM price_data\.raw_money_market_positions/g)).toHaveLength(1)
     expect(explorerService.match(/\$\{moneyMarketPositionOrderSql\(\)\}/g)).toHaveLength(11)
   })
 

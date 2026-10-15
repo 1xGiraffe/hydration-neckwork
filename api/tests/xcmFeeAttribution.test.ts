@@ -183,7 +183,9 @@ describe('a swap that bought a send its fee folds behind the send', () => {
 describe('the fee-purchase fold is mirrored where trades are read alone', () => {
   it('is one SQL statement used by the count arm and resolved once per feed', () => {
     expect(occurrences('feePurchaseSwapSelectSql(')).toBe(4)   // definition, helper, count arm ×2
-    expect(occurrences('await feePurchaseSwapKeys(trades)')).toBe(3)  // global, asset, account feeds
+    expect(occurrences('await feePurchaseSwapKeys(trades)')).toBe(2)  // global and account feeds
+    // The asset feed resolves it beside its treasury fee-leg read.
+    expect(occurrences('Promise.all([dropTreasuryFeeLegs(transfers), feePurchaseSwapKeys(trades)])')).toBe(1)
     expect(explorerService).toContain("topic0 = '${WORMHOLE_EXECUTOR_REQUEST_TOPIC}'")
   })
 })

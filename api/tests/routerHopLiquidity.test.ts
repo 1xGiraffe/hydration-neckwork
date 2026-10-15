@@ -63,7 +63,7 @@ describe('router-hop liquidity classification', () => {
     // Each builds the join/predicate pair with exactly ONE call and destructures it,
     // so the predicate can never end up built from different arguments than the join
     // it is paired with.
-    for (const name of ['getRecentLiquidity', 'assetActivityPage', 'accountLiquidityArm', 'collectAccountActivity', 'venueSources']) {
+    for (const name of ['getRecentLiquidity', 'assetActivityRows', 'accountLiquidityArm', 'collectAccountActivity', 'venueSources']) {
       const at = explorerService.indexOf(`function ${name}(`)
       expect(at, name).toBeGreaterThan(-1)
       const fn = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
