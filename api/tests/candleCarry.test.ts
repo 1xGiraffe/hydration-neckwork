@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { carryCandleOpens, compareDecimalText, priorCloseFallbackSql, priorCloseSql, queryOHLCV, INTERVAL_VIEW_MAP, type OHLCVInterval } from '../src/services/ohlcvService.ts'
-import { carryReadStart, queryPairCandles, queryUsdQuotedRouteCandles } from '../src/services/crossPair.ts'
+import { carryReadStart, queryPairCandles, queryUsdQuotedRouteCandles, readCarriedBefore } from '../src/services/crossPair.ts'
 
 // THE CARRY RULE (ohlcvService.carryCandleOpens): prices are written only in blocks
 // where they change, so a stored open is the bucket's first CHANGE. Every candle opens
@@ -243,5 +243,37 @@ describe('pair candles carry over the finished series', () => {
     // The USD view's inclusive end is one second short of the half-open window end.
     const view = client.seen.find(s => s.query.includes('_query(asset_id='))!
     expect(view.params).toMatchObject({ start_time: '2026-10-04 19:00:00', end_time: '2026-10-05 19:04:59' })
+  })
+})
+
+describe('readCarriedBefore (a window split at a bucket boundary)', () => {
+  // A raw series read over [start, end): one candle per 5-minute bucket, each
+  // depending only on its own bucket, some buckets empty.
+  const raw: Record<number, ReturnType<typeof c>> = {
+    0: c('1', '1.1', '0.9', '1.05'),
+    600: c('1.2', '1.3', '1.15', '1.25'),
+    900: c('1.1', '1.2', '1.0', '1.1'),
+    1_500: c('1.4', '1.5', '1.3', '1.45'),
+    1_800: c('1.5', '1.6', '1.4', '1.55'),
+  }
+  const read = async (startTime: Date, endTime: Date) => Object.entries(raw)
+    .map(([t, candle]) => ({ intervalStart: Number(t), ...candle, volumeBuy: '0', volumeSell: '0', volumeTotal: '0' }))
+    .filter(x => x.intervalStart >= startTime.getTime() / 1000 && x.intervalStart < endTime.getTime() / 1000)
+
+  it('its closed part followed by the rest carried from its last close is the whole window, candle for candle', async () => {
+    for (const start of [300, 600, 1_200]) {
+      for (const split of [900, 1_200, 1_500, 1_800]) {
+        if (split < start) continue
+        const whole = (await readCarriedBefore(read, '5min', start, 2_100)).candles
+        const head = await readCarriedBefore(read, '5min', start, split)
+        const rest = carryCandleOpens(await read(new Date(split * 1000), new Date(2_100_000)), head.lastClose)
+        expect([...head.candles, ...rest]).toEqual(whole)
+      }
+    }
+  })
+
+  it('carries the open bucket from a close in the lookback when the window itself holds none', async () => {
+    const head = await readCarriedBefore(read, '5min', 1_200, 1_200)
+    expect(head).toEqual({ candles: [], lastClose: '1.1' })
   })
 })

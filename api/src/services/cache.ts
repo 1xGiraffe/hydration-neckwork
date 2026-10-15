@@ -22,6 +22,76 @@ const maxEntries = (() => {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 5000
 })()
 
+/* ---------------- hit/miss counters ---------------- */
+
+// What every cache read did, counted per key FAMILY — the key's first one or two
+// colon-separated segments while they are plain words (`explorer:activity`,
+// `pair-volume:tail`), never a segment carrying an id, a block or an address, so
+// the logged names stay a short, fixed vocabulary and nothing a key was built from
+// reaches the log. `hit` is a value served inside its TTL (or fresh window), `stale`
+// one served past its fresh window while it revalidates, `join` a reader that
+// shared another's in-flight load, `miss` a load this read started, `error` a load
+// that threw. Plain integer increments on paths that already do a Map lookup, so
+// they cost nothing measurable; the totals since the last line are logged every
+// API_CACHE_STATS_MS (default five minutes, 0 turns the line off).
+type CacheOutcome = 'hit' | 'stale' | 'join' | 'miss' | 'error'
+type FamilyCounts = Record<CacheOutcome, number>
+const familyCounts = new Map<string, FamilyCounts>()
+// Bound on distinct families kept per window; anything past it is counted as `other`.
+const MAX_FAMILIES = 400
+const FAMILY_SEGMENT = /^[a-z][a-z0-9-]{0,39}$/
+const statsIntervalMs = (() => {
+  const parsed = Number(process.env.API_CACHE_STATS_MS?.trim() || '300000')
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 300_000
+})()
+let statsTimer: ReturnType<typeof setInterval> | null = null
+let statsWindowStart = Date.now()
+
+/** The logged name of a key's family (see the counters above). */
+export function cacheKeyFamily(key: string): string {
+  const [first, second] = key.split(':', 3)
+  const word = (s: string | undefined) => s != null && FAMILY_SEGMENT.test(s) && !/\d{3}/.test(s)
+  if (!word(first)) return '?'
+  return word(second) ? `${first}:${second}` : first!
+}
+
+function count(key: string, outcome: CacheOutcome): void {
+  let family = cacheKeyFamily(key)
+  let counts = familyCounts.get(family)
+  if (!counts) {
+    if (familyCounts.size >= MAX_FAMILIES) family = 'other'
+    counts = familyCounts.get(family)
+    if (!counts) familyCounts.set(family, counts = { hit: 0, stale: 0, join: 0, miss: 0, error: 0 })
+  }
+  counts[outcome] += 1
+  if (statsTimer == null && statsIntervalMs > 0 && !process.env.VITEST) {
+    statsTimer = setInterval(logCacheStats, statsIntervalMs)
+    statsTimer.unref?.()
+  }
+}
+
+/** The counters since the last stats line (or reset), per family, plus the store's size. */
+export function cacheStats(): { sinceMs: number; entries: number; inflight: number; families: Record<string, FamilyCounts> } {
+  return {
+    sinceMs: Date.now() - statsWindowStart,
+    entries: store.size,
+    inflight: inflight.size,
+    families: Object.fromEntries([...familyCounts].map(([family, counts]) => [family, { ...counts }])),
+  }
+}
+
+// One line per window, busiest families first, then the window starts over — so a
+// hit ratio is read straight off one line rather than differenced across two.
+function logCacheStats(): void {
+  const stats = cacheStats()
+  familyCounts.clear()
+  statsWindowStart = Date.now()
+  const total = (c: FamilyCounts) => c.hit + c.stale + c.join + c.miss + c.error
+  const families = Object.entries(stats.families).filter(([, c]) => total(c) > 0).sort((a, b) => total(b[1]) - total(a[1]))
+  if (!families.length) return
+  console.log(`[cache] stats ${JSON.stringify({ windowSec: Math.round(stats.sinceMs / 1000), entries: stats.entries, inflight: stats.inflight, families: Object.fromEntries(families) })}`)
+}
+
 function assertDuration(name: string, durationMs: number): void {
   if (!Number.isFinite(durationMs) || durationMs < 0) {
     throw new RangeError(`${name} must be a finite, non-negative duration`)
@@ -69,7 +139,13 @@ function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: numb
   const startEpoch = writeSequence
   const pending = (async () => {
     try {
-      const value = await fn()
+      let value: T
+      try {
+        value = await fn()
+      } catch (error) {
+        count(key, 'error')
+        throw error
+      }
       const resolvedAt = Date.now()
       // An install landed while this load ran: its value is the newer one (see installEpochs).
       const superseded = (installEpochs.get(key) ?? -1) > startEpoch
@@ -100,6 +176,7 @@ export function resetCacheForTests(): void {
   store.clear()
   inflight.clear()
   installEpochs.clear()
+  familyCounts.clear()
   writeSequence = 0
   lastSweepAt = 0
 }
@@ -110,13 +187,18 @@ export async function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>
   const hit = store.get(key) as Entry<T> | undefined
   if (hit && hit.expiresAt > now) {
     touch(key, hit)
+    count(key, 'hit')
     return hit.value
   }
   if (hit) store.delete(key)
 
   const pending = inflight.get(key) as Promise<T> | undefined
-  if (pending) return pending
+  if (pending) {
+    count(key, 'join')
+    return pending
+  }
 
+  count(key, 'miss')
   return loadAndCache(key, undefined, ttlMs, fn)
 }
 
@@ -144,13 +226,18 @@ export async function cachedFound<T>(key: string, ttlMs: number, fn: () => Promi
   const hit = store.get(key) as Entry<T> | undefined
   if (hit && hit.expiresAt > now) {
     touch(key, hit)
+    count(key, 'hit')
     return hit.value
   }
   if (hit) store.delete(key)
 
   const pending = inflight.get(key) as Promise<T> | undefined
-  if (pending) return pending
+  if (pending) {
+    count(key, 'join')
+    return pending
+  }
 
+  count(key, 'miss')
   return loadAndCache(key, undefined, ttlMs, fn, undefined, isFound)
 }
 
@@ -184,7 +271,9 @@ export async function cachedSwr<T>(key: string, freshMs: number, staleMs: number
   if (hit && hit.expiresAt > now) {
     touch(key, hit)
     const superseded = generation != null && hit.generation !== generation
-    if ((superseded || (hit.freshUntil ?? hit.expiresAt) <= now) && !inflight.has(key)) {
+    const stale = superseded || (hit.freshUntil ?? hit.expiresAt) <= now
+    count(key, stale ? 'stale' : 'hit')
+    if (stale && !inflight.has(key)) {
       loadAndCache(key, freshMs, staleMs, fn, generation).catch(err => {
         // The stale entry stays valid until staleMs; say so, or a failing recompute
         // keeps serving an old value for hours with nothing in the log.
@@ -196,8 +285,12 @@ export async function cachedSwr<T>(key: string, freshMs: number, staleMs: number
   if (hit) store.delete(key)
 
   const pending = inflight.get(key) as Promise<T> | undefined
-  if (pending) return pending
+  if (pending) {
+    count(key, 'join')
+    return pending
+  }
 
+  count(key, 'miss')
   return loadAndCache(key, freshMs, staleMs, fn, generation)
 }
 

@@ -95,8 +95,8 @@ function totalSuppliedUsd(reserves: MmReserveState[]): bigint | null {
 /**
  * The money market's current state, per reserve and in total.
  *
- * Cached because three endpoints read it and the underlying view costs ~0.6 s —
- * one FINAL pass over the post-anchor delta table, flat in the number of callers.
+ * Cached because three endpoints read it, together with the current prices; the
+ * reserve state itself is read to the head on every refresh (readReserveStateRows).
  */
 export function moneyMarketSupply(client: ClickHouseClient): Promise<MoneyMarketSupply> {
   return cachedSwr('pub:mm:supply', 60_000, 300_000, async () => {

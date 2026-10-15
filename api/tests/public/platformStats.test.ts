@@ -144,6 +144,7 @@ function fullSources(): Record<string, Answer> {
       { in_usd: '500.000000000000', out_usd: '505.500000000000' },
     ],
     '-- mm:reserve-state': RESERVE_ROWS,
+    '-- mm:reserve-cold': [],
     'FROM price_data.prices': PRICE_ROWS,
   }
 }
@@ -232,6 +233,7 @@ describe('GET /v1/stats/platform', () => {
       // The reserve-state view returns no rows at all while atoken_scaled_anchor
       // holds no snapshot — the one-way RPC failure the 007 header describes.
       '-- mm:reserve-state': [],
+      '-- mm:reserve-cold': [],
       'FROM price_data.prices': PRICE_ROWS,
       ...REVENUE_SOURCES,
     })

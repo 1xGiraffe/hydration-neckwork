@@ -260,3 +260,43 @@ describe('cacheInstall vs an in-flight load', () => {
     expect(peekCached('j')).toBe('later')
   })
 })
+
+describe('cache counters', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('names a family by its plain-word segments only, never an id, block or address', async () => {
+    const { cacheKeyFamily } = await import('../src/services/cache.ts')
+    expect(cacheKeyFamily('explorer:activity:h123:trade')).toBe('explorer:activity')
+    expect(cacheKeyFamily('pair-volume:tail:h15808342')).toBe('pair-volume:tail')
+    expect(cacheKeyFamily('pub:prices-pair:222:10:usd')).toBe('pub:prices-pair')
+    expect(cacheKeyFamily('acct:7KQx9pZ2Hy:balances')).toBe('acct')
+    expect(cacheKeyFamily('h15808342:x')).toBe('?')
+    expect(cacheKeyFamily('0xabc:x')).toBe('?')
+  })
+
+  it('counts hits, joins, misses, stale serves and failed loads per family', async () => {
+    vi.useFakeTimers()
+    const { cached, cachedSwr, cacheStats } = await import('../src/services/cache.ts')
+    let release!: () => void
+    const slow = new Promise<number>(resolve => { release = () => resolve(1) })
+    const first = cached('fam:one:1', 1_000, () => slow)
+    const joined = cached('fam:one:1', 1_000, () => slow)
+    release()
+    await Promise.all([first, joined])
+    await cached('fam:one:1', 1_000, async () => 2)
+    await cachedSwr('fam:swr', 1_000, 10_000, async () => 1)
+    vi.advanceTimersByTime(2_000)
+    await cachedSwr('fam:swr', 1_000, 10_000, async () => 2)
+    await expect(cached('fam:bad', 1_000, async () => { throw new Error('boom') })).rejects.toThrow('boom')
+    const { families } = cacheStats()
+    expect(families['fam:one']).toEqual({ hit: 1, stale: 0, join: 1, miss: 1, error: 0 })
+    expect(families['fam:swr']).toMatchObject({ miss: 1, stale: 1 })
+    expect(families['fam:bad']).toEqual({ hit: 0, stale: 0, join: 0, miss: 1, error: 1 })
+  })
+})

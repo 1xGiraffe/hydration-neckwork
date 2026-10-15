@@ -178,7 +178,23 @@ FROM (
 ORDER BY block_height, event_index`
 
 /**
- * Current per-reserve state joined to the reserve map that names its market.
+ * Current per-reserve state joined to the reserve map that names its market — the
+ * `money_market_reserve_state_current` view, read in two parts so a call costs a
+ * few blocks of rows instead of the whole delta table.
+ *
+ * The view sums EVERY post-anchor scaled delta under FINAL (16 M rows, ~2.3 GiB and
+ * ~2.3 CPU-s a call, measured 2026-10-15) and takes every reserve's newest index
+ * from the whole index table. Both are sums and maxima over block-keyed rows, so
+ * they split exactly at a block `cut`: the COLD part (anchor, cut] is computed by
+ * `RESERVE_COLD_*_SQL` now and then and handed back in as parameters, and the
+ * per-call statement below reads only the rows above the cut. That tail is found
+ * on the delta table's own key: its (contract, holder) prefixes are the parties of
+ * the Mint/Burn/BalanceTransfer logs above the cut in `raw_evm_logs` (block-keyed),
+ * which are exactly the holders `atoken_scaled_deltas_by_contract_mv` writes a
+ * delta under (onBehalfOf, from, to — taking all three for every log only widens
+ * the candidate set), so the read is a few hundred granules, not the table. The
+ * tail is re-read whole on every call, under FINAL, so a block that lands late or
+ * a replay above the cut is counted exactly once, like the view counts it.
  *
  * The map is a ReplacingMergeTree the anchor snapshotter REWRITES IN FULL every
  * cycle and never deletes from, so a reserve dropped from a pool's `reservesList`
@@ -190,10 +206,74 @@ ORDER BY block_height, event_index`
  * report them as current state.
  *
  * The generation is resolved INSIDE the query rather than passed in from a cached
- * read: a generation resolved a moment ago can already have been superseded.
+ * read: a generation resolved a moment ago can already have been superseded. The
+ * anchor block is too, and comes back as `state_anchor`: the cold sums start at the
+ * anchor they were computed from, so a statement that sees another anchor is
+ * discarded and re-run on a cold part rebuilt for it.
  */
 const RESERVE_STATE_SQL = `-- mm:reserve-state
-WITH (SELECT max(updated_at) FROM price_data.atoken_reserve_map) AS map_generation
+WITH (SELECT max(updated_at) FROM price_data.atoken_reserve_map) AS map_generation,
+     (SELECT max(anchor_block) FROM price_data.atoken_scaled_anchor) AS anchor_block,
+contracts AS (
+  SELECT lower(atoken) AS contract, lower(pool_proxy) AS pool_address, lower(asset_address) AS reserve_address, 1 AS kind
+  FROM price_data.atoken_reserve_map FINAL WHERE anchor_block > 0
+  UNION ALL
+  SELECT lower(vdebt) AS contract, lower(pool_proxy) AS pool_address, lower(asset_address) AS reserve_address, 2 AS kind
+  FROM price_data.atoken_reserve_map FINAL WHERE anchor_block > 0
+),
+scaled AS (
+  SELECT contract, sum(scaled) AS scaled FROM (
+    SELECT lower(contract_address) AS contract, toInt256(argMax(scaled_balance, updated_at)) AS scaled
+    FROM price_data.atoken_scaled_anchor WHERE holder = '' GROUP BY contract
+    UNION ALL
+    SELECT tupleElement(c, 1) AS contract, toInt256(tupleElement(c, 2)) AS scaled
+    FROM (SELECT arrayJoin(arrayZip({cold_contracts:Array(String)}, {cold_scaled:Array(String)})) AS c)
+    UNION ALL
+    SELECT contract_address AS contract, sum(scaled_delta) AS scaled
+    FROM price_data.atoken_scaled_deltas_by_contract FINAL
+    WHERE atoken_scaled_deltas_by_contract.block_height > {cut:UInt32}
+      AND (contract_address, holder) IN (
+        SELECT DISTINCT lower(contract_address), lower(JSONExtractString(decoded_args_json, party))
+        FROM price_data.raw_evm_logs ARRAY JOIN ['onBehalfOf', 'from', 'to'] AS party
+        WHERE raw_evm_logs.block_height > {cut:UInt32}
+          AND raw_evm_logs.event_name IN ('Mint', 'Burn', 'BalanceTransfer'))
+    GROUP BY contract_address
+  ) GROUP BY contract
+),
+totals AS (
+  SELECT c.pool_address AS pool_address, c.reserve_address AS reserve_address,
+         sumIf(s.scaled, c.kind = 1) AS supplied_scaled, sumIf(s.scaled, c.kind = 2) AS debt_scaled
+  FROM contracts AS c LEFT JOIN scaled AS s ON s.contract = c.contract
+  GROUP BY pool_address, reserve_address
+),
+indices AS (
+  SELECT pool_address, reserve_address,
+         argMax(li, rank) AS liquidity_index, argMax(vbi, rank) AS variable_borrow_index,
+         max(bh) AS index_block_height, max(bts) AS index_block_timestamp
+  FROM (
+    -- The cold part's newest row per reserve, ranked by its block alone: every
+    -- tail row is above the cut, so it outranks it whatever its event index.
+    SELECT tupleElement(x, 1) AS pool_address, tupleElement(x, 2) AS reserve_address,
+           toUInt256(tupleElement(x, 3)) AS li, toUInt256(tupleElement(x, 4)) AS vbi,
+           tupleElement(x, 5) AS bh, toDateTime(tupleElement(x, 6)) AS bts,
+           tuple(tupleElement(x, 5), toUInt32(0), toDateTime(0)) AS rank
+    FROM (SELECT arrayJoin(arrayZip({cold_pools:Array(String)}, {cold_reserves:Array(String)}, {cold_li:Array(String)},
+                                    {cold_vbi:Array(String)}, {cold_blocks:Array(UInt32)}, {cold_times:Array(String)})) AS x)
+    UNION ALL
+    SELECT pool_address, reserve_address, liquidity_index AS li, variable_borrow_index AS vbi,
+           block_height AS bh, block_timestamp AS bts, tuple(block_height, event_index, ingested_at) AS rank
+    FROM price_data.money_market_reserve_indices
+    WHERE money_market_reserve_indices.block_height > {cut:UInt32}
+  )
+  GROUP BY pool_address, reserve_address
+),
+state AS (
+  SELECT t.pool_address AS pool_address, t.reserve_address AS reserve_address,
+         i.index_block_height AS block_height, i.index_block_timestamp AS block_timestamp,
+         intDiv(t.supplied_scaled * toInt256(i.liquidity_index), toInt256(toUInt256('1000000000000000000000000000'))) AS supplied,
+         intDiv(t.debt_scaled * toInt256(i.variable_borrow_index), toInt256(toUInt256('1000000000000000000000000000'))) AS debt
+  FROM totals AS t INNER JOIN indices AS i ON i.pool_address = t.pool_address AND i.reserve_address = t.reserve_address
+)
 SELECT s.pool_address                                AS pool_address,
        s.reserve_address                             AS reserve_address,
        m.market_key                                  AS market_key,
@@ -202,14 +282,133 @@ SELECT s.pool_address                                AS pool_address,
        toString(s.block_timestamp)                   AS block_timestamp,
        toString(s.supplied)                          AS supplied,
        toString(s.debt)                              AS debt,
-       toUInt8(m.updated_at >= map_generation)       AS listed
-FROM price_data.money_market_reserve_state_current AS s
+       toUInt8(m.updated_at >= map_generation)       AS listed,
+       anchor_block                                  AS state_anchor
+FROM state AS s
 LEFT JOIN (
   SELECT DISTINCT lower(asset_address) AS reserve_address, lower(pool_proxy) AS pool_address,
                   market_key, lower(atoken) AS atoken, updated_at
   FROM price_data.atoken_reserve_map FINAL
 ) AS m ON m.reserve_address = s.reserve_address AND m.pool_address = s.pool_address
 ORDER BY market_key, reserve_address`
+
+/** Where the cold part ends: the anchor block, and the live head the cut trails. */
+const RESERVE_COLD_BOUNDS_SQL = `-- mm:reserve-cold:bounds
+SELECT (SELECT max(anchor_block) FROM price_data.atoken_scaled_anchor) AS anchor,
+       (SELECT max(last_block) FROM price_data.raw_ingestion_state) AS head`
+
+/** Every contract's post-anchor scaled deltas through the cut, deduplicated as the view deduplicates them. */
+const RESERVE_COLD_SCALED_SQL = `-- mm:reserve-cold:scaled
+SELECT contract_address AS contract, toString(sum(scaled_delta)) AS scaled
+FROM price_data.atoken_scaled_deltas_by_contract FINAL
+WHERE atoken_scaled_deltas_by_contract.block_height > {anchor:UInt32}
+  AND atoken_scaled_deltas_by_contract.block_height <= {cut:UInt32}
+GROUP BY contract_address`
+
+/** Every reserve's newest index at or below the cut, ranked as the view ranks it. */
+const RESERVE_COLD_INDICES_SQL = `-- mm:reserve-cold:indices
+SELECT pool_address, reserve_address,
+       toString(argMax(liquidity_index, tuple(block_height, event_index, ingested_at))) AS li,
+       toString(argMax(variable_borrow_index, tuple(block_height, event_index, ingested_at))) AS vbi,
+       max(block_height) AS bh, toString(max(block_timestamp)) AS bts
+FROM price_data.money_market_reserve_indices
+WHERE money_market_reserve_indices.block_height <= {cut:UInt32}
+GROUP BY pool_address, reserve_address`
+
+/**
+ * How far below the live head the cold part ends. Everything above the cut is
+ * re-read on every call, so a block whose delta rows land after its checkpoint, or
+ * are replayed, is still counted exactly once. 150 blocks is about fifteen minutes;
+ * the per-call read grows with it (measured 0.03 CPU-s at 5 blocks, 0.12 at 600).
+ */
+const RESERVE_COLD_MARGIN_BLOCKS = 150
+/**
+ * How often the cold part is rebuilt (in the background — readers keep the previous
+ * one meanwhile, which stays exact for every block above its own cut). The rebuild is
+ * what brings a row backfilled BELOW the cut into the totals, so this is how late such
+ * a repair can show; rows at the head are never late. Each rebuild is the one full
+ * pass the view used to make on every call (~2 CPU-s).
+ */
+const RESERVE_COLD_REFRESH_MS = 15 * 60_000
+// The FINAL reads are a few hundred granules (tail) or the whole table (cold);
+// either way extra threads only add merge overhead (measured 0.06 CPU-s on one
+// thread against 0.2 on the default pool for the tail).
+const RESERVE_TAIL_SETTINGS = { max_threads: 1 }
+const RESERVE_COLD_SETTINGS = { max_threads: 2 }
+
+/** The cold part of the reserve state: sums and newest indices at or below `cut`. */
+interface ReserveStateCold {
+  anchor: number
+  cut: number
+  builtAt: number
+  scaled: Array<{ contract: string; scaled: string }>
+  indices: Array<{ pool_address: string; reserve_address: string; li: string; vbi: string; bh: number | string; bts: string }>
+}
+
+// Per client: the public API and the explorer each keep their own, and a test's
+// fake client never sees another's cold part.
+const coldParts = new WeakMap<ClickHouseClient, { value: ReserveStateCold | null; building: Promise<ReserveStateCold> | null }>()
+
+async function buildReserveCold(client: ClickHouseClient): Promise<ReserveStateCold> {
+  const boundsRes = await client.query({ query: RESERVE_COLD_BOUNDS_SQL, format: 'JSONEachRow' })
+  const bounds = (await boundsRes.json<{ anchor: number | string | null; head: number | string | null }>())[0]
+  const anchor = Number(bounds?.anchor ?? 0)
+  const cut = Math.max(anchor, Number(bounds?.head ?? 0) - RESERVE_COLD_MARGIN_BLOCKS)
+  // No anchor, no state: the view lists no contract until the anchor exists.
+  if (!anchor) return { anchor, cut, builtAt: Date.now(), scaled: [], indices: [] }
+  const [scaledRes, indicesRes] = await Promise.all([
+    client.query({ query: RESERVE_COLD_SCALED_SQL, query_params: { anchor, cut }, clickhouse_settings: RESERVE_COLD_SETTINGS, format: 'JSONEachRow' }),
+    client.query({ query: RESERVE_COLD_INDICES_SQL, query_params: { cut }, clickhouse_settings: RESERVE_COLD_SETTINGS, format: 'JSONEachRow' }),
+  ])
+  return {
+    anchor, cut, builtAt: Date.now(),
+    scaled: await scaledRes.json<ReserveStateCold['scaled'][number]>(),
+    indices: await indicesRes.json<ReserveStateCold['indices'][number]>(),
+  }
+}
+
+/**
+ * The cold part to read against: built on first use, rebuilt in the background once
+ * it is RESERVE_COLD_REFRESH_MS old (single flight), and rebuilt before use when
+ * `force` says the one held was computed from another anchor.
+ */
+async function reserveCold(client: ClickHouseClient, force = false): Promise<ReserveStateCold> {
+  let slot = coldParts.get(client)
+  if (!slot) coldParts.set(client, slot = { value: null, building: null })
+  const rebuild = (): Promise<ReserveStateCold> => {
+    if (!slot!.building) {
+      slot!.building = buildReserveCold(client)
+        .then(value => { slot!.value = value; return value })
+        .finally(() => { slot!.building = null })
+    }
+    return slot!.building
+  }
+  if (!slot.value || force) return rebuild()
+  if (Date.now() - slot.value.builtAt >= RESERVE_COLD_REFRESH_MS) {
+    rebuild().catch(err => console.warn('[mm] reserve-state cold rebuild failed; keeping the previous one', err instanceof Error ? err.message : err))
+  }
+  return slot.value
+}
+
+async function readReserveStateAgainst(client: ClickHouseClient, cold: ReserveStateCold): Promise<Array<ReserveStateRow & { state_anchor: number | string }>> {
+  const res = await client.query({
+    query: RESERVE_STATE_SQL,
+    query_params: {
+      cut: cold.cut,
+      cold_contracts: cold.scaled.map(r => r.contract),
+      cold_scaled: cold.scaled.map(r => r.scaled),
+      cold_pools: cold.indices.map(r => r.pool_address),
+      cold_reserves: cold.indices.map(r => r.reserve_address),
+      cold_li: cold.indices.map(r => r.li),
+      cold_vbi: cold.indices.map(r => r.vbi),
+      cold_blocks: cold.indices.map(r => Number(r.bh)),
+      cold_times: cold.indices.map(r => r.bts),
+    },
+    clickhouse_settings: RESERVE_TAIL_SETTINGS,
+    format: 'JSONEachRow',
+  })
+  return res.json<ReserveStateRow & { state_anchor: number | string }>()
+}
 
 export interface CapEventRow {
   configurator: string
@@ -250,9 +449,20 @@ export async function readFacilitatorCaps(client: ClickHouseClient): Promise<Fac
   return res.json<FacilitatorRow>()
 }
 
+/**
+ * Every reserve's current state as of the newest indexed rows — exactly what the
+ * `money_market_reserve_state_current` view returns, read as a cold part plus the
+ * blocks above it (see RESERVE_STATE_SQL), so it is current to the head on every
+ * call at a few blocks' cost.
+ */
 export async function readReserveStateRows(client: ClickHouseClient): Promise<ReserveStateRow[]> {
-  const res = await client.query({ query: RESERVE_STATE_SQL, format: 'JSONEachRow' })
-  return res.json<ReserveStateRow>()
+  let cold = await reserveCold(client)
+  let rows = await readReserveStateAgainst(client, cold)
+  if (rows.some(row => Number(row.state_anchor) !== cold.anchor)) {
+    cold = await reserveCold(client, true)
+    rows = await readReserveStateAgainst(client, cold)
+  }
+  return rows.map(({ state_anchor: _anchor, ...row }) => row)
 }
 
 /**
@@ -469,8 +679,9 @@ export const rawUnits = (value: string | number | null | undefined): bigint => {
  * Delisted reserves are dropped, as the public facade drops them: a reserve the
  * map no longer lists is not a reserve anybody can fill.
  *
- * Cached stale-while-revalidate: the reserve view costs ~0.6 s, and a cap is
- * current state read every snapshot tick, not a row lane with a cursor.
+ * Cached stale-while-revalidate: it reads the cap events and facilitator
+ * capacities beside the reserve state, and a cap is current state read every
+ * snapshot tick, not a row lane with a cursor.
  */
 export function moneyMarketCapStates(client: ClickHouseClient, assetIdOf: (reserveAddress: string) => number | null): Promise<ReserveCapState[]> {
   return cachedSwr('mm:cap-states', 60_000, 300_000, async () => {

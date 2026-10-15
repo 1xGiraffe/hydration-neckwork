@@ -257,22 +257,25 @@ export async function queryPairVolume(
     })
   }
   const tail = options.head ? await liveTail(client, options.head) : null
-  // The stored rows end where the tail starts, so no trade is counted twice.
-  // Their reads are over 5-minute starts: a bucket starting at toSec runs at most
-  // a month further.
-  const readEnd = options.toSec + 32 * 86_400
-  const res = await client.query({
-    query: `-- pair-volume:stored
+  // The stored rows end where the tail starts, so no trade is counted twice — and
+  // a window starting at or after the tail's start has none to read. Their reads
+  // are over 5-minute starts: a bucket starting at toSec runs at most a month
+  // further.
+  if (!tail || options.fromSec < tail.from) {
+    const readEnd = options.toSec + 32 * 86_400
+    const res = await client.query({
+      query: `-- pair-volume:stored
 SELECT ${pairVolumeBucketSql(options.interval, 'interval_start')} AS t, toString(sum(volume_usd)) AS v, toString(sum(volume_lo_in_usd)) AS v_lo_in,
        toString(sum(amount_lo)) AS a_lo, toString(sum(amount_hi)) AS a_hi
 FROM ${PAIR_VOLUME_5MIN_TABLE} FINAL
 WHERE asset_lo = {lo:UInt32} AND asset_hi = {hi:UInt32}
   AND interval_start >= toDateTime({from:UInt32}) AND interval_start < toDateTime({end:UInt32})
 GROUP BY t`,
-    query_params: { lo, hi, from: options.fromSec, end: tail ? Math.min(readEnd, tail.from) : readEnd },
-    format: 'JSONEachRow',
-  })
-  for (const r of await res.json<VolumeRow>()) add(Number(r.t), r)
+      query_params: { lo, hi, from: options.fromSec, end: tail ? Math.min(readEnd, tail.from) : readEnd },
+      format: 'JSONEachRow',
+    })
+    for (const r of await res.json<VolumeRow>()) add(Number(r.t), r)
+  }
   if (tail) {
     for (const r of tail.rows) {
       if (Number(r.asset_lo) !== lo || Number(r.asset_hi) !== hi) continue
