@@ -20,7 +20,9 @@ import type { ActivityRow } from '../types'
 // degrees of hue from it, close enough that a relay badge and a Hydration badge read
 // as one chip at 9px. A warm counterparty is fine — Mythos red clears the accent by
 // forty degrees — but nothing here should sit that close to it again.
-const CHAIN_COLORS: Record<string, [string, string]> = {
+// [gradient from, gradient to, text colour — white unless the chain's colour is too
+// light to carry it].
+const CHAIN_COLORS: Record<string, [string, string, string?]> = {
   Polkadot: ['#3d3540', '#141014'],
   AssetHub: ['#333f4e', '#121820'],
   Mythos: ['#e0332b', '#9d1a14'],
@@ -31,7 +33,7 @@ const CHAIN_COLORS: Record<string, [string, string]> = {
   Ethereum: ['#627EEA', '#3c54b8'],
   Base: ['#0052ff', '#0036a8'],
   Sui: ['#4da2ff', '#2367b8'],
-  'Robinhood': ['#1a9e3a', '#0b5e20'],
+  Robinhood: ['#00C805', '#00a304', '#000'],   // Robinhood's brand green; white text would not read on it
   HyperEVM: ['#16857a', '#0b4c45'],
   Acala: ['#e40c5b', '#a80943'],
   Solana: ['#9945FF', '#5c1fd1'],
@@ -44,7 +46,7 @@ const CHAIN_COLORS: Record<string, [string, string]> = {
 }
 export function ChainBadge({ chain, title }: { chain: string; title?: string }) {
   const c = CHAIN_COLORS[chain] ?? ['#666', '#444']
-  return <span className="chain-badge" style={{ background: `linear-gradient(135deg,${c[0]},${c[1]})` }} title={title ?? chain}>{chain || '?'}</span>
+  return <span className="chain-badge" style={{ background: `linear-gradient(135deg,${c[0]},${c[1]})`, ...(c[2] ? { color: c[2] } : {}) }} title={title ?? chain}>{chain || '?'}</span>
 }
 // A Wormhole NTT hop's far token, for the chain badge's tooltip: Robinhood
 // Chain's WETH is its own contract, not Ethereum's.
