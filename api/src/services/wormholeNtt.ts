@@ -401,7 +401,7 @@ export const WORMHOLE_CHAINS: Readonly<Record<number, WormholeChainInfo>> = {
   72: {
     name: 'Robinhood', family: 'evm', evmChainId: 4663, layer: 'l2', publicRpc: 'https://rpc.mainnet.chain.robinhood.com',
     riskNote: 'Robinhood is an Ethereum L2 (Arbitrum Orbit): custody there also rests on its sequencer and its bridge to Ethereum',
-    explorer: 'https://robinscan.io/address/',
+    explorer: 'https://robinhoodchain.blockscout.com/address/',
   },
   73: { name: 'Hydration', family: 'evm', evmChainId: 222222, layer: 'other', publicRpc: null, riskNote: null, explorer: null },
 }

@@ -487,7 +487,7 @@ describe('Wormhole status table', () => {
     expect(wormholeExplorerLink(1, 'So111')?.href).toBe('https://orbmarkets.io/address/So111')
     expect(wormholeExplorerLink(21, '0xobj')?.href).toBe('https://suivision.xyz/object/0xobj')
     // Robinhood is Wormhole 72 — one below Hydration's own 73.
-    expect(wormholeExplorerLink(72, '0xabc')?.href).toBe('https://robinscan.io/address/0xabc')
+    expect(wormholeExplorerLink(72, '0xabc')?.href).toBe('https://robinhoodchain.blockscout.com/address/0xabc')
     // An unknown chain, or a peer that was never read, links nowhere rather than guessing.
     expect(wormholeExplorerLink(999, '0xabc')).toBeNull()
     expect(wormholeExplorerLink(2, null)).toBeNull()
@@ -507,14 +507,14 @@ describe('Wormhole multi-peer assets', () => {
     expect(table).toContain('title="2 lockboxes: Ethereum + Robinhood"')
     // HDX: Hydration holds the custody, Robinhood mints against it.
     expect(text(table)).toContain('Hydrationminted on Robinhood')
-    expect(table).toContain('https://robinscan.io/address/')
+    expect(table).toContain('https://robinhoodchain.blockscout.com/address/')
   })
 
   it('lists each peer with its own token, role, limits, payout and when it was added', () => {
     const html = render('wormhole', buildSecurityWormholeMultiPeer())
     const block = html.slice(html.indexOf('sec-title">Lockboxes &amp; peers'), html.indexOf('sec-title">Rate limits'))
     // Robinhood's own WETH, not Ethereum's.
-    expect(block).toContain('https://robinscan.io/address/0x0bd7d308f8e1639fab988df18a8011f41eacad73')
+    expect(block).toContain('https://robinhoodchain.blockscout.com/address/0x0bd7d308f8e1639fab988df18a8011f41eacad73')
     expect(block).toContain('https://etherscan.io/address/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2')
     expect(text(block)).toContain('lockbox')
     expect(text(block)).toContain('mints')
@@ -550,7 +550,7 @@ describe('Wormhole multi-peer assets', () => {
     expect(html).toContain('Minted on Robinhood  106.0000')
     const transfers = html.slice(html.indexOf('sec-title">Recent transfers'))
     expect(transfers).toContain('WETH 0x0bd7')
-    expect(transfers).toContain('https://robinscan.io/address/0x0bd7d308f8e1639fab988df18a8011f41eacad73')
+    expect(transfers).toContain('https://robinhoodchain.blockscout.com/address/0x0bd7d308f8e1639fab988df18a8011f41eacad73')
   })
 
   it('counts lockboxes on the overview card', () => {
@@ -565,7 +565,7 @@ describe('Wormhole on the asset page and activity detail', () => {
     assetId: 20, hydrationRole: 'spoke' as const, primaryChainId: 2, primaryChainName: 'Ethereum', manager: '0xb5ce',
     peers: [
       { chainId: 2, chainName: 'Ethereum', address: '0xc02a', name: 'Wrapped Ether', symbol: 'WETH', decimals: 18, role: 'lockbox' as const, explorerUrl: null, layer: 'l1' as const, riskNote: null, primary: true },
-      { chainId: 72, chainName: 'Robinhood', address: '0x0bd7d308f8e1639fab988df18a8011f41eacad73', name: 'WETH', symbol: 'WETH', decimals: 18, role: 'lockbox' as const, explorerUrl: 'https://robinscan.io/address/0x0bd7d308f8e1639fab988df18a8011f41eacad73', layer: 'l2' as const, riskNote: 'Robinhood is an Ethereum L2 (Arbitrum Orbit): custody there also rests on its sequencer and its bridge to Ethereum', primary: false },
+      { chainId: 72, chainName: 'Robinhood', address: '0x0bd7d308f8e1639fab988df18a8011f41eacad73', name: 'WETH', symbol: 'WETH', decimals: 18, role: 'lockbox' as const, explorerUrl: 'https://robinhoodchain.blockscout.com/address/0x0bd7d308f8e1639fab988df18a8011f41eacad73', layer: 'l2' as const, riskNote: 'Robinhood is an Ethereum L2 (Arbitrum Orbit): custody there also rests on its sequencer and its bridge to Ethereum', primary: false },
     ],
   }
   const markup = (node: React.ReactElement) => renderToStaticMarkup(node).replace(/<[^>]+>/g, '')
@@ -593,7 +593,7 @@ describe('Wormhole on the asset page and activity detail', () => {
   it('names the far chain’s own token on a cross-chain row', () => {
     const html = renderToStaticMarkup(<RemoteTokenRow row={{ xcmDir: 'in', remoteToken: bridge.peers[1] }} />)
     expect(html).toContain('Source token')
-    expect(html).toContain('href="https://robinscan.io/address/0x0bd7d308f8e1639fab988df18a8011f41eacad73"')
+    expect(html).toContain('href="https://robinhoodchain.blockscout.com/address/0x0bd7d308f8e1639fab988df18a8011f41eacad73"')
     expect(html.replace(/<[^>]+>/g, '')).toContain('locked there')
     expect(renderToStaticMarkup(<RemoteTokenRow row={{ xcmDir: 'out', remoteToken: bridge.peers[0] }} />)).toContain('Destination token')
     expect(renderToStaticMarkup(<RemoteTokenRow row={{ xcmDir: 'in', remoteToken: null }} />)).toBe('')

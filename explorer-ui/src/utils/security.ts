@@ -126,7 +126,7 @@ const WORMHOLE_EXPLORERS: Record<number, { base: string; kind: string }> = {
   21: { base: 'https://suivision.xyz/object/', kind: 'SuiVision' },
   30: { base: 'https://basescan.org/address/', kind: 'BaseScan' },
   47: { base: 'https://hyperevmscan.io/address/', kind: 'HyperEVMScan' },
-  72: { base: 'https://robinscan.io/address/', kind: 'Robinscan' },
+  72: { base: 'https://robinhoodchain.blockscout.com/address/', kind: 'Blockscout' },
 }
 export function wormholeExplorerLink(chainId: number, handle: string | null): { href: string; kind: string } | null {
   const meta = WORMHOLE_EXPLORERS[chainId]
