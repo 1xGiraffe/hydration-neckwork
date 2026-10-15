@@ -185,7 +185,11 @@ export async function cachedSwr<T>(key: string, freshMs: number, staleMs: number
     touch(key, hit)
     const superseded = generation != null && hit.generation !== generation
     if ((superseded || (hit.freshUntil ?? hit.expiresAt) <= now) && !inflight.has(key)) {
-      loadAndCache(key, freshMs, staleMs, fn, generation).catch(() => { /* stale entry stays valid until staleMs */ })
+      loadAndCache(key, freshMs, staleMs, fn, generation).catch(err => {
+        // The stale entry stays valid until staleMs; say so, or a failing recompute
+        // keeps serving an old value for hours with nothing in the log.
+        console.warn(`[cache] background refresh of ${key} failed; serving the stale value`, err instanceof Error ? err.message : err)
+      })
     }
     return hit.value
   }
