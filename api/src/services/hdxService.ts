@@ -835,7 +835,11 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
       gigaMarket,
       gigaLiquidations,
     }
-  })
+    // Generation = whether the chain snapshot (locks, vesting, unlocks) existed when
+    // this build began. The startup warm-up can run before the first refresh, and
+    // without this its empty lock/unlock sections stayed cached until expiry; the
+    // first request after the snapshot appears supersedes that entry once.
+  }, snapshot ? 1 : 0)
 }
 
 // The pinned block's own height and timestamp (the cycle's stamp). Throws when the

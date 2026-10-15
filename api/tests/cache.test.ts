@@ -76,6 +76,34 @@ describe('cached', () => {
     await expect(cachedSwr('swr', 100, 1000, load)).resolves.toBe('second')
   })
 
+  // A failing background refresh keeps the stale value, but must say so: silently it
+  // left the /hdx dashboard's empty warm-up result in place for hours.
+  it('logs a failed background refresh and keeps serving the stale value', async () => {
+    vi.useFakeTimers()
+    const { cachedSwr } = await import('../src/services/cache.ts')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const load = vi.fn().mockResolvedValueOnce('first').mockRejectedValueOnce(new Error('timeout'))
+    await expect(cachedSwr('swr-fail', 100, 1000, load)).resolves.toBe('first')
+    vi.advanceTimersByTime(101)
+    await expect(cachedSwr('swr-fail', 100, 1000, load)).resolves.toBe('first')
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('swr-fail'), 'timeout')
+    warn.mockRestore()
+  })
+
+  // A newer generation supersedes the entry: the stale value is served once while it
+  // recomputes (how the /hdx dashboard heals after a build that ran before its chain
+  // snapshot existed).
+  it('recomputes once when the generation advances', async () => {
+    const { cachedSwr } = await import('../src/services/cache.ts')
+    const load = vi.fn().mockResolvedValueOnce('no-snapshot').mockResolvedValueOnce('with-snapshot')
+    await expect(cachedSwr('swr-gen', 60_000, 600_000, load, 0)).resolves.toBe('no-snapshot')
+    await expect(cachedSwr('swr-gen', 60_000, 600_000, load, 1)).resolves.toBe('no-snapshot')
+    await Promise.resolve(); await Promise.resolve()
+    await expect(cachedSwr('swr-gen', 60_000, 600_000, load, 1)).resolves.toBe('with-snapshot')
+    expect(load).toHaveBeenCalledTimes(2)
+  })
+
   // Every lookup addressed by block coordinates or a hash can be asked for
   // something the finalized index does not hold YET (raw-live trails the chain
   // by 35-65s). Storing that answer is what made a fresh /swap link 404 for a
