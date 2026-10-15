@@ -152,16 +152,40 @@ WHERE block_height BETWEEN {lo:UInt32} AND {hi:UInt32}
     WHERE contract_address = {c:String} AND block_height BETWEEN {lo:UInt32} AND {hi:UInt32})
   AND lower(contract_address) = {c:String} AND ${TRANSFER_DELTAS_ROW_FILTER}`
 
-// Inserts one contract's missing Transfer legs in [lo, hi] (CATCHUP_INSERT_SQL: only
-// keys the table lacks, so a re-run writes nothing). The one write path of both the
-// refresher's whole-history catch-up and an MV swap's window catch-up.
+// The chain-wide feed's party-transfer view (erc20_party_transfers_mv in
+// 003_materialized_views.sql): its SELECT and WHERE over raw_evm_logs, shared verbatim
+// with schemaBootstrap's DATA_UPGRADES backfill and with the catch-up below (the schema
+// test pins the view to exactly these strings). The fixed non-parties are explorerService's
+// ERC20_NON_HOLDERS and ERC20_RESERVED_HOLDER_RE, stated literally (a test pins them equal).
+export const PARTY_TRANSFERS_SELECT = "lower(contract_address) AS contract_address, lower(JSONExtractString(decoded_args_json, 'from')) AS from_address, lower(JSONExtractString(decoded_args_json, 'to')) AS to_address, toUInt256OrZero(JSONExtractString(decoded_args_json, 'value')) AS amount, block_height, event_index, extrinsic_index, block_timestamp, ingested_at"
+export const PARTY_TRANSFERS_WHERE = "raw_evm_logs.event_name = 'Transfer' AND lower(raw_evm_logs.contract_address) IN (SELECT arrayJoin(groupArrayIf(contract, active = 1)) FROM price_data.erc20_wallet_contracts FINAL) AND match(lower(JSONExtractString(raw_evm_logs.decoded_args_json, 'from')), '^0x[0-9a-f]{40}$') AND match(lower(JSONExtractString(raw_evm_logs.decoded_args_json, 'to')), '^0x[0-9a-f]{40}$') AND lower(JSONExtractString(raw_evm_logs.decoded_args_json, 'from')) NOT IN ('0x0000000000000000000000000000000000000000', '0xffffffffffffffffffffffffffffffffffffffff', '0x6d6f646c63757272657365720000000000000000', '0x000000000000000000000000000000000000090a') AND lower(JSONExtractString(raw_evm_logs.decoded_args_json, 'to')) NOT IN ('0x0000000000000000000000000000000000000000', '0xffffffffffffffffffffffffffffffffffffffff', '0x6d6f646c63757272657365720000000000000000', '0x000000000000000000000000000000000000090a') AND NOT match(lower(JSONExtractString(raw_evm_logs.decoded_args_json, 'from')), '^0x(6d6f646c|7369626c|70617261|506172656e74)') AND NOT match(lower(JSONExtractString(raw_evm_logs.decoded_args_json, 'to')), '^0x(6d6f646c|7369626c|70617261|506172656e74)')"
+// The party transfers' catch-up: the same contract's missing keys in [lo, hi] under the
+// view's own WHERE, so a contract that joined the set late reaches the chain-wide feed's
+// table exactly as it reaches the deltas (the deltas' catch-up keys the same window).
+export const CATCHUP_INSERT_PARTY_TRANSFERS_SQL = `INSERT INTO price_data.erc20_party_transfers
+SELECT ${PARTY_TRANSFERS_SELECT} FROM price_data.raw_evm_logs
+WHERE block_height BETWEEN {lo:UInt32} AND {hi:UInt32}
+  AND (block_height, event_index) IN (
+    SELECT block_height, event_index FROM price_data.evm_logs_by_contract
+    WHERE contract_address = {c:String} AND topic0 = '${ERC20_TRANSFER_TOPIC}' AND block_height BETWEEN {lo:UInt32} AND {hi:UInt32})
+  AND (block_height, event_index) NOT IN (
+    SELECT block_height, event_index FROM price_data.erc20_party_transfers
+    WHERE block_height BETWEEN {lo:UInt32} AND {hi:UInt32} AND contract_address = {c:String})
+  AND lower(contract_address) = {c:String} AND ${PARTY_TRANSFERS_WHERE}`
+
+// Inserts one contract's missing Transfer logs in [lo, hi] (CATCHUP_INSERT_SQL: only
+// keys the table lacks, so a re-run writes nothing), into the deltas and the chain-wide
+// feed's party transfers alike. The one write path of both the refresher's whole-history
+// catch-up and an MV swap's window catch-up.
 async function insertMissingTransferDeltas(c: ClickHouseClient, p: { contract: string; lo: number; hi: number }, why: string): Promise<void> {
   const before = Date.now()
-  await c.command({
-    query: CATCHUP_INSERT_SQL,
-    query_params: { c: p.contract, lo: p.lo, hi: p.hi },
-    clickhouse_settings: { max_threads: 4 },
-  })
+  for (const query of [CATCHUP_INSERT_SQL, CATCHUP_INSERT_PARTY_TRANSFERS_SQL]) {
+    await c.command({
+      query,
+      query_params: { c: p.contract, lo: p.lo, hi: p.hi },
+      clickhouse_settings: { max_threads: 4 },
+    })
+  }
   console.log(`[erc20-wallet] transfer-deltas ${why} ${p.contract} blocks ${p.lo}-${p.hi} in ${Date.now() - before} ms`)
 }
 

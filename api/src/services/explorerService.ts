@@ -3450,6 +3450,10 @@ export interface TransferRow {
   amount: string
   asset: AssetRef
   valueUsd: number | null
+  // As ActivityRow's: read from the token's own ERC-20 Transfer log, and a send between
+  // two ordinary accounts no other row owns.
+  erc20Log?: true
+  erc20Send?: true
 }
 
 interface RawTransferEventRow {
@@ -3526,6 +3530,74 @@ function isUnpricedAsset(assetId: number): boolean {
   return SHARE_TOKEN_UNDERLYING_ID[assetId] != null
 }
 
+// ── ERC-20 sends on the chain-wide and asset feeds ────────────────────────────
+//
+// The chain-wide feeds show the account pages' ERC-20 SENDS (erc20Send): a wallet-contract
+// Transfer log with no Currencies twin right after it whose two parties are both
+// ordinary — not a fixed non-party, pool, v3 venue, flash minter, money-market contract,
+// NTT manager, BIL issuance contract (erc20VenueH160s) or pallet/sovereign account.
+// Such a leg is owned by nothing, so both parties' pages show it unconditionally and the
+// feed needs no sibling context to place it. A leg against a venue is that venue's
+// settlement: the parties' pages classify it against the extrinsic's own rows, but a
+// chain-wide view of it would be the venue's bookkeeping — on a HOLLAR page, 1,358 of
+// 1,366 historical candidates are legs between the two BIL originator contracts — so
+// the feeds leave it to the pages. Read from erc20_party_transfers (block-first, already
+// without the fixed non-parties), so a range costs what its few candidates hold.
+interface Erc20GlobalScope { contracts: { contract: string; assetId: number }[]; notOrdinary: string[] }
+async function erc20GlobalScope(): Promise<Erc20GlobalScope | null> {
+  return cached('explorer:erc20-global-scope', 60_000, async () => {
+    const contracts = (await ensureErc20WalletAssets()).map(a => ({ contract: a.contract.toLowerCase(), assetId: a.assetId }))
+    if (!contracts.length) return null
+    const [excluded, venues, mmContracts, managers] = await Promise.all([erc20PlumbingH160s(), erc20VenueH160s(), mmContractAccountIds(), nttManagers()])
+    const notOrdinary = [...new Set([
+      ...ERC20_NON_HOLDERS, ...excluded, ...venues,
+      ...[...mmContracts].map(evmAddressOfAccount), ...managers.map(m => m.manager.toLowerCase()),
+    ])]
+    return { contracts, notOrdinary }
+  })
+}
+// The sends under `bound` as transfer-model rows (block_height, block_timestamp,
+// event_index, extrinsic_index, from_account, to_account, amount, asset_id), so the
+// feed's own exclusions and value predicates apply to them unchanged. The parties the
+// view cannot know (~850: every pool, venue and money-market contract) are matched
+// through a set built once rather than has() over the array (1.2 CPU-s against 0.1 over
+// a week of candidates). The Currencies twin read is held to the blocks of the logs
+// between two ordinary parties (most of them a pallet transfer's own log, which the twin
+// then drops) rather than the window's every Currencies.Transferred: over a sixteen-month
+// dated window that is 133 MB against 1.6 GB. Asset-first for one asset (the asset feed).
+function erc20GlobalCandidateSql(scope: Erc20GlobalScope, bound: string, assetId?: number): string {
+  const quote = (values: readonly string[]) => values.map(v => `'${v}'`).join(',')
+  const contracts = assetId == null ? scope.contracts : scope.contracts.filter(c => c.assetId === assetId)
+  const contractList = contracts.length ? quote(contracts.map(c => c.contract)) : "''"
+  const sends = `SELECT block_height, block_timestamp, event_index, extrinsic_index,
+             from_address AS f, to_address AS t, toString(amount) AS amount,
+             toUInt32(transform(contract_address, [${contractList}], [${contracts.map(c => c.assetId).join(',') || '0'}], 0)) AS asset_id
+      FROM price_data.erc20_party_transfers
+      WHERE ${bound} AND contract_address IN (${contractList})
+        AND from_address NOT IN (SELECT arrayJoin(erc20_not_ordinary)) AND to_address NOT IN (SELECT arrayJoin(erc20_not_ordinary))`
+  const twinSource = assetId == null
+    ? 'price_data.transfer_activity_by_time WHERE'
+    : `price_data.transfer_activity WHERE asset_id = ${assetId} AND`
+  const widened = (h160: string) => `concat('0x45544800', substring(${h160}, 3), repeat('0', 16))`
+  return `WITH CAST([${quote(scope.notOrdinary)}], 'Array(String)') AS erc20_not_ordinary
+    SELECT block_height, block_timestamp, event_index, extrinsic_index,
+           ${widened('f')} AS from_account, ${widened('t')} AS to_account, amount, asset_id
+    FROM (${sends})
+    WHERE (block_height, event_index + 1, asset_id, amount) NOT IN (
+      SELECT block_height, event_index, asset_id, amount FROM ${twinSource} ${bound}
+        AND event_name = 'Currencies.Transferred' AND block_height IN (SELECT block_height FROM (${sends})))`
+}
+
+// An ERC-20 leg's H160s read as their widened ids; one that is the extrinsic's own signer
+// is named as that account, as the account and extrinsic pages name it.
+async function erc20PartyNamer(logs: { block_height: number; extrinsic_index: number | null }[]): Promise<(id: string, r: { block_height: number; extrinsic_index: number | null }) => string> {
+  const signers = logs.length ? await signersFor(logs.map(r => [r.block_height, r.extrinsic_index] as [number, number | null])) : new Map<string, string>()
+  return (id, r) => {
+    const signer = r.extrinsic_index != null ? signers.get(`${r.block_height}:${r.extrinsic_index}`) : undefined
+    return signer && evmAddressOfAccount(signer) === evmAddressOfAccount(id) ? signer.toLowerCase() : id
+  }
+}
+
 async function getRecentTransfers(limit: number, from?: string, to?: string, offset = 0, nonPlumbing = false, filters: ValueListFilters = {}): Promise<TransferRow[]> {
   const tw = timeWindow(from, to)
   return cached(`explorer:transfers:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${nonPlumbing}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
@@ -3562,6 +3634,7 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
     // every page as it goes; every other shape values once, the rows it returns.
     const buildTransferRows = async (rawRows: RawTransferEventRow[]): Promise<TransferRow[]> => {
       const raw = dedupeTransferEvents(rawRows)
+      const party = await erc20PartyNamer(raw.filter(r => r.event_name === 'EVM.Log'))
       const seen = new Set<string>()
       const out: TransferRow[] = []
       for (const r of raw) {
@@ -3569,10 +3642,12 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
         if (seen.has(key)) continue
         seen.add(key)
         const a = asset(r.asset_id)
+        const isErc20 = r.event_name === 'EVM.Log'
         out.push({
           blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
-          from: accountRef(r.from_acc), to: accountRef(r.to_acc), amount: r.amount, asset: a,
+          from: accountRef(isErc20 ? party(r.from_acc, r) : r.from_acc), to: accountRef(isErc20 ? party(r.to_acc, r) : r.to_acc), amount: r.amount, asset: a,
           valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
+          ...(isErc20 ? { erc20Log: true as const, erc20Send: true as const } : {}),
         })
       }
       if (postUsdFilter) await applyHistoricalUsd(out, transferHistPick)
@@ -3597,7 +3672,41 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
     // its own limit, and the next range continues below it.
     let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
     let rangeBound: string | null = tw
+    // The ERC-20 sends (erc20GlobalCandidateSql) under the same bound, filters and limit,
+    // read beside the pallet transfers and merged into one newest-first page of
+    // `rawLimit`: the walk's cursor and boundary logic see one source. The scope loads
+    // beside the first pallet read rather than ahead of it; a failed load surfaces at the
+    // read that awaits it, never as an unhandled rejection when the walk ends first.
+    // `userFilter` is left out: every account it names (noisy pots, sovereign prefixes,
+    // pools, money-market contracts) is a substrate id no widened H160 equals, or a
+    // party the sends already exclude — and without it the display page and its
+    // classification context (which differ only in it) ask the same read, answered once.
+    const erc20ScopeLoad = erc20GlobalScope()
+    erc20ScopeLoad.catch(() => {})
+    const runErc20 = async (rawBound: string, rawLimit: number): Promise<RawTransferEventRow[]> => {
+      const erc20Scope = await erc20ScopeLoad
+      if (!erc20Scope) return []
+      const query = `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, 'EVM.Log' AS event_name,
+                  from_account AS from_acc, to_account AS to_acc, amount, asset_id
+                FROM (${erc20GlobalCandidateSql(erc20Scope, rawBound)})
+                ${amountFilter.joinSql}
+                WHERE 1 ${nttExclusion} ${tokenFilter} ${amountFilter.predicateSql}
+                ORDER BY block_height DESC, event_index DESC
+                LIMIT {limit:UInt32}`
+      const key = createHash('sha1').update(query).digest('hex')
+      return cached(`explorer:erc20-sends:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${key}:${rawLimit}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+        const res = await client.query({ query, query_params: { limit: rawLimit }, format: 'JSONEachRow' })
+        return res.json<RawTransferEventRow>()
+      })
+    }
     const runRaw = async (rawBound: string, rawLimit: number): Promise<RawTransferEventRow[]> => {
+      const [pallet, erc20] = await Promise.all([runPallet(rawBound, rawLimit), runErc20(rawBound, rawLimit)])
+      if (!erc20.length) return pallet
+      return [...pallet, ...erc20]
+        .sort((a, b) => b.block_height - a.block_height || b.event_index - a.event_index)
+        .slice(0, rawLimit)
+    }
+    const runPallet = async (rawBound: string, rawLimit: number): Promise<RawTransferEventRow[]> => {
       const res = await client.query({
         query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
                   from_account AS from_acc, to_account AS to_acc, amount, asset_id
@@ -19112,10 +19221,12 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
   }
 
   return transfers.filter(row => {
+    // An ERC-20 send between two ordinary accounts is no sibling's leg (erc20VenueH160s).
+    if (row.erc20Send) return true
     if (row.extrinsicIndex != null) {
       const key = `${row.blockHeight}:${row.extrinsicIndex}`
       if (semanticExtrinsics.has(key)) return false
-      return !(moneyMarketExtrinsics.has(key) && moneyMarketOwnsTransfer(row.from, row.to, false))
+      return !(moneyMarketExtrinsics.has(key) && moneyMarketOwnsTransfer(row.from, row.to, row.erc20Log))
     }
     const owners = hookAccounts.get(row.blockHeight)
     return !owners || (!owners.has(row.from.accountId.toLowerCase()) && !owners.has(row.to.accountId.toLowerCase()))
@@ -19915,6 +20026,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
   const toTransferRow = (t: TransferRow): ActivityRow => ({
     type: 'transfer', blockHeight: t.blockHeight, timestamp: t.timestamp, eventIndex: t.eventIndex, extrinsicIndex: t.extrinsicIndex,
     who: t.from, to: t.to, asset: t.asset, assetIn: null, assetOut: null, amount: t.amount, amountIn: null, amountOut: null, valueUsd: t.valueUsd,
+    ...(t.erc20Log ? { erc20Log: true as const } : {}), ...(t.erc20Send ? { erc20Send: true as const } : {}),
   })
   const toTradeRow = (t: TradeRow): ActivityRow => ({
     type: 'trade', blockHeight: t.blockHeight, timestamp: t.timestamp, eventIndex: t.eventIndex, extrinsicIndex: t.extrinsicIndex,
@@ -20141,14 +20253,15 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       const intentExtrinsics = activityExtrinsicSet(intents)
       const mmExtrinsics = activityExtrinsicSet(mm.filter(isMoneyMarketActionRow))
       const otcExtrinsics = activityExtrinsicSet(otc)
-      const userTransfers = sourceFilteredTransfers.filter(t =>
+      // An ERC-20 send between two ordinary accounts is no sibling's leg (erc20VenueH160s).
+      const userTransfers = sourceFilteredTransfers.filter(t => t.erc20Send || (
         !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && intentExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         // A money-market action owns only some of its extrinsic's legs (isMoneyMarketActionRow).
-        !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`) && moneyMarketOwnsTransfer(t.from, t.to, false)) &&
-        !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)))
+        !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`) && moneyMarketOwnsTransfer(t.from, t.to, t.erc20Log)) &&
+        !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`))))
       // Module-account MM rows are pool-proxy internals, not user activity.
       const userMm = mm.filter(r => !isModuleAcct(r.who))
       type SourceCursor = { blockHeight: number; eventIndex: number }
@@ -22714,22 +22827,47 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
         + ' ' + fastRelayLegExclusionSql(await fastRelayIndex())
       const transferPlumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
       const transferPlumbingList = transferPlumbing.length ? transferPlumbing.map(a => `'${a}'`).join(',') : "''"
-      const res = await client.query({
+      const legFilters = `${nonPlumbingTransferLegSql('from_account', 'to_account', transferPlumbingList)}
+            ${nttExclusion}
+            ${transferValueFilter.predicateSql}`
+      type AssetTransferRaw = { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; from_acc: string; to_acc: string; amount: string }
+      const palletP = client.query({
         query: `
           SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
             from_account AS from_acc, to_account AS to_acc, amount
           FROM price_data.transfer_activity
           ${transferValueFilter.joinSql}
           WHERE ${bound} AND asset_id = {assetId:UInt32}
-            ${nonPlumbingTransferLegSql('from_account', 'to_account', transferPlumbingList)}
-            ${nttExclusion}
-            ${transferValueFilter.predicateSql}
+            ${legFilters}
           ORDER BY block_height DESC, event_index DESC
           LIMIT {n:UInt32}`,
         query_params: { n: fetchN, assetId }, format: 'JSONEachRow',
-      })
-      const rows = dedupeTransferEvents((await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; from_acc: string; to_acc: string; amount: string }>())
-        .map(r => ({ ...r, asset_id: assetId })))
+      }).then(res => res.json<AssetTransferRaw>())
+      // An Erc20 registry asset's EVM-only Transfer logs (erc20GlobalCandidateSql, held to
+      // this asset), under the same filters and limit, merged into one newest-first source
+      // of `fetchN` so the saturation rule judges the two as one.
+      const erc20P = (async (): Promise<AssetTransferRaw[]> => {
+        const scope = await erc20GlobalScope()
+        if (!scope?.contracts.some(c => c.assetId === assetId)) return []
+        const res = await client.query({
+          query: `
+            SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, 'EVM.Log' AS event_name,
+              from_account AS from_acc, to_account AS to_acc, amount
+            FROM (${erc20GlobalCandidateSql(scope, bound, assetId)})
+            ${transferValueFilter.joinSql}
+            WHERE 1 ${legFilters}
+            ORDER BY block_height DESC, event_index DESC
+            LIMIT {n:UInt32}`,
+          query_params: { n: fetchN, assetId }, format: 'JSONEachRow',
+        })
+        return res.json<AssetTransferRaw>()
+      })()
+      const [pallet, erc20] = await Promise.all([palletP, erc20P])
+      const merged = erc20.length
+        ? [...pallet, ...erc20].sort((x, y) => y.block_height - x.block_height || y.event_index - x.event_index).slice(0, fetchN)
+        : pallet
+      const rows = dedupeTransferEvents(merged.map(r => ({ ...r, asset_id: assetId })))
+      const party = await erc20PartyNamer(rows.filter(r => r.event_name === 'EVM.Log'))
       const a = asset(assetId)
       const seen = new Set<string>()
       const out: ActivityRow[] = []
@@ -22737,11 +22875,13 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
         const key = `${r.block_height}:${r.event_index}`
         if (seen.has(key)) continue
         seen.add(key)
+        const isErc20 = r.event_name === 'EVM.Log'
         out.push({
           type: 'transfer', blockHeight: r.block_height, timestamp: r.ts, eventIndex: r.event_index, extrinsicIndex: r.extrinsic_index,
-          who: accountRef(r.from_acc), to: accountRef(r.to_acc), asset: a, assetIn: null, assetOut: null,
+          who: accountRef(isErc20 ? party(r.from_acc, r) : r.from_acc), to: accountRef(isErc20 ? party(r.to_acc, r) : r.to_acc), asset: a, assetIn: null, assetOut: null,
           amount: r.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, r.amount, a.decimals),
           linkBlock: r.block_height, linkIndex: r.extrinsic_index,
+          ...(isErc20 ? { erc20Log: true as const, erc20Send: true as const } : {}),
         })
       }
       return out
@@ -23141,14 +23281,14 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
     const intentExtrinsics = activityExtrinsicSet(intents)
     const mmExtrinsics = activityExtrinsicSet(mm.filter(isMoneyMarketActionRow))
     const otcExtrinsics = activityExtrinsicSet(otc)
-    const userTransfers = (await dropTreasuryFeeLegs(transfers)).filter(t =>
+    const userTransfers = (await dropTreasuryFeeLegs(transfers)).filter(t => t.erc20Send || (
       !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       !(t.extrinsicIndex != null && intentExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
       // A money-market action owns only some of its extrinsic's legs (isMoneyMarketActionRow).
       !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`) && moneyMarketOwnsTransfer(t.who, t.to, t.erc20Log)) &&
-      !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)))
+      !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`))))
     // The asset page sees the fee purchase (an HDX or GLMR page) without the send it
     // funded (a sUSDS page), so the fold is asked of SQL here (see feePurchaseSwapSelectSql).
     const feeSwapKeys = await feePurchaseSwapKeys(trades)
