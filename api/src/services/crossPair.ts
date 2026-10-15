@@ -258,37 +258,55 @@ export function carryReadStart(interval: OHLCVInterval, startSec: number): numbe
 }
 
 /**
+ * One pair series' raw candles over [startTime, endTime): per bucket, each bucket's
+ * candle depending only on the blocks inside it, BEFORE the carry rule. The two
+ * pair series below are this read carried from the lookback (readCarried); a
+ * caller that keeps the closed buckets of a window can carry the newest one on
+ * from their last close instead (readCarriedBefore).
+ */
+export type PairSeriesRead = (startTime: Date, endTime: Date) => Promise<Array<Sourced<CrossCandle>>>
+
+/**
  * Reads a pair series from the carry lookback (carryReadStart), carries it as one
  * series and returns the candles at or after the window's own start — exactly the
  * buckets a read from `startTime` returns (both paths drop a bucket straddling the
  * start), each opening at the close before it.
  */
-async function readCarried<T extends { intervalStart: number; open: string; high: string; low: string; close: string }>(
-  startTime: Date, interval: OHLCVInterval, read: (from: Date) => Promise<T[]>,
-): Promise<T[]> {
+async function readCarried(startTime: Date, endTime: Date, interval: OHLCVInterval, read: PairSeriesRead): Promise<Array<Sourced<CrossCandle>>> {
   const startSec = Math.floor(startTime.getTime() / 1000)
-  const series = await read(new Date(carryReadStart(interval, startSec) * 1000))
+  const series = await read(new Date(carryReadStart(interval, startSec) * 1000), endTime)
   return carryCandleOpens(series).filter(c => c.intervalStart >= startSec)
 }
 
 /**
- * A pair's candles under the configured price source (services/pairPriceSource.ts):
- * the per-block cross rate above, with — in 'route' mode — every bucket the
- * route-priced fold covers taking the route's price. Volumes stay the cross
- * candle's (the base asset's USD volume; '0' for a bucket only the route covers).
- * In 'usd-ratio' mode the prices are queryCrossPairCandles', candle for candle,
- * except each candle's open is the close before it (the carry rule, applied to the
- * finished series — route and ratio candles alike — with its high/low widened).
+ * The first part of a window split at a bucket boundary `splitSec`: its candles
+ * before the split, read and carried exactly as readCarried reads the whole window,
+ * and the close the bucket at the split opens at (the series' last close before
+ * it, lookback included; null when it has none). Because every raw bucket depends
+ * only on its own blocks and the carry only on the candle before, these candles
+ * followed by `read(splitSec, end)` carried on from `lastClose` (carryCandleOpens)
+ * are the whole window's readCarried, candle for candle.
  */
-export async function queryPairCandles(
+export async function readCarriedBefore(
+  read: PairSeriesRead, interval: OHLCVInterval, startSec: number, splitSec: number,
+): Promise<{ candles: Array<Sourced<CrossCandle>>; lastClose: string | null }> {
+  const series = carryCandleOpens(await read(new Date(carryReadStart(interval, startSec) * 1000), new Date(splitSec * 1000)))
+  return { candles: series.filter(c => c.intervalStart >= startSec), lastClose: series.length ? series[series.length - 1]!.close : null }
+}
+
+/**
+ * The raw read behind queryPairCandles: the per-block cross rate, with — in
+ * 'route' mode — every bucket the route-priced fold covers taking the route's
+ * price. Volumes stay the cross candle's (the base asset's USD volume; '0' for a
+ * bucket only the route covers).
+ */
+export function pairCandlesRead(
   client: ClickHouseClient,
-  // `headFloor`: a price-pipeline block the caller already clamped to; the route
-  // tail is folded at least that far (see queryRouteCandles).
-  options: { baseId: number; quoteId: number; startTime: Date; endTime: Date; interval: OHLCVInterval; headFloor?: number },
+  options: { baseId: number; quoteId: number; interval: OHLCVInterval; headFloor?: number },
   source: PairPriceSource = pairPriceSource(),
-): Promise<Array<Sourced<CrossCandle>>> {
-  return readCarried(options.startTime, options.interval, async startTime => {
-    const window = { ...options, startTime }
+): PairSeriesRead {
+  return async (startTime, endTime) => {
+    const window = { ...options, startTime, endTime }
     if (source !== 'route') return queryCrossPairCandles(client, window)
     const [cross, route] = await Promise.all([queryCrossPairCandles(client, window), queryRouteCandles(client, window)])
     return overlayRouteCandles(cross, route, c => c.intervalStart, (rc, existing) => ({
@@ -301,27 +319,41 @@ export async function queryPairCandles(
       volumeSell: existing?.volumeSell ?? '0',
       volumeTotal: existing?.volumeTotal ?? '0',
     }))
-  })
+  }
 }
 
 /**
- * A USD-pegged quote's pair while pairs are route-priced: the base asset's own USD
- * candles, with every bucket the pair's route prices taking the route price against
- * the token (pairPriceSource). One series, so the carry rule runs over the mixed
- * candles — a route candle opens at the USD close before it and vice versa — read
- * from the carry lookback like queryPairCandles. `endTime` is half-open (the USD
- * view's inclusive bound is read one second short of it). Volumes are the USD
- * candle's ('0' where only the route has the bucket); every candle names its
- * `priceSource`.
+ * A pair's candles under the configured price source (services/pairPriceSource.ts):
+ * pairCandlesRead carried from the lookback. In 'usd-ratio' mode the prices are
+ * queryCrossPairCandles', candle for candle, except each candle's open is the close
+ * before it (the carry rule, applied to the finished series — route and ratio
+ * candles alike — with its high/low widened).
  */
-export async function queryUsdQuotedRouteCandles(
+export async function queryPairCandles(
   client: ClickHouseClient,
+  // `headFloor`: a price-pipeline block the caller already clamped to; the route
+  // tail is folded at least that far (see queryRouteCandles).
   options: { baseId: number; quoteId: number; startTime: Date; endTime: Date; interval: OHLCVInterval; headFloor?: number },
+  source: PairPriceSource = pairPriceSource(),
 ): Promise<Array<Sourced<CrossCandle>>> {
-  return readCarried(options.startTime, options.interval, async startTime => {
+  return readCarried(options.startTime, options.endTime, options.interval, pairCandlesRead(client, options, source))
+}
+
+/**
+ * The raw read behind queryUsdQuotedRouteCandles: the base asset's own USD
+ * candles, with every bucket the pair's route prices taking the route price
+ * against the token (pairPriceSource). `endTime` is half-open (the USD view's
+ * inclusive bound is read one second short of it). Volumes are the USD candle's
+ * ('0' where only the route has the bucket); every candle names its `priceSource`.
+ */
+export function usdQuotedRouteCandlesRead(
+  client: ClickHouseClient,
+  options: { baseId: number; quoteId: number; interval: OHLCVInterval; headFloor?: number },
+): PairSeriesRead {
+  return async (startTime, endTime) => {
     const [usd, route] = await Promise.all([
-      queryOHLCV(client, { assetId: options.baseId, startTime, endTime: new Date(options.endTime.getTime() - 1000), interval: options.interval }),
-      queryRouteCandles(client, { ...options, startTime }),
+      queryOHLCV(client, { assetId: options.baseId, startTime, endTime: new Date(endTime.getTime() - 1000), interval: options.interval }),
+      queryRouteCandles(client, { ...options, startTime, endTime }),
     ])
     const candles: CrossCandle[] = usd.map(c => ({
       intervalStart: Math.floor(Date.parse(`${c.interval_start.replace(' ', 'T')}Z`) / 1000),
@@ -335,5 +367,18 @@ export async function queryUsdQuotedRouteCandles(
       volumeSell: existing?.volumeSell ?? '0',
       volumeTotal: existing?.volumeTotal ?? '0',
     }))
-  })
+  }
+}
+
+/**
+ * A USD-pegged quote's pair while pairs are route-priced: usdQuotedRouteCandlesRead
+ * carried from the lookback like queryPairCandles. One series, so the carry rule
+ * runs over the mixed candles — a route candle opens at the USD close before it
+ * and vice versa.
+ */
+export async function queryUsdQuotedRouteCandles(
+  client: ClickHouseClient,
+  options: { baseId: number; quoteId: number; startTime: Date; endTime: Date; interval: OHLCVInterval; headFloor?: number },
+): Promise<Array<Sourced<CrossCandle>>> {
+  return readCarried(options.startTime, options.endTime, options.interval, usdQuotedRouteCandlesRead(client, options))
 }

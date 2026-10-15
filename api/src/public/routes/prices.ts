@@ -6,8 +6,8 @@ import { cached } from '../../services/cache.ts'
 import { assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
 import { AMOUNT_SCALE, queryPairVolume, reachesPairVolumeTail, scaledText, type PairVolumeBucket } from '../../services/pairVolume.ts'
 import type { OHLCVInterval } from '../../services/ohlcvService.ts'
-import { queryOHLCV } from '../../services/ohlcvService.ts'
-import { CROSS_SCALE, CrossWindowTooWideError, queryPairCandles, queryUsdQuotedRouteCandles, type CrossCandle } from '../../services/crossPair.ts'
+import { carryCandleOpens, queryOHLCV } from '../../services/ohlcvService.ts'
+import { CROSS_SCALE, CrossWindowTooWideError, pairCandlesRead, readCarriedBefore, usdQuotedRouteCandlesRead, type CrossCandle, type PairSeriesRead } from '../../services/crossPair.ts'
 import { lastClosedBucketStart, pairPriceSource, pricePipelineHead, type CandlePriceSource, type Sourced } from '../../services/pairPriceSource.ts'
 import type { OHLCVCandle } from '../../types.ts'
 import { iso, zAssetId, zBucket, zIsoTimestamp } from '../schemas/common.ts'
@@ -428,47 +428,76 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
     // block); a closed-only window cannot change.
     const key = `pub:prices-pair:${baseId}:${quoteId}:${referenceAsset}:${bucket}:${fromSeconds}-${toSeconds}${source === 'route' ? ':route' : ''}${holdsOpen ? `:h${head.block}` : ''}`
     const flag = (items: PairCandle[]) => items.map(c => ({ ...c, closed: Date.parse(c.timestamp) / 1000 + seconds <= head.time }))
+    const volumeOf = (fromSec: number, toSec: number, tail: { head?: typeof head }) =>
+      queryPairVolume(opts.client, { baseId, quoteId, interval, fromSec, toSec, ...tail })
+    // A cross rate is the per-block ratio aggregated, never the two assets' stored
+    // candles divided: min and max do not survive division, so the stored form can
+    // only bound the rate, not state it (see services/crossPair.ts). A USD-pegged
+    // quote is the base's own USD candles, with — in route mode — the buckets its
+    // route prices taking the route price against the token.
+    const read: PairSeriesRead | null = !quoteIsUsd
+      ? pairCandlesRead(opts.client, { baseId, quoteId, interval, headFloor: head.block }, source)
+      : source === 'route' ? usdQuotedRouteCandlesRead(opts.client, { baseId, quoteId, interval, headFloor: head.block }) : null
+    // A route-priced candle is the price against this token, not the dollar: the
+    // series names the token whenever any of its candles is (each candle says
+    // which by its priceSource), and `usd` only while all of them are USD candles.
+    // A cross pair's reference is always the quote's id.
+    const seriesOf = (rows: Array<Sourced<CrossCandle>>): { referenceAsset: string; items: PairCandle[] } => {
+      const items = rows.map(crossToPairCandle)
+      return {
+        referenceAsset: quoteIsUsd && items.some(c => c.priceSource === 'route') ? String(requestedQuoteId) : referenceAsset,
+        items: flag(items.filter(c => Date.parse(c.timestamp) / 1000 <= toSeconds)),
+      }
+    }
+    const tooWide = (error: unknown): never => {
+      if (error instanceof CrossWindowTooWideError) throw badRequest(error.message)
+      throw error
+    }
+
+    if (read && holdsOpen) {
+      // The closed buckets before the open one cannot change once closed (that is
+      // what `closed: true` promises, and why a closed-only window is cached 60 s
+      // and shared 300 s), so they are read and carried once per last-closed bucket
+      // and shared by every head until it moves — on the same 60 s bound — while
+      // each new head re-reads only the open bucket, carried on from the closed
+      // part's last close. readCarriedBefore states why the two parts concatenated
+      // are the whole window's series candle for candle; the pair volume is per
+      // bucket, so its two parts are too.
+      return cached(key, 5_000, async () => {
+        const closedPart = cached(`pub:prices-pair-closed:${baseId}:${quoteId}:${bucket}:${fromSeconds}-${openStart}${source === 'route' ? ':route' : ''}`, 60_000, async () => {
+          const [series, volume] = await Promise.all([
+            readCarriedBefore(read, interval, fromSeconds, openStart).catch(tooWide),
+            fromSeconds <= lastClosedStart
+              ? volumeOf(fromSeconds, lastClosedStart, reachesPairVolumeTail(lastClosedStart + seconds, head.time) ? { head } : {})
+              : Promise.resolve(new Map<number, PairVolumeBucket>()),
+          ])
+          return { ...series, volume }
+        })
+        const [closed, open, openVolume] = await Promise.all([
+          closedPart,
+          read(new Date(openStart * 1000), new Date((openStart + seconds) * 1000)).catch(tooWide),
+          volumeOf(openStart, openStart, { head }),
+        ])
+        const series = seriesOf([...closed.candles, ...carryCandleOpens(open, closed.lastClose)])
+        return { referenceAsset: series.referenceAsset, items: withPairVolume(series.items, new Map([...closed.volume, ...openVolume])) }
+      })
+    }
+
     const candles = async (): Promise<{ referenceAsset: string; items: PairCandle[] }> => {
-      // A cross rate is the per-block ratio aggregated, never the two assets'
-      // stored candles divided: min and max do not survive division, so the stored
-      // form can only bound the rate, not state it (see services/crossPair.ts).
-      if (!quoteIsUsd) {
-        const rows = await queryPairCandles(opts.client, {
-          baseId,
-          quoteId,
-          startTime: new Date(fromSeconds * 1000),
-          // `toSeconds` names the last closed bucket's START; the cross window is a
-          // half-open span of instants, so it has to reach that bucket's CLOSE for
-          // the bucket to be in it at all.
-          endTime: new Date((toSeconds + seconds) * 1000),
-          interval,
-          headFloor: head.block,
-        }, source).catch((error: unknown) => {
-          if (error instanceof CrossWindowTooWideError) throw badRequest(error.message)
-          throw error
-        })
-        return { referenceAsset, items: flag(rows.map(crossToPairCandle).filter(c => Date.parse(c.timestamp) / 1000 <= toSeconds)) }
+      if (read) {
+        // `toSeconds` names the last bucket's START; the window is a half-open span
+        // of instants, so it has to reach that bucket's CLOSE for the bucket to be in
+        // it at all.
+        return seriesOf((await readCarriedBefore(read, interval, fromSeconds, toSeconds + seconds).catch(tooWide)).candles)
       }
-      if (source !== 'route') {
-        const base = await queryOHLCV(opts.client, {
-          assetId: baseId, startTime: new Date(fromSeconds * 1000), endTime: new Date(toSeconds * 1000), interval,
-        })
-        // The view's window is inclusive of `end_time`; a bucket past the open one
-        // (a replayed head ahead of the price head) is dropped, so the series ends at
-        // the head it is flagged against.
-        const closed = base.filter(candle => Date.parse(`${candle.interval_start.replace(' ', 'T')}Z`) / 1000 <= toSeconds)
-        return { referenceAsset, items: flag(usdCandles(closed)) }
-      }
-      // Route mode: a bucket the pair's route prices is the price against THIS
-      // token along that route, not the dollar; the rest stay the USD candles — one
-      // series, each candle opening at the close before it, whichever priced it.
-      const items = (await queryUsdQuotedRouteCandles(opts.client, {
-        baseId, quoteId, interval, startTime: new Date(fromSeconds * 1000), endTime: new Date((toSeconds + seconds) * 1000), headFloor: head.block,
-      })).map(crossToPairCandle)
-      // A route-priced candle is the price against this token, not the dollar: the
-      // series names the token whenever any of its candles is (each candle says
-      // which by its priceSource), and `usd` only while all of them are USD candles.
-      return { referenceAsset: items.some(c => c.priceSource === 'route') ? String(requestedQuoteId) : referenceAsset, items: flag(items.filter(c => Date.parse(c.timestamp) / 1000 <= toSeconds)) }
+      const base = await queryOHLCV(opts.client, {
+        assetId: baseId, startTime: new Date(fromSeconds * 1000), endTime: new Date(toSeconds * 1000), interval,
+      })
+      // The view's window is inclusive of `end_time`; a bucket past the open one
+      // (a replayed head ahead of the price head) is dropped, so the series ends at
+      // the head it is flagged against.
+      const closed = base.filter(candle => Date.parse(`${candle.interval_start.replace(' ', 'T')}Z`) / 1000 <= toSeconds)
+      return { referenceAsset, items: flag(usdCandles(closed)) }
     }
     return cached(key, holdsOpen ? 5_000 : 60_000, async () => {
       // The pair's volume rides along. A window reaching the hours the fold has
@@ -476,10 +505,7 @@ export const pricesRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = as
       // head), so a recent closed bucket is the same with or without the open one.
       const [series, volume] = await Promise.all([
         candles(),
-        queryPairVolume(opts.client, {
-          baseId, quoteId, interval, fromSec: fromSeconds, toSec: toSeconds,
-          ...(reachesPairVolumeTail(toSeconds + seconds, head.time) ? { head } : {}),
-        }),
+        volumeOf(fromSeconds, toSeconds, reachesPairVolumeTail(toSeconds + seconds, head.time) ? { head } : {}),
       ])
       return { referenceAsset: series.referenceAsset, items: withPairVolume(series.items, volume) }
     })

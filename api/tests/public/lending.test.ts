@@ -90,6 +90,7 @@ const FACILITATOR_ROWS: Row[] = [
 function fakeClient(overrides: Record<string, Row[]> = {}) {
   const byMarker: Record<string, Row[]> = {
     '-- mm:reserve-state': RESERVE_ROWS,
+    '-- mm:reserve-cold': [],
     '-- mm:caps:aave': CAP_EVENT_ROWS,
     '-- mm:caps:facilitator': FACILITATOR_ROWS,
     'FROM price_data.prices': [{ asset_id: 5, price: '0.75' }],

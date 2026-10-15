@@ -79,7 +79,7 @@ const NO_PAIR_VOLUME = { pairVolumeUsd: '0', volumeBase: '0', volumeQuote: '0' }
 
 interface Seen { query: string; params: Record<string, unknown> }
 
-function fakeClient(overrides: { candles?: Record<number, Row[]>; cross?: unknown[]; route?: Row[]; coverage?: Row[]; headTime?: number; pairVolume?: Row[]; pairVolumeTail?: Row[]; storedThrough?: number } = {}) {
+function fakeClient(overrides: { candles?: Record<number, Row[]>; cross?: unknown[]; route?: Row[]; coverage?: Row[]; headTime?: number; headBlock?: () => number; pairVolume?: Row[]; pairVolumeTail?: Row[]; storedThrough?: number } = {}) {
   const seen: Seen[] = []
   const byAsset: Record<number, Row[]> = overrides.candles ?? { 5: DOT_CANDLES, 0: HDX_CANDLES }
   const client = {
@@ -90,7 +90,7 @@ function fakeClient(overrides: { candles?: Record<number, Row[]>; cross?: unknow
       if (query.includes('FROM price_data.assets FINAL')) return queryResult(ASSET_ROWS)
       // The price pipeline's head: by default as fresh as the wall clock, so the
       // closed-bucket clamp is the old one unless a test lags the head.
-      if (query.includes('AS b, toUnixTimestamp(block_timestamp) AS t')) return queryResult([{ b: 1_000, t: overrides.headTime ?? Math.floor(Date.now() / 1000) }] as never)
+      if (query.includes('AS b, toUnixTimestamp(block_timestamp) AS t')) return queryResult([{ b: overrides.headBlock?.() ?? 1_000, t: overrides.headTime ?? Math.floor(Date.now() / 1000) }] as never)
       if (query.includes('Bonds.TokenCreated')) return queryResult([])
       // The cross path resolves its block range first, then joins the two legs.
       if (query.includes('min(block_height) AS from_block')) return queryResult([{ from_block: 1, to_block: 1_000 }] as never)
@@ -336,8 +336,9 @@ describe('GET /v1/prices/pair', () => {
         // The cross path reads up to the open bucket's end.
         const cross = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=0&bucket=5m')
         expect(cross.statusCode).toBe(200)
-        const range = probe.seen.find(s => s.query.includes('min(block_height) AS from_block'))
-        expect(range?.params.end_time).toBe('2026-08-17 12:00:00')
+        // Its closed buckets and the open one are two reads; together they end there.
+        const ends = probe.seen.filter(s => s.query.includes('min(block_height) AS from_block')).map(s => String(s.params.end_time))
+        expect(ends.sort().at(-1)).toBe('2026-08-17 12:00:00')
         // A past `to` (hydration-ui's reference-price query) keeps closed buckets only.
         const past = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=5m&to=2026-08-17T11:50:00Z')
         expect((past.json().items as Array<{ closed: boolean }>).every(c => c.closed)).toBe(true)
@@ -510,6 +511,38 @@ describe('GET /v1/prices/pair', () => {
   })
 })
 
+describe('GET /v1/prices/pair open bucket per head', () => {
+  // A new head changes the open bucket only: the closed buckets before it are read
+  // once and shared until a bucket closes, and the open bucket opens at their last close.
+  it('re-reads only the open bucket at a new head and carries it from the closed part', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(Date.parse('2026-08-17T11:59:40Z'))
+      let block = 1_000
+      const probe = fakeClient({ headTime: Date.parse('2026-08-17T11:59:30Z') / 1000, headBlock: () => block })
+      const app2 = await freshApp(probe)
+      try {
+        const url = '/v1/prices/pair?assetIn=5&assetOut=0&bucket=5m'
+        const first = await app2.inject(url)
+        expect(first.statusCode).toBe(200)
+        block = 1_001
+        vi.setSystemTime(Date.parse('2026-08-17T11:59:46Z'))
+        const second = await app2.inject(url)
+        expect(second.statusCode).toBe(200)
+        const starts = probe.seen.filter(s => s.query.includes('min(block_height) AS from_block')).map(s => String(s.params.start_time))
+        const open = '2026-08-17 11:55:00'
+        // The closed buckets once (from the carry lookback), the open bucket per head.
+        expect(starts.filter(t => t < open)).toHaveLength(1)
+        expect(starts.filter(t => t === open)).toHaveLength(2)
+      } finally {
+        await app2.close()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('GET /v1/prices/pair pair volume', () => {
   const t0 = Date.parse('2026-06-24T00:00:00Z') / 1000
   // HDX (0) / DOT (5): the fold keys the pair (lo, hi) = (0, 5); 20.5 of the 120.5
@@ -555,12 +588,15 @@ describe('GET /v1/prices/pair pair volume', () => {
       })
       const app2 = await freshApp(probe)
       try {
-        const res = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=5m&from=2026-08-17T11:50:00Z')
+        // From before the fold's last hour, so the closed buckets read stored rows too.
+        const res = await app2.inject('/v1/prices/pair?assetIn=5&assetOut=10&bucket=5m&from=2026-08-17T10:50:00Z')
         const items = res.json().items as Array<{ timestamp: string; closed: boolean; pairVolumeUsd: string; volumeBase: string; volumeQuote: string }>
         const last = items.at(-1)!
         expect(last).toMatchObject({ timestamp: '2026-08-17T11:55:00.000Z', closed: false, volumeUsd: '1', pairVolumeUsd: '7', volumeBase: '1.5', volumeQuote: '7.01' })
-        const stored = probe.seen.find(s => s.query.includes('-- pair-volume:stored\n'))
-        expect(stored?.params.end).toBe(storedThrough)
+        // One stored read, for the closed buckets, ending where the tail starts; the
+        // open bucket starts after it, so it has no stored rows to read.
+        const stored = probe.seen.filter(s => s.query.includes('-- pair-volume:stored\n'))
+        expect(stored.map(s => [s.params.from, s.params.end])).toEqual([[Date.parse('2026-08-17T10:50:00Z') / 1000, storedThrough]])
         const tail = probe.seen.find(s => s.query.includes('-- pair-volume:tail'))
         expect(tail?.params).toEqual({ from: storedThrough, to: head })
       } finally {

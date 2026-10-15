@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   CAP_FULL_BPS, CAP_OPEN_BPS, capIsFull, reserveCaps,
@@ -115,5 +116,60 @@ describe('reserveCaps', () => {
     ], [facilitator('0xa0', 12_000_000n * E18)])
     expect(caps.get(`${CORE}:${DOT}`)).toEqual({ borrowCap: null, borrowCapSource: null, supplyCap: null })
     expect(caps.get(`${CORE}:${HOLLAR}`)?.borrowCap).toBe(12_000_000n * E18)
+  })
+})
+
+describe('readReserveStateRows', () => {
+  // A fake client answering by marker, recording each statement's parameters.
+  function client(answers: { bounds: Array<{ anchor: number; head: number }>; rows: Array<Array<Record<string, unknown>>> }) {
+    const calls: Array<{ query: string; params?: Record<string, unknown> }> = []
+    let boundsAt = 0, rowsAt = 0
+    return {
+      calls,
+      query: async ({ query, query_params }: { query: string; query_params?: Record<string, unknown> }) => {
+        calls.push({ query, params: query_params })
+        const rows = query.includes('-- mm:reserve-cold:bounds') ? [answers.bounds[Math.min(boundsAt++, answers.bounds.length - 1)]]
+          : query.includes('-- mm:reserve-cold:scaled') ? [{ contract: '0xa', scaled: '5' }]
+          : query.includes('-- mm:reserve-cold:indices') ? [{ pool_address: '0xp', reserve_address: '0xr', li: '1', vbi: '2', bh: 90, bts: '2026-10-15 00:00:00' }]
+          : query.includes('-- mm:reserve-state') ? answers.rows[Math.min(rowsAt++, answers.rows.length - 1)]
+          : []
+        return { json: async () => rows }
+      },
+    }
+  }
+  const row = (anchor: number) => ({ pool_address: '0xp', reserve_address: '0xr', market_key: 'core', atoken: '0xa', block_height: 99, block_timestamp: '2026-10-15 00:00:00', supplied: '1', debt: '0', listed: 1, state_anchor: anchor })
+
+  it('hands the cold part in as parameters, reads only above its cut, and strips the anchor', async () => {
+    const { readReserveStateRows } = await import('../src/services/moneyMarketCaps.ts')
+    const c = client({ bounds: [{ anchor: 10, head: 1_000 }], rows: [[row(10)]] })
+    const rows = await readReserveStateRows(c as never)
+    const { state_anchor: _anchor, ...expected } = row(10)
+    expect(rows).toEqual([expected])
+    const main = c.calls.find(x => x.query.includes('-- mm:reserve-state'))!
+    expect(main.params).toMatchObject({ cut: 850, cold_contracts: ['0xa'], cold_scaled: ['5'], cold_blocks: [90] })
+    const cold = c.calls.find(x => x.query.includes('-- mm:reserve-cold:scaled'))!
+    expect(cold.params).toEqual({ anchor: 10, cut: 850 })
+  })
+
+  it('rebuilds the cold part when the statement sees another anchor', async () => {
+    const { readReserveStateRows } = await import('../src/services/moneyMarketCaps.ts')
+    const c = client({ bounds: [{ anchor: 10, head: 1_000 }, { anchor: 20, head: 1_000 }], rows: [[row(20)], [row(20)]] })
+    await readReserveStateRows(c as never)
+    expect(c.calls.filter(x => x.query.includes('-- mm:reserve-cold:scaled')).map(x => x.params?.anchor)).toEqual([10, 20])
+    expect(c.calls.filter(x => x.query.includes('-- mm:reserve-state')).length).toBe(2)
+  })
+
+  it('takes the tail holders from every party the delta view writes a row under', () => {
+    // The tail's (contract, holder) prefixes are the parties of the logs above the
+    // cut; a holder the materialized view keys a delta under that the candidate set
+    // misses would drop that delta from the total.
+    const mv = readFileSync(new URL('../../clickhouse/schema/003_materialized_views.sql', import.meta.url), 'utf8')
+      .split('\n').find(line => line.includes('atoken_scaled_deltas_by_contract_mv'))!
+    const parties = [...mv.matchAll(/JSONExtractString\(ar, '(\w+)'\)/g)].map(m => m[1]).filter(k => ['onBehalfOf', 'from', 'to'].includes(k))
+    expect(new Set(parties)).toEqual(new Set(['onBehalfOf', 'from', 'to']))
+    const source = readFileSync(new URL('../src/services/moneyMarketCaps.ts', import.meta.url), 'utf8')
+    expect(source).toContain("ARRAY JOIN ['onBehalfOf', 'from', 'to'] AS party")
+    expect(mv).toContain("WHERE (event_name IN ('Mint', 'Burn', 'BalanceTransfer'))")
+    expect(source).toContain("raw_evm_logs.event_name IN ('Mint', 'Burn', 'BalanceTransfer')")
   })
 })
