@@ -62,16 +62,25 @@ describe('DCA failure errors come from the read model', () => {
     // nowhere in api/src, so a guard written that way matched zero things and would
     // have passed over the cross-table lookup it exists to keep out. The positive
     // count pins that the construct is still spelled this way somewhere, so this
-    // stays a real absence rather than another literal that can never match. Five of
-    // the seventeen only look like per-row lookups: the pool-swaps venue check, which
+    // stays a real absence rather than another literal that can never match. Ten of
+    // the twenty-two only look like per-row lookups: the pool-swaps venue check, which
     // confirms the pool id an event carries over the rows one page already read —
     // bounded by that page — the three row reads of a pool account's venue page
     // (venueTradeRows' two sources and venueLiquidityRows), each fetching the keys
     // one located page already holds, and the daily histogram's token arm for the
     // concentrated-liquidity rows (v3HistogramTokenArm), which resolves them to
     // their pool through the venue's own few-thousand-row projection under the
-    // chart's 90-day bound. One subquery per page or per chart, not per row.
-    expect((explorerService.match(/\(block_height, event_index\) IN/g) ?? []).length).toBe(17)
+    // chart's 90-day bound — and the Wormhole NTT ERC-20 legs (getRecentNttErc20Legs),
+    // whose account read keeps only the legs a manager is the other side of (the
+    // managers' own legs, a primary-key prefix of erc20_transfer_deltas) and then reads
+    // just those legs' logs by primary key — and the account's ERC-20 transfer
+    // candidates (erc20TransferCandidateSql), which read its own legs holder-first, then
+    // the non-party holders' rows and the account's own twins by key prefix, and the
+    // survivors' logs by primary key — and the aTokens' transfer candidates
+    // (aTokenTransferCandidateSql) and the chain-wide feeds' sends
+    // (erc20GlobalCandidateSql), whose Currencies twins are read by the candidates' own
+    // keys. One subquery per page or per chart, not per row.
+    expect((explorerService.match(/\(block_height, event_index\) IN/g) ?? []).length).toBe(24)
     expect(schedule).not.toContain('(block_height, event_index) IN')
     // The one raw_events read left in here is DCA.Terminated's point lookup, whose
     // error genuinely has no column. Pinning the count is what keeps that true: a

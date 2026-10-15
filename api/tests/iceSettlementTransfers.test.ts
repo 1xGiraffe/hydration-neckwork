@@ -67,7 +67,7 @@ describe('ICE settlement legs are the intent row, not the owner transfers', () =
     // The viewing exception is keyed on the same list, so adding a pot to it cannot
     // empty that pot's own feed.
     expect(explorerService).toContain('const viewingNoisyPot = accCond.some(a => NOISY_TRANSFER_POTS.includes(a))')
-    expect(explorerService).toContain('if (!accCond.some(a => NOISY_TRANSFER_POTS.includes(a))) {')
+    expect(explorerService).toContain('if (!opts.erc20 && !accCond.some(a => NOISY_TRANSFER_POTS.includes(a))) {')
   })
 
   it('still folds a settlement leg under the intent row when both are assembled', () => {

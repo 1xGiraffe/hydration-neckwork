@@ -63,8 +63,9 @@ describe('the enumerated activity snapshot is one shared read', () => {
   // once, counts it per block, and hands that same object to the page pass rather than
   // letting it read the sources again at a different depth.
   it('reads the snapshot once per plan and hands that array to the page', () => {
-    expect(sites(/await enumeratedActivityRows\(/g)).toBe(1)
-    expect(body('async function planExactActivity')).toContain('const enumerated = await enumeratedActivityRows(accounts, type, from, to)')
+    // Read once, beside the plan's other independent reads.
+    expect(sites(/enumeratedActivityRows\(accounts, /g)).toBe(1)
+    expect(body('async function planExactActivity')).toContain('const [enumerated, withHsm, overBudget, potFilters, erc20Rows] = await Promise.all([\n    enumeratedActivityRows(accounts, type, from, to),')
     expect(body('async function planExactActivity')).toContain('return { arms, enumerated }')
     // The page pass takes it from the plan; the located page is the only place it enters.
     expect(sites(/enumerated: plan\.enumerated/g)).toBe(1)
