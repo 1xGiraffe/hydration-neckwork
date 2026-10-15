@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createDefaultDatabaseClickHouseClient, type ClickHouseClient } from './client.ts'
-import { PARTY_TRANSFERS_SELECT, PARTY_TRANSFERS_WHERE, catchUpTransferDeltasWindow } from '../services/erc20WalletService.ts'
+import { ATOKEN_PARTY_TRANSFERS_SELECT, ATOKEN_PARTY_TRANSFERS_WHERE, PARTY_TRANSFERS_SELECT, PARTY_TRANSFERS_WHERE, catchUpTransferDeltasWindow } from '../services/erc20WalletService.ts'
 
 const DEFAULT_SCHEMA_DIRECTORY = fileURLToPath(new URL('../../../clickhouse/schema/', import.meta.url))
 
@@ -226,6 +226,15 @@ export const DATA_UPGRADES: ReadonlyArray<DataUpgrade> = [
     where: PARTY_TRANSFERS_WHERE,
     fromBlock: 9_300_000,
     select: PARTY_TRANSFERS_SELECT,
+  },
+  {
+    // The aTokens' party transfers (001_tables.sql); the first BalanceTransfer is at block
+    // 6,611,031. No contract set, so no catch-up: the view keeps every market's.
+    table: 'price_data.atoken_party_transfers',
+    source: 'raw_evm_logs',
+    where: ATOKEN_PARTY_TRANSFERS_WHERE,
+    fromBlock: 6_600_000,
+    select: ATOKEN_PARTY_TRANSFERS_SELECT,
   },
   {
     table: 'price_data.hdx_balance_hours',

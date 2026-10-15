@@ -456,7 +456,7 @@ describe('MV upgrade swap', () => {
   // buckets holding Transfer logs INGESTED in the window (± the margin).
   it('wires the erc20 view\'s catch-up to the bounded insert-only-missing fill over the window', async () => {
     const { MV_UPGRADES } = await import('../src/db/schemaBootstrap.ts')
-    const { CATCHUP_INSERT_SQL, CATCHUP_WINDOW_BUCKETS_SQL, CATCHUP_BUCKET_BLOCKS, CATCHUP_WINDOW_MARGIN_SECONDS } = await import('../src/services/erc20WalletService.ts')
+    const { CATCHUP_INSERT_SQL, CATCHUP_INSERT_PARTY_TRANSFERS_SQL, CATCHUP_WINDOW_BUCKETS_SQL, CATCHUP_BUCKET_BLOCKS, CATCHUP_WINDOW_MARGIN_SECONDS } = await import('../src/services/erc20WalletService.ts')
     const u = MV_UPGRADES.find(m => m.name === 'price_data.erc20_transfer_deltas_mv')!
     const A = '0x531a654d1696ed52e7275a8cede955e82620f99a'
     const B = '0x6a21891db0940491603f3cca0a9f4dba4c6e810c'
@@ -469,7 +469,11 @@ describe('MV upgrade swap', () => {
         expect(query).toBe(CATCHUP_WINDOW_BUCKETS_SQL)
         return { json: async () => [{ contract: A, bucket: '154' }, { contract: B, bucket: 154 }] }
       }),
-      command: vi.fn(async ({ query, query_params }: { query: string; query_params: Record<string, unknown> }) => { expect(query).toBe(CATCHUP_INSERT_SQL); inserts.push(query_params) }),
+      // Every bucket fills the deltas and then their block-first twin, same keys.
+      command: vi.fn(async ({ query, query_params }: { query: string; query_params: Record<string, unknown> }) => {
+        expect([CATCHUP_INSERT_SQL, CATCHUP_INSERT_PARTY_TRANSFERS_SQL]).toContain(query)
+        if (query === CATCHUP_INSERT_SQL) inserts.push(query_params)
+      }),
     } as unknown as ClickHouseClient
     const summary = await u.catchUp(client, { from: '2026-10-05 12:00:00', to: '2026-10-05 12:00:07' })
     expect(params[1]).toEqual({ cs: [A, B], size: CATCHUP_BUCKET_BLOCKS, from: '2026-10-05 12:00:00', to: '2026-10-05 12:00:07', margin: CATCHUP_WINDOW_MARGIN_SECONDS })

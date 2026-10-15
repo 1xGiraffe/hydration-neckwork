@@ -145,6 +145,21 @@ CREATE TABLE IF NOT EXISTS price_data.erc20_wallet_balances (`account_id` String
 -- and topped up by the wallet refresher's catch-up for a contract that joined the set late
 -- (erc20WalletService.ts).
 CREATE TABLE IF NOT EXISTS price_data.erc20_party_transfers (`contract_address` LowCardinality(String), `from_address` String, `to_address` String, `amount` UInt256, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index) SETTINGS index_granularity = 8192;
+-- The money-market aTokens' transfers between two parties that can each be an ordinary
+-- account (Aave's BalanceTransfer: the aToken moving between holders, not a supply or a
+-- withdrawal), block-first and one row per log, for the same readers as
+-- erc20_party_transfers: an aToken is a registry Erc20 asset whose EVM-only moves no
+-- pallet event reports. The log carries the SCALED amount and the reserve's liquidity
+-- index; `amount` is Aave's rayMul of the two (half-up), the aToken units the holders
+-- see — it equals the Transfer log Aave emits beside it for 45,492 of the 45,831 rows
+-- and is 1 wei off for the rest (the transfer's own rayDiv round trip). Without the
+-- fixed non-parties (as erc20_party_transfers) a BalanceTransfer is 0.8% of them: 45.8k
+-- rows, 2.5 MiB. Account pages read it by party, so each party column carries a bloom
+-- filter over 1,024-row granules (one granule of 51 for a two-account read). Every
+-- BalanceTransfer is kept whatever its contract, so a market listed later needs no
+-- catch-up; readers name the asset from the registry. Fed by atoken_party_transfers_mv,
+-- back-filled by schemaBootstrap's DATA_UPGRADES.
+CREATE TABLE IF NOT EXISTS price_data.atoken_party_transfers (`contract_address` LowCardinality(String), `from_address` String, `to_address` String, `scaled_amount` UInt256, `liquidity_index` UInt256, `amount` UInt256, `block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `ingested_at` DateTime, INDEX from_bf from_address TYPE bloom_filter(0.01) GRANULARITY 1, INDEX to_bf to_address TYPE bloom_filter(0.01) GRANULARITY 1) ENGINE = ReplacingMergeTree(ingested_at) PARTITION BY toYYYYMM(block_timestamp) ORDER BY (block_height, event_index) SETTINGS index_granularity = 1024;
 -- The contracts erc20_transfer_deltas_mv captures and erc20_wallet_balances is kept
 -- for: every registry asset with a local contract (assets.evm_address) that is not a
 -- money-market aToken (aTokens are reconstructed from atoken_scaled_deltas). Derived,
