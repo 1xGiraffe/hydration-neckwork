@@ -15153,11 +15153,10 @@ const EVM_CHAIN_META: Record<string, { name: string; explorer: string }> = {
   10: { name: 'Optimism', explorer: 'https://optimistic.etherscan.io' },
   56: { name: 'BNB Chain', explorer: 'https://bscscan.com' },
   137: { name: 'Polygon', explorer: 'https://polygonscan.com' },
-  // Robinhood, an Arbitrum Orbit L2 settling on Ethereum. Robinscan over the
-  // chain's Blockscout: both answer /tx/ and /address/, and this is the one the
-  // chain is read on. Checked against a real transaction, and against a fabricated
-  // hash that it does NOT render — a 200 alone proves nothing on a single-page app.
-  4663: { name: 'Robinhood', explorer: 'https://robinscan.io' },
+  // Robinhood, an Arbitrum Orbit L2 settling on Ethereum: the chain's own Blockscout
+  // (/tx/ and /address/). Checked by rendering a real contract (the bridged WETH) —
+  // a 200 alone proves nothing on a single-page app.
+  4663: { name: 'Robinhood', explorer: 'https://robinhoodchain.blockscout.com' },
   // HyperEVM, Hyperliquid's own EVM chain (Wormhole 47; HYPE crosses it by NTT).
   999: { name: 'HyperEVM', explorer: 'https://hyperevmscan.io' },
 }

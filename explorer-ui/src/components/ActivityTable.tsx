@@ -68,7 +68,7 @@ const EXPLORER_SITES: [string, string][] = [
   ['neuroweb.ai', 'NeuroWeb'],
   ['blockchair.com', 'Blockchair'],
   ['orbmarkets.io', 'Orb'],
-  ['robinscan.io', 'Robinscan'],
+  ['robinhoodchain.blockscout.com', 'Blockscout'],
   ['etherscan.io', 'Etherscan'],
   ['basescan.org', 'Basescan'],
   ['arbiscan.io', 'Arbiscan'],

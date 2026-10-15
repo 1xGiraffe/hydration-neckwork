@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { decodeNttReceivedMessage, nttJourneyMessageId, decodeNttTransferSent, nttDestination, nttMinterLegExclusionSql, nttOriginChain, ocnChainName, originTxExplorerUrl } from '../src/services/explorerService.ts'
+import { decodeNttReceivedMessage, nttJourneyMessageId, decodeNttTransferSent, nttDestination, nttLegExclusionSql, nttOriginChain, ocnChainName, originTxExplorerUrl } from '../src/services/explorerService.ts'
 
 // A journey's ends are named by Ocelloids URNs, and a bridge can put either end on a
 // chain this app has no other reason to know. Two things then go wrong quietly: the
@@ -27,7 +27,7 @@ describe('ocnChainName', () => {
   it('names Robinhood and links its own explorer', () => {
     expect(ocnChainName('urn:ocn:ethereum:4663')).toBe('Robinhood')
     expect(originTxExplorerUrl('urn:ocn:ethereum:4663', '0x' + 'ab'.repeat(32)))
-      .toBe(`https://robinscan.io/tx/0x${'ab'.repeat(32)}`)
+      .toBe(`https://robinhoodchain.blockscout.com/tx/0x${'ab'.repeat(32)}`)
   })
 
   // Sui identifies itself with a hex digest, which the old numeric-only URN pattern
@@ -176,33 +176,41 @@ describe('nttOriginChain', () => {
   })
 })
 
-// The minter-leg exclusion every transfer read site and the transfer count arm share:
-// a transfer of an NTT asset TO its registered minter is that asset's outbound send,
-// which the feed renders as a cross-chain row, so the transfer family must not also
-// count or show it. Stated as one SQL fragment so the sites cannot drift.
-describe('nttMinterLegExclusionSql', () => {
-  const minters = new Map([
-    [20, '0x45544800b5cef790d52a57fa619ed96edd64c5328f3dcfb70000000000000000'],
-    [18, '0x45544800cfd576f88c90844aebf45378fd09931281d8b14d0000000000000000'],
-  ])
+// The manager-leg exclusion every transfer read site and the transfer count arm share:
+// a transfer of an NTT asset TO its manager is that asset's outbound send, and one FROM
+// a locking manager its inbound release — both rendered as cross-chain rows, so the
+// transfer family must not also count or show them. Stated as one SQL fragment so the
+// sites cannot drift.
+describe('nttLegExclusionSql', () => {
+  const managers = [
+    { assetId: 20, manager: '0xb5cef790d52a57fa619ed96edd64c5328f3dcfb7', account: '0x45544800b5cef790d52a57fa619ed96edd64c5328f3dcfb70000000000000000', mode: 'burn' as const, erc20: null },
+    { assetId: 18, manager: '0xcfd576f88c90844aebf45378fd09931281d8b14d', account: '0x45544800cfd576f88c90844aebf45378fd09931281d8b14d0000000000000000', mode: 'burn' as const, erc20: null },
+    // HDX is LOCKED on Hydration against Robinhood: no minter registration, and its
+    // release is a transfer out of the manager's custody.
+    { assetId: 0, manager: '0x16ac5b8d9078ed4cf5a522f907fd9ddb6c8841f1', account: '0x4554480016ac5b8d9078ed4cf5a522f907fd9ddb6c8841f10000000000000000', mode: 'lock' as const, erc20: null },
+  ]
 
-  it('excludes exactly the (asset, minter) pairs', () => {
-    const sql = nttMinterLegExclusionSql(minters)
+  it('excludes exactly the (asset, manager) pairs, sends and releases alike', () => {
+    const sql = nttLegExclusionSql(managers)
     expect(sql).toContain('NOT IN')
     expect(sql).toContain("(20,'0x45544800b5cef790d52a57fa619ed96edd64c5328f3dcfb70000000000000000')")
     expect(sql).toContain("(18,'0x45544800cfd576f88c90844aebf45378fd09931281d8b14d0000000000000000')")
+    expect(sql).toContain("(0,'0x4554480016ac5b8d9078ed4cf5a522f907fd9ddb6c8841f10000000000000000')")
     expect(sql).toContain('toUInt32(asset_id)')
-    expect(sql).toContain('lower(to_account)')
+    expect(sql).toContain('lower(to_account)) NOT IN')
+    // from_account is lowercase in the read models, so it is compared as given.
+    expect(sql).toContain('(toUInt32(asset_id), from_account) NOT IN')
   })
 
   it('takes per-site column expressions', () => {
-    const sql = nttMinterLegExclusionSql(minters, "JSONExtractInt(args_json,'currencyId')", "JSONExtractString(args_json,'to')")
+    const sql = nttLegExclusionSql(managers, "JSONExtractInt(args_json,'currencyId')", "JSONExtractString(args_json,'to')", "lower(JSONExtractString(args_json,'from'))")
     expect(sql).toContain("toUInt32(JSONExtractInt(args_json,'currencyId'))")
     expect(sql).toContain("lower(JSONExtractString(args_json,'to'))")
+    expect(sql).toContain("lower(JSONExtractString(args_json,'from'))) NOT IN")
   })
 
-  it('excludes nothing when no minter is registered', () => {
-    expect(nttMinterLegExclusionSql(new Map())).toBe('')
+  it('excludes nothing when no manager is known', () => {
+    expect(nttLegExclusionSql([])).toBe('')
   })
 })
 
