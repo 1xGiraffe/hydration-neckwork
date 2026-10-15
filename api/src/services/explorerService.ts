@@ -40,7 +40,7 @@ import { USER_REVENUE_DISPLAY_STREAMS, userRevenueDisplayStream, type HolderClas
 import { tagForAccount, taggedAccountByH160, taggedTruncationPairs, ammPoolAccounts, getTag as getTagRecord, allTags, economicModuleAccounts, showsExHdxValue, INCENTIVES_REWARD_POT, lbpPools, stableswapPoolAccount } from './tagService.ts'
 import { locateVenuePage, poolVenueForScope, venueKeysUnionSql, venueLiquidityEvents, venueLiquidityKeysSql, venueTradeKeysSql, venueTradeSource, walkVenueRows, type PoolVenue, type VenueKey, type VenueKeyReader, type VenueSourceSql } from './poolVenue.ts'
 import { identityForAccount, searchIdentitiesByDisplay, type AccountIdentity } from './identityService.ts'
-import { normalizeAddress, hydrationAddress, polkadotAddress, reservedH160AccountId, type NormalizedAddress } from './addressIdentity.ts'
+import { normalizeAddress, hydrationAddress, polkadotAddress, reservedH160AccountId, evmAddressOfAccount, type NormalizedAddress } from './addressIdentity.ts'
 import { accountIcon, emojisMatchingName, emojiNameFor, parseSuffixEmojiQuery } from './omniwatchIdentity.ts'
 import { encodeAddress, base58Encode } from '@polkadot/util-crypto'
 import { hexToU8a } from '@polkadot/util'
@@ -63,6 +63,7 @@ import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent
 import { canSkipRepublish } from './snapshotRepublish.ts'
 import { ICE_POT_ACCOUNT as ICE_SETTLEMENT_POT, readIceSettlements, type IceSettlementAmounts } from './iceSettlement.ts'
 import { FAST_RELAY_FILLED_TOPIC, FastRelayIndexStore, fastRelayFeeRaw, fastRelayLegExclusionSql, isFastRelayLeg, type FastRelayDeposit, type FastRelayFill, type FastRelayIndex, type FastRelayLeg } from './wormholeFastRelay.ts'
+import { ERC20_TRANSFER_TOPIC, buildNttManagers, decodeErc20Transfer, type Erc20Transfer, nttErc20ManagerOf, nttLegExclusionSql, nttLegPairsSql, nttManagerAccount, nttManagerH160, nttManagerOfLeg, resolveLockManagers, type NttLockObservation, type NttManagerRef, type ResolvedLockManager } from './wormholeNttManagers.ts'
 import { createHash } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { resolveModuleError } from './runtimeErrorNames.ts'
@@ -3538,12 +3539,13 @@ async function getRecentTransfers(limit: number, from?: string, to?: string, off
     const postUsdFilter = filters.min != null && filters.unit !== 'token'
     const amountFilter = eventValueFilterSql('asset_id', 'amount', 'block_timestamp',
       postUsdFilter ? { ...filters, min: undefined, unit: undefined } : filters, prices, 'transfer_price')
-    // A transfer of an NTT asset to its minter is that asset's outbound Wormhole send —
-    // a cross-chain row, not a transfer (see getRecentNttOut, which renders exactly the
-    // rows this predicate removes).
+    // A transfer of an NTT asset to its manager is that asset's outbound Wormhole send,
+    // and one from a locking manager its inbound release — cross-chain rows, not
+    // transfers (see getRecentNttOut/getRecentNttIn, which render exactly the rows this
+    // predicate removes).
     // A transfer out of the Wormhole Relay's pool in a fill block is a fast delivery —
     // a cross-chain row (getRecentFastRelayIn), by the same one-rule-two-sides split.
-    const nttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts()) + ' ' + fastRelayLegExclusionSql(await fastRelayIndex())
+    const nttExclusion = nttLegExclusionSql(await nttManagers()) + ' ' + fastRelayLegExclusionSql(await fastRelayIndex())
     // nonPlumbing drops the pure-plumbing legs in SQL — the block page's own rule
     // (nonPlumbingTransferLegSql): noisy swap/fee pots, XCM sovereigns, AMM pools,
     // money-market reserves and the hook-phase fees into the treasury. Every other
@@ -15499,16 +15501,13 @@ export function nttOriginChain(sourceChain: number): Pick<ActivityRow, 'fromChai
   return { fromChain: chain, fromParachainId: paraId }
 }
 
-// A transfer of an NTT asset TO its registered minter is that asset's outbound send —
-// the feed renders it as a cross-chain row, so the transfer family must neither show
-// nor count it. One shared fragment, mirroring mmStakingPlumbingExclusionSql: applied
-// at every transfer read site AND inside the transfer count arm's candidates, so the
-// rows a page renders and the rows its total counts can never be a different set.
-export function nttMinterLegExclusionSql(minters: Map<number, string>, assetExpr = 'asset_id', toExpr = 'to_account'): string {
-  if (!minters.size) return ''
-  const pairs = [...minters].map(([assetId, account]) => `(${assetId},'${account}')`).join(',')
-  return `AND (toUInt32(${assetExpr}), lower(${toExpr})) NOT IN (${pairs})`
-}
+// A transfer of an NTT asset TO its manager (a send) or FROM it (a locking manager's
+// release) is that asset's cross-chain row's own leg, so the transfer family must
+// neither show nor count it. One shared fragment (nttLegExclusionSql over
+// nttManagers()), mirroring mmStakingPlumbingExclusionSql: applied at every transfer
+// read site AND inside the transfer count arm's candidates, so the rows a page renders
+// and the rows its total counts can never be a different set.
+export { nttLegExclusionSql }
 
 // assetId → the account its NTT minter burns from. Eleven rows today and one per asset
 // ever listed, so it is cached rather than joined into every read; the latest
@@ -15545,8 +15544,87 @@ export function nttMinterH160(account: string): string {
   return '0x' + account.slice(10, 50)
 }
 
+// Every NTT manager the explorer classifies by — the burning ones from the minter
+// registry above, and the LOCKING ones, which the registry never names (HDX and
+// HOLLAR are locked here and minted on Robinhood; see wormholeNttManagers.ts). A
+// locking manager is found from our own index, never a chain read: every contract
+// that logged TransferSent/TransferRedeemed and is not a minter is a candidate, and
+// the asset it locks is the one its own NTT extrinsics move to or from its custody
+// (a pallet transfer to its widened account, or an ERC-20 Transfer log to/from its
+// H160). A manager's token is immutable, so a resolved manager is memoized for the
+// life of the process and only unresolved candidates are ever re-read — a few
+// primary-key lookups of at most LOCK_SAMPLE_EXTRINSICS extrinsics each.
+const LOCK_SAMPLE_EXTRINSICS = 16
+const lockManagerMemo = new Map<string, ResolvedLockManager>()
+let nttManagerCache: { at: number; refs: NttManagerRef[] } | null = null
+export async function nttManagers(): Promise<NttManagerRef[]> {
+  if (nttManagerCache && Date.now() - nttManagerCache.at < 300_000) return nttManagerCache.refs
+  const minters = await nttMinterAccounts()
+  try {
+    const minterManagers = new Set([...minters.values()].map(a => nttMinterH160(a).toLowerCase()))
+    const res = await client.query({
+      query: `SELECT manager, groupArray(${LOCK_SAMPLE_EXTRINSICS})(tuple(block_height, xi)) AS pairs
+              FROM (
+                SELECT DISTINCT contract_address AS manager, block_height, assumeNotNull(extrinsic_index) AS xi
+                FROM price_data.wormhole_ntt_logs
+                WHERE topic0 IN ('${NTT_TRANSFER_SENT_TOPIC}','${NTT_TRANSFER_REDEEMED_TOPIC}') AND extrinsic_index IS NOT NULL
+              )
+              GROUP BY manager`,
+      format: 'JSONEachRow',
+    })
+    const candidates = (await res.json<{ manager: string; pairs: [number, number][] }>())
+      .map(r => ({ manager: r.manager.toLowerCase(), pairs: r.pairs.map(([b, x]) => [Number(b), Number(x)] as [number, number]) }))
+      .filter(c => /^0x[0-9a-f]{40}$/.test(c.manager) && !minterManagers.has(c.manager) && !lockManagerMemo.has(c.manager))
+    if (candidates.length) {
+      const extrinsicsOf = new Map<string, Set<string>>()
+      for (const c of candidates) extrinsicsOf.set(c.manager, new Set(c.pairs.map(([b, x]) => `${b}:${x}`)))
+      const tuples = [...new Set(candidates.flatMap(c => c.pairs.map(([b, x]) => `(${b},${x})`)))].join(',')
+      const accounts = candidates.map(c => `'${nttManagerAccount(c.manager)}'`).join(',')
+      const [palletRes, evmRes, erc20Assets] = await Promise.all([
+        client.query({
+          query: `SELECT DISTINCT account, asset_id, block_height, assumeNotNull(extrinsic_index) AS xi
+                  FROM price_data.account_transfer_activity
+                  WHERE account IN (${accounts}) AND (block_height, extrinsic_index) IN (${tuples})`,
+          format: 'JSONEachRow',
+        }),
+        client.query({
+          query: `SELECT DISTINCT block_height, assumeNotNull(extrinsic_index) AS xi, lower(contract_address) AS token, topics, data
+                  FROM price_data.raw_evm_logs
+                  WHERE (block_height, extrinsic_index) IN (${tuples}) AND topic0 = '${ERC20_TRANSFER_TOPIC}'`,
+          format: 'JSONEachRow',
+        }),
+        ensureErc20WalletAssets().catch(() => []),
+      ])
+      const assetOfToken = new Map(erc20Assets.map(a => [a.contract.toLowerCase(), a.assetId]))
+      const observations: NttLockObservation[] = []
+      for (const r of await palletRes.json<{ account: string; asset_id: number; block_height: number; xi: number }>()) {
+        const manager = nttManagerH160(r.account)
+        const extrinsic = `${r.block_height}:${r.xi}`
+        if (extrinsicsOf.get(manager)?.has(extrinsic)) observations.push({ manager, assetId: Number(r.asset_id), extrinsic })
+      }
+      for (const r of await evmRes.json<{ block_height: number; xi: number; token: string; topics: string[]; data: string }>()) {
+        const t = decodeErc20Transfer(r.topics, r.data)
+        const assetId = assetOfToken.get(r.token)
+        if (!t || assetId == null) continue
+        const extrinsic = `${r.block_height}:${r.xi}`
+        for (const manager of new Set([t.from, t.to])) {
+          if (extrinsicsOf.get(manager)?.has(extrinsic)) observations.push({ manager, assetId, extrinsic, erc20: r.token })
+        }
+      }
+      for (const [manager, resolved] of resolveLockManagers(observations)) lockManagerMemo.set(manager, resolved)
+    }
+  } catch (err) {
+    // The minter registry still classifies every burning manager; a failed lock read
+    // keeps whatever locking managers this process already resolved.
+    console.error('[Explorer] NTT locking-manager read failed:', err instanceof Error ? err.message : err)
+  }
+  const refs = buildNttManagers(minters, lockManagerMemo)
+  nttManagerCache = { at: Date.now(), refs }
+  return refs
+}
+
 interface NttSentLog { manager: string; sent: NttTransferSent; claimed?: boolean }
-interface NttExtrinsicLogs {
+export interface NttExtrinsicLogs {
   sent: NttSentLog[]
   redeemed: Set<string>     // manager H160s that logged TransferRedeemed here
   sourceChains: number[]    // one entry per decoded ReceivedMessage
@@ -15556,6 +15634,27 @@ interface NttExtrinsicLogs {
   // WETH paid to the Wormhole Executor (RequestForExecution.amtPaid), one per request —
   // the relayer fee of a send delivered without the sender redeeming it.
   executorPaid: string[]
+}
+
+// One extrinsic's NTT logs (in event order), decoded into what its rows are built from.
+// The feeds read them through nttLogsFor; the extrinsic page from its own EVM.Log events.
+export function decodeNttExtrinsicLogs(logs: Iterable<{ contract: string; topics: string[]; data: string }>): NttExtrinsicLogs {
+  const entry: NttExtrinsicLogs = { sent: [], redeemed: new Set<string>(), sourceChains: [], journeyIds: [], executorPaid: [] }
+  for (const log of logs) {
+    const contract = log.contract.toLowerCase()
+    if (log.topics[0]?.toLowerCase() === NTT_TRANSFER_REDEEMED_TOPIC) entry.redeemed.add(contract)
+    const paid = decodeExecutorRequest(log.topics, log.data)
+    if (paid) entry.executorPaid.push(paid.amountPaid)
+    const sent = decodeNttTransferSent(log.topics, log.data)
+    if (sent) entry.sent.push({ manager: contract, sent })
+    const received = decodeNttReceivedMessage(log.topics, log.data)
+    if (received) {
+      entry.sourceChains.push(received.sourceChain)
+      const journeyId = nttJourneyMessageId(received)
+      if (journeyId) entry.journeyIds.push(journeyId)
+    }
+  }
+  return entry
 }
 
 // The NTT logs of the given `block:extrinsic` pairs, decoded — one bounded
@@ -15608,24 +15707,13 @@ async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtri
     })
     return res.json<{ block_height: number; event_index: number; extrinsic_index: number; contract: string; topics: string[]; data: string }>()
   })
-  const fetched = new Map<string, NttExtrinsicLogs>()
-  for (const log of chunks.flat()) {
+  const grouped = new Map<string, { contract: string; topics: string[]; data: string }[]>()
+  for (const log of chunks.flat().sort((x, y) => x.block_height - y.block_height || x.event_index - y.event_index)) {
     const key = `${log.block_height}:${log.extrinsic_index}`
-    const entry = fetched.get(key) ?? { sent: [], redeemed: new Set<string>(), sourceChains: [], journeyIds: [], executorPaid: [] }
-    const topic0 = log.topics[0]?.toLowerCase()
-    if (topic0 === NTT_TRANSFER_REDEEMED_TOPIC) entry.redeemed.add(log.contract)
-    const paid = decodeExecutorRequest(log.topics, log.data)
-    if (paid) entry.executorPaid.push(paid.amountPaid)
-    const sent = decodeNttTransferSent(log.topics, log.data)
-    if (sent) entry.sent.push({ manager: log.contract, sent })
-    const received = decodeNttReceivedMessage(log.topics, log.data)
-    if (received) {
-      entry.sourceChains.push(received.sourceChain)
-      const journeyId = nttJourneyMessageId(received)
-      if (journeyId) entry.journeyIds.push(journeyId)
-    }
-    fetched.set(key, entry)
+    grouped.set(key, [...(grouped.get(key) ?? []), log])
   }
+  const fetched = new Map<string, NttExtrinsicLogs>()
+  for (const [key, logs] of grouped) fetched.set(key, decodeNttExtrinsicLogs(logs))
   for (const key of keys) {
     const entry = fetched.get(key) ?? null
     if (entry) out.set(key, nttLogsCopy(entry))
@@ -15641,36 +15729,107 @@ async function nttLogsFor(pairs: Iterable<string>): Promise<Map<string, NttExtri
   return out
 }
 
-// Outbound NTT sends as cross-chain rows. The send's on-chain trace is an ordinary
-// transfer of the asset TO its registered minter (then a burn from it), so membership
-// is the same `(asset_id, to_account)` predicate the transfer family EXCLUDES by
-// (nttMinterLegExclusionSql) — one rule, two sides, so a leg is always exactly one of
-// the two families. The account-first read model indexes both parties, so the global
-// feed reads the MINTERS' own rows (a primary-key read of just the sends) and an
-// account page reads the viewed accounts'.
-//
-// The far end comes from the manager's TransferSent log, matched per extrinsic by
-// (manager, amount) with claim-once semantics for batched sends; a send whose log is
-// missing or ambiguous keeps an unresolved destination rather than a plausible one.
-async function getRecentNttOut(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
+// One NTT transfer leg on Hydration, whichever way it was recorded: a pallet transfer
+// (account_transfer_activity) or, for a locking manager of an Erc20 asset, the token's
+// ERC-20 Transfer log. `who` is the user's side; `manager` the bare manager H160.
+export interface NttLeg {
+  block_height: number
+  ts: string
+  event_index: number
+  extrinsic_index: number | null
+  who: string | null
+  amount: string
+  asset_id: number
+  manager: string
+}
+
+// A send as its cross-chain row. The far end comes from the manager's TransferSent log,
+// matched per extrinsic by (manager, amount) with claim-once semantics for batched
+// sends; a send whose log is missing or ambiguous keeps an unresolved destination
+// rather than a plausible one.
+export function nttSendRow(leg: NttLeg, entry: NttExtrinsicLogs | undefined, prices: Map<number, PriceInfo>): ActivityRow {
+  const a = asset(leg.asset_id)
+  const row: ActivityRow = {
+    type: 'xcm', blockHeight: leg.block_height, timestamp: leg.ts, eventIndex: leg.event_index, extrinsicIndex: leg.extrinsic_index,
+    who: leg.who ? accountRef(leg.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
+    amount: leg.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, leg.amount, a.decimals),
+    xcmDir: 'out', bridge: 'Wormhole', linkBlock: leg.block_height, linkIndex: leg.extrinsic_index,
+  }
+  const candidates = (entry?.sent ?? []).filter(s => s.manager === leg.manager && !s.claimed)
+  const match = candidates.find(s => s.sent.amount === leg.amount) ?? (candidates.length === 1 ? candidates[0] : undefined)
+  if (match) {
+    match.claimed = true
+    const dest = nttDestination(match.sent)
+    const ref = dest ? externalChainRef(dest.urn, dest.account) : null
+    if (ref) {
+      row.destChain = ref.chain
+      row.destParachainId = ref.paraId
+      row.destAccount = ref.account
+    }
+    const remote = wormholeRemoteToken(leg.asset_id, match.sent.recipientChain)
+    if (remote) row.remoteToken = remote
+  }
+  // The Executor payment is claimed once per extrinsic, by the first send built
+  // from it (a batch of several sends and one request is not a shape the SDK builds).
+  const paid = entry?.executorPaid.shift()
+  if (paid) row.xcmFees = [xcmFeeLeg('relayer', EVM_GAS_ASSET_ID, paid, prices)]
+  return row
+}
+
+// An arrival as its cross-chain row — a burning manager's mint or a locking manager's
+// release alike. The source CHAIN is the transceiver's ReceivedMessage word; the sending
+// USER is in the NTT payload (calldata, never logged), so no source account is shown — a
+// named chain with no pill is honest, an inferred pill would not be.
+export function nttArrivalRow(leg: NttLeg, entry: NttExtrinsicLogs | undefined, prices: Map<number, PriceInfo>): ActivityRow {
+  const a = asset(leg.asset_id)
+  // One message names one chain; a batch of redeems from different chains names none
+  // for this row rather than guessing which message delivered it.
+  const chains = [...new Set(entry?.sourceChains ?? [])]
+  const origin = chains.length === 1 ? nttOriginChain(chains[0]) : null
+  // The VAA this arrival redeemed, which is how Ocelloids correlates the journey that
+  // carried it — and the only key that can name the sender on the far chain, since an
+  // NTT arrival carries no XCM message id. A redeem batch naming several messages names
+  // no single journey, exactly as for the chain.
+  const journeys = [...new Set(entry?.journeyIds ?? [])]
+  const remote = chains.length === 1 ? wormholeRemoteToken(leg.asset_id, chains[0]) : null
+  return {
+    type: 'xcm', blockHeight: leg.block_height, timestamp: leg.ts, eventIndex: leg.event_index, extrinsicIndex: leg.extrinsic_index,
+    who: leg.who ? accountRef(leg.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
+    amount: leg.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, leg.amount, a.decimals),
+    xcmDir: 'in', bridge: 'Wormhole', ...(origin ?? {}), linkBlock: leg.block_height, linkIndex: leg.extrinsic_index,
+    ...(journeys.length === 1 ? { messageId: journeys[0] } : {}),
+    ...(remote ? { remoteToken: remote } : {}),
+  }
+}
+
+// NTT legs recorded as pallet transfers, as cross-chain rows: a send is a transfer of
+// the asset TO its manager (then a burn, or held in a locking manager's custody), a
+// locking manager's arrival a transfer FROM it. Membership is the same (asset, manager
+// account) predicate the transfer family EXCLUDES by (nttLegExclusionSql) — one rule,
+// two sides, so a leg is always exactly one of the two families. The account-first read
+// model indexes both parties, so the global feed reads the MANAGERS' own rows (a
+// primary-key read of just their legs) and an account page reads the viewed accounts'.
+async function getRecentNttPalletLegs(dir: 'out' | 'in', limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
-  return cached(`explorer:ntt-out:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+  return cached(`explorer:ntt-pallet-${dir}:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     if (acctList === "''") return []
-    const minters = await nttMinterAccounts()
-    if (!minters.size) return []
-    const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
-    const scope = [...minters.keys()].filter(id => tokenIds == null || tokenIds.includes(id))
+    const scope = (await nttManagers()).filter(m => tokenIds == null || tokenIds.includes(m.assetId))
     if (!scope.length) return []
-    const pairsSql = scope.map(id => `(${id},'${minters.get(id)!}')`).join(',')
-    const keyList = acctList ?? scope.map(id => `'${minters.get(id)!}'`).join(',')
+    const prices = await ensurePrices()
+    const pairsSql = nttLegPairsSql(scope)
+    const keyList = acctList ?? [...new Set(scope.map(m => `'${m.account}'`))].join(',')
+    // `from_account` is lowercase in this read model; `to_account` is compared lowered,
+    // exactly as nttLegExclusionSql spells both.
+    const membership = dir === 'out' ? `(asset_id, lower(to_account)) IN (${pairsSql})` : `(asset_id, from_account) IN (${pairsSql})`
     const want = offset + limit
     const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
       const res = await client.query({
-        // The pallet mirrors of one send (Currencies.Transferred over Tokens.Transfer)
-        // collapse to the most specific event, exactly as the transfer feed dedupes —
-        // so the row keeps the (block, eventIndex) identity the leg had as a transfer.
+        // The pallet mirrors of one transfer (Currencies.Transferred over Tokens.Transfer
+        // or Balances.Transfer) collapse to the most specific event, exactly as the
+        // transfer feed dedupes — so the row keeps the (block, eventIndex) identity the
+        // leg had as a transfer.
         query: `SELECT block_height, ts, event_index, extrinsic_index, from_acc, to_acc, amount, asset_id
                 FROM (
                   SELECT DISTINCT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name,
@@ -15678,46 +15837,26 @@ async function getRecentNttOut(limit: number, from?: string, to?: string, accoun
                     multiIf(event_name = 'Currencies.Transferred', 3, event_name = 'Tokens.Transfer', 2, 1) AS priority
                   FROM price_data.account_transfer_activity
                   WHERE ${pageBound} AND account IN (${keyList})
-                    AND (asset_id, lower(to_account)) IN (${pairsSql})
+                    AND ${membership}
                   ORDER BY block_height DESC, priority DESC, event_index DESC
                   LIMIT 1 BY block_height, extrinsic_index, asset_id, lower(from_acc), lower(to_acc), amount
                 )
                 ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}`,
         query_params: { limit: pageLimit }, format: 'JSONEachRow',
       })
-      const legs = await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; from_acc: string; to_acc: string; amount: string; asset_id: number }>()
-      if (!legs.length) return []
-      const logs = await nttLogsFor(legs.filter(l => l.extrinsic_index != null).map(l => `${l.block_height}:${l.extrinsic_index}`))
+      const raw = await res.json<{ block_height: number; ts: string; event_index: number; extrinsic_index: number | null; from_acc: string; to_acc: string; amount: string; asset_id: number }>()
+      if (!raw.length) return []
+      const logs = await nttLogsFor(raw.filter(l => l.extrinsic_index != null).map(l => `${l.block_height}:${l.extrinsic_index}`))
       const out: ActivityRow[] = []
-      for (const leg of legs) {
-        const a = asset(leg.asset_id)
-        const row: ActivityRow = {
-          type: 'xcm', blockHeight: leg.block_height, timestamp: leg.ts, eventIndex: leg.event_index, extrinsicIndex: leg.extrinsic_index,
-          who: leg.from_acc ? accountRef(leg.from_acc) : null, to: null, asset: a, assetIn: null, assetOut: null,
-          amount: leg.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, leg.amount, a.decimals),
-          xcmDir: 'out', bridge: 'Wormhole', linkBlock: leg.block_height, linkIndex: leg.extrinsic_index,
+      for (const r of raw) {
+        const manager = nttManagerOfLeg(scope, Number(r.asset_id), dir === 'out' ? r.to_acc : r.from_acc)
+        if (!manager) continue
+        const leg: NttLeg = {
+          block_height: r.block_height, ts: r.ts, event_index: r.event_index, extrinsic_index: r.extrinsic_index,
+          who: (dir === 'out' ? r.from_acc : r.to_acc) || null, amount: r.amount, asset_id: Number(r.asset_id), manager: manager.manager,
         }
-        const manager = nttMinterH160(minters.get(leg.asset_id) ?? '')
-        const entry = leg.extrinsic_index != null ? logs.get(`${leg.block_height}:${leg.extrinsic_index}`) : undefined
-        const candidates = (entry?.sent ?? []).filter(s => s.manager === manager && !s.claimed)
-        const match = candidates.find(s => s.sent.amount === leg.amount) ?? (candidates.length === 1 ? candidates[0] : undefined)
-        if (match) {
-          match.claimed = true
-          const dest = nttDestination(match.sent)
-          const ref = dest ? externalChainRef(dest.urn, dest.account) : null
-          if (ref) {
-            row.destChain = ref.chain
-            row.destParachainId = ref.paraId
-            row.destAccount = ref.account
-          }
-          const remote = wormholeRemoteToken(leg.asset_id, match.sent.recipientChain)
-          if (remote) row.remoteToken = remote
-        }
-        // The Executor payment is claimed once per extrinsic, by the first send built
-        // from it (a batch of several sends and one request is not a shape the SDK builds).
-        const paid = entry?.executorPaid.shift()
-        if (paid) row.xcmFees = [xcmFeeLeg('relayer', EVM_GAS_ASSET_ID, paid, prices)]
-        out.push(row)
+        const entry = r.extrinsic_index != null ? logs.get(`${r.block_height}:${r.extrinsic_index}`) : undefined
+        out.push(dir === 'out' ? nttSendRow(leg, entry, prices) : nttArrivalRow(leg, entry, prices))
       }
       await applyHistoricalUsd(out, activityHistPick)
       return out
@@ -15732,28 +15871,146 @@ async function getRecentNttOut(limit: number, from?: string, to?: string, accoun
   })
 }
 
-// Inbound NTT arrivals as cross-chain rows. An arrival is a MINT, not a transfer:
-// the user's tokens appear as a mirrored Currencies.Deposited in the redeem's SIGNED
-// extrinsic (fee refunds are bare Tokens.Deposited, treasury legs go to module
-// accounts — measured across every redeem indexed). A deposit only becomes a row when
-// the same extrinsic carries a TransferRedeemed log from THAT asset's own manager;
+// The H160 side of an ERC-20 leg as the account it belongs to: the extrinsic's own
+// signer when that is the account the H160 stands for (a native account's EVM address
+// is its first 20 bytes, so a native sender is named as itself), else a viewed account
+// it stands for, else the H160's widened account — which accountRef resolves through the
+// EVM bindings, tags and reserved-address rules like every other EVM-side actor.
+export function nttErc20Owner(h160: string, signer: string | undefined, viewed: readonly string[]): string {
+  if (signer && evmAddressOfAccount(signer) === h160) return signer.toLowerCase()
+  const own = viewed.find(a => evmAddressOfAccount(a) === h160)
+  return own ?? h160AccountId(h160).toLowerCase()
+}
+
+// NTT legs of a LOCKING manager whose asset lives in EVM storage (HOLLAR): the manager
+// pulls the lock with transferFrom and pays a release with transfer, so the ERC-20
+// Transfer log is the leg's only trace — no pallet event, and nothing in the transfer
+// read models to exclude. Read holder-first from erc20_transfer_deltas (the managers'
+// own legs for the global feed, the viewed accounts' H160s for an account page), then
+// the log itself by primary key for its parties and extrinsic. A Transfer of the token
+// to its manager is the send, one from it the release — the same rule as the pallet legs.
+async function getRecentNttErc20Legs(dir: 'out' | 'in', limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
+  const tw = timeWindow(from, to)
+  const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
+  return cached(`explorer:ntt-erc20-${dir}:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+    if (acctList === "''") return []
+    const tokenIds = assetIdsForToken(filters.token)
+    const scope = (await nttManagers()).filter(m => m.mode === 'lock' && m.erc20 != null && (tokenIds == null || tokenIds.includes(m.assetId)))
+    if (!scope.length) return []
+    const prices = await ensurePrices()
+    const viewed = (accounts ?? []).map(a => a.toLowerCase())
+    const holders = viewed.length ? [...new Set(viewed.map(a => evmAddressOfAccount(a)))] : scope.map(m => m.manager)
+    const holderSet = new Set(holders)
+    const tokens = [...new Set(scope.map(m => m.erc20!))]
+    const want = offset + limit
+    let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
+    const tokenList = tokens.map(t => `'${t}'`).join(',')
+    const managerList = scope.map(m => `'${m.manager}'`).join(',')
+    // An account page keeps only the legs whose OTHER side is a manager, decided in the
+    // read itself (the managers' own legs are a primary-key prefix of this table): a
+    // HOLLAR-heavy account's ordinary transfers never reach the log lookup below, so
+    // the walk costs what the account's NTT legs cost, not its whole token history.
+    const managerLegs = viewed.length
+      ? `AND (block_height, event_index) IN (SELECT block_height, event_index FROM price_data.erc20_transfer_deltas
+           WHERE holder IN (${managerList}) AND contract_address IN (${tokenList}))`
+      : ''
+    const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
+      const res = await client.query({
+        query: `SELECT block_height, event_index
+                FROM price_data.erc20_transfer_deltas
+                WHERE ${pageBound} AND holder IN (${holders.map(h => `'${h}'`).join(',')})
+                  AND contract_address IN (${tokenList})
+                  ${managerLegs}
+                ORDER BY block_height DESC, event_index DESC
+                LIMIT 1 BY block_height, event_index
+                LIMIT {limit:UInt32}`,
+        query_params: { limit: pageLimit }, format: 'JSONEachRow',
+      })
+      const candidates = await res.json<{ block_height: number; event_index: number }>()
+      const last = candidates.at(-1)
+      pageState = { scanned: candidates.length, cursor: last ? { blockHeight: Number(last.block_height), eventIndex: Number(last.event_index) } : null }
+      if (!candidates.length) return []
+      const logRes = await client.query({
+        query: `SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, lower(contract_address) AS token, topics, data
+                FROM price_data.raw_evm_logs
+                WHERE (block_height, event_index) IN (${candidates.map(c => `(${Number(c.block_height)},${Number(c.event_index)})`).join(',')})
+                LIMIT 1 BY block_height, event_index`,
+        format: 'JSONEachRow',
+      })
+      const legs: NttLeg[] = []
+      for (const r of await logRes.json<{ block_height: number; event_index: number; extrinsic_index: number | null; ts: string; token: string; topics: string[]; data: string }>()) {
+        const t = decodeErc20Transfer(r.topics, r.data)
+        if (!t) continue
+        const manager = nttErc20ManagerOf(scope, r.token, dir === 'out' ? t.to : t.from)
+        const user = dir === 'out' ? t.from : t.to
+        if (!manager || user === manager.manager) continue
+        // An account page keeps the legs one of its own H160s is a party to.
+        if (viewed.length && !holderSet.has(user) && !holderSet.has(manager.manager)) continue
+        legs.push({
+          block_height: Number(r.block_height), ts: r.ts, event_index: Number(r.event_index),
+          extrinsic_index: r.extrinsic_index == null ? null : Number(r.extrinsic_index),
+          who: user, amount: t.value, asset_id: manager.assetId, manager: manager.manager,
+        })
+      }
+      if (!legs.length) return []
+      const pairs = legs.filter(l => l.extrinsic_index != null).map(l => [l.block_height, l.extrinsic_index] as [number, number])
+      const [signers, logs] = await Promise.all([
+        signersFor(pairs),
+        nttLogsFor(pairs.map(([b, x]) => `${b}:${x}`)),
+      ])
+      const out: ActivityRow[] = []
+      for (const leg of legs.sort((a, b) => b.block_height - a.block_height || b.event_index - a.event_index)) {
+        const key = leg.extrinsic_index != null ? `${leg.block_height}:${leg.extrinsic_index}` : null
+        leg.who = nttErc20Owner(leg.who!, key ? signers.get(key) : undefined, viewed)
+        const entry = key ? logs.get(key) : undefined
+        out.push(dir === 'out' ? nttSendRow(leg, entry, prices) : nttArrivalRow(leg, entry, prices))
+      }
+      await applyHistoricalUsd(out, activityHistPick)
+      return out
+    }
+    const rows = await fetchFilteredDeep(
+      tw, want, fetchPage,
+      row => activityRowMatchesFilters(row, filters),
+      row => row.blockHeight, row => row.eventIndex ?? -1,
+      row => `${row.blockHeight}:${row.eventIndex}`,
+      { pageState: () => pageState },
+    )
+    return rows.slice(offset, offset + limit)
+  })
+}
+
+// Every outbound NTT send — burn or lock, pallet leg or ERC-20 leg. One source for
+// both, so every surface that reads Wormhole sends (global, the xcm tab, asset,
+// account, the enumerated exact counts) reads every mode without a second arm to
+// forget. Each part yields its own newest `offset + limit`, so the merged prefix is exact.
+async function getRecentNttOut(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
+  const want = offset + limit
+  const [pallet, erc20] = await Promise.all([
+    getRecentNttPalletLegs('out', want, from, to, accounts, 0, filters),
+    getRecentNttErc20Legs('out', want, from, to, accounts, 0, filters),
+  ])
+  if (!erc20.length) return pallet.slice(offset, offset + limit)
+  return [...pallet, ...erc20].sort(compareActivityRowsNewestFirst).slice(offset, offset + limit)
+}
+
+// A burning manager's inbound arrivals as cross-chain rows. An arrival there is a MINT,
+// not a transfer: the user's tokens appear as a mirrored Currencies.Deposited in the
+// redeem's SIGNED extrinsic (fee refunds are bare Tokens.Deposited, treasury legs go to
+// module accounts — measured across every redeem indexed). A deposit only becomes a row
+// when the same extrinsic carries a TransferRedeemed log from THAT asset's own manager;
 // plain user deposits of the same assets outnumber real redeems ~250:1, so the log is
-// the classification, not an enrichment.
-//
-// The source CHAIN is the transceiver's ReceivedMessage word; the sending USER is in
-// the NTT payload (calldata, never logged), so no source account is shown — a named
-// chain with no pill is honest, an inferred pill would not be.
+// the classification, not an enrichment. Locking managers are excluded: their asset is
+// never minted here, and a native fee refund in a redeem extrinsic would read as one.
 async function getRecentNttRedeems(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
   return cached(`explorer:ntt-in:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
     if (acctList === "''") return []
-    const minters = await nttMinterAccounts()
-    if (!minters.size) return []
-    const prices = await ensurePrices()
     const tokenIds = assetIdsForToken(filters.token)
-    const scope = [...minters.keys()].filter(id => tokenIds == null || tokenIds.includes(id))
-    if (!scope.length) return []
+    const burning = (await nttManagers()).filter(m => m.mode === 'burn' && (tokenIds == null || tokenIds.includes(m.assetId)))
+    if (!burning.length) return []
+    const prices = await ensurePrices()
+    const scope = [...new Set(burning.map(m => m.assetId))]
     const want = offset + limit
     let pageState: { scanned: number; cursor: { blockHeight: number; eventIndex: number } | null } = { scanned: 0, cursor: null }
     const fetchPage = async (pageBound: string, pageLimit: number): Promise<ActivityRow[]> => {
@@ -15783,26 +16040,12 @@ async function getRecentNttRedeems(limit: number, from?: string, to?: string, ac
       const out: ActivityRow[] = []
       for (const c of candidates) {
         const entry = logs.get(`${c.block_height}:${c.extrinsic_index}`)
-        const manager = nttMinterH160(minters.get(c.asset_id) ?? '')
-        if (!entry || !entry.redeemed.has(manager)) continue
-        const a = asset(c.asset_id)
-        // One message names one chain; a batch of redeems from different chains names
-        // none for this row rather than guessing which message minted it.
-        const chains = [...new Set(entry.sourceChains)]
-        const origin = chains.length === 1 ? nttOriginChain(chains[0]) : null
-        // The VAA this mint redeemed, which is how Ocelloids correlates the journey
-        // that carried it — and the only key that can name the sender on the far
-        // chain, since an NTT arrival carries no XCM message id. A redeem batch
-        // naming several messages names no single journey, exactly as for the chain.
-        const journeys = [...new Set(entry.journeyIds)]
-        out.push({
-          type: 'xcm', blockHeight: c.block_height, timestamp: c.ts, eventIndex: c.event_index, extrinsicIndex: c.extrinsic_index,
-          who: accountRef(c.who), to: null, asset: a, assetIn: null, assetOut: null,
-          amount: c.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, c.amount, a.decimals),
-          xcmDir: 'in', bridge: 'Wormhole', ...(origin ?? {}), linkBlock: c.block_height, linkIndex: c.extrinsic_index,
-          ...(journeys.length === 1 ? { messageId: journeys[0] } : {}),
-          ...(chains.length === 1 && wormholeRemoteToken(c.asset_id, chains[0]) ? { remoteToken: wormholeRemoteToken(c.asset_id, chains[0]) } : {}),
-        })
+        const manager = burning.find(m => m.assetId === Number(c.asset_id) && entry?.redeemed.has(m.manager))
+        if (!entry || !manager) continue
+        out.push(nttArrivalRow({
+          block_height: c.block_height, ts: c.ts, event_index: c.event_index, extrinsic_index: c.extrinsic_index,
+          who: c.who, amount: c.amount, asset_id: Number(c.asset_id), manager: manager.manager,
+        }, entry, prices))
       }
       annotateFastRelaySettlements(out, await fastRelayIndex())
       await applyHistoricalUsd(out, activityHistPick)
@@ -15819,19 +16062,22 @@ async function getRecentNttRedeems(limit: number, from?: string, to?: string, ac
   })
 }
 
-// Every inbound Wormhole arrival: NTT redeems, and the Wormhole Relay's fast deliveries
-// (which reach the user as a transfer out of the relay's pool, see below). One source
-// for both, so every surface that reads Wormhole arrivals — global, the xcm tab, asset,
-// account, the enumerated exact counts — reads both without a second arm to forget.
+// Every inbound Wormhole arrival: a burning manager's mints, a locking manager's
+// releases (pallet or ERC-20 leg), and the Wormhole Relay's fast deliveries (which
+// reach the user as a transfer out of the relay's pool, see below). One source for
+// all, so every surface that reads Wormhole arrivals — global, the xcm tab, asset,
+// account, the enumerated exact counts — reads every mode without a second arm to forget.
 // Each part yields its own newest `offset + limit`, so the merged prefix is exact.
 async function getRecentNttIn(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}): Promise<ActivityRow[]> {
   const want = offset + limit
-  const [redeems, deliveries] = await Promise.all([
+  const [redeems, releases, erc20Releases, deliveries] = await Promise.all([
     getRecentNttRedeems(want, from, to, accounts, 0, filters),
+    getRecentNttPalletLegs('in', want, from, to, accounts, 0, filters),
+    getRecentNttErc20Legs('in', want, from, to, accounts, 0, filters),
     getRecentFastRelayIn(want, from, to, accounts, 0, filters),
   ])
-  if (!deliveries.length) return redeems.slice(offset, offset + limit)
-  return [...redeems, ...deliveries].sort(compareActivityRowsNewestFirst).slice(offset, offset + limit)
+  if (!releases.length && !erc20Releases.length && !deliveries.length) return redeems.slice(offset, offset + limit)
+  return [...redeems, ...releases, ...erc20Releases, ...deliveries].sort(compareActivityRowsNewestFirst).slice(offset, offset + limit)
 }
 
 // Wormhole Relay fast deliveries (the protocol, the index and its one membership rule
@@ -18590,21 +18836,23 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
 
   // An NTT send or redeem extrinsic owns its transfer legs the way a swap or OTC fill
   // does — the send/arrival renders as a cross-chain row (getRecentNttOut/In), so a
-  // transfer beside it is that row's plumbing. Sends are evidenced by the minter-leg
-  // itself (a primary-key read of the minters' own account-first rows), redeems by the
-  // manager's TransferRedeemed log.
-  const nttMinters = await nttMinterAccounts()
-  if (nttMinters.size && signedKeys.length) {
-    const pairsSql = [...nttMinters].map(([assetId, account]) => `(${assetId},'${account}')`).join(',')
-    const minterList = [...nttMinters.values()].map(a => `'${a}'`).join(',')
-    const managerList = [...nttMinters.values()].map(a => `'${nttMinterH160(a)}'`).join(',')
+  // transfer beside it is that row's plumbing. Sends are evidenced by the manager-leg
+  // itself (a primary-key read of the managers' own account-first rows) and, for a
+  // locking manager whose asset moves only in EVM storage, by its TransferSent log;
+  // redeems by the manager's TransferRedeemed log.
+  const nttRefs = await nttManagers()
+  if (nttRefs.length && signedKeys.length) {
+    const pairsSql = nttLegPairsSql(nttRefs)
+    const accountList = [...new Set(nttRefs.map(m => `'${m.account}'`))].join(',')
+    const managerList = [...new Set(nttRefs.map(m => `'${m.manager}'`))].join(',')
+    const erc20ManagerList = [...new Set(nttRefs.filter(m => m.erc20 != null).map(m => `'${m.manager}'`))].join(',')
     const nttChunks = await mapChunksConcurrently(signedKeys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
       const tuples = chunk.map(key => { const [height, index] = key.split(':'); return `(${height},${index})` }).join(',')
       const [sendRes, redeemRes] = await Promise.all([
         client.query({
           query: `SELECT DISTINCT block_height, extrinsic_index
                   FROM price_data.account_transfer_activity
-                  WHERE account IN (${minterList})
+                  WHERE account IN (${accountList})
                     AND (block_height, extrinsic_index) IN (${tuples})
                     AND (asset_id, lower(to_account)) IN (${pairsSql})`,
           format: 'JSONEachRow',
@@ -18613,8 +18861,8 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
           query: `SELECT DISTINCT block_height, extrinsic_index
                   FROM price_data.raw_evm_logs
                   WHERE (block_height, extrinsic_index) IN (${tuples})
-                    AND topic0 = '${NTT_TRANSFER_REDEEMED_TOPIC}'
-                    AND lower(contract_address) IN (${managerList})`,
+                    AND ((topic0 = '${NTT_TRANSFER_REDEEMED_TOPIC}' AND lower(contract_address) IN (${managerList}))${erc20ManagerList ? `
+                      OR (topic0 = '${NTT_TRANSFER_SENT_TOPIC}' AND lower(contract_address) IN (${erc20ManagerList}))` : ''})`,
           format: 'JSONEachRow',
         }),
       ])
@@ -21004,72 +21252,60 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
 
     // Wormhole NTT legs, decoded from the events this read already holds — the same
     // classification the feed builders apply (getRecentNttOut/getRecentNttIn): a
-    // transfer of an NTT asset to its registered minter is the send, and a mirrored
-    // Currencies.Deposited whose asset's manager logged TransferRedeemed here is the
-    // arrival's mint. The underlying transfer legs fold behind these rows through
-    // suppressActivityPlumbing, like every other family's plumbing.
-    const nttMinters = await nttMinterAccounts()
-    if (nttMinters.size) {
-      const sentLogs: NttSentLog[] = []
-      const redeemedManagers = new Set<string>()
-      const sourceChains: number[] = []
-      // The VAA ids of those arrivals — see the deep-scan builder: this is the key
-      // Ocelloids correlates the carrying journey on, and the only way an NTT row
-      // can name its sender.
-      const journeyIds: string[] = []
-      const executorPaid: string[] = []
+    // transfer of an NTT asset TO its manager is the send (burn or lock), one FROM a
+    // locking manager is the arrival's release, an ERC-20 Transfer log of a locking
+    // manager's token to or from it is the same pair of legs for an asset in EVM
+    // storage, and a mirrored Currencies.Deposited whose burning manager logged
+    // TransferRedeemed here is the arrival's mint. The underlying transfer legs fold
+    // behind these rows through suppressActivityPlumbing, like every other family's
+    // plumbing.
+    const nttRefs = await nttManagers()
+    if (nttRefs.length) {
+      const evmLogs: { e: (typeof events)[number]; contract: string; topics: string[]; data: string }[] = []
       for (const e of events) {
         if (e.event_name !== 'EVM.Log') continue
         const log = ((safeJson(e.args_json) ?? {}) as { log?: { address?: string; topics?: string[]; data?: string } }).log
         if (!log?.topics || !Array.isArray(log.topics)) continue
-        const contract = (log.address ?? '').toLowerCase()
-        if (log.topics[0]?.toLowerCase() === NTT_TRANSFER_REDEEMED_TOPIC) redeemedManagers.add(contract)
-        const paid = decodeExecutorRequest(log.topics, log.data ?? '')
-        if (paid) executorPaid.push(paid.amountPaid)
-        const sent = decodeNttTransferSent(log.topics, log.data ?? '')
-        if (sent) sentLogs.push({ manager: contract, sent })
-        const received = decodeNttReceivedMessage(log.topics, log.data ?? '')
-        if (received) {
-          sourceChains.push(received.sourceChain)
-          const journeyId = nttJourneyMessageId(received)
-          if (journeyId) journeyIds.push(journeyId)
-        }
+        evmLogs.push({ e, contract: (log.address ?? '').toLowerCase(), topics: log.topics, data: log.data ?? '' })
+      }
+      const entry = decodeNttExtrinsicLogs(evmLogs)
+      const erc20Legs: { e: (typeof events)[number]; transfer: Erc20Transfer; token: string }[] = []
+      for (const { e, contract, topics, data } of evmLogs) {
+        const transfer = decodeErc20Transfer(topics, data)
+        if (transfer) erc20Legs.push({ e, transfer, token: contract })
       }
       const seenNtt = new Set<string>()
-      for (const t of dedupeTransferEvents(transferRows.filter(leg => {
-        const minter = nttMinters.get(leg.asset_id)
-        return !!minter && leg.to_acc?.toLowerCase() === minter
-      }))) {
+      const nttLegs: { leg: NttLeg; dir: 'out' | 'in' }[] = []
+      for (const t of dedupeTransferEvents(transferRows.filter(leg =>
+        nttManagerOfLeg(nttRefs, leg.asset_id, leg.to_acc) || nttManagerOfLeg(nttRefs, leg.asset_id, leg.from_acc)))) {
         const key = `${t.block_height}:${t.event_index}`
         if (seenNtt.has(key)) continue
         seenNtt.add(key)
-        const a = asset(t.asset_id)
-        const row: ActivityRow = {
-          type: 'xcm', blockHeight: t.block_height, timestamp: t.ts, eventIndex: t.event_index, extrinsicIndex: t.extrinsic_index,
-          who: t.from_acc ? accountRef(t.from_acc) : null, to: null, asset: a, assetIn: null, assetOut: null,
-          amount: t.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, t.amount, a.decimals),
-          xcmDir: 'out', bridge: 'Wormhole', linkBlock: t.block_height, linkIndex: t.extrinsic_index,
-        }
-        const manager = nttMinterH160(nttMinters.get(t.asset_id) ?? '')
-        const candidates = sentLogs.filter(s => s.manager === manager && !s.claimed)
-        const match = candidates.find(s => s.sent.amount === t.amount) ?? (candidates.length === 1 ? candidates[0] : undefined)
-        if (match) {
-          match.claimed = true
-          const dest = nttDestination(match.sent)
-          const ref = dest ? externalChainRef(dest.urn, dest.account) : null
-          if (ref) {
-            row.destChain = ref.chain
-            row.destParachainId = ref.paraId
-            row.destAccount = ref.account
-          }
-          const remote = wormholeRemoteToken(t.asset_id, match.sent.recipientChain)
-          if (remote) row.remoteToken = remote
-        }
-        // Same claim-once rule as getRecentNttOut: the Executor payment belongs to the
-        // first send built from this extrinsic.
-        const paid = executorPaid.shift()
-        if (paid) row.xcmFees = [xcmFeeLeg('relayer', EVM_GAS_ASSET_ID, paid, prices)]
-        rows.push(row)
+        const sendTo = nttManagerOfLeg(nttRefs, t.asset_id, t.to_acc)
+        const manager = sendTo ?? nttManagerOfLeg(nttRefs, t.asset_id, t.from_acc)!
+        nttLegs.push({
+          dir: sendTo ? 'out' : 'in',
+          leg: {
+            block_height: t.block_height, ts: t.ts, event_index: t.event_index, extrinsic_index: t.extrinsic_index,
+            who: (sendTo ? t.from_acc : t.to_acc) || null, amount: t.amount, asset_id: t.asset_id, manager: manager.manager,
+          },
+        })
+      }
+      for (const { e, transfer, token } of erc20Legs) {
+        const sendTo = nttErc20ManagerOf(nttRefs, token, transfer.to)
+        const manager = sendTo ?? nttErc20ManagerOf(nttRefs, token, transfer.from)
+        const user = sendTo ? transfer.from : transfer.to
+        if (!manager || user === manager.manager) continue
+        nttLegs.push({
+          dir: sendTo ? 'out' : 'in',
+          leg: {
+            block_height: e.block_height, ts: e.ts, event_index: e.event_index, extrinsic_index: e.extrinsic_index,
+            who: nttErc20Owner(user, signer ?? undefined, []), amount: transfer.value, asset_id: manager.assetId, manager: manager.manager,
+          },
+        })
+      }
+      for (const { leg, dir } of nttLegs.sort((a, b) => a.leg.event_index - b.leg.event_index)) {
+        rows.push(dir === 'out' ? nttSendRow(leg, entry, prices) : nttArrivalRow(leg, entry, prices))
       }
       for (const e of events) {
         if (e.event_name !== 'Currencies.Deposited') continue
@@ -21077,23 +21313,13 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
         const who = argStr(args, 'who')
         const cid = argInt(args, 'currencyId', 'currency_id')
         const amount = argStr(args, 'amount')
-        const minter = nttMinters.get(cid)
-        if (!minter || !who || RESERVED_ACCOUNT_RE.test(who)) continue
-        if (!redeemedManagers.has(nttMinterH160(minter))) continue
-        const a = asset(cid)
-        // One message names one chain; a batch of redeems from different chains
-        // names none for this row rather than guessing which message minted it.
-        const chains = [...new Set(sourceChains)]
-        const origin = chains.length === 1 ? nttOriginChain(chains[0]) : null
-        const journeys = [...new Set(journeyIds)]
-        rows.push({
-          type: 'xcm', blockHeight: e.block_height, timestamp: e.ts, eventIndex: e.event_index, extrinsicIndex: e.extrinsic_index,
-          who: accountRef(who), to: null, asset: a, assetIn: null, assetOut: null,
-          amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, amount, a.decimals),
-          xcmDir: 'in', bridge: 'Wormhole', ...(origin ?? {}), linkBlock: e.block_height, linkIndex: e.extrinsic_index,
-          ...(journeys.length === 1 ? { messageId: journeys[0] } : {}),
-          ...(chains.length === 1 && wormholeRemoteToken(cid, chains[0]) ? { remoteToken: wormholeRemoteToken(cid, chains[0]) } : {}),
-        })
+        if (!who || RESERVED_ACCOUNT_RE.test(who)) continue
+        const manager = nttRefs.find(m => m.mode === 'burn' && m.assetId === cid && entry.redeemed.has(m.manager))
+        if (!manager) continue
+        rows.push(nttArrivalRow({
+          block_height: e.block_height, ts: e.ts, event_index: e.event_index, extrinsic_index: e.extrinsic_index,
+          who, amount, asset_id: cid, manager: manager.manager,
+        }, entry, prices))
       }
     }
 
@@ -22198,9 +22424,10 @@ async function assetActivityPage(assetId: number, type = 'all', limit = 40, offs
 
     const transfersP: Promise<ActivityRow[]> = wantTransfers ? (async () => {
       const transferValueFilter = eventValueFilterSql('{assetId:UInt32}', 'amount', 'block_timestamp', queryFilters, prices, 'asset_transfer_price')
-      // The asset's outbound Wormhole sends are its cross-chain rows (nttInP/nttOutP),
-      // not its transfers — same predicate both sides, so a leg is exactly one of the two.
-      const nttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts(), '{assetId:UInt32}')
+      // The asset's Wormhole sends and locking releases are its cross-chain rows
+      // (nttInP/nttOutP), not its transfers — same predicate both sides, so a leg is
+      // exactly one of the two.
+      const nttExclusion = nttLegExclusionSql(await nttManagers(), '{assetId:UInt32}')
         + ' ' + fastRelayLegExclusionSql(await fastRelayIndex())
       const transferPlumbing = [...ammPoolAccounts(), ...(await mmReserveAccountIds())]
       const transferPlumbingList = transferPlumbing.length ? transferPlumbing.map(a => `'${a}'`).join(',') : "''"
@@ -24478,12 +24705,13 @@ async function transferCandidatePotFiltersSql(accCond: string[]): Promise<string
     const list = [...mmAccounts].map(a => `'${a}'`).join(',')
     parts.push(`AND from_account NOT IN (${list}) AND to_account NOT IN (${list})`)
   }
-  // A transfer of an NTT asset to its minter is an outbound Wormhole send — the
-  // cross-chain family's row (getRecentNttOut), which the enumerated sources count and
-  // render for every account including the minter's own. No viewing exception here,
+  // A transfer of an NTT asset to its manager is an outbound Wormhole send, and one
+  // from a locking manager an inbound release — the cross-chain family's rows
+  // (getRecentNttOut/getRecentNttIn), which the enumerated sources count and render
+  // for every account including the manager's own. No viewing exception here,
   // unlike the pots above: their legs have no other row to live in, this one does, so
   // an exception would render the same leg twice.
-  const nttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts())
+  const nttExclusion = nttLegExclusionSql(await nttManagers())
   if (nttExclusion) parts.push(nttExclusion)
   // A Wormhole Relay fast delivery likewise lives in the cross-chain family
   // (getRecentFastRelayIn), for the recipient and the pool alike.
@@ -25528,11 +25756,11 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     // The read-model form of all three exclusions, shared verbatim with the count arm
     // so the rows it counts and the rows this reads can never be a different set.
     const readModelPotFilters = await transferCandidatePotFiltersSql(accCond)
-    // The raw-events spelling of the NTT minter-leg and fast-relay exclusions the
+    // The raw-events spelling of the NTT manager-leg and fast-relay exclusions the
     // read-model path carries inside its pot filters (see transferCandidatePotFiltersSql).
     // Raw args are not normalized, so this spelling lowercases the sender itself.
-    const rawNttExclusion = nttMinterLegExclusionSql(await nttMinterAccounts(),
-      transferAssetIdSql(), `JSONExtractString(args_json,'to')`)
+    const rawNttExclusion = nttLegExclusionSql(await nttManagers(),
+      transferAssetIdSql(), `JSONExtractString(args_json,'to')`, `lower(JSONExtractString(args_json,'from'))`)
       + ' ' + fastRelayLegExclusionSql(await fastRelayIndex(), 'block_height', `lower(JSONExtractString(args_json,'from'))`)
     const readTransfers = async (refsFilter: string): Promise<RawTransferEventRow[]> => {
       const res = await client.query({
@@ -32355,22 +32583,30 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         query = daily('raw_events', `event_name IN (${sqlNames(names)})`)
       } else if (type === 'xcm') {
         // raw_xcm_activity counts queue messages; Wormhole NTT is not XCM and leaves no
-        // message, so its sends (the minter-leg identity the feed dedupes to) and
-        // arrivals (one TransferRedeemed per mint) are counted from their own traces.
-        // assets_json is empty and the NTT arms mirror the feed's own classification →
-        // token filter N/A here, as before.
-        const minters = await nttMinterAccounts()
-        const nttArms = minters.size ? `
+        // message, so its sends (the manager-leg identity the feed dedupes to; for a
+        // locking manager of an EVM-storage asset, whose leg is an ERC-20 log, one
+        // TransferSent per send) and arrivals (one TransferRedeemed per mint or
+        // release) are counted from their own traces. assets_json is empty and the NTT
+        // arms mirror the feed's own classification → token filter N/A here, as before.
+        const nttRefs = await nttManagers()
+        const palletRefs = nttRefs.filter(m => m.erc20 == null)
+        const erc20Refs = nttRefs.filter(m => m.erc20 != null)
+        const nttArms = nttRefs.length ? `${palletRefs.length ? `
           UNION ALL SELECT toString(toDate(block_timestamp)) AS d,
               toUInt64(uniqExact(tuple(block_height, ifNull(extrinsic_index, 4294967295), asset_id, lower(from_account), lower(to_account), amount))) AS v
             FROM price_data.account_transfer_activity
-            WHERE ${since} AND account IN (${[...minters.values()].map(a => `'${a}'`).join(',')})
-              AND (asset_id, lower(to_account)) IN (${[...minters].map(([id, acc]) => `(${id},'${acc}')`).join(',')})
-            GROUP BY d
+            WHERE ${since} AND account IN (${[...new Set(palletRefs.map(m => `'${m.account}'`))].join(',')})
+              AND (asset_id, lower(to_account)) IN (${nttLegPairsSql(palletRefs)})
+            GROUP BY d` : ''}${erc20Refs.length ? `
+          UNION ALL SELECT toString(toDate(block_timestamp)) AS d, toUInt64(uniqExact((block_height, event_index))) AS v
+            FROM price_data.wormhole_ntt_logs
+            WHERE ${since} AND topic0 = '${NTT_TRANSFER_SENT_TOPIC}'
+              AND contract_address IN (${erc20Refs.map(m => `'${m.manager}'`).join(',')})
+            GROUP BY d` : ''}
           UNION ALL SELECT toString(toDate(block_timestamp)) AS d, toUInt64(uniqExact((block_height, event_index))) AS v
             FROM price_data.raw_evm_logs
             WHERE ${since} AND topic0 = '${NTT_TRANSFER_REDEEMED_TOPIC}'
-              AND lower(contract_address) IN (${[...minters.values()].map(a => `'${nttMinterH160(a)}'`).join(',')})
+              AND lower(contract_address) IN (${[...new Set(nttRefs.map(m => `'${m.manager}'`))].join(',')})
             GROUP BY d` : ''
         // Wormhole Relay fast deliveries are cross-chain rows too, one per pool Filled log.
         const fastRelayArm = `
