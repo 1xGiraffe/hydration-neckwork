@@ -135,7 +135,7 @@ export function IntentPriceChart({ data }: { data: IntentOrderDetail }) {
           ? <>{o.fillsWhen === 'above' ? 'Minimum received' : 'Maximum paid'} <span className="mono ipc-limit-v">{fmtPrice(o.limit ?? ol.limit)}</span> {pair}
             {lineFee != null && o.limit != null && <span> (fills at <span className="mono">{fmtPrice(ol.limit)}</span> net of the <span className="mono">{(lineFee * 100).toFixed(lineFee < 0.001 ? 3 : 2)}%</span> fee {feeSource})</span>}
             {placement.distancePct != null && <> · <span className="mono">{Math.abs(placement.distancePct).toFixed(2)}%</span> {placement.distancePct < 0 ? 'under' : 'over'} the price when placed</>}
-            {' · '}{data.fillsTotal > 0 ? 'filled at market' : 'fills at market'}
+            {' · '}{data.fillsTotal > 0 ? 'filled at market' : lineFee != null ? 'fills at market' : 'within limit (before fees)'}
 </>
           : ol.limit != null
           ? <>Fills {fillSide} <span className="mono ipc-limit-v">{fmtPrice(ol.limit)}</span> {pair}
@@ -172,7 +172,9 @@ export function IntentPriceChart({ data }: { data: IntentOrderDetail }) {
                     return (
                       <g className="ipc-zone">
                         {y1 > y0 && <rect x={PAD_L} y={y0} width={PLOT_W} height={y1 - y0} />}
-                        <text x={PAD_L + 4} y={below ? ly + 13 : ly - 6}>{below ? 'fills below ↓' : 'fills above ↑'}</text>
+                        {/* Without a known fee the line is the bare limit, and a price just inside
+                            it can still fail to fill once fees are paid — so it claims no fill. */}
+                        <text x={PAD_L + 4} y={below ? ly + 13 : ly - 6}>{lineFee != null ? (below ? 'fills below ↓' : 'fills above ↑') : `within limit (before fees) ${below ? '↓' : '↑'}`}</text>
                       </g>
                     )
                   })()}
@@ -268,7 +270,7 @@ export function IntentPriceChart({ data }: { data: IntentOrderDetail }) {
       </div>
       <div className="ipc-legend muted">
         <span><i className="ipc-key ipc-key-limit" />{lineFee != null ? 'Fills at (net of fees)' : placement.marketable ? (o.fillsWhen === 'above' ? 'Minimum received' : 'Maximum paid') : 'Limit'}</span>
-        {ol.limit != null && <span><i className="ipc-key ipc-key-zone" />Fills {o.fillsWhen === 'above' ? 'above' : 'below'} the line</span>}
+        {ol.limit != null && <span><i className="ipc-key ipc-key-zone" />{lineFee != null ? `Fills ${o.fillsWhen === 'above' ? 'above' : 'below'} the line` : 'Within limit (before fees)'}</span>}
         {lineFee != null && <span><i className="ipc-key ipc-key-stated" />Stated limit (fees included)</span>}
         <span><i className="ipc-key ipc-key-now" />Price now</span>
         {fills.length > 0 && <span><i className="ipc-key ipc-key-fill" />Fills</span>}
