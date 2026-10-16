@@ -97,10 +97,14 @@ export function Activity() {
   // it never renders as a filter chip and "clear filters" leaves it alone.
   const { values: f, onChange, onClear, setDay } = useFilters({ reservedKeys: ['page', 'tab', 'smol'] })
   const [hideSmol, toggleSmol] = useHideSmol()
-  // Failed attempts have no executed USD value. Selecting either DCA action
-  // must therefore bypass the implicit "hide smol" floor, while an explicit
-  // user-entered minimum remains authoritative.
-  const activityMin = (action === 'dca' || action === 'dca-failed') && !f.min
+  // Failed attempts have no executed USD value, and neither does any row of an
+  // asset the index cannot price (ZEC). Selecting either DCA action, or filtering
+  // to an unpriced token, must therefore bypass the implicit "hide smol" floor,
+  // while an explicit user-entered minimum remains authoritative.
+  const tokenId = f.token && /^\d+$/.test(f.token) ? Number(f.token) : null
+  const { data: tokenOptions } = useAssetFilterOptions()
+  const tokenUnpriced = tokenId != null && tokenOptions?.some(a => a.assetId === tokenId && a.price === null) === true
+  const activityMin = (action === 'dca' || action === 'dca-failed' || tokenUnpriced) && !f.min
     ? undefined
     : effectiveMin(f.min, hideSmol)
   // isPlaceholderData: these rows answer the PREVIOUS filter/tab/page, kept on screen
