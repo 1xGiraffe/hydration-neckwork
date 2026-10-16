@@ -123,6 +123,7 @@ export const WORMHOLE_STATUS: Record<WormholeStatus, WormholeStatusMeta> = {
 const WORMHOLE_EXPLORERS: Record<number, { base: string; kind: string }> = {
   1: { base: 'https://orbmarkets.io/address/', kind: 'Orb' },
   2: { base: 'https://etherscan.io/address/', kind: 'Etherscan' },
+  15: { base: 'https://nearblocks.io/address/', kind: 'NearBlocks' },
   21: { base: 'https://suivision.xyz/object/', kind: 'SuiVision' },
   30: { base: 'https://basescan.org/address/', kind: 'BaseScan' },
   47: { base: 'https://hyperevmscan.io/address/', kind: 'HyperEVMScan' },
@@ -131,6 +132,8 @@ const WORMHOLE_EXPLORERS: Record<number, { base: string; kind: string }> = {
 export function wormholeExplorerLink(chainId: number, handle: string | null): { href: string; kind: string } | null {
   const meta = WORMHOLE_EXPLORERS[chainId]
   if (!meta || !handle) return null
+  // A NEAR handle the API could not name is sha256(account id) — nothing to open.
+  if (chainId === 15 && handle.startsWith('0x')) return null
   return { href: meta.base + encodeURIComponent(handle), kind: meta.kind }
 }
 

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { keccakAsHex, xxhashAsU8a } from '@polkadot/util-crypto'
 import { u8aConcat, u8aToHex } from '@polkadot/util'
 // base58 is shared (chainPrimitives): a divergent leading-zero rule produces a
@@ -32,7 +33,7 @@ export { base58Decode, base58Encode } from './chainPrimitives.ts'
 // ───────────────────────────── response shapes ─────────────────────────────
 
 export type WormholeStatus = 'ok' | 'surplus' | 'attention' | 'deficit' | 'unverified' | 'unconfigured'
-export type WormholeChainFamily = 'evm' | 'solana' | 'sui'
+export type WormholeChainFamily = 'evm' | 'solana' | 'sui' | 'near'
 
 // The shared account descriptor, narrowed to the two fields this module can
 // state without importing the explorer's identity graph. The service fills it
@@ -339,11 +340,13 @@ export interface WormholeSummary {
 export const HYDRATION_WORMHOLE_CHAIN_ID = 73
 
 // Wormhole numbers chains itself. Only the family matters to the read recipes:
-// Solana is chain 1, Sui is chain 21, and everything else Hydration carries is
-// an EVM chain reachable by JSON-RPC. An unknown future id with a configured
+// Solana is chain 1, Sui is chain 21, NEAR is chain 15 (named and linked only —
+// it has no custody read recipe), and everything else Hydration carries is an
+// EVM chain reachable by JSON-RPC. An unknown future id with a configured
 // endpoint is treated as EVM rather than skipped.
 export function wormholeChainFamily(chainId: number): WormholeChainFamily {
   if (chainId === 1) return 'solana'
+  if (chainId === 15) return 'near'
   if (chainId === 21) return 'sui'
   return 'evm'
 }
@@ -387,6 +390,8 @@ export interface WormholeChainInfo {
 export const WORMHOLE_CHAINS: Readonly<Record<number, WormholeChainInfo>> = {
   1: { name: 'Solana', family: 'solana', evmChainId: null, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://orbmarkets.io/address/' },
   2: { name: 'Ethereum', family: 'evm', evmChainId: 1, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://etherscan.io/address/' },
+  // NEAR: ZEC (zec.omft.near, NEAR Intents' omni token) arrives from here.
+  15: { name: 'NEAR', family: 'near', evmChainId: null, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://nearblocks.io/address/' },
   21: { name: 'Sui', family: 'sui', evmChainId: null, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://suivision.xyz/object/' },
   30: {
     name: 'Base', family: 'evm', evmChainId: 8453, layer: 'l2', publicRpc: null,
@@ -717,12 +722,20 @@ export function parseWormholeLocation(argsJson: string): WormholeLocation | null
   return { assetId, originChainId, originToken }
 }
 
+// NEAR accounts are named, and Wormhole carries one as sha256(account id), which
+// does not invert. The accounts Hydration's assets are known to come from, keyed
+// by that hash; anything else on NEAR stays hex.
+const NEAR_KNOWN_ACCOUNTS: ReadonlyMap<string, string> = new Map(
+  ['zec.omft.near', 'wrap.near'].map(id => [createHash('sha256').update(id).digest('hex'), id]),
+)
+
 // A 32-byte origin token or peer handle rendered the way its own chain writes it:
-// an EVM address is the low 20 bytes, a Solana account is base58 over all 32, and
-// a Sui object id stays hex.
+// an EVM address is the low 20 bytes, a Solana account is base58 over all 32, a
+// known NEAR account is its name, and a Sui object id stays hex.
 export function displayChainAddress(family: WormholeChainFamily, bytes32: string): string {
   const body = stripHex(bytes32).padStart(64, '0')
   if (family === 'solana') return base58Encode(hexToBytes(body))
+  if (family === 'near') return NEAR_KNOWN_ACCOUNTS.get(body.toLowerCase()) ?? '0x' + body
   if (family === 'evm' && /^0{24}/.test(body)) return '0x' + body.slice(24)
   return '0x' + body
 }
