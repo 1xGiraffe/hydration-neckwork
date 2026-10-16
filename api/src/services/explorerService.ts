@@ -15569,6 +15569,7 @@ export function ocnChainName(urnStr: string): string | null {
   if (consensus === 'ethereum') return EVM_CHAIN_META[chainId]?.name ?? `EVM chain ${chainId}`
   if (consensus === 'solana') return 'Solana'
   if (consensus === 'sui') return 'Sui'
+  if (consensus === 'near') return 'NEAR'
   if (consensus === 'kusama') return kusamaMeta(chainId)?.name ?? null
   return null
 }
@@ -15594,6 +15595,7 @@ export function originTxExplorerUrl(urnStr: string, txHash: string | null): stri
   // Orb (orbmarkets.io) — Helius's own explorer, and the domain its docs link to.
   if (consensus === 'solana') return `https://orbmarkets.io/tx/${encodeURIComponent(txHash)}`
   if (consensus === 'sui') return `https://suiscan.xyz/mainnet/tx/${encodeURIComponent(txHash)}`
+  if (consensus === 'near') return `https://nearblocks.io/txns/${encodeURIComponent(txHash)}`
   return null
 }
 
@@ -15800,6 +15802,7 @@ export const WORMHOLE_CHAIN_URNS: Record<number, string> = {
   2: 'urn:ocn:ethereum:1',
   4: 'urn:ocn:ethereum:56',       // BNB Chain
   5: 'urn:ocn:ethereum:137',      // Polygon
+  15: 'urn:ocn:near:mainnet',     // NEAR
   16: 'urn:ocn:polkadot:2004',    // Moonbeam
   21: 'urn:ocn:sui:0x35834a8a',
   23: 'urn:ocn:ethereum:42161',   // Arbitrum

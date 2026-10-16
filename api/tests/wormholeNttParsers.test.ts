@@ -316,6 +316,9 @@ describe('chain-native address forms', () => {
     // A Solana handle uses all 32 bytes, so it must never be narrowed to 20.
     expect(displayChainAddress('solana', '0x069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001'))
       .toBe('So11111111111111111111111111111111111111112')
+    // NEAR carries sha256(account id): a known account gets its name back, any other stays hex.
+    expect(displayChainAddress('near', '0x3174446b8cc98197d6f2c9e504d6d229f0adb00d2b7566af0e54a84a876fef0f')).toBe('zec.omft.near')
+    expect(displayChainAddress('near', '0x' + '11'.repeat(32))).toBe('0x' + '11'.repeat(32))
   })
 
   it('families follow Wormhole chain ids', () => {

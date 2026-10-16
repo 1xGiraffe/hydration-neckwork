@@ -2461,7 +2461,7 @@ async function readBackingCycle(
         // Sui exposes each inbox entry's release state but not its amount at
         // this precision, so a HELD entry is not subtracted as queued — it
         // keeps degrading to custody surplus, never to a shortfall.
-      } else {
+      } else if (family === 'evm') {
         const evm = await readEvmCustody(url, targets, hydrationChainId, pendingOutboundDigests(timeline.sends, targets, chainId, queueCutoffMs))
         read = evm.custody
         fuseRead = evm.fuses
@@ -3324,7 +3324,8 @@ function publishRemoteTokens(snap: WormholeSnapshot): void {
       list.push({
         chainId: p.chainId, chainName: chainName(p.chainId), address: ref?.address ?? null, name: ref?.name ?? null, symbol: ref?.symbol ?? null,
         decimals: ref?.decimals ?? p.decimals, role,
-        explorerUrl: family === 'evm' && ref ? wormholeExplorerUrl(p.chainId, ref.address) : null,
+        // An unresolved NEAR handle is a hash, not an account an explorer can open.
+        explorerUrl: ref && (family === 'evm' || (family === 'near' && !ref.address.startsWith('0x'))) ? wormholeExplorerUrl(p.chainId, ref.address) : null,
         layer: info?.layer ?? null,
         riskNote: info?.riskNote ?? null,
         primary: p.chainId === asset.originChainId,
