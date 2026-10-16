@@ -68,6 +68,31 @@ function LimitPrice({ data }: { data: IntentOrderDetail }) {
   )
 }
 
+// A price from two raw amounts, scaled by integer arithmetic before Number takes it:
+// the totals are 128-bit and their decimals differ per asset.
+function rawPrice(num: string, numDec: number, den: string, denDec: number): number | null {
+  if (!/^\d+$/.test(num) || !/^\d+$/.test(den) || isZero(den)) return null
+  const SCALE = 18
+  const q = (BigInt(num) * 10n ** BigInt(denDec + SCALE)) / (BigInt(den) * 10n ** BigInt(numDec))
+  const v = Number(q) / 10 ** SCALE
+  return Number.isFinite(v) && v > 0 ? v : null
+}
+
+// The average price the fills achieved, both ways round like the limit above it and
+// for the same reason: the order does not say which leg is the money asset.
+function AvgFillPrice({ data }: { data: IntentOrderDetail }) {
+  const { filledIn, filledOut, assetIn, assetOut } = data
+  const outPerIn = rawPrice(filledOut, assetOut.decimals, filledIn, assetIn.decimals)
+  const inPerOut = rawPrice(filledIn, assetIn.decimals, filledOut, assetOut.decimals)
+  if (outPerIn == null || inPerOut == null) return null
+  return (
+    <span className="muted mono limit-price" title={`Average over all fills\n${outPerIn} ${assetOut.symbol} per ${assetIn.symbol}\n${inPerOut} ${assetIn.symbol} per ${assetOut.symbol}`}>
+      avg <Num v={outPerIn} /> {assetOut.symbol} per {assetIn.symbol}
+      {' · '}<Num v={inPerOut} /> {assetIn.symbol} per {assetOut.symbol}
+    </span>
+  )
+}
+
 function ExtrinsicRef({ at }: { at: { block: number; extrinsicIndex: number | null } }) {
   return at.extrinsicIndex != null
     ? <Link to={paths.extrinsicAt(at.block, at.extrinsicIndex)} className="hash">{F.int(at.block)}-{at.extrinsicIndex}</Link>
@@ -228,6 +253,7 @@ export function Intent({ intentId }: { intentId: string }) {
                 <div className="dt">Filled</div>
                 <div className="dd"><span className="asset-flow"><AssetAmount asset={data.assetIn} raw={data.filledIn} /> → <AssetAmount asset={data.assetOut} raw={data.filledOut} /></span>
                   <span className="muted mono"> · {F.int(data.fillsTotal)} {data.fillsTotal === 1 ? 'fill' : 'fills'}</span>
+                  <AvgFillPrice data={data} />
                 </div>
                 {data.dca?.lastExecutionBlock != null && <>
                   <div className="dt">Last trade</div>
