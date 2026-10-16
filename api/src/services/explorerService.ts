@@ -1,4 +1,5 @@
 import { wormholeAssetBridge, wormholeRemoteToken, type WormholeAssetBridge, type WormholeRemoteToken } from './wormholeRemoteTokens.ts'
+import { NEAR_WORMHOLE_CHAIN_ID, nearAccountUrl, nearArrivalOrigin, nearRecipientFromRefund, nearSendDestination, type FarAccount } from './nearBridge.ts'
 import type { ClickHouseClient } from '../db/client.ts'
 import { inChunkedSql, mapParamChunks } from '../db/queryParams.ts'
 import { rayMul, settledAmount } from './aaveMath.ts'
@@ -15626,7 +15627,10 @@ export function journeyIsOwnRemoteSend(
 }
 
 async function applyXcmInSources(rows: ActivityRow[]): Promise<void> {
-  const inRows = rows.filter(r => r.type === 'xcm' && r.xcmDir === 'in' && r.messageId && !r.fromAccount)
+  // An arrival from NEAR is never asked: the journey index names the relayer that
+  // published its VAA as the sender (applyNearOrigin reads the real one).
+  const inRows = rows.filter(r => r.type === 'xcm' && r.xcmDir === 'in' && r.messageId && !r.fromAccount
+    && !r.messageId.startsWith(`${NEAR_WORMHOLE_CHAIN_ID}/`))
   if (!inRows.length) return
   const sources = await xcmJourneySourcesFor(inRows.map(r => ({
     messageId: r.messageId!,
@@ -15775,6 +15779,7 @@ async function applyXcmOutDests(rows: ActivityRow[]): Promise<void> {
 // of lookups per request; both passes share the journey cache.
 async function applyXcmJourneys(rows: ActivityRow[]): Promise<void> {
   await refreshSettlingAnnotations(rows)
+  await applyNearBridgeSources(rows)
   await applyFastRelaySources(rows)
   await applyXcmInSources(rows)
   await applyXcmOutRemoteSources(rows)
@@ -16165,6 +16170,7 @@ export function nttSendRow(leg: NttLeg, entry: NttExtrinsicLogs | undefined, pri
     }
     const remote = wormholeRemoteToken(leg.asset_id, match.sent.recipientChain)
     if (remote) row.remoteToken = remote
+    applyNearDestination(row, match.sent)
   }
   // The Executor payment is claimed once per extrinsic, by the first send built
   // from it (a batch of several sends and one request is not a shape the SDK builds).
@@ -16189,13 +16195,71 @@ export function nttArrivalRow(leg: NttLeg, entry: NttExtrinsicLogs | undefined, 
   // no single journey, exactly as for the chain.
   const journeys = [...new Set(entry?.journeyIds ?? [])]
   const remote = chains.length === 1 ? wormholeRemoteToken(leg.asset_id, chains[0]) : null
-  return {
+  const row: ActivityRow = {
     type: 'xcm', blockHeight: leg.block_height, timestamp: leg.ts, eventIndex: leg.event_index, extrinsicIndex: leg.extrinsic_index,
     who: leg.who ? accountRef(leg.who) : null, to: null, asset: a, assetIn: null, assetOut: null,
     amount: leg.amount, amountIn: null, amountOut: null, valueUsd: usdValue(prices, a.assetId, leg.amount, a.decimals),
     xcmDir: 'in', bridge: 'Wormhole', ...(origin ?? {}), linkBlock: leg.block_height, linkIndex: leg.extrinsic_index,
     ...(journeys.length === 1 ? { messageId: journeys[0] } : {}),
     ...(remote ? { remoteToken: remote } : {}),
+  }
+  applyNearOrigin(row)
+  return row
+}
+
+// The NEAR end of a hop, from the NEAR managers' own events (nearBridge.ts): Hydration's
+// logs name a NEAR account only by its sha256, and an arrival's VAA only by the contract
+// that called the manager. Read from an in-memory index — a miss schedules its sync and
+// leaves the row chain-only until a later request.
+function farAccountRef(account: FarAccount): NonNullable<ActivityRow['destAccount']> {
+  return { kind: 'AccountId32', accountId: '', raw: '', address: account.address, subscanUrl: account.url }
+}
+export function applyNearDestination(row: ActivityRow, sent: NttTransferSent): void {
+  if (sent.recipientChain !== NEAR_WORMHOLE_CHAIN_ID || (row.destAccount && row.destTxUrl)) return
+  const found = nearSendDestination(sent.recipient, sent.amount)
+  // The refund address is the recipient's implicit account whenever it hashes to the
+  // recipient, which names it with no NEAR read at all.
+  const implicit = found ? null : nearRecipientFromRefund(sent.recipient, sent.refundAddress)
+  const account = found?.account ?? (implicit ? { address: implicit, url: nearAccountUrl(implicit) } : null)
+  if (!account) return
+  row.destAccount ??= farAccountRef(account)
+  if (found?.txUrl) row.destTxUrl = found.txUrl
+}
+export function applyNearOrigin(row: ActivityRow): void {
+  if (row.fromAccount || !row.messageId) return
+  const [chain, emitter, sequence] = row.messageId.split('/')
+  if (Number(chain) !== NEAR_WORMHOLE_CHAIN_ID || !emitter || !sequence) return
+  const origin = nearArrivalOrigin(emitter, sequence)
+  if (!origin) return
+  row.fromChain = origin.chain
+  row.fromParachainId = null
+  if (origin.account) row.fromAccount = farAccountRef(origin.account)
+  row.fromTxUrl = origin.txUrl
+}
+
+// Late pass for NEAR rows built before the index knew them (feeds cache their rows).
+// A send's recipient hash is not on the row, so its extrinsic's logs are re-read —
+// memoized by nttLogsFor, and only for the few unresolved NEAR sends on the page.
+// Pairing is claim-once per extrinsic, as in nttSendRow, so two equal sends in one
+// batch cannot both take the first one's recipient.
+async function applyNearBridgeSources(rows: ActivityRow[]): Promise<void> {
+  for (const r of rows) if (r.type === 'xcm' && r.xcmDir === 'in') applyNearOrigin(r)
+  const key = (r: ActivityRow) => `${r.blockHeight}:${r.extrinsicIndex}`
+  const nearSends = rows.filter(r => r.type === 'xcm' && r.xcmDir === 'out' && r.bridge === 'Wormhole'
+    && r.destChain === 'NEAR' && r.extrinsicIndex != null)
+  // Every NEAR send of an extrinsic takes part in the pairing, resolved or not, so a
+  // resolved one still claims its own log before an unresolved sibling can.
+  const open = new Set(nearSends.filter(r => !r.destAccount || !r.destTxUrl).map(key))
+  if (!open.size) return
+  const logs = await nttLogsFor(open)
+  const ordered = nearSends.filter(r => open.has(key(r))).sort((a, b) => (a.eventIndex ?? 0) - (b.eventIndex ?? 0))
+  for (const r of ordered) {
+    const candidates = (logs.get(key(r))?.sent ?? [])
+      .filter(s => s.sent.recipientChain === NEAR_WORMHOLE_CHAIN_ID && !s.claimed)
+    const match = candidates.find(s => s.sent.amount === r.amount) ?? (candidates.length === 1 ? candidates[0] : undefined)
+    if (!match) continue
+    match.claimed = true
+    applyNearDestination(r, match.sent)
   }
 }
 
