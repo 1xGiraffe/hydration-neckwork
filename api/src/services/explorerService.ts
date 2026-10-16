@@ -15813,23 +15813,27 @@ export const WORMHOLE_CHAIN_URNS: Record<number, string> = {
   47: 'urn:ocn:ethereum:999',
 }
 
-export interface NttTransferSent { recipient: string; amount: string; recipientChain: number }
+export interface NttTransferSent { recipient: string; refundAddress: string; amount: string; recipientChain: number }
 
-// NttManager.TransferSent(address indexed sender, bytes32 indexed recipient,
-//                         uint256 amount, uint256 fee, uint16 recipientChain, uint64 sequence)
+// NttManager.TransferSent(bytes32 indexed recipient, bytes32 indexed refundAddress,
+//                         uint256 amount, uint256 fee, uint16 recipientChain, uint64 msgSequence)
 // The recipient is a bytes32 because it has to hold a Solana or Sui account as easily as
-// an EVM one; narrowing it to 20 bytes happens per destination, not here.
+// an EVM one; narrowing it to 20 bytes happens per destination, not here. Senders to
+// every chain but NEAR set the refund address equal to the recipient, which hid that
+// this once read the refund address; NEAR's recipient is sha256(account id) and its
+// refund address the account's implicit form, so the two differ there.
 export function decodeNttTransferSent(topics: string[], data: string): NttTransferSent | null {
   if (topics[0]?.toLowerCase() !== NTT_TRANSFER_SENT_TOPIC) return null
-  const recipient = topics[2]
-  if (!/^0x[0-9a-fA-F]{64}$/.test(recipient ?? '')) return null
+  const recipient = topics[1]
+  const refundAddress = topics[2]
+  if (!/^0x[0-9a-fA-F]{64}$/.test(recipient ?? '') || !/^0x[0-9a-fA-F]{64}$/.test(refundAddress ?? '')) return null
   const body = (data ?? '').replace(/^0x/, '')
   if (body.length < 64 * 3) return null
   const word = (i: number) => body.slice(i * 64, (i + 1) * 64)
   const amount = BigInt('0x' + word(0)).toString()
   const recipientChain = Number(BigInt('0x' + word(2)))
   if (!Number.isInteger(recipientChain) || recipientChain <= 0) return null
-  return { recipient: recipient.toLowerCase(), amount, recipientChain }
+  return { recipient: recipient.toLowerCase(), refundAddress: refundAddress.toLowerCase(), amount, recipientChain }
 }
 
 // The destination as this file names chains and accounts. An EVM chain takes the low 20
