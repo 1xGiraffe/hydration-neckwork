@@ -96,8 +96,21 @@ describe('decodeNttTransferSent', () => {
   it('reads the recipient, amount and destination chain of a real send', () => {
     expect(decodeNttTransferSent([topic, sender, recipient], data)).toEqual({
       recipient: recipient.toLowerCase(),
+      refundAddress: recipient.toLowerCase(),
       amount: '2000000000000000',
       recipientChain: 2,
+    })
+  })
+
+  // The event is TransferSent(bytes32 indexed recipient, bytes32 indexed refundAddress, …).
+  // Real ZEC send to NEAR at block 15788869: the recipient is sha256 of the NEAR account
+  // that was credited, the refund address that account's implicit form.
+  it('reads the recipient from the first indexed topic, not the refund address', () => {
+    const toNear = '0xa8e92983a580e928180177795abae2e55b8734491b94859a7821489afd286af6'
+    const refund = '0x0952c20ad87a71bfa5177b0e37e274e109d0d9b54544ab228e0051a42cb15804'
+    const nearData = '0x' + (500000).toString(16).padStart(64, '0') + '00'.repeat(32) + (15).toString(16).padStart(64, '0') + (6).toString(16).padStart(64, '0')
+    expect(decodeNttTransferSent([topic, toNear, refund], nearData)).toEqual({
+      recipient: toNear, refundAddress: refund, amount: '500000', recipientChain: 15,
     })
   })
 
@@ -105,7 +118,7 @@ describe('decodeNttTransferSent', () => {
     expect(decodeNttTransferSent(['0x' + '11'.repeat(32), sender, recipient], data)).toBeNull()
     // A truncated payload names no chain, and guessing one would invent a destination.
     expect(decodeNttTransferSent([topic, sender, recipient], '0x00')).toBeNull()
-    // Without a bytes32 recipient there is no account to show.
+    // Without both indexed words there is no account to show.
     expect(decodeNttTransferSent([topic, sender], data)).toBeNull()
   })
 })
@@ -216,7 +229,7 @@ describe('nttLegExclusionSql', () => {
 
 describe('nttDestination', () => {
   const sent = (recipientChain: number, recipient = '0x' + '00'.repeat(12) + 'e6af127259bf7f1b0539fc0a955494f48e31240b') =>
-    ({ recipient, amount: '1', recipientChain })
+    ({ recipient, refundAddress: recipient, amount: '1', recipientChain })
 
   // An EVM destination wants the low 20 bytes; Solana and Sui need all 32, which is what
   // their encodings are built from.
