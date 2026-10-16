@@ -14423,7 +14423,13 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
   // was the dominant cost of a merged `type=all&token=…` page that can match
   // nothing. Every other source already expresses the same emptiness in SQL
   // (`assetIdFilterSql` → `AND 0`).
-  if (assetIdsForToken(filters.token)?.length === 0) return []
+  const tokenIds = assetIdsForToken(filters.token)
+  if (tokenIds?.length === 0) return []
+  // The same proof for a token that IS a registry asset but never travels over XCM
+  // (ZEC, bridged by Wormhole NTT): the walk post-filters, so it reads to genesis to
+  // show it has nothing. No row of an asset predates its registration, so the walk
+  // stops there — ZEC's walk is days of blocks instead of all of history.
+  const tokenFloor = tokenIds ? await assetsRegisteredFloor(tokenIds) : 0
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
   return cached(`explorer:xcm-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${filterKey(filters)}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
@@ -14450,7 +14456,7 @@ async function getRecentXcm(limit: number, from?: string, to?: string, accounts?
       // rows, in the same order.
       const pageOrder = 'ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32}'
       const xcmRows = `source_kind='event' AND name IN (${XCM_SENT_EVENTS_SQL}) AND event_index IS NOT NULL`
-      const candidateBound = `${pageBound} ${senderRefsFilter} AND ${xcmRows} ${senderFilter}`
+      const candidateBound = `${pageBound} ${senderRefsFilter} AND ${xcmRows} ${senderFilter}${tokenFloor > 0 ? ` AND block_height >= ${tokenFloor}` : ''}`
       const rowBound = acctList
         ? candidateBound
         : `(block_height, event_index) IN (
@@ -18712,6 +18718,45 @@ const collectiveVoteLedger = new RareEventLedger<RawCollectiveVoteEvent>({
   head: () => indexedRawHead(),
   client: () => client,
 })
+
+// Every asset's registration height, held in process (AssetRegistry.Registered is a
+// rare family — see rareEventLedger.ts). Lets a walk that can only filter by asset on
+// built rows stop at the block the asset first existed.
+interface AssetRegisteredRow { block_height: number; event_index: number; asset_id: number }
+const assetRegisteredLedger = new RareEventLedger<AssetRegisteredRow>({
+  eventNames: ['AssetRegistry.Registered'],
+  columnsSql: `block_height, event_index, toUInt32(JSONExtractInt(args_json, 'assetId')) AS asset_id`,
+  head: () => indexedRawHead(),
+  client: () => client,
+})
+
+// The lowest block any of `assetIds` can appear at: the earliest registration among
+// them, or 0 (no bound) when any one has none indexed — a genesis asset, or a ledger
+// read that failed. Never a guess above the true first block.
+export function registeredFloor(assetIds: readonly number[], rows: readonly AssetRegisteredRow[]): number {
+  if (!assetIds.length) return 0
+  const first = new Map<number, number>()
+  for (const r of rows) {
+    const id = Number(r.asset_id)
+    const prev = first.get(id)
+    if (prev == null || r.block_height < prev) first.set(id, r.block_height)
+  }
+  let floor = Infinity
+  for (const id of assetIds) {
+    const b = first.get(id)
+    if (b == null) return 0
+    floor = Math.min(floor, b)
+  }
+  return Number.isFinite(floor) ? floor : 0
+}
+async function assetsRegisteredFloor(assetIds: readonly number[]): Promise<number> {
+  try {
+    return registeredFloor(assetIds, await assetRegisteredLedger.rows())
+  } catch (err) {
+    console.error('[Explorer] asset registration ledger failed:', err instanceof Error ? err.message : err)
+    return 0
+  }
+}
 
 // The collective votes in one window (whole chain when `accounts` is absent, one
 // account set when it is present), newest first, at most `limit`.
