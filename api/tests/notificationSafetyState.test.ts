@@ -117,7 +117,7 @@ describe('the unified security kind', () => {
   it('keeps the event enumeration in the order the UI mirrors', () => {
     expect(SAFETY_KINDS).toEqual([
       'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze',
-      'deficit', 'queued', 'released', 'fuse', 'egress',
+      'deficit', 'queued', 'released', 'fuse', 'egress', 'democracy',
     ])
   })
 

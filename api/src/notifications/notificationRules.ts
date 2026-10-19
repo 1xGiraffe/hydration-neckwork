@@ -48,14 +48,16 @@ export const TC_MOTION_PHASES = ['proposed', 'voted', 'approved', 'disapproved',
 //     deficit, an origin-chain rate-limiter queue, an origin manager's pause
 //     flag, and a rate-limit fuse running out;
 //   * the level of Hydration's chain-wide global withdraw limit (`egress`),
-//     read off the security dashboard — a level, so no indexed row carries it.
+//     read off the security dashboard — a level, so no indexed row carries it;
+//   * old governance (`democracy`): every step of a pre-OpenGov Democracy
+//     proposal or referendum, the path an exploit through governance would take.
 //
 // Which source delivers which event is fixed by the delivery matrix in
 // evaluator.ts (SAFETY_ROW_LANE_KINDS / SAFETY_SNAPSHOT_KINDS), so no event can
 // arrive twice. A rule may narrow to any subset.
 export const SAFETY_KINDS = [
   'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze',
-  'deficit', 'queued', 'released', 'fuse', 'egress',
+  'deficit', 'queued', 'released', 'fuse', 'egress', 'democracy',
 ] as const
 export type SafetyKind = typeof SAFETY_KINDS[number]
 

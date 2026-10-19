@@ -630,6 +630,7 @@ export function activityReferencesAsset(row: ActivityRow, assetId: number): bool
 //   fuse               | never (an origin limiter's level)   | yes
 //   egress             | never (a level, not an action)      | yes, from the dashboard's
 //                      |                                     |   global withdraw meter
+//   democracy          | yes (old-governance events)         | never
 //
 // The two pause halves are what makes this delicate: the snapshot carries BOTH
 // flags, and reporting its `pausedLocal` would restate the ledger's own row.
@@ -643,7 +644,7 @@ export function activityReferencesAsset(row: ActivityRow, assetId: number): bool
 // deficit event stays silent. Anyone changing that subtraction is changing
 // whether fixing a gap pages every subscriber about a gap.
 export const SAFETY_ROW_LANE_KINDS: readonly SafetyKind[] = [
-  'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze', 'queued',
+  'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze', 'queued', 'democracy',
 ]
 /** The events the bridge snapshot delivers; `queued` and the pause pair are split by SIDE, not by kind. */
 export const SAFETY_SNAPSHOT_KINDS = ['deficit', 'queued', 'released', 'fuse', 'pause', 'unpause', 'egress'] as const

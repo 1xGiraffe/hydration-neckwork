@@ -14,6 +14,7 @@ import { runtimeCircuitBreakerDefaults } from './runtimeConstants.ts'
 import { accountRef, ensurePrices, mmMarkets, parachainName, type AccountRef, type AssetRef, type PriceInfo } from './explorerService.ts'
 import { usdOfRaw } from './assetValue.ts'
 import { displayDescriptor } from './explorerAssets.ts'
+import { compactAmount, shortAddress } from '../notifications/render.ts'
 import { loadCurrentPools, tradableFlags } from './poolService.ts'
 import { resolveModuleError } from './runtimeErrorNames.ts'
 import { getWormholeManagers, getWormholeSummary, type WormholeManagerRef, type WormholeSummary } from './wormholeNttService.ts'
@@ -348,6 +349,24 @@ const registryLimitLedger = new RareEventLedger<RegistryEventRow>({
   columnsSql: `block_height, block_timestamp, extrinsic_index, event_index,
                JSONExtractInt(args_json, 'assetId') AS asset_id,
                JSONExtractString(args_json, 'xcmRateLimit') AS xcm_rate_limit`,
+  head: async () => (await queryHead()).block_height,
+  client: () => client,
+})
+// Old governance: the pre-OpenGov Democracy pallet. Its Council is gone, but public
+// proposals still table into referenda (proposal #9 → referendum #207, Oct 2026) and
+// pass on a vote alone — the governance path an exploit would take, so every step
+// of it is a security action. Votes, delegations and metadata are left out: tens of
+// thousands of rows that are participation, not action. Read from the chain's own
+// events only; nothing here asks Subsquare or waits on a title.
+export const DEMOCRACY_EVENTS = [
+  'Democracy.Proposed', 'Democracy.Seconded', 'Democracy.Tabled', 'Democracy.ExternalTabled',
+  'Democracy.Started', 'Democracy.Passed', 'Democracy.NotPassed', 'Democracy.Cancelled',
+  'Democracy.Vetoed', 'Democracy.Blacklisted', 'Democracy.ProposalCanceled', 'Democracy.Executed',
+] as const
+export interface DemocracyEventRow { block_height: number; block_timestamp: string; event_index: number; extrinsic_index: number | null; event_name: string; args_json: string }
+const democracyLedger = new RareEventLedger<DemocracyEventRow>({
+  eventNames: DEMOCRACY_EVENTS,
+  columnsSql: 'block_height, block_timestamp, event_index, extrinsic_index, event_name, args_json',
   head: async () => (await queryHead()).block_height,
   client: () => client,
 })
@@ -898,7 +917,7 @@ export async function getSecurityDashboard(): Promise<SecurityDashboard> {
 
 async function buildSecurityDashboard(): Promise<SecurityDashboard> {
   const snap = snapshot
-  const [head, pools, lockdownRows, releaseTotal, limitEvents, registryLimitRows, pauseEvents, tripRows, peaks, omniTradabilityHistory, stableTradability, whitelisted, memberSet, solvency, liquidations, liquidityMoves, runtime, wormhole, wormholeManagerEvents] = await Promise.all([
+  const [head, pools, lockdownRows, releaseTotal, limitEvents, registryLimitRows, pauseEvents, tripRows, peaks, omniTradabilityHistory, stableTradability, whitelisted, memberSet, solvency, liquidations, liquidityMoves, runtime, wormhole, wormholeManagerEvents, democracyRows] = await Promise.all([
     queryHead(),
     loadCurrentPools(),
     queryLockdownEvents(),
@@ -918,6 +937,7 @@ async function buildSecurityDashboard(): Promise<SecurityDashboard> {
     queryRuntime(),
     getWormholeSummary(),
     queryWormholeManagerEvents(),
+    democracyLedger.rows(),
   ])
 
   const headBlock = snap?.headBlock ?? head.block_height
@@ -955,7 +975,7 @@ async function buildSecurityDashboard(): Promise<SecurityDashboard> {
       upgrades: Number(runtime?.upgrades ?? 0),
       lastUpgrade: runtime ? { blockHeight: runtime.block_height, blockTimestamp: runtime.block_timestamp } : null,
     },
-    timeline: buildTimeline(limitEvents, pauseEvents, lockdownRows, omniTradabilityHistory, registryLimitRows, wormholeManagerEvents, lockTimes),
+    timeline: buildTimeline(limitEvents, pauseEvents, lockdownRows, omniTradabilityHistory, registryLimitRows, wormholeManagerEvents, lockTimes, democracyRows),
     guardians: {
       techCommittee: buildTechCommittee(memberSet),
       memberSetAtBlock: memberSet?.block_height ?? null,
@@ -2115,10 +2135,12 @@ function buildTimeline(
   // heights the chain has reached, and the head/pace to project the rest from.
   lockTimes: { actual: ReadonlyMap<number, string>; head: { height: number; timestamp: string } | null; paceMs: number }
     = { actual: new Map(), head: null, paceMs: 0 },
+  democracyRows: readonly DemocracyEventRow[] = [],
 ): SafetyEvent[] {
   const out: SafetyEvent[] = [
     ...registryLimitChanges(registryLimitRows),
     ...buildWormholeSafetyEvents(wormholeManagerEvents, getWormholeManagers()),
+    ...buildDemocracyEvents(democracyRows),
   ]
   const rationalText = (v: unknown): string => {
     if (Array.isArray(v) && v.length === 2) return `${(Number(v[0]) / Number(v[1]) * 100).toFixed(2)}%`
@@ -2223,6 +2245,62 @@ function buildTimeline(
     })
   }
   return out.sort((a, b) => b.blockHeight - a.blockHeight)
+}
+
+const DEMOCRACY_THRESHOLD: Record<string, string> = {
+  SuperMajorityApprove: 'super-majority to approve',
+  SuperMajorityAgainst: 'super-majority to reject',
+  SimpleMajority: 'simple majority',
+}
+const hdxDeposit = (raw: unknown): string => {
+  try { return `${compactAmount(Number(BigInt(String(raw)) / 10n ** BigInt(HDX_DECIMALS - 2)) / 100)} HDX deposit` } catch { return 'deposit unknown' }
+}
+const accountText = (hex: unknown): string => {
+  if (typeof hex !== 'string' || !hex) return 'unknown account'
+  try { return shortAddress(accountRef(hex).address) } catch { return shortAddress(hex) }
+}
+
+// One ledger entry per old-governance step, worded from the event alone.
+export function buildDemocracyEvents(rows: readonly DemocracyEventRow[]): SafetyEvent[] {
+  const out: SafetyEvent[] = []
+  for (const e of rows) {
+    const a = safeJson(e.args_json)
+    const ref = `referendum #${a.refIndex ?? '?'}`
+    const prop = `proposal #${a.proposalIndex ?? a.propIndex ?? '?'}`
+    let label: string
+    let detail: string
+    switch (e.event_name) {
+      case 'Democracy.Proposed': label = 'Democracy proposal made'; detail = `${prop} · ${hdxDeposit(a.deposit)}`; break
+      case 'Democracy.Seconded': label = 'Democracy proposal seconded'; detail = `${prop} by ${accountText(a.seconder)}`; break
+      case 'Democracy.Tabled': label = 'Democracy proposal tabled'; detail = `${prop} goes to a public referendum`; break
+      case 'Democracy.ExternalTabled': label = 'External proposal tabled'; detail = 'goes to a public referendum'; break
+      case 'Democracy.Started': {
+        const kind = (a.threshold as { __kind?: string } | undefined)?.__kind ?? ''
+        label = 'Democracy referendum started'; detail = `${ref} · passes on a ${DEMOCRACY_THRESHOLD[kind] ?? (kind || 'unknown threshold')}`; break
+      }
+      case 'Democracy.Passed': label = 'Democracy referendum passed'; detail = `${ref} · enacted after its delay`; break
+      case 'Democracy.NotPassed': label = 'Democracy referendum failed'; detail = ref; break
+      case 'Democracy.Cancelled': label = 'Democracy referendum cancelled'; detail = ref; break
+      case 'Democracy.Executed': {
+        const ok = (a.result as { __kind?: string } | undefined)?.__kind === 'Ok'
+        label = 'Democracy referendum enacted'; detail = `${ref} · ${ok ? 'call succeeded' : 'call failed'}`; break
+      }
+      case 'Democracy.Vetoed': label = 'External proposal vetoed'; detail = `${shortAddress(String(a.proposalHash ?? ''))} by ${accountText(a.who)} until block ${a.until ?? '?'}`; break
+      case 'Democracy.Blacklisted': label = 'Proposal blacklisted'; detail = shortAddress(String(a.proposalHash ?? '')); break
+      case 'Democracy.ProposalCanceled': label = 'Democracy proposal cancelled'; detail = prop; break
+      default: continue
+    }
+    out.push({
+      kind: 'democracy',
+      label,
+      detail,
+      blockHeight: e.block_height,
+      blockTimestamp: e.block_timestamp,
+      extrinsicIndex: extrinsicIndexOf(e.extrinsic_index),
+      asset: null,
+    })
+  }
+  return out
 }
 
 // `TechnicalCommittee.set_members(newMembers, prime, oldCount)` from the enacted

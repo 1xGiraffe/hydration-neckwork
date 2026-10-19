@@ -733,10 +733,10 @@ describe('buildRuleParams — security', () => {
     expect(dialog).toContain('Fuse threshold (%)')
     expect(dialog).toContain("safetyKinds.includes('egress')")
     expect(dialog).toContain('Withdraw limit threshold (%)')
-    expect(SAFETY_KINDS).toHaveLength(12)
+    expect(SAFETY_KINDS).toHaveLength(13)
     expect(SAFETY_KINDS).toEqual([
       'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze',
-      'deficit', 'queued', 'released', 'fuse', 'egress',
+      'deficit', 'queued', 'released', 'fuse', 'egress', 'democracy',
     ])
   })
 })
