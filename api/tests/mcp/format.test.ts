@@ -530,9 +530,12 @@ describe('scaleAmount', () => {
   it('does not manufacture digits the way Number(raw) / 10 ** decimals does', () => {
     // Both roundings in the naive route compound; splitting with BigInt and
     // parsing the composed decimal rounds exactly once.
-    const raw = '299999999999999999999999'
-    expect(scaleAmount(raw, 23)).toBe(3)
-    expect(Number(raw) / 10 ** 23).not.toBe(3)
+    // The example must stay wrong on every engine: Node 24 rounds 10 ** 23 to
+    // exactly 1e23 where Node 22 did not, which made 299999999999999999999999 / 1e23
+    // come out right there and the old example prove nothing.
+    const raw = '700000000000000000000001'
+    expect(scaleAmount(raw, 24)).toBe(0.7)
+    expect(Number(raw) / 10 ** 24).not.toBe(0.7)
   })
 
   it('distinguishes absent from zero, and refuses a non-integer string', () => {
