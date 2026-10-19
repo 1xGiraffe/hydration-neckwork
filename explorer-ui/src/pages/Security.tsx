@@ -66,6 +66,8 @@ function SectionNav({ active }: { active: SecuritySection }) {
 // when one was released, sky for a configuration change. A bridge transfer a
 // rate limiter holds back is amber like a pause and green like an unpause when
 // it comes free — the same two states, on the bridge rather than on a pallet.
+// Old-governance steps are lavender: neither a clamp nor a release, but a vote
+// that can change anything.
 const KIND_COLOR: Record<string, string> = {
   lockdown: 'var(--red)',
   freeze: 'var(--red)',
@@ -76,6 +78,7 @@ const KIND_COLOR: Record<string, string> = {
   unpause: 'var(--green)',
   released: 'var(--green)',
   limit: 'var(--sky)',
+  democracy: 'var(--lavender)',
 }
 
 function Kind({ kind }: { kind: string }) {

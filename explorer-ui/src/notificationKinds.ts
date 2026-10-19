@@ -42,7 +42,7 @@ export const KIND_HINTS: Record<NotificationKind, string> = {
   'health-factor': 'A position in one money market falling toward liquidation.',
   referendum: 'Governance referenda entering the phases you care about.',
   'tc-motion': 'Technical committee motions — proposals, member votes and outcomes.',
-  safety: 'Circuit breakers, pauses, freezes, lockdowns, the chain-wide withdraw limit filling up, and the Wormhole bridge losing its backing or filling a rate limit.',
+  safety: 'Circuit breakers, pauses, freezes, lockdowns, the chain-wide withdraw limit filling up, the Wormhole bridge losing its backing or filling a rate limit, and old-governance (Democracy) proposals and referenda.',
   extrinsic: 'A specific call, by pallet and method.',
   event: 'A specific runtime event, by pallet and method.',
   'protocol-revenue': 'An extrinsic earning the protocol more than a threshold — the protocol share, not the LPs\'.',
@@ -80,10 +80,11 @@ export const TC_MOTION_PHASES = ['proposed', 'voted', 'approved', 'disapproved',
 // `pause`/`unpause` cover a manager on either chain, `queued`/`released` a
 // transfer a rate limiter took hold of and let go, `deficit` bridged supply
 // that lost its custody backing, `fuse` a rate limit close to spent, and
-// `egress` Hydration's chain-wide withdraw limit filling up.
+// `egress` Hydration's chain-wide withdraw limit filling up, and `democracy`
+// every step of an old-governance (Democracy pallet) proposal or referendum.
 export const SAFETY_KINDS = [
   'limit', 'pause', 'unpause', 'lockdown', 'lockdown-lifted', 'freeze', 'unfreeze',
-  'deficit', 'queued', 'released', 'fuse', 'egress',
+  'deficit', 'queued', 'released', 'fuse', 'egress', 'democracy',
 ] as const
 // The three numeric floors, restated from the server's own schema defaults so the
 // form shows the values an omitted parameter would get: how much bridged supply
