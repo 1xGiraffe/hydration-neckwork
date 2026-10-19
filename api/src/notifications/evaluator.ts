@@ -661,6 +661,11 @@ const SAFETY_MATCHER: RowMatcher<SafetyEvent, RuleParams['safety']> = {
   payloadOf: event => ({ lane: 'safety', event }),
 }
 
+/** The security actions recent enough to be news: within MAX_WINDOW_BLOCKS of the live head. */
+export function liveSafetyEvents(events: readonly SafetyEvent[], head: number): SafetyEvent[] {
+  return events.filter(e => e.blockHeight > head - MAX_WINDOW_BLOCKS)
+}
+
 export function evaluateSafety(events: readonly SafetyEvent[], rules: readonly NotificationRule[], window: BlockWindow): RuleMatch[] {
   return matchRules(SAFETY_MATCHER, events, rules, window)
 }
@@ -2093,7 +2098,13 @@ async function safetyLane(rules: NotificationRule[], cursor: number | null, head
     console.warn(`[notifications] safety cursor ${cursor} was ${newest - cursor} blocks behind the newest security action; skipping ${skipped} blocks`)
   }
   if (window.to <= window.from) return null
-  return { kind: 'safety', matches: evaluateSafety(timeline, rules, window), window }
+  // Only actions within the live horizon are news. The window follows the
+  // timeline's newest row, so an event FAMILY added to the ledger (Democracy,
+  // whose newest rows were days old when it joined) would otherwise hand its last
+  // window of history to every subscriber as if it had just happened — the same
+  // backfill-as-news the head-anchored lanes rule out. MAX_WINDOW_BLOCKS is the
+  // horizon every other lane's window already has.
+  return { kind: 'safety', matches: evaluateSafety(liveSafetyEvents(timeline, head), rules, window), window }
 }
 
 // One source fetch per WATCHED TARGET, not per rule variant: the pure matcher
