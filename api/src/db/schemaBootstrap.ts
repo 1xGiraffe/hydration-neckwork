@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createDefaultDatabaseClickHouseClient, type ClickHouseClient } from './client.ts'
+import { ACCOUNT_ACTIVITY_MV, catchUpAccountActivityWindow } from './accountActivityCatchUp.ts'
 import { ATOKEN_PARTY_TRANSFERS_SELECT, ATOKEN_PARTY_TRANSFERS_WHERE, PARTY_TRANSFERS_SELECT, PARTY_TRANSFERS_WHERE, catchUpTransferDeltasWindow } from '../services/erc20WalletService.ts'
 
 const DEFAULT_SCHEMA_DIRECTORY = fileURLToPath(new URL('../../../clickhouse/schema/', import.meta.url))
@@ -112,6 +113,12 @@ export function selectSchemaFiles(fileNames: string[]): string[] {
  *   active set's Transfer logs ingested in the window, by bucket, through this view's
  *   own SELECT). The refresher's whole-history check (syncTransferDeltas, on every api
  *   start and every 6 h) stays the net under it.
+ *   account_activity_v3_mv — stops turning event hashes and EVM-log words (signature
+ *   topic, zero-padded H160s and amounts) into accounts (003_materialized_views.sql).
+ *   Its catch-up re-reads the blocks raw_blocks recorded as ingested in the window
+ *   through the view's live SELECT, inserting only the missing keys
+ *   (accountActivityCatchUp.ts). The rows the old definition wrote are removed once,
+ *   ad hoc, during rollout — not here.
  */
 export interface MvUpgrade {
   name: string
@@ -125,6 +132,12 @@ export const MV_UPGRADES: ReadonlyArray<MvUpgrade> = [
     marker: 'erc20_wallet_contracts',
     backfill: 'erc20WalletService.catchUpTransferDeltasWindow over that window (or restart api: syncTransferDeltas compares the whole history on its first cycle)',
     catchUp: catchUpTransferDeltasWindow,
+  },
+  {
+    name: ACCOUNT_ACTIVITY_MV,
+    marker: 'operationStack',
+    backfill: 'accountActivityCatchUp.catchUpAccountActivityWindow over that window (it re-reads the window\'s blocks through the live view and inserts only missing keys)',
+    catchUp: catchUpAccountActivityWindow,
   },
 ]
 
