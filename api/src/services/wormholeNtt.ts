@@ -1601,6 +1601,23 @@ export function worstStatus(statuses: readonly WormholeStatus[]): WormholeStatus
 }
 
 /**
+ * The order the backing page lists assets in: whatever needs a look first (by the
+ * same severity `worstStatus` ranks), then the larger bridged supply by value, and
+ * an asset Hydration cannot price after the priced ones of its status, by symbol.
+ */
+export function compareBackingRows(
+  a: { status: WormholeStatus; issuanceUsd: number | null; symbol: string },
+  b: { status: WormholeStatus; issuanceUsd: number | null; symbol: string },
+): number {
+  const severity = STATUS_SEVERITY[b.status] - STATUS_SEVERITY[a.status]
+  if (severity !== 0) return severity
+  if (a.issuanceUsd != null && b.issuanceUsd != null && a.issuanceUsd !== b.issuanceUsd) return b.issuanceUsd - a.issuanceUsd
+  if (a.issuanceUsd != null && b.issuanceUsd == null) return -1
+  if (a.issuanceUsd == null && b.issuanceUsd != null) return 1
+  return a.symbol.localeCompare(b.symbol)
+}
+
+/**
  * Whether a reading is one the classifier would call a shortfall, and whether it
  * could tell at all. An unverifiable reading (no scan, unconfigured origin,
  * carried-over custody, a stalled index) is neither confirmation nor refutation

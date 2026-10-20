@@ -8,6 +8,7 @@ import {
   decodeU128Le,
   deTrim,
   displayChainAddress,
+  compareBackingRows,
   nearViewRequest,
   parseNearViewResult,
   encodeBalanceOf,
@@ -523,5 +524,17 @@ describe('NEAR views', () => {
     expect(parseNearViewResult({ error: { message: 'x' } })).toBeUndefined()
     expect(parseNearViewResult({ result: { result: [999] } })).toBeUndefined()
     expect(parseNearViewResult(null)).toBeUndefined()
+  })
+})
+
+describe('compareBackingRows', () => {
+  const row = (symbol: string, status: Parameters<typeof compareBackingRows>[0]['status'], issuanceUsd: number | null) => ({ symbol, status, issuanceUsd })
+  // A deficit on a small or unpriced asset must not sit under the big healthy ones.
+  it('puts problems first, then larger bridged value, unpriced last by symbol', () => {
+    const rows = [
+      row('PRIME', 'surplus', 7_200_000), row('WBTC', 'ok', 940_000), row('ZEC', 'surplus', null),
+      row('DAI', 'deficit', 3_600), row('SUI', 'unverified', null), row('NEAR', 'ok', null), row('SPY', 'ok', null),
+    ]
+    expect([...rows].sort(compareBackingRows).map(r => r.symbol)).toEqual(['DAI', 'SUI', 'PRIME', 'ZEC', 'WBTC', 'NEAR', 'SPY'])
   })
 })

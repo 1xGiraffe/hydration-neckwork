@@ -11,6 +11,7 @@ import { nearManagerNames } from './nearBridge.ts'
 import {
   base58Encode,
   buildFuse,
+  compareBackingRows,
   nearViewRequest,
   parseNearViewResult,
   buildPeerHistories,
@@ -3639,12 +3640,7 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
     }
   })
 
-  assetRows.sort((a, b) => {
-    if (a.issuanceUsd == null && b.issuanceUsd == null) return a.symbol.localeCompare(b.symbol)
-    if (a.issuanceUsd == null) return 1
-    if (b.issuanceUsd == null) return -1
-    return b.issuanceUsd - a.issuanceUsd
-  })
+  assetRows.sort(compareBackingRows)
 
   // $0 is a measurement, not a default: with no valued residual anywhere (every
   // chain unconfigured, or every asset unpriced) the deficit/surplus totals are

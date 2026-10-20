@@ -1024,7 +1024,7 @@ function WormholeSkeleton() {
   return (
     <>
       <ChartSkeleton h={92} />
-      <SecTitle title="Backing, per asset" subtitle="custody against minted supply" />
+      <SecTitle title="Backing, per asset" subtitle="custody against minted supply · problems first, then by bridged value" />
       <ChartSkeleton h={260} />
       <SecTitle title="Assets" />
       <div className="panel"><table className="tbl sec-tbl"><tbody><TableSkeleton cols={7} rows={6} /></tbody></table></div>
@@ -1080,10 +1080,10 @@ export function WormholeSection({ now }: { now: number }) {
       <SecTitle title="Backing" subtitle={d.asOf ? undefined : 'no snapshot yet'} />
       <Headline d={d} />
 
-      <SecTitle title="Backing, per asset" subtitle="custody against minted supply" />
+      <SecTitle title="Backing, per asset" subtitle="custody against minted supply · problems first, then by bridged value" />
       <BeamBoard d={d} />
 
-      <SecTitle title="Assets" subtitle={`${F.int(d.assets.length)} bridged through Wormhole`} />
+      <SecTitle title="Assets" subtitle={`${F.int(d.assets.length)} bridged through Wormhole · problems first, then by bridged value`} />
       <AssetsTable d={d} />
 
       {/* Every chain of every asset: which hold custody, which mint, the token
