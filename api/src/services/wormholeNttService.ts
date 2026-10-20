@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { ClickHouseClient } from '../db/client.ts'
 import { SUBSTRATE_RPC_URL, substrateStorageBatch } from './substrateRpc.ts'
 import { cachedSwr } from './cache.ts'
@@ -6,9 +7,12 @@ import { usdOfRaw } from './assetValue.ts'
 import { assetIdFromPrecompile, erc20Precompile } from './chainPrimitives.ts'
 import { setWormholeBridges, type WormholeAssetBridge, type WormholeBridgePeer } from './wormholeRemoteTokens.ts'
 import { assetDescriptor } from './explorerAssets.ts'
+import { nearManagerNames } from './nearBridge.ts'
 import {
   base58Encode,
   buildFuse,
+  nearViewRequest,
+  parseNearViewResult,
   buildPeerHistories,
   changeOriginFromEvents,
   classifyLegs,
@@ -1799,6 +1803,79 @@ async function readSuiCustody(
   return { custody, inboxSize, fuses, executed: executedOk ? executed : null }
 }
 
+// NEAR: Wormhole names a NEAR manager only by sha256(account id), so the peer
+// handle is resolved to its account through the NEAR managers the bridge module
+// discovers (every sub-account of the deployer — a new asset needs no code). The
+// manager is its own transceiver and holds the locked NEP-141 balance; the token
+// is the manager's own `token()`, never assumed. The contract exposes remaining
+// rate-limit capacity but no configured limit, so its fuses stay unread rather
+// than stated against a guessed limit.
+const sha256Hex = (s: string): string => createHash('sha256').update(s).digest('hex')
+const nearTokens = new Map<string, string>()
+const nearDecimals = new Map<string, number>()
+// `assetId:chainId` → the other chains the NEAR manager has a peer on (null: unknown).
+const nearAlsoPeers = new Map<string, number[] | null>()
+
+async function nearView(url: string, account: string, method: string, args: Record<string, unknown> = {}): Promise<unknown> {
+  return parseNearViewResult(await postJson(url, nearViewRequest(account, method, args), ORIGIN_RPC_TIMEOUT_MS))
+}
+
+async function readNearCustody(
+  url: string, targets: readonly OriginTarget[], pending: readonly PendingDigest[], hydrationChainId: number,
+): Promise<{ custody: Map<number, CustodyRead>; executed: Set<string> | null }> {
+  const custody = new Map<number, CustodyRead>()
+  const names = await nearManagerNames()
+  const executed = new Set<string>()
+  // Any of our sends left unasked or unanswered makes the whole answer unknown: an
+  // empty set would read as "asked, and none executed".
+  let executedOk = true
+  for (const target of targets) {
+    const handle = target.peer.replace(/^0x/, '').toLowerCase()
+    const manager = names.get(handle)
+    const targetPending = pending.filter(p => p.assetId === target.asset.assetId)
+    if (!manager) { if (targetPending.length) executedOk = false; continue }
+    // Execution is the manager's own record, independent of reading its custody.
+    for (const p of targetPending) {
+      const done = await nearView(url, manager, 'is_executed', { digest: p.digest.replace(/^0x/, '') })
+      if (typeof done !== 'boolean') { executedOk = false; continue }
+      if (done) executed.add(p.digest)
+    }
+    const key = `${target.asset.assetId}:${target.chainId}`
+    // Cached per peer handle, so a re-pointed peer never inherits its predecessor's token.
+    const tokenKey = `${key}:${handle}`
+    const token = nearTokens.get(tokenKey) ?? await nearView(url, manager, 'token')
+    if (typeof token !== 'string' || !token) continue
+    // The registry names the origin token (as sha256 of its account): a manager
+    // answering for any other token is not this asset's custody and stays unread.
+    if (target.expectedToken && sha256Hex(token) !== target.expectedToken.replace(/^0x/, '').toLowerCase()) continue
+    nearTokens.set(tokenKey, token)
+    nearTokens.set(key, token)
+    let decimals = nearDecimals.get(token)
+    if (decimals == null) {
+      const meta = await nearView(url, token, 'ft_metadata') as { decimals?: unknown } | undefined
+      if (typeof meta?.decimals !== 'number') continue
+      decimals = meta.decimals
+      nearDecimals.set(token, decimals)
+    }
+    const balance = await nearView(url, token, 'ft_balance_of', { account_id: manager })
+    const paused = await nearView(url, manager, 'is_paused')
+    if (typeof balance !== 'string' || !/^\d+$/.test(balance)) continue
+    custody.set(target.asset.assetId, {
+      locked: BigInt(balance), decimals, paused: typeof paused === 'boolean' ? paused : null, at: Date.now(), role: 'lockbox', burned: null,
+    })
+    // A lockbox serving other chains too holds their backing as well; which ones is
+    // what keeps its payout from being judged against Hydration's flows alone.
+    let also: number[] | null = []
+    for (const chain of otherKnownChains(target.chainId, hydrationChainId)) {
+      const peer = await nearView(url, manager, 'get_peer', { chain_id: chain })
+      if (peer === undefined) { also = null; break }
+      if (peer !== null) also.push(chain)
+    }
+    nearAlsoPeers.set(key, also)
+  }
+  return { custody, executed: executedOk ? executed : null }
+}
+
 // ─────────────────────── rate-limiter fuses ───────────────────────
 
 // The four calls one manager answers about its two legs, plus the window they
@@ -2461,6 +2538,10 @@ async function readBackingCycle(
         // Sui exposes each inbox entry's release state but not its amount at
         // this precision, so a HELD entry is not subtracted as queued — it
         // keeps degrading to custody surplus, never to a shortfall.
+      } else if (family === 'near') {
+        const near = await readNearCustody(url, targets, pendingOutboundDigests(timeline.sends, targets, chainId, queueCutoffMs), hydrationChainId)
+        read = near.custody
+        executed = near.executed
       } else if (family === 'evm') {
         const evm = await readEvmCustody(url, targets, hydrationChainId, pendingOutboundDigests(timeline.sends, targets, chainId, queueCutoffMs))
         read = evm.custody
@@ -2478,10 +2559,12 @@ async function readBackingCycle(
         else if (family !== 'evm') {
           const sol = solanaMints.get(key)
           const suiMode = suiModes.get(key)
+          const nearToken = nearTokens.get(key)
           peerStaticsNow.set(key, {
-            mode: sol ? sol.mode : suiMode == null ? null : /^burn/i.test(suiMode) ? 1 : 0,
-            token: sol?.mint ?? (target.expectedToken ? displayChainAddress(family, target.expectedToken) : null),
-            name: null, symbol: null, decimals: target.peerDecimals, alsoPeers: null, at: Date.now(),
+            // A NEAR manager is read only as a lockbox (readNearCustody).
+            mode: sol ? sol.mode : nearToken ? 0 : suiMode == null ? null : /^burn/i.test(suiMode) ? 1 : 0,
+            token: sol?.mint ?? nearToken ?? (target.expectedToken ? displayChainAddress(family, target.expectedToken) : null),
+            name: null, symbol: null, decimals: target.peerDecimals, alsoPeers: nearToken ? nearAlsoPeers.get(key) ?? null : null, at: Date.now(),
           })
         }
       }

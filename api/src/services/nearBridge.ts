@@ -298,8 +298,29 @@ async function discoverManagers(): Promise<void> {
   discoveredAt = Date.now()
 }
 
+// One discovery at a time, shared by the sync and by nearManagerNames.
+let discovering: Promise<void> | null = null
+function ensureDiscovered(): Promise<void> {
+  if (Date.now() - discoveredAt <= DISCOVER_INTERVAL_MS) return Promise.resolve()
+  discovering ??= discoverManagers().finally(() => { discovering = null })
+  return discovering
+}
+
+/**
+ * Every Hydration NTT manager on NEAR, keyed by the hash Wormhole carries it as
+ * (sha256 of the account id, no 0x) — how a peer registration names it. For the
+ * backing monitor, which awaits this inside its own cycle; a failed discovery
+ * leaves the managers already known.
+ */
+export async function nearManagerNames(): Promise<ReadonlyMap<string, string>> {
+  try { await ensureDiscovered() } catch (err) {
+    console.error('[wormhole] NEAR manager discovery failed:', err instanceof Error ? err.message : err)
+  }
+  return new Map([...managers.values()].map(m => [m.emitter, m.name]))
+}
+
 async function sync(): Promise<void> {
-  if (Date.now() - discoveredAt > DISCOVER_INTERVAL_MS) await discoverManagers()
+  await ensureDiscovered()
   // One manager failing must not hold back the others' resolutions.
   for (const m of managers.values()) {
     try {

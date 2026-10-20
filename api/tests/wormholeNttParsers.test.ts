@@ -8,6 +8,8 @@ import {
   decodeU128Le,
   deTrim,
   displayChainAddress,
+  nearViewRequest,
+  parseNearViewResult,
   encodeBalanceOf,
   encodeGetInboundQueuedTransfer,
   encodeGetPeer,
@@ -497,5 +499,29 @@ describe('WORMHOLE_ORIGIN_RPC_URLS', () => {
     expect(parseOriginRpcUrls('["https://x"]').size).toBe(0)
     expect(parseOriginRpcUrls(undefined).size).toBe(0)
     expect(parseOriginRpcUrls('{"abc":"https://x","2":"ftp://x","30":"https://base.example"}')).toEqual(new Map([[30, 'https://base.example']]))
+  })
+})
+
+describe('NEAR views', () => {
+  it('builds a final-state call_function query with base64 JSON args', () => {
+    const req = nearViewRequest('zec.omft.near', 'ft_balance_of', { account_id: 'ntt-zec.hydration-whm.near' }) as { params: Record<string, string> }
+    expect(req.params).toMatchObject({ request_type: 'call_function', finality: 'final', account_id: 'zec.omft.near', method_name: 'ft_balance_of' })
+    expect(JSON.parse(Buffer.from(req.params.args_base64, 'base64').toString())).toEqual({ account_id: 'ntt-zec.hydration-whm.near' })
+  })
+
+  // Real answers: ft_balance_of returns a quoted integer, is_paused a bare bool.
+  it('decodes the byte-array result into the JSON value', () => {
+    const bytes = (v: string) => ({ result: { result: [...Buffer.from(v)] } })
+    expect(parseNearViewResult(bytes('"889749871"'))).toBe('889749871')
+    expect(parseNearViewResult(bytes('false'))).toBe(false)
+  })
+
+  // A contract panic (a missing argument) comes back without `result`; it must read
+  // as unknown, never as a zero balance or "not paused".
+  it('reads an error or malformed answer as undefined', () => {
+    expect(parseNearViewResult({ result: { error: 'wasm execution failed' } })).toBeUndefined()
+    expect(parseNearViewResult({ error: { message: 'x' } })).toBeUndefined()
+    expect(parseNearViewResult({ result: { result: [999] } })).toBeUndefined()
+    expect(parseNearViewResult(null)).toBeUndefined()
   })
 })
