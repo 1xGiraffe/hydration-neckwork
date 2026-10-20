@@ -340,9 +340,8 @@ export interface WormholeSummary {
 export const HYDRATION_WORMHOLE_CHAIN_ID = 73
 
 // Wormhole numbers chains itself. Only the family matters to the read recipes:
-// Solana is chain 1, Sui is chain 21, NEAR is chain 15 (named and linked only —
-// it has no custody read recipe), and everything else Hydration carries is an
-// EVM chain reachable by JSON-RPC. An unknown future id with a configured
+// Solana is chain 1, Sui is chain 21, NEAR is chain 15, and everything else
+// Hydration carries is an EVM chain reachable by JSON-RPC. An unknown future id with a configured
 // endpoint is treated as EVM rather than skipped.
 export function wormholeChainFamily(chainId: number): WormholeChainFamily {
   if (chainId === 1) return 'solana'
@@ -391,7 +390,7 @@ export const WORMHOLE_CHAINS: Readonly<Record<number, WormholeChainInfo>> = {
   1: { name: 'Solana', family: 'solana', evmChainId: null, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://orbmarkets.io/address/' },
   2: { name: 'Ethereum', family: 'evm', evmChainId: 1, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://etherscan.io/address/' },
   // NEAR: ZEC (zec.omft.near, NEAR Intents' omni token) arrives from here.
-  15: { name: 'NEAR', family: 'near', evmChainId: null, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://nearblocks.io/address/' },
+  15: { name: 'NEAR', family: 'near', evmChainId: null, layer: 'l1', publicRpc: 'https://free.rpc.fastnear.com', riskNote: null, explorer: 'https://nearblocks.io/address/' },
   21: { name: 'Sui', family: 'sui', evmChainId: null, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://suivision.xyz/object/' },
   30: {
     name: 'Base', family: 'evm', evmChainId: 8453, layer: 'l2', publicRpc: null,
@@ -738,6 +737,26 @@ export function displayChainAddress(family: WormholeChainFamily, bytes32: string
   if (family === 'near') return NEAR_KNOWN_ACCOUNTS.get(body.toLowerCase()) ?? '0x' + body
   if (family === 'evm' && /^0{24}/.test(body)) return '0x' + body.slice(24)
   return '0x' + body
+}
+
+// ─────────────────────── NEAR views ───────────────────────
+
+/** A NEAR `call_function` view request (JSON-RPC `query`) on a contract. */
+export function nearViewRequest(account: string, method: string, args: Record<string, unknown> = {}): unknown {
+  return {
+    jsonrpc: '2.0', id: 1, method: 'query',
+    params: {
+      request_type: 'call_function', finality: 'final', account_id: account, method_name: method,
+      args_base64: Buffer.from(JSON.stringify(args)).toString('base64'),
+    },
+  }
+}
+
+/** A view's JSON return value, or undefined for an error or a malformed answer. */
+export function parseNearViewResult(json: unknown): unknown {
+  const result = (json as { result?: { result?: unknown } } | null)?.result?.result
+  if (!Array.isArray(result) || !result.every(b => Number.isInteger(b) && b >= 0 && b < 256)) return undefined
+  try { return JSON.parse(Buffer.from(result as number[]).toString('utf8')) } catch { return undefined }
 }
 
 // ─────────────────────── NTT wire format ───────────────────────
