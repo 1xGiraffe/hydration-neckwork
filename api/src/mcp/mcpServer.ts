@@ -10,6 +10,13 @@ import type { ToolContext, ToolDefinition, ToolError, ToolOutput } from './toolT
 const SERVER_NAME = 'hydration-explorer'
 const SERVER_VERSION = '1.0.0'
 
+// The most array elements and object members one tools/call `arguments` payload
+// may hold (GHSA-46jr-4wx8-v453). Without a bound the SDK validates however many
+// a request carries, and one body inside the request size limit can exhaust the
+// process's memory. The largest legitimate call here is under twenty (get_activity
+// with every parameter set), so this leaves wide headroom.
+export const MAX_TOOL_INPUT_ELEMENTS = 1000
+
 const TRUNCATION_NOTE = '\n\n_[truncated: the answer exceeded this server\'s text budget. Narrow the request — a smaller `limit`, a tighter window, or fewer `include` sections — to see the rest.]_'
 
 /**
@@ -108,7 +115,7 @@ function toolCallback(def: ToolDefinition, ctx: ToolContext) {
  * between calls and any number of agents can connect without server memory.
  */
 export function createMcpServer(ctx: ToolContext): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION })
+  const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, { maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS })
 
   for (const def of TOOL_DEFINITIONS) {
     server.registerTool(def.name, {
