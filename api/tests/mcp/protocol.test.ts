@@ -3,7 +3,7 @@ import http from 'node:http'
 import type { FastifyInstance } from 'fastify'
 import { buildMcpApp } from '../../src/mcp/app.ts'
 import { TOOL_DEFINITIONS } from '../../src/mcp/registry.ts'
-import { renderToolText } from '../../src/mcp/mcpServer.ts'
+import { MAX_TOOL_INPUT_ELEMENTS, renderToolText } from '../../src/mcp/mcpServer.ts'
 import type { UpstreamClient } from '../../src/mcp/upstream.ts'
 
 // A JSON-RPC round trip over the real Streamable HTTP transport. The app
@@ -236,6 +236,16 @@ describe('JSON-RPC envelope conformance', () => {
     const nameless = await rpc({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { arguments: {} } })
     expect(nameless.json.error.code).toBe(-32602)
     expect(nameless.json.error.message).toMatch(/params\.name/)
+  })
+
+  it('refuses tool arguments with more elements than the server allows', async () => {
+    const include = Array.from({ length: MAX_TOOL_INPUT_ELEMENTS + 1 }, () => 'balances')
+    const { status, json } = await rpc({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'get_account', arguments: { address: '7L53bUTBbfuj14UpdCNPwmgzzHSsrsTWBHX5pys32mVWM3C1', include } } })
+    expect(status).toBe(200)
+    // The SDK refuses before validating the arguments or calling the tool, so the
+    // upstream stub that throws on any read is never reached.
+    expect(json.result.isError).toBe(true)
+    expect(json.result.content[0].text).toContain(`more than the maximum of ${MAX_TOOL_INPUT_ELEMENTS} elements`)
   })
 
   it('calls a tool that takes no required arguments by name alone', async () => {
