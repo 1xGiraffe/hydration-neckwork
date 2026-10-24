@@ -29,6 +29,7 @@ const DISCOVER_INTERVAL_MS = 3_600_000
 const FETCH_TIMEOUT_MS = 10_000
 const MAX_PAGES_PER_SYNC = 20
 const TX_BATCH = 20 // the API's own limit per /v0/transactions request
+const ACCOUNT_PAGE_SIZE = 50
 
 // Omni Bridge's Zcash connector: a `verify_deposit_v2` call carrying the deposit's
 // raw Zcash transaction. Its transfer_sent names the connector, never the user.
@@ -249,19 +250,31 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 interface AccountTxsPage { account_txs: { transaction_hash: string; tx_block_height: number }[]; resume_token?: string }
 
+// The account's transactions at or above `fromHeight`, oldest first. FastNEAR answers
+// "ascending from 0" and "newest first" in well under a second but "ascending from
+// block N" in ~30 s (measured 2026-10-21), past the request timeout — which aborted
+// every incremental sync after the first. So a later sync reads newest first and
+// pages back only until it reaches the synced height. The page size is always
+// explicit: newest first with is_event_log and the default size stalled past 60 s,
+// the same read at limit 50 answered in 0.4 s.
 async function accountTxs(account: string, fromHeight: number, eventLogOnly: boolean): Promise<AccountTxsPage['account_txs']> {
   const out: AccountTxsPage['account_txs'] = []
+  const desc = fromHeight > 0
   let resume: string | undefined
+  let reached = !desc
   for (let page = 0; page < MAX_PAGES_PER_SYNC; page++) {
     const res = await post<AccountTxsPage>('/v0/account', {
-      account_id: account, desc: false, from_tx_block_height: fromHeight,
+      account_id: account, desc, limit: ACCOUNT_PAGE_SIZE, ...(desc ? {} : { from_tx_block_height: 0 }),
       ...(eventLogOnly ? { is_event_log: true } : {}), ...(resume ? { resume_token: resume } : {}),
     })
-    out.push(...(res.account_txs ?? []))
-    if (!res.resume_token) break
+    const txs = res.account_txs ?? []
+    out.push(...txs.filter(t => t.tx_block_height >= fromHeight))
+    if (desc && txs.some(t => t.tx_block_height < fromHeight)) { reached = true; break }
+    if (!res.resume_token) { reached = true; break }
     resume = res.resume_token
   }
-  return out
+  if (!reached) console.warn(`[Explorer] NEAR bridge read of ${account} stopped at the page cap before block ${fromHeight}; older transactions wait for the next sync`)
+  return out.sort((a, b) => a.tx_block_height - b.tx_block_height)
 }
 
 async function transactions(hashes: string[]): Promise<FastNearTx[]> {
