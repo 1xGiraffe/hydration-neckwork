@@ -625,7 +625,7 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
   if (!anchor) return empty
   const anchorSec = BigInt(Math.floor(new Date(iso(anchor.anchor)).getTime() / 1000))
 
-  const [prices, omni, stable, omniFarms, sharePools, xykMeta, xykFees, v3Fees, xykFarmRows, xykFarmedRows, v3Registry, pegRows, gigaApr, xykPayouts] = await Promise.all([
+  const [prices, omni, stable, omniFarms, sharePools, xykMeta, xykFees, v3Fees, xykFarmRows, xykFarmedRows, v3Registry, pegRows, gigaApr] = await Promise.all([
     ensurePrices(),
     omnipoolYield(c, '30d'),
     stableswapYield(c, '30d'),
@@ -640,8 +640,10 @@ async function buildExplorerYields(c: ClickHouseClient): Promise<ExplorerYields>
     c.query({ query: PEG_WINDOW_SQL, query_params: { anchor: Number(anchorSec) }, format: 'JSONEachRow' })
       .then(r => r.json<{ asset_ids: number[]; n0: string[]; d0: string[]; n1: string[]; d1: string[]; t0: number; t1: number; gave_back: number[] }>()),
     cached('explorer:gigahdx-apr', 600_000, () => gigahdxApr(c)).catch(() => null),
-    readFarmPayouts(c, 'XYKWarehouseLM', Number(anchorSec)),
   ])
+  // After the farm config: a live farm silent through the payout window still needs
+  // its newest sync (readFarmPayouts), so the reader is told which farms are live.
+  const xykPayouts = await readFarmPayouts(c, 'XYKWarehouseLM', Number(anchorSec), foldLiveXykFarms(xykFarmRows).map(f => f.globalFarmId))
   const price = priceLookup(prices)
   const reserves = await loadMmReserves(c, anchorSec, price)
 
