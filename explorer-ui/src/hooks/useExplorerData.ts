@@ -648,6 +648,13 @@ export function useV3PoolHistory(address: string) {
 export function useV3PoolLiquidity(address: string) {
   return useQuery({ queryKey: ['v3-pool-liquidity', address], queryFn: ({ signal }) => api.v3PoolLiquidity(address, signal), staleTime: 30_000 })
 }
+export function useV3PoolLps(address: string, offset: number, limit: number) {
+  return useQuery({
+    queryKey: ['v3-pool-lps', address, offset, limit],
+    queryFn: ({ signal }) => api.v3PoolLps(address, offset, limit, signal),
+    staleTime: 120_000, placeholderData: keepPreviousData,
+  })
+}
 export function useV3PoolActivity(address: string, limit = 25) {
   const ri = useInterval()
   return useQuery({ queryKey: ['v3-pool-activity', address, limit], queryFn: ({ signal }) => api.v3PoolActivity(address, limit, signal), staleTime: BLOCK_STALE_MS, refetchInterval: ri })

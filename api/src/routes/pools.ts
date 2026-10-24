@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import { getAssetLiquidity, getOmnipoolAssetLps, getOmnipoolDetail, getOmnipoolSnapshots, getPoolDetail, getPoolLps, getPoolSnapshots, getPoolsIndex, getUniswapV3PoolDetail, getUniswapV3PoolHistory, getUniswapV3PoolLiquidity } from '../services/poolService.ts'
+import { getAssetLiquidity, getOmnipoolAssetLps, getOmnipoolDetail, getOmnipoolSnapshots, getPoolDetail, getPoolLps, getPoolSnapshots, getPoolsIndex, getUniswapV3PoolDetail, getUniswapV3PoolHistory, getUniswapV3PoolLiquidity, getUniswapV3PoolLps } from '../services/poolService.ts'
 import { getAssetActivity, getPoolSwaps, getV3PoolActivity } from '../services/explorerService.ts'
 import { DAILY_GRAIN, grainForWindow } from '../services/historyGrain.ts'
 import { DEFAULT_SNAPSHOT_POINTS, MAX_SNAPSHOT_POINTS, SNAPSHOT_RESOLUTIONS, snapshotRequestProblem } from '../services/poolSnapshots.ts'
@@ -101,6 +101,15 @@ export async function poolsRoutes(fastify: FastifyInstance) {
     const dist = await getUniswapV3PoolLiquidity(address.data)
     if (!dist) return reply.status(404).send({ error: 'Pool not found' })
     return dist
+  })
+  // Who provides the pool's liquidity: vault shareholders and position owners, paged.
+  fastify.get('/explorer/pool/v3/:address/lps', async (req, reply) => {
+    const address = evmAddress.safeParse((req.params as { address: string }).address)
+    if (!address.success) return reply.status(400).send({ error: 'Invalid pool address' })
+    const { limit, offset } = pageParams(req.query as Record<string, string | undefined>)
+    const lps = await getUniswapV3PoolLps(address.data, limit, offset)
+    if (!lps) return reply.status(404).send({ error: 'Pool not found' })
+    return lps
   })
   fastify.get('/explorer/pool/v3/:address/activity', async (req, reply) => {
     const address = evmAddress.safeParse((req.params as { address: string }).address)
