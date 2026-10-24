@@ -350,6 +350,7 @@ function qualifiers(r: ActivityRow): string[] {
       const chain = r.xcmDir === 'in' ? r.fromChain : r.destChain
       out.push(`${r.xcmDir === 'in' ? 'in from' : 'out to'} ${chain ?? 'unknown chain'}`)
       if (r.xcmExecuted === false) out.push('not executed at destination')
+      if (r.xcmTrapped) out.push('TRAPPED: failed on Hydration, not credited')
       if (r.fastRelay?.role === 'settlement') out.push('relay settlement: refills the relay pool, which already paid the recipient')
       if (r.fastRelay?.role === 'delivery') out.push('fast delivery from the relay pool')
       break
@@ -531,8 +532,20 @@ export function activityDetail(r: ActivityRow, base: string, opts: ActivityDetai
     return parts.join(' — ')
   }
   const fees = r.xcmFees?.length ? bullets(r.xcmFees.map(feeLeg)) : null
+  // A failed arrival: what it carried, why it stopped (when the fee asset says so) and
+  // who can recover it — the trap is keyed by the ORIGIN, so only the sending chain.
+  const t = r.xcmTrapped
+  const trapped = t ? [
+    `**Trapped — not delivered.** The message failed on Hydration; nothing was credited${r.who ? ' to the beneficiary' : ''} and its assets sit in Hydration's XCM asset trap.`,
+    bullets(t.assets.map(a => a.asset
+      ? `${formatAmount(a.amount, a.asset.decimals, assetLabel(a.asset))} (${formatUsd(a.valueUsd)})`
+      : `${a.amount} of an unregistered asset`)),
+    t.feeAsset ? `Fee asset offered: ${assetLabel(t.feeAsset)}${t.feeAssetAccepted === false ? ' — not accepted for fees on Hydration at the time, so execution stopped buying it' : t.feeAssetAccepted === true ? ' — accepted; the message failed for another reason' : ''}.` : '',
+    `Recovery: only ${r.fromChain ?? 'the sending chain'} can claim it, by sending ClaimAsset from its own origin and paying Hydration's fee in an accepted asset.`,
+  ].filter(Boolean).join('\n') : null
   return [
     head,
+    trapped ?? '',
     fees ? `**Cross-chain costs**\n${fees}` : '',
     revenueSection(r, opts),
   ].filter(Boolean).join('\n\n')

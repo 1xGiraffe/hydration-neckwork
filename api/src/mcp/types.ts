@@ -328,6 +328,12 @@ export interface ActivityRow {
   // xcm
   xcmDir?: 'in' | 'out'
   xcmFees?: XcmFeeLeg[]
+  /** An inbound message that failed on Hydration: nothing credited, every asset in the asset trap. */
+  xcmTrapped?: {
+    assets: { asset: AssetRef | null; amount: string; valueUsd: number | null }[]
+    feeAsset: AssetRef | null
+    feeAssetAccepted: boolean | null
+  }
   xcmExecuted?: boolean
   xcmLegIndex?: number
   destChain?: string
