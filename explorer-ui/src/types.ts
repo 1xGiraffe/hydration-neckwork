@@ -43,7 +43,7 @@ export interface AccountRef {
   identity?: AccountIdentity | null   // on-chain Identity.IdentityOf display + judgement status
   profile?: ProfileRef | null         // self-authored wallet-login profile, if the account has one
   isContract?: boolean                // deployed EVM smart contract — pills wear the </> glyph
-  contractName?: string               // verified source's contract name — the pill's label, like an identity display
+  contractName?: string               // the contract's display label (verified name, or "X (proxy)" / "X (implementation)") — the pill's label, like an identity display; the verified name itself is contract.verification.name
 }
 
 export interface ExplorerStats {
@@ -178,6 +178,15 @@ export interface ContractVerification {
 export interface ContractInfo {
   address: string
   account: AccountRef
+  // ERC-1967 proxy facts (additive: absent from an api that predates them). A proxy
+  // is the address to call; its implementation is a link, never its own code.
+  proxy?: {
+    implementation: AccountRef | null
+    implementationName: string | null
+    beacon: AccountRef | null
+    history: { kind: 'implementation' | 'beacon'; target: AccountRef; blockHeight: number; timestamp: string }[]
+  } | null
+  implementationOf?: { current: AccountRef[]; former: AccountRef[] }
   verified: { status: string; name: string; matchType: string } | null
   verification: ContractVerification | null
   creation: ContractCreation

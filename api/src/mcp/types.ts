@@ -86,6 +86,7 @@ export interface AccountRef {
   identity?: AccountIdentity | null
   profile?: ProfileRef | null
   isContract?: boolean
+  /** Display label: the verified name, marked "(proxy)" / "(implementation)" for ERC-1967 pairs. */
   contractName?: string
   /** Set on a cross-chain counterparty: its page on the destination's explorer. */
   subscanUrl?: string | null

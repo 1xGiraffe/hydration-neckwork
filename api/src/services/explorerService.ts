@@ -46,7 +46,7 @@ import { accountIcon, emojisMatchingName, emojiNameFor, parseSuffixEmojiQuery } 
 import { encodeAddress, base58Encode } from '@polkadot/util-crypto'
 import { hexToU8a } from '@polkadot/util'
 import { proxyInfoFor, multisigCompositionFor, multisigMembershipsFor, pendingMultisigOps, threshold1OpsFor, type ProxyRelation, type PendingMultisigOp } from './proxyMultisigService.ts'
-import { isContractAccount, contractByH160, allContracts, contractsPage, type ContractRegistryEntry, type ContractCreation, type ContractSort } from './contractRegistryService.ts'
+import { isContractAccount, contractByH160, allContracts, contractsPage, proxyOf, proxiesOfImplementation, type ContractRegistryEntry, type ContractCreation, type ContractSort } from './contractRegistryService.ts'
 import { verifiedContractInfo, verificationDisplay, searchVerifiedNames, allVerifiedContracts, type VerificationDisplay } from './contractVerificationService.ts'
 import { decodeEvmCallSites, attachEvmLogDecodes, decodeEvmLogArgs, decodeEventLog, getContractAbiIndexes, type DecodedEvmCall, type EvmLogDecode } from './contractAbiDecode.ts'
 import {
@@ -329,14 +329,35 @@ export function resolveDisplayAccountId(accountId: string): string {
   return reservedH160AccountId(evm.slice(2)) ?? evmBindings.get(evm) ?? taggedAccountByH160(evm) ?? accountId
 }
 
-// A verified contract's own name for an account id, as an optional-field spread.
+// A contract's display name for an account id, as an optional-field spread.
 // evmFromAccountId returns null for anything but a genuinely ETH-prefixed
-// account, so no substrate account can borrow a contract's name; the map is
-// in-memory, so this is one lookup on every pill.
+// account, so no substrate account can borrow a contract's name; every lookup
+// is in-memory, so this stays one cheap call on every pill.
 function contractNameOf(accountId: string): { contractName?: string } {
   const evm = evmFromAccountId(accountId)
-  const name = evm ? verifiedContractInfo(evm)?.name : undefined
+  if (!evm) return {}
+  const name = contractDisplayName(evm)
   return name ? { contractName: name } : {}
+}
+
+const shortH160 = (h160: string): string => `${h160.slice(0, 6)}…${h160.slice(-4)}`
+
+// The name a contract goes by. A proxy is named for the logic it delegates to —
+// its own verified name is the generic ERC1967Proxy, which says nothing about what
+// calling it does — and says it is the proxy; without a verified implementation it
+// names the implementation's address. A verified contract that proxies currently
+// delegate to says it is an implementation, which is never the address to call.
+export function contractDisplayName(h160: string): string | undefined {
+  const evm = h160.toLowerCase()
+  const own = verifiedContractInfo(evm)?.name
+  const proxy = proxyOf(evm)
+  if (proxy?.implementation) {
+    const implName = verifiedContractInfo(proxy.implementation)?.name
+    return implName ? `${implName} (proxy)` : `proxy → ${shortH160(proxy.implementation)}`
+  }
+  if (proxy?.beacon) return own ? `${own} (beacon proxy)` : `beacon proxy → ${shortH160(proxy.beacon)}`
+  if (own && proxiesOfImplementation(evm).current.length) return `${own} (implementation)`
+  return own
 }
 
 export function accountRef(accountId: string): AccountRef {
@@ -4405,6 +4426,19 @@ export interface ContractMetrics {
 export interface ContractDisplay extends ContractMetrics {
   address: string
   account: AccountRef
+  // ERC-1967: this contract is a proxy — the address users call — delegating to
+  // `implementation` (for a beacon proxy, the one `beacon` announced). The proxy's own source and ABI
+  // stay its own (`verified`, `verification`); the implementation is a link, never
+  // presented as this address's bytecode. `history` is every recorded upgrade.
+  proxy: {
+    implementation: AccountRef | null
+    implementationName: string | null
+    beacon: AccountRef | null
+    history: { kind: 'implementation' | 'beacon'; target: AccountRef; blockHeight: number; timestamp: string }[]
+  } | null
+  // This contract is the implementation behind these proxies now, and was behind
+  // `former` until an upgrade moved them on.
+  implementationOf: { current: AccountRef[]; former: AccountRef[] }
   verified: { status: string; name: string; matchType: string } | null
   verification: VerificationDisplay
   creation: ContractCreationDisplay
@@ -4432,10 +4466,20 @@ function contractDisplay(e: ContractRegistryEntry): ContractDisplay {
       blockHeight: c.blockHeight, timestamp: c.timestamp, txHash: c.txHash,
     } : { method: 'unknown' }
   const verification = verificationDisplay(verifiedContractInfo(e.address), e.codeHash)
+  const refOf = (h160: string) => accountRef(evmAccountIdFromAddress(h160) ?? h160)
+  const p = proxyOf(e.address)
+  const served = proxiesOfImplementation(e.address)
   return {
     ...contractMetrics(e.address),
     address: e.address,
-    account: accountRef(evmAccountIdFromAddress(e.address) ?? e.address),
+    account: refOf(e.address),
+    proxy: p ? {
+      implementation: p.implementation ? refOf(p.implementation) : null,
+      implementationName: p.implementation ? verifiedContractInfo(p.implementation)?.name ?? null : null,
+      beacon: p.beacon ? refOf(p.beacon) : null,
+      history: p.history.map(u => ({ kind: u.kind, target: refOf(u.target), blockHeight: u.blockHeight, timestamp: u.timestamp })),
+    } : null,
+    implementationOf: { current: served.current.map(refOf), former: served.former.map(refOf) },
     verified: verification.status === 'verified'
       ? { status: 'verified', name: verification.name ?? '', matchType: verification.matchType ?? '' }
       : null,
@@ -4457,7 +4501,7 @@ function contractDisplay(e: ContractRegistryEntry): ContractDisplay {
 // rather than in the registry's own comparator.
 export function getContracts(offset: number, limit: number, sort: ContractSort): { contracts: ContractDisplay[]; total: number } {
   const sorted = sort === 'name'
-    ? sortContractsByName(allContracts(), a => verifiedContractInfo(a)?.name ?? '')
+    ? sortContractsByName(allContracts(), a => contractDisplayName(a) ?? '')
     : CONTRACT_METRIC_SORTS[sort]
       ? sortContractsByMetric(allContracts(), contractMetrics, sort)
       : null
