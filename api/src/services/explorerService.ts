@@ -13273,7 +13273,7 @@ async function getRecentV3Rows(
     const prices = await ensurePrices()
     const want = offset + limit
     const unnamedActBlocks = accountsH160 && kind !== 'swap' ? await v3UnnamedActBlocks(accountsH160) : undefined
-    const acts = await v3FeedActivities(registry, { bound: tw ?? '1', kind, accountsH160, pools, unnamedActBlocks, limit: v3ActReadLimit(want) })
+    const acts = await v3FeedActivities(registry, { bound: tw ?? '1', kind, action: scope.action, accountsH160, pools, unnamedActBlocks, limit: v3ActReadLimit(want) })
     const venueSet = venues ? v3VenueSet(venues) : new Set<string>()
     const [calledActs, built] = await Promise.all([
       accountsH160 ? v3ActsCalling(acts, accountsH160) : new Set<string>(),

@@ -194,7 +194,52 @@ function pos(n: bigint): string { return (n > 0n ? n : 0n).toString() }
  * extrinsics; they are grouped by (block, extrinsic) and each group is read in
  * event order. The output is ordered oldest→newest by (block, event index).
  */
-export function classifyV3Events(rows: readonly V3EventRow[], ctx: V3ClassifyContext): V3Activity[] {
+// ── Fee collection principal ─────────────────────────────────────────────────
+//
+// A Collect pays a position's principal (what its decreases or burns freed) together
+// with its earned fees, and the principal is usually freed in an EARLIER extrinsic —
+// decrease, then collect later. Read per extrinsic alone, every such collect booked
+// its whole principal as fees (0.346 HOLLAR of "fees" on a 0.000139 HOLLAR collect).
+// So each Collect's principal comes from its position's own history: everything freed
+// since the previous collect, less what that collect left owed when it took less.
+
+/** A position: a manager NFT, or a raw pool range (pool, owner, ticks). */
+export function v3PositionKey(r: Pick<V3EventRow, 'kind' | 'contract_address' | 'token_id' | 'owner' | 'tick_lower' | 'tick_upper'>): string | null {
+  if (r.kind === 'manager') return `m:${r.contract_address}:${r.token_id}`
+  if (r.kind === 'pool') return `p:${r.contract_address}:${r.owner}:${r.tick_lower}:${r.tick_upper}`
+  return null
+}
+
+/**
+ * Per Collect (keyed `block:eventIndex`), the principal it paid out, from the
+ * position's DecreaseLiquidity/Burn and Collect rows in chain order. A collect that
+ * takes less than is owed leaves the rest owed to the next.
+ */
+export function collectPrincipals(history: readonly V3EventRow[]): Map<string, { a0: bigint; a1: bigint }> {
+  const owed = new Map<string, { a0: bigint; a1: bigint }>()
+  const out = new Map<string, { a0: bigint; a1: bigint }>()
+  const sorted = [...history].sort((a, b) => a.block_height - b.block_height || a.event_index - b.event_index)
+  for (const r of sorted) {
+    const key = v3PositionKey(r)
+    if (!key) continue
+    const cur = owed.get(key) ?? { a0: 0n, a1: 0n }
+    if (r.event_name === 'DecreaseLiquidity' || r.event_name === 'Burn') {
+      owed.set(key, { a0: cur.a0 + big(r.amount0), a1: cur.a1 + big(r.amount1) })
+    } else if (r.event_name === 'Collect') {
+      const c0 = big(r.amount0), c1 = big(r.amount1)
+      const p0 = cur.a0 < c0 ? cur.a0 : c0
+      const p1 = cur.a1 < c1 ? cur.a1 : c1
+      out.set(`${r.block_height}:${r.event_index}`, { a0: p0, a1: p1 })
+      owed.set(key, { a0: cur.a0 - p0, a1: cur.a1 - p1 })
+    }
+  }
+  return out
+}
+
+export function classifyV3Events(
+  rows: readonly V3EventRow[], ctx: V3ClassifyContext,
+  principals?: ReadonlyMap<string, { a0: bigint; a1: bigint }>,
+): V3Activity[] {
   const groups = new Map<string, V3EventRow[]>()
   for (const r of rows) {
     const key = `${r.block_height}:${r.extrinsic_index ?? 'hook'}`
@@ -202,11 +247,11 @@ export function classifyV3Events(rows: readonly V3EventRow[], ctx: V3ClassifyCon
     if (g) g.push(r); else groups.set(key, [r])
   }
   const out: V3Activity[] = []
-  for (const group of groups.values()) out.push(...classifyGroup(group.sort((a, b) => a.event_index - b.event_index), ctx))
+  for (const group of groups.values()) out.push(...classifyGroup(group.sort((a, b) => a.event_index - b.event_index), ctx, principals))
   return out.sort((a, b) => a.blockHeight - b.blockHeight || a.eventIndex - b.eventIndex)
 }
 
-function classifyGroup(rows: V3EventRow[], ctx: V3ClassifyContext): V3Activity[] {
+function classifyGroup(rows: V3EventRow[], ctx: V3ClassifyContext, principals?: ReadonlyMap<string, { a0: bigint; a1: bigint }>): V3Activity[] {
   const out: V3Activity[] = []
   const poolOf = (addr: string): V3PoolInfo | undefined => ctx.pools.get(addr.toLowerCase())
   const base = (r: V3EventRow, pool: V3PoolInfo | null): Pick<V3Activity, 'blockHeight' | 'timestamp' | 'eventIndex' | 'extrinsicIndex' | 'pool' | 'contract' | 'asset0' | 'asset1'> => ({
@@ -271,7 +316,7 @@ function classifyGroup(rows: V3EventRow[], ctx: V3ClassifyContext): V3Activity[]
       } else if (r.event_name === 'Collect') {
         const collect = claimPoolRow(r.contract_address, ['Collect'], r.event_index)
         const pool = collect ? poolOf(collect.contract_address) ?? null : null
-        const principal = decreased.get(key) ?? { a0: 0n, a1: 0n }
+        const principal = principals?.get(`${r.block_height}:${r.event_index}`) ?? decreased.get(key) ?? { a0: 0n, a1: 0n }
         const fee0 = big(r.amount0) - principal.a0
         const fee1 = big(r.amount1) - principal.a1
         // Fees are what the collect paid beyond the principal the decrease booked;
@@ -346,7 +391,7 @@ function classifyGroup(rows: V3EventRow[], ctx: V3ClassifyContext): V3Activity[]
         whoAccountId: null, tickLower: r.tick_lower, tickUpper: r.tick_upper, liquidity: r.liquidity,
       })
     } else if (r.event_name === 'Collect') {
-      const principal = burned.get(rangeKey) ?? { a0: 0n, a1: 0n }
+      const principal = principals?.get(`${r.block_height}:${r.event_index}`) ?? burned.get(rangeKey) ?? { a0: 0n, a1: 0n }
       const fee0 = big(r.amount0) - principal.a0
       const fee1 = big(r.amount1) - principal.a1
       if (fee0 > 0n || fee1 > 0n) {
@@ -517,6 +562,17 @@ const ANCHOR_EVENTS: Record<'swap' | 'liquidity', string> = {
     OR (kind = 'pool' AND event_name IN ('Mint', 'Burn', 'Collect')))`,
 }
 
+// Per liquidity action, the events that can produce it: a rare action's anchors are
+// counted among themselves, so the newest-first read reaches them however much other
+// activity is newer. A superset — the classified act is still matched on its action.
+const ACTION_ANCHOR_EVENTS: Record<string, string> = {
+  Add: `((kind = 'manager' AND event_name = 'IncreaseLiquidity') OR (kind = 'vault' AND event_name = 'Deposit') OR (kind = 'pool' AND event_name = 'Mint'))`,
+  Remove: `((kind = 'manager' AND event_name = 'DecreaseLiquidity') OR (kind = 'vault' AND event_name = 'Withdraw') OR (kind = 'pool' AND event_name = 'Burn'))`,
+  CollectFees: `(kind IN ('manager', 'pool') AND event_name = 'Collect')`,
+  Rebalance: `(kind = 'vault' AND event_name = 'Rebalance')`,
+  Compound: `(kind = 'vault' AND event_name = 'ZeroBurn')`,
+}
+
 function sqlList(values: readonly string[]): string {
   return values.map(v => `'${v.toLowerCase().replace(/[^0-9a-fx]/g, '')}'`).join(',') || "''"
 }
@@ -525,6 +581,8 @@ export interface V3FeedOptions {
   /** SQL predicate on block_height / block_timestamp for the window ('1' = everything). */
   bound?: string
   kind: 'swap' | 'liquidity' | 'all'
+  /** A liquidity action the caller filters on: narrows the anchors to the events that can produce it. */
+  action?: string
   /**
    * H160s whose acts are wanted: a log naming them, a position NFT they hold — and,
    * for one that IS a venue contract (a pool, a vault, a position manager), every
@@ -623,7 +681,8 @@ export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions
   const bound = opts.bound ?? '1'
   const where: string[] = [bound]
   let unnamedChunks: string[][] = []
-  const anchor = opts.kind === 'all' ? `(${ANCHOR_EVENTS.swap} OR ${ANCHOR_EVENTS.liquidity})` : ANCHOR_EVENTS[opts.kind]
+  const actionAnchor = opts.kind === 'liquidity' && opts.action ? ACTION_ANCHOR_EVENTS[opts.action] : undefined
+  const anchor = actionAnchor ?? (opts.kind === 'all' ? `(${ANCHOR_EVENTS.swap} OR ${ANCHOR_EVENTS.liquidity})` : ANCHOR_EVENTS[opts.kind])
   where.push(anchor)
   // A pool Mint/Burn/Collect owned by a manager or a vault is that contract's plumbing
   // (the classifier reads the act from the manager's or vault's own event), never an
@@ -683,7 +742,7 @@ export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions
   const anchors = mergeAnchorReads(await Promise.all(reads), scan)
   if (!anchors.length) return []
   const rows = await eventsOfExtrinsics(anchors.map(a => [a.block_height, a.extrinsic_index]))
-  let acts = classifyV3Events(rows, registry.ctx).reverse()
+  let acts = classifyV3Events(rows, registry.ctx, await collectPrincipalsFor(rows)).reverse()
   if (opts.kind !== 'all') acts = acts.filter(a => a.kind === opts.kind)
   if (opts.pools) {
     const pools = new Set(opts.pools.map(p => p.toLowerCase()))
@@ -695,6 +754,27 @@ export async function v3FeedActivities(registry: V3Registry, opts: V3FeedOptions
     acts = acts.filter(a => a.whoAccountId == null || ids.has(a.whoAccountId) || v3ActOnVenue(a, venueSet))
   }
   return acts.slice(opts.offset ?? 0, want)
+}
+
+// The principal of every Collect in `rows`, from the history of exactly the positions
+// that collected there: one bounded read of their decrease/burn and collect rows up to
+// the newest block in `rows`. Positions are few and collect rarely, so this is small.
+async function collectPrincipalsFor(rows: readonly V3EventRow[]): Promise<Map<string, { a0: bigint; a1: bigint }>> {
+  const collects = rows.filter(r => r.event_name === 'Collect' && (r.kind === 'manager' || r.kind === 'pool'))
+  if (!collects.length) return new Map()
+  const managerTuples = [...new Set(collects.filter(r => r.kind === 'manager').map(r => `('${r.contract_address}','${r.token_id}')`))]
+  const poolTuples = [...new Set(collects.filter(r => r.kind === 'pool').map(r => `('${r.contract_address}','${r.owner}',${r.tick_lower},${r.tick_upper})`))]
+  const clauses = [
+    ...(managerTuples.length ? [`(kind = 'manager' AND event_name IN ('DecreaseLiquidity', 'Collect') AND (contract_address, toString(token_id)) IN (${managerTuples.join(',')}))`] : []),
+    ...(poolTuples.length ? [`(kind = 'pool' AND event_name IN ('Burn', 'Collect') AND (contract_address, owner, tick_lower, tick_upper) IN (${poolTuples.join(',')}))`] : []),
+  ]
+  const history = await queryRows<V3EventRow>({
+    query: `SELECT ${EVENT_COLUMNS} FROM price_data.uniswap_v3_events FINAL
+            WHERE block_height <= {top:UInt32} AND (${clauses.join(' OR ')})
+            ORDER BY block_height, event_index`,
+    query_params: { top: Math.max(...collects.map(r => r.block_height)) }, format: 'JSONEachRow',
+  })
+  return collectPrincipals(history)
 }
 
 // Tuples per extrinsic read. A tuple is ~13 bytes of query text and ClickHouse parses
@@ -738,7 +818,7 @@ export async function v3ActivitiesAt(registry: V3Registry, height: number, extri
             ORDER BY event_index`,
     query_params: { h: height, i: extrinsicIndex ?? 0 }, format: 'JSONEachRow',
   })
-  return classifyV3Events(rows, registry.ctx)
+  return classifyV3Events(rows, registry.ctx, await collectPrincipalsFor(rows))
 }
 
 /** One swap by its Swap log (the /swap/<block>-e<n> page). */
