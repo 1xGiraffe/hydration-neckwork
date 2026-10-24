@@ -116,6 +116,9 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
               <div className="dt">Delivered to</div><div className="dd"><AddrPill account={row.fastRelay.recipient} /></div>
             </>}
             {row.who && <><div className="dt">{row.type === 'xcm' && row.fastRelay?.role === 'settlement' ? 'Refilled pool' : 'Account'}</div><div className="dd"><AddrPill account={row.who} /></div></>}
+            {/* After the account, as on a delivered arrival: the account the message was
+                for reads the same either way, and what went wrong follows it. */}
+            {row.type === 'xcm' && row.xcmTrapped && <TrappedRows row={row} />}
             {row.type === 'transfer' && row.to && <><div className="dt">To</div><div className="dd"><AddrPill account={row.to} /></div></>}
             {row.type === 'xcm' && row.xcmDir === 'in' && row.fromTxUrl && <><div className="dt">Origin transaction</div><div className="dd"><a className="ext-link" href={row.fromTxUrl} target="_blank" rel="noopener">{explorerSiteName(row.fromTxUrl)} ↗</a></div></>}
             {row.type === 'xcm' && row.xcmDir !== 'in' && row.destChain && <>
@@ -234,6 +237,31 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
         )}
     </div>
   )
+}
+
+// A failed arrival: what it was carrying, why it stopped (when the fee asset says so),
+// and who can get it back. The trap is keyed by the message's ORIGIN, so only the
+// sending chain can claim — the beneficiary here cannot.
+function TrappedRows({ row }: { row: ActivityRow }) {
+  const t = row.xcmTrapped!
+  const from = row.fromChain ?? 'the sending chain'
+  return <>
+    <div className="dt">Status</div>
+    <div className="dd"><span className="badge fail">Trapped</span> <span className="muted">The message failed on Hydration. Nothing was credited; its assets sit in Hydration's XCM asset trap.</span></div>
+    <div className="dt">Trapped assets</div>
+    <div className="dd mono xcm-fee">{t.assets.map((a, i) => <span key={i}>
+      {a.asset ? <><ExactAmt raw={a.amount} dec={a.asset.decimals} /> <AssetChip asset={a.asset} /></> : <>{a.amount} <span className="muted">unregistered asset</span></>}
+      {a.valueUsd != null && <span className="muted"> · <Usd v={a.valueUsd} /></span>}
+    </span>)}</div>
+    {t.feeAsset && <>
+      <div className="dt">Fee asset</div>
+      <div className="dd"><AssetChip asset={t.feeAsset} />{t.feeAssetAccepted === false
+        ? <span className="muted"> not accepted for fees on Hydration at the time — execution stopped where the message tried to buy it</span>
+        : t.feeAssetAccepted === true ? <span className="muted"> accepted for fees — the message failed for another reason</span> : null}</div>
+    </>}
+    <div className="dt">Recovery</div>
+    <div className="dd muted">Only {from} can claim it, with an XCM program sent from its own origin (ClaimAsset), paying Hydration's fee in an accepted asset.</div>
+  </>
 }
 
 // The token on the far side of a Wormhole NTT transfer, as that chain's own

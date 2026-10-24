@@ -1011,6 +1011,12 @@ export interface ActivityRow {
     contractName?: string
   }
   xcmDir?: 'in' | 'out'      // xcm: transfer direction relative to Hydration
+  /** An inbound message that failed here: nothing credited, every asset in Hydration's asset trap. */
+  xcmTrapped?: {
+    assets: { asset: AssetRef | null; amount: string; valueUsd: number | null }[]
+    feeAsset: AssetRef | null
+    feeAssetAccepted: boolean | null
+  }
   xcmFees?: XcmFeeLeg[]      // xcm outbound: the send's costs beyond its payload
   fromChain?: string         // xcm inbound: origin chain name
   fromParachainId?: number | null
