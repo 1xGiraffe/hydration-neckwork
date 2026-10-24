@@ -201,6 +201,23 @@ async function loadV3VaultMembers(client: ClickHouseClient, rows: readonly Asset
   return out
 }
 
+const XYK_SHARE_MEMBERS = new Map<number, number[]>()
+
+// XYK share token → its two assets, from the pool registry. A failed read draws the
+// shares as before (their own placeholder) rather than failing the directory.
+async function loadXykMembers(client: ClickHouseClient): Promise<Map<number, number[]>> {
+  const out = new Map<number, number[]>()
+  try {
+    const res = await client.query({ query: `SELECT lp_asset_id, asset_a, asset_b FROM price_data.xyk_pool_registry FINAL`, format: 'JSONEachRow' })
+    for (const r of await res.json<{ lp_asset_id: number; asset_a: number; asset_b: number }>()) {
+      if ([r.lp_asset_id, r.asset_a, r.asset_b].every(Number.isInteger)) out.set(Number(r.lp_asset_id), [Number(r.asset_a), Number(r.asset_b)])
+    }
+  } catch (err) {
+    console.error('[ExplorerAssets] xyk pools unavailable for share icons:', err)
+  }
+  return out
+}
+
 async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<void> {
   const res = await client.query({
     query: `SELECT asset_id, symbol, name, decimals, parachain_id, origin_ecosystem, origin_chain_id, origin_asset_id, evm_address FROM price_data.assets FINAL`,
@@ -214,6 +231,13 @@ async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<voi
   // A v3 vault share draws as its vault's tokens the way a pool share draws as its
   // members; it is NOT a stableswap share, so it joins after that set is built.
   for (const [shareId, members] of await loadV3VaultMembers(client, rows)) if (!poolMembers.has(shareId)) poolMembers.set(shareId, members)
+  // An XYK share token draws as its pair too (DOT / MYTH, not a blank #1000227): the
+  // registry names both legs. Icons only — it is not a stableswap share either.
+  const xykMembers = await loadXykMembers(client)
+  for (const [shareId, members] of xykMembers) if (!poolMembers.has(shareId)) poolMembers.set(shareId, members)
+  // Most XYK shares have no registry row of their own, so the uncached fallback in
+  // assetDescriptor needs the pairing too. Kept on a failed read (an empty map).
+  if (xykMembers.size) { XYK_SHARE_MEMBERS.clear(); for (const [id, m] of xykMembers) XYK_SHARE_MEMBERS.set(id, m) }
   // Before the cache is built: iconAssetIdFor reads the pairing, so a newly
   // discovered aToken must know its reserve to borrow that reserve's artwork.
   await discoverATokenUnderlyings(client, rows)
@@ -290,9 +314,11 @@ export function assetDecimalsOrNull(assetId: number): number | null {
 }
 
 export function assetDescriptor(assetId: number): ExplorerAsset {
+  const xykMembers = XYK_SHARE_MEMBERS.get(assetId)
   return cache.get(assetId) ?? {
     assetId,
     iconAssetId: iconAssetIdFor(assetId),
+    ...(xykMembers ? { iconAssetIds: xykMembers.map(iconAssetIdFor) } : {}),
     symbol: `#${assetId}`,
     name: null,
     decimals: 12,
