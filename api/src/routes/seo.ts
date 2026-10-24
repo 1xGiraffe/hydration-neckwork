@@ -491,10 +491,11 @@ export function pageMeta(path: string): PageMeta {
         ...(holders ? { canonicalPath: `/asset/${id}` } : {}),
         // `name` is null for a registry entry that carries only a symbol.
         facts: [['Symbol', asset.symbol], ...(asset.name ? [['Name', asset.name] as [string, string]] : []), ['Asset ID', String(id)]] as [string, string][],
-        title: holders ? `${asset.symbol} holders` : `${asset.symbol} — ${asset.name}`,
+        // Without a name the symbol stands alone, never next to the word "null".
+        title: holders ? `${asset.symbol} holders` : asset.name ? `${asset.symbol} — ${asset.name}` : asset.symbol,
         description: holders
-          ? `Who holds ${asset.symbol} (${asset.name}) on Hydration, largest first.`
-          : `${asset.name} (${asset.symbol}) on Hydration — price, volume, liquidity, holders, pools and recent trades.`,
+          ? `Who holds ${asset.symbol}${asset.name ? ` (${asset.name})` : ''} on Hydration, largest first.`
+          : `${asset.name ? `${asset.name} (${asset.symbol})` : asset.symbol} on Hydration — price, volume, liquidity, holders, pools and recent trades.`,
         crumbs: [CRUMB_HOME, ['Assets', '/assets']],
       }
     }

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { loadExplorerAssets, stopExplorerAssetsRefresh } from '../src/services/explorerAssets.ts'
 import { pageMeta, renderHead, renderPage, renderBody, PUBLIC_URL, UNBOUNDED_PREFIXES, ACTIVITY_PAGES, FIXED_PAGE_PATHS, __testing } from '../src/routes/seo.ts'
 
 // The real shell this rewrites, not a stand-in: what matters is that the regex
@@ -369,5 +370,21 @@ describe('every form of an address is stated, not just the one the page shows', 
 
   it('adds nothing at all for a page with nothing to state', () => {
     expect(renderPage(shell, '/blocks')).not.toContain('<noscript>')
+  })
+})
+
+describe('asset head without a registry name', () => {
+  // aPRIME (1043) carries a symbol and no name; its page title read "aPRIME — null".
+  beforeEach(async () => {
+    const rows = [{ asset_id: 77777, symbol: 'XYZ', name: '', decimals: 6, parachain_id: null, origin_ecosystem: null, origin_chain_id: null, origin_asset_id: null }]
+    await loadExplorerAssets({ query: vi.fn(async () => ({ json: async () => rows })) } as unknown as Parameters<typeof loadExplorerAssets>[0])
+  })
+  afterEach(() => stopExplorerAssetsRefresh())
+
+  it('lets the symbol stand alone instead of printing null', () => {
+    const meta = pageMeta('/asset/77777')
+    expect(meta.title).toBe('XYZ')
+    expect(meta.description).toMatch(/^XYZ on Hydration — /)
+    expect(pageMeta('/holders/77777').description).toBe('Who holds XYZ on Hydration, largest first.')
   })
 })
