@@ -997,6 +997,47 @@ export function ContractSection({ contract, now }: { contract?: ContractInfo | n
             <div className="dd"><span className="muted" title="Neither a top-level CREATE nor first-log factory evidence exists for this address">Unknown</span></div>
           </>
         )}
+        {contract.proxy && (
+          <>
+            <div className="dt" title="ERC-1967: this address is the one to call; it delegates its logic to the implementation">Proxy</div>
+            <div className="dd proxy-dd">
+              <span className="pill-badge" style={neutralBadge}>ERC-1967 proxy</span>
+              {contract.proxy.beacon && <><span className="muted">via beacon</span><AddrPill account={contract.proxy.beacon} /></>}
+              {contract.proxy.implementation
+                ? <><span className="muted">delegates to</span><AddrPill account={contract.proxy.implementation} /></>
+                : <span className="muted">implementation unknown</span>}
+            </div>
+            {contract.proxy.history.length > 0 && (
+              <>
+                <div className="dt" title="Every Upgraded / BeaconUpgraded event this proxy emitted, newest first">Upgrades</div>
+                <div className="dd">
+                  {[...contract.proxy.history].reverse().map(u => (
+                    <div key={`${u.blockHeight}:${u.target.accountId}`} className="proxy-dd">
+                      <AddrPill account={u.target} />
+                      {u.kind === 'beacon' && <span className="pill-badge" style={neutralBadge}>beacon</span>}
+                      <span className="mono muted"><MomentLink at={{ blockHeight: u.blockHeight, extrinsicIndex: null, timestamp: u.timestamp }} now={now} /></span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </>
+        )}
+        {(contract.implementationOf?.current.length ?? 0) > 0 && (
+          <>
+            <div className="dt" title="ERC-1967 proxies that delegate to this contract now — call them, not this address">Implementation of</div>
+            <div className="dd proxy-dd">
+              <span className="pill-badge" style={neutralBadge}>implementation</span>
+              {contract.implementationOf!.current.map(p => <AddrPill key={p.accountId} account={p} />)}
+            </div>
+          </>
+        )}
+        {(contract.implementationOf?.former.length ?? 0) > 0 && (
+          <>
+            <div className="dt" title="Proxies that delegated to this contract until an upgrade moved them to another implementation">Formerly behind</div>
+            <div className="dd proxy-dd">{contract.implementationOf!.former.map(p => <AddrPill key={p.accountId} account={p} />)}</div>
+          </>
+        )}
         <div className="dt">Verification</div>
         <div className="dd proxy-dd">{contract.verification?.status === 'verified'
           ? <>

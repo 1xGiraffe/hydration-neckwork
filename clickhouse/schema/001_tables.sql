@@ -179,10 +179,15 @@ CREATE TABLE IF NOT EXISTS price_data.erc20_wallet_contracts (`contract` String,
 -- an address that leaves a fully successful enumeration is replaced with
 -- destroyed=1. kind: 'contract' | 'asset-erc20' | 'oracle-adapter'
 -- | 'system-precompile' | 'sentinel' | 'planted-unknown'.
-CREATE TABLE IF NOT EXISTS price_data.evm_contract_code_snapshot (`address` String, `kind` LowCardinality(String), `code_hash` String, `code_size` UInt32, `destroyed` UInt8 DEFAULT 0, `updated_at` DateTime DEFAULT now(), `snapshot_block` UInt32 DEFAULT 0) ENGINE = ReplacingMergeTree(updated_at) ORDER BY address SETTINGS index_granularity = 64;
+CREATE TABLE IF NOT EXISTS price_data.evm_contract_code_snapshot (`address` String, `kind` LowCardinality(String), `code_hash` String, `code_size` UInt32, `destroyed` UInt8 DEFAULT 0, `updated_at` DateTime DEFAULT now(), `snapshot_block` UInt32 DEFAULT 0, `implementation` String DEFAULT '', `beacon` String DEFAULT '') ENGINE = ReplacingMergeTree(updated_at) ORDER BY address SETTINGS index_granularity = 64;
 -- snapshot_block: the block the row's enumeration was read at (one pinned block per
 -- refresh, pinnedBlock.ts); 0 on rows written before the pin.
 ALTER TABLE price_data.evm_contract_code_snapshot ADD COLUMN IF NOT EXISTS `snapshot_block` UInt32 DEFAULT 0;
+-- ERC-1967 proxy slots read at snapshot_block: the implementation and beacon
+-- addresses ('' when the slot is empty), so a proxy is linked to its current
+-- implementation whether or not either side is source-verified.
+ALTER TABLE price_data.evm_contract_code_snapshot ADD COLUMN IF NOT EXISTS `implementation` String DEFAULT '';
+ALTER TABLE price_data.evm_contract_code_snapshot ADD COLUMN IF NOT EXISTS `beacon` String DEFAULT '';
 -- Per-contract log stats. Exact under replay: identities live in a roaring
 -- bitmap ((event_index<<32)|block_height packing), so re-inserted raw ranges
 -- OR into the same bits instead of double-counting. One row per contract.

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   buildContractRegistry, pageContracts, deployerWhitelistFromEvents,
   initContractRegistryService, loadContractRegistry,
-  contractByH160, isContractAccount, allContracts,
+  contractByH160, isContractAccount, allContracts, proxyOf, proxiesOfImplementation, UPGRADED_TOPIC,
   type ContractRegistryInputs, type ContractRegistryEntry,
 } from '../src/services/contractRegistryService.ts'
 import { accountRef, getContracts, sortContractsByMetric, sortContractsByName, dueContractActivityCounts, type ContractMetrics, type ContractActivityEntry } from '../src/services/explorerService.ts'
@@ -234,7 +234,7 @@ describe('loadContractRegistry + accessors', () => {
       query: async ({ query }: { query: string }) => ({
         json: async () => {
           if (query.includes('evm_contract_code_snapshot')) {
-            return [{ address: HOLLAR, kind: 'contract', code_hash: '0x' + 'ab'.repeat(32), code_size: 10719, destroyed: 0 }]
+            return [{ address: HOLLAR, kind: 'contract', code_hash: '0x' + 'ab'.repeat(32), code_size: 10719, destroyed: hollarDestroyed }]
           }
           if (query.includes('evm_create_transactions FINAL')) {
             return [{ block_height: 100, extrinsic_index: 2, block_timestamp: '2024-01-01 00:00:00', deployer: DEPLOYER, success: 1 }]
@@ -255,11 +255,45 @@ describe('loadContractRegistry + accessors', () => {
           // family in a query parameter and asks the head for its settled floor.
           if (query.includes('max(block_height)')) return [{ h: 1_000 }]
           if (query.includes('AS who')) return []
+          // ERC-1967 upgrades: none in this fixture unless a test supplies them.
+          if (query.includes('evm_logs_by_contract')) return upgrades
           throw new Error(`Unexpected query: ${query}`)
         },
       }),
     } as unknown as ClickHouseClient
   }
+  let upgrades: unknown[] = []
+  let hollarDestroyed = 0
+
+  // An upgrade event alone (the slot read has not run) makes HOLLAR a proxy, and
+  // the implementation it names answers with HOLLAR as its current proxy.
+  it('links a proxy to its implementation from an upgrade event, both ways', async () => {
+    const impl = '0xfddb5acb121a6abab4919cfc1672250697163bed'
+    upgrades = [{ proxy: HOLLAR, block_height: 200, event_index: 1, topic0: UPGRADED_TOPIC, target_word: '0x' + '0'.repeat(24) + impl.slice(2), ts: '2024-02-01 00:00:00' }]
+    try {
+      initContractRegistryService(fakeClient())
+      await loadContractRegistry()
+      expect(proxyOf(HOLLAR)).toMatchObject({ implementation: impl, beacon: null })
+      expect(proxiesOfImplementation(impl)).toEqual({ current: [HOLLAR], former: [] })
+    } finally {
+      upgrades = []
+    }
+  })
+
+  it('does not revive a destroyed proxy from its old upgrade events', async () => {
+    const impl = '0xfddb5acb121a6abab4919cfc1672250697163bed'
+    upgrades = [{ proxy: HOLLAR, block_height: 200, event_index: 1, topic0: UPGRADED_TOPIC, target_word: '0x' + '0'.repeat(24) + impl.slice(2), ts: '2024-02-01 00:00:00' }]
+    hollarDestroyed = 1
+    try {
+      initContractRegistryService(fakeClient())
+      await loadContractRegistry()
+      expect(proxyOf(HOLLAR)).toBeNull()
+      expect(proxiesOfImplementation(impl)).toEqual({ current: [], former: [] })
+    } finally {
+      upgrades = []
+      hollarDestroyed = 0
+    }
+  })
 
   it('loads the registry and answers accessors in both address forms', async () => {
     initContractRegistryService(fakeClient())

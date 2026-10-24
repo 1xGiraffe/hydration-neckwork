@@ -7,12 +7,14 @@ import type { ClickHouseClient } from '../src/db/client.ts'
 // a planted 0x00 code entering the registry as a contract, and a redeploy
 // keeping its stale destroyed flag.
 const allKeys = vi.fn<(prefix: string) => Promise<string[]>>()
-const storageBatch = vi.fn<(keys: string[]) => Promise<(string | null)[]>>()
+const storageBatch = vi.fn<(keys: string[]) => Promise<(string | null | undefined)[]>>()
 // Every read of a cycle must name the cycle's ONE pinned block hash.
 const readsAt: (string | null | undefined)[] = []
 vi.mock('../src/services/substrateRpc.ts', () => ({
   substrateAllKeys: (prefix: string, _pages?: number, _size?: number, at?: string | null) => { readsAt.push(at); return allKeys(prefix) },
   substrateStorageBatch: (keys: string[], at?: string | null) => { readsAt.push(at); return storageBatch(keys) },
+  // undefined = unanswered; an unmocked read answers every key as absent.
+  substrateStorageBatchResults: async (keys: string[], at?: string | null) => { readsAt.push(at); return (await storageBatch(keys)) ?? keys.map(() => null) },
 }))
 const PIN = { block: 15_600_000, blockHash: '0x' + 'ab'.repeat(32), indexedHead: 15_600_002, finalizedHead: 15_600_000 }
 vi.mock('../src/services/pinnedBlock.ts', () => ({ loadPinnedSubstrateBlock: async () => PIN }))
@@ -92,10 +94,37 @@ describe('refreshContractCode', () => {
     allKeys.mockResolvedValueOnce([storageKey(HOLLAR)])
     storageBatch.mockResolvedValueOnce(['0x0c600080'])
     await refreshContractCode()
-    expect(readsAt).toEqual([PIN.blockHash, PIN.blockHash])
+    // The enumeration, the new code value and the ERC-1967 slots: all at the pin.
+    expect(readsAt).toEqual([PIN.blockHash, PIN.blockHash, PIN.blockHash])
     const rows = snapshotRows(client)
     expect(rows).toHaveLength(2) // HOLLAR new, ATOKEN tombstoned
     for (const r of rows) expect(r.snapshot_block).toBe(PIN.block)
+  })
+
+  it('stores the ERC-1967 implementation and beacon slots of every contract', async () => {
+    const impl = '0xfddb5acb121a6abab4919cfc1672250697163bed'
+    const client = fakeClient([{ address: ATOKEN, kind: 'contract', code_hash: '0xbb', code_size: 9, destroyed: 0 }])
+    initContractRegistryService(client)
+    allKeys.mockResolvedValueOnce([storageKey(ATOKEN)])
+    // ATOKEN is already snapshotted, so the only storage read is its two slots.
+    storageBatch.mockResolvedValueOnce(['0x' + '0'.repeat(24) + impl.slice(2), null])
+    await refreshContractCode()
+    expect(snapshotRows(client)[0]).toMatchObject({ address: ATOKEN, implementation: impl, beacon: '' })
+  })
+
+  it('writes no row for a contract whose slot read went unanswered, keeping its previous links', async () => {
+    const client = fakeClient([
+      { address: ATOKEN, kind: 'contract', code_hash: '0xbb', code_size: 9, destroyed: 0 },
+      { address: HOLLAR, kind: 'contract', code_hash: '0xaa', code_size: 3, destroyed: 0 },
+    ])
+    initContractRegistryService(client)
+    allKeys.mockResolvedValueOnce([storageKey(ATOKEN), storageKey(HOLLAR)])
+    // ATOKEN's implementation slot is unanswered; HOLLAR's slots are genuinely empty.
+    storageBatch.mockResolvedValueOnce([undefined, null, null, null])
+    await refreshContractCode()
+    const rows = snapshotRows(client)
+    expect(rows.map(r => r.address)).toEqual([HOLLAR])
+    expect(rows[0]).toMatchObject({ implementation: '', beacon: '' })
   })
 
   it('does not refetch code for addresses already snapshotted, and skips new ones whose read failed', async () => {

@@ -35,8 +35,15 @@ export async function rpc<T>(method: string, params: unknown[]): Promise<T | nul
 // block hash, so a set of values read together describes a single chain state
 // rather than several consecutive ones; omitted, the node answers at its head.
 export async function substrateStorageBatch(keys: string[], at?: string | null): Promise<(string | null)[]> {
+  return (await substrateStorageBatchResults(keys, at)).map(v => v ?? null)
+}
+
+// As substrateStorageBatch, but tells a failed read (undefined: the chunk's request
+// failed, or the node answered that key with an error or not at all) from an
+// absent value (null), for callers that must not take "unanswered" as "empty".
+export async function substrateStorageBatchResults(keys: string[], at?: string | null): Promise<(string | null | undefined)[]> {
   if (!keys.length) return []
-  const out: (string | null)[] = keys.map(() => null)
+  const out: (string | null | undefined)[] = keys.map(() => undefined)
   for (let start = 0; start < keys.length; start += MAX_BATCH) {
     const chunk = keys.slice(start, start + MAX_BATCH)
     const body = chunk.map((k, i) => ({ jsonrpc: '2.0', id: i, method: 'state_getStorage', params: at ? [k, at] : [k] }))
@@ -47,11 +54,12 @@ export async function substrateStorageBatch(keys: string[], at?: string | null):
       const json = await res.json() as unknown
       for (const item of Array.isArray(json) ? json : []) {
         if (!item || typeof item !== 'object') continue
-        const { id, result } = item as { id?: unknown; result?: unknown }
+        const { id, result, error } = item as { id?: unknown; result?: unknown; error?: unknown }
         if (!Number.isInteger(id) || (id as number) < 0 || (id as number) >= chunk.length) continue
+        if (error !== undefined || !('result' in item)) continue
         out[start + (id as number)] = typeof result === 'string' ? result : null
       }
-    } catch { /* chunk stays null */ } finally { clearTimeout(timer) }
+    } catch { /* chunk stays unanswered */ } finally { clearTimeout(timer) }
   }
   return out
 }
