@@ -165,6 +165,42 @@ async function discoverATokenUnderlyings(client: ClickHouseClient, rows: readonl
   }
 }
 
+// Uniswap v3 vault shares registered as assets: the vault's ERC-20 share token IS a
+// registry asset when its contract is the asset's evm_address (aDOT-HOLLAR 1001354 is
+// vault 0xa206…). Such an asset is drawn as its vault's two tokens and priced at what
+// one share redeems for (explorerService withExplorerVaultSharePrices). Rebuilt with
+// the directory; a failed read leaves the previous set.
+const V3_VAULT_SHARES = new Map<number, { vault: string; members: [number, number] }>()
+export function v3VaultShareAssets(): ReadonlyMap<number, { vault: string; members: [number, number] }> { return V3_VAULT_SHARES }
+
+async function loadV3VaultMembers(client: ClickHouseClient, rows: readonly AssetRow[]): Promise<Map<number, number[]>> {
+  const out = new Map<number, number[]>()
+  const byContract = new Map<string, number>()
+  for (const r of rows) {
+    const addr = (r.evm_address ?? '').toLowerCase()
+    if (addr) byContract.set(addr, r.asset_id)
+  }
+  let vaults: { vault_address: string; token0: string; token1: string }[]
+  try {
+    const res = await client.query({ query: `SELECT vault_address, token0, token1 FROM price_data.uniswap_v3_vaults FINAL`, format: 'JSONEachRow' })
+    vaults = await res.json<{ vault_address: string; token0: string; token1: string }>()
+  } catch (err) {
+    console.error('[ExplorerAssets] v3 vaults unavailable:', err)
+    return out
+  }
+  V3_VAULT_SHARES.clear()
+  for (const v of vaults) {
+    if (typeof v.vault_address !== 'string' || typeof v.token0 !== 'string' || typeof v.token1 !== 'string') continue
+    const shareId = byContract.get(v.vault_address.toLowerCase())
+    const a0 = underlyingAssetIdOf(v.token0, byContract)
+    const a1 = underlyingAssetIdOf(v.token1, byContract)
+    if (shareId == null || a0 == null || a1 == null) continue
+    out.set(shareId, [a0, a1])
+    V3_VAULT_SHARES.set(shareId, { vault: v.vault_address.toLowerCase(), members: [a0, a1] })
+  }
+  return out
+}
+
 async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<void> {
   const res = await client.query({
     query: `SELECT asset_id, symbol, name, decimals, parachain_id, origin_ecosystem, origin_chain_id, origin_asset_id, evm_address FROM price_data.assets FINAL`,
@@ -175,6 +211,9 @@ async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<voi
   // Additive only: a failed member read must not make a known share token look like
   // an ordinary asset, which would let currentPriceAssetId alias it again.
   for (const poolId of poolMembers.keys()) STABLESWAP_SHARE_IDS.add(poolId)
+  // A v3 vault share draws as its vault's tokens the way a pool share draws as its
+  // members; it is NOT a stableswap share, so it joins after that set is built.
+  for (const [shareId, members] of await loadV3VaultMembers(client, rows)) if (!poolMembers.has(shareId)) poolMembers.set(shareId, members)
   // Before the cache is built: iconAssetIdFor reads the pairing, so a newly
   // discovered aToken must know its reserve to borrow that reserve's artwork.
   await discoverATokenUnderlyings(client, rows)

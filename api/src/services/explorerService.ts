@@ -24,7 +24,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, currentPriceOf, isStableswapShareToken, displayAssetId, supplyFoldedShareIds, foldedShareEntries, namedShareWrapperOf, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, currentPriceOf, isStableswapShareToken, v3VaultShareAssets, displayAssetId, supplyFoldedShareIds, foldedShareEntries, namedShareWrapperOf, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { firstTradeOf, loadVolumeBuckets, tradingVolumeAsOfBlock, tradingVolumeTotals, volumeCutHeights, type AccountVolumeHistory, type VolumeCutHeights } from './accountVolumeHistory.ts'
 import { AAVE_COLLECTOR, PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
@@ -73,7 +73,7 @@ import { currentStableswapSharePools } from './stableswapSharePools.ts'
 import { findMempoolTx, findPendingBlock, findPendingExtrinsic, findPendingExtrinsicByHash, mempoolTxs, pendingBestHeight, pendingBlocksDesc, type MempoolTx, type PendingBlock, type PendingExtrinsicRow } from './pendingHeadService.ts'
 import { buildMempoolActivities, buildPendingActivities, type PendingActivity, type PendingTradeActivity } from './pendingActivity.ts'
 import { ethPrefixedAccountId, feeTierLabel, loadV3Registry, v3ActOnVenue, v3ActivitiesAt, v3FeedActivities, v3PoolForHop, v3PoolName, v3SwapAt, v3UnnamedActExtrinsics, v3VenueSet, v3VenuesInScope, type V3Activity, type V3Pool, type V3Registry } from './uniswapV3Service.ts'
-import { loadV3AccountPositions, v3AccountPositions } from './uniswapV3Positions.ts'
+import { loadV3AccountPositions, v3AccountPositions, v3VaultTotals } from './uniswapV3Positions.ts'
 import { loadMmIncentiveProgrammeRows, scaledSeriesFromBuckets } from './mmIncentiveHistory.ts'
 import { loadCurrentCollateralFlags, loadMmIncentiveHistory, loadMmReserveMap, loadMoneyMarketHistory, mmHistoryStart, mmMarketCompare, mmObservationOrderSql, type MmHistoryInterest, type MmIncentiveHistory, type MmObservation } from './moneyMarketHistory.ts'
 import { loadMmIncentiveClaims } from './mmIncentiveClaims.ts'
@@ -1950,6 +1950,9 @@ async function recomposePriceState(head: number, base: PriceBase): Promise<Price
   const oracle = new Map([...currentMmOraclePrices()].filter(([id]) => !isStableswapShareToken(id)))
   const oracleFilled = new Set(withMmOraclePrices(m, oracle, entry => ({ price: entry.price, priceRaw: entry.priceRaw, change24h: 0 })))
   if (oracleFilled.size) applyAliases()
+  // Last: a v3 vault share is priced from its two tokens, which only now all have
+  // theirs (aDOT through its alias, a reserve through the oracle).
+  await withExplorerVaultSharePrices(m)
 
   const prev = priceState
   // A slower recompose never replaces a newer one.
@@ -2602,6 +2605,37 @@ async function withExplorerSharePrices(m: Map<number, PriceInfo>): Promise<void>
     if (derived == null) continue
     const priceRaw = formatUnits(derived.toString(), PRICE_USD_DECIMALS)
     m.set(id, { price: Number(priceRaw), priceRaw, change24h })
+  }
+}
+
+// A Uniswap v3 vault's share token registered as an asset, priced at what one share
+// redeems for: the vault's two token totals (v3VaultTotals — the same figures the pool
+// page's vault card and account positions use) at their current prices, over the
+// shares outstanding. Only where no feed prices the share itself. The totals move with
+// deposits, withdrawals and rebalances, not per block, so they are read once a minute.
+async function withExplorerVaultSharePrices(m: Map<number, PriceInfo>): Promise<void> {
+  const shares = v3VaultShareAssets()
+  if (!shares.size) return
+  let totals: Map<string, { shares: bigint; total0: bigint; total1: bigint }>
+  try {
+    const vaults = [...shares.values()].map(s => s.vault)
+    const raw = await cached(`explorer:v3-vault-totals:${vaults.join(',')}`, 60_000, async () =>
+      [...(await v3VaultTotals(client, vaults))].map(([v, t]) => [v, t.shares.toString(), t.total0.toString(), t.total1.toString()] as const))
+    totals = new Map(raw.map(([v, sh, t0, t1]) => [v, { shares: BigInt(sh), total0: BigInt(t0), total1: BigInt(t1) }]))
+  } catch (err) {
+    console.error('[Explorer] v3 vault totals unavailable for share prices:', err instanceof Error ? err.message : err)
+    return
+  }
+  for (const [id, { vault, members: [a0, a1] }] of shares) {
+    if (m.has(id)) continue
+    const t = totals.get(vault)
+    const p0 = currentPriceOf(m, a0)?.price, p1 = currentPriceOf(m, a1)?.price
+    const d0 = assetDecimalsOrNull(a0), d1 = assetDecimalsOrNull(a1), ds = assetDecimalsOrNull(id)
+    if (!t || t.shares <= 0n || p0 == null || p1 == null || d0 == null || d1 == null || ds == null) continue
+    const value = Number(t.total0) / 10 ** d0 * p0 + Number(t.total1) / 10 ** d1 * p1
+    const price = value / (Number(t.shares) / 10 ** ds)
+    if (!Number.isFinite(price) || price <= 0) continue
+    m.set(id, { price, priceRaw: price.toFixed(PRICE_USD_DECIMALS), change24h: 0 })
   }
 }
 
