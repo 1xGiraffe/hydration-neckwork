@@ -58,6 +58,7 @@ import { ensureErc20WalletAssets } from './erc20WalletService.ts'
 import { currentMmOraclePrices, withMmOraclePrices } from './mmOraclePrices.ts'
 import { deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
 import { XCM_BARRIER_EVENTS, XCM_IN_DEPOSIT_EVENTS, XCM_IN_WALK_EVENTS, XCM_WALK_CROSSABLE_EVENTS } from './xcmWalkEvents.ts'
+import { trappedArrivals, type TrappedArrival } from './xcmTrappedArrivals.ts'
 import { OMNIPOOL_ACCOUNT, PRICE_LOOKBACK_DAYS, formatUnits, isPoolOwnHubHolding, poolOwnHubHoldingSql, renderUsd, scaledUsd } from './valuation.ts'
 import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
@@ -12551,6 +12552,16 @@ export interface ActivityRow {
   // unavailable). Same shape/semantics as destAccount.
   fromAccount?: ActivityRow['destAccount']
   messageId?: string | null  // xcm inbound: message topic id (MessageQueue.Processed)
+  // xcm inbound that FAILED here: nothing was credited, and every asset it carried
+  // sits in Hydration's asset trap (xcmTrappedArrivals.ts). `who` is the beneficiary
+  // the message named; `asset`/`amount` its largest trapped asset. Only the sending
+  // chain can claim them back (ClaimAsset from the same origin).
+  xcmTrapped?: {
+    assets: { asset: AssetRef | null; amount: string; valueUsd: number | null }[]
+    /** The asset its BuyExecution offered, and whether Hydration accepted it for fees then. */
+    feeAsset: AssetRef | null
+    feeAssetAccepted: boolean | null
+  }
   // Origin-chain extrinsic of an inbound transfer (explorer deep link) —
   // resolved with fromAccount from the crosschain journey index.
   fromTxUrl?: string | null
@@ -14927,9 +14938,48 @@ export async function xcmInboundCreditsForBlocks(blocks: number[], whoIn?: Set<s
   return credits
 }
 
-// The activity feed's inbound arm: the same walk, dressed for presentation.
+// A trapped arrival as an inbound row: the beneficiary it was meant for, its largest
+// trapped asset as the row's amount, every asset and the fee asset in `xcmTrapped`.
+function trappedArrivalRow(a: TrappedArrival, prices: Map<number, PriceInfo>): ActivityRow {
+  const assets = a.assets.map(t => {
+    const ref = t.assetId != null ? asset(t.assetId) : null
+    return { asset: ref, amount: t.amount, valueUsd: ref ? usdValue(prices, ref.assetId, t.amount, ref.decimals) : null }
+  }).sort((l, r) => (r.valueUsd ?? -1) - (l.valueUsd ?? -1))
+  const lead = assets[0]
+  const from = a.originKind === 'Parent'
+    ? { fromChain: RELAY_XCM_NETWORK.name, fromParachainId: null }
+    : a.originParaId != null ? { fromChain: (PARACHAIN_META[a.originParaId] ?? { name: `Parachain ${a.originParaId}` }).name, fromParachainId: a.originParaId } : {}
+  return {
+    type: 'xcm', blockHeight: a.blockHeight, timestamp: a.ts, eventIndex: a.eventIndex, extrinsicIndex: null,
+    who: a.beneficiary ? accountRef(a.beneficiary) : null, to: null, asset: lead?.asset ?? null, assetIn: null, assetOut: null,
+    amount: lead?.asset ? lead.amount : null, amountIn: null, amountOut: null, valueUsd: lead?.valueUsd ?? null,
+    xcmDir: 'in', ...from, messageId: a.messageId,
+    xcmTrapped: { assets, feeAsset: a.feeAssetId != null ? asset(a.feeAssetId) : null, feeAssetAccepted: a.feeAssetAccepted },
+  }
+}
+
+// Trapped arrivals as rows, optionally only those in `blocks` / for `whoIn`. Never
+// fails a feed: an unreadable trap set reads as none. A sovereign or module
+// beneficiary (Bifrost returning HDX to its own sibl account — ~1k of them) is
+// plumbing, skipped exactly as the credit walk skips it (RESERVED_ACCOUNT_RE).
+async function trappedArrivalRows(prices: Map<number, PriceInfo>, opts: { blocks?: Set<number>; whoIn?: Set<string>; assetId?: number } = {}): Promise<ActivityRow[]> {
+  let all: readonly TrappedArrival[]
+  try { all = await trappedArrivals(client) } catch { return [] }
+  return all
+    .filter(a => (a.beneficiary == null || !RESERVED_ACCOUNT_RE.test(a.beneficiary))
+      && (!opts.blocks || opts.blocks.has(a.blockHeight))
+      && (!opts.whoIn || (a.beneficiary != null && opts.whoIn.has(a.beneficiary)))
+      && (opts.assetId == null || a.assets.some(t => t.assetId === opts.assetId)))
+    .map(a => trappedArrivalRow(a, prices))
+}
+
+// The activity feed's inbound arm: the same walk, dressed for presentation, plus the
+// arrivals that failed and were trapped (which the walk cannot see — they credited nobody).
 async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInfo>, whoIn?: Set<string>): Promise<ActivityRow[]> {
-  const credits = await xcmInboundCreditsForBlocks(blocks, whoIn)
+  const [credits, trapped] = await Promise.all([
+    xcmInboundCreditsForBlocks(blocks, whoIn),
+    trappedArrivalRows(prices, { blocks: new Set(blocks), whoIn }),
+  ])
   const rows: ActivityRow[] = credits.map(c => {
     const a = asset(c.assetId)
     return {
@@ -14940,7 +14990,7 @@ async function xcmInRowsForBlocks(blocks: number[], prices: Map<number, PriceInf
       xcmDir: 'in', fromChain: c.fromChain, fromParachainId: c.fromParachainId, messageId: c.messageId,
     } as ActivityRow
   })
-  return rows.sort(compareActivityRowsNewestFirst)
+  return [...rows, ...trapped].sort(compareActivityRowsNewestFirst)
 }
 
 // Remote-initiated OUTBOUND transfers: an inbound message (no local extrinsic,
@@ -15557,7 +15607,17 @@ async function getRecentXcmIn(limit: number, from?: string, to?: string, account
       row => activityRowMatchesFilters(row, filters),
       `xcmin:${acctList ?? ''}:${filterKey(filters)}`,
     )
-    return rows.slice(offset, offset + limit)
+    // Trapped arrivals credited nobody, so no candidate block above leads to them
+    // unless a credit shares their block: merge every one in the window (a few per
+    // account at most). The walk's rows are its newest `want`, so the merged list's
+    // first `want` are still the true newest.
+    const inWindow = timeWindowMatcher(from, to)
+    const seen = new Set(rows.map(r => `${r.blockHeight}:${r.eventIndex ?? ''}`))
+    const trapped = (await trappedArrivalRows(prices, { whoIn }))
+      .filter(r => inWindow(r.timestamp) && !seen.has(`${r.blockHeight}:${r.eventIndex ?? ''}`))
+    // Value filters judge the event-time USD, as the walk's rows are judged.
+    await applyHistoricalUsd(trapped, activityHistPick)
+    return [...rows, ...trapped.filter(r => activityRowMatchesFilters(r, filters))].sort(compareActivityRowsNewestFirst).slice(offset, offset + limit)
   })
 }
 
@@ -19497,7 +19557,8 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
       return [...incoming, ...outgoing]
     })
     for (const chunk of decoded) {
-      for (const row of chunk) addHookAccount(row.blockHeight, row.who?.accountId)
+      // A trapped arrival credited nobody, so it owns none of the block's hook rows.
+      for (const row of chunk) if (!row.xcmTrapped) addHookAccount(row.blockHeight, row.who?.accountId)
     }
   }
   const xcmChunks = await mapChunksConcurrently(signedKeys, 5_000, CHUNK_QUERY_CONCURRENCY, async chunk => {
@@ -23531,9 +23592,17 @@ async function assetActivityRows(assetId: number, type: string, want: number, ac
       async blocks => (await xcmInRowsForBlocks(blocks, prices)).filter(row => row.asset?.assetId === assetId),
       row => activityRowMatchesFilters(row, fixedAssetFilters),
       `asset-xcmin:${assetId}:${filterKey(fixedAssetFilters)}`,
-    ).then(rows => {
+    ).then(async rows => {
       if (above && rows.length >= fetchN) throw new AssetPageAboveSaturated()
-      return rows
+      // Trapped arrivals of this asset credited nothing, so no deposit candidate
+      // leads to them: merge them in, under the same window/above bound.
+      const inWindow = timeWindowMatcher(from, to)
+      const seen = new Set(rows.map(r => `${r.blockHeight}:${r.eventIndex ?? ''}`))
+      const trapped = (await trappedArrivalRows(prices, { assetId }))
+        .filter(r => r.asset?.assetId === assetId && (above ? r.blockHeight > above.block : inWindow(r.timestamp))
+          && !seen.has(`${r.blockHeight}:${r.eventIndex ?? ''}`))
+      await applyHistoricalUsd(trapped, activityHistPick)
+      return [...rows, ...trapped.filter(r => activityRowMatchesFilters(r, fixedAssetFilters))].sort(compareActivityRowsNewestFirst)
     })
   })() : Promise.resolve([])
 
@@ -29469,7 +29538,8 @@ async function getAccountValueEvents(accounts: string[], cacheKey: string, from?
         // Feed row index keyed by block+asset (one credit per asset per block in
         // practice); re-point the marker to that index so the detail link resolves.
         const feedIndex = new Map<string, number>()
-        for (const r of [...inRows, ...outRows]) {
+        // Credits only: a trapped arrival moved no balance a marker could point at.
+        for (const r of [...inRows, ...outRows].filter(r => !r.xcmTrapped)) {
           if (r.eventIndex != null && r.asset) feedIndex.set(`${r.blockHeight}:${r.asset.assetId}`, r.eventIndex)
         }
         for (const m of jumpMarkers) {
