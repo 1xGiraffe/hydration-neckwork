@@ -13,6 +13,7 @@ import {
   type PoolSnapshotPoint, type PoolSnapshotsResponse, type SnapshotRequest,
 } from './poolSnapshots.ts'
 import { v3PoolHistory, v3PoolLiquidity, type V3History, type V3HistoryPool, type V3PoolLiquidity } from './uniswapV3History.ts'
+import { v3VaultTotals, vaultShareLegs } from './uniswapV3Positions.ts'
 import { ethPrefixedAccountId, feeTierLabel, initUniswapV3Service, sqrtPriceX96ToPrice, tickToPrice, v3ManagerPositions, v3PoolStats, v3PoolName, v3PricePoints, v3VaultStats, type V3Pool, type V3Registry } from './uniswapV3Service.ts'
 import { H2O_ASSET_ID, isMoneyMarketAToken, assetDescriptor, currentPriceOf, displayDescriptor, priceAssetId } from './explorerAssets.ts'
 import { usdAtPrice } from './assetValue.ts'
@@ -1899,6 +1900,83 @@ export async function getUniswapV3PoolDetail(address: string): Promise<UniswapV3
       priceHistory: points.map(pt => ({ ts: pt.ts, blockHeight: pt.blockHeight, price: priceOfSqrt(pt.sqrtPriceX96) ?? 0 })).filter(pt => pt.price > 0),
     }
   })
+}
+
+export interface UniswapV3PoolLpRow {
+  rank: number
+  account: AccountRef
+  /** How the liquidity is held: shares of the pool's vault, or positions through the manager. */
+  via: 'vault' | 'position'
+  amount0: string
+  amount1: string
+  /** Vault shares held (via 'vault') or the summed position liquidity (via 'position'). */
+  shares: string
+  valueUsd: number | null
+  /** Share of every listed LP's value; null while the pool is unpriced. */
+  sharePct: number | null
+}
+export interface UniswapV3PoolLpsResponse { token0: AssetRef; token1: AssetRef; total: number; totalUsd: number | null; lps: UniswapV3PoolLpRow[] }
+
+/**
+ * Who provides a v3 pool's liquidity: the vault's shareholders (from its ERC-20 share
+ * Transfers, redeemed pro-rata over v3VaultTotals — the account pages' own math) and
+ * the owners of positions opened through the manager (the pool page's position list),
+ * one row per account and way of holding, largest value first.
+ */
+export async function getUniswapV3PoolLps(address: string, limit: number, offset: number): Promise<UniswapV3PoolLpsResponse | null> {
+  const addr = address.toLowerCase()
+  const all = await cachedSwr(`explorer:v3-pool-lps:${addr}`, 30_000, 300_000, async () => {
+    const registry = await v3Registry()
+    const pool = registry.pools.get(addr)
+    if (!pool || pool.asset0 == null || pool.asset1 == null) return null
+    const asset0 = pool.asset0, asset1 = pool.asset1
+    const vault = pool.vault?.address ?? null
+    const [prices, positions, holderRows, totals] = await Promise.all([
+      ensurePrices(),
+      v3ManagerPositions(registry, pool.address),
+      vault ? client.query({
+        query: `-- explorer:v3-vault-holders
+          SELECT holder, toString(sum(delta)) AS shares FROM (
+            SELECT counterparty AS holder, toInt256(liquidity) AS delta FROM price_data.uniswap_v3_events FINAL
+            WHERE kind = 'vault' AND event_name = 'Transfer' AND contract_address = {v:String}
+            UNION ALL
+            SELECT actor AS holder, -toInt256(liquidity) AS delta FROM price_data.uniswap_v3_events FINAL
+            WHERE kind = 'vault' AND event_name = 'Transfer' AND contract_address = {v:String}
+          ) WHERE holder != '0x0000000000000000000000000000000000000000'
+          GROUP BY holder HAVING sum(delta) > 0`,
+        query_params: { v: vault }, format: 'JSONEachRow',
+      }).then(r => r.json<{ holder: string; shares: string }>()) : Promise.resolve([]),
+      vault ? v3VaultTotals(client, [vault]) : Promise.resolve(new Map()),
+    ])
+    const usd = (a0: bigint, a1: bigint): number | null => {
+      const u0 = usdOf(prices, asset0, a0), u1 = usdOf(prices, asset1, a1)
+      return u0 == null && u1 == null ? null : (u0 ?? 0) + (u1 ?? 0)
+    }
+    const rows: Omit<UniswapV3PoolLpRow, 'rank' | 'sharePct'>[] = []
+    const t = vault ? totals.get(vault) : undefined
+    for (const h of holderRows) {
+      const shares = BigInt(h.shares)
+      const legs = t ? vaultShareLegs(shares, t.shares, t.total0, t.total1) : { amount0: 0n, amount1: 0n }
+      rows.push({ account: v3PoolAccount(h.holder), via: 'vault', amount0: legs.amount0.toString(), amount1: legs.amount1.toString(), shares: h.shares, valueUsd: t ? usd(legs.amount0, legs.amount1) : null })
+    }
+    const byOwner = new Map<string, { a0: bigint; a1: bigint; liq: bigint }>()
+    for (const p of positions) {
+      if (!p.owner) continue
+      const cur = byOwner.get(p.owner) ?? { a0: 0n, a1: 0n, liq: 0n }
+      byOwner.set(p.owner, { a0: cur.a0 + nonNegative(p.amount0), a1: cur.a1 + nonNegative(p.amount1), liq: cur.liq + BigInt(p.liquidity) })
+    }
+    for (const [owner, v] of byOwner) {
+      rows.push({ account: v3PoolAccount(owner), via: 'position', amount0: v.a0.toString(), amount1: v.a1.toString(), shares: v.liq.toString(), valueUsd: usd(v.a0, v.a1) })
+    }
+    rows.sort((a, b) => (b.valueUsd ?? -1) - (a.valueUsd ?? -1) || Number(BigInt(b.shares) - BigInt(a.shares) > 0n) - Number(BigInt(b.shares) - BigInt(a.shares) < 0n))
+    const totalUsd = rows.some(r => r.valueUsd != null) ? rows.reduce((s, r) => s + (r.valueUsd ?? 0), 0) : null
+    return {
+      token0: asset(asset0), token1: asset(asset1), total: rows.length, totalUsd,
+      lps: rows.map((r, i) => ({ ...r, rank: i + 1, sharePct: totalUsd && r.valueUsd != null ? (r.valueUsd / totalUsd) * 100 : null })),
+    }
+  })
+  if (!all) return null
+  return { ...all, lps: all.lps.slice(offset, offset + limit) }
 }
 
 /** The tokens and decimals the history builder needs for a v3 pool, or null for an unknown / unresolved pool. */

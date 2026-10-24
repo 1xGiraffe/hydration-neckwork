@@ -1,13 +1,14 @@
+import { useState } from 'react'
 import { useNow } from '../hooks/useNow'
 import { useV3PoolVolume } from '../api/volume'
 import { asOfLabel, fmtVolumeTvl } from '../utils/volume'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
-import { useV3Pool, useV3PoolActivity, useV3PoolHistory, useV3PoolLiquidity } from '../hooks/useExplorerData'
+import { useV3Pool, useV3PoolActivity, useV3PoolHistory, useV3PoolLiquidity, useV3PoolLps } from '../hooks/useExplorerData'
 import { api } from '../api/explorer'
 import { windowRefine } from '../utils/chartRefine'
 import { distributionSlices, distributionWindow, fmtLiquidity } from '../utils/v3Distribution'
 import { Link, paths } from '../router'
-import { accountHref, Usd, Amt, AddrPill, Ago, AreaChart, AssetAmount, AssetChip, AssetIcon, ChartSkeleton, Crumbs, Dash, EmptyRow, F, PoolBadge, rowNav } from '../components/ui'
+import { accountHref, Usd, Amt, AddrPill, Ago, AreaChart, AssetAmount, AssetChip, AssetIcon, ChartSkeleton, Crumbs, Dash, EmptyRow, F, Pager, pendingRows, PoolBadge, rowNav, TableSkeleton } from '../components/ui'
 import { ChartLegend, MultiLineChart, ShareBar, StackedColumnChart, type ChartZone, type ShareSegment, type StackColumn } from '../components/HdxCharts'
 import { ActivityTable } from '../components/ActivityTable'
 import { PoolVolumeHead, TvlSection, VOLUME_BAR_COLOR, VolumeTvlSection } from '../components/VolumeCharts'
@@ -361,6 +362,8 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
         </>
       )}
 
+      <V3LpsSection d={d} />
+
       <div className="sec-title">Positions
         <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · opened through the position manager, with what is left in them</span>
       </div>
@@ -375,6 +378,45 @@ function PoolBody({ d }: { d: UniswapV3PoolDetail }) {
       {activityRows.length || activity.isLoading
         ? <ActivityTable rows={activityRows} now={now} loading={activity.isLoading && !activityRows.length} pageSize={12} error={activity.error} onRetry={() => { void activity.refetch() }} />
         : <div className="panel"><table className="tbl"><tbody><EmptyRow cols={5}>No activity yet</EmptyRow></tbody></table></div>}
+    </>
+  )
+}
+
+// Who provides the pool's liquidity: the vault's shareholders (their pro-rata part of
+// what the vault holds) and the owners of positions opened through the manager.
+const LPS_PAGE = 10
+function V3LpsSection({ d }: { d: UniswapV3PoolDetail }) {
+  const [page, setPage] = useState(0)
+  const lps = useV3PoolLps(d.address, page * LPS_PAGE, LPS_PAGE)
+  const rows = lps.data?.lps ?? []
+  const total = lps.data?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / LPS_PAGE))
+  if (lps.isError) return null
+  return (
+    <>
+      <div className="sec-title">Liquidity providers
+        {lps.data && <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · {F.int(total)} {total === 1 ? 'provider' : 'providers'}, through the vault or their own positions</span>}
+      </div>
+      <div className="panel"><table className="tbl">
+        <thead><tr><th style={{ width: 50 }}>#</th><th>Provider</th><th>Via</th><th className="r">Holdings</th><th className="r">Share</th><th className="r">Value</th></tr></thead>
+        <tbody {...pendingRows(lps.isPlaceholderData)}>
+          {lps.isLoading && !rows.length ? <TableSkeleton cols={6} rows={6} />
+            : rows.length ? rows.map(r => (
+              <tr key={`${r.account.accountId}:${r.via}`} {...rowNav(accountHref(r.account))}>
+                <td data-label="Rank" className="mono muted">{r.rank}</td>
+                <td data-label="Provider"><AddrPill account={r.account} noCopy /></td>
+                <td data-label="Via" className="muted">{r.via === 'vault' ? 'vault shares' : 'own position'}</td>
+                <td data-label="Holdings" className="r mono">
+                  <AssetAmount asset={d.token0} raw={r.amount0} /><br /><AssetAmount asset={d.token1} raw={r.amount1} />
+                </td>
+                <td data-label="Share" className="r mono muted">{r.sharePct != null ? F.sharePct(r.sharePct) : <Dash />}</td>
+                <td data-label="Value" className="r mono">{r.valueUsd != null ? <Usd v={r.valueUsd} /> : <Dash />}</td>
+              </tr>
+            )) : <EmptyRow cols={6}>No liquidity providers</EmptyRow>}
+        </tbody>
+      </table>
+      {totalPages > 1 && <Pager page={page} totalPages={totalPages} onPage={setPage} />}
+      </div>
     </>
   )
 }

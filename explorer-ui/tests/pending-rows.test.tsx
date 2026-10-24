@@ -56,7 +56,8 @@ describe('held rows are marked pending, not presented as an answer', () => {
 describe('every list that holds rows has a surface that marks them', () => {
   // Each hook's own body only: the next `export function` bounds it, so a
   // keepPreviousData in the hook below is never miscounted as this one's.
-  const declarations = [...hooks.matchAll(/export function (use[A-Za-z]+)\(/g)]
+  // Digits too: `useV3PoolLps` is a hook, and missing it credited its body to the hook above.
+  const declarations = [...hooks.matchAll(/export function (use[A-Za-z0-9]+)\(/g)]
     .map(m => ({ name: m[1], at: m.index ?? 0 }))
   const holdingHooks = declarations
     .filter((h, i) => hooks.slice(h.at, declarations[i + 1]?.at ?? hooks.length).includes('keepPreviousData'))
@@ -76,7 +77,7 @@ describe('every list that holds rows has a surface that marks them', () => {
       'useContractEvents', 'useContractTransactions', 'useContracts', 'useDaily', 'useEvents',
       'useExtrinsics', 'useGovernanceMotions', 'useGovernanceReferenda', 'useGovernanceTips',
       'useHolders', 'useOmnipoolLps', 'usePoolLps', 'useTagActivity', 'useTagEvents',
-      'useTagExtrinsics', 'useTagVotes', 'useTagVotesByReferendum',
+      'useTagExtrinsics', 'useTagVotes', 'useTagVotesByReferendum', 'useV3PoolLps',
     ])
     expect(holdingHooks.filter(h => CHART_ONLY.includes(h))).toEqual(CHART_ONLY)
   })
@@ -90,6 +91,7 @@ describe('every list that holds rows has a surface that marks them', () => {
       '../src/pages/Accounts.tsx': 1,
       '../src/pages/AssetDetail.tsx': 2,        // activity feed + holders
       '../src/pages/PoolDetail.tsx': 1,          // liquidity providers
+      '../src/pages/UniswapV3Pool.tsx': 1,       // liquidity providers
       '../src/components/AssetLiquidity.tsx': 1, // top Omnipool LPs
       '../src/components/ScopedActivity.tsx': 3, // activity, extrinsics, events tabs
       '../src/components/VotesTab.tsx': 1,

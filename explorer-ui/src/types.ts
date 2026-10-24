@@ -1415,6 +1415,18 @@ export interface UniswapV3VaultInfo {
   lastCompoundAt?: string | null
   ranges: { tickLower: number; tickUpper: number; priceLower: number; priceUpper: number; liquidity: string; inRange: boolean }[]
 }
+export interface UniswapV3PoolLpRow {
+  rank: number
+  account: AccountRef
+  /** Vault shares, or positions opened through the manager. */
+  via: 'vault' | 'position'
+  amount0: string
+  amount1: string
+  shares: string
+  valueUsd: number | null
+  sharePct: number | null
+}
+export interface UniswapV3PoolLpsResponse { token0: AssetRef; token1: AssetRef; total: number; totalUsd: number | null; lps: UniswapV3PoolLpRow[] }
 export interface UniswapV3PoolDetail {
   kind: 'uniswapv3'
   address: string

@@ -5,7 +5,7 @@ import type { MmMarketOption,
   AccountsPage, AccountSort, DirectoryActivityCounts, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
   RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, UserRevenueBreakdown, UserRevenueDashboard, UserRevenueFlowResponse, UserRevenueSummary, AssetPriceWindow, HollarDashboard, HollarWindowChart, HdxWindowChart, ChartWindowPayload, IceDashboard, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas, AssetLimitOrderBook, XcDestinationDetail, IntentOrderDetail,
-  AssetLiquidity, PoolDetail, UniswapV3PoolDetail, UniswapV3PoolHistory, UniswapV3PoolLiquidity, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
+  AssetLiquidity, PoolDetail, UniswapV3PoolDetail, UniswapV3PoolHistory, UniswapV3PoolLiquidity, UniswapV3PoolLpsResponse, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
   AccountRef, DeviceLinkResponse, DeviceLinkStatus, DeviceSession, EvmReceipt, PoolsIndexResponse,
@@ -190,6 +190,7 @@ export const api = {
   // down to the swaps (same parameters as the other windowed pool histories).
   v3PoolHistory: (address: string, signal?: AbortSignal) => getJson<UniswapV3PoolHistory>(`/explorer/pool/v3/${address}/history`, signal),
   v3PoolLiquidity: (address: string, signal?: AbortSignal) => getJson<UniswapV3PoolLiquidity>(`/explorer/pool/v3/${address}/liquidity`, signal),
+  v3PoolLps: (address: string, offset = 0, limit = 10, signal?: AbortSignal) => getJson<UniswapV3PoolLpsResponse>(withQuery(`/explorer/pool/v3/${address}/lps`, { offset, limit }), signal),
   v3PoolHistoryWindow: (address: string, fromTs: number, toTs: number, points: number, signal?: AbortSignal) =>
     getJson<UniswapV3PoolHistory>(withQuery(`/explorer/pool/v3/${address}/history`, { fromTs, toTs, points }), signal),
   omnipool: (signal?: AbortSignal) => getJson<OmnipoolDetail>('/explorer/omnipool', signal),
