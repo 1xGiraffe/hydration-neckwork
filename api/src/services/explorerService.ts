@@ -3953,9 +3953,19 @@ export function valueHoldersPage(assetId: number, decimals: number, page: Unvalu
   const totalUsd = 'each' in basis
     ? basis.each.reduce((sum, balance) => sum + (usdValue(prices, assetId, balance, decimals) ?? 0), 0)
     : basis.amount != null ? usdValue(prices, assetId, basis.amount, decimals) ?? 0 : 0
+  // Without a price there is no USD total to divide by, but a holder's share of the
+  // supply never needed one: it falls back to balance over the same total amount.
+  const rawOf = (v: string | null | undefined): bigint | null => { try { return v != null && /^\d+$/.test(v) ? BigInt(v) : null } catch { return null } }
+  const supplyRaw = 'each' in basis
+    ? basis.each.reduce((sum, b) => sum + (rawOf(b) ?? 0n), 0n)
+    : rawOf(basis.amount)
   const holders = page.rows.map(h => {
     const valueUsd = usdValue(prices, assetId, h.balance, decimals)
-    return { ...h, valueUsd, share: totalUsd > 0 ? (valueUsd ?? 0) / totalUsd : 0 }
+    const balanceRaw = rawOf(h.balance)
+    const share = totalUsd > 0
+      ? (valueUsd ?? 0) / totalUsd
+      : supplyRaw != null && supplyRaw > 0n && balanceRaw != null ? Number((balanceRaw * 1_000_000_000n) / supplyRaw) / 1e9 : 0
+    return { ...h, valueUsd, share }
   })
   return { asset: page.asset, holders, total: page.total, totalUsd, holderCount: page.holderCount }
 }
