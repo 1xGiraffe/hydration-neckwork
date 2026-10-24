@@ -47,9 +47,12 @@ describe('zcash deposits', () => {
     expect(zcashDepositOrigin(CREDIT)).toBeNull()
   })
 
-  it('yields no address from bytes it cannot read', () => {
-    expect(zcashInputAddresses(new Uint8Array([1, 2, 3]))).toEqual([])
-    expect(zcashInputAddresses(new Uint8Array(40))).toEqual([])
+  it('tells unreadable bytes from a transaction with no transparent input', () => {
+    expect(zcashInputAddresses(new Uint8Array([1, 2, 3]))).toBeNull()
+    expect(zcashInputAddresses(new Uint8Array(40))).toBeNull()
+    // v6 header, then version group, branch, lock time, expiry, and zero inputs.
+    const shielded = new Uint8Array(21); shielded.set([6, 0, 0, 0x80]); shielded[20] = 0
+    expect(zcashInputAddresses(shielded)).toEqual([])
   })
 })
 

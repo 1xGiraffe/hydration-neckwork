@@ -43,7 +43,7 @@ export const NEAR_WORMHOLE_CHAIN_ID = 15
 const NEARBLOCKS = 'https://nearblocks.io'
 const BLOCKCHAIR_ZCASH = 'https://blockchair.com/zcash'
 
-export interface FarAccount { address: string; url: string | null }
+export interface FarAccount { address: string; url: string | null; label?: string }
 
 /** Where a NEAR arrival really came from. `chain` is 'Zcash' for an Omni Bridge deposit. */
 export interface NearArrivalOrigin { chain: 'NEAR' | 'Zcash'; account: FarAccount | null; txUrl: string | null }
@@ -98,19 +98,20 @@ function base58Check(payload: Uint8Array): string {
 /**
  * The transparent P2PKH addresses that signed a Zcash transaction's inputs (v4,
  * v5 and v6 layouts). A scriptSig is `<sig> <pubkey>`, so the address is
- * hash160(pubkey) under the t1 prefix. Inputs of any other shape are skipped,
- * and a shielded-only transaction has none — the caller then names no sender.
+ * hash160(pubkey) under the t1 prefix. Inputs of any other shape are skipped.
+ * An empty list is a transaction with no transparent input at all (spent from a
+ * shielded balance); null is one whose bytes could not be read.
  */
-export function zcashInputAddresses(tx: Uint8Array): string[] {
-  if (tx.length < 8) return []
+export function zcashInputAddresses(tx: Uint8Array): string[] | null {
+  if (tx.length < 8) return null
   const header = (tx[0] | (tx[1] << 8) | (tx[2] << 16) | (tx[3] << 24)) >>> 0
   const version = header & 0x7fffffff
   // v4: header, versionGroupId, then the transparent bundle.
   // v5/v6: header, versionGroupId, consensusBranchId, lockTime, expiryHeight, then it.
   let o = version === 4 ? 8 : version === 5 || version === 6 ? 20 : -1
-  if (o < 0) return []
+  if (o < 0) return null
   const vin = readCompactSize(tx, o)
-  if (!vin) return []
+  if (!vin) return null
   o = vin[1]
   const out = new Set<string>()
   for (let i = 0; i < vin[0]; i++) {
@@ -155,7 +156,8 @@ function functionCallArgs(tx: FastNearTx, method: string): Record<string, unknow
  * it spends from several — the refund address the depositor named, but only if it is
  * one of them (an address they demonstrably control). Otherwise none.
  */
-export function pickZcashSender(inputs: readonly string[], refund: unknown): string | null {
+export function pickZcashSender(inputs: readonly string[] | null, refund: unknown): string | null {
+  if (!inputs) return null
   if (inputs.length === 1) return inputs[0]
   return typeof refund === 'string' && inputs.includes(refund) ? refund : null
 }
@@ -178,9 +180,12 @@ export function zcashDepositOrigin(tx: FastNearTx): NearArrivalOrigin | null {
   }
   const depositMsg = args.deposit_msg as { refund_address?: unknown } | undefined
   const sender = pickZcashSender(senders, depositMsg?.refund_address)
+  // Spent from a shielded balance: the chain names no sender, and saying so beats a
+  // blank — the refund address is only what the depositor typed, never the sender.
+  const shielded = senders != null && senders.length === 0
   return {
     chain: 'Zcash',
-    account: sender ? { address: sender, url: `${BLOCKCHAIR_ZCASH}/address/${sender}` } : null,
+    account: sender ? { address: sender, url: `${BLOCKCHAIR_ZCASH}/address/${sender}` } : shielded ? { address: 'shielded', url: null, label: 'shielded sender' } : null,
     txUrl: txid ? `${BLOCKCHAIR_ZCASH}/transaction/${txid}` : nearTxUrl(tx.transaction.hash),
   }
 }
