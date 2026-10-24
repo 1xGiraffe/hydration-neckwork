@@ -662,14 +662,66 @@ export function foldFarmPayouts(rows: ReadonlyArray<FarmSyncRow>): Map<number, F
   return out
 }
 
-/** The sync-derived pot state of every global farm of one warehouse instance, at `anchorSec`. */
-export async function readFarmPayouts(client: ClickHouseClient, lm: WarehouseLm, anchorSec: number): Promise<Map<number, FarmPayout>> {
+// A farm's newest sync before the window, once found: block (null = none within the
+// walk's reach). It only changes when the farm syncs again, and that sync lands
+// inside the window, so a found answer holds for the life of the process.
+const olderNewestSync = new Map<string, number | null>()
+// How far back the walk looks for a farm silent through the window, in windows.
+const OLDER_SYNC_MAX_STEPS = 36
+
+/**
+ * The sync-derived pot state of every global farm of one warehouse instance, at
+ * `anchorSec`. `farmIds` are the live farms: one with no sync in the window still
+ * needs its NEWEST sync, because a drained pot stops syncing — its marker leaves the
+ * window a month after it ran dry, and without it the fold sees nothing and the farm
+ * falls back to its scheduled rate (XYK DOT/MYTH showed 63.8 % from two farms empty
+ * since 2026-09-15). Those are found by stepping back one window at a time (each step
+ * a time-pruned read like the window's own) and remembered.
+ */
+export async function readFarmPayouts(client: ClickHouseClient, lm: WarehouseLm, anchorSec: number, farmIds: readonly number[] = []): Promise<Map<number, FarmPayout>> {
   const res = await client.query({
     query: buildFarmSyncSql(lm),
     query_params: { anchor: anchorSec, windowDays: FARM_PAYOUT_WINDOW_DAYS },
     format: 'JSONEachRow',
   })
-  return foldFarmPayouts(await res.json<FarmSyncRow>())
+  const rows = await res.json<FarmSyncRow>()
+  const inWindow = new Set(rows.map(r => Number(r.global_farm_id)))
+  const silent = [...new Set(farmIds)].filter(id => !inWindow.has(id))
+  const unknown = silent.filter(id => !olderNewestSync.has(`${lm}:${id}`))
+  const names = `('${lm}.GlobalFarmAccRPZUpdated', '${lm}.AllRewardsDistributed')`
+  const farmId = `toUInt32OrZero(JSONExtractString(args_json, 'globalFarmId'))`
+  const windowSec = FARM_PAYOUT_WINDOW_DAYS * 86_400
+  let pending = unknown
+  for (let step = 1; pending.length && step <= OLDER_SYNC_MAX_STEPS; step++) {
+    const r = await client.query({
+      query: `SELECT ${farmId} AS g, max(block_height) AS b FROM price_data.raw_events
+              WHERE event_name IN ${names}
+                AND block_timestamp > toDateTime({lo:UInt32}) AND block_timestamp <= toDateTime({hi:UInt32})
+                AND ${farmId} IN {ids:Array(UInt32)}
+              GROUP BY g`,
+      query_params: { lo: anchorSec - (step + 1) * windowSec, hi: anchorSec - step * windowSec, ids: pending },
+      format: 'JSONEachRow',
+    })
+    const found = new Map((await r.json<{ g: number; b: number }>()).map(x => [Number(x.g), Number(x.b)]))
+    for (const [g, b] of found) olderNewestSync.set(`${lm}:${g}`, b)
+    pending = pending.filter(id => !found.has(id))
+  }
+  for (const id of pending) olderNewestSync.set(`${lm}:${id}`, null)
+  const blocks = silent.map(id => olderNewestSync.get(`${lm}:${id}`)).filter((b): b is number => b != null)
+  if (blocks.length) {
+    // The newest sync's own events (and the drained marker beside it): a key read.
+    const older = await client.query({
+      query: `SELECT ${farmId} AS global_farm_id, block_height, event_index, toUnixTimestamp(block_timestamp) AS t,
+                     event_name = '${lm}.AllRewardsDistributed' AS drained,
+                     JSONExtractString(args_json, 'accumulatedRpz') AS acc, JSONExtractString(args_json, 'totalSharesZ') AS z
+              FROM price_data.raw_events
+              WHERE block_height IN {blocks:Array(UInt32)} AND event_name IN ${names} AND ${farmId} IN {ids:Array(UInt32)}`,
+      query_params: { blocks: [...new Set(blocks)], ids: silent },
+      format: 'JSONEachRow',
+    })
+    rows.push(...await older.json<FarmSyncRow>())
+  }
+  return foldFarmPayouts(rows)
 }
 
 /**
@@ -713,7 +765,7 @@ export async function omnipoolFarmAprs(client: ClickHouseClient, anchor: string,
   const at = new Date(iso(anchor))
   // With pot state, a farm past its plan is rated too (decideFarmRate); without it
   // (the public per-asset surface) it stays null as documented in the header.
-  const payouts = opts.potState ? await readFarmPayouts(client, 'OmnipoolWarehouseLM', Math.floor(at.getTime() / 1000)) : null
+  const payouts = opts.potState ? await readFarmPayouts(client, 'OmnipoolWarehouseLM', Math.floor(at.getTime() / 1000), farms.map(f => f.globalFarmId)) : null
   const split = splitAcrossYieldFarms(farms)
   if (split.size) {
     console.warn(`[pool-yield] farm APR: global farm(s) ${[...split].join(', ')} run more than one live yield farm — `
