@@ -95,6 +95,9 @@ export function explorerSiteName(url: string): string {
 }
 export function ExternalAccountPill({ account }: { account: NonNullable<ActivityRow['destAccount']> }) {
   useTagMapVersion()   // re-render when the viewer's tag map changes
+  // A far end the chain names no address for: its words, never an avatar or a
+  // shortened "address" that would read like an account.
+  if (account.label) return <span className="addr-pill muted" title="The chain names no address for this side">{account.label}</span>
   // Prefer the server-resolved canonical accountId: for an AccountId32 it
   // already equals `raw`, but for a bound-EVM AccountKey20 `raw` is the bare
   // H160, not the accountId user tags/avatars are keyed by — using `raw` there

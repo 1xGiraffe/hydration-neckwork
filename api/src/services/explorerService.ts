@@ -12438,6 +12438,10 @@ export interface ActivityRow {
     tag?: { id: string; name: string; color: string; icon: string; memberCount?: number } | null
     identity?: { display: string; verified: boolean } | null
     profile?: { name: string; avatarVersion: number } | null
+    // A far end the chain names no address for, said in words instead (a Zcash
+    // deposit spent from a shielded balance: "shielded sender"). Shown in place of
+    // the address; `address` keeps a plain stand-in for readers that predate it.
+    label?: string
   }
   xcmDir?: 'in' | 'out'      // xcm: transfer direction relative to Hydration
   // xcm outbound: which leg of its send this row is, in the order the message names
@@ -16218,7 +16222,7 @@ export function nttArrivalRow(leg: NttLeg, entry: NttExtrinsicLogs | undefined, 
 // that called the manager. Read from an in-memory index — a miss schedules its sync and
 // leaves the row chain-only until a later request.
 function farAccountRef(account: FarAccount): NonNullable<ActivityRow['destAccount']> {
-  return { kind: 'AccountId32', accountId: '', raw: '', address: account.address, subscanUrl: account.url }
+  return { kind: 'AccountId32', accountId: '', raw: '', address: account.address, subscanUrl: account.url, ...(account.label ? { label: account.label } : {}) }
 }
 export function applyNearDestination(row: ActivityRow, sent: NttTransferSent): void {
   if (sent.recipientChain !== NEAR_WORMHOLE_CHAIN_ID || (row.destAccount && row.destTxUrl)) return

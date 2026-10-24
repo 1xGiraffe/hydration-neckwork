@@ -994,6 +994,8 @@ export interface ActivityRow {
     kind: 'AccountId32' | 'AccountKey20'; accountId?: string; address: string; raw: string; subscanUrl: string | null
     emoji?: string; emojiName?: string; emojiUrl?: string
     tag?: TagRef | null
+    /** A far end with no address, in words (a shielded Zcash sender). */
+    label?: string
     identity?: { display: string; verified: boolean } | null
     profile?: ProfileRef | null
     isContract?: boolean
