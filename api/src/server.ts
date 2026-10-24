@@ -85,7 +85,7 @@ import { initMmIncentiveService } from './services/mmIncentiveService.ts'
 import { initWormholeNttService } from './services/wormholeNttService.ts'
 import { initXcswapSettlements } from './services/xcswapSettlements.ts'
 import { startBackgroundRefresh, stopBackgroundRefresh } from './services/backgroundRefresh.ts'
-import { getHdxDashboard } from './services/hdxService.ts'
+import { getHdxDashboard, refreshHdxSnapshot } from './services/hdxService.ts'
 import { getHollarDashboard } from './services/hollarService.ts'
 import { getIceDashboard } from './services/iceService.ts'
 import { getRevenueDashboard, getStakerDistributions } from './services/revenueService.ts'
@@ -450,7 +450,10 @@ async function start() {
     // execution cap (see loadStructure's own ordering note).
     void (async () => {
       for (const [name, warm] of [
-        ['hdx', () => getHdxDashboard()],
+        // The lock snapshot first (single-flight with the scheduler's run): built
+        // without it, the dashboard's locks, unlocks and liquidation levels are empty,
+        // and that build is what the API and the edge serve for the next minutes.
+        ['hdx', async () => { await refreshHdxSnapshot(); return getHdxDashboard() }],
         ['hollar', () => getHollarDashboard()],
         ['ice', () => getIceDashboard()],
         ['revenue', () => getRevenueDashboard('30d')],
