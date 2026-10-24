@@ -640,8 +640,15 @@ export function assetIconCandidates(srcId: number, origin?: AssetOrigin | null):
   return out
 }
 
+// Icon URLs that already failed in this page session. The metadata CDN serves each
+// icon in one format only (PRIME's Solana-origin icon is PNG-only), so without this
+// every row of a feed re-asked the missing SVG and showed a blank icon until its own
+// error arrived — 41 failed requests on one asset page. One failure now settles it
+// for every later icon of that asset.
+const FAILED_ICON_URLS = new Set<string>()
+
 function CdnIcon({ srcId, symbol, size, clip, origin }: { srcId: number; symbol: string; size: number; clip?: 'left' | 'right'; origin?: AssetOrigin | null }) {
-  const candidates = assetIconCandidates(srcId, origin)
+  const candidates = assetIconCandidates(srcId, origin).filter(url => !FAILED_ICON_URLS.has(url))
   const sourceKey = `${srcId}:${origin?.ecosystem ?? ''}:${origin?.chainId ?? ''}:${origin?.assetId ?? ''}`
   const [fallback, setFallback] = useState<{ key: string; index: number }>({ key: sourceKey, index: 0 })
   const index = fallback.key === sourceKey ? fallback.index : 0
@@ -658,7 +665,12 @@ function CdnIcon({ srcId, symbol, size, clip, origin }: { srcId: number; symbol:
     src={src}
     alt=""
     loading="lazy"
-    onError={() => setFallback(current => ({ key: sourceKey, index: (current.key === sourceKey ? current.index : 0) + 1 }))}
+    onError={() => {
+      FAILED_ICON_URLS.add(src)
+      // The failed URL has just left `candidates`, so the next one already sits at
+      // this index; the index only advances while the list cannot shrink under it.
+      setFallback(current => ({ key: sourceKey, index: current.key === sourceKey ? current.index : 0 }))
+    }}
   />
 }
 
