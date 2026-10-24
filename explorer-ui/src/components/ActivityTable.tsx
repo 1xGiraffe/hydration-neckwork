@@ -353,7 +353,11 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     const origin = <><ChainBadge chain={r.fromChain ?? ''} title={remoteTokenTitle(r, r.fromChain ?? '')} />{r.fromAccount && <ExternalAccountPill account={r.fromAccount} />}</>
     // A Wormhole Relay settlement mints into the relay's pool (its `who`); the transfer
     // went to the account the pool's fast delivery paid, so that is the one named here.
-    const recipient = r.fastRelay?.role === 'settlement' && r.fastRelay.recipient ? <AddrPill account={r.fastRelay.recipient} noCopy /> : null
+    // On a detail page the hop names both ends: the sender (when the crosschain index
+    // knows it) and the local account it was for — a trapped arrival included, whose
+    // beneficiary was named but never credited. A list row has its own account column.
+    const recipient = r.fastRelay?.role === 'settlement' && r.fastRelay.recipient ? <AddrPill account={r.fastRelay.recipient} noCopy />
+      : headed && r.who ? <AddrPill account={r.who} noCopy /> : null
     // A failed arrival credited nobody: say so beside the amount, which never landed.
     const trapped = r.xcmTrapped ? <span className="badge fail" title="The message failed on Hydration; its assets sit in the asset trap and were not credited">trapped</span> : null
     return <span className="asset-flow">{origin} → <HydrationBadge />{recipient}<AssetAmount asset={r.asset} raw={r.amount} />{trapped}</span>
