@@ -6,6 +6,35 @@ import { createDefaultDatabaseClickHouseClient, type ClickHouseClient } from './
 import { ACCOUNT_ACTIVITY_MV, catchUpAccountActivityWindow } from './accountActivityCatchUp.ts'
 import { ATOKEN_PARTY_TRANSFERS_SELECT, ATOKEN_PARTY_TRANSFERS_WHERE, PARTY_TRANSFERS_SELECT, PARTY_TRANSFERS_WHERE, catchUpTransferDeltasWindow } from '../services/erc20WalletService.ts'
 
+// xcm_call_destinations_mv's own SELECT and WHERE over raw_extrinsics (013), verbatim:
+// the replay of its swap window and the backfill of `execute` history read the source
+// exactly as the view does. A test pins the two to the schema file.
+export const XCM_CALL_DESTINATIONS_SELECT = "block_height, extrinsic_index, block_timestamp, call_name, JSONExtractRaw(call_args_json, 'dest') AS dest_json, JSONExtractRaw(call_args_json, 'beneficiary') AS beneficiary_json, JSONExtractRaw(call_args_json, 'customXcmOnDest') AS custom_xcm_on_dest_json, ingested_at, JSONExtractRaw(call_args_json, 'message') AS message_json"
+export const XCM_CALL_DESTINATIONS_WHERE = "startsWith(call_name, 'PolkadotXcm.') AND (JSONHas(call_args_json, 'dest') OR call_name = 'PolkadotXcm.execute')"
+
+/**
+ * Rows raw_extrinsics took while xcm_call_destinations_mv was being recreated: the
+ * blocks ingested in the window (± a margin, read from raw_blocks), replayed through
+ * the view's SELECT. The table's ReplacingMergeTree key makes a replayed row harmless.
+ */
+export async function catchUpXcmCallDestinationsWindow(c: ClickHouseClient, window: { from: string; to: string }, marginSeconds = 300): Promise<string> {
+  const res = await c.query({
+    query: `SELECT min(block_height) AS lo, max(block_height) AS hi FROM price_data.raw_blocks
+            WHERE ingested_at BETWEEN {from:DateTime} - INTERVAL {margin:UInt32} SECOND AND {to:DateTime} + INTERVAL {margin:UInt32} SECOND`,
+    query_params: { from: window.from, to: window.to, margin: marginSeconds }, format: 'JSONEachRow',
+  })
+  const r = (await res.json<{ lo: number | string | null; hi: number | string | null }>())[0]
+  const lo = Number(r?.lo ?? 0), hi = Number(r?.hi ?? 0)
+  if (!(hi >= lo && hi > 0)) return `no blocks ingested ${window.from}..${window.to} ±${marginSeconds}s`
+  await c.command({
+    query: `INSERT INTO price_data.xcm_call_destinations SELECT ${XCM_CALL_DESTINATIONS_SELECT} FROM price_data.raw_extrinsics
+            PREWHERE block_height >= {lo:UInt32} AND block_height <= {hi:UInt32} AND (${XCM_CALL_DESTINATIONS_WHERE})`,
+    query_params: { lo, hi },
+    clickhouse_settings: { max_threads: 4, max_memory_usage: '3000000000' },
+  })
+  return `blocks ${lo}..${hi} replayed through the view's SELECT`
+}
+
 const DEFAULT_SCHEMA_DIRECTORY = fileURLToPath(new URL('../../../clickhouse/schema/', import.meta.url))
 
 function containsSql(statement: string): boolean {
@@ -134,6 +163,13 @@ export const MV_UPGRADES: ReadonlyArray<MvUpgrade> = [
     catchUp: catchUpTransferDeltasWindow,
   },
   {
+    // 2026-10: the view also keeps PolkadotXcm.execute and its `message` slice.
+    name: 'price_data.xcm_call_destinations_mv',
+    marker: 'message_json',
+    backfill: 'schemaBootstrap.catchUpXcmCallDestinationsWindow over that window; the execute history itself is the DATA_UPGRADES entry',
+    catchUp: catchUpXcmCallDestinationsWindow,
+  },
+  {
     name: ACCOUNT_ACTIVITY_MV,
     marker: 'operationStack',
     backfill: 'accountActivityCatchUp.catchUpAccountActivityWindow over that window (it re-reads the window\'s blocks through the live view and inserts only missing keys)',
@@ -198,17 +234,41 @@ export const RAW_ROW_KEY: DataUpgradeKey = {
 }
 export interface DataUpgrade {
   table: string
-  /** The raw table the MV reads; all three are ordered by block_height first. */
-  source: 'raw_events' | 'raw_evm_logs' | 'raw_balance_observations'
+  /** The raw table the MV reads; all are ordered by block_height first. */
+  source: 'raw_events' | 'raw_evm_logs' | 'raw_balance_observations' | 'raw_extrinsics'
   /** Coverage identity, when the table does not carry the raw row's (block_height, event_index). */
   key?: DataUpgradeKey
   /** The MV's WHERE over the source, verbatim (columns qualified by the source's name). */
   where: string
+  /**
+   * Set when `where` replays only the part of the MV's WHERE the view newly admits: the
+   * MV's own WHERE, verbatim. The rest of the table is already filled by the view, and
+   * a narrower replay predicate keeps the per-deploy coverage check cheap.
+   */
+  mvWhere?: string
   fromBlock: number
   /** The MV's SELECT list over the source, verbatim. */
   select: string
 }
 export const DATA_UPGRADES: ReadonlyArray<DataUpgrade> = [
+  {
+    // PolkadotXcm.execute joined xcm_call_destinations in 2026-10 (013); its history
+    // is replayed here. Coverage is the extrinsic's own key, and the predicate names
+    // only call_name, so a chunk's check never reads call_args_json — the widest
+    // column in the database — beyond the execute rows themselves. The first execute
+    // is at block 2,094,994.
+    table: 'price_data.xcm_call_destinations',
+    source: 'raw_extrinsics',
+    key: {
+      raw: 'block_height, extrinsic_index',
+      columns: 'block_height, extrinsic_index',
+      tableWhere: 'block_height >= {lo:UInt32} AND block_height < {hi:UInt32}',
+    },
+    where: "raw_extrinsics.call_name = 'PolkadotXcm.execute'",
+    mvWhere: XCM_CALL_DESTINATIONS_WHERE,
+    fromBlock: 2_000_000,
+    select: XCM_CALL_DESTINATIONS_SELECT,
+  },
   {
     table: 'price_data.gigahdx_reward_records',
     source: 'raw_events',
