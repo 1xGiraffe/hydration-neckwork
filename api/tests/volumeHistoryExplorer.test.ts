@@ -64,6 +64,27 @@ describe('volume / TVL', () => {
     expect(meanOfLast([], 7, cutSec)).toBeNull()
   })
 
+  // HUSDT: its only pooled liquidity was an XYK pool closed in November 2025, so the
+  // last 7 points were that pool's last days ($49.72) and the ratio read 902,720 %.
+  it('counts only points inside the window, never the last days of a venue gone quiet', () => {
+    const cutSec = Date.UTC(2026, 9, 25, 2) / 1000
+    const stale = [{ key: '2025-11-13', v: 49.74 }, { key: '2025-11-14', v: 49.74 }]
+    expect(meanOfLast(stale, 7, cutSec)).toBeNull()
+    const week = ['2026-10-20', '2026-10-21', '2026-10-22', '2026-10-23', '2026-10-24'].map(key => ({ key, v: 1_000 }))
+    expect(meanOfLast([...stale, ...week], 7, cutSec)).toBe(1_000)
+  })
+
+  it('has no mean when the window is mostly empty, but keeps a young series whole', () => {
+    const cutSec = Date.UTC(2026, 9, 25, 2) / 1000
+    const day = (d: string, v: number) => ({ key: d, v })
+    // Twenty dust days a year back, nothing since: no 12-month mean.
+    const dust = Array.from({ length: 20 }, (_, i) => day(new Date(Date.UTC(2025, 9, 26 + i)).toISOString().slice(0, 10), 49.7))
+    expect(meanOfLast([day('2025-10-01', 49.7), ...dust], 365, cutSec)).toBeNull()
+    // Listed ten days ago and pooled every day since: its 12-month mean is those days.
+    const young = Array.from({ length: 10 }, (_, i) => day(new Date(Date.UTC(2026, 9, 15 + i)).toISOString().slice(0, 10), 500))
+    expect(meanOfLast(young, 365, cutSec)).toBe(500)
+  })
+
   it('has no ratio without a positive denominator', () => {
     expect(ratio(50, 200)).toBe(0.25)
     expect(ratio(50, 0)).toBeNull()
