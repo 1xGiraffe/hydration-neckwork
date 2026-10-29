@@ -240,6 +240,14 @@ export function Intent({ intentId }: { intentId: string }) {
                     <span className="muted"> · tolerated when a fill settles</span>
                   </div>
                 </>}
+                {/* A MatchFirstSwap waits this long for an opposite intent to trade
+                    against directly, then is filled from the pools like any swap. */}
+                {data.order.matchUntilMs != null && <>
+                  <div className="dt">Match first</div>
+                  <div className="dd mono">{deadlineText(data.order.matchUntilMs, now)}
+                    <span className="muted"> · {deadlineDate(data.order.matchUntilMs)} · waits for an opposite intent until then, then fills from the pools</span>
+                  </div>
+                </>}
                 {/* A term of the order, live or settled — so "Deadline", not "Expires",
                     which would read as a verdict on an order that was filled in time. */}
                 {data.order.deadlineMs != null && <>

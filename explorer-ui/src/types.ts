@@ -477,7 +477,7 @@ export interface ExtrinsicDetail extends ExtrinsicSummary {
 // decimal string (it starts past u64, so it is never a number) and `seq` its low 64
 // bits, the short "#n" handle.
 export type IntentOrderStatus = 'open' | 'partially-filled' | 'filled' | 'completed' | 'cancelled' | 'expired'
-export interface IntentOrder { intentId: string; seq: number; owner: string; kind: 'swap' | 'dca'; assetIn: number; assetOut: number; amountIn: string; amountOut: string; partial: boolean; partialMin: string | null; slippagePpm: number; budget: string | null; period: number; deadlineMs: number | null; forwardContract: string | null; blockHeight: number; extrinsicIndex: number | null; timestamp: string }
+export interface IntentOrder { intentId: string; seq: number; owner: string; kind: 'swap' | 'dca'; assetIn: number; assetOut: number; amountIn: string; amountOut: string; partial: boolean; partialMin: string | null; slippagePpm: number; budget: string | null; period: number; deadlineMs: number | null; forwardContract: string | null; matchUntilMs?: number | null; blockHeight: number; extrinsicIndex: number | null; timestamp: string }
 export interface IntentOrderDetail {
   order: IntentOrder; owner: AccountRef | null; assetIn: AssetRef; assetOut: AssetRef; status: IntentOrderStatus
   filledIn: string; filledOut: string; fills: ActivityRow[]; fillsTotal: number

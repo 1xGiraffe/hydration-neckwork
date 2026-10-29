@@ -35,6 +35,43 @@ export async function catchUpXcmCallDestinationsWindow(c: ClickHouseClient, wind
   return `blocks ${lo}..${hi} replayed through the view's SELECT`
 }
 
+/**
+ * A raw_events view's own rows for the blocks ingested while it was being recreated:
+ * the LIVE (new) definition's SELECT, replayed over that block range. The range and
+ * the view's predicate go in ONE PREWHERE — never an explicit PREWHERE beside a
+ * separate WHERE, which on CH 26.3 silently returns a fraction of the rows. Only for
+ * views writing a ReplacingMergeTree, where a replayed row is harmless.
+ */
+export function viewReplaySql(create: string, target: string): string {
+  const at = create.indexOf(') AS ')
+  if (at < 0) throw new Error('no ") AS " in the view definition')
+  const select = create.slice(at + ') AS '.length).trim().replace(/;$/, '')
+  const from = ' FROM price_data.raw_events WHERE '
+  const i = select.lastIndexOf(from)
+  if (i < 0) throw new Error('the view SELECT does not read price_data.raw_events with a WHERE')
+  return `INSERT INTO ${target} ${select.slice(0, i)} FROM price_data.raw_events
+          PREWHERE block_height >= {lo:UInt32} AND block_height <= {hi:UInt32} AND (${select.slice(i + from.length)})`
+}
+function catchUpRawEventsView(view: string, target: string) {
+  return async (c: ClickHouseClient, window: { from: string; to: string }, marginSeconds = 300): Promise<string> => {
+    const live = (await (await c.query({
+      query: `SELECT create_table_query AS q FROM system.tables WHERE concat(database, '.', name) = {qname:String}`,
+      query_params: { qname: view }, format: 'JSONEachRow',
+    })).json<{ q: string }>())[0]?.q
+    if (!live) throw new Error(`${view} is not live; nothing can be replayed through it`)
+    const res = await c.query({
+      query: `SELECT min(block_height) AS lo, max(block_height) AS hi FROM price_data.raw_blocks
+              WHERE ingested_at BETWEEN {from:DateTime} - INTERVAL {margin:UInt32} SECOND AND {to:DateTime} + INTERVAL {margin:UInt32} SECOND`,
+      query_params: { from: window.from, to: window.to, margin: marginSeconds }, format: 'JSONEachRow',
+    })
+    const r = (await res.json<{ lo: number | string | null; hi: number | string | null }>())[0]
+    const lo = Number(r?.lo ?? 0), hi = Number(r?.hi ?? 0)
+    if (!(hi >= lo && hi > 0)) return `no blocks ingested ${window.from}..${window.to} ±${marginSeconds}s`
+    await c.command({ query: viewReplaySql(live, target), query_params: { lo, hi }, clickhouse_settings: { max_threads: 4, max_memory_usage: '3000000000' } })
+    return `blocks ${lo}..${hi} replayed through ${view}'s live SELECT`
+  }
+}
+
 const DEFAULT_SCHEMA_DIRECTORY = fileURLToPath(new URL('../../../clickhouse/schema/', import.meta.url))
 
 function containsSql(statement: string): boolean {
@@ -161,6 +198,21 @@ export const MV_UPGRADES: ReadonlyArray<MvUpgrade> = [
     marker: 'erc20_wallet_contracts',
     backfill: 'erc20WalletService.catchUpTransferDeltasWindow over that window (or restart api: syncTransferDeltas compares the whole history on its first cycle)',
     catchUp: catchUpTransferDeltasWindow,
+  },
+  {
+    // 2026-10 (runtime 455): a MatchFirstSwap intent's terms sit under `data.swap`, not
+    // `data.value`; the view reads either, and keeps its matching window.
+    name: 'price_data.intent_orders_mv',
+    marker: 'match_until_ms',
+    backfill: 'schemaBootstrap viewReplaySql over that window (the live SELECT, replayed per block range)',
+    catchUp: catchUpRawEventsView('price_data.intent_orders_mv', 'price_data.intent_orders'),
+  },
+  {
+    // Same change: an intent's two assets, from `data.value` or `data.swap`.
+    name: 'price_data.activity_histogram_events_mv',
+    marker: "'data', 'swap', 'assetIn'",
+    backfill: 'schemaBootstrap viewReplaySql over that window (the live SELECT, replayed per block range)',
+    catchUp: catchUpRawEventsView('price_data.activity_histogram_events_mv', 'price_data.activity_histogram_events'),
   },
   {
     // 2026-10: the view also keeps PolkadotXcm.execute and its `message` slice.

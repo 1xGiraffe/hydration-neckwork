@@ -17994,6 +17994,8 @@ export interface IntentOrder {
   assetIn: number; assetOut: number; amountIn: string; amountOut: string
   partial: boolean; partialMin: string | null; slippagePpm: number; budget: string | null; period: number
   deadlineMs: number | null; forwardContract: string | null
+  /** A MatchFirstSwap: until when it waits for an opposite intent before it is filled from the pools. */
+  matchUntilMs: number | null
   blockHeight: number; extrinsicIndex: number | null; timestamp: string
 }
 export interface IntentActivityParts {
@@ -18019,8 +18021,10 @@ export function intentActivityParts(eventName: string, args: Record<string, unkn
   const intentId = intentNum(args.id)
   if (intentId == null) return null
   if (action === 'Place') {
-    const intent = args.intent as { data?: { value?: Record<string, unknown> } } | undefined
-    const v = intent?.data?.value ?? {}
+    // A struct variant's terms sit under its field name: `value` (Swap, Dca) or `swap`
+    // (MatchFirstSwap, runtime 455).
+    const intent = args.intent as { data?: { value?: Record<string, unknown>; swap?: Record<string, unknown> } } | undefined
+    const v = intent?.data?.value ?? intent?.data?.swap ?? {}
     const owner = typeof args.owner === 'string' && ACCOUNT_RE.test(args.owner) ? args.owner : null
     return { action, intentId, owner, amountIn: intentNum(v.amountIn), amountOut: intentNum(v.amountOut), remainingBudget: null }
   }
@@ -18036,6 +18040,7 @@ export type RawIntentOrderRow = {
   intent_id: string; seq: string | number; owner: string; kind: string; asset_in: number; asset_out: number
   amount_in: string; amount_out: string; partial: number; partial_min: string; slippage_ppm: number; budget: string
   period: number; deadline_ms: string | number; forward_contract: string; block_height: number; extrinsic_index: number | null; ts: string
+  match_until_ms?: string | number
 }
 function intentOrderFromRow(r: RawIntentOrderRow): IntentOrder {
   // `seq` is the u64 low half of the id as a JS number: exact only below 2^53, a
@@ -18045,7 +18050,9 @@ function intentOrderFromRow(r: RawIntentOrderRow): IntentOrder {
     assetIn: Number(r.asset_in), assetOut: Number(r.asset_out), amountIn: r.amount_in, amountOut: r.amount_out,
     partial: Number(r.partial) === 1, partialMin: r.partial_min || null, slippagePpm: Number(r.slippage_ppm),
     budget: r.budget || null, period: Number(r.period), deadlineMs: Number(r.deadline_ms) > 0 ? Number(r.deadline_ms) : null,
-    forwardContract: r.forward_contract || null, blockHeight: Number(r.block_height), extrinsicIndex: r.extrinsic_index, timestamp: r.ts,
+    forwardContract: r.forward_contract || null,
+    matchUntilMs: Number(r.match_until_ms ?? 0) > 0 ? Number(r.match_until_ms) : null,
+    blockHeight: Number(r.block_height), extrinsicIndex: r.extrinsic_index, timestamp: r.ts,
   }
 }
 // Orders are immutable once placed, so a resolved order can be memoised for the
@@ -18064,9 +18071,9 @@ export async function getIntentOrders(ids: string[]): Promise<Map<string, Intent
     // in the same statement would capture a `WHERE intent_id IN …` (ClickHouse
     // resolves the later reference to the alias) and compare strings to u128s.
     const res = await client.query({
-      query: `SELECT toString(intent_id) AS intent_id, seq, owner, kind, asset_in, asset_out, amount_in, amount_out, partial, partial_min, slippage_ppm, budget, period, deadline_ms, forward_contract, block_height, extrinsic_index, toString(block_timestamp) AS ts
+      query: `SELECT toString(intent_id) AS intent_id, seq, owner, kind, asset_in, asset_out, amount_in, amount_out, partial, partial_min, slippage_ppm, budget, period, deadline_ms, forward_contract, match_until_ms, block_height, extrinsic_index, toString(block_timestamp) AS ts
               FROM (
-                SELECT intent_id, seq, owner, kind, asset_in, asset_out, amount_in, amount_out, partial, partial_min, slippage_ppm, budget, period, deadline_ms, forward_contract, block_height, block_timestamp, extrinsic_index
+                SELECT intent_id, seq, owner, kind, asset_in, asset_out, amount_in, amount_out, partial, partial_min, slippage_ppm, budget, period, deadline_ms, forward_contract, match_until_ms, block_height, block_timestamp, extrinsic_index
                 FROM price_data.intent_orders FINAL
                 WHERE intent_id IN (${missing.map(id => `toUInt128('${id}')`).join(',')})
               )`,

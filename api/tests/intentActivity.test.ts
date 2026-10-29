@@ -29,7 +29,9 @@ describe('intent schema', () => {
   it('feeds intent_orders from IntentSubmitted only', () => {
     const line = mvs.split('\n').find(l => l.includes('price_data.intent_orders_mv'))!
     expect(line).toContain("WHERE event_name = 'Intent.IntentSubmitted'")
-    expect(line).toContain("'intent', 'data', 'value', 'assetIn'")
+    // The terms from `data.value` (Swap, Dca) or `data.swap` (MatchFirstSwap, runtime 455).
+    expect(line).toContain("JSONExtractRaw(args_json, 'intent', 'data', 'value'), JSONExtractRaw(args_json, 'intent', 'data', 'swap')) AS body")
+    expect(line).toContain("JSONExtractUInt(body, 'assetIn')")
     expect(line).toContain("bitAnd(")
   })
   it('feeds intent_events from every lifecycle event', () => {
@@ -42,7 +44,7 @@ describe('intent schema', () => {
     for (const name of FEED_EVENTS) expect(line, name).toContain(`'${name}'`)
     // The budget-exhausting trade of a DCA intent is DcaCompleted alone: its bar too.
     expect(line).toContain("'Intent.DcaCompleted'")
-    expect(line).toContain("event_name = 'Intent.IntentSubmitted', arrayDistinct([toUInt32(greatest(0, JSONExtractInt(args_json, 'intent', 'data', 'value', 'assetIn')))")
+    expect(line).toContain("event_name = 'Intent.IntentSubmitted', arrayDistinct([toUInt32(greatest(0, JSONExtractInt(args_json, 'intent', 'data', 'value', 'assetIn'), JSONExtractInt(args_json, 'intent', 'data', 'swap', 'assetIn')))")
   })
   it('records DCA migration outcomes in dca_events', () => {
     const line = mvs.split('\n').find(l => l.includes('price_data.dca_events_mv'))!
@@ -71,8 +73,8 @@ const resolved = { id: ID, amountIn: '8610630', amountOut: '72585831293' }
 const dcaTrade = { id: DCA_ID, amountIn: '190218680', amountOut: '189916449', remainingBudget: '380437361' }
 const dcaDone = { id: DCA_ID }
 const ID_SEQ7 = '18446744073709551623' // 2^64 + 7: high half 1, low half (seq) 7 — a seq the real ids (0, 34) cannot pin
-const order: IntentOrder = { intentId: ID, seq: 0, owner: OWNER, kind: 'swap', assetIn: 10, assetOut: 1001, amountIn: '8610630', amountOut: '72230122863', partial: false, partialMin: null, slippagePpm: 0, budget: null, period: 0, deadlineMs: null, forwardContract: null, blockHeight: 14396667, extrinsicIndex: 2, timestamp: '2026-09-09 09:03:54' }
-const dcaOrderRow: IntentOrder = { intentId: DCA_ID, seq: 34, owner: OWNER, kind: 'dca', assetIn: 1003, assetOut: 1000766, amountIn: '190218680', amountOut: '10000', partial: false, partialMin: null, slippagePpm: 30000, budget: '570656041', period: 18, deadlineMs: null, forwardContract: null, blockHeight: 14402251, extrinsicIndex: 2, timestamp: '2026-09-09 12:31:18' }
+const order: IntentOrder = { intentId: ID, seq: 0, owner: OWNER, kind: 'swap', assetIn: 10, assetOut: 1001, amountIn: '8610630', amountOut: '72230122863', partial: false, partialMin: null, slippagePpm: 0, budget: null, period: 0, deadlineMs: null, forwardContract: null, matchUntilMs: null, blockHeight: 14396667, extrinsicIndex: 2, timestamp: '2026-09-09 09:03:54' }
+const dcaOrderRow: IntentOrder = { intentId: DCA_ID, seq: 34, owner: OWNER, kind: 'dca', assetIn: 1003, assetOut: 1000766, amountIn: '190218680', amountOut: '10000', partial: false, partialMin: null, slippagePpm: 30000, budget: '570656041', period: 18, deadlineMs: null, forwardContract: null, matchUntilMs: null, blockHeight: 14402251, extrinsicIndex: 2, timestamp: '2026-09-09 12:31:18' }
 // The settlement legs of 14402317/2 (Currencies.Transferred): e17 owner→pot 190218680 aUSDC, e65 pot→owner 189907076 USDC.
 const doneLegs: IceSettlementLeg[] = [
   { blockHeight: 14402317, extrinsicIndex: 2, from: OWNER, to: ICE_POT_ACCOUNT, assetId: 1003, amount: '190218680' },
