@@ -955,6 +955,7 @@ async function renderIntent(intentId: string, ctx: ToolContext): Promise<ToolOut
           + (o.kind === 'dca' ? ' (per trade)' : '')
         : null],
       ['Partial fills', o.partial ? 'allowed' : 'all-or-nothing'],
+      ['Match first until', o.matchUntilMs ? `${formatTime(new Date(o.matchUntilMs).toISOString().replace('T', ' ').slice(0, 19))} (waits for an opposite intent, then fills from the pools)` : null],
       ['Deadline', o.deadlineMs ? formatTime(new Date(o.deadlineMs).toISOString().replace('T', ' ').slice(0, 19)) : null],
       ['Placed', `block ${formatCount(o.blockHeight)} · ${timeLine(o.timestamp)}`],
       ['DCA budget left', d.dca?.remainingBudget ? formatAmount(d.dca.remainingBudget, inDec, assetLabel(d.assetIn)) : null],

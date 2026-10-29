@@ -415,6 +415,8 @@ export interface IntentOrderDetail {
     budget?: string | null
     period?: number | null
     deadlineMs?: number | null
+    /** A MatchFirstSwap: until when it waits for an opposite intent before filling from the pools. */
+    matchUntilMs?: number | null
     blockHeight: number
     extrinsicIndex: number | null
     timestamp: string
