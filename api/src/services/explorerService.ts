@@ -5832,11 +5832,19 @@ async function erc20WalletHoldingsByAccount(h160s: string[]): Promise<Map<string
 
 // Fold live ERC-20 holdings into the Tokens-side balance list: summed when the
 // asset already has a (separate-pot) Tokens balance, appended otherwise.
+//
+// A Uniswap v3 vault's share token (aDOT-HOLLAR, 1001354) is NOT a balance here: it
+// is a liquidity position, listed and valued once as the vault on the Liquidity side
+// (getUniswapV3Positions, redeemed against the vault's totals), as the public API's
+// uniswapV3Usd also counts it. Once the share was priced (withExplorerVaultSharePrices,
+// for its holders page) a balance row counted the same money a second time in
+// every account value. Its own asset pages still show it as the token it is.
 export function mergeErc20Balances(balances: AddressBalance[], holdings: { asset: AssetRef; raw: bigint }[], prices: Map<number, PriceInfo>): AddressBalance[] {
   if (!holdings.length) return balances
   const out = balances.slice()
+  const vaultShares = v3VaultShareAssets()
   for (const h of holdings) {
-    if (h.raw <= 0n) continue
+    if (h.raw <= 0n || vaultShares.has(h.asset.assetId)) continue
     const existing = out.findIndex(b => b.asset.assetId === h.asset.assetId)
     if (existing >= 0) {
       const b = out[existing]
