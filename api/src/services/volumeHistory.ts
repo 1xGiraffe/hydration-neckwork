@@ -320,9 +320,25 @@ export function carryStateOnGrid(grid: { keys: string[]; stepSec: number }, poin
   return out
 }
 
-/** The mean of the last `n` non-null points keyed before `beforeSec`; null with none. */
+/**
+ * The mean of the non-null daily points of the last `n` days before `beforeSec`
+ * (the cut's own day and the `n` before it); null with none. Bounded by TIME, not
+ * by count: "the last 7 points" of a venue gone quiet are its last days alive —
+ * HUSDT's 7-day mean TVL was the $49.72 left in an XYK pool that closed in
+ * November 2025, and the week's $449k of volume over it read 902,720 %.
+ */
+//
+// And only when the points COVER the window: at least half of the days the series
+// could have had in it (from the window's start, or from its first point when it is
+// younger). A day with no pooled liquidity has no point rather than a zero, so a few
+// dust days left in the window would otherwise stand for all of it — the 12-month
+// ratio read 466,948 % off twenty such days.
 export function meanOfLast(points: { key: string; v: number | null }[], n: number, beforeSec: number): number | null {
-  const vals = points.filter(p => p.v != null && keySeconds(p.key) < beforeSec).map(p => p.v as number)
+  const from = Math.floor(beforeSec / DAY) * DAY - n * DAY
+  const vals = points.filter(p => p.v != null && keySeconds(p.key) < beforeSec && keySeconds(p.key) >= from).map(p => p.v as number)
+  const firstSec = points.reduce((m, p) => Math.min(m, keySeconds(p.key)), Infinity)
+  const possibleDays = Math.ceil((beforeSec - Math.max(from, firstSec)) / DAY)
+  if (vals.length * 2 < Math.min(n, possibleDays)) return null
   const last = vals.slice(-n)
   return last.length ? last.reduce((s, v) => s + v, 0) / last.length : null
 }
