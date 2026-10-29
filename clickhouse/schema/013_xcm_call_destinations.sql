@@ -12,8 +12,8 @@
 --
 -- This is the narrow source that read wants: one row per top-level PolkadotXcm
 -- extrinsic (47k of the 35M), block-keyed like raw_extrinsics, holding ONLY the
--- top-level args the decoder reads — `dest`, `beneficiary`, `customXcmOnDest` — as raw
--- JSON slices. Decoding stays in TypeScript, in the one function every surface calls:
+-- top-level args the decoder reads — `dest`, `beneficiary`, `customXcmOnDest`, and an
+-- inline program's `message` — as raw JSON slices. Decoding stays in TypeScript, in the one function every surface calls:
 -- the beneficiary is the DepositAsset of the DEEPEST nested hop, skipping
 -- SetAppendix/SetErrorHandler, a recursive walk SQL could only restate as a second
 -- implementation that drifts. The api rebuilds `{dest, beneficiary, customXcmOnDest}`
@@ -21,9 +21,11 @@
 -- args; api/tests/xcmExecutedDestination.test.ts pins that the two agree and that the
 -- slice set is the key set the decoder reads.
 --
--- Only calls naming a `dest` are kept: without one the decoder answers null for every
--- caller, so `PolkadotXcm.execute` (an inline program, no dest) and `claim_assets`
--- contribute nothing and are not stored. A PolkadotXcm call wrapped in
+-- Kept: calls naming a `dest`, and `PolkadotXcm.execute`, an inline program whose route
+-- is its forwarding instructions — XCM v5's `InitiateTransfer`, which wallets now build
+-- Snowbridge sends from (~900 since 2026-05; added 2026-10, its history backfilled by
+-- schemaBootstrap DATA_UPGRADES). Anything else (`claim_assets`) names no destination
+-- the decoder can read, and is not stored. A PolkadotXcm call wrapped in
 -- `Utility.batch_all` or `Proxy.proxy` is not a top-level PolkadotXcm extrinsic and is
 -- absent here as it is from raw_extrinsics' call_name.
 --
@@ -37,18 +39,13 @@ CREATE TABLE IF NOT EXISTS price_data.xcm_call_destinations (
   `dest_json` String,
   `beneficiary_json` String,
   `custom_xcm_on_dest_json` String,
-  `ingested_at` DateTime
+  `ingested_at` DateTime,
+  `message_json` String DEFAULT ''
 ) ENGINE = ReplacingMergeTree(ingested_at)
 PARTITION BY toYYYYMM(block_timestamp)
 ORDER BY (block_height, extrinsic_index)
 SETTINGS index_granularity = 1024;
 
-CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.xcm_call_destinations_mv
-TO price_data.xcm_call_destinations AS
-SELECT block_height, extrinsic_index, block_timestamp, call_name,
-       JSONExtractRaw(call_args_json, 'dest') AS dest_json,
-       JSONExtractRaw(call_args_json, 'beneficiary') AS beneficiary_json,
-       JSONExtractRaw(call_args_json, 'customXcmOnDest') AS custom_xcm_on_dest_json,
-       ingested_at
-FROM price_data.raw_extrinsics
-WHERE startsWith(call_name, 'PolkadotXcm.') AND JSONHas(call_args_json, 'dest');
+ALTER TABLE price_data.xcm_call_destinations ADD COLUMN IF NOT EXISTS `message_json` String DEFAULT '';
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.xcm_call_destinations_mv TO price_data.xcm_call_destinations AS SELECT block_height, extrinsic_index, block_timestamp, call_name, JSONExtractRaw(call_args_json, 'dest') AS dest_json, JSONExtractRaw(call_args_json, 'beneficiary') AS beneficiary_json, JSONExtractRaw(call_args_json, 'customXcmOnDest') AS custom_xcm_on_dest_json, ingested_at, JSONExtractRaw(call_args_json, 'message') AS message_json FROM price_data.raw_extrinsics WHERE startsWith(call_name, 'PolkadotXcm.') AND (JSONHas(call_args_json, 'dest') OR call_name = 'PolkadotXcm.execute');

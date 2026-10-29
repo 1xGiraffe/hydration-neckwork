@@ -18,7 +18,7 @@ describe('schema data upgrades', () => {
     for (const u of DATA_UPGRADES) {
       const mv = statements.find(st => new RegExp(`CREATE MATERIALIZED VIEW IF NOT EXISTS \\S+ TO ${u.table.replace('.', '\\.')} `).test(st))
       expect(mv, u.table).toBeDefined()
-      expect(mv).toContain(`AS SELECT ${u.select} FROM price_data.${u.source} WHERE ${u.where}`)
+      expect(mv).toContain(`AS SELECT ${u.select} FROM price_data.${u.source} WHERE ${u.mvWhere ?? u.where}`)
     }
   })
 
@@ -33,6 +33,10 @@ describe('schema data upgrades', () => {
         expect(create).toContain('`block_height` UInt32')
         expect(create).toContain('`event_index` UInt32')
         expect(create).toMatch(/ENGINE = ReplacingMergeTree\(ingested_at\)/)
+      } else if (/ENGINE = ReplacingMergeTree\(ingested_at\)/.test(create!)) {
+        // An identity-keyed table on its own key (an extrinsic's): it replaces on it.
+        expect(create).toContain(`ORDER BY (${u.key.columns})`)
+        expect(u.key.raw.split(',').length).toBe(u.key.columns.split(',').length)
       } else {
         // An aggregated table: its key columns exist and every state is idempotent
         // under replay (max/min), never an additive sum or count.

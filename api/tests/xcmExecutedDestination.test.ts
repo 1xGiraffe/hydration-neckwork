@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { XCM_CALL_DESTINATION_ARGS, xcmCallDestinationArgs, xcmDestinationFromCallArgs } from '../src/services/explorerService.ts'
+import { XCM_CALL_DESTINATIONS_SELECT, XCM_CALL_DESTINATIONS_WHERE } from '../src/db/schemaBootstrap.ts'
 
 const schema = readFileSync(new URL('../../clickhouse/schema/013_xcm_call_destinations.sql', import.meta.url), 'utf8')
 const explorerService = readFileSync(new URL('../src/services/explorerService.ts', import.meta.url), 'utf8')
@@ -47,6 +48,49 @@ describe('xcmDestinationFromCallArgs', () => {
       dest: { parents: 1, interior: { __kind: 'Here' } },
       beneficiary: account(ALICE),
     })).toMatchObject({ destChain: 'Polkadot', destParachainId: null })
+  })
+
+  // Block 16,264,304 extrinsic 2, as indexed: 100 USDT to Ethereum, a v5 program the
+  // wallet built. It names AssetHub (InitiateTransfer → Parachain 1000), and AssetHub's
+  // program swaps DOT for the bridge fee and forwards to Ethereum (a nested
+  // InitiateTransfer → GlobalConsensus Ethereum) with the recipient. The appendix
+  // refunds the SENDER on AssetHub and is not the recipient.
+  it('reads an execute program built from v5 InitiateTransfer, through to Ethereum', () => {
+    const SENDER = '0x6e141c9f322c377b82418ddb514005260d40e6aaa11acd388961cc33914a8949'
+    const RECIPIENT = '0x326e5e5024e1ad738ebd3a1a724d51a94d68d315'
+    const TOPIC = '0xbb06fe37f98fed6dd9de967d05d9e851e3eeca47859e3dd41d78c31dc1035c88'
+    const ethereum = { parents: 2, interior: { __kind: 'X1', value: [{ __kind: 'GlobalConsensus', value: { chainId: '1', __kind: 'Ethereum' } }] } }
+    const refund = { __kind: 'SetAppendix', value: [{ __kind: 'RefundSurplus' }, { __kind: 'DepositAsset', assets: { __kind: 'Wild', value: { __kind: 'All' } }, beneficiary: account(SENDER) }] }
+    const args = {
+      message: { __kind: 'V5', value: [
+        { __kind: 'WithdrawAsset', value: [] },
+        { __kind: 'PayFees', asset: { id: { parents: 1, interior: { __kind: 'Here' } }, fun: { __kind: 'Fungible', value: '11487300' } } },
+        refund,
+        {
+          __kind: 'InitiateTransfer',
+          destination: { parents: 1, interior: { __kind: 'X1', value: [{ __kind: 'Parachain', value: 1000 }] } },
+          preserveOrigin: true,
+          remoteXcm: [
+            refund,
+            { __kind: 'ExchangeAsset', give: {}, want: [], maximal: false },
+            {
+              __kind: 'InitiateTransfer', destination: ethereum, preserveOrigin: true,
+              remoteXcm: [
+                { __kind: 'DepositAsset', assets: { __kind: 'Wild', value: { __kind: 'AllCounted', value: 3 } }, beneficiary: { parents: 0, interior: { __kind: 'X1', value: [{ __kind: 'AccountKey20', key: RECIPIENT }] } } },
+                { __kind: 'SetTopic', value: TOPIC },
+              ],
+            },
+            { __kind: 'SetTopic', value: TOPIC },
+          ],
+        },
+        { __kind: 'SetTopic', value: TOPIC },
+      ] },
+      maxWeight: { refTime: '20000000000', proofSize: '500000' },
+    }
+    const dest = xcmDestinationFromCallArgs(args)
+    expect(dest).toMatchObject({ destChain: 'Ethereum', destParachainId: null, messageId: TOPIC })
+    // The Ethereum address itself, linked on Etherscan (chain id 1, from the program).
+    expect(dest?.destAccount).toMatchObject({ kind: 'AccountKey20', address: RECIPIENT, subscanUrl: `https://etherscan.io/address/${RECIPIENT}` })
   })
 
   it('is null for a call that names no destination', () => {
@@ -119,11 +163,19 @@ describe('xcm_call_destinations projection', () => {
     expect(xcmDestinationFromCallArgs(xcmCallDestinationArgs(stored(CALLS.limited_reserve_transfer_assets)))?.destAccount?.kind).toBe('AccountKey20')
   })
 
-  it('stores a call only when it names a dest — the decoder answers null for every other', () => {
+  it('stores a call when it names a dest or is an inline program — the decoder answers null for every other', () => {
     for (const [name, args] of Object.entries(CALLS)) {
-      if (!('dest' in args)) expect(xcmDestinationFromCallArgs(args), name).toBeNull()
+      if (!('dest' in args) && name !== 'execute') expect(xcmDestinationFromCallArgs(args), name).toBeNull()
     }
-    expect(schema).toContain("WHERE startsWith(call_name, 'PolkadotXcm.') AND JSONHas(call_args_json, 'dest')")
+    expect(xcmDestinationFromCallArgs(CALLS.execute)).toMatchObject({ destChain: 'AssetHub', destParachainId: 1000 })
+    expect(schema).toContain(`WHERE ${XCM_CALL_DESTINATIONS_WHERE};`)
+  })
+
+  // The swap-window replay and the execute-history backfill (schemaBootstrap) read
+  // raw_extrinsics exactly as the view does.
+  it('replays through the view\'s own SELECT', () => {
+    const viewSelect = schema.slice(schema.indexOf('SELECT block_height, extrinsic_index'), schema.indexOf('FROM price_data.raw_extrinsics')).replace(/\s+/g, ' ').trim()
+    expect(viewSelect).toBe(`SELECT ${XCM_CALL_DESTINATIONS_SELECT}`)
   })
 
   it('declares the block-keyed table before its MV, with one slice column per key the decoder reads', () => {
