@@ -148,7 +148,8 @@ export function mvUpgradePlan(live: ReadonlyMap<string, string>): string[] {
 
 /** The CREATE statement of a view in the schema's statements, by its qualified name. */
 export function createStatementFor(statements: readonly string[], name: string): string | undefined {
-  return statements.find(st => new RegExp(`^(--[^\\n]*\\n\\s*)*CREATE MATERIALIZED VIEW IF NOT EXISTS ${name.replace('.', '\\.')} `).test(st))
+  // The name ends at any whitespace: a CREATE may break the line after it.
+  return statements.find(st => new RegExp(`^(--[^\\n]*\\n\\s*)*CREATE MATERIALIZED VIEW IF NOT EXISTS ${name.replace('.', '\\.')}\\s`).test(st))
 }
 
 /**
