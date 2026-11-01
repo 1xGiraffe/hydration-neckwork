@@ -364,6 +364,20 @@ hydration-mcp.neckwork.net) serves LLM agents a Model Context Protocol surface o
 - Mock data must be deterministic and preserve the same row identity across feeds, blocks, and detail pages.
 - Keep nested controls usable inside clickable rows and preserve canonical navigation, keyboard behavior, and address-only copy actions.
 
+## Dependencies and supply chain
+
+A compromised package runs with whatever the process holding it can reach — the api containers hold RPC keys, bot tokens and the ClickHouse password. Agents are the likeliest way one gets in, so these are rules, not advice.
+
+- Never add, remove or upgrade a dependency, change a `package.json` range or touch a `package-lock.json` unless the task asks for exactly that. Prefer the standard library or a package already in the tree. Never run `npx <package>` for anything not already a dependency, `curl … | sh`, or a global install.
+- A new dependency needs: the exact name checked against typosquats (scope, spelling, a near-namesake with more downloads), a maintainer and repository that match the project it claims to be, a history longer than a few weeks, and an exact version (`npm install --save-exact`). Say in the commit why it is needed and what was checked.
+- Release cooldown: take no version younger than 14 days — most malicious npm releases are found and pulled within days. Resolve with `--before=$(date -u -d '14 days ago' +%Y-%m-%d)` (`npm install`, `npm update <pkg>`, `npm audit fix`), which picks the newest release older than the cutoff. A security fix still inside the cooldown waits; its advisory goes into `ops/audit-allowlist.json` until then (below), never a bypass.
+- Keep a fix narrow: `npm update <pkg> --before=…` for the affected packages, never a bare `npm audit fix` on a workspace (it moves every dev dependency it can), and never `--force` (major bumps) without the task asking. `--omit=dev` also prunes dev dependencies from the local `node_modules`; reinstall with `npm ci --ignore-scripts` before checking.
+- Review every lockfile diff before committing it: list what was added, removed and changed (name, old → new version), and confirm each `resolved` URL is `https://registry.npmjs.org/` and carries an `integrity` hash. A package with a new install script (`hasInstallScript`) is called out explicitly.
+- Install scripts do not run: every Dockerfile installs with `npm ci --ignore-scripts` (esbuild and rollup ship their binaries as optional platform packages and need none). Install locally the same way. A dependency that genuinely needs its script is an explicit, reviewed exception.
+- Base images are pinned by version AND digest (`node:22.23.4-slim@sha256:…`, `nginx:1.31.3-alpine@sha256:…`, `clickhouse/clickhouse-server:26.3.9.8`), never a floating tag. Bump them deliberately, under the same cooldown, all Dockerfiles in one change.
+- `ops/deploy-api.sh` runs `ops/audit-gate.mjs api` after the check: any HIGH or CRITICAL advisory in the api's production dependencies stops the deploy unless `ops/audit-allowlist.json` acknowledges it with a reason and an `expires` date — an expired entry blocks again. Prefer fixing to acknowledging; an entry is for a fix still inside the cooldown or a finding shown unreachable, and is removed with the fix. `DEPLOY_SKIP_AUDIT=1` is for a registry outage only (logged). Run `node ops/audit-gate.mjs explorer-ui` / `preis-ui` before shipping a UI.
+- Containment: the api image's services (`api`, `api-public`, `api-data`, `api-mcp`, `derivations`, `schema-bootstrap`) run as the image's non-root `node` user with a read-only root filesystem, a tmpfs `/tmp`, no capabilities and `no-new-privileges` (`x-hardened` in `docker-compose.yml`). Code that writes files writes under `/tmp`; never weaken the anchor to make a write work. A scratch script runs from `/tmp` (`docker exec -i <container> sh -c 'cat > /tmp/x.ts' < x.ts`, absolute `/app/src/...` imports) — `docker cp` into `/app` no longer works, by design.
+
 ## Checks
 
 Run the smallest relevant checks while iterating, then the package check for every touched workspace:
