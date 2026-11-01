@@ -14,6 +14,19 @@ x-service: &service
       max-size: "50m"
       max-file: "3"
 
+# Containment for the api image's services (AGENTS.md, Dependencies and supply
+# chain): if a dependency were ever compromised, it runs as the image's non-root
+# `node` user with no Linux capabilities, cannot gain any (no-new-privileges), and
+# cannot rewrite the code it runs or plant files — the root filesystem is read-only;
+# only /tmp (tsx's compile cache) is writable, in memory. Nothing in these processes
+# writes elsewhere (verified 2026-11-01).
+x-hardened: &hardened
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
 # Raw ingestion tuning shared by the two raw pipelines. They differ only in
 # their pipeline id, batch size and RPC budget, which each states for itself.
 x-raw-env: &raw-env
@@ -78,7 +91,7 @@ services:
   # downstream gates on `service_completed_successfully` so nothing races an
   # empty/partial schema.
   schema-bootstrap:
-    <<: *service
+    <<: [*service, *hardened]
     build:
       context: ./api
       dockerfile: Dockerfile
@@ -442,7 +455,7 @@ services:
         condition: service_completed_successfully
 
   api:
-    <<: *service
+    <<: [*service, *hardened]
     build:
       context: ./api
       dockerfile: Dockerfile
@@ -543,7 +556,7 @@ services:
   # express). Same image/env as `api`; gated on schema-bootstrap like every
   # other schema consumer.
   derivations:
-    <<: *service
+    <<: [*service, *hardened]
     build:
       context: ./api
       dockerfile: Dockerfile
@@ -576,7 +589,7 @@ services:
   # shares an event loop, in-process cache or rate-limit budget with the
   # explorer; gated on schema-bootstrap like every other schema consumer.
   api-public:
-    <<: *service
+    <<: [*service, *hardened]
     build:
       context: ./api
       dockerfile: Dockerfile
@@ -631,7 +644,7 @@ services:
   # explorer `api` (control plane); this process only reads user_api_tokens/
   # user_api_limits and writes user_api_usage.
   api-data:
-    <<: *service
+    <<: [*service, *hardened]
     build:
       context: ./api
       dockerfile: Dockerfile
@@ -670,7 +683,7 @@ services:
   # the Explorer page shows. No schema dependency and no micro-cache: responses
   # are anonymous, already cached in-process, and the edge proxies straight here.
   api-mcp:
-    <<: *service
+    <<: [*service, *hardened]
     build:
       context: ./api
       dockerfile: Dockerfile
