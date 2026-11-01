@@ -1,0 +1,8 @@
+[
+  {
+    "package": "body-parser",
+    "advisory": "GHSA-27r3-jxmh-p828",
+    "reason": "fix 2.4.0 published 2026-10-22 is inside the 14-day release cooldown; update with `npm update body-parser --before=<14 days ago>` once it clears",
+    "expires": "2026-11-05"
+  }
+]
