@@ -421,6 +421,10 @@ services:
       - SMART_CONTRACT_VERIFIER__SERVER__HTTP__MAX_BODY_SIZE=33554432
       # Defaults to true and pulls two extra compiler lists on startup.
       - SMART_CONTRACT_VERIFIER__ZKSYNC_SOLIDITY__ENABLED=false
+      # Nothing here verifies Vyper, and v1.10.6 cannot parse the upstream Vyper
+      # list since it gained a prerelease ("0.5.0b1+commit…"): the fetcher's init
+      # error crash-looped the whole service (2026-11-01). Off = no Vyper list fetch.
+      - SMART_CONTRACT_VERIFIER__VYPER__ENABLED=false
       # sourcify.dev does not know chain 222222, so its sourcify route is
       # useless here; the api implements that protocol itself.
       - SMART_CONTRACT_VERIFIER__SOURCIFY__ENABLED=false
