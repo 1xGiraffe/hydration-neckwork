@@ -30,10 +30,20 @@
       query_log stays ON. It is the one that earns its keep (every performance
       diagnosis on this deployment reads it) and its retention is a security
       property, not just a disk one — see the note in config.d/logging.xml.
+
+      It logs from QueryFinish up, though. By default every query writes a
+      QueryStart row as well, a full copy of the query text with none of the
+      measurements: 6.66M of each in the first 19 hours of 2026-11-01, 20.9 GiB
+      of query text apiece, ~17 GiB/day on disk for the pair. Every diagnosis
+      reads the finish row
+      (duration, rows and bytes read, memory, log_comment); a query still
+      running is in system.processes. Failures keep their rows, because
+      ExceptionBeforeStart and ExceptionWhileProcessing sort after QueryFinish.
     -->
     <profiles>
         <default>
             <log_processors_profiles>0</log_processors_profiles>
+            <log_queries_min_type>QUERY_FINISH</log_queries_min_type>
             <!-- Both profiler periods must be 0; either one alone still samples. -->
             <query_profiler_real_time_period_ns>0</query_profiler_real_time_period_ns>
             <query_profiler_cpu_time_period_ns>0</query_profiler_cpu_time_period_ns>
