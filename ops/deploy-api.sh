@@ -13,7 +13,9 @@
 #      for api and api-public BEFORE anything is built: the two must agree, and if
 #      EXPECT_PAIR_PRICE_SOURCE is set it must equal them. The script has no
 #      default of its own, so it can never contradict compose's.
-#   2. `npm --prefix api run check` must be green (typecheck + tests).
+#   2. `npm --prefix api run check` must be green (typecheck + tests), and
+#      `ops/audit-gate.mjs api` must find no high/critical production advisory
+#      that ops/audit-allowlist.json does not acknowledge with an unexpired entry.
 #   3. `docker compose build api` builds the one image all five services run; it
 #      is also tagged :<git-sha>[-dirty].
 #   4. Every process entrypoint is imported INSIDE the new image, in a throwaway
@@ -111,6 +113,14 @@ if [[ "${1:-}" != "--skip-check" ]]; then
   log "npm --prefix api run check"
   CHECK_LOG=$(mktemp)
   npm --prefix api run check >"$CHECK_LOG" 2>&1 || { tail -40 "$CHECK_LOG"; log "FAIL: api check is red"; exit 1; }
+fi
+# Known-vulnerable production dependencies (ops/audit-gate.mjs): a high/critical
+# advisory not acknowledged — with an expiry — in ops/audit-allowlist.json stops the
+# deploy. DEPLOY_SKIP_AUDIT=1 only for a registry outage, and it is logged.
+if [[ "${DEPLOY_SKIP_AUDIT:-}" == "1" ]]; then
+  log "WARN: DEPLOY_SKIP_AUDIT=1 — production dependency audit skipped"
+else
+  node ops/audit-gate.mjs api || { log "FAIL: production dependency audit"; exit 1; }
 fi
 
 # ── state for rollback ───────────────────────────────────────────────────────
