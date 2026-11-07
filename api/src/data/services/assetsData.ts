@@ -2,6 +2,7 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import { allExplorerAssets, assetDecimalsOrNull, currentPriceOf, isStableswapShareToken, type ExplorerAsset } from '../../services/explorerAssets.ts'
 import { SHARE_POOL_MAX_AGE_SECONDS, withStableswapSharePrices } from '../../services/lpMath.ts'
+import { loadJuicerRates, withJuicerSharePrices } from '../../services/juicerPrice.ts'
 import { queryOHLCV, type OHLCVInterval } from '../../services/ohlcvService.ts'
 import { formatUnits, scaledUsd } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
@@ -96,7 +97,9 @@ async function currentPriceState(client: ClickHouseClient): Promise<CurrentPrice
   }
   const shareSnapshot = snapshot && snapshot.blockHeight > 0 && Date.now() - Date.parse(snapshot.timestamp) <= SHARE_POOL_MAX_AGE_SECONDS * 1000 ? snapshot : null
   const pools = shareSnapshot ? [...shareSnapshot.stableswap.values()] : null
-  const fresh = withStableswapSharePrices(feeds, pools, id => currentPriceOf(feeds, id), assetDecimalsOrNull, isStableswapShareToken)
+  const shares = withStableswapSharePrices(feeds, pools, id => currentPriceOf(feeds, id), assetDecimalsOrNull, isStableswapShareToken)
+  // A Juicer share (jETH) at its vault's exchange rate in that collateral (juicerPrice.ts).
+  const fresh = withJuicerSharePrices(shares, await loadJuicerRates(client).catch(() => []))
   return { prices, head: status.indexedHead, fresh, shareSnapshot }
 }
 

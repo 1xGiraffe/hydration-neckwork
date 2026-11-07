@@ -9,6 +9,7 @@ import { refreshLmRewards } from './lmRewardService.ts'
 import { refreshMmIncentives } from './mmIncentiveService.ts'
 import { refreshMmOraclePrices } from './mmOraclePrices.ts'
 import { refreshOracleState } from './oracleService.ts'
+import { refreshJuicerState } from './juicerState.ts'
 
 // Coordinated scheduler for the background refreshers that read node-full
 // (chain-state enumeration and EVM eth_call). Previously each ran on its own
@@ -49,6 +50,8 @@ import { refreshOracleState } from './oracleService.ts'
 //   mm-oracle-prices ~50ms node-full (3 batched eth_call round trips: pool +
 //                    provider plumbing, getAssetPrice + getSourceOfAsset per
 //                    primary reserve, latestRoundData per source) → every 5th tick (300s)
+//   juicer-state   ~0.1s node-full (5 batched eth_call round trips at one pin,
+//                    ~60 calls) + one small ClickHouse read  → every tick (60s)
 //   oracle-state   ~0.5s node-full (one pinned block: every market's oracle
 //                    plumbing and reserve prices, then 12 probes per source —
 //                    rounds, answer, description, decimals, owner and the
@@ -132,6 +135,13 @@ const TASKS: RefreshTask[] = [
   // proportional to open orders rather than to orders ever placed — and an
   // order settles in minutes, so it wants the base cadence.
   { name: 'xcswap-settlements', everyTicks: 1, run: refreshXcswapSettlements },
+  // The Juicer vaults' current state (juicerState.ts) at one pinned block: request
+  // lifecycles, wallet balances and Main's/the loop's positions from ClickHouse, and
+  // eth_call only for what no event states (totals, rates, stops, config, the funded
+  // earnings of current holders) — a few batched round trips. It checks every tick but
+  // re-reads only when juicer_logs or jETH's deltas moved, else every fifth tick;
+  // listed ahead of the heavy lanes so a restart states the vault within seconds.
+  { name: 'juicer-state', everyTicks: 1, run: refreshJuicerState },
   // Unclaimed liquidity-mining rewards: every LM deposit and farm read at one
   // finalized block, active farms projected to THAT block (not the head) by a
   // DryRunApi claim. Active farms accrue every relay block, so the published

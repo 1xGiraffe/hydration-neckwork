@@ -3,7 +3,7 @@ import { settledAmount } from '../../services/aaveMath.ts'
 import { cached } from '../../services/cache.ts'
 import { attachExtrinsicHashes, type WithExtrinsicHash } from './extrinsicHashes.ts'
 import { assetDescriptor, assetIdFromMmAddress, currentPriceOf } from '../../services/explorerAssets.ts'
-import { isPoolOwnHubHolding, renderUsd } from '../../services/valuation.ts'
+import { isCustodyAccount, isPoolOwnHubHolding, renderUsd } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
 import { freshPriceMap } from './assetsData.ts'
 import { accountRefFor, accountRefOrNull, h160For, type AccountRef, type ParsedAddress } from './address.ts'
@@ -114,7 +114,7 @@ export interface BalanceItem {
   valueUsd: string | null
   // Present on the one holding the totals leave out: the Omnipool's own H2O
   // reserve (poolOwnHubHolding). `valueUsd` still prices it; no total counts it.
-  uncounted?: 'pool-hub-reserve'
+  uncounted?: 'pool-hub-reserve' | 'strategy-custody'
 }
 
 // The wallet's headline numbers: what it holds (substrate + ERC-20 + supplied
@@ -289,12 +289,16 @@ export async function accountBalances(client: ClickHouseClient, parsed: ParsedAd
     const usd = price != null && price > 0n ? (BigInt(item.amount) * price) / 10n ** BigInt(descriptor.decimals) : null
     // A pool account's own hub reserve (the Omnipool's H2O): priced, and in no
     // total — H2O is priced off the pooled assets the totals already hold.
-    const uncounted = item.kind === 'substrate' && isPoolOwnHubHolding(parsed.accountId, assetId)
+    // A strategy custody account's every holding and position (isCustodyAccount): its
+    // share token's holders own them and are valued for them.
+    const uncounted = isCustodyAccount(parsed.accountId) ? 'strategy-custody' as const
+      : item.kind === 'substrate' && isPoolOwnHubHolding(parsed.accountId, assetId) ? 'pool-hub-reserve' as const
+      : null
     if (usd != null && !uncounted) {
       if (item.kind === 'vdebt') debtUsd += usd
       else assetsUsd += usd
     }
-    return { item: { ...item, symbol: descriptor.symbol, decimals: descriptor.decimals, valueUsd: usd == null ? null : renderUsd(usd), ...(uncounted ? { uncounted: 'pool-hub-reserve' as const } : {}) }, usd }
+    return { item: { ...item, symbol: descriptor.symbol, decimals: descriptor.decimals, valueUsd: usd == null ? null : renderUsd(usd), ...(uncounted ? { uncounted } : {}) }, usd }
   })
   priced.sort((a, b) => {
     const av = a.usd ?? -1n

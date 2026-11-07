@@ -15,6 +15,7 @@
 //    identity (the table's ORDER BY) BEFORE summing.
 
 import { H2O_ASSET_ID, PRICE_ALIAS_ID, allExplorerAssets, priceAssetId } from './explorerAssets.ts'
+import { JUICER_CUSTODY_CONTRACTS } from './juicer.ts'
 
 /**
  * The Omnipool's own pallet account, `modl` + `omnipool` — the fee recipient that
@@ -66,6 +67,32 @@ export function isPoolOwnHubHolding(accountId: string, assetId: number): boolean
  */
 export function poolOwnHubHoldingSql(accountExpr: string, assetExpr: string): string {
   return `(${POOL_OWN_HUB_HOLDINGS.map(holding => `(${accountExpr} = '${holding.account}' AND ${assetExpr} = '${holding.assetId}')`).join(' OR ')})`
+}
+
+/**
+ * A strategy's CUSTODY account holds what its share token's holders own: the Juicer
+ * vault (Main's collateral, its synthetic and debt, the escrowed shares), the SubLoop
+ * (the PRIME loop Main's debt funds) and the yield accounting (the funded earnings
+ * fund) — JUICER_CUSTODY_CONTRACTS. The share token (jETH) is priced at what a share
+ * redeems for and its beneficial balances are attributed to the holders
+ * (juicerBeneficialBalances), so every holding of these accounts, their money-market
+ * positions included, is a balance and never a value: counting both would state the
+ * strategy twice. Same surfaces and the same `uncounted` mechanics as the hub rule
+ * above.
+ */
+export const CUSTODY_ACCOUNT_IDS: ReadonlySet<string> = new Set(JUICER_CUSTODY_CONTRACTS.map(h => '0x45544800' + h.slice(2).toLowerCase() + '0'.repeat(16)))
+export function isCustodyAccount(accountId: string): boolean {
+  return CUSTODY_ACCOUNT_IDS.has(accountId.toLowerCase())
+}
+export function custodyAccountSql(accountExpr: string): string {
+  return `(lower(${accountExpr}) IN (${[...CUSTODY_ACCOUNT_IDS].map(a => `'${a}'`).join(', ')}))`
+}
+/** Either rule: a holding no value counts (the pool's own hub reserve, a custody account's). */
+export function isUncountedHolding(accountId: string, assetId: number): boolean {
+  return isPoolOwnHubHolding(accountId, assetId) || isCustodyAccount(accountId)
+}
+export function uncountedHoldingSql(accountExpr: string, assetExpr: string): string {
+  return `(${poolOwnHubHoldingSql(accountExpr, assetExpr)} OR ${custodyAccountSql(accountExpr)})`
 }
 
 /**

@@ -4,6 +4,7 @@ import { accountIcon } from './omniwatchIdentity.ts'
 import { blake2AsU8a } from '@polkadot/util-crypto'
 import { u8aToHex } from '@polkadot/util'
 import { RareEventLedger, type RareEventRow } from './rareEventLedger.ts'
+import { JUICER_CONTRACTS, JUICER_KEEPERS } from './juicer.ts'
 
 // Address tags. The whole tag set is user-curated and small, so it lives in
 // memory (refreshed on every edit) for O(1) display resolution, and is also
@@ -327,6 +328,26 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
       // forwarder until the mint legs identified it.
       '0x6a21891db0940491603f3cca0a9f4dba4c6e810c',
     ],
+  },
+  {
+    // Juicer (galacticcouncil/money-market `juicer-vault`): the leveraged PRIME-loop
+    // strategy app.hydration.net offers under Strategies. Its contracts hold the
+    // deposited GETH on Main, the PRIME loop and the jETH shares in escrow; untagged
+    // they read as anonymous contracts holding six figures. The members are the
+    // launch deployment (services/juicer.ts JUICER_CONTRACTS, one list).
+    tagId: 'juicer', name: 'Juicer', color: '#9bbf2f',
+    note: 'Juicer strategy contracts: the jETH CollateralVault (deposits supplied to the money market as Main), the shared SubLoop PRIME loop, the Harvester, the Main debt ledger, the fee and discount controllers, the yield accounting and the execution controller',
+    icon: '🧃',
+    addresses: [...JUICER_CONTRACTS],
+  },
+  {
+    // The launch proposal's keepers: they rebalance the vaults, run the loop's ICE
+    // entries and exits, harvest, start unwinds and deliver claims — every Juicer act a
+    // user does not sign is one of theirs.
+    tagId: 'juicer-keeper', name: 'Juicer Keeper', color: '#9bbf2f',
+    note: 'Juicer keepers named by the launch proposal: they rebalance, harvest, run the PRIME loop’s intents, start unwinds and deliver withdrawal claims',
+    icon: '🧃',
+    addresses: [...JUICER_KEEPERS],
   },
 ]
 

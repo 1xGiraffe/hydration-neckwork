@@ -31,8 +31,9 @@ describe('tag membership keys', () => {
     // money-market incentives (`-r3`), leaves a pool account's own hub reserve out
     // (`-r4`) and values money-market collateral by the folded reserves, the
     // market's aggregate standing in only where a reserve is unstated; `-r6`
-    // carries each row's User Revenue.
-    expect(key.slice(0, key.indexOf('|'))).toMatch(/^v[123]-r6$/)
+    // carries each row's User Revenue; `-r7` leaves a strategy custody account's
+    // holdings and money-market positions out (the share token's holders carry them).
+    expect(key.slice(0, key.indexOf('|'))).toMatch(/^v[123]-r7$/)
     expect(key).not.toBe(list)
   })
 
