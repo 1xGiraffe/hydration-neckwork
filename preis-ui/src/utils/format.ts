@@ -107,6 +107,12 @@ export function formatCount(value: number): string {
   return Math.round(value).toLocaleString('en-US')
 }
 
+/** A tally with its noun in the right number: "1 trade", "2 trades", "0 accounts". */
+export function formatCountOf(value: number, singular: string, plural = `${singular}s`): string {
+  const count = formatCount(value)
+  return `${count} ${count === '1' ? singular : plural}`
+}
+
 /** A tally compacted onto the rough scale, for places with no room to spell it out. */
 export function compactCount(value: number): string {
   if (!Number.isFinite(value)) return '0'
