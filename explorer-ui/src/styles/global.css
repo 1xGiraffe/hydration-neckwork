@@ -4482,3 +4482,14 @@ html.rev-fs-lock #view .wrap { animation: none; }
 .bond-round-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 26px 0 0; font-family: 'GeistMono'; font-size: 12px; }
 .bond-round-picker .seg-bar { flex: 0 1 auto; }
 .bonds-page .bond-round[id] { scroll-margin-top: 84px; }
+/* LBP-sold bond families (/hdx-bonds): one card per pool's sale, its price chart and
+   stat cards; the buyer stat row above the Top buyers table. */
+.bonds-page .lbp-sale { margin-bottom: 14px; }
+.bonds-page .lbp-sale[id] { scroll-margin-top: 84px; }
+.bonds-page .lbp-chart { margin-bottom: 4px; }
+.bonds-page .lbp-chart svg { touch-action: pan-y; }
+/* A phone draws the LBP chart on a 400-unit plane (not the 860 the other charts
+   shrink), so its axis type stays near 10px rather than the page's 24-unit size. */
+@media (max-width: 720px) { .bonds-page .lbp-chart .hdx-ax { font-size: 12px; } }
+.nowrap { white-space: nowrap; }
+.bond-buyer-cards { margin: 0 0 12px; }

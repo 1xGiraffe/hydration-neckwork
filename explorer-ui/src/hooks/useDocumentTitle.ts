@@ -5,11 +5,15 @@ const DEFAULT_TITLE = 'Hydration Explorer'
 // Entity-first document title, no product suffix ("Block #9,700,000", "DOT $3.42",
 // "Treasury · 13UV…FsTB"). Pass nothing (or null) while data is loading to keep
 // the default until the entity is known.
-export function useDocumentTitle(title?: string | null) {
+export function useDocumentTitle(title?: string | null, opts: { keepWhileLoading?: boolean } = {}) {
+  const keep = opts.keepWhileLoading === true
   useEffect(() => {
+    // keepWhileLoading: a page whose name depends on its data leaves the title it
+    // arrived with (the server's, on a first load) until the data names it.
+    if (!title && keep) return
     document.title = title || DEFAULT_TITLE
     return () => { document.title = DEFAULT_TITLE }
-  }, [title])
+  }, [title, keep])
 }
 
 // Keeps a page that turned out to name nothing out of the search index.

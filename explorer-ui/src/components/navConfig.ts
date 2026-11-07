@@ -11,7 +11,7 @@ import { DATA_API_URL, PREIS_URL } from '../surfaces'
 // `external` marks a destination outside this app: `to` is then an absolute URL
 // rather than a route, it can never be the active entry, and it is rendered as
 // a real anchor that opens in a new window and says so first.
-export type NavItem = { to: string; label: string; match: Route['name'][]; external?: true }
+export type NavItem = { to: string; label: string; match: Route['name'][]; external?: true; /** A bond family's page: active on that family's route only. */ bondFamily?: string }
 export type NavGroup = { label: string; items: NavItem[]; menuItems?: NavItem[] }
 const IT = {
   activity: { to: paths.activity(), label: 'Activity', match: ['activity'] } as NavItem,
@@ -62,7 +62,7 @@ const IT = {
 }
 // The bond families' pages (bondFamilies.ts), directly after Brazilian Invoice Loans —
 // the other fixed-yield HOLLAR product.
-const BOND_NAV: NavItem[] = BOND_FAMILIES_UI.map(f => ({ to: paths.bonds(f.key), label: f.title, match: ['bonds'] }) as NavItem)
+const BOND_NAV: NavItem[] = BOND_FAMILIES_UI.map(f => ({ to: paths.bonds(f.key), label: f.title, match: ['bonds'], bondFamily: f.key }) as NavItem)
 // Liquidity, Volume and Oracles live under Assets at every width; the trigger navigates
 // to Assets so the menu lists only the destinations it is not. Security leads the Chain menu (it is the
 // entry a returning operator wants first) while the trigger keeps Blocks.

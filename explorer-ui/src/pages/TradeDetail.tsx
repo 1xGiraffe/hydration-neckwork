@@ -9,7 +9,9 @@ import { blockOf } from '../utils/activityIds'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import type { TradeHop } from '../types'
 import { RevenueRow } from '../components/RevenueRow'
-import { intentLabel } from '../components/activityColors'
+import { bondSaleLabel, intentLabel } from '../components/activityColors'
+import { bondFamilyUi } from '../bondFamilies'
+import { bondDate } from '../components/positions/bondStatus'
 
 // Route flow: in-asset →(pool)→ … →(pool)→ out-asset. Amount labels come from
 // the hop events; eventless Aave 1:1 wraps infer values from adjacent hops.
@@ -91,8 +93,13 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
   // there is no such trade. See useAwaitingBlock.
   const awaiting = useAwaitingBlock(blockOf(id), isError || failureReason != null, failureReason)
   const now = useNow()
-  const label = slug === 'dca' ? 'DCA' : 'Swap'
-  useDocumentTitle(`${label} ${id}`)
+  // A bond's LBP purchase or sell back is titled as the bond act it is (the URL stays /swap).
+  const bondSale = data?.bondSale ?? null
+  const label = (data && bondSaleLabel(data)) ?? (slug === 'dca' ? 'DCA' : 'Swap')
+  const bondPage = bondSale?.family ? `${paths.bonds(bondSale.family)}${bondSale.round != null ? `#round-${bondSale.round}` : ''}` : null
+  // Until the trade is known the title stays as the page arrived (the server names a
+  // bond purchase as one), rather than guessing "Swap".
+  useDocumentTitle(data ? `${label} ${id}` : null, { keepWhileLoading: true })
   // Canonicalize /swap ↔ /dca once the data says which it is.
   useEffect(() => {
     if (!data) return
@@ -103,8 +110,11 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
   return (
     <div className="wrap">
       <div className="page-head">
-        <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Activity', to: '/activity?tab=trade' }, { label: id }]} />
-        <div className="page-title">{label} <span className="num">{id}</span>{data && <span className="sub">{data.direction.toLowerCase()} via {data.poolAddress ? <Link to={paths.v3Pool(data.poolAddress)} className="hash">{data.venue}</Link> : data.venue}</span>}</div>
+        <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, bondSale?.family ? { label: bondFamilyUi(bondSale.family)?.title ?? 'Bonds', to: paths.bonds(bondSale.family) } : { label: 'Activity', to: '/activity?tab=trade' }, { label: id }]} />
+        <h1 className="page-title">{label} <span className="num">{id}</span>{data && (bondSale && bondPage
+          // A bond's LBP purchase is named by its round, not by the route it took.
+          ? <span className="sub"><Link to={bondPage}>{bondFamilyUi(bondSale.family ?? '')?.title ?? 'Bonds'}{bondSale.round != null ? ` · round ${bondSale.round}` : ''}</Link> · LBP sale</span>
+          : <span className="sub">{data.direction.toLowerCase()} via {data.poolAddress ? <Link to={paths.v3Pool(data.poolAddress)} className="hash">{data.venue}</Link> : data.venue}</span>)}</h1>
       </div>
 
       {awaiting ? <AwaitingBlockCard height={blockOf(id)} />
@@ -119,7 +129,7 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
           return (
             <>
               <div className="detail-card"><div className="dl">
-                <div className="dt">Swap</div>
+                <div className="dt">{bondSale ? (bondSale.side === 'sell' ? 'Sold back' : 'Purchase') : 'Swap'}</div>
                 <div className="dd">
                   <span className="asset-flow">
                     <AssetAmount asset={data.assetIn} amount={data.amountIn} />
@@ -145,6 +155,13 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                       </AssetValue>
                     </span>
                   </div>
+                </>}
+                {/* A bond's LBP sale: the bond, its round on the family page, and what a purchase locked in. */}
+                {bondSale && <>
+                  {bondSale.price != null && <>
+                    <div className="dt">{bondSale.side === 'sell' ? 'Sold back at' : 'Locked in'}</div>
+                    <div className="dd mono">{bondSale.price.toFixed(4)} {bondSale.faceAsset?.symbol ?? ''} per bond{bondSale.paymentPrice != null && bondSale.paymentAsset ? <> ({bondSale.paymentPrice.toPrecision(4)} {bondSale.paymentAsset.symbol}{bondSale.side === 'sell' ? ' received' : ' paid, fee included'})</> : null}{bondSale.side !== 'sell' && <> · {bondSale.returnPct != null ? `${bondSale.returnPct.toFixed(2)}% in ${bondSale.faceAsset?.symbol ?? 'face'} to maturity` : '—'}{bondSale.aprPct != null && <> · {bondSale.aprPct.toFixed(2)}% APR</>}</>} <span className="muted" style={{ fontFamily: 'inherit' }}>at this trade’s own {bondSale.paymentAsset?.symbol ?? ''} and {bondSale.faceAsset?.symbol ?? ''} prices{bondSale.side !== 'sell' ? `, held to ${bondSale.maturityAt ? bondDate(bondSale.maturityAt) : 'maturity'}` : ''}</span></div>
+                  </>}
                 </>}
                 {data.who && <><div className="dt">Trader</div><div className="dd"><AddrPill account={data.who} /></div></>}
                 {/* The ICE pot's trade inside a solution is how an order was filled: say whose. */}
