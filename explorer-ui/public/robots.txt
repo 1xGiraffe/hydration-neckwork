@@ -60,6 +60,17 @@ Disallow: /intent-fill/
 Disallow: /intent-cancel/
 Disallow: /intent-expire/
 Disallow: /intent-dca-trade/
+Disallow: /juicer-deposit/
+Disallow: /juicer-withdraw/
+Disallow: /juicer-unwind/
+Disallow: /juicer-settle/
+Disallow: /juicer-claim/
+Disallow: /juicer-claim-surplus/
+Disallow: /juicer-harvest/
+Disallow: /juicer-rebalance/
+Disallow: /juicer-delever/
+Disallow: /juicer-lever/
+Disallow: /juicer-unlever/
 
 # Session-only surfaces: a crawler carries no session, so these can only ever be
 # the logged-out teaser.

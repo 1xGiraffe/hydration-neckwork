@@ -1,4 +1,4 @@
-import type { MmMarketOption,
+import type { MmMarketOption, JuicerDashboard, AccountJuicer,
   PairChart,
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
@@ -335,6 +335,7 @@ export const api = {
     getJson<ChartWindowPayload>(withQuery('/explorer/hollar/window', { chart, fromTs, toTs, points }), signal),
   ice: (signal?: AbortSignal) => getJson<IceDashboard>('/explorer/ice', signal),
   openIntents: (signal?: AbortSignal) => getJson<IceOpenIntents>('/explorer/intents/open', signal),
+  juicer: (signal?: AbortSignal) => getJson<JuicerDashboard>('/explorer/juicer', signal),
   security: (signal?: AbortSignal) => getJson<SecurityDashboard>('/explorer/security', signal),
   securityWormhole: (signal?: AbortSignal) => getJson<WormholeBridgeDetail>('/explorer/security/wormhole', signal),
   accounts: (offset = 0, limit = 50, sort: AccountSort = 'value', signal?: AbortSignal) => getJson<AccountsPage>(withQuery('/explorer/accounts', { offset, limit, sort }), signal),
@@ -550,6 +551,8 @@ export const positionsApi = {
   // members are never blended, so a tag reads each member's own.
   moneyMarketHistory: (address: string, signal?: AbortSignal) =>
     getJson<MoneyMarketHistory>(`/explorer/address/${encodeURIComponent(address)}/money-market-history`, signal),
+  accountJuicer: (address: string, signal?: AbortSignal) =>
+    getJson<AccountJuicer>(`/explorer/address/${encodeURIComponent(address)}/juicer`, signal),
   moneyMarketEarned: (address: string, signal?: AbortSignal) =>
     getJson<MoneyMarketEarned>(`/explorer/address/${encodeURIComponent(address)}/money-market-earned`, signal),
   moneyMarketHistoryWindow: (address: string, fromBlock: number, toBlock: number, signal?: AbortSignal) =>

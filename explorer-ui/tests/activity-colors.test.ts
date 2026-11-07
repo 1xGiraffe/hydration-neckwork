@@ -28,6 +28,11 @@ function intentRow(action: ActivityRow['intentAction']): ActivityRow {
 // The coding is only worth anything if a hue means one thing. These pin the parts
 // that would silently drift: a new action falling through to the grey default, or
 // a family leaking into a hue that belongs to another.
+const JUICER_SLUG_ACTION: Record<string, NonNullable<ActivityRow['juicerAction']>> = {
+  'juicer-deposit': 'Deposit', 'juicer-withdraw': 'Withdraw', 'juicer-unwind': 'Unwind', 'juicer-settle': 'Settle', 'juicer-claim': 'Claim',
+  'juicer-claim-surplus': 'ClaimSurplus', 'juicer-harvest': 'Harvest', 'juicer-rebalance': 'Rebalance', 'juicer-delever': 'Delever',
+}
+
 describe('activity category coding', () => {
   it('gives every action in the shared filter list a color from its own family', () => {
     const family: Record<string, string[]> = {
@@ -36,6 +41,7 @@ describe('activity category coding', () => {
       liquidity: [CAT.liquidity, CAT.liquidityRemove, CAT.liquidityCreate, CAT.liquidityClaim],
       stake: [CAT.stake, CAT.stakeExit, CAT.stakeReward, CAT.stakeMigrate, CAT.stakeCancel],
       bond: [CAT.bond, CAT.bondRedeem],
+      juicer: [CAT.juicer, CAT.juicerExit, CAT.juicerClaim, CAT.juicerKeeper],
       intent: INTENT_FAMILY,
       vote: [CAT.vote, CAT.aye, CAT.nay],
       xcm: [CAT.xcm],
@@ -50,6 +56,7 @@ describe('activity category coding', () => {
       liquidity: v => row({ type: 'liquidity', liqAction: v as ActivityRow['liqAction'] }),
       stake: v => row({ type: 'staking', stakingAction: v }),
       bond: v => row({ type: 'bond', bondAction: v as ActivityRow['bondAction'] }),
+      juicer: v => row({ type: 'juicer', juicerAction: JUICER_SLUG_ACTION[v] }),
       intent: v => intentRow(v as ActivityRow['intentAction']),
       vote: v => row({ type: 'vote', voteAction: v }),
       xcm: () => row({ type: 'xcm' }),
@@ -64,7 +71,7 @@ describe('activity category coding', () => {
   })
 
   it('never falls through to the unstyled default for a known activity type', () => {
-    const types: ActivityRow['type'][] = ['transfer', 'trade', 'xcm', 'liquidity', 'mm', 'dca', 'staking', 'vote', 'otc', 'bond', 'intent']
+    const types: ActivityRow['type'][] = ['transfer', 'trade', 'xcm', 'liquidity', 'mm', 'dca', 'staking', 'vote', 'otc', 'bond', 'intent', 'juicer']
     for (const type of types) {
       expect(activityBadge(row({ type })).col, type).not.toBe('var(--text-medium)')
     }
@@ -108,6 +115,9 @@ describe('activity category coding', () => {
       staking: ['Stake', 'Unstake', 'Staking reward', 'GIGAHDX Migrate', 'GIGAHDX Cancel Unstake']
         .map(a => row({ type: 'staking', stakingAction: a })),
       bond: (['Issue', 'Redeem'] as const).map(a => row({ type: 'bond', bondAction: a })),
+      // The way out (request, unwind, settle) shares one shade, as the claims and the
+      // keepers' upkeep share theirs; what stays apart is in, out, paid and upkeep.
+      juicer: (['Deposit', 'Withdraw', 'Claim', 'Harvest'] as const).map(a => row({ type: 'juicer', juicerAction: a })),
       // PartialFill shares Fill's shade and Expire shares Cancel's (see the grouping
       // test below); what must stay apart is place, fill, leave, and a DCA's trade.
       intent: (['Place', 'Fill', 'Cancel', 'DcaTrade'] as const).map(a => intentRow(a)),

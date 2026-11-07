@@ -4,7 +4,7 @@ import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../router'
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
-import { BOND_LABELS, LIQ_LABELS, MM_LABELS, intentLabel } from '../components/activityColors'
+import { BOND_LABELS, JUICER_LABELS, LIQ_LABELS, MM_LABELS, intentLabel } from '../components/activityColors'
 import { RevenueRow } from '../components/RevenueRow'
 import { PoolBadge, Usd, Amt, ExactAmt, Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, hasGas, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
@@ -75,13 +75,14 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
   return (
     <div className="wrap">
       <div className="page-head">
-        <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Activity', to: `/activity?tab=${ACTIVITY_SLUG_TAB[slug]}` }, { label: id }]} />
+        <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, slug.startsWith('juicer-') ? { label: 'Juicer', to: paths.juicer() } : { label: 'Activity', to: `/activity?tab=${ACTIVITY_SLUG_TAB[slug]}` }, { label: id }]} />
         <div className="page-title">{label} <span className="num">{id}</span>
           {row?.type === 'xcm' && <span className="sub">{row.xcmDir === 'in' ? `in from ${row.fromChain ?? '?'}` : `out to ${row.destChain ?? '?'}`}</span>}
           {row?.type === 'mm' && row.mmMarket && <span className="sub">{row.mmMarket}</span>}
           {row?.type === 'staking' && row.stakingAction && <span className="sub">{row.stakingAction}</span>}
           {row?.type === 'bond' && row.bondAction && <span className="sub">{BOND_LABELS[row.bondAction]}</span>}
           {row?.type === 'intent' && <span className="sub">{intentLabel(row.intentKind, row.intentAction)}</span>}
+          {row?.type === 'juicer' && <span className="sub"><Link to={paths.juicer()}>Juicer</Link>{row.juicerRequestId != null && <> · request #{row.juicerRequestId}</>}</span>}
           {row?.type === 'vote' && voteSub && <span className="sub">{voteSub}</span>}
           {row?.type === 'otc' && row.otcOrderId != null && <span className="sub">order #{row.otcOrderId}</span>}
         </div>
@@ -108,7 +109,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {/* headed: this page states the row's context in its own title and subtitle,
                 so the description drops what that already says (see ActivityDesc). */}
             <div className="dt">Activity</div><div className="dd"><ActivityDesc r={row} headed now={now} /></div>
-            <div className="dt">Value</div><div className="dd mono"><Usd v={row.valueUsd} /></div>
+            <div className="dt">Value</div><div className="dd mono"><Usd v={row.valueUsd} />{row.valueUsd == null && <span className="muted" style={{ fontFamily: 'inherit', marginLeft: 6 }}>{unvaluedReason(row)}</span>}</div>
             <RevenueRow revenue={row.revenue} />
             {/* A Wormhole Relay settlement lands in the relay's pool; where the transfer
                 went is the account the pool's fast delivery paid, so that leads. */}
@@ -178,6 +179,14 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
                   stays with the Treasury. */}
               {row.bondUnderlying && <><div className="dt">Underlying</div><div className="dd"><AssetChip asset={row.bondUnderlying} /></div></>}
               {row.bondAction === 'Issue' && row.bondFee != null && row.bondUnderlying && <><div className="dt">Issue fee</div><div className="dd mono"><ExactAmt raw={row.bondFee} dec={row.bondUnderlying.decimals} /> <AssetChip asset={row.bondUnderlying} /></div></>}
+            </>}
+            {row.type === 'juicer' && <>
+              <div className="dt">Action</div><div className="dd">{JUICER_LABELS[row.juicerAction ?? ''] ?? 'Juicer'}</div>
+              {row.juicerVault && <><div className="dt">Vault</div><div className="dd"><AddrPill account={row.juicerVault} />{row.juicerShareAsset && <> <AssetChip asset={row.juicerShareAsset} /></>}</div></>}
+              {row.juicerRequestId != null && <><div className="dt">Request</div><div className="dd mono"><Link to={`${paths.juicer()}#juicer-request-${row.juicerRequestId}`}>#{row.juicerRequestId}</Link> <span className="muted">· its state on the Juicer page</span></div></>}
+              {row.juicerEligibleAt && <><div className="dt">Unwind from</div><div className="dd">{F.datetime(row.juicerEligibleAt)} <span className="muted">· the cooldown's end; requests cannot be cancelled</span></div></>}
+              {row.juicerLtvBefore != null && row.juicerLtvAfter != null && <><div className="dt">Main LTV</div><div className="dd mono">{(row.juicerLtvBefore / 100).toFixed(2)}% → {(row.juicerLtvAfter / 100).toFixed(2)}%</div></>}
+              {row.juicerFee != null && row.asset && <><div className="dt">Protocol share</div><div className="dd mono"><ExactAmt raw={row.juicerFee} dec={row.asset.decimals} /> <AssetChip asset={row.asset} /></div></>}
             </>}
             {row.type === 'vote' && <>
               {/* The subtitle carries these too, but a subtitle is scenery: a reader
@@ -285,3 +294,10 @@ export function RemoteTokenRow({ row }: { row: Pick<ActivityRow, 'xcmDir' | 'rem
   </>
 }
 
+
+// Why a row states no value, in words. A Juicer share (jETH) is valued at its vault
+// collateral's price, so it is unpriced exactly when that collateral was.
+function unvaluedReason(row: ActivityRow): string {
+  if (row.type === 'juicer' && row.asset?.assetId === row.juicerShareAsset?.assetId) return `no price at the time it happened — ${row.juicerShareAsset?.symbol ?? 'the share'} is valued at its vault collateral's price, which had none at that block`
+  return 'no price at the time it happened'
+}

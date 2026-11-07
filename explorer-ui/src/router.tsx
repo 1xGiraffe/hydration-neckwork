@@ -8,7 +8,7 @@ import type { MouseEvent, ReactNode, CSSProperties } from 'react'
 // preis-ui (window events + a single store), but using the History API so URLs
 // are clean (no `#`). Deep links work from static nginx via `try_files … /index.html`.
 
-const ACTIVITY_SLUGS = ['swap', 'dca', 'transfer', 'cross-chain', 'add-liquidity', 'remove-liquidity', 'create-pool', 'destroy-pool', 'claim-rewards', 'claim-referral-rewards', 'collect-fees', 'rebalance', 'compound', 'lend', 'withdraw', 'borrow', 'repay', 'liquidate', 'staking', 'vote', 'otc-place', 'otc-pull', 'otc-fill', 'bond-issue', 'bond-redeem', 'intent-place', 'intent-fill', 'intent-cancel', 'intent-expire', 'intent-dca-trade'] as const
+const ACTIVITY_SLUGS = ['swap', 'dca', 'transfer', 'cross-chain', 'add-liquidity', 'remove-liquidity', 'create-pool', 'destroy-pool', 'claim-rewards', 'claim-referral-rewards', 'collect-fees', 'rebalance', 'compound', 'lend', 'withdraw', 'borrow', 'repay', 'liquidate', 'staking', 'vote', 'otc-place', 'otc-pull', 'otc-fill', 'bond-issue', 'bond-redeem', 'intent-place', 'intent-fill', 'intent-cancel', 'intent-expire', 'intent-dca-trade', 'juicer-deposit', 'juicer-withdraw', 'juicer-unwind', 'juicer-settle', 'juicer-claim', 'juicer-claim-surplus', 'juicer-harvest', 'juicer-rebalance', 'juicer-delever', 'juicer-lever', 'juicer-unlever'] as const
 export type ActivitySlug = typeof ACTIVITY_SLUGS[number]
 const ACTIVITY_ID_RE = /^\d+-(?:e)?\d+$/
 // Activity feed tab that lists this slug's rows (crumbs + malformed-id fallback).
@@ -24,6 +24,9 @@ export const ACTIVITY_SLUG_TAB: Record<ActivitySlug, string> = {
   // Intents fold under Trade as OTC does — a limit order is a trade the chain has yet
   // to make (rows keep their own intent-* slugs).
   'intent-place': 'trade', 'intent-fill': 'trade', 'intent-cancel': 'trade', 'intent-expire': 'trade', 'intent-dca-trade': 'trade',
+  'juicer-deposit': 'juicer', 'juicer-withdraw': 'juicer', 'juicer-unwind': 'juicer', 'juicer-settle': 'juicer', 'juicer-claim': 'juicer',
+  'juicer-claim-surplus': 'juicer', 'juicer-harvest': 'juicer', 'juicer-rebalance': 'juicer', 'juicer-delever': 'juicer',
+  'juicer-lever': 'juicer', 'juicer-unlever': 'juicer',
 }
 
 // One section per part of the protocol, so a page never mixes two domains: the
@@ -66,6 +69,7 @@ export type Route =
   | { name: 'hdx' }
   | { name: 'hollar' }
   | { name: 'intents' }
+  | { name: 'juicer' }
   | { name: 'revenue' }
   | { name: 'revenueUsers' }
   | { name: 'revenueProtocol' }
@@ -179,6 +183,8 @@ export function parseRoute(loc: string): Route {
     // it, query string and all (nginx answers it 301 too).
     case 'intents': return { name: 'intents' }
     case 'ice': return { name: 'legacy', to: '/intents' + (qIdx >= 0 ? loc.slice(qIdx) : '') }
+    // The Juicer strategy vaults (app.hydration.net/strategies/juicer).
+    case 'juicer': return { name: 'juicer' }
     // /revenue is the overview of both rivers; each has its own breakdown page.
     case 'revenue':
       if (parts[1] === 'users') return { name: 'revenueUsers' }
@@ -359,6 +365,7 @@ export const paths = {
   hdx: () => '/hdx',
   hollar: () => '/hollar',
   intents: () => '/intents',
+  juicer: () => '/juicer',
   revenue: () => '/revenue',
   revenueUsers: () => '/revenue/users',
   revenueProtocol: () => '/revenue/protocol',

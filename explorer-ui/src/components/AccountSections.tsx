@@ -325,8 +325,10 @@ export function mmPositionCount(markets: MoneyMarketPosition[]): number {
   return markets.length
 }
 
+// A strategy custody account's market (the Juicer vault's Main, its loop) is shown but
+// in no value — its share token's holders carry it — so its debt nets nothing either.
 export function moneyMarketDebtUsd(markets: MoneyMarketPosition[]): number {
-  return markets.reduce((total, market) => total + Number(market.totalDebtBase) / 1e8, 0)
+  return markets.reduce((total, market) => total + (market.custody ? 0 : Number(market.totalDebtBase) / 1e8), 0)
 }
 
 // What the three position tabs hold right now, plus whether the holder has
@@ -338,6 +340,10 @@ export interface PositionTabCounts {
   orders: number
   liquidity: number
   borrow: number
+  /** Juicer vault positions (and open withdrawal requests) — the Strategies tab. */
+  strategies?: number
+  /** The Strategies read is pending or unavailable: a deep link keeps the tab (it says so) rather than losing it. */
+  strategiesUnsettled?: boolean
   presence?: PositionsPresence | null
   /**
    * positions-presence is still loading: the position tab a `?view=` names is
@@ -381,6 +387,7 @@ export function profileTabs(
     ...positionTab('orders', 'Orders', positions.orders, (p?.orderHistory ?? 0) > 0),
     ...positionTab('liquidity', 'Liquidity', positions.liquidity, !!p?.liquidityHistory),
     ...positionTab('borrow', 'Borrow', positions.borrow, !!p?.moneyMarketHistory),
+    ...positionTab('strategies', 'Strategies', positions.strategies ?? 0, !!positions.strategiesUnsettled && positions.requestedView === 'strategies'),
     ...(hasContract ? [{ key: 'contract', label: 'Contract' }] : []),
     { key: 'activity', label: 'Activity', ...(activity?.total == null ? {} : { count: activity.total, countAtLeast: !activity.complete }) },
     // Extrinsics and Events are first-level tabs, not sub-tabs of Activity: all

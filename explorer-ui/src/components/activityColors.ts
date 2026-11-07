@@ -43,6 +43,11 @@ export const CAT = {
   // bonds — teal
   bond: 'var(--cat-bond)',
   bondRedeem: 'var(--cat-bond-redeem)',
+  // Juicer — citrus lime (the strategy vaults: a deposit, the way out, a claim, the keepers' upkeep)
+  juicer: 'var(--cat-juicer)',
+  juicerExit: 'var(--cat-juicer-exit)',
+  juicerClaim: 'var(--cat-juicer-claim)',
+  juicerKeeper: 'var(--cat-juicer-keeper)',
   // intents — violet (limit orders and DCA intents)
   intent: 'var(--cat-intent)',
   intentFill: 'var(--cat-intent-fill)',
@@ -68,6 +73,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   xcm: CAT.xcm,
   stake: CAT.stake,
   bond: CAT.bond,
+  juicer: CAT.juicer,
   intent: CAT.intent,
   // A cross-chain swap is a swap, so it reads in the trade family's colour.
   xcswap: CAT.trade,
@@ -157,6 +163,20 @@ export const BOND_LABELS: Record<string, string> = {
 const BOND_COLORS: Record<string, string> = {
   Issue: CAT.bond, Redeem: CAT.bondRedeem,
 }
+// A Juicer row reads as the official app names the act. The way out is three acts on
+// chain — the request (shares into escrow, the cooldown starts), the unwind's start
+// and each settled part — then the claim; they share the exit shade and the claim
+// takes its own, as does the keepers' upkeep (harvest, rebalance, de-lever).
+export const JUICER_LABELS: Record<string, string> = {
+  Deposit: 'Juicer deposit', Withdraw: 'Withdrawal requested', Unwind: 'Withdrawal unwinding', Settle: 'Withdrawal settled',
+  Claim: 'Withdrawal claimed', ClaimSurplus: 'Surplus claimed', Harvest: 'Juicer harvest', Rebalance: 'Juicer rebalance', Delever: 'Juicer de-lever',
+  Lever: 'Loop levered', Unlever: 'Loop unlevered',
+}
+const JUICER_COLORS: Record<string, string> = {
+  Deposit: CAT.juicer, Withdraw: CAT.juicerExit, Unwind: CAT.juicerExit, Settle: CAT.juicerExit,
+  Claim: CAT.juicerClaim, ClaimSurplus: CAT.juicerClaim, Harvest: CAT.juicerKeeper, Rebalance: CAT.juicerKeeper, Delever: CAT.juicerKeeper,
+  Lever: CAT.juicerKeeper, Unlever: CAT.juicerKeeper,
+}
 // The product's words: a swap intent is a limit order, a dca intent is a DCA intent.
 // One function names every intent row — the badge, the Trade filter list, the slug
 // labels and the detail page all read from it, so no surface can say it differently.
@@ -197,6 +217,10 @@ export function activityBadge(r: ActivityRow): { label: string; col: string } {
   if (r.type === 'bond') {
     const a = r.bondAction ?? ''
     return { label: BOND_LABELS[a] ?? 'Bond', col: BOND_COLORS[a] ?? CAT.bond }
+  }
+  if (r.type === 'juicer') {
+    const a = r.juicerAction ?? ''
+    return { label: JUICER_LABELS[a] ?? 'Juicer', col: JUICER_COLORS[a] ?? CAT.juicer }
   }
   if (r.type === 'intent') return { label: intentLabel(r.intentKind, r.intentAction), col: INTENT_COLORS[r.intentAction ?? ''] ?? CAT.intent }
   // A cross-chain swap is a SWAP, in every state. The badge used to say `Sent`
