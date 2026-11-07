@@ -40,6 +40,14 @@ function preisPairUrl(assetId: number): string {
   return `${base}/${assetId}-${quoteId}`
 }
 
+// A strategy's share token links to its page: what it is, its NAV and its way out.
+// The value above is that NAV (strategySharePrice.ts), not a market feed.
+const STRATEGY_OF_ASSET: Record<number, { label: string; to: string; note: string }> = {
+  55: { label: 'Brazilian Invoice Loans', to: paths.bil(), note: 'valued at the vault’s NAV in HOLLAR' },
+  550: { label: 'Brazilian Invoice Loans', to: paths.bil(), note: 'the vault share BIL wraps 1:1, valued at its NAV in HOLLAR. Its TVL counts the same uBIL as BIL’s (most uBIL is supplied as BIL), so the two are the same money, never to be summed; its price history below is BIL’s BIL/HOLLAR pool series, as uBIL has no market of its own' },
+  5551: { label: 'Juicer', to: paths.juicer(), note: 'valued at the vault’s exchange rate in its collateral' },
+}
+
 export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: number; initialTab?: 'holders' | 'activity' }) {
   const { data, isLoading, isError } = useAsset(assetId)
   useDocumentTitle(data ? (data.asset.price != null ? `${data.asset.symbol} ${F.priceUsd(data.asset.price)}` : data.asset.symbol) : undefined)
@@ -125,6 +133,10 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
               <div className="dt">Holders</div><div className="dd num">{F.int(data.holderCount)}</div>
               <div className="dt">TVL</div><div className="dd mono"><Usd v={data.totalUsd} /></div>
               {data.bridge && <BridgeRow bridge={data.bridge} />}
+              {STRATEGY_OF_ASSET[a.assetId] && <>
+                <div className="dt">Strategy</div>
+                <div className="dd"><Link to={STRATEGY_OF_ASSET[a.assetId].to}>{STRATEGY_OF_ASSET[a.assetId].label}</Link> <span className="muted">· {STRATEGY_OF_ASSET[a.assetId].note}</span></div>
+              </>}
               {/* Collateral seized from borrowers in the money market, over the
                   asset's full history. Present for every asset the market holds or
                   has held — a reserve that has never been liquidated reads $0. */}

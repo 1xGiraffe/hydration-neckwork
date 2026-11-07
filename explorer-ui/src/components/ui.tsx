@@ -7,7 +7,7 @@ import type { AccountRef, AssetOrigin, AssetRef, FailureReason, FeePayment } fro
 import { parseUtcTimestamp, tsDate, tsDateTime, utcDay } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { voteSideLabel } from '../utils/voteRows'
-import { BOND_LABELS, CAT, JUICER_LABELS, LIQ_LABELS, MM_LABELS, OTC_LABELS, intentLabel } from './activityColors'
+import { BIL_ACTION_FILTERS, BOND_LABELS, CAT, JUICER_LABELS, LIQ_LABELS, MM_LABELS, OTC_LABELS, intentLabel } from './activityColors'
 import { ZoomReset, ZoomSelection, bracketToView, fracOfTime, useChartZoom, useZoomRefine } from './chartZoom'
 import type { RefinedSeries } from './chartZoom'
 import { resolveTag, useTagMapVersion } from '../userTags'
@@ -2164,7 +2164,7 @@ export function rowNav(to: string) {
 // value maps to the backend activity `type` filter; 'all' is the unfiltered feed.
 const ACTIVITY_CHIPS: { v: string; label: string }[] = [
   { v: 'all', label: 'All' }, { v: 'trade', label: 'Trade' }, { v: 'mm', label: 'Borrow' }, { v: 'liquidity', label: 'Liquidity' },
-  { v: 'transfer', label: 'Transfer' }, { v: 'xcm', label: 'Cross-chain' }, { v: 'stake', label: 'Stake' }, { v: 'bond', label: 'Bond' }, { v: 'juicer', label: 'Juicer' }, { v: 'vote', label: 'Vote' },
+  { v: 'transfer', label: 'Transfer' }, { v: 'xcm', label: 'Cross-chain' }, { v: 'stake', label: 'Stake' }, { v: 'bond', label: 'Bond' }, { v: 'juicer', label: 'Juicer' }, { v: 'bil', label: 'BIL' }, { v: 'vote', label: 'Vote' },
 ]
 const ACTIVITY_CHIP_VALUES = new Set(ACTIVITY_CHIPS.map(c => c.v))
 export function normalizeActivityType(value: string): string {
@@ -2210,6 +2210,8 @@ export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = 
     { v: 'juicer-delever', label: JUICER_LABELS.Delever },
     { v: 'juicer-lever', label: JUICER_LABELS.Lever }, { v: 'juicer-unlever', label: JUICER_LABELS.Unlever },
   ],
+  // BIL values are the server's action slugs; the labels are the badges'.
+  bil: BIL_ACTION_FILTERS,
   // The value is the chain's own term; the label is how this app writes that side —
   // taken from the same mapping the badges use, so the two cannot diverge.
   vote: [{ v: 'Aye', label: voteSideLabel('Aye') }, { v: 'Nay', label: voteSideLabel('Nay') }],

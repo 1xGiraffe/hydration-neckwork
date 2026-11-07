@@ -558,7 +558,8 @@ export interface AddressBalance { asset: AssetRef; total: string; free: string; 
 export interface UncountedBalance { amount: string; reason: 'pool-hub-reserve' | 'strategy-custody' }
 // Why a balance is shown and counted in no value, as the Balances tab and the
 // Value hint both phrase it: the Omnipool's own hub reserve, and what a strategy's
-// custody account (the Juicer vault, its loop, its yield fund) holds for its share holders.
+// custody account (the Juicer vault, its loop, its yield fund; the BIL vault and the
+// Decentral pool it invests in) holds for its share holders.
 export const UNCOUNTED_REASON: Record<UncountedBalance['reason'], string> = {
   'pool-hub-reserve': 'the pool\'s own hub reserve — H2O is priced off the assets the pool holds, which the value already counts',
   'strategy-custody': 'held in custody for the strategy\'s share holders — their shares are valued for it',
@@ -970,7 +971,7 @@ export interface XcmFeeLeg {
 }
 
 export interface ActivityRow {
-  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond' | 'intent' | 'xcswap' | 'juicer'
+  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond' | 'intent' | 'xcswap' | 'juicer' | 'bil'
   revenue?: ActivityRevenue
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean
@@ -1081,6 +1082,19 @@ export interface ActivityRow {
   juicerIntentNonce?: number | null
   juicerMinOut?: string | null
   juicerOutAsset?: AssetRef
+  // Brazilian Invoice Loans. `who` is the depositor (Deposit), the request's owner
+  // (Redeem), its controller (Cancel / Settle / Claim; a claim's receiver in `to`), the
+  // vault for its Reinvest and the Decentral pool's Interest / Principal paid to it, the
+  // Decentral borrower for a Draw / Repay (the pool in `to`). `asset`/`amount` is the
+  // HOLLAR moved, or for a Redeem / Cancel the uBIL into or out of the queue;
+  // `bilShares` the uBIL a deposit minted (in `bilShareAsset`: BIL for a zapped deposit),
+  // a settlement settled or a claim burned.
+  bilAction?: BilAction
+  bilShareAsset?: AssetRef
+  bilShares?: string | null
+  bilRequestId?: number | null
+  bilPartial?: boolean | null
+  bilTokenId?: string | null
   votePallet?: string
   voteRefPallet?: 'opengov' | 'democracy' | null
   voteRefTitle?: string | null
@@ -3429,4 +3443,151 @@ export interface AccountJuicerPosition extends Omit<JuicerPosition, 'account'> {
 export interface AccountJuicer {
   asOfBlock: number | null
   positions: AccountJuicerPosition[]
+}
+
+// --- Brazilian Invoice Loans (/explorer/bil, /explorer/address/:a/bil) ---
+export type BilAction = 'Deposit' | 'Redeem' | 'Cancel' | 'Settle' | 'Claim' | 'Reinvest' | 'Interest' | 'Principal' | 'Draw' | 'Repay'
+export type BilRequestStatus = 'queued' | 'partly-settled' | 'claimable' | 'claimed' | 'cancelled'
+/** When a queued redemption is paid: the maturity that covers it and the window its HOLLAR arrives in (maturity + measured processing); `matured` once that maturity has passed. */
+export interface BilWait { maturesAt: string; from: string; to: string; matured: boolean }
+export interface BilRequest {
+  requestId: number
+  owner: AccountRef
+  controller: AccountRef
+  shares: string
+  status: BilRequestStatus
+  requestedAt: string
+  settledShares: string
+  hollarOwed: string
+  cancelledShares: string
+  /** Still queued (accruing at NAV). */
+  pendingShares: string
+  /** Settled and not yet claimed: fixed HOLLAR. */
+  claimableHollar: string | null
+  worthHollar: string | null
+  worthUsd: number | null
+  wait: BilWait | null
+  paidFromIdle: boolean
+  lastSettledAt: string | null
+}
+export interface BilPosition {
+  account: AccountRef
+  bil: string
+  ubil: string
+  /** uBIL still queued for redemption (accruing at NAV). */
+  queuedShares: string
+  /** Settled redemptions awaiting a claim: fixed HOLLAR. */
+  claimableHollar: string
+  totalHollar: string | null
+  totalUsd: number | null
+  /** Share of the accruing uBIL; null when nothing accrues. */
+  share: number | null
+}
+export interface BilLadderBucket { day: string; positions: number; principal: string; payout: string; cumulative: string }
+export interface BilDay {
+  day: string
+  deposits: number
+  depositsUsd: number
+  depositsHollar: string
+  redeems: number
+  settledHollar: string
+  claimedHollar: string
+  interestHollar: string
+  principalHollar: string
+  drawsHollar: string
+  repaysHollar: string
+}
+export interface BilDashboard {
+  generatedAt: string
+  asOfBlock: number | null
+  launchBlock: number | null
+  vault: AccountRef
+  bilAsset: AssetRef
+  ubilAsset: AssetRef
+  hollarAsset: AssetRef
+  status: 'open' | 'full' | 'paused' | 'unavailable'
+  exchangeRate: string | null
+  navUsd: number | null
+  tvl: string | null
+  tvlUsd: number | null
+  cap: string | null
+  remaining: string | null
+  remainingBinding: 'vault' | 'pool' | null
+  sharesOutstanding: string | null
+  bilSupply: string | null
+  idleHollar: string | null
+  investedPrincipal: string | null
+  pendingInterest: string | null
+  reservedHollar: string | null
+  minRedeem: string | null
+  apyPct: number | null
+  termDays: number | null
+  withdrawalDelaySec: number | null
+  realized: { sinceLaunchPct: number | null; launchDays: number | null; d30Pct: number | null; d30Days: number | null; d7Pct: number | null; d7Days: number | null }
+  rateHistory: Array<{ day: string; rate: number; source: 'deposit' | 'settlement' | 'live' }>
+  ladder: { positions: number; principal: string; payout: string; next: { at: string; payout: string } | null; buckets: BilLadderBucket[] } | null
+  queue: {
+    requests: BilRequest[]
+    pendingShares: string
+    claimableHollar: string | null
+    quoteHollar: string
+    quoteWait: BilWait | null
+    quoteFromIdle: boolean
+    quoteCovered: boolean
+    maxWaitSec: number | null
+    processing: { samples: number; medianHours: number; p90Hours: number; maxHours: number } | null
+  } | null
+  borrowing: {
+    borrowedHollar: string | null
+    bucketUsed: string | null
+    bucketCap: string | null
+    utilization: number | null
+    maxLtvPct: number | null
+    liquidationThresholdPct: number | null
+    borrowApyPct: number | null
+    maxLeverage: number | null
+    maxNetApyPct: number | null
+  } | null
+  rollover: { drawnHollar: string; repaidHollar: string; paidToVaultHollar: string; investedByVaultHollar: string | null }
+  holders: number | null
+  depositors: number
+  positions: BilPosition[]
+  pool: {
+    poolId: number
+    account: AccountRef
+    bilReserve: string
+    hollarReserve: string
+    feePct: number
+    amplification: number
+    mid: number | null
+    peg: number | null
+    premiumVsNavPct: number | null
+    sellQuote: { bil: string; hollar: string; price: number; vsNavPct: number | null } | null
+    history: Array<{ day: string; mid: number | null; peg: number | null; premiumVsPegPct: number | null; nav: number | null; premiumVsNavPct: number | null }>
+  } | null
+  totals: {
+    deposits: number; depositsUsd: number; depositsHollar: string
+    redeems: number; cancels: number; settlements: number; settledHollar: string
+    claims: number; claimedHollar: string
+    reinvests: number; reinvestedHollar: string; interestHollar: string; principalHollar: string
+    drawsHollar: string; repaysHollar: string
+    unpricedRows: number
+  }
+  perDay: BilDay[]
+  contracts: Array<{ role: string; account: AccountRef }>
+}
+export interface AccountBil {
+  asOfBlock: number | null
+  /** False when the vault's open requests could not be read: a queued or claimable part may be missing. */
+  complete: boolean
+  position: (Omit<BilPosition, 'account'> & {
+    bilAsset: AssetRef
+    ubilAsset: AssetRef
+    hollarAsset: AssetRef
+    exchangeRate: string
+    /** Null when nothing of the position accrues. */
+    apyPct: number | null
+    termDays: number
+    requests: BilRequest[]
+  }) | null
 }

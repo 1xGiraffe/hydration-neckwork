@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { activityBadge, categoryColor, intentLabel, CAT, UNFILTERED_COLOR } from '../src/components/activityColors'
 import { ACTIVITY_ACTIONS } from '../src/components/ui'
 import type { ActivityRow } from '../src/types'
@@ -32,6 +33,11 @@ const JUICER_SLUG_ACTION: Record<string, NonNullable<ActivityRow['juicerAction']
   'juicer-deposit': 'Deposit', 'juicer-withdraw': 'Withdraw', 'juicer-unwind': 'Unwind', 'juicer-settle': 'Settle', 'juicer-claim': 'Claim',
   'juicer-claim-surplus': 'ClaimSurplus', 'juicer-harvest': 'Harvest', 'juicer-rebalance': 'Rebalance', 'juicer-delever': 'Delever',
 }
+// The BIL filter values are slugs; the badge reads the row's action.
+const BIL_SLUG_ACTION: Record<string, ActivityRow['bilAction']> = {
+  'bil-deposit': 'Deposit', 'bil-redeem': 'Redeem', 'bil-cancel': 'Cancel', 'bil-settle': 'Settle', 'bil-claim': 'Claim',
+  'bil-reinvest': 'Reinvest', 'bil-interest': 'Interest', 'bil-principal': 'Principal', 'bil-draw': 'Draw', 'bil-repay': 'Repay',
+}
 
 describe('activity category coding', () => {
   it('gives every action in the shared filter list a color from its own family', () => {
@@ -42,6 +48,7 @@ describe('activity category coding', () => {
       stake: [CAT.stake, CAT.stakeExit, CAT.stakeReward, CAT.stakeMigrate, CAT.stakeCancel],
       bond: [CAT.bond, CAT.bondRedeem],
       juicer: [CAT.juicer, CAT.juicerExit, CAT.juicerClaim, CAT.juicerKeeper],
+      bil: [CAT.bil, CAT.bilExit, CAT.bilClaim, CAT.bilKeeper, CAT.bilYield],
       intent: INTENT_FAMILY,
       vote: [CAT.vote, CAT.aye, CAT.nay],
       xcm: [CAT.xcm],
@@ -57,6 +64,7 @@ describe('activity category coding', () => {
       stake: v => row({ type: 'staking', stakingAction: v }),
       bond: v => row({ type: 'bond', bondAction: v as ActivityRow['bondAction'] }),
       juicer: v => row({ type: 'juicer', juicerAction: JUICER_SLUG_ACTION[v] }),
+      bil: v => row({ type: 'bil', bilAction: BIL_SLUG_ACTION[v] }),
       intent: v => intentRow(v as ActivityRow['intentAction']),
       vote: v => row({ type: 'vote', voteAction: v }),
       xcm: () => row({ type: 'xcm' }),
@@ -118,6 +126,8 @@ describe('activity category coding', () => {
       // The way out (request, unwind, settle) shares one shade, as the claims and the
       // keepers' upkeep share theirs; what stays apart is in, out, paid and upkeep.
       juicer: (['Deposit', 'Withdraw', 'Claim', 'Harvest'] as const).map(a => row({ type: 'juicer', juicerAction: a })),
+      // BIL: in, the way out (request, settle), paid, interest, and the principal/upkeep flows.
+      bil: (['Deposit', 'Settle', 'Claim', 'Interest', 'Principal'] as const).map(a => row({ type: 'bil', bilAction: a })),
       // PartialFill shares Fill's shade and Expire shares Cancel's (see the grouping
       // test below); what must stay apart is place, fill, leave, and a DCA's trade.
       intent: (['Place', 'Fill', 'Cancel', 'DcaTrade'] as const).map(a => intentRow(a)),
@@ -200,5 +210,24 @@ describe('activity category coding', () => {
     // An unfiltered view is not a category; it takes a neutral slate no family owns.
     expect(categoryColor('all')).toBe(UNFILTERED_COLOR)
     expect(UNFILTERED_COLOR).toBe('var(--chart-neutral)')
+  })
+})
+
+// BIL sits beside the bond family in feeds and on the assets menu: its colour must not
+// read as the bonds' teal. Compared by hue in both themes, from the stylesheet itself.
+describe('the BIL colour', () => {
+  const css = readFileSync(new URL('../src/styles/global.css', import.meta.url), 'utf8')
+  const hue = (hex: string) => {
+    const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min
+    const h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4
+    return (h * 60 + 360) % 360
+  }
+  it('stays well apart from the bonds’ teal in both themes', () => {
+    const bil = [...css.matchAll(/--cat-bil: (#[0-9A-Fa-f]{6});/g)].map(m => m[1])
+    const bond = [...css.matchAll(/--cat-bond: (#[0-9A-Fa-f]{6});/g)].map(m => m[1])
+    expect(bil.length).toBe(2)
+    expect(bond.length).toBe(2)
+    bil.forEach((c, i) => expect(Math.abs(hue(c) - hue(bond[i])), `${c} vs ${bond[i]}`).toBeGreaterThan(30))
   })
 })

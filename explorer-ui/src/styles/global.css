@@ -120,6 +120,12 @@
   --cat-juicer-claim: #E2F0A6;
   --cat-juicer-keeper: #A9B97A;
 
+  --cat-bil: #43C15A;
+  --cat-bil-exit: #23863A;
+  --cat-bil-claim: #A9E8A4;
+  --cat-bil-keeper: #7E9F84;
+  --cat-bil-yield: #E3C547;
+
   --cat-intent: #7C5CFF;
   --cat-intent-fill: #5B3FD6;
   --cat-intent-cancel: #A99BFF;
@@ -216,6 +222,12 @@
   --cat-juicer-exit: #45580A;
   --cat-juicer-claim: #8FAE3A;
   --cat-juicer-keeper: #6F7D46;
+
+  --cat-bil: #1F7F33;
+  --cat-bil-exit: #10501F;
+  --cat-bil-claim: #48A055;
+  --cat-bil-keeper: #4E6B53;
+  --cat-bil-yield: #8C7200;
 
   --cat-intent: #9F86FF;
   --cat-intent-fill: #7F66E6;
@@ -2486,6 +2498,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    row centres items on their MARGIN boxes, so a control beside a title still
    wearing those margins sat 6px above the title's text (measured). With the
    spacing on the row, a button, a link or a tab strip lines up with the text. */
+h2.sec-title, h3.sec-title { font-weight: 400; }
 .sec-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 24px 0 12px; }
 .sec-title-row .sec-title { margin: 0 auto 0 0; }
 /* A tab strip standing alone under a header wears 24px/16px margins of its own;
@@ -4440,3 +4453,12 @@ html.rev-fs-lock #view .wrap { animation: none; }
   .juicer-steps { grid-template-columns: minmax(0, 1fr); }
   .juicer-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ===== Brazilian Invoice Loans page (pages/Bil.tsx) — the Juicer page's layout
+   (.juicer-page, its steps and risk note) in the BIL colour, plus the feed's two
+   selects side by side. ===== */
+.bil-steps li b::before { color: var(--cat-bil); }
+.bil-page tr:target td { background: color-mix(in srgb, var(--cat-bil) 12%, transparent); }
+.bil-page tr[id^="bil-request-"] { scroll-margin-top: 84px; }
+.bil-feed-controls { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+@media (max-width: 720px) { .bil-feed-controls { justify-content: flex-start; } }

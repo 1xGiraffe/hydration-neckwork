@@ -71,6 +71,16 @@ Disallow: /juicer-rebalance/
 Disallow: /juicer-delever/
 Disallow: /juicer-lever/
 Disallow: /juicer-unlever/
+Disallow: /bil-deposit/
+Disallow: /bil-redeem/
+Disallow: /bil-cancel/
+Disallow: /bil-settle/
+Disallow: /bil-claim/
+Disallow: /bil-reinvest/
+Disallow: /bil-interest/
+Disallow: /bil-principal/
+Disallow: /bil-draw/
+Disallow: /bil-repay/
 
 # Session-only surfaces: a crawler carries no session, so these can only ever be
 # the logged-out teaser.

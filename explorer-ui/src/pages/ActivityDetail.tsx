@@ -4,8 +4,9 @@ import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../router'
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
-import { BOND_LABELS, JUICER_LABELS, LIQ_LABELS, MM_LABELS, intentLabel } from '../components/activityColors'
+import { BIL_LABELS, BOND_LABELS, JUICER_LABELS, LIQ_LABELS, MM_LABELS, intentLabel } from '../components/activityColors'
 import { RevenueRow } from '../components/RevenueRow'
+import { bilRequestHref } from '../components/positions/bilStatus'
 import { PoolBadge, Usd, Amt, ExactAmt, Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, hasGas, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
 import { useAwaitingBlock } from '../hooks/useAwaitingBlock'
 import { convictionLabel, voteSideLabel, voteSubjectLabel } from '../utils/voteRows'
@@ -75,7 +76,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
   return (
     <div className="wrap">
       <div className="page-head">
-        <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, slug.startsWith('juicer-') ? { label: 'Juicer', to: paths.juicer() } : { label: 'Activity', to: `/activity?tab=${ACTIVITY_SLUG_TAB[slug]}` }, { label: id }]} />
+        <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, slug.startsWith('juicer-') ? { label: 'Juicer', to: paths.juicer() } : slug.startsWith('bil-') ? { label: 'Brazilian Invoice Loans', to: paths.bil() } : { label: 'Activity', to: `/activity?tab=${ACTIVITY_SLUG_TAB[slug]}` }, { label: id }]} />
         <div className="page-title">{label} <span className="num">{id}</span>
           {row?.type === 'xcm' && <span className="sub">{row.xcmDir === 'in' ? `in from ${row.fromChain ?? '?'}` : `out to ${row.destChain ?? '?'}`}</span>}
           {row?.type === 'mm' && row.mmMarket && <span className="sub">{row.mmMarket}</span>}
@@ -83,6 +84,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
           {row?.type === 'bond' && row.bondAction && <span className="sub">{BOND_LABELS[row.bondAction]}</span>}
           {row?.type === 'intent' && <span className="sub">{intentLabel(row.intentKind, row.intentAction)}</span>}
           {row?.type === 'juicer' && <span className="sub"><Link to={paths.juicer()}>Juicer</Link>{row.juicerRequestId != null && <> · request #{row.juicerRequestId}</>}</span>}
+          {row?.type === 'bil' && <span className="sub"><Link to={paths.bil()}>Brazilian Invoice Loans</Link>{row.bilRequestId != null && <> · request #{row.bilRequestId}</>}</span>}
           {row?.type === 'vote' && voteSub && <span className="sub">{voteSub}</span>}
           {row?.type === 'otc' && row.otcOrderId != null && <span className="sub">order #{row.otcOrderId}</span>}
         </div>
@@ -187,6 +189,17 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
               {row.juicerEligibleAt && <><div className="dt">Unwind from</div><div className="dd">{F.datetime(row.juicerEligibleAt)} <span className="muted">· the cooldown's end; requests cannot be cancelled</span></div></>}
               {row.juicerLtvBefore != null && row.juicerLtvAfter != null && <><div className="dt">Main LTV</div><div className="dd mono">{(row.juicerLtvBefore / 100).toFixed(2)}% → {(row.juicerLtvAfter / 100).toFixed(2)}%</div></>}
               {row.juicerFee != null && row.asset && <><div className="dt">Protocol share</div><div className="dd mono"><ExactAmt raw={row.juicerFee} dec={row.asset.decimals} /> <AssetChip asset={row.asset} /></div></>}
+            </>}
+            {row.type === 'bil' && <>
+              <div className="dt">Action</div><div className="dd">{row.bilAction === 'Settle' && row.bilPartial ? 'Redemption partly settled' : BIL_LABELS[row.bilAction ?? ''] ?? 'BIL'}</div>
+              {row.bilShareAsset && row.bilShares != null && <><div className="dt">{({ Deposit: 'Minted', Redeem: 'Queued', Cancel: 'Returned', Settle: 'Rate-locked', Claim: 'Burned' } as Record<string, string>)[row.bilAction ?? ''] ?? 'uBIL'}</div><div className="dd mono"><ExactAmt raw={row.bilShares} dec={row.bilShareAsset.decimals} /> <AssetChip asset={row.bilShareAsset} /></div></>}
+              {row.bilAction === 'Deposit' && row.bilShares != null && row.amount != null && BigInt(row.bilShares) > 0n && <><div className="dt">Exchange rate</div><div className="dd mono">{(Number(BigInt(row.amount) * 10n ** 9n / BigInt(row.bilShares)) / 1e9).toFixed(6)} <span className="muted">HOLLAR per BIL — the vault's NAV when it minted</span></div></>}
+              {row.bilAction === 'Settle' && row.bilShares != null && row.amount != null && BigInt(row.bilShares) > 0n && <><div className="dt">Exchange rate</div><div className="dd mono">{(Number(BigInt(row.amount) * 10n ** 9n / BigInt(row.bilShares)) / 1e9).toFixed(6)} <span className="muted">HOLLAR per uBIL — fixed for the settled part</span></div></>}
+              {row.bilRequestId != null && <><div className="dt">Request</div><div className="dd mono"><Link to={bilRequestHref(row.bilRequestId)}>#{row.bilRequestId}</Link> <span className="muted">· its state on the BIL page</span></div></>}
+              {/* A settlement names the request's controller, but the vault's keeper signs
+                  it: say who did, so the row is not read as the controller's own act. */}
+              {row.bilAction === 'Settle' && ext?.signer && row.who && ext.signer.accountId !== row.who.accountId && <><div className="dt">Signed by</div><div className="dd"><AddrPill account={ext.signer} /> <span className="muted">· settled for the controller</span></div></>}
+              {row.bilTokenId != null && <><div className="dt">Decentral position</div><div className="dd mono">#{row.bilTokenId}</div></>}
             </>}
             {row.type === 'vote' && <>
               {/* The subtitle carries these too, but a subtitle is scenery: a reader
