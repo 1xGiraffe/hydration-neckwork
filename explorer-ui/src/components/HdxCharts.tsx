@@ -191,8 +191,10 @@ export function niceAxisMax(v: number): number {
 
 // Segments stack bottom-up in the order given, separated by 2px gaps; 3 y-gridlines
 // with compact labels; optional dashed separator (weekly → monthly) before a column.
-export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCaption, yFmt = compactAmount }: {
+export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCaption, yFmt = compactAmount, clamp = true }: {
   columns: StackColumn[]; h?: number; separatorAt?: number; separatorCaption?: string; yFmt?: (v: number) => string
+  /** Clamp a tall-bucket cluster to keep the smaller bars readable (default); false scales the axis to the tallest column. */
+  clamp?: boolean
 }) {
   const [hover, setHover] = useState<number | null>(null)
   const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
@@ -205,7 +207,7 @@ export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCap
   // true value) while the smaller bars keep a readable height instead of being
   // flattened.
   const split = separatorAt != null && separatorAt > 0 && separatorAt < n ? separatorAt : null
-  const max = niceAxisMax(stackedColumnMax(totals))
+  const max = niceAxisMax(clamp ? stackedColumnMax(totals) : Math.max(1, ...totals.filter(v => Number.isFinite(v))))
   const W = 860, padL = 46, padR = 6, padT = 16, padB = 18
   const plotH = h - padT - padB
   const bw = n ? (W - padL - padR) / n : 0

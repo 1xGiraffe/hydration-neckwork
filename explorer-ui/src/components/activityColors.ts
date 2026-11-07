@@ -171,6 +171,8 @@ export const BOND_LABELS: Record<string, string> = {
   Issue: 'Bond issued', Redeem: 'Bond redeemed',
   // A primary-sale act (an OTC row that is also a bond row), by its bond action.
   Purchase: 'Bond purchase', Rollover: 'Bond rollover', SaleOpen: 'Bond sale opened', SaleClose: 'Bond sale closed',
+  // An LBP sale trades both ways: a buyer selling bonds back into the pool.
+  SellBack: 'Bond sold back',
 }
 const BOND_COLORS: Record<string, string> = {
   Issue: CAT.bond, Redeem: CAT.bondRedeem,
@@ -187,7 +189,10 @@ export const BOND_SALE_LABELS: Record<'sale' | 'rollover', Record<string, string
 const BOND_SALE_COLORS: Record<string, string> = { Place: CAT.bondOffer, Pull: CAT.bondOffer, Fill: CAT.bond }
 /** A bond-sale row's label (Bond purchase, Bond sale closed, …); null for any other row. */
 export function bondSaleLabel(r: Pick<ActivityRow, 'bondSale' | 'otcAction'>): string | null {
-  return r.bondSale ? BOND_SALE_LABELS[r.bondSale.kind][r.otcAction ?? ''] ?? 'Bond sale' : null
+  if (!r.bondSale) return null
+  // An LBP sale's acts are trades in its pool: a purchase, or a sell back.
+  if (r.bondSale.venue === 'lbp') return r.bondSale.side === 'sell' ? BOND_LABELS.SellBack : BOND_LABELS.Purchase
+  return BOND_SALE_LABELS[r.bondSale.kind][r.otcAction ?? ''] ?? 'Bond sale'
 }
 // A Juicer row reads as the official app names the act. The way out is three acts on
 // chain — the request (shares into escrow, the cooldown starts), the unwind's start
@@ -299,6 +304,8 @@ export function activityBadge(r: ActivityRow): { label: string; col: string } {
         ? { label: 'DCA failed', col: CAT.bad }
         : { label: 'DCA', col: CAT.tradeDca }
     }
+    // A bond's LBP purchase or sell back: the trade it is, badged as the bond act.
+    if (r.bondSale) return { label: bondSaleLabel(r)!, col: r.bondSale.side === 'sell' ? CAT.bondOffer : CAT.bond }
     return { label: 'Swap', col: CAT.trade }
   }
   if (r.type === 'otc' && r.bondSale) return { label: bondSaleLabel(r)!, col: BOND_SALE_COLORS[r.otcAction ?? ''] ?? CAT.bond }

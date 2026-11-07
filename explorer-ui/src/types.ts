@@ -339,6 +339,8 @@ export interface TradeDetail {
   iceIntents?: { intentId: string; intentSeq: number; intentKind: 'swap' | 'dca' | null; intentAction: string; owner: AccountRef | null }[]
   // A concentrated-liquidity swap's pool contract (links the venue to its page).
   poolAddress?: string
+  /** Set when the trade was a bond's LBP purchase or sell back. */
+  bondSale?: ActivityRow['bondSale']
 }
 
 export interface DailyPoint { date: string; value: number }
@@ -1129,7 +1131,13 @@ export interface ActivityRow {
   // A bond's primary-sale act (bonds.ts): this venue row (an OTC place, pull or fill) is
   // also a `bond` row — a purchase (`sale`) or rollover — of round `round` on the bond
   // family page `family`.
-  bondSale?: { venue: 'otc' | 'lbp'; kind: 'sale' | 'rollover'; bondId: number; family: string | null; round: number | null; maturityAt: string | null; price?: number | null; returnPct?: number | null; aprPct?: number | null }
+  /**
+   * A bond's primary-sale act: an OTC row of the issuer's offer, or a trade that was an
+   * LBP purchase or sell back (`side`). `price` is face units per bond (at the fill's
+   * own prices for an LBP paid in another asset), `paymentPrice` the price in the
+   * payment asset itself.
+   */
+  bondSale?: { venue: 'otc' | 'lbp'; kind: 'sale' | 'rollover'; side?: 'buy' | 'sell'; bondId: number; family: string | null; round: number | null; maturityAt: string | null; price?: number | null; returnPct?: number | null; aprPct?: number | null; paymentPrice?: number | null; paymentAsset?: AssetRef; faceAsset?: AssetRef }
   // ICE intents (runtime 443). A `swap` intent is the product's limit order, a `dca`
   // intent its DCA. `intentId` is the u128 as a decimal string — it starts past u64,
   // so it is never a number; `intentSeq` is its low 64 bits, the short "#n" handle.
@@ -3625,7 +3633,44 @@ export interface BondSale {
   discountPct: number | null
   fixedYieldPct: number | null
   aprAtOpenPct: number | null
+  /** What buyers paid per bond received, volume-weighted: in the payment asset, and in face units (at each fill's event-time prices when the payment is not face units). */
   avgPrice: number | null
+  avgFacePrice: number | null
+  /** The bonds-weighted APR purchases locked in. */
+  avgAprPct: number | null
+  /** The payment is not face units: every price, discount and yield is in face units at each fill's own time. */
+  facedAtEventTime: boolean
+  lbp: BondLbpSale | null
+}
+/** An LBP sale (the HDX bonds): the pool's terms, seed and return, and the sale as it ran. */
+export interface BondLbpSale {
+  pool: AccountRef
+  feePct: number
+  /** The payment asset's weight (%) at the start and the end; the bond's is the rest. */
+  paymentWeightStart: number
+  paymentWeightEnd: number
+  startAt: string | null
+  endAt: string | null
+  seed: { payment: string; bonds: string }
+  returned: { at: string; block: number; payment: string; bonds: string } | null
+  fees: string
+  sellBacks: number
+  soldBack: string
+  /** The replayed reserves land on what was returned: every fill is accounted for. The curve is empty when false. */
+  reconciled: boolean | null
+  /** Spot per bond just before and after every fill, and at the start and end: in the payment asset and in face units then; `t` is Unix ms. */
+  curve: Array<{ t: number; pay: number | null; face: number | null }>
+  /** Every fill: when, which way, the bonds (whole units) and the price per bond in the payment asset and in face units. */
+  fills: Array<{ t: number; side: 'buy' | 'sell'; bonds: number; pay: number | null; face: number | null }>
+}
+export interface BondBuyerStats {
+  buyers: number
+  sellers: number
+  purchases: number
+  medianPurchase: string | null
+  largestPurchase: string | null
+  top10SharePct: number | null
+  top: Array<{ account: AccountRef; fills: number; bonds: string; paid: Array<{ asset: AssetRef; raw: string }>; facePrice: number | null; returnPct: number | null; aprPct: number | null }>
 }
 export interface BondRound {
   round: number
@@ -3659,6 +3704,10 @@ export interface BondRound {
   issuerUsd: number | null
   holders: { list: HolderRow[]; total: number; holderCount: number; totalUsd: number } | null
   buyers: number
+  /** The money sale's discount to face at its price; the bonds-weighted APR purchases locked in. */
+  discountPct: number | null
+  avgAprPct: number | null
+  buyerStats: BondBuyerStats
 }
 export interface BondFillDay { day: string; bondId: number; kind: 'sale' | 'rollover'; fills: number; bonds: string; paid: string; returnPct: number | null; aprPct: number | null }
 export interface BondDay { day: string; sold: Record<string, string>; redeemed: Record<string, string> }

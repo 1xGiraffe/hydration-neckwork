@@ -1,5 +1,10 @@
-import type { ActivityRevenue } from '../types'
+import type { ActivityRevenue, RevenueStream } from '../types'
 import { F, Usd } from './ui'
+import { REVENUE_STREAM_LABEL } from './revenueColors'
+
+// A stream named as the Revenue page names it; an unknown one in words, not snake_case.
+const streamName = (stream: string): string =>
+  REVENUE_STREAM_LABEL[stream as RevenueStream] ?? stream.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase())
 
 // The <dt>/<dd> pair for protocol revenue, shared by every activity detail surface.
 //
@@ -17,7 +22,7 @@ export function RevenueRow({ revenue }: { revenue: ActivityRevenue | undefined }
       {revenue.lpUsd > 0 && <span className="muted"> · <Usd v={revenue.lpUsd} /> to LPs</span>}
       {revenue.streams.length > 0 && (
         <div className="muted revenue-streams">
-          {revenue.streams.map(s => `${s.stream} ${F.usd(s.usd)}`).join(' · ')}
+          {revenue.streams.map(s => `${streamName(s.stream)} ${F.usd(s.usd)}`).join(' · ')}
         </div>
       )}
     </div>

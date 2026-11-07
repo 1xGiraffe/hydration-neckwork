@@ -23,7 +23,8 @@ const ConnectDialog = lazyWithReload(() => import('./ConnectDialog').then(m => (
 const DevicesDialog = lazyWithReload(() => import('./DevicesDialog').then(m => ({ default: m.DevicesDialog })))
 
 function matches(item: NavItem, route: Route): boolean {
-  return item.match.includes(route.name)
+  if (!item.match.includes(route.name)) return false
+  return item.bondFamily == null || (route.name === 'bonds' && route.family === item.bondFamily)
 }
 
 // One destination inside a dropdown or the drawer. An external one is a real

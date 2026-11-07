@@ -6,7 +6,7 @@ import { BilPositions } from './BilPositions'
 import { BondPositions } from './BondPositions'
 
 // The Strategies tab: every strategy the account is in — Juicer's vaults, Brazilian
-// Invoice Loans and bonds (HOLLAR bonds) — each from its own pinned read. A strategy
+// Invoice Loans and bonds (HOLLAR and HDX bonds) — each from its own pinned read. A strategy
 // shows when the account holds a position in it or its state cannot be stated (unknown
 // is said, never shown as empty); with none held, one line says so for all of them.
 

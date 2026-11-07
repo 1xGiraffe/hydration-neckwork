@@ -43,7 +43,7 @@ export function BondPositions({ bonds }: { bonds: AccountBonds }) {
                 <td data-label="Bought in the sale" className="r mono">
                   {p.bought ? <>
                     {p.bought.paid.map(x => <div key={x.asset.assetId}><AssetAmount asset={x.asset} raw={x.raw} /></div>)}
-                    <div className="muted" style={{ fontSize: 11 }}>{F.amount(p.bought.bonds, p.asset.decimals)} {p.asset.symbol}{p.bought.returnPct != null ? ` · ${bondPct(p.bought.returnPct, 4)} fixed` : ''}{p.bought.aprPct != null ? ` (${bondPct(p.bought.aprPct)} APR)` : ''}</div>
+                    <div className="muted" style={{ fontSize: 11 }}>{F.amount(p.bought.bonds, p.asset.decimals)} {p.asset.symbol}{p.bought.returnPct != null ? ` · ${bondPct(p.bought.returnPct)} in ${p.underlying.symbol} to maturity` : ''}{p.bought.aprPct != null ? ` (${bondPct(p.bought.aprPct)} APR)` : ''}</div>
                   </> : <span className="muted">—</span>}
                 </td>
               </tr>
@@ -51,7 +51,7 @@ export function BondPositions({ bonds }: { bonds: AccountBonds }) {
           </tbody>
         </table>
       </div>
-      <div className="hdx-note">As of block {F.int(bonds.asOfBlock ?? 0)}. Bonds are wallet balances, so this is in the account’s Value already — it restates that value, it does not add to it. Before maturity a bond is worth its face discounted at its own issue yield over the time left; from maturity it redeems 1:1 for its underlying. “Bought in the sale” is what this account paid in the issuer’s offers (a rollover pays in the older round’s bonds); bonds moved in or out since are not in it.</div>
+      <div className="hdx-note">As of block {F.int(bonds.asOfBlock ?? 0)}. Bonds are wallet balances, so this is in the account’s Value already — it restates that value, it does not add to it. Before maturity a bond is worth its face discounted at its own issue yield over the time left; from maturity it redeems 1:1 for its underlying. “Bought in the sale” is what this account paid in the issuer’s sale — its OTC offers (a rollover pays in the older round’s bonds) or its LBP, net of any bonds sold back — with the yield it locked in; a bond paid for in another asset (the HDX bonds, bought with DOT) states it in its underlying at each purchase’s own prices. Bonds moved in or out since are not in it.</div>
     </div>
   )
 }

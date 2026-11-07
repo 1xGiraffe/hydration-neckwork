@@ -123,7 +123,7 @@ export function parseRoute(loc: string): Route {
     return { name: 'notfound', path: pathOnly }
   }
   if (parts.length === 0) return { name: 'dashboard' }
-  // A bond family's page, /<family>-bonds (bondFamilies.ts: the HOLLAR bonds today).
+  // A bond family's page, /<family>-bonds (bondFamilies.ts: the HOLLAR and HDX bonds).
   const bondKey = /^([a-z0-9]+)-bonds$/.exec(parts[0] ?? '')?.[1]
   if (bondKey && bondFamilyUi(bondKey) && parts.length === 1) return { name: 'bonds', family: bondKey }
   switch (parts[0]) {
