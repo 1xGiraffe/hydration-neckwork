@@ -1,5 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- router module exports hooks/helpers alongside <Link> */
 import { useSyncExternalStore, useCallback } from 'react'
+import { bondFamilyUi } from './bondFamilies'
 import { flushSync } from 'react-dom'
 import type { MouseEvent, ReactNode, CSSProperties } from 'react'
 
@@ -73,6 +74,7 @@ export type Route =
   | { name: 'intents' }
   | { name: 'juicer' }
   | { name: 'bil' }
+  | { name: 'bonds'; family: string }
   | { name: 'revenue' }
   | { name: 'revenueUsers' }
   | { name: 'revenueProtocol' }
@@ -121,6 +123,9 @@ export function parseRoute(loc: string): Route {
     return { name: 'notfound', path: pathOnly }
   }
   if (parts.length === 0) return { name: 'dashboard' }
+  // A bond family's page, /<family>-bonds (bondFamilies.ts: the HOLLAR bonds today).
+  const bondKey = /^([a-z0-9]+)-bonds$/.exec(parts[0] ?? '')?.[1]
+  if (bondKey && bondFamilyUi(bondKey) && parts.length === 1) return { name: 'bonds', family: bondKey }
   switch (parts[0]) {
     case 'activity': return { name: 'activity' }
     // Consolidated top-level URLs redirect to the matching Activity tab.
@@ -372,6 +377,7 @@ export const paths = {
   intents: () => '/intents',
   juicer: () => '/juicer',
   bil: () => '/bil',
+  bonds: (family: string) => `/${family}-bonds`,
   revenue: () => '/revenue',
   revenueUsers: () => '/revenue/users',
   revenueProtocol: () => '/revenue/protocol',

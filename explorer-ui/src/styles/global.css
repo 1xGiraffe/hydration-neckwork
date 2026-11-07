@@ -114,6 +114,7 @@
 
   --cat-bond: #4FD1C5;
   --cat-bond-redeem: #22948A;
+  --cat-bond-offer: color-mix(in srgb, var(--cat-trade-place) 70%, var(--cat-bond));
 
   --cat-juicer: #C5E15A;
   --cat-juicer-exit: #8FA83A;
@@ -217,6 +218,7 @@
 
   --cat-bond: #17877D;
   --cat-bond-redeem: #0C5A53;
+  --cat-bond-offer: color-mix(in srgb, var(--cat-trade-place) 70%, var(--cat-bond));
 
   --cat-juicer: #6B8A12;
   --cat-juicer-exit: #45580A;
@@ -4434,7 +4436,7 @@ html.rev-fs-lock #view .wrap { animation: none; }
   .ice-page .pf-card .hdx-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .ice-page .pf-card .hdx-card { padding: 11px 12px; }
   .ice-page .pf-card .hdx-card .hs { font-size: 10.5px; }
-  .ice-page .hdx-ax { font-size: 21px; }
+  .ice-page .hdx-ax { font-size: 24px; }
   .ice-page .day-chart { overflow: visible; }
   .ice-gloss dl { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .ice-gloss dd { margin-bottom: 8px; }
@@ -4462,3 +4464,21 @@ html.rev-fs-lock #view .wrap { animation: none; }
 .bil-page tr[id^="bil-request-"] { scroll-margin-top: 84px; }
 .bil-feed-controls { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 @media (max-width: 720px) { .bil-feed-controls { justify-content: flex-start; } }
+
+/* Bonds (the bond family pages, /hollar-bonds) */
+.bond-steps li b::before { color: var(--cat-bond); }
+.bond-round { margin-bottom: 14px; }
+.bond-round .sec-title-row { flex-wrap: wrap; gap: 8px; align-items: center; }
+.bond-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; }
+.bond-offers { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+.bond-offer-head { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; justify-content: space-between; font-size: 12.5px; margin-bottom: 6px; }
+.bond-offer-head > span { min-width: 0; }
+
+/* Headings that keep their visual style: the account name is the page's h1, section
+   titles are h2s (h2.sec-title keeps its weight above). */
+.acct-meta h1.tag { margin: 0; }
+/* Read by assistive tech, not shown: an outline heading over a self-evident card. */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.bond-round-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 26px 0 0; font-family: 'GeistMono'; font-size: 12px; }
+.bond-round-picker .seg-bar { flex: 0 1 auto; }
+.bonds-page .bond-round[id] { scroll-margin-top: 84px; }

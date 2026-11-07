@@ -333,10 +333,10 @@ export function usePoolActivity(poolId: number | null, limit = 25) {
 // The asset-pinned activity feed. Every filter the page shows has to arrive here:
 // the pager's bound is fetched under the same filter set, so a filter that reached
 // only one of the two would size the pages for a list the rows never match.
-export function useAssetActivity(assetId: number | null, type = 'all', offset = 0, action?: string, enabled = true, from?: string, to?: string, min?: string, minRevenue?: string) {
+export function useAssetActivity(assetId: number | null, type = 'all', offset = 0, action?: string, enabled = true, from?: string, to?: string, min?: string, minRevenue?: string, limit?: number) {
   const ri = useInterval()
-  const key = ['asset-activity', assetId, type, offset, action, from, to, min, minRevenue]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.assetActivity(assetId as number, type, offset, undefined, action, from, to, min, minRevenue, signal), enabled: assetId != null && enabled, refetchInterval: enabled && offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
+  const key = ['asset-activity', assetId, type, offset, action, from, to, min, minRevenue, limit]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.assetActivity(assetId as number, type, offset, limit, action, from, to, min, minRevenue, signal), enabled: assetId != null && enabled, refetchInterval: enabled && offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
 }
 export function useAddress(address: string | null) {
   return useQuery({ queryKey: ['address', address], queryFn: ({ signal }) => api.address(address as string, signal), enabled: !!address, refetchInterval: useInterval(DETAIL_POLL_MS), staleTime: BLOCK_STALE_MS })
@@ -638,6 +638,14 @@ export function useBilDashboard() {
 // An account's BIL position and open redemption requests (the same snapshot).
 export function useAccountBil(address: string | null) {
   return useQuery({ queryKey: ['account-bil', address], queryFn: ({ signal }) => positionsApi.accountBil(address!, signal), enabled: !!address, staleTime: 30_000 })
+}
+// A bond family's page (/hollar-bonds): built from the API's bond-state snapshot.
+export function useBondDashboard(family: string) {
+  return useQuery({ queryKey: ['bond-dashboard', family], queryFn: ({ signal }) => api.bonds(family, signal), refetchInterval: 60_000, staleTime: 30_000 })
+}
+// An account's bonds across every family (the same snapshot).
+export function useAccountBonds(address: string | null) {
+  return useQuery({ queryKey: ['account-bonds', address], queryFn: ({ signal }) => positionsApi.accountBonds(address!, signal), enabled: !!address, staleTime: 30_000 })
 }
 // The Intents page's open book: polled like the asset page's order book, which
 // reads the same loaders.

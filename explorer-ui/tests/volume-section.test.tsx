@@ -68,7 +68,7 @@ describe('VolumeSection', () => {
 
   it('carries no members note on a tag', () => {
     const html = render({ kind: 'tag', tagId: 'treasury' }, 112_000, HISTORY)
-    expect(html).toContain('<div class="sec-title">Volume</div>')
+    expect(html).toContain('<h2 class="sec-title">Volume</h2>')
     expect(html).not.toContain('members counts for both')
   })
 

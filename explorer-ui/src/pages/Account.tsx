@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useState } from 'react'
 import { lazyWithReload } from '../lazyWithReload'
 import { blockRangeForWindow } from '../utils/chartRefine'
-import { useAccountBil, useAccountJuicer, useAddress, useAddressHistory, useAddressValueEvents, useAccountActivityCounts, useAccountListCount, useStats } from '../hooks/useExplorerData'
+import { useAccountBil, useAccountBonds, useAccountJuicer, useAddress, useAddressHistory, useAddressValueEvents, useAccountActivityCounts, useAccountListCount, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { api } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -79,10 +79,11 @@ export function Account({ address }: { address: string }) {
   const historyBlocks = history.data?.portfolioBlocks && history.data.portfolioBlocks.length === history.data.portfolioSeries.length
     ? history.data.portfolioBlocks : undefined
   const valueEvents = useAddressValueEvents(canonicalAddress)
-  // Strategy positions (Juicer's vaults, Brazilian Invoice Loans): the Strategies tab,
+  // Strategy positions (Juicer's vaults, Brazilian Invoice Loans, bonds): the Strategies tab,
   // shown only when there is one.
   const juicer = useAccountJuicer(canonicalAddress)
   const bil = useAccountBil(canonicalAddress)
+  const bonds = useAccountBonds(canonicalAddress)
   // The Activity tab badge is the exact length of the activity list, shared with
   // the list's own unfiltered total; absent while it resolves, and absent for good
   // on a feed too deep to count (rather than showing an overshooting estimate).
@@ -128,7 +129,7 @@ export function Account({ address }: { address: string }) {
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
           // Debt counts from every market and is netted out of the portfolio Value.
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(data.balances.length, { orders: (data.activeDcas?.length ?? 0) + (data.openLimitOrders?.length ?? 0), liquidity: data.liquidityPositions?.length ?? 0, borrow: mmList.length, strategies: (juicer.data?.positions.length ?? 0) + (bil.data?.position ? 1 : 0), strategiesUnsettled: juicer.isLoading || juicer.isError || juicer.data?.asOfBlock == null || bil.isLoading || bil.isError || bil.data?.asOfBlock == null, presence: presence.data, presenceLoading: presence.isLoading, requestedView: view }, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd, data.userRevenueUsd)
+          const tabs = profileTabs(data.balances.length, { orders: (data.activeDcas?.length ?? 0) + (data.openLimitOrders?.length ?? 0), liquidity: data.liquidityPositions?.length ?? 0, borrow: mmList.length, strategies: (juicer.data?.positions.length ?? 0) + (bil.data?.position ? 1 : 0) + (bonds.data?.positions.length ?? 0), strategiesUnsettled: juicer.isLoading || juicer.isError || juicer.data?.asOfBlock == null || bil.isLoading || bil.isError || bil.data?.asOfBlock == null || bonds.isLoading || bonds.isError || bonds.data?.asOfBlock == null, presence: presence.data, presenceLoading: presence.isLoading, requestedView: view }, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd, data.userRevenueUsd)
           const activeView = resolveProfileView(view, tabs)
           return (
             <>
@@ -155,7 +156,7 @@ export function Account({ address }: { address: string }) {
                 <div className="acct-avatar">{mod ? '⚙️'
                   : <AccountEmoji account={data} className="acct-avatar-icon" imgClass="acct-avatar-img" />}</div>
                 <div className="acct-meta">
-                  <div className="tag">{mod
+                  <h1 className="tag acct-name">{mod
                     ? <span style={{ fontSize: 18 }}>{mod}</span>
                     : data.profile?.name
                       ? <span style={{ fontSize: 18, fontStyle: 'italic', color: 'var(--amber)' }}>{data.profile.name}</span>
@@ -170,7 +171,7 @@ export function Account({ address }: { address: string }) {
                     {data.contract && <span className="badge" title="Deployed EVM smart contract — this address holds code" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>contract</span>}
                     {data.contract?.destroyed && <span className="badge" title="No code at this address anymore (selfdestructed or removed); history stays addressable" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>destroyed</span>}
                     {data.proxy?.isPure && <span className="badge" title="Keyless pure-proxy account — controlled only through its proxies" style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>pure proxy</span>}
-                    {data.multisig && <span className="badge" title={`Multisig account — any ${data.multisig.threshold} of ${data.multisig.signatories.length} signatories can act`} style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>{data.multisig.threshold}/{data.multisig.signatories.length} multisig</span>}</div>
+                    {data.multisig && <span className="badge" title={`Multisig account — any ${data.multisig.threshold} of ${data.multisig.signatories.length} signatories can act`} style={{ color: 'var(--neutral)', background: 'color-mix(in srgb, var(--neutral) 14%, transparent)' }}>{data.multisig.threshold}/{data.multisig.signatories.length} multisig</span>}</h1>
                   {/* No EVM badge here: the 0x prefix already says it (and the
                       identities card shows "EVM (H160)") — the badge forced the
                       address to wrap mid-token on phones. */}
@@ -191,6 +192,8 @@ export function Account({ address }: { address: string }) {
               </div>
 
               <DetailTabs tabs={tabs} active={activeView} onChange={k => setQuery({ view: k === 'overview' ? null : k })} />
+              {/* The open tab is the page's next heading level; its sections (h2.sec-title) and cards follow. */}
+              <h2 className="sr-only">{tabs.find(t => t.key === activeView)?.label ?? 'Overview'}</h2>
 
               {activeView === 'overview' && (<>
               {(() => {
@@ -292,7 +295,7 @@ export function Account({ address }: { address: string }) {
                 )}
 
                 {activeView === 'strategies' && (
-                  <StrategyPositions juicer={juicer} bil={bil} />
+                  <StrategyPositions juicer={juicer} bil={bil} bonds={bonds} />
                 )}
 
                 {activeView === 'contract' && data.contract && (
@@ -345,7 +348,7 @@ export function ListsSection({ publicLists, ownLists, isOwn }: {
           page header keeps "Edit profile" — not trailing under the table like a
           "view more" link would. */}
       <div className="sec-title-row">
-        <div className="sec-title">Lists{rows.length > 0 ? ` · ${rows.length}` : ''}</div>
+        <h2 className="sec-title">Lists{rows.length > 0 ? ` · ${rows.length}` : ''}</h2>
         {isOwn && <Link to={paths.lists()} className="ext-link">Manage lists</Link>}
       </div>
       <div className="panel"><table className="tbl">

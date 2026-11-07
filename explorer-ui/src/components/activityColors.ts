@@ -43,6 +43,8 @@ export const CAT = {
   // bonds — teal
   bond: 'var(--cat-bond)',
   bondRedeem: 'var(--cat-bond-redeem)',
+  // A bond sale's offer opened or closed: the OTC place/pull shade with a bond accent.
+  bondOffer: 'var(--cat-bond-offer)',
   // Juicer — citrus lime (the strategy vaults: a deposit, the way out, a claim, the keepers' upkeep)
   juicer: 'var(--cat-juicer)',
   juicerExit: 'var(--cat-juicer-exit)',
@@ -167,9 +169,25 @@ export const LIQ_LABELS: Record<string, string> = {
 // shade of the family's teal.
 export const BOND_LABELS: Record<string, string> = {
   Issue: 'Bond issued', Redeem: 'Bond redeemed',
+  // A primary-sale act (an OTC row that is also a bond row), by its bond action.
+  Purchase: 'Bond purchase', Rollover: 'Bond rollover', SaleOpen: 'Bond sale opened', SaleClose: 'Bond sale closed',
 }
 const BOND_COLORS: Record<string, string> = {
   Issue: CAT.bond, Redeem: CAT.bondRedeem,
+}
+// A bond's PRIMARY SALE runs through a venue — the OTC orders governance placed selling
+// the bond (for money, or for an older bond: a rollover). Its rows stay the venue's rows
+// (OTC, under Trade) and are bond rows too (the Bond filter admits them); the badge names
+// what they are: the purchase or rollover in the bond family's teal, the offer opened or
+// closed in the OTC place/pull shade with a bond accent.
+export const BOND_SALE_LABELS: Record<'sale' | 'rollover', Record<string, string>> = {
+  sale: { Place: 'Bond sale opened', Pull: 'Bond sale closed', Fill: 'Bond purchase' },
+  rollover: { Place: 'Bond rollover opened', Pull: 'Bond rollover closed', Fill: 'Bond rollover' },
+}
+const BOND_SALE_COLORS: Record<string, string> = { Place: CAT.bondOffer, Pull: CAT.bondOffer, Fill: CAT.bond }
+/** A bond-sale row's label (Bond purchase, Bond sale closed, …); null for any other row. */
+export function bondSaleLabel(r: Pick<ActivityRow, 'bondSale' | 'otcAction'>): string | null {
+  return r.bondSale ? BOND_SALE_LABELS[r.bondSale.kind][r.otcAction ?? ''] ?? 'Bond sale' : null
 }
 // A Juicer row reads as the official app names the act. The way out is three acts on
 // chain — the request (shares into escrow, the cooldown starts), the unwind's start
@@ -283,6 +301,7 @@ export function activityBadge(r: ActivityRow): { label: string; col: string } {
     }
     return { label: 'Swap', col: CAT.trade }
   }
+  if (r.type === 'otc' && r.bondSale) return { label: bondSaleLabel(r)!, col: BOND_SALE_COLORS[r.otcAction ?? ''] ?? CAT.bond }
   if (r.type === 'otc') {
     const a = r.otcAction
     return { label: OTC_LABELS[a ?? ''] ?? 'OTC order', col: OTC_COLORS[a ?? ''] ?? CAT.tradePlace }
