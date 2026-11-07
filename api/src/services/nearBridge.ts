@@ -30,6 +30,16 @@ const FETCH_TIMEOUT_MS = 10_000
 const MAX_PAGES_PER_SYNC = 20
 const TX_BATCH = 20 // the API's own limit per /v0/transactions request
 const ACCOUNT_PAGE_SIZE = 50
+// A 429 without a Retry-After waits 30 s, doubling per refusal up to 15 min; a
+// Retry-After is honoured up to an hour. Nothing is sent while it runs.
+const BACKOFF_BASE_MS = 30_000
+const BACKOFF_MAX_MS = 15 * 60_000
+const RETRY_AFTER_MAX_MS = 3_600_000
+// The NTT managers known when this was written. Wormhole names a NEAR peer only
+// by sha256(account), so without them a fresh process cannot read NEAR custody
+// until FastNear answers discovery — which it rate-limits (2026-11-07). Discovery
+// still adds any manager deployed since.
+export const PINNED_NEAR_MANAGERS: readonly string[] = ['ntt-zec.hydration-whm.near', 'ntt-near.hydration-whm.near']
 
 // Omni Bridge's Zcash connector: a `verify_deposit_v2` call carrying the deposit's
 // raw Zcash transaction. Its transfer_sent names the connector, never the user.
@@ -234,19 +244,45 @@ interface Cursor { nextHeight: number; seen: Set<string> }
 interface ManagerState extends ManagerEvents, Cursor { name: string; emitter: string }
 
 const managers = new Map<string, ManagerState>()
+const newManager = (name: string): ManagerState =>
+  ({ name, emitter: sha256Hex(name), nextHeight: 0, seen: new Set(), sent: new Map(), received: [] })
+for (const name of PINNED_NEAR_MANAGERS) managers.set(name, newManager(name))
 const deployer: Cursor = { nextHeight: 0, seen: new Set() }
 let discoveredAt = 0
 let lastSyncAt = 0
 let inflight: Promise<void> | null = null
 
+// While FastNear is refusing us, every caller (discovery, each backing cycle, the
+// explorer's syncs) fails fast instead of adding to the rate limit.
+let blockedUntil = 0
+let backoffStep = 0
+class FastNearBackoff extends Error {}
+
+/** A Retry-After header (seconds or an HTTP date) as milliseconds from now, or null. */
+function retryAfterMs(value: string | null, now: number): number | null {
+  if (!value) return null
+  const seconds = Number(value)
+  const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now
+  return Number.isFinite(ms) && ms >= 0 ? Math.min(ms, RETRY_AFTER_MAX_MS) : null
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
+  if (Date.now() < blockedUntil) throw new FastNearBackoff(`FastNear backing off until ${new Date(blockedUntil).toISOString()}`)
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
   try {
     const res = await fetch(FASTNEAR_TX_URL + path, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: ctrl.signal,
     })
+    if (res.status === 429) {
+      const now = Date.now()
+      const wait = retryAfterMs(res.headers.get('retry-after'), now) ?? Math.min(BACKOFF_BASE_MS * 2 ** backoffStep, BACKOFF_MAX_MS)
+      backoffStep += 1
+      blockedUntil = now + wait
+      throw new Error(`FastNear ${path} 429; next request after ${new Date(blockedUntil).toISOString()}`)
+    }
     if (!res.ok) throw new Error(`FastNear ${path} ${res.status}`)
+    backoffStep = 0
     return await res.json() as T
   } finally {
     clearTimeout(timer)
@@ -311,7 +347,7 @@ async function discoverManagers(): Promise<void> {
   for (const tx of await readNew(DEPLOYER, deployer, false)) {
     const name = tx.transaction.receiver_id
     if (!name.endsWith(MANAGER_SUFFIX) || managers.has(name)) continue
-    managers.set(name, { name, emitter: sha256Hex(name), nextHeight: 0, seen: new Set(), sent: new Map(), received: [] })
+    managers.set(name, newManager(name))
   }
   discoveredAt = Date.now()
 }
@@ -332,19 +368,23 @@ function ensureDiscovered(): Promise<void> {
  */
 export async function nearManagerNames(): Promise<ReadonlyMap<string, string>> {
   try { await ensureDiscovered() } catch (err) {
-    console.error('[wormhole] NEAR manager discovery failed:', err instanceof Error ? err.message : err)
+    // A backoff already logged its 429 once; repeating it every cycle is noise.
+    if (!(err instanceof FastNearBackoff)) console.error('[wormhole] NEAR manager discovery failed:', err instanceof Error ? err.message : err)
   }
   return new Map([...managers.values()].map(m => [m.emitter, m.name]))
 }
 
 async function sync(): Promise<void> {
-  await ensureDiscovered()
+  // A failed discovery still leaves the pinned (and earlier discovered) managers to sync.
+  try { await ensureDiscovered() } catch (err) {
+    if (!(err instanceof FastNearBackoff)) console.error('[Explorer] NEAR manager discovery failed:', err instanceof Error ? err.message : err)
+  }
   // One manager failing must not hold back the others' resolutions.
   for (const m of managers.values()) {
     try {
       for (const tx of await readNew(m.name, m, true)) foldManagerTx(m.name, tx, m)
     } catch (err) {
-      console.error(`[Explorer] NEAR bridge sync of ${m.name} failed:`, err instanceof Error ? err.message : err)
+      if (!(err instanceof FastNearBackoff)) console.error(`[Explorer] NEAR bridge sync of ${m.name} failed:`, err instanceof Error ? err.message : err)
     }
   }
 }
@@ -354,7 +394,9 @@ function scheduleSync(): void {
   if (inflight || Date.now() - lastSyncAt < SYNC_MIN_INTERVAL_MS) return
   lastSyncAt = Date.now()
   inflight = sync()
-    .catch(err => console.error('[Explorer] NEAR bridge sync failed:', err instanceof Error ? err.message : err))
+    .catch(err => {
+      if (!(err instanceof FastNearBackoff)) console.error('[Explorer] NEAR bridge sync failed:', err instanceof Error ? err.message : err)
+    })
     .finally(() => { inflight = null })
 }
 
