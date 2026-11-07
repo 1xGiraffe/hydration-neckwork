@@ -54,6 +54,21 @@ describe('buildMoneyMarketAccountValueClaims',()=>{
       .toThrow('missing money-market reserve index')
   })
 
+  // A Juicer vault's synthetic collateral (a reserve with no registry asset) holds the
+  // vault's health factor and is no one's value: its supply is no reserve claim, and it
+  // must not stop the generation (it did, from the vault's first rebalance on).
+  it('leaves a reserve with no registry asset out, and counts it, instead of failing the generation',()=>{
+    const synthetic='0xb94025f14fdc01f8e3b0c34311bcbae0febd1a4a'
+    const unmapped=new Set<string>()
+    const sToken: MmReserveToken={asset:synthetic,aToken:`0x${'9a'.repeat(20)}`,vDebt:`0x${'bc'.repeat(20)}`,poolProxy:pool,marketKey:'core'}
+    const claims=buildMoneyMarketAccountValueClaims(
+      [{holder,contract:aToken,scaled:1_000n},{holder,contract:sToken.aToken,scaled:7_000n}],[token,sToken],
+      new Map([[`${pool}:${token.asset}`,{liq:RAY,vbi:RAY}]]),[aggregate],new Map(),unmapped,
+    )
+    expect(claims.map(c=>c.assetId)).toEqual([0,5])
+    expect([...unmapped]).toEqual([synthetic])
+  })
+
   // A holder's usage-as-collateral bit means a balance (Aave clears it at zero), so a
   // flagged reserve the fold holds no supply of — GDOT that reached the holder
   // Substrate-side, outside the aToken logs — is stored as reserve_present = 2 with
