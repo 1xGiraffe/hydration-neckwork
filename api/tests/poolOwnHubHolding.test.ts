@@ -96,15 +96,16 @@ describe('the rule reaches every value surface', () => {
 
   it('is in the directory ranking and its top-holding map, under a bumped model version', () => {
     const body = fn('accountsPage')
-    expect([...body.matchAll(/poolOwnHubHoldingSql\('latest\.account_id', 'latest\.asset_id'\)/g)]).toHaveLength(2)
+    // uncountedHoldingSql: this rule or a strategy custody account's (valuation.ts).
+    expect([...body.matchAll(/uncountedHoldingSql\('latest\.account_id', 'latest\.asset_id'\)/g)]).toHaveLength(2)
     const at = explorerService.indexOf('function accountDirectoryModelVersion(): string {')
     expect(at).toBeGreaterThan(-1)
     const version = explorerService.slice(at, explorerService.indexOf('\n}\n', at))
-    expect(version).toContain("'v3-r6'")
-    expect(version).not.toContain('-r3')
+    expect(version).toContain("'v3-r7'")
+    expect(version).not.toContain('-r6')
   })
 
   it('is in the value chart\'s balance walk, so the live-pinned last point agrees with its interior', () => {
-    expect(fn('getAccountHistory')).toContain('isPoolOwnHubHolding(accountId, Number(id))')
+    expect(fn('getAccountHistory')).toContain('isUncountedHolding(accountId, Number(id))')
   })
 })

@@ -71,6 +71,7 @@ import { initHollarService } from './services/hollarService.ts'
 import { initPositionYield } from './services/positionYield.ts'
 import { initExternalTokenApy } from './services/externalTokenApy.ts'
 import { initIceService } from './services/iceService.ts'
+import { initJuicerService } from './services/juicerService.ts'
 import { initOrderHistory } from './services/orderHistory.ts'
 import { initLpRewardClaims } from './services/lpRewardClaims.ts'
 import { initPositionsPresence } from './services/positionsPresence.ts'
@@ -80,6 +81,7 @@ import { initOracleService } from './services/oracleService.ts'
 import { initSecurityService } from './services/securityService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
 import { initMmOraclePrices } from './services/mmOraclePrices.ts'
+import { initJuicerState } from './services/juicerState.ts'
 import { initLmRewardService } from './services/lmRewardService.ts'
 import { initMmIncentiveService } from './services/mmIncentiveService.ts'
 import { initWormholeNttService } from './services/wormholeNttService.ts'
@@ -329,6 +331,9 @@ async function start() {
     // Must precede startBackgroundRefresh(): the mm-oracle-prices task pins its
     // eth_calls to the indexed head it reads from ClickHouse.
     initMmOraclePrices(client)
+    // Must precede startBackgroundRefresh(): the juicer-state task reads its holder set
+    // from ClickHouse and pins its eth_calls to the indexed head.
+    initJuicerState(client)
     // Must precede startBackgroundRefresh(): the lm-rewards cycle reads deposit
     // owners from ClickHouse and publishes its generation there.
     initLmRewardService(client)
@@ -404,6 +409,11 @@ async function start() {
     void loadAccountSuffixIndex().catch(err => console.warn('[search] account suffix index load failed; 3-letter-code search stays empty until the refresh succeeds', err))
     startAccountSuffixRefresh()
     startAccountSwapActivityQueueDrain()
+    // The Juicer dashboard's first build starts here, off the request path: after the
+    // asset registry, tags, identities and EVM bindings are loaded (its rows carry their
+    // descriptors and account refs, so a build before them caches placeholder decimals),
+    // and before listen, so the first reader joins a build already under way.
+    initJuicerService(client)
     await fastify.listen({ port: config.port, host: config.host })
     console.log(`[API] Server listening on ${config.host}:${config.port}`)
     // Telegram channel linking needs the bot's long-poll loop; without a token

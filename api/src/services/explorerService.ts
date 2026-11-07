@@ -24,7 +24,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, currentPriceOf, isStableswapShareToken, v3VaultShareAssets, displayAssetId, supplyFoldedShareIds, foldedShareEntries, namedShareWrapperOf, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, idsDisplayedAs, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, currentPriceOf, isStableswapShareToken, v3VaultShareAssets, displayAssetId, supplyFoldedShareIds, foldedShareEntries, namedShareWrapperOf, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { firstTradeOf, loadVolumeBuckets, tradingVolumeAsOfBlock, tradingVolumeTotals, volumeCutHeights, type AccountVolumeHistory, type VolumeCutHeights } from './accountVolumeHistory.ts'
 import { AAVE_COLLECTOR, PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
@@ -59,7 +59,7 @@ import { currentMmOraclePrices, withMmOraclePrices } from './mmOraclePrices.ts'
 import { deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
 import { XCM_BARRIER_EVENTS, XCM_IN_DEPOSIT_EVENTS, XCM_IN_WALK_EVENTS, XCM_WALK_CROSSABLE_EVENTS } from './xcmWalkEvents.ts'
 import { trappedArrivals, type TrappedArrival } from './xcmTrappedArrivals.ts'
-import { OMNIPOOL_ACCOUNT, PRICE_LOOKBACK_DAYS, formatUnits, isPoolOwnHubHolding, poolOwnHubHoldingSql, renderUsd, scaledUsd } from './valuation.ts'
+import { OMNIPOOL_ACCOUNT, PRICE_LOOKBACK_DAYS, custodyAccountSql, formatUnits, isCustodyAccount, isUncountedHolding, poolOwnHubHoldingSql, renderUsd, scaledUsd, uncountedHoldingSql } from './valuation.ts'
 import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
@@ -83,7 +83,9 @@ import { currentMmIncentiveGenerationSql, loadMmIncentives, mmCountedIncentiveRo
 import { isTerminalXcswapStatus, xcswapSettlementsFor, type XcswapSettlement, type XcswapStatus } from './xcswapSettlements.ts'
 import { loadForeignCandles } from './foreignCandles.ts'
 import { intentLimitPrice } from './intentLimitPrice.ts'
+import { loadJuicerRates, withJuicerSharePrices, type JuicerRate } from './juicerPrice.ts'
 import { TREASURY_POT, XYK_PAIR_EVENTS, isAmountlessLiquidityEvent, liquidityLegAssetIds, matchLiquidityAmounts, missingLiquidityAmounts, type LiquidityAmountCandidate, type LiquidityTransferLeg } from './liquidityLegs.ts'
+import { HOLLAR_ASSET_ID as JUICER_HOLLAR_ASSET_ID, JUICER_ACTION_SLUGS, JUICER_CONTRACTS, LOOP_INTENT_ENTRY, PRIME_ASSET_ID, JUICER_ACTION_TOPIC, JUICER_SUBLOOP, JUICER_TOPIC, JUICER_VAULTS, decodeJuicerLog, isJuicerSynthetic, juicerVaultByAddress, type JuicerAction, type JuicerEvent, type JuicerLogRow } from './juicer.ts'
 export { XYK_PAIR_EVENTS, isAmountlessLiquidityEvent, matchLiquidityAmounts, type LiquidityAmountCandidate, type LiquidityTransferLeg }
 
 let client: ClickHouseClient
@@ -1950,6 +1952,10 @@ async function recomposePriceState(head: number, base: PriceBase): Promise<Price
   // over a share without a feed of its own (a3-Pool → 3-Pool) borrows the share's
   // redeemable value.
   await withExplorerSharePrices(m)
+  // A Juicer share (jETH) at its vault's exchange rate in the collateral it just priced
+  // (juicerPrice.ts, the rate every process reads), before the aliases, which would
+  // otherwise state it at one collateral unit.
+  await withExplorerJuicerSharePrices(m)
   // An aliased asset (aToken, duplicate) with no entry of its own takes its
   // alias's — resolved TRANSITIVELY: GIGAHDX → stHDX → HDX, and stopped at a share
   // token — so every value/volume computation that reads this map values it 1:1.
@@ -2356,6 +2362,10 @@ export function activityHistPick(r: ActivityRow): HistPick {
     if (isIntentFillAction(r.intentAction)) return tradeLegsPick(r.assetIn, r.amountIn, r.assetOut, r.amountOut, r.timestamp)
     return r.assetIn && r.amountIn != null ? histLeg(r.assetIn, r.amountIn, r.timestamp) : null
   }
+  // A Juicer row is worth what it moved: the collateral, HOLLAR or PRIME, or — a
+  // withdrawal request — the escrowed jETH, at its vault collateral's event-time price
+  // (PRICE_ALIAS_ID; the exchange-rate approximation is stated at JUICER_SHARE_PRICE_ALIAS_ID).
+  if (r.type === 'juicer') return r.asset && r.amount != null ? histLeg(r.asset, r.amount, r.timestamp) : null
   if (r.assetOut && r.amountOut != null) return tradeLegsPick(r.assetIn, r.amountIn, r.assetOut, r.amountOut, r.timestamp)
   if (r.asset && r.amount != null) return histLeg(r.asset, r.amount, r.timestamp)
   if (r.assetIn && r.amountIn != null) return histLeg(r.assetIn, r.amountIn, r.timestamp)
@@ -2627,6 +2637,27 @@ async function withExplorerSharePrices(m: Map<number, PriceInfo>): Promise<void>
     if (derived == null) continue
     const priceRaw = formatUnits(derived.toString(), PRICE_USD_DECIMALS)
     m.set(id, { price: Number(priceRaw), priceRaw, change24h })
+  }
+}
+
+async function withExplorerJuicerSharePrices(m: Map<number, PriceInfo>): Promise<void> {
+  let rates: JuicerRate[]
+  try {
+    rates = await cached('explorer:juicer-rates', 30_000, () => loadJuicerRates(client))
+  } catch (err) {
+    console.error('[Explorer] juicer rates unavailable for share prices:', err instanceof Error ? err.message : err)
+    return
+  }
+  if (!rates.length) return
+  const feeds = new Map<number, bigint>()
+  for (const [id, p] of m) { const sc = scaledFromPriceInfo(p); if (sc != null) feeds.set(id, sc) }
+  const priced = withJuicerSharePrices(feeds, rates)
+  for (const r of rates) {
+    const derived = priced.get(r.shareAssetId)
+    if (derived == null) { m.delete(r.shareAssetId); continue }
+    const change24h = m.get(r.collateralAssetId)?.change24h ?? 0
+    const priceRaw = formatUnits(derived.toString(), PRICE_USD_DECIMALS)
+    m.set(r.shareAssetId, { price: Number(priceRaw), priceRaw, change24h })
   }
 }
 
@@ -4154,8 +4185,8 @@ async function holdersPageUnvalued(assetId: number, limit: number, offset: numbe
 // the value already counts. A row whose whole total is uncounted values 0, not
 // null — it is priced, and left out on purpose.
 export interface AddressBalance { asset: AssetRef; total: string; free: string; reserved: string; frozen?: string; breakdown?: BalanceLockComponent[]; timeline?: BalanceUnlockSlice[]; lastBlock: number; valueUsd: number | null; uncounted?: UncountedBalance }
-export interface UncountedBalance { amount: string; reason: 'pool-hub-reserve' }
-interface AggregatedBalanceRow { asset_id: string; total: string; free: string; reserved: string; uncounted?: string; last_block: number }
+export interface UncountedBalance { amount: string; reason: 'pool-hub-reserve' | 'strategy-custody' }
+interface AggregatedBalanceRow { asset_id: string; total: string; free: string; reserved: string; uncounted?: string; custody?: string; last_block: number }
 
 // The part of a row's total its value covers: everything but the uncounted slice.
 function countedAmount(balance: Pick<AddressBalance, 'total' | 'uncounted'>): string {
@@ -4169,7 +4200,8 @@ async function queryAggregatedBalances(accountListSql: string): Promise<Aggregat
   const result = await client.query({
     query: `
       SELECT asset_id, toString(sum(t)) AS total, toString(sum(f)) AS free, toString(sum(rsv)) AS reserved,
-        toString(sumIf(t, ${poolOwnHubHoldingSql('account_id', 'asset_id')})) AS uncounted, max(lb) AS last_block FROM (
+        toString(sumIf(t, ${poolOwnHubHoldingSql('account_id', 'asset_id')})) AS uncounted,
+        toString(sumIf(t, ${custodyAccountSql('account_id')})) AS custody, max(lb) AS last_block FROM (
         SELECT account_id, asset_id,
           toUInt256OrZero(argMaxMerge(total_state)) AS t,
           toUInt256OrZero(argMaxMerge(free_state)) AS f,
@@ -4188,8 +4220,9 @@ export function valueAccountBalances(rows: AggregatedBalanceRow[], prices: Map<n
   return rows
     .map(row => {
       const balanceAsset = asset(row.asset_id)
-      const uncountedRaw = BigInt(row.uncounted ?? '0')
-      const uncounted: UncountedBalance | undefined = uncountedRaw > 0n ? { amount: uncountedRaw.toString(), reason: 'pool-hub-reserve' } : undefined
+      const hubRaw = BigInt(row.uncounted ?? '0'), custodyRaw = BigInt(row.custody ?? '0')
+      const uncounted: UncountedBalance | undefined = custodyRaw > 0n ? { amount: (custodyRaw + hubRaw).toString(), reason: 'strategy-custody' }
+        : hubRaw > 0n ? { amount: hubRaw.toString(), reason: 'pool-hub-reserve' } : undefined
       return {
         asset: balanceAsset,
         total: row.total,
@@ -4349,6 +4382,7 @@ export interface MoneyMarketPosition {
   role: 'primary' | 'supplemental'  // primary owns global summaries
   defiSimSupported: boolean
   stakingBacked?: boolean           // collateral backed by locked-in-wallet HDX (display-only in net worth)
+  custody?: boolean                 // a strategy custody account's position (isCustodyAccount): shown, in no value, its debt netted nowhere
   blockHeight: number
   timestamp: string
   totalCollateralBase: string
@@ -5003,7 +5037,11 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     // A market with an unstated reserve keeps, on top of what it folded, the part
     // of its own aggregate the fold could not state (mmUnstatedCollateralUsd).
     let moneyMarket = orderMoneyMarkets([...byMarket.values()])
-    const countedPositions = moneyMarket.filter(p => !p.stakingBacked)
+    // A strategy custody account (the Juicer vault, its loop) holds positions its share
+    // token's holders are valued for: shown, folded into no balance, netted nowhere.
+    const custodyAccount = isCustodyAccount(norm.accountId)
+    if (custodyAccount) moneyMarket = moneyMarket.map(p => ({ ...p, custody: true }))
+    const countedPositions = custodyAccount ? [] : moneyMarket.filter(p => !p.stakingBacked)
     const unstatedMmUsd = countedPositions.reduce((s, p) => s + mmUnstatedCollateralUsd(p, applyMmCollateralToBalances(balances, p, prices)), 0)
     // MM collateral is added under the reserve's own asset id (Hydration's money
     // market uses the pool tokens, e.g. the 2-Pool-GETH reserve), so re-fold to
@@ -5011,7 +5049,7 @@ export async function getAddress(addressInput: string, opts: { summary?: boolean
     balances = foldShareBalances(balances)
     // ERC-20-side wallet holdings: read from the bounded snapshot and
     // summed onto any Tokens-side balance — the two pots are separate on-chain.
-    balances = mergeErc20Balances(balances, await erc20WalletHoldings(mmH160), prices)
+    balances = mergeErc20Balances(balances, await erc20WalletHoldings(mmH160), prices, custodyAccount)
     // Attach the lock/reserve components once the display rows are final.
     balances = attachLockBreakdowns(balances, lockBreakdowns)
     // Fold each market's borrow-position display the same way (2-Pool-GETH → GETH);
@@ -5749,6 +5787,16 @@ export function mmStakingPlumbingExclusionSql(poolColumn = "ifNull(pool_address,
                        FROM price_data.staking_activity
                        WHERE event_name LIKE 'GigaHdx%' AND event_name != 'GigaHdx.YieldRealized' AND length(who) = 66))`
 }
+// A Juicer vault's own legs on Main — the Supply of a deposit's collateral, the
+// Borrow and synthetic Supply of a rebalance, the Repay and Withdraw of an exit —
+// and the SubLoop's on the loop (the PRIME it supplies, the HOLLAR it borrows and
+// repays) are what the Juicer rows ARE (the getRecentJuicer note), so every
+// money-market read leaves them out, before any LIMIT, exactly as it leaves out
+// GIGAHDX's staking legs. A liquidation of either stays: that is the liquidator's act.
+export function mmJuicerPlumbingExclusionSql(accountColumn = "ifNull(account_id, '')"): string {
+  const accounts = [...JUICER_VAULTS.map(v => v.vault), JUICER_SUBLOOP].map(h => `'${accountIdFromH160(h)}'`).join(', ')
+  return `AND NOT (event_name IN ('Supply','Withdraw','Borrow','Repay') AND lower(${accountColumn}) IN (${accounts}))`
+}
 function moneyMarketFields(m: ApiMmMarket): Pick<MoneyMarketPosition, 'marketKey' | 'market' | 'role' | 'defiSimSupported' | 'stakingBacked'> {
   return { marketKey: m.key, market: m.label, role: m.role, defiSimSupported: m.defiSimSupported, stakingBacked: m.stakingBacked }
 }
@@ -5839,8 +5887,25 @@ async function erc20WalletHoldingsByAccount(h160s: string[]): Promise<Map<string
 // uniswapV3Usd also counts it. Once the share was priced (withExplorerVaultSharePrices,
 // for its holders page) a balance row counted the same money a second time in
 // every account value. Its own asset pages still show it as the token it is.
-export function mergeErc20Balances(balances: AddressBalance[], holdings: { asset: AssetRef; raw: bigint }[], prices: Map<number, PriceInfo>): AddressBalance[] {
+export function mergeErc20Balances(balances: AddressBalance[], holdings: { asset: AssetRef; raw: bigint }[], prices: Map<number, PriceInfo>, custody = false): AddressBalance[] {
   if (!holdings.length) return balances
+  // A custody account's ERC-20 holdings (the vault's remainder of escrowed shares) are balances, never value.
+  if (custody) {
+    const out = balances.slice()
+    for (const h of holdings) {
+      if (h.raw <= 0n) continue
+      const raw = h.raw.toString()
+      const existing = out.findIndex(b => b.asset.assetId === h.asset.assetId)
+      const prev = existing >= 0 ? out[existing] : null
+      const total = (BigInt(prev?.total || '0') + h.raw).toString()
+      const row: AddressBalance = { ...(prev ?? { asset: h.asset, free: '0', reserved: '0', lastBlock: 0 }), total, free: (BigInt(prev?.free || '0') + h.raw).toString(),
+        uncounted: { amount: (BigInt(prev?.uncounted?.amount ?? '0') + BigInt(raw)).toString(), reason: 'strategy-custody' }, valueUsd: 0 }
+      row.valueUsd = usdValue(prices, row.asset.assetId, countedAmount(row), row.asset.decimals) ?? 0
+      if (existing >= 0) out[existing] = row
+      else out.push(row)
+    }
+    return out
+  }
   const out = balances.slice()
   const vaultShares = v3VaultShareAssets()
   for (const h of holdings) {
@@ -6462,7 +6527,8 @@ export function mmReserveRow(
   const aTokenId = sup > 0n && reg ? UNDERLYING_TO_ATOKEN_ID[reg.assetId] : undefined
   const disp = aTokenId != null ? asset(aTokenId) : null
   return {
-    assetId: disp?.assetId ?? reg?.assetId ?? -1, symbol: disp?.symbol ?? (reg?.symbol ?? '?'), decimals,
+    // A Juicer vault's synthetic collateral has no registry asset; it is named, never valued.
+    assetId: disp?.assetId ?? reg?.assetId ?? -1, symbol: disp?.symbol ?? (reg?.symbol ?? (isJuicerSynthetic(t.asset) ? 'Juicer synthetic' : '?')), decimals,
     iconAssetId: disp?.iconAssetId ?? reg?.iconAssetId,
     // A reserve that IS a pool share (a2-Pool-PRIME over 2-Pool-PRIME) has no single
     // icon to borrow — it draws as its pool's members, the same cluster the feed
@@ -12452,7 +12518,7 @@ export interface XcmFeeLeg {
 
 // unified activity
 export interface ActivityRow {
-  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond' | 'intent' | 'xcswap'
+  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond' | 'intent' | 'xcswap' | 'juicer'
   blockHeight: number
   timestamp: string
   eventIndex?: number | null
@@ -12496,6 +12562,28 @@ export interface ActivityRow {
   // The asset the bond was issued against and redeems for (null when the bond
   // registry has no entry for it yet).
   bondUnderlying?: AssetRef | null
+  // Juicer (the leveraged PRIME-loop strategy vaults, services/juicer.ts). `who` is
+  // the user for Deposit / Withdraw (the request) / Unwind / Settle / Claim /
+  // ClaimSurplus and the vault for the keepers' Harvest / Rebalance (the SubLoop for
+  // a Delever). `asset`/`amount` is the collateral moved (a Withdraw: the shares
+  // escrowed, a ClaimSurplus: HOLLAR, a Rebalance: the HOLLAR it put into the loop,
+  // when it did); `juicerShares` the jETH minted on a deposit.
+  juicerAction?: JuicerAction
+  juicerVault?: AccountRef
+  juicerShareAsset?: AssetRef
+  juicerShares?: string | null
+  juicerRequestId?: number | null
+  /** Withdraw: the earliest the unwind can start (ISO). */
+  juicerEligibleAt?: string | null
+  /** Rebalance: Main's LTV before and after, in bps. */
+  juicerLtvBefore?: number | null
+  juicerLtvAfter?: number | null
+  /** Harvest: the protocol harvest share taken, in the collateral's raw units. */
+  juicerFee?: string | null
+  /** Lever / Unlever: the loop's ICE intent — its nonce and the least it accepts back. */
+  juicerIntentNonce?: number | null
+  juicerMinOut?: string | null
+  juicerOutAsset?: AssetRef
   // ICE intents (limit orders and DCA intents). `intentId` is the u128 as a decimal
   // string; `intentSeq` is its low 64 bits — the short "#n" handle the UI shows.
   intentId?: string
@@ -12846,10 +12934,10 @@ export function compareActivityRowsNewestFirst(a: ActivityRow, b: ActivityRow): 
 // A stable numeric rank per row family, so a tie on (block, event, extrinsic)
 // still resolves identically every time the feed is built.
 const ACTIVITY_KIND_RANK: Record<string, number> = {
-  trade: 0, otc: 1, liquidity: 2, mm: 3, xcm: 4, staking: 5, intent: 6, bond: 7, vote: 8, transfer: 9,
+  trade: 0, otc: 1, liquidity: 2, mm: 3, xcm: 4, staking: 5, intent: 6, bond: 7, juicer: 8, vote: 9, transfer: 10,
 }
 function activityKindRank(r: ActivityRow): number {
-  return ACTIVITY_KIND_RANK[r.type] ?? 10
+  return ACTIVITY_KIND_RANK[r.type] ?? 11
 }
 
 // Pair rows that belong together by ADJACENCY rather than by a shared key, when the
@@ -17121,7 +17209,7 @@ async function getRecentMoneyMarket(limit: number, from?: string, to?: string, o
                   AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
                   AND user_address NOT LIKE '0x6d6f646c%'
                   ${mmMarketPoolSql(filters.market)}
-                  ${mmStakingPlumbingExclusionSql()}
+                  ${mmStakingPlumbingExclusionSql()} ${mmJuicerPlumbingExclusionSql()}
                   ${reserveFilter}
                   ${amountFilter.predicateSql}
                 ORDER BY block_height DESC, event_index DESC LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
@@ -17636,6 +17724,270 @@ async function getRecentBonds(limit: number, from?: string, to?: string, account
     const raw = acctList ? await run(bound, limit, offset) : await withFeedWindow(tw, limit, offset + limit, b => run(b, limit, offset))
     return (await build(raw)).filter(r => activityRowMatchesFilters(r, filters))
   })
+}
+
+// Juicer (deposit / withdraw / unwind / settle / claim / harvest / rebalance / lever)
+// The strategy vaults' own logs (juicer_logs, 018_juicer.sql), decoded by
+// services/juicer.ts. The table holds a few rows per day, so every surface builds
+// from ONE read of all of it, keyed on the table's own change mark: the rows, the
+// request owners an unwind, a settlement or a claim names only through its request,
+// and the same-extrinsic context a row carries (a request's eligibility, a
+// rebalance's HOLLAR into the loop, a harvest's fee) — then filters, pages and values
+// in memory. Exact by construction: nothing is limited before a filter.
+//
+// Attribution (juicerPartyAccounts, the one rule the dashboard uses too): the chain
+// names a user by H160. It is the Substrate account whose first 20 bytes it is when
+// that account signed one of the user's own acts (an app deposit through the EVM
+// pallet) or is the anchor the share token's wallet balances are filed under
+// (erc20_wallet_balances), else the H160's own account. A request's unwind,
+// settlements and claims are BY its owner — a keeper usually signs them, and a claim
+// names its receiver, which the row carries as `to`. A keeper's Harvest / Rebalance is
+// BY the vault, the loop's Lever / Unlever / Delever by the SubLoop. A Juicer
+// contract's page is its venue (poolVenueOf's rule): a vault lists every row of that
+// vault, the SubLoop its loop's.
+//
+// Plumbing: the Juicer contracts' own money-market legs are what these rows ARE, so
+// they are excluded at every mm read (mmJuicerPlumbingExclusionSql); a Juicer row owns
+// only the transfer legs a Juicer contract is a party to (juicerOwnsTransfer — a
+// batch's unrelated send stays a send), and the contracts are ERC-20 venues
+// (erc20VenueH160s), so such a leg is never a free send.
+const JUICER_ROW_ACTIONS = Object.entries(JUICER_ACTION_TOPIC) as [JuicerAction, (typeof JUICER_ACTION_TOPIC)[JuicerAction]][]
+function juicerActionOf(e: JuicerEvent): JuicerAction | null {
+  if (e.name === 'IntentSubmitted') return e.contract === JUICER_SUBLOOP ? (e.intentKind === LOOP_INTENT_ENTRY ? 'Lever' : 'Unlever') : null
+  for (const [action, def] of JUICER_ROW_ACTIONS) {
+    if (def.topic !== JUICER_TOPIC[e.name]) continue
+    const vault = juicerVaultByAddress(e.contract)
+    if (def.contract === 'vault' && vault?.vault === e.contract) return action
+    if (def.contract === 'mainDebt' && vault?.mainDebt === e.contract) return action
+    if (def.contract === 'subloop' && e.contract === JUICER_SUBLOOP) return action
+  }
+  return null
+}
+/** The action a feed `action` value names (a `juicer-*` slug or the action itself). */
+export function resolveJuicerAction(action?: string): JuicerAction | null | undefined {
+  if (!action) return undefined
+  return JUICER_ACTION_SLUGS[action] ?? (JUICER_ROW_ACTIONS.some(([a]) => a === action) ? action as JuicerAction : null)
+}
+// The H160 forms an account scope answers to on Juicer logs (each member's
+// money-market identity: its ETH-form or its first 20 bytes).
+function juicerScopeH160s(accounts: readonly string[]): Set<string> {
+  const out = new Set<string>()
+  for (const a of accounts) { const h = mmH160ForAccount(a.toLowerCase()); if (h) out.add(h.toLowerCase()) }
+  return out
+}
+// The venue a Juicer contract's own scope lists: a vault's rows (its MainDebt's too), the SubLoop's loop rows.
+function juicerVenueMatches(row: ActivityRow, h160s: ReadonlySet<string>): boolean {
+  const vault = row.juicerVault ? evmFromAccountId(row.juicerVault.accountId) ?? row.juicerVault.address : null
+  if (vault && h160s.has(vault.toLowerCase())) return true
+  return (row.juicerAction === 'Delever' || row.juicerAction === 'Lever' || row.juicerAction === 'Unlever') && h160s.has(JUICER_SUBLOOP)
+}
+const JUICER_CONTRACT_ACCOUNTS = new Set(JUICER_CONTRACTS.map(h => accountIdFromH160(h)!))
+/** Whether a transfer leg is a Juicer row's settlement: a Juicer contract is a party to it. */
+export function juicerOwnsTransfer(from: AccountRef | string | null | undefined, to: AccountRef | string | null | undefined): boolean {
+  const id = (a: AccountRef | string | null | undefined) => (typeof a === 'string' ? a : a?.accountId ?? '').toLowerCase()
+  return JUICER_CONTRACT_ACCOUNTS.has(id(from)) || JUICER_CONTRACT_ACCOUNTS.has(id(to))
+}
+/** The same test over a transfer candidate's account-id columns. */
+export function juicerOwnsTransferSql(fromColumn: string, toColumn: string): string {
+  const list = [...JUICER_CONTRACT_ACCOUNTS].map(a => `'${a}'`).join(',')
+  return `(lower(${fromColumn}) IN (${list}) OR lower(${toColumn}) IN (${list}))`
+}
+interface JuicerBuiltRow { row: ActivityRow; party: string | null }
+// juicer_logs' own change mark: rows and newest ingest. The rows are rebuilt when it
+// moves, never per head (a quiet table keeps its build).
+async function juicerLogsMark(): Promise<string> {
+  return cached('explorer:juicer-logs-mark', 2_000, async () => {
+    const [r] = await (await client.query({ query: `SELECT concat(toString(count()), ':', toString(max(ingested_at))) AS m FROM price_data.juicer_logs`, format: 'JSONEachRow' })).json<{ m: string }>()
+    return r?.m ?? ''
+  })
+}
+async function juicerLogsAll(): Promise<JuicerLogRow[]> {
+  const res = await client.query({
+    query: `SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, contract_address, topic0, topics, data
+            FROM price_data.juicer_logs FINAL
+            ORDER BY block_height, event_index`,
+    format: 'JSONEachRow',
+  })
+  return res.json<JuicerLogRow>()
+}
+/**
+ * The account each Juicer user H160 is shown under (the attribution rule above), for
+ * the parties the logs name. The activity rows and the dashboard both read it.
+ */
+// Keyed by juicer_logs' watermark, so a new log is a new key at once; the TTL only
+// bounds how long a row priced before its event-time candle existed keeps no value.
+const JUICER_ROWS_TTL_MS = 10 * 60_000
+export async function juicerPartyAccounts(): Promise<Map<string, string>> {
+  return cached(`explorer:juicer-parties:${await juicerLogsMark()}`, JUICER_ROWS_TTL_MS, async () => {
+    const events = (await juicerLogsAll()).map(decodeJuicerLog).filter((e): e is JuicerEvent => e != null)
+    const parties = new Set(events.flatMap(e => (e.party ? [e.party] : [])))
+    const own = events.filter(e => e.party && (e.name === 'Deposited' || e.name === 'RedeemRequested' || e.name === 'SurplusClaimed'))
+    const signers = await signersFor(own.map(e => [e.blockHeight, e.extrinsicIndex]))
+    const out = new Map<string, string>()
+    for (const e of own) {
+      const s = signers.get(`${e.blockHeight}:${e.extrinsicIndex}`)
+      if (s && ACCOUNT_RE.test(s) && !evmFromAccountId(s) && mmH160ForAccount(s) === e.party) out.set(e.party!, s)
+    }
+    const shareIds = JUICER_VAULTS.map(v => String(v.shareAssetId))
+    const anchors = await (await client.query({
+      query: `SELECT DISTINCT account_id FROM price_data.erc20_wallet_balances FINAL WHERE asset_id IN {ids:Array(String)}`,
+      query_params: { ids: shareIds }, format: 'JSONEachRow',
+    })).json<{ account_id: string }>()
+    for (const { account_id: a } of anchors) {
+      const id = a.toLowerCase()
+      if (!ACCOUNT_RE.test(id) || evmFromAccountId(id)) continue
+      const h = '0x' + id.slice(2, 42)
+      if (parties.has(h) && !out.has(h)) out.set(h, id)
+    }
+    for (const h of parties) if (!out.has(h)) out.set(h, accountIdFromH160(h) ?? h)
+    return out
+  })
+}
+/**
+ * Every Juicer activity row, newest first, valued at CURRENT prices (callers that
+ * show values re-value at event time through applyHistoricalUsd). One build per
+ * change of juicer_logs.
+ */
+async function juicerRowsAll(): Promise<JuicerBuiltRow[]> {
+  return cached(`explorer:juicer-rows:${await juicerLogsMark()}`, JUICER_ROWS_TTL_MS, async () => {
+    const [prices, parties] = await Promise.all([ensurePrices(), juicerPartyAccounts()])
+    const events = (await juicerLogsAll()).map(decodeJuicerLog).filter((e): e is JuicerEvent => e != null)
+    const key = (contract: string, id: number | undefined) => `${contract}:${id ?? ''}`
+    const ext = (e: { blockHeight: number; extrinsicIndex: number | null }) => `${e.blockHeight}:${e.extrinsicIndex ?? ''}`
+    const owners = new Map<string, string>()
+    const eligible = new Map<string, number>()
+    const loopIn = new Map<string, bigint>()
+    const harvestFee = new Map<string, bigint>()
+    for (const e of events) {
+      if (e.name === 'RedeemRequested' && e.party) owners.set(key(e.contract, e.requestId), e.party)
+      else if (e.name === 'UnwindScheduled' && e.eligibleAt != null) eligible.set(key(e.contract, e.requestId), e.eligibleAt)
+      else if (e.name === 'LoopDeposited' && e.vault && e.hollar) {
+        const k = `${ext(e)}:${e.vault}`
+        loopIn.set(k, (loopIn.get(k) ?? 0n) + BigInt(e.hollar))
+      } else if (e.name === 'ProtocolFeeAccrued' && e.vault && e.fee) {
+        const k = `${ext(e)}:${e.vault}`
+        harvestFee.set(k, (harvestFee.get(k) ?? 0n) + BigInt(e.fee))
+      }
+    }
+    const accountOf = (h: string) => accountRef(parties.get(h) ?? accountIdFromH160(h) ?? h)
+    const out: JuicerBuiltRow[] = []
+    for (const e of events) {
+      const action = juicerActionOf(e)
+      if (!action) continue
+      const vault = juicerVaultByAddress(e.contract) ?? JUICER_VAULTS.find(v => v.vault === e.vault) ?? null
+      // The request's owner for every act on a request; the log's own user otherwise.
+      const owner = action === 'Unwind' || action === 'Settle' || action === 'Claim' ? owners.get(key(e.contract, e.requestId)) ?? null : null
+      const party = owner ?? e.party ?? null
+      const loopRow = action === 'Delever' || action === 'Lever' || action === 'Unlever'
+      const who = party ? accountOf(party)
+        : loopRow ? accountRef(accountIdFromH160(JUICER_SUBLOOP)!)
+        : vault ? accountRef(accountIdFromH160(vault.vault)!) : null
+      const collateral = vault ? asset(vault.collateralAssetId) : null
+      const share = vault ? asset(vault.shareAssetId) : null
+      let rowAsset: AssetRef | null = null
+      let amount: string | null = null
+      if (action === 'Deposit') { rowAsset = collateral; amount = e.assets ?? null }
+      else if (action === 'Withdraw') { rowAsset = share; amount = e.shares ?? null }
+      else if (action === 'Unwind' || action === 'Settle' || action === 'Claim' || action === 'Harvest') { rowAsset = collateral; amount = e.collateral ?? null }
+      else if (action === 'ClaimSurplus') { rowAsset = asset(JUICER_HOLLAR_ASSET_ID); amount = e.hollar ?? null }
+      else if (action === 'Rebalance' && vault) {
+        const h = loopIn.get(`${ext(e)}:${vault.vault}`)
+        if (h != null && h > 0n) { rowAsset = asset(JUICER_HOLLAR_ASSET_ID); amount = h.toString() }
+      } else if (action === 'Lever' || action === 'Unlever') {
+        rowAsset = asset(action === 'Lever' ? JUICER_HOLLAR_ASSET_ID : PRIME_ASSET_ID); amount = e.amount ?? null
+      }
+      const eligibleAt = action === 'Withdraw' ? eligible.get(key(e.contract, e.requestId)) : undefined
+      const fee = action === 'Harvest' && vault ? harvestFee.get(`${ext(e)}:${vault.vault}`) : undefined
+      const row: ActivityRow = {
+        type: 'juicer', blockHeight: e.blockHeight, timestamp: e.timestamp, eventIndex: e.eventIndex, extrinsicIndex: e.extrinsicIndex,
+        who, to: action === 'Claim' && e.party && e.party !== party ? accountOf(e.party) : null,
+        asset: rowAsset, assetIn: null, assetOut: null,
+        amount, amountIn: null, amountOut: null,
+        valueUsd: rowAsset && amount != null && action !== 'Withdraw' ? usdValue(prices, rowAsset.assetId, amount, rowAsset.decimals) : null,
+        ...(vault ? { assetRefs: [vault.shareAssetId, vault.collateralAssetId] } : loopRow ? { assetRefs: [JUICER_HOLLAR_ASSET_ID, PRIME_ASSET_ID] } : {}),
+        juicerAction: action,
+        ...(vault ? { juicerVault: accountRef(accountIdFromH160(vault.vault)!), juicerShareAsset: share! } : {}),
+        juicerShares: action === 'Deposit' || action === 'Withdraw' ? e.shares ?? null : null,
+        juicerRequestId: action === 'Lever' || action === 'Unlever' ? null : e.requestId ?? null,
+        ...(action === 'Withdraw' ? { juicerEligibleAt: eligibleAt != null ? new Date(eligibleAt * 1000).toISOString() : null } : {}),
+        ...(action === 'Rebalance' ? { juicerLtvBefore: e.ltvBefore ?? null, juicerLtvAfter: e.ltvAfter ?? null } : {}),
+        ...(action === 'Harvest' ? { juicerFee: fee != null ? fee.toString() : null } : {}),
+        ...(action === 'Lever' || action === 'Unlever' ? {
+          juicerIntentNonce: e.intentNonce ?? null, juicerMinOut: e.minOut ?? null,
+          juicerOutAsset: asset(action === 'Lever' ? PRIME_ASSET_ID : JUICER_HOLLAR_ASSET_ID),
+        } : {}),
+        linkBlock: e.blockHeight, linkIndex: e.extrinsicIndex,
+      }
+      out.push({ row, party })
+    }
+    return out.sort((a, b) => b.row.blockHeight - a.row.blockHeight || (b.row.eventIndex ?? 0) - (a.row.eventIndex ?? 0))
+  })
+}
+/** Juicer rows a scope sees: the whole feed, or an account set's own rows and its contracts' venue rows. */
+function juicerRowsInScope(all: JuicerBuiltRow[], accounts?: readonly string[]): ActivityRow[] {
+  if (!accounts) return all.map(x => x.row)
+  const h160s = juicerScopeH160s(accounts)
+  return all.filter(x => (x.party != null && h160s.has(x.party)) || juicerVenueMatches(x.row, h160s)).map(x => x.row)
+}
+/** The Juicer rows of one extrinsic (the block and extrinsic pages). */
+async function juicerRowsAt(height: number, extrinsicIndex: number): Promise<ActivityRow[]> {
+  const all = await juicerRowsAll()
+  const rows = all.filter(x => x.row.blockHeight === height && x.row.extrinsicIndex === extrinsicIndex).map(x => ({ ...x.row }))
+  await applyHistoricalUsd(rows, activityHistPick)
+  return rows
+}
+// The candidate rows of a feed request, before paging.
+async function juicerCandidates(from?: string, to?: string, accounts?: string[], assetId?: number, action?: string): Promise<ActivityRow[] | null> {
+  const wanted = resolveJuicerAction(action)
+  if (wanted === null) return null
+  const inWindow = timeWindowMatcher(from, to)
+  // An asset page reaches the rows of the shares displayed under it (GETH's, 2-Pool-GETH's).
+  const assetIds = assetId == null ? null : new Set(idsDisplayedAs(assetId))
+  return juicerRowsInScope(await juicerRowsAll(), accounts)
+    .filter(r => inWindow(r.timestamp) && (wanted == null || r.juicerAction === wanted)
+      && (assetIds == null || [r.asset?.assetId, ...(r.assetRefs ?? [])].some(id => id != null && assetIds.has(id))))
+    .map(r => ({ ...r }))
+}
+// Windowed Juicer feed, the getRecentBonds contract: newest first, `offset`/`limit`
+// over the rows that pass every filter, valued at event time.
+async function getRecentJuicer(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}, assetId?: number, action?: string): Promise<ActivityRow[]> {
+  let rows = await juicerCandidates(from, to, accounts, assetId, action)
+  if (!rows) return []
+  // A value floor is judged at event time, so the candidates are valued before they
+  // are filtered; otherwise only the page is.
+  if (filters.min != null || filters.minRevenue != null) {
+    await applyHistoricalUsd(rows, activityHistPick)
+    rows = rows.filter(r => activityRowMatchesFilters(r, filters))
+    return rows.slice(offset, offset + limit)
+  }
+  rows = rows.filter(r => activityRowMatchesFilters(r, filters)).slice(offset, offset + limit)
+  await applyHistoricalUsd(rows, activityHistPick)
+  return rows
+}
+/** The exact length of the chain-wide Juicer feed under filters the rows alone decide (no value floor). */
+export async function juicerFeedTotal(from?: string, to?: string, filters: ValueListFilters = {}, action?: string): Promise<number | null> {
+  if (filters.min != null || filters.minRevenue != null) return null
+  const rows = await juicerCandidates(from, to, undefined, undefined, action)
+  return rows ? rows.filter(r => activityRowMatchesFilters(r, filters)).length : 0
+}
+/** Every Juicer row with its owner's H160, valued at event time — the dashboard's input. */
+export async function juicerRowsValued(): Promise<Array<{ row: ActivityRow; party: string | null }>> {
+  return cached(`explorer:juicer-rows-valued:${await juicerLogsMark()}`, JUICER_ROWS_TTL_MS, async () => {
+    const all = (await juicerRowsAll()).map(x => ({ row: { ...x.row }, party: x.party }))
+    await applyHistoricalUsd(all.map(x => x.row), activityHistPick)
+    return all
+  })
+}
+/** The extrinsics holding a Juicer row, among (block, extrinsic) pairs — the partial owner set of the transfer-only paths. */
+async function juicerExtrinsicsAmong(pairs: Array<[number, number | null]>): Promise<Set<string>> {
+  const want = new Set(pairs.filter(([, i]) => i != null).map(([h, i]) => `${h}:${i}`))
+  const out = new Set<string>()
+  if (!want.size) return out
+  for (const { row } of await juicerRowsAll()) {
+    const k = `${row.blockHeight}:${row.extrinsicIndex}`
+    if (want.has(k)) out.add(k)
+  }
+  return out
 }
 
 // OTC (place / pull / fill)
@@ -19416,6 +19768,8 @@ export function suppressSubordinateActivityRows<T extends ActivityRow>(rows: T[]
   // Extrinsics a money-market action is in, which own only some of their transfers
   // (see isMoneyMarketActionRow).
   const moneyMarketByExtrinsic = new Set<string>()
+  // Extrinsics a Juicer act is in, which own only the legs a Juicer contract is a party to.
+  const juicerByExtrinsic = new Set<string>()
   const semanticHookAccounts = new Map<number, Set<string>>()
   // Extrinsics whose message left through the xcm executor. A swap in one of those bought the
   // send its delivery fee — the SDK builds every fee-bearing bridge as
@@ -19444,6 +19798,7 @@ export function suppressSubordinateActivityRows<T extends ActivityRow>(rows: T[]
     if (row.type === 'transfer') continue
     if (row.extrinsicIndex != null) {
       if (isMoneyMarketActionRow(row)) moneyMarketByExtrinsic.add(`${row.blockHeight}:${row.extrinsicIndex}`)
+      else if (row.type === 'juicer') juicerByExtrinsic.add(`${row.blockHeight}:${row.extrinsicIndex}`)
       else semanticByExtrinsic.add(`${row.blockHeight}:${row.extrinsicIndex}`)
       continue
     }
@@ -19480,6 +19835,7 @@ export function suppressSubordinateActivityRows<T extends ActivityRow>(rows: T[]
     if (row.extrinsicIndex != null) {
       const key = `${row.blockHeight}:${row.extrinsicIndex}`
       if (semanticByExtrinsic.has(key)) return false
+      if (juicerByExtrinsic.has(key) && juicerOwnsTransfer(row.who, row.to)) return false
       return !(moneyMarketByExtrinsic.has(key) && moneyMarketOwnsTransfer(row.who, row.to, row.erc20Log))
     }
     const owners = semanticHookAccounts.get(row.blockHeight)
@@ -19747,6 +20103,12 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
     }
   }
 
+  // A Juicer act owns the legs of its extrinsic a Juicer contract is a party to; its
+  // evidence is the contracts' own logs (juicer_logs), not a pallet event.
+  const juicerExtrinsics = signedKeys.length
+    ? await juicerExtrinsicsAmong(signedKeys.map(k => { const [h, i] = k.split(':'); return [Number(h), Number(i)] as [number, number] }))
+    : new Set<string>()
+
   // Incentive claims own their reward-pot transfer even though the semantic
   // evidence lives in the compact call model rather than an event.
   const incentiveKeys = transfers
@@ -19774,6 +20136,7 @@ async function suppressTransferCandidates(transfers: TransferRow[]): Promise<Tra
     if (row.extrinsicIndex != null) {
       const key = `${row.blockHeight}:${row.extrinsicIndex}`
       if (semanticExtrinsics.has(key)) return false
+      if (juicerExtrinsics.has(key) && juicerOwnsTransfer(row.from, row.to)) return false
       return !(moneyMarketExtrinsics.has(key) && moneyMarketOwnsTransfer(row.from, row.to, row.erc20Log))
     }
     const owners = hookAccounts.get(row.blockHeight)
@@ -20051,6 +20414,7 @@ export function activityRowMatchesAction(r: ActivityRow, action?: string): boole
     case 'mm': return r.mmAction === action
     case 'staking': return r.stakingAction === action
     case 'bond': return r.bondAction === action
+    case 'juicer': return r.juicerAction != null && r.juicerAction === resolveJuicerAction(action)
     case 'intent': {
       // The Trade chip's DCA filter keeps showing DCA activity after the DCA →
       // intent migration: a DCA intent's trade is what an old schedule's execution was.
@@ -20685,10 +21049,10 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     let sourceFilters = sourceValueFiltered
       ? filters
       : deferredValueFilter ? { ...filters, min: undefined, unit: undefined } : filters
-    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'xcmExecuted' | 'nttOut' | 'nttIn' | 'staking' | 'bond' | 'intent' | 'xcswap' | 'vote' | 'v3Trade' | 'v3Liquidity' | 'hsmTrade'
+    type ClassifiedSourceKey = 'transfer' | 'trade' | 'dca' | 'reward' | 'liquidity' | 'mm' | 'otc' | 'xcm' | 'xcmIn' | 'xcmOutRemote' | 'xcmExecuted' | 'nttOut' | 'nttIn' | 'staking' | 'bond' | 'juicer' | 'intent' | 'xcswap' | 'vote' | 'v3Trade' | 'v3Liquidity' | 'hsmTrade'
     const classifiedSourceKeys: ClassifiedSourceKey[] = [
       'transfer', 'trade', 'dca', 'reward', 'liquidity', 'mm', 'otc',
-      'xcm', 'xcmIn', 'xcmOutRemote', 'xcmExecuted', 'nttOut', 'nttIn', 'staking', 'bond', 'intent', 'xcswap', 'vote', 'v3Trade', 'v3Liquidity', 'hsmTrade',
+      'xcm', 'xcmIn', 'xcmOutRemote', 'xcmExecuted', 'nttOut', 'nttIn', 'staking', 'bond', 'juicer', 'intent', 'xcswap', 'vote', 'v3Trade', 'v3Liquidity', 'hsmTrade',
     ]
     const exactSeedSize = activitySourceSeedSize(want)
     const exactSourceLimits = Object.fromEntries(classifiedSourceKeys.map(key => [key, sourceValueFiltered ? exactSeedSize : fetchN])) as Record<ClassifiedSourceKey, number>
@@ -20707,7 +21071,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       })
     }
     for (;;) {
-      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, staking, bonds, intents, xcswaps, votes, v3Trades, v3Liquidity, hsmTrades] = await Promise.all([
+      const [transfers, trades, dcaFailures, rewards, liquidity, mm, otc, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, staking, bonds, juicers, intents, xcswaps, votes, v3Trades, v3Liquidity, hsmTrades] = await Promise.all([
         needsFullClassification
           ? loadClassifiedSource('transfer', (sourceLimit, sourceFrom) => getRecentTransfers(sourceLimit, sourceFrom, to, 0, true, sourceFilters))
           : Promise.resolve([]),
@@ -20752,6 +21116,9 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
           : Promise.resolve([]),
         needsFullClassification
           ? loadClassifiedSource('bond', (sourceLimit, sourceFrom) => getRecentBonds(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
+          : Promise.resolve([]),
+        needsFullClassification
+          ? loadClassifiedSource('juicer', (sourceLimit, sourceFrom) => getRecentJuicer(sourceLimit, sourceFrom, to, undefined, 0, sourceFilters))
           : Promise.resolve([]),
         // Intents fold under the trade family like otc, so they are read for the trade
         // tab as well as under full classification.
@@ -20798,6 +21165,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       const userV3Trades = v3Trades.filter(r => !(r.extrinsicIndex != null && tradeExtrinsics.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
       const stakingExtrinsics = activityExtrinsicSet(staking)
       const bondExtrinsics = activityExtrinsicSet(bonds)
+      const juicerExtrinsics = activityExtrinsicSet(juicers)
       const intentExtrinsics = activityExtrinsicSet(intents)
       const mmExtrinsics = activityExtrinsicSet(mm.filter(isMoneyMarketActionRow))
       const otcExtrinsics = activityExtrinsicSet(otc)
@@ -20806,6 +21174,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+        !(t.extrinsicIndex != null && juicerExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`) && juicerOwnsTransfer(t.from, t.to)) &&
         !(t.extrinsicIndex != null && intentExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
         // A money-market action owns only some of its extrinsic's legs (isMoneyMarketActionRow).
         !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`) && moneyMarketOwnsTransfer(t.from, t.to, t.erc20Log)) &&
@@ -20833,6 +21202,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
         { key: 'liquidity', fetchSize: sourceFetchSize('liquidity'), rawSize: liquidity.length, rows: liquidity, oldest: oldestOf(liquidity) },
         { key: 'staking', fetchSize: sourceFetchSize('staking'), rawSize: staking.length, rows: staking, oldest: oldestOf(staking) },
         { key: 'bond', fetchSize: sourceFetchSize('bond'), rawSize: bonds.length, rows: bonds, oldest: oldestOf(bonds) },
+        { key: 'juicer', fetchSize: sourceFetchSize('juicer'), rawSize: juicers.length, rows: juicers, oldest: oldestOf(juicers) },
         { key: 'intent', fetchSize: sourceFetchSize('intent'), rawSize: intents.length, rows: intents, oldest: oldestOf(intents) },
         { key: 'xcswap', fetchSize: sourceFetchSize('xcswap'), rawSize: xcswaps.length, rows: xcswaps, oldest: oldestOf(xcswaps) },
         { key: 'v3Trade', fetchSize: sourceFetchSize('v3Trade'), rawSize: v3Trades.length, rows: userV3Trades, oldest: oldestOf(v3Trades) },
@@ -20933,6 +21303,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentXcmExecuted(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
     else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
     else if (type === 'bond') rows = await getRecentBonds(fetchN, from, to, undefined, 0, filters, undefined, action)
+    else if (type === 'juicer') rows = await getRecentJuicer(fetchN, from, to, undefined, 0, filters, undefined, action)
     else if (type === 'intent') rows = await getRecentIntents(fetchN, from, to, undefined, 0, filters, undefined, action)
     // The only action a cross-chain swap admits is `xcswap` itself, which every row
     // in the family satisfies (activityRowMatchesAction), so the source carries the
@@ -20953,6 +21324,8 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     rows = await getRecentStaking(limit, from, to, undefined, offset, filters)
   } else if (type === 'bond') {
     rows = await getRecentBonds(limit, from, to, undefined, offset, filters)
+  } else if (type === 'juicer') {
+    rows = await getRecentJuicer(limit, from, to, undefined, offset, filters)
   } else if (type === 'intent') {
     rows = await getRecentIntents(limit, from, to, undefined, offset, filters)
   } else if (type === 'xcswap') {
@@ -21023,6 +21396,13 @@ export async function getGlobalActivityTotal(
   from?: string,
   to?: string,
 ): Promise<ScopedListTotal> {
+  // The Juicer feed IS its rows (getRecentJuicer reads the whole table, nothing removes
+  // one), so it counts exactly under any filter its rows decide; a value floor, valued
+  // at event time, is the one it leaves to the pager.
+  if (normalizeActivityTypeKey(type) === 'juicer') {
+    const total = await juicerFeedTotal(from, to, filters, action)
+    return total == null ? { total: null, complete: false } : { total, complete: true }
+  }
   if (normalizeActivityTypeKey(type) !== 'vote' || action) return { total: null, complete: false }
   // The identity filter is decided on the built row's actor, which this count
   // cannot see: it counts vote EVENTS in SQL. Reporting the unfiltered total
@@ -22340,7 +22720,7 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
                   AND event_index IN (${eventIndices})
                   AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
                   AND event_name IN ('Supply','Borrow','Repay','Withdraw','LiquidationCall')
-                  ${mmStakingPlumbingExclusionSql()}`,
+                  ${mmStakingPlumbingExclusionSql()} ${mmJuicerPlumbingExclusionSql()}`,
         query_params: { h: height },
         format: 'JSONEachRow',
       })
@@ -22443,6 +22823,9 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
     // the page showed the Router sell that funded the order and the NTT send that
     // carried it while the order itself was absent. Both of those then fold into it.
     rows.push(...await xcswapRowsAt(height, index))
+    // A Juicer vault's acts are EVM logs too (juicer_logs); their money-market legs are
+    // left out at the mm read above, and their transfer legs fold into them below.
+    rows.push(...await juicerRowsAt(height, index))
 
     const seen = new Set<string>()
     // The extrinsic page shows how a solution executed, so the pot's settlement trades stay.
@@ -22451,7 +22834,7 @@ export async function getExtrinsicActivity(height: number, index: number, opts: 
     // collapse, while `batch_all([transfer(B,100 HDX), transfer(B,100 HDX)])` stays two
     // rows instead of rendering 200 HDX as one.
     const deduped = await suppressActivityPlumbing(rows.filter(r => {
-      const key = `${r.type}:${r.blockHeight}:${r.extrinsicIndex ?? ''}:${r.eventIndex ?? ''}:${r.asset?.assetId ?? r.assetIn?.assetId ?? ''}:${r.assetOut?.assetId ?? ''}:${r.who?.accountId ?? ''}:${r.to?.accountId ?? ''}:${r.amount ?? r.amountIn ?? ''}:${r.amountOut ?? ''}:${r.voteRef ?? ''}:${r.mmAction ?? r.stakingAction ?? r.liqAction ?? ''}`
+      const key = `${r.type}:${r.blockHeight}:${r.extrinsicIndex ?? ''}:${r.eventIndex ?? ''}:${r.asset?.assetId ?? r.assetIn?.assetId ?? ''}:${r.assetOut?.assetId ?? ''}:${r.who?.accountId ?? ''}:${r.to?.accountId ?? ''}:${r.amount ?? r.amountIn ?? ''}:${r.amountOut ?? ''}:${r.voteRef ?? ''}:${r.mmAction ?? r.stakingAction ?? r.liqAction ?? r.juicerAction ?? ''}`
       if (seen.has(key)) return false
       seen.add(key)
       return true
@@ -22626,7 +23009,7 @@ async function getBlockHookActivity(height: number): Promise<ActivityRow[]> {
                 AND event_name IN ('Supply','Borrow','Repay','Withdraw','LiquidationCall')
                 AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
                 AND user_address NOT LIKE '0x6d6f646c%'
-                ${mmStakingPlumbingExclusionSql()}
+                ${mmStakingPlumbingExclusionSql()} ${mmJuicerPlumbingExclusionSql()}
               ORDER BY event_index`,
       query_params: { h: height },
       format: 'JSONEachRow',
@@ -23404,6 +23787,7 @@ async function assetActivityRows(assetId: number, type: string, want: number, ac
   const wantOtc = type === 'all' || type === 'otc' || wantTrades
   const wantStaking = type === 'all' || type === 'staking' || wantTransfers
   const wantBonds = type === 'all' || type === 'bond' || wantTransfers
+  const wantJuicer = type === 'all' || type === 'juicer' || wantTransfers
   // intent folds under the trade chip/type like otc — fetched whenever trade is,
   // plus its own `type=intent` request and the Trade tab's intent actions.
   const wantIntents = !xcswapOnly && (type === 'all' || type === 'intent' || wantTrades || intentOnly)
@@ -23789,7 +24173,7 @@ async function assetActivityRows(assetId: number, type: string, want: number, ac
                 AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
                 AND lower(ifNull(asset_address, '')) IN ({reserves:Array(String)})
                 ${mmMarketPoolSql(filters.market)}
-                ${mmStakingPlumbingExclusionSql()}
+                ${mmStakingPlumbingExclusionSql()} ${mmJuicerPlumbingExclusionSql()}
                 ${mmValueFilter.predicateSql}
               ORDER BY block_height DESC, event_index DESC LIMIT {n:UInt32}`,
       query_params: { n: limit, assetId, reserves: reserveAddrs }, format: 'JSONEachRow',
@@ -23860,6 +24244,8 @@ async function assetActivityRows(assetId: number, type: string, want: number, ac
   // A bond row is reached from the bond's own page and from its underlying's
   // (getRecentBonds admits either id).
   const bondsP: Promise<ActivityRow[]> = wantBonds ? getRecentBonds(fetchN, sourceFrom, sourceTo, undefined, 0, queryFilters, assetId).then(aboveRows) : Promise.resolve([])
+  // A Juicer row is reached from its collateral's page and its share token's (jETH).
+  const juicerP: Promise<ActivityRow[]> = wantJuicer ? getRecentJuicer(fetchN, sourceFrom, sourceTo, undefined, 0, queryFilters, assetId, type === 'juicer' ? action : undefined).then(aboveRows) : Promise.resolve([])
   // An intent row is reached from either side of its order's pair (getRecentIntents
   // admits the asset as assetIn or assetOut). An intent-only request pushes its
   // action into the read, so the one source it has cannot saturate on rows the
@@ -23885,12 +24271,13 @@ async function assetActivityRows(assetId: number, type: string, want: number, ac
     ? getVoteFeedRows(fetchN, sourceFrom, sourceTo, 0, queryFilters, collectiveVotesAdmitted(queryFilters)).then(rows => aboveRows(rows.map(voteActivityRow)))
     : Promise.resolve([])
 
-  const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, bonds, intents, xcswaps, votes, v3Trades, v3Liquidity, hsmTrades] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, bondsP, intentsP, xcswapsP, votesP, v3TradesP, v3LiquidityP, hsmTradesP])
+  const [transfers, trades, dcaFailures, rewards, liquidity, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, staking, bonds, juicers, intents, xcswaps, votes, v3Trades, v3Liquidity, hsmTrades] = await Promise.all([transfersP, tradesP, dcaFailuresP, rewardsP, liquidityP, xcmP, xcmInP, xcmOutRemoteP, xcmExecutedP, nttOutP, nttInP, mmP, otcP, stakingP, bondsP, juicerP, intentsP, xcswapsP, votesP, v3TradesP, v3LiquidityP, hsmTradesP])
   // Drop transfer legs of the asset's own trades (hops/fee legs share the extrinsic).
   const tradeExtrinsics = new Set([...trades, ...hsmTrades].filter(t => t.extrinsicIndex != null).map(t => `${t.blockHeight}:${t.extrinsicIndex}`))
   const userV3Trades = v3Trades.filter(r => !(r.extrinsicIndex != null && tradeExtrinsics.has(`${r.blockHeight}:${r.extrinsicIndex}`)))
   const stakingExtrinsics = activityExtrinsicSet(staking)
   const bondExtrinsics = activityExtrinsicSet(bonds)
+  const juicerExtrinsics = activityExtrinsicSet(juicers)
   const intentExtrinsics = activityExtrinsicSet(intents)
   const mmExtrinsics = activityExtrinsicSet(mm.filter(isMoneyMarketActionRow))
   const otcExtrinsics = activityExtrinsicSet(otc)
@@ -23902,13 +24289,14 @@ async function assetActivityRows(assetId: number, type: string, want: number, ac
     !(t.extrinsicIndex != null && tradeExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
     !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
     !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+    !(t.extrinsicIndex != null && juicerExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`) && juicerOwnsTransfer(t.who, t.to)) &&
     !(t.extrinsicIndex != null && intentExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
     // A money-market action owns only some of its extrinsic's legs (isMoneyMarketActionRow).
     !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`) && moneyMarketOwnsTransfer(t.who, t.to, t.erc20Log)) &&
     !(t.extrinsicIndex != null && otcExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`))))
   const userTrades = dropShareRoutedTrades(trades, activityExtrinsicSet(liquidity))
   const userMm = mm.filter(r => !isModuleAcct(r.who))
-  let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc, ...intents, ...xcswaps, ...userV3Trades, ...v3Liquidity, ...hsmTrades], { assetId }))
+  let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...juicers, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc, ...intents, ...xcswaps, ...userV3Trades, ...v3Liquidity, ...hsmTrades], { assetId }))
     .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
   if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
   rows = rows.filter(r => activityRowMatchesAction(r, action))
@@ -23917,7 +24305,7 @@ async function assetActivityRows(assetId: number, type: string, want: number, ac
   if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
   rows = rows.filter(r => activityRowMatchesFilters(r, { ...filters, token: undefined }))
   rows.sort(compareActivityRowsNewestFirst)
-  const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, bonds, intents, xcswaps, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, v3Trades, v3Liquidity, hsmTrades]
+  const saturationSources = type === 'all' ? [transfers, trades, dcaFailures, rewards, liquidity, staking, bonds, juicers, intents, xcswaps, votes, xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn, mm, otc, v3Trades, v3Liquidity, hsmTrades]
     : type === 'transfer' ? [transfers]
       : type === 'trade' ? [trades, dcaFailures, otc, intents, v3Trades, hsmTrades]
         : type === 'liquidity' ? [liquidity, rewards, v3Liquidity]
@@ -23926,6 +24314,7 @@ async function assetActivityRows(assetId: number, type: string, want: number, ac
               : type === 'xcm' ? [xcm, xcmIn, xcmOutRemote, xcmExecuted, nttOut, nttIn]
                 : type === 'staking' ? [staking]
                   : type === 'bond' ? [bonds]
+                    : type === 'juicer' ? [juicers]
                     : type === 'intent' ? [intents]
                       : [votes]
   // Above a block every source was read whole (or the read threw), so a short
@@ -24812,7 +25201,7 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
       // So is a pool account's own hub reserve (the Omnipool's H2O): charted as
       // the balance it is, in no bucket's value — the current-value twin is
       // AddressBalance.uncounted, and the live-pinned last point agrees with it.
-      const valued = !accountId.includes('#mm:') && !isPoolOwnHubHolding(accountId, Number(id))
+      const valued = !accountId.includes('#mm:') && !isUncountedHolding(accountId, Number(id))
       let lastBal = 0
       for (let b = 0; b <= N; b++) {
         if (balMap.has(b)) { lastBal = Number(balMap.get(b)) / 10 ** a.decimals; observedBucket[b] = true }
@@ -25775,7 +26164,7 @@ function accountMoneyMarketArm(evmList: string, eventNames: readonly string[], b
       AND event_name IN (${sqlEventNameList([...eventNames])})
       AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
       ${mmMarketPoolSql(market)}
-      ${mmStakingPlumbingExclusionSql()}
+      ${mmStakingPlumbingExclusionSql()} ${mmJuicerPlumbingExclusionSql()}
       ${tokenFilter}
     GROUP BY block_height`
 }
@@ -25796,7 +26185,7 @@ export async function mmActivityMarketKeys(accounts: string[]): Promise<string[]
             WHERE account_id IN {forms:Array(String)}
               AND event_name IN (${sqlEventNameList([...MONEY_MARKET_EVENT_NAMES])})
               AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
-              ${mmStakingPlumbingExclusionSql()}`,
+              ${mmStakingPlumbingExclusionSql()} ${mmJuicerPlumbingExclusionSql()}`,
     query_params: { forms }, format: 'JSONEachRow',
   })
   const pools = new Set((await res.json<{ pool: string }>()).map(r => r.pool))
@@ -26050,6 +26439,10 @@ async function erc20VenueH160s(): Promise<string[]> {
     ...[...mmContracts].map(evmAddressOfAccount),
     ...managers.map(m => m.manager.toLowerCase()),
     ...bil.map(a => a.toLowerCase()).filter(a => /^0x[0-9a-f]{40}$/.test(a)),
+    // The Juicer contracts: a leg into or out of a vault, its ledger or the loop is the
+    // settlement of the Juicer row beside it (a withdrawal's shares into escrow, the
+    // HOLLAR a rebalance hands the loop), never a send.
+    ...JUICER_CONTRACTS,
   ])]
 }
 const RESERVED_H160_RE = /^0x(6d6f646c|7369626c|70617261)/
@@ -26525,6 +26918,9 @@ function accountTransferArm(args: {
   erc20Candidates: string
   viewingTreasury: boolean
   enumeratedExtrinsics: [number, number][]
+  // The extrinsics of the enumerated Juicer rows, which own only the legs a Juicer
+  // contract is a party to (juicerOwnsTransferSql).
+  juicerExtrinsics: [number, number][]
   enumeratedOwners: [number, string][]
   // Whether the accounts have a direct HSM trade at all (hasDirectHsmTrades).
   withHsm: boolean
@@ -26561,7 +26957,9 @@ function accountTransferArm(args: {
            own_ext AS (${owned}),
            hook_owner AS (${hookOwnerSql(list, accounts, evmList, bound, args.enumeratedOwners, args.withHsm)})
       SELECT block_height FROM cand
-      WHERE (xi = 4294967295 OR free = 1 OR (block_height, xi, ${mmKey}) NOT IN (SELECT block_height, extrinsic_index, mm_key FROM own_ext))
+      WHERE (xi = 4294967295 OR free = 1 OR (block_height, xi, ${mmKey}) NOT IN (SELECT block_height, extrinsic_index, mm_key FROM own_ext))${args.juicerExtrinsics.length ? `
+        AND (xi = 4294967295 OR free = 1 OR NOT ${juicerOwnsTransferSql('from_account', 'to_account')}
+          OR (block_height, xi) NOT IN (SELECT tupleElement(pair, 1), tupleElement(pair, 2) FROM (SELECT arrayJoin(${sortedBlockPairsSql(args.juicerExtrinsics)}) AS pair)))` : ''}
         AND (xi != 4294967295 OR free = 1 OR (
           (block_height, ${resolvedAccountIdSql('from_account', accounts)}) NOT IN (SELECT block_height, owner FROM hook_owner)
           AND (block_height, ${resolvedAccountIdSql('to_account', accounts)}) NOT IN (SELECT block_height, owner FROM hook_owner)))
@@ -26724,6 +27122,9 @@ interface EnumeratedActivity {
   rewards: ActivityRow[]
   staking: ActivityRow[]
   bonds: ActivityRow[]
+  // Juicer vault acts: a small table read whole (getRecentJuicer), the user's own rows
+  // and, on a Juicer contract's page, its venue's.
+  juicer: ActivityRow[]
   intents: ActivityRow[]
   // Cross-chain swaps out through NEAR Intents — trade-family rows like otc and
   // intents, and fully enumerable (the whole chain has placed 62 of them), which
@@ -26757,7 +27158,7 @@ export function builtAtWatermark(generation: number | undefined, mark: number): 
 // Every enumerated row. All of them are non-transfer, so a transfer feed needs each
 // one's extrinsic or hook owner to decide which transfers are its plumbing.
 function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
-  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.bonds, ...e.intents, ...e.xcswaps, ...e.votes, ...e.xcm, ...e.ntt, ...e.v3]
+  return [...e.otc, ...e.dcaFailures, ...e.rewards, ...e.staking, ...e.bonds, ...e.juicer, ...e.intents, ...e.xcswaps, ...e.votes, ...e.xcm, ...e.ntt, ...e.v3]
 }
 
 // Which enumerated sources one type's feed needs. Exactly the `want*` flags
@@ -26770,7 +27171,7 @@ function enumeratedActivityAll(e: EnumeratedActivity): ActivityRow[] {
 // therefore produce the same array, as do `liquidity` and `mm` with their one. That is
 // why the cache key names the SOURCE SET rather than the type — two types that read the
 // same history share one entry instead of reading it twice under two names.
-const ENUMERATED_SOURCE_NAMES = ['otc', 'dcaFailures', 'rewards', 'staking', 'bonds', 'intents', 'xcswaps', 'votes', 'xcm', 'ntt', 'v3'] as const
+const ENUMERATED_SOURCE_NAMES = ['otc', 'dcaFailures', 'rewards', 'staking', 'bonds', 'juicer', 'intents', 'xcswaps', 'votes', 'xcm', 'ntt', 'v3'] as const
 type EnumeratedSourceName = typeof ENUMERATED_SOURCE_NAMES[number]
 function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolean> {
   const wantTransfers = type === 'all' || type === 'transfer'
@@ -26781,6 +27182,7 @@ function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolea
     rewards: type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm',
     staking: type === 'all' || type === 'staking' || wantTransfers,
     bonds: type === 'all' || type === 'bond' || wantTransfers,
+    juicer: type === 'all' || type === 'juicer' || wantTransfers,
     // Intents fold under the trade family like otc.
     intents: type === 'all' || type === 'intent' || type === 'trade' || wantTransfers,
     // Cross-chain swaps fold under trade and under xcm, and own the Router sell and
@@ -26902,12 +27304,13 @@ async function enumeratedActivityRowsUncached(
   const depth = EXACT_SMALL_SOURCE_ROWS + 1
   const xcmDepth = EXACT_XCM_SOURCE_ROWS + 1
   const need = enumeratedSourceNeed(type)
-  const [otc, dcaFailures, rewards, staking, bonds, intents, xcswaps, voteLegs, xcmLegs, nttLegs, v3] = await Promise.all([
+  const [otc, dcaFailures, rewards, staking, bonds, juicer, intents, xcswaps, voteLegs, xcmLegs, nttLegs, v3] = await Promise.all([
     need.otc ? getRecentOtc(depth, from, to, 0, {}, undefined, accounts) : [],
     need.dcaFailures ? getRecentDcaFailures(depth, from, to, accounts) : [],
     need.rewards ? getRecentRewardClaims(depth, from, to, accounts) : [],
     need.staking ? getRecentStaking(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
     need.bonds ? getRecentBonds(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
+    need.juicer ? getRecentJuicer(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
     need.intents ? getRecentIntents(depth, from, to, accounts, 0, {}, undefined, undefined) : [],
     need.xcswaps ? getRecentXcswaps(depth, from, to, accounts, 0) : [],
     // Two vote sources, each read to its own cap and landing in the one `votes`
@@ -26935,13 +27338,13 @@ async function enumeratedActivityRowsUncached(
     need.v3 ? getRecentV3Rows('all', depth, from, to, 0, {}, { accounts }) : [],
   ])
   const capped: [ActivityRow[], number][] = [
-    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth], [bonds, depth], [intents, depth], [xcswaps, depth], [v3, depth],
+    [otc, depth], [dcaFailures, depth], [rewards, depth], [staking, depth], [bonds, depth], [juicer, depth], [intents, depth], [xcswaps, depth], [v3, depth],
     ...voteLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
     ...xcmLegs.map(leg => [leg, xcmDepth] as [ActivityRow[], number]),
     ...nttLegs.map(leg => [leg, depth] as [ActivityRow[], number]),
   ]
   if (capped.some(([rows, cap]) => rows.length >= cap)) return null
-  return { otc, dcaFailures, rewards, staking, bonds, intents, xcswaps, votes: voteLegs.flat(), xcm: xcmLegs.flat(), ntt: nttLegs.flat(), v3 }
+  return { otc, dcaFailures, rewards, staking, bonds, juicer, intents, xcswaps, votes: voteLegs.flat(), xcm: xcmLegs.flat(), ntt: nttLegs.flat(), v3 }
 }
 
 // Which types this path can count exactly, in the order the reasoning above splits
@@ -26955,7 +27358,7 @@ async function enumeratedActivityRowsUncached(
 // counted once, the cross-chain swap included although it belongs to both `trade` and
 // `xcm`.
 const EXACTLY_COUNTABLE_ACTIVITY_TYPES = new Set([
-  'all', 'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'bond', 'intent', 'otc',
+  'all', 'transfer', 'trade', 'liquidity', 'mm', 'xcm', 'vote', 'staking', 'bond', 'juicer', 'intent', 'otc',
 ])
 
 // Whether this request is paged by locating its ranks rather than by widening a
@@ -27096,7 +27499,9 @@ async function planExactActivity(
     // A transfer feed needs the enumerated sources' suppression identities too. Only
     // their SIGNED rows contribute extrinsics and only their HOOK rows contribute owners,
     // which is exactly the split suppressSubordinateActivityRows makes.
-    const signed = new Set(all.filter(row => row.extrinsicIndex != null)
+    const signed = new Set(all.filter(row => row.extrinsicIndex != null && row.type !== 'juicer')
+      .map(row => `${row.blockHeight}:${row.extrinsicIndex}`))
+    const juicerSigned = new Set(all.filter(row => row.extrinsicIndex != null && row.type === 'juicer')
       .map(row => `${row.blockHeight}:${row.extrinsicIndex}`))
     const owners = new Set(all.filter(row => row.extrinsicIndex == null && hookActivityOwnsBlockTransfers(row))
       .flatMap(row => [row.who?.accountId, row.to?.accountId]
@@ -27108,6 +27513,10 @@ async function planExactActivity(
       erc20Candidates: erc20CandidateLiteralSql(erc20Rows),
       viewingTreasury: accCond.includes(TREASURY_POT),
       enumeratedExtrinsics: [...signed].map(key => {
+        const at = key.indexOf(':')
+        return [Number(key.slice(0, at)), Number(key.slice(at + 1))] as [number, number]
+      }),
+      juicerExtrinsics: [...juicerSigned].map(key => {
         const at = key.indexOf(':')
         return [Number(key.slice(0, at)), Number(key.slice(at + 1))] as [number, number]
       }),
@@ -27308,6 +27717,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const wantXcm = type === 'all' || type === 'xcm' || wantTransfers
   const wantStaking = type === 'all' || type === 'staking' || wantTransfers
   const wantBonds = type === 'all' || type === 'bond' || wantTransfers
+  const wantJuicer = type === 'all' || type === 'juicer' || wantTransfers
   // intent folds under the trade chip/type like otc — fetched whenever trade is,
   // plus its own `type=intent` request and the Trade tab's intent actions. Owner
   // scope comes from intent_orders.
@@ -27803,7 +28213,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
               WHERE ${bound} AND account_id IN (${mmList}) AND event_name IN (${mmEventNames.map(n => `'${n}'`).join(',')})
                 AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})
                 ${mmMarketFilter}
-                ${mmStakingPlumbingExclusionSql()}
+                ${mmStakingPlumbingExclusionSql()} ${mmJuicerPlumbingExclusionSql()}
                 ${reserveFilter}
                 ${mmValueFilter.predicateSql}
               ORDER BY block_height DESC LIMIT {n:UInt32}`,
@@ -27853,6 +28263,9 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const bonds = exact ? exact.enumerated.bonds
     : wantBonds ? await getRecentBonds(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
   noteSource(bonds.length, oldestWindowBlock(bonds, r => r.blockHeight))
+  const juicer = exact ? exact.enumerated.juicer
+    : wantJuicer ? await getRecentJuicer(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
+  noteSource(juicer.length, oldestWindowBlock(juicer, r => r.blockHeight))
   const intents = exact ? exact.enumerated.intents
     : wantIntents ? await getRecentIntents(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
   noteSource(intents.length, oldestWindowBlock(intents, r => r.blockHeight))
@@ -27899,11 +28312,13 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   // rare types (e.g. dca, mm) aren't starved out by the slice below.
   const stakingExtrinsics = activityExtrinsicSet(staking)
   const bondExtrinsics = activityExtrinsicSet(bonds)
+  const juicerExtrinsics = activityExtrinsicSet(juicer)
   const intentExtrinsics = activityExtrinsicSet(intents)
   const mmExtrinsics = activityExtrinsicSet(mmTx)
   const scopedTransfers = transfers.filter(t => t.erc20Send || (
     !(t.extrinsicIndex != null && stakingExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
     !(t.extrinsicIndex != null && bondExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
+    !(t.extrinsicIndex != null && juicerExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`) && juicerOwnsTransfer(t.who, t.to)) &&
     !(t.extrinsicIndex != null && intentExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`)) &&
     // A money-market action owns only some of its extrinsic's legs (isMoneyMarketActionRow).
     !(t.extrinsicIndex != null && mmExtrinsics.has(`${t.blockHeight}:${t.extrinsicIndex}`) && moneyMarketOwnsTransfer(t.who, t.to, t.erc20Log)) &&
@@ -27915,7 +28330,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const userMm = mmTx.filter(r => !isModuleAcct(r.who))
   // The ICE pot's own page keeps its settlement trades: there they are what it did.
   const keepPot = accounts.some(a => a.toLowerCase() === ICE_POT_ACCOUNT)
-  let merged = (await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...bonds, ...intents, ...xcswaps, ...v3Acts, ...voteRows, ...userMm, ...otc, ...xcm], { keepPot }))
+  let merged = (await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...bonds, ...juicer, ...intents, ...xcswaps, ...v3Acts, ...voteRows, ...userMm, ...otc, ...xcm], { keepPot }))
     .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
   if (type && type !== 'all') merged = merged.filter(r => activityTypeMatchesFamily(r.type, type))
   merged = merged.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
@@ -28237,8 +28652,20 @@ async function accountActivityWatermark(accounts: string[]): Promise<number> {
         })
         return Number((await res.json<{ w: number | null }>())[0]?.w ?? 0)
       }, { concurrency: CHUNK_QUERY_CONCURRENCY })
-      const [marks, erc20Mark] = await Promise.all([marksP, erc20MarkP])
-      return Math.max(0, ...marks, ...erc20Mark)
+      // The Juicer rows the account is named in (juicer_logs.party) and the unwind,
+      // settlement and claim rows of its withdrawal requests, BY it through the request.
+      const juicerH160s = [...juicerScopeH160s(accounts)]
+      const juicerMarkP = juicerH160s.length ? client.query({
+        query: `SELECT max(block_height) AS w FROM price_data.juicer_logs
+                WHERE party IN {h160s:Array(String)}
+                   OR (topic0 IN ('${JUICER_TOPIC.UnwindStarted}', '${JUICER_TOPIC.RedeemSettled}', '${JUICER_TOPIC.Claimed}')
+                       AND (contract_address, topics[2]) IN (
+                         SELECT contract_address, topics[2] FROM price_data.juicer_logs
+                         WHERE topic0 = '${JUICER_TOPIC.RedeemRequested}' AND party IN {h160s:Array(String)}))`,
+        query_params: { h160s: juicerH160s }, format: 'JSONEachRow',
+      }).then(async res => Number((await res.json<{ w: number | null }>())[0]?.w ?? 0)) : Promise.resolve(0)
+      const [marks, erc20Mark, juicerMark] = await Promise.all([marksP, erc20MarkP, juicerMarkP])
+      return Math.max(0, ...marks, ...erc20Mark, juicerMark)
     } catch {
       // A failed watermark must not serve a stale page: fall back to a value
       // that changes every block, which restores the old rebuild-always
@@ -31028,7 +31455,7 @@ function activitySourceAccounts(gkey: string): string[] {
  * A mark is compared for any movement, not growth: it has no order to grow in.
  */
 export interface ActivitySourceMarks { activity: number; mm: number; activityChange: string; mmChange: string; mmFp: string }
-type ActivitySource = 'activity' | 'mm' | 'erc20' | 'atoken'
+type ActivitySource = 'activity' | 'mm' | 'erc20' | 'atoken' | 'juicer'
 
 interface ActivitySourceTable {
   table: string
@@ -31043,6 +31470,10 @@ interface ActivitySourceTable {
   fingerprint?: string
   // An optional row filter, for a table that holds more than the source's rows.
   where?: string
+  // A table whose ids need resolving at read time is read through this subquery
+  // instead (already deduplicated, so no FINAL; it must keep block_height). Such a
+  // source has no month partitions, so it is only ever read live.
+  subquery?: string
 }
 // XOR of decimal UInt64 fingerprints; '' is the identity.
 function xorFingerprints(a: string, b: string): string {
@@ -31069,6 +31500,20 @@ const ACTIVITY_SOURCE_TABLES: Record<ActivitySource, ActivitySourceTable> = {
   // by holder like the deltas.
   atoken: { table: 'price_data.atoken_scaled_deltas', column: 'holder', idsOf: erc20WatermarkHolders, where: "event_name = 'BalanceTransfer'",
     change: 'toString(groupBitXor(cityHash64(holder, contract_address, block_height, event_index, leg_index, toString(scaled_delta), block_timestamp)))',
+    combine: xorFingerprints,
+  },
+  // Folded into `activity` likewise: the Juicer rows an account is BY, keyed by its H160.
+  // An unwind, a settlement and a claim name their owner only through the request, so
+  // the owner is resolved here, at read time, from the request's own log — the rows'
+  // attribution (juicerRowsAll), so a keeper-signed step moves its owner's mark.
+  juicer: { table: 'price_data.juicer_logs', column: 'party', idsOf: accounts => [...juicerScopeH160s(accounts)], where: "party != ''",
+    subquery: `SELECT l.block_height AS block_height, l.event_index AS event_index, l.contract_address AS contract_address, l.topic0 AS topic0,
+        l.data AS data, l.block_timestamp AS block_timestamp,
+        if(l.topic0 IN ('${JUICER_TOPIC.UnwindStarted}', '${JUICER_TOPIC.RedeemSettled}', '${JUICER_TOPIC.Claimed}'), r.party, l.party) AS party
+      FROM (SELECT * FROM price_data.juicer_logs FINAL) AS l
+      LEFT JOIN (SELECT contract_address, topics[2] AS rid, party FROM price_data.juicer_logs FINAL WHERE topic0 = '${JUICER_TOPIC.RedeemRequested}') AS r
+        ON l.contract_address = r.contract_address AND l.topics[2] = r.rid`,
+    change: 'toString(groupBitXor(cityHash64(party, contract_address, block_height, event_index, topic0, data, block_timestamp)))',
     combine: xorFingerprints,
   },
   mm: {
@@ -31104,12 +31549,12 @@ async function activitySourceMarksOf(scopes: ReadonlyMap<string, { accounts: str
   const heads = new Map<string, number>()
   for (const [gkey, { accounts, head }] of scopes) {
     heads.set(gkey, head)
-    idsOf.set(gkey, { activity: ACTIVITY_SOURCE_TABLES.activity.idsOf(accounts), mm: ACTIVITY_SOURCE_TABLES.mm.idsOf(accounts), erc20: ACTIVITY_SOURCE_TABLES.erc20.idsOf(accounts), atoken: ACTIVITY_SOURCE_TABLES.atoken.idsOf(accounts) })
+    idsOf.set(gkey, { activity: ACTIVITY_SOURCE_TABLES.activity.idsOf(accounts), mm: ACTIVITY_SOURCE_TABLES.mm.idsOf(accounts), erc20: ACTIVITY_SOURCE_TABLES.erc20.idsOf(accounts), atoken: ACTIVITY_SOURCE_TABLES.atoken.idsOf(accounts), juicer: ACTIVITY_SOURCE_TABLES.juicer.idsOf(accounts) })
   }
   const headMonths = await blockMonths([...new Set(heads.values())])
   const refs = new Map<string, SourceMark>() // `${source}|${head}|${id}` → identities, change mark, fingerprint
   for (const source of sources) {
-    const { table, column, change, fingerprint, where, combine } = ACTIVITY_SOURCE_TABLES[source]
+    const { table, column, change, fingerprint, where, combine, subquery } = ACTIVITY_SOURCE_TABLES[source]
     const byHead = new Map<number, Set<string>>()
     for (const [gkey, head] of heads) {
       let group = byHead.get(head)
@@ -31120,7 +31565,11 @@ async function activitySourceMarksOf(scopes: ReadonlyMap<string, { accounts: str
     // One statement shape for both halves: the sealed months, per month (no head bound —
     // every row in them is below it), or the rest at or below a head.
     const read = (chunk: string[], months: string[], scope: 'sealed' | 'live', head = 0) => client.query({
-      query: `SELECT ${column} AS id, ${scope === 'sealed' ? '_partition_id' : "''"} AS p, toString(count()) AS refs, ${change} AS change, ${fingerprint ?? "''"} AS fp FROM ${table} FINAL
+      query: subquery
+        ? `SELECT ${column} AS id, '' AS p, toString(count()) AS refs, ${change} AS change, ${fingerprint ?? "''"} AS fp FROM (${subquery})
+              WHERE ${column} IN {ids:Array(String)} AND block_height <= {head:UInt32}${where ? ` AND ${where}` : ''}
+              GROUP BY ${column}`
+        : `SELECT ${column} AS id, ${scope === 'sealed' ? '_partition_id' : "''"} AS p, toString(count()) AS refs, ${change} AS change, ${fingerprint ?? "''"} AS fp FROM ${table} FINAL
               WHERE ${column} IN {ids:Array(String)} AND ${scope === 'sealed' ? '_partition_id IN {months:Array(String)}' : '_partition_id NOT IN {months:Array(String)} AND block_height <= {head:UInt32}'}${where ? ` AND ${where}` : ''}
               GROUP BY ${column}${scope === 'sealed' ? ', _partition_id' : ''}`,
       query_params: { ids: chunk, head, months }, format: 'JSONEachRow',
@@ -31187,7 +31636,7 @@ async function activitySourceMarksOf(scopes: ReadonlyMap<string, { accounts: str
     const sum = (source: ActivitySource) => ids[source].reduce((n, id) => n + (refs.get(`${source}|${head}|${id}`)?.refs ?? 0), 0)
     const mark = (source: ActivitySource) => ids[source].reduce((m, id) => ACTIVITY_SOURCE_TABLES[source].combine(m, refs.get(`${source}|${head}|${id}`)?.change ?? ''), '')
     const fp = (source: ActivitySource) => ids[source].reduce((m, id) => xorFingerprints(m, refs.get(`${source}|${head}|${id}`)?.fp ?? ''), '')
-    out.set(gkey, { activity: sum('activity') + sum('erc20') + sum('atoken'), mm: sum('mm'), activityChange: xorFingerprints(xorFingerprints(mark('activity'), mark('erc20')), mark('atoken')), mmChange: mark('mm'), mmFp: fp('mm') })
+    out.set(gkey, { activity: sum('activity') + sum('erc20') + sum('atoken') + sum('juicer'), mm: sum('mm'), activityChange: xorFingerprints(xorFingerprints(xorFingerprints(mark('activity'), mark('erc20')), mark('atoken')), mark('juicer')), mmChange: mark('mm'), mmFp: fp('mm') })
   }
   return out
 }
@@ -31800,8 +32249,8 @@ async function loadAccountDirectorySnapshot(
 // tag-detail key, so a payload persisted under an earlier value definition is
 // never served as this one.
 function accountDirectoryModelVersion(): string {
-  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3-r6'
-  return omnipoolAccountClaimsReady ? 'v2-r6' : 'v1-r6'
+  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3-r7'
+  return omnipoolAccountClaimsReady ? 'v2-r7' : 'v1-r7'
 }
 
 // The snapshot's counted collateral for one (account, pool) group, base-8 USD:
@@ -32611,6 +33060,8 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
                 minIf(toFloat64(m.risk_col) * toFloat64(m.liqthr) / 10000. / toFloat64(m.risk_debt),
                   m.pool_address IN (${supplementalMmPoolsSql()}) AND toFloat64(m.risk_debt) > 0) AS supplemental_worst_hf
               FROM mm_latest m
+              -- A strategy custody account's positions are its share holders' value (isCustodyAccount).
+              WHERE NOT ${custodyAccountSql('m.account_id')}
               GROUP BY holder
             ),
             -- One name per account across every identity source: lowest chain
@@ -32639,13 +33090,13 @@ async function accountsPage(offset: number, limit: number, sort: AccountSort, re
                 -- and no value, here as on the account page (AddressBalance.uncounted),
                 -- stated in SQL by poolOwnHubHoldingSql so the row ranks by the value
                 -- its page prints.
-                sum(if(${poolOwnHubHoldingSql('latest.account_id', 'latest.asset_id')}, 0., toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.))) AS usd,
+                sum(if(${uncountedHoldingSql('latest.account_id', 'latest.asset_id')}, 0., toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.))) AS usd,
                 -- Per-asset USD merged across the group's members → top-holding icons.
                 -- Fast single-query approximation from the wallet balance tables; the
                 -- detail pages' hover card additionally folds in money-market
                 -- collateral (aTokens) and EVM-side ERC-20 that only a forward
                 -- per-account read can attribute, so the two can differ for those.
-                sumMap([latest.asset_id], [if(${poolOwnHubHoldingSql('latest.account_id', 'latest.asset_id')}, 0., toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.))]) AS asset_usd_map,
+                sumMap([latest.asset_id], [if(${uncountedHoldingSql('latest.account_id', 'latest.asset_id')}, 0., toFloat64(latest.bal) * transform(latest.asset_id, ${idsSql}, ${unitsSql}, 0.))]) AS asset_usd_map,
                 -- Rewards are per account while latest is per (account, asset): each
                 -- account's sum enters once, deduplicated on (key, usd).
                 arraySum(x -> tupleElement(x, 2), groupUniqArrayIf((latest.account_id, lm.usd), lm.usd != 0)) AS lm_usd,
@@ -34065,7 +34516,11 @@ async function buildTagDetailForMembers(
     // live money-market (per-member H160 reads combined), Omnipool LP positions, and
     // active DCA orders. Money-market collateral is folded into the wallet balances
     // exactly as on the account page.
-    const mmMembers = members.flatMap(simAccount => {
+    // A strategy custody member's (the Juicer vault's, its loop's) positions and ERC-20
+    // holdings are its share holders' value (isCustodyAccount), so a tag reads its
+    // members' money market and ERC-20 pot without them; its pallet balances are
+    // uncounted by the balance read itself.
+    const mmMembers = members.filter(m => !isCustodyAccount(evmAccountForm(m) ?? m)).flatMap(simAccount => {
       const h160 = mmH160ForAccount(simAccount)
       return h160 ? [{ h160, simAccount }] : []
     })
@@ -34488,7 +34943,22 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
     const mmAddrs = tokenIds ? mmReserveAddressesForTokens(tokenIds) : []
     const mmTok = tokenIds == null ? '' : mmAddrs.length ? `AND asset_address IN (${mmAddrs.map(a => `'${a}'`).join(',')})` : 'AND 0'
     let query: string
-    if (scope === 'activity' && type !== 'mm' && type !== 'xcm') {
+    // Juicer rows are the strategy's own logs (juicer_logs), one per row, filtered like
+    // the feed: by action (its topic and contract) and by token (the vault's share or
+    // collateral). They are a separate arm of `all`, summed per day.
+    const juicerDaily = (): string => {
+      const wanted = resolveJuicerAction(filters.action)
+      const actions = (wanted === undefined ? JUICER_ROW_ACTIONS.map(([a]) => a) : wanted === null ? [] : [wanted])
+      const vaults = JUICER_VAULTS.filter(v => tokenIds == null || tokenIds.includes(v.shareAssetId) || tokenIds.includes(v.collateralAssetId))
+      const arms = actions.flatMap(a => {
+        const def = JUICER_ACTION_TOPIC[a]
+        const contracts = def.contract === 'subloop' ? (tokenIds == null ? [JUICER_SUBLOOP] : []) : vaults.map(v => def.contract === 'vault' ? v.vault : v.mainDebt)
+        return contracts.length ? [`(topic0 = '${def.topic}' AND contract_address IN (${contracts.map(c => `'${c}'`).join(',')}))`] : []
+      })
+      return daily('juicer_logs', arms.length ? `(${arms.join(' OR ')})` : '0')
+    }
+    if (scope === 'activity' && type === 'juicer') query = juicerDaily()
+    else if (scope === 'activity' && type !== 'mm' && type !== 'xcm') {
       let names: readonly string[]
       let ignoreToken = false
       // Intent rows carry asset_refs on the placement alone: Intent.IntentSubmitted
@@ -34548,6 +35018,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
                FROM price_data.activity_histogram_events
                WHERE day > today() - 90 AND ${nameFilter} ${assetFilter}${compoundPlumbing}
                GROUP BY day ORDER BY day`
+      if (type === 'all') query = `SELECT d, toUInt64(sum(v)) AS v FROM (${query} UNION ALL ${juicerDaily()}) GROUP BY d ORDER BY d`
     } else if (scope === 'events' || scope === 'extrinsics')
       query = `SELECT toString(day) AS d, toUInt64(groupBitmapMerge(identity_state)) AS v
                FROM price_data.daily_chain_identity_counts_v2
@@ -34606,7 +35077,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         } else {
           const actionNames = moneyMarketEventNames(filters.action)
           const act = actionNames.length ? ` AND event_name IN (${sqlNames(actionNames)})` : ' AND 0'
-          query = daily('raw_money_market_events', `user_address NOT LIKE '0x6d6f646c%' AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})${act}${sp(mmTok)}${sp(mmMarketPoolSql(market))} ${mmStakingPlumbingExclusionSql()}`)
+          query = daily('raw_money_market_events', `user_address NOT LIKE '0x6d6f646c%' AND lower(ifNull(pool_address, '')) IN (${configuredMmPoolsSql()})${act}${sp(mmTok)}${sp(mmMarketPoolSql(market))} ${mmStakingPlumbingExclusionSql()} ${mmJuicerPlumbingExclusionSql()}`)
         }
       } else if (type === 'otc') {
         // Asset identity for Cancelled/Filled/PartiallyFilled lives on the order's

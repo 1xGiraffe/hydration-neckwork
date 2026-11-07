@@ -225,6 +225,29 @@ describe('GET /v1/accounts/:address/balances', () => {
     expect(other.json().items.every((i: { uncounted?: string }) => i.uncounted === undefined)).toBe(true)
   })
 
+  it('flags a strategy custody account\'s holdings strategy-custody and counts none of them', async () => {
+    // The Juicer vault (its truncated account): what it holds belongs to its jETH
+    // holders, whose jETH is valued for it.
+    const VAULT = '0x4554480098db179d65b8abc53946bd89b3433a4fd3bfb60c0000000000000000'
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ')
+    const client = fakeDataClient(
+      query => (query.includes('-- data:accounts:balances-substrate')
+        ? [{ asset_id: '5', total: '3000000000000', free: '3000000000000', reserved: '0' }]
+        : undefined),
+      query => (query.includes('-- data:accounts:balances-erc20') ? [] : undefined),
+      query => (query.includes('-- data:accounts:atoken-anchor-block') ? [{ b0: 0 }] : undefined),
+      query => (query.includes('-- data:accounts:atoken-map') ? [] : undefined),
+      query => (query.includes('-- data:accounts:reserve-indices') ? [] : undefined),
+      query => (query.includes('-- data:assets:current-prices') ? [{ asset_id: 5, price: '2', block: 8_999_000, ts: now }] : undefined),
+    )
+    app = await freshDataApp(client)
+    const res = await app.inject({ url: `/v1/accounts/${VAULT}/balances`, headers: AUTH })
+    expect(res.statusCode).toBe(200)
+    const { items, totals } = res.json()
+    expect(items[0]).toMatchObject({ assetId: '5', valueUsd: '6.00', uncounted: 'strategy-custody' })
+    expect(totals).toEqual({ assetsUsd: '0.00', debtUsd: '0.00', netUsd: '0.00' })
+  })
+
   it('answers an unseen account with empty items, not 404', async () => {
     const client = fakeDataClient(
       query => (query.includes('-- data:accounts:balances-substrate') ? [] : undefined),

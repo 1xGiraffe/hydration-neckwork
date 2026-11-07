@@ -161,7 +161,7 @@ describe('farm rewards in the accounts directory', () => {
     // by the folded reserves (mmUnstatedCollateral.test.ts); `-r6` adds the
     // rows' User Revenue figure. Either way a page persisted under a reward-free
     // value is never served as this one.
-    expect(version).toContain("return 'v3-r6'")
+    expect(version).toContain("return 'v3-r7'")
     expect(version).not.toMatch(/return 'v3'\s*$/m)
   })
 })

@@ -4,10 +4,11 @@ import { cached } from '../../services/cache.ts'
 import { H2O_ASSET_ID, assetDecimalsOrNull, assetDescriptor, currentPriceOf, isMoneyMarketAToken, isStableswapShareToken, priceAssetId } from '../../services/explorerAssets.ts'
 import { lmCountedClaimable, loadLmRewards } from '../../services/lmRewardSnapshot.ts'
 import { withStableswapSharePrices, xykReserveAssets, xykShareLegs } from '../../services/lpMath.ts'
+import { loadJuicerRates, withJuicerSharePrices } from '../../services/juicerPrice.ts'
 import { loadMmIncentives } from '../../services/mmIncentiveSnapshot.ts'
 import { currentStableswapSharePools } from '../../services/stableswapSharePools.ts'
 import { loadV3AccountHistory, v3AccountPositions, v3AccountPositionsRawAt } from '../../services/uniswapV3Positions.ts'
-import { isPoolOwnHubHolding, scaledDecimal } from '../../services/valuation.ts'
+import { isCustodyAccount, isPoolOwnHubHolding, scaledDecimal } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
 
 // Account valuation for GET /v1/accounts/balances and
@@ -365,7 +366,9 @@ export function currentPrices(client: ClickHouseClient): Promise<PriceMap> {
     // definition the explorer and the Data API state too — never an underlying's
     // price, and nothing when a leg is unpriced.
     const pools = await currentStableswapSharePools(client)
-    return withStableswapSharePrices(feeds, pools, id => currentPriceOf(feeds, id), assetDecimalsOrNull, isStableswapShareToken)
+    const shares = withStableswapSharePrices(feeds, pools, id => currentPriceOf(feeds, id), assetDecimalsOrNull, isStableswapShareToken)
+    // A Juicer share (jETH) at its vault's exchange rate in that collateral (juicerPrice.ts).
+    return withJuicerSharePrices(shares, await loadJuicerRates(client).catch(() => []))
   })
 }
 
@@ -1017,6 +1020,10 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
     let seen = false
 
     for (const form of formsByAccount.get(account) ?? []) {
+      // A strategy's custody account (isCustodyAccount: the Juicer vault, its loop and
+      // its yield fund) holds what its share token's holders own, and the share token
+      // is valued in theirs: its holdings and positions are balances, never value.
+      const custody = isCustodyAccount(form)
       for (const row of substrateByForm.get(form) ?? []) {
         seen = true
         const assetId = Number(row.asset_id)
@@ -1024,6 +1031,7 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
         // superseded below — otherwise an account holding only aTokens would report
         // blockHeight 0 despite having been observed.
         blockHeight = Math.max(blockHeight, Number(row.last_block) || 0)
+        if (custody) continue
         // An aToken's pallet row: its free side is the money-market position the
         // snapshot reports on the underlying reserve — replaced, not added, and not
         // a usable substitute when the snapshot is stale. Its reserved side is the
@@ -1050,6 +1058,7 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
       }
       for (const row of erc20ByForm.get(form) ?? []) {
         seen = true
+        if (custody) continue
         const assetId = Number(row.asset_id)
         // The ERC-20 pot is a wallet balance: transferable, never reserved. It
         // carries no block height of its own, so blockHeight stays the newest
@@ -1058,12 +1067,14 @@ export async function queryLatestBalances(client: ClickHouseClient, accounts: st
       }
       for (const [assetId, raw] of mm?.supplied.get(form) ?? []) {
         seen = true
+        if (custody) continue
         // Supplied collateral is withdrawable, so it belongs with transferable
         // rather than locked (spec "Semantics" rule 7).
         transferable += usdScaled(raw, priceFor(prices, assetId), assetDescriptor(assetId).decimals)
       }
       for (const [assetId, raw] of mm?.debt.get(form) ?? []) {
         seen = true
+        if (custody) continue
         // Reported on its own, never netted out of any other field.
         debt += usdScaled(raw, priceFor(prices, assetId), assetDescriptor(assetId).decimals)
       }

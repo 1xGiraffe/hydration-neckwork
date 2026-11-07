@@ -1,4 +1,5 @@
 import type { ClickHouseClient } from '../db/client.ts'
+import { JUICER_VAULTS } from './juicer.ts'
 
 // Full asset registry (all 113 assets), independent of the trading-filtered
 // cache in assetsService.ts. The Explorer must resolve symbol/decimals for every
@@ -564,9 +565,19 @@ const DUPLICATE_PRICE_ALIAS_ID: Record<number, number> = {
   55: 55,        // BIL           → itself (own feed)
   550: 55,       // uBIL          → BIL
 }
-// Every asset that should be priced via another asset: aTokens, duplicates, bonds
-// and the pool shares a named wrapper IS (added at registry load, setNamedShareWrappers).
-export const PRICE_ALIAS_ID: Record<number, number> = { ...ATOKEN_UNDERLYING_ID, ...DUPLICATE_PRICE_ALIAS_ID }
+// A Juicer vault's share token (jETH) is worth its exchange rate in the vault's
+// collateral (2-Pool-GETH). Every CURRENT price map states that rate exactly
+// (juicerPrice.ts, from the refresher's pinned read); HISTORY — candles, the value
+// chart's buckets — values a share at ONE collateral unit through this alias, which is
+// exact while the rate is 1: no harvest had compounded through block 16,731,000 (every
+// Deposited log's assets equal its shares bar the bootstrap's rounding) and the rate
+// read 1.0000. After the first harvest the history understates a share by the rate's
+// growth over 1 (the funded earnings), which is the approximation, and the only place
+// it applies.
+const JUICER_SHARE_PRICE_ALIAS_ID: Record<number, number> = Object.fromEntries(JUICER_VAULTS.map(v => [v.shareAssetId, v.collateralAssetId]))
+// Every asset that should be priced via another asset: aTokens, duplicates, bonds,
+// Juicer shares and the pool shares a named wrapper IS (added at registry load, setNamedShareWrappers).
+export const PRICE_ALIAS_ID: Record<number, number> = { ...ATOKEN_UNDERLYING_ID, ...DUPLICATE_PRICE_ALIAS_ID, ...JUICER_SHARE_PRICE_ALIAS_ID }
 
 // The asset id whose HISTORICAL price series values `assetId` — the one rule every
 // historical valuation applies (explorer, Data API, public API, derivations, the

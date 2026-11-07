@@ -211,6 +211,7 @@ const HUBS: Record<string, { title: string; description: string }> = {
   '/liquidity': { title: 'Liquidity', description: 'Liquidity across the Omnipool, stableswap and XYK pools on Hydration, with each pool\u2019s TVL and 24-hour volume.' },
   '/hdx': { title: 'HDX', description: 'HDX price, supply, staking, treasury buybacks and Omnipool position.' },
   '/hollar': { title: 'HOLLAR', description: 'HOLLAR supply, the stability module, collateral and peg behaviour.' },
+  '/juicer': { title: 'Juicer', description: 'Juicer, Hydration\u2019s leveraged PRIME-loop strategy: deposit GETH, earn in it. TVL and capacity, the estimated APY, the vault\u2019s money-market position, the PRIME loop, positions, withdrawal requests and every deposit, withdrawal, harvest and rebalance.' },
   '/intents': { title: 'Intents', description: 'Limit orders and DCA intents on Hydration, settled by the ICE solver: the open book, fills matched or routed through the pools, execution quality, top traders and the matched-volume fee.' },
   '/revenue': { title: 'Revenue', description: 'Revenue on Hydration, live: User Revenue — what users earn, net — and Protocol Revenue — what the protocol earns — over 24 hours, 7 days, 30 days and all time.' },
   '/revenue/users': { title: 'User Revenue', description: 'What users earn on Hydration, net: LP fees, lending interest and incentives, farm rewards, token accrual and staking yield, less borrow interest and fees paid — by stream and top earners, through the last closed hour.' },
@@ -314,6 +315,7 @@ export const UNBOUNDED_PREFIXES = new Set([
   'lend', 'withdraw', 'borrow', 'repay', 'liquidate', 'staking', 'vote',
   'otc-place', 'otc-pull', 'otc-fill', 'bond-issue', 'bond-redeem',
   'intent-place', 'intent-fill', 'intent-cancel', 'intent-expire', 'intent-dca-trade',
+  'juicer-deposit', 'juicer-withdraw', 'juicer-unwind', 'juicer-settle', 'juicer-claim', 'juicer-claim-surplus', 'juicer-harvest', 'juicer-rebalance', 'juicer-delever', 'juicer-lever', 'juicer-unlever',
 ])
 
 // The product's name for each activity family, keyed by its URL slug, with what
@@ -354,6 +356,17 @@ export const ACTIVITY_PAGES: Record<string, { label: string; about: string }> = 
   'intent-cancel': { label: 'Limit order cancelled', about: 'the ICE intent cancelled and what it returned to its owner' },
   'intent-expire': { label: 'Limit order expired', about: 'the ICE intent that expired and what it returned to its owner' },
   'intent-dca-trade': { label: 'DCA intent trade', about: 'one trade of a DCA intent: what it sold, what it bought and at what price' },
+  'juicer-deposit': { label: 'Juicer deposit', about: 'the collateral deposited into the Juicer vault, the shares it minted and the depositor' },
+  'juicer-withdraw': { label: 'Juicer withdrawal requested', about: 'the vault shares put into escrow, the request number and when its unwind can start' },
+  'juicer-unwind': { label: 'Juicer withdrawal unwinding', about: 'the withdrawal whose unwind started and the collateral it is owed' },
+  'juicer-settle': { label: 'Juicer withdrawal settled', about: 'the part of a withdrawal that settled and the collateral it released' },
+  'juicer-claim': { label: 'Juicer withdrawal claimed', about: 'the settled collateral claimed and who received it' },
+  'juicer-claim-surplus': { label: 'Juicer surplus claimed', about: 'the HOLLAR a finished withdrawal\'s later loop proceeds paid its owner' },
+  'juicer-harvest': { label: 'Juicer harvest', about: 'the yield harvested from the PRIME loop and compounded into the vault, and the protocol share' },
+  'juicer-rebalance': { label: 'Juicer rebalance', about: 'the vault\'s money-market LTV before and after, and the HOLLAR put into the PRIME loop' },
+  'juicer-delever': { label: 'Juicer de-lever', about: 'the PRIME loop\'s health factor before and after the keepers reduced its exposure' },
+  'juicer-lever': { label: 'Juicer loop levered', about: 'the HOLLAR the PRIME loop borrowed and the ICE intent that swaps it into PRIME' },
+  'juicer-unlever': { label: 'Juicer loop unlevered', about: 'the PRIME the loop withdrew and the ICE intent that swaps it back to HOLLAR to repay' },
 }
 
 const CRUMB_HOME: [string, string] = ['Home', '/']
