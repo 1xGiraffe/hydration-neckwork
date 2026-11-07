@@ -4389,3 +4389,30 @@ html.rev-fs-lock #view .wrap { animation: none; }
   .ur-breakdown-tbl td.ur-empty, .ur-breakdown-tbl td.ur-sub { display: none; }
   .ur-breakdown-tbl .revbd-other td:empty { display: none; }
 }
+
+/* ===== Intents page (pages/Intents.tsx) ===== */
+.ice-lede { color: var(--text-medium); font-size: 14px; line-height: 1.6; max-width: 78ch; margin: -6px 0 8px; }
+.ice-gloss { margin: 0 0 22px; font-size: 13px; color: var(--text-medium); }
+.ice-gloss summary { cursor: pointer; width: fit-content; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+.ice-gloss summary:hover, .ice-gloss summary:focus-visible { color: var(--text-high); }
+.ice-gloss dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; margin: 12px 0 0; max-width: 84ch; line-height: 1.5; }
+.ice-gloss dt { font-weight: 600; color: var(--text-high); }
+.ice-gloss dd { margin: 0; }
+.ice-asof { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin: -16px 0 18px; }
+/* Top traders and top pairs sit side by side; an account pill and a pair of asset
+   chips are not the same height, so the rows are pinned to one. */
+@media (min-width: 721px) { .ice-rank tbody td { height: 52px; } }
+.ice-more { background: none; border: 0; padding: 0; font: inherit; font-family: 'GeistMono'; font-size: 12px; color: var(--sky); cursor: pointer; }
+.ice-more:hover, .ice-more:focus-visible { text-decoration: underline; text-underline-offset: 2px; }
+/* Phones: the stat cards pair up (the shared 160px floor leaves one per row inside
+   a padded card), and the charts' axis type is sized in viewBox units so it lands
+   near 9px once the 860-unit viewBox is scaled to the screen. */
+@media (max-width: 720px) {
+  .ice-page .pf-card .hdx-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .ice-page .pf-card .hdx-card { padding: 11px 12px; }
+  .ice-page .pf-card .hdx-card .hs { font-size: 10.5px; }
+  .ice-page .hdx-ax { font-size: 21px; }
+  .ice-page .day-chart { overflow: visible; }
+  .ice-gloss dl { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .ice-gloss dd { margin-bottom: 8px; }
+}

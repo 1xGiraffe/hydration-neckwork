@@ -48,7 +48,7 @@ const Volume = lazyWithReload(() => import('./pages/Volume').then(m => ({ defaul
 const Oracles = lazyWithReload(() => import('./pages/Oracles').then(m => ({ default: m.Oracles })))
 const OracleFeed = lazyWithReload(() => import('./pages/OracleFeed').then(m => ({ default: m.OracleFeed })))
 const Hollar = lazyWithReload(() => import('./pages/Hollar').then(m => ({ default: m.Hollar })))
-const Ice = lazyWithReload(() => import('./pages/Ice').then(m => ({ default: m.Ice })))
+const Intents = lazyWithReload(() => import('./pages/Intents').then(m => ({ default: m.Intents })))
 const LinkDevice = lazyWithReload(() => import('./pages/LinkDevice').then(m => ({ default: m.LinkDevice })))
 const Notifications = lazyWithReload(() => import('./pages/Notifications').then(m => ({ default: m.Notifications })))
 const ApiTokens = lazyWithReload(() => import('./pages/ApiTokens').then(m => ({ default: m.ApiTokens })))
@@ -130,7 +130,7 @@ export default function App() {
       case 'oracles': return <Oracles />
       case 'oracle': return <OracleFeed feed={route.feed} />
       case 'hollar': return <Hollar />
-      case 'ice': return <Ice />
+      case 'intents': return <Intents />
       case 'asset': return <AssetDetail assetId={route.assetId} />
       case 'holders': return <AssetDetail assetId={route.assetId} initialTab="holders" />
       case 'pool': return <PoolDetail poolId={route.poolId} />

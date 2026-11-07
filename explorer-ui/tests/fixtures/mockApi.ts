@@ -14,7 +14,7 @@ import type {
   TradeDetail as TradeDetailResponse,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse,
   NotificationChannel, NotificationRule, NotificationInboxRow, NotificationsOverview,
-  FilterNames, IntentOrderDetail, IceSolutionPanel, IceDashboard,
+  FilterNames, IntentOrderDetail, IceSolutionPanel, IceDashboard, IceOpenIntents,
   ValueEvent, VolumeHistory, VotesByReferendumPage,
 } from '../../src/types'
 
@@ -2326,10 +2326,14 @@ function buildIce(): IceDashboard {
   const today = Math.floor(MOCK_NOW_MS / DAY) * DAY
   const days = Array.from({ length: 30 }, (_, i) => new Date(today - (29 - i) * DAY).toISOString().slice(0, 10))
   return {
-    status: { solverMode: 'V4', protocolFeePpm: 200, dcaMigrationEnabled: false, uniswapV3: null, asOfBlock: 14362830 },
+    status: { solverMode: 'V4', protocolFeePpm: 200, dcaMigrationEnabled: false, uniswapV3: null, asOfBlock: 14362830, routing: [] },
+    allTime: { intents: 0, limit: 0, dca: 0, owners: 0 },
     openOrders: { total: 0, limit: 0, dca: 0, byAsset: [] },
     fillsPerDay: days.map(day => ({ day, fills: 0, solutions: 0, usd: 0, matchedUsd: 0, routedUsd: 0 })),
-    quality: { medianTimeToFillSec: null, partialShare: null, cancelRate: null, expiryRate: null, priceVsLimitBp: { p10: null, p50: null, p90: null } },
+    traders: 0,
+    unpricedFills: 0,
+    topTraders: [],
+    quality: { medianTimeToFillSec: null, medianBlocksToFill: null, partialShare: null, cancelRate: null, expiryRate: null, priceVsLimitBp: { p10: null, p50: null, p90: null }, priceVsLimitBpImmediate: { p10: null, p50: null, p90: null, fills: 0 }, priceVsLimitBpResting: { p10: null, p50: null, p90: null, fills: 0 } },
     feeRevenue: { perDay: days.map(day => ({ day, usd: 0 })), potHoldings: [] },
     migration: { migrated: 0, cancelled: 0, byReason: [], remainingSchedules: 1_240, perDay: days.map(day => ({ day, migrated: 0, cancelled: 0 })) },
     topPairs: [],
@@ -2351,6 +2355,7 @@ const ROUTES: { re: RegExp; fn: (m: RegExpMatchArray, qs: URLSearchParams) => un
   { re: /^\/explorer\/hdx$/, fn: () => buildHdx() },
   { re: /^\/explorer\/hollar$/, fn: () => buildHollar() },
   { re: /^\/explorer\/ice$/, fn: () => buildIce() },
+  { re: /^\/explorer\/intents\/open$/, fn: () => ({ summary: { total: 0, limit: 0, dca: 0, byAsset: [] }, limitOrders: [], limitOrdersTotal: 0, dcaIntents: [], dcaIntentsTotal: 0, generatedAt: new Date(MOCK_NOW_MS).toISOString() } satisfies IceOpenIntents) },
   { re: /^\/explorer\/security$/, fn: () => buildSecurity() },
   { re: /^\/explorer\/security\/wormhole$/, fn: () => buildSecurityWormhole() },
   { re: /^\/explorer\/accounts$/, fn: (_m, qs) => buildAccounts(Number(qs.get('offset') ?? 0), Number(qs.get('limit') ?? 50), qs.get('sort') ?? 'value') },

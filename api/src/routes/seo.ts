@@ -211,7 +211,7 @@ const HUBS: Record<string, { title: string; description: string }> = {
   '/liquidity': { title: 'Liquidity', description: 'Liquidity across the Omnipool, stableswap and XYK pools on Hydration, with each pool\u2019s TVL and 24-hour volume.' },
   '/hdx': { title: 'HDX', description: 'HDX price, supply, staking, treasury buybacks and Omnipool position.' },
   '/hollar': { title: 'HOLLAR', description: 'HOLLAR supply, the stability module, collateral and peg behaviour.' },
-  '/ice': { title: 'ICE', description: 'ICE, Hydration\u2019s intent solver: limit orders, DCA intents, their fills and the matched-volume fee.' },
+  '/intents': { title: 'Intents', description: 'Limit orders and DCA intents on Hydration, settled by the ICE solver: the open book, fills matched or routed through the pools, execution quality, top traders and the matched-volume fee.' },
   '/revenue': { title: 'Revenue', description: 'Revenue on Hydration, live: User Revenue — what users earn, net — and Protocol Revenue — what the protocol earns — over 24 hours, 7 days, 30 days and all time.' },
   '/revenue/users': { title: 'User Revenue', description: 'What users earn on Hydration, net: LP fees, lending interest and incentives, farm rewards, token accrual and staking yield, less borrow interest and fees paid — by stream and top earners, through the last closed hour.' },
   '/revenue/protocol': { title: 'Protocol Revenue', description: 'Protocol Revenue on Hydration by stream — trading fees, the money market, HOLLAR and liquidations — with its top payers and the staker distributions.' },

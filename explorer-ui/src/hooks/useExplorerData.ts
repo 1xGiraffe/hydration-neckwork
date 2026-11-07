@@ -622,6 +622,12 @@ export function useHollarDashboard() {
 export function useIceDashboard() {
   return useQuery({ queryKey: ['ice-dashboard'], queryFn: ({ signal }) => api.ice(signal), staleTime: 120_000 })
 }
+// The Intents page's open book: polled like the asset page's order book, which
+// reads the same loaders.
+export function useOpenIntents() {
+  const ri = useInterval(DETAIL_POLL_MS)
+  return useQuery({ queryKey: ['open-intents'], queryFn: ({ signal }) => api.openIntents(signal), refetchInterval: ri, staleTime: BLOCK_STALE_MS })
+}
 // The circuit-breaker snapshot behind this refreshes every 60s on the API's
 // coordinated node-full refresher, so a matching poll keeps the fuse fills and
 // the egress meter within one refresh of the chain without ever out-running it.

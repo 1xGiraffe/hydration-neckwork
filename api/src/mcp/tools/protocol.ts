@@ -63,12 +63,18 @@ interface HollarDashboard {
   pools: { poolId: number; tvlUsd: number | null; hollar: { amount: number; usd: number }; partners: { asset: AssetRef; amount: number; usd: number }[]; hollarSharePct: number | null }[]
 }
 
+interface IceBp { p10: number | null; p50: number | null; p90: number | null }
+interface IceRoutingEntry { kind: string; assets: AssetRef[][]; contracts: string[]; state: 'Included' | 'Excluded'; block: number }
 interface IceDashboard {
-  status: { solverMode: string; protocolFeePpm: number | null; dcaMigrationEnabled: boolean; asOfBlock: number | null; uniswapV3?: Record<string, string> }
+  status: { solverMode: string; protocolFeePpm: number | null; dcaMigrationEnabled: boolean; asOfBlock: number | null; uniswapV3?: Record<string, string>; routing?: IceRoutingEntry[] }
+  allTime?: { intents: number; limit: number; dca: number; owners: number }
   openOrders: { total: number; limit: number; dca: number; byAsset: { asset: AssetRef; reserved: string; reservedUsd: number | null; orders: number }[] }
   fillsPerDay: { day: string; fills: number; solutions: number; usd: number; matchedUsd: number; routedUsd: number }[]
-  quality: { medianTimeToFillSec: number | null; partialShare: number | null; cancelRate: number | null; expiryRate: number | null; priceVsLimitBp: { p10: number; p50: number; p90: number } | null }
-  feeRevenue: { perDay: { day: string; usd: number }[]; potHoldings: { asset: AssetRef; amount: string; usd: number | null }[] }
+  traders?: number
+  unpricedFills?: number
+  topTraders?: { account: AccountRef; fills: number; usd: number }[]
+  quality: { medianTimeToFillSec: number | null; medianBlocksToFill?: number | null; partialShare: number | null; cancelRate: number | null; expiryRate: number | null; priceVsLimitBp: IceBp | null; priceVsLimitBpImmediate?: IceBp & { fills: number }; priceVsLimitBpResting?: IceBp & { fills: number } }
+  feeRevenue: { perDay: { day: string; usd: number }[]; potHoldings: { asset: AssetRef; amount: string; valueUsd: number | null }[] }
   migration: { migrated: number; cancelled: number; remainingSchedules: number }
   topPairs: { assetIn: AssetRef; assetOut: AssetRef; fills: number; usd: number }[]
   generatedAt: string
@@ -128,6 +134,7 @@ const hdx = (n: number | null | undefined): string =>
 const omnipoolPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/omnipool`
 const liquidityPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/liquidity`
 const volumePageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/volume`
+const intentsPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/intents`
 
 /* ============ description ============ */
 
@@ -136,7 +143,7 @@ const DESCRIPTION = `The protocol's own dashboards, each rendered as headline fi
 - 'revenue' — what the protocol earns. Totals for the day, week, month and all time; the split by stream (HOLLAR borrow interest, Omnipool asset and protocol fees, liquidation penalties, HSM revenue, network fees, XCM execution fees, Uniswap v3 fees, asset reserve); the accounts that generated the most; the live per-block accrual drips; and the HDX distributed to stakers from the three pots. 'range' (30d / 1y / all) applies HERE and only here.
 - 'hdx' — the token. Price and 24-hour move, total/protocol/user supply, holder cohorts, every lock type with its total, the unlock schedule (what is unlockable NOW versus scheduled), buy/sell flow and standing DCA pressure, and the largest accumulators and distributors.
 - 'hollar' — the stablecoin. Price, peg deviation in basis points, how much of the last 30 days sat within 25 bps, where the supply lives (stablepools, Omnipool, elsewhere), the HSM's collateral holdings with their purchase and buy-back parameters, and the pools that quote it.
-- 'ice' — the intent/solver layer. Solver mode and protocol fee, open limit and DCA orders with the capital they reserve, fills per day, execution quality (time to fill, partial and cancel rates, price against limit in basis points), fee revenue, and the busiest pairs.
+- 'ice' — the intent/solver layer (the Explorer's Intents page). Solver mode, protocol fee and routing overrides, open limit and DCA orders with the capital they reserve, fills per day (matched intent-to-intent vs routed through the pools, valued when they settled), execution quality (time to fill in blocks, partial and cancel rates, price against limit in basis points), the top traders (intent owners) and pairs, and fee revenue. For the individual intents call get_activity with type=intent; an intent id reads through inspect_entity.
 - 'security' — the safety posture. Cross-chain egress usage against its limit, per-asset deposit fuses and how close each is to lockdown, the Omnipool's per-block trade/add/remove allowances and the peak pressure seen against them, circuit-breaker trips by error, what is currently paused or restricted, lending-market solvency, runtime version, the Technical Committee, and the Wormhole backing summary.
 - 'liquidity' — where TVL sits: the venue split across Omnipool, stableswaps, XYK and Uniswap v3, then the Omnipool itself asset by asset with each weight against its CAP.
 - 'volume' — 24H / 7D / 30D volume with the change: ROUTED (every trade once, netted — the DefiLlama figure), then per VENUE (every fill once in its pool; sums to MORE than routed — never mix the two), then 7D top pools (volume/TVL), assets and traders.
@@ -414,27 +421,46 @@ function renderHollar(d: HollarDashboard, ctx: ToolContext): string {
 
 /* ============ ice ============ */
 
+// A signed basis-point figure, or nothing when the sample is empty.
+const bps = (v: number | null | undefined): string => v == null ? DASH : `${v > 0 ? '+' : ''}${v} bps`
+
+function routingTarget(r: IceRoutingEntry): string {
+  if (r.contracts.length) return r.contracts.join(', ')
+  const sep = r.kind.startsWith('Aave') ? ' ⇄ ' : ' / '
+  const pairs = r.assets.map(t => t.map(a => assetLabel(a)).join(sep))
+  return pairs.length > 6 ? `${pairs.slice(0, 6).join(', ')} and ${formatCount(pairs.length - 6)} more` : pairs.join(', ')
+}
+
 function renderIce(d: IceDashboard, ctx: ToolContext): string {
   const days = d.fillsPerDay ?? []
   const recent = days.slice(-7)
   const fills30 = days.reduce((a, b) => a + (b.fills ?? 0), 0)
   const usd30 = days.reduce((a, b) => a + (b.usd ?? 0), 0)
+  const matched30 = days.reduce((a, b) => a + (b.matchedUsd ?? 0), 0)
   const fees30 = (d.feeRevenue?.perDay ?? []).reduce((a, b) => a + (b.usd ?? 0), 0)
   const q = d.quality
+  const routing = d.status?.routing ?? []
 
   return joinBlocks(
     h2('ICE (intents and solving)'),
     kv([
+      ['Page', explorerLink('explorer', intentsPageUrl(ctx.explorerBaseUrl))],
       ['Solver mode', d.status?.solverMode],
-      ['Protocol fee', d.status?.protocolFeePpm == null ? null : `${d.status.protocolFeePpm} ppm (${(d.status.protocolFeePpm / 10_000).toFixed(3)}%)`],
-      ['DCA migration', d.status?.dcaMigrationEnabled ? 'enabled' : 'disabled'],
+      ['Protocol fee', d.status?.protocolFeePpm == null ? null : `${d.status.protocolFeePpm} ppm (${(d.status.protocolFeePpm / 10_000).toFixed(3)}%) of the matched volume`],
+      ['DCA migration', d.status?.dcaMigrationEnabled ? 'enabled' : 'disabled — pallet DCA schedules keep running beside the DCA intents'],
       ['Config as of block', formatCount(d.status?.asOfBlock)],
+      ['Intents ever placed', d.allTime ? `${formatCount(d.allTime.intents)} (${formatCount(d.allTime.limit)} limit, ${formatCount(d.allTime.dca)} DCA) by ${formatCount(d.allTime.owners)} accounts` : null],
       ['Generated', d.generatedAt ? `${formatTime(d.generatedAt)} · ${relativeAge(d.generatedAt)}` : null],
     ]),
+    routing.length
+      ? joinBlocks(h3('Solver routing overrides'), table(['Target', 'Covers', 'State', 'Since block'], routing.map(r => [
+        r.kind, routingTarget(r), r.state.toLowerCase(), formatCount(r.block),
+      ])))
+      : null,
     h3('Open orders'),
     kv([
       ['Open', `${formatCount(d.openOrders?.total)} (${formatCount(d.openOrders?.limit)} limit, ${formatCount(d.openOrders?.dca)} DCA)`],
-      ['Unmigrated DCA schedules', formatCount(d.migration?.remainingSchedules)],
+      ['Pallet DCA schedules still running', formatCount(d.migration?.remainingSchedules)],
     ]),
     table(['Asset', 'Reserved', 'USD', 'Orders'], (d.openOrders?.byAsset ?? []).slice(0, 8).map(a => [
       explorerLink(assetLabelWithId(a.asset), assetUrl(ctx.explorerBaseUrl, a.asset.assetId)),
@@ -445,6 +471,9 @@ function renderIce(d: IceDashboard, ctx: ToolContext): string {
     h3(`Fills (${formatCount(days.length)} days)`),
     kv([
       ['Fills in window', `${formatCount(fills30)} · ${formatUsd(usd30)}`],
+      ['Matched intent-to-intent', usd30 > 0 ? `${formatUsd(matched30)} (${formatPercent(matched30 / usd30 * 100)})` : formatUsd(matched30)],
+      ['Traders in window', d.traders == null ? null : `${formatCount(d.traders)} intent owners`],
+      ['Fills without a value', d.unpricedFills ? `${formatCount(d.unpricedFills)} — counted in fills, left out of every USD figure` : null],
       ['Protocol Revenue from ICE fees in window', formatUsd(fees30)],
     ]),
     table(['Day', 'Fills', 'Solutions', 'USD', 'Matched', 'Routed'], recent.map(r => [
@@ -455,19 +484,28 @@ function renderIce(d: IceDashboard, ctx: ToolContext): string {
     note(`The table is the LAST ${formatCount(recent.length)} of the ${formatCount(days.length)} days in the window; the "Fills in window" figure above covers all of them. "Matched" is filled against another intent; "routed" went out to a pool. A solution may carry several fills.`),
     h3('Execution quality'),
     kv([
-      ['Median time to fill', q?.medianTimeToFillSec == null ? null : `${q.medianTimeToFillSec}s`],
+      ['Median time to fill', q?.medianBlocksToFill != null
+        ? `${formatCount(q.medianBlocksToFill)} block${q.medianBlocksToFill === 1 ? '' : 's'}${q.medianTimeToFillSec == null ? '' : ` (~${q.medianTimeToFillSec}s)`}`
+        : q?.medianTimeToFillSec == null ? null : `${q.medianTimeToFillSec}s`],
       ['Partially filled', q?.partialShare == null ? null : formatPercent(q.partialShare * 100)],
       ['Cancelled', q?.cancelRate == null ? null : formatPercent(q.cancelRate * 100)],
       ['Expired', q?.expiryRate == null ? null : formatPercent(q.expiryRate * 100)],
-      ['Price against limit', q?.priceVsLimitBp ? `p10 ${q.priceVsLimitBp.p10} bps · median ${q.priceVsLimitBp.p50} bps · p90 ${q.priceVsLimitBp.p90} bps (positive = better than the limit)` : null],
+      ['Price against limit', q?.priceVsLimitBp?.p50 != null ? `p10 ${bps(q.priceVsLimitBp.p10)} · median ${bps(q.priceVsLimitBp.p50)} · p90 ${bps(q.priceVsLimitBp.p90)} (positive = better than the limit)` : null],
+      ['— market-style fills', q?.priceVsLimitBpImmediate?.p50 != null ? `median ${bps(q.priceVsLimitBpImmediate.p50)} over ${formatCount(q.priceVsLimitBpImmediate.fills)} fills within two blocks of placement — the app's swaps, whose limit is the quote less its slippage allowance, so this is that allowance rather than price improvement` : null],
+      ['— resting orders', q?.priceVsLimitBpResting?.p50 != null ? `median ${bps(q.priceVsLimitBpResting.p50)} over ${formatCount(q.priceVsLimitBpResting.fills)} fills of orders that waited — they fill at or near their limit` : null],
     ]),
+    (d.topTraders ?? []).length
+      ? joinBlocks(h3('Top traders'), table(['Owner', 'Fills', 'USD'], (d.topTraders ?? []).slice(0, 8).map(t => [
+        explorerLink(accountLabel(t.account, { withAddress: true }), accountUrl(ctx.explorerBaseUrl, t.account.address)), formatCount(t.fills), formatUsd(t.usd),
+      ])))
+      : null,
     h3('Busiest pairs'),
     table(['Pair', 'Fills', 'USD'], (d.topPairs ?? []).slice(0, 8).map(p => [
       `${assetLabel(p.assetIn)} → ${assetLabel(p.assetOut)}`, formatCount(p.fills), formatUsd(p.usd),
     ])),
     (d.feeRevenue?.potHoldings ?? []).length
       ? joinBlocks(h3('Fee pot holdings'), table(['Asset', 'Amount', 'USD'], d.feeRevenue.potHoldings.map(h => [
-        assetLabelWithId(h.asset), formatAmount(h.amount, h.asset.decimals), formatUsd(h.usd),
+        assetLabelWithId(h.asset), formatAmount(h.amount, h.asset.decimals), formatUsd(h.valueUsd),
       ])))
       : null,
   )

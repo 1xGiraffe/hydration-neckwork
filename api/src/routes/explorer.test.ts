@@ -10,6 +10,7 @@ import {
 import type { PriceInfo } from '../services/explorerService.ts'
 import { initGovernanceService } from '../services/governanceService.ts'
 import { initIceService } from '../services/iceService.ts'
+import { resetCacheForTests } from '../services/cache.ts'
 import { evmTransactionReceipt } from '../services/evmReceipt.ts'
 import type { ClickHouseClient } from '../db/client.ts'
 
@@ -454,6 +455,7 @@ describe('GET /explorer/ice', () => {
   const app = Fastify()
   beforeAll(async () => { await app.register(explorerRoutes) })
   afterAll(async () => { await app.close() })
+  afterEach(() => resetCacheForTests())
 
   it('answers the launch-state model when nothing has happened on the venue', async () => {
     const { client, sql } = stubClient(() => [])
@@ -462,16 +464,52 @@ describe('GET /explorer/ice', () => {
     const res = await app.inject('/explorer/ice')
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    expect(body.status).toEqual({ solverMode: 'V4', protocolFeePpm: 200, dcaMigrationEnabled: false, uniswapV3: null, asOfBlock: 14362830 })
+    expect(body.status).toEqual({ solverMode: 'V4', protocolFeePpm: 200, dcaMigrationEnabled: false, uniswapV3: null, asOfBlock: 14362830, routing: [] })
+    expect(body.allTime).toEqual({ intents: 0, limit: 0, dca: 0, owners: 0 })
+    expect(body.topTraders).toEqual([])
+    expect(body.quality.medianBlocksToFill).toBeNull()
     expect(body.openOrders).toEqual({ total: 0, limit: 0, dca: 0, byAsset: [] })
     expect(body.fillsPerDay).toHaveLength(30)
     expect(body.quality.priceVsLimitBp).toEqual({ p10: null, p50: null, p90: null })
     expect(body.migration.byReason).toEqual([])
     expect(body.topPairs).toEqual([])
-    // Every read went through the injected client, capped and launch-bounded — the
-    // twelve bucket/status reads plus the DCA completions' own read (loadCompletionFills).
-    expect(sql.some(q => q.includes('price_data.intent_orders FINAL'))).toBe(true)
-    expect(sql.some(q => q.includes("stream = 'ice_matched_fee'"))).toBe(true)
-    expect(sql.filter(q => q.includes('SETTINGS max_memory_usage=1000000000, max_threads=2'))).toHaveLength(13)
+    // Every dashboard read went through the injected client, each capped and bounded
+    // below by the launch block or the window's own blocks.
+    const ice = sql.filter(q => /^\s*-- ice:/.test(q))
+    expect(ice.map(q => /-- ice:(\S+)/.exec(q)![1]).sort()).toEqual(
+      ['all-time', 'bp-sample', 'day-ranges', 'fee-cold', 'fee-holdings', 'fee-mark', 'fee-tail', 'head', 'migration', 'pallet-dca', 'quality', 'status'])
+    for (const q of ice) {
+      expect(q, q).toContain('SETTINGS max_memory_usage=1000000000, max_threads=2')
+      expect(q, q).toMatch(/block_height >= \{(launch|lo|placed):UInt32\}|account_id = \{|id NOT IN/)
+    }
+  })
+
+  it('reads the series for the window\'s days in one span per source, with no day yet cached', async () => {
+    resetCacheForTests()
+    const { client, sql } = stubClient(q => q.includes('-- ice:day-ranges')
+      ? [{ day: new Date().toISOString().slice(0, 10), lo: 16_700_000, hi: 16_740_000 }]
+      : [])
+    initExplorerService(client)
+    initIceService(client)
+    const res = await app.inject('/explorer/ice')
+    expect(res.statusCode).toBe(200)
+    for (const tag of ['fills', 'routes', 'solutions']) {
+      const reads = sql.filter(q => q.includes(`-- ice:${tag}`))
+      expect(reads, tag).toHaveLength(1)
+    }
+  })
+
+  it('answers the open book: the reserve fold beside the resting orders and running DCA intents', async () => {
+    const { client, sql } = stubClient(() => [])
+    initExplorerService(client)
+    initIceService(client)
+    const res = await app.inject('/explorer/intents/open')
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.summary).toEqual({ total: 0, limit: 0, dca: 0, byAsset: [] })
+    expect(body).toMatchObject({ limitOrders: [], limitOrdersTotal: 0, dcaIntents: [], dcaIntentsTotal: 0 })
+    // Both kinds of resting intent are read, unfiltered by owner or asset.
+    expect(sql.some(q => q.includes("kind = 'swap'"))).toBe(true)
+    expect(sql.some(q => q.includes("kind = 'dca'"))).toBe(true)
   })
 })

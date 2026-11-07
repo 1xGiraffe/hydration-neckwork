@@ -9205,6 +9205,27 @@ export async function getOpenLimitOrders(accounts: string[]): Promise<OpenLimitO
     (await loadOpenLimitOrders(`owner IN (${list})`, {})).sort(compareLimitOrdersByValueDesc))
 }
 
+// Every resting limit order and running DCA intent on the venue, each side ranked by
+// its value — the Intents page's open book (iceService.getOpenIntents caches it).
+// The same loaders the account and asset pages use, with no owner or asset filter:
+// intent_orders holds one row per intent ever placed (thousands), so the unfiltered
+// read is the same scan those filtered ones already make.
+export async function getOpenIntentLists(): Promise<{ limitOrders: OpenLimitOrder[]; dcaIntents: ActiveDca[] }> {
+  const [limitOrders, dcaRes] = await Promise.all([
+    loadOpenLimitOrders('1', {}),
+    client.query({
+      query: `SELECT ${ACTIVE_DCA_INTENT_COLUMNS}
+              FROM (SELECT * FROM price_data.intent_orders FINAL WHERE kind = 'dca')
+              WHERE ${INTENT_RESTING_SQL}
+              ORDER BY block_height DESC
+              SETTINGS max_memory_usage=1000000000, max_threads=2`,
+      format: 'JSONEachRow',
+    }),
+  ])
+  const dcaIntents = await enrichActiveDcas(await dcaRes.json<ActiveDcaScheduleRow>())
+  return { limitOrders: limitOrders.sort(compareLimitOrdersByValueDesc), dcaIntents: dcaIntents.sort(compareDcasByBudgetUsdDesc) }
+}
+
 // One side of an asset's book. `price`/`size` restate the order from the asset's
 // own point of view, which is what lets orders quoted in different assets sit in
 // one ladder: `price` is counter-asset units per one unit of this asset, and

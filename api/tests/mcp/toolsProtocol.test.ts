@@ -364,8 +364,31 @@ describe('get_protocol_stats', () => {
     const out = await run(protocol, { dashboard: 'ice' }, { '/explorer/ice': ICE_DASH })
     expect(out.markdown).toContain('Solver mode')
     expect(out.markdown).toContain('200 ppm (0.020%)')
-    expect(out.markdown).toContain('median 10.3 bps')
+    expect(out.markdown).toContain('median +10.3 bps')
+    expect(out.markdown).toContain('p10 -0.1 bps')
     expect(out.markdown).toContain('positive = better than the limit')
+  })
+
+  it('links the Intents page and reads the fields the venue gained since runtime 447', async () => {
+    const dash = {
+      ...ICE_DASH,
+      status: { ...ICE_DASH.status, routing: [{ kind: 'StableswapPool', assets: [[HOLLAR_ASSET]], contracts: [], state: 'Excluded', block: 15_891_816 }] },
+      allTime: { intents: 6268, limit: 5044, dca: 1224, owners: 843 },
+      traders: 624, unpricedFills: 2,
+      topTraders: [{ account: { accountId: '0x' + '11'.repeat(32), address: '12xLgPQunSsPkwMJ3vAgfac7mtU3Xw6R4fbHQcCp2QqXzdtu' }, fills: 1920, usd: 1_648_700 }],
+      quality: { ...ICE_DASH.quality, medianTimeToFillSec: 2.2, medianBlocksToFill: 1, priceVsLimitBp: { p10: null, p50: null, p90: null } },
+      feeRevenue: { perDay: [{ day: '2026-09-18', usd: 0 }], potHoldings: [{ asset: HOLLAR_ASSET, amount: '1000000000000000000', valueUsd: 1.02 }] },
+    }
+    const out = await run(protocol, { dashboard: 'ice' }, { '/explorer/ice': dash })
+    expect(out.markdown).toContain('(https://explorer.example/intents)')
+    expect(out.markdown).toContain('6,268 (5,044 limit, 1,224 DCA) by 843 accounts')
+    expect(out.markdown).toContain('Solver routing overrides')
+    expect(out.markdown).toContain('excluded')
+    expect(out.markdown).toContain('1 block (~2.2s)')
+    expect(out.markdown).toContain('Top traders')
+    expect(out.markdown).toContain('$1.65M')
+    expect(out.markdown).toContain('$1.02')                                  // the fee account's holding, valued
+    expect(out.markdown).not.toContain('null bps')                          // no sample, no percentiles
   })
 
   it('cuts the security dashboard to its top rows and keeps the markets isolated', async () => {

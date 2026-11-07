@@ -21,7 +21,7 @@ import type { EvmTransactionFacts, IceSolutionPanel } from '../types'
 // when any leg is unpriced: a partial sum would read as a smaller solution.
 function IceSolutionCard({ panel, now }: { panel: IceSolutionPanel; now: number }) {
   return <>
-    <div className="sec-title" style={{ marginTop: 22 }}>ICE solution</div>
+    <div className="sec-title" style={{ marginTop: 22 }}>ICE solution <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}>· one batch of the <Link to={paths.intents()}>intents</Link> venue</span></div>
     <div className="detail-card"><div className="dl">
       <div className="dt">Executed</div>
       <div className="dd mono">{F.int(panel.intentsExecuted)} {panel.intentsExecuted === 1 ? 'intent' : 'intents'}

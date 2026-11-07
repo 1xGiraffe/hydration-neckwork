@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { ICE_LAUNCH_BLOCK, bpQuantiles, foldFills, foldMigration, latestGovernanceStatus, priceVsLimitBp, type GovernanceEventRow, type MigrationRow } from '../src/services/iceService.ts'
-
-const iceService = readFileSync(new URL('../src/services/iceService.ts', import.meta.url), 'utf8')
+import {
+  ICE_LAUNCH_BLOCK, IMMEDIATE_FILL_BLOCKS, bpQuantiles, completionIn, foldDays, foldMigration, foldQuality, foldWindow, initIceService,
+  latestGovernanceStatus, loadFeePerDay, matchedPerSolution, openBookSummary, priceVsLimitBp, routingTargetOf, secondsPerBlock,
+  type BpSampleRow, type DayRange, type GovernanceEventRow, type MigrationRow, type SolutionFill, type SolutionRoute,
+} from '../src/services/iceService.ts'
+import type { ActiveDca, OpenLimitOrder, PriceInfo } from '../src/services/explorerService.ts'
 
 const row = (event_name: string, args: unknown, block_height: number): GovernanceEventRow =>
   ({ event_name, args_json: JSON.stringify(args), block_height })
@@ -10,7 +12,7 @@ const row = (event_name: string, args: unknown, block_height: number): Governanc
 describe('latestGovernanceStatus', () => {
   it('answers the runtime-443 defaults when no governance event exists', () => {
     expect(latestGovernanceStatus([])).toEqual({
-      solverMode: 'V4', protocolFeePpm: 200, dcaMigrationEnabled: false, uniswapV3: null, asOfBlock: ICE_LAUNCH_BLOCK,
+      solverMode: 'V4', protocolFeePpm: 200, dcaMigrationEnabled: false, uniswapV3: null, asOfBlock: ICE_LAUNCH_BLOCK, routing: [],
     })
   })
 
@@ -21,7 +23,7 @@ describe('latestGovernanceStatus', () => {
       row('ICE.SolverModeSet', { mode: { __kind: 'Disabled' } }, 14_400_020),
     ]
     expect(latestGovernanceStatus(rows)).toEqual({
-      solverMode: 'Disabled', protocolFeePpm: 150, dcaMigrationEnabled: false, uniswapV3: null, asOfBlock: 14_400_020,
+      solverMode: 'Disabled', protocolFeePpm: 150, dcaMigrationEnabled: false, uniswapV3: null, asOfBlock: 14_400_020, routing: [],
     })
   })
 
@@ -33,7 +35,7 @@ describe('latestGovernanceStatus', () => {
     ]
     expect(latestGovernanceStatus(rows)).toEqual({
       solverMode: 'V4', protocolFeePpm: 200, dcaMigrationEnabled: false,
-      uniswapV3: { factory: '0xaa', swapRouter: '0xbb', quoter: '0xcc' }, asOfBlock: 14_400_100,
+      uniswapV3: { factory: '0xaa', swapRouter: '0xbb', quoter: '0xcc' }, asOfBlock: 14_400_100, routing: [],
     })
   })
 
@@ -45,8 +47,43 @@ describe('latestGovernanceStatus', () => {
       { event_name: 'ICE.ProtocolFeeSet', args_json: 'not json', block_height: 14_400_003 },
     ]
     expect(latestGovernanceStatus(rows)).toEqual({
-      solverMode: 'V4', protocolFeePpm: 200, dcaMigrationEnabled: false, uniswapV3: null, asOfBlock: ICE_LAUNCH_BLOCK,
+      solverMode: 'V4', protocolFeePpm: 200, dcaMigrationEnabled: false, uniswapV3: null, asOfBlock: ICE_LAUNCH_BLOCK, routing: [],
     })
+  })
+})
+
+// ICE.RoutingUpdated (runtime 447): SolverRouting is a map keyed by the target, so
+// the newest update of a target is its state and `state: None` removes it. Shapes
+// as the indexer stored them on chain (blocks 15,141,465 – 16,501,446).
+describe('the solver routing overrides', () => {
+  it('reads every target kind the pallet defines', () => {
+    expect(routingTargetOf({ __kind: 'AaveWrap', value: [1001356, 1012] })).toEqual({ kind: 'AaveWrap', assets: [[1001356, 1012]], contracts: [] })
+    expect(routingTargetOf({ __kind: 'AaveWraps', value: [[5, 1001], [10, 1002]] })).toEqual({ kind: 'AaveWraps', assets: [[5, 1001], [10, 1002]], contracts: [] })
+    expect(routingTargetOf({ __kind: 'StableswapPool', value: 100 })).toEqual({ kind: 'StableswapPool', assets: [[100]], contracts: [] })
+    expect(routingTargetOf({ __kind: 'OmnipoolAsset', value: '5' })).toEqual({ kind: 'OmnipoolAsset', assets: [[5]], contracts: [] })
+    expect(routingTargetOf({ __kind: 'XykPool', value: [5, 10] })).toEqual({ kind: 'XykPool', assets: [[5, 10]], contracts: [] })
+    expect(routingTargetOf({ __kind: 'UniswapV3Pool', value: '0x5C6208a3c316a801f8996750aa7b6f45fc988548' })).toEqual({ kind: 'UniswapV3Pool', assets: [], contracts: ['0x5c6208a3c316a801f8996750aa7b6f45fc988548'] })
+    expect(routingTargetOf({ __kind: 'UniswapV3Pools', value: ['0xaa', '0xbb'] })).toEqual({ kind: 'UniswapV3Pools', assets: [], contracts: ['0xaa', '0xbb'] })
+  })
+  it('refuses a payload it cannot read rather than guessing', () => {
+    expect(routingTargetOf({ __kind: 'AaveWrap', value: [5] })).toBeNull()
+    expect(routingTargetOf({ __kind: 'Teleport', value: 1 })).toBeNull()
+    expect(routingTargetOf(null)).toBeNull()
+  })
+  it('keeps the newest state per target, drops a removed one, and lists newest first', () => {
+    const rows = [
+      row('ICE.RoutingUpdated', { target: { __kind: 'StableswapPool', value: 100 }, state: { __kind: 'Included' } }, 15_000_000),
+      row('ICE.RoutingUpdated', { target: { __kind: 'AaveWrap', value: [23, 1023] }, state: { __kind: 'Included' } }, 15_000_001),
+      row('ICE.RoutingUpdated', { target: { __kind: 'StableswapPool', value: 100 }, state: { __kind: 'Excluded' } }, 15_891_816),
+      row('ICE.RoutingUpdated', { target: { __kind: 'UniswapV3Pool', value: '0xaa' }, state: { __kind: 'Included' } }, 15_900_000),
+      row('ICE.RoutingUpdated', { target: { __kind: 'UniswapV3Pool', value: '0xaa' }, state: null }, 15_900_005),
+    ]
+    const status = latestGovernanceStatus(rows)
+    expect(status.routing).toEqual([
+      { kind: 'StableswapPool', assets: [[100]], contracts: [], state: 'Excluded', block: 15_891_816 },
+      { kind: 'AaveWrap', assets: [[23, 1023]], contracts: [], state: 'Included', block: 15_000_001 },
+    ])
+    expect(status.asOfBlock).toBe(15_900_005)
   })
 })
 
@@ -115,95 +152,152 @@ describe('bpQuantiles', () => {
   })
 })
 
-// The first day of the venue (2026-09-09, 51 solutions): the dashboard reported
-// $112,582 "routed" against $16,577 of fills. Every hop of a route has an `in` leg
-// on the pot's projection — 247 legs over 54 routes — so a 4-hop route (USDT →
-// aUSDT → HOLLAR → H2O → aDOT) was counted four times, hub and intermediates
-// included. Routed is what each ROUTE took in, once: the per-asset net of its legs.
-describe('foldFills', () => {
-  const days = ['2026-09-09']
-  const solutions = new Map([['2026-09-09', 3]])
-  // Intent #34's three DCA trades (14402274/96/317): 3 × 190218680 aUSDC in, valued
-  // $570.60 off the fills' legs; the pot routed the same 570656040 aUSDC, valued
-  // $570.36 off its input leg.
-  const fills = [{ hour: '2026-09-09 12:00:00', day: '2026-09-09', a_in: 1003, a_out: 1000766, fills: '3', sum_in: '570656040', sum_out: '569735289', block: 14402317, valueUsd: 570.597636 }]
-  const routed = [{ hour: '2026-09-09 12:00:00', day: '2026-09-09', asset_id: 1003, sum_in: '570656040', block: 14402317, valueUsd: 570.363313 }]
-
-  it('reports the fills once, the routes once, and no matched volume on a fully routed day', () => {
-    expect(foldFills(fills, routed, solutions, days)).toEqual([
-      { day: '2026-09-09', fills: 3, solutions: 3, usd: 570.597636, matchedUsd: 0, routedUsd: 570.363313 },
-    ])
-  })
-
-  it('reads matched volume from the raw shortfall of the routes, priced like the fills', () => {
-    // 60 aUSDC more filled than routed → $60 at the fills' $1.0000 per aUSDC (570.597636 / 570.656040).
-    const more = [{ ...fills[0], sum_in: '630656040', valueUsd: 630.597636 }]
-    const [day] = foldFills(more, routed, solutions, days)
-    expect(day.matchedUsd).toBeCloseTo(60_000_000 * (630.597636 / 630_656_040), 6)
-    expect(day.routedUsd).toBe(570.363313)
-  })
-
-  it('never reads a valuation gap between the two legs as matched volume', () => {
-    // Same raw amounts, routed valued higher than the fills: still zero, not clamped noise.
-    const [day] = foldFills(fills, [{ ...routed[0], valueUsd: 571.9 }], solutions, days)
-    expect(day.matchedUsd).toBe(0)
-  })
-
-  it('grids every requested day, empty ones at zero', () => {
-    expect(foldFills([], [], new Map(), ['2026-09-08', '2026-09-09'])).toEqual([
-      { day: '2026-09-08', fills: 0, solutions: 0, usd: 0, matchedUsd: 0, routedUsd: 0 },
-      { day: '2026-09-09', fills: 0, solutions: 0, usd: 0, matchedUsd: 0, routedUsd: 0 },
-    ])
-  })
-})
-
-describe('routed and fill reads', () => {
-  it('nets each route per asset on its op_key and keeps the positive side only', () => {
-    expect(iceService).toContain('GROUP BY block_height, op_key, asset_id')
-    expect(iceService).toContain("greatest(toInt256(sumIf(toUInt256OrZero(amount), leg_kind = 'in')) - toInt256(sumIf(toUInt256OrZero(amount), leg_kind = 'out')), toInt256(0)) AS net_in")
-    expect(iceService).toContain('WHERE net_in > 0')
-    // Never the bare per-hop sum again.
-    expect(iceService).not.toMatch(/leg_kind = 'in'\n\s+GROUP BY hour, day, asset_id/)
-  })
-  it("counts a DCA intent's completing trade as a fill, with the settlement reader's amounts", () => {
-    expect(iceService).toContain("event_name = '${DCA_COMPLETED_EVENT}'")
-    expect(iceService).toContain('buckets.push(...await loadCompletionFills())')
-    expect(iceService).toContain('iceSettlementsFor(rows, await getIntentOrders(rows.map(r => r.intent_id)))')
-  })
-})
-
-// The dashboard's reads run against the live ClickHouse: every one must carry a
-// block or time bound and the per-query resource caps the brief mandates.
-describe('iceService reads', () => {
-  const statements = iceService.split(/query:\s*`/).slice(1).map(s => s.split('`')[0])
-  it('bounds and caps every statement', () => {
-    expect(statements.length).toBeGreaterThanOrEqual(8)
-    for (const sql of statements) {
-      expect(sql, sql).toMatch(/block_height >= \{launch:UInt32\}|account_id = \{|id NOT IN/)
-      expect(sql, sql).toContain('SETTINGS max_memory_usage=')
-      expect(sql, sql).toContain('max_threads=')
-      expect(sql, sql).not.toMatch(/PREWHERE[\s\S]*WHERE/)
+// A stand-in for the shared event-time valuation: every leg is worth one dollar per
+// raw unit at its block, except an asset the test leaves unpriced.
+// It records the blocks it was asked to price at, so a test can see that a row is
+// valued at its own solution's block.
+function fakeValue(unpriced: ReadonlySet<number> = new Set()) {
+  const blocks: number[] = []
+  const value = async <T extends object>(rows: T[], pick: (r: T) => { block: number; legs: { assetId: number; decimals: number; raw: string }[] } | null) => {
+    for (const row of rows) {
+      const p = pick(row)
+      if (!p) continue
+      blocks.push(p.block)
+      const leg = p.legs.find(l => !unpriced.has(l.assetId))
+      ;(row as { valueUsd: number | null }).valueUsd = leg ? Number(leg.raw) : null
     }
+  }
+  return { value, blocks }
+}
+
+// Two solutions on one day: the first routes 300 DOT with nothing matched, the
+// second matches 200 DOT and routes nothing. The pallet charges its fee on the
+// second (matched_X per solution, floored at zero); a per-day netting would set the
+// 200 DOT of the second against the first's routes and find no matched volume.
+const DOT = 5, USDT = 10
+const fill = (block: number, amountIn: string | null, amountOut: string | null = '1', owner = 'a'): SolutionFill => ({ block, owner, assetIn: DOT, assetOut: USDT, amountIn, amountOut })
+const twoSolutions = {
+  fills: [fill(100, '100'), fill(200, '200', '1', 'b')],
+  routes: [{ block: 100, assetId: DOT, netIn: '300' }] as SolutionRoute[],
+}
+
+describe('matchedPerSolution', () => {
+  it('nets each solution on its own, as the pallet does', () => {
+    expect(matchedPerSolution(twoSolutions.fills, twoSolutions.routes)).toEqual([{ block: 200, assetId: DOT, matched: 200n }])
   })
-  it('deduplicates the replaceable tables before summing over them', () => {
-    expect(iceService).toContain('price_data.intent_orders FINAL')
-    expect(iceService).toContain('price_data.intent_events FINAL')
-    expect(iceService).toContain('price_data.dca_events FINAL')
-    expect(iceService).toContain('price_data.revenue_events FINAL')
-    expect(iceService).toContain('price_data.pool_swap_legs_by_account FINAL')
+  it('floors a solution that routed more than its intents put in at zero', () => {
+    expect(matchedPerSolution([fill(1, '50')], [{ block: 1, assetId: DOT, netIn: '80' }])).toEqual([])
   })
-  it('caches the model stale-while-revalidate under the agreed key', () => {
-    expect(iceService).toContain("cachedSwr('explorer:ice-dashboard:model', 300_000, 48 * 3_600_000")
+  it('sums every intent of a solution in one asset before netting', () => {
+    expect(matchedPerSolution([fill(1, '50'), fill(1, '70', '1', 'b')], [{ block: 1, assetId: DOT, netIn: '100' }])).toEqual([{ block: 1, assetId: DOT, matched: 20n }])
   })
-  it("reads the fee stream Task 8 writes", () => {
-    expect(iceService).toContain("stream = 'ice_matched_fee'")
+  it('keeps 128-bit amounts exact', () => {
+    const big = (1n << 100n) + 7n
+    expect(matchedPerSolution([fill(1, big.toString())], [{ block: 1, assetId: DOT, netIn: '7' }])[0].matched).toBe(1n << 100n)
   })
-  it('classifies a limit order as anything that is not a DCA intent, like the feed', () => {
-    expect(iceService).not.toContain("kind = 'swap'")
-    expect(iceService).toContain("kind != 'dca'")
+})
+
+describe('completionIn — the final DCA trade the Intent events state no amount for', () => {
+  it('spends the per-trade amount when the budget left covers it', () => {
+    expect(completionIn({ amountIn: '100', budget: '1000' }, '150')).toBe('100')
   })
-  it('is handed its client at boot rather than opening a pool of its own', () => {
-    expect(iceService).not.toContain('createClickHouseClient')
-    expect(iceService).toContain('export function initIceService(c: ClickHouseClient)')
+  it('spends the remainder when the budget left is short of one trade', () => {
+    expect(completionIn({ amountIn: '250000000000000', budget: '1000000000000000' }, '10416666666668')).toBe('10416666666668')
+  })
+  it('falls back to the budget when no trade preceded it, and to one trade for a rolling intent', () => {
+    expect(completionIn({ amountIn: '100', budget: '60' }, undefined)).toBe('60')
+    expect(completionIn({ amountIn: '100', budget: '' }, null)).toBe('100')
+  })
+})
+
+const ranges: DayRange[] = [
+  { day: '2026-10-22', lo: 1, hi: 150, closed: true },
+  { day: '2026-10-23', lo: 151, hi: 300, closed: false },
+]
+
+describe('foldDays', () => {
+  it('values every row at its own solution block and files it under that block\'s day', async () => {
+    const { value, blocks } = fakeValue()
+    const [d1, d2] = await foldDays(ranges, twoSolutions.fills, twoSolutions.routes, [100, 200], value)
+    expect(new Set(blocks)).toEqual(new Set([100, 200]))
+    expect(d1).toMatchObject({ day: '2026-10-22', fills: 1, solutions: 1, matchedUsd: 0, routedUsd: 300 })
+    expect(d2).toMatchObject({ day: '2026-10-23', fills: 1, solutions: 1, matchedUsd: 200, routedUsd: 0 })
+    expect([...d2.owners]).toEqual([['b', { fills: 1, usd: 200 }]])
+  })
+  it('counts a fill it cannot value and keeps it out of every dollar sum', async () => {
+    const { value } = fakeValue(new Set([DOT, USDT]))
+    const [d1] = await foldDays(ranges, [fill(10, '5'), fill(11, null, null)], [], [10, 11], value)
+    expect(d1).toMatchObject({ fills: 2, unpriced: 2, usd: 0 })
+  })
+})
+
+describe('foldWindow', () => {
+  it('rolls the days up, ranks traders and pairs, and snaps sub-cent residue to zero', async () => {
+    const { value } = fakeValue()
+    const facts = await foldDays(ranges, twoSolutions.fills, twoSolutions.routes, [100, 200], value)
+    const w = foldWindow(['2026-10-21', '2026-10-22', '2026-10-23'], facts)
+    expect(w.series.map(d => d.day)).toEqual(['2026-10-21', '2026-10-22', '2026-10-23'])
+    expect(w.series[0]).toEqual({ day: '2026-10-21', fills: 0, solutions: 0, usd: 0, matchedUsd: 0, routedUsd: 0 })
+    expect(w.series[2].matchedUsd).toBe(200)
+    expect(w.traders).toBe(2)
+    expect(w.topPairs).toEqual([{ assetIn: DOT, assetOut: USDT, fills: 2, usd: 300 }])
+    const residue = foldWindow(['2026-10-22'], [{ ...facts[0], matchedUsd: 2.39e-14, routedUsd: 0.004 }])
+    expect(residue.series[0]).toMatchObject({ matchedUsd: 0, routedUsd: 0 })
+  })
+})
+
+describe('foldQuality', () => {
+  const row = (fill_out: string, blocks_after: number): BpSampleRow => ({ fill_in: '100', fill_out, limit_in: '100', limit_out: '100', blocks_after })
+  it('splits price vs limit between market-style fills and resting orders', () => {
+    const q = foldQuality(undefined, null, [row('101', 1), row('101', IMMEDIATE_FILL_BLOCKS), row('100', IMMEDIATE_FILL_BLOCKS + 1)])
+    expect(q.priceVsLimitBpImmediate).toEqual({ p10: 100, p50: 100, p90: 100, fills: 2 })
+    expect(q.priceVsLimitBpResting).toEqual({ p10: 0, p50: 0, p90: 0, fills: 1 })
+    expect(q.priceVsLimitBp.p50).toBe(100)
+  })
+  it('states time to fill in blocks and, at the window\'s pace, in seconds', () => {
+    const q = foldQuality({ closed: '10', filled: '8', cancelled: '1', expired: '1', filled_partially: '2', median_blocks: '1' }, 2.15, [])
+    expect(q).toMatchObject({ medianBlocksToFill: 1, medianTimeToFillSec: 2.2, partialShare: 0.25, cancelRate: 0.1, expiryRate: 0.1 })
+  })
+  it('reads the pace from the window\'s first block to the head', () => {
+    expect(secondsPerBlock(ranges, 1_000, 1_598)).toBe(2)
+    expect(secondsPerBlock([], 0, 10)).toBeNull()
+  })
+})
+
+describe('openBookSummary', () => {
+  const asset = (assetId: number, decimals = 10) => ({ assetId, symbol: `A${assetId}`, name: null, decimals, parachainId: null })
+  const prices = new Map<number, PriceInfo>([[DOT, { price: 4 } as PriceInfo]])
+  const limit = (remainingIn: string) => ({ intentId: remainingIn, assetIn: asset(DOT), remainingIn }) as unknown as OpenLimitOrder
+  const dca = (intentId: string, assetId = DOT) => ({ intentId, assetIn: asset(assetId) }) as unknown as ActiveDca
+  it('holds a limit order\'s unfilled rest and a DCA intent\'s remaining budget, per asset', () => {
+    const s = openBookSummary([limit('20000000000'), limit('5000000000')], [dca('9'), dca('8', USDT)], new Map([['9', '10000000000'], ['8', '3']]), prices)
+    expect(s).toMatchObject({ total: 4, limit: 2, dca: 2 })
+    expect(s.byAsset.map(r => [r.asset.assetId, r.reserved, r.orders])).toEqual([[DOT, '35000000000', 3], [USDT, '3', 1]])
+  })
+})
+
+// The fee: the published hours up to the stream's own cold mark, the raw tail past it.
+describe('loadFeePerDay', () => {
+  it('reads the ICE stream\'s own mark and splits the two arms there, summing both per day', async () => {
+    const seen: { query: string; params: Record<string, unknown> }[] = []
+    initIceService({
+      query: async ({ query, query_params }: { query: string; query_params: Record<string, unknown> }) => {
+        seen.push({ query, params: query_params })
+        const rows = query.includes('-- ice:fee-mark') ? [{ mark: '2026-11-07 07:04:12', n: '22' }]
+          : query.includes('-- ice:fee-cold') ? [{ day: '2026-11-07', usd: 4 }]
+            : query.includes('-- ice:fee-tail') ? [{ day: '2026-11-07', usd: 0.5 }, { day: '2026-11-08', usd: 1 }] : []
+        return { json: async () => rows }
+      },
+    } as never)
+    const out = await loadFeePerDay('2026-10-09 00:00:00', Date.parse('2026-11-07T10:30:00Z') / 1000)
+    expect([...out]).toEqual([['2026-11-07', 4.5], ['2026-11-08', 1]])
+    const mark = seen.find(s => s.query.includes('-- ice:fee-mark'))!
+    expect(mark.params).toMatchObject({ stream: 'ice_matched_fee' })
+    const cold = seen.find(s => s.query.includes('-- ice:fee-cold'))!
+    const tail = seen.find(s => s.query.includes('-- ice:fee-tail'))!
+    expect(cold.params.mark).toBe('2026-11-07 07:04:12')
+    expect(tail.params.mark).toBe('2026-11-07 07:04:12')
+    // The raw arm reaches back to the mark (with an hour of slack), not 26 hours.
+    expect(tail.params.hours).toBe(5)
   })
 })

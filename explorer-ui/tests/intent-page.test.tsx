@@ -49,10 +49,10 @@ describe('the /intent/<id> route', () => {
     const parsed = parseRoute(paths.intent(DCA_ID))
     expect(parsed.name === 'intent' && parsed.intentId).toBe(DCA_ID)
   })
-  it('sends a malformed or missing id to the Trade tab, like the other trade pages', () => {
-    expect(parseRoute('/intent/abc')).toEqual({ name: 'legacy', to: '/activity?tab=trade' })
-    expect(parseRoute('/intent/123-e4')).toEqual({ name: 'legacy', to: '/activity?tab=trade' })
-    expect(parseRoute('/intent')).toEqual({ name: 'legacy', to: '/activity?tab=trade' })
+  it('sends a malformed or missing id to the intents page, where intents are listed', () => {
+    expect(parseRoute('/intent/abc')).toEqual({ name: 'legacy', to: '/intents' })
+    expect(parseRoute('/intent/123-e4')).toEqual({ name: 'legacy', to: '/intents' })
+    expect(parseRoute('/intent')).toEqual({ name: 'legacy', to: '/intents' })
   })
 })
 
@@ -84,8 +84,8 @@ describe('the Intent page — a filled limit order', () => {
     expect(html).toContain('Limit order #0')
     expect(html).toMatch(/●\s*filled</)
   })
-  it('crumbs lead back to the Trade tab of the activity feed', () => {
-    expect(html).toContain('href="/activity?tab=trade"')
+  it('crumbs lead back to the intents page', () => {
+    expect(html).toContain('href="/intents"')
   })
   it('lists both fills, each linking to its own event rather than back to this page', () => {
     expect((html.match(/data-label="Activity"/g) ?? []).length).toBe(2)

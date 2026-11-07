@@ -154,7 +154,7 @@ export function Intent({ intentId }: { intentId: string }) {
   return (
     <div className="wrap">
       <div className="page-head">
-        <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Activity', to: paths.activity() + '?tab=trade' }, { label: title }]} />
+        <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Intents', to: paths.intents() }, { label: title }]} />
         <div className="page-title">{title}
           {data && <span className="sub">{data.status}</span>}
         </div>

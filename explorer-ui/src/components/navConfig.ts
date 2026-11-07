@@ -24,7 +24,6 @@ const IT = {
   liquidity: { to: paths.liquidity(), label: 'Liquidity', match: ['liquidity', 'pool', 'omnipool'] } as NavItem,
   hdx: { to: paths.hdx(), label: 'HDX', match: ['hdx'] } as NavItem,
   hollar: { to: paths.hollar(), label: 'HOLLAR', match: ['hollar'] } as NavItem,
-  // /ice (ICE dashboard) is deliberately URL-only until the venue has live activity — no nav entry yet.
   volume: { to: paths.volume(), label: 'Volume', match: ['volume'] } as NavItem,
   oracles: { to: paths.oracles(), label: 'Oracles', match: ['oracles', 'oracle'] } as NavItem,
   // The overview alone: inside the Revenue menu only the page a reader is on
@@ -35,6 +34,8 @@ const IT = {
   blocks: { to: paths.blocks(), label: 'Blocks', match: ['blocks', 'block'] } as NavItem,
   extrinsics: { to: paths.extrinsics(), label: 'Extrinsics', match: ['extrinsics', 'extrinsic'] } as NavItem,
   events: { to: paths.events(), label: 'Events', match: ['events', 'event'] } as NavItem,
+  // The ICE intent venue: its dashboard and open book, and every order's own page.
+  intents: { to: paths.intents(), label: 'Intents', match: ['intents', 'intent'] } as NavItem,
   contracts: { to: paths.contracts(), label: 'Contracts', match: ['contracts'] } as NavItem,
   security: { to: paths.security(), label: 'Security', match: ['security'] } as NavItem,
   governance: { to: paths.governance(), label: 'Governance', match: ['governance', 'referendum'] } as NavItem,
@@ -66,8 +67,8 @@ const ACCOUNTS_GROUP: NavGroup = { label: 'Accounts', items: [IT.accounts, IT.ta
 const REVENUE_GROUP: NavGroup = { label: 'Revenue', items: [IT.revenue, IT.revenueUsers, IT.revenueProtocol], menuItems: [IT.revenueUsers, IT.revenueProtocol] }
 const CHAIN_GROUP: NavGroup = {
   label: 'Chain',
-  items: [IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.security, IT.governance, IT.dataApi, IT.mcp],
-  menuItems: [IT.security, IT.governance, IT.blocks, IT.extrinsics, IT.events, IT.contracts, IT.dataApi, IT.mcp],
+  items: [IT.blocks, IT.extrinsics, IT.events, IT.intents, IT.contracts, IT.security, IT.governance, IT.dataApi, IT.mcp],
+  menuItems: [IT.security, IT.governance, IT.blocks, IT.extrinsics, IT.events, IT.intents, IT.contracts, IT.dataApi, IT.mcp],
 }
 // Mid-width fold (861–1119px, CSS-gated): HDX/HOLLAR and the Assets and
 // Revenue groups collapse into this single wider Assets dropdown so the topbar
