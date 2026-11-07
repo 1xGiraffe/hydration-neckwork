@@ -6710,6 +6710,8 @@ export function buildMoneyMarketAccountValueClaims(
   // keyed `${pool}:${reserve}`: a flagged reserve with no positive supply claim is
   // stored as an unstated claim (reserve_present = 2).
   collateralFlags: ReadonlyMap<string, ReadonlyMap<string, boolean>> = new Map(),
+  // Collects the reserves skipped for having no registry asset (see below).
+  unmapped: Set<string> = new Set(),
 ): MoneyMarketAccountValueClaim[] {
   const contractMap = new Map<string, { token: MmReserveToken; side: 'supplied' | 'debt' }>()
   for (const token of tokens) {
@@ -6734,10 +6736,14 @@ export function buildMoneyMarketAccountValueClaims(
     seenHoldings.add(holdingKey)
     const mapped = contractMap.get(holding.contract.toLowerCase())
     if (!mapped) throw new Error(`unmapped positive money-market contract ${holding.contract}`)
+    // A reserve with no registry asset — a Juicer vault's synthetic collateral, held only
+    // by its vault to prop its health factor — has no price and is no one's value: it is
+    // left out and counted (the market's aggregate row still states the position), never
+    // a reason to stop the generation for every account.
+    const assetId = assetIdFromMmAddress(mapped.token.asset)
+    if (assetId == null) { unmapped.add(mapped.token.asset); continue }
     const idx = indices.get(`${mapped.token.poolProxy}:${mapped.token.asset}`)
     if (!idx) throw new Error(`missing money-market reserve index ${mapped.token.poolProxy}:${mapped.token.asset}`)
-    const assetId = assetIdFromMmAddress(mapped.token.asset)
-    if (assetId == null) throw new Error(`unmapped money-market reserve asset ${mapped.token.asset}`)
     const actual = settledAmount(holding.scaled, mapped.side === 'supplied' ? idx.liq : idx.vbi)
     const holderMarket = `${holder}|${mapped.token.poolProxy}`
     holderMarkets.add(holderMarket)
@@ -6973,7 +6979,9 @@ async function refreshMoneyMarketAccountValuesUncached(): Promise<'republished' 
   // Every holder in the generation's flags, read once (two user-first tables), so a
   // collateral reserve the fold holds nothing of is stored beside the amounts.
   const collateralFlags = await mmCollateralFlagsByHolder([...new Set([...holdings.map(h => h.holder), ...aggregates.map(a => a.holder)])])
-  const claims = buildMoneyMarketAccountValueClaims(holdings, tokens, indices, aggregates, collateralFlags)
+  const unmapped = new Set<string>()
+  const claims = buildMoneyMarketAccountValueClaims(holdings, tokens, indices, aggregates, collateralFlags, unmapped)
+  if (unmapped.size) console.warn(`[mm-account-values] ${unmapped.size} reserve(s) with no registry asset left out of the claims: ${[...unmapped].join(', ')}`)
   if (!claims.length) throw new Error('money-market account value generation is empty')
 
   const snapshotId = String(Date.now())
