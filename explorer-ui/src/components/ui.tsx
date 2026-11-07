@@ -384,14 +384,18 @@ export function Usd({ v }: { v?: number | null }) {
 // A plain (already-scaled) quantity — the HDX-denominated dashboards and the
 // compact counters, whose API fields are numbers with no raw integer behind them.
 // Same promise as Usd: un-compacted, not exact.
-export function Num({ v, suffix = '' }: { v?: number | null; suffix?: string }) {
+// `digits` shows that many significant digits instead of the rough scale — for a
+// price or rate, where the rough scale's "1" for 1.003 claims an exact parity the
+// order does not state.
+export function Num({ v, suffix = '', digits }: { v?: number | null; suffix?: string; digits?: number }) {
   if (v == null || !Number.isFinite(v)) return <>—</>
   // Significant digits, not decimal places: these fields span 201,000,000 HDX and
   // a sub-cent dust balance, and a fixed decimal count reads one of them as "0".
   // Fifteen is what a double actually carries — asking for more prints its noise.
   const full = v.toLocaleString('en-US', { maximumSignificantDigits: 15 })
+  const shown = digits != null ? v.toLocaleString('en-US', { maximumSignificantDigits: digits }) : compactAmount(v)
   // The unit stays outside the copied text — a pasted "1,234.5 HDX" is not a number.
-  return <><CopyValue full={full + suffix} plain={String(v)}>{compactAmount(v)}</CopyValue>{suffix}</>
+  return <><CopyValue full={full + suffix} plain={String(v)}>{shown}</CopyValue>{suffix}</>
 }
 
 // Relative time ("3m ago") that reveals the absolute UTC timestamp on hover.
