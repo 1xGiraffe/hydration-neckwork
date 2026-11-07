@@ -10,9 +10,19 @@
 // Σ issued − Σ redeemed of every bond over that underlying.
 //
 // A bond is SOLD by its issuer through one or more primary-sale sources (`BondSale`): an
-// OTC order governance placed selling it (bondSales.ts reads them), or — for the HDX
-// bonds — an LBP pool. A source is a `sale` when it takes money and a `rollover` when it
-// takes an older bond of the same underlying.
+// OTC order governance placed selling it, or — for the HDX bonds — a liquidity
+// bootstrapping pool (bondSales.ts reads both). A source is a `sale` when it takes money
+// and a `rollover` when it takes an older bond of the same underlying.
+//
+// FACE UNITS. A sale's terms — its price, discount, yield, APR, the sale anchor — are
+// stated in the bond's face (units of its underlying). A payment that IS face units (the
+// underlying itself, or a dollar stablecoin for a dollar bond: DOLLAR_FACE_UNITS) reads
+// 1:1. A payment that is not — the HDX bonds were sold for DOT — is restated in face
+// units at the EVENT-TIME price of each fill (`BondSaleFill.paidFace`: the payment's
+// hourly USD close over the underlying's, the closed candles at or before the fill),
+// the AGENTS.md rule for flows: what the buyer gave up, in HDX, when it bought. So an
+// HDX bond's discount and APR are HDX-denominated: the HDX a purchase was worth at the
+// time against the HDX it redeems for at maturity.
 
 /** 10^18 — WAD fixed point for prices and factors. */
 export const BOND_WAD = 10n ** 18n
@@ -20,6 +30,7 @@ export const YEAR_MS = 365 * 86_400_000
 /** The Bonds pallet pot (`modl` + `pltbonds`): holds the underlying of every outstanding bond. */
 export const BONDS_POT_ACCOUNT = '0x6d6f646c706c74626f6e64730000000000000000000000000000000000000000'
 export const HOLLAR_ASSET_ID = 222
+export const HDX_ASSET_ID = 0
 
 /** A family of bonds: every bond over one underlying, shown on one page (`/<key>-bonds`). */
 export interface BondFamily { key: string; underlyingId: number; title: string; appUrl: string | null; description: string }
@@ -28,6 +39,10 @@ export const BOND_FAMILIES: readonly BondFamily[] = [
   {
     key: 'hollar', underlyingId: HOLLAR_ASSET_ID, title: 'HOLLAR Bonds', appUrl: 'https://app.hydration.net/strategies/hollar-bonds',
     description: 'HOLLAR Bonds on Hydration: fixed-yield bonds the Treasury sells below face, redeemable 1:1 for HOLLAR at maturity. Every round’s fixed yield and APR, sale progress, rollovers, redemptions, holders and every purchase, transfer and redemption.',
+  },
+  {
+    key: 'hdx', underlyingId: HDX_ASSET_ID, title: 'HDX Bonds', appUrl: null,
+    description: 'HDX Bonds on Hydration: one-year bonds the Treasury sold for DOT through liquidity bootstrapping pools, redeemable 1:1 for HDX at maturity. Every round’s LBP sale — price curve, fills, buyers, discount and APR in HDX — redemptions, holders and every purchase, transfer and redemption.',
   },
 ]
 export const bondFamily = (key: string): BondFamily | undefined => BOND_FAMILIES.find(f => f.key === key)
@@ -75,12 +90,69 @@ export interface BondSaleFill {
   extrinsicIndex: number | null
   atMs: number
   taker: string
-  /** What the buyer paid (raw, payment asset). */
+  /**
+   * `buy` (the default): the taker bought bonds from the source. `sell`: the taker sold
+   * bonds BACK into it (an LBP trades both ways) — `bonds` went back in, `paid` came out
+   * to the taker; every sum over a source's fills nets the two.
+   */
+  side?: 'buy' | 'sell'
+  /** What the buyer paid, its venue fee in the payment asset included (raw, payment asset); for a sell, what the seller received. */
   paid: string
-  /** Bonds the source released (raw), the venue's fee included; the buyer received `bonds − fee`. */
+  /** Bonds the source released (raw), the venue's fee included; the buyer received `bonds − fee`. For a sell, the bonds returned. */
   bonds: string
+  /** The venue's fee in BONDS (an OTC fill's); '0' for a venue whose fee is charged in the payment asset. */
   fee: string
+  /** The venue's fee in the payment asset (an LBP trade's, which the fee collector receives), already inside `paid` for a buy. */
+  paymentFee?: string
+  /**
+   * A venue whose fills are trades (an LBP): the event(s) the explorer's trade row for
+   * this fill is identified by in its block — the router's net summary closing a routed
+   * fill, the fill's own event otherwise, and a DCA execution's TradeExecuted after it.
+   */
+  rowEvents?: number[]
+  /**
+   * `paid` in the bond's face units (raw, bond decimals) at the fill's event-time prices,
+   * for a source whose payment is not face units (bonds.ts header). Null when either
+   * price was missing at the time: the fill's terms are then unstated.
+   */
+  paidFace?: string | null
   partial: boolean
+}
+/** An LBP source's own terms (pallet-lbp `Pool`), its seed and what it returned. */
+export interface BondLbpTerms {
+  /** The pool's account (the issuer side while it holds unsold bonds). */
+  pool: string
+  owner: string
+  feeCollector: string
+  /** The trading fee, numerator / denominator, charged in the payment (accumulated) asset. */
+  fee: [number, number]
+  /** The PAYMENT asset's weight at the start and the end, of LBP_MAX_WEIGHT; the bond's is the rest. */
+  initialWeight: number
+  finalWeight: number
+  /** The sale window in RELAY-chain blocks (the pallet's clock), and when it ran on Hydration (null until the relay chain reaches it). */
+  startRelay: number
+  endRelay: number
+  startMs: number | null
+  endMs: number | null
+  /** What the owner seeded (raw, payment asset and bonds). */
+  seed: { block: number; payment: string; bonds: string }
+  /** What the owner took back when the pool was emptied, and when; null while it holds its reserves. */
+  returned: { block: number; atMs: number; payment: string; bonds: string } | null
+  /** Per fill (same order as `fills`), the relay block it executed at: the weight curve's clock. */
+  fillRelay: Array<number | null>
+  /**
+   * Face units (raw, bond decimals) one whole payment unit was worth at each fill and at
+   * the sale's start and end — the event-time rate `paidFace` applies; null where a
+   * price was missing, and for a source paying in face units.
+   */
+  faceRate: { start: string | null; end: string | null; fills: Array<string | null> }
+  /**
+   * While the sale stands: the pool's price now (its spot at the newest relay block,
+   * WAD per bond) — what a buy executes at, the fee included, since the pool prices a
+   * buy on its gross amount — in the payment asset and in face units at the newest
+   * close. Null once the sale has ended.
+   */
+  spot?: { relay: number; payWad: string; faceWad: string | null } | null
 }
 /** One primary-sale source of one bond. */
 export interface BondSale {
@@ -100,7 +172,14 @@ export interface BondSale {
   /** When the issuer withdrew it (an OTC pull); null while it stands. */
   closedBlock: number | null
   closedMs: number | null
+  /** The events that opened and withdrew it (an OTC order's Placed / Cancelled), for naming those rows. */
+  openedEvent?: { eventIndex: number; extrinsicIndex: number | null }
+  closedEvent?: { eventIndex: number; extrinsicIndex: number | null }
   fills: BondSaleFill[]
+  /** The source's payments are not face units and each fill carries its event-time face value (`paidFace`). */
+  facedAtEventTime?: boolean
+  /** An LBP source's pool terms. */
+  lbp?: BondLbpTerms
 }
 
 /**
@@ -127,9 +206,13 @@ export interface BondSaleProgress {
 }
 /** A source's progress: ONE definition of open / sold out / closed for every surface. */
 export function saleProgress(s: BondSale, maturityMs: number, nowMs: number): BondSaleProgress {
-  const sold = s.fills.reduce((a, f) => a + BigInt(f.bonds), 0n)
-  const paid = s.fills.reduce((a, f) => a + BigInt(f.paid), 0n)
-  const net = s.fills.reduce((a, f) => a + BigInt(f.bonds) - BigInt(f.fee), 0n)
+  let sold = 0n, paid = 0n, net = 0n
+  for (const f of s.fills) {
+    const sign = f.side === 'sell' ? -1n : 1n
+    sold += sign * BigInt(f.bonds)
+    paid += sign * BigInt(f.paid)
+    net += sign * (BigInt(f.bonds) - BigInt(f.fee))
+  }
   const left = s.offered != null ? BigInt(s.offered) - sold : null
   const lastFill = s.fills.length ? s.fills[s.fills.length - 1].atMs : null
   if (left != null && left <= 0n) return { sold, paid, net, remaining: 0n, unsold: 0n, state: 'filled', endedMs: lastFill }
@@ -139,9 +222,22 @@ export function saleProgress(s: BondSale, maturityMs: number, nowMs: number): Bo
   return { sold, paid, net, remaining: left ?? 0n, unsold: 0n, state: 'open', endedMs: null }
 }
 
-/** A source taking money in the bond's face units (a rollover pays in bonds and is no money sale). */
-export function isMoneySale(s: Pick<BondSale, 'kind' | 'paymentAssetId'>, underlyingId: number): boolean {
-  return s.kind === 'sale' && paysInFaceUnits(s.paymentAssetId, underlyingId)
+/**
+ * A source taking money whose face value is stated: in the bond's face units, or in
+ * another asset restated at each fill's event-time prices (an HDX bond's LBP sale for
+ * DOT). A rollover pays in bonds and is no money sale.
+ */
+export function isMoneySale(s: Pick<BondSale, 'kind' | 'paymentAssetId' | 'facedAtEventTime'>, underlyingId: number): boolean {
+  return s.kind === 'sale' && (paysInFaceUnits(s.paymentAssetId, underlyingId) || s.facedAtEventTime === true)
+}
+/**
+ * A fill's payment in the bond's face units (raw, bond decimals): the payment itself
+ * when it pays in face units, else its event-time face value; null when unstated (an
+ * unpriced hour, or a payment in another asset with no face value).
+ */
+export function fillPaidFace(s: Pick<BondSale, 'paymentAssetId' | 'bondId'>, f: Pick<BondSaleFill, 'paid' | 'paidFace'>, underlyingId: number, decimalsOf: (assetId: number) => number): bigint | null {
+  if (paysInFaceUnits(s.paymentAssetId, underlyingId)) return rescale(BigInt(f.paid), decimalsOf(s.paymentAssetId), decimalsOf(s.bondId))
+  return f.paidFace != null && /^\d+$/.test(f.paidFace) ? BigInt(f.paidFace) : null
 }
 
 /**
@@ -156,13 +252,29 @@ export function saleAnchor(sales: readonly BondSale[], t: { underlyingId: number
   if (!money.length) return null
   const openedMs = Math.min(...money.map(s => s.openedMs))
   const progress = money.map(s => ({ s, p: saleProgress(s, t.maturityMs, nowMs) }))
-  const open = progress.filter(x => x.p.state === 'open' && x.s.offered != null && x.s.asked != null)
-    .map(x => salePriceWad(BigInt(x.s.asked!), decimalsOf(x.s.paymentAssetId), BigInt(x.s.offered!), decimalsOf(x.s.bondId)))
+  // What a buy executes at now: a fixed offer's ask net of its fee, an LBP's spot.
+  const open = progress.filter(x => x.p.state === 'open')
+    .map(x => x.s.offered != null && x.s.asked != null
+      ? salePriceWad(BigInt(x.s.asked), decimalsOf(x.s.paymentAssetId), BigInt(x.s.offered), decimalsOf(x.s.bondId))
+      : x.s.lbp?.spot?.faceWad != null ? BigInt(x.s.lbp.spot.faceWad) : null)
     .filter((p): p is bigint => p != null)
   if (open.length) return { priceWad: open.reduce((a, b) => (b < a ? b : a)), openedMs, closedMs: null }
+  // No fixed offer stands: the volume-weighted net price of every money fill, in face
+  // units (a sell-back nets out of both sides). One fill with no stated face value
+  // leaves the anchor unstated — never a price over the fills that happened to price.
   let paidFace = 0n, net = 0n
-  for (const { s, p } of progress) { paidFace += rescale(p.paid, decimalsOf(s.paymentAssetId), decimalsOf(s.bondId)); net += p.net }
+  for (const { s } of progress) {
+    for (const f of s.fills) {
+      const face = fillPaidFace(s, f, t.underlyingId, decimalsOf)
+      if (face == null) return null
+      const sign = f.side === 'sell' ? -1n : 1n
+      paidFace += sign * face
+      net += sign * (BigInt(f.bonds) - BigInt(f.fee))
+    }
+  }
   if (net <= 0n || paidFace <= 0n) return null
+  // A source still selling whose price now is unstated: what it sold at so far, standing.
+  if (progress.some(x => x.p.state === 'open')) return { priceWad: paidFace * BOND_WAD / net, openedMs, closedMs: null }
   const ended = progress.map(x => x.p.endedMs ?? t.maturityMs)
   return { priceWad: paidFace * BOND_WAD / net, openedMs, closedMs: Math.max(...ended) }
 }
@@ -258,4 +370,75 @@ export function bondStatus(o: { nowMs: number; maturityMs: number; openSale: boo
 export function familyRounds(terms: Iterable<BondTerms>, underlyingId: number): BondTerms[] {
   return [...terms].filter(t => t.underlyingId === underlyingId && BigInt(t.issued || '0') > 0n)
     .sort((a, b) => a.createdBlock - b.createdBlock || a.bondId - b.bondId)
+}
+
+// ── the LBP sale source's pool arithmetic (pallet-lbp) ─────────────────────────
+
+/** pallet-lbp MAX_WEIGHT: the two assets' weights sum to it. */
+export const LBP_MAX_WEIGHT = 100_000_000
+/**
+ * The PAYMENT (accumulated) asset's weight at relay block `at` — pallet-lbp's linear
+ * curve (hydra_dx_math calculate_linear_weights, integer division), clamped to the
+ * sale window. The bond's weight is LBP_MAX_WEIGHT minus it.
+ */
+export function lbpPaymentWeight(t: Pick<BondLbpTerms, 'initialWeight' | 'finalWeight' | 'startRelay' | 'endRelay'>, at: number): number {
+  if (t.endRelay <= t.startRelay || at <= t.startRelay) return t.initialWeight
+  if (at >= t.endRelay) return t.finalWeight
+  const d1 = BigInt(t.endRelay - at), d2 = BigInt(at - t.startRelay), dx = BigInt(t.endRelay - t.startRelay)
+  return Number((BigInt(t.initialWeight) * d1 + BigInt(t.finalWeight) * d2) / dx)
+}
+/**
+ * The pool's spot price of one bond in the payment asset (WAD, whole units): the
+ * weighted ratio of its reserves, (R_pay / w_pay) / (R_bond / w_bond), before fees.
+ * Null for an empty side.
+ */
+export function lbpSpotWad(reservePay: bigint, reserveBond: bigint, paymentWeight: number, payDecimals: number, bondDecimals: number): bigint | null {
+  const wPay = BigInt(paymentWeight), wBond = BigInt(LBP_MAX_WEIGHT - paymentWeight)
+  if (reservePay <= 0n || reserveBond <= 0n || wPay <= 0n || wBond <= 0n) return null
+  return reservePay * wBond * 10n ** BigInt(bondDecimals) * BOND_WAD / (reserveBond * wPay * 10n ** BigInt(payDecimals))
+}
+
+/** One point of an LBP's price curve: the spot just before and just after a fill (or the sale's start and end). */
+export interface LbpCurvePoint {
+  atMs: number
+  relay: number | null
+  /** Index into the source's fills; null for the start and end points. */
+  fill: number | null
+  /** Spot price of one bond in the payment asset (WAD), before and after the fill. */
+  beforeWad: bigint | null
+  afterWad: bigint | null
+}
+export interface LbpReplay {
+  points: LbpCurvePoint[]
+  /** The reserves after every fill. */
+  reservePay: bigint
+  reserveBond: bigint
+  /** The replayed reserves equal what the owner took back (null while the pool still holds them): the fills are complete. */
+  reconciled: boolean | null
+}
+/**
+ * Replays an LBP source's reserves from its seed through every fill: a buy adds the
+ * payment net of the fee (the fee goes from the buyer to the collector) and releases
+ * the bonds; a sell takes the bonds back and pays out the payment plus the fee (both
+ * from the pool). The replay must land exactly on what the owner took back, or a fill
+ * is missing and the curve is withheld by the caller.
+ */
+export function lbpReplay(s: Pick<BondSale, 'fills' | 'lbp' | 'paymentAssetId' | 'bondId'>, decimalsOf: (assetId: number) => number): LbpReplay | null {
+  const l = s.lbp
+  if (!l) return null
+  const payDec = decimalsOf(s.paymentAssetId), bondDec = decimalsOf(s.bondId)
+  let pay = BigInt(l.seed.payment), bond = BigInt(l.seed.bonds)
+  const spot = (relay: number | null) => relay == null ? null : lbpSpotWad(pay, bond, lbpPaymentWeight(l, relay), payDec, bondDec)
+  const points: LbpCurvePoint[] = []
+  if (l.startMs != null) points.push({ atMs: l.startMs, relay: l.startRelay, fill: null, beforeWad: null, afterWad: spot(l.startRelay) })
+  s.fills.forEach((f, i) => {
+    const relay = l.fillRelay[i] ?? null
+    const beforeWad = spot(relay)
+    const fee = BigInt(f.paymentFee ?? '0')
+    if (f.side === 'sell') { bond += BigInt(f.bonds); pay -= BigInt(f.paid) + fee } else { pay += BigInt(f.paid) - fee; bond -= BigInt(f.bonds) }
+    points.push({ atMs: f.atMs, relay, fill: i, beforeWad, afterWad: spot(relay) })
+  })
+  if (l.endMs != null) points.push({ atMs: l.endMs, relay: l.endRelay, fill: null, beforeWad: spot(l.endRelay), afterWad: null })
+  const reconciled = l.returned ? BigInt(l.returned.payment) === pay && BigInt(l.returned.bonds) === bond : null
+  return { points, reservePay: pay, reserveBond: bond, reconciled }
 }

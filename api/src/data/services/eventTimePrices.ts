@@ -1,5 +1,5 @@
 import type { ClickHouseClient } from '../../db/client.ts'
-import { assetDescriptor, priceAssetId } from '../../services/explorerAssets.ts'
+import { assetDescriptor, bondFactorWadAt, priceAssetId } from '../../services/explorerAssets.ts'
 import { PRICE_LOOKBACK_DAYS, scaledUsd } from '../../services/valuation.ts'
 
 // Event-time USD for a PAGE of historical flows (trades, transfers): the newest
@@ -61,7 +61,12 @@ export async function eventTimePricer(client: ClickHouseClient, assetIds: Iterab
     usdAt(assetId, amount, timeSec) {
       const close = closeAt(priceAssetId(assetId), timeSec)
       if (close == null) return null
-      return (amount * close) / 10n ** BigInt(assetDescriptor(assetId).decimals)
+      // A bond is its underlying's close × the bond rule's factor at the row's own time
+      // (bonds.ts), as on every explorer surface; a bond the rule cannot state is unpriced.
+      const factor = bondFactorWadAt(assetId, timeSec * 1000)
+      if (factor === null) return null
+      const value = (amount * close) / 10n ** BigInt(assetDescriptor(assetId).decimals)
+      return factor === undefined ? value : value * factor / 10n ** 18n
     },
   }
 }

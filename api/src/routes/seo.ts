@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 import { BOND_FAMILIES, bondFamilyPath } from '../services/bonds.ts'
 import { accountRef, resolveDisplayAccountId, xcDestinationBySlug } from '../services/explorerService.ts'
 import { normalizeAddress, hydrationAddress, polkadotAddress } from '../services/addressIdentity.ts'
-import { displayDescriptor, knownExplorerAsset, allExplorerAssets, isStableswapShareToken } from '../services/explorerAssets.ts'
+import { BOND_SALES, BOND_SALE_TRADES, BOND_SALE_TRADES_BY_EXTRINSIC, bondSaleTradeKey, displayDescriptor, knownExplorerAsset, allExplorerAssets, isStableswapShareToken } from '../services/explorerAssets.ts'
 import { getTag as getSystemTag, allTags } from '../services/tagService.ts'
 import { publicTagById, publicListSummary } from '../services/userListService.ts'
 import { referendumTitleFor, isGenericReferendumTitle, highestReferendumIndex } from '../services/referendumTitleService.ts'
@@ -384,6 +384,42 @@ export const ACTIVITY_PAGES: Record<string, { label: string; about: string }> = 
   'bil-repay': { label: 'Decentral repayment', about: 'the HOLLAR the Decentral borrower repaid into the lending pool' },
 }
 
+const BOND_ACT_PAGES: Record<string, { label: string; about: string }> = {
+  Purchase: { label: 'Bond purchase', about: 'the bonds bought in the issuer’s sale, what was paid and the yield it locked in to maturity' },
+  Rollover: { label: 'Bond rollover', about: 'the older bonds rolled into the new round, the rate and the yield it locked in' },
+  SaleOpen: { label: 'Bond sale opened', about: 'the issuer’s sale of the bond, its size and price' },
+  SaleClose: { label: 'Bond sale closed', about: 'the issuer’s sale withdrawn and the unsold bonds it returned' },
+  SellBack: { label: 'Bond sold back', about: 'the bonds sold back into the issuer’s LBP sale and what they fetched' },
+}
+/**
+ * The bond act an activity URL names (an OTC order's place / pull / fill, an LBP
+ * swap), from the registry's sale read; null for any other row. An id is
+ * `<block>-<extrinsic>` or `<block>-e<event>`.
+ */
+export function bondSaleActPage(slug: string, id: string): { label: string; about: string } | null {
+  const m = /^(\d+)-(e?)(\d+)$/.exec(id)
+  if (!m) return null
+  const block = Number(m[1]), n = Number(m[3]), byEvent = m[2] === 'e'
+  const at = (b: number, x: number | null, e: number | null) => b === block && (byEvent ? e === n : x === n)
+  const sales = [...BOND_SALES.values()].flat()
+  let act: string | null = null
+  if (slug === 'swap') {
+    // `<block>-e<event>` names the trade row's own event; `<block>-<extrinsic>` the
+    // extrinsic's trade, a bond act when every fill in it is the same one.
+    const hits = byEvent ? [BOND_SALE_TRADES.get(bondSaleTradeKey(block, n))].filter(h => h != null) : BOND_SALE_TRADES_BY_EXTRINSIC.get(`${block}:x${n}`) ?? []
+    const acts = new Set(hits.map(h => (h.sale.fills[h.fill].side === 'sell' ? 'SellBack' : 'Purchase')))
+    if (acts.size === 1) act = [...acts][0]
+  } else if (slug === 'otc-fill') {
+    const s = sales.find(x => x.venue === 'otc' && x.fills.some(f => at(f.block, f.extrinsicIndex, f.eventIndex)))
+    if (s) act = s.kind === 'rollover' ? 'Rollover' : 'Purchase'
+  } else if (slug === 'otc-place') {
+    if (sales.some(x => x.venue === 'otc' && x.openedEvent && at(x.openedBlock, x.openedEvent.extrinsicIndex, x.openedEvent.eventIndex))) act = 'SaleOpen'
+  } else if (slug === 'otc-pull') {
+    if (sales.some(x => x.venue === 'otc' && x.closedBlock != null && x.closedEvent && at(x.closedBlock, x.closedEvent.extrinsicIndex, x.closedEvent.eventIndex))) act = 'SaleClose'
+  }
+  return act ? BOND_ACT_PAGES[act] : null
+}
+
 const CRUMB_HOME: [string, string] = ['Home', '/']
 const CRUMB_ACTIVITY: [string, string] = ['Activity', '/activity']
 
@@ -651,7 +687,10 @@ export function pageMeta(path: string): PageMeta {
   // UNBOUNDED_PREFIXES that is not handled above has an entry (pinned by test);
   // the capitalised slug is only the last resort for one that does not.
   if (head && UNBOUNDED_PREFIXES.has(head) && a) {
-    const page = ACTIVITY_PAGES[head]
+    // A bond's primary-sale act is titled as the bond act it is, as the page itself does
+    // (its URL stays the venue's: an OTC fill, an LBP swap).
+    const bond = bondSaleActPage(head, a)
+    const page = bond ?? ACTIVITY_PAGES[head]
     const label = page?.label ?? head.replace(/-/g, ' ').replace(/^./, c => c.toUpperCase())
     const about = page?.about ?? 'what moved, between whom, and what it cost'
     return { title: `${label} ${a}`, description: `${label} ${a} on Hydration — ${about}.`, crawlerExcluded: true, crumbs: [CRUMB_HOME, CRUMB_ACTIVITY] }

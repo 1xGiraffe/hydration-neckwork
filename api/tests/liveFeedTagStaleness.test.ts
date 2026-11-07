@@ -50,14 +50,15 @@ describe('every dated feed cache', () => {
   it('tells its tag helper which window it is caching, so today-touching reads stay head-keyed', () => {
     const dated = [...explorerService.matchAll(/live(?:Feed|Head)Tag\(Boolean\(tw\)[^)]*\)/g)].map(m => m[0])
 
-    // 26 = the three `liveFeedTag` feeds plus twenty-three `liveHeadTag` ones, the
-    // newest being the bond feed's primary-sale acts (bondSaleActivityRows) after the
+    // 27 = the three `liveFeedTag` feeds plus twenty-four `liveHeadTag` ones, the
+    // newest being the bond feed's LBP purchases while a sale can still fill
+    // (bondSaleTradeRows), then its OTC primary-sale acts (bondSaleActivityRows) after the
     // transfers list's ERC-20 send read (shared by its display page and
     // classification context) and getRecentHsmTrades (direct HSM trades),
     // getRecentNttErc20Legs (a locking NTT manager's ERC-20 legs), getRecentFastRelayIn
     // and getRecentXcswaps: a feed keyed without the head is the same permanent loss for
     // a forward-only reader as any other lane's.
-    expect(dated.length).toBe(26)
+    expect(dated.length).toBe(27)
     for (const call of dated) {
       expect(call).toMatch(/datedWindowIsClosed\(/)
     }

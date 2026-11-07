@@ -1,5 +1,5 @@
 import type { ClickHouseClient } from '../db/client.ts'
-import { BOND_TERMS, BOND_UNDERLYING_ID, whenExplorerAssetsLoaded } from './explorerAssets.ts'
+import { BOND_TERMS, BOND_UNDERLYING_ID, assetDescriptor, whenExplorerAssetsLoaded } from './explorerAssets.ts'
 import { getOtcPlacedLegsByOrderId } from './explorerService.ts'
 import { BONDS_POT_ACCOUNT, type BondSale } from './bonds.ts'
 import { loadBondSales } from './bondSales.ts'
@@ -13,11 +13,11 @@ import { createStrategyRefresher, selectRows as select } from './strategyRefresh
 //  - the issues and redemptions (bond_activity: Bonds.Issued / Bonds.Redeemed);
 //  - every primary-sale source with its fills and pull — the one shared sale read
 //    (bondSales.ts) bounded to the block — with each OTC source's maker resolved (the
-//    issuer side: what it holds is unsold);
+//    issuer side: what it holds is unsold); an LBP source names its pool account itself;
 //  - every holder's balance of every bond (asset_account_latest_balances, asset-first,
 //    newest per holder), and the Bonds pot's balance of each underlying (the Tokens side
 //    and, for a contract-backed underlying like HOLLAR, its ERC-20 wallet pot).
-// It re-reads when bond_activity, the OTC events, the bonds' balances or the bond
+// It re-reads when bond_activity, the OTC or LBP events, the bonds' balances or the bond
 // registry move, else every fifth tick (a bond's status turns on the clock at maturity).
 //
 // Checked before the issuer/public split is stated: per bond, its holders' balances must
@@ -139,7 +139,11 @@ export async function readBondSnapshot(ch: ClickHouseClient): Promise<BondSnapsh
     select<EventRow>(ch, `-- bond:events
       SELECT block_height, event_index, extrinsic_index, toUnixTimestamp(block_timestamp) AS ts, event_name, args_json
       FROM price_data.bond_activity FINAL WHERE block_height <= {b:UInt32}`, { b: block }),
-    loadBondSales(ch, bondIds, id => BOND_UNDERLYING_ID[id] != null, block),
+    loadBondSales(ch, bondIds, {
+      isBond: id => BOND_UNDERLYING_ID[id] != null,
+      underlyingOf: id => BOND_UNDERLYING_ID[id],
+      decimalsOf: id => assetDescriptor(id).decimals,
+    }, block),
     select<{ asset_id: string; account_id: string; bal: string }>(ch, `-- bond:holders
       SELECT asset_id, account_id, toString(toUInt256OrZero(argMaxMerge(total_state))) AS bal
       FROM price_data.asset_account_latest_balances
@@ -173,6 +177,7 @@ export async function loadBondMark(ch: ClickHouseClient): Promise<string> {
     SELECT concat(
       (SELECT concat(toString(max(block_height)), ':', toString(max(ingested_at))) FROM price_data.bond_activity), '|',
       (SELECT concat(toString(max(block_height)), ':', toString(max(ingested_at))) FROM price_data.otc_activity), '|',
+      (SELECT concat(toString(max(block_height)), ':', toString(max(ingested_at))) FROM price_data.lbp_activity), '|',
       (SELECT toString(maxMerge(last_block_state)) FROM price_data.asset_account_latest_balances WHERE asset_id IN {ids:Array(String)})) AS m`,
   { ids })
   const registry = [...BOND_TERMS.values()].map(t => `${t.bondId}:${t.issued}:${t.anchor?.priceWad ?? ''}:${t.anchor?.closedMs ?? ''}`).join(',')

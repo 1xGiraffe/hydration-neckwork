@@ -18,5 +18,5 @@ export const zTransfer = z.object({
   to: zAccountRef.nullable(),
   assetId: zAssetId,
   amount: z.string(),
-  valueUsd: z.string().nullable().describe('EVENT-TIME USD (the last closed hourly candle before the transfer, ≤30 days stale); null when the asset had no usable price then.'),
+  valueUsd: z.string().nullable().describe('EVENT-TIME USD (the last closed hourly candle before the transfer, ≤30 days stale); null when the asset had no usable price then. A bond (an HDXb or HOLLARb round) is its underlying\'s close × the bond\'s value factor at that time — its sale price, accreting to face by maturity, face from it — and null before maturity when it had no money sale.'),
 })

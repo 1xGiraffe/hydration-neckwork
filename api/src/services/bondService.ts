@@ -2,8 +2,8 @@ import { cached } from './cache.ts'
 import { BOND_TERMS, currentPriceOf, displayDescriptor, type ExplorerAsset } from './explorerAssets.ts'
 import { accountRef, ensurePrices, getHolders, resolveRelatedAccounts, type AccountRef, type HolderRow, type PriceInfo } from './explorerService.ts'
 import {
-  BOND_FAMILIES, BONDS_POT_ACCOUNT, bondFamily, bondStatus, bondValueFactorWad, familyRounds, fillYield, isMoneySale, otcFillFee, rescale, saleProgress, salePriceWad, wadNumber,
-  type BondFamily, type BondSale, type BondSaleKind, type BondSaleVenue, type BondStatus, type BondTerms,
+  BOND_FAMILIES, BOND_WAD, BONDS_POT_ACCOUNT, bondFamily, bondStatus, bondValueFactorWad, familyRounds, fillPaidFace, fillYield, isMoneySale, lbpReplay, otcFillFee, rescale, saleProgress, salePriceWad, wadNumber,
+  type BondFamily, type BondSale, type BondSaleFill, type BondSaleKind, type BondSaleVenue, type BondStatus, type BondTerms,
 } from './bonds.ts'
 import { bondIssuerAccounts, bondSupplies, currentBondSnapshot, refreshBondState, type BondSnapshot } from './bondState.ts'
 import { rawUsd, strategyDashboardCache, type StrategyDashboardCache } from './strategyDashboard.ts'
@@ -65,8 +65,66 @@ export interface BondSaleView {
   discountPct: number | null
   fixedYieldPct: number | null
   aprAtOpenPct: number | null
-  /** What buyers actually paid per bond received, net of the fee (volume-weighted). */
+  /** What buyers actually paid per bond received, net of the fee (volume-weighted), in the payment asset. */
   avgPrice: number | null
+  /** The same in face units (equal to `avgPrice` for a source paying in face units; at each fill's event-time prices otherwise). */
+  avgFacePrice: number | null
+  /** The APR purchases locked in, bonds-weighted over every purchase (bonds.ts fillYield, held to maturity). */
+  avgAprPct: number | null
+  /** A source whose payment is not face units states its terms at event-time prices (bonds.ts header). */
+  facedAtEventTime: boolean
+  /** An LBP source's pool, weights, curve and fills; null for any other venue. */
+  lbp: BondLbpView | null
+}
+/** An LBP sale: the pool's terms, what it was seeded with and returned, and the sale as it ran. */
+export interface BondLbpView {
+  pool: AccountRef
+  feePct: number
+  /** The payment asset's weight (%) at the start and the end; the bond's is the rest. */
+  paymentWeightStart: number
+  paymentWeightEnd: number
+  startAt: string | null
+  endAt: string | null
+  seed: { payment: string; bonds: string }
+  returned: { at: string; block: number; payment: string; bonds: string } | null
+  /** Trading fees the collector received (raw, payment asset). */
+  fees: string
+  /** Sells back into the pool: how many, and the bonds they returned (raw). */
+  sellBacks: number
+  soldBack: string
+  /** The replayed reserves land exactly on what the owner took back (null while the pool still holds them). The curve is withheld when false. */
+  reconciled: boolean | null
+  /**
+   * The pool's spot price per bond, just before and just after every fill and at the
+   * start and the end: `pay` in the payment asset, `face` in the bond's face units at
+   * that moment's prices (null where unpriced). `t` is Unix ms.
+   */
+  curve: Array<{ t: number; pay: number | null; face: number | null }>
+  /** Every fill: when, which way, the bonds (whole units), and the price per bond paid or received in the payment asset and in face units. */
+  fills: Array<{ t: number; side: 'buy' | 'sell'; bonds: number; pay: number | null; face: number | null }>
+}
+/** Who bought a round: distinct buyers, concentration and the largest, by bonds bought net of sells. */
+export interface BondBuyerStats {
+  buyers: number
+  /** Accounts that sold bonds back into a source. */
+  sellers: number
+  purchases: number
+  /** Median and largest single purchase (bonds, raw). */
+  medianPurchase: string | null
+  largestPurchase: string | null
+  /** The ten largest buyers' share of the bonds sold, %. */
+  top10SharePct: number | null
+  top: Array<{
+    account: AccountRef
+    fills: number
+    /** Bonds bought net of sells back (raw) and what that cost net (raw, per payment asset). */
+    bonds: string
+    paid: Array<{ asset: ExplorerAsset; raw: string }>
+    /** The bonds-weighted price per bond in face units, its return to maturity and APR as bought. */
+    facePrice: number | null
+    returnPct: number | null
+    aprPct: number | null
+  }>
 }
 export interface BondRoundView {
   round: number
@@ -107,6 +165,10 @@ export interface BondRoundView {
   issuerUsd: number | null
   holders: { list: HolderRow[]; total: number; holderCount: number; totalUsd: number } | null
   buyers: number
+  /** The money sale's discount to face at its price (null for a sale without one), and the bonds-weighted APR purchases locked in. */
+  discountPct: number | null
+  avgAprPct: number | null
+  buyerStats: BondBuyerStats
 }
 export interface BondDayView { day: string; sold: Record<string, string>; redeemed: Record<string, string> }
 export interface BondDashboard {
@@ -148,7 +210,22 @@ export function saleTerms(s: Pick<BondSale, 'offered' | 'asked' | 'openedMs' | '
   }
 }
 
-/** The per-day yield of a bond's fills, bonds-weighted (pure, for the tests). */
+/**
+ * The yield one PURCHASE locked in, held to maturity (bonds.ts fillYield) on its face
+ * value: the payment itself in face units, else at the fill's event-time prices; a
+ * rollover's from the older bond's maturity. Null for a sell back or an unstated one.
+ */
+export function purchaseYield(s: BondSale, f: BondSaleFill, t: Pick<BondTerms, 'underlyingId' | 'maturityMs'>, decimalsOf: (id: number) => number, paidMaturityMs: number | null): ReturnType<typeof fillYield> {
+  if (f.side === 'sell') return null
+  const bondDecimals = decimalsOf(s.bondId)
+  const net = BigInt(f.bonds) - BigInt(f.fee)
+  // A rollover pays in bonds of the same face: 1:1 in units of the older bond.
+  const face = s.kind === 'rollover' ? rescale(BigInt(f.paid), decimalsOf(s.paymentAssetId), bondDecimals) : fillPaidFace(s, f, t.underlyingId, decimalsOf)
+  if (face == null) return null
+  return fillYield({ paid: face, paidDecimals: bondDecimals, net, bondDecimals, atMs: f.atMs, maturityMs: t.maturityMs, paidMaturityMs })
+}
+
+/** The per-day yield of a bond's fills, bonds-weighted over the purchases; bonds and paid net of sells back (pure, for the tests). */
 export function fillDaysOf(sales: readonly BondSale[], terms: ReadonlyMap<number, BondTerms>, decimalsOf: (id: number) => number): BondFillDay[] {
   const acc = new Map<string, { day: string; bondId: number; kind: BondSaleKind; fills: number; bonds: bigint; paid: bigint; wr: number; wa: number; w: number; wA: number }>()
   for (const s of sales) {
@@ -158,12 +235,12 @@ export function fillDaysOf(sales: readonly BondSale[], terms: ReadonlyMap<number
     for (const f of s.fills) {
       const key = `${dayOf(f.atMs)}:${s.bondId}:${s.kind}`
       const a = acc.get(key) ?? acc.set(key, { day: dayOf(f.atMs), bondId: s.bondId, kind: s.kind, fills: 0, bonds: 0n, paid: 0n, wr: 0, wa: 0, w: 0, wA: 0 }).get(key)!
-      const net = BigInt(f.bonds) - BigInt(f.fee)
-      const y = fillYield({ paid: BigInt(f.paid), paidDecimals: decimalsOf(s.paymentAssetId), net, bondDecimals: decimalsOf(s.bondId), atMs: f.atMs, maturityMs: t.maturityMs, paidMaturityMs: paidMaturity })
-      const weight = weightOf(net, decimalsOf(s.bondId))
+      const sign = f.side === 'sell' ? -1n : 1n
+      const y = purchaseYield(s, f, t, decimalsOf, paidMaturity)
+      const weight = weightOf(BigInt(f.bonds) - BigInt(f.fee), decimalsOf(s.bondId))
       a.fills++
-      a.bonds += BigInt(f.bonds)
-      a.paid += BigInt(f.paid)
+      a.bonds += sign * BigInt(f.bonds)
+      a.paid += sign * BigInt(f.paid)
       if (y) { a.wr += y.returnPct * weight; a.w += weight; if (y.aprPct != null) { a.wa += y.aprPct * weight; a.wA += weight } }
     }
   }
@@ -181,21 +258,157 @@ function familyBonds(f: BondFamily): BondTerms[] {
 const anySaleOpen = (sales: readonly BondSale[], t: BondTerms, nowMs: number): boolean =>
   sales.some(s => s.bondId === t.bondId && saleProgress(s, t.maturityMs, nowMs).state === 'open')
 
+/** A source's purchases, net of sells back, in face units (WAD price) — null when a fill's face value is unstated. */
+function faceAverage(s: BondSale, t: BondTerms, decimalsOf: (id: number) => number): { priceWad: bigint } | null {
+  let face = 0n, net = 0n
+  for (const f of s.fills) {
+    const v = s.kind === 'rollover' ? rescale(BigInt(f.paid), decimalsOf(s.paymentAssetId), decimalsOf(s.bondId)) : fillPaidFace(s, f, t.underlyingId, decimalsOf)
+    if (v == null) return null
+    const sign = f.side === 'sell' ? -1n : 1n
+    face += sign * v
+    net += sign * (BigInt(f.bonds) - BigInt(f.fee))
+  }
+  return net > 0n && face > 0n ? { priceWad: face * BOND_WAD / net } : null
+}
+/** The bonds-weighted APR of a set of purchases (bonds.ts fillYield over each). */
+function weightedApr(list: Array<{ s: BondSale; f: BondSaleFill }>, decimalsOf: (id: number) => number): { aprPct: number | null; returnPct: number | null } {
+  let wa = 0, wr = 0, w = 0
+  for (const { s, f } of list) {
+    const t = BOND_TERMS.get(s.bondId)
+    if (!t) continue
+    const y = purchaseYield(s, f, t, decimalsOf, BOND_TERMS.get(s.paymentAssetId)?.maturityMs ?? null)
+    if (y?.aprPct == null) continue
+    const weight = weightOf(BigInt(f.bonds) - BigInt(f.fee), decimalsOf(s.bondId))
+    wa += y.aprPct * weight; wr += y.returnPct * weight; w += weight
+  }
+  return w > 0 ? { aprPct: wa / w, returnPct: wr / w } : { aprPct: null, returnPct: null }
+}
+
+const MAX_CURVE_POINTS = 1_200
+function lbpView(s: BondSale, decimalsOf: (id: number) => number): BondLbpView | null {
+  const l = s.lbp
+  if (!l) return null
+  const payDec = decimalsOf(s.paymentAssetId), bondDec = decimalsOf(s.bondId)
+  const replay = lbpReplay(s, decimalsOf)
+  // Face per bond = payment per bond × face per payment unit at that moment.
+  const toFace = (payWad: bigint | null, rate: string | null | undefined): number | null =>
+    payWad == null || rate == null ? null : wadNumber(payWad * BigInt(rate) / 10n ** BigInt(bondDec))
+  const curve: BondLbpView['curve'] = []
+  if (replay && replay.reconciled !== false) {
+    for (const pt of replay.points) {
+      const rate = pt.fill != null ? l.faceRate.fills[pt.fill] : pt.afterWad != null ? l.faceRate.start : l.faceRate.end
+      if (pt.beforeWad != null) curve.push({ t: pt.atMs, pay: wadNumber(pt.beforeWad), face: toFace(pt.beforeWad, rate) })
+      if (pt.afterWad != null) curve.push({ t: pt.atMs, pay: wadNumber(pt.afterWad), face: toFace(pt.afterWad, rate) })
+    }
+  }
+  const fills = s.fills.map((f, i) => {
+    const bonds = BigInt(f.bonds) - BigInt(f.fee)
+    // A buy's price includes the fee it paid; a sell's is what it received per bond.
+    const payWad = bonds > 0n ? rescale(BigInt(f.paid), payDec, bondDec) * BOND_WAD / bonds : null
+    const faceRaw = fillPaidFace(s, f, BOND_TERMS.get(s.bondId)?.underlyingId ?? -1, decimalsOf)
+    void i
+    return {
+      t: f.atMs, side: f.side === 'sell' ? 'sell' as const : 'buy' as const, bonds: weightOf(bonds, bondDec),
+      pay: payWad != null ? wadNumber(payWad) : null,
+      face: faceRaw != null && bonds > 0n ? wadNumber(faceRaw * BOND_WAD / bonds) : null,
+    }
+  })
+  const fees = s.fills.reduce((a, f) => a + BigInt(f.paymentFee ?? '0'), 0n)
+  const sells = s.fills.filter(f => f.side === 'sell')
+  return {
+    pool: accountRef(l.pool), feePct: l.fee[1] > 0 ? l.fee[0] / l.fee[1] * 100 : 0,
+    paymentWeightStart: l.initialWeight / 1_000_000, paymentWeightEnd: l.finalWeight / 1_000_000,
+    startAt: l.startMs != null ? iso(l.startMs) : null, endAt: l.endMs != null ? iso(l.endMs) : null,
+    seed: { payment: l.seed.payment, bonds: l.seed.bonds },
+    returned: l.returned ? { at: iso(l.returned.atMs), block: l.returned.block, payment: l.returned.payment, bonds: l.returned.bonds } : null,
+    fees: fees.toString(), sellBacks: sells.length, soldBack: sells.reduce((a, f) => a + BigInt(f.bonds), 0n).toString(),
+    reconciled: replay?.reconciled ?? null,
+    curve: curve.length > MAX_CURVE_POINTS ? curve.filter((_, i) => i % Math.ceil(curve.length / MAX_CURVE_POINTS) === 0 || i === curve.length - 1) : curve,
+    fills,
+  }
+}
+
 function saleView(s: BondSale, t: BondTerms, nowMs: number): BondSaleView {
   const p = saleProgress(s, t.maturityMs, nowMs)
   const decimalsOf = (id: number) => asset(id).decimals
-  const avg = p.net > 0n ? rescale(p.paid, decimalsOf(s.paymentAssetId), decimalsOf(s.bondId)) * 10n ** 18n / p.net : null
+  const avg = p.net > 0n && p.paid > 0n ? rescale(p.paid, decimalsOf(s.paymentAssetId), decimalsOf(s.bondId)) * 10n ** 18n / p.net : null
   const fromTerms = BOND_TERMS.get(s.paymentAssetId)
   const fromRound = fromTerms ? familyRounds(BOND_TERMS.values(), fromTerms.underlyingId).findIndex(x => x.bondId === s.paymentAssetId) + 1 || null : null
+  const faceAvg = faceAverage(s, t, decimalsOf)
+  const bought = weightedApr(s.fills.map(f => ({ s, f })), decimalsOf)
+  // A fixed-terms source (an OTC offer) states its terms from its ask; a source without
+  // them (an LBP) from what it sold at: the face-unit average price, its return to
+  // maturity, and that return annualised from when the sale opened.
+  const terms = s.offered != null && s.asked != null ? saleTerms(s, t, decimalsOf, s.kind === 'rollover') : (() => {
+    if (!faceAvg) return { price: null, discountPct: null, fixedYieldPct: null, aprAtOpenPct: null }
+    const y = fillYield({ paid: faceAvg.priceWad, paidDecimals: 18, net: BOND_WAD, bondDecimals: 18, atMs: s.openedMs, maturityMs: t.maturityMs })
+    const price = wadNumber(faceAvg.priceWad)
+    return { price, discountPct: s.kind === 'rollover' ? null : Math.round((1 - price) * 1e6) / 1e4, fixedYieldPct: y?.returnPct ?? null, aprAtOpenPct: y?.aprPct ?? null }
+  })()
   return {
     venue: s.venue, id: s.id, kind: s.kind, paymentAsset: asset(s.paymentAssetId), fromRound,
     issuerAccounts: s.issuerAccounts.map(accountRef),
     openedAt: iso(s.openedMs), openedBlock: s.openedBlock, endedAt: p.endedMs != null ? iso(p.endedMs) : null, state: p.state,
     offered: s.offered, sold: p.sold.toString(), paid: p.paid.toString(), net: p.net.toString(),
     remaining: p.remaining.toString(), unsold: p.unsold.toString(),
-    fills: s.fills.length, buyers: new Set(s.fills.map(f => f.taker)).size,
-    ...saleTerms(s, t, decimalsOf, s.kind === 'rollover'),
+    fills: s.fills.length, buyers: new Set(s.fills.filter(f => f.side !== 'sell').map(f => f.taker)).size,
+    ...terms,
     avgPrice: avg != null ? wadNumber(avg) : null,
+    avgFacePrice: faceAvg ? wadNumber(faceAvg.priceWad) : null,
+    avgAprPct: bought.aprPct,
+    facedAtEventTime: s.facedAtEventTime === true,
+    lbp: lbpView(s, decimalsOf),
+  }
+}
+
+const TOP_BUYERS = 25
+/** Who bought a set of sources (pure over the snapshot; accounts as stored, lowercased). */
+export function buyerStatsOf(sales: readonly BondSale[], decimalsOf: (id: number) => number): Omit<BondBuyerStats, 'top'> & { top: Array<Omit<BondBuyerStats['top'][number], 'account' | 'paid'> & { account: string; paid: Map<number, bigint> }> } {
+  const by = new Map<string, { fills: number; bonds: bigint; paid: Map<number, bigint>; buys: Array<{ s: BondSale; f: BondSaleFill }> }>()
+  const purchases: bigint[] = []
+  const sellers = new Set<string>()
+  let total = 0n
+  for (const s of sales) for (const f of s.fills) {
+    const b = by.get(f.taker) ?? by.set(f.taker, { fills: 0, bonds: 0n, paid: new Map(), buys: [] }).get(f.taker)!
+    const sign = f.side === 'sell' ? -1n : 1n
+    const net = BigInt(f.bonds) - BigInt(f.fee)
+    b.fills++
+    b.bonds += sign * net
+    b.paid.set(s.paymentAssetId, (b.paid.get(s.paymentAssetId) ?? 0n) + sign * BigInt(f.paid))
+    total += sign * net
+    if (f.side === 'sell') sellers.add(f.taker)
+    else { purchases.push(net); b.buys.push({ s, f }) }
+  }
+  const buyers = [...by].filter(([, b]) => b.buys.length > 0).sort((x, y) => (y[1].bonds > x[1].bonds ? 1 : y[1].bonds < x[1].bonds ? -1 : 0))
+  purchases.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+  const top10 = buyers.slice(0, 10).reduce((a, [, b]) => a + (b.bonds > 0n ? b.bonds : 0n), 0n)
+  return {
+    buyers: buyers.length, sellers: sellers.size, purchases: purchases.length,
+    medianPurchase: purchases.length ? purchases[Math.floor((purchases.length - 1) / 2)].toString() : null,
+    largestPurchase: purchases.length ? purchases[purchases.length - 1].toString() : null,
+    top10SharePct: total > 0n ? Number(top10 * 1_000_000n / total) / 10_000 : null,
+    top: buyers.slice(0, TOP_BUYERS).map(([account, b]) => {
+      const sold = b.buys.reduce((a, x) => a + BigInt(x.f.bonds) - BigInt(x.f.fee), 0n)
+      let face: bigint | null = 0n
+      for (const { s, f } of b.buys) {
+        const t = BOND_TERMS.get(s.bondId)
+        const v = !t ? null : s.kind === 'rollover' ? rescale(BigInt(f.paid), decimalsOf(s.paymentAssetId), decimalsOf(s.bondId)) : fillPaidFace(s, f, t.underlyingId, decimalsOf)
+        face = v == null || face == null ? null : face + v
+      }
+      const y = weightedApr(b.buys, decimalsOf)
+      return {
+        account, fills: b.fills, bonds: b.bonds.toString(), paid: b.paid,
+        facePrice: face != null && sold > 0n ? wadNumber(face * BOND_WAD / sold) : null,
+        returnPct: y.returnPct, aprPct: y.aprPct,
+      }
+    }),
+  }
+}
+function buyerStatsView(sales: readonly BondSale[]): BondBuyerStats {
+  const st = buyerStatsOf(sales, id => asset(id).decimals)
+  return {
+    ...st,
+    top: st.top.map(b => ({ ...b, account: accountRef(b.account), paid: [...b.paid].map(([id, raw]) => ({ asset: asset(id), raw: raw.toString() })) })),
   }
 }
 
@@ -244,7 +457,10 @@ async function roundView(round: number, t: BondTerms, snap: BondSnapshot, prices
     publicUsd: publicOutstanding != null ? rawUsd(prices, t.bondId, publicOutstanding) : null,
     issuerUsd: reconciled ? rawUsd(prices, t.bondId, issuerHeld) : null,
     holders: holders ? { list: holders.holders, total: holders.total, holderCount: holders.holderCount, totalUsd: holders.totalUsd } : null,
-    buyers: new Set(sales.flatMap(s => s.fills.map(f => f.taker))).size,
+    buyers: new Set(sales.flatMap(s => s.fills.filter(f => f.side !== 'sell').map(f => f.taker))).size,
+    discountPct: headline?.discountPct ?? null,
+    avgAprPct: weightedApr(sales.filter(s => isMoneySale(s, t.underlyingId)).flatMap(s => s.fills.map(f => ({ s, f }))), id => asset(id).decimals).aprPct,
+    buyerStats: buyerStatsView(sales),
   }
 }
 
@@ -257,7 +473,7 @@ export function bondDays(bondIds: readonly number[], snap: Pick<BondSnapshot, 's
     d.set(id, (d.get(id) ?? 0n) + v)
   }
   let first: number | null = null
-  for (const s of snap.sales) if (ids.has(s.bondId)) for (const f of s.fills) { add(sold, dayOf(f.atMs), s.bondId, BigInt(f.bonds)); first = Math.min(first ?? f.atMs, f.atMs) }
+  for (const s of snap.sales) if (ids.has(s.bondId)) for (const f of s.fills) { add(sold, dayOf(f.atMs), s.bondId, (f.side === 'sell' ? -1n : 1n) * BigInt(f.bonds)); first = Math.min(first ?? f.atMs, f.atMs) }
   for (const r of snap.redemptions) if (ids.has(r.bondId)) { add(red, dayOf(r.atMs), r.bondId, BigInt(r.amount)); first = Math.min(first ?? r.atMs, r.atMs) }
   if (first == null) return []
   const out: BondDayView[] = []
@@ -295,7 +511,8 @@ async function buildBondDashboard(f: BondFamily, snap: BondSnapshot | null): Pro
   const issuer = new Set(ids.flatMap(id => [...bondIssuerAccounts(id, BOND_TERMS.get(id)?.issuer, snap.sales)]))
   const holderSet = new Set(ids.flatMap(id => [...(snap.holdings.get(id)?.keys() ?? [])].filter(a => !issuer.has(a))))
   const issuers = [...new Set(bonds.map(t => t.issuer))]
-  const sellers = [...new Set(sales.flatMap(s => s.issuerAccounts))].filter(a => !issuers.includes(a))
+  const sellers = [...new Set(sales.filter(s => s.venue !== 'lbp').flatMap(s => s.issuerAccounts))].filter(a => !issuers.includes(a))
+  const lbpPools = sales.filter(s => s.lbp).map(s => ({ pool: s.lbp!.pool, round: bonds.findIndex(t => t.bondId === s.bondId) + 1 }))
   return {
     generatedAt: iso(nowMs), asOfBlock: snap.block, family, underlying, rounds,
     fillDays: fillDaysOf(sales, BOND_TERMS, id => asset(id).decimals),
@@ -304,12 +521,13 @@ async function buildBondDashboard(f: BondFamily, snap: BondSnapshot | null): Pro
       issued: sum(r => r.issued) ?? '0', soldForMoney: sum(r => r.soldForMoney) ?? '0', rolledOver: sum(r => r.rolledOver) ?? '0',
       redeemed: sum(r => r.redeemed) ?? '0', outstanding: outstanding.toString(),
       publicOutstanding: sum(r => r.publicOutstanding), publicUsd: usd.some(v => v == null) ? null : usd.reduce<number>((a, v) => a + (v ?? 0), 0),
-      holders: holderSet.size, buyers: new Set(sales.flatMap(s => s.fills.map(x => x.taker))).size, fills: sales.reduce((s, x) => s + x.fills.length, 0),
+      holders: holderSet.size, buyers: new Set(sales.flatMap(s => s.fills.filter(x => x.side !== 'sell').map(x => x.taker))).size, fills: sales.reduce((s, x) => s + x.fills.length, 0),
     },
     pot: { ...pot, balance: snap.pot.get(f.underlyingId)?.toString() ?? null, outstanding: outstanding.toString(), reconciled: snap.potReconciled.get(f.underlyingId) ?? null },
     accounts: [
       ...issuers.map(a => ({ role: 'Issuer — issued the bonds against its own underlying', account: accountRef(a) })),
       ...sellers.map(a => ({ role: 'Sale account — the sales’ issuer side, holds what went unsold', account: accountRef(a) })),
+      ...lbpPools.map(p => ({ role: `Round ${p.round} LBP pool — sold the bonds; held the unsold ones until the Treasury took them back`, account: accountRef(p.pool) })),
       { role: `Bonds pot — holds the ${underlying.symbol} owed to every outstanding bond`, account: accountRef(BONDS_POT_ACCOUNT) },
     ],
   }
@@ -373,10 +591,12 @@ export async function getAccountBondPositions(address: string): Promise<AccountB
         const paid = new Map<number, bigint>()
         let bonds = 0n, wa = 0, wr = 0, w = 0
         for (const { s, x } of fills) {
+          // A sell back into the source nets out of what was bought and paid.
+          const sign = x.side === 'sell' ? -1n : 1n
           const net = BigInt(x.bonds) - BigInt(x.fee)
-          bonds += net
-          paid.set(s.paymentAssetId, (paid.get(s.paymentAssetId) ?? 0n) + BigInt(x.paid))
-          const y = fillYield({ paid: BigInt(x.paid), paidDecimals: asset(s.paymentAssetId).decimals, net, bondDecimals: dec, atMs: x.atMs, maturityMs: t.maturityMs, paidMaturityMs: BOND_TERMS.get(s.paymentAssetId)?.maturityMs ?? null })
+          bonds += sign * net
+          paid.set(s.paymentAssetId, (paid.get(s.paymentAssetId) ?? 0n) + sign * BigInt(x.paid))
+          const y = purchaseYield(s, x, t, id => asset(id).decimals, BOND_TERMS.get(s.paymentAssetId)?.maturityMs ?? null)
           if (y?.aprPct != null) { const weight = weightOf(net, dec); wa += y.aprPct * weight; wr += y.returnPct * weight; w += weight }
         }
         const factor = bondValueFactorWad(t, nowMs)
