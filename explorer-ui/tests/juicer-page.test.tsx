@@ -70,7 +70,7 @@ describe('the Juicer page', () => {
     expect(html).toContain('Requests cannot be cancelled')
     expect(html).toContain('not an unconditional guarantee')
     expect(html).toContain('Terms on this page')
-    expect(html.indexOf('Terms on this page')).toBeLessThan(html.indexOf('Total TVL'))
+    expect(html.indexOf('Terms on this page')).toBeLessThan(html.indexOf('>TVL<'))
   })
   it('states the vault as the app does: TVL, est. APY, a full cap, Main and its settings', () => {
     const html = render(dashboard())
