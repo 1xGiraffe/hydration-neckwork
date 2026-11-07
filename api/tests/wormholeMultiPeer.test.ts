@@ -351,3 +351,37 @@ describe('ERC-20 string answers', () => {
     expect(decodeAbiString(null)).toBeNull()
   })
 })
+
+describe('a lockbox with sends toward it its chain has not confirmed either way', () => {
+  // The NEAR ZEC lockbox on 2026-11-07: both "pending" sends had already been
+  // released, so subtracting them again read as transfers exceeding custody.
+  const near: LockboxPayoutInput = {
+    balance: 20_834_525_915n,
+    received: 26_414_116_176n,
+    sent: 5_579_760_534n,
+    pendingIn: 0n,
+    pendingOut: 256_790_179n,
+    pendingUnresolved: 256_790_179n,
+    inboundCapacity: 10_000_000_000n,
+    circulating: 20_834_355_642n,
+    tolerance: 100n,
+    fresh: true,
+    sharedWith: [],
+    symbol: 'ZEC',
+    decimals: 8,
+  }
+
+  it('is unverified rather than attention when the unresolved sends explain the gap', () => {
+    const out = lockboxPayout(near)
+    expect(out.status).toBe('unverified')
+    expect(out.detail).toMatch(/not confirmed/i)
+  })
+
+  it('is still attention when the gap outgrows them', () => {
+    expect(lockboxPayout({ ...near, balance: near.balance! - 1_000_000_000n }).status).toBe('attention')
+  })
+
+  it('is ok once the sends are confirmed released', () => {
+    expect(lockboxPayout({ ...near, pendingOut: 0n, pendingUnresolved: 0n }).status).toBe('ok')
+  })
+})

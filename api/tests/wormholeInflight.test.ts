@@ -291,3 +291,82 @@ describe('matchInboundDeposit', () => {
     expect(matchInboundDeposit([], 21, 6, 6)).toBeNull()
   })
 })
+
+describe('decideInflight — a destination only its own manager can resolve (NEAR)', () => {
+  // Wormholescan does not index redemptions on NEAR either: its operations for
+  // the 2026-11-05/06 ZEC sends (73/…0dd43a80…/67 and /68) carry no targetChain
+  // although NEAR's `transfer_received` executed both a minute after the send.
+  // The NEAR manager's own `is_executed` is the only authority; when it does not
+  // answer for a digest, the scan must not stand in for it (2026-11-07 false
+  // ZEC deficit page: FastNear 429s after a restart, the scan read both as
+  // pending, and their already-released amounts were subtracted a second time).
+  const NEAR = 15
+  const ZEC_EMITTER = '0dd43a80c6f96019b8f5699df1890dfa33bdde85'
+  const nearSend = (sequence: string, amount: bigint): OutboundSend => ({
+    sequence,
+    emitterAddress: ZEC_EMITTER,
+    toChain: NEAR,
+    assetId: 1_001_357,
+    amount,
+    sentAtMs: Date.parse('2026-08-21T00:00:00Z'),
+    blockHeight: 16_692_450,
+    txRef: '16692450-3',
+    digest: `0x${sequence.padStart(64, '0')}`,
+  })
+  // The scan's view of the same sends: present, never redeemed.
+  const scanOps = (sequences: string[]) => normalizeScanOperations(sequences.map(sequence => ({
+    id: `${HYDRATION}/${ZEC_EMITTER.padStart(64, '0')}/${sequence}`,
+    emitterChain: HYDRATION,
+    emitterAddress: { hex: ZEC_EMITTER.padStart(64, '0'), native: `0x${ZEC_EMITTER}` },
+    sequence,
+    content: { payload: {}, standarizedProperties: { fromChain: HYDRATION, toChain: NEAR } },
+    sourceChain: { chainId: HYDRATION, timestamp: '2026-08-21T00:00:00Z', transaction: { txHash: '16692450-3' } },
+  })))
+  const sends = [nearSend('67', 125_031_588n), nearSend('68', 131_758_591n)]
+
+  it('never reads a NEAR-bound send as pending from the scan when NEAR did not answer', () => {
+    const inflight = decideInflight(scanOps(['67', '68']), context({
+      outboundSends: sends,
+      scanBlindOutbound: new Map([[NEAR, new Set<string>()]]),
+    }))
+    // Still counted (the conservative side of the residual) but marked as a
+    // send nobody confirmed either way, so no verdict can grade on it.
+    expect(inflight.map(op => [op.sequence, op.unresolved])).toEqual([['68', true], ['67', true]])
+  })
+
+  it('settles a send NEAR has confirmed executed, whatever the scan says', () => {
+    const executedOutbound = new Set([`0x${'67'.padStart(64, '0')}`, `0x${'68'.padStart(64, '0')}`])
+    expect(decideInflight(scanOps(['67', '68']), context({
+      outboundSends: sends,
+      executedOutbound,
+      scanBlindOutbound: new Map([[NEAR, new Set<string>()]]),
+    }))).toEqual([])
+  })
+
+  it('counts a send NEAR answered not-executed as plainly in flight', () => {
+    const inflight = decideInflight(scanOps(['67', '68']), context({
+      outboundSends: sends,
+      executedOutbound: new Set([`0x${'67'.padStart(64, '0')}`]),
+      scanBlindOutbound: new Map([[NEAR, new Set([`0x${'68'.padStart(64, '0')}`])]]),
+    }))
+    expect(inflight.map(op => [op.sequence, op.unresolved])).toEqual([['68', undefined]])
+  })
+
+  it('leaves chains the scan does resolve on the scan', () => {
+    // A USDC send to Ethereum beside it keeps the scan path: not in the map.
+    const usdcToEth: OutboundSend = { ...nearSend('32', 4_103_723_948n), toChain: 2, assetId: 21, emitterAddress: '0x0d7488b39aa64468a709ec3b3d354defe539ed97' }
+    const pendingOnScan = normalizeScanOperations([{
+      id: `73/${'0d7488b39aa64468a709ec3b3d354defe539ed97'.padStart(64, '0')}/32`,
+      emitterChain: 73,
+      emitterAddress: { hex: '0d7488b39aa64468a709ec3b3d354defe539ed97'.padStart(64, '0') },
+      sequence: '32',
+      content: { payload: {}, standarizedProperties: { fromChain: 73, toChain: 2 } },
+      sourceChain: { timestamp: '2026-08-21T00:00:00Z' },
+    }])
+    const inflight = decideInflight(pendingOnScan, context({
+      outboundSends: [usdcToEth],
+      scanBlindOutbound: new Map([[NEAR, new Set<string>()]]),
+    }))
+    expect(inflight.map(op => [op.sequence, op.unresolved])).toEqual([['32', undefined]])
+  })
+})
