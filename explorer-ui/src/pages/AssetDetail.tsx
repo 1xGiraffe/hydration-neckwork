@@ -5,8 +5,10 @@ import { useNow } from '../hooks/useNow'
 import { api } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, navigate, useQuery, useQueryValue, setQuery } from '../router'
-import { Crumbs, Usd, Amt, PriceUsd, F, AssetIcon, AssetAmount, AddrPill, AssetDetailSkeleton, TableSkeleton, EmptyRow, rowNav, accountHref, TagGroupPill, ActivityChips, Pager, normalizeActivityType, normalizeActivityAction, Dash, LoadError, pendingRows } from '../components/ui'
+import { Crumbs, Usd, Amt, PriceUsd, F, AssetChip, AssetIcon, AssetAmount, AddrPill, AssetDetailSkeleton, TableSkeleton, EmptyRow, rowNav, accountHref, TagGroupPill, ActivityChips, Pager, normalizeActivityType, normalizeActivityAction, Dash, LoadError, pendingRows } from '../components/ui'
 import { ActiveDcaTable } from '../components/AccountSections'
+import { bondDate } from '../components/positions/bondStatus'
+import { bondFamilyUi } from '../bondFamilies'
 import { AssetOrderBook } from '../components/AssetOrderBook'
 import { AssetLiquidityTab } from '../components/AssetLiquidity'
 import { AssetVolumeSection } from '../components/VolumeCharts'
@@ -117,7 +119,7 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Assets', to: paths.assets() }, { label: a?.symbol ?? String(assetId) }]} />
         <div className="detail-header">
-          <div className="page-title">{a && <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} iconAssetIds={a.iconAssetIds} symbol={a.symbol} size={30} parachainId={a.parachainId} origin={a.origin} />} {a?.symbol ?? a?.name ?? `Asset`} <span className="sub muted">#{a?.assetId ?? assetId}</span></div>
+          <h1 className="page-title">{a && <AssetIcon assetId={a.assetId} iconAssetId={a.iconAssetId} iconAssetIds={a.iconAssetIds} symbol={a.symbol} size={30} parachainId={a.parachainId} origin={a.origin} />} {a?.symbol ?? a?.name ?? `Asset`} <span className="sub muted">#{a?.assetId ?? assetId}</span></h1>
           {a && <AssetAlertActions asset={a} />}
         </div>
       </div>
@@ -137,6 +139,25 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
                 <div className="dt">Strategy</div>
                 <div className="dd"><Link to={STRATEGY_OF_ASSET[a.assetId].to}>{STRATEGY_OF_ASSET[a.assetId].label}</Link> <span className="muted">· {STRATEGY_OF_ASSET[a.assetId].note}</span></div>
               </>}
+              {/* A bond: what it redeems for and when, and how the price above is stated —
+                  face from maturity, face discounted at its own issue yield before it. Its
+                  price history below is the underlying's (face). */}
+              {data.bond && (() => {
+                const bond = data.bond
+                const sym = bond.underlying.symbol
+                const page = bond.family ? `${paths.bonds(bond.family)}${bond.round != null ? `#round-${bond.round}` : ''}` : null
+                return <>
+                  <div className="dt">Bond</div>
+                  <div className="dd">
+                    {page ? <Link to={page}>{bondFamilyUi(bond.family ?? '')?.title ?? `${sym} Bonds`}{bond.round != null ? ` · round ${bond.round}` : ''}</Link> : 'Bond'}
+                    <div className="muted" style={{ marginTop: 2 }}>Redeems 1:1 for <AssetChip asset={bond.underlying} /> {bond.matured ? 'since' : 'from'} {bondDate(bond.maturityAt)}
+                      {bond.matured ? ' — redeemable now, valued at face.'
+                        : bond.saleOpen && bond.salePrice != null ? ` — valued at its sale’s price, ${bond.salePrice.toFixed(4)} ${sym} per bond (net of the fee), while the sale stands.`
+                        : bond.valueFactor != null ? ` — valued at its sale’s price accreting to face by maturity: ${bond.valueFactor.toFixed(4)} ${sym} per bond today.`
+                        : ' — no sale price to value it by before then, so it is unpriced.'} Its price history is {sym}’s × that rule.</div>
+                  </div>
+                </>
+              })()}
               {/* Collateral seized from borrowers in the money market, over the
                   asset's full history. Present for every asset the market holds or
                   has held — a reserve that has never been liquidated reads $0. */}
@@ -150,9 +171,9 @@ export function AssetDetail({ assetId, initialTab = 'activity' }: { assetId: num
 
             {data.priceSeries.length > 1 && (
               <>
-                <div className="sec-title" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>Price
+                <h2 className="sec-title" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>Price
                   <a className="ext-link" style={{ marginLeft: 'auto', textTransform: 'none', letterSpacing: 0 }} href={preisPairUrl(assetId)} target="_blank" rel="noopener">Open in preis ↗</a>
-                </div>
+                </h2>
                 <PriceChart data={data.priceSeries} dates={data.priceDates} price={a.price} change24h={a.change24h}
                   liquidations={data.liquidations} asset={a} zoomKey="zp"
                   refine={(dates => dates && dates.length === data.priceSeries.length

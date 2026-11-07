@@ -88,12 +88,12 @@ function OmnipoolLpsSection({ asset }: { asset: AssetRef }) {
   const totalPages = Math.max(1, Math.ceil(total / LPS_PAGE))
   return (
     <>
-      <div className="sec-title">
+      <h2 className="sec-title">
         <button type="button" className="lp-expand" aria-expanded={open} onClick={() => setOpen(o => !o)}>
           <span className="caret">{open ? '▾' : '▸'}</span> Top liquidity providers
         </button>
         {open && lps.data && <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · {F.int(lps.data.lpCount)} {lps.data.lpCount === 1 ? 'provider' : 'providers'} across {F.int(lps.data.positionCount)} positions</span>}
-      </div>
+      </h2>
       {open && (
         lps.isError
           ? <LoadError title="Couldn’t load the liquidity providers" onRetry={() => { void lps.refetch() }} />
@@ -176,11 +176,11 @@ export function AssetLiquidityTab({ asset }: { asset: AssetRef }) {
         </div>
       ) : (
         <>
-          <div className="sec-title" style={{ marginTop: 4 }}>Current
+          <h2 className="sec-title" style={{ marginTop: 4 }}>Current
             {/* Plain text, no AssetAmount: its icon chip breaks the title's
                 baseline alignment, and the page is already about this asset. */}
             <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · <Amt raw={data.totalAmount} dec={asset.decimals} /> {asset.symbol} pooled across {data.sources.length} {data.sources.length === 1 ? 'pool' : 'pools'} · <Usd v={data.totalUsd} /></span>
-          </div>
+          </h2>
           <div className="hdx-cards pool-cards" style={{ marginTop: 0 }}>
             {cards.map((s, i) => <SourceCard key={`${s.kind}:${s.poolId ?? 'omni'}:${i}`} s={s} asset={asset} />)}
           </div>
@@ -214,12 +214,12 @@ export function AssetLiquidityTab({ asset }: { asset: AssetRef }) {
 
       {history.buckets.length > 1 && (
         <>
-          <div className="sec-title" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>Pooled over time
+          <h2 className="sec-title" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>Pooled over time
             <span className="liq-toggle" style={{ marginLeft: 'auto' }}>
               <button className={unit === 'amount' ? 'active' : ''} onClick={() => setUnit('amount')}>{asset.symbol}</button>
               <button className={unit === 'usd' ? 'active' : ''} onClick={() => setUnit('usd')}>USD</button>
             </span>
-          </div>
+          </h2>
           <div className="pf-card">
             <ChartLegend items={series.map(s => ({ label: s.label, color: s.color }))} />
             <StackedAreaChart buckets={history.buckets} series={series} yFmt={unit === 'usd' ? F.usd : undefined} zoomKey="zliq" refine={refineLiquidity} />
@@ -229,9 +229,9 @@ export function AssetLiquidityTab({ asset }: { asset: AssetRef }) {
 
       {data.former.length > 0 && (
         <>
-          <div className="sec-title">Former pools
+          <h2 className="sec-title">Former pools
             <span style={{ color: 'var(--text-low)', textTransform: 'none', letterSpacing: 0 }}> · pools that no longer hold {asset.symbol}</span>
-          </div>
+          </h2>
           <div className="panel"><table className="tbl">
             <thead><tr><th>Pool</th><th>Venue</th><th className="r">Last active</th></tr></thead>
             <tbody>

@@ -19,10 +19,10 @@ function BookSide({ side, entries, asset }: { side: 'bids' | 'asks'; entries: As
   const max = maxSideSizeUsd(entries)
   return (
     <div className="book-side">
-      <div className="sec-title">
+      <h2 className="sec-title">
         {bids ? 'Bids' : 'Asks'} · {entries.length}
         <span className="book-side-note">· {bids ? `orders buying ${asset.symbol}` : `orders selling ${asset.symbol}`}</span>
-      </div>
+      </h2>
       <div className="panel book-panel"><table className={'tbl book-tbl' + (bids ? ' book-bids' : ' book-asks')}>
         <thead><tr>
           <th className="r">Price</th><th className="r">Size</th><th className="r">Total</th><th>Owner</th>

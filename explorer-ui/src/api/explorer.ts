@@ -1,4 +1,4 @@
-import type { MmMarketOption, JuicerDashboard, AccountJuicer, BilDashboard, AccountBil,
+import type { MmMarketOption, JuicerDashboard, AccountJuicer, BilDashboard, AccountBil, BondDashboard, AccountBonds,
   PairChart,
   ExplorerStats, BlockSummary, BlockDetail, ExtrinsicSummary, ExtrinsicDetail,
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
@@ -337,6 +337,7 @@ export const api = {
   openIntents: (signal?: AbortSignal) => getJson<IceOpenIntents>('/explorer/intents/open', signal),
   juicer: (signal?: AbortSignal) => getJson<JuicerDashboard>('/explorer/juicer', signal),
   bil: (signal?: AbortSignal) => getJson<BilDashboard>('/explorer/bil', signal),
+  bonds: (family: string, signal?: AbortSignal) => getJson<BondDashboard>(`/explorer/bonds/${encodeURIComponent(family)}`, signal),
   security: (signal?: AbortSignal) => getJson<SecurityDashboard>('/explorer/security', signal),
   securityWormhole: (signal?: AbortSignal) => getJson<WormholeBridgeDetail>('/explorer/security/wormhole', signal),
   accounts: (offset = 0, limit = 50, sort: AccountSort = 'value', signal?: AbortSignal) => getJson<AccountsPage>(withQuery('/explorer/accounts', { offset, limit, sort }), signal),
@@ -556,6 +557,8 @@ export const positionsApi = {
     getJson<AccountJuicer>(`/explorer/address/${encodeURIComponent(address)}/juicer`, signal),
   accountBil: (address: string, signal?: AbortSignal) =>
     getJson<AccountBil>(`/explorer/address/${encodeURIComponent(address)}/bil`, signal),
+  accountBonds: (address: string, signal?: AbortSignal) =>
+    getJson<AccountBonds>(`/explorer/address/${encodeURIComponent(address)}/bonds`, signal),
   moneyMarketEarned: (address: string, signal?: AbortSignal) =>
     getJson<MoneyMarketEarned>(`/explorer/address/${encodeURIComponent(address)}/money-market-earned`, signal),
   moneyMarketHistoryWindow: (address: string, fromBlock: number, toBlock: number, signal?: AbortSignal) =>

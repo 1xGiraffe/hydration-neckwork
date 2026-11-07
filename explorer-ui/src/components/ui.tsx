@@ -934,6 +934,11 @@ export function AddrPill({ account, full, noCopy, noTag, noFocus, tagToAccount }
   // `tagToAccount` keeps the name but points the link at the account — for a surface
   // that is about this one account rather than the company it keeps.
   const resolved = noTag ? null : resolveTag(account)
+  // A system account with its own name inside a generic system tag (the Bonds pot in
+  // Pallet Pot) wears the tag's face under its own name and opens the account itself.
+  if (resolved && resolved.kind === 'system' && account.displayName) {
+    return <UserTagPill tag={{ ...resolved, name: account.displayName, memberCount: undefined }} address={account.address} noCopy={noCopy} noFocus={noFocus} to={accountHref(account)} isContract={account.isContract} />
+  }
   if (resolved) return <UserTagPill tag={resolved} address={account.address} noCopy={noCopy} noFocus={noFocus} to={tagToAccount ? accountHref(account) : undefined} isContract={account.isContract} />
   const mod = moduleName(account.accountId)
   if (mod) {
@@ -2200,7 +2205,8 @@ export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = 
   // runtime event name — so there is no mapping here to keep in step.
   stake: [{ v: 'Stake', label: 'Stake' }, { v: 'Add stake', label: 'Add stake' }, { v: 'Unstake', label: 'Unstake' }, { v: 'Force unstake', label: 'Force unstake' }, { v: 'Staking reward', label: 'Staking reward' }, { v: 'GIGAHDX Stake', label: 'GIGAHDX Stake' }, { v: 'GIGAHDX Unstake', label: 'GIGAHDX Unstake' }, { v: 'GIGAHDX Cancel Unstake', label: 'GIGAHDX Cancel Unstake' }, { v: 'GIGAHDX Unlock', label: 'GIGAHDX Unlock' }, { v: 'GIGAHDX Migrate', label: 'GIGAHDX Migrate' }, { v: 'GIGAHDX Yield', label: 'GIGAHDX Yield' }, { v: 'GIGAHDX Reward', label: 'GIGAHDX Reward' }, { v: 'Collator payout', label: 'Collator payout' }],
   // Bond values are the server's action words too; the labels are the badges'.
-  bond: [{ v: 'Issue', label: BOND_LABELS.Issue }, { v: 'Redeem', label: BOND_LABELS.Redeem }],
+  // A primary sale's acts are bond rows too (OTC rows the Bond filter admits).
+  bond: (['Purchase', 'Rollover', 'Redeem', 'Issue', 'SaleOpen', 'SaleClose'] as const).map(v => ({ v, label: BOND_LABELS[v] })),
   // Juicer values are the server's action slugs; the labels are the badges'.
   juicer: [
     { v: 'juicer-deposit', label: JUICER_LABELS.Deposit }, { v: 'juicer-withdraw', label: JUICER_LABELS.Withdraw },

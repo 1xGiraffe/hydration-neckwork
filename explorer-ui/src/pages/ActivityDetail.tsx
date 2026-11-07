@@ -4,7 +4,9 @@ import { useNow } from '../hooks/useNow'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, paths, redirect, ACTIVITY_SLUG_TAB, type ActivitySlug } from '../router'
 import { activityLabel, canonicalTarget, subordinateActivityTarget, parseId, SLUG_TYPES, ActivityDesc, ChainBadge, ConvictionTag, ExternalAccountPill, explorerSiteName } from '../components/ActivityTable'
-import { BIL_LABELS, BOND_LABELS, JUICER_LABELS, LIQ_LABELS, MM_LABELS, intentLabel } from '../components/activityColors'
+import { BIL_LABELS, BOND_LABELS, JUICER_LABELS, LIQ_LABELS, MM_LABELS, bondSaleLabel, intentLabel } from '../components/activityColors'
+import { bondFamilyUi } from '../bondFamilies'
+import { bondDate } from '../components/positions/bondStatus'
 import { RevenueRow } from '../components/RevenueRow'
 import { bilRequestHref } from '../components/positions/bilStatus'
 import { PoolBadge, Usd, Amt, ExactAmt, Crumbs, F, AddrPill, AssetChip, FeeAmount, hasTip, hasGas, StatusBadge, FinalizedBadge, CallPill, MomentLink, SkeletonRows, VoteSideBadge, AwaitingBlockCard } from '../components/ui'
@@ -14,7 +16,6 @@ import type { ActivityRow } from '../types'
 
 export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: string }) {
   const label = activityLabel(slug)
-  useDocumentTitle(`${label} ${id}`)
   const ref = parseId(id)
   const { data: rows, isLoading, isError, failureReason } = useBlockActivity(ref?.height ?? null)
   const row = rows?.find(r =>
@@ -69,6 +70,12 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
   }, [row, handover])
 
   const eventId = row?.eventIndex != null ? `${row.blockHeight}-${row.eventIndex}` : null
+  // A bond's primary-sale act is titled as the bond act it is (Bond purchase), not as the
+  // OTC venue's (the slug, and so the URL, stays the venue's).
+  const bondSale = row?.bondSale ?? null
+  const title = (row && bondSaleLabel(row)) ?? label
+  const bondPage = bondSale?.family ? `${paths.bonds(bondSale.family)}${bondSale.round != null ? `#round-${bondSale.round}` : ''}` : null
+  useDocumentTitle(`${title} ${id}`)
   const voteSub = row?.type === 'vote'
     ? [voteSideLabel(row.voteSide), convictionLabel(row.voteConviction),
       row.voteRef ? voteSubjectLabel(row.voteRef, row.voteRefPallet, row.voteRefTitle) : null].filter(Boolean).join(' · ')
@@ -76,8 +83,8 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
   return (
     <div className="wrap">
       <div className="page-head">
-        <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, slug.startsWith('juicer-') ? { label: 'Juicer', to: paths.juicer() } : slug.startsWith('bil-') ? { label: 'Brazilian Invoice Loans', to: paths.bil() } : { label: 'Activity', to: `/activity?tab=${ACTIVITY_SLUG_TAB[slug]}` }, { label: id }]} />
-        <div className="page-title">{label} <span className="num">{id}</span>
+        <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, slug.startsWith('juicer-') ? { label: 'Juicer', to: paths.juicer() } : slug.startsWith('bil-') ? { label: 'Brazilian Invoice Loans', to: paths.bil() } : bondSale?.family ? { label: bondFamilyUi(bondSale.family)?.title ?? 'Bonds', to: paths.bonds(bondSale.family) } : { label: 'Activity', to: `/activity?tab=${ACTIVITY_SLUG_TAB[slug]}` }, { label: id }]} />
+        <h1 className="page-title">{title} <span className="num">{id}</span>
           {row?.type === 'xcm' && <span className="sub">{row.xcmDir === 'in' ? `in from ${row.fromChain ?? '?'}` : `out to ${row.destChain ?? '?'}`}</span>}
           {row?.type === 'mm' && row.mmMarket && <span className="sub">{row.mmMarket}</span>}
           {row?.type === 'staking' && row.stakingAction && <span className="sub">{row.stakingAction}</span>}
@@ -86,8 +93,8 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
           {row?.type === 'juicer' && <span className="sub"><Link to={paths.juicer()}>Juicer</Link>{row.juicerRequestId != null && <> · request #{row.juicerRequestId}</>}</span>}
           {row?.type === 'bil' && <span className="sub"><Link to={paths.bil()}>Brazilian Invoice Loans</Link>{row.bilRequestId != null && <> · request #{row.bilRequestId}</>}</span>}
           {row?.type === 'vote' && voteSub && <span className="sub">{voteSub}</span>}
-          {row?.type === 'otc' && row.otcOrderId != null && <span className="sub">order #{row.otcOrderId}</span>}
-        </div>
+          {row?.type === 'otc' && row.otcOrderId != null && <span className="sub">{bondSale && bondPage ? <><Link to={bondPage}>{bondFamilyUi(bondSale.family ?? '')?.title ?? 'Bonds'}{bondSale.round != null ? ` · round ${bondSale.round}` : ''}</Link> · </> : null}OTC order #{row.otcOrderId}</span>}
+        </h1>
       </div>
 
       {!ref ? <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>Invalid activity id</div>
@@ -107,7 +114,7 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
           </div>
         )
         : isLoading || !row ? <div className="detail-card"><SkeletonRows /></div> : (
-          <div className="detail-card"><div className="dl">
+          <div className="detail-card"><h2 className="sr-only">Details</h2><div className="dl">
             {/* headed: this page states the row's context in its own title and subtitle,
                 so the description drops what that already says (see ActivityDesc). */}
             <div className="dt">Activity</div><div className="dd"><ActivityDesc r={row} headed now={now} /></div>
@@ -223,6 +230,18 @@ export function ActivityDetailPage({ slug, id }: { slug: ActivitySlug; id: strin
             {row.type === 'otc' && <>
               <div className="dt">Order ID</div><div className="dd mono">#{row.otcOrderId}</div>
               <div className="dt">Action</div><div className="dd">{row.otcAction ?? '—'}</div>
+              {/* A bond's primary sale: the bond, its round on the family page, and what a fill locked in. */}
+              {bondSale && (() => {
+                const bond = row.otcAction === 'Fill' ? row.assetOut : row.assetIn
+                return <>
+                  <div className="dt">Bond sale</div>
+                  <div className="dd">{bondSaleLabel(row)}{bond && <> · <AssetChip asset={bond} /></>}{bondPage && <> · <Link to={bondPage}>{bondSale.round != null ? `round ${bondSale.round}` : 'the bond'} on its page</Link></>} <span className="muted">· the issuer's own offer, placed by governance</span></div>
+                  {row.otcAction === 'Fill' && bondSale.price != null && <>
+                    <div className="dt">Locked in</div>
+                    <div className="dd mono">{bondSale.price.toFixed(4)} {bondSale.kind === 'rollover' ? 'old bonds' : row.assetIn?.symbol ?? ''} per bond · {bondSale.returnPct != null ? `${bondSale.returnPct.toFixed(4)}% to maturity` : '—'}{bondSale.aprPct != null && <> · {bondSale.aprPct.toFixed(2)}% APR</>} <span className="muted" style={{ fontFamily: 'inherit' }}>· net of the fee, held to {bondSale.maturityAt ? bondDate(bondSale.maturityAt) : 'maturity'}</span></div>
+                  </>}
+                </>
+              })()}
               {/* The Account row above is the taker who called the fill; this is
                   the account whose order it consumed. */}
               {row.otcAction === 'Fill' && row.to && <><div className="dt">Maker</div><div className="dd"><AddrPill account={row.to} /></div></>}

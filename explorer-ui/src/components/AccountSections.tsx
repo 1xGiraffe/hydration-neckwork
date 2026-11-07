@@ -196,7 +196,7 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
   if (!series || series.length <= 1) {
     return loading ? (
       <>
-        <div className="sec-title">{title}</div>
+        <h2 className="sec-title">{title}</h2>
         {/* Same shape as the loaded card below: value + the 24H/7D/30D/12M row. */}
         <ChartCardSkeleton metrics={4} />
       </>
@@ -235,7 +235,7 @@ export function PortfolioChart({ title, netUsd, series, dates: datesProp, balanc
   const totalUp = series[series.length - 1] >= series[0]
   return (
     <>
-      <div className="sec-title">{title}</div>
+      <h2 className="sec-title">{title}</h2>
       <div className="pf-card">
         <div className="pf-head pf-head-volume"><div className="pf-now"><Usd v={netUsd} /></div>{perfItems.length > 0 && <div className="perf-row">{perfItems.map(p => perf(p.label, p.value))}</div>}</div>
         {/* Legend only with two curves: it names them and carries the ex-HDX figure
@@ -276,7 +276,7 @@ export function VolumeSection({ scope, tradingVolumeUsd }: {
   if (!h) {
     return q.isLoading || q.isFetching ? (
       <>
-        <div className="sec-title">Volume</div>
+        <h2 className="sec-title">Volume</h2>
         <ChartCardSkeleton metrics={4} />
       </>
     ) : null
@@ -300,7 +300,7 @@ export function VolumeSection({ scope, tradingVolumeUsd }: {
   const lag = h.asOfBlock != null ? `Trades through block ${F.int(h.asOfBlock)}; the newest can trail the chain head by up to one indexing cycle.` : undefined
   return (
     <>
-      <div className="sec-title">Volume</div>
+      <h2 className="sec-title">Volume</h2>
       <div className="pf-card">
         <div className="pf-head pf-head-volume">
           <div className="pf-now" title={lag}><Usd v={h.totals.all} /></div>
@@ -340,7 +340,7 @@ export interface PositionTabCounts {
   orders: number
   liquidity: number
   borrow: number
-  /** Strategy positions (Juicer vaults, Brazilian Invoice Loans) and open withdrawal/redemption requests — the Strategies tab. */
+  /** Strategy positions (Juicer vaults, Brazilian Invoice Loans, bonds) and open withdrawal/redemption requests — the Strategies tab. */
   strategies?: number
   /** The Strategies read is pending or unavailable: a deep link keeps the tab (it says so) rather than losing it. */
   strategiesUnsettled?: boolean
@@ -693,7 +693,7 @@ export function ActiveDcaTable({ dcas, headBlock, headTime, now, blockSec, title
   if (!dcas.length && !emptyText) return null
   return (
     <>
-      <div className="sec-title">{title ?? <>Active DCA orders · {dcas.length}</>}</div>
+      <h2 className="sec-title">{title ?? <>Active DCA orders · {dcas.length}</>}</h2>
       {/* The owner variant is the asset page's, where a Buys and a Sells table
           stack: fixed shared column widths keep the pair's columns on the same
           vertical lines (see .dca-tbl-aligned). */}
@@ -862,7 +862,7 @@ export function LimitOrdersTable({ orders, now, title, showOwner, emptyText }: {
   if (!orders.length && !emptyText) return null
   return (
     <>
-      <div className="sec-title">{title ?? <>Open limit orders · {orders.length}</>}</div>
+      <h2 className="sec-title">{title ?? <>Open limit orders · {orders.length}</>}</h2>
       <div className="panel"><table className="tbl dca-tbl">
         <thead><tr>
           {showOwner && <th>Owner</th>}

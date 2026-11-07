@@ -196,6 +196,7 @@ export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCap
 }) {
   const [hover, setHover] = useState<number | null>(null)
   const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
+  const narrowCols = useMediaQuery('(max-width: 720px)')
   const n = columns.length
   const totals = columns.map(c => c.segments.reduce((s, x) => s + x.value, 0))
   // Single shared axis for weekly and monthly. Detect the tall-bucket cluster
@@ -210,6 +211,23 @@ export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCap
   const bw = n ? (W - padL - padR) / n : 0
   const colX = (i: number) => padL + i * bw
   const gy = (t: number) => padT + (1 - t) * plotH
+  // A clamped column's value label is drawn only where it clears the previous one:
+  // neighbouring outliers would print over each other (its tooltip still says it). Axis
+  // type is set in viewBox units and phones size it up (.ice-page .hdx-ax), so the
+  // width estimate follows the viewport.
+  const axisPx = narrowCols ? 24 : 10
+  const clampLabelShown: boolean[] = []
+  {
+    let lastRight = -Infinity
+    for (let i = 0; i < n; i++) {
+      if (!(totals[i] > max)) { clampLabelShown.push(false); continue }
+      const half = fmtHdxTick(totals[i]).length * axisPx * 0.31
+      const cx = colX(i) + bw / 2
+      const show = cx - half > lastRight + axisPx * 0.3
+      if (show) lastRight = cx + half
+      clampLabelShown.push(show)
+    }
+  }
   return (
     <div ref={wrapRef} className="hdx-chart-wrap" onMouseLeave={() => setHover(null)}>
       <svg className="day-chart" viewBox={`0 0 ${W} ${h}`}>
@@ -252,7 +270,7 @@ export function StackedColumnChart({ columns, h = 200, separatorAt, separatorCap
                 <g>
                   <line x1={(bx - 2).toFixed(1)} x2={(bx + bwid + 2).toFixed(1)} y1={padT + 9} y2={padT + 4} stroke="var(--bg-elev)" strokeWidth="3" />
                   <line x1={(bx - 2).toFixed(1)} x2={(bx + bwid + 2).toFixed(1)} y1={padT + 15} y2={padT + 10} stroke="var(--bg-elev)" strokeWidth="3" />
-                  <text className="hdx-ax" x={(bx + bwid / 2).toFixed(1)} y={padT - 5} textAnchor="middle" style={{ fill: 'var(--text-medium)' }}>{fmtHdxTick(totals[i])}</text>
+                  {clampLabelShown[i] && <text className="hdx-ax" x={(bx + bwid / 2).toFixed(1)} y={padT - 5} textAnchor="middle" style={{ fill: 'var(--text-medium)' }}>{fmtHdxTick(totals[i])}</text>}
                 </g>
               )}
               <text className="hdx-ax" x={(bx + bwid / 2).toFixed(1)} y={h - 4} textAnchor="middle">{c.label}</text>

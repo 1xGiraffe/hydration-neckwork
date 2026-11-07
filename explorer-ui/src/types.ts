@@ -44,6 +44,7 @@ export interface AccountRef {
   profile?: ProfileRef | null         // self-authored wallet-login profile, if the account has one
   isContract?: boolean                // deployed EVM smart contract — pills wear the </> glyph
   contractName?: string               // the contract's display label (verified name, or "X (proxy)" / "X (implementation)") — the pill's label, like an identity display; the verified name itself is contract.verification.name
+  displayName?: string                // a system account's own name inside a generic tag (the Bonds pot in Pallet Pot)
 }
 
 export interface ExplorerStats {
@@ -559,10 +560,10 @@ export interface UncountedBalance { amount: string; reason: 'pool-hub-reserve' |
 // Why a balance is shown and counted in no value, as the Balances tab and the
 // Value hint both phrase it: the Omnipool's own hub reserve, and what a strategy's
 // custody account (the Juicer vault, its loop, its yield fund; the BIL vault and the
-// Decentral pool it invests in) holds for its share holders.
+// Decentral pool it invests in; the Bonds pallet pot) holds for its share or bond holders.
 export const UNCOUNTED_REASON: Record<UncountedBalance['reason'], string> = {
   'pool-hub-reserve': 'the pool\'s own hub reserve — H2O is priced off the assets the pool holds, which the value already counts',
-  'strategy-custody': 'held in custody for the strategy\'s share holders — their shares are valued for it',
+  'strategy-custody': 'held in custody for a strategy\'s share holders or a bond\'s holders — their shares and bonds are valued for it',
 }
 export interface MmReserve {
   assetId: number
@@ -1125,6 +1126,10 @@ export interface ActivityRow {
   otcPartial?: boolean            // fill came from OTC.PartiallyFilled
   otcPartiallyFillable?: boolean  // Placed order property
   otcFee?: string                 // fills; denominated in assetOut
+  // A bond's primary-sale act (bonds.ts): this venue row (an OTC place, pull or fill) is
+  // also a `bond` row — a purchase (`sale`) or rollover — of round `round` on the bond
+  // family page `family`.
+  bondSale?: { venue: 'otc' | 'lbp'; kind: 'sale' | 'rollover'; bondId: number; family: string | null; round: number | null; maturityAt: string | null; price?: number | null; returnPct?: number | null; aprPct?: number | null }
   // ICE intents (runtime 443). A `swap` intent is the product's limit order, a `dca`
   // intent its DCA. `intentId` is the u128 as a decimal string — it starts past u64,
   // so it is never a number; `intentSeq` is its low 64 bits, the short "#n" handle.
@@ -1288,6 +1293,8 @@ export interface AssetDetail {
   // every peer, which of them hold custody, and the token on each. Absent for
   // an asset that does not cross Wormhole.
   bridge?: WormholeAssetBridge | null
+  // A bond: what it redeems for and when, its family page and what one bond is worth now in the underlying.
+  bond?: { underlying: AssetRef; maturityAt: string; matured: boolean; family: string | null; round: number | null; valueFactor: number | null; salePrice: number | null; saleOpen: boolean }
 }
 
 // The token an NTT asset is on one of its peer chains.
@@ -3591,3 +3598,100 @@ export interface AccountBil {
     requests: BilRequest[]
   }) | null
 }
+
+// ── Bonds (the Bonds pallet; /<family>-bonds) ──────────────────────────────────────
+export type BondStatus = 'selling' | 'active' | 'matured' | 'redeemed'
+/** One primary-sale source of a bond: an OTC offer (an LBP pool for the HDX bonds). */
+export interface BondSale {
+  venue: 'otc' | 'lbp'
+  id: string
+  kind: 'sale' | 'rollover'
+  paymentAsset: AssetRef
+  fromRound: number | null
+  issuerAccounts: AccountRef[]
+  openedAt: string
+  openedBlock: number
+  endedAt: string | null
+  state: 'open' | 'filled' | 'closed'
+  offered: string | null
+  sold: string
+  paid: string
+  net: string
+  remaining: string
+  unsold: string
+  fills: number
+  buyers: number
+  price: number | null
+  discountPct: number | null
+  fixedYieldPct: number | null
+  aprAtOpenPct: number | null
+  avgPrice: number | null
+}
+export interface BondRound {
+  round: number
+  bondId: number
+  asset: AssetRef
+  status: BondStatus
+  issuer: AccountRef
+  createdAt: string
+  createdBlock: number
+  maturityAt: string
+  issued: string
+  issueFee: string
+  sales: BondSale[]
+  offered: string
+  soldForMoney: string
+  rolledOver: string
+  proceeds: Array<{ asset: AssetRef; raw: string }>
+  fixedYieldPct: number | null
+  aprAtOpenPct: number | null
+  salePrice: number | null
+  saleOpen: boolean
+  redeemed: string
+  redemptions: number
+  firstRedemptionAt: string | null
+  lastRedemptionAt: string | null
+  outstanding: string
+  issuerHeld: string | null
+  publicOutstanding: string | null
+  valueFactor: number | null
+  publicUsd: number | null
+  issuerUsd: number | null
+  holders: { list: HolderRow[]; total: number; holderCount: number; totalUsd: number } | null
+  buyers: number
+}
+export interface BondFillDay { day: string; bondId: number; kind: 'sale' | 'rollover'; fills: number; bonds: string; paid: string; returnPct: number | null; aprPct: number | null }
+export interface BondDay { day: string; sold: Record<string, string>; redeemed: Record<string, string> }
+export interface BondDashboard {
+  generatedAt: string
+  asOfBlock: number | null
+  family: { key: string; title: string; appUrl: string | null }
+  underlying: AssetRef
+  rounds: BondRound[]
+  fillDays: BondFillDay[]
+  days: BondDay[]
+  totals: {
+    issued: string; soldForMoney: string; rolledOver: string; redeemed: string; outstanding: string
+    publicOutstanding: string | null; publicUsd: number | null
+    holders: number | null; buyers: number; fills: number
+  }
+  pot: { account: AccountRef; balance: string | null; outstanding: string; reconciled: boolean | null }
+  accounts: Array<{ role: string; account: AccountRef }>
+}
+export interface AccountBondPosition {
+  family: string
+  familyTitle: string
+  round: number
+  bondId: number
+  asset: AssetRef
+  underlying: AssetRef
+  balance: string
+  maturityAt: string
+  status: BondStatus
+  redeemable: boolean
+  valueUsd: number | null
+  faceUsd: number | null
+  valueFactor: number | null
+  bought: { bonds: string; paid: Array<{ asset: AssetRef; raw: string }>; returnPct: number | null; aprPct: number | null; fills: number } | null
+}
+export interface AccountBonds { asOfBlock: number | null; positions: AccountBondPosition[] }
