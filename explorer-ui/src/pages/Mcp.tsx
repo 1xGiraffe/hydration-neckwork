@@ -1,11 +1,11 @@
-import { useRef } from 'react'
-import type { KeyboardEvent, ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
 import { Link, navigate, paths, redirect, useQueryValue } from '../router'
 import { Copy, CopyTextButton, Crumbs, F } from '../components/ui'
 import { DATA_API_URL, PREIS_URL } from '../surfaces'
 import { PROBE_BODY, classifyProbe, type Probe } from '../mcpProbe'
+import { RovingTabs } from '../components/RovingTabs'
 
 // /mcp — getting started with the Hydration MCP server, and the map of which
 // developer surface answers which question.
@@ -337,46 +337,10 @@ function clientLocation(id: string): string {
   return q ? `${window.location.pathname}?${q}` : window.location.pathname
 }
 
-// Real tab semantics over the app's own `.tabs` bar: the styling, the ink and
-// the narrow-screen edge fade all come from the shared class; the roles and the
-// arrow-key movement are this bar's own, because a seven-item strip is where
-// keyboard navigation starts to matter.
+// The setup clients as tabs (RovingTabs): seven configs, where keyboard movement
+// across the strip starts to matter.
 function ClientTabs({ value, onChange }: { value: string; onChange: (id: string, replace: boolean) => void }) {
-  const refs = useRef<Record<string, HTMLButtonElement | null>>({})
-  const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    const last = SETUP_CLIENTS.length - 1
-    const next = e.key === 'ArrowRight' ? (index === last ? 0 : index + 1)
-      : e.key === 'ArrowLeft' ? (index === 0 ? last : index - 1)
-        : e.key === 'Home' ? 0
-          : e.key === 'End' ? last
-            : null
-    if (next == null) return
-    e.preventDefault()
-    const target = SETUP_CLIENTS[next]
-    onChange(target.id, true)
-    refs.current[target.id]?.focus()
-  }
-  return (
-    <div className="tabs detail-tabs" role="tablist" aria-label="Setup clients">
-      {SETUP_CLIENTS.map((client, index) => (
-        <button
-          key={client.id}
-          type="button"
-          role="tab"
-          id={`mcp-tab-${client.id}`}
-          aria-controls={`mcp-panel-${client.id}`}
-          aria-selected={value === client.id}
-          tabIndex={value === client.id ? 0 : -1}
-          ref={el => { refs.current[client.id] = el }}
-          className={value === client.id ? 'active' : ''}
-          onClick={() => onChange(client.id, false)}
-          onKeyDown={e => onKeyDown(e, index)}
-        >
-          {client.label}
-        </button>
-      ))}
-    </div>
-  )
+  return <RovingTabs tabs={SETUP_CLIENTS.map(c => ({ id: c.id, label: c.label }))} value={value} onChange={onChange} idPrefix="mcp" label="Setup clients" className="tabs detail-tabs" />
 }
 
 function ToolRow({ tool }: { tool: McpTool }) {
