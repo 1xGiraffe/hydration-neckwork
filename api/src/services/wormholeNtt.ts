@@ -390,7 +390,7 @@ export const WORMHOLE_CHAINS: Readonly<Record<number, WormholeChainInfo>> = {
   1: { name: 'Solana', family: 'solana', evmChainId: null, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://orbmarkets.io/address/' },
   2: { name: 'Ethereum', family: 'evm', evmChainId: 1, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://etherscan.io/address/' },
   // NEAR: ZEC (zec.omft.near, NEAR Intents' omni token) arrives from here.
-  15: { name: 'NEAR', family: 'near', evmChainId: null, layer: 'l1', publicRpc: 'https://free.rpc.fastnear.com', riskNote: null, explorer: 'https://nearblocks.io/address/' },
+  15: { name: 'NEAR', family: 'near', evmChainId: null, layer: 'l1', publicRpc: 'https://near.drpc.org', riskNote: null, explorer: 'https://nearblocks.io/address/' },
   21: { name: 'Sui', family: 'sui', evmChainId: null, layer: 'l1', publicRpc: null, riskNote: null, explorer: 'https://suivision.xyz/object/' },
   30: {
     name: 'Base', family: 'evm', evmChainId: 8453, layer: 'l2', publicRpc: null,
