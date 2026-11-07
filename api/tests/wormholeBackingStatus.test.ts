@@ -417,3 +417,45 @@ describe('worstStatus', () => {
     expect(worstStatus([])).toBe('ok')
   })
 })
+
+describe('classifyBacking with in-flight sends their destination has not confirmed either way', () => {
+  // The 2026-11-07 ZEC reading: NEAR custody 208.34525915, issuance 208.34355642,
+  // and two outbound sends (1.25031588 + 1.31758591) NEAR had already executed
+  // but did not confirm this cycle. Counting them in flight is the conservative
+  // side of the residual, but a shortfall they alone could explain is not a
+  // finding until the destination answers for them.
+  const zec = (over: Partial<BackingInput> = {}): BackingInput => usdc({
+    locked: 20_834_525_915n,
+    issuance: 20_834_355_642n,
+    inflightOut: 256_790_179n,
+    inflightUnresolved: 256_790_179n,
+    decimals: 8,
+    symbol: 'ZEC',
+    priceUsd: 12.81,
+    ...over,
+  })
+
+  it('holds the false ZEC shortfall at unverified instead of grading it a deficit', () => {
+    const verdict = classifyBacking(zec())
+    expect(verdict.status).toBe('unverified')
+    expect(verdict.residual).toBe(-256_619_906n)
+    expect(verdict.detail).toMatch(/not confirmed/i)
+  })
+
+  it('grades the part of a shortfall the unresolved sends cannot explain', () => {
+    // 5 ZEC missing beyond the unresolved sends: real whichever way they went,
+    // and stated at that certain floor.
+    const verdict = classifyBacking(zec({ locked: 20_834_525_915n - 500_000_000n }))
+    expect(verdict.status).toBe('deficit')
+    expect(verdict.residual).toBe(-256_619_906n - 500_000_000n + 256_790_179n)
+  })
+
+  it('changes nothing when every in-flight send was confirmed', () => {
+    expect(classifyBacking(zec({ inflightUnresolved: 0n })).status).toBe('deficit')
+    expect(classifyBacking(zec({ inflightUnresolved: undefined })).status).toBe('deficit')
+  })
+
+  it('leaves a balanced or surplus reading alone', () => {
+    expect(classifyBacking(zec({ locked: 20_834_355_642n + 256_790_179n })).status).toBe('ok')
+  })
+})

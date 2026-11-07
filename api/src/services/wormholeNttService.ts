@@ -1823,23 +1823,24 @@ async function nearView(url: string, account: string, method: string, args: Reco
 
 async function readNearCustody(
   url: string, targets: readonly OriginTarget[], pending: readonly PendingDigest[], hydrationChainId: number,
-): Promise<{ custody: Map<number, CustodyRead>; executed: Set<string> | null }> {
+): Promise<{ custody: Map<number, CustodyRead>; executed: Set<string>; notExecuted: Set<string> }> {
   const custody = new Map<number, CustodyRead>()
   const names = await nearManagerNames()
+  // Answers are kept per digest: Wormholescan does not index NEAR redemptions,
+  // so the manager is the only authority, and a digest it did not answer stays
+  // in neither set — unresolved, never "pending" by default.
   const executed = new Set<string>()
-  // Any of our sends left unasked or unanswered makes the whole answer unknown: an
-  // empty set would read as "asked, and none executed".
-  let executedOk = true
+  const notExecuted = new Set<string>()
   for (const target of targets) {
     const handle = target.peer.replace(/^0x/, '').toLowerCase()
     const manager = names.get(handle)
     const targetPending = pending.filter(p => p.assetId === target.asset.assetId)
-    if (!manager) { if (targetPending.length) executedOk = false; continue }
+    if (!manager) continue
     // Execution is the manager's own record, independent of reading its custody.
     for (const p of targetPending) {
       const done = await nearView(url, manager, 'is_executed', { digest: p.digest.replace(/^0x/, '') })
-      if (typeof done !== 'boolean') { executedOk = false; continue }
-      if (done) executed.add(p.digest)
+      if (done === true) executed.add(p.digest)
+      else if (done === false) notExecuted.add(p.digest)
     }
     const key = `${target.asset.assetId}:${target.chainId}`
     // Cached per peer handle, so a re-pointed peer never inherits its predecessor's token.
@@ -1874,7 +1875,7 @@ async function readNearCustody(
     }
     nearAlsoPeers.set(key, also)
   }
-  return { custody, executed: executedOk ? executed : null }
+  return { custody, executed, notExecuted }
 }
 
 // ─────────────────────── rate-limiter fuses ───────────────────────
@@ -2513,6 +2514,9 @@ async function readBackingCycle(
   const queued: QueuedEntry[] = []
   const originFuses = new Map<string, FusePair>()
   const executedOutboundByChain = new Map<number, ReadonlySet<string>>()
+  // NEAR: the digests its managers answered NOT executed this cycle (see
+  // `InflightContext.scanBlindOutbound`).
+  const nearNotExecuted = new Map<number, ReadonlySet<string>>()
   const queueCutoffMs = Date.now() - LOOKBACK_MS
   for (const [chainId, targets] of [...byChain.entries()].sort((a, b) => a[0] - b[0])) {
     const family = wormholeChainFamily(chainId)
@@ -2542,7 +2546,11 @@ async function readBackingCycle(
       } else if (family === 'near') {
         const near = await readNearCustody(url, targets, pendingOutboundDigests(timeline.sends, targets, chainId, queueCutoffMs), hydrationChainId)
         read = near.custody
-        executed = near.executed
+        // Straight into the permanent set, answered digest by answered digest;
+        // never into `executedOutboundByChain`, which would make every digest
+        // NEAR did not answer read as pending.
+        for (const digest of near.executed) executedDigests.add(digest)
+        nearNotExecuted.set(chainId, near.notExecuted)
       } else if (family === 'evm') {
         const evm = await readEvmCustody(url, targets, hydrationChainId, pendingOutboundDigests(timeline.sends, targets, chainId, queueCutoffMs))
         read = evm.custody
@@ -2722,6 +2730,14 @@ async function readBackingCycle(
     unresolvedOutboundByChain.set(chainId, pending)
   }
 
+  // Wormholescan does not index redemptions on NEAR (its operations for NEAR-bound
+  // sends never gain a targetChain), so only the NEAR manager decides them — a
+  // chain with no endpoint or no answer leaves its sends unresolved.
+  const scanBlindOutbound = new Map<number, ReadonlySet<string>>()
+  for (const chainId of new Set(outboundSends.map(s => s.toChain))) {
+    if (wormholeChainFamily(chainId) === 'near') scanBlindOutbound.set(chainId, nearNotExecuted.get(chainId) ?? new Set())
+  }
+
   const inflight = decideInflight(ops, {
     hydrationChainId,
     assetByManager,
@@ -2730,6 +2746,7 @@ async function readBackingCycle(
     executedOutboundByChain,
     executedOutbound: executedDigests,
     unresolvedOutboundByChain,
+    scanBlindOutbound,
     queuedOutbound: new Set(queued.map(q => q.sendKey).filter((k): k is string => k != null)),
     nowMs,
     lookbackMs: LOOKBACK_MS,
@@ -3110,6 +3127,10 @@ function backingLegs(snap: WormholeSnapshot, asset: DiscoveredAsset): BackingLeg
   return legs
 }
 
+/** Σ the outbound in-flight amounts their destination did not confirm either way. */
+const unresolvedOutOf = (ops: readonly WormholeInflightOp[]): bigint =>
+  ops.reduce((total, op) => total + (op.direction === 'out' && op.unresolved && op.amount != null ? BigInt(op.amount) : 0n), 0n)
+
 function assetBacking(
   snap: WormholeSnapshot, asset: DiscoveredAsset, prices: Map<number, PriceInfo>,
   // Override for the refresh pass, which grades a cycle's own reading before the
@@ -3120,9 +3141,10 @@ function assetBacking(
   const scanEnabled = snap.scan.configured && snap.scan.ok
   const inflightIn = scanEnabled ? snap.inflightIn.get(asset.assetId) ?? 0n : null
   const inflightOut = scanEnabled ? snap.inflightOut.get(asset.assetId) ?? 0n : null
+  const inflightUnresolved = scanEnabled ? unresolvedOutOf(snap.inflight.filter(op => op.assetId === String(asset.assetId))) : null
   const queued = snap.queuedByAsset.get(asset.assetId) ?? null
   const verdict = classifyLegs({
-    inflightIn, inflightOut, queued,
+    inflightIn, inflightOut, inflightUnresolved, queued,
     decimals: asset.decimals,
     symbol: asset.symbol,
     priceUsd: prices.get(asset.assetId)?.price ?? null,
@@ -3267,6 +3289,7 @@ function peerRows(
         sent: flow.sent,
         pendingIn: inflightIn ?? 0n,
         pendingOut: (inflightOut ?? 0n) + (held?.peer ?? 0n),
+        pendingUnresolved: scanEnabled ? unresolvedOutOf(pendingOutOps) : 0n,
         inboundCapacity: fuses?.peerIn ? BigInt(fuses.peerIn.capacity) : null,
         circulating,
         tolerance: tol,

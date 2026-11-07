@@ -234,6 +234,10 @@ export interface WormholeInflightOp {
   sequence: string
   sentAt: string | null
   sourceTx: string | null
+  // Outbound only: counted in flight because its destination — the one
+  // authority for it (NEAR) — did not confirm it executed or pending this
+  // cycle. A shortfall such sends could explain is not graded.
+  unresolved?: true
 }
 
 export interface WormholeTransferRow {
@@ -1435,6 +1439,9 @@ export interface BackingInput {
   // (null) counts as nothing queued, which under-subtracts and therefore only
   // widens a surplus — it can never manufacture a deficit.
   queued: bigint | null
+  // The part of `inflightOut` whose destination did not confirm it either way
+  // this cycle (see `WormholeInflightOp.unresolved`). Absent or 0n: none.
+  inflightUnresolved?: bigint | null
   decimals: number
   /** Ticker, so a verdict that names an amount reads as an amount of something. */
   symbol: string
@@ -1569,10 +1576,26 @@ export function classifyBacking(input: BackingInput): BackingVerdict {
       detail: `${behind}, so supply is read at an older block than custody. Transfers the origin has already released since then still count as supply, so this shortfall is not graded until indexing catches up.${burnedNote}`,
     }
   }
+  // Sends counted in flight that their destination did not confirm either way
+  // (NEAR, which only its own manager can answer for) may already be released:
+  // a shortfall they could explain is not a finding, and one larger than them
+  // is graded at the floor that holds whichever way they went.
+  const unresolved = input.inflightUnresolved ?? 0n
+  let graded = residual
+  if (unresolved > 0n) {
+    graded = residual + unresolved
+    if (graded >= -tol) {
+      return {
+        status: 'unverified',
+        residual,
+        detail: `${humanAmount(unresolved, decimals)} ${input.symbol} of outbound transfers were not confirmed executed or pending by their destination this cycle, so this shortfall may be transfers already released and is not graded.${burnedNote}`,
+      }
+    }
+  }
   // One cycle is not a finding: hold the row on the safe side of the line and
   // say why, rather than raising a shortfall the next cycle may erase.
-  if (!input.downgradeConfirmed) return { status: 'ok', residual, detail: `${unconfirmed}${burnedNote}` }
-  const shortfall = -residual
+  if (!input.downgradeConfirmed) return { status: 'ok', residual: graded, detail: `${unconfirmed}${burnedNote}` }
+  const shortfall = -graded
   const shortfallUsd = rawToUsd(shortfall, decimals, priceUsd)
   const minorByValue = shortfallUsd != null && shortfallUsd < MINOR_DEFICIT_USD
   // Measured against CIRCULATING supply, the same quantity the residual is:
@@ -1580,9 +1603,9 @@ export function classifyBacking(input: BackingInput): BackingVerdict {
   // a smaller share of the asset than it is.
   const minorByShare = circulating > 0n && shortfall * 1000n < circulating * MINOR_DEFICIT_PERMILLE_OF_ISSUANCE
   if (minorByValue && minorByShare) {
-    return { status: 'attention', residual, detail: `Minted supply exceeds custody by a small amount. ${window}` }
+    return { status: 'attention', residual: graded, detail: `Minted supply exceeds custody by a small amount. ${window}` }
   }
-  return { status: 'deficit', residual, detail: `Minted supply exceeds custody, so part of the supply is not backed. ${window}` }
+  return { status: 'deficit', residual: graded, detail: `Minted supply exceeds custody, so part of the supply is not backed. ${window}` }
 }
 
 const STATUS_SEVERITY: Record<WormholeStatus, number> = {
@@ -1765,6 +1788,8 @@ export interface LockboxPayoutInput {
   pendingIn: bigint
   /** Burned on Hydration toward this chain but not yet released from it (in flight + queued). */
   pendingOut: bigint
+  /** The part of `pendingOut` this lockbox's chain did not confirm executed or pending this cycle. */
+  pendingUnresolved?: bigint
   /** How much this lockbox's inbound limiter would let through from Hydration right now. */
   inboundCapacity: bigint | null
   /** Hydration-side supply that could be sent here. */
@@ -1822,6 +1847,13 @@ export function lockboxPayout(input: LockboxPayoutInput): LockboxPayout {
   const shortFlows = baseline < -tol
   if ((shortRelease || shortFlows) && !input.fresh) {
     return { ...out, status: 'unverified', detail: `A shortfall stands against a balance carried over from an earlier read, so it is not graded.${limitNote}` }
+  }
+  // Sends its chain did not answer for may already be released from it: a gap
+  // they alone could explain is not graded.
+  const unresolved = input.pendingUnresolved ?? 0n
+  if ((shortRelease || shortFlows) && unresolved > 0n
+    && !(balance - (pendingOut - unresolved) < -tol) && !(baseline + unresolved < -tol)) {
+    return { ...out, status: 'unverified', detail: `${amt(unresolved)} of transfers toward it were not confirmed executed or pending by its chain this cycle, so the gap may be transfers it has already released and is not graded.${limitNote}` }
   }
   if (shortRelease) {
     return { ...out, status: 'attention', detail: `Transfers already burned on Hydration toward this lockbox (${amt(pendingOut)}) exceed what it holds (${amt(balance)}).${limitNote}` }
@@ -2120,6 +2152,12 @@ export interface InflightContext {
   // still unredeemed. Present only for chains Wormholescan cannot resolve (Sui);
   // absent means "trust the scan".
   unresolvedOutboundByChain?: Map<number, number>
+  // Per target chain whose redemptions Wormholescan does not index and whose
+  // manager answers per digest (NEAR): the digests it answered NOT executed this
+  // cycle. A send to such a chain is never decided by the scan — executed
+  // (`executedOutbound`) settles it, answered-not-executed is in flight, and
+  // anything the chain did not answer is in flight but `unresolved`.
+  scanBlindOutbound?: Map<number, ReadonlySet<string>>
   // VAA keys of our sends the origin's rate limiter is already holding. They are
   // redeemed, so they are not in flight, and the queued term already subtracts
   // them — counting them twice would subtract the same amount twice and raise a
@@ -2182,8 +2220,13 @@ export function decideInflight(ops: readonly NormalizedScanOp[], ctx: InflightCo
     if (ctx.executedOutbound?.has(send.digest)) continue
     const scanOp = scanByKey.get(key)
     let pending: boolean
+    let unresolved = false
     const executed = ctx.executedOutboundByChain?.get(send.toChain)
-    if (executed) {
+    const blind = ctx.scanBlindOutbound?.get(send.toChain)
+    if (blind) {
+      pending = true
+      unresolved = !blind.has(send.digest)
+    } else if (executed) {
       pending = !executed.has(send.digest)
     } else if (ctx.unresolvedOutboundByChain?.has(send.toChain)) {
       const budget = pendingBudget.get(send.toChain) ?? 0
@@ -2206,6 +2249,7 @@ export function decideInflight(ops: readonly NormalizedScanOp[], ctx: InflightCo
       sequence: send.sequence,
       sentAt: new Date(send.sentAtMs).toISOString(),
       sourceTx: send.txRef,
+      ...(unresolved ? { unresolved: true as const } : {}),
     })
   }
 
