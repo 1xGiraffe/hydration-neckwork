@@ -83,9 +83,39 @@ function evmFromTruncatedAccountId(accountId: string): string | null {
   return `0x${accountId.slice(10, 50)}`.toLowerCase()
 }
 
+/* ---- section 'juicer' ---- */
+
+interface AccountJuicer {
+  asOfBlock: number | null
+  positions: Array<{
+    vault: AccountRef; name: string; shareAsset: AssetRef; collateral: AssetRef; apyPct: number | null; runRateApyPct: number | null
+    totalShares: string; totalAssets: string | null; totalUsd: number | null; shares: string; inWithdrawal: string
+    withdrawals: Array<{ requestId: number; shares: string; status: string; eligibleAt: string | null; assets: string | null; valueUsd: number | null }>
+  }>
+}
+function juicerBlock(j: AccountJuicer, base: string): string {
+  if (j.asOfBlock == null) return note('The Juicer state is unavailable right now (no fresh read); positions are unknown, not empty.')
+  if (!j.positions.length) return note(`No Juicer position or open withdrawal request (as of block ${formatCount(j.asOfBlock)}).`)
+  return joinBlocks(
+    table(['Vault', 'Shares (total)', 'Worth now', 'USD', 'Est. APY · run-rate', 'In withdrawal'], j.positions.map(p => [
+      explorerLink(p.name, accountUrl(base, p.vault.address)),
+      formatAmount(p.totalShares, p.shareAsset.decimals, assetLabel(p.shareAsset)),
+      p.totalAssets == null ? DASH : formatAmount(p.totalAssets, p.collateral.decimals, assetLabel(p.collateral)),
+      formatUsd(p.totalUsd),
+      `${p.apyPct == null ? DASH : formatPercent(p.apyPct)} · ${p.runRateApyPct == null ? DASH : formatPercent(p.runRateApyPct)}`,
+      p.inWithdrawal === '0' ? DASH : formatAmount(p.inWithdrawal, p.shareAsset.decimals, assetLabel(p.shareAsset)),
+    ])),
+    ...j.positions.filter(p => p.withdrawals.length).map(p => table(['Request', 'Shares', 'State', 'Unwind from', 'Worth'], p.withdrawals.map(w => [
+      `#${w.requestId}`, formatAmount(w.shares, p.shareAsset.decimals, assetLabel(p.shareAsset)), w.status,
+      w.eligibleAt ? formatTime(w.eligibleAt) : DASH, w.assets == null ? DASH : formatAmount(w.assets, p.collateral.decimals, assetLabel(p.collateral)),
+    ]))),
+    note(`Read at block ${formatCount(j.asOfBlock)}. Total shares are held shares (funded earnings included) plus those in withdrawal; "worth now" is what they convert to in the vault's collateral today. Est. APY is the official estimate at target leverage, run-rate what the position accrues at the loop's live leverage. Withdrawal requests cannot be cancelled.`),
+  )
+}
+
 /* ============ get_account ============ */
 
-const ACCOUNT_SECTIONS = ['balances', 'positions', 'moneymarket', 'dca', 'orders', 'related', 'counts', 'revenue'] as const
+const ACCOUNT_SECTIONS = ['balances', 'positions', 'moneymarket', 'dca', 'orders', 'related', 'counts', 'revenue', 'juicer'] as const
 type AccountSection = typeof ACCOUNT_SECTIONS[number]
 const DEFAULT_ACCOUNT_SECTIONS: AccountSection[] = ['balances', 'positions', 'moneymarket', 'dca', 'orders', 'related']
 
@@ -118,7 +148,7 @@ const MAX_REVENUE_ASSETS = 4
 const accountInputShape = {
   address: addressParam,
   include: z.array(z.enum(ACCOUNT_SECTIONS)).optional().describe(
-    `Sections to build. Default: ${DEFAULT_ACCOUNT_SECTIONS.join(', ')}. 'counts' and 'revenue' each cost one extra upstream read and are off by default; an include set of only 'moneymarket', 'counts' and/or 'revenue' takes the cheap summary build of the account record.`,
+    `Sections to build. Default: ${DEFAULT_ACCOUNT_SECTIONS.join(', ')}. 'counts', 'revenue' and 'juicer' each cost one extra upstream read and are off by default; an include set of only 'moneymarket', 'counts', 'revenue' and/or 'juicer' takes the cheap summary build of the account record. 'juicer': Juicer vault shares, what they are worth now and open withdrawal requests (jETH is not in the account's Value).`,
   ),
   format: formatParam,
 }
@@ -776,7 +806,7 @@ const getAccount: ToolDefinition = {
     const summarized = ![...sections].some(s => SECTIONS_NEEDING_FULL_BUILD.has(s))
     const encoded = encodeURIComponent(address)
 
-    const [detailResult, countsResult, revenueResult, statsResult] = await Promise.allSettled([
+    const [detailResult, countsResult, revenueResult, statsResult, juicerResult] = await Promise.allSettled([
       ctx.upstream.get<AddressDetail>(`/explorer/address/${encoded}`, summarized ? { summary: 1 } : undefined, { ttlMs: PRICE_BEARING_TTL_MS }),
       sections.has('counts') ? ctx.upstream.get<TabCounts>(`/explorer/address/${encoded}/counts`, undefined, { ttlMs: 60_000 }) : Promise.resolve(null),
       sections.has('revenue') ? ctx.upstream.get<RevenueBreakdown>(`/explorer/address/${encoded}/revenue-breakdown`, undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
@@ -784,6 +814,7 @@ const getAccount: ToolDefinition = {
       // the alternative is a literal that goes silently wrong after a cadence
       // change (see `dcaBlock`).
       sections.has('dca') ? ctx.upstream.get<ExplorerStats>('/explorer/stats', undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
+      sections.has('juicer') ? ctx.upstream.get<AccountJuicer>(`/explorer/address/${encoded}/juicer`, undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
     ])
 
     if (detailResult.status === 'rejected') return failure(addressNotFound(detailResult.reason, address))
@@ -798,6 +829,11 @@ const getAccount: ToolDefinition = {
       errs.push(toolErrorFromUpstream(revenueResult.reason, `The revenue breakdown for ${address}`))
       failedSections.push('revenue')
     }
+    if (juicerResult.status === 'rejected') {
+      errs.push(toolErrorFromUpstream(juicerResult.reason, `The Juicer positions of ${address}`))
+      failedSections.push('juicer')
+    }
+    const juicer = settledValue(juicerResult)
     const counts = settledValue(countsResult)
     const revenue = settledValue(revenueResult)
     const stats = settledValue(statsResult)
@@ -819,6 +855,7 @@ const getAccount: ToolDefinition = {
       sections.has('related') ? section('Related accounts', relationshipsBlock(detail, base, summarized)) : '',
       counts ? section('Lifetime counts', countsBlock(counts)) : '',
       revenue ? section('Protocol Revenue', revenueBlock(revenue)) : '',
+      juicer ? section('Juicer positions', juicerBlock(juicer, base)) : '',
       // A section that failed is simply missing, which an agent could read as
       // "there is none". Name it instead.
       failedSections.length
@@ -894,6 +931,7 @@ const getAccount: ToolDefinition = {
         ...(sections.has('related') ? compactRelationships(detail) : {}),
         counts: counts ?? undefined,
         revenue: revenue ?? undefined,
+        juicer: juicer ?? undefined,
     }, errs)
   },
 }

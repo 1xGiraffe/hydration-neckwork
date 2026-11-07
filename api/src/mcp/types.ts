@@ -275,10 +275,10 @@ export interface XcmFeeLeg {
   purchase?: { asset: AssetRef; amount: string; valueUsd: number | null } | null
 }
 
-/** The value a row's own `type` field can take (12 values — `dca` rows arrive typed `trade`). */
+/** The value a row's own `type` field can take (13 values — `dca` rows arrive typed `trade`). */
 export type ActivityRowType =
   | 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca'
-  | 'staking' | 'vote' | 'otc' | 'bond' | 'intent' | 'xcswap'
+  | 'staking' | 'vote' | 'otc' | 'bond' | 'intent' | 'xcswap' | 'juicer'
 
 /**
  * One classified economic action — the explorer's highest-level reading of what
@@ -366,6 +366,23 @@ export interface ActivityRow {
   bondAction?: 'Issue' | 'Redeem'
   bondFee?: string | null
   bondUnderlying?: AssetRef | null
+
+  // Juicer strategy vaults — `asset`/`amount` are the collateral moved (a withdrawal
+  // request: the shares escrowed; a surplus claim: HOLLAR; a rebalance: the HOLLAR it
+  // put into the PRIME loop), `juicerShares` the shares minted or escrowed
+  juicerAction?: 'Deposit' | 'Withdraw' | 'Unwind' | 'Settle' | 'Claim' | 'ClaimSurplus' | 'Harvest' | 'Rebalance' | 'Delever' | 'Lever' | 'Unlever'
+  juicerVault?: AccountRef
+  juicerShareAsset?: AssetRef
+  juicerShares?: string | null
+  juicerRequestId?: number | null
+  juicerEligibleAt?: string | null
+  juicerLtvBefore?: number | null
+  juicerLtvAfter?: number | null
+  juicerFee?: string | null
+  // Lever / Unlever: the PRIME loop's ICE intent — its nonce and the least it accepts back
+  juicerIntentNonce?: number | null
+  juicerMinOut?: string | null
+  juicerOutAsset?: AssetRef
 
   // governance votes
   votePallet?: string

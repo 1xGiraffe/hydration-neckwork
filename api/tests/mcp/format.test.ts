@@ -781,11 +781,11 @@ describe('markdown builders', () => {
 /* ============ the activity vocabulary ============ */
 
 describe('activity vocabulary', () => {
-  it('exports the 13 query types and the 12 row types, which are not the same list', () => {
-    expect(ACTIVITY_TYPES).toHaveLength(13)
+  it('exports the 14 query types and the 13 row types, which are not the same list', () => {
+    expect(ACTIVITY_TYPES).toHaveLength(14)
     expect(ACTIVITY_TYPES).toContain('all')
     expect(ACTIVITY_TYPES).toContain('stake')
-    expect(ACTIVITY_ROW_TYPES).toHaveLength(12)
+    expect(ACTIVITY_ROW_TYPES).toHaveLength(13)
     expect(ACTIVITY_ROW_TYPES).not.toContain('all')
     // `stake` is the query word; rows arrive typed `staking`.
     expect(ACTIVITY_ROW_TYPES).toContain('staking')

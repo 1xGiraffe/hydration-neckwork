@@ -50,7 +50,7 @@ const WIDE_TYPES = new Set(['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm'
  * 5,000,000 — a bound the caller cannot check and would have believed.
  * `xcswap` is the one query type that is genuinely not countable.
  */
-const COUNTABLE_TYPES = new Set(['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'vote', 'stake', 'bond', 'intent', 'otc'])
+const COUNTABLE_TYPES = new Set(['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'vote', 'stake', 'bond', 'juicer', 'intent', 'otc'])
 
 type Scope = 'global' | 'account' | 'tag' | 'asset' | 'block' | 'extrinsic'
 
@@ -71,7 +71,7 @@ function ceilingFor(scope: Scope, type: string, windowed: boolean): Ceiling | nu
   if (scope === 'block' || scope === 'extrinsic') return null
   if (scope === 'global' || scope === 'asset') {
     return WIDE_TYPES.has(type)
-      ? { max: MAX_GLOBAL_WIDE_OFFSET, label: `the global feed's wide categories (${[...WIDE_TYPES].join(', ')})`, advice: 'Narrow to one of the rarer types (vote, stake, otc, bond, intent, xcswap) to reach 250,000, or move the window with `from`/`to` instead of paging deeper, or scope the read to an account or a tag.' }
+      ? { max: MAX_GLOBAL_WIDE_OFFSET, label: `the global feed's wide categories (${[...WIDE_TYPES].join(', ')})`, advice: 'Narrow to one of the rarer types (vote, stake, otc, bond, intent, xcswap, juicer) to reach 250,000, or move the window with `from`/`to` instead of paging deeper, or scope the read to an account or a tag.' }
       : { max: MAX_GLOBAL_NARROW_OFFSET, label: 'the global feed\'s narrow categories', advice: 'Move the window with `from`/`to` instead of paging deeper, or scope the read to an account or a tag.' }
   }
   return windowed
@@ -116,12 +116,13 @@ TYPE vocabulary (default \`all\`): ${ACTIVITY_TYPES.join(', ')}.
 ACTION requires a TYPE and is validated here before the call. Upstream an \`action\` with no \`type\` is ignored (the unfiltered feed), and an unrecognised one is no error: scoped it returns an empty page, on the global feed it walks the whole candidate set for ~45 s and answers 503. So an \`action\` without a \`type\`, on a type that takes none, or outside its type's list is refused here with the accepted values:
 ${ACTION_TABLE}
 Liquidity \`Rebalance\` and \`Compound\` are a Gamma vault keeper's acts, credited to the keeper; a Compound's amount is the fees it collected and reinvested.
+Juicer: harvest/rebalance is the vault's; unwind/settle/claim the request owner's.
 
 ${ACTIVITY_TYPE_NOTES} For DCA fills only, pass \`type=trade, action=dca\`, or keep the rows flagged \`dca\`. A ROW's own \`type\` is one of ${ACTIVITY_ROW_TYPES.join(', ')} — not the query vocabulary above.
 
 Two more traps. Rows marked **unconfirmed** are not facts yet, in TWO kinds never quoted alike: a transaction-pool row has no block (a zero placeholder height, never printed; dry-run amounts), while a row above the finalized head is in a real block whose height IS quotable — only that block's survival is provisional. The answer states which kind. And there is NO total row count (the upstream counts only votes): never present a page count or "N results found" — page with \`offset\` until a page comes back short.
 
-OFFSET CEILINGS, enforced here before the call: 2,500 on the global feed's wide categories (all, transfer, trade, dca, liquidity, mm, xcm); 250,000 on its narrow ones (vote, stake, otc, bond, intent, xcswap); 900,000 on an account or tag feed that carries a \`minUsd\` or \`identity\` filter; 5,000,000 on one that does not. Past a ceiling, move the window with \`from\`/\`to\` rather than paging deeper.`
+OFFSET CEILINGS, enforced here before the call: 2,500 on the global feed's wide categories (all, transfer, trade, dca, liquidity, mm, xcm); 250,000 on its narrow ones (vote, stake, otc, bond, intent, xcswap, juicer); 900,000 on an account or tag feed that carries a \`minUsd\` or \`identity\` filter; 5,000,000 on one that does not. Past a ceiling, move the window with \`from\`/\`to\` rather than paging deeper.`
 
 /* ============ handler ============ */
 
