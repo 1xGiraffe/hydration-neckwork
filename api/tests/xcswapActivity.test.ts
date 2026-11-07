@@ -155,9 +155,9 @@ describe('adoptOrphanXcswapLegs', () => {
   it('keeps the adopted swap through the Cross-chain and the Trade filters alike', async () => {
     initExplorerService(fakeClient([]))
     const folded = suppressXcswapPlumbingRows(await adoptOrphanXcswapLegs([bridgeLeg]))
-    expect(folded.filter(r => activityTypeMatchesFamily(r.type, 'xcm')).map(r => r.type)).toEqual(['xcswap'])
-    expect(folded.filter(r => activityTypeMatchesFamily(r.type, 'trade')).map(r => r.type)).toEqual(['xcswap'])
-    expect(folded.filter(r => activityTypeMatchesFamily(r.type, 'transfer'))).toEqual([])
+    expect(folded.filter(r => activityTypeMatchesFamily(r, 'xcm')).map(r => r.type)).toEqual(['xcswap'])
+    expect(folded.filter(r => activityTypeMatchesFamily(r, 'trade')).map(r => r.type)).toEqual(['xcswap'])
+    expect(folded.filter(r => activityTypeMatchesFamily(r, 'transfer'))).toEqual([])
   })
 
   // On an asset page the row shows only the asset sold, so a swap that sold

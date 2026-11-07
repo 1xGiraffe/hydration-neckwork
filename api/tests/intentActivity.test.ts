@@ -242,8 +242,8 @@ describe('iceMatchedInUsd', () => {
 describe('intent wiring', () => {
   it('is a wire type in the Trade family', () => {
     expect(activityTypes).toContain('intent')
-    expect(activityTypeMatchesFamily('intent', 'trade')).toBe(true)
-    expect(activityTypeMatchesFamily('intent', 'intent')).toBe(true)
+    expect(activityTypeMatchesFamily({ type: 'intent' }, 'trade')).toBe(true)
+    expect(activityTypeMatchesFamily({ type: 'intent' }, 'intent')).toBe(true)
   })
   it('matches actions by word and by slug', () => {
     const fill = { type: 'intent', intentAction: 'Fill' } as any

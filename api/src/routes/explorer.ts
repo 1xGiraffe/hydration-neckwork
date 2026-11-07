@@ -36,6 +36,7 @@ import { DEFAULT_WINDOW_POINTS, windowSchema } from './windowQuery.ts'
 import { getExplorerYields } from '../services/positionYield.ts'
 import { getAccountJuicerPositions, getJuicerDashboard } from '../services/juicerService.ts'
 import { getAccountBilPositions, getBilDashboard } from '../services/bilService.ts'
+import { getAccountBondPositions, getBondDashboard } from '../services/bondService.ts'
 import {
   getAddressLiquidityRewards, getAddressOrderHistory, getAddressPositionsPresence,
   getTagLiquidityRewards, getTagOrderHistory, getTagPositionsPresence, type OrderHistoryQuery,
@@ -1041,6 +1042,16 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return positions
   })
 
+  // An account's bonds (every family): balance, maturity, what it is worth now and what
+  // the account paid in the primary sale — from the bond-state snapshot alone.
+  fastify.get('/explorer/address/:address/bonds', async (req, reply) => {
+    const params = addressParam.safeParse(req.params)
+    if (!params.success) return reply.status(400).send({ error: 'Invalid address' })
+    const positions = await getAccountBondPositions(params.data.address)
+    if (!positions) return reply.status(404).send({ error: 'Address not recognized' })
+    return positions
+  })
+
   // The Borrow tab card's Earned / Interest paid per market: a per-market slice of
   // the User Revenue facts (getAddressMoneyMarketEarned, services/mmEarned.ts).
   // Per account only, like the history — a tag's cards read each member's.
@@ -1268,6 +1279,14 @@ export async function explorerRoutes(fastify: FastifyInstance) {
   // The Brazilian Invoice Loans page (/bil): the vault's current state from the bil-state
   // refresher's pinned snapshot, and its indexed history.
   fastify.get('/explorer/bil', async () => getBilDashboard())
+  // A bond family's page (/hollar-bonds): every round's terms, sale, redemptions and
+  // holders, from the bond-state snapshot (bonds.ts, bondState.ts).
+  fastify.get('/explorer/bonds/:family', async (req, reply) => {
+    const { family } = req.params as { family: string }
+    const d = getBondDashboard(String(family))
+    if (!d) return reply.status(404).send({ error: 'Unknown bond family' })
+    return d
+  })
 
   fastify.get('/explorer/security', async () => {
     return getSecurityDashboard()

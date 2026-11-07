@@ -73,6 +73,7 @@ import { initExternalTokenApy } from './services/externalTokenApy.ts'
 import { initIceService } from './services/iceService.ts'
 import { initJuicerService } from './services/juicerService.ts'
 import { initBilService } from './services/bilService.ts'
+import { initBondService } from './services/bondService.ts'
 import { initOrderHistory } from './services/orderHistory.ts'
 import { initLpRewardClaims } from './services/lpRewardClaims.ts'
 import { initPositionsPresence } from './services/positionsPresence.ts'
@@ -82,8 +83,9 @@ import { initOracleService } from './services/oracleService.ts'
 import { initSecurityService } from './services/securityService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
 import { initMmOraclePrices } from './services/mmOraclePrices.ts'
-import { initJuicerState } from './services/juicerState.ts'
-import { initBilState } from './services/bilState.ts'
+import { initJuicerState, refreshJuicerState } from './services/juicerState.ts'
+import { initBilState, refreshBilState } from './services/bilState.ts'
+import { initBondState } from './services/bondState.ts'
 import { initLmRewardService } from './services/lmRewardService.ts'
 import { initMmIncentiveService } from './services/mmIncentiveService.ts'
 import { initWormholeNttService } from './services/wormholeNttService.ts'
@@ -336,8 +338,10 @@ async function start() {
     // Must precede startBackgroundRefresh(): the juicer-state task reads its holder set
     // from ClickHouse and pins its eth_calls to the indexed head.
     initJuicerState(client)
-    // Likewise the bil-state task (the BIL vault's pinned read).
+    // Likewise the bil-state task (the BIL vault's pinned read) and the bond-state task
+    // (every bond's indexed state at one block).
     initBilState(client)
+    initBondState(client)
     // Must precede startBackgroundRefresh(): the lm-rewards cycle reads deposit
     // owners from ClickHouse and publishes its generation there.
     initLmRewardService(client)
@@ -416,13 +420,21 @@ async function start() {
     void loadAccountSuffixIndex().catch(err => console.warn('[search] account suffix index load failed; 3-letter-code search stays empty until the refresh succeeds', err))
     startAccountSuffixRefresh()
     startAccountSwapActivityQueueDrain()
-    // The Juicer dashboard's first build starts here, off the request path: after the
-    // asset registry, tags, identities and EVM bindings are loaded (its rows carry their
-    // descriptors and account refs, so a build before them caches placeholder decimals),
-    // and before listen, so the first reader joins a build already under way.
+    // The strategy dashboards' first builds (Juicer's, BIL's, the bond pages') start here,
+    // off the request path: after the asset registry, tags, identities and EVM bindings
+    // are loaded (their rows carry descriptors and account refs, so a build before them
+    // caches placeholder decimals), and before listen, so the first reader joins a build
+    // already under way. Each strategy's state is read once first — the scheduler's first
+    // pass reaches it only behind the node-full lanes — so a restart serves its pages
+    // within the boot, not a minute or more of "state unavailable". Juicer's and BIL's
+    // are a few batched eth_calls each (~0.1 s), the bonds' ClickHouse only (inside
+    // initBondService); one after another, so they never stack RPC bursts.
+    for (const [name, read] of [['juicer', refreshJuicerState], ['bil', refreshBilState]] as const) {
+      await read().catch(err => console.warn(`[${name}] boot state read failed; the scheduler retries`, err instanceof Error ? err.message : err))
+    }
     initJuicerService(client)
-    // The BIL dashboard's first build, on the same terms.
     initBilService(client)
+    await initBondService()
     await fastify.listen({ port: config.port, host: config.host })
     console.log(`[API] Server listening on ${config.host}:${config.port}`)
     // Telegram channel linking needs the bot's long-poll loop; without a token

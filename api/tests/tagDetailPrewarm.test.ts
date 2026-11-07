@@ -32,8 +32,9 @@ describe('tag membership keys', () => {
     // (`-r4`) and values money-market collateral by the folded reserves, the
     // market's aggregate standing in only where a reserve is unstated; `-r6`
     // carries each row's User Revenue; `-r7` leaves a strategy custody account's
-    // holdings and money-market positions out (the share token's holders carry them).
-    expect(key.slice(0, key.indexOf('|'))).toMatch(/^v[123]-r7$/)
+    // holdings and money-market positions out (the share token's holders carry them);
+    // `-r8` leaves the Bonds pot out too; `-r9` values a bond by the bond rule.
+    expect(key.slice(0, key.indexOf('|'))).toMatch(/^v[123]-r9$/)
     expect(key).not.toBe(list)
   })
 

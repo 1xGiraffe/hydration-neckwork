@@ -17,6 +17,7 @@
 import { H2O_ASSET_ID, PRICE_ALIAS_ID, allExplorerAssets, priceAssetId } from './explorerAssets.ts'
 import { JUICER_CUSTODY_CONTRACTS } from './juicer.ts'
 import { BIL_CUSTODY_CONTRACTS } from './bil.ts'
+import { BONDS_POT_ACCOUNT } from './bonds.ts'
 
 /**
  * The Omnipool's own pallet account, `modl` + `omnipool` — the fee recipient that
@@ -81,12 +82,22 @@ export function poolOwnHubHoldingSql(accountExpr: string, assetExpr: string): st
  * its beneficial balances are attributed to the holders (juicerBeneficialBalances,
  * bilBeneficialBalances), so every holding of these accounts, their money-market
  * positions included, is a balance and never a value: counting both would state the
- * strategy twice. Same surfaces and the same `uncounted` mechanics as the hub rule
- * above.
+ * strategy twice. The Bonds pallet pot (BONDS_POT_ACCOUNT) is one too: it holds the
+ * underlying of every outstanding bond until it is redeemed, and the bond holders' bonds
+ * — valued by the bond rule (bonds.ts) — are that claim. Same surfaces and the same
+ * `uncounted` mechanics as the hub rule above.
  */
-export const CUSTODY_ACCOUNT_IDS: ReadonlySet<string> = new Set([...JUICER_CUSTODY_CONTRACTS, ...BIL_CUSTODY_CONTRACTS].map(h => '0x45544800' + h.slice(2).toLowerCase() + '0'.repeat(16)))
+export const CUSTODY_ACCOUNT_IDS: ReadonlySet<string> = new Set([
+  ...[...JUICER_CUSTODY_CONTRACTS, ...BIL_CUSTODY_CONTRACTS].map(h => '0x45544800' + h.slice(2).toLowerCase() + '0'.repeat(16)),
+  BONDS_POT_ACCOUNT,
+])
 export function isCustodyAccount(accountId: string): boolean {
   return CUSTODY_ACCOUNT_IDS.has(accountId.toLowerCase())
+}
+/** The H160s the custody accounts' EVM-side (ERC-20) holdings are keyed by: an ETH-form account's own, a substrate account's first 20 bytes. */
+export const CUSTODY_H160S: ReadonlySet<string> = new Set([...CUSTODY_ACCOUNT_IDS].map(a => a.startsWith('0x45544800') ? '0x' + a.slice(10, 50) : a.slice(0, 42)))
+export function isCustodyH160(h160: string): boolean {
+  return CUSTODY_H160S.has(h160.toLowerCase())
 }
 export function custodyAccountSql(accountExpr: string): string {
   return `(lower(${accountExpr}) IN (${[...CUSTODY_ACCOUNT_IDS].map(a => `'${a}'`).join(', ')}))`

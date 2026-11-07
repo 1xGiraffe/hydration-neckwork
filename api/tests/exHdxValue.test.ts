@@ -37,7 +37,7 @@ describe('the ex-HDX exclusion covers every path HDX takes into the portfolio', 
   it('excludes HDX from the Omnipool principal, not just the wallet balance', () => {
     const body = fn('getAccountHistory')
     // The wallet leg.
-    expect(body).toContain('if (exHdx) portfolioExHdx[b] += portfolioCombined[b] * (lastPx || 0)')
+    expect(body).toContain('if (exHdx) portfolioExHdx[b] += portfolioCombined[b] * px')
     // The Omnipool leg, dropped with its hub half — that leg is part of the excluded
     // position's withdraw value, not H2O the account holds separately.
     expect(fn('addChartOmnipoolValue')).toContain('if (leg.assetId !== HDX_ASSET_ID) portfolioExHdx[b] += withdrawValue')
