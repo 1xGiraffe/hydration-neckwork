@@ -278,7 +278,7 @@ export interface XcmFeeLeg {
 /** The value a row's own `type` field can take (13 values — `dca` rows arrive typed `trade`). */
 export type ActivityRowType =
   | 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca'
-  | 'staking' | 'vote' | 'otc' | 'bond' | 'intent' | 'xcswap' | 'juicer'
+  | 'staking' | 'vote' | 'otc' | 'bond' | 'intent' | 'xcswap' | 'juicer' | 'bil'
 
 /**
  * One classified economic action — the explorer's highest-level reading of what
@@ -383,6 +383,17 @@ export interface ActivityRow {
   juicerIntentNonce?: number | null
   juicerMinOut?: string | null
   juicerOutAsset?: AssetRef
+
+  // Brazilian Invoice Loans — `asset`/`amount` are the HOLLAR moved (a redemption
+  // request or a cancellation: the uBIL into or out of the queue), `bilShares` the uBIL
+  // a deposit minted (in `bilShareAsset`: BIL for a zapped deposit), a settlement settled
+  // or a claim burned
+  bilAction?: 'Deposit' | 'Redeem' | 'Cancel' | 'Settle' | 'Claim' | 'Reinvest' | 'Interest' | 'Principal' | 'Draw' | 'Repay'
+  bilShareAsset?: AssetRef
+  bilShares?: string | null
+  bilRequestId?: number | null
+  bilPartial?: boolean | null
+  bilTokenId?: string | null
 
   // governance votes
   votePallet?: string

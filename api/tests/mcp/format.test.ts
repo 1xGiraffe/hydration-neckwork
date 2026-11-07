@@ -32,7 +32,7 @@ import {
 } from '../../src/mcp/format/units.ts'
 import {
   parseChainTime, formatTime, formatUnixSeconds, relativeAge, formatDuration, blocksToDuration,
-  isUnrecordedTime,
+  isUnrecordedTime, bilWaitText,
 } from '../../src/mcp/format/time.ts'
 import {
   accountLabel, assetLabel, assetLabelWithId, assetPairLabels, shortAddress, shortHash, explorerLink,
@@ -781,11 +781,11 @@ describe('markdown builders', () => {
 /* ============ the activity vocabulary ============ */
 
 describe('activity vocabulary', () => {
-  it('exports the 14 query types and the 13 row types, which are not the same list', () => {
-    expect(ACTIVITY_TYPES).toHaveLength(14)
+  it('exports the 15 query types and the 14 row types, which are not the same list', () => {
+    expect(ACTIVITY_TYPES).toHaveLength(15)
     expect(ACTIVITY_TYPES).toContain('all')
     expect(ACTIVITY_TYPES).toContain('stake')
-    expect(ACTIVITY_ROW_TYPES).toHaveLength(13)
+    expect(ACTIVITY_ROW_TYPES).toHaveLength(14)
     expect(ACTIVITY_ROW_TYPES).not.toContain('all')
     // `stake` is the query word; rows arrive typed `staking`.
     expect(ACTIVITY_ROW_TYPES).toContain('staking')
@@ -1328,5 +1328,19 @@ describe('activityLine — Wormhole Relay fast transfer', () => {
   it('marks the pool payout as the fast delivery', () => {
     const delivery = { ...settlement, who: user, fastRelay: { role: 'delivery' } } as unknown as ActivityRow
     expect(activityLine(delivery, BASE, NOW)).toContain('fast delivery from the relay pool')
+  })
+})
+
+describe('bilWaitText', () => {
+  const now = Date.parse('2026-11-07T12:00:00Z')
+  it('states a future maturity as a window, never one time', () => {
+    const t = bilWaitText({ maturesAt: '2026-11-10T00:00:00Z', from: '2026-11-10T18:00:00Z', to: '2026-11-12T06:00:00Z', matured: false }, false, now)
+    expect(t).toContain('2026-11-10 18:00')
+    expect(t).toContain('2026-11-12 06:00')
+  })
+  it('states a passed maturity as awaiting processing, never a time in the past', () => {
+    expect(bilWaitText({ maturesAt: '2026-11-01T00:00:00Z', from: '2026-11-01T18:00:00Z', to: '2026-11-03T06:00:00Z', matured: true }, false, now)).toBe('matured, awaiting processing')
+    expect(bilWaitText({ maturesAt: '2026-11-07T00:00:00Z', from: '2026-11-07T18:00:00Z', to: '2026-11-09T06:00:00Z', matured: true }, false, now)).toMatch(/^matured, awaiting processing \(usually paid by .*2026-11-09/)
+    expect(bilWaitText(null, true, now)).toMatch(/idle HOLLAR/)
   })
 })

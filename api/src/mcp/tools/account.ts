@@ -40,7 +40,7 @@ import {
   scaleBase1e8,
   formatUserRevenue,
 } from '../format/units.ts'
-import { blocksToDuration, formatDuration, formatTime, relativeAge } from '../format/time.ts'
+import { bilWaitText, blocksToDuration, formatDuration, formatTime, relativeAge, type BilWait } from '../format/time.ts'
 import {
   accountLabel,
   accountUrl,
@@ -113,9 +113,45 @@ function juicerBlock(j: AccountJuicer, base: string): string {
   )
 }
 
+/* ---- section 'bil' ---- */
+
+interface AccountBil {
+  asOfBlock: number | null
+  complete: boolean
+  position: {
+    bil: string; ubil: string; queuedShares: string; claimableHollar: string
+    totalHollar: string | null; totalUsd: number | null; share: number | null
+    bilAsset: AssetRef; ubilAsset: AssetRef; hollarAsset: AssetRef; exchangeRate: string; apyPct: number | null
+    requests: Array<{ requestId: number; shares: string; status: string; requestedAt: string; pendingShares: string; claimableHollar: string | null; worthHollar: string | null; wait: BilWait | null; paidFromIdle: boolean }>
+  } | null
+}
+function bilBlock(b: AccountBil): string {
+  if (b.asOfBlock == null) return note('The BIL vault state is unavailable right now (no fresh read); the position is unknown, not empty.')
+  const p = b.position
+  if (!p) return note(`No BIL position or open redemption request (as of block ${formatCount(b.asOfBlock)}).${b.complete ? '' : ' The open redemption requests could not be read, so a queued or claimable part may be missing.'}`)
+  const u = (raw: string) => formatAmount(raw, p.ubilAsset.decimals, assetLabel(p.ubilAsset))
+  const h = (raw: string | null) => raw == null ? DASH : formatAmount(raw, p.hollarAsset.decimals, assetLabel(p.hollarAsset))
+  return joinBlocks(
+    kv([
+      ['Worth', `${h(p.totalHollar)} · ${formatUsd(p.totalUsd)}`],
+      ['Held as BIL', p.bil === '0' ? DASH : formatAmount(p.bil, p.bilAsset.decimals, assetLabel(p.bilAsset))],
+      ['Held as uBIL', p.ubil === '0' ? DASH : u(p.ubil)],
+      ['Queued for redemption (still accruing)', p.queuedShares === '0' ? DASH : u(p.queuedShares)],
+      ['Settled, claimable (fixed HOLLAR)', p.claimableHollar === '0' ? DASH : h(p.claimableHollar)],
+      ['Vault share', p.share == null ? null : formatPercent(p.share * 100)],
+      ['Stated APY', p.apyPct == null ? null : formatPercent(p.apyPct)],
+    ]),
+    p.requests.length ? table(['Request', 'uBIL', 'State', 'Worth', 'Paid'], p.requests.map(r => [
+      `#${r.requestId}`, u(r.shares), r.status, h(r.worthHollar), r.pendingShares === '0' ? (r.claimableHollar && r.claimableHollar !== '0' ? 'claimable now' : DASH) : bilWaitText(r.wait, r.paidFromIdle),
+    ])) : null,
+    b.complete ? null : note('The open redemption requests could not be read at this block: a queued or claimable part may be missing above.'),
+    note(`Read at block ${formatCount(b.asOfBlock)}. BIL is the BIL money market's aToken over uBIL (1:1); BIL, uBIL and queued uBIL accrue at the vault's NAV (HOLLAR per uBIL), a settled part is a fixed HOLLAR amount until claimed. That value is already in the account's balances — this section restates it, it is not additional.`),
+  )
+}
+
 /* ============ get_account ============ */
 
-const ACCOUNT_SECTIONS = ['balances', 'positions', 'moneymarket', 'dca', 'orders', 'related', 'counts', 'revenue', 'juicer'] as const
+const ACCOUNT_SECTIONS = ['balances', 'positions', 'moneymarket', 'dca', 'orders', 'related', 'counts', 'revenue', 'juicer', 'bil'] as const
 type AccountSection = typeof ACCOUNT_SECTIONS[number]
 const DEFAULT_ACCOUNT_SECTIONS: AccountSection[] = ['balances', 'positions', 'moneymarket', 'dca', 'orders', 'related']
 
@@ -148,7 +184,7 @@ const MAX_REVENUE_ASSETS = 4
 const accountInputShape = {
   address: addressParam,
   include: z.array(z.enum(ACCOUNT_SECTIONS)).optional().describe(
-    `Sections to build. Default: ${DEFAULT_ACCOUNT_SECTIONS.join(', ')}. 'counts', 'revenue' and 'juicer' each cost one extra upstream read and are off by default; an include set of only 'moneymarket', 'counts', 'revenue' and/or 'juicer' takes the cheap summary build of the account record. 'juicer': Juicer vault shares, what they are worth now and open withdrawal requests (jETH is not in the account's Value).`,
+    `Sections to build. Default: ${DEFAULT_ACCOUNT_SECTIONS.join(', ')}. 'counts', 'revenue', 'juicer' and 'bil' each cost one extra upstream read and are off by default; an include set of only 'moneymarket', 'counts', 'revenue', 'juicer' and/or 'bil' takes the cheap summary build of the account record. 'juicer': Juicer vault shares, what they are worth now and open withdrawal requests (jETH is not in the account's Value). 'bil': BIL and uBIL held and queued at NAV, settled HOLLAR to claim, and when the queue pays (already in Value).`,
   ),
   format: formatParam,
 }
@@ -806,7 +842,7 @@ const getAccount: ToolDefinition = {
     const summarized = ![...sections].some(s => SECTIONS_NEEDING_FULL_BUILD.has(s))
     const encoded = encodeURIComponent(address)
 
-    const [detailResult, countsResult, revenueResult, statsResult, juicerResult] = await Promise.allSettled([
+    const [detailResult, countsResult, revenueResult, statsResult, juicerResult, bilResult] = await Promise.allSettled([
       ctx.upstream.get<AddressDetail>(`/explorer/address/${encoded}`, summarized ? { summary: 1 } : undefined, { ttlMs: PRICE_BEARING_TTL_MS }),
       sections.has('counts') ? ctx.upstream.get<TabCounts>(`/explorer/address/${encoded}/counts`, undefined, { ttlMs: 60_000 }) : Promise.resolve(null),
       sections.has('revenue') ? ctx.upstream.get<RevenueBreakdown>(`/explorer/address/${encoded}/revenue-breakdown`, undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
@@ -815,6 +851,7 @@ const getAccount: ToolDefinition = {
       // change (see `dcaBlock`).
       sections.has('dca') ? ctx.upstream.get<ExplorerStats>('/explorer/stats', undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
       sections.has('juicer') ? ctx.upstream.get<AccountJuicer>(`/explorer/address/${encoded}/juicer`, undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
+      sections.has('bil') ? ctx.upstream.get<AccountBil>(`/explorer/address/${encoded}/bil`, undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
     ])
 
     if (detailResult.status === 'rejected') return failure(addressNotFound(detailResult.reason, address))
@@ -834,6 +871,11 @@ const getAccount: ToolDefinition = {
       failedSections.push('juicer')
     }
     const juicer = settledValue(juicerResult)
+    if (bilResult.status === 'rejected') {
+      errs.push(toolErrorFromUpstream(bilResult.reason, `The BIL position of ${address}`))
+      failedSections.push('bil')
+    }
+    const bil = settledValue(bilResult)
     const counts = settledValue(countsResult)
     const revenue = settledValue(revenueResult)
     const stats = settledValue(statsResult)
@@ -856,6 +898,7 @@ const getAccount: ToolDefinition = {
       counts ? section('Lifetime counts', countsBlock(counts)) : '',
       revenue ? section('Protocol Revenue', revenueBlock(revenue)) : '',
       juicer ? section('Juicer positions', juicerBlock(juicer, base)) : '',
+      bil ? section('Brazilian Invoice Loans', bilBlock(bil)) : '',
       // A section that failed is simply missing, which an agent could read as
       // "there is none". Name it instead.
       failedSections.length
@@ -932,6 +975,7 @@ const getAccount: ToolDefinition = {
         counts: counts ?? undefined,
         revenue: revenue ?? undefined,
         juicer: juicer ?? undefined,
+        bil: bil ?? undefined,
     }, errs)
   },
 }

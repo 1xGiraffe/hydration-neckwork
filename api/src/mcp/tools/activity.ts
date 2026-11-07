@@ -50,7 +50,7 @@ const WIDE_TYPES = new Set(['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm'
  * 5,000,000 — a bound the caller cannot check and would have believed.
  * `xcswap` is the one query type that is genuinely not countable.
  */
-const COUNTABLE_TYPES = new Set(['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'vote', 'stake', 'bond', 'juicer', 'intent', 'otc'])
+const COUNTABLE_TYPES = new Set(['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'vote', 'stake', 'bond', 'juicer', 'bil', 'intent', 'otc'])
 
 type Scope = 'global' | 'account' | 'tag' | 'asset' | 'block' | 'extrinsic'
 
@@ -71,7 +71,7 @@ function ceilingFor(scope: Scope, type: string, windowed: boolean): Ceiling | nu
   if (scope === 'block' || scope === 'extrinsic') return null
   if (scope === 'global' || scope === 'asset') {
     return WIDE_TYPES.has(type)
-      ? { max: MAX_GLOBAL_WIDE_OFFSET, label: `the global feed's wide categories (${[...WIDE_TYPES].join(', ')})`, advice: 'Narrow to one of the rarer types (vote, stake, otc, bond, intent, xcswap, juicer) to reach 250,000, or move the window with `from`/`to` instead of paging deeper, or scope the read to an account or a tag.' }
+      ? { max: MAX_GLOBAL_WIDE_OFFSET, label: `the global feed's wide categories (${[...WIDE_TYPES].join(', ')})`, advice: 'Narrow to one of the rarer types (vote, stake, otc, bond, intent, xcswap, juicer, bil) to reach 250,000, or move the window with `from`/`to` instead of paging deeper, or scope the read to an account or a tag.' }
       : { max: MAX_GLOBAL_NARROW_OFFSET, label: 'the global feed\'s narrow categories', advice: 'Move the window with `from`/`to` instead of paging deeper, or scope the read to an account or a tag.' }
   }
   return windowed
@@ -88,7 +88,7 @@ const SHAPE = {
   asset: z.string().min(1).max(64).optional().describe('An asset id or symbol. This is a SCOPE SWITCH, not a filter: it moves the read to that asset\'s FULL history instead of the recent global window (and costs up to ~40 s on a cold read). To filter a feed by asset without changing the scope, use `token` instead.'),
   block: z.number().int().min(0).optional().describe('A block height. Returns that block\'s whole classified activity, unpaged; the other filters do not apply.'),
   extrinsic: z.string().min(1).max(128).optional().describe('An extrinsic hash or a `height-index` coordinate. Returns the activity that one extrinsic produced; the other filters do not apply.'),
-  type: z.enum(ACTIVITY_TYPES).optional().describe(`Activity family (default all). One of: ${ACTIVITY_TYPES.join(', ')}. Read the traps in this description first — type=dca does NOT narrow to DCA (it selects the trade family, rows typed "trade"), and type=trade is a family that also returns otc, intent and xcswap rows.`),
+  type: z.enum(ACTIVITY_TYPES).optional().describe('Activity family (default all). Read the traps in this description first: type=dca does NOT narrow to DCA, and type=trade is a family.'),
   action: z.string().min(1).max(32).optional().describe('Sub-filter within a type; the accepted values are listed per type in this description. An unrecognised value is NOT an error upstream — it silently matches nothing.'),
   token: z.string().min(1).max(64).optional().describe('An asset symbol or id the row must reference. Matches every asset the source event touched, including nested pool assets and both legs of a pair. A Hydrated pool\'s product name (GDOT, HUSDT, HEURC…) or its wrapper id names the pool share displayed under it too, so its add/remove-liquidity rows and trades routed through it match; the share\'s own id names the share alone. An unknown token silently returns nothing.'),
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Inclusive lower day bound, `YYYY-MM-DD`.'),
@@ -109,20 +109,20 @@ const DESCRIPTION = `The classified Hydration activity feed: what people actuall
 
 This is the tool for "what happened" — recently, in a block or extrinsic, to an account or tag, or over one asset's history. It is NOT a raw event log: a DCA execution is one trade line, not four transfers, and a router swap one swap, not its hops. For the interpreted record of a single thing you already identified, use inspect_entity; for an account's balance sheet, use get_account.
 
-SCOPE is chosen by whichever target you set, and you may set at most one: nothing = the recent global feed; \`account\` = that address's feed (scoped to its whole related set — proxies, bound EVM account, multisigs); \`tag\` = every member of a system tag; \`block\` = that block's whole activity, unpaged; \`extrinsic\` = what one extrinsic produced. \`asset\` is different and worth stating plainly: it is a SCOPE SWITCH, not a filter — it moves the read to that asset's FULL history rather than the recent window, and is expensive on a cold read. To filter a feed by asset while keeping the scope, pass \`token\` instead.
+SCOPE is chosen by whichever target you set, and you may set at most one: nothing = the recent global feed; \`account\` = that address's feed (scoped to its whole related set — proxies, bound EVM account, multisigs); \`tag\` = every member of a system tag; \`block\` = that block's whole activity, unpaged; \`extrinsic\` = what one extrinsic produced. \`asset\` is a SCOPE SWITCH, not a filter: that asset's FULL history, expensive cold. To filter a feed by asset, keep the scope and pass \`token\`.
 
 TYPE vocabulary (default \`all\`): ${ACTIVITY_TYPES.join(', ')}.
 
-ACTION requires a TYPE and is validated here before the call. Upstream an \`action\` with no \`type\` is ignored (the unfiltered feed), and an unrecognised one is no error: scoped it returns an empty page, on the global feed it walks the whole candidate set for ~45 s and answers 503. So an \`action\` without a \`type\`, on a type that takes none, or outside its type's list is refused here with the accepted values:
+ACTION needs a TYPE and is checked here against that type's list, because upstream an \`action\` without a \`type\` is ignored and an unknown one is no error (an empty page; on the global feed ~45 s and a 503):
 ${ACTION_TABLE}
 Liquidity \`Rebalance\` and \`Compound\` are a Gamma vault keeper's acts, credited to the keeper; a Compound's amount is the fees it collected and reinvested.
-Juicer: harvest/rebalance is the vault's; unwind/settle/claim the request owner's.
+Juicer: harvest/rebalance is the vault's; unwind/settle/claim the request owner's. BIL: settle/claim are the request controller's.
 
 ${ACTIVITY_TYPE_NOTES} For DCA fills only, pass \`type=trade, action=dca\`, or keep the rows flagged \`dca\`. A ROW's own \`type\` is one of ${ACTIVITY_ROW_TYPES.join(', ')} — not the query vocabulary above.
 
 Two more traps. Rows marked **unconfirmed** are not facts yet, in TWO kinds never quoted alike: a transaction-pool row has no block (a zero placeholder height, never printed; dry-run amounts), while a row above the finalized head is in a real block whose height IS quotable — only that block's survival is provisional. The answer states which kind. And there is NO total row count (the upstream counts only votes): never present a page count or "N results found" — page with \`offset\` until a page comes back short.
 
-OFFSET CEILINGS, enforced here before the call: 2,500 on the global feed's wide categories (all, transfer, trade, dca, liquidity, mm, xcm); 250,000 on its narrow ones (vote, stake, otc, bond, intent, xcswap, juicer); 900,000 on an account or tag feed that carries a \`minUsd\` or \`identity\` filter; 5,000,000 on one that does not. Past a ceiling, move the window with \`from\`/\`to\` rather than paging deeper.`
+OFFSET CEILINGS, enforced here: 2,500 on the global feed's wide types (${[...WIDE_TYPES].join(', ')}), 250,000 on its others; 900,000 on an account or tag feed with \`minUsd\` or \`identity\`, else 5,000,000. Past one, move \`from\`/\`to\` rather than paging deeper.`
 
 /* ============ handler ============ */
 

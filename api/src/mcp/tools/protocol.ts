@@ -6,7 +6,7 @@ import type {
 } from '../types.ts'
 import { CUT_NOTE, WINDOW_KEYS, WINDOW_LABEL, changeCell, ratioPct, venueLabel } from '../format/volume.ts'
 import { DASH, formatAmount, formatCount, formatNumber, formatPercent, formatPercentChange, formatUsd, scaleAmount } from '../format/units.ts'
-import { formatTime, formatUnixSeconds, relativeAge } from '../format/time.ts'
+import { bilWaitText, formatTime, formatUnixSeconds, relativeAge, type BilWait } from '../format/time.ts'
 import { accountLabel, accountUrl, assetLabel, assetLabelWithId, assetUrl, explorerLink, poolUrl, v3PoolUrl } from '../format/refs.ts'
 import { bullets, h2, h3, joinBlocks, kv, note, table } from '../format/md.ts'
 import { HUB_DECIMALS, HUB_SYMBOL, failure, fit, output, parseInput } from './shared.ts'
@@ -123,7 +123,7 @@ interface OmnipoolResponse { account: AccountRef; tvlUsd: number | null; assetCo
 
 /* ============ constants ============ */
 
-const DASHBOARDS = ['revenue', 'hdx', 'hollar', 'ice', 'juicer', 'security', 'liquidity', 'volume'] as const
+const DASHBOARDS = ['revenue', 'hdx', 'hollar', 'ice', 'juicer', 'bil', 'security', 'liquidity', 'volume'] as const
 type Dashboard = typeof DASHBOARDS[number]
 const RANGES = ['30d', '1y', 'all'] as const
 
@@ -136,6 +136,7 @@ const liquidityPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/
 const volumePageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/volume`
 const intentsPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/intents`
 const juicerPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/juicer`
+const bilPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/bil`
 
 /* ============ description ============ */
 
@@ -146,6 +147,7 @@ const DESCRIPTION = `The protocol's own dashboards, each rendered as headline fi
 - 'hollar' — the stablecoin. Price, peg deviation in basis points, how much of the last 30 days sat within 25 bps, where the supply lives (stablepools, Omnipool, elsewhere), the HSM's collateral holdings with their purchase and buy-back parameters, and the pools that quote it.
 - 'ice' — the intent/solver layer (the Explorer's Intents page). Solver mode, protocol fee and routing overrides, open limit and DCA orders with the capital they reserve, fills per day (matched intent-to-intent vs routed through the pools, valued when they settled), execution quality (time to fill in blocks, partial and cancel rates, price against limit in basis points), the top traders (intent owners) and pairs, and fee revenue. For the individual intents call get_activity with type=intent; an intent id reads through inspect_entity.
 - 'juicer' — the Juicer strategy vaults: TVL and cap, est. APY (the official formula), Main and PRIME-loop health, top positions, withdrawal requests, activity since launch.
+- 'bil' — Brazilian Invoice Loans: NAV (BIL and uBIL are valued at it), stated vs realized APY, TVL and cap, the maturity ladder, the redemption queue and its wait, borrowing against BIL, pool 10055's premium to NAV.
 - 'security' — the safety posture. Cross-chain egress usage against its limit, per-asset deposit fuses and how close each is to lockdown, the Omnipool's per-block trade/add/remove allowances and the peak pressure seen against them, circuit-breaker trips by error, what is currently paused or restricted, lending-market solvency, runtime version, the Technical Committee, and the Wormhole backing summary.
 - 'liquidity' — where TVL sits: the venue split across Omnipool, stableswaps, XYK and Uniswap v3, then the Omnipool itself asset by asset with each weight against its CAP.
 - 'volume' — 24H / 7D / 30D volume with the change: ROUTED (every trade once, netted — the DefiLlama figure), then per VENUE (every fill once in its pool; sums to MORE than routed — never mix the two), then 7D top pools (volume/TVL), assets and traders.
@@ -237,6 +239,95 @@ function renderJuicer(d: JuicerDashboard, ctx: ToolContext): string {
     recent.length ? joinBlocks(h3('Last days'), table(['Day', 'Deposits', 'Deposited', 'Withdrawal requests', 'Claimed', 'Harvested', 'Rebalances'], recent.map(r => [
       r.day, formatCount(r.deposits), formatUsd(r.depositsUsd), formatCount(r.withdrawals), formatUsd(r.claimsUsd), formatUsd(r.harvestsUsd), formatCount(r.rebalances),
     ]))) : null,
+  )
+}
+
+/* ============ bil ============ */
+
+interface BilDashboardResponse {
+  generatedAt: string; asOfBlock: number | null; launchBlock: number | null
+  bilAsset: AssetRef; ubilAsset: AssetRef; hollarAsset: AssetRef
+  status: string; exchangeRate: string | null; navUsd: number | null
+  tvl: string | null; tvlUsd: number | null; cap: string | null; remaining: string | null; remainingBinding: string | null
+  sharesOutstanding: string | null; idleHollar: string | null; investedPrincipal: string | null; reservedHollar: string | null
+  apyPct: number | null; termDays: number | null
+  realized: { sinceLaunchPct: number | null; launchDays: number | null; d30Pct: number | null; d30Days: number | null; d7Pct: number | null; d7Days: number | null }
+  ladder: { positions: number; principal: string; payout: string; next: { at: string; payout: string } | null; buckets: Array<{ day: string; positions: number; principal: string; payout: string; cumulative: string }> } | null
+  queue: {
+    requests: Array<{ requestId: number; owner: AccountRef; controller: AccountRef; shares: string; status: string; requestedAt: string; settledShares: string; hollarOwed: string; pendingShares: string; claimableHollar: string | null; worthHollar: string | null; wait: BilWait | null; paidFromIdle: boolean }>
+    pendingShares: string; claimableHollar: string | null; quoteHollar: string; quoteWait: BilWait | null; quoteFromIdle: boolean; quoteCovered: boolean; maxWaitSec: number | null
+    processing: { samples: number; medianHours: number; p90Hours: number; maxHours: number } | null
+  } | null
+  borrowing: { borrowedHollar: string | null; bucketCap: string | null; utilization: number | null; maxLtvPct: number | null; liquidationThresholdPct: number | null; borrowApyPct: number | null; maxLeverage: number | null; maxNetApyPct: number | null } | null
+  rollover: { drawnHollar: string; repaidHollar: string; paidToVaultHollar: string; investedByVaultHollar: string | null }
+  holders: number | null; depositors: number
+  positions: Array<{ account: AccountRef; totalHollar: string | null; totalUsd: number | null; bil: string; ubil: string; queuedShares: string; claimableHollar: string; share: number | null }>
+  pool: { poolId: number; account: AccountRef; bilReserve: string; hollarReserve: string; feePct: number; mid: number | null; peg: number | null; premiumVsNavPct: number | null; sellQuote: { bil: string; hollar: string; price: number; vsNavPct: number | null } | null; history: Array<{ day: string; premiumVsPegPct: number | null; premiumVsNavPct: number | null }> } | null
+  totals: { deposits: number; depositsUsd: number; depositsHollar: string; redeems: number; cancels: number; settlements: number; settledHollar: string; claims: number; claimedHollar: string; reinvests: number; interestHollar: string; principalHollar: string; drawsHollar: string; repaysHollar: string; unpricedRows: number }
+  perDay: Array<{ day: string; deposits: number; depositsUsd: number; redeems: number; settledHollar: string; claimedHollar: string; interestHollar: string; principalHollar: string; drawsHollar: string; repaysHollar: string }>
+}
+const signedPct = (v: number | null | undefined): string | null => v == null ? null : `${v >= 0 ? '+' : ''}${formatPercent(v)}`
+
+function renderBil(d: BilDashboardResponse, ctx: ToolContext): string {
+  const base = ctx.explorerBaseUrl
+  const H = d.hollarAsset, hol = (raw: string | null | undefined) => raw == null ? DASH : formatAmount(raw, H.decimals, assetLabel(H))
+  const shares = (raw: string) => formatAmount(raw, d.ubilAsset.decimals, assetLabel(d.ubilAsset))
+  const nav = d.exchangeRate == null ? null : Number(BigInt(d.exchangeRate) / 1_000_000_000n) / 1e9
+  const r = d.realized
+  const q = d.queue
+  const b = d.borrowing
+  const t = d.totals
+  const ro = d.rollover
+  return joinBlocks(
+    h2('Brazilian Invoice Loans (BIL)'),
+    kv([
+      ['Page', explorerLink('explorer', bilPageUrl(base))],
+      ['Current state as of block', d.asOfBlock == null ? 'unavailable — no fresh state read; history below still holds' : formatCount(d.asOfBlock)],
+      ['Deposits', d.status],
+      ['NAV', nav == null ? null : `${nav.toFixed(6)} HOLLAR per BIL (= per uBIL) · ${formatUsd(d.navUsd)} — BIL and uBIL are valued at this on every value surface`],
+      ['TVL', d.tvl == null ? null : `${hol(d.tvl)} · ${formatUsd(d.tvlUsd)}`],
+      ['Cap', d.cap == null ? null : `${hol(d.cap)} · ${hol(d.remaining)} left (binding: ${d.remainingBinding ?? DASH})`],
+      ['Stated APY', d.apyPct == null ? null : `${formatPercent(d.apyPct)} fixed over ${d.termDays ?? DASH}-day Decentral terms (simple interest per position)`],
+      ['Realized APY', `${r.sinceLaunchPct == null ? DASH : formatPercent(r.sinceLaunchPct)} since launch (${r.launchDays ?? DASH} d) · ${r.d30Pct == null ? DASH : formatPercent(r.d30Pct)} over ${r.d30Days ?? DASH} d · ${r.d7Pct == null ? DASH : formatPercent(r.d7Pct)} over ${r.d7Days ?? DASH} d — the live rate against the exact rate deposits and settlements executed at, annualised simple`],
+      ['Invested / idle / reserved', `${hol(d.investedPrincipal)} principal in Decentral positions · ${hol(d.idleHollar)} idle · ${hol(d.reservedHollar)} reserved for settled claims`],
+      ['Holders', d.holders == null ? null : `${formatCount(d.holders)} (pool and custody excluded) · ${formatCount(d.depositors)} ever deposited`],
+      ['Generated', d.generatedAt ? `${formatTime(d.generatedAt)} · ${relativeAge(d.generatedAt)}` : null],
+    ]),
+    d.ladder ? joinBlocks(h3('Maturity ladder'), kv([
+      ['Open positions', `${formatCount(d.ladder.positions)} · ${hol(d.ladder.principal)} principal · ${hol(d.ladder.payout)} due at maturity`],
+      ['Next maturity', d.ladder.next ? `${formatTime(d.ladder.next.at)} · ${hol(d.ladder.next.payout)}` : DASH],
+    ]), table(['Day', 'Positions', 'Payout', 'Cumulative'], d.ladder.buckets.slice(0, 14).map(b => [b.day, formatCount(b.positions), hol(b.payout), hol(b.cumulative)]))) : null,
+    q ? joinBlocks(h3('Redemption queue'), kv([
+      ['Queued (still accruing)', shares(q.pendingShares)],
+      ['Settled, claimable (fixed HOLLAR)', hol(q.claimableHollar)],
+      [`A new ${hol(q.quoteHollar)} request`, !q.quoteCovered ? 'beyond the current ladder' : bilWaitText(q.quoteWait, q.quoteFromIdle) + ' — FIFO behind the queue'],
+      ['Processing after maturity (measured)', q.processing ? `median ${formatNumber(q.processing.medianHours)} h, 90% within ${formatNumber(q.processing.p90Hours)} h, max ${formatNumber(q.processing.maxHours)} h over ${formatCount(q.processing.samples)} repaid positions (the app says up to 48 h)` : null],
+      ['Lockup of a fresh deposit', q.maxWaitSec == null ? null : `about ${Math.round(q.maxWaitSec / 86_400)} days: its ${d.termDays ?? DASH}-day term plus processing`],
+    ]), q.requests.length ? table(['Request', 'Owner', 'uBIL', 'State', 'Worth', 'Paid'], q.requests.filter(x => x.status !== 'claimed' && x.status !== 'cancelled').slice(0, 12).map(x => [
+      `#${x.requestId}`, explorerLink(accountLabel(x.owner), accountUrl(base, x.owner.address)), shares(x.shares), x.status, hol(x.worthHollar),
+      x.pendingShares === '0' ? (x.claimableHollar && x.claimableHollar !== '0' ? 'claimable now' : DASH) : bilWaitText(x.wait, x.paidFromIdle),
+    ])) : null) : null,
+    b ? joinBlocks(h3('Borrowing HOLLAR against BIL (looping)'), kv([
+      ['Borrowed', b.borrowedHollar == null ? null : `${hol(b.borrowedHollar)} of a ${hol(b.bucketCap)} borrow cap (${b.utilization == null ? DASH : formatPercent(b.utilization * 100)})`],
+      ['Max LTV · liquidation threshold', `${b.maxLtvPct == null ? DASH : formatPercent(b.maxLtvPct)} · ${b.liquidationThresholdPct == null ? DASH : formatPercent(b.liquidationThresholdPct)}`],
+      ['Borrow APY', b.borrowApyPct == null ? null : formatPercent(b.borrowApyPct)],
+      ['Max Net APY', b.maxNetApyPct == null ? null : `${formatPercent(b.maxNetApyPct)} at max LTV (${b.maxLeverage?.toFixed(1) ?? DASH}× leverage: BIL supplied, HOLLAR borrowed, re-deposited) — the stated APY less the borrow cost; the borrow rate floats and a looped position is liquidated if its LTV reaches the threshold`],
+    ])) : null,
+    d.pool ? joinBlocks(h3(`BIL/HOLLAR pool (${d.pool.poolId}) — the instant way out`), kv([
+      ['Pool', explorerLink(accountLabel(d.pool.account), accountUrl(base, d.pool.account.address))],
+      ['Reserves', `${formatAmount(d.pool.bilReserve, d.bilAsset.decimals, assetLabel(d.bilAsset))} · ${hol(d.pool.hollarReserve)} · fee ${formatPercent(d.pool.feePct)}`],
+      ['Mid price', d.pool.mid == null ? null : `${d.pool.mid.toFixed(6)} HOLLAR per BIL · ${signedPct(d.pool.premiumVsNavPct) ?? DASH} vs NAV (peg ${d.pool.peg?.toFixed(6) ?? DASH})`],
+      ['Sell 1,000 BIL now', d.pool.sellQuote ? `${hol(d.pool.sellQuote.hollar)} (${d.pool.sellQuote.price.toFixed(6)} per BIL, ${signedPct(d.pool.sellQuote.vsNavPct) ?? DASH} vs NAV, fee and impact included)` : null],
+    ])) : null,
+    table(['Top holder', 'Worth', 'USD', 'Queued', 'Claimable'], d.positions.slice(0, 10).map(p => [
+      explorerLink(accountLabel(p.account), accountUrl(base, p.account.address)), hol(p.totalHollar), formatUsd(p.totalUsd), p.queuedShares === '0' ? DASH : shares(p.queuedShares), p.claimableHollar === '0' ? DASH : hol(p.claimableHollar),
+    ])),
+    joinBlocks(h3('Since launch'), kv([
+      ['Deposits', `${formatCount(t.deposits)} · ${hol(t.depositsHollar)} · ${formatUsd(t.depositsUsd)} (valued when deposited)`],
+      ['Redemptions', `${formatCount(t.redeems)} requests · ${formatCount(t.cancels)} cancellations · ${formatCount(t.settlements)} settlements (${hol(t.settledHollar)}) · ${formatCount(t.claims)} claims (${hol(t.claimedHollar)})`],
+      ['Decentral', `${formatCount(t.reinvests)} reinvestments · ${hol(t.interestHollar)} interest and ${hol(t.principalHollar)} principal paid back to the vault`],
+      ['Rollover', `since the vault's first investment the borrower drew ${hol(ro.drawnHollar)} from the Decentral pool and repaid ${hol(ro.repaidHollar)}; the pool paid the vault ${hol(ro.paidToVaultHollar)} while the vault invested ${hol(ro.investedByVaultHollar)} in it (new deposits and reinvestments) — maturities so far were paid partly out of new investment, not only out of repayments`],
+    ])),
   )
 }
 
@@ -956,6 +1047,18 @@ async function handler(input: Record<string, unknown>, ctx: ToolContext): Promis
       return output(ctx, fit(joinBlocks(rangeNote, renderJuicer(d, ctx)), ctx), {
         ...d,
         vaults: d.vaults.map(v => ({ ...v, positions: v.positions.slice(0, 25), withdrawals: v.withdrawals.slice(0, 25) })),
+        perDay: d.perDay.slice(-30),
+      })
+    }
+
+    if (dashboard === 'bil') {
+      const d = await ctx.upstream.get<BilDashboardResponse>('/explorer/bil', undefined, { ttlMs: 30_000, timeoutMs: 60_000 })
+      return output(ctx, fit(joinBlocks(rangeNote, renderBil(d, ctx)), ctx), {
+        ...d,
+        positions: d.positions.slice(0, 25),
+        queue: d.queue ? { ...d.queue, requests: d.queue.requests.filter(r => r.status !== 'claimed' && r.status !== 'cancelled').slice(0, 25) } : null,
+        ladder: d.ladder ? { ...d.ladder, buckets: d.ladder.buckets.slice(0, 60) } : null,
+        pool: d.pool ? { ...d.pool, history: d.pool.history.slice(-30) } : null,
         perDay: d.perDay.slice(-30),
       })
     }

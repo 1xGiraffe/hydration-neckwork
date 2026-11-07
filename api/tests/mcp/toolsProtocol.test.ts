@@ -289,7 +289,7 @@ describe('get_protocol_stats', () => {
   it('refuses a dashboard that does not exist, naming the ones that do', async () => {
     const out = await run(protocol, { dashboard: 'treasury' }, {})
     expect(out.errors?.[0].code).toBe('INVALID_ARGUMENT')
-    expect(out.errors?.[0].message).toContain('revenue, hdx, hollar, ice, juicer, security, liquidity')
+    expect(out.errors?.[0].message).toContain('revenue, hdx, hollar, ice, juicer, bil, security, liquidity')
   })
 
   it('reads the revenue trio under ONE range, so the answer is internally consistent', async () => {
