@@ -416,8 +416,8 @@ export interface ActivityRow {
 
   // OTC — cancellation is called Pull in product copy
   otcAction?: 'Place' | 'Pull' | 'Fill'
-  /** A bond's primary-sale act (this OTC row is also a `bond` row): a purchase (`sale`) or rollover, and the bond's page and round. */
-  bondSale?: { venue: string; kind: 'sale' | 'rollover'; bondId: number; family: string | null; round: number | null; maturityAt: string | null; price?: number | null; returnPct?: number | null; aprPct?: number | null }
+  /** A bond's primary-sale act (this OTC or LBP-trade row is also a `bond` row): a purchase (`sale`), rollover or sell back (`side: 'sell'`), and the bond's page and round. */
+  bondSale?: { venue: string; kind: 'sale' | 'rollover'; side?: 'buy' | 'sell'; bondId: number; family: string | null; round: number | null; maturityAt: string | null; price?: number | null; returnPct?: number | null; aprPct?: number | null; paymentPrice?: number | null }
   otcOrderId?: number
   otcPartial?: boolean
   otcPartiallyFillable?: boolean

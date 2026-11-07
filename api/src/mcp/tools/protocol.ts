@@ -126,7 +126,7 @@ interface OmnipoolResponse { account: AccountRef; tvlUsd: number | null; assetCo
 // The bond families' dashboards: one per explorer bond family (bonds.ts BOND_FAMILIES,
 // mirrored here because this tree imports nothing outside itself — a test pins the two
 // lists equal). The dashboard name is `<family>-bonds`, its page `/<family>-bonds`.
-export const BOND_DASHBOARD_FAMILIES = ['hollar'] as const
+export const BOND_DASHBOARD_FAMILIES = ['hollar', 'hdx'] as const
 type BondDashboardName = `${typeof BOND_DASHBOARD_FAMILIES[number]}-bonds`
 const BOND_DASHBOARDS = BOND_DASHBOARD_FAMILIES.map(f => `${f}-bonds` as BondDashboardName)
 const DASHBOARDS = ['revenue', 'hdx', 'hollar', 'ice', 'juicer', 'bil', ...BOND_DASHBOARDS, 'security', 'liquidity', 'volume'] as [string, ...string[]]
@@ -155,7 +155,7 @@ const DESCRIPTION = `The protocol's own dashboards, each rendered as headline fi
 - 'ice' — the intent/solver layer (the Explorer's Intents page). Solver mode, protocol fee and routing overrides, open limit and DCA orders with the capital they reserve, fills per day (matched intent-to-intent vs routed through the pools, valued when they settled), execution quality (time to fill in blocks, partial and cancel rates, price against limit in basis points), the top traders (intent owners) and pairs, and fee revenue. For the individual intents call get_activity with type=intent; an intent id reads through inspect_entity.
 - 'juicer' — the Juicer strategy vaults: TVL and cap, est. APY (the official formula), Main and PRIME-loop health, top positions, withdrawal requests, activity since launch.
 - 'bil' — Brazilian Invoice Loans: NAV (BIL and uBIL are valued at it), stated vs realized APY, TVL and cap, the maturity ladder, the redemption queue and its wait, borrowing against BIL, pool 10055's premium to NAV.
-- 'hollar-bonds' — the Treasury's fixed-yield HOLLAR bonds per round: yield, sales, rollover, redemptions, holders. Purchases: get_activity type=bond.
+- 'hollar-bonds'/'hdx-bonds' — Treasury bonds by round: yield, sales, redemptions, holders (HDX's sold for DOT via LBP, yield in HDX). Buys: get_activity type=bond.
 - 'security' — the safety posture. Cross-chain egress usage against its limit, per-asset deposit fuses and how close each is to lockdown, the Omnipool's per-block trade/add/remove allowances and the peak pressure seen against them, circuit-breaker trips by error, what is currently paused or restricted, lending-market solvency, runtime version, the Technical Committee, and the Wormhole backing summary.
 - 'liquidity' — where TVL sits: the venue split across Omnipool, stableswaps, XYK and Uniswap v3, then the Omnipool itself asset by asset with each weight against its CAP.
 - 'volume' — 24H / 7D / 30D volume with the change: ROUTED (every trade once, netted — the DefiLlama figure), then per VENUE (every fill once in its pool; sums to MORE than routed — never mix the two), then 7D top pools (volume/TVL), assets and traders.
@@ -350,6 +350,17 @@ interface BondSaleResponse {
   venue: string; id: string; kind: 'sale' | 'rollover'; paymentAsset: AssetRef; fromRound: number | null; state: string; openedAt: string; endedAt: string | null
   offered: string | null; sold: string; paid: string; remaining: string; unsold: string; fills: number; buyers: number
   price: number | null; discountPct: number | null; fixedYieldPct: number | null; aprAtOpenPct: number | null; avgPrice: number | null
+  avgFacePrice?: number | null; avgAprPct?: number | null; facedAtEventTime?: boolean
+  lbp?: {
+    pool: AccountRef; feePct: number; paymentWeightStart: number; paymentWeightEnd: number; startAt: string | null; endAt: string | null
+    seed: { payment: string; bonds: string }; returned: { at: string; payment: string; bonds: string } | null
+    fees: string; sellBacks: number; soldBack: string; reconciled: boolean | null
+    curve: Array<{ t: number; pay: number | null; face: number | null }>
+  } | null
+}
+interface BondBuyerStatsResponse {
+  buyers: number; sellers: number; purchases: number; medianPurchase: string | null; largestPurchase: string | null; top10SharePct: number | null
+  top: Array<{ account: AccountRef; fills: number; bonds: string; facePrice: number | null; aprPct: number | null }>
 }
 interface BondRoundResponse {
   round: number; bondId: number; asset: AssetRef; status: string; issuer: AccountRef; createdAt: string; maturityAt: string
@@ -359,6 +370,7 @@ interface BondRoundResponse {
   valueFactor: number | null; publicUsd: number | null; issuerUsd: number | null
   holders: { list: Array<{ account: AccountRef | null; tag: { name: string } | null; balance: string; valueUsd?: number | null; share?: number }>; holderCount: number } | null
   buyers: number
+  discountPct?: number | null; avgAprPct?: number | null; buyerStats?: BondBuyerStatsResponse
 }
 interface BondDashboardResponse {
   generatedAt: string; asOfBlock: number | null; family: { key: string; title: string }; underlying: AssetRef
@@ -388,21 +400,42 @@ function renderBonds(d: BondDashboardResponse, ctx: ToolContext): string {
       kv([
         ['Asset', explorerLink(assetLabel(r.asset), assetUrl(base, r.asset.assetId))],
         ['Issued · matures', `${face(r.issued)} on ${formatTime(r.createdAt)} · matures ${formatTime(r.maturityAt)}`],
-        ['Fixed yield', r.fixedYieldPct == null ? null : `${pct(r.fixedYieldPct)} to maturity (${pct(r.aprAtOpenPct)} APR from when the sale opened; net of the 0.1% fee)`],
+        ['Fixed yield', r.fixedYieldPct == null ? null : r.sales.some(o => o.lbp)
+          ? `${pct(r.fixedYieldPct)} to maturity at the sale's average price of ${r.salePrice == null ? DASH : r.salePrice.toFixed(4)} ${U.symbol} per bond (${pct(r.discountPct ?? null)} discount) · ${pct(r.avgAprPct ?? null)} APR as bought, bonds-weighted`
+          : `${pct(r.fixedYieldPct)} to maturity (${pct(r.aprAtOpenPct)} APR from when the sale opened; net of the 0.1% fee)`],
         ['Sold', `${face(r.soldForMoney)} for money (${r.proceeds.map(p => formatAmount(p.raw, p.asset.decimals, assetLabel(p.asset))).join(' + ') || DASH}) · ${face(r.rolledOver)} rolled over · ${formatCount(r.buyers)} buyers`],
         ['Redeemed', `${face(r.redeemed)} in ${formatCount(r.redemptions)} redemptions`],
         ['Outstanding', `${face(r.publicOutstanding)} public (${formatUsd(r.publicUsd)}) · ${face(r.issuerHeld)} the Treasury's own (unsold, fees)`],
         ['Worth now', r.valueFactor == null ? null : `${r.valueFactor.toFixed(6)} ${U.symbol} per bond`],
       ]),
+      ...r.sales.filter(o => o.lbp).map(o => {
+        const l = o.lbp!, P = o.paymentAsset
+        const faces = l.curve.map(c => c.face).filter((v): v is number => v != null)
+        return kv([
+          ['LBP pool', explorerLink(accountLabel(l.pool), accountUrl(base, l.pool.address))],
+          ['Sale window', `${l.startAt ? formatTime(l.startAt) : DASH} → ${l.endAt ? formatTime(l.endAt) : DASH} · ${formatPercent(l.feePct)} fee in ${assetLabel(P)} · ${assetLabel(P)} weight ${l.paymentWeightStart}% → ${l.paymentWeightEnd}%`],
+          ['Seeded · returned', `${face(l.seed.bonds)} + ${formatAmount(l.seed.payment, P.decimals, assetLabel(P))} · ${l.returned ? `${face(l.returned.bonds)} unsold + ${formatAmount(l.returned.payment, P.decimals, assetLabel(P))} back to the Treasury on ${formatTime(l.returned.at)}` : 'still in the pool'}`],
+          ['Sold', `${face(o.sold)} net of ${formatCount(l.sellBacks)} sells back for ${formatAmount(o.paid, P.decimals, assetLabel(P))} (fees ${formatAmount(l.fees, P.decimals, assetLabel(P))}) · ${o.avgPrice == null ? DASH : o.avgPrice.toFixed(6)} ${P.symbol} per bond = ${o.avgFacePrice == null ? DASH : o.avgFacePrice.toFixed(4)} ${U.symbol} at the time`],
+          ['Spot over the sale', faces.length ? `${faces[0].toFixed(4)} → ${faces[faces.length - 1].toFixed(4)} ${U.symbol} per bond (low ${Math.min(...faces).toFixed(4)}, high ${Math.max(...faces).toFixed(4)})` : DASH],
+          ['Reserves replay', l.reconciled === true ? 'every fill accounted for (lands on what was returned)' : l.reconciled === false ? 'does NOT land on what was returned — curve withheld' : 'pool still holds its reserves'],
+        ])
+      }),
+      r.buyerStats && r.buyerStats.top.length ? table(['Top buyer', 'Bonds', 'Fills', 'Price', 'APR'], r.buyerStats.top.slice(0, 8).map(b => [
+        explorerLink(accountLabel(b.account), accountUrl(base, b.account.address)), face(b.bonds), formatCount(b.fills),
+        b.facePrice == null ? DASH : `${b.facePrice.toFixed(4)} ${U.symbol}`, pct(b.aprPct),
+      ])) : null,
+      r.buyerStats ? kv([['Buyers', `${formatCount(r.buyerStats.buyers)} buyers in ${formatCount(r.buyerStats.purchases)} purchases (median ${face(r.buyerStats.medianPurchase)}, largest ${face(r.buyerStats.largestPurchase)}) · top 10 bought ${pct(r.buyerStats.top10SharePct)} · ${formatCount(r.buyerStats.sellers)} sold back`]]) : null,
       table(['Sale', 'Pays', 'State', 'Price', 'Fixed yield', 'APR at open', 'Sold', 'Unsold'], r.sales.map(o => [
-        `${o.venue} #${o.id}${o.kind === 'rollover' ? ` (rollover${o.fromRound ? ` from round ${o.fromRound}` : ''})` : ''}`, assetLabel(o.paymentAsset), o.state, o.price == null ? DASH : o.price.toFixed(6),
+        `${o.venue === 'lbp' ? 'LBP' : `${o.venue} #${o.id}`}${o.kind === 'rollover' ? ` (rollover${o.fromRound ? ` from round ${o.fromRound}` : ''})` : ''}`, assetLabel(o.paymentAsset), o.state, o.price == null ? DASH : o.price.toFixed(6),
         pct(o.fixedYieldPct), pct(o.aprAtOpenPct), face(o.sold), o.unsold === '0' ? (o.remaining === '0' ? DASH : `${face(o.remaining)} left`) : face(o.unsold),
       ])),
       r.holders?.list.length ? table(['Top holder', 'Bonds', 'USD'], r.holders.list.slice(0, 8).map(h => [
         h.account ? explorerLink(accountLabel(h.account), accountUrl(base, h.account.address)) : h.tag?.name ?? DASH, face(h.balance), formatUsd(h.valueUsd ?? null),
       ])) : null,
     )),
-    note('A bond redeems 1:1 for its underlying from maturity. Until then it is valued at its sale\'s price (net of the fee) while the sale stands, then at that price accreting to face by maturity (simple interest). Prices and yields are on the sales\' own units (one USDT or USDC per HOLLAR of face).'),
+    note(d.rounds.some(r => r.sales.some(o => o.facedAtEventTime))
+      ? `A bond redeems 1:1 for its underlying from maturity. Until then it is valued at its sale's price while the sale stands, then at that price accreting to face by maturity (simple interest). These bonds were paid for in another asset, so every price, discount and yield is in ${U.symbol} at each purchase's own time: what the payment was worth in ${U.symbol} then, against the ${U.symbol} it redeems for.`
+      : 'A bond redeems 1:1 for its underlying from maturity. Until then it is valued at its sale\'s price (net of the fee) while the sale stands, then at that price accreting to face by maturity (simple interest). Prices and yields are on the sales\' own units (one USDT or USDC per HOLLAR of face).'),
   )
 }
 
@@ -420,10 +453,14 @@ export function bondsJson(d: BondDashboardResponse): unknown {
       fixedYieldPct: r.fixedYieldPct, aprAtOpenPct: r.aprAtOpenPct, salePrice: r.salePrice, saleOpen: r.saleOpen,
       redeemed: r.redeemed, redemptions: r.redemptions, outstanding: r.outstanding, issuerHeld: r.issuerHeld, publicOutstanding: r.publicOutstanding,
       valueFactor: r.valueFactor, publicUsd: r.publicUsd, issuerUsd: r.issuerUsd, buyers: r.buyers,
+      discountPct: r.discountPct ?? null, avgAprPct: r.avgAprPct ?? null,
+      buyerStats: r.buyerStats ? { ...r.buyerStats, top: r.buyerStats.top.slice(0, 5).map(b => ({ account: acct(b.account), bonds: b.bonds, fills: b.fills, facePrice: b.facePrice, aprPct: b.aprPct })) } : null,
       sales: r.sales.map(o => ({
         venue: o.venue, id: o.id, kind: o.kind, paymentAsset: a(o.paymentAsset), fromRound: o.fromRound, state: o.state, openedAt: o.openedAt, endedAt: o.endedAt,
         offered: o.offered, sold: o.sold, paid: o.paid, remaining: o.remaining, unsold: o.unsold, fills: o.fills, buyers: o.buyers,
         price: o.price, discountPct: o.discountPct, fixedYieldPct: o.fixedYieldPct, aprAtOpenPct: o.aprAtOpenPct, avgPrice: o.avgPrice,
+        avgFacePrice: o.avgFacePrice ?? null, avgAprPct: o.avgAprPct ?? null,
+        ...(o.lbp ? { lbp: { pool: acct(o.lbp.pool), feePct: o.lbp.feePct, paymentWeightStart: o.lbp.paymentWeightStart, paymentWeightEnd: o.lbp.paymentWeightEnd, startAt: o.lbp.startAt, endAt: o.lbp.endAt, seed: o.lbp.seed, returned: o.lbp.returned, fees: o.lbp.fees, sellBacks: o.lbp.sellBacks, soldBack: o.lbp.soldBack, reconciled: o.lbp.reconciled } } : {}),
       })),
       holderCount: r.holders?.holderCount ?? null,
       topHolders: (r.holders?.list ?? []).slice(0, 5).map(h => ({ account: acct(h.account), group: h.tag?.name ?? null, balance: h.balance, valueUsd: h.valueUsd ?? null })),

@@ -192,6 +192,8 @@ export function activityKind(r: ActivityRow): string {
         if (r.dcaStatus === 'scheduled') return 'DCA scheduled'
         return r.dcaStatus === 'failed' ? 'DCA execution failed' : 'DCA execution'
       }
+      // A bond's LBP purchase or sell back is the bond act it is (the explorer's label).
+      if (r.bondSale) return r.bondSale.side === 'sell' ? 'Bond sold back' : 'Bond purchase'
       return 'Swap'
     // Product copy calls an OTC cancellation a Pull.
     case 'otc': return r.bondSale ? BOND_SALE_LABELS[r.bondSale.kind]?.[r.otcAction ?? ''] ?? 'Bond sale' : OTC_LABELS[r.otcAction ?? ''] ?? 'OTC order'
