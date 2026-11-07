@@ -4,7 +4,7 @@ import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
 import { F, Amt, Usd, AddrPill, AssetChip, AssetAmount, AssetIcon, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
-import { LIQ_LABELS, MM_LABELS, OTC_LABELS, activityBadge, BOND_LABELS, intentLabel } from './activityColors'
+import { LIQ_LABELS, MM_LABELS, OTC_LABELS, activityBadge, BOND_LABELS, JUICER_LABELS, intentLabel } from './activityColors'
 import { parseUtcTimestamp } from '../utils/time'
 import { fmtDuration } from '../utils/dca'
 import { resolveTag, useTagMapVersion } from '../userTags'
@@ -147,6 +147,11 @@ const MM_SLUG: Record<string, ActivitySlug> = {
   LiquidationCall: 'liquidate', Liquidate: 'liquidate',
   ClaimRewards: 'claim-rewards',
 }
+const JUICER_SLUG: Record<string, ActivitySlug> = {
+  Deposit: 'juicer-deposit', Withdraw: 'juicer-withdraw', Unwind: 'juicer-unwind', Settle: 'juicer-settle', Claim: 'juicer-claim',
+  ClaimSurplus: 'juicer-claim-surplus', Harvest: 'juicer-harvest', Rebalance: 'juicer-rebalance', Delever: 'juicer-delever',
+  Lever: 'juicer-lever', Unlever: 'juicer-unlever',
+}
 // Canonical detail-page slug for a activity row — mirrors badge() labels.
 export function activitySlug(r: ActivityRow): ActivitySlug {
   switch (r.type) {
@@ -157,6 +162,7 @@ export function activitySlug(r: ActivityRow): ActivitySlug {
     case 'mm': return MM_SLUG[r.mmAction ?? ''] ?? 'lend'
     case 'staking': return 'staking'
     case 'bond': return r.bondAction === 'Redeem' ? 'bond-redeem' : 'bond-issue'
+    case 'juicer': return JUICER_SLUG[r.juicerAction ?? ''] ?? 'juicer-deposit'
     // A partial fill is a fill: one slug covers both (the badge tells them apart).
     case 'intent': return r.intentAction === 'Place' ? 'intent-place' : r.intentAction === 'Cancel' ? 'intent-cancel' : r.intentAction === 'Expire' ? 'intent-expire' : r.intentAction === 'DcaTrade' ? 'intent-dca-trade' : 'intent-fill'
     case 'vote': return 'vote'
@@ -234,6 +240,10 @@ const SLUG_LABEL: Record<ActivitySlug, string> = {
   'bond-issue': BOND_LABELS.Issue, 'bond-redeem': BOND_LABELS.Redeem,
   'intent-place': intentLabel('swap', 'Place'), 'intent-fill': intentLabel('swap', 'Fill'), 'intent-cancel': intentLabel('swap', 'Cancel'), 'intent-expire': intentLabel('swap', 'Expire'),
   'intent-dca-trade': intentLabel('dca', 'DcaTrade'),
+  'juicer-deposit': JUICER_LABELS.Deposit, 'juicer-withdraw': JUICER_LABELS.Withdraw, 'juicer-unwind': JUICER_LABELS.Unwind,
+  'juicer-settle': JUICER_LABELS.Settle, 'juicer-claim': JUICER_LABELS.Claim, 'juicer-claim-surplus': JUICER_LABELS.ClaimSurplus,
+  'juicer-harvest': JUICER_LABELS.Harvest, 'juicer-rebalance': JUICER_LABELS.Rebalance, 'juicer-delever': JUICER_LABELS.Delever,
+  'juicer-lever': JUICER_LABELS.Lever, 'juicer-unlever': JUICER_LABELS.Unlever,
 }
 export function activityLabel(slug: ActivitySlug): string { return SLUG_LABEL[slug] }
 
@@ -248,6 +258,9 @@ export const SLUG_TYPES: Record<ActivitySlug, ActivityRow['type'][]> = {
   'otc-place': ['otc'], 'otc-pull': ['otc'], 'otc-fill': ['otc'],
   'bond-issue': ['bond'], 'bond-redeem': ['bond'],
   'intent-place': ['intent'], 'intent-fill': ['intent'], 'intent-cancel': ['intent'], 'intent-expire': ['intent'], 'intent-dca-trade': ['intent'],
+  'juicer-deposit': ['juicer'], 'juicer-withdraw': ['juicer'], 'juicer-unwind': ['juicer'], 'juicer-settle': ['juicer'], 'juicer-claim': ['juicer'],
+  'juicer-claim-surplus': ['juicer'], 'juicer-harvest': ['juicer'], 'juicer-rebalance': ['juicer'], 'juicer-delever': ['juicer'],
+  'juicer-lever': ['juicer'], 'juicer-unlever': ['juicer'],
 }
 
 export { parseId } from '../utils/activityIds'
@@ -332,6 +345,44 @@ export function V3PoolChip({ r }: { r: Pick<ActivityRow, 'poolAddress' | 'poolNa
       ))}</span> : null}
       {r.poolName}
     </Link>
+  )
+}
+
+// A Juicer act's phrase: what moved, in the units the vault moved it — a deposit's
+// collateral and the shares it minted, a request's escrowed shares, a payout's
+// collateral, a rebalance's move of Main's LTV and the HOLLAR it put into the loop.
+// A request's number ties its unwind, settlements and claim together.
+function JuicerFlow({ r, headed }: { r: ActivityRow; headed?: boolean }) {
+  const req = !headed && r.juicerRequestId != null ? <span className="muted mono">#{r.juicerRequestId}</span> : null
+  const amount = r.asset && r.amount != null ? <AssetAmount asset={r.asset} raw={r.amount} /> : null
+  if (r.juicerAction === 'Deposit') {
+    return <span className="asset-flow">{amount}{r.juicerShareAsset && r.juicerShares != null && <> → <AssetAmount asset={r.juicerShareAsset} raw={r.juicerShares} /></>}</span>
+  }
+  if (r.juicerAction === 'Rebalance') {
+    const ltv = (b: number) => `${(b / 100).toFixed(1)}%`
+    return (
+      <span className="asset-flow">
+        {r.juicerLtvBefore != null && r.juicerLtvAfter != null && <span className="muted">Main LTV <span className="mono">{ltv(r.juicerLtvBefore)} → {ltv(r.juicerLtvAfter)}</span></span>}
+        {amount && <><span className="muted">·</span>{amount}<span className="muted">into the loop</span></>}
+      </span>
+    )
+  }
+  if (r.juicerAction === 'Delever') return <span className="asset-flow muted">PRIME loop exposure reduced</span>
+  if (r.juicerAction === 'Lever' || r.juicerAction === 'Unlever') {
+    // The loop's ICE intent: what it sends out and the least it takes back.
+    return (
+      <span className="asset-flow">
+        {amount}
+        {r.juicerOutAsset && r.juicerMinOut != null && <> → <span className="muted">at least</span> <AssetAmount asset={r.juicerOutAsset} raw={r.juicerMinOut} /></>}
+        {!headed && r.juicerIntentNonce != null && <span className="muted mono">intent #{r.juicerIntentNonce}</span>}
+      </span>
+    )
+  }
+  return (
+    <span className="asset-flow">
+      {amount}{req}
+      {r.juicerAction === 'Harvest' && r.juicerFee != null && r.asset && <span className="muted">compounded · <Amt raw={r.juicerFee} dec={r.asset.decimals} /> {r.asset.symbol} protocol share</span>}
+    </span>
   )
 }
 
@@ -489,6 +540,7 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     // act moves both tokens — show both legs side by side.
     return <span className="asset-flow">{pool}<AssetAmount asset={r.assetIn} raw={r.amountIn} /> + <AssetAmount asset={r.assetOut} raw={r.amountOut} /></span>
   }
+  if (r.type === 'juicer') return <JuicerFlow r={r} headed={headed} />
   if ((r.type === 'mm' || r.type === 'liquidity' || r.type === 'staking' || r.type === 'bond') && r.asset) {
     return <span className="asset-flow">{pool}<AssetAmount asset={r.asset} raw={r.amount} /></span>
   }
@@ -552,7 +604,10 @@ export function ActivityTable({ rows, noActor, now, live, anchorRef, loading, pe
                 const slug = activitySlug(r)
                 const aid = activityId(r, dcaExecutionLinks)
                 // De-emphasise low-/zero-value activity (null treated as low) so high-value rows stand out. Not hidden — just muted via the .dim class.
-                const dim = r.valueUsd == null || r.valueUsd < 10
+                // A row that names an amount of a known asset but no value (a Juicer withdrawal
+                // request: shares, valued only when its unwind fixes them) is not dust.
+                const unvaluedAmount = r.valueUsd == null && r.asset != null && r.amount != null && r.amount !== '0'
+                const dim = !unvaluedAmount && (r.valueUsd == null || r.valueUsd < 10)
                 // Mempool rows are dry-run PROJECTIONS of transactions no block
                 // holds yet — specially marked (not dimmed like unfinalized: the
                 // point is to stand out), non-navigable, replaced by their

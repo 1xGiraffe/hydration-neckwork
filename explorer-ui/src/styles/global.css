@@ -115,6 +115,11 @@
   --cat-bond: #4FD1C5;
   --cat-bond-redeem: #22948A;
 
+  --cat-juicer: #C5E15A;
+  --cat-juicer-exit: #8FA83A;
+  --cat-juicer-claim: #E2F0A6;
+  --cat-juicer-keeper: #A9B97A;
+
   --cat-intent: #7C5CFF;
   --cat-intent-fill: #5B3FD6;
   --cat-intent-cancel: #A99BFF;
@@ -206,6 +211,11 @@
 
   --cat-bond: #17877D;
   --cat-bond-redeem: #0C5A53;
+
+  --cat-juicer: #6B8A12;
+  --cat-juicer-exit: #45580A;
+  --cat-juicer-claim: #8FAE3A;
+  --cat-juicer-keeper: #6F7D46;
 
   --cat-intent: #9F86FF;
   --cat-intent-fill: #7F66E6;
@@ -4415,4 +4425,18 @@ html.rev-fs-lock #view .wrap { animation: none; }
   .ice-page .day-chart { overflow: visible; }
   .ice-gloss dl { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .ice-gloss dd { margin-bottom: 8px; }
+}
+
+/* ===== Juicer page (pages/Juicer.tsx) — the Intents page's lede, glossary, ribbon
+   and card grid (the .ice-* rules above, .ice-page on the wrapper), plus the
+   official app's three-step explainer. ===== */
+.juicer-steps { list-style: none; padding: 0; margin: 4px 0 10px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; max-width: 1100px; counter-reset: jstep; }
+.juicer-steps li { counter-increment: jstep; border: 1px solid var(--separator); border-radius: 12px; padding: 12px 14px; background: var(--bg-elev); display: flex; flex-direction: column; gap: 4px; font-size: 13px; line-height: 1.5; color: var(--text-medium); }
+.juicer-steps li b { color: var(--text-high); font-weight: 600; font-size: 14px; }
+.juicer-steps li b::before { content: counter(jstep) '  '; font-family: 'GeistMono'; font-size: 11px; color: var(--cat-juicer); margin-right: 4px; }
+.juicer-risk { font-size: 12px; color: var(--text-low); line-height: 1.55; max-width: 100ch; margin: 0 0 10px; }
+.juicer-page .badge { vertical-align: 1px; }
+@media (max-width: 860px) {
+  .juicer-steps { grid-template-columns: minmax(0, 1fr); }
+  .juicer-grid { grid-template-columns: minmax(0, 1fr); }
 }

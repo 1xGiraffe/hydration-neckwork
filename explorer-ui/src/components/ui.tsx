@@ -7,7 +7,7 @@ import type { AccountRef, AssetOrigin, AssetRef, FailureReason, FeePayment } fro
 import { parseUtcTimestamp, tsDate, tsDateTime, utcDay } from '../utils/time'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { voteSideLabel } from '../utils/voteRows'
-import { BOND_LABELS, CAT, LIQ_LABELS, MM_LABELS, OTC_LABELS, intentLabel } from './activityColors'
+import { BOND_LABELS, CAT, JUICER_LABELS, LIQ_LABELS, MM_LABELS, OTC_LABELS, intentLabel } from './activityColors'
 import { ZoomReset, ZoomSelection, bracketToView, fracOfTime, useChartZoom, useZoomRefine } from './chartZoom'
 import type { RefinedSeries } from './chartZoom'
 import { resolveTag, useTagMapVersion } from '../userTags'
@@ -1796,10 +1796,20 @@ export function Crumbs({ items }: { items: { label: string; to?: string }[] }) {
 // at here" mark, for a tab whose attention has no count behind it.
 export interface DetailTab { key: string; label: string; count?: number; countAtLeast?: boolean; badge?: ReactNode; dot?: boolean; title?: string }
 export function DetailTabs({ tabs, active, onChange }: { tabs: DetailTab[]; active: string; onChange: (key: string) => void }) {
+  // A deep-linked tab (?view=strategies) sits off-screen in the scrolling strip on a
+  // phone: bring the active one into view, horizontally only, never the page.
+  const activeRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    const el = activeRef.current
+    const strip = el?.parentElement
+    if (!el || !strip || strip.scrollWidth <= strip.clientWidth) return
+    const left = el.offsetLeft - (strip.clientWidth - el.offsetWidth) / 2
+    strip.scrollTo({ left: Math.max(0, left), behavior: 'auto' })
+  }, [active, tabs.length])
   return (
     <div className="tabs detail-tabs">
       {tabs.map(t => (
-        <button key={t.key} className={active === t.key ? 'active' : ''} title={t.title} onClick={() => onChange(t.key)}>
+        <button key={t.key} ref={active === t.key ? activeRef : undefined} className={active === t.key ? 'active' : ''} title={t.title} onClick={() => onChange(t.key)}>
           {t.label}{t.count != null ? <span className="cnt">{F.int(t.count)}{t.countAtLeast ? '+' : ''}</span> : null}
           {t.badge}
           {t.dot ? <span className="tab-dot" aria-hidden="true" /> : null}
@@ -2154,7 +2164,7 @@ export function rowNav(to: string) {
 // value maps to the backend activity `type` filter; 'all' is the unfiltered feed.
 const ACTIVITY_CHIPS: { v: string; label: string }[] = [
   { v: 'all', label: 'All' }, { v: 'trade', label: 'Trade' }, { v: 'mm', label: 'Borrow' }, { v: 'liquidity', label: 'Liquidity' },
-  { v: 'transfer', label: 'Transfer' }, { v: 'xcm', label: 'Cross-chain' }, { v: 'stake', label: 'Stake' }, { v: 'bond', label: 'Bond' }, { v: 'vote', label: 'Vote' },
+  { v: 'transfer', label: 'Transfer' }, { v: 'xcm', label: 'Cross-chain' }, { v: 'stake', label: 'Stake' }, { v: 'bond', label: 'Bond' }, { v: 'juicer', label: 'Juicer' }, { v: 'vote', label: 'Vote' },
 ]
 const ACTIVITY_CHIP_VALUES = new Set(ACTIVITY_CHIPS.map(c => c.v))
 export function normalizeActivityType(value: string): string {
@@ -2191,6 +2201,15 @@ export const ACTIVITY_ACTIONS: Record<string, { v: string; label: string }[]> = 
   stake: [{ v: 'Stake', label: 'Stake' }, { v: 'Add stake', label: 'Add stake' }, { v: 'Unstake', label: 'Unstake' }, { v: 'Force unstake', label: 'Force unstake' }, { v: 'Staking reward', label: 'Staking reward' }, { v: 'GIGAHDX Stake', label: 'GIGAHDX Stake' }, { v: 'GIGAHDX Unstake', label: 'GIGAHDX Unstake' }, { v: 'GIGAHDX Cancel Unstake', label: 'GIGAHDX Cancel Unstake' }, { v: 'GIGAHDX Unlock', label: 'GIGAHDX Unlock' }, { v: 'GIGAHDX Migrate', label: 'GIGAHDX Migrate' }, { v: 'GIGAHDX Yield', label: 'GIGAHDX Yield' }, { v: 'GIGAHDX Reward', label: 'GIGAHDX Reward' }, { v: 'Collator payout', label: 'Collator payout' }],
   // Bond values are the server's action words too; the labels are the badges'.
   bond: [{ v: 'Issue', label: BOND_LABELS.Issue }, { v: 'Redeem', label: BOND_LABELS.Redeem }],
+  // Juicer values are the server's action slugs; the labels are the badges'.
+  juicer: [
+    { v: 'juicer-deposit', label: JUICER_LABELS.Deposit }, { v: 'juicer-withdraw', label: JUICER_LABELS.Withdraw },
+    { v: 'juicer-unwind', label: JUICER_LABELS.Unwind }, { v: 'juicer-settle', label: JUICER_LABELS.Settle },
+    { v: 'juicer-claim', label: JUICER_LABELS.Claim }, { v: 'juicer-claim-surplus', label: JUICER_LABELS.ClaimSurplus },
+    { v: 'juicer-harvest', label: JUICER_LABELS.Harvest }, { v: 'juicer-rebalance', label: JUICER_LABELS.Rebalance },
+    { v: 'juicer-delever', label: JUICER_LABELS.Delever },
+    { v: 'juicer-lever', label: JUICER_LABELS.Lever }, { v: 'juicer-unlever', label: JUICER_LABELS.Unlever },
+  ],
   // The value is the chain's own term; the label is how this app writes that side —
   // taken from the same mapping the badges use, so the two cannot diverge.
   vote: [{ v: 'Aye', label: voteSideLabel('Aye') }, { v: 'Nay', label: voteSideLabel('Nay') }],

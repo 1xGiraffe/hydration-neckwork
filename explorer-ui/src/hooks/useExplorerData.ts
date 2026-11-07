@@ -1,6 +1,6 @@
 import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { mergeBreakdownCatchup, mergeDashboardCatchup } from '../utils/userRevenueMerge'
-import { api, userApi } from '../api/explorer'
+import { api, positionsApi, userApi } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import { useHeadStream, BLOCK_STALE_MS, LIVE_MS } from '../live'
 import { detailWait } from '../queryRetry'
@@ -621,6 +621,15 @@ export function useHollarDashboard() {
 }
 export function useIceDashboard() {
   return useQuery({ queryKey: ['ice-dashboard'], queryFn: ({ signal }) => api.ice(signal), staleTime: 120_000 })
+}
+// The Juicer page. Its current half is the API's 60 s pinned snapshot, so a
+// matching poll keeps it within one refresh of the chain.
+export function useJuicerDashboard() {
+  return useQuery({ queryKey: ['juicer-dashboard'], queryFn: ({ signal }) => api.juicer(signal), refetchInterval: 60_000, staleTime: 30_000 })
+}
+// An account's Juicer positions and open withdrawal requests (the same snapshot).
+export function useAccountJuicer(address: string | null) {
+  return useQuery({ queryKey: ['account-juicer', address], queryFn: ({ signal }) => positionsApi.accountJuicer(address!, signal), enabled: !!address, staleTime: 30_000 })
 }
 // The Intents page's open book: polled like the asset page's order book, which
 // reads the same loaders.

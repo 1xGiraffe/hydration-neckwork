@@ -555,11 +555,13 @@ export interface BalanceUnlockSlice { state: 'releasable' | 'scheduled' | 'activ
 // rest while the row keeps the whole amount. Whole-row uncounted values 0, not
 // null: priced, and left out.
 export interface AddressBalance { asset: AssetRef; total: string; free: string; reserved: string; frozen?: string; breakdown?: BalanceLockComponent[]; timeline?: BalanceUnlockSlice[]; lastBlock: number; valueUsd: number | null; uncounted?: UncountedBalance }
-export interface UncountedBalance { amount: string; reason: 'pool-hub-reserve' }
+export interface UncountedBalance { amount: string; reason: 'pool-hub-reserve' | 'strategy-custody' }
 // Why a balance is shown and counted in no value, as the Balances tab and the
-// Value hint both phrase it. The one reason today: the Omnipool's own hub reserve.
+// Value hint both phrase it: the Omnipool's own hub reserve, and what a strategy's
+// custody account (the Juicer vault, its loop, its yield fund) holds for its share holders.
 export const UNCOUNTED_REASON: Record<UncountedBalance['reason'], string> = {
   'pool-hub-reserve': 'the pool\'s own hub reserve — H2O is priced off the assets the pool holds, which the value already counts',
+  'strategy-custody': 'held in custody for the strategy\'s share holders — their shares are valued for it',
 }
 export interface MmReserve {
   assetId: number
@@ -708,6 +710,7 @@ export interface MoneyMarketPosition {
   role: 'primary' | 'supplemental'
   defiSimSupported: boolean      // DefiSim can simulate this market (core, GIGAHDX, BIL; not env-configured ones)
   stakingBacked?: boolean        // collateral backed by locked-in-wallet HDX (display-only in net worth)
+  custody?: boolean              // a strategy custody account's position: shown, in no value, its debt netted nowhere
   blockHeight: number
   timestamp: string
   totalCollateralBase: string
@@ -967,7 +970,7 @@ export interface XcmFeeLeg {
 }
 
 export interface ActivityRow {
-  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond' | 'intent' | 'xcswap'
+  type: 'transfer' | 'trade' | 'xcm' | 'liquidity' | 'mm' | 'dca' | 'staking' | 'vote' | 'otc' | 'bond' | 'intent' | 'xcswap' | 'juicer'
   revenue?: ActivityRevenue
   // false = unfinalized (pending-head layer; may reorg away). Absent = finalized.
   finalized?: boolean
@@ -1060,6 +1063,24 @@ export interface ActivityRow {
   bondAction?: 'Issue' | 'Redeem'
   bondFee?: string | null
   bondUnderlying?: AssetRef | null
+  // Juicer strategy vaults. `who` is the user for Deposit / Withdraw (the request) /
+  // Unwind / Settle / Claim / ClaimSurplus, the vault for a keeper's Harvest / Rebalance
+  // (the PRIME loop for a Delever). `asset`/`amount` is the collateral moved (a
+  // Withdraw: the shares escrowed; a ClaimSurplus: HOLLAR; a Rebalance: the HOLLAR it
+  // put into the loop, when it did).
+  juicerAction?: JuicerAction
+  juicerVault?: AccountRef
+  juicerShareAsset?: AssetRef
+  juicerShares?: string | null
+  juicerRequestId?: number | null
+  juicerEligibleAt?: string | null
+  juicerLtvBefore?: number | null
+  juicerLtvAfter?: number | null
+  juicerFee?: string | null
+  // Lever / Unlever: the loop's ICE intent — its nonce, the asset it buys and the least it accepts.
+  juicerIntentNonce?: number | null
+  juicerMinOut?: string | null
+  juicerOutAsset?: AssetRef
   votePallet?: string
   voteRefPallet?: 'opengov' | 'democracy' | null
   voteRefTitle?: string | null
@@ -3280,4 +3301,132 @@ export interface DirectoryActivityCounts {
   failed?: string[]
   /** Client-side: the table stopped polling with these keys still uncounted. */
   unavailable?: string[]
+}
+
+// --- Juicer (/explorer/juicer, /explorer/address/:a/juicer) ---
+export type JuicerAction = 'Deposit' | 'Withdraw' | 'Unwind' | 'Settle' | 'Claim' | 'ClaimSurplus' | 'Harvest' | 'Rebalance' | 'Delever' | 'Lever' | 'Unlever'
+export type JuicerRequestStatus = 'cooldown' | 'queued' | 'settling' | 'claimable' | 'claimed'
+export interface JuicerWithdrawal {
+  requestId: number
+  owner: AccountRef
+  shares: string
+  status: JuicerRequestStatus
+  requestedAt: string
+  eligibleAt: string | null
+  collateralOwed: string | null
+  collateralSettled: string
+  claimed: string
+  assets: string | null
+  valueUsd: number | null
+}
+export interface JuicerPosition {
+  account: AccountRef
+  /** Held plus on its way out, in shares, and what that converts to now. */
+  totalShares: string
+  totalAssets: string | null
+  totalUsd: number | null
+  shares: string
+  assets: string | null
+  valueUsd: number | null
+  share: number | null
+  inWithdrawal: string
+  inWithdrawalAssets: string | null
+  inWithdrawalUsd: number | null
+}
+export interface JuicerVault {
+  vault: AccountRef
+  name: string
+  shareAsset: AssetRef
+  collateral: AssetRef
+  baseAsset: AssetRef
+  status: 'open' | 'full' | 'paused' | 'deploying' | 'unavailable'
+  paused: boolean | null
+  depositsPaused: boolean | null
+  deficitStop: boolean | null
+  deleverPending: boolean | null
+  deploying: boolean | null
+  tvl: string | null
+  tvlUsd: number | null
+  cap: string | null
+  remaining: string | null
+  sharesOutstanding: string | null
+  exchangeRate: string | null
+  /** The official estimate, at the loop's target leverage. */
+  apyPct: number | null
+  /** What holders accrue now, at the loop's live leverage. */
+  runRateApyPct: number | null
+  deployedFraction: number | null
+  maxLtvBps: number | null
+  targetLtvBps: number | null
+  releverLtvBps: number | null
+  deleverLtvBps: number | null
+  liquidationThresholdBps: number | null
+  exitHeadroom: { enabled: boolean; gapBps: number } | null
+  main: { collateralUsd: number | null; syntheticUsd: number | null; debtUsd: number | null; healthFactor: number | null; ltv: number | null } | null
+  protocolFeeBps: number | null
+  mainDiscountBps: number | null
+  withdrawalDelaySec: number | null
+  holders: number | null
+  withdrawals: JuicerWithdrawal[]
+  positions: JuicerPosition[]
+}
+export interface JuicerLoop {
+  account: AccountRef
+  collateralUsd: number | null
+  debtUsd: number | null
+  healthFactor: number | null
+  targetHf: number | null
+  leverage: number | null
+  targetLeverage: number | null
+  borrowRatePct: number | null
+  loopDiscountBps: number | null
+  primeSupplyApyPct: number | null
+  primeLtBps: number | null
+  emergencyPaused: boolean | null
+}
+export interface JuicerDay {
+  day: string
+  deposits: number
+  depositsUsd: number
+  withdrawals: number
+  withdrawShares: string
+  claims: number
+  claimsUsd: number
+  harvestsUsd: number
+  rebalances: number
+}
+export interface JuicerDashboard {
+  generatedAt: string
+  asOfBlock: number | null
+  launchBlock: number | null
+  vaults: JuicerVault[]
+  loop: JuicerLoop | null
+  totals: {
+    tvlUsd: number | null
+    depositors: number
+    deposits: number
+    depositsUsd: number
+    withdrawals: number
+    claims: number
+    claimsUsd: number
+    harvests: number
+    harvestsUsd: number
+    rebalances: number
+    unpricedRows: number
+  }
+  perDay: JuicerDay[]
+  contracts: Array<{ role: string; account: AccountRef }>
+}
+export interface AccountJuicerPosition extends Omit<JuicerPosition, 'account'> {
+  vault: AccountRef
+  name: string
+  shareAsset: AssetRef
+  collateral: AssetRef
+  apyPct: number | null
+  runRateApyPct: number | null
+  withdrawals: JuicerWithdrawal[]
+}
+export interface AccountJuicer {
+  asOfBlock: number | null
+  positions: AccountJuicerPosition[]
 }
