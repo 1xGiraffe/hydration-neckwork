@@ -10,11 +10,14 @@ import { CAT, JUICER_LABELS } from '../components/activityColors'
 import { offeredPages } from '../utils/activityPaging'
 import { ChartLegend, ShareBar, StackedColumnChart } from '../components/HdxCharts'
 import type { ShareSegment, StackColumn } from '../components/HdxCharts'
-import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
+import { ChartTooltipRow as TipRow, DashboardSectionTitle } from '../components/DashboardPrimitives'
 import { monthDayLabel as mdLabel } from '../utils/dashboardDates'
 import type { JuicerDashboard, JuicerLoop, JuicerVault } from '../types'
 import { UnwindsIn } from '../components/positions/JuicerPositions'
 import { JUICER_STATUS_LABEL, JUICER_STATUS_TONE } from '../components/positions/juicerStatus'
+
+// Section titles are the page outline's h2s under its h1.
+const SecTitle = (p: { title: string; subtitle?: ReactNode }) => <DashboardSectionTitle {...p} as="h2" />
 
 // Juicer: Hydration's leveraged PRIME-loop strategy (app.hydration.net/strategies/juicer).
 // A deposit is supplied to the money market as the vault's collateral position ("Main");
@@ -130,7 +133,7 @@ function Ribbon({ d }: { d: JuicerDashboard }) {
   const v = d.vaults[0]
   const holders = d.vaults.reduce((s, x) => s + (x.holders ?? 0), 0)
   const cells: { k: string; v: ReactNode; s?: ReactNode }[] = [
-    { k: 'Total TVL', v: <Usd v={d.totals.tvlUsd} />, s: v?.tvl != null ? <><span className="mono">{F.amount(v.tvl, v.collateral.decimals)}</span> {v.collateral.symbol}</> : 'state unavailable' },
+    { k: 'TVL', v: <Usd v={d.totals.tvlUsd} />, s: v?.tvl != null ? <><span className="mono">{F.amount(v.tvl, v.collateral.decimals)}</span> {v.collateral.symbol}</> : 'state unavailable' },
     { k: 'Est. APY', v: pctOf(v?.apyPct), s: <>at target leverage · {v?.runRateApyPct != null ? <>earning <span style={{ color: v.runRateApyPct < 0 ? 'var(--red)' : 'var(--green)' }}>{pctOf(v.runRateApyPct)}</span> now</> : 'run-rate unknown'}</> },
     { k: 'Capacity', v: v?.status === 'full' ? 'Full' : v?.status === 'deploying' ? 'Deploying' : v?.remaining != null ? <><span className="mono">{F.amount(v.remaining, v.collateral.decimals)}</span> {v.collateral.symbol}</> : '—', s: v?.cap != null ? <>of a <span className="mono">{F.amount(v.cap, v.collateral.decimals)}</span> {v.collateral.symbol} cap</> : undefined },
     { k: 'Holders', v: F.int(holders), s: <>{F.int(d.totals.depositors)} ever deposited</> },
@@ -363,7 +366,7 @@ function ActivitySection({ narrow }: { narrow: boolean }) {
   return (
     <>
       <div className="sec-title-row">
-        <div className="sec-title">Juicer activity <span style={MUTED_SUB}>· newest first</span></div>
+        <h2 className="sec-title">Juicer activity <span style={MUTED_SUB}>· newest first</span></h2>
         <select className="activity-action" value={action} onChange={e => setQuery({ action: e.target.value || null, page: null })} aria-label="Juicer action">
           <option value="">All actions</option>
           {JUICER_FILTERS.map(a => <option key={a.v} value={a.v}>{a.label}</option>)}
@@ -403,7 +406,7 @@ export function Juicer() {
       </div>
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Assets', to: paths.assets() }, { label: 'Juicer' }]} />
-        <div className="page-title">Juicer <span className="sub">earn in your deposited asset with automated PRIME looping</span></div>
+        <h1 className="page-title">Juicer <span className="sub">earn in your deposited asset with automated PRIME looping</span></h1>
       </div>
       {!narrow && <Intro narrow={false} />}
       {isError
