@@ -40,6 +40,11 @@ export interface OmniwatchVolumeDetails {
   nativeVolumeSell: string
   nativeVolumeTotal: string
   nativeNetVolume: string
+  // The candle's OWN pool volume over the same window (USD, and the base asset's
+  // raw units as exact decimal strings) — see utils/reconcile.ts for how it
+  // relates to the accounts' figures. Absent from an older api.
+  candleVolumeTotal?: number
+  candleNativeVolumeTotal?: string
   limit: number
   offset: number
   hasMore: boolean

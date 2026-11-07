@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { compactAmount, formatChange, formatCountdown, formatPrice, formatSignedPrice, tokenAmountFromRaw } from '../src/utils/format'
+import { compactAmount, formatChange, formatCountOf, formatCountdown, formatPrice, formatSignedPrice, tokenAmountFromRaw } from '../src/utils/format'
 
 describe('formatting edge cases', () => {
   // An unknown price is not a zero one — a broken feed must not render as free.
@@ -51,5 +51,14 @@ describe('token amounts', () => {
     expect(compactAmount(-0.0423)).toBe('-0.0423')
     expect(compactAmount(0)).toBe('0')
     expect(compactAmount(Number.NaN)).toBe('—')
+  })
+})
+
+describe('formatCountOf', () => {
+  it('puts the noun in the number the tally reads as', () => {
+    expect(formatCountOf(1, 'trade')).toBe('1 trade')
+    expect(formatCountOf(2, 'account')).toBe('2 accounts')
+    expect(formatCountOf(0, 'account')).toBe('0 accounts')
+    expect(formatCountOf(1200, 'trade')).toBe('1,200 trades')
   })
 })
