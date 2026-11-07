@@ -88,6 +88,8 @@ export interface AccountRef {
   isContract?: boolean
   /** Display label: the verified name, marked "(proxy)" / "(implementation)" for ERC-1967 pairs. */
   contractName?: string
+  /** A system account's own name inside a generic tag (the Bonds pot). */
+  displayName?: string
   /** Set on a cross-chain counterparty: its page on the destination's explorer. */
   subscanUrl?: string | null
 }
@@ -414,6 +416,8 @@ export interface ActivityRow {
 
   // OTC — cancellation is called Pull in product copy
   otcAction?: 'Place' | 'Pull' | 'Fill'
+  /** A bond's primary-sale act (this OTC row is also a `bond` row): a purchase (`sale`) or rollover, and the bond's page and round. */
+  bondSale?: { venue: string; kind: 'sale' | 'rollover'; bondId: number; family: string | null; round: number | null; maturityAt: string | null; price?: number | null; returnPct?: number | null; aprPct?: number | null }
   otcOrderId?: number
   otcPartial?: boolean
   otcPartiallyFillable?: boolean

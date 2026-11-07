@@ -149,9 +149,34 @@ function bilBlock(b: AccountBil): string {
   )
 }
 
+/* ---- section 'bonds' ---- */
+
+interface AccountBonds {
+  asOfBlock: number | null
+  positions: Array<{
+    familyTitle: string; round: number; bondId: number; asset: AssetRef; underlying: AssetRef; balance: string; maturityAt: string
+    status: string; redeemable: boolean; valueUsd: number | null; faceUsd: number | null; valueFactor: number | null
+    bought: { bonds: string; paid: Array<{ asset: AssetRef; raw: string }>; aprPct: number | null; fills: number } | null
+  }>
+}
+function bondsBlock(b: AccountBonds, base: string): string {
+  if (b.asOfBlock == null) return note('The bond state is unavailable right now (no fresh read); the account\'s bonds are unknown, not empty.')
+  if (!b.positions.length) return note(`No bonds held (as of block ${formatCount(b.asOfBlock)}).`)
+  return joinBlocks(
+    table(['Bond', 'Held (face)', 'Matures', 'State', 'Worth now', 'Bought in the sale'], b.positions.map(p => [
+      `${explorerLink(`${p.familyTitle} round ${p.round}`, `${base.replace(/\/+$/, '')}/asset/${p.bondId}`)}`,
+      formatAmount(p.balance, p.asset.decimals, `${p.underlying.symbol} face`),
+      `${formatTime(p.maturityAt)}${p.redeemable ? ' — redeemable now' : ''}`, p.status,
+      `${formatUsd(p.valueUsd)}${p.valueFactor != null && p.valueFactor < 1 ? ` (${p.valueFactor.toFixed(4)} of face ${formatUsd(p.faceUsd)})` : ''}`,
+      p.bought ? `${formatAmount(p.bought.bonds, p.asset.decimals, 'bonds')} for ${p.bought.paid.map(x => formatAmount(x.raw, x.asset.decimals, assetLabel(x.asset))).join(' + ')}${p.bought.aprPct != null ? ` at ${formatPercent(p.bought.aprPct)} APR` : ''}` : DASH,
+    ])),
+    note(`Read at block ${formatCount(b.asOfBlock)}. A bond redeems 1:1 for its underlying from maturity; before it, it is valued at face discounted at its own issue yield. Bonds are wallet balances — already in the account's Value; this section restates them, it is not additional.`),
+  )
+}
+
 /* ============ get_account ============ */
 
-const ACCOUNT_SECTIONS = ['balances', 'positions', 'moneymarket', 'dca', 'orders', 'related', 'counts', 'revenue', 'juicer', 'bil'] as const
+const ACCOUNT_SECTIONS = ['balances', 'positions', 'moneymarket', 'dca', 'orders', 'related', 'counts', 'revenue', 'juicer', 'bil', 'bonds'] as const
 type AccountSection = typeof ACCOUNT_SECTIONS[number]
 const DEFAULT_ACCOUNT_SECTIONS: AccountSection[] = ['balances', 'positions', 'moneymarket', 'dca', 'orders', 'related']
 
@@ -184,7 +209,7 @@ const MAX_REVENUE_ASSETS = 4
 const accountInputShape = {
   address: addressParam,
   include: z.array(z.enum(ACCOUNT_SECTIONS)).optional().describe(
-    `Sections to build. Default: ${DEFAULT_ACCOUNT_SECTIONS.join(', ')}. 'counts', 'revenue', 'juicer' and 'bil' each cost one extra upstream read and are off by default; an include set of only 'moneymarket', 'counts', 'revenue', 'juicer' and/or 'bil' takes the cheap summary build of the account record. 'juicer': Juicer vault shares, what they are worth now and open withdrawal requests (jETH is not in the account's Value). 'bil': BIL and uBIL held and queued at NAV, settled HOLLAR to claim, and when the queue pays (already in Value).`,
+    `Sections to build. Default: ${DEFAULT_ACCOUNT_SECTIONS.join(', ')}. 'counts', 'revenue', 'juicer', 'bil' and 'bonds' each cost one extra upstream read and are off by default; an include set of only those and/or 'moneymarket' takes the cheap summary build of the account record. 'juicer': Juicer vault shares, what they are worth now and open withdrawal requests (jETH is not in the account's Value). 'bil': BIL and uBIL held and queued at NAV, settled HOLLAR to claim, and when the queue pays (already in Value). 'bonds': bonds held, maturity, worth now (already in Value).`,
   ),
   format: formatParam,
 }
@@ -842,7 +867,7 @@ const getAccount: ToolDefinition = {
     const summarized = ![...sections].some(s => SECTIONS_NEEDING_FULL_BUILD.has(s))
     const encoded = encodeURIComponent(address)
 
-    const [detailResult, countsResult, revenueResult, statsResult, juicerResult, bilResult] = await Promise.allSettled([
+    const [detailResult, countsResult, revenueResult, statsResult, juicerResult, bilResult, bondsResult] = await Promise.allSettled([
       ctx.upstream.get<AddressDetail>(`/explorer/address/${encoded}`, summarized ? { summary: 1 } : undefined, { ttlMs: PRICE_BEARING_TTL_MS }),
       sections.has('counts') ? ctx.upstream.get<TabCounts>(`/explorer/address/${encoded}/counts`, undefined, { ttlMs: 60_000 }) : Promise.resolve(null),
       sections.has('revenue') ? ctx.upstream.get<RevenueBreakdown>(`/explorer/address/${encoded}/revenue-breakdown`, undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
@@ -852,6 +877,7 @@ const getAccount: ToolDefinition = {
       sections.has('dca') ? ctx.upstream.get<ExplorerStats>('/explorer/stats', undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
       sections.has('juicer') ? ctx.upstream.get<AccountJuicer>(`/explorer/address/${encoded}/juicer`, undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
       sections.has('bil') ? ctx.upstream.get<AccountBil>(`/explorer/address/${encoded}/bil`, undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
+      sections.has('bonds') ? ctx.upstream.get<AccountBonds>(`/explorer/address/${encoded}/bonds`, undefined, { ttlMs: 30_000 }) : Promise.resolve(null),
     ])
 
     if (detailResult.status === 'rejected') return failure(addressNotFound(detailResult.reason, address))
@@ -876,6 +902,11 @@ const getAccount: ToolDefinition = {
       failedSections.push('bil')
     }
     const bil = settledValue(bilResult)
+    if (bondsResult.status === 'rejected') {
+      errs.push(toolErrorFromUpstream(bondsResult.reason, `The bonds of ${address}`))
+      failedSections.push('bonds')
+    }
+    const bonds = settledValue(bondsResult)
     const counts = settledValue(countsResult)
     const revenue = settledValue(revenueResult)
     const stats = settledValue(statsResult)
@@ -899,6 +930,7 @@ const getAccount: ToolDefinition = {
       revenue ? section('Protocol Revenue', revenueBlock(revenue)) : '',
       juicer ? section('Juicer positions', juicerBlock(juicer, base)) : '',
       bil ? section('Brazilian Invoice Loans', bilBlock(bil)) : '',
+      bonds ? section('Bonds', bondsBlock(bonds, base)) : '',
       // A section that failed is simply missing, which an agent could read as
       // "there is none". Name it instead.
       failedSections.length
@@ -976,6 +1008,7 @@ const getAccount: ToolDefinition = {
         revenue: revenue ?? undefined,
         juicer: juicer ?? undefined,
         bil: bil ?? undefined,
+        bonds: bonds ?? undefined,
     }, errs)
   },
 }

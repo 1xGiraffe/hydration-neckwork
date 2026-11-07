@@ -137,6 +137,8 @@ export function accountLabel(
   let named: string | null = null
   let emoji = a.emoji
   if (identity) named = a.identity?.verified ? `${identity} ✓` : identity
+  // A system account's own name inside a generic tag (the Bonds pot in Pallet Pot).
+  else if (a.displayName) named = a.displayName
   else if (a.tag?.name) named = a.tag.name
   else if (a.profile?.name) named = a.profile.name
   else if (pallet) { named = pallet; emoji = '⚙️' }

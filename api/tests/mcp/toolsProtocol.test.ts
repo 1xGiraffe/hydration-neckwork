@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { networkTools } from '../../src/mcp/tools/network.ts'
-import { protocolTools } from '../../src/mcp/tools/protocol.ts'
+import { BOND_DASHBOARD_FAMILIES, bondsJson, protocolTools } from '../../src/mcp/tools/protocol.ts'
+import { JSON_BUDGET_MARGIN } from '../../src/mcp/tools/shared.ts'
+import { BOND_FAMILIES } from '../../src/services/bonds.ts'
+import { readFileSync } from 'node:fs'
 import { UpstreamError, type UpstreamClient } from '../../src/mcp/upstream.ts'
 import type { ToolContext, ToolDefinition, ToolOutput } from '../../src/mcp/toolTypes.ts'
 
@@ -289,7 +292,7 @@ describe('get_protocol_stats', () => {
   it('refuses a dashboard that does not exist, naming the ones that do', async () => {
     const out = await run(protocol, { dashboard: 'treasury' }, {})
     expect(out.errors?.[0].code).toBe('INVALID_ARGUMENT')
-    expect(out.errors?.[0].message).toContain('revenue, hdx, hollar, ice, juicer, bil, security, liquidity')
+    expect(out.errors?.[0].message).toContain('revenue, hdx, hollar, ice, juicer, bil, hollar-bonds, security, liquidity')
   })
 
   it('reads the revenue trio under ONE range, so the answer is internally consistent', async () => {
@@ -458,6 +461,27 @@ describe('get_protocol_stats', () => {
       // Small enough that the server's text cap cannot cut it into invalid JSON.
       expect(text.length, `${dashboard} json is too large to survive the text budget`).toBeLessThan(24_000)
     }
+  })
+
+  // A bond family's record against the PRODUCTION-sized dashboard (the live
+  // /explorer/bonds/hollar, 41 KB): it must keep every round whole inside the JSON
+  // budget — the budget trims a record that overflows it, which is how every round once
+  // went missing from the answer — and the dashboard list is the explorer's families.
+  it('keeps every bond round inside the JSON budget at production size', async () => {
+    const dashboard = JSON.parse(readFileSync(new URL('../fixtures/hollarBondsDashboard.json', import.meta.url), 'utf8'))
+    const out = await run(protocol, { dashboard: 'hollar-bonds', format: 'json' }, { '/explorer/bonds/hollar': dashboard })
+    const text = JSON.stringify(out.json)
+    expect(text.length).toBeLessThan(24_000 - JSON_BUDGET_MARGIN)
+    expect(JSON.stringify(bondsJson(dashboard)).length).toBeLessThan(24_000 - JSON_BUDGET_MARGIN)
+    const json = out.json as { rounds: Array<{ sales: unknown[]; topHolders: unknown[] }>; days?: unknown; fillDays?: unknown }
+    expect(json.rounds).toHaveLength(dashboard.rounds.length)
+    expect(json.rounds.every(r => r.sales.length > 0 && r.topHolders.length > 0)).toBe(true)
+    expect(json.days).toBeUndefined()
+    expect(json.fillDays).toBeUndefined()
+    const md = await run(protocol, { dashboard: 'hollar-bonds' }, { '/explorer/bonds/hollar': dashboard })
+    expect(md.markdown).toContain('Round 2')
+    expect(md.markdown).toContain('Round 1')
+    expect([...BOND_DASHBOARD_FAMILIES]).toEqual(BOND_FAMILIES.map(f => f.key))
   })
 
   // The other half of "a record, not a dump": each dashboard names the raw

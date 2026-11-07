@@ -123,7 +123,13 @@ interface OmnipoolResponse { account: AccountRef; tvlUsd: number | null; assetCo
 
 /* ============ constants ============ */
 
-const DASHBOARDS = ['revenue', 'hdx', 'hollar', 'ice', 'juicer', 'bil', 'security', 'liquidity', 'volume'] as const
+// The bond families' dashboards: one per explorer bond family (bonds.ts BOND_FAMILIES,
+// mirrored here because this tree imports nothing outside itself — a test pins the two
+// lists equal). The dashboard name is `<family>-bonds`, its page `/<family>-bonds`.
+export const BOND_DASHBOARD_FAMILIES = ['hollar'] as const
+type BondDashboardName = `${typeof BOND_DASHBOARD_FAMILIES[number]}-bonds`
+const BOND_DASHBOARDS = BOND_DASHBOARD_FAMILIES.map(f => `${f}-bonds` as BondDashboardName)
+const DASHBOARDS = ['revenue', 'hdx', 'hollar', 'ice', 'juicer', 'bil', ...BOND_DASHBOARDS, 'security', 'liquidity', 'volume'] as [string, ...string[]]
 type Dashboard = typeof DASHBOARDS[number]
 const RANGES = ['30d', '1y', 'all'] as const
 
@@ -137,6 +143,7 @@ const volumePageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/vol
 const intentsPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/intents`
 const juicerPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/juicer`
 const bilPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/bil`
+const bondsPageUrl = (base: string, family: string): string => `${base.replace(/\/+$/, '')}/${family}-bonds`
 
 /* ============ description ============ */
 
@@ -148,6 +155,7 @@ const DESCRIPTION = `The protocol's own dashboards, each rendered as headline fi
 - 'ice' — the intent/solver layer (the Explorer's Intents page). Solver mode, protocol fee and routing overrides, open limit and DCA orders with the capital they reserve, fills per day (matched intent-to-intent vs routed through the pools, valued when they settled), execution quality (time to fill in blocks, partial and cancel rates, price against limit in basis points), the top traders (intent owners) and pairs, and fee revenue. For the individual intents call get_activity with type=intent; an intent id reads through inspect_entity.
 - 'juicer' — the Juicer strategy vaults: TVL and cap, est. APY (the official formula), Main and PRIME-loop health, top positions, withdrawal requests, activity since launch.
 - 'bil' — Brazilian Invoice Loans: NAV (BIL and uBIL are valued at it), stated vs realized APY, TVL and cap, the maturity ladder, the redemption queue and its wait, borrowing against BIL, pool 10055's premium to NAV.
+- 'hollar-bonds' — the Treasury's fixed-yield HOLLAR bonds per round: yield, sales, rollover, redemptions, holders. Purchases: get_activity type=bond.
 - 'security' — the safety posture. Cross-chain egress usage against its limit, per-asset deposit fuses and how close each is to lockdown, the Omnipool's per-block trade/add/remove allowances and the peak pressure seen against them, circuit-breaker trips by error, what is currently paused or restricted, lending-market solvency, runtime version, the Technical Committee, and the Wormhole backing summary.
 - 'liquidity' — where TVL sits: the venue split across Omnipool, stableswaps, XYK and Uniswap v3, then the Omnipool itself asset by asset with each weight against its CAP.
 - 'volume' — 24H / 7D / 30D volume with the change: ROUTED (every trade once, netted — the DefiLlama figure), then per VENUE (every fill once in its pool; sums to MORE than routed — never mix the two), then 7D top pools (volume/TVL), assets and traders.
@@ -329,6 +337,98 @@ function renderBil(d: BilDashboardResponse, ctx: ToolContext): string {
       ['Rollover', `since the vault's first investment the borrower drew ${hol(ro.drawnHollar)} from the Decentral pool and repaid ${hol(ro.repaidHollar)}; the pool paid the vault ${hol(ro.paidToVaultHollar)} while the vault invested ${hol(ro.investedByVaultHollar)} in it (new deposits and reinvestments) — maturities so far were paid partly out of new investment, not only out of repayments`],
     ])),
   )
+}
+
+/* ============ bonds ============ */
+
+const bondFamilyOfDashboard = (d: string): string | null => {
+  const key = d.endsWith('-bonds') ? d.slice(0, -'-bonds'.length) : null
+  return key && (BOND_DASHBOARD_FAMILIES as readonly string[]).includes(key) ? key : null
+}
+
+interface BondSaleResponse {
+  venue: string; id: string; kind: 'sale' | 'rollover'; paymentAsset: AssetRef; fromRound: number | null; state: string; openedAt: string; endedAt: string | null
+  offered: string | null; sold: string; paid: string; remaining: string; unsold: string; fills: number; buyers: number
+  price: number | null; discountPct: number | null; fixedYieldPct: number | null; aprAtOpenPct: number | null; avgPrice: number | null
+}
+interface BondRoundResponse {
+  round: number; bondId: number; asset: AssetRef; status: string; issuer: AccountRef; createdAt: string; maturityAt: string
+  issued: string; sales: BondSaleResponse[]; offered: string; soldForMoney: string; rolledOver: string; proceeds: Array<{ asset: AssetRef; raw: string }>
+  fixedYieldPct: number | null; aprAtOpenPct: number | null; salePrice: number | null; saleOpen: boolean
+  redeemed: string; redemptions: number; outstanding: string; issuerHeld: string | null; publicOutstanding: string | null
+  valueFactor: number | null; publicUsd: number | null; issuerUsd: number | null
+  holders: { list: Array<{ account: AccountRef | null; tag: { name: string } | null; balance: string; valueUsd?: number | null; share?: number }>; holderCount: number } | null
+  buyers: number
+}
+interface BondDashboardResponse {
+  generatedAt: string; asOfBlock: number | null; family: { key: string; title: string }; underlying: AssetRef
+  rounds: BondRoundResponse[]
+  fillDays: Array<{ day: string; bondId: number; kind: string; fills: number; aprPct: number | null; returnPct: number | null }>
+  totals: { issued: string; soldForMoney: string; rolledOver: string; redeemed: string; outstanding: string; publicOutstanding: string | null; publicUsd: number | null; holders: number | null; buyers: number; fills: number }
+  pot: { account: AccountRef; balance: string | null; outstanding: string; reconciled: boolean | null }
+}
+
+function renderBonds(d: BondDashboardResponse, ctx: ToolContext): string {
+  const base = ctx.explorerBaseUrl
+  const U = d.underlying, face = (raw: string | null | undefined) => raw == null ? DASH : formatAmount(raw, U.decimals, `${U.symbol} face`)
+  const t = d.totals
+  const pct = (v: number | null) => v == null ? DASH : formatPercent(v)
+  return joinBlocks(
+    h2(d.family.title),
+    kv([
+      ['Page', explorerLink('explorer', bondsPageUrl(base, d.family.key))],
+      ['Current state as of block', d.asOfBlock == null ? 'unavailable — no fresh state read' : formatCount(d.asOfBlock)],
+      ['Issued · sold for money · rolled over · redeemed', `${face(t.issued)} · ${face(t.soldForMoney)} · ${face(t.rolledOver)} · ${face(t.redeemed)}`],
+      ['Owed to holders (public)', `${face(t.publicOutstanding)} · worth ${formatUsd(t.publicUsd)} now · ${face(t.outstanding)} outstanding incl. the Treasury's own`],
+      ['Bonds pot', `${d.pot.balance == null ? DASH : formatAmount(d.pot.balance, U.decimals, assetLabel(U))} held for the outstanding bonds${d.pot.reconciled === false ? ' — does NOT equal the outstanding supply' : d.pot.reconciled ? ' (equals the outstanding supply)' : ''}`],
+      ['Holders · buyers · fills', `${t.holders == null ? DASH : formatCount(t.holders)} · ${formatCount(t.buyers)} · ${formatCount(t.fills)}`],
+    ]),
+    ...d.rounds.slice().reverse().map(r => joinBlocks(
+      h3(`Round ${r.round} — ${assetLabelWithId(r.asset)} · ${r.status}`),
+      kv([
+        ['Asset', explorerLink(assetLabel(r.asset), assetUrl(base, r.asset.assetId))],
+        ['Issued · matures', `${face(r.issued)} on ${formatTime(r.createdAt)} · matures ${formatTime(r.maturityAt)}`],
+        ['Fixed yield', r.fixedYieldPct == null ? null : `${pct(r.fixedYieldPct)} to maturity (${pct(r.aprAtOpenPct)} APR from when the sale opened; net of the 0.1% fee)`],
+        ['Sold', `${face(r.soldForMoney)} for money (${r.proceeds.map(p => formatAmount(p.raw, p.asset.decimals, assetLabel(p.asset))).join(' + ') || DASH}) · ${face(r.rolledOver)} rolled over · ${formatCount(r.buyers)} buyers`],
+        ['Redeemed', `${face(r.redeemed)} in ${formatCount(r.redemptions)} redemptions`],
+        ['Outstanding', `${face(r.publicOutstanding)} public (${formatUsd(r.publicUsd)}) · ${face(r.issuerHeld)} the Treasury's own (unsold, fees)`],
+        ['Worth now', r.valueFactor == null ? null : `${r.valueFactor.toFixed(6)} ${U.symbol} per bond`],
+      ]),
+      table(['Sale', 'Pays', 'State', 'Price', 'Fixed yield', 'APR at open', 'Sold', 'Unsold'], r.sales.map(o => [
+        `${o.venue} #${o.id}${o.kind === 'rollover' ? ` (rollover${o.fromRound ? ` from round ${o.fromRound}` : ''})` : ''}`, assetLabel(o.paymentAsset), o.state, o.price == null ? DASH : o.price.toFixed(6),
+        pct(o.fixedYieldPct), pct(o.aprAtOpenPct), face(o.sold), o.unsold === '0' ? (o.remaining === '0' ? DASH : `${face(o.remaining)} left`) : face(o.unsold),
+      ])),
+      r.holders?.list.length ? table(['Top holder', 'Bonds', 'USD'], r.holders.list.slice(0, 8).map(h => [
+        h.account ? explorerLink(accountLabel(h.account), accountUrl(base, h.account.address)) : h.tag?.name ?? DASH, face(h.balance), formatUsd(h.valueUsd ?? null),
+      ])) : null,
+    )),
+    note('A bond redeems 1:1 for its underlying from maturity. Until then it is valued at its sale\'s price (net of the fee) while the sale stands, then at that price accreting to face by maturity (simple interest). Prices and yields are on the sales\' own units (one USDT or USDC per HOLLAR of face).'),
+  )
+}
+
+/** The structured record, compact enough for the JSON budget: no daily series, asset refs as id + symbol, the top holders only. */
+export function bondsJson(d: BondDashboardResponse): unknown {
+  const a = (x: AssetRef) => ({ assetId: x.assetId, symbol: x.symbol })
+  const acct = (x: AccountRef | null) => x ? { address: x.address, label: x.tag?.name ?? x.identity?.display ?? null } : null
+  return {
+    generatedAt: d.generatedAt, asOfBlock: d.asOfBlock, family: d.family, underlying: a(d.underlying), totals: d.totals,
+    pot: { account: acct(d.pot.account), balance: d.pot.balance, outstanding: d.pot.outstanding, reconciled: d.pot.reconciled },
+    rounds: d.rounds.map(r => ({
+      round: r.round, bondId: r.bondId, symbol: r.asset.symbol, status: r.status, createdAt: r.createdAt, maturityAt: r.maturityAt,
+      issued: r.issued, offered: r.offered, soldForMoney: r.soldForMoney, rolledOver: r.rolledOver,
+      proceeds: r.proceeds.map(p => ({ asset: a(p.asset), raw: p.raw })),
+      fixedYieldPct: r.fixedYieldPct, aprAtOpenPct: r.aprAtOpenPct, salePrice: r.salePrice, saleOpen: r.saleOpen,
+      redeemed: r.redeemed, redemptions: r.redemptions, outstanding: r.outstanding, issuerHeld: r.issuerHeld, publicOutstanding: r.publicOutstanding,
+      valueFactor: r.valueFactor, publicUsd: r.publicUsd, issuerUsd: r.issuerUsd, buyers: r.buyers,
+      sales: r.sales.map(o => ({
+        venue: o.venue, id: o.id, kind: o.kind, paymentAsset: a(o.paymentAsset), fromRound: o.fromRound, state: o.state, openedAt: o.openedAt, endedAt: o.endedAt,
+        offered: o.offered, sold: o.sold, paid: o.paid, remaining: o.remaining, unsold: o.unsold, fills: o.fills, buyers: o.buyers,
+        price: o.price, discountPct: o.discountPct, fixedYieldPct: o.fixedYieldPct, aprAtOpenPct: o.aprAtOpenPct, avgPrice: o.avgPrice,
+      })),
+      holderCount: r.holders?.holderCount ?? null,
+      topHolders: (r.holders?.list ?? []).slice(0, 5).map(h => ({ account: acct(h.account), group: h.tag?.name ?? null, balance: h.balance, valueUsd: h.valueUsd ?? null })),
+    })),
+  }
 }
 
 /* ============ revenue ============ */
@@ -1061,6 +1161,12 @@ async function handler(input: Record<string, unknown>, ctx: ToolContext): Promis
         pool: d.pool ? { ...d.pool, history: d.pool.history.slice(-30) } : null,
         perDay: d.perDay.slice(-30),
       })
+    }
+
+    const bondFamily = bondFamilyOfDashboard(dashboard)
+    if (bondFamily) {
+      const d = await ctx.upstream.get<BondDashboardResponse>(`/explorer/bonds/${bondFamily}`, undefined, { ttlMs: 30_000, timeoutMs: 60_000 })
+      return output(ctx, fit(joinBlocks(rangeNote, renderBonds(d, ctx)), ctx), bondsJson(d))
     }
 
     if (dashboard === 'volume') {

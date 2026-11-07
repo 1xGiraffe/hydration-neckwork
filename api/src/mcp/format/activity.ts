@@ -68,7 +68,7 @@ export const ACTIVITY_ACTIONS: Record<string, string[]> = {
     'GIGAHDX Stake', 'GIGAHDX Unstake', 'GIGAHDX Cancel Unstake', 'GIGAHDX Unlock',
     'GIGAHDX Migrate', 'GIGAHDX Yield', 'GIGAHDX Reward', 'Collator payout',
   ],
-  bond: ['Issue', 'Redeem'],
+  bond: ['Issue', 'Redeem', 'Purchase', 'Rollover', 'SaleOpen', 'SaleClose'],
   juicer: [
     'juicer-deposit', 'juicer-withdraw', 'juicer-unwind', 'juicer-settle', 'juicer-claim',
     'juicer-claim-surplus', 'juicer-harvest', 'juicer-rebalance', 'juicer-delever', 'juicer-lever', 'juicer-unlever',
@@ -152,6 +152,11 @@ const BIL_SLUG: Record<string, string> = {
 }
 // An OTC order's acts read as its lifecycle, the way an intent's do.
 const OTC_LABELS: Record<string, string> = { Place: 'OTC order placed', Pull: 'OTC order pulled', Fill: 'OTC order filled' }
+// A bond's primary-sale act (bondSale, an OTC row) names the bond act (the explorer's BOND_SALE_LABELS).
+const BOND_SALE_LABELS: Record<string, Record<string, string>> = {
+  sale: { Place: 'Bond sale opened', Pull: 'Bond sale closed', Fill: 'Bond purchase' },
+  rollover: { Place: 'Bond rollover opened', Pull: 'Bond rollover closed', Fill: 'Bond rollover' },
+}
 const INTENT_KIND_WORD: Record<string, string> = { swap: 'Limit order', dca: 'DCA intent' }
 const INTENT_ACTION_WORD: Record<string, string> = {
   Place: 'placed', Fill: 'filled', PartialFill: 'partially filled',
@@ -189,7 +194,7 @@ export function activityKind(r: ActivityRow): string {
       }
       return 'Swap'
     // Product copy calls an OTC cancellation a Pull.
-    case 'otc': return OTC_LABELS[r.otcAction ?? ''] ?? 'OTC order'
+    case 'otc': return r.bondSale ? BOND_SALE_LABELS[r.bondSale.kind]?.[r.otcAction ?? ''] ?? 'Bond sale' : OTC_LABELS[r.otcAction ?? ''] ?? 'OTC order'
     case 'transfer': return 'Transfer'
     case 'xcm': return r.bridge ?? 'Cross-chain'
     default: return 'Activity'
