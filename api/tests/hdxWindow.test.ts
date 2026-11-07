@@ -103,8 +103,8 @@ describe('holder structure SQL', () => {
     const hourly = hdxStructureSql('hourly')
     expect(hourly).toContain('interval_start >= toDateTime({w0:UInt32}) AND interval_start < toDateTime({end:UInt32})')
     // Replayable AggregatingMergeTree inputs are merged per key before use.
-    expect(hourly).toContain('GROUP BY account_id, interval_start')
-    expect(hourly).toContain('GROUP BY account_id, week_start')
+    expect(hourly).toContain('GROUP BY account_id, asset_id, interval_start')
+    expect(hourly).toContain('GROUP BY account_id, asset_id, week_start')
   })
 
   it('restricts a Kraken-scoped read to the tagged wallets by primary key', () => {
