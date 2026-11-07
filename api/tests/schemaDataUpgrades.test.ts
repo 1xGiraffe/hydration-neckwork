@@ -16,9 +16,10 @@ describe('schema data upgrades', () => {
   // hold different rows than a fresh one.
   it('replays exactly the MV SELECT of each upgraded table', () => {
     for (const u of DATA_UPGRADES) {
-      const mv = statements.find(st => new RegExp(`CREATE MATERIALIZED VIEW IF NOT EXISTS \\S+ TO ${u.table.replace('.', '\\.')} `).test(st))
-      expect(mv, u.table).toBeDefined()
-      expect(mv).toContain(`AS SELECT ${u.select} FROM price_data.${u.source} WHERE ${u.mvWhere ?? u.where}`)
+      // A table two views feed (juicer_logs) has an entry per view: one of them must be it.
+      const mvs = statements.filter(st => new RegExp(`CREATE MATERIALIZED VIEW IF NOT EXISTS \\S+ TO ${u.table.replace('.', '\\.')} `).test(st))
+      expect(mvs.length, u.table).toBeGreaterThan(0)
+      expect(mvs.some(mv => mv.includes(`AS SELECT ${u.select} FROM price_data.${u.source} WHERE ${u.mvWhere ?? u.where}`)), u.table).toBe(true)
     }
   })
 
