@@ -561,13 +561,16 @@ const DUPLICATE_PRICE_ALIAS_ID: Record<number, number> = {
   // keeps its own feed, and uBIL — an Aave underlying, always 1:1 with its
   // rebasing aToken — values through it. Without the self-entry the pair would
   // alias in both directions and priceAssetId's hop bound would leave uBIL
-  // resolving to itself, unpriced.
+  // resolving to itself, unpriced. That is the HISTORICAL rule (candles, the value
+  // chart's buckets: the feed tracks the vault's rate through the pool's peg); every
+  // CURRENT price map states both at the vault's exchange rate in HOLLAR
+  // (strategySharePrice.ts).
   55: 55,        // BIL           → itself (own feed)
   550: 55,       // uBIL          → BIL
 }
 // A Juicer vault's share token (jETH) is worth its exchange rate in the vault's
 // collateral (2-Pool-GETH). Every CURRENT price map states that rate exactly
-// (juicerPrice.ts, from the refresher's pinned read); HISTORY — candles, the value
+// (strategySharePrice.ts, from the refresher's pinned read); HISTORY — candles, the value
 // chart's buckets — values a share at ONE collateral unit through this alias, which is
 // exact while the rate is 1: no harvest had compounded through block 16,731,000 (every
 // Deposited log's assets equal its shares bar the bootstrap's rounding) and the rate

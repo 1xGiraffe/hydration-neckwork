@@ -35,3 +35,7 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.juicer_loop_logs_mv TO price_d
 -- refresher cadence. Every current price map prices the share token by it
 -- (services/juicerPrice.ts): rate × the collateral's current price.
 CREATE TABLE IF NOT EXISTS price_data.juicer_vault_state (`vault` String, `share_asset_id` UInt32, `collateral_asset_id` UInt32, `block_height` UInt32, `exchange_rate_wad` UInt256, `total_assets` UInt256, `total_supply` UInt256, `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) ORDER BY vault SETTINGS index_granularity = 64;
+-- The registry assets minted 1:1 over the share (none for jETH today), priced at the
+-- share's rate too — the column every strategy rate table carries, so the price loader
+-- (services/strategySharePrice.ts) reads them all one way.
+ALTER TABLE price_data.juicer_vault_state ADD COLUMN IF NOT EXISTS `wrapper_asset_ids` Array(UInt32) DEFAULT [] AFTER `collateral_asset_id`;

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { createDefaultDatabaseClickHouseClient, type ClickHouseClient } from './client.ts'
 import { ACCOUNT_ACTIVITY_MV, catchUpAccountActivityWindow } from './accountActivityCatchUp.ts'
 import { ATOKEN_PARTY_TRANSFERS_SELECT, ATOKEN_PARTY_TRANSFERS_WHERE, PARTY_TRANSFERS_SELECT, PARTY_TRANSFERS_WHERE, catchUpTransferDeltasWindow } from '../services/erc20WalletService.ts'
+import { BIL_LOGS_SELECT, BIL_LOGS_WHERE } from '../services/bil.ts'
 
 // xcm_call_destinations_mv's own SELECT and WHERE over raw_extrinsics (013), verbatim:
 // the replay of its swap window and the backfill of `execute` history read the source
@@ -273,6 +274,9 @@ export function createStatementFor(statements: readonly string[], name: string):
  *   observation blocks the churn chart dates exits by (017_narrow_event_tables.sql).
  *   juicer_logs — the Juicer strategy contracts' logs the activity feed and the
  *   /juicer page read (018_juicer.sql); the first is at block 16,630,305.
+ *   bil_logs — the BIL vault's, its deposit zap's and the Decentral pool's logs and the
+ *   pool's non-vault HOLLAR transfers the activity feed and the /bil page read
+ *   (019_bil.sql); the Decentral pool was created at block 11,507,379.
  */
 /**
  * The identity coverage is judged on: a raw row's key (`raw`, a SELECT list over
@@ -380,6 +384,16 @@ export const DATA_UPGRADES: ReadonlyArray<DataUpgrade> = [
     where: "raw_evm_logs.topic0 IN ('0x14a13f958d7fe38fb8529e8d43353b6d9120f52444e486a4077f68a3fc77dcbf', '0x81472a96709c8315c82af40d41ef624a642ad53864b097e53af675593bb4e035', '0xf47be53a3800f408a772b4ce403212b043ad8c0eff97ec1a583cbc250aa91c89', '0x3a51313280fc2f1e8e1ce3435821f506bc14cf540e387a22d71c54dffc7bc7b3') AND lower(raw_evm_logs.contract_address) IN ('0x2df1d70f413b5edd16bb794791117948a7436a45')",
     fromBlock: 16_600_000,
     select: "block_height, event_index, extrinsic_index, block_timestamp, lower(raw_evm_logs.contract_address) AS contract_address, ifNull(raw_evm_logs.topic0, '') AS topic0, topics, data, '' AS party, ingested_at",
+  },
+  {
+    // The BIL strategy's logs (019_bil.sql): the predicate and select are bil.ts's own
+    // constants, which the MV states verbatim (bilSchema.test.ts). The Decentral pool was
+    // created at block 11,507,379, so the search for raw's first record starts just below.
+    table: 'price_data.bil_logs',
+    source: 'raw_evm_logs',
+    where: BIL_LOGS_WHERE,
+    fromBlock: 11_500_000,
+    select: BIL_LOGS_SELECT,
   },
   {
     table: 'price_data.hdx_balance_hours',

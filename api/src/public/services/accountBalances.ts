@@ -3,8 +3,8 @@ import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import { H2O_ASSET_ID, assetDecimalsOrNull, assetDescriptor, currentPriceOf, isMoneyMarketAToken, isStableswapShareToken, priceAssetId } from '../../services/explorerAssets.ts'
 import { lmCountedClaimable, loadLmRewards } from '../../services/lmRewardSnapshot.ts'
-import { withStableswapSharePrices, xykReserveAssets, xykShareLegs } from '../../services/lpMath.ts'
-import { loadJuicerRates, withJuicerSharePrices } from '../../services/juicerPrice.ts'
+import { xykReserveAssets, xykShareLegs } from '../../services/lpMath.ts'
+import { loadStrategyShareRates, withDerivedSharePrices } from '../../services/strategySharePrice.ts'
 import { loadMmIncentives } from '../../services/mmIncentiveSnapshot.ts'
 import { currentStableswapSharePools } from '../../services/stableswapSharePools.ts'
 import { loadV3AccountHistory, v3AccountPositions, v3AccountPositionsRawAt } from '../../services/uniswapV3Positions.ts'
@@ -365,10 +365,10 @@ export function currentPrices(client: ClickHouseClient): Promise<PriceMap> {
     // prices (lpMath.stableswapSharePrices over the newest pool snapshot), the one
     // definition the explorer and the Data API state too — never an underlying's
     // price, and nothing when a leg is unpriced.
-    const pools = await currentStableswapSharePools(client)
-    const shares = withStableswapSharePrices(feeds, pools, id => currentPriceOf(feeds, id), assetDecimalsOrNull, isStableswapShareToken)
-    // A Juicer share (jETH) at its vault's exchange rate in that collateral (juicerPrice.ts).
-    return withJuicerSharePrices(shares, await loadJuicerRates(client).catch(() => []))
+    // A strategy share (jETH, uBIL and BIL) is at its vault's exchange rate in its
+    // underlying; both derivations run in the one shared order (withDerivedSharePrices).
+    const [pools, rates] = await Promise.all([currentStableswapSharePools(client), loadStrategyShareRates(client).catch(() => [])])
+    return withDerivedSharePrices(feeds, pools, rates, assetDecimalsOrNull, isStableswapShareToken)
   })
 }
 

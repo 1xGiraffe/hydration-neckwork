@@ -212,6 +212,7 @@ const HUBS: Record<string, { title: string; description: string }> = {
   '/hdx': { title: 'HDX', description: 'HDX price, supply, staking, treasury buybacks and Omnipool position.' },
   '/hollar': { title: 'HOLLAR', description: 'HOLLAR supply, the stability module, collateral and peg behaviour.' },
   '/juicer': { title: 'Juicer', description: 'Juicer, Hydration\u2019s leveraged PRIME-loop strategy: deposit GETH, earn in it. TVL and capacity, the estimated APY, the vault\u2019s money-market position, the PRIME loop, positions, withdrawal requests and every deposit, withdrawal, harvest and rebalance.' },
+  '/bil': { title: 'Brazilian Invoice Loans', description: 'Brazilian Invoice Loans (BIL) on Hydration: HOLLAR lent to fixed-rate 60-day Decentral invoice-receivable positions at 18% APY. NAV and realized APY, TVL and capacity, the maturity ladder, the redemption queue and its wait, the BIL/HOLLAR pool\u2019s premium or discount to NAV, holders and every deposit, redemption, settlement and claim.' },
   '/intents': { title: 'Intents', description: 'Limit orders and DCA intents on Hydration, settled by the ICE solver: the open book, fills matched or routed through the pools, execution quality, top traders and the matched-volume fee.' },
   '/revenue': { title: 'Revenue', description: 'Revenue on Hydration, live: User Revenue — what users earn, net — and Protocol Revenue — what the protocol earns — over 24 hours, 7 days, 30 days and all time.' },
   '/revenue/users': { title: 'User Revenue', description: 'What users earn on Hydration, net: LP fees, lending interest and incentives, farm rewards, token accrual and staking yield, less borrow interest and fees paid — by stream and top earners, through the last closed hour.' },
@@ -316,6 +317,7 @@ export const UNBOUNDED_PREFIXES = new Set([
   'otc-place', 'otc-pull', 'otc-fill', 'bond-issue', 'bond-redeem',
   'intent-place', 'intent-fill', 'intent-cancel', 'intent-expire', 'intent-dca-trade',
   'juicer-deposit', 'juicer-withdraw', 'juicer-unwind', 'juicer-settle', 'juicer-claim', 'juicer-claim-surplus', 'juicer-harvest', 'juicer-rebalance', 'juicer-delever', 'juicer-lever', 'juicer-unlever',
+  'bil-deposit', 'bil-redeem', 'bil-cancel', 'bil-settle', 'bil-claim', 'bil-reinvest', 'bil-interest', 'bil-principal', 'bil-draw', 'bil-repay',
 ])
 
 // The product's name for each activity family, keyed by its URL slug, with what
@@ -367,6 +369,16 @@ export const ACTIVITY_PAGES: Record<string, { label: string; about: string }> = 
   'juicer-delever': { label: 'Juicer de-lever', about: 'the PRIME loop\'s health factor before and after the keepers reduced its exposure' },
   'juicer-lever': { label: 'Juicer loop levered', about: 'the HOLLAR the PRIME loop borrowed and the ICE intent that swaps it into PRIME' },
   'juicer-unlever': { label: 'Juicer loop unlevered', about: 'the PRIME the loop withdrew and the ICE intent that swaps it back to HOLLAR to repay' },
+  'bil-deposit': { label: 'BIL deposit', about: 'the HOLLAR deposited into the Brazilian Invoice Loans vault, the BIL it minted and the depositor' },
+  'bil-redeem': { label: 'BIL redemption requested', about: 'the uBIL put into the redemption queue and the request number' },
+  'bil-cancel': { label: 'BIL redemption cancelled', about: 'the unsettled uBIL a cancelled redemption request returned' },
+  'bil-settle': { label: 'BIL redemption settled', about: 'the queued uBIL a settlement rate-locked and the HOLLAR it fixed for the request (the uBIL is burned when that HOLLAR is claimed)' },
+  'bil-claim': { label: 'BIL redemption claimed', about: 'the settled HOLLAR claimed, the uBIL that claim burned, and who received it' },
+  'bil-reinvest': { label: 'BIL reinvested', about: 'the HOLLAR the BIL vault reinvested in a new fixed-rate Decentral position' },
+  'bil-interest': { label: 'Decentral interest received', about: 'the fixed interest a matured Decentral position paid the BIL vault' },
+  'bil-principal': { label: 'Decentral principal returned', about: 'the principal a matured Decentral position returned to the BIL vault' },
+  'bil-draw': { label: 'Decentral draw', about: 'the HOLLAR the Decentral borrower drew from the lending pool to finance invoice receivables' },
+  'bil-repay': { label: 'Decentral repayment', about: 'the HOLLAR the Decentral borrower repaid into the lending pool' },
 }
 
 const CRUMB_HOME: [string, string] = ['Home', '/']

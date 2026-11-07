@@ -53,7 +53,7 @@ import {
   startTagCountsPrewarm,
   stopExplorerBackgroundTasks,
 } from './services/explorerService.ts'
-import { initTagService, loadTags, seedDefaultTags, syncMoneyMarketTag, startMoneyMarketTagRefresh, syncStructuralTags, startStructuralTagRefresh, reconcileTagPresentation, retireUnknownTagMemberships } from './services/tagService.ts'
+import { initTagService, loadTags, seedDefaultTags, syncMoneyMarketTag, startMoneyMarketTagRefresh, syncStructuralTags, startStructuralTagRefresh, reconcileTagPresentation, retireUnknownTagMemberships, retireDroppedDefaultMembers } from './services/tagService.ts'
 import { initContractRegistryService, loadContractRegistry, startContractRegistryRefresh, stopContractRegistryRefresh } from './services/contractRegistryService.ts'
 import { initContractVerificationService, loadVerifiedContracts, startVerifiedContractsRefresh, stopVerifiedContractsRefresh } from './services/contractVerificationService.ts'
 import { initIdentityService, loadIdentities, startIdentityRefresh, stopIdentityRefresh } from './services/identityService.ts'
@@ -72,6 +72,7 @@ import { initPositionYield } from './services/positionYield.ts'
 import { initExternalTokenApy } from './services/externalTokenApy.ts'
 import { initIceService } from './services/iceService.ts'
 import { initJuicerService } from './services/juicerService.ts'
+import { initBilService } from './services/bilService.ts'
 import { initOrderHistory } from './services/orderHistory.ts'
 import { initLpRewardClaims } from './services/lpRewardClaims.ts'
 import { initPositionsPresence } from './services/positionsPresence.ts'
@@ -82,6 +83,7 @@ import { initSecurityService } from './services/securityService.ts'
 import { initErc20WalletService } from './services/erc20WalletService.ts'
 import { initMmOraclePrices } from './services/mmOraclePrices.ts'
 import { initJuicerState } from './services/juicerState.ts'
+import { initBilState } from './services/bilState.ts'
 import { initLmRewardService } from './services/lmRewardService.ts'
 import { initMmIncentiveService } from './services/mmIncentiveService.ts'
 import { initWormholeNttService } from './services/wormholeNttService.ts'
@@ -334,6 +336,8 @@ async function start() {
     // Must precede startBackgroundRefresh(): the juicer-state task reads its holder set
     // from ClickHouse and pins its eth_calls to the indexed head.
     initJuicerState(client)
+    // Likewise the bil-state task (the BIL vault's pinned read).
+    initBilState(client)
     // Must precede startBackgroundRefresh(): the lm-rewards cycle reads deposit
     // owners from ClickHouse and publishes its generation there.
     initLmRewardService(client)
@@ -371,6 +375,9 @@ async function start() {
     await Promise.all([loadTags(), loadUserProfiles(), loadIdentities(), loadReferendumTitles().catch(err => console.warn('[titles] referendum title load failed; vote rows render without titles until the refresh succeeds', err)), loadUserSessions(), loadUserLists(), loadNotifications()])
     // Seed the fixed default tag set on a fresh database (no-op once tags exist),
     // so a clean `docker compose up` reaches the expected state with no manual step.
+    // A membership moved between default tags is retired from its old tag first, so the
+    // seed (one account, one tag) can file it under the new one in the same start.
+    await retireDroppedDefaultMembers().catch(e => console.warn('[tags] member reconcile failed', e))
     await seedDefaultTags()
     // Money-market reserve contracts self-label from the indexed reserve map;
     // the hourly refresh catches newly listed reserves automatically.
@@ -414,6 +421,8 @@ async function start() {
     // descriptors and account refs, so a build before them caches placeholder decimals),
     // and before listen, so the first reader joins a build already under way.
     initJuicerService(client)
+    // The BIL dashboard's first build, on the same terms.
+    initBilService(client)
     await fastify.listen({ port: config.port, host: config.host })
     console.log(`[API] Server listening on ${config.host}:${config.port}`)
     // Telegram channel linking needs the bot's long-poll loop; without a token

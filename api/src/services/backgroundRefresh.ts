@@ -10,6 +10,7 @@ import { refreshMmIncentives } from './mmIncentiveService.ts'
 import { refreshMmOraclePrices } from './mmOraclePrices.ts'
 import { refreshOracleState } from './oracleService.ts'
 import { refreshJuicerState } from './juicerState.ts'
+import { refreshBilState } from './bilState.ts'
 
 // Coordinated scheduler for the background refreshers that read node-full
 // (chain-state enumeration and EVM eth_call). Previously each ran on its own
@@ -52,6 +53,9 @@ import { refreshJuicerState } from './juicerState.ts'
 //                    primary reserve, latestRoundData per source) → every 5th tick (300s)
 //   juicer-state   ~0.1s node-full (5 batched eth_call round trips at one pin,
 //                    ~60 calls) + one small ClickHouse read  → every tick (60s)
+//   bil-state      ~0.1s node-full (2 batched eth_call round trips at one pin,
+//                    ~20 calls + one per open redemption request) + two small
+//                    ClickHouse reads                         → every tick (60s)
 //   oracle-state   ~0.5s node-full (one pinned block: every market's oracle
 //                    plumbing and reserve prices, then 12 probes per source —
 //                    rounds, answer, description, decimals, owner and the
@@ -142,6 +146,13 @@ const TASKS: RefreshTask[] = [
   // re-reads only when juicer_logs or jETH's deltas moved, else every fifth tick;
   // listed ahead of the heavy lanes so a restart states the vault within seconds.
   { name: 'juicer-state', everyTicks: 1, run: refreshJuicerState },
+  // The BIL vault's current state (bilState.ts) at one pinned block: the redemption
+  // queue's lifecycle, the Decentral positions and uBIL's wallet balances from
+  // ClickHouse, and eth_call only for what no event states (the exchange rate and the
+  // totals behind it, the APY, cap and stops, the Decentral terms, the open requests'
+  // escrow). It checks every tick but re-reads only when bil_logs or uBIL's deltas
+  // moved, else every fifth tick — the rate accrues by the second.
+  { name: 'bil-state', everyTicks: 1, run: refreshBilState },
   // Unclaimed liquidity-mining rewards: every LM deposit and farm read at one
   // finalized block, active farms projected to THAT block (not the head) by a
   // DryRunApi claim. Active farms accrue every relay block, so the published
