@@ -287,3 +287,62 @@ async function readPriorBudgets(client: ClickHouseClient, done: readonly IceComp
   for (const r of await res.json<{ intent_id: string; rb: string }>()) if (/^\d+$/.test(r.rb)) out.set(String(r.intent_id), r.rb)
   return out
 }
+
+/** A settlement extrinsic, as a feed row names it. */
+export interface IceSettlementRef { blockHeight: number; extrinsicIndex: number }
+
+/**
+ * The ONE intent owner of each ICE settlement among `refs`, keyed
+ * `${blockHeight}:${extrinsicIndex}`: the owner of every fill the solution
+ * settled, from its orders — the explorer's own attribution of an intent's trade.
+ * A solution that served several owners has none (its routes cannot be divided
+ * between them — src/blocks/icePotSettlement.ts), and neither has one with a fill
+ * whose order is not indexed yet (a backward backfill), rather than an owner read
+ * off part of it. Primary-key reads over the refs' own blocks only.
+ */
+export async function iceSettlementOwners(client: ClickHouseClient, refs: readonly IceSettlementRef[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const wanted = new Set(refs.map(r => `${r.blockHeight}:${r.extrinsicIndex}`))
+  const blocks = [...new Set(refs.map(r => Number(r.blockHeight)))].sort((a, b) => a - b)
+  if (!blocks.length) return out
+  type OwnerRow = { block_height: number; x: number; owner: string }
+  const parts = await allChunks(blocks, async part => {
+    const res = await client.query({
+      query: `-- ice:settlement-owners
+          SELECT f.block_height AS block_height, f.x AS x, any(o.owner) AS owner
+          FROM (
+            SELECT intent_id, block_height, assumeNotNull(extrinsic_index) AS x
+            FROM price_data.intent_events FINAL
+            WHERE block_height IN ({blocks:Array(UInt32)}) AND extrinsic_index IS NOT NULL AND event_name IN {names:Array(String)}
+          ) AS f
+          LEFT JOIN (
+            SELECT intent_id, lower(owner) AS owner
+            FROM price_data.intent_orders FINAL
+            WHERE intent_id IN (
+              SELECT intent_id FROM price_data.intent_events
+              WHERE block_height IN ({blocks:Array(UInt32)}) AND event_name IN {names:Array(String)}
+            )
+          ) AS o ON o.intent_id = f.intent_id
+          GROUP BY f.block_height, f.x
+          HAVING countIf(o.owner = '') = 0 AND uniqExact(o.owner) = 1`,
+      query_params: { blocks: part, names: SETTLED_FILL_EVENTS }, format: 'JSONEachRow',
+      clickhouse_settings: { join_use_nulls: 0 },
+    })
+    return res.json<OwnerRow>()
+  })
+  for (const row of parts.flat()) {
+    const key = `${Number(row.block_height)}:${Number(row.x)}`
+    if (wanted.has(key)) out.set(key, row.owner)
+  }
+  return out
+}
+
+/**
+ * The trader an ICE route swap belongs to: `swapper` itself unless it is the
+ * pot, then the settlement's one owner when it has one (`owners`, from
+ * `iceSettlementOwners`), else still the pot.
+ */
+export function iceTraderOf(swapper: string | null, ref: { blockHeight: number; extrinsicIndex: number | null }, owners: ReadonlyMap<string, string>): string | null {
+  if (swapper == null || swapper.toLowerCase() !== ICE_POT_ACCOUNT || ref.extrinsicIndex == null) return swapper
+  return owners.get(`${ref.blockHeight}:${ref.extrinsicIndex}`) ?? swapper
+}
