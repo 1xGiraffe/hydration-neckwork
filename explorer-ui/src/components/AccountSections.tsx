@@ -893,7 +893,7 @@ export function LimitOrdersTable({ orders, now, title, showOwner, emptyText }: {
                 <td data-label="Limit price" className="r mono">
                   {o.limitPrice != null
                     ? <span title={`One ${o.assetIn.symbol} for ${o.limitPrice} ${o.assetOut.symbol}`}>
-                      <Num v={o.limitPrice} /> <span className="muted">{o.assetOut.symbol}</span>
+                      <Num v={o.limitPrice} digits={4} /> <span className="muted">{o.assetOut.symbol}</span>
                       <span className="dca-sub mono muted">per {o.assetIn.symbol}</span>
                     </span>
                     : <Dash />}

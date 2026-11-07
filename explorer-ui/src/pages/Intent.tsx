@@ -18,6 +18,8 @@ const PAGE = 25
 // 285 solutions in 20 minutes — so the header names the newest few and counts the
 // rest; the Fills table below links every one of them.
 const SOLUTION_LINKS_SHOWN = 3
+// A limit price is a rate: four significant digits keep 1.003 from reading as 1.
+const RATE_DIGITS = 4
 
 // An open order is live; a filled, completed or partially-filled one has been (or is
 // being) met, so it wears the settled shade; a cancel is the owner's own quiet exit
@@ -61,8 +63,8 @@ function LimitPrice({ data }: { data: IntentOrderDetail }) {
   const binding = limitBinding(data.limitMarketRatio)
   return (
     <span className="muted mono limit-price" title={`${outPerIn} ${assetOut.symbol} per ${assetIn.symbol}\n${inPerOut} ${assetIn.symbol} per ${assetOut.symbol}`}>
-      <Num v={Number(outPerIn)} /> {assetOut.symbol} per {assetIn.symbol}
-      {' · '}<Num v={Number(inPerOut)} /> {assetIn.symbol} per {assetOut.symbol}
+      <Num v={Number(outPerIn)} digits={RATE_DIGITS} /> {assetOut.symbol} per {assetIn.symbol}
+      {' · '}<Num v={Number(inPerOut)} digits={RATE_DIGITS} /> {assetIn.symbol} per {assetOut.symbol}
       {binding && <span className={`limit-flag limit-flag-${binding.kind}`} title={binding.title}>{binding.label}</span>}
     </span>
   )
@@ -87,8 +89,8 @@ function AvgFillPrice({ data }: { data: IntentOrderDetail }) {
   if (outPerIn == null || inPerOut == null) return null
   return (
     <span className="muted mono limit-price" title={`Average over all fills\n${outPerIn} ${assetOut.symbol} per ${assetIn.symbol}\n${inPerOut} ${assetIn.symbol} per ${assetOut.symbol}`}>
-      avg <Num v={outPerIn} /> {assetOut.symbol} per {assetIn.symbol}
-      {' · '}<Num v={inPerOut} /> {assetIn.symbol} per {assetOut.symbol}
+      avg <Num v={outPerIn} digits={RATE_DIGITS} /> {assetOut.symbol} per {assetIn.symbol}
+      {' · '}<Num v={inPerOut} digits={RATE_DIGITS} /> {assetIn.symbol} per {assetOut.symbol}
     </span>
   )
 }
