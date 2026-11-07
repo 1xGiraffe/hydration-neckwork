@@ -425,7 +425,7 @@ export interface ActivityRow {
 /* ============ search ============ */
 
 export interface SearchResult {
-  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination'
+  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination' | 'intent'
   /**
    * The identifier the hit resolves to — a height, a hash, an accountId, an
    * asset id, a tagId, a pool id or an xc-destination platform slug. For a

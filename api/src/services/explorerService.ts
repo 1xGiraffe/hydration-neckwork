@@ -34703,7 +34703,7 @@ export async function getDailyAccounts(): Promise<{ date: string; active: number
 
 // search
 export interface SearchResult {
-  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination'
+  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination' | 'intent'
   value: string
   label?: string
   desc?: string   // asset-type: the descriptive name (e.g. DOT → "Polkadot")
@@ -35068,8 +35068,34 @@ const FUTURE_BLOCK_SEARCH_DAYS = 365
 // wording — the block page works out for itself which of the two it is showing.
 const FUTURE_BLOCK_INDEX_LAG_MINUTES = 5
 
+// An ICE intent is addressed by its u128 id — the deadline in the high 64 bits, the
+// pallet's incremental counter in the low (`generate_new_intent_id`) — and shown as
+// "#<counter>" (intentSeqOf), so a search finds it by either: the whole id, or the
+// short handle a page prints. intent_orders is one row per intent ever placed
+// (thousands); the id is its key, the handle a scan of that small table.
+const INTENT_ID_SEARCH_RE = /^\d{11,39}$/
+async function intentSearchResults(where: string, params: Record<string, unknown>): Promise<SearchResult[]> {
+  const res = await client.query({
+    query: `SELECT toString(intent_id) AS id, kind, asset_in, asset_out
+            FROM price_data.intent_orders FINAL WHERE ${where}
+            ORDER BY intent_id LIMIT 3`,
+    query_params: params, format: 'JSONEachRow',
+  })
+  return (await res.json<{ id: string; kind: string; asset_in: number; asset_out: number }>()).map(r => ({
+    type: 'intent' as const, value: r.id,
+    label: `${r.kind === 'dca' ? 'DCA intent' : 'Limit order'} #${intentSeqOf(r.id)}`,
+    desc: `${asset(Number(r.asset_in)).symbol} → ${asset(Number(r.asset_out)).symbol}`,
+  }))
+}
+
 async function searchUncached(query: string): Promise<SearchResult[]> {
   const results: SearchResult[] = []
+
+  const compact = query.replace(SEARCH_SEPARATORS, '').replace(/^#/, '')
+  if (INTENT_ID_SEARCH_RE.test(compact)) results.push(...await intentSearchResults('intent_id = toUInt128({id:String})', { id: compact }))
+  // "#5807" is only ever an intent's handle; the bare number is also a block, a
+  // referendum and a pool, and is answered with those below.
+  else if (/^#\s*\d{1,10}$/.test(query.trim())) results.push(...await intentSearchResults('seq = {seq:UInt64}', { seq: Number(compact) }))
 
   const asNumber = searchNumber(query)
   if (asNumber != null) {
@@ -35114,6 +35140,9 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
     // Pool id — the share/LP asset id the pool pages route by (e.g. 690).
     const poolHit = (await poolDirectoryForSearch()).find(p => p.poolId === h)
     if (poolHit) results.push(poolSearchResult(poolHit))
+
+    // An intent's short handle, the "#5807" its pages print.
+    results.push(...await intentSearchResults('seq = {seq:UInt64}', { seq: h }))
   }
 
   // extrinsic id "height-index"

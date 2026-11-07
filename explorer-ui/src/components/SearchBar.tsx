@@ -34,6 +34,8 @@ export function routeFor(r: Hit): string {
     case 'referendum': return r.pallet && r.index != null ? paths.referendum(r.pallet, r.index) : paths.dashboard()
     case 'pool': return r.value === 'omnipool' ? paths.omnipool() : r.poolKind === 'uniswapv3' ? paths.v3Pool(r.value) : paths.pool(Number(r.value))
     case 'xcDestination': return paths.xcDestination(r.value)
+    // An ICE intent's order page; `value` is the u128 id.
+    case 'intent': return paths.intent(r.value)
     default: return paths.dashboard()
   }
 }
@@ -45,7 +47,7 @@ export function hitKey(r: Hit): string {
 }
 export const TYPE_LABEL: Record<Hit['type'], string> = {
   block: 'Block', extrinsic: 'Extrinsic', address: 'Account', asset: 'Asset', tag: 'Tag', 'user-tag': 'Tag', referendum: 'Referendum', pool: 'Pool',
-  xcDestination: 'Cross-chain',
+  xcDestination: 'Cross-chain', intent: 'Intent',
 }
 
 // Account results use the same avatar and shortened-address treatment as account
@@ -118,6 +120,16 @@ export function SearchResultBody({ r }: { r: Hit }) {
         <span className="sr-acct-name">
           <span className="mono">{r.label || r.value}</span>
           <span className="sr-desc">{venue}{r.tvlUsd != null ? ` · ${F.usd(r.tvlUsd)} TVL` : ''}</span>
+        </span>
+      </span>
+    )
+  }
+  if (r.type === 'intent') {
+    return (
+      <span className="sr-acct">
+        <span className="sr-acct-name">
+          <span className="mono">{r.label ?? r.value}</span>
+          {r.desc && <span className="sr-desc">{r.desc}</span>}
         </span>
       </span>
     )
