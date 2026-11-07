@@ -277,6 +277,11 @@ export function createStatementFor(statements: readonly string[], name: string):
  *   bil_logs — the BIL vault's, its deposit zap's and the Decentral pool's logs and the
  *   pool's non-vault HOLLAR transfers the activity feed and the /bil page read
  *   (019_bil.sql); the Decentral pool was created at block 11,507,379.
+ *   hdx_large_deposits — every Balances.Deposit of at least 10M HDX, the HDX
+ *   dashboard's allocation mints (017_narrow_event_tables.sql); the first is at block
+ *   2,750,400.
+ *   lbp_activity — every LBP pool event, the HDX bonds' LBP sale source
+ *   (020_lbp.sql); the first is at block 3,681,428.
  */
 /**
  * The identity coverage is judged on: a raw row's key (`raw`, a SELECT list over
@@ -394,6 +399,25 @@ export const DATA_UPGRADES: ReadonlyArray<DataUpgrade> = [
     where: BIL_LOGS_WHERE,
     fromBlock: 11_500_000,
     select: BIL_LOGS_SELECT,
+  },
+  {
+    // HDX deposits of at least 10M (017_narrow_event_tables.sql): the HDX dashboard's
+    // allocation-realization mints. The first is the Treasury's at block 2,750,400; the
+    // search starts at the chain's start, since a deposit that large is not datable.
+    table: 'price_data.hdx_large_deposits',
+    source: 'raw_events',
+    where: "raw_events.event_name = 'Balances.Deposit' AND length(JSONExtractString(raw_events.args_json, 'amount')) >= 20",
+    fromBlock: 0,
+    select: "block_height, event_index, block_timestamp, JSONExtractString(args_json, 'who') AS who, JSONExtractString(args_json, 'amount') AS amount, ingested_at",
+  },
+  {
+    // Every LBP event (020_lbp.sql): the HDX bonds' LBP sale source reads the family
+    // whole. The first is the first bond round's pool at block 3,681,428.
+    table: 'price_data.lbp_activity',
+    source: 'raw_events',
+    where: "raw_events.event_name IN ('LBP.PoolCreated', 'LBP.PoolUpdated', 'LBP.LiquidityAdded', 'LBP.LiquidityRemoved', 'LBP.SellExecuted', 'LBP.BuyExecuted')",
+    fromBlock: 3_600_000,
+    select: 'block_height, event_index, extrinsic_index, block_timestamp, event_name, args_json, ingested_at',
   },
   {
     table: 'price_data.hdx_balance_hours',

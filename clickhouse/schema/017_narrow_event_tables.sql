@@ -34,3 +34,22 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.referendum_preimage_events_mv 
 -- max is idempotent, so a replayed raw range changes nothing.
 CREATE TABLE IF NOT EXISTS price_data.hdx_balance_hours (`account_id` String, `interval_start` DateTime, `last_nonzero_block` SimpleAggregateFunction(max, UInt32), `last_zero_block` SimpleAggregateFunction(max, UInt32)) ENGINE = AggregatingMergeTree ORDER BY (account_id, interval_start) SETTINGS index_granularity = 8192;
 CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.hdx_balance_hours_mv TO price_data.hdx_balance_hours (`account_id` String, `interval_start` DateTime, `last_nonzero_block` UInt32, `last_zero_block` UInt32) AS SELECT account_id, toStartOfHour(block_timestamp) AS interval_start, if(toUInt256OrZero(ifNull(raw_balance_observations.total, '')) > 0, block_height, toUInt32(0)) AS last_nonzero_block, if(toUInt256OrZero(ifNull(raw_balance_observations.total, '')) = 0, block_height, toUInt32(0)) AS last_zero_block FROM price_data.raw_balance_observations WHERE raw_balance_observations.asset_id = '0' AND raw_balance_observations.account_id != '' AND raw_balance_observations.source_kind != 'snapshot_bootstrap' AND isNotNull(toUInt256OrNull(raw_balance_observations.total));
+
+-- HDX allocation-realization mints: every Balances.Deposit of at least 10M HDX (a
+-- 20-digit raw amount) — the on-chain moment a pre-committed allocation starts to
+-- float (api/src/services/hdxService.ts loadAllocationMints; organic deposits such as
+-- fee payouts are orders of magnitude smaller). From raw_events that read was a
+-- ~37 GiB scan of every deposit's arguments for a handful of rows.
+CREATE TABLE IF NOT EXISTS price_data.hdx_large_deposits (`block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `who` String, `amount` String, `ingested_at` DateTime) ENGINE = ReplacingMergeTree(ingested_at) ORDER BY (block_height, event_index) SETTINGS index_granularity = 8192;
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.hdx_large_deposits_mv TO price_data.hdx_large_deposits (`block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `who` String, `amount` String, `ingested_at` DateTime) AS SELECT block_height, event_index, block_timestamp, JSONExtractString(args_json, 'who') AS who, JSONExtractString(args_json, 'amount') AS amount, ingested_at FROM price_data.raw_events WHERE raw_events.event_name = 'Balances.Deposit' AND length(JSONExtractString(raw_events.args_json, 'amount')) >= 20;
+
+-- HDX transfers sent by an ordinary (non-module) account to another: the holder
+-- rotations the HDX dashboard's holding ages follow (hdxService.ts
+-- loadRotationAnchors) read only these, ~1M rows, where the account-first
+-- account_transfer_activity made them a ~21 GiB scan of every asset's legs. Chained
+-- off transfer_activity (its asset-first twin, one row per transfer event), so the
+-- extraction exists once; replay-safe on the event's own (block_height, event_index)
+-- under the source's replacement semantics. A fresh database fills it as
+-- transfer_activity fills.
+CREATE TABLE IF NOT EXISTS price_data.hdx_user_transfers (`block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `from_account` String, `to_account` String, `amount` String) ENGINE = ReplacingMergeTree ORDER BY (block_height, event_index) SETTINGS index_granularity = 8192;
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.hdx_user_transfers_mv TO price_data.hdx_user_transfers (`block_height` UInt32, `event_index` UInt32, `block_timestamp` DateTime, `from_account` String, `to_account` String, `amount` String) AS SELECT block_height, event_index, block_timestamp, from_account, to_account, amount FROM price_data.transfer_activity WHERE transfer_activity.asset_id = 0 AND transfer_activity.from_account != '' AND transfer_activity.from_account != transfer_activity.to_account AND NOT startsWith(transfer_activity.from_account, '0x6d6f646c');
