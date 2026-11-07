@@ -29,22 +29,22 @@ import { bullets, kv, note } from './md.ts'
 /* ============ the vocabulary, as data ============ */
 
 /**
- * The 13 values `type=` accepts. Exported as data so a tool's description, its
+ * The 14 values `type=` accepts. Exported as data so a tool's description, its
  * zod schema and this renderer cannot drift apart.
  */
 export const ACTIVITY_TYPES = [
   'all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm',
-  'stake', 'vote', 'otc', 'bond', 'intent', 'xcswap',
+  'stake', 'vote', 'otc', 'bond', 'intent', 'xcswap', 'juicer',
 ] as const
 
 /**
- * The 12 values a ROW's own `type` can carry. Note it is not the same list:
+ * The 13 values a ROW's own `type` can carry. Note it is not the same list:
  * `all` is a query word, `stake` arrives as `staking`, and `dca` executions
  * arrive typed `trade`.
  */
 export const ACTIVITY_ROW_TYPES: readonly ActivityRowType[] = [
   'transfer', 'trade', 'xcm', 'liquidity', 'mm', 'dca',
-  'staking', 'vote', 'otc', 'bond', 'intent', 'xcswap',
+  'staking', 'vote', 'otc', 'bond', 'intent', 'xcswap', 'juicer',
 ]
 
 /**
@@ -69,6 +69,10 @@ export const ACTIVITY_ACTIONS: Record<string, string[]> = {
     'GIGAHDX Migrate', 'GIGAHDX Yield', 'GIGAHDX Reward', 'Collator payout',
   ],
   bond: ['Issue', 'Redeem'],
+  juicer: [
+    'juicer-deposit', 'juicer-withdraw', 'juicer-unwind', 'juicer-settle', 'juicer-claim',
+    'juicer-claim-surplus', 'juicer-harvest', 'juicer-rebalance', 'juicer-delever', 'juicer-lever', 'juicer-unlever',
+  ],
   vote: ['Aye', 'Nay'],
 }
 
@@ -121,6 +125,18 @@ const MM_LABELS: Record<string, string> = {
   LiquidationCall: 'Liquidate', Liquidate: 'Liquidate',
 }
 const BOND_LABELS: Record<string, string> = { Issue: 'Bond issued', Redeem: 'Bond redeemed' }
+// A Juicer act reads as the official app names it (the explorer's JUICER_LABELS).
+const JUICER_LABELS: Record<string, string> = {
+  Deposit: 'Juicer deposit', Withdraw: 'Juicer withdrawal requested', Unwind: 'Juicer withdrawal unwinding',
+  Settle: 'Juicer withdrawal settled', Claim: 'Juicer withdrawal claimed', ClaimSurplus: 'Juicer surplus claimed',
+  Harvest: 'Juicer harvest', Rebalance: 'Juicer rebalance', Delever: 'Juicer de-lever',
+  Lever: 'Juicer loop levered', Unlever: 'Juicer loop unlevered',
+}
+const JUICER_SLUG: Record<string, string> = {
+  Deposit: 'juicer-deposit', Withdraw: 'juicer-withdraw', Unwind: 'juicer-unwind', Settle: 'juicer-settle',
+  Claim: 'juicer-claim', ClaimSurplus: 'juicer-claim-surplus', Harvest: 'juicer-harvest', Rebalance: 'juicer-rebalance', Delever: 'juicer-delever',
+  Lever: 'juicer-lever', Unlever: 'juicer-unlever',
+}
 // An OTC order's acts read as its lifecycle, the way an intent's do.
 const OTC_LABELS: Record<string, string> = { Place: 'OTC order placed', Pull: 'OTC order pulled', Fill: 'OTC order filled' }
 const INTENT_KIND_WORD: Record<string, string> = { swap: 'Limit order', dca: 'DCA intent' }
@@ -140,6 +156,7 @@ export function activityKind(r: ActivityRow): string {
     case 'mm': return MM_LABELS[r.mmAction ?? ''] ?? r.mmAction ?? 'Money market'
     case 'staking': return r.stakingAction || 'Staking'
     case 'bond': return BOND_LABELS[r.bondAction ?? ''] ?? 'Bond'
+    case 'juicer': return JUICER_LABELS[r.juicerAction ?? ''] ?? 'Juicer'
     case 'intent': return intentLabel(r.intentKind, r.intentAction)
     case 'xcswap':
       // The action is a swap in every state; whether it was DELIVERED is the
@@ -191,6 +208,7 @@ export function activitySlug(r: ActivityRow): string {
     case 'mm': return MM_SLUG[r.mmAction ?? ''] ?? 'lend'
     case 'staking': return 'staking'
     case 'bond': return r.bondAction === 'Redeem' ? 'bond-redeem' : 'bond-issue'
+    case 'juicer': return JUICER_SLUG[r.juicerAction ?? ''] ?? 'juicer-deposit'
     case 'intent':
       // A partial fill IS a fill: one slug covers both.
       return r.intentAction === 'Place' ? 'intent-place'
@@ -390,6 +408,12 @@ function qualifiers(r: ActivityRow): string[] {
       break
     case 'bond':
       if (r.bondUnderlying) out.push(`underlying ${assetLabel(r.bondUnderlying)}`)
+      break
+    case 'juicer':
+      if (r.juicerRequestId != null) out.push(`request #${r.juicerRequestId}`)
+      if (r.juicerEligibleAt) out.push(`unwind from ${r.juicerEligibleAt.slice(0, 16).replace('T', ' ')} UTC`)
+      if (r.juicerLtvBefore != null && r.juicerLtvAfter != null) out.push(`Main LTV ${(r.juicerLtvBefore / 100).toFixed(1)}% → ${(r.juicerLtvAfter / 100).toFixed(1)}%`)
+      if (r.juicerIntentNonce != null) out.push(`ICE intent nonce ${r.juicerIntentNonce}`)
       break
     case 'staking':
     case 'transfer':

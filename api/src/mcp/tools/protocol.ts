@@ -123,7 +123,7 @@ interface OmnipoolResponse { account: AccountRef; tvlUsd: number | null; assetCo
 
 /* ============ constants ============ */
 
-const DASHBOARDS = ['revenue', 'hdx', 'hollar', 'ice', 'security', 'liquidity', 'volume'] as const
+const DASHBOARDS = ['revenue', 'hdx', 'hollar', 'ice', 'juicer', 'security', 'liquidity', 'volume'] as const
 type Dashboard = typeof DASHBOARDS[number]
 const RANGES = ['30d', '1y', 'all'] as const
 
@@ -135,6 +135,7 @@ const omnipoolPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/o
 const liquidityPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/liquidity`
 const volumePageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/volume`
 const intentsPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/intents`
+const juicerPageUrl = (base: string): string => `${base.replace(/\/+$/, '')}/juicer`
 
 /* ============ description ============ */
 
@@ -144,6 +145,7 @@ const DESCRIPTION = `The protocol's own dashboards, each rendered as headline fi
 - 'hdx' — the token. Price and 24-hour move, total/protocol/user supply, holder cohorts, every lock type with its total, the unlock schedule (what is unlockable NOW versus scheduled), buy/sell flow and standing DCA pressure, and the largest accumulators and distributors.
 - 'hollar' — the stablecoin. Price, peg deviation in basis points, how much of the last 30 days sat within 25 bps, where the supply lives (stablepools, Omnipool, elsewhere), the HSM's collateral holdings with their purchase and buy-back parameters, and the pools that quote it.
 - 'ice' — the intent/solver layer (the Explorer's Intents page). Solver mode, protocol fee and routing overrides, open limit and DCA orders with the capital they reserve, fills per day (matched intent-to-intent vs routed through the pools, valued when they settled), execution quality (time to fill in blocks, partial and cancel rates, price against limit in basis points), the top traders (intent owners) and pairs, and fee revenue. For the individual intents call get_activity with type=intent; an intent id reads through inspect_entity.
+- 'juicer' — the Juicer strategy vaults: TVL and cap, est. APY (the official formula), Main and PRIME-loop health, top positions, withdrawal requests, activity since launch.
 - 'security' — the safety posture. Cross-chain egress usage against its limit, per-asset deposit fuses and how close each is to lockdown, the Omnipool's per-block trade/add/remove allowances and the peak pressure seen against them, circuit-breaker trips by error, what is currently paused or restricted, lending-market solvency, runtime version, the Technical Committee, and the Wormhole backing summary.
 - 'liquidity' — where TVL sits: the venue split across Omnipool, stableswaps, XYK and Uniswap v3, then the Omnipool itself asset by asset with each weight against its CAP.
 - 'volume' — 24H / 7D / 30D volume with the change: ROUTED (every trade once, netted — the DefiLlama figure), then per VENUE (every fill once in its pool; sums to MORE than routed — never mix the two), then 7D top pools (volume/TVL), assets and traders.
@@ -151,6 +153,92 @@ const DESCRIPTION = `The protocol's own dashboards, each rendered as headline fi
 Every one of these payloads is 10-280 KB upstream and carries long raw series (the Omnipool's TVL history alone is 1,351 daily points). None of that is returned: series are collapsed into first/last/high/low with their window, and tables are cut to the top rows. Timestamps inside the revenue payloads are UNIX SECONDS, unlike the ClickHouse timestamps everywhere else on this server; both are rendered as UTC here.
 
 Prefer get_network_status for liveness, get_money_market for per-account lending risk ('security' sizes the markets, never an account), get_pools for one pool, and get_asset for one token.`
+
+/* ============ juicer ============ */
+
+interface JuicerPositionRow { account: AccountRef; totalShares: string; totalAssets: string | null; totalUsd: number | null; shares: string; share: number | null; inWithdrawal: string }
+interface JuicerWithdrawalRow { requestId: number; owner: AccountRef; shares: string; status: string; requestedAt: string; eligibleAt: string | null; assets: string | null; valueUsd: number | null }
+interface JuicerVaultRow {
+  vault: AccountRef; name: string; shareAsset: AssetRef; collateral: AssetRef; status: string
+  tvl: string | null; tvlUsd: number | null; cap: string | null; remaining: string | null
+  apyPct: number | null; runRateApyPct: number | null; deployedFraction: number | null; maxLtvBps: number | null; targetLtvBps: number | null
+  releverLtvBps: number | null; deleverLtvBps: number | null
+  main: { collateralUsd: number | null; debtUsd: number | null; healthFactor: number | null; ltv: number | null } | null
+  protocolFeeBps: number | null; mainDiscountBps: number | null; withdrawalDelaySec: number | null; holders: number | null
+  positions: JuicerPositionRow[]; withdrawals: JuicerWithdrawalRow[]
+}
+interface JuicerDashboard {
+  generatedAt: string; asOfBlock: number | null; launchBlock: number | null
+  vaults: JuicerVaultRow[]
+  loop: { account: AccountRef; collateralUsd: number | null; debtUsd: number | null; healthFactor: number | null; targetHf: number | null; leverage: number | null; targetLeverage: number | null; borrowRatePct: number | null; loopDiscountBps: number | null; primeSupplyApyPct: number | null; emergencyPaused: boolean | null } | null
+  totals: { tvlUsd: number | null; depositors: number; deposits: number; depositsUsd: number; withdrawals: number; claims: number; claimsUsd: number; harvests: number; harvestsUsd: number; rebalances: number; unpricedRows: number }
+  perDay: { day: string; deposits: number; depositsUsd: number; withdrawals: number; claims: number; claimsUsd: number; harvestsUsd: number; rebalances: number }[]
+}
+const pctOfBps = (b: number | null | undefined): string | null => b == null ? null : formatPercent(b / 100)
+
+function renderJuicer(d: JuicerDashboard, ctx: ToolContext): string {
+  const t = d.totals
+  const recent = (d.perDay ?? []).slice(-7)
+  return joinBlocks(
+    h2('Juicer (leveraged PRIME-loop strategy vaults)'),
+    kv([
+      ['Page', explorerLink('explorer', juicerPageUrl(ctx.explorerBaseUrl))],
+      ['Current state as of block', d.asOfBlock == null ? 'unavailable — no fresh state read; history below still holds' : formatCount(d.asOfBlock)],
+      ['TVL', formatUsd(t.tvlUsd)],
+      ['Depositors since launch', formatCount(t.depositors)],
+      ['Deposits', `${formatCount(t.deposits)} · ${formatUsd(t.depositsUsd)} (valued when deposited)`],
+      ['Withdrawal requests', formatCount(t.withdrawals)],
+      ['Claims', `${formatCount(t.claims)} · ${formatUsd(t.claimsUsd)}`],
+      ['Harvests', `${formatCount(t.harvests)} · ${formatUsd(t.harvestsUsd)} compounded`],
+      ['Rebalances', formatCount(t.rebalances)],
+      ['Rows without a value', t.unpricedRows ? `${formatCount(t.unpricedRows)} — left out of every USD figure` : null],
+      ['Generated', d.generatedAt ? `${formatTime(d.generatedAt)} · ${relativeAge(d.generatedAt)}` : null],
+    ]),
+    ...(d.vaults ?? []).flatMap(v => [
+      h3(`${v.name} — ${assetLabel(v.shareAsset)} over ${assetLabel(v.collateral)}`),
+      kv([
+        ['Vault', explorerLink(accountLabel(v.vault), accountUrl(ctx.explorerBaseUrl, v.vault.address))],
+        ['Deposits', v.status],
+        ['TVL', v.tvl == null ? null : `${formatAmount(v.tvl, v.collateral.decimals, assetLabel(v.collateral))} · ${formatUsd(v.tvlUsd)}`],
+        ['Cap', v.cap == null ? null : `${formatAmount(v.cap, v.collateral.decimals, assetLabel(v.collateral))} · ${formatAmount(v.remaining ?? '0', v.collateral.decimals, assetLabel(v.collateral))} left`],
+        ['Est. APY', v.apyPct == null ? null : `${formatPercent(v.apyPct)} — the official estimate: at TARGET leverage and current rates, after borrowing interest and the protocol harvest share; no minimum yield is promised`],
+        ['Run-rate APY', v.runRateApyPct == null ? null : `${formatPercent(v.runRateApyPct)} — the same at the loop's LIVE leverage and Main's live LTV: what holders accrue now`],
+        ['Borrowing deployed', v.deployedFraction == null ? null : `${formatPercent(v.deployedFraction * 100)} of target`],
+        ['Main (collateral position)', v.main ? `collateral ${formatUsd(v.main.collateralUsd)} (synthetic excluded) · HOLLAR debt ${formatUsd(v.main.debtUsd)} · LTV ${v.main.ltv == null ? DASH : formatPercent(v.main.ltv * 100)} · health factor ${v.main.healthFactor == null ? DASH : v.main.healthFactor.toFixed(2)}` : null],
+        ['Target LTV', v.targetLtvBps == null ? null : `${pctOfBps(v.targetLtvBps)} (max ${pctOfBps(v.maxLtvBps)}; relever under ${pctOfBps(v.releverLtvBps) ?? DASH}, delever over ${pctOfBps(v.deleverLtvBps) ?? DASH})`],
+        ['Protocol harvest share', v.protocolFeeBps == null ? null : `${pctOfBps(v.protocolFeeBps)} of each harvest's yield (principal excluded)`],
+        ['Main HOLLAR discount', pctOfBps(v.mainDiscountBps)],
+        ['Withdrawal cooldown', v.withdrawalDelaySec == null ? null : `${formatNumber(v.withdrawalDelaySec / 86_400)} days — requests cannot be cancelled`],
+        ['Holders', formatCount(v.holders)],
+      ]),
+      table(['Holder', 'Shares (total)', 'Worth', 'USD', 'In withdrawal'], (v.positions ?? []).slice(0, 10).map(p => [
+        explorerLink(accountLabel(p.account), accountUrl(ctx.explorerBaseUrl, p.account.address)),
+        formatAmount(p.totalShares, v.shareAsset.decimals, assetLabel(v.shareAsset)),
+        p.totalAssets == null ? DASH : formatAmount(p.totalAssets, v.collateral.decimals, assetLabel(v.collateral)),
+        formatUsd(p.totalUsd),
+        p.inWithdrawal === '0' ? DASH : formatAmount(p.inWithdrawal, v.shareAsset.decimals, assetLabel(v.shareAsset)),
+      ])),
+      (v.withdrawals ?? []).length
+        ? table(['Request', 'Owner', 'Shares', 'State', 'Requested', 'Unwind from'], v.withdrawals.slice(0, 10).map(w => [
+          `#${w.requestId}`, explorerLink(accountLabel(w.owner), accountUrl(ctx.explorerBaseUrl, w.owner.address)),
+          formatAmount(w.shares, v.shareAsset.decimals, assetLabel(v.shareAsset)), w.status, formatTime(w.requestedAt), w.eligibleAt ? formatTime(w.eligibleAt) : DASH,
+        ]))
+        : null,
+    ]),
+    d.loop ? joinBlocks(h3('PRIME loop (shared by every vault)'), kv([
+      ['Contract', explorerLink(accountLabel(d.loop.account), accountUrl(ctx.explorerBaseUrl, d.loop.account.address))],
+      ['Collateral / debt', `${formatUsd(d.loop.collateralUsd)} / ${formatUsd(d.loop.debtUsd)}`],
+      ['Health factor', d.loop.healthFactor == null ? null : `${d.loop.healthFactor.toFixed(2)} (target ${d.loop.targetHf?.toFixed(2) ?? DASH}) — the loop can be liquidated; deposits are not in it`],
+      ['Leverage', d.loop.leverage == null ? null : `${d.loop.leverage.toFixed(2)}x now · ${d.loop.targetLeverage?.toFixed(2) ?? DASH}x at target`],
+      ['HOLLAR borrow rate', d.loop.borrowRatePct == null ? null : `${formatPercent(d.loop.borrowRatePct)} less the loop's ${pctOfBps(d.loop.loopDiscountBps) ?? DASH} discount`],
+      ['PRIME supply APY', d.loop.primeSupplyApyPct == null ? null : formatPercent(d.loop.primeSupplyApyPct)],
+      ['Emergency pause', d.loop.emergencyPaused == null ? null : d.loop.emergencyPaused ? 'ON' : 'off'],
+    ])) : null,
+    recent.length ? joinBlocks(h3('Last days'), table(['Day', 'Deposits', 'Deposited', 'Withdrawal requests', 'Claimed', 'Harvested', 'Rebalances'], recent.map(r => [
+      r.day, formatCount(r.deposits), formatUsd(r.depositsUsd), formatCount(r.withdrawals), formatUsd(r.claimsUsd), formatUsd(r.harvestsUsd), formatCount(r.rebalances),
+    ]))) : null,
+  )
+}
 
 /* ============ revenue ============ */
 
@@ -860,6 +948,15 @@ async function handler(input: Record<string, unknown>, ctx: ToolContext): Promis
       return output(ctx, fit(joinBlocks(rangeNote, renderIce(d, ctx)), ctx), {
         ...d,
         migration: d.migration ? { migrated: d.migration.migrated, cancelled: d.migration.cancelled, remainingSchedules: d.migration.remainingSchedules } : null,
+      })
+    }
+
+    if (dashboard === 'juicer') {
+      const d = await ctx.upstream.get<JuicerDashboard>('/explorer/juicer', undefined, { ttlMs: 30_000, timeoutMs: 60_000 })
+      return output(ctx, fit(joinBlocks(rangeNote, renderJuicer(d, ctx)), ctx), {
+        ...d,
+        vaults: d.vaults.map(v => ({ ...v, positions: v.positions.slice(0, 25), withdrawals: v.withdrawals.slice(0, 25) })),
+        perDay: d.perDay.slice(-30),
       })
     }
 
