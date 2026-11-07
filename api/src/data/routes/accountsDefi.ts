@@ -49,7 +49,7 @@ const zTrade = z.object({
   inputs: z.array(zTradeAmount).describe('What the account paid, netted per asset across the route\'s fills.'),
   outputs: z.array(zTradeAmount),
   fees: z.array(zFillFeeLeg).describe('Fee legs RESTATE value the in/out legs already carry — a revenue breakdown, never extra flow. Do not add them to the trade\'s value. The same leg shape the fill feeds publish.'),
-  valueUsd: z.string().nullable().describe('Event-time USD: max of the priced in-side and out-side at the last closed hourly candle (≤30 days stale); null when no leg had a usable price.'),
+  valueUsd: z.string().nullable().describe('Event-time USD: max of the priced in-side and out-side at the last closed hourly candle (≤30 days stale); null when no leg had a usable price. A bond leg is its underlying\'s close × the bond\'s value factor at that time (its sale price accreting to face by maturity, face from it).'),
 })
 
 const zDcaEvent = z.object({

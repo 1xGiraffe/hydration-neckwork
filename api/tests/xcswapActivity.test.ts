@@ -56,8 +56,9 @@ describe('suppressXcswapPlumbingRows', () => {
   // read it separately. It did not, and rendered the two legs with the action they serve
   // missing: /extrinsic/14326094-3 showed a fee swap and a Wormhole send but no swap.
   it('sources the swap row on the extrinsic page, so the legs have one to fold into', () => {
-    const build = explorerService.slice(explorerService.indexOf('export async function getExtrinsicActivity'))
-    const body = build.slice(0, build.indexOf('export async function getBlockActivity'))
+    // The page's builder (the exported function wraps it to mark bond-sale trades).
+    const build = explorerService.slice(explorerService.indexOf('async function getExtrinsicActivityUnmarked('))
+    const body = build.slice(0, build.indexOf('async function getBlockActivityUnmarked('))
     const push = body.indexOf('xcswapRowsAt(height, index)')
     // The CALL, not the several comments that name it earlier in this function.
     const suppress = body.indexOf('await suppressActivityPlumbing(rows.filter')
@@ -74,7 +75,7 @@ describe('suppressXcswapPlumbingRows', () => {
   // rather than needing its own reader — asserted so a refactor that stops composing
   // them has to make the block page's own source explicit.
   it('lets the block page inherit the swap through the extrinsic page', () => {
-    const block = explorerService.slice(explorerService.indexOf('export async function getBlockActivity'))
+    const block = explorerService.slice(explorerService.indexOf('async function getBlockActivityUnmarked('))
     expect(block.slice(0, 2000)).toContain('getExtrinsicActivity(height, i)')
   })
 

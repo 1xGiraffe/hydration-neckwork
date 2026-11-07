@@ -1079,6 +1079,8 @@ function activityHeadline(row: ActivityRow): string {
   if (row.type === 'liquidity' && row.liqAction) return `${row.liqAction} liquidity`
   if (row.type === 'mm' && row.mmAction) return row.mmAction
   if (row.type === 'otc' && row.otcAction && row.bondSale) return BOND_SALE_HEADLINE[row.bondSale.kind]?.[row.otcAction] ?? 'Bond sale'
+  // A bond's LBP purchase or sell back is a trade row that is also the bond act.
+  if (row.type === 'trade' && row.bondSale) return row.bondSale.side === 'sell' ? 'Bond sold back' : 'Bond purchase'
   if (row.type === 'otc' && row.otcAction) return OTC_HEADLINE[row.otcAction] ?? 'OTC order'
   if (row.type === 'bond' && row.bondAction) return BOND_HEADLINE[row.bondAction] ?? 'Bond'
   if (row.type === 'juicer' && row.juicerAction) return JUICER_HEADLINE[row.juicerAction] ?? 'Juicer'

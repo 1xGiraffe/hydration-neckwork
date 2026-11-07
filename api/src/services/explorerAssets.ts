@@ -506,6 +506,14 @@ export const BOND_TERMS = new Map<number, BondTerms>()
 // builders name a bond sale's rows from it) — the shared sale read (bondSales.ts).
 export const BOND_SALES = new Map<number, BondSale[]>()
 export const BOND_SALE_BY_ORDER = new Map<string, BondSale>()
+// Every fill of a venue whose fills are trades (an LBP), by the identity of the trade
+// row it is — its block and the row's event (`<block>:e<i>`, BondSaleFill.rowEvents) —
+// so the activity builders can tell a trade that WAS a bond purchase, however many
+// fills an extrinsic holds and whether or not it is signed; and by extrinsic, for a
+// trade page addressed by its extrinsic.
+export const BOND_SALE_TRADES = new Map<string, { sale: BondSale; fill: number }>()
+export const BOND_SALE_TRADES_BY_EXTRINSIC = new Map<string, Array<{ sale: BondSale; fill: number }>>()
+export const bondSaleTradeKey = (block: number, eventIndex: number): string => `${block}:e${eventIndex}`
 async function injectBonds(client: ClickHouseClient): Promise<void> {
   type CreatedRow = { bond_id: number; underlying: number; issuer: string; maturity: string; block_height: number; ts: number }
   let rows: CreatedRow[]
@@ -517,7 +525,11 @@ async function injectBonds(client: ClickHouseClient): Promise<void> {
                      toString(JSONExtractUInt(args_json,'maturity')) AS maturity,
                      block_height, toUnixTimestamp(block_timestamp) AS ts
               FROM price_data.raw_events
-              WHERE event_name = 'Bonds.TokenCreated'`,
+              -- pallet-bonds creates a bond's token in the call that first issues it, so
+              -- every TokenCreated shares a block with an Issued (bond_activity): a
+              -- primary-key read of those blocks, not a scan of raw_events by name
+              WHERE block_height IN (SELECT DISTINCT block_height FROM price_data.bond_activity WHERE event_name = 'Bonds.Issued')
+                AND event_name = 'Bonds.TokenCreated'`,
       format: 'JSONEachRow',
     })
     rows = await res.json<CreatedRow>()
@@ -541,7 +553,11 @@ async function injectBonds(client: ClickHouseClient): Promise<void> {
       }).then(r => r.json<{ bond_id: number; issued: string }>())
         .then(list => { issued = new Map(list.map(x => [Number(x.bond_id), x.issued])) })
         .catch(err => console.error('[ExplorerAssets] bond issue read failed; keeping the previous amounts:', err instanceof Error ? err.message : err)),
-      loadBondSales(client, bondIds, isBond)
+      loadBondSales(client, bondIds, {
+        isBond,
+        underlyingOf: id => { const r = rows.find(x => Number(x.bond_id) === id); return r ? Number(r.underlying) : undefined },
+        decimalsOf: id => (cache.get(id) ?? assetDescriptor(id)).decimals,
+      })
         .then(list => { sales = list })
         .catch(err => console.error('[ExplorerAssets] bond sale read failed; keeping the previous sale anchors:', err instanceof Error ? err.message : err)),
     ])
@@ -566,9 +582,19 @@ export function applyBondRegistry(
   if (sales) {
     BOND_SALES.clear()
     BOND_SALE_BY_ORDER.clear()
+    BOND_SALE_TRADES.clear()
+    BOND_SALE_TRADES_BY_EXTRINSIC.clear()
     for (const s of sales) {
       ;(BOND_SALES.get(s.bondId) ?? BOND_SALES.set(s.bondId, []).get(s.bondId)!).push(s)
       if (s.venue === 'otc') BOND_SALE_BY_ORDER.set(s.id, s)
+      if (s.venue !== 'lbp') continue
+      s.fills.forEach((f, i) => {
+        for (const e of f.rowEvents ?? [f.eventIndex]) BOND_SALE_TRADES.set(bondSaleTradeKey(f.block, e), { sale: s, fill: i })
+        if (f.extrinsicIndex != null) {
+          const k = `${f.block}:x${f.extrinsicIndex}`
+          ;(BOND_SALE_TRADES_BY_EXTRINSIC.get(k) ?? BOND_SALE_TRADES_BY_EXTRINSIC.set(k, []).get(k)!).push({ sale: s, fill: i })
+        }
+      })
     }
   }
   for (const r of created) {
