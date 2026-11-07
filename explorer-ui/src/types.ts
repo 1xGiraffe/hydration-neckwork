@@ -857,7 +857,7 @@ export interface CloseAccountsResponse {
 }
 
 export interface SearchResult {
-  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination'
+  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination' | 'intent'
   value: string
   label?: string
   desc?: string   // asset-type: the descriptive name (e.g. DOT → "Polkadot")

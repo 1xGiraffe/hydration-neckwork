@@ -18,7 +18,7 @@ import { invalidArgument, toolErrorFromUpstream } from '../errors.ts'
 import { UpstreamError } from '../upstream.ts'
 import {
   accountLabel, accountUrl, assetLabelWithId, assetUrl, blockUrl,
-  extrinsicUrl, poolUrl, referendumUrl, shortHash, tagUrl, v3PoolUrl, xcDestinationUrl,
+  extrinsicUrl, intentUrl, poolUrl, referendumUrl, shortHash, tagUrl, v3PoolUrl, xcDestinationUrl,
 } from '../format/refs.ts'
 import { formatUsd, scaleBase1e8 } from '../format/units.ts'
 import { budget } from '../format/md.ts'
@@ -178,6 +178,12 @@ export function viewSearchHit(hit: SearchResult, base: string): SearchHitView | 
         detail: hit.desc ?? hit.asset?.name ?? null,
         json: { assetId: Number(value), symbol: hit.asset?.symbol ?? hit.label ?? null, name: hit.desc ?? null },
       }
+    // An ICE intent — a limit order or a DCA intent, found by its id or its "#n" handle.
+    case 'intent':
+      return {
+        kind: 'intent', label: hit.label ?? `intent ${value}`, identifier: value,
+        url: intentUrl(base, value), detail: hit.desc ?? null, json: { intentId: value, name: hit.label ?? null },
+      }
     case 'tag':
       return {
         kind: 'tag', label: hit.label ?? value, identifier: value,
@@ -244,7 +250,7 @@ export function viewSearchHits(hits: readonly SearchResult[], base: string): Sea
  * otherwise read as the "HDX Kraken LP" tag rather than as the native token.
  */
 export const HIT_KIND_PREFERENCE: readonly SearchResult['type'][] =
-  ['asset', 'tag', 'xcDestination', 'pool', 'referendum', 'block', 'extrinsic', 'address']
+  ['asset', 'tag', 'xcDestination', 'pool', 'referendum', 'block', 'intent', 'extrinsic', 'address']
 
 export interface PreferredHit { pair: SearchHitPair; exact: boolean }
 
