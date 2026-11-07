@@ -446,6 +446,35 @@ describe('GET /dexscreener/events', () => {
     })
   })
 
+  // An ICE solution routes as the solver's pot. A solution serving one owner is
+  // that owner's trade, so `maker` names the owner and the pot does not count as
+  // one trader for every intent; a solution serving several keeps the pot.
+  it('names the intent owner as maker of a one-owner ICE solution\'s swaps', async () => {
+    const pot = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
+    const owner = `0x${'5e'.repeat(32)}`
+    const potRows = [
+      { ...OMNIPOOL_EVENT_ROWS[0], swapper: pot },
+      { ...OMNIPOOL_EVENT_ROWS[0], swapper: pot, block_height: 8000001, event_index: 9 },
+    ]
+    const client = fakeClient({
+      'pub:ds:events:omnipool': potRows,
+      '-- ice:settlement-owners': [{ block_height: 8000000, x: 3, owner }],
+    })
+    await withApp(client, async app => {
+      const { events } = (await app.inject('/dexscreener/events?fromBlock=8000000&toBlock=8000010')).json()
+      expect(events.map((e: Row) => e.maker)).toEqual([owner, pot])
+    })
+    expect(client.seen.filter(s => s.query.includes('-- ice:settlement-owners'))).toHaveLength(1)
+  })
+
+  it('reads no ICE settlement for a window without a pot swap', async () => {
+    const client = fakeClient({ 'pub:ds:events:omnipool': OMNIPOOL_EVENT_ROWS })
+    await withApp(client, async app => {
+      await app.inject('/dexscreener/events?fromBlock=8000000&toBlock=8000010')
+    })
+    expect(client.seen.some(s => s.query.includes('-- ice:settlement-owners'))).toBe(false)
+  })
+
   it('reads the stableswap share token\'s reserve as the pool\'s total issuance', async () => {
     const client = fakeClient({ 'pub:ds:events:stableswap': STABLESWAP_EVENT_ROWS })
     await withApp(client, async app => {

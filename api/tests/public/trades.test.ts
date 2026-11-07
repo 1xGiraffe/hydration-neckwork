@@ -59,7 +59,7 @@ function assetsMatch(row: Row, assets: number[]): boolean {
   return !assets.length || assets.includes(Number(row.asset_in)) || assets.includes(Number(row.asset_out))
 }
 
-function fakeClient(overrides: { global?: Row[]; account?: Row[]; aliases?: Row[] } = {}) {
+function fakeClient(overrides: { global?: Row[]; account?: Row[]; aliases?: Row[]; actors?: Row[]; iceOwners?: Row[] } = {}) {
   const seen: Seen[] = []
   const client = {
     seen,
@@ -92,7 +92,8 @@ function fakeClient(overrides: { global?: Row[]; account?: Row[]; aliases?: Row[
       if (query.includes('FROM price_data.asset_swap_activity')) return page(overrides.global ?? GLOBAL_ROWS)
       if (query.includes('FROM price_data.swap_activity')) return page(overrides.global ?? GLOBAL_ROWS)
       if (query.includes('FROM price_data.dca_events')) return queryResult(DCA_EXEC_ROWS)
-      if (query.includes('FROM price_data.raw_events')) return queryResult(SWAP_ACTOR_ROWS)
+      if (query.includes('-- ice:settlement-owners')) return queryResult(overrides.iceOwners ?? [])
+      if (query.includes('FROM price_data.raw_events')) return queryResult(overrides.actors ?? SWAP_ACTOR_ROWS)
       if (query.includes('FROM price_data.raw_extrinsics')) return queryResult(EXTRINSIC_ROWS)
       if (query.includes('FROM price_data.account_alias_directory')) {
         return queryResult(overrides.aliases ?? [{ evm_address: EVM_ACCOUNT, account_id: BOUND_ACCOUNT }])
@@ -132,7 +133,7 @@ describe('GET /v1/trades', () => {
           {
             blockHeight: 1000, eventIndex: 22, extrinsicIndex: null, timestamp: '2026-06-24T02:00:00.000Z',
             // The DCA execution names its owner; the router's net event carries no `who`.
-            swapper: ACCOUNT_B, operationType: null,
+            swapper: ACCOUNT_B, trader: ACCOUNT_B, operationType: null,
             assetIn: '5', amountIn: '10000000000', assetOut: '0', amountOut: '500000000000',
             dca: { scheduleId: 42 },
           },
@@ -140,20 +141,20 @@ describe('GET /v1/trades', () => {
             blockHeight: 999, eventIndex: 7, extrinsicIndex: 2, timestamp: '2026-06-24T01:00:00.000Z',
             // Broadcast.Swapped's swapper wins over the extrinsic's signatory: a swap
             // dispatched through a proxy belongs to the account whose funds moved.
-            swapper: ACCOUNT_C, operationType: 'exactIn',
+            swapper: ACCOUNT_C, trader: ACCOUNT_C, operationType: 'exactIn',
             assetIn: '0', amountIn: '400000000000', assetOut: '5', amountOut: '8000000000',
             dca: null,
           },
           {
             blockHeight: 998, eventIndex: 3, extrinsicIndex: 1, timestamp: '2026-06-24T00:30:00.000Z',
-            swapper: ACCOUNT_A, operationType: 'exactOut',
+            swapper: ACCOUNT_A, trader: ACCOUNT_A, operationType: 'exactOut',
             assetIn: '5', amountIn: '1000000000', assetOut: '0', amountOut: '50000000000',
             dca: null,
           },
           {
             blockHeight: 997, eventIndex: 5, extrinsicIndex: null, timestamp: '2026-06-24T00:00:00.000Z',
             // Unattributable rather than credited to the router pallet.
-            swapper: null, operationType: null,
+            swapper: null, trader: null, operationType: null,
             assetIn: '0', amountIn: '100000000000', assetOut: '222', amountOut: '2000000000000000000',
             dca: null,
           },
@@ -161,6 +162,46 @@ describe('GET /v1/trades', () => {
         totalCount: 4,
       })
       expect(res.headers['cache-control']).toBe('public, max-age=3')
+    } finally {
+      await app2.close()
+    }
+  })
+
+  // An ICE solution's route swap names the solver's pot as swapper. `swapper` keeps
+  // that (frozen meaning); `trader` names the intent owner when the solution served
+  // one, and stays the pot when nothing names a single owner.
+  it('resolves trader through a one-owner ICE settlement and keeps swapper as the pot', async () => {
+    const pot = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
+    const rows: Row[] = [
+      { block_height: 1201, event_index: 30, extrinsic_index: 2, ts: '2026-06-24 03:00:00', event_name: 'Router.Executed', who: '', asset_in: 0, asset_out: 5, amount_in: '1', amount_out: '2' },
+      { block_height: 1200, event_index: 30, extrinsic_index: 2, ts: '2026-06-24 02:59:00', event_name: 'Router.Executed', who: '', asset_in: 0, asset_out: 5, amount_in: '1', amount_out: '2' },
+    ]
+    const probe = fakeClient({
+      global: rows,
+      actors: [{ block_height: 1201, event_index: 30, swapper: pot }, { block_height: 1200, event_index: 30, swapper: pot }],
+      iceOwners: [{ block_height: 1201, x: 2, owner: ACCOUNT_D }],
+    })
+    const app2 = await freshApp(probe)
+    try {
+      const res = await app2.inject('/v1/trades?limit=7')
+      expect(res.statusCode).toBe(200)
+      expect(res.json().items.map((r: Row) => [r.blockHeight, r.swapper, r.trader])).toEqual([
+        [1201, pot, ACCOUNT_D],
+        [1200, pot, pot],
+      ])
+      const owners = probe.seen.find(s => s.query.includes('-- ice:settlement-owners'))!
+      expect(owners.params.blocks).toEqual([1200, 1201])
+    } finally {
+      await app2.close()
+    }
+  })
+
+  it('reads no ICE settlement on a page without a pot swap', async () => {
+    const probe = fakeClient()
+    const app2 = await freshApp(probe)
+    try {
+      await app2.inject('/v1/trades?limit=9')
+      expect(probe.seen.some(s => s.query.includes('-- ice:settlement-owners'))).toBe(false)
     } finally {
       await app2.close()
     }

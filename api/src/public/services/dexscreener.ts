@@ -1,3 +1,4 @@
+import { ICE_POT_ACCOUNT, iceSettlementOwners, iceTraderOf } from '../../services/iceSettlement.ts'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import { allExplorerAssets } from '../../services/explorerAssets.ts'
@@ -1044,6 +1045,7 @@ function toEvent(
   venue: DexVenue,
   forms: PairIdForms,
   reserves: { asset0: string; asset1: string } | undefined,
+  iceOwners: ReadonlyMap<string, string>,
 ): DexScreenerSwapEvent {
   const blockHeight = Number(row.block_height)
   const eventIndex = Number(row.event_index)
@@ -1062,7 +1064,9 @@ function toEvent(
     txnId: txnIdFor(blockHeight, eventIndex, extrinsicIndex, row.op_key ?? ''),
     txnIndex: 0,
     eventIndex,
-    maker: row.swapper,
+    // An ICE solution's route swaps all name the solver's pot; the trade is the
+    // intent owner's when the solution served one (see dexScreenerEvents).
+    maker: iceTraderOf(row.swapper, { blockHeight, extrinsicIndex }, iceOwners) ?? row.swapper,
     pairId: pairId(forms, venue, row.pool_key, asset0, asset1),
     ...(inIsAsset0
       ? { asset0In: formatUnits(amount0Raw, decimals0), asset1Out: formatUnits(amount1Raw, decimals1) }
@@ -1218,11 +1222,20 @@ export async function dexScreenerEvents(client: ClickHouseClient, fromBlock: num
     for (const id of missing) skipped.add(id)
     return missing.length === 0
   }
+  // `maker` is who traded. An ICE intent solution routes through the pools as the
+  // solver's pot, so every one of its swaps would name the pot and fold every
+  // intent owner into one maker; a solution serving ONE owner is that owner's
+  // (iceSettlementOwners: the indexed intent orders, the explorer's attribution).
+  // One serving several keeps the pot: its routes are no single owner's. Read only
+  // when the window holds a pot swap.
+  const iceOwners = await iceSettlementOwners(client, [...omnipool, ...stableswap, ...xyk, ...uniswapV3]
+    .filter(row => row.swapper?.toLowerCase() === ICE_POT_ACCOUNT && row.extrinsic_index != null)
+    .map(row => ({ blockHeight: Number(row.block_height), extrinsicIndex: Number(row.extrinsic_index) })))
   const events = [
-    ...omnipool.filter(servable).map(row => toEvent(row, 'omnipool', forms, omnipoolReserves(row, forms))),
-    ...stableswap.filter(servable).map(row => toEvent(row, 'stableswap', forms, stableswapReserves(row, forms))),
-    ...xyk.filter(servable).map(row => toEvent(row, 'xyk', forms, xykReserves(row, forms))),
-    ...uniswapV3.filter(servable).map(row => toEvent(row, 'uniswapv3', forms, undefined)),
+    ...omnipool.filter(servable).map(row => toEvent(row, 'omnipool', forms, omnipoolReserves(row, forms), iceOwners)),
+    ...stableswap.filter(servable).map(row => toEvent(row, 'stableswap', forms, stableswapReserves(row, forms), iceOwners)),
+    ...xyk.filter(servable).map(row => toEvent(row, 'xyk', forms, xykReserves(row, forms), iceOwners)),
+    ...uniswapV3.filter(servable).map(row => toEvent(row, 'uniswapv3', forms, undefined, iceOwners)),
   ]
   if (skipped.size) warnSkipped(skipped)
   if (events.length > MAX_EVENTS) {

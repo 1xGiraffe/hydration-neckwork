@@ -1,3 +1,4 @@
+import { ICE_POT_ACCOUNT, iceSettlementOwners, iceTraderOf } from '../../services/iceSettlement.ts'
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
 import { iso } from '../schemas/common.ts'
@@ -78,6 +79,8 @@ export interface TradeRow {
   extrinsicIndex: number | null
   timestamp: string
   swapper: string | null
+  /** `swapper`, with an ICE solution's route swap resolved to the intent owner it ran for. */
+  trader: string | null
   operationType: 'exactIn' | 'exactOut' | null
   assetIn: string
   amountIn: string
@@ -461,7 +464,7 @@ async function decorate(client: ClickHouseClient, rows: RawTradeRow[], scopedTo:
     executionRows,
   )
 
-  return rows.map(row => {
+  const decorated = rows.map(row => {
     const blockHeight = Number(row.block_height)
     const eventIndex = Number(row.event_index)
     const extrinsicIndex = row.extrinsic_index == null ? null : Number(row.extrinsic_index)
@@ -485,6 +488,7 @@ async function decorate(client: ClickHouseClient, rows: RawTradeRow[], scopedTo:
       extrinsicIndex,
       timestamp: iso(row.ts),
       swapper,
+      trader: swapper,
       operationType: operationTypeOf(row.event_name, extrinsic?.call_name ?? null),
       assetIn: String(row.asset_in),
       amountIn: rawAmount(row.amount_in),
@@ -493,4 +497,21 @@ async function decorate(client: ClickHouseClient, rows: RawTradeRow[], scopedTo:
       dca: dca ? { scheduleId: dca.scheduleId } : null,
     }
   })
+  return withIceTraders(client, decorated)
+}
+
+/**
+ * `trader`: an ICE solution's route swap names the solver's pot as its swapper,
+ * which is the account the router traded for and stays `swapper`. The trade is
+ * the intent owner's when the solution served one owner (`iceSettlementOwners`,
+ * the explorer's attribution); a solution serving several keeps the pot, whose
+ * routes no single owner's are. Only a page holding a pot row reads anything.
+ */
+async function withIceTraders(client: ClickHouseClient, rows: TradeRow[]): Promise<TradeRow[]> {
+  const refs = rows
+    .filter(row => row.swapper?.toLowerCase() === ICE_POT_ACCOUNT && row.extrinsicIndex != null)
+    .map(row => ({ blockHeight: row.blockHeight, extrinsicIndex: row.extrinsicIndex! }))
+  if (!refs.length) return rows
+  const owners = await iceSettlementOwners(client, refs)
+  return rows.map(row => ({ ...row, trader: iceTraderOf(row.swapper, row, owners) }))
 }
