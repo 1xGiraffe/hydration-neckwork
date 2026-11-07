@@ -111,10 +111,34 @@ export interface TradeVolumeDetails {
   nativeVolumeSell: string
   nativeVolumeTotal: string
   nativeNetVolume: string
+  /**
+   * The candle's OWN volume over the same window: the asset's price rows, which
+   * the candles aggregate (USD) and which carry the native amounts the candles do
+   * not. It is POOL volume; the per-account figures above are what each account
+   * traded. The two differ by design (src/blocks/icePotSettlement.ts): volume no
+   * account is booked for — an ICE solution's route hop through an asset no owner
+   * traded, the fee processor's conversions — is in the candle and in no account,
+   * and the part of an ICE intent matched peer-to-peer against another, never
+   * touching a pool, is in its owner's figures and in no candle. Readers state the
+   * difference (candle minus the accounts' principal sum) rather than hide it.
+   */
+  candleVolumeBuy: number
+  candleVolumeSell: number
+  candleVolumeTotal: number
+  candleNativeVolumeBuy: string
+  candleNativeVolumeSell: string
+  candleNativeVolumeTotal: string
   limit: number
   offset: number
   hasMore: boolean
   nextOffset: number | null
+}
+
+interface CandleTotalsRow {
+  volume_buy: string
+  volume_sell: string
+  native_volume_buy: string
+  native_volume_sell: string
 }
 
 interface DetailTotalsRow {
@@ -340,7 +364,7 @@ export async function queryTradeVolumeDetails(
       offset,
     }
 
-    const [pageResult, totalsResult] = await Promise.all([
+    const [pageResult, totalsResult, candleResult] = await Promise.all([
       client.query({
         query: `
           SELECT
@@ -373,12 +397,46 @@ export async function queryTradeVolumeDetails(
         query_params: queryParams,
         format: 'JSONEachRow',
       }),
+      // One row per (asset, block) before summing: `prices` is a ReplacingMergeTree
+      // and a replayed block leaves copies until a merge — the candle rebuild's
+      // own rule (src/ohlc/repair.ts), so this equals the candle it describes.
+      client.query({
+        query: `
+          WITH
+            (SELECT min(block_height) FROM price_data.blocks
+              WHERE block_timestamp >= {start_time:DateTime}
+                AND block_timestamp < {end_time:DateTime}) AS from_block,
+            (SELECT max(block_height) FROM price_data.blocks
+              WHERE block_timestamp >= {start_time:DateTime}
+                AND block_timestamp < {end_time:DateTime}) AS to_block
+          SELECT
+            toString(sum(vb)) AS volume_buy,
+            toString(sum(vs)) AS volume_sell,
+            toString(sum(nb)) AS native_volume_buy,
+            toString(sum(ns)) AS native_volume_sell
+          FROM (
+            SELECT p.block_height,
+              any(p.usd_volume_buy) AS vb, any(p.usd_volume_sell) AS vs,
+              any(p.native_volume_buy) AS nb, any(p.native_volume_sell) AS ns
+            FROM price_data.prices AS p
+            WHERE p.asset_id = {asset_id:UInt32}
+              AND p.block_height BETWEEN from_block AND to_block
+            GROUP BY p.block_height
+          )
+        `,
+        query_params: queryParams,
+        format: 'JSONEachRow',
+      }),
     ])
 
-    const [rows, totalsRows] = await Promise.all([
+    const [rows, totalsRows, candleRows] = await Promise.all([
       pageResult.json<DetailRow>(),
       totalsResult.json<DetailTotalsRow>(),
+      candleResult.json<CandleTotalsRow>(),
     ])
+    const candle = candleRows[0]
+    const candleNativeBuy = parseRawAmount(candle?.native_volume_buy)
+    const candleNativeSell = parseRawAmount(candle?.native_volume_sell)
     await emojiSourceReady
     const accounts = rows.map(toTrader)
     const totals = totalsRows[0]
@@ -397,6 +455,12 @@ export async function queryTradeVolumeDetails(
       nativeVolumeSell: parseRawAmount(totals?.native_volume_sell),
       nativeVolumeTotal: parseRawAmount(totals?.native_volume_total),
       nativeNetVolume: parseRawAmount(totals?.native_net_volume),
+      candleVolumeBuy: parseNumber(candle?.volume_buy),
+      candleVolumeSell: parseNumber(candle?.volume_sell),
+      candleVolumeTotal: parseNumber(candle?.volume_buy) + parseNumber(candle?.volume_sell),
+      candleNativeVolumeBuy: candleNativeBuy,
+      candleNativeVolumeSell: candleNativeSell,
+      candleNativeVolumeTotal: (BigInt(candleNativeBuy) + BigInt(candleNativeSell)).toString(),
       limit,
       offset,
       hasMore,
@@ -416,6 +480,12 @@ export async function queryTradeVolumeDetails(
         nativeVolumeSell: '0',
         nativeVolumeTotal: '0',
         nativeNetVolume: '0',
+        candleVolumeBuy: 0,
+        candleVolumeSell: 0,
+        candleVolumeTotal: 0,
+        candleNativeVolumeBuy: '0',
+        candleNativeVolumeSell: '0',
+        candleNativeVolumeTotal: '0',
         limit,
         offset,
         hasMore: false,
