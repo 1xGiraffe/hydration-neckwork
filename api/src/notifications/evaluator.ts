@@ -500,7 +500,7 @@ const activityPayloadOf = (row: ActivityRow): MatchPayload => ({ lane: 'activity
 export const activityTypeSelects = (row: ActivityRow, type: string): boolean =>
   type === 'dca'
     ? (row.type === 'trade' && row.dca === true) || (row.type === 'intent' && row.intentKind === 'dca')
-    : activityTypeMatchesFamily(row.type, type)
+    : activityTypeMatchesFamily(row, type)
 
 const ACCOUNT_ACTIVITY_MATCHER: RowMatcher<ActivityRow, RuleParams['account-activity']> = {
   blockOf: activityBlockOf,
@@ -1040,6 +1040,11 @@ const INTENT_VERB: Record<string, string> = {
 // An OTC order's and a bond's acts read as their lifecycle, as the explorer's badges do.
 const OTC_HEADLINE: Record<string, string> = { Place: 'OTC order placed', Pull: 'OTC order pulled', Fill: 'OTC order filled' }
 const BOND_HEADLINE: Record<string, string> = { Issue: 'Bond issued', Redeem: 'Bond redeemed' }
+// A bond's primary-sale act (bondSale, an OTC row) reads as the bond act it is (the UI's BOND_SALE_LABELS).
+const BOND_SALE_HEADLINE: Record<string, Record<string, string>> = {
+  sale: { Place: 'Bond sale opened', Pull: 'Bond sale closed', Fill: 'Bond purchase' },
+  rollover: { Place: 'Bond rollover opened', Pull: 'Bond rollover closed', Fill: 'Bond rollover' },
+}
 // A Juicer row reads as the official app names the act (the UI's JUICER_LABELS).
 const JUICER_HEADLINE: Record<string, string> = {
   Deposit: 'Juicer deposit', Withdraw: 'Juicer withdrawal requested', Unwind: 'Juicer withdrawal unwinding',
@@ -1073,6 +1078,7 @@ function activityHeadline(row: ActivityRow): string {
   if (row.type === 'liquidity' && row.liqAction === 'Compound') return 'Compound'
   if (row.type === 'liquidity' && row.liqAction) return `${row.liqAction} liquidity`
   if (row.type === 'mm' && row.mmAction) return row.mmAction
+  if (row.type === 'otc' && row.otcAction && row.bondSale) return BOND_SALE_HEADLINE[row.bondSale.kind]?.[row.otcAction] ?? 'Bond sale'
   if (row.type === 'otc' && row.otcAction) return OTC_HEADLINE[row.otcAction] ?? 'OTC order'
   if (row.type === 'bond' && row.bondAction) return BOND_HEADLINE[row.bondAction] ?? 'Bond'
   if (row.type === 'juicer' && row.juicerAction) return JUICER_HEADLINE[row.juicerAction] ?? 'Juicer'

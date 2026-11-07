@@ -1,5 +1,6 @@
 import type { ClickHouseClient } from '../db/client.ts'
-import { currentPriceOf } from './explorerAssets.ts'
+import { BOND_TERMS, currentPriceOf } from './explorerAssets.ts'
+import { withBondPrices } from './bonds.ts'
 import { withStableswapSharePrices, type StableswapSharePool } from './lpMath.ts'
 import { BIL_ASSET_ID, UBIL_ASSET_ID } from './bil.ts'
 import { JUICER_VAULTS } from './juicer.ts'
@@ -56,7 +57,7 @@ export function withStrategySharePrices(feeds: ReadonlyMap<number, bigint>, rate
 
 /**
  * The derived current prices every surface applies over its feeds, in the ONE order that
- * is right both ways round: strategy shares first (BIL at NAV, so a pool holding it —
+ * is right both ways round, bonds after all of it (withBondPrices): strategy shares first (BIL at NAV, so a pool holding it —
  * 2-Pool-BIL — redeems at NAV), then stableswap shares at what they redeem for, then the
  * strategy shares again (jETH's underlying IS a pool share, 2-Pool-GETH, priced by the
  * second step). Each step is a pure function of the map before it, so the third pass
@@ -68,8 +69,13 @@ export function withDerivedSharePrices(
   rates: readonly StrategyShareRate[],
   decimalsOf: (assetId: number) => number | null | undefined,
   isShare: (assetId: number) => boolean,
+  nowMs: number = Date.now(),
 ): Map<number, bigint> {
   const strategies = withStrategySharePrices(feeds, rates)
   const shares = withStableswapSharePrices(strategies, pools, id => currentPriceOf(strategies, id), decimalsOf, isShare)
-  return withStrategySharePrices(shares, rates)
+  const rated = withStrategySharePrices(shares, rates)
+  // Bonds last (bonds.ts): a bond is worth its underlying's price — whatever the steps
+  // above made it — times the bond rule's factor (face from maturity, its own issue
+  // yield discounted over the time left before it).
+  return withBondPrices(rated, BOND_TERMS.values(), nowMs, id => currentPriceOf(rated, id))
 }

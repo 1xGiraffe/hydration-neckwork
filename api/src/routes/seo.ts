@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
+import { BOND_FAMILIES, bondFamilyPath } from '../services/bonds.ts'
 import { accountRef, resolveDisplayAccountId, xcDestinationBySlug } from '../services/explorerService.ts'
 import { normalizeAddress, hydrationAddress, polkadotAddress } from '../services/addressIdentity.ts'
 import { displayDescriptor, knownExplorerAsset, allExplorerAssets, isStableswapShareToken } from '../services/explorerAssets.ts'
@@ -213,6 +214,8 @@ const HUBS: Record<string, { title: string; description: string }> = {
   '/hollar': { title: 'HOLLAR', description: 'HOLLAR supply, the stability module, collateral and peg behaviour.' },
   '/juicer': { title: 'Juicer', description: 'Juicer, Hydration\u2019s leveraged PRIME-loop strategy: deposit GETH, earn in it. TVL and capacity, the estimated APY, the vault\u2019s money-market position, the PRIME loop, positions, withdrawal requests and every deposit, withdrawal, harvest and rebalance.' },
   '/bil': { title: 'Brazilian Invoice Loans', description: 'Brazilian Invoice Loans (BIL) on Hydration: HOLLAR lent to fixed-rate 60-day Decentral invoice-receivable positions at 18% APY. NAV and realized APY, TVL and capacity, the maturity ladder, the redemption queue and its wait, the BIL/HOLLAR pool\u2019s premium or discount to NAV, holders and every deposit, redemption, settlement and claim.' },
+  // One hub per bond family (bonds.ts BOND_FAMILIES): /hollar-bonds, …
+  ...Object.fromEntries(BOND_FAMILIES.map(f => [bondFamilyPath(f.key), { title: f.title, description: f.description }])),
   '/intents': { title: 'Intents', description: 'Limit orders and DCA intents on Hydration, settled by the ICE solver: the open book, fills matched or routed through the pools, execution quality, top traders and the matched-volume fee.' },
   '/revenue': { title: 'Revenue', description: 'Revenue on Hydration, live: User Revenue — what users earn, net — and Protocol Revenue — what the protocol earns — over 24 hours, 7 days, 30 days and all time.' },
   '/revenue/users': { title: 'User Revenue', description: 'What users earn on Hydration, net: LP fees, lending interest and incentives, farm rewards, token accrual and staking yield, less borrow interest and fees paid — by stream and top earners, through the last closed hour.' },

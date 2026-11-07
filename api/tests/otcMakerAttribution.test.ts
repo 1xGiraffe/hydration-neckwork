@@ -19,7 +19,7 @@ const prices = new Map<number, PriceInfo>()
 const legs = (over: Partial<OtcPlacedLeg> = {}): OtcPlacedLeg => ({
   assetIn: 1_001_351, assetOut: 1_001_353,
   amountIn: '452563222222222222222222', amountOut: '463292880801654013221745',
-  partiallyFillable: true, maker: MAKER,
+  partiallyFillable: true, maker: MAKER, governance: true,
   ...over,
 })
 const placedById = (leg = legs()) => new Map<string, OtcPlacedLeg>([['1548', leg]])

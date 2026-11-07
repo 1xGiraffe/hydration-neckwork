@@ -24,7 +24,7 @@ import { referendumTitleFor, referendumTitleKey } from './referendumTitleService
 // through a dynamic import instead, same as the tag branch does for tagService.
 import type { ReferendumListRow, ReferendumPallet } from './governanceService.ts'
 import { weightedFromLabels } from './convictionWeight.ts'
-import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, idsDisplayedAs, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, currentPriceOf, isStableswapShareToken, v3VaultShareAssets, displayAssetId, supplyFoldedShareIds, foldedShareEntries, namedShareWrapperOf, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
+import { type AssetOrigin, assetDescriptor, displayDescriptor, assetDecimalsOrNull, allExplorerAssets, assetIdsForToken, idsDisplayedAs, ATOKEN_RESERVE_ID, ATOKEN_UNDERLYING_ID, isMoneyMarketAToken, H2O_ASSET_ID, BOND_UNDERLYING_ID, BOND_TERMS, BOND_SALE_BY_ORDER, bondFactorWadAt, bondRoundOf, PRICE_ALIAS_ID, SHARE_TOKEN_UNDERLYING_ID, UNDERLYING_TO_ATOKEN_ID, priceAssetId, currentPriceOf, isStableswapShareToken, v3VaultShareAssets, displayAssetId, supplyFoldedShareIds, foldedShareEntries, namedShareWrapperOf, shareWrapperOf, assetIdFromMmAddress, mmReserveAddressForAsset, MM_CONTRACT_ASSET, MM_MARKETS as MM_MARKET_LIST, CORE_MM_MARKET, GIGAHDX_MM_MARKET, type MmMarket, type ExplorerAsset } from './explorerAssets.ts'
 import { accountVolumeSource } from './accountTradeVolume.ts'
 import { firstTradeOf, loadVolumeBuckets, tradingVolumeAsOfBlock, tradingVolumeTotals, volumeCutHeights, type AccountVolumeHistory, type VolumeCutHeights } from './accountVolumeHistory.ts'
 import { AAVE_COLLECTOR, PROTOCOL_REVENUE_PREDICATE_SQL, REVENUE_STREAMS, buildRevenueEventRowsSql, type EventfulRevenueStream } from './revenueStreams.ts'
@@ -59,7 +59,7 @@ import { currentMmOraclePrices, withMmOraclePrices } from './mmOraclePrices.ts'
 import { deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
 import { XCM_BARRIER_EVENTS, XCM_IN_DEPOSIT_EVENTS, XCM_IN_WALK_EVENTS, XCM_WALK_CROSSABLE_EVENTS } from './xcmWalkEvents.ts'
 import { trappedArrivals, type TrappedArrival } from './xcmTrappedArrivals.ts'
-import { OMNIPOOL_ACCOUNT, PRICE_LOOKBACK_DAYS, custodyAccountSql, formatUnits, isCustodyAccount, isUncountedHolding, poolOwnHubHoldingSql, renderUsd, scaledUsd, uncountedHoldingSql } from './valuation.ts'
+import { OMNIPOOL_ACCOUNT, PRICE_LOOKBACK_DAYS, custodyAccountSql, formatUnits, isCustodyAccount, isCustodyH160, isUncountedHolding, poolOwnHubHoldingSql, renderUsd, scaledUsd, uncountedHoldingSql } from './valuation.ts'
 import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
 import { canSkipRepublish } from './snapshotRepublish.ts'
@@ -84,6 +84,7 @@ import { isTerminalXcswapStatus, xcswapSettlementsFor, type XcswapSettlement, ty
 import { loadForeignCandles } from './foreignCandles.ts'
 import { intentLimitPrice } from './intentLimitPrice.ts'
 import { loadStrategyShareRates, withDerivedSharePrices, type StrategyShareRate } from './strategySharePrice.ts'
+import { BONDS_POT_ACCOUNT, BOND_WAD, bondValueFactorWad, fillYield, netPriceWad, paysInFaceUnits, primaryOtcSaleKind, wadNumber, type BondSaleKind, type BondSaleVenue, type BondTerms } from './bonds.ts'
 import { BIL_ACTIONS, BIL_ACTION_SLUGS, BIL_ASSET_ID, BIL_CONTRACTS, BIL_HOLLAR_ASSET_ID, BIL_MM_POOL, BIL_TOPIC, BIL_VAULT, DECENTRAL_POOL, UBIL_ASSET_ID, UBIL_RESERVE, BIL_ACTION_ASSETS, bilActionOf, bilActionRowSql, bilFirstInvestmentBlock, bilRowAssets, decentralBorrowers, decodeBilLog, type BilAction, type BilEvent, type BilLogRow } from './bil.ts'
 import { TREASURY_POT, XYK_PAIR_EVENTS, isAmountlessLiquidityEvent, liquidityLegAssetIds, matchLiquidityAmounts, missingLiquidityAmounts, type LiquidityAmountCandidate, type LiquidityTransferLeg } from './liquidityLegs.ts'
 import { HOLLAR_ASSET_ID as JUICER_HOLLAR_ASSET_ID, JUICER_ACTION_SLUGS, JUICER_CONTRACTS, LOOP_INTENT_ENTRY, PRIME_ASSET_ID, JUICER_ACTION_TOPIC, JUICER_SUBLOOP, JUICER_TOPIC, JUICER_VAULTS, decodeJuicerLog, isJuicerSynthetic, juicerVaultByAddress, type JuicerAction, type JuicerEvent, type JuicerLogRow } from './juicer.ts'
@@ -113,6 +114,7 @@ export interface AccountRef {
   profile: { name: string; avatarVersion: number } | null   // self-set display name/avatar, if any
   isContract?: boolean                // deployed EVM smart contract (contract registry)
   contractName?: string               // verified source's contract name — the pill's label, like an identity display
+  displayName?: string                // a system account's own name inside a generic tag (ACCOUNT_DISPLAY_NAMES)
 }
 
 // The explorer's AssetRef: the registry entry under its DISPLAY face — a pool share
@@ -364,6 +366,9 @@ export function contractDisplayName(h160: string): string | undefined {
   return own
 }
 
+// System accounts that keep a generic tag (and so its membership, which the revenue and
+// holder-class folds fingerprint) yet go by their own name wherever they are shown.
+const ACCOUNT_DISPLAY_NAMES: Record<string, string> = { [BONDS_POT_ACCOUNT]: 'Bonds Pot' }
 export function accountRef(accountId: string): AccountRef {
   const resolved = resolveDisplayAccountId(accountId)
   const t = tagForAccount(resolved)
@@ -386,6 +391,8 @@ export function accountRef(accountId: string): AccountRef {
     // A verified contract's own name, so a pill can label it the way it labels
     // an identity instead of showing bare hex.
     ...contractNameOf(resolved),
+    // A system account's own name inside a generic tag (the Bonds pot in Pallet Pot).
+    ...(ACCOUNT_DISPLAY_NAMES[resolved] ? { displayName: ACCOUNT_DISPLAY_NAMES[resolved] } : {}),
   }
 }
 
@@ -1519,7 +1526,7 @@ export function eventValueFilterSql(
   const { thresholds, denominator } = historicalValueThresholds(filters.min)
   return {
     joinSql: historicalCloseJoinSql(assetExpr, timestampExpr, alias, options.since),
-    predicateSql: `AND ${exactHistoricalValuePredicateSql(assetExpr, rawAmountExpr, `${alias}.close`, thresholds, denominator, options)}`,
+    predicateSql: `AND ${exactHistoricalValuePredicateSql(assetExpr, rawAmountExpr, bondCloseSql(assetExpr, timestampExpr, `${alias}.close`), thresholds, denominator, options)}`,
   }
 }
 
@@ -1565,7 +1572,7 @@ export function eventValueAlternativesFilterSql(
   if (filters?.min == null || filters.unit === 'token' || !legs.length) return { joinSql: '', predicateSql: '' }
   const { thresholds, denominator } = historicalValueThresholds(filters.min)
   const branches = legs.flatMap(leg => {
-    const close = `${leg.alias}.close`
+    const close = bondCloseSql(leg.assetExpr, timestampExpr, `${leg.alias}.close`)
     const options = { amountIsUInt256: leg.amountIsUInt256, hasAmountExpr: leg.hasAmountExpr }
     return [
       historicalLegPricedSql(leg.assetExpr, leg.rawAmountExpr, close, thresholds, options),
@@ -2287,6 +2294,44 @@ function priceAtomsOf(priceRaw: string): bigint | null {
   return scaled / price.denominator
 }
 
+// A bond's historical value is its underlying's close × the bond rule's factor at the
+// row's own time (bonds.ts bondValueFactorWad, a pure function of time) — the same rule
+// the current price applies, so a flow, a chart and the live point agree. These are the
+// TS and SQL halves of that one product, kept integer-identical: the close's 1e-12 atoms
+// times the WAD factor, floored (a Decimal(·,12) division truncates the same way).
+function eventMs(ts: string): number {
+  return Date.parse(normalizeTs(ts).replace(' ', 'T') + 'Z')
+}
+export function bondAdjustedClose(assetId: number, ts: string, closeRaw: string | undefined): string | undefined {
+  if (closeRaw == null) return closeRaw
+  const factor = bondFactorWadAt(assetId, eventMs(ts))
+  if (factor === undefined) return closeRaw
+  if (factor == null) return undefined
+  const atoms = priceAtomsOf(closeRaw)
+  if (atoms == null) return undefined
+  return formatUnits((atoms * factor / BOND_WAD).toString(), 12)
+}
+/** The bond rule's factor (WAD, Nullable(Int256)) for one bond at a ms-precision Int256 time. */
+function bondFactorSql(t: { maturityMs: number; anchor: { priceWad: bigint; closedMs: number | null } | null }, msExpr: string): string {
+  const W = `toInt256('${BOND_WAD}')`, M = `toInt256('${t.maturityMs}')`
+  const a = t.anchor
+  if (!a || a.priceWad <= 0n) return `if(${msExpr} >= ${M}, ${W}, CAST(NULL AS Nullable(Int256)))`
+  const p = `toInt256('${a.priceWad}')`
+  if (a.closedMs == null || a.closedMs >= t.maturityMs) return `if(${msExpr} >= ${M}, ${W}, ${p})`
+  const g = BOND_WAD * BOND_WAD / a.priceWad - BOND_WAD
+  if (g <= 0n) return `if(${msExpr} >= ${M}, ${W}, ${p})`
+  return `multiIf(${msExpr} >= ${M}, ${W}, ${msExpr} <= toInt256('${a.closedMs}'), ${p},
+    intDiv(${W} * ${W}, ${W} + intDiv(toInt256('${g}') * (${M} - ${msExpr}), toInt256('${t.maturityMs - a.closedMs}'))))`
+}
+/** SQL twin of bondAdjustedClose: `closeExpr` (a Decimal(·,12) close of the asset's price series) as the asset's value at `tsExpr`. */
+export function bondCloseSql(assetExpr: string, tsExpr: string, closeExpr: string): string {
+  const terms = [...BOND_TERMS.values()]
+  if (!terms.length) return closeExpr
+  const ms = `(toInt256(toUnixTimestamp(${tsExpr})) * 1000)`
+  const arms = terms.flatMap(t => [`toUInt32(${assetExpr}) = ${t.bondId}`, bondFactorSql(t, ms)])
+  return `(toDecimal256(${closeExpr}, 12) * toDecimal256(multiIf(${arms.join(', ')}, toInt256('${BOND_WAD}')), 0) / toDecimal256('${BOND_WAD}', 0))`
+}
+
 function exactUsdLeg(raw: string | null | undefined, decimals: number, closeRaw: string | undefined): ExactUsdLeg | null {
   if (!raw || !/^\d+$/.test(raw) || !closeRaw) return null
   const priceAtoms = priceAtomsOf(closeRaw)
@@ -2368,6 +2413,11 @@ export function activityHistPick(r: ActivityRow): HistPick {
   // A BIL row likewise: the HOLLAR it moved, or — a request, a cancellation — the uBIL put
   // into or taken out of the queue (uBIL's history is BIL's feed).
   if (isStrategyRow(r)) return r.asset && r.amount != null ? histLeg(r.asset, r.amount, r.timestamp) : null
+  // A bond purchase is worth what was paid for it: its payment leg first, the bonds (at
+  // the bond rule) only as the alternative.
+  if (r.type === 'otc' && r.bondSale && r.otcAction === 'Fill' && r.assetIn && r.amountIn != null) {
+    return { alternatives: [histLeg(r.assetIn, r.amountIn, r.timestamp), ...(r.assetOut && r.amountOut != null ? [histLeg(r.assetOut, r.amountOut, r.timestamp)] : [])] }
+  }
   if (r.assetOut && r.amountOut != null) return tradeLegsPick(r.assetIn, r.amountIn, r.assetOut, r.amountOut, r.timestamp)
   if (r.asset && r.amount != null) return histLeg(r.asset, r.amount, r.timestamp)
   if (r.assetIn && r.amountIn != null) return histLeg(r.assetIn, r.amountIn, r.timestamp)
@@ -2399,7 +2449,7 @@ export async function applyHistoricalUsd<T>(rows: T[], pick: (r: T) => HistPick)
   rows.forEach((r, i) => {
     const p = picks[i]
     if (!p) return
-    const priceLeg = (leg: HistLeg) => exactUsdLeg(leg.raw, leg.decimals, closes.get(historicalPriceKey(leg.assetId, leg.ts)))
+    const priceLeg = (leg: HistLeg) => exactUsdLeg(leg.raw, leg.decimals, bondAdjustedClose(leg.assetId, leg.ts, closes.get(historicalPriceKey(leg.assetId, leg.ts))))
     let priced: ExactUsdLeg[] | null
     if ('sum' in p) {
       const legs = p.sum.map(priceLeg)
@@ -2624,6 +2674,12 @@ export function scaledFromPriceInfo(p: PriceInfo | undefined): bigint | null {
     return scaled > 0n ? scaled : null
   } catch { return null }
 }
+/** A bond's 24h price change: (1 + its underlying's) × factor(now) ÷ factor(24h ago) − 1; null when either factor is unstated. */
+export function bondChange24h(t: BondTerms, underlyingChange: number, nowMs: number): number | null {
+  const now = bondValueFactorWad(t, nowMs), then = bondValueFactorWad(t, nowMs - 86_400_000)
+  if (now == null || then == null || then <= 0n) return null
+  return (1 + underlyingChange) * wadNumber(now) / wadNumber(then) - 1
+}
 async function withExplorerDerivedSharePrices(m: Map<number, PriceInfo>): Promise<void> {
   const pools = await currentStableswapSharePools(client)
   let rates: StrategyShareRate[] = []
@@ -2642,6 +2698,10 @@ async function withExplorerDerivedSharePrices(m: Map<number, PriceInfo>): Promis
   const change = new Map<number, number>()
   for (const id of shareIds) change.set(id, (m.get(id) ?? m.get(priceAssetId(id)))?.change24h ?? 0)
   for (const r of rates) change.set(r.shareAssetId, m.get(r.collateralAssetId)?.change24h ?? 0)
+  // A bond's entry is the bond rule's (bonds.ts), set or removed; its 24h move is its own
+  // series' — the underlying's move and the factor's (bondChange24h).
+  const nowMs = Date.now()
+  for (const [bondId, t] of BOND_TERMS) change.set(bondId, bondChange24h(t, m.get(t.underlyingId)?.change24h ?? 0, nowMs) ?? 0)
   for (const id of change.keys()) {
     const derived = priced.get(id)
     m.delete(id)
@@ -8645,7 +8705,7 @@ async function spendableBalances(pairs: { account: string; assetId: number }[]):
     // The market's reserve is the pool share (2-Pool-HUSDC), not the asset the order
     // names (HUSDC), so re-fold before reading — same second fold as getAddress.
     balances = foldShareBalances(balances)
-    balances = mergeErc20Balances(balances, erc20ByHolder.get(h160) ?? [], prices)
+    balances = mergeErc20Balances(balances, erc20ByHolder.get(h160) ?? [], prices, isCustodyAccount(account) || isCustodyH160(h160))
     for (const b of balances) freeByAccountAsset.set(`${account}|${b.asset.assetId}`, { free: b.free, decimals: b.asset.decimals })
   }
 
@@ -10170,8 +10230,8 @@ function pricedAssetsDirectory({ totals, holderCounts, samples, xcDestinations }
   const listed = allExplorerAssets()
     .filter(a => !isStableswapShareToken(a.assetId) && !a.symbol.includes('-Pool') && !a.symbol.startsWith('Asset') && a.symbol.trim() !== '')
     .map(a => {
-      // Derivatives (bonds, aTokens) carry no price feed of their own — fall back
-      // to the asset they're priced through (a bond redeems 1:1 for its underlying).
+      // Derivatives carry no price feed of their own: an aToken is priced through its
+      // underlying, a bond by the bond rule (its own entry, bonds.ts).
       const p = currentPriceOf(prices, a.assetId)
       const type = explorerAssetType(a)
       const raw = totals.get(a.assetId) ?? 0n
@@ -12753,6 +12813,11 @@ export interface ActivityRow {
   otcPartial?: boolean            // fill came from OTC.PartiallyFilled
   otcPartiallyFillable?: boolean  // Placed order property
   otcFee?: string                 // fills; denominated in assetOut
+  // The row is an act of a bond's PRIMARY SALE (bonds.ts): a venue's row (an OTC place,
+  // pull or fill; an LBP trade) that stays its venue's type everywhere and is ALSO a bond
+  // act — the `bond` type and its actions admit it (activityTypeMatchesFamily,
+  // bondSaleAction). `family`/`round` name its bond family's page and round.
+  bondSale?: BondSaleRef
   // A transfer read from the token contract's own ERC-20 Transfer log because no pallet
   // event reports it (an Erc20 registry asset moved inside the EVM); `eventIndex` is
   // that EVM.Log event.
@@ -17702,7 +17767,50 @@ type RawBondActivityEvent = { block_height: number; ts: string; event_index: num
 // keep the event-time valuation and the displayed row in agreement. `identity` is
 // the one filter decided on the built row, so it walks history like every other
 // source with a row-level filter.
-async function getRecentBonds(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}, assetId?: number, action?: string): Promise<ActivityRow[]> {
+//
+// `includeSales` (the `bond` type's own feed, never `all`, which reads them as OTC rows):
+// the bond's primary-sale acts join the Bonds-pallet rows — the OTC place, pull and fill
+// rows of every primary-sale order (bondSaleActivityRows), merged newest first. They are
+// few (one row per sale act), so they are read whole in the window and merged with the
+// first offset + limit pallet rows, which is exact.
+async function getRecentBonds(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}, assetId?: number, action?: string, includeSales = false): Promise<ActivityRow[]> {
+  if (!includeSales) return getRecentBondEvents(limit, from, to, accounts, offset, filters, assetId, action)
+  const [events, sales] = await Promise.all([
+    getRecentBondEvents(offset + limit, from, to, accounts, 0, filters, assetId, action),
+    bondSaleActivityRows(from, to),
+  ])
+  const bondIds = bondIdsForTokens(assetIdsForToken(filters.token), assetId)
+  const accountSet = accounts?.length ? new Set(accounts.map(a => a.toLowerCase())) : null
+  const saleRows = sales.filter(r => (bondIds == null || bondIds.includes(r.bondSale!.bondId))
+    && (accountSet == null || [r.who?.accountId, r.to?.accountId].some(a => a != null && accountSet.has(a.toLowerCase())))
+    && activityRowMatchesAction(r, action) && activityRowMatchesFilters(r, filters))
+  return [...events, ...saleRows]
+    .sort((a, b) => b.blockHeight - a.blockHeight || (b.eventIndex ?? 0) - (a.eventIndex ?? 0))
+    .slice(offset, offset + limit)
+}
+// Every primary-sale act in a window, as the OTC builder makes it (otcRowFromEvent),
+// valued at event time — the order ids are the registry's sale read (BOND_SALE_BY_ORDER).
+async function bondSaleActivityRows(from?: string, to?: string): Promise<ActivityRow[]> {
+  const ids = [...BOND_SALE_BY_ORDER.keys()]
+  if (!ids.length) return []
+  const tw = timeWindow(from, to)
+  return cached(`explorer:bond-sale-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${from ?? ''}:${to ?? ''}:${ids.join(',')}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
+    const prices = await ensurePrices()
+    const res = await client.query({
+      query: `SELECT block_height, toString(block_timestamp) AS ts, event_index, extrinsic_index, event_name, args_json
+              FROM ${otcActivityTable()}
+              WHERE ${tw ?? '1'} AND event_name IN (${OTC_EVENT_NAMES.map(n => `'${n}'`).join(',')})
+                AND toUInt32(JSONExtractUInt(args_json,'orderId')) IN ({ids:Array(UInt32)})`,
+      query_params: { ids: ids.map(Number) }, format: 'JSONEachRow',
+    })
+    const raw = await res.json<RawOtcActivityEvent>()
+    const placedById = await getOtcPlacedLegsByOrderId(raw.map(r => argInt((safeJson(r.args_json) ?? {}) as Record<string, unknown>, 'orderId')))
+    const rows = raw.map(r => otcRowFromEvent(r, prices, placedById)).filter((r): r is ActivityRow => r != null && r.bondSale != null)
+    await applyHistoricalUsd(rows, activityHistPick)
+    return rows
+  })
+}
+async function getRecentBondEvents(limit: number, from?: string, to?: string, accounts?: string[], offset = 0, filters: ValueListFilters = {}, assetId?: number, action?: string): Promise<ActivityRow[]> {
   const tw = timeWindow(from, to)
   const acctList = accounts && accounts.length ? sqlAccountList(accounts) : null
   return cached(`explorer:bond-activity:${await liveHeadTag(Boolean(tw), datedWindowIsClosed(to))}:${limit}:${offset}:${from ?? ''}:${to ?? ''}:${acctList ?? ''}:${assetId ?? ''}:${filterKey(filters)}:${action ?? ''}`, tw ? 30000 : LIVE_CACHE_MS, async () => {
@@ -18270,7 +18378,29 @@ function resolveOtcAction(action?: string): string | undefined {
   if (!action) return undefined
   return OTC_ACTION_ALIASES[action] ?? action
 }
-export interface OtcPlacedLeg { assetIn: number; assetOut: number; amountIn: string; amountOut: string; partiallyFillable: boolean; maker: string | null }
+export interface BondSaleRef {
+  venue: BondSaleVenue; kind: BondSaleKind; bondId: number; family: string | null; round: number | null; maturityAt: string | null
+  /** A fill's terms: face units paid per bond received (net of the fee), and the return and APR it locked in to maturity (bonds.ts fillYield). */
+  price?: number | null; returnPct?: number | null; aprPct?: number | null
+}
+/** The primary-sale act a row is, venue-agnostic (bonds.ts); null for any other row. */
+export function bondPrimarySaleOf(r: Pick<ActivityRow, 'bondSale'>): BondSaleRef | null {
+  return r.bondSale ?? null
+}
+/** The bond actions a primary-sale row answers to: opening and closing an offer, a purchase, a rollover. */
+export const BOND_SALE_ACTIONS = ['SaleOpen', 'SaleClose', 'Purchase', 'Rollover'] as const
+export function bondSaleAction(r: Pick<ActivityRow, 'bondSale' | 'otcAction'>): string | null {
+  const b = r.bondSale
+  if (!b) return null
+  if (r.otcAction === 'Place') return 'SaleOpen'
+  if (r.otcAction === 'Pull') return 'SaleClose'
+  return b.kind === 'rollover' ? 'Rollover' : 'Purchase'
+}
+export interface OtcPlacedLeg {
+  assetIn: number; assetOut: number; amountIn: string; amountOut: string; partiallyFillable: boolean; maker: string | null
+  /** Placed with no extrinsic: dispatched by governance (bonds.ts's primary-sale rule reads it). */
+  governance: boolean
+}
 
 // The order's MAKER — the account that owns it. No OTC event names them: Placed
 // and Cancelled carry no account at all, and Filled/PartiallyFilled name only
@@ -18306,7 +18436,7 @@ const OTC_PLACED_MEMO_MAX = 20_000
 const OTC_PLACED_FINALITY_MARGIN_BLOCKS = 600
 const otcPlacedMemo = new Map<string, OtcPlacedLeg>()
 
-async function getOtcPlacedLegsByOrderId(orderIds: Array<string | number>): Promise<Map<string, OtcPlacedLeg>> {
+export async function getOtcPlacedLegsByOrderId(orderIds: Array<string | number>): Promise<Map<string, OtcPlacedLeg>> {
   const out = new Map<string, OtcPlacedLeg>()
   const misses: Array<string | number> = []
   for (const id of new Set(orderIds.map(String))) {
@@ -18327,11 +18457,12 @@ async function getOtcPlacedLegsByOrderId(orderIds: Array<string | number>): Prom
                      toUInt32(JSONExtractInt(args_json,'assetOut')) AS asset_out,
                      JSONExtractString(args_json,'amountIn') AS amount_in,
                      JSONExtractString(args_json,'amountOut') AS amount_out,
-                     JSONExtractBool(args_json,'partiallyFillable') AS partially_fillable
+                     JSONExtractBool(args_json,'partiallyFillable') AS partially_fillable,
+                     extrinsic_index IS NULL AS governance
               FROM ${otcActivityTable()}
               WHERE event_name = 'OTC.Placed' AND JSONExtractUInt(args_json,'orderId') IN (${list})
             )
-            SELECT p.order_id AS order_id, any(p.block_height) AS placed_block,
+            SELECT p.order_id AS order_id, any(p.block_height) AS placed_block, any(p.governance) AS governance,
                    any(p.asset_in) AS asset_in, any(p.asset_out) AS asset_out,
                    any(p.amount_in) AS amount_in, any(p.amount_out) AS amount_out,
                    any(p.partially_fillable) AS partially_fillable,
@@ -18348,7 +18479,7 @@ async function getOtcPlacedLegsByOrderId(orderIds: Array<string | number>): Prom
             GROUP BY p.order_id`,
     format: 'JSONEachRow',
   })
-  type Row = { order_id: number; placed_block: number; asset_in: number; asset_out: number; amount_in: string; amount_out: string; partially_fillable: number | boolean; maker: string }
+  type Row = { order_id: number; placed_block: number; governance: number | boolean; asset_in: number; asset_out: number; amount_in: string; amount_out: string; partially_fillable: number | boolean; maker: string }
   const rows = await res.json<Row>()
   const memoFloor = rows.length ? (await indexedRawHead()) - OTC_PLACED_FINALITY_MARGIN_BLOCKS : 0
   for (const r of rows) {
@@ -18357,6 +18488,7 @@ async function getOtcPlacedLegsByOrderId(orderIds: Array<string | number>): Prom
       amountIn: r.amount_in, amountOut: r.amount_out,
       partiallyFillable: r.partially_fillable === true || r.partially_fillable === 1,
       maker: r.maker && ACCOUNT_RE.test(r.maker) ? r.maker : null,
+      governance: r.governance === true || r.governance === 1,
     }
     out.set(String(r.order_id), leg)
     if (r.placed_block > memoFloor) continue
@@ -18430,6 +18562,8 @@ export function otcRowFromEvent(
   const orderMaker = placedById.get(String(orderId))?.maker ?? null
   const makerOrSigner = orderMaker ?? signerWho
   const makerWho = makerOrSigner ? accountRef(makerOrSigner) : null
+  const bondSale = bondSaleRefOf(placedById.get(String(orderId)), e.event_name === 'OTC.Filled' || e.event_name === 'OTC.PartiallyFilled'
+    ? { paid: argStr(args, 'amountIn'), bonds: argStr(args, 'amountOut'), fee: argStr(args, 'fee'), ts: e.ts } : undefined)
 
   if (e.event_name === 'OTC.Placed') {
     // Actor pays (locks) the order's assetOut and receives its assetIn —
@@ -18443,22 +18577,26 @@ export function otcRowFromEvent(
       ...base, who: makerWho, assetIn: aIn, assetOut: aOut, amountIn, amountOut,
       valueUsd: usdValue(prices, aOut.assetId, amountOut, aOut.decimals) ?? usdValue(prices, aIn.assetId, amountIn, aIn.decimals),
       otcAction: 'Place', otcPartiallyFillable: args.partiallyFillable === true,
+      ...(bondSale ? { bondSale } : {}),
     }
   }
 
   if (e.event_name === 'OTC.Cancelled') {
     const placed = placedById.get(String(orderId))
-    // Same maker-perspective flip as Place (this is the order being pulled).
+    // Same maker-perspective flip as Place (this is the order being pulled). A bond
+    // sale's pull returns only what it had not sold: the remainder, at the order's price.
     const aIn = placed ? asset(placed.assetOut) : null
     const aOut = placed ? asset(placed.assetIn) : null
-    const amountIn = placed ? placed.amountOut : null
-    const amountOut = placed ? placed.amountIn : null
+    const remainder = bondSale ? bondSaleRemainder(String(orderId)) : null
+    const amountIn = remainder?.bonds ?? (placed ? placed.amountOut : null)
+    const amountOut = remainder?.payment ?? (placed ? placed.amountIn : null)
     return {
       ...base, who: makerWho, assetIn: aIn, assetOut: aOut, amountIn, amountOut,
       valueUsd: aOut && amountOut != null
         ? (usdValue(prices, aOut.assetId, amountOut, aOut.decimals) ?? (aIn && amountIn != null ? usdValue(prices, aIn.assetId, amountIn, aIn.decimals) : null))
         : null,
       otcAction: 'Pull',
+      ...(bondSale ? { bondSale } : {}),
     }
   }
 
@@ -18480,7 +18618,34 @@ export function otcRowFromEvent(
     who: who && ACCOUNT_RE.test(who) ? accountRef(who) : null, assetIn: aIn, assetOut: aOut, amountIn, amountOut,
     valueUsd: aOut ? (usdValue(prices, aOut.assetId, amountOut, aOut.decimals) ?? (aIn ? usdValue(prices, aIn.assetId, amountIn, aIn.decimals) : null)) : null,
     otcAction: 'Fill', otcPartial: e.event_name === 'OTC.PartiallyFilled', otcFee: argStr(args, 'fee'),
+    ...(bondSale ? { bondSale } : {}),
   }
+}
+
+/** The bond-sale act an OTC order's rows are, by the one primary-sale rule (bonds.ts primaryOtcSaleKind); null for any other order. */
+export function bondSaleRefOf(placed: Pick<OtcPlacedLeg, 'governance' | 'assetIn' | 'assetOut'> | undefined, fill?: { paid: string; bonds: string; fee: string; ts: string }): BondSaleRef | null {
+  const kind = placed ? primaryOtcSaleKind(placed, id => BOND_UNDERLYING_ID[id] != null) : null
+  if (!kind || !placed) return null
+  const r = bondRoundOf(placed.assetOut)
+  const t = BOND_TERMS.get(placed.assetOut)
+  const ref: BondSaleRef = { venue: 'otc', kind, bondId: placed.assetOut, family: r?.family ?? null, round: r?.round ?? null, maturityAt: t ? new Date(t.maturityMs).toISOString() : null }
+  if (fill && t && /^\d+$/.test(fill.paid) && /^\d+$/.test(fill.bonds) && /^\d+$/.test(fill.fee || '0') && (kind === 'rollover' || paysInFaceUnits(placed.assetIn, t.underlyingId))) {
+    const net = BigInt(fill.bonds) - BigInt(fill.fee || '0')
+    const paidDecimals = asset(placed.assetIn).decimals, bondDecimals = asset(placed.assetOut).decimals
+    const p = netPriceWad(BigInt(fill.paid), paidDecimals, net, bondDecimals)
+    const y = fillYield({ paid: BigInt(fill.paid), paidDecimals, net, bondDecimals, atMs: eventMs(fill.ts), maturityMs: t.maturityMs, paidMaturityMs: BOND_TERMS.get(placed.assetIn)?.maturityMs ?? null })
+    Object.assign(ref, { price: p == null ? null : wadNumber(p), returnPct: y?.returnPct ?? null, aprPct: y?.aprPct ?? null })
+  }
+  return ref
+}
+/** What a pulled bond-sale order returned: its unsold bonds and the payment they were offered for, pro rata (the registry's sale read). */
+function bondSaleRemainder(orderId: string): { bonds: string; payment: string } | null {
+  const s = BOND_SALE_BY_ORDER.get(orderId)
+  if (!s || s.offered == null || s.asked == null) return null
+  const left = BigInt(s.offered) - s.fills.reduce((a, f) => a + BigInt(f.bonds), 0n)
+  if (left < 0n) return null
+  const offered = BigInt(s.offered)
+  return { bonds: left.toString(), payment: offered > 0n ? (BigInt(s.asked) * left / offered).toString() : '0' }
 }
 
 interface RawOtcActivityEvent { block_height: number; ts: string; event_index: number; extrinsic_index: number | null; event_name: string; args_json: string }
@@ -20653,17 +20818,21 @@ function normalizeActivityTypeKey(type: string): string { return type === 'dca' 
 // A cross-chain swap is the one row in TWO families: a swap (Trade) that leaves
 // the chain (Cross-chain). Nothing sums the families into `all` — `all` applies no
 // family filter — so the overlap counts it once there and once in each chip.
-export function activityTypeMatchesFamily(rowType: ActivityRow['type'], type: string): boolean {
+// A row is in its own type's family and the folds below; a bond's primary-sale act (an
+// OTC row, bondSale) is ALSO a `bond` row — one row, two families, never two rows.
+export function activityTypeMatchesFamily(row: Pick<ActivityRow, 'type' | 'bondSale'>, type: string): boolean {
+  const rowType = row.type
   return rowType === type
     || (type === 'trade' && (rowType === 'otc' || rowType === 'intent' || rowType === 'xcswap'))
     || (type === 'xcm' && rowType === 'xcswap')
+    || (type === 'bond' && row.bondSale != null)
 }
 // Per-category action filter (the sub-type select next to the chips).
 export function activityRowMatchesAction(r: ActivityRow, action?: string): boolean {
   if (!action) return true
   switch (r.type) {
     case 'trade': return action === 'dca-failed' ? r.dcaStatus === 'failed' : action === 'dca' ? r.dca === true : action === 'swap' ? !r.dca : false
-    case 'otc': return r.otcAction === resolveOtcAction(action)
+    case 'otc': return (r.bondSale != null && bondSaleAction(r) === action) || r.otcAction === resolveOtcAction(action)
     case 'mm': return r.mmAction === action
     case 'staking': return r.stakingAction === action
     case 'bond': return r.bondAction === action
@@ -20871,7 +21040,7 @@ async function revenueFilteredActivityPage(
     // extrinsic that cleared it carries every row it produced, not only the paying one.
     .filter(row => revenueFloorPasses(row, minUsd))
     .filter(row => activityRowMatchesFilters(row, filters) && activityRowMatchesAction(row, action))
-    .filter(row => type === 'all' || activityTypeMatchesFamily(row.type, type))
+    .filter(row => type === 'all' || activityTypeMatchesFamily(row, type))
     .sort((a, b) => b.blockHeight - a.blockHeight || (b.eventIndex ?? -1) - (a.eventIndex ?? -1))
   return rows.slice(offset, offset + limit)
 }
@@ -21491,7 +21660,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
       rows = (await suppressActivityPlumbing(classificationPages.flatMap(source => source.rows)))
         .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
       plumbingApplied = true
-      if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
+      if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r, type))
       if (deferredValueFilter && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
       // The dense route reaches here with a narrow date range; no source can express a
       // revenue floor in SQL, so it is decided on built rows once they carry the figure.
@@ -21559,7 +21728,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
     else if (type === 'otc') rows = await getRecentOtc(fetchN, from, to, 0, filters, action)
     else if (type === 'xcm') rows = (await Promise.all([getRecentXcm(fetchN, from, to, undefined, 0, filters), getRecentXcmIn(fetchN, from, to, undefined, 0, filters), getRecentXcmOutRemote(fetchN, from, to, undefined, 0, filters), getRecentXcmExecuted(fetchN, from, to, undefined, 0, filters), getRecentNttOut(fetchN, from, to, undefined, 0, filters), getRecentNttIn(fetchN, from, to, undefined, 0, filters)])).flat()
     else if (type === 'staking') rows = await getRecentStaking(fetchN, from, to, undefined, 0, filters, undefined, action)
-    else if (type === 'bond') rows = await getRecentBonds(fetchN, from, to, undefined, 0, filters, undefined, action)
+    else if (type === 'bond') rows = await getRecentBonds(fetchN, from, to, undefined, 0, filters, undefined, action, true)
     else if (isStrategyRow({ type: type as ActivityRow['type'] })) rows = await getRecentStrategies(strategyTypesFor(type), fetchN, from, to, undefined, 0, filters, undefined, action)
     else if (type === 'intent') rows = await getRecentIntents(fetchN, from, to, undefined, 0, filters, undefined, action)
     // The only action a cross-chain swap admits is `xcswap` itself, which every row
@@ -21580,7 +21749,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
   } else if (type === 'staking') {
     rows = await getRecentStaking(limit, from, to, undefined, offset, filters)
   } else if (type === 'bond') {
-    rows = await getRecentBonds(limit, from, to, undefined, offset, filters)
+    rows = await getRecentBonds(limit, from, to, undefined, offset, filters, undefined, undefined, true)
   } else if (isStrategyRow({ type: type as ActivityRow['type'] })) {
     rows = await getRecentStrategies(strategyTypesFor(type), limit, from, to, undefined, offset, filters)
   } else if (type === 'intent') {
@@ -21592,7 +21761,7 @@ async function buildActivityWindow(limit: number, from: string | undefined, to: 
   }
   if (locallyPaged && !classified) sourceSaturated = rows.length >= fetchN
   if (!plumbingApplied) rows = await suppressActivityPlumbing(rows)
-  if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
+  if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r, type))
   if (filters.min != null && filters.unit !== 'token') await applyHistoricalUsd(rows, activityHistPick)
   rows = rows.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
   rows.sort(compareActivityRowsNewestFirst)
@@ -24500,7 +24669,8 @@ async function assetActivityRows(assetId: number, type: string, want: number, ac
   const stakingP: Promise<ActivityRow[]> = wantStaking ? getRecentStaking(fetchN, sourceFrom, sourceTo, undefined, 0, queryFilters, assetId).then(aboveRows) : Promise.resolve([])
   // A bond row is reached from the bond's own page and from its underlying's
   // (getRecentBonds admits either id).
-  const bondsP: Promise<ActivityRow[]> = wantBonds ? getRecentBonds(fetchN, sourceFrom, sourceTo, undefined, 0, queryFilters, assetId).then(aboveRows) : Promise.resolve([])
+  // Under `type=bond` the bond's primary-sale acts join them (an OTC row is a bond row too).
+  const bondsP: Promise<ActivityRow[]> = wantBonds ? getRecentBonds(fetchN, sourceFrom, sourceTo, undefined, 0, queryFilters, assetId, undefined, type === 'bond').then(aboveRows) : Promise.resolve([])
   // A strategy row is reached from the page of every asset it moves (a Juicer row: the
   // vault's collateral and share; a BIL row: the assets its action moves).
   const strategiesP: Promise<ActivityRow[]> = getRecentStrategies(wantStrategies, fetchN, sourceFrom, sourceTo, undefined, 0, queryFilters, assetId, STRATEGY_TYPES.has(type) ? action : undefined).then(aboveRows)
@@ -24556,7 +24726,7 @@ async function assetActivityRows(assetId: number, type: string, want: number, ac
   const userMm = mm.filter(r => !isModuleAcct(r.who))
   let rows = (await suppressActivityPlumbing([...userTransfers, ...userTrades, ...dcaFailures, ...rewards, ...liquidity, ...staking, ...bonds, ...strategies, ...votes, ...xcm, ...xcmIn, ...xcmOutRemote, ...xcmExecuted, ...nttOut, ...nttIn, ...userMm, ...otc, ...intents, ...xcswaps, ...userV3Trades, ...v3Liquidity, ...hsmTrades], { assetId }))
     .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
-  if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r.type, type))
+  if (type !== 'all') rows = rows.filter(r => activityTypeMatchesFamily(r, type))
   rows = rows.filter(r => activityRowMatchesAction(r, action))
   // The token key is meaningless here (the asset IS fixed); min applies the
   // same way the account/global feeds filter by row value.
@@ -25470,11 +25640,16 @@ async function getAccountHistory(accounts: string[], window?: { fromBlock: numbe
     let lastPx = earliestPx
     const points: AssetBalancePoint[] = []
     const exHdx = Number(id) !== HDX_ASSET_ID
+    // A bond is its underlying's close × the bond rule's factor at the bucket's end
+    // (bondAdjustedClose's rule), so the chart meets the live point without a step.
+    const bondTerms = BOND_TERMS.get(Number(id))
     for (let b = 0; b <= N; b++) {
       if (pxMap.has(b)) lastPx = pxMap.get(b)!
+      const factor = bondTerms ? bondValueFactorWad(bondTerms, bk.endSec(b) * 1000) : BOND_WAD
+      const px = factor == null ? 0 : (lastPx || 0) * wadNumber(factor)
       if (!suppressPortfolioValue) {
-        portfolio[b] += portfolioCombined[b] * (lastPx || 0)
-        if (exHdx) portfolioExHdx[b] += portfolioCombined[b] * (lastPx || 0)
+        portfolio[b] += portfolioCombined[b] * px
+        if (exHdx) portfolioExHdx[b] += portfolioCombined[b] * px
       }
       // Plot every observed bucket, plus the final bucket so the line is forward-
       // filled to "now" (the balance persists after its last change). This also
@@ -27436,7 +27611,8 @@ type EnumeratedSourceName = typeof ENUMERATED_SOURCE_NAMES[number]
 function enumeratedSourceNeed(type: string): Record<EnumeratedSourceName, boolean> {
   const wantTransfers = type === 'all' || type === 'transfer'
   return {
-    otc: type === 'all' || type === 'otc' || type === 'trade' || wantTransfers,
+    // A bond sale's OTC rows are bond rows too (activityTypeMatchesFamily).
+    otc: type === 'all' || type === 'otc' || type === 'trade' || type === 'bond' || wantTransfers,
     dcaFailures: type === 'all' || type === 'trade' || wantTransfers,
     // Referral claims render as liquidity, incentive claims as mm.
     rewards: type === 'all' || type === 'transfer' || type === 'liquidity' || type === 'mm',
@@ -27720,7 +27896,7 @@ async function planExactActivity(
     // `all` asks for no family filter at all, exactly as the classifier's own
     // `type !== 'all'` guard does — otherwise every enumerated row would be counted out
     // of the merged feed and the total would fall short of the chips that make it up.
-    if (type !== 'all' && !activityTypeMatchesFamily(row.type, type)) continue
+    if (type !== 'all' && !activityTypeMatchesFamily(row, type)) continue
     // The action and token tests are the classifier's OWN predicates over the SAME
     // array the page will render (see enumeratedActivityRowsUncached), so these
     // families need no SQL mirror at all and cannot be counted under a rule the page
@@ -28521,7 +28697,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
     : wantStaking ? await getRecentStaking(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
   noteSource(staking.length, oldestWindowBlock(staking, r => r.blockHeight))
   const bonds = exact ? exact.enumerated.bonds
-    : wantBonds ? await getRecentBonds(catFetch, from, to, accounts, 0, queryFilters, undefined, action) : []
+    : wantBonds ? await getRecentBonds(catFetch, from, to, accounts, 0, queryFilters, undefined, action, type === 'bond') : []
   noteSource(bonds.length, oldestWindowBlock(bonds, r => r.blockHeight))
   const strategies = exact ? exact.enumerated.strategies
     : await getRecentStrategies(wantStrategies, catFetch, from, to, accounts, 0, queryFilters, undefined, STRATEGY_TYPES.has(type) ? action : undefined)
@@ -28592,7 +28768,7 @@ async function collectAccountActivity(accounts: string[], type: string, catFetch
   const keepPot = accounts.some(a => a.toLowerCase() === ICE_POT_ACCOUNT)
   let merged = (await suppressActivityPlumbing([...userTrades, ...scopedTransfers, ...dcaTrades, ...rewards, ...liq, ...staking, ...bonds, ...strategies, ...intents, ...xcswaps, ...v3Acts, ...voteRows, ...userMm, ...otc, ...xcm], { keepPot }))
     .filter(r => !(r.type === 'trade' && isFeePurchaseSwap(feeSwapKeys, r)))
-  if (type && type !== 'all') merged = merged.filter(r => activityTypeMatchesFamily(r.type, type))
+  if (type && type !== 'all') merged = merged.filter(r => activityTypeMatchesFamily(r, type))
   merged = merged.filter(r => activityRowMatchesFilters(r, filters) && activityRowMatchesAction(r, action))
   if (exact) {
     // The enumerated sources were read over the whole history rather than the located
@@ -31015,6 +31191,35 @@ export interface AssetDetail {
   // the token on each — from the backing monitor's last snapshot. Absent for an
   // asset that does not cross Wormhole (and before the first snapshot).
   bridge?: WormholeAssetBridge | null
+  // A bond (Bonds pallet): what it redeems for and when, the family page it belongs to
+  // (bonds.ts BOND_FAMILIES; null when none shows it) and what one bond is worth now in
+  // the underlying (the bond rule; null when it cannot be stated). Absent otherwise.
+  bond?: AssetBondInfo
+}
+export interface AssetBondInfo {
+  underlying: AssetRef
+  maturityAt: string
+  matured: boolean
+  family: string | null
+  round: number | null
+  /** What one bond is worth now in the underlying (the bond rule); null when it cannot be stated. */
+  valueFactor: number | null
+  /** Its money sale's price per face unit (net of the fee) and whether the sale still stands. */
+  salePrice: number | null
+  saleOpen: boolean
+}
+export function assetBondInfo(assetId: number, nowMs = Date.now()): AssetBondInfo | undefined {
+  const t = BOND_TERMS.get(assetId)
+  if (!t) return undefined
+  const factor = bondValueFactorWad(t, nowMs)
+  const r = bondRoundOf(assetId)
+  return {
+    underlying: asset(t.underlyingId), maturityAt: new Date(t.maturityMs).toISOString(), matured: nowMs >= t.maturityMs,
+    family: r?.family ?? null, round: r?.round ?? null,
+    valueFactor: factor == null ? null : wadNumber(factor),
+    salePrice: t.anchor ? wadNumber(t.anchor.priceWad) : null,
+    saleOpen: t.anchor != null && t.anchor.closedMs == null && nowMs < t.maturityMs,
+  }
 }
 // The market whose liquidations an asset page reports. Env-configured markets are
 // always supplemental, so this is the core market; isolated markets are never
@@ -31130,7 +31335,8 @@ export async function getAssetDetail(assetId: number): Promise<AssetDetail> {
   // `amountUsd` is the total USD held of this asset — the same value the asset
   // list surfaces — so reuse the holder summary's total here.
   const assetItem: AssetListItem = { ...base.asset, price: p?.price ?? null, change24h: p?.change24h ?? null, amountUsd: hsummary.totalUsd }
-  return { ...base, asset: assetItem, holderCount: hsummary.holderCount, totalUsd: hsummary.totalUsd, bridge: wormholeAssetBridge(assetId) }
+  const bond = assetBondInfo(assetId)
+  return { ...base, asset: assetItem, holderCount: hsummary.holderCount, totalUsd: hsummary.totalUsd, bridge: wormholeAssetBridge(assetId), ...(bond ? { bond } : {}) }
 }
 
 async function assetDetailBase(assetId: number): Promise<AssetDetail> {
@@ -31156,9 +31362,10 @@ async function assetDetailBase(assetId: number): Promise<AssetDetail> {
         query_params: { id: priceAssetId(assetId), s: chDateTime(start), e: chDateTime(end) }, format: 'JSONEachRow',
       })
       for (const r of await pxRes.json<{ ts: string; px: number }>()) {
-        if (!(r.px > 0)) continue
+        const px = bondSeriesPrice(assetId, r.ts, 86_400, r.px)
+        if (px == null || !(px > 0)) continue
         priceDates.push(r.ts)
-        priceSeries.push(r.px)
+        priceSeries.push(px)
       }
     })().catch(() => { /* asset may have no OHLC */ })
     // The liquidation history is an independent read, so it costs no extra latency.
@@ -31195,6 +31402,13 @@ const PRICE_WINDOW_INTERVALS = [
 
 export interface AssetPriceWindow { interval: string; priceSeries: number[]; priceDates: string[] }
 
+// An asset page's candle close: a bond's is its underlying's close × the bond rule's
+// factor at the candle's end — its own series, not the underlying's (null where the rule
+// states nothing).
+function bondSeriesPrice(assetId: number, intervalStart: string, intervalSec: number, close: number): number | null {
+  const factor = bondFactorWadAt(assetId, eventMs(intervalStart) + intervalSec * 1000)
+  return factor === undefined ? close : factor == null ? null : close * wadNumber(factor)
+}
 export async function getAssetPriceWindow(assetId: number, fromSec: number, toSec: number, points: number): Promise<AssetPriceWindow> {
   const span = Math.max(1, toSec - fromSec)
   const iv = PRICE_WINDOW_INTERVALS.find(x => span / x.seconds <= points) ?? PRICE_WINDOW_INTERVALS[PRICE_WINDOW_INTERVALS.length - 1]
@@ -31213,9 +31427,10 @@ export async function getAssetPriceWindow(assetId: number, fromSec: number, toSe
     const priceSeries: number[] = []
     const priceDates: string[] = []
     for (const r of await res.json<{ ts: string; px: number }>()) {
-      if (!(r.px > 0)) continue
+      const px = bondSeriesPrice(assetId, r.ts, iv.seconds, r.px)
+      if (px == null || !(px > 0)) continue
       priceDates.push(r.ts)
-      priceSeries.push(r.px)
+      priceSeries.push(px)
     }
     return { interval: iv.key, priceSeries, priceDates }
   })
@@ -32490,12 +32705,15 @@ async function loadAccountDirectorySnapshot(
 // money-market value), leaves out a pool account's own hub reserve (the
 // Omnipool's H2O: poolOwnHubHoldingSql in `grouped`), and values money-market
 // collateral by the folded reserves, the market's aggregate standing in only
-// where a reserve is unstated (mmSnapshotCollateralSql). Part of every page and
-// tag-detail key, so a payload persisted under an earlier value definition is
-// never served as this one.
+// where a reserve is unstated (mmSnapshotCollateralSql); `-r6` carries each row's
+// User Revenue; `-r7` leaves a strategy custody account's holdings and money-market
+// positions out; `-r8` leaves the Bonds pot out too (a custody account); `-r9` values a
+// bond by the bond rule (bonds.ts: an open sale's price, then accreting to face). Part
+// of every page and tag-detail key, so a payload persisted under an earlier value
+// definition is never served as this one.
 function accountDirectoryModelVersion(): string {
-  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3-r7'
-  return omnipoolAccountClaimsReady ? 'v2-r7' : 'v1-r7'
+  if (omnipoolAccountClaimsReady && moneyMarketAccountValuesReady) return 'v3-r9'
+  return omnipoolAccountClaimsReady ? 'v2-r9' : 'v1-r9'
 }
 
 // The snapshot's counted collateral for one (account, pool) group, base-8 USD:
@@ -33749,7 +33967,8 @@ async function exactRowTopAssets(
 ): Promise<TopAssetEntry[]> {
   const [walletRows, erc20] = await Promise.all([
     queryAggregatedBalances(sqlAccountList(accounts)),
-    erc20WalletHoldingsForAccounts(h160s),
+    // A custody account's ERC-20 pot is its holders' value (isCustodyH160), here as on a tag.
+    erc20WalletHoldingsForAccounts(h160s.filter(h => !isCustodyH160(h))),
   ])
   let balances = foldShareBalances(valueAccountBalances(walletRows, prices))
   // Merge the row's holders' supplied collateral, summing a reserve shared by a
@@ -34765,9 +34984,9 @@ async function buildTagDetailForMembers(
     // holdings are its share holders' value (isCustodyAccount), so a tag reads its
     // members' money market and ERC-20 pot without them; its pallet balances are
     // uncounted by the balance read itself.
-    const mmMembers = members.filter(m => !isCustodyAccount(evmAccountForm(m) ?? m)).flatMap(simAccount => {
+    const mmMembers = members.filter(m => !isCustodyAccount(m) && !isCustodyAccount(evmAccountForm(m) ?? m)).flatMap(simAccount => {
       const h160 = mmH160ForAccount(simAccount)
-      return h160 ? [{ h160, simAccount }] : []
+      return h160 && !isCustodyH160(h160) ? [{ h160, simAccount }] : []
     })
     const tagHistoryAccounts = [...new Set([
       ...members,
@@ -35188,6 +35407,17 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
     const mmAddrs = tokenIds ? mmReserveAddressesForTokens(tokenIds) : []
     const mmTok = tokenIds == null ? '' : mmAddrs.length ? `AND asset_address IN (${mmAddrs.map(a => `'${a}'`).join(',')})` : 'AND 0'
     let query: string
+    // The bond-sale arm of the `bond` count: the OTC place / pull / fill events of every
+    // primary-sale order (BOND_SALE_BY_ORDER) a bond action and the token admit — the
+    // rows getRecentBonds merges in (bondSaleAction's inverse).
+    const bondSaleDaily = (action: string | undefined, tokens: number[] | null): string => {
+      const bondIds = bondIdsForTokens(tokens ?? undefined)
+      const orders = [...BOND_SALE_BY_ORDER.values()].filter(x => (bondIds == null || bondIds.includes(x.bondId))
+        && (!action || action === 'SaleOpen' || action === 'SaleClose' || (action === 'Purchase' && x.kind === 'sale') || (action === 'Rollover' && x.kind === 'rollover')))
+      const names = !action ? OTC_EVENT_NAMES : action === 'SaleOpen' ? ['OTC.Placed'] : action === 'SaleClose' ? ['OTC.Cancelled'] : action === 'Purchase' || action === 'Rollover' ? [...OTC_FILL_EVENTS] : []
+      if (!orders.length || !names.length) return daily('otc_activity', '0')
+      return daily('otc_activity', `event_name IN (${sqlNames(names)}) AND toUInt32(JSONExtractUInt(args_json,'orderId')) IN (${orders.map(x => x.id).join(',')})`)
+    }
     // A strategy's rows are its own logs, one per row, filtered like the feed: by action
     // and by the assets the row moves (each family's dailyPredicate). They are a separate
     // arm of `all`, summed per day.
@@ -35255,6 +35485,8 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
                WHERE day > today() - 90 AND ${nameFilter} ${assetFilter}${compoundPlumbing}
                GROUP BY day ORDER BY day`
       if (type === 'all') query = `SELECT d, toUInt64(sum(v)) AS v FROM (${[query, ...STRATEGY_FAMILIES.map(f => strategyDaily(f, filters.action))].join(' UNION ALL ')}) GROUP BY d ORDER BY d`
+      // A bond's primary-sale acts are bond rows too (OTC rows, read here by order id).
+      if (type === 'bond') query = `SELECT d, toUInt64(sum(v)) AS v FROM (${query} UNION ALL ${bondSaleDaily(filters.action, tokenIds ?? null)}) GROUP BY d ORDER BY d`
     } else if (scope === 'events' || scope === 'extrinsics')
       query = `SELECT toString(day) AS d, toUInt64(groupBitmapMerge(identity_state)) AS v
                FROM price_data.daily_chain_identity_counts_v2
@@ -35296,7 +35528,7 @@ export async function getDailyActivity(scope: string, filters: DailyFilters = {}
         const names = filters.action ? (BOND_ACTION_EVENTS[filters.action] ?? []) : BOND_EVENT_NAMES
         const bondIds = bondIdsForTokens(tokenIds)
         const bondTok = bondIds == null ? '' : bondIds.length ? `AND ${BOND_ASSET_SQL} IN (${bondIds.join(',')})` : 'AND 0'
-        query = daily('bond_activity', `${names.length ? `event_name IN (${sqlNames(names)})` : '0'}${sp(bondTok)}`)
+        query = `SELECT d, toUInt64(sum(v)) AS v FROM (${daily('bond_activity', `${names.length ? `event_name IN (${sqlNames(names)})` : '0'}${sp(bondTok)}`)} UNION ALL ${bondSaleDaily(filters.action, tokenIds ?? null)}) GROUP BY d ORDER BY d`
       } else if (type === 'vote') {
         const side = filters.action === 'Aye' ? ` AND JSONExtractInt(args_json, 'vote', 'vote') >= 128`
           : filters.action === 'Nay' ? ` AND JSONExtractInt(args_json, 'vote', 'vote') < 128 AND JSONExtractString(args_json, 'vote', '__kind') = 'Standard'` : ''

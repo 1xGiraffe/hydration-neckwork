@@ -1,5 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { JUICER_VAULTS } from './juicer.ts'
+import { bondFamilyOf, bondValueFactorWad, familyRounds, saleAnchor, type BondSale, type BondTerms } from './bonds.ts'
+import { loadBondSales } from './bondSales.ts'
 
 // Full asset registry (all 113 assets), independent of the trading-filtered
 // cache in assetsService.ts. The Explorer must resolve symbol/decimals for every
@@ -279,12 +281,18 @@ async function loadExplorerAssetsUncached(client: ClickHouseClient): Promise<voi
 
 export function loadExplorerAssets(client: ClickHouseClient): Promise<void> {
   if (loadInflight) return loadInflight
-  const request = loadExplorerAssetsUncached(client).finally(() => {
+  const request = loadExplorerAssetsUncached(client).then(() => { markRegistryLoaded() }).finally(() => {
     if (loadInflight === request) loadInflight = null
   })
   loadInflight = request
   return request
 }
+// Resolves once the registry (bonds included) has loaded the first time: a reader that
+// needs it — the bond refresher's first read, which can run before the boot path loads
+// the registry — awaits it rather than reading an empty registry.
+let markRegistryLoaded: () => void = () => {}
+const registryLoaded = new Promise<void>(resolve => { markRegistryLoaded = resolve })
+export const whenExplorerAssetsLoaded = (): Promise<void> => registryLoaded
 
 export function stopExplorerAssetsRefresh(): void {
   if (!refreshTimer) return
@@ -480,38 +488,95 @@ function inheritATokenOrigins(): void {
 // assets are, so they otherwise reach the explorer as a bare `#id` with no name,
 // icon or price. Each bond maps 1:1 to an underlying asset + a maturity via
 // Bonds.TokenCreated, so we synthesise a registry entry that borrows the underlying's
-// icon / decimals / origin and prices through it (a bond redeems 1:1 for the
-// underlying at maturity). Runs on every registry refresh, so new bonds appear
-// automatically. Best-effort: a failed lookup leaves bonds as bare ids, never the
+// icon / decimals / origin. Its price is the bond rule (bonds.ts bondValueFactorWad) ×
+// the underlying's: CURRENT on every current surface (strategySharePrice.ts
+// withDerivedSharePrices, which is why currentPriceAssetId stops at a bond), HISTORICAL
+// as the underlying's candle (the alias) × the factor at the event's or bucket's time
+// (bondFactorWadAt; its SQL twin is explorerService bondCloseSql). Runs on every
+// registry refresh, so new bonds
+// appear automatically. Best-effort: a failed lookup leaves bonds as bare ids, never the
 // rest of the registry.
 // bond id → the asset it redeems for, one entry per Bonds.TokenCreated. The bond
 // activity builders read it to tell a bond from any other aliased asset and to list
 // the underlying beside the bond in a row's asset references.
 export const BOND_UNDERLYING_ID: Record<number, number> = {}
+// bond id → its terms and where its primary sale priced it (bonds.ts BondTerms).
+export const BOND_TERMS = new Map<number, BondTerms>()
+// bond id → its primary-sale sources, and every source by OTC order id (the activity
+// builders name a bond sale's rows from it) — the shared sale read (bondSales.ts).
+export const BOND_SALES = new Map<number, BondSale[]>()
+export const BOND_SALE_BY_ORDER = new Map<string, BondSale>()
 async function injectBonds(client: ClickHouseClient): Promise<void> {
-  let rows: { bond_id: number; underlying: number; maturity: string }[]
+  type CreatedRow = { bond_id: number; underlying: number; issuer: string; maturity: string; block_height: number; ts: number }
+  let rows: CreatedRow[]
   try {
     const res = await client.query({
       query: `SELECT JSONExtractInt(args_json,'bondId') AS bond_id,
                      JSONExtractInt(args_json,'assetId') AS underlying,
-                     toString(JSONExtractUInt(args_json,'maturity')) AS maturity
+                     JSONExtractString(args_json,'issuer') AS issuer,
+                     toString(JSONExtractUInt(args_json,'maturity')) AS maturity,
+                     block_height, toUnixTimestamp(block_timestamp) AS ts
               FROM price_data.raw_events
               WHERE event_name = 'Bonds.TokenCreated'`,
       format: 'JSONEachRow',
     })
-    rows = await res.json<{ bond_id: number; underlying: number; maturity: string }>()
+    rows = await res.json<CreatedRow>()
   } catch (err) {
     console.error('[ExplorerAssets] bond registry load failed:', err instanceof Error ? err.message : err)
     return
   }
-  for (const r of rows) {
-    const bondId = Number(r.bond_id)
-    if (!Number.isInteger(bondId) || bondId <= 0) continue
-    const base = cache.get(Number(r.underlying)) ?? assetDescriptor(Number(r.underlying))
-    const maturityMs = Number(r.maturity)
-    const matures = Number.isFinite(maturityMs) && maturityMs > 0 ? new Date(maturityMs).toISOString().slice(0, 10) : null
-    cache.set(bondId, {
-      assetId: bondId,
+  const bondIds = rows.map(r => Number(r.bond_id)).filter(id => Number.isInteger(id) && id > 0)
+  const isBond = (id: number) => bondIds.includes(id)
+  // Σ issued and the sales are each read on their own: a failed read keeps what the
+  // previous load stated for every bond (its issued amount, its sale anchor) rather
+  // than wiping it — a failed sale read must never leave every bond unpriced.
+  let issued: Map<number, string> | null = null
+  let sales: BondSale[] | null = null
+  if (bondIds.length) {
+    await Promise.all([
+      client.query({
+        query: `SELECT JSONExtractInt(args_json,'bondId') AS bond_id, toString(sum(toUInt256OrZero(JSONExtractString(args_json,'amount')))) AS issued
+                FROM price_data.bond_activity FINAL WHERE event_name = 'Bonds.Issued' GROUP BY bond_id`,
+        format: 'JSONEachRow',
+      }).then(r => r.json<{ bond_id: number; issued: string }>())
+        .then(list => { issued = new Map(list.map(x => [Number(x.bond_id), x.issued])) })
+        .catch(err => console.error('[ExplorerAssets] bond issue read failed; keeping the previous amounts:', err instanceof Error ? err.message : err)),
+      loadBondSales(client, bondIds, isBond)
+        .then(list => { sales = list })
+        .catch(err => console.error('[ExplorerAssets] bond sale read failed; keeping the previous sale anchors:', err instanceof Error ? err.message : err)),
+    ])
+  }
+  applyBondRegistry(rows.map(r => ({
+    bondId: Number(r.bond_id), underlyingId: Number(r.underlying), issuer: String(r.issuer ?? '').toLowerCase(),
+    maturityMs: Number(r.maturity), createdBlock: Number(r.block_height), createdMs: Number(r.ts) * 1000,
+  })), issued, sales, Date.now())
+}
+
+/**
+ * Installs the bond registry: each bond's synthesised asset entry, its historical alias
+ * (the underlying) and its terms. `issued` / `sales` null means that read failed: the
+ * previous amounts, sources and anchors stand. Exported for the tests.
+ */
+export function applyBondRegistry(
+  created: ReadonlyArray<Omit<BondTerms, 'issued' | 'anchor'>>,
+  issued: ReadonlyMap<number, string> | null,
+  sales: readonly BondSale[] | null,
+  nowMs: number,
+): void {
+  if (sales) {
+    BOND_SALES.clear()
+    BOND_SALE_BY_ORDER.clear()
+    for (const s of sales) {
+      ;(BOND_SALES.get(s.bondId) ?? BOND_SALES.set(s.bondId, []).get(s.bondId)!).push(s)
+      if (s.venue === 'otc') BOND_SALE_BY_ORDER.set(s.id, s)
+    }
+  }
+  for (const r of created) {
+    if (!Number.isInteger(r.bondId) || r.bondId <= 0) continue
+    const base = cache.get(r.underlyingId) ?? assetDescriptor(r.underlyingId)
+    const matures = Number.isFinite(r.maturityMs) && r.maturityMs > 0 ? new Date(r.maturityMs).toISOString().slice(0, 10) : null
+    cache.set(r.bondId, {
+      assetId: r.bondId,
       iconAssetId: base.iconAssetId,
       symbol: `${base.symbol}b`,
       name: `${base.name ?? base.symbol} Bond${matures ? ` · matures ${matures}` : ''}`,
@@ -519,10 +584,30 @@ async function injectBonds(client: ClickHouseClient): Promise<void> {
       parachainId: base.parachainId,
       origin: base.origin,
     })
-    // Price/value through the underlying (feeds priceAssetId + the SQL alias).
-    PRICE_ALIAS_ID[bondId] = Number(r.underlying)
-    BOND_UNDERLYING_ID[bondId] = Number(r.underlying)
+    // HISTORICAL candles through the underlying (priceAssetId); every historical value
+    // then applies the bond rule's factor at the event's time (bondFactorWadAt).
+    PRICE_ALIAS_ID[r.bondId] = r.underlyingId
+    BOND_UNDERLYING_ID[r.bondId] = r.underlyingId
+    if (!(Number.isFinite(r.maturityMs) && r.maturityMs > 0)) continue
+    const prev = BOND_TERMS.get(r.bondId)
+    const t: BondTerms = { ...r, issued: issued?.get(r.bondId) ?? prev?.issued ?? '0', anchor: prev?.anchor ?? null }
+    if (sales) t.anchor = saleAnchor(BOND_SALES.get(r.bondId) ?? [], t, id => (cache.get(id) ?? assetDescriptor(id)).decimals, nowMs)
+    BOND_TERMS.set(r.bondId, t)
   }
+}
+
+/** The bond rule's factor for `assetId` at `ms` (WAD): undefined for an asset that is not a bond, null when the rule states nothing. */
+export function bondFactorWadAt(assetId: number, ms: number): bigint | null | undefined {
+  const t = BOND_TERMS.get(assetId)
+  return t ? bondValueFactorWad(t, ms) : undefined
+}
+/** A bond's family and round (round 1 is its family's first issued bond); null when no family shows it. */
+export function bondRoundOf(bondId: number): { family: string; round: number } | null {
+  const t = BOND_TERMS.get(bondId)
+  const f = t ? bondFamilyOf(t.underlyingId) : undefined
+  if (!t || !f) return null
+  const i = familyRounds(BOND_TERMS.values(), t.underlyingId).findIndex(x => x.bondId === bondId)
+  return i < 0 ? null : { family: f.key, round: i + 1 }
 }
 
 // Stableswap/pool SHARE tokens → the asset whose ARTWORK a share borrows
@@ -692,7 +777,9 @@ export function foldedShareEntries(): [number, number][] {
 export function currentPriceAssetId(assetId: number): number {
   let id = assetId
   for (let hop = 0; hop < 4; hop++) {
-    if (STABLESWAP_SHARE_IDS.has(id)) return id
+    // A share's and a bond's current entry is its own derived price (what it redeems
+    // for; the bond rule) — never its alias's.
+    if (STABLESWAP_SHARE_IDS.has(id) || BOND_UNDERLYING_ID[id] != null) return id
     const next = PRICE_ALIAS_ID[id]
     if (next == null || next === id) return id
     id = next

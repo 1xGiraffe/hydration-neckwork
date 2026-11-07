@@ -21,17 +21,17 @@ const otcRow = (otcAction: 'Place' | 'Pull' | 'Fill'): ActivityRow => ({
 
 describe('activityTypeMatchesFamily', () => {
   it('type=trade matches both trade and otc rows', () => {
-    expect(activityTypeMatchesFamily('trade', 'trade')).toBe(true)
-    expect(activityTypeMatchesFamily('otc', 'trade')).toBe(true)
+    expect(activityTypeMatchesFamily({ type: 'trade' }, 'trade')).toBe(true)
+    expect(activityTypeMatchesFamily({ type: 'otc' }, 'trade')).toBe(true)
   })
   it('type=otc matches only otc rows', () => {
-    expect(activityTypeMatchesFamily('otc', 'otc')).toBe(true)
-    expect(activityTypeMatchesFamily('trade', 'otc')).toBe(false)
+    expect(activityTypeMatchesFamily({ type: 'otc' }, 'otc')).toBe(true)
+    expect(activityTypeMatchesFamily({ type: 'trade' }, 'otc')).toBe(false)
   })
   it('other types are unaffected (exact match only)', () => {
-    expect(activityTypeMatchesFamily('transfer', 'transfer')).toBe(true)
-    expect(activityTypeMatchesFamily('otc', 'transfer')).toBe(false)
-    expect(activityTypeMatchesFamily('mm', 'trade')).toBe(false)
+    expect(activityTypeMatchesFamily({ type: 'transfer' }, 'transfer')).toBe(true)
+    expect(activityTypeMatchesFamily({ type: 'otc' }, 'transfer')).toBe(false)
+    expect(activityTypeMatchesFamily({ type: 'mm' }, 'trade')).toBe(false)
   })
 })
 

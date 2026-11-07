@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
+import { BOND_FAMILIES, bondFamilyPath } from '../services/bonds.ts'
 import { allExplorerAssets } from '../services/explorerAssets.ts'
 import { allTags } from '../services/tagService.ts'
 import { publicLists, publicListTags } from '../services/userListService.ts'
@@ -112,7 +113,7 @@ function paginate(section: Section, urls: SitemapUrl[]): Map<string, string> {
 const CORE_PATHS = [
   '/', '/activity', '/blocks', '/extrinsics', '/events', '/accounts', '/contracts', '/assets',
   '/governance', '/tags', '/tags/hydration', '/lists', '/omnipool', '/liquidity',
-  '/hdx', '/hollar', '/intents', '/juicer', '/bil', '/revenue', '/revenue/users', '/revenue/protocol', '/volume', '/oracles', '/security', '/mcp',
+  '/hdx', '/hollar', '/intents', '/juicer', '/bil', ...BOND_FAMILIES.map(f => bondFamilyPath(f.key)), '/revenue', '/revenue/users', '/revenue/protocol', '/volume', '/oracles', '/security', '/mcp',
 ]
 
 async function buildSections(): Promise<Map<string, string>> {

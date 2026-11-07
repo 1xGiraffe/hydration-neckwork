@@ -11,6 +11,7 @@ import { refreshMmOraclePrices } from './mmOraclePrices.ts'
 import { refreshOracleState } from './oracleService.ts'
 import { refreshJuicerState } from './juicerState.ts'
 import { refreshBilState } from './bilState.ts'
+import { refreshBondState } from './bondState.ts'
 
 // Coordinated scheduler for the background refreshers that read node-full
 // (chain-state enumeration and EVM eth_call). Previously each ran on its own
@@ -56,6 +57,10 @@ import { refreshBilState } from './bilState.ts'
 //   bil-state      ~0.1s node-full (2 batched eth_call round trips at one pin,
 //                    ~20 calls + one per open redemption request) + two small
 //                    ClickHouse reads                         → every tick (60s)
+//   bond-state     ClickHouse only: a change-mark read every tick; on a change (or
+//                    every 5th tick) ~6 small reads (bond_activity, the bond OTC
+//                    orders and their events, the bonds' and the pot's balances)
+//                                                              → every tick (60s)
 //   oracle-state   ~0.5s node-full (one pinned block: every market's oracle
 //                    plumbing and reserve prices, then 12 probes per source —
 //                    rounds, answer, description, decimals, owner and the
@@ -153,6 +158,12 @@ const TASKS: RefreshTask[] = [
   // escrow). It checks every tick but re-reads only when bil_logs or uBIL's deltas
   // moved, else every fifth tick — the rate accrues by the second.
   { name: 'bil-state', everyTicks: 1, run: refreshBilState },
+  // Every bond's state (bondState.ts) at one indexed block: issues, redemptions, the
+  // primary-sale offers and their fills, every bond holder's balance and the Bonds pot —
+  // ClickHouse only, no chain read. It checks every tick but re-reads only when
+  // bond_activity, the OTC events or the bonds' balances moved, else every fifth tick
+  // (a bond's status turns on the clock at maturity).
+  { name: 'bond-state', everyTicks: 1, run: refreshBondState },
   // Unclaimed liquidity-mining rewards: every LM deposit and farm read at one
   // finalized block, active farms projected to THAT block (not the head) by a
   // DryRunApi claim. Active farms accrue every relay block, so the published
