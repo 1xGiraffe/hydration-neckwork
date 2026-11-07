@@ -595,7 +595,9 @@ export function useFilterNames() {
   return useQuery({ queryKey: ['filter-names'], queryFn: ({ signal }) => api.filterNames(signal), staleTime: 3_600_000 })
 }
 export function useHdxDashboard() {
-  return useQuery({ queryKey: ['hdx-dashboard'], queryFn: ({ signal }) => api.hdx(signal), staleTime: 120_000 })
+  // A build published before its history landed (`historyPending`) is completed within
+  // seconds on the api: ask again shortly rather than at the next stale time.
+  return useQuery({ queryKey: ['hdx-dashboard'], queryFn: ({ signal }) => api.hdx(signal), staleTime: 120_000, refetchInterval: q => (q.state.data?.historyPending ? 4_000 : false) })
 }
 export function useRevenueDashboard(range: RevenueRange) {
   return useQuery({ queryKey: ['revenue-dashboard', range], queryFn: ({ signal }) => api.revenue(range, signal), staleTime: 60_000 })

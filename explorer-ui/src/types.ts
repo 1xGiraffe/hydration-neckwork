@@ -1842,8 +1842,10 @@ export interface HdxDashboard {
     }
   }
   flows: { daily: HdxDailyFlow[]; dca: { buy: { orders: number; hdxPerDay: number }; sell: { orders: number; hdxPerDay: number } } }
-  churn: { weekly: { weekStart: string; newHolders: number; exitedHolders: number }[] }
-  structure: HdxStructure
+  /** Null while the api is still reading the history (`historyPending`). */
+  churn: { weekly: { weekStart: string; newHolders: number; exitedHolders: number }[] } | null
+  structure: HdxStructure | null
+  historyPending?: boolean
   topMovers: { accumulators: HdxMover[]; distributors: HdxMover[] }
   gigaMarket: GigaMarketReserveStat[] | null
   gigaLiquidations: GigaLiquidations | null

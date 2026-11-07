@@ -12,9 +12,13 @@ import { LOCK_ORDER, lockColor } from '../components/lockColors'
 import type { ShareSegment, StackColumn, MirrorBar, AreaSeries } from '../components/HdxCharts'
 import type { HdxDashboard, HdxStructure, HdxLockType, HdxMover, HdxWindowChart } from '../types'
 import { gridRefine, payloadRefine } from '../utils/chartRefine'
-import { ChartTooltipRow as TipRow, DashboardSectionTitle as SecTitle } from '../components/DashboardPrimitives'
+import { ChartTooltipRow as TipRow, DashboardSectionTitle } from '../components/DashboardPrimitives'
+import type { ComponentProps } from 'react'
 import { monthDayLabel as mdLabel, monthLabel as monLabel } from '../utils/dashboardDates'
 import { useMediaQuery } from '../hooks/useMediaQuery'
+
+// Section titles are the page outline's h2s under its h1.
+const SecTitle = (p: Omit<ComponentProps<typeof DashboardSectionTitle>, 'as'>) => <DashboardSectionTitle {...p} as="h2" />
 
 // Every lock cause the series can carry. `other` is the catch-all for a lock id
 // outside the three named causes (staking, democracy, elections, sufficiency, or
@@ -165,7 +169,7 @@ function HolderSection({ d }: { d: HdxDashboard }) {
             </div>
           ))}
         </div>
-        <div className="hdx-note">Protocol accounts (treasury, omnipool, staking pot) hold <Num v={d.supply.protocolHdx} /> — excluded from cohorts.</div>
+        <div className="hdx-note">Protocol accounts (treasury, omnipool, staking pot) hold <Num v={d.supply.protocolHdx} /> — excluded from cohorts. The HDX locked in the Bonds pot for the <Link to={paths.bonds('hdx')}>HDX bonds</Link> still outstanding counts as their holders’ — each bond is owed 1 HDX.</div>
       </div>
     </>
   )
@@ -661,8 +665,8 @@ const refineChurn = payloadRefine(hdxWindow('churn'), p =>
     ? churnBars(p.buckets, zeros(p.series.newHolders), zeros(p.series.exitedHolders), p.stepSec)
     : null)
 
-function ChurnSection({ d }: { d: HdxDashboard }) {
-  const weeks = d.churn.weekly
+function ChurnSection({ churn }: { churn: NonNullable<HdxDashboard['churn']> }) {
+  const weeks = churn.weekly
   const bars = churnBars(weeks.map(w => w.weekStart), weeks.map(w => w.newHolders), weeks.map(w => w.exitedHolders), 7 * 86_400)
   const ticks = weeks.map((w, i) => ({ i, label: mdLabel(w.weekStart) })).filter(t => t.i % 2 === 0)
   return (
@@ -713,6 +717,12 @@ function MoversSection({ d }: { d: HdxDashboard }) {
   )
 }
 
+// A history section the api published before its read landed (`historyPending`):
+// its frame, and the page refetches until the history is in.
+function HistoryPending({ titles }: { titles: Array<[string, number]> }) {
+  return <>{titles.map(([t, h]) => <div key={t}><SecTitle title={t} subtitle="loading the history" /><ChartSkeleton h={h} /></div>)}</>
+}
+
 // loading skeleton (per section)
 function HdxSkeleton() {
   return (
@@ -740,7 +750,7 @@ export function Hdx() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'HDX' }]} />
-        <div className="page-title">HDX <span className="sub">native token · supply, locks, unlocks & flow</span></div>
+        <h1 className="page-title">HDX <span className="sub">native token · supply, locks, unlocks & flow</span></h1>
       </div>
       {isError
         ? <LoadError title="Couldn’t load the HDX dashboard" onRetry={() => { void refetch() }} />
@@ -748,16 +758,20 @@ export function Hdx() {
           <>
             <Ribbon d={data} />
             <HolderSection d={data} />
-            <OwnershipSection s={data.structure} />
-            <SupplySinksSection s={data.structure} />
+            {data.structure ? <>
+              <OwnershipSection s={data.structure} />
+              <SupplySinksSection s={data.structure} />
+            </> : <HistoryPending titles={[['Who holds HDX', 480], ['Supply sinks', 430]]} />}
             <LocksSection d={data} />
             <UnlocksSection d={data} />
             <GigaMarketSection d={data} />
             <FlowsSection d={data} />
-            <ChurnSection d={data} />
-            <LoyaltySection s={data.structure} />
-            <CostBasisSection s={data.structure} />
-            <ParticipationSection s={data.structure} />
+            {data.churn ? <ChurnSection churn={data.churn} /> : <HistoryPending titles={[['New vs exited holders', 210]]} />}
+            {data.structure ? <>
+              <LoyaltySection s={data.structure} />
+              <CostBasisSection s={data.structure} />
+              <ParticipationSection s={data.structure} />
+            </> : <HistoryPending titles={[['Holder loyalty', 280], ['Cost basis & accumulation', 640], ['Participation', 400]]} />}
             <MoversSection d={data} />
           </>
         )}
