@@ -631,6 +631,14 @@ export function useJuicerDashboard() {
 export function useAccountJuicer(address: string | null) {
   return useQuery({ queryKey: ['account-juicer', address], queryFn: ({ signal }) => positionsApi.accountJuicer(address!, signal), enabled: !!address, staleTime: 30_000 })
 }
+// The Brazilian Invoice Loans page: its current half is the API's 60 s pinned snapshot.
+export function useBilDashboard() {
+  return useQuery({ queryKey: ['bil-dashboard'], queryFn: ({ signal }) => api.bil(signal), refetchInterval: 60_000, staleTime: 30_000 })
+}
+// An account's BIL position and open redemption requests (the same snapshot).
+export function useAccountBil(address: string | null) {
+  return useQuery({ queryKey: ['account-bil', address], queryFn: ({ signal }) => positionsApi.accountBil(address!, signal), enabled: !!address, staleTime: 30_000 })
+}
 // The Intents page's open book: polled like the asset page's order book, which
 // reads the same loaders.
 export function useOpenIntents() {

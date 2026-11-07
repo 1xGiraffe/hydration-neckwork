@@ -340,7 +340,7 @@ export interface PositionTabCounts {
   orders: number
   liquidity: number
   borrow: number
-  /** Juicer vault positions (and open withdrawal requests) — the Strategies tab. */
+  /** Strategy positions (Juicer vaults, Brazilian Invoice Loans) and open withdrawal/redemption requests — the Strategies tab. */
   strategies?: number
   /** The Strategies read is pending or unavailable: a deep link keeps the tab (it says so) rather than losing it. */
   strategiesUnsettled?: boolean

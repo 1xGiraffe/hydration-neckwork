@@ -55,11 +55,14 @@ const IT = {
   // The Juicer strategy vaults: an asset product (deposit an asset, earn in it), so
   // it closes the Assets menu, after Charts.
   juicer: { to: paths.juicer(), label: 'Juicer', match: ['juicer'] } as NavItem,
+  // Brazilian Invoice Loans, the other strategy: HOLLAR into fixed-rate invoice
+  // receivables — directly after Juicer.
+  bil: { to: paths.bil(), label: 'Brazilian Invoice Loans', match: ['bil'] } as NavItem,
 }
 // Liquidity, Volume and Oracles live under Assets at every width; the trigger navigates
 // to Assets so the menu lists only the destinations it is not. Security leads the Chain menu (it is the
 // entry a returning operator wants first) while the trigger keeps Blocks.
-const ASSETS_GROUP: NavGroup = { label: 'Assets', items: [IT.assets, IT.liquidity, IT.volume, IT.oracles, IT.juicer], menuItems: [IT.liquidity, IT.volume, IT.oracles, IT.preis, IT.juicer] }
+const ASSETS_GROUP: NavGroup = { label: 'Assets', items: [IT.assets, IT.liquidity, IT.volume, IT.oracles, IT.juicer, IT.bil], menuItems: [IT.liquidity, IT.volume, IT.oracles, IT.preis, IT.juicer, IT.bil] }
 // Same shape as Assets: the trigger still goes to Accounts (items[0]), and the
 // menu lists only the destination the trigger is not. Tags used to be reachable
 // only from a link on the accounts page itself, which is a place you have to
@@ -81,8 +84,8 @@ const CHAIN_GROUP: NavGroup = {
 export const FOLDABLE = new Set(['HDX', 'HOLLAR'])
 const ASSETS_FOLD_GROUP: NavGroup = {
   label: 'Assets',
-  items: [IT.assets, IT.liquidity, IT.volume, IT.oracles, IT.juicer, IT.hdx, IT.hollar, IT.revenue, IT.revenueUsers, IT.revenueProtocol],
-  menuItems: [IT.liquidity, IT.volume, IT.oracles, IT.hdx, IT.hollar, IT.revenue, IT.revenueUsers, IT.revenueProtocol, IT.preis, IT.juicer],
+  items: [IT.assets, IT.liquidity, IT.volume, IT.oracles, IT.juicer, IT.bil, IT.hdx, IT.hollar, IT.revenue, IT.revenueUsers, IT.revenueProtocol],
+  menuItems: [IT.liquidity, IT.volume, IT.oracles, IT.hdx, IT.hollar, IT.revenue, IT.revenueUsers, IT.revenueProtocol, IT.preis, IT.juicer, IT.bil],
 }
 // The desktop nav in visual order; the drawer keeps every destination flat.
 export const NAV_ENTRIES: Array<{ kind: 'link'; item: NavItem } | { kind: 'group'; group: NavGroup; fold?: 'only' | 'hidden' }> = [
@@ -95,7 +98,7 @@ export const NAV_ENTRIES: Array<{ kind: 'link'; item: NavItem } | { kind: 'group
   { kind: 'group', group: ASSETS_FOLD_GROUP, fold: 'only' },
   { kind: 'group', group: CHAIN_GROUP },
 ]
-export const DRAWER_LINKS: NavItem[] = [IT.activity, IT.accounts, IT.tags, IT.assets, IT.liquidity, IT.volume, IT.oracles, IT.preis, IT.juicer, IT.hdx, IT.hollar, IT.revenue, IT.revenueUsers, IT.revenueProtocol]
+export const DRAWER_LINKS: NavItem[] = [IT.activity, IT.accounts, IT.tags, IT.assets, IT.liquidity, IT.volume, IT.oracles, IT.preis, IT.juicer, IT.bil, IT.hdx, IT.hollar, IT.revenue, IT.revenueUsers, IT.revenueProtocol]
 export const DRAWER_GROUPS: NavGroup[] = [CHAIN_GROUP]
 /** The nav's destination lists, for tests (rendering the bar needs a document). */
 export const NAV_CONFIG = { ASSETS_GROUP, ASSETS_FOLD_GROUP, REVENUE_GROUP, DRAWER_LINKS, NAV_ENTRIES }

@@ -62,7 +62,7 @@ export const HEALTH_FACTOR_DEFAULT_MARKET = 'core'
 
 // The activity-type union the explorer feed routes accept. A rule naming a type
 // the feed cannot filter would silently never match.
-export const ACTIVITY_TYPES = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc', 'bond', 'intent', 'xcswap', 'juicer'] as const
+export const ACTIVITY_TYPES = ['all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm', 'stake', 'vote', 'otc', 'bond', 'intent', 'xcswap', 'juicer', 'bil'] as const
 
 // Referenda lifecycle phases the evaluator watches. `confirming` (entering the
 // confirmation period) and `confirmed` (surviving it) are two different moments,

@@ -4,7 +4,7 @@ import { Link, paths } from '../router'
 import type { ActivitySlug } from '../router'
 import { F, Amt, Usd, AddrPill, AssetChip, AssetAmount, AssetIcon, rowNav, Ago, Waiting, AccountEmoji, ShortAddr, TagIcon, tagMemberSuffix, VoteSideBadge, TableSkeleton, Dash, EmptyRow, ErrorRow, pendingRows, LiveAnchor, ContractGlyph } from './ui'
 import { useNewRows } from '../hooks/useNewRows'
-import { LIQ_LABELS, MM_LABELS, OTC_LABELS, activityBadge, BOND_LABELS, JUICER_LABELS, intentLabel } from './activityColors'
+import { LIQ_LABELS, MM_LABELS, OTC_LABELS, activityBadge, BOND_LABELS, JUICER_LABELS, BIL_LABELS, intentLabel } from './activityColors'
 import { parseUtcTimestamp } from '../utils/time'
 import { fmtDuration } from '../utils/dca'
 import { resolveTag, useTagMapVersion } from '../userTags'
@@ -152,6 +152,10 @@ const JUICER_SLUG: Record<string, ActivitySlug> = {
   ClaimSurplus: 'juicer-claim-surplus', Harvest: 'juicer-harvest', Rebalance: 'juicer-rebalance', Delever: 'juicer-delever',
   Lever: 'juicer-lever', Unlever: 'juicer-unlever',
 }
+const BIL_SLUG: Record<string, ActivitySlug> = {
+  Deposit: 'bil-deposit', Redeem: 'bil-redeem', Cancel: 'bil-cancel', Settle: 'bil-settle', Claim: 'bil-claim',
+  Reinvest: 'bil-reinvest', Interest: 'bil-interest', Principal: 'bil-principal', Draw: 'bil-draw', Repay: 'bil-repay',
+}
 // Canonical detail-page slug for a activity row — mirrors badge() labels.
 export function activitySlug(r: ActivityRow): ActivitySlug {
   switch (r.type) {
@@ -163,6 +167,7 @@ export function activitySlug(r: ActivityRow): ActivitySlug {
     case 'staking': return 'staking'
     case 'bond': return r.bondAction === 'Redeem' ? 'bond-redeem' : 'bond-issue'
     case 'juicer': return JUICER_SLUG[r.juicerAction ?? ''] ?? 'juicer-deposit'
+    case 'bil': return BIL_SLUG[r.bilAction ?? ''] ?? 'bil-deposit'
     // A partial fill is a fill: one slug covers both (the badge tells them apart).
     case 'intent': return r.intentAction === 'Place' ? 'intent-place' : r.intentAction === 'Cancel' ? 'intent-cancel' : r.intentAction === 'Expire' ? 'intent-expire' : r.intentAction === 'DcaTrade' ? 'intent-dca-trade' : 'intent-fill'
     case 'vote': return 'vote'
@@ -244,6 +249,9 @@ const SLUG_LABEL: Record<ActivitySlug, string> = {
   'juicer-settle': JUICER_LABELS.Settle, 'juicer-claim': JUICER_LABELS.Claim, 'juicer-claim-surplus': JUICER_LABELS.ClaimSurplus,
   'juicer-harvest': JUICER_LABELS.Harvest, 'juicer-rebalance': JUICER_LABELS.Rebalance, 'juicer-delever': JUICER_LABELS.Delever,
   'juicer-lever': JUICER_LABELS.Lever, 'juicer-unlever': JUICER_LABELS.Unlever,
+  'bil-deposit': BIL_LABELS.Deposit, 'bil-redeem': BIL_LABELS.Redeem, 'bil-cancel': BIL_LABELS.Cancel, 'bil-settle': BIL_LABELS.Settle,
+  'bil-claim': BIL_LABELS.Claim, 'bil-reinvest': BIL_LABELS.Reinvest, 'bil-interest': BIL_LABELS.Interest, 'bil-principal': BIL_LABELS.Principal,
+  'bil-draw': BIL_LABELS.Draw, 'bil-repay': BIL_LABELS.Repay,
 }
 export function activityLabel(slug: ActivitySlug): string { return SLUG_LABEL[slug] }
 
@@ -261,6 +269,8 @@ export const SLUG_TYPES: Record<ActivitySlug, ActivityRow['type'][]> = {
   'juicer-deposit': ['juicer'], 'juicer-withdraw': ['juicer'], 'juicer-unwind': ['juicer'], 'juicer-settle': ['juicer'], 'juicer-claim': ['juicer'],
   'juicer-claim-surplus': ['juicer'], 'juicer-harvest': ['juicer'], 'juicer-rebalance': ['juicer'], 'juicer-delever': ['juicer'],
   'juicer-lever': ['juicer'], 'juicer-unlever': ['juicer'],
+  'bil-deposit': ['bil'], 'bil-redeem': ['bil'], 'bil-cancel': ['bil'], 'bil-settle': ['bil'], 'bil-claim': ['bil'],
+  'bil-reinvest': ['bil'], 'bil-interest': ['bil'], 'bil-principal': ['bil'], 'bil-draw': ['bil'], 'bil-repay': ['bil'],
 }
 
 export { parseId } from '../utils/activityIds'
@@ -384,6 +394,21 @@ function JuicerFlow({ r, headed }: { r: ActivityRow; headed?: boolean }) {
       {r.juicerAction === 'Harvest' && r.juicerFee != null && r.asset && <span className="muted">compounded · <Amt raw={r.juicerFee} dec={r.asset.decimals} /> {r.asset.symbol} protocol share</span>}
     </span>
   )
+}
+
+// A BIL act's phrase: a deposit's HOLLAR and the BIL it minted, a request's or
+// cancellation's uBIL, a settlement's HOLLAR fixed for the uBIL it settled, a claim's
+// HOLLAR, and the strategy's own HOLLAR flows with the Decentral position they belong to.
+function BilFlow({ r, headed }: { r: ActivityRow; headed?: boolean }) {
+  const req = !headed && r.bilRequestId != null ? <span className="muted mono">#{r.bilRequestId}</span> : null
+  const amount = r.asset && r.amount != null ? <AssetAmount asset={r.asset} raw={r.amount} /> : null
+  const shares = r.bilShareAsset && r.bilShares != null ? <AssetAmount asset={r.bilShareAsset} raw={r.bilShares} /> : null
+  if (r.bilAction === 'Deposit') return <span className="asset-flow">{amount}{shares && <> → {shares}</>}</span>
+  if (r.bilAction === 'Settle') return <span className="asset-flow">{shares}{shares && amount && <> → </>}{amount}{req}</span>
+  if (r.bilAction === 'Reinvest' || r.bilAction === 'Interest' || r.bilAction === 'Principal') {
+    return <span className="asset-flow">{amount}{!headed && r.bilTokenId != null && <span className="muted mono">position #{r.bilTokenId}</span>}</span>
+  }
+  return <span className="asset-flow">{amount}{req}</span>
 }
 
 // One row's activity, as a phrase. `headed` marks a surface whose page HEADER
@@ -541,6 +566,7 @@ export function ActivityDesc({ r, headed, now }: { r: ActivityRow; headed?: bool
     return <span className="asset-flow">{pool}<AssetAmount asset={r.assetIn} raw={r.amountIn} /> + <AssetAmount asset={r.assetOut} raw={r.amountOut} /></span>
   }
   if (r.type === 'juicer') return <JuicerFlow r={r} headed={headed} />
+  if (r.type === 'bil') return <BilFlow r={r} headed={headed} />
   if ((r.type === 'mm' || r.type === 'liquidity' || r.type === 'staking' || r.type === 'bond') && r.asset) {
     return <span className="asset-flow">{pool}<AssetAmount asset={r.asset} raw={r.amount} /></span>
   }

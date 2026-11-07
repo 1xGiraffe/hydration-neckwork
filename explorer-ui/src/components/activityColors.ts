@@ -48,6 +48,13 @@ export const CAT = {
   juicerExit: 'var(--cat-juicer-exit)',
   juicerClaim: 'var(--cat-juicer-claim)',
   juicerKeeper: 'var(--cat-juicer-keeper)',
+  // BIL — bandeira green (Brazilian Invoice Loans: a deposit, the way out, a claim, the
+  // vault's and Decentral's own cash flows, and the interest they pay in gold)
+  bil: 'var(--cat-bil)',
+  bilExit: 'var(--cat-bil-exit)',
+  bilClaim: 'var(--cat-bil-claim)',
+  bilKeeper: 'var(--cat-bil-keeper)',
+  bilYield: 'var(--cat-bil-yield)',
   // intents — violet (limit orders and DCA intents)
   intent: 'var(--cat-intent)',
   intentFill: 'var(--cat-intent-fill)',
@@ -74,6 +81,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   stake: CAT.stake,
   bond: CAT.bond,
   juicer: CAT.juicer,
+  bil: CAT.bil,
   intent: CAT.intent,
   // A cross-chain swap is a swap, so it reads in the trade family's colour.
   xcswap: CAT.trade,
@@ -177,6 +185,27 @@ const JUICER_COLORS: Record<string, string> = {
   Claim: CAT.juicerClaim, ClaimSurplus: CAT.juicerClaim, Harvest: CAT.juicerKeeper, Rebalance: CAT.juicerKeeper, Delever: CAT.juicerKeeper,
   Lever: CAT.juicerKeeper, Unlever: CAT.juicerKeeper,
 }
+// A BIL row reads as the official app words the act: the way out is a redemption
+// request into the queue, its settlements and the claim; the vault's reinvestments and
+// the Decentral pool's cash flows (interest, principal, the borrower's draws and
+// repayments) are the strategy's own upkeep.
+export const BIL_LABELS: Record<string, string> = {
+  Deposit: 'BIL deposit', Redeem: 'Redemption requested', Cancel: 'Redemption cancelled', Settle: 'Redemption settled',
+  Claim: 'Redemption claimed', Reinvest: 'BIL reinvested', Interest: 'Decentral interest', Principal: 'Decentral principal',
+  Draw: 'Decentral draw', Repay: 'Decentral repayment',
+}
+// The bil-* action slugs the feeds filter on, labelled as the badges (the activity
+// chips and the BIL page's own feed read one list).
+export const BIL_ACTION_FILTERS: { v: string; label: string }[] = [
+  { v: 'bil-deposit', label: BIL_LABELS.Deposit }, { v: 'bil-redeem', label: BIL_LABELS.Redeem }, { v: 'bil-cancel', label: BIL_LABELS.Cancel },
+  { v: 'bil-settle', label: BIL_LABELS.Settle }, { v: 'bil-claim', label: BIL_LABELS.Claim }, { v: 'bil-reinvest', label: BIL_LABELS.Reinvest },
+  { v: 'bil-interest', label: BIL_LABELS.Interest }, { v: 'bil-principal', label: BIL_LABELS.Principal },
+  { v: 'bil-draw', label: BIL_LABELS.Draw }, { v: 'bil-repay', label: BIL_LABELS.Repay },
+]
+const BIL_COLORS: Record<string, string> = {
+  Deposit: CAT.bil, Redeem: CAT.bilExit, Cancel: CAT.bilExit, Settle: CAT.bilExit, Claim: CAT.bilClaim,
+  Reinvest: CAT.bilKeeper, Interest: CAT.bilYield, Principal: CAT.bilKeeper, Draw: CAT.bilKeeper, Repay: CAT.bilKeeper,
+}
 // The product's words: a swap intent is a limit order, a dca intent is a DCA intent.
 // One function names every intent row — the badge, the Trade filter list, the slug
 // labels and the detail page all read from it, so no surface can say it differently.
@@ -221,6 +250,10 @@ export function activityBadge(r: ActivityRow): { label: string; col: string } {
   if (r.type === 'juicer') {
     const a = r.juicerAction ?? ''
     return { label: JUICER_LABELS[a] ?? 'Juicer', col: JUICER_COLORS[a] ?? CAT.juicer }
+  }
+  if (r.type === 'bil') {
+    const a = r.bilAction ?? ''
+    return { label: a === 'Settle' && r.bilPartial ? 'Redemption partly settled' : BIL_LABELS[a] ?? 'BIL', col: BIL_COLORS[a] ?? CAT.bil }
   }
   if (r.type === 'intent') return { label: intentLabel(r.intentKind, r.intentAction), col: INTENT_COLORS[r.intentAction ?? ''] ?? CAT.intent }
   // A cross-chain swap is a SWAP, in every state. The badge used to say `Sent`

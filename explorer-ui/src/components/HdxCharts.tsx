@@ -574,8 +574,19 @@ export interface SecondaryScale { keys: string[]; fmt: (v: number) => string; an
  */
 export interface FloorZone { frac: number; color: string; label?: string }
 
-export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero, band, zones, secondary, floorZone, markLast, markers, hideDates, zoomKey, refine }: {
+export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) => v.toFixed(4), floorZero, band, zones, secondary, floorZone, markLast, markers, hideDates, zoomKey, refine, refLine = 1, refLabel, yTicks }: {
   buckets: string[]; series: AreaSeries[]; h?: number; yFmt?: (v: number) => string; floorZero?: boolean
+  /**
+   * The dashed reference line drawn when the domain spans it (default 1, the parity a
+   * ratio chart reads against); null for none. `refLabel` names it at the right edge.
+   */
+  refLine?: number | null
+  refLabel?: string
+  /**
+   * Explicit y gridlines (each labelled with yFmt), in place of the min/mid/max three.
+   * The domain widens to include them, so round values stay round.
+   */
+  yTicks?: number[]
   /**
    * Draw two of the series as one filled low/high envelope: a RANGE reads as an
    * area between its bounds, not as two more measurements. `lo`/`hi` name the
@@ -668,8 +679,8 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
   const leftFlat = secondary ? vSeries.filter(s => !onSecondary(s.key)).flatMap(s => s.values).filter((v): v is number => v != null) : flat
   const secFlat = secondary ? vSeries.filter(s => onSecondary(s.key)).flatMap(s => s.values).filter((v): v is number => v != null) : []
   const domainFlat = leftFlat.length ? leftFlat : [0, 1]
-  const lo = Math.min(...domainFlat), hi = Math.max(...domainFlat)
-  const pad = Math.max((hi - lo) * 0.08, hi * 0.0005)
+  const lo = Math.min(...domainFlat, ...(yTicks ?? [])), hi = Math.max(...domainFlat, ...(yTicks ?? []))
+  const pad = yTicks?.length ? 0 : Math.max((hi - lo) * 0.08, hi * 0.0005)
   const min = floorZone ? 0 : floorZero ? Math.max(0, lo - pad) : lo - pad, max = hi + pad
   // A floor zone is carved out of the bottom of the plot: the axis maps onto the
   // rest, and `floorY` is its floor line.
@@ -787,8 +798,8 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
       onPointerUp={zoom.onPointerUp} onPointerCancel={zoom.onPointerCancel} onDoubleClick={zoom.onDoubleClick}
       onPointerLeave={e => { if (e.pointerType === 'mouse') setHover(null) }}>
       <svg className="day-chart" viewBox={`0 0 ${W} ${H}`}>
-        {[0, 0.5, 1].map(t => {
-          const v = min + (max - min) * t
+        {(yTicks?.length ? yTicks : [0, 0.5, 1].map(t => min + (max - min) * t)).map(v => {
+          const t = v
           return (
             <g key={t}>
               <line x1={padL} x2={W - padR} y1={sy(v).toFixed(1)} y2={sy(v).toFixed(1)} stroke="var(--separator)" strokeWidth="1" />
@@ -816,7 +827,10 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
         })}
         {floorZone && <rect className="mlc-floor-zone" x={padL} y={floorY.toFixed(1)} width={plotW} height={zoneH.toFixed(1)} fill={floorZone.color} fillOpacity={0.1} />}
         {bandAreas.map((d, i) => <path key={`band${i}`} d={d} fill={bHi!.color} fillOpacity={0.2} />)}
-        {!secondary && min < 1 && max > 1 && <line x1={padL} x2={W - padR} y1={sy(1).toFixed(1)} y2={sy(1).toFixed(1)} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.6" />}
+        {!secondary && refLine != null && min < refLine && max > refLine && <>
+          <line x1={padL} x2={W - padR} y1={sy(refLine).toFixed(1)} y2={sy(refLine).toFixed(1)} stroke="var(--text-low)" strokeDasharray="3 4" strokeOpacity="0.6" />
+          {refLabel && <text className="hdx-ax" x={W - padR - 4} y={(sy(refLine) - 4).toFixed(1)} textAnchor="end">{refLabel}</text>}
+        </>}
         {vSeries.map(s => {
           // A band bound is the edge of a filled range, so it wears a hairline
           // instead of the full 2px a standalone line gets.

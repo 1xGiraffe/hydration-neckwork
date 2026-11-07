@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useState } from 'react'
 import { lazyWithReload } from '../lazyWithReload'
 import { blockRangeForWindow } from '../utils/chartRefine'
-import { useAccountJuicer, useAddress, useAddressHistory, useAddressValueEvents, useAccountActivityCounts, useAccountListCount, useStats } from '../hooks/useExplorerData'
+import { useAccountBil, useAccountJuicer, useAddress, useAddressHistory, useAddressValueEvents, useAccountActivityCounts, useAccountListCount, useStats } from '../hooks/useExplorerData'
 import { useNow } from '../hooks/useNow'
 import { api } from '../api/explorer'
 import { useDocumentTitle } from '../hooks/useDocumentTitle'
@@ -12,7 +12,7 @@ import { SectionBoundary } from '../components/SectionBoundary'
 import { OrdersTab } from '../components/positions/OrdersTab'
 import { LiquidityTab } from '../components/positions/LiquidityTab'
 import { BorrowTab } from '../components/positions/BorrowTab'
-import { JuicerPositions } from '../components/positions/JuicerPositions'
+import { StrategyPositions } from '../components/positions/StrategyPositions'
 import { usePositionsPresence } from '../hooks/usePositions'
 import { BalancesTreemap } from '../components/BalancesTreemap'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
@@ -79,8 +79,10 @@ export function Account({ address }: { address: string }) {
   const historyBlocks = history.data?.portfolioBlocks && history.data.portfolioBlocks.length === history.data.portfolioSeries.length
     ? history.data.portfolioBlocks : undefined
   const valueEvents = useAddressValueEvents(canonicalAddress)
-  // Juicer vault positions: the Strategies tab, shown only when there is one.
+  // Strategy positions (Juicer's vaults, Brazilian Invoice Loans): the Strategies tab,
+  // shown only when there is one.
   const juicer = useAccountJuicer(canonicalAddress)
+  const bil = useAccountBil(canonicalAddress)
   // The Activity tab badge is the exact length of the activity list, shared with
   // the list's own unfiltered total; absent while it resolves, and absent for good
   // on a feed too deep to count (rather than showing an overshooting estimate).
@@ -126,7 +128,7 @@ export function Account({ address }: { address: string }) {
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
           // Debt counts from every market and is netted out of the portfolio Value.
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(data.balances.length, { orders: (data.activeDcas?.length ?? 0) + (data.openLimitOrders?.length ?? 0), liquidity: data.liquidityPositions?.length ?? 0, borrow: mmList.length, strategies: juicer.data?.positions.length ?? 0, strategiesUnsettled: juicer.isLoading || juicer.isError || juicer.data?.asOfBlock == null, presence: presence.data, presenceLoading: presence.isLoading, requestedView: view }, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd, data.userRevenueUsd)
+          const tabs = profileTabs(data.balances.length, { orders: (data.activeDcas?.length ?? 0) + (data.openLimitOrders?.length ?? 0), liquidity: data.liquidityPositions?.length ?? 0, borrow: mmList.length, strategies: (juicer.data?.positions.length ?? 0) + (bil.data?.position ? 1 : 0), strategiesUnsettled: juicer.isLoading || juicer.isError || juicer.data?.asOfBlock == null || bil.isLoading || bil.isError || bil.data?.asOfBlock == null, presence: presence.data, presenceLoading: presence.isLoading, requestedView: view }, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd, data.userRevenueUsd)
           const activeView = resolveProfileView(view, tabs)
           return (
             <>
@@ -290,7 +292,7 @@ export function Account({ address }: { address: string }) {
                 )}
 
                 {activeView === 'strategies' && (
-                  <JuicerPositions positions={juicer.data} loading={juicer.isLoading} failed={juicer.isError} />
+                  <StrategyPositions juicer={juicer} bil={bil} />
                 )}
 
                 {activeView === 'contract' && data.contract && (
