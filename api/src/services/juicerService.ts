@@ -1,6 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
-import { cacheRefresh, cached, cachedSwr } from './cache.ts'
-import { currentPriceOf, displayDescriptor, type ExplorerAsset } from './explorerAssets.ts'
+import { cached } from './cache.ts'
+import { h160Account, rawUsd, strategyDashboardCache } from './strategyDashboard.ts'
+import { displayDescriptor, type ExplorerAsset } from './explorerAssets.ts'
 import {
   accountRef, ensurePrices, juicerPartyAccounts, juicerRowsValued, moneyMarketIdentities, resolveRelatedAccounts,
   type AccountRef, type ActivityRow, type PriceInfo,
@@ -26,44 +27,14 @@ import { currentJuicerSnapshot, type JuicerSnapshot, type JuicerVaultState } fro
 // Holders are named by the one attribution rule the activity rows use
 // (explorerService.juicerPartyAccounts).
 
-// The dashboard is never built on a reader's request: the first build starts at
-// process init (server.ts calls initJuicerService once the asset registry and account
-// refs are loaded, before listen; history only, until the juicer-state refresher's
-// first snapshot), and a timer rebuilds it in the background
-// whenever that refresher publishes a new snapshot (on a juicer_logs/jETH change, else
-// every fifth minute). Readers get the cached build — stale-while-revalidate across a
-// snapshot change, so a reader is answered from the previous build while the next one
-// computes; a reader arriving during the boot build joins its single flight.
-const DASHBOARD_KEY = 'explorer:juicer-dashboard'
-const DASHBOARD_FRESH_MS = 5 * 60_000
-const DASHBOARD_STALE_MS = 30 * 60_000
-const PREWARM_EVERY_MS = 15_000
-let prewarmTimer: ReturnType<typeof setInterval> | null = null
-let prewarmedGeneration = -1
-let prewarming = false
-
-export function initJuicerService(_c: ClickHouseClient): void {
-  if (prewarmTimer) return
-  prewarmTimer = setInterval(() => { void prewarmJuicerDashboard() }, PREWARM_EVERY_MS)
-  prewarmTimer.unref?.()
-  setTimeout(() => { void prewarmJuicerDashboard() }, 0).unref?.()
-}
-
+// The dashboard is built off the request path and served stale-while-revalidate (the
+// shared strategyDashboardCache: once at init, again on each new juicer-state snapshot).
+const dashboard = strategyDashboardCache({
+  name: 'juicer', key: 'explorer:juicer-dashboard', snapshot: () => currentJuicerSnapshot(), build: snap => buildJuicerDashboard(snap),
+})
+export function initJuicerService(_c: ClickHouseClient): void { dashboard.init() }
 /** Builds the cached dashboard at boot, then rebuilds it when the snapshot it reads has changed (and only then). */
-export async function prewarmJuicerDashboard(): Promise<void> {
-  const snap = currentJuicerSnapshot()
-  const generation = snap?.readAt ?? 0
-  if (prewarming || generation === prewarmedGeneration) return
-  prewarming = true
-  try {
-    await cacheRefresh(DASHBOARD_KEY, DASHBOARD_FRESH_MS, DASHBOARD_STALE_MS, () => buildJuicerDashboard(snap), generation)
-    prewarmedGeneration = generation
-  } catch (err) {
-    console.warn('[juicer] dashboard prewarm failed; readers keep the previous build', err instanceof Error ? err.message : err)
-  } finally {
-    prewarming = false
-  }
-}
+export const prewarmJuicerDashboard = (): Promise<void> => dashboard.prewarm()
 
 const WAD = 10n ** 18n
 const BASE = 1e8
@@ -187,14 +158,6 @@ export interface JuicerDashboard {
 }
 
 const asset = (id: number): ExplorerAsset => displayDescriptor(id)
-const h160Account = (h: string): AccountRef => accountRef('0x45544800' + h.slice(2).toLowerCase() + '0'.repeat(16))
-function rawUsd(prices: Map<number, PriceInfo>, assetId: number, raw: string | null): number | null {
-  const p = currentPriceOf(prices, assetId)?.price
-  const d = asset(assetId).decimals
-  if (raw == null || p == null || d == null) return null
-  const v = Number(raw) / 10 ** d * p
-  return Number.isFinite(v) ? v : null
-}
 const CUSTODY = new Set([...JUICER_CUSTODY_CONTRACTS, DEAD_ADDRESS])
 
 /**
@@ -369,10 +332,7 @@ async function vaultCtx(): Promise<VaultCtx> {
   return { prices, primeSupplyApyPct: prime, parties, nowSec: Math.floor(Date.now() / 1000) }
 }
 
-export async function getJuicerDashboard(): Promise<JuicerDashboard> {
-  const snap = currentJuicerSnapshot()
-  return cachedSwr(DASHBOARD_KEY, DASHBOARD_FRESH_MS, DASHBOARD_STALE_MS, () => buildJuicerDashboard(snap), snap?.readAt ?? 0)
-}
+export const getJuicerDashboard = (): Promise<JuicerDashboard> => dashboard.get()
 
 async function buildJuicerDashboard(snap: JuicerSnapshot | null): Promise<JuicerDashboard> {
   const [ctx, rowsValued] = await Promise.all([vaultCtx(), juicerRowsValued()])

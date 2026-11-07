@@ -1,6 +1,7 @@
 import type { ClickHouseClient } from '../db/client.ts'
 import { loadPinnedBlock } from './pinnedBlock.ts'
 import { makeTolerantEthCall, type TolerantEthCall } from './mmOraclePrices.ts'
+import { addressWord as addr, abiArg as arg, createStrategyRefresher, loadErc20Wallet as loadWallet, loadReserveBorrowRate, selectRows as select, strategyChangeMark, word } from './strategyRefresher.ts'
 import {
   DEAD_ADDRESS, HOLLAR_CONTRACT, JUICER_POOL, JUICER_SUBLOOP, JUICER_VAULTS, JUICER_YIELD_ACCOUNTING, PRIME_RESERVE,
   decodeJuicerLog, juicerBeneficialBalances, juicerRequests,
@@ -25,7 +26,8 @@ import {
 //
 // A cycle runs when juicer_logs or the share token's deltas moved, and on every 5th
 // tick regardless (rates and prices move with no log). It is complete or it is not
-// published: any read that fails keeps the previous snapshot whole.
+// published: any read that fails keeps the previous snapshot whole (the shared cycle,
+// strategyRefresher.ts).
 
 const SEL = {
   totalAssets: '0x01e1d114', totalSupply: '0x18160ddd', exchangeRate: '0x3ba0b9a9', tvlCap: '0x3f23fa1a',
@@ -34,15 +36,6 @@ const SEL = {
   activeSourceRemaining: '0x5033c9ef', pendingSourceAccounting: '0xd0e96d76',
   targetHf: '0x1c823eff', getConfiguration: '0xc44b11f7',
   addressesProvider: '0x0542975c', getPriceOracle: '0xfca513a8', getAssetPrice: '0xb3596f07',
-}
-const arg = (address: string) => address.slice(2).toLowerCase().padStart(64, '0')
-export function word(hex: string | null | undefined, i: number): bigint | null {
-  if (!hex || hex.length < 2 + 64 * (i + 1)) return null
-  return BigInt('0x' + hex.slice(2 + 64 * i, 2 + 64 * (i + 1)))
-}
-const addr = (hex: string | null | undefined): string | null => {
-  const w = word(hex, 0)
-  return w == null ? null : '0x' + w.toString(16).padStart(40, '0')
 }
 
 export interface JuicerAccountData {
@@ -120,29 +113,12 @@ export function juicerSettings(events: readonly JuicerEvent[], vault: string) {
   return { paused, emergencyPaused, withdrawalDelaySec, protocolFeeBps, mainDiscountBps, loopDiscountBps, band, exitHeadroom }
 }
 
-let client: ClickHouseClient | null = null
-let snapshot: JuicerSnapshot | null = null
-let lastMark = ''
-let ticks = 0
-export function initJuicerState(c: ClickHouseClient): void { client = c }
-
-async function select<T>(ch: ClickHouseClient, query: string, query_params: Record<string, unknown> = {}): Promise<T[]> {
-  return (await ch.query({ query, query_params, format: 'JSONEachRow' })).json<T>()
-}
 
 /** Every Juicer log up to `block`, decoded. */
 export async function loadJuicerEvents(ch: ClickHouseClient, block: number): Promise<JuicerEvent[]> {
   const rows = await select<JuicerLogRow>(ch, `SELECT block_height, event_index, extrinsic_index, toString(block_timestamp) AS ts, contract_address, topic0, topics, data
     FROM price_data.juicer_logs FINAL WHERE block_height <= {b:UInt32} ORDER BY block_height, event_index`, { b: block })
   return rows.map(decodeJuicerLog).filter((e): e is JuicerEvent => e != null)
-}
-
-async function loadWallet(ch: ClickHouseClient, contract: string, block: number): Promise<Map<string, bigint>> {
-  const rows = await select<{ holder: string; balance: string }>(ch, `SELECT holder, toString(sum(balance_delta)) AS balance
-    FROM price_data.erc20_transfer_deltas FINAL
-    WHERE contract_address = {c:String} AND block_height <= {b:UInt32} AND holder != '0x0000000000000000000000000000000000000000'
-    GROUP BY holder`, { c: contract, b: block })
-  return new Map(rows.map(r => [r.holder.toLowerCase(), BigInt(r.balance)] as [string, bigint]).filter(([, v]) => v !== 0n))
 }
 
 async function loadAccountData(ch: ClickHouseClient, holders: string[], block: number): Promise<Map<string, JuicerAccountData>> {
@@ -154,22 +130,6 @@ async function loadAccountData(ch: ClickHouseClient, holders: string[], block: n
   { h: holders, pool: JUICER_POOL })
   // The latest observation, at or below the pin (an observation above it is newer than the rest of the snapshot).
   return new Map(rows.filter(r => Number(r.b) <= block).map(r => [r.holder.toLowerCase(), { collateralBase: r.c, debtBase: r.d, healthFactor: r.hf, blockHeight: Number(r.b) }]))
-}
-
-async function loadHollarRate(ch: ClickHouseClient, block: number): Promise<string | null> {
-  const [r] = await select<{ rate: string }>(ch, `SELECT toString(variable_borrow_rate) AS rate FROM price_data.money_market_reserve_rates FINAL
-    WHERE pool_address = {pool:String} AND reserve_address = {res:String} AND block_height <= {b:UInt32}
-    ORDER BY block_height DESC, event_index DESC LIMIT 1`, { pool: JUICER_POOL, res: HOLLAR_CONTRACT, b: block })
-  return r?.rate ?? null
-}
-
-/** The change mark a cycle compares: juicer_logs and the share tokens' deltas, rows and newest ingest. */
-async function loadMark(ch: ClickHouseClient): Promise<string> {
-  const [r] = await select<{ m: string }>(ch, `SELECT concat(
-      (SELECT concat(toString(count()), ':', toString(max(ingested_at))) FROM price_data.juicer_logs), '|',
-      (SELECT concat(toString(count()), ':', toString(max(ingested_at))) FROM price_data.erc20_transfer_deltas WHERE contract_address IN {cs:Array(String)})) AS m`,
-  { cs: JUICER_VAULTS.map(v => v.vault) })
-  return r?.m ?? ''
 }
 
 /** One vault at the pin, or null when any read it needs failed. */
@@ -231,7 +191,7 @@ export async function readJuicerSnapshot(ch: ClickHouseClient): Promise<JuicerSn
   const events = await loadJuicerEvents(ch, pin.block)
   const [accounts, rate, loopReads] = await Promise.all([
     loadAccountData(ch, [...JUICER_VAULTS.map(v => v.vault), JUICER_SUBLOOP], pin.block),
-    loadHollarRate(ch, pin.block),
+    loadReserveBorrowRate(ch, JUICER_POOL, HOLLAR_CONTRACT, pin.block),
     call([{ to: JUICER_SUBLOOP, data: SEL.targetHf }, { to: JUICER_POOL, data: SEL.getConfiguration + arg(PRIME_RESERVE) }]),
   ])
   const targetHf = word(loopReads[0], 0), primeConfig = word(loopReads[1], 0)
@@ -265,26 +225,18 @@ async function publishVaultState(ch: ClickHouseClient, s: JuicerSnapshot): Promi
   })
 }
 
-export async function refreshJuicerState(): Promise<void> {
-  if (!client) return
-  ticks++
-  const mark = await loadMark(client)
-  if (snapshot && mark === lastMark && ticks % 5 !== 0) return
-  const next = await readJuicerSnapshot(client)
-  if (!next) {
-    console.warn('[juicer] a state read failed; keeping the previous snapshot')
-    return
-  }
-  snapshot = next
-  lastMark = mark
-  await publishVaultState(client, next).catch(err => console.error('[juicer] vault state publish failed', err))
-}
-
 /** A snapshot older than this states no current figure (the refresher has stopped renewing it). */
 export const JUICER_SNAPSHOT_MAX_AGE_MS = 15 * 60_000
-export function currentJuicerSnapshot(nowMs = Date.now()): JuicerSnapshot | null {
-  return snapshot && nowMs - snapshot.readAt <= JUICER_SNAPSHOT_MAX_AGE_MS ? snapshot : null
-}
+const refresher = createStrategyRefresher<JuicerSnapshot>({
+  name: 'juicer',
+  loadMark: ch => strategyChangeMark(ch, 'price_data.juicer_logs', JUICER_VAULTS.map(v => v.vault)),
+  read: readJuicerSnapshot,
+  publish: publishVaultState,
+  maxAgeMs: JUICER_SNAPSHOT_MAX_AGE_MS,
+})
+export function initJuicerState(c: ClickHouseClient): void { refresher.init(c) }
+export const refreshJuicerState = (): Promise<void> => refresher.refresh()
+export const currentJuicerSnapshot = (nowMs = Date.now()): JuicerSnapshot | null => refresher.current(nowMs)
 /** The beneficial share balances to publish for a vault's share token, and the block they are at. */
 export function juicerBeneficialFor(contract: string): { block: number; balances: Map<string, bigint> } | null {
   const s = currentJuicerSnapshot()
@@ -292,4 +244,4 @@ export function juicerBeneficialFor(contract: string): { block: number; balances
   return s && v ? { block: s.block, balances: v.beneficial } : null
 }
 /** Test seam. */
-export function setJuicerSnapshotForTest(s: JuicerSnapshot | null): void { snapshot = s }
+export function setJuicerSnapshotForTest(s: JuicerSnapshot | null): void { refresher.setForTest(s) }

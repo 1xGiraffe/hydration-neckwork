@@ -220,7 +220,7 @@ describe('an ERC-20 send between ordinary accounts', () => {
     expect(explorerService).toContain('if (r.extrinsic_index != null && !erc20Free.has(key) && (tradeExt.has(')
     expect(body('erc20TransferLegsOf')).toContain('free: erc20OrdinaryLeg(t.from, t.to, venues)')
     // The BIL issuance contracts are venues by their existing tags, not a second list.
-    expect(body('erc20VenueH160s')).toContain("t.tagId === 'bil-issuer' || t.tagId === 'bil-originator'")
+    expect(body('erc20VenueH160s')).toContain('BIL_TAG_IDS.has(t.tagId)')
   })
 })
 

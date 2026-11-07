@@ -3,10 +3,7 @@ import { SUBSTRATE_RPC_URL } from './substrateRpc.ts'
 import { loadPinnedSubstrateBlock, withEthBlockHash } from './pinnedBlock.ts'
 import { reservedH160AccountId } from './addressIdentity.ts'
 import { erc20Precompile } from './chainPrimitives.ts'
-import { JUICER_VAULTS } from './juicer.ts'
-import { juicerBeneficialFor } from './juicerState.ts'
-
-const isJuicerShareContract = (c: string) => JUICER_VAULTS.some(v => v.vault === c.toLowerCase())
+import { auditsBalanceOf, isStrategyShareContract, strategyBeneficialFor } from './strategyCustody.ts'
 
 // ERC-20-backed wallet assets: registry assets whose balances live (partly) in
 // EVM contract storage rather than the Tokens pallet, so the indexed balance
@@ -606,20 +603,22 @@ export async function publishDeltaBalances(assets: Erc20WalletAsset[], pin: { bl
   // Current holders per contract: freshly summed where the watermark moved, the
   // last publication's otherwise.
   const holdersOf = (c: string): Map<string, bigint> | undefined => fresh.balances.get(c) ?? published.get(c)?.balances
-  const allHolders = [...new Set(contracts.flatMap(c => [...(holdersOf(c)?.keys() ?? []), ...(isJuicerShareContract(c) ? juicerBeneficialFor(c)?.balances.keys() ?? [] : [])]))]
+  const allHolders = [...new Set(contracts.flatMap(c => [...(holdersOf(c)?.keys() ?? []), ...(isStrategyShareContract(c) ? strategyBeneficialFor(c)?.balances.keys() ?? [] : [])]))]
   const anchorOf = makeAnchorOf(await loadAnchors(allHolders))
   const out: string[] = []
   for (const a of assets) {
     const c = a.contract
-    // A Juicer vault's share token publishes BENEFICIAL balances: the custody the vault
-    // and its yield fund hold (escrowed shares, unwinding exits, funded earnings),
-    // attributed to whom it belongs — juicerBeneficialBalances over these same deltas,
-    // summed at the juicer-state refresher's own pin together with the reads they
-    // need. Without a fresh snapshot the previous rows stand.
-    if (isJuicerShareContract(c)) {
-      const beneficial = juicerBeneficialFor(c)
+    // A strategy's share token publishes BENEFICIAL balances: the custody its vault holds
+    // (Juicer: escrowed shares, unwinding exits and the yield fund's funded earnings;
+    // BIL: uBIL escrowed by open redemption requests, a settled part at the HOLLAR it is
+    // owed), attributed to whom it belongs — juicerBeneficialBalances /
+    // bilBeneficialBalances over these same deltas, summed at the strategy refresher's
+    // own pin together with the reads they need. Without a fresh snapshot the previous
+    // rows stand.
+    if (isStrategyShareContract(c)) {
+      const beneficial = strategyBeneficialFor(c)
       if (!beneficial) continue
-      const jmark = `juicer:${beneficial.block}`
+      const jmark = `strategy:${beneficial.block}`
       const anchorsJ = anchorFingerprint([...beneficial.balances.keys()], anchorOf)
       const prevJ = published.get(c)
       if (prevJ && prevJ.watermark === jmark && prevJ.anchors === anchorsJ) continue
@@ -662,7 +661,7 @@ export async function auditDeltaBalances(assets: Erc20WalletAsset[], pin: { bloc
   for (const a of assets) {
     // A Juicer share's balanceOf includes funded earnings no Transfer moves; its
     // beneficial balances are reconciled by the juicer-state refresher instead.
-    if (isJuicerShareContract(a.contract)) continue
+    if (!auditsBalanceOf(a.contract)) continue
     const deltas = balances.get(a.contract)
     if (!deltas?.size) continue
     const chain = await ethCallBalances(a.assetId, [...deltas.keys()], { blockHash: pin.ethBlockHash })

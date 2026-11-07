@@ -16,6 +16,7 @@
 
 import { H2O_ASSET_ID, PRICE_ALIAS_ID, allExplorerAssets, priceAssetId } from './explorerAssets.ts'
 import { JUICER_CUSTODY_CONTRACTS } from './juicer.ts'
+import { BIL_CUSTODY_CONTRACTS } from './bil.ts'
 
 /**
  * The Omnipool's own pallet account, `modl` + `omnipool` — the fee recipient that
@@ -73,14 +74,17 @@ export function poolOwnHubHoldingSql(accountExpr: string, assetExpr: string): st
  * A strategy's CUSTODY account holds what its share token's holders own: the Juicer
  * vault (Main's collateral, its synthetic and debt, the escrowed shares), the SubLoop
  * (the PRIME loop Main's debt funds) and the yield accounting (the funded earnings
- * fund) — JUICER_CUSTODY_CONTRACTS. The share token (jETH) is priced at what a share
- * redeems for and its beneficial balances are attributed to the holders
- * (juicerBeneficialBalances), so every holding of these accounts, their money-market
+ * fund) — JUICER_CUSTODY_CONTRACTS; the BIL vault (uBIL escrowed by open redemption
+ * requests, HOLLAR reserved for settled claims, idle HOLLAR) and the Decentral pool it
+ * invests in (the invested HOLLAR its borrower has not drawn) — BIL_CUSTODY_CONTRACTS.
+ * Each share token (jETH, uBIL and BIL over it) is priced at what a share redeems for and
+ * its beneficial balances are attributed to the holders (juicerBeneficialBalances,
+ * bilBeneficialBalances), so every holding of these accounts, their money-market
  * positions included, is a balance and never a value: counting both would state the
  * strategy twice. Same surfaces and the same `uncounted` mechanics as the hub rule
  * above.
  */
-export const CUSTODY_ACCOUNT_IDS: ReadonlySet<string> = new Set(JUICER_CUSTODY_CONTRACTS.map(h => '0x45544800' + h.slice(2).toLowerCase() + '0'.repeat(16)))
+export const CUSTODY_ACCOUNT_IDS: ReadonlySet<string> = new Set([...JUICER_CUSTODY_CONTRACTS, ...BIL_CUSTODY_CONTRACTS].map(h => '0x45544800' + h.slice(2).toLowerCase() + '0'.repeat(16)))
 export function isCustodyAccount(accountId: string): boolean {
   return CUSTODY_ACCOUNT_IDS.has(accountId.toLowerCase())
 }

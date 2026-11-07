@@ -41,7 +41,7 @@ const ALLOWED_SHARED = new Set([
   // need the same prices the public pair route composes.
   'services/foreignCandles.ts',
   'services/valuation.ts',
-  'services/juicerPrice.ts',
+  'services/strategySharePrice.ts',
   // The price limit an ICE intent states, both directions, from the raw integer
   // amounts. A leaf (no imports at all); shared so the explorer, this surface and
   // the other API cannot quote one order's limit two ways.

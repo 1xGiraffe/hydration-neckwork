@@ -35,6 +35,7 @@ import {
   humanDuration, renderList, renderNotification, shortAddress, shortHash, text as textPart, usd as usdPart,
   type RenderAccount, type RenderInput, type RenderPart, type RenderedNotification,
 } from './render.ts'
+import { bilActionSlug } from '../services/bil.ts'
 
 // The trigger evaluator: one always-on loop that turns each new stretch of the
 // chain into notifications.
@@ -1007,6 +1008,7 @@ export function activityPath(row: ActivityRow): string {
       case 'staking': return 'staking'
       case 'bond': return row.bondAction === 'Redeem' ? 'bond-redeem' : 'bond-issue'
       case 'juicer': return JUICER_SLUG[row.juicerAction ?? ''] ?? 'juicer-deposit'
+      case 'bil': return row.bilAction ? bilActionSlug(row.bilAction) : 'bil-deposit'
       case 'intent': return INTENT_SLUG[row.intentAction ?? ''] ?? 'intent-place'
       case 'vote': return 'vote'
       case 'otc': return row.otcAction === 'Pull' ? 'otc-pull' : row.otcAction === 'Fill' ? 'otc-fill' : 'otc-place'
@@ -1051,10 +1053,17 @@ const JUICER_SLUG: Record<string, string> = {
   Lever: 'juicer-lever', Unlever: 'juicer-unlever',
 }
 
+// A BIL row reads as the UI labels it (BIL_LABELS).
+const BIL_HEADLINE: Record<string, string> = {
+  Deposit: 'BIL deposit', Redeem: 'BIL redemption requested', Cancel: 'BIL redemption cancelled', Settle: 'BIL redemption settled',
+  Claim: 'BIL redemption claimed', Reinvest: 'BIL reinvested', Interest: 'Decentral interest received', Principal: 'Decentral principal returned',
+  Draw: 'Decentral draw', Repay: 'Decentral repayment',
+}
+
 const ACTIVITY_LABEL: Record<ActivityRow['type'], string> = {
   transfer: 'Transfer', trade: 'Swap', xcm: 'Cross-chain', liquidity: 'Liquidity',
   mm: 'Money market', dca: 'DCA', staking: 'Staking', vote: 'Vote', otc: 'OTC', bond: 'Bond', intent: 'Intent',
-  xcswap: 'Cross-chain swap', juicer: 'Juicer',
+  xcswap: 'Cross-chain swap', juicer: 'Juicer', bil: 'BIL',
 }
 function activityHeadline(row: ActivityRow): string {
   if (row.type === 'liquidity' && row.liqAction === 'ClaimReferral') return 'Claim referral rewards'
@@ -1067,6 +1076,7 @@ function activityHeadline(row: ActivityRow): string {
   if (row.type === 'otc' && row.otcAction) return OTC_HEADLINE[row.otcAction] ?? 'OTC order'
   if (row.type === 'bond' && row.bondAction) return BOND_HEADLINE[row.bondAction] ?? 'Bond'
   if (row.type === 'juicer' && row.juicerAction) return JUICER_HEADLINE[row.juicerAction] ?? 'Juicer'
+  if (row.type === 'bil' && row.bilAction) return BIL_HEADLINE[row.bilAction] ?? 'BIL'
   if (row.type === 'intent' && row.intentAction) {
     const noun = row.intentKind === 'dca' ? 'DCA intent' : row.intentKind === 'swap' ? 'Limit order' : 'Intent'
     return `${noun} ${INTENT_VERB[row.intentAction] ?? row.intentAction.toLowerCase()}`

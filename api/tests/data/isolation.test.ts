@@ -18,7 +18,7 @@ const ALLOWED_SHARED = new Set([
   'services/cache.ts',
   'services/explorerAssets.ts',
   'services/valuation.ts',
-  'services/juicerPrice.ts',
+  'services/strategySharePrice.ts',
   'services/lpMath.ts',
   // The amounts a pallet liquidity event does not state, matched from the
   // transfer legs beside it — the explorer's own pairing, so an XYK add's or
