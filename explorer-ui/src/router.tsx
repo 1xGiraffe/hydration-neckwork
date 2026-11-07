@@ -65,7 +65,7 @@ export type Route =
   | { name: 'assets' }
   | { name: 'hdx' }
   | { name: 'hollar' }
-  | { name: 'ice' }
+  | { name: 'intents' }
   | { name: 'revenue' }
   | { name: 'revenueUsers' }
   | { name: 'revenueProtocol' }
@@ -168,14 +168,17 @@ export function parseRoute(loc: string): Route {
     }
     // /intent/<u128>: its own case, deliberately not an ACTIVITY_SLUGS entry — the
     // bare integer fails ACTIVITY_ID_RE, so as a slug it would silently fall back to
-    // the tab. A malformed id lands on the Trade tab, where intents are listed.
+    // the tab. A malformed id lands on /intents, where intents are listed.
     case 'intent':
       return parts[1] && /^\d{1,39}$/.test(parts[1])
         ? { name: 'intent', intentId: parts[1] }
-        : { name: 'legacy', to: '/activity?tab=trade' }
+        : { name: 'legacy', to: '/intents' }
     case 'hdx': return { name: 'hdx' }
     case 'hollar': return { name: 'hollar' }
-    case 'ice': return { name: 'ice' }
+    // The intent venue's page. /ice — the solver pallet's name — is an alias of
+    // it, query string and all (nginx answers it 301 too).
+    case 'intents': return { name: 'intents' }
+    case 'ice': return { name: 'legacy', to: '/intents' + (qIdx >= 0 ? loc.slice(qIdx) : '') }
     // /revenue is the overview of both rivers; each has its own breakdown page.
     case 'revenue':
       if (parts[1] === 'users') return { name: 'revenueUsers' }
@@ -355,7 +358,7 @@ export const paths = {
   assets: () => '/assets',
   hdx: () => '/hdx',
   hollar: () => '/hollar',
-  ice: () => '/ice',
+  intents: () => '/intents',
   revenue: () => '/revenue',
   revenueUsers: () => '/revenue/users',
   revenueProtocol: () => '/revenue/protocol',

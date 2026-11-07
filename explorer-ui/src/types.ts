@@ -1883,16 +1883,44 @@ export interface HollarDashboard {
   trends: HollarTrends
 }
 
-// The ICE intent venue (runtime 443): status, open orders, fills, execution
-// quality, the matched-volume fee and the DCA→intent migration (api iceService).
+// The ICE intent venue (runtime 443), served at /intents: status, open orders,
+// fills, execution quality, the matched-volume fee and the DCA→intent migration
+// (api iceService).
+// One `ICE.SolverRouting` override: a venue governance included in or excluded from
+// the solver's routing. `assets` holds one tuple per target (a pair for a wrap or an
+// XYK pool, a single asset for an Omnipool asset or a stableswap pool's share).
+export interface IceRoutingEntry { kind: string; assets: AssetRef[][]; contracts: string[]; state: 'Included' | 'Excluded'; block: number }
+export interface IceBp { p10: number | null; p50: number | null; p90: number | null }
+export interface IceOpenOrders { total: number; limit: number; dca: number; byAsset: { asset: AssetRef; reserved: string; reservedUsd: number | null; orders: number }[] }
 export interface IceDashboard {
-  status: { solverMode: 'V4' | 'Passthrough' | 'Disabled'; protocolFeePpm: number; dcaMigrationEnabled: boolean; uniswapV3: { factory: string; swapRouter: string; quoter: string } | null; asOfBlock: number }
-  openOrders: { total: number; limit: number; dca: number; byAsset: { asset: AssetRef; reserved: string; reservedUsd: number | null; orders: number }[] }
+  status: { solverMode: 'V4' | 'Passthrough' | 'Disabled'; protocolFeePpm: number; dcaMigrationEnabled: boolean; uniswapV3: { factory: string; swapRouter: string; quoter: string } | null; asOfBlock: number; routing: IceRoutingEntry[] }
+  allTime: { intents: number; limit: number; dca: number; owners: number }
+  openOrders: IceOpenOrders
   fillsPerDay: { day: string; fills: number; solutions: number; usd: number; matchedUsd: number; routedUsd: number }[]
-  quality: { medianTimeToFillSec: number | null; partialShare: number | null; cancelRate: number | null; expiryRate: number | null; priceVsLimitBp: { p10: number | null; p50: number | null; p90: number | null } }
+  // Owners with a fill in the window, and the fills left out of every USD figure.
+  traders: number
+  unpricedFills: number
+  topTraders: { account: AccountRef; fills: number; usd: number }[]
+  // Price vs limit over every limit-order fill, then split: market-style fills (within
+  // two blocks of placement — the app's swaps, whose limit is the quote less its
+  // slippage allowance) and fills of orders that rested.
+  quality: {
+    medianTimeToFillSec: number | null; medianBlocksToFill: number | null; partialShare: number | null; cancelRate: number | null; expiryRate: number | null
+    priceVsLimitBp: IceBp
+    priceVsLimitBpImmediate: IceBp & { fills: number }
+    priceVsLimitBpResting: IceBp & { fills: number }
+  }
   feeRevenue: { perDay: { day: string; usd: number }[]; potHoldings: { asset: AssetRef; amount: string; valueUsd: number | null }[] }
   migration: { migrated: number; cancelled: number; byReason: { reason: string; count: number }[]; remainingSchedules: number; perDay: { day: string; migrated: number; cancelled: number }[] }
   topPairs: { assetIn: AssetRef; assetOut: AssetRef; fills: number; usd: number }[]
+  generatedAt: string
+}
+// The open book, live (/explorer/intents/open): the per-asset reserves beside every
+// resting limit order and running DCA intent, each list cut to its first 200 by value.
+export interface IceOpenIntents {
+  summary: IceOpenOrders
+  limitOrders: OpenLimitOrder[]; limitOrdersTotal: number
+  dcaIntents: ActiveDca[]; dcaIntentsTotal: number
   generatedAt: string
 }
 

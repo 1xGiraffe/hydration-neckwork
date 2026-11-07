@@ -1766,7 +1766,7 @@ export function revenueColdCapPredicateSql(marks: ReadonlyMap<RevenueStream, str
  * history is simply incomplete until the job lands, which the derivations
  * freshness contract states rather than hides.
  */
-const MAX_TAIL_HOURS = 26
+export const MAX_TAIL_HOURS = 26
 
 export function revenueTailHours(marks: ReadonlyMap<RevenueStream, string>, nowSeconds: number): number {
   let oldest = nowSeconds

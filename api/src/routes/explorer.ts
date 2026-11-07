@@ -39,7 +39,7 @@ import {
   getTagLiquidityRewards, getTagOrderHistory, getTagPositionsPresence, type OrderHistoryQuery,
 } from '../services/positionsPresence.ts'
 import { ORDER_HISTORY_MAX_LIMIT } from '../services/orderHistory.ts'
-import { getIceDashboard } from '../services/iceService.ts'
+import { getIceDashboard, getOpenIntents } from '../services/iceService.ts'
 import { getSecurityDashboard } from '../services/securityService.ts'
 import { getWormholeBridgeDetail } from '../services/wormholeNttService.ts'
 import { countLiquiditySources } from '../services/poolService.ts'
@@ -1233,9 +1233,12 @@ export async function explorerRoutes(fastify: FastifyInstance) {
   // (services/positionYield.ts). Global; SWR-cached ten minutes.
   fastify.get('/explorer/yields', async () => getExplorerYields())
 
+  // The Intents page (/intents): the venue's 30-day model, SWR-cached five minutes…
   fastify.get('/explorer/ice', async () => {
     return getIceDashboard()
   })
+  // …and its open book, which moves with every solution: cached 15s.
+  fastify.get('/explorer/intents/open', async () => getOpenIntents())
 
   fastify.get('/explorer/security', async () => {
     return getSecurityDashboard()
