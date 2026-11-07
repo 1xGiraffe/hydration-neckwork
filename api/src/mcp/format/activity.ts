@@ -29,22 +29,22 @@ import { bullets, kv, note } from './md.ts'
 /* ============ the vocabulary, as data ============ */
 
 /**
- * The 14 values `type=` accepts. Exported as data so a tool's description, its
+ * The 15 values `type=` accepts. Exported as data so a tool's description, its
  * zod schema and this renderer cannot drift apart.
  */
 export const ACTIVITY_TYPES = [
   'all', 'transfer', 'trade', 'dca', 'liquidity', 'mm', 'xcm',
-  'stake', 'vote', 'otc', 'bond', 'intent', 'xcswap', 'juicer',
+  'stake', 'vote', 'otc', 'bond', 'intent', 'xcswap', 'juicer', 'bil',
 ] as const
 
 /**
- * The 13 values a ROW's own `type` can carry. Note it is not the same list:
+ * The 14 values a ROW's own `type` can carry. Note it is not the same list:
  * `all` is a query word, `stake` arrives as `staking`, and `dca` executions
  * arrive typed `trade`.
  */
 export const ACTIVITY_ROW_TYPES: readonly ActivityRowType[] = [
   'transfer', 'trade', 'xcm', 'liquidity', 'mm', 'dca',
-  'staking', 'vote', 'otc', 'bond', 'intent', 'xcswap', 'juicer',
+  'staking', 'vote', 'otc', 'bond', 'intent', 'xcswap', 'juicer', 'bil',
 ]
 
 /**
@@ -72,6 +72,10 @@ export const ACTIVITY_ACTIONS: Record<string, string[]> = {
   juicer: [
     'juicer-deposit', 'juicer-withdraw', 'juicer-unwind', 'juicer-settle', 'juicer-claim',
     'juicer-claim-surplus', 'juicer-harvest', 'juicer-rebalance', 'juicer-delever', 'juicer-lever', 'juicer-unlever',
+  ],
+  bil: [
+    'bil-deposit', 'bil-redeem', 'bil-cancel', 'bil-settle', 'bil-claim',
+    'bil-reinvest', 'bil-interest', 'bil-principal', 'bil-draw', 'bil-repay',
   ],
   vote: ['Aye', 'Nay'],
 }
@@ -110,8 +114,7 @@ export const ACTIVITY_TYPE_NOTES =
   'type=trade is a FAMILY and also returns otc, intent and xcswap rows, while ' +
   'type=otc|intent|xcswap narrow to their own; and an unknown `token` is not an error upstream — ' +
   'it silently returns an empty page, so this tool names it as a candidate cause whenever a ' +
-  'filtered page comes back empty. (`action` is checked against the per-type list below BEFORE ' +
-  'the call, because upstream an unknown one costs ~45 s and a 503 on the global feed.)'
+  'filtered page comes back empty.'
 
 /* ============ per-family wording ============ */
 
@@ -137,6 +140,16 @@ const JUICER_SLUG: Record<string, string> = {
   Claim: 'juicer-claim', ClaimSurplus: 'juicer-claim-surplus', Harvest: 'juicer-harvest', Rebalance: 'juicer-rebalance', Delever: 'juicer-delever',
   Lever: 'juicer-lever', Unlever: 'juicer-unlever',
 }
+// A BIL act reads as the explorer's BIL_LABELS name it.
+const BIL_LABELS: Record<string, string> = {
+  Deposit: 'BIL deposit', Redeem: 'BIL redemption requested', Cancel: 'BIL redemption cancelled', Settle: 'BIL redemption settled',
+  Claim: 'BIL redemption claimed', Reinvest: 'BIL reinvested', Interest: 'Decentral interest received', Principal: 'Decentral principal returned',
+  Draw: 'Decentral draw', Repay: 'Decentral repayment',
+}
+const BIL_SLUG: Record<string, string> = {
+  Deposit: 'bil-deposit', Redeem: 'bil-redeem', Cancel: 'bil-cancel', Settle: 'bil-settle', Claim: 'bil-claim',
+  Reinvest: 'bil-reinvest', Interest: 'bil-interest', Principal: 'bil-principal', Draw: 'bil-draw', Repay: 'bil-repay',
+}
 // An OTC order's acts read as its lifecycle, the way an intent's do.
 const OTC_LABELS: Record<string, string> = { Place: 'OTC order placed', Pull: 'OTC order pulled', Fill: 'OTC order filled' }
 const INTENT_KIND_WORD: Record<string, string> = { swap: 'Limit order', dca: 'DCA intent' }
@@ -157,6 +170,7 @@ export function activityKind(r: ActivityRow): string {
     case 'staking': return r.stakingAction || 'Staking'
     case 'bond': return BOND_LABELS[r.bondAction ?? ''] ?? 'Bond'
     case 'juicer': return JUICER_LABELS[r.juicerAction ?? ''] ?? 'Juicer'
+    case 'bil': return r.bilAction === 'Settle' && r.bilPartial ? 'BIL redemption partly settled' : BIL_LABELS[r.bilAction ?? ''] ?? 'BIL'
     case 'intent': return intentLabel(r.intentKind, r.intentAction)
     case 'xcswap':
       // The action is a swap in every state; whether it was DELIVERED is the
@@ -209,6 +223,7 @@ export function activitySlug(r: ActivityRow): string {
     case 'staking': return 'staking'
     case 'bond': return r.bondAction === 'Redeem' ? 'bond-redeem' : 'bond-issue'
     case 'juicer': return JUICER_SLUG[r.juicerAction ?? ''] ?? 'juicer-deposit'
+    case 'bil': return BIL_SLUG[r.bilAction ?? ''] ?? 'bil-deposit'
     case 'intent':
       // A partial fill IS a fill: one slug covers both.
       return r.intentAction === 'Place' ? 'intent-place'
@@ -414,6 +429,11 @@ function qualifiers(r: ActivityRow): string[] {
       if (r.juicerEligibleAt) out.push(`unwind from ${r.juicerEligibleAt.slice(0, 16).replace('T', ' ')} UTC`)
       if (r.juicerLtvBefore != null && r.juicerLtvAfter != null) out.push(`Main LTV ${(r.juicerLtvBefore / 100).toFixed(1)}% → ${(r.juicerLtvAfter / 100).toFixed(1)}%`)
       if (r.juicerIntentNonce != null) out.push(`ICE intent nonce ${r.juicerIntentNonce}`)
+      break
+    case 'bil':
+      if (r.bilRequestId != null) out.push(`request #${r.bilRequestId}`)
+      if (r.bilShareAsset && r.bilShares != null) out.push(`${formatAmount(r.bilShares, r.bilShareAsset.decimals, assetLabel(r.bilShareAsset))} ${({ Deposit: 'minted', Redeem: 'queued', Cancel: 'returned', Settle: 'rate-locked', Claim: 'burned' } as Record<string, string>)[r.bilAction ?? ''] ?? 'moved'}`)
+      if (r.bilTokenId != null) out.push(`Decentral position #${r.bilTokenId}`)
       break
     case 'staking':
     case 'transfer':

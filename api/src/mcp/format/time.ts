@@ -124,3 +124,13 @@ export function blocksToDuration(blocks: number | null | undefined, secondsPerBl
   if (!Number.isFinite(secondsPerBlock) || secondsPerBlock <= 0) return DASH
   return formatDuration(blocks * secondsPerBlock)
 }
+
+/** A queued BIL redemption's payment: its covering maturity and the window the HOLLAR arrives in (maturity + measured processing). */
+export interface BilWait { maturesAt: string; from: string; to: string; matured: boolean }
+/** When a queued redemption is paid, as a window — or "matured, awaiting processing" once its maturity has passed (never a time in the past). */
+export function bilWaitText(w: BilWait | null, paidFromIdle: boolean, nowMs = Date.now()): string {
+  if (paidFromIdle) return 'covered by idle HOLLAR (next settlement)'
+  if (!w) return '—'
+  if (w.matured) return Date.parse(w.to) > nowMs ? `matured, awaiting processing (usually paid by ${formatTime(w.to)})` : 'matured, awaiting processing'
+  return `${formatTime(w.from)} – ${formatTime(w.to)} (maturity ${formatTime(w.maturesAt)} + measured processing)`
+}

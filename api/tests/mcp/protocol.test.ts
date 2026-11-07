@@ -362,9 +362,9 @@ describe('JSON-RPC envelope conformance', () => {
 /*
  * The cost of the tool table itself.
  *
- * Measured on this registry: tools/list answers 53 KB — roughly 13k tokens
- * that every client spends before it can call anything. Of that, ~32 KB is the
- * thirteen descriptions and ~21 KB the generated input schemas.
+ * Measured on this registry: tools/list answers 64 KB — roughly 16k tokens
+ * that every client spends before it can call anything. Of that, ~40 KB is the
+ * fourteen descriptions and ~23 KB the generated input schemas.
  *
  * That size is a deliberate trade, not an oversight. A description here is the
  * tool's interface (AGENTS.md § MCP server): it carries the traps an agent
@@ -373,7 +373,7 @@ describe('JSON-RPC envelope conformance', () => {
  * empty page rather than an error. An agent that walks into one of those spends
  * far more than 13k tokens finding out, and on the shared explorer api rather
  * than in its own context. Shortening them would move the cost, not remove it,
- * so they stay whole; the transport gzips the reply (53 KB → 17 KB on the wire)
+ * so they stay whole; the transport gzips the reply (64 KB → 21 KB on the wire)
  * which is the part that is free to take.
  *
  * The ceiling below is what makes it a decision rather than a drift: a registry
