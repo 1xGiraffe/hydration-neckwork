@@ -45,6 +45,10 @@ export interface DecodedRawTrade {
   counterparty?: string | null
   inputs: TradeAssetAmount[]
   outputs: TradeAssetAmount[]
+  /** A route leg of an ICE solution booked to its owners' fills: no per-account row (see icePotSettlement.ts). */
+  bookedAsIceFills?: boolean
+  /** An intent owner's ICE fill: a per-account booking only, never candle volume. */
+  iceFill?: boolean
 }
 
 /**

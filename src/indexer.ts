@@ -15,6 +15,7 @@ import * as storage from './types/storage.ts'
 import { hasAssetRegistryMetadataEvent } from './registry/events.js'
 import { isSwapEvent } from './registry/swapEvents.js'
 import { extractTradeVolumeFromSwaps, extractVolumeFromSwaps, mergePriceAndVolumeRows } from './blocks/extractVolume.js'
+import { ICE_SOLUTION_CALL } from './blocks/icePotSettlement.js'
 import { readErc20Balances, isKnownErc20, updateErc20Registry, type AtokenReserveRef } from './evm/balances.js'
 import {
   ClickHouseSnapshotReader,
@@ -626,6 +627,10 @@ export async function run(options: RunOptions = {}): Promise<void> {
       previousSpecVersion = specVersion
 
       const hasSetStorageAffectingPools = detectPoolAffectingSetStorage(block.calls)
+      // An ICE solution whose intents matched each other whole emits no swap event,
+      // yet its owners' fills are per-account volume (src/blocks/icePotSettlement.ts),
+      // so its block is never skipped as price-irrelevant.
+      const hasIceSolution = block.calls.some(call => call.name === ICE_SOLUTION_CALL)
       const hasAssetRegistryChange = hasAssetRegistryMetadataEvent(block.events)
       // Every block, processed or skipped: a Mint in a quiet block still moves
       // the edge, and a pool's Swap is volume this block must book.
@@ -727,7 +732,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
           if (hasPoolAffectingTransfer && hasSwapEvents) break
         }
 
-        if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && !hasSwapEvents && !uniswapV3Changes.changed && uniswapV3Changes.swaps === 0 && previousPrices !== null) {
+        if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && !hasSwapEvents && !hasIceSolution && !uniswapV3Changes.changed && uniswapV3Changes.swaps === 0 && previousPrices !== null) {
           shouldProcess = false
         } else {
           omnipoolAssets = historicalSnapshot.omnipoolAssets
@@ -805,7 +810,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
           if (hasPoolAffectingTransfer && hasSwapEvents) break
         }
 
-        if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && !hasSwapEvents && !uniswapV3Changes.changed && uniswapV3Changes.swaps === 0 && previousPrices !== null) {
+        if (!hasPoolAffectingTransfer && !hasSetStorageAffectingPools && !compositionChanged && !hasSwapEvents && !hasIceSolution && !uniswapV3Changes.changed && uniswapV3Changes.swaps === 0 && previousPrices !== null) {
           shouldProcess = false
         } else {
           try {
@@ -897,7 +902,7 @@ export async function run(options: RunOptions = {}): Promise<void> {
 
       // Extract volume from swap events in this block (Broadcast fills plus the
       // direct-EVM swaps on known concentrated-liquidity pools)
-      const volumeOptions = { uniswapV3Pools: uniswapV3Pools.poolIndex() }
+      const volumeOptions = { uniswapV3Pools: uniswapV3Pools.poolIndex(), calls: block.calls }
       const volumeRows = extractVolumeFromSwaps(
         block.events,
         blockHeight,

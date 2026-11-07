@@ -9,9 +9,12 @@ import {
   ICE_FIRST_BLOCK,
   ICE_POT_ACCOUNT,
   ICE_SETTLEMENT_TRANSFER_EVENTS,
-  icePotSettlementOwner,
-  isIcePotSwapper,
+  ICE_SOLUTION_CALL,
+  bookIceSettlements,
+  icePotLegOf,
   isUnattributableVolumePot,
+  type IceBookingAccess,
+  type IcePotLeg,
 } from '../blocks/icePotSettlement.js'
 import { EVM_LOG_EVENT_NAME, resolveEvmTokenAssetId, routedUniswapV3Extrinsics, type UniswapV3PoolIndex, type UniswapV3PoolTokens } from '../price/uniswapV3.js'
 import { aggregateTradeVolumeRows, decimalToScaledBigInt, formatDecimal128, sumBigIntStrings, sumDecimal128Strings, sumVolumeFields } from '../blocks/volumeMath.js'
@@ -40,6 +43,13 @@ interface Args {
 }
 
 export type RawEventRow = RawTradeEventRow
+
+/** A raw `ICE.submit_solution` extrinsic: the call that states what its solution resolved. */
+export interface IceSolutionCallRow {
+  block_height: number
+  extrinsic_index: number
+  call_args_json: string
+}
 
 interface SnapshotRow {
   block_height: number
@@ -311,30 +321,55 @@ function otcTakerBefore(row: RawEventRow, previous: RawEventRow | undefined): st
   }
 }
 
+/** The ICE booking's view of the repair's trade type — the live extractor's twin. */
+const ICE_BOOKING: IceBookingAccess<DecodedTrade> = {
+  traderOf: trade => trade.account,
+  withTrader: (trade, owner) => ({ ...trade, account: owner }),
+  bookedAsFills: trade => ({ ...trade, bookedAsIceFills: true }),
+  fillTrade: fill => ({
+    account: fill.owner,
+    inputs: [{ assetId: fill.assetIn, amount: fill.amountIn }],
+    outputs: [{ assetId: fill.assetOut, amount: fill.amountOut }],
+    iceFill: true,
+  }),
+}
+
 export function decodeBlockTrades(
   rows: readonly RawEventRow[],
   uniswapV3Pools: UniswapV3PoolIndex = new Map(),
+  iceSolutions: readonly IceSolutionCallRow[] = [],
 ): Array<{ blockHeight: number; trade: DecodedTrade }> {
   const out: Array<{ blockHeight: number; trade: DecodedTrade }> = []
+  // The solutions' call args by block, then extrinsic: what books a solution to
+  // its owners' fills (see icePotSettlement.ts).
+  const solutionArgs = new Map<number, Map<number, unknown>>()
+  for (const call of iceSolutions) {
+    let args: unknown
+    try {
+      args = JSON.parse(call.call_args_json)
+    } catch {
+      continue // An unreadable call states nothing; its solution stays on the pot.
+    }
+    const height = Number(call.block_height)
+    const inBlock = solutionArgs.get(height) ?? new Map<number, unknown>()
+    inBlock.set(Number(call.extrinsic_index), args)
+    solutionArgs.set(height, inBlock)
+  }
   let block: RawEventRow['block_height'] | null = null
   // A pool's Swap log (EVM.Log) counts only when no Broadcast fill of its
   // extrinsic already booked the hop — the same rule as the live extractor.
   let slots: Array<{ trade: DecodedTrade; extrinsicIndex: number | null | undefined; fromPoolLog: boolean }> = []
   // The pot's transfer legs of the block being read, per extrinsic — what names
-  // the intent owner of an ICE settlement (see icePotSettlement.ts).
-  let icePotLegs = new Map<number, Array<{ from: string | null; to: string | null }>>()
+  // the intent owners of an ICE settlement (see icePotSettlement.ts).
+  let icePotLegs = new Map<number, IcePotLeg[]>()
   const flush = () => {
     if (block == null) return
-    for (const slot of slots) {
-      if (slot.extrinsicIndex == null || !isIcePotSwapper(slot.trade.account)) continue
-      const owner = icePotSettlementOwner(icePotLegs.get(slot.extrinsicIndex) ?? [])
-      if (owner) slot.trade = { ...slot.trade, account: owner }
-    }
+    const fills = bookIceSettlements(slots, icePotLegs, solutionArgs.get(block) ?? new Map(), ICE_BOOKING)
     const routed = routedUniswapV3Extrinsics(slots.filter(slot => !slot.fromPoolLog).map(slot => ({ filler: slot.trade.filler, extrinsicIndex: slot.extrinsicIndex })))
     const trades = slots
       .filter(slot => !slot.fromPoolLog || slot.extrinsicIndex == null || !routed.has(slot.extrinsicIndex))
       .map(slot => slot.trade)
-    for (const trade of foldOmnipoolHubHops(trades, t => t.account)) out.push({ blockHeight: block, trade })
+    for (const trade of [...foldOmnipoolHubHops(trades, t => t.account), ...fills]) out.push({ blockHeight: block, trade })
     slots = []
     icePotLegs = new Map()
   }
@@ -350,16 +385,14 @@ export function decodeBlockTrades(
     if (row.block_height !== block) { flush(); block = row.block_height }
     if (ICE_TRANSFER_EVENT_SET.has(row.event_name)) {
       // Collected, never a trade of its own: the settlement's transfer legs exist
-      // only to name the owner the solution's route legs belong to.
+      // only to name the owners its route legs or its fills belong to.
       if (row.extrinsic_index == null) continue
       try {
-        const args = JSON.parse(row.args_json) as { from?: unknown; to?: unknown }
-        const from = typeof args.from === 'string' ? args.from : null
-        const to = typeof args.to === 'string' ? args.to : null
-        if (from && to) {
+        const leg = icePotLegOf(row.event_name, JSON.parse(row.args_json))
+        if (leg) {
           const legs = icePotLegs.get(row.extrinsic_index)
-          if (legs) legs.push({ from, to })
-          else icePotLegs.set(row.extrinsic_index, [{ from, to }])
+          if (legs) legs.push(leg)
+          else icePotLegs.set(row.extrinsic_index, [leg])
         }
       } catch {
         // A leg we cannot read simply does not name an owner.
@@ -584,8 +617,10 @@ export function rowsForTrade(
   }
   // A pot that swaps as machinery with nobody behind it gets no per-account row
   // (icePotSettlement.ts) — the price rows below still carry the volume.
+  // An ICE solution booked to its owners' fills gives its route legs no account
+  // row either; the fills carry the per-account side (icePotSettlement.ts).
   const tradeRowForAsset = (assetId: number): TradeVolumeRow | null =>
-    trade.account && !isUnattributableVolumePot(trade.account) ? rowIn(tradeRowsByAsset, trade.account, assetId, false) : null
+    trade.account && !trade.bookedAsIceFills && !isUnattributableVolumePot(trade.account) ? rowIn(tradeRowsByAsset, trade.account, assetId, false) : null
   // The passive side of an OTC fill, booked with the legs mirrored (otcCounterparty.ts).
   const counterpartyAccount = trade.counterparty && trade.counterparty !== trade.account
     && !isUnattributableVolumePot(trade.counterparty) ? trade.counterparty : null
@@ -597,7 +632,9 @@ export function rowsForTrade(
 
     const priced = calculateLegUsdVolume(input, blockHeight, aliases, prices)
     const usdVolume = priced ?? '0.000000000000'
-    if (priced == null && targeted(input)) {
+    if (trade.iceFill) {
+      // A fill is no pool trade: the route legs that executed it are the candle's volume.
+    } else if (priced == null && targeted(input)) {
       unpricedLegs += 1
     } else {
       const priceRow = priceRowForAsset(input.canonicalAssetId)
@@ -622,7 +659,9 @@ export function rowsForTrade(
 
     const priced = calculateLegUsdVolume(output, blockHeight, aliases, prices)
     const usdVolume = priced ?? '0.000000000000'
-    if (priced == null && targeted(output)) {
+    if (trade.iceFill) {
+      // See the input side: no candle volume of its own.
+    } else if (priced == null && targeted(output)) {
       unpricedLegs += 1
     } else {
       const priceRow = priceRowForAsset(output.canonicalAssetId)
@@ -865,8 +904,8 @@ async function queryRawEvents(
           -- event names, which sits at event_index - 1 (see otcCounterparty.ts). It
           -- is not a swap event, so it has to be asked for explicitly.
           OR event_name IN ({otc_fill_names:Array(String)})
-          -- An ICE solution's route legs carry the solver's pot as swapper; the
-          -- intent owner is named by the pot's own transfer legs in the same
+          -- An ICE solution's route legs carry the solver's pot as swapper; its
+          -- intent owners are named by the pot's own transfer legs in the same
           -- extrinsic (see icePotSettlement.ts). Bounded to the pot's own legs and
           -- to blocks at or above ICE's first event, so a repair below that range
           -- reads nothing extra.
@@ -894,6 +933,30 @@ async function queryRawEvents(
     clickhouse_settings: BOUNDED_QUERY_SETTINGS,
   })
   return await result.json<RawEventRow>()
+}
+
+/**
+ * The chunk's successful ICE solutions with their call args — what books a
+ * solution serving several owners to each owner's fill (icePotSettlement.ts).
+ * Nothing to read below ICE's first block.
+ */
+async function queryIceSolutionCalls(client: ClickHouseClient, from: number, to: number): Promise<IceSolutionCallRow[]> {
+  if (to < ICE_FIRST_BLOCK) return []
+  const result = await client.query({
+    query: `
+      SELECT block_height, extrinsic_index, call_args_json
+      FROM price_data.raw_extrinsics FINAL
+      PREWHERE block_height BETWEEN {from:UInt32} AND {to:UInt32} AND call_name = {call:String} AND success = 1
+    `,
+    query_params: { from: Math.max(from, ICE_FIRST_BLOCK), to, call: ICE_SOLUTION_CALL },
+    format: 'JSONEachRow',
+    clickhouse_settings: BOUNDED_QUERY_SETTINGS,
+  })
+  return (await result.json<IceSolutionCallRow>()).map(row => ({
+    block_height: Number(row.block_height),
+    extrinsic_index: Number(row.extrinsic_index),
+    call_args_json: row.call_args_json,
+  }))
 }
 
 /**
@@ -969,6 +1032,56 @@ async function queryPricesForAssets(client: ClickHouseClient, from: number, to: 
   })
   const rows = await result.json<{ block_height: number; asset_id: number; usd_price: string }>()
   return new Map(rows.map(row => [priceKey(row.block_height, row.asset_id), row.usd_price]))
+}
+
+// How far back a skipped block looks for the prices the live indexer carried
+// into it: far beyond any stretch without a processed block.
+const SKIPPED_BLOCK_PRICE_LOOKBACK = 50_000
+
+/**
+ * The live indexer skips a block that moved no pool as price-irrelevant and
+ * writes it no price row: its prices are the previous processed block's. The one
+ * kind of event block that can be such a block is an ICE solution whose intents
+ * matched each other with no route (icePotSettlement.ts; the indexer processes
+ * those blocks now, history has three). An event block with no price row at all
+ * is priced here at each asset's newest price below it, which is exactly what
+ * the live path held for it. A block with price rows keeps the exact-block rule.
+ */
+async function carryPricesIntoSkippedBlocks(
+  client: ClickHouseClient,
+  prices: Map<string, string>,
+  eventBlocks: readonly number[],
+  assetIds: readonly number[],
+): Promise<void> {
+  if (assetIds.length === 0) return
+  const priced = new Set<number>()
+  for (const key of prices.keys()) priced.add(Number(key.split(':')[0]))
+  const skipped = eventBlocks.filter(block => !priced.has(block))
+  if (skipped.length === 0) return
+  const withRows = await client.query({
+    query: `SELECT DISTINCT block_height FROM price_data.prices WHERE block_height IN ({blocks:Array(UInt32)})`,
+    query_params: { blocks: skipped },
+    format: 'JSONEachRow',
+    clickhouse_settings: BOUNDED_QUERY_SETTINGS,
+  })
+  const hasRows = new Set((await withRows.json<{ block_height: number }>()).map(row => Number(row.block_height)))
+  for (const block of skipped.filter(b => !hasRows.has(b))) {
+    const result = await client.query({
+      query: `
+        SELECT asset_id, toString(argMax(usd_price, block_height)) AS usd_price
+        FROM price_data.prices FINAL
+        WHERE asset_id IN ({asset_ids:Array(UInt32)})
+          AND block_height < {block:UInt32} AND block_height >= {floor:UInt32}
+        GROUP BY asset_id
+      `,
+      query_params: { asset_ids: [...assetIds], block, floor: Math.max(0, block - SKIPPED_BLOCK_PRICE_LOOKBACK) },
+      format: 'JSONEachRow',
+      clickhouse_settings: BOUNDED_QUERY_SETTINGS,
+    })
+    for (const row of await result.json<{ asset_id: number; usd_price: string }>()) {
+      prices.set(priceKey(block, Number(row.asset_id)), row.usd_price)
+    }
+  }
 }
 
 async function queryExistingNonZeroPriceRows(
@@ -1095,8 +1208,11 @@ async function repairChunk(
     uniswapV3Pools: UniswapV3PoolIndex
   }
 ): Promise<RepairChunkResult> {
-  const events = await queryRawEvents(client, options.from, options.to, options.unifiedSwapFromBlock, [...options.uniswapV3Pools.keys()])
-  const trades = decodeBlockTrades(events, options.uniswapV3Pools)
+  const [events, iceSolutions] = await Promise.all([
+    queryRawEvents(client, options.from, options.to, options.unifiedSwapFromBlock, [...options.uniswapV3Pools.keys()]),
+    queryIceSolutionCalls(client, options.from, options.to),
+  ])
+  const trades = decodeBlockTrades(events, options.uniswapV3Pools, iceSolutions)
   const eventBlocks = [...new Set(trades.map(row => row.blockHeight))]
   const snapshots = await querySnapshots(client, eventBlocks)
   const missingSnapshots = eventBlocks.filter(blockHeight => !snapshots.has(blockHeight))
@@ -1113,7 +1229,9 @@ async function repairChunk(
       sourceAssetIds.add(canonicalAssetId(leg.assetId, aliases))
     }
   }
-  const prices = await queryPricesForAssets(client, options.from, options.to, [...sourceAssetIds].sort((a, b) => a - b))
+  const assetIdList = [...sourceAssetIds].sort((a, b) => a - b)
+  const prices = await queryPricesForAssets(client, options.from, options.to, assetIdList)
+  await carryPricesIntoSkippedBlocks(client, prices, eventBlocks, assetIdList)
 
   const generated = trades.map(({ blockHeight, trade }) => {
     const aliases = snapshots.get(blockHeight)

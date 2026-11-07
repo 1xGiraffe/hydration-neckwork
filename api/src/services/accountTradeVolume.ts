@@ -276,7 +276,8 @@ legacy AS (
   // them read $813k of "trading" by October 2026 on top of the owners' fills, and
   // any sum across accounts counted intent volume twice. The fill states exact
   // per-owner amounts, so even a multi-owner solution needs no split of the routes
-  // (the indexer, which has only the routes, re-attributes them instead — see
+  // (the indexer's per-account candle volume re-attributes a one-owner solution's
+  // routes and books a several-owner one's fills from the solution call — see
   // src/blocks/icePotSettlement.ts). The owner's trade is the FILL: the Intent event's amounts for a resolve,
   // a partial or a DCA trade; for the budget-exhausting DcaCompleted, which states
   // none, the pot's settlement legs for that (solution, owner, asset) less the

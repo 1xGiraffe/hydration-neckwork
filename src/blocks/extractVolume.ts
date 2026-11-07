@@ -22,9 +22,13 @@ import { foldOmnipoolHubHops } from './hubHops.js';
 import { OTC_FILLER_KIND, OTC_FILL_EVENT_NAMES, otcSides } from './otcCounterparty.js';
 import {
   ICE_SETTLEMENT_TRANSFER_EVENTS,
-  icePotSettlementOwner,
-  isIcePotSwapper,
+  ICE_SOLUTION_CALL,
+  bookIceSettlements,
+  iceSettlementExtrinsics,
+  icePotLegOf,
   isUnattributableVolumePot,
+  type IceBookingAccess,
+  type IcePotLeg,
 } from './icePotSettlement.js';
 import { aggregateTradeVolumeRows, sumBigIntStrings, sumDecimal128Strings, sumVolumeFields } from './volumeMath.js';
 import {
@@ -72,6 +76,17 @@ interface DecodedTrade {
    * counterparty to book. See resolveOtcCounterparties.
    */
   counterparty?: string | null;
+  /**
+   * A route leg of an ICE solution that served several owners: the per-account
+   * breakdown books those owners' fills instead (see icePotSettlement.ts), so it
+   * gives this leg no row. The candle's volume still counts it.
+   */
+  bookedAsIceFills?: boolean;
+  /**
+   * An intent owner's ICE fill: a per-account booking only. The pool trades that
+   * executed it are already the candle's volume, so it adds none of its own.
+   */
+  iceFill?: boolean;
 }
 
 export type AssetCanonicalizer = (assetId: number) => number;
@@ -84,6 +99,21 @@ export interface ExtractVolumeOptions {
    * UniswapV3 venue — the router-routed case, which is already counted.
    */
   uniswapV3Pools?: UniswapV3PoolIndex;
+  /**
+   * The block's calls, of which only `ICE.submit_solution` is read: it states
+   * what a solution resolved for each intent, which is how a solution serving
+   * several owners is booked to them (see icePotSettlement.ts).
+   */
+  calls?: ReadonlyArray<CallLike>;
+}
+
+/** The subset of a Subsquid call the extractor reads. */
+export interface CallLike {
+  name: string;
+  args?: unknown;
+  extrinsicIndex?: number;
+  /** Empty for the extrinsic's own call; a nested call is never a solution. */
+  address?: number[];
 }
 
 interface CanonicalTradeLeg extends DecodedTradeAssetAmount {
@@ -183,15 +213,15 @@ const ICE_TRANSFER_EVENTS = new Set<string>(ICE_SETTLEMENT_TRANSFER_EVENTS);
 
 /**
  * The pot's own transfer legs in each of `extrinsics`, which is where an ICE
- * settlement names the intent owner (see icePotSettlement.ts). Only called for a
- * block that actually settled an intent, so an ordinary block decodes no
- * transfers it would otherwise have left alone.
+ * settlement names the intent owners (see icePotSettlement.ts). Decodes nothing
+ * in a block without a settlement.
  */
 function icePotTransferLegs(
   events: Array<EventLike>,
   extrinsics: Set<number>,
-): Map<number, Array<{ from: string | null; to: string | null }>> {
-  const byExtrinsic = new Map<number, Array<{ from: string | null; to: string | null }>>();
+): Map<number, IcePotLeg[]> {
+  const byExtrinsic = new Map<number, IcePotLeg[]>();
+  if (extrinsics.size === 0) return byExtrinsic;
   for (const event of events) {
     const extrinsicIndex = event.extrinsicIndex;
     if (extrinsicIndex == null || !extrinsics.has(extrinsicIndex)) continue;
@@ -204,36 +234,37 @@ function icePotTransferLegs(
     } catch {
       continue;
     }
-    const from = normalizeAccount(args?.from);
-    const to = normalizeAccount(args?.to);
-    if (!from || !to) continue;
+    const leg = icePotLegOf(event.name, args);
+    if (!leg) continue;
     const legs = byExtrinsic.get(extrinsicIndex);
-    if (legs) legs.push({ from, to });
-    else byExtrinsic.set(extrinsicIndex, [{ from, to }]);
+    if (legs) legs.push(leg);
+    else byExtrinsic.set(extrinsicIndex, [leg]);
   }
   return byExtrinsic;
 }
 
-/**
- * Book an ICE solution's route legs to the intent owner the settlement names,
- * leaving them on the pot when the extrinsic names no single owner.
- */
-function resolveIceSettlementOwners(
-  slots: Array<{ trade: DecodedTrade; extrinsicIndex?: number; fromPoolLog: boolean }>,
-  events: Array<EventLike>,
-): void {
-  const settled = new Set<number>();
-  for (const slot of slots) {
-    if (slot.extrinsicIndex != null && isIcePotSwapper(slot.trade.trader)) settled.add(slot.extrinsicIndex);
+/** The block's top-level `ICE.submit_solution` calls, by extrinsic. */
+function iceSolutionCalls(calls: ReadonlyArray<CallLike> | undefined): Map<number, unknown> {
+  const out = new Map<number, unknown>();
+  for (const call of calls ?? []) {
+    if (call.name !== ICE_SOLUTION_CALL || call.extrinsicIndex == null || (call.address?.length ?? 0) > 0) continue;
+    out.set(call.extrinsicIndex, call.args);
   }
-  if (settled.size === 0) return;
-  const legsByExtrinsic = icePotTransferLegs(events, settled);
-  for (const slot of slots) {
-    if (slot.extrinsicIndex == null || !isIcePotSwapper(slot.trade.trader)) continue;
-    const owner = icePotSettlementOwner(legsByExtrinsic.get(slot.extrinsicIndex) ?? []);
-    if (owner) slot.trade = { ...slot.trade, trader: owner };
-  }
+  return out;
 }
+
+/** The ICE booking's view of this extractor's trade type (see icePotSettlement.ts). */
+const ICE_BOOKING: IceBookingAccess<DecodedTrade> = {
+  traderOf: trade => trade.trader,
+  withTrader: (trade, owner) => ({ ...trade, trader: owner }),
+  bookedAsFills: trade => ({ ...trade, bookedAsIceFills: true }),
+  fillTrade: fill => ({
+    trader: fill.owner,
+    inputs: [{ assetId: fill.assetIn, amount: fill.amountIn }],
+    outputs: [{ assetId: fill.assetOut, amount: fill.amountOut }],
+    iceFill: true,
+  }),
+};
 
 /**
  * Put the two accounts of an OTC fill on their true sides — see otcSides in
@@ -707,8 +738,11 @@ function decorateLegacyBroadcastTrade({
 /**
  * One block's swap trades, in event order, with each routed Omnipool trade's
  * two hub hops folded back into the one trade the pallet executed (see
- * hubHops.ts). Both volume extractors read trades through here so the hub asset
- * is booked the same way for candles and for per-account volume.
+ * hubHops.ts), followed by the ICE fills of any solution booked to its owners
+ * that way. Both volume extractors read trades through here so the hub asset
+ * is booked the same way for candles and for per-account volume; the candle
+ * takes every trade but the fills, the per-account breakdown every trade but
+ * the route legs those fills replace.
  */
 function decodeBlockTrades(
   events: Array<EventLike>,
@@ -753,7 +787,9 @@ function decodeBlockTrades(
     });
   }
 
-  resolveIceSettlementOwners(slots, events);
+  const solutions = iceSolutionCalls(options.calls);
+  const settlementLegs = icePotTransferLegs(events, iceSettlementExtrinsics(slots, solutions, ICE_BOOKING.traderOf));
+  const iceFills = bookIceSettlements(slots, settlementLegs, solutions, ICE_BOOKING);
 
   const routedExtrinsics = routedUniswapV3Extrinsics(
     slots.filter(slot => !slot.fromPoolLog).map(slot => ({ filler: slot.trade.filler, extrinsicIndex: slot.extrinsicIndex })),
@@ -761,7 +797,7 @@ function decodeBlockTrades(
   const trades = slots
     .filter(slot => !slot.fromPoolLog || slot.extrinsicIndex == null || !routedExtrinsics.has(slot.extrinsicIndex))
     .map(slot => slot.trade);
-  return foldOmnipoolHubHops(trades, trade => trade.trader);
+  return [...foldOmnipoolHubHops(trades, trade => trade.trader), ...iceFills];
 }
 
 /**
@@ -788,6 +824,7 @@ export function extractVolumeFromSwaps(
   const volumeRows: PriceRow[] = [];
 
   for (const trade of decodeBlockTrades(events, blockHeight, specVersion, options)) {
+    if (trade.iceFill) continue;
     // Generate volume rows from all input and output asset legs
     const rows = tradeToVolumeRows(trade, blockHeight, prices, decimals, canonicalizeAssetId);
     volumeRows.push(...rows);
@@ -915,6 +952,7 @@ export function extractTradeVolumeFromSwaps(
   const tradeRows: TradeVolumeRow[] = [];
 
   for (const trade of decodeBlockTrades(events, blockHeight, specVersion, options)) {
+    if (trade.bookedAsIceFills) continue;
     tradeRows.push(...tradeToAccountVolumeRows(trade, blockHeight, prices, decimals, canonicalizeAssetId));
   }
 

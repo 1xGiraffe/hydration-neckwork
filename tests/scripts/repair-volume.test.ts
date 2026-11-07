@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { extractTradeVolumeFromSwaps } from '../../src/blocks/extractVolume.ts'
 import {
+  aggregateTradeRows,
   aliasStateFromSnapshot,
   buildRepairedPriceRows,
   canonicalAssetId,
@@ -49,6 +51,121 @@ describe('volume repair helpers', () => {
       [100, '0xrouter', [1], [0]],
       [101, '0xalice', [0], [1]],
     ])
+  })
+
+  // The repair books an ICE solution exactly as the live extractor does: a
+  // solution serving several owners is booked to each owner's fill from its call,
+  // its route legs keep their candle volume and lose their account row.
+  it('books a several-owner ICE solution to each owner\'s fill, from the solution call', () => {
+    const pot = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
+    const a = '0x' + 'a'.repeat(64)
+    const b = '0x' + 'b'.repeat(64)
+    const route = (event_index: number, input: [number, string], output: [number, string]) => ({
+      block_height: 100, extrinsic_index: 2, event_index, event_name: 'Broadcast.Swapped3',
+      args_json: JSON.stringify({
+        swapper: pot, fillerType: { __kind: 'Stableswap' }, operation: { __kind: 'ExactIn' },
+        inputs: [{ asset: input[0], amount: input[1] }], outputs: [{ asset: output[0], amount: output[1] }],
+      }),
+    })
+    const payout = (event_index: number, to: string, currencyId: number, amount: string) => ({
+      block_height: 100, extrinsic_index: 2, event_index, event_name: 'Currencies.Transferred',
+      args_json: JSON.stringify({ from: pot, to, currencyId, amount }),
+    })
+    const rows = [route(1, [222, '12'], [5, '13']), route(2, [10, '300'], [5, '350']), payout(3, a, 5, '363'), payout(4, b, 222, '320')]
+    const call = {
+      block_height: 100, extrinsic_index: 2,
+      call_args_json: JSON.stringify({ solution: { resolvedIntents: [
+        { id: '1', data: { __kind: 'Swap', value: { assetIn: 222, assetOut: 5, amountIn: '333', amountOut: '363' } } },
+        { id: '2', data: { __kind: 'Swap', value: { assetIn: 10, assetOut: 222, amountIn: '300', amountOut: '320' } } },
+      ] } }),
+    }
+
+    // Without the call the pot keeps the routes, as before.
+    expect(decodeBlockTrades(rows).map(t => t.trade.account)).toEqual([pot, pot])
+
+    const trades = decodeBlockTrades(rows, new Map(), [call]).map(t => t.trade)
+    expect(trades.map(t => [t.account, !!t.bookedAsIceFills, !!t.iceFill])).toEqual([
+      [pot, true, false], [pot, true, false], [a, false, true], [b, false, true],
+    ])
+
+    const aliases: AliasState = { atokenToBase: new Map(), lpToDisplay: new Map(), decimals: new Map([[5, 0], [10, 0], [222, 0]]) }
+    const prices = new Map([['100:5', '1.000000000000'], ['100:10', '1.000000000000'], ['100:222', '1.000000000000']])
+    const [routeRows, , fillRows] = trades.map(t => rowsForTrade(t, 100, aliases, prices))
+    expect(routeRows.tradeRows).toEqual([])
+    expect(routeRows.priceRows.map(r => r.asset_id).sort((x, y) => x - y)).toEqual([5, 222])
+    expect(fillRows.priceRows).toEqual([])
+    expect(fillRows.tradeRows.map(r => [r.account, r.asset_id, r.native_volume_sell, r.native_volume_buy])).toEqual([
+      [a, 222, '333', '0'], [a, 5, '0', '363'],
+    ])
+  })
+
+  // One solution, both extractors: the live one over the block's events and call,
+  // the repair over the same block's raw rows and raw call. Shared booking means
+  // the per-account rows must be identical — two owners booked their fills, a
+  // second solution in the block with one owner keeps its routes on that owner,
+  // and a zero-route solution in a third extrinsic books its owners too.
+  it('books ICE solutions exactly as the live extractor does', () => {
+    const pot = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'
+    const [a, b, c, d] = ['a1', 'b2', 'c3', 'd4'].map(byte => '0x' + byte.repeat(32))
+    type Item =
+      | { kind: 'route'; x: number; input: [number, bigint]; output: [number, bigint] }
+      | { kind: 'transfer'; x: number; name: string; from: string; to: string; asset: number; amount: bigint }
+    const items: Item[] = [
+      { kind: 'route', x: 2, input: [222, 12n], output: [5, 13n] },
+      { kind: 'route', x: 2, input: [10, 300n], output: [5, 350n] },
+      { kind: 'transfer', x: 2, name: 'Currencies.Transferred', from: pot, to: a, asset: 5, amount: 363n },
+      { kind: 'transfer', x: 2, name: 'Currencies.Transferred', from: pot, to: b, asset: 222, amount: 320n },
+      { kind: 'transfer', x: 3, name: 'Tokens.Transfer', from: c, to: pot, asset: 10, amount: 50n },
+      { kind: 'route', x: 3, input: [10, 50n], output: [222, 49n] },
+      { kind: 'transfer', x: 3, name: 'Currencies.Transferred', from: pot, to: c, asset: 222, amount: 49n },
+      { kind: 'transfer', x: 4, name: 'Currencies.Transferred', from: pot, to: d, asset: 0, amount: 7n },
+      { kind: 'transfer', x: 4, name: 'Currencies.Transferred', from: pot, to: a, asset: 10, amount: 8n },
+    ]
+    const solution = (intents: Array<[number, string, number, string]>) => ({ solution: { resolvedIntents: intents.map(([assetIn, amountIn, assetOut, amountOut], i) => ({
+      id: String(i), data: { __kind: 'Swap', value: { assetIn, assetOut, amountIn, amountOut } },
+    })), trades: [] } })
+    const calls = new Map<number, unknown>([
+      [2, solution([[222, '333', 5, '363'], [10, '300', 222, '320']])],
+      [4, solution([[10, '8', 0, '7'], [0, '7', 10, '8']])],
+    ])
+
+    const runtimeFor = (name: string) => ({
+      events: { checkType: (eventName: string) => eventName === name },
+      decodeJsonEventRecordArguments: (event: { args: unknown }) => event.args,
+    })
+    const liveEvents = items.map(item => ({
+      name: item.kind === 'route' ? 'Broadcast.Swapped3' : item.name,
+      extrinsicIndex: item.x,
+      block: { _runtime: runtimeFor(item.kind === 'route' ? 'Broadcast.Swapped3' : item.name) },
+      args: item.kind === 'route'
+        ? { fillerType: { __kind: 'Stableswap' }, operation: { __kind: 'ExactIn' }, fees: [], swapper: pot, filler: 'pool', operationStack: [],
+          inputs: [{ asset: item.input[0], amount: item.input[1] }], outputs: [{ asset: item.output[0], amount: item.output[1] }] }
+        : { from: item.from, to: item.to, currencyId: item.asset, amount: item.amount },
+    }))
+    const rawRows = items.map((item, i) => ({
+      block_height: 100, extrinsic_index: item.x, event_index: i, event_name: liveEvents[i].name,
+      args_json: JSON.stringify(liveEvents[i].args, (_, v) => typeof v === 'bigint' ? v.toString() : v),
+    }))
+
+    const assets = [0, 5, 10, 222]
+    const livePrices = new Map(assets.map(id => [id, '1.000000000000']))
+    const decimals = new Map(assets.map(id => [id, 0]))
+    const live = extractTradeVolumeFromSwaps(liveEvents, 100, 443, livePrices, decimals, undefined, {
+      calls: [...calls].map(([extrinsicIndex, args]) => ({ name: 'ICE.submit_solution', extrinsicIndex, address: [], args })),
+    })
+
+    const aliases: AliasState = { atokenToBase: new Map(), lpToDisplay: new Map(), decimals }
+    const repairPrices = new Map(assets.map(id => [`100:${id}`, '1.000000000000']))
+    const trades = decodeBlockTrades(rawRows, new Map(), [...calls].map(([extrinsic_index, args]) => ({
+      block_height: 100, extrinsic_index, call_args_json: JSON.stringify(args),
+    })))
+    const repaired = aggregateTradeRows(trades.flatMap(t => rowsForTrade(t.trade, 100, aliases, repairPrices).tradeRows))
+
+    const key = (row: { account: string; asset_id: number }) => `${row.account}:${row.asset_id}`
+    const sorted = <T extends { account: string; asset_id: number }>(rows: T[]) => [...rows].sort((x, y) => key(x).localeCompare(key(y)))
+    expect(sorted(repaired)).toEqual(sorted(live))
+    expect(new Set(live.map(row => row.account))).toEqual(new Set([a, b, c, d]))
+    expect(live.some(row => row.account === pot)).toBe(false)
   })
 
   // A chunk's block list rides to ClickHouse as an HTTP query parameter, which

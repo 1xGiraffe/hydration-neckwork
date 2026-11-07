@@ -13,7 +13,8 @@ import { sts, type RuntimeCtx } from '../../src/types/support.ts';
 import { broadcast } from '../../src/types/events.ts';
 import { readFile } from 'node:fs/promises'
 import { OTC_FILL_EVENT_NAMES } from '../../src/blocks/otcCounterparty.js'
-import { ICE_SETTLEMENT_TRANSFER_EVENTS } from '../../src/blocks/icePotSettlement.js'
+import { ICE_SETTLEMENT_TRANSFER_EVENTS, ICE_SOLUTION_CALL, iceResolvedIntents, iceSolutionFills } from '../../src/blocks/icePotSettlement.js'
+import { foldOmnipoolHubHops } from '../../src/blocks/hubHops.js'
 
 function createMockEvent(name: string, args: unknown) {
   const runtime = {
@@ -1187,11 +1188,187 @@ describe('an ICE settlement is the intent owner\'s trade, not the pot\'s', () =>
   });
 })
 
+// The shape of an on-chain solution with two owners: A sold HOLLAR (222) for
+// DOT (5) and B sold USDC (22 here) for HOLLAR; ICE matched B's HOLLAR against
+// A's and routed the rest, so the routes mix the two owners' funds.
+describe('an ICE solution serving several owners books each owner\'s fill', () => {
+  const ICE_POT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000';
+  const ROUTER_POT = '0x6d6f646c726f7574657265780000000000000000000000000000000000000000';
+  const ICE_FEE = '0x6d6f646c6963655f666565230000000000000000000000000000000000000000';
+  const A = '0x' + 'a1'.repeat(32);
+  const B = '0x45544800' + 'b2'.repeat(20) + '0000000000000000';
+
+  const prices: PriceMap = new Map([[5, '4.000000000000'], [22, '1.000000000000'], [222, '1.000000000000']]);
+  const decimals: AssetDecimals = new Map([[5, 10], [22, 6], [222, 18]]);
+
+  const at = <T extends object>(item: T, extrinsicIndex = 2) => ({ ...item, extrinsicIndex });
+  const routeLeg = (assetIn: number, amountIn: bigint, assetOut: number, amountOut: bigint) => at(createMockEvent('Broadcast.Swapped3', {
+    fillerType: { __kind: 'Stableswap' }, operation: { __kind: 'ExactIn' },
+    inputs: [{ asset: assetIn, amount: amountIn }], outputs: [{ asset: assetOut, amount: amountOut }],
+    fees: [], swapper: ICE_POT, filler: 'pool', operationStack: [],
+  }));
+  const transfer = (from: string, to: string, currencyId: number, amount: bigint) =>
+    at(createMockEvent('Currencies.Transferred', { from, to, currencyId, amount }));
+  const solution = (intents: Array<[number, string, number, string]>, extrinsicIndex = 2) => ({
+    name: 'ICE.submit_solution', extrinsicIndex, address: [],
+    args: { solution: { resolvedIntents: intents.map(([assetIn, amountIn, assetOut, amountOut], i) => ({
+      id: String(i), data: { __kind: 'Swap', value: { assetIn, assetOut, amountIn, amountOut, partial: { __kind: 'No' } } },
+    })), trades: [], score: '0' } },
+  });
+
+  const events = [
+    routeLeg(222, 12_000000000000000000n, 5, 1310_0000000000n),
+    routeLeg(22, 300_000000n, 222, 321_000000000000000000n),
+    routeLeg(222, 321_000000000000000000n, 5, 35050_000000000n),
+    transfer(ROUTER_POT, ICE_POT, 5, 3636_2000000000n),
+    transfer(ICE_POT, A, 5, 3636_1000000000n),
+    transfer(ICE_POT, B, 222, 320_000000000000000000n),
+    transfer(ICE_POT, ICE_FEE, 222, 1_000000000000000000n),
+  ];
+  const calls = [solution([
+    [222, '333000000000000000000', 5, '36361000000000'],
+    [22, '300000000', 222, '320000000000000000000'],
+  ])];
+
+  const byAccount = (rows: ReturnType<typeof extractTradeVolumeFromSwaps>) =>
+    Object.fromEntries(rows.map(row => [`${row.account}:${row.asset_id}`, [row.native_volume_sell, row.native_volume_buy]]));
+
+  it('books each owner exactly what the solution resolved for them, and nothing to the pot', () => {
+    const rows = extractTradeVolumeFromSwaps(events, 100, 443, prices, decimals, undefined, { calls });
+
+    expect(byAccount(rows)).toEqual({
+      [`${A}:222`]: ['333000000000000000000', '0'],
+      [`${A}:5`]: ['0', '36361000000000'],
+      [`${B}:22`]: ['300000000', '0'],
+      [`${B}:222`]: ['0', '320000000000000000000'],
+    });
+    // USD is the block's price, as for any other booking: 333 HOLLAR at $1, 3,636.1 DOT at $4.
+    expect(rows.find(row => row.account === A && row.asset_id === 5)).toMatchObject({ usd_volume_buy: '14544.400000000000' });
+  });
+
+  it('leaves the candle volume as the routes traded it', () => {
+    expect(extractVolumeFromSwaps(events, 100, 443, prices, decimals, undefined, { calls }))
+      .toEqual(extractVolumeFromSwaps(events, 100, 443, prices, decimals));
+  });
+
+  it('keeps the pot when the block\'s solution call was not read', () => {
+    const rows = extractTradeVolumeFromSwaps(events, 100, 443, prices, decimals);
+    expect([...new Set(rows.map(row => row.account))]).toEqual([ICE_POT]);
+  });
+
+  it('keeps the pot when a resolved intent has no payout to name its owner', () => {
+    const unpaid = [solution([
+      [222, '333000000000000000000', 5, '36361000000000'],
+      [22, '300000000', 222, '999'],
+    ])];
+    const rows = extractTradeVolumeFromSwaps(events, 100, 443, prices, decimals, undefined, { calls: unpaid });
+    expect([...new Set(rows.map(row => row.account))]).toEqual([ICE_POT]);
+  });
+
+  it('reads only the solution of the route legs\' own extrinsic', () => {
+    const elsewhere = [{ ...calls[0], extrinsicIndex: 3 }];
+    const rows = extractTradeVolumeFromSwaps(events, 100, 443, prices, decimals, undefined, { calls: elsewhere });
+    expect([...new Set(rows.map(row => row.account))]).toEqual([ICE_POT]);
+  });
+
+  // Three solutions on chain matched their intents whole: no route, so no swap
+  // event, and the call and the payouts are all there is.
+  it('books a solution with no route at all to its owners, and adds no candle volume', () => {
+    const matched = [
+      transfer(ICE_POT, A, 222, 9_000000000000000000n),
+      transfer(ICE_POT, B, 5, 2_0000000000n),
+    ];
+    const pureMatch = [solution([[5, '20000000000', 222, '9000000000000000000'], [222, '9000000000000000000', 5, '20000000000']])];
+    // Each payout names the owner of the intent whose amountOut it is.
+    const rows = extractTradeVolumeFromSwaps(matched, 100, 443, prices, decimals, undefined, { calls: pureMatch });
+    expect(byAccount(rows)).toEqual({
+      [`${A}:5`]: ['20000000000', '0'],
+      [`${A}:222`]: ['0', '9000000000000000000'],
+      [`${B}:222`]: ['9000000000000000000', '0'],
+      [`${B}:5`]: ['0', '20000000000'],
+    });
+    expect(extractVolumeFromSwaps(matched, 100, 443, prices, decimals, undefined, { calls: pureMatch })).toEqual([]);
+  });
+
+  // The fold that merges an Omnipool route's two hub hops spreads the first
+  // hop, so a route leg marked as booked by fills stays marked after it.
+  it('keeps hub-hop route legs out of the per-account rows once folded', () => {
+    const hop = (assetIn: number, amountIn: bigint, assetOut: number, amountOut: bigint) => at(createMockEvent('Broadcast.Swapped3', {
+      fillerType: { __kind: 'Omnipool' }, operation: { __kind: 'ExactIn' },
+      inputs: [{ asset: assetIn, amount: amountIn }], outputs: [{ asset: assetOut, amount: amountOut }],
+      fees: [], swapper: ICE_POT, filler: 'pool', operationStack: [],
+    }));
+    const hubRoute = [hop(222, 12_000000000000000000n, 1, 5_000000000000n), hop(1, 5_000000000000n, 5, 1310_0000000000n), ...events.slice(1)];
+    const rows = extractTradeVolumeFromSwaps(hubRoute, 100, 443, prices, decimals, undefined, { calls });
+    expect([...new Set(rows.map(row => row.account))].sort()).toEqual([B, A].sort());
+  });
+});
+
+describe('foldOmnipoolHubHops', () => {
+  it('carries a trade\'s own flags through the fold', () => {
+    const hop = (assetIn: number, assetOut: number) => ({
+      filler: 'Omnipool', trader: 'pot', bookedAsIceFills: true,
+      inputs: [{ assetId: assetIn, amount: 1n }], outputs: [{ assetId: assetOut, amount: 1n }],
+    });
+    const folded = foldOmnipoolHubHops([hop(5, 1), hop(1, 0)], trade => trade.trader);
+    expect(folded).toHaveLength(1);
+    expect(folded[0]).toMatchObject({ bookedAsIceFills: true, inputs: [{ assetId: 5 }], outputs: [{ assetId: 0 }] });
+  });
+});
+
+describe('iceSolutionFills', () => {
+  const ICE_POT = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000';
+  const A = '0x' + 'a'.repeat(64);
+  const B = '0x' + 'b'.repeat(64);
+  const payout = (to: string, assetId: number, amount: bigint) => ({ event: 'Currencies.Transferred', from: ICE_POT, to, assetId, amount });
+  const intent = (assetIn: number, amountIn: bigint, assetOut: number, amountOut: bigint) => ({ assetIn, amountIn, assetOut, amountOut });
+
+  it('assigns two identical intents paid to two owners one each', () => {
+    const fills = iceSolutionFills(
+      [intent(44, 10n, 222, 7n), intent(44, 10n, 222, 7n)],
+      [payout(A, 222, 7n), payout(B, 222, 7n)],
+    );
+    expect(fills?.map(fill => fill.owner).sort()).toEqual([A, B]);
+  });
+
+  it('refuses two different intents whose payouts cannot tell them apart', () => {
+    expect(iceSolutionFills(
+      [intent(44, 10n, 222, 7n), intent(5, 99n, 222, 7n)],
+      [payout(A, 222, 7n), payout(B, 222, 7n)],
+    )).toBeNull();
+  });
+
+  it('refuses a payout count that does not match the intents', () => {
+    expect(iceSolutionFills([intent(44, 10n, 222, 7n)], [payout(A, 222, 7n), payout(B, 222, 7n)])).toBeNull();
+    expect(iceSolutionFills([intent(44, 10n, 222, 7n)], [])).toBeNull();
+  });
+
+  it('never names a module account, nor reads a transfer that is not a payout', () => {
+    const module = '0x6d6f646c' + '0'.repeat(56);
+    expect(iceSolutionFills([intent(44, 10n, 222, 7n)], [payout(module, 222, 7n)])).toBeNull();
+    expect(iceSolutionFills([intent(44, 10n, 222, 7n)], [{ ...payout(A, 222, 7n), event: 'Tokens.Transfer' }])).toBeNull();
+    expect(iceSolutionFills([intent(44, 10n, 222, 7n)], [{ ...payout(A, 222, 7n), from: A, to: ICE_POT }])).toBeNull();
+  });
+
+  it('reads the call\'s JSON form and refuses an intent kind it does not know', () => {
+    const swap = { id: '1', data: { __kind: 'Swap', value: { assetIn: 44, assetOut: 222, amountIn: '10', amountOut: '7' } } };
+    expect(iceResolvedIntents({ solution: { resolvedIntents: [swap] } })).toEqual([intent(44, 10n, 222, 7n)]);
+    expect(iceResolvedIntents({ solution: { resolvedIntents: [swap, { id: '2', data: { __kind: 'Other', value: {} } }] } })).toBeNull();
+    expect(iceResolvedIntents({ solution: { resolvedIntents: [] } })).toBeNull();
+  });
+});
+
 describe('the ICE settlement rule needs its source events subscribed', () => {
   it('the processor fetches the transfer events that name the intent owner', async () => {
     // Same regression the OTC rule shipped once: a rule reading events the
     // processor never asked for is silently a no-op on the live path.
     const source = await readFile(new URL('../../src/processor.ts', import.meta.url), 'utf8')
     for (const name of ICE_SETTLEMENT_TRANSFER_EVENTS) expect(source).toContain(`'${name}'`)
+  })
+
+  it('the processor fetches the solution call that books a several-owner solution', async () => {
+    const source = await readFile(new URL('../../src/processor.ts', import.meta.url), 'utf8')
+    const calls = source.slice(source.indexOf('.addCall('), source.indexOf('.includeAllBlocks('))
+    expect(calls).toContain(`'${ICE_SOLUTION_CALL}'`)
   })
 })

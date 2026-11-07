@@ -51,14 +51,13 @@ export const processor = new SubstrateBatchProcessor()
       'OTC.Filled',
       'OTC.PartiallyFilled',
       // Also not a swap: an ICE solution's route legs name the solver's pot as
-      // swapper, and the only thing naming the intent owner they belong to is the
-      // pot's own transfer legs in the same extrinsic
-      // (src/blocks/icePotSettlement.ts). `Tokens.Transfer` above covers 135 of
-      // the 150 settlements on chain; the remaining 15 move an aToken, which is
-      // reported as `Currencies.Transferred` alone — so without this the rule
-      // silently leaves a tenth of settlements booked to the pot. Measured on
-      // 2026-09-10 it is 27,560 events/day, against 21,565 for Broadcast.Swapped3
-      // and 15,732 for Tokens.Transfer, both already subscribed.
+      // swapper, and what names the intent owners they belong to is the pot's own
+      // transfer legs in the same extrinsic (src/blocks/icePotSettlement.ts). An
+      // aToken or Erc20 leg, and every fill's payout to its owner, is reported as
+      // `Currencies.Transferred` alone, so without this the rule silently leaves
+      // settlements booked to the pot. Measured on 2026-09-10 it is 27,560
+      // events/day, against 21,565 for Broadcast.Swapped3 and 15,732 for
+      // Tokens.Transfer, both already subscribed.
       'Currencies.Transferred',
       // Native HDX moves as `Balances.Transfer` alone, and HDX is an Omnipool and
       // XYK reserve: the indexer's price-irrelevance skip (POOL_TRANSFER_EVENTS in
@@ -97,6 +96,16 @@ export const processor = new SubstrateBatchProcessor()
   // catches set_storage regardless of how it was dispatched.
   .addCall({
     name: ['System.set_storage'],
+  })
+
+  // An ICE solution states, per intent, what it resolved: the only per-owner
+  // record of a solution serving several owners, whose AMM routes cannot be
+  // divided between them, or of one whose intents matched each other with no
+  // route at all (src/blocks/icePotSettlement.ts). A block holding one is always
+  // processed (src/indexer.ts). One unsigned call per solution — 1,122 in the day
+  // to 2026-11-07.
+  .addCall({
+    name: ['ICE.submit_solution'],
   })
 
   // Include all blocks - we need every block for accurate price snapshots
