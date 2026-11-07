@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { DEFAULT_TAGS, SYSTEM_TAG_IDS } from '../src/services/tagService.ts'
 import { normalizeAddress } from '../src/services/addressIdentity.ts'
+import { BIL_TAG_IDS } from '../src/services/explorerService.ts'
 
 // Every address in the code-defined tag set must resolve to an AccountId32 —
 // seedDefaultTags() skips (with a warning) anything that doesn't, so a typo here
@@ -60,49 +61,49 @@ describe('default tag membership is exclusive', () => {
   })
 })
 
-// The BIL primary sale routes its HOLLAR proceeds through three addresses that
-// belong to the originator, not to the issuance operator: a forwarder contract,
-// the funding vault it sweeps into, and the wallet that converts the proceeds to
-// USDT and withdraws them over XCM. Untagged, the last of those reads as an
-// anonymous whale selling half a million HOLLAR for no visible reason.
-describe('BIL originator tag', () => {
+// BIL's parties each carry their own label: the vault (Hydration's side, the uBIL token),
+// the Decentral lending pool its positions are in, that pool's position NFT, and the
+// Decentral borrower. One tag for all four labelled the vault "Decentral".
+describe('BIL and Decentral tags', () => {
   const byId = new Map(DEFAULT_TAGS.map(t => [t.tagId, t]))
+  const members = (id: string) => byId.get(id)?.addresses.map(a => a.toLowerCase())
 
-  it('claims the operator wallet, the funding vault and the uBIL issuance contract', () => {
-    const tag = byId.get('bil-originator')
-    expect(tag?.addresses.map(a => a.toLowerCase())).toEqual([
-      '0x2333aa052610012c27e4fc176bc27095651dcbc6',
-      '0x207a626c07b73e76134177d1f44b0f32e94adb5a',
-      '0x6a21891db0940491603f3cca0a9f4dba4c6e810c',
-    ])
+  it('labels the vault, the pool, the position NFT and the borrower each on its own', () => {
+    expect(members('bil-vault')).toEqual(['0x6a21891db0940491603f3cca0a9f4dba4c6e810c'])
+    expect(members('decentral-pool')).toEqual(['0x207a626c07b73e76134177d1f44b0f32e94adb5a'])
+    expect(members('decentral-position-nft')).toEqual(['0xc91808c129c9766b13d22c9f0cd53db459c0bc48'])
+    expect(members('bil-originator')).toEqual(['0x2333aa052610012c27e4fc176bc27095651dcbc6'])
+    expect(byId.get('bil-vault')?.name).toBe('BIL Vault')
+    expect(byId.get('bil-originator')?.name).toBe('Decentral Borrower')
   })
 
-  it('stays distinct from the issuance operator tag', () => {
-    expect(byId.get('bil-issuer')?.addresses).not.toContain('0x2333aa052610012c27e4fc176bc27095651dcbc6')
-    expect(byId.get('bil-originator')?.tagId).not.toBe(byId.get('bil-issuer')?.tagId)
+  // 0x15304c8f…a578df0 is the first 20 bytes of the BIL/HOLLAR stableswap pool's own
+  // account (pool 10055): the BIL aToken files the pool's balance under it (its BIL
+  // equals the pool's BIL reserve to the wei). It is the pool, not an issuer wallet.
+  it('names only the deposit zap as the issuer, not the BIL/HOLLAR pool', () => {
+    expect(members('bil-issuer')).toEqual(['0x646fd203bbcf19b35d79f58413bb07450fdbb1db'])
   })
 
-  it('shares the BIL market colour so both sides of the sale read as one market', () => {
-    expect(byId.get('bil-originator')?.color).toBe(byId.get('bil-issuer')?.color)
+  it('colours Hydration\'s side in the BIL market green and Decentral\'s side apart', () => {
+    expect(byId.get('bil-vault')?.color).toBe(byId.get('bil-issuer')?.color)
+    for (const id of ['decentral-pool', 'decentral-position-nft', 'bil-originator']) expect(byId.get(id)?.color).not.toBe(byId.get('bil-vault')?.color)
   })
 
-  it('says in its note where the proceeds go and what the Treasury pilot returned', () => {
-    const note = byId.get('bil-originator')?.note ?? ''
-    expect(note).toMatch(/HOLLAR/)
-    expect(note).toMatch(/USDT/)
-    expect(note).toMatch(/200,000/)
-    expect(note).toMatch(/207,337\.97/)
+  it('says where the borrowed HOLLAR goes, and what the Treasury pilot returned on the pool', () => {
+    expect(byId.get('bil-originator')?.note).toMatch(/USDT/)
+    const pool = byId.get('decentral-pool')?.note ?? ''
+    expect(pool).toMatch(/200,000/)
+    expect(pool).toMatch(/207,337\.97/)
   })
 
-  // 0x6a21891db is the uBIL token contract, not a payment forwarder: it was given
-  // its roles on 2026-07-24 and has minted uBIL from the zero address 25 times
-  // (694,503.35 uBIL), handing each mint to the BIL aToken. It moves the buyer's
-  // HOLLAR on to the vault as part of that sale, which is what made it look like a
-  // forwarder. Naming it wrongly in the note misdescribes the one address a reader
-  // is most likely to arrive at from the uBIL side of the flow.
-  it('describes the uBIL issuance contract for what it is', () => {
-    const note = byId.get('bil-originator')?.note ?? ''
-    expect(note).toMatch(/uBIL/)
-    expect(note).not.toMatch(/forwarder/i)
+  // 0x6a21891db is the uBIL token contract, not a payment forwarder.
+  it('describes the vault as the uBIL token', () => {
+    expect(byId.get('bil-vault')?.note).toMatch(/uBIL/)
+    expect(byId.get('bil-vault')?.note).not.toMatch(/forwarder/i)
+  })
+
+  it('treats every BIL and Decentral contract as an ERC-20 venue', () => {
+    const tagged = DEFAULT_TAGS.filter(t => /^(bil|decentral)-/.test(t.tagId)).map(t => t.tagId)
+    expect([...BIL_TAG_IDS].sort()).toEqual(tagged.sort())
   })
 })

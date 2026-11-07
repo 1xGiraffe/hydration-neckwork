@@ -292,42 +292,55 @@ export const DEFAULT_TAGS: { tagId: string; name: string; color: string; note: s
     addresses: [INCENTIVES_REWARD_POT],
   },
   {
-    // Primary issuance of BIL (Decentral × DUX Group invoice-receivables RWA):
-    // this operator wallet is the `caller` of every uBIL supply into the isolated
-    // BIL market, minting BIL straight to each buyer via onBehalfOf — including
-    // the launch seed the treasury passed on to the stableswap pool. It keeps no
-    // balance of its own, so untagged it reads as an anonymous busy EOA rather
-    // than the issuance bot behind every primary BIL sale. Color is the BIL
-    // market's bandeira green (see .mm-market-bil in explorer-ui).
+    // Primary issuance of BIL (Brazilian Invoice Loans, Decentral × DUX Group
+    // invoice receivables; services/bil.ts): the BIL deposit zap — the contract the
+    // Hydration app deposits through, which takes the buyer's HOLLAR, deposits it into
+    // the BIL vault and supplies the minted uBIL into the isolated BIL money market on
+    // the buyer's behalf, so the buyer receives BIL. It keeps no balance of its own.
+    // Color is the BIL market's bandeira green (see .mm-market-bil in explorer-ui).
     tagId: 'bil-issuer', name: 'BIL Issuer', color: '#009739',
-    note: 'BIL issuance operation (Decentral × DUX Group): the operator wallet that supplies uBIL into the isolated BIL market on buyers’ behalf, minting BIL directly to them, and the distribution wallet the treasury passed the launch supply to, which seeded the BIL/HOLLAR stableswap pool',
+    note: 'Brazilian Invoice Loans issuance: the BIL deposit zap the Hydration app deposits through — HOLLAR into the BIL vault, the minted uBIL supplied to the isolated BIL money market on the depositor’s behalf, which hands them BIL',
     icon: BIL_ICON,
     addresses: [
-      '0x646fd203bbcf19b35d79f58413bb07450fdbb1db', // issuance operator (supply caller)
-      '0x15304c8f6921694c608312a7a16948454a578df0', // distribution wallet (launch supply → stableswap seed)
+      // The BIL deposit zap (BILDepositZap). Not 0x15304c8f…a578df0: that is the
+      // BIL/HOLLAR stableswap pool's own account (10055) as the EVM sees it (the first
+      // 20 bytes of the pool account), so it is the pool's (stableswap-pools).
+      '0x646fd203bbcf19b35d79f58413bb07450fdbb1db',
     ],
   },
   {
-    // The originator side of the same sale: where the HOLLAR buyers pay for BIL
-    // actually goes. The issuance operator sweeps its proceeds through a
-    // forwarder into a funding vault, and an operator wallet draws them out,
-    // DCAs them into USDT and withdraws over XCM to AssetHub. Untagged, that
-    // wallet reads as an anonymous whale dumping half a million HOLLAR — its
-    // funding leg is an EVM-internal ERC-20 transfer, so the activity feed
-    // cannot yet show where the HOLLAR came from. Same bandeira green as
-    // bil-issuer so both sides of the sale read as one market.
-    tagId: 'bil-originator', name: 'Decentral (BIL)', color: '#009739',
-    note: 'Decentral × DUX Group receivables operation: the uBIL issuance contract that mints the receivable each buyer\'s HOLLAR pays for and passes that HOLLAR on, the funding vault it goes to, and the operator wallet that converts the proceeds to USDT and withdraws to AssetHub. The Treasury lent this vault 200,000 HOLLAR on 2026-03-26 and was repaid 207,337.97 HOLLAR on 2026-06-10.',
+    // The BIL vault (BILVault: the uBIL token, ERC-4626 + ERC-7540). It takes the
+    // deposited HOLLAR, mints uBIL at NAV, invests the HOLLAR in fixed-rate Decentral
+    // positions and runs the redemption queue. Hydration's side of the strategy, so the
+    // BIL market's bandeira green.
+    tagId: 'bil-vault', name: 'BIL Vault', color: '#009739',
+    note: 'Brazilian Invoice Loans vault (BILVault, the uBIL token): mints uBIL at NAV for deposited HOLLAR, invests it in fixed-rate Decentral positions, holds queued redemptions in escrow and pays them out as the positions mature',
     icon: BIL_ICON,
-    addresses: [
-      '0x2333aa052610012c27e4fc176bc27095651dcbc6', // operator wallet (vault draw → DCA to USDT → XCM out)
-      '0x207a626c07b73e76134177d1f44b0f32e94adb5a', // funding vault (also took the Treasury's 200k pilot)
-      // uBIL token: mints from the zero address to the issuer, hands the mint to the
-      // BIL aToken, and forwards the buyer's HOLLAR to the vault. Its own HOLLAR
-      // balance nets to exactly 0 — a pass-through, which is what made it read as a
-      // forwarder until the mint legs identified it.
-      '0x6a21891db0940491603f3cca0a9f4dba4c6e810c',
-    ],
+    addresses: ['0x6a21891db0940491603f3cca0a9f4dba4c6e810c'],
+  },
+  {
+    // The Decentral lending pool the vault's positions are in. It also took the
+    // Treasury's 200k HOLLAR pilot before BIL launched. Decentral's side, so a darker green.
+    tagId: 'decentral-pool', name: 'Decentral Pool', color: '#00703a',
+    note: 'Decentral lending pool (× DUX Group): holds the fixed-rate positions the BIL vault invests in and lends their HOLLAR to the Decentral borrower to finance Brazilian invoice receivables. The Treasury lent it 200,000 HOLLAR on 2026-03-26 and was repaid 207,337.97 HOLLAR on 2026-06-10.',
+    icon: BIL_ICON,
+    addresses: ['0x207a626c07b73e76134177d1f44b0f32e94adb5a'],
+  },
+  {
+    // The pool's position NFT (PoolToken): one token per position, held by the investor.
+    tagId: 'decentral-position-nft', name: 'Decentral Position NFT', color: '#00703a',
+    note: 'Decentral position NFT (PoolToken): one token per fixed-rate position in the Decentral lending pool, held by the investor (the BIL vault for every BIL position)',
+    icon: BIL_ICON,
+    addresses: ['0xc91808c129c9766b13d22c9f0cd53db459c0bc48'],
+  },
+  {
+    // The Decentral operator wallet that borrows the pool's HOLLAR, converts it to USDT
+    // and withdraws it to AssetHub to finance the receivables, repaying the pool as they
+    // are paid. Untagged, it reads as an anonymous whale dumping half a million HOLLAR.
+    tagId: 'bil-originator', name: 'Decentral Borrower', color: '#00703a',
+    note: 'Decentral operator wallet (× DUX Group), the Decentral lending pool’s borrower: draws the pool’s HOLLAR to finance Brazilian invoice receivables (converting it to USDT and withdrawing it to AssetHub) and repays the pool as the invoices are paid',
+    icon: BIL_ICON,
+    addresses: ['0x2333aa052610012c27e4fc176bc27095651dcbc6'],
   },
   {
     // Juicer (galacticcouncil/money-market `juicer-vault`): the leveraged PRIME-loop
@@ -597,6 +610,31 @@ export async function retireUnknownTagMemberships(): Promise<void> {
   })
   await loadTags()
   console.log(`[tags] retired ${stale.length} tag(s) no longer defined in code: ${stale.join(', ')}`)
+}
+
+// A DEFAULT_TAGS membership is code: a member a definition no longer lists (an address
+// found to be mislabelled) would otherwise stay stored and keep labelling its account,
+// since seeding only inserts. Tombstone, per code-defined tag, every stored member its
+// definition does not name. Only DEFAULT_TAGS: their rows have no other writer
+// (STRUCTURAL_TAGS and MM_TAG are synced from chain registries). Idempotent: a no-op
+// once the table matches the code.
+export async function retireDroppedDefaultMembers(): Promise<void> {
+  const drop: Array<{ tagId: string; accountIds: string[] }> = []
+  for (const def of DEFAULT_TAGS) {
+    const wanted = new Set(def.addresses.map(a => normalizeAddress(a)?.accountId).filter((id): id is string => !!id))
+    const stale = (byTag.get(def.tagId)?.members ?? []).filter(id => !wanted.has(id))
+    if (stale.length) drop.push({ tagId: def.tagId, accountIds: stale })
+  }
+  if (!drop.length) return
+  for (const d of drop) {
+    await client.command({
+      query: `ALTER TABLE price_data.account_tags UPDATE deleted = 1 WHERE label_id = {tagId:String} AND account_id IN {ids:Array(String)} AND deleted = 0`,
+      query_params: { tagId: d.tagId, ids: d.accountIds },
+      clickhouse_settings: { mutations_sync: '1' },
+    })
+  }
+  await loadTags()
+  console.log(`[tags] retired ${drop.reduce((n, d) => n + d.accountIds.length, 0)} membership(s) no longer in DEFAULT_TAGS: ${drop.map(d => `${d.tagId}(${d.accountIds.length})`).join(', ')}`)
 }
 
 export async function reconcileTagPresentation(): Promise<void> {
