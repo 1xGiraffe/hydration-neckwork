@@ -42,7 +42,7 @@ const zBalanceItem = z.object({
   free: z.string().nullable(),
   reserved: z.string().nullable(),
   valueUsd: z.string().nullable().describe('At the CURRENT price (balances are positions, not flows); null when the asset has no fresh price.'),
-  uncounted: z.enum(['pool-hub-reserve', 'strategy-custody']).optional().describe('Present on a holding no total counts: `pool-hub-reserve` — the Omnipool pallet account\'s own H2O reserve (H2O is priced off the assets that pool holds, so its `valueUsd` restates the pool\'s TVL); `strategy-custody` — any holding or position of a strategy custody account (the Juicer vaults, their loop and yield fund), which their share holders\' jETH already values. The item keeps its `valueUsd`, `totals` leave it out.'),
+  uncounted: z.enum(['pool-hub-reserve', 'strategy-custody']).optional().describe('Present on a holding no total counts: `pool-hub-reserve` — the Omnipool pallet account\'s own H2O reserve (H2O is priced off the assets that pool holds, so its `valueUsd` restates the pool\'s TVL); `strategy-custody` — any holding or position of a strategy custody account (the Juicer vaults, their loop and yield fund; the BIL vault and the Decentral pool it invests in), which their share holders\' jETH, uBIL and BIL already value. The item keeps its `valueUsd`, `totals` leave it out.'),
 })
 
 const zBalanceTotals = z.object({
@@ -98,7 +98,7 @@ export const accountsRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = 
       summary: 'Current balances: Substrate tokens, ERC-20 tokens and money-market positions',
       description: [
         'Three composed sources, deliberately separate kinds: substrate pallet balances, EVM wallet (ERC-20) balances, and money-market positions reconstructed from the scaled-balance anchor plus indexed deltas times the live reserve index (integer arithmetic end to end). A supplied asset does NOT appear as a substrate balance — it appears as its `atoken` row; variable debt appears as `vdebt`.',
-        'USD values are at the current price (the same freshness rule as /v1/assets: a feed older than 30 days prices nothing), and `totals` sums the priced items exactly — except an item flagged `uncounted`: the Omnipool pallet account\'s own H2O reserve, which H2O is priced off, so counting it would state the pool\'s TVL a second time, and a strategy custody account\'s holdings (the Juicer vaults, their loop and yield fund), which their share holders\' jETH already values. ' + UNSEEN_IS_EMPTY,
+        'USD values are at the current price (the same freshness rule as /v1/assets: a feed older than 30 days prices nothing), and `totals` sums the priced items exactly — except an item flagged `uncounted`: the Omnipool pallet account\'s own H2O reserve, which H2O is priced off, so counting it would state the pool\'s TVL a second time, and a strategy custody account\'s holdings (the Juicer vaults, their loop and yield fund; the BIL vault and the Decentral pool), which their share holders\' jETH, uBIL and BIL already value. Strategy share tokens (jETH, uBIL, BIL) are valued at NAV — `navPriceUsd` on /v1/assets — not at their market price. ' + UNSEEN_IS_EMPTY,
       ].join('\n\n'),
       params: zAccountParams,
       response: { 200: z.object({ items: z.array(zBalanceItem), totals: zBalanceTotals }), 400: zError },

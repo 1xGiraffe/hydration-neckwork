@@ -1,8 +1,8 @@
 import type { ClickHouseClient } from '../../db/client.ts'
 import { cached } from '../../services/cache.ts'
-import { allExplorerAssets, assetDecimalsOrNull, currentPriceOf, isStableswapShareToken, type ExplorerAsset } from '../../services/explorerAssets.ts'
-import { SHARE_POOL_MAX_AGE_SECONDS, withStableswapSharePrices } from '../../services/lpMath.ts'
-import { loadJuicerRates, withJuicerSharePrices } from '../../services/juicerPrice.ts'
+import { allExplorerAssets, assetDecimalsOrNull, isStableswapShareToken, type ExplorerAsset } from '../../services/explorerAssets.ts'
+import { SHARE_POOL_MAX_AGE_SECONDS } from '../../services/lpMath.ts'
+import { STRATEGY_SHARE_ASSET_IDS, loadStrategyShareRates, withDerivedSharePrices } from '../../services/strategySharePrice.ts'
 import { queryOHLCV, type OHLCVInterval } from '../../services/ohlcvService.ts'
 import { formatUnits, scaledUsd } from '../../services/valuation.ts'
 import { iso } from '../schemas/common.ts'
@@ -24,6 +24,8 @@ export interface AssetItem {
   origin: { ecosystem: string; chainId: string; assetId: string | null } | null
   priceUsd: string | null
   priceUpdatedAt: string | null
+  /** Strategy share tokens only (jETH, uBIL, BIL): the vault's rate times its underlying's price — what /v1/accounts/{address}/balances values them at. */
+  navPriceUsd?: string | null
 }
 
 interface PriceEntry { price: string; block: number; time: string | null }
@@ -97,9 +99,9 @@ async function currentPriceState(client: ClickHouseClient): Promise<CurrentPrice
   }
   const shareSnapshot = snapshot && snapshot.blockHeight > 0 && Date.now() - Date.parse(snapshot.timestamp) <= SHARE_POOL_MAX_AGE_SECONDS * 1000 ? snapshot : null
   const pools = shareSnapshot ? [...shareSnapshot.stableswap.values()] : null
-  const shares = withStableswapSharePrices(feeds, pools, id => currentPriceOf(feeds, id), assetDecimalsOrNull, isStableswapShareToken)
-  // A Juicer share (jETH) at its vault's exchange rate in that collateral (juicerPrice.ts).
-  const fresh = withJuicerSharePrices(shares, await loadJuicerRates(client).catch(() => []))
+  // Pool shares at what they redeem for and strategy shares (jETH, uBIL, BIL) at their
+  // vault's rate, in the one shared order (strategySharePrice.ts withDerivedSharePrices).
+  const fresh = withDerivedSharePrices(feeds, pools, await loadStrategyShareRates(client).catch(() => []), assetDecimalsOrNull, isStableswapShareToken)
   return { prices, head: status.indexedHead, fresh, shareSnapshot }
 }
 
@@ -136,7 +138,15 @@ function assetItem(asset: ExplorerAsset, state: CurrentPriceState): AssetItem {
     parachainId: asset.parachainId,
     origin: asset.origin ? { ecosystem: asset.origin.ecosystem, chainId: asset.origin.chainId, assetId: asset.origin.assetId } : null,
     ...(share ? { priceUsd: share.priceUsd, priceUpdatedAt: share.time } : freshPrice(state.prices.get(asset.assetId), state.head)),
+    // A strategy share keeps its market price and states its NAV beside it.
+    ...(STRATEGY_SHARE_ASSET_IDS.has(asset.assetId) ? { navPriceUsd: navPrice(asset.assetId, state) } : {}),
   }
+}
+
+/** A strategy share's NAV price (`fresh` holds rate × underlying for it); null when its rate is stale or its underlying unpriced. */
+function navPrice(assetId: number, state: CurrentPriceState): string | null {
+  const v = state.fresh.get(assetId)
+  return v == null ? null : formatUnits(v.toString(), USD_DECIMALS)
 }
 
 export async function listAssets(client: ClickHouseClient): Promise<AssetItem[]> {
