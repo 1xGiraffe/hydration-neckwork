@@ -226,23 +226,40 @@ describe('pairLockdowns', () => {
     block_height: block, block_timestamp: '2026-01-01 00:00:00', event_name: `CircuitBreaker.${event}`,
     args_json: JSON.stringify(args), extrinsic_index: null,
   })
-  it('pairs each lockdown with the removal that cleared it', () => {
+  const reach = (height: number, ...untils: number[]) =>
+    ({ height, timestamps: new Map(untils.map(u => [u, `2026-01-02 00:00:${String(u % 60).padStart(2, '0')}`])) })
+  it('dates an elapsed window by its until block, not by the next deposit\'s removal', () => {
     const out = pairLockdowns([
       row('AssetLockdown', 100, { assetId: 5, until: 14_500 }),
       row('AssetLockdownRemoved', 14_600, { assetId: 5 }),
-    ])
+    ], reach(14_600, 14_500))
     expect(out).toHaveLength(1)
-    expect(out[0]).toMatchObject({ blockHeight: 100, untilBlock: 14_500, liftedAtBlock: 14_600, liftedEarly: false })
+    expect(out[0]).toMatchObject({
+      blockHeight: 100, untilBlock: 14_500, liftedAtBlock: 14_500, liftedAtTimestamp: '2026-01-02 00:00:40',
+      liftedEarly: false, liftedExtrinsicIndex: null,
+    })
   })
-  it('marks a removal before the scheduled block as an early lift', () => {
+  it('clears an elapsed window with no removal at all once the chain reaches until', () => {
+    const rows = [row('AssetLockdown', 100, { assetId: 5, until: 14_500 })]
+    expect(pairLockdowns(rows, reach(14_499, 14_500))[0].liftedAtBlock).toBeNull()
+    expect(pairLockdowns(rows, reach(14_500, 14_500))[0]).toMatchObject({ liftedAtBlock: 14_500, liftedEarly: false })
+  })
+  it('clears an expired lockdown that an over-limit deposit re-tripped without a removal', () => {
     const out = pairLockdowns([
       row('AssetLockdown', 100, { assetId: 5, until: 14_500 }),
-      row('AssetLockdownRemoved', 900, { assetId: 5 }),
-    ])
-    expect(out[0].liftedEarly).toBe(true)
+      row('AssetLockdown', 15_000, { assetId: 5, until: 29_400 }),
+    ], reach(15_000, 14_500))
+    expect(out.map(l => l.liftedAtBlock)).toEqual([14_500, null])
+  })
+  it('marks a removal before the scheduled block as an early lift, dated by that removal', () => {
+    const out = pairLockdowns([
+      row('AssetLockdown', 100, { assetId: 5, until: 14_500 }),
+      { ...row('AssetLockdownRemoved', 900, { assetId: 5 }), extrinsic_index: 2 },
+    ], reach(900))
+    expect(out[0]).toMatchObject({ liftedAtBlock: 900, liftedEarly: true, liftedExtrinsicIndex: 2 })
   })
   it('keeps an unresolved lockdown open rather than inventing a lift', () => {
-    const out = pairLockdowns([row('AssetLockdown', 100, { assetId: 5, until: 14_500 })])
+    const out = pairLockdowns([row('AssetLockdown', 100, { assetId: 5, until: 14_500 })], reach(1_000))
     expect(out[0]).toMatchObject({ liftedAtBlock: null, liftedEarly: null })
   })
   it('tracks repeated lockdowns of the same asset independently', () => {
@@ -251,7 +268,7 @@ describe('pairLockdowns', () => {
       row('AssetLockdownRemoved', 200, { assetId: 5 }),
       row('AssetLockdown', 300, { assetId: 5, until: 14_700 }),
       row('AssetLockdownRemoved', 400, { assetId: 5 }),
-    ])
+    ], reach(400))
     expect(out).toHaveLength(2)
     expect(out.map(l => l.liftedAtBlock)).toEqual([200, 400])
   })
