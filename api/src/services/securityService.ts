@@ -718,6 +718,8 @@ export interface LockdownEvent {
   liftedAtTimestamp: string | null
   liftedEarly: boolean | null
   extrinsicIndex: number | null
+  /** The early lift's extrinsic; null for a lockdown whose window elapsed (no call cleared it). */
+  liftedExtrinsicIndex: number | null
 }
 
 export interface PerBlockRow {
@@ -917,6 +919,10 @@ export async function getSecurityDashboard(): Promise<SecurityDashboard> {
 
 async function buildSecurityDashboard(): Promise<SecurityDashboard> {
   const snap = snapshot
+  // Read BEFORE the ledgers, so every raw_events row at or below it is visible
+  // to them: a lockdown window that elapsed at or below it is stated together
+  // with every security row beneath it, never ahead of one the ledgers missed.
+  const eventsHead = await queryEventsHead()
   const [head, pools, lockdownRows, releaseTotal, limitEvents, registryLimitRows, pauseEvents, tripRows, peaks, omniTradabilityHistory, stableTradability, whitelisted, memberSet, solvency, liquidations, liquidityMoves, runtime, wormhole, wormholeManagerEvents, democracyRows] = await Promise.all([
     queryHead(),
     loadCurrentPools(),
@@ -953,14 +959,17 @@ async function buildSecurityDashboard(): Promise<SecurityDashboard> {
   // the ones the chain has already passed into their real timestamps — one bounded
   // point read per height, and lockdowns are rare — and leave the rest to be
   // projected from the head at the chain's measured pace.
-  const lockTimes = await resolveLockTimes(lockdownRows, { height: head.block_height, timestamp: head.block_timestamp })
+  // A lockdown row above `eventsHead` proves the chain reached its own block too.
+  const reachedHeight = lockdownRows.reduce((max, r) => Math.max(max, r.block_height), eventsHead)
+  const lockTimes = await resolveLockTimes(lockdownRows, { height: head.block_height, timestamp: head.block_timestamp }, reachedHeight)
+  const lockdowns = pairLockdowns(lockdownRows, { height: reachedHeight, timestamps: lockTimes.actual })
 
   return {
     head: { blockHeight: head.block_height, blockTimestamp: head.block_timestamp },
     chainAsOf: snap ? new Date(snap.takenAt).toISOString() : null,
     chainBlock: snap?.headBlock ?? null,
     withdraw: buildWithdrawView(snap, limitEvents),
-    fuses: buildFuses(snap, registryLimits, lockdownRows, releaseTotal, headBlock, prices, fusePeriod),
+    fuses: buildFuses(snap, registryLimits, lockdowns, releaseTotal, headBlock, prices, fusePeriod),
     perBlock: buildPerBlock(snap, pools, prices, peaks),
     trips: buildTrips(tripRows),
     freezes: buildFreezes(snap, pools, pauseEvents, stableTradability, omniTradabilityHistory),
@@ -975,7 +984,7 @@ async function buildSecurityDashboard(): Promise<SecurityDashboard> {
       upgrades: Number(runtime?.upgrades ?? 0),
       lastUpgrade: runtime ? { blockHeight: runtime.block_height, blockTimestamp: runtime.block_timestamp } : null,
     },
-    timeline: buildTimeline(limitEvents, pauseEvents, lockdownRows, omniTradabilityHistory, registryLimitRows, wormholeManagerEvents, lockTimes, democracyRows),
+    timeline: buildTimeline(limitEvents, pauseEvents, lockdowns, omniTradabilityHistory, registryLimitRows, wormholeManagerEvents, lockTimes, democracyRows),
     guardians: {
       techCommittee: buildTechCommittee(memberSet),
       memberSetAtBlock: memberSet?.block_height ?? null,
@@ -994,6 +1003,14 @@ async function queryHead(): Promise<HeadRow> {
   })
   const rows = await res.json<HeadRow>()
   return rows[0] ?? { block_height: 0, block_timestamp: new Date(0).toISOString() }
+}
+
+// The newest block whose raw_events rows are visible. Every block carries events,
+// so it advances on every block, unlike a family's own newest row.
+async function queryEventsHead(): Promise<number> {
+  const res = await client.query({ query: 'SELECT max(block_height) AS head FROM price_data.raw_events', format: 'JSONEachRow' })
+  const head = Number((await res.json<{ head: number | string | null }>())[0]?.head ?? 0)
+  return Number.isFinite(head) && head > 0 ? head : 0
 }
 
 const queryLockdownEvents = (): Promise<LimitEventRow[]> => lockdownLedger.rows()
@@ -1611,13 +1628,12 @@ function buildWithdrawView(snap: ChainSnapshot | null, limitEvents: LimitEventRo
 function buildFuses(
   snap: ChainSnapshot | null,
   registryLimits: Map<number, bigint>,
-  lockdownRows: LimitEventRow[],
+  lockdowns: LockdownEvent[],
   releaseTotal: number,
   headBlock: number,
   prices: Map<number, PriceInfo>,
   period: FusePeriod,
 ): SecurityDashboard['fuses'] {
-  const lockdowns = pairLockdowns(lockdownRows)
   const perAssetLockdowns = new Map<number, number>()
   for (const l of lockdowns) perAssetLockdowns.set(l.asset.assetId, (perAssetLockdowns.get(l.asset.assetId) ?? 0) + 1)
 
@@ -1732,17 +1748,49 @@ function fuseAmount(raw: bigint, decimals: number): string {
   return value.toLocaleString('en-US', { maximumFractionDigits: value >= 1000 ? 0 : value >= 1 ? 2 : 6 })
 }
 
-// Pair each AssetLockdown with the AssetLockdownRemoved that cleared it. A removal
-// before the lockdown's own `until` block was a governance lift; at or after it,
-// the fuse cleared itself on the next under-limit mint.
-export function pairLockdowns(rows: LimitEventRow[]): LockdownEvent[] {
+/**
+ * How far the chain is known to have reached, for deciding which lockdown
+ * windows have elapsed: `height` is a block every raw_events row at or below
+ * which the lockdown ledger's read could see, and `timestamps` the real time of
+ * each `until` height at or below it.
+ */
+export interface LockdownReach { height: number; timestamps: ReadonlyMap<number, string> }
+
+// Pair each AssetLockdown with the moment it stopped holding deposits.
+//
+// A lockdown ENDS at its own `until` block: the pallet treats `Locked(until)` as
+// active only while `until > current_block` (`classify_state`, and
+// `release_deposit`'s guard), so from block `until` on a deposit under the limit
+// mints. Nothing is emitted then. `AssetLockdownRemoved` comes only with the
+// next deposit of that asset — hours or days later, whenever someone happens to
+// mint — and an over-limit deposit after expiry re-locks the asset with a fresh
+// AssetLockdown and no removal at all. Dated by the removal row, the clear would
+// arrive with the next use of the limit; so an elapsed window is dated by `until`
+// once the chain has reached it, and the late removal is bookkeeping.
+// A removal BEFORE `until` is a governance lift (`force_lift_lockdown`) and is
+// dated by its own row.
+export function pairLockdowns(rows: LimitEventRow[], reach: LockdownReach = { height: 0, timestamps: new Map() }): LockdownEvent[] {
   const open = new Map<number, LockdownEvent>()
   const out: LockdownEvent[] = []
+  // Closes an open lockdown at its `until`, true when the chain has reached it.
+  const elapse = (event: LockdownEvent): boolean => {
+    const at = reach.timestamps.get(event.untilBlock)
+    if (event.untilBlock <= 0 || event.untilBlock > reach.height || at == null) return false
+    event.liftedAtBlock = event.untilBlock
+    event.liftedAtTimestamp = at
+    event.liftedEarly = false
+    event.liftedExtrinsicIndex = null
+    return true
+  }
   for (const r of rows) {
     const args = safeJson(r.args_json)
     const assetId = Number(args.assetId ?? -1)
     if (!Number.isInteger(assetId) || assetId < 0) continue
     if (r.event_name === 'CircuitBreaker.AssetLockdown') {
+      // An expired lockdown re-tripped by an over-limit deposit: no removal
+      // between the two, but the first one still ended at its `until`.
+      const previous = open.get(assetId)
+      if (previous) elapse(previous)
       const event: LockdownEvent = {
         asset: asset(assetId),
         blockHeight: r.block_height,
@@ -1752,18 +1800,29 @@ export function pairLockdowns(rows: LimitEventRow[]): LockdownEvent[] {
         liftedAtTimestamp: null,
         liftedEarly: null,
         extrinsicIndex: extrinsicIndexOf(r.extrinsic_index),
+        liftedExtrinsicIndex: null,
       }
       open.set(assetId, event)
       out.push(event)
     } else {
       const event = open.get(assetId)
       if (!event) continue
+      open.delete(assetId)
+      if (event.untilBlock > 0 && r.block_height >= event.untilBlock) {
+        // The window had already elapsed; this removal is the next deposit's
+        // bookkeeping. `until` sits at or below this row, so it is reached
+        // unless its block's timestamp is missing from raw, which leaves the
+        // clear unstated rather than dated by the deposit.
+        elapse(event)
+        continue
+      }
       event.liftedAtBlock = r.block_height
       event.liftedAtTimestamp = r.block_timestamp
-      event.liftedEarly = event.untilBlock > 0 && r.block_height < event.untilBlock
-      open.delete(assetId)
+      event.liftedEarly = event.untilBlock > 0
+      event.liftedExtrinsicIndex = extrinsicIndexOf(r.extrinsic_index)
     }
   }
+  for (const event of open.values()) elapse(event)
   return out
 }
 
@@ -2064,21 +2123,28 @@ export function withdrawConfigText(args: Record<string, unknown>): string {
 // newest first. Configuration events, pauses, lockdowns and tradability flips read
 // as one story, which is how they were actually applied — several of them arrived
 // in the same committee batch.
-/** The real timestamps of every `until` height the chain has already reached. */
+/**
+ * The real timestamps of every `until` height the chain has already reached —
+ * read from raw_events, the table `reachedHeight` was measured on, so a height
+ * counted as reached always has its timestamp (every block carries events).
+ */
 async function resolveLockTimes(
   lockdownRows: LimitEventRow[],
   head: { height: number; timestamp: string },
+  reachedHeight: number,
 ): Promise<{ actual: ReadonlyMap<number, string>; head: { height: number; timestamp: string }; paceMs: number }> {
   const wanted = new Set<number>()
+  const reached = Math.max(head.height, reachedHeight)
   for (const e of lockdownRows) {
     if (e.event_name !== 'CircuitBreaker.AssetLockdown') continue
     const until = Number(safeJson(e.args_json).until ?? 0)
-    if (until > 0 && until <= head.height) wanted.add(until)
+    if (until > 0 && until <= reached) wanted.add(until)
   }
   const actual = new Map<number, string>()
   if (wanted.size) {
     const res = await client.query({
-      query: `SELECT block_height, block_timestamp FROM price_data.raw_blocks WHERE block_height IN ({hs:Array(UInt32)})`,
+      query: `SELECT block_height, any(block_timestamp) AS block_timestamp FROM price_data.raw_events
+              WHERE block_height IN ({hs:Array(UInt32)}) GROUP BY block_height`,
       query_params: { hs: [...wanted] },
       format: 'JSONEachRow',
     })
@@ -2124,10 +2190,46 @@ function utcMinute(timestamp: string): string {
   return `${timestamp.slice(0, 16).replace('T', ' ')} UTC`
 }
 
+/**
+ * The ledger entries of the deposit fuses: each trip, and each clear at the block
+ * it actually happened — `until` for a window that elapsed, the lift's own row for
+ * a governance lift (see pairLockdowns). A clear is a block-dated fact the
+ * notification lane delivers as such, so it must never wait for the next deposit.
+ */
+export function lockdownTimelineEvents(
+  lockdowns: readonly LockdownEvent[],
+  lockTimes: { actual: ReadonlyMap<number, string>; head: { height: number; timestamp: string } | null; paceMs: number },
+): SafetyEvent[] {
+  const out: SafetyEvent[] = []
+  for (const l of lockdowns) {
+    const symbol = displayDescriptor(l.asset.assetId).symbol
+    out.push({
+      kind: 'lockdown',
+      label: 'Deposit fuse tripped',
+      detail: `${symbol} locked until ${lockUntilLabel(l.untilBlock, lockTimes.actual, lockTimes.head, lockTimes.paceMs)}`,
+      blockHeight: l.blockHeight,
+      blockTimestamp: l.blockTimestamp,
+      extrinsicIndex: l.extrinsicIndex,
+      asset: l.asset,
+    })
+    if (l.liftedAtBlock == null || l.liftedAtTimestamp == null) continue
+    out.push({
+      kind: 'lockdown-lifted',
+      label: 'Deposit lockdown cleared',
+      detail: l.liftedEarly ? `${symbol} minting resumed, lifted early` : `${symbol} minting resumed, lockdown window elapsed`,
+      blockHeight: l.liftedAtBlock,
+      blockTimestamp: l.liftedAtTimestamp,
+      extrinsicIndex: l.liftedExtrinsicIndex,
+      asset: l.asset,
+    })
+  }
+  return out
+}
+
 function buildTimeline(
   limitEvents: LimitEventRow[],
   pauseEvents: PauseEventRow[],
-  lockdownRows: LimitEventRow[],
+  lockdowns: readonly LockdownEvent[],
   tradabilityHistory: LimitEventRow[],
   registryLimitRows: RegistryLimitRow[],
   wormholeManagerEvents: readonly WormholeManagerEventRow[] = [],
@@ -2201,22 +2303,7 @@ function buildTimeline(
       asset: null,
     })
   }
-  for (const e of lockdownRows) {
-    const args = safeJson(e.args_json)
-    const locked = e.event_name === 'CircuitBreaker.AssetLockdown'
-    const assetId = Number(args.assetId ?? 0)
-    out.push({
-      kind: locked ? 'lockdown' : 'lockdown-lifted',
-      label: locked ? 'Deposit fuse tripped' : 'Deposit lockdown cleared',
-      detail: locked
-        ? `${displayDescriptor(assetId).symbol} locked until ${lockUntilLabel(Number(args.until ?? 0), lockTimes.actual, lockTimes.head, lockTimes.paceMs)}`
-        : `${displayDescriptor(assetId).symbol} minting resumed`,
-      blockHeight: e.block_height,
-      blockTimestamp: e.block_timestamp,
-      extrinsicIndex: extrinsicIndexOf(e.extrinsic_index),
-      asset: asset(assetId),
-    })
-  }
+  out.push(...lockdownTimelineEvents(lockdowns, lockTimes))
   // Events arrive block-ascending, so each (family, pool, asset)'s previous
   // state is at hand: the ledger states the new rules AND what they replaced,
   // like every limit row does — an asset's first event has no on-record
