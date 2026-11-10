@@ -11,7 +11,7 @@ import { claimPendingNotification } from '../pendingNotification'
 // topbar's unread badge together — the same shape useUserMutation gives the
 // ['user']/['lists'] family.
 
-// The badge poll. Sixty seconds is deliberate: the evaluator ticks every few
+// The badge poll. Sixty seconds is deliberate: the evaluator ticks every fifteen
 // seconds, but an unread COUNT is not something a reader watches, and this
 // query is mounted on every page through the topbar.
 const OVERVIEW_POLL_MS = 60_000

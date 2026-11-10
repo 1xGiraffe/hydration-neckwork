@@ -108,7 +108,7 @@ const MAX_WINDOW_BLOCKS = Math.max(1, Number(process.env.NOTIFICATIONS_MAX_WINDO
  * anchored on. The block threshold is half the window clamp: a cursor that falls
  * MAX_WINDOW_BLOCKS behind has its oldest blocks written off by `resolveWindow`
  * for good, so the alarm has to sound with half the clamp still in hand (~30
- * minutes at 6 s blocks by default). Five failures is 30 s of 6 s ticks — past a
+ * minutes at 6 s blocks by default). Five failures is 75 s of 15 s ticks — past a
  * single ClickHouse hiccup or a merge stall, far before the clamp is in reach.
  * It clears with hysteresis (no failure this tick AND back within half the block
  * threshold), so a cursor hovering at the line is one raise and one clear, not a
@@ -142,8 +142,13 @@ export function recheckWindow(window: BlockWindow, blocks = TRAILING_RECHECK_BLO
   return { from: Math.max(0, window.from - blocks), to: window.to }
 }
 
-const DEFAULT_EVAL_MS = 6_000
-const SNAPSHOT_EVERY_TICKS = 5
+// The row lanes read only the blocks since their cursor, so a slower tick costs
+// latency, not coverage: 15 s is a few blocks per tick, and every read the lanes
+// make per tick is paid once per tick rather than once per block.
+const DEFAULT_EVAL_MS = 15_000
+// The value triggers (price, health factor, a reserve's cap headroom) run every
+// second tick — every 30 s at the default tick.
+export const SNAPSHOT_EVERY_TICKS = 2
 // Rows fetched per activity source per tick. ~600 blocks of head movement
 // between ticks is already the clamp, so one page covers a normal tick many
 // times over; a page that turns out to be too small is refetched once.
@@ -153,8 +158,8 @@ const ACTIVITY_PAGE_WIDE = 250
 // deferred to a later tick by a persistent rotation, and the kind's cursor
 // advances only as far as EVERY group has been read (see groupsCoveredTo) — so
 // a deferred group loses nothing until the window clamp catches up with it. At
-// 25 fetches per 6s tick the rotation covers 250 groups a minute, and the clamp
-// is ~600 blocks (~20 minutes), so a deployment stays lossless up to a few
+// 25 fetches per 15s tick the rotation covers 100 groups a minute, and the clamp
+// is ~600 blocks (~20 minutes), so a deployment stays lossless up to about two
 // thousand distinct watched addresses. The budget is per kind rather than shared
 // because the row lane visits the kinds in a fixed order, and a shared budget
 // the first kind can exhaust would starve the second one forever.
@@ -1473,8 +1478,8 @@ export function dcaHourlyValueUsd(
 /**
  * How a rule's matches for one tick become outbound messages. Matches sharing a
  * block are ONE event and merge; matches in different blocks are different events
- * and must not be — a 6s tick spans more than one ~4.8s block, so collapsing the
- * whole tick turned unrelated swaps into a single digest.
+ * and must not be — a tick spans several blocks, so collapsing the whole tick
+ * turned unrelated swaps into a single digest.
  *
  * Over `maxSends` the OLDEST blocks collapse into one leading digest, because a
  * catch-up window (the 600-block clamp, or a rewound cursor) holds dozens of
@@ -2969,13 +2974,13 @@ async function queryWindowExtrinsics(rules: NotificationRule[], window: BlockWin
  * Which halves of the snapshot lane this tick runs.
  *
  * The value triggers keep the fixed rhythm: a price and a health factor move
- * continuously, so there is no event to react to and a fifth of the ticks is the
- * resolution they were sized for.
+ * continuously, so there is no event to react to and every 30 s
+ * (SNAPSHOT_EVERY_TICKS) is the resolution they were sized for.
  *
  * The security half is different — its source publishes in steps, and the step
  * is observable for free (an in-memory counter on the Wormhole monitor). So it
  * also runs on ANY tick where the monitor published a new snapshot, which takes
- * a confirmed backing shortfall from "up to 30s behind its snapshot" to "one 6s
+ * a confirmed backing shortfall from "up to 30s behind its snapshot" to "one
  * tick behind it". The rhythm stays as the floor for everything a generation
  * bump does not cover.
  */
@@ -3032,7 +3037,7 @@ async function runSnapshotLane(run: { values: boolean; security: boolean }): Pro
   return {
     matches,
     // One insert for the whole tick's arm state: a rule per row cost a round
-    // trip each, on a 6s tick.
+    // trip each, on every tick.
     commit: async () => {
       await setNotificationStates(writes)
       for (const apply of applies) apply()
@@ -3076,9 +3081,9 @@ async function priceMatches(): Promise<RuleMatch[]> {
   })
 }
 
-// Health-factor reads one tick may have in flight at once. The tick is 6s and
-// shared with every other kind, so this is deliberately small: enough to hide the
-// round trips, not enough to turn a tag rule into a fan-out.
+// Health-factor reads one tick may have in flight at once. The tick is shared
+// with every other kind, so this is deliberately small: enough to hide the round
+// trips, not enough to turn a tag rule into a fan-out.
 const HEALTH_FACTOR_CONCURRENCY = 8
 
 /** `Promise.all` under a ceiling on how many run at once. Results keep input order. */
@@ -3132,7 +3137,7 @@ async function healthFactorMatches(): Promise<RuleMatch[]> {
   }
   // The de-duplication above already proves the reads are independent, so they
   // run a few at a time rather than one after another: a single tag rule is
-  // capped at MAX_TAG_MEMBERS, and 50 sequential round trips do not fit a 6s tick.
+  // capped at MAX_TAG_MEMBERS, and 50 sequential round trips do not fit a tick.
   // Unreadable is NOT zero: an address with no position in this market, or a
   // position whose health factor cannot be read, must never look like an
   // imminent liquidation.

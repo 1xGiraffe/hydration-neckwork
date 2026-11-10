@@ -34,7 +34,7 @@ vi.mock('../src/services/explorerService.ts', async importOriginal => {
 })
 
 import {
-  SAFETY_ROW_LANE_KINDS, SAFETY_SNAPSHOT_KINDS,
+  SAFETY_ROW_LANE_KINDS, SAFETY_SNAPSHOT_KINDS, SNAPSHOT_EVERY_TICKS,
   evaluateStateFlip, evaluatorCursors, initEvaluator, renderMatch, resetEvaluatorForTests, runEvaluatorTick,
   stopNotificationEvaluator, wormholeReleaseText, type ArmState, type RuleMatch,
 } from '../src/notifications/evaluator.ts'
@@ -86,8 +86,9 @@ const ledgerEvent = (over: Partial<SafetyEvent> = {}): SafetyEvent => ({
   ...over,
 })
 
-// The snapshot lane runs on every fifth tick, so a scenario advances in fives.
-const snapshotTick = async () => { for (let i = 0; i < 5; i++) await runEvaluatorTick() }
+// The snapshot lane runs on every SNAPSHOT_EVERY_TICKS-th tick, so a scenario
+// advances a whole rhythm at a time.
+const snapshotTick = async () => { for (let i = 0; i < SNAPSHOT_EVERY_TICKS; i++) await runEvaluatorTick() }
 
 beforeEach(async () => {
   resetEvaluatorForTests()
@@ -748,30 +749,37 @@ describe('the snapshot lane’s cadence', () => {
   const priceRule = () => createRule(OWNER, { kind: 'price', params: { assetId: 21, direction: 'above', price: 1 } })
 
   it('runs the security lane off-rhythm when the monitor published a new snapshot', async () => {
+    expect(SNAPSHOT_EVERY_TICKS).toBeGreaterThan(1)
     await createRule(OWNER, { kind: 'safety', params: {} })
     await runEvaluatorTick()                                // tick 1: on rhythm, arms
     alertCalls.length = 0
     await runEvaluatorTick()                                // tick 2: off rhythm, no news
     expect(alertCalls).toHaveLength(0)
+    // Up to the tick before the next on-rhythm one.
+    for (let i = 2; i < SNAPSHOT_EVERY_TICKS; i++) await runEvaluatorTick()
+    await runEvaluatorTick()                                // on rhythm again
+    alertCalls.length = 0
 
     // A new snapshot lands between two ticks.
     alertState = state({ assets: [asset({ residualUsd: -412, status: 'deficit' })] })
     generation += 1
-    await runEvaluatorTick()                                // tick 3: off rhythm, but stepped
+    await runEvaluatorTick()                                // off rhythm, but stepped
     expect(alertCalls).toHaveLength(1)
     expect(inbox()).toHaveLength(1)
     expect(inbox()[0].title).toBe('USDC backing deficit')
 
-    // The same generation on the next tick is not news again.
+    // The same generation on the next tick is not news again: no read off the
+    // rhythm, and no second notification on it.
     await runEvaluatorTick()
-    expect(alertCalls).toHaveLength(1)
+    expect(alertCalls).toHaveLength(SNAPSHOT_EVERY_TICKS > 2 ? 1 : 2)
+    expect(inbox()).toHaveLength(1)
   })
 
-  it('keeps the five-tick rhythm when the generation holds', async () => {
+  it('keeps the rhythm when the generation holds', async () => {
     await createRule(OWNER, { kind: 'safety', params: {} })
-    for (let i = 0; i < 5; i++) await runEvaluatorTick()
+    for (let i = 0; i < SNAPSHOT_EVERY_TICKS; i++) await runEvaluatorTick()
     expect(alertCalls).toHaveLength(1)                      // tick 1 only
-    await runEvaluatorTick()                                // tick 6: back on rhythm
+    await runEvaluatorTick()                                // back on rhythm
     expect(alertCalls).toHaveLength(2)
   })
 
@@ -779,11 +787,11 @@ describe('the snapshot lane’s cadence', () => {
     await priceRule()
     await runEvaluatorTick()                                // tick 1: on rhythm
     expect(priceReads).toHaveLength(1)
-    // Four off-rhythm ticks, each with a fresh bridge snapshot: the price lane
+    // Every off-rhythm tick, each with a fresh bridge snapshot: the price lane
     // must not be dragged along by the bridge's clock.
-    for (let i = 0; i < 4; i++) { generation += 1; await runEvaluatorTick() }
+    for (let i = 1; i < SNAPSHOT_EVERY_TICKS; i++) { generation += 1; await runEvaluatorTick() }
     expect(priceReads).toHaveLength(1)
-    await runEvaluatorTick()                                // tick 6: its own rhythm
+    await runEvaluatorTick()                                // its own rhythm
     expect(priceReads).toHaveLength(2)
   })
 })
