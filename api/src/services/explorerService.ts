@@ -14,7 +14,7 @@ import { BUCKET_HISTORY_CLOSED_TTL_MS, BUCKET_HISTORY_FINALITY_SEC, BUCKET_HISTO
 import { OMNI_FIXED, omnipoolRemoveLiquidity, xykReserveAssets, xykShareLegs, type DecodedPosition, type OmnipoolAssetState } from './lpMath.ts'
 import { currentLmRewardGenerationSql, lmCountedClaimable, lmCountedRewardRowsSql, loadLmRewards, type LmRewardRow } from './lmRewardSnapshot.ts'
 import { headSingleFlight } from './headSingleFlight.ts'
-import { cached, cachedFound, cachedSwr, cacheExpiry, cacheInstall, cacheRefresh, peekCached, seedStale } from './cache.ts'
+import { cached, cachedFor, cachedFound, cachedSwr, cacheExpiry, cacheInstall, cacheRefresh, peekCached, seedStale } from './cache.ts'
 import { allocateFundingPools } from './dcaFunding.ts'
 import { NOMINAL_BLOCKS_PER_HOUR, blocksPerHour, measuredParaBlockMs, newestBlockTimestampsSql, paraBlockMs } from './blockTime.ts'
 import { RareEventLedger } from './rareEventLedger.ts'
@@ -58,7 +58,7 @@ import { ensureErc20WalletAssets } from './erc20WalletService.ts'
 import { currentMmOraclePrices, withMmOraclePrices } from './mmOraclePrices.ts'
 import { deriveFeePayment, hasSubstrateFee, type FeePaymentEvent } from './extrinsicFeePayment.ts'
 import { XCM_BARRIER_EVENTS, XCM_IN_DEPOSIT_EVENTS, XCM_IN_WALK_EVENTS, XCM_WALK_CROSSABLE_EVENTS } from './xcmWalkEvents.ts'
-import { trappedArrivals, type TrappedArrival } from './xcmTrappedArrivals.ts'
+import { trappedArrivals, trappedArrivalsKnown, type TrappedArrival } from './xcmTrappedArrivals.ts'
 import { OMNIPOOL_ACCOUNT, PRICE_LOOKBACK_DAYS, custodyAccountSql, formatUnits, isCustodyAccount, isCustodyH160, isUncountedHolding, poolOwnHubHoldingSql, renderUsd, scaledUsd, uncountedHoldingSql } from './valuation.ts'
 import { bridgeLabel, xcmJourneySourcesFor, xcmJourneysByOriginTx, type XcmJourneySource } from './xcmJourneyService.ts'
 import { queryLockBreakdowns, type AssetLockBreakdown, type BalanceLockComponent, type BalanceLockTranche, type BalanceUnlockSlice } from './lockBreakdownService.ts'
@@ -29046,7 +29046,13 @@ async function growAccountActivityWindow(
 // it holds, so the page is refused rather than silently omitting older history — and
 // a page that only ENDS past it is served short rather than withheld, because a total
 // counts a complete window to exactly there.
-async function getAccountActivity(accounts: string[], limit: number, type = 'all', offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, opts: ActivityPageOptions = {}): Promise<ActivityRow[]> {
+// What a scoped page was built from, for the page cache to decide how long it may be held
+// (scopedActivityPageTtlMs): whether it read as a pool venue, and the watermark the
+// enumerated snapshot under a located page was read for (absent for a windowed page, which
+// reads its sources live).
+interface ActivityPageProvenance { venue?: boolean; generation?: number }
+
+async function getAccountActivity(accounts: string[], limit: number, type = 'all', offset = 0, action?: string, filters: ValueListFilters = {}, from?: string, to?: string, opts: ActivityPageOptions = {}, provenance?: ActivityPageProvenance): Promise<ActivityRow[]> {
   // A revenue floor can only be judged once the rows carry the figure, which happens
   // below — so the page is read WIDER and cut to size afterwards, or a filtered list
   // would return a near-empty page whatever it actually holds. An account's feed is
@@ -29057,8 +29063,12 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
   const readOffset = floor == null ? offset : 0
   // A scope that is one native pool's account reads as that pool (see poolVenueOf).
   const venue = await poolVenueOf(accounts)
-  const located = venue ? await venueActivityPage(venue, type, readLimit, readOffset, action, filters, from, to)
-    : await heldLocatedActivityPage(accounts, type, readLimit, readOffset, action, filters, from, to)
+  const held = venue ? null : await heldLocatedActivityPage(accounts, type, readLimit, readOffset, action, filters, from, to)
+  const located = venue ? await venueActivityPage(venue, type, readLimit, readOffset, action, filters, from, to) : held?.rows ?? null
+  if (provenance) {
+    provenance.venue = venue != null
+    provenance.generation = held?.generation
+  }
   // Copy before enriching. These rows are the objects held in the cached source
   // arrays (the enumerated snapshot above all, and the held located page), and the
   // enrichment writes to them:
@@ -29079,9 +29089,10 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
 // The located page, held for as long as the scope's activity watermark stands.
 //
 // The page cache above it (getScopedAccountActivity) is keyed by that watermark too, but
-// its 60s TTL is the backstop for the ENRICHMENT the page carries — a price that lands
-// late, an XCM journey that resolves minutes after the transfer, revenue attributed by a
-// later derivation cycle — and a reader polling every few seconds turned that backstop
+// its 30–60s TTL is the backstop for the ENRICHMENT the page carries — an XCM journey that
+// resolves minutes after the transfer, revenue attributed by a later derivation cycle (a
+// page without revenue on a settled watermark is held longer: scopedActivityPageTtlMs) —
+// and a reader polling every few seconds turned that backstop
 // into the schedule: every lapse re-ran the locate query and the located block reads for
 // a scope that had done nothing (see ACTIVITY_WATERMARK_HOLD_MS for what that cost). The
 // rows themselves are a pure function of the scope's rows, so they are held here on the
@@ -29097,7 +29108,7 @@ async function getAccountActivity(accounts: string[], limit: number, type = 'all
 async function heldLocatedActivityPage(
   accounts: string[], type: string, limit: number, offset: number,
   action: string | undefined, filters: ValueListFilters, from?: string, to?: string,
-): Promise<ActivityRow[] | null> {
+): Promise<LocatedActivityPage | null> {
   const mark = datedWindowIsClosed(to) ? 0 : await accountActivityWatermark(accounts)
   const key = `explorer:located-page:${[...accounts].sort().join(',')}:w${mark}:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`
   const keep = (located: LocatedActivityPage | null) => located != null && builtAtWatermark(located.generation, mark)
@@ -29106,7 +29117,7 @@ async function heldLocatedActivityPage(
     () => markRevalidated(key, accounts, mark, () => locatedAccountActivityPage(accounts, type, limit, offset, action, filters, from, to),
       located => keep(located) && !located!.rows.some(awaitsSettlement)),
     keep)
-  return located?.rows ?? null
+  return located
 }
 
 // One located page and the watermark its plan's snapshot was read for (see
@@ -29268,6 +29279,66 @@ export function erc20WatermarkHolders(accounts: readonly string[]): string[] {
     .filter(h => !ERC20_NON_HOLDERS.includes(h) && !ERC20_RESERVED_HOLDER_RE.test(h))
 }
 
+// Every source a scoped activity page reads its rows from, and the arm of
+// accountActivityWatermark that holds a row for the same scope IN THE SAME BLOCK as each
+// of that source's rows — so a row landing for the scope moves the mark, and the page
+// keyed by it, however long the page is otherwise held (scopedActivityPageTtlMs). The keys
+// are the sources collectAccountActivity reads (its tables, its row builders) and the
+// enumerated snapshot's; a test fails on any it reads that this table does not name.
+//   indexed  account_activity_bounds, the max of account_activity_v3: every 32-byte
+//            account any raw event names (transfers, fee payments, reserves, deposits)
+//   dca      dca_events_by_account, a DCA execution's schedule owner
+//   erc20    erc20_transfer_deltas / atoken_scaled_deltas under the scope's H160s
+//   strategy each strategy family's watermarkSql (its rows' own attribution)
+//   trapped  the trap set's beneficiaries (trappedArrivalMark)
+// Measured over 2.5 days of every source, and on 2,266 sampled feed-row actors across
+// every family and bridge: each row had its arm's row in its own block, the trapped
+// arrivals alone excepted, which is why that arm exists.
+export type ActivityMarkArm = 'indexed' | 'dca' | 'erc20' | 'strategy' | 'trapped'
+export const ACTIVITY_PAGE_MARK_COVERAGE: Record<string, readonly ActivityMarkArm[]> = {
+  // Tables collectAccountActivity reads directly.
+  'price_data.account_swap_activity': ['indexed'],     // the swapper's own swap/transfer events
+  'price_data.account_transfer_activity': ['indexed'], // derived from the transfer events naming the account
+  'price_data.raw_events': ['indexed', 'dca'],         // transfer legs by account; a DCA block's legs by its owner
+  'price_data.dca_events_by_account': ['dca'],
+  'price_data.account_money_market_activity': ['indexed', 'erc20'], // the reserve transfer, or the aToken/debt-token log
+  // Row builders collectAccountActivity calls.
+  liquidityScopedSourceSql: ['indexed'],     // the LP's own liquidity event; a pool's lifecycle event names it
+  hsmDirectTradeRows: ['indexed'],
+  evmTransferCandidateSql: ['erc20'],
+  getRecentOtc: ['indexed'],                 // taker in the fill, maker's reserve/settlement leg, signer's fee
+  getRecentDcaFailures: ['dca'],
+  getRecentRewardClaims: ['indexed'],
+  getRecentStaking: ['indexed'],
+  getRecentBonds: ['indexed'],
+  accountBondSaleTradeRows: ['indexed'],     // an LBP fill is the taker's trade
+  getRecentStrategies: ['strategy'],
+  getRecentIntents: ['indexed'],             // the owner's settlement/unreserve leg in every intent event's block
+  getRecentXcswaps: ['indexed'],             // the caller's deposit; its status is a settlement (awaitsSettlement)
+  getRecentVotes: ['indexed'],
+  getCollectiveVotes: ['indexed'],
+  getRecentXcm: ['indexed'],
+  getRecentXcmIn: ['indexed', 'erc20', 'trapped'], // a credit's deposit event; a trap names nobody
+  getRecentXcmOutRemote: ['indexed'],
+  getRecentXcmExecuted: ['indexed'],
+  getRecentNttOut: ['indexed', 'erc20'],
+  getRecentNttIn: ['indexed', 'erc20'],
+  getRecentV3Rows: ['indexed', 'erc20'],     // the signer's fee, or the token legs under the H160
+  // The enumerated snapshot's sources (ENUMERATED_SOURCE_NAMES), read by the same builders.
+  otc: ['indexed'], dcaFailures: ['dca'], rewards: ['indexed'], staking: ['indexed'], bonds: ['indexed'],
+  strategies: ['strategy'], intents: ['indexed'], xcswaps: ['indexed'], votes: ['indexed'],
+  xcm: ['indexed', 'erc20', 'trapped'], ntt: ['indexed', 'erc20'], v3: ['indexed', 'erc20'],
+}
+
+// The newest trapped arrival meant for any of the accounts (the beneficiary test
+// trappedArrivalRows filters a scope's rows by), 0 when there is none.
+export function trappedArrivalMark(arrivals: readonly TrappedArrival[], accounts: readonly string[]): number {
+  const who = new Set(accounts.map(a => a.toLowerCase()))
+  let mark = 0
+  for (const a of arrivals) if (a.beneficiary != null && who.has(a.beneficiary.toLowerCase())) mark = Math.max(mark, a.blockHeight)
+  return mark
+}
+
 async function accountActivityWatermark(accounts: string[]): Promise<number> {
   if (!accounts.length) return 0
   // Briefly cached: one page asks for several lists at once, and they should
@@ -29309,8 +29380,16 @@ async function accountActivityWatermark(accounts: string[]): Promise<number> {
       const strategyMarksP = strategyH160s.length ? Promise.all(STRATEGY_FAMILIES.map(f => client.query({
         query: f.watermarkSql(strategyH160s), query_params: { h160s: strategyH160s }, format: 'JSONEachRow',
       }).then(async res => Number((await res.json<{ w: number | null }>())[0]?.w ?? 0)))) : Promise.resolve([] as number[])
+      // A trapped inbound XCM arrival credited nobody, so no indexed row names its
+      // beneficiary (measured: the one trap among 800 sampled cross-chain rows sat 714
+      // blocks above its account's indexed mark). Its row comes from the in-memory trap
+      // set (trappedArrivalRows), so its arm is read from that same set: no query, and the
+      // mark moves when the set reveals the arrival, which is when the feed can show it.
+      // Read without waiting on a cold first build: until it lands the feed's own read of
+      // the set is the one that waits, so a page built meanwhile holds MORE than its mark says.
+      const trappedMark = trappedArrivalMark(trappedArrivalsKnown(client), accounts)
       const [marks, erc20Mark, strategyMarks] = await Promise.all([marksP, erc20MarkP, strategyMarksP])
-      return Math.max(0, ...marks, ...erc20Mark, ...strategyMarks)
+      return Math.max(0, ...marks, ...erc20Mark, ...strategyMarks, trappedMark)
     } catch {
       // A failed watermark must not serve a stale page: fall back to a value
       // that changes every block, which restores the old rebuild-always
@@ -29342,8 +29421,63 @@ async function getScopedAccountActivity(
   // The revenue flag changes what the entry HOLDS, so it is part of the key: a page
   // cached without revenue must never be served to a caller that needs it.
   const revTag = opts.revenue === false ? 'norev' : 'rev'
-  return cached(`explorer:${cacheScope}:activity:w${mark}:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${revTag}`, window ? 30_000 : 60_000,
-    () => getAccountActivity(accounts, limit, type, offset, action, filters, from, to, opts))
+  // The member set is in the key as well as the scope: a tag gains members and an account
+  // gains EVM bindings, and a member whose rows are all older than the scope's mark moves
+  // nothing else in it.
+  const key = `explorer:${cacheScope}:activity:w${mark}:m${membershipFingerprint(accounts)}:${type}:${limit}:${offset}:${action ?? ''}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}:${revTag}`
+  return cachedFor(key, async () => {
+    // Read BEFORE the build, so every queued swap at or below the mark is in the table
+    // the build reads (the drain inserts its rows before it moves its cursor).
+    const settled = opts.revenue === false && filters.minRevenue == null && await activityWatermarkSettled(mark)
+    const provenance: ActivityPageProvenance = {}
+    const rows = await getAccountActivity(accounts, limit, type, offset, action, filters, from, to, opts, provenance)
+    return { value: rows, ttlMs: scopedActivityPageTtlMs({ settled, mark, provenance, rows, dated: Boolean(window) }) }
+  })
+}
+
+// How long a scoped activity page is held under its watermark key.
+//
+// The key carries the scope's mark (accountActivityWatermark), which moves with every row
+// any source of the feed writes for the scope — the proof, source by source, is the
+// coverage table ACTIVITY_PAGE_MARK_COVERAGE and its test. So once nothing at or
+// below the mark can still land or change, a rebuild under the same key returns the same
+// rows, and the 30–60s backstop only re-reads them: the notification lane asks for each
+// watched target's page every tick, and those re-reads were its whole cost for a target
+// that had done nothing. Such a page is held for SETTLED_ACTIVITY_PAGE_MS instead, when:
+//   - the mark is SETTLED (activityWatermarkSettled): MARKED_HOLD_SETTLED_BLOCKS under the
+//     head, which every source written after its block's raw_events — the raw_evm_logs and
+//     raw_xcm_activity tables of the same flush, seconds behind — has long reached, and
+//     the account-swap queue, the one written by a later drain, has drained past it;
+//   - the page carries no revenue (`settled` is only ever true without it): revenue is
+//     attributed by a later derivation cycle that moves no mark. The notification lane is
+//     the caller that asks without it;
+//   - it was built AT the mark: a windowed page reads its sources live, a located one is
+//     current only when its enumerated snapshot was read for the mark (builtAtWatermark),
+//     since cachedSwr serves a superseded snapshot while its refresh runs;
+//   - it is not a pool venue's page, which reads the venue's own sources;
+//   - no row still waits on an off-chain or later-block settlement (awaitsSettlement).
+// Otherwise it keeps the backstop it always had. Whatever no mark covers and no condition
+// above excludes — a registry change that reroutes a share token's legs, an XCM journey's
+// remote annotation, an identity display — is bounded by the hold itself, below the
+// MARKED_HOLD_MAX_MS a located page and a held total already carry such a change for.
+export const SETTLED_ACTIVITY_PAGE_MS = 10 * 60_000
+export function scopedActivityPageTtlMs(page: {
+  settled: boolean; mark: number; dated: boolean
+  provenance: { venue?: boolean; generation?: number }
+  rows: readonly ActivityRow[]
+}): number {
+  const held = page.settled && page.mark > 0 && page.provenance.venue === false
+    && builtAtWatermark(page.provenance.generation, page.mark)
+    && !page.rows.some(awaitsSettlement)
+  return held ? SETTLED_ACTIVITY_PAGE_MS : page.dated ? 30_000 : 60_000
+}
+
+// Whether nothing at or below a scope's mark can still land: the condition a value keyed
+// by the mark alone must meet before it is trusted past the short backstop (see
+// scopedActivityPageTtlMs; markRevalidated applies the same two tests).
+async function activityWatermarkSettled(mark: number): Promise<boolean> {
+  if (mark <= 0 || (await indexedRawHead()) - mark < MARKED_HOLD_SETTLED_BLOCKS) return false
+  return swapQueueDrainedTo(mark).catch(() => false)
 }
 
 // ── Keeping the shared enumerated read warm ───────────────────────────────────
