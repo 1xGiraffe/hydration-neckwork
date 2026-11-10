@@ -1194,8 +1194,13 @@ export async function explorerRoutes(fastify: FastifyInstance) {
     return rows
   })
 
-  fastify.get('/explorer/hdx', async () => {
-    return getHdxDashboard()
+  // A build published before its history landed is replaced within seconds, and the
+  // page polls for it: it must not sit in the edge's or a browser's cache for the
+  // route's five minutes (server.ts CACHE_CONTROL).
+  fastify.get('/explorer/hdx', async (_req, reply) => {
+    const dashboard = await getHdxDashboard()
+    if (dashboard.historyPending) reply.header('cache-control', 'no-store')
+    return dashboard
   })
 
   fastify.get('/explorer/revenue', async (req, reply) => {
