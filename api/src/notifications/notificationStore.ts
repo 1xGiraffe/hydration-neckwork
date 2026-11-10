@@ -627,7 +627,7 @@ export async function setNotificationState(key: string, value: string): Promise<
 
 /**
  * Several state rows in ONE insert. The evaluator writes a row per rule (arm
- * state) and per kind (cursors) on a 6s tick, and one insert each was one round
+ * state) and per kind (cursors) on every tick, and one insert each was one round
  * trip each. Same semantics as `setNotificationState`, applied in order.
  */
 export async function setNotificationStates(entries: readonly { key: string; value: string }[]): Promise<void> {
