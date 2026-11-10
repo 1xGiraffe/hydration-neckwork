@@ -864,16 +864,51 @@ export function lbpBondFillCounts(sales: readonly BondSale[], accounts: readonly
   }
   return out
 }
-/** timeWindow's bounds as Unix ms: [from's midnight, the midnight after `to`), unbounded where absent. */
+/**
+ * A BLOCK FLOOR: the lower bound a forward-only reader (the notification evaluator's
+ * global lanes) passes as `from` in place of a day — `YYYY-MM-DD HH:MM:SS#<height>`,
+ * a block height and that block's own timestamp. The reader needs only the blocks
+ * from `height` up — a tick's few new blocks, not the whole UTC day — and a whole
+ * block is a whole set of transactions, so every classifier still sees each row's
+ * full extrinsic.
+ *
+ * The SQL bound states both halves: the height prunes on the block_height-led
+ * sorting keys, the timestamp on the month partitions. They select the same rows —
+ * block timestamps rise with height, so the blocks at or above `height` are exactly
+ * the ones at or after its timestamp, give or take blocks sharing its second, which
+ * the height bound excludes. In-memory window checks compare the timestamp.
+ *
+ * Only `from` takes a floor; `to` stays a day or nothing, so a floored read is
+ * never a closed window and keeps its head-keyed cache entry.
+ */
+const BLOCK_FLOOR_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})#(\d{1,10})$/
+export interface BlockFloor { height: number; timestamp: string }
+export function blockFloorBound(floor: BlockFloor): string | null {
+  const bound = `${floor.timestamp}#${floor.height}`
+  return Number.isInteger(floor.height) && floor.height >= 0 && BLOCK_FLOOR_RE.test(bound) ? bound : null
+}
+export function parseBlockFloor(from?: string): BlockFloor | null {
+  const m = from ? BLOCK_FLOOR_RE.exec(from) : null
+  return m ? { height: Number(m[3]), timestamp: `${m[1]} ${m[2]}` } : null
+}
+// The `YYYY-MM-DD HH:MM:SS` a `from` bound opens at: a day's midnight or a floor's block.
+function windowLowerTimestamp(from?: string): string | null {
+  if (from && DATE_RE.test(from)) return `${from} 00:00:00`
+  return parseBlockFloor(from)?.timestamp ?? null
+}
+/** timeWindow's bounds as Unix ms: [from's midnight (or a floor's block), the midnight after `to`), unbounded where absent. */
 function dateWindowMs(from?: string, to?: string): { fromMs: number; toMs: number } {
+  const lower = windowLowerTimestamp(from)
   return {
-    fromMs: from && DATE_RE.test(from) ? Date.parse(`${from}T00:00:00Z`) : -Infinity,
+    fromMs: lower ? Date.parse(`${lower.replace(' ', 'T')}Z`) : -Infinity,
     toMs: to && DATE_RE.test(to) ? Date.parse(`${to}T00:00:00Z`) + 86_400_000 : Infinity,
   }
 }
 function timeWindow(from?: string, to?: string): string | null {
   const parts: string[] = []
-  if (from && DATE_RE.test(from)) parts.push(`block_timestamp >= '${from} 00:00:00'`)
+  const floor = parseBlockFloor(from)
+  if (floor) parts.push(`block_timestamp >= '${floor.timestamp}' AND block_height >= ${floor.height}`)
+  else if (from && DATE_RE.test(from)) parts.push(`block_timestamp >= '${from} 00:00:00'`)
   if (to && DATE_RE.test(to)) parts.push(`block_timestamp < '${to} 00:00:00' + INTERVAL 1 DAY`)
   return parts.length ? parts.join(' AND ') : null
 }
@@ -1539,9 +1574,12 @@ function historicalClosesRelationSql(options: { priceIds?: string; narrowTo?: st
            GROUP BY asset_id, interval_start)`
 }
 
-// The lower bound a dated window puts on its rows' timestamps, as a SQL
-// DateTime, for historicalClosesRelationSql's `since`.
-const timeWindowSinceSql = (from?: string): string | undefined => from && DATE_RE.test(from) ? `toDateTime('${from} 00:00:00')` : undefined
+// The lower bound a dated (or block-floored) window puts on its rows' timestamps,
+// as a SQL DateTime, for historicalClosesRelationSql's `since`.
+const timeWindowSinceSql = (from?: string): string | undefined => {
+  const lower = windowLowerTimestamp(from)
+  return lower ? `toDateTime('${lower}')` : undefined
+}
 
 export interface EventValueFilterSql { joinSql: string; predicateSql: string }
 
@@ -11587,7 +11625,10 @@ async function getRecentTrades(limit: number, from?: string, to?: string, offset
     const amountFilter = eventValueFilterSql(assetOutExpr, amountOutExpr, 'block_timestamp',
       postUsdFilter ? { ...filters, min: undefined, unit: undefined } : filters, prices, 'trade_price')
     const notRouterHop = `AND who != '${ROUTER_PALLET_ACCT}'`
-    const notDcaFeeLeg = `AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%') ${NOT_LEGACY_DCA_HOP}`
+    // A read floored above the rename can hold no legacy hop, and the clause's
+    // dca_events set is ~0.6M rows built on every read whether it matches or not.
+    const legacyHops = (parseBlockFloor(from)?.height ?? 0) >= ROUTER_NET_RENAME_BLOCK ? '' : NOT_LEGACY_DCA_HOP
+    const notDcaFeeLeg = `AND NOT (extrinsic_index IS NULL AND who != '' AND who NOT LIKE '0x6d6f646c%') ${legacyHops}`
     const want = offset + limit
     // Several swap events can collapse into one user trade (a batch extrinsic's
     // swaps, an old multi-hop route), so the scan over-fetches. Measured over the
@@ -20033,10 +20074,11 @@ export function selectCollectiveVoteEvents(
 }
 
 // The in-memory twin of timeWindow(): whether a `YYYY-MM-DD HH:MM:SS` timestamp
-// falls inside the same day range — `from` inclusive from midnight, `to`
-// inclusive through the end of its day. The fixed format compares as text.
+// falls inside the same day range — `from` inclusive from midnight (a block
+// floor from its block's timestamp), `to` inclusive through the end of its day.
+// The fixed format compares as text.
 export function timeWindowMatcher(from?: string, to?: string): (ts: string) => boolean {
-  const lower = from && DATE_RE.test(from) ? `${from} 00:00:00` : null
+  const lower = windowLowerTimestamp(from)
   const upper = to && DATE_RE.test(to) ? `${nextUtcDay(to)} 00:00:00` : null
   return ts => (lower == null || ts >= lower) && (upper == null || ts < upper)
 }
@@ -20936,7 +20978,7 @@ async function getRecentDcaFailures(limit: number, from?: string, to?: string, a
     : ''
   const bound = height != null
     ? `e.block_height = {height:UInt32}`
-    : (timeWindow(from, to)?.replaceAll('block_timestamp', 'e.block_timestamp') ?? '1')
+    : (timeWindow(from, to)?.replaceAll('block_timestamp', 'e.block_timestamp').replaceAll('block_height', 'e.block_height') ?? '1')
   const res = await client.query({
     query: `SELECT e.block_height, toString(e.block_timestamp) AS ts, e.event_index,
               e.who, toString(e.id) AS id,

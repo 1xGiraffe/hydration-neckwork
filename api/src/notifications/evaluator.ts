@@ -4,7 +4,7 @@ import { normalizeAddress } from '../services/addressIdentity.ts'
 import { assetDescriptor, displayDescriptor, idsDisplayedAs } from '../services/explorerAssets.ts'
 import { avgBlockMsSql, clampBlockMs, NOMINAL_PARA_BLOCK_MS } from '../services/blockTime.ts'
 import {
-  accountRef, activityRowMatchesAction, activityTypeMatchesFamily, assetIdFromMmAddress, ensurePrices,
+  accountRef, activityRowMatchesAction, activityTypeMatchesFamily, assetIdFromMmAddress, blockFloorBound, ensurePrices,
   getAddressActivity, getListTagActivity, getMarketHealthFactor, getRecentActivity, getTagActivity, isIntentFillAction,
   mmMarketByKey, mmReserveIdsForAsset,
   type AccountRef, type ActivityRow,
@@ -2167,9 +2167,10 @@ function activitySourceKey(rule: NotificationRule): string | null {
 // HERE rather than trusted from creation time: a list unshared between two ticks
 // must stop contributing rows immediately, without the rule being touched.
 //
-// `since` opens the read at the window's first day (windowDayBounds), as the
-// large-value lanes bound theirs. Undated, every tick asked the target's whole
-// history for its newest page, and a target whose rows are mostly suppressed — a
+// `since` opens the read at the window's first day (windowDayBounds): the scoped
+// feeds' time filter is day-granular, where the global lanes floor theirs at the
+// window's first block (windowBlockFloor). Undated, every tick asked the target's
+// whole history for its newest page, and a target whose rows are mostly suppressed — a
 // pool tag, whose transfer legs are all plumbing, or a value floor few rows
 // clear — walked all of it to fill the page: 2 GB a read, every ~20 s. The
 // window's rows are the same either way: the page is the scope's newest rows and
@@ -2206,10 +2207,10 @@ async function protocolRevenueMatches(
   // No server-side revenue filter exists, so every rule reads the SAME page whatever
   // its floor — one group, one fetch, floors applied per rule in the evaluator.
   const groups = groupRules(rules, () => 'all')
-  const bounds = await windowDayBounds(window)
+  const floor = await windowBlockFloor(window)
   return visitGroups('protocol-revenue', groups, budget, async group => {
     const rows = await fetchActivityPage(
-      limit => getRecentActivity(limit, bounds?.from, bounds?.to, 0, 'all', {}, undefined, FORWARD_ONLY_REVENUE_PAGE),
+      limit => getRecentActivity(limit, floor, undefined, 0, 'all', {}, undefined, FORWARD_ONLY_REVENUE_PAGE),
       window)
     return evaluateProtocolRevenue(rows, group, window)
   })
@@ -2225,12 +2226,18 @@ async function liquidationMatches(
     if (!target) return 'chain'
     return activitySourceKey({ ...rule, params: { ...rule.params as object, target } } as NotificationRule) ?? 'unreadable'
   })
-  const bounds = await windowDayBounds(window)
+  // A targeted group reads its scoped feed, which takes a day (see
+  // fetchTargetActivity); the chain-wide group reads the global feed from the
+  // window's floor block. Each is looked up once, and only when a group needs it.
+  let dayBounds: Promise<{ from: string; to: string } | null> | null = null
+  let blockFloor: Promise<string | undefined> | null = null
   return visitGroups('liquidation', groups, budget, async group => {
     const target = (group[0].params as RuleParams['liquidation']).target
+    const bounds = target ? await (dayBounds ??= windowDayBounds(window)) : null
+    const floor = target ? undefined : await (blockFloor ??= windowBlockFloor(window))
     const rows = await fetchActivityPage(limit => target
       ? fetchTargetActivity(target, group[0].accountId, limit, {}, 'mm', { revenue: true }, bounds?.from)
-      : getRecentActivity(limit, bounds?.from, bounds?.to, 0, 'mm', {}, undefined, FORWARD_ONLY_REVENUE_PAGE),
+      : getRecentActivity(limit, floor, undefined, 0, 'mm', {}, undefined, FORWARD_ONLY_REVENUE_PAGE),
       window)
     return evaluateLiquidations(rows, group, window)
   })
@@ -2300,8 +2307,8 @@ const largeValueKey = (p: RuleParams['large-trade']): string => (p.assetId == nu
 
 // How every lane that reads the GLOBAL feed must ask for its page.
 //
-// `forwardOnly` is the load-bearing half: these lanes day-bound their fetch (a
-// sparse floor walks all history otherwise), and a dated read is served the
+// `forwardOnly` is the load-bearing half: these lanes bound their fetch (a
+// sparse floor walks all history otherwise), and a bounded read is served the
 // shared classified window — stale-while-revalidate, on a key that carries no
 // head. Their cursor tracks the live head every tick, so a row that landed while
 // that window was fresh sits below the cursor by the time it appears, and is
@@ -2320,25 +2327,47 @@ async function largeValueMatches(
   // The feed walks HISTORY until `limit` rows clear the value floor — and a rule
   // whose floor matches almost nothing (a $10k floor on one token) walks past
   // the read guard and throws too-broad on every tick, wedging the whole lane
-  // behind one rule. Day-bounding the fetch to the window's own days caps the
+  // behind one rule. Flooring the fetch at the window's first block caps the
   // walk absolutely; the rows are block-filtered to the exact window by
-  // evaluateLargeValue either way. A missing bound (block not in the blocks
+  // evaluateLargeValue either way. A missing floor (block not in the blocks
   // table yet) falls back to the unbounded fetch rather than skipping the tick.
-  const bounds = await windowDayBounds(window)
+  const floor = await windowBlockFloor(window)
   return visitGroups(kind, groups, budget, async group => {
     const params = group.map(r => r.params as RuleParams['large-trade'])
     const min = Math.min(...params.map(p => p.minUsd))
     const assetId = params[0].assetId
     const filters = { min, unit: 'usd' as const, ...(assetId == null ? {} : { token: String(assetId) }) }
     // No large-value rule reads revenue, so this lane must not pay for attaching it.
-    const rows = await fetchActivityPage(limit => getRecentActivity(limit, bounds?.from, bounds?.to, 0, feedType, filters, undefined, FORWARD_ONLY_PAGE), window)
+    const rows = await fetchActivityPage(limit => getRecentActivity(limit, floor, undefined, 0, feedType, filters, undefined, FORWARD_ONLY_PAGE), window)
     return evaluateLargeValue(rows, group, window)
   })
 }
 
-// The window's block range as feed day bounds (the feed's time filter is
-// day-granular), so a windowed fetch scans at most two days instead of walking
-// all history for a rare match. null when either boundary block has no row yet.
+// The global feed's lower bound for a window: a BLOCK FLOOR (blockFloorBound) at the
+// window's `from` block, so a tick reads the blocks it matches over and no more.
+// The window is `(from, to]`; the floor includes `from` itself, one block of slack
+// the matcher drops. It bounds whole blocks, never rows, so every classifier still
+// sees each row's whole extrinsic; and the page is the feed's newest rows under any
+// lower bound at or below the window, so the rows inside the window are the same
+// as under a day bound or none. undefined (an unbounded read) when the block has
+// no row yet.
+async function windowBlockFloor(window: BlockWindow): Promise<string | undefined> {
+  if (!client) return undefined
+  try {
+    const res = await client.query({
+      query: `SELECT toString(block_timestamp) AS ts FROM price_data.blocks WHERE block_height = {h:UInt32} LIMIT 1`,
+      query_params: { h: window.from },
+      format: 'JSONEachRow',
+    })
+    const ts = (await res.json<{ ts: string }>())[0]?.ts
+    return ts ? blockFloorBound({ height: window.from, timestamp: ts.slice(0, 19) }) ?? undefined : undefined
+  } catch { return undefined }
+}
+
+// The window's block range as feed day bounds, for the SCOPED feeds (an account,
+// a tag), whose time filter is day-granular: a windowed fetch scans at most two
+// days instead of walking all history for a rare match. null when either boundary
+// block has no row yet.
 async function windowDayBounds(window: BlockWindow): Promise<{ from: string; to: string } | null> {
   if (!client) return null
   try {

@@ -12,7 +12,7 @@ vi.mock('../src/services/securityService.ts', () => ({
   getSecurityDashboard: async () => ({ timeline: [...timeline] }),
 }))
 
-interface ActivityCall { kind: 'address' | 'recent'; address?: string; type?: string; action?: string; filters?: Record<string, unknown>; opts?: Record<string, unknown> }
+interface ActivityCall { kind: 'address' | 'recent'; address?: string; type?: string; action?: string; filters?: Record<string, unknown>; opts?: Record<string, unknown>; from?: string; to?: string }
 const activityCalls: ActivityCall[] = []
 let activityRows: Record<string, unknown>[] = []
 let failAddress: string | null = null
@@ -20,13 +20,13 @@ vi.mock('../src/services/explorerService.ts', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/services/explorerService.ts')>()
   return {
     ...actual,
-    getAddressActivity: async (address: string, type: string, _limit: number, _offset: number, action?: string, filters?: Record<string, unknown>) => {
-      activityCalls.push({ kind: 'address', address, type, action, filters })
+    getAddressActivity: async (address: string, type: string, _limit: number, _offset: number, action?: string, filters?: Record<string, unknown>, since?: string) => {
+      activityCalls.push({ kind: 'address', address, type, action, filters, from: since })
       if (failAddress != null && address === failAddress) throw new Error('Field value too long')
       return activityRows
     },
-    getRecentActivity: async (_limit: number, _from?: string, _to?: string, _offset = 0, type = 'all', filters: Record<string, unknown> = {}, _action?: string, opts: Record<string, unknown> = {}) => {
-      activityCalls.push({ kind: 'recent', type, filters, opts })
+    getRecentActivity: async (_limit: number, from?: string, to?: string, _offset = 0, type = 'all', filters: Record<string, unknown> = {}, _action?: string, opts: Record<string, unknown> = {}) => {
+      activityCalls.push({ kind: 'recent', type, filters, opts, from, to })
       return activityRows
     },
     getMarketHealthFactor: async (address: string, market: string) => {
@@ -373,8 +373,8 @@ describe('activity source fan-out', () => {
     expect(evaluatorCursors()['large-trade']).toBe(1_010)
   })
 
-  // Every lane that reads the GLOBAL feed day-bounds its fetch (a sparse floor
-  // walks all history otherwise), and a dated read is served the shared
+  // Every lane that reads the GLOBAL feed bounds its fetch (a sparse floor
+  // walks all history otherwise), and a bounded read is served the shared
   // stale-while-revalidate window: a page up to a minute old, on a key with no
   // head in it. The cursor meanwhile tracks the live head, so rows that landed
   // inside that minute were stepped over for good — measured 2026-08-21, one
@@ -395,6 +395,56 @@ describe('activity source fan-out', () => {
     const global = activityCalls.filter(c => c.kind === 'recent')
     expect(global.map(c => c.type).sort()).toEqual(['all', 'mm', 'trade', 'transfer'])
     expect(global.every(c => c.opts?.forwardOnly === true)).toBe(true)
+  })
+
+  // The global lanes read the feed from the window's first block — the re-check
+  // stretch included — rather than from its first day, so a tick reads the blocks
+  // it matches over instead of the whole UTC day; no `to`, so the read never turns
+  // into a closed, head-less window. A TARGETED liquidation reads its scoped feed,
+  // whose time filter is a day, from the window's first day as before.
+  it('floors the global feed at the window’s first block and the scoped feed at its day', async () => {
+    const floorSql = 'FROM price_data.blocks WHERE block_height = {h:UInt32}'
+    const daySql = 'FROM price_data.blocks WHERE block_height IN'
+    initEvaluator(fakeClient({
+      ...tables as unknown as Record<string, Record<string, unknown>[]>,
+      [floorSql]: [{ ts: '2026-08-18 10:00:00' }],
+      [daySql]: [{ f: '2026-08-18', t: '2026-08-18', n: '2' }],
+    }))
+    await createRule(OWNER, { kind: 'large-trade', params: { minUsd: 1_000 } })
+    await createRule(OWNER, { kind: 'large-transfer', params: { minUsd: 1_000 } })
+    await createRule(OWNER, { kind: 'protocol-revenue', params: { minUsd: 10 } })
+    await createRule(OWNER, { kind: 'liquidation', params: {} })
+    await createRule(OWNER, { kind: 'liquidation', params: { target: { kind: 'address', address: ADDRESSES[0] } } })
+    await runEvaluatorTick()
+    setHead(1_010)
+    activityCalls.length = 0
+    await runEvaluatorTick()
+
+    const global = activityCalls.filter(c => c.kind === 'recent')
+    expect(global.map(c => c.type).sort()).toEqual(['all', 'mm', 'trade', 'transfer'])
+    // Window (1_000, 1_010], re-checked 150 blocks back: the floor is block 850.
+    for (const call of global) {
+      expect(call.from).toBe('2026-08-18 10:00:00#850')
+      expect(call.to).toBeUndefined()
+    }
+    const scoped = activityCalls.filter(c => c.kind === 'address')
+    expect(scoped).toHaveLength(1)
+    expect(scoped[0].from).toBe('2026-08-18')
+  })
+
+  // A floor block not in the blocks table yet reads unbounded rather than skipping
+  // the tick, as a missing day bound always did.
+  it('reads the global feed unbounded when the floor block is not indexed yet', async () => {
+    await createRule(OWNER, { kind: 'large-trade', params: { minUsd: 1_000 } })
+    await runEvaluatorTick()
+    setHead(1_010)
+    activityRows = [trade(1_005, 1, 25_000)]
+    activityCalls.length = 0
+    await runEvaluatorTick()
+    const global = activityCalls.filter(c => c.kind === 'recent')
+    expect(global).toHaveLength(1)
+    expect(global[0].from).toBeUndefined()
+    expect(inbox()).toHaveLength(1)
   })
 
   // The cap is per kind: the row lane visits the kinds in a fixed order, and a
