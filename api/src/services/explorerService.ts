@@ -1564,14 +1564,27 @@ function historicalClosesRelationSql(options: { priceIds?: string; narrowTo?: st
   // A caller whose rows all lie at or after `since` needs only the closes from the
   // hour before it on, plus each asset's newest close older than that — the one an
   // ASOF match of an early row in a quiet asset still lands on (the match has no
-  // staleness bound, so that close must stay reachable). The rest of the 2.4M-row
-  // hourly history can never be matched, and folding it was the whole cost.
+  // staleness bound, so that close must stay reachable). The rest of the hourly
+  // history can never be matched, and folding it was the whole cost.
+  //
+  // That newest older close is the boundary day's own newest hour before the
+  // boundary, else the newest hour of the asset's newest earlier day — which
+  // ohlc_1h_day_closes holds per day (its hour and close, the merge of that hour's
+  // states), so it is one read of that small table instead of a search through every
+  // monthly part of ohlc_1h. Hours are distinct per asset, so argMax by hour is the
+  // newest hour's close exactly.
   const boundary = `toStartOfHour(${options.since}) - INTERVAL 1 HOUR`
+  const boundaryDay = `toStartOfDay(${boundary})`
+  const joinKey = options.joinKey ? ', toUInt8(1) AS asof_join_key' : ''
   return `(${select} WHERE ${assets} AND interval_start >= ${boundary} GROUP BY asset_id, interval_start
            UNION ALL
-           ${select} WHERE ${assets} AND interval_start < ${boundary}
-             AND (asset_id, interval_start) IN (SELECT asset_id, max(interval_start) FROM price_data.ohlc_1h WHERE ${assets} AND interval_start < ${boundary} GROUP BY asset_id)
-           GROUP BY asset_id, interval_start)`
+           SELECT asset_id, max(hour) + INTERVAL 1 HOUR AS price_time, argMax(hour_close, hour) AS close${joinKey} FROM (
+             SELECT asset_id, interval_start AS hour, argMaxMerge(close_state) AS hour_close FROM price_data.ohlc_1h
+             WHERE ${assets} AND interval_start >= ${boundaryDay} AND interval_start < ${boundary} GROUP BY asset_id, interval_start
+             UNION ALL
+             SELECT asset_id, max(last_hour) AS hour, argMaxMerge(close_state) AS hour_close FROM price_data.ohlc_1h_day_closes
+             WHERE ${assets} AND day < ${boundaryDay} GROUP BY asset_id, day
+           ) GROUP BY asset_id)`
 }
 
 // The lower bound a dated (or block-floored) window puts on its rows' timestamps,
