@@ -29631,7 +29631,24 @@ export async function getAddressTabCounts(addressInput: string): Promise<TabCoun
 }
 const TAG_COUNT_REFRESH_MS = 10 * 60_000
 const tagCountRefreshes = new Map<string, Promise<TabCounts>>()
-const hotTagCounts = new Set<string>()
+// A tag stays on the two tag prewarms (its tab counts here, its detail payload at
+// hotTagDetails) for an hour after a reader last asked for it, the rule the activity
+// prewarm keeps (HOT_ACTIVITY_SCOPE_IDLE_MS). Held for the life of the process instead,
+// every tag anyone ever opened was rebuilt every few minutes until the next restart, so
+// the cost tracked uptime rather than visits. Only the request paths record demand: a
+// prewarm's own rebuild goes through getTag too, and counted as a request it would keep
+// every tag it touches in demand forever. A tag that lapses is served exactly as one
+// never opened since the restart is: the counts' last snapshot while the next pass
+// refreshes it, a detail build once the stored payload is past its serving age.
+const TAG_PREWARM_IDLE_MS = 60 * 60_000
+// Tag id -> when a reader last asked for its tab counts.
+const hotTagCounts = new Map<string, number>()
+// The tags whose last request is inside the idle window; a lapsed one is dropped from
+// `demand` as it is read, so the map holds only what is still being read.
+export function tagsStillInDemand(demand: Map<string, number>, now: number, idleMs = TAG_PREWARM_IDLE_MS): Set<string> {
+  for (const [tagId, requestedAt] of demand) if (now - requestedAt > idleMs) demand.delete(tagId)
+  return new Set(demand.keys())
+}
 async function refreshTagTabCounts(tagId: string, members: string[], membershipKey: string): Promise<TabCounts> {
   const existing = tagCountRefreshes.get(tagId)
   if (existing) return existing
@@ -29657,7 +29674,7 @@ async function refreshTagTabCounts(tagId: string, members: string[], membershipK
 export async function getTagTabCounts(tagId: string): Promise<TabCounts | null> {
   const members = tagMembers(tagId)
   if (!members) return null
-  hotTagCounts.add(tagId)
+  hotTagCounts.set(tagId, Date.now())
   const membershipKey = tagMembershipList(members)
   const result = await client.query({
     query: `SELECT membership_key, extrinsics, events,
@@ -35042,7 +35059,10 @@ const TAG_DETAIL_REQUEST_MAX_AGE_SECONDS = 10 * 60
 // 120 s margin, which keeps it unreachable. It costs a skip rate of about two in
 // three instead of four in five.
 const TAG_DETAIL_PREWARM_REBUILD_AGE_SECONDS = TAG_DETAIL_REQUEST_MAX_AGE_SECONDS - 2 * (TAG_DETAIL_PREWARM_INTERVAL_MS / 1000)
-const hotTagDetails = new Set<string>(['treasury', 'money-market'])
+// Tag id -> when a reader last asked for its full detail (see TAG_PREWARM_IDLE_MS).
+const hotTagDetails = new Map<string, number>()
+// Kept warm whatever their demand: the two tags this set was always seeded with.
+const PINNED_HOT_TAG_DETAILS = ['treasury', 'money-market']
 
 // The joined member list both tag snapshot tables key on. Lowercased and sorted
 // so a reordered or re-cased tag definition still matches a stored payload.
@@ -35347,7 +35367,8 @@ export async function getTag(tagId: string, opts: { summary?: boolean; refresh?:
   const summary = opts.summary === true
   const refresh = opts.refresh === true
   const membershipKey = tagDetailMembershipKey(tag.members)
-  if (!summary) hotTagDetails.add(tagId)
+  // The prewarm's own rebuild (`refresh`) is not a reader's demand (TAG_PREWARM_IDLE_MS).
+  if (!summary && !refresh) hotTagDetails.set(tagId, Date.now())
   return buildTagDetailForMembers(
     { tagId: tag.tagId, name: tag.name, color: tag.color, icon: tag.icon, note: tag.note },
     tag.members,
@@ -36065,6 +36086,7 @@ export function startAccountsPrewarm(): void {
 async function prewarmTagTabCountsUncached(): Promise<void> {
   // Sequential by tag: the exact aggregation can be large for structural tags,
   // and concurrent full-history unions would contend with live ingestion.
+  const inDemand = tagsStillInDemand(hotTagCounts, Date.now())
   for (const tag of allTags()) {
     const membershipKey = tagMembershipList(tag.members)
     const result = await client.query({
@@ -36076,9 +36098,9 @@ async function prewarmTagTabCountsUncached(): Promise<void> {
     const snapshot = (await result.json<{ membership_key: string; age: number }>())[0]
     const membershipMatches = snapshot?.membership_key === membershipKey
     // Establish complete coverage for every reproducible tag once. Thereafter
-    // only tags actually requested by this API process need ten-minute refresh;
+    // only tags a reader asked for within the idle window need ten-minute refresh;
     // rescanning every structural tag forever would create continuous load.
-    if (membershipMatches && (!hotTagCounts.has(tag.tagId) || Number(snapshot.age) < TAG_COUNT_REFRESH_MS / 1000)) continue
+    if (membershipMatches && (!inDemand.has(tag.tagId) || Number(snapshot.age) < TAG_COUNT_REFRESH_MS / 1000)) continue
     await refreshTagTabCounts(tag.tagId, tag.members, membershipKey)
   }
 }
@@ -36100,7 +36122,7 @@ export function startTagCountsPrewarm(): void {
   const prewarmDetails = (): Promise<void> => {
     if (tagDetailsPrewarmInflight) return tagDetailsPrewarmInflight
     const request = (async () => {
-      for (const tagId of hotTagDetails) {
+      for (const tagId of new Set([...PINNED_HOT_TAG_DETAILS, ...tagsStillInDemand(hotTagDetails, Date.now())])) {
         const tag = getTagRecord(tagId)
         // Reconstructing a tag whose stored payload a request would still accept
         // buys nothing: the payload moves with live prices, so every rebuild
