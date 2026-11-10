@@ -1540,8 +1540,8 @@ async function loadRotationAnchors(): Promise<{ accounts: string[]; anchors: str
     const linkRes = await client.query({
       query: `
         WITH
-        -- per USER account its weekly closes, read once: when it was born (first
-        -- nonzero close and that close) and the weeks it exited (nonzero → zero)
+        -- per USER account its weekly closes: when it was born (first nonzero
+        -- close and that close) and the weeks it exited (nonzero → zero)
         info AS (
           SELECT account_id,
             arrayFilter((ww, bb) -> bb > 0, ws, bs)[1] AS nzw,
@@ -1575,18 +1575,18 @@ async function loadRotationAnchors(): Promise<{ accounts: string[]; anchors: str
         kraken_forwarders AS (
           SELECT DISTINCT a FROM legs WHERE b IN ${tagAccountSetSql(KRAKEN_TAG_IDS)}
         ),
-        -- each send joined ONCE to the info of both its parties (exploded by role
-        -- and folded back), so the weekly closes are read a single time
+        -- the candidate sends, filtered as they are joined: a receiver born (its
+        -- first nonzero close) within a week after the send, from a sender that
+        -- was born and exited (nonzero → zero) within a fortnight of it
+        births AS (SELECT account_id, nzw, first_close FROM info WHERE born),
+        exits AS (SELECT account_id, nzw, ews FROM info WHERE born AND length(ews) > 0),
         sends AS (
-          SELECT h, ei, any(legs_b) AS b, any(legs_a) AS a, any(legs_amt) AS amt_row, any(legs_wk) AS wk,
-            maxIf(info.born, role = 1) AS b_born, anyIf(info.nzw, role = 1) AS b_nzw, anyIf(info.first_close, role = 1) AS b_close,
-            maxIf(info.born, role = 2) AS a_born, anyIf(info.nzw, role = 2) AS a_nzw, anyIf(info.ews, role = 2) AS a_ews
-          FROM (
-            SELECT h, ei, b AS legs_b, a AS legs_a, amt_row AS legs_amt, wk AS legs_wk, r.1 AS role, r.2 AS acc
-            FROM legs ARRAY JOIN [(toUInt8(1), b), (toUInt8(2), a)] AS r
-          ) x
-          INNER JOIN info ON info.account_id = x.acc
-          GROUP BY h, ei
+          SELECT l.b AS b, l.a AS a, l.amt_row AS amt_row, bi.first_close AS b_close, ex.nzw AS a_nzw
+          FROM legs AS l
+          INNER JOIN births AS bi ON bi.account_id = l.b
+          INNER JOIN exits AS ex ON ex.account_id = l.a
+          WHERE l.wk >= bi.nzw - 7 AND l.wk <= bi.nzw
+            AND arrayExists(x -> x >= l.wk AND x <= l.wk + 14, ex.ews)
         )
         SELECT x.b AS b, x.funder AS a, toString(x.funder_firstnz) AS a_firstnz
         FROM (
@@ -1599,10 +1599,7 @@ async function loadRotationAnchors(): Promise<{ accounts: string[]; anchors: str
             -- often arrives as several transfers, none alone ≥90% of the close
             SELECT b, a, sum(amt_row) / 1e12 AS amt, any(b_close) AS first_close, any(a_nzw) AS a_nzw
             FROM sends
-            WHERE b_born AND a_born AND length(a_ews) > 0
-              AND wk BETWEEN b_nzw - 7 AND b_nzw
-              AND arrayExists(x -> x >= wk AND x <= wk + 14, a_ews)
-              AND b NOT IN (SELECT a FROM kraken_forwarders)
+            WHERE b NOT IN (SELECT a FROM kraken_forwarders)
             GROUP BY b, a
             HAVING amt >= 0.9 * first_close
           )
