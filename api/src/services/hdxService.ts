@@ -1177,9 +1177,9 @@ const POOL_TAG_IDS = ['xyk-pools', 'stableswap-pools', 'lbp-pools', 'money-marke
 
 const tagAccountsSql = (ids: string[]) =>
   `(SELECT groupArray(account_id) FROM price_data.account_tags FINAL WHERE label_id IN (${ids.map(t => `'${t}'`).join(',')}) AND deleted = 0)`
-// The same members as a set, for `x [NOT] IN …` over many rows: `has()` on the array
-// above is a linear scan of its ~840 members per row, which on the weekly HDX closes
-// (6M rows) was more than half of the rotation-link and cost-basis reads.
+// The same members as a set, for `x [NOT] IN …` over many rows (the structure's
+// classes, the rotation links, the cost basis): `has()` on the array above is a
+// linear scan of its ~840 members per row, a set lookup is a hash probe.
 const tagAccountSetSql = (ids: string[]) =>
   `(SELECT account_id FROM price_data.account_tags FINAL WHERE label_id IN (${ids.map(t => `'${t}'`).join(',')}) AND deleted = 0)`
 
@@ -1404,9 +1404,6 @@ export function hdxStructureSql(source: HdxStructureSource, scope: HdxStructureS
   // is one row as before and the movers alone expand bucket by bucket. `bal` is the
   // account's HDX and HDX bonds; `hbal` its HDX alone, which the holding-age bands count.
   return `
-    WITH
-    ${tagAccountsSql(KRAKEN_TAG_IDS)} AS kraken_accts,
-    ${tagAccountsSql(POOL_TAG_IDS)} AS pool_accts
     SELECT i,
       toString(sumIf(bal, cls = 'treasury')) AS treasury,
       toString(sumIf(bal, cls = 'protocol')) AS protocol,
@@ -1453,8 +1450,8 @@ export function hdxStructureSql(source: HdxStructureSource, scope: HdxStructureS
                 if(sum(nzn) = 0, toDate('2100-01-01'), minIf(nz, nzn > 0)) AS hnz,
                 multiIf(
                   account_id = '${TREASURY_ACCOUNT}', 'treasury',
-                  startsWith(account_id, '0x6d6f646c') OR has(pool_accts, account_id), 'protocol',
-                  has(kraken_accts, account_id), 'kraken',
+                  startsWith(account_id, '0x6d6f646c') OR account_id IN ${tagAccountSetSql(POOL_TAG_IDS)}, 'protocol',
+                  account_id IN ${tagAccountSetSql(KRAKEN_TAG_IDS)}, 'kraken',
                   'user') AS cls
               FROM (${parts.join('\n        UNION ALL')})
               GROUP BY account_id, asset_id
