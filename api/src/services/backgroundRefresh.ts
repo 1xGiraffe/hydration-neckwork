@@ -1,4 +1,4 @@
-import { refreshHdxSnapshot } from './hdxService.ts'
+import { refreshHdxHistory, refreshHdxSnapshot } from './hdxService.ts'
 import { refreshProxyMultisig } from './proxyMultisigService.ts'
 import { refreshErc20Wallets } from './erc20WalletService.ts'
 import { refreshContractCode } from './contractRegistryService.ts'
@@ -125,6 +125,10 @@ const BASE_TICK_MS = 60_000
 
 const TASKS: RefreshTask[] = [
   { name: 'hdx-locks', everyTicks: 1, run: refreshHdxSnapshot },
+  // The /hdx history's weekly closes (hdxWeeklyCloses.ts): ClickHouse only, two small
+  // reads a tick, and a ~5 CPU-s rebuild on the long-op client when a week has closed
+  // or a week before the generation's cut took an insert.
+  { name: 'hdx-history', everyTicks: 1, run: refreshHdxHistory },
   { name: 'proxy-multisig', everyTicks: 1, run: refreshProxyMultisig },
   { name: 'erc20-wallets', everyTicks: 3, run: refreshErc20Wallets },
   // EVM.AccountCodes enumeration (~1k keys); contracts appear rarely, so a
