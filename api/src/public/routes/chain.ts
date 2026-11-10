@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync } from 'fastify'
+import type { FastifyPluginAsync, FastifyReply } from 'fastify'
 import type { ZodTypeProvider } from 'fastify-type-provider-zod'
 import { z } from 'zod'
 import type { ClickHouseClient } from '../../db/client.ts'
@@ -12,6 +12,7 @@ import {
   getExtrinsicByHash,
   getOtcOrder,
   queryStakingEvents,
+  type ExtrinsicDetail,
   type StakingEventType,
 } from '../services/chain.ts'
 
@@ -61,6 +62,22 @@ const zExtrinsic = z.object({
   success: z.boolean(),
   error: zDispatchError.nullable(),
 })
+
+// A found extrinsic's answer does not change: raw ingestion follows the FINALIZED
+// head, so a row in raw_extrinsics is final when it lands, and a replayed row
+// resolves to the same values. Such a 200 is held for a day by the sidecar and by
+// clients instead of the table's 10 s, which exists for the toast polling a hash
+// that is not indexed yet — that is a 404, never stored. The one part that can
+// still move is a Module error the metadata index cannot name yet: a later index
+// pass names it, so that answer keeps the short entry. A day also bounds the hash
+// route's own edges: a hash re-included later (the route reports the newest
+// inclusion) and an extrinsic aging out of the `withinDays` window it was found in.
+const SETTLED_EXTRINSIC_MAX_AGE_SECONDS = 86_400
+
+function cacheSettledExtrinsic(reply: FastifyReply, found: ExtrinsicDetail): void {
+  if (found.error?.kind === 'Module' && found.error.name == null) return
+  reply.header('cache-control', `public, max-age=${SETTLED_EXTRINSIC_MAX_AGE_SECONDS}`)
+}
 
 const EXTRINSIC_DESCRIPTION = [
   '`success` and `error` are the extrinsic\'s dispatch outcome: exactly one of them is meaningful, and a successful extrinsic has `error: null`.',
@@ -181,12 +198,13 @@ export const chainRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
     // evicting entries that other endpoints DO reuse (/v1/assets and friends).
     // It buys nothing in exchange: a toast polls every 10 s, so a 3 s memo never
     // hits, and repeat 200s are already collapsed by the nginx micro-cache in
-    // front (max-age 10). The uncached read is bounded on its own — a 7-day
+    // front (cacheSettledExtrinsic). The uncached read is bounded on its own — a 7-day
     // partition-pruned lookup is ~5 MiB / 8 ms — which is what makes that safe.
     const found = await getExtrinsicByHash(opts.client, hash, withinDays)
     if (!found) {
       return reply.code(404).send(errorEnvelope('not_found', `no extrinsic ${hash} in the last ${withinDays} day(s); an older one is addressable as /v1/extrinsics/{blockHeight}/{index}`))
     }
+    cacheSettledExtrinsic(reply, found)
     return found
   })
 
@@ -216,6 +234,7 @@ export const chainRoutes: FastifyPluginAsync<{ client: ClickHouseClient }> = asy
     const { blockHeight, index } = request.params
     const found = await cached(`pub:extrinsic:at:${blockHeight}:${index}`, 3_000, () => getExtrinsicAt(opts.client, blockHeight, index))
     if (!found) return reply.code(404).send(errorEnvelope('not_found', `no extrinsic ${blockHeight}-${index}`))
+    cacheSettledExtrinsic(reply, found)
     return found
   })
 

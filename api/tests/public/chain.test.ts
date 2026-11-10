@@ -466,9 +466,30 @@ describe('GET /v1/extrinsics/:hash', () => {
     }
   })
 
-  it('is not cached beyond a toast poll interval', async () => {
+  it('holds a found extrinsic for a day, since a finalized row does not change', async () => {
     const res = await app.inject('/v1/extrinsics/' + HASH)
-    expect(res.headers['cache-control']).toBe('public, max-age=10')
+    expect(res.headers['cache-control']).toBe('public, max-age=86400')
+    // A named failure is as final as a success.
+    expect((await app.inject('/v1/extrinsics/' + FAILED_HASH)).headers['cache-control']).toBe('public, max-age=86400')
+  })
+
+  it('never stores a not-found answer, which a toast polls until the extrinsic is indexed', async () => {
+    const res = await app.inject('/v1/extrinsics/' + MISSING_HASH)
+    expect(res.statusCode).toBe(404)
+    expect(res.headers['cache-control']).toBe('no-store')
+  })
+
+  it('keeps the short entry for a Module error the metadata index cannot name yet', async () => {
+    // A later index pass can still name it, so this answer is not final.
+    const local = fakeClient({ errorName: [] })
+    const localApp = await freshApp(local)
+    try {
+      const res = await localApp.inject('/v1/extrinsics/' + UNNAMED_HASH)
+      expect(res.statusCode).toBe(200)
+      expect(res.headers['cache-control']).toBe('public, max-age=10')
+    } finally {
+      await localApp.close()
+    }
   })
 })
 
@@ -494,6 +515,13 @@ describe('GET /v1/extrinsics/:blockHeight/:index', () => {
     } finally {
       await localApp.close()
     }
+  })
+
+  it('holds a found position for a day and never stores a missing one', async () => {
+    expect((await app.inject('/v1/extrinsics/13585924/2')).headers['cache-control']).toBe('public, max-age=86400')
+    const missing = await app.inject('/v1/extrinsics/13585924/98')
+    expect(missing.statusCode).toBe(404)
+    expect(missing.headers['cache-control']).toBe('no-store')
   })
 
   it('404s an unknown position and 400s a non-numeric one', async () => {

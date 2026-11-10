@@ -45,6 +45,8 @@ export const PUBLIC_CACHE_CONTROL: Array<[RegExp, number]> = [
   // must expire inside a poll interval or the toast shows a stale "pending" for
   // longer than the block it is waiting for. Both extrinsic shapes — hash and
   // (blockHeight, index) — share the TTL because they answer the same question.
+  // A found extrinsic is final and its route sets a day of its own
+  // (cacheSettledExtrinsic in routes/chain.ts); this entry covers the rest.
   [/^\/v1\/extrinsics\/[^/]+(\/[^/]+)?$/, 10],
   // An OTC order row is watched while a fill is expected; 5 s is the same "watch
   // it change" budget the money-market event feed takes.
