@@ -13,6 +13,10 @@ const H = 3_600
 const D = 86_400
 const at = (iso: string) => Date.parse(`${iso}Z`) / 1000
 
+// The published weekly-close generation every fake client answers the pointer with.
+const GENERATION = [{ snapshot_id: '1794000000000-test', cut: '2026-11-09', cut_height: 16787098, source_at: '2026-11-10 12:00:00', assets: ['0'], n: 1 }]
+const pointer = (query: string) => query.includes('FROM price_data.hdx_weekly_closes_state')
+
 // An hourly clock, one block every 6 s from height 1000.
 function clockOver(fromSec: number, hours: number): BlockClock {
   const marks = Array.from({ length: hours }, (_, i) => fromSec + i * H)
@@ -98,7 +102,10 @@ describe('holder structure: static accounts plus movers', () => {
 describe('holder structure SQL', () => {
   it('reads only weekly closes on a whole-week grid, and hourly rows from the window\'s Monday otherwise', () => {
     const weekly = hdxStructureSql('weekly')
-    expect(weekly).toContain('price_data.account_balance_weekly')
+    // The generation's change points before its cut, raw from the cut on.
+    expect(weekly).toContain('FROM price_data.hdx_weekly_closes')
+    expect(weekly).toContain('FROM price_data.raw_balance_observations')
+    expect(weekly).not.toContain('price_data.account_balance_weekly')
     expect(weekly).not.toContain('account_balance_hourly')
     const hourly = hdxStructureSql('hourly')
     expect(hourly).toContain('interval_start >= toDateTime({w0:UInt32}) AND interval_start < toDateTime({end:UInt32})')
@@ -108,7 +115,11 @@ describe('holder structure SQL', () => {
   })
 
   it('restricts a Kraken-scoped read to the tagged wallets by primary key', () => {
-    expect(hdxStructureSql('hourly', 'kraken').match(/account_id IN \(SELECT account_id FROM price_data.account_tags FINAL/g)).toHaveLength(2)
+    const scoped = /AND account_id IN \(SELECT account_id FROM price_data.account_tags FINAL WHERE label_id IN \('kraken'\)/g
+    // both weekly reads (the generation's and raw's) and the hourly one
+    expect(hdxStructureSql('hourly', 'kraken').match(scoped)).toHaveLength(3)
+    expect(hdxStructureSql('weekly', 'kraken').match(scoped)).toHaveLength(2)
+    expect(hdxStructureSql('weekly').match(scoped)).toBeNull()
   })
 
   it('measures ages at the Monday holding each bucket\'s last instant', () => {
@@ -206,6 +217,7 @@ describe('getHdxChartWindow', () => {
       seen.push(query)
       return {
         json: async () => {
+          if (pointer(query)) return GENERATION
           if (query.includes('FROM price_data.blocks')) return blocks
           if (query.includes('staking_activity')) return stakedRows
           if (query.includes('SELECT count() AS n FROM price_data.account_balance_hourly')) return [{ n: hourlyRows }]
@@ -278,7 +290,7 @@ describe('structure windows of a week or more land on whole weeks', () => {
   const client = {
     query: async ({ query }: { query: string }) => {
       seen.push(query)
-      return { json: async () => (query.includes('FROM price_data.blocks') ? blocks : []) }
+      return { json: async () => (pointer(query) ? GENERATION : query.includes('FROM price_data.blocks') ? blocks : []) }
     },
   }
   beforeEach(() => { resetCacheForTests(); initHdxService(client as never); seen.length = 0 })
@@ -301,7 +313,7 @@ describe('structure windows of a week or more land on whole weeks', () => {
     expect(w.buckets.every(isMonday)).toBe(true)
     const structure = seen.filter(q => q.includes('groupArraySortedIf'))
     expect(structure).toHaveLength(1)
-    expect(structure[0]).toContain('price_data.account_balance_weekly')
+    expect(structure[0]).toContain('price_data.hdx_weekly_closes')
     expect(structure[0]).not.toContain('account_balance_hourly')
     // The hourly source was never even sized: a week-or-more step is coarsened outright.
     expect(seen.some(q => q.includes('SELECT count() AS n FROM price_data.account_balance_hourly'))).toBe(false)
@@ -338,6 +350,7 @@ describe('structure window concurrency', () => {
   const client = {
     query: async ({ query }: { query: string }) => ({
       json: async () => {
+        if (pointer(query)) return GENERATION
         if (query.includes('FROM price_data.blocks')) return blocks
         if (query.includes('SELECT count() AS n FROM price_data.account_balance_hourly')) return [{ n: 10 }]
         if (query.includes('groupArraySortedIf')) return new Promise<unknown[]>(resolve => held.push(resolve))

@@ -233,7 +233,8 @@ describe('the HDX supply\'s Bonds pot', () => {
   })
   it('reads each (account, asset) balance and sums an account\'s HDX and bonds, its ages on HDX alone', () => {
     for (const sql of [hdxStructureSql('weekly'), hdxStructureSql('hourly')]) {
-      expect(sql.match(/\(\(asset_id = '0' AND account_id != \{pot:String\}\) OR asset_id IN \{bonds:Array\(String\)\}\)/g)?.length).toBe(sql.includes('account_balance_hourly') ? 2 : 1)
+      // both weekly reads (the generation's and raw's), and the hourly one
+      expect(sql.match(/\(\(asset_id = '0' AND account_id != \{pot:String\}\) OR asset_id IN \{bonds:Array\(String\)\}\)/g)?.length).toBe(sql.includes('account_balance_hourly') ? 3 : 2)
       expect(sql).toContain('GROUP BY account_id, asset_id')
       expect(sql).toMatch(/sumIf\(hbal, cls = 'user' AND i > 0 AND dateDiff\('day', anchor, ref\) < 91\)/)
       expect(sql).toContain("countIf(asset_id = '0' AND toUInt256OrZero(wbal) > 0) AS nzn")

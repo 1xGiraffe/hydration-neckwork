@@ -17,6 +17,7 @@ import { accountRef, bindCteSql, boundAccountSql, ensurePrices, cutoffHeightForW
 import { alignToGrid, carryForwardValues, fullChartGrid, MAX_HEIGHT, serveChartWindow, type ChartGrid, type ChartWindowRequest, type ChartWindowResponse } from './chartWindow.ts'
 import { DAILY_GRAIN, grainBucketEndSec, keySeconds, makeGrain, MONTHLY_GRAIN, WEEKLY_MONDAY_GRAIN } from './historyGrain.ts'
 import { MONDAY_ANCHOR_SEC } from './bucketLadder.ts'
+import { closesAssets, hdxClosesFor, hdxClosesParams, hdxWeeklyCloseRowsSql, initHdxWeeklyCloses, refreshHdxWeeklyCloses } from './hdxWeeklyCloses.ts'
 
 export { gigaUnbondingBlocks }
 
@@ -571,8 +572,19 @@ export function refreshHdxSnapshot(): Promise<void> {
   return request
 }
 
-export function initHdxService(c: ClickHouseClient): void {
+/**
+ * The `hdx-history` refresher's step (backgroundRefresh.ts): keeps the weekly-close
+ * generation the history reads current (hdxWeeklyCloses.ts) — ClickHouse only, a
+ * pointer and a marks read per tick, a rebuild only when a week closed or one
+ * before the cut took an insert.
+ */
+export async function refreshHdxHistory(): Promise<void> {
+  await refreshHdxWeeklyCloses(hdxBondIds())
+}
+
+export function initHdxService(c: ClickHouseClient, closesBuildClient?: ClickHouseClient): void {
   client = c
+  initHdxWeeklyCloses(c, closesBuildClient)
 }
 
 // dashboard payload (ClickHouse aggregates + chain snapshot)
@@ -1356,12 +1368,11 @@ export function hdxStructureSql(source: HdxStructureSource, scope: HdxStructureS
   const assets = `((asset_id = '0' AND account_id != {pot:String}) OR asset_id IN {bonds:Array(String)})`
   // A weekly close is the state at `c`, the Monday after its week. Weeks starting
   // at or after the grid's end state nothing it shows: a first-nonzero week that
-  // late reads as "under 3 months" either way.
+  // late reads as "under 3 months" either way. The closes are each series' changes
+  // (hdxWeeklyCloses.ts); every use below carries a close forward to the next one.
   const weeklyRows = `
-          SELECT account_id, asset_id, week_start, toDateTime(week_start) + ${WEEK_SEC} AS c, argMaxMerge(balance_state) AS wbal
-          FROM price_data.account_balance_weekly
-          WHERE ${assets} AND week_start < toDate(toDateTime({end:UInt32}))${scoped}
-          GROUP BY account_id, asset_id, week_start`
+          SELECT account_id, asset_id, week_start, toDateTime(week_start) + ${WEEK_SEC} AS c, wbal
+          FROM (${hdxWeeklyCloseRowsSql(`${assets} AND week_start < toDate(toDateTime({end:UInt32}))${scoped}`)})`
   // bi: 0 = at or before the grid opens (opening candidates), 1…n = the bucket
   // whose span holds the close, -1 = a weekly close the hourly rows supersede
   // (kept only for its first-nonzero week). The first-nonzero week — the holding
@@ -1523,7 +1534,9 @@ export function mergeHdxStructureRows(refs: string[], rows: HdxStructureSqlRow[]
 async function loadRotationAnchors(): Promise<{ accounts: string[]; anchors: string[] }> {
   return cachedSwr('explorer:hdx-rotation-anchors', 3_600_000, 48 * 3_600_000, async () => {
     // USER accounts only (no modl, no pool/Kraken custody), balances as sorted
-    // per-account (week, balance) arrays.
+    // per-account (week, balance) arrays: each series' changes (hdxWeeklyCloses.ts),
+    // which state its births and its exits as the whole series does.
+    const closes = await hdxClosesFor(closesAssets([]))
     const linkRes = await client.query({
       query: `
         WITH
@@ -1540,11 +1553,8 @@ async function loadRotationAnchors(): Promise<{ accounts: string[]; anchors: str
               arraySort(groupArray(w)) AS ws,
               arraySort((b, ww) -> ww, groupArray(bal), groupArray(w)) AS bs
             FROM (
-              SELECT account_id, week_start AS w,
-                toFloat64(toUInt256OrZero(argMaxMerge(balance_state))) / 1e12 AS bal
-              FROM price_data.account_balance_weekly
-              WHERE asset_id = '0' AND NOT startsWith(account_id, '0x6d6f646c')
-              GROUP BY account_id, w
+              SELECT account_id, week_start AS w, toFloat64(toUInt256OrZero(wbal)) / 1e12 AS bal
+              FROM (${hdxWeeklyCloseRowsSql(`asset_id = '0' AND NOT startsWith(account_id, '0x6d6f646c')`)})
             )
             WHERE account_id NOT IN ${tagAccountSetSql([...KRAKEN_TAG_IDS, ...POOL_TAG_IDS])}
             GROUP BY account_id
@@ -1598,6 +1608,7 @@ async function loadRotationAnchors(): Promise<{ accounts: string[]; anchors: str
           )
           GROUP BY b
         ) x`,
+      query_params: hdxClosesParams(closes),
       format: 'JSONEachRow',
     })
     const linkRows = (await linkRes.json<{ b: string; a: string; a_firstnz: string }>())
@@ -1627,13 +1638,17 @@ export async function structureBuckets(g: ChartGrid, scope: HdxStructureScope = 
     throw new RangeError(`an hourly-source holder structure cannot bucket by ${g.grain.stepSec / DAY_SEC} days: coarsen the grid to whole weeks first`)
   }
   const refs = structureRefs(g)
-  const rot = scope === 'all' ? await loadRotationAnchors() : NO_ROTATION
+  const attribution = hdxStructureAttribution(hdxBondIds())
+  const [rot, closes] = await Promise.all([
+    scope === 'all' ? loadRotationAnchors() : NO_ROTATION,
+    hdxClosesFor(closesAssets(attribution.bonds)),
+  ])
   const res = await client.query({
     query: hdxStructureSql(source, scope),
     query_params: {
       from: g.fromSec, w0: keySeconds(WEEKLY_MONDAY_GRAIN.keyOf(g.fromSec)), end: g.endSec,
       step: g.grain.stepSec, n: g.keys.length, refs, rotAccs: rot.accounts, rotAnchors: rot.anchors,
-      ...hdxStructureAttribution(hdxBondIds()),
+      ...attribution, ...hdxClosesParams(closes),
     },
     format: 'JSONEachRow',
   })
@@ -1849,7 +1864,9 @@ async function buybackSeries(g: ChartGrid): Promise<(number | null)[]> {
  * cost). The cost is BOOKED weekly — that is its grain, and a zoom shows it
  * carried forward between week closes rather than inventing a finer basis.
  * Summed as per-account deltas at the weeks they changed, then run forward, so
- * the aggregate needs no per-cut expansion; the balance side is integer planck.
+ * the aggregate needs no per-cut expansion; the balance side is integer planck. A
+ * close equal to the one before books nothing either way, so each series is read
+ * at its changes alone (hdxWeeklyCloses.ts). Parameters: hdxClosesParams.
  */
 export function hdxRealizedWeeklySql(): string {
   return `
@@ -1897,12 +1914,10 @@ export function hdxRealizedWeeklySql(): string {
             arraySort((b, ww) -> ww, groupArray(balF), groupArray(w)) AS bsF,
             arraySort((b, ww) -> ww, groupArray(balI), groupArray(w)) AS bsI
           FROM (
-            SELECT account_id, week_start AS w, argMaxMerge(balance_state) AS b0,
+            SELECT account_id, week_start AS w, wbal AS b0,
               toFloat64(toUInt256OrZero(b0)) AS balF, toInt256(toUInt256OrZero(b0)) AS balI
-            FROM price_data.account_balance_weekly
-            WHERE asset_id = '0' AND NOT startsWith(account_id, '0x6d6f646c')
-              AND account_id NOT IN ${tagAccountSetSql([...KRAKEN_TAG_IDS, ...POOL_TAG_IDS])}
-            GROUP BY account_id, week_start
+            FROM (${hdxWeeklyCloseRowsSql(`asset_id = '0' AND NOT startsWith(account_id, '0x6d6f646c')
+              AND account_id NOT IN ${tagAccountSetSql([...KRAKEN_TAG_IDS, ...POOL_TAG_IDS])}`)})
           ) GROUP BY account_id
         )
       )
@@ -1919,7 +1934,8 @@ export function hdxRealizedWeeklySql(): string {
 /** Realized price at each week close ('YYYY-MM-DD' Monday → USD), 8 decimals. */
 async function loadRealizedWeekly(): Promise<Map<string, number>> {
   return cachedSwr('explorer:hdx-realized-weekly', 3_600_000, 48 * 3_600_000, async () => {
-    const res = await client.query({ query: hdxRealizedWeeklySql(), format: 'JSONEachRow' })
+    const closes = await hdxClosesFor(closesAssets([]))
+    const res = await client.query({ query: hdxRealizedWeeklySql(), query_params: hdxClosesParams(closes), format: 'JSONEachRow' })
     const out = new Map<string, number>()
     for (const r of await res.json<{ w: string; bal: string; cost: string }>()) {
       const bal = BigInt(r.bal)
