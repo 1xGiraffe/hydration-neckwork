@@ -135,7 +135,8 @@ function prune(now: number): void {
   }
 }
 
-function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: number, fn: () => Promise<T>, generation?: number, keepIf?: (value: T) => boolean): Promise<T> {
+// `ttlOf`, when given, replaces `staleMs` with a lifetime the load decided (cachedFor).
+function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: number, fn: () => Promise<T>, generation?: number, keepIf?: (value: T) => boolean, ttlOf?: () => number): Promise<T> {
   const startEpoch = writeSequence
   const pending = (async () => {
     try {
@@ -154,7 +155,7 @@ function loadAndCache<T>(key: string, freshMs: number | undefined, staleMs: numb
           value,
           ...(freshMs == null ? {} : { freshUntil: resolvedAt + freshMs }),
           ...(generation == null ? {} : { generation }),
-          expiresAt: resolvedAt + staleMs,
+          expiresAt: resolvedAt + (ttlOf ? ttlOf() : staleMs),
           lastAccessedAt: nextAccess(),
         })
         prune(resolvedAt)
@@ -200,6 +201,38 @@ export async function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>
 
   count(key, 'miss')
   return loadAndCache(key, undefined, ttlMs, fn)
+}
+
+/**
+ * `cached`, with the lifetime decided by the load itself: `fn` returns the value and how
+ * long it may be served. For a value whose staleness bound depends on what was read — a
+ * scoped activity page holds longer once nothing under its key can still change
+ * (scopedActivityPageTtlMs) — rather than on the key alone.
+ */
+export async function cachedFor<T>(key: string, fn: () => Promise<{ value: T; ttlMs: number }>): Promise<T> {
+  const now = Date.now()
+  const hit = store.get(key) as Entry<T> | undefined
+  if (hit && hit.expiresAt > now) {
+    touch(key, hit)
+    count(key, 'hit')
+    return hit.value
+  }
+  if (hit) store.delete(key)
+
+  const pending = inflight.get(key) as Promise<T> | undefined
+  if (pending) {
+    count(key, 'join')
+    return pending
+  }
+
+  count(key, 'miss')
+  let ttlMs = 0
+  return loadAndCache(key, undefined, 0, async () => {
+    const loaded = await fn()
+    assertDuration('ttlMs', loaded.ttlMs)
+    ttlMs = loaded.ttlMs
+    return loaded.value
+  }, undefined, undefined, () => ttlMs)
 }
 
 /**

@@ -300,15 +300,31 @@ function findProgram(
   return null
 }
 
+// Start the next extension when one is due; the refresh this call started, else null.
+function extend(client: ClickHouseClient): Promise<void> | null {
+  if (Date.now() - lastRefresh <= REFRESH_MS || inflight) return null
+  lastRefresh = Date.now()
+  inflight = refresh(client)
+    .catch(err => { console.warn('[xcm-trapped] refresh failed:', err instanceof Error ? err.message : err); lastRefresh = 0 })
+    .finally(() => { inflight = null })
+  return inflight
+}
+
 /** Every trapped inbound arrival known so far, oldest first; extends itself in the background. */
 export async function trappedArrivals(client: ClickHouseClient): Promise<readonly TrappedArrival[]> {
-  if (Date.now() - lastRefresh > REFRESH_MS && !inflight) {
-    lastRefresh = Date.now()
-    inflight = refresh(client)
-      .catch(err => { console.warn('[xcm-trapped] refresh failed:', err instanceof Error ? err.message : err); lastRefresh = 0 })
-      .finally(() => { inflight = null })
-    // The first build is awaited, so a cold process does not answer "nothing trapped".
-    if (watermark < MESSAGE_QUEUE_MIGRATION_BLOCK) await inflight
-  }
+  const started = extend(client)
+  // The first build is awaited, so a cold process does not answer "nothing trapped".
+  if (started && watermark < MESSAGE_QUEUE_MIGRATION_BLOCK) await started
+  return arrivals
+}
+
+/**
+ * The arrivals known right now, extending the set in the background when due — never
+ * waiting, not even for a cold process's first build (which then reads as none). For the
+ * activity watermark, which every scoped list reads and which must keep the set moving
+ * without making each of them wait on the archive reads of a first build.
+ */
+export function trappedArrivalsKnown(client: ClickHouseClient): readonly TrappedArrival[] {
+  extend(client)
   return arrivals
 }
