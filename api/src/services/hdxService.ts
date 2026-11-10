@@ -1165,6 +1165,11 @@ const POOL_TAG_IDS = ['xyk-pools', 'stableswap-pools', 'lbp-pools', 'money-marke
 
 const tagAccountsSql = (ids: string[]) =>
   `(SELECT groupArray(account_id) FROM price_data.account_tags FINAL WHERE label_id IN (${ids.map(t => `'${t}'`).join(',')}) AND deleted = 0)`
+// The same members as a set, for `x [NOT] IN …` over many rows: `has()` on the array
+// above is a linear scan of its ~840 members per row, which on the weekly HDX closes
+// (6M rows) was more than half of the rotation-link and cost-basis reads.
+const tagAccountSetSql = (ids: string[]) =>
+  `(SELECT account_id FROM price_data.account_tags FINAL WHERE label_id IN (${ids.map(t => `'${t}'`).join(',')}) AND deleted = 0)`
 
 export interface HdxStructureWeekRow {
   week: string
@@ -1522,8 +1527,6 @@ async function loadRotationAnchors(): Promise<{ accounts: string[]; anchors: str
     const linkRes = await client.query({
       query: `
         WITH
-        ${tagAccountsSql(KRAKEN_TAG_IDS)} AS kraken_accts,
-        ${tagAccountsSql([...KRAKEN_TAG_IDS, ...POOL_TAG_IDS])} AS special_accts,
         -- per USER account its weekly closes, read once: when it was born (first
         -- nonzero close and that close) and the weeks it exited (nonzero → zero)
         info AS (
@@ -1543,7 +1546,7 @@ async function loadRotationAnchors(): Promise<{ accounts: string[]; anchors: str
               WHERE asset_id = '0' AND NOT startsWith(account_id, '0x6d6f646c')
               GROUP BY account_id, w
             )
-            WHERE NOT has(special_accts, account_id)
+            WHERE account_id NOT IN ${tagAccountSetSql([...KRAKEN_TAG_IDS, ...POOL_TAG_IDS])}
             GROUP BY account_id
           )
         ),
@@ -1560,7 +1563,7 @@ async function loadRotationAnchors(): Promise<{ accounts: string[]; anchors: str
         -- a forwarder that is a module account is never a birth, so the ordinary
         -- senders' transfers are all this needs
         kraken_forwarders AS (
-          SELECT DISTINCT a FROM legs WHERE has(kraken_accts, b)
+          SELECT DISTINCT a FROM legs WHERE b IN ${tagAccountSetSql(KRAKEN_TAG_IDS)}
         ),
         -- each send joined ONCE to the info of both its parties (exploded by role
         -- and folded back), so the weekly closes are read a single time
@@ -1851,7 +1854,6 @@ async function buybackSeries(g: ChartGrid): Promise<(number | null)[]> {
 export function hdxRealizedWeeklySql(): string {
   return `
     WITH
-    ${tagAccountsSql([...KRAKEN_TAG_IDS, ...POOL_TAG_IDS])} AS special_accts,
     -- Weekly HDX close, FORWARD-FILLED onto the contiguous Monday grid
     -- through the current week. A ClickHouse map subscript on a missing key
     -- returns the value type's default, and 0.0 is indistinguishable from a
@@ -1899,7 +1901,7 @@ export function hdxRealizedWeeklySql(): string {
               toFloat64(toUInt256OrZero(b0)) AS balF, toInt256(toUInt256OrZero(b0)) AS balI
             FROM price_data.account_balance_weekly
             WHERE asset_id = '0' AND NOT startsWith(account_id, '0x6d6f646c')
-              AND NOT has(special_accts, account_id)
+              AND account_id NOT IN ${tagAccountSetSql([...KRAKEN_TAG_IDS, ...POOL_TAG_IDS])}
             GROUP BY account_id, week_start
           ) GROUP BY account_id
         )
