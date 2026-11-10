@@ -6,6 +6,7 @@ import { accountRef, ensurePrices, nttMinterAccounts, nttMinterH160, ocnChainNam
 import { usdOfRaw } from './assetValue.ts'
 import { assetIdFromPrecompile, erc20Precompile } from './chainPrimitives.ts'
 import { setWormholeBridges, type WormholeAssetBridge, type WormholeBridgePeer } from './wormholeRemoteTokens.ts'
+import { createTokenLegReader, type HourWatermark, type TokenLegPair } from './wormholeTokenLegs.ts'
 import { assetDescriptor } from './explorerAssets.ts'
 import { nearManagerNames } from './nearBridge.ts'
 import {
@@ -3026,15 +3027,15 @@ async function queryHead(): Promise<HeadRow | null> {
 // The token movements inside the extrinsics the NTT logs identified. An outbound
 // send burns from the manager's ETH\0 account (Tokens.Withdrawn) after a transfer
 // into it names the sender; an inbound redemption mints straight to the recipient
-// (Tokens.Deposited) with no marker of its own.
-async function queryTokenLegs(pairs: readonly string[]): Promise<TokenEventRow[]> {
+// (Tokens.Deposited) with no marker of its own. Replays collapse to the newest
+// insert of each event, the row a merge keeps. Read incrementally: each
+// extrinsic's legs are kept until its hour is inserted again (wormholeTokenLegs.ts).
+async function queryTokenLegs(pairs: readonly TokenLegPair[]): Promise<TokenEventRow[]> {
   if (!pairs.length) return []
-  const tuples = pairs.map(pair => {
-    const at = pair.indexOf(':')
-    return `(${Number(pair.slice(0, at))},${Number(pair.slice(at + 1))})`
-  }).join(',')
+  const tuples = pairs.map(p => `(${Number(p.blockHeight)},${Number(p.extrinsicIndex)})`).join(',')
   const res = await client.query({
-    query: `SELECT block_height, event_index, extrinsic_index, block_timestamp, event_name,
+    query: `-- wormhole:token-legs
+            SELECT block_height, event_index, extrinsic_index, block_timestamp, event_name,
                    toUInt32(JSONExtractInt(args_json, 'currencyId')) AS currency_id,
                    lower(JSONExtractString(args_json, 'who')) AS who,
                    lower(JSONExtractString(args_json, 'from')) AS from_account,
@@ -3043,12 +3044,33 @@ async function queryTokenLegs(pairs: readonly string[]): Promise<TokenEventRow[]
             FROM price_data.raw_events
             WHERE (block_height, extrinsic_index) IN (${tuples})
               AND event_name IN ('Tokens.Withdrawn', 'Tokens.Deposited', 'Tokens.Transfer')
-            ORDER BY block_height, event_index
+            ORDER BY block_height, event_index, ingested_at DESC
             LIMIT 1 BY block_height, event_index`,
     format: 'JSONEachRow',
   })
   return res.json<TokenEventRow>()
 }
+
+// The 'events' watermark of every chain-time hour from the one holding
+// `minHeight` on (008_revenue.sql). Its first hour is found by the block's own
+// timestamp, so no clock or time zone is assumed on this side.
+async function queryLegWatermarks(minHeight: number): Promise<HourWatermark[]> {
+  const res = await client.query({
+    query: `-- wormhole:token-leg-marks
+            SELECT min(src_minb) AS lo, max(src_maxb) AS hi, toString(max(src_ingest)) AS ingest,
+                   max(src_ingest) < now() - 2 AS settled
+            FROM price_data.revenue_hour_watermarks
+            WHERE kind = 'events'
+              AND hour >= (SELECT toStartOfHour(min(block_timestamp)) FROM price_data.raw_blocks WHERE block_height = ${Math.max(0, Math.trunc(minHeight))})
+            GROUP BY hour
+            HAVING hi >= ${Math.max(0, Math.trunc(minHeight))}`,
+    format: 'JSONEachRow',
+  })
+  const rows = await res.json<{ lo: number | string; hi: number | string; ingest: string; settled: number | string | boolean }>()
+  return rows.map(r => ({ lo: Number(r.lo), hi: Number(r.hi), ingest: String(r.ingest), settled: Number(r.settled) === 1 || r.settled === true }))
+}
+
+const tokenLegs = createTokenLegReader<TokenEventRow>({ watermarks: queryLegWatermarks, legs: queryTokenLegs })
 
 export async function getWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
   return cachedSwr('explorer:security-wormhole', 20_000, 120_000, buildWormholeBridgeDetail, wormholeSnapshotGeneration)
@@ -3470,10 +3492,10 @@ async function buildWormholeBridgeDetail(): Promise<WormholeBridgeDetail> {
   }
   if (!snap) return empty
 
-  const pairs = new Set<string>()
-  for (const send of snap.timeline.sends) if (send.extrinsicIndex != null) pairs.add(`${send.blockHeight}:${send.extrinsicIndex}`)
-  for (const receive of snap.timeline.receives) if (receive.extrinsicIndex != null) pairs.add(`${receive.blockHeight}:${receive.extrinsicIndex}`)
-  const legs = await queryTokenLegs([...pairs])
+  const pairs: TokenLegPair[] = []
+  for (const send of snap.timeline.sends) if (send.extrinsicIndex != null) pairs.push({ blockHeight: send.blockHeight, extrinsicIndex: send.extrinsicIndex })
+  for (const receive of snap.timeline.receives) if (receive.extrinsicIndex != null) pairs.push({ blockHeight: receive.blockHeight, extrinsicIndex: receive.extrinsicIndex })
+  const legs = await tokenLegs.read(pairs)
 
   const legsByExtrinsic = new Map<string, TokenEventRow[]>()
   for (const leg of legs) {
