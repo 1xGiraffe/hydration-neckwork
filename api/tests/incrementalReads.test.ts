@@ -44,16 +44,26 @@ describe('sealed months of the source watermark', () => {
 })
 
 // A day-bounded value read keeps the closes it can match: every close from the hour
-// before its first day, and each asset's newest close older than that.
+// before its first day, and each asset's newest close older than that. That older
+// close is the boundary day's newest hour before the boundary, else the newest hour
+// of the asset's newest earlier day from ohlc_1h_day_closes — never a search through
+// every monthly part of ohlc_1h.
 describe('closes relation with a lower bound', () => {
   const legs = [{ assetExpr: 'asset_out', rawAmountExpr: 'amount_out', alias: 'out_price' }]
 
   it('narrows to the window and keeps each asset’s last earlier close', () => {
     const since = "toDateTime('2026-10-01 00:00:00')"
+    const boundary = `toStartOfHour(${since}) - INTERVAL 1 HOUR`
+    const day = `toStartOfDay(${boundary})`
     const { joinSql } = eventValueAlternativesFilterSql(legs, 'block_timestamp', { min: 10, unit: 'usd' }, { since })
-    expect(joinSql).toContain(`interval_start >= toStartOfHour(${since}) - INTERVAL 1 HOUR`)
-    expect(joinSql).toContain('UNION ALL')
-    expect(joinSql).toContain(`SELECT asset_id, max(interval_start) FROM price_data.ohlc_1h WHERE asset_id IN (0) AND interval_start < toStartOfHour(${since}) - INTERVAL 1 HOUR GROUP BY asset_id`)
+    expect(joinSql).toContain(`WHERE asset_id IN (0) AND interval_start >= ${boundary} GROUP BY asset_id, interval_start`)
+    expect(joinSql).toContain(`WHERE asset_id IN (0) AND interval_start >= ${day} AND interval_start < ${boundary} GROUP BY asset_id, interval_start`)
+    expect(joinSql).toContain(`FROM price_data.ohlc_1h_day_closes\n             WHERE asset_id IN (0) AND day < ${day} GROUP BY asset_id, day`)
+    expect(joinSql).not.toContain('max(interval_start)')
+    // One row per asset — its newest hour, labelled like every close (by its end), and
+    // that hour's close — beside the window's own closes.
+    expect(joinSql).toContain('SELECT asset_id, max(hour) + INTERVAL 1 HOUR AS price_time, argMax(hour_close, hour) AS close, toUInt8(1) AS asof_join_key FROM (')
+    expect(joinSql).toContain(') GROUP BY asset_id)')
   })
 
   it('reads the whole history without one', () => {
