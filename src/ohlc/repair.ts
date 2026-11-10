@@ -73,6 +73,31 @@ WHERE interval_start >= ${startExpr}
 }
 
 /**
+ * `ohlc_1h_day_closes` (clickhouse/schema/023_ohlc_day_closes.sql) holds each asset's
+ * newest hourly candle per day, written by a view chained off ohlc_1h whose SELECT is
+ * `DAY_CLOSES_SELECT` grouped by (asset_id, day). A view sees only INSERTs, so every
+ * path here that DELETEs ohlc_1h candles also clears the days it touched and, once
+ * ohlc_1h holds its final candles again, re-derives those days from ohlc_1h by the
+ * view's own SELECT. The view fires on the rebuild's INSERT too, which only adds hour
+ * states the re-derivation also carries; max and argMax absorb the duplicates.
+ */
+export const DAY_CLOSES_SELECT = 'SELECT asset_id, toStartOfDay(interval_start) AS day, max(interval_start) AS last_hour, argMaxMergeState(close_state) AS close_state FROM price_data.ohlc_1h'
+
+export function buildDeleteDayClosesQuery(startTime: string, endTime: string, assetIds?: readonly number[]): string {
+  return `DELETE FROM price_data.ohlc_1h_day_closes
+WHERE day >= toStartOfDay(toDateTime('${startTime}'))
+  AND day <= toStartOfDay(toDateTime('${endTime}'))${assetIdPredicate('', assetIds)}`
+}
+
+export function buildRederiveDayClosesQuery(startTime: string, endTime: string, assetIds?: readonly number[]): string {
+  return `INSERT INTO price_data.ohlc_1h_day_closes
+${DAY_CLOSES_SELECT}
+WHERE interval_start >= toStartOfDay(toDateTime('${startTime}'))
+  AND interval_start < toStartOfDay(toDateTime('${endTime}')) + INTERVAL 1 DAY${assetIdPredicate('', assetIds)}
+GROUP BY asset_id, day`
+}
+
+/**
  * Candle aggregation over one deduplicated price row per `(asset_id,
  * block_height)`.
  *
@@ -155,6 +180,10 @@ export async function clearOHLCForTimeRange(
       clickhouse_settings: { mutations_sync: '1' },
     })
   }
+  await client.command({
+    query: buildDeleteDayClosesQuery(startTime, endTime, assetIds),
+    clickhouse_settings: { mutations_sync: '1' },
+  })
 }
 
 export async function restoreRollbackOHLCPrefix(
@@ -168,11 +197,18 @@ export async function restoreRollbackOHLCPrefix(
       clickhouse_settings: settings,
     })
   }
+  // The clear removed every day from the start's on; only the start's own day still
+  // has candles (those before the start), and ohlc_1h now holds them all.
+  await client.command({
+    query: buildRederiveDayClosesQuery(startTime, startTime),
+    clickhouse_settings: settings,
+  })
 }
 
 /**
  * Clear and recompute every OHLC table's buckets in the range (for the given
- * assets, or all) from `prices`. `settings` bounds each rebuild INSERT…SELECT —
+ * assets, or all) from `prices`, then re-derive the range's days in
+ * ohlc_1h_day_closes from the rebuilt ohlc_1h. `settings` bounds each rebuild INSERT…SELECT —
  * a repair runs against the live ClickHouse, so a caller passes an explicit
  * memory/thread ceiling.
  */
@@ -191,4 +227,8 @@ export async function rebuildOHLCForTimeRange(
       clickhouse_settings: settings,
     })
   }
+  await client.command({
+    query: buildRederiveDayClosesQuery(startTime, endTime, assetIds),
+    clickhouse_settings: settings,
+  })
 }
