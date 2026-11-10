@@ -576,10 +576,16 @@ export function refreshHdxSnapshot(): Promise<void> {
  * The `hdx-history` refresher's step (backgroundRefresh.ts): keeps the weekly-close
  * generation the history reads current (hdxWeeklyCloses.ts) — ClickHouse only, a
  * pointer and a marks read per tick, a rebuild only when a week closed or one
- * before the cut took an insert.
+ * before the cut took an insert — and reads the history again while the dashboard
+ * lacks it, once its backoff has passed.
  */
 export async function refreshHdxHistory(): Promise<void> {
-  await refreshHdxWeeklyCloses(hdxBondIds())
+  try {
+    await refreshHdxWeeklyCloses(hdxBondIds())
+  } finally {
+    // The history the dashboard lacks, once its backoff has passed (loadHistory).
+    if ((!hdxHistoryReady || lastBuildPending) && !historyWatch && Date.now() >= historyRetryAt) void loadHistory().catch(() => {})
+  }
 }
 
 export function initHdxService(c: ClickHouseClient, closesBuildClient?: ClickHouseClient): void {
@@ -704,11 +710,47 @@ const iso = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace
 
 // The history parts — the holder structure since 2022 and the weekly churn — are the
 // dashboard's slow reads (a few seconds cold). A build waits for them at most this
-// long; past it the dashboard is published without them (`historyPending`, the two
-// fields null) and, the moment they land, rebuilt complete and installed in place.
+// long; past it, or when they fail, the dashboard is published without them
+// (`historyPending`, the two fields null — never zeros) and, the moment they land,
+// rebuilt complete and installed in place. A read that failed is retried by the
+// `hdx-history` refresher (refreshHdxHistory) once a backoff has passed — doubling per
+// failure in a row, 30 s up to 10 min — so a missing section recovers by itself
+// rather than at the first request after the dashboard's five minutes.
 const HDX_HISTORY_WAIT_MS = 1_500
 const HDX_DASHBOARD_KEY = 'explorer:hdx-dashboard'
 let hdxHistoryReady = false
+// The last build published without its history.
+let lastBuildPending = false
+let historyWatch: Promise<void> | null = null
+let historyFailures = 0
+let historyRetryAt = 0
+
+/** The wait before the refresher reads the history again after `failures` failures in a row. */
+export function hdxHistoryRetryDelayMs(failures: number): number {
+  return Math.min(600_000, 30_000 * 2 ** Math.max(0, failures - 1))
+}
+
+// The history parts. While the dashboard lacks them, their landing rebuilds it and
+// their failure schedules the refresher's retry.
+function loadHistory(): Promise<[HdxStructure, HdxDashboard['churn']]> {
+  const history = Promise.all([loadStructure(), loadChurn()])
+  if ((!hdxHistoryReady || lastBuildPending) && !historyWatch) {
+    historyWatch = history.then(() => {
+      historyFailures = 0
+      hdxHistoryReady = true
+      // A build still in flight is the one that gave up on the history: rebuild after it.
+      const rebuild = () => cacheRefresh(HDX_DASHBOARD_KEY, 300_000, 48 * 3_600_000, buildHdxDashboard, hdxDashboardGeneration())
+      void rebuild().then(d => (d.historyPending ? rebuild() : d))
+        .catch(err => console.warn('[hdx] rebuilding the dashboard with its history failed', err instanceof Error ? err.message : err))
+    }, err => {
+      historyFailures++
+      const delay = hdxHistoryRetryDelayMs(historyFailures)
+      historyRetryAt = Date.now() + delay
+      console.warn(`[hdx] the dashboard history failed (${historyFailures} in a row); the refresher reads it again in ${delay / 1000}s`, err instanceof Error ? err.message : err)
+    }).finally(() => { historyWatch = null })
+  }
+  return history
+}
 // Generation = whether the chain snapshot (locks, vesting, unlocks) existed when the
 // build began, and whether the history had landed. The startup warm-up can run
 // before the first refresh, and without this its empty lock/unlock sections (or its
@@ -723,18 +765,9 @@ export async function getHdxDashboard(): Promise<HdxDashboard> {
 }
 
 async function buildHdxDashboard(): Promise<HdxDashboard> {
-  const history = Promise.all([loadStructure(), loadChurn()])
-  if (!hdxHistoryReady) {
-    history.then(() => {
-      if (hdxHistoryReady) return
-      hdxHistoryReady = true
-      // A build still in flight is the one that gave up on the history: rebuild after it.
-      const rebuild = () => cacheRefresh(HDX_DASHBOARD_KEY, 300_000, 48 * 3_600_000, buildHdxDashboard, hdxDashboardGeneration())
-      void rebuild().then(d => (d.historyPending ? rebuild() : d))
-        .catch(err => console.warn('[hdx] rebuilding the dashboard with its history failed', err instanceof Error ? err.message : err))
-    }, () => {})
-  }
-  const pending = Symbol('pending')
+  const pending: unique symbol = Symbol('pending')
+  // A failed history publishes the dashboard without it, never fails the rest.
+  const history = loadHistory().catch((): typeof pending => pending)
   const [prices, head, paraMs, supply, flows, dca, hist, movers, gigaMarket] = await Promise.all([
     ensurePrices(), loadHead(), paraBlockMs(client), loadSupplyCohorts(), loadDailyFlows(), loadDcaFlows(),
     hdxHistoryReady ? history : Promise.race([history, new Promise<typeof pending>(resolve => setTimeout(() => resolve(pending), HDX_HISTORY_WAIT_MS).unref())]),
@@ -880,7 +913,7 @@ async function buildHdxDashboard(): Promise<HdxDashboard> {
     flows: { daily: flows, dca },
     churn,
     structure,
-    historyPending: structure == null,
+    historyPending: (lastBuildPending = structure == null),
     topMovers: movers,
     gigaMarket,
     gigaLiquidations,
