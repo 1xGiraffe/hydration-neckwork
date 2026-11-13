@@ -1,6 +1,6 @@
 # Base images are pinned by version AND digest (AGENTS.md, Dependencies and supply chain):
 # a floating tag pulls whatever was pushed last on every rebuild. Bump both deliberately.
-FROM node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
+FROM node:26.13.1-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc
 
 WORKDIR /app
 
