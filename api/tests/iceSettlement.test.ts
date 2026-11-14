@@ -108,6 +108,82 @@ describe('iceSettlementAmounts — the DCA final trade', () => {
   })
 })
 
+// Two completions of ONE owner in ONE asset pair in one solution: block 17012838/2,
+// intents 8310 and 8311 of 138YQEm9… (avDOT 1005 → aUSDC 1003, 500 avDOT a trade,
+// 2,000 avDOT budget each) end on the same shared trade. Each completion is paid its
+// own pot→owner aUSDC transfer, emitted right before its DcaCompleted (70→71, 74→75).
+// Summed per (owner, asset) the two payouts cannot be told apart, so each is read by
+// its position; a null there leaves each intent page at 2,000 avDOT sold for
+// 1,814.85 aUSDC (the first three trades) instead of 2,418.73.
+const ID_8310 = '33106148604844169284175265800310'
+const ID_8311 = '33106148936885562610947194888311'
+const AVDOT_ORDER: IceSettlementOrder = { owner: OWNER, assetIn: 1005, assetOut: 1003, amountIn: '5000000000000', budget: '20000000000000', blockHeight: 17012769 }
+const PAIR_FILLS: IceSettlementFill[] = [
+  { blockHeight: 17012838, extrinsicIndex: 2, eventIndex: 71, eventName: 'Intent.DcaCompleted', intentId: ID_8310, amountIn: null, amountOut: null },
+  { blockHeight: 17012838, extrinsicIndex: 2, eventIndex: 75, eventName: 'Intent.DcaCompleted', intentId: ID_8311, amountIn: null, amountOut: null },
+]
+const PAIR_LEGS: IceSettlementLeg[] = [
+  // The shared trade's aUSDC reaching the pot from the route (not the owner's).
+  { blockHeight: 17012838, extrinsicIndex: 2, eventIndex: 57, from: '0x0cfd4ae3c8db0e5d06a84cd788c72cb15f8d0c247117b1cc75f69907002674c6', to: ICE_POT_ACCOUNT, assetId: 1003, amount: '1207912950' },
+  { blockHeight: 17012838, extrinsicIndex: 2, eventIndex: 70, from: ICE_POT_ACCOUNT, to: OWNER, assetId: 1003, amount: '603876116' },
+  { blockHeight: 17012838, extrinsicIndex: 2, eventIndex: 74, from: ICE_POT_ACCOUNT, to: OWNER, assetId: 1003, amount: '603876116' },
+]
+
+describe('iceSettlementAmounts — two completions of one owner and asset in one solution', () => {
+  const orders = new Map([[ID_8310, AVDOT_ORDER], [ID_8311, { ...AVDOT_ORDER, blockHeight: 17012774 }]])
+  const prior = new Map([[ID_8310, '5000000000000'], [ID_8311, '5000000000000']])
+
+  it('pays each completion the pot transfer emitted right before it', () => {
+    const out = iceSettlementAmounts(PAIR_FILLS, orders, PAIR_LEGS, prior)
+    expect(out.get('17012838:71')).toEqual({ amountIn: '5000000000000', amountOut: '603876116' })
+    expect(out.get('17012838:75')).toEqual({ amountIn: '5000000000000', amountOut: '603876116' })
+  })
+
+  it('reads each payout from its own segment, not the neighbour\'s', () => {
+    // 17013488/2: a completion (payout 48 → event 55) beside a sibling trade of the
+    // same owner and asset that states its amount (payout 58 → event 59).
+    const sib = '33106177824486782040105025544387', done = '33106176717682137617531928584383'
+    const aDot: IceSettlementOrder = { owner: OWNER, assetIn: 1001, assetOut: 1003, amountIn: '3333333333333', budget: '10000000000000', blockHeight: 17013439 }
+    const fills: IceSettlementFill[] = [
+      { blockHeight: 17013488, extrinsicIndex: 2, eventIndex: 55, eventName: 'Intent.DcaCompleted', intentId: done, amountIn: null, amountOut: null },
+      { blockHeight: 17013488, extrinsicIndex: 2, eventIndex: 59, eventName: 'Intent.DcaTradeExecuted', intentId: sib, amountIn: '3333333333333', amountOut: '230295085' },
+      { blockHeight: 17013488, extrinsicIndex: 2, eventIndex: 63, eventName: 'Intent.DcaCompleted', intentId: ID_8310, amountIn: null, amountOut: null },
+    ]
+    const legs: IceSettlementLeg[] = [
+      { blockHeight: 17013488, extrinsicIndex: 2, eventIndex: 48, from: ICE_POT_ACCOUNT, to: OWNER, assetId: 1003, amount: '230295085' },
+      { blockHeight: 17013488, extrinsicIndex: 2, eventIndex: 58, from: ICE_POT_ACCOUNT, to: OWNER, assetId: 1003, amount: '230295085' },
+      { blockHeight: 17013488, extrinsicIndex: 2, eventIndex: 62, from: ICE_POT_ACCOUNT, to: OWNER, assetId: 1003, amount: '111' },
+    ]
+    const out = iceSettlementAmounts(fills, new Map([[done, aDot], [sib, aDot], [ID_8310, aDot]]), legs)
+    expect(out.get('17013488:55')?.amountOut).toBe('230295085')
+    expect(out.get('17013488:63')?.amountOut).toBe('111')
+  })
+
+  it('stays null when a segment holds no payout or more than one', () => {
+    expect(iceSettlementAmounts(PAIR_FILLS, orders, PAIR_LEGS.filter(l => l.eventIndex !== 74), prior).get('17012838:75')?.amountOut).toBeNull()
+    const doubled = [...PAIR_LEGS, { ...PAIR_LEGS[2]!, eventIndex: 73 }]
+    expect(iceSettlementAmounts(PAIR_FILLS, orders, doubled, prior).get('17012838:75')?.amountOut).toBeNull()
+    // Without event positions the legs cannot be divided: unchanged, null.
+    const unplaced = PAIR_LEGS.map(({ eventIndex: _e, ...l }) => l)
+    expect(iceSettlementAmounts(PAIR_FILLS, orders, unplaced, prior).get('17012838:71')?.amountOut).toBeNull()
+  })
+})
+
+describe('readIceSettlements on the real rows of 17012838', () => {
+  it('states both final trades: 500 avDOT → 603.876116 aUSDC each', async () => {
+    const pair: Record<string, unknown[]> = {
+      'ice:settlement-legs': PAIR_LEGS.map(l => ({ block_height: l.blockHeight, event_index: l.eventIndex, extrinsic_index: l.extrinsicIndex, from_account: l.from, to_account: l.to, asset_id: l.assetId, amount: l.amount })),
+      'ice:settlement-repatriations': [],
+      'ice:settlement-fills': PAIR_FILLS.map(f => ({ intent_id: f.intentId, block_height: f.blockHeight, event_index: f.eventIndex, extrinsic_index: f.extrinsicIndex, event_name: f.eventName, amount_in: '', amount_out: '' })),
+      'ice:settlement-orders': [ID_8310, ID_8311].map(id => ({ intent_id: id, owner: OWNER, asset_in: 1005, asset_out: 1003, amount_in: '5000000000000', budget: '20000000000000', block_height: 17012769 })),
+      'ice:settlement-prior-budget': [{ intent_id: ID_8310, rb: '5000000000000' }, { intent_id: ID_8311, rb: '5000000000000' }],
+    }
+    const out = await readIceSettlements(fakeClient(undefined, pair) as never, PAIR_FILLS.map(f => ({ blockHeight: f.blockHeight, eventIndex: f.eventIndex, extrinsicIndex: f.extrinsicIndex, eventName: f.eventName, intentId: f.intentId })))
+    expect(out.get('17012838:71')).toEqual({ amountIn: '5000000000000', amountOut: '603876116' })
+    expect(out.get('17012838:75')).toEqual({ amountIn: '5000000000000', amountOut: '603876116' })
+  })
+})
+
 describe('readIceSettlements on the real rows of 15555475', () => {
   it('resolves the completion to 500 USDC in, 70,532.08 HDX out', async () => {
     const client = fakeClient()
