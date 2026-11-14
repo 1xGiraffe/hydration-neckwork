@@ -295,9 +295,23 @@ describe('ICE intent fills as owner trades', () => {
     expect(sql).toContain("event_name = 'Currencies.Transferred'")
     expect(sql).toContain("'0x6d6f646c6963655f696365230000000000000000000000000000000000000000'")
     // Sibling fills that state their amounts are subtracted; two completions of one
-    // owner in one asset cannot be split and contribute nothing.
+    // owner in one asset cannot be split by the sum ...
     expect(sql).toContain('if(c.n = 1, greatest(')
     expect(sql).toContain("event_name != 'Intent.DcaCompleted'")
+  })
+
+  // ... so their output is read by position (services/iceSettlement.ts' rule): the one
+  // pot->owner transfer after the solution's previous fill event and before the
+  // completion's own. 17012838/2: two avDOT->aUSDC completions of 138YQEm9… booked
+  // amount_out 0 each; run on live rows the CTEs give 603876116 each (and 230457630
+  // for each of 17013432's four completions).
+  it('reads the output of a completion sharing its (owner, asset) by its event segment', () => {
+    expect(sql).toContain('lagInFrame(toInt64(event_index), 1, toInt64(-1)) OVER (PARTITION BY block_height, extrinsic_index ORDER BY event_index ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS prev_index')
+    expect(sql).toContain("WHERE s.event_name = 'Intent.DcaCompleted' AND l.src = '0x6d6f646c6963655f696365230000000000000000000000000000000000000000'")
+    expect(sql).toContain('AND toInt64(l.event_index) > s.prev_index AND l.event_index < s.event_index')
+    expect(sql).toContain('if(count() = 1, any(l.amount), toDecimal256(0, 0)) AS amount')
+    expect(sql).toContain("if(f.event_name = 'Intent.DcaCompleted', if(co.amount > 0, co.amount, cp.amount), f.stated_out) AS amount_out")
+    expect(sql).toContain('LEFT JOIN completion_positioned cp ON cp.block_height = f.block_height AND cp.event_index = f.event_index')
   })
 
   // Since ~block 15.14M the completion's input is a reserve repatriation (or, for an
