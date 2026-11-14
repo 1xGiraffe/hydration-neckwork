@@ -27,7 +27,13 @@ import type { ClickHouseClient } from '../db/client.ts'
 // the measured leg on every one of the 170 completions where one exists alone (a
 // final trade spends min(amountIn, left) and the pallet unreserves any dust left
 // over, so "the previous remainingBudget" alone would overstate 125 of them).
-// The OUT side has no such rule and stays null when it cannot be measured.
+// The OUT side of such a shared (owner, asset) is read by POSITION instead: the
+// pallet pays each fill its own pot→owner transfer, emitted after the previous
+// fill event of the solution and before the fill's own event. Every one of the
+// 1,449 completions indexed by 2026-11-15 holds exactly one such transfer in its
+// segment (block 17012838: two avDOT→aUSDC completions of one owner, each paid
+// 603.876116 aUSDC, that the sum read as null). A segment with none or several, or
+// legs without an event position, stays null.
 //
 // A leaf: no imports but the client type, so the public API and the Data API can
 // share it (their isolation tests allow-list it). Integer arithmetic throughout.
@@ -47,7 +53,8 @@ const BLOCK_CHUNK = 2_000
 
 /** The order terms the settlement reader needs. `IntentOrder` satisfies it. */
 export interface IceSettlementOrder { owner: string; assetIn: number; assetOut: number; amountIn: string; budget: string | null; blockHeight: number }
-export interface IceSettlementLeg { blockHeight: number; extrinsicIndex: number; from: string; to: string; assetId: number; amount: string }
+/** `eventIndex` places the leg among the solution's fills (see the OUT-by-position rule). */
+export interface IceSettlementLeg { blockHeight: number; extrinsicIndex: number; eventIndex?: number; from: string; to: string; assetId: number; amount: string }
 export interface IceSettlementFill { blockHeight: number; extrinsicIndex: number | null; eventIndex: number; eventName: string; intentId: string; amountIn: string | null; amountOut: string | null }
 export interface IceSettlementAmounts { amountIn: string | null; amountOut: string | null }
 /** A DcaCompleted to resolve, keyed in the result by `${blockHeight}:${eventIndex}`. */
@@ -118,6 +125,26 @@ export function iceSettlementAmounts(
     const left = total - (stated.get(key) ?? 0n)
     return left >= 0n ? left : null
   }
+  // Every settled fill's event position per solution, for the segment read below.
+  const fillPositions = new Map<string, number[]>()
+  for (const fill of fills) {
+    if (fill.extrinsicIndex == null) continue
+    const key = `${fill.blockHeight}:${fill.extrinsicIndex}`
+    const list = fillPositions.get(key)
+    if (list) list.push(fill.eventIndex)
+    else fillPositions.set(key, [fill.eventIndex])
+  }
+  // The pot→owner payout in the completion's own segment: after the solution's
+  // previous fill event, before this one. Exactly one, else null.
+  const positionedOut = (c: typeof completions[number]): string | null => {
+    const at = c.fill.eventIndex
+    const prev = (fillPositions.get(`${c.fill.blockHeight}:${c.fill.extrinsicIndex}`) ?? []).reduce((m, i) => i < at && i > m ? i : m, -1)
+    const owner = c.order.owner.toLowerCase()
+    const hits = legs.filter(l => l.blockHeight === c.fill.blockHeight && l.extrinsicIndex === c.fill.extrinsicIndex
+      && l.eventIndex != null && l.eventIndex > prev && l.eventIndex < at
+      && l.assetId === c.order.assetOut && l.from.toLowerCase() === ICE_POT_ACCOUNT && l.to.toLowerCase() === owner)
+    return hits.length === 1 && big(hits[0]!.amount) != null ? hits[0]!.amount : null
+  }
   for (const c of completions) {
     // A final trade always spends something: a measured zero is a leg that belongs
     // to the siblings, not this trade's input, and falls back like a missing one.
@@ -125,7 +152,8 @@ export function iceSettlementAmounts(
     const amountIn = measuredIn != null && measuredIn > 0n
       ? measuredIn.toString()
       : dcaFinalTradeIn(c.order.amountIn, priorBudgets.has(c.fill.intentId) ? priorBudgets.get(c.fill.intentId) : c.order.budget)
-    out.set(`${c.fill.blockHeight}:${c.fill.eventIndex}`, { amountIn, amountOut: rest(c.outKey)?.toString() ?? null })
+    const amountOut = claimants.get(c.outKey) === 1 ? rest(c.outKey)?.toString() ?? null : positionedOut(c)
+    out.set(`${c.fill.blockHeight}:${c.fill.eventIndex}`, { amountIn, amountOut })
   }
   return out
 }
@@ -243,7 +271,7 @@ export async function readIceSettlements(
   }
   for (const l of legRows) {
     if (!once(Number(l.block_height), Number(l.event_index))) continue
-    legs.push({ blockHeight: Number(l.block_height), extrinsicIndex: Number(l.extrinsic_index), from: l.from_account, to: l.to_account, assetId: Number(l.asset_id), amount: l.amount })
+    legs.push({ blockHeight: Number(l.block_height), extrinsicIndex: Number(l.extrinsic_index), eventIndex: Number(l.event_index), from: l.from_account, to: l.to_account, assetId: Number(l.asset_id), amount: l.amount })
   }
   for (const r of repatRows) {
     const leg = repatriationLeg(r)
