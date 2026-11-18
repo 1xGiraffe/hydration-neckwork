@@ -9,8 +9,8 @@ import { renderLlmsTxt } from '../../src/mcp/llmsTxt.ts'
 // tool is a change to a published contract, so it fails here until the
 // declaration is updated to match.
 describe('tool registry', () => {
-  it('declares the fourteen names the design pins, uniquely', () => {
-    expect(EXPECTED_TOOL_NAMES).toHaveLength(14)
+  it('declares the fifteen names the surface pins, uniquely', () => {
+    expect(EXPECTED_TOOL_NAMES).toHaveLength(15)
     expect(new Set(EXPECTED_TOOL_NAMES).size).toBe(EXPECTED_TOOL_NAMES.length)
   })
 

@@ -1,12 +1,12 @@
-import { afterEach, beforeEach, describe, it, expect } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
+import { installReferendumTitles } from './helpers/referendumTitles.ts'
 import {
   cursorKey, initEvaluator, resetEvaluatorForTests, runEvaluatorTick, stopNotificationEvaluator,
 } from '../src/notifications/evaluator.ts'
 import {
-  createRule, initNotifications, loadNotifications, setNotificationState,
+  createRule, initNotifications, loadNotifications, rulesFor, setNotificationState,
 } from '../src/notifications/notificationStore.ts'
 import { resetDeliveryStateForTests } from '../src/notifications/delivery.ts'
-import { initReferendumTitleService, loadReferendumTitles } from '../src/services/referendumTitleService.ts'
 import { initExplorerService } from '../src/services/explorerService.ts'
 import { referendumEnactmentTaskId } from '../src/services/governanceService.ts'
 import { fakeClient, insertedRows, type FakeClient } from './helpers/userFakes.ts'
@@ -39,14 +39,13 @@ describe('referendum enactment notifications', () => {
     resetDeliveryStateForTests()
     tables = {
       raw_ingestion_state: [{ head: 1_000 }],
-      // The submitted row is what teaches the lane 412 exists (max index) and
-      // which track it runs on (the track-filter backfill).
+      // The submitted row is what teaches the lane 412 exists (max index).
       referendum_lifecycle_events: [{
         pallet: 'opengov', ref_index: 412, block_height: 800, event_index: 1,
         event_name: 'Referenda.Submitted', args_json: JSON.stringify({ track: 5 }),
       }],
       scheduler_named_dispatches: [],
-      referendum_titles: [{ pallet: 'opengov', ref_index: 412, title: 'Add HDX liquidity to the Omnipool' }],
+      forum_posts: [{ pallet: 'opengov', ref_index: 412, title: 'Add HDX liquidity to the Omnipool' }],
       raw_events: [], raw_extrinsics: [],
       user_notification_rules: [], user_notification_state: [], user_notification_channels: [],
       user_notification_inbox: [],
@@ -55,8 +54,7 @@ describe('referendum enactment notifications', () => {
     initNotifications(client)
     await loadNotifications()
     initEvaluator(client)
-    initReferendumTitleService(client)
-    await loadReferendumTitles()
+    installReferendumTitles(tables.forum_posts as { pallet: string; ref_index: number; title: string }[])
     // Cursor above the submitted row: the enactment is the only news.
     await setNotificationState(cursorKey('referendum'), '900')
   })
@@ -64,7 +62,7 @@ describe('referendum enactment notifications', () => {
   afterEach(async () => { await stopNotificationEvaluator() })
 
   it('turns a named dispatch back into its referendum and fires exactly once', async () => {
-    await createRule(OWNER, { kind: 'referendum', params: { phases: ['executed'], track: '5' } })
+    await createRule(OWNER, { kind: 'referendum', params: { phases: ['executed'] } })
     tables.scheduler_named_dispatches.push(
       dispatch(412, 950, { __kind: 'Ok' }),
       // A named scheduler task that is not any referendum's enactment.
@@ -90,9 +88,29 @@ describe('referendum enactment notifications', () => {
     expect(String(inbox()[0].body)).toContain('the call FAILED')
   })
 
-  it('does not wake rules that filter to other phases or tracks', async () => {
+  it('does not wake rules that filter to other phases', async () => {
     await createRule(OWNER, { kind: 'referendum', params: { phases: ['confirmed'] } })
-    await createRule(OWNER, { kind: 'referendum', params: { track: '0' } })
+    tables.scheduler_named_dispatches.push(dispatch(412, 950, { __kind: 'Ok' }))
+    await runEvaluatorTick()
+    expect(inbox()).toHaveLength(0)
+  })
+
+  // There is no per-track subscription. A rule stored with a `track` no longer
+  // parses, so the store skips it at load: never listed, never evaluated, its row
+  // left alone, and only the number of such rules is logged.
+  it('skips a stored per-track rule at load and never evaluates it', async () => {
+    tables.user_notification_rules.push({
+      rule_id: 'stored-track-rule', account_id: OWNER, kind: 'referendum', name: 'Referenda on treasurer',
+      params: JSON.stringify({ track: '5' }), channels: [], muted: 0, cooldown_s: 0, deleted: 0,
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await loadNotifications()
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('1 per-track referendum rule(s) skipped'))
+      expect(warn.mock.calls.flat().join(' ')).not.toContain('stored-track-rule')
+    } finally { warn.mockRestore() }
+    expect(rulesFor(OWNER)).toHaveLength(0)
+    await setNotificationState(cursorKey('referendum'), '900')
     tables.scheduler_named_dispatches.push(dispatch(412, 950, { __kind: 'Ok' }))
     await runEvaluatorTick()
     expect(inbox()).toHaveLength(0)

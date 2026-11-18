@@ -538,7 +538,7 @@ export function Hollar() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'HOLLAR' }]} />
-        <div className="page-title">HOLLAR <span className="sub">GHO-fork stablecoin · peg, HSM & liquidity</span></div>
+        <h1 className="page-title">HOLLAR <span className="sub">GHO-fork stablecoin · peg, HSM & liquidity</span></h1>
       </div>
       {isError
         ? <LoadError title="Couldn’t load the HOLLAR dashboard" onRetry={() => { void refetch() }} />

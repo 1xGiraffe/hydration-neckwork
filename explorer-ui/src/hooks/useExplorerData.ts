@@ -406,10 +406,10 @@ export function useAccountEvents(address: string | null, offset = 0, from?: stri
   const key = ['account-events', address, offset, from, to, filters]
   return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountEvents(address as string, offset, undefined, from, to, filters, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
 }
-export function useAccountVotes(address: string | null, offset = 0, from?: string, to?: string) {
+export function useAccountVotes(address: string | null, offset = 0, from?: string, to?: string, limit?: number) {
   const ri = useInterval()
-  const key = ['account-votes', address, offset, from, to]
-  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountVotes(address as string, offset, undefined, from, to, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
+  const key = ['account-votes', address, offset, from, to, ...(limit ? [limit] : [])]
+  return useHeldRows(useQuery({ queryKey: key, queryFn: ({ signal }) => api.accountVotes(address as string, offset, limit, from, to, signal), enabled: !!address, refetchInterval: offset === 0 ? ri : false, staleTime: BLOCK_STALE_MS, placeholderData: keepPreviousData }), key, offset === 0)
 }
 // The /governance page. The overview holds the live cards, so it polls at the
 // feed cadence while mounted; the tables poll nothing — a motion or archive row
@@ -418,10 +418,10 @@ export function useGovernanceOverview() {
   const ri = useInterval(LIVE_MS, true)
   return useQuery({ queryKey: ['governance'], queryFn: ({ signal }) => api.governance(signal), refetchInterval: ri, staleTime: 5_000 })
 }
-export function useGovernanceReferenda(pallet: 'opengov' | 'democracy', status?: string, track?: number, offset = 0, enabled = true) {
+export function useGovernanceReferenda(pallet: 'opengov' | 'democracy', status?: string, offset = 0, enabled = true) {
   return useQuery({
-    queryKey: ['governance-referenda', pallet, status ?? '', track ?? -1, offset],
-    queryFn: ({ signal }) => api.governanceReferenda(pallet, status, track, offset, 25, signal),
+    queryKey: ['governance-referenda', pallet, status ?? '', offset],
+    queryFn: ({ signal }) => api.governanceReferenda(pallet, status, offset, 25, signal),
     enabled, staleTime: 30_000, placeholderData: keepPreviousData,
   })
 }
@@ -448,10 +448,13 @@ export function useGovernanceTips(offset = 0, enabled = true) {
 // timer: a concluded referendum can never gain another vote, so there is nothing left
 // to poll for. The API holds a running referendum for one block and a concluded one for
 // a minute, so a poll here is not answered with the figures the last one already showed.
+export const REFERENDUM_TOP_VOTERS = 200
 export function useReferendum(pallet: 'opengov' | 'democracy', index: number) {
   return useQuery({
     queryKey: ['referendum', pallet, index],
-    queryFn: ({ signal }) => api.referendum(pallet, index, signal),
+    // The heaviest voters only: they draw the bubble map, and the votes table pages
+    // through every voter on its own route (/votes) — #21 alone is 480 voters, 311 KB.
+    queryFn: ({ signal }) => api.referendum(pallet, index, signal, REFERENDUM_TOP_VOTERS),
     refetchInterval: query => (query.state.data?.concludedAt ? false : DETAIL_POLL_MS),
     staleTime: BLOCK_STALE_MS,
   })
@@ -660,6 +663,10 @@ export function useOpenIntents() {
 // the egress meter within one refresh of the chain without ever out-running it.
 export function useSecurityDashboard() {
   return useQuery({ queryKey: ['security-dashboard'], queryFn: ({ signal }) => api.security(signal), refetchInterval: 60_000, staleTime: 30_000 })
+}
+// The Technical Committee's members and thresholds, without the rest of the dashboard.
+export function useTechCommittee() {
+  return useQuery({ queryKey: ['security-committee'], queryFn: ({ signal }) => api.techCommittee(signal), refetchInterval: 60_000, staleTime: 30_000 })
 }
 // Wormhole backing detail. The custody snapshot behind it is rebuilt every 120s
 // on the API's background refresher, so a 60s poll keeps the beams within one

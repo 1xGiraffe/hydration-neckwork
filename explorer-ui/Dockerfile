@@ -18,6 +18,11 @@ ENV VITE_PREIS_URL=$VITE_PREIS_URL
 ARG VITE_EVM_RPC_URL
 ENV VITE_EVM_RPC_URL=$VITE_EVM_RPC_URL
 RUN npm run build
+# A gzip copy of every text asset at the highest level, beside the original, for
+# nginx's gzip_static (nginx.conf): served as is, never compressed per request.
+# Node's own zlib, so the build needs no compressor package. A copy no smaller
+# than the original is not kept.
+RUN node -e "const fs=require('fs'),z=require('zlib'),p=require('path');const d='dist/assets';let n=0;for(const f of fs.readdirSync(d)){if(!/\\.(js|css|svg|json)$/.test(f))continue;const b=fs.readFileSync(p.join(d,f));if(b.length<1024)continue;const g=z.gzipSync(b,{level:9});if(g.length<b.length){fs.writeFileSync(p.join(d,f+'.gz'),g);n++}}console.log('precompressed',n,'assets')"
 # Bundle identity for the SEO page handshake (seo_page.conf, api/src/routes/seo.ts):
 # the hash of the entry chunk this image's index.html loads, as an nginx variable.
 # The build fails rather than ship an image whose renderer cannot be checked.
@@ -26,10 +31,21 @@ RUN id=$(grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' dist/index.html | head -1 |
  && printf 'set $bundle_id "%s";\n' "$id" > /app/bundle_id.conf \
  && cat /app/bundle_id.conf
 
+# The CSP's script-src allows index.html's one inline script (the theme bootstrap) by
+# its hash instead of 'unsafe-inline'. Every other <script> must load from a file; the
+# build fails on a second inline script rather than ship a policy that blocks it.
+RUN node -e "const fs=require('fs'),c=require('crypto');const h=fs.readFileSync('dist/index.html','utf8');const tags=[...h.matchAll(/<script\\b([^>]*)>([\\s\\S]*?)<\\/script>/g)];const inline=tags.filter(t=>!/\\bsrc=/.test(t[1]));if(inline.length!==1||inline[0][1].trim()!==''){console.error('expected exactly one bare inline <script> in dist/index.html, found',inline.length);process.exit(1)}fs.writeFileSync('/app/csp_script_hash',\"'sha256-\"+c.createHash('sha256').update(inline[0][2],'utf8').digest('base64')+\"'\")" \
+ && cat /app/csp_script_hash
+
 FROM nginx:1.31.3-alpine@sha256:4a73073bd557c65b759505da037898b61f1be6cbcc3c2c3aeac22d2a470c1752
 
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/csp_script_hash /tmp/csp_script_hash
+RUN sed -i "s|__CSP_SCRIPT_HASH__|$(cat /tmp/csp_script_hash)|" /etc/nginx/conf.d/default.conf \
+ && ! grep -q __CSP_SCRIPT_HASH__ /etc/nginx/conf.d/default.conf \
+ && grep -q "script-src 'self' 'sha256-" /etc/nginx/conf.d/default.conf \
+ && rm /tmp/csp_script_hash
 # Shared include for the page-URL locations (see seo_page.conf's own comment).
 COPY seo_page.conf /etc/nginx/seo_page.conf
 COPY --from=build /app/bundle_id.conf /etc/nginx/bundle_id.conf

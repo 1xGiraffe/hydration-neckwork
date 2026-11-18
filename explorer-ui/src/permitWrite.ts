@@ -149,7 +149,7 @@ export interface PermitWriteOptions {
 
 const SUBMIT_TIMEOUT_MS = 30_000
 
-function withSubmitTimeout(submission: Promise<unknown>, ms: number): Promise<unknown> {
+export function withSubmitTimeout(submission: Promise<unknown>, ms: number): Promise<unknown> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {

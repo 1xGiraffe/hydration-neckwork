@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { initExplorerService, search, type SearchResult } from '../src/services/explorerService.ts'
 import { initGovernanceService } from '../src/services/governanceService.ts'
-import { initReferendumTitleService } from '../src/services/referendumTitleService.ts'
 import { loadExplorerAssets, stopExplorerAssetsRefresh } from '../src/services/explorerAssets.ts'
 
 // Search names an asset the way every other explorer surface does — under its
@@ -41,7 +40,6 @@ function emptyRowClient() {
 async function setup(): Promise<void> {
   initExplorerService(emptyRowClient())
   initGovernanceService(emptyRowClient())
-  initReferendumTitleService(emptyRowClient())
   await loadExplorerAssets({
     query: vi.fn(async ({ query }: { query: string }) => ({
       json: async () => (query.includes('atoken_reserve_map') ? RESERVES

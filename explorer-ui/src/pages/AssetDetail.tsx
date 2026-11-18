@@ -371,7 +371,7 @@ function AssetAlertActions({ asset }: { asset: AssetListItem }) {
             assets={[]}
             pending={createRule.isPending}
             preset={preset}
-            submitLabel={session ? undefined : 'Log in to save this alert'}
+            submitLabel={session ? undefined : 'Sign in to save this alert'}
             onSubmit={async (input: NotificationRuleInput) => {
               // Logged out this is still a real save: the rule the dialog just
               // built is parked and the login dialog takes over, and the pending

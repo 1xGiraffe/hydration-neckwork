@@ -5,9 +5,9 @@ import { cached } from './cache.ts'
 import { convictionName, decodeVoteByte, weightedVotePower } from './convictionWeight.ts'
 import { assetDescriptor } from './explorerAssets.ts'
 import { accountRef, ensurePrices, nestedRemovalRefs, nestedVoteInfos, removalRefsFromPermitData, voteFromPermitData, type AccountRef, type AssetRef } from './explorerService.ts'
-import { referendumTitles } from './referendumTitleService.ts'
+import { referendumTitleFor } from './referendumTitleService.ts'
 import { pendingNodeApi } from './pendingHeadService.ts'
-import { curveCrossingX, curveThresholdPerbill, PERBILL, perbillOfRational, trackById, undecidingTimeoutBlocks, type TrackDef } from './referendaTracks.ts'
+import { curveCrossingX, curveDelayPerbill, curveThresholdPerbill, mulCeilPerbill, PERBILL, perbillOfRational, trackById, undecidingTimeoutBlocks, type TrackDef } from './referendaTracks.ts'
 
 // Governance referendum detail.
 //
@@ -77,7 +77,6 @@ export interface ReferendumDetail {
   // Who signed the submit extrinsic (OpenGov only; Democracy proposals were
   // tabled from a queue and name no single submitter).
   proposer: AccountRef | null
-  subsquareUrl: string
   track: number | null
   proposalHash: string | null
   // The proposal's actual call, decoded from its preimage by the referendum-proposals
@@ -245,11 +244,6 @@ export interface ReferendumProgress {
 let client: ClickHouseClient
 export function initGovernanceService(c: ClickHouseClient): void { client = c }
 
-const SUBSQUARE_BASE_URL = (process.env.SUBSQUARE_BASE_URL ?? 'https://hydration.subsquare.io').replace(/\/+$/, '')
-
-export function subsquareUrl(pallet: ReferendumPallet, index: number): string {
-  return `${SUBSQUARE_BASE_URL}${pallet === 'democracy' ? '/democracy/referenda' : '/referenda'}/${index}`
-}
 
 export function parseReferendumPallet(value: unknown): ReferendumPallet | null {
   return value === 'opengov' || value === 'democracy' ? value : null
@@ -885,8 +879,12 @@ export function progressFrom(
       if (crossA == null || crossS == null) {
         projection = { state: 'short', confirmableAtBlock: null }
       } else {
-        const cross = Math.max(crossA, crossS)
-        const block = decisionStartBlock + Math.ceil(cross / PERBILL * track.decisionPeriod)
+        // The block the pallet itself schedules (Referenda::decision_time):
+        // since + max(delay(approval), delay(support)).mul_ceil(decision period),
+        // with Curve::delay's own rounding — the bisection above only says WHETHER
+        // the bars are crossed in time; its x can land a block or two early.
+        const delay = Math.max(curveDelayPerbill(track.minApproval, approval.currentPerbill), curveDelayPerbill(track.minSupport, support.currentPerbill))
+        const block = decisionStartBlock + mulCeilPerbill(delay, track.decisionPeriod)
         projection = { state: 'on-track', confirmableAtBlock: Math.max(block, headBlock + 1) }
       }
     }
@@ -1153,12 +1151,17 @@ async function loadConvictionVotes(index: number, fromBlock: number, toBlock: nu
 
 // Where in the chain a vote (or its removal) sits. Block plus extrinsic, because an
 // account can remove a vote and cast a new one in the same block: Democracy 206 has
-// exactly that, and only the LATER action stands.
-export interface VotePosition { blockHeight: number; extrinsicIndex: number | null }
+// exactly that, and only the LATER action stands. Within one extrinsic (a batch that
+// removes a vote and casts another) the event index orders them, where both actions
+// carry one; a removal known only by its call (Democracy, OpenGov before
+// ConvictionVoting.VoteRemoved existed) is not after a vote in the same extrinsic, so
+// that vote stands.
+export interface VotePosition { blockHeight: number; extrinsicIndex: number | null; eventIndex?: number | null }
 
 export function isAfter(a: VotePosition, b: VotePosition): boolean {
   if (a.blockHeight !== b.blockHeight) return a.blockHeight > b.blockHeight
-  return (a.extrinsicIndex ?? -1) > (b.extrinsicIndex ?? -1)
+  if ((a.extrinsicIndex ?? -1) !== (b.extrinsicIndex ?? -1)) return (a.extrinsicIndex ?? -1) > (b.extrinsicIndex ?? -1)
+  return a.eventIndex != null && b.eventIndex != null && a.eventIndex > b.eventIndex
 }
 
 const REMOVAL_CALLS: Record<ReferendumPallet, string[]> = {
@@ -1252,10 +1255,12 @@ async function wrappedRemovalExtrinsics(index: number, fromBlock: number, toBloc
 // OpenGov removals below CONVICTION_VOTED_FIRST_BLOCK — the event did not exist yet
 // (the first one is at 7,175,689), so demanding one there kept withdrawn votes in the
 // tally and pushed referenda 14, 23, 27 and 32 ABOVE the chain's own figure.
-async function loadWithdrawals(
+// Every withdrawal, in no particular order (loadWithdrawals keeps each account's last;
+// the tally trajectory replays them all).
+async function loadRemovals(
   pallet: ReferendumPallet, index: number, fromBlock: number, toBlock: number,
   concludedAt: VotePosition | null,
-): Promise<Map<string, VotePosition>> {
+): Promise<{ who: string; at: VotePosition }[]> {
   // OpenGov's post-event-era rows need no positional bound at all: their
   // ConvictionVoting.VoteRemoved confirmation below is emitted only while the
   // poll is Ongoing, so it already separates a withdrawal from a post-close
@@ -1273,7 +1278,7 @@ async function loadWithdrawals(
     query_params: { pallet, idx: index, calls: REMOVAL_CALLS[pallet], from: fromBlock, to: toBlock },
     format: 'JSONEachRow',
   })
-  let removals = await removalRes.json<{ who: string; block_height: number; extrinsic_index: number | null }>()
+  let removals = await removalRes.json<{ who: string; block_height: number; extrinsic_index: number | null; event_index?: number | null }>()
 
   if (pallet === 'opengov') {
     // A wrapped removal has no call row at all, so its extrinsic is recovered by decoding
@@ -1288,23 +1293,29 @@ async function loadWithdrawals(
     removals = removals.filter(row => Number(row.block_height) < CONVICTION_VOTED_FIRST_BLOCK && beforeClose(row))
     if (tuples) {
       const eventRes = await client.query({
-        query: `SELECT JSONExtractString(args_json, 'who') AS who, block_height, extrinsic_index
+        query: `SELECT JSONExtractString(args_json, 'who') AS who, block_height, extrinsic_index, event_index
                 FROM price_data.raw_events
                 WHERE event_name = 'ConvictionVoting.VoteRemoved'
                   AND (block_height, extrinsic_index) IN (${tuples})`,
         format: 'JSONEachRow',
       })
-      removals = removals.concat(await eventRes.json<{ who: string; block_height: number; extrinsic_index: number | null }>())
+      removals = removals.concat(await eventRes.json<{ who: string; block_height: number; extrinsic_index: number | null; event_index?: number | null }>())
     }
   } else {
     removals = removals.filter(beforeClose)
   }
 
+  return removals
+    .filter(row => !!row.who)
+    .map(row => ({ who: row.who.toLowerCase(), at: { blockHeight: Number(row.block_height), extrinsicIndex: row.extrinsic_index, eventIndex: row.event_index != null ? Number(row.event_index) : null } }))
+}
+
+async function loadWithdrawals(
+  pallet: ReferendumPallet, index: number, fromBlock: number, toBlock: number,
+  concludedAt: VotePosition | null,
+): Promise<Map<string, VotePosition>> {
   const latest = new Map<string, VotePosition>()
-  for (const row of removals) {
-    const who = (row.who ?? '').toLowerCase()
-    if (!who) continue
-    const at: VotePosition = { blockHeight: Number(row.block_height), extrinsicIndex: row.extrinsic_index }
+  for (const { who, at } of await loadRemovals(pallet, index, fromBlock, toBlock, concludedAt)) {
     const held = latest.get(who)
     if (!held || isAfter(at, held)) latest.set(who, at)
   }
@@ -1382,7 +1393,7 @@ export function toVoter(row: VoteEventRow, withdrawals: Map<string, VotePosition
     // and then voted again is voting, not withdrawing.
     removed: (() => {
       const at = withdrawals.get((row.who ?? '').toLowerCase())
-      return at != null && isAfter(at, { blockHeight: row.block_height, extrinsicIndex: row.extrinsic_index })
+      return at != null && isAfter(at, { blockHeight: row.block_height, extrinsicIndex: row.extrinsic_index, eventIndex: row.event_index })
     })(),
   }
 }
@@ -1508,12 +1519,65 @@ async function loadProposalCall(hash: string): Promise<ReferendumDetail['proposa
   }
 }
 
+/**
+ * Everything one referendum's tally trajectory replays: its lifecycle, every vote row
+ * (not only each account's last), every withdrawal, read by the same loaders and
+ * bounds the detail page uses — so the trajectory and the page's voter list are one
+ * reading of the votes. Cached like the page: a minute once concluded, a block while
+ * running.
+ */
+export interface ReferendumVoteHistory {
+  lifecycle: { event_name: string; block_height: number; extrinsic_index: number | null; ts: string; args_json: string }[]
+  votes: VoteEventRow[]
+  removals: { who: string; at: VotePosition }[]
+  concludedAt: VotePosition | null
+  headBlock: number | null
+}
+
+export async function referendumVoteHistory(pallet: ReferendumPallet, index: number): Promise<ReferendumVoteHistory | null> {
+  const lifecycle = await cached(`explorer:referendum:lifecycle:${pallet}:${index}`, RUNNING_TTL_MS, () => loadLifecycle(pallet, index))
+  if (!lifecycle.length) return null
+  const concluded = lifecycle.some(row => isConcludingEvent(row.event_name))
+  return cached(`explorer:referendum:vote-history:${pallet}:${index}`, concluded ? CONCLUDED_TTL_MS : RUNNING_TTL_MS, async () => {
+    const concludedRow = [...lifecycle].reverse().find(row => isConcludingEvent(row.event_name)) ?? null
+    const concludedAt: VotePosition | null = concludedRow ? { blockHeight: concludedRow.block_height, extrinsicIndex: concludedRow.extrinsic_index } : null
+    const headBlock = concludedRow ? null : await indexedHead()
+    const toBlock = concludedRow?.block_height ?? headBlock ?? lifecycle[lifecycle.length - 1].block_height
+    const votes = pallet === 'democracy' ? await loadDemocracyVotes(index) : await loadConvictionVotes(index, lifecycle[0].block_height, toBlock)
+    const removals = await loadRemovals(pallet, index, lifecycle[0].block_height, concludedRow?.block_height ?? 0xffff_ffff, concludedAt)
+    return { lifecycle, votes, removals, concludedAt, headBlock }
+  })
+}
+
+/** Every OpenGov lifecycle row, in (ref, block, event) order — the whole table is a few thousand rows. */
+export async function allOpengovLifecycle(): Promise<Map<number, { event_name: string; block_height: number; extrinsic_index: number | null; ts: string; args_json: string }[]>> {
+  return cached('explorer:governance:opengov-lifecycle', RUNNING_TTL_MS, async () => {
+    const res = await client.query({
+      query: `SELECT ref_index, event_name, block_height, extrinsic_index, toString(block_timestamp) AS ts, args_json
+              FROM price_data.referendum_lifecycle_events FINAL
+              WHERE pallet = 'opengov'
+              ORDER BY ref_index, block_height, event_index`,
+      format: 'JSONEachRow',
+    })
+    const out = new Map<number, { event_name: string; block_height: number; extrinsic_index: number | null; ts: string; args_json: string }[]>()
+    for (const row of await res.json<LifecycleRow & { ref_index: number }>()) {
+      const i = Number(row.ref_index)
+      const list = out.get(i) ?? []
+      list.push({ event_name: row.event_name, block_height: Number(row.block_height), extrinsic_index: row.extrinsic_index, ts: row.ts, args_json: row.args_json })
+      out.set(i, list)
+    }
+    return out
+  })
+}
+
+export { liveReferendumState, indexedHead }
+
 // How long a referendum's answer stays true. A concluded referendum can gain no vote
 // and change no tally, so it is held for a minute; a running one is what the page polls
 // for new votes, so holding it that long would make the poll show the same figures four
 // times over. One block is the finest resolution the votes themselves have.
 const RUNNING_TTL_MS = 6_000
-const CONCLUDED_TTL_MS = 60_000
+export const CONCLUDED_TTL_MS = 60_000
 
 export async function getReferendum(pallet: ReferendumPallet, index: number, limit = 500): Promise<ReferendumDetail | null> {
   // Which of the two this is comes from the lifecycle, so that is read first — under
@@ -1522,7 +1586,7 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
   const lifecycle = await cached(`explorer:referendum:lifecycle:${pallet}:${index}`, RUNNING_TTL_MS, () => loadLifecycle(pallet, index))
   const ttlMs = lifecycle.some(row => isConcludingEvent(row.event_name)) ? CONCLUDED_TTL_MS : RUNNING_TTL_MS
 
-  return cached(`explorer:referendum:${pallet}:${index}:${limit}`, ttlMs, async () => {
+  const detail = await cached(`explorer:referendum:${pallet}:${index}:${limit}`, ttlMs, async () => {
     // Deposit refunds and other housekeeping land long after the vote closes, and
     // votes cannot be cast after it, so vote windows end at the CONCLUSION. Using
     // the last lifecycle event instead widened some windows enough to read
@@ -1552,7 +1616,7 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
 
     if (!lifecycle.length && !votes.length) return null
 
-    const [prices, titles] = await Promise.all([ensurePrices(), referendumTitles()])
+    const prices = await ensurePrices()
     const priceUsd = prices.get(HDX_ASSET_ID)?.price ?? null
     const assetRef = assetDescriptor(HDX_ASSET_ID)
     const decimals = assetRef.decimals
@@ -1614,9 +1678,8 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
     return {
       pallet,
       index,
-      title: titles.get(`${pallet}:${index}`) ?? null,
+      title: null,  // laid over at read time (getReferendum)
       proposer,
-      subsquareUrl: subsquareUrl(pallet, index),
       track: trackId,
       proposalHash,
       proposalCall,
@@ -1658,6 +1721,8 @@ export async function getReferendum(pallet: ReferendumPallet, index: number, lim
         : null,
     }
   })
+  // The title is laid over the cached detail at read time (see getReferenda).
+  return detail ? { ...detail, title: referendumTitleFor(pallet, index) } : null
 }
 
 export interface ReferendumListRow {
@@ -1700,7 +1765,10 @@ export interface GovernanceTrackRef { id: number; name: string }
 // limit back to back returned two referenda twice and silently dropped two others, and
 // which two varied from one walk to the next.
 export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumListRow[]> {
+  // Titles are laid over the cached rows at read time, never baked into the cache, so a
+  // hidden description drops its title from every list as soon as the forum snapshot does.
   return (await referendumDirectory()).slice(offset, offset + limit)
+    .map(row => ({ ...row, title: referendumTitleFor(row.pallet, row.index) }))
 }
 
 // The whole directory (~600 rows), sorted by last activity. Built whole because
@@ -1708,38 +1776,35 @@ export async function getReferenda(limit = 100, offset = 0): Promise<ReferendumL
 // files live in the scheduler's tables, not the referendum's lifecycle.
 async function referendumDirectory(): Promise<ReferendumListRow[]> {
   return cached('explorer:referenda:directory', 60_000, async () => {
-    const [res, titles] = await Promise.all([
-      client.query({
-        query: `
-          SELECT pallet, ref_index, events, last_block AS block_height, ts, track_id, submit_block, submit_ext
-          FROM (
-            -- The inner aggregate must NOT alias max(block_height) to the column's
-            -- own name: the alias shadows the column for the submit_block
-            -- aggregate, which ClickHouse rejects as nested aggregation.
-            -- The status walk reads the lifecycle in order (a ConfirmStarted the
-            -- chain later aborted must not outrank the abort), so the names are
-            -- sorted on the event identity rather than left in group order.
-            SELECT pallet, ref_index,
-                   arrayMap(e -> tupleElement(e, 3), arraySort(groupArray((block_height, event_index, event_name)))) AS events,
-                   -- Last ACTIVITY, not last event: a deposit refund is settlement
-                   -- (NON_ACTIVITY_EVENTS). The plain max stays the fallback for a
-                   -- lifecycle that holds nothing else yet.
-                   if(countIf(event_name NOT IN (${NON_ACTIVITY_EVENTS_SQL})) > 0,
-                      maxIf(block_height, event_name NOT IN (${NON_ACTIVITY_EVENTS_SQL})), max(block_height)) AS last_block,
-                   toString(if(countIf(event_name NOT IN (${NON_ACTIVITY_EVENTS_SQL})) > 0,
-                      maxIf(block_timestamp, event_name NOT IN (${NON_ACTIVITY_EVENTS_SQL})), max(block_timestamp))) AS ts,
-                   if(countIf(event_name = 'Referenda.Submitted') > 0,
-                      anyIf(JSONExtractInt(args_json, 'track'), event_name = 'Referenda.Submitted'), -1) AS track_id,
-                   anyIf(block_height, event_name = 'Referenda.Submitted') AS submit_block,
-                   anyIf(ifNull(extrinsic_index, -1), event_name = 'Referenda.Submitted') AS submit_ext
-            FROM price_data.referendum_lifecycle_events FINAL
-            GROUP BY pallet, ref_index
-          )
-          ORDER BY block_height DESC, pallet ASC, ref_index DESC`,
-        format: 'JSONEachRow',
-      }),
-      referendumTitles(),
-    ])
+    const res = await client.query({
+      query: `
+        SELECT pallet, ref_index, events, last_block AS block_height, ts, track_id, submit_block, submit_ext
+        FROM (
+          -- The inner aggregate must NOT alias max(block_height) to the column's
+          -- own name: the alias shadows the column for the submit_block
+          -- aggregate, which ClickHouse rejects as nested aggregation.
+          -- The status walk reads the lifecycle in order (a ConfirmStarted the
+          -- chain later aborted must not outrank the abort), so the names are
+          -- sorted on the event identity rather than left in group order.
+          SELECT pallet, ref_index,
+                 arrayMap(e -> tupleElement(e, 3), arraySort(groupArray((block_height, event_index, event_name)))) AS events,
+                 -- Last ACTIVITY, not last event: a deposit refund is settlement
+                 -- (NON_ACTIVITY_EVENTS). The plain max stays the fallback for a
+                 -- lifecycle that holds nothing else yet.
+                 if(countIf(event_name NOT IN (${NON_ACTIVITY_EVENTS_SQL})) > 0,
+                    maxIf(block_height, event_name NOT IN (${NON_ACTIVITY_EVENTS_SQL})), max(block_height)) AS last_block,
+                 toString(if(countIf(event_name NOT IN (${NON_ACTIVITY_EVENTS_SQL})) > 0,
+                    maxIf(block_timestamp, event_name NOT IN (${NON_ACTIVITY_EVENTS_SQL})), max(block_timestamp))) AS ts,
+                 if(countIf(event_name = 'Referenda.Submitted') > 0,
+                    anyIf(JSONExtractInt(args_json, 'track'), event_name = 'Referenda.Submitted'), -1) AS track_id,
+                 anyIf(block_height, event_name = 'Referenda.Submitted') AS submit_block,
+                 anyIf(ifNull(extrinsic_index, -1), event_name = 'Referenda.Submitted') AS submit_ext
+          FROM price_data.referendum_lifecycle_events FINAL
+          GROUP BY pallet, ref_index
+        )
+        ORDER BY block_height DESC, pallet ASC, ref_index DESC`,
+      format: 'JSONEachRow',
+    })
     const raw = await res.json<{ pallet: string; ref_index: number; events: string[]; block_height: number; ts: string; track_id: number; submit_block: number; submit_ext: number }>()
     // Every submit extrinsic's signer in one primary-key batch (~400 tuples);
     // the directory result is cached, so this is not a per-request read.
@@ -1779,7 +1844,7 @@ async function referendumDirectory(): Promise<ReferendumListRow[]> {
       return {
         pallet,
         index: Number(row.ref_index),
-        title: titles.get(`${pallet}:${Number(row.ref_index)}`) ?? null,
+        title: null,  // laid over at read time (getReferenda)
         // An approved referendum whose call has run reads 'executed' — its true
         // final state. A CallUnavailable is not an execution, so it stays
         // 'approved' with the fault carried in `enactment`.

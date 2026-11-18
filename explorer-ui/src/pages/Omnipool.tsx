@@ -183,7 +183,7 @@ export function Omnipool() {
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Assets', to: paths.assets() }, { label: 'Omnipool' }]} />
         <div className="detail-header">
-          <div className="page-title">Omnipool <span className="sub muted">shared liquidity, every asset paired with the H2O hub</span></div>
+          <h1 className="page-title">Omnipool <span className="sub muted">shared liquidity, every asset paired with the H2O hub</span></h1>
         </div>
       </div>
       {isError

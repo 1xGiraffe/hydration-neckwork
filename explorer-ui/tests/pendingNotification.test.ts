@@ -128,9 +128,9 @@ describe('new-alert form → rule params', () => {
     expect(buildRuleParams('safety', {}, noSets)).toEqual({ ok: true, params: {} })
     expect(buildRuleParams('safety', {}, { phases: [], safetyKinds: ['pause', 'freeze'] }))
       .toEqual({ ok: true, params: { kinds: ['pause', 'freeze'] } })
-    expect(buildRuleParams('referendum', { track: '' }, noSets)).toEqual({ ok: true, params: {} })
-    expect(buildRuleParams('referendum', { track: 'root' }, { phases: ['deciding'], safetyKinds: [] }))
-      .toEqual({ ok: true, params: { phases: ['deciding'], track: 'root' } })
+    expect(buildRuleParams('referendum', {}, noSets)).toEqual({ ok: true, params: {} })
+    expect(buildRuleParams('referendum', {}, { phases: ['deciding'], safetyKinds: [] }))
+      .toEqual({ ok: true, params: { phases: ['deciding'] } })
   })
 
   it('names what is wrong before spending a round trip', () => {

@@ -173,7 +173,7 @@ export function ExtrinsicDetail({ id }: { id: string }) {
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Extrinsics', to: paths.extrinsics() }, { label: id }]} />
         <div className="detail-header">
-          <div className="page-title">Extrinsic <span className="num">{id}</span></div>
+          <h1 className="page-title">Extrinsic <span className="num">{id}</span></h1>
           {/* Both arrows always occupy the strip, the unavailable one disabled:
               a block's first and last extrinsic otherwise moved the remaining
               arrow sideways, so the same control sat under a different pixel on

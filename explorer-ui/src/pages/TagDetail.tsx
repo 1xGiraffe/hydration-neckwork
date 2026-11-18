@@ -11,7 +11,7 @@ import { AccountsTable } from '../components/AccountsTable'
 import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
-import { VotesTab } from '../components/VotesTab'
+import { TagGovernance } from '../components/gov/TagGovernance'
 import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
 import { UserRevenueTab } from '../components/UserRevenueTab'
 import { moneyMarketDebtUsd, profileTabs, resolveProfileView, ProfileStats, PortfolioChart, VolumeSection } from '../components/AccountSections'
@@ -53,8 +53,8 @@ function LoginToViewTag() {
     <div className="wrap">
       <div className="page-head"><Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Tags', to: paths.tags() }]} /></div>
       <div className="detail-card" style={{ padding: 32, textAlign: 'center', color: 'var(--text-medium)' }}>
-        <div>Log in to view this tag.</div>
-        <button type="button" className="btn primary" style={{ marginTop: 16 }} onClick={() => { setMounted(true); setOpen(true) }}>Log in</button>
+        <div>Sign in to view this tag.</div>
+        <button type="button" className="btn primary" style={{ marginTop: 16 }} onClick={() => { setMounted(true); setOpen(true) }}>Sign in</button>
       </div>
       {mounted && (
         <Suspense fallback={null}>
@@ -250,7 +250,7 @@ function SystemTagDetail({ tagId }: { tagId: string }) {
 
                 {activeView === 'events' && <ScopedActivity scope={{ kind: 'tag', tagId }} tab="events" />}
 
-                {activeView === 'votes' && <VotesTab scope={{ kind: 'tag', tagId }} />}
+                {activeView === 'governance' && <TagGovernance scope={{ kind: 'tag', tagId }} votesCount={votesTotal.data?.total ?? undefined} />}
 
                 {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'tag', tagId }} />}
                 {activeView === 'user-revenue' && <UserRevenueTab scope={{ kind: 'tag', tagId }} />}

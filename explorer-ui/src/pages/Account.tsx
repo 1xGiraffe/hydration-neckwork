@@ -19,7 +19,8 @@ import { CloseAccountsSection } from '../components/CloseAccountsSection'
 import { ScopedActivity } from '../components/ScopedActivity'
 import { NotifyButton } from '../components/NotifyButton'
 import { activityListCount, voteListCount } from '../utils/activityPaging'
-import { VotesTab } from '../components/VotesTab'
+import { AccountGovernance } from '../components/gov/AccountGovernance'
+import { useAccountForumCount } from '../hooks/useGovernance'
 import { RevenueBreakdownTab } from '../components/RevenueBreakdownTab'
 import { UserRevenueTab } from '../components/UserRevenueTab'
 import { useSession } from '../session'
@@ -89,6 +90,8 @@ export function Account({ address }: { address: string }) {
   // on a feed too deep to count (rather than showing an overshooting estimate).
   const activityTotal = useAccountListCount(canonicalAddress, activityListCount('all', '', {}))
   const votesTotal = useAccountListCount(canonicalAddress, voteListCount())
+  // The Governance tab also shows for an account with forum activity and no vote.
+  const forumCount = useAccountForumCount(canonicalAddress)
   // Raw extrinsic/event counts badge the two promoted tabs; ScopedActivity asks
   // for the same key, so the two share one request.
   const activityCounts = useAccountActivityCounts(address)
@@ -129,12 +132,14 @@ export function Account({ address }: { address: string }) {
           const explicitEvmBinding = data.aliases.find(alias => alias.relationship === 'explicit_binding' && alias.evmAddress)?.evmAddress
           // Debt counts from every market and is netted out of the portfolio Value.
           const debtUsd = moneyMarketDebtUsd(mmList)
-          const tabs = profileTabs(data.balances.length, { orders: (data.activeDcas?.length ?? 0) + (data.openLimitOrders?.length ?? 0), liquidity: data.liquidityPositions?.length ?? 0, borrow: mmList.length, strategies: (juicer.data?.positions.length ?? 0) + (bil.data?.position ? 1 : 0) + (bonds.data?.positions.length ?? 0), strategiesUnsettled: juicer.isLoading || juicer.isError || juicer.data?.asOfBlock == null || bil.isLoading || bil.isError || bil.data?.asOfBlock == null || bonds.isLoading || bonds.isError || bonds.data?.asOfBlock == null, presence: presence.data, presenceLoading: presence.isLoading, requestedView: view }, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd, data.userRevenueUsd)
+          const tabs = profileTabs(data.balances.length, { orders: (data.activeDcas?.length ?? 0) + (data.openLimitOrders?.length ?? 0), liquidity: data.liquidityPositions?.length ?? 0, borrow: mmList.length, strategies: (juicer.data?.positions.length ?? 0) + (bil.data?.position ? 1 : 0) + (bonds.data?.positions.length ?? 0), strategiesUnsettled: juicer.isLoading || juicer.isError || juicer.data?.asOfBlock == null || bil.isLoading || bil.isError || bil.data?.asOfBlock == null || bonds.isLoading || bonds.isError || bonds.data?.asOfBlock == null, presence: presence.data, presenceLoading: presence.isLoading, requestedView: view }, activityTotal.data, votesTotal.data?.total ?? undefined, !!data.contract, activityCounts.data?.extrinsics, activityCounts.data?.events, data.revenueUsd, data.userRevenueUsd,
+            data.balances.some(b => b.asset.assetId === 0 && (b.breakdown ?? []).some(c => c.kind === 'lock' && c.source === 'vote'))
+              || (data.proxy?.delegatorOf.length ?? 0) > 0 || (forumCount.data?.total ?? 0) > 0)
           const activeView = resolveProfileView(view, tabs)
           return (
             <>
               {/* Above the header card and right-aligned, matching "Open in preis"
-                  on the asset page and "Open in Subsquare" on a referendum. */}
+                  on the asset page and the actions row on a referendum. */}
               <div className="ext-link-row">
                 {isOwn && <button type="button" className="ext-link" style={{ cursor: 'pointer' }} onClick={() => { setEditMounted(true); setEditOpen(true) }}>Edit profile</button>}
                 {/* Watching an account is the single most-asked-for alert, and
@@ -310,7 +315,7 @@ export function Account({ address }: { address: string }) {
 
                 {activeView === 'events' && <ScopedActivity scope={{ kind: 'account', address }} tab="events" />}
 
-                {activeView === 'votes' && <VotesTab scope={{ kind: 'account', address }} />}
+                {activeView === 'governance' && <AccountGovernance address={canonicalAddress ?? address} />}
 
                 {activeView === 'revenue' && <RevenueBreakdownTab scope={{ kind: 'account', address }} />}
                 {activeView === 'user-revenue' && <UserRevenueTab scope={{ kind: 'account', address }} />}

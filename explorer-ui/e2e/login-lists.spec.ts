@@ -75,15 +75,13 @@ async function openConnectDialog(page: Page): Promise<void> {
 // account → the topbar resolves the mocked profile name and the session
 // token lands in localStorage. Shared by the desktop and mobile variants
 // below — the dialog's own contents don't depend on viewport, only how it's
-// reached does. Clicks the Nova tile rather than Polkadot{.js} — Nova is in
-// the default shortlist (C1) and shares the same stubbed 'polkadot-js'
-// injected key, so it exercises the exact same connect path without first
-// opening "Other wallets" (that toggle gets its own dedicated coverage below).
+// reached does. The stubbed 'polkadot-js' extension outside Nova's browser IS
+// Polkadot{.js}, which an installed extension promotes into the shortlist.
 async function loginFlow(page: Page): Promise<void> {
   await page.goto('/')
   await openConnectDialog(page)
 
-  const walletRow = page.locator('.wallet-tile', { hasText: 'Nova Wallet' })
+  const walletRow = page.locator('.wallet-tile', { hasText: 'Polkadot{.js}' })
   await expect(walletRow).toContainText('Installed')
   await walletRow.click()
 
@@ -100,37 +98,42 @@ test('connect a wallet and sign in', async ({ page, userMock, injectedWallet }) 
 })
 
 // Nova shares the 'polkadot-js' injected key (it acts as polkadot-js inside
-// its own in-app browser) but gets a separate visual tile — distinct name,
-// icon and install link — rather than folding into the Polkadot{.js} tile.
-// Both must read "Installed" off the one stubbed extension, and either tile
-// must be able to complete the same connect/sign flow.
-test('Nova Wallet has its own tile and connects through the shared polkadot-js key', async ({ page, userMock, injectedWallet }) => {
+// its own in-app browser). Which one answers is Nova's own flag: inside Nova
+// the tile is "Nova Wallet" and Polkadot{.js} is hidden; anywhere else the
+// extension is Polkadot{.js} and Nova is only an install link.
+test('the polkadot-js key is labelled Nova only inside Nova\'s browser', async ({ page, userMock, injectedWallet }) => {
   void userMock; void injectedWallet
   await page.goto('/')
   await openConnectDialog(page)
+  await expect(page.locator('.wallet-tile', { hasText: 'Nova Wallet' })).not.toContainText('Installed')
+  await expect(page.locator('.wallet-tile', { hasText: 'Polkadot{.js}' })).toContainText('Installed')
+  await page.keyboard.press('Escape')
 
+  await page.addInitScript(() => { (window as unknown as { walletExtension: unknown }).walletExtension = { isNovaWallet: true } })
+  await page.reload()
+  await openConnectDialog(page)
   const novaTile = page.locator('.wallet-tile', { hasText: 'Nova Wallet' })
   await expect(novaTile).toContainText('Installed')
+  await expect(page.locator('.dialog-body')).not.toContainText('Polkadot{.js}')
   await novaTile.click()
-
   await expect(page.locator('.account-btn .account-label')).toHaveText('E2E User')
 })
 
-// C1: the wallet grid shows only a shortlist (Talisman, Nova, SubWallet) by
-// default; every other substrate wallet — including Polkadot{.js}, whose
-// injected key Nova's own tile shares — sits behind an "Other wallets"
-// toggle until it's opened, and the toggle resets closed on every reopen.
+// C1: the wallet grid shows only a shortlist (Talisman, Nova, SubWallet, plus
+// an installed Polkadot{.js}) by default; every other substrate wallet sits
+// behind an "Other wallets" toggle until it's opened, and the toggle resets
+// closed on every reopen.
 test('the wallet grid shows a shortlist by default, and "Other wallets" reveals the rest', async ({ page, userMock, injectedWallet }) => {
   void userMock; void injectedWallet
   await page.goto('/')
   await openConnectDialog(page)
 
   const grid = page.locator('.dialog-body .wallet-grid').first()
-  await expect(grid.locator('.wallet-tile')).toHaveCount(3)
+  await expect(grid.locator('.wallet-tile')).toHaveCount(4)
+  await expect(grid).toContainText('Polkadot{.js}')
   await expect(grid).toContainText('Talisman')
   await expect(grid).toContainText('Nova Wallet')
   await expect(grid).toContainText('SubWallet')
-  await expect(page.locator('.dialog-body')).not.toContainText('Polkadot{.js}')
   await expect(page.locator('.dialog-body')).not.toContainText('Aleph Zero')
 
   // A stable class-based locator, not a role+name query — the button's own
@@ -144,20 +147,13 @@ test('the wallet grid shows a shortlist by default, and "Other wallets" reveals 
 
   await expect(toggle).toHaveAttribute('aria-expanded', 'true')
   await expect(toggle).toHaveText('Fewer wallets')
-  const otherTile = page.locator('.wallet-tile', { hasText: 'Polkadot{.js}' })
-  await expect(otherTile).toContainText('Installed')
   await expect(page.locator('.wallet-tile', { hasText: 'Aleph Zero Signer' })).toBeVisible()
 
   // Closing and reopening the dialog resets the toggle, not just the wallet stage.
   await page.keyboard.press('Escape')
   await openConnectDialog(page)
   await expect(toggle).toHaveAttribute('aria-expanded', 'false')
-  await expect(page.locator('.dialog-body')).not.toContainText('Polkadot{.js}')
-
-  // The revealed tile still completes the same connect flow as a shortlisted one.
-  await toggle.click()
-  await page.locator('.wallet-tile', { hasText: 'Polkadot{.js}' }).click()
-  await expect(page.locator('.account-btn .account-label')).toHaveText('E2E User')
+  await expect(page.locator('.dialog-body')).not.toContainText('Aleph Zero')
 })
 
 // C12: a public list's Subscribe affordance shows for logged-out visitors
@@ -175,7 +171,7 @@ test('logged out, clicking Subscribe on a /tags row opens the login dialog', asy
 
   await subscribeBtn.click()
 
-  await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
+  await expect(page.locator('.dialog-head h2')).toHaveText('Sign in with your wallet')
 })
 
 // New user request: a visitor with no session, viewing an account TAGGED IN
@@ -208,7 +204,7 @@ test.describe('Account page — logged-out "tagged in a public list" hint', () =
 
     await hint.getByRole('button', { name: 'login to subscribe' }).click()
 
-    await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
+    await expect(page.locator('.dialog-head h2')).toHaveText('Sign in with your wallet')
   })
 
   // No tagged-in membership at all — the hint has nothing to say, even
@@ -289,7 +285,7 @@ test('a user tag outranks the system tag — even with a single member, it becom
   await expect(page.locator('.accounts-tbl tbody tr', { hasText: 'Treasury' })).toHaveCount(0)
 
   await page.locator('.account-btn').click()
-  await page.locator('.account-menu button', { hasText: 'Log out' }).click()
+  await page.locator('.account-menu button', { hasText: 'Sign out' }).click()
 
   // Logged out: the fold is gone, and Treasury's own system-tag row — with
   // its own real $980k — is back.
@@ -332,7 +328,7 @@ test('a user tag holding two on-page accounts folds them into one row, and unfol
   await expect(page.locator('.accounts-tbl tbody tr', { hasText: '410k' })).toHaveCount(0)
 
   await page.locator('.account-btn').click()
-  await page.locator('.account-menu button', { hasText: 'Log out' }).click()
+  await page.locator('.account-menu button', { hasText: 'Sign out' }).click()
 
   await expect(page.locator('.accounts-tbl tbody tr', { hasText: 'Whales' })).toHaveCount(0)
   await expect(page.locator('.accounts-tbl tbody tr', { has: page.locator('td[data-label="Value"]', { hasText: '1.24M' }) })).toHaveCount(1)
@@ -563,13 +559,13 @@ test('a logged-out visitor on a user-tag URL sees a log-in hint, not "Tag not fo
   await page.goto(`/tag/${USER_TAG_ID}`)
 
   const card = page.locator('.detail-card')
-  await expect(card).toContainText(/log in/i)
+  await expect(card).toContainText(/sign in/i)
   await expect(card).not.toContainText('Tag not found')
 
   // The affordance is real, not decorative text — it opens the actual dialog.
-  // Scoped to the card: the topbar carries its own "Log in" button too.
-  await card.getByRole('button', { name: 'Log in' }).click()
-  await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
+  // Scoped to the card: the topbar carries its own "Sign in" button too.
+  await card.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page.locator('.dialog-head h2')).toHaveText('Sign in with your wallet')
 })
 
 // Provenance is one quiet link — the list's name, with the owner in its
@@ -780,7 +776,7 @@ test('an already-subscribed public list shows Unsubscribe on /lists, and unsubsc
 test('logged out, /lists still shows Public lists (with a real Subscribe → log-in flow) alongside the log-in prompt for Your lists', async ({ page }) => {
   await page.goto('/lists')
 
-  await expect(page.locator('.detail-card', { hasText: 'Log in to manage your lists' })).toBeVisible()
+  await expect(page.locator('.detail-card', { hasText: 'Sign in to manage your lists' })).toBeVisible()
 
   const row = page.locator('tbody tr', { hasText: 'DeFi desks' })
   const subscribeBtn = row.getByRole('button', { name: 'Subscribe', exact: true })
@@ -789,7 +785,7 @@ test('logged out, /lists still shows Public lists (with a real Subscribe → log
 
   await subscribeBtn.click()
 
-  await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
+  await expect(page.locator('.dialog-head h2')).toHaveText('Sign in with your wallet')
 })
 
 // New user request: "I want to be able to click on my lists in /lists on the

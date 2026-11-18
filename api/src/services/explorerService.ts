@@ -1,7 +1,8 @@
+import { textFold } from './forumView.ts'
 import { wormholeAssetBridge, wormholeRemoteToken, type WormholeAssetBridge, type WormholeRemoteToken } from './wormholeRemoteTokens.ts'
 import { NEAR_WORMHOLE_CHAIN_ID, nearAccountUrl, nearArrivalOrigin, nearRecipientFromRefund, nearSendDestination, type FarAccount } from './nearBridge.ts'
 import type { ClickHouseClient } from '../db/client.ts'
-import { inChunkedSql, mapParamChunks } from '../db/queryParams.ts'
+import { chunkByParamBytes, inChunkedSql, mapParamChunks } from '../db/queryParams.ts'
 import { rayMul, settledAmount } from './aaveMath.ts'
 import { onBehalfActorsFor } from './onBehalfActors.ts'
 import { usdOfRaw } from './assetValue.ts'
@@ -3688,7 +3689,11 @@ export async function getExtrinsic(hash: string): Promise<ExtrinsicDetail | null
                      e.fee AS fee, e.tip AS tip, e.call_args_json AS call_args_json, e.error_json AS error_json,
                      b.spec_version AS spec_version
               FROM price_data.raw_extrinsics e
-              LEFT JOIN price_data.blocks b ON b.block_height = e.block_height
+              -- Only the blocks holding the hash: joined whole, the 16.8M-row block table
+              -- became the hash table (2 GiB).
+              LEFT JOIN (SELECT block_height, spec_version FROM price_data.blocks
+                         WHERE block_height IN (SELECT block_height FROM price_data.raw_extrinsics WHERE extrinsic_hash = {hash:String})) b
+                ON b.block_height = e.block_height
               WHERE e.extrinsic_hash = {hash:String} ORDER BY e.block_height DESC LIMIT 1`,
       query_params: { hash: hash.toLowerCase() }, format: 'JSONEachRow',
     })
@@ -26965,14 +26970,18 @@ async function transferCandidatePotFiltersSql(accCond: string[], opts: { erc20?:
 // Whether this account's transfer history is larger than the arm will take on.
 // `account` is the read model's sort-key prefix, so this is a marks read.
 // The ERC-20 Transfer legs of the accounts' H160s count against the same budget —
-// `holder` is that table's sort-key prefix, so it is a marks read too.
+// `holder` is that table's sort-key prefix, so it is a marks read too. Each side stops
+// one row past the budget: whichever side passes it decides the answer alone, and
+// below it both are exact, so the sum is over the budget exactly when the full counts
+// are — while the busiest pots no longer read all of their tens of millions of rows.
 async function transferCandidatesExceedExactBudget(accCond: string[]): Promise<boolean> {
   const holders = [...new Set(accCond.map(evmAddressOfAccount))]
   const res = await client.query({
-    query: `SELECT (SELECT count() FROM price_data.account_transfer_activity
-                    WHERE account IN (${accCond.map(a => `'${a}'`).join(',')}))
-                 + (SELECT count() FROM price_data.erc20_transfer_deltas
-                    WHERE holder IN (${holders.map(h => `'${h}'`).join(',')})) AS c`,
+    query: `SELECT (SELECT count() FROM (SELECT 1 FROM price_data.account_transfer_activity
+                    WHERE account IN (${accCond.map(a => `'${a}'`).join(',')}) LIMIT {cap:UInt32}))
+                 + (SELECT count() FROM (SELECT 1 FROM price_data.erc20_transfer_deltas
+                    WHERE holder IN (${holders.map(h => `'${h}'`).join(',')}) LIMIT {cap:UInt32})) AS c`,
+    query_params: { cap: MAX_EXACT_TRANSFER_CANDIDATES + 1 },
     format: 'JSONEachRow',
   })
   return Number((await res.json<{ c: string }>())[0]?.c ?? 0) > MAX_EXACT_TRANSFER_CANDIDATES
@@ -30206,12 +30215,34 @@ async function countAccountExtrinsics(accounts: string[], cacheKey: string, filt
 // into UInt64 — not a hash, no collision to argue about, and no assumption about
 // how many events a block may hold — and a roaring bitmap counts that set
 // directly, for the same total in 3.7 s, 743 MiB and no spill.
+//
+// When only ONE of the accounts holds references (an address and its EVM twin, the
+// twin silent), no event can be reached twice, so the references are exactly that
+// account's distinct sort keys (account, block_height, event_index): a FINAL count,
+// partition-local because a reference's block fixes its month. That is the common
+// address page, and on the treasury's 34M references it costs 1.6 CPU-s and 180 MiB
+// against the bitmap's 8.5 CPU-s and 920 MiB. The same pass counts the accounts that
+// answered, so a set where two do falls through to the bitmap. An event-name filter
+// stays on the bitmap: it tests every stored version of a reference, FINAL only the
+// newest.
+const EVENT_TOTAL_FINAL_MAX_ACCOUNTS = 4
 async function countAccountEvents(accounts: string[], cacheKey: string, filters: EventListFilters, from?: string, to?: string): Promise<number> {
   const list = sqlAccountList(accounts)
   if (list === "''") return 0
   const bound = timeWindow(from, to) ?? '1'
   return cached(`explorer:events-total:${cacheKey}:${from ?? ''}:${to ?? ''}:${filterKey(filters)}`, 600_000, async () => {
     const eventFilter = filters.event?.trim() ? textNameFilter('event_name', 'eventName') : ''
+    if (!eventFilter && new Set(accounts).size <= EVENT_TOTAL_FINAL_MAX_ACCOUNTS) {
+      const res = await client.query({
+        query: `SELECT uniqExact(account) AS n, count() AS c
+                FROM price_data.account_activity_v3 FINAL
+                WHERE ${bound} AND account IN (${list})`,
+        format: 'JSONEachRow',
+        clickhouse_settings: { max_threads: 4, do_not_merge_across_partitions_select_final: 1 },
+      })
+      const row = (await res.json<{ n: string; c: string }>())[0]
+      if (Number(row?.n ?? 0) <= 1) return Number(row?.c ?? 0)
+    }
     const res = await client.query({
       query: `SELECT groupBitmap(bitShiftLeft(toUInt64(block_height), 32) + toUInt64(event_index)) AS c
               FROM price_data.account_activity_v3
@@ -31278,9 +31309,12 @@ interface ExtrinsicHydrationRow { block: number; extrinsic: number; hash: string
 async function hydrateOnBehalfExtrinsics(tuples: Set<string>): Promise<Map<string, ExtrinsicHydrationRow>> {
   const chunks = await mapChunksConcurrently([...tuples], 10_000, CHUNK_QUERY_CONCURRENCY, async keys => {
     const inList = keys.map(k => `(${k})`).join(',')
+    const blockList = [...new Set(keys.map(k => k.split(',')[0]))].join(',')
     const res = await client.query({
       // spec_version joins one level up (see the signed select) so a failed
-      // anchor extrinsic's error_json can be decoded into a failure reason.
+      // anchor extrinsic's error_json can be decoded into a failure reason —
+      // from the tuples' own blocks only: joined whole, the 16.8M-row block table
+      // became the hash table (1 GiB).
       query: `SELECT ext.*, b.spec_version AS spec_version
               FROM (
                 SELECT block_height AS block, extrinsic_index AS extrinsic, extrinsic_hash AS hash,
@@ -31291,7 +31325,8 @@ async function hydrateOnBehalfExtrinsics(tuples: Set<string>): Promise<Map<strin
                 ORDER BY ingested_at DESC
                 LIMIT 1 BY block_height, extrinsic_index
               ) AS ext
-              LEFT JOIN price_data.blocks b ON b.block_height = ext.block`,
+              LEFT JOIN (SELECT block_height, spec_version FROM price_data.blocks WHERE block_height IN (${blockList})) b
+                ON b.block_height = ext.block`,
       format: 'JSONEachRow',
     })
     return res.json<ExtrinsicHydrationRow>()
@@ -32150,15 +32185,7 @@ async function activityLeaderboardPool(published: ActivityLeaderboard | null): P
   const fresh = published?.pool?.length && published.poolAt && published.tagRefs
     && Date.now() - Date.parse(published.poolAt) < ACTIVITY_LEADERBOARD_POOL_TTL_MS
   if (fresh) return { pool: published.pool as ActivityLeaderboardPoolMember[], refsOutside: published.refsOutside ?? 0, poolAt: published.poolAt as string, tagRefs: published.tagRefs as Record<string, number> }
-  const res = await client.query({
-    query: `SELECT account, toString(count()) AS refs FROM price_data.account_activity_v3
-            GROUP BY account
-            HAVING match(account, '^0x[0-9a-f]{64}$')
-            ORDER BY count() DESC LIMIT {limit:UInt32}`,
-    query_params: { limit: ACTIVITY_LEADERBOARD_POOL + 1 }, format: 'JSONEachRow',
-  })
-  const rows = (await res.json<{ account: string; refs: string }>())
-    .map(r => ({ account: r.account, refs: Number(r.refs) }))
+  const rows = await activityLeaderboardTopRefs(ACTIVITY_LEADERBOARD_POOL + 1)
   return {
     pool: rows.slice(0, ACTIVITY_LEADERBOARD_POOL),
     // No single account outside the pool can hold more feed rows than this.
@@ -32166,6 +32193,42 @@ async function activityLeaderboardPool(published: ActivityLeaderboard | null): P
     poolAt: new Date().toISOString(),
     tagRefs: await activityLeaderboardTagRefs(),
   }
+}
+
+// Disjoint ranges of account_activity_v3's leading key whose union holds every
+// '0x' + lower-case hex account (the only ones the pool ranks). The module accounts
+// (0x6d6f646c…) hold half the table, so their stretch is cut around the busiest pots.
+export const ACTIVITY_POOL_KEY_BOUNDS = [
+  '0x0', '0x2', '0x4', '0x5', '0x6',
+  '0x6d6f646c6f', '0x6d6f646c70', '0x6d6f646c72', '0x6d6f646c726f', '0x6d6f646c73',
+  '0x7', '0x8', '0xa', '0xc', '0xe', '0xg',
+]
+
+// The `limit` accounts with the most account_activity_v3 rows, largest first. Every
+// account lies in exactly one key range, so each range's own top `limit` holds every
+// account of the global top `limit` in it, and the merged lists' top `limit` carries
+// the same counts as one GROUP BY over the whole table — which, at 465M rows, ran
+// 11–18 s and into the 20 s cap. Each range is a primary-key-bounded read.
+export function mergeTopRefs(lists: readonly ActivityLeaderboardPoolMember[][], limit: number): ActivityLeaderboardPoolMember[] {
+  return lists.flat().sort((a, b) => b.refs - a.refs).slice(0, limit)
+}
+async function activityLeaderboardTopRefs(limit: number): Promise<ActivityLeaderboardPoolMember[]> {
+  const ranges = ACTIVITY_POOL_KEY_BOUNDS.slice(0, -1).map((lo, i) => ({ lo, hi: ACTIVITY_POOL_KEY_BOUNDS[i + 1] }))
+  const lists = await mapChunksConcurrently(ranges, 1, CHUNK_QUERY_CONCURRENCY, async ([{ lo, hi }]) => {
+    const res = await client.query({
+      query: `SELECT account, toString(count()) AS refs FROM price_data.account_activity_v3
+              WHERE account >= {lo:String} AND account < {hi:String}
+              GROUP BY account
+              HAVING match(account, '^0x[0-9a-f]{64}$')
+              ORDER BY count() DESC LIMIT {limit:UInt32}`,
+      query_params: { lo, hi, limit }, format: 'JSONEachRow',
+      // Four ranges at a time at two threads each: the eight threads the one
+      // statement over the whole table took.
+      clickhouse_settings: { max_threads: 2 },
+    })
+    return (await res.json<{ account: string; refs: string }>()).map(r => ({ account: r.account, refs: Number(r.refs) }))
+  })
+  return mergeTopRefs(lists, limit)
 }
 
 // Every system tag's summed member reference counts (see ActivityLeaderboard.tagRefs).
@@ -32481,12 +32544,19 @@ async function activitySourceMarksOf(scopes: ReadonlyMap<string, { accounts: str
         // each under the part signature it was read at (the one read above, before the fold).
         const sigs = new Map([...(prior ? [...prior].filter(([month, sig]) => partitions.get(month) === sig) : []), ...stale.map(month => [month, partitions.get(month)!] as [string, string])])
         const fresh = new Map<string, Map<string, SourceMark>>()
-        await mapParamChunks([...group], async chunk => {
-          for (const r of await read(chunk, stale, 'sealed')) {
+        // One statement per (id chunk, month). The read groups by month and FINAL stays
+        // inside each partition, so the per-month statements return exactly the rows one
+        // statement over every stale month would, but each stays bounded: a cold fold
+        // (every sealed month, as after a restart) over the busiest ids is ~350M rows,
+        // which as one statement ran into the 20 s cap on every cycle and so was never
+        // installed. A failed statement fails the whole group, which the next cycle reads again.
+        const reads = chunkByParamBytes([...group]).flatMap(chunk => stale.map(month => ({ chunk, month })))
+        await mapChunksConcurrently(reads, 1, CHUNK_QUERY_CONCURRENCY, async ([{ chunk, month }]) => {
+          for (const r of await read(chunk, [month], 'sealed')) {
             const months = fresh.get(r.id) ?? fresh.set(r.id, new Map()).get(r.id)!
             months.set(r.p, { refs: Number(r.refs), change: r.change, fp: r.fp })
           }
-        }, { concurrency: CHUNK_QUERY_CONCURRENCY })
+        })
         for (const id of group) {
           const months = new Map([...(folds.get(id)?.months ?? [])].filter(([month]) => sigs.has(month) && !stale.includes(month)))
           for (const [month, mark] of fresh.get(id) ?? []) months.set(month, mark)
@@ -35222,7 +35292,7 @@ export interface TagDetail {
 // Resolve a tag's canonical member account-id set (validated AccountId32 hexes).
 // Shared by getTag and the tag activity/extrinsics/events endpoints so they all
 // scope to the same accounts.
-function tagMembers(tagId: string): string[] | null {
+export function tagMembers(tagId: string): string[] | null {
   const tag = getTagRecord(tagId)
   if (!tag || !tag.members.length) return null
   return tag.members.filter(m => ACCOUNT_RE.test(m))
@@ -35268,7 +35338,7 @@ export function tagMembershipList(members: string[]): string {
 // list-totals — none hash the account list themselves) would otherwise keep serving
 // the previous membership's answer until its TTL lapses. Folding this into the scope
 // makes a membership change take effect immediately: the string itself changes.
-function membershipFingerprint(members: string[]): string {
+export function membershipFingerprint(members: string[]): string {
   return createHash('sha256').update(tagMembershipList(members)).digest('hex').slice(0, 16)
 }
 
@@ -36103,7 +36173,12 @@ export async function getDailyAccounts(): Promise<{ date: string; active: number
 
 // search
 export interface SearchResult {
-  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination' | 'intent'
+  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination' | 'intent' | 'discussion' | 'spend'
+  // For a `spend` hit: the treasury spend's index; `label` names it and `desc` states
+  // its amount and state.
+  // For a `discussion` hit: the forum post id ('42' native, 's248' imported), the
+  // route segment of /discussions/:id; `label` is its title and `desc` a short
+  // caption — both user-authored text, rendered as text only.
   value: string
   label?: string
   desc?: string   // asset-type: the descriptive name (e.g. DOT → "Polkadot")
@@ -36243,13 +36318,21 @@ function refreshActivityLeaderboard(): Promise<void> {
 // The activity ranking's own pass. Separate from the directory prewarm because the two
 // want completely different cadences: pages are cheap and want to be minutes fresh, while
 // an exact per-account total costs seconds of ClickHouse and changes slowly.
+// The first pass waits out the boot. A fresh process holds no sealed-month folds, so
+// its first source-watermark read covers every month of the swept set; landing at
+// listen, it competed with every other lane's cold start. Nothing waits on it: readers
+// serve the persisted ranking and totals meanwhile (ensureActivityLeaderboard).
+const ACTIVITY_LEADERBOARD_FIRST_DELAY_MS = 2 * 60_000
 export function startActivityLeaderboardRefresh(): void {
   if (activityLeaderboardTimer) return
   const cycle = async (): Promise<void> => {
     await refreshActivityLeaderboard().catch(error => console.warn('[explorer] activity leaderboard refresh failed', error))
   }
-  void cycle()
-  activityLeaderboardTimer = setInterval(() => { void cycle() }, ACTIVITY_LEADERBOARD_REFRESH_MS)
+  activityLeaderboardTimer = setTimeout(() => {
+    void cycle()
+    activityLeaderboardTimer = setInterval(() => { void cycle() }, ACTIVITY_LEADERBOARD_REFRESH_MS)
+    activityLeaderboardTimer.unref()
+  }, ACTIVITY_LEADERBOARD_FIRST_DELAY_MS)
   activityLeaderboardTimer.unref()
 }
 
@@ -36379,6 +36462,9 @@ const MAX_REFERENDUM_RESULTS = 8
 // Pool-name hits are ranked by TVL, so five covers every pool a reader can
 // plausibly mean while a broad substring ('pool') stays scannable.
 const MAX_POOL_RESULTS = 5
+const MAX_DISCUSSION_RESULTS = 5
+// An excerpt match is noise below this many characters ("a", "de" hit every post).
+const DISCUSSION_EXCERPT_MIN_QUERY = 3
 // Bounded snapshot of the whole referendum directory (Democracy 0-206, OpenGov
 // 0-369 as of writing — governance moves far slower than blocks or accounts, so
 // this ceiling comfortably covers the foreseeable count). getReferenda caches this
@@ -36397,6 +36483,46 @@ function referendumSearchResult(r: ReferendumListRow): SearchResult {
 // matcher below: without it, tag results came back in directory/insertion
 // order, so an exact "Treasury" tag sat under "Moonbeam Treasury" and
 // "Polkadot Treasury" merely because they were inserted first.
+// Forum discussions from the api's in-process forum snapshot (forumStore.ts): by
+// title (ranked like every name match), then by excerpt, and by number — a native
+// discussion's id is a decimal and an imported one is 's' plus Subsquare's post
+// number, so "248" finds both '248' and 's248'. Hidden and deleted discussions are
+// never offered (their titles are not served anywhere). Fail-soft and empty while
+// the snapshot loads: forum hits are additive and never cost the rest of the search.
+async function discussionSearchResults(query: string, asNumber: number | null): Promise<SearchResult[]> {
+  try {
+    const { forumReady, forumPosts, forumThreadCounts } = await import('./forumStore.ts')
+    if (!forumReady()) return []
+    const posts = [...forumPosts()].filter(p => p.kind === 'discussion' && !p.hidden && !p.deleted)
+    const ql = searchFold(query.trim())
+    // A bare number names the native discussion and the imported one ('248', 's248'),
+    // native first; the s-form names the imported one alone.
+    const ids = asNumber != null ? [String(asNumber), `s${asNumber}`] : /^s\d{1,10}$/.test(ql) ? [ql] : []
+    const byId = ids.flatMap(id => posts.filter(p => p.postId === id))
+    const byTitle = SEARCH_HAS_LETTER.test(query)
+      ? posts.map(p => ({ p, rank: nameMatchRank(p.title, ql) })).filter(x => x.rank >= 0)
+        .sort((a, b) => a.rank - b.rank || b.p.lastActivityAt - a.p.lastActivityAt).map(x => x.p)
+      : []
+    const byExcerpt = SEARCH_HAS_LETTER.test(query) && [...ql].length >= DISCUSSION_EXCERPT_MIN_QUERY
+      ? posts.filter(p => searchFold(p.excerpt).includes(ql)).sort((a, b) => b.lastActivityAt - a.lastActivityAt)
+      : []
+    const seen = new Set<string>()
+    const out: SearchResult[] = []
+    for (const p of [...byId, ...byTitle, ...byExcerpt]) {
+      if (seen.has(p.postId) || out.length >= MAX_DISCUSSION_RESULTS) continue
+      seen.add(p.postId)
+      const comments = forumThreadCounts(p.postId)?.comments ?? 0
+      out.push({
+        type: 'discussion', value: p.postId, label: p.title || `Discussion ${p.postId}`,
+        desc: `Discussion · ${comments} ${comments === 1 ? 'comment' : 'comments'}`,
+      })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
 // The pool directory as a search source. Fail-soft: pool hits are additive, so
 // a pools-index failure (or, in unit tests, an unwired poolService client) must
 // cost the pool entries alone, never the whole search response.
@@ -36424,20 +36550,30 @@ function poolSearchResult(p: import('./poolService.ts').PoolListEntry): SearchRe
 }
 
 function nameMatchRank(name: string, ql: string): number {
-  const t = name.toLowerCase()
+  const t = searchFold(name)
   if (t === ql) return 0
   if (t.startsWith(ql)) return 1
   const idx = t.indexOf(ql)
   if (idx < 0) return -1
-  return /[a-z0-9]/i.test(name[idx - 1]) ? 3 : 2
+  return /[\p{L}\p{N}]/u.test(t[idx - 1]) ? 3 : 2
 }
+
+// How search compares text: NFKC (so a full-width 'ＨＤＸ', a ligature or a
+// composed/decomposed accent matches its plain form) then lower case — any script,
+// not ASCII only. Applied to both the query and every name it is compared with.
+export function searchFold(text: string): string {
+  return textFold(text)
+}
+// Whether a query holds a letter in any script — the gate for the name matchers
+// (an all-digit or punctuation query is a number, a hash or an id instead).
+const SEARCH_HAS_LETTER = /\p{L}/u
 
 export async function search(q: string): Promise<SearchResult[]> {
   const query = q.trim()
   if (!query) return []
   // Single-flight cache: many users typing the same prefixes (and each user's
   // keystroke debounce) would otherwise hit ClickHouse per request.
-  return cached(`explorer:search:${query.toLowerCase()}`, 10000, () => searchUncached(query))
+  return cached(`explorer:search:${searchFold(query)}`, 10000, () => searchUncached(query))
 }
 
 // A number as the UI wrote it. Every height on every page renders through F.int,
@@ -36611,9 +36747,9 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
   // block lookup above still wins outright, since this only fires on a query
   // containing letters. Without the ranking, an exact "Treasury" tag sorted
   // below "Moonbeam Treasury"/"Polkadot Treasury" on directory order alone.
-  if (/[A-Za-z]/.test(query)) {
+  if (SEARCH_HAS_LETTER.test(query)) {
     const { allTags } = await import('./tagService.ts')
-    const ql = query.toLowerCase()
+    const ql = searchFold(query)
     const rankedTags = allTags()
       .map(t => ({ t, rank: nameMatchRank(t.name, ql) }))
       .filter(x => x.rank >= 0)
@@ -36665,12 +36801,12 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
   // name in `desc`. Ranked: exact symbol, then symbol prefix, then symbol
   // substring, then name substring; shortest symbol wins ties, and a share
   // follows the asset it is named for.
-  if (/[A-Za-z]/.test(query)) {
-    const ql = query.toLowerCase()
+  if (SEARCH_HAS_LETTER.test(query)) {
+    const ql = searchFold(query)
     const ranked = allExplorerAssets()
       .map(a => displayDescriptor(a.assetId))
       .map(a => {
-        const sym = a.symbol.toLowerCase(), name = (a.name ?? '').toLowerCase()
+        const sym = searchFold(a.symbol), name = searchFold(a.name ?? '')
         const rank = sym === ql ? 0 : sym.startsWith(ql) ? 1 : sym.includes(ql) ? 2 : name.includes(ql) ? 3 : -1
         return { a, rank }
       })
@@ -36687,8 +36823,8 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
   for (const d of XC_DESTINATIONS) {
     // The 1Click id matches only in full: every NEAR-hosted id ENDS in '.near',
     // so a substring test on it answered "near" with ZEC as well.
-    const q = query.toLowerCase()
-    const hay = [d.symbol, d.name, d.platform].map(v => v.toLowerCase())
+    const q = searchFold(query)
+    const hay = [d.symbol, d.name, d.platform].map(searchFold)
     if (!hay.some(v => v.includes(q)) && d.oneClickId.toLowerCase() !== q) continue
     // Carries the destination's CDN entry as an ordinary asset descriptor, so the
     // dropdown draws its icon through the same path every foreign asset uses —
@@ -36711,8 +36847,8 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
   // 'DOT / MYTH', …). Matching hits are ordered by TVL, not match tier: a
   // reader typing a fragment shared by several pools ('pool', 'DOT') means the
   // big one far more often than the best string match.
-  if (/[A-Za-z]/.test(query)) {
-    const ql = query.toLowerCase()
+  if (SEARCH_HAS_LETTER.test(query)) {
+    const ql = searchFold(query)
     const poolHits = (await poolDirectoryForSearch())
       .filter(p => nameMatchRank(p.name, ql) >= 0)
       .sort((a, b) => (b.tvlUsd ?? -1) - (a.tvlUsd ?? -1))
@@ -36723,7 +36859,7 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
   // Identity name — case-insensitive substring on Identity.IdentityOf display
   // (e.g. "kraken", "stakernode"). Returns the matching accounts as address
   // results, deduped against a direct address match above.
-  if (/[A-Za-z]/.test(query)) {
+  if (SEARCH_HAS_LETTER.test(query)) {
     // Drawn from the SHARED account budget, like every other address source below
     // (direct match, emoji name, 3-letter suffix), each of which already stops at
     // MAX_ACCOUNT_RESULTS. Identity was the one source with its own smaller number,
@@ -36744,7 +36880,7 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
   // Emoji name — the spelled-out avatar each account shows (e.g. "Mushroom" → 🍄,
   // "Fox" → 🦊, "Shark" → 🦈). Resolve the name to its glyph(s), then surface the
   // most-active accounts that render with that emoji (from the emoji index).
-  if (/[A-Za-z]/.test(query)) {
+  if (SEARCH_HAS_LETTER.test(query)) {
     for (const glyph of emojisMatchingName(query)) {
       if (results.filter(r => r.type === 'address').length >= MAX_ACCOUNT_RESULTS) break
       for (const id of accountsByEmoji(glyph)) {
@@ -36785,9 +36921,9 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
   // Referendum title — case-insensitive substring (e.g. "treasury spend"), ranked
   // prefix/word-start first and capped, off the same bounded directory snapshot
   // the digit branch above uses.
-  if (/[A-Za-z]/.test(query)) {
+  if (SEARCH_HAS_LETTER.test(query)) {
     const { getReferenda } = await import('./governanceService.ts')
-    const ql = query.toLowerCase()
+    const ql = searchFold(query)
     const directory = await getReferenda(REFERENDA_SEARCH_DIRECTORY_LIMIT, 0)
     const ranked = directory
       .map(r => (r.title ? { r, rank: nameMatchRank(r.title, ql) } : null))
@@ -36795,6 +36931,19 @@ async function searchUncached(query: string): Promise<SearchResult[]> {
       .sort((a, b) => a.rank - b.rank)
       .slice(0, MAX_REFERENDUM_RESULTS)
     for (const { r } of ranked) results.push(referendumSearchResult(r))
+  }
+
+  results.push(...await discussionSearchResults(query, asNumber))
+
+  // "spend 3", "spend #3", "treasury spend 3": a treasury spend by its index.
+  const spend = /^(?:treasury\s+)?spend\s*#?\s*(\d{1,6})$/i.exec(query.trim())
+  if (spend) {
+    const { treasuryFold } = await import('./governanceTreasury.ts')
+    const s = (await treasuryFold()).spends.find(x => x.index === Number(spend[1]))
+    if (s) {
+      const whole = (BigInt(s.amount) / 10n ** 12n).toLocaleString('en-US')
+      results.push({ type: 'spend', value: String(s.index), label: `Treasury spend #${s.index}`, desc: `${whole} HDX · ${s.state}` })
+    }
   }
 
   return results

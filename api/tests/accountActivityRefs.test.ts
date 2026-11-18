@@ -76,9 +76,10 @@ describe('account-activity reference reads limit per account, then merge', () =>
     // block_height and event_index are both UInt32, so the 32-bit shift packs a
     // reference into a UInt64 one-to-one. A narrower shift would depend on how
     // many events a block may hold, and uniq/uniqExact would trade the exact
-    // total for memory.
+    // total for memory. The one uniq counts the ACCOUNTS that answered (the
+    // one-account FINAL path, boundedReads.test.ts), never the references.
     expect(fn).toContain('groupBitmap(bitShiftLeft(toUInt64(block_height), 32) + toUInt64(event_index))')
-    expect(fn).not.toMatch(/\buniq\w*\(/)
+    expect(fn.match(/\buniq\w*\([^)]*\)/g)).toEqual(['uniqExact(account)'])
     expect(fn).not.toContain('GROUP BY')
   })
 
@@ -139,8 +140,8 @@ describe('the account activity index has exactly one table behind it', () => {
     // leaderboard's per-tag reference sums (activityLeaderboardTagRefs), the bound
     // an uncounted tag row is held to. 11: the activity totals' source watermark
     // (activitySourceRefs: rows at or below a count's head, so backward ingestion
-    // re-queues the entity).
-    expect(occurrences(explorerService, 'price_data.account_activity_v3')).toBe(11)
+    // re-queues the entity). 12: the events total's one-account FINAL count.
+    expect(occurrences(explorerService, 'price_data.account_activity_v3')).toBe(12)
     expect(occurrences(affinityService, 'price_data.account_activity_v3')).toBe(2)
   })
 
@@ -152,9 +153,11 @@ describe('the account activity index has exactly one table behind it', () => {
     expect(occurrences(materializedViews, 'price_data.account_activity_v3_mv TO price_data.account_activity_v3 ')).toBe(1)
   })
 
-  // The repointed reads are deliberately non-FINAL (the one FINAL read, the activity
-  // totals' source watermark, counts deduplicated identities on purpose and is pinned in
-  // accountDirectoryActivity.test.ts): `account` leads the sort key, so
+  // The repointed reads are deliberately non-FINAL (the FINAL reads count deduplicated
+  // identities on purpose: the activity totals' source watermark, pinned in
+  // accountDirectoryActivity.test.ts, and the events total when one account answers,
+  // pinned in boundedReads.test.ts — a partition-local FINAL count is a fifth of the
+  // bitmap's cost on one account's 34M references): `account` leads the sort key, so
   // a pinned account prunes to its own granules, while FINAL would force a merging
   // read across the partition set. Un-merged ReplacingMergeTree duplicates are
   // collapsed by the callers' own GROUP BY / groupBitmap instead.
@@ -162,8 +165,11 @@ describe('the account activity index has exactly one table behind it', () => {
     const reads = explorerService.split('FROM price_data.account_activity_v3\n').slice(1)
     expect(reads).toHaveLength(7)
     for (const read of reads) expect(read.slice(0, 400)).not.toContain('FINAL')
-    // The source watermark's FINAL read names its table through ACTIVITY_SOURCE_TABLES.
-    expect(occurrences(explorerService, 'FROM price_data.account_activity_v3 FINAL\n')).toBe(0)
+    // The source watermark's FINAL read names its table through ACTIVITY_SOURCE_TABLES;
+    // the one literal FINAL read is the events total's one-account count.
+    expect(occurrences(explorerService, 'FROM price_data.account_activity_v3 FINAL\n')).toBe(1)
+    const eventsTotal = explorerService.slice(explorerService.indexOf('async function countAccountEvents'))
+    expect(eventsTotal.slice(0, eventsTotal.indexOf('\n}'))).toContain('FROM price_data.account_activity_v3 FINAL\n')
     expect(explorerService).toContain(`activity: { table: 'price_data.account_activity_v3', column: 'account'`)
 
     const affinityReads = affinityService.split('FROM price_data.account_activity_v3\n').slice(1)

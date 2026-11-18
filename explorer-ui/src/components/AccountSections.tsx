@@ -374,6 +374,9 @@ export function profileTabs(
   // account): the User Revenue tab exists exactly when its stat does — any
   // published figure, $0 included (the directory's rule).
   userRevenueUsd?: number | null,
+  // Governance without a vote of its own on record: a conviction lock, a proxy it can
+  // vote through, or forum activity — the tab shows, without a count.
+  hasGovernance = false,
 ): DetailTab[] {
   const p = positions.presence
   // A tab with nothing open still shows when its history exists; its badge then
@@ -395,7 +398,11 @@ export function profileTabs(
     // one level down made them invisible.
     { key: 'extrinsics', label: 'Extrinsics', ...(extrinsicsCount == null ? {} : { count: extrinsicsCount }) },
     { key: 'events', label: 'Events', ...(eventsCount == null ? {} : { count: eventsCount }) },
-    ...(votesCount && votesCount > 0 ? [{ key: 'votes', label: 'Votes', count: votesCount }] : []),
+    // Governance (an account's votes, locks, proxies and forum activity; a tag's the
+    // same summed over its members — each with the vote history) replaced the Votes
+    // tab; it shows wherever a vote was cast, or when it is asked for.
+    ...(votesCount && votesCount > 0 ? [{ key: 'governance', label: 'Governance', count: votesCount }]
+      : hasGovernance || positions.requestedView === 'governance' || positions.requestedView === 'votes' ? [{ key: 'governance', label: 'Governance' }] : []),
     ...(revenueUsd && revenueUsd > 0 ? [{ key: 'revenue', label: 'Protocol Revenue' }] : []),
     ...(userRevenueUsd != null ? [{ key: 'user-revenue', label: 'User Revenue' }] : []),
   ]
@@ -408,6 +415,8 @@ export function profileTabs(
 export function resolveProfileView(view: string, tabs: DetailTab[]): string {
   const has = (key: string) => tabs.some(t => t.key === key)
   if (view === 'positions') return ['borrow', 'liquidity', 'orders'].find(has) ?? 'overview'
+  // The Votes tab became Governance; an old ?view=votes link lands there.
+  if (view === 'votes') return has('governance') ? 'governance' : 'overview'
   return has(view) ? view : 'overview'
 }
 

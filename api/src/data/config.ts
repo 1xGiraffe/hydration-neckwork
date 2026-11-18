@@ -29,6 +29,10 @@ function parseAdmins(value: string | undefined): Set<string> {
 // pointer, the base URL /llms.txt teaches a client to call) are built from it.
 const publicUrl = (process.env.DATA_API_PUBLIC_URL?.trim() || 'https://hydration-data.neckwork.net').replace(/\/$/, '')
 
+// The explorer's origin: the token-management page a 401 points at, and the
+// pages forum items link to (`explorerUrl`).
+const explorerUrl = (process.env.EXPLORER_PUBLIC_URL?.trim() || 'https://hydration-explorer.neckwork.net').replace(/\/$/, '')
+
 export const dataConfig = {
   defaultPerMinute: parseCount(process.env.DATA_API_DEFAULT_PER_MINUTE, 'DATA_API_DEFAULT_PER_MINUTE', 30),
   defaultPerDay: parseCount(process.env.DATA_API_DEFAULT_PER_DAY, 'DATA_API_DEFAULT_PER_DAY', 20_000),
@@ -37,5 +41,6 @@ export const dataConfig = {
   // Where a 401's context points a developer: the docs portal on this host and
   // the explorer's token-management page.
   docsUrl: publicUrl + '/docs',
-  createTokenUrl: (process.env.EXPLORER_PUBLIC_URL?.trim() || 'https://hydration-explorer.neckwork.net').replace(/\/$/, '') + '/api-tokens',
+  createTokenUrl: explorerUrl + '/api-tokens',
+  explorerUrl,
 } as const

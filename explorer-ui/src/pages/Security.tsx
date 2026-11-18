@@ -1086,10 +1086,10 @@ export function Security({ section }: { section: SecuritySection | null }) {
           ? [{ label: 'Home', to: paths.dashboard() }, { label: 'Security', to: paths.security() }, { label: SECTION_LABELS[section] }]
           : [{ label: 'Home', to: paths.dashboard() }, { label: 'Security' }]} />
         <div className="sec-page-title-row">
-          <div className="page-title">
+          <h1 className="page-title">
             {section ? SECTION_LABELS[section] : 'Security'}
             <span className="sub">{section ? SECTION_BLURB[section] : 'circuit breakers, freezes and the levers that can stop the chain'}</span>
-          </div>
+          </h1>
           {/* The one place to subscribe: a single Security rule covers every
               safety action and every Wormhole backing or rate-limit event. */}
           <NotifyButton rule={{ kind: 'safety', params: {}, name: 'Security' }} label="Get notified"

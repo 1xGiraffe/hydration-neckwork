@@ -4,7 +4,7 @@ import type { MmMarketOption, JuicerDashboard, AccountJuicer, BilDashboard, Acco
   HoldersResponse, AddressDetail, SearchResult, Tag, AssetListItem, AssetFilterItem, FilterNames,
   AccountsPage, AccountSort, DirectoryActivityCounts, ContractsPage, ContractSort, ContractAbiPayload, ContractSourcesPayload, ContractTransactionsPage, ContractEventsPage, VerificationJob, DailyPoint, EventRow, EventDetail, ActivityRow, VoteRow, VotesByReferendumPage, AssetDetail, TagDetail, RevenueBreakdown, GovernanceOverview, GovernanceReferendaPage, CollectiveMotionsPage, TreasuryTipsPage,
   AccountHistoryResponse, CloseAccountsResponse, HdxDashboard,
-  RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, UserRevenueBreakdown, UserRevenueDashboard, UserRevenueFlowResponse, UserRevenueSummary, AssetPriceWindow, HollarDashboard, HollarWindowChart, HdxWindowChart, ChartWindowPayload, IceDashboard, IceOpenIntents, SecurityDashboard, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas, AssetLimitOrderBook, XcDestinationDetail, IntentOrderDetail,
+  RevenueDashboard, RevenueFlowResponse, RevenueRange, StakerDistributions, UserRevenueBreakdown, UserRevenueDashboard, UserRevenueFlowResponse, UserRevenueSummary, AssetPriceWindow, HollarDashboard, HollarWindowChart, HdxWindowChart, ChartWindowPayload, IceDashboard, IceOpenIntents, SecurityDashboard, TechCommitteeView, WormholeBridgeDetail, TradeDetail, DcaScheduleDetail, DcaExecutionDetail, AssetDcas, AssetLimitOrderBook, XcDestinationDetail, IntentOrderDetail,
   AssetLiquidity, PoolDetail, UniswapV3PoolDetail, UniswapV3PoolHistory, UniswapV3PoolLiquidity, UniswapV3PoolLpsResponse, OmnipoolDetail, PoolLpsResponse, OmnipoolAssetLpsResponse,
   ValueEvent, ReferendumDetail,
   ListSummaryRef, ListDetailResponse, ListTagDetail, TagMapResponse, MeResponse, ProfileRef, LoginChallengeResponse, LoginResponse,
@@ -15,6 +15,13 @@ import type { MmMarketOption, JuicerDashboard, AccountJuicer, BilDashboard, Acco
   WebPushSubscriptionInput,
   PositionScope, VolumeScope, VolumeHistory, ExplorerYields, OrderHistoryKind, OrderHistoryPage, PositionsPresence, LiquidityRewardsClaimed, LiquidityHistory, MoneyMarketHistory, MoneyMarketEarned,
 } from '../types'
+import type {
+  AccountForumPage, AccountGovernance, MembersGovernance, DiscussionSort, DiscussionsPage, ForumPost, ForumRevisions, ForumThread,
+  ForumMe, ForumPermissions, ForumPostWrite, ForumCommentWrite, ModerationQueue, ModerationLogPage,
+  GovernanceCalendar, GovernanceConvictionsResponse, GovernanceTracksResponse, ListedPostKind, NeedsVote, TallyHistory, ThreadFilter, ThreadSort,
+} from '../governanceTypes'
+import type { GovClock } from '../governanceClock'
+import type { GovernanceStats, ReferendumVotesPage } from '../governanceTypes'
 import { getSession, setSession } from '../session'
 // Live feeds stamp the pushed head onto their URLs (`h=`): the nginx
 // micro-cache keys on the URI alone, so a push-triggered refetch would
@@ -44,7 +51,12 @@ export class ApiError extends Error {
     this.body = body
   }
 }
-export interface ApiErrorBody { error?: string; message?: string; blockIndexed?: boolean; headBound?: number }
+export interface ApiErrorBody { error?: string; message?: string; blockIndexed?: boolean; headBound?: number; reason?: string; retryAfterSec?: number }
+
+/** A snapshot-backed route answering 503 `{reason: 'not-ready'}`: its data is still loading, not empty. */
+export function isNotReady(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 503 && error.body.reason === 'not-ready'
+}
 
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`/api${path}`, { signal })
@@ -71,8 +83,8 @@ async function authedJson<T>(method: string, path: string, body?: unknown, signa
   })
   if (response.status === 401 && token && !path.startsWith('/user/auth/')) setSession(null)
   if (!response.ok) {
-    const errBody = await response.json().catch(() => null) as { error?: string; message?: string } | null
-    throw new ApiError(response.status, errBody?.message || errBody?.error || `${response.status} ${response.statusText}`)
+    const errBody = await response.json().catch(() => null) as ApiErrorBody | null
+    throw new ApiError(response.status, errBody?.message || errBody?.error || `${response.status} ${response.statusText}`, errBody ?? {})
   }
   return response.json() as Promise<T>
 }
@@ -152,6 +164,8 @@ export const api = {
   // Gas for one EVM transaction, from the chain's own receipt (nothing indexes it).
   // 404 when the node cannot answer — the extrinsic page then omits the gas rows.
   evmReceipt: (txHash: string, signal?: AbortSignal) => getJson<EvmReceipt>(`/explorer/evm-tx/${txHash}/receipt`, signal),
+  // The head renderer preloads this read, the post and the thread's first page with
+  // exactly these URLs (api/src/routes/seo.ts, pagePreloads): change both together.
   referendum: (pallet: 'opengov' | 'democracy', index: number, signal?: AbortSignal, limit?: number) =>
     getJson<ReferendumDetail>(withQuery(`/explorer/referendum/${pallet}/${index}`, limit == null ? {} : { limit }), signal),
   dcaSchedule: (scheduleId: number, offset = 0, limit = 25, signal?: AbortSignal) => getJson<DcaScheduleDetail>(withQuery(`/explorer/dca/${scheduleId}`, { offset, limit }), signal),
@@ -276,8 +290,8 @@ export const api = {
   tagVotes: (tagId: string, offset = 0, limit = 25, from?: string, to?: string, signal?: AbortSignal) =>
     getJson<VoteRow[]>(withQuery(`/explorer/tag/${encodeURIComponent(tagId)}/votes`, { offset, limit, from, to }), signal),
   governance: (signal?: AbortSignal) => getJson<GovernanceOverview>('/explorer/governance', signal),
-  governanceReferenda: (pallet: 'opengov' | 'democracy', status?: string, track?: number, offset = 0, limit = 25, signal?: AbortSignal) =>
-    getJson<GovernanceReferendaPage>(withQuery('/explorer/governance/referenda', { pallet, status, track, offset, limit }), signal),
+  governanceReferenda: (pallet: 'opengov' | 'democracy', status?: string, offset = 0, limit = 25, signal?: AbortSignal) =>
+    getJson<GovernanceReferendaPage>(withQuery('/explorer/governance/referenda', { pallet, status, offset, limit }), signal),
   governanceMotions: (body: 'tc' | 'council', offset = 0, limit = 25, signal?: AbortSignal) =>
     getJson<CollectiveMotionsPage>(withQuery('/explorer/governance/motions', { body, offset, limit }), signal),
   governanceTips: (offset = 0, limit = 25, signal?: AbortSignal) =>
@@ -339,11 +353,22 @@ export const api = {
   bil: (signal?: AbortSignal) => getJson<BilDashboard>('/explorer/bil', signal),
   bonds: (family: string, signal?: AbortSignal) => getJson<BondDashboard>(`/explorer/bonds/${encodeURIComponent(family)}`, signal),
   security: (signal?: AbortSignal) => getJson<SecurityDashboard>('/explorer/security', signal),
+  // The Technical Committee alone; an api without the slim route answers 404, and
+  // the dashboard carries the same view.
+  techCommittee: (signal?: AbortSignal): Promise<TechCommitteeView> =>
+    getJson<TechCommitteeView>('/explorer/security/committee', signal)
+      .catch(async (e: unknown) => {
+        if (!(e instanceof ApiError && e.status === 404)) throw e
+        const d = await getJson<SecurityDashboard>('/explorer/security', signal)
+        return { techCommittee: d.guardians.techCommittee, memberSetAtBlock: d.guardians.memberSetAtBlock }
+      }),
   securityWormhole: (signal?: AbortSignal) => getJson<WormholeBridgeDetail>('/explorer/security/wormhole', signal),
   accounts: (offset = 0, limit = 50, sort: AccountSort = 'value', signal?: AbortSignal) => getJson<AccountsPage>(withQuery('/explorer/accounts', { offset, limit, sort }), signal),
   contracts: (offset = 0, limit = 50, sort: ContractSort = 'created', signal?: AbortSignal) => getJson<ContractsPage>(withQuery('/explorer/contracts', { offset, limit, sort }), signal),
   // Lazy verified-contract artifacts (Code/Read sub-tabs); 404 when unverified.
   contractAbi: (address: string, signal?: AbortSignal) => getJson<ContractAbiPayload>(`/explorer/contract/${encodeURIComponent(address)}/abi`, signal),
+  /** The verified ABI, or null for an unverified contract (200 either way, so no failed request is logged). */
+  contractAbiIfAny: (address: string, signal?: AbortSignal) => getJson<ContractAbiPayload | null>(`/explorer/contract/${encodeURIComponent(address)}/abi?optional=1`, signal),
   contractSources: (address: string, signal?: AbortSignal) => getJson<ContractSourcesPayload>(`/explorer/contract/${encodeURIComponent(address)}/sources`, signal),
   compilerVersions: (signal?: AbortSignal) => getJson<{ versions: string[] }>('/explorer/contract/compiler-versions', signal),
   // Contract-tab activity: the contract's own transactions and events with
@@ -471,6 +496,8 @@ export const userApi = {
     authedJson<VoteRow[]>('GET', withQuery(listTagPath(listId, tagId, '/votes'), { offset, limit, from, to }), undefined, signal),
   listTagVotesByReferendum: (listId: string, tagId: string, offset = 0, limit = 25, signal?: AbortSignal) =>
     authedJson<VotesByReferendumPage>('GET', withQuery(listTagPath(listId, tagId, '/votes-by-referendum'), { offset, limit }), undefined, signal),
+  listTagGovernance: (listId: string, tagId: string, signal?: AbortSignal) =>
+    authedJson<MembersGovernance>('GET', listTagPath(listId, tagId, '/governance'), undefined, signal),
   listTagActivityCounts: (listId: string, tagId: string, signal?: AbortSignal) =>
     authedJson<TabCounts>('GET', listTagPath(listId, tagId, '/counts'), undefined, signal),
   listTagListCount: (listId: string, tagId: string, query: ListCountQuery, signal?: AbortSignal) =>
@@ -563,6 +590,83 @@ export const positionsApi = {
     getJson<MoneyMarketEarned>(`/explorer/address/${encodeURIComponent(address)}/money-market-earned`, signal),
   moneyMarketHistoryWindow: (address: string, fromBlock: number, toBlock: number, signal?: AbortSignal) =>
     getJson<MoneyMarketHistory>(withQuery(`/explorer/address/${encodeURIComponent(address)}/money-market-history`, { fromBlock, toBlock }), signal),
+}
+
+// Governance and forum reads (api/src/routes/governance.ts). Forum responses carry the
+// store's `generation`; they are micro-cached two seconds at the edge.
+// After the reader's own forum write, reads carry `g=<generation the write returned>`:
+// a key the two-second edge micro-cache has never seen, so the author's next read is
+// fresh (see api/src/routes/governance.ts). Until a write, the plain URLs stay shared.
+let forumGeneration: string | null = null
+export function setForumGeneration(g: string | null | undefined): void { if (g) forumGeneration = g }
+const gen = () => forumGeneration ?? undefined
+
+export const govApi = {
+  clock: (signal?: AbortSignal) => getJson<GovClock>('/explorer/governance/clock', signal),
+  referendumVotes: (pallet: 'opengov' | 'democracy', index: number, opts: { sort: 'power' | 'time'; side: 'all' | 'aye' | 'nay' | 'abstain'; q?: string; offset: number; limit: number }, signal?: AbortSignal) =>
+    getJson<ReferendumVotesPage>(withQuery(`/explorer/referendum/${pallet}/${index}/votes`, { sort: opts.sort, side: opts.side === 'all' ? undefined : opts.side, q: opts.q, offset: opts.offset || undefined, limit: opts.limit }), signal),
+  tracks: (signal?: AbortSignal) => getJson<GovernanceTracksResponse>('/explorer/governance/tracks', signal),
+  // The conviction table alone; an api without the slim route answers 404, and the
+  // full tracks read carries the same table.
+  convictions: (signal?: AbortSignal): Promise<GovernanceConvictionsResponse> =>
+    getJson<GovernanceConvictionsResponse>('/explorer/governance/convictions', signal)
+      .catch((e: unknown) => {
+        if (e instanceof ApiError && e.status === 404) return getJson<GovernanceTracksResponse>('/explorer/governance/tracks', signal)
+        throw e
+      }),
+  tallyHistory: (pallet: 'opengov' | 'democracy', index: number, signal?: AbortSignal) =>
+    getJson<TallyHistory>(`/explorer/referendum/${pallet}/${index}/tally-history`, signal),
+  calendar: (from: string, to: string, signal?: AbortSignal) => getJson<GovernanceCalendar>(withQuery('/explorer/governance/calendar', { from, to }), signal),
+  tagGovernance: (tagId: string, signal?: AbortSignal) => getJson<MembersGovernance>(`/explorer/tag/${encodeURIComponent(tagId)}/governance`, signal),
+  accountGovernance: (address: string, signal?: AbortSignal) => getJson<AccountGovernance>(`/explorer/address/${encodeURIComponent(address)}/governance`, signal),
+  stats: (signal?: AbortSignal) => getJson<GovernanceStats>('/explorer/governance/stats', signal),
+  // POST: a reader's account set never goes into a URL (access logs keep URLs beside
+  // the IP). An api without the POST route answers 404/405, and only then is the
+  // older GET form used.
+  needsVote: async (accounts: string[], signal?: AbortSignal): Promise<NeedsVote> => {
+    const response = await fetch('/api/explorer/governance/needs-vote', {
+      method: 'POST', signal, cache: 'no-store',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ accounts }),
+    })
+    if (response.status === 404 || response.status === 405) return getJson<NeedsVote>(withQuery('/explorer/governance/needs-vote', { accounts: accounts.join(',') }), signal)
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as ApiErrorBody | null
+      throw new ApiError(response.status, body?.message || body?.error || `${response.status} ${response.statusText}`, body ?? {})
+    }
+    return response.json() as Promise<NeedsVote>
+  },
+  discussions: (opts: { sort?: DiscussionSort; q?: string; kind?: ListedPostKind; cursor?: string | null; limit?: number }, signal?: AbortSignal) =>
+    getJson<DiscussionsPage>(withQuery('/explorer/forum/discussions', { sort: opts.sort, q: opts.q, kind: opts.kind === 'discussion' ? undefined : opts.kind, cursor: opts.cursor ?? undefined, limit: opts.limit, g: gen() }), signal),
+  post: (postId: string, signal?: AbortSignal) => getJson<ForumPost>(withQuery(`/explorer/forum/post/${encodeURIComponent(postId)}`, { g: gen() }), signal),
+  thread: (threadKey: string, opts: { sort?: ThreadSort; filter?: ThreadFilter; cursor?: string | null; limit?: number }, signal?: AbortSignal) =>
+    getJson<ForumThread>(withQuery(`/explorer/forum/thread/${encodeURIComponent(threadKey)}`, { sort: opts.sort, filter: opts.filter ?? undefined, cursor: opts.cursor ?? undefined, limit: opts.limit, g: gen() }), signal),
+  revisions: (targetId: string, signal?: AbortSignal) => getJson<ForumRevisions>(withQuery(`/explorer/forum/revisions/${encodeURIComponent(targetId)}`, { g: gen() }), signal),
+  moderationLog: (cursor: string | null, signal?: AbortSignal) =>
+    getJson<ModerationLogPage>(withQuery('/explorer/forum/moderation-log', { cursor: cursor ?? undefined, limit: 50, g: gen() }), signal),
+  accountForumCount: (address: string, signal?: AbortSignal) =>
+    getJson<AccountForumPage>(withQuery(`/explorer/address/${encodeURIComponent(address)}/forum`, { limit: 1 }), signal),
+  accountForum: (address: string, cursor?: string | null, signal?: AbortSignal) =>
+    getJson<AccountForumPage>(withQuery(`/explorer/address/${encodeURIComponent(address)}/forum`, { cursor: cursor ?? undefined, limit: 25 }), signal),
+}
+
+// The forum's writes (api/src/routes/forum.ts): bearer session, never cached. Every
+// write returns the forum generation it produced, which the reads above then carry.
+export const forumApi = {
+  me: (signal?: AbortSignal) => authedJson<ForumMe>('GET', '/user/forum/me', undefined, signal),
+  permissions: (postId: string, signal?: AbortSignal) => authedJson<ForumPermissions>('GET', `/user/forum/permissions/${encodeURIComponent(postId)}`, undefined, signal),
+  createDiscussion: (body: { title: string; body: string; labels: string[] }) => authedJson<ForumPostWrite>('POST', '/user/forum/discussions', body),
+  editPost: (postId: string, body: { title?: string; body?: string; tldr?: string; labels?: string[] }) => authedJson<ForumPostWrite>('PATCH', `/user/forum/posts/${encodeURIComponent(postId)}`, body),
+  deletePost: (postId: string) => authedJson<{ ok: true; generation: string }>('DELETE', `/user/forum/posts/${encodeURIComponent(postId)}`),
+  addUpdate: (postId: string, body: string) => authedJson<ForumCommentWrite>('POST', `/user/forum/posts/${encodeURIComponent(postId)}/updates`, { body }),
+  createComment: (body: { threadKey: string; parentId?: string | null; body: string }) => authedJson<ForumCommentWrite>('POST', '/user/forum/comments', body),
+  editComment: (id: string, body: string) => authedJson<ForumCommentWrite>('PATCH', `/user/forum/comments/${encodeURIComponent(id)}`, { body }),
+  deleteComment: (id: string) => authedJson<{ ok: true; generation: string }>('DELETE', `/user/forum/comments/${encodeURIComponent(id)}`),
+  report: (body: { targetId: string; reason: string; note?: string }) => authedJson<{ ok: true; autoHidden: boolean }>('POST', '/user/forum/reports', body),
+  queue: (signal?: AbortSignal) => authedJson<ModerationQueue>('GET', '/user/admin/forum/queue', undefined, signal),
+  moderate: (body: { targetId: string; action: string; reasonCode: string }) => authedJson<{ ok: true; generation: string }>('POST', '/user/admin/forum/moderate', body),
+  setReport: (reportId: string, status: 'resolved' | 'dismissed') => authedJson<{ ok: true }>('POST', `/user/admin/forum/reports/${reportId}`, { status }),
+  mute: (body: { account: string; until: string | null; reason: string }) => authedJson<{ ok: true }>('POST', '/user/admin/forum/sanctions', body),
 }
 
 // The fetch helpers, for the feature modules that keep their own clients (api/volume.ts).

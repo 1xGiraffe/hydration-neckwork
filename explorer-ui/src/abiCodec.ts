@@ -1,4 +1,4 @@
-import { encodeFunctionData, decodeFunctionResult, decodeErrorResult } from 'viem'
+import { encodeFunctionData, decodeFunctionResult, decodeErrorResult, decodeFunctionData, parseAbi, toFunctionSelector } from 'viem'
 import type { Abi, AbiFunction } from 'viem'
 import type { AbiParam, AbiFunctionItem } from './abiShape'
 
@@ -137,4 +137,71 @@ export function parseArgs(fn: AbiFunctionItem, raws: string[]): unknown[] {
       throw new Error(`${label}: ${err instanceof Error ? err.message : String(err)}`)
     }
   })
+}
+
+/**
+ * Names an EVM call from a verified ABI: the function its selector matches and its
+ * decoded arguments, or null when the selector is not in the ABI or the calldata
+ * does not decode against it.
+ */
+export function decodeCalldata(abi: unknown[], data: string): { name: string; signature: string; args: { name: string; type: string; value: unknown }[] } | null {
+  if (!/^0x[0-9a-fA-F]{8}/.test(data)) return null
+  const selector = data.slice(0, 10).toLowerCase()
+  const fn = (abi as AbiFunction[]).find(item => item?.type === 'function' && (() => { try { return toFunctionSelector(item) === selector } catch { return false } })())
+  if (!fn) return null
+  try {
+    const decoded = decodeFunctionData({ abi: [fn], data: data as `0x${string}` })
+    const values = (decoded.args ?? []) as unknown[]
+    return {
+      name: fn.name,
+      signature: `${fn.name}(${fn.inputs.map(i => i.type).join(',')})`,
+      args: fn.inputs.map((input, i) => ({ name: input.name ?? `arg${i}`, type: input.type, value: values[i] })),
+    }
+  } catch {
+    return null
+  }
+}
+
+// Functions a governance proposal commonly calls on a contract with no verified
+// source here — the HOLLAR (GHO) token's facilitator admin, the Aave pool
+// configurator, ACL roles, ERC-20 basics, proxy upgrades and the incentives
+// controller. A selector match decodes the calldata with that signature; anything
+// else stays an unverified function.
+const KNOWN_FUNCTIONS = [
+  'function addFacilitator(address facilitator, string label, uint128 bucketCapacity)',
+  'function setFacilitatorBucketCapacity(address facilitator, uint128 newCapacity)',
+  'function removeFacilitator(address facilitator)',
+  'function transfer(address to, uint256 amount)',
+  'function approve(address spender, uint256 amount)',
+  'function transferFrom(address from, address to, uint256 amount)',
+  'function mint(address to, uint256 amount)',
+  'function setSupplyCap(address asset, uint256 newSupplyCap)',
+  'function setBorrowCap(address asset, uint256 newBorrowCap)',
+  'function configureReserveAsCollateral(address asset, uint256 ltv, uint256 liquidationThreshold, uint256 liquidationBonus)',
+  'function setReserveFreeze(address asset, bool freeze)',
+  'function setReservePause(address asset, bool paused)',
+  'function setReserveBorrowing(address asset, bool enabled)',
+  'function setReserveActive(address asset, bool active)',
+  'function setReserveFactor(address asset, uint256 newReserveFactor)',
+  'function setReserveInterestRateStrategyAddress(address asset, address newRateStrategyAddress)',
+  'function setDebtCeiling(address asset, uint256 newDebtCeiling)',
+  'function setBorrowableInIsolation(address asset, bool borrowable)',
+  'function setSiloedBorrowing(address asset, bool siloed)',
+  'function setReserveFlashLoaning(address asset, bool enabled)',
+  'function setLiquidationProtocolFee(address asset, uint256 newFee)',
+  'function setAssetEModeCategory(address asset, uint8 newCategoryId)',
+  'function setPoolPause(bool paused)',
+  'function setAssetSources(address[] assets, address[] sources)',
+  'function grantRole(bytes32 role, address account)',
+  'function revokeRole(bytes32 role, address account)',
+  'function transferOwnership(address newOwner)',
+  'function upgradeTo(address newImplementation)',
+  'function upgradeToAndCall(address newImplementation, bytes data)',
+  'function setEmissionPerSecond(address asset, address[] rewards, uint88[] newEmissionsPerSecond)',
+  'function setDistributionEnd(address asset, address reward, uint32 newDistributionEnd)',
+] as const
+
+/** Calldata decoded against the known-function list; null when its selector is not on it. */
+export function decodeKnownCalldata(data: string): ReturnType<typeof decodeCalldata> {
+  return decodeCalldata([...parseAbi(KNOWN_FUNCTIONS)], data)
 }

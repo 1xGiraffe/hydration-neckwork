@@ -1,8 +1,10 @@
 // Wallet connection for login only — enable an injected extension, list its
 // accounts, sign one message. No SDK: substrate extensions all speak the tiny
 // window.injectedWeb3 protocol, EVM wallets announce via EIP-6963 (with a
-// window.ethereum fallback for older injectors). WalletConnect is out of scope
-// for v1 (needs a relay origin the CSP forbids and a heavy dependency).
+// window.ethereum fallback for older injectors). WalletConnect is deliberately not
+// supported (its client's dependency tree; see AGENTS.md § Dependencies): a phone
+// reaches the explorer through a wallet app's in-app browser instead, which injects
+// the same extension API (`walletAppLink` below opens this page in one).
 
 // `id` is the catalog identity (React key, e2e selector target) — unique per
 // tile. `injectedKey` is which `window.injectedWeb3[...]` entry actually
@@ -11,7 +13,10 @@
 // link) while still connecting, and reporting installed, through the shared
 // 'polkadot-js' key.
 export interface SubstrateWalletInfo { id: string; title: string; installUrl: string; icon: string; injectedKey: string; installed: boolean; shortlist: boolean }
-export interface InjectedAccount { address: string; name?: string }
+// `type` is the key type the extension reports; 'ethereum' marks an H160 account
+// held in a substrate extension (Talisman, SubWallet, Nova), which cannot sign
+// Hydration extrinsics (the chain's accounts are AccountId32 with MultiSignature).
+export interface InjectedAccount { address: string; name?: string; type?: string }
 // The injected signer also carries signPayload (extrinsic signing, used by
 // the contract Write tab through dedot); only signRaw is typed here because
 // it is all this module calls itself.
@@ -40,16 +45,36 @@ const SUBSTRATE_WALLETS: { id: string; title: string; installUrl: string; icon: 
   { id: 'enkrypt', title: 'Enkrypt', installUrl: 'https://www.enkrypt.com/', icon: '/wallet-icons/enkrypt.svg', injectedKey: 'enkrypt', shortlist: false },
   { id: 'fearless-wallet', title: 'Fearless Wallet', installUrl: 'https://fearlesswallet.io/', icon: '/wallet-icons/fearless-wallet.svg', injectedKey: 'fearless-wallet', shortlist: false },
   { id: 'polkagate', title: 'PolkaGate', installUrl: 'https://polkagate.xyz/', icon: '/wallet-icons/polkagate.svg', injectedKey: 'polkagate', shortlist: false },
+  { id: 'manta-wallet-js', title: 'Manta Wallet', installUrl: 'https://chrome.google.com/webstore/detail/manta-wallet/enabgbdfcbaehmbigakijjabdpdnimlg', icon: '/wallet-icons/manta-wallet-js.svg', injectedKey: 'manta-wallet-js', shortlist: false },
 ]
+
+/** Nova Wallet's in-app browser injects as `polkadot-js` and flags itself here. */
+export function isNovaBrowser(): boolean {
+  return !!(window as { walletExtension?: { isNovaWallet?: boolean } }).walletExtension?.isNovaWallet
+}
 
 // Installed-first within each group (shortlist, then the rest) — an
 // install-link wallet never outranks one the visitor can actually click, but
 // a shortlisted wallet never drops behind the toggle just because it's not
 // installed. Array#filter is stable, so declaration order is the tiebreak
 // within a group with no explicit sort needed.
+//
+// Nova and Polkadot{.js} share the 'polkadot-js' injected key, so which one is
+// answering is decided by Nova's own flag, never by the key: inside Nova's
+// browser the Nova tile is the installed one and the Polkadot{.js} tile is
+// hidden; everywhere else the extension IS Polkadot{.js} — its tile reads
+// installed and joins the shortlist, and Nova is only an install link.
 export function listSubstrateWallets(): SubstrateWalletInfo[] {
   const injected = (window as InjectedWindow).injectedWeb3 ?? {}
-  const withStatus = SUBSTRATE_WALLETS.map(w => ({ ...w, installed: w.injectedKey in injected }))
+  const nova = isNovaBrowser()
+  const withStatus = SUBSTRATE_WALLETS
+    .filter(w => !(nova && w.id === 'polkadot-js'))
+    .map(w => {
+      const present = w.injectedKey in injected
+      if (w.id === 'nova') return { ...w, installed: present && nova }
+      if (w.id === 'polkadot-js') return { ...w, installed: present, shortlist: present }
+      return { ...w, installed: present }
+    })
   const byInstalled = (group: typeof withStatus) => [...group.filter(w => w.installed), ...group.filter(w => !w.installed)]
   return [...byInstalled(withStatus.filter(w => w.shortlist)), ...byInstalled(withStatus.filter(w => !w.shortlist))]
 }
@@ -124,4 +149,26 @@ export function accountRowLabel(
   if (ref.profile?.name) return { primary: ref.profile.name, kind: 'profile', address: ref.address }
   if (ref.identity?.display) return { primary: ref.identity.display, kind: 'identity', address: ref.address }
   return { primary: extensionName ?? null, kind: extensionName ? 'name' : null, address: ref.address }
+}
+
+// "Open this page in the wallet app": a link that opens a URL inside a mobile
+// wallet's in-app browser, where the wallet injects the extension API the
+// connectors above already speak. Only links each wallet documents or ships and
+// that we verified are listed:
+//   - SubWallet: https://mobile.subwallet.app/browser?url=<encoded>, the universal
+//     link its own app and its official deeplink tool (Koniverse/SubWallet-Deeplinks)
+//     build; the domain's apple-app-site-association and assetlinks.json claim
+//     /browser for app.subwallet.mobile.
+//   - Nova Wallet documents https://app.novawallet.io/open/dapp?url=… but it works
+//     only for a dApp listed in Nova's catalog (nova-utils), which this explorer is
+//     not, so it is left out until it is.
+//   - Talisman's mobile app documents no such link.
+export const WALLET_APP_LINKS: readonly { id: string; title: string; icon: string; link: (pageUrl: string) => string }[] = [
+  { id: 'subwallet-js', title: 'SubWallet', icon: '/wallet-icons/subwallet-js.svg', link: url => `https://mobile.subwallet.app/browser?url=${encodeURIComponent(url)}` },
+]
+
+/** Whether this looks like a phone or tablet browser (a coarse pointer and no hover), where the in-app-browser links help. */
+export function isTouchBrowser(): boolean {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    && window.matchMedia('(pointer: coarse)').matches && !window.matchMedia('(hover: hover)').matches
 }

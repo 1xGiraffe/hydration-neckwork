@@ -1,0 +1,182 @@
+/* The forum editor (MarkdownEditor.tsx). One quiet surface: mode tabs and the
+   formatting toolbar on top, the text (or its preview) in the middle, uploads and
+   notices under it, and the footer with whatever the host puts there and the
+   character count. Uses the explorer's tokens only, so both themes follow. */
+
+.mde {
+  position: relative;
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  transition: border-color .14s;
+}
+.mde:focus-within { border-color: color-mix(in srgb, var(--lavender) 55%, var(--border)); }
+.mde-disabled { opacity: .7; }
+
+/* ---- draft offer ---- */
+.mde-draft {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px;
+  padding: 9px 14px; font-size: 13px; color: var(--text-medium);
+  background: var(--lavender-soft); border-bottom: 1px solid var(--separator);
+  border-radius: 13px 13px 0 0;
+}
+.mde-draft-actions { display: inline-flex; gap: 12px; margin-left: auto; }
+
+/* ---- tabs + toolbar ---- */
+.mde-bar {
+  position: relative; display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px 6px 6px; border-bottom: 1px solid var(--separator);
+  min-width: 0;
+}
+.mde-tabs { display: flex; gap: 2px; flex: none; }
+.mde-tab {
+  height: 30px; padding: 0 12px; border-radius: 9px; border: 0; background: transparent;
+  font-size: 13px; font-weight: 600; color: var(--text-low); cursor: pointer;
+}
+.mde-tab:hover { color: var(--text-high); }
+.mde-tab.on { background: var(--panel-hover); color: var(--text-high); }
+
+.mde-tools {
+  display: flex; align-items: center; gap: 1px; margin-left: auto; min-width: 0;
+  overflow-x: auto; scrollbar-width: none;
+}
+.mde-tools::-webkit-scrollbar { display: none; }
+.mde-tool {
+  flex: none; display: inline-grid; place-items: center; width: 30px; height: 30px;
+  border: 0; border-radius: 8px; background: transparent; color: var(--text-medium); cursor: pointer;
+}
+.mde-tool:hover:not(:disabled) { background: var(--panel-hover); color: var(--text-high); }
+.mde-tool:disabled { cursor: not-allowed; opacity: .5; }
+.mde-tool[aria-expanded="true"] { background: var(--panel-hover); color: var(--text-high); }
+.mde-sep { flex: none; width: 1px; height: 18px; margin: 0 4px; background: var(--separator); }
+.mde-tool-blocked { opacity: .45; cursor: not-allowed; }
+.mde-inline-more { display: contents; }
+.mde-more-btn { display: none; }
+
+/* The "More" menu: the formatting a narrow editor does not show inline. */
+.mde-more-menu {
+  position: absolute; right: 6px; top: calc(100% + 4px); z-index: 30; min-width: 220px;
+  padding: 4px; border-radius: 12px; background: var(--bg-elev2); border: 1px solid var(--border);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .35); display: grid;
+}
+.mde-more-item {
+  display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 10px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--text-high); font-size: 13px; text-align: left; cursor: pointer;
+}
+.mde-more-item:hover, .mde-more-item:focus-visible { background: var(--panel-hover); outline: none; }
+.mde-more-item kbd { margin-left: auto; font-family: 'GeistMono', monospace; font-size: 11px; color: var(--text-low); }
+
+/* A narrow editor keeps bold, italic, link, image, mention, More and help in view. */
+@container (max-width: 600px) {
+  .mde-inline-more, .mde-sep { display: none; }
+  .mde-more-btn { display: inline-grid; }
+}
+
+/* A keyboard shortcut means nothing on a touch screen. */
+@media (hover: none) and (pointer: coarse) {
+  .mde-kbd-hint { display: none; }
+}
+
+/* Anchored to the bar (outside the toolbar's scroll box), so it is never clipped. */
+.mde-help-pop {
+  position: absolute; right: 6px; top: calc(100% + 4px); z-index: 30; width: min(340px, 86vw);
+  padding: 10px 12px; border-radius: 12px; background: var(--bg-elev2); border: 1px solid var(--border);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .35); font-size: 12.5px; color: var(--text-medium);
+}
+.mde-help-pop table { border-collapse: collapse; width: 100%; }
+.mde-help-pop td { padding: 3px 6px 3px 0; vertical-align: top; }
+.mde-help-pop td:first-child { white-space: nowrap; }
+.mde-help-pop code { font-family: 'GeistMono', monospace; font-size: 11.5px; color: var(--text-high); }
+.mde-help-pop p { margin: 8px 0 0; color: var(--text-low); }
+
+/* ---- body ---- */
+.mde-body { position: relative; }
+.mde-input {
+  display: block; width: 100%; box-sizing: border-box; resize: vertical; min-height: 96px;
+  padding: 12px 14px; border: 0; background: transparent; color: var(--text-high);
+  font: inherit; font-size: 14.5px; line-height: 1.6; overflow-wrap: anywhere;
+}
+.mde-input[hidden] { display: none; }
+.mde-input:focus, .mde-input:focus-visible { outline: none; }
+.mde-input::placeholder { color: var(--text-lowest); }
+.mde-preview { padding: 12px 14px; min-height: 96px; }
+.mde-preview-md { font-size: 14px; line-height: 1.65; }
+.mde-empty { margin: 0; color: var(--text-low); font-size: 13px; font-style: italic; }
+
+.mde-drop {
+  position: absolute; inset: 6px; z-index: 20; display: grid; place-items: center;
+  border: 2px dashed var(--lavender); border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-elev) 82%, var(--lavender));
+  color: var(--text-high); font-size: 14px; font-weight: 600; pointer-events: none;
+}
+
+/* ---- mention / referendum suggestions ---- */
+.mde-suggest {
+  position: absolute; left: 10px; right: 10px; bottom: 6px; z-index: 25; max-width: 420px;
+  list-style: none; margin: 0; padding: 4px; border-radius: 12px;
+  background: var(--bg-elev2); border: 1px solid var(--border); box-shadow: 0 12px 32px rgba(0, 0, 0, .35);
+  transform: translateY(100%);
+}
+.mde-suggest li {
+  display: flex; align-items: baseline; gap: 10px; padding: 7px 10px; border-radius: 8px; cursor: pointer;
+  font-size: 13px; min-width: 0;
+}
+.mde-suggest li.on { background: var(--lavender-soft); }
+.mde-suggest-primary { color: var(--text-high); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 55%; }
+.mde-suggest-secondary { color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* ---- uploads and notices ---- */
+.mde-uploads, .mde-notices { list-style: none; margin: 0; padding: 0 14px 8px; display: grid; gap: 6px; }
+.mde-public-note { margin: 0; padding: 0 14px 8px; font-size: 12px; line-height: 1.45; color: var(--text-medium); }
+.mde-upload { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--text-medium); min-width: 0; }
+.mde-upload-name { flex: 0 1 auto; min-width: 0; max-width: 40%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text-high); }
+.mde-upload-bar { flex: 1 1 80px; height: 4px; border-radius: 9999px; background: var(--panel-hover); overflow: hidden; }
+.mde-upload-bar > span { display: block; height: 100%; background: var(--lavender); border-radius: inherit; transition: width .2s var(--ease-standard, ease); }
+.mde-upload-state { flex: none; font-family: 'GeistMono', monospace; font-size: 11px; color: var(--text-low); min-width: 64px; text-align: right; }
+
+.mde-notices li {
+  display: flex; align-items: baseline; gap: 12px; padding: 8px 10px; border-radius: 10px;
+  font-size: 13px; color: var(--text-high);
+  background: var(--red-soft); border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
+}
+.mde-notices li > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+/* ---- footer ---- */
+.mde-foot {
+  display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap;
+  padding: 8px 10px 8px 14px; border-top: 1px solid var(--separator);
+}
+.mde-foot-main { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.mde-count { margin-left: auto; font-family: 'GeistMono', monospace; font-size: 11px; color: var(--text-low); white-space: nowrap; }
+.mde-count.near { color: var(--amber-text); }
+.mde-count.over { color: var(--red-text); font-weight: 600; }
+
+.mde-link-btn {
+  border: 0; background: none; padding: 0; cursor: pointer; font: inherit; font-size: 12.5px; font-weight: 600;
+  color: var(--lavender); text-decoration: underline; text-decoration-color: transparent; text-underline-offset: 3px;
+}
+.mde-link-btn:hover { text-decoration-color: currentColor; }
+.mde-link-btn.mde-muted { color: var(--text-medium); font-weight: 500; }
+
+@media (max-width: 720px) {
+  .mde-bar { gap: 4px; padding: 4px; }
+  .mde-tab { padding: 0 10px; }
+  .mde-tool { width: 34px; height: 34px; }
+  .mde-input { font-size: 16px; } /* no zoom-on-focus on iOS */
+  .mde-upload-name { max-width: 30%; }
+  .mde-suggest { right: 10px; max-width: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mde, .mde-upload-bar > span { transition: none; }
+}
+
+/* Last, so it wins over the phone sizes above: the narrowest editors trim spacing, not tools. */
+@container (max-width: 400px) {
+  .mde-bar { gap: 2px; }
+  .mde-tab { padding: 0 8px; }
+  .mde-tool { width: 30px; height: 32px; }
+}

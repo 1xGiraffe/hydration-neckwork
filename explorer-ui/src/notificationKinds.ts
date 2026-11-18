@@ -13,6 +13,8 @@ export const NOTIFICATION_KINDS: readonly NotificationKind[] = [
   'account-activity', 'large-trade', 'large-transfer', 'price', 'health-factor',
   'referendum', 'tc-motion', 'safety', 'extrinsic', 'event',
   'protocol-revenue', 'liquidation', 'mm-cap', 'block',
+  'forum-reply', 'forum-mention', 'forum-thread',
+  'gov-unvoted', 'gov-unlockable',
 ]
 
 // Display names for the kind itself (rule picker, rules list, inbox grouping).
@@ -31,6 +33,11 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   liquidation: 'Liquidation',
   'mm-cap': 'Money market cap',
   block: 'Future block',
+  'forum-reply': 'Forum replies',
+  'forum-mention': 'Forum mentions',
+  'forum-thread': 'Followed thread',
+  'gov-unvoted': 'Vote reminder',
+  'gov-unlockable': 'Unlockable HDX',
 }
 
 // One line of "what this kind watches", shown under the kind in the picker.
@@ -49,6 +56,37 @@ export const KIND_HINTS: Record<NotificationKind, string> = {
   liquidation: 'A money-market position being liquidated, chain-wide or for one account.',
   'mm-cap': 'A money market\'s borrow or supply cap being raised, lowered, reached, or opening up again — every reserve, or one token.',
   block: 'One future block being reached. Fires once, then the alert deletes itself.',
+  'forum-reply': 'Someone replying to one of your posts or comments in the forum.',
+  'forum-mention': 'Someone mentioning your account (@address) in a forum post or comment.',
+  'forum-thread': 'A new comment in one forum thread you follow — use Follow on the thread itself.',
+  'gov-unvoted': 'A live referendum one account has not voted on (nor delegated for) coming within hours of its decision or confirmation end.',
+  'gov-unlockable': 'Part of one account\'s conviction-voting lock reaching the block from which it can be unlocked.',
+}
+
+// The vote reminder's lead time, in hours: the server's bounds and default,
+// restated so the form opens on the default and refuses what the server would. The
+// chips are the leads people pick — a working day, a day, two, three.
+export const GOV_UNVOTED_LEAD_HOURS = { min: 1, max: 168, default: 24 } as const
+export const GOV_UNVOTED_LEAD_PRESETS: readonly { value: number; label: string }[] = [
+  { value: 6, label: '6h' },
+  { value: 24, label: '1 day' },
+  { value: 48, label: '2 days' },
+  { value: 72, label: '3 days' },
+]
+// The governance kinds watch ONE account by a bare `address` (never a tag).
+export const GOV_KINDS: readonly NotificationKind[] = ['gov-unvoted', 'gov-unlockable']
+export const isGovKind = (kind: NotificationKind): boolean => GOV_KINDS.includes(kind)
+
+// The forum kinds read the forum, not the chain: no block window, and no finality
+// to wait for — a reply is news the moment it is written.
+export const FORUM_KINDS: readonly NotificationKind[] = ['forum-reply', 'forum-mention', 'forum-thread']
+export const isForumKind = (kind: NotificationKind): boolean => FORUM_KINDS.includes(kind)
+
+// A followed thread's id, as the forum read routes accept it ('s248', '42',
+// 'opengov:450', 'external:0x…@6429878').
+export function isForumThreadKey(value: string): boolean {
+  const v = value.trim()
+  return v.length > 0 && v.length <= 160 && /^[A-Za-z0-9_:@.#-]+$/.test(v)
 }
 
 // Kinds whose alert fires once and then deletes itself (SELF_DELETING_KINDS on
@@ -94,22 +132,6 @@ export const SAFETY_KINDS = [
 export const SAFETY_DEFICIT_DEFAULT_USD = 100
 export const SAFETY_FUSE_DEFAULT_PCT = 90
 export const SAFETY_EGRESS_DEFAULT_PCT = 90
-
-// Hydration's OpenGov tracks, id → runtime name. The chain reports the numeric
-// id, so a rule stores the id and a picker offers the name; the server accepts
-// either and normalizes.
-export const REFERENDUM_TRACKS: readonly { id: number; name: string }[] = [
-  { id: 0, name: 'root' },
-  { id: 1, name: 'whitelisted_caller' },
-  { id: 2, name: 'referendum_canceller' },
-  { id: 3, name: 'referendum_killer' },
-  { id: 4, name: 'general_admin' },
-  { id: 5, name: 'treasurer' },
-  { id: 6, name: 'spender' },
-  { id: 7, name: 'tipper' },
-  { id: 8, name: 'omnipool_admin' },
-  { id: 9, name: 'economic_parameters' },
-]
 
 // The floor the two value-floor kinds (large trade, large transfer) share. Below
 // $100 a "large trade" is every trade: the row lane shares one window query per
@@ -235,9 +257,8 @@ export function targetParams(target: NotificationTarget): { target: Notification
  * "Is this exact alert already subscribed?" is asked by every subscribe
  * affordance on every surface, against rules the server wrote — which may spell
  * the same subscription differently from the button: a legacy `{ address }`
- * against a `{ target }`, a stored `threshold` against an omitted default, a
- * track id as a number against the string the store keeps, phases in a
- * different order. Canonicalizing per kind — and comparing the canonical form,
+ * against a `{ target }`, a stored `threshold` against an omitted default, an
+ * asset id as a number against a string, phases in a different order. Canonicalizing per kind — and comparing the canonical form,
  * never the raw object — is what makes the subscribed state survive a reload.
  */
 
@@ -265,7 +286,7 @@ function canonicalValue(value: unknown): unknown {
     }
     return out
   }
-  // A number that travelled as a string ('5' for a track id, '0' for an asset)
+  // A number that travelled as a string ('0' for an asset)
   // is the same parameter as the number itself.
   if (typeof value === 'string') {
     const t = value.trim()
@@ -321,6 +342,15 @@ function normalizeParams(kind: NotificationKind, params: Record<string, unknown>
     // flag, so nothing is invented for it.
     case 'large-trade':
       return { ...p, dcaStart: p.dcaStart === false ? false : true }
+    // The account is an address either way it was spelled; the lead has a server
+    // default a bell need not send.
+    case 'gov-unvoted':
+      return {
+        address: typeof p.address === 'string' ? normalizeAddress(p.address) : p.address,
+        leadHours: Number(p.leadHours ?? GOV_UNVOTED_LEAD_HOURS.default),
+      }
+    case 'gov-unlockable':
+      return { address: typeof p.address === 'string' ? normalizeAddress(p.address) : p.address }
     // Same reason as above: every security floor has a schema default, so a
     // stored rule carries numbers the "Get notified" button never sent. Without
     // the defaults applied on both sides that button would read "not subscribed"

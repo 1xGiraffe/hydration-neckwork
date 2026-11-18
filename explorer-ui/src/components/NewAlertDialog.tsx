@@ -8,11 +8,11 @@ import { addressOption, AlertTargetPicker, type TargetOption } from './AlertTarg
 import { useFilterNames } from '../hooks/useExplorerData'
 import { useNotificationsOverview } from '../hooks/useNotifications'
 import {
-  ACTIVITY_TYPES, COOLDOWN_CHOICES, HEALTH_FACTOR_DEFAULT, HEALTH_FACTOR_DEFAULT_MARKET, HEALTH_FACTOR_MAX, HEALTH_FACTOR_MIN,
+  ACTIVITY_TYPES, COOLDOWN_CHOICES, GOV_UNVOTED_LEAD_HOURS, GOV_UNVOTED_LEAD_PRESETS, HEALTH_FACTOR_DEFAULT, HEALTH_FACTOR_DEFAULT_MARKET, HEALTH_FACTOR_MAX, HEALTH_FACTOR_MIN,
   HEALTH_FACTOR_PRESETS, KIND_HINTS, KIND_LABELS, LARGE_VALUE_MIN_USD, NOTIFICATION_KINDS, PRICE_STEP_PCTS,
-  REFERENDUM_PHASES, REFERENDUM_TRACKS, SAFETY_DEFICIT_DEFAULT_USD, SELF_DELETING_KINDS, SAFETY_EGRESS_DEFAULT_PCT, SAFETY_FUSE_DEFAULT_PCT, SAFETY_KINDS,
+  REFERENDUM_PHASES, SAFETY_DEFICIT_DEFAULT_USD, SELF_DELETING_KINDS, SAFETY_EGRESS_DEFAULT_PCT, SAFETY_FUSE_DEFAULT_PCT, SAFETY_KINDS,
   TC_MOTION_PHASES, USD_FLOOR_PRESETS, isAddressLike,
-  isPalletNameLike, priceAtStep, priceStepLabel, readTarget, suggestPriceDirection, targetParams,
+  isForumKind, isForumThreadKey, isGovKind, isPalletNameLike, priceAtStep, priceStepLabel, readTarget, suggestPriceDirection, targetParams,
 } from '../notificationKinds'
 import type { AssetFilterItem, NotificationKind, NotificationMarket, NotificationRule, NotificationRuleInput, NotificationTarget } from '../types'
 
@@ -98,7 +98,8 @@ export function seedFromRule(rule: NotificationRule): {
     phases: rule.kind === 'referendum' && Array.isArray(p.phases) ? p.phases.map(String) : [],
     motionPhases: rule.kind === 'tc-motion' && Array.isArray(p.phases) ? p.phases.map(String) : [],
     safetyKinds: rule.kind === 'safety' && Array.isArray(p.kinds) ? p.kinds.map(String) : [],
-    target: seededTarget(rule, p.target),
+    // The governance kinds name their one account by a bare `address`.
+    target: seededTarget(rule, p.target) ?? (isGovKind(rule.kind) && typeof p.address === 'string' && p.address ? addressOption(p.address) : null),
     signerTarget: typeof p.signer === 'string' && p.signer ? addressOption(p.signer) : null,
   }
 }
@@ -210,13 +211,8 @@ export function buildRuleParams(
       const assetId = num(v.assetId ?? '')
       return { ok: true, params: { market, ...(assetId != null ? { assetId } : {}) } }
     }
-    case 'referendum': {
-      const track = (v.track ?? '').trim()
-      return { ok: true, params: {
-        ...(sets.phases.length ? { phases: sets.phases } : {}),
-        ...(track ? { track } : {}),
-      } }
-    }
+    case 'referendum':
+      return { ok: true, params: sets.phases.length ? { phases: sets.phases } : {} }
     // Its own phase set, so a referendum rule can never be built out of motion
     // phases (or the other way round) — the server rejects the crossed spelling too.
     case 'tc-motion':
@@ -268,6 +264,29 @@ export function buildRuleParams(
       const block = num(v.block ?? '')
       if (block == null || !Number.isInteger(block) || block < 1) return { ok: false, error: 'Enter a future block number' }
       return { ok: true, params: { block } }
+    }
+    // Replies and mentions are about the rule's owner, so they carry nothing.
+    case 'forum-reply':
+    case 'forum-mention':
+      return { ok: true, params: {} }
+    case 'forum-thread': {
+      const threadKey = (v.threadKey ?? '').trim()
+      if (!isForumThreadKey(threadKey)) return { ok: false, error: 'Follow a thread from its own page (the Follow button above its comments)' }
+      return { ok: true, params: { threadKey } }
+    }
+    // One account each, never a tag: a vote and a lock belong to one voter. The
+    // picker's address wins over text left in the box, like the other target kinds.
+    case 'gov-unvoted':
+    case 'gov-unlockable': {
+      const picked = sets.target
+      const account = (picked && picked.kind === 'address' ? picked.address : address).trim()
+      if (!isAddressLike(account)) return { ok: false, error: 'Pick the account to watch, or paste an SS58 or 0x address' }
+      if (kind === 'gov-unlockable') return { ok: true, params: { address: account } }
+      const leadHours = num(v.leadHours ?? '') ?? GOV_UNVOTED_LEAD_HOURS.default
+      if (!Number.isInteger(leadHours) || leadHours < GOV_UNVOTED_LEAD_HOURS.min || leadHours > GOV_UNVOTED_LEAD_HOURS.max) {
+        return { ok: false, error: `The lead time must be a whole number of hours from ${GOV_UNVOTED_LEAD_HOURS.min} to ${GOV_UNVOTED_LEAD_HOURS.max}` }
+      }
+      return { ok: true, params: { address: account, leadHours } }
     }
     case 'event': {
       const section = (v.section ?? '').trim()
@@ -482,7 +501,9 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
           </div>
           <div className="dialog-body">
             <Dialog.Description className="dialog-hint">
-              {preset ? `${KIND_HINTS[kind]} ` : ''}Alerts run on finalized blocks only and never fire for backfilled history.
+              {preset ? `${KIND_HINTS[kind]} ` : ''}{isForumKind(kind)
+                ? 'Forum alerts fire for posts and comments written from now on — never for older ones.'
+                : 'Alerts run on finalized blocks only and never fire for backfilled history.'}
             </Dialog.Description>
             {error && <div className="dialog-error">{error}</div>}
             {/* Idempotent create: an identical rule was already there and was kept.
@@ -504,6 +525,40 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
                 </select>
                 <div className="muted" style={{ fontSize: 11 }}>{KIND_HINTS[kind]}</div>
               </div>
+            )}
+
+            {kind === 'forum-thread' && (
+              <div className="field">
+                <label htmlFor="alert-thread">Thread</label>
+                <input {...noAutofill} id="alert-thread" type="text" maxLength={160}
+                  placeholder="e.g. opengov:450 or s248"
+                  value={values.threadKey ?? ''} disabled={pending} onChange={e => set('threadKey', e.target.value)} />
+                <div className="muted" style={{ fontSize: 11 }}>Easier: open the discussion or referendum and press Follow above its comments.</div>
+              </div>
+            )}
+
+            {isGovKind(kind) && (
+              <>
+                {/* One account, never a tag: whether it has voted, and what its
+                    own lock frees, are about one voter. */}
+                <div className="field">
+                  <label htmlFor="alert-gov-account" className="field-label">Account</label>
+                  <AlertTargetPicker inputId="alert-gov-account" value={target} addressOnly
+                    onChange={setTarget} onTextChange={t => set('address', t)} disabled={pending} />
+                </div>
+                {kind === 'gov-unvoted' && (
+                  <div className="field">
+                    <label htmlFor="alert-gov-lead">Remind me this many hours before it ends</label>
+                    <input {...noAutofill} id="alert-gov-lead" type="number" inputMode="numeric" step={1}
+                      min={GOV_UNVOTED_LEAD_HOURS.min} max={GOV_UNVOTED_LEAD_HOURS.max}
+                      placeholder={String(GOV_UNVOTED_LEAD_HOURS.default)}
+                      value={values.leadHours ?? ''} disabled={pending} onChange={e => set('leadHours', e.target.value)} />
+                    <PresetChips options={GOV_UNVOTED_LEAD_PRESETS} value={values.leadHours ?? String(GOV_UNVOTED_LEAD_HOURS.default)}
+                      label="Lead time presets" disabled={pending} onPick={v => set('leadHours', v)} />
+                    <div className="muted" style={{ fontSize: 11 }}>Fires once when a referendum’s decision or confirmation end comes this close (once more if a confirmation aborts back to the decision end) — never for one already that close when you create the alert.</div>
+                  </div>
+                )}
+              </>
             )}
 
             {kind === 'block' && (
@@ -750,15 +805,6 @@ export function NewAlertDialog({ open, onOpenChange, assets, pending, initialKin
                   <ChipSet options={REFERENDUM_PHASES} selected={phases} label="Referendum phases" disabled={pending}
                     onToggle={value => setPhases(current => toggle(current, value))} />
                   <div className="muted" style={{ fontSize: 11 }}>{phases.length ? `${phases.length} selected` : 'None selected — every phase.'}</div>
-                </div>
-                {/* The chain reports the numeric track id, so the option value
-                    is the id and the label is the runtime's own name. */}
-                <div className="field">
-                  <label htmlFor="alert-track">Track</label>
-                  <select id="alert-track" value={values.track ?? ''} disabled={pending} onChange={e => set('track', e.target.value)}>
-                    <option value="">Any track</option>
-                    {REFERENDUM_TRACKS.map(t => <option key={t.id} value={String(t.id)}>{t.name}</option>)}
-                  </select>
                 </div>
               </>
             )}

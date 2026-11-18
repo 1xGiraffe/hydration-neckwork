@@ -34,7 +34,6 @@ async function installReferendum(page: Page, entryCount: number) {
     contentType: 'application/json',
     body: JSON.stringify({
       pallet: 'opengov', index: 371, title: 'Launch BIL',
-      subsquareUrl: 'https://hydration.subsquare.io/referenda/371',
       track: 0, proposalHash: '0x1268295a7db315fd3fafbdd5c2c120162fc106864ef07909dd9341466de60d65',
       proposalCall: {
         pallet: 'Utility', callName: 'batch_all',
@@ -54,6 +53,12 @@ async function installReferendum(page: Page, entryCount: number) {
   }))
 }
 
+// The decoded call sits under "What it does", in a disclosure the reader opens.
+async function gotoReferendum(page: Page) {
+  await page.goto('/referendum/opengov/371')
+  await page.locator('.gov-call-details > summary').click()
+}
+
 const PANEL = '.pc-panel'
 // The batch's own entries, not the calls they wrap.
 const ENTRY = '.pc-panel > .pc-call > .pc-args > .pc-arg > .pc-val > .pc-list > li > details.pc-fold'
@@ -67,10 +72,20 @@ function horizontalOverflow(page: Page) {
   return page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
 }
 
+test('the description comes first, then the status, then what the proposal does, in the page and in its section nav', async ({ page }) => {
+  await installReferendum(page, 2)
+  await page.goto('/referendum/opengov/371')
+  await expect(page.locator('#what')).toBeVisible()
+  const order = (await page.locator('section[id]').evaluateAll(els => els.map(e => e.id))).filter(id => ['description', 'verdict', 'what'].includes(id))
+  expect(order).toEqual(['description', 'verdict', 'what'])
+  const nav = (await page.locator('.gov-section-nav .gov-section-link').allInnerTexts()).map(t => t.trim())
+  expect(nav.slice(0, 3)).toEqual(['Description', 'Status', 'What it does'])
+})
+
 test.describe('big proposal folding', () => {
   test('arrives as an outline and opens one call at a time', async ({ page }) => {
     await installReferendum(page, 28)
-    await page.goto('/referendum/opengov/371')
+    await gotoReferendum(page)
     await expect(page.locator(PANEL)).toBeVisible()
 
     // Every batch entry is a heading, none of them open, and each names what it wraps.
@@ -103,7 +118,7 @@ test.describe('big proposal folding', () => {
 
   test('expand all restores the whole tree, and collapses back', async ({ page }) => {
     await installReferendum(page, 28)
-    await page.goto('/referendum/opengov/371')
+    await gotoReferendum(page)
     const folded = await panelHeight(page)
 
     await page.getByRole('button', { name: 'Expand all' }).click()
@@ -119,7 +134,7 @@ test.describe('big proposal folding', () => {
 
   test('caps a very long batch until the reader asks for the rest', async ({ page }) => {
     await installReferendum(page, 120)
-    await page.goto('/referendum/opengov/371')
+    await gotoReferendum(page)
     await expect(page.locator(ENTRY)).toHaveCount(50)
 
     const more = page.getByRole('button', { name: 'Show remaining 70 calls' })
@@ -134,7 +149,7 @@ test.describe('big proposal folding', () => {
 
   test('a folded call toggles from the keyboard', async ({ page }) => {
     await installReferendum(page, 28)
-    await page.goto('/referendum/opengov/371')
+    await gotoReferendum(page)
     const first = page.locator(ENTRY).first()
     await first.locator('summary').first().focus()
     await page.keyboard.press('Enter')
@@ -146,7 +161,7 @@ test.describe('big proposal folding', () => {
   test('the outline fits a 390px phone without sideways scroll', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await installReferendum(page, 28)
-    await page.goto('/referendum/opengov/371')
+    await gotoReferendum(page)
     await expect(page.locator(PANEL)).toBeVisible()
     expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1)
 

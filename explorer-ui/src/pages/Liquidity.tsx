@@ -128,9 +128,9 @@ export function Liquidity() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Liquidity' }]} />
-        <div className="page-title">Liquidity <span className="sub">
+        <h1 className="page-title">Liquidity <span className="sub">
           {data ? <><Usd v={pooledUsd} /> pooled across {held.length} {held.length === 1 ? 'pool' : 'pools'}</> : 'every pool, largest first'}
-        </span></div>
+        </span></h1>
       </div>
 
       <div className="liq-filter">

@@ -9,8 +9,16 @@
  */
 
 import type { AccountRef, AssetRef } from '../types.ts'
+import { userLine } from './untrusted.ts'
 
 const DASH = '—'
+
+/**
+ * A registry symbol, folded to one safe line. Registry names are set by
+ * whoever registered the asset — an external asset's by anyone — so they are
+ * user text like any other name.
+ */
+const symbolOf = (a: AssetRef): string => userLine(a.symbol, 32)
 
 /* ============ assets ============ */
 
@@ -27,7 +35,7 @@ export const isCrossChainDestination = (a: AssetRef | null | undefined): boolean
 /** The short form: just the symbol, which is what a feed line wants. */
 export function assetLabel(a: AssetRef | null | undefined): string {
   if (!a) return DASH
-  if (a.symbol) return a.symbol
+  if (symbolOf(a)) return symbolOf(a)
   return isCrossChainDestination(a) ? 'cross-chain asset' : `#${a.assetId}`
 }
 
@@ -39,7 +47,7 @@ export function assetLabel(a: AssetRef | null | undefined): string {
 export function assetLabelWithId(a: AssetRef | null | undefined): string {
   if (!a) return DASH
   if (isCrossChainDestination(a)) return `${assetLabel(a)} (cross-chain)`
-  return a.symbol ? `${a.symbol} (#${a.assetId})` : `#${a.assetId}`
+  return symbolOf(a) ? `${symbolOf(a)} (#${a.assetId})` : `#${a.assetId}`
 }
 
 /**
@@ -145,6 +153,9 @@ export function accountLabel(
   // Contract names are not unique — the address tail disambiguates two.
   else if (a.contractName) named = `${a.contractName}·${(a.address ?? '').slice(-3)}`
   const head = emoji ? `${emoji} ` : ''
+  // Every one of these names was chosen by a person (an identity, a profile, a
+  // verified contract's source) or typed by an operator: one safe line each.
+  named = named ? userLine(named, 64) : null
   if (!named) return `${head}${short}`
   return opts.withAddress ? `${head}${named} (${short})` : `${head}${named}`
 }
@@ -213,6 +224,38 @@ export const intentUrl = (base: string, intentId: string): string =>
 /** Democracy and OpenGov both index from 0, so the pallet is part of the identity. */
 export const referendumUrl = (base: string, pallet: 'opengov' | 'democracy', index: number | string): string =>
   url(base, `/referendum/${pallet}/${index}`)
+
+/** A forum discussion's page. Native ids are decimals, imported ones `s<Subsquare post number>`. */
+export const discussionUrl = (base: string, postId: string): string =>
+  url(base, `/discussions/${encodeURIComponent(postId)}`)
+
+/**
+ * The page that shows a forum post, by its id, or null for a kind with no page.
+ * A third copy of explorer-ui's `forumPostPath` (governanceSubjects.ts) and
+ * the api's SUBJECT_ROUTES: a discussion is /discussions/<id>, a referendum's
+ * description is its referendum page, and an archive body's imported record
+ * lives under /governance/<route>/<id>.
+ */
+const SUBJECT_ROUTE_BY_PREFIX: Readonly<Record<string, string>> = {
+  democracy_proposal: 'democracy/proposal',
+  external: 'democracy/external',
+  council: 'motion/council',
+  tc: 'motion/tc',
+  treasury: 'treasury/proposal',
+  spend: 'treasury/spend',
+  tip: 'tip',
+}
+export function forumPostUrl(base: string, postId: string): string | null {
+  if (/^[A-Za-z0-9]{1,40}$/.test(postId)) return discussionUrl(base, postId)
+  const m = /^([a-z_]+):(.+)$/.exec(postId)
+  if (!m) return null
+  if (m[1] === 'opengov' || m[1] === 'democracy') return /^\d+$/.test(m[2]) ? referendumUrl(base, m[1], m[2]) : null
+  const route = SUBJECT_ROUTE_BY_PREFIX[m[1]]
+  return route ? url(base, `/governance/${route}/${encodeURIComponent(m[2])}`) : null
+}
+
+export const treasurySpendUrl = (base: string, index: number): string =>
+  url(base, `/governance/treasury/spend/${index}`)
 
 export const poolUrl = (base: string, poolId: number | string): string =>
   url(base, `/pool/${poolId}`)

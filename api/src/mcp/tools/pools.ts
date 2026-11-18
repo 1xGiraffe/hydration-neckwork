@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { userLine } from '../format/untrusted.ts'
 import { formatParam, type ToolContext, type ToolDefinition, type ToolError, type ToolOutput } from '../toolTypes.ts'
 import { invalidArgument, toolErrorFromUpstream } from '../errors.ts'
 import { UpstreamError } from '../upstream.ts'
@@ -436,7 +437,7 @@ function renderOmnipool(d: OmnipoolResponse, ctx: ToolContext, includes: Set<Inc
 function renderPoolDetail(d: PoolDetail, ctx: ToolContext, includes: Set<Include>): string {
   const issuance = scaleAmount(d.totalIssuance, d.shareToken?.decimals ?? 18)
   const head = kv([
-    ['Pool', `${d.name} · ${d.kind === 'stableswap' ? 'Stableswap' : 'XYK'}`],
+    ['Pool', `${userLine(d.name, 80)} · ${d.kind === 'stableswap' ? 'Stableswap' : 'XYK'}`],
     ['Share token', `${assetLabelWithId(d.shareToken)}${issuance == null ? '' : ` · ${formatNumber(issuance)} issued`}`],
     ['TVL', formatUsd(d.tvlUsd)],
     // The wire field is called `feePermill` but its scale is parts per MILLION:
@@ -481,7 +482,7 @@ function renderPoolDetail(d: PoolDetail, ctx: ToolContext, includes: Set<Include
 
 function renderV3Detail(d: UniswapV3PoolDetail, ctx: ToolContext, includes: Set<Include>): string {
   const head = kv([
-    ['Pool', `${d.name} · Uniswap v3`],
+    ['Pool', `${userLine(d.name, 80)} · Uniswap v3`],
     ['Contract', explorerLink(d.address, v3PoolUrl(ctx.explorerBaseUrl, d.address))],
     ['Fee tier', `${d.feeTier} (tick spacing ${d.tickSpacing})`],
     ['TVL', formatUsd(d.tvlUsd)],
@@ -530,7 +531,8 @@ function renderV3Detail(d: UniswapV3PoolDetail, ctx: ToolContext, includes: Set<
   )
 }
 
-const vaultName = (v: V3Vault): string => v.account?.contractName ?? v.address
+// A verified contract's name comes from its published source: user text.
+const vaultName = (v: V3Vault): string => userLine(v.account?.contractName, 64) || v.address
 
 /** Fixed depths for the v3 tables; the counts beside each heading state them. */
 const V3_POSITION_ROWS = 15

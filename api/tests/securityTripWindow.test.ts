@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
-import { mergeLiquidationWindow, mergeTripWindow, type LiquidationWindowRow } from '../src/services/securityService.ts'
+import { attachTripSpecVersions, mergeLiquidationWindow, mergeTripWindow, type LiquidationWindowRow } from '../src/services/securityService.ts'
 
 // A circuit-breaker trip is found by a pallet index and an error byte that both
 // live inside JSON, so none of the four arms can prune on anything: read
@@ -55,6 +55,38 @@ describe('mergeTripWindow', () => {
     expect(source.split('block_height > ${fromBlock}').length - 1).toBe(3)
     const { next } = mergeTripWindow(null, [row(9_400)], 10_000)
     expect(next.rows.map(r => r.block_height)).toEqual([9_400])
+  })
+})
+
+// The cold read (fromBlock = -1) is the whole of history. Joined to raw_blocks in
+// place, each arm hashed all 16.8M block rows as its right side, and once that
+// passed 2^24 rows the hash tables doubled and the read overran the api's 4 GB
+// cap on every attempt — the dashboard and both safety lanes failed with it. The
+// spec_version comes from a key lookup over the trips' own blocks instead.
+describe('attachTripSpecVersions', () => {
+  const bare = (block_height: number) => {
+    const { spec_version: _drop, ...rest } = row(block_height)
+    return rest
+  }
+
+  it('puts each block\'s spec_version on every trip in it, keeping the order', () => {
+    const out = attachTripSpecVersions([bare(900), bare(900), bare(500)], [
+      { block_height: 500, spec_version: 280 },
+      { block_height: '900', spec_version: '310' },
+    ])
+    expect(out.map(r => [r.block_height, r.spec_version])).toEqual([[900, 310], [900, 310], [500, 280]])
+  })
+
+  it('drops a trip whose block row is missing, as the inner join did', () => {
+    expect(attachTripSpecVersions([bare(900), bare(500)], [{ block_height: 500, spec_version: 280 }])
+      .map(r => r.block_height)).toEqual([500])
+  })
+
+  it('never joins raw_blocks inside the trip scan', () => {
+    const source = readFileSync(new URL('../src/services/securityService.ts', import.meta.url), 'utf8')
+    const scan = source.slice(source.indexOf('async function queryTripsAbove'), source.indexOf('export function attachTripSpecVersions'))
+    expect(scan).not.toMatch(/JOIN\s+price_data\.raw_blocks/)
+    expect(scan).toMatch(/FROM price_data\.raw_blocks\s+WHERE block_height IN \{heights:Array\(UInt32\)\}/)
   })
 })
 

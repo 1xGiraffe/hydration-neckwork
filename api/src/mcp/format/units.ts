@@ -16,6 +16,8 @@
  * notation (0.0₅7191) so high-decimal assets stay readable.
  */
 
+import { userLine } from './untrusted.ts'
+
 /** What every formatter prints for a value that is absent or unusable. */
 export const DASH = '—'
 
@@ -149,7 +151,9 @@ export function formatAmount(raw: string | number | null | undefined, decimals: 
   const value = scaleAmount(raw, decimals)
   if (value == null) return DASH
   const shown = formatNumber(value)
-  return symbol ? `${shown} ${symbol}` : shown
+  // A symbol is a registry or ERC-20 name someone chose: one safe line.
+  const sym = userLine(symbol, 32)
+  return sym ? `${shown} ${sym}` : shown
 }
 
 /**

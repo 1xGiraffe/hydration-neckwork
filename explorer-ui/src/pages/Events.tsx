@@ -42,7 +42,7 @@ export function Events() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Events' }]} />
-        <div className="page-title">Events <span className="sub">emitted by extrinsics</span></div>
+        <h1 className="page-title">Events <span className="sub">emitted by extrinsics</span></h1>
       </div>
       <DayBarChart data={daily ?? []} color={UNFILTERED_COLOR} label="Daily events emitted" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
       <FilterZone fields={eventFilterFields(names?.events)} values={f} onChange={(k, v) => { onChange(k, v); setPage(0) }} onClear={onClear} />

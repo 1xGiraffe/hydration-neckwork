@@ -35,14 +35,14 @@ export function LinkDevice() {
       // the confirmation; a success interstitial would just be one more tap.
       navigate(paths.dashboard())
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Couldn’t log in with this code')
+      setError(e instanceof Error ? e.message : 'Couldn’t sign in with this code')
       setBusy(false)
     }
   }
 
   return (
     <div className="wrap">
-      <div className="page-head"><div className="page-title">Link this device</div></div>
+      <div className="page-head"><h1 className="page-title">Link this device</h1></div>
       <div className="detail-card link-device-card">
         {!code ? (
           <>
@@ -59,7 +59,7 @@ export function LinkDevice() {
             )}
             {error && <div className="dialog-error">{error} — generate a fresh QR code on your logged-in device and scan it again.</div>}
             <button type="button" className="btn primary" onClick={() => void claim()} disabled={busy}>
-              {busy ? 'Logging in…' : 'Log in on this device'}
+              {busy ? 'Signing in…' : 'Sign in on this device'}
             </button>
           </>
         )}

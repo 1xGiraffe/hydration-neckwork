@@ -864,7 +864,7 @@ export interface CloseAccountsResponse {
 }
 
 export interface SearchResult {
-  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination' | 'intent'
+  type: 'block' | 'extrinsic' | 'address' | 'asset' | 'tag' | 'referendum' | 'pool' | 'xcDestination' | 'intent' | 'discussion' | 'spend'
   value: string
   label?: string
   desc?: string   // asset-type: the descriptive name (e.g. DOT → "Polkadot")
@@ -2135,7 +2135,6 @@ export interface ReferendumDetail {
   index: number
   title: string | null
   proposer: AccountRef | null
-  subsquareUrl: string
   track: number | null
   proposalHash: string | null
   proposalCall: { pallet: string; callName: string; args: unknown; encoded: string | null; byteLength: number; decodeError: string | null } | null
@@ -2160,6 +2159,10 @@ export interface ReferendumDetail {
   trackInfo: ReferendumTrackRef | null
   liveTally: LiveReferendumTally | null
   progress: ReferendumProgress | null
+  /** The forum record (description post and thread); null until the forum store has loaded. */
+  forum?: import('./governanceTypes').SubjectForumRef | null
+  /** Its submission and decision deposits (OpenGov; absent from older api versions). */
+  deposits?: import('./governanceTypes').ReferendumDeposits | null
 }
 
 export interface ReferendumTimelineEntry {
@@ -2342,6 +2345,8 @@ export type NotificationKind =
   | 'account-activity' | 'large-trade' | 'large-transfer' | 'price' | 'health-factor'
   | 'referendum' | 'tc-motion' | 'safety' | 'extrinsic' | 'event'
   | 'protocol-revenue' | 'liquidation' | 'mm-cap' | 'block'
+  | 'forum-reply' | 'forum-mention' | 'forum-thread'
+  | 'gov-unvoted' | 'gov-unlockable'
 // One isolated money market a health-factor or cap rule can name, as the
 // deployment configures it. The overview ships the list; the forms offer it.
 export interface NotificationMarket { key: string; label: string; role: 'primary' | 'supplemental' }
@@ -2598,6 +2603,12 @@ export interface SecurityLiquidityMove {
   shareOfAllowancePct: number | null
 }
 
+/** `/explorer/security/committee`: the Technical Committee without the rest of the dashboard. */
+export interface TechCommitteeView {
+  techCommittee: { members: AccountRef[]; size: number; majority: number; superMajority: number }
+  memberSetAtBlock: number | null
+}
+
 export interface SecurityDashboard {
   head: { blockHeight: number; blockTimestamp: string }
   chainAsOf: string | null
@@ -2646,7 +2657,7 @@ export interface SecurityDashboard {
   runtime: { specVersion: number; upgrades: number; lastUpgrade: { blockHeight: number; blockTimestamp: string } | null }
   timeline: SecuritySafetyEvent[]
   guardians: {
-    techCommittee: { members: AccountRef[]; size: number; majority: number; superMajority: number }
+    techCommittee: TechCommitteeView['techCommittee']
     memberSetAtBlock: number | null
     outstandingWhitelisted: { callHash: string; blockHeight: number; blockTimestamp: string }[]
   }
@@ -2986,6 +2997,8 @@ export interface GovernanceReferendumRow {
   proposer: AccountRef | null
   // How the approved call's enactment went (OpenGov only, null until it runs).
   enactment: 'ok' | 'failed' | 'unavailable' | null
+  // Forum counts for the referendum's thread; null until the forum store has loaded.
+  commentsCount?: number | null
 }
 export interface GovernanceReferendaPage { total: number; rows: GovernanceReferendumRow[] }
 
@@ -3002,6 +3015,10 @@ export interface ActiveReferendumCard {
 export interface GovernanceOverview {
   active: ActiveReferendumCard[]
   counts: { opengov: number; democracy: number; tcMotions: number; councilMotions: number; tips: number }
+  /** The latest discussions by activity; null until the forum store has loaded. */
+  discussions?: import('./governanceTypes').DiscussionRow[] | null
+  /** The live referenda by their next deadline. */
+  endingSoon?: import('./governanceTypes').NeedsVoteReferendum[]
 }
 
 export interface CollectiveMotionRow {

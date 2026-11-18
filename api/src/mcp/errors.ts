@@ -120,6 +120,19 @@ function safeDetail(message: string | undefined): string | null {
   return UNSAFE_DETAIL.test(flat) ? null : flat
 }
 
+const SNAPSHOT_NAMES: Readonly<Record<string, string>> = {
+  forum: 'forum',
+  'conviction-state': 'governance vote-state',
+}
+
+/** The snapshot a 503 `{reason: 'not-ready'}` names, in words, or null for any other failure. */
+export function notReadySnapshot(err: unknown): string | null {
+  if (!(err instanceof UpstreamError) || err.status !== 503) return null
+  const body = err.body as { reason?: unknown; snapshot?: unknown } | null
+  if (!body || typeof body !== 'object' || body.reason !== 'not-ready') return null
+  return SNAPSHOT_NAMES[String(body.snapshot)] ?? 'governance'
+}
+
 /** What a tool knows about the failed read that the error itself does not carry. */
 export interface UpstreamErrorContext {
   // The block height the call was asking about, when the path does not name it.
@@ -191,6 +204,14 @@ export function toolErrorFromUpstream(err: unknown, what: string, ctx?: Upstream
     return upstreamUnavailable(`${what} could not be read: the Hydration explorer API did not answer${transport ? ` (${transport})` : ''}.`)
   }
   if (err.status === 404) return lookupMiss(err, what, ctx)
+  // The governance vote state and the forum are served from snapshots the
+  // explorer api loads in the background; until one has loaded, its routes
+  // answer 503 `{reason: 'not-ready'}` rather than an empty list that would read
+  // as "no votes" or "no discussions". The agent must hear the same thing.
+  const notReady = notReadySnapshot(err)
+  if (notReady) {
+    return upstreamUnavailable(`${what} could not be read yet: the Hydration explorer API is still loading its ${notReady} snapshot. This is NOT an empty result — nothing about the data is known until it has loaded. Retry in about 10 seconds.`)
+  }
   // A 2xx whose body was not JSON. The status says nothing useful here, so the
   // sentence has to; the body itself is the upstream's own and never repeated.
   if (err.status < 400) {

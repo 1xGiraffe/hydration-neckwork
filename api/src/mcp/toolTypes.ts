@@ -31,4 +31,4 @@ export interface ToolDefinition {
 // Every tool takes the same rendering switch, declared once so the wording an
 // agent reads is identical across the surface and the registry test can assert
 // its presence.
-export const formatParam = z.enum(['markdown', 'json']).optional().describe("Response rendering. 'markdown' (default) is a compact, token-efficient reading of the data; 'json' returns the raw structured record.")
+export const formatParam = z.enum(['markdown', 'json']).optional().describe("'markdown' (default, compact reading) or 'json' (the structured record).")

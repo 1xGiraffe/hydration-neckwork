@@ -1,3 +1,4 @@
+import { userLine } from '../format/untrusted.ts'
 import { z } from 'zod'
 import { formatParam, type ToolContext, type ToolDefinition, type ToolError, type ToolOutput } from '../toolTypes.ts'
 import { invalidArgument, toolErrorFromUpstream } from '../errors.ts'
@@ -126,7 +127,7 @@ function reserveTable(reserves: MmReserve[] | undefined, ctx: ToolContext): stri
     .filter(r => r.supplied !== '0' || r.debt !== '0')
     .sort((a, b) => ((b.suppliedUsd ?? 0) + (b.debtUsd ?? 0)) - ((a.suppliedUsd ?? 0) + (a.debtUsd ?? 0)))
     .map(r => [
-      explorerLink(`${r.symbol} (#${r.assetId})`, assetUrl(ctx.explorerBaseUrl, r.assetId)),
+      explorerLink(`${userLine(r.symbol, 32)} (#${r.assetId})`, assetUrl(ctx.explorerBaseUrl, r.assetId)),
       r.supplied === '0' ? DASH : `${formatAmount(r.supplied, r.decimals)} (${formatUsd(r.suppliedUsd)})`,
       r.debt === '0' ? DASH : `${formatAmount(r.debt, r.decimals)} (${formatUsd(r.debtUsd)})`,
       r.collateral ? 'yes' : 'no',
@@ -149,7 +150,7 @@ function renderPosition(p: MoneyMarketPosition, ctx: ToolContext): string {
       ['Max LTV', formatBasisPoints(p.ltv)],
       ['Liquidation threshold', formatBasisPoints(p.liquidationThreshold)],
       ['Staking-backed', p.stakingBacked ? 'yes' : null],
-      ['Collateral not stated per reserve', p.unstatedCollateral?.length ? `${p.unstatedCollateral.map(a => a.symbol).join(', ')} — reached the holder outside the market's logs or has no price here; the market's own collateral figure stands in for it in Supplied and the account value` : null],
+      ['Collateral not stated per reserve', p.unstatedCollateral?.length ? `${p.unstatedCollateral.map(a => userLine(a.symbol, 32)).join(', ')} — reached the holder outside the market's logs or has no price here; the market's own collateral figure stands in for it in Supplied and the account value` : null],
       // A zero blockHeight is "this was read live, not from an indexed
       // position"; printed as "block 0" it reads as a genesis-era snapshot.
       ['As of', `${formatTime(p.timestamp)}${p.blockHeight > 0 ? ` · block ${formatCount(p.blockHeight)}` : ' · read live from chain state, not from an indexed block'}`],

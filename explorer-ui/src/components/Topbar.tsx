@@ -10,7 +10,7 @@ import { useMe, useTagMapSync, logout } from '../hooks/useUser'
 import { useNotificationsOverview, usePendingNotificationHandoff } from '../hooks/useNotifications'
 import { AccountEmoji, ShortAddr, showIconFallback } from './ui'
 import { NotificationBell } from './NotificationBell'
-import { DRAWER_GROUPS, DRAWER_LINKS, FOLDABLE, NAV_ENTRIES, type NavItem } from './navConfig'
+import { DRAWER_GROUPS, DRAWER_LINKS, NAV_ENTRIES, type NavItem } from './navConfig'
 import type { AccountRef } from '../types'
 
 // Radix + the dialog itself are only needed once a visitor actually tries to
@@ -21,6 +21,10 @@ const ConnectDialog = lazyWithReload(() => import('./ConnectDialog').then(m => (
 // Same lazy treatment: the devices list (and its QR renderer) only loads when
 // a logged-in visitor opens it.
 const DevicesDialog = lazyWithReload(() => import('./DevicesDialog').then(m => ({ default: m.DevicesDialog })))
+// The needs-your-vote count beside "My governance" reads the connected wallets and
+// followed addresses, so it is its own chunk too.
+const NavNeedsVote = lazyWithReload(() => import('./gov/NavNeedsVote').then(m => ({ default: m.NavNeedsVote })))
+const GOVERNANCE_ROUTES = new Set(['governance', 'referendum', 'discussions', 'discussion', 'discussionNew', 'governanceSubject', 'governanceMe', 'governanceModeration', 'governancePropose'])
 
 function matches(item: NavItem, route: Route): boolean {
   if (!item.match.includes(route.name)) return false
@@ -33,7 +37,7 @@ function matches(item: NavItem, route: Route): boolean {
 // use, so a reader can tell it leaves the Explorer before clicking rather than
 // after. The drawer closes on a real navigation; an external link performs
 // none, so its onClick is what closes it.
-function NavDestination({ item, route, onClick }: { item: NavItem; route: Route; onClick?: () => void }) {
+function NavDestination({ item, route, onClick, count }: { item: NavItem; route: Route; onClick?: () => void; count?: boolean }) {
   const className = matches(item, route) ? 'active' : ''
   if (item.external) {
     return (
@@ -42,7 +46,12 @@ function NavDestination({ item, route, onClick }: { item: NavItem; route: Route;
       </a>
     )
   }
-  return <Link to={item.to} className={className} onClick={onClick}>{item.label}</Link>
+  return (
+    <Link to={item.to} className={className} onClick={onClick}>
+      {item.label}
+      {count && item.to === paths.governanceMe() && <Suspense fallback={null}><NavNeedsVote /></Suspense>}
+    </Link>
+  )
 }
 
 // Sun/moon theme switch — rendered in the topbar on desktop and inside the
@@ -74,7 +83,7 @@ function ProfileAvatar({ account }: { account?: AccountRef }) {
 }
 
 // Desktop compact login control: a Connect button logged out, or the account's
-// avatar + name opening a small menu (My account / Lists / Log out) logged
+// avatar + name opening a small menu (My account / Lists / Sign out) logged
 // in. Escape and an outside click close the menu, same as the drawer below.
 function AccountMenuButton({ session, account, invites, apiAdmin, theme, onToggleTheme, onConnect, onDevices }: {
   session: ReturnType<typeof useSession>
@@ -120,7 +129,7 @@ function AccountMenuButton({ session, account, invites, apiAdmin, theme, onToggl
   }, [])
 
   if (!session) {
-    return <button type="button" className="btn connect-btn" onClick={onConnect}>Log in</button>
+    return <button type="button" className="btn connect-btn" onClick={onConnect}>Sign in</button>
   }
 
   return (
@@ -144,7 +153,7 @@ function AccountMenuButton({ session, account, invites, apiAdmin, theme, onToggl
           {/* The standalone topbar toggle is hidden while logged in — the menu
               is its home then, so the chrome stays one control shorter. */}
           <button type="button" className="menu-row" onClick={onToggleTheme}>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</button>
-          <button type="button" className="menu-row" onClick={() => { setOpen(false); void logout() }}>Log out</button>
+          <button type="button" className="menu-row" onClick={() => { setOpen(false); void logout() }}>Sign out</button>
         </div>
       )}
     </div>
@@ -167,7 +176,7 @@ function DrawerAccountSection({ session, invites, apiAdmin, onConnect, onDevices
   if (!session) {
     return (
       <div className="drawer-sec">
-        <button type="button" className="btn primary drawer-connect-btn" onClick={onConnect}>Log in</button>
+        <button type="button" className="btn primary drawer-connect-btn" onClick={onConnect}>Sign in</button>
       </div>
     )
   }
@@ -179,7 +188,7 @@ function DrawerAccountSection({ session, invites, apiAdmin, onConnect, onDevices
       <Link to={paths.apiTokens()} onClick={onNavigate}>API tokens</Link>
       {apiAdmin && <Link to={paths.apiAdmin()} onClick={onNavigate}>API admin</Link>}
       <button type="button" className="drawer-row" onClick={() => { onNavigate(); onDevices() }}>Devices</button>
-      <button type="button" className="drawer-row" onClick={() => { onNavigate(); void logout() }}>Log out</button>
+      <button type="button" className="drawer-row" onClick={() => { onNavigate(); void logout() }}>Sign out</button>
     </div>
   )
 }
@@ -218,6 +227,10 @@ export function Topbar({ route }: { route: Route }) {
   // Which desktop dropdown is open (by group label), or null. Driven by JS rather
   // than :hover/:focus-within so only one is ever open, and a click closes it.
   const [openGroup, setOpenGroup] = useState<string | null>(null)
+  // Once true, stays true: the governance menu's count loads the first time the
+  // reader opens a menu holding it, or lands on a governance page.
+  const [govCount, setGovCount] = useState(false)
+  if (!govCount && (drawer || openGroup?.startsWith('Governance:') || GOVERNANCE_ROUTES.has(route.name))) setGovCount(true)
 
   // Close transient navigation UI after any History API navigation. Route
   // objects are derived values, so subscribing to the same events as the router
@@ -272,14 +285,14 @@ export function Topbar({ route }: { route: Route }) {
           {NAV_ENTRIES.map(entry => {
             if (entry.kind === 'link') {
               const it = entry.item
-              return <Link key={it.to} to={it.to} className={`nav-link${FOLDABLE.has(it.label) ? ' nav-fold' : ''}${matches(it, route) ? ' active' : ''}`}>{it.label}</Link>
+              return <Link key={it.to} to={it.to} className={`nav-link${matches(it, route) ? ' active' : ''}`}>{it.label}</Link>
             }
             const { group, fold } = entry
             const active = group.items.some(it => matches(it, route))
             const key = `${group.label}:${fold ?? 'always'}`
             return (
               <div
-                className={`nav-group${fold === 'only' ? ' nav-fold-group' : ''}${fold === 'hidden' ? ' nav-unfold-group' : ''}${openGroup === key ? ' open' : ''}`}
+                className={`nav-group${fold === 'only' ? ' nav-fold-group' : ''}${fold === 'hidden' ? ' nav-unfold-group' : ''}${fold === 'wide-only' ? ' nav-wfold-group' : ''}${fold === 'wide-hidden' ? ' nav-wunfold-group' : ''}${openGroup === key ? ' open' : ''}`}
                 key={key}
                 onMouseEnter={() => setOpenGroup(key)}
                 onMouseLeave={() => setOpenGroup(null)}
@@ -291,7 +304,7 @@ export function Topbar({ route }: { route: Route }) {
                 </Link>
                 <div className="nav-menu">
                   {(group.menuItems ?? group.items).map(it => (
-                    <NavDestination key={it.to} item={it} route={route} onClick={() => setOpenGroup(null)} />
+                    <NavDestination key={it.to} item={it} route={route} onClick={() => setOpenGroup(null)} count={govCount} />
                   ))}
                 </div>
               </div>
@@ -336,7 +349,7 @@ export function Topbar({ route }: { route: Route }) {
               <div className="drawer-sec" key={group.label}>
                 <div className="sec-lbl">{group.label}</div>
                 {(group.menuItems ?? group.items).map(it => (
-                  <NavDestination key={it.to} item={it} route={route} onClick={() => setDrawer(false)} />
+                  <NavDestination key={it.to} item={it} route={route} onClick={() => setDrawer(false)} count={govCount} />
                 ))}
               </div>
             ))}

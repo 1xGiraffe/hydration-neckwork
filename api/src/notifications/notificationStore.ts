@@ -70,6 +70,8 @@ export const NOTIFICATION_LIMITS = {
 // short enough that the set does not grow for the life of the process.
 const RECENT_ID_DAYS = 7
 const RECENT_ID_TTL_MS = RECENT_ID_DAYS * 86_400_000
+/** How long a delivered notification id is remembered (and re-seeded at boot): a match re-made within it is a duplicate. */
+export const RECENT_NOTIFICATION_TTL_MS = RECENT_ID_TTL_MS
 const RECENT_ID_PRUNE_MS = 3_600_000
 
 let client: ClickHouseClient
@@ -176,6 +178,7 @@ export async function loadNotifications(): Promise<void> {
       label: r.label ?? '', verified: Number(r.verified) === 1,
     })
   }
+  let trackRules = 0
   for (const r of await ruleRes.json<{ rule_id: string; account_id: string; kind: string; name?: string; params?: string; channels?: string[]; muted?: number; cooldown_s?: number }>()) {
     // A row naming a kind this build no longer has is SKIPPED, never fatal: a
     // kind can be retired (the Wormhole alerts folded into `safety`) while rows
@@ -191,15 +194,21 @@ export async function loadNotifications(): Promise<void> {
     try { params = JSON.parse(r.params || '{}') } catch { continue }
     // A row whose params no longer satisfy their kind's schema is dropped
     // rather than handed to the evaluator: a rule that cannot be described
-    // cannot be matched safely either.
+    // cannot be matched safely either. A `referendum` rule carrying a `track`
+    // is one: there is no per-track subscription, so such a row is neither
+    // evaluated nor listed, and is left alone. Only their number is logged.
     const parsed = parseRuleParams(r.kind, params)
-    if (!parsed.ok) continue
+    if (!parsed.ok) {
+      if (r.kind === 'referendum' && params && typeof params === 'object' && 'track' in params) trackRules++
+      continue
+    }
     indexRule({
       ruleId: r.rule_id, accountId: r.account_id, kind: r.kind, name: r.name ?? '',
       params: parsed.params, channels: r.channels ?? [],
       muted: Number(r.muted) === 1, cooldownS: Number(r.cooldown_s) || 0,
     })
   }
+  if (trackRules) console.warn(`[notifications] ${trackRules} per-track referendum rule(s) skipped: there is no per-track subscription`)
   for (const r of await stateRes.json<{ key: string; value: string }>()) state.set(r.key, r.value ?? '')
   for (const r of await recentRes.json<{ notification_id: string; created_at?: string }>()) {
     recentNotificationIds.set(r.notification_id, seenAtMs(r.created_at))

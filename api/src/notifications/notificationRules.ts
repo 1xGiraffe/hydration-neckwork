@@ -5,15 +5,17 @@ import { compactUsd } from './render.ts'
 // rule kind. Deliberately dependency-free — the evaluator, the routes, the
 // renderer and (mirrored) the explorer UI all describe a rule from the same
 // definition, so a kind's parameter set exists in exactly one place. `render.ts`
-// is the one import: it is itself a pure leaf, and a threshold in a summary has
-// to round exactly the way the message and the page round it, so the rough scale
-// is never restated here (a local rounder summarised a $1,500 floor as "$2k",
+// is the only import: it is a pure leaf, and a
+// threshold in a summary has to round exactly the way the message and the page
+// round it, so the rough scale is never restated here (a local rounder summarised a $1,500 floor as "$2k",
 // telling an owner a threshold they never set).
 
 export const NOTIFICATION_KINDS = [
   'account-activity', 'large-trade', 'large-transfer', 'price', 'health-factor',
   'referendum', 'tc-motion', 'safety', 'extrinsic', 'event',
   'protocol-revenue', 'liquidation', 'mm-cap', 'block',
+  'forum-reply', 'forum-mention', 'forum-thread',
+  'gov-unvoted', 'gov-unlockable',
 ] as const
 export type NotificationKind = typeof NOTIFICATION_KINDS[number]
 
@@ -60,45 +62,6 @@ export const SAFETY_KINDS = [
   'deficit', 'queued', 'released', 'fuse', 'egress', 'democracy',
 ] as const
 export type SafetyKind = typeof SAFETY_KINDS[number]
-
-// Hydration's OpenGov tracks, id → runtime name, transcribed from the runtime's
-// own `TRACKS_DATA` (`runtime/hydradx/src/governance/tracks.rs` in
-// galacticcouncil/HydraDX-node). The chain puts the numeric id on Submitted and
-// DecisionStarted, so the id is what a rule matches on; the name exists because
-// nobody subscribes to "track 5".
-export const REFERENDUM_TRACKS: readonly { id: number; name: string }[] = [
-  { id: 0, name: 'root' },
-  { id: 1, name: 'whitelisted_caller' },
-  { id: 2, name: 'referendum_canceller' },
-  { id: 3, name: 'referendum_killer' },
-  { id: 4, name: 'general_admin' },
-  { id: 5, name: 'treasurer' },
-  { id: 6, name: 'spender' },
-  { id: 7, name: 'tipper' },
-  { id: 8, name: 'omnipool_admin' },
-  { id: 9, name: 'economic_parameters' },
-]
-
-// A track is stored as its numeric id, whichever form the request used: names
-// are typed by people ("root") and ids come from the chain, and the matcher only
-// ever sees an id. Names are matched loosely — case, spaces and dashes are how
-// the same track gets written by hand ("Whitelisted Caller").
-const trackKey = (value: string): string => value.trim().toLowerCase().replace(/[\s-]+/g, '_')
-
-export function referendumTrackId(value: string): number | null {
-  const raw = value.trim()
-  if (/^\d{1,5}$/.test(raw)) {
-    const id = Number(raw)
-    return REFERENDUM_TRACKS.some(t => t.id === id) ? id : null
-  }
-  const key = trackKey(raw)
-  return REFERENDUM_TRACKS.find(t => t.name === key)?.id ?? null
-}
-
-export function referendumTrackName(id: number | string): string | null {
-  const numeric = Number(id)
-  return REFERENDUM_TRACKS.find(t => t.id === numeric)?.name ?? null
-}
 
 // Kinds whose rule is ONE-SHOT: it fires once and then deletes itself, because
 // the moment it describes cannot happen twice. A block height is reached exactly
@@ -242,15 +205,11 @@ export const mmCapParams = z.object({
   assetId: assetId.optional(),
 }).strict()
 
-// `track` accepts either form and stores the numeric id, so the matcher only
-// ever compares an id to the id the chain reported.
-const referendumTrack = z.string().trim().min(1).max(48)
-  .refine(v => referendumTrackId(v) != null, 'Expected an OpenGov track id or name')
-  .transform(v => String(referendumTrackId(v)))
-
+// Every OpenGov referendum, narrowed only by phase. There is no per-track
+// subscription: a stored rule that still carries a `track` no longer parses, so
+// the store skips it at load (loadNotifications) and it is never evaluated.
 export const referendumParams = z.object({
   phases: z.array(z.enum(REFERENDUM_PHASES)).min(1).optional(),
-  track: referendumTrack.optional(),
 }).strict()
 
 export const tcMotionParams = z.object({
@@ -295,6 +254,36 @@ export const blockParams = z.object({
   block: z.number().int().min(1).max(4_294_967_295),
 }).strict()
 
+// The forum kinds (the forum lane, forumLane.ts). Replies and mentions are about
+// the rule's OWNER — the session account that created it — so they carry no
+// parameters at all; one of each per account (creation is idempotent on the
+// canonical params). A followed thread names its thread key, the forum id shape
+// the read routes accept ('s248', '42', 'opengov:450', 'external:0x…@6429878').
+export const forumReplyParams = z.object({}).strict()
+export const forumMentionParams = z.object({}).strict()
+export const forumThreadParams = z.object({
+  threadKey: z.string().trim().min(1).max(160).regex(/^[A-Za-z0-9_:@.#-]+$/, 'Expected a forum thread id'),
+}).strict()
+
+// The governance kinds (governanceLane.ts). Both watch ONE account, by address —
+// never a tag: "you have not voted" and "you can unlock" are about one voter's own
+// state, and a tag's members would turn one rule into a fan-out over every member.
+//
+// `gov-unvoted` fires when a live referendum the account has no vote on comes within
+// `leadHours` of its decision or confirmation end. The lead is bounded to a week
+// (the longest decision period a reminder is useful for) and at least an hour (the
+// deadline is projected from the governance clock, which is not minute-exact). The
+// default is explicit rather than optional so one subscription has one canonical
+// parameter set (the `dcaStart` precedent).
+export const GOV_UNVOTED_LEAD_HOURS = { min: 1, max: 168, default: 24 } as const
+export const govUnvotedParams = z.object({
+  address,
+  leadHours: z.number().int().min(GOV_UNVOTED_LEAD_HOURS.min).max(GOV_UNVOTED_LEAD_HOURS.max).default(GOV_UNVOTED_LEAD_HOURS.default),
+}).strict()
+// `gov-unlockable` fires when one of the account's conviction-voting locks reaches
+// the block from which more of it becomes unlockable.
+export const govUnlockableParams = z.object({ address }).strict()
+
 export const ruleParamSchemas = {
   'account-activity': accountActivityParams,
   'large-trade': largeTradeParams,
@@ -310,6 +299,11 @@ export const ruleParamSchemas = {
   liquidation: liquidationParams,
   'mm-cap': mmCapParams,
   block: blockParams,
+  'forum-reply': forumReplyParams,
+  'forum-mention': forumMentionParams,
+  'forum-thread': forumThreadParams,
+  'gov-unvoted': govUnvotedParams,
+  'gov-unlockable': govUnlockableParams,
 } as const satisfies Record<NotificationKind, z.ZodType>
 
 export type RuleParams = {
@@ -327,6 +321,11 @@ export type RuleParams = {
   liquidation: z.infer<typeof liquidationParams>
   'mm-cap': z.infer<typeof mmCapParams>
   block: z.infer<typeof blockParams>
+  'forum-reply': z.infer<typeof forumReplyParams>
+  'forum-mention': z.infer<typeof forumMentionParams>
+  'forum-thread': z.infer<typeof forumThreadParams>
+  'gov-unvoted': z.infer<typeof govUnvotedParams>
+  'gov-unlockable': z.infer<typeof govUnlockableParams>
 }
 
 // Parse without throwing: the route turns a failure into a 422 carrying the
@@ -368,6 +367,27 @@ export type TargetLabelLookup = (target: AccountActivityTarget) => { name: strin
  * one the key itself stands in, which still says which market.
  */
 export type MarketLabelLookup = (key: string) => string | null
+
+/**
+ * Forum thread key → the thread's title as readers see it. Passed in like the
+ * other lookups: the forum store lives in services/forumStore.ts. Without one a
+ * followed thread is named by its key's own shape ("referendum #450").
+ */
+export type ThreadLabelLookup = (threadKey: string) => string | null
+
+/** A forum thread key read on its own: what kind of thread it is and which one. */
+export function threadKeyLabel(threadKey: string): string {
+  const m = /^([a-z_]+):(.+)$/.exec(threadKey)
+  if (!m) return 'a discussion'
+  if (m[1] === 'opengov') return `referendum #${m[2]}`
+  if (m[1] === 'democracy') return `democracy referendum #${m[2]}`
+  const labels: Record<string, string> = {
+    council: 'council motion', tc: 'technical committee motion', tip: 'treasury tip', treasury: 'treasury proposal',
+    spend: 'treasury spend', democracy_proposal: 'democracy proposal', external: 'external proposal',
+  }
+  const label = labels[m[1]] ?? 'post'
+  return /^0x/.test(m[2]) ? `${label} ${m[2].slice(0, 8)}…` : `${label} #${m[2]}`
+}
 const marketLabel = (key: string, labelOf?: MarketLabelLookup): string => labelOf?.(key) ?? key
 
 // One line describing what a rule watches, used by the rules list, the inbox
@@ -376,6 +396,7 @@ const marketLabel = (key: string, labelOf?: MarketLabelLookup): string => labelO
 export function describeRule(
   kind: NotificationKind, params: unknown,
   symbolOf?: AssetSymbolLookup, targetLabelOf?: TargetLabelLookup, marketLabelOf?: MarketLabelLookup,
+  threadLabelOf?: ThreadLabelLookup,
 ): string {
   const parsed = parseRuleParams(kind, params)
   if (!parsed.ok) return KIND_LABELS[kind]
@@ -425,9 +446,7 @@ export function describeRule(
     }
     case 'referendum': {
       const p = parsed.params as RuleParams['referendum']
-      const phases = p.phases?.length ? p.phases.join(', ') : 'any phase'
-      const track = p.track ? referendumTrackName(p.track) ?? `track ${p.track}` : null
-      return `referenda — ${phases}${track ? ` on ${track}` : ''}`
+      return `referenda — ${p.phases?.length ? p.phases.join(', ') : 'any phase'}`
     }
     case 'tc-motion': {
       const p = parsed.params as RuleParams['tc-motion']
@@ -463,6 +482,23 @@ export function describeRule(
       const p = parsed.params as RuleParams['block']
       return `block #${p.block.toLocaleString('en-US')} being reached`
     }
+    case 'forum-reply':
+      return 'replies to your forum posts and comments'
+    case 'forum-mention':
+      return 'mentions of you in the forum'
+    case 'forum-thread': {
+      const p = parsed.params as RuleParams['forum-thread']
+      const title = threadLabelOf?.(p.threadKey)
+      return `new comments on ${title ? `"${title}"` : threadKeyLabel(p.threadKey)}`
+    }
+    // The account is shown beside the sentence as a pill (the address-target
+    // convention above), so the sentence says only what is watched.
+    case 'gov-unvoted': {
+      const p = parsed.params as RuleParams['gov-unvoted']
+      return `referenda without a vote, ${p.leadHours}h before they end`
+    }
+    case 'gov-unlockable':
+      return 'conviction-locked HDX becoming unlockable'
     case 'liquidation': {
       const p = parsed.params as RuleParams['liquidation']
       const floor = p.minUsd ? ` over ${compactUsd(p.minUsd)}` : ''
@@ -491,4 +527,9 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   liquidation: 'Liquidation',
   'mm-cap': 'Money market cap',
   block: 'Future block',
+  'forum-reply': 'Forum replies',
+  'forum-mention': 'Forum mentions',
+  'forum-thread': 'Followed thread',
+  'gov-unvoted': 'Vote reminder',
+  'gov-unlockable': 'Unlockable HDX',
 }

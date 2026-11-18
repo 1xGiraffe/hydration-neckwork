@@ -81,12 +81,14 @@ export function identityForAccount(accountId: string): AccountIdentity | null {
 // display IS the query whenever enough other names merely contained it — searching
 // "Validator" never found the account called "Validator".
 export function searchIdentitiesByDisplay(q: string, limit = 5): { accountId: string; identity: AccountIdentity }[] {
-  const ql = q.trim().toLowerCase()
+  // NFKC then lower case, as the explorer search folds every name (searchFold).
+  const fold = (t: string) => t.normalize('NFKC').toLowerCase()
+  const ql = fold(q.trim())
   if (!ql) return []
   type Match = { accountId: string; identity: AccountIdentity }
   const exact: Match[] = [], prefix: Match[] = [], sub: Match[] = []
   for (const [accountId, identity] of byAccount) {
-    const display = identity.display.toLowerCase()
+    const display = fold(identity.display)
     if (display === ql) exact.push({ accountId, identity })
     else if (display.startsWith(ql)) prefix.push({ accountId, identity })
     else if (display.includes(ql)) sub.push({ accountId, identity })

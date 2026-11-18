@@ -40,7 +40,12 @@ export async function contractsRoutes(fastify: FastifyInstance) {
     const address = normalizeAddressParam(String((req.params as { address: string }).address ?? ''))
     if (!isH160(address)) return reply.status(400).send({ error: 'Invalid contract address' })
     const payload = await getContractAbiPayload(address)
-    if (!payload) return reply.status(404).send({ error: 'Contract is not verified' })
+    // `?optional=1`: a caller that only asks whether an ABI exists (a proposal's
+    // "what it does") gets 200 with `null` for an unverified contract, not a 404.
+    if (!payload) {
+      if ((req.query as { optional?: string }).optional === '1') return reply.type('application/json').send('null')
+      return reply.status(404).send({ error: 'Contract is not verified' })
+    }
     return payload
   })
 

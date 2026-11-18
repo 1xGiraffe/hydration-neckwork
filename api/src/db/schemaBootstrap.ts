@@ -283,6 +283,15 @@ export function createStatementFor(statements: readonly string[], name: string):
  *   2,750,400.
  *   lbp_activity — every LBP pool event, the HDX bonds' LBP sale source
  *   (020_lbp.sql); the first is at block 3,681,428.
+ *   conviction_voting_state / account_vote_locks_state — every observed
+ *   ConvictionVoting.VotingFor and Balances.Locks of an account
+ *   (022_governance_state.sql), keyed (account_id, block_height); the observations
+ *   start with the seed read at block 15,622,703.
+ *   treasury_events — the Treasury's proposal and spend events, the governance
+ *   calendar's spend dates (022_governance_state.sql); the first is at block 1,905,497.
+ *   hollar_debt_logs — HOLLAR's variable-debt tokens' Mint, Burn and
+ *   DiscountPercentUpdated logs, the borrow-discount fold's input
+ *   (025_hollar_debt_logs.sql); the first is at block 9,333,143.
  */
 /**
  * The identity coverage is judged on: a raw row's key (`raw`, a SELECT list over
@@ -296,10 +305,26 @@ export const RAW_ROW_KEY: DataUpgradeKey = {
   columns: 'block_height, event_index',
   tableWhere: 'block_height >= {lo:UInt32} AND block_height < {hi:UInt32}',
 }
+/** An account-state observation's identity, carried by the 022 tables as their own key. */
+const ACCOUNT_STATE_KEY: DataUpgradeKey = {
+  raw: 'account_id, block_height',
+  columns: 'account_id, block_height',
+  tableWhere: 'block_height >= {lo:UInt32} AND block_height < {hi:UInt32}',
+}
+// The 022 views' SELECTs over raw_account_state_observations, verbatim (a test pins
+// them to the schema file). Each lock is the Balances.Locks entry's amount by its
+// 8-byte id — 'pyconvot' (conviction voting), 'stk_stks' (legacy staking),
+// 'ghdxlock' (GIGAHDX) — and '0' when the account holds none.
+const lockAmountSql = (idHex: string): string => {
+  const pick = `JSONExtractString(arrayFirst(l -> (JSONExtractString(l, 'id') = '${idHex}'), JSONExtractArrayRaw(value_json)), 'amount')`
+  return `if(${pick} = '', '0', ${pick})`
+}
+export const CONVICTION_VOTING_STATE_SELECT = 'account_id, block_height, block_timestamp, value_json, ingested_at'
+export const ACCOUNT_VOTE_LOCKS_SELECT = `account_id, block_height, block_timestamp, ${lockAmountSql('0x7079636f6e766f74')} AS conviction_lock, ${lockAmountSql('0x73746b5f73746b73')} AS staking_lock, ${lockAmountSql('0x676864786c6f636b')} AS gigahdx_lock, ingested_at`
 export interface DataUpgrade {
   table: string
   /** The raw table the MV reads; all are ordered by block_height first. */
-  source: 'raw_events' | 'raw_evm_logs' | 'raw_balance_observations' | 'raw_extrinsics'
+  source: 'raw_events' | 'raw_evm_logs' | 'raw_balance_observations' | 'raw_extrinsics' | 'raw_account_state_observations'
   /** Coverage identity, when the table does not carry the raw row's (block_height, event_index). */
   key?: DataUpgradeKey
   /** The MV's WHERE over the source, verbatim (columns qualified by the source's name). */
@@ -455,6 +480,36 @@ export const DATA_UPGRADES: ReadonlyArray<DataUpgrade> = [
     where: "raw_balance_observations.asset_id = '0' AND raw_balance_observations.account_id != '' AND raw_balance_observations.source_kind != 'snapshot_bootstrap' AND isNotNull(toUInt256OrNull(raw_balance_observations.total))",
     fromBlock: 0,
     select: "account_id, toStartOfHour(block_timestamp) AS interval_start, if(toUInt256OrZero(ifNull(raw_balance_observations.total, '')) > 0, block_height, toUInt32(0)) AS last_nonzero_block, if(toUInt256OrZero(ifNull(raw_balance_observations.total, '')) = 0, block_height, toUInt32(0)) AS last_zero_block",
+  },
+  {
+    // Every observed ConvictionVoting.VotingFor (022_governance_state.sql). An
+    // observation's identity is (block, account) — one row per kind per account per
+    // block (sub_key is '' for this kind) — which is the table's own key.
+    table: 'price_data.conviction_voting_state',
+    source: 'raw_account_state_observations',
+    key: ACCOUNT_STATE_KEY,
+    where: "raw_account_state_observations.kind = 'conviction_voting'",
+    fromBlock: 15_600_000,
+    select: CONVICTION_VOTING_STATE_SELECT,
+  },
+  {
+    // The conviction-voting and staking locks out of every observed Balances.Locks
+    // (022_governance_state.sql), on the same identity.
+    table: 'price_data.account_vote_locks_state',
+    source: 'raw_account_state_observations',
+    key: ACCOUNT_STATE_KEY,
+    where: "raw_account_state_observations.kind = 'balances_locks'",
+    fromBlock: 15_600_000,
+    select: ACCOUNT_VOTE_LOCKS_SELECT,
+  },
+  {
+    // Treasury proposals and spends (022_governance_state.sql): the first is a legacy
+    // Treasury.Proposed at block 1,905,497.
+    table: 'price_data.treasury_events',
+    source: 'raw_events',
+    where: "raw_events.event_name IN ('Treasury.Proposed', 'Treasury.Awarded', 'Treasury.Rejected', 'Treasury.SpendApproved', 'Treasury.AssetSpendApproved', 'Treasury.Paid', 'Treasury.PaymentFailed', 'Treasury.SpendProcessed', 'Treasury.AssetSpendVoided')",
+    fromBlock: 1_900_000,
+    select: 'block_height, event_index, extrinsic_index, block_timestamp, event_name, args_json, ingested_at',
   },
 ]
 export const DATA_UPGRADE_CHUNK_BLOCKS = 100_000

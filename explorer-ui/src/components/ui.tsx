@@ -787,7 +787,8 @@ export function showIconFallback(e: React.SyntheticEvent<HTMLImageElement>) {
 // preis-ui's OmniwatchIcon: self-authored profile avatar (wallet-login) →
 // custom image (e.g. a Discord avatar) → emoji glyph → deterministic
 // gradient-letter emoji. `className` styles the emoji <span>; `imgClass`
-// styles the rounded image when an avatar/emojiUrl is present.
+// styles the rounded image when an avatar/emojiUrl is present. The image is
+// decorative (alt=""): the account's name or address always sits beside it.
 export function AccountEmoji({ account, className = 'emoji id', imgClass = 'emoji-img', title }: {
   account: { emoji?: string; emojiName?: string; emojiUrl?: string; accountId: string; profile?: { avatarVersion: number } | null }
   className?: string
@@ -799,7 +800,7 @@ export function AccountEmoji({ account, className = 'emoji id', imgClass = 'emoj
   if (account.profile && account.profile.avatarVersion > 0) {
     return (
       <span className={className} style={{ padding: 0, overflow: 'hidden' }} title={title ?? name}>
-        <img className={imgClass} src={`/api/explorer/profile-avatar/${encodeURIComponent(account.accountId)}?v=${account.profile.avatarVersion}`} alt={name ?? glyph} onError={showIconFallback} />
+        <img className={imgClass} src={`/api/explorer/profile-avatar/${encodeURIComponent(account.accountId)}?v=${account.profile.avatarVersion}`} alt="" onError={showIconFallback} />
         <span className="icon-fallback" style={{ display: 'none' }}>{glyph}</span>
       </span>
     )
@@ -807,7 +808,7 @@ export function AccountEmoji({ account, className = 'emoji id', imgClass = 'emoj
   if (account.emojiUrl) {
     return (
       <span className={className} style={{ padding: 0, overflow: 'hidden' }} title={title ?? name}>
-        <img className={imgClass} src={account.emojiUrl} alt={name ?? glyph} title={name} onError={showIconFallback} />
+        <img className={imgClass} src={account.emojiUrl} alt="" title={name} onError={showIconFallback} />
         <span className="icon-fallback" style={{ display: 'none' }}>{glyph}</span>
       </span>
     )
@@ -1147,7 +1148,8 @@ export function StatusBadge({ ok, reason, compact }: { ok: boolean; reason?: str
 export function VoteSideBadge({ side }: { side: string | null | undefined }) {
   const label = voteSideLabel(side)
   const col = label === 'AYE' ? CAT.aye : label === 'NAY' ? CAT.nay : CAT.vote
-  return <span className="pill-badge" style={{ color: col, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>{label}</span>
+  const text = label === 'AYE' ? 'var(--green-text)' : label === 'NAY' ? 'var(--red-text)' : col
+  return <span className="pill-badge" style={{ color: text, background: `color-mix(in srgb, ${col} 15%, transparent)` }}>{label}</span>
 }
 export function FinalizedBadge({ finalized }: { finalized: boolean }) {
   return finalized
@@ -1166,7 +1168,7 @@ export function Copy({ text }: { text: string }) {
     <button
       className={`copy${done ? ' done' : ''}`}
       title={done ? 'Copied' : 'Copy'}
-      aria-label={done ? 'Copied' : 'Copy'}
+      aria-label={done ? 'Copied' : `Copy ${text.length > 16 ? `${text.slice(0, 6)}…${text.slice(-4)}` : text}`}
       onClick={(e) => {
         e.stopPropagation(); e.preventDefault()
         void navigator.clipboard?.writeText(text)
@@ -1780,14 +1782,14 @@ export function JsonView({ value }: { value: unknown }) {
 /* ============ layout helpers ============ */
 export function Crumbs({ items }: { items: { label: string; to?: string }[] }) {
   return (
-    <div className="crumbs">
+    <nav className="crumbs" aria-label="Breadcrumb">
       {items.map((it, i) => (
         <span key={i} style={{ display: 'contents' }}>
-          {i > 0 && <span className="sep">/</span>}
-          {it.to ? <Link to={it.to}>{it.label}</Link> : <span>{it.label}</span>}
+          {i > 0 && <span className="sep" aria-hidden="true">/</span>}
+          {it.to ? <Link to={it.to}>{it.label}</Link> : <span aria-current={i === items.length - 1 ? 'page' : undefined}>{it.label}</span>}
         </span>
       ))}
-    </div>
+    </nav>
   )
 }
 // Top-level tab bar for detail pages (Account/Tag). Reuses the shared .tabs

@@ -194,7 +194,7 @@ const HDX_GIGA = {
 
 const REFERENDUM_OPENGOV = {
   pallet: 'opengov', index: 410, title: 'Reduce Omnipool weight cap for aDOT (DOT) from 30% to 10%',
-  proposer: ACCOUNT, subsquareUrl: 'https://hydration.subsquare.io/referenda/410',
+  proposer: ACCOUNT,
   track: 8, proposalHash: '0xb4ef77ca954b061d157010d381fd990dfaf533b3515bc8d2ea422336fe18ec33',
   proposalCall: { pallet: 'Omnipool', callName: 'set_asset_weight_cap', args: { assetId: 1001, cap: 100_000 }, encoded: '0x00', byteLength: 10, decodeError: null },
   status: 'confirming', enactment: null,

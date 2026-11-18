@@ -1,3 +1,4 @@
+import { userLine } from '../format/untrusted.ts'
 import { z } from 'zod'
 import { formatParam, type ToolContext, type ToolDefinition, type ToolOutput } from '../toolTypes.ts'
 import { invalidArgument, toolErrorFromUpstream } from '../errors.ts'
@@ -33,18 +34,19 @@ const ROW_CHARS_PER_ASSET = 22
 
 const V3_ADDRESS = /^0x[0-9a-fA-F]{40}$/
 
-const DESCRIPTION = `A pool's state history as exact observations: raw integer reserves per asset, peg rationals, share issuance, amplification and fee, each stamped with the block it was read at (height, hash, time). Answers "how did the PRIME/HOLLAR reserves move last week?", "when did pool 110 run short of aUSDC?", "what were the pegs at block 14,400,000?", and feeds a liquidity or arbitrage simulation the aligned series it calibrates on. get_pools with include 'history' gives a five-number TVL summary; this tool gives the points.
+const DESCRIPTION = `A pool's state history as exact observations: raw integer reserves per asset, peg rationals, share issuance, amplification and fee, each stamped with the block it was read at. Answers "how did the PRIME/HOLLAR reserves move last week?", "when did pool 110 run short of aUSDC?", "pegs at block 14,400,000?", and feeds simulations their aligned series. get_pools include 'history' is a five-number TVL summary; this gives the points.
 
-'pool' is a stableswap or XYK pool's SHARE-TOKEN id (143, 110, 111, 105...), or the literal 'omnipool' with 'asset' naming one or more listed assets by id ("222", "0,222,1001"): per asset its reserve, hub reserve (H2O), LP shares, protocol shares, weight cap, tradability and the asset fee its last sale out of the pool paid, beside the pool-wide H2O total every price and weight is read against. A DELISTED Omnipool asset ends at its removal block (the reply's listings name it); its last state is never repeated. Uniswap v3 pools are not served here.
+'pool' is a stableswap or XYK SHARE-TOKEN id (143, 110, 111, 105…), or 'omnipool' with 'asset' naming listed assets ("222", "0,222,1001"): per asset its reserve, hub reserve (H2O), LP and protocol shares, weight cap, tradability and the asset fee its last sale paid, beside the pool-wide H2O total. A DELISTED Omnipool asset ends at its removal block. Uniswap v3 is not served.
 
-Every point is chain storage read at exactly the block it names — never interpolated, never carried forward — so the value between two points is unknown, not constant. 'resolution' chooses the sampling:
-- 'grid' (default): the indexer's 600-block grid (height divisible by 600, about every 22 minutes), thinned to every Nth grid block so the window fits 'limit' points; 'stepBlocks' fixes the stride instead (rounded up to a multiple of 600) and the window is then paged.
-- 'hour' / 'day': one point per calendar bucket — the LAST grid observation at or before the bucket's end, standing for the bucket and stamped with its own block. 'day' points are the observations behind the explorer pool page's daily chart.
-- 'block': every block, exact — the replay mode, at most 200 blocks per call; window it with fromBlock/toBlock only.
+Every point is storage read at exactly its block — never interpolated or carried forward; between two points the value is unknown. 'resolution':
+- 'grid' (default): the 600-block grid (~22 min), thinned so the window fits 'limit'; 'stepBlocks' fixes the stride (multiple of 600) and pages instead.
+- 'hour' / 'day': the LAST grid observation at or before each bucket's end, stamped with its own block ('day' = the pool page's daily chart).
+- 'block': every block, exact replay, at most 200 per call, windowed by height only.
 
-Window with fromBlock/toBlock (heights) or fromTs/toTs (unix SECONDS, not dates); with neither, the newest 'limit' points. 'limit' is points per call (default 48, max 100); a reply that stops short says so under coverage.truncated, counts the unexamined rest in coverage.remaining and names coverage.nextFromBlock to continue from. coverage.missing lists the slots inside the returned span with no observation — a gap is a gap, never zero inventory.
+Window with fromBlock/toBlock (heights) or fromTs/toTs (unix SECONDS); neither = the newest 'limit' points. A reply that stops short says so in coverage.truncated, coverage.remaining and coverage.nextFromBlock. coverage.missing lists slots with no observation — a gap, never zero inventory.
 
-The markdown table scales amounts by each asset's decimals; format 'json' carries the raw integers (reserves, peg num/den, issuance as strings), the block hash and specVersion per point, and fits fewer points per call than markdown. feePermill is Substrate's Permill: parts per MILLION (400 = 0.04%). One reading to know: a money-market aToken leg (aUSDC in pool 110, aUSDT in 111, aDOT in the Omnipool) is the balance as last read, so interest accrued since the pool last moved that aToken is not in the figure — the reply's semantics.reserves names such legs. Omnipool fees are event-derived (the rate last charged, not a quote) and the protocol fee is not served; semantics.fees says why.`
+Markdown scales amounts by decimals; 'json' carries raw integers (reserves, peg num/den, issuance as strings), hash and specVersion per point, and fits fewer points. feePermill is parts per MILLION (400 = 0.04%). A money-market aToken leg (aUSDC in 110, aUSDT in 111, aDOT in the Omnipool) is the balance as last read, without interest accrued since the pool last moved it (semantics.reserves names such legs). Omnipool fees are event-derived (the rate last charged) and the protocol fee is not served (semantics.fees).`
+
 
 /* ============ budget ============ */
 
@@ -154,7 +156,7 @@ export function renderSnapshots(s: PoolSnapshots, ctx: ToolContext, rows: number
   const first = shown[0]
   const last = shown[shown.length - 1]
   const head = kv([
-    ['Pool', `${explorerLink(`${s.name} (pool ${s.poolId})`, poolUrl(base, s.poolId))} · ${s.kind === 'stableswap' ? 'Stableswap' : 'XYK'}`],
+    ['Pool', `${explorerLink(`${userLine(s.name, 80)} (pool ${s.poolId})`, poolUrl(base, s.poolId))} · ${s.kind === 'stableswap' ? 'Stableswap' : 'XYK'}`],
     ['Assets', s.assets.map(a => `${explorerLink(assetLabelWithId(a), assetUrl(base, a.assetId))} (${a.decimals} decimals)`).join(' · ')],
     ['Window', `block ${formatCount(s.window.fromBlock)} → ${formatCount(s.window.toBlock)}${first ? ` · ${formatTime(first.time)} → ${formatTime(last.time)}` : ''}`],
     ['Resolution', describeResolution(s)],
@@ -172,7 +174,7 @@ export function renderSnapshots(s: PoolSnapshots, ctx: ToolContext, rows: number
   ]
   const cut = s.points.length - shown.length
   return joinBlocks(
-    h2(`${s.name} — state snapshots`),
+    h2(`${userLine(s.name, 80)} — state snapshots`),
     head,
     h3(`Points (${formatCount(shown.length)}${cut > 0 ? ` of ${formatCount(s.points.length)} fetched` : ''}, oldest first)`),
     table(headers, shown.map(p => pointRow(p, s, pegCols, base)), 'no observation of this pool in the window'),
@@ -383,15 +385,15 @@ async function handler(input: Record<string, unknown>, ctx: ToolContext): Promis
 }
 
 const INPUT_SHAPE = {
-  pool: z.string().trim().min(1).max(64).describe('A stableswap or XYK pool\'s SHARE-TOKEN asset id, as a numeric string ("143", "110", "111", "105"), or the literal "omnipool" together with `asset`. A 0x v3 address is not served here.'),
-  asset: z.string().trim().max(120).optional().describe('pool "omnipool" only: the listed asset(s) to follow, as registry ids, comma-separated ("222" for HOLLAR, "0,222,1001"; at most 8). Each becomes one table.'),
-  fromBlock: z.coerce.number().int().min(0).max(0xffff_ffff).optional().describe('Start of the window as a BLOCK NUMBER (inclusive). Omit for the pool\'s first observation, or — with toBlock/toTs also omitted — for the newest `limit` points.'),
-  toBlock: z.coerce.number().int().min(0).max(0xffff_ffff).optional().describe('End of the window as a BLOCK NUMBER (inclusive). Omit for the newest observation.'),
-  fromTs: z.coerce.number().int().min(0).max(0xffff_ffff).optional().describe('Start of the window in unix SECONDS (not a date, not milliseconds); resolves to the first observation at or after it. Not for resolution "block".'),
-  toTs: z.coerce.number().int().min(0).max(0xffff_ffff).optional().describe('End of the window in unix SECONDS; resolves to the last observation at or before it. Not for resolution "block".'),
-  resolution: z.enum(RESOLUTIONS).optional().describe("Sampling: 'grid' (default; the 600-block grid, thinned to fit `limit`), 'hour' or 'day' (the last grid observation of each calendar bucket), 'block' (every block, exact; at most 200 per call, windowed by height)."),
-  stepBlocks: z.coerce.number().int().min(1).max(100_000_000).optional().describe("Resolution 'grid' only: fix the stride in blocks (rounded up to a multiple of 600) instead of letting the window thin itself to `limit`; the window is then paged with coverage.nextFromBlock."),
-  limit: z.coerce.number().int().min(1).max(MAX_POINTS).optional().describe(`Points per call (default ${DEFAULT_POINTS}, max ${MAX_POINTS}). The json form fits fewer and says so in coverage.`),
+  pool: z.string().trim().min(1).max(64).describe('Stableswap/XYK SHARE-TOKEN id ("143"), or "omnipool" with `asset`.'),
+  asset: z.string().trim().max(120).optional().describe('Omnipool only: registry ids, comma-separated, at most 8 ("0,222").'),
+  fromBlock: z.coerce.number().int().min(0).max(0xffff_ffff).optional().describe('Window start, BLOCK NUMBER, inclusive.'),
+  toBlock: z.coerce.number().int().min(0).max(0xffff_ffff).optional().describe('Window end, BLOCK NUMBER, inclusive.'),
+  fromTs: z.coerce.number().int().min(0).max(0xffff_ffff).optional().describe('Window start, unix SECONDS (not for "block").'),
+  toTs: z.coerce.number().int().min(0).max(0xffff_ffff).optional().describe('Window end, unix SECONDS (not for "block").'),
+  resolution: z.enum(RESOLUTIONS).optional().describe("Default 'grid'."),
+  stepBlocks: z.coerce.number().int().min(1).max(100_000_000).optional().describe("'grid' only: fixed stride in blocks (multiple of 600); pages via coverage.nextFromBlock."),
+  limit: z.coerce.number().int().min(1).max(MAX_POINTS).optional().describe(`Points per call (default ${DEFAULT_POINTS}).`),
   format: formatParam,
 }
 

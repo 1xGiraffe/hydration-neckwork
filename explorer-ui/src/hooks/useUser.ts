@@ -1,10 +1,12 @@
+import { snapshotRetry } from './useGovernance'
 import { useEffect } from 'react'
 import { mergeBreakdownCatchup } from '../utils/userRevenueMerge'
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query'
 import { api, userApi, PUBLIC_LIST_TAG } from '../api/explorer'
 import type { EventFilters, ExtrinsicFilters, ListCountQuery, ValueFilters } from '../api/explorer'
 import type { RevenueRange } from '../types'
-import { useSession, setSession } from '../session'
+import { useSession, setSession, getSession } from '../session'
+import { clearAccountDrafts } from '../markdown/drafts'
 import { setTagMap, setTagMapError } from '../userTags'
 import { BLOCK_STALE_MS } from '../live'
 import { useHeldRows } from './useHeldRows'
@@ -216,6 +218,18 @@ export function useListTagVotes(listId: string | null, tagId: string | null, off
 }
 // Grouped mode (one row per referendum) — ranked page, no useHeldRows, same as
 // its system-tag counterpart in useExplorerData.ts.
+/** A list tag's members' governance, summed (its Governance tab). */
+export function useListTagGovernance(listId: string | null, tagId: string | null) {
+  const session = useSession()
+  return useQuery({
+    queryKey: ['list-tag-governance', listId, tagId],
+    queryFn: ({ signal }) => userApi.listTagGovernance(listId as string, tagId as string, signal),
+    enabled: listTagReadable(session, listId) && !!tagId,
+    staleTime: 30_000,
+    ...snapshotRetry,
+  })
+}
+
 export function useListTagVotesByReferendum(listId: string | null, tagId: string | null, offset = 0, enabled = true) {
   const session = useSession()
   const ri = useInterval()
@@ -248,5 +262,11 @@ export function useUserMutation<A extends unknown[], R>(fn: (...args: A) => Prom
 }
 
 export async function logout(): Promise<void> {
-  try { await userApi.logout() } finally { setSession(null) }
+  // Unsent forum drafts belong to the account: a person logging out of a shared
+  // browser leaves none behind for the next one.
+  const accountId = getSession()?.accountId
+  try { await userApi.logout() } finally {
+    if (accountId) clearAccountDrafts(accountId)
+    setSession(null)
+  }
 }

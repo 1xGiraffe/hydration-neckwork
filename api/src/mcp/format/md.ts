@@ -12,8 +12,20 @@
 
 const NONE = '_none_'
 
-export const h2 = (text: string): string => `## ${text}`
-export const h3 = (text: string): string => `### ${text}`
+/**
+ * Every line terminator a renderer or a model may honour: CR, LF, CRLF, the
+ * vertical tab, the form feed, NEL and the Unicode line and paragraph
+ * separators. A value that must stay on one line folds all of them, not only
+ * `\n` — a U+2028 inside an identity name starts a new line for many readers.
+ */
+export const LINE_BREAKS = /\r\n|[\r\n\v\f\u0085\u2028\u2029]/g
+
+const oneLine = (text: string): string => String(text).replace(LINE_BREAKS, ' ')
+
+// A heading is one line by definition; folding here means no value spliced
+// into one can start a heading, list or section of its own.
+export const h2 = (text: string): string => `## ${oneLine(text)}`
+export const h3 = (text: string): string => `### ${oneLine(text)}`
 
 /**
  * A pipe or a newline inside a value would end the cell and shear the rest of
@@ -23,7 +35,7 @@ export const h3 = (text: string): string => `### ${text}`
  */
 export function escapeCell(s: string | null | undefined): string {
   if (s == null) return ''
-  return String(s).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim()
+  return String(s).replace(/\|/g, '\\|').replace(LINE_BREAKS, ' ').trim()
 }
 
 /**

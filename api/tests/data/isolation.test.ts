@@ -69,6 +69,17 @@ const ALLOWED_SHARED = new Set([
   // the same totals. Leaves: the client type, cache and valuation only.
   'services/userRevenueStreams.ts',
   'services/userRevenueRead.ts',
+  // The governance forum's in-process snapshot (lists, titles, excerpts, counts;
+  // reloaded on the forum tables' watermark) and its read rules — the hidden/deleted
+  // stub rule, the merged-thread resolution, the Subsquare link — so the forum
+  // routes here count and withhold exactly what the explorer's do. Leaves: the
+  // client type, node:crypto and each other only.
+  'services/forumStore.ts',
+  'services/forumView.ts',
+  // The treasury's spend fold (a spend's state from its events), so the explorer's
+  // treasury read model and /v1/governance/treasury/spends state one spend one way. A
+  // leaf: no imports at all.
+  'services/treasurySpends.ts',
 ])
 
 function walk(dir: string, prefix = ''): string[] {

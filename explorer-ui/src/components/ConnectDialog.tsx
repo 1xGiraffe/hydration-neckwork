@@ -28,10 +28,10 @@ type Stage = 'wallets' | 'accounts' | 'signing' | 'scan'
 
 function describeStage(stage: Stage, busy: boolean, hasError: boolean): string {
   if (stage === 'wallets') return 'Sign a message with your wallet to prove you own the address — no transaction, no fee.'
-  if (stage === 'accounts') return 'Choose the account to log in with.'
-  if (stage === 'scan') return busy ? 'Logging you in…' : 'Point the camera at the QR code shown on your logged-in device.'
+  if (stage === 'accounts') return 'Choose the account to sign in with.'
+  if (stage === 'scan') return busy ? 'Signing you in…' : 'Point the camera at the QR code shown on your signed-in device.'
   if (hasError) return 'Couldn’t log you in.'
-  return busy ? 'Waiting for a signature in your wallet…' : 'Logging you in…'
+  return busy ? 'Waiting for a signature in your wallet…' : 'Signing you in…'
 }
 
 // Wallet connect + sign-in: pick a wallet, pick an account (skipped when the
@@ -210,7 +210,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
     if (claimingRef.current) return
     const code = extractDeviceLinkCode(text)
     if (!code) {
-      setError('That is not a device-link QR code — show the one from your logged-in device.')
+      setError('That is not a device-link QR code — show the one from your signed-in device.')
       return
     }
     claimingRef.current = true
@@ -227,7 +227,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
       if (attemptRef.current !== attempt) return
       claimingRef.current = false
       setBusy(false)
-      setError(e instanceof Error ? e.message : 'Couldn’t log in with this code')
+      setError(e instanceof Error ? e.message : 'Couldn’t sign in with this code')
     }
   }
 
@@ -237,7 +237,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog">
           <div className="dialog-head">
-            <Dialog.Title asChild><h2>{stage === 'scan' ? 'Log in with a QR code' : 'Log in with your wallet'}</h2></Dialog.Title>
+            <Dialog.Title asChild><h2>{stage === 'scan' ? 'Sign in with a QR code' : 'Sign in with your wallet'}</h2></Dialog.Title>
             <Dialog.Close asChild>
               <button className="theme-toggle" aria-label="Close">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
@@ -328,7 +328,7 @@ export function ConnectDialog({ open, onOpenChange }: { open: boolean; onOpenCha
                     <QrScanner
                       onCode={text => void claimScanned(text)}
                       onUnavailable={reason => setScanUnavailable(reason === 'unsupported'
-                        ? 'No camera is available here (it needs an HTTPS connection). Scan the QR code with your phone’s camera app instead — it opens the explorer already logged in.'
+                        ? 'No camera is available here (it needs an HTTPS connection). Scan the QR code with your phone’s camera app instead — it opens the explorer already signed in.'
                         : 'Camera access was denied. Allow it in the browser settings, or scan the QR code with your phone’s camera app instead.')}
                     />
                   </Suspense>

@@ -31,12 +31,10 @@ async function setup(tags: TagFixture[], identities: IdentityFixture[] = []) {
   vi.resetModules()
   const { initExplorerService, search } = await import('../src/services/explorerService.ts')
   const { initGovernanceService } = await import('../src/services/governanceService.ts')
-  const { initReferendumTitleService } = await import('../src/services/referendumTitleService.ts')
   const { initIdentityService, loadIdentities } = await import('../src/services/identityService.ts')
 
   initExplorerService(emptyRowClient())
   initGovernanceService(emptyRowClient())
-  initReferendumTitleService(emptyRowClient())
   initIdentityService({
     query: vi.fn(async () => ({
       json: async () => identities.map(i => ({

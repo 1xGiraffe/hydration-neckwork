@@ -42,7 +42,7 @@ export function Extrinsics() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Extrinsics' }]} />
-        <div className="page-title">Extrinsics <span className="sub">signed calls</span></div>
+        <h1 className="page-title">Extrinsics <span className="sub">signed calls</span></h1>
       </div>
       <DayBarChart data={daily ?? []} color={UNFILTERED_COLOR} label="Daily signed extrinsics" selected={f.from === f.to ? f.from : undefined} onSelect={setDay} fmt={F.int} loading={!daily} />
       <FilterZone fields={extrinsicFilterFields(false, names?.calls)} values={f} onChange={(k, v) => { onChange(k, v); setPage(0) }} onClear={onClear} />

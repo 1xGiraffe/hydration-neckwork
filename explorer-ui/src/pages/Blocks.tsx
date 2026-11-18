@@ -93,7 +93,7 @@ export function Blocks() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Blocks' }]} />
-        <div className="page-title">Blocks <span className="sub">{stats.data ? 'indexed through block ' + F.int(stats.data.headBlock) : ''}</span></div>
+        <h1 className="page-title">Blocks <span className="sub">{stats.data ? 'indexed through block ' + F.int(stats.data.headBlock) : ''}</span></h1>
       </div>
 
       <div className="sec-title">Average block time</div>

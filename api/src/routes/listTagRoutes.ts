@@ -3,7 +3,7 @@ import {
   getAccountsForMembers,
   getListTagDetail, getListTagHistoryWindow, getListTagLiquidityHistory, getListTagVolumeHistory, getListTagActivity, getListTagExtrinsics, getListTagEvents,
   getListTagVotes, getListTagRevenueBreakdown, getListTagUserRevenue, USER_REVENUE_RANGES, getListTagVotesByReferendum, getListTagTabCounts,
-  getListTagListTotal, getListTagValueEvents,
+  getListTagListTotal, getListTagValueEvents, membershipFingerprint,
   type ValueListFilters,
 } from '../services/explorerService.ts'
 import {
@@ -12,6 +12,8 @@ import {
   maxActivityOffsetFor, maxScopedActivityOffsetFor, scopedListQuery, listTabSchema,
   accountSortParam, historyWindowSchema, optionalHistoryWindow, orderHistoryQuery,
 } from './explorer.ts'
+import { getMembersGovernance } from '../services/governanceRead.ts'
+import { convictionSnapshotReady } from '../services/convictionState.ts'
 import { getListTagLiquidityRewards, getListTagOrderHistory, getListTagPositionsPresence } from '../services/positionsPresence.ts'
 
 // A list tag resolved to the two things every route below needs: which tag it
@@ -199,6 +201,18 @@ export function listTagReadRoutes(fastify: FastifyInstance, surface: ListTagRead
     const offset = offsetParam(q)
     if (offset == null) return badOffset(reply)
     return getListTagVotesByReferendum(resolved.listId, resolved.tagId, resolved.tag.members, limitParam(q, 25), offset)
+  })
+
+  // The Governance tab: the members' locks, delegations and running votes, summed.
+  fastify.get(`${base}/governance`, async (req, reply) => {
+    const resolved = resolve(req, reply)
+    if (!resolved) return
+    if (!convictionSnapshotReady()) {
+      return reply.status(503).header('cache-control', 'no-store').header('retry-after', '10')
+        .send({ error: 'Governance vote state is still loading', reason: 'not-ready', snapshot: 'conviction-state' })
+    }
+    const { listId, tagId, tag } = resolved
+    return getMembersGovernance(tag.members, `list-tag:${listId}:${tagId}:${membershipFingerprint(tag.members)}`)
   })
 
   fastify.get(`${base}/counts`, async (req, reply) => {

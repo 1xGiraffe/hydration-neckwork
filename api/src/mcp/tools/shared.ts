@@ -22,6 +22,7 @@ import {
 } from '../format/refs.ts'
 import { formatUsd, scaleBase1e8 } from '../format/units.ts'
 import { budget } from '../format/md.ts'
+import { foldUserStrings, userField, userLine } from '../format/untrusted.ts'
 import { fitJson } from '../format/json.ts'
 
 /**
@@ -107,11 +108,11 @@ export const KIND_HEADING: Record<EntityKind, string> = {
   extrinsic: 'Extrinsics',
   event: 'Events',
   trade: 'Trades',
-  account: 'Accounts',
+  account: 'Accounts (names are user-chosen)',
   asset: 'Assets',
   pool: 'Pools',
   tag: 'Tags',
-  referendum: 'Referenda',
+  referendum: 'Referenda (titles are user-authored)',
   intent: 'Intents',
   dca: 'DCA schedules',
   contract: 'Contracts',
@@ -139,6 +140,21 @@ function poolHitUrl(value: string, base: string): string | null {
  * it is ever printed — the platform slug is the identifier.
  */
 export function viewSearchHit(hit: SearchResult, base: string): SearchHitView | null {
+  const view = rawSearchHitView(hit, base)
+  if (!view) return null
+  // A hit's label and caption are names someone chose — an identity display, a
+  // referendum title imported verbatim, a registry name — so every view leaves
+  // here folded to one safe line, whichever tool prints it.
+  const json = Object.fromEntries(Object.entries(view.json).map(([k, v]) => [k, typeof v === 'string' ? userField(v) : v]))
+  return {
+    ...view,
+    label: userLine(view.label, 110) || view.identifier,
+    detail: view.detail ? userLine(view.detail, 110) || null : null,
+    json,
+  }
+}
+
+function rawSearchHitView(hit: SearchResult, base: string): SearchHitView | null {
   const value = String(hit.value ?? '')
   if (!value) return null
   switch (hit.type) {
@@ -676,7 +692,10 @@ export const JSON_BUDGET_MARGIN = 2_000
  */
 export function output(ctx: ToolContext, markdown: string, json: unknown, errors: (ToolError | null | undefined)[] = []): ToolOutput {
   const real = errors.filter((e): e is ToolError => e != null)
-  const fitted = fitJson(json, ctx.maxTextChars - JSON_BUDGET_MARGIN)
+  // Every tool's record passes the same net: user-chosen names and titles
+  // (identity fields, profile and contract names, titles, reasons, labels) are
+  // cleaned of invisible characters and bounded wherever they sit.
+  const fitted = fitJson(foldUserStrings(json), ctx.maxTextChars - JSON_BUDGET_MARGIN)
   return real.length ? { markdown, json: fitted, errors: real } : { markdown, json: fitted }
 }
 

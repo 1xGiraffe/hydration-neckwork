@@ -1,10 +1,10 @@
 import { memo } from 'react'
 import type { ReactNode } from 'react'
 import { Link, paths } from '../router'
-import { AddrPill, Amt, Dash, EmptyRow, ErrorRow, MomentLink, TableSkeleton, VoteSideBadge, pendingRows, LiveAnchor, type Moment } from './ui'
+import { AddrPill, Amt, Dash, EmptyRow, ErrorRow, F, MomentLink, TableSkeleton, VoteSideBadge, pendingRows, LiveAnchor, type Moment } from './ui'
 import type { AccountRef, AssetRef } from '../types'
 import { ConvictionTag } from './ActivityTable'
-import { voteSubjectLabel } from '../utils/voteRows'
+import { convictionLabel, voteSubjectLabel } from '../utils/voteRows'
 
 // The one votes table.
 //
@@ -26,6 +26,8 @@ export interface VoteTableRow extends Moment {
   // Conviction-weighted power, planck. Null when the vote has no weight to report (a
   // collective vote has neither balance nor conviction).
   weighted: string | null
+  /** The HDX behind the vote (its capital, before conviction), planck — shown under the voting power. */
+  capital?: string | null
   withdrawn?: boolean
   // Grouped mode (tag votes by referendum): how many members' latest votes this
   // row combines. Absent on a plain single-vote row.
@@ -51,21 +53,25 @@ function ReferendumCell({ row }: { row: VoteTableRow }) {
 // Memoised, and fed row objects whose identity survives a re-sort: a referendum
 // carries a couple of hundred of these, and sorting or filtering only reorders the
 // same votes, so React can move the rows without re-rendering any of them.
-const VoteRow = memo(function VoteRow({ row, asset, now, showAccount, showReferendum }: {
-  row: VoteTableRow; asset: AssetRef; now: number; showAccount?: boolean; showReferendum?: boolean
+const VoteRow = memo(function VoteRow({ row, asset, now, showAccount, showReferendum, lockDays, oneLine }: {
+  row: VoteTableRow; asset: AssetRef; now: number; showAccount?: boolean; showReferendum?: boolean; lockDays?: number[]; oneLine?: boolean
 }) {
+  const mult = convictionLabel(row.conviction)
+  const level = row.conviction ? /^Locked([1-6])x$/.exec(row.conviction)?.[1] : null
+  const days = level && lockDays ? lockDays[Number(level)] : null
   return (
-    <tr className={row.withdrawn ? 'row-muted' : undefined}>
+    <tr className={row.withdrawn ? 'row-muted' : undefined} title={oneLine && row.timestamp ? `Voted ${F.datetime(row.timestamp)}` : undefined}>
       {showReferendum && <td data-label="Referendum"><ReferendumCell row={row} /></td>}
       {showAccount && <td data-label="Account">{row.account ? <AddrPill account={row.account} /> : <span className="muted">unknown</span>}</td>}
       <td data-label="Vote">
         <VoteSideBadge side={row.side} />
-        <ConvictionTag conviction={row.conviction} />
+        {days != null && mult ? <span className="muted conviction-tag" title={`Locks ~${Math.round(days * 10) / 10 >= 10 ? Math.round(days) : Math.round(days * 10) / 10} days after the referendum if this side wins`}>{mult}</span> : <ConvictionTag conviction={row.conviction} />}
         {row.voters != null && row.voters > 1 && <span className="muted" title="Members whose latest vote this row combines"> · {row.voters} accounts</span>}
         {row.withdrawn && <span className="badge badge-quiet" title="Withdrawn before the referendum closed, so it is not counted">withdrawn</span>}
       </td>
-      <td data-label="Votes" className="r mono">
-        {row.weighted == null ? <Dash /> : <><Amt raw={row.weighted} dec={asset.decimals} /> <span className="muted">{asset.symbol}</span></>}
+      <td data-label="Voting power" className="r mono">
+        {row.weighted == null ? <Dash /> : <><Amt raw={row.weighted} dec={asset.decimals} /> <span className="muted">votes</span></>}
+        {row.capital != null && row.weighted != null && <div className="votes-capital muted"><Amt raw={row.capital} dec={asset.decimals} /> {asset.symbol}{mult && row.voters == null ? <> × {mult.replace(/x$/, '')}</> : null}</div>}
       </td>
       <td data-label="Time" className="r">
         {/* Links to the extrinsic that cast the vote (see MomentLink). */}
@@ -75,8 +81,10 @@ const VoteRow = memo(function VoteRow({ row, asset, now, showAccount, showRefere
   )
 })
 
-export function VotesTable({ rows, asset, now, showAccount, showReferendum, sortHeads, loading, pending, error, onRetry, pageSize, anchorRef }: {
+export function VotesTable({ rows, asset, now, showAccount, showReferendum, sortHeads, loading, pending, error, onRetry, pageSize, anchorRef, lockDays, oneLine }: {
   rows: VoteTableRow[]
+  /** Lock days per conviction level (the tracks read), for the conviction tag's hover. */
+  lockDays?: number[]
   asset: AssetRef
   now: number
   showAccount?: boolean
@@ -94,15 +102,17 @@ export function VotesTable({ rows, asset, now, showAccount, showReferendum, sort
   // Marks this list's top edge when its rows are live (see useHeldRows). The
   // referendum page and the grouped mode pass none: neither prepends.
   anchorRef?: (el: HTMLElement | null) => void
+  /** On a phone, one line per vote (account · vote · power, the time in the row's tooltip) instead of a labelled card. */
+  oneLine?: boolean
 }) {
   const cols = 2 + (showAccount ? 1 : 0) + (showReferendum ? 1 : 0)
   return (
-    <div className="panel"><LiveAnchor anchorRef={anchorRef} /><table className="tbl votes-tbl">
+    <div className="panel"><LiveAnchor anchorRef={anchorRef} /><table className={`tbl votes-tbl${oneLine ? ' votes-line' : ''}`}>
       <thead><tr>
         {showReferendum && <th>Referendum</th>}
         {showAccount && <th>Account</th>}
         <th>Vote</th>
-        <th className="r">{sortHeads?.votes ?? 'Votes'}</th>
+        <th className="r">{sortHeads?.votes ?? 'Voting power'}</th>
         <th className="r">{sortHeads?.time ?? 'Time'}</th>
       </tr></thead>
       <tbody {...pendingRows(pending)}>
@@ -110,7 +120,7 @@ export function VotesTable({ rows, asset, now, showAccount, showReferendum, sort
           : error && !rows.length ? <ErrorRow cols={cols + 1} title="Couldn’t load votes" error={error} onRetry={onRetry} />
             : !rows.length ? <EmptyRow cols={cols + 1}>No votes</EmptyRow>
               : rows.map(row => (
-                <VoteRow key={row.key} row={row} asset={asset} now={now} showAccount={showAccount} showReferendum={showReferendum} />
+                <VoteRow key={row.key} row={row} asset={asset} now={now} showAccount={showAccount} showReferendum={showReferendum} lockDays={lockDays} oneLine={oneLine} />
               ))}
       </tbody>
     </table></div>

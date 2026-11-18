@@ -46,7 +46,7 @@ export function Accounts() {
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Accounts' }]} />
         <div className="detail-header">
-          <div className="page-title">Accounts <span className="sub">{total ? `${F.int(total)} accounts` : ''}</span></div>
+          <h1 className="page-title">Accounts <span className="sub">{total ? `${F.int(total)} accounts` : ''}</span></h1>
         </div>
       </div>
 

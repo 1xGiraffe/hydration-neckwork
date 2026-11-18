@@ -26,6 +26,7 @@ import { dcaRoutes } from './routes/dca.ts'
 import { intentsRoutes } from './routes/intents.ts'
 import { otcRoutes } from './routes/otc.ts'
 import { governanceRoutes } from './routes/governance.ts'
+import { discussionsRoutes } from './routes/discussions.ts'
 import { stakingRoutes } from './routes/staking.ts'
 import { xcmRoutes } from './routes/xcm.ts'
 import { evmRoutes } from './routes/evm.ts'
@@ -48,6 +49,7 @@ export const DATA_ROUTE_PLUGINS: Array<FastifyPluginAsync<{ client: ClickHouseCl
   intentsRoutes,
   otcRoutes,
   governanceRoutes,
+  discussionsRoutes,
   stakingRoutes,
   xcmRoutes,
   evmRoutes,
@@ -163,7 +165,7 @@ const GETTING_STARTED = [
   '- **Extrinsic linkage**: wherever an `extrinsicIndex` appears, its `extrinsicHash` rides beside it (null on block-hook rows that no extrinsic carried).',
   '- **Names**: an event is always `eventName` (`Pallet.Event`), a call always `callName` (`Pallet.call`); the same entity has the same shape wherever it is reached (a vote under an account is the vote under its referendum, a staking event under an account is the staking event on the global feed).',
   '- **Pagination** is cursor-based: `?limit=` (1-100, default 25) and `?cursor=` (opaque, from the previous page\'s `nextCursor`). Responses are `{ items, nextCursor?, hasMore }`, descending by default (`order=asc` where documented). Cursors are stable under live ingestion and O(1) at any depth. Every deep feed also takes the optional window quartet `fromBlock`/`toBlock`/`fromTime`/`toTime` (either kind, either end alone) — the cursor then walks only the window, so reading a bounded slice costs the slice, not the account\'s whole history.',
-  '- **Errors** are always `{ "error": { "code", "message", "context?" } }` with the matching HTTP status. `code` ∈ `unauthorized | rate_limited | bad_request | not_found | internal`. A 404 for a chain resource carries the indexed head in `context`, so "not found" is distinguishable from "not yet ingested". List endpoints answer an unknown-but-valid account with `200` and empty items; only single resources 404.',
+  '- **Errors** are always `{ "error": { "code", "message", "context?" } }` with the matching HTTP status. `code` ∈ `unauthorized | rate_limited | bad_request | not_found | unavailable | internal` (`unavailable`: a 503 with `Retry-After` while a snapshot a route answers from is still loading). A 404 for a chain resource carries the indexed head in `context`, so "not found" is distinguishable from "not yet ingested". List endpoints answer an unknown-but-valid account with `200` and empty items; only single resources 404.',
   '- **Versioning**: `/v1` is additive-only. A breaking change means `/v2`; fields and routes are never renamed, retyped or removed within `/v1`.',
   '- The contract serves finalized, indexed state only — no mempool or unfinalized data.',
 ].join('\n\n')

@@ -139,7 +139,7 @@ export function Activity() {
     <div className="wrap">
       <div className="page-head">
         <Crumbs items={[{ label: 'Home', to: paths.dashboard() }, { label: 'Activity' }]} />
-        <div className="page-title">Activity <span className="sub">on-chain activity, interpreted</span></div>
+        <h1 className="page-title">Activity <span className="sub">on-chain activity, interpreted</span></h1>
       </div>
       {/* The histogram wears whatever category is filtered, so the chart and the
           rows under it agree on what you are looking at. */}

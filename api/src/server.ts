@@ -30,6 +30,20 @@ import { seoRoutes } from './routes/seo.ts'
 import { sitemapRoutes } from './routes/sitemap.ts'
 import { seoPreisRoutes } from './routes/seoPreis.ts'
 import { verificationRoutes, collapseDuplicateSlashes } from './routes/verification.ts'
+import { governanceRoutes } from './routes/governance.ts'
+import { feedRoutes } from './routes/feeds.ts'
+import { forumRoutes } from './routes/forum.ts'
+import { stripCorsFromPrivate } from './routes/corsPolicy.ts'
+import { registerHtmlCsp } from './routes/htmlCsp.ts'
+import { initConvictionState, refreshConvictionSnapshot, startConvictionSnapshotRefresh } from './services/convictionState.ts'
+import { initGovernanceRead } from './services/governanceRead.ts'
+import { initGovernanceDeposits } from './services/governanceDeposits.ts'
+import { initGovernanceTreasury } from './services/governanceTreasury.ts'
+import { initGovernanceStats } from './services/governanceStats.ts'
+import { initForumStore, refreshForumStore, startForumStoreRefresh } from './services/forumStore.ts'
+import { initForumRead } from './services/forumRead.ts'
+import { initForumWrite } from './services/forumWrite.ts'
+import { initForumMedia, startForumMediaHousekeeping } from './services/forumMedia.ts'
 import { loadExplorerAssets, stopExplorerAssetsRefresh } from './services/explorerAssets.ts'
 import { loadRuntimeErrorNames, stopRuntimeErrorNamesRefresh } from './services/runtimeErrorNames.ts'
 import {
@@ -58,12 +72,6 @@ import { initContractRegistryService, loadContractRegistry, startContractRegistr
 import { initContractVerificationService, loadVerifiedContracts, startVerifiedContractsRefresh, stopVerifiedContractsRefresh } from './services/contractVerificationService.ts'
 import { initIdentityService, loadIdentities, startIdentityRefresh, stopIdentityRefresh } from './services/identityService.ts'
 import { initGovernanceService } from './services/governanceService.ts'
-import {
-  initReferendumTitleService,
-  loadReferendumTitles,
-  startReferendumTitleRefresh,
-  stopReferendumTitleRefresh,
-} from './services/referendumTitleService.ts'
 import { initProxyMultisigService } from './services/proxyMultisigService.ts'
 import { initHdxService } from './services/hdxService.ts'
 import { initRevenueService } from './services/revenueService.ts'
@@ -130,8 +138,9 @@ const fastify = Fastify({
 
 const client = createClickHouseClient()
 
-// All routes are anonymous reads. A fixed wildcard avoids reflecting arbitrary
-// origins (and the resulting Vary: Origin fragmentation in shared caches).
+// CORS: anonymous reads for every origin (a fixed '*', so no Vary: Origin), the
+// private /user/ surface for none (routes/corsPolicy.ts).
+stripCorsFromPrivate(fastify)
 await fastify.register(cors, { origin: '*' })
 // JSON payloads (history series, activities, holders) shrink ~10× under gzip —
 // directly cuts transfer time for every concurrent client.
@@ -216,8 +225,13 @@ const CACHE_CONTROL: [RegExp, number][] = [
   [/^\/explorer\/contract\//, 300],
   // Sourcify already-verified probe; flips at most once per verification.
   [/^\/v2\/contract\//, 60],
+  // Track parameters change only with a runtime upgrade; the per-track referendum
+  // lists are cached 60s server-side.
+  [/^\/explorer\/governance\/tracks/, 60],
   [/^\/explorer\//, 5],
 ]
+registerHtmlCsp(fastify)
+
 fastify.addHook('onSend', async (req, reply) => {
   if (req.method !== 'GET' || reply.statusCode !== 200 || reply.getHeader('cache-control')) return
   const path = req.url.split('?')[0]
@@ -238,7 +252,6 @@ fastify.addHook('onClose', async () => {
   stopExplorerAssetsRefresh()
   stopRuntimeErrorNamesRefresh()
   stopIdentityRefresh()
-  stopReferendumTitleRefresh()
   stopBackgroundRefresh()
   stopContractRegistryRefresh()
   stopVerifiedContractsRefresh()
@@ -271,6 +284,9 @@ await fastify.register(seoRoutes)
 await fastify.register(sitemapRoutes)
 await fastify.register(seoPreisRoutes)
 await fastify.register(verificationRoutes)
+await fastify.register(governanceRoutes)
+await fastify.register(feedRoutes)
+await fastify.register(forumRoutes)
 
 async function start() {
   try {
@@ -306,8 +322,16 @@ async function start() {
     // readiness gates or historical backfills to wait on.
     initTagService(client)
     initIdentityService(client)
-    initReferendumTitleService(client)
     initGovernanceService(client)
+    initGovernanceRead(client)
+    initGovernanceDeposits(client)
+    initGovernanceTreasury(client)
+    initGovernanceStats(client, { prewarm: true })
+    initConvictionState(client)
+    initForumStore(client)
+    initForumRead(client)
+    initForumWrite(client)
+    initForumMedia(client)
     initProxyMultisigService(client)
     initHdxService(client)
     initRevenueService(client)
@@ -376,7 +400,7 @@ async function start() {
     await Promise.all([loadExplorerAssets(client), ensureSnakewatchEmojiSourceLoaded(), loadRuntimeErrorNames(client)])
     // Referendum titles come from SubSquare (the chain has none), so they are held
     // in memory like identities and read on every vote row the explorer renders.
-    await Promise.all([loadTags(), loadUserProfiles(), loadIdentities(), loadReferendumTitles().catch(err => console.warn('[titles] referendum title load failed; vote rows render without titles until the refresh succeeds', err)), loadUserSessions(), loadUserLists(), loadNotifications()])
+    await Promise.all([loadTags(), loadUserProfiles(), loadIdentities(), loadUserSessions(), loadUserLists(), loadNotifications()])
     // Seed the fixed default tag set on a fresh database (no-op once tags exist),
     // so a clean `docker compose up` reaches the expected state with no manual step.
     // A membership moved between default tags is retired from its old tag first, so the
@@ -411,7 +435,18 @@ async function start() {
     await reconcileTagPresentation().catch(e => console.warn('[tags] presentation reconcile failed', e))
     await retireUnknownTagMemberships().catch(e => console.warn('[tags] retire reconcile failed', e))
     startIdentityRefresh()
-    startReferendumTitleRefresh()
+    // Governance state and the forum store, read before listen so the governance and
+    // forum routes answer from a ready snapshot on the first request after a restart
+    // (both are a few-MB read of small tables). Each then reloads whenever its
+    // tables' watermark moves.
+    await Promise.all([
+      refreshConvictionSnapshot().catch(err => console.warn('[conviction-state] boot load failed; governance routes answer without vote state until the refresh succeeds', err)),
+      refreshForumStore().catch(err => console.warn('[forum] boot load failed; forum routes answer empty until the refresh succeeds', err)),
+    ])
+    startConvictionSnapshotRefresh()
+    startForumStoreRefresh()
+    // Forum uploads: seed the day's global budget, then unpin unreferenced uploads periodically.
+    void startForumMediaHousekeeping()
     // H160 → bound substrate owner map for display resolution.
     await loadEvmBindings().catch(err => console.warn('[evm] binding load failed; bound EVM signers display unresolved until the refresh succeeds', err))
     startEvmBindingsRefresh()

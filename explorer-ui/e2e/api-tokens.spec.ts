@@ -64,7 +64,7 @@ test('revoking goes through the confirm and removes the row server-side', async 
 
 test('logged out, the page is a sign-in teaser', async ({ page }) => {
   await page.goto('/api-tokens')
-  await expect(page.getByRole('button', { name: 'Log in to manage your API tokens' })).toBeVisible()
+  await expect(page.locator('.detail-card', { hasText: 'Sign in to create and manage your API tokens' }).getByRole('button', { name: 'Sign in' })).toBeVisible()
   await expect(page.locator('.panel')).toHaveCount(0)
 })
 

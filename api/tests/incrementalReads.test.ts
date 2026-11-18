@@ -39,7 +39,17 @@ describe('sealed months of the source watermark', () => {
     expect(refs).toContain("_partition_id NOT IN {months:Array(String)} AND block_height <= {head:UInt32}")
     // The signature is read before the fold, so a part landing in between is never
     // stored under a key that could be asked again.
-    expect(refs.indexOf('await sealedPartitionSignatures(table)')).toBeLessThan(refs.indexOf("read(chunk, stale, 'sealed')"))
+    expect(refs.indexOf('await sealedPartitionSignatures(table)')).toBeLessThan(refs.indexOf("read(chunk, [month], 'sealed')"))
+  })
+
+  // A cold fold over the busiest ids is hundreds of millions of rows; as one statement
+  // it ran into the 20 s cap on every cycle and was never installed. Each sealed month
+  // is its own statement, so every one stays bounded.
+  it('reads each stale sealed month in a statement of its own', () => {
+    const refs = body(explorerService, 'async function activitySourceMarksOf(')
+    expect(refs).toContain('chunkByParamBytes([...group]).flatMap(chunk => stale.map(month => ({ chunk, month })))')
+    expect(refs).toContain("read(chunk, [month], 'sealed')")
+    expect(refs).not.toContain("read(chunk, stale, 'sealed')")
   })
 })
 

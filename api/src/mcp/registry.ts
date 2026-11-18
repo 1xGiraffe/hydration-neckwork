@@ -8,6 +8,7 @@ import { poolTools } from './tools/pools.ts'
 import { poolHistoryTools } from './tools/poolHistory.ts'
 import { moneyMarketTools } from './tools/moneyMarket.ts'
 import { governanceTools } from './tools/governance.ts'
+import { forumTools } from './tools/forum.ts'
 import { networkTools } from './tools/network.ts'
 import { protocolTools } from './tools/protocol.ts'
 
@@ -26,12 +27,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   ...poolHistoryTools,
   ...moneyMarketTools,
   ...governanceTools,
+  ...forumTools,
   ...networkTools,
   ...protocolTools,
 ]
 
-// The fourteen names the design pins (spec § 3, plus the pool state history
-// added for simulation calibration), in registration order. It is the contract
+// The fifteen names the surface pins — the original fourteen plus the
+// governance forum (get_forum) — in registration order. It is the contract
 // a client codes against, so it is declared here rather than derived from
 // whatever happens to be registered.
 export const EXPECTED_TOOL_NAMES: readonly string[] = [
@@ -47,6 +49,7 @@ export const EXPECTED_TOOL_NAMES: readonly string[] = [
   'get_pool_history',
   'get_money_market',
   'get_governance',
+  'get_forum',
   'get_network_status',
   'get_protocol_stats',
 ]

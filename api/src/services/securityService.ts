@@ -917,6 +917,22 @@ export async function getSecurityDashboard(): Promise<SecurityDashboard> {
   return cachedSwr('explorer:security', 20_000, 120_000, buildSecurityDashboard, snapshotGeneration)
 }
 
+// The Technical Committee alone, for pages that show its members without the rest of
+// the dashboard (the governance hub's committee tab): the same member set and
+// thresholds as the dashboard's `guardians.techCommittee`, from the same three small
+// reads, without building the fuses, freezes and risk sections around it.
+export interface TechCommitteeView {
+  techCommittee: SecurityDashboard['guardians']['techCommittee']
+  memberSetAtBlock: number | null
+}
+
+export async function getTechCommittee(): Promise<TechCommitteeView> {
+  return cachedSwr('explorer:security:tc', 20_000, 120_000, async () => {
+    const row = await queryTechCommittee()
+    return { techCommittee: buildTechCommittee(row), memberSetAtBlock: row?.block_height ?? null }
+  })
+}
+
 async function buildSecurityDashboard(): Promise<SecurityDashboard> {
   const snap = snapshot
   // Read BEFORE the ledgers, so every raw_events row at or below it is visible
@@ -1180,45 +1196,77 @@ const queryPauseEvents = (): Promise<PauseEventRow[]> => pauseLedger.rows()
 const TRIP_REORG_MARGIN_BLOCKS = 600
 let tripCache: { upTo: number; rows: TripSourceRow[] } | null = null
 
+type TripRowWithoutSpec = Omit<TripSourceRow, 'spec_version'>
+
+// The block's spec_version is attached in a second, primary-key read over just the
+// blocks the trips sit in, never by joining raw_blocks inside the scan. Joined in
+// place, each arm hashed the whole of raw_blocks as its right side (the predicates
+// live in the left side's JSON, so nothing narrows it on a full-history read): three
+// tables of 16.8M rows, 1 GiB each until raw_blocks passed 2^24 rows on 2026-11-08,
+// when each doubled to 2 GiB and the cold read overran the api's 4 GB cap on every
+// attempt. The trips are a few hundred rows; their blocks are a key lookup.
 async function queryTripsAbove(fromBlock: number): Promise<TripSourceRow[]> {
   const moduleIndex = `JSONExtractUInt(error_json, 'value', 'index')`
   const errorByte = (col: string) => `reinterpretAsUInt8(substring(unhex(substring(JSONExtractString(${col}, 'value', 'error'), 3)), 1, 1))`
   const res = await client.query({
     query: `
-      SELECT block_height, block_timestamp, extrinsic_index, call_name, signer, spec_version, error_index, source FROM (
-        SELECT e.block_height AS block_height, e.block_timestamp AS block_timestamp, e.extrinsic_index AS extrinsic_index,
-               e.call_name AS call_name, coalesce(e.signer, e.effective_signer) AS signer, b.spec_version AS spec_version,
-               ${errorByte('e.error_json')} AS error_index, 'extrinsic' AS source
-        FROM price_data.raw_extrinsics e
-        INNER JOIN price_data.raw_blocks b ON b.block_height = e.block_height
-        WHERE e.block_height > ${fromBlock}
-          AND e.success = 0 AND JSONExtractString(e.error_json, '__kind') = 'Module'
-          AND ${moduleIndex.replace('error_json', 'e.error_json')} = ${CIRCUIT_BREAKER_PALLET_INDEX}
+      SELECT block_height, block_timestamp, extrinsic_index, call_name, signer, error_index, source FROM (
+        SELECT block_height, block_timestamp, extrinsic_index, call_name,
+               coalesce(signer, effective_signer) AS signer, ${errorByte('error_json')} AS error_index, 'extrinsic' AS source
+        FROM price_data.raw_extrinsics
+        WHERE block_height > ${fromBlock}
+          AND success = 0 AND JSONExtractString(error_json, '__kind') = 'Module'
+          AND ${moduleIndex} = ${CIRCUIT_BREAKER_PALLET_INDEX}
         UNION ALL
-        SELECT ev.block_height, ev.block_timestamp, ev.extrinsic_index, ev.event_name,
-               NULL, b.spec_version,
-               reinterpretAsUInt8(substring(unhex(substring(JSONExtractString(ev.args_json, 'error', 'value', 'error'), 3)), 1, 1)),
-               ev.event_name
-        FROM price_data.raw_events ev
-        INNER JOIN price_data.raw_blocks b ON b.block_height = ev.block_height
-        WHERE ev.block_height > ${fromBlock}
-          AND ev.event_name IN ('Utility.BatchInterrupted', 'Utility.ItemFailed')
-          AND JSONExtractUInt(ev.args_json, 'error', 'value', 'index') = ${CIRCUIT_BREAKER_PALLET_INDEX}
+        SELECT block_height, block_timestamp, extrinsic_index, event_name, NULL,
+               reinterpretAsUInt8(substring(unhex(substring(JSONExtractString(args_json, 'error', 'value', 'error'), 3)), 1, 1)),
+               event_name
+        FROM price_data.raw_events
+        WHERE block_height > ${fromBlock}
+          AND event_name IN ('Utility.BatchInterrupted', 'Utility.ItemFailed')
+          AND JSONExtractUInt(args_json, 'error', 'value', 'index') = ${CIRCUIT_BREAKER_PALLET_INDEX}
         UNION ALL
-        SELECT ev.block_height, ev.block_timestamp, ev.extrinsic_index, ev.event_name,
-               NULL, b.spec_version,
-               reinterpretAsUInt8(substring(unhex(substring(JSONExtractString(ev.args_json, 'result', 'value', 'value', 'error'), 3)), 1, 1)),
-               ev.event_name
-        FROM price_data.raw_events ev
-        INNER JOIN price_data.raw_blocks b ON b.block_height = ev.block_height
-        WHERE ev.block_height > ${fromBlock}
-          AND ev.event_name = 'Multisig.MultisigExecuted'
-          AND JSONExtractUInt(ev.args_json, 'result', 'value', 'value', 'index') = ${CIRCUIT_BREAKER_PALLET_INDEX}
+        SELECT block_height, block_timestamp, extrinsic_index, event_name, NULL,
+               reinterpretAsUInt8(substring(unhex(substring(JSONExtractString(args_json, 'result', 'value', 'value', 'error'), 3)), 1, 1)),
+               event_name
+        FROM price_data.raw_events
+        WHERE block_height > ${fromBlock}
+          AND event_name = 'Multisig.MultisigExecuted'
+          AND JSONExtractUInt(args_json, 'result', 'value', 'value', 'index') = ${CIRCUIT_BREAKER_PALLET_INDEX}
       )
       ORDER BY block_height DESC`,
     format: 'JSONEachRow',
   })
-  return res.json<TripSourceRow>()
+  const trips = await res.json<TripRowWithoutSpec>()
+  if (trips.length === 0) return []
+  const heights = [...new Set(trips.map(t => Number(t.block_height)))]
+  const specRes = await client.query({
+    query: `SELECT block_height, any(spec_version) AS spec_version FROM price_data.raw_blocks
+            WHERE block_height IN {heights:Array(UInt32)} GROUP BY block_height`,
+    query_params: { heights },
+    format: 'JSONEachRow',
+  })
+  return attachTripSpecVersions(trips, await specRes.json<{ block_height: number; spec_version: number }>())
+}
+
+/**
+ * Puts each trip's block spec_version on it. A trip whose block has no raw_blocks
+ * row is dropped, as the inner join it replaces dropped it: the error name depends
+ * on the runtime, and a row whose runtime is unknown cannot be named. The floor
+ * trails the head by the reorg margin, so a block whose header lands after its
+ * events is re-read before it is kept.
+ */
+export function attachTripSpecVersions(
+  trips: readonly TripRowWithoutSpec[],
+  blocks: readonly { block_height: number | string; spec_version: number | string }[],
+): TripSourceRow[] {
+  const spec = new Map(blocks.map(b => [Number(b.block_height), Number(b.spec_version)]))
+  const out: TripSourceRow[] = []
+  for (const t of trips) {
+    const v = spec.get(Number(t.block_height))
+    if (v !== undefined) out.push({ ...t, spec_version: v })
+  }
+  return out
 }
 
 /**

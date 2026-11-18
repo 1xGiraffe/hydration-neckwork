@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { userLine } from '../format/untrusted.ts'
 import { formatParam, type ToolContext, type ToolDefinition, type ToolError, type ToolOutput } from '../toolTypes.ts'
 import { invalidArgument, toolErrorFromUpstream } from '../errors.ts'
 import type { ActiveDca, AssetDetail, AssetListItem, AssetVolume, HoldersPage, OpenLimitOrder } from '../types.ts'
@@ -47,7 +48,7 @@ function compactHolder(h: HoldersPage['holders'][number], decimals: number, symb
   return {
     rank: h.rank,
     address: h.account?.address ?? null,
-    label: h.account ? accountLabel(h.account) : h.tag ? `${h.tag.name} (${h.tag.memberCount} accounts folded)` : null,
+    label: h.account ? accountLabel(h.account) : h.tag ? `${userLine(h.tag.name, 64)} (${h.tag.memberCount} accounts folded)` : null,
     tagGroup: h.tag ? h.tag.tagId : null,
     balance: scaleAmount(h.balance, decimals),
     symbol,
@@ -218,7 +219,7 @@ const listAssets: ToolDefinition = {
     const headers = ['Id', 'Symbol', 'Name', 'Dec', 'Price', '24H', 'Value held', ...(sort === 'volume' ? ['Volume 24H'] : []), 'Holder rows', 'Origin']
     const rows = shown.map(a => [
       assetIdCell(a),
-      explorerLink(a.symbol ?? `#${a.assetId}`, assetHref(base, a)),
+      explorerLink(userLine(a.symbol, 32) || `#${a.assetId}`, assetHref(base, a)),
       a.name ?? DASH,
       String(a.decimals),
       a.price == null ? DASH : formatUsd(a.price),
@@ -380,7 +381,7 @@ async function resolveAsset(input: string, ctx: ToolContext): Promise<{ resolved
     return {
       error: failure({
         code: 'NOT_FOUND',
-        message: `No registered asset has the symbol ${JSON.stringify(trimmed)}.${near.length ? ` Closest by symbol or name: ${near.map(a => `${a.symbol} (#${a.assetId})`).join(', ')}.` : ''} Note that pool-share tokens and a few derivatives are registered assets but are not in the asset directory the symbol lookup reads — pass their numeric id directly, or call \`search\`.`,
+        message: `No registered asset has the symbol ${JSON.stringify(trimmed)}.${near.length ? ` Closest by symbol or name: ${near.map(a => `${userLine(a.symbol, 32)} (#${a.assetId})`).join(', ')}.` : ''} Note that pool-share tokens and a few derivatives are registered assets but are not in the asset directory the symbol lookup reads — pass their numeric id directly, or call \`search\`.`,
       }),
     }
   }
@@ -423,7 +424,7 @@ async function resolveAsset(input: string, ctx: ToolContext): Promise<{ resolved
     return {
       error: failure({
         code: 'NOT_FOUND',
-        message: `${only.symbol} is a CROSS-CHAIN DESTINATION (platform "${only.xcDestination?.platform ?? '?'}"), not a Hydration registry asset: it is a token you can sell into over NEAR Intents, it has no asset id, and the negative number the API carries for it routes nowhere. Ask \`inspect_entity\` for "${only.xcDestination?.platform ?? only.symbol}" instead.`,
+        message: `${userLine(only.symbol, 32)} is a CROSS-CHAIN DESTINATION (platform "${only.xcDestination?.platform ?? '?'}"), not a Hydration registry asset: it is a token you can sell into over NEAR Intents, it has no asset id, and the negative number the API carries for it routes nowhere. Ask \`inspect_entity\` for "${only.xcDestination?.platform ?? only.symbol}" instead.`,
       }),
     }
   }
@@ -463,7 +464,7 @@ function holdersBlock(page: HoldersPage, base: string): string {
     h.account
       ? explorerLink(accountLabel(h.account, { withAddress: true }), accountUrl(base, h.account.address))
       : h.tag
-        ? `${tagIcon(h.tag.icon)}${h.tag.name} — ${h.tag.memberCount} account${h.tag.memberCount === 1 ? '' : 's'} folded`
+        ? `${tagIcon(h.tag.icon)}${userLine(h.tag.name, 64)} — ${h.tag.memberCount} account${h.tag.memberCount === 1 ? '' : 's'} folded`
         : DASH,
     formatAmount(h.balance, page.asset.decimals, page.asset.symbol),
     h.valueUsd == null ? DASH : formatUsd(h.valueUsd),
@@ -671,7 +672,7 @@ const getAsset: ToolDefinition = {
     const markdown = fit(joinBlocks(
       synthetic
         ? `## Asset #${assetId} — held on chain, but not in the token registry`
-        : `## ${escapeCell(a.symbol)}${a.name ? ` — ${escapeCell(a.name)}` : ''} (asset #${assetId})`,
+        : `## ${userLine(a.symbol, 32)}${a.name ? ` — ${userLine(a.name, 80)}` : ''} (asset #${assetId})`,
       kv([
         ['Resolved from', from === 'symbol' ? `the symbol ${JSON.stringify(parsed.value.asset)}` : null],
         ['Price', a.price == null ? 'not priced by the index' : formatUsd(a.price)],
@@ -714,19 +715,19 @@ const getAsset: ToolDefinition = {
       pools ? section('Where the liquidity sits', poolsBlock(pools, base)) : '',
       dcas
         ? section('Ongoing DCA', joinBlocks(
-          h3(`Buying ${a.symbol} (${dcas.buys?.length ?? 0})`),
-          table(['Schedule', 'Owner', 'Trade', 'Per trade', 'Fills', 'USD/trade'], dcaRows(dcas.buys ?? [], base), `no schedule is buying ${a.symbol}`),
-          h3(`Selling ${a.symbol} (${dcas.sells?.length ?? 0})`),
-          table(['Schedule', 'Owner', 'Trade', 'Per trade', 'Fills', 'USD/trade'], dcaRows(dcas.sells ?? [], base), `no schedule is selling ${a.symbol}`),
+          h3(`Buying ${userLine(a.symbol, 32)} (${dcas.buys?.length ?? 0})`),
+          table(['Schedule', 'Owner', 'Trade', 'Per trade', 'Fills', 'USD/trade'], dcaRows(dcas.buys ?? [], base), `no schedule is buying ${userLine(a.symbol, 32)}`),
+          h3(`Selling ${userLine(a.symbol, 32)} (${dcas.sells?.length ?? 0})`),
+          table(['Schedule', 'Owner', 'Trade', 'Per trade', 'Fills', 'USD/trade'], dcaRows(dcas.sells ?? [], base), `no schedule is selling ${userLine(a.symbol, 32)}`),
           note('Chain-wide, not per account, and it covers both pallet DCA schedules and DCA intents.'),
         ))
         : '',
       book
         ? section('Open limit orders', joinBlocks(
-          h3(`Bids — buying ${a.symbol} (${book.bids?.length ?? 0})`),
-          table(['Order', 'Owner', 'Remaining', 'Price', 'USD', 'Placed'], bookRows(book.bids ?? [], base), `nobody has a standing bid for ${a.symbol}`),
-          h3(`Asks — selling ${a.symbol} (${book.asks?.length ?? 0})`),
-          table(['Order', 'Owner', 'Remaining', 'Price', 'USD', 'Placed'], bookRows(book.asks ?? [], base), `nobody has a standing ask for ${a.symbol}`),
+          h3(`Bids — buying ${userLine(a.symbol, 32)} (${book.bids?.length ?? 0})`),
+          table(['Order', 'Owner', 'Remaining', 'Price', 'USD', 'Placed'], bookRows(book.bids ?? [], base), `nobody has a standing bid for ${userLine(a.symbol, 32)}`),
+          h3(`Asks — selling ${userLine(a.symbol, 32)} (${book.asks?.length ?? 0})`),
+          table(['Order', 'Owner', 'Remaining', 'Price', 'USD', 'Placed'], bookRows(book.asks ?? [], base), `nobody has a standing ask for ${userLine(a.symbol, 32)}`),
         ))
         : '',
       // A section that failed is simply missing from the answer, which an agent

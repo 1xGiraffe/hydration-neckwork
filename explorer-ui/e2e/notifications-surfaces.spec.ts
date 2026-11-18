@@ -36,7 +36,6 @@ async function installReferendum(page: Page): Promise<void> {
     contentType: 'application/json',
     body: JSON.stringify({
       pallet: 'opengov', index: 263, title: 'Treasury spend for Bifrost integration',
-      subsquareUrl: 'https://hydration.subsquare.io/referenda/263',
       track: 0, proposalHash: '0x' + '4c'.repeat(32),
       proposalCall: { pallet: 'Treasury', callName: 'spend', args: {}, encoded: '0x1a00', byteLength: 12, decodeError: null },
       status: 'deciding', submittedAt: null, concludedAt: null,
@@ -222,17 +221,17 @@ test('the security page subscribes to safety actions from beside the timeline', 
   await expect.poll(() => posted).toEqual([{ kind: 'safety', params: {}, name: 'Safety actions' }])
 })
 
-test('a referendum page subscribes to the chain-wide referenda feed', async ({ page, userMock }) => {
+// A referendum page offers no alert of its own: there is no per-referendum or
+// per-track subscription, and every referendum is watched from the governance hub
+// or the notifications page.
+test('a referendum page carries no alert button', async ({ page, userMock }) => {
   await seedSession(page, userMock)
   await installReferendum(page)
-  const posted = await captureCreatedRules(page)
 
   await page.goto('/referendum/opengov/263')
-  await page.locator('.ext-link-row').getByRole('button', { name: 'Watch referenda' }).click()
-
-  // Not a per-item subscription: by the time you can read this one it has
-  // already moved, so the rule watches every phase of every referendum.
-  await expect.poll(() => posted).toEqual([{ kind: 'referendum', params: {}, name: 'New referenda' }])
+  await expect(page.locator('.gov-ref-meta')).toBeVisible()
+  await expect(page.locator('.gov-ref-meta').getByRole('button')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Get notified|Referendum alerts|Alert me about referenda on/ })).toHaveCount(0)
 })
 
 test('the activity filters offer a Notify button only once they express a real alert', async ({ page, userMock }) => {
@@ -304,7 +303,7 @@ test('logged out, a surface button parks the alert, logs in, creates it and land
   const dialog = page.locator('.dialog')
   await expect(dialog.locator('.dialog-head h2')).toHaveText('Price alert · HDX')
   // The button says what the click will do, so "Save" is never a silent login.
-  const save = dialog.getByRole('button', { name: 'Log in to save this alert' })
+  const save = dialog.getByRole('button', { name: 'Sign in to save this alert' })
   await expect(save).toBeVisible()
   await save.click()
 
@@ -313,10 +312,10 @@ test('logged out, a surface button parks the alert, logs in, creates it and land
   // not a second instance) takes the place of the alert dialog.
   await expect.poll(() => page.evaluate(key => window.localStorage.getItem(key), PENDING_NOTIFICATION_KEY))
     .toBe(JSON.stringify({ kind: 'price', params: { assetId: 0, direction: 'above', price: HDX_PRICE }, name: 'HDX price' }))
-  await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
+  await expect(page.locator('.dialog-head h2')).toHaveText('Sign in with your wallet')
   expect(posted).toEqual([])
 
-  await page.locator('.wallet-tile', { hasText: 'Nova Wallet' }).click()
+  await page.locator('.wallet-tile', { hasText: 'Polkadot{.js}' }).click()
 
   // The handoff claims the parked intent, creates it, and takes the reader to
   // the tab holding the alert it just made — the inbox would be empty until it
@@ -376,9 +375,9 @@ test('the handoff refreshes the page it lands on even when the first overview fe
 
   await page.goto('/asset/0')
   await page.locator('.notify-actions').getByRole('button', { name: 'Price alert' }).click()
-  await page.locator('.dialog').getByRole('button', { name: 'Log in to save this alert' }).click()
-  await expect(page.locator('.dialog-head h2')).toHaveText('Log in with your wallet')
-  await page.locator('.wallet-tile', { hasText: 'Nova Wallet' }).click()
+  await page.locator('.dialog').getByRole('button', { name: 'Sign in to save this alert' }).click()
+  await expect(page.locator('.dialog-head h2')).toHaveText('Sign in with your wallet')
+  await page.locator('.wallet-tile', { hasText: 'Polkadot{.js}' }).click()
 
   // The handoff has created the rule and navigated — with the first overview
   // response still unanswered.

@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { initExplorerService, search, searchNumber, type SearchResult } from '../src/services/explorerService.ts'
 import { initGovernanceService } from '../src/services/governanceService.ts'
-import { initReferendumTitleService } from '../src/services/referendumTitleService.ts'
 
 // Every height in the UI renders through F.int, pinned to en-US, so the number a
 // reader copies off a page carries commas. Pasting it back has to find the block.
@@ -51,7 +50,6 @@ function init(): void {
   }
   initExplorerService(client as never)
   initGovernanceService(client as never)
-  initReferendumTitleService(client as never)
 }
 
 const blocks = (r: SearchResult[]) => r.filter(x => x.type === 'block')
