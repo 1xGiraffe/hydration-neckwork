@@ -96,7 +96,7 @@ export function ShareBar({ segments, h = 44 }: { segments: ShareSegment[]; h?: n
   const wrapRef = useClearOnOutsidePointer(() => setHover(null), hover != null)
   const segs = segments.filter(s => s.value > 0)
   const total = segs.reduce((s, x) => s + x.value, 0)
-  if (!segs.length || total <= 0) return <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, padding: '12px 0' }}>Nothing to show yet</div>
+  if (!segs.length || total <= 0) return <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12, padding: '12px 0' }}>Nothing to show yet</div>
   const offsets: number[] = []
   for (let i = 0, run = 0; i < segs.length; i++) { offsets.push(run); run += segs[i].value }
   const rects = segs.map((s, i) => ({ ...s, x0: offsets[i] / total * 100, w: s.value / total * 100 }))
@@ -428,7 +428,7 @@ export function StackedAreaChart({ buckets, series, h = 220, yFmt = compactAmoun
   const { tops, max: rawMax } = stackSeries(vSeries)
   if (n < 2 || !vSeries.length || !(rawMax > 0)) {
     return (
-      <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12, position: 'relative' }}>
+      <div className="muted" style={{ padding: '24px 0', fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12, position: 'relative' }}>
         Not enough history.
         {zoom.zoomed && <ZoomReset onReset={zoom.reset} />}
       </div>
@@ -688,7 +688,7 @@ export function MultiLineChart({ buckets, series, h = 190, yFmt = (v: number) =>
   const flat = vSeries.flatMap(s => s.values).filter((v): v is number => v != null)
   if (n < 2 || !flat.length) {
     return (
-      <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12, position: 'relative' }}>
+      <div className="muted" style={{ padding: '24px 0', fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12, position: 'relative' }}>
         Not enough history.
         {zoom.zoomed && <ZoomReset onReset={zoom.reset} />}
       </div>
@@ -1168,7 +1168,7 @@ export function MirroredBarChart({ data, h = 190, xTicks, upColor = 'var(--green
   if (hover != null && hover > n - 1) setHover(null)
   if (!n) {
     return (
-      <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, padding: '12px 0', position: 'relative' }}>
+      <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12, padding: '12px 0', position: 'relative' }}>
         {zoom.zoomed ? 'Nothing in this range' : 'Nothing to show yet'}
         {zoom.zoomed && <ZoomReset onReset={zoom.reset} />}
       </div>
@@ -1295,7 +1295,7 @@ export function StackedBarChart({ buckets, series, h: hProp, yFmt = compactAmoun
   if (hover != null && hover > n - 1) setHover(null)
   if (!n || !vSeries.length || !(rawMax > 0)) {
     return (
-      <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12, position: 'relative' }}>
+      <div className="muted" style={{ padding: '24px 0', fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12, position: 'relative' }}>
         Not enough history.
         {zoom.zoomed && <ZoomReset onReset={zoom.reset} />}
       </div>

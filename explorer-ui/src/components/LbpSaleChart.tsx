@@ -63,7 +63,7 @@ export function LbpSaleChart({ lbp, maturityAt, faceSymbol, paySymbol, bondSymbo
   const curve = lbp.reconciled === false ? [] : lbp.curve
   const fills = lbp.fills.filter(f => f.face != null)
   const times = [...curve.map(c => c.t), ...fills.map(f => f.t)]
-  if (!times.length) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>No fill of this sale is priced.</div>
+  if (!times.length) return <div className="muted" style={{ padding: '24px 0', fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12 }}>No fill of this sale is priced.</div>
   const from = lbp.startAt ? Math.min(Date.parse(lbp.startAt), ...times) : Math.min(...times)
   const to = lbp.endAt ? Math.max(Date.parse(lbp.endAt), ...times) : Math.max(...times)
   const values = [...curve.map(c => c.face), ...fills.map(f => f.face)].filter((v): v is number => v != null)

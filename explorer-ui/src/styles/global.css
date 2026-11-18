@@ -53,16 +53,28 @@
 
   --text-high: #f5f1f8;
   --text-medium: #a4abbd;
-  --text-low: #6a7187;
+  --text-low: #8890a6;
   --text-lowest: #454c5e;
 
   --accent: #e53e76;
   --accent-soft: rgba(229,62,118,0.14);
   --accent-on: #ffffff;
+  /* The accent as text on the page grounds, and as a fill under white text:
+     both hold 4.5:1 where the brand pink itself does not. */
+  --accent-text: #f0628f;
+  --accent-fill: #d6336c;
+  /* Status colours as text: the same hues where they already read at 4.5:1. */
+  --green-text: var(--green);
+  --red-text: var(--red);
+  --amber-text: var(--amber);
 
   --lavender: #dfb1f3;
   --lavender-deep: #cc6ef4;
   --lavender-soft: rgba(204,110,244,0.15);
+  /* The one filled action (Vote, Sign, Unlock): lavender with dark text in the dark
+     theme, deep lavender with white in the light one — both above 4.5:1. */
+  --action-fill: #cc6ef4;
+  --action-on: #14061f;
 
   --sky: #95caff;
   --sky-deep: #2C89E9;
@@ -157,19 +169,26 @@
 
   --text-high: #232226;
   --text-medium: #5f5b67;
-  --text-low: #8a8693;
+  --text-low: #686571;
   --text-lowest: #bdb8c6;
 
   --accent: #e53e76;
   --accent-soft: rgba(229,62,118,0.10);
   --accent-on: #ffffff;
+  --accent-text: #b8255a;
+  --accent-fill: #d6336c;
+  --green-text: #2b7311;
+  --red-text: #b42a2a;
+  --amber-text: #856100;
 
-  --lavender: #b454da;
+  --lavender: #8a3cb3;
   --lavender-deep: #823fa1;
   --lavender-soft: rgba(204,110,244,0.16);
+  --action-fill: #823fa1;
+  --action-on: #ffffff;
 
-  --sky: #2C89E9;
-  --sky-deep: #1f5cab;
+  --sky: #1d66b8;
+  --sky-deep: #184f90;
   --sky-soft: rgba(83,164,243,0.10);
 
   --green: #45AC1F;
@@ -379,7 +398,7 @@ svg { display: block; }
 .drawer-head .theme-toggle svg { width: 15px; height: 15px; }
 .drawer-sec { padding: 10px 10px; border-bottom: 1px solid var(--separator); }
 .drawer-sec:last-child { border-bottom: 0; }
-.drawer-sec .sec-lbl { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); padding: 6px 12px 8px; }
+.drawer-sec .sec-lbl { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); padding: 6px 12px 8px; }
 /* .drawer-row is the button equivalent of a plain nav `a` above (Log out has
    no route to link to), reset to the same look. */
 .drawer-sec > a, .drawer-sec > button.drawer-row {
@@ -432,8 +451,8 @@ svg { display: block; }
 .profile-name { color: var(--text-high); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .invite-badge {
   display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px;
-  padding: 0 4px; border-radius: 9999px; background: var(--accent); color: var(--accent-on);
-  font-family: 'GeistMono'; font-size: 10px; line-height: 1; font-style: normal;
+  padding: 0 4px; border-radius: 9999px; background: var(--accent-fill); color: var(--accent-on);
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; line-height: 1; font-style: normal;
 }
 .account-menu {
   position: absolute; top: calc(100% + 8px); right: 0; z-index: 120;
@@ -537,9 +556,9 @@ svg { display: block; }
 .search-results[hidden] { display: none; }
 .sr-item { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 9px; cursor: pointer; min-width: 0; }
 .sr-item.on, .sr-item:hover { background: var(--panel-hover); }
-.sr-type { font-family: 'GeistMono'; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-low); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; min-width: 64px; text-align: center; }
-.sr-val { font-family: 'GeistMono'; font-size: 12.5px; color: var(--text-high); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sr-empty { padding: 12px 11px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-low); }
+.sr-type { font-family: 'GeistMono', ui-monospace, monospace; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-low); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; min-width: 64px; text-align: center; flex-shrink: 0; white-space: nowrap; }
+.sr-val { font-family: 'GeistMono', ui-monospace, monospace; font-size: 12.5px; color: var(--text-high); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-empty { padding: 12px 11px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--text-low); }
 /* account / asset search-result pill */
 .sr-acct { display: inline-flex; align-items: center; gap: 7px; min-width: 0; overflow: hidden; flex: 1 1 auto; }
 .sr-emoji { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; background: var(--panel); border: 1px solid var(--border); }
@@ -548,7 +567,7 @@ svg { display: block; }
 .sr-acct .emoji { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; background: var(--panel); border: 1px solid var(--border); overflow: hidden; }
 .sr-acct-name { font-size: 12.5px; color: var(--text-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sr-acct-identity { min-width: 0; font-size: 12.5px; color: var(--text-medium); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sr-acct .id-verified { color: var(--green); font-weight: 700; font-size: 11px; }
+.sr-acct .id-verified { color: var(--green-text); font-weight: 700; font-size: 11px; }
 .sr-acct .sr-val { color: var(--sky); flex: 0 0 auto; }
 
 /* ============ SEARCH ============ */
@@ -565,8 +584,8 @@ svg { display: block; }
   font-family: 'Geist'; font-size: 13px; color: var(--text-high);
 }
 .search input::placeholder { color: var(--text-low); }
-.search .hint { font-family: 'GeistMono'; font-size: 10px; color: var(--text-lowest); text-transform: uppercase; letter-spacing: 0.08em; }
-.kbd-slash { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--text-medium); font-family: 'GeistMono'; font-size: 11px; line-height: 1; }
+.search .hint { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; color: var(--text-lowest); text-transform: uppercase; letter-spacing: 0.08em; }
+.kbd-slash { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: 1px solid var(--border); border-radius: 5px; background: var(--panel); color: var(--text-medium); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; line-height: 1; }
 @media (max-width: 768px) { .kbd-slash { display: none; } }
 
 /* Shared-element morph between the start page's hero search and the topbar
@@ -631,8 +650,8 @@ svg { display: block; }
 /* slim stat ribbon (replaces dense cards) */
 .ribbon { display: inline-flex; align-items: center; gap: 0; margin-top: 26px; padding: 12px 8px; flex-wrap: wrap; justify-content: center; }
 .ribbon .cell { display: inline-flex; flex-direction: column; gap: 3px; padding: 0 20px; align-items: center; }
-.ribbon .cell .k { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
-.ribbon .cell .v { font-family: 'GeistMono'; font-size: 16px; font-weight: 600; color: var(--text-high); }
+.ribbon .cell .k { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.ribbon .cell .v { font-family: 'GeistMono', ui-monospace, monospace; font-size: 16px; font-weight: 600; color: var(--text-high); }
 .ribbon .rs { width: 1px; height: 26px; background: var(--separator); }
 .ribbon.standalone { display: flex; justify-content: flex-start; border: 1px solid var(--separator); border-radius: 14px; background: var(--bg-elev); margin: 0 0 24px; padding: 14px 8px; }
 .ribbon.standalone .cell { align-items: flex-start; }
@@ -677,7 +696,7 @@ svg { display: block; }
 .live-anchor { display: block; height: 0; }
 .tbl { width: 100%; min-width: 760px; border-collapse: collapse; }
 .tbl thead th {
-  font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
   color: var(--text-low); font-weight: 500; text-align: left;
   padding: 11px 16px; border-bottom: 1px solid var(--separator); white-space: nowrap;
 }
@@ -775,7 +794,7 @@ svg { display: block; }
 @media (max-width: 720px) { .tbl .ref-link, .tbl tbody td .addr-pill .tag { max-width: none; } }
 .tbl tbody td .addr-pill .tag.tag-full { max-width: none; }
 .tbl td.r { text-align: right; }
-.tbl td.mono { font-family: 'GeistMono'; }
+.tbl td.mono { font-family: 'GeistMono', ui-monospace, monospace; }
 /* Failed list request — deliberately louder than the "No activity" empty cell so
    an error is never read as "there is nothing here". */
 .tbl td.table-error { padding: 32px 16px; text-align: center; color: var(--text-medium); font-size: 12px; }
@@ -783,14 +802,14 @@ svg { display: block; }
 .tbl td.table-error span { display: block; }
 .tbl td.table-error button {
   display: inline-block; margin-top: 10px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px;
-  background: var(--panel); color: var(--sky); font-family: 'GeistMono'; font-size: 11px;
+  background: var(--panel); color: var(--sky); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px;
 }
 .tbl td.table-error button:hover { background: var(--panel-hover); color: var(--text-high); }
 .load-error { padding: 32px 16px; text-align: center; color: var(--text-medium); font-size: 13px; }
 .load-error strong { display: block; font-weight: 400; }
 .load-error button {
   display: inline-block; margin-top: 10px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px;
-  background: var(--panel); color: var(--sky); font-family: 'GeistMono'; font-size: 11px;
+  background: var(--panel); color: var(--sky); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px;
 }
 .load-error button:hover { background: var(--panel-hover); color: var(--text-high); }
 /* Row ids (e.g. 13184944-3) must stay on one line — a break at the hyphen
@@ -861,7 +880,7 @@ svg { display: block; }
 .contracts-tbl tr.contract-destroyed td { opacity: 0.55; }
 /* Verification as a bare check: the match kind is in the cell's title, so the
    column costs one glyph instead of a chip. Sized like the id-verified tick. */
-.ok-check { color: var(--green); font-weight: 600; cursor: help; }
+.ok-check { color: var(--green-text); font-weight: 600; cursor: help; }
 /* Last active is always one relative duration, so it never needs to wrap. Created
    carries "first seen" for the 16 factory-attributed contracts, which is the
    honest label and is allowed its second line — bounded here, so one factory
@@ -878,14 +897,14 @@ svg { display: block; }
 
 
 /* ============ ATOMS ============ */
-.hash { font-family: 'GeistMono'; color: var(--sky); }
+.hash { font-family: 'GeistMono', ui-monospace, monospace; color: var(--sky); }
 .hash:hover { text-decoration: underline; text-underline-offset: 2px; }
 .muted { color: var(--text-low); }
 /* Global utility: `mono` means GeistMono wherever it appears. Without this,
    spans marked mono outside the scoped rules (td.mono, .dd.mono, …) silently
    rendered in the sans font — e.g. placeholder dashes and flow amounts. */
-.mono { font-family: 'GeistMono'; }
-.num { font-family: 'GeistMono'; }
+.mono { font-family: 'GeistMono', ui-monospace, monospace; }
+.num { font-family: 'GeistMono', ui-monospace, monospace; }
 
 /* Reveal-then-copy micro-surface for every rounded figure (CopyValue): hover
    reveals what the rough scale left out in a chip, a click while it shows copies
@@ -898,7 +917,7 @@ svg { display: block; }
    there is no room above. No color change on the figure, no global toast. */
 .copyamt { cursor: copy; }
 .copyamt:hover { text-decoration: underline dotted; text-underline-offset: 0.25em; text-decoration-thickness: 1px; }
-.exact-tip { position: fixed; translate: -50% -100%; z-index: 300; display: inline-flex; align-items: baseline; gap: 8px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-high); white-space: nowrap; max-width: calc(100vw - 24px); overflow: hidden; text-overflow: ellipsis; pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); animation: tipIn 120ms ease-out; }
+.exact-tip { position: fixed; translate: -50% -100%; z-index: 300; display: inline-flex; align-items: baseline; gap: 8px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-family: 'GeistMono', ui-monospace, monospace; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-high); white-space: nowrap; max-width: calc(100vw - 24px); overflow: hidden; text-overflow: ellipsis; pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); animation: tipIn 120ms ease-out; }
 .exact-tip.below { translate: -50% 0; }
 .exact-hint { color: var(--text-low); font-size: 10px; }
 
@@ -908,7 +927,7 @@ svg { display: block; }
 /* weight 400: asset symbols read the same in every table (chips in flows/holders
    are regular too); hierarchy here comes from size + the muted name line below. */
 .ar-sym { font-family: 'Geist', sans-serif; font-weight: 400; font-size: 14px; color: var(--text-high); }
-.ar-name { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.ar-name { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); }
 .assets-tbl td { padding-top: 10px; padding-bottom: 10px; }
 .assets-tbl .ar-price { font-size: 14px; color: var(--text-high); }
 .assets-tbl .spark-cell { width: 120px; }
@@ -947,10 +966,10 @@ svg { display: block; }
    below the symbol. */
 .tm-id { display: flex; flex-direction: column; min-width: 0; }
 .tm-sym { font-family: 'Geist', sans-serif; font-weight: 600; font-size: 14px; color: var(--text-high); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.tm-name { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-name { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* The %/value pair is pinned to the tile bottom as a group, % above value. */
-.tm-pct { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-medium); margin-top: auto; }
-.tm-val { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-high); }
+.tm-pct { font-family: 'GeistMono', ui-monospace, monospace; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-medium); margin-top: auto; }
+.tm-val { font-family: 'GeistMono', ui-monospace, monospace; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-high); }
 .tm-val-usd { color: var(--text-medium); font-size: 12px; }
 .tm-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: var(--tile); }
 
@@ -968,17 +987,17 @@ svg { display: block; }
 .tm-detail-head { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
 .tm-detail-id { display: flex; flex-direction: column; min-width: 0; }
 .tm-detail-sym { font-family: 'Geist', sans-serif; font-weight: 600; font-size: 15px; color: var(--text-high); }
-.tm-detail-name { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tm-detail-name { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tm-detail-grid { display: flex; flex-wrap: wrap; gap: 10px 26px; flex: 0 0 auto; }
 .tm-metric { display: flex; flex-direction: column; gap: 3px; }
-.tm-metric-label { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
-.tm-metric-value { font-family: 'GeistMono'; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-medium); }
+.tm-metric-label { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+.tm-metric-value { font-family: 'GeistMono', ui-monospace, monospace; font-variant-numeric: tabular-nums; font-size: 14px; color: var(--text-medium); }
 .tm-metric-value.strong { color: var(--text-high); }
 /* Amount = free + reserved; the lock/reserve breakdown below spells out the split. */
 .tm-amt { display: inline-flex; align-items: center; gap: 5px; }
 .tm-amt-sym { color: var(--text-low); }
 /* Shown when the focused asset is held only in the past (no live amount/value). */
-.tm-detail-note { margin-top: 10px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-low); }
+.tm-detail-note { margin-top: 10px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--text-low); }
 
 /* per-asset lock/reserve breakdown (BalanceBreakdown) — adaptive TWO rows.
    Variant A (bar + legend fit one line): "Locks" label alone, then the bar
@@ -1022,7 +1041,7 @@ svg { display: block; }
    look — dot, cause, amount, note in fixed columns). Desktop widens this to
    a single wrapped inline line, each item separated by a muted divider. */
 .bd-sched { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
-.bd-sched-row { display: grid; grid-template-columns: 8px 96px 104px 1fr; gap: 8px; align-items: baseline; font-family: 'GeistMono'; font-size: 11.5px; line-height: 1.35; }
+.bd-sched-row { display: grid; grid-template-columns: 8px 96px 104px 1fr; gap: 8px; align-items: baseline; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11.5px; line-height: 1.35; }
 /* the faint ring keeps dark dots (GIGAHDX brand black) legible on dark surfaces */
 .bd-dot { width: 8px; height: 8px; border-radius: 50%; align-self: center; box-shadow: 0 0 0 1px color-mix(in srgb, var(--text-low) 60%, transparent); }
 .bd-cause { color: var(--text-high); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1133,7 +1152,7 @@ svg { display: block; }
 .hovercard .hc-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
 .hovercard .hc-emoji { width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 16px; background: var(--panel); border: 1px solid var(--border); }
 .hovercard .hc-title { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 16px; }
-.hovercard .hc-title .profile-name { color: var(--amber); font-style: italic; }
+.hovercard .hc-title .profile-name { color: var(--amber-text); font-style: italic; }
 .hovercard .hc-sub { font-size: 11px; color: var(--text-medium); }
 /* Every tag association (not just the priority winner) as a row of compact
    chips, so the card doubles as a "which of my lists is this in" lookup.
@@ -1141,13 +1160,13 @@ svg { display: block; }
 .hovercard .hc-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
 .hovercard .hc-tags .addr-pill { font-size: 11px; gap: 5px; }
 .hovercard .hc-tags .emoji { width: 16px; height: 16px; font-size: 10px; }
-.hovercard .hc-tags-more { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 10.5px; color: var(--text-low); background: var(--panel); border: 1px solid var(--border); }
-.hovercard .hc-identity { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; color: var(--green); margin-bottom: 10px; }
+.hovercard .hc-tags-more { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 9999px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; color: var(--text-low); background: var(--panel); border: 1px solid var(--border); }
+.hovercard .hc-identity { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; color: var(--green-text); margin-bottom: 10px; }
 .hovercard .hc-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-medium); padding: 4px 0; }
-.hovercard .hc-row .mono { font-family: 'GeistMono'; color: var(--text-high); }
+.hovercard .hc-row .mono { font-family: 'GeistMono', ui-monospace, monospace; color: var(--text-high); }
 .hovercard .hc-route { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--separator); display: flex; flex-direction: column; gap: 7px; }
 .hovercard .hc-route-title { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-medium); }
-.hovercard .hc-route-title .mono { font-family: 'GeistMono'; color: var(--text-high); }
+.hovercard .hc-route-title .mono { font-family: 'GeistMono', ui-monospace, monospace; color: var(--text-high); }
 .hovercard .hc-hop { display: grid; grid-template-columns: minmax(68px, auto) 1fr; align-items: center; gap: 8px; font-size: 12px; min-width: 0; }
 .hovercard .hc-hop .badge { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hovercard .hc-hop-assets { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
@@ -1155,7 +1174,7 @@ svg { display: block; }
 .hovercard .hc-bals { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--separator); display: flex; flex-direction: column; gap: 6px; }
 .hovercard .hc-bal { display: flex; align-items: center; gap: 7px; font-size: 12px; }
 .hovercard .hc-bal .muted { margin-left: auto; }
-.hovercard .hc-go { display: inline-flex; align-items: center; gap: 4px; margin-top: 12px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--sky); }
+.hovercard .hc-go { display: inline-flex; align-items: center; gap: 4px; margin-top: 12px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--sky); }
 .hovercard .hc-go:hover { color: var(--text-high); }
 .addr-pill, .asset-chip { cursor: pointer; }
 
@@ -1169,7 +1188,7 @@ svg { display: block; }
    A bare ADDRESS (.a) never truncates: ShortAddr is already the minimal
    identifying form and its tail is the identity — "1TjR…CC…" says nothing. */
 .addr-wrap { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; min-width: 0; max-width: 100%; }
-.addr-pill { display: inline-flex; align-items: center; gap: 7px; font-family: 'GeistMono'; font-size: 12.5px; white-space: nowrap; min-width: 0; max-width: 100%; }
+.addr-pill { display: inline-flex; align-items: center; gap: 7px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12.5px; white-space: nowrap; min-width: 0; max-width: 100%; }
 .addr-pill .tag { overflow: hidden; text-overflow: ellipsis; }
 .addr-pill .emoji {
   width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
@@ -1187,12 +1206,12 @@ svg { display: block; }
 .addr-pill .tag { color: var(--lavender); font-weight: 500; }
 /* Which member of a multi-account tag this particular pill means — muted so
    the tag name stays the primary read, mono like ShortAddr's highlighted tail. */
-.tag-member-suffix { color: var(--text-low); font-family: 'GeistMono'; font-size: 0.9em; }
+.tag-member-suffix { color: var(--text-low); font-family: 'GeistMono', ui-monospace, monospace; font-size: 0.9em; }
 /* Self-set wallet-login display name: a real, distinct hue from a curated tag's
    lavender (amber reads as "the owner's own claim", unverified — same idea as
    the ✓ mark staying exclusive to a registrar-checked identity), plus italics
    so it never reads as a system/list tag at a glance. */
-.addr-pill .tag.profile-name { color: var(--amber); font-weight: 500; font-style: italic; }
+.addr-pill .tag.profile-name { color: var(--amber-text); font-weight: 500; font-style: italic; }
 /* A list's own name (Lists.tsx's Your-lists table, and the shared
    PublicListsPanel): plain white text, not a curated tag's lavender —
    user-confirmed a list's name shouldn't read as if it WERE a tag. Same
@@ -1270,7 +1289,7 @@ svg { display: block; }
 /* vertical-align matters only when the chip sits in flowing text (e.g. the HSM
    "Last intervention … via aUSDC" note): an inline-flex box baseline-aligns on
    its first item — the 20px icon — riding high next to 13px prose. */
-.asset-chip { display: inline-flex; align-items: center; gap: 6px; font-family: 'GeistMono'; font-size: 12px; vertical-align: middle; }
+.asset-chip { display: inline-flex; align-items: center; gap: 6px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; vertical-align: middle; }
 .asset-logo { width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 600; color: #fff; flex-shrink: 0; }
 
 /* copy button */
@@ -1281,7 +1300,7 @@ svg { display: block; }
    and pops in — shared with CopyTextButton's confirmation so every copy
    control in the app acknowledges a click the same way. The global
    prefers-reduced-motion block collapses the pop to an instant swap. */
-.copy.done, .copy.done:hover { color: var(--green); }
+.copy.done, .copy.done:hover { color: var(--green-text); }
 .copy.done svg, .copy-text-btn.done svg { animation: copy-pop 220ms cubic-bezier(0.22, 1, 0.36, 1); }
 @keyframes copy-pop { from { transform: scale(0.45); } 60% { transform: scale(1.25); } }
 
@@ -1301,9 +1320,9 @@ svg { display: block; }
 @media (prefers-reduced-motion: reduce) { .awaiting-block .ab-dot { animation: none; } }
 .dl { display: grid; grid-template-columns: 200px 1fr; }
 @media (max-width: 720px){ .dl { grid-template-columns: 1fr; } }
-.dl .dt { padding: 14px 18px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); border-bottom: 1px solid var(--separator); display: flex; align-items: center; }
+.dl .dt { padding: 14px 18px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); border-bottom: 1px solid var(--separator); display: flex; align-items: center; }
 .dl .dd { padding: 14px 18px; border-bottom: 1px solid var(--separator); font-size: 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
-.dl .dd.mono { font-family: 'GeistMono'; }
+.dl .dd.mono { font-family: 'GeistMono', ui-monospace, monospace; }
 /* The per-stream breakdown under a revenue figure. `.dd` is a wrapping flex row,
    so the basis is what puts the breakdown on its own line under the total
    instead of trailing it as another inline item. */
@@ -1371,9 +1390,9 @@ svg { display: block; }
 .kv-row { display: grid; grid-template-columns: 220px 1fr; border-bottom: 1px solid var(--separator); }
 .kv-row:last-child { border-bottom: 0; }
 @media (max-width: 720px){ .kv-row { grid-template-columns: 1fr; } }
-.kv-row .kk { padding: 11px 16px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-medium); display: flex; gap: 8px; align-items: center; }
+.kv-row .kk { padding: 11px 16px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--text-medium); display: flex; gap: 8px; align-items: center; }
 .kv-row .kk .ty { font-size: 9px; padding: 1px 5px; border-radius: 4px; background: var(--panel); color: var(--text-low); text-transform: uppercase; letter-spacing: 0.06em; }
-.kv-row .vv { padding: 11px 16px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-high); word-break: break-all; }
+.kv-row .vv { padding: 11px 16px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--text-high); word-break: break-all; }
 
 /* Verified-ABI decode blocks (extrinsic params tab, event detail, expanded
    event rows): a chip line above a ParamsTable; spaced so a following raw
@@ -1381,16 +1400,16 @@ svg { display: block; }
 .evm-decoded { margin: 0 0 14px; }
 .evm-decoded:last-child { margin-bottom: 0; }
 
-.json { font-family: 'GeistMono'; font-size: 12px; line-height: 1.7; background: var(--bg); border: 1px solid var(--separator); border-radius: 12px; padding: 16px 18px; overflow-x: auto; white-space: pre; color: var(--text-medium); }
+.json { font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; line-height: 1.7; background: var(--bg); border: 1px solid var(--separator); border-radius: 12px; padding: 16px 18px; overflow-x: auto; white-space: pre; color: var(--text-medium); }
 .json .key { color: var(--sky); }
-.json .str { color: var(--green); }
+.json .str { color: var(--green-text); }
 .json .numb { color: var(--lavender); }
 .json .punc { color: var(--text-lowest); }
 
 /* event row */
 .event-row { display: grid; grid-template-columns: 56px 1fr; gap: 0; border-bottom: 1px solid var(--separator); }
 .event-row:last-child { border-bottom: 0; }
-.event-row .ei { padding: 14px 16px; font-family: 'GeistMono'; font-size: 12px; color: var(--text-low); border-right: 1px solid var(--separator); }
+.event-row .ei { padding: 14px 16px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--text-low); border-right: 1px solid var(--separator); }
 .event-row .ec { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
 
 /* ============ ACCOUNT HEADER ============ */
@@ -1407,7 +1426,7 @@ svg { display: block; }
    instead of keeping a stray indent. `gap` replaces the badges' left margin. */
 .acct-meta .tag { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 22px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .acct-meta .tag .em { color: var(--lavender); font-style: italic; }
-.acct-meta .full { font-family: 'GeistMono'; font-size: 12.5px; color: var(--text-medium); word-break: break-all; display: flex; align-items: center; gap: 8px; }
+.acct-meta .full { font-family: 'GeistMono', ui-monospace, monospace; font-size: 12.5px; color: var(--text-medium); word-break: break-all; display: flex; align-items: center; gap: 8px; }
 /* A pill nested in the header meta (e.g. a list's owner) keeps standard
    pill sizing — .acct-meta .tag above is the 22px serif PAGE TITLE rule and
    would otherwise win the cascade over .addr-pill .tag. */
@@ -1504,13 +1523,13 @@ svg { display: block; }
 
 /* pagination */
 .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; }
-.pager .info { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.pager .info { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); }
 .pager .btns { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; }
-.pager .btns button { min-width: 30px; height: 30px; padding: 0 7px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); display: inline-flex; align-items: center; justify-content: center; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); white-space: nowrap; flex-shrink: 0; }
+.pager .btns button { min-width: 30px; height: 30px; padding: 0 7px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); display: inline-flex; align-items: center; justify-content: center; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-medium); white-space: nowrap; flex-shrink: 0; }
 .pager .btns button:hover:not(:disabled) { color: var(--text-high); background: var(--panel-hover); }
-.pager .btns button.on { background: var(--accent); color: var(--accent-on); border-color: var(--accent); }
+.pager .btns button.on { background: var(--accent-fill); color: var(--accent-on); border-color: var(--accent-fill); }
 .pager .btns button:disabled { opacity: 0.35; cursor: not-allowed; }
-.pager-jump { all: unset; box-sizing: border-box; width: 64px; height: 30px; padding: 0 10px; margin-left: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); font-family: 'GeistMono'; font-size: 11px; color: var(--text-high); }
+.pager-jump { all: unset; box-sizing: border-box; width: 64px; height: 30px; padding: 0 10px; margin-left: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-high); }
 .pager-jump:focus { border-color: var(--sky); }
 .pager-jump::placeholder { color: var(--text-low); }
 @media (max-width: 520px) {
@@ -1524,7 +1543,7 @@ svg { display: block; }
 }
 
 /* small section title */
-.sec-title { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); margin: 24px 0 12px; }
+.sec-title { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); margin: 24px 0 12px; }
 
 /* footer */
 .foot { border-top: 1px solid var(--separator); padding: 28px 0; margin-top: 40px; }
@@ -1534,10 +1553,10 @@ svg { display: block; }
 
 /* identity / alias card (EVM-primary accounts) */
 .id-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; overflow: hidden; margin-bottom: 16px; }
-.id-card-head { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); padding: 13px 18px; border-bottom: 1px solid var(--separator); }
+.id-card-head { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); padding: 13px 18px; border-bottom: 1px solid var(--separator); }
 /* nowrap + no shrink: inside the flex .full row the badge would otherwise
    inherit word-break: break-all and wrap letter-by-letter under pressure */
-.id-kind { font-family: 'GeistMono'; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 5px; white-space: nowrap; flex-shrink: 0; }
+.id-kind { font-family: 'GeistMono', ui-monospace, monospace; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 5px; white-space: nowrap; flex-shrink: 0; }
 .id-kind.evm { background: var(--lavender-soft); color: var(--lavender); }
 .acct-meta .full .id-kind { margin-right: 4px; }
 
@@ -1555,29 +1574,29 @@ svg { display: block; }
 .close-accounts > summary:hover { background: var(--panel-hover); }
 .close-accounts > summary:focus-visible { outline: 2px solid var(--sky); outline-offset: -2px; border-radius: 16px; }
 .close-accounts-summary-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
-.close-accounts-title { font-family: 'GeistMono'; font-size: 11px; font-weight: 600; color: var(--text-medium); text-transform: uppercase; letter-spacing: 0.1em; }
+.close-accounts-title { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; font-weight: 600; color: var(--text-medium); text-transform: uppercase; letter-spacing: 0.1em; }
 .close-accounts-subtitle { font-size: 11px; color: var(--text-low); }
 .close-accounts-chevron { margin-left: auto; color: var(--text-low); font-size: 18px; transition: transform 150ms var(--ease-standard); }
 .close-accounts[open] .close-accounts-chevron { transform: rotate(180deg); }
 .close-accounts-body { padding: 16px 18px 18px; border-top: 1px solid var(--separator); }
-.close-accounts-context { margin-bottom: 10px; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); text-transform: uppercase; letter-spacing: 0.06em; }
+.close-accounts-context { margin-bottom: 10px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; color: var(--text-low); text-transform: uppercase; letter-spacing: 0.06em; }
 .close-accounts-list, .close-account-reasons { padding: 0; list-style: none; }
 .close-account-match { padding: 13px 0; border-bottom: 1px solid var(--separator); }
 .close-account-match:first-child { padding-top: 4px; }
 .close-account-match:last-child { border-bottom: 0; }
 .close-account-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.close-account-confidence { display: inline-flex; align-items: center; padding: 3px 7px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
-.close-account-confidence.strong { color: var(--green); background: var(--green-soft); }
-.close-account-confidence.moderate { color: var(--amber); background: var(--amber-soft); }
-.close-account-seen { margin-left: auto; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); white-space: nowrap; }
+.close-account-confidence { display: inline-flex; align-items: center; padding: 3px 7px; border-radius: 9999px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
+.close-account-confidence.strong { color: var(--green-text); background: var(--green-soft); }
+.close-account-confidence.moderate { color: var(--amber-text); background: var(--amber-soft); }
+.close-account-seen { margin-left: auto; font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; color: var(--text-low); white-space: nowrap; }
 .close-account-reasons { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .close-account-reasons li { padding: 4px 8px; border: 1px solid var(--separator); border-radius: 7px; background: var(--panel); color: var(--text-medium); font-size: 11px; }
 .close-accounts-disclaimer { margin-top: 12px; padding: 10px 12px; border-left: 2px solid var(--amber); border-radius: 0 8px 8px 0; background: var(--amber-soft); color: var(--text-medium); font-size: 11px; }
 .close-accounts-state { display: flex; min-height: 96px; flex-direction: column; align-items: flex-start; justify-content: center; gap: 4px; color: var(--text-medium); font-size: 12px; }
 .close-accounts-state strong { color: var(--text-high); font-size: 13px; }
-.close-accounts-retry { margin-top: 8px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--sky); font-family: 'GeistMono'; font-size: 11px; }
+.close-accounts-retry { margin-top: 8px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--sky); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; }
 .close-accounts-retry:hover { background: var(--panel-hover); color: var(--text-high); }
-.close-accounts-loading { display: grid; gap: 8px; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; }
+.close-accounts-loading { display: grid; gap: 8px; color: var(--text-low); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; }
 .close-account-skeleton { display: flex; justify-content: space-between; gap: 20px; padding: 9px 0; }
 .close-account-skeleton span { width: 160px; height: 11px; border-radius: 6px; background: linear-gradient(90deg, var(--panel) 25%, var(--panel-hover) 37%, var(--panel) 63%); background-size: 400% 100%; animation: sk 1.4s ease infinite; }
 .close-account-skeleton span:last-child { width: 240px; }
@@ -1594,7 +1613,7 @@ svg { display: block; }
 /* inline-flex + centered items: a market-logo icon inside the note (GIGAHDX)
    would otherwise sit on the text baseline and push the whole note upward
    relative to the primary market's plain-text note. */
-.mm-title-note { display: inline-flex; align-items: center; gap: 4px; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.mm-title-note { display: inline-flex; align-items: center; gap: 4px; color: var(--text-low); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
 /* Stays right-aligned once the title row wraps, so it lines up with the other
    "Open in …" links instead of sliding under the heading on narrow screens. */
 .ext-link-row { display: flex; justify-content: flex-end; margin-bottom: 8px; }
@@ -1605,25 +1624,25 @@ svg { display: block; }
 .mm-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; padding: 18px 20px; margin-bottom: 8px; }
 .mm-summary { display: flex; flex-wrap: wrap; gap: 28px; padding-bottom: 16px; border-bottom: 1px solid var(--separator); }
 .mm-stat { display: flex; flex-direction: column; gap: 4px; }
-.mm-stat .k { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
-.mm-stat .v { font-family: 'GeistMono'; font-size: 18px; font-weight: 600; }
-.hf { font-family: 'GeistMono'; font-weight: 600; padding: 1px 8px; border-radius: 6px; }
-.hf.hf-ok { background: var(--green-soft); color: var(--green); }
-.hf.hf-warn { background: var(--amber-soft); color: var(--amber); }
-.hf.hf-bad { background: var(--red-soft); color: var(--red); }
+.mm-stat .k { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.mm-stat .v { font-family: 'GeistMono', ui-monospace, monospace; font-size: 18px; font-weight: 600; }
+.hf { font-family: 'GeistMono', ui-monospace, monospace; font-weight: 600; padding: 1px 8px; border-radius: 6px; }
+.hf.hf-ok { background: var(--green-soft); color: var(--green-text); }
+.hf.hf-warn { background: var(--amber-soft); color: var(--amber-text); }
+.hf.hf-bad { background: var(--red-soft); color: var(--red-text); }
 /* trade detail — route flow */
 .trade-route { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .trade-hop { display: inline-flex; align-items: center; gap: 10px; }
 .hop-arrow { display: inline-flex; flex-direction: column; align-items: center; gap: 1px; color: var(--text-low); }
 .hop-arrow svg { width: 26px; height: 12px; }
-.hop-pool { font-family: 'GeistMono'; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-medium); white-space: nowrap; }
+.hop-pool { font-family: 'GeistMono', ui-monospace, monospace; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-medium); white-space: nowrap; }
 
 /* two-sided health badge: color-coded factor | DefiSim, the whole thing one link */
-.hf-badge { display: inline-flex; align-items: stretch; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; font-family: 'GeistMono'; font-size: 11px; line-height: 1; white-space: nowrap; vertical-align: middle; }
+.hf-badge { display: inline-flex; align-items: stretch; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; line-height: 1; white-space: nowrap; vertical-align: middle; }
 .hf-badge .hfv { padding: 5px 8px; font-weight: 600; color: var(--text-medium); }
-.hf-badge .hfv.hf-ok { background: var(--green-soft); color: var(--green); }
-.hf-badge .hfv.hf-warn { background: var(--amber-soft); color: var(--amber); }
-.hf-badge .hfv.hf-bad { background: var(--red-soft); color: var(--red); }
+.hf-badge .hfv.hf-ok { background: var(--green-soft); color: var(--green-text); }
+.hf-badge .hfv.hf-warn { background: var(--amber-soft); color: var(--amber-text); }
+.hf-badge .hfv.hf-bad { background: var(--red-soft); color: var(--red-text); }
 .hf-badge .sim { padding: 5px 8px; border-left: 1px solid var(--border); color: var(--text-medium); background: var(--panel); }
 .hf-badge:hover .sim { color: var(--text-high); }
 .mm-bar { padding: 16px 0; border-bottom: 1px solid var(--separator); }
@@ -1635,7 +1654,7 @@ svg { display: block; }
 /* The supplemental GIGAHDX debt a primary-market summary line names. */
 .mm-secondary-debt { color: var(--cat-borrow); }
 /* Marks which money market a row belongs to, so it wears that family's yellow. */
-.mm-activity-market { display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--cat-borrow) 30%, transparent); border-radius: 9999px; background: color-mix(in srgb, var(--cat-borrow) 13%, transparent); color: var(--cat-borrow); font-family: 'GeistMono'; font-size: 9px; font-weight: 600; line-height: 1; letter-spacing: 0.04em; white-space: nowrap; }
+.mm-activity-market { display: inline-flex; align-items: center; border: 1px solid color-mix(in srgb, var(--cat-borrow) 30%, transparent); border-radius: 9999px; background: color-mix(in srgb, var(--cat-borrow) 13%, transparent); color: var(--cat-borrow); font-family: 'GeistMono', ui-monospace, monospace; font-size: 9px; font-weight: 600; line-height: 1; letter-spacing: 0.04em; white-space: nowrap; }
 /* GIGAHDX is brand black (same #000 the HDX lock charts and balance breakdown
    already give it), so its market marker is the one filled black chip in the
    app. A black fill would disappear into the dark theme's background, so there
@@ -1672,12 +1691,12 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
 .token-icons-item { display: inline-flex; line-height: 0; }
 /* How many other holdings the stack leaves out — every one worth more than $10.
    A count, not more icons: past a few the icons stop being tellable apart. */
-.stack-more { margin-left: 11px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.stack-more { margin-left: 11px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); }
 .holdings-cell .stack-more { margin-left: 9px; }
 .activity-badge-group { display: inline-flex; align-items: center; gap: 5px; }
 .mm-activity-market { padding: 4px 6px; }
 /* cross-chain chips */
-.chain-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 18px; padding: 0 6px; border-radius: 6px; font-family: 'GeistMono'; font-size: 9px; font-weight: 600; color: #fff; letter-spacing: 0.04em; flex-shrink: 0; }
+.chain-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 18px; padding: 0 6px; border-radius: 6px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 9px; font-weight: 600; color: #fff; letter-spacing: 0.04em; flex-shrink: 0; }
 /* The local chain. Counterparties carry a hardcoded brand pair; this one derives
    its ramp from the accent token, so it follows the brand instead of pinning a
    second copy of it here. */
@@ -1689,7 +1708,7 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
 .dest { display: inline-flex; align-items: center; gap: 7px; }
 .trade-leg { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
 .trade-leg .mono { color: var(--text-high); }
-.ext-link { font-family: 'GeistMono'; font-size: 11px; color: var(--sky); padding: 2px 7px; border-radius: 6px; background: var(--sky-soft); margin-left: 4px; white-space: nowrap; }
+.ext-link { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--sky); padding: 2px 7px; border-radius: 6px; background: var(--sky-soft); margin-left: 4px; white-space: nowrap; }
 .ext-link:hover { color: var(--text-high); }
 
 
@@ -1726,7 +1745,7 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
 .filters .combo-input, .filters select, .filters input {
   all: unset; box-sizing: border-box; height: 34px; line-height: 32px; padding: 0 12px;
   border: 1px solid var(--border); border-radius: 9999px; background: var(--panel);
-  font-family: 'GeistMono'; font-size: 12px; color: var(--text-high); cursor: pointer;
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--text-high); cursor: pointer;
 }
 .filters input { cursor: text; }
 .filters input[type="number"] { width: 92px; }
@@ -1737,10 +1756,10 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
 .filters .fclear {
   height: 34px; padding: 0 14px; border-radius: 9999px; border: 1px solid var(--border);
   background: var(--panel); cursor: pointer;
-  font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-medium);
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-medium);
 }
 .filters .fclear:hover { color: var(--text-high); background: var(--panel-hover); }
-.filters .fcount { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-left: auto; }
+.filters .fcount { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); margin-left: auto; }
 
 /* Highlight the last 3 chars of any address: the ink of the theme against the blue
    of the rest of the address, so the characters that actually tell two addresses
@@ -1767,14 +1786,14 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
 /* account portfolio chart */
 .pf-card { background: var(--bg-elev); border: 1px solid var(--separator); border-radius: 16px; padding: 18px 20px; margin-bottom: 16px; }
 .pf-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 12px; }
-.pf-head .pf-now { font-family: 'GeistMono'; font-size: 26px; font-weight: 600; }
-.pf-head .pf-chg { font-family: 'GeistMono'; font-size: 13px; }
+.pf-head .pf-now { font-family: 'GeistMono', ui-monospace, monospace; font-size: 26px; font-weight: 600; }
+.pf-head .pf-chg { font-family: 'GeistMono', ui-monospace, monospace; font-size: 13px; }
 /* Two-curve legend (total vs ex-HDX). Wraps rather than overflowing at 390px, and
    sits between the headline row and the chart so a key is read before the lines. */
 .pf-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: -4px 0 6px; }
 .pf-legend .pf-key { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-low); text-transform: uppercase; letter-spacing: 0.04em; }
 .pf-legend .pf-swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
-.pf-legend .pf-key-val { font-family: 'GeistMono'; font-size: 12px; color: var(--text); text-transform: none; letter-spacing: 0; }
+.pf-legend .pf-key-val { font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--text); text-transform: none; letter-spacing: 0; }
 .apx-chart { width: 100%; height: 220px; display: block; margin-top: 8px; overflow: visible; }
 /* touch-action pan-y: horizontal touch drags scrub the crosshair (pointer events
    keep firing) while vertical swipes still scroll the page. */
@@ -1785,14 +1804,14 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
    chip that exists only while a chart is zoomed (double-click also resets).
    The chip restyles from the global `all: unset` button reset. */
 .chart-zoom-sel { position: absolute; top: 0; bottom: 0; background: var(--sky-soft); border-left: 1px solid var(--sky-deep); border-right: 1px solid var(--sky-deep); pointer-events: none; z-index: 2; }
-.chart-zoom-sel-label { position: absolute; top: 5px; left: 50%; transform: translateX(-50%); white-space: nowrap; font-family: 'GeistMono'; font-size: 10px; color: var(--text-high); background: var(--bg-elev2); border: 1px solid var(--separator); border-radius: 6px; padding: 2px 7px; }
-.chart-zoom-reset { position: absolute; bottom: 4px; right: 4px; z-index: 3; display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--separator); background: var(--bg-elev2); font-family: 'GeistMono'; font-size: 10.5px; color: var(--text-medium); }
+.chart-zoom-sel-label { position: absolute; top: 5px; left: 50%; transform: translateX(-50%); white-space: nowrap; font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; color: var(--text-high); background: var(--bg-elev2); border: 1px solid var(--separator); border-radius: 6px; padding: 2px 7px; }
+.chart-zoom-reset { position: absolute; bottom: 4px; right: 4px; z-index: 3; display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--separator); background: var(--bg-elev2); font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; color: var(--text-medium); }
 .chart-zoom-reset:hover { color: var(--text-high); border-color: var(--border); }
 .apx-wrap .apx-chart { margin-top: 0; }
 .apx-cross { position: absolute; inset: 0; pointer-events: none; }
 .apx-vline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--text-medium); opacity: .55; transform: translateX(-.5px); }
 .apx-dot { position: absolute; width: 9px; height: 9px; border-radius: 50%; background: var(--text-high); border: 2px solid var(--bg-elev); transform: translate(-50%, -50%); }
-.apx-tip { position: absolute; top: 4px; transform: translateX(-50%); display: flex; gap: 8px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-family: 'GeistMono'; font-size: 11px; white-space: nowrap; pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); z-index: 4; }
+.apx-tip { position: absolute; top: 4px; transform: translateX(-50%); display: flex; gap: 8px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; white-space: nowrap; pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); z-index: 4; }
 .apx-tip .t-d { color: var(--text-low); }
 .apx-tip .t-p { color: var(--text-high); font-weight: 600; }
 .apx-tip .t-e { color: var(--lavender); }
@@ -1818,7 +1837,7 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
   background: var(--mk); border: 2px solid var(--bg-elev);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--mk) 40%, transparent);
   display: flex; align-items: center; justify-content: center;
-  font-family: 'GeistMono'; font-size: 9px; font-weight: 700; line-height: 1; text-decoration: none;
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 9px; font-weight: 700; line-height: 1; text-decoration: none;
   pointer-events: auto; cursor: pointer; transition: transform 120ms ease;
   appearance: none; -webkit-appearance: none; padding: 0; margin: 0;
 }
@@ -1837,7 +1856,7 @@ tr:hover .icon-stack > *:nth-child(n+4), .icon-stack:hover > *:nth-child(n+4) { 
   position: absolute; top: 18px; left: 0; transform: translateX(-50%); z-index: 6;
   display: flex; flex-direction: column; gap: 4px; padding: 6px 9px;
   background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
-  font-family: 'GeistMono'; font-size: 11px; white-space: nowrap;
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; white-space: nowrap;
   box-shadow: 0 8px 20px rgba(0,0,0,.4); pointer-events: auto;
   animation: tipIn 120ms ease-out;
 }
@@ -1878,7 +1897,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
   .perf-row { gap: 10px 14px; max-width: 100%; }
 }
 .day-chart { width: 100%; height: auto; display: block; }
-.day-chart .ax-lbl { font-family: 'GeistMono'; font-size: 9px; }
+.day-chart .ax-lbl { font-family: 'GeistMono', ui-monospace, monospace; font-size: 9px; }
 .day-bar { fill: var(--bar, var(--accent)); opacity: 0.4; cursor: pointer; transition: opacity 0.12s; }
 .day-bar:hover { opacity: 0.78; }
 .day-bar.on { opacity: 1; }
@@ -1893,14 +1912,14 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
   background-size: 400% 100%; animation: sk 1.4s ease infinite;
 }
 
-.bal-xaxis { display: flex; justify-content: space-between; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); margin-top: 4px; }
-.bal-legend { display: flex; gap: 16px; align-items: center; margin-top: 14px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); flex-wrap: wrap; }
+.bal-xaxis { display: flex; justify-content: space-between; font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; color: var(--text-low); margin-top: 4px; }
+.bal-legend { display: flex; gap: 16px; align-items: center; margin-top: 14px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-medium); flex-wrap: wrap; }
 .bal-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
 .bal-legend i.lg-dash { width: 12px; height: 0; border-radius: 0; border-top: 2px dashed currentColor; opacity: 0.8; }
 
 
-.perf .pk { font-family: 'GeistMono'; font-size: 10px; letter-spacing: 0.1em; color: var(--text-low); text-transform: uppercase; }
-.perf .pv { font-family: 'GeistMono'; font-size: 15px; font-weight: 600; }
+.perf .pk { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; letter-spacing: 0.1em; color: var(--text-low); text-transform: uppercase; }
+.perf .pv { font-family: 'GeistMono', ui-monospace, monospace; font-size: 15px; font-weight: 600; }
 
 /* portfolio sparkline */
 .spark { display: inline-block; vertical-align: middle; }
@@ -1934,16 +1953,16 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .src-split + .src-split { border-top: 1px solid var(--separator); }
 /* No height of its own — the grid row gives it one (see .src-split). */
 .src-tree { border-right: 1px solid var(--separator); min-height: 0; overflow: auto; padding: 8px 6px; background: var(--panel); }
-.src-tree-dir { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 5px; width: 100%; cursor: pointer; padding: 4px 6px; border-radius: 7px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); text-align: left; overflow-wrap: anywhere; }
+.src-tree-dir { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 5px; width: 100%; cursor: pointer; padding: 4px 6px; border-radius: 7px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); text-align: left; overflow-wrap: anywhere; }
 .src-tree-dir:hover { color: var(--text-medium); background: var(--panel-hover); }
 .src-tree-dir .tw { flex-shrink: 0; width: 9px; color: var(--text-lowest); }
-.src-tree-file { all: unset; box-sizing: border-box; display: block; width: 100%; cursor: pointer; padding: 4px 6px 4px 8px; border-radius: 7px; font-family: 'GeistMono'; font-size: 11.5px; color: var(--text-medium); text-align: left; overflow-wrap: anywhere; }
+.src-tree-file { all: unset; box-sizing: border-box; display: block; width: 100%; cursor: pointer; padding: 4px 6px 4px 8px; border-radius: 7px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11.5px; color: var(--text-medium); text-align: left; overflow-wrap: anywhere; }
 .src-tree-file:hover { color: var(--text-high); background: var(--panel-hover); }
-.src-tree-file.on { color: var(--accent-on); background: var(--accent); }
+.src-tree-file.on { color: var(--accent-on); background: var(--accent-fill); }
 .src-tree-file:focus-visible, .src-tree-dir:focus-visible { outline: 2px solid var(--sky); outline-offset: -2px; }
 .src-tree-kids { border-left: 1px solid var(--separator); margin-left: 8px; padding-left: 4px; }
 .src-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.src-pane-head { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--separator); font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); min-width: 0; }
+.src-pane-head { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--separator); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-medium); min-width: 0; }
 .src-pane-head .p { display: flex; min-width: 0; }
 .src-pane-head .p .dir { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-low); }
 .src-pane-head .p .file { flex-shrink: 0; }
@@ -1953,7 +1972,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    side, and owns the shared typography so their lines cannot drift apart. */
 .src-viewer {
   flex: 1; min-height: 0; overflow: auto; display: flex; align-items: flex-start;
-  font-family: 'GeistMono'; font-size: 12px; line-height: 1.7; color: var(--text-medium);
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; line-height: 1.7; color: var(--text-medium);
 }
 .src-viewer .src-gutter, .src-viewer .src-code { margin: 0; white-space: pre; font: inherit; line-height: inherit; }
 /* Sticky, so the numbers stay beside their lines while the code scrolls sideways. */
@@ -1982,17 +2001,17 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    --text-low rather than the JSON viewer's --text-lowest: punctuation may recede
    to the edge of legibility, but a natspec block is prose someone reads. */
 .src-viewer .s-comment { color: var(--text-low); }
-.src-viewer .s-string { color: var(--green); }
+.src-viewer .s-string { color: var(--green-text); }
 .src-viewer .s-number { color: var(--lavender); }
 .src-viewer .s-keyword { color: var(--sky); }
-.src-viewer .s-type { color: var(--amber); }
+.src-viewer .s-type { color: var(--amber-text); }
 /* The tree's mobile form: closed by default, so the code stays one scroll away. */
 .src-picker { display: none; }
 @media (max-width: 860px) {
   .src-split { grid-template-columns: minmax(0, 1fr); }
   .src-tree { display: none; }
   .src-picker { display: block; border-bottom: 1px solid var(--separator); background: var(--panel); }
-  .src-picker > summary { display: flex; align-items: center; gap: 8px; padding: 11px 14px; cursor: pointer; list-style: none; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); }
+  .src-picker > summary { display: flex; align-items: center; gap: 8px; padding: 11px 14px; cursor: pointer; list-style: none; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-medium); }
   .src-picker > summary::-webkit-details-marker { display: none; }
   .src-picker > summary .cnt { margin-left: auto; color: var(--text-low); }
   .src-picker[open] > summary { border-bottom: 1px solid var(--separator); }
@@ -2007,7 +2026,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 }
 
 .cli-block { padding: 10px 12px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.abi-details > summary { cursor: pointer; padding: 13px 18px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); }
+.abi-details > summary { cursor: pointer; padding: 13px 18px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-medium); }
 .abi-details > summary:hover { color: var(--text-high); }
 .abi-details[open] > summary { border-bottom: 1px solid var(--separator); }
 .abi-details .json { margin: 0; border: 0; border-radius: 0; max-height: 520px; overflow: auto; }
@@ -2049,7 +2068,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .prog-ring .pr-track { stroke: var(--panel-hover); }
 .prog-ring .pr-label {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-  font-family: 'GeistMono'; font-size: 15px; font-weight: 600; color: var(--text-high); letter-spacing: -0.02em;
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 15px; font-weight: 600; color: var(--text-high); letter-spacing: -0.02em;
 }
 .prog-ring .pr-unit { font-size: 10px; color: var(--text-low); margin-left: 1px; }
 .prog-ring .pr-runs { font-size: 13px; }
@@ -2070,7 +2089,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 /* Separator ahead of each fact but the first: a wrapped line then starts with
    the dot instead of ending on one. */
 .dca-hero-facts > span + span::before { content: '·'; margin-right: 7px; color: var(--text-lowest); }
-.dca-hero-facts .dca-state { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+.dca-hero-facts .dca-state { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
 /* The mechanism behind a duration, never competing with it. */
 .dca-blocks { font-size: 11px; }
 /* Marks a dollar figure as the price of its own day, not of today. */
@@ -2181,8 +2200,8 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .book-asks tbody tr { background-image: linear-gradient(to right, var(--book-depth) 0, var(--book-depth) var(--depth, 0%), transparent var(--depth, 0%)); }
 .book-bids { --book-depth: color-mix(in srgb, var(--green) 12%, transparent); }
 .book-asks { --book-depth: color-mix(in srgb, var(--red) 12%, transparent); }
-.book-bids .book-price { color: var(--green); }
-.book-asks .book-price { color: var(--red); }
+.book-bids .book-price { color: var(--green-text); }
+.book-asks .book-price { color: var(--red-text); }
 /* The one figure the pair of ladders doesn't hold: sits between the section
    title and the book, reading as a caption rather than a card. */
 .book-spread {
@@ -2215,7 +2234,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .combo-input { width: 150px; cursor: text; }
 .combo-input::placeholder { color: var(--text-low); }
 .combo-pop { position: absolute; top: 40px; left: 0; z-index: 30; min-width: 220px; max-height: 280px; overflow-y: auto; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 12px; padding: 6px; box-shadow: 0 14px 34px rgba(0,0,0,0.45); }
-.combo-opt { padding: 8px 10px; border-radius: 8px; font-family: 'GeistMono'; font-size: 12px; cursor: pointer; color: var(--text-high); white-space: nowrap; }
+.combo-opt { padding: 8px 10px; border-radius: 8px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; cursor: pointer; color: var(--text-high); white-space: nowrap; }
 .combo-opt:hover, .combo-opt.active { background: var(--panel-hover); }
 .combo-opt .muted { font-size: 11px; margin-left: 4px; }
 /* Token lookup rows: symbol, then a muted "name #id" detail so duplicate symbols
@@ -2335,13 +2354,13 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
   .acct-head-skeleton .acct-bal { margin-left: 0; align-items: flex-start; min-width: 0; width: 100%; }
   .dl-skeleton .dd .sk-bar { max-width: 86%; }
 }
-.empty-state { padding: 48px 16px; text-align: center; color: var(--text-low); font-size: 13px; font-family: 'GeistMono'; }
-.btn { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; border-radius: 9999px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; background: var(--panel); border: 1px solid var(--border); color: var(--text-medium); transition: background 140ms, color 140ms; }
+.empty-state { padding: 48px 16px; text-align: center; color: var(--text-low); font-size: 13px; font-family: 'GeistMono', ui-monospace, monospace; }
+.btn { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; border-radius: 9999px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; background: var(--panel); border: 1px solid var(--border); color: var(--text-medium); transition: background 140ms, color 140ms; }
 .btn:hover { color: var(--text-high); background: var(--panel-hover); }
 .btn.sm { height: 26px; padding: 0 10px; font-size: 10px; }
-.btn.primary { background: var(--accent); color: var(--accent-on); border-color: transparent; }
+.btn.primary { background: var(--accent-fill); color: var(--accent-on); border-color: transparent; }
 .btn.primary:hover { filter: brightness(1.06); }
-.btn.danger { color: var(--red); }
+.btn.danger { color: var(--red-text); }
 .dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); animation: ov 0.18s ease; z-index: 100; }
 @keyframes ov { from { opacity: 0; } to { opacity: 1; } }
 .dialog { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(560px, 94vw); max-height: 88vh; overflow-y: auto; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 18px; z-index: 101; box-shadow: 0 24px 60px rgba(0,0,0,0.45); }
@@ -2350,7 +2369,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .dialog-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 16px; }
 .dialog-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 20px; border-top: 1px solid var(--separator); }
 .field { display: flex; flex-direction: column; gap: 7px; }
-.field label, .field .field-label { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+.field label, .field .field-label { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
 /* Shared input skin: border/background/radius/focus ring defined once here.
    `.field`'s own input/textarea get it through the selector list below; a
    bare input OUTSIDE a `.field`'s stacked label layout (e.g. a tag panel's
@@ -2366,7 +2385,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 :root[data-theme="dark"] .field select { color-scheme: dark; }
 :root[data-theme="light"] .field select { color-scheme: light; }
 .field select option { background: var(--bg-elev); color: var(--text-high); }
-.field textarea { resize: vertical; min-height: 84px; font-family: 'GeistMono'; font-size: 12px; line-height: 1.6; }
+.field textarea { resize: vertical; min-height: 84px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; line-height: 1.6; }
 /* A combo standing in for a form field (the alert form's token, pallet and
    call/event pickers) fills the field like the selects beside it — the 150px
    filter-bar width is for a filter ROW, where several controls share a line. */
@@ -2383,13 +2402,13 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 /* ConnectDialog: wallet list, account picker, signing screens (built on the
    .dialog* skin above). */
 .dialog-hint { color: var(--text-low); font-size: 12.5px; }
-.dialog-error { padding: 10px 12px; border-radius: 10px; background: var(--red-soft); color: var(--red); font-size: 12.5px; }
+.dialog-error { padding: 10px 12px; border-radius: 10px; background: var(--red-soft); color: var(--red-text); font-size: 12.5px; }
 /* Same box as the error, in the informational sky rather than a warm tone:
    "you already have this alert" after an idempotent create is worth reading and
    is not a refusal, so it must not be mistaken for one. */
 .dialog-note { padding: 10px 12px; border-radius: 10px; background: var(--sky-soft); color: var(--sky); font-size: 12.5px; }
 .wallet-group { display: flex; flex-direction: column; gap: 4px; }
-.wallet-group-label { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); padding: 0 2px 2px; }
+.wallet-group-label { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); padding: 0 2px 2px; }
 .wallet-row {
   display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box;
   padding: 11px 12px; border-radius: 12px; background: var(--panel); border: 1px solid var(--border);
@@ -2399,7 +2418,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .wallet-row:hover { color: var(--text-high); background: var(--panel-hover); border-color: var(--sky); }
 .wallet-row:disabled { opacity: 0.6; pointer-events: none; }
 .wallet-row .wallet-name { color: var(--text-high); font-weight: 500; }
-.wallet-row .wallet-status { margin-left: auto; color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; }
+.wallet-row .wallet-status { margin-left: auto; color: var(--text-low); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; }
 .wallet-row.account-row .wallet-status { font-size: 12.5px; }
 /* An account row's name reads the same as an AddrPill's would (profile → amber
    italic, on-chain identity → plain) — the account-picker rows and the signing
@@ -2407,7 +2426,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    without the .addr-pill wrapper (its own gap/font-family would fight
    .wallet-row's). */
 .wallet-row .tag { color: var(--lavender); font-weight: 500; }
-.wallet-row .tag.profile-name { color: var(--amber); font-style: italic; }
+.wallet-row .tag.profile-name { color: var(--amber-text); font-style: italic; }
 /* The signing screen's row is a status display, not a clickable choice — drop
    the hover highlight .wallet-row otherwise carries. */
 .wallet-row.static { cursor: default; }
@@ -2443,7 +2462,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
    so that's true by design, not by accident. */
 .wallet-tile-icon { width: 40px; height: 40px; border-radius: 10px; object-fit: contain; }
 .wallet-tile-name { color: var(--text-high); font-weight: 500; line-height: 1.25; }
-.wallet-tile-status { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+.wallet-tile-status { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
 /* Installed reads as the "real" choice — full strength plus an accent border;
    not-installed is a dimmed, honest "you'd need to leave to get this" link. */
 .wallet-tile.installed { border-color: color-mix(in srgb, var(--sky) 40%, var(--border)); }
@@ -2461,7 +2480,7 @@ a.apx-mark-go:hover, a.apx-mark-go:active { text-decoration: underline; }
 .qr-box svg { width: 224px; height: 224px; border-radius: 12px; }
 .qr-box-loading { height: 224px; border-radius: 12px; background: var(--panel); }
 .qr-expiry { text-align: center; font-size: 12px; color: var(--text-medium); min-height: 1.2em; }
-.qr-linked { padding: 24px 16px; border-radius: 12px; background: var(--green-soft); color: var(--green); text-align: center; font-weight: 500; }
+.qr-linked { padding: 24px 16px; border-radius: 12px; background: var(--green-soft); color: var(--green-text); text-align: center; font-weight: 500; }
 .device-list { display: flex; flex-direction: column; gap: 8px; }
 .device-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
 .device-info { flex: 1; min-width: 0; }
@@ -2553,34 +2572,34 @@ h2.sec-title, h3.sec-title { font-weight: 400; }
 .notif-hero-copy h2 { font-family: 'Gazpacho', serif; font-weight: 500; font-size: 25px; margin: 0 0 10px; color: var(--text-high); }
 .notif-hero-copy p { margin: 0; color: var(--text-medium); font-size: 14px; line-height: 1.65; max-width: 62ch; }
 .notif-hero-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 18px; }
-.notif-hero-note { font-family: 'GeistMono'; font-size: 11px; }
+.notif-hero-note { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; }
 .notif-hero-channels { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
 .notif-channel-badge {
   display: inline-flex; align-items: center; justify-content: center;
   padding: 7px 14px; border-radius: 9999px;
   background: var(--panel); border: 1px solid var(--border);
-  font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium);
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-medium);
 }
 .notif-personas { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
 .notif-persona { padding: 16px 18px; border: 1px solid var(--separator); border-radius: 14px; background: var(--bg-elev); }
-.notif-persona-who { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+.notif-persona-who { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
 .notif-persona-want { color: var(--text-high); font-size: 15px; margin-top: 6px; }
 .notif-persona-how { color: var(--text-medium); font-size: 12.5px; margin-top: 8px; }
-.notif-foot-note { font-family: 'GeistMono'; font-size: 11px; margin-top: 16px; }
+.notif-foot-note { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; margin-top: 16px; }
 
 /* Channels panel: grouped rows inside one .panel, same box as .device-row. */
 .notif-panel { padding: 4px 0; }
 .notif-list { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; }
 .notif-group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .notif-group-head:not(:first-child) { margin-top: 10px; }
-.notif-group-title { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); margin-right: auto; }
+.notif-group-title { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-medium); margin-right: auto; }
 .notif-note { color: var(--text-low); font-size: 12.5px; }
 .notif-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
 .notif-row-main { flex: 1; min-width: 0; }
 .notif-row-title { color: var(--text-high); font-weight: 500; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .notif-row-meta { color: var(--text-low); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
 .notif-row-actions { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.notif-linked { padding: 14px 16px; border-radius: 10px; background: var(--green-soft); color: var(--green); font-weight: 500; }
+.notif-linked { padding: 14px 16px; border-radius: 10px; background: var(--green-soft); color: var(--green-text); font-weight: 500; }
 .notif-link-panel { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; padding: 12px; border: 1px solid var(--border); border-radius: 10px; }
 .notif-link-code { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
 .notif-link-code .mono { color: var(--text-high); overflow-wrap: anywhere; }
@@ -2591,13 +2610,13 @@ h2.sec-title, h3.sec-title { font-weight: 400; }
 .notif-chip {
   display: inline-flex; align-items: center; margin: 0 4px 4px 0; padding: 2px 8px; border-radius: 9999px;
   background: var(--panel); border: 1px solid var(--border);
-  font-family: 'GeistMono'; font-size: 10.5px; color: var(--text-medium);
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; color: var(--text-medium);
 }
 .tbl tbody tr.notif-rule-muted { opacity: 0.55; }
 /* An unread row is marked on its leading edge — a background tint would fight
    the table's own hover and zebra treatment. */
 .tbl tbody tr.notif-unread td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
-.notif-quick-add { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; font-family: 'GeistMono'; font-size: 11px; }
+.notif-quick-add { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; }
 
 /* New-alert form assists. The preset chips are the activity filter's own chips,
    sitting under the input they fill, so they read as shortcuts to that field
@@ -2627,7 +2646,7 @@ h2.sec-title, h3.sec-title { font-weight: 400; }
 /* The link-device landing page (phone camera → URL): one narrow card. */
 .link-device-card { max-width: 480px; padding: 24px; display: flex; flex-direction: column; gap: 14px; align-items: flex-start; }
 .link-device-card p { margin: 0; color: var(--text-medium); }
-.link-device-warn { padding: 10px 12px; border-radius: 10px; background: var(--amber-soft); color: var(--amber); font-size: 13px; }
+.link-device-warn { padding: 10px 12px; border-radius: 10px; background: var(--amber-soft); color: var(--amber-text); font-size: 13px; }
 /* Two-segment sliding switch (visibility private/public) — the indicator pill
    translates by segment index, preis-ui's interval-selector mechanic. */
 .seg-switch {
@@ -2662,7 +2681,7 @@ h2.sec-title, h3.sec-title { font-weight: 400; }
 .acct-chip {
   display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
   padding: 2px 4px 2px 8px; border-radius: 9999px; background: var(--panel); border: 1px solid var(--border);
-  font-family: 'GeistMono'; font-size: 11.5px; color: var(--text-high);
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 11.5px; color: var(--text-high);
 }
 /* The label is a flex row like `.acct-picker-row`, not an inline run: as inline
    content the 22px icon circle and the text sit on one baseline with no gap, and
@@ -2723,13 +2742,13 @@ h2.sec-title, h3.sec-title { font-weight: 400; }
    chrome/background), same underline-on-hover treatment as other inline
    actions (.hash) rather than a second CTA box. */
 /* One quiet self-contained line in the account header, under the tag row. */
-.lists-login-hint { display: block; margin-top: 3px; font-size: 11px; font-family: 'GeistMono'; }
+.lists-login-hint { display: block; margin-top: 3px; font-size: 11px; font-family: 'GeistMono', ui-monospace, monospace; }
 .hint-link { background: none; border: 0; padding: 0; margin: 0; color: var(--sky); font: inherit; cursor: pointer; }
 .hint-link:hover { text-decoration: underline; text-underline-offset: 2px; }
 .list-stats { display: flex; gap: 32px; flex-wrap: wrap; }
 .list-stats > div { display: flex; flex-direction: column; gap: 2px; }
 .list-stat-num { font-family: 'Gazpacho', serif; font-size: 24px; font-weight: 500; color: var(--text-high); }
-.list-stat-label { font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); text-transform: uppercase; letter-spacing: 0.05em; }
+.list-stat-label { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-medium); text-transform: uppercase; letter-spacing: 0.05em; }
 /* Account rows carry the same avatar an account pill would (profile image /
    snakewatch emoji / placeholder while the display refs load). */
 .account-row-emoji { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; overflow: hidden; background: var(--bg-elev); border: 1px solid var(--border); }
@@ -2769,15 +2788,15 @@ h2.sec-title, h3.sec-title { font-weight: 400; }
 
 /* HDX dashboard */
 .hdx-chart-wrap { position: relative; }
-.hdx-tip { position: absolute; transform: translateX(-50%); display: flex; flex-direction: column; gap: 3px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-family: 'GeistMono'; font-size: 11px; white-space: nowrap; pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); z-index: 4; }
+.hdx-tip { position: absolute; transform: translateX(-50%); display: flex; flex-direction: column; gap: 3px; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; white-space: nowrap; pointer-events: none; box-shadow: 0 8px 20px rgba(0,0,0,.4); z-index: 4; }
 .hdx-tip .t-d { color: var(--text-low); }
 .hdx-tip .t-row { display: flex; align-items: center; gap: 6px; color: var(--text-medium); }
 .hdx-tip .t-row i { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .hdx-tip .t-row .tv { margin-left: auto; padding-left: 12px; color: var(--text-high); font-weight: 600; }
 /* The stack total: a summed row, ruled off from the bands it adds up. */
 .hdx-tip .t-total { margin-top: 2px; padding-top: 4px; border-top: 1px solid var(--separator); color: var(--text-high); }
-.hdx-ax { font-family: 'GeistMono'; font-size: 10px; fill: var(--text-low); }
-.ribbon .cell .s { font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); }
+.hdx-ax { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; fill: var(--text-low); }
+.ribbon .cell .s { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; color: var(--text-low); }
 .hdx-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 14px; }
 /* HOLLAR liquidity pools: cap at 4 per row. The min track is a quarter of the
    container (minus its share of the 3 gaps), so a 5th never fits on desktop,
@@ -2828,8 +2847,8 @@ h2.sec-title, h3.sec-title { font-weight: 400; }
    reads as "not settled yet" at a glance. The unknown case is deliberately
    plain — no colour to imply an outcome nothing established. */
 .badge.projected { background: transparent; border: 1px dashed currentColor; }
-.badge.projected.ok { color: var(--green); }
-.badge.projected.fail { color: var(--red); }
+.badge.projected.ok { color: var(--green-text); }
+.badge.projected.fail { color: var(--red-text); }
 .badge.projected.unknown { color: var(--text-low); border-style: dashed; padding-inline: 7px; }
 /* ── /liquidity ───────────────────────────────────────────────────────────────
    A pool is a mixture, so every row draws its own, and the page reads down as a
@@ -2860,8 +2879,8 @@ h2.sec-title, h3.sec-title { font-weight: 400; }
 /* The folded tail, and the page's closing note: both are asides, so they sit
    outside the panel and stay quiet. */
 .liq-filter { display: flex; margin-bottom: 12px; }
-.liq-dust { display: flex; align-items: center; gap: 10px; padding: 10px 2px 0; font-family: 'GeistMono'; font-size: 11.5px; color: var(--text-low); }
-.liq-dust-toggle { color: var(--sky-deep); font-family: 'GeistMono'; font-size: 11.5px; }
+.liq-dust { display: flex; align-items: center; gap: 10px; padding: 10px 2px 0; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11.5px; color: var(--text-low); }
+.liq-dust-toggle { color: var(--sky-deep); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11.5px; }
 .liq-dust-toggle:hover { text-decoration: underline; }
 .liq-foot { max-width: 62ch; padding: 14px 2px 0; font-size: 12px; line-height: 1.6; }
 /* The closing link keeps its arrow: a wrapped "→" reads as a stray glyph. */
@@ -2888,18 +2907,18 @@ a.hdx-card-link:hover { border-color: var(--text-low); }
 a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offset: 2px; }
 /* Amount ⇄ USD unit switch on the pooled-over-time chart. */
 .liq-toggle { display: inline-flex; gap: 2px; border: 1px solid var(--separator); border-radius: 8px; padding: 2px; }
-.liq-toggle button { padding: 3px 10px; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); border-radius: 6px; }
+.liq-toggle button { padding: 3px 10px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-medium); border-radius: 6px; }
 .liq-toggle button.active { background: var(--bg-elev); color: var(--text-high); }
 .hdx-card .hk { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500; color: var(--text-high); }
 .hdx-card .hk i { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.hdx-card .hk .cohort-threshold { margin-left: auto; font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); white-space: nowrap; }
-.hdx-card .hv { font-family: 'GeistMono'; font-size: 17px; font-weight: 600; }
-.hdx-card .hs { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
-.hdx-note { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin-top: 12px; }
+.hdx-card .hk .cohort-threshold { margin-left: auto; font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; color: var(--text-low); white-space: nowrap; }
+.hdx-card .hv { font-family: 'GeistMono', ui-monospace, monospace; font-size: 17px; font-weight: 600; }
+.hdx-card .hs { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); }
+.hdx-note { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); margin-top: 12px; }
 .hdx-flow-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: stretch; margin-bottom: 16px; }
 @media (max-width: 920px) { .hdx-flow-grid { grid-template-columns: 1fr; } }
 .hdx-dca { display: flex; flex-direction: column; gap: 18px; justify-content: center; }
-.hdx-dca .mm-stat .s { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); }
+.hdx-dca .mm-stat .s { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); }
 /* movers tables sit two-up in .cols — relax the global 760px table min-width.
    Desktop-only: below 720px the stacked-card rule (.tbl { min-width: 0 }) must win. */
 @media (min-width: 721px) { .hdx-movers .tbl { min-width: 420px; } }
@@ -2955,7 +2974,7 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
     content: attr(data-label);
     float: left; margin-right: 14px;
     color: var(--text-low);
-    font-family: 'GeistMono'; font-size: 10px; font-weight: 500;
+    font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; font-weight: 500;
     text-transform: uppercase; letter-spacing: 0.08em;
     white-space: nowrap; line-height: 1.85;
   }
@@ -2994,7 +3013,7 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
      figure the directory is scanned for. Weighted between the headline value and
      the plain lines; DOM order puts it ahead of the 12M chart sharing its order. */
   .accounts-tbl tbody td[data-label="User Revenue"] { order: 3; padding-top: 6px; font-size: 14px; font-weight: 600; color: var(--text-high); }
-  .accounts-tbl tbody td[data-label="User Revenue"].ur-neg { color: var(--red); }
+  .accounts-tbl tbody td[data-label="User Revenue"].ur-neg { color: var(--red-text); }
   /* Full-bleed chart under the two of them, its label a caption above it. */
   .accounts-tbl tbody td[data-label="12M"] { order: 3; text-align: left; padding: 8px 14px 2px; }
   .accounts-tbl tbody td[data-label="12M"]::before { float: none; display: block; margin: 0 0 4px; line-height: 1.2; }
@@ -3063,7 +3082,7 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
 }
 
 /* Referendum: tally bar, vote bubbles, and the ref link on vote rows. */
-.ref-link { display: inline-block; font-family: 'GeistMono'; font-size: 12px; color: var(--sky); text-decoration: none; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ref-link { display: inline-block; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--sky); text-decoration: none; max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ref-link:hover { text-decoration: underline; }
 .ref-num { margin-right: 2px; }
 /* A vote row pairs the index with the title. The title ellipsizes, and an
@@ -3097,8 +3116,8 @@ a.hdx-card-link:focus-visible { outline: 2px solid var(--sky-deep); outline-offs
 .tally-bar { display: flex; width: 100%; height: 10px; border-radius: 5px; overflow: hidden; background: var(--surface-2); }
 .tally-aye { background: var(--green); }
 .tally-nay { background: var(--red); }
-.vb-aye-text { color: var(--green); }
-.vb-nay-text { color: var(--red); }
+.vb-aye-text { color: var(--green-text); }
+.vb-nay-text { color: var(--red-text); }
 /* Says where a tally came from when it is NOT the chain's own figure. Prose, so it wraps
    and keeps the body font rather than the mono of the amounts above it. */
 .tally-note { font-size: 12px; line-height: 1.45; color: var(--text-low); max-width: 74ch; }
@@ -3212,7 +3231,7 @@ tr.row-muted td { opacity: .55; }
 /* Decoded referendum proposal: a call tree, not raw JSON. */
 .pc-panel { padding: 14px 16px; }
 .pc-call { min-width: 0; }
-.pc-head { display: flex; align-items: baseline; gap: 1px; font-family: 'GeistMono'; font-size: 13px; margin-bottom: 8px; }
+.pc-head { display: flex; align-items: baseline; gap: 1px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 13px; margin-bottom: 8px; }
 .pc-pallet { color: var(--text-medium); }
 .pc-dot { color: var(--text-low); }
 .pc-name { color: var(--sky); font-weight: 600; }
@@ -3234,8 +3253,8 @@ tr.row-muted td { opacity: .55; }
 .pc-key { font-size: 11px; color: var(--text-low); text-transform: uppercase; letter-spacing: .04em; }
 .pc-val { min-width: 0; font-size: 12px; color: var(--text-high); overflow-wrap: anywhere; }
 .pc-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
-.pc-list > li::marker { color: var(--text-low); font-family: 'GeistMono'; font-size: 11px; }
-.pc-variant { font-family: 'GeistMono'; font-size: 12px; color: var(--accent); }
+.pc-list > li::marker { color: var(--text-low); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; }
+.pc-variant { font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--accent-text); }
 /* A big proposal folds every call below its own to a heading, so the batch reads as an
    outline. Same disclosure treatment as .close-accounts, sized for a tree row. */
 .pc-fold { display: block; }
@@ -3248,18 +3267,18 @@ tr.row-muted td { opacity: .55; }
 .pc-hint { margin-left: 8px; font-size: 11px; color: var(--text-low); }
 .pc-chevron { margin-left: auto; padding-left: 10px; color: var(--text-low); font-size: 14px; line-height: 1; transition: transform 150ms var(--ease-standard); }
 .pc-fold[open] > summary .pc-chevron { transform: rotate(180deg); }
-.pc-toggle, .pc-more { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-medium); font-family: 'GeistMono'; font-size: 10.5px; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
+.pc-toggle, .pc-more { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-medium); font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
 .pc-toggle:hover, .pc-more:hover { color: var(--text-high); border-color: var(--text-low); }
 .pc-toggle { margin-left: auto; }
 .pc-more { margin-top: 8px; color: var(--sky); }
 .pc-foot { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 11px; }
 .pc-hash { color: var(--text-medium); font-size: 10.5px; overflow-wrap: anywhere; }
 .pc-unavailable { color: var(--text-medium); font-size: 12px; }
-.pc-error { color: var(--red); font-size: 11px; margin-top: 4px; }
+.pc-error { color: var(--red-text); font-size: 11px; margin-top: 4px; }
 .pc-copy { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
-.copy-text-btn, .pc-copy-btn { display: inline-flex; align-items: center; gap: 5px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-medium); font-family: 'GeistMono'; font-size: 10.5px; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
+.copy-text-btn, .pc-copy-btn { display: inline-flex; align-items: center; gap: 5px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-medium); font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; padding: 3px 8px; border-radius: 6px; cursor: pointer; }
 .copy-text-btn:hover, .pc-copy-btn:hover { color: var(--text-high); border-color: var(--text-low); }
-.copy-text-btn.done, .pc-copy-btn.done { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+.copy-text-btn.done, .pc-copy-btn.done { color: var(--green-text); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
 .copy-text-btn svg, .pc-copy-btn svg { width: 12px; height: 12px; }
 .json-copy-row { display: flex; justify-content: flex-end; margin-bottom: 8px; }
 
@@ -3288,7 +3307,7 @@ tr.row-muted td { opacity: .55; }
 .fuse-fill { position: absolute; inset: auto 0 0 0; background: currentColor; opacity: .82; transition: height 500ms var(--ease-out-soft); }
 .fuse-pct {
   position: absolute; inset: 4px 0 auto 0; text-align: center;
-  font-family: 'GeistMono'; font-size: 9.5px; font-weight: 600; letter-spacing: 0.02em;
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 9.5px; font-weight: 600; letter-spacing: 0.02em;
   color: currentColor;
 }
 /* A gauge filled past the label zone would render the number in its own hue
@@ -3301,18 +3320,18 @@ tr.row-muted td { opacity: .55; }
 }
 .fuse-plate {
   display: block; padding: 4px 3px 5px; text-align: center; border-top: 1px solid var(--separator);
-  background: var(--panel); font-family: 'GeistMono'; font-size: 9px; letter-spacing: 0.02em;
+  background: var(--panel); font-family: 'GeistMono', ui-monospace, monospace; font-size: 9px; letter-spacing: 0.02em;
   color: var(--text-medium); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .fuse.dormant .fuse-plate { color: var(--text-lowest); }
 .fuse.locked { border-color: var(--red); box-shadow: inset 0 0 0 1px var(--red-soft); }
-.fuse.locked .fuse-plate { color: var(--red); }
+.fuse.locked .fuse-plate { color: var(--red-text); }
 @media (prefers-reduced-motion: reduce) {
   .fuse, .fuse-fill { transition: none; }
   .fuse:hover { transform: none; }
 }
 
-.sec-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 14px; font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-low); }
+.sec-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 14px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-low); }
 .sec-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .sec-legend i { width: 9px; height: 9px; border-radius: 2px; }
 .sec-legend .muted { margin-left: auto; text-transform: none; letter-spacing: 0; }
@@ -3330,7 +3349,7 @@ tr.row-muted td { opacity: .55; }
 .sec-meter-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
 .sec-meter-value { font-size: 19px; font-weight: 600; color: var(--text-high); }
 
-.sec-sub { font-family: 'GeistMono'; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-low); margin: 18px 0 9px; }
+.sec-sub { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-low); margin: 18px 0 9px; }
 .sec-pills { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
 .sec-delisted { background: var(--panel); color: var(--text-medium); border: 1px solid var(--separator); }
 .sec-delisted:hover { color: var(--text-high); border-color: var(--text-low); }
@@ -3339,10 +3358,10 @@ tr.row-muted td { opacity: .55; }
    a chart. */
 .year-bars { display: flex; align-items: flex-end; gap: 14px; height: 132px; }
 .year-bars .yb { display: flex; flex-direction: column; align-items: center; gap: 5px; flex: 1; min-width: 34px; height: 100%; }
-.year-bars .yb-v { font-family: 'GeistMono'; font-size: 11px; font-weight: 600; color: var(--text-high); }
+.year-bars .yb-v { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; font-weight: 600; color: var(--text-high); }
 .year-bars .yb-track { flex: 1; width: 100%; display: flex; align-items: flex-end; }
 .year-bars .yb-track i { display: block; width: 100%; border-radius: 4px 4px 0 0; min-height: 3px; opacity: .85; }
-.year-bars .yb-k { font-family: 'GeistMono'; font-size: 10px; color: var(--text-low); }
+.year-bars .yb-k { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; color: var(--text-low); }
 
 .sec-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 22px; align-items: start; }
 .sec-errors { display: flex; flex-direction: column; gap: 6px; }
@@ -3383,8 +3402,8 @@ tr.row-muted td { opacity: .55; }
    chain name is the identifying half, so it leads. */
 .sec-sinks { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-bottom: 10px; }
 .sec-sink { display: inline-flex; align-items: center; gap: 7px; }
-.sec-sink-chain { font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); }
-.sec-orphan { background: var(--amber-soft); color: var(--amber); margin-left: 8px; }
+.sec-sink-chain { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-medium); }
+.sec-orphan { background: var(--amber-soft); color: var(--amber-text); margin-left: 8px; }
 
 /* Overview cards are buttons that switch tabs, so they carry the card's own look
    with a button's affordance rather than a link's. */
@@ -3597,7 +3616,7 @@ tr.row-muted td { opacity: .55; }
 .wh-release { white-space: nowrap; font-size: 11.5px; color: var(--text-medium); }
 /* Past its timer the release is anybody's to complete — the one thing on this
    surface that is an invitation rather than a report. */
-.wh-release.ready { color: var(--green); }
+.wh-release.ready { color: var(--green-text); }
 .wh-digest { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; }
 .wh-digest .mono { font-size: 10.5px; }
 /* A footnote naming several sources is prose, not a caption: it reads left, at
@@ -3615,10 +3634,10 @@ tr.row-muted td { opacity: .55; }
 /* Lockboxes & peers: a chain chip, its role in the bridge, and quiet tags for
    the registered origin and for a chain that is not an L1. */
 .wh-peer-chain { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.wh-role { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-medium); }
+.wh-role { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-medium); }
 .wh-role.lockbox { color: var(--text-high); }
-.wh-tag { font-family: 'GeistMono'; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 6px; border-radius: 9999px; background: var(--panel); color: var(--text-low); }
-.wh-tag.warn { background: var(--amber-soft); color: var(--amber); cursor: help; }
+.wh-tag { font-family: 'GeistMono', ui-monospace, monospace; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 6px; border-radius: 9999px; background: var(--panel); color: var(--text-low); }
+.wh-tag.warn { background: var(--amber-soft); color: var(--amber-text); cursor: help; }
 .wh-token { display: inline-flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
 .wh-token-sym { color: var(--text-high); }
 .wh-limits { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; cursor: help; white-space: nowrap; }
@@ -3742,7 +3761,7 @@ a.rev-pill-label:hover { color: var(--accent); }
   .rev-river-foot { justify-content: center; }
 }
 
-.ur-neg, .acct-bal.subtle .amt.ur-neg { color: var(--red); }
+.ur-neg, .acct-bal.subtle .amt.ur-neg { color: var(--red-text); }
 .ur-foot-note { color: var(--text-low); }
 
 /* Reduced-motion ledger: the same incomes as calm rows. */
@@ -3857,7 +3876,7 @@ a.rev-pill-label:hover { color: var(--accent); }
   .gov-cards { grid-template-columns: 1fr; }
   .gov-title-cell { max-width: none; }
 }
-.ref-short { color: var(--red); }
+.ref-short { color: var(--red-text); }
 /* Always its own line under the token amount. As an inline span the line break
    between amount and dollar hint fell wherever each cell's width dictated, so
    half a column wrapped and half did not, and the amounts zigzagged vertically
@@ -3919,7 +3938,7 @@ a.rev-pill-label:hover { color: var(--accent); }
 .mcp-note { color: var(--text-medium); font-size: 13.5px; line-height: 1.6; max-width: 76ch; margin: -4px 0 14px; }
 /* The probe's finding when the endpoint answered something other than its
    documented 405: a claim about THIS deployment, not page furniture. */
-.mcp-warn { margin: 12px 0 0; color: var(--amber); }
+.mcp-warn { margin: 12px 0 0; color: var(--amber-text); }
 .mcp-warn code { color: inherit; }
 .mcp-pad { padding: 18px 20px; }
 @media (max-width: 560px) { .mcp-pad { padding: 16px; } }
@@ -3986,7 +4005,7 @@ a.rev-pill-label:hover { color: var(--accent); }
    which a reader who misses it will mistake for the whole reply. --text-lowest
    measured 1.66:1 on the light ground here, so it takes the head row's token. */
 .mcp-reply-cut { margin-left: auto; font-size: 10.5px; color: var(--text-low); }
-.mcp-reply-body { margin: 0; padding: 14px 15px; font-family: 'GeistMono'; font-size: 12px; line-height: 1.72; color: var(--text-medium); white-space: pre-wrap; overflow-wrap: anywhere; }
+.mcp-reply-body { margin: 0; padding: 14px 15px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; line-height: 1.72; color: var(--text-medium); white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 560px) { .mcp-reply-body { padding: 12px 13px; font-size: 11.5px; } }
 
 /* These two lists hold sentences, not values: a flex row would make every
@@ -4002,8 +4021,8 @@ a.rev-pill-label:hover { color: var(--accent); }
    reads as a caption of the tables beneath rather than a second page header. */
 .ord-kpis { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 26px; margin: 24px 0 0; padding: 12px 16px; border: 1px solid var(--separator); border-radius: 14px; background: var(--bg-elev); }
 .ord-kpi { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.ord-kpi .k { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); white-space: nowrap; }
-.ord-kpi .v { font-family: 'GeistMono'; font-size: 14px; font-weight: 600; color: var(--text-high); white-space: nowrap; }
+.ord-kpi .k { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); white-space: nowrap; }
+.ord-kpi .v { font-family: 'GeistMono', ui-monospace, monospace; font-size: 14px; font-weight: 600; color: var(--text-high); white-space: nowrap; }
 .ord-kpi .u { font-weight: 400; font-size: 11px; color: var(--text-low); }
 .ord-kpi-sep { width: 1px; align-self: stretch; background: var(--separator); }
 .ord-none { margin: 24px 0 0; color: var(--text-low); font-size: 13px; }
@@ -4020,7 +4039,7 @@ a.rev-pill-label:hover { color: var(--accent); }
 .ord-id { display: flex; align-items: center; gap: 6px; }
 .dca-kind.ord-kind-dca { color: var(--cat-trade-dca); background: color-mix(in srgb, var(--cat-trade-dca) 14%, transparent); }
 .dca-kind.ord-kind-dca-intent { color: var(--cat-intent-dca); background: color-mix(in srgb, var(--cat-intent-dca) 14%, transparent); }
-.ord-state { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap; }
+.ord-state { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; white-space: nowrap; }
 .ord-tbl .asset-flow { flex-wrap: nowrap; white-space: nowrap; }
 .ord-tbl td[data-label="Avg price"], .ord-tbl td[data-label="Trades"], .ord-tbl td[data-label="Sold"], .ord-tbl td[data-label="Received"] { white-space: nowrap; }
 .ord-reason { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4036,15 +4055,15 @@ a.rev-pill-label:hover { color: var(--accent); }
    names what it leaves out (unpriced, unpayable, APR coverage). */
 .lpt-kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px 22px; margin: 24px 0 0; padding: 12px 16px; border: 1px solid var(--separator); border-radius: 14px; background: var(--bg-elev); }
 .lpt-kpi { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.lpt-kpi .lab { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); white-space: nowrap; }
-.lpt-kpi .amt { font-family: 'GeistMono'; font-size: 15px; font-weight: 600; color: var(--text-high); white-space: nowrap; }
-.lpt-kpi .hint { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lpt-kpi .lab { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); white-space: nowrap; }
+.lpt-kpi .amt { font-family: 'GeistMono', ui-monospace, monospace; font-size: 15px; font-weight: 600; color: var(--text-high); white-space: nowrap; }
+.lpt-kpi .hint { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 720px) { .lpt-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 10px 14px; } }
 /* Section header with the Expand/Collapse all control on its line. */
 .lpt-head { justify-content: space-between; }
 .lpt-head .lpt-title { margin: 0; }
 .lpt-sub-title { margin-left: 10px; font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--text-low); }
-.lpt-toggle-all { font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); padding: 4px 10px; border: 1px solid var(--separator); border-radius: 9999px; }
+.lpt-toggle-all { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-medium); padding: 4px 10px; border: 1px solid var(--separator); border-radius: 9999px; }
 .lpt-toggle-all:hover { color: var(--text-high); border-color: var(--text-low); }
 .lpt-toggle-all:focus-visible, .lpt-tbl .exp-btn:focus-visible { outline: 2px solid var(--sky-deep); outline-offset: 2px; }
 /* Pool row: caret, icon, name over its venue badges. */
@@ -4064,9 +4083,9 @@ a.rev-pill-label:hover { color: var(--accent); }
 .lpt-empty { padding: 18px 16px; font-size: 13px; }
 .lpt-subsec { margin-top: 20px; }
 .lpt-foot { font-size: 11px; margin-top: 8px; }
-.lpt-active { color: var(--green); font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+.lpt-active { color: var(--green-text); font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
 .lpt-tbl tr.lpt-total > td { border-top: 1px solid var(--border); font-weight: 600; color: var(--text-high); }
-.lpt-total-lab { font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-medium); }
+.lpt-total-lab { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-medium); }
 @media (max-width: 720px) {
   /* The pool cell is the card's title: left-aligned, no floated label. */
   .lpt-tbl tbody td[data-label="Pool"] { text-align: left; }
@@ -4098,7 +4117,7 @@ a.rev-pill-label:hover { color: var(--accent); }
    one step per theme (CVD-checked against each surface). */
 .bw-card { --bw-sup: #3D8FE8; --bw-debt: #D2672A; margin-bottom: 14px; }
 :root[data-theme="light"] .bw-card { --bw-sup: #2C89E9; --bw-debt: #D9601C; }
-.bw-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin: 0 2px 8px; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-medium); }
+.bw-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin: 0 2px 8px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-medium); }
 .bw-title { font-size: 12px; font-weight: 600; color: var(--text-high); margin: 0; }
 .bw-head-end { margin-left: auto; display: inline-flex; align-items: center; gap: 12px; }
 .bw-hf { display: inline-flex; align-items: center; gap: 6px; }
@@ -4110,7 +4129,7 @@ a.rev-pill-label:hover { color: var(--accent); }
 .bw-closed .bw-body.mm-card { border-style: dashed; }
 .bw-risk { display: flex; align-items: center; gap: 12px; padding: 2px 0 10px; }
 .bw-risk .mm-bar-track { flex: 1 1 auto; height: 6px; }
-.bw-risk-lab { display: inline-flex; gap: 8px; flex: 0 0 auto; font-family: 'GeistMono'; font-size: 11px; color: var(--text-medium); white-space: nowrap; }
+.bw-risk-lab { display: inline-flex; gap: 8px; flex: 0 0 auto; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-medium); white-space: nowrap; }
 /* The disclosure rule below is the seam; the summary's own border would double it. */
 .bw-kpis.mm-summary { gap: 10px 26px; padding-bottom: 6px; border-bottom: 0; }
 .bw-kpis .mm-stat .v { font-size: 15px; display: inline-flex; align-items: baseline; gap: 2px; }
@@ -4119,7 +4138,7 @@ a.rev-pill-label:hover { color: var(--accent); }
 .bw-inc-part { display: inline-flex; align-items: baseline; gap: 4px; }
 .bw-inc-k { font-size: 10px; font-weight: 400; color: var(--text-low); }
 .bw-inc-sep { color: var(--text-low); font-weight: 400; }
-.bw-unpriced { font-size: 10px; font-weight: 400; color: var(--amber); }
+.bw-unpriced { font-size: 10px; font-weight: 400; color: var(--amber-text); }
 .bw-tbl-wrap { overflow-x: auto; margin: 0 -4px; border-bottom: 1px solid var(--separator); }
 .tbl.bw-tbl { min-width: 0; }
 .bw-tbl thead th { padding: 8px 8px; }
@@ -4128,7 +4147,7 @@ a.rev-pill-label:hover { color: var(--accent); }
 /* Middle, not baseline: an inline-flex box led by its icon would otherwise sit above the text beside it. */
 .bw-asset { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; }
 .bw-usd { font-size: 11px; }
-.bw-closed-note { margin-left: 8px; font-family: 'GeistMono'; font-size: 10px; vertical-align: middle; }
+.bw-closed-note { margin-left: 8px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; vertical-align: middle; }
 .bw-row-closed td { color: var(--text-medium); }
 .bw-earned { color: var(--bw-sup); }
 .bw-paid { color: var(--bw-debt); }
@@ -4154,18 +4173,18 @@ a.rev-pill-label:hover { color: var(--accent); }
 .bw-tbl-wrap:has(+ .bw-rule) { border-bottom: 0; }
 .bw-reserves { padding-bottom: 6px; }
 .bw-hist-body { padding: 8px 0 6px; }
-.bw-hist-loading { padding: 18px 0; font-family: 'GeistMono'; font-size: 12px; }
+.bw-hist-loading { padding: 18px 0; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; }
 .bw-hist { display: flex; flex-direction: column; gap: 10px; }
 .bw-chart { margin: 0; }
 .bw-chart + .bw-chart { padding-top: 8px; border-top: 1px solid var(--separator); }
 .bw-chart-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 2px; }
 .bw-chart-head .bal-legend { margin: 0 !important; gap: 12px; font-size: 10.5px; }
 .bw-chart-title { font-size: 12px; font-weight: 500; color: var(--text-high); }
-.bw-chart-sub { font-family: 'GeistMono'; font-size: 10.5px; color: var(--text-low); }
+.bw-chart-sub { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; color: var(--text-low); }
 .bw-chart-note { margin: 2px 0 0; font-size: 11px; color: var(--text-low); }
 /* The history chart's bottom strip is the liquidation zone, where the markers sit: keep the zoom reset out of it. */
 .bw-hist .chart-zoom-reset { bottom: auto; top: 4px; }
-.bw-card-loading { padding: 16px; font-family: 'GeistMono'; font-size: 12px; }
+.bw-card-loading { padding: 16px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; }
 @media (prefers-reduced-motion: reduce) { .bw-rule::before, .bw-rule::after, .bw-rule-pill, .bw-rule-chev { transition: none; } }
 @media (max-width: 720px) {
   .bw-head-end { margin-left: 0; width: 100%; justify-content: space-between; }
@@ -4201,7 +4220,7 @@ a.rev-pill-label:hover { color: var(--accent); }
 .yh-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-low); margin-bottom: 4px; }
 .yh-group { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-low); margin-top: 6px; }
 .yh-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 0; }
-.yh-row .mono { font-family: 'GeistMono'; color: var(--text-high); white-space: nowrap; }
+.yh-row .mono { font-family: 'GeistMono', ui-monospace, monospace; color: var(--text-high); white-space: nowrap; }
 .yh-lab { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .yh-note { color: var(--text-low); font-size: 11px; }
 .yh-total { margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--separator); color: var(--text-high); font-weight: 500; }
@@ -4313,7 +4332,7 @@ a.orc-asset-link:hover { text-decoration: underline; }
 .orc-consumers { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; }
 a.orc-consumer { display: inline-flex; align-items: center; gap: 4px; color: inherit; text-decoration: none; font-size: 12px; }
 a.orc-consumer:hover .orc-asset span:last-child { text-decoration: underline; }
-.orc-consumer .muted { font-family: 'GeistMono'; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+.orc-consumer .muted { font-family: 'GeistMono', ui-monospace, monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
 .orc-pool { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .orc-feed { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 .orc-feed-name { display: inline-flex; flex-direction: column; min-width: 0; }
@@ -4329,16 +4348,16 @@ a.orc-consumer:hover .orc-asset span:last-child { text-decoration: underline; }
 .orc-pairs-tbl thead th { padding-top: 8px; padding-bottom: 8px; }
 .orc-pairs-tbl tbody td { padding-top: 8px; padding-bottom: 8px; font-size: 12.5px; }
 .orc-stale td:first-child { box-shadow: inset 2px 0 0 var(--amber); }
-.orc-sub { padding: 8px 2px 0; font-family: 'GeistMono'; font-size: 11px; }
+.orc-sub { padding: 8px 2px 0; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; }
 .orc-foot p { margin: 0 0 8px; }
 .orc-foot { max-width: 86ch; }
 .orc-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .orc-title .sub { display: inline-flex; align-items: center; gap: 6px; }
 .orc-detail { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 14px; }
 .orc-detail-row { display: grid; grid-template-columns: 130px 1fr; gap: 12px; align-items: baseline; font-size: 13px; min-width: 0; }
-.orc-detail-k { color: var(--text-low); font-family: 'GeistMono'; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+.orc-detail-k { color: var(--text-low); font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; }
 .orc-detail-v { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; min-width: 0; overflow-wrap: anywhere; }
-.orc-period { display: inline-flex; align-items: center; gap: 5px; font-family: 'GeistMono'; font-size: 12px; }
+.orc-period { display: inline-flex; align-items: center; gap: 5px; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; }
 @media (max-width: 720px) {
   .orc-detail-row { grid-template-columns: 1fr; gap: 3px; }
   .orc-bars-cell { width: auto; }
@@ -4380,7 +4399,7 @@ html.rev-fs-lock #view .wrap { animation: none; }
   border: 0; border-radius: 0; background: transparent; }
 .rev-duo-fs .rev-river { flex: 1; min-height: 0; height: auto; }
 .rev-duo-fs .rev-band-label { display: block; position: absolute; top: 12px; left: 16px; z-index: 5; pointer-events: none;
-  font-family: 'GeistMono'; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
+  font-family: 'GeistMono', ui-monospace, monospace; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-low); }
 .rev-duo-fs .rev-counter { top: 34px; left: 14px; transform: none; padding: 6px 10px; border-radius: 10px; }
 .rev-duo-fs .rev-counter.pulse-a { animation: revPulseFs 520ms var(--ease-out-soft); }
 .rev-duo-fs .rev-counter.pulse-b { animation: revPulseFsB 520ms var(--ease-out-soft); }
@@ -4418,16 +4437,16 @@ html.rev-fs-lock #view .wrap { animation: none; }
 /* ===== Intents page (pages/Intents.tsx) ===== */
 .ice-lede { color: var(--text-medium); font-size: 14px; line-height: 1.6; max-width: 78ch; margin: -6px 0 8px; }
 .ice-gloss { margin: 0 0 22px; font-size: 13px; color: var(--text-medium); }
-.ice-gloss summary { cursor: pointer; width: fit-content; font-family: 'GeistMono'; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
+.ice-gloss summary { cursor: pointer; width: fit-content; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-low); }
 .ice-gloss summary:hover, .ice-gloss summary:focus-visible { color: var(--text-high); }
 .ice-gloss dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; margin: 12px 0 0; max-width: 84ch; line-height: 1.5; }
 .ice-gloss dt { font-weight: 600; color: var(--text-high); }
 .ice-gloss dd { margin: 0; }
-.ice-asof { font-family: 'GeistMono'; font-size: 11px; color: var(--text-low); margin: -16px 0 18px; }
+.ice-asof { font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--text-low); margin: -16px 0 18px; }
 /* Top traders and top pairs sit side by side; an account pill and a pair of asset
    chips are not the same height, so the rows are pinned to one. */
 @media (min-width: 721px) { .ice-rank tbody td { height: 52px; } }
-.ice-more { background: none; border: 0; padding: 0; font: inherit; font-family: 'GeistMono'; font-size: 12px; color: var(--sky); cursor: pointer; }
+.ice-more { background: none; border: 0; padding: 0; font: inherit; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; color: var(--sky); cursor: pointer; }
 .ice-more:hover, .ice-more:focus-visible { text-decoration: underline; text-underline-offset: 2px; }
 /* Phones: the stat cards pair up (the shared 160px floor leaves one per row inside
    a padded card), and the charts' axis type is sized in viewBox units so it lands
@@ -4448,7 +4467,7 @@ html.rev-fs-lock #view .wrap { animation: none; }
 .juicer-steps { list-style: none; padding: 0; margin: 4px 0 10px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; max-width: 1100px; counter-reset: jstep; }
 .juicer-steps li { counter-increment: jstep; border: 1px solid var(--separator); border-radius: 12px; padding: 12px 14px; background: var(--bg-elev); display: flex; flex-direction: column; gap: 4px; font-size: 13px; line-height: 1.5; color: var(--text-medium); }
 .juicer-steps li b { color: var(--text-high); font-weight: 600; font-size: 14px; }
-.juicer-steps li b::before { content: counter(jstep) '  '; font-family: 'GeistMono'; font-size: 11px; color: var(--cat-juicer); margin-right: 4px; }
+.juicer-steps li b::before { content: counter(jstep) '  '; font-family: 'GeistMono', ui-monospace, monospace; font-size: 11px; color: var(--cat-juicer); margin-right: 4px; }
 .juicer-risk { font-size: 12px; color: var(--text-low); line-height: 1.55; max-width: 100ch; margin: 0 0 10px; }
 .juicer-page .badge { vertical-align: 1px; }
 @media (max-width: 860px) {
@@ -4479,7 +4498,7 @@ html.rev-fs-lock #view .wrap { animation: none; }
 .acct-meta h1.tag { margin: 0; }
 /* Read by assistive tech, not shown: an outline heading over a self-evident card. */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-.bond-round-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 26px 0 0; font-family: 'GeistMono'; font-size: 12px; }
+.bond-round-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 26px 0 0; font-family: 'GeistMono', ui-monospace, monospace; font-size: 12px; }
 .bond-round-picker .seg-bar { flex: 0 1 auto; }
 .bonds-page .bond-round[id] { scroll-margin-top: 84px; }
 /* LBP-sold bond families (/hdx-bonds): one card per pool's sale, its price chart and

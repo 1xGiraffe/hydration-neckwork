@@ -612,7 +612,7 @@ function TripsSection({ d, now }: { d: SecurityDashboard; now: number }) {
               <tr key={r.extrinsicId}>
                 <td data-label="When"><Link className="hash" to={paths.extrinsic(r.extrinsicId)}><Ago ts={r.blockTimestamp} now={now} /></Link></td>
                 <td data-label="Call" className="mono sec-wrap">{r.callName}</td>
-                <td data-label="Rejected by" className="mono" style={{ color: 'var(--red)' }}>{r.errorName}</td>
+                <td data-label="Rejected by" className="mono" style={{ color: 'var(--red-text)' }}>{r.errorName}</td>
                 <td data-label="Account" className={r.account ? undefined : 'cell-empty'}>{r.account ? <AddrPill account={r.account} /> : <Dash />}</td>
               </tr>
             ))}
@@ -921,7 +921,7 @@ function GuardianSection({ d, now }: { d: SecurityDashboard; now: number }) {
                 <td data-label="Committee" className="mono">
                   {c.committee == null
                     ? <span className="muted">no</span>
-                    : <span style={{ color: 'var(--amber)' }}>{c.committee === 'super' ? tc.superMajority : tc.majority} of {tc.size || '?'}</span>}
+                    : <span style={{ color: 'var(--amber-text)' }}>{c.committee === 'super' ? tc.superMajority : tc.majority} of {tc.size || '?'}</span>}
                 </td>
                 <td data-label="Other origins" className="muted">{c.others}</td>
                 <td data-label="Speed" className="r mono muted">{c.speed}</td>

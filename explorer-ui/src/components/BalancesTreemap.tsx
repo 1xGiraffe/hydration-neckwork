@@ -248,7 +248,7 @@ function FocusedDetail({ balance, hist, allHistory, refineWindow }: {
         ? <AssetBalanceChart selected={hist} all={allHistory} refineWindow={refineWindow} />
         : <div className="tm-hist">
             <div className="tm-hist-head"><span className="tm-metric-label">Balance history</span></div>
-            <div className="muted" style={{ padding: '16px 0', fontFamily: 'GeistMono', fontSize: 12 }}>No balance history indexed.</div>
+            <div className="muted" style={{ padding: '16px 0', fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12 }}>No balance history indexed.</div>
           </div>}
     </div>
   )

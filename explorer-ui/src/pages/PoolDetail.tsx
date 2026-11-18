@@ -120,7 +120,7 @@ function PoolBody({ d }: { d: PoolDetailData }) {
   return (
     <>
       <div className="detail-card"><div className="dl">
-        <div className="dt">Venue</div><div className="dd">{d.kind === 'stableswap' ? 'Stableswap' : 'XYK'}{d.destroyed && <span className="badge" style={{ marginLeft: 8, background: 'color-mix(in srgb, var(--red) 15%, transparent)', color: 'var(--red)' }}>Destroyed</span>}</div>
+        <div className="dt">Venue</div><div className="dd">{d.kind === 'stableswap' ? 'Stableswap' : 'XYK'}{d.destroyed && <span className="badge" style={{ marginLeft: 8, background: 'color-mix(in srgb, var(--red) 15%, transparent)', color: 'var(--red-text)' }}>Destroyed</span>}</div>
         <div className="dt">Pool account</div><div className="dd"><AddrPill account={d.account} /></div>
         <div className="dt">TVL</div><div className="dd mono">{d.tvlUsd != null ? <Usd v={d.tvlUsd} /> : <Dash />}</div>
         <div className="dt">Trade fee</div><div className="dd mono">{d.feePermill != null ? fmtPermill(d.feePermill) : <Dash />}</div>

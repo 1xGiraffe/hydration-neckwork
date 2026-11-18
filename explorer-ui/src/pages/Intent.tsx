@@ -346,8 +346,8 @@ export function Intent({ intentId }: { intentId: string }) {
                       <td className="r mono" data-label="Fee"><FeeAmount hdxRaw={c.fees} /></td>
                       <td data-label="Result">{c.executed
                         ? <>{c.executed.result === 'ok'
-                          ? <span style={{ color: 'var(--green)' }}>executed</span>
-                          : <span style={{ color: 'var(--red)' }}>failed{c.executed.error && <span className="muted"> · {c.executed.error}</span>}</span>}
+                          ? <span style={{ color: 'var(--green-text)' }}>executed</span>
+                          : <span style={{ color: 'var(--red-text)' }}>failed{c.executed.error && <span className="muted"> · {c.executed.error}</span>}</span>}
                           <span className="muted mono"> · block <Link to={paths.block(c.executed.block)} className="hash">{F.int(c.executed.block)}</Link></span></>
                         : <span className="muted">queued — not executed yet</span>}</td>
                     </tr>

@@ -350,7 +350,7 @@ function FlowsSection({ d }: { d: HdxDashboard }) {
       <SecTitle title="Buys vs sells" subtitle="last 60 days" />
       <div className="hdx-flow-grid">
         <div className="pf-card" style={{ marginBottom: 0 }}>
-          <ChartLegend items={[{ label: 'Buys', color: 'var(--green)' }, { label: 'Sells', color: 'var(--red)' }]} />
+          <ChartLegend items={[{ label: 'Buys', color: 'var(--green-text)' }, { label: 'Sells', color: 'var(--red-text)' }]} />
           <MirroredBarChart data={bars} h={190} xTicks={ticks} zoomKey="zflow" refine={refineFlows} />
           <div className="bal-xaxis" style={{ justifyContent: 'center' }}><span>avg buys <Num v={avgBuy} />/day · avg sells <Num v={avgSell} />/day</span></div>
         </div>
@@ -527,7 +527,7 @@ function CostBasisSection({ s }: { s: HdxStructure }) {
   const px = lastNum(t.marketPrice), rp = lastNum(t.realizedPrice)
   const mvrv = px != null && rp != null && rp > 0 ? px / rp : null
   const buyback: AreaSeries[] = [
-    { key: 'buyback', label: 'Bought back', color: 'var(--green)', values: t.buybackHdx },
+    { key: 'buyback', label: 'Bought back', color: 'var(--green-text)', values: t.buybackHdx },
   ]
   const whaleLine: AreaSeries[] = [
     { key: 'top100', label: 'Top-100 share', color: cohortColor('whale'), values: t.top100Share },
@@ -673,7 +673,7 @@ function ChurnSection({ churn }: { churn: NonNullable<HdxDashboard['churn']> }) 
     <>
       <SecTitle title="New vs exited holders" subtitle="weekly" />
       <div className="pf-card">
-        <ChartLegend items={[{ label: 'New', color: 'var(--green)' }, { label: 'Exited', color: 'var(--red)' }]} />
+        <ChartLegend items={[{ label: 'New', color: 'var(--green-text)' }, { label: 'Exited', color: 'var(--red-text)' }]} />
         <MirroredBarChart data={bars} h={160} xTicks={ticks} zoomKey="zchurn" refine={refineChurn} />
         <div className="hdx-note">Drag across this chart or the buys and sells above to zoom; a few days refine to hourly bars.</div>
       </div>

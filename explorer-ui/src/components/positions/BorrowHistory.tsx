@@ -79,7 +79,7 @@ const HF_SCALE: SecondaryScale = { keys: ['hf'], fmt: hfFmt, anchor: 1, max: HF_
 
 // Under $0: the liquidation zone. An HF below 1 dips into it on the same scale,
 // and the liquidations sit in it rather than over the lines.
-const LIQ_ZONE: FloorZone = { frac: 0.13, color: 'var(--red)', label: 'Liquidation' }
+const LIQ_ZONE: FloorZone = { frac: 0.13, color: 'var(--red-text)', label: 'Liquidation' }
 
 /** How many zoom windows a card keeps fetched series for. */
 const WINDOW_CACHE = 16

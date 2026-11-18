@@ -306,7 +306,7 @@ function TagPanel({ listId, tag, isOwner }: { listId: string; tag: ListTagDetail
             chips={
               <div className="tag-member-chips">
                 {!orderedMembers.length
-                  ? <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>No accounts yet</div>
+                  ? <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12 }}>No accounts yet</div>
                   : orderedMembers.map(m => (
                     <span
                       key={m.accountId}
@@ -333,7 +333,7 @@ function TagPanel({ listId, tag, isOwner }: { listId: string; tag: ListTagDetail
         ) : (
           <div className="tag-member-chips">
             {!tag.members.length
-              ? <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>No accounts yet</div>
+              ? <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12 }}>No accounts yet</div>
               : tag.members.map(m => (
                 <span key={m.accountId} className="acct-chip tag-member-chip">
                   <AddrPill account={m} noTag noCopy />
@@ -368,7 +368,7 @@ function ShareChips({ shares, onRevoke, revoking }: {
   onRevoke?: (address: string) => void
   revoking?: boolean
 }) {
-  if (!shares.length) return <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>No subscribers yet</div>
+  if (!shares.length) return <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12 }}>No subscribers yet</div>
   return (
     <div className="tag-member-chips">
       {shares.map(s => (
@@ -559,7 +559,7 @@ export function ListDetail({ listId }: { listId: string }) {
                     action (the account header's "Edit profile", the alerts list's
                     "+ New alert") — not trailing under the last tag panel. */}
                 <div className="ext-link-row"><button type="button" className="ext-link" style={{ cursor: 'pointer' }} onClick={() => setNewTagOpen(true)}>+ New tag</button></div>
-                {!data.tags.length && <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12, marginBottom: 16 }}>No tags yet.</div>}
+                {!data.tags.length && <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12, marginBottom: 16 }}>No tags yet.</div>}
                 {orderedTags.map(tag => <TagPanel key={tag.tagId} listId={listId} tag={tag} isOwner={isOwner} />)}
               </>
             )}

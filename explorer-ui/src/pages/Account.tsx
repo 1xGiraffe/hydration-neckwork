@@ -159,7 +159,7 @@ export function Account({ address }: { address: string }) {
                   <h1 className="tag acct-name">{mod
                     ? <span style={{ fontSize: 18 }}>{mod}</span>
                     : data.profile?.name
-                      ? <span style={{ fontSize: 18, fontStyle: 'italic', color: 'var(--amber)' }}>{data.profile.name}</span>
+                      ? <span style={{ fontSize: 18, fontStyle: 'italic', color: 'var(--amber-text)' }}>{data.profile.name}</span>
                       : data.identity?.display
                         ? <span style={{ fontSize: 18 }}>{data.identity.display}{data.identity.verified && <span className="id-verified" title="Verified identity" style={{ marginLeft: 5 }}>✓</span>}</span>
                         : data.contract?.verification?.name
@@ -180,7 +180,7 @@ export function Account({ address }: { address: string }) {
                   </div>
                   {associations.length > 0 && (
                     <div className="row gap6" style={{ marginTop: 2, flexWrap: 'wrap', alignItems: 'center' }}>
-                      <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>Tags</span>
+                      <span className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 11 }}>Tags</span>
                       {associations.map(a => <UserTagPill key={a.listId ?? `system-${a.id}`} tag={a} address={data.evmAddress ?? data.ss58Polkadot} noCopy noMemberSuffix />)}
                     </div>
                   )}

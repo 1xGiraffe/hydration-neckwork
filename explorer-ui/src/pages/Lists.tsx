@@ -204,7 +204,7 @@ function YourLists({ me }: { me: MeResponse }) {
         </tbody>
       </table></div>
       {orderError && <div className="dialog-error" style={{ marginBottom: 16 }}>{orderError}</div>}
-      <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11, marginBottom: 16 }}>Higher lists win when an account is tagged in several. Drag a row's handle, or focus it and press ArrowUp/ArrowDown, to reorder.</div>
+      <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 11, marginBottom: 16 }}>Higher lists win when an account is tagged in several. Drag a row's handle, or focus it and press ArrowUp/ArrowDown, to reorder.</div>
     </>
   )
 }

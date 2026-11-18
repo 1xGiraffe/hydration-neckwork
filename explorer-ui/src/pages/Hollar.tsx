@@ -176,7 +176,7 @@ function ArbitrageChart({ d, now }: { d: HollarDashboard; now: number }) {
     <>
       <SecTitle title="Arbitrage" subtitle="last 60 days" />
       <div className="pf-card">
-        <ChartLegend items={[{ label: 'Bought back & burned', color: 'var(--green)' }, { label: 'Minted & sold', color: 'var(--amber)' }]} />
+        <ChartLegend items={[{ label: 'Bought back & burned', color: 'var(--green-text)' }, { label: 'Minted & sold', color: 'var(--amber-text)' }]} />
         <MirroredBarChart data={bars} xTicks={ticks} upColor="var(--green)" downColor="var(--amber)" zoomKey="zarb" refine={refineArbitrage} />
         <div className="hdx-note">
           {lastArb
@@ -213,7 +213,7 @@ function TradesChart({ d }: { d: HollarDashboard }) {
     <>
       <SecTitle title="HSM trades" subtitle="last 60 days" />
       <div className="pf-card">
-        <ChartLegend items={[{ label: 'Bought (minted)', color: 'var(--green)' }, { label: 'Sold (burned)', color: 'var(--red)' }]} />
+        <ChartLegend items={[{ label: 'Bought (minted)', color: 'var(--green-text)' }, { label: 'Sold (burned)', color: 'var(--red-text)' }]} />
         <MirroredBarChart data={bars} xTicks={ticks} zoomKey="ztrades" refine={refineTrades} />
         <div className="hdx-note">Drag across either chart to zoom into a window; a few days refine to hourly bars.</div>
       </div>
@@ -425,7 +425,7 @@ function BorrowingSection({ t }: { t: HollarTrends }) {
     { key: 'borrowers', label: 'Borrowers', color: '#3f88dd', values: t.borrowers.map(positive) },
   ]
   const revenueSeries: AreaSeries[] = [
-    { key: 'revenueCumUsd', label: 'Cumulative interest', color: 'var(--green)', values: t.revenueCumUsd.map(positive) },
+    { key: 'revenueCumUsd', label: 'Cumulative interest', color: 'var(--green-text)', values: t.revenueCumUsd.map(positive) },
   ]
   const debtNow = lastNum(t.debt) ?? 0
   const borrowedNow = minted ? lastNum(minted.borrowed) : null
