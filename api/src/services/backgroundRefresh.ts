@@ -19,12 +19,14 @@ import { refreshTreasurySpends } from './governanceTreasury.ts'
 // (chain-state enumeration and EVM eth_call). Previously each ran on its own
 // independent setInterval (15 / 10 / 10 min), so their phases could align and
 // stack concurrent RPC bursts on the one archive node. Here they share a single
-// timer and run SEQUENTIALLY, so node-full only ever sees one refresh lane, and
-// the cadence is fast enough that a just-changed balance (an unstake, a claimed
-// vesting tranche, a vote lock removed) shows within a minute.
+// timer and run SEQUENTIALLY, so node-full only ever sees one refresh lane. The
+// HDX lock breakdown (an unstake, a claimed vesting tranche, a vote lock removed)
+// is re-read every five minutes: each pass re-reads every account's locks (~45k
+// storage reads), and the breakdown it feeds — the HDX dashboard and an account's
+// lock components — is a five-minute-old view at worst.
 //
 // Measured per-cycle cost against node-full (same-host RPC):
-//   hdx-locks      ~2.2s enumeration + ~0.8s ClickHouse write   → every tick (60s)
+//   hdx-locks      ~2.2s enumeration + ~0.8s ClickHouse write   → every 5th tick (300s)
 //   proxy-multisig ~15ms enumeration + ~30ms reconstruction     → every tick (60s)
 //   erc20-wallets  ClickHouse only: one delta-watermark read (~60ms), the
 //                    FINAL delta sums (~0.3s) only for a contract whose
@@ -76,7 +78,7 @@ import { refreshTreasurySpends } from './governanceTreasury.ts'
 //                    sources with no rounds; codes are kept an hour)
 //                                                              → every 5th tick (300s)
 // Worst case (every thirtieth minute — the cadences' common multiple — all of
-// them run back to back) ≈ 20–32s of node-full time in that 60s window, ≈ 7s in
+// them run back to back) ≈ 20–32s of node-full time in that 60s window, ≈ 5s in
 // the other windows — a low duty cycle, comfortably below the one backfill
 // worker the node sustains before live ingestion lags.
 // The Wormhole cycle also reaches OFF-chain endpoints (origin RPCs,
@@ -131,7 +133,7 @@ export interface RefreshTask {
 const BASE_TICK_MS = 60_000
 
 const TASKS: RefreshTask[] = [
-  { name: 'hdx-locks', everyTicks: 1, run: refreshHdxSnapshot },
+  { name: 'hdx-locks', everyTicks: 5, run: refreshHdxSnapshot },
   // The /hdx history's weekly closes (hdxWeeklyCloses.ts): ClickHouse only, two small
   // reads a tick, and a ~5 CPU-s rebuild on the long-op client when a week has closed
   // or a week before the generation's cut took an insert.
