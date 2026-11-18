@@ -17,6 +17,7 @@ const CAUSE_LABEL: Record<string, string> = {
   'owner-unknown': 'Positions whose owner no indexed record names',
   rounding: 'Integer rounding remainders',
   'gamma-vault-fee': 'Gamma vault fee to the Treasury',
+  'juicer-fee': "Juicer protocol fee — the protocol's share of the loop's yield (its fee rate per vault)",
   direct: "Protocol accounts' own holdings",
 }
 
@@ -26,6 +27,8 @@ const CUSTODY_LABEL: Record<string, string> = {
   omnipool: 'Omnipool custody remainder — what no position’s share covers',
   'gamma-vault': 'Gamma vault custody remainder — what no vault share covers',
   lbp: 'LBP custody remainder',
+  'juicer-remainder': 'Juicer vault income no share holder claims (the burn-address bootstrap shares, the yield fund, exits whose unwind has started)',
+  'juicer-loop-unsplit': 'Juicer loop income in hours its split between several vaults is not known',
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -33,6 +36,8 @@ const KIND_LABEL: Record<string, string> = {
   stableswap: 'stableswap pool',
   xyk: 'XYK pool',
   'gamma-vault': 'Gamma vault',
+  juicer: 'Juicer vault',
+  'juicer-loop': 'Juicer loop',
   custody: 'custody',
 }
 
@@ -46,6 +51,7 @@ const PATH_SHORT: Record<string, string> = {
   'bridge-custody': 'bridge custody',
   'incentives-unclaimable': 'unclaimable custody rewards',
   'custody:atoken-remainder': 'aToken interest remainder',
+  'juicer-fee': 'Juicer protocol fee',
 }
 
 // `external-rate:<source>`: a token's accrual before its first on-chain rate, read from its issuer's published

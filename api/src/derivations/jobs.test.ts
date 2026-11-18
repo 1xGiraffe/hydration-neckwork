@@ -744,8 +744,8 @@ describe('revenueEventsInsertSql', () => {
   it('covers every eventful stream except the two the payer split is computed for', () => {
     expect(REVENUE_EVENT_STREAMS_INSERTED).toEqual([
       'omnipool_asset_fee', 'omnipool_protocol_fee', 'liquidation_penalty',
-      'pepl_liquidation_profit', 'hsm_revenue', 'ice_matched_fee', 'uniswap_v3_fee', 'network_fee',
-      'xcm_execution_fee',
+      'pepl_liquidation_profit', 'hsm_revenue', 'ice_matched_fee', 'uniswap_v3_fee', 'juicer_protocol_fee',
+      'network_fee', 'xcm_execution_fee',
     ])
     expect(REVENUE_EVENT_STREAMS_INSERTED).not.toContain('asset_reserve')
     expect(REVENUE_EVENT_STREAMS_INSERTED).not.toContain('hollar_borrow')

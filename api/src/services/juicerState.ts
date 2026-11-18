@@ -36,6 +36,7 @@ const SEL = {
   activeSourceRemaining: '0x5033c9ef', pendingSourceAccounting: '0xd0e96d76',
   targetHf: '0x1c823eff', getConfiguration: '0xc44b11f7',
   addressesProvider: '0x0542975c', getPriceOracle: '0xfca513a8', getAssetPrice: '0xb3596f07',
+  sharesOf: '0xf5eb42dc', totalShares: '0x3a98ef39',
 }
 
 export interface JuicerAccountData {
@@ -85,6 +86,9 @@ export interface JuicerLoopState {
   hollarBorrowRateRay: string | null
   loopDiscountBps: number | null
   primeLiquidationThresholdBps: number
+  /** Each vault's units of the loop (SubLoop.sharesOf) and the loop's total, at the pin. */
+  sharesOf: Map<string, bigint>
+  totalShares: bigint
 }
 export interface JuicerSnapshot {
   block: number
@@ -192,10 +196,19 @@ export async function readJuicerSnapshot(ch: ClickHouseClient): Promise<JuicerSn
   const [accounts, rate, loopReads] = await Promise.all([
     loadAccountData(ch, [...JUICER_VAULTS.map(v => v.vault), JUICER_SUBLOOP], pin.block),
     loadReserveBorrowRate(ch, JUICER_POOL, HOLLAR_CONTRACT, pin.block),
-    call([{ to: JUICER_SUBLOOP, data: SEL.targetHf }, { to: JUICER_POOL, data: SEL.getConfiguration + arg(PRIME_RESERVE) }]),
+    call([
+      { to: JUICER_SUBLOOP, data: SEL.targetHf }, { to: JUICER_POOL, data: SEL.getConfiguration + arg(PRIME_RESERVE) },
+      { to: JUICER_SUBLOOP, data: SEL.totalShares }, ...JUICER_VAULTS.map(v => ({ to: JUICER_SUBLOOP, data: SEL.sharesOf + arg(v.vault) })),
+    ]),
   ])
-  const targetHf = word(loopReads[0], 0), primeConfig = word(loopReads[1], 0)
-  if (targetHf == null || primeConfig == null) return null
+  const targetHf = word(loopReads[0], 0), primeConfig = word(loopReads[1], 0), totalShares = word(loopReads[2], 0)
+  if (targetHf == null || primeConfig == null || totalShares == null) return null
+  const sharesOf = new Map<string, bigint>()
+  for (const [i, v] of JUICER_VAULTS.entries()) {
+    const shares = word(loopReads[3 + i], 0)
+    if (shares == null) return null
+    sharesOf.set(v.vault, shares)
+  }
   const vaults: JuicerVaultState[] = []
   for (const v of JUICER_VAULTS) {
     const state = await readVault(ch, call, v, pin.block, events, accounts)
@@ -209,12 +222,21 @@ export async function readJuicerSnapshot(ch: ClickHouseClient): Promise<JuicerSn
       subLoop: JUICER_SUBLOOP, targetHf: targetHf.toString(), account: accounts.get(JUICER_SUBLOOP) ?? null,
       emergencyPaused: settings.emergencyPaused, hollarBorrowRateRay: rate, loopDiscountBps: settings.loopDiscountBps,
       primeLiquidationThresholdBps: Number((primeConfig >> 16n) & 0xffffn),
+      sharesOf, totalShares,
     },
   }
 }
 
-/** The exchange rates the other processes price the share token by (juicer_vault_state, 018_juicer.sql). */
+/**
+ * The exchange rates the other processes price the share token by (juicer_vault_state, 018_juicer.sql), and
+ * each vault's units of the shared loop at the pin (juicer_loop_shares), the split User Revenue passes the
+ * loop's income through by once several vaults fund it.
+ */
 async function publishVaultState(ch: ClickHouseClient, s: JuicerSnapshot): Promise<void> {
+  await ch.insert({
+    table: 'price_data.juicer_loop_shares', format: 'JSONEachRow',
+    values: [...s.loop.sharesOf].map(([vault, shares]) => ({ vault, block_height: s.block, shares: shares.toString(), total_shares: s.loop.totalShares.toString() })),
+  })
   await ch.insert({
     table: 'price_data.juicer_vault_state', format: 'JSONEachRow',
     values: s.vaults.map(v => {

@@ -39,3 +39,34 @@ CREATE TABLE IF NOT EXISTS price_data.juicer_vault_state (`vault` String, `share
 -- share's rate too — the column every strategy rate table carries, so the price loader
 -- (services/strategySharePrice.ts) reads them all one way.
 ALTER TABLE price_data.juicer_vault_state ADD COLUMN IF NOT EXISTS `wrapper_asset_ids` Array(UInt32) DEFAULT [] AFTER `collateral_asset_id`;
+
+-- The fee controller's exit-yield fee, into the same table: SourceFeeAccrued (vault,
+-- asset, fee), the HOLLAR the Main ledger pays it from an exit's realized source yield
+-- (JUICER_FEE_TOPICS in juicer.ts). The harvest fee (ProtocolFeeAccrued) is the first
+-- view's; this one is a view of its own so neither existing definition changes under a
+-- deployment, and its history comes from raw through its own DATA_UPGRADES entry. Both
+-- feed the juicer_protocol_fee revenue stream (services/revenueStreams.ts).
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.juicer_fee_logs_mv TO price_data.juicer_logs (`block_height` UInt32, `event_index` UInt32, `extrinsic_index` Nullable(UInt32), `block_timestamp` DateTime, `contract_address` String, `topic0` String, `topics` Array(String), `data` String, `party` String, `ingested_at` DateTime) AS SELECT block_height, event_index, extrinsic_index, block_timestamp, lower(raw_evm_logs.contract_address) AS contract_address, ifNull(raw_evm_logs.topic0, '') AS topic0, topics, data, '' AS party, ingested_at FROM price_data.raw_evm_logs WHERE raw_evm_logs.topic0 IN ('0xcf657569f70a271ef14e43654679450e1cee0cfd668599413511f1b4cd14331e') AND lower(raw_evm_logs.contract_address) IN ('0x9e9e273df28b4f54a4b7227517fe56d7ffa24843');
+
+-- The juicer_protocol_fee revenue stream's watermark: the hours holding a fee accrual,
+-- with the asset each is paid in (a registry asset's EVM alias, HOLLAR by its contract),
+-- so the revenue job folds them (revenueEventsStaleHoursSql) and fingerprints their
+-- valuation. Declared here, beside juicer_logs, because the table must exist first.
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.revenue_hour_watermarks_juicer_fees_mv TO price_data.revenue_hour_watermarks (`hour` DateTime, `kind` String, `src_ingest` DateTime, `src_minb` UInt32, `src_maxb` UInt32, `assets` Array(UInt32), `v3` UInt8) AS SELECT toStartOfHour(block_timestamp) AS hour, 'events' AS kind, max(ingested_at) AS src_ingest, min(block_height) AS src_minb, max(block_height) AS src_maxb, groupUniqArray(if(startsWith(lower(concat('0x', substring(topics[3], 27, 40))), '0x0000000000000000000000000000000100'), reinterpretAsUInt32(reverse(unhex(right(lower(concat('0x', substring(topics[3], 27, 40))), 8)))), transform(lower(concat('0x', substring(topics[3], 27, 40))), ['0x531a654d1696ed52e7275a8cede955e82620f99a'], [toUInt32(222)], toUInt32(0)))) AS assets, toUInt8(0) AS v3 FROM price_data.juicer_logs WHERE (contract_address = '0x9e9e273df28b4f54a4b7227517fe56d7ffa24843') AND (topic0 IN ('0xef307ecc2880448842675e7d171caa0bcc3474fd35bb18cad19f4ff36e00d0d1', '0xcf657569f70a271ef14e43654679450e1cee0cfd668599413511f1b4cd14331e')) GROUP BY hour;
+
+-- Each vault's units of the shared SubLoop (SubLoop.sharesOf / totalShares), as the
+-- juicer-state refresher (api/src/services/juicerState.ts) read them at its pinned block,
+-- one row per cycle. A CURRENT-STATE refresher snapshot kept as history (AGENTS.md,
+-- Schema and derivations): a harvest burns a vault's loop units with no event naming
+-- the vault, so no log restates the split and it is not reproducible from raw. User
+-- Revenue reads it only while more than one vault funds the loop (one vault owns all of
+-- it by construction); an hour no row reaches books the loop's income unattributed.
+CREATE TABLE IF NOT EXISTS price_data.juicer_loop_shares (`vault` String, `block_height` UInt32, `shares` UInt256, `total_shares` UInt256, `computed_at` DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(computed_at) ORDER BY (vault, block_height) SETTINGS index_granularity = 1024;
+
+-- User Revenue's watermark for the Juicer logs its custody pass-through weighs by
+-- (services/userRevenueJuicer.ts): a withdrawal request opening or its unwind starting
+-- (who earns a vault's income), a vault funding the loop (the loop's split) and a fee
+-- rate change (the protocol's share of the loop). Kind 'state': cumulative exposure, so
+-- staleness cascades forward. The share token's own transfers are already marked
+-- through erc20_transfer_deltas.
+CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.user_revenue_hour_watermarks_juicer_mv TO price_data.user_revenue_hour_watermarks (`hour` DateTime, `kind` String, `src_ingest` DateTime, `src_minb` UInt32, `src_maxb` UInt32, `assets` Array(UInt32)) AS SELECT toStartOfHour(block_timestamp) AS hour, 'state' AS kind, max(ingested_at) AS src_ingest, min(block_height) AS src_minb, max(block_height) AS src_maxb, CAST([], 'Array(UInt32)') AS assets FROM price_data.juicer_logs WHERE topic0 IN ('0x1d3135f7e52d949fd35b86ab673aeb906bdee851ec045f9539dc9a33fbfbe482', '0xb1c0c2e07488f4aa1df44007c536731d967f82433a7b84165277d42539b2fd7f', '0xfb5f43e3eb2833d020c71477c280fe339de3c2770691e1a67d65cd12eb6ea72d', '0x23e5bc5f063963f9e7b37609ce9794ed733f8df8c8122736a34380f2f4039a75') GROUP BY hour;

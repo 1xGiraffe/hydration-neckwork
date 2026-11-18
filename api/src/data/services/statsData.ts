@@ -106,8 +106,8 @@ export async function volumeStats(client: ClickHouseClient, options: VolumeOptio
 // under scope=all but not asked for by name).
 export const REVENUE_STREAMS = [
   'omnipool_asset_fee', 'omnipool_protocol_fee', 'liquidation_penalty', 'pepl_liquidation_profit',
-  'asset_reserve', 'hollar_borrow', 'hsm_revenue', 'ice_matched_fee', 'uniswap_v3_fee', 'network_fee',
-  'xcm_execution_fee',
+  'asset_reserve', 'hollar_borrow', 'hsm_revenue', 'ice_matched_fee', 'uniswap_v3_fee', 'juicer_protocol_fee',
+  'network_fee', 'xcm_execution_fee',
 ] as const
 
 // The canonical protocol-revenue predicate, restated from

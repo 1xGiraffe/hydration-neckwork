@@ -1,12 +1,13 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { DATA_UPGRADES } from '../src/db/schemaBootstrap.ts'
-import { JUICER_ACTION_TOPIC, JUICER_LOG_CONTRACTS, JUICER_LOOP_TOPICS, JUICER_SUBLOOP, JUICER_TOPIC } from '../src/services/juicer.ts'
+import { JUICER_ACTION_TOPIC, JUICER_FEE_CONTROLLER, JUICER_FEE_TOPICS, JUICER_LOG_CONTRACTS, JUICER_LOOP_TOPICS, JUICER_SUBLOOP, JUICER_TOPIC } from '../src/services/juicer.ts'
 
 const sql = readFileSync(new URL('../../clickhouse/schema/018_juicer.sql', import.meta.url), 'utf8')
 const mvLine = (name: string) => sql.split('\n').find(l => l.startsWith(`CREATE MATERIALIZED VIEW IF NOT EXISTS price_data.${name} `))!
 const mv = mvLine('juicer_logs_mv')
 const loopMv = mvLine('juicer_loop_logs_mv')
+const feeMv = mvLine('juicer_fee_logs_mv')
 
 function listAfter(prefix: string, line = mv): string[] {
   const at = line.indexOf(prefix)
@@ -23,11 +24,14 @@ describe('juicer_logs', () => {
     expect(listAfter('AND lower(raw_evm_logs.contract_address) IN (')).toEqual([...JUICER_LOG_CONTRACTS].sort())
   })
 
-  it('copies every topic juicer.ts decodes, and only those, across its two views', () => {
+  it('copies every topic juicer.ts decodes, and only those, across its three views', () => {
     const loop = listAfter('WHERE raw_evm_logs.topic0 IN (', loopMv)
+    const fee = listAfter('WHERE raw_evm_logs.topic0 IN (', feeMv)
     expect(loop).toEqual([...JUICER_LOOP_TOPICS].sort())
-    expect([...listAfter('WHERE raw_evm_logs.topic0 IN ('), ...loop].sort()).toEqual(Object.values(JUICER_TOPIC).sort())
+    expect(fee).toEqual([...JUICER_FEE_TOPICS].sort())
+    expect([...listAfter('WHERE raw_evm_logs.topic0 IN ('), ...loop, ...fee].sort()).toEqual(Object.values(JUICER_TOPIC).sort())
     expect(listAfter('AND lower(raw_evm_logs.contract_address) IN (', loopMv)).toEqual([JUICER_SUBLOOP])
+    expect(listAfter('AND lower(raw_evm_logs.contract_address) IN (', feeMv)).toEqual([JUICER_FEE_CONTROLLER])
     for (const { topic } of Object.values(JUICER_ACTION_TOPIC)) expect(Object.values(JUICER_TOPIC)).toContain(topic)
   })
 
@@ -39,8 +43,9 @@ describe('juicer_logs', () => {
 
   it('replays each view by its own predicate and select', () => {
     const ups = DATA_UPGRADES.filter(x => x.table === 'price_data.juicer_logs')
-    expect(ups).toHaveLength(2)
+    expect(ups).toHaveLength(3)
     expect(mv).toContain(`AS SELECT ${ups[0].select} FROM price_data.raw_evm_logs WHERE ${ups[0].where};`)
     expect(loopMv).toContain(`AS SELECT ${ups[1].select} FROM price_data.raw_evm_logs WHERE ${ups[1].where};`)
+    expect(feeMv).toContain(`AS SELECT ${ups[2].select} FROM price_data.raw_evm_logs WHERE ${ups[2].where};`)
   })
 })

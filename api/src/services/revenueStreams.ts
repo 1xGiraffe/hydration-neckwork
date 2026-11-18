@@ -52,6 +52,10 @@ import {
 // one leaf, so the fee stream and the feed agree on what closes a message and
 // what the executor emits around its deposits.
 import { XCM_BARRIER_EVENTS, XCM_EXECUTE_BARRIER_EVENT, XCM_FEE_RUN_EVENTS } from './xcmWalkEvents.ts'
+// The Juicer fee controller and its two fee accruals — the leaf that names the deployment.
+import { JUICER_FEE_CONTROLLER, JUICER_TOPIC } from './juicer.ts'
+// HOLLAR's debt-token discount (GHO): the part of the indexed accrual no borrower is charged.
+import { discountSeries, loadHollarDiscounts, seriesAt, type DiscountSeriesPoint } from './hollarDiscount.ts'
 
 export const REVENUE_STREAMS = [
   'omnipool_asset_fee',
@@ -63,6 +67,7 @@ export const REVENUE_STREAMS = [
   'hsm_revenue',
   'ice_matched_fee',
   'uniswap_v3_fee',
+  'juicer_protocol_fee',
   'network_fee',
   'xcm_execution_fee',
 ] as const
@@ -555,6 +560,45 @@ rows AS (
   FROM minted
 )
 ${valuedTailSql('asset_reserve')}`
+}
+
+/**
+ * Juicer protocol fee — what the strategy's fee controller ACCRUES the protocol, per
+ * accrual log (juicer_logs; every vault reports into the one controller):
+ *   * ProtocolFeeAccrued(vault, asset, gross, fee, net) — a harvest's share of the
+ *     collateral bought with the loop's realized yield, before Main's interest;
+ *   * SourceFeeAccrued(vault, asset, fee) — the HOLLAR the Main ledger pays from an
+ *     exit's realized source yield.
+ * Booked when accrued, not when `claimProtocolFees` later pays the recipient: the claim
+ * is a transfer of fees already counted, and no other stream reads the controller's
+ * payouts. The asset is the log's own (a registry asset's EVM alias, HOLLAR by its
+ * contract), so a vault on another collateral books in that collateral with no change
+ * here. The payer is the vault (ETH-mapped): its holders' yield paid the fee.
+ * The HOLLAR interest Juicer's debt pays is hollar_borrow's, net of its discount — a
+ * separate charge, so the two never overlap.
+ */
+function juicerProtocolFeeRowsSql(extra: string): string {
+  return `-- rev:juicer_protocol_fee
+WITH accruals AS (
+  SELECT block_height, event_index, min(block_timestamp) AS block_time,
+         argMax(topic0, ingested_at) AS t0, argMax(topics, ingested_at) AS tp, argMax(data, ingested_at) AS d
+  FROM price_data.juicer_logs
+  WHERE contract_address = '${JUICER_FEE_CONTROLLER}'
+    AND topic0 IN ('${JUICER_TOPIC.ProtocolFeeAccrued}', '${JUICER_TOPIC.SourceFeeAccrued}')
+    AND ${WINDOW}
+    AND (${extra})
+  GROUP BY block_height, event_index
+),
+rows AS (
+  SELECT block_height, block_time, event_index, toUInt16(0) AS leg_index, 'protocol' AS dest,
+         ${ethMappedAccountSql("concat('0x', substring(tp[2], 27, 40))")} AS account,
+         ${reserveAssetIdSql("lower(concat('0x', substring(tp[3], 27, 40)))")} AS asset_id,
+         -- the fee is ProtocolFeeAccrued's second data word, SourceFeeAccrued's first
+         reinterpretAsUInt256(reverse(unhex(substring(d, if(t0 = '${JUICER_TOPIC.ProtocolFeeAccrued}', 67, 3), 64)))) AS amount
+  FROM accruals
+  WHERE length(tp) >= 3
+)
+${valuedTailSql('juicer_protocol_fee')}`
 }
 
 /**
@@ -1339,6 +1383,8 @@ export function buildRevenueEventRowsSql(stream: EventfulRevenueStream, extraPre
       return assetReserveRowsSql(extraPredicate)
     case 'hsm_revenue':
       return hsmRevenueRowsSql(extraPredicate)
+    case 'juicer_protocol_fee':
+      return juicerProtocolFeeRowsSql(extraPredicate)
     case 'ice_matched_fee':
       return iceMatchedFeeRowsSql(extraPredicate)
     case 'uniswap_v3_fee':
@@ -1359,8 +1405,17 @@ export interface HollarHourlyRow {
   hour: number
   poolAddress: string
   reserveAddress: string
-  /** Interest accrued in HOLLAR planck (18 decimals) — the WHOLE market's. */
+  /**
+   * Interest accrued in HOLLAR planck (18 decimals) — the WHOLE market's, as the debt
+   * token charges it: the indexed accrual less `discountPlanck`.
+   */
   amountPlanck: bigint
+  /**
+   * The part of the indexed accrual (debt_scaled × Δindex) the debt token's discount
+   * excused its enrolled borrowers (Juicer's vaults and loop): never charged, so never
+   * revenue. Already out of `amountPlanck`. See services/hollarDiscount.ts.
+   */
+  discountPlanck: bigint
   /** The same interest in 1e-12 USD, valued at the candle closed by `hour`. */
   usd1e12: bigint
   /**
@@ -1599,6 +1654,30 @@ export async function hollarBorrowHourlyRows(
     internalByPool.set(row.pool_address, list)
   }
   for (const list of internalByPool.values()) list.sort((a, b) => a.t - b.t)
+
+  // The discounted borrowers' part of each pool's indexed accrual (hollarDiscount.ts):
+  // the scaled debt the token burned but the deltas still count, and rate × true scaled.
+  // Sampled at the same observation as the debt it corrects (the end of that hour).
+  const discounts = await loadHollarDiscounts(client, { seconds: endSeconds + HOUR - 1 })
+  const vdebtRes = await client.query({
+    query: `-- rev:hollar-vdebt-pools
+SELECT DISTINCT lower(vdebt) AS vdebt, lower(pool_proxy) AS pool FROM price_data.atoken_reserve_map FINAL
+WHERE vdebt != '' AND lower(asset_address) = {reserve:String}`,
+    query_params: { reserve: HOLLAR_RESERVE_ADDRESS },
+    format: 'JSONEachRow',
+  })
+  const vdebtPools = await vdebtRes.json<{ vdebt: string; pool: string }>()
+  const discountByPool = new Map<string, DiscountSeriesPoint[]>()
+  const series = discountSeries(discounts)
+  for (const { vdebt, pool } of vdebtPools) {
+    const points = series.get(vdebt)
+    if (points) discountByPool.set(pool, points)
+  }
+  const discountAt = (pool: string, obsHour: number, indexMove: bigint): bigint => {
+    const { burned, rateScaled } = seriesAt(discountByPool.get(pool), obsHour + HOUR - 1)
+    return ((burned * 10_000n + rateScaled) * indexMove) / (RAY * 10_000n)
+  }
+
   const internalDebtAt = (pool: string, at: number): bigint => {
     const list = internalByPool.get(pool)
     if (!list?.length) return 0n
@@ -1668,7 +1747,9 @@ export async function hollarBorrowHourlyRows(
       const debt = BigInt(row.debt_scaled)
       const index = BigInt(row.borrow_index)
       if (prevDebt != null && prevIndex != null && prevIndexHour != null && index > prevIndex) {
-        const planck = (prevDebt * (index - prevIndex)) / RAY
+        const indexed = (prevDebt * (index - prevIndex)) / RAY
+        const discountPlanck = min(indexed, discountAt(poolAddress, prevObsHour ?? t, index - prevIndex))
+        const planck = indexed - discountPlanck
         const usd = (planck * (priceAtHour.get(t) ?? 0n)) / HOLLAR_UNIT
         // Same index move, internal holders' debt: their part of this accrual.
         // Clamped at the gross amount — a reconstruction gap must not book a
@@ -1681,6 +1762,7 @@ export async function hollarBorrowHourlyRows(
           out.push({
             hour: t, poolAddress, reserveAddress: HOLLAR_RESERVE_ADDRESS,
             amountPlanck: planck, usd1e12: usd,
+            discountPlanck,
             internalPlanck,
             internalUsd1e12: (internalPlanck * (priceAtHour.get(t) ?? 0n)) / HOLLAR_UNIT,
             hoursCovered: Math.max(1, Math.round((t - prevIndexHour) / HOUR)),

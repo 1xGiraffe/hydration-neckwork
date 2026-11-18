@@ -44,6 +44,7 @@ import { assetDecimalsOrNull } from './explorerAssets.ts'
 import { HOUR, userRevenueRows as rows, type FoldWindow, type Ledger } from './userRevenueFold.ts'
 import { BalanceBook, LedgerMap } from './userRevenueLp.ts'
 import { PEG_OPEN_END, pegSegmentBooks, pegSegmentHash, pegSegments, segmentRiseIn, type PegPoint, type PegSegment, type PegSegmentKind } from './userRevenueMath.ts'
+import { USER_REVENUE_RULE_ERAS } from './userRevenueStreams.ts'
 
 export interface AccruingToken {
   /** The registry asset holders hold (uBIL is held as an ERC-20). */
@@ -287,6 +288,14 @@ export function tokenSegments(grid: ReadonlyMap<number, readonly PegPoint[]>, ex
   ]]))
 }
 
+/** An era rule's identity (FNV-1a 64 over its fields). */
+export function ruleEraHash(era: { id: string; fromTs: number; version: number }): bigint {
+  const s = `era|${era.id}|${era.fromTs}|${era.version}`
+  let h = 0xcbf29ce484222325n
+  for (let i = 0; i < s.length; i++) { h ^= BigInt(s.charCodeAt(i)); h = (h * 0x100000001b3n) & 0xffffffffffffffffn }
+  return h
+}
+
 /**
  * Per bucket [from, to): the XOR of the identities of the segments overlapping
  * it — the token stream's input a bucket's facts depend on beyond its own
@@ -295,6 +304,12 @@ export function tokenSegments(grid: ReadonlyMap<number, readonly PegPoint[]>, ex
  */
 export function pegBucketFingerprints(segments: ReadonlyMap<number, readonly PegSegment[]>, buckets: ReadonlyArray<readonly [number, number]>): bigint[] {
   const out = buckets.map(() => 0n)
+  // The era rules (USER_REVENUE_RULE_ERAS) ride the same per-bucket term: a bucket reaching past an era's start
+  // carries its identity, so a version bump re-marks exactly that era's buckets.
+  for (const era of USER_REVENUE_RULE_ERAS) {
+    const h = ruleEraHash(era)
+    for (let i = 0; i < buckets.length; i++) if (buckets[i][1] > era.fromTs) out[i] ^= h
+  }
   const ruleOf = new Map(ACCRUING_TOKENS.map(t => [t.token, t.ruleVersion ?? 0]))
   for (const [token, segs] of segments) {
     for (const seg of segs) {

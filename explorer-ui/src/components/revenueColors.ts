@@ -23,7 +23,8 @@ import type { RiverLegendItem } from './RevenueFlow'
 //    forfeits) is a deep shade of its source's family, and a marker that
 //    stands for a cost is drawn hollow (a ring) whatever its stream.
 //  * A stream with no counterpart has a hue nothing else uses: XCM in the
-//    cross-chain neutral of its activity badge, ICE in the intent violet, the
+//    cross-chain neutral of its activity badge, Juicer fees in the Juicer's
+//    lime (its activity badge too), ICE in the intent violet, the
 //    liquidation pair in vermilion and brick (clear of the brand pink), farms
 //    in cyan, token accrual in sky, staking in the stake violets, referrers in
 //    a neutral grey.
@@ -52,6 +53,8 @@ export const REVENUE_STREAM_COLOR: Record<RevenueStream, string> = {
   uniswap_v3_fee: 'var(--rv-uniswap)',
   network_fee: 'var(--accent)',
   xcm_execution_fee: 'var(--cat-xcm)',
+  // Juicer's fee, in the Juicer's own lime (its activity badge's colour).
+  juicer_protocol_fee: 'var(--cat-juicer)',
 }
 
 export const REVENUE_STREAM_LABEL: Record<RevenueStream, string> = {
@@ -70,6 +73,9 @@ export const REVENUE_STREAM_LABEL: Record<RevenueStream, string> = {
   // What the XCM weight trader charged a message (an inbound transfer, a local
   // PolkadotXcm.execute) for its execution here, paid to the treasury.
   xcm_execution_fee: 'XCM execution fees',
+  // The fee controller's share of the yield the Juicer strategy realized: a harvest's
+  // collateral fee and an exit's HOLLAR fee, booked when accrued.
+  juicer_protocol_fee: 'Juicer fees',
 }
 
 /**
@@ -79,6 +85,7 @@ export const REVENUE_STREAM_LABEL: Record<RevenueStream, string> = {
 export const REVENUE_STREAMS_ORDERED: RevenueStream[] = [
   'network_fee', 'ice_matched_fee', 'asset_reserve', 'omnipool_protocol_fee', 'pepl_liquidation_profit',
   'omnipool_asset_fee', 'liquidation_penalty', 'uniswap_v3_fee', 'hsm_revenue', 'hollar_borrow', 'xcm_execution_fee',
+  'juicer_protocol_fee',
 ]
 
 // The staker-distribution stack wears the /hdx lock palette (lockColors.ts) —

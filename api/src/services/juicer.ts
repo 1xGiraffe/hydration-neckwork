@@ -153,6 +153,8 @@ export const JUICER_TOPIC = {
   ProtocolFeeAccrued: '0xef307ecc2880448842675e7d171caa0bcc3474fd35bb18cad19f4ff36e00d0d1', // (address indexed vault, address indexed asset, uint256 gross, uint256 fee, uint256 net)
   ProtocolFeesClaimed: '0x4f8a50ec1fe3d316970fdadd1f94e0b822f92d31e2bac3c9dc2c6c287de07107', // (address indexed asset, address indexed recipient, uint256 amount)
   ProtocolFeeUpdated: '0x23e5bc5f063963f9e7b37609ce9794ed733f8df8c8122736a34380f2f4039a75', // (address indexed vault, uint16 previousBps, uint16 newBps)
+  // JuicerFeeController, the exit-yield fee (juicer_fee_logs_mv): HOLLAR the Main ledger pays from an exit's realized source yield
+  SourceFeeAccrued: '0xcf657569f70a271ef14e43654679450e1cee0cfd668599413511f1b4cd14331e', // (address indexed vault, address indexed asset, uint256 fee)
   // JuicerDiscount
   DiscountBpsUpdated: '0x98e3263d243be6fa54f64665eb035d2af14f3873f13b350f25d26184c6036035', // (uint16 previousBps, uint16 newBps)
   LoopDiscountBpsUpdated: '0x345b03f5c035388db76a0f8edb9be72736d2c47998b185aee8ee8b4d9d5a882b', // (uint16 previousBps, uint16 newBps)
@@ -164,6 +166,10 @@ export const JUICER_TOPIC = {
 } as const
 /** The SubLoop-only topics juicer_loop_logs_mv copies (the rest are juicer_logs_mv's). */
 export const JUICER_LOOP_TOPICS: readonly string[] = [JUICER_TOPIC.LoopBorrowed, JUICER_TOPIC.LoopRepaid, JUICER_TOPIC.IntentSubmitted, JUICER_TOPIC.IntentSettled]
+/** The fee-controller topics juicer_fee_logs_mv copies (ProtocolFeeAccrued is juicer_logs_mv's). */
+export const JUICER_FEE_TOPICS: readonly string[] = [JUICER_TOPIC.SourceFeeAccrued]
+/** The two fee accruals the juicer_protocol_fee revenue stream books: a harvest's collateral fee and an exit's HOLLAR fee. */
+export const JUICER_FEE_ACCRUAL_TOPICS: readonly string[] = [JUICER_TOPIC.ProtocolFeeAccrued, JUICER_TOPIC.SourceFeeAccrued]
 /** An IntentSubmitted/Settled `kind`: 1 buys PRIME with borrowed HOLLAR (levers up), 2 sells it back (levers down). */
 export const LOOP_INTENT_ENTRY = 1
 export type JuicerTopicName = keyof typeof JUICER_TOPIC
@@ -260,6 +266,8 @@ export interface JuicerEvent {
   delay?: number
   band?: { target: number; relever: number; delever: number }
   headroom?: { enabled: boolean; gapBps: number }
+  /** The asset a fee accrual is paid in (ProtocolFeeAccrued: the vault's collateral; SourceFeeAccrued: HOLLAR), lowercase H160. */
+  asset?: string
   /** IntentSubmitted / IntentSettled. */
   intentKind?: number
   intentNonce?: number
@@ -392,8 +400,12 @@ export function decodeJuicerLog(r: JuicerLogRow): JuicerEvent | null {
       return id != null ? { ...base, requestId: id, hollar: str(cash), debtShare: str(debt) } : null
     }
     case 'ProtocolFeeAccrued': {
-      const vault = topicAddress(t, 1), gross = dataWord(d, 0), fee = dataWord(d, 1), net = dataWord(d, 2)
-      return vault && fee != null ? { ...base, vault, gross: str(gross), fee: fee.toString(), amount: str(net) } : null
+      const vault = topicAddress(t, 1), asset = topicAddress(t, 2), gross = dataWord(d, 0), fee = dataWord(d, 1), net = dataWord(d, 2)
+      return vault && fee != null ? { ...base, vault, asset: asset ?? undefined, gross: str(gross), fee: fee.toString(), amount: str(net) } : null
+    }
+    case 'SourceFeeAccrued': {
+      const vault = topicAddress(t, 1), asset = topicAddress(t, 2), fee = dataWord(d, 0)
+      return vault && asset && fee != null ? { ...base, vault, asset, fee: fee.toString() } : null
     }
     case 'ProtocolFeesClaimed': {
       const v = dataWord(d, 0)

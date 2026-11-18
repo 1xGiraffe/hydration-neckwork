@@ -19,12 +19,20 @@
 // convention, folded to the owner by the readers' bind map) — except an H160
 // that is the truncated form of a known custody account (a pool account holding
 // aTokens), which is booked to that account so the custody passes it on.
+//
+// A HOLLAR borrower its debt token discounts (hollarDiscount.ts: Juicer's vaults and
+// loop) is walked as the chain charges it: the scaled debt the token burns at each
+// action joins the deltas (the Mint/Burn amounts state none of it), and every stretch
+// accrues at (1 − the rate cached for it), the rate stepping where the token refreshed
+// it. Over a stretch between actions that telescopes to the token's own settled
+// interest, so the walk ends on the chain's scaled balance.
 
 import type { ClickHouseClient } from '../db/client.ts'
 import { normalizedDebt, normalizedIncome, RAY } from './aaveMath.ts'
 import { hourIndexOfBlock, userRevenueCompactRows as compactRows, userRevenueRows as rows, type FoldWindow, type Ledger } from './userRevenueFold.ts'
 import { MM_COVERAGE_FROM_BLOCK, UNATTRIBUTED_VIA, ethMappedAccount } from './userRevenueStreams.ts'
 import { gigahdxBookings, splitProRata } from './userRevenueMath.ts'
+import { rateAt, type HolderDiscount } from './hollarDiscount.ts'
 
 export interface MmContract {
   contract: string
@@ -187,6 +195,7 @@ export interface ScaledDelta { holder: string; contract: string; block: number; 
 export async function loadOpeningScaled(
   client: ClickHouseClient, contracts: readonly MmContract[], atBlock: number,
   anchor: { rows: ReadonlyArray<{ holder: string; exposure_id: string; units: bigint }>; fromBlock: number } | null,
+  discounts: readonly HolderDiscount[] = [],
 ): Promise<Map<string, bigint>> {
   const out = new Map<string, bigint>()
   const list = contracts.map(c => c.contract)
@@ -215,6 +224,15 @@ export async function loadOpeningScaled(
     for (const r of got) {
       const k = key(r.holder, r.contract)
       out.set(k, (out.get(k) ?? 0n) + BigInt(r.s))
+    }
+    // The debt a discount burned in the same span (the deltas above count none of it).
+    const listed = new Set(list)
+    for (const d of discounts) {
+      if (!listed.has(d.contract)) continue
+      const burned = d.burns.reduce((a, b) => (b.block > from && b.block <= atBlock ? a + b.scaled : a), 0n)
+      if (burned === 0n) continue
+      const k = key(d.holder, d.contract)
+      out.set(k, (out.get(k) ?? 0n) - burned)
     }
   }
   return out
@@ -258,6 +276,7 @@ export interface MmBuild {
 export async function buildMmInterest(
   client: ClickHouseClient, w: FoldWindow, contracts: readonly MmContract[],
   opening: Map<string, bigint>, accountOf: (h160: string) => string,
+  discounts: readonly HolderDiscount[] = [],
 ): Promise<MmBuild> {
   const H = w.hours
   const start = Math.max(w.openBlock, MM_COVERAGE_FROM_BLOCK)
@@ -281,6 +300,22 @@ export async function buildMmInterest(
     const list = deltasOf.get(k)
     if (list) list.push(d)
     else deltasOf.set(k, [d])
+  }
+  // A discounted borrower: its burns join the deltas, and a step of its rate splits a stretch (a zero delta).
+  const discountOf = new Map<string, HolderDiscount>()
+  for (const d of discounts) {
+    if (!byContract.has(d.contract)) continue
+    const k = `${d.holder}|${d.contract}`
+    discountOf.set(k, d)
+    const merged = new Map<number, ScaledDelta>((deltasOf.get(k) ?? []).map(x => [x.block, { ...x }]))
+    const at = (block: number, ts: number): ScaledDelta => {
+      let x = merged.get(block)
+      if (!x) { x = { holder: d.holder, contract: d.contract, block, ts, delta: 0n }; merged.set(block, x) }
+      return x
+    }
+    for (const b of d.burns) if (b.block > start && b.block <= w.lastBlock) at(b.block, b.ts).delta -= b.scaled
+    for (const r of d.rates) if (r.block > start && r.block <= w.lastBlock) at(r.block, r.ts)
+    if (merged.size) deltasOf.set(k, [...merged.values()].sort((a, b) => a.block - b.block))
   }
   const keys = [...new Set([...opening.keys(), ...deltasOf.keys()])].sort()
   // Hour-end index per reserve and side, computed once.
@@ -306,6 +341,10 @@ export async function buildMmInterest(
     let iPrev = book.indexAt(c.pool, c.reserve, c.side, start, startTs)
     let di = 0
     let any = false
+    const discount = discountOf.get(k)
+    let pct = discount ? rateAt(discount.rates, start) : 0n
+    // What the stretch's indexed interest is charged: all of it, or (1 − rate) of it for a discounted borrower.
+    const charged = (x: bigint): bigint => (pct > 0n ? (x * (10_000n - pct)) / 10_000n : x)
     const snaps = hourStart.get(contract) ?? Array.from({ length: H }, () => new Map<string, bigint>())
     hourStart.set(contract, snaps)
     for (let h = 0; h < H; h++) {
@@ -316,12 +355,13 @@ export async function buildMmInterest(
       while (di < ds.length && hourIndexOfBlock(w, ds[di].block) <= h) {
         const d = ds[di++]
         const iB = book.indexAt(c.pool, c.reserve, c.side, d.block, d.ts)
-        if (iB != null && iPrev != null && s > 0n) acc += rayMulPos(s, iB) - rayMulPos(s, iPrev)
+        if (iB != null && iPrev != null && s > 0n) acc += charged(rayMulPos(s, iB) - rayMulPos(s, iPrev))
         s += d.delta
         iPrev = iB ?? iPrev
+        if (discount) pct = rateAt(discount.rates, d.block)
       }
       const iEnd = ends[h]
-      if (iEnd != null && iPrev != null && s > 0n) acc += rayMulPos(s, iEnd) - rayMulPos(s, iPrev)
+      if (iEnd != null && iPrev != null && s > 0n) acc += charged(rayMulPos(s, iEnd) - rayMulPos(s, iPrev))
       if (iEnd != null) iPrev = iEnd
       if (acc !== 0n) { amounts[h] = c.side === 'supply' ? acc : -acc; any = true }
     }

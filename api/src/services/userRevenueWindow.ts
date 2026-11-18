@@ -51,6 +51,8 @@ import {
 import { buildGigahdxVoting, buildLegacyStaking, buildReferralCommissions } from './userRevenueStaking.ts'
 import { buildFarmRewards } from './userRevenueFarms.ts'
 import { buildV3LpFees, loadVaultCustodies } from './userRevenueV3.ts'
+import { loadJuicerCustody } from './userRevenueJuicer.ts'
+import { loadHollarDiscounts } from './hollarDiscount.ts'
 import {
   ACCRUING_TOKENS, ERC20_CHECKPOINT_MARK, ESCROW_CHECKPOINT_MARK, REDEMPTION_ESCROWS, REDEMPTION_ESCROW_REMAINDER_VIA, RedemptionEscrowBook, TOKEN_BALANCE_ASSETS,
   buildTokenAccrual, erc20CheckpointPot, erc20Closing, escrowCheckpointPot, loadErc20Book, loadEscrowEvents, loadPegGrid, tokenSegments,
@@ -271,10 +273,12 @@ export async function computeUserRevenueWindow(client: ClickHouseClient, w: Fold
   const xykAssets = xykPools.map(p => p.lpAsset)
   // Sequential on purpose: each read is large, and a result left unread while the
   // process parses another stalls ClickHouse's socket write (30 s send timeout).
+  // HOLLAR borrowers its debt token discounts (hollarDiscount.ts): their burns and rates, through the window's end.
+  const discounts = await timed('mm-discounts', () => loadHollarDiscounts(client, { block: w.lastBlock }))
   // Coverage starts at B0: a window before it holds nothing, one spanning it opens at the B0 anchor.
   const opening = await timed('mm-opening', async () => w.lastBlock < MM_COVERAGE_FROM_BLOCK
     ? new Map<string, bigint>()
-    : loadOpeningScaled(client, contracts, Math.max(w.openBlock, MM_COVERAGE_FROM_BLOCK), mmAnchor && anchor!.block >= MM_COVERAGE_FROM_BLOCK ? mmAnchor : null))
+    : loadOpeningScaled(client, contracts, Math.max(w.openBlock, MM_COVERAGE_FROM_BLOCK), mmAnchor && anchor!.block >= MM_COVERAGE_FROM_BLOCK ? mmAnchor : null, discounts))
   const ssBalances = await timed('ss-balances', () => BalanceBook.load(client, w, ssAssets, balAnchor('bal:'), anchor?.block ?? 0))
   const xykBalances = await timed('xyk-balances', () => BalanceBook.load(client, w, xykAssets, balAnchor('xyk:'), anchor?.block ?? 0, 'xyk'))
   const omnipool = await timed('omnipool-book', () => OmnipoolBook.load(client, w))
@@ -302,7 +306,7 @@ export async function computeUserRevenueWindow(client: ClickHouseClient, w: Fold
     escrows.push({ escrow, hours, closing: book.openAt(Number.MAX_SAFE_INTEGER) })
   }
 
-  const mm = await timed('mm', () => buildMmInterest(client, w, contracts, opening, accountOf))
+  const mm = await timed('mm', () => buildMmInterest(client, w, contracts, opening, accountOf, discounts))
   const incentives = await timed('mm-incentives', () => buildMmIncentives(client, w, contracts, opening, mm, accountOf, assetDecimalsOrNull))
   const ledgers: Ledger[] = [...mm.ledgers, ...incentives]
   const giga = await timed('gigahdx', () => buildGigahdxYield(client, w, accountOf))
@@ -350,6 +354,9 @@ export async function computeUserRevenueWindow(client: ClickHouseClient, w: Fold
     unresolved.delete(account)
   }
   for (const { a } of lbp) unresolved.set(a, 'custody:lbp')
+  // The Juicer strategy's contracts: the loop to its vaults (less the protocol's fee share), each vault to its holders.
+  const juicer = await timed('juicer', () => loadJuicerCustody(client, w, accountOf))
+  for (const [account, resolver] of juicer.resolvers) resolvers.set(account, resolver)
   // A redemption escrow passes on only what its own held units earn (the token's accrual); anything else it held
   // would be classed like any account.
   const escrowResolvers = new Map(escrows.map(e => [accountOf(e.escrow.contract).toLowerCase(), { token: e.escrow.token, resolver: redemptionEscrowCustody(e.escrow, h => e.hours[h] ?? [], accountOf) }]))

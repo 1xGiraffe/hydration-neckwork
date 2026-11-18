@@ -1648,7 +1648,7 @@ export interface HdxMover { account: AccountRef; balanceHdx: number; boughtHdx: 
 export type RevenueStream =
   | 'omnipool_asset_fee' | 'omnipool_protocol_fee' | 'liquidation_penalty'
   | 'pepl_liquidation_profit' | 'asset_reserve' | 'hollar_borrow'
-  | 'hsm_revenue' | 'ice_matched_fee' | 'uniswap_v3_fee' | 'network_fee' | 'xcm_execution_fee'
+  | 'hsm_revenue' | 'ice_matched_fee' | 'uniswap_v3_fee' | 'juicer_protocol_fee' | 'network_fee' | 'xcm_execution_fee'
 export type RevenueRange = '30d' | '1y' | 'all'
 
 export interface RevenuePoint { t: number; usd: number }
