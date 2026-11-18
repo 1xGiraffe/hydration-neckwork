@@ -95,19 +95,21 @@ import { DECIMAL_STRINGS, scaledUsd } from '../../services/poolVolumes.ts'
 /**
  * Product groupings, exactly as the UI's `ProductType` enum spells them, plus
  * `uniswap-v3`: the concentrated-liquidity pools on Hydration's EVM (runtime 443),
- * which the incumbent never had. It is an ADDITION to the matrix — every
- * combination the incumbent accepts is still accepted unchanged.
+ * and `juicer`: the leveraged PRIME-loop strategy vaults — products the incumbent
+ * never had. They are ADDITIONS to the matrix — every combination the incumbent
+ * accepts is still accepted unchanged.
  */
-export const FEES_PRODUCT_TYPES = ['omnipool', 'money-market', 'hollar', 'uniswap-v3'] as const
+export const FEES_PRODUCT_TYPES = ['omnipool', 'money-market', 'hollar', 'uniswap-v3', 'juicer'] as const
 export type FeesProductType = (typeof FEES_PRODUCT_TYPES)[number]
 
 /**
  * Streams, exactly as the UI's `StreamType` enum spells them, plus `uniswap_v3_fee`
- * (the canonical revenue stream key, as the money-market and HOLLAR entries are).
+ * and `juicer_protocol_fee` (the canonical revenue stream keys, as the money-market
+ * and HOLLAR entries are).
  */
 export const FEES_STREAM_TYPES = [
   'asset', 'protocol', 'liquidation_penalty', 'pepl_liquidation_profit',
-  'asset_reserve', 'borrow_apr', 'hsm_revenue', 'uniswap_v3_fee',
+  'asset_reserve', 'borrow_apr', 'hsm_revenue', 'uniswap_v3_fee', 'juicer_protocol_fee',
 ] as const
 export type FeesStreamType = (typeof FEES_STREAM_TYPES)[number]
 
@@ -162,6 +164,10 @@ export const FEES_COMBINATIONS: ReadonlyArray<[FeesProductType, FeesStreamType, 
   // vault's fee share sent to the Treasury, and a pool's own protocol fee as it
   // accrues on each swap — never its CollectProtocol, which would double it).
   ['uniswap-v3', 'uniswap_v3_fee', 'protocol'],
+  // Not in the incumbent's matrix either: the Juicer fee controller's accruals — a
+  // harvest's share of the collateral the loop's realized yield bought and an exit's
+  // HOLLAR fee, every vault's, in each accrual's own asset.
+  ['juicer', 'juicer_protocol_fee', 'protocol'],
 ]
 
 export const FEES_TOTAL_MESSAGE
@@ -246,6 +252,7 @@ export const AGGREGATE_MODE: Record<FeesStreamType, 'sum' | 'mean'> = {
   borrow_apr: 'sum',
   hsm_revenue: 'mean',
   uniswap_v3_fee: 'sum',
+  juicer_protocol_fee: 'sum',
 }
 
 export function aggregate(values: number[], mode: 'sum' | 'mean'): number {
@@ -286,6 +293,7 @@ const STREAM_TO_REVENUE: Record<Exclude<FeesStreamType, 'borrow_apr'>, EventfulR
   asset_reserve: 'asset_reserve',
   hsm_revenue: 'hsm_revenue',
   uniswap_v3_fee: 'uniswap_v3_fee',
+  juicer_protocol_fee: 'juicer_protocol_fee',
 }
 
 /** The marker comment each stream's query carries (test/dispatch anchor). */
@@ -297,6 +305,7 @@ const STREAM_MARKER: Record<Exclude<FeesStreamType, 'borrow_apr'>, string> = {
   asset_reserve: '-- pub:fees:asset-reserve',
   hsm_revenue: '-- pub:fees:hsm-revenue',
   uniswap_v3_fee: '-- pub:fees:uniswap-v3',
+  juicer_protocol_fee: '-- pub:fees:juicer',
 }
 
 /**
@@ -333,7 +342,7 @@ export function feesDestinationPredicateSql(destination: FeesDestination): strin
 export function buildFeesStreamSql(streamType: Exclude<FeesStreamType, 'borrow_apr'>, destination: FeesDestination): string {
   const stream = STREAM_TO_REVENUE[streamType]
   // The destination split applies to the two omnipool fee streams; the money-market,
-  // HOLLAR and Uniswap v3 streams have a single destination and take every row.
+  // HOLLAR, Uniswap v3 and Juicer streams have a single destination and take every row.
   const destSql = streamType === 'asset' || streamType === 'protocol'
     ? feesDestinationPredicateSql(destination)
     : '1'

@@ -618,6 +618,34 @@ describe('hollarBorrowHourlyRows', () => {
     expect(await hollarBorrowHourlyRows(client, t0, t0 + 4 * H)).toEqual([])
   })
 
+  // HOLLAR's debt token excuses an enrolled borrower (Juicer's vaults, its loop) its rate
+  // of the interest: the indexed accrual (debt_scaled × Δindex) overstates the market's by
+  // that share, and by the scaled debt the token already burned. Never charged, so never
+  // revenue — it leaves amountPlanck and is reported beside it.
+  it('takes the debt token\'s discount out of the market\'s accrual', async () => {
+    const RAYS = '1000000000000000000000000000'
+    const holder = '0x2df1d70f413b5edd16bb794791117948a7436a45'
+    const { client } = fakeClient({
+      'money_market_reserve_state_history': [
+        { bucket: ch(t0), pool_address: '0xpool', debt_scaled: '1000000000000000000000', borrow_index: RAYS },
+        { bucket: ch(t0 + H), pool_address: '0xpool', debt_scaled: '1000000000000000000000', borrow_index: '1001000000000000000000000000' },
+      ],
+      'ohlc_1h': [{ bucket: ch(t0), close: '1' }],
+      'rev:hollar-vdebt-pools': [{ vdebt: '0xvdebt', pool: '0xpool' }],
+      // The borrower's first action: its refresh sets 90% (logged ahead of its Mint), then it borrows all 1,000 scaled.
+      'hollar:discounts': [
+        { c: '0xvdebt', h: holder, b: '10', e: '1', ts: String(t0 - 100), k: 'DiscountPercentUpdated', v: '0', bi: '0', i: '0', po: '0', pn: '9000' },
+        { c: '0xvdebt', h: holder, b: '10', e: '3', ts: String(t0 - 100), k: 'Mint', v: '1000000000000000000000', bi: '0', i: RAYS, po: '0', pn: '0' },
+      ],
+    })
+    const rows = await hollarBorrowHourlyRows(client, t0, t0 + H)
+    expect(rows).toHaveLength(1)
+    // 1 HOLLAR indexed; the borrower holds all of it at 90% off, so 0.9 is excused.
+    expect(rows[0].discountPlanck).toBe(9n * 10n ** 17n)
+    expect(rows[0].amountPlanck).toBe(10n ** 17n)
+    expect(rows[0].usd1e12).toBe(10n ** 11n)
+  })
+
   it('never leaks one pool\'s later price into another pool\'s earlier hour', async () => {
     const { client } = fakeClient({
       'money_market_reserve_state_history': [
@@ -732,5 +760,27 @@ describe('hollarBorrowHourlyRows', () => {
     })
     const rows = await hollarBorrowHourlyRows(client, t0, t0 + H)
     expect(rows[0].hoursCovered).toBe(1)
+  })
+})
+
+describe('juicer_protocol_fee', () => {
+  const sql = buildRevenueEventRowsSql('juicer_protocol_fee')
+
+  it('books both of the fee controller\'s accruals, never its claims', async () => {
+    const { JUICER_FEE_CONTROLLER, JUICER_TOPIC } = await import('../src/services/juicer.ts')
+    expect(sql).toContain('-- rev:juicer_protocol_fee')
+    expect(sql).toContain(`contract_address = '${JUICER_FEE_CONTROLLER}'`)
+    expect(sql).toContain(`topic0 IN ('${JUICER_TOPIC.ProtocolFeeAccrued}', '${JUICER_TOPIC.SourceFeeAccrued}')`)
+    // A claim pays out fees already accrued: reading it too would count them twice.
+    expect(sql).not.toContain(JUICER_TOPIC.ProtocolFeesClaimed)
+    // The fee is ProtocolFeeAccrued's second data word (after gross), SourceFeeAccrued's first.
+    expect(sql).toContain(`substring(d, if(t0 = '${JUICER_TOPIC.ProtocolFeeAccrued}', 67, 3), 64)`)
+  })
+
+  it('is the protocol\'s, paid in the log\'s own asset by the vault', () => {
+    expect(sql).toContain("'protocol' AS dest")
+    expect(sql).toContain("substring(tp[2], 27, 40)")
+    expect(sql).toMatch(/startsWith\(lower\(concat\('0x', substring\(tp\[3\], 27, 40\)\)\), '0x0000000000000000000000000000000100'\)/)
+    expect(sql).toContain('GROUP BY block_height, event_index')
   })
 })

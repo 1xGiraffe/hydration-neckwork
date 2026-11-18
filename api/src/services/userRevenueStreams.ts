@@ -13,6 +13,8 @@
 // collator rewards, grants, vesting, airdrops, LBP fees, bonds and trader
 // rebates. Protocol Revenue keeps its own meaning; the two are not additive.
 
+import { JUICER_FEE_CONTROLLER, JUICER_VAULTS } from './juicer.ts'
+
 /**
  * The Omnipool's trade events carry their fee amounts from this block on
  * (2023-08-04 11:04:24, the first fee leg); before it the fee is in no event and
@@ -33,6 +35,19 @@ export const XYK_FEE_COVERAGE_FROM_BLOCK = 3_934_664
  * change moves no ingest time, so nothing else would).
  */
 export const USER_REVENUE_RULE_VERSION = 5
+
+/**
+ * A booking rule that only changes what an ERA of the chain books: from `fromTs` (unix
+ * seconds) on, every bucket's fingerprint carries the era's identity, so bumping its
+ * `version` re-marks exactly the buckets from that instant forward — not all history, as
+ * USER_REVENUE_RULE_VERSION would (userRevenueTokens.pegBucketFingerprints folds them).
+ *  - 'juicer': the Juicer strategy's custody pass-through (userRevenueJuicer.ts) and the
+ *    HOLLAR borrow discount its vaults and loop are charged at (hollarDiscount.ts); from
+ *    the contracts' deployment (block 16,630,305, 2026-11-05 01:35:24 UTC).
+ */
+export const USER_REVENUE_RULE_ERAS: ReadonlyArray<{ id: string; fromTs: number; version: number }> = [
+  { id: 'juicer', fromTs: 1_793_842_524, version: 1 },
+]
 
 export type UserRevenueSign = 'earned' | 'paid' | 'both'
 
@@ -179,11 +194,17 @@ export const PROTOCOL_HOLDER_TAGS = [
   'gigahdx-pots', 'fee-processor', 'fee-referrals', 'fee-staking-rewards', 'hollar-stability-module',
 ] as const
 
-/** The Aave collector (reserve-factor accrual) and the PEPL/HSM EVM executor, ETH-mapped. */
-export const PROTOCOL_FIXED_ACCOUNTS = [
+/**
+ * The Aave collector (reserve-factor accrual), the PEPL/HSM EVM executor, and Juicer's
+ * protocol accounts — its fee controller (the fees it collects, and the protocol's fee
+ * share of the loop's yield, userRevenueJuicer.ts) and each vault's Main debt ledger
+ * (its reserve) — ETH-mapped.
+ */
+export const PROTOCOL_FIXED_ACCOUNTS: readonly string[] = [
   '0x45544800e52567ff06acd6cbe7ba94dc777a3126e180b6d90000000000000000',
   '0x45544800000000000000000000000000000000000000090a0000000000000000',
-] as const
+  ...[JUICER_FEE_CONTROLLER, ...JUICER_VAULTS.map(v => v.mainDebt)].map(h => `0x45544800${h.slice(2).toLowerCase()}0000000000000000`),
+]
 
 /** The tag-driven member sets the holder class reads, each in both id forms, lowercased. */
 export interface HolderSets {
@@ -215,7 +236,7 @@ export function holderClassOf(account: string, sets: ReadonlySet<string> | Holde
   if (s.custody?.has(a)) return 'unattributed'
   if (isSovereign(a)) return 'unattributed'
   if (a.startsWith(MODL_PREFIX) || a.startsWith(MODL_ETH_MAPPED_PREFIX)) return 'protocol'
-  if (s.protocol.has(a) || (PROTOCOL_FIXED_ACCOUNTS as readonly string[]).includes(a)) return 'protocol'
+  if (s.protocol.has(a) || PROTOCOL_FIXED_ACCOUNTS.includes(a)) return 'protocol'
   return 'user'
 }
 

@@ -294,9 +294,12 @@ describe('request validation', () => {
     ]) expect(isValidCombination(combo[0], combo[1], combo[2]), combo.join('+')).toBe(true)
     // The incumbent's eleven plus the concentrated-liquidity stream (2026-09-09),
     // which is only ever protocol revenue: a vault's fee share to the Treasury and
-    // the pool's own protocol fee as each swap accrues it.
-    expect(FEES_COMBINATIONS.length).toBe(12)
+    // the pool's own protocol fee as each swap accrues it — and the Juicer
+    // strategy's fee, likewise the protocol's alone.
+    expect(FEES_COMBINATIONS.length).toBe(13)
     expect(isValidCombination('uniswap-v3', 'uniswap_v3_fee', 'protocol')).toBe(true)
+    expect(isValidCombination('juicer', 'juicer_protocol_fee', 'protocol')).toBe(true)
+    expect(isValidCombination('juicer', 'juicer_protocol_fee', 'lp')).toBe(false)
     expect(isValidCombination('uniswap-v3', 'uniswap_v3_fee', 'lp')).toBe(false)
     expect(isValidCombination('omnipool', 'uniswap_v3_fee', 'protocol')).toBe(false)
     expect(isValidCombination('hollar', 'asset', 'protocol')).toBe(false)
@@ -503,7 +506,7 @@ describe('hollar borrow interest', () => {
       { bucket: '2026-08-04 00:00:00', close: '1' },
       { bucket: '2026-08-04 01:00:00', close: '1' },
     ]
-    const app = await buildApp(fakeClient({ '-- rev:hollar-debt': debt, '-- rev:hollar-seed': seed, '-- rev:hollar-price': price, '-- rev:hollar-internal-debt': [] }))
+    const app = await buildApp(fakeClient({ '-- rev:hollar-debt': debt, '-- rev:hollar-seed': seed, '-- rev:hollar-price': price, '-- rev:hollar-internal-debt': [], '-- hollar:discounts': [], '-- rev:hollar-vdebt-pools': [] }))
     const res = await app.inject({ method: 'GET', url: url({
       productType: 'hollar', streamType: 'borrow_apr', feeDestination: 'protocol', bucketSize: '24hour',
       startTime: '2026-08-04T00:00:00.000Z', endTime: '2026-08-04T23:59:59.000Z',
@@ -537,7 +540,7 @@ describe('hollar borrow interest', () => {
       // other market's 00:00 accrual.
       { bucket: '2026-08-05 01:00:00', close: '2' },
     ]
-    const app = await buildApp(fakeClient({ '-- rev:hollar-debt': debt, '-- rev:hollar-seed': seed, '-- rev:hollar-price': price, '-- rev:hollar-internal-debt': [] }))
+    const app = await buildApp(fakeClient({ '-- rev:hollar-debt': debt, '-- rev:hollar-seed': seed, '-- rev:hollar-price': price, '-- rev:hollar-internal-debt': [], '-- hollar:discounts': [], '-- rev:hollar-vdebt-pools': [] }))
     const res = await app.inject({ method: 'GET', url: url({
       productType: 'hollar', streamType: 'borrow_apr', feeDestination: 'protocol', bucketSize: '24hour',
       startTime: '2026-08-05T00:00:00.000Z', endTime: '2026-08-05T23:59:59.000Z',

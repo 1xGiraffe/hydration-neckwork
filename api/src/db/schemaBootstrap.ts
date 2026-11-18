@@ -6,6 +6,7 @@ import { createDefaultDatabaseClickHouseClient, type ClickHouseClient } from './
 import { ACCOUNT_ACTIVITY_MV, catchUpAccountActivityWindow } from './accountActivityCatchUp.ts'
 import { ATOKEN_PARTY_TRANSFERS_SELECT, ATOKEN_PARTY_TRANSFERS_WHERE, PARTY_TRANSFERS_SELECT, PARTY_TRANSFERS_WHERE, catchUpTransferDeltasWindow } from '../services/erc20WalletService.ts'
 import { BIL_LOGS_SELECT, BIL_LOGS_WHERE } from '../services/bil.ts'
+import { HOLLAR_DEBT_LOGS_SELECT, HOLLAR_DEBT_LOGS_WHERE } from '../services/hollarDiscount.ts'
 
 // xcm_call_destinations_mv's own SELECT and WHERE over raw_extrinsics (013), verbatim:
 // the replay of its swap window and the backfill of `execute` history read the source
@@ -391,6 +392,14 @@ export const DATA_UPGRADES: ReadonlyArray<DataUpgrade> = [
     select: "block_height, event_index, extrinsic_index, block_timestamp, lower(raw_evm_logs.contract_address) AS contract_address, ifNull(raw_evm_logs.topic0, '') AS topic0, topics, data, '' AS party, ingested_at",
   },
   {
+    // The fee controller's exit-yield fee logs, the third view into juicer_logs (018_juicer.sql).
+    table: 'price_data.juicer_logs',
+    source: 'raw_evm_logs',
+    where: "raw_evm_logs.topic0 IN ('0xcf657569f70a271ef14e43654679450e1cee0cfd668599413511f1b4cd14331e') AND lower(raw_evm_logs.contract_address) IN ('0x9e9e273df28b4f54a4b7227517fe56d7ffa24843')",
+    fromBlock: 16_600_000,
+    select: "block_height, event_index, extrinsic_index, block_timestamp, lower(raw_evm_logs.contract_address) AS contract_address, ifNull(raw_evm_logs.topic0, '') AS topic0, topics, data, '' AS party, ingested_at",
+  },
+  {
     // The BIL strategy's logs (019_bil.sql): the predicate and select are bil.ts's own
     // constants, which the MV states verbatim (bilSchema.test.ts). The Decentral pool was
     // created at block 11,507,379, so the search for raw's first record starts just below.
@@ -399,6 +408,17 @@ export const DATA_UPGRADES: ReadonlyArray<DataUpgrade> = [
     where: BIL_LOGS_WHERE,
     fromBlock: 11_500_000,
     select: BIL_LOGS_SELECT,
+  },
+  {
+    // Every Mint, Burn and DiscountPercentUpdated of HOLLAR's variable-debt tokens
+    // (025_hollar_debt_logs.sql), the discount fold's input (services/hollarDiscount.ts).
+    // The core token's first log is at block 9,333,143, so the search for raw's first
+    // record starts just below.
+    table: 'price_data.hollar_debt_logs',
+    source: 'raw_evm_logs',
+    where: HOLLAR_DEBT_LOGS_WHERE,
+    fromBlock: 9_300_000,
+    select: HOLLAR_DEBT_LOGS_SELECT,
   },
   {
     // HDX deposits of at least 10M (017_narrow_event_tables.sql): the HDX dashboard's
