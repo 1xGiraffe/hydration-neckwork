@@ -119,8 +119,8 @@ function MultisigHoverCard({ origin, rect, onMouseEnter, onMouseLeave, onClose }
       {origin.timeline?.map((entry, i) => (
         <div key={`${entry.extrinsicId}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, whiteSpace: 'nowrap' }}>
           <AddrPill account={entry.account} noCopy />
-          <Link to={paths.extrinsic(entry.extrinsicId)} className="hash" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>{entry.action}</Link>
-          <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>· {entry.timestamp}</span>
+          <Link to={paths.extrinsic(entry.extrinsicId)} className="hash" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 11 }}>{entry.action}</Link>
+          <span className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 11 }}>· {entry.timestamp}</span>
         </div>
       ))}
     </div>,
@@ -139,7 +139,7 @@ function ExpandPanel({ id, origin }: { id: string; origin?: ExtrinsicOrigin }) {
         <div>
           <div className="exp-h">Parameters</div>
           {entries.length ? <div className="exp-kv">{entries.map(([k, v]) => <Fragment key={k}><div className="kk">{k}</div><div className="vv">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</div></Fragment>)}</div>
-            : <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>no parameters</div>}
+            : <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12 }}>no parameters</div>}
         </div>
         <div>
           <div className="exp-h">Events · {data.events.length}</div>
@@ -151,8 +151,8 @@ function ExpandPanel({ id, origin }: { id: string; origin?: ExtrinsicOrigin }) {
             {origin.timeline?.map((entry, i) => (
               <div key={`${entry.action}-${entry.timestamp}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                 <AddrPill account={entry.account} noCopy />
-                <Link to={paths.extrinsic(entry.extrinsicId)} className="hash" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>{entry.action}</Link>
-                <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>· {entry.timestamp}</span>
+                <Link to={paths.extrinsic(entry.extrinsicId)} className="hash" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 11 }}>{entry.action}</Link>
+                <span className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 11 }}>· {entry.timestamp}</span>
               </div>
             ))}
           </div>
@@ -160,7 +160,7 @@ function ExpandPanel({ id, origin }: { id: string; origin?: ExtrinsicOrigin }) {
         {origin?.kind === 'proxy' && (
           <div style={{ gridColumn: '1 / -1' }}>
             <div className="exp-h">Proxy</div>
-            <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>Executed via proxy — the signer is the delegate acting for this account</div>
+            <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 11 }}>Executed via proxy — the signer is the delegate acting for this account</div>
           </div>
         )}
       </div>
@@ -245,8 +245,8 @@ export function EvRow({ e, now, isNew }: { e: EventRow; now: number; isNew?: boo
           <div className="exp">
             <div className="exp-h">{e.name}</div>
             {e.evmDecoded ? <EvmLogView decoded={e.evmDecoded} />
-              : hasArgs ? <JsonView value={args} /> : <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>no parameters</div>}
-            {extId ? <Link to={paths.extrinsic(extId)} className="hash">{mempool ? 'Open pool transaction →' : 'Open extrinsic →'}</Link> : <span className="muted" style={{ fontFamily: 'GeistMono', fontSize: 11 }}>System event · no extrinsic</span>}
+              : hasArgs ? <JsonView value={args} /> : <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12 }}>no parameters</div>}
+            {extId ? <Link to={paths.extrinsic(extId)} className="hash">{mempool ? 'Open pool transaction →' : 'Open extrinsic →'}</Link> : <span className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 11 }}>System event · no extrinsic</span>}
           </div>
         </td></tr>
       )}

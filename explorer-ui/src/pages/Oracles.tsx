@@ -291,10 +291,10 @@ export function Oracles() {
       <div className="hdx-cards" style={{ marginTop: 0 }}>
         {d && k ? <>
           <Card k="Live feeds" v={F.int(k.liveFeeds)} s="published inside their own cadence" />
-          <Card k="Stale feeds" v={<span style={k.staleFeeds ? { color: 'var(--amber)' } : undefined}>{F.int(k.staleFeeds)}</span>}
+          <Card k="Stale feeds" v={<span style={k.staleFeeds ? { color: 'var(--amber-text)' } : undefined}>{F.int(k.staleFeeds)}</span>}
             s={<>{staleNames.length ? `read by a market or pool: ${staleNames.join(', ')}` : 'none that a market or pool reads'}{k.staleUnused ? ` · ${k.staleUnused} more nothing reads` : ''}</>} />
           <Card k="Updates · 24H" v={F.int(k.updates24h)} s={`${F.int(diaUpdates)} DIA · ${F.int(k.updates24h - diaUpdates)} push feed`} />
-          <Card k="Largest deviation" v={dev ? <span style={Math.abs(dev.deviationPct) > 3 ? { color: 'var(--red)' } : Math.abs(dev.deviationPct) > 1 ? { color: 'var(--amber)' } : undefined}>{dev.asset.symbol} {(dev.deviationPct >= 0 ? '+' : '') + dev.deviationPct.toFixed(2)}%</span> : '—'}
+          <Card k="Largest deviation" v={dev ? <span style={Math.abs(dev.deviationPct) > 3 ? { color: 'var(--red-text)' } : Math.abs(dev.deviationPct) > 1 ? { color: 'var(--amber-text)' } : undefined}>{dev.asset.symbol} {(dev.deviationPct >= 0 ? '+' : '') + dev.deviationPct.toFixed(2)}%</span> : '—'}
             s={dev ? `oracle vs market, ${d.markets.find(m => m.key === dev.market) ? MARKET_LABEL(dev.market, d.markets.find(m => m.key === dev.market)!.label) : dev.market} market` : 'no reserve has both prices'} />
         </> : [0, 1, 2, 3].map(i => <div key={i} className="hdx-card"><ChartSkeleton h={56} /></div>)}
       </div>

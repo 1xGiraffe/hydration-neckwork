@@ -1598,7 +1598,7 @@ export function AreaChart({ data, h = 190, target, color, floor, dates, valueFmt
   // never drifts off a curve that fell back to index spacing.
   const markAxis = useMemo(() => (markers?.length ? timeAxisSpan(vData?.length ?? 0, vDates) : null), [markers, vData, vDates])
 
-  if (!geom) return <div className="muted" style={{ padding: '24px 0', fontFamily: 'GeistMono', fontSize: 12 }}>Not enough history.</div>
+  if (!geom) return <div className="muted" style={{ padding: '24px 0', fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12 }}>Not enough history.</div>
   const { xFrac, sy, line, area, overlayLine, ov, barRects, col } = geom
   const ovCol = overlay?.color ?? 'var(--text-low)'
   // Points closer than half a day label with their time, not just the date.

@@ -25,7 +25,7 @@ export function EvmCallCard({ decoded }: { decoded: DecodedEvmCall }) {
       </div>
       {call.decoded
         ? call.params.length > 0 && <ParamsTable args={decodedParamsRecord(call.params)} />
-        : <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>selector not in the verified ABI — arguments shown raw below</div>}
+        : <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12 }}>selector not in the verified ABI — arguments shown raw below</div>}
     </div>
   )
 }
@@ -39,7 +39,7 @@ export function EvmLogView({ decoded }: { decoded: EvmLogDecode }) {
       </div>
       {decoded.params.length > 0
         ? <ParamsTable args={decodedParamsRecord(decoded.params)} />
-        : <div className="muted" style={{ fontFamily: 'GeistMono', fontSize: 12 }}>no parameters</div>}
+        : <div className="muted" style={{ fontFamily: "'GeistMono', ui-monospace, monospace", fontSize: 12 }}>no parameters</div>}
     </div>
   )
 }

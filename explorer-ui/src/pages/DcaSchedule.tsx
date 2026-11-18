@@ -256,7 +256,7 @@ export function DcaSchedule({ scheduleId }: { scheduleId: number }) {
                 <div className="dt">Traded</div>
                 <div className="dd"><span className="asset-flow"><AssetAmount asset={data.assetIn} raw={data.executions.totalIn} /> → <AssetAmount asset={data.assetOut} raw={data.executions.totalOut} /></span>
                   <span className="muted mono"> · {F.int(data.executions.count)} {data.executions.count === 1 ? 'trade' : 'trades'}</span>
-                  {data.executions.failed > 0 && <span style={{ color: 'var(--red)' }} className="mono"> · {F.int(data.executions.failed)} failed</span>}
+                  {data.executions.failed > 0 && <span style={{ color: 'var(--red-text)' }} className="mono"> · {F.int(data.executions.failed)} failed</span>}
                 </div>
                 {unspent && <>
                   <div className="dt">Unspent</div>

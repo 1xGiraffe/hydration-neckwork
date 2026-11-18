@@ -226,7 +226,7 @@ export function TradeDetailPage({ id, slug = 'swap' }: { id: string; slug?: 'swa
                       ? <AssetAmount asset={data.assetOut} amount={data.amountOut} />
                       : <AssetAmount asset={data.assetIn} amount={data.amountIn} />}
                     {visibleLimit.marginPct != null && (
-                      <span className="badge" style={{ marginLeft: 8, background: 'var(--green-soft)', color: 'var(--green)' }} title={visibleLimit.kind === 'minReceived' ? 'Executed above the slippage floor by this margin' : 'Executed under the slippage ceiling by this margin'}>
+                      <span className="badge" style={{ marginLeft: 8, background: 'var(--green-soft)', color: 'var(--green-text)' }} title={visibleLimit.kind === 'minReceived' ? 'Executed above the slippage floor by this margin' : 'Executed under the slippage ceiling by this margin'}>
                         {visibleLimit.kind === 'minReceived' ? '+' : '−'}{Math.abs(visibleLimit.marginPct).toFixed(2)}% vs limit
                       </span>
                     )}
