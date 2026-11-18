@@ -76,7 +76,7 @@ describe('startBackgroundRefresh scheduling', () => {
   beforeEach(() => { vi.useFakeTimers(); hdx.mockClear(); proxy.mockClear(); erc20.mockClear(); wormhole.mockClear() })
   afterEach(() => { stopBackgroundRefresh(); vi.useRealTimers() })
 
-  it('runs an initial pass of all tasks once, then locks+proxy every 60s and erc20 every 180s', async () => {
+  it('runs an initial pass of all tasks once, then proxy every 60s, erc20 every 180s and locks every 300s', async () => {
     startBackgroundRefresh()
     await vi.advanceTimersByTimeAsync(0)
     // initial pass: all three once
@@ -84,19 +84,26 @@ describe('startBackgroundRefresh scheduling', () => {
     expect(proxy).toHaveBeenCalledTimes(1)
     expect(erc20).toHaveBeenCalledTimes(1)
 
-    // ticks 1 and 2 (60s, 120s): locks + proxy + wormhole each tick
+    // ticks 1 and 2 (60s, 120s): proxy + wormhole each tick, the locks wait
     await vi.advanceTimersByTimeAsync(60_000)
     expect(wormhole).toHaveBeenCalledTimes(2)
     await vi.advanceTimersByTimeAsync(60_000)
-    expect(hdx).toHaveBeenCalledTimes(3)
+    expect(hdx).toHaveBeenCalledTimes(1)
     expect(proxy).toHaveBeenCalledTimes(3)
     expect(erc20).toHaveBeenCalledTimes(1)
     expect(wormhole).toHaveBeenCalledTimes(3)
 
     // tick 3 (180s): erc20 joins
     await vi.advanceTimersByTimeAsync(60_000)
-    expect(hdx).toHaveBeenCalledTimes(4)
+    expect(hdx).toHaveBeenCalledTimes(1)
     expect(erc20).toHaveBeenCalledTimes(2)
+
+    // tick 5 (300s): the locks join
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(hdx).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(hdx).toHaveBeenCalledTimes(2)
+    expect(proxy).toHaveBeenCalledTimes(6)
   })
 
   it('serializes the batch and skips a tick while it is still running (no pile-up)', async () => {
@@ -117,7 +124,8 @@ describe('startBackgroundRefresh scheduling', () => {
     expect(erc20).toHaveBeenCalledTimes(1)
     // the next tick then resumes the normal cadence
     await vi.advanceTimersByTimeAsync(60_000)
-    expect(hdx).toHaveBeenCalledTimes(2)
+    expect(proxy).toHaveBeenCalledTimes(2)
+    expect(hdx).toHaveBeenCalledTimes(1)
   })
 
   it('isolates a failing task so the rest of the batch still runs', async () => {
