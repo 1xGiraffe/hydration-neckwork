@@ -30057,14 +30057,15 @@ async function heldActivityTotal(accounts: string[], key: string, mark: number, 
 //     (refreshSettlingAnnotations), but a page holding one is rebuilt on its own hold
 //     rather than carried;
 //   - it is younger than MARKED_HOLD_MAX_MS, which bounds a change no mark covers (the
-//     registry, the venue lists). Thirty minutes: a live list total can already be
-//     served that long after its count (the 15-minute hold, then LIST_TOTAL_STALE_MS of
-//     stale-while-revalidate), so no surface shows anything older than it could before.
+//     registry, the venue lists). Two hours: identical recounts of idle scopes landed
+//     10–60 minutes apart under a thirty-minute bound (1,353 of 2,221 repeats in a day
+//     of exact totals, each ~1–7 s of ClickHouse CPU), and such a change is rare enough
+//     that reaching a held total or page within two hours is worth that.
 // A one-off scope never pays for the marks: the baseline is taken at its first lapse,
 // before that rebuild.
 interface MarkedHold { marks: ActivitySourceMarks; value: unknown; at: number }
 const MARKED_HOLD_SETTLED_BLOCKS = 100
-const MARKED_HOLD_MAX_MS = 30 * 60_000
+const MARKED_HOLD_MAX_MS = 2 * 3_600_000
 const MARKED_HOLDS = 2_000
 const MARKED_HOLD_SEEN = 20_000
 const markedHolds = new Map<string, MarkedHold>()

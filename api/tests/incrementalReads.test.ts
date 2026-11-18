@@ -155,11 +155,11 @@ describe('mark-revalidated exact holds', () => {
 
   // Kept only at a watermark the swap queue has drained past, never with a row still
   // waiting on a settlement, and never past a hold and a half of the old schedule.
-  it('keeps only settled results, and only for thirty minutes', () => {
+  it('keeps only settled results, and only for two hours', () => {
     const fn = body(explorerService, 'async function markRevalidated<T>(')
     expect(fn.indexOf('await swapQueueDrainedTo(mark)')).toBeLessThan(fn.indexOf('const value = await build()'))
     expect(fn).toContain('if (marks && drained && keepable(value))')
-    expect(explorerService).toMatch(/^const MARKED_HOLD_MAX_MS = 30 \* 60_000$/m)
+    expect(explorerService).toMatch(/^const MARKED_HOLD_MAX_MS = 2 \* 3_600_000$/m)
     expect(body(explorerService, 'async function heldLocatedActivityPage(')).toContain('located => keep(located) && !located!.rows.some(awaitsSettlement)')
   })
 
